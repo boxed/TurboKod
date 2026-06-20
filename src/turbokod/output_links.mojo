@@ -1,11 +1,12 @@
-"""Clickable file:line link detection for output panes.
+"""Clickable file:line + URL link detection for output panes.
 
 Both the debug/run pane (``debug_pane.mojo``, ``TextLog``-backed) and the
 test pane (``test_pane.mojo``, ``Vt``-backed) scan their output lines for
-navigable spans — Python tracebacks (``File "<path>", line N``) and the bare
-``<path>:<N>`` form (pytest / compilers / linters). The scanners are pure
-String→spans functions with no rendering dependency, so they live here and
-both panes overlay the results onto whatever grid they paint into.
+navigable spans — Python tracebacks (``File "<path>", line N``), the bare
+``<path>:<N>`` form (pytest / compilers / linters), and ``http(s)://`` URLs
+(opened in the system browser). The scanners are pure String→spans functions
+with no rendering dependency, so they live here and both panes overlay the
+results onto whatever grid they paint into.
 
 ``cell_start`` / ``cell_end`` are codepoint counts from the start of the
 line, matching how ``Canvas.put_text`` advances columns — callers convert
@@ -25,12 +26,17 @@ struct OutputLink(ImplicitlyCopyable, Movable):
     in a visible line, and consumed by ``handle_mouse`` to map a click back
     to a file-open intent. The rect is in absolute screen coordinates so
     the click test doesn't need to know about the pane's own origin.
+
+    When ``is_url`` is True the span is a web link: ``path`` holds the full
+    URL and ``line`` is unused (the click opens it in the system browser
+    instead of in the editor).
     """
     var y: Int
     var x_start: Int
     var x_end: Int     # exclusive
     var path: String
     var line: Int      # 1-based; matches Python traceback convention
+    var is_url: Bool
 
 
 @fieldwise_init
@@ -38,11 +44,15 @@ struct LinkHit(ImplicitlyCopyable, Movable):
     """Bytes-resolved match for a single link occurrence. ``cell_start`` /
     ``cell_end`` are codepoint counts from the start of the line, matching
     how ``Canvas.put_text`` advances columns — so callers can convert
-    directly to screen X without redoing the UTF-8 walk."""
+    directly to screen X without redoing the UTF-8 walk.
+
+    ``is_url`` True means ``path`` is a ``http(s)://`` URL rather than a
+    file path (and ``line`` is unused)."""
     var cell_start: Int
     var cell_end: Int    # exclusive
     var path: String
     var line: Int        # 1-based
+    var is_url: Bool
 
 
 def extract_python_traceback_links(line: String) -> List[LinkHit]:
@@ -136,7 +146,7 @@ def extract_python_traceback_links(line: String) -> List[LinkHit]:
             var span_cells = 6 + path_cell_count + 1 + 7 + digit_count
             out.append(LinkHit(
                 match_start_cell, match_start_cell + span_cells,
-                path, line_no,
+                path, line_no, False,
             ))
             # Advance past the matched span. We've already moved ``p``
             # to the byte after the last digit; sync ``cell`` to the
@@ -262,7 +272,7 @@ def extract_path_line_links(line: String) -> List[LinkHit]:
                     var digit_count = p - digit_start
                     var span_end_cell = cell + 1 + digit_count
                     out.append(LinkHit(
-                        tok_start_cell, span_end_cell, path, line_no,
+                        tok_start_cell, span_end_cell, path, line_no, False,
                     ))
                     cell = span_end_cell
                     i = p
@@ -275,6 +285,112 @@ def extract_path_line_links(line: String) -> List[LinkHit]:
             continue
         # Any other byte ends the current token.
         tok_start_byte = -1
+        if (b & 0xC0) != 0x80:
+            cell += char_width(codepoint_at(line, i)[0])
+        i += 1
+    return out^
+
+
+def _is_url_byte(b: Int) -> Bool:
+    """Bytes that may appear inside a URL token. Non-ASCII (UTF-8 leader
+    or continuation) is allowed for IRIs; the ASCII set is the unreserved
+    + reserved + sub-delim characters that legitimately occur in URLs.
+    Notably excludes whitespace, ``<``, ``>``, ``"``, ``{``, ``}``,
+    ``|``, ``\\``, ``^`` and backtick, which terminate the link."""
+    if b >= 0x80:
+        return True
+    if b >= 0x30 and b <= 0x39:  # 0-9
+        return True
+    if b >= 0x41 and b <= 0x5A:  # A-Z
+        return True
+    if b >= 0x61 and b <= 0x7A:  # a-z
+        return True
+    # - . _ ~ : / ? # [ ] @ ! $ & ' ( ) * + , ; = %
+    return b == 0x2D or b == 0x2E or b == 0x5F or b == 0x7E or b == 0x3A \
+        or b == 0x2F or b == 0x3F or b == 0x23 or b == 0x5B or b == 0x5D \
+        or b == 0x40 or b == 0x21 or b == 0x24 or b == 0x26 or b == 0x27 \
+        or b == 0x28 or b == 0x29 or b == 0x2A or b == 0x2B or b == 0x2C \
+        or b == 0x3B or b == 0x3D or b == 0x25
+
+
+def extract_url_links(line: String) -> List[LinkHit]:
+    """Find every ``http://`` / ``https://`` URL span in ``line``.
+
+    The scheme must not be preceded by an alphanumeric (so a stray
+    ``xhttp://`` won't match), and the URL body runs across
+    ``_is_url_byte`` characters. Trailing prose punctuation
+    (``. , ; : ! ?`` and unbalanced ``)``, ``'``, ``"``) is trimmed off
+    the end so ``(see https://x.com).`` links just the URL. ``LinkHit``s
+    are returned with ``is_url=True`` and ``line=-1``.
+    """
+    var out = List[LinkHit]()
+    var bytes = line.as_bytes()
+    var n = len(bytes)
+    var i = 0
+    var cell = 0
+    while i < n:
+        var b = Int(bytes[i])
+        # Probe for ``http://`` / ``https://`` at a codepoint boundary.
+        if b == 0x68:  # 'h'
+            # Don't match mid-word (e.g. the "http" inside "xhttp").
+            var prev_alnum = False
+            if i > 0:
+                var pb = Int(bytes[i - 1])
+                prev_alnum = (pb >= 0x30 and pb <= 0x39) \
+                    or (pb >= 0x41 and pb <= 0x5A) \
+                    or (pb >= 0x61 and pb <= 0x7A)
+            var scheme_len = 0
+            if not prev_alnum and i + 7 <= n \
+                    and bytes[i + 1] == 0x74 and bytes[i + 2] == 0x74 \
+                    and bytes[i + 3] == 0x70:
+                if i + 8 <= n and bytes[i + 4] == 0x73 \
+                        and bytes[i + 5] == 0x3A and bytes[i + 6] == 0x2F \
+                        and bytes[i + 7] == 0x2F:
+                    scheme_len = 8   # https://
+                elif bytes[i + 4] == 0x3A and bytes[i + 5] == 0x2F \
+                        and bytes[i + 6] == 0x2F:
+                    scheme_len = 7   # http://
+            if scheme_len > 0:
+                var match_start_cell = cell
+                var body_start = i + scheme_len
+                var p = body_start
+                # Scheme is all ASCII, one cell each.
+                var url_cell_count = scheme_len
+                while p < n and _is_url_byte(Int(bytes[p])):
+                    if (Int(bytes[p]) & 0xC0) != 0x80:
+                        url_cell_count += char_width(codepoint_at(line, p)[0])
+                    p += 1
+                # Trim trailing prose punctuation (all ASCII → 1 cell each).
+                # A trailing ``)`` is only trimmed when the URL has no
+                # ``(`` (so Wikipedia-style balanced parens survive).
+                var has_open_paren = False
+                for q in range(body_start, p):
+                    if Int(bytes[q]) == 0x28:
+                        has_open_paren = True
+                        break
+                while p > body_start:
+                    var lb = Int(bytes[p - 1])
+                    var trim = lb == 0x2E or lb == 0x2C or lb == 0x3B \
+                        or lb == 0x3A or lb == 0x21 or lb == 0x3F \
+                        or lb == 0x27 or lb == 0x22
+                    if lb == 0x29 and not has_open_paren:
+                        trim = True
+                    if not trim:
+                        break
+                    p -= 1
+                    url_cell_count -= 1
+                # Require at least one character after the scheme.
+                if p > body_start:
+                    var url = String(StringSlice(
+                        ptr=bytes.unsafe_ptr() + i, length=p - i,
+                    ))
+                    out.append(LinkHit(
+                        match_start_cell, match_start_cell + url_cell_count,
+                        url, -1, True,
+                    ))
+                    cell = match_start_cell + url_cell_count
+                    i = p
+                    continue
         if (b & 0xC0) != 0x80:
             cell += char_width(codepoint_at(line, i)[0])
         i += 1

@@ -73,6 +73,7 @@ from .output_links import (
     OutputLink,
     extract_path_line_links as _extract_path_line_links,
     extract_python_traceback_links as _extract_python_traceback_links,
+    extract_url_links as _extract_url_links,
 )
 from .scrollbar import VScrollbar
 from .text_field import TextField
@@ -265,6 +266,8 @@ struct DebugPane(Copyable, Movable):
     # Output-log link click. Empty string = none.
     var pending_open_path: String
     var pending_open_line: Int          # 1-based; 0 with empty path = none
+    # Output-log URL click — opened in the system browser. "" = none.
+    var pending_open_url: String
 
     # --- mouse-mapping bookkeeping ------------------------------------
     var _last_inspect_y0: Int   # screen y of the first inspect row
@@ -327,6 +330,7 @@ struct DebugPane(Copyable, Movable):
         self.pending_remove_watch = -1
         self.pending_open_path = String("")
         self.pending_open_line = 0
+        self.pending_open_url = String("")
         self._last_inspect_y0 = 0
         self._last_divider_x = 0
         self._left_indices = List[Int]()
@@ -367,6 +371,7 @@ struct DebugPane(Copyable, Movable):
         self.pending_remove_watch = copy.pending_remove_watch
         self.pending_open_path = copy.pending_open_path
         self.pending_open_line = copy.pending_open_line
+        self.pending_open_url = copy.pending_open_url
         self._last_inspect_y0 = copy._last_inspect_y0
         self._last_divider_x = copy._last_divider_x
         self._left_indices = copy._left_indices.copy()
@@ -632,6 +637,14 @@ struct DebugPane(Copyable, Movable):
         self.pending_open_path = String("")
         self.pending_open_line = 0
         return (path^, line)
+
+    def consume_open_url(mut self) -> String:
+        """Return the URL of a freshly clicked output-log web link (and
+        clear the latch), or ``""`` when nothing is pending. The host
+        hands it to ``open_url`` to launch the default browser."""
+        var u = self.pending_open_url
+        self.pending_open_url = String("")
+        return u^
 
     # --- interactive console (REPL) --------------------------------------
 
@@ -971,6 +984,7 @@ struct DebugPane(Copyable, Movable):
             var line_y = self.output.last_y0 + k
             var hits = _extract_python_traceback_links(line)
             hits.extend(_extract_path_line_links(line))
+            hits.extend(_extract_url_links(line))
             for h in range(len(hits)):
                 var hit = hits[h]
                 var seg_lo = vrow.cell_start
@@ -992,7 +1006,7 @@ struct DebugPane(Copyable, Movable):
                 for x in range(x0, x1):
                     painter.set_attr(canvas, x, line_y, link_attr)
                 self._last_links.append(OutputLink(
-                    line_y, x0, x1, hit.path, hit.line,
+                    line_y, x0, x1, hit.path, hit.line, hit.is_url,
                 ))
         # Console input line across the bottom row. The ``>>>`` prompt is
         # painted in the pane colors; the editable strip after it reuses
@@ -1146,16 +1160,19 @@ struct DebugPane(Copyable, Movable):
                     self._output_scrolling = True
                     self._output_drag_offset = hit[1]
                 return True
-            # File:line link hit-test runs second — clicking on a
-            # ``File "x", line N`` span should open the file rather
-            # than start a selection drag.
+            # File:line / URL link hit-test runs second — clicking on a
+            # ``File "x", line N`` span opens the file, a ``http(s)://``
+            # span opens the browser, rather than starting a selection drag.
             for li in range(len(self._last_links)):
                 var link = self._last_links[li]
                 if event.pos.y == link.y \
                         and event.pos.x >= link.x_start \
                         and event.pos.x < link.x_end:
-                    self.pending_open_path = link.path
-                    self.pending_open_line = link.line
+                    if link.is_url:
+                        self.pending_open_url = link.path
+                    else:
+                        self.pending_open_path = link.path
+                        self.pending_open_line = link.line
                     return True
             # Forward to the log: starts the selection drag.
             return self.output.handle_mouse(event)

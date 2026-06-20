@@ -247,7 +247,7 @@ from turbokod.config import (
     save_config,
 )
 from turbokod.dropdown import Dropdown
-from turbokod.settings import Settings, _FOCUS_LS_INLAY_HINTS
+from turbokod.settings import Settings, _FOCUS_LS_INLAY_HINTS, _FOCUS_MAX_WINDOWS
 from turbokod.onig import OnigRegex, onig_global_init
 from turbokod.tm_grammar import load_grammar_from_string
 from turbokod.tm_tokenizer import tokenize_with_grammar
@@ -6645,7 +6645,7 @@ def test_settings_max_open_windows_seeds_and_edits() raises:
         True, True,
         max_open_windows=20,
     )
-    assert_equal(s.max_windows_text, String("20"))
+    assert_equal(s._mw_tf.text, String("20"))
     assert_equal(s.max_open_windows_value(), 20)
     assert_false(s.dirty)
     # 0 (no limit) renders as an empty field and parses back to 0.
@@ -6656,21 +6656,26 @@ def test_settings_max_open_windows_seeds_and_edits() raises:
         True, True,
         max_open_windows=0,
     )
-    assert_equal(len(s.max_windows_text.as_bytes()), 0)
+    assert_equal(len(s._mw_tf.text.as_bytes()), 0)
     assert_equal(s.max_open_windows_value(), 0)
-    # Editing the field: digits append, Backspace removes, value reparses.
+    # Editing the field through the shared TextField (digits append,
+    # Backspace removes, value reparses) once it owns focus.
+    s.focus = _FOCUS_MAX_WINDOWS
     s.dirty = False
-    _ = s._max_windows_key(UInt32(ord("5")))
-    _ = s._max_windows_key(UInt32(ord("0")))
-    assert_equal(s.max_windows_text, String("50"))
+    _ = s.handle_key(Event.key_event(UInt32(ord("5")), MOD_NONE))
+    _ = s.handle_key(Event.key_event(UInt32(ord("0")), MOD_NONE))
+    assert_equal(s._mw_tf.text, String("50"))
     assert_equal(s.max_open_windows_value(), 50)
     assert_true(s.dirty)
-    _ = s._max_windows_key(KEY_BACKSPACE)
+    _ = s.handle_key(Event.key_event(KEY_BACKSPACE, MOD_NONE))
+    assert_equal(s.max_open_windows_value(), 5)
+    # Non-digit input is filtered out, leaving the value unchanged.
+    _ = s.handle_key(Event.key_event(UInt32(ord("x")), MOD_NONE))
     assert_equal(s.max_open_windows_value(), 5)
     # Field is capped at 4 digits so it can't overflow the box.
-    s.max_windows_text = String("9999")
-    assert_false(s._max_windows_key(UInt32(ord("9"))) and len(s.max_windows_text.as_bytes()) > 4)
-    assert_equal(len(s.max_windows_text.as_bytes()), 4)
+    s._mw_tf.set_text(String("9999"))
+    _ = s.handle_key(Event.key_event(UInt32(ord("9")), MOD_NONE))
+    assert_equal(len(s._mw_tf.text.as_bytes()), 4)
 
 
 def test_language_catalog_carries_comment_tokens() raises:

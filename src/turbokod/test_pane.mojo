@@ -42,6 +42,7 @@ from .events import (
 from .geometry import Point, Rect
 from .output_links import (
     OutputLink, extract_path_line_links, extract_python_traceback_links,
+    extract_url_links,
 )
 from .painter import Painter
 from .posix import (
@@ -123,6 +124,7 @@ struct TestPane(Copyable, Movable):
     var _last_links: List[OutputLink]
     var pending_open_path: String
     var pending_open_line: Int    # 1-based; 0 with empty path = none
+    var pending_open_url: String  # http(s) link to open in the browser; "" = none
 
     def __init__(out self):
         self.visible = False
@@ -145,6 +147,7 @@ struct TestPane(Copyable, Movable):
         self._last_links = List[OutputLink]()
         self.pending_open_path = String("")
         self.pending_open_line = 0
+        self.pending_open_url = String("")
 
     def __copyinit__(mut self, copy: Self):
         self.visible = copy.visible
@@ -167,6 +170,7 @@ struct TestPane(Copyable, Movable):
         self._last_links = copy._last_links
         self.pending_open_path = copy.pending_open_path
         self.pending_open_line = copy.pending_open_line
+        self.pending_open_url = copy.pending_open_url
 
     # --- chrome forwarders ---------------------------------------------
 
@@ -196,6 +200,13 @@ struct TestPane(Copyable, Movable):
         self.pending_open_path = String("")
         self.pending_open_line = 0
         return (path^, line)
+
+    def consume_open_url(mut self) -> String:
+        """Return a freshly clicked output URL (and clear the latch), or
+        ``""`` when nothing is pending. The host hands it to ``open_url``."""
+        var u = self.pending_open_url
+        self.pending_open_url = String("")
+        return u^
 
     def running(self) -> Bool:
         return self.started and not self.exited
@@ -404,6 +415,7 @@ struct TestPane(Copyable, Movable):
                 continue
             var hits = extract_python_traceback_links(line)
             hits.extend(extract_path_line_links(line))
+            hits.extend(extract_url_links(line))
             for h in range(len(hits)):
                 var hit = hits[h]
                 var x0 = body.a.x + hit.cell_start
@@ -418,7 +430,7 @@ struct TestPane(Copyable, Movable):
                 for x in range(x0, x1):
                     painter.set_attr(canvas, x, line_y, link_attr)
                 self._last_links.append(OutputLink(
-                    line_y, x0, x1, hit.path, hit.line,
+                    line_y, x0, x1, hit.path, hit.line, hit.is_url,
                 ))
 
     def _row_text(self, r: Int) -> String:
@@ -488,14 +500,18 @@ struct TestPane(Copyable, Movable):
                 and not event.motion:
             self.focused = True
             # Link hit-test first — clicking a ``File "...", line N`` span
-            # opens the file rather than starting a selection.
+            # opens the file, a ``http(s)://`` span the browser, rather
+            # than starting a selection.
             for li in range(len(self._last_links)):
                 var link = self._last_links[li]
                 if event.pos.y == link.y \
                         and event.pos.x >= link.x_start \
                         and event.pos.x < link.x_end:
-                    self.pending_open_path = link.path
-                    self.pending_open_line = link.line
+                    if link.is_url:
+                        self.pending_open_url = link.path
+                    else:
+                        self.pending_open_path = link.path
+                        self.pending_open_line = link.line
                     return True
             # Double-click → word, triple → line, else cell drag.
             if event.click_count >= 3:

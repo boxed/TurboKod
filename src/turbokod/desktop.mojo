@@ -45,6 +45,7 @@ from .events import (
     MOUSE_BUTTON_NONE, MOUSE_BUTTON_RIGHT,
 )
 from .clipboard import clipboard_copy, clipboard_paste
+from .open_url import open_url
 from .config import (
     MAX_FONT_SIZE, MIN_FONT_SIZE, OnSaveAction,
     TurbokodConfig, WRAP_NONE, default_font_label,
@@ -9378,6 +9379,11 @@ struct Desktop(Movable):
                 )
             except e:
                 print("desktop: debug_pane open_file_at", oreq[0], ":", String(e))
+        # Output-log URL click: a ``http(s)://`` span clicked in the run /
+        # debug output opens in the system default browser.
+        var ourl = self.debug_pane.consume_open_url()
+        if len(ourl.as_bytes()) > 0:
+            open_url(ourl)
         # Interactive console submit: the user pressed Enter on the
         # ``>>>`` line. Echo the expression and fire an ``evaluate``
         # against the current frame; the result lands later via
@@ -9411,6 +9417,9 @@ struct Desktop(Movable):
                 )
             except e:
                 print("desktop: test_pane open_file_at", treq[0], ":", String(e))
+        var turl = self.test_pane.consume_open_url()
+        if len(turl.as_bytes()) > 0:
+            open_url(turl)
         # Find Results pane: ``[■]`` / Cmd+W close, plus the multi-select
         # open queue (Enter / double-click). Drained here in dap_tick so it
         # runs every frame regardless of any debug session.

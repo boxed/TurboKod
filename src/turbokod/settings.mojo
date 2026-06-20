@@ -63,12 +63,13 @@ from .dropdown import (
 )
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_SPACE, KEY_TAB, KEY_UP,
+    KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_SPACE, KEY_TAB, KEY_UP,
     MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT,
     MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
 from .string_utils import display_columns
+from .text_field import TextField
 from .type_ahead import TypeAhead, is_printable_ascii, type_ahead_pick
 from .window import paint_window_title
 
@@ -187,6 +188,26 @@ def _wrap_mode_options() -> List[String]:
     return out^
 
 
+def _clamp_numeric_field(mut tf: TextField, max_len: Int):
+    """Keep only the leading ``max_len`` digits of a numeric inline field.
+
+    Called after every mutation of the comma-threshold / max-windows
+    ``TextField`` so a paste, a stray non-digit, or an over-long value can't
+    survive. Only rewrites the field (which resets the caret to the end and
+    drops undo history) when the text actually violates the constraint —
+    ordinary digit typing leaves the caret and undo stack untouched."""
+    var bytes = tf.text.as_bytes()
+    var out = String("")
+    var count = 0
+    for i in range(len(bytes)):
+        var b = bytes[i]
+        if b >= UInt8(0x30) and b <= UInt8(0x39) and count < max_len:
+            out += chr(Int(b))
+            count += 1
+    if out != tf.text:
+        tf.set_text(out^)
+
+
 @fieldwise_init
 struct _PlacedButton(ImplicitlyCopyable, Movable):
     var button: ShadowButton
@@ -260,19 +281,20 @@ struct Settings(Movable):
     var _wrap_dd_anchor: Rect
     """Last-painted bounds of the Wrap dropdown strip (mouse hit-test
     cache, mirrors ``_save_dd_anchor``)."""
-    var smart_wrap_comma_text: String
-    """Working copy of ``TurbokodConfig.smart_wrap_comma_threshold`` as an
-    editable digit string — Editor ▸ "Smart wrap: break at commas". Empty
-    means "no comma trigger, only window width" (the ``-1`` sentinel). The
-    host reads the parsed value via ``comma_threshold_value`` on the next
-    config sync."""
+    var _comma_tf: TextField
+    """Editable digit field — Editor ▸ "Smart wrap: break at commas". Empty
+    means "no comma trigger, only window width" (the ``-1`` sentinel). Backed
+    by the shared ``TextField`` so it gets cursor movement, drag-select,
+    double/triple-click, undo, and clipboard for free; ``handle_key``
+    re-filters the text to at most 3 digits after every edit. The host reads
+    the parsed value via ``comma_threshold_value`` on the next config sync."""
     var _comma_input_anchor: Rect
     """Last-painted bounds of the comma-threshold input box (mouse hit-test
     cache, mirrors ``_wrap_dd_anchor``)."""
-    var max_windows_text: String
-    """Working copy of ``TurbokodConfig.max_open_windows`` as an editable
-    digit string — Editor ▸ "Max open windows". Empty (or ``0``) means
-    "no limit". The host reads the parsed value via
+    var _mw_tf: TextField
+    """Editable digit field — Editor ▸ "Max open windows". Empty (or ``0``)
+    means "no limit". Shared ``TextField`` like ``_comma_tf``; re-filtered to
+    at most 4 digits. The host reads the parsed value via
     ``max_open_windows_value`` on the next config sync."""
     var _max_windows_anchor: Rect
     """Last-painted bounds of the max-open-windows input box (mouse
@@ -445,9 +467,9 @@ struct Settings(Movable):
         self._save_dd_anchor = Rect(0, 0, 0, 0)
         self._wrap_dropdown = Dropdown(_wrap_mode_options(), 0)
         self._wrap_dd_anchor = Rect(0, 0, 0, 0)
-        self.smart_wrap_comma_text = String("")
+        self._comma_tf = TextField()
         self._comma_input_anchor = Rect(0, 0, 0, 0)
-        self.max_windows_text = String("")
+        self._mw_tf = TextField()
         self._max_windows_anchor = Rect(0, 0, 0, 0)
         self._trim_cb = Checkbox(
             String("Trim trailing whitespace"), 0, 0, False,
@@ -589,15 +611,15 @@ struct Settings(Movable):
         # Negative sentinel renders as an empty field; any value >= 0 shows
         # its digits.
         if comma_threshold < 0:
-            self.smart_wrap_comma_text = String("")
+            self._comma_tf.set_text(String(""))
         else:
-            self.smart_wrap_comma_text = String(comma_threshold)
+            self._comma_tf.set_text(String(comma_threshold))
         # 0 (or negative) is "no limit" and renders as an empty field;
         # any positive value shows its digits.
         if max_open_windows <= 0:
-            self.max_windows_text = String("")
+            self._mw_tf.set_text(String(""))
         else:
-            self.max_windows_text = String(max_open_windows)
+            self._mw_tf.set_text(String(max_open_windows))
         self.dict_specs = built_in_downloadable_dictionaries()
         self.selected_dict = 0 if len(self.dict_specs) > 0 else -1
         self.pending_dict_install_lang = String("")
@@ -1294,25 +1316,19 @@ struct Settings(Movable):
         )
         var box_x = inner.a.x + display_columns(comma_label) + 1
         var box_w = 5
-        var box_attr = (
-            Attr(WHITE, BLUE) if self.focus == _FOCUS_COMMA_WRAP
-            else Attr(BLACK, CYAN)
-        )
         var box_rect = Rect(box_x, comma_y, box_x + box_w, comma_y + 1)
         self._comma_input_anchor = box_rect
-        painter.fill(canvas, box_rect, String(" "), box_attr)
-        # Field text is left-aligned with one column of padding. An empty
-        # field shows a faint "—" placeholder so the box doesn't read as a
-        # rendering glitch.
-        var shown = self.smart_wrap_comma_text
-        if len(shown.as_bytes()) == 0 and self.focus != _FOCUS_COMMA_WRAP:
+        var comma_focused = self.focus == _FOCUS_COMMA_WRAP
+        if len(self._comma_tf.text.as_bytes()) == 0 and not comma_focused:
+            # Empty + unfocused: faint "—" placeholder so the box doesn't
+            # read as a rendering glitch. The TextField paints the cyan
+            # field + caret itself once focused or non-empty.
+            painter.fill(canvas, box_rect, String(" "), Attr(BLACK, CYAN))
             _ = painter.put_text(
-                canvas, Point(box_x + 1, comma_y), String("—"), box_attr,
+                canvas, Point(box_x, comma_y), String("—"), Attr(BLACK, CYAN),
             )
         else:
-            _ = painter.put_text(
-                canvas, Point(box_x + 1, comma_y), shown, box_attr,
-            )
+            self._comma_tf.paint(canvas, box_rect, comma_focused)
         _ = painter.put_text(
             canvas, Point(box_x + box_w + 1, comma_y),
             String("commas (blank = window width only)"), hint,
@@ -1375,22 +1391,16 @@ struct Settings(Movable):
         )
         var mw_box_x = inner.a.x + display_columns(mw_label) + 1
         var mw_box_w = 6
-        var mw_box_attr = (
-            Attr(WHITE, BLUE) if self.focus == _FOCUS_MAX_WINDOWS
-            else Attr(BLACK, CYAN)
-        )
         var mw_box_rect = Rect(mw_box_x, mw_y, mw_box_x + mw_box_w, mw_y + 1)
         self._max_windows_anchor = mw_box_rect
-        painter.fill(canvas, mw_box_rect, String(" "), mw_box_attr)
-        var mw_shown = self.max_windows_text
-        if len(mw_shown.as_bytes()) == 0 and self.focus != _FOCUS_MAX_WINDOWS:
+        var mw_focused = self.focus == _FOCUS_MAX_WINDOWS
+        if len(self._mw_tf.text.as_bytes()) == 0 and not mw_focused:
+            painter.fill(canvas, mw_box_rect, String(" "), Attr(BLACK, CYAN))
             _ = painter.put_text(
-                canvas, Point(mw_box_x + 1, mw_y), String("—"), mw_box_attr,
+                canvas, Point(mw_box_x, mw_y), String("—"), Attr(BLACK, CYAN),
             )
         else:
-            _ = painter.put_text(
-                canvas, Point(mw_box_x + 1, mw_y), mw_shown, mw_box_attr,
-            )
+            self._mw_tf.paint(canvas, mw_box_rect, mw_focused)
         _ = painter.put_text(
             canvas, Point(mw_box_x + mw_box_w + 1, mw_y),
             String("per project (blank = no limit); least-used closes first"), hint,
@@ -1815,15 +1825,25 @@ struct Settings(Movable):
                 return True
             if self._toggle_ls_focus(self.focus):
                 return True
-        # Comma-threshold field owns digits + Backspace while focused, ahead
-        # of the type-to-jump fallthrough so the digits edit the value
-        # instead of leaking in as a list search prefix.
+        # Numeric inline fields route through the shared TextField (cursor
+        # movement, drag-select, double/triple-click, undo, clipboard), ahead
+        # of the type-to-jump fallthrough so the keys edit the value instead
+        # of leaking in as a list search prefix. After every mutation we
+        # re-filter to digits + a max length so a paste or stray letter can't
+        # leave a non-numeric value.
         if self.focus == _FOCUS_COMMA_WRAP:
-            if self._comma_input_key(k):
+            var r = self._comma_tf.handle_key(event)
+            if r.consumed:
+                if r.changed:
+                    _clamp_numeric_field(self._comma_tf, 3)
+                    self.dirty = True
                 return True
-        # Max-open-windows field likewise owns digits + Backspace.
         if self.focus == _FOCUS_MAX_WINDOWS:
-            if self._max_windows_key(k):
+            var r = self._mw_tf.handle_key(event)
+            if r.consumed:
+                if r.changed:
+                    _clamp_numeric_field(self._mw_tf, 4)
+                    self.dirty = True
                 return True
         # Type-to-jump on whichever section list currently owns focus.
         # Each section produces its own row labels so the user can
@@ -2013,11 +2033,11 @@ struct Settings(Movable):
         self._ls_progress_cb.pressed_inside = False
 
     def comma_threshold_value(self) -> Int:
-        """Parse ``smart_wrap_comma_text`` into the persisted int. Empty
-        input → ``-1`` (no comma trigger). The text only ever holds digits
-        (the key handler rejects everything else), so this never has to
-        cope with sign or stray characters."""
-        var bytes = self.smart_wrap_comma_text.as_bytes()
+        """Parse the comma-threshold field into the persisted int. Empty
+        input → ``-1`` (no comma trigger). ``handle_key`` keeps the field
+        digits-only, so this never has to cope with sign or stray
+        characters."""
+        var bytes = self._comma_tf.text.as_bytes()
         if len(bytes) == 0:
             return -1
         var v = 0
@@ -2028,33 +2048,11 @@ struct Settings(Movable):
             v = v * 10 + d
         return v
 
-    def _comma_input_key(mut self, k: UInt32) -> Bool:
-        """Edit the comma-threshold field. Digits append (capped at 3 so the
-        value stays sane and fits the box); Backspace removes the last digit.
-        Returns True when the keystroke was consumed."""
-        if k == KEY_BACKSPACE:
-            var bytes = self.smart_wrap_comma_text.as_bytes()
-            if len(bytes) > 0:
-                var keep = String("")
-                for i in range(len(bytes) - 1):
-                    keep += chr(Int(bytes[i]))
-                self.smart_wrap_comma_text = keep
-                self.dirty = True
-            return True
-        if k >= UInt32(0x30) and k <= UInt32(0x39):
-            if len(self.smart_wrap_comma_text.as_bytes()) >= 3:
-                return True
-            self.smart_wrap_comma_text += chr(Int(k))
-            self.dirty = True
-            return True
-        return False
-
     def max_open_windows_value(self) -> Int:
-        """Parse ``max_windows_text`` into the persisted int. Empty input
-        → ``0`` (no limit). The text only ever holds digits (the key
-        handler rejects everything else), so this never has to cope with
-        sign or stray characters."""
-        var bytes = self.max_windows_text.as_bytes()
+        """Parse the max-open-windows field into the persisted int. Empty
+        input → ``0`` (no limit). ``handle_key`` keeps the field digits-only,
+        so this never has to cope with sign or stray characters."""
+        var bytes = self._mw_tf.text.as_bytes()
         if len(bytes) == 0:
             return 0
         var v = 0
@@ -2064,27 +2062,6 @@ struct Settings(Movable):
                 return 0
             v = v * 10 + d
         return v
-
-    def _max_windows_key(mut self, k: UInt32) -> Bool:
-        """Edit the max-open-windows field. Digits append (capped at 4 so
-        the value fits the box); Backspace removes the last digit. Returns
-        True when the keystroke was consumed."""
-        if k == KEY_BACKSPACE:
-            var bytes = self.max_windows_text.as_bytes()
-            if len(bytes) > 0:
-                var keep = String("")
-                for i in range(len(bytes) - 1):
-                    keep += chr(Int(bytes[i]))
-                self.max_windows_text = keep
-                self.dirty = True
-            return True
-        if k >= UInt32(0x30) and k <= UInt32(0x39):
-            if len(self.max_windows_text.as_bytes()) >= 4:
-                return True
-            self.max_windows_text += chr(Int(k))
-            self.dirty = True
-            return True
-        return False
 
     def _next_focus(self, current: UInt8, backward: Bool) -> UInt8:
         # Walk only the widgets that exist on the active section;
@@ -2484,16 +2461,13 @@ struct Settings(Movable):
                     self.focus = _FOCUS_BLINK_CURSOR
                     self._toggle_blink_cursor()
                 return True
-            # Click the comma-threshold box to focus it; editing is keyboard.
-            if event.button == MOUSE_BUTTON_LEFT and event.pressed \
-                    and not event.motion \
-                    and self._comma_input_anchor.contains(event.pos):
+            # Numeric inline fields route mouse through the shared TextField
+            # so a click positions the caret and a drag selects text — the
+            # field owns its own drag / multi-click state machine.
+            if self._comma_tf.handle_mouse(event, self._comma_input_anchor):
                 self.focus = _FOCUS_COMMA_WRAP
                 return True
-            # Click the max-open-windows box to focus it; editing is keyboard.
-            if event.button == MOUSE_BUTTON_LEFT and event.pressed \
-                    and not event.motion \
-                    and self._max_windows_anchor.contains(event.pos):
+            if self._mw_tf.handle_mouse(event, self._max_windows_anchor):
                 self.focus = _FOCUS_MAX_WINDOWS
                 return True
         if self.section == _SECTION_LANGUAGE_SERVER:
