@@ -517,6 +517,11 @@ comptime DOCK_FIND_RESULTS_PANE = UInt8(5)
 # the editor feel near-instant, and slow enough that we don't run two
 # stat() calls per paint frame on idle.
 comptime _GIT_POLL_INTERVAL_MS = 1000
+# How often to recompute the project-level "dirty working tree" flag for
+# the status-bar indicator. This one spawns ``git status`` (the mtime
+# poll above can't see worktree-only edits), so it runs less often than
+# the stat-only poll — 2 s reads as live without a subprocess per second.
+comptime _GIT_DIRTY_POLL_INTERVAL_MS = 2000
 # Caret-blink half-cycle in ms (solid for this long, then hidden for the
 # same): the full blink period is twice this. 530 ms matches the common
 # editor default. Only consulted when ``config.cursor_blink`` is on.
@@ -1433,6 +1438,14 @@ struct Desktop(Movable):
     # rather than walking the tree to ``/`` every frame.
     var _git_root_cached: String
     var _git_root_is_repo: Bool
+    # Project-level "working tree is dirty" flag, surfaced as an
+    # at-a-glance indicator on the status bar. Recomputed on a timer
+    # (``_GIT_DIRTY_POLL_INTERVAL_MS``) by running ``git status`` — the
+    # cheap mtime poll above misses worktree-only edits, so this needs
+    # its own subprocess. True when the repo has anything to commit
+    # (staged, unstaged, or untracked).
+    var _project_dirty: Bool
+    var _last_git_dirty_check_ms: Int
     # Raw (pre-realpath) path of the last focused editor, so the per-frame
     # recents bookkeeping can skip the realpath syscall when focus is steady.
     var _last_focus_raw_path: String
@@ -1639,6 +1652,8 @@ struct Desktop(Movable):
         self._last_git_state_check_ms = 0
         self._git_root_cached = String("")
         self._git_root_is_repo = False
+        self._project_dirty = False
+        self._last_git_dirty_check_ms = 0
         self._last_focus_raw_path = String("")
         self._last_input_ms = 0
         self._last_focused_editor_path = String("")
@@ -3466,6 +3481,16 @@ struct Desktop(Movable):
                                 and not self.windows.windows[j].editor.review_mode:
                             self.windows.windows[j].editor.invalidate_git_changes()
                 self._git_state_mtimes = current
+            # Working-tree dirty flag for the status-bar indicator. Polled
+            # on its own (slower) cadence because it shells out to ``git
+            # status`` — non-empty output means there's something to
+            # commit (staged, unstaged, or untracked).
+            if now - self._last_git_dirty_check_ms >= _GIT_DIRTY_POLL_INTERVAL_MS:
+                self._last_git_dirty_check_ms = now
+                self._project_dirty = len(fetch_git_status(root)) > 0
+        else:
+            # Not a repo (or no project): never show the indicator.
+            self._project_dirty = False
         # Caret-blink phase, computed once for the whole frame. When
         # blinking is off the caret is always shown. When on, the caret
         # is solid for the first half of each ~530 ms cycle measured from
@@ -3592,6 +3617,9 @@ struct Desktop(Movable):
                 self.windows.windows[j].editor.invalidate_git_changes()
         self._last_git_state_check_ms = 0
         self._git_state_mtimes = GitStateMtimes(Int64(0), Int64(0))
+        # Re-check the dirty indicator promptly too — a commit or worktree
+        # edit may have happened while we were in the background.
+        self._last_git_dirty_check_ms = 0
 
     # --- review hosting ---------------------------------------------------
 
@@ -5667,6 +5695,9 @@ struct Desktop(Movable):
         # comparing against whatever the previous project was at.
         self._git_state_mtimes = GitStateMtimes(Int64(0), Int64(0))
         self._last_git_state_check_ms = 0
+        # Clear the dirty indicator until the new project's first poll.
+        self._project_dirty = False
+        self._last_git_dirty_check_ms = 0
         # Record this project at the front of the persistent recents list
         # before any later step might raise — failing to save the config
         # is a non-fatal best-effort, just like the View-menu toggles.
@@ -10965,6 +10996,7 @@ struct Desktop(Movable):
             )
             tabs.append(StatusTab(t.name, running, debugging))
         self.status_bar.set_tabs(tabs^, self.targets.active)
+        self.status_bar.git_dirty = self._project_dirty
 
     def _jump_to(
         mut self, target: DefinitionResolved, screen: Rect,

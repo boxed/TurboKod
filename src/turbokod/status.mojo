@@ -11,7 +11,7 @@ from std.collections.list import List
 
 from .canvas import Canvas, popup_size_for_text
 from .painter import Painter, paint_tooltip_popup
-from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, RED, WHITE, YELLOW
+from .colors import Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, RED, WHITE, YELLOW
 from .events import (
     Event, EVENT_MOUSE, MOUSE_BUTTON_LEFT,
 )
@@ -89,6 +89,10 @@ keeps the box from spanning the whole container_bounds on a wide terminal."""
 struct StatusBar(Movable):
     var items: List[StatusItem]
     var tabs: List[StatusTab]
+    # When True, paint an at-a-glance "uncommitted changes" indicator at
+    # the far left of the bar. Set every frame by the host from its
+    # project-level git poll; the bar itself never computes it.
+    var git_dirty: Bool
     var active_tab: Int          # index into ``tabs``, or -1
     var message: String          # right-aligned diagnostic / status text
     var message_attr: Attr       # color for the diagnostic; default = subtle
@@ -125,6 +129,7 @@ struct StatusBar(Movable):
     def __init__(out self):
         self.items = List[StatusItem]()
         self.tabs = List[StatusTab]()
+        self.git_dirty = False
         self.active_tab = -1
         self.message = String("")
         self.message_attr = Attr(BLACK, LIGHT_GRAY)
@@ -209,6 +214,16 @@ struct StatusBar(Movable):
             x += display_columns(k) + 1
             _ = painter.put_text(canvas, Point(x, y), d, desc_attr)
             x += display_columns(d) + 2
+        # Project-level git indicator, first thing on the bar: a green dot
+        # plus "uncommitted" tells the user at a glance that the working
+        # tree has changes to commit — no need to open the git/review
+        # features. Painted only when dirty; a clean tree shows nothing.
+        if self.git_dirty:
+            _ = painter.put_text(canvas, Point(x, y), String("●"), Attr(GREEN, LIGHT_GRAY))
+            x += 2
+            var lbl = String("uncommitted")
+            _ = painter.put_text(canvas, Point(x, y), lbl, desc_attr)
+            x += display_columns(lbl) + 2
         # Target tabs: painted in the gap between F-key shortcuts and
         # the right-aligned status message. The active tab is
         # reverse-video so the user can see at a glance which target
