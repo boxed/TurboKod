@@ -9496,7 +9496,20 @@ struct Editor(Copyable, Movable):
             if self._try_minimap_click(event.pos, view):
                 self.clear_minimap_hover()
                 return True
-        # Wheel events scroll the view without moving the cursor.
+        # Wheel events scroll the view without moving the cursor. Holding
+        # Shift turns the wheel into a *horizontal* scroll (matching the
+        # convention every GUI uses) — the host also routes a trackpad's
+        # horizontal swipe here as a Shift+wheel event. No-op while wrapping,
+        # where ``max_scroll_x`` is 0 and the text reflows instead.
+        if (event.button == MOUSE_WHEEL_UP or event.button == MOUSE_WHEEL_DOWN) \
+                and event.mods & MOD_SHIFT != 0:
+            if event.pressed:
+                var max_x = self.max_scroll_x(view)
+                var dir = -6 if event.button == MOUSE_WHEEL_UP else 6
+                self.scroll_x += dir
+                if self.scroll_x < 0: self.scroll_x = 0
+                if self.scroll_x > max_x: self.scroll_x = max_x
+            return True
         if event.button == MOUSE_WHEEL_UP:
             if event.pressed:
                 # Notch scroll snaps off any smooth-scroll sub-row offset.
@@ -10501,6 +10514,19 @@ struct Editor(Copyable, Movable):
             f = 1.0
         var m = self.smooth_begin(view)
         self.smooth_set(view, f * m[1])
+
+    def max_scroll_x(self, view: Rect) -> Int:
+        """Largest valid ``scroll_x`` for ``view`` — the horizontal twin of
+        ``max_scroll_y``. Always 0 on any wrap mode (text reflows instead of
+        scrolling). The range is measured against the *text content width*
+        (interior minus the left gutters and the right minimap gutter), so it
+        matches ``clamp_scroll`` and ``paint`` — without subtracting the
+        gutters the bar stops short and the last columns of the longest line
+        can never scroll into view."""
+        if self._is_wrapping():
+            return 0
+        var m = self.longest_line_width() - self._content_width(view)
+        return 0 if m < 0 else m
 
     def clamp_scroll(mut self, view: Rect):
         """Pull ``scroll_x`` / ``scroll_y`` back inside their valid ranges.

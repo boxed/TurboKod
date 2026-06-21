@@ -657,6 +657,19 @@ def tk_editor_minimap_to(h: Int, win_idx: Int, frac_micro: Int):
 
 
 @export
+def tk_desktop_hscroll_by(h: Int, cols: Int, screen_cols: Int, screen_rows: Int) -> Int:
+    """Scroll the focused editor horizontally by ``cols`` columns (negative =
+    left). Used by the host for a trackpad horizontal swipe / Shift+wheel.
+    Returns 1 if an editor actually scrolled (so the host repaints), else 0."""
+    if h == 0:
+        return 0
+    var moved = _desk(h)[].hscroll_focused(
+        cols, Rect(0, 0, screen_cols, screen_rows),
+    )
+    return 1 if moved else 0
+
+
+@export
 def tk_desktop_vscroll_active(h: Int) -> Int:
     """1 while a window-border vertical-scrollbar thumb drag is in progress
     (the press landed on the thumb). The host polls this right after a

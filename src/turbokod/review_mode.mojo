@@ -39,7 +39,9 @@ from .events import (
     MOD_CTRL, MOD_META, MOD_SHIFT,
     MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
-from .diff import DIFF_ROW_CONTEXT, build_diff_rows
+from .diff import (
+    DIFF_ROW_ADDED, DIFF_ROW_CONTEXT, DIFF_ROW_REMOVED, build_diff_rows,
+)
 from .file_io import join_path, read_file
 from .geometry import Point, Rect
 from .git_changes import (
@@ -157,6 +159,14 @@ struct ReviewMode(Movable):
     var change_index: Int
     var change_total: Int
     var cur_file_cum_lines: Int
+    # Cache for ``changed_lines_through``: a prefix-sum of changed diff rows
+    # (added + removed, the same basis as ``file_changed_lines``) by after-file
+    # row, rebuilt only when the hosted file changes. ``_cum_file`` is the file
+    # index the cache is valid for (-1 = stale); ``_cum_prefix[b]`` is the number
+    # of changed rows anchored at after-rows ``< b``, so ``_cum_prefix[last]``
+    # equals the file's total (→ the bar hits 100% on the final change).
+    var _cum_file: Int
+    var _cum_prefix: List[Int]
     # Navigation intent set by the toolbar / keys and drained by the host:
     # +1 = next change, -1 = previous change. The host walks change-to-
     # change in the hosted editor and rolls into the next/prev file when a
@@ -206,6 +216,8 @@ struct ReviewMode(Movable):
         self.change_index = 0
         self.change_total = 0
         self.cur_file_cum_lines = 0
+        self._cum_file = -1
+        self._cum_prefix = List[Int]()
         self.pending_nav = 0
         self.mem_keys = List[String]()
         self.mem_files = List[Int]()
@@ -285,9 +297,16 @@ struct ReviewMode(Movable):
         self.file_before = List[String]()
         self.file_after = List[String]()
         self.file_binary = List[Bool]()
+        # Must be cleared too — ``_build_model`` *appends* to it, so leaving
+        # stale entries here would misalign it with ``file_paths`` and inflate
+        # the progress-bar denominator on every re-opened review.
+        self.file_changed_lines = List[Int]()
         self.cur_file = 0
         self.change_index = 0
         self.change_total = 0
+        self.cur_file_cum_lines = 0
+        self._cum_file = -1
+        self._cum_prefix = List[Int]()
 
     def _build_picker(mut self):
         self.picker_labels = List[String]()
@@ -429,6 +448,69 @@ struct ReviewMode(Movable):
         self.change_index = index
         self.change_total = total
         self.cur_file_cum_lines = cum_lines
+
+    def _ensure_cum_cache(mut self):
+        """Build ``_cum_prefix`` for ``cur_file`` if stale. ``_cum_prefix[b]``
+        is the count of changed diff rows (added + removed) anchored at
+        after-file rows ``< b``. A removed (deleted) row is anchored to the
+        after-row it renders before — pure-deletion runs to the next surviving
+        row, trailing deletions to end-of-file — so every deletion is counted
+        exactly once and ``_cum_prefix`` is non-decreasing. Built from the same
+        ``build_diff_rows`` pass as ``file_changed_lines`` (``_count_changed_lines``),
+        so ``_cum_prefix[-1]`` equals this file's ``file_changed_lines`` entry
+        exactly — no drift between the bar's numerator and denominator."""
+        if self._cum_file == self.cur_file and len(self._cum_prefix) > 0:
+            return
+        self._cum_file = self.cur_file
+        var prefix = List[Int]()
+        prefix.append(0)
+        if self.cur_file < 0 or self.cur_file >= len(self.file_before):
+            self._cum_prefix = prefix^
+            return
+        var before_lines = split_lines_no_trailing(self.file_before[self.cur_file])
+        var after_lines = split_lines_no_trailing(self.file_after[self.cur_file])
+        var n_after = len(after_lines)
+        var drows = build_diff_rows(before_lines, after_lines)
+        # delta[a] = changed rows anchored at after-row a (index n_after = EOF).
+        var delta = List[Int]()
+        for _ in range(n_after + 1):
+            delta.append(0)
+        var pending = 0
+        for j in range(len(drows)):
+            var k = drows[j].kind
+            if k == DIFF_ROW_REMOVED:
+                pending += 1
+                continue
+            var ar = drows[j].after_row
+            if ar < 0 or ar > n_after:
+                ar = n_after
+            # Pending removed rows anchor just before this surviving row.
+            delta[ar] += pending
+            pending = 0
+            if k == DIFF_ROW_ADDED:
+                delta[ar] += 1
+        delta[n_after] += pending  # trailing deletions
+        var run = 0
+        for a in range(n_after + 1):
+            run += delta[a]
+            prefix.append(run)  # prefix[a + 1] = changed rows anchored <= a
+        self._cum_prefix = prefix^
+
+    def changed_lines_through(mut self, boundary: Int) -> Int:
+        """Changed lines (added + removed) in the current file from its top
+        through ``boundary`` — the within-file part of the changeset-wide
+        progress bar. ``boundary`` is the after-file row just past the cursor's
+        change chunk (supplied by the host from the git gutter); ``< 0`` means
+        "through end of file", used on the last change so the file's share fills
+        completely."""
+        self._ensure_cum_cache()
+        var last = len(self._cum_prefix) - 1
+        if last < 0:
+            return 0
+        var b = boundary
+        if b < 0 or b > last:
+            b = last
+        return self._cum_prefix[b]
 
     def consume_nav(mut self) -> Int:
         var n = self.pending_nav

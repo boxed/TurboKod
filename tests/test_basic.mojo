@@ -1333,6 +1333,59 @@ def test_scrollbar_horizontal_paints_arrows_on_axis() raises:
     assert_equal(c.get(2, 5).glyph, String("░"))
 
 
+def _long_line_editor_window() raises -> Window:
+    """An editor window whose single logical line overflows the view, with
+    horizontal scroll (WRAP_NONE) on — the setup the horizontal scrollbar
+    needs to be present."""
+    var long_line = String("")
+    for _ in range(300):
+        long_line += String("x")
+    var w = Window.editor_window(String("t"), Rect(2, 2, 80, 24), long_line)
+    w.editor.wrap_mode = WRAP_NONE
+    return w^
+
+
+def test_hscrollbar_reaches_last_column() raises:
+    """The horizontal bar's range is the *content* width (gutters excluded),
+    so dragging the thumb to the far right scrolls the last column of the
+    longest line into view — not gutter-width short of it."""
+    var w = _long_line_editor_window()
+    var view = w.interior()
+    var max_x = w.editor.max_scroll_x(view)
+    # The content width is strictly narrower than the interior (gutters), so
+    # the reachable range exceeds ``longest - interior_width``.
+    assert_true(max_x > w.editor.longest_line_width() - view.width())
+    var bar = w._h_scrollbar()
+    assert_true(bar.metrics().present)
+    # Drag the thumb's leading cell to the far right end of the track.
+    w.h_drag_thumb_to(bar.right, 0)
+    assert_equal(w.editor.scroll_x, max_x)
+
+
+def test_hscrollbar_shift_wheel_scrolls_horizontally() raises:
+    """Shift+wheel scrolls the editor horizontally; a plain wheel still
+    scrolls vertically and leaves scroll_x untouched."""
+    var w = _long_line_editor_window()
+    var view = w.interior()
+    # Shift+wheel-down scrolls right.
+    var down = Event.mouse_event(Point(5, 5), MOUSE_WHEEL_DOWN, True, False,
+                                 MOD_SHIFT)
+    _ = w.editor.handle_mouse(down, view)
+    assert_true(w.editor.scroll_x > 0)
+    var after_down = w.editor.scroll_x
+    # Shift+wheel-up scrolls back left.
+    var up = Event.mouse_event(Point(5, 5), MOUSE_WHEEL_UP, True, False,
+                               MOD_SHIFT)
+    _ = w.editor.handle_mouse(up, view)
+    assert_true(w.editor.scroll_x < after_down)
+    # A plain (no-Shift) wheel-down moves the view vertically, not sideways.
+    w.editor.scroll_x = 0
+    var plain = Event.mouse_event(Point(5, 5), MOUSE_WHEEL_DOWN, True, False)
+    _ = w.editor.handle_mouse(plain, view)
+    assert_equal(w.editor.scroll_x, 0)
+    assert_true(w.editor.scroll_y > 0)
+
+
 # ----- Editor tests ---------------------------------------------------------
 
 
@@ -3624,6 +3677,90 @@ def test_review_goto_change_saves_edits() raises:
     assert_false(d.windows.windows[ridx].editor.dirty)
     assert_equal(read_file(path), String("original!\n"))
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+def test_review_progress_spans_whole_changeset() raises:
+    """The review progress bar weights the *entire* changeset as one bar: each
+    file's share is its added+removed line count and the within-file cumulative
+    shares that exact basis, so the bar is monotonic and reaches 100% on the
+    last change of the last file. Regression for two bugs: (1) numerator and
+    denominator counted different things (added/modified-only vs added+removed),
+    so the bar never hit 100% and lurched between files; (2) ``_reset_review``
+    didn't clear ``file_changed_lines``, so a re-opened review accumulated stale
+    per-file totals and the denominator ballooned."""
+    var paths = List[String]()
+    var befores = List[String]()
+    var afters = List[String]()
+    # File 0: one modified line + one added line (3 changed diff rows).
+    paths.append(String("a.txt"))
+    befores.append(String("a\nb\nc\n"))
+    afters.append(String("a\nB\nc\nd\n"))
+    # File 1: one pure deletion (1 changed diff row) — exercises the
+    # deletions-counted path the gutter alone would miss.
+    paths.append(String("b.txt"))
+    befores.append(String("x\ny\nz\n"))
+    afters.append(String("x\nz\n"))
+    # File 2: two pure additions (2 changed diff rows).
+    paths.append(String("c.txt"))
+    befores.append(String(""))
+    afters.append(String("1\n2\n"))
+
+    var rv = ReviewMode()
+    rv.build_from_pairs(paths, befores, afters)
+
+    # Per-file totals: the denominator pieces.
+    assert_equal(rv.file_changed_lines[0], 3)
+    assert_equal(rv.file_changed_lines[1], 1)
+    assert_equal(rv.file_changed_lines[2], 2)
+    var den = rv.file_changed_lines[0] + rv.file_changed_lines[1] \
+        + rv.file_changed_lines[2]
+    assert_equal(den, 6)
+
+    # For every file, the within-file cumulative is monotonic in the boundary
+    # and "through end of file" (-1) equals that file's total exactly — the
+    # property that makes numerator and denominator share one basis.
+    var fi = 0
+    while fi < 3:
+        rv.cur_file = fi
+        assert_equal(rv.changed_lines_through(-1), rv.file_changed_lines[fi])
+        var prev = 0
+        var b = 0
+        while b <= 6:
+            var cum = rv.changed_lines_through(b)
+            assert_true(cum >= prev)               # never decreases
+            assert_true(cum <= rv.file_changed_lines[fi])  # never overshoots
+            prev = cum
+            b += 1
+        fi += 1
+
+    # Walk the whole changeset forward (file 0 → 1 → 2, each finished at -1)
+    # and assert the changeset-wide numerator never goes backward and tops out
+    # at the denominator on the final change.
+    var prior = 0
+    var last_num = 0
+    var f = 0
+    while f < 3:
+        rv.cur_file = f
+        # Stepping through this file's boundaries, then finishing it (-1).
+        var b2 = 0
+        while b2 <= 6:
+            var num = prior + rv.changed_lines_through(b2)
+            assert_true(num >= last_num)
+            assert_true(num <= den)
+            last_num = num
+            b2 += 1
+        var done = prior + rv.changed_lines_through(-1)
+        assert_true(done >= last_num)
+        last_num = done
+        prior += rv.file_changed_lines[f]
+        f += 1
+    assert_equal(last_num, den)  # 100% on the last change of the last file
+
+    # Re-opening (rebuilding) the changeset must not accumulate stale per-file
+    # totals — len(file_changed_lines) stays aligned with the file list.
+    rv.build_from_pairs(paths, befores, afters)
+    assert_equal(len(rv.file_changed_lines), len(rv.file_paths))
+    assert_equal(len(rv.file_changed_lines), 3)
 
 
 def test_editor_external_change_refreshes_highlights() raises:
@@ -21722,6 +21859,7 @@ def _run_chunk_01() raises:
     test_review_window_not_counted_as_document()
     test_review_teardown_saves_and_closes_editable_window()
     test_review_goto_change_saves_edits()
+    test_review_progress_spans_whole_changeset()
     test_editor_external_change_refreshes_highlights()
     test_editor_external_change_auto_merges_disjoint_edits()
     test_editor_external_change_clears_dirty_when_disk_already_has_our_edits()

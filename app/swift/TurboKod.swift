@@ -280,6 +280,9 @@ final class CellView: NSView {
     // and emit one notch per notch-worth of travel so scroll speed tracks
     // the gesture, not the raw event rate. See scrollWheel.
     private var scrollAccumY: CGFloat = 0
+    // Horizontal twin of scrollAccumY — a trackpad horizontal swipe or
+    // Shift+wheel is integrated here and emitted as Shift+wheel notches.
+    private var scrollAccumX: CGFloat = 0
     // --- Native smooth (pixel-level) scrolling, main surface only --------
     // The host owns a continuous scroll position in fractional buffer lines
     // for the focused editor; the Mojo core stores the integer split +
@@ -335,6 +338,11 @@ final class CellView: NSView {
     // modifier transition) can detect Option's own up/down edges and report
     // them as bare EVENT_MOD_KEY transitions for the Alt-tap gestures.
     private var optionDown = false
+    // Live Shift-key state, tracked from flagsChanged. Used to decide a
+    // Shift+scroll is horizontal — more reliable than a scrollWheel event's
+    // own modifierFlags, which (depending on device/momentum) may not carry
+    // Shift, and macOS doesn't always axis-swap it to deltaX for us.
+    private var shiftDown = false
     // Palette is the active theme's index→RGB table. Seeded with the classic
     // built-in palette and refreshed from the Mojo core whenever the theme
     // version changes (Settings ▸ Theme). `themeVersion = -1` forces the first
@@ -947,8 +955,10 @@ final class CellView: NSView {
     override func flagsChanged(with event: NSEvent) {
         // See keyDown — scripted capture runs ignore live input.
         if ProcessInfo.processInfo.environment["TK_CAPTURE"] != nil { return }
-        // flagsChanged fires for *every* modifier transition; isolate
-        // Option's own up/down edges by diffing against the last state.
+        // flagsChanged fires for *every* modifier transition; keep the live
+        // Shift state current (scrollWheel reads it) before isolating Option's
+        // own up/down edges by diffing against the last state.
+        shiftDown = event.modifierFlags.contains(.shift)
         let nowDown = event.modifierFlags.contains(.option)
         if nowDown == optionDown { return }   // some other modifier moved
         optionDown = nowDown
@@ -1089,11 +1099,28 @@ final class CellView: NSView {
     override func scrollWheel(with e: NSEvent) {
         // Scripted capture runs ignore live input (matches sendMouse).
         if ProcessInfo.processInfo.environment["TK_CAPTURE"] != nil { return }
+        let dx = e.scrollingDeltaX
         let dy = e.scrollingDeltaY
+        let shift = shiftDown || e.modifierFlags.contains(.shift)
+        if ProcessInfo.processInfo.environment["TK_SCROLL_DEBUG"] != nil {
+            FileHandle.standardError.write("DBGSCROLL dx=\(dx) dy=\(dy) shift=\(shift) precise=\(e.hasPreciseScrollingDeltas) phase=\(e.phase.rawValue) mom=\(e.momentumPhase.rawValue)\n".data(using: .utf8)!)
+        }
         // A zero-delta event still matters at gesture/momentum end — that's
         // when an out-of-range smooth scroll starts its rubber-band spring.
-        if dy == 0 && e.phase != .ended && e.phase != .cancelled
+        if dx == 0 && dy == 0 && e.phase != .ended && e.phase != .cancelled
             && e.momentumPhase != .ended { return }
+
+        // Horizontal scroll: an explicit horizontal swipe, or Shift+wheel (the
+        // GUI convention — macOS reports the held-Shift scroll on either axis
+        // depending on the device). Scrolls the focused editor's scroll_x
+        // directly (never the vertical smooth-scroll path).
+        if shift || abs(dx) > abs(dy) {
+            // With Shift held the intended magnitude is the wheel's natural
+            // axis (dy) unless macOS already swapped it onto dx.
+            let amount = abs(dx) > abs(dy) ? dx : dy
+            if amount != 0 { horizontalScroll(e, delta: amount) }
+            return
+        }
 
         // Smooth pixel scrolling: a precise device (trackpad / Magic Mouse)
         // over the focused editor body. Everything else — legacy wheels, or
@@ -1222,6 +1249,34 @@ final class CellView: NSView {
             let up = scrollAccumY > 0
             sendMouse(e, button: up ? 4 : 5, pressed: 1, motion: 0)
             scrollAccumY += up ? -perNotch : perNotch
+        }
+    }
+
+    /// Horizontal scroll of the *focused* editor (not the pointer's window —
+    /// matches the vertical smooth-scroll target). `delta > 0` (content/finger
+    /// moving right) scrolls the view left; `delta < 0` scrolls right, matching
+    /// AppKit's scroll-axis sign. A precise device integrates pixels into whole
+    /// columns (1 column per cell-width of travel); a legacy wheel moves a few
+    /// columns per line detent.
+    private func horizontalScroll(_ e: NSEvent, delta: CGFloat) {
+        if e.phase == .began { scrollAccumX = 0 }
+        var cols = 0
+        if e.hasPreciseScrollingDeltas {
+            scrollAccumX += delta
+            let perCol = max(1, CELL_W)
+            while abs(scrollAccumX) >= perCol {
+                cols += scrollAccumX > 0 ? -1 : 1   // delta>0 → scroll left
+                scrollAccumX += scrollAccumX > 0 ? -perCol : perCol
+            }
+        } else {
+            // Legacy wheel: each line detent is ~3 columns, like the 3-line
+            // vertical notch.
+            cols = delta > 0 ? -3 : 3
+        }
+        if cols == 0 { return }
+        if tk_desktop_hscroll_by(handle, Int64(cols),
+                                 Int64(self.cols()), Int64(rows())) != 0 {
+            needsDisplay = true
         }
     }
 

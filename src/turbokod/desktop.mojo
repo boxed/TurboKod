@@ -2458,6 +2458,23 @@ struct Desktop(Movable):
         var interior = self.windows.windows[win_idx].interior()
         self.windows.windows[win_idx].editor.minimap_to(interior, frac)
 
+    def hscroll_focused(mut self, cols: Int, screen: Rect) -> Bool:
+        """Scroll the focused editor horizontally by ``cols`` columns
+        (negative = left). Targets the focused window — like the smooth
+        vertical scroll uses the focused editor rather than whatever's under
+        the pointer — so a trackpad horizontal swipe / Shift+wheel works
+        regardless of where the cursor happens to sit. Returns True when an
+        editor's ``scroll_x`` actually moved (the host repaints on True)."""
+        self.windows.fit_into(self.workspace_rect(screen))
+        var idx = self.windows.focused
+        if idx < 0 or idx >= len(self.windows.windows):
+            return False
+        if not self.windows.windows[idx].is_editor:
+            return False
+        var before = self.windows.windows[idx].editor.scroll_x
+        self.windows.windows[idx].h_scroll_by(cols)
+        return self.windows.windows[idx].editor.scroll_x != before
+
     def vscroll_dragging(self) -> Bool:
         """True while a window-border v-scrollbar thumb drag is in progress."""
         return self.windows.v_scroll_dragging()
@@ -3856,8 +3873,17 @@ struct Desktop(Movable):
 
     def _review_update_counter(mut self):
         """Feed the toolbar from the hosted editor's git-change chunks: the
-        chunk index/total for "change z of w", plus the cumulative changed
-        rows through the cursor's chunk for the line-weighted progress bar."""
+        chunk index/total for "change z of w", and the after-row boundary of the
+        cursor's chunk for the changeset-wide progress bar.
+
+        The bar spans the whole changeset: ``ReviewMode`` owns the per-file
+        totals (``file_changed_lines``) and the within-file cumulative (computed
+        from the same ``build_diff_rows`` pass via ``changed_lines_through``), so
+        numerator and denominator share one counting basis and can't drift. Our
+        only job is to locate the cursor's chunk in the gutter and hand
+        ``ReviewMode`` the after-row just past it. On the last (or no) chunk we
+        pass ``-1`` = "through end of file" so trailing deletions are included
+        and the final change of the final file reaches 100%."""
         var idx = self._review_win_idx
         if idx < 0 or idx >= len(self.windows.windows):
             self.review.set_change_counter(0, 0, 0)
@@ -3866,8 +3892,7 @@ struct Desktop(Movable):
         var n = len(self.windows.windows[idx].editor.git_change_lines)
         var total_chunks = 0
         var cur_chunk = 0
-        var cum_lines = 0
-        var running = 0
+        var boundary = -1
         var found = False
         var r = 0
         while r < n:
@@ -3876,17 +3901,21 @@ struct Desktop(Movable):
                 total_chunks += 1
                 while r < n and self.windows.windows[idx].editor \
                         .git_change_lines[r] != GIT_CHANGE_NONE:
-                    running += 1
                     r += 1
                 if not found and cursor_row < r:
                     found = True
                     cur_chunk = total_chunks
-                    cum_lines = running
+                    boundary = r
             else:
                 r += 1
         if not found:
             cur_chunk = total_chunks
-            cum_lines = running
+            boundary = -1
+        elif cur_chunk == total_chunks:
+            # On the last change → fill this file's share completely (include
+            # any trailing deletions) so the changeset bar can reach 100%.
+            boundary = -1
+        var cum_lines = self.review.changed_lines_through(boundary)
         self.review.set_change_counter(cur_chunk, total_chunks, cum_lines)
 
     def _review_handle_body_mouse(mut self, event: Event):

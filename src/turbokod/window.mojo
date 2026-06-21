@@ -1386,12 +1386,18 @@ struct Window(Copyable, Movable):
         var pos_len = display_columns(pos_text)
         var sb_left = pos_x + pos_len + 1
         var sb_right = self.rect.b.x - 2
-        var visible = self.rect.width() - 2
+        # ``visible`` is derived from ``max_scroll_x`` (the same content-width
+        # range ``clamp_scroll`` uses) — not the raw interior width — so the
+        # bar is present exactly when the text overflows the gutters, the thumb
+        # sizes to the visible text portion, and a drag/track-jump can reach the
+        # last column. Mirrors ``_v_scrollbar``'s ``editor.max_scroll_y`` use.
+        var total = self.editor.longest_line_width()
+        var visible = total - self.editor.max_scroll_x(self.interior())
+        if visible < 1:
+            visible = 1
         return HScrollbar(
             self.rect.b.y - 1, sb_left, sb_right,
-            self.editor.longest_line_width(),
-            visible,
-            self.editor.scroll_x,
+            total, visible, self.editor.scroll_x,
         )
 
     def _paint_v_scrollbar(
@@ -1443,9 +1449,7 @@ struct Window(Copyable, Movable):
 
     def h_scroll_by(mut self, cols: Int):
         if not self.is_editor: return
-        var view = self.interior()
-        var max_x = self.editor.longest_line_width() - view.width()
-        if max_x < 0: max_x = 0
+        var max_x = self.editor.max_scroll_x(self.interior())
         var nx = self.editor.scroll_x + cols
         if nx < 0: nx = 0
         if nx > max_x: nx = max_x
