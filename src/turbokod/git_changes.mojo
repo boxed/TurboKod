@@ -472,19 +472,37 @@ def project_is_git_repo(project_root: String) -> Bool:
 
 @fieldwise_init
 struct GitStateMtimes(ImplicitlyCopyable, Movable):
-    """``mtime`` (seconds) of ``.git/HEAD`` and ``.git/index``. Together
-    these cover the operations that change what ``git show HEAD:<path>``
-    returns: HEAD mtime moves on branch switch / detach / symbolic-ref
-    rewrite, index mtime moves on commit / add / reset / stash. Either
-    field is 0 when the file is missing or the project isn't a git repo
-    — callers treat ``(0, 0)`` as "no baseline yet" and avoid firing a
-    spurious invalidation on the first observation."""
+    """Fingerprint of the git state that decides what ``git show
+    HEAD:<path>`` returns, polled (~1 Hz) to notice external git operations
+    on an open file.
+
+    The subtlety is that ``.git/HEAD`` is only the *symref*
+    (``ref: refs/heads/main``) — a plain commit never rewrites it, so
+    watching HEAD alone misses commits entirely. The signal that always
+    moves on a commit (and on reset / amend / checkout / merge / rebase) is
+    the HEAD reflog ``.git/logs/HEAD``, appended to on every HEAD update
+    under the default ``core.logAllRefUpdates``. We track its ``mtime`` *and*
+    ``size``: the size guards the same-second case (mtime has 1 s
+    resolution, but the reflog only ever grows, so two commits in one second
+    still differ by size). ``.git/HEAD`` mtime still catches branch switches;
+    ``.git/index`` mtime is a backstop (it moves on commit too, and covers
+    the rare reflog-disabled repo). All fields are 0 when the file is missing
+    or the project isn't a git repo — callers treat ``is_zero()`` as "no
+    baseline yet" and skip the first-observation invalidation."""
     var head_mtime: Int64
     var index_mtime: Int64
+    var reflog_mtime: Int64
+    var reflog_size: Int64
+
+    @staticmethod
+    def zero() -> GitStateMtimes:
+        return GitStateMtimes(Int64(0), Int64(0), Int64(0), Int64(0))
 
     def equals(self, other: GitStateMtimes) -> Bool:
         return self.head_mtime == other.head_mtime \
-            and self.index_mtime == other.index_mtime
+            and self.index_mtime == other.index_mtime \
+            and self.reflog_mtime == other.reflog_mtime \
+            and self.reflog_size == other.reflog_size
 
     def is_zero(self) -> Bool:
         return self.head_mtime == Int64(0) and self.index_mtime == Int64(0)
@@ -496,7 +514,7 @@ def git_state_mtimes(project_root: String) -> GitStateMtimes:
     operations on an open file. Returns zeros for non-repos and for
     ``.git`` entries that are pointer files (submodules / linked
     worktrees) — we don't yet follow ``gitdir:`` redirects."""
-    var zero = GitStateMtimes(Int64(0), Int64(0))
+    var zero = GitStateMtimes.zero()
     if len(project_root.as_bytes()) == 0:
         return zero
     var found = find_git_project(project_root)
@@ -508,9 +526,15 @@ def git_state_mtimes(project_root: String) -> GitStateMtimes:
         return zero
     var head = stat_file(join_path(git_dir, String("HEAD")))
     var index = stat_file(join_path(git_dir, String("index")))
+    # ``.git/logs/HEAD`` — the HEAD reflog, appended on every commit / reset /
+    # amend / checkout, which is what actually changes ``git show HEAD:`` (the
+    # symref ``HEAD`` file above does not move on a commit).
+    var reflog = stat_file(join_path(git_dir, String("logs/HEAD")))
     var head_mt = head.mtime_sec if head.ok else Int64(0)
     var index_mt = index.mtime_sec if index.ok else Int64(0)
-    return GitStateMtimes(head_mt, index_mt)
+    var reflog_mt = reflog.mtime_sec if reflog.ok else Int64(0)
+    var reflog_sz = reflog.size if reflog.ok else Int64(0)
+    return GitStateMtimes(head_mt, index_mt, reflog_mt, reflog_sz)
 
 
 def compute_local_changes(project_root: String) raises -> String:

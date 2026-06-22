@@ -19051,9 +19051,9 @@ def test_git_state_mtimes_zero_for_non_repo() raises:
 
 
 def test_git_state_mtimes_nonzero_after_init_commit() raises:
-    """A fresh ``git init`` + commit produces nonzero mtimes for both
-    ``.git/HEAD`` and ``.git/index`` — the polling loop's "something
-    changed" comparison only fires once a real baseline exists."""
+    """A fresh ``git init`` + commit produces a nonzero fingerprint (HEAD,
+    index, and reflog) — the polling loop's "something changed" comparison
+    only fires once a real baseline exists — and a second commit changes it."""
     var dir = _temp_path(String("_git_mtime_init"))
     _rm_rf(dir)
     _ensure_dir(dir)
@@ -19092,11 +19092,35 @@ def test_git_state_mtimes_nonzero_after_init_commit() raises:
     var mt = git_state_mtimes(dir)
     assert_true(mt.head_mtime != Int64(0))
     assert_true(mt.index_mtime != Int64(0))
+    # The HEAD reflog exists after the first commit — it's the field that
+    # actually moves on a *subsequent* commit (the ``.git/HEAD`` symref does
+    # not), so the poll relies on it to notice commits.
+    assert_true(mt.reflog_mtime != Int64(0))
+    assert_true(mt.reflog_size != Int64(0))
     # equals() returns True for itself, False for a zero baseline.
     assert_true(mt.equals(mt))
-    var zero = GitStateMtimes(Int64(0), Int64(0))
+    var zero = GitStateMtimes.zero()
     assert_true(not mt.equals(zero))
     assert_true(zero.is_zero())
+    # Regression: a second commit must change the fingerprint even though
+    # ``.git/HEAD`` (the symref) never moves. The reflog grows by one entry,
+    # so size alone flips ``equals`` — this is what makes the gutter notice a
+    # commit made in the in-app terminal (no host focus-gain to force a
+    # refresh).
+    assert_true(write_file(f, String("hello\nworld\n")))
+    var add2 = List[String]()
+    add2.append(String("add"))
+    add2.append(String("a.txt"))
+    _ = _run_git(dir, add2^)
+    var commit2 = List[String]()
+    commit2.append(String("commit"))
+    commit2.append(String("-q"))
+    commit2.append(String("-m"))
+    commit2.append(String("second"))
+    _ = _run_git(dir, commit2^)
+    var mt2 = git_state_mtimes(dir)
+    assert_true(not mt2.equals(mt))
+    assert_true(mt2.reflog_size != mt.reflog_size)
     _rm_rf(dir)
 
 

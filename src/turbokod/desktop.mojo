@@ -1648,7 +1648,7 @@ struct Desktop(Movable):
         self._recent_files = List[String]()
         self._nav_stack = List[NavPoint]()
         self._nav_pos = -1
-        self._git_state_mtimes = GitStateMtimes(Int64(0), Int64(0))
+        self._git_state_mtimes = GitStateMtimes.zero()
         self._last_git_state_check_ms = 0
         self._git_root_cached = String("")
         self._git_root_is_repo = False
@@ -3475,11 +3475,13 @@ struct Desktop(Movable):
                 self._git_root_is_repo = project_is_git_repo(root)
             have_git = self._git_root_is_repo
         # Poll for external git state changes (commit, checkout, reset,
-        # stash, ...) at ~1 Hz. Two stat() calls — cheap enough on idle.
-        # When ``.git/HEAD`` or ``.git/index`` mtime moves we drop every
-        # editor's cached HEAD baseline so the next paint refetches
-        # ``git show HEAD:<path>`` and re-renders the gutter against the
-        # new commit. The first observation only seeds the cache (zero
+        # stash, ...) at ~1 Hz. A few stat() calls — cheap enough on idle.
+        # The fingerprint watches the HEAD reflog (``.git/logs/HEAD``) so a
+        # commit is actually noticed — the bare ``.git/HEAD`` symref doesn't
+        # move on commit (see ``GitStateMtimes``). When the fingerprint moves
+        # we drop every editor's cached HEAD baseline so the next paint
+        # refetches ``git show HEAD:<path>`` and re-renders the gutter against
+        # the new commit. The first observation only seeds the cache (zero
         # baseline → no invalidation), so opening the project doesn't
         # spuriously thrash ``git show``.
         if have_git:
@@ -3633,7 +3635,7 @@ struct Desktop(Movable):
                     and not self.windows.windows[j].editor.review_mode:
                 self.windows.windows[j].editor.invalidate_git_changes()
         self._last_git_state_check_ms = 0
-        self._git_state_mtimes = GitStateMtimes(Int64(0), Int64(0))
+        self._git_state_mtimes = GitStateMtimes.zero()
         # Re-check the dirty indicator promptly too — a commit or worktree
         # edit may have happened while we were in the background.
         self._last_git_dirty_check_ms = 0
@@ -5722,7 +5724,7 @@ struct Desktop(Movable):
         # Reset the external-git polling cache so the new project's
         # ``.git`` mtimes seed fresh on its first paint instead of
         # comparing against whatever the previous project was at.
-        self._git_state_mtimes = GitStateMtimes(Int64(0), Int64(0))
+        self._git_state_mtimes = GitStateMtimes.zero()
         self._last_git_state_check_ms = 0
         # Clear the dirty indicator until the new project's first poll.
         self._project_dirty = False
