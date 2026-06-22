@@ -129,6 +129,11 @@ struct StatusBar(Movable):
     # Inclusive ``a_x`` / exclusive ``b_x`` column bounds.
     var _msg_a_x: Int
     var _msg_b_x: Int
+    # Painted bounds of the git uncommitted/unpushed indicator cluster —
+    # captured by ``paint`` so a click on it can open the git view.
+    # ``a_x >= b_x`` ⇒ nothing painted (clean repo), so no hit target.
+    var _git_a_x: Int
+    var _git_b_x: Int
 
     def __init__(out self):
         self.items = List[StatusItem]()
@@ -148,6 +153,8 @@ struct StatusBar(Movable):
         self._tab_hits = List[_TabHit]()
         self._msg_a_x = 0
         self._msg_b_x = 0
+        self._git_a_x = 0
+        self._git_b_x = 0
 
     def add(mut self, var key: String, var desc: String):
         self.items.append(StatusItem(key^, desc^))
@@ -223,6 +230,10 @@ struct StatusBar(Movable):
         # plus "uncommitted" tells the user at a glance that the working
         # tree has changes to commit — no need to open the git/review
         # features. Painted only when dirty; a clean tree shows nothing.
+        # Capture the cluster's left edge so a click anywhere on the
+        # indicator(s) can open the git view; ``_git_b_x`` advances with
+        # each painted indicator. Clean repo ⇒ a_x == b_x ⇒ no hit target.
+        self._git_a_x = x
         if self.git_dirty:
             _ = painter.put_text(canvas, Point(x, y), String("●"), Attr(GREEN, LIGHT_GRAY))
             x += 2
@@ -240,6 +251,10 @@ struct StatusBar(Movable):
             var ulbl = String(self.git_unpushed) + String(" unpushed")
             _ = painter.put_text(canvas, Point(x, y), ulbl, desc_attr)
             x += display_columns(ulbl) + 2
+        # End of the cluster (exclusive). The trailing ``+ 2`` gap above is
+        # included so the whole painted span — not just the last glyph — is
+        # clickable; harmless when empty since a_x == b_x then.
+        self._git_b_x = x
         # Target tabs: painted in the gap between F-key shortcuts and
         # the right-aligned status message. The active tab is
         # reverse-video so the user can see at a glance which target
@@ -385,6 +400,16 @@ struct StatusBar(Movable):
         if self._msg_a_x >= self._msg_b_x:
             return False
         return self._msg_a_x <= pos.x and pos.x < self._msg_b_x
+
+    def hit_test_git(self, pos: Point, container_bounds: Rect) -> Bool:
+        """True if ``pos`` lands on the uncommitted/unpushed indicator
+        cluster — the host opens the git view on such a click. False when
+        the repo is clean (nothing painted ⇒ ``_git_a_x == _git_b_x``)."""
+        if pos.y != container_bounds.b.y - 1:
+            return False
+        if self._git_a_x >= self._git_b_x:
+            return False
+        return self._git_a_x <= pos.x and pos.x < self._git_b_x
 
     def hit_test_tab(self, pos: Point, container_bounds: Rect) -> Int:
         """Return the index of the tab clicked at ``pos``, or -1 if no

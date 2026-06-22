@@ -1945,6 +1945,13 @@ struct LocalChanges(Movable):
         # itself is green for commits that have been pushed to a remote
         # and red for commits that only exist locally — at-a-glance
         # signal of "what would I lose if this branch went away."
+        #
+        # The SHA tint alone is too easy to miss, and it disappears
+        # entirely on the selected row (where ``row_attr`` overrides every
+        # segment). So unpushed commits also carry a leading ``↑`` glyph,
+        # painted on every row including the selected one: a shape reads
+        # against the selection bar where a color can't. ``↑`` matches the
+        # status-bar "unpushed" indicator.
         var sha_pushed   = Attr(LIGHT_GREEN, EDITOR_BG)
         var sha_local    = Attr(LIGHT_RED, EDITOR_BG)
         var subject_attr = Attr(EDITOR_FG, EDITOR_BG)
@@ -1978,6 +1985,13 @@ struct LocalChanges(Movable):
             # the cursor forward — codepoint width, not byte width.
             var x = left + 1
             var stop = right + 1
+            # Unpushed marker, always painted (even on the selected row, so
+            # it stays visible when ``row_attr`` flattens the SHA tint). A
+            # space for pushed commits keeps the SHA column aligned.
+            var mark = String(" ") if co.is_pushed else String("↑")
+            var mark_attr = row_attr if is_sel else sha_local
+            x += canvas.put_text(Point(x, y), mark, mark_attr, stop)
+            if x >= stop: continue
             x += canvas.put_text(
                 Point(x, y), co.short_sha, seg_sha, stop,
             )

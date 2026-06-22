@@ -2809,11 +2809,11 @@ def test_selection_history_paint_and_keys() raises:
     var entries = List[LineHistoryEntry]()
     entries.append(LineHistoryEntry(
         String("aaa1111"), String("Ada"), String("2026-05-09"),
-        String("Tweak reveal"), String("@@ -1 +1 @@\n+new\n"),
+        String("Tweak reveal"), String("@@ -1 +1 @@\n+new\n"), False,
     ))
     entries.append(LineHistoryEntry(
         String("bbb2222"), String("Bob"), String("2026-04-01"),
-        String("Initial"), String("@@ -0,0 +1 @@\n+first\n"),
+        String("Initial"), String("@@ -0,0 +1 @@\n+first\n"), True,
     ))
     var h = SelectionHistory()
     assert_false(h.active)
@@ -2826,8 +2826,13 @@ def test_selection_history_paint_and_keys() raises:
     h.paint(c, screen, 1)
     # Title bar (row 1) starts with "Git History …".
     assert_equal(c.get(1, 1).glyph, String("G"))
-    # Left list row 0 shows the first commit's short sha (1-cell indent).
-    assert_equal(c.get(1, 2).glyph, String("a"))
+    # Left list row 0 is the unpushed commit: a leading "↑" marker (at the
+    # 1-cell indent), then the short sha after the 2-cell marker column.
+    assert_equal(c.get(1, 2).glyph, String("↑"))
+    assert_equal(c.get(3, 2).glyph, String("a"))
+    # Row 1 is pushed: no marker (space), sha still in the same column.
+    assert_equal(c.get(1, 3).glyph, String(" "))
+    assert_equal(c.get(3, 3).glyph, String("b"))
     # Right pane (divider at x=32 for an 80-wide screen) shows the
     # selected commit's patch, starting with its hunk header.
     assert_equal(c.get(33, 2).glyph, String("@"))

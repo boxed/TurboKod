@@ -948,12 +948,17 @@ struct LineHistoryEntry(ImplicitlyCopyable, Movable):
     """One commit from ``git log -L`` over a selected line range: the
     commit metadata for the left-pane list, plus the unified-diff
     ``patch`` (scoped to that line range) shown in the right pane.
-    ``date`` is YYYY-MM-DD; newest commit first."""
+    ``date`` is YYYY-MM-DD; newest commit first. ``is_pushed`` is True
+    when the commit is reachable from a remote-tracking ref (already
+    pushed); False when it only exists locally — same meaning as on
+    :struct:`GitCommit`. ``parse_line_history`` leaves it True; the
+    fetch wrapper fills it in from the unpushed-SHA set."""
     var short_sha: String
     var author: String
     var date: String
     var subject: String
     var patch: String
+    var is_pushed: Bool
 
 
 def _split_on_byte(s: String, sep: UInt8) -> List[String]:
@@ -1135,7 +1140,13 @@ def fetch_line_history(
     args.append(String("--date=short"))
     args.append(String("-") + String(limit))
     args.append(String("--format=%x1e%h%x1f%an%x1f%ad%x1f%s"))
-    return parse_line_history(_git_stdout(project_root, args^))
+    var entries = parse_line_history(_git_stdout(project_root, args^))
+    # Flag local-only commits so the list can mark them — same
+    # unpushed set the commits pane uses, abbreviated to match ``%h``.
+    var unpushed = _fetch_unpushed_short_shas(project_root, limit)
+    for i in range(len(entries)):
+        entries[i].is_pushed = not _list_contains(unpushed, entries[i].short_sha)
+    return entries^
 
 
 def parse_line_history(stdout: String) -> List[LineHistoryEntry]:
@@ -1170,7 +1181,7 @@ def parse_line_history(stdout: String) -> List[LineHistoryEntry]:
             fields.append(String(""))
         out.append(
             LineHistoryEntry(
-                fields[0], fields[1], fields[2], fields[3], patch^,
+                fields[0], fields[1], fields[2], fields[3], patch^, True,
             ),
         )
     return out^

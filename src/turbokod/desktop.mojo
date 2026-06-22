@@ -7129,6 +7129,13 @@ struct Desktop(Movable):
             return self.dispatch_action(
                 TARGET_SELECT_PREFIX + String(tab_idx), screen,
             )
+        # Click on the far-left git indicator (● uncommitted / ↑ unpushed)
+        # opens the git view, so the at-a-glance signal is also the way in.
+        if event.kind == EVENT_MOUSE \
+                and event.button == MOUSE_BUTTON_LEFT \
+                and event.pressed and not event.motion \
+                and self.status_bar.hit_test_git(event.pos, screen):
+            return self.dispatch_action(GIT_LOCAL_CHANGES, screen)
         # Click on the right-aligned status indicator opens an info
         # window for whichever subsystem currently owns the message
         # slot. The slot is shared between LSP and DAP, so we route

@@ -105,13 +105,20 @@ struct SelectionHistory(Movable):
         self.patch_scroll = 0
 
     def _list_items(self) -> List[String]:
-        """``<sha>  <date>  <subject>`` per commit. Truncation to the
+        """``<mark><sha>  <date>  <subject>`` per commit. ``<mark>`` is a
+        leading ``↑`` for a commit that isn't yet pushed to a remote
+        (two spaces otherwise, so the columns stay aligned). A glyph —
+        not a color — because the list widget paints the whole selected
+        row in one highlight color, so a tint would vanish on the
+        selected line; the arrow stays legible there. Truncation to the
         pane width is the list widget's job (it clips to its bounds)."""
         var out = List[String]()
         for i in range(len(self.entries)):
             var e = self.entries[i]
+            var mark = String("  ") if e.is_pushed else String("↑ ")
             out.append(
-                e.short_sha + String("  ") + e.date + String("  ") + e.subject
+                mark + e.short_sha + String("  ") + e.date
+                + String("  ") + e.subject
             )
         return out^
 
@@ -226,7 +233,8 @@ struct SelectionHistory(Movable):
         var hint_painter = Painter(Rect(x0, lay.hint_y, x1, lay.hint_y + 1))
         _ = hint_painter.put_text(
             canvas, Point(x0 + 1, lay.hint_y),
-            String("↑↓ commit · PgUp/PgDn scroll · Esc close"), bar_attr,
+            String("↑↓ commit · PgUp/PgDn scroll · ↑ = unpushed · Esc close"),
+            bar_attr,
         )
 
     def handle_event(mut self, event: Event, screen: Rect, top_y: Int) -> Bool:
