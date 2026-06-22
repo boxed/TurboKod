@@ -1970,12 +1970,19 @@ struct LocalChanges(Movable):
             var co = self.commits[idx]
             var seg_sha    = sha_pushed if co.is_pushed else sha_local
             # Per-committer color so the same author's rows stand out down
-            # the log; suppressed by ``row_attr`` on the selected row below.
+            # the log.
             var seg_author = Attr(_author_color(co.author), EDITOR_BG)
             var seg_subj   = subject_attr
             if is_sel:
-                seg_sha = row_attr
-                seg_author = row_attr
+                # On the selected row, keep the *foreground* color coding —
+                # the sha's pushed/unpushed tint and the per-author color —
+                # and only adopt the selection bar's background. Flattening
+                # every segment to black would hide exactly the signal the
+                # user is acting on. The subject carries no coding, so it
+                # takes the selection fg (black) where it reads best.
+                var sel_bg = row_attr.bg
+                seg_sha = seg_sha.with_bg(sel_bg)
+                seg_author = seg_author.with_bg(sel_bg)
                 seg_subj = row_attr
             # Layout: ``<sha> <AB> <subject>`` painted in three
             # passes; each ``put_text`` clips at ``right + 1`` so a
@@ -1985,11 +1992,11 @@ struct LocalChanges(Movable):
             # the cursor forward — codepoint width, not byte width.
             var x = left + 1
             var stop = right + 1
-            # Unpushed marker, always painted (even on the selected row, so
-            # it stays visible when ``row_attr`` flattens the SHA tint). A
-            # space for pushed commits keeps the SHA column aligned.
+            # Unpushed marker, always painted (even on the selected row). A
+            # space for pushed commits keeps the SHA column aligned. On the
+            # selected row it keeps its red tint over the selection bg.
             var mark = String(" ") if co.is_pushed else String("↑")
-            var mark_attr = row_attr if is_sel else sha_local
+            var mark_attr = sha_local.with_bg(row_attr.bg) if is_sel else sha_local
             x += canvas.put_text(Point(x, y), mark, mark_attr, stop)
             if x >= stop: continue
             x += canvas.put_text(
