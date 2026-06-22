@@ -93,6 +93,10 @@ struct StatusBar(Movable):
     # the far left of the bar. Set every frame by the host from its
     # project-level git poll; the bar itself never computes it.
     var git_dirty: Bool
+    # Count of locally committed but unpushed commits (ahead of upstream).
+    # Set every frame by the host alongside ``git_dirty``; painted as an
+    # "↑N unpushed" indicator next to the dirty dot. 0 ⇒ nothing to push.
+    var git_unpushed: Int
     var active_tab: Int          # index into ``tabs``, or -1
     var message: String          # right-aligned diagnostic / status text
     var message_attr: Attr       # color for the diagnostic; default = subtle
@@ -130,6 +134,7 @@ struct StatusBar(Movable):
         self.items = List[StatusItem]()
         self.tabs = List[StatusTab]()
         self.git_dirty = False
+        self.git_unpushed = 0
         self.active_tab = -1
         self.message = String("")
         self.message_attr = Attr(BLACK, LIGHT_GRAY)
@@ -224,6 +229,17 @@ struct StatusBar(Movable):
             var lbl = String("uncommitted")
             _ = painter.put_text(canvas, Point(x, y), lbl, desc_attr)
             x += display_columns(lbl) + 2
+        # Unpushed-commits indicator, just after the dirty dot: an up-arrow
+        # plus "N unpushed" flags commits that are committed locally but not
+        # yet on the upstream. Independent of ``git_dirty`` — a clean tree
+        # can still have commits to push. Painted only when there's at least
+        # one; nothing shows when up to date.
+        if self.git_unpushed > 0:
+            _ = painter.put_text(canvas, Point(x, y), String("↑"), Attr(GREEN, LIGHT_GRAY))
+            x += 2
+            var ulbl = String(self.git_unpushed) + String(" unpushed")
+            _ = painter.put_text(canvas, Point(x, y), ulbl, desc_attr)
+            x += display_columns(ulbl) + 2
         # Target tabs: painted in the gap between F-key shortcuts and
         # the right-aligned status message. The active tab is
         # reverse-video so the user can see at a glance which target

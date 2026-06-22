@@ -633,6 +633,33 @@ def fetch_git_status(project_root: String) -> List[GitFileStatus]:
     return out^
 
 
+def count_unpushed_commits(project_root: String) -> Int:
+    """Number of commits on the current branch that are ahead of its
+    upstream — i.e. committed locally but not yet pushed. Runs
+    ``git rev-list --count @{upstream}..HEAD``.
+
+    Returns 0 when there's no upstream configured (the branch was never
+    pushed / has no tracking remote), when the branch is up to date, or
+    when git is unavailable — git exits non-zero in the no-upstream case,
+    which ``_git_stdout`` maps to ``""`` → 0. So this is conservatively
+    "commits we know are unpushed", not "commits that might be unpushed".
+    """
+    if len(project_root.as_bytes()) == 0:
+        return 0
+    var args = List[String]()
+    args.append(String("rev-list"))
+    args.append(String("--count"))
+    args.append(String("@{upstream}..HEAD"))
+    var stdout = _git_stdout(project_root, args^)
+    var s = stdout.strip()
+    if len(s.as_bytes()) == 0:
+        return 0
+    try:
+        return Int(s)
+    except:
+        return 0
+
+
 def stage_file(project_root: String, path: String) -> Bool:
     """``git add -- <path>``. Returns False when git is unavailable, the
     path is empty, or git exited non-zero. ``path`` is taken as-is —

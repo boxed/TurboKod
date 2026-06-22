@@ -64,6 +64,7 @@ from .git_blame import compute_blame
 from .git_changes import (
     GIT_CHANGE_NONE,
     GitFileStatus, GitRevertBlock, GitStateMtimes, compute_revert_block,
+    count_unpushed_commits,
     diff_buffer_against_head, fetch_git_status, fetch_head_text,
     fetch_line_history, git_state_mtimes, project_is_git_repo,
 )
@@ -1452,6 +1453,11 @@ struct Desktop(Movable):
     # (staged, unstaged, or untracked).
     var _project_dirty: Bool
     var _last_git_dirty_check_ms: Int
+    # Count of commits ahead of upstream — committed locally but not yet
+    # pushed. Surfaced next to the dirty indicator on the status bar and
+    # refreshed on the same poll as ``_project_dirty``. 0 when up to date,
+    # no upstream is configured, or the project isn't a git repo.
+    var _project_unpushed: Int
     # Raw (pre-realpath) path of the last focused editor, so the per-frame
     # recents bookkeeping can skip the realpath syscall when focus is steady.
     var _last_focus_raw_path: String
@@ -1660,6 +1666,7 @@ struct Desktop(Movable):
         self._git_root_cached = String("")
         self._git_root_is_repo = False
         self._project_dirty = False
+        self._project_unpushed = 0
         self._last_git_dirty_check_ms = 0
         self._last_focus_raw_path = String("")
         self._last_input_ms = 0
@@ -3523,9 +3530,11 @@ struct Desktop(Movable):
             if now - self._last_git_dirty_check_ms >= _GIT_DIRTY_POLL_INTERVAL_MS:
                 self._last_git_dirty_check_ms = now
                 self._project_dirty = len(fetch_git_status(root)) > 0
+                self._project_unpushed = count_unpushed_commits(root)
         else:
             # Not a repo (or no project): never show the indicator.
             self._project_dirty = False
+            self._project_unpushed = 0
         # Caret-blink phase, computed once for the whole frame. When
         # blinking is off the caret is always shown. When on, the caret
         # is solid for the first half of each ~530 ms cycle measured from
@@ -5751,6 +5760,7 @@ struct Desktop(Movable):
         self._last_git_state_check_ms = 0
         # Clear the dirty indicator until the new project's first poll.
         self._project_dirty = False
+        self._project_unpushed = 0
         self._last_git_dirty_check_ms = 0
         # Record this project at the front of the persistent recents list
         # before any later step might raise — failing to save the config
@@ -11094,6 +11104,7 @@ struct Desktop(Movable):
             tabs.append(StatusTab(t.name, running, debugging))
         self.status_bar.set_tabs(tabs^, self.targets.active)
         self.status_bar.git_dirty = self._project_dirty
+        self.status_bar.git_unpushed = self._project_unpushed
 
     def _jump_to(
         mut self, target: DefinitionResolved, screen: Rect,
