@@ -105,9 +105,11 @@ from turbokod.file_io import (
 from turbokod.git_blame import BlameLine, parse_blame_porcelain
 from turbokod.git_changes import (
     ChangedFile, GIT_CHANGE_ADDED, GIT_CHANGE_MODIFIED, GIT_CHANGE_NONE,
-    compute_revert_block, diff_buffer_against_head, parse_unified_diff_files,
+    LineHistoryEntry, compute_revert_block, diff_buffer_against_head,
+    parse_line_history, parse_unified_diff_files,
 )
 from turbokod.local_changes import LocalChanges, build_minimal_patch
+from turbokod.selection_history import SelectionHistory
 from turbokod.file_tree import FILE_TREE_WIDTH, FileTree, FileTreeEntry
 from turbokod.menu import Menu, MenuBar, MenuItem
 from turbokod.project import (
@@ -136,6 +138,7 @@ from turbokod.status import StatusBar, StatusTab
 from turbokod.string_utils import (
     slice_codepoints, char_width, display_columns,
     shell_escape_path, escape_drop_paths, tail_to_columns,
+    utf8_cell_of_byte, utf8_byte_of_cell,
 )
 from turbokod.project_settings import ProjectSettings
 from turbokod.project_on_save import (
@@ -783,6 +786,58 @@ def test_emoji_double_width() raises:
     var n2 = c2.put_text(Point(0, 0), String("🚀"), default_attr(), 1)
     assert_equal(n2, 0)
     assert_equal(c2.get(0, 0).glyph, String(" "))
+
+
+def test_tab_cell_byte_converters_match_put_text() raises:
+    """Tabs expand to the next TAB_WIDTH (4) boundary, and the scalar
+    byte↔cell converters used for cursor positioning agree with what
+    ``put_text`` / ``utf8_byte_to_cell`` actually paint. Regression for
+    the makefile case where the caret drifted off the glyph because the
+    cursor's column was computed treating ``\\t`` as one cell."""
+    # Leading tab (makefile recipe line): '\t' then "gcc".
+    var line = String("\tgcc")
+    # byte 0 is the tab; byte 1 ('g') sits at the cell-4 tab stop.
+    assert_equal(utf8_cell_of_byte(line, 0), 0)
+    assert_equal(utf8_cell_of_byte(line, 1), 4)
+    assert_equal(utf8_cell_of_byte(line, 2), 5)
+    # Inverse: cell 4 maps back to the 'g' byte; columns inside the tab's
+    # expansion (1..3) snap to the tab's own start byte.
+    assert_equal(utf8_byte_of_cell(line, 0), 0)
+    assert_equal(utf8_byte_of_cell(line, 1), 0)
+    assert_equal(utf8_byte_of_cell(line, 3), 0)
+    assert_equal(utf8_byte_of_cell(line, 4), 1)
+
+    # Agreement with the painter's own byte→cell map and with put_text.
+    var cm = utf8_byte_to_cell(line)
+    assert_equal(cm[0], 0)
+    assert_equal(cm[1], 4)
+    assert_equal(utf8_codepoint_count(line), 7)  # 4-cell tab + "gcc"
+    var c = Canvas(20, 1)
+    _ = c.put_text(Point(0, 0), line, default_attr())
+    assert_equal(c.get(0, 0).glyph, String(" "))  # tab → spaces
+    assert_equal(c.get(4, 0).glyph, String("g"))  # 'g' lands at cell 4
+
+    # A tab partway through a line aligns to the *next* stop, not +4.
+    var mid = String("ab\tc")  # a,b at 0,1; tab 2→4; c at 4
+    assert_equal(utf8_cell_of_byte(mid, 2), 2)
+    assert_equal(utf8_cell_of_byte(mid, 3), 4)
+    assert_equal(utf8_byte_of_cell(mid, 4), 3)
+
+    # Gutter offset: editor content starts right of the line-number gutter,
+    # so a leading tab must expand to a FULL tab width measured from where
+    # the text starts (``tab_base``), not from physical screen column 0.
+    # Painting at column 6 (6 % 4 == 2) without a tab_base would collapse
+    # the tab to 2 cells — the bug behind the makefile caret drift.
+    var gut = Canvas(20, 1)
+    _ = gut.put_text(Point(6, 0), line, default_attr(), -1, 6)  # tab_base=6
+    assert_equal(gut.get(6, 0).glyph, String(" "))   # tab fills cells 6..9
+    assert_equal(gut.get(10, 0).glyph, String("g"))  # 'g' a full 4 past 6
+    # Painter passes its paint origin as tab_base automatically, so editor
+    # content tabs align to the text's own left edge regardless of gutter.
+    var pc = Canvas(20, 1)
+    var pnt = Painter(Rect(6, 0, 20, 1))
+    _ = pnt.put_text(pc, Point(6, 0), line, default_attr())
+    assert_equal(pc.get(10, 0).glyph, String("g"))
 
 
 def test_shell_escape_path_escapes_metacharacters() raises:
@@ -2711,6 +2766,82 @@ def test_find_git_project() raises:
     assert_true(info.ok)
     var examples = stat_file(join_path(root.value(), String("examples")))
     assert_true(examples.ok)
+
+
+def test_parse_line_history_splits_commits() raises:
+    """``parse_line_history`` splits the RS-delimited commit blocks emitted
+    by ``git log -L``, pulls the four US-separated header fields, and keeps
+    each commit's range-scoped patch — without bleeding the next commit's
+    header into the previous patch."""
+    var rs = chr(0x1E)
+    var us = chr(0x1F)
+    var blob = (
+        rs + "abc1234" + us + "Ada L" + us + "2026-05-09" + us
+        + "Tweak reveal\n"
+        + "diff --git a/x.mojo b/x.mojo\n"
+        + "@@ -40,3 +40,3 @@\n"
+        + "-    old\n"
+        + "+    new\n"
+        + rs + "def5678" + us + "Bob" + us + "2026-04-01" + us + "Initial\n"
+        + "diff --git a/x.mojo b/x.mojo\n"
+        + "@@ -0,0 +40,3 @@\n"
+        + "+    first\n"
+    )
+    var entries = parse_line_history(blob)
+    assert_equal(len(entries), 2)
+    assert_equal(entries[0].short_sha, String("abc1234"))
+    assert_equal(entries[0].author, String("Ada L"))
+    assert_equal(entries[0].date, String("2026-05-09"))
+    assert_equal(entries[0].subject, String("Tweak reveal"))
+    assert_true(entries[0].patch.find(String("+    new")) >= 0)
+    # The next commit's metadata must not leak into the first patch.
+    assert_true(entries[0].patch.find(String("def5678")) < 0)
+    assert_equal(entries[1].short_sha, String("def5678"))
+    assert_equal(entries[1].subject, String("Initial"))
+    assert_true(entries[1].patch.find(String("+    first")) >= 0)
+    # Empty output (untracked / no-history / not a repo) → no entries.
+    assert_equal(len(parse_line_history(String(""))), 0)
+
+
+def test_selection_history_paint_and_keys() raises:
+    """The paned history modal paints title + commit list + selected
+    patch, and its keys drive selection / patch-scroll / close."""
+    var entries = List[LineHistoryEntry]()
+    entries.append(LineHistoryEntry(
+        String("aaa1111"), String("Ada"), String("2026-05-09"),
+        String("Tweak reveal"), String("@@ -1 +1 @@\n+new\n"),
+    ))
+    entries.append(LineHistoryEntry(
+        String("bbb2222"), String("Bob"), String("2026-04-01"),
+        String("Initial"), String("@@ -0,0 +1 @@\n+first\n"),
+    ))
+    var h = SelectionHistory()
+    assert_false(h.active)
+    h.open(String("x.mojo:1-3"), entries^)
+    assert_true(h.active)
+    assert_equal(h.list.selected, 0)
+
+    var screen = Rect(0, 0, 80, 24)
+    var c = Canvas(80, 24)
+    h.paint(c, screen, 1)
+    # Title bar (row 1) starts with "Git History …".
+    assert_equal(c.get(1, 1).glyph, String("G"))
+    # Left list row 0 shows the first commit's short sha (1-cell indent).
+    assert_equal(c.get(1, 2).glyph, String("a"))
+    # Right pane (divider at x=32 for an 80-wide screen) shows the
+    # selected commit's patch, starting with its hunk header.
+    assert_equal(c.get(33, 2).glyph, String("@"))
+
+    # Down moves the selection and resets the patch scroll.
+    h.patch_scroll = 5
+    _ = h.handle_event(Event.key_event(KEY_DOWN), screen, 1)
+    assert_equal(h.list.selected, 1)
+    assert_equal(h.patch_scroll, 0)
+    # A non-action key is still swallowed (fully modal).
+    assert_true(h.handle_event(Event.key_event(KEY_SPACE), screen, 1))
+    # Esc closes.
+    _ = h.handle_event(Event.key_event(KEY_ESC), screen, 1)
+    assert_false(h.active)
 
 
 def _empty_menu(label: String) -> Menu:
@@ -21731,6 +21862,7 @@ def _run_chunk_00() raises:
     test_attr()
     test_canvas_put_text()
     test_emoji_double_width()
+    test_tab_cell_byte_converters_match_put_text()
     test_shell_escape_path_escapes_metacharacters()
     test_escape_drop_paths_joins_and_trails()
     test_find_results_pane_multiselect()
@@ -21831,6 +21963,8 @@ def _run_chunk_01() raises:
     test_path_helpers()
     test_basename()
     test_find_git_project()
+    test_parse_line_history_splits_commits()
+    test_selection_history_paint_and_keys()
     test_menu_layout_pins_file_edit_window_help()
     test_display_order_pins_help_after_right_aligned()
     test_system_menu_pins_to_left_edge()

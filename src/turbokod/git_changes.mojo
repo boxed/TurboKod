@@ -916,6 +916,34 @@ struct GitCommit(ImplicitlyCopyable, Movable):
     var is_pushed: Bool
 
 
+@fieldwise_init
+struct LineHistoryEntry(ImplicitlyCopyable, Movable):
+    """One commit from ``git log -L`` over a selected line range: the
+    commit metadata for the left-pane list, plus the unified-diff
+    ``patch`` (scoped to that line range) shown in the right pane.
+    ``date`` is YYYY-MM-DD; newest commit first."""
+    var short_sha: String
+    var author: String
+    var date: String
+    var subject: String
+    var patch: String
+
+
+def _split_on_byte(s: String, sep: UInt8) -> List[String]:
+    """Split ``s`` into fields on every occurrence of byte ``sep``. The
+    result has one more element than there are separators (an empty
+    leading/trailing field when ``s`` begins/ends with ``sep``)."""
+    var out = List[String]()
+    var b = s.as_bytes()
+    var start = 0
+    for i in range(len(b)):
+        if b[i] == sep:
+            out.append(String(StringSlice(unsafe_from_utf8=b[start:i])))
+            start = i + 1
+    out.append(String(StringSlice(unsafe_from_utf8=b[start:len(b)])))
+    return out^
+
+
 def _split_tab_fields(line: String, n: Int) -> List[String]:
     """Split ``line`` on ``\\t`` into at most ``n`` fields. The last
     field absorbs any further tabs verbatim, so a commit subject that
@@ -1046,6 +1074,79 @@ def fetch_commit_show(project_root: String, sha: String) -> String:
     args.append(String("--no-color"))
     args.append(sha)
     return _git_stdout(project_root, args^)
+
+
+def fetch_line_history(
+    project_root: String, rel_path: String,
+    start_line: Int, end_line: Int, limit: Int = 200,
+) -> List[LineHistoryEntry]:
+    """Run ``git -C <root> log -L<start>,<end>:<rel>`` and return the
+    history of the selected line range, newest first — the "show history
+    for selection" feature. ``git log -L`` follows the lines across
+    renames automatically.
+
+    The ``--format`` below makes each commit's header
+    ``\\x1e<sha>\\x1f<author>\\x1f<date>\\x1f<subject>\\n``: an ASCII RS
+    (0x1e) prefixes every commit and US (0x1f) separates the fields, so
+    the blocks parse cleanly regardless of what the diff body contains.
+    The range-scoped patch follows the header up to the next RS.
+
+    Empty list when the file is untracked, has no history in this range,
+    or the path lies outside a git repo."""
+    var out = List[LineHistoryEntry]()
+    if len(project_root.as_bytes()) == 0 or len(rel_path.as_bytes()) == 0:
+        return out^
+    var lo = start_line if start_line >= 1 else 1
+    var hi = end_line if end_line >= lo else lo
+    var args = List[String]()
+    args.append(String("log"))
+    args.append(
+        String("-L") + String(lo) + String(",") + String(hi)
+        + String(":") + rel_path
+    )
+    args.append(String("--no-color"))
+    args.append(String("--date=short"))
+    args.append(String("-") + String(limit))
+    args.append(String("--format=%x1e%h%x1f%an%x1f%ad%x1f%s"))
+    return parse_line_history(_git_stdout(project_root, args^))
+
+
+def parse_line_history(stdout: String) -> List[LineHistoryEntry]:
+    """Parse ``git log -L`` output formatted by :func:`fetch_line_history`
+    into per-commit entries. Factored out so it's unit-testable without a
+    repo. Each commit block starts at an RS (0x1E) byte; its header (up to
+    the first newline) holds four US-separated (0x1F) fields, and the
+    range-scoped patch is the remainder of the block."""
+    var out = List[LineHistoryEntry]()
+    # The first split element is the empty text before the leading RS, so
+    # blank blocks are skipped.
+    var blocks = _split_on_byte(stdout, 0x1E)
+    for bi in range(len(blocks)):
+        var bb = blocks[bi].as_bytes()
+        if len(bb) == 0:
+            continue
+        var nl = -1
+        for i in range(len(bb)):
+            if bb[i] == 0x0A:
+                nl = i
+                break
+        var header: String
+        var patch: String
+        if nl < 0:
+            header = String(StringSlice(unsafe_from_utf8=bb[0:len(bb)]))
+            patch = String("")
+        else:
+            header = String(StringSlice(unsafe_from_utf8=bb[0:nl]))
+            patch = String(StringSlice(unsafe_from_utf8=bb[nl + 1:len(bb)]))
+        var fields = _split_on_byte(header, 0x1F)
+        while len(fields) < 4:
+            fields.append(String(""))
+        out.append(
+            LineHistoryEntry(
+                fields[0], fields[1], fields[2], fields[3], patch^,
+            ),
+        )
+    return out^
 
 
 def fetch_branch_log(

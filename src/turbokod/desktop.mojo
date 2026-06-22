@@ -65,7 +65,7 @@ from .git_changes import (
     GIT_CHANGE_NONE,
     GitFileStatus, GitRevertBlock, GitStateMtimes, compute_revert_block,
     diff_buffer_against_head, fetch_git_status, fetch_head_text,
-    git_state_mtimes, project_is_git_repo,
+    fetch_line_history, git_state_mtimes, project_is_git_repo,
 )
 from .git_gutter_menu import (
     GUTTER_ACTION_NEXT, GUTTER_ACTION_PREV, GUTTER_ACTION_REVERT,
@@ -113,6 +113,7 @@ from .spell_menu import (
 from .install_runner import InstallResult, InstallRunner
 from .local_changes import LocalChanges
 from .review_mode import ReviewMode
+from .selection_history import SelectionHistory
 from .grammar_install import (
     DownloadableGrammar, built_in_downloadable_grammars,
     find_downloadable_grammar_by_language,
@@ -339,6 +340,10 @@ comptime EDITOR_TOGGLE_BLAME        = String("git:blame")
 # included — only modifications against the last commit.
 comptime GIT_LOCAL_CHANGES          = String("git:local_changes")
 comptime GIT_REVIEW                 = String("git:review")
+# "Show History for Selection" — ``git log -L<start>,<end>:<file>`` for the
+# selected line range (or the cursor's line with no selection), shown in a
+# paned modal: commit list left, range-scoped patch right.
+comptime GIT_HISTORY_SELECTION      = String("git:history_selection")
 # "Open all with changes" — for every entry from ``git status`` in the
 # active project, open an editor window. Deletions and untracked-empty
 # entries are skipped (no file to show); already-open files are
@@ -869,6 +874,7 @@ struct Desktop(Movable):
     var project_find: ProjectFind
     var local_changes: LocalChanges
     var review: ReviewMode
+    var history: SelectionHistory
     # Review hosting: the window-list index of the editor ReviewMode is
     # currently showing in its body (``-1`` when none). The review window is
     # *always* a transient, review-owned window — it never reuses or mutates a
@@ -1502,6 +1508,7 @@ struct Desktop(Movable):
         self.project_find = ProjectFind()
         self.local_changes = LocalChanges()
         self.review = ReviewMode()
+        self.history = SelectionHistory()
         self._review_win_idx = -1
         self._review_host_path = String("")
         self._review_pending_chunk_edge = 0
@@ -1871,6 +1878,13 @@ struct Desktop(Movable):
         self._hotkeys.append(Hotkey(
             UInt32(ord("r")), MOD_CTRL | MOD_SHIFT, GIT_REVIEW,
             group=HKG_GIT, help=String("Review changes"),
+        ))
+        # Ctrl+Shift+H — git history for the current selection (H for
+        # History). Registered uppercase-with-shift like the reviewer above
+        # so the native menu's key-equivalent derivation lines up.
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("h")), MOD_CTRL | MOD_SHIFT, GIT_HISTORY_SELECTION,
+            group=HKG_GIT, help=String("Show history for selection"),
         ))
         # LSP completion request. Two default triggers so at least one
         # survives macOS's input-source hijack of Ctrl+Space:
@@ -2328,7 +2342,7 @@ struct Desktop(Movable):
                 or self.symbol_pick.active or self.reference_pick.active \
                 or self.find_symbol.active or self.doc_pick.active \
                 or self.project_find.active or self.local_changes.active \
-                or self.review.active:
+                or self.review.active or self.history.active:
             return True
         if self.settings.active or self.project_settings.active:
             return True
@@ -3355,6 +3369,8 @@ struct Desktop(Movable):
             return String("default")
         if self.review.active:
             return String("default")
+        if self.history.active:
+            return String("default")
         if self.project_settings.active and not self.project_settings_detached:
             if self.project_settings.is_input_at(pos, screen):
                 return String("text")
@@ -4236,6 +4252,11 @@ struct Desktop(Movable):
                     True, ridx + 1, False,
                 )
         self.review.paint(canvas, screen, review_top_y)
+        # Git history for selection — a paned modal over the whole
+        # surface, same top_y convention as review (below the in-grid
+        # menu, over everything else).
+        if self.history.active:
+            self.history.paint(canvas, screen, review_top_y)
         # Status-bar message tooltip — painted last so the popup
         # z-orders above every dock, modal, and menu. No-op unless the
         # cursor has been resting on the message rect long enough for
@@ -4711,6 +4732,7 @@ struct Desktop(Movable):
                 or self.find_symbol.active \
                 or self.project_find.active \
                 or self.local_changes.active or self.review.active \
+                or self.history.active \
                 or self.save_as_dialog.active or self.doc_pick.active:
             if len(self._pending_lsp_prompt_ext.as_bytes()) == 0:
                 self._pending_lsp_prompt_ext = ext
@@ -4764,6 +4786,7 @@ struct Desktop(Movable):
                 or self.find_symbol.active \
                 or self.project_find.active \
                 or self.local_changes.active or self.review.active \
+                or self.history.active \
                 or self.save_as_dialog.active or self.doc_pick.active:
             if len(self._pending_grammar_prompt_ext.as_bytes()) == 0:
                 self._pending_grammar_prompt_ext = ext
@@ -6907,6 +6930,11 @@ struct Desktop(Movable):
                 # results are immediately navigable. See ``panel_focus_request``.
                 self.panel_focus_request = True
             return Optional[String]()
+        if self.history.active:
+            # Fully modal: it swallows every event, like the review picker.
+            var hist_top_y = 0 if self.host_owns_menu else 1
+            _ = self.history.handle_event(event, screen, hist_top_y)
+            return Optional[String]()
         if self.review.active:
             var review_top_y = 0 if self.host_owns_menu else 1
             if not self.review.is_reviewing():
@@ -7477,6 +7505,7 @@ struct Desktop(Movable):
             or self.doc_pick.active or self.project_find.active \
             or self.local_changes.active \
             or (self.review.active and not self.review.is_reviewing()) \
+            or self.history.active \
             or self.project_settings.active \
             or self.settings.active
 
@@ -7862,6 +7891,9 @@ struct Desktop(Movable):
         if action == GIT_REVIEW:
             if self.project:
                 self.review.open(self.project.value())
+            return Optional[String]()
+        if action == GIT_HISTORY_SELECTION:
+            self._open_selection_history()
             return Optional[String]()
         if action == GIT_OPEN_ALL_CHANGED:
             if self.project:
@@ -11513,6 +11545,30 @@ struct Desktop(Movable):
             return -1
         return self.windows.focused
 
+    def _open_selection_history(mut self):
+        """Open the paned git-history-for-selection modal for the focused
+        editor's selection (or, with no selection, its cursor line). A
+        no-op when there's no focused editor, no backing file on disk, or
+        no project root — the history needs a tracked path in a repo."""
+        var idx = self._focused_editor_idx()
+        if idx < 0 or not self.project:
+            return
+        var path = self.windows.windows[idx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            return
+        var root = self.project.value()
+        var rel = project_relative(root, path, canonicalize=True)
+        var sel = self.windows.windows[idx].editor.selection()
+        var start = sel[0] + 1
+        var end = sel[2] + 1
+        if end < start:
+            end = start
+        var entries = fetch_line_history(root, rel, start, end)
+        var title = basename(path) + String(":") + String(start)
+        if end != start:
+            title = title + String("-") + String(end)
+        self.history.open(title^, entries^)
+
     def focused_editor_has_extra_carets(self) -> Bool:
         """True iff the focused window is an editor with more than one
         caret. Exposed for hosts that want to gate menu items (e.g.
@@ -12407,6 +12463,7 @@ struct Desktop(Movable):
                 or self.find_symbol.active \
                 or self.project_find.active \
                 or self.local_changes.active or self.review.active \
+                or self.history.active \
                 or self.save_as_dialog.active or self.doc_pick.active:
             return
         self._doc_install_prompted.append(spec.language_id)
@@ -12453,6 +12510,7 @@ struct Desktop(Movable):
                 or self.find_symbol.active \
                 or self.project_find.active \
                 or self.local_changes.active or self.review.active \
+                or self.history.active \
                 or self.save_as_dialog.active or self.doc_pick.active:
             return False
         self._debugpy_install_prompted.append(venv_dir)
