@@ -7440,15 +7440,16 @@ struct Desktop(Movable):
         """True when a modal that ``handle_event`` routes ahead of the
         hotkey table currently owns the screen.
 
-        The native Edit menu's ⌘ key-equivalents (Paste / Cut / …) are
-        matched by AppKit *before* the keystroke reaches ``handle_event``,
-        so they land in ``dispatch_action`` directly and skip the modal
-        routing every typed key goes through. Clipboard/history actions
-        consult this to re-route into the focused modal's text field
-        instead of the editor behind it. Mirrors the modal sequence at
-        the top of ``handle_event`` — keep the two in sync; any modal
-        listed here is guaranteed to return before the hotkey lookup, so
-        re-injecting a chord can't recurse back into ``dispatch_action``.
+        Native menu key-equivalents (the Navigation menu's movement chords,
+        the Edit menu's Paste / Cut / …) are matched by AppKit *before* the
+        keystroke reaches ``handle_event``, so they land in ``dispatch_action``
+        directly and skip the modal routing every typed key goes through. The
+        gate at the top of ``dispatch_action`` consults this to re-route a
+        keystroke-equivalent action into the focused modal's text field instead
+        of the editor behind it (see ``_action_replay_event``). Mirrors the
+        modal sequence at the top of ``handle_event`` — keep the two in sync;
+        any modal listed here is guaranteed to return before the hotkey lookup,
+        so re-injecting a chord can't recurse back into ``dispatch_action``.
 
         Review is the one whose two sub-modes split here: the *picker* is
         fully modal (returns before the hotkey lookup, like every other
@@ -7477,6 +7478,75 @@ struct Desktop(Movable):
             or self.project_settings.active \
             or self.settings.active
 
+    def _action_replay_event(self, action: String) -> Optional[Event]:
+        """If ``action`` is *keystroke-equivalent* — its whole meaning is
+        "replay this chord into whatever owns input" — return the chord's
+        Event. Otherwise an empty Optional.
+
+        Two families qualify, and this is the single registry of them:
+
+          * ``SYNTH_KEY_PREFIX`` actions — the Navigation menu's movement
+            chords (Word Left/Right, Line Start/End, Grow/Shrink Selection,
+            Add Caret Above/Below, …), which encode their chord in the
+            action string itself.
+          * The clipboard / history quintet (Paste / Cut / Copy / Undo /
+            Redo), whose chord is looked up from the hotkey table.
+
+        The modal-input gate at the top of ``dispatch_action`` consults this
+        to decide whether an action arriving while a modal owns the screen
+        must be re-routed through the modal instead of run against the editor
+        behind it. Keeping the set in one place is what makes the gate
+        structural: a keystroke-equivalent action added later is covered the
+        moment it takes one of these two forms (movement chords should use
+        ``synth_key_action``), so it can't reintroduce the leak.
+        """
+        if starts_with(action, SYNTH_KEY_PREFIX):
+            var b = action.as_bytes()
+            var p = len(SYNTH_KEY_PREFIX.as_bytes())
+            var keyv = parse_int_prefix(action, p, len(b))
+            while p < len(b) and Int(b[p]) >= 0x30 and Int(b[p]) <= 0x39:
+                p += 1
+            if p < len(b) and Int(b[p]) == 0x3A:  # ':'
+                p += 1
+            var modsv = parse_int_prefix(action, p, len(b))
+            if keyv >= 0 and modsv >= 0:
+                return Event.key_event(UInt32(keyv), UInt8(modsv))
+            return Optional[Event]()
+        if action == EDITOR_PASTE or action == EDITOR_CUT \
+                or action == EDITOR_COPY or action == EDITOR_UNDO \
+                or action == EDITOR_REDO:
+            var i = len(self._hotkeys) - 1
+            while i >= 0:
+                if self._hotkeys[i].action == action:
+                    return Event.key_event(
+                        self._hotkeys[i].key, self._hotkeys[i].mods,
+                    )
+                i -= 1
+        return Optional[Event]()
+
+    def _replay_through_modal(mut self, ev: Event, screen: Rect):
+        """Feed a replayed chord into whichever modal currently owns input.
+
+        For every in-grid modal this is ``handle_event``, which runs its
+        modal stack ahead of the hotkey lookup and so consumes the chord in
+        the focused field — no recursion back into ``dispatch_action``.
+        Detached Settings (native macOS) is the exception: its block in
+        ``handle_event`` is gated ``not …_detached`` because the host's
+        settings window owns those events, so a chord routed through
+        ``handle_event`` would fall past that gate to the hotkey table,
+        re-match, and recurse. Dispatch it straight into the settings surface
+        instead — which is also what's focused.
+        """
+        if self.project_settings.active and self.project_settings_detached:
+            self.handle_project_settings_event(ev, screen)
+        elif self.settings.active and self.settings_detached:
+            self.handle_settings_event(ev, screen)
+        else:
+            try:
+                _ = self.handle_event(ev, screen)
+            except:
+                pass
+
     def dispatch_action(
         mut self, action: String, screen: Rect,
     ) -> Optional[String]:
@@ -7496,72 +7566,36 @@ struct Desktop(Movable):
         # vanished. Any dispatched action is a deliberate user action, so a
         # solid caret afterward is always right.
         self._last_input_ms = monotonic_ms()
-        # Synthetic-key actions (Navigation-menu items for editor-movement
-        # chords). Decode ``key:<keycode>:<mods>`` and replay it through
-        # ``_handle_key`` exactly as if the user had pressed it — so the
+        # The single modal-input gate. ``dispatch_action`` has two callers: a
+        # real keystroke that already cleared ``handle_event``'s modal stack
+        # (terminal + in-grid menu), and — on the native frontend — AppKit
+        # firing a menu item via ``tk_desktop_menu_invoke`` straight here,
+        # which bypasses that stack entirely. So any *keystroke-equivalent*
+        # action (the Navigation menu's movement chords, the Edit menu's
+        # clipboard/history chords) that arrives while a modal owns the screen
+        # would replay into the editor *behind* the dialog — a Word-Left moving
+        # a caret in the background window, a Paste landing in the wrong buffer.
+        # Catch all of them in one place: if a modal owns input and the action
+        # is keystroke-equivalent (``_action_replay_event``), replay the chord
+        # into the modal instead and stop. A movement chord added later via
+        # ``synth_key_action`` is covered automatically — nothing per-action to
+        # remember. (No recursion: the modal consumes the chord ahead of
+        # ``handle_event``'s hotkey lookup — see ``_replay_through_modal``.)
+        if self._modal_owns_input():
+            var replay = self._action_replay_event(action)
+            if replay:
+                self._replay_through_modal(replay.value(), screen)
+                return Optional[String]()
+        # Synthetic-key actions with no modal in the way: replay the chord
+        # through ``_handle_key`` exactly as if the user had pressed it — so the
         # editor's own handlers do the work and the post-key drains (e.g. the
         # git-gutter popup for Ctrl+Shift+Up/Down) still run. The matching
         # ``doc_only`` registry row means ``_handle_key`` skips dispatch and
-        # forwards the keystroke to the editor.
+        # forwards the keystroke to the editor rather than re-dispatching here.
         if starts_with(action, SYNTH_KEY_PREFIX):
-            var b = action.as_bytes()
-            var p = len(SYNTH_KEY_PREFIX.as_bytes())
-            var keyv = parse_int_prefix(action, p, len(b))
-            while p < len(b) and Int(b[p]) >= 0x30 and Int(b[p]) <= 0x39:
-                p += 1
-            if p < len(b) and Int(b[p]) == 0x3A:  # ':'
-                p += 1
-            var modsv = parse_int_prefix(action, p, len(b))
-            if keyv >= 0 and modsv >= 0:
-                return self._handle_key(
-                    Event.key_event(UInt32(keyv), UInt8(modsv)), screen,
-                )
-            return Optional[String]()
-        # Clipboard / history edits target whatever currently owns input.
-        # On the native frontend AppKit fires these via the Edit menu's ⌘
-        # key-equivalents, which arrive here directly and bypass the
-        # modal routing in ``handle_event`` — so a paste while a text
-        # dialog (Find-in-Project, Save As, …) is open would land in the
-        # editor behind it. Re-inject the equivalent chord through
-        # ``handle_event`` so the dialog's text field handles it exactly
-        # as a typed chord. The chord comes from the hotkey table so we
-        # don't duplicate the binding. For every in-grid modal,
-        # ``handle_event`` consumes the event in its modal block before its
-        # own hotkey lookup, so this can't recurse — *except* detached
-        # Settings (native macOS), whose modal block in ``handle_event`` is
-        # gated ``not settings_detached`` because the host's settings window
-        # owns those events. Routing a detached-settings chord through
-        # ``handle_event`` would fall past that gate to the hotkey table,
-        # re-match this same chord → EDITOR_PASTE → back here, recursing
-        # until the stack overflows. Route it straight into the settings
-        # surface instead (where it also belongs — the settings window is
-        # what's focused).
-        if self._modal_owns_input() and (
-            action == EDITOR_PASTE or action == EDITOR_CUT
-            or action == EDITOR_COPY or action == EDITOR_UNDO
-            or action == EDITOR_REDO
-        ):
-            var i = len(self._hotkeys) - 1
-            while i >= 0:
-                if self._hotkeys[i].action == action:
-                    var ev = Event.key_event(
-                        self._hotkeys[i].key, self._hotkeys[i].mods,
-                    )
-                    if self.project_settings.active \
-                            and self.project_settings_detached:
-                        self.handle_project_settings_event(ev, screen)
-                    elif self.settings.active and self.settings_detached:
-                        self.handle_settings_event(ev, screen)
-                    else:
-                        try:
-                            _ = self.handle_event(ev, screen)
-                        except:
-                            pass
-                    break
-                i -= 1
-            # Swallow regardless of whether a chord was found — a
-            # clipboard edit must never fall through to the editor while
-            # a modal owns the screen.
+            var synth_ev = self._action_replay_event(action)
+            if synth_ev:
+                return self._handle_key(synth_ev.value(), screen)
             return Optional[String]()
         if action == PROJECT_CLOSE_ACTION:
             # On a host frontend (Swift/macOS) the window *is* the project,
