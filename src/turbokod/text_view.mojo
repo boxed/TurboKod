@@ -41,7 +41,7 @@ from .events import (
 from .geometry import Point, Rect
 from .string_utils import (
     byte_slice, char_width, codepoint_at, is_word_codepoint,
-    leading_indent_bytes, utf8_codepoint_size, word_range_at,
+    leading_indent_bytes, utf8_codepoint_size, word_range_at, TAB_WIDTH,
 )
 
 
@@ -192,11 +192,18 @@ def _wrap_one_line_into(
         var cells = 0
         var e_hard = c
         while e_hard < hi:
-            var info = codepoint_at(line, e_hard)
-            var cw = char_width(info[0])
+            var cw: Int
+            var step: Int
+            if Int(bytes[e_hard]) == 0x09:
+                cw = TAB_WIDTH - (cells % TAB_WIDTH)
+                step = 1
+            else:
+                var info = codepoint_at(line, e_hard)
+                cw = char_width(info[0])
+                step = info[1]
             if cells + cw > seg_w and e_hard > c:
                 break
-            e_hard += info[1]
+            e_hard += step
             cells += cw
             if cells >= seg_w:
                 break
@@ -226,6 +233,10 @@ def _wrap_one_line_into(
             seg_cells = 0
             var k = c
             while k < e:
+                if Int(bytes[k]) == 0x09:
+                    seg_cells += TAB_WIDTH - (seg_cells % TAB_WIDTH)
+                    k += 1
+                    continue
                 var info = codepoint_at(line, k)
                 seg_cells += char_width(info[0])
                 k += info[1]
@@ -367,6 +378,10 @@ def smart_wrap_lines(
         var cols = 0
         var kk = 0
         while kk < line_n:
+            if Int(bytes[kk]) == 0x09:
+                cols += TAB_WIDTH - (cols % TAB_WIDTH)
+                kk += 1
+                continue
             var info = codepoint_at(line, kk)
             cols += char_width(info[0])
             kk += info[1]
@@ -582,6 +597,10 @@ def _cells_for_bytes(line: String, lo: Int, hi: Int) -> Int:
     var i = lo
     var cells = 0
     while i < hi and i < n:
+        if Int(bytes[i]) == 0x09:
+            cells += TAB_WIDTH - (cells % TAB_WIDTH)
+            i += 1
+            continue
         var dec = codepoint_at(line, i)
         cells += char_width(dec[0])
         i += dec[1]
@@ -1151,13 +1170,21 @@ struct TextLog(Copyable, Movable):
         var b = vrow.byte_start
         var consumed = 0
         while consumed < cell_in_seg and b < vrow.byte_end:
-            var info = codepoint_at(line, b)
-            var cw = char_width(info[0])
-            # A click on the right half of a wide glyph snaps to its start.
+            var cw: Int
+            var step: Int
+            if Int(line.as_bytes()[b]) == 0x09:
+                cw = TAB_WIDTH - (consumed % TAB_WIDTH)
+                step = 1
+            else:
+                var info = codepoint_at(line, b)
+                cw = char_width(info[0])
+                step = info[1]
+            # A click on the right half of a wide glyph (or inside a tab's
+            # expansion) snaps to its start.
             if consumed + cw > cell_in_seg:
                 break
             consumed += cw
-            b += info[1]
+            b += step
         if b > vrow.byte_end:
             b = vrow.byte_end
         return (vrow.line_idx, b)
@@ -1359,6 +1386,10 @@ def _row_cell_offset(
     var b = vrow.byte_start
     var cells = 0
     while b < target_byte and b < vrow.byte_end:
+        if Int(line.as_bytes()[b]) == 0x09:
+            cells += TAB_WIDTH - (cells % TAB_WIDTH)
+            b += 1
+            continue
         var info = codepoint_at(line, b)
         cells += char_width(info[0])
         b += info[1]

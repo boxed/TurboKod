@@ -82,7 +82,7 @@ from .string_utils import (
     is_word_codepoint,
     leading_indent_bytes, prev_codepoint_start, truncate_to_columns,
     utf8_byte_of_cell, utf8_cell_of_byte, utf8_codepoint_size,
-    utf8_step_forward, word_char_step, word_range_at,
+    utf8_step_forward, word_char_step, word_range_at, TAB_WIDTH,
 )
 from .text_view import (
     Selection, VisualLine, paint_selection_overlay,
@@ -461,6 +461,10 @@ def _seg_cell_offset(
     var b = seg_start
     var cells = 0
     while b < target_byte and b < seg_end:
+        if Int(line.as_bytes()[b]) == 0x09:
+            cells += TAB_WIDTH - (cells % TAB_WIDTH)
+            b += 1
+            continue
         var info = codepoint_at(line, b)
         cells += char_width(info[0])
         b += info[1]
@@ -480,12 +484,19 @@ def _seg_byte_of_cell(
     var b = seg_start
     var cells = 0
     while b < seg_end and cells < want_cells:
-        var info = codepoint_at(line, b)
-        var w = char_width(info[0])
+        var w: Int
+        var step: Int
+        if Int(line.as_bytes()[b]) == 0x09:
+            w = TAB_WIDTH - (cells % TAB_WIDTH)
+            step = 1
+        else:
+            var info = codepoint_at(line, b)
+            w = char_width(info[0])
+            step = info[1]
         if cells + w > want_cells:
             break
         cells += w
-        b += info[1]
+        b += step
     return b
 
 

@@ -11,6 +11,17 @@ from the desktop copy by exactly one ``<`` vs. ``<=`` in a bounds check).
 from std.collections.list import List
 
 
+# Number of cells a tab byte expands to. ``Canvas.put_text`` aligns each
+# tab to the next multiple of this width, and so must every byte↔cell
+# converter below it (otherwise the painted glyph column and the cursor's
+# computed column drift apart on any line containing a ``\t`` — the
+# makefile / Go indentation case). Defined here, in the lowest layer, so
+# both ``canvas.mojo`` (which re-exports it) and the converters share one
+# value. Tab width is *column-dependent* — unlike ``char_width`` it can't
+# be answered per-codepoint, so the converters thread the running column.
+comptime TAB_WIDTH: Int = 4
+
+
 def byte_slice(s: String, start: Int, end: Int) -> String:
     """Byte-range substring (no UTF-8 decoding). Tolerates out-of-range
     bounds, returning ``""`` when the range is empty or inverted."""
@@ -453,9 +464,10 @@ def prev_codepoint_start(s: String, col: Int) -> Int:
 
 def utf8_cell_of_byte(line: String, byte_col: Int) -> Int:
     """Cell column for byte offset ``byte_col`` in ``line``. Emoji advance
-    two cells (``char_width``); past-EOL bytes consume one virtual cell each
-    so cursors parked to the right of the last character stay distinguishable
-    in vertical-movement bookkeeping."""
+    two cells (``char_width``); a tab advances to the next ``TAB_WIDTH``
+    boundary (matching ``Canvas.put_text``); past-EOL bytes consume one
+    virtual cell each so cursors parked to the right of the last character
+    stay distinguishable in vertical-movement bookkeeping."""
     if byte_col <= 0:
         return 0
     var bytes = line.as_bytes()
@@ -463,6 +475,10 @@ def utf8_cell_of_byte(line: String, byte_col: Int) -> Int:
     var cell = 0
     var i = 0
     while i < n and i < byte_col:
+        if Int(bytes[i]) == 0x09:
+            cell += TAB_WIDTH - (cell % TAB_WIDTH)
+            i += 1
+            continue
         var info = codepoint_at(line, i)
         cell += char_width(info[0])
         i += info[1]
@@ -474,9 +490,10 @@ def utf8_cell_of_byte(line: String, byte_col: Int) -> Int:
 def utf8_byte_of_cell(line: String, cell_col: Int) -> Int:
     """Byte offset of the codepoint at cell column ``cell_col`` in ``line``,
     clamped to ``len(line)``. Used to translate a remembered cell column from
-    one row to another during vertical movement. When ``cell_col`` lands on
-    the right half of a wide (emoji) glyph there is no codepoint to point at,
-    so we snap to the start of that glyph."""
+    one row to another during vertical movement, and to resolve a click's
+    cell column to a byte. When ``cell_col`` lands inside a wide glyph — the
+    right half of an emoji or anywhere within a tab's expansion — there is no
+    codepoint to point at, so we snap to the start of that glyph."""
     if cell_col <= 0:
         return 0
     var bytes = line.as_bytes()
@@ -484,13 +501,20 @@ def utf8_byte_of_cell(line: String, cell_col: Int) -> Int:
     var cell = 0
     var i = 0
     while i < n and cell < cell_col:
-        var info = codepoint_at(line, i)
-        var w = char_width(info[0])
+        var w: Int
+        var step: Int
+        if Int(bytes[i]) == 0x09:
+            w = TAB_WIDTH - (cell % TAB_WIDTH)
+            step = 1
+        else:
+            var info = codepoint_at(line, i)
+            w = char_width(info[0])
+            step = info[1]
         if cell + w > cell_col:
             # ``cell_col`` falls inside this wide glyph — snap to its start.
             break
         cell += w
-        i += info[1]
+        i += step
     return i
 
 

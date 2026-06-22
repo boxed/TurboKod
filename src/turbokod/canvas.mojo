@@ -12,16 +12,14 @@ from std.collections import List
 from .cell import Cell, blank_cell
 from .colors import Attr, DARK_GRAY, PANE_BG, default_attr
 from .geometry import Point, Rect
-from .string_utils import char_width, codepoint_at, utf8_codepoint_size
+from .string_utils import char_width, codepoint_at, utf8_codepoint_size, TAB_WIDTH
 
 
-# Number of cells a tab byte expands to. ``put_text`` aligns each tab
-# to the next multiple of this width. Four matches the prevailing
-# convention in the editor's grammars and mirrors what most code
-# editors render by default. Exported so other layers (Painter's
-# left-clip walker, the editor's column model) advance their own
-# cell counters in lock-step with what ``put_text`` actually emits.
-comptime TAB_WIDTH: Int = 4
+# ``TAB_WIDTH`` (the number of cells a tab byte expands to) lives in
+# ``string_utils`` so the byte↔cell converters there share the exact same
+# value ``put_text`` aligns to. Re-exported here because the rest of the
+# tree (Painter's left-clip walker, ``kwarg_conceal``) imports it from
+# ``.canvas`` — the layer that owns ``put_text``.
 
 
 def _control_picture_glyph(b: Int) -> String:
@@ -110,12 +108,24 @@ struct Canvas(Copyable, Movable):
                     self.cells[self._index(x + 1, y)] = Cell(String(""), attr, 0)
                 x += w
 
-    def put_text(mut self, p: Point, text: String, attr: Attr, max_x: Int = -1) -> Int:
+    def put_text(mut self, p: Point, text: String, attr: Attr, max_x: Int = -1,
+                 tab_base: Int = 0) -> Int:
         """Paint ``text`` starting at ``p`` (no wrapping). Returns columns advanced.
 
         If ``max_x`` is non-negative, painting stops at column ``max_x``
         (exclusive) — letting callers like ``Window`` clip text to their
         own bounds without building a truncated string.
+
+        ``tab_base`` is the screen column that tab stops are measured from:
+        a tab advances to the next ``TAB_WIDTH`` boundary *relative to*
+        ``tab_base``. It defaults to 0 (physical screen column), but text
+        that doesn't start at the screen's left edge — editor content sits
+        right of the line-number gutter — must pass the column where the
+        text begins, or a leading tab expands by however many cells happen
+        to remain to the next absolute stop (e.g. 2 instead of 4) while the
+        cursor's column model (``utf8_byte_to_cell``, which counts from the
+        line start) says 4. ``Painter.put_text`` passes the paint origin so
+        every editor / tool-pane paint is tab-aligned to its own left edge.
 
         Codepoint-aligned: each codepoint occupies one cell carrying the
         full UTF-8 byte sequence as its glyph string. Callers that hold
@@ -150,7 +160,7 @@ struct Canvas(Copyable, Movable):
         while i < n and x < limit:
             var b = Int(bytes[i])
             if b == 0x09:    # TAB → fill spaces to next tab stop
-                var stop = x + TAB_WIDTH - (x % TAB_WIDTH)
+                var stop = x + TAB_WIDTH - ((x - tab_base) % TAB_WIDTH)
                 if stop > limit: stop = limit
                 while x < stop:
                     if x >= 0:

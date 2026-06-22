@@ -65,12 +65,12 @@ struct Painter(Copyable, Movable):
         while x < self.clip.a.x and i < n:
             var b = Int(bytes[i])
             if b == 0x09:
-                # Tab expands to spaces aligned to a screen-column tab
-                # stop, so advance ``x`` by however many cells the tab
-                # occupies before the clip's left edge — same width
-                # ``Canvas.put_text`` will emit on the far side of the
-                # clip.
-                x += TAB_WIDTH - (x % TAB_WIDTH)
+                # Tab expands to spaces aligned to a tab stop measured from
+                # the paint origin ``p.x`` (not the physical screen edge),
+                # so advance ``x`` by however many cells the tab occupies
+                # before the clip's left edge — same width / alignment
+                # ``Canvas.put_text`` will emit on the far side of the clip.
+                x += TAB_WIDTH - ((x - p.x) % TAB_WIDTH)
                 i += 1
             else:
                 # Emoji advance two cells, matching ``Canvas.put_text``.
@@ -78,10 +78,14 @@ struct Painter(Copyable, Movable):
                 i += utf8_codepoint_size(b)
         if i >= n:
             return 0
+        # ``tab_base = p.x`` so tabs align to this string's own left edge —
+        # editor content sits right of the gutter, and a leading tab there
+        # must still expand to a full ``TAB_WIDTH`` to match the cursor's
+        # line-relative column model.
         if i == 0:
-            return canvas.put_text(p, text, attr, self.clip.b.x)
+            return canvas.put_text(p, text, attr, self.clip.b.x, p.x)
         var sub = String(StringSlice(unsafe_from_utf8=bytes[i:]))
-        return canvas.put_text(Point(x, p.y), sub, attr, self.clip.b.x)
+        return canvas.put_text(Point(x, p.y), sub, attr, self.clip.b.x, p.x)
 
     def fill(
         self,
