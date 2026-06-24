@@ -105,7 +105,8 @@ from turbokod.file_io import (
 from turbokod.git_blame import BlameLine, parse_blame_porcelain
 from turbokod.git_changes import (
     ChangedFile, GIT_CHANGE_ADDED, GIT_CHANGE_MODIFIED, GIT_CHANGE_NONE,
-    LineHistoryEntry, compute_revert_block, diff_buffer_against_head,
+    LineHistoryEntry, compute_deletion_revert_block, compute_revert_block,
+    diff_buffer_against_head, diff_buffer_marks,
     parse_line_history, parse_unified_diff_files,
 )
 from turbokod.local_changes import LocalChanges, build_minimal_patch
@@ -18082,6 +18083,82 @@ def test_diff_modified_line_keeps_inserted_block_added() raises:
     assert_equal(marks[6], GIT_CHANGE_NONE)
 
 
+def test_diff_buffer_marks_flags_pure_deletion_above() raises:
+    """A pure deletion (HEAD lines removed with no replacement) leaves no
+    buffer row to colour, so ``deleted_below`` flags the row immediately
+    above the removed run — and that row's change status stays NONE."""
+    var head = (
+        String("alpha\n")
+        + String("beta\n")
+        + String("gamma\n")
+        + String("delta\n")
+    )
+    var buffer = List[String]()
+    buffer.append(String("alpha"))
+    buffer.append(String("delta"))     # beta + gamma deleted between alpha and delta
+    buffer.append(String(""))
+    var marks = diff_buffer_marks(head, buffer)
+    assert_equal(len(marks.statuses), len(buffer))
+    assert_equal(len(marks.deleted_below), len(buffer))
+    # No buffer row is added/modified — the change is a deletion only.
+    assert_equal(marks.statuses[0], GIT_CHANGE_NONE)
+    assert_equal(marks.statuses[1], GIT_CHANGE_NONE)
+    # The underscore lands on row 0 (the line above the removed run).
+    assert_true(marks.deleted_below[0])
+    assert_true(not marks.deleted_below[1])
+
+
+def test_diff_buffer_marks_modify_is_not_a_deletion() raises:
+    """A delete paired with an insert is a MODIFIED line, not a deletion —
+    no underscore marker for it."""
+    var head = String("alpha\nbeta\ngamma\n")
+    var buffer = List[String]()
+    buffer.append(String("alpha"))
+    buffer.append(String("BETA"))      # modified, not deleted
+    buffer.append(String("gamma"))
+    buffer.append(String(""))
+    var marks = diff_buffer_marks(head, buffer)
+    assert_equal(marks.statuses[1], GIT_CHANGE_MODIFIED)
+    for i in range(len(marks.deleted_below)):
+        assert_true(not marks.deleted_below[i])
+
+
+def test_compute_deletion_revert_block_reinserts_lines() raises:
+    """Clicking the deletion marker on the row above a removed run yields a
+    block that re-inserts the removed HEAD lines just below that row (an
+    empty buffer range, so ``apply_revert_block`` inserts not replaces)."""
+    var head = (
+        String("alpha\n")
+        + String("beta\n")
+        + String("gamma\n")
+        + String("delta\n")
+    )
+    var buffer = List[String]()
+    buffer.append(String("alpha"))
+    buffer.append(String("delta"))
+    buffer.append(String(""))
+    var block_opt = compute_deletion_revert_block(head, buffer, 0)
+    assert_true(Bool(block_opt))
+    var block = block_opt.value().copy()
+    # Empty range at row 1 → pure insertion of the two removed lines.
+    assert_equal(block.buf_start, 1)
+    assert_equal(block.buf_end_excl, 1)
+    assert_equal(len(block.head_lines), 2)
+    assert_equal(block.head_lines[0], String("beta"))
+    assert_equal(block.head_lines[1], String("gamma"))
+
+
+def test_compute_deletion_revert_block_unchanged_row_returns_empty() raises:
+    """A row with no pure deletion below it yields no deletion block."""
+    var head = String("alpha\nbeta\n")
+    var buffer = List[String]()
+    buffer.append(String("alpha"))
+    buffer.append(String("beta"))
+    buffer.append(String(""))
+    var block_opt = compute_deletion_revert_block(head, buffer, 0)
+    assert_true(not Bool(block_opt))
+
+
 def _slist(*items: String) -> List[String]:
     var out = List[String]()
     for it in items:
@@ -18695,6 +18772,34 @@ def test_editor_right_gutter_paints_gray_square_for_changes() raises:
     # When git-changes is off the right gutter is zero-width again.
     ed.invalidate_git_changes()
     assert_equal(ed._right_gutter(), 0)
+
+
+def test_editor_paints_deletion_underscore_in_gutter() raises:
+    """A pure-deletion marker paints a red ``_`` in the git-changes gutter
+    column on the row above the removed run; rows with no deletion leave
+    that column blank."""
+    var ed = Editor(String("alpha\nbeta\ngamma\n"))
+    ed.git_changes_visible = True
+    var marks = List[Int]()
+    marks.append(GIT_CHANGE_NONE)
+    marks.append(GIT_CHANGE_NONE)
+    marks.append(GIT_CHANGE_NONE)
+    ed.set_git_changes(marks^)
+    var deleted = List[Bool]()
+    deleted.append(True)         # lines removed just below row 0
+    deleted.append(False)
+    deleted.append(False)
+    ed.set_git_deletions(deleted^)
+    var canvas = Canvas(40, 5)
+    canvas.fill(Rect(0, 0, 40, 5), String(" "), default_attr())
+    ed.paint(canvas, Rect(0, 0, 40, 5), False)
+    # The git-changes column sits just after the line-number gutter (no
+    # breakpoints → no dap column).
+    var gx = ed._line_number_gutter()
+    assert_equal(canvas.get(gx, 0).glyph, String("_"))
+    assert_equal(canvas.get(gx, 0).attr.fg, LIGHT_RED)
+    # Row 1 has no deletion below it — gutter column blank there.
+    assert_equal(canvas.get(gx, 1).glyph, String(" "))
 
 
 def test_editor_right_gutter_projects_full_file_when_scrolled() raises:
@@ -21819,6 +21924,10 @@ def _run_chunk_00() raises:
     test_parse_unified_diff_handles_pure_delete()
     test_diff_buffer_against_head_marks_added_and_modified()
     test_diff_modified_line_keeps_inserted_block_added()
+    test_diff_buffer_marks_flags_pure_deletion_above()
+    test_diff_buffer_marks_modify_is_not_a_deletion()
+    test_compute_deletion_revert_block_reinserts_lines()
+    test_compute_deletion_revert_block_unchanged_row_returns_empty()
     test_diff_rows_removed_lines_have_no_line_number()
     test_diff_rows_pure_insertion_all_numbered()
     test_diff_rows_multiline_removal_numbers_skip_removed()
@@ -21837,6 +21946,7 @@ def _run_chunk_00() raises:
     test_compute_revert_block_modified_line()
     test_compute_revert_block_added_line()
     test_compute_revert_block_unchanged_returns_empty()
+    test_editor_paints_deletion_underscore_in_gutter()
     test_editor_git_changes_gutter_widens_total_gutter()
     test_editor_right_gutter_paints_gray_square_for_changes()
     test_editor_right_gutter_projects_full_file_when_scrolled()

@@ -45,7 +45,8 @@ from .file_io import FileInfo, read_file, stat_file, write_file
 from .git_blame import BlameLine
 from .git_changes import (
     GIT_CHANGE_ADDED, GIT_CHANGE_MODIFIED, GIT_CHANGE_NONE,
-    GitRevertBlock, GitRevertRequest, compute_revert_block,
+    GitRevertBlock, GitRevertRequest, compute_deletion_revert_block,
+    compute_revert_block,
 )
 from .highlight import (
     CompletionRequest, DefinitionRequest, EditorContextMenuRequest,
@@ -1282,6 +1283,13 @@ struct Editor(Copyable, Movable):
     # the toggle is on).
     var git_changes_visible: Bool
     var git_change_lines: List[Int]
+    # Parallel to ``git_change_lines``: ``git_deleted_below[i]`` is True
+    # when one or more lines present at HEAD were *deleted* immediately
+    # after buffer row ``i`` (a pure deletion — no replacement text). Such
+    # runs leave no buffer row of their own to mark, so we flag the row
+    # above and paint a ``_`` underscore there (reads as "content removed
+    # here"); clicking it opens the same revert popup, restoring the lines.
+    var git_deleted_below: List[Bool]
     # Right-side minimap gutter. When True, the right-edge column paints
     # a whole-file projection of uncommitted-change markers (independent
     # of ``scroll_y``). The gutter is zero-width whenever there's no
@@ -1596,6 +1604,7 @@ struct Editor(Copyable, Movable):
         self.blame_visible = False
         self.git_changes_visible = False
         self.git_change_lines = List[Int]()
+        self.git_deleted_below = List[Bool]()
         self._git_has_changes = False
         self.minimap_visible = True
         self._git_head_text = String("")
@@ -1742,6 +1751,7 @@ struct Editor(Copyable, Movable):
         self.blame_visible = False
         self.git_changes_visible = False
         self.git_change_lines = List[Int]()
+        self.git_deleted_below = List[Bool]()
         self._git_has_changes = False
         self.minimap_visible = True
         self._git_head_text = String("")
@@ -1915,6 +1925,7 @@ struct Editor(Copyable, Movable):
         self.blame_visible = copy.blame_visible
         self.git_changes_visible = copy.git_changes_visible
         self.git_change_lines = copy.git_change_lines.copy()
+        self.git_deleted_below = copy.git_deleted_below.copy()
         self._git_has_changes = copy._git_has_changes
         self.minimap_visible = copy.minimap_visible
         self._git_head_text = copy._git_head_text
@@ -3805,6 +3816,45 @@ struct Editor(Copyable, Movable):
             GitRevertRequest(
                 target_row, anchor_x, anchor_y,
                 text_x, block_top_y, new_count, block.head_lines.copy(),
+                False,
+            )
+        )
+
+    def _build_deletion_revert_request(
+        self, view: Rect, marker_row: Int, anchor_x: Int, anchor_y: Int,
+    ) -> Optional[GitRevertRequest]:
+        """Payload for the revert popup opened by clicking a ``_`` deletion
+        marker. ``marker_row`` is the row the underscore sits on (the row
+        above the removed run); the popup previews the deleted HEAD lines
+        on the row just below it and offers to restore them.
+
+        Empty Optional when there's no HEAD baseline or no pure deletion
+        below ``marker_row``."""
+        if not self._git_head_present:
+            return Optional[GitRevertRequest]()
+        var block_opt = compute_deletion_revert_block(
+            self._git_head_text, self.buffer.lines, marker_row,
+        )
+        if not block_opt:
+            return Optional[GitRevertRequest]()
+        var block = block_opt.value().copy()
+        var total_gutter = self._total_gutter()
+        var right_gutter = self._right_gutter()
+        var text_x = view.a.x + total_gutter
+        var content_h = view.height()
+        var content_w = view.width() - total_gutter - right_gutter
+        if content_w < 1:
+            content_w = 1
+        var layout = self._layout_lines(content_h, content_w)
+        var sr = self._screen_row_for(layout, marker_row, 0)
+        var block_top_y = (view.a.y + sr) if sr >= 0 else -1
+        # ``new_count=1`` anchors the deleted-code preview on the row just
+        # below the marker — exactly where the lines used to live.
+        return Optional[GitRevertRequest](
+            GitRevertRequest(
+                marker_row, anchor_x, anchor_y,
+                text_x, block_top_y, 1, block.head_lines.copy(),
+                True,
             )
         )
 
@@ -4550,6 +4600,13 @@ struct Editor(Copyable, Movable):
                 break
         self._git_has_changes = any_change
 
+    def set_git_deletions(mut self, var deleted: List[Bool]):
+        """Replace the per-row pure-deletion markers (the ``_`` gutter
+        underscores). The desktop paint pass calls this right after
+        ``set_git_changes`` with the matching :func:`diff_buffer_marks`
+        output, so both stay length-aligned with the buffer."""
+        self.git_deleted_below = deleted^
+
     def git_head_text(self) -> Optional[String]:
         """Return the cached HEAD content for this file, or empty
         Optional when no baseline has been fetched (file is untracked,
@@ -4567,6 +4624,7 @@ struct Editor(Copyable, Movable):
         on-disk HEAD blob may itself have changed (commit, checkout)
         between when we cached it and now."""
         self.git_change_lines = List[Int]()
+        self.git_deleted_below = List[Bool]()
         self._git_has_changes = False
         self._git_head_text = String("")
         self._git_head_loaded = False
@@ -6666,6 +6724,7 @@ struct Editor(Copyable, Movable):
                         and buf_row >= 0 \
                         and buf_row < len(self.git_change_lines):
                     var status = self.git_change_lines[buf_row]
+                    var gx = view.a.x + ln_gutter + dap_gutter
                     if status != GIT_CHANGE_NONE:
                         # In review every changed buffer row is the *new*
                         # side of a change (the old text of a modified line is
@@ -6675,8 +6734,20 @@ struct Editor(Copyable, Movable):
                         if self.review_mode:
                             bar_fg = LIGHT_GREEN
                         var bar_attr = Attr(bar_fg, EDITOR_BG)
-                        var gx = view.a.x + ln_gutter + dap_gutter
                         painter.set(canvas, gx, sy_g, Cell(String("│"), bar_attr, 1))
+                    elif not self.review_mode \
+                            and buf_row < len(self.git_deleted_below) \
+                            and self.git_deleted_below[buf_row]:
+                        # Lines were deleted just below this row (a pure
+                        # deletion with no replacement). Mark the row above
+                        # with a red ``_`` — reads as "content removed here";
+                        # clicking it opens the revert popup to restore them.
+                        # (Review mode draws its own red phantom rows for
+                        # deletions, so the underscore is suppressed there.)
+                        painter.set(
+                            canvas, gx, sy_g,
+                            Cell(String("_"), Attr(LIGHT_RED, EDITOR_BG), 1),
+                        )
                 if bl_gutter > 0 and is_first_seg \
                         and buf_row >= 0 \
                         and buf_row < len(self.blame_lines):
@@ -9676,6 +9747,10 @@ struct Editor(Copyable, Movable):
                     row >= 0 and row < len(self.git_change_lines)
                     and self.git_change_lines[row] != GIT_CHANGE_NONE
                 )
+                var has_deletion = (
+                    row >= 0 and row < len(self.git_deleted_below)
+                    and self.git_deleted_below[row]
+                )
                 # Test run-icon column (right end of the gutter): a click on
                 # a detected-test row stashes a run request for the host's
                 # Run/Debug popup. Clicks on the column over a non-test row
@@ -9716,8 +9791,18 @@ struct Editor(Copyable, Movable):
                             GitRevertRequest(
                                 row, event.pos.x, event.pos.y,
                                 event.pos.x, -1, 1, List[String](),
+                                False,
                             )
                         )
+                elif on_gc and has_deletion:
+                    # Click on a ``_`` deletion marker: open the revert popup
+                    # previewing the removed lines, with a restore action.
+                    self.move_to(row, 0, False)
+                    var del_opt = self._build_deletion_revert_request(
+                        view, row, event.pos.x, event.pos.y,
+                    )
+                    if del_opt:
+                        self.pending_git_revert = del_opt^
                 else:
                     self.pending_breakpoint_toggle = Optional[Int](row)
             return True

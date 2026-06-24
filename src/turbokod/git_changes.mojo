@@ -62,6 +62,12 @@ struct GitRevertRequest(Copyable, Movable):
     var block_top_y: Int
     var new_count: Int
     var head_lines: List[String]
+    var is_deletion: Bool
+    """True when the request targets a *pure deletion* marker (the ``_``
+    underscore on the row above a removed run) rather than an added /
+    modified change bar. ``row`` is then the row above the deletion, and
+    the submit path recomputes the block via ``compute_deletion_revert_block``
+    (which re-inserts the removed lines) instead of ``compute_revert_block``."""
 
     def __copyinit__(mut self, copy: Self):
         self.row = copy.row
@@ -71,6 +77,7 @@ struct GitRevertRequest(Copyable, Movable):
         self.block_top_y = copy.block_top_y
         self.new_count = copy.new_count
         self.head_lines = copy.head_lines.copy()
+        self.is_deletion = copy.is_deletion
 
 
 @fieldwise_init
@@ -288,33 +295,75 @@ def _line_pair_score(a: String, b: String) -> Int:
     return pre + suf
 
 
+@fieldwise_init
+struct BufferDiffMarks(Copyable, Movable):
+    """Result of :func:`diff_buffer_marks`: per-buffer-row change status
+    plus the pure-deletion markers, both derived from a single Myers diff
+    against HEAD. ``statuses[i]`` is one of ``GIT_CHANGE_NONE/ADDED/
+    MODIFIED``; ``deleted_below[i]`` is True when one or more HEAD lines
+    were deleted with no replacement immediately *after* buffer row ``i``
+    (so the gutter flags the row above with a ``_`` underscore). A pure
+    deletion before the very first buffer row has no "row above" to mark
+    and is intentionally not surfaced."""
+    var statuses: List[Int]
+    var deleted_below: List[Bool]
+
+    def __copyinit__(mut self, copy: Self):
+        self.statuses = copy.statuses.copy()
+        self.deleted_below = copy.deleted_below.copy()
+
+
 def diff_buffer_against_head(
     head_text: String, buffer_lines: List[String],
 ) -> List[Int]:
+    """Per-buffer-row change status against HEAD — thin wrapper over
+    :func:`diff_buffer_marks` returning just the ``GIT_CHANGE_*`` list,
+    for callers that don't need the deletion markers."""
+    var marks = diff_buffer_marks(head_text, buffer_lines)
+    return marks.statuses.copy()
+
+
+def diff_buffer_marks(
+    head_text: String, buffer_lines: List[String],
+) -> BufferDiffMarks:
     """Run a Myers line-diff between ``head_text`` (the file at HEAD)
-    and ``buffer_lines`` (the editor's in-memory text); return a list
-    of length ``len(buffer_lines)`` where each entry is one of
-    ``GIT_CHANGE_NONE/ADDED/MODIFIED``.
+    and ``buffer_lines`` (the editor's in-memory text); return both the
+    per-row change status (length ``len(buffer_lines)``, each entry one
+    of ``GIT_CHANGE_NONE/ADDED/MODIFIED``) and the per-row pure-deletion
+    markers in a single pass.
 
     Heuristic for added vs. modified: a run of inserts inside a single
     hunk is *modified* when at least one delete preceded it within the
     same run, otherwise *added*. This matches the VS Code / IntelliJ
     change-bar convention.
+
+    A non-equal run that consists *only* of deletes (no inserts) is a
+    pure deletion: there's no buffer row to colour, so we instead set
+    ``deleted_below`` on the buffer row immediately preceding the run.
     """
     var out = List[Int]()
+    var deleted_below = List[Bool]()
     var nb = len(buffer_lines)
     if nb == 0:
-        return out^
+        return BufferDiffMarks(out^, deleted_below^)
     for _ in range(nb):
         out.append(GIT_CHANGE_NONE)
+        deleted_below.append(False)
     var head_lines = split_lines(head_text)
     var ops = diff_lines(head_lines, buffer_lines)
     var i = 0
     var n = len(ops)
+    # Highest buffer row consumed by an equal/insert op so far — the row
+    # a following pure-deletion run sits just below. -1 before any row.
+    var last_buf_row = -1
     while i < n:
         if ops[i].kind == 0:
+            last_buf_row = ops[i].b_index
             i += 1
             continue
+        # Buffer row immediately above this non-equal run (captured before
+        # the run's own inserts advance ``last_buf_row``).
+        var run_anchor = last_buf_row
         # Scan the whole non-equal run first — Myers can emit inserts
         # and deletes in either order within a run, so we can't classify
         # an insert as ADDED vs MODIFIED until we know how many deletes
@@ -326,7 +375,12 @@ def diff_buffer_against_head(
                 del_ai.append(ops[i].a_index)
             elif 0 <= ops[i].b_index and ops[i].b_index < nb:
                 ins_bi.append(ops[i].b_index)
+                last_buf_row = ops[i].b_index
             i += 1
+        # Pure-deletion run (deletes, no inserts): flag the row above.
+        if len(ins_bi) == 0 and len(del_ai) > 0 \
+                and run_anchor >= 0 and run_anchor < nb:
+            deleted_below[run_anchor] = True
         # ``min(#dels, #ins)`` inserts pair up with deletes → MODIFIED;
         # the surplus are pure ADDED. *Which* inserts pair matters: a
         # comment block inserted just before a genuinely-changed line
@@ -366,7 +420,57 @@ def diff_buffer_against_head(
                 used[best_k] = True
                 out[ins_bi[best_k]] = GIT_CHANGE_MODIFIED
                 marked += 1
-    return out^
+    return BufferDiffMarks(out^, deleted_below^)
+
+
+def compute_deletion_revert_block(
+    head_text: String, buffer_lines: List[String], marker_row: Int,
+) -> Optional[GitRevertBlock]:
+    """Counterpart to :func:`compute_revert_block` for the pure-deletion
+    marker (the ``_`` underscore). ``marker_row`` is the buffer row the
+    underscore sits on — i.e. the row immediately *above* a deleted run.
+    Walk the Myers diff, find the pure-deletion run anchored just below
+    ``marker_row``, and return a block that re-inserts the removed HEAD
+    lines there: an empty buffer range ``[marker_row+1, marker_row+1)``
+    (so ``apply_revert_block`` inserts rather than replaces) carrying the
+    deleted lines.
+
+    Empty Optional when ``marker_row`` has no pure deletion below it.
+    """
+    if marker_row < 0:
+        return Optional[GitRevertBlock]()
+    var head_lines = split_lines(head_text)
+    var ops = diff_lines(head_lines, buffer_lines)
+    var i = 0
+    var n = len(ops)
+    var last_buf_row = -1
+    while i < n:
+        if ops[i].kind == 0:
+            last_buf_row = ops[i].b_index
+            i += 1
+            continue
+        var run_anchor = last_buf_row
+        var head_start = -1
+        var head_end_excl = -1
+        var has_ins = False
+        while i < n and ops[i].kind != 0:
+            if ops[i].kind == 1:
+                if head_start == -1:
+                    head_start = ops[i].a_index
+                head_end_excl = ops[i].a_index + 1
+            else:
+                has_ins = True
+                last_buf_row = ops[i].b_index
+            i += 1
+        if (not has_ins) and head_start != -1 \
+                and run_anchor == marker_row:
+            var head_slice = List[String]()
+            for k in range(head_start, head_end_excl):
+                head_slice.append(head_lines[k])
+            return Optional[GitRevertBlock](
+                GitRevertBlock(marker_row + 1, marker_row + 1, head_slice^)
+            )
+    return Optional[GitRevertBlock]()
 
 
 def fetch_blob_text(

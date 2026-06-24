@@ -63,9 +63,10 @@ from .file_io import (
 from .git_blame import compute_blame
 from .git_changes import (
     GIT_CHANGE_NONE,
-    GitFileStatus, GitRevertBlock, GitStateMtimes, compute_revert_block,
+    GitFileStatus, GitRevertBlock, GitStateMtimes,
+    compute_deletion_revert_block, compute_revert_block,
     count_unpushed_commits,
-    diff_buffer_against_head, fetch_git_status, fetch_head_text,
+    diff_buffer_marks, fetch_git_status, fetch_head_text,
     fetch_line_history, git_state_mtimes, project_is_git_repo,
 )
 from .git_gutter_menu import (
@@ -3636,10 +3637,13 @@ struct Desktop(Movable):
                             self.windows.windows[i].editor.buffer.lines.copy()
                         var head_text = \
                             self.windows.windows[i].editor._git_head_text
-                        var lines = diff_buffer_against_head(
-                            head_text, buf_lines,
+                        var marks = diff_buffer_marks(head_text, buf_lines)
+                        self.windows.windows[i].editor.set_git_changes(
+                            marks.statuses.copy(),
                         )
-                        self.windows.windows[i].editor.set_git_changes(lines^)
+                        self.windows.windows[i].editor.set_git_deletions(
+                            marks.deleted_below.copy(),
+                        )
 
     def force_git_refresh(mut self):
         """Drop every editor's cached HEAD baseline so the gutter re-diffs
@@ -13073,6 +13077,7 @@ struct Desktop(Movable):
         could otherwise stale-out a stashed block."""
         var act = self.git_gutter_menu.action
         var row = self.git_gutter_menu.row
+        var is_del = self.git_gutter_menu.is_deletion
         self.git_gutter_menu.close()
         if not self.windows.focused_is_editor():
             return
@@ -13102,7 +13107,13 @@ struct Desktop(Movable):
             return
         var head = head_opt.value()
         var lines = self.windows.windows[idx].editor.buffer.lines.copy()
-        var block_opt = compute_revert_block(head, lines, row)
+        # A deletion marker re-inserts the removed HEAD lines; a change bar
+        # replaces the changed run with its HEAD text.
+        var block_opt: Optional[GitRevertBlock]
+        if is_del:
+            block_opt = compute_deletion_revert_block(head, lines, row)
+        else:
+            block_opt = compute_revert_block(head, lines, row)
         if not block_opt:
             self.status_bar.set_message(
                 String("Revert: no change to revert at this line"),

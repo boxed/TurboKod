@@ -77,6 +77,13 @@ comptime _CTX_FILE_CAP: Int = 4 * 1024 * 1024   # 4 MB total ctx file
 # (cap + 1)th lands we drop it, mark the result truncated, and kill rg.
 comptime _MAX_MATCHES: Int = 1000
 
+# Keyboard-focus targets, cycled by Tab. The dialog has three editable
+# strips stacked under the title: the query, the path scope, and the
+# filename glob.
+comptime _FOCUS_QUERY: Int = 0
+comptime _FOCUS_SCOPE: Int = 1
+comptime _FOCUS_GLOB: Int = 2
+
 
 struct ProjectFind(Movable):
     var active: Bool
@@ -88,13 +95,21 @@ struct ProjectFind(Movable):
     # Edited via Tab between it and the query field; changing it kicks
     # off a fresh debounced search the same as the query does.
     var scope: TextField
-    # True when keyboard focus is on the scope field (False == query).
-    var focus_scope: Bool
+    # Filename glob: when non-empty, restricts the search to files whose
+    # path matches one of these rg ``-g`` globs (e.g. ``*.mojo`` or
+    # ``!*_test.py`` to exclude). Multiple patterns are comma-separated.
+    # Empty == every file. Edited via Tab like the scope field; a change
+    # kicks off a fresh debounced search.
+    var glob: TextField
+    # Which editable strip has keyboard focus (_FOCUS_QUERY/SCOPE/GLOB).
+    var focus: Int
     # Cached input strip rects for mouse routing.
     var _input_rect: Rect
     var _scope_rect: Rect
+    var _glob_rect: Rect
     var _last_searched_query: String   # what we last ran a search for
     var _last_searched_scope: String   # scope path at last search
+    var _last_searched_glob: String    # filename glob at last search
     var _last_searched_opts: SearchOptions   # toggle state at last search
     var _query_dirty_at_ms: Int        # 0 when no debounce pending
     var matches: List[ProjectMatch]
@@ -157,11 +172,14 @@ struct ProjectFind(Movable):
         self.root = String("")
         self.query = TextField()
         self.scope = TextField()
-        self.focus_scope = False
+        self.glob = TextField()
+        self.focus = _FOCUS_QUERY
         self._input_rect = Rect(0, 0, 0, 0)
         self._scope_rect = Rect(0, 0, 0, 0)
+        self._glob_rect = Rect(0, 0, 0, 0)
         self._last_searched_query = String("")
         self._last_searched_scope = String("")
+        self._last_searched_glob = String("")
         self._last_searched_opts = SearchOptions()
         self._query_dirty_at_ms = 0
         self.matches = List[ProjectMatch]()
@@ -221,7 +239,7 @@ struct ProjectFind(Movable):
         if not has_prefill and same_root and have_saved:
             self.root = root^
             self.query.select_all()
-            self.focus_scope = False
+            self.focus = _FOCUS_QUERY
             self._query_dirty_at_ms = 0
             self.toggle_case.hovered = False
             self.toggle_word.hovered = False
@@ -236,15 +254,19 @@ struct ProjectFind(Movable):
             self.query.set_text(prefill^)
             if select_prefill:
                 self.query.select_all()
-        # Scope resets to whole-project on a fresh open (a prior project's
-        # subpath is meaningless against a new root, and a prefill search
-        # wants the broadest results). Focus starts on the query field.
+        # Scope + glob reset to whole-project on a fresh open (a prior
+        # project's subpath / filter is meaningless against a new root, and
+        # a prefill search wants the broadest results). Focus starts on the
+        # query field.
         self.scope = TextField()
-        self.focus_scope = False
+        self.glob = TextField()
+        self.focus = _FOCUS_QUERY
         self._input_rect = Rect(0, 0, 0, 0)
         self._scope_rect = Rect(0, 0, 0, 0)
+        self._glob_rect = Rect(0, 0, 0, 0)
         self._last_searched_query = String("")
         self._last_searched_scope = String("")
+        self._last_searched_glob = String("")
         self._last_searched_opts = SearchOptions()
         # ``1`` is the "fire on next tick" sentinel (see _mark_toggle_changed).
         self._query_dirty_at_ms = 1 if has_prefill else 0
@@ -389,6 +411,7 @@ struct ProjectFind(Movable):
     def _run_search(mut self):
         self._last_searched_query = self.query.text
         self._last_searched_scope = self.scope.text
+        self._last_searched_glob = self.glob.text
         var opts = self._current_options()
         self._last_searched_opts = opts
         self.matches = List[ProjectMatch]()
@@ -407,7 +430,7 @@ struct ProjectFind(Movable):
         # failure here is a transient OS error — leave matches empty
         # and let the user retry.
         _ = self._runner.start(
-            self.root, self.query.text, self.scope.text, opts,
+            self.root, self.query.text, self.scope.text, self.glob.text, opts,
         )
 
     def _refresh_context_for_selection(mut self):
@@ -481,8 +504,11 @@ struct ProjectFind(Movable):
     def _path_y(self, container_bounds: Rect) -> Int:
         return container_bounds.a.y + 2
 
+    def _glob_y(self, container_bounds: Rect) -> Int:
+        return container_bounds.a.y + 3
+
     def _list_top(self, container_bounds: Rect) -> Int:
-        return container_bounds.a.y + 4
+        return container_bounds.a.y + 5
 
     def _context_height(self, container_bounds: Rect) -> Int:
         # 1 separator + ``2 * _CONTEXT_LINES + 1`` content rows.
@@ -498,16 +524,19 @@ struct ProjectFind(Movable):
         return h
 
     def is_input_at(self, pos: Point, container_bounds: Rect) -> Bool:
-        """True iff ``pos`` lies on the ``Search:`` query row or the
-        ``Path:`` scope row (both are editable text strips)."""
+        """True iff ``pos`` lies on the ``Search:`` query row, the
+        ``Path:`` scope row, or the ``Glob:`` filter row (all editable
+        text strips)."""
         if not self.active:
             return False
         var qy = self._input_y(container_bounds)
         var py = self._path_y(container_bounds)
+        var gy = self._glob_y(container_bounds)
         var left = container_bounds.a.x + 1
         var right = container_bounds.b.x - 1
         return Rect(left, qy, right, qy + 1).contains(pos) \
-            or Rect(left, py, right, py + 1).contains(pos)
+            or Rect(left, py, right, py + 1).contains(pos) \
+            or Rect(left, gy, right, gy + 1).contains(pos)
 
     # --- paint ------------------------------------------------------------
 
@@ -593,7 +622,7 @@ struct ProjectFind(Movable):
             qw_max = 0
         var input_rect = Rect(qx, input_y, qx + qw_max, input_y + 1)
         self._input_rect = input_rect
-        self.query.paint(canvas, input_rect, not self.focus_scope)
+        self.query.paint(canvas, input_rect, self.focus == _FOCUS_QUERY)
         # Toggle chips. Off uses a darker on-blue paint so an inactive
         # chip blends with the dialog body; on inverts to the standard
         # yellow selection background.
@@ -623,12 +652,12 @@ struct ProjectFind(Movable):
             pw_max = 0
         var scope_rect = Rect(px, path_y, px + pw_max, path_y + 1)
         self._scope_rect = scope_rect
-        self.scope.paint(canvas, scope_rect, self.focus_scope)
+        self.scope.paint(canvas, scope_rect, self.focus == _FOCUS_SCOPE)
         # When the scope is empty, overlay a dim placeholder so the field
         # reads as "(whole project)" rather than looking like a blank
         # required input. Skipped while focused — the caret should sit on
         # a clean field once the user starts editing.
-        if len(self.scope.text.as_bytes()) == 0 and not self.focus_scope:
+        if len(self.scope.text.as_bytes()) == 0 and self.focus != _FOCUS_SCOPE:
             # Clip to the field rect (not the dialog painter, which would
             # reach the right border column) so a long placeholder can't
             # overpaint the frame on a narrow window.
@@ -637,11 +666,33 @@ struct ProjectFind(Movable):
                 canvas, Point(px, path_y),
                 String("(whole project)"), Attr(LIGHT_GRAY, CYAN),
             )
+        # Glob-filter row: ``Glob: <patterns>`` — restricts the search to
+        # files whose path matches one of these rg globs (comma-separated).
+        # Empty means every file. Label padded to ``Search:`` width so all
+        # three fields' left edges line up.
+        var glob_y = self._glob_y(container_bounds)
+        var glob_label = String(" Glob:   ")
+        _ = painter.put_text(
+            canvas, Point(container_bounds.a.x + 1, glob_y), glob_label, label_attr,
+        )
+        var gx = container_bounds.a.x + 1 + display_columns(glob_label)
+        var gw_max = container_bounds.b.x - 1 - gx
+        if gw_max < 0:
+            gw_max = 0
+        var glob_rect = Rect(gx, glob_y, gx + gw_max, glob_y + 1)
+        self._glob_rect = glob_rect
+        self.glob.paint(canvas, glob_rect, self.focus == _FOCUS_GLOB)
+        if len(self.glob.text.as_bytes()) == 0 and self.focus != _FOCUS_GLOB:
+            var glob_painter = Painter(glob_rect)
+            _ = glob_painter.put_text(
+                canvas, Point(gx, glob_y),
+                String("(all files, e.g. *.mojo)"), Attr(LIGHT_GRAY, CYAN),
+            )
         # Separator under the inputs. When a toggle is hovered the
         # separator gives way to the chip's tooltip text so the user
         # learns what each abbreviation means without leaving the
         # search flow.
-        var sep1_y = path_y + 1
+        var sep1_y = glob_y + 1
         var hovered_tooltip = String("")
         if self.toggle_case.hovered:
             hovered_tooltip = self.toggle_case.tooltip
@@ -672,6 +723,7 @@ struct ProjectFind(Movable):
             elif self._query_dirty_at_ms != 0 \
                     or self.query.text != self._last_searched_query \
                     or self.scope.text != self._last_searched_scope \
+                    or self.glob.text != self._last_searched_glob \
                     or self._runner.is_active():
                 msg = String("Searching...")
             else:
@@ -718,7 +770,7 @@ struct ProjectFind(Movable):
         # the same read-only-selection color ``TextLog`` uses).
         self.ctxsel.paint_overlay(canvas, container_bounds, Attr(BLACK, CYAN))
         # Hint at the very bottom (overlays the bottom border).
-        var hint = String(" Enter: open  Tab: query/path  Cmd+Enter: panel  ESC: cancel  Up/Down: navigate ")
+        var hint = String(" Enter: open  Tab: query/path/glob  Cmd+Enter: panel  ESC: cancel  Up/Down: navigate ")
         var hx = container_bounds.b.x - display_columns(hint) - 1
         if hx < container_bounds.a.x + 1:
             hx = container_bounds.a.x + 1
@@ -866,10 +918,13 @@ struct ProjectFind(Movable):
         if k == KEY_ESC:
             self.close()
             return True
-        # Tab / Shift+Tab moves focus between the query and scope fields.
-        # Both directions just toggle since there are only two fields.
+        # Tab / Shift+Tab cycles focus across the query, scope, and glob
+        # fields. Shift reverses the direction.
         if k == KEY_TAB:
-            self.focus_scope = not self.focus_scope
+            if (event.mods & MOD_SHIFT) != 0:
+                self.focus = (self.focus + 2) % 3
+            else:
+                self.focus = (self.focus + 1) % 3
             return True
         # Cmd+Enter docks the current results into the Find Results pane
         # (checked before the plain-Enter open so the modifier wins).
@@ -889,11 +944,14 @@ struct ProjectFind(Movable):
             self._scroll_to_selection()
             self._refresh_context_for_selection()
             return True
-        # Route typed input to whichever field has focus. Both the query
-        # and the scope kick off a fresh debounced search on change.
+        # Route typed input to whichever field has focus. The query, the
+        # scope, and the glob all kick off a fresh debounced search on
+        # change.
         var r: TextFieldKeyResult
-        if self.focus_scope:
+        if self.focus == _FOCUS_SCOPE:
             r = self.scope.handle_key(event)
+        elif self.focus == _FOCUS_GLOB:
+            r = self.glob.handle_key(event)
         else:
             r = self.query.handle_key(event)
         if r.consumed:
@@ -956,12 +1014,17 @@ struct ProjectFind(Movable):
             # A press inside the query strip moves focus there; motion /
             # release events keep the existing focus.
             if event.pressed and not event.motion:
-                self.focus_scope = False
+                self.focus = _FOCUS_QUERY
             return True
         if self._scope_rect.width() > 0 \
                 and self.scope.handle_mouse(event, self._scope_rect):
             if event.pressed and not event.motion:
-                self.focus_scope = True
+                self.focus = _FOCUS_SCOPE
+            return True
+        if self._glob_rect.width() > 0 \
+                and self.glob.handle_mouse(event, self._glob_rect):
+            if event.pressed and not event.motion:
+                self.focus = _FOCUS_GLOB
             return True
         if event.pressed and not event.motion:
             if picker_wheel_scroll(
@@ -1177,6 +1240,32 @@ def _clean_scope(s: String) -> String:
     return String(StringSlice(unsafe_from_utf8=b[lo:hi]))
 
 
+def _split_globs(s: String) -> List[String]:
+    """Split a comma-separated glob string into individual rg patterns,
+    trimming surrounding whitespace and dropping empties. ``"*.mojo,
+    !*_test.py"`` → ``["*.mojo", "!*_test.py"]``; an all-whitespace or
+    empty input yields ``[]`` (no ``-g`` flags, so every file is scanned).
+    """
+    var out = List[String]()
+    var b = s.as_bytes()
+    var start = 0
+    var i = 0
+    while i <= len(b):
+        if i == len(b) or b[i] == 0x2C:   # ',' or end of string
+            # Trim leading/trailing spaces + tabs from [start, i).
+            var lo = start
+            var hi = i
+            while lo < hi and (b[lo] == 0x20 or b[lo] == 0x09):
+                lo += 1
+            while hi > lo and (b[hi - 1] == 0x20 or b[hi - 1] == 0x09):
+                hi -= 1
+            if lo < hi:
+                out.append(String(StringSlice(unsafe_from_utf8=b[lo:hi])))
+            start = i + 1
+        i += 1
+    return out^
+
+
 def _lstrip_tabs(s: String) -> String:
     """Drop leading whitespace (tabs/spaces) so the first non-blank
     character of the line lines up at the row's left edge — search hits
@@ -1251,7 +1340,7 @@ struct _RgRunner(Movable):
 
     def start(
         mut self, root: String, query: String, scope: String,
-        opts: SearchOptions,
+        glob: String, opts: SearchOptions,
     ) -> Bool:
         """Spawn a fresh ``rg`` child for ``(root, query)``. Returns
         False when the spawn syscall failed (callers gate on rg being
@@ -1262,6 +1351,10 @@ struct _RgRunner(Movable):
         Match paths are still reported relative to ``root`` (the parse
         side keeps ``self.root = root``), so the result list reads the
         same regardless of scope.
+
+        ``glob`` is an optional comma-separated list of rg filename globs
+        (``*.mojo``, ``!*_test.py``, …); each non-empty pattern becomes a
+        ``-g`` flag, so the search only touches matching files.
 
         Any previous in-flight search is cancelled first, so calling
         ``start`` repeatedly (one per debounced keystroke) never lets
@@ -1299,6 +1392,13 @@ struct _RgRunner(Movable):
             argv.append(String("--word-regexp"))
         if not opts.regex:
             argv.append(String("-F"))            # fixed-string
+        # Filename globs: one ``-g`` per comma-separated pattern. rg
+        # applies these as include/exclude filters on the file walk, so a
+        # query like ``foo`` with glob ``*.mojo`` only scans Mojo files.
+        var globs = _split_globs(glob)
+        for gi in range(len(globs)):
+            argv.append(String("-g"))
+            argv.append(globs[gi])
         # Cap how much rg emits per matched line. Without this, a hit
         # in a minified JS / CSS bundle would push a single multi-MB
         # match line into our pipe; we'd have to buffer it whole

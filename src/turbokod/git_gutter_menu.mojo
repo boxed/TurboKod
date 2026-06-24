@@ -77,6 +77,10 @@ struct GitGutterMenu(Movable):
     var block_top_y: Int
     var new_count: Int
     var head_lines: List[String]
+    var is_deletion: Bool
+    """Mirrors ``GitRevertRequest.is_deletion`` — True when the popup was
+    opened from a ``_`` deletion marker. The host's submit handler reads it
+    to pick ``compute_deletion_revert_block`` over ``compute_revert_block``."""
     var selected: Int
     var tracking: Bool
     """True between a captured left-press on the Revert bar and its matching
@@ -93,6 +97,7 @@ struct GitGutterMenu(Movable):
         self.block_top_y = -1
         self.new_count = 1
         self.head_lines = List[String]()
+        self.is_deletion = False
         self.selected = 0
         self.tracking = False
 
@@ -104,6 +109,7 @@ struct GitGutterMenu(Movable):
         self.block_top_y = req.block_top_y
         self.new_count = req.new_count if req.new_count > 0 else 1
         self.head_lines = req.head_lines.copy()
+        self.is_deletion = req.is_deletion
         self.active = True
         self.submitted = False
         self.action = GUTTER_ACTION_NONE
@@ -116,6 +122,7 @@ struct GitGutterMenu(Movable):
         self.action = GUTTER_ACTION_NONE
         self.row = -1
         self.head_lines = List[String]()
+        self.is_deletion = False
         self.tracking = False
 
     def _resolve(mut self, action: Int):
