@@ -310,6 +310,151 @@ def wrap_lines(
     return out^
 
 
+def _has_non_ws(line: String, lo: Int, hi: Int) -> Bool:
+    """True when ``line``'s byte range ``[lo, hi)`` holds a non-whitespace
+    byte (so an empty / all-blank CSS declaration isn't counted)."""
+    var bytes = line.as_bytes()
+    var i = lo
+    while i < hi and i < len(bytes):
+        var b = Int(bytes[i])
+        if b != 0x20 and b != 0x09:
+            return True
+        i += 1
+    return False
+
+
+def _html_attr_layout(
+    line: String, comma_threshold: Int, overflow: Bool,
+) -> Tuple[List[Int], List[Bool], Bool]:
+    """Build the smart-wrap cut list for breaking *every* semicolon-delimited
+    attribute value on an HTML ``line`` one item per line.
+
+    Returns ``(cuts, is_item, any_break)``:
+
+    * ``cuts`` — sorted segment boundaries; segment ``s`` spans
+      ``[cuts[s], cuts[s + 1])`` and there are ``len(cuts) - 1`` segments.
+    * ``is_item`` — parallel to the segments; ``True`` for an item row (a
+      declaration / statement that hangs at the item indent), ``False`` for
+      a structural row (the head, the bridge between two broken attributes,
+      or a closing quote + trailing markup — all at indent 0).
+    * ``any_break`` — whether at least one attribute was broken. When
+      ``False`` the caller ignores ``cuts`` and treats the line as unbroken.
+
+    A quoted attribute value is broken when it has at least one top-level
+    ``;`` separator (so ``class``/``id``/``href`` and other plain attributes
+    are never touched) *and* either the line overflows or the value holds at
+    least ``comma_threshold`` items (``comma_threshold < 0`` disables the
+    item trigger). Semicolons inside a nested ``(...)`` group (``url(a;b)``,
+    a JS ``for(;;)``) or inside an inner quoted string (the *other* quote
+    char) are not separators. The whitespace after a ``;`` rides the end of
+    the previous segment so item rows render flush. The byte-coverage
+    invariant holds: ``cuts`` starts at 0, ends at the line length, and every
+    byte lands in exactly one segment.
+    """
+    var bytes = line.as_bytes()
+    var n = len(bytes)
+    var cuts = List[Int]()
+    var is_item = List[Bool]()
+    cuts.append(0)
+    var any_break = False
+    var i = 0
+    while i < n:
+        var b = Int(bytes[i])
+        if b != 0x22 and b != 0x27:  # not a quote → skip
+            i += 1
+            continue
+        # A quote opens an attribute value only when preceded (skipping
+        # whitespace) by ``=``. Any other quote is markup text — skip it.
+        var p = i - 1
+        while p >= 0 and (Int(bytes[p]) == 0x20 or Int(bytes[p]) == 0x09):
+            p -= 1
+        if p < 0 or Int(bytes[p]) != 0x3D:
+            i += 1
+            continue
+        var attr_quote = b
+        # Walk the value: find the closing quote and the top-level ``;``.
+        var close_idx = -1
+        var sem_positions = List[Int]()
+        var depth = 0
+        var in_inner = False
+        var inner_q = 0
+        var k = i + 1
+        while k < n:
+            var c = Int(bytes[k])
+            if in_inner:
+                if c == 0x5C:  # backslash escapes the next byte
+                    k += 2
+                    continue
+                if c == inner_q:
+                    in_inner = False
+                k += 1
+                continue
+            if c == attr_quote:
+                close_idx = k
+                break
+            if c == 0x22 or c == 0x27:  # inner string in the other quote
+                in_inner = True
+                inner_q = c
+                k += 1
+                continue
+            if c == 0x28:  # (
+                depth += 1
+            elif c == 0x29:  # )
+                if depth > 0:
+                    depth -= 1
+            elif c == 0x3B and depth == 0:  # ;
+                sem_positions.append(k)
+            k += 1
+        if close_idx < 0:
+            # Unterminated value — the rest of the line is inside it.
+            break
+        if len(sem_positions) < 1:
+            # Plain attribute (no separators) — skip past it and keep looking.
+            i = close_idx + 1
+            continue
+        # Semicolon-delimited attribute: count items + item boundaries.
+        var item_starts = List[Int]()
+        var decl_count = 0
+        var piece_lo = i + 1
+        for z in range(len(sem_positions)):
+            var sp = sem_positions[z]
+            if _has_non_ws(line, piece_lo, sp):
+                decl_count += 1
+            var q = sp + 1
+            while q < close_idx and (
+                Int(bytes[q]) == 0x20 or Int(bytes[q]) == 0x09
+            ):
+                q += 1
+            if q < close_idx:
+                item_starts.append(q)
+            piece_lo = sp + 1
+        if _has_non_ws(line, piece_lo, close_idx):
+            decl_count += 1
+        var trigger = comma_threshold >= 0 and decl_count >= comma_threshold
+        if decl_count < 1 or not (overflow or trigger):
+            # Not broken — its bytes ride the surrounding structural segment.
+            i = close_idx + 1
+            continue
+        any_break = True
+        # Head/bridge segment ends right after this opening quote (indent 0);
+        # each item begins at its first non-ws byte (hangs at item indent);
+        # the closing quote opens the next structural segment.
+        cuts.append(i + 1)
+        is_item.append(False)
+        for z in range(len(item_starts)):
+            cuts.append(item_starts[z])
+            is_item.append(True)
+        cuts.append(close_idx)
+        is_item.append(True)
+        i = close_idx + 1
+    # Final structural segment runs to end-of-line (also the whole-line
+    # segment when nothing broke).
+    if cuts[len(cuts) - 1] != n:
+        cuts.append(n)
+        is_item.append(False)
+    return (cuts^, is_item^, any_break)
+
+
 def smart_wrap_lines(
     lines: List[String],
     content_w: Int,
@@ -318,6 +463,7 @@ def smart_wrap_lines(
     start_line: Int = 0,
     max_rows: Int = -1,
     comma_threshold: Int = -1,
+    html_attr: Bool = False,
 ) -> List[VisualLine]:
     """Smart-wrap a slice of ``lines``: a logical line that overflows
     ``content_w`` *and* has bracketed, comma-separated call structure is
@@ -346,6 +492,27 @@ def smart_wrap_lines(
     fits ``content_w``. ``-1`` (the default) disables this — only width
     triggers a break, the original behavior. ``0`` breaks any bracketed call
     that has a comma; ``2`` breaks calls with 3+ arguments; and so on.
+
+    ``html_attr`` switches the structural scan to HTML mode: instead of a
+    bracketed call, it breaks *every* semicolon-delimited attribute value on
+    the line (``style="..."``, an ``onclick="..."`` / other ``on*`` handler,
+    or any attribute whose value carries top-level ``;``) one item per line,
+    with each closing quote (and any trailing markup, up to the next broken
+    attribute) on its own line at the outer indent::
+
+        <div style="
+            position: relative;
+            width: 100%;
+            overflow: hidden;
+        "></div>
+
+    Items are split on top-level ``;`` (semicolons inside ``(...)`` or an
+    inner quoted string don't count). The width trigger applies as usual;
+    ``comma_threshold`` here reads as an *item* threshold — the attribute
+    breaks when it has at least ``comma_threshold`` items (so a
+    3-declaration attribute breaks at a threshold of 3 or lower). A line
+    with no semicolon-delimited attribute falls back to word-aware soft
+    wrap.
 
     Byte coverage invariant (required by the editor's caret/selection
     code): a line's segments are byte-contiguous and cover it whole. We
@@ -391,6 +558,50 @@ def smart_wrap_lines(
         # fitting line to count its commas.
         if not overflow and comma_threshold < 0:
             out.append(VisualLine(br, 0, line_n, 0, cols, 0))
+            br += 1
+            continue
+        # HTML mode: break the first semicolon-delimited attribute value
+        # (style / on* handler / …) one item per line, closing quote on its
+        # own line.
+        if html_attr:
+            var hres = _html_attr_layout(line, comma_threshold, overflow)
+            var s_cuts = hres[0].copy()
+            var s_item = hres[1].copy()
+            var s_any = hres[2]
+            var s_indent = leading_indent_bytes(line) + indent_size
+            if s_indent > content_w - 1:
+                s_indent = content_w - 1
+            if s_indent < 0:
+                s_indent = 0
+            if not s_any:
+                if overflow:
+                    _ = _wrap_one_line_into(
+                        out, br, line, 0, line_n, content_w,
+                        0, s_indent, 0, True, max_rows,
+                    )
+                else:
+                    out.append(VisualLine(br, 0, line_n, 0, cols, 0))
+                br += 1
+                continue
+            # Walk the cut list: item segments hang at the item indent, the
+            # structural ones (head / bridge / closing quote + trailing
+            # markup) sit at indent 0.
+            var s_off = 0
+            var s_seg = 0
+            while s_seg + 1 < len(s_cuts):
+                if max_rows >= 0 and len(out) >= max_rows:
+                    break
+                var s_lo = s_cuts[s_seg]
+                var s_hi = s_cuts[s_seg + 1]
+                if s_hi <= s_lo:
+                    s_seg += 1
+                    continue
+                var s_first = s_indent if s_item[s_seg] else 0
+                s_off = _wrap_one_line_into(
+                    out, br, line, s_lo, s_hi, content_w,
+                    s_first, s_indent, s_off, True, max_rows,
+                )
+                s_seg += 1
             br += 1
             continue
         # Scan once for the outermost bracket group's structure.

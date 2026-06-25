@@ -4645,12 +4645,27 @@ struct Editor(Copyable, Movable):
         only ``WRAP_NONE`` keeps horizontal scroll."""
         return self.wrap_mode != WRAP_NONE
 
+    def _smart_html_mode(self) -> Bool:
+        """Whether ``WRAP_SMART`` should use HTML attribute breaking (break a
+        semicolon-delimited attribute value — ``style``, an ``on*`` handler,
+        … — one item per line) rather than the bracketed-call structural
+        break. Gated to HTML."""
+        var ext = extension_of(self.file_path)
+        return (
+            ext == String("html") or ext == String("htm")
+            or ext == String("xhtml")
+        )
+
     def _smart_wrap_supported(self) -> Bool:
         """Whether ``WRAP_SMART`` attempts delimiter breaking for this
         buffer's language. Smart wrap targets python-style / algol-style
-        languages that use ``call(arg, arg)`` syntax; markup, prose, and
-        config formats fall back to soft wrap instead. Gated by extension
-        so the layout decision is cheap and frontend-agnostic."""
+        languages that use ``call(arg, arg)`` syntax plus HTML (inline
+        semicolon-delimited attributes like ``style`` / ``on*`` handlers);
+        markup, prose, and config formats otherwise fall back to soft wrap.
+        Gated by extension so the layout decision is cheap and
+        frontend-agnostic."""
+        if self._smart_html_mode():
+            return True
         var ext = extension_of(self.file_path)
         return (
             ext == String("py") or ext == String("pyi")
@@ -5939,6 +5954,7 @@ struct Editor(Copyable, Movable):
                 ),
                 start_line=self.scroll_y, max_rows=max_rows,
                 comma_threshold=self.smart_wrap_comma_threshold,
+                html_attr=self._smart_html_mode(),
             )
         else:
             wrapped = wrap_lines(
@@ -10106,6 +10122,7 @@ struct Editor(Copyable, Movable):
                     ),
                     start_line=0, max_rows=-1,
                     comma_threshold=self.smart_wrap_comma_threshold,
+                    html_attr=self._smart_html_mode(),
                 )
             else:
                 segs = wrap_lines(
@@ -10407,6 +10424,7 @@ struct Editor(Copyable, Movable):
             v = smart_wrap_lines(
                 single, w, tab, line_comment=lc,
                 comma_threshold=self.smart_wrap_comma_threshold,
+                html_attr=self._smart_html_mode(),
             )
         else:
             v = wrap_lines(single, w, indent_size=tab, word_aware=True)
@@ -10462,6 +10480,7 @@ struct Editor(Copyable, Movable):
                 v = smart_wrap_lines(
                     single, content_w, tab, line_comment=lc,
                     comma_threshold=self.smart_wrap_comma_threshold,
+                    html_attr=self._smart_html_mode(),
                 )
             else:
                 v = wrap_lines(

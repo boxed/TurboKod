@@ -15548,6 +15548,138 @@ def test_smart_wrap_lines_comment_stops_structural_scan() raises:
         assert_equal(narrow[i].byte_end, soft[i].byte_end)
 
 
+def test_smart_wrap_lines_style_attr_breaks_one_decl_per_line() raises:
+    """``html_attr`` mode breaks an inline ``style="..."`` one CSS
+    declaration per line, with the closing quote (+ trailing markup) on
+    its own line at the outer indent. The 3-declaration example breaks at
+    a threshold of 3 or lower and stays whole at 4."""
+    var line = String(
+        "<div style=\"position: relative; width: 100%; overflow: hidden;\">"
+        "</div>"
+    )
+    var lines = List[String]()
+    lines.append(line)
+    var bytes = line.as_bytes()
+    # Threshold 3, fits the width: still breaks (3 declarations >= 3).
+    var layout = smart_wrap_lines(
+        lines, 200, 4, comma_threshold=3, html_attr=True,
+    )
+    _assert_layout_contiguous(line, layout)
+    # head + 3 declarations + closing-quote row.
+    assert_equal(len(layout), 5)
+    # Head ends right after the opening quote.
+    assert_equal(Int(bytes[layout[0].byte_end - 1]), Int(ord("\"")))
+    assert_equal(layout[0].indent_cells, 0)
+    # Declarations hang at leading-indent (0) + indent_size (4).
+    assert_equal(Int(bytes[layout[1].byte_start]), Int(ord("p")))  # position
+    assert_equal(Int(bytes[layout[2].byte_start]), Int(ord("w")))  # width
+    assert_equal(Int(bytes[layout[3].byte_start]), Int(ord("o")))  # overflow
+    for i in range(1, 4):
+        assert_equal(layout[i].indent_cells, 4)
+    # The closing quote opens the last row, back at indent 0.
+    assert_equal(Int(bytes[layout[4].byte_start]), Int(ord("\"")))
+    assert_equal(layout[4].indent_cells, 0)
+
+    # Threshold 4: 3 declarations is below 4 and it fits -> stays whole.
+    var whole = smart_wrap_lines(
+        lines, 200, 4, comma_threshold=4, html_attr=True,
+    )
+    assert_equal(len(whole), 1)
+
+    # Off by default (-1) when it fits: one segment.
+    var off = smart_wrap_lines(lines, 200, 4, html_attr=True)
+    assert_equal(len(off), 1)
+
+
+def test_smart_wrap_lines_style_attr_semicolons_in_url_and_string() raises:
+    """Top-level ``;`` split declarations, but a ``;`` inside ``url(...)``
+    or an inner quoted string is not a separator."""
+    var line = String(
+        "<span style=\"background: url(a;b.png); content: ';';\"></span>"
+    )
+    var lines = List[String]()
+    lines.append(line)
+    var layout = smart_wrap_lines(
+        lines, 300, 4, comma_threshold=0, html_attr=True,
+    )
+    _assert_layout_contiguous(line, layout)
+    var bytes = line.as_bytes()
+    # head + 2 declarations (background, content) + closing-quote row.
+    assert_equal(len(layout), 4)
+    assert_equal(Int(bytes[layout[1].byte_start]), Int(ord("b")))  # background
+    assert_equal(Int(bytes[layout[2].byte_start]), Int(ord("c")))  # content
+    assert_equal(Int(bytes[layout[3].byte_start]), Int(ord("\"")))
+
+
+def test_smart_wrap_lines_html_attr_generalizes_to_onclick() raises:
+    """``html_attr`` mode is not style-specific: an ``onclick`` (or any
+    other) handler with semicolon-separated statements breaks one statement
+    per line. A plain ``class`` attribute before it has no top-level ``;``,
+    so it's skipped in favor of the handler. JS ``;`` inside ``(...)`` (a
+    ``for(;;)``) or an inner string don't count as separators."""
+    var line = String(
+        "<button class=\"btn\" onclick=\"open(); track('a;b'); close();\">"
+        "Go</button>"
+    )
+    var lines = List[String]()
+    lines.append(line)
+    var layout = smart_wrap_lines(
+        lines, 300, 4, comma_threshold=0, html_attr=True,
+    )
+    _assert_layout_contiguous(line, layout)
+    var bytes = line.as_bytes()
+    # head ends right after the onclick opening quote (class is skipped).
+    assert_equal(Int(bytes[layout[0].byte_end - 1]), Int(ord("\"")))
+    var ho = layout[0].byte_end - 1
+    # The selected quote is the onclick value's, not class's: the bytes just
+    # before it spell `onclick=`.
+    assert_equal(Int(bytes[ho - 1]), Int(ord("=")))
+    assert_equal(Int(bytes[ho - 2]), Int(ord("k")))  # onclic[k]
+    # head + 3 statements (open/track/close) + closing-quote row.
+    assert_equal(len(layout), 5)
+    assert_equal(Int(bytes[layout[1].byte_start]), Int(ord("o")))  # open()
+    assert_equal(Int(bytes[layout[2].byte_start]), Int(ord("t")))  # track(...)
+    assert_equal(Int(bytes[layout[3].byte_start]), Int(ord("c")))  # close()
+    assert_equal(Int(bytes[layout[4].byte_start]), Int(ord("\"")))
+    for i in range(1, 4):
+        assert_equal(layout[i].indent_cells, 4)
+
+
+def test_smart_wrap_lines_html_attr_breaks_all_attributes() raises:
+    """Every semicolon-delimited attribute on the line breaks, not just the
+    first: an ``onclick`` and a ``style`` on the same tag both go one item
+    per line, the bridge between them (closing quote of one + opening of the
+    next) is a structural indent-0 row, and the trailing tail closes flush."""
+    var line = String(
+        "<button onclick=\"open(); close();\" "
+        "style=\"color: red; width: 100%;\">Go</button>"
+    )
+    var lines = List[String]()
+    lines.append(line)
+    var layout = smart_wrap_lines(
+        lines, 400, 4, comma_threshold=0, html_attr=True,
+    )
+    _assert_layout_contiguous(line, layout)
+    var bytes = line.as_bytes()
+    # head, open(), close(), bridge ("/style="), color, width, tail.
+    assert_equal(len(layout), 7)
+    assert_equal(layout[0].indent_cells, 0)                       # head
+    assert_equal(Int(bytes[layout[1].byte_start]), Int(ord("o")))  # open()
+    assert_equal(Int(bytes[layout[2].byte_start]), Int(ord("c")))  # close()
+    assert_equal(layout[1].indent_cells, 4)
+    assert_equal(layout[2].indent_cells, 4)
+    # Bridge row: closing quote of onclick, back at indent 0.
+    assert_equal(Int(bytes[layout[3].byte_start]), Int(ord("\"")))
+    assert_equal(layout[3].indent_cells, 0)
+    assert_equal(Int(bytes[layout[4].byte_start]), Int(ord("c")))  # color
+    assert_equal(Int(bytes[layout[5].byte_start]), Int(ord("w")))  # width
+    assert_equal(layout[4].indent_cells, 4)
+    assert_equal(layout[5].indent_cells, 4)
+    # Tail row: closing quote of style + ">Go</button>", at indent 0.
+    assert_equal(Int(bytes[layout[6].byte_start]), Int(ord("\"")))
+    assert_equal(layout[6].indent_cells, 0)
+
+
 def test_text_view_selection_extracts_text() raises:
     """``Selection.extracted_text`` slices a flat ``List[String]`` by
     cell coordinates and joins lines with ``\\n``."""
@@ -22609,6 +22741,10 @@ def _run_chunk_04() raises:
     test_smart_wrap_lines_falls_back_to_soft_wrap()
     test_smart_wrap_lines_ignores_commas_in_strings_and_nesting()
     test_smart_wrap_lines_comment_stops_structural_scan()
+    test_smart_wrap_lines_style_attr_breaks_one_decl_per_line()
+    test_smart_wrap_lines_style_attr_semicolons_in_url_and_string()
+    test_smart_wrap_lines_html_attr_generalizes_to_onclick()
+    test_smart_wrap_lines_html_attr_breaks_all_attributes()
 
 
 def test_sgr_parse() raises:
