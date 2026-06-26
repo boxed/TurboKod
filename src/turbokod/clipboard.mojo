@@ -62,14 +62,24 @@ def clipboard_chord(event: Event) -> UInt8:
 
 def _copy_command() -> String:
     comptime if CompilationTarget.is_macos():
-        return String("pbcopy")
+        # ``LC_CTYPE=UTF-8`` is load-bearing: ``pbcopy`` interprets its stdin
+        # using the locale's text encoding, and a GUI app launched from
+        # Finder/Dock inherits no ``LANG``/``LC_*`` — so ``pbcopy`` falls back
+        # to Mac OS Roman and silently mis-decodes our UTF-8 bytes. ``m³``
+        # (U+00B3 → ``C2 B3``) then lands on the pasteboard as ``m¬≥`` (the
+        # Mac-Roman reading of those two bytes). Forcing UTF-8 here keeps the
+        # pasteboard string byte-faithful regardless of the app's environment.
+        return String("LC_CTYPE=UTF-8 pbcopy")
     else:
         return String("xclip -selection clipboard 2>/dev/null")
 
 
 def _paste_command() -> String:
     comptime if CompilationTarget.is_macos():
-        return String("pbpaste")
+        # Same as ``_copy_command``: ``pbpaste`` *emits* in the locale encoding,
+        # so without UTF-8 it would re-encode a real Unicode pasteboard string
+        # (e.g. copied from another app) as Mac Roman on the way out.
+        return String("LC_CTYPE=UTF-8 pbpaste")
     else:
         return String("xclip -selection clipboard -o 2>/dev/null")
 

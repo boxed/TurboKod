@@ -34,6 +34,30 @@ let VECTOR_FONT_DEFAULT_SIZE = 13
 // crisp, everything else must not.
 var cellFont = loadCellFont()
 var cellFontIsBitmap = true
+
+// Per-codepoint "does the cell font actually have a glyph for this?" cache.
+// The bundled Px437 bitmap font only covers CP437, so codepoints outside it
+// (e.g. U+00B3 ³ — there's no superscript-three in CP437, though ² U+00B2 is
+// present) have no glyph. Left to `NSString.draw`, Core Text silently swaps in
+// a system fallback font whose metrics overflow the 8×16 cell and bleed over
+// the neighbouring cell — so the same character renders differently depending
+// on what sits beside it. We detect the gap and render it cell-fitted instead.
+// Cleared whenever `cellFont` changes (Settings ▸ Font).
+var cellFontGlyphCache: [UInt32: Bool] = [:]
+
+func cellFontHasGlyph(_ cp: UInt32) -> Bool {
+    if let v = cellFontGlyphCache[cp] { return v }
+    var present = false
+    if let scalar = Unicode.Scalar(cp) {
+        var utf16 = Array(String(scalar).utf16)
+        var glyphs = [CGGlyph](repeating: 0, count: utf16.count)
+        let ok = CTFontGetGlyphsForCharacters(
+            cellFont as CTFont, &utf16, &glyphs, utf16.count)
+        present = ok && glyphs[0] != 0
+    }
+    cellFontGlyphCache[cp] = present
+    return present
+}
 var currentCellFontName = ""             // "" = the bundled default
 var currentCellFontSize: CGFloat = -1    // 0 = font default; -1 forces the first apply through
 // Resolved size info the host reports back to the Mojo core after every
@@ -133,6 +157,7 @@ func bitmapStrikePPEM(_ font: NSFont) -> Int {
 private func applyBundledCellFont(_ size: CGFloat) {
     let eff = size > 0 ? size : CGFloat(BITMAP_FONT_DEFAULT_SIZE)
     cellFont = loadCellFont(size: eff)
+    cellFontGlyphCache.removeAll()
     cellFontEffectiveSize = Int(eff.rounded())
     cellFontIdealSize = BITMAP_FONT_DEFAULT_SIZE
     cellFontIsBitmap = cellFontEffectiveSize % BITMAP_FONT_DEFAULT_SIZE == 0
@@ -163,6 +188,7 @@ func applyCellFont(_ name: String, size: CGFloat = 0) {
         return
     }
     cellFont = f
+    cellFontGlyphCache.removeAll()
     cellFontEffectiveSize = Int(eff.rounded())
     cellFontIdealSize = bitmapStrikePPEM(f)
     // A font with embedded bitmap strikes renders crisp (no AA) at exactly
@@ -651,10 +677,12 @@ final class CellView: NSView {
                 let s = String(scalar) as NSString
                 if charWidth(cp) == 2 {
                     drawEmoji(s, cellX: x, cellY: y, cellW: CELL_W * 2)
-                } else {
+                } else if cellFontHasGlyph(cp) {
                     var a = attrs
                     a[.foregroundColor] = nscolor(fg)
                     s.draw(at: NSPoint(x: x, y: y), withAttributes: a)
+                } else {
+                    drawFallbackGlyph(ctx, s, fg: fg, cellX: x, cellY: y)
                 }
             }
             if style & STYLE_UNDERLINE != 0 {
@@ -870,6 +898,31 @@ final class CellView: NSView {
         s.draw(at: NSPoint(x: x + (cellW - glyph.width) / 2,
                            y: y + (CELL_H - glyph.height) / 2),
                withAttributes: [.font: font])
+    }
+
+    /// Draw a single-width codepoint the cell font has no glyph for. Letting
+    /// `NSString.draw` pick its own Core Text fallback renders it with foreign
+    /// metrics that overflow the cell and overdraw the neighbour (so the same
+    /// codepoint looks different depending on what's beside it — the symptom on
+    /// `m³`, U+00B3, which is absent from the CP437 bitmap font). Render it via
+    /// a monospaced fallback scaled to fit, centered, and clipped to the one
+    /// cell so it stays put regardless of context.
+    private func drawFallbackGlyph(_ ctx: CGContext, _ s: NSString, fg: UInt32,
+                                   cellX x: CGFloat, cellY y: CGFloat) {
+        let ref: CGFloat = CELL_H
+        let baseFont = NSFont.monospacedSystemFont(ofSize: ref, weight: .regular)
+        let probe = s.size(withAttributes: [.font: baseFont])
+        guard probe.width > 0, probe.height > 0 else { return }
+        let scale = min(1, min(CELL_W / probe.width, CELL_H / probe.height))
+        let font = NSFont.monospacedSystemFont(
+            ofSize: max(1, ref * scale), weight: .regular)
+        let g = s.size(withAttributes: [.font: font])
+        ctx.saveGState()
+        ctx.clip(to: CGRect(x: x, y: y, width: CELL_W, height: CELL_H))
+        s.draw(at: NSPoint(x: x + (CELL_W - g.width) / 2,
+                           y: y + (CELL_H - g.height) / 2),
+               withAttributes: [.font: font, .foregroundColor: nscolor(fg)])
+        ctx.restoreGState()
     }
 
     // MARK: input
