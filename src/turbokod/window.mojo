@@ -1262,6 +1262,12 @@ struct Window(Copyable, Movable):
         # body content fills the interior; either way nothing should
         # leak outside ``self.rect``.
         var painter = Painter(self.rect)
+        # TV-style drop shadow under the window, matching dialogs. Painted
+        # before the window's own body so it darkens whatever it floats
+        # above (the desktop or a lower window in z-order) without touching
+        # the window's interior. ``paint_drop_shadow`` composites outside
+        # ``self.rect`` only, so it's safe to call before the box fill.
+        paint_drop_shadow(canvas, self.rect)
         var interior = self.rect.inset(1, 1)
         if not interior.is_empty():
             painter.fill(canvas, interior, String(" "), body_bg)
