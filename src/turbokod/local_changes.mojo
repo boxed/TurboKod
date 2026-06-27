@@ -72,9 +72,11 @@ from .git_changes import (
     compute_staged_diff, compute_unstaged_diff,
     fetch_blob_text, fetch_branch_log, fetch_commit_show,
     fetch_git_branches, fetch_git_commits, fetch_git_status,
+    git_state_mtimes, GitStateMtimes,
     parse_unified_diff_files,
     stage_file, unstage_file,
 )
+from .posix import monotonic_ms
 from .install_runner import InstallRunner
 from .string_utils import (
     display_columns,
@@ -135,6 +137,12 @@ comptime _GITOP_AMEND:   Int = 2
 comptime _GITOP_PULL:    Int = 3
 comptime _GITOP_PUSH:    Int = 4
 comptime _GITOP_REVERT:  Int = 5
+
+# How often (ms) the open modal re-checks git for state that changed on
+# disk behind our back — a save in an editor, a commit/checkout in another
+# terminal — so the panels never show a stale worktree. One ``git status``
+# + a few ``stat`` calls per tick; cheap enough at ~1 Hz.
+comptime _LC_POLL_INTERVAL_MS: Int = 1000
 
 # Hard caps on the inputs we'll feed to the TextMate tokenizer for the
 # diff side panels. Above either bound we skip syntax highlighting and
@@ -1073,6 +1081,15 @@ struct LocalChanges(Movable):
     # so a hook failure (or other rejection) doesn't force the user to
     # retype the message. Persists across modal close/reopen.
     var _pending_commit_message: String
+    # Baseline for the external-change poll (see ``_poll_external_change``).
+    # ``_poll_status_fp`` fingerprints the ``git status`` rows (worktree +
+    # index), ``_poll_state`` the ``.git`` metadata mtimes (commit / checkout
+    # / reset). Both are re-seeded in ``_reload_files`` every time we reload —
+    # whether from our own mutation or from a detected external change — so the
+    # poll only fires on state we *didn't* cause. ``_last_poll_ms`` rate-limits.
+    var _poll_status_fp: String
+    var _poll_state: GitStateMtimes
+    var _last_poll_ms: Int
 
     def __init__(out self):
         self.active = False
@@ -1119,6 +1136,9 @@ struct LocalChanges(Movable):
         self._git_revert_untracked = False
         self._discard_diff_idx = -1
         self._pending_commit_message = String("")
+        self._poll_status_fp = String("")
+        self._poll_state = GitStateMtimes.zero()
+        self._last_poll_ms = 0
 
     def open(mut self, var root: String):
         """Populate all three panels synchronously. Diff/branches/log
@@ -1198,6 +1218,54 @@ struct LocalChanges(Movable):
             self.files.append(
                 FileEntry(st.path, st.staged, st.worktree, sd^, ud^),
             )
+        # Re-seed the external-change poll baseline off the same status we
+        # just read, so a reload we initiated never re-triggers the poll.
+        self._poll_status_fp = LocalChanges._status_fingerprint(statuses)
+        self._poll_state = git_state_mtimes(self.root)
+        self._last_poll_ms = monotonic_ms()
+
+    @staticmethod
+    def _status_fingerprint(statuses: List[GitFileStatus]) -> String:
+        """A compact, order-stable digest of ``git status`` rows — staged +
+        worktree code and path per entry. Equal fingerprints mean the
+        worktree/index state the modal renders is unchanged."""
+        var fp = String("")
+        for i in range(len(statuses)):
+            var s = statuses[i]
+            fp += String(Int(s.staged)) + "," + String(Int(s.worktree))
+            fp += ":" + s.path + "\n"
+        return fp^
+
+    def _poll_external_change(mut self):
+        """While the modal is open, watch for git state that changed on disk
+        behind our back — an editor saved a file, a commit/checkout/reset
+        happened in another terminal — and reload so the panels never show a
+        stale worktree. Rate-limited to ~1 Hz.
+
+        Skipped while one of our own git ops is in flight (it refreshes on
+        completion via ``tick``) and while an overlay is up (a refresh would
+        shuffle the list a confirmation prompt is pinned to). The status
+        fingerprint catches worktree + index changes; the ``.git`` mtime
+        fingerprint catches commits / checkouts that leave the worktree
+        unchanged but reshuffle the Branches / Commits panels."""
+        if not self.active:
+            return
+        if self._git_op != _GITOP_NONE:
+            return
+        if self.overlay != _OVERLAY_NONE:
+            return
+        var now = monotonic_ms()
+        if now - self._last_poll_ms < _LC_POLL_INTERVAL_MS:
+            return
+        self._last_poll_ms = now
+        var statuses = fetch_git_status(self.root)
+        var fp = LocalChanges._status_fingerprint(statuses)
+        var state = git_state_mtimes(self.root)
+        if fp == self._poll_status_fp and state.equals(self._poll_state):
+            return
+        # ``_refresh_full`` reloads every panel, clamps the selections, and
+        # re-seeds the poll baseline through ``_reload_files``.
+        self._refresh_full()
 
     def close(mut self):
         self.active = False
@@ -3070,6 +3138,9 @@ struct LocalChanges(Movable):
         was still running (e.g. the user Enter'd a file to open it), we
         still need to drain the pipes and reap the pid here so the
         child doesn't get orphaned with a full kernel pipe buffer."""
+        # Notice on-disk git changes we didn't cause and reload (no-op while
+        # one of our ops is in flight — it gates on ``_git_op``).
+        self._poll_external_change()
         if self._git_op == _GITOP_NONE:
             return
         var maybe = self.git_runner.tick()
