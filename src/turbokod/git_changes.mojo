@@ -1039,12 +1039,15 @@ struct GitCommit(ImplicitlyCopyable, Movable):
     ``is_pushed`` is True when the commit is reachable from at least one
     remote-tracking ref (i.e. already pushed somewhere); False when it
     only exists locally. With no remotes configured, every commit is
-    treated as unpushed."""
+    treated as unpushed. ``tags`` is the space-separated list of tag
+    names pointing at this commit (empty when none), parsed from the
+    ``%D`` ref decoration."""
     var short_sha: String
     var author: String
     var date: String
     var subject: String
     var is_pushed: Bool
+    var tags: String
 
 
 @fieldwise_init
@@ -1166,6 +1169,30 @@ def _list_contains(shas: List[String], sha: String) -> Bool:
     return False
 
 
+def _extract_tags(decoration: String) -> String:
+    """Pull tag names out of a ``%D`` ref decoration string. ``%D`` is a
+    comma+space separated list of refs like
+    ``HEAD -> main, tag: v1.0, tag: v1.1, origin/main``; we keep only the
+    ``tag: <name>`` entries and return their names joined by a single
+    space (empty string when the commit carries no tags)."""
+    var tags = String("")
+    var parts = _split_on_byte(decoration, 0x2C)  # ','
+    for i in range(len(parts)):
+        var p = String(parts[i].strip())
+        if not p.startswith("tag: "):
+            continue
+        var pb = p.as_bytes()
+        var name = String(
+            StringSlice(unsafe_from_utf8=pb[5:len(pb)]),
+        ).strip()
+        if len(name.as_bytes()) == 0:
+            continue
+        if len(tags.as_bytes()) > 0:
+            tags += String(" ")
+        tags += String(name)
+    return tags^
+
+
 def fetch_git_commits(
     project_root: String, limit: Int = 50,
 ) -> List[GitCommit]:
@@ -1181,7 +1208,9 @@ def fetch_git_commits(
     args.append(String("-") + String(limit))
     args.append(String("--no-color"))
     args.append(String("--date=short"))
-    args.append(String("--pretty=format:%h%x09%an%x09%ad%x09%s"))
+    # ``%D`` (ref decoration) sits before ``%s`` so the subject stays the
+    # tab-absorbing last field; %D never contains a tab itself.
+    args.append(String("--pretty=format:%h%x09%an%x09%ad%x09%D%x09%s"))
     var stdout = _git_stdout(project_root, args^)
     var unpushed = _fetch_unpushed_short_shas(project_root, limit)
     var lines = split_lines_no_trailing(stdout)
@@ -1189,11 +1218,12 @@ def fetch_git_commits(
         var line = lines[li]
         if len(line.as_bytes()) == 0:
             continue
-        var fields = _split_tab_fields(line, 4)
+        var fields = _split_tab_fields(line, 5)
         var pushed = not _list_contains(unpushed, fields[0])
+        var tags = _extract_tags(fields[3])
         out.append(
             GitCommit(
-                fields[0], fields[1], fields[2], fields[3], pushed,
+                fields[0], fields[1], fields[2], fields[4], pushed, tags,
             ),
         )
     return out^

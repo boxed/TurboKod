@@ -43,6 +43,7 @@ from std.collections.list import List
 
 from .canvas import Canvas, paint_drop_shadow, utf8_byte_to_cell, utf8_codepoint_count
 from .cell import Cell
+from .clipboard import clipboard_copy
 from .colors import (
     Attr, BLACK, BORDER_FOCUS, CYAN, DARK_GRAY, EDITOR_BG, EDITOR_FG,
     GREEN, LIGHT_CYAN, LIGHT_GRAY, LIGHT_GREEN, LIGHT_MAGENTA, LIGHT_RED,
@@ -52,7 +53,7 @@ from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     KEY_BACKSPACE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME, KEY_LEFT,
     KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP,
-    MOD_SHIFT,
+    MOD_META, MOD_SHIFT,
     MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
@@ -1729,19 +1730,19 @@ struct LocalChanges(Movable):
         var hint: String
         if self.focus == _PANE_RIGHT_UNSTAGED:
             hint = String(
-                " Up/Down: line  Space: stage  d: discard line  Left: back  ESC: close ",
+                " Up/Down: line  Space: stage  d: discard line  ⌘C: copy  Left: back  ESC: close ",
             )
         elif self._is_right_focus():
             hint = String(
-                " Up/Down: line  Tab: panel  Space: stage/unstage  Left: back  ESC: close ",
+                " Up/Down: line  Tab: panel  Space: stage/unstage  ⌘C: copy  Left: back  ESC: close ",
             )
         elif self.focus == _PANE_FILES:
             hint = String(
-                " c:commit A:amend d:revert p:pull P:push  Space:stage  Enter:open  ESC:close ",
+                " c:commit A:amend d:revert p:pull P:push  Space:stage  ⌘C:copy  Enter:open  ESC:close ",
             )
         else:
             hint = String(
-                " Tab: pane  Up/Down: select  Right: diff  Space: stage  Enter: open  ESC: close ",
+                " Tab: pane  Up/Down: select  Right: diff  ⌘C: copy  Enter: open  ESC: close ",
             )
         var hx = bounds.b.x - display_columns(hint) - 1
         if hx < bounds.a.x + 1:
@@ -2023,6 +2024,9 @@ struct LocalChanges(Movable):
         var sha_pushed   = Attr(LIGHT_GREEN, EDITOR_BG)
         var sha_local    = Attr(LIGHT_RED, EDITOR_BG)
         var subject_attr = Attr(EDITOR_FG, EDITOR_BG)
+        # Tags get their own colour, sitting between the SHA and the
+        # author — yellow, matching git's default tag decoration.
+        var tag_attr     = Attr(LIGHT_YELLOW, EDITOR_BG)
         for i in range(height):
             var idx = self.scroll_commits + i
             if idx >= len(self.commits):
@@ -2040,6 +2044,7 @@ struct LocalChanges(Movable):
             # Per-committer color so the same author's rows stand out down
             # the log.
             var seg_author = Attr(_author_color(co.author), EDITOR_BG)
+            var seg_tags   = tag_attr
             var seg_subj   = subject_attr
             if is_sel:
                 # On the selected row, keep the *foreground* color coding —
@@ -2051,6 +2056,7 @@ struct LocalChanges(Movable):
                 var sel_bg = row_attr.bg
                 seg_sha = seg_sha.with_bg(sel_bg)
                 seg_author = seg_author.with_bg(sel_bg)
+                seg_tags = seg_tags.with_bg(sel_bg)
                 seg_subj = row_attr
             # Layout: ``<sha> <AB> <subject>`` painted in three
             # passes; each ``put_text`` clips at ``right + 1`` so a
@@ -2077,6 +2083,12 @@ struct LocalChanges(Movable):
                 Point(x, y), _author_abbrev(co.author), seg_author, stop,
             )
             if x >= stop: continue
+            # Tags, in their own colour, between the author and the subject.
+            if len(co.tags.as_bytes()) > 0:
+                x += canvas.put_text(Point(x, y), String(" "), row_attr, stop)
+                if x >= stop: continue
+                x += canvas.put_text(Point(x, y), co.tags, seg_tags, stop)
+                if x >= stop: continue
             x += canvas.put_text(Point(x, y), String(" "), row_attr, stop)
             if x >= stop: continue
             _ = canvas.put_text(
@@ -2602,6 +2614,48 @@ struct LocalChanges(Movable):
             return
         self.focus = self.last_sidebar_focus
 
+    def _copy_focused(mut self):
+        """Copy whatever the focused pane points at to the system
+        clipboard:
+
+        * Files / right diff panes (Unstaged / Staged / Info) — the
+          single line under the cursor. Diff body rows store their text
+          with the ``+`` / ``-`` / space gutter already stripped, so the
+          copy is clean code, not a patch fragment.
+        * Commits — ``<short_sha> <subject>``.
+        * Branches — the branch name.
+
+        Silent — copying is its own confirmation; an out-of-range
+        cursor / empty pane just copies nothing."""
+        if self.focus == _PANE_BRANCHES:
+            if 0 <= self.sel_branch and self.sel_branch < len(self.branches):
+                clipboard_copy(self.branches[self.sel_branch].name.copy())
+            return
+        if self.focus == _PANE_COMMITS:
+            if 0 <= self.sel_commit and self.sel_commit < len(self.commits):
+                var c = self.commits[self.sel_commit]
+                clipboard_copy(c.short_sha + String(" ") + c.subject)
+            return
+        # File row, or any of the three right diff/info panes: copy the
+        # cursor's line. ``_PANE_FILES`` copies the project-relative path;
+        # the right panes copy the diff/log line under the cursor.
+        if self.focus == _PANE_FILES:
+            if 0 <= self.sel_file and self.sel_file < len(self.files):
+                clipboard_copy(self.files[self.sel_file].path.copy())
+            return
+        if self.focus == _PANE_RIGHT_UNSTAGED:
+            if 0 <= self.unstaged.cursor \
+                    and self.unstaged.cursor < len(self.unstaged.lines):
+                clipboard_copy(self.unstaged.lines[self.unstaged.cursor].copy())
+        elif self.focus == _PANE_RIGHT_STAGED:
+            if 0 <= self.staged.cursor \
+                    and self.staged.cursor < len(self.staged.lines):
+                clipboard_copy(self.staged.lines[self.staged.cursor].copy())
+        elif self.focus == _PANE_RIGHT_INFO:
+            if 0 <= self.info.cursor \
+                    and self.info.cursor < len(self.info.lines):
+                clipboard_copy(self.info.lines[self.info.cursor].copy())
+
     def handle_key(
         mut self, event: Event, container_bounds: Rect,
         mut registry: GrammarRegistry,
@@ -2624,6 +2678,16 @@ struct LocalChanges(Movable):
                 )
                 return True
             self.close()
+            return True
+        # Copy (Cmd/⌘+C). Handled before the file-pane bare-letter
+        # shortcuts below so the ⌘ chord doesn't fall through to 'c' →
+        # commit. The native frontend replays its ⌘C menu equivalent
+        # into this handler as a MOD_META key event (see the
+        # ``_modal_owns_input`` gate in desktop.dispatch_action), so the
+        # same branch serves both frontends. What gets copied depends on
+        # the focused pane.
+        if k == UInt32(0x63) and (event.mods & MOD_META) != 0:
+            self._copy_focused()
             return True
         # File-pane git operations: c / A / d / p / P. These are
         # repo-level (or selected-file-level) actions that only make
