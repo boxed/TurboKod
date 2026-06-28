@@ -299,7 +299,17 @@ def _path_for_scope(scope: String) -> String:
         return String("src/turbokod/grammars/javascript.tmLanguage.json")
     if scope == String("source.ts"):
         return String("src/turbokod/grammars/typescript.tmLanguage.json")
-    if scope == String("source.css"):
+    if scope == String("source.css") or scope == String("source.css.django"):
+        # ``source.css.django`` is the scope the vscode-django grammar
+        # embeds ``<style>`` contents under, but it never ships a grammar
+        # for it (a dangling include). Route it to the bundled CSS
+        # grammar so style blocks in Django templates get full CSS
+        # highlighting. The Django template tags (``{{ }}`` / ``{% %}`` /
+        # ``{# #}``) that appear *inside* that CSS are painted by the
+        # post-tokenize ``_apply_django_template_overlay`` pass — the
+        # tokenizer can't reach them from grammar root patterns once
+        # CSS's own ``{ }`` rule context is open, and we don't implement
+        # TextMate injection grammars.
         return String("src/turbokod/grammars/css.tmLanguage.json")
     if scope == String("text.html.basic"):
         return String("src/turbokod/grammars/html.tmLanguage.json")

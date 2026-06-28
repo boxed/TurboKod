@@ -218,6 +218,7 @@ from turbokod.debugger_config import (
 )
 from turbokod.highlight import (
     DefinitionRequest, GrammarRegistry, Highlight, HighlightCache,
+    _apply_django_template_overlay,
     embedded_language_extensions,
     extension_of, highlight_for_extension, highlight_incremental,
     highlight_comment_attr, highlight_decorator_attr, highlight_ident_attr,
@@ -8467,6 +8468,66 @@ def test_textmate_html_embeds_css_inside_style_block() raises:
     # don't pin to a specific count because the bundled grammar's
     # exact tokenization can shift across grammar updates.
     assert_true(row1_count >= 4)
+
+
+def test_django_template_overlay_fills_embedded_tags() raises:
+    """``_apply_django_template_overlay`` paints Django template tags
+    (``{{ }}`` / ``{% %}`` / ``{# #}``) the base grammar left uncoloured.
+    This is what gives ``<style>`` / ``<script>`` blocks in Django
+    templates their template-tag tinting: the CSS/JS grammar embedded
+    under ``source.css.django`` / ``source.js`` can't reach a tag once
+    its own ``{ }`` context is open (we don't do TextMate injection), so
+    the overlay fills the gap. Tags the grammar already coloured (the
+    HTML surface) are skipped so its finer per-token tinting survives.
+    """
+    var lines = List[String]()
+    # row 0: a tag nested inside a CSS declaration value — the case the
+    # grammar can't reach. The leading ``{`` (CSS block open) must NOT be
+    # mistaken for a tag opener.
+    lines.append(String(".cls { color: {{ theme }}; }"))
+    lines.append(String("{% if dark %}"))            # row 1: block tag
+    lines.append(String("/* {# note #} */"))         # row 2: django comment
+
+    # No pre-existing highlights cover the tags (CSS left them plain).
+    var hls = List[Highlight]()
+    _apply_django_template_overlay(String("django-html"), lines, hls)
+
+    var saw_var = False
+    var saw_tag = False
+    var saw_comment = False
+    var saw_block_open = False
+    for i in range(len(hls)):
+        var h = hls[i]
+        # ``{{ theme }}`` begins at byte 14 in ``.cls { color: {{...``.
+        if h.row == 0 and h.attr == highlight_keyword_attr() \
+                and h.col_start == 14 and h.col_end == 25:
+            saw_var = True
+        # The CSS block-open ``{`` at byte 5 must not be coloured.
+        if h.row == 0 and h.col_start == 5:
+            saw_block_open = True
+        if h.row == 1 and h.attr == highlight_keyword_attr() \
+                and h.col_start == 0:
+            saw_tag = True
+        if h.row == 2 and h.attr == highlight_comment_attr():
+            saw_comment = True
+    assert_true(saw_var)
+    assert_true(saw_tag)
+    assert_true(saw_comment)
+    assert_true(not saw_block_open)
+
+    # A tag the grammar already coloured (keyword on its opener) is left
+    # alone — the overlay appends nothing, preserving the grammar's tint.
+    var html_lines = List[String]()
+    html_lines.append(String("<a>{{ x }}</a>"))      # ``{{`` at byte 3
+    var html_hls = List[Highlight]()
+    html_hls.append(Highlight(0, 3, 10, highlight_keyword_attr()))
+    _apply_django_template_overlay(String("django-html"), html_lines, html_hls)
+    assert_equal(len(html_hls), 1)
+
+    # Non-django languages are a no-op (plain CSS keeps its ``{{`` plain).
+    var other = List[Highlight]()
+    _apply_django_template_overlay(String("css"), lines, other)
+    assert_equal(len(other), 0)
 
 
 def test_textmate_capture_patterns_run_inside_group() raises:
@@ -22377,6 +22438,7 @@ def _run_chunk_02() raises:
     test_highlight_rst_grammar_paints_common_constructs()
     test_textmate_brackets_paint_as_operators()
     test_textmate_html_embeds_css_inside_style_block()
+    test_django_template_overlay_fills_embedded_tags()
     test_textmate_capture_patterns_run_inside_group()
     test_textmate_comment_marker_and_covered_brackets()
     test_textmate_while_rule_keeps_scope_open_per_line()

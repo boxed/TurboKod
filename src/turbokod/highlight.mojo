@@ -29,7 +29,7 @@ from .grammar_install import (
     user_grammar_path_for_ext,
 )
 from .project_grammars import GrammarOverride
-from .string_utils import codepoint_at, is_word_codepoint, prev_codepoint_start
+from .string_utils import codepoint_at, is_word_codepoint, prev_codepoint_start, starts_with
 from .tm_grammar import Grammar, load_grammar_from_file
 from .tm_tokenizer import (
     Frame, copy_stack, stack_eq,
@@ -497,6 +497,7 @@ def highlight_incremental(
     if len(path.as_bytes()) == 0:
         var fb = _fallback_for_extension(ext, lines)
         _apply_intellij_injections(ext, lines, fb, registry)
+        _apply_django_template_overlay(cache_key, lines, fb)
         return fb^
 
     # Grammar load — registry hit if the cache_key is already known,
@@ -517,6 +518,7 @@ def highlight_incremental(
         except:
             var fb = _fallback_for_extension(ext, lines)
             _apply_intellij_injections(ext, lines, fb, registry)
+            _apply_django_template_overlay(cache_key, lines, fb)
             return fb^
 
     # Per-Editor state: invalidate when the cache key changes (either
@@ -550,8 +552,10 @@ def highlight_incremental(
         if len(hls) == 0 and _has_nonempty_line(lines):
             var fb = _fallback_for_extension(ext, lines)
             _apply_intellij_injections(ext, lines, fb, registry)
+            _apply_django_template_overlay(cache_key, lines, fb)
             return fb^
         _apply_intellij_injections(ext, lines, hls, registry)
+        _apply_django_template_overlay(cache_key, lines, hls)
         return hls^
 
     # Incremental path. Start state = post-state at end of line
@@ -609,8 +613,10 @@ def highlight_incremental(
     if len(out) == 0 and _has_nonempty_line(lines):
         var fb = _fallback_for_extension(ext, lines)
         _apply_intellij_injections(ext, lines, fb, registry)
+        _apply_django_template_overlay(cache_key, lines, fb)
         return fb^
     _apply_intellij_injections(ext, lines, out, registry)
+    _apply_django_template_overlay(cache_key, lines, out)
     return out^
 
 
@@ -1742,6 +1748,121 @@ def _starts_with(line: String, i: Int, needle: List[UInt8]) -> Bool:
         if b[i + k] != needle[k]:
             return False
     return True
+
+
+# --- Django template-tag overlay ------------------------------------------
+#
+# The django-html grammar (vscode-django) threads its template tags
+# (``{{ }}`` / ``{% %}`` / ``{# #}``) through the HTML structure by hand,
+# so they colour correctly in markup, attributes, and text nodes. But it
+# embeds ``<style>`` / ``<script>`` bodies via ``source.css.django`` /
+# ``source.js`` — and once the CSS (or JS) grammar's own ``{ }`` context
+# opens, no root-level django pattern can fire inside it (we don't
+# implement TextMate injection grammars). So a tag like
+# ``color: {{ theme }}`` inside a style block gets no django colour from
+# the grammar.
+#
+# This post-tokenize pass fills that gap: for django-language buffers it
+# scans every line for the three tag forms and overlays a colour on any
+# tag the grammar left untinted. Tags the grammar already coloured (the
+# whole HTML surface) are skipped, so its finer per-token colouring
+# (tag-name vs. filter vs. variable) is preserved — the overlay only
+# reaches the embedded CSS/JS regions, which would otherwise be plain.
+
+
+@fieldwise_init
+struct _DjangoTag(ImplicitlyCopyable, Movable):
+    """An opener/closer byte-pair for one Django template-tag form.
+    ``comment`` selects the comment colour (for ``{# #}``) over the
+    keyword colour (for ``{{ }}`` / ``{% %}``)."""
+    var open1: UInt8
+    var close1: UInt8
+    var comment: Bool
+
+
+def _apply_django_template_overlay(
+    lang_key: String, lines: List[String], mut hls: List[Highlight],
+):
+    """Overlay Django template-tag colours on ``hls`` for django-language
+    buffers (``lang_key`` like ``"django-html"``). No-op for any other
+    language. Only tags the base grammar left uncoloured are painted, so
+    the django-html grammar's own (finer) tinting in the HTML surface is
+    untouched and only embedded CSS/JS regions get filled in.
+
+    Single-line tags are handled fully; an unterminated opener colours to
+    end-of-line (rare for the embedded case this targets, and never worse
+    than the plain text it replaces)."""
+    if not starts_with(lang_key, String("django")):
+        return
+    # ``{{`` and ``{%`` read as keyword; ``{#`` as comment — matching the
+    # scope→attr mapping the grammar uses for the same tags in markup.
+    var forms = List[_DjangoTag]()
+    forms.append(_DjangoTag(0x7B, 0x7D, False))  # {{ ... }}
+    forms.append(_DjangoTag(0x25, 0x25, False))  # {% ... %}  (second byte)
+    forms.append(_DjangoTag(0x23, 0x23, True))   # {# ... #}
+    var kw = highlight_keyword_attr()
+    var cm = highlight_comment_attr()
+    var n = len(lines)
+    var buckets = _hl_buckets(hls, n)
+    for row in range(n):
+        var b = lines[row].as_bytes()
+        var L = len(b)
+        ref row_hls = buckets[row]
+        var col = 0
+        while col + 1 < L:
+            if b[col] != 0x7B:  # '{'
+                col += 1
+                continue
+            var nb = b[col + 1]
+            var matched = -1
+            for fi in range(len(forms)):
+                # First form opens on ``{{``; the other two on ``{%`` /
+                # ``{#`` where ``open1`` is the *second* byte.
+                if fi == 0:
+                    if nb == 0x7B:
+                        matched = 0
+                        break
+                elif nb == forms[fi].open1:
+                    matched = fi
+                    break
+            if matched < 0:
+                col += 1
+                continue
+            var form = forms[matched]
+            # Find the matching two-byte closer after the opener.
+            var c1: UInt8
+            if matched == 0:
+                c1 = 0x7D  # '}'
+            else:
+                c1 = form.close1
+            var end = -1
+            var j = col + 2
+            while j + 1 < L:
+                if b[j] == c1 and b[j + 1] == 0x7D:
+                    end = j + 2
+                    break
+                j += 1
+            var span_end = end if end >= 0 else L
+            # Skip if the grammar already coloured this tag (its opener
+            # cell carries the same django attr) — preserves the markup
+            # surface's finer per-token colouring.
+            var want = cm if form.comment else kw
+            var already = False
+            for hi in range(len(row_hls)):
+                var h = row_hls[hi]
+                if h.col_start <= col and col < h.col_end and h.attr == want:
+                    already = True
+                    break
+            if not already:
+                # Appended at the end of ``hls`` (after every grammar
+                # span) so the editor's per-cell overlay — which applies
+                # highlights in list order, later winning — paints the
+                # django colour over whatever CSS/JS left underneath.
+                # Consumers bucket by row, so the non-monotonic append is
+                # fine; the overlay is re-derived each paint and never
+                # enters the incremental cache.
+                hls.append(Highlight(row, col, span_end, want))
+            col = span_end
 
 
 # --- IntelliJ-style language injection ------------------------------------
