@@ -11156,6 +11156,14 @@ struct Desktop(Movable):
         self.windows.windows[existing].editor.reveal_cursor(
             self.windows.windows[existing].interior(), golden=golden,
         )
+        # A deliberate jump (goto-def, references, Find Symbol, find-results
+        # double-click, …) should also bring the editor's OS window to the
+        # front + key — the trigger may have come from a floating panel
+        # window (Find Results / debug) sitting on top. Mirrors
+        # ``open_file_at``. Gated on ``golden`` so debugger single-stepping
+        # (``golden=False``) does *not* yank the window forward each step.
+        if golden:
+            self.main_focus_request = True
 
     def _click_landed_at_definition(
         self, lsp_idx: Int, target: DefinitionResolved,
@@ -11472,6 +11480,8 @@ struct Desktop(Movable):
         self.windows.windows[existing].editor.reveal_cursor(
             self.windows.windows[existing].interior(), golden=True,
         )
+        # Deliberate jump: raise the editor's OS window (see ``_jump_to``).
+        self.main_focus_request = True
 
     def _open_recent_picker(mut self):
         """Open the QuickOpen picker over the recents list, skipping the
