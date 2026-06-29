@@ -553,7 +553,6 @@ comptime _TREE_LABEL_LEFT   = String("File tree: left")
 # itself now carries two input rows (find + replace), so this is just
 # a tag distinguishing in-buffer replace from project-wide replace.
 comptime _PA_REPLACE_DO          = String("__pa_replace_do")
-comptime _PA_PROJECT_REPLACE_DO  = String("__pa_project_replace_do")
 comptime _PA_BP_CONDITION        = String("__pa_bp_condition")
 comptime _PA_ADD_WATCH           = String("__pa_add_watch")
 
@@ -6943,6 +6942,32 @@ struct Desktop(Movable):
                 # panel window — this one-shot makes it key so the docked
                 # results are immediately navigable. See ``panel_focus_request``.
                 self.panel_focus_request = True
+            elif self.project_find.do_replace:
+                # Replace All: swap ``query`` → ``replace`` across the
+                # project (the streamed result list was the live preview),
+                # surface the summary window, and close. ``replace_in_project``
+                # re-scans via ``walk_project_files`` honoring the same
+                # toggles, so the on-disk edit matches what the user saw.
+                var find = self.project_find.query.text
+                var replacement = self.project_find.replace.text
+                var opts = SearchOptions(
+                    self.project_find.toggle_case.on,
+                    self.project_find.toggle_word.on,
+                    self.project_find.toggle_regex.on,
+                )
+                self._last_search = find
+                self._last_search_opts = opts
+                self.project_find.close()
+                if self.project:
+                    try:
+                        var summary = replace_in_project(
+                            self.project.value(), find, replacement, opts,
+                        )
+                        self.windows.add(_summary_window(
+                            find, replacement, summary[0], summary[1],
+                        ))
+                    except e:
+                        print("desktop: replace_in_project:", String(e))
             return Optional[String]()
         if self.history.active:
             # Fully modal: it swallows every event, like the review picker.
@@ -8057,7 +8082,14 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == PROJECT_REPLACE:
             if self.project:
-                self._open_project_replace_prompt()
+                if len(which(String("rg")).as_bytes()) == 0:
+                    self.windows.add(_rg_missing_window())
+                else:
+                    self.project_find.open_replace(
+                        self.project.value(),
+                        self._selection_seed_for_search(),
+                        select_prefill=True,
+                    )
             return Optional[String]()
         if action == WINDOW_MAXIMIZE_ALL:
             self.windows.maximize_all(self.workspace_rect(screen))
@@ -11649,17 +11681,6 @@ struct Desktop(Movable):
         )
         self.prompt.set_search_options(self._last_search_opts)
 
-    def _open_project_replace_prompt(mut self):
-        """Project-wide Replace counterpart to ``_open_replace_prompt``
-        — same two-field layout, different submit handler."""
-        self._pending_action = _PA_PROJECT_REPLACE_DO
-        self.prompt.open_replace(
-            String("Find: "), String("Replace: "),
-            self._selection_seed_for_search(),
-            select_prefill=True, show_options=True,
-        )
-        self.prompt.set_search_options(self._last_search_opts)
-
     def _selection_seed_for_search(self) -> String:
         """Return the focused editor's current selection if it's
         single-line, else the empty string. Used by Find / Replace to
@@ -14822,26 +14843,6 @@ struct Desktop(Movable):
                     self.windows.windows[idx].interior(),
                     margin_below=10, margin_above=10,
                 )
-            return Optional[String]()
-        if pa == _PA_PROJECT_REPLACE_DO:
-            var find = text
-            var replacement = second_text
-            self._last_search = find
-            self._last_search_opts = opts
-            # Project replace is intrinsically a "replace all" — the
-            # Find Next / Replace per-match flow doesn't apply across
-            # multiple files. Every button on the dialog runs the same
-            # project-wide swap and surfaces the summary window.
-            if self.project:
-                try:
-                    var summary = replace_in_project(
-                        self.project.value(), find, replacement, opts,
-                    )
-                    self.windows.add(_summary_window(
-                        find, replacement, summary[0], summary[1],
-                    ))
-                except e:
-                    print("desktop: replace_in_project:", String(e))
             return Optional[String]()
         if pa == _PA_BP_CONDITION:
             # ``_pending_arg`` carries ``path|line`` from when the

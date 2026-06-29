@@ -5089,6 +5089,39 @@ def test_desktop_project_find_requires_active_project() raises:
     assert_true(d.project_find.active)
 
 
+def test_desktop_project_replace_opens_find_in_replace_mode() raises:
+    var d = Desktop()
+    # No project: dispatch is a no-op (the modal stays closed).
+    _ = d.dispatch_action(PROJECT_REPLACE, _SCREEN)
+    assert_false(d.project_find.active)
+    # With a project: Cmd+Shift+R opens the same find surface, in replace
+    # mode (a Replace strip + the Replace All action).
+    d.detect_project_from(String("examples/hello.mojo"))
+    _ = d.dispatch_action(PROJECT_REPLACE, _SCREEN)
+    assert_true(d.project_find.active)
+    assert_true(d.project_find.replace_mode)
+    # Tab cycles query(0) -> replace(3) -> scope(1) -> glob(2) -> query(0).
+    assert_equal(d.project_find.focus, 0)
+    d.project_find._cycle_focus(False)
+    assert_equal(d.project_find.focus, 3)
+    d.project_find._cycle_focus(False)
+    assert_equal(d.project_find.focus, 1)
+    d.project_find._cycle_focus(False)
+    assert_equal(d.project_find.focus, 2)
+    d.project_find._cycle_focus(False)
+    assert_equal(d.project_find.focus, 0)
+    # Plain Find (Cmd+Shift+F) reuses the struct but skips replace mode and
+    # keeps the replace strip out of the Tab cycle (query -> scope -> glob).
+    _ = d.dispatch_action(PROJECT_FIND, _SCREEN)
+    assert_false(d.project_find.replace_mode)
+    d.project_find._cycle_focus(False)
+    assert_equal(d.project_find.focus, 1)
+    d.project_find._cycle_focus(False)
+    assert_equal(d.project_find.focus, 2)
+    d.project_find._cycle_focus(False)
+    assert_equal(d.project_find.focus, 0)
+
+
 def test_nav_history_records_initial_open() raises:
     """Opening a file seeds the nav stack with the file's starting
     cursor position so the very first Cmd+[ has somewhere to go."""
@@ -22582,6 +22615,7 @@ def _run_chunk_03() raises:
     test_hotkey_overrides_default_when_registered_later()
     test_hotkey_does_not_fire_while_prompt_active()
     test_desktop_project_find_requires_active_project()
+    test_desktop_project_replace_opens_find_in_replace_mode()
     test_replace_in_project_round_trip()
     test_painter_clips_text_at_right_edge()
     test_painter_skips_codepoints_left_of_clip()

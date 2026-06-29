@@ -83,13 +83,26 @@ comptime _MAX_MATCHES: Int = 1000
 comptime _FOCUS_QUERY: Int = 0
 comptime _FOCUS_SCOPE: Int = 1
 comptime _FOCUS_GLOB: Int = 2
+# Replace-mode only: the replacement-text strip, slotted between the
+# query and the scope/glob fields in the Tab cycle.
+comptime _FOCUS_REPLACE: Int = 3
 
 
 struct ProjectFind(Movable):
     var active: Bool
     var submitted: Bool
+    # False == plain Find-in-Project; True == Replace-in-Project, which
+    # reuses the entire find surface (streaming results, context preview,
+    # scope/glob, toggles) and adds the ``replace`` strip + a ``[ Replace
+    # All ]`` action. Set by ``open`` / ``open_replace`` and stable for the
+    # session, so geometry / paint / focus all branch on it.
+    var replace_mode: Bool
     var root: String
     var query: TextField
+    # Replace-mode only: the replacement text. Edited via Tab between it
+    # and the query field; changing it does *not* re-run the search (the
+    # match set depends only on the query), unlike the other fields.
+    var replace: TextField
     # Relative-path scope: when non-empty, the search is restricted to
     # this subdirectory (or file) of the project. Empty == whole project.
     # Edited via Tab between it and the query field; changing it kicks
@@ -105,6 +118,7 @@ struct ProjectFind(Movable):
     var focus: Int
     # Cached input strip rects for mouse routing.
     var _input_rect: Rect
+    var _replace_rect: Rect   # replace-mode only; empty otherwise
     var _scope_rect: Rect
     var _glob_rect: Rect
     var _last_searched_query: String   # what we last ran a search for
@@ -159,8 +173,17 @@ struct ProjectFind(Movable):
     # ``submitted``, hands ``matches`` / ``query`` / ``root`` to the pane,
     # and closes the dialog. ``matches`` is left intact for the handoff.
     var send_to_panel: Bool
+    # Replace-mode output flag: set when the user fires Replace All (the
+    # title-bar ``[ Replace All ]`` button or Cmd+Enter). The host polls it
+    # the same frame it polls ``submitted`` / ``send_to_panel``, runs
+    # ``replace_in_project`` over ``query`` → ``replace``, and closes the
+    # dialog. Mutually exclusive with ``send_to_panel`` (that's find-mode
+    # only).
+    var do_replace: Bool
     # Cached rect of the title-bar ``[ Panel ]`` button for mouse routing
     # (empty when no results, so the button isn't painted or clickable).
+    # In replace mode this slot paints ``[ Replace All ]`` instead and the
+    # rect feeds ``do_replace``.
     var _panel_btn_rect: Rect
     # Mouse-drag text selection over the bottom context panel — lets the
     # user highlight and Cmd+C source lines straight out of the preview.
@@ -169,12 +192,15 @@ struct ProjectFind(Movable):
     def __init__(out self):
         self.active = False
         self.submitted = False
+        self.replace_mode = False
         self.root = String("")
         self.query = TextField()
+        self.replace = TextField()
         self.scope = TextField()
         self.glob = TextField()
         self.focus = _FOCUS_QUERY
         self._input_rect = Rect(0, 0, 0, 0)
+        self._replace_rect = Rect(0, 0, 0, 0)
         self._scope_rect = Rect(0, 0, 0, 0)
         self._glob_rect = Rect(0, 0, 0, 0)
         self._last_searched_query = String("")
@@ -204,14 +230,28 @@ struct ProjectFind(Movable):
         self._runner = _RgRunner()
         self._truncated = False
         self.send_to_panel = False
+        self.do_replace = False
         self._panel_btn_rect = Rect(0, 0, 0, 0)
         self.ctxsel = PaneTextSelect()
+
+    def open_replace(
+        mut self,
+        var root: String,
+        var prefill: String = String(""),
+        select_prefill: Bool = False,
+    ):
+        """Open the dialog in Replace-in-Project mode — the find surface
+        plus a Replace strip and a ``[ Replace All ]`` action. Thin wrapper
+        over ``open`` so the two entry points share all the resume / reset
+        logic."""
+        self.open(root^, prefill^, select_prefill, replace=True)
 
     def open(
         mut self,
         var root: String,
         var prefill: String = String(""),
         select_prefill: Bool = False,
+        replace: Bool = False,
     ):
         """Open the Find-in-Project dialog.
 
@@ -229,13 +269,17 @@ struct ProjectFind(Movable):
         or overwrite it (type).
         """
         self._runner.cancel()
+        # Mode is set before the resume early-return so flipping between
+        # Find (Cmd+Shift+F) and Replace (Cmd+Shift+R) over the same saved
+        # query lands in the right surface.
+        self.replace_mode = replace
         var has_prefill = len(prefill.as_bytes()) > 0
         var same_root = root == self.root
         var have_saved = len(self.query.text.as_bytes()) > 0
         # Resume path: no new prefill, same project, and we have a
-        # prior query — keep everything (query / matches / scroll /
-        # selected / context) and just re-select the query text so a
-        # type-over still replaces it.
+        # prior query — keep everything (query / replace / matches /
+        # scroll / selected / context) and just re-select the query text
+        # so a type-over still replaces it.
         if not has_prefill and same_root and have_saved:
             self.root = root^
             self.query.select_all()
@@ -247,9 +291,11 @@ struct ProjectFind(Movable):
             self.active = True
             self.submitted = False
             self.send_to_panel = False
+            self.do_replace = False
             return
         self.root = root^
         self.query = TextField()
+        self.replace = TextField()
         if has_prefill:
             self.query.set_text(prefill^)
             if select_prefill:
@@ -262,6 +308,7 @@ struct ProjectFind(Movable):
         self.glob = TextField()
         self.focus = _FOCUS_QUERY
         self._input_rect = Rect(0, 0, 0, 0)
+        self._replace_rect = Rect(0, 0, 0, 0)
         self._scope_rect = Rect(0, 0, 0, 0)
         self._glob_rect = Rect(0, 0, 0, 0)
         self._last_searched_query = String("")
@@ -289,6 +336,7 @@ struct ProjectFind(Movable):
         self.active = True
         self.submitted = False
         self.send_to_panel = False
+        self.do_replace = False
 
     def close(mut self):
         """Hide the dialog and stop any in-flight ``rg`` child, but
@@ -298,6 +346,7 @@ struct ProjectFind(Movable):
         self.active = False
         self.submitted = False
         self.send_to_panel = False
+        self.do_replace = False
         # Any pending debounce belongs to the just-closed session;
         # the next open decides whether to fire a fresh search.
         self._query_dirty_at_ms = 0
@@ -498,17 +547,28 @@ struct ProjectFind(Movable):
 
     # --- geometry ---------------------------------------------------------
 
+    def _ro(self) -> Int:
+        """Replace-row offset: replace mode inserts a ``Replace:`` strip
+        under the query, pushing the Path / Glob / separator / list down
+        by one row. 0 in find mode."""
+        return 1 if self.replace_mode else 0
+
     def _input_y(self, container_bounds: Rect) -> Int:
         return container_bounds.a.y + 1
 
-    def _path_y(self, container_bounds: Rect) -> Int:
+    def _replace_y(self, container_bounds: Rect) -> Int:
+        # Only meaningful (and painted) in replace mode — directly under
+        # the query strip.
         return container_bounds.a.y + 2
 
+    def _path_y(self, container_bounds: Rect) -> Int:
+        return container_bounds.a.y + 2 + self._ro()
+
     def _glob_y(self, container_bounds: Rect) -> Int:
-        return container_bounds.a.y + 3
+        return container_bounds.a.y + 3 + self._ro()
 
     def _list_top(self, container_bounds: Rect) -> Int:
-        return container_bounds.a.y + 5
+        return container_bounds.a.y + 5 + self._ro()
 
     def _context_height(self, container_bounds: Rect) -> Int:
         # 1 separator + ``2 * _CONTEXT_LINES + 1`` content rows.
@@ -534,9 +594,13 @@ struct ProjectFind(Movable):
         var gy = self._glob_y(container_bounds)
         var left = container_bounds.a.x + 1
         var right = container_bounds.b.x - 1
-        return Rect(left, qy, right, qy + 1).contains(pos) \
+        var on_input = Rect(left, qy, right, qy + 1).contains(pos) \
             or Rect(left, py, right, py + 1).contains(pos) \
             or Rect(left, gy, right, gy + 1).contains(pos)
+        if self.replace_mode:
+            var ry = self._replace_y(container_bounds)
+            on_input = on_input or Rect(left, ry, right, ry + 1).contains(pos)
+        return on_input
 
     # --- paint ------------------------------------------------------------
 
@@ -565,20 +629,25 @@ struct ProjectFind(Movable):
         painter.fill(canvas, container_bounds, String(" "), bg)
         painter.draw_box(canvas, container_bounds, border, True)
         # Title — framework helper enforces title bg = body bg.
+        var title_text = String(" Replace in Project ") if self.replace_mode \
+            else String(" Find in Project ")
         paint_window_title(
-            canvas, container_bounds, String(" Find in Project "), title_attr, bg,
+            canvas, container_bounds, title_text, title_attr, bg,
         )
         # Standard ``[■]`` close button at the top-LEFT — equivalent to
         # ESC / cancel. Same chrome the editor windows and other dialogs
         # use, painted via the shared ``paint_close_button`` helper.
         paint_close_button(canvas, Point(container_bounds.a.x, container_bounds.a.y), border)
-        # Title-bar ``[ Panel ]`` button: docks the current result set into
-        # the persistent Find Results pane (Cmd+Enter does the same). Only
-        # painted once there are hits to keep — empty otherwise so the mouse
-        # router treats it as absent.
+        # Title-bar action button. In find mode it's ``[ Panel ]`` (docks
+        # the current result set into the persistent Find Results pane;
+        # Cmd+Enter does the same). In replace mode the same slot is
+        # ``[ Replace All ]`` (Cmd+Enter does the same). Only painted once
+        # there are hits — empty otherwise so the mouse router treats it as
+        # absent.
         self._panel_btn_rect = Rect(0, 0, 0, 0)
         if len(self.matches) > 0:
-            var btn_label = String(" [ Panel ] ")
+            var btn_label = String(" [ Replace All ] ") if self.replace_mode \
+                else String(" [ Panel ] ")
             var btn_w = display_columns(btn_label)
             var btn_x = container_bounds.b.x - btn_w - 1
             if btn_x > container_bounds.a.x + 6:
@@ -637,6 +706,24 @@ struct ProjectFind(Movable):
         paint_option_toggle(
             canvas, self.toggle_regex, toggle_off, toggle_on, container_bounds.b.x - 1,
         )
+        # Replace row (replace mode only): ``Replace: <text>`` directly under
+        # the query, label width matched to ``Search:`` so the field's left
+        # edge lines up with the others. No toggles ride on it — the search
+        # flags live on the query row.
+        self._replace_rect = Rect(0, 0, 0, 0)
+        if self.replace_mode:
+            var rep_y = self._replace_y(container_bounds)
+            var rep_label = String(" Replace:")
+            _ = painter.put_text(
+                canvas, Point(container_bounds.a.x + 1, rep_y), rep_label, label_attr,
+            )
+            var rx = container_bounds.a.x + 1 + display_columns(rep_label)
+            var rw_max = container_bounds.b.x - 1 - rx
+            if rw_max < 0:
+                rw_max = 0
+            var rep_rect = Rect(rx, rep_y, rx + rw_max, rep_y + 1)
+            self._replace_rect = rep_rect
+            self.replace.paint(canvas, rep_rect, self.focus == _FOCUS_REPLACE)
         # Path-scope row: ``Path: <relative path>`` — restricts the search
         # to a subdirectory (or file). Empty means the whole project. The
         # label is padded to the width of ``Search:`` so the two fields'
@@ -770,7 +857,11 @@ struct ProjectFind(Movable):
         # the same read-only-selection color ``TextLog`` uses).
         self.ctxsel.paint_overlay(canvas, container_bounds, Attr(BLACK, CYAN))
         # Hint at the very bottom (overlays the bottom border).
-        var hint = String(" Enter: open  Tab: query/path/glob  Cmd+Enter: panel  ESC: cancel  Up/Down: navigate ")
+        var hint: String
+        if self.replace_mode:
+            hint = String(" Enter: open  Tab: fields  Cmd+Enter: replace all  ESC: cancel  Up/Down: navigate ")
+        else:
+            hint = String(" Enter: open  Tab: query/path/glob  Cmd+Enter: panel  ESC: cancel  Up/Down: navigate ")
         var hx = container_bounds.b.x - display_columns(hint) - 1
         if hx < container_bounds.a.x + 1:
             hx = container_bounds.a.x + 1
@@ -918,19 +1009,21 @@ struct ProjectFind(Movable):
         if k == KEY_ESC:
             self.close()
             return True
-        # Tab / Shift+Tab cycles focus across the query, scope, and glob
-        # fields. Shift reverses the direction.
+        # Tab / Shift+Tab cycles focus across the editable strips — query →
+        # (replace) → scope → glob. The replace strip is in the cycle only
+        # in replace mode. Shift reverses the direction.
         if k == KEY_TAB:
-            if (event.mods & MOD_SHIFT) != 0:
-                self.focus = (self.focus + 2) % 3
-            else:
-                self.focus = (self.focus + 1) % 3
+            self._cycle_focus((event.mods & MOD_SHIFT) != 0)
             return True
-        # Cmd+Enter docks the current results into the Find Results pane
-        # (checked before the plain-Enter open so the modifier wins).
+        # Cmd+Enter fires the title-bar action (checked before the
+        # plain-Enter open so the modifier wins): Replace All in replace
+        # mode, dock-to-panel in find mode.
         if k == KEY_ENTER and (event.mods & MOD_META) != 0:
             if len(self.matches) > 0:
-                self.send_to_panel = True
+                if self.replace_mode:
+                    self.do_replace = True
+                else:
+                    self.send_to_panel = True
             return True
         if k == KEY_ENTER:
             if self.selected < 0 or self.selected >= len(self.matches):
@@ -946,7 +1039,11 @@ struct ProjectFind(Movable):
             return True
         # Route typed input to whichever field has focus. The query, the
         # scope, and the glob all kick off a fresh debounced search on
-        # change.
+        # change; the replace field does not — the replacement text has no
+        # bearing on which lines match.
+        if self.focus == _FOCUS_REPLACE:
+            _ = self.replace.handle_key(event)
+            return True
         var r: TextFieldKeyResult
         if self.focus == _FOCUS_SCOPE:
             r = self.scope.handle_key(event)
@@ -959,6 +1056,25 @@ struct ProjectFind(Movable):
                 self._mark_query_dirty(now_ms)
             return True
         return True
+
+    def _cycle_focus(mut self, backward: Bool):
+        """Advance (or reverse) keyboard focus across the editable strips.
+        The order is query → replace → scope → glob, with the replace strip
+        present only in replace mode."""
+        var order = List[Int]()
+        order.append(_FOCUS_QUERY)
+        if self.replace_mode:
+            order.append(_FOCUS_REPLACE)
+        order.append(_FOCUS_SCOPE)
+        order.append(_FOCUS_GLOB)
+        var n = len(order)
+        var cur = 0
+        for i in range(n):
+            if order[i] == self.focus:
+                cur = i
+                break
+        var nxt = (cur + n - 1) % n if backward else (cur + 1) % n
+        self.focus = order[nxt]
 
     def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Bool:
         if not self.active:
@@ -979,13 +1095,17 @@ struct ProjectFind(Movable):
         if close_button_clicked(container_bounds, event):
             self.close()
             return True
-        # Title-bar ``[ Panel ]`` button — dock the current results.
+        # Title-bar action button — Replace All in replace mode, dock the
+        # current results to the panel in find mode.
         if event.pressed and not event.motion \
                 and event.button == MOUSE_BUTTON_LEFT \
                 and self._panel_btn_rect.width() > 0 \
                 and self._panel_btn_rect.contains(event.pos):
             if len(self.matches) > 0:
-                self.send_to_panel = True
+                if self.replace_mode:
+                    self.do_replace = True
+                else:
+                    self.send_to_panel = True
             return True
         # Toggles run first so a click on a chip doesn't slip through
         # to the input field and reposition the cursor; the same call
@@ -1015,6 +1135,11 @@ struct ProjectFind(Movable):
             # release events keep the existing focus.
             if event.pressed and not event.motion:
                 self.focus = _FOCUS_QUERY
+            return True
+        if self._replace_rect.width() > 0 \
+                and self.replace.handle_mouse(event, self._replace_rect):
+            if event.pressed and not event.motion:
+                self.focus = _FOCUS_REPLACE
             return True
         if self._scope_rect.width() > 0 \
                 and self.scope.handle_mouse(event, self._scope_rect):
