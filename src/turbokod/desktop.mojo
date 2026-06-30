@@ -792,6 +792,15 @@ struct Desktop(Movable):
     # mouse/key events to it, so the in-grid menu disappears entirely. Stays
     # False for the terminal frontend, where the bar is the menu.
     var host_owns_menu: Bool
+    # When True, a host frontend draws the editor body popups' drop shadows as
+    # a real translucent layer composited over the live (smooth-scrolled) text,
+    # so the core skips baking the cell-darkening shadow (``paint_drop_shadow``)
+    # under the minimap tooltip / LSP hover popup. Set by the Swift host: its
+    # sub-cell smooth-scroll composite pixel-shifts the editor body, and a baked
+    # shadow — being darkened editor cells re-blitted from the un-shifted frame —
+    # would tear away from the text it sits on. Stays False for the terminal
+    # frontend, which has no sub-cell scroll and keeps the classic baked shadow.
+    var host_owns_shadows: Bool
     # When True, the tool panels (terminal panes, debug pane, test pane) are
     # rendered on a *separate* host window (the native "Floating panels"
     # feature) instead of docked at the bottom of this Desktop's grid. The
@@ -1481,6 +1490,7 @@ struct Desktop(Movable):
     def __init__(out self):
         self.menu_bar = MenuBar()
         self.host_owns_menu = False
+        self.host_owns_shadows = False
         self.panels_detached = False
         self.host_focused = True
         self.windows = WindowManager()
@@ -3553,6 +3563,8 @@ struct Desktop(Movable):
             if not self.windows.windows[i].is_editor:
                 continue
             self.windows.windows[i].editor.caret_visible = caret_on
+            self.windows.windows[i].editor.host_owns_shadows = \
+                self.host_owns_shadows
             # Review-hosted editors keep line numbers even when read-only
             # (staged/commit reviews) — they're a real editor view, not the
             # chrome-free docs viewer the read_only branch was written for.

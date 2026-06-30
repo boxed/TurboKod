@@ -973,6 +973,12 @@ struct Editor(Copyable, Movable):
     # anchored to a screen position isn't drawn into — and translated by —
     # the offset composite. Off in every normal paint.
     var _suppress_overlays: Bool
+    # When True, ``paint_minimap_tooltip`` / ``paint_hover_popup`` skip the
+    # cell-darkening drop shadow — the host draws it as a real translucent layer
+    # over the live text instead. Mirrors ``Desktop.host_owns_shadows`` (the
+    # Desktop pushes it onto every editor each frame). See that field for why
+    # the native smooth-scroll path needs it. Off for the terminal frontend.
+    var host_owns_shadows: Bool
     # File-backing (empty file_path means buffer is not file-backed):
     var file_path: String
     var file_size: Int64
@@ -1538,6 +1544,7 @@ struct Editor(Copyable, Movable):
         self._vis_mode = -1
         self._vis_dirty = True
         self._suppress_overlays = False
+        self.host_owns_shadows = False
         self.file_path = String("")
         self.file_size = Int64(0)
         self.file_mtime = Int64(0)
@@ -1685,6 +1692,7 @@ struct Editor(Copyable, Movable):
         self._vis_mode = -1
         self._vis_dirty = True
         self._suppress_overlays = False
+        self.host_owns_shadows = False
         self.file_path = String("")
         self.file_size = Int64(0)
         self.file_mtime = Int64(0)
@@ -1859,6 +1867,7 @@ struct Editor(Copyable, Movable):
         self._vis_mode = copy._vis_mode
         self._vis_dirty = copy._vis_dirty
         self._suppress_overlays = copy._suppress_overlays
+        self.host_owns_shadows = copy.host_owns_shadows
         self.file_path = copy.file_path
         self.file_size = copy.file_size
         self.file_mtime = copy.file_mtime
@@ -5747,7 +5756,8 @@ struct Editor(Copyable, Movable):
         # 1-cell padding ring. ``put_wrapped_text`` wraps to the
         # interior width and clips to its rect, so the message can't
         # overflow the popup.
-        paint_drop_shadow(canvas, r)
+        if not self.host_owns_shadows:
+            paint_drop_shadow(canvas, r)
         var tt_painter = Painter(r)
         tt_painter.fill(canvas, r, String(" "), attr)
         tt_painter.draw_box(canvas, r, attr, False)
@@ -5810,7 +5820,8 @@ struct Editor(Copyable, Movable):
         var label = l[4]
         var r = Rect(l[0], l[1], l[0] + w, l[1] + h)
         var attr = Attr(BLACK, LIGHT_GRAY)
-        paint_drop_shadow(canvas, r)
+        if not self.host_owns_shadows:
+            paint_drop_shadow(canvas, r)
         var tt_painter = Painter(r)
         tt_painter.fill(canvas, r, String(" "), attr)
         tt_painter.draw_box(canvas, r, attr, False)
@@ -5822,24 +5833,29 @@ struct Editor(Copyable, Movable):
             _ = canvas.put_wrapped_text(msg_rect, label, attr)
 
     def active_overlay_bounds(self, view: Rect) -> Optional[Rect]:
-        """Screen-space bounding rect (box **plus drop shadow**) of whichever
-        screen-anchored body overlay is currently shown — the minimap /
-        diagnostic / spell tooltip, else the LSP hover popup. ``None`` when
-        neither is up.
+        """Screen-space bounding rect of whichever screen-anchored body overlay
+        is currently shown — the minimap / diagnostic / spell tooltip, else the
+        LSP hover popup. ``None`` when neither is up.
 
-        The macOS smooth-scroll compositor overdraws the editor body
-        translated by a sub-cell pixel offset (with overlays suppressed) and
-        would otherwise paint over these popups, leaving only the stray bit of
-        drop shadow that falls on the minimap column it excludes. The host
-        re-blits this rect from the main frame on top of that overdraw so the
-        popup survives. The shadow extends 2 cells right and 1 row below the
-        box (see ``paint_drop_shadow``), so widen the rect to cover it."""
+        The macOS smooth-scroll compositor overdraws the editor body translated
+        by a sub-cell pixel offset (with overlays suppressed) and would
+        otherwise paint over these popups. The host re-blits this rect from the
+        main frame on top of that overdraw so the popup survives.
+
+        When the host owns the drop shadow (``host_owns_shadows`` — the native
+        path) this is the **box only**: the host derives the L-shaped shadow
+        strips from it and paints them as a real translucent layer over the live
+        text, so the box must not include them. Otherwise (no host-drawn shadow)
+        the rect is widened 2 cells right and 1 row below to cover the baked
+        cell shadow (see ``paint_drop_shadow``)."""
         var lay = self._minimap_tooltip_layout(view)
         if not lay:
             lay = self._hover_popup_layout(view)
         if not lay:
             return None
         var l = lay.value()
+        if self.host_owns_shadows:
+            return Rect(l[0], l[1], l[0] + l[2], l[1] + l[3])
         return Rect(l[0], l[1], l[0] + l[2] + 2, l[1] + l[3] + 1)
 
     def _paint_right_gutter(

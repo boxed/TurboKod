@@ -635,6 +635,12 @@ final class CellView: NSView {
         // Smooth scroll: when the focused editor rests (or is being dragged)
         // at a sub-line offset, overdraw its body translated by the fraction.
         if surface == .main { compositeSmoothScroll(ctx, mainN: n, mainCols: c) }
+        // Editor body popups (minimap tooltip / LSP hover) carry a translucent
+        // drop shadow drawn here, after the main draw + smooth composite, so it
+        // lands on the final (smooth-scrolled) body instead of a baked cell
+        // shadow torn off the un-shifted frame. Runs at rest too (the composite
+        // early-returns when not scrolling).
+        if surface == .main { drawPopupShadow(ctx) }
         // First main-surface frame is now on screen. Kick the deferred
         // startup work (PATH recovery, font-family scan) on the next runloop
         // turn so it runs *after* this draw flushes — not inside it. One-shot
@@ -773,9 +779,10 @@ final class CellView: NSView {
         // The overdraw above suppressed the editor's screen-anchored overlays
         // (minimap/diagnostic/spell tooltip, LSP hover popup) and just painted
         // over them — they don't scroll with the body. The main frame already
-        // rendered the popup into `buf` with its drop shadow composited over
-        // real content, so re-blit just that rect on top, untranslated. (Clip
-        // + redraw the whole main buffer: only the overlay cells land.)
+        // rendered the popup box into `buf` (shadow excluded — host_owns_shadows;
+        // drawPopupShadow paints it later as a translucent layer), so re-blit
+        // just that box on top, untranslated. (Clip + redraw the whole main
+        // buffer: only the overlay box cells land.)
         var ob = [Int32](repeating: 0, count: 4)
         let hasOverlay = ob.withUnsafeMutableBufferPointer { b in
             Int(tk_editor_overlay_bounds(handle, Int64(cols()), Int64(rows()),
@@ -790,6 +797,45 @@ final class CellView: NSView {
             drawCells(ctx, buf, mainN, mainCols, originX: 0, originY: 0)
             ctx.restoreGState()
         }
+    }
+
+    /// Translucent drop shadow under the focused editor's body popup (minimap
+    /// tooltip / LSP hover). With `host_owns_shadows` the core paints the popup
+    /// box only and `tk_editor_overlay_bounds` reports that box; we darken the
+    /// classic Turbo Vision L-strips (2 cells right from one row down, 1 row
+    /// below shifted right 2 — matching `paint_drop_shadow`) as a real alpha
+    /// layer over whatever the body composited beneath. Because it darkens the
+    /// live pixels, it tracks the sub-cell smooth scroll instead of tearing.
+    /// The strips sit outside the box, so drawing last never covers it.
+    private func drawPopupShadow(_ ctx: CGContext) {
+        guard handle != 0, surface == .main else { return }
+        var ob = [Int32](repeating: 0, count: 4)
+        let has = ob.withUnsafeMutableBufferPointer { b in
+            Int(tk_editor_overlay_bounds(handle, Int64(cols()), Int64(rows()),
+                Int64(Int(bitPattern: b.baseAddress))))
+        }
+        guard has == 1, ob[2] > 0, ob[3] > 0 else { return }
+        // Clip to the editor interior so the shadow can't bleed past the popup's
+        // reserved right margin onto chrome / the next pane. No region (a rare
+        // edge: completion popup open over a lingering minimap tooltip) → skip
+        // the shadow rather than draw it unclipped.
+        guard let r = focusedSmoothRegion() else { return }
+        let bx = CGFloat(ob[0]), by = CGFloat(ob[1])
+        let bw = CGFloat(ob[2]), bh = CGFloat(ob[3])
+        ctx.saveGState()
+        ctx.clip(to: CGRect(x: CGFloat(r.x) * CELL_W, y: CGFloat(r.y) * CELL_H,
+                            width: CGFloat(r.w) * CELL_W,
+                            height: CGFloat(r.h) * CELL_H))
+        ctx.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 0.5))
+        // Right strip: 2 cells wide, from one row below the top to the bottom.
+        if bh > 1 {
+            ctx.fill(CGRect(x: (bx + bw) * CELL_W, y: (by + 1) * CELL_H,
+                            width: 2 * CELL_W, height: (bh - 1) * CELL_H))
+        }
+        // Bottom strip: 1 row tall, shifted right by 2 for the diagonal lift.
+        ctx.fill(CGRect(x: (bx + 2) * CELL_W, y: (by + bh) * CELL_H,
+                        width: bw * CELL_W, height: CELL_H))
+        ctx.restoreGState()
     }
 
     /// Damped overscroll distance (in visual rows) for a raw overshoot past
@@ -1763,6 +1809,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // end of CellView.draw.
         if chromeDesktop != 0 {
             tk_desktop_set_host_owns_menu(chromeDesktop, 1)
+            tk_desktop_set_host_owns_shadows(chromeDesktop, 1)
             // The chrome Desktop loaded the user config — apply the saved
             // cell font + size now so the first window opens with the right
             // grid metrics instead of reflowing one frame in.
@@ -2987,6 +3034,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if ProcessInfo.processInfo.environment["TK_MENU_INGRID"] == nil {
             tk_desktop_set_host_owns_menu(h, 1)
         }
+        // The host draws the editor body popups' drop shadows as a real
+        // translucent layer (drawPopupShadow) so they composite correctly over
+        // the sub-cell smooth-scroll body instead of tearing. The core stops
+        // baking the cell shadow under those popups.
+        tk_desktop_set_host_owns_shadows(h, 1)
         // Likewise the Settings view renders in its own native window (see
         // settingsWins) — the main surface skips the in-grid overlay and
         // stays interactive while Settings is open.

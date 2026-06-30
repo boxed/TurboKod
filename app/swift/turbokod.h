@@ -49,11 +49,13 @@ int64_t tk_editor_scroll_regions(int64_t h, int64_t cols, int64_t rows,
 int64_t tk_editor_region_layout(int64_t h, int64_t win_idx,
                                 int64_t region_cols, int64_t region_rows,
                                 int64_t out_ptr, int64_t cap);
-//   tk_editor_overlay_bounds: screen-cell bounds [x, y, w, h] (box + drop
-//     shadow) of the focused editor's active screen-anchored overlay (minimap
-//     tooltip or LSP hover popup). Returns 1 when one is up (and fills
-//     out_ptr), 0 otherwise. Re-blit this rect from the main frame on top of
-//     the smooth-scroll overdraw, which suppresses overlays.
+//   tk_editor_overlay_bounds: screen-cell bounds [x, y, w, h] of the focused
+//     editor's active screen-anchored overlay (minimap tooltip or LSP hover
+//     popup). Returns 1 when one is up (and fills out_ptr), 0 otherwise.
+//     Re-blit this rect from the main frame on top of the smooth-scroll
+//     overdraw, which suppresses overlays. With host_owns_shadows set this is
+//     the box only — draw the drop shadow as a translucent layer (see
+//     drawPopupShadow); otherwise it includes the baked cell shadow.
 int64_t tk_editor_overlay_bounds(int64_t h, int64_t cols, int64_t rows,
                                  int64_t out_ptr);
 int64_t tk_editor_smooth_begin(int64_t h, int64_t win_idx,
@@ -116,6 +118,10 @@ int32_t tk_desktop_paste_text(int64_t h, int64_t text_ptr, int64_t text_len);
 int32_t tk_desktop_paste_clipboard_text(int64_t h, int64_t text_ptr, int64_t text_len);
 int32_t tk_desktop_has_project(int64_t h);
 void    tk_desktop_set_host_owns_menu(int64_t h, int64_t on);
+// When on, the host draws the editor body popups' drop shadows as a real
+// translucent layer over the live (smooth-scrolled) text; the core stops
+// baking the cell shadow and tk_editor_overlay_bounds reports the box only.
+void    tk_desktop_set_host_owns_shadows(int64_t h, int64_t on);
 void    tk_desktop_set_host_focused(int64_t h, int64_t on);
 void    tk_desktop_refresh_git(int64_t h);
 int64_t tk_desktop_menu_snapshot(int64_t h, int64_t out_ptr, int64_t cap);

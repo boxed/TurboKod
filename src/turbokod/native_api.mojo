@@ -589,12 +589,15 @@ def tk_editor_region_layout(
 def tk_editor_overlay_bounds(
     h: Int, cols: Int, rows: Int, out_ptr: Int
 ) -> Int:
-    """Screen-cell bounds (box + drop shadow) of the focused editor's active
-    screen-anchored overlay — the minimap/diagnostic/spell tooltip or the LSP
-    hover popup. Writes ``[x, y, w, h]`` (Int32) to ``out_ptr`` and returns 1
-    when one is up, 0 otherwise. The host re-blits this rect from the main
-    frame on top of the smooth-scroll body overdraw (which suppresses overlays
-    and would otherwise erase the popup)."""
+    """Screen-cell bounds of the focused editor's active screen-anchored
+    overlay — the minimap/diagnostic/spell tooltip or the LSP hover popup.
+    Writes ``[x, y, w, h]`` (Int32) to ``out_ptr`` and returns 1 when one is up,
+    0 otherwise. The host re-blits this rect from the main frame on top of the
+    smooth-scroll body overdraw (which suppresses overlays and would otherwise
+    erase the popup). Under ``host_owns_shadows`` this is the popup **box only**
+    — the host paints the drop shadow as a translucent layer over the body (see
+    ``tk_desktop_set_host_owns_shadows``); otherwise it includes the baked cell
+    shadow (box + 2 cols right / 1 row below)."""
     if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
         return 0
     var b = _desk(h)[].focused_overlay_bounds(Rect(0, 0, cols, rows))
@@ -1355,6 +1358,22 @@ def tk_desktop_set_host_owns_menu(h: Int, on: Int):
     if h == 0:
         return
     _desk(h)[].host_owns_menu = on != 0
+
+
+@export
+def tk_desktop_set_host_owns_shadows(h: Int, on: Int):
+    """Tell the Desktop a host frontend draws the editor body popups' drop
+    shadows itself, as a real translucent layer over the live (smooth-scrolled)
+    text. When ``on`` is non-zero the core stops baking the cell-darkening
+    shadow under the minimap tooltip / LSP hover popup, and
+    ``tk_editor_overlay_bounds`` reports the popup *box only* (no shadow strips)
+    so the host can re-blit the box and paint the shadow over the body beneath
+    it. Without it the baked shadow tears away from the body during a sub-cell
+    smooth-scroll gesture. Idempotent; call once after ``tk_desktop_new``.
+    """
+    if h == 0:
+        return
+    _desk(h)[].host_owns_shadows = on != 0
 
 
 @export
