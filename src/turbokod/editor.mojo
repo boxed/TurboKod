@@ -2447,8 +2447,43 @@ struct Editor(Copyable, Movable):
 
     def set_document_links(mut self, var links: List[TextEditEntry]):
         """Replace the LSP documentLink ranges (range carrier + target uri
-        in ``new_text``). Host gates behind ``lsp_document_links``."""
-        self.document_links = links^
+        in ``new_text``). Host gates behind ``lsp_document_links``.
+
+        Links whose span covers a Django/Jinja template tag (``{% %}`` /
+        ``{{ }}``) are dropped: an HTML language server that doesn't parse
+        Django emits a naive documentLink over the whole
+        ``href="{% static '…' %}"`` value, which underlines the entire tag
+        and hijacks Cmd+click away from the project-aware template
+        resolution (``Desktop._try_open_template_include``). Dropping them
+        lets that path handle the click and removes the misleading
+        underline."""
+        var kept = List[TextEditEntry]()
+        for i in range(len(links)):
+            if not self._link_covers_template_tag(links[i]):
+                kept.append(links[i])
+        self.document_links = kept^
+
+    def _link_covers_template_tag(self, lk: TextEditEntry) -> Bool:
+        """True when the link's span contains a ``{%`` or ``{{`` opener."""
+        var nlines = self.buffer.line_count()
+        for row in range(lk.start_line, lk.end_line + 1):
+            if row < 0 or row >= nlines:
+                continue
+            var line = self.buffer.line(row)
+            var b = line.as_bytes()
+            var n = len(b)
+            var lo = lk.start_char if row == lk.start_line else 0
+            var hi = lk.end_char if row == lk.end_line else n
+            if lo < 0:
+                lo = 0
+            if hi > n:
+                hi = n
+            var k = lo
+            while k < hi - 1:
+                if b[k] == 0x7B and (b[k + 1] == 0x25 or b[k + 1] == 0x7B):
+                    return True
+                k += 1
+        return False
 
     def document_link_at(self, row: Int, col: Int) -> String:
         """Return the target uri of the document link covering ``(row,

@@ -848,6 +848,71 @@ def word_at(line: String, col: Int) -> String:
     return String(StringSlice(unsafe_from_utf8=b[start:end]))
 
 
+def template_include_at(line: String, col: Int) -> String:
+    """Return the quoted string covering ``col`` when that string sits
+    inside a Django/Jinja template tag (``{% ... %}`` or ``{{ ... }}``),
+    or empty otherwise.
+
+    Powers Cmd+click on the filename in ``{% include "a/b.html" %}`` /
+    ``{% extends "base.html" %}`` — the host resolves the returned path
+    against the project's template dirs and opens it. We deliberately
+    return the string for *any* tag (not just ``include``/``extends``):
+    resolution downstream only opens a match if a real file exists, so a
+    non-path string like ``{% trans "Hi" %}`` simply finds nothing and
+    falls through to the usual go-to-definition path.
+    """
+    var b = line.as_bytes()
+    var n = len(b)
+    if col < 0 or col > n:
+        return String("")
+    var in_tag = False
+    var j = 0
+    while j < n:
+        # Tag open: ``{%`` or ``{{``.
+        if not in_tag and j + 1 < n and b[j] == 0x7B \
+                and (b[j + 1] == 0x25 or b[j + 1] == 0x7B):
+            in_tag = True
+            j += 2
+            continue
+        # Tag close: ``%}`` or ``}}``.
+        if in_tag and j + 1 < n and (b[j] == 0x25 or b[j] == 0x7D) \
+                and b[j + 1] == 0x7D:
+            in_tag = False
+            j += 2
+            continue
+        # Quoted string inside a tag. Bound the scan to the tag interior:
+        # stop at the closing quote *or* the tag close (``%}`` / ``}}``) so
+        # an unterminated/odd-quoted string can never drag the tag-closing
+        # syntax into the path (``'…/index.css` with no closing quote must
+        # not yield ``…/index.css %}``).
+        if in_tag and (b[j] == 0x22 or b[j] == 0x27):
+            var quote = b[j]
+            var start = j + 1
+            var k = start
+            var found_quote = False
+            while k < n:
+                if b[k] == quote:
+                    found_quote = True
+                    break
+                if k + 1 < n and (b[k] == 0x25 or b[k] == 0x7D) \
+                        and b[k + 1] == 0x7D:
+                    break
+                k += 1
+            if col >= start and col < k:
+                # Trim trailing whitespace so a missing closing quote (scan
+                # stopped at ``%}``/EOL) still yields a clean path.
+                var e = k
+                while e > start and (b[e - 1] == 0x20 or b[e - 1] == 0x09):
+                    e -= 1
+                return String(StringSlice(unsafe_from_utf8=b[start:e]))
+            if not found_quote:
+                return String("")
+            j = k + 1
+            continue
+        j += 1
+    return String("")
+
+
 @fieldwise_init
 struct DefinitionRequest(ImplicitlyCopyable, Movable):
     """Payload emitted by the editor when the user Cmd+clicks an

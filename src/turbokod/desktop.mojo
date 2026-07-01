@@ -106,7 +106,7 @@ from .geometry import Point, Rect
 from .highlight import (
     CompletionRequest, DefinitionRequest, GrammarRegistry, Highlight,
     HoverRequest, diff_row_highlights, embedded_language_extensions,
-    extension_of, word_at,
+    extension_of, template_include_at, word_at,
 )
 from .spell import Speller
 from .spell_menu import (
@@ -155,7 +155,7 @@ from .debugger_config import (
 )
 from .menu import Menu, MenuBar, MenuItem
 from .posix import monotonic_ms, wall_clock_ms, which
-from .project import replace_in_project
+from .project import replace_in_project, walk_project_files
 from .search_options import SearchOptions, build_search_regex
 from .project_find import ProjectFind
 from .find_results_pane import FindResultsPane
@@ -555,6 +555,19 @@ comptime _TREE_LABEL_LEFT   = String("File tree: left")
 comptime _PA_REPLACE_DO          = String("__pa_replace_do")
 comptime _PA_BP_CONDITION        = String("__pa_bp_condition")
 comptime _PA_ADD_WATCH           = String("__pa_add_watch")
+
+
+def _ends_with(s: String, suffix: String) -> Bool:
+    """True when ``s`` ends with ``suffix`` (byte comparison)."""
+    var sb = s.as_bytes()
+    var fb = suffix.as_bytes()
+    if len(fb) > len(sb):
+        return False
+    var off = len(sb) - len(fb)
+    for i in range(len(fb)):
+        if sb[off + i] != fb[i]:
+            return False
+    return True
 
 
 def ctrl_key(letter: String) -> UInt32:
@@ -8329,6 +8342,8 @@ struct Desktop(Movable):
                     .document_link_at(dreq.row, dreq.col)
                 if len(dl_target.as_bytes()) > 0:
                     self._open_document_link(dl_target, screen)
+                elif self._try_open_template_include(idx, dreq, screen):
+                    pass
                 else:
                     self._dispatch_definition_request(idx, dreq)
             # Drain the cancel latch *before* consuming a new request:
@@ -9193,6 +9208,73 @@ struct Desktop(Movable):
         _ = self.lsp_managers[lsp_idx].request_hover(
             path, req.row, req.col, text^,
         )
+
+    def _try_open_template_include(
+        mut self, win_idx: Int, dreq: DefinitionRequest, screen: Rect,
+    ) -> Bool:
+        """Cmd+click on the filename in ``{% include "a/b.html" %}`` (or
+        ``extends`` / any template tag with a quoted path) opens that
+        template. Returns True when the click landed on such a string —
+        including the "found the tag but no matching file" case — so the
+        caller doesn't also fire a go-to-definition. Returns False when
+        the click isn't on a template-tag string, letting the normal LSP
+        path run.
+
+        Django/Jinja templates have no language server here, so this is
+        the frontend-agnostic stand-in for documentLink resolution: the
+        include path is relative to a template loader dir, which we
+        resolve by matching it as a suffix under the project tree.
+        """
+        var ext = extension_of(self.windows.windows[win_idx].editor.file_path)
+        if ext != String("html") and ext != String("htm") \
+                and ext != String("jinja") and ext != String("jinja2") \
+                and ext != String("j2") and ext != String("twig"):
+            return False
+        var line = self.windows.windows[win_idx].editor.buffer.line(dreq.row)
+        var rel = template_include_at(line, dreq.col)
+        if len(rel.as_bytes()) == 0:
+            return False
+        var target = self._resolve_template_include(rel)
+        if len(target.as_bytes()) == 0:
+            self.status_bar.set_message(
+                String("Template not found: ") + rel,
+                Attr(RED, LIGHT_GRAY),
+            )
+            return True
+        try:
+            self.open_file(target, screen)
+        except e:
+            print("desktop: open template include", target, ":", String(e))
+        return True
+
+    def _resolve_template_include(self, rel: String) -> String:
+        """Resolve a template include path (``core/offer/side_block.html``)
+        to an absolute path under the project. Prefers a file living under
+        a ``templates/`` (or ``jinja2/``) loader dir — the Django/Jinja
+        convention — and falls back to any file whose path ends with the
+        include path. Empty when nothing matches (or there's no project)."""
+        if not self.project:
+            return String("")
+        # Strip any leading ``./`` or ``/`` so the suffix match is stable.
+        var r = rel
+        while starts_with(r, String("./")):
+            r = byte_slice(r, 2, len(r.as_bytes()))
+        while starts_with(r, String("/")):
+            r = byte_slice(r, 1, len(r.as_bytes()))
+        if len(r.as_bytes()) == 0:
+            return String("")
+        var want_t = String("/templates/") + r
+        var want_j = String("/jinja2/") + r
+        var want_any = String("/") + r
+        var files = walk_project_files(self.project.value())
+        var fallback = String("")
+        for i in range(len(files)):
+            var f = files[i]
+            if _ends_with(f, want_t) or _ends_with(f, want_j):
+                return f
+            if len(fallback.as_bytes()) == 0 and _ends_with(f, want_any):
+                fallback = f
+        return fallback
 
     def _open_document_link(mut self, target: String, screen: Rect):
         """Open a documentLink target: a ``file://`` uri opens in the

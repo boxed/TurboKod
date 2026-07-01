@@ -224,7 +224,7 @@ from turbokod.highlight import (
     highlight_comment_attr, highlight_decorator_attr, highlight_ident_attr,
     highlight_keyword_attr,
     highlight_number_attr, highlight_operator_attr, highlight_string_attr,
-    word_at,
+    template_include_at, word_at,
 )
 from turbokod.posix import getenv_value, monotonic_ms, which
 from turbokod.spell import (
@@ -7954,6 +7954,75 @@ def test_word_at_helper() raises:
     # Cyrillic and Greek roundtrip too.
     assert_equal(word_at(String("Привет foo"), 0), String("Привет"))
     assert_equal(word_at(String("λambda"), 0), String("λambda"))
+
+
+def test_template_include_at_extracts_quoted_path() raises:
+    """Cmd+click on the filename inside a Django/Jinja template tag returns
+    the quoted path; a click outside any tag-string returns empty."""
+    var inc = String('{% include "core/offer/side_block.html" %}')
+    # Column 12 is on the 'c' of the quoted path; anywhere inside works.
+    assert_equal(
+        template_include_at(inc, 12), String("core/offer/side_block.html")
+    )
+    assert_equal(
+        template_include_at(inc, 25), String("core/offer/side_block.html")
+    )
+    # On the opening brace / bare tag body (not the string) → empty.
+    assert_equal(template_include_at(inc, 0), String(""))
+    assert_equal(template_include_at(inc, 2), String(""))
+    # Single quotes and other tags work too.
+    assert_equal(
+        template_include_at(String("{% extends 'base.html' %}"), 13),
+        String("base.html"),
+    )
+    # Quoted string inside a ``{{ }}`` expression.
+    assert_equal(
+        template_include_at(String('{{ foo|default:"x.html" }}'), 17),
+        String("x.html"),
+    )
+    # A quoted string that is *not* inside a template tag is ignored.
+    assert_equal(
+        template_include_at(String('include "core/x.html"'), 12), String("")
+    )
+    # {% static ... %} works the same as include.
+    assert_equal(
+        template_include_at(
+            String("{% static 'styles/external/index.css' %}"), 20
+        ),
+        String("styles/external/index.css"),
+    )
+    # A missing/unmatched closing quote must NOT drag the tag close (``%}``)
+    # or trailing whitespace into the path (regression: opened ``index.css
+    # %}`` as a filename).
+    assert_equal(
+        template_include_at(
+            String("{% static 'styles/external/index.css %}"), 20
+        ),
+        String("styles/external/index.css"),
+    )
+
+
+def test_document_link_over_template_tag_is_dropped() raises:
+    """An HTML language server that doesn't parse Django emits a naive
+    documentLink over the whole ``href="{% static '…' %}"`` value — which
+    underlines the entire tag and hijacks Cmd+click away from the
+    project-aware template resolution. ``set_document_links`` must drop any
+    link whose span covers a ``{% %}`` / ``{{ }}`` tag, while keeping real
+    links untouched."""
+    var line = String(
+        '<link href="{% static ' + "'offer_extra.css'"
+        + ' %}" rel="stylesheet">'
+    )
+    var ed = Editor(line)
+    var links = List[TextEditEntry]()
+    # href value spans bytes 12..42 (covers the template tag) → dropped.
+    links.append(TextEditEntry(0, 12, 0, 42, String("file:///bogus")))
+    # A plain link with no template tag → kept.
+    links.append(TextEditEntry(0, 0, 0, 5, String("https://example.com")))
+    ed.set_document_links(links^)
+    assert_equal(len(ed.document_links), 1)
+    assert_equal(ed.document_link_at(0, 27), String(""))          # tag: gone
+    assert_equal(ed.document_link_at(0, 2), String("https://example.com"))
 
 
 def test_highlight_for_extension_recognizes_mojo() raises:
@@ -22458,6 +22527,8 @@ def _run_chunk_02() raises:
     test_pyenv_pin_satisfaction()
     test_extension_of_helper()
     test_word_at_helper()
+    test_template_include_at_extracts_quoted_path()
+    test_document_link_over_template_tag_is_dropped()
     test_highlight_for_extension_recognizes_mojo()
     test_highlight_triple_quoted_string_spans_lines()
     test_highlight_unknown_extension_returns_empty()
