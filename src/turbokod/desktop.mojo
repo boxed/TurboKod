@@ -3587,8 +3587,11 @@ struct Desktop(Movable):
             else:
                 self.windows.windows[i].editor.line_numbers = self.config.line_numbers
             # Inline-diff review windows must stay unwrapped — the phantom
-            # removed-row interleave only runs in WRAP_NONE.
-            if self.windows.windows[i].editor.diff_active:
+            # removed-row interleave only runs in WRAP_NONE. Big buffers
+            # (minified / very long lines) also force WRAP_NONE: wrapping
+            # reflows every line at paint/scroll time and would be sluggish.
+            if self.windows.windows[i].editor.diff_active \
+                    or self.windows.windows[i].editor._big_buffer:
                 self.windows.windows[i].editor.wrap_mode = WRAP_NONE
             else:
                 self.windows.windows[i].editor.wrap_mode = self.config.wrap_mode
@@ -3607,9 +3610,11 @@ struct Desktop(Movable):
                 1 if self.config.trim_trailing_whitespace else 0
             self.windows.windows[i].editor.default_insert_final_newline = \
                 1 if self.config.ensure_final_newline else -1
-            if self.config.wrap_mode != WRAP_NONE:
+            if self.windows.windows[i].editor.wrap_mode != WRAP_NONE:
                 # Any wrap mode forces a left-aligned visible area; keep the
                 # invariant even if the host poked ``scroll_x`` directly.
+                # Keyed on the editor's *effective* mode (not config) so a
+                # bailed-out big buffer keeps horizontal scroll.
                 self.windows.windows[i].editor.scroll_x = 0
             # Git-changes column. Read-only editors (the docs viewer)
             # always skip it. When the toggle's on and we haven't

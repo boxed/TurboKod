@@ -8025,6 +8025,32 @@ def test_document_link_over_template_tag_is_dropped() raises:
     assert_equal(ed.document_link_at(0, 2), String("https://example.com"))
 
 
+def test_big_buffer_disables_wrap_and_highlight() raises:
+    """Wrap reflows and syntax tokenizing both scan every line, so a huge
+    buffer must bail out of both. A single very long line (minified JS/CSS)
+    trips ``_big_buffer``; ordinary content does not. When set,
+    ``flush_highlights`` must produce no highlights (skip the slow
+    TextMate/onig pass) instead of hanging."""
+    var long_line = String("")
+    for _ in range(6000):                       # > _BIG_BUFFER_LINE_BYTES
+        long_line += "x"
+    var big = Editor(long_line + String(".js"))
+    big.file_path = String("min.js")
+    assert_true(big._big_buffer)
+    var registry = GrammarRegistry()
+    var speller = Speller()
+    big.flush_highlights(registry, speller)     # must be instant, not ~28 s
+    assert_equal(len(big.highlights), 0)
+    var small = Editor(String("def f():\n    return 1\n"))
+    assert_true(not small._big_buffer)
+    # Many short lines, well under the total cap → still wrappable.
+    var many = String("")
+    for _ in range(500):
+        many += "a short line of code\n"
+    var med = Editor(many^)
+    assert_true(not med._big_buffer)
+
+
 def test_highlight_for_extension_recognizes_mojo() raises:
     """``fn``/``var`` are keywords, ``"hello"`` is a string, ``# note`` is a
     comment, ``42`` is a number — each gets its own attr."""
@@ -22529,6 +22555,7 @@ def _run_chunk_02() raises:
     test_word_at_helper()
     test_template_include_at_extracts_quoted_path()
     test_document_link_over_template_tag_is_dropped()
+    test_big_buffer_disables_wrap_and_highlight()
     test_highlight_for_extension_recognizes_mojo()
     test_highlight_triple_quoted_string_spans_lines()
     test_highlight_unknown_extension_returns_empty()

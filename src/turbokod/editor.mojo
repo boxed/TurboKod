@@ -626,6 +626,20 @@ of the buffer plus four ints, so a few hundred steps is comfortably more than
 any realistic editing session needs."""
 
 
+comptime _BIG_BUFFER_LINE_BYTES = 5000
+"""A single logical line longer than this (bytes) marks the buffer "big",
+disabling soft/smart wrap and syntax tokenizing for the whole buffer. Both
+reflow/scan every line; one minified 30 KB line (JS/CSS) makes that work
+dominate — the TextMate/onig tokenizer took ~28 s on such a line. Real source
+lines almost never exceed this — a line this long means generated/minified."""
+
+
+comptime _BIG_BUFFER_TOTAL_BYTES = 2_000_000
+"""Total buffer size (bytes) past which wrap + syntax highlighting are
+disabled. Even with short lines, building the per-line visual-row table or
+tokenizing a multi-megabyte buffer is too slow to redo on width/mode change."""
+
+
 comptime _TYPING_DEBOUNCE_MS = 800
 """How long a typing run can pause before the next keystroke starts a new
 undo step. 800 ms feels right in practice — fast enough that "type sentence,
@@ -1196,6 +1210,14 @@ struct Editor(Copyable, Movable):
     # the text / caret passes; the rows come from ``_sticky_rows``.
     var sticky_scroll: Bool
     var wrap_mode: Int
+    # True when the buffer is too big for per-line reflow/tokenize work (a
+    # very long line — minified JS/CSS — or a very large total size).
+    # Computed cheaply on every full buffer load (``_recompute_big_buffer``).
+    # Gates two expensive passes: the host forces ``WRAP_NONE`` so
+    # paint/scroll skip wrapping, and ``flush_highlights`` skips syntax
+    # tokenizing (a 30 KB minified line through the TextMate/onig grammar
+    # took ~28 s). The file still opens and scrolls — just uncolored.
+    var _big_buffer: Bool
     # Smart-wrap (``WRAP_SMART``) extra break trigger: a bracketed call with
     # *more than* this many top-level commas is broken one-item-per-line even
     # when it fits the window width. ``-1`` disables it (window width is the
@@ -1592,6 +1614,7 @@ struct Editor(Copyable, Movable):
         self.line_numbers = False
         self.sticky_scroll = True
         self.wrap_mode = WRAP_NONE
+        self._big_buffer = False
         self.smart_wrap_comma_threshold = -1
         self._vmove_streak = False
         self.compress_kwargs = False
@@ -1740,6 +1763,7 @@ struct Editor(Copyable, Movable):
         self.line_numbers = False
         self.sticky_scroll = True
         self.wrap_mode = WRAP_NONE
+        self._big_buffer = False
         self.smart_wrap_comma_threshold = -1
         self._vmove_streak = False
         self.compress_kwargs = False
@@ -1825,6 +1849,28 @@ struct Editor(Copyable, Movable):
         self._hover_result_col = -1
         self._hover_result_anchor_x = 0
         self._hover_result_anchor_y = 0
+        self._recompute_big_buffer()
+
+    def _recompute_big_buffer(mut self):
+        """Set ``_big_buffer`` when the buffer is too big for per-line
+        reflow/tokenize work: any single line over
+        ``_BIG_BUFFER_LINE_BYTES`` or a total size over
+        ``_BIG_BUFFER_TOTAL_BYTES``. Cheap — scans O(1) line lengths (no
+        wrap/tokenize analysis, no line copies) and early-exits the moment
+        either threshold is crossed, so a minified file bails on its first
+        long line."""
+        var n = self.buffer.line_count()
+        var total = 0
+        for i in range(n):
+            var length = self.buffer.line_length(i)
+            if length > _BIG_BUFFER_LINE_BYTES:
+                self._big_buffer = True
+                return
+            total += length
+            if total > _BIG_BUFFER_TOTAL_BYTES:
+                self._big_buffer = True
+                return
+        self._big_buffer = False
 
     @staticmethod
     def from_file(var path: String) raises -> Self:
@@ -1915,6 +1961,7 @@ struct Editor(Copyable, Movable):
         self.line_numbers = copy.line_numbers
         self.sticky_scroll = copy.sticky_scroll
         self.wrap_mode = copy.wrap_mode
+        self._big_buffer = copy._big_buffer
         self.smart_wrap_comma_threshold = copy.smart_wrap_comma_threshold
         self._vmove_streak = copy._vmove_streak
         self.compress_kwargs = copy.compress_kwargs
@@ -2032,6 +2079,17 @@ struct Editor(Copyable, Movable):
             self._recompute_tests()
             self._tests_dirty = False
         if not self._highlights_dirty:
+            return
+        # Big buffers (minified / very long lines) skip syntax tokenizing:
+        # a 30 KB line through the TextMate/onig grammar took ~28 s. Leave
+        # highlights empty (plain, uncolored text) so the file opens fast.
+        if self._big_buffer:
+            self.highlights = List[Highlight]()
+            self._highlights_dirty = False
+            self._hl_dirty_row = self.buffer.line_count()
+            self._hl_dirty_max_row = -1
+            self.spell_highlights = List[Highlight]()
+            self.spell_lines = List[Bool]()
             return
         var ext = extension_of(self.file_path)
         self.highlights = highlight_incremental(
@@ -4025,6 +4083,7 @@ struct Editor(Copyable, Movable):
         recoverable with Ctrl+Z."""
         self._push_undo()
         self.buffer = TextBuffer(text^)
+        self._recompute_big_buffer()
         self.clear_diagnostics()
         self._last_known_line_count = self.buffer.line_count()
         self._clamp_cursor_after_reload()
@@ -4079,6 +4138,7 @@ struct Editor(Copyable, Movable):
             # adopt the new bytes.
             var baseline = text
             self.buffer = TextBuffer(text^)
+            self._recompute_big_buffer()
             self.disk_baseline = baseline^
             self.file_size = info.size
             self.file_mtime = info.mtime_sec
