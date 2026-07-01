@@ -1081,13 +1081,19 @@ final class CellView: NSView {
             needsDisplay = true
             return
         }
-        // Minimap-as-scrollbar drag: a left-drag that began on the minimap
-        // gutter scrolls proportionally from the raw (sub-cell) pointer Y,
-        // bypassing the cell-quantized core hit-test. Without this, the
-        // minimap maps one whole cell row to lines/height lines — ~100+ on a
-        // 10k-line file — so the smallest drag step jumps that far.
+        // Minimap gutter: a plain click jumps to the item under it — we let
+        // the press fall through to the normal dispatch so the core's
+        // _try_minimap_click moves the cursor there and golden-reveals it.
+        // A left-*drag* that began on the gutter instead scrubs the scroll
+        // proportionally from the raw (sub-cell) pointer Y, bypassing the
+        // cell-quantized core hit-test (without which the minimap maps one
+        // whole cell row to lines/height lines — ~100+ on a 10k-line file —
+        // so the smallest drag step jumps that far).
         if surface == .main && button == 1 {
             if pressed == 1 && motion == 0 {
+                // Fresh press: arm a potential scrub-drag if it landed on the
+                // gutter, but do NOT scroll yet — fall through so the core
+                // handles the click as a jump. Only later motion scrubs.
                 minimapDragging = false
                 if let sr = focusedSmoothRegion(), sr.rightGutter > 0 {
                     let c = Int(max(0, p.x) / CELL_W), r = Int(max(0, p.y) / CELL_H)
@@ -1096,10 +1102,12 @@ final class CellView: NSView {
                         minimapDragging = true
                     }
                 }
-            }
-            if minimapDragging {
+            } else if minimapDragging {
+                // In-flight scrub: motion scrolls proportionally, release ends it.
                 if pressed == 0 {
-                    minimapDragging = false      // drag released
+                    minimapDragging = false      // released — fall through so
+                    // the core sees the release and clears the drag latch its
+                    // matching press armed (via _handle_press).
                 } else if let sr = focusedSmoothRegion() {
                     let top = CGFloat(sr.y) * CELL_H
                     let hgt = max(1, CGFloat(sr.h) * CELL_H)
@@ -1112,8 +1120,9 @@ final class CellView: NSView {
                                          Int64(f * 1_000_000))
                     needsDisplay = true
                     return
+                } else {
+                    return
                 }
-                return
             }
         }
         let col = Int64(max(0, p.x) / CELL_W)

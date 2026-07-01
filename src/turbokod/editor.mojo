@@ -5375,12 +5375,16 @@ struct Editor(Copyable, Movable):
         )
 
     def _try_minimap_click(mut self, pos: Point, view: Rect) -> Bool:
-        """Handle a left-click on the minimap column: scroll the editor
-        so the corresponding buffer row is centered, and place the cursor
-        on that row. For rows flagged by the speller, the cursor lands
-        on the first misspelled word so spell-fix actions (Alt+Enter)
+        """Handle a left-click on the minimap column: jump to the
+        corresponding item in the code — place the cursor on that buffer
+        row and golden-ratio-reveal it (a deliberate jump, like a link
+        click or go-to-line, so the landing re-anchors the view rather
+        than edge-scrolling). For rows flagged by the speller, the cursor
+        lands on the first misspelled word so spell-fix actions (Alt+Enter)
         work immediately; otherwise it lands at column 0. Returns True
-        if the click was on the minimap (and was therefore consumed)."""
+        if the click was on the minimap (and was therefore consumed).
+        Window focus is moved by the click-routing layer
+        (``WindowManager._handle_press`` + ``_focus_dock``)."""
         if not self._is_minimap_hit(pos, view):
             return False
         var sy = pos.y - view.a.y
@@ -5412,13 +5416,7 @@ struct Editor(Copyable, Movable):
                 col = _diag_byte_start_for_row(diag, buf_row)
                 break
         self.move_to(buf_row, col, False)
-        var target = buf_row - content_h // 2
-        var max_y = self.max_scroll_y(view)
-        if target < 0:
-            target = 0
-        if target > max_y:
-            target = max_y
-        self.scroll_y = target
+        self.reveal_cursor(view, golden=True)
         return True
 
     def _completion_popup_rect_at(
