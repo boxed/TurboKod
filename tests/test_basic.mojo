@@ -8560,6 +8560,53 @@ def test_textmate_incremental_in_place_multirow_edit() raises:
     assert_true(len(s_buggy) != len(s_full))
 
 
+def test_editor_rename_multirow_refreshes_all_highlights() raises:
+    """A rename that rewrites the symbol on several rows in place (no
+    line-count change) must re-color *every* touched row, not just the
+    topmost one.
+
+    Regression: ``apply_text_edits`` (the code path LSP rename +
+    formatting flow through) used to mark only the lowest edited row
+    dirty with no high-water mark, so ``flush_highlights`` early-exited
+    at the first edited row — whose post-stack rejoins the base
+    trajectory immediately — and spliced stale, column-misaligned
+    highlights over the renamed rows below it. The fix passes the
+    highest edited row as the dirty high-water mark. After the rename
+    the editor's highlights must equal a full retokenize of the buffer.
+    """
+    var path = _temp_path(String("_rename_hl.rs"))
+    var src = String("fn main() {\n")
+    src = src + String("    let a = 0;\n")
+    src = src + String("    let foo = 1;\n")      # row 2
+    src = src + String("    let b = 2;\n")
+    src = src + String("    let c = foo + 42;\n")  # row 4
+    src = src + String("}\n")
+    assert_true(write_file(path, src))
+    var ed = Editor.from_file(path)
+    var registry = GrammarRegistry()
+    var speller = Speller()
+    # Warm the per-editor incremental cache with a full pass.
+    ed.flush_highlights(registry, speller)
+
+    # Rename ``foo`` -> ``foobar`` (longer, so trailing highlights on the
+    # lower row shift) at both occurrences: row 2 cols 8..11 and row 4
+    # cols 12..15.
+    var edits = List[TextEditEntry]()
+    edits.append(TextEditEntry(2, 8, 2, 11, String("foobar")))
+    edits.append(TextEditEntry(4, 12, 4, 15, String("foobar")))
+    assert_true(ed.apply_text_edits(edits^))
+    ed.flush_highlights(registry, speller)
+
+    var s_incr = _hl_set(ed.highlights)
+    var s_full = _hl_set(highlight_for_extension(String("rs"), ed.buffer.lines))
+    assert_equal(len(s_incr), len(s_full))
+    for i in range(len(s_incr)):
+        assert_equal(s_incr[i].row, s_full[i].row)
+        assert_equal(s_incr[i].col_start, s_full[i].col_start)
+        assert_equal(s_incr[i].col_end, s_full[i].col_end)
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
 def test_textmate_html_embeds_css_inside_style_block() raises:
     """The HTML grammar's ``<style>`` block embeds CSS via
     ``include: "source.css"`` inside a ``(?!\\G)``-gated begin/end.
@@ -22577,6 +22624,7 @@ def _run_chunk_02() raises:
     test_textmate_captures_overlay_on_match()
     test_textmate_incremental_matches_full_retokenize()
     test_textmate_incremental_in_place_multirow_edit()
+    test_editor_rename_multirow_refreshes_all_highlights()
     test_editor_default_text_is_light_green()
     test_settings_windowed_default_is_centered_dialog()
     test_settings_windowed_move_and_resize()

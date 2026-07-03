@@ -3567,6 +3567,7 @@ struct Editor(Copyable, Movable):
         # but the import edits do (they end with ``\n``), and without
         # the nudge the cursor would float into the wrong row.
         var hl_low = pre
+        var hl_high = pre
         var aux = item.additional_text_edits.copy()
         var m = len(aux)
         if m > 1:
@@ -3606,8 +3607,10 @@ struct Editor(Copyable, Movable):
             self.selections[0].anchor_col = anc[1]
             if ed.start_line < hl_low:
                 hl_low = ed.start_line
+            if ed.end_line > hl_high:
+                hl_high = ed.end_line
         self.dirty = True
-        self._mark_hl_dirty(hl_low)
+        self._mark_hl_dirty(hl_low, hl_high)
         self.close_completion_popup()
         return True
 
@@ -3762,6 +3765,15 @@ struct Editor(Copyable, Movable):
         self._push_undo()
         self._typing_active = False
         var hl_low = self.selections[0].row
+        # High-water mark: the *highest* row any edit touches. A rename
+        # replaces the symbol at several rows in place (no line-count
+        # change), so without this the incremental tokenizer early-exits
+        # at the topmost edited row — whose post-stack rejoins the cached
+        # trajectory immediately — and splices stale highlights over the
+        # renamed rows below it. Edits that insert/delete newlines change
+        # the line count, which forces a full retokenize where the mark is
+        # ignored, so tracking start_line here is safe.
+        var hl_high = -1
         for k in range(m):
             var ed = edits[k]
             var res = self._apply_buffer_edit_raw(
@@ -3782,8 +3794,10 @@ struct Editor(Copyable, Movable):
             self.selections[0].anchor_col = anc[1]
             if ed.start_line < hl_low:
                 hl_low = ed.start_line
+            if ed.end_line > hl_high:
+                hl_high = ed.end_line
         self.dirty = True
-        self._mark_hl_dirty(hl_low)
+        self._mark_hl_dirty(hl_low, hl_high)
         return True
 
     def consume_breakpoint_toggle(mut self) -> Optional[Int]:
