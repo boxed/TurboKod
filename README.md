@@ -27,7 +27,7 @@ The editor runs in any terminal, but ships with an optional native macOS `.app` 
 ./run.sh examples/desktop.mojo path/...   # ...opening file(s) or a project dir
 ./run.sh examples/hello.mojo              # minimal windowed greeting
 ./run.sh examples/boxes.mojo              # arrow-key-driven draggable frame
-./run.sh tests/test_basic.mojo            # pure-data tests, no TTY needed
+scripts/run_tests.sh                      # pure-data test suites, no TTY needed
 ```
 
 If you use [pixi](https://pixi.sh):

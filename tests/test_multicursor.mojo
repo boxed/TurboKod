@@ -1,15 +1,14 @@
 """Standalone smoke test for multi-cursor support.
 
-Lives separately from ``test_basic.mojo`` so it doesn't pull the giant
-import graph (which currently has unrelated WIP issues in
-``debug_pane.mojo``). Runs with ``./run.sh tests/test_multicursor.mojo``.
+Kept as its own suite (like every other file here since ``test_basic.mojo``
+was split up); ``scripts/run_tests.sh`` runs it along with the rest.
 """
 
 from std.testing import assert_equal, assert_false, assert_true
 
 from turbokod.editor import Caret, Editor
 from turbokod.events import (
-    Event, EVENT_KEY, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_UP,
+    Event, EVENT_KEY, KEY_BACKSPACE, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_UP,
     MOD_ALT, MOD_CTRL, MOD_KEY_ALT, MOD_META, MOD_NONE, MOD_SHIFT,
 )
 from turbokod.geometry import Point, Rect
@@ -193,15 +192,26 @@ def test_three_carets_delete_inline() raises:
     assert_equal(ed.buffer.line(2), String("cc"))
 
 
-def test_backspace_at_col_zero_collapses_to_primary() raises:
+def test_backspace_at_col_zero_joins_lines_per_caret() raises:
+    """Primary at (0, 0), extra at (1, 0). Backspace is a no-op for the
+    primary (top of buffer) and a line-join for the extra, and both carets
+    survive it.
+
+    This used to assert the extras collapsed into the primary — the old
+    conservative rule where any edit that wasn't an inline insert/delete
+    dropped the multi-caret state. Line-join is handled per caret now, so
+    collapsing would be a regression rather than the contract."""
     var ed = Editor(String("aaa\nbbb\n"))
     ed.add_caret_below()
-    # Primary at (0, 0), extra at (1, 0). Backspace at (0, 0) is a
-    # no-op (top of buffer); inline_safe=False because col == 0.
-    # Expected: extras collapse, primary fields unchanged.
     var view = _view()
-    _ = ed.handle_key(Event.key_event(UInt32(0xE003), MOD_NONE), view)
-    assert_equal(ed.caret_count(), 1)
+    _ = ed.handle_key(Event.key_event(KEY_BACKSPACE, MOD_NONE), view)
+    assert_equal(ed.caret_count(), 2)
+    assert_equal(ed.buffer.line(0), String("aaabbb"))
+    assert_equal(ed.selections[0].row, 0)
+    assert_equal(ed.selections[0].col, 0)
+    # The extra rode the join up to the seam between the two old lines.
+    assert_equal(ed.selections[1].row, 0)
+    assert_equal(ed.selections[1].col, 3)
 
 
 def test_typing_three_carets_same_row() raises:
@@ -232,8 +242,9 @@ def test_ctrl_alt_down_adds_caret() raises:
 
 def test_alt_tap_converts_multiline_selection_to_block_edit() raises:
     # Selection from (0, 1) to (2, 2) covers three lines. An Alt tap
-    # (press + release with no other input) should collapse the
-    # selection into one caret per line at col 0 — three carets total.
+    # (press + release with no other input) collapses the selection into one
+    # caret per line at the selection's *start* column — col 1 here, not col
+    # 0: the gesture is a block edit at the column you selected from.
     var ed = Editor(String("alpha\nbeta\ngamma\ndelta\n"))
     ed.selections[0].row = 0
     ed.selections[0].col = 1
@@ -243,11 +254,12 @@ def test_alt_tap_converts_multiline_selection_to_block_edit() raises:
     _ = ed.handle_mod_key(Event.mod_key_event(MOD_KEY_ALT, True))
     _ = ed.handle_mod_key(Event.mod_key_event(MOD_KEY_ALT, False))
     assert_equal(ed.caret_count(), 3)
-    # All carets at col 0.
-    assert_equal(ed.selections[0].col, 0)
+    # One caret per selected row, every one on the start column.
+    assert_equal(ed.selections[0].col, 1)
     assert_equal(ed.selections[0].row, 0)
     for i in range(1, len(ed.selections)):
-        assert_equal(ed.selections[i].col, 0)
+        assert_equal(ed.selections[i].col, 1)
+        assert_equal(ed.selections[i].row, i)
     # The selection collapsed (anchor == cursor).
     assert_false(ed.has_selection())
 
@@ -603,7 +615,7 @@ def main() raises:
     test_clear_extra_carets()
     test_carets_merge_when_movement_collides()
     test_three_carets_delete_inline()
-    test_backspace_at_col_zero_collapses_to_primary()
+    test_backspace_at_col_zero_joins_lines_per_caret()
     test_typing_three_carets_same_row()
     test_ctrl_alt_down_adds_caret()
     test_alt_tap_converts_multiline_selection_to_block_edit()

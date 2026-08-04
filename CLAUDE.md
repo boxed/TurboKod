@@ -78,7 +78,7 @@ Build-only (use after editing Mojo source — keeps both frontends compilable *a
 make            # build both frontends, no launch
 make app        # build .build/TurboKod.app
 make tui        # build examples/desktop.mojo (canonical terminal entry)
-make test       # build + run tests/test_basic.mojo
+make test       # build + run every tests/test_*.mojo suite
 ```
 
 Terminal path (build + launch):
@@ -86,7 +86,7 @@ Terminal path (build + launch):
 ```sh
 ./run.sh examples/hello.mojo     # demo: windowed greeting
 ./run.sh examples/boxes.mojo     # demo: arrow-key navigation
-./run.sh tests/test_basic.mojo   # pure-data tests, no TTY required
+scripts/run_tests.sh             # pure-data test suites, no TTY required
 ```
 
 Native macOS path (build + launch):
@@ -106,7 +106,22 @@ Both scripts honor `TURBOKOD_BUILD_ONLY=1` to skip the launch — that's how the
 
 First build of a fresh entry point is ~8–12 s; cached re-runs are ~0.5 s.
 
-`tests/test_basic.mojo` exercises everything that doesn't need a TTY — run it via `./run.sh tests/test_basic.mojo` to verify package changes. It does **not** exercise the Swift frontend; for that, smoke-test with `TK_CAPTURE=/tmp/shot.png ./run_swift.sh` (renders one frame to PNG and quits).
+### The test suites
+
+`tests/` holds one entry point per topic — `tests/test_editor_edit.mojo`, `tests/test_git.mojo`, `tests/test_lsp.mojo` and so on — each with its own `main()` that calls every test in the file. Shared fixtures (`_key`, `_SCREEN`, `_temp_path`, `_run_git`, …) live in `tests/support.mojo`, which the suites import as a sibling module (no extra `-I` needed). Together they exercise everything that doesn't need a TTY.
+
+```sh
+scripts/run_tests.sh              # all suites: build concurrently, run serially
+scripts/run_tests.sh git editor   # only suites whose filename matches a filter
+```
+
+The runner builds all suites in parallel and then runs them **one at a time** — they share a scratch `$HOME` (`/tmp/turbokod_test_home`, set up by `setup_test_env`) and a couple of tests write config files into it, so concurrent runs would race. It fails the run on any compiler warning.
+
+When you add a test, put it in the topic file it belongs to **and add the call to that file's `main()`** — nothing auto-discovers tests. (The monolith this replaced had 43 tests that were defined but never called, which is how three of them came to encode behaviour the product had long since changed.)
+
+This was one 23k-line `tests/test_basic.mojo` until it crossed a compile-time cliff in this Mojo version: a full `mojo build` went from ~5 minutes to over two hours, so it stopped being run at all. Same tests, 16 files, ~2m40s cold and seconds warm. Keep the files roughly under ~2.5k lines and this stays true.
+
+None of it exercises the Swift frontend; for that, smoke-test with `TK_CAPTURE=/tmp/shot.png ./run_swift.sh` (renders one frame to PNG and quits).
 
 ### Keep the build warning-free
 
@@ -115,7 +130,7 @@ First build of a fresh entry point is ~8–12 s; cached re-runs are ~0.5 s.
 Mojo only reports warnings for files in the *current* build's import graph, so no single build sees all of them. After a change, sweep every entry point that compiles your code:
 
 ```sh
-./run.sh tests/test_basic.mojo 2>&1 | grep -i warning:   # shared core (TTY-free)
+scripts/run_tests.sh 2>&1 | grep -i warning:   # shared core (TTY-free; the runner also fails on any warning)
 TURBOKOD_BUILD_ONLY=1 ./run_swift.sh 2>&1 | grep -i warning:   # native_api.mojo + dylib + Swift
 ```
 
@@ -205,7 +220,7 @@ Edit handlers track pre-edit row state at the top of the function (`pre_dirty_ro
 
 Measured perf on a 1380-line Rust file with the vscode rust grammar: cold full tokenize ~180 ms; subsequent token-level edits ~180 μs (1000× faster). Scope-changing edits (e.g. opening a block comment) re-tokenize until state stabilizes; in the worst case (edit at row 0, scope never matches cached) the cost reverts to a full retokenize.
 
-`test_textmate_incremental_matches_full_retokenize` in `test_basic.mojo` is the regression test: after a token-level and a scope-changing edit, the incremental output must equal a fresh full pass.
+`test_textmate_incremental_matches_full_retokenize` in `tests/test_highlight.mojo` is the regression test: after a token-level and a scope-changing edit, the incremental output must equal a fresh full pass.
 
 `_try_textmate` falls back to the generic tokenizer in three cases: no grammar bundled for the extension, the loader/runtime raised, or the grammar produced zero highlights for non-empty input. The last is the tripwire for grammars that "load fine" but rely on unimplemented features — better degrade to colored-but-cruder than a blank screen.
 
@@ -248,7 +263,7 @@ A wide glyph occupies two cells: `put_text` writes the glyph cell with `width=2`
 
 When a cell column lands on the **right half** of a wide glyph, the cell→byte converters snap to the glyph's start — you can't park a cursor inside an emoji.
 
-East-Asian fullwidth (CJK) and zero-width combining marks are **still not modeled** — only emoji widen. Regional-indicator letters (flags) deliberately stay width 1 so a two-codepoint flag reserves two cells total, matching most terminals. If CJK ever needs real wide handling, extend `char_width` (and its Swift twin) — everything downstream already respects it. The regression test is `test_emoji_double_width` in `tests/test_basic.mojo`.
+East-Asian fullwidth (CJK) and zero-width combining marks are **still not modeled** — only emoji widen. Regional-indicator letters (flags) deliberately stay width 1 so a two-codepoint flag reserves two cells total, matching most terminals. If CJK ever needs real wide handling, extend `char_width` (and its Swift twin) — everything downstream already respects it. The regression test is `test_emoji_double_width` in `tests/test_misc.mojo`.
 
 ## Jump-to commands center at the golden ratio
 

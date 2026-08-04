@@ -41,11 +41,14 @@ tui:
 	TURBOKOD_BUILD_ONLY=1 ./run.sh examples/desktop.mojo
 
 # Build + run the headless unit tests. Same as ``pixi run test``.
-# Doesn't fit the "build only" pattern of ``build`` because the
-# ``test_basic.mojo`` binary has no purpose outside being run, so this
-# target launches.
+# Doesn't fit the "build only" pattern of ``build`` because a test binary has
+# no purpose outside being run, so this target launches.
+#
+# The suites (``tests/test_<topic>.mojo``) build concurrently and then run one
+# at a time — see scripts/run_tests.sh. Pass a filter to narrow it down:
+# ``scripts/run_tests.sh git editor``.
 test:
-	./run.sh tests/test_basic.mojo
+	scripts/run_tests.sh
 
 # Build a self-contained, Developer ID signed + Apple-notarized + stapled
 # TurboKod.app, zip it, and publish to the GitHub Releases page. Unlike

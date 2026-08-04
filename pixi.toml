@@ -17,5 +17,7 @@ hello    = "./run.sh examples/hello.mojo"
 boxes    = "./run.sh examples/boxes.mojo"
 desktop  = "./run.sh examples/desktop.mojo"
 diagnose = "./run.sh examples/diagnose.mojo"
-test     = "./run.sh tests/test_basic.mojo"
+# Builds every tests/test_<topic>.mojo suite concurrently, then runs them one
+# at a time. Filter with e.g. ``scripts/run_tests.sh git``.
+test     = "scripts/run_tests.sh"
 update-lsp-list = "python3 scripts/refresh_languages.py"

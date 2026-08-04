@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Convenience wrapper: `./run.sh examples/hello.mojo` or `./run.sh tests/test_basic.mojo`.
+# Convenience wrapper: `./run.sh examples/hello.mojo` or `./run.sh tests/test_git.mojo`.
+# (For the whole test suite use `scripts/run_tests.sh`, which drives this script.)
 #
 # Builds the entry point with `mojo build -I src` and runs the resulting
 # native binary. Build artifacts are cached under `.build/` keyed by the
@@ -67,9 +68,19 @@ fi
 # (a shim rebuild needs a binary rebuild — they're statically linked).
 # ``find -newer`` returns the first match and we short-circuit on
 # -print -quit, so this scales fine as the package grows.
+#
+# A sibling ``support.mojo`` next to the entry point counts as a dependency
+# too: the test suites import their shared fixtures from ``tests/support.mojo``,
+# and without this a fixture edit would leave every suite running stale code.
+# Only that one filename, so editing one suite doesn't rebuild its siblings.
+deps=("src" "$src")
+support="$(dirname -- "$src")/support.mojo"
+if [ -f "$support" ] && [ "$support" != "$src" ]; then
+  deps+=("$support")
+fi
 needs_build=1
 if [ -x "$bin" ]; then
-  newer=$(find src "$src" -name '*.mojo' -newer "$bin" -print -quit 2>/dev/null)
+  newer=$(find "${deps[@]}" -name '*.mojo' -newer "$bin" -print -quit 2>/dev/null)
   if [ -z "$newer" ] \
      && [ ! "app/turbokod-shim/target/release/libturbokod_shim.a" -nt "$bin" ]; then
     needs_build=0
