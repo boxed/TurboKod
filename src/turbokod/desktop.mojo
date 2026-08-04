@@ -7039,6 +7039,11 @@ struct Desktop(Movable):
                 _ = self.local_changes.handle_mouse(
                     event, screen, self.grammar_registry,
                 )
+            # A click on a URL in a commit message / branch log queues it
+            # here; the modal stays open behind the browser.
+            var lc_url = self.local_changes.consume_open_url()
+            if len(lc_url.as_bytes()) > 0:
+                open_url(lc_url)
             if self.local_changes.submitted:
                 # ``selected_path`` is project-relative; resolve against
                 # the project root before opening so ``open_file`` can

@@ -9,7 +9,8 @@ The left sidebar stacks three panels:
   toggles whole-file staged status (``git add`` if there's anything in
   the worktree column, ``git restore --staged`` otherwise).
 * **Branches** — local branches sorted by most recent commit, with the
-  currently checked-out branch tagged ``*``.
+  currently checked-out branch tagged ``*``. Space checks out the
+  selected branch (``git checkout``).
 * **Commits** — the last 50 commits on whichever ref is reachable from
   ``HEAD``.
 
@@ -21,7 +22,9 @@ arrow enters the right side (lands on Unstaged for files); Tab cycles
 between Unstaged and Staged when both are visible. Within a right
 panel, Up/Down moves the line cursor and Space stages / unstages the
 single ``+`` / ``-`` line under the cursor (forward from Unstaged,
-``--reverse`` from Staged).
+``--reverse`` from Staged). ``http(s)://`` URLs in the info panel's text
+— a commit message, a branch-log subject — paint as underlined blue
+links and open in the system browser when clicked.
 
 Tab / Shift+Tab cycle focus between the three sidebar panels, or
 between the two right-side panels when focus is on the right.
@@ -46,8 +49,8 @@ from .cell import Cell
 from .clipboard import clipboard_copy
 from .colors import (
     Attr, BLACK, BORDER_FOCUS, CYAN, DARK_GRAY, EDITOR_BG, EDITOR_FG,
-    GREEN, LIGHT_CYAN, LIGHT_GRAY, LIGHT_GREEN, LIGHT_MAGENTA, LIGHT_RED,
-    LIGHT_YELLOW, MAGENTA, WHITE, YELLOW,
+    GREEN, LIGHT_BLUE, LIGHT_CYAN, LIGHT_GRAY, LIGHT_GREEN, LIGHT_MAGENTA,
+    LIGHT_RED, LIGHT_YELLOW, MAGENTA, STYLE_UNDERLINE, WHITE, YELLOW,
 )
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
@@ -61,6 +64,7 @@ from .highlight import (
     GrammarRegistry, Highlight, HighlightCache,
     extension_of, highlight_for_extension_cached,
 )
+from .output_links import extract_url_links
 from .painter import Painter
 from .file_io import join_path, read_file
 from .window import (
@@ -138,6 +142,7 @@ comptime _GITOP_AMEND:   Int = 2
 comptime _GITOP_PULL:    Int = 3
 comptime _GITOP_PUSH:    Int = 4
 comptime _GITOP_REVERT:  Int = 5
+comptime _GITOP_CHECKOUT: Int = 6
 
 # How often (ms) the open modal re-checks git for state that changed on
 # disk behind our back — a save in an editor, a commit/checkout in another
@@ -187,6 +192,23 @@ struct FileEntry(ImplicitlyCopyable, Movable):
     var unstaged_diff: String
 
 
+@fieldwise_init
+struct PanelLink(ImplicitlyCopyable, Movable):
+    """One clickable ``http(s)://`` span found in a right-panel info row —
+    in practice a URL in a commit message or a branch-log subject.
+
+    ``row`` indexes ``RightPanel.lines``; ``cell_start`` / ``cell_end``
+    (exclusive) are codepoint-cell offsets from the start of that line,
+    matching how ``Canvas.put_text`` advances columns — so both the paint
+    (underline) and the click hit-test convert to screen X the same way,
+    by adding the panel's body origin and subtracting the horizontal
+    scroll."""
+    var row: Int
+    var cell_start: Int
+    var cell_end: Int
+    var url: String
+
+
 struct RightPanel(Movable):
     """One scrollable subpane on the right side. ``diff_line`` parallels
     ``lines``: the index into the source per-file diff text for body
@@ -204,13 +226,18 @@ struct RightPanel(Movable):
     to in the *after* file. Empty path / zero line for non-body rows
     (banners, blanks, info text) where there's nothing to jump to.
     Used by the double-click handler to open the file at the clicked
-    line."""
+    line.
+
+    ``links`` is a flat list (not parallel to ``lines`` — a row can hold
+    several links, most hold none) of URL spans found in the panel's info
+    rows; ``PanelLink.row`` indexes back into ``lines``."""
     var lines: List[String]
     var diff_line: List[Int]
     var kind: List[Int]
     var file_path: List[String]
     var file_line: List[Int]
     var highlights: List[Highlight]
+    var links: List[PanelLink]
     var scroll: Int
     var scroll_x: Int
     var cursor: Int
@@ -222,6 +249,7 @@ struct RightPanel(Movable):
         self.file_path = List[String]()
         self.file_line = List[Int]()
         self.highlights = List[Highlight]()
+        self.links = List[PanelLink]()
         self.scroll = 0
         self.scroll_x = 0
         self.cursor = 0
@@ -233,9 +261,19 @@ struct RightPanel(Movable):
         self.file_path = List[String]()
         self.file_line = List[Int]()
         self.highlights = List[Highlight]()
+        self.links = List[PanelLink]()
         self.scroll = 0
         self.scroll_x = 0
         self.cursor = 0
+
+    def link_at(self, row: Int, cell: Int) -> String:
+        """URL of the link covering cell column ``cell`` of ``row``, or an
+        empty string when the position isn't on a link."""
+        for i in range(len(self.links)):
+            var l = self.links[i]
+            if l.row == row and cell >= l.cell_start and cell < l.cell_end:
+                return l.url
+        return String("")
 
 
 def _line_starts_with_at_at(line: String) -> Bool:
@@ -655,6 +693,18 @@ def _emit_separator(mut panel: RightPanel):
 
 
 def _emit_info(mut panel: RightPanel, var text: String):
+    """Append a free-form info row. Info rows are the human-facing text of
+    a commit (author / date / message) or a branch log line, so they're
+    scanned for ``http(s)://`` URLs here — the paint underlines them and a
+    click opens them in the browser. Diff body rows deliberately aren't
+    scanned: a URL inside changed *code* is a diff line to stage, not a
+    link to follow."""
+    var hits = extract_url_links(text)
+    var row = len(panel.lines)
+    for i in range(len(hits)):
+        panel.links.append(PanelLink(
+            row, hits[i].cell_start, hits[i].cell_end, hits[i].path,
+        ))
     panel.lines.append(text^)
     panel.kind.append(_LINE_INFO)
     panel.diff_line.append(-1)
@@ -672,6 +722,42 @@ def _emit_body_row(
     panel.diff_line.append(diff_idx)
     panel.file_path.append(path)
     panel.file_line.append(line)
+
+
+def _cells_skipped(line: String, scroll_x: Int) -> Int:
+    """Cell columns of ``line`` hidden off the left edge by the panel's
+    ``scroll_x``, which is a *byte* offset (the panels slice raw bytes to
+    scroll). Link spans are in cell offsets, so they need this conversion
+    before they can be turned into screen columns."""
+    if scroll_x <= 0:
+        return 0
+    var bytes = line.as_bytes()
+    if scroll_x >= len(bytes):
+        return utf8_codepoint_count(line)
+    return utf8_byte_to_cell(line)[scroll_x]
+
+
+def _underline_row_links(
+    mut canvas: Canvas, painter: Painter, panel: RightPanel,
+    row: Int, y: Int, body_x: Int, x_max: Int, attr: Attr,
+):
+    """Stamp ``attr`` over every URL span of ``row``, which is painted at
+    screen row ``y`` starting at column ``body_x`` (exclusive right edge
+    ``x_max``). Attr-only writes, so the glyphs the row already painted
+    stay put and only their colour + underline change."""
+    var skipped = _cells_skipped(panel.lines[row], panel.scroll_x)
+    for i in range(len(panel.links)):
+        var l = panel.links[i]
+        if l.row != row:
+            continue
+        var x0 = body_x + l.cell_start - skipped
+        var x1 = body_x + l.cell_end - skipped
+        if x0 < body_x:
+            x0 = body_x
+        if x1 > x_max:
+            x1 = x_max
+        for x in range(x0, x1):
+            painter.set_attr(canvas, x, y, attr)
 
 
 def _parse_hunk_starts(line: String, mut old_start: Int, mut new_start: Int):
@@ -1034,6 +1120,12 @@ struct LocalChanges(Movable):
     # when a file row was Enter'd, ``selected_line`` is 0 ("no jump").
     var selected_path: String
     var selected_line: Int
+    # URL queued by a click on a link in a commit message / branch log.
+    # Non-empty for exactly one frame: the desktop drains it right after
+    # dispatching the event and hands it to ``open_url``. Kept as an
+    # intent (rather than shelling out from here) so the modal stays free
+    # of process-spawning side effects and tests can assert on the click.
+    var pending_open_url: String
     # Banner shown at the top when git failed entirely. Empty means
     # "render normally" (per-panel placeholders take over inside each
     # section if its data list is empty).
@@ -1073,6 +1165,10 @@ struct LocalChanges(Movable):
     var _git_op_label: String   # short label flashed in the success status
     var _git_revert_path: String  # path being reverted (for _GITOP_REVERT)
     var _git_revert_untracked: Bool
+    # Branch being switched to (for _GITOP_CHECKOUT) — used for the status
+    # flash and to re-select the same branch after the refresh reorders
+    # the list (branches sort by most recent commit).
+    var _git_checkout_branch: String
     # Diff-line index queued for line-level discard, captured when the
     # confirmation overlay opens and consumed when the user confirms.
     var _discard_diff_idx: Int
@@ -1118,6 +1214,7 @@ struct LocalChanges(Movable):
         self._drag_kind = _DRAG_NONE
         self.selected_path = String("")
         self.selected_line = 0
+        self.pending_open_url = String("")
         self.status_message = String("")
         self.overlay = _OVERLAY_NONE
         self.overlay_input = TextField()
@@ -1135,6 +1232,7 @@ struct LocalChanges(Movable):
         self._git_op_label = String("")
         self._git_revert_path = String("")
         self._git_revert_untracked = False
+        self._git_checkout_branch = String("")
         self._discard_diff_idx = -1
         self._pending_commit_message = String("")
         self._poll_status_fp = String("")
@@ -1168,6 +1266,7 @@ struct LocalChanges(Movable):
         self._drag_kind = _DRAG_NONE
         self.selected_path = String("")
         self.selected_line = 0
+        self.pending_open_url = String("")
         self.status_message = String("")
         self.overlay = _OVERLAY_NONE
         self.overlay_input = TextField()
@@ -1179,6 +1278,7 @@ struct LocalChanges(Movable):
         self._git_op_label = String("")
         self._git_revert_path = String("")
         self._git_revert_untracked = False
+        self._git_checkout_branch = String("")
         self._reload_files()
         self.branches = fetch_git_branches(self.root)
         self.commits = fetch_git_commits(self.root, 50)
@@ -1294,6 +1394,7 @@ struct LocalChanges(Movable):
         self._drag_kind = _DRAG_NONE
         self.selected_path = String("")
         self.selected_line = 0
+        self.pending_open_url = String("")
         self.status_message = String("")
         self.overlay = _OVERLAY_NONE
         self.overlay_input = TextField()
@@ -1305,6 +1406,7 @@ struct LocalChanges(Movable):
         self._git_op_label = String("")
         self._git_revert_path = String("")
         self._git_revert_untracked = False
+        self._git_checkout_branch = String("")
 
     # --- geometry ---------------------------------------------------------
 
@@ -1739,6 +1841,10 @@ struct LocalChanges(Movable):
         elif self.focus == _PANE_FILES:
             hint = String(
                 " c:commit A:amend d:revert p:pull P:push  Space:stage  ⌘C:copy  Enter:open  ESC:close ",
+            )
+        elif self.focus == _PANE_BRANCHES:
+            hint = String(
+                " Tab: pane  Up/Down: select  Space: switch branch  Right: log  ⌘C: copy  ESC: close ",
             )
         else:
             hint = String(
@@ -2249,53 +2355,10 @@ struct LocalChanges(Movable):
             var line = panel.lines[idx]
             var k = panel.kind[idx] if idx < len(panel.kind) else _LINE_INFO
             var is_cursor = (idx == panel.cursor and pane_focused)
-            # Cursor row: paint the whole row in cursor_active and write
-            # the line content on top — overrides the per-kind colouring
-            # below. Skip the syntax overlay for this row so the YELLOW
-            # background isn't recoloured back to the editor background.
-            if is_cursor:
-                painter.fill(
-                    canvas,
-                    Rect(area.a.x, y, area.b.x, y + 1),
-                    String(" "), cursor_active,
-                )
-                # Show the gutter character even on the cursor row so
-                # the user can still tell add from remove from context.
-                # The column right of the marker is left as a blank
-                # spacer so the marker doesn't crowd the code.
-                var gutter_glyph: String
-                if k == _LINE_ADD:
-                    gutter_glyph = String("+")
-                elif k == _LINE_REM:
-                    gutter_glyph = String("-")
-                else:
-                    gutter_glyph = String(" ")
-                _ = painter.put_text(
-                    canvas, Point(area.a.x, y), gutter_glyph, cursor_active,
-                )
-                var bytes_c = line.as_bytes()
-                if panel.scroll_x < len(bytes_c):
-                    var visible_c = String(StringSlice(
-                        unsafe_from_utf8=bytes_c[
-                            panel.scroll_x:len(bytes_c)
-                        ],
-                    ))
-                    _ = painter.put_text(
-                        canvas, Point(area.a.x + 2, y),
-                        visible_c, cursor_active,
-                    )
-                continue
-            # Separator rule between hunks: a dim horizontal line across
-            # the whole panel width. No gutter, no syntax overlay.
-            if k == _LINE_SEPARATOR:
-                var sep_attr = Attr(DARK_GRAY, EDITOR_BG)
-                painter.fill(
-                    canvas,
-                    Rect(area.a.x, y, area.b.x, y + 1),
-                    String("─"), sep_attr,
-                )
-                continue
-            # Non-cursor row: pick the base colour by line kind.
+            # Per-kind render recipe. Resolved before the cursor row is
+            # special-cased so both paths agree on where the text starts —
+            # a row must not slide sideways just because it got selected,
+            # and the link hit-test in ``_info_link_at`` relies on that.
             var line_attr: Attr
             var gutter_glyph: String
             var gutter_attr: Attr
@@ -2335,13 +2398,61 @@ struct LocalChanges(Movable):
                 gutter_glyph = String(" ")
                 gutter_attr = body_bg
                 has_gutter = True
+            var body_x = area.a.x + 2 if has_gutter else area.a.x
+            # Cursor row: paint the whole row in cursor_active and write
+            # the line content on top — overrides the per-kind colouring
+            # below. Skip the syntax overlay for this row so the YELLOW
+            # background isn't recoloured back to the editor background.
+            if is_cursor:
+                painter.fill(
+                    canvas,
+                    Rect(area.a.x, y, area.b.x, y + 1),
+                    String(" "), cursor_active,
+                )
+                # Show the gutter character even on the cursor row so
+                # the user can still tell add from remove from context.
+                # The column right of the marker is left as a blank
+                # spacer so the marker doesn't crowd the code.
+                if has_gutter:
+                    _ = painter.put_text(
+                        canvas, Point(area.a.x, y),
+                        gutter_glyph, cursor_active,
+                    )
+                var bytes_c = line.as_bytes()
+                if panel.scroll_x < len(bytes_c):
+                    var visible_c = String(StringSlice(
+                        unsafe_from_utf8=bytes_c[
+                            panel.scroll_x:len(bytes_c)
+                        ],
+                    ))
+                    _ = painter.put_text(
+                        canvas, Point(body_x, y), visible_c, cursor_active,
+                    )
+                # Keep URLs marked on the cursor row too, but as an
+                # underline over the selection colours rather than the
+                # blue link attr — recolouring would swallow the cursor.
+                if len(panel.links) > 0:
+                    _underline_row_links(
+                        canvas, painter, panel, idx, y, body_x,
+                        area.b.x, cursor_active.add_style(STYLE_UNDERLINE),
+                    )
+                continue
+            # Separator rule between hunks: a dim horizontal line across
+            # the whole panel width. No gutter, no syntax overlay.
+            if k == _LINE_SEPARATOR:
+                var sep_attr = Attr(DARK_GRAY, EDITOR_BG)
+                painter.fill(
+                    canvas,
+                    Rect(area.a.x, y, area.b.x, y + 1),
+                    String("─"), sep_attr,
+                )
+                continue
             # Gutter is two cells: the +/-/space marker, then a blank
             # spacer so the code body doesn't crowd against the marker.
             if has_gutter:
                 _ = painter.put_text(
                     canvas, Point(area.a.x, y), gutter_glyph, gutter_attr,
                 )
-            var body_x = area.a.x + 2 if has_gutter else area.a.x
             var bytes = line.as_bytes()
             var start = panel.scroll_x
             if start < len(bytes):
@@ -2384,6 +2495,14 @@ struct LocalChanges(Movable):
                         if sx >= area.b.x:
                             break
                         painter.set_attr(canvas, sx, y, hl.attr)
+            # URL spans in info rows (commit message / branch log) paint
+            # as underlined links last, so they win over the base kind
+            # colour. Only info rows ever carry links — see ``_emit_info``.
+            if len(panel.links) > 0:
+                _underline_row_links(
+                    canvas, painter, panel, idx, y, body_x, area.b.x,
+                    Attr(LIGHT_BLUE, EDITOR_BG, STYLE_UNDERLINE),
+                )
         _ = cursor_inactive
         _ = hunk_attr   # retained for the legacy diff colour palette
         _ = rem_attr
@@ -2446,6 +2565,19 @@ struct LocalChanges(Movable):
             elif self.sel_commit >= self.scroll_commits + h:
                 self.scroll_commits = self.sel_commit - h + 1
             if self.scroll_commits < 0: self.scroll_commits = 0
+
+    def _select_branch_by_name(mut self, name: String):
+        """Move ``sel_branch`` onto the row named ``name``, if it's still
+        in the list. No container bounds here (we're called from ``tick``,
+        which doesn't have them), so scroll only gets nudged up when the
+        new row sits above the viewport — the paint's own scroll window is
+        unchanged otherwise."""
+        for i in range(len(self.branches)):
+            if self.branches[i].name == name:
+                self.sel_branch = i
+                if self.scroll_branches > i:
+                    self.scroll_branches = i
+                return
 
     def _cycle_focus(mut self, direction: Int):
         """Tab / Shift+Tab. Cycles through every visible pane in a
@@ -2799,9 +2931,9 @@ struct LocalChanges(Movable):
             return True
         if k == KEY_ENTER:
             # Enter only does something for file rows — open the file.
-            # On branches/commits there's no obvious "open" action, so
-            # we ignore Enter rather than fake a non-reversible action
-            # like ``git checkout``.
+            # On branches/commits there's no obvious "open" action, and
+            # branch checkout lives on Space (see ``_handle_space``), so
+            # Enter stays inert there rather than guessing.
             if self.focus == _PANE_FILES \
                     and 0 <= self.sel_file \
                     and self.sel_file < len(self.files):
@@ -2817,17 +2949,24 @@ struct LocalChanges(Movable):
           staged column does. (For an entry with both, prefer staging
           the rest of the worktree changes; the user can press Space
           again to unstage.)
+        * On the Branches panel: check out the selected branch. Not
+          gated behind a confirmation — git refuses the switch outright
+          when it would clobber local changes, and switching back is one
+          more keystroke.
         * On Unstaged / Staged right panels: build a minimal patch from
           the cursor's single line and apply it (forward to stage from
           Unstaged, ``--reverse`` to unstage from Staged).
 
-        Anywhere else (branches / commits / info / non-actionable line)
-        it's a no-op rather than an error so the keystroke doesn't grab
-        focus from a future binding.
+        Anywhere else (commits / info / non-actionable line) it's a
+        no-op rather than an error so the keystroke doesn't grab focus
+        from a future binding.
         """
         if self.focus == _PANE_FILES:
             if 0 <= self.sel_file and self.sel_file < len(self.files):
                 self._toggle_file_at(self.sel_file)
+            return
+        if self.focus == _PANE_BRANCHES:
+            self._run_checkout()
             return
         if self.focus == _PANE_RIGHT_UNSTAGED:
             var cursor = self.unstaged.cursor
@@ -3126,6 +3265,32 @@ struct LocalChanges(Movable):
             _GITOP_PUSH, String("git push"), argv^, String("Running "),
         )
 
+    def _run_checkout(mut self):
+        """``git checkout`` the selected branch. Already-current branch is
+        a no-op flash rather than a git invocation, so Space on the ``*``
+        row doesn't spin the runner for nothing. Open editors pick up the
+        new file contents through the desktop's usual external-change
+        poll."""
+        if self.sel_branch < 0 or self.sel_branch >= len(self.branches):
+            self._show_status(String("No branch selected."), False)
+            return
+        var br = self.branches[self.sel_branch]
+        if br.is_current:
+            self._show_status(
+                String("Already on ") + br.name, True,
+            )
+            return
+        var argv = List[String]()
+        argv.append(String("git"))
+        argv.append(String("-C"))
+        argv.append(self.root)
+        argv.append(String("checkout"))
+        argv.append(br.name)
+        self._git_checkout_branch = br.name.copy()
+        self._start_git_op(
+            _GITOP_CHECKOUT, String("git checkout"), argv^, String("Running "),
+        )
+
     def _submit_commit(mut self):
         var msg = self.overlay_input.text
         if len(msg.as_bytes()) == 0:
@@ -3219,6 +3384,7 @@ struct LocalChanges(Movable):
             self._git_op_label = String("")
             self._git_revert_path = String("")
             self._git_revert_untracked = False
+            self._git_checkout_branch = String("")
             return
         var ok = r.ok()
         # Push/pull report progress + the final summary on stderr; the
@@ -3242,6 +3408,11 @@ struct LocalChanges(Movable):
                 fallback = String("reverted ") + self._git_revert_path
             else:
                 fallback = String("revert failed")
+        elif op == _GITOP_CHECKOUT:
+            if ok:
+                fallback = String("switched to ") + self._git_checkout_branch
+            else:
+                fallback = String("checkout failed")
         else:
             fallback = String("done") if ok else String("failed")
         var msg: String
@@ -3253,11 +3424,19 @@ struct LocalChanges(Movable):
             self._refresh_full()
         if op == _GITOP_COMMIT and ok:
             self._pending_commit_message = String("")
+        if op == _GITOP_CHECKOUT and ok:
+            # Branches sort by most recent commit, so the refreshed list
+            # can have moved the row we just checked out — follow it by
+            # name rather than leaving the cursor on whatever slid in.
+            var switched = self._git_checkout_branch.copy()
+            self._select_branch_by_name(switched)
         self._show_status(msg^, ok)
         self._git_op_label = String("")
         if op == _GITOP_REVERT:
             self._git_revert_path = String("")
             self._git_revert_untracked = False
+        if op == _GITOP_CHECKOUT:
+            self._git_checkout_branch = String("")
 
     def _handle_overlay_key(mut self, event: Event) -> Bool:
         """Route key events while an overlay is active. Returns True to
@@ -3430,6 +3609,28 @@ struct LocalChanges(Movable):
             return _PANE_RIGHT_STAGED
         return -1
 
+    def _info_link_at(self, pos: Point, row: Int, container_bounds: Rect) -> String:
+        """URL of the link under ``pos`` in the info panel's row ``row``,
+        or empty when the click missed every link.
+
+        Links only ever land on info rows (``_emit_info``), which carry no
+        gutter — selected or not, their text starts at the panel's left
+        edge, which is where ``_paint_right_side`` puts the info panel."""
+        if row < 0 or row >= len(self.info.lines):
+            return String("")
+        var body_x = self._diff_left(container_bounds)
+        var cell = pos.x - body_x \
+            + _cells_skipped(self.info.lines[row], self.info.scroll_x)
+        return self.info.link_at(row, cell)
+
+    def consume_open_url(mut self) -> String:
+        """Take the URL queued by a click on a commit-message link (empty
+        when there is none). The desktop calls this after dispatching an
+        event and passes any result to ``open_url``."""
+        var u = self.pending_open_url
+        self.pending_open_url = String("")
+        return u^
+
     def _try_submit_jump(
         mut self, var path: String, line: Int,
     ) -> Bool:
@@ -3546,6 +3747,15 @@ struct LocalChanges(Movable):
                         return True
                     var li = self.info.scroll + (pos.y - top - 1)
                     if 0 <= li and li < len(self.info.lines):
+                        # A URL in the commit message / branch log opens in
+                        # the browser instead of moving the line cursor.
+                        # Guarded to the first press of a click so a
+                        # double-click can't launch two browser tabs.
+                        if Int(event.click_count) < 2:
+                            var url = self._info_link_at(pos, li, bounds)
+                            if len(url.as_bytes()) > 0:
+                                self.pending_open_url = url^
+                                return True
                         self.info.cursor = li
                         if Int(event.click_count) >= 2 \
                                 and li < len(self.info.file_line) \
