@@ -171,6 +171,14 @@ The bottom dock hosts three kinds of output pane, split by how the child process
 
 The Vt-grid behavior shared by both pty panes — grid paint, scrollback view, selection (cell/word/line drag) + copy, and the key→pty / mouse→pty wire encodings — lives in **`terminal_view.mojo`** (`GridSelection` + `paint_grid` + `encode_key`). Each pane keeps its own `Vt` + `PtyProcess` and the chrome/title/command-strip concerns specific to it. Clickable `File "...", line N` / `path:N` traceback links are detected by **`output_links.mojo`** (shared by `DebugPane` and `TestPane`); a pane scans its visible rows each paint, underlines the spans, and turns a click into an `open_file_at`. When you add a tool pane, decide pipe vs pty by whether the child wants a TTY, and reuse `terminal_view` / `output_links` rather than reimplementing.
 
+## Case-insensitive search
+
+Anything that compares bytes ignoring case goes through **`case_fold.mojo`** — branchless ASCII folding (`(c - 0x41) <u 26`, `c | is_upper << 5`) with explicit 32-byte SIMD. Don't hand-inline `if 0x41 <= c and c <= 0x5A: c += 0x20` again; that idiom used to be copy-pasted in half a dozen places and each copy sat *inside* an innermost compare loop.
+
+Find and Replace (in-file and project-wide) go through **`LineSearcher`** in `search_options.mojo`, which decides **per line** whether the SIMD scan is provably equivalent to libonig's `(?i)` (needle and line both pure ASCII) or whether that line needs the regex for Unicode case pairs. Never bypass it by calling `build_search_regex` for a find/replace loop — that's the slow path with none of the gating. Adding a new search site means constructing a `LineSearcher` and looping on `search` / `rsearch` / `search_span`.
+
+Full details, the correctness argument for folding UTF-8 in place, and the benchmarks (`bench/fold_bench.mojo`) in [docs/case-folding.md](docs/case-folding.md).
+
 ## Themes
 
 A color theme (Settings ▸ Theme, default "Turbo C++ 3.0") retints **both**

@@ -45,6 +45,7 @@ fall through to no row.
 
 from std.collections.list import List
 
+from .case_fold import starts_with_ci as _starts_with_ci
 from .posix import monotonic_ms
 
 
@@ -151,18 +152,9 @@ def starts_with_ci(name: String, prefix: String) -> Bool:
     """ASCII-case-insensitive prefix test. UTF-8 case folding is
     non-trivial; restricting to ASCII keeps the comparison cheap and
     matches the way the rest of this codebase already sorts/compares
-    names (see ``_sort_entries_ci`` in ``file_io``)."""
-    var nb = name.as_bytes()
-    var pb = prefix.as_bytes()
-    if len(pb) > len(nb):
-        return False
-    for i in range(len(pb)):
-        var cn = Int(nb[i])
-        var cp = Int(pb[i])
-        if 0x41 <= cn and cn <= 0x5A:
-            cn += 0x20
-        if 0x41 <= cp and cp <= 0x5A:
-            cp += 0x20
-        if cn != cp:
-            return False
-    return True
+    names (see ``_sort_entries_ci`` in ``file_io``).
+
+    Re-exported from ``case_fold`` so the type-ahead callers
+    (``dropdown``, ``dir_browser``, ``find_symbol``) keep importing it
+    from here."""
+    return _starts_with_ci(name, prefix)

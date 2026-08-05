@@ -24,6 +24,7 @@ they show up rarely and the spec marks them optional.
 
 from std.collections.list import List
 
+from .case_fold import fold_ascii
 from .file_io import join_path, parent_path, read_file, stat_file
 from .posix import realpath
 from .string_utils import parse_int_all, starts_with
@@ -43,15 +44,7 @@ def _slice(s: String, start: Int, end: Int) -> String:
 
 
 def _to_lower(s: String) -> String:
-    var bytes = s.as_bytes()
-    var out = List[UInt8]()
-    for i in range(len(bytes)):
-        var b = Int(bytes[i])
-        if 0x41 <= b and b <= 0x5A:
-            out.append(UInt8(b + 32))
-        else:
-            out.append(bytes[i])
-    return String(StringSlice(ptr=out.unsafe_ptr(), length=len(out)))
+    return fold_ascii(s)
 
 
 def _strip(s: String) -> String:

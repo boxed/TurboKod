@@ -47,6 +47,7 @@ from .picker_input import (
 from .posix import alloc_zero_buffer, poll_stdin, read_into
 from .string_utils import display_columns, starts_with, tail_to_columns
 from .text_field import TextField
+from .case_fold import contains_ci, eq_ci
 from .type_ahead import starts_with_ci
 from .window import paint_close_button, paint_window_title
 
@@ -707,26 +708,6 @@ struct FindSymbol(Movable):
 # --- helpers ---------------------------------------------------------------
 
 
-def _eq_ci(a: String, b: String) -> Bool:
-    """ASCII case-insensitive string equality. Used for the ``rank 0``
-    (exact match) test in the picker's ordering — identifiers are
-    ASCII per the rg regex, and rg's ``--smart-case`` is itself
-    case-insensitive on all-lowercase queries, so a case-sensitive
-    equality here would inconsistently exclude obvious matches."""
-    var ab = a.as_bytes()
-    var bb = b.as_bytes()
-    if len(ab) != len(bb):
-        return False
-    for i in range(len(ab)):
-        var ca = Int(ab[i])
-        var cb = Int(bb[i])
-        if 0x41 <= ca and ca <= 0x5A: ca += 0x20
-        if 0x41 <= cb and cb <= 0x5A: cb += 0x20
-        if ca != cb:
-            return False
-    return True
-
-
 def _query_has_upper(q: String) -> Bool:
     """True iff ``q`` contains any ASCII uppercase byte. Gates the
     smart-case promotion in ``_rank``: a capitalized query treats
@@ -761,7 +742,7 @@ def _rank(name: String, query: String) -> Int:
             return 0
         if starts_with(name, query):
             return 1
-    if _eq_ci(name, query):
+    if eq_ci(name, query):
         return 2
     if starts_with_ci(name, query):
         return 3
@@ -1040,29 +1021,8 @@ def container_matches_qualifier(container: String, qualifier: String) -> Bool:
         return True
     if len(container.as_bytes()) == 0:
         return False
-    return _contains_ci(container, qualifier) \
-        or _contains_ci(qualifier, container)
+    return contains_ci(container, qualifier) \
+        or contains_ci(qualifier, container)
 
 
-def _contains_ci(haystack: String, needle: String) -> Bool:
-    var hb = haystack.as_bytes()
-    var nb = needle.as_bytes()
-    if len(nb) == 0:
-        return True
-    if len(nb) > len(hb):
-        return False
-    var i = 0
-    while i + len(nb) <= len(hb):
-        var ok = True
-        for j in range(len(nb)):
-            var a = Int(hb[i + j])
-            var c = Int(nb[j])
-            if 0x41 <= a and a <= 0x5A: a += 0x20
-            if 0x41 <= c and c <= 0x5A: c += 0x20
-            if a != c:
-                ok = False
-                break
-        if ok:
-            return True
-        i += 1
-    return False
+

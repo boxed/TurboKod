@@ -27,6 +27,7 @@ clears the state and makes the next file open eligible to set it again.
 from std.collections.list import List
 from std.collections.optional import Optional
 
+from .case_fold import eq_ci
 from .canvas import Canvas, utf8_codepoint_count
 from .painter import Painter
 from .colors import (
@@ -15029,26 +15030,14 @@ def _find_doc_entry_for_word(
     for i in range(len(entries)):
         if entries[i].name == word:
             return i
-    var wb = word.as_bytes()
     # Case-insensitive exact match.
     for i in range(len(entries)):
-        var nb = entries[i].name.as_bytes()
-        if len(nb) != len(wb):
-            continue
-        var ok = True
-        for k in range(len(nb)):
-            var ca = Int(nb[k])
-            var cb = Int(wb[k])
-            if 0x41 <= ca and ca <= 0x5A: ca += 0x20
-            if 0x41 <= cb and cb <= 0x5A: cb += 0x20
-            if ca != cb:
-                ok = False
-                break
-        if ok:
+        if eq_ci(entries[i].name, word):
             return i
     # Suffix match: ``.<word>``. First hit wins (DevDocs typically
     # lists the most common parent type first — ``str.find`` ahead of
     # ``bytes.find`` for example).
+    var wb = word.as_bytes()
     for i in range(len(entries)):
         var nb = entries[i].name.as_bytes()
         if len(nb) <= len(wb):

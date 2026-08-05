@@ -73,10 +73,9 @@ from .spell import (
 from .terminal import terminal_supports_extended_underline
 from std.collections.optional import Optional
 from .geometry import Point, Rect
-from .onig import OnigRegex
 from .posix import append_string_bytes, monotonic_ms
 from .search_options import (
-    SearchOptions, build_search_regex, default_search_options,
+    LineSearcher, SearchOptions, default_search_options,
 )
 from .string_utils import (
     byte_slice, char_width, codepoint_at, display_columns, is_space_cp,
@@ -4387,50 +4386,48 @@ struct Editor(Copyable, Movable):
         actually fired, so a bulk replace that finds nothing won't blow
         away redo history. No-op when the editor is read-only.
 
-        ``opts`` honors the Cc / W / .* search-mode flags. The fast
-        byte-replace loop runs unchanged when no flag is set; once any
-        flag is on we route through libonig per line. Replacement is
-        always literal (no ``$1`` backrefs) — that's a deliberate
-        scope limit, not a bug."""
+        ``opts`` honors the Cc / W / .* search-mode flags; matching runs
+        through ``LineSearcher``, which takes the branchless SIMD byte
+        scan per line where that's equivalent to libonig and the regex
+        where it isn't. Replacement is always literal (no ``$1``
+        backrefs) — that's a deliberate scope limit, not a bug."""
         if self.read_only:
             return 0
-        var fb = find.as_bytes()
-        var n = len(fb)
-        if n == 0:
+        if len(find.as_bytes()) == 0:
             return 0
-        var rx_opt = build_search_regex(find, opts)
-        if rx_opt:
-            return self._replace_all_regex(rx_opt.value(), replacement)
+        var searcher = LineSearcher(find, opts)
+        if not searcher.usable():
+            return 0
         self._push_undo()
         var count = 0
         for row in range(self.buffer.line_count()):
             var line = self.buffer.line(row)
             var lb = line.as_bytes()
             var h = len(lb)
-            if h < n:
-                continue
             var rebuilt = String("")
-            var i = 0
+            var pos = 0
             var seg_start = 0
             var line_changed = False
-            while i + n <= h:
-                var hit = True
-                for k in range(n):
-                    if lb[i + k] != fb[k]:
-                        hit = False
-                        break
-                if hit:
-                    if i > seg_start:
-                        rebuilt = rebuilt + String(StringSlice(
-                            unsafe_from_utf8=lb[seg_start:i]
-                        ))
-                    rebuilt = rebuilt + replacement
-                    i += n
-                    seg_start = i
-                    count += 1
-                    line_changed = True
+            while pos <= h:
+                var m = searcher.search(line, pos)
+                if not m:
+                    break
+                var mv = m.value()
+                if mv.start > seg_start:
+                    rebuilt = rebuilt + String(StringSlice(
+                        unsafe_from_utf8=lb[seg_start:mv.start]
+                    ))
+                rebuilt = rebuilt + replacement
+                count += 1
+                line_changed = True
+                if mv.end == mv.start:
+                    # Zero-width match (regex mode only): advance one byte
+                    # so the loop can't spin forever.
+                    seg_start = mv.start
+                    pos = mv.start + 1
                 else:
-                    i += 1
+                    seg_start = mv.end
+                    pos = mv.end
             if line_changed:
                 if seg_start < h:
                     rebuilt = rebuilt + String(StringSlice(
@@ -4453,64 +4450,6 @@ struct Editor(Copyable, Movable):
         else:
             # Nothing changed — roll back the speculative snapshot so the
             # undo stack stays in sync and redo isn't clobbered.
-            _ = self._undo_stack.pop()
-        return count
-
-    def _replace_all_regex(
-        mut self, rx: OnigRegex, replacement: String,
-    ) -> Int:
-        """Regex-mode ``replace_all``: rebuild each line by walking
-        forward through libonig matches. Same speculative-undo
-        protocol as the byte path so a no-op replace doesn't clobber
-        redo history."""
-        self._push_undo()
-        var count = 0
-        for row in range(self.buffer.line_count()):
-            var line = self.buffer.line(row)
-            var lb = line.as_bytes()
-            var h = len(lb)
-            var rebuilt = String("")
-            var pos = 0
-            var seg_start = 0
-            var line_changed = False
-            while pos <= h:
-                var m = rx.search_at(line, pos)
-                if not m:
-                    break
-                var mv = m.value().copy()
-                if mv.start < 0 or mv.end < mv.start:
-                    break
-                if mv.start > seg_start:
-                    rebuilt = rebuilt + String(StringSlice(
-                        unsafe_from_utf8=lb[seg_start:mv.start]
-                    ))
-                rebuilt = rebuilt + replacement
-                count += 1
-                line_changed = True
-                if mv.end == mv.start:
-                    # Zero-width match: advance one byte to avoid an
-                    # infinite loop while still consuming the position.
-                    seg_start = mv.start
-                    pos = mv.start + 1
-                else:
-                    seg_start = mv.end
-                    pos = mv.end
-            if line_changed:
-                if seg_start < h:
-                    rebuilt = rebuilt + String(StringSlice(
-                        unsafe_from_utf8=lb[seg_start:h]
-                    ))
-                self.buffer.lines[row] = rebuilt
-        if count > 0:
-            self.dirty = True
-            self._mark_hl_dirty(0)
-            var max_row = self.buffer.line_count() - 1
-            if self.selections[0].row > max_row: self.selections[0].row = max_row
-            var nlen = self.buffer.line_length(self.selections[0].row)
-            if self.selections[0].col > nlen: self.selections[0].col = nlen
-            self.selections[0].anchor_row = self.selections[0].row
-            self.selections[0].anchor_col = self.selections[0].col
-        else:
             _ = self._undo_stack.pop()
         return count
 
@@ -9312,19 +9251,18 @@ struct Editor(Copyable, Movable):
     ) -> Bool:
         """Search forward from the cursor for ``needle``; select on hit.
 
-        ``opts`` carries the Cc / W / .* toggles from the Find prompt;
-        when every flag is off the function takes the byte-match fast
-        path (the original implementation). With any flag set we
-        compile ``needle`` to a libonig regex and scan one line at a
-        time so word boundaries, case folding, and user-supplied
-        regex syntax all share one code path."""
+        ``opts`` carries the Cc / W / .* toggles from the Find prompt.
+        Both the literal and the regex mode run through one loop over
+        lines; ``LineSearcher`` decides per line whether the branchless
+        SIMD byte scan is equivalent to libonig or whether that line
+        needs the regex. We skip the current selection by starting one
+        byte past ``cursor_col`` on the cursor's row, so a repeated
+        press steps to the next match."""
         if len(needle.as_bytes()) == 0:
             return False
-        var rx_opt = build_search_regex(needle, opts)
-        if rx_opt:
-            return self._find_next_regex(rx_opt.value())
-        var n = len(needle.as_bytes())
-        var nb = needle.as_bytes()
+        var searcher = LineSearcher(needle, opts)
+        if not searcher.usable():
+            return False
         # Search the rest of the current line, then subsequent lines, then wrap.
         var start_row = self.selections[0].row
         var start_col = self.selections[0].col + 1   # skip past current match
@@ -9333,43 +9271,11 @@ struct Editor(Copyable, Movable):
             var r1 = self.buffer.line_count() if pass_idx == 0 else start_row + 1
             for r in range(r0, r1):
                 var line = self.buffer.line(r)
-                var lb = line.as_bytes()
                 var first_col = start_col if (pass_idx == 0 and r == start_row) else 0
-                if first_col + n > len(lb):
-                    continue
-                for c in range(first_col, len(lb) - n + 1):
-                    var matches = True
-                    for k in range(n):
-                        if lb[c + k] != nb[k]:
-                            matches = False
-                            break
-                    if matches:
-                        self.move_to(r, c, False)
-                        self.move_to(r, c + n, True)
-                        return True
-        return False
-
-    def _find_next_regex(mut self, rx: OnigRegex) -> Bool:
-        """Regex-mode implementation of ``find_next``. Scans each
-        line independently from the cursor's row, then wraps. We
-        skip the current selection by starting one byte past
-        ``cursor_col`` on the cursor's row — same idiom as the byte
-        path so a repeated press steps to the next match."""
-        var start_row = self.selections[0].row
-        var start_col = self.selections[0].col + 1
-        for pass_idx in range(2):
-            var r0 = start_row if pass_idx == 0 else 0
-            var r1 = self.buffer.line_count() if pass_idx == 0 else start_row + 1
-            for r in range(r0, r1):
-                var line = self.buffer.line(r)
-                var lb = line.as_bytes()
-                var first_col = start_col if (pass_idx == 0 and r == start_row) else 0
-                if first_col > len(lb):
-                    continue
-                var m = rx.search_at(line, first_col)
+                var m = searcher.search(line, first_col)
                 if m:
-                    var mv = m.value().copy()
-                    if mv.start < 0 or mv.end <= mv.start:
+                    var mv = m.value()
+                    if mv.end <= mv.start:
                         continue
                     self.move_to(r, mv.start, False)
                     self.move_to(r, mv.end, True)
@@ -9383,16 +9289,16 @@ struct Editor(Copyable, Movable):
         """Search backward from the cursor for ``needle``; select on hit.
         Wraps around to the file end when nothing earlier matches.
 
-        Mirrors ``find_next`` for the opts-aware path: any flag set
-        triggers the regex implementation; otherwise the byte scan
-        runs unchanged."""
+        Mirrors ``find_next``: one loop over lines, with
+        ``LineSearcher`` picking the SIMD byte scan or libonig per line.
+        Neither has a reverse search, so within a line we walk forward
+        keeping the right-most hit that starts at or before the anchor
+        (``LineSearcher.rsearch``)."""
         if len(needle.as_bytes()) == 0:
             return False
-        var rx_opt = build_search_regex(needle, opts)
-        if rx_opt:
-            return self._find_prev_regex(rx_opt.value())
-        var n = len(needle.as_bytes())
-        var nb = needle.as_bytes()
+        var searcher = LineSearcher(needle, opts)
+        if not searcher.usable():
+            return False
         # Anchor: the leftmost end of the current selection / cursor. We
         # subtract one byte so a repeated press steps to the *previous*
         # match instead of re-finding the one already selected.
@@ -9415,86 +9321,18 @@ struct Editor(Copyable, Movable):
             var r = r_bot
             while r >= r_top:
                 var line = self.buffer.line(r)
-                var lb = line.as_bytes()
-                if len(lb) >= n:
-                    var last_col: Int
-                    if pass_idx == 0 and r == anchor_row:
-                        last_col = anchor_col
-                        if last_col > len(lb) - n:
-                            last_col = len(lb) - n
-                    else:
-                        last_col = len(lb) - n
-                    var c = last_col
-                    while c >= 0:
-                        var matches = True
-                        for k in range(n):
-                            if lb[c + k] != nb[k]:
-                                matches = False
-                                break
-                        if matches:
-                            self.move_to(r, c, False)
-                            self.move_to(r, c + n, True)
-                            return True
-                        c -= 1
-                r -= 1
-        return False
-
-    def _find_prev_regex(mut self, rx: OnigRegex) -> Bool:
-        """Regex-mode ``find_prev``: walk lines from the selection
-        anchor backward, and within each line collect every match
-        forward until past the upper bound, then return the
-        right-most one. libonig has no built-in reverse search, but
-        per-line forward scans are still cheap because line lengths
-        are bounded in practice."""
-        var sel = self.selection()
-        var anchor_row = sel[0]
-        var anchor_col = sel[1] - 1
-        for pass_idx in range(2):
-            var r_top: Int
-            var r_bot: Int
-            if pass_idx == 0:
-                r_top = 0
-                r_bot = anchor_row
-            else:
-                r_top = anchor_row + 1
-                r_bot = self.buffer.line_count() - 1
-            var r = r_bot
-            while r >= r_top:
-                var line = self.buffer.line(r)
-                var lb = line.as_bytes()
-                var upper: Int
+                var limit: Int
                 if pass_idx == 0 and r == anchor_row:
-                    upper = anchor_col + 1
-                    if upper < 0:
-                        upper = 0
-                    if upper > len(lb):
-                        upper = len(lb)
+                    limit = anchor_col
                 else:
-                    upper = len(lb)
-                # Walk forward collecting hits whose start is < upper;
-                # remember the last such match.
-                var best_start = -1
-                var best_end = -1
-                var pos = 0
-                while pos <= len(lb):
-                    var m = rx.search_at(line, pos)
-                    if not m:
-                        break
-                    var mv = m.value().copy()
-                    if mv.start < 0 or mv.end < mv.start:
-                        break
-                    if mv.start >= upper:
-                        break
-                    best_start = mv.start
-                    best_end = mv.end
-                    if mv.end == mv.start:
-                        pos = mv.end + 1
-                    else:
-                        pos = mv.end
-                if best_start >= 0:
-                    self.move_to(r, best_start, False)
-                    self.move_to(r, best_end, True)
-                    return True
+                    limit = len(line.as_bytes())
+                var m = searcher.rsearch(line, limit)
+                if m:
+                    var mv = m.value()
+                    if mv.end > mv.start:
+                        self.move_to(r, mv.start, False)
+                        self.move_to(r, mv.end, True)
+                        return True
                 r -= 1
         return False
 

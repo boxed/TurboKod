@@ -15,6 +15,7 @@ from std.ffi import external_call
 from std.memory.span import Span
 from std.sys.info import CompilationTarget
 
+from .case_fold import fold_byte
 from .posix import alloc_zero_buffer, realpath
 
 
@@ -415,10 +416,8 @@ def ci_less(a: String, b: String) -> Bool:
     var bb = b.as_bytes()
     var n = len(ab) if len(ab) < len(bb) else len(bb)
     for i in range(n):
-        var ca = Int(ab[i])
-        var cb = Int(bb[i])
-        if 0x41 <= ca and ca <= 0x5A: ca += 0x20
-        if 0x41 <= cb and cb <= 0x5A: cb += 0x20
+        var ca = fold_byte(ab[i])
+        var cb = fold_byte(bb[i])
         if ca != cb:
             return ca < cb
     return len(ab) < len(bb)
