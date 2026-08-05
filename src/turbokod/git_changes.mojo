@@ -1135,6 +1135,225 @@ def fetch_git_branches(project_root: String) -> List[GitBranch]:
     return out^
 
 
+def main_line_branch(project_root: String) -> String:
+    """Name of the repo's main line — ``main`` if a local branch by that
+    name exists, else ``master``, else the empty string.
+
+    Deliberately local-branch-only: this drives "is it safe to delete
+    this branch?", and a remote-tracking ref the user hasn't fetched in
+    a month is a bad thing to measure "already merged" against."""
+    if len(project_root.as_bytes()) == 0:
+        return String("")
+    var args = List[String]()
+    args.append(String("for-each-ref"))
+    args.append(String("--format=%(refname:short)"))
+    args.append(String("refs/heads/main"))
+    args.append(String("refs/heads/master"))
+    var lines = split_lines_no_trailing(_git_stdout(project_root, args^))
+    var found_master = False
+    for i in range(len(lines)):
+        if lines[i] == String("main"):
+            return String("main")
+        if lines[i] == String("master"):
+            found_master = True
+    return String("master") if found_master else String("")
+
+
+comptime _SQUASH_SCAN_COMMITS: Int = 500
+"""How far back down the main line :func:`_change_already_landed` will
+look for a squash commit. A bound rather than a correctness limit — past
+it we just fall through to "ask the user", which is the safe answer."""
+
+comptime _SQUASH_SCAN_MAX_FILES: Int = 512
+"""Skip the squash scan for branches touching more files than this,
+rather than build an unbounded pathspec argv."""
+
+
+def _git_stdout_stdin(
+    project_root: String, var args: List[String], stdin_text: String,
+) -> String:
+    """:func:`_git_stdout` with something piped into the child's stdin —
+    the shape ``git patch-id`` needs, since it reads a diff rather than
+    taking a revision."""
+    try:
+        var r = capture_command(_git_argv(project_root, args^), stdin_text)
+        if Int(r.status) != 0:
+            return String("")
+        return r.stdout
+    except:
+        return String("")
+
+
+def _first_field(line: String) -> String:
+    """Everything up to the first space. ``git patch-id`` prints
+    ``<patch-id> <commit-id>``; we only ever want the first."""
+    var b = line.as_bytes()
+    for i in range(len(b)):
+        if b[i] == 0x20:
+            return String(StringSlice(unsafe_from_utf8=b[0:i]))
+    return line
+
+
+def _merge_base(project_root: String, a: String, b: String) -> String:
+    var args = List[String]()
+    args.append(String("merge-base"))
+    args.append(a)
+    args.append(b)
+    var lines = split_lines_no_trailing(_git_stdout(project_root, args^))
+    return lines[0] if len(lines) > 0 else String("")
+
+
+def _every_commit_landed(
+    project_root: String, main: String, branch: String,
+) -> Bool:
+    """True when every commit on ``branch`` has an equivalent already on
+    ``main``, compared by *patch-id* rather than SHA.
+
+    This is ``git cherry``, which prefixes each commit with ``-`` when an
+    equivalent patch is upstream and ``+`` when it isn't. Patch-ids are
+    what make a **rebased** or **cherry-picked** branch recognizable:
+    the commits were replayed under new SHAs, so ancestry says
+    "unmerged", but the content is all there.
+
+    Empty output means git told us nothing about any commit; treated as
+    "unknown" (False) rather than as a vacuous yes."""
+    var args = List[String]()
+    args.append(String("cherry"))
+    args.append(main)
+    args.append(branch)
+    var lines = split_lines_no_trailing(_git_stdout(project_root, args^))
+    var saw_one = False
+    for i in range(len(lines)):
+        var b = lines[i].as_bytes()
+        if len(b) == 0:
+            continue
+        saw_one = True
+        if b[0] != 0x2D:            # '-' == equivalent found upstream
+            return False
+    return saw_one
+
+
+def _change_already_landed(
+    project_root: String, main: String, branch: String, base: String,
+) -> Bool:
+    """True when the branch's changes, taken as *one* combined diff, are
+    already present on ``main`` as a single commit.
+
+    This is the **squash-merge** case, which ``git cherry`` can't see: a
+    squash collapses N commits into one, so none of the individual
+    patch-ids survive — only their sum does. So we patch-id the branch's
+    whole ``base..branch`` diff and look for a commit on main carrying
+    exactly that patch.
+
+    The search is restricted to commits touching the files the branch
+    touched, which is what keeps it cheap (~40 ms across a 600-commit
+    divergence) — a squash commit containing the branch's work must
+    touch those paths by definition. Both the file count and the search
+    depth are capped; overrunning either returns False, i.e. "ask the
+    user"."""
+    var name_args = List[String]()
+    name_args.append(String("diff"))
+    name_args.append(String("--name-only"))
+    name_args.append(base)
+    name_args.append(branch)
+    var files = split_lines_no_trailing(
+        _git_stdout(project_root, name_args^),
+    )
+    if len(files) == 0:
+        # The branch's net change against the merge base is empty, so
+        # there is by definition nothing in it to lose.
+        return True
+    if len(files) > _SQUASH_SCAN_MAX_FILES:
+        return False
+    var diff_args = List[String]()
+    diff_args.append(String("diff"))
+    diff_args.append(base)
+    diff_args.append(branch)
+    var combined = _git_stdout(project_root, diff_args^)
+    if len(combined.as_bytes()) == 0:
+        return False
+    var pid_args = List[String]()
+    pid_args.append(String("patch-id"))
+    pid_args.append(String("--stable"))
+    var want_lines = split_lines_no_trailing(
+        _git_stdout_stdin(project_root, pid_args^, combined),
+    )
+    if len(want_lines) == 0:
+        return False
+    var want = _first_field(want_lines[0])
+    if len(want.as_bytes()) == 0:
+        return False
+    var log_args = List[String]()
+    log_args.append(String("log"))
+    log_args.append(String("-n"))
+    log_args.append(String(_SQUASH_SCAN_COMMITS))
+    log_args.append(String("--format=%H"))
+    log_args.append(String("-p"))
+    log_args.append(base + String("..") + main)
+    log_args.append(String("--"))
+    for i in range(len(files)):
+        log_args.append(files[i])
+    var sweep = _git_stdout(project_root, log_args^)
+    if len(sweep.as_bytes()) == 0:
+        return False
+    var scan_args = List[String]()
+    scan_args.append(String("patch-id"))
+    scan_args.append(String("--stable"))
+    var got = split_lines_no_trailing(
+        _git_stdout_stdin(project_root, scan_args^, sweep),
+    )
+    for i in range(len(got)):
+        if _first_field(got[i]) == want:
+            return True
+    return False
+
+
+def branch_is_merged(project_root: String, branch: String) -> Bool:
+    """True when deleting ``branch`` would throw away no work, because
+    its changes are already on the repo's main line
+    (:func:`main_line_branch`).
+
+    Three checks, cheapest first, stopping at the first yes:
+
+    1. **Ancestry** (``merge-base --is-ancestor``) — an ordinary merge or
+       fast-forward, where the branch's commits are literally in main.
+    2. **Per-commit patch-ids** (``git cherry``) — catches a **rebased**
+       or **cherry-picked** branch, whose commits were replayed under new
+       SHAs. Also catches a squash-merge of a single-commit branch, since
+       one commit squashed is the same patch.
+    3. **Combined patch-id** — catches a **squash-merge** of a
+       multi-commit branch, where only the sum of the commits survived.
+
+    Everything is content-based from step 2 on, so this answers "is this
+    work in main?" rather than git's own "is this commit in main?" —
+    which is why ``git branch -d`` refuses branches this function
+    happily calls merged.
+
+    Conservative in every uncertain direction, because False just means
+    "make the user confirm": no ``main`` / ``master`` to measure against,
+    the main line *itself* (trivially its own ancestor, and never
+    something to delete on a bare keystroke), an unreadable merge base,
+    or a branch too large for the squash scan's caps all report False."""
+    if len(project_root.as_bytes()) == 0 or len(branch.as_bytes()) == 0:
+        return False
+    var main = main_line_branch(project_root)
+    if len(main.as_bytes()) == 0 or main == branch:
+        return False
+    var anc = List[String]()
+    anc.append(String("merge-base"))
+    anc.append(String("--is-ancestor"))
+    anc.append(branch)
+    anc.append(main)
+    if _git_ok(project_root, anc^):
+        return True
+    if _every_commit_landed(project_root, main, branch):
+        return True
+    var base = _merge_base(project_root, main, branch)
+    if len(base.as_bytes()) == 0:
+        return False
+    return _change_already_landed(project_root, main, branch, base)
+
+
 def _fetch_unpushed_short_shas(
     project_root: String, limit: Int,
 ) -> List[String]:

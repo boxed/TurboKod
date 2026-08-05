@@ -31,14 +31,17 @@ from turbokod.git_changes import (
     diff_buffer_against_head, diff_buffer_marks, parse_unified_diff_files
 )
 from turbokod.local_changes import (
-    LocalChanges, build_minimal_patch, _GITOP_CHECKOUT, _GITOP_NONE,
+    LocalChanges, build_minimal_patch, _GITOP_BRANCH_DELETE, _GITOP_CHECKOUT,
+    _GITOP_MERGE, _GITOP_NONE, _OVERLAY_DELETE_BRANCH_CONFIRM, _OVERLAY_NONE,
+    _OVERLAY_STATUS,
     _PANE_BRANCHES, _PANE_COMMITS
 )
 from turbokod.project import GitignoreMatcher
 from turbokod.string_utils import display_columns
 from turbokod.git_changes import (
-    GitBranch, GitStateMtimes, apply_patch_to_index, compute_staged_diff,
-    compute_unstaged_diff, fetch_git_status, git_state_mtimes, stage_file,
+    GitBranch, GitStateMtimes, apply_patch_to_index, branch_is_merged,
+    compute_staged_diff, compute_unstaged_diff, fetch_git_branches,
+    fetch_git_status, git_state_mtimes, main_line_branch, stage_file,
     unstage_file
 )
 from turbokod.highlight import (
@@ -58,8 +61,8 @@ from turbokod.merge_view import (
 from turbokod.window import Window
 
 from support import (
-    _VIEW, _ensure_dir, _hl_lines, _key, _rm_rf, _run_git, _temp_path,
-    setup_test_env
+    _VIEW, _contains, _ensure_dir, _hl_lines, _key, _rm_rf, _run_git,
+    _temp_path, setup_test_env
 )
 
 
@@ -1804,6 +1807,366 @@ def test_review_mode_builds_changeset_model() raises:
     assert_true(not rv.handle_event(Event.key_event(KEY_LEFT), view, 0))
 
 
+def _drain_git_op(mut lc: LocalChanges):
+    """Spin ``tick`` until the in-flight git child reaps, so a test
+    doesn't leave a zombie behind. Non-blocking, so this is a spin."""
+    for _ in range(2000000):
+        if lc._git_op == _GITOP_NONE:
+            break
+        lc.tick()
+
+
+def _checkout(dir: String, name: String) raises -> Int:
+    var a = List[String]()
+    a.append(String("checkout"))
+    a.append(String("-q"))
+    a.append(name)
+    return _run_git(dir, a^)
+
+
+def _checkout_new(dir: String, name: String) raises -> Int:
+    var a = List[String]()
+    a.append(String("checkout"))
+    a.append(String("-q"))
+    a.append(String("-b"))
+    a.append(name)
+    return _run_git(dir, a^)
+
+
+def _checkout_new_at(dir: String, name: String, start: String) raises -> Int:
+    var a = List[String]()
+    a.append(String("checkout"))
+    a.append(String("-q"))
+    a.append(String("-b"))
+    a.append(name)
+    a.append(start)
+    return _run_git(dir, a^)
+
+
+def _commit_file(
+    dir: String, name: String, body: String, message: String,
+) raises -> Int:
+    if not write_file(join_path(dir, name), body):
+        return -1
+    var add = List[String]()
+    add.append(String("add"))
+    add.append(String("-A"))
+    _ = _run_git(dir, add^)
+    var c = List[String]()
+    c.append(String("commit"))
+    c.append(String("-q"))
+    c.append(String("-m"))
+    c.append(message)
+    return _run_git(dir, c^)
+
+
+def _init_repo_with_branches() raises -> String:
+    """Throwaway repo on ``main`` with one commit, plus four branches
+    covering every answer ``branch_is_merged`` has to give:
+
+    * ``merged-x``    — same tip as main (plain ancestry).
+    * ``rebased-x``   — its commit was replayed onto main under a new
+      SHA, so ancestry says no but the patch-id says yes.
+    * ``squashed-x``  — two commits squash-merged into one on main, so
+      not even the per-commit patch-ids match — only their sum does.
+    * ``unmerged-x``  — genuinely not in main.
+
+    Returns the path, or the empty string when git isn't available."""
+    var dir = _temp_path(String("_branch_ops"))
+    _rm_rf(dir)
+    _ensure_dir(dir)
+    var init_args = List[String]()
+    init_args.append(String("init"))
+    init_args.append(String("-q"))
+    init_args.append(String("-b"))
+    init_args.append(String("main"))
+    var rc = _run_git(dir, init_args^)
+    if rc != 0:
+        # No git on PATH — skip silently, matching the other repo tests.
+        _rm_rf(dir)
+        return String("")
+    var cfg1 = List[String]()
+    cfg1.append(String("config"))
+    cfg1.append(String("user.email"))
+    cfg1.append(String("test@example.com"))
+    _ = _run_git(dir, cfg1^)
+    var cfg2 = List[String]()
+    cfg2.append(String("config"))
+    cfg2.append(String("user.name"))
+    cfg2.append(String("Test"))
+    _ = _run_git(dir, cfg2^)
+    if not write_file(join_path(dir, String("a.txt")), String("one\n")):
+        return String("")
+    var add = List[String]()
+    add.append(String("add"))
+    add.append(String("a.txt"))
+    _ = _run_git(dir, add^)
+    var commit = List[String]()
+    commit.append(String("commit"))
+    commit.append(String("-q"))
+    commit.append(String("-m"))
+    commit.append(String("init"))
+    _ = _run_git(dir, commit^)
+    # merged-x: same tip as main, nothing to lose.
+    var br1 = List[String]()
+    br1.append(String("branch"))
+    br1.append(String("merged-x"))
+    _ = _run_git(dir, br1^)
+    # rebased-x: one commit, replayed onto a moved main. git rebase
+    # gives it a fresh SHA, so only a patch-id comparison finds it.
+    _ = _checkout_new(dir, String("rebased-x"))
+    _ = _commit_file(dir, String("reb.txt"), String("reb\n"), String("reb"))
+    _ = _checkout(dir, String("main"))
+    _ = _commit_file(dir, String("moved.txt"), String("m\n"), String("moved"))
+    _ = _checkout_new_at(dir, String("_tmp"), String("rebased-x"))
+    var reb = List[String]()
+    reb.append(String("rebase"))
+    reb.append(String("-q"))
+    reb.append(String("main"))
+    _ = _run_git(dir, reb^)
+    _ = _checkout(dir, String("main"))
+    var ff = List[String]()
+    ff.append(String("merge"))
+    ff.append(String("-q"))
+    ff.append(String("--ff-only"))
+    ff.append(String("_tmp"))
+    _ = _run_git(dir, ff^)
+    var delt = List[String]()
+    delt.append(String("branch"))
+    delt.append(String("-q"))
+    delt.append(String("-D"))
+    delt.append(String("_tmp"))
+    _ = _run_git(dir, delt^)
+    # squashed-x: two commits collapsed into one on main. Per-commit
+    # patch-ids all miss; only the combined diff matches.
+    _ = _checkout_new_at(dir, String("squashed-x"), String("main"))
+    _ = _commit_file(dir, String("s1.txt"), String("s1\n"), String("s1"))
+    _ = _commit_file(dir, String("s2.txt"), String("s2\n"), String("s2"))
+    _ = _checkout(dir, String("main"))
+    var sq = List[String]()
+    sq.append(String("merge"))
+    sq.append(String("-q"))
+    sq.append(String("--squash"))
+    sq.append(String("squashed-x"))
+    _ = _run_git(dir, sq^)
+    var sqc = List[String]()
+    sqc.append(String("commit"))
+    sqc.append(String("-q"))
+    sqc.append(String("-m"))
+    sqc.append(String("squash it"))
+    _ = _run_git(dir, sqc^)
+    # unmerged-x: one commit main doesn't have, in any form.
+    _ = _checkout_new_at(dir, String("unmerged-x"), String("main"))
+    _ = _commit_file(dir, String("b.txt"), String("two\n"), String("wip"))
+    _ = _checkout(dir, String("main"))
+    return dir^
+
+
+def _select_branch(mut lc: LocalChanges, name: String) -> Bool:
+    for i in range(len(lc.branches)):
+        if lc.branches[i].name == name:
+            lc.sel_branch = i
+            return True
+    return False
+
+
+def test_branch_is_merged_sees_through_rebase_and_squash() raises:
+    """Ancestry alone would call a rebased or squash-merged branch
+    unmerged — its commits are in main only as replayed or collapsed
+    copies under different SHAs. The patch-id tiers are what make those
+    two answer True, and they're the whole reason this is more useful
+    than ``git branch -d``'s own check."""
+    var dir = _init_repo_with_branches()
+    if len(dir.as_bytes()) == 0:
+        return                          # no git on PATH
+    # Both are invisible to plain ancestry...
+    assert_false(_is_ancestor_of_main(dir, String("rebased-x")))
+    assert_false(_is_ancestor_of_main(dir, String("squashed-x")))
+    # ...and both are recognized anyway.
+    assert_true(branch_is_merged(dir, String("rebased-x")))
+    assert_true(branch_is_merged(dir, String("squashed-x")))
+    # A branch that really isn't in main stays False — the tiers must not
+    # be so eager that the confirmation never fires.
+    assert_false(branch_is_merged(dir, String("unmerged-x")))
+    _rm_rf(dir)
+
+
+def _is_ancestor_of_main(dir: String, branch: String) raises -> Bool:
+    """The plain-ancestry check on its own, so the test above can show
+    that it's the one that would have gotten these wrong."""
+    var a = List[String]()
+    a.append(String("merge-base"))
+    a.append(String("--is-ancestor"))
+    a.append(branch)
+    a.append(String("main"))
+    return _run_git(dir, a^) == 0
+
+
+def test_branch_is_merged_reads_the_main_line() raises:
+    """``branch_is_merged`` is what decides whether ``d`` needs a
+    confirmation, so its three "be careful" answers matter as much as the
+    happy path: the main branch itself, a repo with no main/master, and a
+    non-repo all report False."""
+    var dir = _init_repo_with_branches()
+    if len(dir.as_bytes()) == 0:
+        return                          # no git on PATH
+    assert_equal(main_line_branch(dir), String("main"))
+    assert_true(branch_is_merged(dir, String("merged-x")))
+    assert_false(branch_is_merged(dir, String("unmerged-x")))
+    # The main branch is trivially its own ancestor; we still say False so
+    # deleting it can never skip the confirm.
+    assert_false(branch_is_merged(dir, String("main")))
+    # Not a repo / unknown branch.
+    assert_equal(main_line_branch(String("/tmp")), String(""))
+    assert_false(branch_is_merged(String("/tmp"), String("main")))
+    assert_false(branch_is_merged(dir, String("no-such-branch")))
+    _rm_rf(dir)
+
+
+def test_local_changes_shift_m_merges_selected_branch() raises:
+    """``M`` on a non-current branch row spawns ``git merge <name>``,
+    merging it *into* the checked-out branch."""
+    var lc = _local_changes_with_branches()
+    lc.sel_branch = 1                       # feature-x
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(_key(UInt32(0x4D)), screen, registry)
+    assert_equal(lc._git_op, _GITOP_MERGE)
+    assert_true(lc.git_runner.is_active())
+    _drain_git_op(lc)
+    assert_equal(lc._git_op, _GITOP_NONE)
+    assert_false(lc.git_runner.is_active())
+
+
+def test_local_changes_shift_m_on_current_branch_is_a_noop() raises:
+    """Merging the checked-out branch into itself is meaningless, so it
+    flashes instead of spawning git."""
+    var lc = _local_changes_with_branches()
+    lc.sel_branch = 0                       # main, is_current
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(_key(UInt32(0x4D)), screen, registry)
+    assert_equal(lc._git_op, _GITOP_NONE)
+    assert_false(lc.git_runner.is_active())
+    assert_false(lc.overlay_ok)
+    assert_true(len(lc.overlay_message.as_bytes()) > 0)
+
+
+def test_local_changes_d_on_current_branch_is_refused() raises:
+    """Git won't delete the branch you're standing on, and neither will
+    we — with our own message rather than relaying git's."""
+    var lc = _local_changes_with_branches()
+    lc.sel_branch = 0                       # main, is_current
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(_key(UInt32(0x64)), screen, registry)
+    assert_equal(lc._git_op, _GITOP_NONE)
+    assert_false(lc.git_runner.is_active())
+    # A red status flash, explicitly *not* the delete confirmation —
+    # there is no "yes, delete it anyway" answer for this case.
+    assert_equal(lc.overlay, _OVERLAY_STATUS)
+    assert_false(lc.overlay_ok)
+    assert_true(_contains(lc.overlay_message, String("main")))
+
+
+def test_local_changes_d_on_unmerged_branch_confirms_first() raises:
+    """The whole point of the confirmation: a branch that isn't merged
+    into main must not vanish on one keystroke. ``y`` then runs the
+    force-delete, since plain ``-d`` would refuse."""
+    var dir = _init_repo_with_branches()
+    if len(dir.as_bytes()) == 0:
+        return
+    var lc = LocalChanges()
+    lc.open(dir)
+    lc.focus = _PANE_BRANCHES
+    if not _select_branch(lc, String("unmerged-x")):
+        _rm_rf(dir)
+        return
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(_key(UInt32(0x64)), screen, registry)
+    # Confirmation, not a delete.
+    assert_equal(lc.overlay, _OVERLAY_DELETE_BRANCH_CONFIRM)
+    assert_equal(lc._git_op, _GITOP_NONE)
+    assert_true(_contains(lc.overlay_message, String("unmerged-x")))
+    assert_true(_contains(lc.overlay_message, String("NOT merged")))
+    # 'n' cancels and leaves the branch alone.
+    _ = lc.handle_key(_key(UInt32(0x6E)), screen, registry)
+    assert_equal(lc.overlay, _OVERLAY_NONE)
+    assert_equal(lc._git_op, _GITOP_NONE)
+    var still = fetch_git_branches(dir)
+    var found = False
+    for i in range(len(still)):
+        if still[i].name == String("unmerged-x"):
+            found = True
+    assert_true(found)
+    # Re-open the confirm and answer 'y' this time.
+    _ = lc.handle_key(_key(UInt32(0x64)), screen, registry)
+    assert_equal(lc.overlay, _OVERLAY_DELETE_BRANCH_CONFIRM)
+    _ = lc.handle_key(_key(UInt32(0x79)), screen, registry)
+    assert_equal(lc._git_op, _GITOP_BRANCH_DELETE)
+    _drain_git_op(lc)
+    var after = fetch_git_branches(dir)
+    for i in range(len(after)):
+        assert_true(after[i].name != String("unmerged-x"))
+    _rm_rf(dir)
+
+
+def test_local_changes_d_on_merged_branch_deletes_immediately() raises:
+    """A branch already contained in main loses nothing, so ``d`` acts
+    straight away — no overlay in the way."""
+    var dir = _init_repo_with_branches()
+    if len(dir.as_bytes()) == 0:
+        return
+    var lc = LocalChanges()
+    lc.open(dir)
+    lc.focus = _PANE_BRANCHES
+    if not _select_branch(lc, String("merged-x")):
+        _rm_rf(dir)
+        return
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(_key(UInt32(0x64)), screen, registry)
+    assert_equal(lc.overlay, _OVERLAY_NONE)
+    assert_equal(lc._git_op, _GITOP_BRANCH_DELETE)
+    _drain_git_op(lc)
+    var after = fetch_git_branches(dir)
+    for i in range(len(after)):
+        assert_true(after[i].name != String("merged-x"))
+    # main survived.
+    var has_main = False
+    for i in range(len(after)):
+        if after[i].name == String("main"):
+            has_main = True
+    assert_true(has_main)
+    _rm_rf(dir)
+
+
+def test_local_changes_d_on_rebased_branch_deletes_immediately() raises:
+    """The user-visible payoff: a branch whose commits landed in main via
+    rebase deletes on ``d`` with no confirmation, even though git itself
+    would refuse ``git branch -d`` on it."""
+    var dir = _init_repo_with_branches()
+    if len(dir.as_bytes()) == 0:
+        return
+    var lc = LocalChanges()
+    lc.open(dir)
+    lc.focus = _PANE_BRANCHES
+    if not _select_branch(lc, String("rebased-x")):
+        _rm_rf(dir)
+        return
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(_key(UInt32(0x64)), screen, registry)
+    assert_equal(lc.overlay, _OVERLAY_NONE)
+    assert_equal(lc._git_op, _GITOP_BRANCH_DELETE)
+    _drain_git_op(lc)
+    var after = fetch_git_branches(dir)
+    for i in range(len(after)):
+        assert_true(after[i].name != String("rebased-x"))
+    _rm_rf(dir)
+
+
 def main() raises:
     setup_test_env()
     test_diff3_merge_clean_when_only_ours_changed()
@@ -1858,6 +2221,14 @@ def main() raises:
     test_local_changes_open_records_status_when_clean()
     test_local_changes_space_on_branch_checks_it_out()
     test_local_changes_space_on_current_branch_is_a_noop()
+    test_branch_is_merged_reads_the_main_line()
+    test_branch_is_merged_sees_through_rebase_and_squash()
+    test_local_changes_d_on_rebased_branch_deletes_immediately()
+    test_local_changes_shift_m_merges_selected_branch()
+    test_local_changes_shift_m_on_current_branch_is_a_noop()
+    test_local_changes_d_on_current_branch_is_refused()
+    test_local_changes_d_on_unmerged_branch_confirms_first()
+    test_local_changes_d_on_merged_branch_deletes_immediately()
     test_local_changes_commit_message_url_is_underlined()
     test_local_changes_click_on_commit_message_url_opens_browser()
     test_local_changes_sidebar_splitter_drag_resizes_right_pane()
@@ -1865,4 +2236,4 @@ def main() raises:
     test_git_state_mtimes_nonzero_after_init_commit()
     test_stage_unstage_round_trip_against_real_git()
     test_review_mode_builds_changeset_model()
-    print("git: 59 tests passed")
+    print("git: 67 tests passed")

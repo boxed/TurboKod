@@ -10,7 +10,14 @@ The left sidebar stacks three panels:
   the worktree column, ``git restore --staged`` otherwise).
 * **Branches** — local branches sorted by most recent commit, with the
   currently checked-out branch tagged ``*``. Space checks out the
-  selected branch (``git checkout``).
+  selected branch (``git checkout``); ``M`` merges it into the
+  checked-out branch (``git merge``); ``d`` deletes it, straight away
+  when its work is already on ``main`` / ``master`` and behind a y/n
+  confirm when it isn't (which is also what an unrecognized main line,
+  or the main branch itself, gets). "Already on main" is decided by
+  ``git_changes.branch_is_merged``, which compares *content* — a
+  rebased or squash-merged branch counts as merged even though its
+  commits carry different SHAs and ``git branch -d`` would refuse it.
 * **Commits** — the last 50 commits on whichever ref is reachable from
   ``HEAD``.
 
@@ -75,8 +82,9 @@ from .git_changes import (
     ChangedFile, GitBranch, GitCommit, GitFileStatus, GitOpResult,
     apply_patch_to_index, apply_patch_to_worktree,
     compute_staged_diff, compute_unstaged_diff,
-    fetch_blob_text, fetch_branch_log, fetch_commit_show,
+    branch_is_merged, fetch_blob_text, fetch_branch_log, fetch_commit_show,
     fetch_git_branches, fetch_git_commits, fetch_git_status,
+    main_line_branch,
     git_state_mtimes, GitStateMtimes,
     parse_unified_diff_files,
     stage_file, unstage_file,
@@ -125,6 +133,7 @@ comptime _OVERLAY_AMEND_CONFIRM:  Int = 2   # y/n: amend HEAD with --no-edit
 comptime _OVERLAY_REVERT_CONFIRM: Int = 3   # y/n: discard changes for file
 comptime _OVERLAY_STATUS:         Int = 4   # transient git pull/push/etc result
 comptime _OVERLAY_DISCARD_LINE_CONFIRM: Int = 5  # y/n: discard one worktree line
+comptime _OVERLAY_DELETE_BRANCH_CONFIRM: Int = 6  # y/n: force-delete an unmerged branch
 
 # Y/N answer keys (upper- and lowercase ASCII) for confirmation overlays.
 comptime _KEY_Y_UPPER = UInt32(0x59)
@@ -143,6 +152,8 @@ comptime _GITOP_PULL:    Int = 3
 comptime _GITOP_PUSH:    Int = 4
 comptime _GITOP_REVERT:  Int = 5
 comptime _GITOP_CHECKOUT: Int = 6
+comptime _GITOP_MERGE:   Int = 7
+comptime _GITOP_BRANCH_DELETE: Int = 8
 
 # How often (ms) the open modal re-checks git for state that changed on
 # disk behind our back — a save in an editor, a commit/checkout in another
@@ -1150,7 +1161,9 @@ struct LocalChanges(Movable):
     # owns focus. The Files pane keeps its bare-letter git shortcuts
     # (c / A / d / p / P), so type-to-jump only fires on Branches /
     # Commits — wiring the Files pane would silently steal those
-    # action shortcuts from active git workflows.
+    # action shortcuts from active git workflows. Branches makes the
+    # same trade for two letters: ``M`` (merge) and ``d`` (delete) are
+    # actions there and never reach the prefix buffer.
     var _type_ahead: TypeAhead
     # Async runner for the slow git ops (commit / push / pull / amend /
     # revert). The UI used to call ``git_commit`` / ``git_push`` etc.
@@ -1169,6 +1182,12 @@ struct LocalChanges(Movable):
     # flash and to re-select the same branch after the refresh reorders
     # the list (branches sort by most recent commit).
     var _git_checkout_branch: String
+    # Branch being merged into the current one (for _GITOP_MERGE) and the
+    # one being deleted (for _GITOP_BRANCH_DELETE) — both only feed the
+    # status flash, which reads better naming the branch than echoing
+    # git's own output.
+    var _git_merge_branch: String
+    var _git_delete_branch: String
     # Diff-line index queued for line-level discard, captured when the
     # confirmation overlay opens and consumed when the user confirms.
     var _discard_diff_idx: Int
@@ -1233,6 +1252,8 @@ struct LocalChanges(Movable):
         self._git_revert_path = String("")
         self._git_revert_untracked = False
         self._git_checkout_branch = String("")
+        self._git_merge_branch = String("")
+        self._git_delete_branch = String("")
         self._discard_diff_idx = -1
         self._pending_commit_message = String("")
         self._poll_status_fp = String("")
@@ -1279,6 +1300,8 @@ struct LocalChanges(Movable):
         self._git_revert_path = String("")
         self._git_revert_untracked = False
         self._git_checkout_branch = String("")
+        self._git_merge_branch = String("")
+        self._git_delete_branch = String("")
         self._reload_files()
         self.branches = fetch_git_branches(self.root)
         self.commits = fetch_git_commits(self.root, 50)
@@ -1407,6 +1430,8 @@ struct LocalChanges(Movable):
         self._git_revert_path = String("")
         self._git_revert_untracked = False
         self._git_checkout_branch = String("")
+        self._git_merge_branch = String("")
+        self._git_delete_branch = String("")
 
     # --- geometry ---------------------------------------------------------
 
@@ -1844,7 +1869,7 @@ struct LocalChanges(Movable):
             )
         elif self.focus == _PANE_BRANCHES:
             hint = String(
-                " Tab: pane  Up/Down: select  Space: switch branch  Right: log  ⌘C: copy  ESC: close ",
+                " Space:switch  M:merge  d:delete  Right:log  ⌘C:copy  ESC:close ",
             )
         else:
             hint = String(
@@ -1900,6 +1925,9 @@ struct LocalChanges(Movable):
             prompt_text = String("")
         elif self.overlay == _OVERLAY_DISCARD_LINE_CONFIRM:
             title = String(" Discard ")
+            prompt_text = String("")
+        elif self.overlay == _OVERLAY_DELETE_BRANCH_CONFIRM:
+            title = String(" Delete branch ")
             prompt_text = String("")
         else:
             title = String(" Status ")
@@ -2857,6 +2885,17 @@ struct LocalChanges(Movable):
         if k == KEY_SPACE:
             self._handle_space(bounds)
             return True
+        # Branch-pane git operations: M / d. Placed before the
+        # type-to-jump block below, which means those two letters no
+        # longer jump the cursor on this pane — the same trade the Files
+        # pane already makes for c / A / d / p / P.
+        if self.focus == _PANE_BRANCHES:
+            if k == UInt32(0x4D):       # 'M' (shift+m) → merge into HEAD
+                self._run_merge()
+                return True
+            if k == UInt32(0x64):       # 'd' → delete branch
+                self._delete_selected_branch()
+                return True
         if self._is_right_focus():
             if self.focus == _PANE_RIGHT_UNSTAGED and k == UInt32(0x64):
                 # 'd' → discard the worktree change on the cursor's line.
@@ -3209,6 +3248,10 @@ struct LocalChanges(Movable):
         self.overlay_input = TextField()
         self.overlay_message = String("")
         self.overlay_ok = False
+        # Queued-but-unconfirmed targets die with the overlay.
+        # ``_confirm_delete_branch`` takes its copy before closing.
+        if self._git_op != _GITOP_BRANCH_DELETE:
+            self._git_delete_branch = String("")
 
     def _is_git_busy(self) -> Bool:
         """True iff an async git op is currently in flight via
@@ -3289,6 +3332,118 @@ struct LocalChanges(Movable):
         self._git_checkout_branch = br.name.copy()
         self._start_git_op(
             _GITOP_CHECKOUT, String("git checkout"), argv^, String("Running "),
+        )
+
+    def _run_merge(mut self):
+        """``git merge`` the selected branch into the checked-out one.
+
+        Not gated behind a confirmation, for the same reason checkout on
+        Space isn't: git refuses outright when the worktree is dirty, and
+        a merge that does start is undone with one ``git merge --abort``.
+        A merge that stops on conflicts still exits non-zero, so it
+        surfaces as a red status flash with git's own first line
+        (``CONFLICT (content): …``) rather than looking like success."""
+        if self.sel_branch < 0 or self.sel_branch >= len(self.branches):
+            self._show_status(String("No branch selected."), False)
+            return
+        var br = self.branches[self.sel_branch]
+        if br.is_current:
+            self._show_status(
+                String("Can't merge ") + br.name + String(" into itself."),
+                False,
+            )
+            return
+        var argv = List[String]()
+        argv.append(String("git"))
+        argv.append(String("-C"))
+        argv.append(self.root)
+        argv.append(String("merge"))
+        argv.append(br.name)
+        self._git_merge_branch = br.name.copy()
+        self._start_git_op(
+            _GITOP_MERGE, String("git merge"), argv^, String("Running "),
+        )
+
+    def _delete_selected_branch(mut self):
+        """``d`` on the Branches panel.
+
+        Deletes the selected branch outright when its work is already on
+        the repo's main line, and pops a y/n confirm when it isn't —
+        that's the only case where the keystroke would destroy commits.
+        ``branch_is_merged`` decides that by content rather than
+        ancestry, so a branch that was rebased or squash-merged into main
+        deletes without ceremony. It also answers False for the main
+        branch itself and for a repo with no ``main`` / ``master``, so
+        both of those route through the confirm too.
+
+        The current branch is refused up front: git won't delete the
+        branch you're standing on, and saying so is friendlier than
+        relaying its error."""
+        if self._is_git_busy():
+            self._show_status(
+                String("Git operation in progress — please wait."), False,
+            )
+            return
+        if self.sel_branch < 0 or self.sel_branch >= len(self.branches):
+            self._show_status(String("No branch selected."), False)
+            return
+        var br = self.branches[self.sel_branch]
+        if br.is_current:
+            self._show_status(
+                String("Can't delete the checked-out branch ") + br.name
+                + String("."),
+                False,
+            )
+            return
+        if branch_is_merged(self.root, br.name):
+            self._start_branch_delete(br.name)
+            return
+        self._git_delete_branch = br.name.copy()
+        self.overlay = _OVERLAY_DELETE_BRANCH_CONFIRM
+        self.overlay_input = TextField()
+        var main = main_line_branch(self.root)
+        if len(main.as_bytes()) == 0:
+            self.overlay_message = String("Delete ") + br.name \
+                + String("? No main/master to check it against.")
+        elif main == br.name:
+            self.overlay_message = String("Delete ") + br.name \
+                + String(" — this repo's main branch?")
+        else:
+            self.overlay_message = String("Delete ") + br.name \
+                + String("? NOT merged into ") + main \
+                + String("; commits will be lost.")
+
+    def _confirm_delete_branch(mut self):
+        var name = self._git_delete_branch.copy()
+        self._close_overlay()
+        if len(name.as_bytes()) == 0:
+            return
+        self._start_branch_delete(name)
+
+    def _start_branch_delete(mut self, name: String):
+        """Spawn ``git branch -D``.
+
+        Always ``-D``, never ``-d``, because by the time we get here the
+        safety question is already settled — either ``branch_is_merged``
+        proved the work is on the main line, or the user answered the
+        confirmation. Letting git re-litigate it with ``-d`` would only
+        produce confusing failures, and for two distinct reasons: ``-d``
+        judges by ancestry, so it refuses exactly the rebased and
+        squash-merged branches this feature exists to delete; and it
+        judges against **HEAD**, not the main line, so it would also
+        refuse a plainly-merged branch whenever you happen to be standing
+        on some other feature branch."""
+        var argv = List[String]()
+        argv.append(String("git"))
+        argv.append(String("-C"))
+        argv.append(self.root)
+        argv.append(String("branch"))
+        argv.append(String("-D"))
+        argv.append(name)
+        self._git_delete_branch = name.copy()
+        self._start_git_op(
+            _GITOP_BRANCH_DELETE, String("git branch -D"), argv^,
+            String("Running "),
         )
 
     def _submit_commit(mut self):
@@ -3385,6 +3540,8 @@ struct LocalChanges(Movable):
             self._git_revert_path = String("")
             self._git_revert_untracked = False
             self._git_checkout_branch = String("")
+            self._git_merge_branch = String("")
+            self._git_delete_branch = String("")
             return
         var ok = r.ok()
         # Push/pull report progress + the final summary on stderr; the
@@ -3413,6 +3570,16 @@ struct LocalChanges(Movable):
                 fallback = String("switched to ") + self._git_checkout_branch
             else:
                 fallback = String("checkout failed")
+        elif op == _GITOP_MERGE:
+            if ok:
+                fallback = String("merged ") + self._git_merge_branch
+            else:
+                fallback = String("merge failed")
+        elif op == _GITOP_BRANCH_DELETE:
+            if ok:
+                fallback = String("deleted ") + self._git_delete_branch
+            else:
+                fallback = String("delete failed")
         else:
             fallback = String("done") if ok else String("failed")
         var msg: String
@@ -3437,6 +3604,10 @@ struct LocalChanges(Movable):
             self._git_revert_untracked = False
         if op == _GITOP_CHECKOUT:
             self._git_checkout_branch = String("")
+        if op == _GITOP_MERGE:
+            self._git_merge_branch = String("")
+        if op == _GITOP_BRANCH_DELETE:
+            self._git_delete_branch = String("")
 
     def _handle_overlay_key(mut self, event: Event) -> Bool:
         """Route key events while an overlay is active. Returns True to
@@ -3467,6 +3638,8 @@ struct LocalChanges(Movable):
                 self._confirm_revert()
             elif self.overlay == _OVERLAY_DISCARD_LINE_CONFIRM:
                 self._confirm_discard_line()
+            elif self.overlay == _OVERLAY_DELETE_BRANCH_CONFIRM:
+                self._confirm_delete_branch()
             return True
         if k == _KEY_N_LOWER or k == _KEY_N_UPPER:
             self._close_overlay()
