@@ -10,8 +10,10 @@ The left sidebar stacks three panels:
   the worktree column, ``git restore --staged`` otherwise).
 * **Branches** — local branches sorted by most recent commit, with the
   currently checked-out branch tagged ``*``. Space checks out the
-  selected branch (``git checkout``); ``M`` merges it into the
-  checked-out branch (``git merge``); ``d`` deletes it, straight away
+  selected branch (``git checkout``); ``M`` integrates it into the
+  checked-out branch, asking first *how* — ``m`` for a merge commit
+  (``git merge --no-ff``) or ``r`` for straight history
+  (``git rebase``); ``d`` deletes it, straight away
   when its work is already on ``main`` / ``master`` and behind a y/n
   confirm when it isn't (which is also what an unrecognized main line,
   or the main branch itself, gets). "Already on main" is decided by
@@ -45,6 +47,28 @@ panels, or the ``│`` column between sidebar and right) and drag to
 resize. The vertical separator resizes sidebar / right; horizontal
 splitters resize the panels above / below. Sizes are remembered until
 the modal closes.
+
+**Reporting outcomes.** Every git operation ends in one of three ways,
+chosen by whether its output was the one git prints when nothing
+interesting happened (``git_output.GitOutputMatcher``, which holds the
+per-subcommand regexes for what "boring" looks like):
+
+* *Routine success* — the spinner closes and a one-line summary lands on
+  the sub-title row (``flash_message``), ageing out after ``_FLASH_MS``.
+  Nothing to dismiss: the panels have already refreshed to show the
+  result, so a modal would charge a keystroke for a confirmation.
+* *Success with something to say* — a ``pre-push`` hook, or a Dokku-style
+  remote streaming a deploy log back over ``remote:``. The output opens
+  full screen (``_OVERLAY_OUTPUT``), scrolled to the bottom and
+  scrollable, and waits for ESC. While such a child is still *running*,
+  ``_promote_if_interesting`` also grows the corner spinner into the same
+  full-screen frame, so a two-minute deploy is watchable live rather than
+  summarized afterwards.
+* *Failure* — same full-screen output view, for the same reason: nothing
+  on screen changed to explain it.
+
+``_show_status`` is the modal/non-modal fork; ``tick``'s reap is where the
+three-way choice is made.
 """
 
 from collections import Optional
@@ -76,23 +100,32 @@ from .painter import Painter
 from .file_io import join_path, read_file
 from .window import (
     DockChromeHit, DockedPanelStack,
-    paint_window_title,
+    paint_window_title, paint_window_title_at,
 )
 from .git_changes import (
     ChangedFile, GitBranch, GitCommit, GitFileStatus, GitOpResult,
     apply_patch_to_index, apply_patch_to_worktree,
-    compute_staged_diff, compute_unstaged_diff,
+    compute_staged_diff, compute_unstaged_diff, compute_untracked_diff,
     branch_is_merged, fetch_blob_text, fetch_branch_log, fetch_commit_show,
     fetch_git_branches, fetch_git_commits, fetch_git_status,
+    fetch_merged_commits,
+    format_age,
     main_line_branch,
     git_state_mtimes, GitStateMtimes,
     parse_unified_diff_files,
     stage_file, unstage_file,
 )
-from .posix import monotonic_ms
+from .git_output import (
+    GIT_OUT_BRANCH_DELETE, GIT_OUT_CHECKOUT, GIT_OUT_COMMIT, GIT_OUT_MERGE,
+    GIT_OUT_OTHER, GIT_OUT_PULL, GIT_OUT_PUSH, GIT_OUT_REBASE,
+    GIT_OUT_RESTORE,
+    GitOutputMatcher, complete_lines,
+)
+from .posix import monotonic_ms, wall_clock_ms
 from .install_runner import InstallRunner
 from .string_utils import (
     display_columns,
+    split_lines,
     split_lines_no_trailing,
     starts_with,
     tail_to_columns,
@@ -134,12 +167,29 @@ comptime _OVERLAY_REVERT_CONFIRM: Int = 3   # y/n: discard changes for file
 comptime _OVERLAY_STATUS:         Int = 4   # transient git pull/push/etc result
 comptime _OVERLAY_DISCARD_LINE_CONFIRM: Int = 5  # y/n: discard one worktree line
 comptime _OVERLAY_DELETE_BRANCH_CONFIRM: Int = 6  # y/n: force-delete an unmerged branch
+comptime _OVERLAY_OUTPUT: Int = 7   # full-screen scrollback of a git op's output
+comptime _OVERLAY_MERGE_CHOICE: Int = 8  # m/r: merge commit or rebase
+
+# How long a success flash stays on the sub-title row before the row
+# reverts to the project root. Long enough to read a one-liner, and it
+# never stands between the user and their next keystroke.
+comptime _FLASH_MS: Int = 4000
+
+# Rows a PgUp / PgDn moves in the full-screen output log. A fixed step
+# rather than a viewport-derived one: the key handler has no bounds, and
+# paint clamps whatever it produces.
+comptime _OUTPUT_PAGE: Int = 15
 
 # Y/N answer keys (upper- and lowercase ASCII) for confirmation overlays.
 comptime _KEY_Y_UPPER = UInt32(0x59)
 comptime _KEY_Y_LOWER = UInt32(0x79)
 comptime _KEY_N_UPPER = UInt32(0x4E)
 comptime _KEY_N_LOWER = UInt32(0x6E)
+# Answer keys for the merge-style choice: M(erge commit) / R(ebase).
+comptime _KEY_M_UPPER = UInt32(0x4D)
+comptime _KEY_M_LOWER = UInt32(0x6D)
+comptime _KEY_R_UPPER = UInt32(0x52)
+comptime _KEY_R_LOWER = UInt32(0x72)
 
 # In-flight async git ops. Tracked so that on completion we know which
 # op finished (for the success message + which refresh to run) and so
@@ -154,6 +204,7 @@ comptime _GITOP_REVERT:  Int = 5
 comptime _GITOP_CHECKOUT: Int = 6
 comptime _GITOP_MERGE:   Int = 7
 comptime _GITOP_BRANCH_DELETE: Int = 8
+comptime _GITOP_REBASE:  Int = 9
 
 # How often (ms) the open modal re-checks git for state that changed on
 # disk behind our back — a save in an editor, a commit/checkout in another
@@ -1144,13 +1195,33 @@ struct LocalChanges(Movable):
     # Inline modal overlay state. When ``overlay != _OVERLAY_NONE`` the
     # overlay intercepts key events. ``overlay_input`` is the typed
     # commit message; ``overlay_message`` is the static body text shown
-    # for confirmations / status flashes; ``overlay_ok`` carries the
-    # success/failure of a finished git op so the status flash can be
-    # colored accordingly.
+    # for confirmations and for the failure flash.
+    #
+    # Only *failures* reach the modal ``_OVERLAY_STATUS`` flash — a
+    # successful op reports through ``flash_message`` below, so it never
+    # costs a dismissal keystroke. See ``_show_status``.
     var overlay: Int
     var overlay_input: TextField
     var overlay_message: String
-    var overlay_ok: Bool
+    # Transient, non-modal one-liner on the sub-title row: what the last
+    # successful git op did. Painted until ``_flash_until_ms``, after
+    # which the row goes back to showing the project root. Intercepts no
+    # input, so it can't interrupt anything.
+    var flash_message: String
+    var _flash_until_ms: Int
+    # Full-screen scrollback for a git op whose output wasn't the routine
+    # one (``_OVERLAY_OUTPUT``): a deploy log streamed back over
+    # ``remote:``, a chatty hook, or any failure. ``overlay_output_scroll``
+    # is the first visible line; it starts pinned to the bottom, since the
+    # part you want is what the command said last.
+    var overlay_output: String
+    var overlay_output_scroll: Int
+    # Compiled "what does boring look like" patterns for the op in flight,
+    # plus whether we've already decided this one isn't boring. Sticky:
+    # once promoted, we stop re-classifying, so a long deploy log costs
+    # one match pass rather than one per frame.
+    var _output_matcher: GitOutputMatcher
+    var _output_promoted: Bool
     # The three sidebar panels (Modified files / Branches / Commits)
     # share the framework ``DockedPanelStack`` for min/max state, layout
     # and chrome dispatch. Section indices match the ``_PANE_FILES`` /
@@ -1182,12 +1253,27 @@ struct LocalChanges(Movable):
     # flash and to re-select the same branch after the refresh reorders
     # the list (branches sort by most recent commit).
     var _git_checkout_branch: String
-    # Branch being merged into the current one (for _GITOP_MERGE) and the
-    # one being deleted (for _GITOP_BRANCH_DELETE) — both only feed the
-    # status flash, which reads better naming the branch than echoing
-    # git's own output.
+    # Branch being brought into the current one (for _GITOP_MERGE and
+    # _GITOP_REBASE, whichever the merge-style overlay picked) and the one
+    # being deleted (for _GITOP_BRANCH_DELETE). Both feed the status flash,
+    # which reads better naming the branch than echoing git's own output;
+    # the merge one is also what the choice overlay's wording is built
+    # from, so it's set before the answer rather than at spawn time.
     var _git_merge_branch: String
     var _git_delete_branch: String
+    # Straight-history integration is three git commands, not one (see
+    # ``_confirm_merge_rebase``). ``_rebase_step`` is which one is in
+    # flight — 0 none, 1 rebase, 2 checkout back, 3 fast-forward merge —
+    # and ``_rebase_onto`` is the branch that was checked out when the
+    # user answered, i.e. the one the work is being integrated *into*.
+    var _rebase_step: Int
+    var _rebase_onto: String
+    # Output of the chain's finished steps, and whether any of them said
+    # something non-routine. Spawning the next step resets the runner's
+    # capture, so a talkative rebase would otherwise scroll away unread
+    # before the chain reached the point where it reports.
+    var _rebase_log: String
+    var _rebase_noisy: Bool
     # Diff-line index queued for line-level discard, captured when the
     # confirmation overlay opens and consumed when the user confirms.
     var _discard_diff_idx: Int
@@ -1238,7 +1324,12 @@ struct LocalChanges(Movable):
         self.overlay = _OVERLAY_NONE
         self.overlay_input = TextField()
         self.overlay_message = String("")
-        self.overlay_ok = False
+        self.flash_message = String("")
+        self._flash_until_ms = 0
+        self.overlay_output = String("")
+        self.overlay_output_scroll = 0
+        self._output_matcher = GitOutputMatcher()
+        self._output_promoted = False
         self.sidebar_dock = DockedPanelStack()
         # Order must match ``_PANE_FILES`` / ``_PANE_BRANCHES`` /
         # ``_PANE_COMMITS`` (0/1/2).
@@ -1254,6 +1345,10 @@ struct LocalChanges(Movable):
         self._git_checkout_branch = String("")
         self._git_merge_branch = String("")
         self._git_delete_branch = String("")
+        self._rebase_step = 0
+        self._rebase_onto = String("")
+        self._rebase_log = String("")
+        self._rebase_noisy = False
         self._discard_diff_idx = -1
         self._pending_commit_message = String("")
         self._poll_status_fp = String("")
@@ -1292,7 +1387,12 @@ struct LocalChanges(Movable):
         self.overlay = _OVERLAY_NONE
         self.overlay_input = TextField()
         self.overlay_message = String("")
-        self.overlay_ok = False
+        self.flash_message = String("")
+        self._flash_until_ms = 0
+        self.overlay_output = String("")
+        self.overlay_output_scroll = 0
+        self._output_matcher = GitOutputMatcher()
+        self._output_promoted = False
         self.sidebar_dock.reset()
         self._type_ahead.reset()
         self._git_op = _GITOP_NONE
@@ -1302,6 +1402,10 @@ struct LocalChanges(Movable):
         self._git_checkout_branch = String("")
         self._git_merge_branch = String("")
         self._git_delete_branch = String("")
+        self._rebase_step = 0
+        self._rebase_onto = String("")
+        self._rebase_log = String("")
+        self._rebase_noisy = False
         self._reload_files()
         self.branches = fetch_git_branches(self.root)
         self.commits = fetch_git_commits(self.root, 50)
@@ -1422,7 +1526,12 @@ struct LocalChanges(Movable):
         self.overlay = _OVERLAY_NONE
         self.overlay_input = TextField()
         self.overlay_message = String("")
-        self.overlay_ok = False
+        self.flash_message = String("")
+        self._flash_until_ms = 0
+        self.overlay_output = String("")
+        self.overlay_output_scroll = 0
+        self._output_matcher = GitOutputMatcher()
+        self._output_promoted = False
         self.sidebar_dock.reset()
         self._type_ahead.reset()
         self._git_op = _GITOP_NONE
@@ -1432,6 +1541,10 @@ struct LocalChanges(Movable):
         self._git_checkout_branch = String("")
         self._git_merge_branch = String("")
         self._git_delete_branch = String("")
+        self._rebase_step = 0
+        self._rebase_onto = String("")
+        self._rebase_log = String("")
+        self._rebase_noisy = False
 
     # --- geometry ---------------------------------------------------------
 
@@ -1647,12 +1760,18 @@ struct LocalChanges(Movable):
             return
         # commits
         if 0 <= self.sel_commit and self.sel_commit < len(self.commits):
-            var sha = self.commits[self.sel_commit].short_sha
-            var show_text = fetch_commit_show(self.root, sha)
-            self._populate_commit_info(show_text, registry)
+            var co = self.commits[self.sel_commit]
+            var show_text = fetch_commit_show(self.root, co.short_sha)
+            # Only a merge has commits hiding behind it; for everything
+            # else this stays empty and the section isn't painted.
+            var merged = String("")
+            if co.is_merge():
+                merged = fetch_merged_commits(self.root, co.short_sha)
+            self._populate_commit_info(show_text, merged, registry)
 
     def _populate_commit_info(
-        mut self, show_text: String, mut registry: GrammarRegistry,
+        mut self, show_text: String, merged_log: String,
+        mut registry: GrammarRegistry,
     ):
         """Render ``git show`` output into the info panel: commit
         metadata + message rendered as info rows, then each file's
@@ -1660,7 +1779,13 @@ struct LocalChanges(Movable):
         gutter + syntax-highlight treatment applies. The split point
         is the first ``diff --git`` line — everything before it is
         free-form metadata that is meant for humans, everything from
-        it onward is a multi-file unified diff."""
+        it onward is a multi-file unified diff.
+
+        ``merged_log`` is :func:`fetch_merged_commits` output for a merge
+        commit (empty otherwise). It's inserted between the metadata and
+        the diff, because "which commits came in with this merge" is the
+        first question a merge row raises and the ``Merge:`` header line
+        git prints answers it only in raw SHAs."""
         var lines = split_lines_no_trailing(show_text)
         var diff_start = -1
         for i in range(len(lines)):
@@ -1670,6 +1795,7 @@ struct LocalChanges(Movable):
         var meta_end = diff_start if diff_start >= 0 else len(lines)
         for li in range(meta_end):
             _emit_info(self.info, lines[li])
+        self._emit_merged_commits(merged_log)
         if diff_start < 0:
             return
         # Walk per-file diff chunks and feed each one to the same
@@ -1697,13 +1823,94 @@ struct LocalChanges(Movable):
                 String(""), String(""), banner_w, registry,
             )
 
+    def _emit_merged_commits(mut self, merged_log: String):
+        """Emit the "Merged commits" section for a merge commit.
+
+        ``merged_log`` is :func:`fetch_merged_commits` output — two lines
+        per commit (``<sha>  <date>  <author>`` then an indented subject)
+        plus a blank separator. Continuation lines start with a space, so
+        the commit count is the number of non-blank lines that don't."""
+        if len(merged_log.as_bytes()) == 0:
+            return
+        var lines = split_lines_no_trailing(merged_log)
+        var count = 0
+        for i in range(len(lines)):
+            var b = lines[i].as_bytes()
+            if len(b) > 0 and b[0] != 0x20:
+                count += 1
+        if count == 0:
+            return
+        _emit_info(self.info, String(""))
+        var plural = String(" commits:") if count != 1 else String(" commit:")
+        _emit_info(
+            self.info, String("Merged ") + String(count) + plural,
+        )
+        for i in range(len(lines)):
+            if len(lines[i].as_bytes()) == 0:
+                _emit_info(self.info, String(""))
+            else:
+                _emit_info(self.info, String("  ") + lines[i])
+
+    def _ensure_untracked_diff(mut self):
+        """Fill in ``unstaged_diff`` for the focused file when it's
+        untracked, so the changes panel shows the whole file as additions
+        instead of just a "not tracked yet" note.
+
+        Neither whole-tree fetch in ``_reload_files`` can see an
+        untracked file (``git diff`` walks the index), so the diff has to
+        come from a per-file ``git diff --no-index`` against
+        ``/dev/null``. That's one git spawn, which is why it happens here
+        — lazily, for the selected row only — rather than in
+        ``_reload_files``, where a tree with hundreds of untracked files
+        would pay hundreds of spawns on every staging mutation.
+
+        The result is cached back onto the ``FileEntry`` so the
+        line-level staging and discard paths (which read
+        ``fe.unstaged_diff``) work on untracked files too, and so a
+        repaint doesn't respawn git. ``_reload_files`` rebuilds
+        ``self.files`` from scratch, which drops the cache exactly when
+        the file's contents may have changed.
+
+        Stays a no-op for a tracked file, for a file whose diff is
+        already known, and when git returns nothing (a collapsed ``dir/``
+        entry — see ``compute_untracked_diff``). In that last case the
+        probe re-runs on the next panel rebuild, which is bounded by the
+        hint row ``_build_files_right_panels`` always emits: the panel is
+        never empty, so ``_ensure_right_panels`` won't rebuild until the
+        selection actually moves."""
+        if self.sel_file < 0 or self.sel_file >= len(self.files):
+            return
+        var fe = self.files[self.sel_file]
+        if Int(fe.staged) != 0x3F or Int(fe.worktree) != 0x3F:
+            return
+        if len(fe.unstaged_diff.as_bytes()) > 0:
+            return
+        var text = compute_untracked_diff(self.root, fe.path)
+        if len(text.as_bytes()) == 0:
+            return
+        # Normalize through the same splitter the tracked diffs go
+        # through, so the stored text is a single-file chunk with the
+        # path resolved the same way. We asked about one path, so a
+        # lone chunk is ours even when its header path doesn't compare
+        # equal — git C-quotes a path containing spaces, and the quoted
+        # form is what ``git apply`` wants back anyway.
+        var chunks = parse_unified_diff_files(text)
+        if len(chunks) == 1:
+            self.files[self.sel_file].unstaged_diff = chunks[0].diff
+            return
+        for i in range(len(chunks)):
+            if chunks[i].path == fe.path:
+                self.files[self.sel_file].unstaged_diff = chunks[i].diff
+                return
+
     def _build_files_right_panels(
         mut self, mut registry: GrammarRegistry,
     ):
         """Populate the unstaged + staged panels from the focused file's
-        diffs. Untracked files (XY == ``"??"``) get a hint in the
-        unstaged panel so the user knows to press Space on the file row
-        to start tracking them.
+        diffs. Untracked files (XY == ``"??"``) have no diff in either
+        whole-tree fetch, so ``_ensure_untracked_diff`` synthesizes one
+        showing the whole file as additions; a hint row above it says
+        the file isn't tracked yet.
 
         For syntax highlighting we hand ``_populate_diff_panel`` the
         full *after* text of each side: the worktree file for the
@@ -1712,6 +1919,7 @@ struct LocalChanges(Movable):
         full file rather than just the diff body lets the tokenizer
         see scope context that ends or starts outside the visible
         hunks (block comments, triple-quoted strings, …)."""
+        self._ensure_untracked_diff()
         var fe = self.files[self.sel_file]
         # Banner width is a hint only — the painter clips long banners
         # at the panel edge, so a generous fixed width keeps the dashes
@@ -1722,6 +1930,12 @@ struct LocalChanges(Movable):
         # Either fetch may fail (untracked file → no index entry,
         # binary / missing file → no worktree text) — both gracefully
         # degrade to "no full-file highlights for that side".
+        var untracked = (Int(fe.staged) == 0x3F and Int(fe.worktree) == 0x3F)
+        if untracked:
+            _emit_info(
+                self.unstaged,
+                String(" (untracked — press Space on the file to stage it)"),
+            )
         if len(fe.unstaged_diff.as_bytes()) > 0:
             var after: String
             try:
@@ -1735,14 +1949,8 @@ struct LocalChanges(Movable):
                 self.unstaged, fe.unstaged_diff, fe.path,
                 before, after, banner_w, registry,
             )
-        else:
-            if Int(fe.staged) == 0x3F and Int(fe.worktree) == 0x3F:
-                _emit_info(
-                    self.unstaged,
-                    String(" (untracked — press Space on the file to stage it)"),
-                )
-            else:
-                _emit_info(self.unstaged, String(" (no unstaged changes)"))
+        elif not untracked:
+            _emit_info(self.unstaged, String(" (no unstaged changes)"))
         # Staged panel. "After" is the index blob, "before" is HEAD.
         if len(fe.staged_diff.as_bytes()) > 0:
             var after = fetch_blob_text(
@@ -1792,15 +2000,20 @@ struct LocalChanges(Movable):
         paint_window_title(
             canvas, bounds, String(" Local changes "), title_attr, bg,
         )
-        # Sub-title: project root (or status banner).
+        # Sub-title: the last successful op's one-liner while its flash is
+        # live, else the git-unavailable banner, else the project root.
         var sub_y = bounds.a.y + 1
         var sub: String
-        if len(self.status_message.as_bytes()) > 0:
+        var sub_attr = list_dim
+        if len(self.flash_message.as_bytes()) > 0:
+            sub = String(" ") + self.flash_message
+            sub_attr = Attr(LIGHT_GREEN, EDITOR_BG)
+        elif len(self.status_message.as_bytes()) > 0:
             sub = String(" ") + self.status_message
         else:
             sub = String(" ") + self.root
         _ = canvas.put_text(
-            Point(bounds.a.x + 1, sub_y), sub, list_dim, bounds.b.x - 1,
+            Point(bounds.a.x + 1, sub_y), sub, sub_attr, bounds.b.x - 1,
         )
         # Vertical separator (also the sidebar/right splitter target).
         var sw = self._sidebar_width(bounds)
@@ -1893,10 +2106,18 @@ struct LocalChanges(Movable):
         status flash) as a small drop-shadowed box centered on the
         modal area. Every write is bound to the overlay's clip via a
         Painter so an over-long status message (or a wide commit
-        title) can't bleed out onto the underlying modal."""
+        title) can't bleed out onto the underlying modal.
+
+        ``_OVERLAY_OUTPUT`` is the exception — a git log needs room, so it
+        gets the whole modal area and its own scrollback rather than a
+        centered box."""
+        if self.overlay == _OVERLAY_OUTPUT:
+            self._paint_output_overlay(canvas, container_bounds)
+            return
         var border = Attr(BLACK, LIGHT_GRAY)
         var body   = Attr(BLACK, LIGHT_GRAY)
-        var ok_attr   = Attr(WHITE, LIGHT_GREEN)
+        # No success colour here: the only status box this paints is a
+        # failure (successes flash on the sub-title row instead).
         var err_attr  = Attr(WHITE, LIGHT_RED)
         # Box geometry — 60 cols wide, 5 rows tall by default; clamps
         # to the modal area on tiny terminals.
@@ -1904,7 +2125,17 @@ struct LocalChanges(Movable):
         var box_w = 64 if max_w >= 64 else max_w
         if box_w < 24:
             box_w = 24
+        # The merge-style choice needs room for two labelled options with a
+        # consequence line each — a bare ``[m] / [r]`` hint row would put
+        # the whole point of asking (what each answer does to the history)
+        # off screen. Clamped so a short terminal still gets a box that
+        # fits, at which point paint just runs out of rows to fill.
         var box_h = 5
+        if self.overlay == _OVERLAY_MERGE_CHOICE:
+            box_h = 9
+            var max_h = container_bounds.height() - 2
+            if box_h > max_h:
+                box_h = max_h if max_h >= 5 else 5
         var bx = container_bounds.a.x + (container_bounds.width() - box_w) // 2
         var by = container_bounds.a.y + (container_bounds.height() - box_h) // 2
         var rect = Rect(bx, by, bx + box_w, by + box_h)
@@ -1928,6 +2159,9 @@ struct LocalChanges(Movable):
             prompt_text = String("")
         elif self.overlay == _OVERLAY_DELETE_BRANCH_CONFIRM:
             title = String(" Delete branch ")
+            prompt_text = String("")
+        elif self.overlay == _OVERLAY_MERGE_CHOICE:
+            title = String(" Merge branch ")
             prompt_text = String("")
         else:
             title = String(" Status ")
@@ -1953,17 +2187,23 @@ struct LocalChanges(Movable):
             )
             return
         if self.overlay == _OVERLAY_STATUS:
-            var attr = ok_attr if self.overlay_ok else err_attr
+            # Failure-only: successes report through ``flash_message`` on
+            # the sub-title row and never open this box.
             body_p.fill(
                 canvas, Rect(bx + 1, by + 2, bx + box_w - 1, by + 3),
-                String(" "), attr,
+                String(" "), err_attr,
             )
             _ = body_p.put_text(
-                canvas, Point(bx + 2, by + 2), self.overlay_message, attr,
+                canvas, Point(bx + 2, by + 2), self.overlay_message, err_attr,
             )
             var hint = String("Press any key to dismiss")
             _ = body_p.put_text(
                 canvas, Point(bx + 2, by + box_h - 2), hint, body,
+            )
+            return
+        if self.overlay == _OVERLAY_MERGE_CHOICE:
+            self._paint_merge_choice(
+                canvas, body_p, bx, by, box_w, box_h, body,
             )
             return
         # Confirmation overlays.
@@ -1974,6 +2214,125 @@ struct LocalChanges(Movable):
         _ = body_p.put_text(
             canvas, Point(bx + 2, by + box_h - 2), hint, body,
         )
+
+    def _paint_merge_choice(
+        self, mut canvas: Canvas, mut body_p: Painter,
+        bx: Int, by: Int, box_w: Int, box_h: Int, body: Attr,
+    ):
+        """Body of the merge-style choice box: the question, the two
+        answers with what each does to the history, and the escape hatch.
+
+        Rows are emitted top-down and anything that would land on or below
+        the hint row is dropped, so a terminal too short for the full box
+        loses the explanatory second lines rather than painting over its
+        own border. The two hotkey markers are tinted so the answer keys
+        are findable without reading the sentence."""
+        var key_attr = Attr(LIGHT_RED, body.bg)
+        var target = self._git_merge_branch.copy()
+        var current = self._current_branch_name()
+        var last_row = by + box_h - 2      # the hint row; body stops above it
+        var y = by + 1
+        _ = body_p.put_text(canvas, Point(bx + 2, y), self.overlay_message, body)
+        y += 2
+        # ``[m] label`` in two writes so only the bracketed key is tinted.
+        if y < last_row:
+            _ = body_p.put_text(canvas, Point(bx + 2, y), String("[m]"), key_attr)
+            _ = body_p.put_text(
+                canvas, Point(bx + 6, y),
+                String("merge commit — keep both histories"), body,
+            )
+            y += 1
+        if y < last_row:
+            _ = body_p.put_text(
+                canvas, Point(bx + 6, y),
+                String("and record the merge (git merge --no-ff)"), body,
+            )
+            y += 1
+        if y < last_row:
+            _ = body_p.put_text(canvas, Point(bx + 2, y), String("[r]"), key_attr)
+            _ = body_p.put_text(
+                canvas, Point(bx + 6, y),
+                String("straight history — no merge commit;"), body,
+            )
+            y += 1
+        if y < last_row:
+            _ = body_p.put_text(
+                canvas, Point(bx + 6, y),
+                String("replays ") + current + String(" onto ") + target
+                + String(" (git rebase)"), body,
+            )
+        _ = body_p.put_text(
+            canvas, Point(bx + 2, last_row),
+            String("[m] merge commit   [r] straight   ESC: cancel"), body,
+        )
+
+    def _output_overlay_rect(self, container_bounds: Rect) -> Rect:
+        """Where the full-screen output log lives: the modal area inset by
+        two columns / one row, matching the promoted spinner's frame so the
+        log doesn't jump when the child reaps and we take over drawing it."""
+        return Rect(
+            container_bounds.a.x + 2, container_bounds.a.y + 1,
+            container_bounds.b.x - 2, container_bounds.b.y - 1,
+        )
+
+    def _output_overlay_lines(self) -> List[String]:
+        return split_lines(self.overlay_output)
+
+    def _paint_output_overlay(
+        mut self, mut canvas: Canvas, container_bounds: Rect,
+    ):
+        """Full-screen scrollback of one git op's output.
+
+        Clamps ``overlay_output_scroll`` here rather than in the key
+        handler: paint is the only place that knows the viewport height,
+        and the overlay opens with the scroll deliberately over-large to
+        mean "start at the bottom"."""
+        var rect = self._output_overlay_rect(container_bounds)
+        if rect.width() < 8 or rect.height() < 4:
+            return
+        var frame = Attr(BLACK, LIGHT_GRAY)
+        var text_attr = Attr(BLACK, LIGHT_GRAY)
+        paint_drop_shadow(canvas, rect)
+        var painter = Painter(rect)
+        painter.fill(canvas, rect, String(" "), frame)
+        painter.draw_box(canvas, rect, frame, False)
+        var title = String(" ") + self._git_op_label + String(" output ")
+        if len(self._git_op_label.as_bytes()) == 0:
+            title = String(" git output ")
+        paint_window_title_at(
+            canvas, Point(rect.a.x + 1, rect.a.y), title, frame, frame,
+        )
+        var lines = self._output_overlay_lines()
+        var view_h = rect.height() - 2
+        var max_scroll = len(lines) - view_h
+        if max_scroll < 0:
+            max_scroll = 0
+        if self.overlay_output_scroll > max_scroll:
+            self.overlay_output_scroll = max_scroll
+        if self.overlay_output_scroll < 0:
+            self.overlay_output_scroll = 0
+        for i in range(view_h):
+            var idx = self.overlay_output_scroll + i
+            if idx >= len(lines):
+                break
+            _ = painter.put_text(
+                canvas, Point(rect.a.x + 2, rect.a.y + 1 + i),
+                lines[idx], text_attr,
+            )
+        var hint = String(" Up/Down/PgUp/PgDn: scroll   ESC / Enter: close ")
+        var hx = rect.b.x - display_columns(hint) - 1
+        if hx < rect.a.x + 1:
+            hx = rect.a.x + 1
+        _ = painter.put_text(
+            canvas, Point(hx, rect.b.y - 1), hint, frame,
+        )
+
+    def _scroll_output_overlay(mut self, delta: Int):
+        """Move the log viewport. The clamp lives in paint (which knows the
+        height); here we only refuse to go negative."""
+        self.overlay_output_scroll += delta
+        if self.overlay_output_scroll < 0:
+            self.overlay_output_scroll = 0
 
     def _paint_horizontal_splitter(
         self, mut canvas: Canvas, left: Int, right: Int, y: Int,
@@ -2110,6 +2469,35 @@ struct LocalChanges(Movable):
                 dim_attr, right + 1,
             )
             return
+        # One wall-clock reading for the whole pane, so every row's age is
+        # measured against the same "now" and the column can't disagree
+        # with itself mid-paint.
+        var now = wall_clock_ms() // 1000
+        # One right-aligned gutter carries *either* the age or the ``*``,
+        # never both: the age answers "which branch do I want to switch
+        # to", and you're already on the current one. Sizing the gutter
+        # from the other branches' ages only is what keeps it narrow —
+        # the current row contributes a single ``*``.
+        #
+        # Width comes from the whole list rather than the visible window,
+        # so the name column doesn't shift sideways as the pane scrolls.
+        var gutter_w = 1
+        if now > 0:
+            for i in range(len(self.branches)):
+                var b = self.branches[i]
+                if b.is_current or b.committer_unix <= 0:
+                    continue
+                var w = display_columns(format_age(now - b.committer_unix))
+                if w > gutter_w:
+                    gutter_w = w
+        # Gutter spans ``[left + 1, left + 1 + gutter_w)``, then one space,
+        # then the name.
+        var name_x = left + 2 + gutter_w
+        # On a pane too narrow to leave the name real room, drop the gutter
+        # entirely and give every column to the name — that's what the row
+        # is for. The ``*`` goes back to a bare prefix so the current branch
+        # is still identifiable.
+        var narrow = name_x + 4 > right
         for i in range(height):
             var idx = self.scroll_branches + i
             if idx >= len(self.branches):
@@ -2123,10 +2511,32 @@ struct LocalChanges(Movable):
                 Rect(left, y, right + 1, y + 1), String(" "), attr,
             )
             var br = self.branches[idx]
-            var marker = String("* ") if br.is_current else String("  ")
+            if narrow:
+                self._paint_truncated(
+                    canvas, left + 1, y, right + 1,
+                    (String("* ") if br.is_current else String("  "))
+                    + br.name,
+                    attr,
+                )
+                continue
+            # ``*`` in the row's own colour (it's identity); the age dim,
+            # since it's context — except on the selected row, where it
+            # takes the selection bar so the bar reads as one block.
+            var gutter = String("*")
+            var gutter_attr = attr
+            if not br.is_current:
+                if br.committer_unix <= 0:
+                    gutter = String("")
+                else:
+                    gutter = format_age(now - br.committer_unix)
+                    gutter_attr = attr if is_sel else dim_attr.with_bg(attr.bg)
+            if len(gutter.as_bytes()) > 0:
+                _ = canvas.put_text(
+                    Point(name_x - 1 - display_columns(gutter), y), gutter,
+                    gutter_attr, right + 1,
+                )
             self._paint_truncated(
-                canvas, left + 1, y, right + 1,
-                marker + br.name, attr,
+                canvas, name_x, y, right + 1, br.name, attr,
             )
 
     def _paint_commits(
@@ -3237,21 +3647,108 @@ struct LocalChanges(Movable):
         self._refresh_after_mutation(path)
 
     def _show_status(mut self, var msg: String, ok: Bool):
-        """Flash a one-shot status line. Dismissed by any keystroke."""
+        """Report the outcome of an operation, modally or not depending on
+        whether the user needs to act on it.
+
+        **Success** goes to ``flash_message``: a transient one-liner on
+        the sub-title row that expires on its own after ``_FLASH_MS`` and
+        intercepts nothing. A modal here would put a mandatory keystroke
+        between the user and their next action for no reason — the panels
+        have already refreshed to show what happened, so the text is a
+        confirmation, not information.
+
+        **Failure** keeps the modal ``_OVERLAY_STATUS`` flash. Nothing on
+        screen changed, so a banner that quietly ages out is exactly how
+        an error gets missed; making it cost a keystroke is the point."""
+        if ok:
+            self.flash_message = msg^
+            self._flash_until_ms = monotonic_ms() + _FLASH_MS
+            return
         self.overlay = _OVERLAY_STATUS
         self.overlay_message = msg^
-        self.overlay_ok = ok
         self.overlay_input = TextField()
+
+    def _open_output_overlay(mut self, var text: String):
+        """Show a git op's full output full-screen, scrolled to the bottom.
+
+        Opened for anything that isn't the routine success: a deploy log a
+        remote streamed back, a talkative hook, or a failure. The bottom
+        is where the answer is, so that's where we start."""
+        self.overlay = _OVERLAY_OUTPUT
+        self.overlay_input = TextField()
+        self.overlay_message = String("")
+        self.overlay_output = text^
+        # Clamped against the real viewport on the first paint; a large
+        # number just means "as far down as it goes".
+        self.overlay_output_scroll = 1 << 30
+
+    def _output_kind_for(self, op: Int) -> Int:
+        """Map an in-flight ``_GITOP_*`` onto the git subcommand whose
+        output shape ``git_output`` knows how to recognize."""
+        if op == _GITOP_COMMIT or op == _GITOP_AMEND:
+            return GIT_OUT_COMMIT
+        if op == _GITOP_PUSH:
+            return GIT_OUT_PUSH
+        if op == _GITOP_PULL:
+            return GIT_OUT_PULL
+        if op == _GITOP_CHECKOUT:
+            return GIT_OUT_CHECKOUT
+        if op == _GITOP_MERGE:
+            return GIT_OUT_MERGE
+        if op == _GITOP_REBASE:
+            return GIT_OUT_REBASE
+        if op == _GITOP_BRANCH_DELETE:
+            return GIT_OUT_BRANCH_DELETE
+        if op == _GITOP_REVERT:
+            return GIT_OUT_RESTORE
+        return GIT_OUT_OTHER
+
+    def _promote_if_interesting(mut self):
+        """While a child runs, watch its output and switch the spinner to
+        the full-screen log the moment it says something unexpected.
+
+        This is what makes a ``git push`` to a Dokku-style remote watchable
+        without making an ordinary push intrusive: both start as the same
+        corner spinner, and only the one streaming a build log grows into
+        the whole view. Sticky — once promoted we stop classifying, so the
+        remaining megabyte of log costs nothing.
+
+        Only complete lines are classified; a half-read line can fail to
+        match a pattern it would match a moment later."""
+        if self._output_promoted or self._git_op == _GITOP_NONE:
+            return
+        var done = complete_lines(self.git_runner.output)
+        if len(done.as_bytes()) == 0:
+            return
+        if self._output_matcher.is_routine(done):
+            return
+        self._output_promoted = True
+        self.git_runner.full_screen = True
+
+    def _expire_flash(mut self):
+        """Drop the success banner once its window has passed. Called from
+        ``tick``, which the host runs every frame."""
+        if len(self.flash_message.as_bytes()) == 0:
+            return
+        if monotonic_ms() >= self._flash_until_ms:
+            self.flash_message = String("")
+            self._flash_until_ms = 0
 
     def _close_overlay(mut self):
         self.overlay = _OVERLAY_NONE
         self.overlay_input = TextField()
         self.overlay_message = String("")
-        self.overlay_ok = False
+        self.overlay_output = String("")
+        self.overlay_output_scroll = 0
         # Queued-but-unconfirmed targets die with the overlay.
         # ``_confirm_delete_branch`` takes its copy before closing.
         if self._git_op != _GITOP_BRANCH_DELETE:
             self._git_delete_branch = String("")
+        # Same for the merge-style choice, whose two answers
+        # (``_confirm_merge_commit`` / ``_confirm_merge_rebase``) also copy
+        # the branch out and restore it after closing.
+        if self._git_op != _GITOP_MERGE and self._git_op != _GITOP_REBASE:
+            self._git_merge_branch = String("")
 
     def _is_git_busy(self) -> Bool:
         """True iff an async git op is currently in flight via
@@ -3283,6 +3780,10 @@ struct LocalChanges(Movable):
         if spawned:
             self._git_op = op
             self._git_op_label = label^
+            # Arm the classifier for this op's expected output before any
+            # of it arrives.
+            self._output_matcher = GitOutputMatcher(self._output_kind_for(op))
+            self._output_promoted = False
         else:
             self._show_status(
                 String("Failed to start ") + label, False,
@@ -3335,14 +3836,31 @@ struct LocalChanges(Movable):
         )
 
     def _run_merge(mut self):
-        """``git merge`` the selected branch into the checked-out one.
+        """``M`` on the Branches panel: integrate the selected branch into
+        the checked-out one — but ask *how* first.
 
-        Not gated behind a confirmation, for the same reason checkout on
-        Space isn't: git refuses outright when the worktree is dirty, and
-        a merge that does start is undone with one ``git merge --abort``.
-        A merge that stops on conflicts still exits non-zero, so it
-        surfaces as a red status flash with git's own first line
-        (``CONFLICT (content): …``) rather than looking like success."""
+        The two answers are the two shapes a repo's history can take, and
+        which one a project wants isn't something we can infer:
+
+        * ``m`` — ``git merge --no-ff``: a merge commit, both histories
+          preserved, the integration itself recorded as an event.
+        * ``r`` — ``git rebase``: straight history, our commits replayed
+          on top of the branch. Nothing new is recorded, and the commits
+          being replayed get new SHAs.
+
+        ``--no-ff`` rather than a bare ``git merge`` because the choice
+        has to mean what it says: bare merge silently fast-forwards when
+        it can, which is the *other* option's outcome. The same reasoning
+        makes ``--no-edit`` explicit — git decides whether to open an
+        editor partly from whether stdout is a terminal, and a git op
+        blocking forever on an editor we never show would be the worst
+        possible answer.
+
+        Neither answer gets a second confirmation. git refuses both
+        outright when the worktree is dirty, a merge that starts is undone
+        with ``git merge --abort`` and a rebase with ``git rebase
+        --abort``, and either one stopping on a conflict exits non-zero,
+        so it surfaces as git's own diagnostic rather than as success."""
         if self.sel_branch < 0 or self.sel_branch >= len(self.branches):
             self._show_status(String("No branch selected."), False)
             return
@@ -3353,16 +3871,157 @@ struct LocalChanges(Movable):
                 False,
             )
             return
+        if self._is_git_busy():
+            self._show_status(
+                String("Git operation in progress — please wait."), False,
+            )
+            return
+        self._git_merge_branch = br.name.copy()
+        self.overlay = _OVERLAY_MERGE_CHOICE
+        self.overlay_input = TextField()
+        self.overlay_message = String("Bring ") + br.name \
+            + String(" into ") + self._current_branch_name() + String(":")
+
+    def _current_branch_name(self) -> String:
+        """Name of the checked-out branch as the branch list reports it,
+        or ``HEAD`` when nothing is tagged current (detached HEAD, or a
+        list we haven't fetched yet). Only used for overlay wording."""
+        for i in range(len(self.branches)):
+            if self.branches[i].is_current:
+                return self.branches[i].name.copy()
+        return String("HEAD")
+
+    def _confirm_merge_commit(mut self):
+        """``m`` in the merge-style overlay — the merge-commit answer."""
+        var name = self._git_merge_branch.copy()
+        self._close_overlay()
+        if len(name.as_bytes()) == 0:
+            return
         var argv = List[String]()
         argv.append(String("git"))
         argv.append(String("-C"))
         argv.append(self.root)
         argv.append(String("merge"))
-        argv.append(br.name)
-        self._git_merge_branch = br.name.copy()
+        argv.append(String("--no-ff"))
+        argv.append(String("--no-edit"))
+        argv.append(name)
+        self._git_merge_branch = name^
         self._start_git_op(
             _GITOP_MERGE, String("git merge"), argv^, String("Running "),
         )
+
+    def _confirm_merge_rebase(mut self):
+        """``r`` in the merge-style overlay — the straight-history answer.
+
+        Three commands, in this order::
+
+            git rebase <current> <branch>   # replay branch onto current
+            git checkout <current>
+            git merge --ff-only <branch>
+
+        The one-command version of this is ``git rebase <branch>`` run
+        from ``<current>``, and it is **wrong here**: that replays
+        *current's* commits onto ``<branch>``, which rewrites the SHAs of
+        commits on the branch you're standing on. When those commits were
+        already pushed — the normal case for ``main`` — the local branch
+        silently diverges from its upstream, and the next pull reports
+        "have diverged, N and M different commits each" and manufactures
+        a merge that reintroduces the originals.
+
+        Rewriting has to land on the *topic* branch, whose commits are
+        the unpublished ones, and the integration branch then only ever
+        moves forward — hence the rebase-then-fast-forward pair, which is
+        what a forge's "Rebase and merge" button does. ``--ff-only`` is
+        load-bearing: after the rebase the fast-forward is guaranteed, so
+        if it somehow isn't, that's a bug worth failing on rather than a
+        merge commit to paper over it in the answer that exists to avoid
+        merge commits.
+
+        The steps are chained in ``tick`` as they reap; a failure at any
+        step stops the chain and reports (see ``_advance_rebase_chain``)."""
+        var name = self._git_merge_branch.copy()
+        var onto = self._current_branch_name()
+        self._close_overlay()
+        if len(name.as_bytes()) == 0:
+            return
+        if onto == String("HEAD"):
+            # Detached HEAD: there's no branch ref to fast-forward at the
+            # end, so the chain has nowhere to land.
+            self._show_status(
+                String("Not on a branch — check one out first."), False,
+            )
+            return
+        self._git_merge_branch = name.copy()
+        self._rebase_onto = onto.copy()
+        self._rebase_step = 1
+        var argv = List[String]()
+        argv.append(String("git"))
+        argv.append(String("-C"))
+        argv.append(self.root)
+        argv.append(String("rebase"))
+        argv.append(onto^)
+        argv.append(name^)
+        self._start_git_op(
+            _GITOP_REBASE, String("git rebase"), argv^, String("Running "),
+        )
+        if self._git_op == _GITOP_NONE:
+            # Spawn refused or failed; don't leave the chain armed.
+            self._rebase_step = 0
+            self._rebase_onto = String("")
+
+    def _advance_rebase_chain(mut self, ok: Bool) -> Bool:
+        """Called as each step of the straight-history chain reaps.
+        Returns True when another step was started, meaning the caller
+        should report nothing yet.
+
+        A failed step ends the chain where it stands. That deliberately
+        leaves the repo mid-operation (a conflicted rebase keeps its
+        state so it can be resolved and continued); we just stop driving
+        it and let the normal failure reporting say so."""
+        if self._rebase_step == 0:
+            return False
+        if not ok:
+            self._rebase_step = 0
+            return False
+        var onto = self._rebase_onto.copy()
+        var name = self._git_merge_branch.copy()
+        if len(onto.as_bytes()) == 0 or len(name.as_bytes()) == 0:
+            self._rebase_step = 0
+            return False
+        var argv = List[String]()
+        argv.append(String("git"))
+        argv.append(String("-C"))
+        argv.append(self.root)
+        var kind: Int
+        if self._rebase_step == 1:
+            # The rebase left HEAD on the topic branch; go back to the
+            # branch we're integrating into.
+            self._rebase_step = 2
+            argv.append(String("checkout"))
+            argv.append(onto^)
+            kind = GIT_OUT_CHECKOUT
+        elif self._rebase_step == 2:
+            self._rebase_step = 3
+            argv.append(String("merge"))
+            argv.append(String("--ff-only"))
+            argv.append(name^)
+            kind = GIT_OUT_MERGE
+        else:
+            # Last step reaped ok — the chain is done. ``_rebase_onto``
+            # stays set until ``tick`` has used it to name the branches in
+            # the success flash; tick clears it with the other op state.
+            self._rebase_step = 0
+            return False
+        self._start_git_op(
+            _GITOP_REBASE, String("git rebase"), argv^, String("Running "),
+        )
+        if self._git_op == _GITOP_NONE:
+            self._rebase_step = 0
+            return False
+        # ``_start_git_op`` armed the classifier for a rebase; this step is
+        # a checkout / merge and prints that shape of output instead.
+        self._output_matcher = GitOutputMatcher(kind)
+        return True
 
     def _delete_selected_branch(mut self):
         """``d`` on the Branches panel.
@@ -3512,9 +4171,9 @@ struct LocalChanges(Movable):
 
     def tick(mut self):
         """Drain the in-flight git child (if any). When it reaps, refresh
-        the affected panels and flash a status line with the summary —
-        the same shape as the previous synchronous ``_run_*`` calls had,
-        but driven off the per-frame loop instead of blocking it.
+        the affected panels and report the summary — as a self-expiring
+        sub-title flash on success, as a modal on failure (see
+        ``_show_status``).
 
         Safe to call every frame regardless of whether anything's in
         flight; returns immediately when idle. We deliberately *don't*
@@ -3522,12 +4181,20 @@ struct LocalChanges(Movable):
         was still running (e.g. the user Enter'd a file to open it), we
         still need to drain the pipes and reap the pid here so the
         child doesn't get orphaned with a full kernel pipe buffer."""
+        # Age out the previous success flash. Ahead of the early returns
+        # below: the flash outlives the op that set it, so its expiry
+        # can't be gated on one being in flight.
+        self._expire_flash()
         # Notice on-disk git changes we didn't cause and reload (no-op while
         # one of our ops is in flight — it gates on ``_git_op``).
         self._poll_external_change()
         if self._git_op == _GITOP_NONE:
             return
         var maybe = self.git_runner.tick()
+        # Classify what's arrived so far — a child that turns out to be
+        # streaming a build log gets the whole view while it still has
+        # something to show, not a summary after the fact.
+        self._promote_if_interesting()
         if not maybe:
             return
         var r = maybe.value()
@@ -3542,13 +4209,42 @@ struct LocalChanges(Movable):
             self._git_checkout_branch = String("")
             self._git_merge_branch = String("")
             self._git_delete_branch = String("")
+            # Whatever step was in flight is the last one we drive — the
+            # view that would report the rest is gone.
+            self._rebase_step = 0
+            self._rebase_onto = String("")
+            self._rebase_log = String("")
+            self._rebase_noisy = False
             return
         var ok = r.ok()
+        # Three fates, decided here: a routine success reports through the
+        # non-modal flash, anything else opens the full-screen log. See
+        # ``git_output`` for what "routine" means and why the test is
+        # "every line was expected" rather than "nothing looked wrong".
+        var routine = ok and not self._output_promoted \
+            and self._output_matcher.is_routine(r.output)
         # Push/pull report progress + the final summary on stderr; the
         # rest report success on stdout and the error on stderr. We
         # collapse the captured output to a single trimmed line for the
         # status flash and prefer stdout on success / stderr on failure.
         var summary = _first_useful_line(r.output)
+        # Straight-history integration is a chain of git commands; keep
+        # this step's output, start the next one, and report nothing until
+        # the chain either finishes or stops on a failure.
+        if self._rebase_step > 0:
+            self._rebase_log += r.output
+            if not routine:
+                self._rebase_noisy = True
+            if self._advance_rebase_chain(ok):
+                return
+            r.output = self._rebase_log.copy()
+            self._rebase_log = String("")
+            routine = ok and not self._rebase_noisy
+            self._rebase_noisy = False
+            # A clean chain reports through its own one-liner below —
+            # git's per-step chatter names the topic branch it rewrote,
+            # which reads like the wrong thing happened.
+            summary = String("") if routine else _first_useful_line(r.output)
         var fallback: String
         if op == _GITOP_COMMIT:
             fallback = String("commit ok") if ok else String("commit failed")
@@ -3575,6 +4271,12 @@ struct LocalChanges(Movable):
                 fallback = String("merged ") + self._git_merge_branch
             else:
                 fallback = String("merge failed")
+        elif op == _GITOP_REBASE:
+            if ok:
+                fallback = String("rebased ") + self._git_merge_branch \
+                    + String(" into ") + self._rebase_onto
+            else:
+                fallback = String("rebase failed")
         elif op == _GITOP_BRANCH_DELETE:
             if ok:
                 fallback = String("deleted ") + self._git_delete_branch
@@ -3582,8 +4284,9 @@ struct LocalChanges(Movable):
                 fallback = String("delete failed")
         else:
             fallback = String("done") if ok else String("failed")
+        var had_output = len(summary.as_bytes()) > 0
         var msg: String
-        if len(summary.as_bytes()) > 0:
+        if had_output:
             msg = summary^
         else:
             msg = fallback^
@@ -3597,15 +4300,25 @@ struct LocalChanges(Movable):
             # name rather than leaving the cursor on whatever slid in.
             var switched = self._git_checkout_branch.copy()
             self._select_branch_by_name(switched)
-        self._show_status(msg^, ok)
+        if routine:
+            self._show_status(msg^, True)
+        elif had_output:
+            # Everything git said, not just the last line — the reason the
+            # output was worth stopping for is usually several lines up.
+            self._open_output_overlay(r.output.copy())
+        else:
+            # Silent failure (a spawn that died, a command with no
+            # diagnostic): our own one-liner is all there is to show.
+            self._show_status(msg^, False)
         self._git_op_label = String("")
         if op == _GITOP_REVERT:
             self._git_revert_path = String("")
             self._git_revert_untracked = False
         if op == _GITOP_CHECKOUT:
             self._git_checkout_branch = String("")
-        if op == _GITOP_MERGE:
+        if op == _GITOP_MERGE or op == _GITOP_REBASE:
             self._git_merge_branch = String("")
+            self._rebase_onto = String("")
         if op == _GITOP_BRANCH_DELETE:
             self._git_delete_branch = String("")
 
@@ -3619,6 +4332,32 @@ struct LocalChanges(Movable):
             # frame).
             self._close_overlay()
             return True
+        if self.overlay == _OVERLAY_OUTPUT:
+            # A log is for reading, so arrows scroll it and only an
+            # explicit ESC / Enter closes — "any key dismisses" would make
+            # it impossible to page through.
+            if k == KEY_ESC or k == KEY_ENTER:
+                self._close_overlay()
+                return True
+            if k == KEY_UP:
+                self._scroll_output_overlay(-1)
+                return True
+            if k == KEY_DOWN:
+                self._scroll_output_overlay(1)
+                return True
+            if k == KEY_PAGEUP:
+                self._scroll_output_overlay(-_OUTPUT_PAGE)
+                return True
+            if k == KEY_PAGEDOWN:
+                self._scroll_output_overlay(_OUTPUT_PAGE)
+                return True
+            if k == KEY_HOME:
+                self.overlay_output_scroll = 0
+                return True
+            if k == KEY_END:
+                self.overlay_output_scroll = 1 << 30
+                return True
+            return True
         if k == KEY_ESC:
             self._close_overlay()
             return True
@@ -3629,6 +4368,15 @@ struct LocalChanges(Movable):
             var r = self.overlay_input.handle_key(event)
             if r.consumed:
                 return True
+            return True
+        if self.overlay == _OVERLAY_MERGE_CHOICE:
+            # Its own answer keys, and deliberately no default on Enter:
+            # the two outcomes are different enough that guessing which one
+            # a stray Return meant would be worse than doing nothing.
+            if k == _KEY_M_LOWER or k == _KEY_M_UPPER:
+                self._confirm_merge_commit()
+            elif k == _KEY_R_LOWER or k == _KEY_R_UPPER:
+                self._confirm_merge_rebase()
             return True
         # Confirmation overlays.
         if k == _KEY_Y_LOWER or k == _KEY_Y_UPPER:

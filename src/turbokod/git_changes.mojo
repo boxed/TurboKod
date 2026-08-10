@@ -6,7 +6,10 @@ but ``git diff HEAD`` only walks the index. That's a deliberate choice for
 a single-tier "Show local changes" view: the output is real unified-diff
 content with a single hunk-header convention the editor's diff TextMate
 grammar already paints. Mixing in ``+++ Untitled`` slabs for untracked
-files would muddy that.
+files would muddy that. The Local-changes modal, which lists untracked
+files as their own rows, pulls their contents through
+:func:`compute_untracked_diff` instead — one file at a time, in the same
+unified-diff shape.
 
 A repository with no commits at all (``git init`` but never committed)
 makes ``git diff HEAD`` fail with a non-zero exit; the captured stderr is
@@ -20,7 +23,7 @@ from .diff import DiffOp, diff_lines
 from .file_io import find_git_project, join_path, project_relative, stat_file
 from .lsp import capture_command
 from .string_utils import (
-    split_lines, split_lines_no_trailing, starts_with,
+    parse_int_all, split_lines, split_lines_no_trailing, starts_with,
 )
 
 
@@ -681,6 +684,51 @@ def compute_unstaged_diff(project_root: String) -> String:
     return _git_stdout(project_root, args^)
 
 
+def compute_untracked_diff(project_root: String, rel_path: String) -> String:
+    """``git diff --no-index -- /dev/null <rel_path>`` — one untracked
+    file's whole contents as an all-additions unified diff.
+
+    Untracked files are invisible to every ``git diff`` that consults the
+    index, so this is the only way the changes panel gets real diff text
+    for them. Diffing against ``/dev/null`` makes git emit exactly the
+    shape it uses for a newly-added tracked file (``new file mode``
+    header, ``--- /dev/null``, one ``@@ -0,0 +1,N @@`` hunk), so the
+    output drops straight into ``parse_unified_diff_files`` /
+    ``build_minimal_patch`` alongside the index-derived diffs.
+
+    ``--no-index`` implies ``--exit-code``, so git returns 1 whenever it
+    found a difference — i.e. on every success — which is why this
+    can't go through ``_git_stdout``. We take stdout regardless of the
+    status and let an empty result mean "nothing to show".
+
+    A zero-byte file yields the ``diff --git`` / ``new file mode`` /
+    ``index`` header with no ``---``/``+++`` pair and no hunk — there's
+    no content to differ. Renderers already skip those header lines, so
+    it displays as a file banner with nothing under it, which is what an
+    empty new file is.
+
+    Empty string when the spawn fails, or when ``rel_path`` names a
+    directory: ``git status --porcelain`` collapses a wholly-untracked
+    directory to a single ``dir/`` entry, and a directory has no diff.
+    """
+    if len(project_root.as_bytes()) == 0 or len(rel_path.as_bytes()) == 0:
+        return String("")
+    var pb = rel_path.as_bytes()
+    if pb[len(pb) - 1] == 0x2F:      # collapsed untracked directory
+        return String("")
+    var args = List[String]()
+    args.append(String("diff"))
+    args.append(String("--no-color"))
+    args.append(String("--no-index"))
+    args.append(String("--"))
+    args.append(String("/dev/null"))
+    args.append(rel_path)
+    try:
+        return capture_command(_git_argv(project_root, args^)).stdout
+    except:
+        return String("")
+
+
 @fieldwise_init
 struct GitFileStatus(ImplicitlyCopyable, Movable):
     """One row of ``git status --porcelain=v1 -z``. ``staged`` (X) and
@@ -1025,12 +1073,39 @@ def git_push(project_root: String) -> GitOpResult:
 @fieldwise_init
 struct GitBranch(ImplicitlyCopyable, Movable):
     """One row of ``git for-each-ref refs/heads``: branch ``name``, the
-    short sha its tip points at, the tip commit's subject, and whether
-    this is the currently checked-out branch (``HEAD``)."""
+    short sha its tip points at, the tip commit's subject, whether this
+    is the currently checked-out branch (``HEAD``), and the tip commit's
+    committer date as a Unix timestamp (seconds).
+
+    ``committer_unix`` is what the branch pane's age column renders and
+    what the list is sorted by; it's ``0`` when git didn't report a
+    parseable date (never for a real ref, but synthetic rows in tests
+    leave it unset)."""
     var name: String
     var short_sha: String
     var subject: String
     var is_current: Bool
+    var committer_unix: Int
+
+
+def format_age(seconds: Int) -> String:
+    """Render an age in seconds as the compact form the branch pane
+    shows: ``45s``, ``5m``, ``3h``, ``20d``, ``2y``.
+
+    One unit only, truncated toward zero — the column is a glance-level
+    "how stale is this branch", not a duration. Minutes take ``m``, so
+    months would collide; the ladder goes straight from days to years at
+    365 days. A negative age (clock skew, a commit dated in the future)
+    clamps to ``0s``."""
+    if seconds < 60:
+        return String(seconds if seconds > 0 else 0) + String("s")
+    if seconds < 3600:
+        return String(seconds // 60) + String("m")
+    if seconds < 86400:
+        return String(seconds // 3600) + String("h")
+    if seconds < 86400 * 365:
+        return String(seconds // 86400) + String("d")
+    return String(seconds // (86400 * 365)) + String("y")
 
 
 @fieldwise_init
@@ -1041,13 +1116,36 @@ struct GitCommit(ImplicitlyCopyable, Movable):
     only exists locally. With no remotes configured, every commit is
     treated as unpushed. ``tags`` is the space-separated list of tag
     names pointing at this commit (empty when none), parsed from the
-    ``%D`` ref decoration."""
+    ``%D`` ref decoration. ``parents`` is ``%p`` verbatim — the
+    space-separated short SHAs of this commit's parents, which is how
+    the view tells a merge from an ordinary commit without a second
+    git call."""
     var short_sha: String
     var author: String
     var date: String
     var subject: String
     var is_pushed: Bool
     var tags: String
+    var parents: String
+
+    def is_merge(self) -> Bool:
+        """True when this commit has more than one parent. ``%p`` is
+        space-separated, so counting separators counts parents; the root
+        commit has an empty ``parents`` and is not a merge."""
+        var b = self.parents.as_bytes()
+        for i in range(len(b)):
+            if b[i] == 0x20:
+                return True
+        return False
+
+    def first_parent(self) -> String:
+        """The first short SHA in ``parents`` — the mainline side of a
+        merge. Empty for a root commit."""
+        var b = self.parents.as_bytes()
+        for i in range(len(b)):
+            if b[i] == 0x20:
+                return String(StringSlice(unsafe_from_utf8=b[0:i]))
+        return self.parents
 
 
 @fieldwise_init
@@ -1118,7 +1216,10 @@ def fetch_git_branches(project_root: String) -> List[GitBranch]:
     args.append(String("for-each-ref"))
     args.append(String("--sort=-committerdate"))
     args.append(
-        String("--format=%(HEAD)%09%(refname:short)%09%(objectname:short)%09%(subject)"),
+        String(
+            "--format=%(HEAD)%09%(refname:short)%09%(objectname:short)"
+            "%09%(committerdate:unix)%09%(subject)"
+        ),
     )
     args.append(String("refs/heads"))
     var stdout = _git_stdout(project_root, args^)
@@ -1127,11 +1228,18 @@ def fetch_git_branches(project_root: String) -> List[GitBranch]:
         var line = lines[li]
         if len(line.as_bytes()) == 0:
             continue
-        var fields = _split_tab_fields(line, 4)
+        var fields = _split_tab_fields(line, 5)
         var marker = fields[0]
         var is_cur = (len(marker.as_bytes()) > 0
                       and marker.as_bytes()[0] == 0x2A)
-        out.append(GitBranch(fields[1], fields[2], fields[3], is_cur))
+        # ``%(committerdate:unix)`` is plain seconds; anything else (an
+        # ancient git that doesn't know the ``:unix`` modifier and echoes
+        # the format back) parses to -1 and shows no age.
+        var when = parse_int_all(fields[3])
+        out.append(
+            GitBranch(fields[1], fields[2], fields[4], is_cur,
+                      when if when > 0 else 0),
+        )
     return out^
 
 
@@ -1427,9 +1535,10 @@ def fetch_git_commits(
     args.append(String("-") + String(limit))
     args.append(String("--no-color"))
     args.append(String("--date=short"))
-    # ``%D`` (ref decoration) sits before ``%s`` so the subject stays the
-    # tab-absorbing last field; %D never contains a tab itself.
-    args.append(String("--pretty=format:%h%x09%an%x09%ad%x09%D%x09%s"))
+    # ``%D`` (ref decoration) and ``%p`` (parents) sit before ``%s`` so the
+    # subject stays the tab-absorbing last field; neither ever contains a
+    # tab itself.
+    args.append(String("--pretty=format:%h%x09%an%x09%ad%x09%D%x09%p%x09%s"))
     var stdout = _git_stdout(project_root, args^)
     var unpushed = _fetch_unpushed_short_shas(project_root, limit)
     var lines = split_lines_no_trailing(stdout)
@@ -1437,12 +1546,13 @@ def fetch_git_commits(
         var line = lines[li]
         if len(line.as_bytes()) == 0:
             continue
-        var fields = _split_tab_fields(line, 5)
+        var fields = _split_tab_fields(line, 6)
         var pushed = not _list_contains(unpushed, fields[0])
         var tags = _extract_tags(fields[3])
         out.append(
             GitCommit(
-                fields[0], fields[1], fields[2], fields[4], pushed, tags,
+                fields[0], fields[1], fields[2], fields[5], pushed, tags,
+                fields[4],
             ),
         )
     return out^
@@ -1451,13 +1561,51 @@ def fetch_git_commits(
 def fetch_commit_show(project_root: String, sha: String) -> String:
     """Run ``git show <sha> --no-color`` and return its full output
     (header + unified diff). Used as the right-pane content when the
-    user focuses a commit in the local-changes view."""
+    user focuses a commit in the local-changes view.
+
+    ``--first-parent`` is what makes merge commits show anything at all.
+    Bare ``git show`` on a merge prints the header and then *stops*: with
+    several parents there's no single "before" to diff against, so git
+    declines to guess and the right pane came up empty — the one commit
+    in the log you most want to inspect rendered as the one commit with
+    no content. ``--first-parent`` picks the mainline parent, which makes
+    the diff exactly "what this merge brought into this branch". On an
+    ordinary single-parent commit the flag is a no-op."""
     if len(project_root.as_bytes()) == 0 or len(sha.as_bytes()) == 0:
         return String("")
     var args = List[String]()
     args.append(String("show"))
     args.append(String("--no-color"))
+    args.append(String("--first-parent"))
     args.append(sha)
+    return _git_stdout(project_root, args^)
+
+
+def fetch_merged_commits(
+    project_root: String, sha: String, limit: Int = 200,
+) -> String:
+    """The commits a merge commit brought in, newest first, formatted the
+    same way :func:`fetch_branch_log` formats a branch log.
+
+    ``git log <sha>^@ --not <sha>^1`` reads as "everything reachable from
+    any parent, minus everything reachable from the mainline parent" —
+    i.e. the side branch's own commits, without the merge commit itself
+    and without the mainline history it was merged into. ``^@`` covers
+    every parent, so an octopus merge lists all of its sides.
+
+    Empty string for a non-merge commit (its ``^2`` doesn't resolve, git
+    exits non-zero, and :func:`_git_stdout` maps that to ``""``)."""
+    if len(project_root.as_bytes()) == 0 or len(sha.as_bytes()) == 0:
+        return String("")
+    var args = List[String]()
+    args.append(String("log"))
+    args.append(String("-") + String(limit))
+    args.append(String("--no-color"))
+    args.append(String("--date=short"))
+    args.append(String("--pretty=format:%h  %ad  %an%n    %s%n"))
+    args.append(sha + String("^@"))
+    args.append(String("--not"))
+    args.append(sha + String("^1"))
     return _git_stdout(project_root, args^)
 
 

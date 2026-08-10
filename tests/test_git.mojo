@@ -32,27 +32,36 @@ from turbokod.git_changes import (
 )
 from turbokod.local_changes import (
     LocalChanges, build_minimal_patch, _GITOP_BRANCH_DELETE, _GITOP_CHECKOUT,
-    _GITOP_MERGE, _GITOP_NONE, _OVERLAY_DELETE_BRANCH_CONFIRM, _OVERLAY_NONE,
-    _OVERLAY_STATUS,
-    _PANE_BRANCHES, _PANE_COMMITS
+    _GITOP_MERGE, _GITOP_NONE, _GITOP_PUSH, _GITOP_REBASE,
+    _OVERLAY_DELETE_BRANCH_CONFIRM,
+    _OVERLAY_MERGE_CHOICE, _OVERLAY_NONE,
+    _OVERLAY_OUTPUT, _OVERLAY_STATUS,
+    _PANE_BRANCHES, _PANE_COMMITS, _LINE_ADD
+)
+from turbokod.git_output import (
+    GIT_OUT_BRANCH_DELETE, GIT_OUT_CHECKOUT, GIT_OUT_COMMIT, GIT_OUT_MERGE,
+    GIT_OUT_OTHER, GIT_OUT_PULL, GIT_OUT_PUSH, GIT_OUT_REBASE,
+    GitOutputMatcher, complete_lines,
 )
 from turbokod.project import GitignoreMatcher
-from turbokod.string_utils import display_columns
+from turbokod.string_utils import display_columns, split_lines_no_trailing
+from turbokod.lsp import capture_command
 from turbokod.git_changes import (
     GitBranch, GitStateMtimes, apply_patch_to_index, branch_is_merged,
-    compute_staged_diff, compute_unstaged_diff, fetch_git_branches,
-    fetch_git_status, git_state_mtimes, main_line_branch, stage_file,
-    unstage_file
+    compute_staged_diff, compute_unstaged_diff, fetch_commit_show,
+    fetch_git_branches, fetch_git_commits,
+    fetch_git_status, fetch_merged_commits, format_age, git_state_mtimes,
+    main_line_branch, stage_file, unstage_file
 )
 from turbokod.highlight import (
     GrammarRegistry, Highlight, highlight_for_extension,
     highlight_decorator_attr, highlight_ident_attr, highlight_string_attr
 )
-from turbokod.posix import which
+from turbokod.posix import wall_clock_ms, which
 from turbokod.config import WRAP_NONE
 from turbokod.events import (
-    Event, KEY_END, KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_SPACE, MOD_CTRL,
-    MOD_SHIFT, MOUSE_BUTTON_LEFT
+    Event, KEY_DOWN, KEY_END, KEY_ESC, KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP,
+    KEY_SPACE, MOD_CTRL, MOD_SHIFT, MOUSE_BUTTON_LEFT
 )
 from turbokod.geometry import Point, Rect
 from turbokod.merge_view import (
@@ -108,6 +117,17 @@ def _slist(*items: String) -> List[String]:
     for it in items:
         out.append(it)
     return out^
+
+
+def _screen_text(c: Canvas, screen: Rect) -> String:
+    """Every glyph on the canvas, one newline-terminated row per line —
+    for tests that only care that some string reached the screen."""
+    var out = String("")
+    for y in range(screen.height()):
+        for x in range(screen.width()):
+            out += c.get(x, y).glyph
+        out += String("\n")
+    return out
 
 
 def _diff_row_text(c: Canvas, y: Int, x0: Int, w: Int) -> String:
@@ -224,11 +244,11 @@ def _local_changes_with_branches() -> LocalChanges:
     var lc = LocalChanges()
     lc.open(String("/tmp"))
     lc.branches.append(
-        GitBranch(String("main"), String("aaa1111"), String("tip"), True),
+        GitBranch(String("main"), String("aaa1111"), String("tip"), True, 0),
     )
     lc.branches.append(
         GitBranch(
-            String("feature-x"), String("bbb2222"), String("wip"), False,
+            String("feature-x"), String("bbb2222"), String("wip"), False, 0,
         ),
     )
     lc.focus = _PANE_BRANCHES
@@ -249,6 +269,7 @@ def _local_changes_with_commit_url() -> LocalChanges:
             "commit abc1234\nAuthor: A <a@b.c>\n\n"
             "    Fix per https://example.com/issues/7\n"
         ),
+        String(""),
         registry,
     )
     lc.focus = _PANE_COMMITS
@@ -1422,9 +1443,10 @@ def test_local_changes_space_on_branch_checks_it_out() raises:
 
 
 def test_local_changes_space_on_current_branch_is_a_noop() raises:
-    """Space on the already-checked-out row flashes a status line and
-    spawns nothing — no point paying for a git invocation to land where
-    we already are."""
+    """Space on the already-checked-out row reports and spawns nothing —
+    no point paying for a git invocation to land where we already are.
+    "Already on X" is a success, so it goes to the non-modal sub-title
+    flash rather than a box the user has to dismiss."""
     var lc = _local_changes_with_branches()
     lc.sel_branch = 0                       # main, is_current
     var screen = Rect(0, 0, 100, 30)
@@ -1432,8 +1454,8 @@ def test_local_changes_space_on_current_branch_is_a_noop() raises:
     _ = lc.handle_key(Event.key_event(KEY_SPACE), screen, registry)
     assert_equal(lc._git_op, _GITOP_NONE)
     assert_false(lc.git_runner.is_active())
-    assert_true(lc.overlay_ok)
-    assert_true(len(lc.overlay_message.as_bytes()) > 0)
+    assert_equal(lc.overlay, _OVERLAY_NONE)
+    assert_true(_contains(lc.flash_message, String("main")))
 
 
 def test_local_changes_commit_message_url_is_underlined() raises:
@@ -1755,6 +1777,300 @@ def test_stage_unstage_round_trip_against_real_git() raises:
     _rm_rf(dir)
 
 
+def test_local_changes_untracked_file_shows_its_whole_contents() raises:
+    """Selecting an untracked file must fill the Unstaged panel with the
+    whole file as ``+`` rows.
+
+    Neither whole-tree fetch can see an untracked file — ``git diff``
+    walks the index — so before ``compute_untracked_diff`` the panel held
+    nothing but the "press Space to stage it" note. That note stays (the
+    file really isn't tracked), followed by the synthesized
+    ``/dev/null`` → worktree diff.
+
+    Skipped silently when ``git`` isn't on PATH."""
+    var dir = _temp_path(String("_untracked_diff"))
+    _rm_rf(dir)
+    _ensure_dir(dir)
+    var init_args = List[String]()
+    init_args.append(String("init"))
+    init_args.append(String("-q"))
+    init_args.append(String("-b"))
+    init_args.append(String("main"))
+    if _run_git(dir, init_args^) != 0:
+        _rm_rf(dir)
+        return
+    var cfg1 = List[String]()
+    cfg1.append(String("config"))
+    cfg1.append(String("user.email"))
+    cfg1.append(String("test@example.com"))
+    _ = _run_git(dir, cfg1^)
+    var cfg2 = List[String]()
+    cfg2.append(String("config"))
+    cfg2.append(String("user.name"))
+    cfg2.append(String("Test"))
+    _ = _run_git(dir, cfg2^)
+    # A committed file so HEAD resolves; the untracked one is the subject.
+    assert_true(
+        write_file(join_path(dir, String("tracked.txt")), String("base\n")),
+    )
+    var add = List[String]()
+    add.append(String("add"))
+    add.append(String("tracked.txt"))
+    _ = _run_git(dir, add^)
+    var commit = List[String]()
+    commit.append(String("commit"))
+    commit.append(String("-q"))
+    commit.append(String("-m"))
+    commit.append(String("init"))
+    _ = _run_git(dir, commit^)
+    assert_true(
+        write_file(
+            join_path(dir, String("fresh.txt")),
+            String("first line\nsecond line\nthird line\n"),
+        ),
+    )
+    var lc = LocalChanges()
+    lc.open(dir)
+    # ``??`` in both columns — one row, the untracked file.
+    assert_equal(len(lc.files), 1)
+    assert_equal(lc.files[0].path, String("fresh.txt"))
+    assert_equal(Int(lc.files[0].staged), 0x3F)
+    assert_equal(Int(lc.files[0].worktree), 0x3F)
+    var registry = GrammarRegistry()
+    var screen = Rect(0, 0, 120, 40)
+    var canvas = Canvas(screen.width(), screen.height())
+    lc.paint(canvas, screen, registry)
+    # Every content line shows up as an addition row.
+    var want = List[String]()
+    want.append(String("first line"))
+    want.append(String("second line"))
+    want.append(String("third line"))
+    for w in range(len(want)):
+        var found = False
+        for i in range(len(lc.unstaged.lines)):
+            if lc.unstaged.lines[i] == want[w] \
+                    and lc.unstaged.kind[i] == _LINE_ADD:
+                found = True
+                break
+        assert_true(found)
+    # The hint survives above the diff, and nothing claims there are no
+    # unstaged changes.
+    var saw_hint = False
+    for i in range(len(lc.unstaged.lines)):
+        if _contains(lc.unstaged.lines[i], String("untracked")):
+            saw_hint = True
+        assert_false(
+            _contains(lc.unstaged.lines[i], String("no unstaged changes")),
+        )
+    assert_true(saw_hint)
+    # The diff is cached on the entry in git's own new-file shape, so the
+    # line-level staging path can build a patch from it.
+    var stored = lc.files[0].unstaged_diff
+    assert_true(_contains(stored, String("new file mode")))
+    assert_true(_contains(stored, String("@@ -0,0 +1,3 @@")))
+    # And that patch really applies: staging just ``+second line`` puts
+    # that one line in the index and leaves the other two unstaged
+    # (status ``AM``). This is the payoff of caching a genuine unified
+    # diff rather than only rendering the file's text.
+    var diff_lines_of = _lines_from(stored)
+    var target = -1
+    for i in range(len(diff_lines_of)):
+        if diff_lines_of[i] == String("+second line"):
+            target = i
+            break
+    assert_true(target > 0)
+    var patch = build_minimal_patch(stored, target, False)
+    assert_true(len(patch.as_bytes()) > 0)
+    assert_true(apply_patch_to_index(dir, patch, False))
+    var after = fetch_git_status(dir)
+    assert_equal(len(after), 1)
+    assert_equal(Int(after[0].staged), 0x41)      # 'A'
+    assert_equal(Int(after[0].worktree), 0x4D)    # 'M'
+    lc.close()
+    _rm_rf(dir)
+
+
+def test_local_changes_untracked_empty_file_has_no_body_rows() raises:
+    """A zero-byte untracked file has no content to differ, so git emits
+    the ``new file mode`` header and stops — no ``---``/``+++`` pair, no
+    hunk. The panel keeps the hint and paints no ``+`` rows rather than
+    inventing a phantom line."""
+    var dir = _temp_path(String("_untracked_empty"))
+    _rm_rf(dir)
+    _ensure_dir(dir)
+    var init_args = List[String]()
+    init_args.append(String("init"))
+    init_args.append(String("-q"))
+    init_args.append(String("-b"))
+    init_args.append(String("main"))
+    if _run_git(dir, init_args^) != 0:
+        _rm_rf(dir)
+        return
+    assert_true(write_file(join_path(dir, String("empty.txt")), String("")))
+    var lc = LocalChanges()
+    lc.open(dir)
+    assert_equal(len(lc.files), 1)
+    var registry = GrammarRegistry()
+    var screen = Rect(0, 0, 120, 40)
+    var canvas = Canvas(screen.width(), screen.height())
+    lc.paint(canvas, screen, registry)
+    var stored = lc.files[0].unstaged_diff
+    assert_true(_contains(stored, String("new file mode")))
+    assert_false(_contains(stored, String("@@")))
+    var saw_hint = False
+    for i in range(len(lc.unstaged.lines)):
+        if _contains(lc.unstaged.lines[i], String("untracked")):
+            saw_hint = True
+        assert_true(lc.unstaged.kind[i] != _LINE_ADD)
+    assert_true(saw_hint)
+    lc.close()
+    _rm_rf(dir)
+
+
+def _init_repo_with_a_merge() raises -> String:
+    """Throwaway repo whose ``main`` ends in a real merge commit:
+
+        base ── main work ──── M   (main)
+             └ feat one ─ feat two (feature)
+
+    Returns the path, or the empty string when git isn't available."""
+    var dir = _temp_path(String("_merge_log"))
+    _rm_rf(dir)
+    _ensure_dir(dir)
+    var init_args = List[String]()
+    init_args.append(String("init"))
+    init_args.append(String("-q"))
+    init_args.append(String("-b"))
+    init_args.append(String("main"))
+    if _run_git(dir, init_args^) != 0:
+        _rm_rf(dir)
+        return String("")
+    var cfg1 = List[String]()
+    cfg1.append(String("config"))
+    cfg1.append(String("user.email"))
+    cfg1.append(String("test@example.com"))
+    _ = _run_git(dir, cfg1^)
+    var cfg2 = List[String]()
+    cfg2.append(String("config"))
+    cfg2.append(String("user.name"))
+    cfg2.append(String("Test"))
+    _ = _run_git(dir, cfg2^)
+    _ = _commit_file(
+        dir, String("base.txt"), String("base\n"), String("base"),
+    )
+    _ = _checkout_new(dir, String("feature"))
+    _ = _commit_file(
+        dir, String("one.txt"), String("one\n"), String("feat one"),
+    )
+    _ = _commit_file(
+        dir, String("two.txt"), String("two\n"), String("feat two"),
+    )
+    _ = _checkout(dir, String("main"))
+    _ = _commit_file(
+        dir, String("main.txt"), String("main\n"), String("main work"),
+    )
+    var m = List[String]()
+    m.append(String("merge"))
+    m.append(String("-q"))
+    m.append(String("--no-ff"))
+    m.append(String("feature"))
+    m.append(String("-m"))
+    m.append(String("Merge feature"))
+    if _run_git(dir, m^) != 0:
+        _rm_rf(dir)
+        return String("")
+    return dir^
+
+
+def test_merge_commit_log_lists_the_commits_it_brought_in() raises:
+    """A merge row in the commit log used to be a dead end: ``git show``
+    on a merge prints the header and no diff, so selecting the one commit
+    you most want to inspect showed nothing but its own message.
+
+    Three things have to hold: the log lists the merged-in commits (git
+    does that for us, but ``%p`` parsing must not drop rows), the merge
+    row identifies itself as a merge, and the two merge-only fetches
+    return the side branch's commits and its diff."""
+    var dir = _init_repo_with_a_merge()
+    if len(dir.as_bytes()) == 0:
+        return
+    var commits = fetch_git_commits(dir, 50)
+    # base, feat one, feat two, main work, M — all five, merge first.
+    assert_equal(len(commits), 5)
+    assert_equal(commits[0].subject, String("Merge feature"))
+    assert_true(commits[0].is_merge())
+    var subjects = String("")
+    for i in range(len(commits)):
+        subjects += commits[i].subject + String("\n")
+        # Every non-merge row has exactly one parent (or none, for base).
+        if i != 0:
+            assert_false(commits[i].is_merge())
+    assert_true(_contains(subjects, String("feat one")))
+    assert_true(_contains(subjects, String("feat two")))
+    # The merge's first parent is the mainline side, not the branch.
+    var mainline = commits[0].first_parent()
+    assert_true(len(mainline.as_bytes()) > 0)
+    var main_work = String("")
+    for i in range(len(commits)):
+        if commits[i].subject == String("main work"):
+            main_work = commits[i].short_sha
+    assert_equal(mainline, main_work)
+    # The merged-in list is the side branch only: its two commits, and
+    # neither the merge itself nor the mainline commit it landed on.
+    var merged = fetch_merged_commits(dir, commits[0].short_sha)
+    assert_true(_contains(merged, String("feat one")))
+    assert_true(_contains(merged, String("feat two")))
+    assert_false(_contains(merged, String("Merge feature")))
+    assert_false(_contains(merged, String("main work")))
+    # And a non-merge commit has nothing behind it.
+    assert_equal(len(fetch_merged_commits(dir, main_work).as_bytes()), 0)
+    # ``git show --first-parent`` gives the merge a diff: what it brought
+    # in. Bare ``git show`` on a merge stops after the header.
+    var show = fetch_commit_show(dir, commits[0].short_sha)
+    assert_true(_contains(show, String("Merge feature")))
+    assert_true(_contains(show, String("one.txt")))
+    assert_true(_contains(show, String("two.txt")))
+    assert_false(_contains(show, String("main.txt")))
+    _rm_rf(dir)
+
+
+def test_merge_commit_info_panel_shows_merged_commits_section() raises:
+    """The view side: the merged-in log lands in the info panel between
+    the commit metadata and the diff, with a counted header."""
+    var lc = LocalChanges()
+    lc.open(String("/tmp"))
+    var registry = GrammarRegistry()
+    lc._populate_commit_info(
+        String(
+            "commit abc1234\nMerge: 1111111 2222222\n\n"
+            "    Merge feature\n"
+            "diff --git a/one.txt b/one.txt\n"
+            "--- /dev/null\n+++ b/one.txt\n@@ -0,0 +1 @@\n+one\n"
+        ),
+        String("2222222  2026-08-05  Test\n    feat two\n\n"
+               "1111112  2026-08-05  Test\n    feat one\n"),
+        registry,
+    )
+    var joined = String("")
+    for i in range(len(lc.info.lines)):
+        joined += lc.info.lines[i] + String("\n")
+    assert_true(_contains(joined, String("Merged 2 commits:")))
+    assert_true(_contains(joined, String("feat one")))
+    assert_true(_contains(joined, String("feat two")))
+    # Section order: metadata, then the merged list, then the diff.
+    var hdr = -1
+    var body = -1
+    var dif = -1
+    for i in range(len(lc.info.lines)):
+        if _contains(lc.info.lines[i], String("Merge feature")) and hdr < 0:
+            hdr = i
+        if _contains(lc.info.lines[i], String("Merged 2 commits:")):
+            body = i
+        if _contains(lc.info.lines[i], String("one.txt")) and dif < 0:
+            dif = i
+    assert_true(hdr >= 0 and body > hdr and dif > body)
+
+
 def test_review_mode_builds_changeset_model() raises:
     # Two files, given as explicit before/after texts (the git-free entry
     # point). ReviewMode is now just the changeset model + navigation — the
@@ -1991,6 +2307,34 @@ def test_branch_is_merged_sees_through_rebase_and_squash() raises:
     _rm_rf(dir)
 
 
+def _git_capture(dir: String, var args: List[String]) raises -> String:
+    """``_run_git`` but returning stdout instead of the exit status."""
+    var argv = List[String]()
+    argv.append(String("git"))
+    argv.append(String("-C"))
+    argv.append(dir)
+    for i in range(len(args)):
+        argv.append(args[i])
+    return capture_command(argv).stdout
+
+
+def _rev_list(dir: String, rev: String) raises -> List[String]:
+    """Every commit SHA reachable from ``rev``, newest first."""
+    var a = List[String]()
+    a.append(String("rev-list"))
+    a.append(rev)
+    return split_lines_no_trailing(_git_capture(dir, a^))
+
+
+def _current_branch(dir: String) raises -> String:
+    var a = List[String]()
+    a.append(String("rev-parse"))
+    a.append(String("--abbrev-ref"))
+    a.append(String("HEAD"))
+    var lines = split_lines_no_trailing(_git_capture(dir, a^))
+    return lines[0].copy() if len(lines) > 0 else String("")
+
+
 def _is_ancestor_of_main(dir: String, branch: String) raises -> Bool:
     """The plain-ancestry check on its own, so the test above can show
     that it's the one that would have gotten these wrong."""
@@ -2023,19 +2367,263 @@ def test_branch_is_merged_reads_the_main_line() raises:
     _rm_rf(dir)
 
 
-def test_local_changes_shift_m_merges_selected_branch() raises:
-    """``M`` on a non-current branch row spawns ``git merge <name>``,
-    merging it *into* the checked-out branch."""
+def test_local_changes_shift_m_asks_merge_commit_or_straight_history() raises:
+    """``M`` on a non-current branch row doesn't run git — it asks which
+    shape of history to produce, and only the answer spawns anything."""
     var lc = _local_changes_with_branches()
     lc.sel_branch = 1                       # feature-x
     var screen = Rect(0, 0, 100, 30)
     var registry = GrammarRegistry()
     _ = lc.handle_key(_key(UInt32(0x4D)), screen, registry)
+    assert_equal(lc.overlay, _OVERLAY_MERGE_CHOICE)
+    assert_equal(lc._git_op, _GITOP_NONE)
+    assert_false(lc.git_runner.is_active())
+    # The question names both branches, in the direction the work moves.
+    assert_true(_contains(lc.overlay_message, String("feature-x")))
+    assert_true(_contains(lc.overlay_message, String("main")))
+    # Both answers are on screen, with what each one does.
+    var canvas = Canvas(screen.width(), screen.height())
+    lc.paint(canvas, screen, registry)
+    var painted = String("")
+    for y in range(screen.height()):
+        for x in range(screen.width()):
+            painted += canvas.get(x, y).glyph
+        painted += String("\n")
+    assert_true(_contains(painted, String("[m]")))
+    assert_true(_contains(painted, String("[r]")))
+    assert_true(_contains(painted, String("merge commit")))
+    assert_true(_contains(painted, String("straight history")))
+    # A key that isn't an answer leaves the question standing.
+    _ = lc.handle_key(_key(UInt32(0x78)), screen, registry)   # 'x'
+    assert_equal(lc.overlay, _OVERLAY_MERGE_CHOICE)
+    # ESC backs out without running git.
+    _ = lc.handle_key(_key(KEY_ESC), screen, registry)
+    assert_equal(lc.overlay, _OVERLAY_NONE)
+    assert_equal(lc._git_op, _GITOP_NONE)
+
+
+def test_local_changes_merge_choice_m_spawns_a_no_ff_merge() raises:
+    """``m`` answers "merge commit": ``git merge --no-ff``, never a bare
+    merge — a bare merge fast-forwards when it can, which is the *other*
+    answer's outcome and would make the choice a lie."""
+    var lc = _local_changes_with_branches()
+    lc.sel_branch = 1                       # feature-x
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(_key(UInt32(0x4D)), screen, registry)
+    _ = lc.handle_key(_key(UInt32(0x6D)), screen, registry)   # 'm'
+    assert_equal(lc.overlay, _OVERLAY_NONE)
     assert_equal(lc._git_op, _GITOP_MERGE)
     assert_true(lc.git_runner.is_active())
+    # ``command`` is the runner's shell-y rendering of the argv it spawned.
+    var cmd = lc.git_runner.command
+    assert_true(_contains(cmd, String("merge")))
+    assert_true(_contains(cmd, String("--no-ff")))
+    assert_true(_contains(cmd, String("--no-edit")))
+    assert_true(_contains(cmd, String("feature-x")))
     _drain_git_op(lc)
     assert_equal(lc._git_op, _GITOP_NONE)
     assert_false(lc.git_runner.is_active())
+
+
+def test_local_changes_merge_choice_r_spawns_a_rebase() raises:
+    """``r`` answers "straight history" by replaying the *selected*
+    branch onto the current one — ``git rebase <current> <branch>``.
+
+    The argument order is the whole point. Bare ``git rebase <branch>``
+    from the current branch integrates the same content but rewrites the
+    current branch's commits, which for ``main`` means rewriting already
+    pushed history. See ``test_rebase_preserves_current_branch_shas``."""
+    var lc = _local_changes_with_branches()
+    lc.sel_branch = 1                       # feature-x
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(_key(UInt32(0x4D)), screen, registry)
+    _ = lc.handle_key(_key(UInt32(0x72)), screen, registry)   # 'r'
+    assert_equal(lc.overlay, _OVERLAY_NONE)
+    assert_equal(lc._git_op, _GITOP_REBASE)
+    assert_true(lc.git_runner.is_active())
+    var cmd = lc.git_runner.command
+    # Onto-branch first, topic branch second — never the bare one-arg form.
+    assert_true(_contains(cmd, String("rebase main feature-x")))
+    assert_false(_contains(cmd, String("merge")))
+    _drain_git_op(lc)
+    assert_equal(lc._git_op, _GITOP_NONE)
+
+
+def test_rebase_preserves_current_branch_shas() raises:
+    """The regression this exists for: "straight history" must not
+    rewrite the branch you're standing on.
+
+    ``main`` has a commit the topic branch doesn't, so the buggy
+    direction (``git rebase <branch>`` from main) replays *that* commit
+    and gives it a new SHA. In a real repo the rewritten commit is
+    usually one that's already been pushed, which leaves the local branch
+    diverged from its upstream and makes the next pull report "have
+    diverged" and manufacture a merge.
+
+    So: after the operation, main's pre-existing commits must still carry
+    the same SHAs, the topic branch's work must be present, and the
+    history must be linear (the whole point of the "straight" answer)."""
+    var dir = _temp_path(String("_rebase_dir"))
+    _rm_rf(dir)
+    _ensure_dir(dir)
+    var init_args = List[String]()
+    init_args.append(String("init"))
+    init_args.append(String("-q"))
+    init_args.append(String("-b"))
+    init_args.append(String("main"))
+    if _run_git(dir, init_args^) != 0:
+        _rm_rf(dir)
+        return                              # no git on PATH
+    var cfg1 = List[String]()
+    cfg1.append(String("config"))
+    cfg1.append(String("user.email"))
+    cfg1.append(String("test@example.com"))
+    _ = _run_git(dir, cfg1^)
+    var cfg2 = List[String]()
+    cfg2.append(String("config"))
+    cfg2.append(String("user.name"))
+    cfg2.append(String("Test"))
+    _ = _run_git(dir, cfg2^)
+
+    _ = _commit_file(dir, String("base.txt"), String("base\n"), String("A"))
+    # feature-x branches here, then main moves on — that later commit on
+    # main is what the wrong rebase direction rewrites.
+    _ = _checkout_new(dir, String("feature-x"))
+    _ = _commit_file(dir, String("f.txt"), String("f\n"), String("F"))
+    _ = _checkout(dir, String("main"))
+    _ = _commit_file(dir, String("m.txt"), String("m\n"), String("B on main"))
+    var main_before = _rev_list(dir, String("main"))
+    assert_equal(len(main_before), 2)
+
+    var lc = LocalChanges()
+    lc.open(dir)
+    lc.focus = _PANE_BRANCHES
+    if not _select_branch(lc, String("feature-x")):
+        _rm_rf(dir)
+        return
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(_key(UInt32(0x4D)), screen, registry)
+    _ = lc.handle_key(_key(UInt32(0x72)), screen, registry)   # 'r'
+    _drain_git_op(lc)
+    assert_equal(lc._git_op, _GITOP_NONE)
+
+    # Back on main, and every commit main already had kept its SHA.
+    assert_equal(_current_branch(dir), String("main"))
+    var main_after = _rev_list(dir, String("main"))
+    assert_equal(len(main_after), 3)
+    for i in range(len(main_before)):
+        var kept = False
+        for j in range(len(main_after)):
+            if main_after[j] == main_before[i]:
+                kept = True
+        assert_true(kept)
+    # feature-x's work arrived, and as one line — no merge commit.
+    assert_equal(read_file(join_path(dir, String("f.txt"))), String("f\n"))
+    var merges = List[String]()
+    merges.append(String("rev-list"))
+    merges.append(String("--merges"))
+    merges.append(String("main"))
+    assert_equal(
+        len(split_lines_no_trailing(_git_capture(dir, merges^))), 0,
+    )
+    # The branch ref moved with the rewrite, so it's a plain ancestor now.
+    var anc = List[String]()
+    anc.append(String("merge-base"))
+    anc.append(String("--is-ancestor"))
+    anc.append(String("feature-x"))
+    anc.append(String("main"))
+    assert_equal(_run_git(dir, anc^), 0)
+    _rm_rf(dir)
+
+
+def test_rebase_success_output_is_routine() raises:
+    """A finished rebase prints its progress counter and its verdict on one
+    ``\\r``-joined line. That has to read as routine, or every successful
+    rebase would pop the full-screen log."""
+    var m = GitOutputMatcher(GIT_OUT_REBASE)
+    assert_true(m.is_routine(String(
+        "Rebasing (1/1)\rSuccessfully rebased and updated refs/heads/main.\n"
+    )))
+    assert_true(m.is_routine(String(
+        "Rebasing (1/3)\rRebasing (2/3)\rRebasing (3/3)\r"
+        "Successfully rebased and updated refs/heads/feature-x.\n"
+    )))
+    assert_true(m.is_routine(String("Current branch main is up to date.\n")))
+    # A rebase that stopped has something to say, and must not be hidden.
+    assert_false(m.is_routine(String(
+        "Rebasing (1/2)\rerror: could not apply 1234abc... feat one\n"
+        "hint: Resolve all conflicts manually.\n"
+    )))
+
+
+def test_autostash_pull_output_is_routine() raises:
+    """A pull that had to stash dirty changes and put them back is still
+    just a pull that worked. Both bodies below are verbatim captures from
+    git 2.50 — note that the rebase backend prints ``Applied autostash.``
+    at the *tail of the ``\\r`` redraw train* rather than on its own line,
+    which is the shape a hand-written pattern gets wrong."""
+    var m = GitOutputMatcher(GIT_OUT_PULL)
+    # merge backend: autostash lines on their own, around the diffstat.
+    assert_true(m.is_routine(String(
+        "From /tmp/up\n"
+        "   9cac3e9..07a89b3  main       -> origin/main\n"
+        "Updating 9cac3e9..07a89b3\n"
+        "Created autostash: 5a6300b\n"
+        "Fast-forward\n"
+        " f.txt | 1 +\n"
+        " 1 file changed, 1 insertion(+)\n"
+        "Applied autostash.\n"
+    )))
+    # rebase backend (``pull.rebase``): redraw train, then the apply
+    # notice, then the rebase verdict.
+    assert_true(m.is_routine(String(
+        "Created autostash: 4620858\n"
+        "Rebasing (1/3)\rRebasing (2/3)\rRebasing (3/3)\r"
+        "Applied autostash.\n"
+        "Successfully rebased and updated refs/heads/main.\n"
+    )))
+    # The one autostash outcome that must still surface: the stash did
+    # not go back, the user's changes are sitting in it, and git says so
+    # while *still exiting 0* — so the exit code can't catch this and the
+    # classifier is the only thing standing between the user and silently
+    # losing sight of their work.
+    assert_false(m.is_routine(String(
+        "Created autostash: bdde665\n"
+        "Rebasing (1/3)\rRebasing (2/3)\rRebasing (3/3)\r"
+        "Applying autostash resulted in conflicts.\n"
+        "Your changes are safe in the stash.\n"
+        "You can run \"git stash pop\" or \"git stash drop\" at any time.\n"
+        "Successfully rebased and updated refs/heads/main.\n"
+    )))
+    # Fetch pads the local-ref column, so a pull's ref-update summary is
+    # spaced differently from the push one the patterns were first
+    # written against. Verbatim again, including the ``(none)`` source
+    # git prints for a pruned remote branch.
+    assert_true(m.is_routine(String(
+        "From /tmp/up\n"
+        " * [new branch]      sidebranch -> origin/sidebranch\n"
+        " + f961126...e9952c6 sidebranch -> origin/sidebranch  (forced update)\n"
+        " - [deleted]         (none)     -> origin/sidebranch\n"
+        "Already up to date.\n"
+    )))
+    # Same lines are routine for a direct rebase and a direct merge,
+    # both of which honor ``--autostash`` too.
+    var reb = GitOutputMatcher(GIT_OUT_REBASE)
+    assert_true(reb.is_routine(String(
+        "Created autostash: 4620858\n"
+        "Rebasing (1/1)\rApplied autostash.\n"
+        "Successfully rebased and updated refs/heads/feature-x.\n"
+    )))
+    var mrg = GitOutputMatcher(GIT_OUT_MERGE)
+    assert_true(mrg.is_routine(String(
+        "Created autostash: 5a6300b\n"
+        "Merge made by the 'ort' strategy.\n"
+        " 1 file changed, 1 insertion(+)\n"
+        "Applied autostash.\n"
+    )))
 
 
 def test_local_changes_shift_m_on_current_branch_is_a_noop() raises:
@@ -2048,7 +2636,9 @@ def test_local_changes_shift_m_on_current_branch_is_a_noop() raises:
     _ = lc.handle_key(_key(UInt32(0x4D)), screen, registry)
     assert_equal(lc._git_op, _GITOP_NONE)
     assert_false(lc.git_runner.is_active())
-    assert_false(lc.overlay_ok)
+    # A refusal, so it's modal — the user asked for something that didn't
+    # happen and nothing on screen says so.
+    assert_equal(lc.overlay, _OVERLAY_STATUS)
     assert_true(len(lc.overlay_message.as_bytes()) > 0)
 
 
@@ -2065,7 +2655,6 @@ def test_local_changes_d_on_current_branch_is_refused() raises:
     # A red status flash, explicitly *not* the delete confirmation —
     # there is no "yes, delete it anyway" answer for this case.
     assert_equal(lc.overlay, _OVERLAY_STATUS)
-    assert_false(lc.overlay_ok)
     assert_true(_contains(lc.overlay_message, String("main")))
 
 
@@ -2140,6 +2729,329 @@ def test_local_changes_d_on_merged_branch_deletes_immediately() raises:
             has_main = True
     assert_true(has_main)
     _rm_rf(dir)
+
+
+def test_format_age_picks_one_unit() raises:
+    """The branch pane's age column: one unit, truncated, and never
+    ``m`` for months — minutes already own that letter."""
+    assert_equal(format_age(0), String("0s"))
+    assert_equal(format_age(-5), String("0s"))          # clock skew
+    assert_equal(format_age(59), String("59s"))
+    assert_equal(format_age(60), String("1m"))
+    assert_equal(format_age(5 * 60 + 30), String("5m"))
+    assert_equal(format_age(3599), String("59m"))
+    assert_equal(format_age(3600), String("1h"))
+    assert_equal(format_age(86399), String("23h"))
+    assert_equal(format_age(86400), String("1d"))
+    assert_equal(format_age(20 * 86400), String("20d"))
+    # 364 days is still days; 365 flips to years.
+    assert_equal(format_age(364 * 86400), String("364d"))
+    assert_equal(format_age(365 * 86400), String("1y"))
+    assert_equal(format_age(800 * 86400), String("2y"))
+
+
+def test_local_changes_branch_pane_paints_age_column() raises:
+    """One leftmost gutter holds *either* the age or the current-branch
+    ``*``, right-aligned, with every name starting at the same column."""
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    # Without a timestamp there's no age to show — establishes that the
+    # strings below come from the age column and not from some other
+    # chrome that happens to contain them.
+    var bare = _local_changes_with_branches()
+    var bare_canvas = Canvas(screen.width(), screen.height())
+    bare.paint(bare_canvas, screen, registry)
+    var bare_painted = _screen_text(bare_canvas, screen)
+    assert_false(_contains(bare_painted, String("37d")))
+    assert_false(_contains(bare_painted, String("5m")))
+
+    var lc = _local_changes_with_branches()
+    var now = wall_clock_ms() // 1000
+    lc.branches[0].committer_unix = now - 37 * 86400      # main, current
+    lc.branches[1].committer_unix = now - 5 * 60          # feature-x, 5m
+    var canvas = Canvas(screen.width(), screen.height())
+    lc.paint(canvas, screen, registry)
+    var painted = _screen_text(canvas, screen)
+    # The current branch shows the marker and *no* age — you're already
+    # there, so its age buys nothing and would widen the gutter.
+    assert_true(_contains(painted, String(" * main")))
+    assert_false(_contains(painted, String("37d")))
+    # Everyone else shows an age, right-aligned into the same gutter, so
+    # both names start at the same column.
+    assert_true(_contains(painted, String("5m feature-x")))
+
+
+def test_fetch_git_branches_carries_age_newest_first() raises:
+    """Every branch row carries its tip's committer timestamp, and the
+    list arrives newest-first — which is what puts the stalest branch at
+    the bottom of the pane."""
+    var dir = _init_repo_with_branches()
+    if len(dir.as_bytes()) == 0:
+        return                          # no git on PATH
+    var branches = fetch_git_branches(dir)
+    assert_true(len(branches) > 1)
+    var now = wall_clock_ms() // 1000
+    var prev = branches[0].committer_unix
+    for i in range(len(branches)):
+        # A real ref always has a parseable committer date, and these
+        # commits were made moments ago.
+        assert_true(branches[i].committer_unix > 0)
+        assert_true(now - branches[i].committer_unix < 600)
+        assert_true(branches[i].committer_unix <= prev)
+        prev = branches[i].committer_unix
+    _rm_rf(dir)
+
+
+def test_routine_push_output_is_recognized() raises:
+    """A plain push to an ordinary remote — including the "create a pull
+    request" nudge GitHub adds for a new branch, which is the case that
+    makes a blanket ``remote:`` allow-list wrong in one direction and a
+    blanket ``remote:`` reject wrong in the other."""
+    var m = GitOutputMatcher(GIT_OUT_PUSH)
+    assert_true(m.is_routine(String("")))
+    assert_true(m.is_routine(String("Everything up-to-date\n")))
+    assert_true(m.is_routine(String(
+        "Enumerating objects: 17, done.\n"
+        "Counting objects: 100% (17/17), done.\n"
+        "Delta compression uses up to 10 threads\n"
+        "Compressing objects: 100% (9/9), done.\n"
+        "Writing objects: 100% (9/9), 1.21 KiB | 1.21 MiB/s, done.\n"
+        "Total 9 (delta 8), reused 0 (delta 0), pack-reused 0\n"
+        "remote: Resolving deltas: 100% (8/8), completed with 8 local objects.\n"
+        "To github.com:boxed/TurboKod.git\n"
+        "   3fdfe00..bfc8c4a  main -> main\n"
+    )))
+    assert_true(m.is_routine(String(
+        "To github.com:boxed/TurboKod.git\n"
+        " * [new branch]      feature-x -> feature-x\n"
+        "remote: \n"
+        "remote: Create a pull request for 'feature-x' on GitHub by visiting:\n"
+        "remote:      https://github.com/boxed/TurboKod/pull/new/feature-x\n"
+        "remote: \n"
+    )))
+
+
+def test_deploy_log_is_not_routine_push_output() raises:
+    """The case this exists for: a Dokku / Heroku remote streaming a build
+    back over ``remote:``. Its lines are not among the ones an ordinary
+    push prints, so it must classify as worth showing — and it must do so
+    from the *first* few lines, since that's what promotes the spinner to
+    a full-screen log while the deploy is still running."""
+    var m = GitOutputMatcher(GIT_OUT_PUSH)
+    var head = String(
+        "Enumerating objects: 5, done.\n"
+        "Counting objects: 100% (5/5), done.\n"
+        "remote: -----> Cleaning up...\n"
+    )
+    assert_false(m.is_routine(head))
+    assert_false(m.is_routine(String(
+        "To ssh://dokku@example.com:22/myapp\n"
+        "remote: -----> Building myapp from Dockerfile\n"
+        "remote:        Step 1/12 : FROM python:3.12-slim\n"
+        "remote:         ---> a1b2c3d4e5f6\n"
+        "remote: -----> Deploying myapp via Docker...\n"
+        "remote: =====> Application deployed:\n"
+        "remote:        https://myapp.example.com\n"
+        "   abc1234..def5678  main -> main\n"
+    )))
+
+
+def test_routine_output_for_the_other_operations() raises:
+    """The remaining ops' boring shapes, and one non-boring counterpart
+    each: a talkative hook on commit, and a merge that reports a
+    conflict."""
+    var commit = GitOutputMatcher(GIT_OUT_COMMIT)
+    assert_true(commit.is_routine(String(
+        "[main 3fdfe00] Split the tests into per-topic suites\n"
+        " 3 files changed, 41 insertions(+), 9 deletions(-)\n"
+        " create mode 100644 tests/test_case_fold.mojo\n"
+    )))
+    # Verbatim from a real ``git commit`` — the first commit in a repo
+    # gets an extra ``(root-commit)`` token inside the brackets, which is
+    # not a shape you'd think to write by hand.
+    assert_true(commit.is_routine(String(
+        "[main (root-commit) f9618b8] test subject\n"
+        " 1 file changed, 1 insertion(+)\n"
+        " create mode 100644 a.txt\n"
+    )))
+    # Likewise verbatim: a checkout that carried local modifications
+    # across, which git reports as tab-separated status lines.
+    var co = GitOutputMatcher(GIT_OUT_CHECKOUT)
+    assert_true(co.is_routine(String(
+        "Already on 'main'\n"
+        "M\tsrc/turbokod/local_changes.mojo\n"
+        "Your branch is up to date with 'origin/main'.\n"
+    )))
+    assert_false(commit.is_routine(String(
+        "black....................................................Failed\n"
+        "- hook id: black\n"
+        "[main 3fdfe00] wip\n"
+    )))
+
+    var checkout = GitOutputMatcher(GIT_OUT_CHECKOUT)
+    assert_true(checkout.is_routine(String(
+        "Switched to branch 'main'\n"
+        "Your branch is up to date with 'origin/main'.\n"
+    )))
+    assert_true(checkout.is_routine(String("Already on 'main'\n")))
+
+    var merge = GitOutputMatcher(GIT_OUT_MERGE)
+    assert_true(merge.is_routine(String(
+        "Updating 3fdfe00..bfc8c4a\n"
+        "Fast-forward\n"
+        " src/turbokod/git_output.mojo | 12 ++++++++++++\n"
+        " 1 file changed, 12 insertions(+)\n"
+    )))
+    assert_false(merge.is_routine(String(
+        "Auto-merging src/turbokod/editor.mojo\n"
+        "CONFLICT (content): Merge conflict in src/turbokod/editor.mojo\n"
+        "Automatic merge failed; fix conflicts and then commit the result.\n"
+    )))
+
+    var delete = GitOutputMatcher(GIT_OUT_BRANCH_DELETE)
+    assert_true(delete.is_routine(
+        String("Deleted branch merged-x (was 3fdfe00).\n"),
+    ))
+
+    # GIT_OUT_OTHER recognizes nothing, so any output at all shows.
+    var other = GitOutputMatcher(GIT_OUT_OTHER)
+    assert_true(other.is_routine(String("")))
+    assert_false(other.is_routine(String("anything at all\n")))
+
+
+def test_complete_lines_drops_a_partial_tail() raises:
+    """Live classification must only judge whole lines: half of
+    ``remote: Resolving deltas`` would not match the pattern that the
+    whole line does, and would promote the spinner for nothing."""
+    assert_equal(
+        complete_lines(String("one\ntwo\nthr")), String("one\ntwo\n"),
+    )
+    assert_equal(complete_lines(String("one\n")), String("one\n"))
+    assert_equal(complete_lines(String("no newline yet")), String(""))
+    assert_equal(complete_lines(String("")), String(""))
+    # And the partial-line case really would have misfired.
+    var m = GitOutputMatcher(GIT_OUT_PUSH)
+    var partial = String("Everything up-to-date\nremote: Resolving del")
+    assert_false(m.is_routine(partial))
+    assert_true(m.is_routine(complete_lines(partial)))
+
+
+def test_deploy_log_promotes_the_spinner_to_full_screen() raises:
+    """A push starts as the corner spinner and only grows into the whole
+    view once the remote says something unexpected — which is what makes
+    the ordinary push unintrusive and the deploy watchable, from the same
+    keystroke. The decision is sticky: routine lines arriving afterwards
+    must not shrink a live deploy log back into the corner."""
+    var lc = _local_changes_with_branches()
+    # Stand in for a push in flight; we drive the capture by hand rather
+    # than needing a remote.
+    lc._git_op = _GITOP_PUSH
+    lc._output_matcher = GitOutputMatcher(GIT_OUT_PUSH)
+    lc._output_promoted = False
+    lc.git_runner.output = String("Enumerating objects: 5, done.\n")
+    lc._promote_if_interesting()
+    assert_false(lc._output_promoted)
+    assert_false(lc.git_runner.full_screen)
+    # A partial line must not decide anything either way.
+    lc.git_runner.output += String("remote: -----> Buil")
+    lc._promote_if_interesting()
+    assert_false(lc.git_runner.full_screen)
+    # Completed, it does.
+    lc.git_runner.output += String("ding myapp from Dockerfile\n")
+    lc._promote_if_interesting()
+    assert_true(lc._output_promoted)
+    assert_true(lc.git_runner.full_screen)
+    # Sticky.
+    lc.git_runner.output += String("   abc1234..def5678  main -> main\n")
+    lc._promote_if_interesting()
+    assert_true(lc.git_runner.full_screen)
+    lc._git_op = _GITOP_NONE
+
+
+def test_local_changes_success_flashes_without_a_modal() raises:
+    """A successful op must not leave a box in the way. Its summary lands
+    on the sub-title row, the overlay stays shut, and the next keystroke
+    reaches the view instead of being eaten as a dismissal."""
+    var dir = _init_repo_with_branches()
+    if len(dir.as_bytes()) == 0:
+        return
+    var lc = LocalChanges()
+    lc.open(dir)
+    lc.focus = _PANE_BRANCHES
+    if not _select_branch(lc, String("merged-x")):
+        _rm_rf(dir)
+        return
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(_key(UInt32(0x64)), screen, registry)
+    _drain_git_op(lc)
+    # git printed "Deleted branch merged-x (was …)" — so this is the case
+    # a literal "only skip when there's no output" rule would still have
+    # popped a modal for.
+    assert_true(len(lc.flash_message.as_bytes()) > 0)
+    assert_equal(lc.overlay, _OVERLAY_NONE)
+    # The flash is painted on the sub-title row, in place of the root.
+    var canvas = Canvas(screen.width(), screen.height())
+    lc.paint(canvas, screen, registry)
+    var bounds = lc._panel_rect(screen)
+    var row = String("")
+    for x in range(bounds.a.x + 1, bounds.b.x - 1):
+        row += canvas.get(x, bounds.a.y + 1).glyph
+    assert_true(_contains(row, lc.flash_message))
+    # And a keystroke afterwards is handled normally, not swallowed. Park
+    # the cursor on row 0 first: the delete left ``sel_branch`` wherever
+    # ``merged-x`` used to be, and ``fetch_git_branches`` sorts by
+    # committer date — whether the surviving branches' commits land in the
+    # same wall-clock second decides the order, so that row is sometimes
+    # the last one, where Down legitimately can't move.
+    if len(lc.branches) > 1:
+        lc.sel_branch = 0
+        _ = lc.handle_key(_key(KEY_DOWN), screen, registry)
+        assert_equal(lc.sel_branch, 1)
+    _rm_rf(dir)
+
+
+def test_local_changes_failure_shows_the_whole_output() raises:
+    """The other half of the rule: an op that didn't produce the routine
+    success output stops and shows all of it, because nothing else on
+    screen explains what happened. Merging a nonexistent branch is the
+    cheapest way to make git exit non-zero with something to say."""
+    var lc = _local_changes_with_branches()
+    lc.sel_branch = 1                       # feature-x, not a real branch
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(_key(UInt32(0x4D)), screen, registry)
+    _ = lc.handle_key(_key(UInt32(0x6D)), screen, registry)   # 'm': merge commit
+    assert_equal(lc._git_op, _GITOP_MERGE)
+    _drain_git_op(lc)
+    assert_equal(lc.overlay, _OVERLAY_OUTPUT)
+    assert_equal(len(lc.flash_message.as_bytes()), 0)
+    assert_true(len(lc.overlay_output.as_bytes()) > 0)
+    # Arrows scroll rather than dismiss — a log you can't page through
+    # would be worse than the one-liner it replaced.
+    _ = lc.handle_key(_key(KEY_DOWN), screen, registry)
+    assert_equal(lc.overlay, _OVERLAY_OUTPUT)
+    # ESC closes.
+    _ = lc.handle_key(_key(KEY_ESC), screen, registry)
+    assert_equal(lc.overlay, _OVERLAY_NONE)
+
+
+def test_local_changes_flash_expires_on_its_own() raises:
+    """The flash ages out without any input — that's what makes it
+    non-blocking rather than just quieter."""
+    var lc = _local_changes_with_branches()
+    lc.sel_branch = 0
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(Event.key_event(KEY_SPACE), screen, registry)
+    assert_true(len(lc.flash_message.as_bytes()) > 0)
+    # tick() inside the window leaves it alone...
+    lc.tick()
+    assert_true(len(lc.flash_message.as_bytes()) > 0)
+    # ...and drops it once the deadline has passed.
+    lc._flash_until_ms = 0
+    lc.tick()
+    assert_equal(len(lc.flash_message.as_bytes()), 0)
 
 
 def test_local_changes_d_on_rebased_branch_deletes_immediately() raises:
@@ -2224,16 +3136,36 @@ def main() raises:
     test_branch_is_merged_reads_the_main_line()
     test_branch_is_merged_sees_through_rebase_and_squash()
     test_local_changes_d_on_rebased_branch_deletes_immediately()
-    test_local_changes_shift_m_merges_selected_branch()
+    test_routine_push_output_is_recognized()
+    test_deploy_log_is_not_routine_push_output()
+    test_routine_output_for_the_other_operations()
+    test_complete_lines_drops_a_partial_tail()
+    test_deploy_log_promotes_the_spinner_to_full_screen()
+    test_local_changes_success_flashes_without_a_modal()
+    test_local_changes_failure_shows_the_whole_output()
+    test_local_changes_flash_expires_on_its_own()
+    test_local_changes_shift_m_asks_merge_commit_or_straight_history()
+    test_local_changes_merge_choice_m_spawns_a_no_ff_merge()
+    test_local_changes_merge_choice_r_spawns_a_rebase()
+    test_rebase_preserves_current_branch_shas()
+    test_rebase_success_output_is_routine()
+    test_autostash_pull_output_is_routine()
     test_local_changes_shift_m_on_current_branch_is_a_noop()
     test_local_changes_d_on_current_branch_is_refused()
     test_local_changes_d_on_unmerged_branch_confirms_first()
     test_local_changes_d_on_merged_branch_deletes_immediately()
+    test_format_age_picks_one_unit()
+    test_local_changes_branch_pane_paints_age_column()
+    test_fetch_git_branches_carries_age_newest_first()
     test_local_changes_commit_message_url_is_underlined()
     test_local_changes_click_on_commit_message_url_opens_browser()
     test_local_changes_sidebar_splitter_drag_resizes_right_pane()
+    test_local_changes_untracked_file_shows_its_whole_contents()
+    test_local_changes_untracked_empty_file_has_no_body_rows()
     test_git_state_mtimes_zero_for_non_repo()
     test_git_state_mtimes_nonzero_after_init_commit()
     test_stage_unstage_round_trip_against_real_git()
+    test_merge_commit_log_lists_the_commits_it_brought_in()
+    test_merge_commit_info_panel_shows_merged_commits_section()
     test_review_mode_builds_changeset_model()
-    print("git: 67 tests passed")
+    print("git: 84 tests passed")

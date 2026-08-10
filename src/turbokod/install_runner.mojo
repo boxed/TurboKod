@@ -77,6 +77,13 @@ struct InstallRunner(Movable):
     var title_prefix: String    # popup title prefix ("Installing ", "Running ", …)
     var process: LspProcess     # owns pid + stdin/stdout/stderr fds
     var output: String          # rolling capture (capped at _OUTPUT_CAP)
+    # When set, ``paint`` fills the container instead of tucking a 60x7
+    # box into the bottom-right corner. The host turns this on when the
+    # child turns out to be saying something worth reading — a remote
+    # streaming back a deploy log, say — so a two-minute build is
+    # watchable instead of scrolling past five lines at a time. Cleared
+    # on every ``start``; the host re-decides per run.
+    var full_screen: Bool
     var _spinner_anchor_ms: Int
 
     def __init__(out self):
@@ -86,6 +93,7 @@ struct InstallRunner(Movable):
         self.title_prefix = String("Installing ")
         self.process = LspProcess()
         self.output = String("")
+        self.full_screen = False
         self._spinner_anchor_ms = 0
 
     def is_active(self) -> Bool:
@@ -105,6 +113,7 @@ struct InstallRunner(Movable):
         self.command = command^
         self.title_prefix = String("Installing ")
         self.output = String("")
+        self.full_screen = False
         self._spinner_anchor_ms = monotonic_ms()
         self.active = True
 
@@ -134,6 +143,7 @@ struct InstallRunner(Movable):
         self.command = rendered^
         self.title_prefix = title_prefix^
         self.output = String("")
+        self.full_screen = False
         self._spinner_anchor_ms = monotonic_ms()
         self.active = True
 
@@ -227,20 +237,34 @@ struct InstallRunner(Movable):
         """
         if not self.active:
             return
-        var width = 60
-        # Top border row (also carries the title), one row per output line,
-        # bottom border row.
-        var height = _LAST_LINES + 2
-        if width > container_bounds.b.x - 2: width = container_bounds.b.x - 2
-        if height > container_bounds.b.y - 2: height = container_bounds.b.y - 2
-        if width < 20 or height < 4:
-            return
-        # Bottom-right, one row above the status bar, two cols off the edge.
-        var x = container_bounds.b.x - width - 2
-        var y = container_bounds.b.y - height - 1
-        if x < 1: x = 1
-        if y < 1: y = 1
-        var rect = Rect(x, y, x + width, y + height)
+        var rect: Rect
+        if self.full_screen:
+            # Fill the container, inset by two columns / one row so the
+            # drop shadow and the view underneath still read as layered.
+            rect = Rect(
+                container_bounds.a.x + 2, container_bounds.a.y + 1,
+                container_bounds.b.x - 2, container_bounds.b.y - 1,
+            )
+            if rect.width() < 20 or rect.height() < 4:
+                return
+        else:
+            var width = 60
+            # Top border row (also carries the title), one row per output
+            # line, bottom border row.
+            var height = _LAST_LINES + 2
+            if width > container_bounds.b.x - 2:
+                width = container_bounds.b.x - 2
+            if height > container_bounds.b.y - 2:
+                height = container_bounds.b.y - 2
+            if width < 20 or height < 4:
+                return
+            # Bottom-right, one row above the status bar, two cols off
+            # the edge.
+            var x = container_bounds.b.x - width - 2
+            var y = container_bounds.b.y - height - 1
+            if x < 1: x = 1
+            if y < 1: y = 1
+            rect = Rect(x, y, x + width, y + height)
         var bg = Attr(BLACK, LIGHT_GRAY)
         var spin_attr = Attr(YELLOW, LIGHT_GRAY)
         paint_drop_shadow(canvas, rect)
@@ -257,9 +281,17 @@ struct InstallRunner(Movable):
         var sx = rect.b.x - 3
         if sx > tx + display_columns(title):
             _ = painter.put_text(canvas, Point(sx, rect.a.y), spin, spin_attr)
-        # Last N lines of output, top-down. Truncated to the popup width
-        # by the painter's clip.
-        var tail = _last_lines(self.output, _LAST_LINES)
+        # Last N lines of output, top-down — as many as the box has room
+        # for, so the full-screen mode actually shows a log rather than
+        # five lines in a big frame. Truncated to the popup width by the
+        # painter's clip.
+        var room = rect.height() - 2
+        var want = room if self.full_screen else _LAST_LINES
+        if want > room:
+            want = room
+        if want < 1:
+            want = 1
+        var tail = _last_lines(self.output, want)
         var inner_top = rect.a.y + 1
         var inner_left = rect.a.x + 2
         for i in range(len(tail)):
