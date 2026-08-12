@@ -690,7 +690,5 @@ def _split_space(text: String) -> List[String]:
             has_content = True
             i += 1
         if has_content:
-            out.append(String(StringSlice(
-                ptr=token.unsafe_ptr(), length=len(token),
-            )))
+            out.append(String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=token.unsafe_ptr(), length=len(token)))))
     return out^

@@ -380,7 +380,7 @@ struct MenuBar(Movable):
             if seq == 1:
                 glyph = String(chr(c0))
             else:
-                glyph = String(StringSlice(unsafe_from_utf8=b[i:i + seq]))
+                glyph = String(StringSpan(unsafe_from_utf8=b[i:i + seq]))
             var a = hotkey_attr if col == 0 else body_attr
             var w = char_width(codepoint_at(label, i)[0])
             painter.set(canvas, x + col, y, Cell(glyph, a, w))

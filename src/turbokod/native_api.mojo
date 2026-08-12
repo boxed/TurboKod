@@ -7,7 +7,7 @@ run per-frame housekeeping (LSP/DAP/autosave ticks).
 
 The handle is a heap ``Desktop`` pointer: we ``malloc`` storage, construct in
 place, and hand the address back as an ``Int``. On later calls we rebuild a
-usable pointer with ``UnsafePointer[Desktop, MutExternalOrigin](
+usable pointer with ``Pointer[Desktop, MutUntrackedOrigin](
 unsafe_from_address=h)`` — this is how persistent Mojo state survives across
 C-ABI calls (Mojo has no module-level mutable globals).
 
@@ -102,15 +102,15 @@ comptime _MB_WHEEL_UP   = UInt8(4)
 comptime _MB_WHEEL_DOWN = UInt8(5)
 
 
-def _desk(h: Int) -> UnsafePointer[Desktop, MutExternalOrigin]:
-    return UnsafePointer[Desktop, MutExternalOrigin](unsafe_from_address=h)
+def _desk(h: Int) -> Pointer[Desktop, MutUntrackedOrigin]:
+    return Pointer[Desktop, MutUntrackedOrigin](unsafe_from_address=h)
 
 
 def _string_from(ptr: Int, n: Int) -> String:
     if ptr == 0 or n <= 0:
         return String("")
-    var p = UnsafePointer[UInt8, MutExternalOrigin](unsafe_from_address=ptr)
-    return String(StringSlice(ptr=p, length=n))
+    var p = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=ptr)
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=p, length=n)))
 
 
 def _mk_menu(var label: String, *items: Tuple[String, String]) -> Menu:
@@ -347,7 +347,7 @@ def _canon_ctrl_key(key: UInt32, mods: UInt8) -> UInt32:
 
 
 @export
-def tk_recover_user_shell_path():
+def tk_recover_user_shell_path() abi("C"):
     """Recover the user's full interactive shell ``$PATH``.
 
     macOS Dock/launchd launches hand us a stripped ``PATH`` that lacks the
@@ -369,7 +369,7 @@ def tk_recover_user_shell_path():
 
 
 @export
-def tk_desktop_new() -> Int:
+def tk_desktop_new() abi("C") -> Int:
     """Create a Desktop on the heap, load config + standard menus, return the
     opaque handle."""
     # Cheap, synchronous half of GUI-launch PATH recovery: prepend the
@@ -383,8 +383,8 @@ def tk_desktop_new() -> Int:
     var addr = external_call["malloc", Int](size_of[Desktop]())
     if addr == 0:
         return 0
-    var p = UnsafePointer[Desktop, MutExternalOrigin](unsafe_from_address=addr)
-    p.init_pointee_move(Desktop())
+    var p = Pointer[Desktop, MutUntrackedOrigin](unsafe_from_address=addr)
+    p.unsafe_write(Desktop())
     p[].load_config_from_disk()
     # ``TK_THEME`` overrides the saved theme for this process only (not
     # persisted) — used to capture doc screenshots in a specific theme, e.g.
@@ -398,16 +398,16 @@ def tk_desktop_new() -> Int:
 
 
 @export
-def tk_desktop_free(h: Int):
+def tk_desktop_free(h: Int) abi("C"):
     if h == 0:
         return
     var p = _desk(h)
-    p.destroy_pointee()
+    p.unsafe_deinit_pointee()
     _ = external_call["free", Int](h)
 
 
 @export
-def tk_desktop_open_project(h: Int, path_ptr: Int, path_len: Int):
+def tk_desktop_open_project(h: Int, path_ptr: Int, path_len: Int) abi("C"):
     if h == 0:
         return
     var path = _string_from(path_ptr, path_len)
@@ -417,7 +417,7 @@ def tk_desktop_open_project(h: Int, path_ptr: Int, path_len: Int):
 
 
 @export
-def tk_desktop_open_file(h: Int, path_ptr: Int, path_len: Int, cols: Int, rows: Int):
+def tk_desktop_open_file(h: Int, path_ptr: Int, path_len: Int, cols: Int, rows: Int) abi("C"):
     if h == 0:
         return
     var path = _string_from(path_ptr, path_len)
@@ -433,7 +433,7 @@ def tk_desktop_open_file(h: Int, path_ptr: Int, path_len: Int, cols: Int, rows: 
 def tk_desktop_open_file_at(
     h: Int, path_ptr: Int, path_len: Int, line: Int, character: Int,
     cols: Int, rows: Int,
-):
+) abi("C"):
     """Open ``path`` and place the cursor at ``(line, character)`` — both
     0-based. Backs the ``turbokod://open?file=X&line=N`` URL scheme; the
     Swift host converts the URL's 1-based line to 0-based before calling."""
@@ -449,7 +449,7 @@ def tk_desktop_open_file_at(
 
 
 @export
-def tk_desktop_tick(h: Int, cols: Int, rows: Int):
+def tk_desktop_tick(h: Int, cols: Int, rows: Int) abi("C"):
     """Per-frame housekeeping Swift runs before laying out: external-change
     reload, menu visibility, file-tree opens, and the LSP/DAP/autosave
     ticks."""
@@ -480,13 +480,13 @@ def tk_desktop_tick(h: Int, cols: Int, rows: Int):
     d.save_actions_tick()
 
 
-def _pack_canvas(read canvas: Canvas, cols: Int, rows: Int, out_ptr: Int, cap: Int) -> Int:
+def _pack_canvas(imm canvas: Canvas, cols: Int, rows: Int, out_ptr: Int, cap: Int) -> Int:
     """Pack a laid-out canvas into the caller's ``UInt32`` buffer, 5 words
     per cell (``[codepoint, fg|bg<<8|style<<16|color_mode<<24, underline,
     fg_rgb, bg_rgb]``). Returns the number of cells written (clamped to
     ``cap``). Shared by the main and the floating-panels layout entry points
     so the packing format stays in one place."""
-    var op = UnsafePointer[UInt32, MutExternalOrigin](unsafe_from_address=out_ptr)
+    var op = Pointer[UInt32, MutUntrackedOrigin](unsafe_from_address=out_ptr)
     var n = cols * rows
     if n > cap:
         n = cap
@@ -505,16 +505,16 @@ def _pack_canvas(read canvas: Canvas, cols: Int, rows: Int, out_ptr: Int, cap: I
             w2 = UInt32(0xFFFFFFFF)
         else:
             w2 = UInt32(Int(attr.underline_color))
-        op[i * 5] = UInt32(cp)
-        op[i * 5 + 1] = w1
-        op[i * 5 + 2] = w2
-        op[i * 5 + 3] = attr.fg_rgb
-        op[i * 5 + 4] = attr.bg_rgb
+        op[unsafe_offset=i * 5] = UInt32(cp)
+        op[unsafe_offset=i * 5 + 1] = w1
+        op[unsafe_offset=i * 5 + 2] = w2
+        op[unsafe_offset=i * 5 + 3] = attr.fg_rgb
+        op[unsafe_offset=i * 5 + 4] = attr.bg_rgb
     return n
 
 
 @export
-def tk_desktop_layout(h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int) -> Int:
+def tk_desktop_layout(h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     """Paint the Desktop into a ``cols``x``rows`` grid and pack it into the
     caller's buffer (5 u32 per cell). Returns the number of cells written."""
     if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
@@ -528,7 +528,7 @@ def tk_desktop_layout(h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int) -> I
 @export
 def tk_editor_scroll_regions(
     h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int
-) -> Int:
+) abi("C") -> Int:
     """Report the editor windows the host may smooth-scroll this frame.
     Writes N records of 9 Int32 words each into the caller's buffer
     (``cap`` = max records): ``[win_idx, x, y, w, h, sub, frac_milli,
@@ -545,21 +545,21 @@ def tk_editor_scroll_regions(
     if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0 or cap <= 0:
         return 0
     var regions = _desk(h)[].scroll_regions(Rect(0, 0, cols, rows))
-    var op = UnsafePointer[Int32, MutExternalOrigin](unsafe_from_address=out_ptr)
+    var op = Pointer[Int32, MutUntrackedOrigin](unsafe_from_address=out_ptr)
     var n = len(regions)
     if n > cap:
         n = cap
     for i in range(n):
         var r = regions[i]
-        op[i * 9] = Int32(r.win_idx)
-        op[i * 9 + 1] = Int32(r.interior.a.x)
-        op[i * 9 + 2] = Int32(r.interior.a.y)
-        op[i * 9 + 3] = Int32(r.interior.width())
-        op[i * 9 + 4] = Int32(r.interior.height())
-        op[i * 9 + 5] = Int32(r.sub)
-        op[i * 9 + 6] = Int32(Int(r.frac * 1000.0))
-        op[i * 9 + 7] = Int32(r.n_sticky)
-        op[i * 9 + 8] = Int32(r.right_gutter)
+        op[unsafe_offset=i * 9] = Int32(r.win_idx)
+        op[unsafe_offset=i * 9 + 1] = Int32(r.interior.a.x)
+        op[unsafe_offset=i * 9 + 2] = Int32(r.interior.a.y)
+        op[unsafe_offset=i * 9 + 3] = Int32(r.interior.width())
+        op[unsafe_offset=i * 9 + 4] = Int32(r.interior.height())
+        op[unsafe_offset=i * 9 + 5] = Int32(r.sub)
+        op[unsafe_offset=i * 9 + 6] = Int32(Int(r.frac * 1000.0))
+        op[unsafe_offset=i * 9 + 7] = Int32(r.n_sticky)
+        op[unsafe_offset=i * 9 + 8] = Int32(r.right_gutter)
     return n
 
 
@@ -567,7 +567,7 @@ def tk_editor_scroll_regions(
 def tk_editor_region_layout(
     h: Int, win_idx: Int, region_cols: Int, region_rows: Int,
     out_ptr: Int, cap: Int,
-) -> Int:
+) abi("C") -> Int:
     """Render editor ``win_idx``'s body at its current ``scroll_y`` into a
     0-origin grid, ``region_rows`` visual rows tall, and pack it (same
     5-u32-per-cell format as ``tk_desktop_layout``). ``region_rows`` should
@@ -588,7 +588,7 @@ def tk_editor_region_layout(
 @export
 def tk_editor_overlay_bounds(
     h: Int, cols: Int, rows: Int, out_ptr: Int
-) -> Int:
+) abi("C") -> Int:
     """Screen-cell bounds of the focused editor's active screen-anchored
     overlay — the minimap/diagnostic/spell tooltip or the LSP hover popup.
     Writes ``[x, y, w, h]`` (Int32) to ``out_ptr`` and returns 1 when one is up,
@@ -604,18 +604,18 @@ def tk_editor_overlay_bounds(
     if not b:
         return 0
     var r = b.value()
-    var op = UnsafePointer[Int32, MutExternalOrigin](unsafe_from_address=out_ptr)
-    op[0] = Int32(r.a.x)
-    op[1] = Int32(r.a.y)
-    op[2] = Int32(r.width())
-    op[3] = Int32(r.height())
+    var op = Pointer[Int32, MutUntrackedOrigin](unsafe_from_address=out_ptr)
+    op[unsafe_offset=0] = Int32(r.a.x)
+    op[unsafe_offset=1] = Int32(r.a.y)
+    op[unsafe_offset=2] = Int32(r.width())
+    op[unsafe_offset=3] = Int32(r.height())
     return 1
 
 
 @export
 def tk_editor_smooth_begin(
     h: Int, win_idx: Int, cols: Int, rows: Int, out_ptr: Int
-) -> Int:
+) abi("C") -> Int:
     """Seed a smooth-scroll gesture on editor ``win_idx``. Writes two Int32
     words to ``out_ptr``: ``[cur_vis_milli, max_vis_milli]`` — the current
     vertical position and the maximum, as continuous *visual-row*
@@ -624,16 +624,16 @@ def tk_editor_smooth_begin(
     if h == 0 or out_ptr == 0:
         return 0
     var m = _desk(h)[].smooth_begin(win_idx, Rect(0, 0, cols, rows))
-    var op = UnsafePointer[Int32, MutExternalOrigin](unsafe_from_address=out_ptr)
-    op[0] = Int32(Int(m[0] * 1000.0))
-    op[1] = Int32(Int(m[1] * 1000.0))
+    var op = Pointer[Int32, MutUntrackedOrigin](unsafe_from_address=out_ptr)
+    op[unsafe_offset=0] = Int32(Int(m[0] * 1000.0))
+    op[unsafe_offset=1] = Int32(Int(m[1] * 1000.0))
     return 1
 
 
 @export
 def tk_editor_smooth_set(
     h: Int, win_idx: Int, cols: Int, rows: Int, vis_milli: Int
-):
+) abi("C"):
     """Apply a host-driven smooth-scroll position to editor ``win_idx``: a
     global visual-row coordinate × 1000 (``vis_milli``). The core clamps the
     integer part to ``[0, max]`` and maps it to a (buffer line, sub-row)
@@ -647,7 +647,7 @@ def tk_editor_smooth_set(
 
 
 @export
-def tk_editor_minimap_to(h: Int, win_idx: Int, frac_micro: Int):
+def tk_editor_minimap_to(h: Int, win_idx: Int, frac_micro: Int) abi("C"):
     """Scroll editor ``win_idx`` proportionally from a minimap / scrollbar
     drag: ``frac_micro`` is the pointer's fractional position down the
     minimap × 1,000,000 (0 = top, 1e6 = bottom of the scrollable range). The
@@ -661,7 +661,7 @@ def tk_editor_minimap_to(h: Int, win_idx: Int, frac_micro: Int):
 
 
 @export
-def tk_desktop_hscroll_by(h: Int, cols: Int, screen_cols: Int, screen_rows: Int) -> Int:
+def tk_desktop_hscroll_by(h: Int, cols: Int, screen_cols: Int, screen_rows: Int) abi("C") -> Int:
     """Scroll the focused editor horizontally by ``cols`` columns (negative =
     left). Used by the host for a trackpad horizontal swipe / Shift+wheel.
     Returns 1 if an editor actually scrolled (so the host repaints), else 0."""
@@ -674,7 +674,7 @@ def tk_desktop_hscroll_by(h: Int, cols: Int, screen_cols: Int, screen_rows: Int)
 
 
 @export
-def tk_desktop_vscroll_active(h: Int) -> Int:
+def tk_desktop_vscroll_active(h: Int) abi("C") -> Int:
     """1 while a window-border vertical-scrollbar thumb drag is in progress
     (the press landed on the thumb). The host polls this right after a
     mouse-down to decide whether to route subsequent motion through the
@@ -686,7 +686,7 @@ def tk_desktop_vscroll_active(h: Int) -> Int:
 
 
 @export
-def tk_desktop_vscroll_drag(h: Int, mouse_y_milli: Int) -> Int:
+def tk_desktop_vscroll_drag(h: Int, mouse_y_milli: Int) abi("C") -> Int:
     """Continue the in-progress v-scrollbar thumb drag at a sub-cell pointer
     Y: ``mouse_y_milli`` is the pointer's fractional *cell row* × 1000 (raw
     pointer Y / cell height). Maps every line on a long file instead of the
@@ -698,7 +698,7 @@ def tk_desktop_vscroll_drag(h: Int, mouse_y_milli: Int) -> Int:
 
 
 @export
-def tk_theme_version(h: Int) -> Int:
+def tk_theme_version(h: Int) abi("C") -> Int:
     """Monotonic counter that bumps whenever the active color theme changes.
     The Swift host polls this each frame and refetches the palette only when
     it moves — copying 256 ints every frame would be pointless churn."""
@@ -708,24 +708,24 @@ def tk_theme_version(h: Int) -> Int:
 
 
 @export
-def tk_theme_palette(h: Int, out_ptr: Int, cap: Int) -> Int:
+def tk_theme_palette(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     """Write the active theme's 256-entry RGB palette (packed ``0xRRGGBB``)
     into the caller's UInt32 buffer. Returns the number of entries written
     (256, clamped to ``cap``). Swift resolves cell color indices through this
     table, so this is how a theme retints the whole native UI."""
     if h == 0 or out_ptr == 0 or cap <= 0:
         return 0
-    var op = UnsafePointer[UInt32, MutExternalOrigin](unsafe_from_address=out_ptr)
+    var op = Pointer[UInt32, MutUntrackedOrigin](unsafe_from_address=out_ptr)
     var n = len(_desk(h)[].active_theme.palette)
     if n > cap:
         n = cap
     for i in range(n):
-        op[i] = _desk(h)[].active_theme.palette[i]
+        op[unsafe_offset=i] = _desk(h)[].active_theme.palette[i]
     return n
 
 
 @export
-def tk_desktop_set_font_options(h: Int, ptr: Int, n: Int):
+def tk_desktop_set_font_options(h: Int, ptr: Int, n: Int) abi("C"):
     """Register the monospace font families the host can render cells
     with — newline-separated UTF-8 family names. Their presence is what
     makes the Settings Font section appear; the terminal frontend never
@@ -743,7 +743,7 @@ def tk_desktop_set_font_options(h: Int, ptr: Int, n: Int):
 
 
 @export
-def tk_font_version(h: Int) -> Int:
+def tk_font_version(h: Int) abi("C") -> Int:
     """Monotonic counter that bumps whenever ``config.font`` changes.
     The Swift host polls this each frame (like ``tk_theme_version``) and
     refetches the font name + rebuilds its cell font only when it moves."""
@@ -753,7 +753,7 @@ def tk_font_version(h: Int) -> Int:
 
 
 @export
-def tk_font_name(h: Int, out_ptr: Int, cap: Int) -> Int:
+def tk_font_name(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     """Write the configured font family name (UTF-8) into the caller's
     buffer and return the byte count. 0 means "use the built-in bitmap
     font" — the config's empty-string default."""
@@ -763,14 +763,14 @@ def tk_font_name(h: Int, out_ptr: Int, cap: Int) -> Int:
     var n = len(bytes)
     if n > cap:
         n = cap
-    var op = UnsafePointer[UInt8, MutExternalOrigin](unsafe_from_address=out_ptr)
+    var op = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=out_ptr)
     for i in range(n):
-        op[i] = bytes[i]
+        op[unsafe_offset=i] = bytes[i]
     return n
 
 
 @export
-def tk_font_size(h: Int) -> Int:
+def tk_font_size(h: Int) abi("C") -> Int:
     """The configured cell-font point size. 0 means "the font's default
     size" — the host picks 16 for the bundled bitmap font, 13 for system
     monospace families. Polled together with ``tk_font_name`` whenever
@@ -781,7 +781,7 @@ def tk_font_size(h: Int) -> Int:
 
 
 @export
-def tk_desktop_set_font_size_info(h: Int, effective: Int, ideal: Int):
+def tk_desktop_set_font_size_info(h: Int, effective: Int, ideal: Int) abi("C"):
     """Host reports the active font's live size info after every font
     apply: ``effective`` is the point size actually rendering (resolves
     the 0-means-default config value), ``ideal`` is the font's design
@@ -796,7 +796,7 @@ def tk_desktop_set_font_size_info(h: Int, effective: Int, ideal: Int):
 
 
 @export
-def tk_desktop_set_panels_detached(h: Int, on: Int):
+def tk_desktop_set_panels_detached(h: Int, on: Int) abi("C"):
     """Tell the Desktop its tool panels are rendered on a separate host
     window (the native "Floating panels" feature).
 
@@ -811,7 +811,7 @@ def tk_desktop_set_panels_detached(h: Int, on: Int):
 
 
 @export
-def tk_desktop_panels_visible_count(h: Int) -> Int:
+def tk_desktop_panels_visible_count(h: Int) abi("C") -> Int:
     """Number of tool panels currently open (terminal + debug + test).
 
     The host polls this to auto-hide the floating panel window when the last
@@ -824,7 +824,7 @@ def tk_desktop_panels_visible_count(h: Int) -> Int:
 @export
 def tk_desktop_layout_panels(
     h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
-) -> Int:
+) abi("C") -> Int:
     """Paint *only* the tool panels into the host's separate panel window and
     pack them into the caller's buffer (same 5-u32-per-cell format as
     ``tk_desktop_layout``). Returns the number of cells written. The panel
@@ -841,7 +841,7 @@ def tk_desktop_layout_panels(
 @export
 def tk_desktop_panels_key(
     h: Int, key: UInt32, mods: UInt8, cols: Int, rows: Int,
-) -> Int32:
+) abi("C") -> Int32:
     """Route a keystroke from the panel window into the tool panels.
     Mirrors ``tk_desktop_key`` (same Ctrl/Cmd canonicalization and action
     codes), but dispatches through ``handle_panels_event``."""
@@ -863,7 +863,7 @@ def tk_desktop_panels_key(
 def tk_desktop_panels_mouse(
     h: Int, x: Int, y: Int, button: UInt8, pressed: UInt8, motion: UInt8,
     mods: UInt8, cols: Int, rows: Int, click_count: UInt8,
-) -> Int32:
+) abi("C") -> Int32:
     """Route a mouse event from the panel window into the tool panels.
     Mirrors ``tk_desktop_mouse`` but dispatches through
     ``handle_panels_event``."""
@@ -884,7 +884,7 @@ def tk_desktop_panels_mouse(
 @export
 def tk_desktop_panels_pointer_shape(
     h: Int, x: Int, y: Int, cols: Int, rows: Int,
-) -> Int32:
+) abi("C") -> Int32:
     """0 = default, 1 = text, 2 = pointer — for the panel window."""
     if h == 0:
         return Int32(0)
@@ -899,7 +899,7 @@ def tk_desktop_panels_pointer_shape(
 @export
 def tk_desktop_panels_drop_paths(
     h: Int, x: Int, y: Int, paths_ptr: Int, paths_len: Int, cols: Int, rows: Int,
-) -> Int32:
+) abi("C") -> Int32:
     """Host drag-and-drop onto the detached floating-panels window. Mirrors
     ``tk_desktop_drop_paths`` but routes through ``drop_text_on_panel`` (the
     panel-window layout)."""
@@ -916,7 +916,7 @@ def tk_desktop_panels_drop_paths(
 @export
 def tk_desktop_panels_drop_target(
     h: Int, x: Int, y: Int, cols: Int, rows: Int,
-) -> Int32:
+) abi("C") -> Int32:
     """Classify a drag-and-drop on the detached floating-panels window: 1 =
     terminal pane, 0 = nothing (the panels window has no editors, so never 2).
     Companion to ``tk_desktop_drop_target``."""
@@ -937,7 +937,7 @@ def tk_desktop_panels_drop_target(
 
 
 @export
-def tk_desktop_set_settings_detached(h: Int, on: Int):
+def tk_desktop_set_settings_detached(h: Int, on: Int) abi("C"):
     """Tell the Desktop the Settings view is rendered on a separate host
     window. The terminal frontend never sets this — there Settings is a
     movable/resizable in-grid dialog."""
@@ -947,7 +947,7 @@ def tk_desktop_set_settings_detached(h: Int, on: Int):
 
 
 @export
-def tk_desktop_settings_active(h: Int) -> Int32:
+def tk_desktop_settings_active(h: Int) abi("C") -> Int32:
     """1 while the Settings view is open. The host polls this per tick and
     shows/hides its settings window on transitions (the Mojo side opens via
     the menu action and closes via Esc / the Close button, so the host can't
@@ -960,7 +960,7 @@ def tk_desktop_settings_active(h: Int) -> Int32:
 
 
 @export
-def tk_desktop_take_attention(h: Int) -> Int32:
+def tk_desktop_take_attention(h: Int) abi("C") -> Int32:
     """Drain and return the count of attention events (a Claude session
     in a terminal pane finishing its turn, the debugger hitting a stop)
     since the last call. The host polls this every tick and, when the
@@ -973,7 +973,7 @@ def tk_desktop_take_attention(h: Int) -> Int32:
 
 
 @export
-def tk_desktop_take_panel_focus_request(h: Int) -> Int32:
+def tk_desktop_take_panel_focus_request(h: Int) abi("C") -> Int32:
     """Drain the one-shot "focus the panel window" request. Returns 1
     exactly once after the user explicitly opens a new terminal pane,
     0 otherwise. When the tool panels float on their own window the host
@@ -986,7 +986,7 @@ def tk_desktop_take_panel_focus_request(h: Int) -> Int32:
 
 
 @export
-def tk_desktop_take_panel_front_request(h: Int) -> Int32:
+def tk_desktop_take_panel_front_request(h: Int) abi("C") -> Int32:
     """Drain the one-shot "raise the panel window" request. Returns 1
     exactly once after a target run / test / debug (re)start, 0 otherwise.
     When the tool panels float on their own window the host uses this to
@@ -1001,7 +1001,7 @@ def tk_desktop_take_panel_front_request(h: Int) -> Int32:
 
 
 @export
-def tk_desktop_take_main_focus_request(h: Int) -> Int32:
+def tk_desktop_take_main_focus_request(h: Int) abi("C") -> Int32:
     """Drain the one-shot "raise the main window" request. Returns 1
     exactly once after a deliberate open-at-line jump (an output-pane
     link click or a ``turbokod://`` command-line open), 0 otherwise. The
@@ -1015,7 +1015,7 @@ def tk_desktop_take_main_focus_request(h: Int) -> Int32:
 
 
 @export
-def tk_desktop_debug_stopped(h: Int) -> Int32:
+def tk_desktop_debug_stopped(h: Int) abi("C") -> Int32:
     """1 while a DAP session is active and paused (stopped event received,
     not yet resumed). Backs ``TK_CAPTURE_WHEN=debug-stopped`` — the host's
     scripted-screenshot path polls this to know the debugger has actually
@@ -1028,7 +1028,7 @@ def tk_desktop_debug_stopped(h: Int) -> Int32:
 
 
 @export
-def tk_desktop_settings_close(h: Int):
+def tk_desktop_settings_close(h: Int) abi("C"):
     """Close the Settings view — the host calls this when the user closes
     the settings window via its native close button (the reverse direction
     of ``tk_desktop_settings_active``)."""
@@ -1040,7 +1040,7 @@ def tk_desktop_settings_close(h: Int):
 @export
 def tk_desktop_layout_settings(
     h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
-) -> Int:
+) abi("C") -> Int:
     """Paint the Settings view into the host's settings window and pack it
     into the caller's buffer (same 5-u32-per-cell format as
     ``tk_desktop_layout``). Returns the number of cells written."""
@@ -1055,7 +1055,7 @@ def tk_desktop_layout_settings(
 @export
 def tk_desktop_settings_key(
     h: Int, key: UInt32, mods: UInt8, cols: Int, rows: Int,
-) -> Int32:
+) abi("C") -> Int32:
     """Route a keystroke from the settings window into the Settings view.
     Mirrors ``tk_desktop_key``'s Ctrl/Cmd canonicalization; Settings never
     produces host actions, so this always returns ACT_NONE."""
@@ -1072,7 +1072,7 @@ def tk_desktop_settings_key(
 def tk_desktop_settings_mouse(
     h: Int, x: Int, y: Int, button: UInt8, pressed: UInt8, motion: UInt8,
     mods: UInt8, cols: Int, rows: Int, click_count: UInt8,
-) -> Int32:
+) abi("C") -> Int32:
     """Route a mouse event from the settings window into the Settings view."""
     if h == 0:
         return ACT_NONE
@@ -1092,7 +1092,7 @@ def tk_desktop_settings_mouse(
 
 
 @export
-def tk_desktop_set_project_settings_detached(h: Int, on: Int):
+def tk_desktop_set_project_settings_detached(h: Int, on: Int) abi("C"):
     """Tell the Desktop the Project Settings view renders on a separate host
     window. The terminal frontend never sets this — there it's a
     movable/resizable in-grid dialog."""
@@ -1102,7 +1102,7 @@ def tk_desktop_set_project_settings_detached(h: Int, on: Int):
 
 
 @export
-def tk_desktop_project_settings_active(h: Int) -> Int32:
+def tk_desktop_project_settings_active(h: Int) abi("C") -> Int32:
     """1 while the Project Settings view is open. The host polls this per tick
     and shows/hides its window on transitions."""
     if h == 0:
@@ -1113,7 +1113,7 @@ def tk_desktop_project_settings_active(h: Int) -> Int32:
 
 
 @export
-def tk_desktop_project_settings_close(h: Int):
+def tk_desktop_project_settings_close(h: Int) abi("C"):
     """Close the Project Settings view — the host calls this when the user
     closes the window via its native close button."""
     if h == 0:
@@ -1124,7 +1124,7 @@ def tk_desktop_project_settings_close(h: Int):
 @export
 def tk_desktop_layout_project_settings(
     h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
-) -> Int:
+) abi("C") -> Int:
     """Paint the Project Settings view into the host's window and pack it into
     the caller's buffer (same 5-u32-per-cell format as ``tk_desktop_layout``).
     Returns the number of cells written."""
@@ -1139,7 +1139,7 @@ def tk_desktop_layout_project_settings(
 @export
 def tk_desktop_project_settings_key(
     h: Int, key: UInt32, mods: UInt8, cols: Int, rows: Int,
-) -> Int32:
+) abi("C") -> Int32:
     """Route a keystroke from the Project Settings window into the view.
     Project Settings never produces host actions, so this returns ACT_NONE."""
     if h == 0:
@@ -1155,7 +1155,7 @@ def tk_desktop_project_settings_key(
 def tk_desktop_project_settings_mouse(
     h: Int, x: Int, y: Int, button: UInt8, pressed: UInt8, motion: UInt8,
     mods: UInt8, cols: Int, rows: Int, click_count: UInt8,
-) -> Int32:
+) abi("C") -> Int32:
     """Route a mouse event from the Project Settings window into the view."""
     if h == 0:
         return ACT_NONE
@@ -1167,7 +1167,7 @@ def tk_desktop_project_settings_mouse(
 
 
 @export
-def tk_desktop_key(h: Int, key: UInt32, mods: UInt8, cols: Int, rows: Int) -> Int32:
+def tk_desktop_key(h: Int, key: UInt32, mods: UInt8, cols: Int, rows: Int) abi("C") -> Int32:
     if h == 0:
         return ACT_NONE
     # Canonicalize Ctrl/Cmd + uppercase letter to lowercase (matches the
@@ -1183,7 +1183,7 @@ def tk_desktop_key(h: Int, key: UInt32, mods: UInt8, cols: Int, rows: Int) -> In
 
 
 @export
-def tk_desktop_mod_key(h: Int, mod_id: UInt32, pressed: UInt8) -> Int32:
+def tk_desktop_mod_key(h: Int, mod_id: UInt32, pressed: UInt8) abi("C") -> Int32:
     """Bare modifier-key transition (press/release of a lone modifier,
     e.g. Option/Alt) from the AppKit host's ``flagsChanged``. The
     terminal frontend synthesizes these from ``CSI ... z`` sequences;
@@ -1209,7 +1209,7 @@ def tk_desktop_mod_key(h: Int, mod_id: UInt32, pressed: UInt8) -> Int32:
 def tk_desktop_mouse(
     h: Int, x: Int, y: Int, button: UInt8, pressed: UInt8, motion: UInt8,
     mods: UInt8, cols: Int, rows: Int, click_count: UInt8,
-) -> Int32:
+) abi("C") -> Int32:
     if h == 0:
         return ACT_NONE
     var ev = Event.mouse_event(
@@ -1225,7 +1225,7 @@ def tk_desktop_mouse(
 
 
 @export
-def tk_desktop_pointer_shape(h: Int, x: Int, y: Int, cols: Int, rows: Int) -> Int32:
+def tk_desktop_pointer_shape(h: Int, x: Int, y: Int, cols: Int, rows: Int) abi("C") -> Int32:
     """0 = default, 1 = text, 2 = pointer."""
     if h == 0:
         return Int32(0)
@@ -1240,7 +1240,7 @@ def tk_desktop_pointer_shape(h: Int, x: Int, y: Int, cols: Int, rows: Int) -> In
 @export
 def tk_desktop_drop_paths(
     h: Int, x: Int, y: Int, paths_ptr: Int, paths_len: Int, cols: Int, rows: Int,
-) -> Int32:
+) abi("C") -> Int32:
     """Host drag-and-drop of one or more files onto the *main* window.
     ``paths`` is a newline-separated list of absolute file paths. If a terminal
     pane sits under cell ``(x, y)``, the paths are shell-escaped, space-joined
@@ -1259,7 +1259,7 @@ def tk_desktop_drop_paths(
 
 
 @export
-def tk_desktop_drop_target(h: Int, x: Int, y: Int, cols: Int, rows: Int) -> Int32:
+def tk_desktop_drop_target(h: Int, x: Int, y: Int, cols: Int, rows: Int) abi("C") -> Int32:
     """Classify a drag-and-drop landing at cell ``(x, y)`` on the *main*
     window: 1 = terminal pane, 2 = editor window body, 0 = nothing droppable.
     The host polls this during the drag (to set the copy/no-drop cursor) and on
@@ -1273,7 +1273,7 @@ def tk_desktop_drop_target(h: Int, x: Int, y: Int, cols: Int, rows: Int) -> Int3
 @export
 def tk_desktop_insert_text(
     h: Int, x: Int, y: Int, text_ptr: Int, text_len: Int, cols: Int, rows: Int,
-) -> Int32:
+) abi("C") -> Int32:
     """Insert ``text`` verbatim into the editor window under cell ``(x, y)``,
     placing the caret at the drop point first. Backs the editor branch of
     drag-and-drop: the host has already formatted the dropped path (full path /
@@ -1293,7 +1293,7 @@ def tk_desktop_insert_text(
 
 
 @export
-def tk_desktop_paste_target_is_editor(h: Int) -> Int32:
+def tk_desktop_paste_target_is_editor(h: Int) abi("C") -> Int32:
     """1 when a paste should go to an editor (an editor window is focused and
     no terminal pane / file tree has keyboard focus). The host checks this
     before offering the file-path paste menu — see ``tk_desktop_paste_text``."""
@@ -1303,7 +1303,7 @@ def tk_desktop_paste_target_is_editor(h: Int) -> Int32:
 
 
 @export
-def tk_desktop_paste_text(h: Int, text_ptr: Int, text_len: Int) -> Int32:
+def tk_desktop_paste_text(h: Int, text_ptr: Int, text_len: Int) abi("C") -> Int32:
     """Insert ``text`` verbatim at the focused editor's caret. Backs the
     file-path paste menu (Cmd+V of a file copied in Finder): the host has
     formatted the path per the menu choice, like the editor drop branch but at
@@ -1322,7 +1322,7 @@ def tk_desktop_paste_text(h: Int, text_ptr: Int, text_len: Int) -> Int32:
 
 
 @export
-def tk_desktop_paste_clipboard_text(h: Int, text_ptr: Int, text_len: Int) -> Int32:
+def tk_desktop_paste_clipboard_text(h: Int, text_ptr: Int, text_len: Int) abi("C") -> Int32:
     """Paste ``text`` into whatever owns keyboard focus — the host-driven
     counterpart to the in-core ``Cmd+V`` (``EDITOR_PASTE``) path. The Swift host
     reads the system pasteboard and Unicode-normalizes it to NFC before calling
@@ -1338,14 +1338,14 @@ def tk_desktop_paste_clipboard_text(h: Int, text_ptr: Int, text_len: Int) -> Int
 
 
 @export
-def tk_desktop_has_project(h: Int) -> Int32:
+def tk_desktop_has_project(h: Int) abi("C") -> Int32:
     if h == 0:
         return Int32(0)
     return Int32(1) if _desk(h)[].project else Int32(0)
 
 
 @export
-def tk_desktop_set_host_owns_menu(h: Int, on: Int):
+def tk_desktop_set_host_owns_menu(h: Int, on: Int) abi("C"):
     """Tell the Desktop a host frontend owns the menu surface.
 
     When ``on`` is non-zero, Desktop stops painting the in-grid menu bar
@@ -1361,7 +1361,7 @@ def tk_desktop_set_host_owns_menu(h: Int, on: Int):
 
 
 @export
-def tk_desktop_set_host_owns_shadows(h: Int, on: Int):
+def tk_desktop_set_host_owns_shadows(h: Int, on: Int) abi("C"):
     """Tell the Desktop a host frontend draws the editor body popups' drop
     shadows itself, as a real translucent layer over the live (smooth-scrolled)
     text. When ``on`` is non-zero the core stops baking the cell-darkening
@@ -1377,7 +1377,7 @@ def tk_desktop_set_host_owns_shadows(h: Int, on: Int):
 
 
 @export
-def tk_desktop_set_host_focused(h: Int, on: Int):
+def tk_desktop_set_host_focused(h: Int, on: Int) abi("C"):
     """Tell the Desktop whether its host window currently owns the OS
     keyboard focus (is the key window).
 
@@ -1394,7 +1394,7 @@ def tk_desktop_set_host_focused(h: Int, on: Int):
 
 
 @export
-def tk_desktop_refresh_git(h: Int):
+def tk_desktop_refresh_git(h: Int) abi("C"):
     """Force a git-state refresh: invalidate every editor's cached HEAD
     baseline so the change gutter re-diffs on the next paint, regardless of
     the cheap 1 Hz mtime poll. The host calls this on focus-gain (Cmd+Tab
@@ -1411,7 +1411,7 @@ def _b(v: Bool) -> String:
 
 
 @export
-def tk_desktop_menu_snapshot(h: Int, out_ptr: Int, cap: Int) -> Int:
+def tk_desktop_menu_snapshot(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     """Serialize the current ``menu_bar`` into a flat TSV-shaped buffer.
 
     The host re-reads this every tick and rebuilds its native menu when
@@ -1454,16 +1454,16 @@ def tk_desktop_menu_snapshot(h: Int, out_ptr: Int, cap: Int) -> Int:
     var n = len(bytes)
     if n > cap:
         n = cap
-    var op = UnsafePointer[UInt8, MutExternalOrigin](unsafe_from_address=out_ptr)
+    var op = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=out_ptr)
     for i in range(n):
-        op[i] = bytes[i]
+        op[unsafe_offset=i] = bytes[i]
     return n
 
 
 @export
 def tk_desktop_menu_invoke(
     h: Int, action_ptr: Int, action_len: Int, cols: Int, rows: Int,
-) -> Int32:
+) abi("C") -> Int32:
     """Run the menu action identified by its action string.
 
     Mirrors what ``MenuBar.handle_event`` would have produced when the
@@ -1488,7 +1488,7 @@ def tk_desktop_menu_invoke(
 @export
 def tk_desktop_take_pending_new_window_project(
     h: Int, out_ptr: Int, cap: Int,
-) -> Int:
+) abi("C") -> Int:
     """Drain the "open this project in a new window" path queued by the
     Project menu's inline recent-project picks. Returns the number of
     UTF-8 bytes written into the caller's buffer; returns 0 when
@@ -1514,7 +1514,7 @@ def tk_desktop_take_pending_new_window_project(
     if n > cap:
         return 0
     _desk(h)[]._pending_new_window_project = Optional[String]()
-    var op = UnsafePointer[UInt8, MutExternalOrigin](unsafe_from_address=out_ptr)
+    var op = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=out_ptr)
     for i in range(n):
-        op[i] = bytes[i]
+        op[unsafe_offset=i] = bytes[i]
     return n

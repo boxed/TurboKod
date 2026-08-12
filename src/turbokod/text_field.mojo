@@ -328,7 +328,7 @@ struct TextField(Copyable, Movable):
             return String("")
         var rng = self._sel_range()
         var b = self.text.as_bytes()
-        return String(StringSlice(unsafe_from_utf8=b[rng[0]:rng[1]]))
+        return String(StringSpan(unsafe_from_utf8=b[rng[0]:rng[1]]))
 
     def select_all(mut self):
         self.anchor = 0
@@ -796,7 +796,7 @@ struct TextField(Copyable, Movable):
         var start_byte = utf8_byte_of_cell(self.text, self._scroll)
         if start_byte < len(bytes):
             var visible = String(
-                StringSlice(unsafe_from_utf8=bytes[start_byte:])
+                StringSpan(unsafe_from_utf8=bytes[start_byte:])
             )
             _ = painter.put_text(
                 canvas, Point(rect.a.x, rect.a.y), visible, attr,
@@ -980,7 +980,7 @@ def _sanitize_single_line(text: String) -> String:
         out.append(byte)
     if len(out) == 0:
         return String("")
-    return String(StringSlice(ptr=out.unsafe_ptr(), length=len(out)))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=len(out))))
 
 
 def _splice(text: String, start: Int, end: Int, replacement: String) -> String:
@@ -1007,7 +1007,7 @@ def _splice(text: String, start: Int, end: Int, replacement: String) -> String:
         out.append(b[i])
     if len(out) == 0:
         return String("")
-    return String(StringSlice(ptr=out.unsafe_ptr(), length=len(out)))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=len(out))))
 
 
 # --- UTF-8 boundary helpers (mirrors editor.mojo) -----------------------

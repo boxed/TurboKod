@@ -196,7 +196,7 @@ def test_speller_add_user_word_persists_and_check_word_passes() raises:
     var i = 0
     while i < len(b):
         if b[i] == 0x0A:
-            lines.append(String(StringSlice(unsafe_from_utf8=b[start:i])))
+            lines.append(String(StringSpan(unsafe_from_utf8=b[start:i])))
             start = i + 1
         i += 1
     var saw = False

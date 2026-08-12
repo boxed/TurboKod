@@ -144,7 +144,7 @@ def _split_open_arg_path(arg: String) -> String:
     var b = arg.as_bytes()
     for i in range(len(b)):
         if b[i] == 0x1F:
-            return String(StringSlice(unsafe_from_utf8=b[:i]))
+            return String(StringSpan(unsafe_from_utf8=b[:i]))
     return arg
 
 

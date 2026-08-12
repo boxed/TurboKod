@@ -1374,9 +1374,7 @@ def _basename(path: String) -> String:
     var i = n - 1
     while i >= 0:
         if b[i] == 0x2F:
-            return String(StringSlice(
-                ptr=b.unsafe_ptr() + i + 1, length=n - i - 1,
-            ))
+            return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(i).unsafe_offset(1), length=n - i - 1)))
         i -= 1
     return path
 

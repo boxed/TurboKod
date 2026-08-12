@@ -25,7 +25,6 @@ cleared by the host each tick.
 
 from std.collections.list import List
 from std.ffi import external_call
-from std.memory.span import Span
 
 from .canvas import Canvas
 from .clipboard import clipboard_copy
@@ -300,7 +299,7 @@ struct TestPane(Copyable, Movable):
                         self.pty.alive = False
                     break
                 var span = Span[UInt8, origin_of(scratch)](
-                    ptr=scratch.unsafe_ptr(), length=n,
+                    unsafe_ptr=scratch.unsafe_ptr(), length=n,
                 )
                 self.vt.feed(span)
                 self._capture(scratch.unsafe_ptr(), n)
@@ -446,7 +445,7 @@ struct TestPane(Copyable, Movable):
             end -= 1
         if end == 0:
             return String("")
-        return String(StringSlice(ptr=row_bytes.unsafe_ptr(), length=end))
+        return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=row_bytes.unsafe_ptr(), length=end)))
 
     # --- copy / selection delegates ------------------------------------
 
@@ -591,7 +590,7 @@ struct TestPane(Copyable, Movable):
             return
         var sent = 0
         while sent < n:
-            var rc = self.pty.write_bytes(bytes.unsafe_ptr() + sent, n - sent)
+            var rc = self.pty.write_bytes(bytes.unsafe_ptr().unsafe_offset(sent), n - sent)
             if rc < 0:
                 return  # EPIPE / EBADF — child gone.
             if rc == 0:
@@ -607,14 +606,14 @@ struct TestPane(Copyable, Movable):
         var b = s.as_bytes()
         self._capture(b.unsafe_ptr(), len(b))
 
-    def _capture(mut self, ptr: UnsafePointer[UInt8, _], n: Int):
+    def _capture(mut self, ptr: Pointer[UInt8, _], n: Int):
         """Append ``n`` display-bound bytes to the replay buffer, latching
         overflow at ``_RAW_CAP``. Replies / clipboard writes (Vt→child)
         are deliberately not captured — only what's on screen."""
         if self._raw_overflow:
             return
         for i in range(n):
-            self._raw.append(ptr[i])
+            self._raw.append(ptr[unsafe_offset=i])
         if len(self._raw) > _RAW_CAP:
             self._raw_overflow = True
 
@@ -626,6 +625,6 @@ struct TestPane(Copyable, Movable):
         self.vt = Vt(cols, rows)
         if len(self._raw) > 0:
             var span = Span[UInt8, origin_of(self._raw)](
-                ptr=self._raw.unsafe_ptr(), length=len(self._raw),
+                unsafe_ptr=self._raw.unsafe_ptr(), length=len(self._raw),
             )
             self.vt.feed(span)

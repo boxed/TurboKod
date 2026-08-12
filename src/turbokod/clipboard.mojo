@@ -156,4 +156,4 @@ def clipboard_paste() -> String:
     _ = external_call["pclose", Int32](fp)
     if len(out) == 0:
         return String("")
-    return String(StringSlice(ptr=out.unsafe_ptr(), length=len(out)))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=len(out))))

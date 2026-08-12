@@ -102,11 +102,11 @@ struct PtyProcess(Copyable, Movable):
         )
         if Int(rc) != 0:
             raise Error("tk_pty_spawn failed")
-        var pid_ptr    = pid_buf.unsafe_ptr().bitcast[Int32]()
-        var master_ptr = fd_buf.unsafe_ptr().bitcast[Int32]()
+        var pid_ptr    = pid_buf.unsafe_ptr().unsafe_bitcast[Int32]()
+        var master_ptr = fd_buf.unsafe_ptr().unsafe_bitcast[Int32]()
         var proc = PtyProcess()
-        proc.pid       = pid_ptr[0]
-        proc.master_fd = master_ptr[0]
+        proc.pid       = pid_ptr[unsafe_offset=0]
+        proc.master_fd = master_ptr[unsafe_offset=0]
         proc.alive     = True
         return proc^
 
@@ -120,7 +120,7 @@ struct PtyProcess(Copyable, Movable):
             self.master_fd, Int32(cols), Int32(rows),
         ))
 
-    def write_bytes(self, ptr: UnsafePointer[UInt8, _], n: Int) -> Int:
+    def write_bytes(self, ptr: Pointer[UInt8, _], n: Int) -> Int:
         """Best-effort non-blocking write to the master. Returns the
         byte count actually written (may be < ``n``). ``tk_write_nb``
         returns 0 on EAGAIN, which we surface to the caller — the

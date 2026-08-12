@@ -59,7 +59,7 @@ def test_editor_save_clears_dirty() raises:
     assert_false(ed.dirty)
     var contents = read_file(path)
     # First line was "hello"; cursor moved to its end before typing '!'.
-    var first_line = String(StringSlice(
+    var first_line = String(StringSpan(
         unsafe_from_utf8=contents.as_bytes()[:6],
     ))
     assert_equal(first_line, String("hello!"))

@@ -145,7 +145,7 @@ def _split_open_arg_path(arg: String) -> String:
     var b = arg.as_bytes()
     for i in range(len(b)):
         if b[i] == 0x1F:
-            return String(StringSlice(unsafe_from_utf8=b[:i]))
+            return String(StringSpan(unsafe_from_utf8=b[:i]))
     return arg
 
 
@@ -180,7 +180,7 @@ def _dirname(path: String) -> String:
             last = i
     if last <= 0:
         return String("/")
-    return String(StringSlice(unsafe_from_utf8=b[:last]))
+    return String(StringSpan(unsafe_from_utf8=b[:last]))
 
 
 def _abspath(path: String) -> String:
@@ -214,7 +214,7 @@ def _exe_path() -> String:
     var n = 0
     while n < len(buf) and buf[n] != 0:
         n += 1
-    return String(StringSlice(unsafe_from_utf8=buf[:n]))
+    return String(StringSpan(unsafe_from_utf8=buf[:n]))
 
 
 def _chdir_to_resources_if_bundled():

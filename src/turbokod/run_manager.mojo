@@ -222,9 +222,7 @@ def _drain_fd(fd: Int32) -> String:
         var n = read_into(fd, scratch, 4096)
         if n <= 0:
             break
-        out = out + String(StringSlice(
-            ptr=scratch.unsafe_ptr(), length=n,
-        ))
+        out = out + String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=scratch.unsafe_ptr(), length=n)))
         total += n
     return out^
 

@@ -49,7 +49,7 @@ def _ref_fold(s: String) -> String:
         if 0x41 <= c and c <= 0x5A:
             c += 0x20
         out.append(UInt8(c))
-    return String(StringSlice(unsafe_from_utf8=out))
+    return String(StringSpan(unsafe_from_utf8=out))
 
 
 def _ref_find_ci(haystack: String, needle: String, start: Int) -> Int:
@@ -139,10 +139,10 @@ def test_is_ascii_scans_the_whole_buffer() raises:
 def test_fold_ascii_into_reports_ascii_purity() raises:
     var buf = List[UInt8]()
     assert_true(fold_ascii_into(String("PLAIN ascii 123").as_bytes(), buf))
-    assert_equal(String(StringSlice(unsafe_from_utf8=buf)),
+    assert_equal(String(StringSpan(unsafe_from_utf8=buf)),
                  String("plain ascii 123"))
     assert_false(fold_ascii_into(String("HAS ä").as_bytes(), buf))
-    assert_equal(String(StringSlice(unsafe_from_utf8=buf)),
+    assert_equal(String(StringSpan(unsafe_from_utf8=buf)),
                  String("has ä"))
 
 
@@ -281,7 +281,7 @@ def test_eq_ci_and_starts_with_ci_agree_with_reference() raises:
             var b = pairs[j]
             var want = len(b.as_bytes()) <= len(a.as_bytes())
             if want:
-                var head = String(StringSlice(
+                var head = String(StringSpan(
                     unsafe_from_utf8=a.as_bytes()[0:len(b.as_bytes())]
                 ))
                 want = _ref_fold(head) == _ref_fold(b)

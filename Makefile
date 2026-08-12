@@ -1,4 +1,4 @@
-.PHONY: build shim app tui test release screenshots update-lsp-list
+.PHONY: build shim app tui test check release screenshots update-lsp-list
 .DEFAULT_GOAL := build
 
 # ``make`` (default) — build both frontends without launching either.
@@ -49,6 +49,20 @@ tui:
 # ``scripts/run_tests.sh git editor``.
 test:
 	scripts/run_tests.sh
+
+# Full pre-commit sweep: build EVERY entry point (including the ones no other
+# target compiles — bench/ and most of examples/), build the native frontend,
+# run every test suite, and fail on a single compiler warning.
+#
+# ``build`` and ``test`` deliberately don't cover the standalone entry points:
+# each one is a full core compile, so folding them into the edit loop would
+# cost ~25s on every src/ change. That left bench/ and most of examples/
+# compiled by nothing, which is exactly where warnings rotted unnoticed until
+# a toolchain bump surfaced them. Run this before committing instead.
+#
+# ``scripts/check_all.sh --quick`` skips the test run (build + warning gate only).
+check:
+	scripts/check_all.sh
 
 # Build a self-contained, Developer ID signed + Apple-notarized + stapled
 # TurboKod.app, zip it, and publish to the GitHub Releases page. Unlike

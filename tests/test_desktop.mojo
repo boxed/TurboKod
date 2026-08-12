@@ -2305,11 +2305,11 @@ def test_desktop_snapshot_captures_per_window_rects() raises:
         var alen = len(String("a.txt").as_bytes())
         var blen = len(String("b.txt").as_bytes())
         if len(pb) >= alen \
-                and String(StringSlice(unsafe_from_utf8=pb[len(pb) - alen:])) \
+                and String(StringSpan(unsafe_from_utf8=pb[len(pb) - alen:])) \
                 == String("a.txt"):
             idx_a = i
         if len(pb) >= blen \
-                and String(StringSlice(unsafe_from_utf8=pb[len(pb) - blen:])) \
+                and String(StringSpan(unsafe_from_utf8=pb[len(pb) - blen:])) \
                 == String("b.txt"):
             idx_b = i
     assert_true(idx_a >= 0)
@@ -2491,11 +2491,11 @@ def test_desktop_save_then_restore_round_trip_through_paint() raises:
         var fpb = fp.as_bytes()
         var slen = len(String("/p.txt").as_bytes())
         if len(fpb) >= slen \
-                and String(StringSlice(unsafe_from_utf8=fpb[len(fpb) - slen:])) \
+                and String(StringSpan(unsafe_from_utf8=fpb[len(fpb) - slen:])) \
                 == String("/p.txt"):
             p_idx = i
         if len(fpb) >= slen \
-                and String(StringSlice(unsafe_from_utf8=fpb[len(fpb) - slen:])) \
+                and String(StringSpan(unsafe_from_utf8=fpb[len(fpb) - slen:])) \
                 == String("/q.txt"):
             q_idx = i
     assert_true(p_idx >= 0)

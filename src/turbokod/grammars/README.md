@@ -38,7 +38,7 @@ grammars (always to "less colored", never to "broken"):
 
 * **Injections** (`injectionSelector` / `injections`) are not
   consulted.
-* **No per-instance `OnigRegex.__del__`** — handles aren't freed
+* **No per-instance `OnigRegex.__deinit__`** — handles aren't freed
   when the wrapping struct goes out of scope. Cleanup batches at
   process exit via the C shim (`onig_shim.c` + the
   `__attribute__((destructor))` it carries), so leak detectors

@@ -1362,7 +1362,7 @@ def _clean_scope(s: String) -> String:
         hi -= 1
     if lo >= hi:
         return String("")
-    return String(StringSlice(unsafe_from_utf8=b[lo:hi]))
+    return String(StringSpan(unsafe_from_utf8=b[lo:hi]))
 
 
 def _split_globs(s: String) -> List[String]:
@@ -1385,7 +1385,7 @@ def _split_globs(s: String) -> List[String]:
             while hi > lo and (b[hi - 1] == 0x20 or b[hi - 1] == 0x09):
                 hi -= 1
             if lo < hi:
-                out.append(String(StringSlice(unsafe_from_utf8=b[lo:hi])))
+                out.append(String(StringSpan(unsafe_from_utf8=b[lo:hi])))
             start = i + 1
         i += 1
     return out^
@@ -1401,7 +1401,7 @@ def _lstrip_tabs(s: String) -> String:
         i += 1
     if i == 0:
         return s
-    return String(StringSlice(unsafe_from_utf8=b[i:len(b)]))
+    return String(StringSpan(unsafe_from_utf8=b[i:len(b)]))
 
 
 struct _RgRunner(Movable):
@@ -1588,7 +1588,7 @@ struct _RgRunner(Movable):
         while i < len(self._buf):
             if self._buf[i] == 0x0A:
                 if i > consumed:
-                    var line_str = String(StringSlice(
+                    var line_str = String(StringSpan(
                         unsafe_from_utf8=Span(self._buf)[consumed:i],
                     ))
                     var m = _parse_rg_line(line_str, self.root)
@@ -1698,7 +1698,7 @@ def _slice_str(s: String, start: Int, end: Int) -> String:
     var b = s.as_bytes()
     if start >= end:
         return String("")
-    return String(StringSlice(unsafe_from_utf8=b[start:end]))
+    return String(StringSpan(unsafe_from_utf8=b[start:end]))
 
 
 def _find_bytes(haystack: String, needle: String) -> Int:

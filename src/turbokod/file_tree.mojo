@@ -255,7 +255,7 @@ struct FileTree(Movable):
             if i == len(rb) or rb[i] == 0x2F:
                 if i > start:
                     parts.append(
-                        String(StringSlice(unsafe_from_utf8=rb[start:i])),
+                        String(StringSpan(unsafe_from_utf8=rb[start:i])),
                     )
                 start = i + 1
         # Walk the flat entry list one component at a time. A component

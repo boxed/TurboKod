@@ -85,7 +85,7 @@ def _extract_diff_part(show_text: String) -> String:
         for j in range(len(lb)):
             out.append(lb[j])
         out.append(0x0A)
-    return String(StringSlice(unsafe_from_utf8=Span(out)))
+    return String(StringSpan(unsafe_from_utf8=Span(out)))
 
 
 def _diff_is_binary(diff_text: String) -> Bool:
@@ -103,7 +103,7 @@ def _diff_is_binary(diff_text: String) -> Bool:
 def _one_char(b: UInt8) -> String:
     var buf = List[UInt8]()
     buf.append(b)
-    return String(StringSlice(unsafe_from_utf8=Span(buf)))
+    return String(StringSpan(unsafe_from_utf8=Span(buf)))
 
 
 def _count_changed_lines(before: String, after: String, is_binary: Bool) -> Int:

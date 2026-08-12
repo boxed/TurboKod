@@ -168,7 +168,7 @@ def _shell_sq(s: String) -> String:
         else:
             out.append(b[i])
     out.append(0x27)  # closing '
-    return String(StringSlice(ptr=out.unsafe_ptr(), length=len(out)))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=len(out))))
 
 
 def docs_install_command(slug: String, dest_dir: String) -> String:

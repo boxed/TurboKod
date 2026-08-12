@@ -255,7 +255,7 @@ def complete_lines(output: String) -> String:
     var i = len(b)
     while i > 0:
         if b[i - 1] == 0x0A:
-            return String(StringSlice(unsafe_from_utf8=b[0:i]))
+            return String(StringSpan(unsafe_from_utf8=b[0:i]))
         i -= 1
     return String("")
 
@@ -301,7 +301,7 @@ struct GitOutputMatcher(Movable):
             var at_end = i == len(b)
             if at_end or b[i] == 0x0A:
                 if i > start:
-                    var line = String(StringSlice(
+                    var line = String(StringSpan(
                         unsafe_from_utf8=b[start:i],
                     ))
                     if not self._line_is_routine(line):
@@ -337,4 +337,4 @@ def _trimmed(s: String) -> String:
         end -= 1
     if start >= end:
         return String("")
-    return String(StringSlice(unsafe_from_utf8=b[start:end]))
+    return String(StringSpan(unsafe_from_utf8=b[start:end]))

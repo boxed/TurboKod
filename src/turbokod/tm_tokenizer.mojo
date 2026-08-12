@@ -742,7 +742,7 @@ def _emit_capture_subtokens(
 
 
 def _slice_string(s: String, start: Int, end: Int) -> String:
-    """Byte-slice helper. Mojo's StringSlice accepts unsafe-from-utf8
+    """Byte-slice helper. Mojo's StringSpan accepts unsafe-from-utf8
     construction; the caller guarantees the bounds are codepoint-
     aligned (libonig matches at codepoint boundaries)."""
     var b = s.as_bytes()
@@ -754,7 +754,7 @@ def _slice_string(s: String, start: Int, end: Int) -> String:
         e_clamped = len(b)
     if e_clamped <= s_clamped:
         return String("")
-    return String(StringSlice(unsafe_from_utf8=b[s_clamped:e_clamped]))
+    return String(StringSpan(unsafe_from_utf8=b[s_clamped:e_clamped]))
 
 
 def _emit_unmatched(
@@ -1173,9 +1173,9 @@ def _split_scopes(chain: String) -> List[String]:
     while i < n:
         if sb[i] == 0x20:  # space
             if i > start:
-                out.append(String(StringSlice(unsafe_from_utf8=sb[start:i])))
+                out.append(String(StringSpan(unsafe_from_utf8=sb[start:i])))
             start = i + 1
         i += 1
     if start < n:
-        out.append(String(StringSlice(unsafe_from_utf8=sb[start:n])))
+        out.append(String(StringSpan(unsafe_from_utf8=sb[start:n])))
     return out^

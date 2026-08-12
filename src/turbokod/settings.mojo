@@ -2728,6 +2728,6 @@ def _shell_quote(s: String) -> String:
             buf.append(0x5C)
         buf.append(c)
     buf.append(0x22)  # closing "
-    return String(StringSlice(ptr=buf.unsafe_ptr(), length=len(buf)))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=len(buf))))
 
 

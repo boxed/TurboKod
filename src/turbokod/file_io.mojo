@@ -12,7 +12,6 @@ target platform — the offsets *will* differ.
 from std.collections.list import List
 from std.collections.optional import Optional
 from std.ffi import external_call
-from std.memory.span import Span
 from std.sys.info import CompilationTarget
 
 from .case_fold import fold_byte
@@ -61,9 +60,9 @@ struct FileInfo(ImplicitlyCopyable, Movable):
 def _stat_mode(buf: List[UInt8]) -> UInt32:
     """``st_mode`` is uint16 at offset 4 on Darwin, uint32 at offset 24 on Linux."""
     comptime if CompilationTarget.is_macos():
-        return UInt32(buf.unsafe_ptr().bitcast[UInt16]()[2])
+        return UInt32(buf.unsafe_ptr().unsafe_bitcast[UInt16]()[unsafe_offset=2])
     else:
-        return buf.unsafe_ptr().bitcast[UInt32]()[6]
+        return buf.unsafe_ptr().unsafe_bitcast[UInt32]()[unsafe_offset=6]
 
 
 def stat_file(path: String) -> FileInfo:
@@ -73,9 +72,9 @@ def stat_file(path: String) -> FileInfo:
     var rc = external_call["stat", Int32](c_path.unsafe_ptr(), buf.unsafe_ptr())
     if Int(rc) != 0:
         return FileInfo(Int64(0), Int64(0), UInt32(0), False)
-    var p64 = buf.unsafe_ptr().bitcast[Int64]()
-    var size = p64[_stat_size_offset() // 8]
-    var mtime = p64[_stat_mtime_offset() // 8]
+    var p64 = buf.unsafe_ptr().unsafe_bitcast[Int64]()
+    var size = p64[unsafe_offset=_stat_size_offset() // 8]
+    var mtime = p64[unsafe_offset=_stat_mtime_offset() // 8]
     var mode = _stat_mode(buf)
     return FileInfo(size, mtime, mode, True)
 
@@ -101,7 +100,7 @@ def read_file(path: String) raises -> String:
     var retries = 0
     while total < size:
         var got = external_call["read", Int](
-            fd, buf.unsafe_ptr() + total, size - total,
+            fd, buf.unsafe_ptr().unsafe_offset(total), size - total,
         )
         if got == 0:
             break  # true EOF — file shrank since stat; return what we have
@@ -120,7 +119,7 @@ def read_file(path: String) raises -> String:
     _ = external_call["close", Int32](fd)
     if total <= 0:
         return String("")
-    return String(StringSlice(ptr=buf.unsafe_ptr(), length=total))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=total)))
 
 
 def write_file(path: String, content: String) -> Bool:
@@ -165,7 +164,7 @@ def write_file(path: String, content: String) -> Bool:
     var ok = True
     while written < total:
         var n = external_call["write", Int](
-            Int(fd), ptr + written, UInt(total - written),
+            Int(fd), ptr.unsafe_offset(written), UInt(total - written),
         )
         if n <= 0:
             ok = False
@@ -272,9 +271,7 @@ def list_directory(path: String) -> List[String]:
             Int32(4096),
         ))
         if got > 0:
-            out.append(String(StringSlice(
-                ptr=name_buf.unsafe_ptr(), length=got,
-            )))
+            out.append(String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=name_buf.unsafe_ptr(), length=got))))
     _ = external_call["tk_listdir_done", NoneType]()
     debug_log(String("[list_directory] EXIT n=") + String(len(out)))
     return out^
@@ -306,9 +303,7 @@ def list_directory_typed(path: String) -> List[Tuple[String, Bool]]:
             Int32(4096),
         ))
         if got > 0:
-            var name = String(StringSlice(
-                ptr=name_buf.unsafe_ptr(), length=got,
-            ))
+            var name = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=name_buf.unsafe_ptr(), length=got)))
             var dtype = Int(external_call["tk_listdir_get_type", Int32](
                 Int32(i),
             ))
@@ -381,7 +376,7 @@ def project_relative(
         return full
     if fb[len(rb)] != 0x2F:
         return full
-    return String(StringSlice(unsafe_from_utf8=fb[len(rb) + 1:]))
+    return String(StringSpan(unsafe_from_utf8=fb[len(rb) + 1:]))
 
 
 def parent_path(path: String) -> String:
@@ -400,7 +395,7 @@ def parent_path(path: String) -> String:
         return String(".")
     if i == 0:
         return String("/")
-    return String(StringSlice(unsafe_from_utf8=bytes[:i]))
+    return String(StringSpan(unsafe_from_utf8=bytes[:i]))
 
 
 def ci_less(a: String, b: String) -> Bool:
@@ -473,10 +468,10 @@ def basename(path: String) -> String:
     while i >= 0 and bytes[i] != 0x2F:
         i -= 1
     if i < 0:
-        return String(StringSlice(unsafe_from_utf8=bytes[:n]))
+        return String(StringSpan(unsafe_from_utf8=bytes[:n]))
     if i == 0 and n == 1:
         return String("/")
-    return String(StringSlice(unsafe_from_utf8=bytes[i + 1:n]))
+    return String(StringSpan(unsafe_from_utf8=bytes[i + 1:n]))
 
 
 def find_git_project(start_path: String) -> Optional[String]:

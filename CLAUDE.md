@@ -127,14 +127,19 @@ None of it exercises the Swift frontend; for that, smoke-test with `TK_CAPTURE=/
 
 **Zero compiler warnings is a hard rule.** A clean build must emit *no* warnings — not "no new warnings." If you touch a file, fix any warning it emits, including pre-existing ones you happen to surface. Don't let warnings accumulate; a noisy build trains everyone to ignore the one warning that actually matters.
 
-Mojo only reports warnings for files in the *current* build's import graph, so no single build sees all of them. After a change, sweep every entry point that compiles your code:
+Mojo only reports warnings for files in the *current* build's import graph, so no single build sees all of them. **`make check` is the sweep** — it builds every entry point in the repo, runs every suite, and fails on a single warning:
 
 ```sh
-scripts/run_tests.sh 2>&1 | grep -i warning:   # shared core (TTY-free; the runner also fails on any warning)
-TURBOKOD_BUILD_ONLY=1 ./run_swift.sh 2>&1 | grep -i warning:   # native_api.mojo + dylib + Swift
+make check                      # everything: all entry points + suites + warning gate
+scripts/check_all.sh --quick    # same minus the test run (build + warning gate only)
 ```
 
-`native_api.mojo` in particular is compiled *only* by the dylib build, so its warnings never show up in the test or TUI builds — check the Swift path explicitly whenever you edit it. Common offenders seen here: `'fn' is deprecated, use 'def' instead` (this Mojo version unifies on `def` — including `@export def` for the C ABI, which keeps the same ABI), and dead `try`/`except` blocks the compiler flags as unreachable once the callee is non-raising (`'except' logic is unreachable` / `variable 'e' was never used`) — delete the wrapper, keep the body.
+Use it before committing. The narrower commands are still there for a fast inner loop (`make` / `scripts/run_tests.sh`), but neither is a complete sweep on its own:
+
+- `native_api.mojo` is compiled **only** by the dylib build, so its warnings never appear in the test or TUI builds — that's where `@export` / C-ABI diagnostics live.
+- `bench/*.mojo` and most of `examples/*.mojo` are compiled by **no** other target. `make` builds two entry points and `run_tests.sh` builds the suites; everything else went unchecked, which is exactly where warnings rotted unnoticed until the Mojo 1.0 bump surfaced eight of them in `bench/fold_bench.mojo`.
+
+`make check` costs a few minutes cold (each standalone entry point is a full core compile) and is near-instant warm, which is why it's a separate target rather than part of `make`.
 
 ## Mojo port architecture
 
@@ -236,7 +241,7 @@ The runtime supports: `match`, `begin`/`end`, `begin`/`while` (per-line scope co
 
 `\G` anchor handling is wired so `(?!\G)`-gated embeds (HTML's `<style>` / `<script>` blocks) actually fire. The tokenizer tracks `g_pos` per line — initialized to `-1` (sentinel: no match has fired on this line yet) and updated to each successful match's `onig_search`-reported end position. When the next search's `pos != g_pos` we pass `ONIG_OPTION_NOT_BEGIN_POSITION` so libonig's `\G` anchor refuses to match; when `pos == g_pos` we pass no flag and `\G` matches at that position. Pair that with the empty-match guard skipping the byte-bump for begin pushes (so a zero-width `(?!\G)` begin pushes its frame and body-tokenization starts *at* the matched position rather than one byte past), and HTML+CSS embedding produces real CSS highlights inside `<style>`. Embedded grammar repo entries register under `"<scope>#<name>"` with refs rewritten at compile time, so embedded `#name` references resolve to the embedded's own repo entries instead of colliding with the host's.
 
-`OnigRegex` skips per-instance `__del__` (two attempts — plain destructor and refcounted via `ArcPointer` — both interacted badly with Mojo's destructor sequencing in this version, the second one hanging the next `onig_search` call). Cleanup runs at process exit instead: `src/turbokod/onig_shim.c` keeps a flat array of every allocated `(regex_t*, OnigRegion*)` pair, `OnigRegex.__init__` calls `tk_onig_track` to register, and a `__attribute__((destructor))` walks the registry on exit and frees them. `run.sh` compiles the C shim once and links it in alongside the Mojo binary. Verified with `leaks(1)` on macOS: a process that compiles 50 regexes and exits reports `0 leaks for 0 total leaked bytes`.
+`OnigRegex` skips per-instance `__deinit__` (two attempts — plain destructor and refcounted via `ArcPointer` — both interacted badly with Mojo's destructor sequencing in this version, the second one hanging the next `onig_search` call). Cleanup runs at process exit instead: `src/turbokod/onig_shim.c` keeps a flat array of every allocated `(regex_t*, OnigRegion*)` pair, `OnigRegex.__init__` calls `tk_onig_track` to register, and a `__attribute__((destructor))` walks the registry on exit and frees them. `run.sh` compiles the C shim once and links it in alongside the Mojo binary. Verified with `leaks(1)` on macOS: a process that compiles 50 regexes and exits reports `0 leaks for 0 total leaked bytes`.
 
 The libonig dep ships through pixi (`pixi.toml` deps), and `run.sh` plumbs `-Xlinker -lonig` and `DYLD/LD_LIBRARY_PATH` so build + exec resolve it. We use `mojo build` (not `mojo run`) specifically so `-Xlinker` actually fires — `mojo run` is JIT and silently ignores it.
 
@@ -281,15 +286,60 @@ The deliberate exceptions: **iterative search** (Find Next/Prev, Replace's step-
 
 ## Mojo-version sensitivity
 
-Mojo's syntax has churned. The code targets a recent (~25.x) release and relies on:
+**The code targets Mojo 1.0.0**, pinned via `modular = ">=26.5"` in `pixi.toml`
+(that's the `modular` release whose `mojo` is 1.0.0 — check with `pixi run mojo --version`).
+Mojo's syntax churned a lot pre-1.0; 1.0 is the stable baseline. The idioms in use:
 
-- `@value` decorator + explicit `Copyable, Movable` trait conformance on every value-type struct.
-- `mut self` / `out self` / `owned` argument conventions (no `inout`).
-- `from python import Python, PythonObject` for interop.
-- `String` indexed via `as_bytes()`; no `len(string)` on `String` for character count.
-- Optional via `from collections import Optional`; truthiness via `if maybe_x:`, value via `.value()`.
+- `@fieldwise_init` + explicit trait conformance (`Copyable, Movable`) on value-type structs — *not* the old `@value`.
+- Every function is `def`. There is no `fn` in this codebase, including `@export def` for the C ABI.
+- `var` on every declaration — implicit declarations are deprecated.
+- Argument conventions: `mut self` / `out self` / `var` (owned) / `imm` (the old `read`). No `inout`.
+- `__deinit__(deinit self)` — *not* `__del__`.
+- Optional via `from std.collections.optional import Optional`; truthiness `if maybe_x:`, value `.value()`, move-construct `Optional[T](x^)`.
+- `from python import Python, PythonObject` for interop (only in `terminal.mojo`).
 
-If a Mojo version mismatch breaks compilation, the most likely culprits are: the `@value` decorator (replaced by `@fieldwise_init` in newer versions), context-manager protocol (deliberately avoided here for that reason — use explicit `start()`/`stop()` instead), and Python interop helpers (`Python.none()` vs `builtins.None`).
+Pointers and unsafe operations carry an explicit `unsafe_` marker in 1.0:
+
+| use | spelling |
+| --- | --- |
+| pointer type | `Pointer` / `MutPointer` (not `UnsafePointer`) |
+| untracked origin | `MutUntrackedOrigin` (not `MutExternalOrigin`) |
+| subscript | `p[unsafe_offset=i]` (not `p[i]`) |
+| offset | `p.unsafe_offset(i)` (not `p + i`) |
+| load / store | `unsafe_load` / `unsafe_store` / `unsafe_bitcast` |
+| init / destroy | `p.unsafe_write(v)` / `p.unsafe_deinit_pointee()` |
+
+Strings and spans:
+
+- `StringSpan`, not `StringSlice` (the old name is a deprecated alias).
+- `Span` is in the prelude — don't import it (`from std.memory.span import Span` no longer resolves).
+- Building a `String` from a raw byte pointer is
+  `String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=p, length=n)))`. This
+  incantation appears ~100 times; it replaced `StringSlice(ptr=…, length=…)`.
+- `len()` on a `String`/`StringSpan` is a hard error (byte/codepoint/grapheme is
+  ambiguous). This codebase says `len(s.as_bytes())` for bytes — see
+  "Text width is codepoints, not bytes" above for when that's the wrong question.
+
+Three things bite when porting older code, all of which the 1.0 compiler catches:
+
+1. **`@export` needs an explicit `abi("C")` effect**, in the same slot as `raises`:
+   `def tk_desktop_new() abi("C") -> Int:`. Without it you get a warning, not an
+   error — but every C-ABI entry point in `native_api.mojo` has it.
+2. **The borrow checker is stricter about self-assignment through a span.**
+   `s = String(StringSpan(unsafe_from_utf8=s.as_bytes()[…]))` is rejected —
+   the `as_bytes()` span borrows `s` while the assignment overwrites it. Build
+   into a temporary and move: `var t = …; s = t^`. Same for calling
+   `Optional.value()` twice when the first result's interior reference is still
+   live (see `lsp.mojo`'s trace paths).
+3. **Recursive types need an explicit `__deinit__`.** `List[T]`'s conditional
+   `Deinitable` conformance can't be proven for `T` while `T`'s own conformance
+   is still being computed, so a struct holding a `List[Self]` reports
+   `field has non-'Deinitable' type`. Declaring `__deinit__` breaks the cycle;
+   fields are still destroyed automatically. `JsonValue` in `json.mojo` is the
+   worked example, with the reasoning in a comment.
+
+The context-manager protocol is still deliberately avoided — use explicit
+`start()`/`stop()` instead.
 
 ## C++ reference build (only when comparing to the original)
 

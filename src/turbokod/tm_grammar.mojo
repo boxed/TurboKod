@@ -577,7 +577,7 @@ def _compile_pattern(
             var rb = raw.as_bytes()
             var is_repo_ref = (len(rb) > 0 and rb[0] == 0x23)
             if is_repo_ref:
-                target = String(StringSlice(unsafe_from_utf8=rb[1:len(rb)]))
+                target = String(StringSpan(unsafe_from_utf8=rb[1:len(rb)]))
             # Apply the embedded-grammar scope-prefix rewrite so
             # references inside an embedded grammar resolve to that
             # grammar's namespaced repo / roots in the merged tables.

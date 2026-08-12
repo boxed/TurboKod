@@ -34,7 +34,7 @@ def byte_slice(s: String, start: Int, end: Int) -> String:
         s_end = len(bytes)
     if s_start >= s_end:
         return String("")
-    return String(StringSlice(unsafe_from_utf8=bytes[s_start:s_end]))
+    return String(StringSpan(unsafe_from_utf8=bytes[s_start:s_end]))
 
 
 def starts_with(s: String, prefix: String) -> Bool:
@@ -60,10 +60,10 @@ def split_lines(text: String) -> List[String]:
     var i = 0
     while i < len(b):
         if b[i] == 0x0A:
-            out.append(String(StringSlice(unsafe_from_utf8=b[start:i])))
+            out.append(String(StringSpan(unsafe_from_utf8=b[start:i])))
             start = i + 1
         i += 1
-    out.append(String(StringSlice(unsafe_from_utf8=b[start:len(b)])))
+    out.append(String(StringSpan(unsafe_from_utf8=b[start:len(b)])))
     return out^
 
 
@@ -77,10 +77,10 @@ def split_lines_no_trailing(text: String) -> List[String]:
     var s = 0
     for i in range(len(b)):
         if b[i] == 0x0A:
-            out.append(String(StringSlice(unsafe_from_utf8=b[s:i])))
+            out.append(String(StringSpan(unsafe_from_utf8=b[s:i])))
             s = i + 1
     if s < len(b):
-        out.append(String(StringSlice(unsafe_from_utf8=b[s:len(b)])))
+        out.append(String(StringSpan(unsafe_from_utf8=b[s:len(b)])))
     return out^
 
 
@@ -102,7 +102,7 @@ def shell_escape_path(path: String) -> String:
         if special:
             out.append(0x5C)  # backslash
         out.append(b[i])
-    return String(StringSlice(unsafe_from_utf8=Span(out)))
+    return String(StringSpan(unsafe_from_utf8=Span(out)))
 
 
 def escape_drop_paths(paths: String) -> String:
@@ -270,7 +270,7 @@ def truncate_to_columns(s: String, max_cols: Int) -> String:
     Use this instead of slicing ``as_bytes()`` at a column offset: byte
     slicing over-counts multi-byte glyphs (so a label that would fit gets
     truncated early) and can cut mid-codepoint, producing invalid UTF-8 when
-    the fragment is handed to ``StringSlice(unsafe_from_utf8=...)``. Returns
+    the fragment is handed to ``StringSpan(unsafe_from_utf8=...)``. Returns
     ``""`` for ``max_cols <= 0`` and ``s`` unchanged when it already fits."""
     if max_cols <= 0:
         return String("")
@@ -287,7 +287,7 @@ def truncate_to_columns(s: String, max_cols: Int) -> String:
         i += info[1]
     if i >= n:
         return s
-    return String(StringSlice(ptr=b.unsafe_ptr(), length=i))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr(), length=i)))
 
 
 def tail_to_columns(s: String, max_cols: Int) -> String:
@@ -311,7 +311,7 @@ def tail_to_columns(s: String, max_cols: Int) -> String:
         var info = codepoint_at(s, i)
         total -= char_width(info[0])
         i += info[1]
-    return String(StringSlice(ptr=b.unsafe_ptr() + i, length=n - i))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(i), length=n - i)))
 
 
 def parse_int_all(s: String) -> Int:
@@ -644,9 +644,7 @@ def slice_codepoints(s: String, lo_cell: Int, hi_cell: Int) -> String:
         return String("")
     if byte_hi <= byte_lo:
         return String("")
-    return String(StringSlice(
-        ptr=bytes.unsafe_ptr() + byte_lo, length=byte_hi - byte_lo,
-    ))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=bytes.unsafe_ptr().unsafe_offset(byte_lo), length=byte_hi - byte_lo)))
 
 
 def parse_int_prefix(s: String, start: Int, stop: Int) -> Int:

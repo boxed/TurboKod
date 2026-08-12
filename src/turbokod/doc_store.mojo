@@ -178,8 +178,8 @@ def _split_at_hash(path: String) -> Tuple[String, String]:
     for i in range(len(b)):
         if b[i] == 0x23:    # '#'
             return (
-                String(StringSlice(unsafe_from_utf8=b[:i])),
-                String(StringSlice(unsafe_from_utf8=b[i + 1:])),
+                String(StringSpan(unsafe_from_utf8=b[:i])),
+                String(StringSpan(unsafe_from_utf8=b[i + 1:])),
             )
     return (path, String(""))
 
@@ -245,7 +245,7 @@ def html_to_text(html: String) -> String:
                 end += 1
             if end >= n:
                 break
-            var tag = String(StringSlice(unsafe_from_utf8=b[i + 1:end]))
+            var tag = String(StringSpan(unsafe_from_utf8=b[i + 1:end]))
             i = end + 1
             var info = _classify_tag(tag)
             var name = info[0]
@@ -405,7 +405,7 @@ def html_to_text(html: String) -> String:
                 out.append(0x26)    # '&'
                 i += 1
                 continue
-            var ent = String(StringSlice(unsafe_from_utf8=b[i + 1:end]))
+            var ent = String(StringSpan(unsafe_from_utf8=b[i + 1:end]))
             var decoded = _decode_entity(ent)
             if pending_space and pre_depth == 0:
                 out.append(0x20)
@@ -436,7 +436,7 @@ def html_to_text(html: String) -> String:
             or out[len(out) - 1] == 0x20
             or out[len(out) - 1] == 0x09):
         _ = out.pop()
-    return String(StringSlice(unsafe_from_utf8=Span(out)))
+    return String(StringSpan(unsafe_from_utf8=Span(out)))
 
 
 def _extend(mut out: List[UInt8], s: String):
@@ -531,12 +531,12 @@ def _get_attr(tag: String, attr: String) -> String:
                         var vstart = p
                         while p < n and tb[p] != quote:
                             p += 1
-                        return String(StringSlice(unsafe_from_utf8=tb[vstart:p]))
+                        return String(StringSpan(unsafe_from_utf8=tb[vstart:p]))
                     var vstart = p
                     while p < n and tb[p] != 0x20 and tb[p] != 0x09 \
                             and tb[p] != 0x2F and tb[p] != 0x3E:
                         p += 1
-                    return String(StringSlice(unsafe_from_utf8=tb[vstart:p]))
+                    return String(StringSpan(unsafe_from_utf8=tb[vstart:p]))
         i += 1
     return String("")
 
@@ -561,7 +561,7 @@ def _classify_tag(tag: String) -> Tuple[String, Int]:
         if c == 0x20 or c == 0x09 or c == 0x0A or c == 0x0D or c == 0x2F:
             break
         i += 1
-    var name = String(StringSlice(unsafe_from_utf8=b[start:i]))
+    var name = String(StringSpan(unsafe_from_utf8=b[start:i]))
     # Lower-case ASCII.
     var nb = name.as_bytes()
     var lower = String("")
@@ -738,7 +738,7 @@ def _table_inner_and_end(html: String, start: Int) -> Tuple[String, Int]:
                 end += 1
             if end >= n:
                 break
-            var tag = String(StringSlice(unsafe_from_utf8=b[i + 1:end]))
+            var tag = String(StringSpan(unsafe_from_utf8=b[i + 1:end]))
             var info = _classify_tag(tag)
             var name = info[0]
             var is_close = info[1] == 1
@@ -747,7 +747,7 @@ def _table_inner_and_end(html: String, start: Int) -> Tuple[String, Int]:
                     depth -= 1
                     if depth == 0:
                         var inner = String(
-                            StringSlice(unsafe_from_utf8=b[start:i]),
+                            StringSpan(unsafe_from_utf8=b[start:i]),
                         )
                         return (inner^, end + 1)
                 else:
@@ -755,7 +755,7 @@ def _table_inner_and_end(html: String, start: Int) -> Tuple[String, Int]:
             i = end + 1
             continue
         i += 1
-    var inner = String(StringSlice(unsafe_from_utf8=b[start:n]))
+    var inner = String(StringSpan(unsafe_from_utf8=b[start:n]))
     return (inner^, n)
 
 
@@ -793,7 +793,7 @@ def _render_table(mut out: List[UInt8], inner: String):
             end += 1
         if end >= n:
             break
-        var tag = String(StringSlice(unsafe_from_utf8=b[i + 1:end]))
+        var tag = String(StringSpan(unsafe_from_utf8=b[i + 1:end]))
         var info = _classify_tag(tag)
         var name = info[0]
         var is_close = info[1] == 1
@@ -828,7 +828,7 @@ def _render_table(mut out: List[UInt8], inner: String):
             else:
                 if cell_start >= 0:
                     var cell_html = String(
-                        StringSlice(unsafe_from_utf8=b[cell_start:i]),
+                        StringSpan(unsafe_from_utf8=b[cell_start:i]),
                     )
                     var rendered = html_to_text(cell_html)
                     var flat = _flatten_cell(rendered)
@@ -925,7 +925,7 @@ def _flatten_cell(s: String) -> String:
         prev_space = False
     while len(out) > 0 and out[len(out) - 1] == 0x20:
         _ = out.pop()
-    return String(StringSlice(unsafe_from_utf8=Span(out)))
+    return String(StringSpan(unsafe_from_utf8=Span(out)))
 
 
 def _utf8_codepoint_count(s: String) -> Int:

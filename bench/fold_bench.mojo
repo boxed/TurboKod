@@ -64,10 +64,10 @@ def fold_branchless_into(b: Span[UInt8, _], mut out: List[UInt8]) -> UInt8:
     var dst = out.unsafe_ptr()
     var acc = UInt8(0)
     for i in range(n):
-        var c = src[i]
+        var c = src[unsafe_offset=i]
         acc |= c
         var is_upper = UInt8((c - UInt8(0x41)) < UInt8(26))
-        dst[i] = c | (is_upper << 5)
+        dst[unsafe_offset=i] = c | (is_upper << 5)
     return acc
 
 
@@ -80,19 +80,19 @@ def fold_simd_into(b: Span[UInt8, _], mut out: List[UInt8]) -> UInt8:
     var acc_v = SIMD[DType.uint8, _W](0)
     var i = 0
     while i + _W <= n:
-        var v = (src + i).load[width=_W]()
+        var v = src.unsafe_offset(i).unsafe_load[width=_W]()
         acc_v |= v
         var is_upper = (v - SIMD[DType.uint8, _W](0x41)).lt(
             SIMD[DType.uint8, _W](26)
         )
-        (dst + i).store(v | (is_upper.cast[DType.uint8]() << 5))
+        dst.unsafe_offset(i).unsafe_store(v | (is_upper.cast[DType.uint8]() << 5))
         i += _W
     var acc = acc_v.reduce_or()
     while i < n:
-        var c = src[i]
+        var c = src[unsafe_offset=i]
         acc |= c
         var is_upper = UInt8((c - UInt8(0x41)) < UInt8(26))
-        dst[i] = c | (is_upper << 5)
+        dst[unsafe_offset=i] = c | (is_upper << 5)
         i += 1
     return acc
 
@@ -159,8 +159,8 @@ def find_simd(hb: Span[UInt8, _], nb: Span[UInt8, _], start: Int) -> Int:
     var last_i = h - n
     var i = start
     while i + _W <= last_i + 1:
-        var v0 = (p + i).load[width=_W]()
-        var v1 = (p + i + n - 1).load[width=_W]()
+        var v0 = p.unsafe_offset(i).unsafe_load[width=_W]()
+        var v1 = p.unsafe_offset(i + n - 1).unsafe_load[width=_W]()
         var m = v0.eq(first) & v1.eq(last)
         if m.reduce_or():
             for k in range(_W):
@@ -168,17 +168,17 @@ def find_simd(hb: Span[UInt8, _], nb: Span[UInt8, _], start: Int) -> Int:
                     var at = i + k
                     var ok = True
                     for j in range(1, n - 1):
-                        if p[at + j] != nb[j]:
+                        if p[unsafe_offset=at + j] != nb[j]:
                             ok = False
                             break
                     if ok:
                         return at
         i += _W
     while i <= last_i:
-        if p[i] == nb[0]:
+        if p[unsafe_offset=i] == nb[0]:
             var ok = True
             for j in range(1, n):
-                if p[i + j] != nb[j]:
+                if p[unsafe_offset=i + j] != nb[j]:
                     ok = False
                     break
             if ok:
@@ -195,7 +195,7 @@ def count_newlines(b: Span[UInt8, _], upto: Int) -> Int:
     var total = 0
     var chunks = 0
     while i + _W <= upto:
-        var v = (p + i).load[width=_W]()
+        var v = p.unsafe_offset(i).unsafe_load[width=_W]()
         acc += v.eq(SIMD[DType.uint8, _W](0x0A)).cast[DType.uint8]() & 1
         i += _W
         chunks += 1
@@ -205,7 +205,7 @@ def count_newlines(b: Span[UInt8, _], upto: Int) -> Int:
             acc = SIMD[DType.uint8, _W](0)
     total += Int(acc.reduce_add())
     while i < upto:
-        if p[i] == 0x0A:
+        if p[unsafe_offset=i] == 0x0A:
             total += 1
         i += 1
     return total
@@ -415,7 +415,7 @@ def main() raises:
     for i in range(len(cands)):
         var buf = List[UInt8](capacity=len(cands[i].as_bytes()))
         sink += Int(fold_simd_into(cands[i].as_bytes(), buf))
-        folded_cands.append(String(StringSlice(unsafe_from_utf8=buf)))
+        folded_cands.append(String(StringSpan(unsafe_from_utf8=buf)))
     t1 = monotonic_ms()
     print("  one-time prefold cost:    ", _ms(t1 - t0))
 
@@ -529,7 +529,7 @@ def main() raises:
     for pi in range(len(parts)):
         var pbuf = List[UInt8](capacity=len(parts[pi].as_bytes()))
         sink += Int(fold_simd_into(parts[pi].as_bytes(), pbuf))
-        folded_parts.append(String(StringSlice(unsafe_from_utf8=pbuf)))
+        folded_parts.append(String(StringSpan(unsafe_from_utf8=pbuf)))
     t0 = monotonic_ms()
     hits = 0
     for _ in range(keystrokes):

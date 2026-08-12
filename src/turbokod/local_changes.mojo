@@ -355,7 +355,7 @@ def _convert_to_context(line: String) -> String:
     out.append(0x20)
     for i in range(1, len(b)):
         out.append(b[i])
-    return String(StringSlice(unsafe_from_utf8=Span(out)))
+    return String(StringSpan(unsafe_from_utf8=Span(out)))
 
 
 def _append_line(mut buf: List[UInt8], line: String):
@@ -463,7 +463,7 @@ def build_minimal_patch(
             # else: drop entirely
             continue
         _append_line(out, lk)
-    return String(StringSlice(unsafe_from_utf8=Span(out)))
+    return String(StringSpan(unsafe_from_utf8=Span(out)))
 
 
 def _first_useful_line(text: String) -> String:
@@ -492,7 +492,7 @@ def _first_useful_line(text: String) -> String:
         start += 1
     if start >= end:
         return String("")
-    return String(StringSlice(unsafe_from_utf8=b[start:end]))
+    return String(StringSpan(unsafe_from_utf8=b[start:end]))
 
 
 def _byte_to_string(b: UInt8) -> String:
@@ -501,7 +501,7 @@ def _byte_to_string(b: UInt8) -> String:
     X column and Y column can take different colors."""
     var buf = List[UInt8]()
     buf.append(b)
-    return String(StringSlice(unsafe_from_utf8=Span(buf)))
+    return String(StringSpan(unsafe_from_utf8=Span(buf)))
 
 
 def _take_first_char(s: String) -> String:
@@ -517,7 +517,7 @@ def _take_first_char(s: String) -> String:
     elif c >= 0xE0:  n = 3
     elif c >= 0xC0:  n = 2
     if n > len(b): n = len(b)
-    return String(StringSlice(unsafe_from_utf8=b[:n]))
+    return String(StringSpan(unsafe_from_utf8=b[:n]))
 
 
 def _take_after_first_char(s: String) -> String:
@@ -533,7 +533,7 @@ def _take_after_first_char(s: String) -> String:
     elif c >= 0xE0:  n = 3
     elif c >= 0xC0:  n = 2
     if n > len(b): n = len(b)
-    return String(StringSlice(unsafe_from_utf8=b[n:len(b)]))
+    return String(StringSpan(unsafe_from_utf8=b[n:len(b)]))
 
 
 def _ascii_upper_str(s: String) -> String:
@@ -551,7 +551,7 @@ def _ascii_upper_str(s: String) -> String:
     out.append(first)
     for i in range(1, len(b)):
         out.append(b[i])
-    return String(StringSlice(unsafe_from_utf8=Span(out)))
+    return String(StringSpan(unsafe_from_utf8=Span(out)))
 
 
 def _author_abbrev(author: String) -> String:
@@ -571,7 +571,7 @@ def _author_abbrev(author: String) -> String:
         while i < n and not (b[i] == 0x20 or b[i] == 0x09):
             i += 1
         if s < i:
-            words.append(String(StringSlice(unsafe_from_utf8=b[s:i])))
+            words.append(String(StringSpan(unsafe_from_utf8=b[s:i])))
     if len(words) == 0:
         return String("  ")
     var first: String
@@ -659,7 +659,7 @@ def _strip_first_byte_to_string(s: String) -> String:
     var b = s.as_bytes()
     if len(b) <= 1:
         return String("")
-    return String(StringSlice(unsafe_from_utf8=b[1:]))
+    return String(StringSpan(unsafe_from_utf8=b[1:]))
 
 
 def _build_filename_banner(path: String, width: Int) -> String:
@@ -678,7 +678,7 @@ def _build_filename_banner(path: String, width: Int) -> String:
     var dashes = List[UInt8]()
     for _ in range(pad):
         dashes.append(0x2D)
-    return prefix + String(StringSlice(unsafe_from_utf8=Span(dashes)))
+    return prefix + String(StringSpan(unsafe_from_utf8=Span(dashes)))
 
 
 def _is_skip_diff_header(line: String) -> Bool:
@@ -1806,7 +1806,7 @@ struct LocalChanges(Movable):
             for j in range(len(lb)):
                 diff_part_bytes.append(lb[j])
             diff_part_bytes.append(0x0A)
-        var diff_part = String(StringSlice(
+        var diff_part = String(StringSpan(
             unsafe_from_utf8=Span(diff_part_bytes),
         ))
         var changed = parse_unified_diff_files(diff_part)
@@ -2858,7 +2858,7 @@ struct LocalChanges(Movable):
                     )
                 var bytes_c = line.as_bytes()
                 if panel.scroll_x < len(bytes_c):
-                    var visible_c = String(StringSlice(
+                    var visible_c = String(StringSpan(
                         unsafe_from_utf8=bytes_c[
                             panel.scroll_x:len(bytes_c)
                         ],
@@ -2894,7 +2894,7 @@ struct LocalChanges(Movable):
             var bytes = line.as_bytes()
             var start = panel.scroll_x
             if start < len(bytes):
-                var visible = String(StringSlice(
+                var visible = String(StringSpan(
                     unsafe_from_utf8=bytes[start:len(bytes)],
                 ))
                 _ = painter.put_text(

@@ -34,13 +34,13 @@ comptime JSON_OBJECT = UInt8(6)
 
 
 @fieldwise_init
-struct JsonMember(Copyable, Movable):
+struct JsonMember(Copyable, Movable, Deinitable):
     """A single ``(key, value)`` pair inside a JsonValue object."""
     var key: String
     var value: JsonValue
 
 
-struct JsonValue(Copyable, Movable):
+struct JsonValue(Copyable, Movable, Deinitable):
     """Tagged-union JSON node. Construct via the ``json_*`` factory
     functions and inspect via ``is_*`` predicates + ``as_*`` accessors."""
     var kind: UInt8
@@ -57,6 +57,17 @@ struct JsonValue(Copyable, Movable):
         self.str_v = String("")
         self.arr_v = List[JsonValue]()
         self.obj_v = List[JsonMember]()
+
+    def __deinit__(deinit self):
+        # Deliberately empty. ``JsonValue`` is recursive (``arr_v`` is a
+        # ``List[JsonValue]``), and as of Mojo 1.0 ``List[T]``'s conditional
+        # ``Deinitable`` conformance can't be proven for a type while that
+        # type's own conformance is still being computed — the cycle makes
+        # ``List[JsonValue]`` look non-Deinitable. Declaring ``__deinit__``
+        # explicitly breaks the cycle. Fields are still destroyed
+        # automatically after this body runs, so there's nothing to do here
+        # (verified: nested values inside ``arr_v`` are reclaimed).
+        pass
 
     def __copyinit__(mut self, copy: Self):
         self.kind = copy.kind
@@ -275,9 +286,7 @@ def encode_json(value: JsonValue) -> String:
     """
     var buf = List[UInt8]()
     _encode(value, buf)
-    return String(StringSlice(
-        ptr=buf.unsafe_ptr(), length=len(buf),
-    ))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=len(buf))))
 
 
 def _encode(value: JsonValue, mut buf: List[UInt8]):
@@ -473,7 +482,7 @@ def _parse_string(text: String, pos: Int) raises -> Tuple[String, Int]:
         var c = Int(bytes[p])
         if c == 0x22:
             return (
-                String(StringSlice(unsafe_from_utf8=Span(out))),
+                String(StringSpan(unsafe_from_utf8=Span(out))),
                 p + 1,
             )
         if c == 0x5C:
@@ -576,7 +585,7 @@ def _parse_number(text: String, pos: Int) raises -> Tuple[JsonValue, Int]:
             p += 1
     if p == start:
         raise Error("expected number")
-    var token = String(StringSlice(unsafe_from_utf8=bytes[start:p]))
+    var token = String(StringSpan(unsafe_from_utf8=bytes[start:p]))
     if is_float:
         var v = JsonValue()
         v.kind = JSON_FLOAT

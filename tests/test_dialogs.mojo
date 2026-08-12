@@ -2130,8 +2130,8 @@ def test_find_misspelled_runs_filters_identifiers_and_short_words() raises:
     # all skipped. Only ``helo`` and ``world`` should flag.
     assert_equal(len(runs), 2)
     var b = text.as_bytes()
-    var first_word = String(StringSlice(unsafe_from_utf8=b[runs[0][0]:runs[0][1]]))
-    var second_word = String(StringSlice(unsafe_from_utf8=b[runs[1][0]:runs[1][1]]))
+    var first_word = String(StringSpan(unsafe_from_utf8=b[runs[0][0]:runs[0][1]]))
+    var second_word = String(StringSpan(unsafe_from_utf8=b[runs[1][0]:runs[1][1]]))
     assert_equal(first_word, String("helo"))
     assert_equal(second_word, String("world"))
 

@@ -303,7 +303,7 @@ def test_lsp_drop_prefix_helper() raises:
     var b = _bytes_of(String("hello world"))
     var rest = _drop_prefix(b^, 6)
     assert_equal(len(rest), 5)
-    var s = String(StringSlice(ptr=rest.unsafe_ptr(), length=len(rest)))
+    var s = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=rest.unsafe_ptr(), length=len(rest))))
     assert_equal(s, String("world"))
 
 
@@ -1637,7 +1637,7 @@ def test_install_runner_runs_sh_command_to_completion() raises:
     # is preserved in ``output`` (we only strip per-line in the popup).
     var ob = result.output.as_bytes()
     assert_true(len(ob) >= 5)
-    var first5 = String(StringSlice(unsafe_from_utf8=ob[:5]))
+    var first5 = String(StringSpan(unsafe_from_utf8=ob[:5]))
     assert_equal(first5, String("hello"))
     # Runner is back to idle, ready to accept a new install.
     assert_false(r.is_active())

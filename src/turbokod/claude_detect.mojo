@@ -106,9 +106,7 @@ def detect_claude_state(lines: List[String]) -> UInt8:
         var rb = rows_lc[i].as_bytes()
         for k in range(len(rb)):
             joined_bytes.append(rb[k])
-    var joined = String(StringSlice(
-        ptr=joined_bytes.unsafe_ptr(), length=len(joined_bytes),
-    ))
+    var joined = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=joined_bytes.unsafe_ptr(), length=len(joined_bytes))))
 
     var has_working_marker  = False
     var has_clean_marker    = False
@@ -298,7 +296,7 @@ def _join_lines(lines: List[String]) -> String:
         var rb = lines[i].as_bytes()
         for k in range(len(rb)):
             out.append(rb[k])
-    return String(StringSlice(ptr=out.unsafe_ptr(), length=len(out)))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=len(out))))
 
 
 def _contains(haystack: String, needle: String) -> Bool:
@@ -408,6 +406,4 @@ def _to_lower(s: String) -> String:
             out.append(b + UInt8(0x20))
         else:
             out.append(b)
-    return String(StringSlice(
-        ptr=out.unsafe_ptr(), length=n,
-    ))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=n)))

@@ -405,9 +405,12 @@ struct ColorPickerDialog(Movable):
             if k == KEY_BACKSPACE:
                 var b = self.edit_buf.as_bytes()
                 if len(b) > 0:
-                    self.edit_buf = String(
-                        StringSlice(unsafe_from_utf8=b[0 : len(b) - 1])
+                    # Temporary: ``b`` borrows ``self.edit_buf``, so the
+                    # build-and-assign can't be a single expression.
+                    var trimmed = String(
+                        StringSpan(unsafe_from_utf8=b[0 : len(b) - 1])
                     )
+                    self.edit_buf = trimmed^
                 return True
             if self._is_value_char(k):
                 self.edit_buf = self.edit_buf + chr(Int(k))

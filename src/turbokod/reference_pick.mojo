@@ -117,7 +117,7 @@ struct ReferencePick(Movable):
         if starts_with(path, root):
             var pb = path.as_bytes()
             var rb = root.as_bytes()
-            return String(StringSlice(unsafe_from_utf8=pb[len(rb):]))
+            return String(StringSpan(unsafe_from_utf8=pb[len(rb):]))
         return path
 
     def paint(mut self, mut canvas: Canvas, container_bounds: Rect):

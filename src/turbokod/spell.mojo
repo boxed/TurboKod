@@ -73,7 +73,7 @@ def _ensure_parent_dir(path: String):
     var i = 1
     while i < n:
         if b[i] == 0x2F:  # '/'
-            var prefix = String(StringSlice(unsafe_from_utf8=b[0:i]))
+            var prefix = String(StringSpan(unsafe_from_utf8=b[0:i]))
             if len(prefix.as_bytes()) > 0:
                 var c_path = prefix + String("\0")
                 _ = external_call["mkdir", Int32](
@@ -751,7 +751,7 @@ def _normalize(s: String) -> String:
         i += sz
     if len(out) == 0:
         return String("")
-    return String(StringSlice(ptr=out.unsafe_ptr(), length=len(out)))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=len(out))))
 
 
 def _lower_codepoint(cp: Int) -> Int:
@@ -845,7 +845,7 @@ def _emit_utf8(mut out: List[UInt8], cp: Int):
 
 def _slice(s: String, start: Int, end: Int) -> String:
     var b = s.as_bytes()
-    return String(StringSlice(unsafe_from_utf8=b[start:end]))
+    return String(StringSpan(unsafe_from_utf8=b[start:end]))
 
 
 def _is_letter(c: UInt8) -> Bool:
@@ -900,7 +900,7 @@ def _strip_word(line: String) -> String:
         var c = b[k]
         if c == 0x20 or c == 0x09:
             return String("")
-    return String(StringSlice(unsafe_from_utf8=b[i:j]))
+    return String(StringSpan(unsafe_from_utf8=b[i:j]))
 
 
 def _parse_idea_dict_words(content: String, mut out: List[String]):
@@ -930,7 +930,7 @@ def _parse_idea_dict_words(content: String, mut out: List[String]):
             if not found:
                 return
             if i > start:
-                out.append(String(StringSlice(unsafe_from_utf8=b[start:i])))
+                out.append(String(StringSpan(unsafe_from_utf8=b[start:i])))
             i += 4    # past </w>
         else:
             i += 1

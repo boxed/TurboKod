@@ -231,7 +231,7 @@ def _codepoints_with_offsets(s: String) -> Tuple[List[String], List[Int]]:
         var buf = List[UInt8]()
         for k in range(i, j):
             buf.append(b[k])
-        cps.append(String(StringSlice(unsafe_from_utf8=Span(buf))))
+        cps.append(String(StringSpan(unsafe_from_utf8=Span(buf))))
         i = j
     offs.append(n)
     return (cps^, offs^)
@@ -302,7 +302,7 @@ def _lstrip_ws(s: String) -> String:
     var i = 0
     while i < len(b) and (b[i] == 0x20 or b[i] == 0x09):
         i += 1
-    return String(StringSlice(unsafe_from_utf8=b[i:len(b)]))
+    return String(StringSpan(unsafe_from_utf8=b[i:len(b)]))
 
 
 def _line_similarity(a: String, b: String) -> Float64:

@@ -41,16 +41,12 @@ def _shell_single_quote(s: String) -> String:
     while i < n:
         if b[i] == 0x27:  # '
             if i > start:
-                out += String(StringSlice(
-                    ptr=b.unsafe_ptr() + start, length=i - start,
-                ))
+                out += String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(start), length=i - start)))
             out += String("'\\''")
             start = i + 1
         i += 1
     if start < n:
-        out += String(StringSlice(
-            ptr=b.unsafe_ptr() + start, length=n - start,
-        ))
+        out += String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(start), length=n - start)))
     out += String("'")
     return out^
 

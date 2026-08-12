@@ -372,13 +372,13 @@ def _split_buffer_lines(text: String) -> List[String]:
             var line_end = i
             if line_end > start and bytes[line_end - 1] == 0x0D:
                 line_end -= 1
-            out.append(String(StringSlice(unsafe_from_utf8=bytes[start:line_end])))
+            out.append(String(StringSpan(unsafe_from_utf8=bytes[start:line_end])))
             start = i + 1
         i += 1
     var end = len(bytes)
     if end > start and bytes[end - 1] == 0x0D:
         end -= 1
-    out.append(String(StringSlice(unsafe_from_utf8=bytes[start:end])))
+    out.append(String(StringSpan(unsafe_from_utf8=bytes[start:end])))
     return out^
 
 
@@ -408,7 +408,7 @@ def _normalize_crlf(text: String) -> String:
             break
         out.append(b)
         i += 1
-    return String(StringSlice(ptr=out.unsafe_ptr(), length=len(out)))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=len(out))))
 
 
 def _detect_line_ending(text: String) -> String:
@@ -859,7 +859,7 @@ def _file_is_test(path: String, globs: List[String]) -> Bool:
     for i in range(n):
         if Int(b[i]) == 0x2F:  # '/'
             bn = i + 1
-    var base = String(StringSlice(ptr=b.unsafe_ptr() + bn, length=n - bn))
+    var base = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(bn), length=n - bn)))
     if len(globs) == 0:
         return _glob_match(base, String("test_*.py")) \
             or _glob_match(base, String("*_test.py"))
@@ -887,7 +887,7 @@ def _test_ident_at(s: String, off_in: Int) -> String:
         off += 1
     if off <= start:
         return String("")
-    return String(StringSlice(ptr=b.unsafe_ptr() + start, length=off - start))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(start), length=off - start)))
 
 
 struct EditorSnapshot(Copyable, Movable):
@@ -2006,7 +2006,7 @@ struct Editor(Copyable, Movable):
         self._tc_anchor_row = copy._tc_anchor_row
         # Don't carry the cached grammar across a copy. ``Grammar`` owns
         # ``OnigRegex`` instances whose libonig handles we share via a
-        # bitwise-aliasing copy; once we add proper ``__del__`` support
+        # bitwise-aliasing copy; once we add proper ``__deinit__`` support
         # the aliasing could double-free. Letting the copy rebuild on
         # first refresh costs one cold load but is always correct.
         self._hl_cache = HighlightCache()
@@ -2251,7 +2251,7 @@ struct Editor(Copyable, Movable):
             if lo >= hi:
                 continue
             var slice_text = String(
-                StringSlice(unsafe_from_utf8=line_bytes[lo:hi])
+                StringSpan(unsafe_from_utf8=line_bytes[lo:hi])
             )
             var runs = find_misspelled_runs(speller, slice_text)
             if len(runs) == 0:
@@ -3677,7 +3677,7 @@ struct Editor(Copyable, Movable):
                 if lo >= hi:
                     return Optional[SpellActionRequest]()
                 var word = String(
-                    StringSlice(unsafe_from_utf8=lb[lo:hi])
+                    StringSpan(unsafe_from_utf8=lb[lo:hi])
                 )
                 return Optional[SpellActionRequest](
                     SpellActionRequest(hl.row, lo, hi, word)
@@ -4262,9 +4262,7 @@ struct Editor(Copyable, Movable):
             if i > 0:
                 buf.append(UInt8(0x0A))
             append_string_bytes(buf, self.buffer.line(i))
-        return String(StringSlice(
-            ptr=buf.unsafe_ptr(), length=len(buf),
-        ))
+        return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=len(buf))))
 
     def _disk_text(self) -> String:
         """Build the byte sequence to write to disk for the current buffer,
@@ -4323,7 +4321,7 @@ struct Editor(Copyable, Movable):
             if i > 0:
                 append_string_bytes(buf, sep)
             append_string_bytes(buf, line)
-        return String(StringSlice(ptr=buf.unsafe_ptr(), length=len(buf)))
+        return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=len(buf))))
 
     def save(mut self) raises -> Bool:
         """Write the buffer back to ``file_path``. Returns False if the
@@ -4414,7 +4412,7 @@ struct Editor(Copyable, Movable):
                     break
                 var mv = m.value()
                 if mv.start > seg_start:
-                    rebuilt = rebuilt + String(StringSlice(
+                    rebuilt = rebuilt + String(StringSpan(
                         unsafe_from_utf8=lb[seg_start:mv.start]
                     ))
                 rebuilt = rebuilt + replacement
@@ -4430,7 +4428,7 @@ struct Editor(Copyable, Movable):
                     pos = mv.end
             if line_changed:
                 if seg_start < h:
-                    rebuilt = rebuilt + String(StringSlice(
+                    rebuilt = rebuilt + String(StringSpan(
                         unsafe_from_utf8=lb[seg_start:h]
                     ))
                 self.buffer.lines[row] = rebuilt
@@ -7298,9 +7296,7 @@ struct Editor(Copyable, Movable):
                         var cp_len = utf8_codepoint_size(Int(nb[bi]))
                         if bi + cp_len > len(nb):
                             cp_len = 1
-                        var glyph = String(StringSlice(
-                            ptr=nb.unsafe_ptr() + bi, length=cp_len,
-                        ))
+                        var glyph = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=nb.unsafe_ptr().unsafe_offset(bi), length=cp_len)))
                         _ = painter.put_text(
                             canvas, Point(nx, sy_hl), glyph, note_attr,
                         )
@@ -7330,9 +7326,7 @@ struct Editor(Copyable, Movable):
                         var gcp = utf8_codepoint_size(Int(gb[gbi]))
                         if gbi + gcp > gn:
                             gcp = 1
-                        var gglyph = String(StringSlice(
-                            ptr=gb.unsafe_ptr() + gbi, length=gcp,
-                        ))
+                        var gglyph = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=gb.unsafe_ptr().unsafe_offset(gbi), length=gcp)))
                         _ = painter.put_text(
                             canvas, Point(gx, sy_hl), gglyph, ghost_attr,
                         )
@@ -9469,9 +9463,7 @@ struct Editor(Copyable, Movable):
                         new_bytes.append(lb[i])
                 else:
                     new_bytes.append(lb[i])
-            self.buffer.lines[r] = String(StringSlice(
-                ptr=new_bytes.unsafe_ptr(), length=len(new_bytes),
-            ))
+            self.buffer.lines[r] = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=new_bytes.unsafe_ptr(), length=len(new_bytes))))
         self.dirty = True
         # ``toggle_case`` edits ``sr..er`` in place; ``sr`` is the
         # lowest changed row, ``er`` the high-water mark that keeps the

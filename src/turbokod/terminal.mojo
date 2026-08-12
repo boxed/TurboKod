@@ -26,7 +26,8 @@ from .events import (
     KEY_F7, KEY_F8, KEY_F9, KEY_F10, KEY_F11, KEY_F12,
     KEY_ENTER, KEY_TAB, KEY_BACKSPACE, KEY_ESC,
     MOD_NONE, MOD_SHIFT, MOD_ALT, MOD_CTRL, MOD_META,
-    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_MIDDLE, MOUSE_BUTTON_RIGHT,
+    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_MIDDLE, MOUSE_BUTTON_NONE,
+    MOUSE_BUTTON_RIGHT,
     MOUSE_WHEEL_UP, MOUSE_WHEEL_DOWN,
 )
 from .geometry import Point
@@ -530,9 +531,7 @@ struct Terminal:
         self._trace(
             String("    poll_event:combined ") + String(total) + String("B\n"),
         )
-        var bytes = StringSlice(
-            ptr=combined.unsafe_ptr(), length=total
-        ).as_bytes()
+        var bytes = StringSpan(unsafe_from_utf8=Span(unsafe_ptr=combined.unsafe_ptr(), length=total)).as_bytes()
         var pos = 0
         var iters = 0
         while pos < total:
@@ -541,7 +540,7 @@ struct Terminal:
                 String("    poll_event:parse iter=") + String(iters)
                 + String(" pos=") + String(pos) + String("\n"),
             )
-            var slice = String(StringSlice(unsafe_from_utf8=bytes[pos:]))
+            var slice = String(StringSpan(unsafe_from_utf8=bytes[pos:]))
             var parsed = parse_input(slice)
             var consumed = parsed[1]
             self._trace(
@@ -1100,7 +1099,7 @@ def _parse_osc(data: String) -> Tuple[Event, Int]:
     var us = path_start
     while us < body_end and bytes[us] != 0x1F:
         us += 1
-    var path = String(StringSlice(unsafe_from_utf8=bytes[path_start:us]))
+    var path = String(StringSpan(unsafe_from_utf8=bytes[path_start:us]))
     var line: Int = 0
     if us < body_end:
         var p = us + 1

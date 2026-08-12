@@ -838,9 +838,13 @@ struct DapManager(Copyable, Movable):
             var bs = self._stderr_log.as_bytes()
             if len(bs) > 16384:
                 var start = len(bs) - 16384
-                self._stderr_log = String(StringSlice(
-                    ptr=bs.unsafe_ptr() + start, length=len(bs) - start,
-                ))
+                # Temporary: ``bs`` borrows ``self._stderr_log``, so the
+                # new value has to be built before the assignment lands.
+                var tail = String(StringSpan(unsafe_from_utf8=Span(
+                    unsafe_ptr=bs.unsafe_ptr().unsafe_offset(start),
+                    length=len(bs) - start,
+                )))
+                self._stderr_log = tail^
         return text^
 
     def captured_stderr(self) -> String:
@@ -2461,11 +2465,11 @@ struct DapManager(Copyable, Movable):
         var condition: String
         var traceback: String
         if nl < 0:
-            condition = String(StringSlice(unsafe_from_utf8=b[p:]))
+            condition = String(StringSpan(unsafe_from_utf8=b[p:]))
             traceback = String("")
         else:
-            condition = String(StringSlice(unsafe_from_utf8=b[p:nl]))
-            traceback = String(StringSlice(unsafe_from_utf8=b[nl + 1:]))
+            condition = String(StringSpan(unsafe_from_utf8=b[p:nl]))
+            traceback = String(StringSpan(unsafe_from_utf8=b[nl + 1:]))
         var short_error = _last_nonempty_line(traceback)
         if len(short_error.as_bytes()) == 0:
             short_error = String("evaluation failed")
@@ -2904,9 +2908,7 @@ def _trim_trailing_newline(s: String) -> String:
     one-per-line in the log file."""
     var b = s.as_bytes()
     if len(b) > 0 and b[len(b) - 1] == 0x0A:
-        return String(StringSlice(
-            ptr=b.unsafe_ptr(), length=len(b) - 1,
-        ))
+        return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr(), length=len(b) - 1)))
     return s
 
 
@@ -2926,7 +2928,7 @@ def _last_nonempty_line(text: String) -> String:
     var start = end
     while start > 0 and b[start - 1] != 0x0A:
         start -= 1
-    return String(StringSlice(unsafe_from_utf8=b[start:end]))
+    return String(StringSpan(unsafe_from_utf8=b[start:end]))
 
 
 def _state_name(state: UInt8) -> String:

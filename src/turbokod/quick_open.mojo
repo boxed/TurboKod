@@ -255,7 +255,7 @@ struct QuickOpen(Movable):
                     matches_root = False
                     break
             if matches_root and fb[len(rb)] == 0x2F:
-                self.entries.append(String(StringSlice(
+                self.entries.append(String(StringSpan(
                     unsafe_from_utf8=fb[len(rb) + 1:],
                 )))
                 self.entries_abs.append(full)
@@ -744,7 +744,7 @@ def _split_query_to_parts(q: String) -> List[String]:
         while i < n and b[i] != 0x20:
             if b[i] == 0x2F:
                 if i > run_start:
-                    out.append(String(StringSlice(
+                    out.append(String(StringSpan(
                         unsafe_from_utf8=b[run_start:i],
                     )))
                 out.append(String("/"))
@@ -753,7 +753,7 @@ def _split_query_to_parts(q: String) -> List[String]:
             else:
                 i += 1
         if i > run_start:
-            out.append(String(StringSlice(
+            out.append(String(StringSpan(
                 unsafe_from_utf8=b[run_start:i],
             )))
     return out^

@@ -156,11 +156,11 @@ def _split_args(text: String) -> List[String]:
     while i < n:
         if b[i] == 0x20:
             if i > start:
-                out.append(String(StringSlice(unsafe_from_utf8=b[start:i])))
+                out.append(String(StringSpan(unsafe_from_utf8=b[start:i])))
             start = i + 1
         i += 1
     if start < n:
-        out.append(String(StringSlice(unsafe_from_utf8=b[start:n])))
+        out.append(String(StringSpan(unsafe_from_utf8=b[start:n])))
     return out^
 
 

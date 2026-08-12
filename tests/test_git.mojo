@@ -85,10 +85,10 @@ def _lines_from(text: String) -> List[String]:
     var i = 0
     while i < len(b):
         if b[i] == 0x0A:
-            out.append(String(StringSlice(unsafe_from_utf8=b[start:i])))
+            out.append(String(StringSpan(unsafe_from_utf8=b[start:i])))
             start = i + 1
         i += 1
-    out.append(String(StringSlice(unsafe_from_utf8=b[start:len(b)])))
+    out.append(String(StringSpan(unsafe_from_utf8=b[start:len(b)])))
     return out^
 
 
@@ -1746,10 +1746,10 @@ def test_stage_unstage_round_trip_against_real_git() raises:
     var s = 0
     for i in range(len(b)):
         if b[i] == 0x0A:
-            lines.append(String(StringSlice(unsafe_from_utf8=b[s:i])))
+            lines.append(String(StringSpan(unsafe_from_utf8=b[s:i])))
             s = i + 1
     if s < len(b):
-        lines.append(String(StringSlice(unsafe_from_utf8=b[s:len(b)])))
+        lines.append(String(StringSpan(unsafe_from_utf8=b[s:len(b)])))
     # Find the ``+beta-modified`` line index.
     var plus_idx = -1
     for i in range(len(lines)):

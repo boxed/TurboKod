@@ -44,7 +44,7 @@ def _control_picture_glyph(b: Int) -> String:
     buf.append(UInt8(0xE0 | (cp >> 12)))
     buf.append(UInt8(0x80 | ((cp >> 6) & 0x3F)))
     buf.append(UInt8(0x80 | (cp & 0x3F)))
-    return String(StringSlice(ptr=buf.unsafe_ptr(), length=len(buf)))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=len(buf))))
 
 
 @fieldwise_init
@@ -186,7 +186,7 @@ struct Canvas(Copyable, Movable):
                 else:
                     glyph = chr(b)
             elif seq_len > 1 and i + seq_len <= n:
-                glyph = String(StringSlice(unsafe_from_utf8=bytes[i:i+seq_len]))
+                glyph = String(StringSpan(unsafe_from_utf8=bytes[i:i+seq_len]))
             else:
                 # Stray continuation or truncated tail — show ``?``
                 # rather than losing the column to silence.
@@ -436,7 +436,7 @@ def wrap_to_width(text: String, width: Int) -> List[String]:
         var seq_len = utf8_codepoint_size(b)
         if i + seq_len > n:
             seq_len = n - i
-        cps.append(String(StringSlice(unsafe_from_utf8=bytes[i:i+seq_len])))
+        cps.append(String(StringSpan(unsafe_from_utf8=bytes[i:i+seq_len])))
         i += seq_len
     var nc = len(cps)
     var pos = 0

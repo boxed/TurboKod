@@ -107,8 +107,8 @@ def parse_blame_porcelain(text: String) -> List[BlameLine]:
             in_header = False
             continue
         if _looks_like_header(ln):
-            current_sha = String(StringSlice(unsafe_from_utf8=lb[:40]))
-            current_short = String(StringSlice(unsafe_from_utf8=lb[:8]))
+            current_sha = String(StringSpan(unsafe_from_utf8=lb[:40]))
+            current_short = String(StringSpan(unsafe_from_utf8=lb[:8]))
             # Skip past sha + space, parse orig, then final.
             var space2 = 41
             while space2 < len(lb) and lb[space2] != 0x20:
@@ -128,7 +128,7 @@ def parse_blame_porcelain(text: String) -> List[BlameLine]:
             in_header = True
             continue
         if in_header and starts_with(ln, String("author ")):
-            var author = String(StringSlice(unsafe_from_utf8=lb[7:len(lb)]))
+            var author = String(StringSpan(unsafe_from_utf8=lb[7:len(lb)]))
             pending_author = author
             # Cache against the SHA so subsequent same-commit lines pick
             # it up without re-reading metadata.

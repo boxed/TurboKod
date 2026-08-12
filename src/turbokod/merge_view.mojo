@@ -433,7 +433,7 @@ struct MergeView(Movable):
                 if self.edit_mode and is_current and row.line_idx == self.edit_row:
                     var pre = row.text.as_bytes()[0:self.edit_col]
                     var cx = content_x + 2 + display_columns(
-                        String(StringSlice(unsafe_from_utf8=pre)))
+                        String(StringSpan(unsafe_from_utf8=pre)))
                     cp.set_attr(canvas, cx, y, Attr(CYAN, BLACK))
             elif row.kind == _ROW_ACTIONBAR:
                 self._paint_action_bar(canvas, cp, content_x, y, row.ordinal)
@@ -675,8 +675,8 @@ struct MergeView(Movable):
         var ci = self.current
         var line = self.states[ci].edited_lines[self.edit_row]
         var b = line.as_bytes()
-        var head = String(StringSlice(unsafe_from_utf8=b[0:self.edit_col]))
-        var tail = String(StringSlice(unsafe_from_utf8=b[self.edit_col:len(b)]))
+        var head = String(StringSpan(unsafe_from_utf8=b[0:self.edit_col]))
+        var tail = String(StringSpan(unsafe_from_utf8=b[self.edit_col:len(b)]))
         self.states[ci].edited_lines[self.edit_row] = head + s + tail
         self.edit_col += len(s.as_bytes())
         self._rows_dirty = True
@@ -687,8 +687,8 @@ struct MergeView(Movable):
             var line = self.states[ci].edited_lines[self.edit_row]
             var b = line.as_bytes()
             var start = prev_codepoint_start(line, self.edit_col)
-            var head = String(StringSlice(unsafe_from_utf8=b[0:start]))
-            var tail = String(StringSlice(unsafe_from_utf8=b[self.edit_col:len(b)]))
+            var head = String(StringSpan(unsafe_from_utf8=b[0:start]))
+            var tail = String(StringSpan(unsafe_from_utf8=b[self.edit_col:len(b)]))
             self.states[ci].edited_lines[self.edit_row] = head + tail
             self.edit_col = start
         elif self.edit_row > 0:
@@ -705,8 +705,8 @@ struct MergeView(Movable):
         var ci = self.current
         var line = self.states[ci].edited_lines[self.edit_row]
         var b = line.as_bytes()
-        var head = String(StringSlice(unsafe_from_utf8=b[0:self.edit_col]))
-        var tail = String(StringSlice(unsafe_from_utf8=b[self.edit_col:len(b)]))
+        var head = String(StringSpan(unsafe_from_utf8=b[0:self.edit_col]))
+        var tail = String(StringSpan(unsafe_from_utf8=b[self.edit_col:len(b)]))
         self.states[ci].edited_lines[self.edit_row] = head
         self.states[ci].edited_lines.insert(self.edit_row + 1, tail)
         self.edit_row += 1

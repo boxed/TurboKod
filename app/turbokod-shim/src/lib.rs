@@ -550,16 +550,27 @@ pub extern "C" fn tk_listdir_done() {
 //
 // Mojo's destructor lifecycle interacted badly with libonig's region
 // scratch when we tried to call ``onig_free`` / ``onig_region_free``
-// from ``OnigRegex.__del__`` — the destructor sequencing under
+// from ``OnigRegex.__deinit__`` — the destructor sequencing under
 // ``ArcPointer`` hung the next ``onig_search``. So per-instance
 // reclamation is disabled; ``OnigRegex.__init__`` registers each
 // fresh ``(regex_t*, OnigRegion*)`` pair via ``tk_onig_track`` and
 // the destructor (`__mod_term_func` below) walks the list at exit.
 //
+// Re-tested under Mojo 1.0 with a manual heap refcount instead of
+// ``ArcPointer``: still broken, now as heap corruption — the next
+// ``onig_new`` crashes inside ``onig_compile``'s malloc. The frees
+// are the trigger (identical bookkeeping minus the frees runs
+// clean), so this registry stays. See the ``OnigRegex`` doc comment.
+//
 // Cost: handles outlive their wrapping ``OnigRegex`` for the rest
 // of the session — bounded by (#grammars × patterns per grammar).
 // Empirically tens of MB on a multi-language session, all reclaimed
-// cleanly at shutdown so leak detectors stay quiet.
+// cleanly at shutdown so leak detectors stay quiet. The dynamically
+// substituted end regexes (``_dyn_end_regex``, compiled per tokenize
+// for backref ``end`` patterns) look like they'd escape that bound,
+// but measurably don't: 200 re-tokenizations of a backref-heavy
+// buffer add 0 KB, against a control showing ~1.2 KB per compiled
+// regex.
 
 extern "C" {
     fn onig_free(reg: *mut c_void) -> c_int;

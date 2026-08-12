@@ -483,7 +483,11 @@ struct ActionEditor(Movable):
             while i >= 0 and b[i] != 0x2F:
                 i -= 1
             if i > 0:
-                seed = String(StringSlice(unsafe_from_utf8=b[:i]))
+                # Temporary: ``b`` borrows ``seed``, so building the new
+                # value and assigning it in one step would mutate ``seed``
+                # while it's still aliased.
+                var parent = String(StringSpan(unsafe_from_utf8=b[:i]))
+                seed = parent^
             else:
                 # i == 0 (path is "/x") or i < 0 (a bare program name like
                 # "black", no slash at all) — open at the filesystem root
@@ -640,11 +644,11 @@ def _split_args(text: String) -> List[String]:
     while i < n:
         if b[i] == 0x20:
             if i > start:
-                out.append(String(StringSlice(unsafe_from_utf8=b[start:i])))
+                out.append(String(StringSpan(unsafe_from_utf8=b[start:i])))
             start = i + 1
         i += 1
     if start < n:
-        out.append(String(StringSlice(unsafe_from_utf8=b[start:n])))
+        out.append(String(StringSpan(unsafe_from_utf8=b[start:n])))
     return out^
 
 
@@ -652,4 +656,4 @@ def _str_pop_byte(s: String) -> String:
     var b = s.as_bytes()
     if len(b) == 0:
         return s
-    return String(StringSlice(unsafe_from_utf8=b[:len(b) - 1]))
+    return String(StringSpan(unsafe_from_utf8=b[:len(b) - 1]))

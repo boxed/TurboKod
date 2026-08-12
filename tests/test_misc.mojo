@@ -906,10 +906,10 @@ def test_discard_line_round_trip_against_real_git() raises:
     var s = 0
     for i in range(len(b)):
         if b[i] == 0x0A:
-            lines.append(String(StringSlice(unsafe_from_utf8=b[s:i])))
+            lines.append(String(StringSpan(unsafe_from_utf8=b[s:i])))
             s = i + 1
     if s < len(b):
-        lines.append(String(StringSlice(unsafe_from_utf8=b[s:len(b)])))
+        lines.append(String(StringSpan(unsafe_from_utf8=b[s:len(b)])))
     var target_idx = -1
     for i in range(len(lines)):
         if lines[i] == String("+NEW2"):

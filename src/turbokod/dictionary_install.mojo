@@ -151,7 +151,7 @@ def installed_dictionary_languages() -> List[String]:
         if (b[n - 4] != 0x2E or b[n - 3] != 0x74
                 or b[n - 2] != 0x78 or b[n - 1] != 0x74):
             continue
-        var stem = String(StringSlice(unsafe_from_utf8=b[0:n - 4]))
+        var stem = String(StringSpan(unsafe_from_utf8=b[0:n - 4]))
         out.append(stem^)
     return out^
 

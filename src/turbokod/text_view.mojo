@@ -865,10 +865,7 @@ def paint_text_segments(
             hi = n
         var seg = String("")
         if lo < n and hi > lo:
-            seg = String(StringSlice(
-                ptr=bytes.unsafe_ptr() + lo,
-                length=hi - lo,
-            ))
+            seg = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=bytes.unsafe_ptr().unsafe_offset(lo), length=hi - lo)))
         _ = painter.put_text(
             canvas,
             Point(view.a.x + vrow.indent_cells, view.a.y + k),
@@ -887,10 +884,7 @@ def paint_text_segments(
                 if rce > hi:
                     rce = hi
                 var cellx = vrow.indent_cells + _cells_for_bytes(line, lo, rs)
-                var sub = String(StringSlice(
-                    ptr=bytes.unsafe_ptr() + rs,
-                    length=rce - rs,
-                ))
+                var sub = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=bytes.unsafe_ptr().unsafe_offset(rs), length=rce - rs)))
                 _ = painter.put_text(
                     canvas,
                     Point(view.a.x + cellx, view.a.y + k),
@@ -1156,9 +1150,7 @@ struct TextLog(Copyable, Movable):
         var start = 0
         for i in range(len(b)):
             if b[i] == 0x0A:  # '\n'
-                var seg = String(StringSlice(
-                    ptr=b.unsafe_ptr() + start, length=i - start,
-                ))
+                var seg = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(start), length=i - start)))
                 var seg_runs = _slice_runs(runs, start, i)
                 if first and continue_open:
                     self._extend_last(seg^, seg_runs^)
@@ -1167,9 +1159,7 @@ struct TextLog(Copyable, Movable):
                 first = False
                 start = i + 1
         if start < len(b):
-            var seg = String(StringSlice(
-                ptr=b.unsafe_ptr() + start, length=len(b) - start,
-            ))
+            var seg = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(start), length=len(b) - start)))
             var seg_runs = _slice_runs(runs, start, len(b))
             if first and continue_open:
                 self._extend_last(seg^, seg_runs^)

@@ -188,7 +188,7 @@ struct _FindSymbolRunner(Movable):
         while i < len(self._buf):
             if self._buf[i] == 0x0A:
                 if i > consumed:
-                    var line_str = String(StringSlice(
+                    var line_str = String(StringSpan(
                         unsafe_from_utf8=Span(self._buf)[consumed:i],
                     ))
                     var parsed = _parse_rg_match_line(line_str)
@@ -822,7 +822,7 @@ def _relativize(path: String, root: String) -> String:
         return path
     if pb[len(rb)] != 0x2F:   # '/'
         return path
-    return String(StringSlice(unsafe_from_utf8=pb[len(rb) + 1:len(pb)]))
+    return String(StringSpan(unsafe_from_utf8=pb[len(rb) + 1:len(pb)]))
 
 
 def _truncate_path_to(s: String, max_cols: Int) -> String:
@@ -889,7 +889,7 @@ def _extract_identifier(line: String, col_1based: Int) -> String:
     var end = col_1based - 1
     while end < len(b) and _is_ident_byte(b[end]):
         end += 1
-    return String(StringSlice(unsafe_from_utf8=b[start:end]))
+    return String(StringSpan(unsafe_from_utf8=b[start:end]))
 
 
 def _parse_rg_match_line(
@@ -918,12 +918,12 @@ def _parse_rg_match_line(
                 while k < len(b) and Int(b[k]) >= 0x30 and Int(b[k]) <= 0x39:
                     k += 1
                 if k > j + 1 and k < len(b) and b[k] == 0x3A:
-                    var path = String(StringSlice(unsafe_from_utf8=b[0:i]))
+                    var path = String(StringSpan(unsafe_from_utf8=b[0:i]))
                     var line_no = _parse_int(b, i + 1, j)
                     var col_no = _parse_int(b, j + 1, k)
                     if line_no <= 0 or col_no <= 0:
                         return Optional[Tuple[String, Int, Int, String]]()
-                    var text = String(StringSlice(
+                    var text = String(StringSpan(
                         unsafe_from_utf8=b[k + 1:len(b)],
                     ))
                     return Optional[Tuple[String, Int, Int, String]](
@@ -978,7 +978,7 @@ def sanitize_symbol_query(query: String) -> String:
             out.append(b[i])
     if len(out) == 0:
         return String("")
-    return String(StringSlice(ptr=out.unsafe_ptr(), length=len(out)))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=len(out))))
 
 
 def _query_member(q: String) -> String:
@@ -990,7 +990,7 @@ def _query_member(q: String) -> String:
     for i in range(len(b)):
         if Int(b[i]) == 0x2E:   # '.'
             start = i + 1
-    return String(StringSlice(unsafe_from_utf8=b[start:len(b)]))
+    return String(StringSpan(unsafe_from_utf8=b[start:len(b)]))
 
 
 def _query_qualifier(q: String) -> String:
@@ -1005,7 +1005,7 @@ def _query_qualifier(q: String) -> String:
             last = i
     if last < 0:
         return String("")
-    return String(StringSlice(unsafe_from_utf8=b[0:last]))
+    return String(StringSpan(unsafe_from_utf8=b[0:last]))
 
 
 def container_matches_qualifier(container: String, qualifier: String) -> Bool:

@@ -541,6 +541,6 @@ def parse_sgr(text: String, base_attr: Attr) -> Tuple[String, List[ColorRun]]:
     var clean_str = String("")
     if len(clean) > 0:
         clean_str = String(
-            StringSlice(ptr=clean.unsafe_ptr(), length=len(clean))
+            StringSpan(unsafe_from_utf8=Span(unsafe_ptr=clean.unsafe_ptr(), length=len(clean)))
         )
     return (clean_str^, runs^)

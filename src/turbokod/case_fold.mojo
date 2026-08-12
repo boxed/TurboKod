@@ -118,11 +118,11 @@ def is_ascii(b: Span[UInt8, _]) -> Bool:
     var acc_v = SIMD[DType.uint8, FOLD_W](0)
     var i = 0
     while i + FOLD_W <= n:
-        acc_v |= (p + i).load[width=FOLD_W]()
+        acc_v |= p.unsafe_offset(i).unsafe_load[width=FOLD_W]()
         i += FOLD_W
     var acc = acc_v.reduce_or()
     while i < n:
-        acc |= p[i]
+        acc |= p[unsafe_offset=i]
         i += 1
     return (acc & 0x80) == 0
 
@@ -141,15 +141,15 @@ def fold_ascii_into(b: Span[UInt8, _], mut out: List[UInt8]) -> Bool:
     var acc_v = SIMD[DType.uint8, FOLD_W](0)
     var i = 0
     while i + FOLD_W <= n:
-        var v = (src + i).load[width=FOLD_W]()
+        var v = src.unsafe_offset(i).unsafe_load[width=FOLD_W]()
         acc_v |= v
-        (dst + i).store(_fold_vec(v))
+        dst.unsafe_offset(i).unsafe_store(_fold_vec(v))
         i += FOLD_W
     var acc = acc_v.reduce_or()
     while i < n:
-        var c = src[i]
+        var c = src[unsafe_offset=i]
         acc |= c
-        dst[i] = fold_byte(c)
+        dst[unsafe_offset=i] = fold_byte(c)
         i += 1
     return (acc & 0x80) == 0
 
@@ -159,7 +159,7 @@ def fold_ascii(s: String) -> String:
     whole non-ASCII range included — passed through byte for byte."""
     var buf = List[UInt8](capacity=len(s.as_bytes()) + 1)
     _ = fold_ascii_into(s.as_bytes(), buf)
-    return String(StringSlice(unsafe_from_utf8=buf))
+    return String(StringSpan(unsafe_from_utf8=buf))
 
 
 # --- search ----------------------------------------------------------------
@@ -171,13 +171,13 @@ def fold_ascii(s: String) -> String:
 
 @always_inline
 def _needle_at[fold: Bool](
-    p: UnsafePointer[UInt8, _], at: Int, nb: Span[UInt8, _], from_: Int,
+    p: Pointer[UInt8, _], at: Int, nb: Span[UInt8, _], from_: Int,
 ) -> Bool:
     """Verify ``nb[from_:]`` against the haystack at ``at + from_``.
     ``nb`` is already folded when ``fold`` is set, so only the haystack
     side needs folding."""
     for j in range(from_, len(nb)):
-        var c = p[at + j]
+        var c = p[unsafe_offset=at + j]
 
         comptime if fold:
             c = fold_byte(c)
@@ -212,8 +212,8 @@ def _find[fold: Bool](
     var last = SIMD[DType.uint8, FOLD_W](nb[n - 1])
     var i = start
     while i + FOLD_W <= last_i + 1:
-        var v0 = (p + i).load[width=FOLD_W]()
-        var v1 = (p + i + n - 1).load[width=FOLD_W]()
+        var v0 = p.unsafe_offset(i).unsafe_load[width=FOLD_W]()
+        var v1 = p.unsafe_offset(i + n - 1).unsafe_load[width=FOLD_W]()
 
         comptime if fold:
             v0 = _fold_vec(v0)
@@ -225,7 +225,7 @@ def _find[fold: Bool](
                     return i + k
         i += FOLD_W
     while i <= last_i:
-        var c = p[i]
+        var c = p[unsafe_offset=i]
 
         comptime if fold:
             c = fold_byte(c)
@@ -296,10 +296,10 @@ def scan_folded(hb: Span[UInt8, _], nb: Span[UInt8, _], start: Int) -> FoldScan:
     var found = -1
     var i = start
     while i + FOLD_W <= last_i + 1:
-        var v0 = (p + i).load[width=FOLD_W]()
+        var v0 = p.unsafe_offset(i).unsafe_load[width=FOLD_W]()
         acc_v |= v0
         if found < 0:
-            var v1 = _fold_vec((p + i + n - 1).load[width=FOLD_W]())
+            var v1 = _fold_vec(p.unsafe_offset(i + n - 1).unsafe_load[width=FOLD_W]())
             var m = _fold_vec(v0).eq(first) & v1.eq(last)
             if m.reduce_or():
                 for k in range(FOLD_W):
@@ -310,7 +310,7 @@ def scan_folded(hb: Span[UInt8, _], nb: Span[UInt8, _], start: Int) -> FoldScan:
     var acc = acc_v.reduce_or()
     # Tail positions that can still start a match.
     while i <= last_i:
-        var c = p[i]
+        var c = p[unsafe_offset=i]
         acc |= c
         if found < 0 and fold_byte(c) == nb[0] \
                 and _needle_at[True](p, i, nb, 1):
@@ -319,7 +319,7 @@ def scan_folded(hb: Span[UInt8, _], nb: Span[UInt8, _], start: Int) -> FoldScan:
     # The final ``n - 1`` bytes can't start a match but still decide
     # whether the whole region was ASCII.
     while i < h:
-        acc |= p[i]
+        acc |= p[unsafe_offset=i]
         i += 1
     return FoldScan(found, (acc & 0x80) == 0)
 
@@ -371,13 +371,13 @@ def eq_ci(a: String, b: String) -> Bool:
     var diff = SIMD[DType.uint8, FOLD_W](0)
     var i = 0
     while i + FOLD_W <= n:
-        diff |= _fold_vec((pa + i).load[width=FOLD_W]()) ^ _fold_vec(
-            (pb + i).load[width=FOLD_W]()
+        diff |= _fold_vec(pa.unsafe_offset(i).unsafe_load[width=FOLD_W]()) ^ _fold_vec(
+            pb.unsafe_offset(i).unsafe_load[width=FOLD_W]()
         )
         i += FOLD_W
     var acc = diff.reduce_or()
     while i < n:
-        acc |= fold_byte(pa[i]) ^ fold_byte(pb[i])
+        acc |= fold_byte(pa[unsafe_offset=i]) ^ fold_byte(pb[unsafe_offset=i])
         i += 1
     return acc == 0
 
@@ -394,12 +394,12 @@ def starts_with_ci(name: String, prefix: String) -> Bool:
     var diff = SIMD[DType.uint8, FOLD_W](0)
     var i = 0
     while i + FOLD_W <= n:
-        diff |= _fold_vec((pa + i).load[width=FOLD_W]()) ^ _fold_vec(
-            (pp + i).load[width=FOLD_W]()
+        diff |= _fold_vec(pa.unsafe_offset(i).unsafe_load[width=FOLD_W]()) ^ _fold_vec(
+            pp.unsafe_offset(i).unsafe_load[width=FOLD_W]()
         )
         i += FOLD_W
     var acc = diff.reduce_or()
     while i < n:
-        acc |= fold_byte(pa[i]) ^ fold_byte(pp[i])
+        acc |= fold_byte(pa[unsafe_offset=i]) ^ fold_byte(pp[unsafe_offset=i])
         i += 1
     return acc == 0

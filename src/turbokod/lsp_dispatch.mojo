@@ -3857,9 +3857,7 @@ struct LspManager(Copyable, Movable):
         if len(cb) <= room:
             self._stderr_log = self._stderr_log + chunk
         else:
-            self._stderr_log = self._stderr_log + String(StringSlice(
-                ptr=cb.unsafe_ptr(), length=room,
-            ))
+            self._stderr_log = self._stderr_log + String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=cb.unsafe_ptr(), length=room)))
 
     def _on_publish_diagnostics(mut self, params: JsonValue):
         """Replace (not merge) the bucket for the published URI. The
@@ -5428,9 +5426,7 @@ def _first_nonempty_line(s: String) -> String:
     var start = 0
     for i in range(len(b)):
         if b[i] == 0x0A:
-            var seg = String(StringSlice(
-                ptr=b.unsafe_ptr() + start, length=i - start,
-            ))
+            var seg = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(start), length=i - start)))
             var trimmed = _trim_trailing_newline(seg)
             var tb = trimmed.as_bytes()
             var has_text = False
@@ -5443,9 +5439,7 @@ def _first_nonempty_line(s: String) -> String:
                 return trimmed^
             start = i + 1
     if start < len(b):
-        return _trim_trailing_newline(String(StringSlice(
-            ptr=b.unsafe_ptr() + start, length=len(b) - start,
-        )))
+        return _trim_trailing_newline(String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(start), length=len(b) - start))))
     return String("")
 
 
@@ -5459,7 +5453,7 @@ def _trim_trailing_newline(s: String) -> String:
         end -= 1
     if end == len(b):
         return s
-    return String(StringSlice(ptr=b.unsafe_ptr(), length=end))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr(), length=end)))
 
 
 def _text_document(path: String) -> JsonValue:
@@ -6188,9 +6182,7 @@ def _path_to_uri(path: String) -> String:
             out.append(0x25)            # '%'
             out.append(_uri_hex_nibble((c >> 4) & 0xF))
             out.append(_uri_hex_nibble(c & 0xF))
-    return String("file://") + String(StringSlice(
-        ptr=out.unsafe_ptr(), length=len(out),
-    ))
+    return String("file://") + String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=len(out))))
 
 
 def uri_to_path(uri: String) -> String:
@@ -6225,4 +6217,4 @@ def _uri_to_path(uri: String) -> String:
                 continue
         out.append(ub[i])
         i += 1
-    return String(StringSlice(ptr=out.unsafe_ptr(), length=len(out)))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=len(out))))

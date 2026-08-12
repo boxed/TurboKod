@@ -194,22 +194,21 @@ struct InstallRunner(Movable):
             var n = read_into(fd, scratch, 4096)
             if n <= 0:
                 break
-            append_string_bytes(chunk, String(StringSlice(
-                ptr=scratch.unsafe_ptr(), length=n,
-            )))
+            append_string_bytes(chunk, String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=scratch.unsafe_ptr(), length=n))))
             total += n
         if len(chunk) > 0:
-            self.output = self.output + String(StringSlice(
-                ptr=chunk.unsafe_ptr(), length=len(chunk),
-            ))
+            self.output = self.output + String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=chunk.unsafe_ptr(), length=len(chunk))))
         if len(self.output.as_bytes()) > _OUTPUT_CAP:
             # Keep the *tail*: install failures put the diagnostic at the
             # bottom of the log, and silently dropping the head is much
             # less misleading than dropping a multi-megabyte tail.
             var ob = self.output.as_bytes()
-            self.output = String(StringSlice(
+            # Temporary: ``ob`` borrows ``self.output``, so the trimmed
+            # value must exist before we overwrite what it points into.
+            var tail = String(StringSpan(
                 unsafe_from_utf8=ob[len(ob) - _OUTPUT_CAP:],
             ))
+            self.output = tail^
 
     def _reset(mut self):
         # Close the parent ends of the pipes that we still own; the child
@@ -308,7 +307,7 @@ struct InstallRunner(Movable):
         if n == 0:
             return String(" ")
         var idx = (elapsed // _SPINNER_PERIOD_MS) % n
-        return String(StringSlice(unsafe_from_utf8=fb[idx:idx + 1]))
+        return String(StringSpan(unsafe_from_utf8=fb[idx:idx + 1]))
 
 
 # --- helpers ----------------------------------------------------------------
@@ -334,7 +333,7 @@ def _last_lines(text: String, n: Int) -> List[String]:
                          or b[end - 1] == 0x09):
                 end -= 1
             if end > line_start:
-                lines.append(String(StringSlice(
+                lines.append(String(StringSpan(
                     unsafe_from_utf8=b[line_start:end],
                 )))
             line_start = i + 1
@@ -346,7 +345,7 @@ def _last_lines(text: String, n: Int) -> List[String]:
                      or b[end - 1] == 0x09):
             end -= 1
         if end > line_start:
-            lines.append(String(StringSlice(
+            lines.append(String(StringSpan(
                 unsafe_from_utf8=b[line_start:end],
             )))
     if len(lines) <= n:

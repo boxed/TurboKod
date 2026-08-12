@@ -42,7 +42,7 @@ from .events import (
     KEY_F7, KEY_F8, KEY_F9, KEY_F10, KEY_F11, KEY_F12,
     KEY_HOME, KEY_INSERT, KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP,
     KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP,
-    MOD_CTRL, MOD_META, MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT,
+    MOD_ALT, MOD_CTRL, MOD_META, MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT,
     MOUSE_BUTTON_NONE, MOUSE_BUTTON_RIGHT,
 )
 from .clipboard import clipboard_copy, clipboard_paste
@@ -9398,16 +9398,11 @@ struct Desktop(Movable):
                     var eb = err.as_bytes()
                     for k in range(len(eb)):
                         if eb[k] == 0x0A:
-                            var seg = String(StringSlice(
-                                ptr=eb.unsafe_ptr() + start, length=k - start,
-                            ))
+                            var seg = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=eb.unsafe_ptr().unsafe_offset(start), length=k - start)))
                             lines.append(String("    ") + seg)
                             start = k + 1
                     if start < len(eb):
-                        var tail = String(StringSlice(
-                            ptr=eb.unsafe_ptr() + start,
-                            length=len(eb) - start,
-                        ))
+                        var tail = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=eb.unsafe_ptr().unsafe_offset(start), length=len(eb) - start)))
                         lines.append(String("    ") + tail)
                 # Server protocol log (window/logMessage + telemetry/event)
                 # — a server that explains a problem via logMessage rather
@@ -9419,17 +9414,11 @@ struct Desktop(Movable):
                     var lb = lg.as_bytes()
                     for k in range(len(lb)):
                         if lb[k] == 0x0A:
-                            var seg = String(StringSlice(
-                                ptr=lb.unsafe_ptr() + lstart,
-                                length=k - lstart,
-                            ))
+                            var seg = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=lb.unsafe_ptr().unsafe_offset(lstart), length=k - lstart)))
                             lines.append(String("    ") + seg)
                             lstart = k + 1
                     if lstart < len(lb):
-                        var ltail = String(StringSlice(
-                            ptr=lb.unsafe_ptr() + lstart,
-                            length=len(lb) - lstart,
-                        ))
+                        var ltail = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=lb.unsafe_ptr().unsafe_offset(lstart), length=len(lb) - lstart)))
                         lines.append(String("    ") + ltail)
         # Show what python candidates are on $PATH so the user can
         # tell why ty (or pyright) was selected.
@@ -9535,16 +9524,11 @@ struct Desktop(Movable):
             var eb = err.as_bytes()
             for k in range(len(eb)):
                 if eb[k] == 0x0A:
-                    var seg = String(StringSlice(
-                        ptr=eb.unsafe_ptr() + start, length=k - start,
-                    ))
+                    var seg = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=eb.unsafe_ptr().unsafe_offset(start), length=k - start)))
                     lines.append(String("  ") + seg)
                     start = k + 1
             if start < len(eb):
-                var tail = String(StringSlice(
-                    ptr=eb.unsafe_ptr() + start,
-                    length=len(eb) - start,
-                ))
+                var tail = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=eb.unsafe_ptr().unsafe_offset(start), length=len(eb) - start)))
                 lines.append(String("  ") + tail)
         var body = String("")
         for i in range(len(lines)):
@@ -11434,7 +11418,7 @@ struct Desktop(Movable):
         var seg_end = seg_start
         while seg_end < len(pb) and pb[seg_end] != 0x2F:
             seg_end += 1
-        var seg = String(StringSlice(unsafe_from_utf8=pb[seg_start:seg_end]))
+        var seg = String(StringSpan(unsafe_from_utf8=pb[seg_start:seg_end]))
         for k in range(len(deps)):
             if seg == deps[k]:
                 return True
@@ -12063,7 +12047,10 @@ struct Desktop(Movable):
             if b[k] == 0x2F:
                 slash = k
         if slash >= 0:
-            label = String(StringSlice(unsafe_from_utf8=b[slash + 1:]))
+            # Temporary: ``b`` borrows ``label``, so building the basename
+            # and assigning it in one expression would alias.
+            var basename = String(StringSpan(unsafe_from_utf8=b[slash + 1:]))
+            label = basename^
         try:
             var proc = LspProcess.spawn(argv)
             # On-save actions don't read from stdin — close it now so
@@ -12828,7 +12815,7 @@ struct Desktop(Movable):
                             matches = False
                             break
                     if matches:
-                        package = String(StringSlice(
+                        package = String(StringSpan(
                             unsafe_from_utf8=hb[len(pb):len(hb)],
                         ))
                 break
@@ -13851,7 +13838,7 @@ struct Desktop(Movable):
             hi -= 1
         if lo == 0 and hi == n:
             return s
-        return String(StringSlice(unsafe_from_utf8=b[lo:hi]))
+        return String(StringSpan(unsafe_from_utf8=b[lo:hi]))
 
     def _maybe_open_context_menu(mut self):
         """Drain ``Editor.consume_context_menu_request`` on the focused
@@ -14962,12 +14949,8 @@ struct Desktop(Movable):
                     sep = k
                     break
             if sep > 0:
-                var path = String(StringSlice(
-                    ptr=ab.unsafe_ptr(), length=sep,
-                ))
-                var line_str = String(StringSlice(
-                    ptr=ab.unsafe_ptr() + sep + 1, length=len(ab) - sep - 1,
-                ))
+                var path = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=ab.unsafe_ptr(), length=sep)))
+                var line_str = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=ab.unsafe_ptr().unsafe_offset(sep).unsafe_offset(1), length=len(ab) - sep - 1)))
                 var line = 0
                 try:
                     line = Int(atol(line_str))
@@ -15082,14 +15065,14 @@ def _expand_save_placeholders(arg: String, saved_path: String) -> String:
                 break
         if hit:
             if i > run_start:
-                out = out + String(StringSlice(unsafe_from_utf8=b[run_start:i]))
+                out = out + String(StringSpan(unsafe_from_utf8=b[run_start:i]))
             out = out + saved_path
             i += t
             run_start = i
         else:
             i += 1
     if run_start < n:
-        out = out + String(StringSlice(unsafe_from_utf8=b[run_start:n]))
+        out = out + String(StringSpan(unsafe_from_utf8=b[run_start:n]))
     return out
 
 
@@ -15111,7 +15094,7 @@ def _recent_display_label(path: String, project_root: String) -> String:
             return path
     if pb[len(rb)] != 0x2F:
         return path
-    return String(StringSlice(unsafe_from_utf8=pb[len(rb) + 1:]))
+    return String(StringSpan(unsafe_from_utf8=pb[len(rb) + 1:]))
 
 
 def _clip_rect_to_workspace(rect: Rect, workspace: Rect) -> Rect:
@@ -15308,14 +15291,14 @@ def _split_version_pins(content: String) -> List[String]:
             or b[i] == UInt8(ord("\n")) or b[i] == UInt8(ord("\r"))
         if ws:
             if start >= 0:
-                pins.append(String(StringSlice(
+                pins.append(String(StringSpan(
                     unsafe_from_utf8=b[start:i],
                 )))
                 start = -1
         elif start < 0:
             start = i
     if start >= 0:
-        pins.append(String(StringSlice(unsafe_from_utf8=b[start:len(b)])))
+        pins.append(String(StringSpan(unsafe_from_utf8=b[start:len(b)])))
     return pins^
 
 

@@ -33,7 +33,6 @@ and cleared by the host each tick.
 
 from std.collections.list import List
 from std.ffi import external_call
-from std.memory.span import Span
 
 from .canvas import Canvas
 from .claude_detect import (
@@ -333,7 +332,7 @@ struct TerminalPane(Copyable, Movable):
                     self.pty.alive = False
                 break
             var span = Span[UInt8, origin_of(scratch)](
-                ptr=scratch.unsafe_ptr(), length=n,
+                unsafe_ptr=scratch.unsafe_ptr(), length=n,
             )
             self.vt.feed(span)
             total += n
@@ -688,7 +687,7 @@ struct TerminalPane(Copyable, Movable):
         # buffer is full (a stuck child not draining). For typical
         # keystroke payloads (1..10 bytes) this loop runs once.
         while sent < n:
-            var rc = self.pty.write_bytes(bytes.unsafe_ptr() + sent, n - sent)
+            var rc = self.pty.write_bytes(bytes.unsafe_ptr().unsafe_offset(sent), n - sent)
             if rc < 0:
                 return  # EPIPE / EBADF — child gone. Next tick reaps.
             if rc == 0:

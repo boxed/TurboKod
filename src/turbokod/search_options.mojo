@@ -75,7 +75,7 @@ def regex_escape_literal(needle: String) -> String:
                 or c == 0x28 or c == 0x29 or c == 0x5B or c == 0x5D \
                 or c == 0x7B or c == 0x7D:
             out = out + String("\\")
-        var ch = chr(c) if c < 0x80 else String(StringSlice(
+        var ch = chr(c) if c < 0x80 else String(StringSpan(
             unsafe_from_utf8=b[i:i + 1],
         ))
         out = out + ch
@@ -243,7 +243,7 @@ struct LineSearcher(ImplicitlyCopyable, Movable):
             return self._span_of(at)
         if not self.rx:
             return Optional[MatchSpan]()
-        return self._regex_span(String(StringSlice(unsafe_from_utf8=lb)), start)
+        return self._regex_span(String(StringSpan(unsafe_from_utf8=lb)), start)
 
     def rsearch(self, line: String, limit: Int) -> Optional[MatchSpan]:
         """Last match whose start is <= ``limit``, or None. Neither

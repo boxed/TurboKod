@@ -845,7 +845,7 @@ def word_at(line: String, col: Int) -> String:
         if not is_word_codepoint(info[0]):
             break
         end += info[1]
-    return String(StringSlice(unsafe_from_utf8=b[start:end]))
+    return String(StringSpan(unsafe_from_utf8=b[start:end]))
 
 
 def template_include_at(line: String, col: Int) -> String:
@@ -904,7 +904,7 @@ def template_include_at(line: String, col: Int) -> String:
                 var e = k
                 while e > start and (b[e - 1] == 0x20 or b[e - 1] == 0x09):
                     e -= 1
-                return String(StringSlice(unsafe_from_utf8=b[start:e]))
+                return String(StringSpan(unsafe_from_utf8=b[start:e]))
             if not found_quote:
                 return String("")
             j = k + 1
@@ -1752,7 +1752,7 @@ def _highlight_generic_line(
             var start = i
             while i < n and _is_ident_part(b[i]):
                 i += 1
-            var word = String(StringSlice(unsafe_from_utf8=b[start:i]))
+            var word = String(StringSpan(unsafe_from_utf8=b[start:i]))
             if _is_keyword_in(word, spec.keywords):
                 out.append(Highlight(row, start, i, highlight_keyword_attr()))
             else:
@@ -2030,7 +2030,7 @@ def _md_fence_info(line: String, start: Int) -> String:
         i += 1
     if i <= s:
         return String("")
-    return String(StringSlice(unsafe_from_utf8=b[s:i]))
+    return String(StringSpan(unsafe_from_utf8=b[s:i]))
 
 
 def _apply_markdown_fence_injections(
@@ -2110,7 +2110,7 @@ def _find_language_marker(line: String) -> Optional[_LangMarker]:
             while j < n and _is_lang_char(b[j]):
                 j += 1
             if j > i + nlen:
-                var raw = String(StringSlice(unsafe_from_utf8=b[i + nlen:j]))
+                var raw = String(StringSpan(unsafe_from_utf8=b[i + nlen:j]))
                 return Optional[_LangMarker](_LangMarker(
                     _to_lower_ascii(raw), j,
                 ))
@@ -2390,7 +2390,7 @@ def _slice_body_lines(
             e = len(b)
         if e < s:
             e = s
-        out.append(String(StringSlice(unsafe_from_utf8=b[s:e])))
+        out.append(String(StringSpan(unsafe_from_utf8=b[s:e])))
         return out^
     var b0 = lines[body.start_row].as_bytes()
     var s0 = body.start_col
@@ -2398,7 +2398,7 @@ def _slice_body_lines(
         s0 = 0
     if s0 > len(b0):
         s0 = len(b0)
-    out.append(String(StringSlice(unsafe_from_utf8=b0[s0:len(b0)])))
+    out.append(String(StringSpan(unsafe_from_utf8=b0[s0:len(b0)])))
     for r in range(body.start_row + 1, body.end_row):
         out.append(lines[r])
     var bN = lines[body.end_row].as_bytes()
@@ -2407,7 +2407,7 @@ def _slice_body_lines(
         eN = 0
     if eN > len(bN):
         eN = len(bN)
-    out.append(String(StringSlice(unsafe_from_utf8=bN[0:eN])))
+    out.append(String(StringSpan(unsafe_from_utf8=bN[0:eN])))
     return out^
 
 

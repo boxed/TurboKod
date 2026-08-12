@@ -38,7 +38,6 @@ assert.
 """
 
 from std.collections.list import List
-from std.memory.span import Span
 
 from .cell import Cell, blank_cell
 from .colors import (
@@ -403,9 +402,7 @@ struct Vt(Copyable, Movable):
             var end = len(bytes)
             while end > 0 and bytes[end - 1] == 0x20:
                 end -= 1
-            out.append(String(StringSlice(
-                ptr=bytes.unsafe_ptr(), length=end,
-            )))
+            out.append(String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=bytes.unsafe_ptr(), length=end))))
         return out^
 
     def view_cell_at(self, r: Int, c: Int) -> Cell:
@@ -433,7 +430,7 @@ struct Vt(Copyable, Movable):
             return blank_cell()
         if abs_row < sb_len:
             # Index without copying — only the single Cell we return
-            # needs to leave the function. ``UnsafePointer`` into the
+            # needs to leave the function. ``Pointer`` into the
             # nested list is overkill for one cell; ``copy()`` of the
             # inner row is one allocation we'd like to avoid, but Mojo
             # won't let us index a non-implicitly-copyable nested List
@@ -579,9 +576,7 @@ struct Vt(Copyable, Movable):
         bytes.append(UInt8(cb + 32))
         bytes.append(UInt8(x + 32))
         bytes.append(UInt8(y + 32))
-        return String(StringSlice(
-            ptr=bytes.unsafe_ptr(), length=len(bytes),
-        ))
+        return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=bytes.unsafe_ptr(), length=len(bytes))))
 
     def take_bell(mut self) -> Bool:
         """Consume the latched-bell flag. Returns True iff a BEL
@@ -760,9 +755,7 @@ struct Vt(Copyable, Movable):
         if b < 0x80:
             var one = List[UInt8]()
             one.append(UInt8(b))
-            self._print_glyph(String(StringSlice(
-                ptr=one.unsafe_ptr(), length=1,
-            )))
+            self._print_glyph(String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=one.unsafe_ptr(), length=1))))
             return
         # UTF-8 leading byte → enter UTF-8 collection.
         var remaining: Int
@@ -794,10 +787,7 @@ struct Vt(Copyable, Movable):
         if self._utf8_remaining > 0:
             return
         # Complete — assemble the glyph.
-        var glyph = String(StringSlice(
-            ptr=self._utf8_buf.unsafe_ptr(),
-            length=len(self._utf8_buf),
-        ))
+        var glyph = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=self._utf8_buf.unsafe_ptr(), length=len(self._utf8_buf))))
         self._state = _S_GROUND
         self._print_glyph(glyph)
 
@@ -1493,13 +1483,11 @@ struct Vt(Copyable, Movable):
             self._state = _S_OSC_ESC
             return
         # Accept the byte verbatim. We accumulate as raw bytes via the
-        # StringSlice trick; for an OSC title the byte stream is
+        # StringSpan trick; for an OSC title the byte stream is
         # well-formed UTF-8 in practice.
         var tmp = List[UInt8]()
         tmp.append(UInt8(b))
-        self._osc_buf = self._osc_buf + String(StringSlice(
-            ptr=tmp.unsafe_ptr(), length=1,
-        ))
+        self._osc_buf = self._osc_buf + String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=tmp.unsafe_ptr(), length=1)))
 
     def _step_osc_esc(mut self, b: Int):
         if b == 0x5C:  # '\\' — String Terminator
@@ -1538,9 +1526,7 @@ struct Vt(Copyable, Movable):
             param = param * 10 + (c - 0x30)
         if param == 0 or param == 1 or param == 2:
             var t_start = sep + 1
-            self.title = String(StringSlice(
-                ptr=b.unsafe_ptr() + t_start, length=n - t_start,
-            ))
+            self.title = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(t_start), length=n - t_start)))
             return
         if param == 52:
             # OSC 52: ``52;<targets>;<base64>``. Targets are c/p/s
@@ -1569,9 +1555,7 @@ struct Vt(Copyable, Movable):
             # First payload byte ``?`` is a query — skip.
             if b[p_start] == 0x3F:  # '?'
                 return
-            var payload = String(StringSlice(
-                ptr=b.unsafe_ptr() + p_start, length=n - p_start,
-            ))
+            var payload = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(p_start), length=n - p_start)))
             var decoded = _b64_decode(payload^)
             if len(decoded.as_bytes()) > 0:
                 # Defer the actual clipboard write to the pane — the
@@ -1677,4 +1661,4 @@ def _b64_decode(var s: String) -> String:
             out.append(UInt8((accum >> bits) & 0xFF))
     if len(out) == 0:
         return String("")
-    return String(StringSlice(ptr=out.unsafe_ptr(), length=len(out)))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=len(out))))

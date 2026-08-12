@@ -171,7 +171,7 @@ def _format_int(value: Int, base: Int, min_digits: Int) -> String:
     while i >= 0:
         fwd.append(rev[i])
         i -= 1
-    var digits = String(StringSlice(ptr=fwd.unsafe_ptr(), length=len(fwd)))
+    var digits = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=fwd.unsafe_ptr(), length=len(fwd))))
     if negative:
         return String("-") + digits
     return digits

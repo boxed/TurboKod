@@ -167,9 +167,7 @@ struct GridSelection(Copyable, Movable):
             var end = len(row_bytes)
             while end > 0 and row_bytes[end - 1] == 0x20:
                 end -= 1
-            out = out + String(StringSlice(
-                ptr=row_bytes.unsafe_ptr(), length=end,
-            ))
+            out = out + String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=row_bytes.unsafe_ptr(), length=end)))
             if r < sr1:
                 out = out + String("\n")
         return out^
@@ -617,13 +615,13 @@ def _codepoint_to_utf8(cp: UInt32) -> String:
         buf.append(UInt8(0x80 | ((c >> 12) & 0x3F)))
         buf.append(UInt8(0x80 | ((c >> 6) & 0x3F)))
         buf.append(UInt8(0x80 | (c & 0x3F)))
-    return String(StringSlice(ptr=buf.unsafe_ptr(), length=len(buf)))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=len(buf))))
 
 
 def _ascii_to_string(b: UInt8) -> String:
     var buf = List[UInt8]()
     buf.append(b)
-    return String(StringSlice(ptr=buf.unsafe_ptr(), length=1))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=1)))
 
 
 # --- visual helpers -------------------------------------------------------

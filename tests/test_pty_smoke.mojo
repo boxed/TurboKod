@@ -20,7 +20,6 @@ Run with::
 """
 
 from std.collections.list import List
-from std.memory.span import Span
 from std.testing import assert_equal, assert_true
 
 from turbokod.posix import (
@@ -44,7 +43,7 @@ def _drain_until_exit(mut pty: PtyProcess, mut vt: Vt, deadline_ms: Int):
             var n = read_into(pty.master_fd, scratch, 4096)
             if n > 0:
                 var span = Span[UInt8, origin_of(scratch)](
-                    ptr=scratch.unsafe_ptr(), length=n,
+                    unsafe_ptr=scratch.unsafe_ptr(), length=n,
                 )
                 vt.feed(span)
                 continue
@@ -58,7 +57,7 @@ def _drain_until_exit(mut pty: PtyProcess, mut vt: Vt, deadline_ms: Int):
                 var n2 = read_into(pty.master_fd, scratch, 4096)
                 if n2 <= 0: break
                 var span2 = Span[UInt8, origin_of(scratch)](
-                    ptr=scratch.unsafe_ptr(), length=n2,
+                    unsafe_ptr=scratch.unsafe_ptr(), length=n2,
                 )
                 vt.feed(span2)
             return

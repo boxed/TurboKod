@@ -135,10 +135,7 @@ def extract_python_traceback_links(line: String) -> List[LinkHit]:
                 i += 1
                 continue
             # Slice the path text out without re-decoding.
-            var path = String(StringSlice(
-                ptr=bytes.unsafe_ptr() + path_byte_start,
-                length=path_byte_end - path_byte_start,
-            ))
+            var path = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=bytes.unsafe_ptr().unsafe_offset(path_byte_start), length=path_byte_end - path_byte_start)))
             # Cell offsets: prefix ``File "`` is 6 cells (all ASCII),
             # then the path, the closing ``"``, then ``, line `` (7
             # cells), then digit_count cells.
@@ -263,10 +260,7 @@ def extract_path_line_links(line: String) -> List[LinkHit]:
                     else:
                         break
                 if p > digit_start:
-                    var path = String(StringSlice(
-                        ptr=bytes.unsafe_ptr() + tok_start_byte,
-                        length=tok_end_byte - tok_start_byte,
-                    ))
+                    var path = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=bytes.unsafe_ptr().unsafe_offset(tok_start_byte), length=tok_end_byte - tok_start_byte)))
                     # ``cell`` sits on the colon. Span = colon (1) plus
                     # the digits (all ASCII, one cell each).
                     var digit_count = p - digit_start
@@ -381,9 +375,7 @@ def extract_url_links(line: String) -> List[LinkHit]:
                     url_cell_count -= 1
                 # Require at least one character after the scheme.
                 if p > body_start:
-                    var url = String(StringSlice(
-                        ptr=bytes.unsafe_ptr() + i, length=p - i,
-                    ))
+                    var url = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=bytes.unsafe_ptr().unsafe_offset(i), length=p - i)))
                     out.append(LinkHit(
                         match_start_cell, match_start_cell + url_cell_count,
                         url, -1, True,

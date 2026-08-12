@@ -123,10 +123,10 @@ def _build_argv_buffer(args: List[String]) -> ArgvBuffer:
     # via blob.unsafe_ptr() + offset.
     var nptrs = len(args) + 1
     var pointers = alloc_zero_buffer(nptrs * 8)
-    var pp = pointers.unsafe_ptr().bitcast[Int]()
+    var pp = pointers.unsafe_ptr().unsafe_bitcast[Int]()
     for i in range(len(args)):
-        pp[i] = Int(blob.unsafe_ptr()) + offsets[i]
-    pp[len(args)] = 0
+        pp[unsafe_offset=i] = Int(blob.unsafe_ptr()) + offsets[i]
+    pp[unsafe_offset=len(args)] = 0
     return ArgvBuffer(blob^, pointers^)
 
 
@@ -241,10 +241,8 @@ def _drain_to_eof(fd: Int32) -> String:
         var n = read_into(fd, scratch, 8192)
         if n <= 0:
             break
-        append_string_bytes(buf, String(StringSlice(
-            ptr=scratch.unsafe_ptr(), length=n,
-        )))
-    return String(StringSlice(ptr=buf.unsafe_ptr(), length=len(buf)))
+        append_string_bytes(buf, String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=scratch.unsafe_ptr(), length=n))))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=len(buf))))
 
 
 # --- LspProcess -----------------------------------------------------------
@@ -461,9 +459,7 @@ struct LspProcess(Copyable, Movable):
             var preview = payload
             var pb = payload.as_bytes()
             if len(pb) > 400:
-                preview = String(StringSlice(
-                    ptr=pb.unsafe_ptr(), length=400,
-                )) + String("…")
+                preview = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=pb.unsafe_ptr(), length=400))) + String("…")
             self.trace(String("> ") + String(n) + String("B ") + preview)
         append_string_bytes(self._pending_write, hdr)
         append_string_bytes(self._pending_write, payload)
@@ -546,14 +542,19 @@ struct LspProcess(Copyable, Movable):
         var prefab = self._extract_one_message()
         if prefab:
             if self.trace_fd >= 0:
-                var pb = prefab.value().as_bytes()
-                var preview = prefab.value()
-                if len(pb) > 400:
-                    preview = String(StringSlice(
-                        ptr=pb.unsafe_ptr(), length=400,
-                    )) + String("…")
+                # Own the message first: taking ``as_bytes()`` off one
+                # ``value()`` call and then calling ``value()`` again for
+                # the preview invalidates that first interior reference.
+                var msg = prefab.value()
+                var nbytes = len(msg.as_bytes())
+                var preview = msg
+                if nbytes > 400:
+                    var mb = msg.as_bytes()
+                    preview = String(StringSpan(unsafe_from_utf8=Span(
+                        unsafe_ptr=mb.unsafe_ptr(), length=400,
+                    ))) + String("…")
                 self.trace(
-                    String("< ") + String(len(pb)) + String("B ") + preview,
+                    String("< ") + String(nbytes) + String("B ") + preview,
                 )
             return prefab
         var scratch = alloc_zero_buffer(65536)
@@ -584,14 +585,18 @@ struct LspProcess(Copyable, Movable):
             var extracted = self._extract_one_message()
             if extracted:
                 if self.trace_fd >= 0:
-                    var eb = extracted.value().as_bytes()
-                    var preview = extracted.value()
-                    if len(eb) > 400:
-                        preview = String(StringSlice(
-                            ptr=eb.unsafe_ptr(), length=400,
-                        )) + String("…")
+                    # Own the message first — see the matching comment in
+                    # the pre-drained branch above.
+                    var msg = extracted.value()
+                    var nbytes = len(msg.as_bytes())
+                    var preview = msg
+                    if nbytes > 400:
+                        var mb = msg.as_bytes()
+                        preview = String(StringSpan(unsafe_from_utf8=Span(
+                            unsafe_ptr=mb.unsafe_ptr(), length=400,
+                        ))) + String("…")
                     self.trace(
-                        String("< extracted ") + String(len(eb)) + String("B ")
+                        String("< extracted ") + String(nbytes) + String("B ")
                         + preview,
                     )
                 return extracted
@@ -616,10 +621,7 @@ struct LspProcess(Copyable, Movable):
         var body_start = hdr_end + 4
         if len(self._read_buffer) - body_start < content_length:
             return Optional[String]()
-        var body = String(StringSlice(
-            ptr=self._read_buffer.unsafe_ptr() + body_start,
-            length=content_length,
-        ))
+        var body = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=self._read_buffer.unsafe_ptr().unsafe_offset(body_start), length=content_length)))
         self._read_buffer = _drop_prefix(
             self._read_buffer^, body_start + content_length,
         )
@@ -649,9 +651,7 @@ struct LspProcess(Copyable, Movable):
             var m = read_into(self.stderr_fd, scratch, 4096)
             if m <= 0:
                 break
-            out = out + String(StringSlice(
-                ptr=scratch.unsafe_ptr(), length=m,
-            ))
+            out = out + String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=scratch.unsafe_ptr(), length=m)))
             total += m
         return out
 

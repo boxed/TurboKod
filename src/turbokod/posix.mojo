@@ -8,7 +8,7 @@ poll (timeout-aware input wait), read (stdin bytes). Stdout writes go through
 
 Where C functions take an opaque struct pointer (termios, winsize, pollfd) we
 allocate a ``List[UInt8]`` of conservative size and pass its raw pointer at the
-call site, never through a wrapper-function arg type. Mojo's ``UnsafePointer``
+call site, never through a wrapper-function arg type. Mojo's ``Pointer``
 needs an explicit origin parameter when used in a function signature; inlining
 the ``external_call`` avoids that whole song and dance.
 """
@@ -16,7 +16,6 @@ the ``external_call`` avoids that whole song and dance.
 from std.collections.list import List
 from std.ffi import external_call
 from std.io.file_descriptor import FileDescriptor
-from std.memory.span import Span
 from std.sys.info import CompilationTarget
 
 
@@ -138,8 +137,8 @@ def monotonic_ms() -> Int:
     )
     if Int(rc) != 0:
         return 0
-    var sec = Int(ts.unsafe_ptr().bitcast[Int64]()[0])
-    var nsec = Int(ts.unsafe_ptr().bitcast[Int64]()[1])
+    var sec = Int(ts.unsafe_ptr().unsafe_bitcast[Int64]()[unsafe_offset=0])
+    var nsec = Int(ts.unsafe_ptr().unsafe_bitcast[Int64]()[unsafe_offset=1])
     return sec * 1000 + nsec // 1_000_000
 
 
@@ -159,8 +158,8 @@ def wall_clock_ms() -> Int:
     )
     if Int(rc) != 0:
         return 0
-    var sec = Int(ts.unsafe_ptr().bitcast[Int64]()[0])
-    var nsec = Int(ts.unsafe_ptr().bitcast[Int64]()[1])
+    var sec = Int(ts.unsafe_ptr().unsafe_bitcast[Int64]()[unsafe_offset=0])
+    var nsec = Int(ts.unsafe_ptr().unsafe_bitcast[Int64]()[unsafe_offset=1])
     return sec * 1000 + nsec // 1_000_000
 
 
@@ -177,9 +176,9 @@ def poll_stdin(fd: Int32, timeout_ms: Int32) -> Bool:
     """
     var pfd = alloc_zero_buffer(POLLFD_SIZE)
     # Layout: int fd (4B), short events (2B), short revents (2B).
-    pfd.unsafe_ptr().bitcast[Int32]()[0] = fd
-    pfd.unsafe_ptr().bitcast[Int16]()[2] = POLLIN
-    pfd.unsafe_ptr().bitcast[Int16]()[3] = Int16(0)
+    pfd.unsafe_ptr().unsafe_bitcast[Int32]()[unsafe_offset=0] = fd
+    pfd.unsafe_ptr().unsafe_bitcast[Int16]()[unsafe_offset=2] = POLLIN
+    pfd.unsafe_ptr().unsafe_bitcast[Int16]()[unsafe_offset=3] = Int16(0)
     var n = external_call["poll", Int32](pfd.unsafe_ptr(), UInt(1), timeout_ms)
     return Int(n) > 0
 
@@ -221,9 +220,9 @@ def query_winsize(fd: Int32) -> Tuple[Int, Int]:
     var rc = external_call["ioctl", Int32](fd, tiocgwinsz(), ws.unsafe_ptr())
     if Int(rc) != 0:
         return (0, 0)
-    var p = ws.unsafe_ptr().bitcast[UInt16]()
-    var rows = Int(p[0])
-    var cols = Int(p[1])
+    var p = ws.unsafe_ptr().unsafe_bitcast[UInt16]()
+    var rows = Int(p[unsafe_offset=0])
+    var cols = Int(p[unsafe_offset=1])
     return (cols, rows)
 
 
@@ -310,7 +309,7 @@ def debug_log(msg: String):
 def write_string(fd: Int32, s: String):
     """Write ``s`` to ``fd`` via ``FileDescriptor.write_string``."""
     var f = FileDescriptor(Int(fd))
-    f.write_string(StringSlice(s))
+    f.write_string(StringSpan(s))
 
 
 # --- Path resolution --------------------------------------------------------
@@ -329,8 +328,8 @@ def pipe_pair() raises -> Tuple[Int32, Int32]:
     var rc = external_call["pipe", Int32](fds.unsafe_ptr())
     if Int(rc) != 0:
         raise Error("pipe() failed")
-    var p = fds.unsafe_ptr().bitcast[Int32]()
-    return (p[0], p[1])
+    var p = fds.unsafe_ptr().unsafe_bitcast[Int32]()
+    return (p[unsafe_offset=0], p[unsafe_offset=1])
 
 
 def close_fd(fd: Int32) -> Int32:
@@ -362,7 +361,7 @@ def waitpid_blocking(pid: Int32) -> Int32:
     ``waitpid_nohang`` for a non-blocking poll."""
     var status = alloc_zero_buffer(4)
     _ = external_call["waitpid", Int32](pid, status.unsafe_ptr(), Int32(0))
-    return status.unsafe_ptr().bitcast[Int32]()[0]
+    return status.unsafe_ptr().unsafe_bitcast[Int32]()[unsafe_offset=0]
 
 
 # --- TCP sockets ----------------------------------------------------------
@@ -442,15 +441,15 @@ def tcp_connect(host: String, port: Int) -> Int32:
     var ip = sa.unsafe_ptr()
     comptime if CompilationTarget.is_macos():
         # sin_len, sin_family, sin_port (BE), sin_addr (BE), sin_zero[8]
-        ip[0] = UInt8(16)
-        ip[1] = UInt8(_AF_INET)
-        ip.bitcast[UInt16]()[1] = UInt16(port_be)
-        ip.bitcast[UInt32]()[1] = addr_pair[0]
+        ip[unsafe_offset=0] = UInt8(16)
+        ip[unsafe_offset=1] = UInt8(_AF_INET)
+        ip.unsafe_bitcast[UInt16]()[unsafe_offset=1] = UInt16(port_be)
+        ip.unsafe_bitcast[UInt32]()[unsafe_offset=1] = addr_pair[0]
     else:
         # sin_family (16-bit), sin_port (BE), sin_addr (BE), sin_zero[8]
-        ip.bitcast[UInt16]()[0] = UInt16(_AF_INET)
-        ip.bitcast[UInt16]()[1] = UInt16(port_be)
-        ip.bitcast[UInt32]()[1] = addr_pair[0]
+        ip.unsafe_bitcast[UInt16]()[unsafe_offset=0] = UInt16(_AF_INET)
+        ip.unsafe_bitcast[UInt16]()[unsafe_offset=1] = UInt16(port_be)
+        ip.unsafe_bitcast[UInt32]()[unsafe_offset=1] = addr_pair[0]
     var rc = external_call["connect", Int32](fd, ip, UInt32(16))
     if Int(rc) != 0:
         _ = close_fd(fd)
@@ -464,7 +463,7 @@ def waitpid_nohang(pid: Int32) -> Tuple[Int32, Int32]:
     """
     var status = alloc_zero_buffer(4)
     var rc = external_call["waitpid", Int32](pid, status.unsafe_ptr(), WNOHANG)
-    return (rc, status.unsafe_ptr().bitcast[Int32]()[0])
+    return (rc, status.unsafe_ptr().unsafe_bitcast[Int32]()[unsafe_offset=0])
 
 
 def exit_code_from_status(status: Int) -> Int:
@@ -612,7 +611,7 @@ def posix_spawnp_call(
     _ = posix_spawnattr_destroy(attr)
     if Int(rc) != 0:
         raise Error("posix_spawnp failed")
-    return pid_buf.unsafe_ptr().bitcast[Int32]()[0]
+    return pid_buf.unsafe_ptr().unsafe_bitcast[Int32]()[unsafe_offset=0]
 
 
 def getenv_value(name: String) -> String:
@@ -632,7 +631,7 @@ def getenv_value(name: String) -> String:
         return String("")
     var out = alloc_zero_buffer(n)
     _ = external_call["memcpy", Int](out.unsafe_ptr(), addr, n)
-    return String(StringSlice(ptr=out.unsafe_ptr(), length=n))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=n)))
 
 
 def which(name: String) -> String:
@@ -657,7 +656,7 @@ def which(name: String) -> String:
     while i <= len(pb):
         if i == len(pb) or pb[i] == 0x3A:
             if i > start:
-                var entry = String(StringSlice(unsafe_from_utf8=pb[start:i]))
+                var entry = String(StringSpan(unsafe_from_utf8=pb[start:i]))
                 var candidate = entry + String("/") + name
                 var c_path = candidate + String("\0")
                 # F_OK = 0 — just check existence; let posix_spawnp fail
@@ -789,7 +788,7 @@ def recover_login_shell_path() -> Bool:
     ))
     if n <= 0:
         return False
-    var path = String(StringSlice(ptr=buf.unsafe_ptr(), length=n))
+    var path = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=n)))
     _ = setenv_value(String("PATH"), path)
     return True
 
@@ -849,7 +848,7 @@ def getcwd_path() -> String:
     var n = 0
     while n < 4096 and buf[n] != 0:
         n += 1
-    return String(StringSlice(ptr=buf.unsafe_ptr(), length=n))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=n)))
 
 
 def chdir_path(path: String) -> Int32:
@@ -882,7 +881,7 @@ def realpath(path: String) -> String:
     var n = 0
     while n < 4096 and resolved[n] != 0:
         n += 1
-    return String(StringSlice(ptr=resolved.unsafe_ptr(), length=n))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=resolved.unsafe_ptr(), length=n)))
 
 
 # --- Cursor-position size query ---------------------------------------------

@@ -40,7 +40,7 @@ def _slice(s: String, start: Int, end: Int) -> String:
     if s_start < 0: s_start = 0
     if s_end > len(bytes): s_end = len(bytes)
     if s_start >= s_end: return String("")
-    return String(StringSlice(unsafe_from_utf8=bytes[s_start:s_end]))
+    return String(StringSpan(unsafe_from_utf8=bytes[s_start:s_end]))
 
 
 def _to_lower(s: String) -> String:
@@ -138,7 +138,7 @@ struct EditorConfig(ImplicitlyCopyable, Movable):
         var buf = List[UInt8]()
         for _ in range(n):
             buf.append(0x20)
-        return String(StringSlice(ptr=buf.unsafe_ptr(), length=len(buf)))
+        return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=len(buf))))
 
     def line_separator(self) -> String:
         """Byte sequence to use between lines on disk. ``\\n`` by default."""
@@ -336,7 +336,7 @@ def _bytes_slice_to_string(
     var tmp = List[UInt8]()
     for i in range(start, end):
         tmp.append(bytes[i])
-    return String(StringSlice(ptr=tmp.unsafe_ptr(), length=len(tmp)))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=tmp.unsafe_ptr(), length=len(tmp))))
 
 
 def _split_alts(bytes: List[UInt8], start: Int, end: Int) -> List[String]:

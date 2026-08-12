@@ -165,11 +165,17 @@ struct OnigRegex(ImplicitlyCopyable, Movable):
 
     Copy semantics are *bitwise / aliasing*: a copied ``OnigRegex``
     shares the same underlying ``regex_t*`` and ``OnigRegion*`` as
-    its source. We don't run ``onig_free`` from a per-instance
-    ``__del__`` — that path was tried two ways (plain ``__del__``
-    and refcounted ``ArcPointer``) and both interacted badly with
-    Mojo's destructor sequencing in this version (the refcount
-    variant hung the next ``onig_search``).
+    its source. A plain ``__deinit__`` calling ``onig_free`` would
+    therefore double-free on the first copy — that's inherent to the
+    aliasing design, not a toolchain quirk. Refcounting is the only
+    correct shape, and it doesn't work: tried as ``ArcPointer``
+    (which hung the next ``onig_search``) and **re-tested under Mojo
+    1.0 with a manual heap refcount, which corrupts the heap** —
+    the next ``onig_new`` crashes inside ``onig_compile``'s malloc.
+    The frees are unambiguously the trigger: identical refcount
+    bookkeeping with the ``onig_free`` / ``onig_region_free`` calls
+    removed runs clean. Don't re-litigate this without a new
+    experiment; the 1.0 re-test is already done.
 
     Cleanup happens via a process-wide registry (``onig_shim.c``):
     every ``__init__`` calls ``tk_onig_track`` to record the
@@ -196,7 +202,7 @@ struct OnigRegex(ImplicitlyCopyable, Movable):
         var syn = _resolve_syntax()
         var pb = pattern.as_bytes()
         var pp = pattern.unsafe_ptr()
-        var pe = pp + len(pb)
+        var pe = pp.unsafe_offset(len(pb))
         # ``onig_new`` writes the freshly compiled regex_t* into the
         # 8-byte slot. We allocate 16 to be safe against a future
         # libonig that grows the out-arg.
@@ -218,7 +224,7 @@ struct OnigRegex(ImplicitlyCopyable, Movable):
         )
         if rc != 0:
             raise Error("onig_new failed: " + String(rc))
-        self._reg = slot.unsafe_ptr().bitcast[Int]()[0]
+        self._reg = slot.unsafe_ptr().unsafe_bitcast[Int]()[unsafe_offset=0]
         self._region = external_call["onig_region_new", Int]()
         if self._region == 0:
             raise Error("onig_region_new failed (out of memory)")
@@ -226,7 +232,7 @@ struct OnigRegex(ImplicitlyCopyable, Movable):
         # process registry (``onig_shim.c``). At program exit a
         # ``__attribute__((destructor))`` walks the registry and
         # frees everything in one shot — the substitute for the
-        # per-instance ``__del__`` we couldn't safely run from
+        # per-instance ``__deinit__`` we couldn't safely run from
         # Mojo (see the struct doc-comment for the lifecycle saga).
         _ = external_call["tk_onig_track", Int](self._reg, self._region)
 
@@ -262,8 +268,8 @@ struct OnigRegex(ImplicitlyCopyable, Movable):
         if start < 0 or start > len(hb):
             return Optional[OnigMatch]()
         var hp = haystack.unsafe_ptr()
-        var he = hp + len(hb)
-        var hs = hp + start
+        var he = hp.unsafe_offset(len(hb))
+        var hs = hp.unsafe_offset(start)
         var rc = external_call["onig_search", Int32](
             self._reg, hp, he, hs, he, self._region, options,
         )
@@ -298,11 +304,11 @@ struct OnigRegex(ImplicitlyCopyable, Movable):
 
 def _read_ptr(addr: Int) -> Int:
     """Read an 8-byte pointer-sized value at the given address."""
-    return UnsafePointer[Int, MutExternalOrigin](unsafe_from_address=addr)[0]
+    return Pointer[Int, MutUntrackedOrigin](unsafe_from_address=addr)[unsafe_offset=0]
 
 
 def _read_int32(addr: Int) -> Int:
     """Read a 4-byte signed int at the given address, sign-extended."""
     return Int(
-        UnsafePointer[Int32, MutExternalOrigin](unsafe_from_address=addr)[0]
+        Pointer[Int32, MutUntrackedOrigin](unsafe_from_address=addr)[unsafe_offset=0]
     )

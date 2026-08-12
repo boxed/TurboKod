@@ -173,7 +173,7 @@ def _byte_slice(s: String, lo: Int, hi: Int) -> String:
     if hi <= lo:
         return String("")
     var bytes = s.as_bytes()
-    return String(StringSlice(ptr=bytes.unsafe_ptr() + lo, length=hi - lo))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=bytes.unsafe_ptr().unsafe_offset(lo), length=hi - lo)))
 
 
 def build_concealed_segment(
@@ -242,5 +242,5 @@ def build_concealed_segment(
     if len(disp) == 0:
         display = String("")
     else:
-        display = String(StringSlice(ptr=disp.unsafe_ptr(), length=len(disp)))
+        display = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=disp.unsafe_ptr(), length=len(disp))))
     return (display, byte_to_cell^, cell)

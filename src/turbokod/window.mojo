@@ -22,7 +22,8 @@ from .editor import (
 )
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
-    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
+    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_BUTTON_RIGHT,
+    MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .file_io import basename, parent_path
 from .geometry import Point, Rect

@@ -183,7 +183,7 @@ def _strip_prefix_b(line: String) -> String:
         ofs += 2
     elif ofs < n and bytes[ofs] == 0x61 and ofs + 1 < n and bytes[ofs + 1] == 0x2F:
         ofs += 2
-    return String(StringSlice(unsafe_from_utf8=bytes[ofs:n]))
+    return String(StringSpan(unsafe_from_utf8=bytes[ofs:n]))
 
 
 def parse_unified_diff_files(diff: String) -> List[ChangedFile]:
@@ -213,7 +213,7 @@ def parse_unified_diff_files(diff: String) -> List[ChangedFile]:
     while i < len(line_starts) - 1:
         var s = line_starts[i]
         var e = line_starts[i + 1] if i + 1 < len(line_starts) else len(b)
-        var line = String(StringSlice(unsafe_from_utf8=b[s:e]))
+        var line = String(StringSpan(unsafe_from_utf8=b[s:e]))
         # Strip trailing LF for the prefix check.
         if starts_with(line, String("diff --git ")):
             chunk_starts.append(s)
@@ -225,7 +225,7 @@ def parse_unified_diff_files(diff: String) -> List[ChangedFile]:
         var ce = chunk_starts[k + 1]
         if ce <= cs:
             continue
-        var chunk = String(StringSlice(unsafe_from_utf8=b[cs:ce]))
+        var chunk = String(StringSpan(unsafe_from_utf8=b[cs:ce]))
         # Find the ``+++ `` line for the path; fall back to ``--- ``.
         var path = String("")
         var cb = chunk.as_bytes()
@@ -234,7 +234,7 @@ def parse_unified_diff_files(diff: String) -> List[ChangedFile]:
             var le = ls
             while le < len(cb) and cb[le] != 0x0A:
                 le += 1
-            var ln = String(StringSlice(unsafe_from_utf8=cb[ls:le]))
+            var ln = String(StringSpan(unsafe_from_utf8=cb[ls:le]))
             if starts_with(ln, String("+++ ")):
                 if ln != String("+++ /dev/null"):
                     path = _strip_prefix_b(ln)
@@ -259,7 +259,7 @@ def parse_unified_diff_files(diff: String) -> List[ChangedFile]:
             var hdr_end = 0
             while hdr_end < len(cb) and cb[hdr_end] != 0x0A:
                 hdr_end += 1
-            var hdr = String(StringSlice(unsafe_from_utf8=cb[:hdr_end]))
+            var hdr = String(StringSpan(unsafe_from_utf8=cb[:hdr_end]))
             var hb = hdr.as_bytes()
             # Locate `` a/``.
             var a = 0
@@ -272,7 +272,7 @@ def parse_unified_diff_files(diff: String) -> List[ChangedFile]:
                                             and hb[p + 2] == 0x2F):
                 p += 1
             if p + 2 < len(hb):
-                path = String(StringSlice(unsafe_from_utf8=hb[p + 3:len(hb)]))
+                path = String(StringSpan(unsafe_from_utf8=hb[p + 3:len(hb)]))
             else:
                 path = String("(unknown)")
         out.append(ChangedFile(path^, chunk^))
@@ -770,7 +770,7 @@ def fetch_git_status(project_root: String) -> List[GitFileStatus]:
         var s = i
         while i < len(b) and b[i] != 0x00:
             i += 1
-        var path = String(StringSlice(unsafe_from_utf8=b[s:i]))
+        var path = String(StringSpan(unsafe_from_utf8=b[s:i]))
         if i < len(b):
             i += 1   # consume the path's trailing NUL
         var orig = String("")
@@ -778,7 +778,7 @@ def fetch_git_status(project_root: String) -> List[GitFileStatus]:
             var os = i
             while i < len(b) and b[i] != 0x00:
                 i += 1
-            orig = String(StringSlice(unsafe_from_utf8=b[os:i]))
+            orig = String(StringSpan(unsafe_from_utf8=b[os:i]))
             if i < len(b):
                 i += 1
         out.append(GitFileStatus(path^, x, y, orig^))
@@ -909,14 +909,14 @@ def _trim_one_line(s: String) -> String:
         var s_start = i
         while i < len(b) and b[i] != 0x0A and b[i] != 0x0D:
             i += 1
-        var line = String(StringSlice(unsafe_from_utf8=b[s_start:i]))
+        var line = String(StringSpan(unsafe_from_utf8=b[s_start:i]))
         # trim trailing whitespace
         var lb = line.as_bytes()
         var end = len(lb)
         while end > 0 and (lb[end - 1] == 0x20 or lb[end - 1] == 0x09):
             end -= 1
         if end > 0:
-            return String(StringSlice(unsafe_from_utf8=lb[:end]))
+            return String(StringSpan(unsafe_from_utf8=lb[:end]))
     return String("")
 
 
@@ -1144,7 +1144,7 @@ struct GitCommit(ImplicitlyCopyable, Movable):
         var b = self.parents.as_bytes()
         for i in range(len(b)):
             if b[i] == 0x20:
-                return String(StringSlice(unsafe_from_utf8=b[0:i]))
+                return String(StringSpan(unsafe_from_utf8=b[0:i]))
         return self.parents
 
 
@@ -1175,9 +1175,9 @@ def _split_on_byte(s: String, sep: UInt8) -> List[String]:
     var start = 0
     for i in range(len(b)):
         if b[i] == sep:
-            out.append(String(StringSlice(unsafe_from_utf8=b[start:i])))
+            out.append(String(StringSpan(unsafe_from_utf8=b[start:i])))
             start = i + 1
-    out.append(String(StringSlice(unsafe_from_utf8=b[start:len(b)])))
+    out.append(String(StringSpan(unsafe_from_utf8=b[start:len(b)])))
     return out^
 
 
@@ -1194,10 +1194,10 @@ def _split_tab_fields(line: String, n: Int) -> List[String]:
         if produced + 1 >= n:
             break
         if b[i] == 0x09:
-            out.append(String(StringSlice(unsafe_from_utf8=b[s:i])))
+            out.append(String(StringSpan(unsafe_from_utf8=b[s:i])))
             s = i + 1
             produced += 1
-    out.append(String(StringSlice(unsafe_from_utf8=b[s:len(b)])))
+    out.append(String(StringSpan(unsafe_from_utf8=b[s:len(b)])))
     while len(out) < n:
         out.append(String(""))
     return out^
@@ -1298,7 +1298,7 @@ def _first_field(line: String) -> String:
     var b = line.as_bytes()
     for i in range(len(b)):
         if b[i] == 0x20:
-            return String(StringSlice(unsafe_from_utf8=b[0:i]))
+            return String(StringSpan(unsafe_from_utf8=b[0:i]))
     return line
 
 
@@ -1510,7 +1510,7 @@ def _extract_tags(decoration: String) -> String:
             continue
         var pb = p.as_bytes()
         var name = String(
-            StringSlice(unsafe_from_utf8=pb[5:len(pb)]),
+            StringSpan(unsafe_from_utf8=pb[5:len(pb)]),
         ).strip()
         if len(name.as_bytes()) == 0:
             continue
@@ -1672,11 +1672,11 @@ def parse_line_history(stdout: String) -> List[LineHistoryEntry]:
         var header: String
         var patch: String
         if nl < 0:
-            header = String(StringSlice(unsafe_from_utf8=bb[0:len(bb)]))
+            header = String(StringSpan(unsafe_from_utf8=bb[0:len(bb)]))
             patch = String("")
         else:
-            header = String(StringSlice(unsafe_from_utf8=bb[0:nl]))
-            patch = String(StringSlice(unsafe_from_utf8=bb[nl + 1:len(bb)]))
+            header = String(StringSpan(unsafe_from_utf8=bb[0:nl]))
+            patch = String(StringSpan(unsafe_from_utf8=bb[nl + 1:len(bb)]))
         var fields = _split_on_byte(header, 0x1F)
         while len(fields) < 4:
             fields.append(String(""))

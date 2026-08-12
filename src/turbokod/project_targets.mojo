@@ -210,11 +210,11 @@ def _split_command(s: String) -> List[String]:
     while i < n:
         if b[i] == 0x20 or b[i] == 0x09:
             if i > start:
-                out.append(String(StringSlice(unsafe_from_utf8=b[start:i])))
+                out.append(String(StringSpan(unsafe_from_utf8=b[start:i])))
             start = i + 1
         i += 1
     if start < n:
-        out.append(String(StringSlice(unsafe_from_utf8=b[start:n])))
+        out.append(String(StringSpan(unsafe_from_utf8=b[start:n])))
     return out^
 
 
@@ -479,14 +479,10 @@ def _split_lines(s: String) -> List[String]:
             var end = i
             if end > start and Int(b[end - 1]) == 0x0D:
                 end -= 1
-            out.append(String(StringSlice(
-                ptr=b.unsafe_ptr() + start, length=end - start,
-            )))
+            out.append(String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(start), length=end - start))))
             start = i + 1
     if start < n:
-        out.append(String(StringSlice(
-            ptr=b.unsafe_ptr() + start, length=n - start,
-        )))
+        out.append(String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(start), length=n - start))))
     return out^
 
 
@@ -511,7 +507,7 @@ def _strip(s: String) -> String:
         hi -= 1
     if hi <= lo:
         return String("")
-    return String(StringSlice(ptr=b.unsafe_ptr() + lo, length=hi - lo))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(lo), length=hi - lo)))
 
 
 def _split_ws(s: String) -> List[String]:
@@ -525,16 +521,12 @@ def _split_ws(s: String) -> List[String]:
         var ws = c == 0x20 or c == 0x09 or c == 0x0A or c == 0x0D
         if ws:
             if start >= 0:
-                out.append(String(StringSlice(
-                    ptr=b.unsafe_ptr() + start, length=i - start,
-                )))
+                out.append(String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(start), length=i - start))))
                 start = -1
         elif start < 0:
             start = i
     if start >= 0:
-        out.append(String(StringSlice(
-            ptr=b.unsafe_ptr() + start, length=len(b) - start,
-        )))
+        out.append(String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(start), length=len(b) - start))))
     return out^
 
 
@@ -550,9 +542,7 @@ def _key_before_sep(line: String) -> Tuple[String, Int]:
     var b = line.as_bytes()
     for i in range(len(b)):
         if Int(b[i]) == 0x3D or Int(b[i]) == 0x3A:  # '=' or ':'
-            return (_strip(String(StringSlice(
-                ptr=b.unsafe_ptr(), length=i,
-            ))), i)
+            return (_strip(String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr(), length=i)))), i)
     return (String(""), -1)
 
 
@@ -595,9 +585,7 @@ def _ini_python_files(text: String, section: String) -> List[String]:
         var kv = _key_before_sep(line)
         if kv[1] >= 0 and kv[0] == String("python_files"):
             var b = line.as_bytes()
-            var val = String(StringSlice(
-                ptr=b.unsafe_ptr() + kv[1] + 1, length=len(b) - kv[1] - 1,
-            ))
+            var val = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(kv[1]).unsafe_offset(1), length=len(b) - kv[1] - 1)))
             for t in _split_ws(val):
                 out.append(t)
             key_indent = indent
@@ -619,9 +607,7 @@ def _toml_quoted_tokens(s: String) -> List[String]:
             while j < n and Int(b[j]) != c:
                 j += 1
             if j < n:
-                out.append(String(StringSlice(
-                    ptr=b.unsafe_ptr() + i + 1, length=j - i - 1,
-                )))
+                out.append(String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(i).unsafe_offset(1), length=j - i - 1))))
                 i = j + 1
                 continue
         i += 1
@@ -668,9 +654,7 @@ def _toml_python_files(text: String) -> List[String]:
         var kv = _key_before_sep(lines[li])
         if kv[1] >= 0 and kv[0] == String("python_files"):
             var b = lines[li].as_bytes()
-            var val = _strip(String(StringSlice(
-                ptr=b.unsafe_ptr() + kv[1] + 1, length=len(b) - kv[1] - 1,
-            )))
+            var val = _strip(String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(kv[1]).unsafe_offset(1), length=len(b) - kv[1] - 1))))
             for t in _toml_quoted_tokens(val):
                 out.append(t)
             # Multi-line array: the opening line had no closing ``]``, so

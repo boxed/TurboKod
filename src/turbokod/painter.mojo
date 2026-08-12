@@ -84,7 +84,7 @@ struct Painter(Copyable, Movable):
         # line-relative column model.
         if i == 0:
             return canvas.put_text(p, text, attr, self.clip.b.x, p.x)
-        var sub = String(StringSlice(unsafe_from_utf8=bytes[i:]))
+        var sub = String(StringSpan(unsafe_from_utf8=bytes[i:]))
         return canvas.put_text(Point(x, p.y), sub, attr, self.clip.b.x, p.x)
 
     def fill(

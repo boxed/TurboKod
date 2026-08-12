@@ -95,7 +95,7 @@ struct GitignoreMatcher(Copyable, Movable):
                 end -= 1
             if end <= start:
                 continue
-            var glob = String(StringSlice(unsafe_from_utf8=lb[start:end]))
+            var glob = String(StringSpan(unsafe_from_utf8=lb[start:end]))
             m.patterns.append(GitignorePattern(glob, dir_only, anchored, negate))
         return m^
 
@@ -125,7 +125,7 @@ def _strip(s: String) -> String:
         j -= 1
     if i == 0 and j == n:
         return s
-    return String(StringSlice(unsafe_from_utf8=b[i:j]))
+    return String(StringSpan(unsafe_from_utf8=b[i:j]))
 
 
 def _split_path_components(path: String) -> List[String]:
@@ -136,11 +136,11 @@ def _split_path_components(path: String) -> List[String]:
     while i < len(b):
         if b[i] == 0x2F:
             if i > start:
-                out.append(String(StringSlice(unsafe_from_utf8=b[start:i])))
+                out.append(String(StringSpan(unsafe_from_utf8=b[start:i])))
             start = i + 1
         i += 1
     if start < len(b):
-        out.append(String(StringSlice(unsafe_from_utf8=b[start:])))
+        out.append(String(StringSpan(unsafe_from_utf8=b[start:])))
     return out^
 
 
@@ -333,12 +333,12 @@ def _git_ls_project_files(
                 # Skip ``dir/`` entries (``--directory`` output for a
                 # wholly-ignored directory) — only plain file paths pass.
                 if i > start and bytes[i - 1] != 0x2F:
-                    var rel = String(StringSlice(unsafe_from_utf8=bytes[start:i]))
+                    var rel = String(StringSpan(unsafe_from_utf8=bytes[start:i]))
                     out.append(join_path(root, rel))
                 start = i + 1
         # No trailing NUL? Treat the tail as a final entry too.
         if start < n and bytes[n - 1] != 0x2F:
-            var rel_tail = String(StringSlice(unsafe_from_utf8=bytes[start:n]))
+            var rel_tail = String(StringSpan(unsafe_from_utf8=bytes[start:n]))
             out.append(join_path(root, rel_tail))
         return Optional[List[String]](out^)
     except:
@@ -403,7 +403,7 @@ struct FileIndexer(Movable):
         try:
             var proc = LspProcess.spawn(argv, String(""))
             var idx = Self(proc^)
-            return Optional[Self](take=idx^)
+            return Optional[Self](idx^)
         except:
             return Optional[Self]()
 
@@ -460,7 +460,7 @@ struct FileIndexer(Movable):
                 # ``dir/`` entries (``--directory`` output in
                 # ignored-only mode) are dropped — see ``start``.
                 if i > start and self.buf[i - 1] != 0x2F:
-                    var rel = String(StringSlice(
+                    var rel = String(StringSpan(
                         unsafe_from_utf8=self.buf[start:i],
                     ))
                     new_paths.append(join_path(root, rel))
@@ -740,7 +740,7 @@ def _replace_by_line(
             var mv = m.value()
             var abs_start = line_start + mv.start
             if abs_start > copied_upto:
-                out += String(StringSlice(
+                out += String(StringSpan(
                     unsafe_from_utf8=hb[copied_upto:abs_start]
                 ))
             out += replacement
@@ -751,7 +751,7 @@ def _replace_by_line(
     if count == 0:
         return (text, 0)
     if copied_upto < h:
-        out += String(StringSlice(unsafe_from_utf8=hb[copied_upto:h]))
+        out += String(StringSpan(unsafe_from_utf8=hb[copied_upto:h]))
     return (out^, count)
 
 
@@ -776,7 +776,7 @@ def _regex_replace_count(
         if mv.start < 0 or mv.end < mv.start:
             break
         if mv.start > seg_start:
-            out = out + String(StringSlice(
+            out = out + String(StringSpan(
                 unsafe_from_utf8=hb[seg_start:mv.start]
             ))
         out = out + replacement
@@ -790,5 +790,5 @@ def _regex_replace_count(
     if count == 0:
         return (text, 0)
     if seg_start < h:
-        out = out + String(StringSlice(unsafe_from_utf8=hb[seg_start:h]))
+        out = out + String(StringSpan(unsafe_from_utf8=hb[seg_start:h]))
     return (out, count)
