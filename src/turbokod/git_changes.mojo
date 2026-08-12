@@ -1581,6 +1581,115 @@ def fetch_commit_show(project_root: String, sha: String) -> String:
     return _git_stdout(project_root, args^)
 
 
+# --- rewording a commit message ------------------------------------------
+#
+# Only *unpushed* commits are rewordable: rewriting them needs no
+# force-push and can't disturb anyone else's history. The view enforces
+# that via ``GitCommit.is_pushed`` before it ever calls in here.
+
+
+def fetch_commit_message(project_root: String, sha: String) -> String:
+    """The full commit message (subject + body) of ``sha``.
+
+    ``%B`` is the raw body, which is what an editor needs to round-trip —
+    ``%s`` would silently truncate a multi-paragraph message to its first
+    line. Git appends a trailing newline that isn't part of the message,
+    so it's stripped; interior blank lines are preserved.
+    """
+    if len(project_root.as_bytes()) == 0 or len(sha.as_bytes()) == 0:
+        return String("")
+    var args = List[String]()
+    args.append(String("log"))
+    args.append(String("-1"))
+    args.append(String("--format=%B"))
+    args.append(sha)
+    var out = _git_stdout(project_root, args^)
+    # Trim only trailing newlines; a message's own trailing spaces are
+    # the user's business.
+    var b = out.as_bytes()
+    var end = len(b)
+    while end > 0 and (b[end - 1] == 0x0A or b[end - 1] == 0x0D):
+        end -= 1
+    return String(StringSpan(unsafe_from_utf8=b[0:end]))
+
+
+def head_short_sha(project_root: String) -> String:
+    """``git rev-parse --short HEAD``, or ``""`` when unavailable (empty
+    repo, not a checkout). Lets a caller tell "this is the tip" — which
+    can be reworded with a plain ``--amend`` — from an older commit,
+    which needs the replay path."""
+    if len(project_root.as_bytes()) == 0:
+        return String("")
+    var args = List[String]()
+    args.append(String("rev-parse"))
+    args.append(String("--short"))
+    args.append(String("HEAD"))
+    return String(_git_stdout(project_root, args^).strip())
+
+
+def has_merge_between(project_root: String, sha: String) -> Bool:
+    """True when any commit in ``<sha>..HEAD`` is a merge.
+
+    Those are the commits a reword of ``sha`` would have to replay, and
+    ``git rebase`` flattens merges by default — so a reword that looked
+    like a message-only change would quietly restructure history. The
+    view refuses instead."""
+    if len(project_root.as_bytes()) == 0 or len(sha.as_bytes()) == 0:
+        return False
+    var args = List[String]()
+    args.append(String("rev-list"))
+    args.append(String("--merges"))
+    args.append(sha + String("..HEAD"))
+    return len(_git_stdout(project_root, args^).strip().as_bytes()) > 0
+
+
+def create_reworded_commit(
+    project_root: String, sha: String, message: String,
+) -> String:
+    """Build a copy of ``sha`` carrying ``message``, returning its full
+    SHA (or ``""`` on failure).
+
+    ``git commit-tree`` writes a new commit object with the *same tree*
+    and the same parents as ``sha`` but a new message. Nothing is moved:
+    the new object is unreferenced until a caller points a branch at it
+    (via ``rebase --onto``), which is what makes this safe to do
+    synchronously — it's a pure object-store write with no worktree,
+    index, or ref side effects, and an abandoned object is collected by
+    ``git gc``.
+
+    The message goes in through stdin rather than ``-m`` so a message
+    containing anything shell- or flag-like can't be misread.
+    """
+    if len(project_root.as_bytes()) == 0 or len(sha.as_bytes()) == 0:
+        return String("")
+    # Parents, in order. A root commit has none, and ``rev-parse`` exits
+    # non-zero for its nonexistent ``^1`` — an empty list is correct there.
+    var pargs = List[String]()
+    pargs.append(String("rev-list"))
+    pargs.append(String("--parents"))
+    pargs.append(String("-1"))
+    pargs.append(sha)
+    var parent_line = _git_stdout(project_root, pargs^).strip()
+    var fields = List[String]()
+    var pb = parent_line.as_bytes()
+    var start = 0
+    for i in range(len(pb)):
+        if pb[i] == 0x20:
+            if i > start:
+                fields.append(String(StringSpan(unsafe_from_utf8=pb[start:i])))
+            start = i + 1
+    if start < len(pb):
+        fields.append(String(StringSpan(unsafe_from_utf8=pb[start:len(pb)])))
+    var args = List[String]()
+    args.append(String("commit-tree"))
+    args.append(sha + String("^{tree}"))
+    # fields[0] is the commit itself; the rest are its parents.
+    for i in range(1, len(fields)):
+        args.append(String("-p"))
+        args.append(fields[i])
+    return String(_git_stdout_stdin(project_root, args^, message).strip())
+
+
 def fetch_merged_commits(
     project_root: String, sha: String, limit: Int = 200,
 ) -> String:

@@ -87,7 +87,7 @@ from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     KEY_BACKSPACE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME, KEY_LEFT,
     KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP,
-    MOD_META, MOD_SHIFT,
+    MOD_CTRL, MOD_META, MOD_SHIFT,
     MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
@@ -106,7 +106,9 @@ from .git_changes import (
     ChangedFile, GitBranch, GitCommit, GitFileStatus, GitOpResult,
     apply_patch_to_index, apply_patch_to_worktree,
     compute_staged_diff, compute_unstaged_diff, compute_untracked_diff,
-    branch_is_merged, fetch_blob_text, fetch_branch_log, fetch_commit_show,
+    branch_is_merged, create_reworded_commit,
+    fetch_blob_text, fetch_branch_log, fetch_commit_message, fetch_commit_show,
+    has_merge_between, head_short_sha,
     fetch_git_branches, fetch_git_commits, fetch_git_status,
     fetch_merged_commits,
     format_age,
@@ -130,8 +132,9 @@ from .string_utils import (
     starts_with,
     tail_to_columns,
 )
-from .text_field import TextField
+from .text_field import TextArea, TextField
 from .type_ahead import TypeAhead, is_printable_ascii, type_ahead_pick
+from .buttons import BUTTON_FIRED, ShadowButton, paint_shadow_button
 
 
 comptime _SIDEBAR_MIN: Int = 28
@@ -169,6 +172,15 @@ comptime _OVERLAY_DISCARD_LINE_CONFIRM: Int = 5  # y/n: discard one worktree lin
 comptime _OVERLAY_DELETE_BRANCH_CONFIRM: Int = 6  # y/n: force-delete an unmerged branch
 comptime _OVERLAY_OUTPUT: Int = 7   # full-screen scrollback of a git op's output
 comptime _OVERLAY_MERGE_CHOICE: Int = 8  # m/r: merge commit or rebase
+comptime _OVERLAY_EDIT_MSG: Int = 9  # multi-line edit of a commit message
+
+# Save-button face for the message editor. The chord is spelled out on
+# the button because Enter is taken by newlines in a multi-line input, so
+# the key the user reaches for first is deliberately *not* the one that
+# submits. Both modifiers are listed (and both are accepted) since the
+# same label is painted by the native macOS host and the terminal
+# frontend, where ⌘ doesn't exist.
+comptime _SAVE_BTN_LABEL = " Save  ⌘/Ctrl+↵ "
 
 # How long a success flash stays on the sub-title row before the row
 # reverts to the project root. Long enough to read a one-liner, and it
@@ -205,6 +217,7 @@ comptime _GITOP_CHECKOUT: Int = 6
 comptime _GITOP_MERGE:   Int = 7
 comptime _GITOP_BRANCH_DELETE: Int = 8
 comptime _GITOP_REBASE:  Int = 9
+comptime _GITOP_REWORD:  Int = 10  # rewrite an unpushed commit's message
 
 # How often (ms) the open modal re-checks git for state that changed on
 # disk behind our back — a save in an editor, a commit/checkout in another
@@ -1203,6 +1216,21 @@ struct LocalChanges(Movable):
     var overlay: Int
     var overlay_input: TextField
     var overlay_message: String
+    # ``_OVERLAY_EDIT_MSG`` state: the multi-line editor holding the
+    # message being rewritten, plus which commit it belongs to.
+    # ``_reword_sha`` is the short SHA as shown in the list;
+    # ``_reword_is_head`` picks the apply strategy (a plain ``--amend``
+    # for the tip, a replay for anything older — see ``_submit_reword``).
+    # The Save button is a field rather than a per-paint temporary because
+    # ``ShadowButton`` latches a press across frames.
+    var overlay_area: TextArea
+    var _reword_sha: String
+    var _reword_is_head: Bool
+    var _reword_save_btn: ShadowButton
+    # Where the text area was last painted, recorded by ``_paint_edit_msg``
+    # so click-to-position hit-tests the same rect that was drawn instead
+    # of recomputing the box geometry and drifting from it.
+    var _reword_area_rect: Rect
     # Transient, non-modal one-liner on the sub-title row: what the last
     # successful git op did. Painted until ``_flash_until_ms``, after
     # which the row goes back to showing the project root. Intercepts no
@@ -1324,6 +1352,11 @@ struct LocalChanges(Movable):
         self.overlay = _OVERLAY_NONE
         self.overlay_input = TextField()
         self.overlay_message = String("")
+        self.overlay_area = TextArea()
+        self._reword_sha = String("")
+        self._reword_is_head = False
+        self._reword_save_btn = ShadowButton(String(_SAVE_BTN_LABEL), 0, 0)
+        self._reword_area_rect = Rect(0, 0, 0, 0)
         self.flash_message = String("")
         self._flash_until_ms = 0
         self.overlay_output = String("")
@@ -1387,6 +1420,11 @@ struct LocalChanges(Movable):
         self.overlay = _OVERLAY_NONE
         self.overlay_input = TextField()
         self.overlay_message = String("")
+        self.overlay_area = TextArea()
+        self._reword_sha = String("")
+        self._reword_is_head = False
+        self._reword_save_btn = ShadowButton(String(_SAVE_BTN_LABEL), 0, 0)
+        self._reword_area_rect = Rect(0, 0, 0, 0)
         self.flash_message = String("")
         self._flash_until_ms = 0
         self.overlay_output = String("")
@@ -1526,6 +1564,11 @@ struct LocalChanges(Movable):
         self.overlay = _OVERLAY_NONE
         self.overlay_input = TextField()
         self.overlay_message = String("")
+        self.overlay_area = TextArea()
+        self._reword_sha = String("")
+        self._reword_is_head = False
+        self._reword_save_btn = ShadowButton(String(_SAVE_BTN_LABEL), 0, 0)
+        self._reword_area_rect = Rect(0, 0, 0, 0)
         self.flash_message = String("")
         self._flash_until_ms = 0
         self.overlay_output = String("")
@@ -2136,6 +2179,14 @@ struct LocalChanges(Movable):
             var max_h = container_bounds.height() - 2
             if box_h > max_h:
                 box_h = max_h if max_h >= 5 else 5
+        # The message editor needs real room: a commit body is the point,
+        # so give it 12 rows (≈8 of text) and shrink only when the
+        # terminal can't spare them.
+        if self.overlay == _OVERLAY_EDIT_MSG:
+            box_h = 14
+            var max_h2 = container_bounds.height() - 2
+            if box_h > max_h2:
+                box_h = max_h2 if max_h2 >= 7 else 7
         var bx = container_bounds.a.x + (container_bounds.width() - box_w) // 2
         var by = container_bounds.a.y + (container_bounds.height() - box_h) // 2
         var rect = Rect(bx, by, bx + box_w, by + box_h)
@@ -2148,6 +2199,9 @@ struct LocalChanges(Movable):
         if self.overlay == _OVERLAY_COMMIT:
             title = String(" Commit ")
             prompt_text = String("message: ")
+        elif self.overlay == _OVERLAY_EDIT_MSG:
+            title = String(" Edit message ") + self._reword_sha + String(" ")
+            prompt_text = String("")
         elif self.overlay == _OVERLAY_AMEND_CONFIRM:
             title = String(" Amend ")
             prompt_text = String("")
@@ -2186,6 +2240,9 @@ struct LocalChanges(Movable):
                 canvas, Point(bx + 2, by + box_h - 2), hint, body,
             )
             return
+        if self.overlay == _OVERLAY_EDIT_MSG:
+            self._paint_edit_msg(canvas, body_p, bx, by, box_w, box_h, body)
+            return
         if self.overlay == _OVERLAY_STATUS:
             # Failure-only: successes report through ``flash_message`` on
             # the sub-title row and never open this box.
@@ -2214,6 +2271,71 @@ struct LocalChanges(Movable):
         _ = body_p.put_text(
             canvas, Point(bx + 2, by + box_h - 2), hint, body,
         )
+
+    def _handle_edit_msg_mouse(
+        mut self, event: Event, container_bounds: Rect,
+    ):
+        """Route a click inside the message editor: the Save button first,
+        then click-to-position in the text area. The caller swallows the
+        event either way, so a click on the box chrome does nothing rather
+        than falling through to the list underneath."""
+        if self._reword_save_btn.handle_mouse(event) == BUTTON_FIRED:
+            self._submit_reword()
+            return
+        _ = self.overlay_area.handle_mouse(event, self._reword_area_rect)
+
+    def _paint_edit_msg(
+        mut self, mut canvas: Canvas, mut body_p: Painter,
+        bx: Int, by: Int, box_w: Int, box_h: Int, body: Attr,
+    ):
+        """Body of the commit-message editor: a multi-row input strip with
+        a Save button under it.
+
+        The button carries its own shortcut (``Save  ⌘↵``) because a
+        multi-line editor takes Enter for newlines — so the one key the
+        user would reach for first isn't the one that submits, and a hint
+        row alone is easy to miss. Cancel isn't a button: ESC already
+        closes every overlay in this view, and the hint row says so.
+
+        Takes ``mut self`` because the text area tracks its own scroll
+        offsets and the button latches presses across paints.
+        """
+        var last_row = by + box_h - 2      # hint row
+        # Text area fills everything between the top padding and the
+        # button row, so a taller box just means more visible message.
+        var area_top = by + 2
+        var area_bottom = last_row - 2
+        if area_bottom <= area_top:
+            area_bottom = area_top + 1
+        var area_rect = Rect(bx + 2, area_top, bx + box_w - 2, area_bottom)
+        self._reword_area_rect = area_rect
+        self.overlay_area.paint(canvas, area_rect, True)
+        # Save button, right-aligned on the row above the hint.
+        var btn_y = area_bottom
+        var btn_x = bx + box_w - 2 - self._reword_save_btn.total_width()
+        self._reword_save_btn.move_to(btn_x, btn_y)
+        paint_shadow_button(
+            canvas, self._reword_save_btn, Attr(BLACK, LIGHT_GREEN), body.bg,
+            bx + box_w - 1,
+        )
+        # What the edit will actually do — an amend of the tip and a
+        # replay of everything above an older commit are different enough
+        # that the user should see which one they're about to get.
+        var what: String
+        if self._reword_is_head:
+            what = String("amends ") + self._reword_sha
+        else:
+            what = String("rewrites ") + self._reword_sha \
+                + String(" and replays above it")
+        # Shares its row with the button, so it's only drawn when it
+        # actually fits beside it — the box clamps to 24 columns on a
+        # narrow terminal, where this would otherwise run underneath.
+        if bx + 2 + display_columns(what) < btn_x - 1:
+            _ = body_p.put_text(canvas, Point(bx + 2, btn_y), what, body)
+        # Save's chord lives on the button face, so the hint row only has
+        # to cover the way out.
+        var hint = String("ESC: cancel")
+        _ = body_p.put_text(canvas, Point(bx + 2, by + box_h - 2), hint, body)
 
     def _paint_merge_choice(
         self, mut canvas: Canvas, mut body_p: Painter,
@@ -3306,6 +3428,14 @@ struct LocalChanges(Movable):
             if k == UInt32(0x64):       # 'd' → delete branch
                 self._delete_selected_branch()
                 return True
+        # Commits pane: 'e' → edit the selected commit's message. Same
+        # trade as the other panes' bare letters — 'e' no longer
+        # type-jumps here, which is why this sits above the type-to-jump
+        # block below.
+        if self.focus == _PANE_COMMITS:
+            if k == UInt32(0x65):       # 'e' → edit commit message
+                self._open_reword_prompt()
+                return True
         if self._is_right_focus():
             if self.focus == _PANE_RIGHT_UNSTAGED and k == UInt32(0x64):
                 # 'd' → discard the worktree change on the cursor's line.
@@ -3558,6 +3688,57 @@ struct LocalChanges(Movable):
             self.overlay_input.set_text(self._pending_commit_message.copy())
         self.overlay_message = String("")
 
+    def _open_reword_prompt(mut self):
+        """Pop the multi-line editor for the selected commit's message.
+
+        Refuses up front rather than letting the user type a message we'd
+        then have to throw away:
+
+        * **Pushed commits.** Rewriting one would need a force-push and
+          would break anyone who already fetched it. ``is_pushed`` is
+          conservative (with no remotes configured everything counts as
+          unpushed), which errs toward allowing the edit on a purely
+          local repo — the case where it's unambiguously safe.
+        * **Merge commits**, and any merge between the commit and HEAD.
+          The replay path is ``git rebase``, which flattens merges by
+          default, so a "message-only" edit would silently restructure
+          history.
+        """
+        if self._is_git_busy():
+            self._show_status(
+                String("Git operation in progress — please wait."), False,
+            )
+            return
+        if self.sel_commit < 0 or self.sel_commit >= len(self.commits):
+            return
+        var c = self.commits[self.sel_commit]
+        if c.is_pushed:
+            self._show_status(
+                String("Commit ") + c.short_sha
+                + String(" is already pushed — its message can't be edited."),
+                False,
+            )
+            return
+        if c.is_merge():
+            self._show_status(
+                String("Can't edit a merge commit's message."), False,
+            )
+            return
+        if has_merge_between(self.root, c.short_sha):
+            self._show_status(
+                String("A merge sits between ") + c.short_sha
+                + String(" and HEAD — editing would flatten it."),
+                False,
+            )
+            return
+        var existing = fetch_commit_message(self.root, c.short_sha)
+        self._reword_sha = c.short_sha.copy()
+        self._reword_is_head = (head_short_sha(self.root) == c.short_sha)
+        self.overlay = _OVERLAY_EDIT_MSG
+        self.overlay_area = TextArea()
+        self.overlay_area.set_text(existing)
+        self.overlay_message = String("")
+
     def _open_amend_confirm(mut self):
         if self._is_git_busy():
             self._show_status(
@@ -3697,6 +3878,10 @@ struct LocalChanges(Movable):
             return GIT_OUT_MERGE
         if op == _GITOP_REBASE:
             return GIT_OUT_REBASE
+        if op == _GITOP_REWORD:
+            # Amending the tip talks like a commit; replaying onto a
+            # rewritten parent talks like a rebase.
+            return GIT_OUT_COMMIT if self._reword_is_head else GIT_OUT_REBASE
         if op == _GITOP_BRANCH_DELETE:
             return GIT_OUT_BRANCH_DELETE
         if op == _GITOP_REVERT:
@@ -4129,6 +4314,62 @@ struct LocalChanges(Movable):
             _GITOP_COMMIT, String("git commit"), argv^, String("Running "),
         )
 
+    def _submit_reword(mut self):
+        """Apply the edited message to ``_reword_sha``.
+
+        Two strategies, because only one of them is cheap:
+
+        * **The tip** — ``git commit --amend -m <msg>``. Touches nothing
+          but HEAD's message, and leaves the index and worktree alone.
+        * **An older commit** — write a copy of it carrying the new
+          message (``create_reworded_commit``, a pure object-store write),
+          then ``git rebase --onto <new> <old> HEAD`` to replay its
+          children onto the copy. Those children keep their trees, so the
+          replay is content-identical and can't raise a conflict; only the
+          message differs. ``--autostash`` covers a dirty worktree, which
+          rebase would otherwise refuse outright.
+
+        Both are guarded by ``_open_reword_prompt``: unpushed only, and no
+        merges in the replayed range.
+        """
+        if self.overlay_area.is_empty():
+            self._show_status(String("Empty commit message."), False)
+            return
+        var msg = self.overlay_area.text()
+        var sha = self._reword_sha.copy()
+        if len(sha.as_bytes()) == 0:
+            self._close_overlay()
+            return
+        var argv = List[String]()
+        argv.append(String("git"))
+        argv.append(String("-C"))
+        argv.append(self.root)
+        if self._reword_is_head:
+            argv.append(String("commit"))
+            argv.append(String("--amend"))
+            argv.append(String("-m"))
+            argv.append(msg)
+        else:
+            # Build the replacement object first: if this fails there's
+            # nothing to undo, and the editor is still open with the
+            # user's text intact.
+            var new_sha = create_reworded_commit(self.root, sha, msg)
+            if len(new_sha.as_bytes()) == 0:
+                self._show_status(
+                    String("Could not rewrite ") + sha + String("."), False,
+                )
+                return
+            argv.append(String("rebase"))
+            argv.append(String("--autostash"))
+            argv.append(String("--onto"))
+            argv.append(new_sha)
+            argv.append(sha)
+            argv.append(String("HEAD"))
+        self._close_overlay()
+        self._start_git_op(
+            _GITOP_REWORD, String("git reword"), argv^, String("Running "),
+        )
+
     def _confirm_amend(mut self):
         var argv = List[String]()
         argv.append(String("git"))
@@ -4277,6 +4518,11 @@ struct LocalChanges(Movable):
                     + String(" into ") + self._rebase_onto
             else:
                 fallback = String("rebase failed")
+        elif op == _GITOP_REWORD:
+            if ok:
+                fallback = String("reworded ") + self._reword_sha
+            else:
+                fallback = String("reword failed")
         elif op == _GITOP_BRANCH_DELETE:
             if ok:
                 fallback = String("deleted ") + self._git_delete_branch
@@ -4321,6 +4567,9 @@ struct LocalChanges(Movable):
             self._rebase_onto = String("")
         if op == _GITOP_BRANCH_DELETE:
             self._git_delete_branch = String("")
+        if op == _GITOP_REWORD:
+            self._reword_sha = String("")
+            self._reword_is_head = False
 
     def _handle_overlay_key(mut self, event: Event) -> Bool:
         """Route key events while an overlay is active. Returns True to
@@ -4360,6 +4609,28 @@ struct LocalChanges(Movable):
             return True
         if k == KEY_ESC:
             self._close_overlay()
+            return True
+        if self.overlay == _OVERLAY_EDIT_MSG:
+            # Cmd/Ctrl+Enter saves; plain Enter is a newline (the text
+            # area handles it and deliberately leaves the chord alone).
+            #
+            # Both modifiers are accepted so one binding covers the native
+            # host (⌘) and the terminal (Ctrl). The terminal only sees the
+            # modifier on Enter when its emulator honours the
+            # modifyOtherKeys=2 / kitty request ``Terminal.start`` sends —
+            # true for xterm, kitty, iTerm2, WezTerm, Alacritty, but *not*
+            # macOS Terminal.app, which delivers Ctrl+Enter as a bare CR.
+            # That's why Save is also a real button: clicking it is the
+            # keyboard-independent path, and it carries the chord on its
+            # face so the shortcut is discoverable where it does work.
+            if k == KEY_ENTER and (event.mods & (MOD_CTRL | MOD_META)) != 0:
+                self._submit_reword()
+                return True
+            var ra = self.overlay_area.handle_key(event)
+            if ra.consumed:
+                return True
+            # Swallow anything else so a stray key can't reach the list
+            # underneath while a modal editor is open.
             return True
         if self.overlay == _OVERLAY_COMMIT:
             if k == KEY_ENTER:
@@ -4588,6 +4859,12 @@ struct LocalChanges(Movable):
         if not self.active or event.kind != EVENT_MOUSE:
             return False
         # Modal overlay — swallow all mouse so clicks don't sneak under.
+        # The message editor is the one overlay with clickable parts (the
+        # Save button, and click-to-position in the text area), so it gets
+        # a look first; everything it doesn't claim is still swallowed.
+        if self.overlay == _OVERLAY_EDIT_MSG:
+            self._handle_edit_msg_mouse(event, container_bounds)
+            return True
         if self.overlay != _OVERLAY_NONE:
             return True
         var pos = event.pos

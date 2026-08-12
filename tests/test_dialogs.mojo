@@ -36,7 +36,7 @@ from turbokod.menu import Menu, MenuBar, MenuItem
 from turbokod.project import ProjectMatch, find_in_project, walk_project_files
 from turbokod.find_results_pane import FindResultsPane
 from turbokod.search_options import SearchOptions
-from turbokod.text_field import TextField
+from turbokod.text_field import TextArea, TextField
 from turbokod.quick_open import QuickOpen, quick_open_match
 from turbokod.doc_store import DocEntry
 from turbokod.language_config import built_in_servers
@@ -53,8 +53,8 @@ from turbokod.settings import (
     Settings, _FOCUS_LS_INLAY_HINTS, _FOCUS_MAX_WINDOWS
 )
 from turbokod.events import (
-    Event, KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_HOME, KEY_TAB,
-    KEY_UP, MOD_ALT, MOD_CTRL, MOD_META, MOD_NONE, MOD_SHIFT,
+    Event, KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_HOME, KEY_LEFT,
+    KEY_TAB, KEY_UP, MOD_ALT, MOD_CTRL, MOD_META, MOD_NONE, MOD_SHIFT,
     MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP
 )
 from turbokod.geometry import Point, Rect
@@ -2487,8 +2487,126 @@ def test_dir_browser_jump_button_release_outside_cancels() raises:
     assert_true(browser.dir == start_dir)
 
 
+def test_text_area_round_trips_multi_line_text() raises:
+    """``set_text`` / ``text`` must be exact, blank lines included — a
+    commit body's paragraph breaks are content, and the editor is the
+    thing that has to give them back unchanged."""
+    var ta = TextArea()
+    ta.set_text(String("subject line\n\nbody one\nbody two"))
+    assert_equal(len(ta.lines), 4)
+    assert_equal(ta.lines[1], String(""))
+    assert_equal(ta.text(), String("subject line\n\nbody one\nbody two"))
+    # The caret parks at the very end, which is where you want it when
+    # opening an existing message to append to it.
+    assert_equal(ta.row, 3)
+    assert_equal(ta.col, len(String("body two").as_bytes()))
+    # A trailing newline is a real empty last line, not noise to trim.
+    var tb = TextArea()
+    tb.set_text(String("one\n"))
+    assert_equal(len(tb.lines), 2)
+    assert_equal(tb.text(), String("one\n"))
+
+
+def test_text_area_enter_splits_and_backspace_joins() raises:
+    """Enter inserts a newline (the whole point of the widget) and
+    Backspace at column 0 joins back onto the previous line, landing the
+    caret at the seam."""
+    var ta = TextArea()
+    ta.set_text(String("ab"))
+    ta.row = 0
+    ta.col = 1
+    var r = ta.handle_key(_key(KEY_ENTER))
+    assert_true(r.consumed)
+    assert_true(r.changed)
+    assert_equal(ta.text(), String("a\nb"))
+    assert_equal(ta.row, 1)
+    assert_equal(ta.col, 0)
+    # Backspace at the start of line 1 rejoins and puts the caret where
+    # the two halves met.
+    var r2 = ta.handle_key(_key(KEY_BACKSPACE))
+    assert_true(r2.changed)
+    assert_equal(ta.text(), String("ab"))
+    assert_equal(ta.row, 0)
+    assert_equal(ta.col, 1)
+    # Backspace at the very start of the buffer is a no-op, not an error.
+    ta.col = 0
+    var r3 = ta.handle_key(_key(KEY_BACKSPACE))
+    assert_false(r3.changed)
+    assert_equal(ta.text(), String("ab"))
+
+
+def test_text_area_leaves_submit_chord_for_the_host() raises:
+    """Plain Enter is a newline; Cmd/Ctrl+Enter is deliberately *not*
+    consumed so a host can bind it to submit. If the widget swallowed it,
+    a multi-line input would have no way to be confirmed from the
+    keyboard."""
+    var ta = TextArea()
+    ta.set_text(String("msg"))
+    var plain = ta.handle_key(_key(KEY_ENTER))
+    assert_true(plain.consumed)
+    assert_equal(ta.text(), String("msg\n"))
+    var meta = ta.handle_key(_key(KEY_ENTER, MOD_META))
+    assert_false(meta.consumed)
+    var ctrl = ta.handle_key(_key(KEY_ENTER, MOD_CTRL))
+    assert_false(ctrl.consumed)
+    # Neither chord may leave a stray newline behind.
+    assert_equal(ta.text(), String("msg\n"))
+
+
+def test_text_area_vertical_move_keeps_goal_column() raises:
+    """Walking down through a short line and back out returns to the
+    original column — the behaviour that makes vertical movement in a
+    text editor feel right, rather than collapsing to the short line's
+    end."""
+    var ta = TextArea()
+    ta.set_text(String("longest line\nx\nanother long one"))
+    ta.row = 0
+    ta.col = 8                     # inside "longest line"
+    _ = ta.handle_key(_key(KEY_DOWN))
+    assert_equal(ta.row, 1)
+    assert_equal(ta.col, 1)        # clamped to "x"
+    _ = ta.handle_key(_key(KEY_DOWN))
+    assert_equal(ta.row, 2)
+    assert_equal(ta.cursor_cell(), 8)   # goal column restored
+    # A horizontal move resets the goal, so the next Up doesn't jump back.
+    _ = ta.handle_key(_key(KEY_LEFT))
+    _ = ta.handle_key(_key(KEY_UP))
+    assert_equal(ta.row, 1)
+    assert_equal(ta.col, 1)
+
+
+def test_text_area_insert_handles_embedded_newlines() raises:
+    """A multi-line paste lands as multiple lines rather than one line
+    with literal newlines in it."""
+    var ta = TextArea()
+    ta.set_text(String("head tail"))
+    ta.row = 0
+    ta.col = 5                     # between "head " and "tail"
+    assert_true(ta.insert(String("A\nB\nC")))
+    assert_equal(ta.text(), String("head A\nB\nCtail"))
+    assert_equal(ta.row, 2)
+    assert_equal(ta.col, 1)        # just after the "C"
+
+
+def test_text_area_is_empty_ignores_whitespace() raises:
+    """Whitespace-only content counts as empty so a caller can refuse it
+    without writing its own trimming."""
+    var ta = TextArea()
+    assert_true(ta.is_empty())
+    ta.set_text(String("  \n\n \t "))
+    assert_true(ta.is_empty())
+    ta.set_text(String("  x "))
+    assert_false(ta.is_empty())
+
+
 def main() raises:
     setup_test_env()
+    test_text_area_round_trips_multi_line_text()
+    test_text_area_enter_splits_and_backspace_joins()
+    test_text_area_leaves_submit_chord_for_the_host()
+    test_text_area_vertical_move_keeps_goal_column()
+    test_text_area_insert_handles_embedded_newlines()
+    test_text_area_is_empty_ignores_whitespace()
     test_find_results_pane_multiselect()
     test_find_in_project_options_smoke()
     test_find_git_project()
@@ -2596,4 +2714,4 @@ def main() raises:
     test_paint_shadow_button_dragged_off_shows_shadow_again()
     test_dir_browser_jump_button_release_inside_jumps()
     test_dir_browser_jump_button_release_outside_cancels()
-    print("dialogs: 107 tests passed")
+    print("dialogs: 113 tests passed")

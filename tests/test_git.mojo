@@ -34,6 +34,7 @@ from turbokod.local_changes import (
     LocalChanges, build_minimal_patch, _GITOP_BRANCH_DELETE, _GITOP_CHECKOUT,
     _GITOP_MERGE, _GITOP_NONE, _GITOP_PUSH, _GITOP_REBASE,
     _OVERLAY_DELETE_BRANCH_CONFIRM,
+    _GITOP_REWORD, _OVERLAY_EDIT_MSG,
     _OVERLAY_MERGE_CHOICE, _OVERLAY_NONE,
     _OVERLAY_OUTPUT, _OVERLAY_STATUS,
     _PANE_BRANCHES, _PANE_COMMITS, _LINE_ADD
@@ -47,11 +48,13 @@ from turbokod.project import GitignoreMatcher
 from turbokod.string_utils import display_columns, split_lines_no_trailing
 from turbokod.lsp import capture_command
 from turbokod.git_changes import (
-    GitBranch, GitStateMtimes, apply_patch_to_index, branch_is_merged,
-    compute_staged_diff, compute_unstaged_diff, fetch_commit_show,
+    GitBranch, GitCommit, GitStateMtimes, apply_patch_to_index,
+    branch_is_merged, compute_staged_diff, compute_unstaged_diff,
+    create_reworded_commit, fetch_commit_message, fetch_commit_show,
     fetch_git_branches, fetch_git_commits,
     fetch_git_status, fetch_merged_commits, format_age, git_state_mtimes,
-    main_line_branch, stage_file, unstage_file
+    has_merge_between, head_short_sha, main_line_branch, stage_file,
+    unstage_file
 )
 from turbokod.highlight import (
     GrammarRegistry, Highlight, highlight_for_extension,
@@ -60,8 +63,8 @@ from turbokod.highlight import (
 from turbokod.posix import wall_clock_ms, which
 from turbokod.config import WRAP_NONE
 from turbokod.events import (
-    Event, KEY_DOWN, KEY_END, KEY_ESC, KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP,
-    KEY_SPACE, MOD_CTRL, MOD_SHIFT, MOUSE_BUTTON_LEFT
+    Event, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_LEFT, KEY_PAGEDOWN,
+    KEY_PAGEUP, KEY_SPACE, MOD_CTRL, MOD_META, MOD_SHIFT, MOUSE_BUTTON_LEFT
 )
 from turbokod.geometry import Point, Rect
 from turbokod.merge_view import (
@@ -2123,6 +2126,301 @@ def test_review_mode_builds_changeset_model() raises:
     assert_true(not rv.handle_event(Event.key_event(KEY_LEFT), view, 0))
 
 
+def _reword_repo(tag: String) raises -> String:
+    """A repo with three commits on ``main``, the middle one carrying a
+    multi-paragraph message. Returns the directory, or ``""`` when git
+    isn't on PATH (callers skip, matching the other git tests)."""
+    var dir = _temp_path(tag)
+    _rm_rf(dir)
+    _ensure_dir(dir)
+    var init_args = List[String]()
+    init_args.append(String("init"))
+    init_args.append(String("-q"))
+    init_args.append(String("-b"))
+    init_args.append(String("main"))
+    if _run_git(dir, init_args^) != 0:
+        _rm_rf(dir)
+        return String("")
+    var cfg1 = List[String]()
+    cfg1.append(String("config"))
+    cfg1.append(String("user.email"))
+    cfg1.append(String("test@example.com"))
+    _ = _run_git(dir, cfg1^)
+    var cfg2 = List[String]()
+    cfg2.append(String("config"))
+    cfg2.append(String("user.name"))
+    cfg2.append(String("Test"))
+    _ = _run_git(dir, cfg2^)
+    var subjects = List[String]()
+    subjects.append(String("first"))
+    subjects.append(String("second subject\n\nsecond body line"))
+    subjects.append(String("third"))
+    for i in range(len(subjects)):
+        var f = join_path(dir, String("f") + String(i) + String(".txt"))
+        assert_true(write_file(f, String("v") + String(i) + String("\n")))
+        var add = List[String]()
+        add.append(String("add"))
+        add.append(String("."))
+        _ = _run_git(dir, add^)
+        var commit = List[String]()
+        commit.append(String("commit"))
+        commit.append(String("-q"))
+        commit.append(String("-m"))
+        commit.append(subjects[i])
+        _ = _run_git(dir, commit^)
+    return dir^
+
+
+def test_fetch_commit_message_returns_full_body() raises:
+    """``%B``, not ``%s``: the editor prefill has to include the body, or
+    saving would silently truncate a multi-paragraph message to its
+    subject. The trailing newline git adds is not part of the message."""
+    var dir = _reword_repo(String("_reword_msg"))
+    if len(dir.as_bytes()) == 0:
+        return
+    var commits = fetch_git_commits(dir, 10)
+    assert_equal(len(commits), 3)
+    # commits[1] is the middle one — the multi-paragraph message.
+    var msg = fetch_commit_message(dir, commits[1].short_sha)
+    assert_equal(msg, String("second subject\n\nsecond body line"))
+    # Subject-only commits round-trip with no trailing blank line.
+    var top = fetch_commit_message(dir, commits[0].short_sha)
+    assert_equal(top, String("third"))
+    _rm_rf(dir)
+
+
+def test_head_short_sha_matches_the_top_of_the_log() raises:
+    var dir = _reword_repo(String("_reword_head"))
+    if len(dir.as_bytes()) == 0:
+        return
+    var commits = fetch_git_commits(dir, 10)
+    assert_equal(head_short_sha(dir), commits[0].short_sha)
+    # And it isn't the older ones — that's the distinction that picks
+    # ``--amend`` over the replay path.
+    assert_true(head_short_sha(dir) != commits[1].short_sha)
+    _rm_rf(dir)
+
+
+def test_create_reworded_commit_keeps_tree_and_parent() raises:
+    """The new object must differ from the original *only* in its message:
+    same tree, same parent. That's what makes the subsequent replay
+    content-identical and therefore conflict-free."""
+    var dir = _reword_repo(String("_reword_obj"))
+    if len(dir.as_bytes()) == 0:
+        return
+    var commits = fetch_git_commits(dir, 10)
+    var old_sha = commits[1].short_sha
+    var new_sha = create_reworded_commit(dir, old_sha, String("rewritten"))
+    assert_true(len(new_sha.as_bytes()) > 0)
+    # Message changed...
+    assert_equal(fetch_commit_message(dir, new_sha), String("rewritten"))
+    # ...tree did not.
+    var t1 = List[String]()
+    t1.append(String("rev-parse"))
+    t1.append(old_sha + String("^{tree}"))
+    var t2 = List[String]()
+    t2.append(String("rev-parse"))
+    t2.append(new_sha + String("^{tree}"))
+    assert_equal(_git_out(dir, t1^), _git_out(dir, t2^))
+    # ...and neither did the parent.
+    var p1 = List[String]()
+    p1.append(String("rev-parse"))
+    p1.append(old_sha + String("^"))
+    var p2 = List[String]()
+    p2.append(String("rev-parse"))
+    p2.append(new_sha + String("^"))
+    assert_equal(_git_out(dir, p1^), _git_out(dir, p2^))
+    # Nothing moved: HEAD is untouched, so a failure here leaves no mess.
+    assert_equal(head_short_sha(dir), commits[0].short_sha)
+    _rm_rf(dir)
+
+
+def test_has_merge_between_is_false_on_a_linear_history() raises:
+    var dir = _reword_repo(String("_reword_linear"))
+    if len(dir.as_bytes()) == 0:
+        return
+    var commits = fetch_git_commits(dir, 10)
+    assert_false(has_merge_between(dir, commits[2].short_sha))
+    _rm_rf(dir)
+
+
+def test_local_changes_e_refuses_a_pushed_commit() raises:
+    """The guard the whole feature rests on: a commit that's already on a
+    remote can't be reworded, because rewriting it would need a
+    force-push. No overlay, no git op — just an explanation."""
+    var lc = LocalChanges()
+    lc.open(String("/tmp"))
+    lc.commits.append(
+        GitCommit(
+            String("aaa1111"), String("A"), String("2026-01-01"),
+            String("already pushed"), True, String(""), String("bbb2222"),
+        ),
+    )
+    lc.focus = _PANE_COMMITS
+    lc.sel_commit = 0
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(_key(UInt32(0x65)), screen, registry)   # 'e'
+    assert_equal(lc.overlay, _OVERLAY_STATUS)
+    assert_equal(lc._git_op, _GITOP_NONE)
+    assert_true(_contains(lc.overlay_message, String("pushed")))
+
+
+def test_local_changes_e_refuses_a_merge_commit() raises:
+    """Rewording a merge would have to go through ``git rebase``, which
+    flattens merges — so a message-only edit would restructure history."""
+    var lc = LocalChanges()
+    lc.open(String("/tmp"))
+    lc.commits.append(
+        GitCommit(
+            String("aaa1111"), String("A"), String("2026-01-01"),
+            String("Merge branch 'x'"), False, String(""),
+            String("bbb2222 ccc3333"),      # two parents == a merge
+        ),
+    )
+    lc.focus = _PANE_COMMITS
+    lc.sel_commit = 0
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(_key(UInt32(0x65)), screen, registry)
+    assert_equal(lc.overlay, _OVERLAY_STATUS)
+    assert_equal(lc._git_op, _GITOP_NONE)
+    assert_true(_contains(lc.overlay_message, String("merge")))
+
+
+def test_local_changes_e_opens_prefilled_editor_and_esc_cancels() raises:
+    """``e`` on an unpushed commit opens the multi-line editor loaded with
+    the existing message (body included), paints the Save button with its
+    shortcut on the face, and ESC backs out without running git."""
+    var dir = _reword_repo(String("_reword_open"))
+    if len(dir.as_bytes()) == 0:
+        return
+    var lc = LocalChanges()
+    lc.open(dir)
+    lc.focus = _PANE_COMMITS
+    lc.sel_commit = 1                 # the multi-paragraph one
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(_key(UInt32(0x65)), screen, registry)
+    assert_equal(lc.overlay, _OVERLAY_EDIT_MSG)
+    assert_equal(lc._git_op, _GITOP_NONE)
+    # Prefilled with the *whole* message, as multiple lines.
+    assert_equal(
+        lc.overlay_area.text(), String("second subject\n\nsecond body line"),
+    )
+    assert_equal(len(lc.overlay_area.lines), 3)
+    # The Save button advertises the chord, since Enter is a newline here.
+    var canvas = Canvas(screen.width(), screen.height())
+    lc.paint(canvas, screen, registry)
+    var painted = String("")
+    for y in range(screen.height()):
+        for x in range(screen.width()):
+            painted += canvas.get(x, y).glyph
+        painted += String("\n")
+    assert_true(_contains(painted, String("Save")))
+    assert_true(_contains(painted, String("Ctrl+")))
+    assert_true(_contains(painted, String("ESC: cancel")))
+    # Plain Enter edits rather than submitting.
+    _ = lc.handle_key(_key(KEY_ENTER), screen, registry)
+    assert_equal(lc.overlay, _OVERLAY_EDIT_MSG)
+    assert_equal(lc._git_op, _GITOP_NONE)
+    # ESC cancels: overlay gone, no git op, message on disk untouched.
+    _ = lc.handle_key(_key(KEY_ESC), screen, registry)
+    assert_equal(lc.overlay, _OVERLAY_NONE)
+    assert_equal(lc._git_op, _GITOP_NONE)
+    var commits = fetch_git_commits(dir, 10)
+    assert_equal(
+        fetch_commit_message(dir, commits[1].short_sha),
+        String("second subject\n\nsecond body line"),
+    )
+    _rm_rf(dir)
+
+
+def test_local_changes_reword_head_amends_the_message() raises:
+    """Cmd+Enter on the tip runs ``commit --amend``: the message changes
+    and the commit count doesn't."""
+    var dir = _reword_repo(String("_reword_amend"))
+    if len(dir.as_bytes()) == 0:
+        return
+    var lc = LocalChanges()
+    lc.open(dir)
+    lc.focus = _PANE_COMMITS
+    lc.sel_commit = 0                 # HEAD
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(_key(UInt32(0x65)), screen, registry)
+    assert_equal(lc.overlay, _OVERLAY_EDIT_MSG)
+    assert_true(lc._reword_is_head)
+    lc.overlay_area.set_text(String("amended subject\n\nwith a body"))
+    _ = lc.handle_key(_key(KEY_ENTER, MOD_META), screen, registry)
+    assert_equal(lc.overlay, _OVERLAY_NONE)
+    assert_equal(lc._git_op, _GITOP_REWORD)
+    _drain_git_op(lc)
+    var commits = fetch_git_commits(dir, 10)
+    assert_equal(len(commits), 3)     # amended, not added
+    assert_equal(
+        fetch_commit_message(dir, commits[0].short_sha),
+        String("amended subject\n\nwith a body"),
+    )
+    _rm_rf(dir)
+
+
+def test_local_changes_reword_older_commit_keeps_its_children() raises:
+    """The replay path. Rewording the *middle* commit rewrites it and
+    replays the commit above it — the history keeps its shape (same
+    count, same order, same file contents) and only the one message
+    changes."""
+    var dir = _reword_repo(String("_reword_replay"))
+    if len(dir.as_bytes()) == 0:
+        return
+    var lc = LocalChanges()
+    lc.open(dir)
+    lc.focus = _PANE_COMMITS
+    lc.sel_commit = 1                 # middle commit, not HEAD
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(_key(UInt32(0x65)), screen, registry)
+    assert_equal(lc.overlay, _OVERLAY_EDIT_MSG)
+    assert_false(lc._reword_is_head)
+    lc.overlay_area.set_text(String("middle rewritten"))
+    _ = lc.handle_key(_key(KEY_ENTER, MOD_META), screen, registry)
+    assert_equal(lc._git_op, _GITOP_REWORD)
+    _drain_git_op(lc)
+    var commits = fetch_git_commits(dir, 10)
+    assert_equal(len(commits), 3)
+    # The rewritten message is in place...
+    assert_equal(
+        fetch_commit_message(dir, commits[1].short_sha),
+        String("middle rewritten"),
+    )
+    # ...its child kept its own message and stayed on top...
+    assert_equal(
+        fetch_commit_message(dir, commits[0].short_sha), String("third"),
+    )
+    # ...and the first commit is untouched.
+    assert_equal(
+        fetch_commit_message(dir, commits[2].short_sha), String("first"),
+    )
+    # Content survived the replay: every file is still there.
+    for i in range(3):
+        var f = join_path(dir, String("f") + String(i) + String(".txt"))
+        assert_true(len(read_file(f).as_bytes()) > 0)
+    _rm_rf(dir)
+
+
+def _git_out(dir: String, var args: List[String]) raises -> String:
+    """``git -C dir <args>`` stdout, trimmed. Test-local since the
+    production helper is private to ``git_changes``."""
+    var argv = List[String]()
+    argv.append(String("git"))
+    argv.append(String("-C"))
+    argv.append(dir)
+    for i in range(len(args)):
+        argv.append(args[i])
+    var r = capture_command(argv^)
+    return String(r.stdout.strip())
+
+
 def _drain_git_op(mut lc: LocalChanges):
     """Spin ``tick`` until the in-flight git child reaps, so a test
     doesn't leave a zombie behind. Non-blocking, so this is a spin."""
@@ -3168,4 +3466,13 @@ def main() raises:
     test_merge_commit_log_lists_the_commits_it_brought_in()
     test_merge_commit_info_panel_shows_merged_commits_section()
     test_review_mode_builds_changeset_model()
-    print("git: 84 tests passed")
+    test_fetch_commit_message_returns_full_body()
+    test_head_short_sha_matches_the_top_of_the_log()
+    test_create_reworded_commit_keeps_tree_and_parent()
+    test_has_merge_between_is_false_on_a_linear_history()
+    test_local_changes_e_refuses_a_pushed_commit()
+    test_local_changes_e_refuses_a_merge_commit()
+    test_local_changes_e_opens_prefilled_editor_and_esc_cancels()
+    test_local_changes_reword_head_amends_the_message()
+    test_local_changes_reword_older_commit_keeps_its_children()
+    print("git: 93 tests passed")
