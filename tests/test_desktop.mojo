@@ -19,7 +19,7 @@ from turbokod.view_state_store import (
 )
 from turbokod.drafts_store import StoredDraft, save_drafts
 from turbokod.desktop import (
-    Desktop, PendingSaveAction,
+    Desktop, PendingSaveAction, _VIEW_STATES_MAX,
     EDITOR_FIND, EDITOR_NAV_BACK, EDITOR_NAV_FORWARD, EDITOR_NEW,
     EDITOR_REPLACE, EDITOR_SAVE, EDITOR_SAVE_AS, PROJECT_CLOSE_ACTION,
     PROJECT_SETTINGS, PROJECT_FIND, PROJECT_OPEN_RECENT_PREFIX,
@@ -2836,6 +2836,54 @@ def test_desktop_confirm_dialog_no_clears_pending_action() raises:
     assert_false(d.install_runner.is_active())
 
 
+def test_view_states_are_capped_least_recently_used_first() raises:
+    """The remembered per-file view states are bounded.
+
+    Nothing used to cap this list: it grew one entry per *distinct file
+    ever opened* in the project, held in memory and re-encoded into
+    ``view_states.json`` on the paint cadence — so browsing a big repo
+    grew both without limit, and made the change-detection encode more
+    expensive with every file visited.
+
+    Ordering is least-recently-used first, so the trim drops from the
+    front and a file the user keeps returning to survives an arbitrary
+    amount of browsing in between.
+    """
+    var root = String("/tmp/turbokod_vs_test_cap")
+    _ = external_call["system", Int32](
+        (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
+    )
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var d = Desktop()
+    d.open_project(root)
+    assert_true(d.project)
+    var overflow = 50
+    for i in range(_VIEW_STATES_MAX + overflow):
+        d._view_states.append(StoredViewState(
+            root + String("/f") + String(i) + String(".txt"), i, 0, 0, 0,
+        ))
+    # Reopening f0 is a "use", so it moves to the back and outlives the
+    # 550 entries that were appended after it.
+    d._touch_view_state(d._find_view_state(root + String("/f0.txt")))
+    # The save path is where the trim is wired in.
+    d._save_view_states_if_changed()
+    assert_equal(len(d._view_states), _VIEW_STATES_MAX)
+    assert_equal(
+        d._view_states[len(d._view_states) - 1].path,
+        root + String("/f0.txt"),
+    )
+    # f1..f50 were the least recently used and went; f51 stayed.
+    assert_equal(d._find_view_state(root + String("/f1.txt")), -1)
+    assert_equal(d._find_view_state(root + String("/f50.txt")), -1)
+    assert_true(d._find_view_state(root + String("/f51.txt")) >= 0)
+    d.shutdown()
+    _ = external_call["system", Int32](
+        (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
+    )
+
+
 def main() raises:
     setup_test_env()
     test_desktop_take_attention_drains_panes_and_dap()
@@ -2920,6 +2968,7 @@ def main() raises:
     test_view_state_store_round_trip()
     test_view_state_store_load_missing_returns_empty()
     test_view_state_store_per_user_path()
+    test_view_states_are_capped_least_recently_used_first()
     test_session_relative_path_round_trip()
     test_desktop_restores_session_from_disk()
     test_desktop_restores_drafts_from_disk()
@@ -2940,4 +2989,4 @@ def main() raises:
     test_close_all_editor_windows_releases_their_find_regexes()
     test_shutdown_reaps_an_in_flight_on_save_child()
     test_shutdown_stops_the_search_subprocesses()
-    print("desktop: 101 tests passed")
+    print("desktop: 102 tests passed")

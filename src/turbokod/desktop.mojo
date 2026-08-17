@@ -508,6 +508,14 @@ comptime _NAV_COL_THRESHOLD = 100
 # entries fall off the back when the cap is hit.
 comptime _NAV_STACK_CAP = 100
 
+# Cap on remembered per-file view states (scroll + cursor), the
+# least-recently-used dropping off the front. Generous — the point is a
+# bound, not thrift: the list is one small entry per *distinct file ever
+# opened* in the project, held in memory and re-encoded into
+# ``view_states.json`` on the paint cadence, so an uncapped one grew for
+# as long as the user kept browsing the repo.
+comptime _VIEW_STATES_MAX = 500
+
 # Keyboard-focus discriminants for the docked-pane stack. Editor
 # windows have their own ``windows.focused`` index; the panes are
 # conceptually a parallel set of "docked windows" and we keep their
@@ -4586,6 +4594,10 @@ struct Desktop(Movable):
             w.editor.selections[0].anchor_col = cc
             w.editor.scroll_x = self._view_states[vs_idx].scroll_x
             w.editor.scroll_y = self._view_states[vs_idx].scroll_y
+            # Opening the file is the "use" that makes this entry recent:
+            # the list is ordered least-recently-used first so the trim can
+            # drop from the front. Once per open, not per frame.
+            self._touch_view_state(vs_idx)
         self.windows.add(w^)
         self._open_count += 1
         if was_max:
@@ -6089,6 +6101,33 @@ struct Desktop(Movable):
                 return i
         return -1
 
+    def _touch_view_state(mut self, idx: Int):
+        """Move entry ``idx`` to the back of ``_view_states``.
+
+        The list doubles as an LRU queue — least-recently-used at the
+        front, which is what ``_trim_view_states`` drops. Refreshes from
+        live editors already append new entries at the back, so the only
+        other "use" worth recording is a file being opened again.
+        """
+        if idx < 0 or idx >= len(self._view_states):
+            return
+        if idx == len(self._view_states) - 1:
+            return
+        var entry = self._view_states.pop(idx)
+        self._view_states.append(entry^)
+
+    def _trim_view_states(mut self):
+        """Drop least-recently-used entries past ``_VIEW_STATES_MAX``.
+
+        Nothing used to bound this list: it accumulated one entry per
+        file ever opened in the project, in memory *and* in the
+        ``view_states.json`` it re-encodes on every paint — so browsing a
+        big repo grew both without limit and made the change-detection
+        encode more expensive with every file visited.
+        """
+        while len(self._view_states) > _VIEW_STATES_MAX:
+            _ = self._view_states.pop(0)
+
     def _capture_view_state_for_window(mut self, idx: Int):
         """Update ``_view_states`` from window ``idx`` right before that
         window is removed. Without this the next paint's refresh would
@@ -6171,6 +6210,7 @@ struct Desktop(Movable):
         if not self.project:
             return
         self._refresh_view_states_from_windows()
+        self._trim_view_states()
         var encoded = encode_view_states(
             self.project.value(), self._view_states,
         )
