@@ -99,8 +99,9 @@ from .lsp_status_menu import (
     LSP_MENU_ACTION_RESTART, LspStatusMenu,
 )
 from .posix import (
-    alloc_zero_buffer, close_fd, debug_log, getenv_value, poll_stdin,
-    read_into, realpath, untrack_child, waitpid_nohang,
+    SIGTERM, alloc_zero_buffer, close_fd, debug_log, getenv_value, kill_pid,
+    poll_stdin, read_into, realpath, reap_child, untrack_child,
+    waitpid_nohang,
 )
 from .file_tree import FileTree
 from .geometry import Point, Rect
@@ -5387,6 +5388,9 @@ struct Desktop(Movable):
     def shutdown(mut self):
         """Release every OS resource this Desktop owns. Idempotent.
 
+        Everything here owns something Mojo's destructor can't reclaim: a
+        child process, a pipe/pty descriptor, or a libonig handle.
+
         The native host builds one ``Desktop`` per window and the app
         deliberately outlives its windows
         (``applicationShouldTerminateAfterLastWindowClosed`` is False), so
@@ -5416,6 +5420,14 @@ struct Desktop(Movable):
         self.run_session.terminate()
         self.install_runner.terminate()
         self.quick_open.close()
+        # The two ``rg`` children: Find in Project and Find Symbol both
+        # stream a search subprocess, and each ``close`` cancels its
+        # runner (SIGTERM + reap + pipe close). A window closed while a
+        # search was still streaming used to leave the child running with
+        # our three descriptors held.
+        self.project_find.close()
+        self.find_symbol.close()
+        self._terminate_pending_save_actions()
         # Per-editor search regexes: one live handle per editor that ran
         # a Find, invisible to the grammar registry release below.
         for i in range(len(self.windows.windows)):
@@ -12168,6 +12180,46 @@ struct Desktop(Movable):
                 )
             self._reload_after_on_save(pa.saved_path)
         self.pending_save_actions = still_pending^
+
+    def _terminate_pending_save_actions(mut self):
+        """Teardown for in-flight on-save children (``Desktop.shutdown``).
+
+        These are the only children reaped *purely* by a per-frame tick,
+        so a window that closes while one is running gets no further
+        ticks: the child kept going, its two pipe descriptors stayed
+        open for the life of the app, and it sat unreaped in our process
+        table. The window is closed by an auto-save on focus loss in the
+        common case, which is precisely when a formatter is most likely
+        to be mid-run.
+
+        Every child gets a grace period to finish on its own first —
+        these rewrite the user's file, and a formatter cut short halfway
+        through is worse than a stray process, so the fast common case
+        (sub-100 ms) completes untouched. One that outlives the grace is
+        SIGTERMed: its window is gone, and leaving it attached to
+        descriptors nobody will ever drain again isn't better.
+        """
+        if len(self.pending_save_actions) == 0:
+            return
+        for i in range(len(self.pending_save_actions)):
+            var pa = self.pending_save_actions[i]
+            # Drain first — a child blocked writing into a full pipe
+            # can't exit, so without this the grace period is wasted on
+            # a child we're keeping from finishing.
+            self._drain_save_action_fd(pa.stdout_fd)
+            self._drain_save_action_fd(pa.stderr_fd)
+            var reaped = reap_child(pa.pid, 100)
+            if not reaped[0] and pa.pid > 0:
+                _ = kill_pid(pa.pid, SIGTERM)
+                _ = reap_child(pa.pid)
+            # Untracked either way: a pid we gave up on may be recycled
+            # by the time the shim's exit reaper runs, and SIGTERMing an
+            # unrelated process is worse than missing a kill (same
+            # reasoning as ``PtyProcess.terminate``).
+            untrack_child(pa.pid)
+            if pa.stdout_fd >= 0: _ = close_fd(pa.stdout_fd)
+            if pa.stderr_fd >= 0: _ = close_fd(pa.stderr_fd)
+        self.pending_save_actions = List[PendingSaveAction]()
 
     def _drain_save_action_fd(mut self, fd: Int32):
         """Read and discard everything currently available on ``fd``.

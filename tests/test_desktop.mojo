@@ -19,7 +19,8 @@ from turbokod.view_state_store import (
 )
 from turbokod.drafts_store import StoredDraft, save_drafts
 from turbokod.desktop import (
-    Desktop, EDITOR_FIND, EDITOR_NAV_BACK, EDITOR_NAV_FORWARD, EDITOR_NEW,
+    Desktop, PendingSaveAction,
+    EDITOR_FIND, EDITOR_NAV_BACK, EDITOR_NAV_FORWARD, EDITOR_NEW,
     EDITOR_REPLACE, EDITOR_SAVE, EDITOR_SAVE_AS, PROJECT_CLOSE_ACTION,
     PROJECT_SETTINGS, PROJECT_FIND, PROJECT_OPEN_RECENT_PREFIX,
     PROJECT_REPLACE, WINDOW_CLOSE_ALL, WINDOW_FOCUS_PREFIX
@@ -43,7 +44,8 @@ from turbokod.json import parse_json
 from turbokod.lsp_dispatch import (
     CompletionItem, DefinitionResolved, TextEditEntry
 )
-from turbokod.posix import which
+from turbokod.lsp import LspProcess
+from turbokod.posix import close_fd, kill_pid, which
 from turbokod.project_grammars import GrammarOverride
 from turbokod.config import (
     MAX_FONT_SIZE, MIN_FONT_SIZE, OnSaveAction, WRAP_SOFT
@@ -2759,6 +2761,66 @@ def test_close_all_editor_windows_releases_their_find_regexes() raises:
     _ = delete_path(b)
 
 
+def test_shutdown_reaps_an_in_flight_on_save_child() raises:
+    """``shutdown`` has to reap the on-save children too.
+
+    They're the only children cleaned *purely* by a per-frame tick
+    (``save_actions_tick``), and a closed window gets no further ticks —
+    so before this the child kept running, its two pipe descriptors
+    stayed open for the life of the app, and it sat unreaped in our
+    process table. Auto-save on focus loss is what spawns them, which is
+    exactly the moment a window is closing.
+
+    Asserted through the pid rather than the fds: ``kill(pid, 0)``
+    succeeds on a zombie, so its *failure* is what proves the reap
+    happened rather than just a SIGTERM.
+    """
+    var sh_info = stat_file(String("/bin/sh"))
+    if not sh_info.ok:
+        assert_true(True)
+        return
+    var d = Desktop()
+    var argv = List[String]()
+    argv.append(String("/bin/sh"))
+    argv.append(String("-c"))
+    argv.append(String("sleep 30"))
+    var proc = LspProcess.spawn(argv)
+    if proc.stdin_fd >= 0:
+        _ = close_fd(proc.stdin_fd)
+    d.pending_save_actions.append(
+        PendingSaveAction(
+            proc.pid, proc.stdout_fd, proc.stderr_fd,
+            String("sleep"), String(""),
+        )
+    )
+    # Still alive going in, so the assertions below can't pass by accident.
+    assert_equal(Int(kill_pid(proc.pid, Int32(0))), 0)
+    d.shutdown()
+    assert_equal(len(d.pending_save_actions), 0)
+    assert_true(Int(kill_pid(proc.pid, Int32(0))) != 0)
+    # Both pipe ends are ours and were closed — a second close is EBADF.
+    assert_true(Int(close_fd(proc.stdout_fd)) != 0)
+    assert_true(Int(close_fd(proc.stderr_fd)) != 0)
+
+
+def test_shutdown_stops_the_search_subprocesses() raises:
+    """Find in Project / Find Symbol each stream an ``rg`` child; a
+    window closed mid-search used to leave it running with our three
+    descriptors held, since ``shutdown`` never cancelled either runner.
+    """
+    if len(which(String("rg")).as_bytes()) == 0:
+        assert_true(True)
+        return
+    var d = Desktop()
+    var root = String("/Users")
+    assert_true(d.find_symbol.runner.start(String("interface"), root))
+    assert_true(d.find_symbol.runner.active)
+    var sym_pid = d.find_symbol.runner.proc.pid
+    d.shutdown()
+    assert_false(d.find_symbol.runner.active)
+    assert_true(Int(kill_pid(sym_pid, Int32(0))) != 0)
+
+
 def test_desktop_confirm_dialog_no_clears_pending_action() raises:
     var d = Desktop()
     d._pending_action = String("lsp:install")
@@ -2876,4 +2938,6 @@ def main() raises:
     test_desktop_shutdown_releases_its_libonig_handles()
     test_closing_a_window_releases_its_find_regex()
     test_close_all_editor_windows_releases_their_find_regexes()
-    print("desktop: 99 tests passed")
+    test_shutdown_reaps_an_in_flight_on_save_child()
+    test_shutdown_stops_the_search_subprocesses()
+    print("desktop: 101 tests passed")
