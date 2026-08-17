@@ -5704,6 +5704,14 @@ struct Desktop(Movable):
                 var p = self.windows.windows[i].editor.file_path
                 if len(p.as_bytes()) > 0:
                     closing_paths.append(p)
+                # Same reason ``WindowManager.close_by_index`` does it: the
+                # editor's compiled Find regex is owned by the shim's
+                # registry, so dropping the window below reclaims the Mojo
+                # value and strands the handle. ``Desktop.shutdown`` only
+                # walks windows that are still *open*, so a window closed
+                # here is unreachable from every later teardown — the
+                # release has to happen on the way out.
+                self.windows.windows[i].release()
         var kept = List[Window]()
         var remap = List[Int]()
         for i in range(len(self.windows.windows)):

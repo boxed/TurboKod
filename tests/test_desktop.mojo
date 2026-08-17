@@ -22,7 +22,7 @@ from turbokod.desktop import (
     Desktop, EDITOR_FIND, EDITOR_NAV_BACK, EDITOR_NAV_FORWARD, EDITOR_NEW,
     EDITOR_REPLACE, EDITOR_SAVE, EDITOR_SAVE_AS, PROJECT_CLOSE_ACTION,
     PROJECT_SETTINGS, PROJECT_FIND, PROJECT_OPEN_RECENT_PREFIX,
-    PROJECT_REPLACE, WINDOW_FOCUS_PREFIX
+    PROJECT_REPLACE, WINDOW_CLOSE_ALL, WINDOW_FOCUS_PREFIX
 )
 from turbokod.file_io import (
     basename, delete_path, find_git_project, join_path, project_relative,
@@ -2719,6 +2719,46 @@ def test_closing_a_window_releases_its_find_regex() raises:
     _ = delete_path(b)
 
 
+def test_close_all_editor_windows_releases_their_find_regexes() raises:
+    """Closing *every* editor at once releases their Find regexes too.
+
+    ``_close_all_editor_windows`` is a third window-removal path
+    alongside ``close_focused`` / ``close_by_index``: it rebuilds the
+    window list by assignment rather than popping, so it used to drop
+    each editor without the ``Window.release`` the other two do. Both of
+    its callers are routine — Window ▸ Close All, and ``close_project``,
+    which every project *switch* goes through — and because the windows
+    are gone afterwards, no later ``shutdown`` can reach the stranded
+    handles: one regex per editor that ran a Find, leaked permanently
+    per project switch.
+    """
+    onig_global_init()
+    var a = _temp_path(String("_close_all_leak_a.ts"))
+    var b = _temp_path(String("_close_all_leak_b.ts"))
+    assert_true(write_file(a, String("interface Foo { bar: string }\n")))
+    assert_true(write_file(b, String("interface Foo { baz: string }\n")))
+    var live = onig_tracked_count()
+    var d = Desktop()
+    var screen = Rect(0, 0, 100, 40)
+    d.open_file(a, screen)
+    d.open_file(b, screen)
+    var found = 0
+    for i in range(len(d.windows.windows)):
+        if d.windows.windows[i].is_editor:
+            _ = d.windows.windows[i].editor.find_next(String("Foo"))
+            found += 1
+    assert_equal(found, 2)
+    assert_true(onig_tracked_count() >= live + 2)
+    _ = d.dispatch_action(WINDOW_CLOSE_ALL, screen)
+    # The editors are gone, so their searchers must be too — this is the
+    # last moment anything could reach them.
+    assert_equal(onig_tracked_count(), live)
+    d.shutdown()
+    assert_equal(onig_tracked_count(), live)
+    _ = delete_path(a)
+    _ = delete_path(b)
+
+
 def test_desktop_confirm_dialog_no_clears_pending_action() raises:
     var d = Desktop()
     d._pending_action = String("lsp:install")
@@ -2835,4 +2875,5 @@ def main() raises:
     test_desktop_confirm_dialog_no_clears_pending_action()
     test_desktop_shutdown_releases_its_libonig_handles()
     test_closing_a_window_releases_its_find_regex()
-    print("desktop: 98 tests passed")
+    test_close_all_editor_windows_releases_their_find_regexes()
+    print("desktop: 99 tests passed")
