@@ -652,26 +652,35 @@ def find_in_project(
         # (whole-word or ``(?i)`` wrapping of an empty-matching pattern).
         searcher.release()
         return out^
-    var paths = walk_project_files(root)
-    for p in range(len(paths)):
-        var full = paths[p]
-        var text: String
-        try:
-            text = read_file(full)
-        except:
-            continue
-        if _looks_binary(text):
-            continue
-        var lines = split_lines_no_trailing(text)
-        var rel = project_relative(root, full)
-        for ln in range(len(lines)):
-            if searcher.search(lines[ln], 0):
-                out.append(ProjectMatch(full, rel, ln + 1, lines[ln]))
     # The searcher is local to this call and nothing above holds a copy,
-    # so this is the last point it's reachable — and the only place its
-    # regex can be reclaimed, since libonig's allocations aren't
-    # Mojo-owned. Without it, every project-wide search stranded one.
-    searcher.release()
+    # so the ``finally`` is the last point it's reachable — and the only
+    # place its regex can be reclaimed, since libonig's allocations
+    # aren't Mojo-owned. Without it, every project-wide search stranded
+    # one.
+    #
+    # ``finally`` rather than a trailing call because every function
+    # here is ``def`` and so may raise — ``walk_project_files`` reads
+    # the filesystem on a tree the user can be mutating underneath us.
+    # A raise skipping the release is the same bug ``_tokenize_line``
+    # was carrying for its back-reference regexes.
+    try:
+        var paths = walk_project_files(root)
+        for p in range(len(paths)):
+            var full = paths[p]
+            var text: String
+            try:
+                text = read_file(full)
+            except:
+                continue
+            if _looks_binary(text):
+                continue
+            var lines = split_lines_no_trailing(text)
+            var rel = project_relative(root, full)
+            for ln in range(len(lines)):
+                if searcher.search(lines[ln], 0):
+                    out.append(ProjectMatch(full, rel, ln + 1, lines[ln]))
+    finally:
+        searcher.release()
     return out^
 
 
@@ -703,35 +712,38 @@ def replace_in_project(
     if not searcher.usable():
         searcher.release()
         return (0, 0)
-    var paths = walk_project_files(root)
-    for p in range(len(paths)):
-        var full = paths[p]
-        var text: String
-        try:
-            text = read_file(full)
-        except:
-            continue
-        if _looks_binary(text):
-            continue
-        var count: Int
-        var new_text: String
-        if opts.regex:
-            var pair = _regex_replace_count(
-                text, searcher.rx.value(), replacement,
-            )
-            new_text = pair[0]
-            count = pair[1]
-        else:
-            var pair = _replace_by_line(text, searcher, replacement)
-            new_text = pair[0]
-            count = pair[1]
-        if count == 0:
-            continue
-        if write_file(full, new_text):
-            files_changed += 1
-            total += count
-    # Last point the searcher is reachable — see ``find_in_project``.
-    searcher.release()
+    # Last point the searcher is reachable, and a ``finally`` for the
+    # same reason ``find_in_project`` uses one — see its note.
+    try:
+        var paths = walk_project_files(root)
+        for p in range(len(paths)):
+            var full = paths[p]
+            var text: String
+            try:
+                text = read_file(full)
+            except:
+                continue
+            if _looks_binary(text):
+                continue
+            var count: Int
+            var new_text: String
+            if opts.regex:
+                var pair = _regex_replace_count(
+                    text, searcher.rx.value(), replacement,
+                )
+                new_text = pair[0]
+                count = pair[1]
+            else:
+                var pair = _replace_by_line(text, searcher, replacement)
+                new_text = pair[0]
+                count = pair[1]
+            if count == 0:
+                continue
+            if write_file(full, new_text):
+                files_changed += 1
+                total += count
+    finally:
+        searcher.release()
     return (files_changed, total)
 
 
