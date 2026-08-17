@@ -42,7 +42,7 @@ from turbokod.local_changes import (
 from turbokod.git_output import (
     GIT_OUT_BRANCH_DELETE, GIT_OUT_CHECKOUT, GIT_OUT_COMMIT, GIT_OUT_MERGE,
     GIT_OUT_OTHER, GIT_OUT_PULL, GIT_OUT_PUSH, GIT_OUT_REBASE,
-    GitOutputMatcher, complete_lines,
+    GitOutputMatcher, GitOutputMatchers, complete_lines,
 )
 from turbokod.project import GitignoreMatcher
 from turbokod.string_utils import display_columns, split_lines_no_trailing
@@ -3129,6 +3129,37 @@ def test_routine_push_output_is_recognized() raises:
     )))
 
 
+def test_git_output_matchers_compile_each_kind_once() raises:
+    """The per-kind matchers are built once and kept.
+
+    Nothing frees a compiled ``OnigRegex`` — its libonig handles live
+    until the process exits — so a fresh ``GitOutputMatcher`` per git
+    operation stranded ~25 KB every time the user committed, pushed,
+    pulled, checked out, merged or rebased. ``GitOutputMatchers`` bounds
+    that at one matcher per kind per session, which is what these counts
+    assert.
+    """
+    var m = GitOutputMatchers()
+    assert_equal(len(m.kinds), 0)
+    for _ in range(4):
+        assert_true(m.is_routine(
+            GIT_OUT_PUSH, String("Everything up-to-date\n"),
+        ))
+        assert_true(m.is_routine(
+            GIT_OUT_COMMIT, String("[main abc1234] a subject\n"),
+        ))
+        assert_false(m.is_routine(
+            GIT_OUT_PUSH, String("remote: -----> Building myapp\n"),
+        ))
+    assert_equal(len(m.kinds), 2)
+    assert_equal(len(m.matchers), 2)
+    # An unarmed classifier (``GIT_OUT_OTHER``) still means "only silence
+    # is routine", the state an idle LocalChanges sits in.
+    assert_true(m.is_routine(GIT_OUT_OTHER, String("")))
+    assert_false(m.is_routine(GIT_OUT_OTHER, String("anything\n")))
+    assert_equal(len(m.kinds), 3)
+
+
 def test_deploy_log_is_not_routine_push_output() raises:
     """The case this exists for: a Dokku / Heroku remote streaming a build
     back over ``remote:``. Its lines are not among the ones an ordinary
@@ -3244,7 +3275,7 @@ def test_deploy_log_promotes_the_spinner_to_full_screen() raises:
     # Stand in for a push in flight; we drive the capture by hand rather
     # than needing a remote.
     lc._git_op = _GITOP_PUSH
-    lc._output_matcher = GitOutputMatcher(GIT_OUT_PUSH)
+    lc._output_kind = GIT_OUT_PUSH
     lc._output_promoted = False
     lc.git_runner.output = String("Enumerating objects: 5, done.\n")
     lc._promote_if_interesting()
@@ -3435,6 +3466,7 @@ def main() raises:
     test_branch_is_merged_sees_through_rebase_and_squash()
     test_local_changes_d_on_rebased_branch_deletes_immediately()
     test_routine_push_output_is_recognized()
+    test_git_output_matchers_compile_each_kind_once()
     test_deploy_log_is_not_routine_push_output()
     test_routine_output_for_the_other_operations()
     test_complete_lines_drops_a_partial_tail()
@@ -3475,4 +3507,4 @@ def main() raises:
     test_local_changes_e_opens_prefilled_editor_and_esc_cancels()
     test_local_changes_reword_head_amends_the_message()
     test_local_changes_reword_older_commit_keeps_its_children()
-    print("git: 93 tests passed")
+    print("git: 94 tests passed")

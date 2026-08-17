@@ -37,7 +37,7 @@ from turbokod.grammar_install import (
     user_grammar_path, user_grammar_path_for_ext
 )
 from turbokod.project_grammars import GrammarOverride
-from turbokod.onig import OnigRegex, onig_global_init
+from turbokod.onig import OnigRegex, onig_global_init, onig_tracked_count
 from turbokod.tm_grammar import load_grammar_from_string
 from turbokod.tm_tokenizer import tokenize_with_grammar
 from turbokod.geometry import Rect
@@ -144,11 +144,97 @@ def test_grammar_registry_override_routes_to_alternate_grammar() raises:
     assert_false(matches_python)
 
 
-def test_grammar_registry_set_overrides_clears_grammar_cache() raises:
-    """``set_overrides`` drops the cached compiled grammars so the next
-    paint reloads against the new map. Without that eviction, a buffer
-    whose extension's override changed mid-session would keep showing
-    the previous grammar's colors until the editor was reopened."""
+def test_grammar_registry_release_frees_and_leaves_the_engine_usable() raises:
+    """``release`` is the one way compiled grammars give memory back, and
+    the reason it can exist at all is that the shim frees a handle only
+    if it's still registered — so an aliasing copy releasing again is a
+    no-op rather than a double free.
+
+    Two earlier attempts at reclaiming these handles (``ArcPointer``
+    refcounting, then a manual heap refcount, both from a destructor)
+    hung or corrupted the heap, and the symptom was always in the *next*
+    compile. So the assertion that matters here isn't that the registry
+    emptied — it's that tokenizing through a freshly loaded grammar after
+    the frees still produces the same highlights it did before them."""
+    var lines = List[String]()
+    lines.append(String("def greet(name):"))
+    lines.append(String("    return name"))
+
+    var registry = GrammarRegistry()
+    var cache = HighlightCache()
+    var live_at_start = onig_tracked_count()
+    var before = highlight_incremental(
+        String("py"), lines, 0, registry, cache,
+    )
+    assert_true(len(before) > 0)
+    assert_true(len(registry.keys) > 0)
+    # Loading the grammar compiled handles the shim is now tracking.
+    assert_true(onig_tracked_count() > live_at_start)
+
+    registry.release()
+    assert_equal(len(registry.keys), 0)
+    assert_equal(len(registry.grammars), 0)
+    assert_equal(len(registry.paths), 0)
+    # And every one of them came back. This is the assertion that matters:
+    # RSS can't see it (a freed block stays resident) and the whole point
+    # of ``release`` is that the count returns to its floor.
+    assert_equal(onig_tracked_count(), live_at_start)
+    # Releasing twice must be harmless (the second pass finds nothing
+    # registered), and so must a release of a registry that never loaded.
+    registry.release()
+    var never_loaded = GrammarRegistry()
+    never_loaded.release()
+
+    # Compile + tokenize again after the frees: same grammar, same input,
+    # same answer.
+    var after_registry = GrammarRegistry()
+    var after_cache = HighlightCache()
+    var after = highlight_incremental(
+        String("py"), lines, 0, after_registry, after_cache,
+    )
+    assert_equal(len(after), len(before))
+    for i in range(len(after)):
+        assert_equal(after[i].row, before[i].row)
+        assert_equal(after[i].col_start, before[i].col_start)
+        assert_equal(after[i].col_end, before[i].col_end)
+        assert_equal(after[i].attr.fg, before[i].attr.fg)
+
+
+def test_released_regex_reports_no_match() raises:
+    """A released ``OnigRegex`` answers "no match" instead of
+    dereferencing a freed ``regex_t``. Belt-and-braces: the contract is
+    that nothing uses a handle after release, and this is what happens
+    when something does anyway."""
+    onig_global_init()
+    var rx = OnigRegex(String("wor"))
+    var hay = String("hello world")
+    var m = rx.search(hay)
+    assert_true(Bool(m))
+    assert_equal(m.value().start, 6)
+    rx.release()
+    assert_false(Bool(rx.search(hay)))
+    # Idempotent, including through a copy that aliases the same handles.
+    var aliased = rx
+    aliased.release()
+    rx.release()
+    assert_false(Bool(aliased.search(hay)))
+    # And the engine still works afterwards.
+    var fresh = OnigRegex(String("hell"))
+    assert_true(Bool(fresh.search(hay)))
+    assert_equal(fresh.search(hay).value().start, 0)
+
+
+def test_grammar_registry_keeps_grammars_across_set_overrides() raises:
+    """``set_overrides`` must *not* drop the compiled grammars.
+
+    Nothing frees a compiled grammar's libonig handles (``OnigRegex`` has
+    no destructor), so evicting one doesn't reclaim memory — it just
+    guarantees the next paint pays for a second copy that lives until the
+    process exits. ``set_overrides`` runs on every project open and
+    close, which made that ~8 MB per switch with a TypeScript buffer
+    open. The mapping change is picked up by the *cache key* instead
+    (see the override-routing test above), so eviction was never what
+    made overrides work."""
     var registry = GrammarRegistry()
     var cache = HighlightCache()
     var lines = List[String]()
@@ -156,10 +242,57 @@ def test_grammar_registry_set_overrides_clears_grammar_cache() raises:
     var _ = highlight_incremental(
         String("py"), lines, 0, registry, cache,
     )
-    assert_true(len(registry.keys) > 0)
+    var loaded = len(registry.keys)
+    assert_true(loaded > 0)
     registry.set_overrides(List[GrammarOverride]())
-    assert_equal(len(registry.keys), 0)
-    assert_equal(len(registry.grammars), 0)
+    assert_equal(len(registry.keys), loaded)
+    assert_equal(len(registry.grammars), loaded)
+
+
+def test_grammar_registry_override_change_reresolves_without_eviction() raises:
+    """Adding an override mid-session changes which grammar a buffer
+    tokenizes through, with the previously-loaded grammars still cached.
+
+    This is the invariant the old cache-clearing was standing in for:
+    ``cache_key`` is the override's ``language_id`` when an override
+    fires and the bare extension otherwise, so a changed mapping resolves
+    to a *different* key, misses, and loads — while every other
+    language's compiled patterns stay put."""
+    var lines = List[String]()
+    lines.append(String("def greet(name):"))
+    lines.append(String("    return name"))
+    var registry = GrammarRegistry()
+
+    # Tokenize as ``.html`` with no override — caches the html grammar.
+    var html_cache = HighlightCache()
+    var _ = highlight_incremental(
+        String("html"), lines, 0, registry, html_cache,
+    )
+    var before = len(registry.keys)
+    assert_true(before > 0)
+
+    # Point ``html`` at the python grammar and re-tokenize the same
+    # buffer: the spans must now match a direct python tokenization.
+    var overrides = List[GrammarOverride]()
+    overrides.append(GrammarOverride(String("html"), String("python")))
+    registry.set_overrides(overrides^)
+    var after_cache = HighlightCache()
+    var after_hls = highlight_incremental(
+        String("html"), lines, 0, registry, after_cache,
+    )
+    var py_registry = GrammarRegistry()
+    var py_cache = HighlightCache()
+    var py_hls = highlight_incremental(
+        String("py"), lines, 0, py_registry, py_cache,
+    )
+    assert_true(len(py_hls) > 0)
+    assert_equal(len(after_hls), len(py_hls))
+    for i in range(len(after_hls)):
+        assert_equal(after_hls[i].row, py_hls[i].row)
+        assert_equal(after_hls[i].col_start, py_hls[i].col_start)
+        assert_equal(after_hls[i].col_end, py_hls[i].col_end)
+    # The html grammar it had already compiled is still cached.
+    assert_true(len(registry.keys) > before)
 
 
 def test_language_catalog_carries_comment_tokens() raises:
@@ -1939,7 +2072,10 @@ def main() raises:
     test_grammar_install_command_targets_user_config()
     test_django_grammar_is_in_downloadable_catalog()
     test_grammar_registry_override_routes_to_alternate_grammar()
-    test_grammar_registry_set_overrides_clears_grammar_cache()
+    test_grammar_registry_release_frees_and_leaves_the_engine_usable()
+    test_released_regex_reports_no_match()
+    test_grammar_registry_keeps_grammars_across_set_overrides()
+    test_grammar_registry_override_change_reresolves_without_eviction()
     test_language_catalog_carries_comment_tokens()
     test_language_editor_save_emits_override()
     test_language_editor_paint_does_not_damage_dialog_border()
@@ -1989,4 +2125,4 @@ def main() raises:
     test_html_to_text_table_escapes_pipes_in_cells()
     test_markdown_highlights_headings_code_and_emphasis()
     test_markdown_fenced_code_uses_embedded_grammar()
-    print("highlight: 53 tests passed")
+    print("highlight: 55 tests passed")

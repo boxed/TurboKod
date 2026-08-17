@@ -601,6 +601,54 @@ pub extern "C" fn tk_onig_track(reg: *mut c_void, region: *mut c_void) {
     }
 }
 
+/// How many ``(regex_t*, OnigRegion*)`` pairs are currently tracked,
+/// i.e. compiled and not yet freed. Diagnostic: it's the direct measure
+/// of "did that teardown actually give the handles back", which RSS only
+/// tells you about indirectly (a freed block stays resident).
+#[no_mangle]
+pub extern "C" fn tk_onig_tracked_count() -> c_int {
+    match ONIG_HANDLES.lock() {
+        Ok(v) => v.len() as c_int,
+        Err(_) => -1,
+    }
+}
+
+/// Free one tracked ``(regex_t*, OnigRegion*)`` pair and drop it from
+/// the registry. Returns 1 if this call did the freeing, 0 if the pair
+/// wasn't tracked (already freed, or never registered).
+///
+/// The registry lookup is what makes this safe to call through an
+/// aliasing ``OnigRegex`` copy: the *first* caller removes the entry and
+/// frees, and every later caller for the same handle finds nothing and
+/// returns 0. So a double-free can't happen even when two copies of one
+/// regex are reachable — which is the shape that made a per-instance
+/// destructor unworkable (see the ``OnigRegex`` doc comment).
+///
+/// Callers must still guarantee no *live use* of the handle after the
+/// free — this reclaims memory, it doesn't reference-count.
+#[no_mangle]
+pub extern "C" fn tk_onig_free_one(reg: *mut c_void, region: *mut c_void) -> c_int {
+    let found = if let Ok(mut v) = ONIG_HANDLES.lock() {
+        match v.iter().position(|h| h.reg == reg && h.region == region) {
+            // Swap-remove for O(1) — order is irrelevant.
+            Some(idx) => Some(v.swap_remove(idx)),
+            None => None,
+        }
+    } else {
+        return 0;
+    };
+    let Some(h) = found else { return 0 };
+    unsafe {
+        if !h.region.is_null() {
+            onig_region_free(h.region, 1);
+        }
+        if !h.reg.is_null() {
+            onig_free(h.reg);
+        }
+    }
+    1
+}
+
 /// Free every tracked handle and clear the registry. Idempotent — a
 /// second call is a no-op. Exposed so a host that wants deterministic
 /// teardown before exit can call it directly.

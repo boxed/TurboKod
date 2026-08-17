@@ -261,11 +261,12 @@ def complete_lines(output: String) -> String:
 
 
 struct GitOutputMatcher(Movable):
-    """Compiled ``routine_patterns`` for one operation.
+    """Compiled ``routine_patterns`` for one output kind.
 
-    Built once when an operation starts, not per classification: the live
-    path re-checks on every frame that the capture grows, and recompiling
-    thirty regexes per frame to answer "still boring?" would be silly.
+    Built once per kind and kept for the session by ``GitOutputMatchers``,
+    not per classification: the live path re-checks on every frame that
+    the capture grows, and recompiling thirty regexes per frame to answer
+    "still boring?" would be silly.
 
     A pattern libonig refuses to compile is dropped rather than fatal —
     the cost is that one shape of boring output stops being recognized
@@ -321,6 +322,44 @@ struct GitOutputMatcher(Movable):
             if m and m.value().start >= 0:
                 return True
         return False
+
+
+struct GitOutputMatchers(Movable):
+    """One ``GitOutputMatcher`` per output kind, compiled on first use and
+    kept for the rest of the session.
+
+    The owner (``LocalChanges``) holds one of these and names a *kind*
+    per operation instead of building a matcher per operation. That's not
+    just about avoiding ~15 regex compiles per ``git push``: an
+    ``OnigRegex`` never frees its libonig handles (see the ``OnigRegex``
+    doc comment), so a matcher per operation leaked ~25 KB on every
+    commit, push, pull, checkout, merge and rebase, for the life of the
+    process. Compiling once per kind bounds it at ~200 KB total.
+
+    Storage is parallel ``kinds`` / ``matchers`` arrays — there are nine
+    kinds, so a linear scan is the whole lookup.
+    """
+
+    var kinds: List[Int]
+    var matchers: List[GitOutputMatcher]
+
+    def __init__(out self):
+        self.kinds = List[Int]()
+        self.matchers = List[GitOutputMatcher]()
+
+    def is_routine(mut self, kind: Int, output: String) -> Bool:
+        """``GitOutputMatcher.is_routine`` for ``kind``, compiling that
+        kind's patterns if this is their first use."""
+        var idx = self._ensure(kind)
+        return self.matchers[idx].is_routine(output)
+
+    def _ensure(mut self, kind: Int) -> Int:
+        for i in range(len(self.kinds)):
+            if self.kinds[i] == kind:
+                return i
+        self.kinds.append(kind)
+        self.matchers.append(GitOutputMatcher(kind))
+        return len(self.kinds) - 1
 
 
 def _trimmed(s: String) -> String:

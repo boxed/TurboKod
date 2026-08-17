@@ -75,7 +75,7 @@ from std.collections.optional import Optional
 from .geometry import Point, Rect
 from .posix import append_string_bytes, monotonic_ms
 from .search_options import (
-    LineSearcher, SearchOptions, default_search_options,
+    SearchOptions, SearcherCache, default_search_options,
 )
 from .string_utils import (
     byte_slice, char_width, codepoint_at, display_columns, is_space_cp,
@@ -1404,6 +1404,10 @@ struct Editor(Copyable, Movable):
     # ``OnigRegex`` list aliases libonig handles); the next refresh will
     # rebuild it from the file path.
     var _hl_cache: HighlightCache
+    # Compiled search state for Find / Find-Next / Replace. Cached rather
+    # than rebuilt per call because a compiled regex is never reclaimed
+    # (``OnigRegex`` has no destructor), so recompiling on every F3 leaked.
+    var _search_cache: SearcherCache
     # Smart-select expansion stack. Each Cmd+Up snapshots the current
     # caret + selection here before growing; Cmd+Down pops to walk back.
     # Cleared by any other key, click, or edit so the stack only ever
@@ -1658,6 +1662,7 @@ struct Editor(Copyable, Movable):
         self._tc_active = False
         self._tc_anchor_row = 0
         self._hl_cache = HighlightCache()
+        self._search_cache = SearcherCache()
         self._smart_select_stack = List[Caret]()
         self._alt_armed = False
         self._last_alt_tap_ms = 0
@@ -1807,6 +1812,7 @@ struct Editor(Copyable, Movable):
         self._tc_active = False
         self._tc_anchor_row = 0
         self._hl_cache = HighlightCache()
+        self._search_cache = SearcherCache()
         self._smart_select_stack = List[Caret]()
         self._alt_armed = False
         self._last_alt_tap_ms = 0
@@ -2010,6 +2016,7 @@ struct Editor(Copyable, Movable):
         # the aliasing could double-free. Letting the copy rebuild on
         # first refresh costs one cold load but is always correct.
         self._hl_cache = HighlightCache()
+        self._search_cache = SearcherCache()
         self._smart_select_stack = copy._smart_select_stack.copy()
         self._alt_armed = copy._alt_armed
         self._last_alt_tap_ms = copy._last_alt_tap_ms
@@ -4393,7 +4400,7 @@ struct Editor(Copyable, Movable):
             return 0
         if len(find.as_bytes()) == 0:
             return 0
-        var searcher = LineSearcher(find, opts)
+        var searcher = self._search_cache.get(find, opts)
         if not searcher.usable():
             return 0
         self._push_undo()
@@ -9239,6 +9246,26 @@ struct Editor(Copyable, Movable):
         if r > max_r: r = max_r
         self.move_to(r, 0, False)
 
+    def selection_is_search_match(
+        mut self, needle: String,
+        opts: SearchOptions = default_search_options(),
+    ) -> Bool:
+        """True when the current selection is *itself* a hit for
+        ``needle`` under ``opts``.
+
+        This is the question the Replace button asks: a selection that
+        matches gets replaced, one that doesn't just steps forward to the
+        first real match (same UX as VS Code / JetBrains). It runs
+        through the same cached searcher as ``find_next``, so the two
+        can't disagree about what a given set of toggles matches, and
+        Replace doesn't compile a second (never-freed) regex for a needle
+        the walk already compiled.
+        """
+        if len(needle.as_bytes()) == 0:
+            return False
+        var sel = self.selection_text()
+        return self._search_cache.get(needle, opts).matches_whole(sel)
+
     def find_next(
         mut self, needle: String,
         opts: SearchOptions = default_search_options(),
@@ -9254,7 +9281,7 @@ struct Editor(Copyable, Movable):
         press steps to the next match."""
         if len(needle.as_bytes()) == 0:
             return False
-        var searcher = LineSearcher(needle, opts)
+        var searcher = self._search_cache.get(needle, opts)
         if not searcher.usable():
             return False
         # Search the rest of the current line, then subsequent lines, then wrap.
@@ -9290,7 +9317,7 @@ struct Editor(Copyable, Movable):
         (``LineSearcher.rsearch``)."""
         if len(needle.as_bytes()) == 0:
             return False
-        var searcher = LineSearcher(needle, opts)
+        var searcher = self._search_cache.get(needle, opts)
         if not searcher.usable():
             return False
         # Anchor: the leftmost end of the current selection / cursor. We

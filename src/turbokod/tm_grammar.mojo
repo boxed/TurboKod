@@ -250,10 +250,11 @@ struct Grammar(Copyable, Movable):
         # Copy semantics: list-of-list fields deep-copy their
         # spines (we want each ``Grammar`` instance to own its own
         # vectors), but ``OnigRegex`` is itself bitwise-aliasing
-        # so the regex_t handles are *shared* across copies. Since
-        # ``onig_shim.c`` is the sole owner of those handles
-        # (process-wide registry, freed at exit) the aliasing is
-        # benign — copies don't multiply the libonig allocations.
+        # so the regex_t handles are *shared* across copies. The Rust
+        # shim's registry is the sole owner of those handles, so the
+        # aliasing is benign — copies don't multiply the libonig
+        # allocations. It does mean ``release`` is a whole-grammar
+        # operation, not something a copy may do on its own.
         self.scope_name = copy.scope_name
         self.root_patterns = copy.root_patterns.copy()
         self.patterns = copy.patterns.copy()
@@ -265,6 +266,22 @@ struct Grammar(Copyable, Movable):
             ext_roots_copy.append(copy.external_roots[i].copy())
         self.external_scopes = copy.external_scopes.copy()
         self.external_roots = ext_roots_copy^
+
+    def release(mut self):
+        """Give this grammar's compiled regexes back to the allocator.
+
+        ``regexes`` is the grammar's one flat table — patterns hold
+        indices into it — so this is the whole set. A fat grammar is
+        125 KB to 12 MB of libonig handles, and nothing else reclaims
+        them: they're owned by the shim's registry, not by Mojo, so the
+        destructor can't help.
+
+        Call this only when the grammar is being discarded *and* nothing
+        can still tokenize through it — copies alias the same handles.
+        ``GrammarRegistry.release`` is the sanctioned caller.
+        """
+        for i in range(len(self.regexes)):
+            self.regexes[i].release()
 
     def lookup_repo(self, key: String) -> Int:
         """Repository key → pattern index. Returns -1 if unknown."""

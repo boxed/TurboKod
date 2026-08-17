@@ -100,6 +100,17 @@ def onig_global_init() raises:
     _ = _resolve_syntax()
 
 
+def onig_tracked_count() -> Int:
+    """How many compiled regexes are currently alive — registered with the
+    shim and not yet freed.
+
+    The direct measure of whether a teardown gave its handles back. RSS
+    can't answer that (a freed block stays resident), so this is what
+    leak regressions should assert on.
+    """
+    return Int(external_call["tk_onig_tracked_count", Int32]())
+
+
 def onig_global_end():
     """Optional: release libonig's internal tables. Not required for
     correctness — present for completeness."""
@@ -236,6 +247,31 @@ struct OnigRegex(ImplicitlyCopyable, Movable):
         # Mojo (see the struct doc-comment for the lifecycle saga).
         _ = external_call["tk_onig_track", Int](self._reg, self._region)
 
+    def release(mut self):
+        """Free this regex's libonig handles now instead of at exit.
+
+        **Explicit, never a destructor.** The struct doc comment records
+        why a destructor can't work: copies alias, so per-instance frees
+        double-free. This is safe against that because the shim's
+        ``tk_onig_free_one`` frees only if it still finds the pair in its
+        registry — the first release wins and every later one through an
+        aliasing copy is a no-op. Verified with 2700 compile/search/free
+        cycles interleaved with fresh compiles, which is precisely what
+        the two earlier refcounting attempts crashed on.
+
+        What it does *not* do is reference-count. The caller has to know
+        no use of the handle can follow — which in practice means a
+        release belongs at a teardown point (a ``Grammar`` being dropped,
+        a per-line scratch regex going out of scope), not at the end of
+        some value's lifetime. As a backstop, a released regex reports
+        "no match" rather than dereferencing a freed ``regex_t``.
+        """
+        if self._reg == 0 and self._region == 0:
+            return
+        _ = external_call["tk_onig_free_one", Int32](self._reg, self._region)
+        self._reg = 0
+        self._region = 0
+
     def search(self, haystack: String) -> Optional[OnigMatch]:
         """Search ``haystack`` for the first match. Returns the match
         bounds or ``None`` if there's no match."""
@@ -264,6 +300,11 @@ struct OnigRegex(ImplicitlyCopyable, Movable):
         (when the option flag is *not* set) — that's libonig's
         contract, and the tokenizer leans on it.
         """
+        # A released regex matches nothing. One register compare against
+        # an ``onig_search`` call, and it turns "used after ``release``"
+        # from a segfault into a visibly wrong-but-alive highlight.
+        if self._reg == 0:
+            return Optional[OnigMatch]()
         var hb = haystack.as_bytes()
         if start < 0 or start > len(hb):
             return Optional[OnigMatch]()

@@ -299,10 +299,18 @@ struct GrammarRegistry(Movable):
     owner is ``Desktop`` (the top-level UI controller); editor
     methods that need it take it as a ``mut`` parameter.
 
-    Storage is parallel ``keys`` / ``grammars`` arrays. A linear
-    scan suffices — sessions rarely load more than a handful of
+    Storage is parallel ``keys`` / ``paths`` / ``grammars`` arrays. A
+    linear scan suffices — sessions rarely load more than a handful of
     distinct languages, so the constant factor beats a hash map
     plus the bookkeeping it'd require.
+
+    **Entries are never evicted, and that is load-bearing.**
+    ``OnigRegex`` has no destructor — its libonig handles live until
+    process exit (see the ``OnigRegex`` doc comment) — so dropping a
+    ``Grammar`` reclaims nothing and re-loading one costs its whole
+    compiled pattern set again, permanently. ~8 MB for the TypeScript
+    grammar. Anything that used to "invalidate the cache" therefore has
+    to work by keying differently instead; see ``ensure``.
 
     Not ``ImplicitlyCopyable``: ``Grammar`` isn't copyable (its
     ``OnigRegex`` list aliases libonig handles). The struct is
@@ -311,23 +319,69 @@ struct GrammarRegistry(Movable):
     than try to copy this one.
     """
     var keys: List[String]
+    var paths: List[String]
     var grammars: List[Grammar]
     var overrides: List[GrammarOverride]
 
     def __init__(out self):
         self.keys = List[String]()
+        self.paths = List[String]()
         self.grammars = List[Grammar]()
         self.overrides = List[GrammarOverride]()
 
-    def lookup_idx(self, key: String) -> Int:
+    def lookup_idx(self, key: String, path: String) -> Int:
         """Index of the cached grammar for ``key``, or -1.
-        ``key`` is whatever the caller wants to key on — typically
-        the file extension (``"rs"``, ``"py"``).
+
+        ``key`` is whatever the caller wants to key on — typically the
+        file extension (``"rs"``, ``"py"``) or, when a project override
+        fires, the ``language_id``. ``path`` is the grammar file the
+        caller resolved that key to: an entry recorded against a
+        different path is a *miss*, which is how a grammar installed or
+        updated mid-session gets picked up without a cache-clearing
+        sweep that would leak every other language's regexes.
         """
         for i in range(len(self.keys)):
-            if self.keys[i] == key:
+            if self.keys[i] == key and self.paths[i] == path:
                 return i
         return -1
+
+    def ensure(mut self, key: String, path: String) raises -> Int:
+        """Index of the compiled grammar for ``(key, path)``, loading and
+        registering it on a miss. Raises whatever the loader raises — a
+        malformed or missing grammar JSON — and registers nothing in that
+        case, so the caller can fall back to the generic tokenizer and a
+        later call can retry.
+        """
+        var idx = self.lookup_idx(key, path)
+        if idx >= 0:
+            return idx
+        var g = load_grammar_from_file(path)
+        self.keys.append(key)
+        self.paths.append(path)
+        self.grammars.append(g^)
+        return len(self.keys) - 1
+
+    def release(mut self):
+        """Free every compiled grammar and empty the cache.
+
+        The one sanctioned way to shrink this registry. It exists for the
+        native host, which builds a ``Desktop`` — and therefore a
+        registry — per window: without it, closing a window strands every
+        grammar that window had compiled, because libonig's handles are
+        owned by the shim's registry rather than by Mojo, so
+        ``tk_desktop_free``'s destructor pass can't reach them.
+
+        Hard precondition: nothing may tokenize through this registry
+        afterwards. It's not a cache eviction — the grammars are gone, not
+        reloadable-on-demand-and-meanwhile-safe. Use it at teardown only;
+        for "the mapping changed", see ``set_overrides``, which is
+        deliberately non-destructive.
+        """
+        for i in range(len(self.grammars)):
+            self.grammars[i].release()
+        self.keys = List[String]()
+        self.paths = List[String]()
+        self.grammars = List[Grammar]()
 
     def lookup_override(self, ext: String) -> String:
         """Return the configured ``language_id`` for ``ext``, or the
@@ -341,15 +395,23 @@ struct GrammarRegistry(Movable):
         return String("")
 
     def set_overrides(mut self, var overrides: List[GrammarOverride]):
-        """Replace the per-project override map and drop the grammar
-        cache so the next paint reloads against the new mapping.
+        """Replace the per-project override map.
 
-        Clearing the whole cache (rather than surgically evicting just
-        the entries whose extension changed) is fine because this only
-        runs on project open / close, not on every keystroke."""
+        The grammar cache is deliberately *not* dropped. It doesn't need
+        to be: a cache entry is keyed by the ``(cache_key, path)`` pair
+        the override map resolved to, so changing the map can't make an
+        existing entry wrong — the new mapping simply resolves to a
+        different key (the override's ``language_id`` rather than the
+        bare extension), misses, and loads.
+
+        This used to clear ``keys`` / ``grammars``, on the reasoning that
+        it "only runs on project open / close, not on every keystroke".
+        That's true of the CPU cost and false of the memory cost: nothing
+        frees a compiled grammar's libonig handles, so every project
+        open and close leaked the full compiled pattern set of every
+        language on screen — ~8 MB with a TypeScript buffer open, per
+        switch, for the life of the process."""
         self.overrides = overrides^
-        self.keys = List[String]()
-        self.grammars = List[Grammar]()
 
 
 struct HighlightCache(Copyable, Movable):
@@ -508,18 +570,14 @@ def highlight_incremental(
     # when an override fires, the bare extension otherwise — keeping
     # them distinct prevents an override-bound editor from sharing a
     # grammar with one that wasn't.
-    var grammar_idx = registry.lookup_idx(cache_key)
-    if grammar_idx < 0:
-        try:
-            var g = load_grammar_from_file(path)
-            registry.keys.append(cache_key)
-            registry.grammars.append(g^)
-            grammar_idx = len(registry.keys) - 1
-        except:
-            var fb = _fallback_for_extension(ext, lines)
-            _apply_intellij_injections(ext, lines, fb, registry)
-            _apply_django_template_overlay(cache_key, lines, fb)
-            return fb^
+    var grammar_idx: Int
+    try:
+        grammar_idx = registry.ensure(cache_key, path)
+    except:
+        var fb = _fallback_for_extension(ext, lines)
+        _apply_intellij_injections(ext, lines, fb, registry)
+        _apply_django_template_overlay(cache_key, lines, fb)
+        return fb^
 
     # Per-Editor state: invalidate when the cache key changes (either
     # the extension itself moved or the project's override map did).
@@ -2335,15 +2393,11 @@ def _inject_grammar(
     var cache_key = resolved.cache_key
     if len(path.as_bytes()) == 0:
         return
-    var grammar_idx = registry.lookup_idx(cache_key)
-    if grammar_idx < 0:
-        try:
-            var g = load_grammar_from_file(path)
-            registry.keys.append(cache_key)
-            registry.grammars.append(g^)
-            grammar_idx = len(registry.keys) - 1
-        except:
-            return
+    var grammar_idx: Int
+    try:
+        grammar_idx = registry.ensure(cache_key, path)
+    except:
+        return
 
     var sub_lines = _slice_body_lines(lines, body)
     var sub_post = List[List[Frame]]()

@@ -402,6 +402,14 @@ def tk_desktop_free(h: Int) abi("C"):
     if h == 0:
         return
     var p = _desk(h)
+    # Hand this window's compiled grammars back before the Desktop goes.
+    # The destructor below can't: a grammar's regexes are libonig
+    # allocations owned by the Rust shim's handle registry, not by Mojo,
+    # so without this every window the user closes strands the ~125 KB to
+    # 12 MB of pattern set it had compiled. Safe here because the host
+    # zeroes its view handle before calling us — no tick or layout can
+    # follow, which is this call's precondition anyway.
+    p[].grammar_registry.release()
     p.unsafe_deinit_pointee()
     _ = external_call["free", Int](h)
 

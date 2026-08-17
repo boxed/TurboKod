@@ -29,7 +29,9 @@ from turbokod.project import find_in_project, replace_in_project
 from turbokod.quick_open import (
     quick_open_match, quick_open_match_parts, split_query_parts,
 )
-from turbokod.search_options import LineSearcher, SearchOptions
+from turbokod.search_options import (
+    LineSearcher, SearchOptions, SearcherCache,
+)
 
 from support import _ensure_dir, _rm_rf, _temp_path, setup_test_env
 
@@ -390,6 +392,49 @@ def test_line_searcher_honors_case_sensitive_and_word_and_regex() raises:
     assert_false(Bool(bad.search(line, 0)))
 
 
+def test_searcher_cache_reuses_the_compiled_regex() raises:
+    """Repeating a search must not recompile its regex.
+
+    A compiled ``OnigRegex`` is never freed — its libonig handles live
+    until the process exits (see the ``OnigRegex`` doc comment) — so a
+    recompile per F3 is a leak, not just wasted work. The identity check
+    is on the raw ``regex_t*``: same needle and toggles must hand back
+    the very same handle, a changed needle must not.
+    """
+    onig_global_init()
+    var opts = SearchOptions(False, False, False)   # case-insensitive
+    var cache = SearcherCache()
+    var first = cache.get(String("selection"), opts)
+    assert_true(Bool(first.rx))
+    var reg = first.rx.value()._reg
+    for _ in range(5):
+        var again = cache.get(String("selection"), opts)
+        assert_equal(again.rx.value()._reg, reg)
+    # A different needle is a miss, and so is the same needle under
+    # different toggles.
+    var other = cache.get(String("other"), opts)
+    assert_true(other.rx.value()._reg != reg)
+    var reworded = cache.get(String("other"), SearchOptions(False, True, False))
+    assert_true(reworded.rx.value()._reg != other.rx.value()._reg)
+
+
+def test_searcher_matches_whole_drives_the_replace_button() raises:
+    """``matches_whole`` is what Replace asks before replacing the
+    selection: true only for a match anchored at 0 that consumes every
+    byte, under whichever toggles are live."""
+    onig_global_init()
+    var ci = LineSearcher(String("selection"), SearchOptions(False, False, False))
+    assert_true(ci.matches_whole(String("SELECTION")))
+    assert_false(ci.matches_whole(String("selections")))
+    assert_false(ci.matches_whole(String("")))
+    var cs = LineSearcher(String("selection"), SearchOptions(True, False, False))
+    assert_true(cs.matches_whole(String("selection")))
+    assert_false(cs.matches_whole(String("SELECTION")))
+    var rx = LineSearcher(String("sel[a-z]+n"), SearchOptions(True, False, True))
+    assert_true(rx.matches_whole(String("selection")))
+    assert_false(rx.matches_whole(String("selection ")))
+
+
 def test_line_searcher_non_ascii_needle_uses_regex() raises:
     """A needle with non-ASCII bytes can't take the ASCII-fold fast path
     — the fold wouldn't relate ``Ä`` to ``ä`` — so it must route to
@@ -612,6 +657,8 @@ def main() raises:
     test_line_searcher_matches_libonig_exactly()
     test_line_searcher_honors_case_sensitive_and_word_and_regex()
     test_line_searcher_non_ascii_needle_uses_regex()
+    test_searcher_cache_reuses_the_compiled_regex()
+    test_searcher_matches_whole_drives_the_replace_button()
     test_line_searcher_rsearch_finds_rightmost_before_limit()
     test_editor_find_is_case_insensitive_by_default()
     test_editor_find_prev_walks_backwards()
@@ -621,4 +668,4 @@ def main() raises:
     test_project_replace_preserves_line_endings()
     test_project_find_reports_case_insensitive_hits()
     test_quick_open_match_parts_matches_the_unhoisted_form()
-    print("case_fold: 21 tests passed")
+    print("case_fold: 23 tests passed")

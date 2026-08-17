@@ -157,7 +157,7 @@ from .debugger_config import (
 from .menu import Menu, MenuBar, MenuItem
 from .posix import monotonic_ms, wall_clock_ms, which
 from .project import replace_in_project, walk_project_files
-from .search_options import SearchOptions, build_search_regex
+from .search_options import SearchOptions
 from .project_find import ProjectFind
 from .find_results_pane import FindResultsPane
 from .project_targets import (
@@ -14918,10 +14918,8 @@ struct Desktop(Movable):
                 # Replace the current match (if the selection is one)
                 # then step forward. When the selection isn't a match,
                 # this just advances — same UX as VS Code / JetBrains.
-                if _selection_is_match(
-                    self.windows.windows[idx].editor.selection_text(),
-                    find, opts,
-                ):
+                if self.windows.windows[idx].editor \
+                        .selection_is_search_match(find, opts):
                     self.windows.windows[idx].editor.paste_text(replacement)
                 if self.windows.windows[idx].editor.find_next(find, opts):
                     self.windows.windows[idx].editor.reveal_cursor(
@@ -14970,28 +14968,10 @@ struct Desktop(Movable):
 # --- Small helpers ----------------------------------------------------------
 
 
-def _selection_is_match(sel: String, find: String, opts: SearchOptions) -> Bool:
-    """True when ``sel`` would match ``find`` under ``opts`` if it were
-    a standalone candidate — i.e. the user's currently-selected text is
-    a hit for the search term. Drives the Replace button: if the active
-    selection is a match, replacing it is the right thing to do; if it
-    isn't, the button instead just walks forward to the first match.
-
-    Non-regex / non-case-insensitive / non-whole-word: simple byte
-    equality. Anything else: compile the same regex ``find_next`` uses
-    and check it against the selection text, anchored at start, with
-    the match consuming the entire selection.
-    """
-    if len(sel.as_bytes()) == 0 or len(find.as_bytes()) == 0:
-        return False
-    var rx_opt = build_search_regex(find, opts)
-    if rx_opt:
-        var m_opt = rx_opt.value().search_at(sel, 0)
-        if m_opt:
-            var m = m_opt.value().copy()
-            return m.start == 0 and m.end == len(sel.as_bytes())
-        return False
-    return sel == find
+# ``_selection_is_match`` used to live here. It compiled its own regex per
+# Replace click, which nothing ever freed; it is now
+# ``Editor.selection_is_search_match``, sharing the editor's cached
+# searcher with ``find_next``.
 
 
 def _find_doc_entry_for_word(

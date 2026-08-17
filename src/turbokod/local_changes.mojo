@@ -50,7 +50,7 @@ the modal closes.
 
 **Reporting outcomes.** Every git operation ends in one of three ways,
 chosen by whether its output was the one git prints when nothing
-interesting happened (``git_output.GitOutputMatcher``, which holds the
+interesting happened (``git_output.GitOutputMatchers``, which holds the
 per-subcommand regexes for what "boring" looks like):
 
 * *Routine success* — the spinner closes and a one-line summary lands on
@@ -121,7 +121,7 @@ from .git_output import (
     GIT_OUT_BRANCH_DELETE, GIT_OUT_CHECKOUT, GIT_OUT_COMMIT, GIT_OUT_MERGE,
     GIT_OUT_OTHER, GIT_OUT_PULL, GIT_OUT_PUSH, GIT_OUT_REBASE,
     GIT_OUT_RESTORE,
-    GitOutputMatcher, complete_lines,
+    GitOutputMatchers, complete_lines,
 )
 from .posix import monotonic_ms, wall_clock_ms
 from .install_runner import InstallRunner
@@ -1244,11 +1244,15 @@ struct LocalChanges(Movable):
     # part you want is what the command said last.
     var overlay_output: String
     var overlay_output_scroll: Int
-    # Compiled "what does boring look like" patterns for the op in flight,
-    # plus whether we've already decided this one isn't boring. Sticky:
-    # once promoted, we stop re-classifying, so a long deploy log costs
-    # one match pass rather than one per frame.
-    var _output_matcher: GitOutputMatcher
+    # Which shape of "boring" output the op in flight is expected to
+    # print, plus whether we've already decided this one isn't boring.
+    # Sticky: once promoted, we stop re-classifying, so a long deploy log
+    # costs one match pass rather than one per frame. The compiled
+    # patterns live in ``_output_matchers``, which builds each kind at
+    # most once per session — a fresh ``GitOutputMatcher`` per operation
+    # leaked its regexes, since libonig handles are never freed.
+    var _output_kind: Int
+    var _output_matchers: GitOutputMatchers
     var _output_promoted: Bool
     # The three sidebar panels (Modified files / Branches / Commits)
     # share the framework ``DockedPanelStack`` for min/max state, layout
@@ -1361,7 +1365,8 @@ struct LocalChanges(Movable):
         self._flash_until_ms = 0
         self.overlay_output = String("")
         self.overlay_output_scroll = 0
-        self._output_matcher = GitOutputMatcher()
+        self._output_kind = GIT_OUT_OTHER
+        self._output_matchers = GitOutputMatchers()
         self._output_promoted = False
         self.sidebar_dock = DockedPanelStack()
         # Order must match ``_PANE_FILES`` / ``_PANE_BRANCHES`` /
@@ -1429,7 +1434,7 @@ struct LocalChanges(Movable):
         self._flash_until_ms = 0
         self.overlay_output = String("")
         self.overlay_output_scroll = 0
-        self._output_matcher = GitOutputMatcher()
+        self._output_kind = GIT_OUT_OTHER
         self._output_promoted = False
         self.sidebar_dock.reset()
         self._type_ahead.reset()
@@ -1573,7 +1578,7 @@ struct LocalChanges(Movable):
         self._flash_until_ms = 0
         self.overlay_output = String("")
         self.overlay_output_scroll = 0
-        self._output_matcher = GitOutputMatcher()
+        self._output_kind = GIT_OUT_OTHER
         self._output_promoted = False
         self.sidebar_dock.reset()
         self._type_ahead.reset()
@@ -3905,7 +3910,8 @@ struct LocalChanges(Movable):
         var done = complete_lines(self.git_runner.output)
         if len(done.as_bytes()) == 0:
             return
-        if self._output_matcher.is_routine(done):
+        var kind = self._output_kind
+        if self._output_matchers.is_routine(kind, done):
             return
         self._output_promoted = True
         self.git_runner.full_screen = True
@@ -3967,7 +3973,7 @@ struct LocalChanges(Movable):
             self._git_op_label = label^
             # Arm the classifier for this op's expected output before any
             # of it arrives.
-            self._output_matcher = GitOutputMatcher(self._output_kind_for(op))
+            self._output_kind = self._output_kind_for(op)
             self._output_promoted = False
         else:
             self._show_status(
@@ -4205,7 +4211,7 @@ struct LocalChanges(Movable):
             return False
         # ``_start_git_op`` armed the classifier for a rebase; this step is
         # a checkout / merge and prints that shape of output instead.
-        self._output_matcher = GitOutputMatcher(kind)
+        self._output_kind = kind
         return True
 
     def _delete_selected_branch(mut self):
@@ -4462,8 +4468,10 @@ struct LocalChanges(Movable):
         # non-modal flash, anything else opens the full-screen log. See
         # ``git_output`` for what "routine" means and why the test is
         # "every line was expected" rather than "nothing looked wrong".
-        var routine = ok and not self._output_promoted \
-            and self._output_matcher.is_routine(r.output)
+        var routine = ok and not self._output_promoted
+        if routine:
+            var kind = self._output_kind
+            routine = self._output_matchers.is_routine(kind, r.output)
         # Push/pull report progress + the final summary on stderr; the
         # rest report success on stdout and the error on stderr. We
         # collapse the captured output to a single trimmed line for the

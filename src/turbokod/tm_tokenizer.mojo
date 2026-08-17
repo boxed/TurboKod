@@ -267,6 +267,10 @@ def _tokenize_line(
     # recomputed whenever the candidate set is rebuilt (i.e. when the
     # top frame changes). The keys/regexes lists cache compiles so a
     # line full of ``<td>..</td>`` rows doesn't recompile per cell.
+    # Line-local, and released at the bottom of this function: these are
+    # the only regexes in the system compiled from data rather than from a
+    # grammar file, so without the release they'd accumulate for the life
+    # of the process — one set per line, per re-tokenize.
     var dyn_keys = List[String]()
     var dyn_regexes = List[OnigRegex]()
     var dyn_end = Optional[OnigRegex]()
@@ -566,6 +570,14 @@ def _tokenize_line(
                         break
             if not covered:
                 out.append(Highlight(row, i, i + 1, op_attr))
+
+    # The back-reference end regexes were compiled for this line only and
+    # nothing above stores one past this point (``Frame`` holds a pattern
+    # index, not a handle), so this is the last moment they're reachable —
+    # and the only place they can be reclaimed, since libonig's
+    # allocations aren't Mojo-owned.
+    for i in range(len(dyn_regexes)):
+        dyn_regexes[i].release()
 
 
 def _process_while_frames(

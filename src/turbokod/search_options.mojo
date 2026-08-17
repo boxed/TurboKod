@@ -245,6 +245,25 @@ struct LineSearcher(ImplicitlyCopyable, Movable):
             return Optional[MatchSpan]()
         return self._regex_span(String(StringSpan(unsafe_from_utf8=lb)), start)
 
+    def matches_whole(self, text: String) -> Bool:
+        """True when ``text`` is *itself* a hit — a match anchored at byte
+        0 that consumes every byte.
+
+        Drives the Replace button: if the current selection is a match,
+        replacing it is the right thing to do; if it isn't, Replace just
+        walks forward to the next hit. Goes through the same searcher as
+        the walk so the two can't disagree about what counts as a match
+        under a given set of toggles.
+        """
+        var n = len(text.as_bytes())
+        if n == 0:
+            return False
+        var m = self.search(text, 0)
+        if not m:
+            return False
+        var mv = m.value()
+        return mv.start == 0 and mv.end == n
+
     def rsearch(self, line: String, limit: Int) -> Optional[MatchSpan]:
         """Last match whose start is <= ``limit``, or None. Neither
         libonig nor the SIMD scan has a reverse search, so both walk
@@ -266,3 +285,56 @@ struct LineSearcher(ImplicitlyCopyable, Movable):
             # to advance or this loop never terminates.
             pos = mv.end if mv.end > mv.start else mv.start + 1
         return best^
+
+
+struct SearcherCache(ImplicitlyCopyable, Movable):
+    """Holds the last ``LineSearcher`` so a repeated search reuses its
+    compiled regex instead of building a new one.
+
+    This is a memory fix, not a speed one. ``build_search_regex`` fires
+    for every configuration except case-sensitive-literal — including the
+    all-off default, which is case-*insensitive* — and an ``OnigRegex``
+    never frees its libonig handles (see the ``OnigRegex`` doc comment).
+    So each Find, F3, Replace and Replace-All used to strand ~1 KB for
+    the life of the process; stepping through a big file's matches was a
+    slow leak with a keyboard shortcut attached.
+
+    One slot, not a map: the repeat we care about is "same needle, same
+    toggles, again" (F3, or Replace stepping match to match). Changing
+    the needle compiles once, as it must.
+    """
+
+    var needle: String
+    var opts: SearchOptions
+    var searcher: LineSearcher
+    var valid: Bool
+
+    def __init__(out self):
+        self.needle = String("")
+        # Case-sensitive literal on purpose: that's the one configuration
+        # ``build_search_regex`` answers without compiling, so a
+        # default-constructed cache (one per ``Editor``) doesn't strand a
+        # regex for a search nobody ran. ``valid`` is False, so this
+        # placeholder is never handed out.
+        self.opts = SearchOptions(True, False, False)
+        self.searcher = LineSearcher(String(""), self.opts)
+        self.valid = False
+
+    def get(mut self, needle: String, opts: SearchOptions) -> LineSearcher:
+        """The searcher for ``(needle, opts)``, compiling only on a miss.
+
+        The returned value shares the cached ``OnigRegex`` handles —
+        ``LineSearcher`` copies alias rather than duplicate — so callers
+        can hold it for the duration of a search without extending any
+        lifetime.
+        """
+        if self.valid and self.needle == needle \
+                and self.opts.case_sensitive == opts.case_sensitive \
+                and self.opts.whole_word == opts.whole_word \
+                and self.opts.regex == opts.regex:
+            return self.searcher
+        self.searcher = LineSearcher(needle, opts)
+        self.needle = needle
+        self.opts = opts
+        self.valid = True
+        return self.searcher
