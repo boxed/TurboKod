@@ -911,12 +911,31 @@ struct DapManager(Copyable, Movable):
         previous run; the dead ``client`` would let writes go to a
         closed pipe.
 
-        Sibling to ``shutdown``: callers that want to teardown call
-        ``shutdown`` first, then ``reset_for_restart`` before the
-        next ``start``.
+        Sibling to ``shutdown``, but it does not *depend* on having been
+        preceded by one. It used to: the docstring told callers to
+        ``shutdown`` first, and all four of them did the opposite —
+        each gates on ``is_failed() or is_terminated()``, which is
+        exactly where the ``if is_active(): shutdown()`` above it
+        doesn't fire. And the child is very much alive in those states:
+        a post-spawn ``initialize`` failure, an outbound-queue
+        overflow, the 15 s watchdog and an ``initialize`` rejection all
+        latch FAILED without touching the process, and the
+        ``terminated`` event — the normal end of every session — latches
+        TERMINATED while the adapter is still running. ``tick`` returns
+        early in both states, so not even ``try_reap`` ran. Replacing
+        ``client`` then stranded the pid, its three pipes and the trace
+        fd for the life of the process: one leaked set per F5 → exit →
+        F5 cycle, which is the ordinary debugging loop.
+
+        So the teardown happens here instead of in a precondition.
+        ``LspProcess.terminate`` is idempotent and closes the fds
+        whether or not the child is still up, so a caller that *did*
+        shutdown first pays nothing.
         """
         # Discard the dead child + pipes wholesale by giving back a
-        # fresh inert client.
+        # fresh inert client — but hand the old one's pid + fds back
+        # first, since nothing else can reach them once it's replaced.
+        self.client.terminate()
         self.client = DapClient(LspProcess())
         self.state = _STATE_NOT_STARTED
         self.failure_reason = String("")
@@ -977,6 +996,12 @@ struct DapManager(Copyable, Movable):
         self.spawn_argv = List[String]()
         self._state_entered_ms = 0
         self._last_heartbeat_ms = 0
+        # Same reasoning as ``client`` above: a subprocess attach holds a
+        # connected TCP socket (``LspProcess.from_socket``), and because
+        # its ``pid`` is the ``-1`` socket-mode sentinel, ``terminate``
+        # is the only thing that ever closes it. ``shutdown`` tears this
+        # down too — but that's the call the restart paths skip.
+        self._subprocess.client.terminate()
         self._subprocess = SubprocessAttach()
         self._last_inspect_in_subprocess = False
         self._stop_in_subprocess = False

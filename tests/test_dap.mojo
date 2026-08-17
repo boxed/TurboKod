@@ -31,8 +31,8 @@ from turbokod.dap import (
 )
 from turbokod.dap_dispatch import (
     DapManager, DapStackFrame, DapVariable, _STATE_FAILED,
-    _STATE_INITIALIZING, _parse_scopes, _parse_stack_trace,
-    _parse_threads, _parse_variables
+    _STATE_INITIALIZING, _STATE_TERMINATED, _parse_scopes,
+    _parse_stack_trace, _parse_threads, _parse_variables
 )
 from turbokod.debugger_config import (
     built_in_debuggers, find_debugger_for_language, launch_arguments_for
@@ -1666,6 +1666,50 @@ def test_breakpoint_store_per_user_path() raises:
     )
 
 
+def test_dap_reset_for_restart_closes_the_previous_sessions_fds() raises:
+    """Restarting after a FAILED / TERMINATED session hands the old
+    adapter's descriptors back.
+
+    ``reset_for_restart`` replaces ``client`` wholesale, so whatever the
+    old one held is unreachable the moment it returns. Its four callers
+    all gate on ``is_failed() or is_terminated()`` — precisely the
+    states where the preceding ``if is_active(): shutdown()`` doesn't
+    fire — and the child is still up in those states (watchdog trip,
+    rejected ``initialize``, or the ``terminated`` event that ends every
+    normal session). So each restart used to strand a pid, three pipes
+    and the trace fd.
+
+    Asserted on the descriptor rather than on RSS: a second ``close``
+    of a live fd returns 0, of a closed one -1 (EBADF). ``from_socket``
+    stands in for a real adapter — same ``LspProcess`` teardown path,
+    no adapter binary needed on the test machine.
+    """
+    var pair = pipe_pair()
+    var read_fd = pair[0]
+    var write_fd = pair[1]
+    var mgr = DapManager()
+    mgr.client = DapClient(LspProcess.from_socket(read_fd))
+    mgr.state = _STATE_FAILED
+    mgr.reset_for_restart()
+    assert_equal(Int(close_fd(read_fd)), -1)
+
+    # The subprocess-attach socket is the second half: ``pid == -1``
+    # means nothing but ``terminate`` ever closes it, and
+    # ``reset_for_restart`` drops that value too.
+    var sub_pair = pipe_pair()
+    var sub_read = sub_pair[0]
+    var sub_write = sub_pair[1]
+    var mgr2 = DapManager()
+    mgr2._subprocess.client = DapClient(LspProcess.from_socket(sub_read))
+    mgr2._subprocess.state = _STATE_TERMINATED
+    mgr2.state = _STATE_TERMINATED
+    mgr2.reset_for_restart()
+    assert_equal(Int(close_fd(sub_read)), -1)
+
+    _ = close_fd(write_fd)
+    _ = close_fd(sub_write)
+
+
 def main() raises:
     setup_test_env()
     test_debug_pane_repl_console()
@@ -1730,4 +1774,5 @@ def main() raises:
     test_breakpoint_store_round_trip()
     test_breakpoint_store_load_missing_returns_empty()
     test_breakpoint_store_per_user_path()
-    print("dap: 61 tests passed")
+    test_dap_reset_for_restart_closes_the_previous_sessions_fds()
+    print("dap: 62 tests passed")
