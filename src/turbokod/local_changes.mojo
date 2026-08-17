@@ -3801,6 +3801,10 @@ struct LocalChanges(Movable):
         self._reword_sha = c.short_sha.copy()
         self._reword_is_head = (head_short_sha(self.root) == c.short_sha)
         self.overlay = _OVERLAY_EDIT_MSG
+        # Hand back the outgoing editor's Find regex before the value is
+        # overwritten — same reason as ``close`` / ``reset``, which is
+        # the pattern this site was the odd one out of.
+        self.overlay_editor.release_search_cache()
         self.overlay_editor = self._message_editor_for(existing)
         self.overlay_message = String("")
 
