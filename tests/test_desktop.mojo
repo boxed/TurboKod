@@ -2676,6 +2676,49 @@ def test_desktop_shutdown_releases_its_libonig_handles() raises:
     _ = delete_path(path)
 
 
+def test_closing_a_window_releases_its_find_regex() raises:
+    """A window closed mid-session hands its Find regex back.
+
+    ``Desktop.shutdown`` walks the windows that are still *open*, so it
+    can't reach the searcher of one already popped off the list — the
+    release has to happen on the close path itself (``Window.release``).
+    Before it did, every window close stranded ~1 KB of libonig for the
+    life of the process, and ``_enforce_window_cap``'s LRU eviction made
+    that automatic rather than user-driven.
+
+    Both close paths are covered: ``close_focused`` is Window ▸ Close /
+    the ``[■]`` button, ``close_by_index`` is what eviction and the
+    delete-file sweep use.
+    """
+    onig_global_init()
+    var a = _temp_path(String("_close_leak_a.ts"))
+    var b = _temp_path(String("_close_leak_b.ts"))
+    assert_true(write_file(a, String("interface Foo { bar: string }\n")))
+    assert_true(write_file(b, String("interface Foo { baz: string }\n")))
+    var live = onig_tracked_count()
+    var d = Desktop()
+    var screen = Rect(0, 0, 100, 40)
+    d.open_file(a, screen)
+    var idx_a = len(d.windows.windows) - 1
+    d.open_file(b, screen)
+    var idx_b = len(d.windows.windows) - 1
+    # A Find compiles a regex that lives on the Editor, not on the
+    # grammar registry — the default search options are case-*insensitive*,
+    # which is precisely the configuration that needs libonig.
+    _ = d.windows.windows[idx_a].editor.find_next(String("Foo"))
+    _ = d.windows.windows[idx_b].editor.find_next(String("Foo"))
+    assert_true(onig_tracked_count() > live)
+    assert_true(d.windows.close_by_index(idx_a))
+    assert_true(d.windows.close_focused())
+    # Every window that compiled a regex is gone, so the count is already
+    # back at the baseline — shutdown has nothing left to reach.
+    assert_equal(onig_tracked_count(), live)
+    d.shutdown()
+    assert_equal(onig_tracked_count(), live)
+    _ = delete_path(a)
+    _ = delete_path(b)
+
+
 def test_desktop_confirm_dialog_no_clears_pending_action() raises:
     var d = Desktop()
     d._pending_action = String("lsp:install")
@@ -2791,4 +2834,5 @@ def main() raises:
     test_desktop_confirm_dialog_yes_starts_grammar_install()
     test_desktop_confirm_dialog_no_clears_pending_action()
     test_desktop_shutdown_releases_its_libonig_handles()
+    test_closing_a_window_releases_its_find_regex()
     print("desktop: 98 tests passed")

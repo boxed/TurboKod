@@ -1190,6 +1190,24 @@ struct Window(Copyable, Movable):
         w.is_editor = True
         return w^
 
+    def release(mut self):
+        """Hand back what this window owns that Mojo's destructor can't.
+
+        Today that's the ``Editor``'s compiled Find regex: libonig's
+        allocations are owned by the Rust shim's registry, so popping the
+        window off ``WindowManager.windows`` reclaims the Mojo value and
+        strands the handle. ``Desktop.shutdown`` releases the caches of
+        windows that are *still open*, which by definition can't reach one
+        that was closed mid-session — so the release has to happen here,
+        on the way out.
+
+        Safe against the ``OnigRegex`` aliasing hazard because
+        ``Editor.__copyinit__`` builds a *fresh* ``SearcherCache`` rather
+        than copying this one: no window copy can name the same handle.
+        Idempotent — a later Find would just recompile.
+        """
+        self.editor.release_search_cache()
+
     def __copyinit__(mut self, copy: Self):
         self.title = copy.title
         self.rect = copy.rect
@@ -1886,6 +1904,7 @@ struct WindowManager(Movable):
         if self.focused < 0 or self.focused >= len(self.windows):
             return False
         var idx = self.focused
+        self.windows[idx].release()
         _ = self.windows.pop(idx)
         # Drop ``idx`` from z_order and shift any index above it down by one
         # to keep the indices in sync with the now-shorter ``windows`` list.
@@ -1915,6 +1934,7 @@ struct WindowManager(Movable):
         if idx < 0 or idx >= len(self.windows):
             return False
         var was_focused = self.focused
+        self.windows[idx].release()
         _ = self.windows.pop(idx)
         var new_z = List[Int]()
         for k in range(len(self.z_order)):
