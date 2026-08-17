@@ -132,9 +132,11 @@ from .string_utils import (
     starts_with,
     tail_to_columns,
 )
-from .text_field import TextArea, TextField
+from .text_field import TextField
 from .type_ahead import TypeAhead, is_printable_ascii, type_ahead_pick
 from .buttons import BUTTON_FIRED, ShadowButton, paint_shadow_button
+from .editor import Editor
+from .config import WRAP_SOFT
 
 
 comptime _SIDEBAR_MIN: Int = 28
@@ -1223,7 +1225,7 @@ struct LocalChanges(Movable):
     # for the tip, a replay for anything older — see ``_submit_reword``).
     # The Save button is a field rather than a per-paint temporary because
     # ``ShadowButton`` latches a press across frames.
-    var overlay_area: TextArea
+    var overlay_editor: Editor
     var _reword_sha: String
     var _reword_is_head: Bool
     var _reword_save_btn: ShadowButton
@@ -1356,7 +1358,7 @@ struct LocalChanges(Movable):
         self.overlay = _OVERLAY_NONE
         self.overlay_input = TextField()
         self.overlay_message = String("")
-        self.overlay_area = TextArea()
+        self.overlay_editor = Editor(String(""))
         self._reword_sha = String("")
         self._reword_is_head = False
         self._reword_save_btn = ShadowButton(String(_SAVE_BTN_LABEL), 0, 0)
@@ -1425,7 +1427,7 @@ struct LocalChanges(Movable):
         self.overlay = _OVERLAY_NONE
         self.overlay_input = TextField()
         self.overlay_message = String("")
-        self.overlay_area = TextArea()
+        self.overlay_editor = Editor(String(""))
         self._reword_sha = String("")
         self._reword_is_head = False
         self._reword_save_btn = ShadowButton(String(_SAVE_BTN_LABEL), 0, 0)
@@ -1569,7 +1571,7 @@ struct LocalChanges(Movable):
         self.overlay = _OVERLAY_NONE
         self.overlay_input = TextField()
         self.overlay_message = String("")
-        self.overlay_area = TextArea()
+        self.overlay_editor = Editor(String(""))
         self._reword_sha = String("")
         self._reword_is_head = False
         self._reword_save_btn = ShadowButton(String(_SAVE_BTN_LABEL), 0, 0)
@@ -2287,7 +2289,9 @@ struct LocalChanges(Movable):
         if self._reword_save_btn.handle_mouse(event) == BUTTON_FIRED:
             self._submit_reword()
             return
-        _ = self.overlay_area.handle_mouse(event, self._reword_area_rect)
+        _ = self.overlay_editor.handle_mouse(
+            event, self._reword_area_rect,
+        )
 
     def _paint_edit_msg(
         mut self, mut canvas: Canvas, mut body_p: Painter,
@@ -2314,7 +2318,7 @@ struct LocalChanges(Movable):
             area_bottom = area_top + 1
         var area_rect = Rect(bx + 2, area_top, bx + box_w - 2, area_bottom)
         self._reword_area_rect = area_rect
-        self.overlay_area.paint(canvas, area_rect, True)
+        self.overlay_editor.paint(canvas, area_rect, True)
         # Save button, right-aligned on the row above the hint.
         var btn_y = area_bottom
         var btn_x = bx + box_w - 2 - self._reword_save_btn.total_width()
@@ -3693,6 +3697,29 @@ struct LocalChanges(Movable):
             self.overlay_input.set_text(self._pending_commit_message.copy())
         self.overlay_message = String("")
 
+    def _message_editor_for(mut self, text: String) -> Editor:
+        """A full ``Editor`` configured as a commit-message input.
+
+        The message box is a real editor rather than a bespoke widget, so
+        it inherits everything the editor already does — mouse and
+        keyboard selection, word/line jumps, multi-cursor, undo/redo,
+        clipboard, smart-select, autocomplete-free plain text — instead of
+        reimplementing a worse subset. Only the chrome is dialed back:
+
+        * ``minimap_visible`` off — a minimap of a five-line message is
+          noise, and it would eat columns the text needs.
+        * ``WRAP_SOFT`` — the box is ~60 columns, so a long subject line
+          should wrap rather than scroll horizontally out of sight.
+
+        Line numbers and the DAP gutter are already off by default for a
+        fresh ``Editor``, and with no ``file_path`` there's no autosave,
+        no external-change polling, and no grammar, so it stays plain text.
+        """
+        var ed = Editor(text)
+        ed.minimap_visible = False
+        ed.wrap_mode = WRAP_SOFT
+        return ed^
+
     def _open_reword_prompt(mut self):
         """Pop the multi-line editor for the selected commit's message.
 
@@ -3740,8 +3767,7 @@ struct LocalChanges(Movable):
         self._reword_sha = c.short_sha.copy()
         self._reword_is_head = (head_short_sha(self.root) == c.short_sha)
         self.overlay = _OVERLAY_EDIT_MSG
-        self.overlay_area = TextArea()
-        self.overlay_area.set_text(existing)
+        self.overlay_editor = self._message_editor_for(existing)
         self.overlay_message = String("")
 
     def _open_amend_confirm(mut self):
@@ -4338,10 +4364,10 @@ struct LocalChanges(Movable):
         Both are guarded by ``_open_reword_prompt``: unpushed only, and no
         merges in the replayed range.
         """
-        if self.overlay_area.is_empty():
+        if len(self.overlay_editor.text_snapshot().strip().as_bytes()) == 0:
             self._show_status(String("Empty commit message."), False)
             return
-        var msg = self.overlay_area.text()
+        var msg = self.overlay_editor.text_snapshot()
         var sha = self._reword_sha.copy()
         if len(sha.as_bytes()) == 0:
             self._close_overlay()
@@ -4634,8 +4660,23 @@ struct LocalChanges(Movable):
             if k == KEY_ENTER and (event.mods & (MOD_CTRL | MOD_META)) != 0:
                 self._submit_reword()
                 return True
-            var ra = self.overlay_area.handle_key(event)
-            if ra.consumed:
+            # Undo / redo aren't bound inside ``Editor.handle_key`` — the
+            # Desktop dispatches them as actions from its hotkey table,
+            # and that path never runs while this modal owns input. Route
+            # the same chords (⌘Z / ⌘⇧Z / ⌘Y, Ctrl equivalents too) to the
+            # embedded editor's own history so the message box has real
+            # undo rather than a dead shortcut.
+            var chord_mods = (event.mods & (MOD_CTRL | MOD_META)) != 0
+            if chord_mods and k == UInt32(ord("z")):
+                if (event.mods & MOD_SHIFT) != 0:
+                    _ = self.overlay_editor.redo()
+                else:
+                    _ = self.overlay_editor.undo()
+                return True
+            if chord_mods and k == UInt32(ord("y")):
+                _ = self.overlay_editor.redo()
+                return True
+            if self.overlay_editor.handle_key(event, self._reword_area_rect):
                 return True
             # Swallow anything else so a stray key can't reach the list
             # underneath while a modal editor is open.

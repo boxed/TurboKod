@@ -63,8 +63,9 @@ from turbokod.highlight import (
 from turbokod.posix import wall_clock_ms, which
 from turbokod.config import WRAP_NONE
 from turbokod.events import (
-    Event, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_LEFT, KEY_PAGEDOWN,
-    KEY_PAGEUP, KEY_SPACE, MOD_CTRL, MOD_META, MOD_SHIFT, MOUSE_BUTTON_LEFT
+    Event, KEY_BACKSPACE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME,
+    KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_SPACE, MOD_CTRL,
+    MOD_META, MOD_SHIFT, MOUSE_BUTTON_LEFT
 )
 from turbokod.geometry import Point, Rect
 from turbokod.merge_view import (
@@ -74,7 +75,7 @@ from turbokod.window import Window
 
 from support import (
     _VIEW, _contains, _ensure_dir, _hl_lines, _key, _rm_rf, _run_git,
-    _temp_path, setup_test_env
+    _starts_with, _temp_path, setup_test_env
 )
 
 
@@ -2306,9 +2307,10 @@ def test_local_changes_e_opens_prefilled_editor_and_esc_cancels() raises:
     assert_equal(lc._git_op, _GITOP_NONE)
     # Prefilled with the *whole* message, as multiple lines.
     assert_equal(
-        lc.overlay_area.text(), String("second subject\n\nsecond body line"),
+        lc.overlay_editor.text_snapshot(),
+        String("second subject\n\nsecond body line"),
     )
-    assert_equal(len(lc.overlay_area.lines), 3)
+    assert_equal(lc.overlay_editor.buffer.line_count(), 3)
     # The Save button advertises the chord, since Enter is a newline here.
     var canvas = Canvas(screen.width(), screen.height())
     lc.paint(canvas, screen, registry)
@@ -2336,6 +2338,83 @@ def test_local_changes_e_opens_prefilled_editor_and_esc_cancels() raises:
     _rm_rf(dir)
 
 
+def test_reword_editor_supports_keyboard_selection() raises:
+    """The message box is a real ``Editor``, so Shift+arrow selects and
+    typing replaces the selection. This is the whole reason it isn't a
+    bespoke widget — a hand-rolled input had none of it."""
+    var dir = _reword_repo(String("_reword_kbsel"))
+    if len(dir.as_bytes()) == 0:
+        return
+    var lc = LocalChanges()
+    lc.open(dir)
+    lc.focus = _PANE_COMMITS
+    lc.sel_commit = 0                 # message is "third"
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(_key(UInt32(0x65)), screen, registry)
+    assert_equal(lc.overlay, _OVERLAY_EDIT_MSG)
+    assert_false(lc.overlay_editor.has_selection())
+    # Home, then Shift+Right three times: "thi" is selected.
+    _ = lc.handle_key(_key(KEY_HOME), screen, registry)
+    for _ in range(3):
+        _ = lc.handle_key(_key(KEY_RIGHT, MOD_SHIFT), screen, registry)
+    assert_true(lc.overlay_editor.has_selection())
+    assert_equal(lc.overlay_editor.selection_text(), String("thi"))
+    # Typing over a selection replaces it.
+    _ = lc.handle_key(_key(UInt32(0x58)), screen, registry)     # 'X'
+    assert_equal(lc.overlay_editor.text_snapshot(), String("Xrd"))
+    assert_false(lc.overlay_editor.has_selection())
+    _rm_rf(dir)
+
+
+def test_reword_editor_supports_mouse_selection_and_undo() raises:
+    """Press-drag-release inside the box selects a range, and undo is the
+    editor's own — two more things the message box gets for free by being
+    an ``Editor``."""
+    var dir = _reword_repo(String("_reword_mousesel"))
+    if len(dir.as_bytes()) == 0:
+        return
+    var lc = LocalChanges()
+    lc.open(dir)
+    lc.focus = _PANE_COMMITS
+    lc.sel_commit = 1                 # "second subject\n\nsecond body line"
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(_key(UInt32(0x65)), screen, registry)
+    # Paint once so the editor's view rect is recorded for hit-testing.
+    var canvas = Canvas(screen.width(), screen.height())
+    lc.paint(canvas, screen, registry)
+    var area = lc._reword_area_rect
+    # Drag across the first six cells of row 0: selects "second".
+    var x0 = area.a.x
+    var y0 = area.a.y
+    _ = lc.handle_mouse(
+        Event.mouse_event(Point(x0, y0), MOUSE_BUTTON_LEFT, True, False),
+        screen, registry,
+    )
+    _ = lc.handle_mouse(
+        Event.mouse_event(Point(x0 + 6, y0), MOUSE_BUTTON_LEFT, True, True),
+        screen, registry,
+    )
+    _ = lc.handle_mouse(
+        Event.mouse_event(Point(x0 + 6, y0), MOUSE_BUTTON_LEFT, False, False),
+        screen, registry,
+    )
+    assert_true(lc.overlay_editor.has_selection())
+    assert_equal(lc.overlay_editor.selection_text(), String("second"))
+    # Delete the selection, then undo restores it — the editor's history,
+    # not something reimplemented here.
+    _ = lc.handle_key(_key(KEY_BACKSPACE), screen, registry)
+    assert_true(
+        _starts_with(lc.overlay_editor.text_snapshot(), String(" subject")),
+    )
+    _ = lc.handle_key(_key(UInt32(0x7A), MOD_META), screen, registry)   # ⌘Z
+    assert_true(
+        _starts_with(lc.overlay_editor.text_snapshot(), String("second subject")),
+    )
+    _rm_rf(dir)
+
+
 def test_local_changes_reword_head_amends_the_message() raises:
     """Cmd+Enter on the tip runs ``commit --amend``: the message changes
     and the commit count doesn't."""
@@ -2351,7 +2430,9 @@ def test_local_changes_reword_head_amends_the_message() raises:
     _ = lc.handle_key(_key(UInt32(0x65)), screen, registry)
     assert_equal(lc.overlay, _OVERLAY_EDIT_MSG)
     assert_true(lc._reword_is_head)
-    lc.overlay_area.set_text(String("amended subject\n\nwith a body"))
+    lc.overlay_editor = lc._message_editor_for(
+        String("amended subject\n\nwith a body"),
+    )
     _ = lc.handle_key(_key(KEY_ENTER, MOD_META), screen, registry)
     assert_equal(lc.overlay, _OVERLAY_NONE)
     assert_equal(lc._git_op, _GITOP_REWORD)
@@ -2382,7 +2463,7 @@ def test_local_changes_reword_older_commit_keeps_its_children() raises:
     _ = lc.handle_key(_key(UInt32(0x65)), screen, registry)
     assert_equal(lc.overlay, _OVERLAY_EDIT_MSG)
     assert_false(lc._reword_is_head)
-    lc.overlay_area.set_text(String("middle rewritten"))
+    lc.overlay_editor = lc._message_editor_for(String("middle rewritten"))
     _ = lc.handle_key(_key(KEY_ENTER, MOD_META), screen, registry)
     assert_equal(lc._git_op, _GITOP_REWORD)
     _drain_git_op(lc)
@@ -3505,6 +3586,8 @@ def main() raises:
     test_local_changes_e_refuses_a_pushed_commit()
     test_local_changes_e_refuses_a_merge_commit()
     test_local_changes_e_opens_prefilled_editor_and_esc_cancels()
+    test_reword_editor_supports_keyboard_selection()
+    test_reword_editor_supports_mouse_selection_and_undo()
     test_local_changes_reword_head_amends_the_message()
     test_local_changes_reword_older_commit_keeps_its_children()
-    print("git: 94 tests passed")
+    print("git: 96 tests passed")
