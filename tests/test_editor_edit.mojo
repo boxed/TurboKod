@@ -13,7 +13,10 @@ from turbokod.colors import (
     BLUE, LIGHT_GREEN, LIGHT_RED, STYLE_UNDERLINE, STYLE_UNDERLINE_CURLY,
     YELLOW, CARET_BG, CARET_FG, EDITOR_BG, EDITOR_FG, SYN_IDENT, default_attr
 )
-from turbokod.editor import Editor
+from turbokod.editor import (
+    Editor, _UNDO_STACK_BYTE_BUDGET, _UNDO_STACK_LIMIT,
+    _UNDO_STACK_MIN_ENTRIES
+)
 from turbokod.kwarg_conceal import (
     build_concealed_segment, kwarg_conceal_ranges,
     kwarg_separator_for_extension
@@ -2225,6 +2228,55 @@ def test_kwarg_conceal_build_segment_collapses_and_shifts() raises:
     assert_equal(plain[0], String("=a"))
 
 
+def test_undo_history_is_capped_by_bytes_not_just_entries() raises:
+    """A big buffer's undo history is bounded in *bytes*, not entries.
+
+    Every entry is a whole-buffer copy, so the 500-entry cap alone meant
+    the cost of a full stack scaled with the file: 500 edits in a 1 MB
+    file retained ~500 MB per editor, times every open window. Typing is
+    all it took to get there.
+    """
+    # ~1 MB buffer: 1024 lines of 1 KB. Assigning ``buffer.lines``
+    # directly keeps the fixture out of the O(n^2) string-concat that
+    # building one 1 MB literal would cost.
+    var chunk = String("")
+    for _ in range(64):
+        chunk = chunk + String("0123456789abcdef")
+    var lines = List[String]()
+    for _ in range(1024):
+        lines.append(chunk)
+    var ed = Editor(String(""))
+    ed.buffer.lines = lines^
+    var per_snapshot = 0
+    for i in range(ed.buffer.line_count()):
+        per_snapshot += len(ed.buffer.lines[i].as_bytes()) + 1
+    assert_true(per_snapshot > 1000000)
+    for _ in range(200):
+        ed._push_undo()
+    var total = 0
+    for i in range(len(ed._undo_stack)):
+        total += ed._undo_stack[i].byte_size
+    # The byte budget is what bound this, not the entry count: 200 pushes
+    # is well under the 500-entry cap, yet entries were dropped and the
+    # retained bytes fit the budget (~210 MB unbounded, before the fix).
+    assert_true(len(ed._undo_stack) < 200)
+    assert_true(len(ed._undo_stack) < _UNDO_STACK_LIMIT)
+    assert_true(total <= _UNDO_STACK_BYTE_BUDGET)
+    # …and it still keeps a usable amount of history.
+    assert_true(len(ed._undo_stack) >= _UNDO_STACK_MIN_ENTRIES)
+
+
+def test_undo_history_still_honors_the_entry_cap() raises:
+    """A small buffer never reaches the byte budget, so the entry cap is
+    what stops the stack — the behaviour that was there before."""
+    var ed = Editor(String("hello\nworld\n"))
+    for _ in range(_UNDO_STACK_LIMIT + 100):
+        ed._push_undo()
+    assert_equal(len(ed._undo_stack), _UNDO_STACK_LIMIT)
+    # Trimming drops the *oldest* entries, so undo still rewinds.
+    assert_true(ed.undo())
+
+
 def main() raises:
     setup_test_env()
     test_editor_fold_collapse()
@@ -2333,4 +2385,6 @@ def main() raises:
     test_kwarg_conceal_skips_annotation_default()
     test_kwarg_conceal_swift_colon()
     test_kwarg_conceal_build_segment_collapses_and_shifts()
-    print("editor_edit: 106 tests passed")
+    test_undo_history_is_capped_by_bytes_not_just_entries()
+    test_undo_history_still_honors_the_entry_cap()
+    print("editor_edit: 108 tests passed")

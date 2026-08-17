@@ -625,6 +625,29 @@ of the buffer plus four ints, so a few hundred steps is comfortably more than
 any realistic editing session needs."""
 
 
+comptime _UNDO_STACK_BYTE_BUDGET = 64 * 1024 * 1024
+"""Second cap on undo history, in bytes of buffered text.
+
+The entry count alone doesn't bound memory: an entry is a *whole-buffer*
+copy, so the cost of a full stack scales with the file. 500 edits in a
+1 MB file retained ~500 MB per editor, times every open window — the
+largest single memory exposure in the product, and reached by nothing
+more exotic than typing in a big file.
+
+At 64 MB the common case is unaffected (500 steps of a 50 KB file is
+~25 MB, well under), and a 1 MB file keeps ~64 steps instead of 500.
+The real fix is storing edit deltas rather than snapshots; this bounds
+the damage without that rewrite."""
+
+
+comptime _UNDO_STACK_MIN_ENTRIES = 8
+"""Floor on the byte-budget trim: undo stays useful on a file so large
+that even a handful of snapshots blows the budget. Worst case is
+``8 x file size`` rather than the budget, which is the deliberate trade
+— an editor whose Ctrl+Z does nothing is worse than one holding a few
+snapshots of a 20 MB file."""
+
+
 comptime _BIG_BUFFER_LINE_BYTES = 5000
 """A single logical line longer than this (bytes) marks the buffer "big",
 disabling soft/smart wrap and syntax tokenizing for the whole buffer. Both
@@ -898,18 +921,30 @@ struct EditorSnapshot(Copyable, Movable):
     Editor's field of the same name (non-empty, primary at index 0)."""
     var lines: List[String]
     var selections: List[Caret]
+    var byte_size: Int
+    """Bytes of text this snapshot holds, stamped at construction.
+
+    Cached rather than recomputed because the byte-budget trim runs on
+    every push: measuring the stack by walking each entry's lines would
+    be O(total bytes) per keystroke, while summing a stored int per entry
+    is O(entries) — a few hundred integer adds."""
 
     def __init__(
         out self,
         var lines: List[String],
         var selections: List[Caret],
     ):
+        var total = 0
+        for i in range(len(lines)):
+            total += len(lines[i].as_bytes()) + 1
         self.lines = lines^
         self.selections = selections^
+        self.byte_size = total
 
     def __copyinit__(mut self, copy: Self):
         self.lines = copy.lines.copy()
         self.selections = copy.selections.copy()
+        self.byte_size = copy.byte_size
 
 
 # --- Editor widget ----------------------------------------------------------
@@ -2794,22 +2829,35 @@ struct Editor(Copyable, Movable):
         from a Turbo-Vision-era editor.
         """
         self._undo_stack.append(self._snapshot())
-        # Drop the oldest entries when the cap is exceeded. ``List`` has no
-        # pop_front, so we rebuild a tail slice — only happens at most once
-        # per push, after the stack has filled up.
-        if len(self._undo_stack) > _UNDO_STACK_LIMIT:
-            var trimmed = List[EditorSnapshot]()
-            for i in range(
-                len(self._undo_stack) - _UNDO_STACK_LIMIT,
-                len(self._undo_stack),
-            ):
-                trimmed.append(self._undo_stack[i].copy())
-            self._undo_stack = trimmed^
+        self._trim_undo_stack()
         self._redo_stack = List[EditorSnapshot]()
         # Pushing a snapshot ends any typing run that was in flight. The
         # printable-insert path explicitly re-sets the flag after this
         # call when it wants the new char to anchor a fresh group.
         self._typing_active = False
+
+    def _trim_undo_stack(mut self):
+        """Drop the oldest history until it fits both caps.
+
+        Two caps, because the entry count alone doesn't bound memory:
+        every entry is a whole-buffer copy, so a full stack costs
+        ``entries x file size`` (see ``_UNDO_STACK_BYTE_BUDGET``).
+
+        Dropping from the front is ``pop(0)`` — O(n) in *element moves*,
+        with n at most a few hundred. The rebuild-a-tail-slice this
+        replaced deep-copied every surviving snapshot instead, so once
+        the stack was full each keystroke paid an O(500 x file size)
+        memcpy and briefly doubled the peak.
+        """
+        var total = 0
+        for i in range(len(self._undo_stack)):
+            total += self._undo_stack[i].byte_size
+        while len(self._undo_stack) > _UNDO_STACK_LIMIT or (
+            total > _UNDO_STACK_BYTE_BUDGET
+            and len(self._undo_stack) > _UNDO_STACK_MIN_ENTRIES
+        ):
+            total -= self._undo_stack[0].byte_size
+            _ = self._undo_stack.pop(0)
 
     def _restore(mut self, snap: EditorSnapshot):
         self.buffer.lines = snap.lines.copy()
@@ -3096,6 +3144,11 @@ struct Editor(Copyable, Movable):
             return False
         var snap = self._redo_stack.pop()
         self._undo_stack.append(self._snapshot())
+        # Redo pushes onto the undo stack too, so it needs the same trim —
+        # otherwise a long undo/redo walk grows past both caps. The redo
+        # stack itself needs none: it only ever receives what ``undo``
+        # pops off the (already capped) undo stack.
+        self._trim_undo_stack()
         self._restore(snap)
         return True
 
