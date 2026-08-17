@@ -1427,6 +1427,10 @@ struct LocalChanges(Movable):
         self.overlay = _OVERLAY_NONE
         self.overlay_input = TextField()
         self.overlay_message = String("")
+        # Hand back the commit-message editor's Find regex before the
+        # value is overwritten — an ``Editor`` going out of scope
+        # reclaims nothing (see ``Window.release``).
+        self.overlay_editor.release_search_cache()
         self.overlay_editor = Editor(String(""))
         self._reword_sha = String("")
         self._reword_is_head = False
@@ -1546,8 +1550,17 @@ struct LocalChanges(Movable):
         Separate from ``close`` — closing the view is a UI state change
         the user can undo by reopening, and dropping the matchers there
         would recompile them on every open. This is the window-is-going-
-        away path (``Desktop.shutdown``)."""
+        away path (``Desktop.shutdown``).
+
+        The commit-message editor goes too: ``Desktop.shutdown`` releases
+        the search cache of every *window's* editor, and this one isn't a
+        window — it's the only ``Editor`` in the tree that a window walk
+        can't reach. Nothing runs a Find in it today, so this is
+        preventative rather than a live leak, but it costs one call and
+        the alternative is a stranded handle the moment Find is wired
+        into the reword box."""
         self._output_matchers.release()
+        self.overlay_editor.release_search_cache()
 
     def close(mut self):
         self.active = False
@@ -1580,6 +1593,10 @@ struct LocalChanges(Movable):
         self.overlay = _OVERLAY_NONE
         self.overlay_input = TextField()
         self.overlay_message = String("")
+        # Hand back the commit-message editor's Find regex before the
+        # value is overwritten — an ``Editor`` going out of scope
+        # reclaims nothing (see ``Window.release``).
+        self.overlay_editor.release_search_cache()
         self.overlay_editor = Editor(String(""))
         self._reword_sha = String("")
         self._reword_is_head = False

@@ -60,6 +60,7 @@ from turbokod.highlight import (
     GrammarRegistry, Highlight, highlight_for_extension,
     highlight_decorator_attr, highlight_ident_attr, highlight_string_attr
 )
+from turbokod.onig import onig_global_init, onig_tracked_count
 from turbokod.posix import wall_clock_ms, which
 from turbokod.config import WRAP_NONE
 from turbokod.events import (
@@ -3489,8 +3490,35 @@ def test_local_changes_d_on_rebased_branch_deletes_immediately() raises:
     _rm_rf(dir)
 
 
+def test_git_view_overlay_editor_releases_its_find_regex() raises:
+    """The commit-message editor hands its compiled Find regex back.
+
+    It is the only ``Editor`` in the tree that doesn't live inside a
+    ``Window``, so ``Desktop.shutdown``'s per-window walk cannot reach it.
+    Nothing runs a Find in it today; this pins the invariant so that stays
+    true if Find is ever wired into the reword box, and covers both
+    discard points — ``close`` (user closes the view) and ``release``
+    (the window is going away).
+    """
+    onig_global_init()
+    var live = onig_tracked_count()
+    var lc = LocalChanges()
+    # The default search options are case-*insensitive*, which is the
+    # configuration that has to go through libonig.
+    _ = lc.overlay_editor.find_next(String("wip"))
+    assert_true(onig_tracked_count() > live)
+    lc.close()
+    assert_equal(onig_tracked_count(), live)
+    # ``release`` is independently sufficient — ``close`` need not have run.
+    _ = lc.overlay_editor.find_next(String("wip"))
+    assert_true(onig_tracked_count() > live)
+    lc.release()
+    assert_equal(onig_tracked_count(), live)
+
+
 def main() raises:
     setup_test_env()
+    test_git_view_overlay_editor_releases_its_find_regex()
     test_diff3_merge_clean_when_only_ours_changed()
     test_diff3_merge_clean_when_only_theirs_changed()
     test_diff3_merge_clean_when_changes_disjoint()
