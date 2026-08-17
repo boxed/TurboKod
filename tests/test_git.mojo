@@ -25,7 +25,9 @@ from turbokod.editor import Editor, TextBuffer
 from turbokod.view_state_store import StoredViewState
 from turbokod.desktop import Desktop
 from turbokod.file_io import join_path, read_file, write_file
-from turbokod.git_blame import BlameLine, parse_blame_porcelain
+from turbokod.git_blame import (
+    BlameLine, format_commit_time, parse_blame_porcelain, tz_offset_seconds,
+)
 from turbokod.git_changes import (
     GIT_CHANGE_ADDED, GIT_CHANGE_MODIFIED, GIT_CHANGE_NONE,
     diff_buffer_against_head, diff_buffer_marks, parse_unified_diff_files
@@ -874,6 +876,87 @@ def test_git_blame_parses_two_line_porcelain() raises:
     assert_equal(lines[1].author, String("Bob"))
 
 
+def test_git_blame_captures_commit_detail_metadata() raises:
+    """The click-through popup needs more than sha + author: the full
+    sha, the author mail, the authored timestamp + zone, and the subject
+    line. ``author-mail`` must not be swallowed by the ``author`` key."""
+    var sha = String("abcdef0123456789abcdef0123456789abcdef01")
+    var text = (
+        sha + String(" 1 1 1\n")
+        + String("author Anders Hovmöller\n")
+        + String("author-mail <anders@example.com>\n")
+        + String("author-time 1755500000\n")
+        + String("author-tz +0200\n")
+        + String("committer Someone Else\n")
+        + String("summary Release the reword editor's search cache\n")
+        + String("filename foo.mojo\n")
+        + String("\tvar x = 1\n")
+    )
+    var lines = parse_blame_porcelain(text)
+    assert_equal(len(lines), 1)
+    assert_equal(lines[0].sha, sha)
+    assert_equal(lines[0].commit, String("abcdef01"))
+    assert_equal(lines[0].author, String("Anders Hovmöller"))
+    assert_equal(lines[0].author_mail, String("<anders@example.com>"))
+    assert_equal(lines[0].author_time, 1755500000)
+    assert_equal(lines[0].author_tz, String("+0200"))
+    assert_equal(
+        lines[0].summary,
+        String("Release the reword editor's search cache"),
+    )
+    assert_false(lines[0].is_uncommitted())
+
+
+def test_git_blame_propagates_full_metadata_across_a_group() raises:
+    """A same-commit group emits metadata only on its first record; the
+    timestamp and summary must reach the later lines too, or clicking the
+    second line of a chunk would show a blank popup."""
+    var sha = String("dddddddddddddddddddddddddddddddddddddddd")
+    var text = (
+        sha + String(" 1 1 2\n")
+        + String("author Carol\n")
+        + String("author-time 1700000000\n")
+        + String("author-tz +0000\n")
+        + String("summary one commit, two lines\n")
+        + String("\tline one\n")
+        + sha + String(" 2 2\n")
+        + String("\tline two\n")
+    )
+    var lines = parse_blame_porcelain(text)
+    assert_equal(len(lines), 2)
+    assert_equal(lines[1].sha, sha)
+    assert_equal(lines[1].author_time, 1700000000)
+    assert_equal(lines[1].summary, String("one commit, two lines"))
+
+
+def test_git_blame_time_formats_in_the_authors_zone() raises:
+    """``format_commit_time`` renders the author's wall clock, not UTC —
+    the same convention ``git log`` follows. 1700000000 is
+    2023-11-14 22:13:20 UTC, so +0200 must read 00:13 the next day."""
+    assert_equal(
+        format_commit_time(1700000000, String("+0000")),
+        String("2023-11-14 22:13 +0000"),
+    )
+    assert_equal(
+        format_commit_time(1700000000, String("+0200")),
+        String("2023-11-15 00:13 +0200"),
+    )
+    assert_equal(
+        format_commit_time(1700000000, String("-0800")),
+        String("2023-11-14 14:13 -0800"),
+    )
+    # Leap-year end-of-month, the classic off-by-one in civil-date math.
+    assert_equal(
+        format_commit_time(1709164800, String("+0000")),
+        String("2024-02-29 00:00 +0000"),
+    )
+    # No timestamp (a record git gave us nothing for) renders as nothing
+    # rather than as the epoch.
+    assert_equal(format_commit_time(0, String("+0000")), String(""))
+    assert_equal(tz_offset_seconds(String("-0930")), -34200)
+    assert_equal(tz_offset_seconds(String("")), 0)
+
+
 def test_git_blame_propagates_cached_author_for_repeated_sha() raises:
     """Lines 2..N of a same-commit group only carry ``<sha> <orig> <final>``
     + ``\\t<content>`` — no metadata. The parser must remember the
@@ -911,6 +994,9 @@ def test_git_blame_marks_uncommitted_with_zero_sha_and_placeholder() raises:
     assert_equal(len(lines), 1)
     assert_equal(lines[0].commit, String("00000000"))
     assert_equal(lines[0].author, String("Not Committed Yet"))
+    # ``is_uncommitted`` is what stops the popup spawning a ``git log`` for
+    # an object that doesn't exist.
+    assert_true(lines[0].is_uncommitted())
 
 
 def test_diff_buffer_against_head_marks_added_and_modified() raises:
@@ -3571,6 +3657,9 @@ def main() raises:
     test_diff_lines_replace_round_trips()
     test_unified_diff_renders_hunk_header_and_marks()
     test_git_blame_parses_two_line_porcelain()
+    test_git_blame_captures_commit_detail_metadata()
+    test_git_blame_propagates_full_metadata_across_a_group()
+    test_git_blame_time_formats_in_the_authors_zone()
     test_git_blame_propagates_cached_author_for_repeated_sha()
     test_git_blame_marks_uncommitted_with_zero_sha_and_placeholder()
     test_diff_buffer_against_head_marks_added_and_modified()

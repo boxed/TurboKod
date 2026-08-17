@@ -825,6 +825,19 @@ struct TestRunRequest(ImplicitlyCopyable, Movable):
     var anchor_y: Int
 
 
+@fieldwise_init
+struct BlameInfoRequest(ImplicitlyCopyable, Movable):
+    """Set by ``handle_mouse`` when the user clicks the blame gutter over a
+    row that has attribution. ``blame`` is that row's record, carried whole
+    so the host doesn't re-index ``blame_lines``; ``anchor_x``/``anchor_y``
+    are the clicked screen cell so the detail popup opens under the
+    cursor."""
+    var row: Int
+    var blame: BlameLine
+    var anchor_x: Int
+    var anchor_y: Int
+
+
 def _lit_at(s: String, off: Int, lit: String) -> Bool:
     """True if ``s``'s bytes at ``off`` equal ``lit`` exactly (bounds-safe)."""
     var b = s.as_bytes()
@@ -1191,6 +1204,11 @@ struct Editor(Copyable, Movable):
     # the click, and on confirmation calls ``apply_revert_block`` with a
     # block computed from the cached HEAD baseline.
     var pending_git_revert: Optional[GitRevertRequest]
+    # Set by ``handle_mouse`` when the user left-clicks the blame gutter
+    # over a row that has attribution. The host polls
+    # ``consume_blame_info_request``, fetches the full commit message, and
+    # opens the read-only commit-detail popup anchored at the click.
+    var pending_blame_info: Optional[BlameInfoRequest]
     # Set by ``handle_mouse`` when the user right-clicks a diagnostic
     # squiggle in the text area. The host polls
     # ``consume_diagnostic_menu_request`` and opens the diagnostic
@@ -1641,6 +1659,7 @@ struct Editor(Copyable, Movable):
         self.pending_breakpoint_toggle = Optional[Int]()
         self.pending_breakpoint_menu = Optional[BreakpointMenuRequest]()
         self.pending_git_revert = Optional[GitRevertRequest]()
+        self.pending_blame_info = Optional[BlameInfoRequest]()
         self.pending_diagnostic_menu = Optional[DiagnosticMenuRequest]()
         self.test_rows = List[Int]()
         self.test_nodes = List[String]()
@@ -1791,6 +1810,7 @@ struct Editor(Copyable, Movable):
         self.pending_breakpoint_toggle = Optional[Int]()
         self.pending_breakpoint_menu = Optional[BreakpointMenuRequest]()
         self.pending_git_revert = Optional[GitRevertRequest]()
+        self.pending_blame_info = Optional[BlameInfoRequest]()
         self.pending_diagnostic_menu = Optional[DiagnosticMenuRequest]()
         self.test_rows = List[Int]()
         self.test_nodes = List[String]()
@@ -1990,6 +2010,7 @@ struct Editor(Copyable, Movable):
         self.pending_breakpoint_toggle = copy.pending_breakpoint_toggle
         self.pending_breakpoint_menu = copy.pending_breakpoint_menu
         self.pending_git_revert = copy.pending_git_revert.copy()
+        self.pending_blame_info = copy.pending_blame_info.copy()
         self.pending_diagnostic_menu = copy.pending_diagnostic_menu
         self.test_rows = copy.test_rows.copy()
         self.test_nodes = copy.test_nodes.copy()
@@ -3892,6 +3913,14 @@ struct Editor(Copyable, Movable):
         from HEAD."""
         var req = self.pending_git_revert^
         self.pending_git_revert = Optional[GitRevertRequest]()
+        return req^
+
+    def consume_blame_info_request(mut self) -> Optional[BlameInfoRequest]:
+        """Return any pending blame-gutter click and clear the slot. Set by
+        ``handle_mouse`` when the user clicks the blame columns over a row
+        that has attribution; the host opens the commit-detail popup."""
+        var req = self.pending_blame_info^
+        self.pending_blame_info = Optional[BlameInfoRequest]()
         return req^
 
     def consume_test_run_request(mut self) -> Optional[TestRunRequest]:
@@ -9826,6 +9855,19 @@ struct Editor(Copyable, Movable):
                         if self.test_rows[k] == row:
                             test_idx = k
                             break
+                # Blame columns ("<sha> <author>", between the change bar
+                # and the test icon): a click opens the read-only
+                # commit-detail popup. Rows with no attribution (past the
+                # end of the blame data, e.g. lines added since it loaded)
+                # fall through to the breakpoint toggle.
+                var bl_w = self._blame_gutter()
+                var bl_x0 = self.gutter_width + self._line_number_gutter() \
+                    + self._git_changes_gutter()
+                var on_blame = (
+                    bl_w > 0 and rel_x >= bl_x0 and rel_x < bl_x0 + bl_w
+                    and row >= 0 and row < len(self.blame_lines)
+                    and len(self.blame_lines[row].commit.as_bytes()) > 0
+                )
                 if test_idx >= 0:
                     self.pending_test_run = Optional[TestRunRequest](
                         TestRunRequest(
@@ -9862,6 +9904,13 @@ struct Editor(Copyable, Movable):
                     )
                     if del_opt:
                         self.pending_git_revert = del_opt^
+                elif on_blame:
+                    self.pending_blame_info = Optional[BlameInfoRequest](
+                        BlameInfoRequest(
+                            row, self.blame_lines[row],
+                            event.pos.x, event.pos.y,
+                        )
+                    )
                 else:
                     self.pending_breakpoint_toggle = Optional[Int](row)
             return True

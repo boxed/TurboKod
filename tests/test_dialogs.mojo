@@ -8,7 +8,9 @@ and ``scripts/run_tests.sh`` runs every suite.
 from std.ffi import external_call
 from std.testing import assert_equal, assert_false, assert_true
 from turbokod.canvas import Canvas, wrap_to_width
+from turbokod.blame_popup import BlamePopup
 from turbokod.dir_browser import DirBrowser
+from turbokod.git_blame import BlameLine
 from turbokod.painter import Painter
 from turbokod.cell import Cell
 from turbokod.colors import (
@@ -55,7 +57,8 @@ from turbokod.settings import (
 from turbokod.events import (
     Event, KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_HOME, KEY_TAB,
     KEY_UP, MOD_ALT, MOD_CTRL, MOD_META, MOD_NONE, MOD_SHIFT,
-    MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP
+    MENU_HIT_OUTSIDE, MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN,
+    MOUSE_WHEEL_UP
 )
 from turbokod.geometry import Point, Rect
 from turbokod.confirm_dialog import ConfirmDialog
@@ -84,6 +87,124 @@ def _ends_with(s: String, suffix: String) -> Bool:
         if sb[len(sb) - len(fb) + i] != fb[i]:
             return False
     return True
+
+
+def _canvas_row(c: Canvas, y: Int, x0: Int, x1: Int) -> String:
+    """The glyphs painted on row ``y`` from ``x0`` up to ``x1``, joined."""
+    var out = String("")
+    for x in range(x0, x1):
+        out += c.get(x, y).glyph
+    return out^
+
+
+def _blame_of(
+    sha: String, author: String, mail: String, when: Int, tz: String,
+    summary: String,
+) -> BlameLine:
+    var bl = BlameLine()
+    bl.sha = sha
+    bl.commit = sha
+    bl.author = author
+    bl.author_mail = mail
+    bl.author_time = when
+    bl.author_tz = tz
+    bl.summary = summary
+    return bl^
+
+
+def test_blame_popup_shows_sha_author_time_and_message() raises:
+    """The blame-gutter popup lays out sha, author + mail, authored time,
+    then the commit message body — wrapped, blank-separated from the
+    header rows, and painted inside its own box."""
+    var p = BlamePopup()
+    var bl = _blame_of(
+        String("abcdef01"), String("Alice"), String("<alice@example.com>"),
+        1700000000, String("+0000"), String("subject only"),
+    )
+    p.open(
+        bl, String("Fix the thing\n\nBecause it was broken."),
+        1700086400, Point(30, 5),
+    )
+    assert_true(p.active)
+    var screen = Rect(0, 0, 100, 40)
+    var c = Canvas(100, 40)
+    c.clear(default_attr())
+    p.paint(c, screen)
+    var rect = p._rect(screen)
+    # Opens below the click, snapped inside the screen.
+    assert_equal(rect.a.y, 6)
+    assert_true(rect.b.x <= 100)
+    var head0 = _canvas_row(c, rect.a.y + 1, rect.a.x + 2, rect.b.x)
+    assert_true(_starts_with(head0, String("abcdef01")))
+    var head1 = _canvas_row(c, rect.a.y + 2, rect.a.x + 2, rect.b.x)
+    assert_true(_starts_with(head1, String("Alice <alice@example.com>")))
+    var head2 = _canvas_row(c, rect.a.y + 3, rect.a.x + 2, rect.b.x)
+    # Author's zone, plus the relative age (1 day after the commit).
+    assert_true(_starts_with(head2, String("2023-11-14 22:13 +0000 (1d ago)")))
+    # Blank spacer, then the message body — the *full* body, not just the
+    # porcelain summary.
+    var body0 = _canvas_row(c, rect.a.y + 5, rect.a.x + 2, rect.b.x)
+    assert_true(_starts_with(body0, String("Fix the thing")))
+    var body2 = _canvas_row(c, rect.a.y + 7, rect.a.x + 2, rect.b.x)
+    assert_true(_starts_with(body2, String("Because it was broken.")))
+    # Any key dismisses — there's nothing to navigate.
+    _ = p.handle_key(_key(KEY_DOWN))
+    assert_false(p.active)
+
+
+def test_blame_popup_falls_back_to_summary_and_flags_uncommitted() raises:
+    """No message body (git unavailable, or the fetch failed) shows the
+    porcelain subject line instead. An uncommitted line has no commit to
+    describe, so the popup is the placeholder alone."""
+    var p = BlamePopup()
+    var bl = _blame_of(
+        String("abcdef01"), String("Alice"), String(""),
+        1700000000, String("+0000"), String("subject only"),
+    )
+    p.open(bl, String(""), 0, Point(0, 0))
+    assert_equal(len(p.body_rows), 1)
+    assert_equal(p.body_rows[0], String("subject only"))
+    # No ``now`` reference ⇒ no relative-age suffix.
+    assert_equal(p.head_rows[2], String("2023-11-14 22:13 +0000"))
+
+    var fresh = BlameLine()
+    fresh.sha = String("0000000000000000000000000000000000000000")
+    fresh.commit = String("00000000")
+    fresh.author = String("Not Committed Yet")
+    p.open(fresh, String(""), 1700086400, Point(0, 0))
+    assert_equal(len(p.head_rows), 1)
+    assert_equal(p.head_rows[0], String("Not committed yet"))
+    assert_equal(len(p.body_rows), 0)
+    # A press anywhere dismisses; outside the box the host is told so.
+    var screen = Rect(0, 0, 100, 40)
+    assert_equal(
+        p.handle_mouse(
+            Event.mouse_event(Point(99, 39), MOUSE_BUTTON_LEFT, True, False),
+            screen,
+        ),
+        MENU_HIT_OUTSIDE,
+    )
+    assert_false(p.active)
+
+
+def test_blame_popup_caps_a_long_message() raises:
+    """A long-form commit message must not grow the popup past the window —
+    ``anchored_menu_rect`` can only slide a box, not shrink it. The body is
+    capped and the cut is marked, and the box still fits a 24-row screen."""
+    var p = BlamePopup()
+    var bl = _blame_of(
+        String("abcdef01"), String("Alice"), String(""),
+        1700000000, String("+0000"), String("subject"),
+    )
+    var long_message = String("")
+    for i in range(40):
+        long_message += String("paragraph ") + String(i) + String("\n")
+    p.open(bl, long_message, 0, Point(0, 0))
+    assert_equal(len(p.body_rows), 13)
+    assert_equal(p.body_rows[12], String("…"))
+    var rect = p._rect(Rect(0, 0, 80, 24))
+    assert_true(rect.a.y >= 0)
+    assert_true(rect.height() <= 24)
 
 
 def test_find_results_pane_multiselect() raises:
@@ -2489,6 +2610,9 @@ def test_dir_browser_jump_button_release_outside_cancels() raises:
 
 def main() raises:
     setup_test_env()
+    test_blame_popup_shows_sha_author_time_and_message()
+    test_blame_popup_falls_back_to_summary_and_flags_uncommitted()
+    test_blame_popup_caps_a_long_message()
     test_find_results_pane_multiselect()
     test_find_in_project_options_smoke()
     test_find_git_project()

@@ -11,6 +11,7 @@ from std.ffi import external_call
 from std.testing import assert_equal, assert_true
 from turbokod.desktop import Desktop
 from turbokod.file_io import basename
+from turbokod.git_blame import BlameLine
 from turbokod.menu import Menu, MenuItem
 from turbokod.project_targets import ProjectTargets
 from turbokod.project_settings import ProjectSettings
@@ -82,6 +83,16 @@ def _docs_contains(d: Desktop, name: String) -> Bool:
         if paths[i] == name:
             return True
     return False
+
+
+def _blame(short_sha: String, author: String) -> BlameLine:
+    """A ``BlameLine`` carrying just what the gutter paints. The commit
+    metadata the detail popup shows (full sha, mail, time, summary) is left
+    empty — tests that need it fill the fields in directly."""
+    var bl = BlameLine()
+    bl.commit = short_sha
+    bl.author = author
+    return bl^
 
 
 def _empty_menu(label: String) -> Menu:

@@ -25,7 +25,7 @@ from turbokod.events import Event, KEY_END, KEY_RIGHT, MOUSE_BUTTON_LEFT
 from turbokod.geometry import Point, Rect
 from turbokod.merge_view import CHOICE_BOTH, MergeView
 
-from support import _VIEW, _key, _temp_path, setup_test_env
+from support import _VIEW, _blame, _key, _temp_path, setup_test_env
 
 
 def test_editor_dirty_flag() raises:
@@ -451,14 +451,62 @@ def test_editor_blame_gutter_widens_total_gutter() raises:
     cells). Toggling off shrinks the margin back."""
     var ed = Editor(String("alpha\nbeta\n"))
     var bl = List[BlameLine]()
-    bl.append(BlameLine(String("12345678"), String("Anders")))
-    bl.append(BlameLine(String("12345678"), String("Anders")))
+    bl.append(_blame(String("12345678"), String("Anders")))
+    bl.append(_blame(String("12345678"), String("Anders")))
     ed.set_blame(bl^)
     assert_true(ed.blame_visible)
     assert_equal(ed._blame_gutter(), 24)
     ed.toggle_blame()
     assert_false(ed.blame_visible)
     assert_equal(ed._blame_gutter(), 0)
+
+
+def test_blame_gutter_click_requests_commit_details() raises:
+    """A click on the blame columns stamps a ``BlameInfoRequest`` carrying
+    the clicked row's record and the clicked cell — not a breakpoint
+    toggle, which is what the rest of the gutter does."""
+    var ed = Editor(String("alpha\nbeta\ngamma\n"))
+    var bl = List[BlameLine]()
+    bl.append(_blame(String("aaaaaaaa"), String("Alice")))
+    bl.append(_blame(String("bbbbbbbb"), String("Bob")))
+    bl.append(_blame(String("cccccccc"), String("Carol")))
+    ed.set_blame(bl^)
+    var view = Rect(0, 0, 80, 24)
+    # Blame columns start right after the (here zero-width) debugger,
+    # line-number and change gutters, so column 0 is inside them.
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(2, 1), MOUSE_BUTTON_LEFT, True, False), view,
+    )
+    var req_opt = ed.consume_blame_info_request()
+    assert_true(Bool(req_opt))
+    var req = req_opt.value()
+    assert_equal(req.row, 1)
+    assert_equal(req.blame.commit, String("bbbbbbbb"))
+    assert_equal(req.blame.author, String("Bob"))
+    assert_equal(req.anchor_x, 2)
+    assert_equal(req.anchor_y, 1)
+    # The click is a details request, not a breakpoint toggle.
+    assert_false(Bool(ed.consume_breakpoint_toggle()))
+    # Drained — a second poll is empty.
+    assert_false(Bool(ed.consume_blame_info_request()))
+
+
+def test_blame_gutter_click_past_blame_data_still_toggles_breakpoint() raises:
+    """Lines added after the blame loaded have no attribution. Clicking
+    their (blank) blame columns must fall through to the breakpoint
+    toggle rather than opening an empty popup."""
+    var ed = Editor(String("alpha\nbeta\ngamma\n"))
+    var bl = List[BlameLine]()
+    bl.append(_blame(String("aaaaaaaa"), String("Alice")))
+    ed.set_blame(bl^)
+    var view = Rect(0, 0, 80, 24)
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(2, 2), MOUSE_BUTTON_LEFT, True, False), view,
+    )
+    assert_false(Bool(ed.consume_blame_info_request()))
+    var row = ed.consume_breakpoint_toggle()
+    assert_true(Bool(row))
+    assert_equal(row.value(), 2)
 
 
 def test_editor_git_changes_gutter_widens_total_gutter() raises:
@@ -499,5 +547,7 @@ def main() raises:
     test_editor_gutter_click_below_eof_is_ignored()
     test_editor_gutter_drag_motion_does_not_toggle()
     test_editor_blame_gutter_widens_total_gutter()
+    test_blame_gutter_click_requests_commit_details()
+    test_blame_gutter_click_past_blame_data_still_toggles_breakpoint()
     test_editor_git_changes_gutter_widens_total_gutter()
     print("editor_io: 20 tests passed")

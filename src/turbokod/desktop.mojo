@@ -61,7 +61,8 @@ from .file_io import (
     parent_path, project_relative, read_file, rename_path, stat_file,
     write_file,
 )
-from .git_blame import compute_blame
+from .blame_popup import BlamePopup
+from .git_blame import blame_commit_message, compute_blame
 from .git_changes import (
     GIT_CHANGE_NONE,
     GitFileStatus, GitRevertBlock, GitStateMtimes,
@@ -1063,6 +1064,12 @@ struct Desktop(Movable):
     # ``Editor.consume_test_run_request`` and routed input-first like
     # ``git_gutter_menu``.
     var test_gutter_menu: TestGutterMenu
+    # Read-only popup that opens when the user clicks the blame gutter —
+    # the clicked line's commit: SHA, author, authored time, message.
+    # Surfaced from ``Editor.consume_blame_info_request``; routed
+    # input-first like ``git_gutter_menu``, but it has no action, so any
+    # key or click just dismisses it.
+    var blame_popup: BlamePopup
     # Popup that opens when the user right-clicks a diagnostic squiggle
     # in the editor text area. Single ``Copy message`` action pushes
     # the LSP message onto the system clipboard. Surfaced from
@@ -1596,6 +1603,7 @@ struct Desktop(Movable):
         self.spell_menu = SpellMenu()
         self.git_gutter_menu = GitGutterMenu()
         self.test_gutter_menu = TestGutterMenu()
+        self.blame_popup = BlamePopup()
         self.diagnostic_menu = DiagnosticMenu()
         self._diag_menu_editor_idx = -1
         self._diag_menu_actions = List[CodeAction]()
@@ -2388,6 +2396,7 @@ struct Desktop(Movable):
             return True
         if self.spell_menu.active or self.git_gutter_menu.active \
                 or self.test_gutter_menu.active \
+                or self.blame_popup.active \
                 or self.diagnostic_menu.active \
                 or self.editor_context_menu.active \
                 or self.tab_context_menu.active \
@@ -4248,6 +4257,7 @@ struct Desktop(Movable):
         self.spell_menu.paint(canvas, screen)
         self.git_gutter_menu.paint(canvas, screen)
         self.test_gutter_menu.paint(canvas, screen)
+        self.blame_popup.paint(canvas, screen)
         self.diagnostic_menu.paint(canvas, screen)
         self.editor_context_menu.paint(canvas, screen)
         self.tab_context_menu.paint(canvas, screen)
@@ -6831,6 +6841,15 @@ struct Desktop(Movable):
             if self.test_gutter_menu.submitted:
                 self._on_test_gutter_menu_submit()
             return Optional[String]()
+        if self.blame_popup.active:
+            # Read-only commit details: nothing to submit, so any key or
+            # click just dismisses. Routed here (ahead of the editor) so
+            # the dismissing keystroke can't also land in the buffer.
+            if event.kind == EVENT_KEY:
+                _ = self.blame_popup.handle_key(event)
+            else:
+                _ = self.blame_popup.handle_mouse(event, screen)
+            return Optional[String]()
         if self.diagnostic_menu.active:
             # Right-click on a diagnostic squiggle opens this single-row
             # menu; same input-first routing as ``git_gutter_menu``.
@@ -7399,6 +7418,9 @@ struct Desktop(Movable):
         # the focused editor — surface the Run/Debug popup before the next
         # paint so it lands on this same frame.
         self._maybe_open_test_gutter_menu()
+        # A click on the blame gutter stamps a ``pending_blame_info`` —
+        # surface the commit-detail popup on this same frame.
+        self._maybe_open_blame_popup()
         # Right-click on a diagnostic squiggle stamps a pending menu
         # request on the focused editor — surface the popup before the
         # next paint so it lands on this same frame.
@@ -7676,6 +7698,7 @@ struct Desktop(Movable):
         return self.spell_menu.active or self.breakpoint_error.active \
             or self.breakpoint_menu.active or self.fill_dialog.active \
             or self.git_gutter_menu.active or self.test_gutter_menu.active \
+            or self.blame_popup.active \
             or self.diagnostic_menu.active or self.editor_context_menu.active \
             or self.tab_context_menu.active \
             or self.lsp_status_menu.active or self.prompt.active \
@@ -10259,6 +10282,7 @@ struct Desktop(Movable):
         if self.spell_menu.active or self.breakpoint_error.active \
                 or self.breakpoint_menu.active or self.fill_dialog.active \
                 or self.git_gutter_menu.active or self.test_gutter_menu.active \
+                or self.blame_popup.active \
                 or self.diagnostic_menu.active \
                 or self.editor_context_menu.active \
                 or self.tab_context_menu.active \
@@ -13317,6 +13341,31 @@ struct Desktop(Movable):
         var req = req_opt.value()
         self.test_gutter_menu.open(
             req.node_id, Point(req.anchor_x, req.anchor_y),
+        )
+
+    def _maybe_open_blame_popup(mut self):
+        """Drain ``Editor.consume_blame_info_request`` on the focused window
+        and open the commit-detail popup at the clicked cell.
+
+        The porcelain blame stream only carries the commit's subject line,
+        so the full message is fetched here — one short-lived ``git log -1``
+        per click, on the click, rather than one per blamed line at load
+        time. A failed fetch is soft: the popup falls back to the subject.
+        """
+        if not self.windows.focused_is_editor():
+            return
+        var idx = self.windows.focused
+        var req_opt = self.windows.windows[idx] \
+            .editor.consume_blame_info_request()
+        if not req_opt:
+            return
+        var req = req_opt.value()
+        var message = blame_commit_message(
+            self.windows.windows[idx].editor.file_path, req.blame.sha,
+        )
+        self.blame_popup.open(
+            req.blame, message^, wall_clock_ms() // 1000,
+            Point(req.anchor_x, req.anchor_y),
         )
 
     def _on_test_gutter_menu_submit(mut self):
