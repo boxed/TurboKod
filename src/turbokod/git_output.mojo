@@ -289,6 +289,13 @@ struct GitOutputMatcher(Movable):
         showing. The state an idle ``LocalChanges`` holds."""
         self.regexes = List[OnigRegex]()
 
+    def release(mut self):
+        """Free this kind's compiled patterns. Teardown only — nothing
+        may call ``is_routine`` afterwards."""
+        for i in range(len(self.regexes)):
+            self.regexes[i].release()
+        self.regexes = List[OnigRegex]()
+
     def is_routine(self, output: String) -> Bool:
         """True when every non-blank line of ``output`` matches one of the
         compiled patterns. Empty output is routine (git said nothing, so
@@ -360,6 +367,18 @@ struct GitOutputMatchers(Movable):
         self.kinds.append(kind)
         self.matchers.append(GitOutputMatcher(kind))
         return len(self.kinds) - 1
+
+    def release(mut self):
+        """Free every compiled kind and empty the table.
+
+        One of these lives per window (on ``LocalChanges``), and its ~200 KB
+        of handles isn't reachable from the ``GrammarRegistry``, so window
+        teardown has to release it separately. Idempotent; a later
+        ``is_routine`` recompiles the kind it needs."""
+        for i in range(len(self.matchers)):
+            self.matchers[i].release()
+        self.kinds = List[Int]()
+        self.matchers = List[GitOutputMatcher]()
 
 
 def _trimmed(s: String) -> String:

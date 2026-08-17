@@ -1342,7 +1342,7 @@ struct LspManager(Copyable, Movable):
                 trace_path.unsafe_ptr(), Int32(0o644),
             )
             if Int(tfd) >= 0:
-                self.client.process.trace_fd = tfd
+                self.client.process.own_trace_fd(tfd)
                 var hdr = String("session start argv:")
                 for k in range(len(argv)):
                     hdr = hdr + String(" ") + argv[k]

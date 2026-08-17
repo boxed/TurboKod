@@ -497,6 +497,16 @@ final class CellView: NSView {
         }
     }
 
+    // `buf` and `regionBuf` are manual allocations, so ARC releasing the
+    // view reclaims the object but not them. They're grown to the window's
+    // cell count and never shrink, so a closed window stranded both at its
+    // final size (~1.6 MB for a large grid) for the life of the app — and
+    // the app deliberately outlives its windows.
+    deinit {
+        buf.deallocate()
+        regionBuf.deallocate()
+    }
+
     private func ensureBuf(_ cells: Int) {
         if cells > bufCells {
             buf.deallocate()

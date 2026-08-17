@@ -33,8 +33,7 @@ from .string_utils import codepoint_at, is_word_codepoint, prev_codepoint_start,
 from .tm_grammar import Grammar, load_grammar_from_file
 from .tm_tokenizer import (
     Frame, copy_stack, stack_eq,
-    tokenize_lines_from, tokenize_with_grammar,
-    tokenize_with_grammar_full,
+    tokenize_lines_from, tokenize_with_grammar_full,
 )
 
 
@@ -82,35 +81,29 @@ def highlight_for_extension(
     module has no upward dependency — the editor simply passes
     ``self.buffer.lines``.
 
-    Three tiers:
-    1. Mojo/Python use a bespoke tokenizer because they need
-       docstring-aware triple-quote handling.
-    2. Languages with a TextMate grammar bundled under
-       ``src/turbokod/grammars/`` go through that runtime — same
-       data path VS Code / Sublime use.
-    3. Everything else falls back to ``_highlight_generic``, the
-       small per-language config registry. Crude but pure-Mojo and
-       always available.
+    **Compiles a grammar per call and throws it away**, so this is the
+    convenience entry point, not the one to render with. Anything that
+    highlights the same buffer more than once — every live editor — wants
+    ``highlight_incremental`` (or ``highlight_for_extension_cached``) with
+    a ``GrammarRegistry`` it keeps, which is what makes the grammar load
+    once per language per process instead of once per call.
 
-    The TextMate path can fail (grammar file missing, regex
-    compile error in the bundled JSON, runtime exception inside
-    the tokenizer); when that happens we silently fall through to
-    the generic tokenizer rather than letting an exception kill the
-    editor's render pass.
-
-    After the base tokenization, we run the IntelliJ-style language-
-    injection pass — ``# language=html`` / ``// language=html``
-    markers re-tokenize the *next* string literal's body with the
-    named grammar.
+    This used to be a separate, subtly divergent implementation of the
+    same dispatch that leaked its grammar (and a second one for the
+    injection pass) on every call — 500+ libonig handles per call for a
+    TypeScript buffer, none of them reclaimable. It's now a thin wrapper:
+    a private registry, a full retokenize through the shared path, and a
+    ``release`` on the way out. Same answer, nothing stranded, and the
+    dispatch/fallback/injection logic exists in exactly one place.
     """
-    var hls: List[Highlight]
-    var tm_opt = _try_textmate(ext, lines)
-    if tm_opt:
-        hls = tm_opt.value().copy()
-    else:
-        hls = _fallback_for_extension(ext, lines)
-    var injection_registry = GrammarRegistry()
-    _apply_intellij_injections(ext, lines, hls, injection_registry)
+    var registry = GrammarRegistry()
+    var cache = HighlightCache()
+    # dirty_row=0 means "full retokenize", which is all a cold cache can do.
+    var hls = highlight_incremental(ext, lines, 0, registry, cache)
+    # Safe here and only here: ``hls`` is plain row/column/attr data with
+    # no reference back into the grammar, and the registry is local, so
+    # nothing can tokenize through it after this point.
+    registry.release()
     return hls^
 
 
@@ -707,33 +700,15 @@ def _fallback_for_extension(
     return List[Highlight]()
 
 
-def _try_textmate(
-    ext: String, lines: List[String],
-) -> Optional[List[Highlight]]:
-    """Load the matching TextMate grammar (if any) and tokenize.
-
-    Returns ``None`` to signal "fall back to the generic tokenizer"
-    on three conditions:
-
-    1. No bundled grammar for this extension.
-    2. Loading or tokenizing raised (malformed JSON, regex libonig
-       can't compile, etc.) — better degrade than crash the editor.
-    3. The grammar ran cleanly but emitted *zero* highlights against
-       non-empty input. That's the signal that the grammar relies on
-       a feature our runtime doesn't implement (typically ``while``
-       rules); the generic tokenizer is a better answer than blank.
-    """
-    var path = _grammar_path_for_ext(ext)
-    if len(path.as_bytes()) == 0:
-        return Optional[List[Highlight]]()
-    try:
-        var g = load_grammar_from_file(path)
-        var hls = tokenize_with_grammar(g, lines)
-        if len(hls) == 0 and _has_nonempty_line(lines):
-            return Optional[List[Highlight]]()
-        return Optional[List[Highlight]](hls^)
-    except:
-        return Optional[List[Highlight]]()
+# ``_try_textmate`` lived here: an uncached "load a grammar, tokenize,
+# drop it" helper used only by ``highlight_for_extension``. Both of its
+# callers now route through ``highlight_incremental``, which does the
+# same dispatch against a caller-owned registry (and applies the Django
+# template overlay this path silently skipped). It's gone rather than
+# kept-but-unused because its contract — compile a grammar and discard
+# the handle — is unimplementable without leaking: libonig allocations
+# are owned by the shim's registry, so a dropped ``Grammar`` strands its
+# whole pattern set. See the ``OnigRegex`` doc comment.
 
 
 def _has_nonempty_line(lines: List[String]) -> Bool:

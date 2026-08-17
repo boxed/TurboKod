@@ -138,9 +138,39 @@ def test_pty_isatty_detected_by_child() raises:
     assert_equal(vt.cell_at(0, 2).glyph, String("Y"))
 
 
+def test_pty_terminate_reaps_the_child() raises:
+    """``terminate`` must actually collect the child, not just signal it.
+
+    It used to issue a single ``waitpid_nohang`` microseconds after the
+    ``kill`` — long before the child had been scheduled to die, so it
+    always came back empty — and then ``untrack_child`` anyway, which
+    took the pid away from the shim's exit reaper too. Every terminal-pane
+    close and every test run left a zombie for the life of the process.
+
+    A still-reapable pid after ``terminate`` is exactly that zombie, so
+    the second ``waitpid`` below must find nothing.
+    """
+    var pids = List[Int]()
+    for _ in range(3):
+        var argv = List[String]()
+        argv.append(String("/bin/sh"))
+        argv.append(String("-c"))
+        argv.append(String("sleep 30"))
+        var p = PtyProcess.spawn(argv)
+        assert_true(p.pid > 0)
+        pids.append(Int(p.pid))
+        p.terminate()
+        # The master fd must come back too.
+        assert_equal(Int(p.master_fd), -1)
+    for i in range(len(pids)):
+        var pair = waitpid_nohang(Int32(pids[i]))
+        assert_true(Int(pair[0]) != pids[i])
+
+
 def main() raises:
     test_pty_echo_writes_into_grid()
     test_pty_printf_ansi_color_lands_as_red_fg()
     test_pty_child_runs_in_requested_cwd()
     test_pty_isatty_detected_by_child()
+    test_pty_terminate_reaps_the_child()
     print("all pty smoke tests passed")

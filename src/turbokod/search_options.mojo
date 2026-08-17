@@ -188,6 +188,28 @@ struct LineSearcher(ImplicitlyCopyable, Movable):
         Callers treat it as "no matches" rather than erroring."""
         return self.fast or Bool(self.rx)
 
+    def release(mut self):
+        """Hand this searcher's compiled regex back to libonig.
+
+        Needed because ``build_search_regex`` fires for every
+        configuration except case-sensitive-literal — including the
+        all-off default, which is case-*insensitive* — and an
+        ``OnigRegex`` is not reclaimed by going out of scope (see its doc
+        comment). Without this, each distinct needle stranded ~1 KB for
+        the life of the process: one per project-wide search, and one per
+        needle change in the Find box.
+
+        Same precondition as ``OnigRegex.release``: no ``search`` /
+        ``rsearch`` / ``search_span`` call may follow, and copies of this
+        searcher alias the same handle. Release at a teardown point —
+        when the searcher is being replaced or is going out of scope.
+        Double release is harmless (the shim's free-one is a no-op once
+        the pair has left its registry)."""
+        if self.rx:
+            self.rx.value().release()
+            self.rx = Optional[OnigRegex]()
+        self.fast = False
+
     def _fast_find(self, lb: Span[UInt8, _], start: Int) -> Int:
         """Fast-path result: a byte offset, ``-1`` for "no match here",
         or ``_NO_FAST_PATH`` when this line has to go to libonig.
@@ -294,14 +316,25 @@ struct SearcherCache(ImplicitlyCopyable, Movable):
     This is a memory fix, not a speed one. ``build_search_regex`` fires
     for every configuration except case-sensitive-literal — including the
     all-off default, which is case-*insensitive* — and an ``OnigRegex``
-    never frees its libonig handles (see the ``OnigRegex`` doc comment).
-    So each Find, F3, Replace and Replace-All used to strand ~1 KB for
-    the life of the process; stepping through a big file's matches was a
-    slow leak with a keyboard shortcut attached.
+    is not reclaimed by going out of scope (see the ``OnigRegex`` doc
+    comment). So each Find, F3, Replace and Replace-All used to strand
+    ~1 KB for the life of the process; stepping through a big file's
+    matches was a slow leak with a keyboard shortcut attached.
 
     One slot, not a map: the repeat we care about is "same needle, same
     toggles, again" (F3, or Replace stepping match to match). Changing
-    the needle compiles once, as it must.
+    the needle compiles once, as it must — and ``get`` releases the
+    searcher it evicts, so a *changing* needle costs one live regex
+    rather than one per distinct needle ever searched. (Caching alone
+    only ever fixed the repeat half of this; the eviction was still a
+    drip.)
+
+    Not aliasing-hazardous despite being ``ImplicitlyCopyable``:
+    ``Editor.__copyinit__`` builds a fresh cache rather than copying
+    this one, so no two caches can name the same handle. Callers hold a
+    ``get`` result only for the duration of one search and never re-enter
+    ``get`` while holding it, which is the precondition the eviction
+    release needs.
     """
 
     var needle: String
@@ -333,8 +366,23 @@ struct SearcherCache(ImplicitlyCopyable, Movable):
                 and self.opts.whole_word == opts.whole_word \
                 and self.opts.regex == opts.regex:
             return self.searcher
+        # Give the evicted searcher's regex back before overwriting the
+        # slot — plain assignment reclaims nothing.
+        if self.valid:
+            self.searcher.release()
         self.searcher = LineSearcher(needle, opts)
         self.needle = needle
         self.opts = opts
         self.valid = True
         return self.searcher
+
+    def release(mut self):
+        """Drop the cached searcher's regex and empty the slot.
+
+        For teardown points that discard the whole cache — reopening an
+        ``Editor`` onto a different file, or the editor itself going
+        away. Idempotent; ``get`` recompiles on the next call."""
+        if self.valid:
+            self.searcher.release()
+            self.valid = False
+        self.needle = String("")

@@ -18,7 +18,8 @@ from .file_io import (
 from .lsp import LspProcess, capture_command
 from .onig import OnigRegex
 from .posix import (
-    SIGTERM, alloc_zero_buffer, kill_pid, poll_stdin, read_into, waitpid_nohang,
+    SIGTERM, alloc_zero_buffer, close_fd, kill_pid, poll_stdin, read_into,
+    reap_child, untrack_child, waitpid_nohang,
 )
 from .search_options import (
     LineSearcher, SearchOptions, default_search_options,
@@ -490,27 +491,49 @@ struct FileIndexer(Movable):
         if Int(ws[0]) != 0:
             self.proc.alive = False
         if saw_eof:
-            self.alive = False
-            self.proc.alive = False
+            # Enumeration finished normally — reap and give the pipes back.
+            # This path is the common one (the ``_terminate`` cutoff only
+            # fires past ``QUICK_OPEN_FILE_CAP``), so it's where the
+            # descriptors actually accumulated.
+            self._reap_and_close()
         return new_paths^
 
     def _terminate(mut self):
-        """Best-effort SIGTERM + clear alive. The shim's atexit handler
-        will SIGKILL anything still alive at process exit."""
+        """SIGTERM the child, then reap it and hand its pipes back."""
         if self.proc.alive:
             _ = kill_pid(self.proc.pid, SIGTERM)
             self.proc.alive = False
+        self._reap_and_close()
+
+    def _reap_and_close(mut self):
+        """Reap the child and close the parent-side pipe ends. Idempotent.
+
+        Called from both the ``_terminate`` path *and* the normal
+        end-of-output path — an indexer that ran to completion owns the
+        same three descriptors as one that was cut short, and the picker
+        starts two of these every time it opens. Leaving them behind cost
+        6 descriptors per Quick Open, for the life of the process.
+
+        The reap is a bounded ``waitpid_nohang`` loop rather than a
+        blocking wait: on the ``_terminate`` path the SIGTERM may not have
+        been delivered yet, and this runs on the UI thread. If the child
+        somehow outlives the loop we leave it to the shim's exit reaper —
+        but we still ``untrack_child`` and close, because the descriptors
+        are ours either way.
+        """
         self.alive = False
-        # Close fds so the kernel reclaims them; the LspProcess fields
-        # are now defunct and shouldn't be reused.
-        _ = self.proc.stdin_fd
-        # Reap. waitpid_nohang in a short loop in case SIGTERM hasn't
-        # delivered yet; if not done after a few tries, leave it to the
-        # shim's atexit reaper.
-        for _ in range(8):
-            var ws = waitpid_nohang(self.proc.pid)
-            if Int(ws[0]) != 0:
-                return
+        _ = reap_child(self.proc.pid)
+        untrack_child(self.proc.pid)
+        if self.proc.stdin_fd >= 0:
+            _ = close_fd(self.proc.stdin_fd)
+            self.proc.stdin_fd = -1
+        if self.proc.stdout_fd >= 0:
+            _ = close_fd(self.proc.stdout_fd)
+            self.proc.stdout_fd = -1
+        if self.proc.stderr_fd >= 0:
+            _ = close_fd(self.proc.stderr_fd)
+            self.proc.stderr_fd = -1
+        self.proc.alive = False
 
 
 def walk_project_files(
@@ -625,6 +648,9 @@ def find_in_project(
         return out^
     var searcher = LineSearcher(needle, opts)
     if not searcher.usable():
+        # Still release: an unusable searcher can hold a compiled regex
+        # (whole-word or ``(?i)`` wrapping of an empty-matching pattern).
+        searcher.release()
         return out^
     var paths = walk_project_files(root)
     for p in range(len(paths)):
@@ -641,6 +667,11 @@ def find_in_project(
         for ln in range(len(lines)):
             if searcher.search(lines[ln], 0):
                 out.append(ProjectMatch(full, rel, ln + 1, lines[ln]))
+    # The searcher is local to this call and nothing above holds a copy,
+    # so this is the last point it's reachable — and the only place its
+    # regex can be reclaimed, since libonig's allocations aren't
+    # Mojo-owned. Without it, every project-wide search stranded one.
+    searcher.release()
     return out^
 
 
@@ -670,6 +701,7 @@ def replace_in_project(
         return (0, 0)
     var searcher = LineSearcher(needle, opts)
     if not searcher.usable():
+        searcher.release()
         return (0, 0)
     var paths = walk_project_files(root)
     for p in range(len(paths)):
@@ -698,6 +730,8 @@ def replace_in_project(
         if write_file(full, new_text):
             files_changed += 1
             total += count
+    # Last point the searcher is reachable — see ``find_in_project``.
+    searcher.release()
     return (files_changed, total)
 
 

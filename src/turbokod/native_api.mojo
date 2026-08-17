@@ -402,14 +402,18 @@ def tk_desktop_free(h: Int) abi("C"):
     if h == 0:
         return
     var p = _desk(h)
-    # Hand this window's compiled grammars back before the Desktop goes.
-    # The destructor below can't: a grammar's regexes are libonig
-    # allocations owned by the Rust shim's handle registry, not by Mojo,
-    # so without this every window the user closes strands the ~125 KB to
-    # 12 MB of pattern set it had compiled. Safe here because the host
-    # zeroes its view handle before calling us — no tick or layout can
-    # follow, which is this call's precondition anyway.
-    p[].grammar_registry.release()
+    # Hand back everything this window owns that Mojo's destructor can't:
+    # the child processes it spawned (language servers, debug adapter, pty
+    # shells, run/install children) with their pipes, and the libonig
+    # handles behind its grammars and search regexes — all owned by the
+    # Rust shim's registries rather than by Mojo. Without this a closed
+    # window left its language servers *running* until app quit, and
+    # stranded ~125 KB to 12 MB of compiled pattern set.
+    #
+    # Safe here because the host zeroes its view handle before calling us
+    # — no tick or layout can follow, which is this call's precondition
+    # anyway and exactly what ``shutdown``'s grammar release requires.
+    p[].shutdown()
     p.unsafe_deinit_pointee()
     _ = external_call["free", Int](h)
 

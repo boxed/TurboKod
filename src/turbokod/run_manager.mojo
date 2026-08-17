@@ -31,7 +31,8 @@ from std.collections.optional import Optional
 from .lsp import LspProcess
 from .posix import (
     SIGTERM, alloc_zero_buffer, close_fd, exit_code_from_status, kill_pid,
-    monotonic_ms, poll_stdin, read_into, untrack_child, waitpid_nohang,
+    monotonic_ms, poll_stdin, read_into, reap_child, untrack_child,
+    waitpid_nohang,
 )
 
 
@@ -130,14 +131,18 @@ struct RunSession(Movable):
             return
         if not self.exited and self.process.pid > 0 and self.process.alive:
             _ = kill_pid(self.process.pid, SIGTERM)
-            # Give the kernel a single tick to deliver the signal +
-            # let waitpid reap. We don't loop / sleep here — callers
-            # poll ``tick`` next frame to harvest the exit code.
-            var pair = waitpid_nohang(self.process.pid)
-            if Int(pair[0]) == Int(self.process.pid):
+            # Reap here rather than leaving it to the next ``tick``. A
+            # bare post-``kill`` ``waitpid_nohang`` essentially always
+            # returns 0 (the signal is delivered, the child hasn't died
+            # yet), so "the caller polls next frame" only worked while
+            # there *was* a next frame — on the shutdown path there
+            # isn't, and the child was left as a zombie. ``reap_child``
+            # is bounded, so the Stop button stays responsive.
+            var reaped = reap_child(self.process.pid)
+            if reaped[0]:
                 untrack_child(self.process.pid)
                 self.exited = True
-                self.exit_code = exit_code_from_status(Int(pair[1]))
+                self.exit_code = exit_code_from_status(Int(reaped[1]))
                 self.process.alive = False
         self._close_pipes()
         self.active = False

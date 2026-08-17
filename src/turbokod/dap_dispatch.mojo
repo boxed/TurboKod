@@ -774,7 +774,7 @@ struct DapManager(Copyable, Movable):
             trace_path.unsafe_ptr(), Int32(0o644),
         )
         if Int(tfd) >= 0:
-            self.client.process.trace_fd = tfd
+            self.client.process.own_trace_fd(tfd)
             var hdr = String("session start argv:")
             for k in range(len(self.spawn_argv)):
                 hdr = hdr + String(" ") + self.spawn_argv[k]
@@ -2838,7 +2838,8 @@ struct DapManager(Copyable, Movable):
             ) + host + String(":") + String(port))
             return
         var proc = LspProcess.from_socket(fd)
-        proc.trace_fd = self.client.process.trace_fd
+        # Shared with the parent session, which owns the close.
+        proc.borrow_trace_fd(self.client.process.trace_fd)
         # Reset the subprocess slot in place — direct field access
         # (instead of an Optional swap) avoids copying the live socket
         # fd, which the inert __copyinit__ would lose.

@@ -82,10 +82,12 @@ def stat_file(path: String) -> FileInfo:
 def read_file(path: String) raises -> String:
     """Read the entire file as a UTF-8 string. Empty string on error."""
     var c_path = path + String("\0")
+    # stat before open: ``stat_file`` can raise, and doing it while we hold
+    # an open descriptor would leak it on the way out.
+    var info = stat_file(path)
     var fd = external_call["open", Int32](c_path.unsafe_ptr(), O_RDONLY)
     if fd < 0:
         return String("")
-    var info = stat_file(path)
     var size = Int(info.size)
     if size <= 0:
         _ = external_call["close", Int32](fd)

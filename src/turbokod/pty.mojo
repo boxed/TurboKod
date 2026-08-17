@@ -20,7 +20,9 @@ from std.collections.list import List
 from std.ffi import external_call
 
 from .lsp import ArgvBuffer, _build_argv_buffer
-from .posix import close_fd, kill_pid, SIGTERM, untrack_child, waitpid_nohang
+from .posix import (
+    close_fd, kill_pid, reap_child, SIGTERM, untrack_child, waitpid_nohang,
+)
 
 
 struct PtyProcess(Copyable, Movable):
@@ -137,15 +139,25 @@ struct PtyProcess(Copyable, Movable):
         return Int(rc)
 
     def terminate(mut self):
-        """SIGTERM the child and close the master fd. Safe to call
-        more than once; subsequent calls are no-ops. The kill +
-        waitpid + untrack sequence mirrors what
-        ``TerminalPane._terminate_shell`` did for the pipe child."""
+        """SIGTERM the child, reap it, and close the master fd. Safe to
+        call more than once; subsequent calls are no-ops.
+
+        The reap is a bounded ``waitpid_nohang`` loop, not the single
+        poll this used to do. A single poll runs microseconds after the
+        ``kill``, long before the shell has actually died, so it always
+        returned 0 — and since we ``untrack_child`` regardless, the
+        shim's exit reaper never revisited it either. Every terminal-pane
+        close and every test run left a zombie for the life of the
+        process. We can't use ``waitpid_blocking`` here (this runs on the
+        UI thread and a wedged child would hang the editor), so we spin a
+        few times and fall back to the exit reaper if the child is
+        somehow still up — the master fd is closed either way, which is
+        what makes the child see EOF and quit."""
         if not self.alive:
             return
         if self.pid > 0:
             _ = kill_pid(self.pid, SIGTERM)
-            var _pair = waitpid_nohang(self.pid)
+            _ = reap_child(self.pid)
             untrack_child(self.pid)
         self.alive = False
         if self.master_fd >= 0:

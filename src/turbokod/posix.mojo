@@ -183,6 +183,61 @@ def poll_stdin(fd: Int32, timeout_ms: Int32) -> Bool:
     return Int(n) > 0
 
 
+def sleep_ms(ms: Int):
+    """Sleep for ``ms`` milliseconds.
+
+    Implemented as a ``poll`` over zero descriptors, which is the
+    portable "just wait" syscall — ``nanosleep`` takes a ``struct
+    timespec`` by pointer and would need another opaque-buffer dance,
+    while ``poll`` is already fixed-arity and bound here.
+
+    ``nfds = 0`` means the array is never dereferenced, but Mojo's
+    ``Pointer`` is non-nullable, so we hand it a throwaway buffer rather
+    than NULL.
+    """
+    if ms <= 0:
+        return
+    var unused = alloc_zero_buffer(POLLFD_SIZE)
+    _ = external_call["poll", Int32](
+        unused.unsafe_ptr(), UInt(0), Int32(ms),
+    )
+
+
+def reap_child(pid: Int32, budget_ms: Int = 50) -> Tuple[Bool, Int32]:
+    """Reap ``pid`` without blocking indefinitely.
+
+    Returns ``(reaped, status)``. The status is the raw ``waitpid(2)``
+    status word — feed it to ``exit_code_from_status`` — and is only
+    meaningful when ``reaped`` is True. It's returned rather than
+    discarded because the reap *consumes* it: a caller that wants the
+    exit code can't go back and ask again with a second ``waitpid``.
+
+    A ``waitpid_nohang`` issued immediately after a ``kill`` essentially
+    always reports nothing — the signal has been *delivered* but the
+    child hasn't been scheduled to die yet — and a tight retry loop
+    spins through its attempts in nanoseconds without ever giving it
+    that chance. Every caller that got this wrong left one zombie per
+    terminated child for the life of the process.
+
+    So we poll with a short sleep between attempts, capped at
+    ``budget_ms``. This runs on the UI thread, hence the cap: a wedged
+    child costs a bounded stall and is then left to the shim's exit
+    reaper rather than hanging the editor the way ``waitpid_blocking``
+    would.
+    """
+    if pid <= 0:
+        return (False, Int32(0))
+    var waited = 0
+    while True:
+        var pair = waitpid_nohang(pid)
+        if Int(pair[0]) != 0:
+            return (True, pair[1])
+        if waited >= budget_ms:
+            return (False, Int32(0))
+        sleep_ms(1)
+        waited += 1
+
+
 # --- Reading raw bytes ------------------------------------------------------
 
 
@@ -335,6 +390,36 @@ def pipe_pair() raises -> Tuple[Int32, Int32]:
 def close_fd(fd: Int32) -> Int32:
     """Wrap ``close(2)`` so callers don't have to write external_call inline."""
     return external_call["close", Int32](fd)
+
+
+def stdio_pipes() raises -> Tuple[
+    Int32, Int32, Int32, Int32, Int32, Int32,
+]:
+    """Three pipe pairs for a child's stdin/stdout/stderr, all-or-nothing.
+
+    Returns ``(stdin_r, stdin_w, stdout_r, stdout_w, stderr_r, stderr_w)``.
+    If any of the three ``pipe`` calls fails, the ones already opened are
+    closed before the error propagates — so a failure leaks nothing.
+
+    That matters more than it looks: ``pipe`` fails on ``EMFILE``, i.e.
+    precisely when the process is already out of descriptors, so the
+    naive version leaked hardest exactly when descriptors were scarcest.
+    """
+    var a = pipe_pair()
+    var b: Tuple[Int32, Int32]
+    try:
+        b = pipe_pair()
+    except e:
+        _ = close_fd(a[0]); _ = close_fd(a[1])
+        raise e
+    var c: Tuple[Int32, Int32]
+    try:
+        c = pipe_pair()
+    except e:
+        _ = close_fd(a[0]); _ = close_fd(a[1])
+        _ = close_fd(b[0]); _ = close_fd(b[1])
+        raise e
+    return (a[0], a[1], b[0], b[1], c[0], c[1])
 
 
 def set_nonblocking(fd: Int32) -> Bool:

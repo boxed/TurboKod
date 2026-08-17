@@ -1540,6 +1540,15 @@ struct LocalChanges(Movable):
         # re-seeds the poll baseline through ``_reload_files``.
         self._refresh_full()
 
+    def release(mut self):
+        """Teardown: free the compiled git-output patterns.
+
+        Separate from ``close`` — closing the view is a UI state change
+        the user can undo by reopening, and dropping the matchers there
+        would recompile them on every open. This is the window-is-going-
+        away path (``Desktop.shutdown``)."""
+        self._output_matchers.release()
+
     def close(mut self):
         self.active = False
         self.submitted = False

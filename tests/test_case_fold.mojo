@@ -24,7 +24,7 @@ from turbokod.case_fold import (
 )
 from turbokod.editor import Editor
 from turbokod.file_io import read_file, write_file
-from turbokod.onig import OnigRegex, onig_global_init
+from turbokod.onig import OnigRegex, onig_global_init, onig_tracked_count
 from turbokod.project import find_in_project, replace_in_project
 from turbokod.quick_open import (
     quick_open_match, quick_open_match_parts, split_query_parts,
@@ -395,11 +395,19 @@ def test_line_searcher_honors_case_sensitive_and_word_and_regex() raises:
 def test_searcher_cache_reuses_the_compiled_regex() raises:
     """Repeating a search must not recompile its regex.
 
-    A compiled ``OnigRegex`` is never freed — its libonig handles live
-    until the process exits (see the ``OnigRegex`` doc comment) — so a
-    recompile per F3 is a leak, not just wasted work. The identity check
-    is on the raw ``regex_t*``: same needle and toggles must hand back
-    the very same handle, a changed needle must not.
+    A compiled ``OnigRegex`` isn't reclaimed by going out of scope — its
+    libonig handles are owned by the shim's registry (see the
+    ``OnigRegex`` doc comment) — so a recompile per F3 is a leak, not
+    just wasted work. The identity check is on the raw ``regex_t*``:
+    same needle and toggles must hand back the very same handle.
+
+    The *miss* side can't be checked the same way. ``get`` now releases
+    the searcher it evicts, so the freed block is available to libonig
+    again and the next ``onig_new`` may legitimately return the same
+    address — asserting a different pointer would be asserting that the
+    old handle is still allocated, i.e. asserting the leak. The property
+    that matters is asserted directly instead: a miss compiles one and
+    frees one, so the live-handle count doesn't move.
     """
     onig_global_init()
     var opts = SearchOptions(False, False, False)   # case-insensitive
@@ -410,12 +418,26 @@ def test_searcher_cache_reuses_the_compiled_regex() raises:
     for _ in range(5):
         var again = cache.get(String("selection"), opts)
         assert_equal(again.rx.value()._reg, reg)
+    # Hits alone must not have grown the registry either.
+    var live = onig_tracked_count()
     # A different needle is a miss, and so is the same needle under
-    # different toggles.
+    # different toggles. Both compile — and both free their predecessor,
+    # so the cache holds exactly one live regex throughout.
     var other = cache.get(String("other"), opts)
-    assert_true(other.rx.value()._reg != reg)
+    assert_true(Bool(other.rx))
+    assert_equal(onig_tracked_count(), live)
     var reworded = cache.get(String("other"), SearchOptions(False, True, False))
-    assert_true(reworded.rx.value()._reg != other.rx.value()._reg)
+    assert_true(Bool(reworded.rx))
+    assert_equal(onig_tracked_count(), live)
+    # Ten more distinct needles: still one live regex, not eleven. This is
+    # the regression the eviction release exists for — typing into the Find
+    # box used to strand one per needle for the life of the process.
+    for i in range(10):
+        _ = cache.get(String("needle") + String(i), opts).usable()
+    assert_equal(onig_tracked_count(), live)
+    # And the explicit teardown gives back the last one.
+    cache.release()
+    assert_equal(onig_tracked_count(), live - 1)
 
 
 def test_searcher_matches_whole_drives_the_replace_button() raises:
@@ -607,6 +629,35 @@ def test_project_find_reports_case_insensitive_hits() raises:
     _rm_rf(root)
 
 
+def test_project_search_does_not_strand_its_regex() raises:
+    """``find_in_project`` / ``replace_in_project`` build a
+    ``LineSearcher`` per call and must release it.
+
+    Both compile a regex for every configuration except case-sensitive
+    literal — including the all-off default, which is case-*insensitive*
+    — and libonig handles aren't reclaimed by scope exit. Each
+    project-wide search used to strand one."""
+    onig_global_init()
+    var root = _temp_path(String("case_fold_search_release"))
+    _rm_rf(root)
+    _ensure_dir(root)
+    assert_true(write_file(
+        root + String("/a.txt"), String("alpha\nbeta\ngamma\n"),
+    ))
+    # Warm: the first call may pull in lazily-initialised libonig state.
+    _ = find_in_project(root, String("alpha"))
+    var live = onig_tracked_count()
+    for i in range(5):
+        _ = find_in_project(root, String("needle") + String(i))
+    assert_equal(onig_tracked_count(), live)
+    for i in range(5):
+        _ = replace_in_project(
+            root, String("absent") + String(i), String("x"),
+        )
+    assert_equal(onig_tracked_count(), live)
+    _rm_rf(root)
+
+
 # --- quick open ------------------------------------------------------------
 
 
@@ -667,5 +718,6 @@ def main() raises:
     test_editor_replace_all_case_sensitive_only_hits_exact()
     test_project_replace_preserves_line_endings()
     test_project_find_reports_case_insensitive_hits()
+    test_project_search_does_not_strand_its_regex()
     test_quick_open_match_parts_matches_the_unhoisted_form()
-    print("case_fold: 23 tests passed")
+    print("case_fold: 24 tests passed")

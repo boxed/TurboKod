@@ -25,10 +25,11 @@ from turbokod.desktop import (
     PROJECT_REPLACE, WINDOW_FOCUS_PREFIX
 )
 from turbokod.file_io import (
-    basename, find_git_project, join_path, project_relative, read_file,
-    stat_file, write_file
+    basename, delete_path, find_git_project, join_path, project_relative,
+    read_file, stat_file, write_file
 )
 from turbokod.file_tree import FILE_TREE_WIDTH
+from turbokod.onig import onig_global_init, onig_tracked_count
 from turbokod.project_targets import (
     ProjectTargets, RunTarget, load_project_targets, resolved_cwd,
     resolved_program, save_project_targets
@@ -2630,6 +2631,51 @@ def test_desktop_confirm_dialog_yes_starts_grammar_install() raises:
     assert_equal(d._pending_arg, String(""))
 
 
+def test_desktop_shutdown_releases_its_libonig_handles() raises:
+    """``Desktop.shutdown`` is what ``tk_desktop_free`` calls when a
+    window closes, and it has to give back everything Mojo's destructor
+    can't reach.
+
+    The native app deliberately outlives its windows, so before this
+    existed a closed window left its language servers, debug adapter and
+    pty shells *running* with their pipes held, plus every compiled
+    grammar, git-output matcher and Find regex it had accumulated —
+    until the user quit the app entirely.
+
+    Child processes aren't spawned in this test (no servers to talk to),
+    so what's asserted is the handle side: painting a buffer compiles a
+    grammar, running a Find compiles a searcher, and shutdown must
+    return the count to where it started. It must also be safe to call
+    twice — the host's teardown ordering makes that reachable.
+    """
+    onig_global_init()
+    # A temp file outside any project root, so ``paint``'s session-restore
+    # can't contaminate the window list (same reasoning as the golden-line
+    # tests above).
+    var path = _temp_path(String("_leak_probe.ts"))
+    assert_true(write_file(path, String(
+        "interface Foo { bar: string }\nconst x: Foo = { bar: 'hi' };\n",
+    )))
+    var live = onig_tracked_count()
+    var d = Desktop()
+    var screen = Rect(0, 0, 100, 40)
+    d.open_file(path, screen)
+    var canvas = Canvas(100, 40)
+    d.paint(canvas, screen)
+    var idx = len(d.windows.windows) - 1
+    # A Find compiles a regex that lives on the Editor, not the registry —
+    # invisible to the grammar release, so it needs its own teardown.
+    _ = d.windows.windows[idx].editor.find_next(String("Foo"))
+    assert_true(onig_tracked_count() > live)
+    d.shutdown()
+    assert_equal(onig_tracked_count(), live)
+    # Idempotent — the host's teardown ordering makes a second call
+    # reachable.
+    d.shutdown()
+    assert_equal(onig_tracked_count(), live)
+    _ = delete_path(path)
+
+
 def test_desktop_confirm_dialog_no_clears_pending_action() raises:
     var d = Desktop()
     d._pending_action = String("lsp:install")
@@ -2744,4 +2790,5 @@ def main() raises:
     test_desktop_snapshot_skips_untitled_windows()
     test_desktop_confirm_dialog_yes_starts_grammar_install()
     test_desktop_confirm_dialog_no_clears_pending_action()
-    print("desktop: 97 tests passed")
+    test_desktop_shutdown_releases_its_libonig_handles()
+    print("desktop: 98 tests passed")

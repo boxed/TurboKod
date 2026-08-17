@@ -2059,6 +2059,16 @@ struct Editor(Copyable, Movable):
         self._hover_result_anchor_x = copy._hover_result_anchor_x
         self._hover_result_anchor_y = copy._hover_result_anchor_y
 
+    def release_search_cache(mut self):
+        """Give back the compiled regex the Find path is holding.
+
+        Teardown only (``Desktop.shutdown``). The searcher's ``OnigRegex``
+        isn't reclaimed by the editor going out of scope — libonig's
+        allocations are owned by the shim's registry — and it isn't
+        reachable from the ``GrammarRegistry``, so it needs its own
+        release. Idempotent; a later Find just recompiles."""
+        self._search_cache.release()
+
     def flush_highlights(
         mut self, mut registry: GrammarRegistry, mut speller: Speller,
     ):

@@ -144,6 +144,39 @@ def test_grammar_registry_override_routes_to_alternate_grammar() raises:
     assert_false(matches_python)
 
 
+def test_highlight_for_extension_does_not_strand_its_grammar() raises:
+    """The uncached convenience entry point must not leak a grammar.
+
+    It used to be a separate implementation that loaded a grammar,
+    tokenized, and dropped it — which reclaims nothing, because libonig's
+    allocations are owned by the shim's registry rather than by Mojo. A
+    TypeScript buffer cost ~500 handles per call, and a buffer carrying a
+    ``# language=html`` injection marker ~900 (the injection pass built a
+    second throwaway registry). It's now a wrapper around
+    ``highlight_incremental`` with a private registry it releases.
+    """
+    onig_global_init()
+    var ts = List[String]()
+    ts.append(String("interface Foo { bar: string }"))
+    ts.append(String("const x: Foo = { bar: 'hi' };"))
+    # Warm: the first call also initialises process-wide libonig state.
+    assert_true(len(highlight_for_extension(String("ts"), ts)) > 0)
+    var live = onig_tracked_count()
+    for _ in range(3):
+        assert_true(len(highlight_for_extension(String("ts"), ts)) > 0)
+    assert_equal(onig_tracked_count(), live)
+
+    # The injection path compiles a *second* grammar; it must go back too.
+    var inj = List[String]()
+    inj.append(String("# language=html"))
+    inj.append(String('page = "<div class=\'x\'>hi</div>"'))
+    _ = highlight_for_extension(String("py"), inj)
+    var live2 = onig_tracked_count()
+    for _ in range(3):
+        _ = highlight_for_extension(String("py"), inj)
+    assert_equal(onig_tracked_count(), live2)
+
+
 def test_grammar_registry_release_frees_and_leaves_the_engine_usable() raises:
     """``release`` is the one way compiled grammars give memory back, and
     the reason it can exist at all is that the shim frees a handle only
@@ -2072,6 +2105,7 @@ def main() raises:
     test_grammar_install_command_targets_user_config()
     test_django_grammar_is_in_downloadable_catalog()
     test_grammar_registry_override_routes_to_alternate_grammar()
+    test_highlight_for_extension_does_not_strand_its_grammar()
     test_grammar_registry_release_frees_and_leaves_the_engine_usable()
     test_released_regex_reports_no_match()
     test_grammar_registry_keeps_grammars_across_set_overrides()
@@ -2125,4 +2159,4 @@ def main() raises:
     test_html_to_text_table_escapes_pipes_in_cells()
     test_markdown_highlights_headings_code_and_emphasis()
     test_markdown_fenced_code_uses_embedded_grammar()
-    print("highlight: 55 tests passed")
+    print("highlight: 56 tests passed")

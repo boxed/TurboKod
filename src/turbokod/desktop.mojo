@@ -5382,6 +5382,47 @@ struct Desktop(Movable):
         self._window_menu_titles = titles^
         self._window_menu_built = True
 
+    # --- teardown ----------------------------------------------------------
+
+    def shutdown(mut self):
+        """Release every OS resource this Desktop owns. Idempotent.
+
+        The native host builds one ``Desktop`` per window and the app
+        deliberately outlives its windows
+        (``applicationShouldTerminateAfterLastWindowClosed`` is False), so
+        without this a closed window left its language servers, debug
+        adapter, pty shells and run children *running* — each holding its
+        pipes — until the user quit the app entirely. A language server is
+        hundreds of MB resident, so opening and closing a few projects in
+        one session was the largest leak in the product.
+
+        Mojo can't do this in a destructor: none of these types can carry
+        one (``LspProcess`` copies alias fd + pid ownership, so a
+        per-instance ``__deinit__`` would double-close), which is why
+        teardown is explicit and why ``tk_desktop_free`` is the one
+        caller that must not forget it.
+
+        Ordering: children first, then the libonig handle registries. The
+        grammar release has a hard "nothing may tokenize afterwards"
+        precondition, so it goes last, after everything that could still
+        paint is gone.
+        """
+        for i in range(len(self.lsp_managers)):
+            self.lsp_managers[i].shutdown()
+        self.dap.shutdown()
+        for i in range(len(self.terminal_panes)):
+            self.terminal_panes[i].close()
+        self.test_pane.close()
+        self.run_session.terminate()
+        self.install_runner.terminate()
+        self.quick_open.close()
+        # Per-editor search regexes: one live handle per editor that ran
+        # a Find, invisible to the grammar registry release below.
+        for i in range(len(self.windows.windows)):
+            self.windows.windows[i].editor.release_search_cache()
+        self.local_changes.release()
+        self.grammar_registry.release()
+
     # --- project state -----------------------------------------------------
 
     def detect_project_from(mut self, path: String):

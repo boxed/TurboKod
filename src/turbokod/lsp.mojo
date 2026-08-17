@@ -27,11 +27,12 @@ from .posix import (
     POSIX_SPAWN_FILE_ACTIONS_SIZE, SIGTERM,
     alloc_zero_buffer, append_string_bytes, chdir_path, close_fd,
     getcwd_path, getenv_value,
-    kill_pid, monotonic_ms, pipe_pair, poll_stdin,
+    kill_pid, monotonic_ms, poll_stdin,
     posix_spawn_file_actions_addclose, posix_spawn_file_actions_adddup2,
     posix_spawn_file_actions_destroy, posix_spawn_file_actions_init,
-    posix_spawnp_call, read_into, set_nonblocking, track_child,
-    untrack_child, waitpid_blocking, waitpid_nohang, write_buffer,
+    posix_spawnp_call, read_into, set_nonblocking, stdio_pipes,
+    track_child, untrack_child, waitpid_blocking, waitpid_nohang,
+    write_buffer,
 )
 
 
@@ -163,15 +164,13 @@ def capture_command(
     """
     if len(argv) == 0:
         raise Error("argv must not be empty")
-    var stdin_pair = pipe_pair()
-    var stdin_r = stdin_pair[0]
-    var stdin_w = stdin_pair[1]
-    var stdout_pair = pipe_pair()
-    var stdout_r = stdout_pair[0]
-    var stdout_w = stdout_pair[1]
-    var stderr_pair = pipe_pair()
-    var stderr_r = stderr_pair[0]
-    var stderr_w = stderr_pair[1]
+    var pipes = stdio_pipes()
+    var stdin_r = pipes[0]
+    var stdin_w = pipes[1]
+    var stdout_r = pipes[2]
+    var stdout_w = pipes[3]
+    var stderr_r = pipes[4]
+    var stderr_w = pipes[5]
 
     var fa = alloc_zero_buffer(POSIX_SPAWN_FILE_ACTIONS_SIZE)
     var rc_init = posix_spawn_file_actions_init(fa)
@@ -211,6 +210,9 @@ def capture_command(
 
     # Send stdin (if any), then close to signal EOF — without this many
     # tools that read stdin (e.g. ``rg`` reading from stdin) would hang.
+    # ``write_buffer`` is non-raising, so no teardown guard is needed here;
+    # if that ever changes, note that everything from the spawn down owns
+    # three descriptors plus an unreaped child.
     if len(stdin_text.as_bytes()) > 0:
         var sb = List[UInt8]()
         append_string_bytes(sb, stdin_text)
@@ -288,7 +290,13 @@ struct LspProcess(Copyable, Movable):
     # disk — no need for the host loop to be alive to flush. We
     # ``write()`` directly via ``FileDescriptor`` (no userspace
     # buffering) so each call is durable on return.
+    #
+    # Set it through ``own_trace_fd`` / ``borrow_trace_fd`` rather than
+    # by assignment: ``terminate`` closes the fd, and the debugpyAttach
+    # path deliberately points a *second* process at the parent session's
+    # log, so the two need to disagree about who does the closing.
     var trace_fd: Int32
+    var _trace_fd_owned: Bool
 
     def __init__(out self):
         self.pid = -1
@@ -300,6 +308,7 @@ struct LspProcess(Copyable, Movable):
         self._pending_write = List[UInt8]()
         self._write_overflowed = False
         self.trace_fd = -1
+        self._trace_fd_owned = False
 
     def __copyinit__(mut self, copy: Self):
         self.pid = -1
@@ -311,6 +320,26 @@ struct LspProcess(Copyable, Movable):
         self._pending_write = List[UInt8]()
         self._write_overflowed = False
         self.trace_fd = -1
+        self._trace_fd_owned = False
+
+    def own_trace_fd(mut self, fd: Int32):
+        """Attach a trace log this process is responsible for closing.
+
+        Callers ``creat`` the log right after spawning; without a matching
+        close in ``terminate`` every restarted LSP / DAP session leaked one
+        descriptor for the life of the process."""
+        self.trace_fd = fd
+        self._trace_fd_owned = fd >= 0
+
+    def borrow_trace_fd(mut self, fd: Int32):
+        """Write into someone else's trace log without owning it.
+
+        Used for debugpy's subprocess sessions, which share the parent
+        session's log — the parent closes it, and a second close here
+        would target a descriptor number the process may since have
+        reused."""
+        self.trace_fd = fd
+        self._trace_fd_owned = False
 
     @staticmethod
     def spawn(argv: List[String], cwd: String = String("")) raises -> Self:
@@ -331,15 +360,13 @@ struct LspProcess(Copyable, Movable):
             raise Error("argv must not be empty")
         # Parent's view: ``stdin_w`` writes to child stdin, ``stdout_r``
         # reads child stdout, ``stderr_r`` reads child stderr.
-        var stdin_pair = pipe_pair()    # (read, write)
-        var stdin_r = stdin_pair[0]
-        var stdin_w = stdin_pair[1]
-        var stdout_pair = pipe_pair()
-        var stdout_r = stdout_pair[0]
-        var stdout_w = stdout_pair[1]
-        var stderr_pair = pipe_pair()
-        var stderr_r = stderr_pair[0]
-        var stderr_w = stderr_pair[1]
+        var pipes = stdio_pipes()
+        var stdin_r = pipes[0]
+        var stdin_w = pipes[1]
+        var stdout_r = pipes[2]
+        var stdout_w = pipes[3]
+        var stderr_r = pipes[4]
+        var stderr_w = pipes[5]
 
         var fa = alloc_zero_buffer(POSIX_SPAWN_FILE_ACTIONS_SIZE)
         var rc_init = posix_spawn_file_actions_init(fa)
@@ -678,6 +705,12 @@ struct LspProcess(Copyable, Movable):
         if self.stderr_fd >= 0:
             _ = close_fd(self.stderr_fd)
             self.stderr_fd = -1
+        # The trace log too, when it's ours (see ``own_trace_fd``). A
+        # borrowed one belongs to the parent session and is left alone.
+        if self.trace_fd >= 0 and self._trace_fd_owned:
+            _ = close_fd(self.trace_fd)
+        self.trace_fd = -1
+        self._trace_fd_owned = False
         # Drop any queued outbound bytes — they'd be writing to a
         # closed fd next time around.
         self._pending_write = List[UInt8]()

@@ -30,7 +30,8 @@ from .string_utils import display_columns
 from .window import paint_window_title_at
 from .posix import (
     alloc_zero_buffer, append_string_bytes, close_fd, exit_code_from_status,
-    monotonic_ms, poll_stdin, read_into, untrack_child, waitpid_nohang,
+    kill_pid, monotonic_ms, poll_stdin, read_into, reap_child, SIGTERM,
+    untrack_child, waitpid_nohang,
 )
 
 
@@ -209,6 +210,22 @@ struct InstallRunner(Movable):
                 unsafe_from_utf8=ob[len(ob) - _OUTPUT_CAP:],
             ))
             self.output = tail^
+
+    def terminate(mut self):
+        """Kill an in-flight install and release its pipes. Idempotent.
+
+        Teardown path (``Desktop.shutdown``): ``tick`` only reclaims the
+        child when it exits on its own, so a window closed mid-install
+        would otherwise leave the installer running with our three
+        descriptors held."""
+        if not self.active:
+            return
+        if self.process.pid > 0 and self.process.alive:
+            _ = kill_pid(self.process.pid, SIGTERM)
+            _ = reap_child(self.process.pid)
+            untrack_child(self.process.pid)
+            self.process.alive = False
+        self._reset()
 
     def _reset(mut self):
         # Close the parent ends of the pipes that we still own; the child

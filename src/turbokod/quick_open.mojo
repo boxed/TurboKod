@@ -210,6 +210,15 @@ struct QuickOpen(Movable):
         self.entries = List[String]()
         self.entries_abs = List[String]()
         self.truncated = False
+        # Reopening while a previous enumeration is still in flight would
+        # otherwise overwrite the slot and strand that child's pipes — the
+        # assignments below don't run a teardown.
+        if self._indexer:
+            self._indexer.value()._terminate()
+            self._indexer = Optional[FileIndexer]()
+        if self._ignored_indexer:
+            self._ignored_indexer.value()._terminate()
+            self._ignored_indexer = Optional[FileIndexer]()
         # Async path: ``git ls-files`` runs in a child process and its
         # output is drained from ``tick()`` each frame. The dialog opens
         # *immediately* showing an empty list + an "<indexing…>" status;

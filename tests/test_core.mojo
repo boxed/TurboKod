@@ -31,7 +31,8 @@ from turbokod.desktop import (
     APP_QUIT_ACTION, Desktop, EDITOR_SAVE, PROJECT_FIND
 )
 from turbokod.file_io import (
-    delete_path, join_path, parent_path, read_file, stat_file, write_file
+    delete_path, join_path, list_directory, parent_path, read_file,
+    stat_file, write_file
 )
 from turbokod.git_changes import (
     compute_deletion_revert_block, compute_revert_block, parse_line_history,
@@ -1169,6 +1170,70 @@ def test_file_indexer_drains_full_stream_to_eof() raises:
     rm.append(String("-rf"))
     rm.append(root)
     _ = capture_command(rm)
+
+
+def test_file_indexer_returns_its_pipes_on_every_path() raises:
+    """A completed ``FileIndexer`` must give back the three descriptors it
+    holds — and so must a terminated one.
+
+    QuickOpen starts *two* of these per open (the tracked pass and the
+    ignored-only pass), so a leak here cost 6 descriptors per Cmd+P, for
+    the life of the process; a few hundred Quick Opens exhausted the
+    table. The normal end-of-output path was the leaky one: ``_terminate``
+    only fires past ``QUICK_OPEN_FILE_CAP``, and it wasn't closing
+    anything either (the "close fds" comment sat above a statement that
+    evaluated a field and discarded it).
+
+    ``/dev/fd`` is the count of descriptors this process has open, so the
+    assertion is direct rather than a proxy.
+    """
+    var root = _temp_path(String("_indexer_fds"))
+    var init = List[String]()
+    init.append(String("git"))
+    init.append(String("init"))
+    init.append(String("-q"))
+    init.append(root)
+    var cap = capture_command(init)
+    if Int(cap.status) != 0:
+        return  # no git available
+    assert_true(write_file(join_path(root, String("a.txt")), String("hi\n")))
+
+    # Warm once: the first spawn can open lazily-initialised state.
+    _ = _drain_indexer(root)
+    var base = len(list_directory(String("/dev/fd")))
+    for _ in range(5):
+        _ = _drain_indexer(root)
+    assert_equal(len(list_directory(String("/dev/fd"))), base)
+
+    # The cut-short path too — ``close()`` on the picker takes this one.
+    for _ in range(5):
+        var idx_opt = FileIndexer.start(root)
+        assert_true(Bool(idx_opt))
+        var idx = idx_opt.take()
+        _ = idx.poll(root)
+        idx._terminate()
+    assert_equal(len(list_directory(String("/dev/fd"))), base)
+
+    var rm = List[String]()
+    rm.append(String("rm"))
+    rm.append(String("-rf"))
+    rm.append(root)
+    _ = capture_command(rm)
+
+
+def _drain_indexer(root: String) raises -> Int:
+    """Run one ``FileIndexer`` to completion; return the path count."""
+    var idx_opt = FileIndexer.start(root)
+    if not idx_opt:
+        return -1
+    var idx = idx_opt.take()
+    var total = 0
+    for _ in range(5000):
+        total += len(idx.poll(root))
+        if not idx.alive:
+            break
+        _ = external_call["usleep", Int32](Int32(1000))   # 1 ms
+    return total
 
 
 def test_load_project_grammar_overrides_missing_file_is_empty() raises:
@@ -2392,6 +2457,7 @@ def main() raises:
     test_default_hotkey_cmd_s_saves_focused_editor()
     test_file_indexer_ignored_mode_skips_directory_entries()
     test_file_indexer_drains_full_stream_to_eof()
+    test_file_indexer_returns_its_pipes_on_every_path()
     test_load_project_grammar_overrides_missing_file_is_empty()
     test_load_project_grammar_overrides_parses_extensions_map()
     test_load_project_grammar_overrides_malformed_is_empty()
@@ -2444,4 +2510,4 @@ def main() raises:
     test_detect_skips_non_test_file()
     test_detect_custom_python_files_glob()
     test_write_file_in_place_fallback_replaces_fully()
-    print("core: 115 tests passed")
+    print("core: 116 tests passed")
