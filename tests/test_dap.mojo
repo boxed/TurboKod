@@ -12,6 +12,7 @@ from turbokod.colors import (
     Attr, BLACK, DARK_GRAY, LIGHT_BLUE, LIGHT_GRAY, STYLE_UNDERLINE, WHITE
 )
 from turbokod.editor import Editor
+from turbokod.lsp import LspProcess
 from turbokod.breakpoint_store import (
     StoredBreakpoint, load_breakpoints, save_breakpoints
 )
@@ -29,13 +30,16 @@ from turbokod.dap import (
     dap_initialize_arguments
 )
 from turbokod.dap_dispatch import (
-    DapManager, DapStackFrame, DapVariable, _parse_scopes, _parse_stack_trace,
+    DapManager, DapStackFrame, DapVariable, _STATE_FAILED,
+    _STATE_INITIALIZING, _parse_scopes, _parse_stack_trace,
     _parse_threads, _parse_variables
 )
 from turbokod.debugger_config import (
     built_in_debuggers, find_debugger_for_language, launch_arguments_for
 )
-from turbokod.posix import which
+from turbokod.posix import (
+    append_string_bytes, close_fd, pipe_pair, which, write_buffer,
+)
 from turbokod.project_grammars import GrammarOverride
 from turbokod.config import OnSaveAction
 from turbokod.settings import Settings
@@ -575,6 +579,40 @@ def test_dap_manager_captures_condition_exception_from_output() raises:
     # Drained — second take returns nothing.
     assert_false(mgr.has_condition_exception())
     assert_false(Bool(mgr.take_condition_exception()))
+
+
+def test_dap_subprocess_poll_failure_closes_its_socket() raises:
+    """A failed poll on the subprocess socket hands the descriptor back.
+
+    This was the one failure transition that latched ``_STATE_FAILED``
+    without ``terminate``. FAILED is a *reusable* slot, so the next
+    ``debugpyAttach`` overwrote ``client`` and the socket became
+    unreachable — one leaked descriptor per malformed message followed by
+    a re-attach.
+
+    A pipe stands in for the TCP socket (``from_socket`` wraps any fd) and
+    a well-framed message with a non-JSON body is what makes ``poll``
+    raise — ``parse_json`` is strict.
+    """
+    var pipes = pipe_pair()
+    var r = pipes[0]
+    var w = pipes[1]
+    var body = String("not json at all")
+    var frame = String("Content-Length: ") + String(len(body.as_bytes())) \
+        + String("\r\n\r\n") + body
+    var buf = List[UInt8]()
+    append_string_bytes(buf, frame)
+    write_buffer(w, buf)
+    _ = close_fd(w)
+    var mgr = DapManager()
+    mgr._subprocess.client = DapClient(LspProcess.from_socket(r))
+    mgr._subprocess.state = _STATE_INITIALIZING
+    mgr._tick_subprocess()
+    assert_equal(mgr._subprocess.state, _STATE_FAILED)
+    assert_equal(Int(mgr._subprocess.client.process.stdout_fd), -1)
+    # Closing an already-closed fd fails (EBADF) — direct proof the
+    # descriptor went back to the kernel rather than just being forgotten.
+    assert_true(Int(close_fd(r)) != 0)
 
 
 def test_dap_manager_condition_exception_ignores_unrelated_output() raises:
@@ -1654,6 +1692,7 @@ def main() raises:
     test_dap_manager_breakpoints_info_for()
     test_dap_manager_breakpoint_wait_for_arms_on_trigger()
     test_dap_manager_captures_condition_exception_from_output()
+    test_dap_subprocess_poll_failure_closes_its_socket()
     test_dap_manager_condition_exception_ignores_unrelated_output()
     test_pytest_python_files_multiline_toml_array()
     test_pytest_python_files_singleline_toml_array()

@@ -1848,6 +1848,14 @@ struct DapManager(Copyable, Movable):
             try:
                 maybe = self._subprocess.client.poll(Int32(0))
             except:
+                # Close the socket, don't just latch FAILED. This was the
+                # one failure transition that skipped ``terminate`` — and
+                # the slot is *reusable* at FAILED, so the next
+                # ``debugpyAttach`` overwrote ``client`` and made the fd
+                # unreachable. (``shutdown`` does terminate a FAILED
+                # subprocess, so the descriptor was only lost when a
+                # re-attach came first.)
+                self._subprocess.client.terminate()
                 self._subprocess.state = _STATE_FAILED
                 return
             if not maybe:
