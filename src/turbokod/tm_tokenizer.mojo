@@ -223,6 +223,33 @@ def _tokenize_line(
     grammar: Grammar, line: String, next_line: String, row: Int,
     mut stack: List[Frame], mut out: List[Highlight],
 ):
+    """Tokenize one line, owning the line-local dynamic regexes.
+
+    Thin wrapper over ``_tokenize_line_scan`` for one reason: the
+    back-reference end regexes it compiles are the only regexes in the
+    system built from *data* rather than from a grammar file, so nothing
+    else can ever reclaim them — the ``Frame`` that outlives the line
+    holds a pattern index, not a handle. The release therefore has to
+    happen on every exit from the scan, and a scan that raised (every
+    function here is ``def``, so any of them may) used to skip it and
+    strand that line's handles for the life of the process.
+    """
+    var dyn_keys = List[String]()
+    var dyn_regexes = List[OnigRegex]()
+    try:
+        _tokenize_line_scan(
+            grammar, line, next_line, row, stack, out, dyn_keys, dyn_regexes,
+        )
+    finally:
+        for i in range(len(dyn_regexes)):
+            dyn_regexes[i].release()
+
+
+def _tokenize_line_scan(
+    grammar: Grammar, line: String, next_line: String, row: Int,
+    mut stack: List[Frame], mut out: List[Highlight],
+    mut dyn_keys: List[String], mut dyn_regexes: List[OnigRegex],
+):
     var hb = line.as_bytes()
     var n = len(hb)
     var pos = 0
@@ -267,12 +294,9 @@ def _tokenize_line(
     # recomputed whenever the candidate set is rebuilt (i.e. when the
     # top frame changes). The keys/regexes lists cache compiles so a
     # line full of ``<td>..</td>`` rows doesn't recompile per cell.
-    # Line-local, and released at the bottom of this function: these are
-    # the only regexes in the system compiled from data rather than from a
-    # grammar file, so without the release they'd accumulate for the life
-    # of the process — one set per line, per re-tokenize.
-    var dyn_keys = List[String]()
-    var dyn_regexes = List[OnigRegex]()
+    # ``dyn_keys`` / ``dyn_regexes`` are line-local but owned by the
+    # caller, which releases them however this function exits — including
+    # by raising (see ``_tokenize_line``).
     var dyn_end = Optional[OnigRegex]()
     # Per-candidate cached search result, reused across advancing positions
     # while the candidate set and search options are unchanged. ``cached_start``
@@ -571,13 +595,9 @@ def _tokenize_line(
             if not covered:
                 out.append(Highlight(row, i, i + 1, op_attr))
 
-    # The back-reference end regexes were compiled for this line only and
-    # nothing above stores one past this point (``Frame`` holds a pattern
-    # index, not a handle), so this is the last moment they're reachable —
-    # and the only place they can be reclaimed, since libonig's
-    # allocations aren't Mojo-owned.
-    for i in range(len(dyn_regexes)):
-        dyn_regexes[i].release()
+    # No release here: ``_tokenize_line`` owns ``dyn_regexes`` and frees
+    # them in a ``finally``, so a raise on any path above still hands
+    # libonig's allocations back.
 
 
 def _process_while_frames(

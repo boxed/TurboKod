@@ -2100,6 +2100,38 @@ def test_markdown_fenced_code_uses_embedded_grammar() raises:
     assert_true(saw_number)
 
 
+def test_backreference_end_regexes_are_released_per_line() raises:
+    """Tokenizing a back-referencing grammar leaves no libonig handles.
+
+    A ``\\2``-style ``end`` is the only regex in the system compiled from
+    *data* rather than from a grammar file, so nothing else can reclaim
+    it: the ``Frame`` that outlives the line stores a pattern index, not
+    a handle. Every such compile therefore has to be handed back before
+    the line's tokenize returns, on every exit path — which is why the
+    release lives in ``_tokenize_line``'s ``finally`` rather than at the
+    bottom of the scan, where a raise would skip it.
+    """
+    onig_global_init()
+    var grammar_json = String(
+        "{\"scopeName\": \"source.test\", \"patterns\": ["
+        "{\"begin\": \"(<)([a-z]+)>\", \"end\": \"(</)(\\\\2)(>)\", "
+        "\"name\": \"meta.tag.test\"}"
+        "], \"repository\": {}}"
+    )
+    var g = load_grammar_from_string(grammar_json)
+    # Baseline *after* the grammar is compiled: its own pattern regexes
+    # are owned by the Grammar and released with it, not per line.
+    var live = onig_tracked_count()
+    var lines = List[String]()
+    for i in range(40):
+        lines.append(String("<div>row") + String(i) + String("</div>"))
+    var hls = tokenize_with_grammar(g, lines)
+    assert_true(len(hls) > 0)
+    # One distinct substituted end regex per line, all handed back.
+    assert_equal(onig_tracked_count(), live)
+    g.release()
+
+
 def main() raises:
     setup_test_env()
     test_grammar_install_command_targets_user_config()
@@ -2159,4 +2191,5 @@ def main() raises:
     test_html_to_text_table_escapes_pipes_in_cells()
     test_markdown_highlights_headings_code_and_emphasis()
     test_markdown_fenced_code_uses_embedded_grammar()
-    print("highlight: 56 tests passed")
+    test_backreference_end_regexes_are_released_per_line()
+    print("highlight: 57 tests passed")
