@@ -23,9 +23,11 @@ from std.collections.list import List
 from std.testing import assert_equal, assert_true
 
 from turbokod.posix import (
-    alloc_zero_buffer, poll_stdin, read_into, waitpid_nohang,
+    alloc_zero_buffer, getenv_value, poll_stdin, read_into, setenv_value,
+    waitpid_nohang,
 )
 from turbokod.pty import PtyProcess
+from turbokod.terminal_pane import TerminalPane
 from turbokod.vt import Vt
 
 
@@ -167,10 +169,83 @@ def test_pty_terminate_reaps_the_child() raises:
         assert_true(Int(pair[0]) != pids[i])
 
 
+def test_pty_terminate_after_the_child_exited_on_its_own() raises:
+    """A child that exited by itself is still reclaimable.
+
+    ``terminate`` used to open with ``if not self.alive: return``, and
+    ``alive`` is cleared from the *outside* — a pane's drain loop latches
+    it False the moment its read reports EOF. So a shell the user ended
+    with ``exit`` (the normal way to end one) turned every later
+    ``terminate`` into an early return, and the master fd, the zombie and
+    the shim's tracked-pid entry all survived to process exit. One leaked
+    descriptor per shell.
+
+    The guards are now per-resource (``pid > 0``, ``master_fd >= 0``), so
+    this sequence — drain to EOF, latch, terminate — reclaims both.
+    """
+    var argv = List[String]()
+    argv.append(String("/bin/sh"))
+    argv.append(String("-c"))
+    argv.append(String("echo bye"))
+    var p = PtyProcess.spawn(argv)
+    var pid = p.pid
+    assert_true(pid > 0)
+    var fd = Int(p.master_fd)
+    assert_true(fd >= 0)
+    # Exactly what a pane's tick does: read until EOF, then latch ``alive``.
+    var scratch = alloc_zero_buffer(4096)
+    var spins = 0
+    while p.alive and spins < 5000:
+        spins += 1
+        if not poll_stdin(p.master_fd, Int32(20)):
+            continue
+        var n = read_into(p.master_fd, scratch, 4096)
+        if n <= 0:
+            p.alive = False
+    assert_equal(p.alive, False)
+    # The drain loop itself doesn't (and shouldn't) close anything.
+    assert_equal(Int(p.master_fd), fd)
+    p.terminate()
+    assert_equal(Int(p.master_fd), -1)
+    assert_true(Int(waitpid_nohang(pid)[0]) != Int(pid))
+
+
+def test_terminal_pane_reclaims_the_pty_when_the_shell_exits() raises:
+    """The pane hands the pty back when its shell exits on its own.
+
+    The pane-level half of the same bug: ``tick`` latched ``alive`` False
+    on EOF and stopped there, leaving the fd for a ``close`` that could no
+    longer act on it — and for an ``ensure_started`` that would overwrite
+    the whole ``PtyProcess`` and make it unreachable.
+    """
+    var saved_shell = getenv_value(String("SHELL"))
+    _ = setenv_value(String("SHELL"), String("/bin/sh"))
+    var pane = TerminalPane()
+    pane.startup_command = String("exit 0")
+    pane.ensure_started()
+    var pid = pane.pty.pid
+    assert_true(pid > 0)
+    assert_true(pane.pty.master_fd >= 0)
+    var spins = 0
+    while pane.pty.alive and spins < 5000:
+        pane.tick()
+        spins += 1
+    assert_equal(pane.pty.alive, False)
+    # Reclaimed by ``tick`` itself, before anyone closes the pane.
+    assert_equal(Int(pane.pty.master_fd), -1)
+    assert_true(Int(waitpid_nohang(pid)[0]) != Int(pid))
+    # And the pane still works afterwards: a fresh shell on the next start.
+    pane.close()
+    if len(saved_shell.as_bytes()) > 0:
+        _ = setenv_value(String("SHELL"), saved_shell)
+
+
 def main() raises:
     test_pty_echo_writes_into_grid()
     test_pty_printf_ansi_color_lands_as_red_fg()
     test_pty_child_runs_in_requested_cwd()
     test_pty_isatty_detected_by_child()
     test_pty_terminate_reaps_the_child()
+    test_pty_terminate_after_the_child_exited_on_its_own()
+    test_terminal_pane_reclaims_the_pty_when_the_shell_exits()
     print("all pty smoke tests passed")

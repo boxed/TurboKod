@@ -152,14 +152,27 @@ struct PtyProcess(Copyable, Movable):
         UI thread and a wedged child would hang the editor), so we spin a
         few times and fall back to the exit reaper if the child is
         somehow still up — the master fd is closed either way, which is
-        what makes the child see EOF and quit."""
-        if not self.alive:
-            return
-        if self.pid > 0:
+        what makes the child see EOF and quit.
+
+        Each half is guarded by *its own* sentinel (``pid > 0``,
+        ``master_fd >= 0``) rather than by ``alive``. ``alive`` answers "is
+        the child still running", and it is cleared from the outside — a
+        pane's drain loop latches it False the moment it reads EOF — so
+        gating the whole teardown on it meant a child that exited on its
+        own could never be cleaned up at all: every later ``terminate``
+        was an early return, and the fd, the zombie and the shim's
+        tracked-pid entry survived to process exit."""
+        if self.alive and self.pid > 0:
             _ = kill_pid(self.pid, SIGTERM)
-            _ = reap_child(self.pid)
-            untrack_child(self.pid)
         self.alive = False
+        if self.pid > 0:
+            _ = reap_child(self.pid)
+            # Untracked even if the reap timed out: the shim's exit reaper
+            # signals every pid it still holds, and a pid we've given up on
+            # may be recycled by then — better to miss a kill than to
+            # SIGTERM an unrelated process.
+            untrack_child(self.pid)
+            self.pid = -1
         if self.master_fd >= 0:
             _ = close_fd(self.master_fd)
             self.master_fd = -1

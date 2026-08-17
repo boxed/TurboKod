@@ -327,9 +327,17 @@ struct TerminalPane(Copyable, Movable):
             var n = read_into(self.pty.master_fd, scratch, 4096)
             if n <= 0:
                 if n == 0:
-                    # EOF / EIO from the slave side closing — child
-                    # gone. The next ``ensure_started`` will respawn.
+                    # EOF from the slave side closing — the child is gone
+                    # (the user typed ``exit``, or the shell died). Tear it
+                    # down here rather than just latching ``alive`` False:
+                    # nothing else will. ``close`` runs only when the user
+                    # closes the pane, and the next ``ensure_started``
+                    # overwrites this ``PtyProcess`` wholesale — either way
+                    # the master fd and the unreaped child would be
+                    # unreachable. ``terminate`` skips the SIGTERM now that
+                    # ``alive`` is False and does the reap + close.
                     self.pty.alive = False
+                    self.pty.terminate()
                 break
             var span = Span[UInt8, origin_of(scratch)](
                 unsafe_ptr=scratch.unsafe_ptr(), length=n,
