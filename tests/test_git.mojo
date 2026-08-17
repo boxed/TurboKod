@@ -61,7 +61,7 @@ from turbokod.highlight import (
     highlight_decorator_attr, highlight_ident_attr, highlight_string_attr
 )
 from turbokod.onig import onig_global_init, onig_tracked_count
-from turbokod.posix import wall_clock_ms, which
+from turbokod.posix import kill_pid, wall_clock_ms, which
 from turbokod.config import WRAP_NONE
 from turbokod.events import (
     Event, KEY_BACKSPACE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME,
@@ -3516,6 +3516,32 @@ def test_git_view_overlay_editor_releases_its_find_regex() raises:
     assert_equal(onig_tracked_count(), live)
 
 
+def test_local_changes_release_stops_an_in_flight_git_child() raises:
+    """``release`` is the window-is-going-away path, so it has to stop the
+    git child too.
+
+    ``git_runner`` is a second ``InstallRunner`` alongside the one
+    ``Desktop`` owns for installs, so ``Desktop.shutdown``'s
+    ``install_runner.terminate()`` never reached it: closing a window
+    during a push or pull to a slow remote left the git child running
+    with our three pipe descriptors held. ``kill(pid, 0)`` failing is
+    what proves it was reaped rather than merely signalled — a zombie
+    would still answer.
+    """
+    var lc = _local_changes_with_branches()
+    lc.sel_branch = 1                       # feature-x
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(Event.key_event(KEY_SPACE), screen, registry)
+    assert_true(lc.git_runner.is_active())
+    var pid = lc.git_runner.process.pid
+    assert_true(pid > 0)
+    lc.release()
+    assert_false(lc.git_runner.is_active())
+    assert_true(Int(kill_pid(pid, Int32(0))) != 0)
+    registry.release()
+
+
 def main() raises:
     setup_test_env()
     test_git_view_overlay_editor_releases_its_find_regex()
@@ -3618,4 +3644,5 @@ def main() raises:
     test_reword_editor_supports_mouse_selection_and_undo()
     test_local_changes_reword_head_amends_the_message()
     test_local_changes_reword_older_commit_keeps_its_children()
-    print("git: 96 tests passed")
+    test_local_changes_release_stops_an_in_flight_git_child()
+    print("git: 97 tests passed")

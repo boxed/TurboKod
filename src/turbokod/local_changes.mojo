@@ -1545,12 +1545,19 @@ struct LocalChanges(Movable):
         self._refresh_full()
 
     def release(mut self):
-        """Teardown: free the compiled git-output patterns.
+        """Teardown: stop the git child, free the compiled git-output
+        patterns.
 
         Separate from ``close`` — closing the view is a UI state change
         the user can undo by reopening, and dropping the matchers there
         would recompile them on every open. This is the window-is-going-
         away path (``Desktop.shutdown``).
+
+        ``git_runner`` is a second ``InstallRunner`` alongside the one
+        ``Desktop`` owns for LSP/docs installs, so ``shutdown``'s
+        ``install_runner.terminate()`` doesn't reach it: a window closed
+        during a push or pull to a slow remote left the git child running
+        with its three pipe descriptors held.
 
         The commit-message editor goes too: ``Desktop.shutdown`` releases
         the search cache of every *window's* editor, and this one isn't a
@@ -1559,6 +1566,7 @@ struct LocalChanges(Movable):
         preventative rather than a live leak, but it costs one call and
         the alternative is a stranded handle the moment Find is wired
         into the reword box."""
+        self.git_runner.terminate()
         self._output_matchers.release()
         self.overlay_editor.release_search_cache()
 
