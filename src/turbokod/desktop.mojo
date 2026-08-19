@@ -49,8 +49,9 @@ from .clipboard import clipboard_copy, clipboard_paste
 from .open_url import open_url
 from .config import (
     MAX_FONT_SIZE, MIN_FONT_SIZE, OnSaveAction,
-    TurbokodConfig, WRAP_NONE, default_font_label,
-    load_config, record_recent_file, record_recent_project, save_config,
+    TurbokodConfig, WRAP_NONE, config_file_stamp, default_font_label,
+    load_config, lsp_overrides_equal, merge_config, record_recent_file,
+    record_recent_project, save_config, save_config_merged, try_read_config,
 )
 from .diff import (
     DIFF_ROW_REMOVED, DiffRow, build_diff_rows, diff_row_emphasis,
@@ -544,6 +545,11 @@ comptime _GIT_DIRTY_POLL_INTERVAL_MS = 2000
 # same): the full blink period is twice this. 530 ms matches the common
 # editor default. Only consulted when ``config.cursor_blink`` is on.
 comptime _CARET_BLINK_HALF_MS = 530
+# Throttle for re-stat'ing ``~/.config/turbokod/config.json`` to pick up a
+# settings change made by another window or another turbokod process (see
+# ``_poll_config_file``). Half a second: settings are changed by hand, so
+# this only has to beat human patience, and the check is one ``stat``.
+comptime _CONFIG_POLL_MS = 500
 
 # When ESC fires at the top level (no menu open, no prompt active), the
 # Desktop returns this so the app can decide whether to quit, ignore, etc.
@@ -1361,6 +1367,29 @@ struct Desktop(Movable):
     # the user's real settings. Gated on by every ``save_config`` call site.
     # ``True`` by default (fresh process / no file / clean load all persist).
     var config_persistable: Bool
+    # ``config`` as it last stood on disk, from our own read or our own
+    # write. It's the base of the three-way merge in ``_persist_config``:
+    # a field differing from it is one *we* changed, so it survives the
+    # write while every other field takes whatever the file holds now.
+    #
+    # This exists because the config has many writers — one Desktop per
+    # window plus the chrome Desktop, and one per ``tk-tui`` process — and
+    # each writes the whole file. Before the merge, a window that had been
+    # open since before a setting changed reverted that setting the moment
+    # anything made it save (switching files persists the recents list, so
+    # that was constant).
+    var _config_baseline: TurbokodConfig
+    # Set by ``load_config_from_disk``: this Desktop's config came from the
+    # file, so ``_config_baseline`` is a real merge base and it's worth
+    # watching the file for changes by others. ``__init__`` deliberately
+    # doesn't load, so a test-constructed Desktop neither polls nor merges
+    # and keeps its deterministic defaults.
+    var _config_from_disk: Bool
+    # ``stat`` of the config file as of our last read/write, for spotting a
+    # write by another window or process. Size is ``-1`` until we've looked.
+    var _config_stamp_mtime: Int64
+    var _config_stamp_size: Int64
+    var _last_config_poll_ms: Int
     # Per-project run/debug targets, loaded from
     # ``<project>/.turbokod/targets.json`` when ``_set_project`` runs.
     # Empty (no targets) when no project is open. The active index
@@ -1682,6 +1711,11 @@ struct Desktop(Movable):
         # to be (e.g. ``tab_bar`` changes the workspace height by a row).
         self.config = TurbokodConfig()
         self.config_persistable = True
+        self._config_baseline = TurbokodConfig()
+        self._config_from_disk = False
+        self._config_stamp_mtime = Int64(0)
+        self._config_stamp_size = Int64(-1)
+        self._last_config_poll_ms = 0
         self.targets = ProjectTargets()
         self._last_screen = Rect.empty()
         self.run_session = RunSession()
@@ -5294,6 +5328,11 @@ struct Desktop(Movable):
         an interactive ``MergeView`` opened over it — one at a time, with
         the rest queued in ``pending_merge_queue``.
         """
+        # The global config is an out-of-band write like any other, so it
+        # gets picked up here too — this is the one per-frame hook both
+        # frontends run, and the only one the window-less chrome Desktop
+        # that drives the native menu bar ever gets.
+        self._poll_config_file()
         self._close_deleted_file_windows()
         var conflicts = self.windows.check_external_changes()
         for k in range(len(conflicts)):
@@ -5484,6 +5523,11 @@ struct Desktop(Movable):
         # Read the flag before consuming ``config`` out of ``loaded``.
         self.config_persistable = loaded.persistable
         self.config = loaded.config.copy()
+        # Baseline for the three-way merge on save, and start watching the
+        # file so a change by another window / process reaches this one.
+        self._config_baseline = loaded.config.copy()
+        self._refresh_config_stamp()
+        self._config_from_disk = True
         # Apply the saved theme (or the default if the name is unknown).
         self.active_theme = theme_by_name(self.config.theme)
         self.theme_version += 1
@@ -5501,13 +5545,109 @@ struct Desktop(Movable):
         if not self.project:
             self._reset_no_project_menu()
 
-    def _persist_config(self):
+    def _refresh_config_stamp(mut self):
+        """Record the config file's ``stat`` as of right now, so the watcher
+        only reacts to writes that aren't ours."""
+        var info = config_file_stamp()
+        if not info.ok:
+            self._config_stamp_mtime = Int64(0)
+            self._config_stamp_size = Int64(-1)
+            return
+        self._config_stamp_mtime = info.mtime_sec
+        self._config_stamp_size = info.size
+
+    def _adopt_config(mut self, var merged: TurbokodConfig):
+        """Install ``merged`` as both the live config and the merge
+        baseline, and apply the bits that don't re-derive themselves each
+        frame.
+
+        ``_apply_view_config`` already pushes the per-editor toggles every
+        paint, so those need nothing here. The theme and the LSP routing
+        are the two that are computed once on change, so each is re-derived
+        only when its input actually moved — a poll that adopts an
+        unrelated change mustn't bump ``theme_version`` (the host would
+        refetch the palette) or rebuild the language-server specs.
+        """
+        var theme_changed = merged.theme != self.config.theme
+        var lsp_changed = not lsp_overrides_equal(
+            merged.language_servers, self.config.language_servers,
+        )
+        self.config = merged.copy()
+        self._config_baseline = merged.copy()
+        self._refresh_config_stamp()
+        self._recent_files = self.config.recent_files.copy()
+        if theme_changed:
+            self.active_theme = theme_by_name(self.config.theme)
+            self.theme_version += 1
+        if lsp_changed:
+            self._rebuild_lsp_specs()
+
+    def _persist_config(mut self):
         """Write ``self.config`` to disk — unless a failed load left us
         holding defaults over an unreadable original we couldn't move aside.
-        Centralizes the persistability gate so no save site can forget it."""
+        Centralizes the persistability gate so no save site can forget it.
+
+        The write is a locked read-merge-write (``save_config_merged``), so
+        the fields *we* changed land without reverting what another window
+        or another turbokod process changed meanwhile. We adopt the merged
+        result, which is how those other changes arrive here.
+        """
         if not self.config_persistable:
             return
-        _ = save_config(self.config)
+        if not self._config_from_disk:
+            # We never read the file, so ``_config_baseline`` is defaults
+            # rather than "what the file held when we last looked". Merging
+            # against that reads every field as unchanged and would adopt
+            # the whole file over our state. Only a Desktop built straight
+            # from ``__init__`` gets here — i.e. tests, which deliberately
+            # keep deterministic defaults; every frontend calls
+            # ``load_config_from_disk`` first.
+            _ = save_config(self.config)
+            return
+        var saved = save_config_merged(self.config, self._config_baseline)
+        if not saved.ok:
+            return
+        self._adopt_config(saved.config.copy())
+
+    def _poll_config_file(mut self):
+        """Pick up config changes written by another window or another
+        turbokod process.
+
+        Settings are global to the app, so a toggle in one window has to
+        reach the others — and with several processes (the native app plus
+        any number of ``tk-tui`` sessions) the file is the only channel
+        they share. Throttled and gated on a cheap ``stat``, so the steady
+        state is one syscall every ``_CONFIG_POLL_MS``.
+
+        Skipped while a Settings window is open: adopting a change
+        underneath a live dialog would fight whatever the user is
+        currently editing there. The merge on save covers that window.
+        """
+        if not self._config_from_disk:
+            return
+        if self.settings.active or self.project_settings.active:
+            return
+        var now = monotonic_ms()
+        if now - self._last_config_poll_ms < _CONFIG_POLL_MS:
+            return
+        self._last_config_poll_ms = now
+        var info = config_file_stamp()
+        if not info.ok:
+            return
+        if info.mtime_sec == self._config_stamp_mtime \
+                and info.size == self._config_stamp_size:
+            return
+        var current = try_read_config()
+        if not current:
+            # Unreadable right now (mid-write by someone else, or corrupt).
+            # Leave the stamp alone so we retry rather than treating this
+            # state as seen, and never adopt defaults over a live config.
+            return
+        # Anything we've changed but not yet written still wins — normally
+        # nothing, since every setting persists as it's changed.
+        self._adopt_config(
+            merge_config(current.value(), self.config, self._config_baseline),
+        )
 
     def set_theme(mut self, name: String):
         """Switch the active color theme. Updates ``config.theme`` (so the

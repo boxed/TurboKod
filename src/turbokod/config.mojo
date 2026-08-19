@@ -10,9 +10,10 @@ theme, font, and more. Other settings can join later by extending
 ``TurbokodConfig`` plus the load/save round-trip.
 """
 
+from std.collections.optional import Optional
 from std.ffi import external_call
 
-from .file_io import read_file, rename_path, stat_file, write_file
+from .file_io import FileInfo, read_file, rename_path, stat_file, write_file
 from .json import (
     JsonValue, encode_json, json_array, json_bool, json_int, json_object,
     json_str, json_get_bool, json_get_int, json_get_string,
@@ -435,184 +436,215 @@ def _on_load_failed(path: String) -> ConfigLoad:
     return ConfigLoad(TurbokodConfig(), moved)
 
 
+def _config_from_json(root: JsonValue) raises -> TurbokodConfig:
+    """Parse a config object into a ``TurbokodConfig``.
+
+    Raises on anything it can't read, and only ever returns a *fully*
+    parsed config — a mid-parse error must not yield a half-merged hybrid
+    of file values and defaults. Callers decide what a failure means:
+    ``load_config`` moves the file aside for recovery, while the
+    merge-on-save and change-watcher paths just skip this round.
+    """
+    var cfg = TurbokodConfig()
+    if not root.is_object():
+        raise Error("config: root is not a JSON object")
+    cfg.line_numbers = json_get_bool(
+        root, String("line_numbers"), cfg.line_numbers,
+    )
+    # ``wrap_mode`` (int) is authoritative; fall back to the legacy
+    # ``soft_wrap`` bool so configs written by older builds still wrap.
+    var legacy_soft = WRAP_SOFT if json_get_bool(
+        root, String("soft_wrap"), False,
+    ) else WRAP_NONE
+    cfg.wrap_mode = json_get_int(
+        root, String("wrap_mode"), legacy_soft,
+    )
+    cfg.smart_wrap_comma_threshold = json_get_int(
+        root, String("smart_wrap_comma_threshold"),
+        cfg.smart_wrap_comma_threshold,
+    )
+    cfg.git_changes = json_get_bool(
+        root, String("git_changes"), cfg.git_changes,
+    )
+    cfg.tab_bar = json_get_bool(root, String("tab_bar"), cfg.tab_bar)
+    cfg.minimap = json_get_bool(root, String("minimap"), cfg.minimap)
+    cfg.sticky_scroll = json_get_bool(
+        root, String("sticky_scroll"), cfg.sticky_scroll,
+    )
+    cfg.auto_save = json_get_bool(
+        root, String("auto_save"), cfg.auto_save,
+    )
+    cfg.trim_trailing_whitespace = json_get_bool(
+        root, String("trim_trailing_whitespace"),
+        cfg.trim_trailing_whitespace,
+    )
+    cfg.ensure_final_newline = json_get_bool(
+        root, String("ensure_final_newline"),
+        cfg.ensure_final_newline,
+    )
+    cfg.compress_kwargs = json_get_bool(
+        root, String("compress_kwargs"), cfg.compress_kwargs,
+    )
+    cfg.cursor_blink = json_get_bool(
+        root, String("cursor_blink"), cfg.cursor_blink,
+    )
+    cfg.lsp_format_on_save = json_get_bool(
+        root, String("lsp_format_on_save"), cfg.lsp_format_on_save,
+    )
+    cfg.lsp_signature_help = json_get_bool(
+        root, String("lsp_signature_help"), cfg.lsp_signature_help,
+    )
+    cfg.lsp_document_highlight = json_get_bool(
+        root, String("lsp_document_highlight"),
+        cfg.lsp_document_highlight,
+    )
+    cfg.lsp_document_links = json_get_bool(
+        root, String("lsp_document_links"), cfg.lsp_document_links,
+    )
+    cfg.lsp_inlay_hints = json_get_bool(
+        root, String("lsp_inlay_hints"), cfg.lsp_inlay_hints,
+    )
+    cfg.lsp_code_lens = json_get_bool(
+        root, String("lsp_code_lens"), cfg.lsp_code_lens,
+    )
+    cfg.lsp_document_colors = json_get_bool(
+        root, String("lsp_document_colors"), cfg.lsp_document_colors,
+    )
+    cfg.lsp_linked_editing = json_get_bool(
+        root, String("lsp_linked_editing"), cfg.lsp_linked_editing,
+    )
+    cfg.lsp_server_progress = json_get_bool(
+        root, String("lsp_server_progress"), cfg.lsp_server_progress,
+    )
+    var theme_v = json_get_string(root, String("theme"))
+    if len(theme_v.as_bytes()) > 0:
+        cfg.theme = theme_v
+    cfg.font = json_get_string(root, String("font"))
+    cfg.font_size = json_get_int(
+        root, String("font_size"), cfg.font_size,
+    )
+    # 0 means "use the default"; any explicit size is clamped to the
+    # same range the stepper / set_font_size enforce, so a corrupt or
+    # hand-edited config can't briefly push a negative or absurd size
+    # to the host at startup.
+    if cfg.font_size != 0:
+        if cfg.font_size < MIN_FONT_SIZE:
+            cfg.font_size = MIN_FONT_SIZE
+        elif cfg.font_size > MAX_FONT_SIZE:
+            cfg.font_size = MAX_FONT_SIZE
+    cfg.max_open_windows = json_get_int(
+        root, String("max_open_windows"), cfg.max_open_windows,
+    )
+    # Negative is meaningless — fold it into "no limit" (0) so a
+    # corrupt or hand-edited config can't wedge the cap below zero.
+    if cfg.max_open_windows < 0:
+        cfg.max_open_windows = 0
+    cfg.recent_projects = json_get_string_array(
+        root, String("recent_projects"),
+    )
+    cfg.recent_files = json_get_string_array(
+        root, String("recent_files"),
+    )
+    var osa = root.object_get(String("on_save_actions"))
+    if osa and osa.value().is_array():
+        var arr = osa.value().copy()
+        for i in range(arr.array_len()):
+            var item = arr.array_at(i)
+            if not item.is_object():
+                continue
+            var act = OnSaveAction()
+            act.language_id = json_get_string(item, String("language_id"))
+            act.program = json_get_string(item, String("program"))
+            act.args = json_get_string_array(item, String("args"))
+            act.cwd = json_get_string(item, String("cwd"))
+            cfg.on_save_actions.append(act^)
+    var lsv = root.object_get(String("language_servers"))
+    if lsv and lsv.value().is_array():
+        var arr = lsv.value().copy()
+        for i in range(arr.array_len()):
+            var item = arr.array_at(i)
+            if not item.is_object():
+                continue
+            var ov = LanguageServerOverride()
+            ov.language_id = json_get_string(item, String("language_id"))
+            if len(ov.language_id.as_bytes()) == 0:
+                continue
+            ov.file_types = json_get_string_array(
+                item, String("file_types"),
+            )
+            var argvs_v = item.object_get(String("argvs"))
+            if argvs_v and argvs_v.value().is_array():
+                var aa = argvs_v.value().copy()
+                for k in range(aa.array_len()):
+                    var inner = aa.array_at(k)
+                    if not inner.is_array():
+                        continue
+                    var argv = List[String]()
+                    for m in range(inner.array_len()):
+                        var s = inner.array_at(m)
+                        if s.is_string():
+                            argv.append(s.as_str())
+                    if len(argv) > 0:
+                        ov.argvs.append(argv^)
+            cfg.language_servers.append(ov^)
+    return cfg^
+
+
+def try_read_config() -> Optional[TurbokodConfig]:
+    """Non-destructive read of the config file. ``None`` when there is no
+    file, or it can't be read or parsed.
+
+    Unlike ``load_config`` this never moves a bad file aside. It backs the
+    two paths that run continuously — the merge in ``save_config_merged``
+    and ``Desktop``'s change watcher — and neither may perform one-shot
+    recovery as a side effect of a routine poll.
+    """
+    var path = _config_path()
+    if len(path.as_bytes()) == 0:
+        return Optional[TurbokodConfig]()
+    if not stat_file(path).ok:
+        return Optional[TurbokodConfig]()
+    try:
+        var cfg = _config_from_json(parse_json(read_file(path)))
+        return Optional[TurbokodConfig](cfg^)
+    except:
+        return Optional[TurbokodConfig]()
+
+
+def config_file_stamp() -> FileInfo:
+    """``stat`` of the config file, used by the change watcher to spot a
+    write by another window or another turbokod process. ``ok=False``
+    when there's no ``$HOME`` or no file yet."""
+    var path = _config_path()
+    if len(path.as_bytes()) == 0:
+        return FileInfo(Int64(0), Int64(0), UInt32(0), False)
+    return stat_file(path)
+
+
 def load_config() -> ConfigLoad:
     """Load the saved config. See ``ConfigLoad`` for why this returns a
     persistability flag rather than a bare config — a failed read must not
     be laundered into a destructive save-back of defaults."""
-    var cfg = TurbokodConfig()
     var path = _config_path()
     if len(path.as_bytes()) == 0:
-        return ConfigLoad(cfg^, True)
-    var info = stat_file(path)
-    if not info.ok:
+        return ConfigLoad(TurbokodConfig(), True)
+    if not stat_file(path).ok:
         # Fresh install — no file yet. Writing defaults later is correct.
-        return ConfigLoad(cfg^, True)
-    # The file exists. Parse into this scratch config and only return it on
-    # *full* success — a mid-parse error must yield clean defaults, not a
-    # half-merged hybrid of file values and defaults.
+        return ConfigLoad(TurbokodConfig(), True)
     try:
-        var text = read_file(path)
-        var root = parse_json(text)
-        if not root.is_object():
-            return _on_load_failed(path)
-        cfg.line_numbers = json_get_bool(
-            root, String("line_numbers"), cfg.line_numbers,
-        )
-        # ``wrap_mode`` (int) is authoritative; fall back to the legacy
-        # ``soft_wrap`` bool so configs written by older builds still wrap.
-        var legacy_soft = WRAP_SOFT if json_get_bool(
-            root, String("soft_wrap"), False,
-        ) else WRAP_NONE
-        cfg.wrap_mode = json_get_int(
-            root, String("wrap_mode"), legacy_soft,
-        )
-        cfg.smart_wrap_comma_threshold = json_get_int(
-            root, String("smart_wrap_comma_threshold"),
-            cfg.smart_wrap_comma_threshold,
-        )
-        cfg.git_changes = json_get_bool(
-            root, String("git_changes"), cfg.git_changes,
-        )
-        cfg.tab_bar = json_get_bool(root, String("tab_bar"), cfg.tab_bar)
-        cfg.minimap = json_get_bool(root, String("minimap"), cfg.minimap)
-        cfg.sticky_scroll = json_get_bool(
-            root, String("sticky_scroll"), cfg.sticky_scroll,
-        )
-        cfg.auto_save = json_get_bool(
-            root, String("auto_save"), cfg.auto_save,
-        )
-        cfg.trim_trailing_whitespace = json_get_bool(
-            root, String("trim_trailing_whitespace"),
-            cfg.trim_trailing_whitespace,
-        )
-        cfg.ensure_final_newline = json_get_bool(
-            root, String("ensure_final_newline"),
-            cfg.ensure_final_newline,
-        )
-        cfg.compress_kwargs = json_get_bool(
-            root, String("compress_kwargs"), cfg.compress_kwargs,
-        )
-        cfg.cursor_blink = json_get_bool(
-            root, String("cursor_blink"), cfg.cursor_blink,
-        )
-        cfg.lsp_format_on_save = json_get_bool(
-            root, String("lsp_format_on_save"), cfg.lsp_format_on_save,
-        )
-        cfg.lsp_signature_help = json_get_bool(
-            root, String("lsp_signature_help"), cfg.lsp_signature_help,
-        )
-        cfg.lsp_document_highlight = json_get_bool(
-            root, String("lsp_document_highlight"),
-            cfg.lsp_document_highlight,
-        )
-        cfg.lsp_document_links = json_get_bool(
-            root, String("lsp_document_links"), cfg.lsp_document_links,
-        )
-        cfg.lsp_inlay_hints = json_get_bool(
-            root, String("lsp_inlay_hints"), cfg.lsp_inlay_hints,
-        )
-        cfg.lsp_code_lens = json_get_bool(
-            root, String("lsp_code_lens"), cfg.lsp_code_lens,
-        )
-        cfg.lsp_document_colors = json_get_bool(
-            root, String("lsp_document_colors"), cfg.lsp_document_colors,
-        )
-        cfg.lsp_linked_editing = json_get_bool(
-            root, String("lsp_linked_editing"), cfg.lsp_linked_editing,
-        )
-        cfg.lsp_server_progress = json_get_bool(
-            root, String("lsp_server_progress"), cfg.lsp_server_progress,
-        )
-        var theme_v = json_get_string(root, String("theme"))
-        if len(theme_v.as_bytes()) > 0:
-            cfg.theme = theme_v
-        cfg.font = json_get_string(root, String("font"))
-        cfg.font_size = json_get_int(
-            root, String("font_size"), cfg.font_size,
-        )
-        # 0 means "use the default"; any explicit size is clamped to the
-        # same range the stepper / set_font_size enforce, so a corrupt or
-        # hand-edited config can't briefly push a negative or absurd size
-        # to the host at startup.
-        if cfg.font_size != 0:
-            if cfg.font_size < MIN_FONT_SIZE:
-                cfg.font_size = MIN_FONT_SIZE
-            elif cfg.font_size > MAX_FONT_SIZE:
-                cfg.font_size = MAX_FONT_SIZE
-        cfg.max_open_windows = json_get_int(
-            root, String("max_open_windows"), cfg.max_open_windows,
-        )
-        # Negative is meaningless — fold it into "no limit" (0) so a
-        # corrupt or hand-edited config can't wedge the cap below zero.
-        if cfg.max_open_windows < 0:
-            cfg.max_open_windows = 0
-        cfg.recent_projects = json_get_string_array(
-            root, String("recent_projects"),
-        )
-        cfg.recent_files = json_get_string_array(
-            root, String("recent_files"),
-        )
-        var osa = root.object_get(String("on_save_actions"))
-        if osa and osa.value().is_array():
-            var arr = osa.value().copy()
-            for i in range(arr.array_len()):
-                var item = arr.array_at(i)
-                if not item.is_object():
-                    continue
-                var act = OnSaveAction()
-                act.language_id = json_get_string(item, String("language_id"))
-                act.program = json_get_string(item, String("program"))
-                act.args = json_get_string_array(item, String("args"))
-                act.cwd = json_get_string(item, String("cwd"))
-                cfg.on_save_actions.append(act^)
-        var lsv = root.object_get(String("language_servers"))
-        if lsv and lsv.value().is_array():
-            var arr = lsv.value().copy()
-            for i in range(arr.array_len()):
-                var item = arr.array_at(i)
-                if not item.is_object():
-                    continue
-                var ov = LanguageServerOverride()
-                ov.language_id = json_get_string(item, String("language_id"))
-                if len(ov.language_id.as_bytes()) == 0:
-                    continue
-                ov.file_types = json_get_string_array(
-                    item, String("file_types"),
-                )
-                var argvs_v = item.object_get(String("argvs"))
-                if argvs_v and argvs_v.value().is_array():
-                    var aa = argvs_v.value().copy()
-                    for k in range(aa.array_len()):
-                        var inner = aa.array_at(k)
-                        if not inner.is_array():
-                            continue
-                        var argv = List[String]()
-                        for m in range(inner.array_len()):
-                            var s = inner.array_at(m)
-                            if s.is_string():
-                                argv.append(s.as_str())
-                        if len(argv) > 0:
-                            ov.argvs.append(argv^)
-                cfg.language_servers.append(ov^)
+        var cfg = _config_from_json(parse_json(read_file(path)))
+        return ConfigLoad(cfg^, True)
     except e:
         # The file exists but read/parse raised. Log, move it aside, and
         # return defaults that won't clobber the original (see ConfigLoad).
         print("config: load_config:", String(e))
         return _on_load_failed(path)
-    return ConfigLoad(cfg^, True)
 
 
-def save_config(config: TurbokodConfig) -> Bool:
-    """Write ``config`` to ``~/.config/turbokod/config.json``. Returns
-    True on success. Creates ``~/.config`` and ``~/.config/turbokod``
-    if they don't exist yet."""
-    var path = _config_path()
-    if len(path.as_bytes()) == 0:
-        return False
-    var home = getenv_value(String("HOME"))
-    if len(home.as_bytes()) > 0:
-        _ensure_dir(home + String("/.config"))
-    _ensure_dir(_config_dir())
+def _config_to_json(config: TurbokodConfig) -> JsonValue:
+    """Serialize a config to the JSON object written to disk. Split out of
+    ``save_config`` so the merge path can round-trip through the same
+    encoding the loader parses."""
     var root = json_object()
     root.put(String("line_numbers"), json_bool(config.line_numbers))
     root.put(String("wrap_mode"), json_int(config.wrap_mode))
@@ -706,4 +738,245 @@ def save_config(config: TurbokodConfig) -> Bool:
         obj.put(String("argvs"), aa^)
         lsv.append(obj^)
     root.put(String("language_servers"), lsv^)
-    return write_file(path, encode_json(root) + String("\n"))
+    return root^
+
+
+def _write_config(config: TurbokodConfig) -> Bool:
+    """Encode and atomically write ``config``, creating ``~/.config`` and
+    ``~/.config/turbokod`` if they don't exist yet. ``write_file`` does the
+    temp-file + ``rename(2)`` dance, so a failed write can't truncate the
+    existing config."""
+    var path = _config_path()
+    if len(path.as_bytes()) == 0:
+        return False
+    var home = getenv_value(String("HOME"))
+    if len(home.as_bytes()) > 0:
+        _ensure_dir(home + String("/.config"))
+    _ensure_dir(_config_dir())
+    return write_file(path, encode_json(_config_to_json(config)) + String("\n"))
+
+
+def save_config(config: TurbokodConfig) -> Bool:
+    """Write ``config`` to ``~/.config/turbokod/config.json``, replacing
+    whatever is there. Returns True on success.
+
+    This is the unconditional overwrite. Anything holding a config that
+    was loaded earlier — i.e. every ``Desktop`` — must go through
+    ``save_config_merged`` instead, or it writes a stale whole-file
+    snapshot over changes made since. See ``merge_config``.
+    """
+    return _write_config(config)
+
+
+# --- concurrent writers -------------------------------------------------
+#
+# The config file has many writers: one ``Desktop`` per window in the
+# native app (plus the always-alive chrome Desktop that drives the menu
+# bar with no window open), and one per ``tk-tui`` process. Each holds its
+# own ``TurbokodConfig`` loaded when it was created, and each writes the
+# *whole* file. Without the three-way merge below, the last writer won —
+# so changing the theme in one window and then merely switching files in
+# another (which persists the recents list) reverted the theme.
+
+
+# ``flock(2)`` operations — same values on Darwin and Linux.
+comptime _LOCK_EX = Int32(2)
+comptime _LOCK_UN = Int32(8)
+
+
+def _lock_path() -> String:
+    var dir = _config_dir()
+    if len(dir.as_bytes()) == 0:
+        return String("")
+    return dir + String("/config.lock")
+
+
+def _acquire_config_lock() -> Int32:
+    """Take an exclusive ``flock`` on ``~/.config/turbokod/config.lock``,
+    returning the held descriptor or ``-1``.
+
+    This serializes the read-merge-write against other turbokod processes
+    (windows within one process are single-threaded, so they can't
+    interleave). Failing to lock is not fatal — we still merge and write,
+    we just lose the cross-process serialization, which is no worse than
+    the behavior before the lock existed.
+
+    ``creat(2)`` rather than ``open(2)`` because ``open`` is variadic and
+    so unreachable through ``external_call`` (the same reason
+    ``write_file`` uses it). Truncating the lock file is harmless: it is
+    always empty, the lock lives in the kernel and not in the bytes.
+    """
+    var path = _lock_path()
+    if len(path.as_bytes()) == 0:
+        return Int32(-1)
+    var c_path = path + String("\0")
+    var fd = external_call["creat", Int32](c_path.unsafe_ptr(), Int32(0o644))
+    if fd < 0:
+        return Int32(-1)
+    if external_call["flock", Int32](fd, _LOCK_EX) != Int32(0):
+        _ = external_call["close", Int32](fd)
+        return Int32(-1)
+    return fd
+
+
+def _release_config_lock(fd: Int32):
+    if fd < 0:
+        return
+    _ = external_call["flock", Int32](fd, _LOCK_UN)
+    _ = external_call["close", Int32](fd)
+
+
+def _str_lists_equal(a: List[String], b: List[String]) -> Bool:
+    if len(a) != len(b):
+        return False
+    for i in range(len(a)):
+        if a[i] != b[i]:
+            return False
+    return True
+
+
+def lsp_overrides_equal(
+    a: List[LanguageServerOverride], b: List[LanguageServerOverride],
+) -> Bool:
+    """Structural equality for the per-language LSP overrides. Used to
+    decide whether adopting a merged config has to rebuild the language
+    server routing."""
+    if len(a) != len(b):
+        return False
+    for i in range(len(a)):
+        if a[i].language_id != b[i].language_id:
+            return False
+        if not _str_lists_equal(a[i].file_types, b[i].file_types):
+            return False
+        if len(a[i].argvs) != len(b[i].argvs):
+            return False
+        for k in range(len(a[i].argvs)):
+            if not _str_lists_equal(a[i].argvs[k], b[i].argvs[k]):
+                return False
+    return True
+
+
+def _merge_recents(
+    disk: List[String], mine: List[String], base: List[String], cap: Int,
+) -> List[String]:
+    """Merge one most-recent-first path list.
+
+    Untouched by us → take the file's copy wholesale. Touched → keep our
+    order (our promotion is the newest event we know of) and append the
+    entries only the file has, so a path another window opened is
+    preserved rather than dropped.
+    """
+    if _str_lists_equal(mine, base):
+        return disk.copy()
+    var out = mine.copy()
+    for i in range(len(disk)):
+        var seen = False
+        for k in range(len(out)):
+            if out[k] == disk[i]:
+                seen = True
+                break
+        if not seen:
+            out.append(disk[i])
+    while len(out) > cap:
+        _ = out.pop(len(out) - 1)
+    return out^
+
+
+def _merge_json_objects(
+    disk: JsonValue, mine: JsonValue, base: JsonValue,
+) -> JsonValue:
+    """Key-wise three-way merge of two flat config objects.
+
+    A key whose value differs from the baseline is one we changed, so ours
+    wins; every other key keeps whatever the file holds. Values compare by
+    their encoding, which covers the nested arrays (``on_save_actions``,
+    ``language_servers``) with no per-field code.
+
+    Merging over the JSON rather than over ``TurbokodConfig``'s fields is
+    deliberate. A hand-written field-by-field merge is only correct while
+    somebody remembers to extend it: a field left out would resolve to
+    "unchanged" on every save, so the setting would be reverted the
+    instant it was written — silently, and only for the fields nobody
+    thought about. Driving it off the serializer means a field that
+    persists at all is merged too.
+    """
+    var out = disk.copy()
+    for i in range(mine.object_len()):
+        var key = mine.object_key_at(i)
+        var mine_v = mine.object_value_at(i)
+        var base_v = base.object_get(key)
+        if base_v and encode_json(base_v.value()) == encode_json(mine_v):
+            continue
+        out.put(key, mine_v^)
+    return out^
+
+
+def merge_config(
+    disk: TurbokodConfig, mine: TurbokodConfig, base: TurbokodConfig,
+) -> TurbokodConfig:
+    """Three-way merge of the config.
+
+    ``base`` is what *this* holder last read from (or wrote to) disk,
+    ``mine`` is its current in-memory state, and ``disk`` is what the file
+    holds now. Fields we changed win; everything else takes the on-disk
+    value. That is what lets another window's — or another process's —
+    change survive our write instead of being reverted by our stale
+    snapshot.
+
+    Simultaneous edits of the *same* field still resolve last-writer-wins.
+    The point is that editing *different* fields no longer conflicts, and
+    in this config nearly every field is a separate setting.
+    """
+    var merged = _merge_json_objects(
+        _config_to_json(disk), _config_to_json(mine), _config_to_json(base),
+    )
+    try:
+        var out = _config_from_json(merged)
+        # The recents are the one pair that merges rather than replaces:
+        # the generic key merge would drop the entries only the other
+        # writer has, and those are just as real as ours.
+        out.recent_projects = _merge_recents(
+            disk.recent_projects, mine.recent_projects, base.recent_projects,
+            _RECENT_PROJECTS_MAX,
+        )
+        out.recent_files = _merge_recents(
+            disk.recent_files, mine.recent_files, base.recent_files,
+            _RECENT_FILES_MAX,
+        )
+        return out^
+    except:
+        # Unreachable — we just built ``merged`` with the same encoder the
+        # parser round-trips. Keeping ours is the safe fallback regardless:
+        # it's what every save did before the merge existed.
+        return mine.copy()
+
+
+@fieldwise_init
+struct ConfigSave(Copyable, Movable):
+    """Result of ``save_config_merged``: whether the write landed, and the
+    config as it now stands on disk. Callers adopt ``config`` as both their
+    live config and their new merge baseline — it carries any change another
+    writer made that they hadn't seen yet."""
+    var ok: Bool
+    var config: TurbokodConfig
+
+
+def save_config_merged(
+    config: TurbokodConfig, baseline: TurbokodConfig,
+) -> ConfigSave:
+    """Persist ``config`` without clobbering concurrent writers.
+
+    Locks, re-reads the file, three-way merges our changes over it (see
+    ``merge_config``), and writes the result. An unreadable file on disk
+    falls back to writing ours verbatim — recovery of a corrupt config is
+    ``load_config``'s job, and refusing to save at all would leave the user
+    unable to change any setting.
+    """
+    var lock = _acquire_config_lock()
+    var merged = config.copy()
+    var current = try_read_config()
+    if current:
+        merged = merge_config(current.value(), config, baseline)
+    var ok = _write_config(merged)
+    _release_config_lock(lock)
+    return ConfigSave(ok, merged^)

@@ -37,7 +37,13 @@ from turbokod.git_changes import (
 from turbokod.highlight import GrammarRegistry, extension_of
 from turbokod.posix import which
 from turbokod.spell import Speller
-from turbokod.config import TurbokodConfig, load_config, save_config
+from turbokod.config import (
+    TurbokodConfig, _config_from_json, _config_to_json, load_config,
+    merge_config, save_config
+)
+from turbokod.json import (
+    JsonValue, encode_json, json_bool, json_int, json_object, json_str
+)
 from turbokod.settings import Settings
 from turbokod.window import (
     TitleCommand, _fit_title_path, hit_title_command, paint_title_commands
@@ -983,6 +989,178 @@ def test_corrupt_config_is_not_clobbered_with_defaults() raises:
     _ = delete_path(corrupt_glob)
 
 
+def test_merge_config_keeps_every_writers_change() raises:
+    """The three-way merge: a field we changed wins, a field we didn't takes
+    the on-disk value. That's what makes two writers editing two different
+    settings non-destructive."""
+    var base = TurbokodConfig()
+    base.theme = String("Turbo C++ 3.0")
+
+    # What we hold: the baseline with one field changed.
+    var mine = base.copy()
+    mine.line_numbers = not base.line_numbers
+
+    # What the file holds: the baseline with a *different* field changed,
+    # written by somebody else after we loaded.
+    var disk = base.copy()
+    disk.theme = String("Dracula")
+    disk.font_size = 21
+
+    var merged = merge_config(disk, mine, base)
+    assert_equal(merged.line_numbers, mine.line_numbers)   # ours survived
+    assert_equal(merged.theme, String("Dracula"))          # theirs survived
+    assert_equal(merged.font_size, 21)
+
+    # Recents merge rather than replace: ours keeps its order (our promotion
+    # is the newest event we know of) and their entry is appended, not lost.
+    var mine2 = base.copy()
+    mine2.recent_files.append(String("/tmp/ours.txt"))
+    var disk2 = base.copy()
+    disk2.recent_files.append(String("/tmp/theirs.txt"))
+    var merged2 = merge_config(disk2, mine2, base)
+    assert_equal(len(merged2.recent_files), 2)
+    assert_equal(merged2.recent_files[0], String("/tmp/ours.txt"))
+    assert_equal(merged2.recent_files[1], String("/tmp/theirs.txt"))
+
+
+def _flip_json(v: JsonValue) -> JsonValue:
+    """Return a value that differs from ``v``, whatever its type. Arrays get
+    both a string and an object appended so the same flip works for the
+    lists of paths and the lists of records."""
+    if v.is_bool():
+        return json_bool(not v.as_bool())
+    if v.is_int():
+        return json_int(v.as_int() + 1)
+    if v.is_string():
+        return json_str(v.as_str() + String("x"))
+    if v.is_array():
+        var out = v.copy()
+        out.append(json_str(String("/tmp/zz")))
+        var item = json_object()
+        item.put(String("language_id"), json_str(String("zz")))
+        item.put(String("program"), json_str(String("/bin/true")))
+        out.append(item^)
+        return out^
+    return v.copy()
+
+
+def test_merge_covers_every_persisted_field() raises:
+    """Every field that persists must also merge.
+
+    The merge is driven off the serialized keys precisely so it can't fall
+    behind ``TurbokodConfig``: a field a hand-written merge forgot would
+    read as "unchanged" on every save, so the setting would be reverted the
+    moment it was written. This walks the actual serialization and asserts a
+    change to *each* key survives a merge — so a rewrite back to a
+    field-by-field merge fails here instead of in someone's settings.
+    """
+    var base = TurbokodConfig()
+    var base_json = _config_to_json(base)
+    assert_true(base_json.object_len() > 20)    # sanity: we really walked it
+    var checked = 0
+    for i in range(base_json.object_len()):
+        var key = base_json.object_key_at(i)
+        var mutated_json = base_json.copy()
+        mutated_json.put(key, _flip_json(base_json.object_value_at(i)))
+        # Round-trip so clamping / validation applies to the mutation the
+        # same way it would to a real edit.
+        var mine = _config_from_json(mutated_json)
+        var expect = _config_to_json(mine)
+        var want = encode_json(expect.object_get(key).value())
+        if want == encode_json(base_json.object_value_at(i)):
+            # The flip didn't survive parsing (e.g. an entry of the wrong
+            # shape for that list) — nothing to assert for this key.
+            continue
+        checked += 1
+        # Nobody else touched the file: our change must land.
+        var merged = merge_config(base, mine, base)
+        assert_equal(
+            encode_json(_config_to_json(merged).object_get(key).value()), want,
+        )
+    assert_true(checked > 20)
+
+
+def test_second_window_does_not_revert_first_windows_setting() raises:
+    """Two Desktops (two windows, or two turbokod processes) each hold their
+    own config loaded when they were created, and each writes the whole
+    file. Before the merge, the *second* one to save reverted everything the
+    first had changed — and since switching files persists the recents list,
+    that happened constantly in normal use.
+    """
+    var home = String("/tmp/turbokod_test_home")
+    var path = home + String("/.config/turbokod/config.json")
+    _ = delete_path(path)
+
+    var seed = TurbokodConfig()
+    seed.theme = String("Turbo C++ 3.0")
+    seed.line_numbers = False
+    assert_true(save_config(seed))
+
+    # Both windows open, both read the same starting state.
+    var a = Desktop()
+    a.load_config_from_disk()
+    var b = Desktop()
+    b.load_config_from_disk()
+    assert_equal(b.config.theme, String("Turbo C++ 3.0"))
+
+    # Window A changes the theme and persists it.
+    a.set_theme(String("Dracula"))
+    a._persist_config()
+
+    # Window B now persists for an unrelated reason — a recents update, which
+    # is what merely clicking on another file does.
+    b.config.line_numbers = True
+    b._persist_config()
+
+    # Both changes are on disk. (Previously B's stale snapshot won and the
+    # theme was back to the seeded one.)
+    var final = load_config()
+    assert_equal(final.config.theme, String("Dracula"))
+    assert_true(final.config.line_numbers)
+    # ...and B adopted A's change as part of merging, so the two windows
+    # agree rather than drifting until the next restart.
+    assert_equal(b.config.theme, String("Dracula"))
+
+    a.shutdown()
+    b.shutdown()
+    _ = delete_path(path)
+
+
+def test_config_change_by_another_process_reaches_an_open_window() raises:
+    """Settings are global to the app, so a change made elsewhere — another
+    window, or a ``tk-tui`` session sharing the same config file — has to
+    reach an already-open Desktop without a restart."""
+    var home = String("/tmp/turbokod_test_home")
+    var path = home + String("/.config/turbokod/config.json")
+    _ = delete_path(path)
+
+    var seed = TurbokodConfig()
+    seed.theme = String("Turbo C++ 3.0")
+    seed.minimap = True
+    assert_true(save_config(seed))
+
+    var win = Desktop()
+    win.load_config_from_disk()
+    var version_before = win.theme_version
+
+    # Somebody else writes the file (different length, so the stat-based
+    # change check sees it even within the same wall-clock second).
+    var other = seed.copy()
+    other.theme = String("Dracula")
+    other.minimap = False
+    assert_true(save_config(other))
+
+    win._poll_config_file()
+
+    assert_equal(win.config.theme, String("Dracula"))
+    assert_false(win.config.minimap)
+    # The palette was actually rebuilt, so the frontends refetch it.
+    assert_true(win.theme_version > version_before)
+
+    win.shutdown()
+    _ = delete_path(path)
+
+
 def main() raises:
     setup_test_env()
     test_help_hotkeys_opens_readonly_reference()
@@ -1017,4 +1195,8 @@ def main() raises:
     test_restore_caps_to_most_recently_focused()
     test_discard_line_round_trip_against_real_git()
     test_corrupt_config_is_not_clobbered_with_defaults()
-    print("misc: 32 tests passed")
+    test_merge_config_keeps_every_writers_change()
+    test_merge_covers_every_persisted_field()
+    test_second_window_does_not_revert_first_windows_setting()
+    test_config_change_by_another_process_reaches_an_open_window()
+    print("misc: 36 tests passed")

@@ -110,6 +110,22 @@ struct JsonValue(Copyable, Movable, Deinitable):
     def object_has(self, key: String) -> Bool:
         return Bool(self.object_get(key))
 
+    def object_len(self) -> Int:
+        return len(self.obj_v) if self.is_object() else 0
+
+    def object_key_at(self, i: Int) -> String:
+        """Key of the ``i``-th member, in insertion order. Paired with
+        ``object_value_at`` this walks an object without knowing its keys
+        up front — what a generic merge over two objects needs."""
+        if not self.is_object() or i < 0 or i >= len(self.obj_v):
+            return String("")
+        return self.obj_v[i].key
+
+    def object_value_at(self, i: Int) -> JsonValue:
+        if not self.is_object() or i < 0 or i >= len(self.obj_v):
+            return json_null()
+        return self.obj_v[i].value.copy()
+
     # --- mutators (for object/array construction) --------------------
 
     def append(mut self, value: JsonValue):

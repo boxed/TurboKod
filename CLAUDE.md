@@ -184,6 +184,17 @@ Find and Replace (in-file and project-wide) go through **`LineSearcher`** in `se
 
 Full details, the correctness argument for folding UTF-8 in place, and the benchmarks (`bench/fold_bench.mojo`) in [docs/case-folding.md](docs/case-folding.md).
 
+## Settings are global, and the config file has many writers
+
+`~/.config/turbokod/config.json` (`config.mojo`) is one file with N writers: the native app builds **one `Desktop` per window** plus an always-alive chrome Desktop for the menu bar, and every `tk-tui` process adds another. Each holds its own `TurbokodConfig`, loaded when it was created, and each `_persist_config` writes the **whole** file. Saves are frequent and mostly invisible — merely switching files persists the recents list.
+
+So two rules:
+
+1. **Never write the config from a snapshot.** `Desktop._persist_config` goes through `save_config_merged`, which takes an exclusive `flock` on `config.lock`, re-reads the file, three-way merges (`merge_config`: a field differing from `_config_baseline` is one *we* changed and wins; every other field keeps the on-disk value), writes, and hands back the merged config to adopt. The bare `save_config` is the unconditional overwrite — only for a holder with no baseline, i.e. a test-constructed `Desktop` that never called `load_config_from_disk`.
+2. **Settings are global, so changes have to propagate.** `Desktop._poll_config_file` (from `process_external_changes`, the one per-frame hook both frontends run) re-stats the file every `_CONFIG_POLL_MS` and adopts a change made by another window or another process. An occluded window doesn't tick, but the tick precedes its next frame, so nothing stale is ever drawn. Skipped while a Settings window is open — the merge on save covers that window.
+
+`merge_config` is driven off the **serialized keys**, not a hand-written field list, and it must stay that way. A field-by-field merge is only correct while everyone remembers to extend it; a field left out reads as "unchanged" on every save, so the setting gets reverted the instant it's written — silently. `test_merge_covers_every_persisted_field` walks the serialization and fails if that ever regresses. Adding a config field therefore means touching `_config_to_json` + `_config_from_json` and nothing else.
+
 ## Themes
 
 A color theme (Settings ▸ Theme, default "Turbo C++ 3.0") retints **both**
