@@ -1868,6 +1868,128 @@ def test_stage_unstage_round_trip_against_real_git() raises:
     _rm_rf(dir)
 
 
+def test_fetch_git_status_expands_untracked_directories() raises:
+    """A brand-new folder must show up as one status row per file inside
+    it, not as a single collapsed ``dir/`` row.
+
+    Plain ``git status --porcelain`` collapses a wholly-untracked
+    directory, and a directory row is useless to the Local-changes view:
+    it has no diff, can't be opened, and hides how many files the folder
+    brought in. ``fetch_git_status`` passes ``--untracked-files=all`` to
+    prevent that; this pins the behavior. Skipped silently when git is
+    unavailable."""
+    var dir = _temp_path(String("_status_uall"))
+    _rm_rf(dir)
+    _ensure_dir(dir)
+    var init_args = List[String]()
+    init_args.append(String("init"))
+    init_args.append(String("-q"))
+    init_args.append(String("-b"))
+    init_args.append(String("main"))
+    if _run_git(dir, init_args^) != 0:
+        _rm_rf(dir)
+        return
+    var sub = join_path(dir, String("newdir"))
+    _ensure_dir(sub)
+    var nested = join_path(sub, String("nested"))
+    _ensure_dir(nested)
+    assert_true(write_file(join_path(sub, String("one.txt")), String("1\n")))
+    assert_true(write_file(join_path(sub, String("two.txt")), String("2\n")))
+    assert_true(
+        write_file(join_path(nested, String("three.txt")), String("3\n")),
+    )
+    var statuses = fetch_git_status(dir)
+    assert_equal(len(statuses), 3)
+    var seen_one = False
+    var seen_two = False
+    var seen_three = False
+    for i in range(len(statuses)):
+        # Every row is untracked ('?' in both columns) and names a file
+        # — no row may end in '/'.
+        assert_equal(Int(statuses[i].staged), 0x3F)
+        assert_equal(Int(statuses[i].worktree), 0x3F)
+        var pb = statuses[i].path.as_bytes()
+        assert_true(len(pb) > 0 and pb[len(pb) - 1] != 0x2F)
+        if statuses[i].path == String("newdir/one.txt"):
+            seen_one = True
+        if statuses[i].path == String("newdir/two.txt"):
+            seen_two = True
+        if statuses[i].path == String("newdir/nested/three.txt"):
+            seen_three = True
+    assert_true(seen_one)
+    assert_true(seen_two)
+    assert_true(seen_three)
+    _rm_rf(dir)
+
+
+def test_local_changes_files_panel_is_a_tree() raises:
+    """The Files panel shows changed paths as a tree: directory rows,
+    then their contents indented with basenames only — not one full-path
+    row per file. Pins three things: the tree ordering of ``files``
+    (dirs first at every level, then case-insensitive, so flat file
+    indices walk the painted tree top-to-bottom), the derived
+    ``file_rows`` (labels / indents / file back-references), and that
+    directory rows carry ``file_idx == -1``. Skipped silently when git
+    is unavailable."""
+    var dir = _temp_path(String("_files_tree"))
+    _rm_rf(dir)
+    _ensure_dir(dir)
+    var init_args = List[String]()
+    init_args.append(String("init"))
+    init_args.append(String("-q"))
+    init_args.append(String("-b"))
+    init_args.append(String("main"))
+    if _run_git(dir, init_args^) != 0:
+        _rm_rf(dir)
+        return
+    var sub = join_path(dir, String("newdir"))
+    _ensure_dir(sub)
+    var nested = join_path(sub, String("nested"))
+    _ensure_dir(nested)
+    assert_true(write_file(join_path(dir, String("a.txt")), String("a\n")))
+    assert_true(write_file(join_path(dir, String("zz.txt")), String("z\n")))
+    assert_true(write_file(join_path(sub, String("one.txt")), String("1\n")))
+    assert_true(write_file(join_path(sub, String("two.txt")), String("2\n")))
+    assert_true(
+        write_file(join_path(nested, String("three.txt")), String("3\n")),
+    )
+    var lc = LocalChanges()
+    lc.open(dir)
+    # Model order: newdir/ subtree first (dirs before files at the top
+    # level), nested/ before newdir's own files, then the root files.
+    assert_equal(len(lc.files), 5)
+    assert_equal(lc.files[0].path, String("newdir/nested/three.txt"))
+    assert_equal(lc.files[1].path, String("newdir/one.txt"))
+    assert_equal(lc.files[2].path, String("newdir/two.txt"))
+    assert_equal(lc.files[3].path, String("a.txt"))
+    assert_equal(lc.files[4].path, String("zz.txt"))
+    # Display rows: two directory headers, then basenames at their depth.
+    assert_equal(len(lc.file_rows), 7)
+    assert_equal(lc.file_rows[0].file_idx, -1)
+    assert_equal(lc.file_rows[0].indent, 0)
+    assert_equal(lc.file_rows[0].label, String("newdir/"))
+    assert_equal(lc.file_rows[1].file_idx, -1)
+    assert_equal(lc.file_rows[1].indent, 1)
+    assert_equal(lc.file_rows[1].label, String("nested/"))
+    assert_equal(lc.file_rows[2].file_idx, 0)
+    assert_equal(lc.file_rows[2].indent, 2)
+    assert_equal(lc.file_rows[2].label, String("three.txt"))
+    assert_equal(lc.file_rows[3].file_idx, 1)
+    assert_equal(lc.file_rows[3].indent, 1)
+    assert_equal(lc.file_rows[3].label, String("one.txt"))
+    assert_equal(lc.file_rows[4].file_idx, 2)
+    assert_equal(lc.file_rows[4].indent, 1)
+    assert_equal(lc.file_rows[4].label, String("two.txt"))
+    assert_equal(lc.file_rows[5].file_idx, 3)
+    assert_equal(lc.file_rows[5].indent, 0)
+    assert_equal(lc.file_rows[5].label, String("a.txt"))
+    assert_equal(lc.file_rows[6].file_idx, 4)
+    assert_equal(lc.file_rows[6].indent, 0)
+    assert_equal(lc.file_rows[6].label, String("zz.txt"))
+    lc.release()
+    _rm_rf(dir)
+
+
 def test_local_changes_untracked_file_shows_its_whole_contents() raises:
     """Selecting an untracked file must fill the Unstaged panel with the
     whole file as ``+`` rows.
@@ -3719,6 +3841,8 @@ def main() raises:
     test_git_state_mtimes_zero_for_non_repo()
     test_git_state_mtimes_nonzero_after_init_commit()
     test_stage_unstage_round_trip_against_real_git()
+    test_fetch_git_status_expands_untracked_directories()
+    test_local_changes_files_panel_is_a_tree()
     test_merge_commit_log_lists_the_commits_it_brought_in()
     test_merge_commit_info_panel_shows_merged_commits_section()
     test_review_mode_builds_changeset_model()
@@ -3734,4 +3858,4 @@ def main() raises:
     test_local_changes_reword_head_amends_the_message()
     test_local_changes_reword_older_commit_keeps_its_children()
     test_local_changes_release_stops_an_in_flight_git_child()
-    print("git: 97 tests passed")
+    print("git: 106 tests passed")

@@ -708,8 +708,10 @@ def compute_untracked_diff(project_root: String, rel_path: String) -> String:
     empty new file is.
 
     Empty string when the spawn fails, or when ``rel_path`` names a
-    directory: ``git status --porcelain`` collapses a wholly-untracked
-    directory to a single ``dir/`` entry, and a directory has no diff.
+    directory. ``fetch_git_status`` passes ``--untracked-files=all``
+    precisely so no collapsed ``dir/`` entry reaches here anymore, but
+    the guard stays as defense for other callers: a directory has no
+    diff.
     """
     if len(project_root.as_bytes()) == 0 or len(rel_path.as_bytes()) == 0:
         return String("")
@@ -744,13 +746,20 @@ struct GitFileStatus(ImplicitlyCopyable, Movable):
 
 
 def fetch_git_status(project_root: String) -> List[GitFileStatus]:
-    """Run ``git status --porcelain=v1 -z`` and parse one entry per row.
+    """Run ``git status --porcelain=v1 -z -uall`` and parse one entry
+    per row.
 
     The ``-z`` framing keeps paths unquoted and NUL-terminated, so a
     filename containing whitespace or a ``\\n`` survives intact. Renames
     and copies append a second NUL-terminated source path; we capture it
     in ``orig_path``. Empty list when git exits non-zero (not a repo,
     git missing, etc.).
+
+    ``--untracked-files=all`` stops git from collapsing a wholly-
+    untracked directory into a single ``dir/`` row: every row names an
+    actual file, so callers can stage / diff / open each one
+    individually. A directory row would have no diff, couldn't be
+    opened, and hid how many files a new folder actually brought in.
     """
     var out = List[GitFileStatus]()
     if len(project_root.as_bytes()) == 0:
@@ -759,6 +768,7 @@ def fetch_git_status(project_root: String) -> List[GitFileStatus]:
     args.append(String("status"))
     args.append(String("--porcelain=v1"))
     args.append(String("-z"))
+    args.append(String("--untracked-files=all"))
     var stdout = _git_stdout(project_root, args^)
     var b = stdout.as_bytes()
     var i = 0

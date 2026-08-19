@@ -97,7 +97,7 @@ from .highlight import (
 )
 from .output_links import extract_url_links
 from .painter import Painter
-from .file_io import join_path, read_file
+from .file_io import ci_less, join_path, read_file
 from .window import (
     DockChromeHit, DockedPanelStack,
     paint_window_title, paint_window_title_at,
@@ -267,6 +267,90 @@ struct FileEntry(ImplicitlyCopyable, Movable):
     var worktree: UInt8
     var staged_diff: String
     var unstaged_diff: String
+
+
+@fieldwise_init
+struct FileRow(ImplicitlyCopyable, Movable):
+    """One *display* row of the Files panel — the tree-shaped view over
+    the flat ``files`` list. A directory row (``file_idx == -1``) is
+    pure structure: it paints its component name at ``indent`` depth and
+    can't be selected. A file row carries the index of its ``FileEntry``
+    and shows just the basename, indented one level deeper than its
+    parent directory. ``files`` stays the model everywhere (selection,
+    staging, diffs are all file-index based); this list exists only for
+    painting, scrolling, and mouse hit-testing."""
+    var file_idx: Int
+    var indent: Int
+    var label: String
+
+
+def _path_components(path: String) -> List[String]:
+    """Split a repo-relative path on ``/``. Empty components (doubled
+    or trailing slashes — git doesn't emit them, but be safe) drop out."""
+    var out = List[String]()
+    var b = path.as_bytes()
+    var s = 0
+    for i in range(len(b)):
+        if b[i] == 0x2F:
+            if i > s:
+                out.append(String(StringSpan(unsafe_from_utf8=b[s:i])))
+            s = i + 1
+    if s < len(b):
+        out.append(String(StringSpan(unsafe_from_utf8=b[s:len(b)])))
+    return out^
+
+
+def _tree_order_less(a: List[String], b: List[String]) -> Bool:
+    """``True`` iff path ``a`` (as components) sorts before ``b`` in
+    tree-display order: compare component-by-component, and at the first
+    level they differ put directories before files, then order
+    case-insensitively — the same convention ``sort_directory_listing``
+    gives the project file tree, so the two views agree. A component is
+    "a directory" at level ``i`` when the path continues past it.
+    Case-insensitively-equal names fall through to "not less", which
+    keeps the insertion sort stable (git's own path order breaks the
+    tie)."""
+    var i = 0
+    while i < len(a) and i < len(b):
+        var a_dir = (i < len(a) - 1)
+        var b_dir = (i < len(b) - 1)
+        if a[i] == b[i]:
+            if a_dir != b_dir:
+                # Same name as both a directory and a file (can't
+                # coexist in a worktree, but renames can surface it):
+                # directory first, like everywhere else.
+                return a_dir
+            i += 1
+            continue
+        if a_dir != b_dir:
+            return a_dir
+        if ci_less(a[i], b[i]):
+            return True
+        if ci_less(b[i], a[i]):
+            return False
+        return False
+    return len(a) < len(b)
+
+
+def _sort_statuses_tree_order(mut statuses: List[GitFileStatus]):
+    """Reorder status rows in place into tree-display order (see
+    ``_tree_order_less``). The Files panel's flat ``files`` list is built
+    in this order so Up/Down over file indices walks the painted tree
+    top-to-bottom without any row↔file remapping. Insertion sort — the
+    list is a worktree's dirty files, small by construction."""
+    var comps = List[List[String]]()
+    for i in range(len(statuses)):
+        comps.append(_path_components(statuses[i].path))
+    for i in range(1, len(statuses)):
+        var j = i
+        while j > 0 and _tree_order_less(comps[j], comps[j - 1]):
+            var ts = statuses[j]
+            statuses[j] = statuses[j - 1]
+            statuses[j - 1] = ts^
+            var tc = comps[j].copy()
+            comps[j] = comps[j - 1].copy()
+            comps[j - 1] = tc^
+            j -= 1
 
 
 @fieldwise_init
@@ -1156,6 +1240,11 @@ struct LocalChanges(Movable):
     var root: String
     # Sidebar data, one list per panel.
     var files: List[FileEntry]
+    # Tree-shaped display rows over ``files`` — directory headers plus
+    # one basename row per file. Rebuilt by ``_rebuild_file_rows``
+    # whenever ``files`` changes. ``scroll_files`` indexes THIS list;
+    # ``sel_file`` still indexes ``files``.
+    var file_rows: List[FileRow]
     var branches: List[GitBranch]
     var commits: List[GitCommit]
     # Currently-focused pane (one of the six _PANE_* values).
@@ -1332,6 +1421,7 @@ struct LocalChanges(Movable):
         self.submitted = False
         self.root = String("")
         self.files = List[FileEntry]()
+        self.file_rows = List[FileRow]()
         self.branches = List[GitBranch]()
         self.commits = List[GitCommit]()
         self.focus = _PANE_FILES
@@ -1472,6 +1562,12 @@ struct LocalChanges(Movable):
         git failed outright; otherwise leaves it empty."""
         self.files = List[FileEntry]()
         var statuses = fetch_git_status(self.root)
+        # Fingerprint git's raw output order BEFORE the tree sort:
+        # ``_poll_external_change`` fingerprints a fresh (unsorted)
+        # fetch, and the two must agree byte-for-byte or every poll
+        # tick would look like an external change and refresh forever.
+        self._poll_status_fp = LocalChanges._status_fingerprint(statuses)
+        _sort_statuses_tree_order(statuses)
         var staged_text = compute_staged_diff(self.root)
         var unstaged_text = compute_unstaged_diff(self.root)
         var staged_files = List[ChangedFile]()
@@ -1495,11 +1591,67 @@ struct LocalChanges(Movable):
             self.files.append(
                 FileEntry(st.path, st.staged, st.worktree, sd^, ud^),
             )
-        # Re-seed the external-change poll baseline off the same status we
-        # just read, so a reload we initiated never re-triggers the poll.
-        self._poll_status_fp = LocalChanges._status_fingerprint(statuses)
+        self._rebuild_file_rows()
+        # The poll baseline fingerprint was re-seeded above (pre-sort),
+        # so a reload we initiated never re-triggers the poll.
         self._poll_state = git_state_mtimes(self.root)
         self._last_poll_ms = monotonic_ms()
+
+    def _rebuild_file_rows(mut self):
+        """Derive the tree-shaped display rows from ``files`` (which is
+        already in tree order — see ``_sort_statuses_tree_order``): walk
+        the list keeping a stack of open directory components, emit a
+        directory row whenever a path opens one the previous path didn't
+        have, then a basename row for the file itself. Also clamps
+        ``scroll_files`` (a row index) against the new row count so a
+        shrinking list can't scroll the pane past its end."""
+        self.file_rows = List[FileRow]()
+        var stack = List[String]()
+        for i in range(len(self.files)):
+            var comps = _path_components(self.files[i].path)
+            if len(comps) == 0:
+                continue
+            var ndirs = len(comps) - 1
+            var common = 0
+            while common < len(stack) and common < ndirs \
+                    and stack[common] == comps[common]:
+                common += 1
+            while len(stack) > common:
+                _ = stack.pop()
+            while len(stack) < ndirs:
+                var d = len(stack)
+                self.file_rows.append(
+                    FileRow(-1, d, comps[d] + String("/")),
+                )
+                stack.append(comps[d])
+            self.file_rows.append(FileRow(i, ndirs, comps[ndirs]))
+        if self.scroll_files >= len(self.file_rows):
+            self.scroll_files = len(self.file_rows) - 1
+        if self.scroll_files < 0:
+            self.scroll_files = 0
+
+    def _file_row_of(self, file_idx: Int) -> Int:
+        """Display-row index of the file row carrying ``file_idx``, or
+        ``-1`` when it isn't in ``file_rows`` (stale index)."""
+        for r in range(len(self.file_rows)):
+            if self.file_rows[r].file_idx == file_idx:
+                return r
+        return -1
+
+    def _nudge_files_scroll_up(mut self):
+        """Scroll up (never down) just enough that the selected file is
+        visible — including any directory rows sitting immediately above
+        it, which by construction are exactly its still-open ancestors,
+        so landing on the first file of a folder shows the folder too."""
+        var row = self._file_row_of(self.sel_file)
+        if row < 0:
+            self.scroll_files = 0
+            return
+        var reveal = row
+        while reveal > 0 and self.file_rows[reveal - 1].file_idx < 0:
+            reveal -= 1
+        if self.scroll_files > reveal:
+            self.scroll_files = reveal
 
     @staticmethod
     def _status_fingerprint(statuses: List[GitFileStatus]) -> String:
@@ -1575,6 +1727,7 @@ struct LocalChanges(Movable):
         self.submitted = False
         self.root = String("")
         self.files = List[FileEntry]()
+        self.file_rows = List[FileRow]()
         self.branches = List[GitBranch]()
         self.commits = List[GitCommit]()
         self.focus = _PANE_FILES
@@ -1956,8 +2109,10 @@ struct LocalChanges(Movable):
         the file's contents may have changed.
 
         Stays a no-op for a tracked file, for a file whose diff is
-        already known, and when git returns nothing (a collapsed ``dir/``
-        entry — see ``compute_untracked_diff``). In that last case the
+        already known, and when git returns nothing (an unreadable file,
+        say — ``fetch_git_status`` expands untracked directories with
+        ``-uall``, so a collapsed ``dir/`` row no longer occurs). In
+        that last case the
         probe re-runs on the next panel rebuild, which is bounded by the
         hint row ``_build_files_right_panels`` always emits: the panel is
         never empty, so ``_ensure_right_panels`` won't rebuild until the
@@ -2586,24 +2741,41 @@ struct LocalChanges(Movable):
         # Per-column status colors. Selected rows always use the row attr
         # so the selection bar reads as one block (same trick as the
         # commits pane). Untracked entries (XY == "??") get a single
-        # red ``?`` in both columns; the path stays normal so the eye
-        # picks up "this is new" without losing the path.
+        # red ``?`` in both columns; the name stays normal so the eye
+        # picks up "this is new" without losing the name.
+        #
+        # Rows come from ``file_rows`` (tree view): the X/Y status chars
+        # stay pinned at the left edge so the columns scan vertically,
+        # the name field starts after them and indents two cells per
+        # tree level. Directory rows have no status — just the dimmed
+        # component name — and no selection (they aren't files).
         var staged_attr   = Attr(LIGHT_GREEN, EDITOR_BG)
         var unstaged_attr = Attr(LIGHT_RED, EDITOR_BG)
         for i in range(height):
-            var idx = self.scroll_files + i
-            if idx >= len(self.files):
+            var ridx = self.scroll_files + i
+            if ridx >= len(self.file_rows):
                 break
             var y = top + i
-            var is_sel = (idx == self.sel_file)
+            var row = self.file_rows[ridx]
+            var stop = right + 1
+            var name_x = left + 4 + 2 * row.indent
+            if row.file_idx < 0:
+                canvas.fill(
+                    Rect(left, y, right + 1, y + 1), String(" "),
+                    list_attr,
+                )
+                self._paint_truncated(
+                    canvas, name_x, y, stop, row.label, dim_attr,
+                )
+                continue
+            var is_sel = (row.file_idx == self.sel_file)
             var row_attr = self._row_attr(
                 is_sel, is_focused, list_attr, sel_active, sel_inactive,
             )
             canvas.fill(
                 Rect(left, y, right + 1, y + 1), String(" "), row_attr,
             )
-            var fe = self.files[idx]
-            var stop = right + 1
+            var fe = self.files[row.file_idx]
             var x = left + 1
             # Two status chars: X (staged column, green) then Y
             # (worktree column, red). Spaces stay invisible against the
@@ -2616,10 +2788,8 @@ struct LocalChanges(Movable):
             if x >= stop: continue
             x += canvas.put_text(Point(x, y), y_char, y_attr, stop)
             if x >= stop: continue
-            x += canvas.put_text(Point(x, y), String(" "), row_attr, stop)
-            if x >= stop: continue
             self._paint_truncated(
-                canvas, x, y, stop, fe.path, row_attr,
+                canvas, name_x, y, stop, row.label, row_attr,
             )
 
     def _paint_branches(
@@ -3149,10 +3319,16 @@ struct LocalChanges(Movable):
         if h < 1: h = 1
         if self.focus == _PANE_FILES:
             self.sel_file = new
-            if self.sel_file < self.scroll_files:
-                self.scroll_files = self.sel_file
-            elif self.sel_file >= self.scroll_files + h:
-                self.scroll_files = self.sel_file - h + 1
+            # ``scroll_files`` lives in display-row space (directory
+            # headers included); convert before clamping. Keeping the
+            # selected row visible wins over revealing its headers when
+            # the pane is too short for both.
+            var row = self._file_row_of(self.sel_file)
+            if row >= 0:
+                if row >= self.scroll_files + h:
+                    self.scroll_files = row - h + 1
+                else:
+                    self._nudge_files_scroll_up()
             if self.scroll_files < 0: self.scroll_files = 0
         elif self.focus == _PANE_BRANCHES:
             self.sel_branch = new
@@ -3669,8 +3845,7 @@ struct LocalChanges(Movable):
         if new_idx < 0:
             new_idx = 0
         self.sel_file = new_idx
-        if self.sel_file < self.scroll_files:
-            self.scroll_files = self.sel_file
+        self._nudge_files_scroll_up()
         # Force right-pane recompute next paint.
         self._right_key = String("")
         self.unstaged.reset()
@@ -3688,8 +3863,7 @@ struct LocalChanges(Movable):
             self.sel_file = len(self.files) - 1
         if self.sel_file < 0:
             self.sel_file = 0
-        if self.scroll_files > self.sel_file:
-            self.scroll_files = self.sel_file
+        self._nudge_files_scroll_up()
         if self.sel_branch >= len(self.branches):
             self.sel_branch = len(self.branches) - 1
         if self.sel_branch < 0:
@@ -5102,18 +5276,28 @@ struct LocalChanges(Movable):
             var body_offset = pos.y - top - 1
             if body_offset < 0 or body_offset >= height - 1:
                 return True
-            var scroll: Int
             if pane == _PANE_FILES:
-                scroll = self.scroll_files
-            elif pane == _PANE_BRANCHES:
+                # ``scroll_files`` + the clicked offset is a display-row
+                # index; map it through ``file_rows``. Directory rows
+                # are structure, not files — a click on one just moves
+                # focus to the pane.
+                var ridx = self.scroll_files + body_offset
+                if ridx < 0 or ridx >= len(self.file_rows):
+                    return True
+                var fidx = self.file_rows[ridx].file_idx
+                if fidx < 0:
+                    return True
+                self._set_focused_selection(fidx, bounds)
+                if Int(event.click_count) >= 2 \
+                        and 0 <= self.sel_file \
+                        and self.sel_file < len(self.files):
+                    self._submit_selected_file()
+                return True
+            var scroll: Int
+            if pane == _PANE_BRANCHES:
                 scroll = self.scroll_branches
             else:
                 scroll = self.scroll_commits
             self._set_focused_selection(scroll + body_offset, bounds)
-            if pane == _PANE_FILES \
-                    and Int(event.click_count) >= 2 \
-                    and 0 <= self.sel_file \
-                    and self.sel_file < len(self.files):
-                self._submit_selected_file()
             return True
         return False
