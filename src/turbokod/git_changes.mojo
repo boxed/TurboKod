@@ -502,10 +502,26 @@ def fetch_blob_text(
 
 
 def _git_argv(project_root: String, var args: List[String]) -> List[String]:
-    """Build ``git -C <project_root> <args...>`` — the prefix every git
-    invocation in this module shares."""
+    """Build ``git --no-optional-locks -C <project_root> <args...>`` — the
+    prefix every git invocation in this module shares.
+
+    ``--no-optional-locks`` is what keeps our polling out of another
+    process's way. ``git status`` normally *refreshes* the index as a side
+    effect of stat'ing the worktree, and writing it back takes
+    ``.git/index.lock`` — so the desktop's 2 s dirty-flag poll (and the
+    Local Changes modal's 1 Hz refresh) were grabbing that lock a few
+    times a minute per open window. Anything else running git in the same
+    repo — a shell, an agent, a hook — would then intermittently fail with
+    "Unable to create '.../index.lock': File exists".
+
+    The flag only suppresses *optional* locks, so the mutating commands
+    that route through here (``add`` / ``reset`` / ``apply`` / ``stash``)
+    still take the locks they actually need. It's the same mechanism as
+    ``GIT_OPTIONAL_LOCKS=0`` and exists precisely for editors and shell
+    prompts that poll a repo they don't own."""
     var argv = List[String]()
     argv.append(String("git"))
+    argv.append(String("--no-optional-locks"))
     argv.append(String("-C"))
     argv.append(project_root)
     for i in range(len(args)):

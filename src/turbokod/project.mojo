@@ -277,6 +277,9 @@ def _git_ls_files_argv(root: String, ignored_only: Bool) -> List[String]:
     """
     var argv = List[String]()
     argv.append(String("git"))
+    # Read-only query: never take ``.git/index.lock`` (see ``_git_argv`` in
+    # ``git_changes.mojo``).
+    argv.append(String("--no-optional-locks"))
     argv.append(String("-C"))
     argv.append(root)
     argv.append(String("ls-files"))

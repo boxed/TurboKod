@@ -63,7 +63,7 @@ from turbokod.highlight import (
     highlight_decorator_attr, highlight_ident_attr, highlight_string_attr
 )
 from turbokod.onig import onig_global_init, onig_tracked_count
-from turbokod.posix import kill_pid, wall_clock_ms, which
+from turbokod.posix import kill_pid, sleep_ms, wall_clock_ms, which
 from turbokod.config import WRAP_NONE
 from turbokod.events import (
     Event, KEY_BACKSPACE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME,
@@ -1753,6 +1753,72 @@ def test_git_state_mtimes_nonzero_after_init_commit() raises:
     var mt2 = git_state_mtimes(dir)
     assert_true(not mt2.equals(mt))
     assert_true(mt2.reflog_size != mt.reflog_size)
+    _rm_rf(dir)
+
+
+def test_git_status_poll_leaves_the_index_alone() raises:
+    """A status poll must not rewrite ``.git/index``.
+
+    ``git status`` normally refreshes the index as a side effect of
+    stat'ing the worktree and writes it back — which takes
+    ``.git/index.lock``. The desktop runs ``fetch_git_status`` every 2 s
+    for the status-bar dirty flag and the Local Changes modal once a
+    second, so a few times a minute *per open window* we were competing
+    for that lock with whatever else the user has running in the repo (a
+    shell, an agent, a hook), which fails with "Unable to create
+    '.../index.lock': File exists". ``_git_argv`` passes
+    ``--no-optional-locks`` to stop it.
+
+    The observable is the index mtime. We commit (which writes the index),
+    wait past a one-second boundary — ``stat``'s mtime granularity here —
+    then rewrite the tracked file with identical content so its cached
+    stat data goes stale and a refresh would have something to write.
+    The worktree is still clean, so the poll's *result* is unchanged
+    either way; only the write is at issue."""
+    var dir = _temp_path(String("_git_nolock"))
+    _rm_rf(dir)
+    _ensure_dir(dir)
+    var init_args = List[String]()
+    init_args.append(String("init"))
+    init_args.append(String("-q"))
+    init_args.append(String("-b"))
+    init_args.append(String("main"))
+    if _run_git(dir, init_args^) != 0:
+        # No git available — skip silently.
+        _rm_rf(dir)
+        return
+    var cfg1 = List[String]()
+    cfg1.append(String("config"))
+    cfg1.append(String("user.email"))
+    cfg1.append(String("test@example.com"))
+    _ = _run_git(dir, cfg1^)
+    var cfg2 = List[String]()
+    cfg2.append(String("config"))
+    cfg2.append(String("user.name"))
+    cfg2.append(String("Test"))
+    _ = _run_git(dir, cfg2^)
+    var f = join_path(dir, String("a.txt"))
+    assert_true(write_file(f, String("alpha\n")))
+    var add = List[String]()
+    add.append(String("add"))
+    add.append(String("a.txt"))
+    _ = _run_git(dir, add^)
+    var commit = List[String]()
+    commit.append(String("commit"))
+    commit.append(String("-q"))
+    commit.append(String("-m"))
+    commit.append(String("init"))
+    _ = _run_git(dir, commit^)
+    # Cross a second boundary so a rewrite would be visible at ``stat``'s
+    # one-second resolution, then make the index's stat cache stale.
+    sleep_ms(1100)
+    assert_true(write_file(f, String("alpha\n")))
+    var before = git_state_mtimes(dir)
+    assert_true(before.index_mtime != Int64(0))
+    var statuses = fetch_git_status(dir)
+    assert_equal(len(statuses), 0)       # same content: nothing to report
+    var after = git_state_mtimes(dir)
+    assert_equal(Int(after.index_mtime), Int(before.index_mtime))
     _rm_rf(dir)
 
 
@@ -3840,6 +3906,7 @@ def main() raises:
     test_local_changes_untracked_empty_file_has_no_body_rows()
     test_git_state_mtimes_zero_for_non_repo()
     test_git_state_mtimes_nonzero_after_init_commit()
+    test_git_status_poll_leaves_the_index_alone()
     test_stage_unstage_round_trip_against_real_git()
     test_fetch_git_status_expands_untracked_directories()
     test_local_changes_files_panel_is_a_tree()

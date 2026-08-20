@@ -280,6 +280,10 @@ def compute_blame(file_path: String) raises -> List[BlameLine]:
     var root = maybe_root.value()
     var argv = List[String]()
     argv.append(String("git"))
+    # Read-only query: never take ``.git/index.lock`` to refresh the index
+    # behind another git process's back (see ``_git_argv`` in
+    # ``git_changes.mojo`` for why).
+    argv.append(String("--no-optional-locks"))
     argv.append(String("-C"))
     argv.append(root)
     argv.append(String("blame"))
