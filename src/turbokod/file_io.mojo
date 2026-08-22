@@ -41,20 +41,49 @@ def _stat_mtime_offset() -> Int:
         return 88    # st_mtim.tv_sec on Linux 64-bit
 
 
+def _stat_mtime_nsec_offset() -> Int:
+    """Byte offset of the ``tv_nsec`` half of the mtime timespec.
+
+    Always ``tv_sec + 8``: ``struct timespec`` is two 64-bit fields on
+    both platforms we build for. Kept as its own function so the two
+    halves stay visibly paired with the layout comments above.
+    """
+    return _stat_mtime_offset() + 8
+
+
 comptime _S_IFMT  = UInt32(0o170000)
 comptime _S_IFDIR = UInt32(0o040000)
 
 
 @fieldwise_init
 struct FileInfo(ImplicitlyCopyable, Movable):
-    """Subset of ``struct stat`` we care about for change detection."""
+    """Subset of ``struct stat`` we care about for change detection.
+
+    ``mtime_sec`` alone is a *lossy* change detector: it has one-second
+    granularity, so a write that lands in the same second as the last
+    stat and happens to leave the size unchanged is invisible. That is
+    not hypothetical for generated files and for ``git checkout``.
+    ``mtime_nsec`` closes it — pair the two (plus ``size``) whenever you
+    are deciding "did this file change since I last looked?".
+    """
     var size: Int64
     var mtime_sec: Int64
+    var mtime_nsec: Int64
     var mode: UInt32
     var ok: Bool
 
     def is_dir(self) -> Bool:
         return (self.mode & _S_IFMT) == _S_IFDIR
+
+    def same_content_stamp(self, other: Self) -> Bool:
+        """True when both stats succeeded and agree on size + mtime to
+        nanosecond precision — i.e. the file almost certainly has not
+        been rewritten between the two calls."""
+        if not self.ok or not other.ok:
+            return False
+        return self.size == other.size \
+            and self.mtime_sec == other.mtime_sec \
+            and self.mtime_nsec == other.mtime_nsec
 
 
 def _stat_mode(buf: List[UInt8]) -> UInt32:
@@ -71,12 +100,13 @@ def stat_file(path: String) -> FileInfo:
     var buf = alloc_zero_buffer(STAT_BUF_SIZE)
     var rc = external_call["stat", Int32](c_path.unsafe_ptr(), buf.unsafe_ptr())
     if Int(rc) != 0:
-        return FileInfo(Int64(0), Int64(0), UInt32(0), False)
+        return FileInfo(Int64(0), Int64(0), Int64(0), UInt32(0), False)
     var p64 = buf.unsafe_ptr().unsafe_bitcast[Int64]()
     var size = p64[unsafe_offset=_stat_size_offset() // 8]
     var mtime = p64[unsafe_offset=_stat_mtime_offset() // 8]
+    var mtime_ns = p64[unsafe_offset=_stat_mtime_nsec_offset() // 8]
     var mode = _stat_mode(buf)
-    return FileInfo(size, mtime, mode, True)
+    return FileInfo(size, mtime, mtime_ns, mode, True)
 
 
 def read_file(path: String) raises -> String:

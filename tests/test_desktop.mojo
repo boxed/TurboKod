@@ -65,8 +65,8 @@ from turbokod.view import Fill, Label, centered
 from turbokod.window import Window
 
 from support import (
-    _SCREEN, _doc_paths, _docs_contains, _key, _ps_open, _starts_with,
-    _temp_path, setup_test_env
+    _SCREEN, _doc_paths, _docs_contains, _ensure_dir, _key, _ps_open,
+    _rm_rf, _starts_with, _temp_path, setup_test_env
 )
 
 
@@ -2803,6 +2803,106 @@ def test_shutdown_reaps_an_in_flight_on_save_child() raises:
     assert_true(Int(close_fd(proc.stderr_fd)) != 0)
 
 
+def test_find_symbol_answers_from_the_identifier_index() raises:
+    """The wiring test: with a warm index the picker must serve a query
+    from it, not by spawning ``rg``.
+
+    Both halves matter. If the index never becomes ready the picker
+    silently keeps paying the old ~2.7 CPU-seconds per keystroke, and
+    nothing else in the suite would notice — the results would be
+    identical."""
+    var root = _temp_path(String("_fs_index"))
+    _rm_rf(root)
+    _ensure_dir(root)
+    _ = write_file(root + String("/mod.py"), String(
+        "import os\n"
+        "def indexed_symbol(a, b):\n"
+        "    return a + b\n"
+    ))
+    var d = Desktop()
+    d.project = Optional[String](root)
+    d._open_find_symbol()
+    assert_true(d.find_symbol.active)
+
+    # Drive frames until the build + revalidation sweep finish. Bounded
+    # so a wiring regression fails the test instead of hanging it.
+    var frames = 0
+    while not d.symbol_index.is_ready() and frames < 200:
+        d._pump_find_symbol()
+        frames += 1
+    assert_true(d.symbol_index.is_ready())
+
+    d.find_symbol.query.set_text(String("indexed"))
+    d.find_symbol.query_dirty = True
+    d._pump_find_symbol()
+
+    assert_true(len(d.find_symbol.entries) >= 1)
+    assert_equal(d.find_symbol.entries[0].name, String("indexed_symbol"))
+    assert_equal(d.find_symbol.entries[0].line, 2)
+    # Served from the index, so no rg child was ever spawned.
+    assert_false(d.find_symbol.runner.active)
+    d.shutdown()
+    _rm_rf(root)
+
+
+def test_find_symbol_falls_back_to_rg_before_the_index_is_ready() raises:
+    """The safety net: a cold index must route to ``rg`` rather than
+    return an empty list. This is what makes a staleness or build bug
+    cost latency instead of results."""
+    if len(which(String("rg")).as_bytes()) == 0:
+        assert_true(True)
+        return
+    var root = _temp_path(String("_fs_cold"))
+    _rm_rf(root)
+    _ensure_dir(root)
+    _ = write_file(root + String("/mod.py"), String("cold_symbol = 1\n"))
+    var d = Desktop()
+    d.project = Optional[String](root)
+    d._open_find_symbol()
+    # Deliberately do *not* pump the build to completion.
+    assert_false(d.symbol_index.is_ready())
+    d.find_symbol.query.set_text(String("cold_sym"))
+    d.find_symbol.query_dirty = True
+    d._run_find_symbol_query()
+    assert_true(d.find_symbol.runner.active)
+    d.shutdown()
+    assert_false(d.find_symbol.runner.active)
+    _rm_rf(root)
+
+
+def test_find_symbol_index_sees_unsaved_buffer_text() raises:
+    """Strictly better than the rg path it replaces: rg reads disk, so a
+    symbol typed and not yet saved was unfindable."""
+    var root = _temp_path(String("_fs_dirty"))
+    _rm_rf(root)
+    _ensure_dir(root)
+    _ = write_file(root + String("/mod.py"), String("saved_symbol = 1\n"))
+    var d = Desktop()
+    d.project = Optional[String](root)
+    d.open_file(root + String("/mod.py"), _SCREEN)
+    var idx = d._focused_editor_idx()
+    assert_true(idx >= 0)
+    d.windows.windows[idx].editor.buffer.lines.append(
+        String("unsaved_symbol = 2"),
+    )
+    d.windows.windows[idx].editor.dirty = True
+
+    d._open_find_symbol()
+    var frames = 0
+    while not d.symbol_index.is_ready() and frames < 200:
+        d._pump_find_symbol()
+        frames += 1
+    assert_true(d.symbol_index.is_ready())
+
+    d.find_symbol.query.set_text(String("unsaved_sym"))
+    d.find_symbol.query_dirty = True
+    d._pump_find_symbol()
+    assert_true(len(d.find_symbol.entries) >= 1)
+    assert_equal(d.find_symbol.entries[0].name, String("unsaved_symbol"))
+    d.shutdown()
+    _rm_rf(root)
+
+
 def test_shutdown_stops_the_search_subprocesses() raises:
     """Find in Project / Find Symbol each stream an ``rg`` child; a
     window closed mid-search used to leave it running with our three
@@ -2988,5 +3088,8 @@ def main() raises:
     test_closing_a_window_releases_its_find_regex()
     test_close_all_editor_windows_releases_their_find_regexes()
     test_shutdown_reaps_an_in_flight_on_save_child()
+    test_find_symbol_answers_from_the_identifier_index()
+    test_find_symbol_falls_back_to_rg_before_the_index_is_ready()
+    test_find_symbol_index_sees_unsaved_buffer_text()
     test_shutdown_stops_the_search_subprocesses()
-    print("desktop: 102 tests passed")
+    print("desktop: 105 tests passed")

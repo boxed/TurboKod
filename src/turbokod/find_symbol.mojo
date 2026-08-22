@@ -250,6 +250,13 @@ struct FindSymbol(Movable):
     var state: UInt8
     var status_message: String
     var runner: _FindSymbolRunner
+    # True when the query changed and the search has not been re-run for
+    # it yet. The picker no longer decides *how* to search: the host
+    # owns the ``SymbolIndex`` and picks the index fast path or the
+    # ``rg`` fallback in ``Desktop._pump_find_symbol``. Keeping that
+    # choice out of here is what stops this module from having to know
+    # about projects, indexes, or frame budgets.
+    var query_dirty: Bool
     # True once the user has actively navigated (arrow keys, page,
     # home/end, or click-to-select). Drives whether streaming inserts
     # follow the user's chosen entry by name (preserve selection) or
@@ -286,6 +293,7 @@ struct FindSymbol(Movable):
         self._user_navigated = False
         self._chooser_mode = False
         self._chooser_name = String("")
+        self.query_dirty = False
 
     def open(
         mut self,
@@ -327,10 +335,9 @@ struct FindSymbol(Movable):
         self._user_navigated = False
         self._chooser_mode = False
         self._chooser_name = String("")
-        var member = _query_member(self.query.text)
-        if len(member.as_bytes()) >= _MIN_QUERY_LEN \
-                and len(self.root.as_bytes()) > 0:
-            _ = self.runner.start(member, self.root)
+        # The host re-runs the search on the next frame, choosing the
+        # index or ``rg``; see ``query_dirty``.
+        self.query_dirty = True
 
     def close(mut self):
         self.active = False
@@ -349,6 +356,7 @@ struct FindSymbol(Movable):
         self._user_navigated = False
         self._chooser_mode = False
         self._chooser_name = String("")
+        self.query_dirty = False
 
     def set_pending(mut self, var msg: String):
         self.state = _STATE_PENDING
@@ -391,6 +399,9 @@ struct FindSymbol(Movable):
         self._chooser_name = name^
         self.state = _STATE_IDLE
         self.status_message = String("")
+        # The host's curated list *is* the result — a pending query would
+        # overwrite it on the next frame.
+        self.query_dirty = False
 
     # --- background pump --------------------------------------------------
 
@@ -443,6 +454,48 @@ struct FindSymbol(Movable):
                     return
         self.selected = 0
         self.scroll = 0
+
+    def take_query_dirty(mut self) -> Bool:
+        """Consume the "query changed, re-run the search" flag."""
+        var d = self.query_dirty
+        self.query_dirty = False
+        return d
+
+    def query_member(self) -> String:
+        """The member segment of the live query — the name a search
+        actually looks for. ``User.has_permission`` -> ``has_permission``.
+
+        Public because the host needs it to drive both search backends;
+        the qualifier half is a container hint resolved later via the
+        LSP and never appears at a definition site."""
+        return _query_member(self.query.text)
+
+    def min_query_len(self) -> Int:
+        """Shortest member the picker will search for. Below this a
+        query matches so much of a real project that the result list is
+        noise."""
+        return _MIN_QUERY_LEN
+
+    def apply_index_results(
+        mut self, var hits: List[FindSymbolMatch],
+    ):
+        """Install a complete result set from the identifier index.
+
+        Unlike the ``rg`` path this is not a stream: the index answers
+        the whole query in one call, so there is no partial state to
+        merge and no runner to keep alive. Selection resets to the
+        best-ranked entry, matching what the streaming path does before
+        the user has navigated.
+        """
+        self.runner.cancel()
+        self.entries = hits^
+        self.seen_names = List[String]()
+        for i in range(len(self.entries)):
+            self.seen_names.append(self.entries[i].name)
+        _sort_entries_ranked(self.entries, _query_member(self.query.text))
+        self.selected = 0
+        self.scroll = 0
+        self._user_navigated = False
 
     def restart_runner(mut self):
         """Cancel any in-flight rg and start a fresh search for
@@ -654,7 +707,7 @@ struct FindSymbol(Movable):
                 if self.state == _STATE_ERROR:
                     self.state = _STATE_IDLE
                     self.status_message = String("")
-                self.restart_runner()
+                self.query_dirty = True
         return True
 
     def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Bool:

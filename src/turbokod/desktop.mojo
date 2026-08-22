@@ -220,6 +220,7 @@ from .reference_pick import ReferencePick
 from .find_symbol import (
     FindSymbol, FindSymbolMatch, container_matches_qualifier,
 )
+from .symbol_index import SymbolIndex
 from .terminal import beep
 from .terminal_pane import TERMINAL_PANE_CLOSE, TerminalPane
 from .test_pane import (
@@ -282,6 +283,28 @@ comptime EDITOR_GOTO_SYMBOL   = String("edit:goto_symbol")
 # then asks the LSP to follow that usage to its definition. See
 # ``find_symbol.mojo`` for the rationale.
 comptime EDITOR_FIND_SYMBOL   = String("edit:find_symbol")
+
+comptime _SYMBOL_INDEX_BUILD_BUDGET: Int = 1024 * 1024
+"""File bytes the identifier index may read per frame while building.
+Sized so a frame stays comfortably inside its budget on a cold open of a
+large project; the picker shows rg results until the build lands."""
+
+comptime _SYMBOL_INDEX_STAT_BUDGET: Int = 8000
+"""Files the identifier index may re-``stat`` per frame during a
+revalidation sweep.
+
+A stat is ~1.5 us, so this is ~12 ms — deliberately large enough that a
+few-thousand-file project revalidates in a single frame. The sweep gates
+``is_ready``, and every frame it spans is a frame the picker answers with
+``rg`` instead, so stretching it thin is the wrong trade."""
+
+comptime FIND_SYMBOL_RESULT_CAP: Int = 500
+"""Rows one Find Symbol query may return.
+
+Unlike the ``rg`` path's old cap this is a *ranked* top-N rather than
+"the first 500 names that happened to stream in": the index answers the
+whole query at once, so truncation now drops the worst matches instead
+of whichever files rg reached first."""
 # LSP completion request. Default-bound to Ctrl+Space, but routed
 # through the action table so users can rebind via the action editor
 # — macOS hijacks Ctrl+Space for "Select previous input source" by
@@ -887,6 +910,15 @@ struct Desktop(Movable):
     var symbol_pick: SymbolPick
     var reference_pick: ReferencePick
     var find_symbol: FindSymbol
+    # Project-wide identifier index backing Find Symbol. Built lazily on
+    # first picker open (nothing pays for it otherwise) and kept for the
+    # session. While it is not ``is_ready()`` the picker falls back to
+    # spawning ``rg``, so a cold index costs latency, never results —
+    # see ``symbol_index.mojo`` for the staleness argument.
+    var symbol_index: SymbolIndex
+    # Root ``symbol_index`` was seeded from, so a project switch is
+    # noticed without consulting the index itself.
+    var _symbol_index_root: String
     # Indices of LSP managers we've sent a workspace/symbol request
     # to as part of the Find Symbol submit flow but haven't yet
     # received a response from. We send to every ready manager so a
@@ -1574,6 +1606,8 @@ struct Desktop(Movable):
         self.symbol_pick = SymbolPick()
         self.reference_pick = ReferencePick()
         self.find_symbol = FindSymbol()
+        self.symbol_index = SymbolIndex()
+        self._symbol_index_root = String("")
         self._find_symbol_pending_lsps = List[Int]()
         self._find_symbol_collected = List[WorkspaceSymbolItem]()
         self._find_symbol_hit_path = String("")
@@ -4097,10 +4131,11 @@ struct Desktop(Movable):
         # Drive any per-frame timers before drawing — the project-find
         # widget runs its 200 ms debounce off this clock.
         self.project_find.tick(monotonic_ms())
-        # FindSymbol streams rg output across frames; pump it here so
-        # the picker's entry list grows visibly as results arrive
-        # rather than appearing all at once at the end.
-        self.find_symbol.tick()
+        # FindSymbol either answers from the identifier index or streams
+        # rg output across frames. ``_pump_find_symbol`` owns that choice
+        # and also spends this frame's slice of index build /
+        # revalidation work.
+        self._pump_find_symbol()
         # QuickOpen does the same with ``git ls-files`` — its async
         # FileIndexer trickles entries in over multiple frames so the
         # dialog opens immediately even on giant projects.
@@ -12486,6 +12521,112 @@ struct Desktop(Movable):
         if ok:
             self.symbol_pick.open(path)
 
+    # --- Find Symbol: index maintenance + query routing ------------------
+
+    def _pump_find_symbol(mut self):
+        """One frame of Find Symbol work: index upkeep, then the search.
+
+        Split into slices because both halves are unbounded in principle
+        — a first index build reads the whole project — and this runs on
+        the UI thread. The budgets below are what keeps a picker open on
+        a huge monorepo from dropping frames.
+        """
+        if not self.find_symbol.active:
+            return
+        # Index upkeep. Only while the picker is up: an index nobody is
+        # querying is not worth a frame's budget, and a project the user
+        # never runs Find Symbol on should not pay for one at all.
+        if not self.symbol_index.is_ready():
+            # 1 MiB of file content per frame. At the ~600 MiB/s this
+            # tokenizes at, that is well under a frame; the cost that
+            # actually bounds it is the per-file read syscalls.
+            if self.symbol_index.build_step(_SYMBOL_INDEX_BUILD_BUDGET):
+                pass
+            elif self.symbol_index.revalidate_step(
+                _SYMBOL_INDEX_STAT_BUDGET,
+            ):
+                pass
+            # Falling through with a not-ready index is fine — the query
+            # below routes to rg until the build lands, then switches
+            # over on whichever frame finishes it.
+            if self.symbol_index.is_ready():
+                # Both the build and the sweep read from *disk*, which
+                # retires any buffer-derived segment. So the unsaved-text
+                # overlay has to be re-applied after they finish, never
+                # before — doing it up front is silently undone.
+                self._overlay_dirty_buffers()
+                # Whatever is on screen came from rg (or from nothing);
+                # re-ask now that the index is authoritative.
+                self.find_symbol.query_dirty = True
+        if self.find_symbol.take_query_dirty():
+            self._run_find_symbol_query()
+        # Drain the rg fallback if that is what is running.
+        self.find_symbol.tick()
+
+    def _run_find_symbol_query(mut self):
+        """Answer the current query from the index, or fall back to rg.
+
+        The index is preferred whenever it is ready; ``rg`` covers the
+        cold-start and mid-sweep windows. Both produce the same
+        ``FindSymbolMatch`` list, so nothing downstream knows which one
+        ran."""
+        var member = self.find_symbol.query_member()
+        if len(member.as_bytes()) < self.find_symbol.min_query_len():
+            self.find_symbol.apply_index_results(List[FindSymbolMatch]())
+            return
+        if not self.symbol_index.is_ready():
+            self.find_symbol.restart_runner()
+            return
+        var hits = self.symbol_index.search(member, FIND_SYMBOL_RESULT_CAP)
+        var out = List[FindSymbolMatch](capacity=len(hits))
+        for i in range(len(hits)):
+            out.append(FindSymbolMatch(
+                hits[i].name, hits[i].path, hits[i].line, hits[i].column,
+            ))
+        self.find_symbol.apply_index_results(out^)
+
+    def _prepare_symbol_index(mut self):
+        """Point the index at the current project and get it revalidating.
+
+        Re-rooting throws the old project's index away; re-opening the
+        same project keeps it and only re-``stat``s, which is the case
+        that matters (the picker is opened over and over in a session).
+        The file-list refresh is what catches files added, deleted, or
+        renamed since the last open — content changes are the sweep's
+        job.
+        """
+        if not self.project:
+            return
+        var root = self.project.value()
+        if root != self._symbol_index_root:
+            self.symbol_index.reset(root)
+            self._symbol_index_root = root
+        self.symbol_index.set_file_list(walk_project_files(root))
+        self.symbol_index.begin_revalidation()
+        # The unsaved-buffer overlay is applied by ``_pump_find_symbol``
+        # once the build and sweep have finished — see the comment there
+        # for why it cannot be done here.
+
+    def _overlay_dirty_buffers(mut self):
+        """Re-index every modified editor from its live buffer.
+
+        Unsaved text is invisible to anything that reads the file, which
+        is why the old ``rg`` picker could not find a symbol the user had
+        just typed. Must run *after* any disk-reading build or sweep,
+        which would otherwise replace these segments with the file's
+        contents."""
+        for i in range(len(self.windows.windows)):
+            if not self.windows.windows[i].is_editor:
+                continue
+            if not self.windows.windows[i].editor.dirty:
+                continue
+            var path = self.windows.windows[i].editor.file_path
+            if len(path.as_bytes()) == 0:
+                continue
+            _ = self.symbol_index.reindex_from_text(
+                path, self.windows.windows[i].editor.text_snapshot(),
+            )
+
     def _open_find_symbol(mut self):
         """Open the Find Symbol picker. Validates rg + project
         availability up front so a misconfigured environment fails
@@ -12506,6 +12647,11 @@ struct Desktop(Movable):
         self._find_symbol_collected = List[WorkspaceSymbolItem]()
         self._find_symbol_hit_path = String("")
         self._find_symbol_qualifier = String("")
+        # Refresh the identifier index's roster and start its
+        # revalidation sweep before the first keystroke arrives. Both
+        # halves are sliced across frames by ``_pump_find_symbol``, so
+        # this call itself is only the ``git ls-files`` walk.
+        self._prepare_symbol_index()
         var prefill = String("")
         var idx = self._focused_editor_idx()
         if idx >= 0:
@@ -12559,7 +12705,9 @@ struct Desktop(Movable):
             return
         if self.find_symbol.is_choosing():
             # Chooser pick: the workspace symbol entry is already the
-            # definition site, so jump straight there.
+            # definition site, so jump straight there. Not verified —
+            # this location came from the LSP this frame, not from the
+            # index.
             self.find_symbol.close()
             self._find_symbol_pending_lsps = List[Int]()
             self._find_symbol_collected = List[WorkspaceSymbolItem]()
@@ -12568,6 +12716,22 @@ struct Desktop(Movable):
                 DefinitionResolved(path, line, col), screen,
             )
             return
+        # The seed is the identifier index's record of a *textual*
+        # occurrence, and the index can be a revalidation sweep behind
+        # the file. Check it before anyone navigates to it. Against the
+        # live buffer where there is one, because that is what the index
+        # was built from for a dirty editor.
+        var seed_ok = False
+        var source = self._snapshot_or_read(path)
+        if source:
+            var fixed = self.symbol_index.verify_occurrence_in(
+                name, source.value(), line + 1, col + 1,
+            )
+            if fixed:
+                # 1-based from the index, 0-based for the LSP / _jump_to.
+                line = fixed.value()[0] - 1
+                col = fixed.value()[1] - 1
+                seed_ok = True
         # Spray workspace/symbol across every ready LSP. A failed
         # send (server crashed mid-session, e.g.) just doesn't get
         # added to the pending list — we'll resolve with whatever
@@ -12579,8 +12743,17 @@ struct Desktop(Movable):
             if self.lsp_managers[li].request_workspace_symbols(name):
                 pending.append(li)
         if len(pending) == 0:
-            # No LSP available — fall back to the rg hit so the user
-            # at least lands at a usage site.
+            # No LSP available — fall back to the textual hit so the
+            # user at least lands at a usage site. Only if it verified:
+            # jumping to an unverified seed is the one outcome the index
+            # must never produce.
+            if not seed_ok:
+                self.find_symbol.set_error(
+                    name + String(" is no longer where it was indexed."),
+                )
+                # Re-run the query so the list stops offering it.
+                self._prepare_symbol_index()
+                return
             self.find_symbol.close()
             self._find_symbol_pending_lsps = List[Int]()
             self._jump_to(
@@ -12590,7 +12763,10 @@ struct Desktop(Movable):
         self._find_symbol_pending_lsps = pending^
         self._find_symbol_collected = List[WorkspaceSymbolItem]()
         self._find_symbol_qualifier = qualifier
-        self._find_symbol_hit_path = path
+        # An empty hit path is how the resolver is told there is no
+        # textual fallback — it closes without jumping rather than
+        # navigating to a location we could not confirm.
+        self._find_symbol_hit_path = path if seed_ok else String("")
         self._find_symbol_hit_line = line
         self._find_symbol_hit_column = col
         self.find_symbol.set_pending(

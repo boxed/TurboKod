@@ -184,6 +184,46 @@ Find and Replace (in-file and project-wide) go through **`LineSearcher`** in `se
 
 Full details, the correctness argument for folding UTF-8 in place, and the benchmarks (`bench/fold_bench.mojo`) in [docs/case-folding.md](docs/case-folding.md).
 
+## Find Symbol is an index, not a search
+
+Find Symbol (Cmd+Option+O) does **not** search the project when you
+type. It queries a project-wide identifier index (`symbol_index.mojo`,
+owned by `Desktop.symbol_index`) with one SIMD pass over a
+NUL-separated blob of identifier names: 0.3–1.15 ms a keystroke on a
+12k-file repo, against the 160–490 ms wall / ~2.7 s CPU the old
+per-keystroke `rg` cost.
+
+Three things to know before touching it:
+
+1. **`rg` is still the fallback and must stay one.** `is_ready()` gates
+   the fast path; while the index is cold or mid-sweep,
+   `Desktop._run_find_symbol_query` spawns the old `rg` runner. That's
+   what makes a staleness bug cost latency instead of results. Don't
+   delete the runner.
+2. **The blob is segmented per file on purpose.** A globally-deduped
+   table is smaller but can't retire a re-indexed file's names without
+   an inverted index, so it leaves ghosts. Re-indexing is a segment
+   swap; cross-file dedupe happens at query time.
+3. **The unsaved-buffer overlay runs *after* the build/sweep, never
+   before.** Both read from disk and retire buffer-derived segments, so
+   `_overlay_dirty_buffers` is called when the index reaches ready.
+   Putting it in `_prepare_symbol_index` looks right and is silently
+   undone.
+
+Adding a search site here means constructing the query through
+`SymbolIndex.search`, and any new location seed must go through
+`verify_occurrence_in` before it reaches an LSP or `_jump_to` — that
+check is the reason a stale entry can't produce a wrong jump.
+
+Related: `stat_file` now reports `mtime_nsec`, because `st_mtime`'s
+one-second granularity misses a same-second same-size rewrite (what
+`git checkout` produces). Use `FileInfo.same_content_stamp` for any new
+"did this change?" comparison rather than `mtime_sec` alone.
+
+Full details, the proof that the old regex was equivalent to a literal
+substring search, and the measurements in
+[docs/find-symbol-index.md](docs/find-symbol-index.md).
+
 ## Settings are global, and the config file has many writers
 
 `~/.config/turbokod/config.json` (`config.mojo`) is one file with N writers: the native app builds **one `Desktop` per window** plus an always-alive chrome Desktop for the menu bar, and every `tk-tui` process adds another. Each holds its own `TurbokodConfig`, loaded when it was created, and each `_persist_config` writes the **whole** file. Saves are frequent and mostly invisible — merely switching files persists the recents list.

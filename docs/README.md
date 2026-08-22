@@ -10,6 +10,7 @@ Project notes that go deeper than `CLAUDE.md`'s overview. Each file is a focused
 | [sequoia-close-crash.md](sequoia-close-crash.md) | macOS Sequoia AppKit regression where `performClose` segfaults; workaround via `windowShouldClose` + `orderOut`. |
 | [app-bundle.md](app-bundle.md) | How `TurboKod.app` is laid out so Dock launches find `libturbokod.dylib` regardless of CWD (`@rpath` + `Contents/Frameworks/`). |
 | [baseline-transforms.md](baseline-transforms.md) | Pattern for reversible UI transforms (resize, etc.) — scale from a stored baseline so round-trips don't accumulate rounding error. |
+| [find-symbol-index.md](find-symbol-index.md) | Why Find Symbol stopped spawning `rg` per keystroke (the regex was vacuous, `--smart-case` was inert, and it cost 25× the CPU of the literal it equalled), the per-file-segment identifier index that replaced it, and the five mechanisms that keep it from going stale. |
 | [case-folding.md](case-folding.md) | Branchless/SIMD ASCII case folding (`case_fold.mojo`) and the `LineSearcher` that decides per line whether a SIMD byte scan is equivalent to libonig's `(?i)`; why ASCII-only folding is safe on UTF-8, and the measurements. |
 | [performance.md](performance.md) | Profiling the drawing path (headless Mojo bench + live `sample`), the per-frame cost model, the hot-path traps (deep-copying the Editor, O(rows×highlights) overlays, the immediate-mode redraw timer), and why LSP semantic highlighting was removed for performance. |
 

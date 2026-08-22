@@ -617,7 +617,7 @@ def config_file_stamp() -> FileInfo:
     when there's no ``$HOME`` or no file yet."""
     var path = _config_path()
     if len(path.as_bytes()) == 0:
-        return FileInfo(Int64(0), Int64(0), UInt32(0), False)
+        return FileInfo(Int64(0), Int64(0), Int64(0), UInt32(0), False)
     return stat_file(path)
 
 
