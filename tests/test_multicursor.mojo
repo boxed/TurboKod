@@ -601,6 +601,141 @@ def test_cross_row_selections_merge_when_they_touch() raises:
     assert_equal(ed.selections[0].anchor_col, 0)
 
 
+def test_paste_broadcasts_to_every_caret() raises:
+    # A clipboard that doesn't line up with the caret count lands whole
+    # at every caret.
+    var ed = Editor(String("abc\nabc\nabc\n"))
+    ed.selections[0].row = 0
+    ed.selections[0].col = 1
+    ed.selections[0].anchor_row = 0
+    ed.selections[0].anchor_col = 1
+    ed._add_caret(Caret(1, 1, 1, 1, 1))
+    ed._add_caret(Caret(2, 1, 1, 2, 1))
+    ed.paste_text(String("XY"))
+    assert_equal(ed.buffer.line(0), String("aXYbc"))
+    assert_equal(ed.buffer.line(1), String("aXYbc"))
+    assert_equal(ed.buffer.line(2), String("aXYbc"))
+    assert_equal(ed.caret_count(), 3)
+    for c in ed.selections:
+        assert_equal(c.col, 3)
+
+
+def test_paste_two_carets_same_row_shifts_correctly() raises:
+    # Both carets on one row: the second one's column has to be shifted
+    # by what the first caret's paste inserted ahead of it.
+    var ed = Editor(String("abcdef\n"))
+    ed.selections[0].row = 0
+    ed.selections[0].col = 1
+    ed.selections[0].anchor_row = 0
+    ed.selections[0].anchor_col = 1
+    ed._add_caret(Caret(0, 4, 4, 0, 4))
+    ed.paste_text(String("XY"))
+    assert_equal(ed.buffer.line(0), String("aXYbcdXYef"))
+    assert_equal(ed.caret_count(), 2)
+    assert_equal(ed.selections[0].col, 3)
+    assert_equal(ed.selections[1].col, 8)
+
+
+def test_paste_replaces_each_carets_selection() raises:
+    var ed = Editor(String("foo bar\nbaz qux\n"))
+    ed.selections[0].anchor_row = 0
+    ed.selections[0].anchor_col = 0
+    ed.selections[0].row = 0
+    ed.selections[0].col = 3
+    ed._add_caret(Caret(1, 3, 3, 1, 0))
+    ed.paste_text(String("XY"))
+    assert_equal(ed.buffer.line(0), String("XY bar"))
+    assert_equal(ed.buffer.line(1), String("XY qux"))
+    assert_false(ed.has_selection())
+
+
+def test_paste_distributes_when_line_count_matches_caret_count() raises:
+    # Three carets + a three-line clipboard: caret i gets line i, in
+    # canonical top-to-bottom order.
+    var ed = Editor(String("a\nb\nc\n"))
+    ed.selections[0].row = 0
+    ed.selections[0].col = 1
+    ed.selections[0].anchor_row = 0
+    ed.selections[0].anchor_col = 1
+    ed._add_caret(Caret(1, 1, 1, 1, 1))
+    ed._add_caret(Caret(2, 1, 1, 2, 1))
+    ed.paste_clipboard_text(String("1\n2\n3\n"))
+    assert_equal(ed.buffer.line(0), String("a1"))
+    assert_equal(ed.buffer.line(1), String("b2"))
+    assert_equal(ed.buffer.line(2), String("c3"))
+    assert_equal(ed.caret_count(), 3)
+
+
+def test_paste_multiline_broadcast_renumbers_lower_carets() raises:
+    # Two carets, three clipboard lines → broadcast. The first caret's
+    # paste adds rows, so the second caret has to be renumbered before
+    # its own paste lands.
+    var ed = Editor(String("aaa\nbbb\nccc\n"))
+    ed.selections[0].row = 0
+    ed.selections[0].col = 1
+    ed.selections[0].anchor_row = 0
+    ed.selections[0].anchor_col = 1
+    ed._add_caret(Caret(2, 1, 1, 2, 1))
+    ed.paste_text(String("X\nY\nZ"))
+    assert_equal(ed.buffer.line(0), String("aX"))
+    assert_equal(ed.buffer.line(1), String("Y"))
+    assert_equal(ed.buffer.line(2), String("Zaa"))
+    assert_equal(ed.buffer.line(3), String("bbb"))
+    assert_equal(ed.buffer.line(4), String("cX"))
+    assert_equal(ed.buffer.line(5), String("Y"))
+    assert_equal(ed.buffer.line(6), String("Zcc"))
+    assert_equal(ed.caret_count(), 2)
+    assert_equal(ed.selections[0].row, 2)
+    assert_equal(ed.selections[0].col, 1)
+    assert_equal(ed.selections[1].row, 6)
+    assert_equal(ed.selections[1].col, 1)
+
+
+def test_paste_line_clipboard_inserts_above_each_caret() raises:
+    # A whole-line clipboard ("Z\n") with no selection keeps the
+    # single-caret semantic per caret: the line goes in above, the caret
+    # stays on its own text at the same column.
+    var ed = Editor(String("aaa\nbbb\nccc\n"))
+    ed.selections[0].row = 0
+    ed.selections[0].col = 1
+    ed.selections[0].anchor_row = 0
+    ed.selections[0].anchor_col = 1
+    ed._add_caret(Caret(1, 1, 1, 1, 1))
+    ed.paste_clipboard_text(String("Z\n"))
+    assert_equal(ed.buffer.line(0), String("Z"))
+    assert_equal(ed.buffer.line(1), String("aaa"))
+    assert_equal(ed.buffer.line(2), String("Z"))
+    assert_equal(ed.buffer.line(3), String("bbb"))
+    assert_equal(ed.buffer.line(4), String("ccc"))
+    assert_equal(ed.caret_count(), 2)
+    assert_equal(ed.selections[0].row, 1)
+    assert_equal(ed.selections[0].col, 1)
+    assert_equal(ed.selections[1].row, 3)
+    assert_equal(ed.selections[1].col, 1)
+
+
+def test_undo_restores_extras_after_paste() raises:
+    var ed = Editor(String("abc\nabc\n"))
+    ed.selections[0].row = 0
+    ed.selections[0].col = 1
+    ed.selections[0].anchor_row = 0
+    ed.selections[0].anchor_col = 1
+    ed._add_caret(Caret(1, 1, 1, 1, 1))
+    ed.paste_text(String("XY"))
+    assert_true(ed.undo())
+    assert_equal(ed.buffer.line(0), String("abc"))
+    assert_equal(ed.buffer.line(1), String("abc"))
+    assert_equal(ed.caret_count(), 2)
+
+
+def test_paste_empty_clipboard_with_carets_is_a_noop() raises:
+    var ed = Editor(String("abc\nabc\n"))
+    ed._add_caret(Caret(1, 0, 0, 1, 0))
+    ed.paste_text(String(""))
+    assert_equal(ed.buffer.line(0), String("abc"))
+    assert_false(ed.undo())
+
+
 def main() raises:
     test_primary_only_by_default()
     test_add_caret_below_then_above()
@@ -637,4 +772,12 @@ def main() raises:
     test_typing_two_selections_same_row_shifts_correctly()
     test_typing_falls_back_when_selection_crosses_rows()
     test_cross_row_selections_merge_when_they_touch()
+    test_paste_broadcasts_to_every_caret()
+    test_paste_two_carets_same_row_shifts_correctly()
+    test_paste_replaces_each_carets_selection()
+    test_paste_distributes_when_line_count_matches_caret_count()
+    test_paste_multiline_broadcast_renumbers_lower_carets()
+    test_paste_line_clipboard_inserts_above_each_caret()
+    test_undo_restores_extras_after_paste()
+    test_paste_empty_clipboard_with_carets_is_a_noop()
     print("All multi-cursor tests passed.")

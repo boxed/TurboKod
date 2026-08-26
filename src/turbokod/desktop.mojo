@@ -15426,6 +15426,11 @@ struct Desktop(Movable):
                 # this just advances — same UX as VS Code / JetBrains.
                 if self.windows.windows[idx].editor \
                         .selection_is_search_match(find, opts):
+                    # Replace is scoped to the one match under the
+                    # primary caret. ``paste_text`` broadcasts to every
+                    # caret, so drop any stale extras first — the match
+                    # the dialog found is a primary-caret selection.
+                    self.windows.windows[idx].editor.clear_extra_carets()
                     self.windows.windows[idx].editor.paste_text(replacement)
                 if self.windows.windows[idx].editor.find_next(find, opts):
                     self.windows.windows[idx].editor.reveal_cursor(

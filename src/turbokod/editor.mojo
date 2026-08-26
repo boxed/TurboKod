@@ -979,8 +979,9 @@ struct Editor(Copyable, Movable):
     pre-multi-cursor code. Bindings: Alt+click adds a caret, Ctrl+Alt+
     Up/Down stamps a caret one row above the topmost / below the
     bottommost existing caret, plain click drops back to a single caret.
-    Edits that don't generalise cleanly across rows (Enter, paste, cut,
-    comment toggle, replace-all, …) collapse the extras first.
+    Edits that don't generalise cleanly across rows (Enter, cut,
+    comment toggle, replace-all, …) collapse the extras first. Paste
+    does not — it broadcasts to every caret (``_multi_paste``).
     """
     var buffer: TextBuffer
     # Unified selection storage. Always non-empty; ``selections[0]`` is
@@ -2934,7 +2935,7 @@ struct Editor(Copyable, Movable):
     def clear_extra_carets(mut self):
         """Drop every extra caret. The primary keeps its position and
         selection. Called on plain mouse click, on collapsing
-        operations (Enter, paste, comment toggle, …), and from the
+        operations (Enter, cut, comment toggle, …), and from the
         host when the user presses Esc with no modal open."""
         if len(self.selections) > 1:
             var only_primary = List[Caret]()
@@ -2945,7 +2946,7 @@ struct Editor(Copyable, Movable):
         """When extras are present, push an undo snapshot capturing
         them and then drop them — so undo restores the multi-caret
         state. Used by ops that don't generalise to multi-caret
-        (Enter, paste, cut, comment toggle, …): each falls through
+        (Enter, cut, comment toggle, …): each falls through
         to the original single-caret code paths after this call,
         and those may push their own further undo steps. The user
         then walks back through both via repeated undo."""
@@ -7916,6 +7917,152 @@ struct Editor(Copyable, Movable):
             )
         self._install_carets(new_carets^)
 
+    def _any_caret_has_selection(self) -> Bool:
+        """True when at least one caret — primary or extra — has a non-empty
+        selection. ``has_selection`` only asks about the primary, which is
+        the wrong question for a multi-caret op."""
+        for c in self.selections:
+            if c.row != c.anchor_row or c.col != c.anchor_col:
+                return True
+        return False
+
+    def _paste_segments(self, text: String) -> List[String]:
+        """Split ``text`` on newlines, dropping the empty tail a trailing
+        newline produces — so a three-line clipboard is three segments
+        whether or not it ends in one."""
+        var out = List[String]()
+        var bytes = text.as_bytes()
+        var n = len(bytes)
+        var start = 0
+        var i = 0
+        while i < n:
+            if bytes[i] == 0x0A:
+                out.append(byte_slice(text, start, i))
+                start = i + 1
+            i += 1
+        if start < n:
+            out.append(byte_slice(text, start, n))
+        return out^
+
+    def _remap_past_edit(
+        self, r: Int, c: Int,
+        from_row: Int, from_col: Int, to_row: Int, to_col: Int,
+    ) -> Tuple[Int, Int]:
+        """Where ``(r, c)`` — a position in the *pre-edit* buffer at or after
+        ``(from_row, from_col)`` — now lives, given that the pre-edit
+        position ``(from_row, from_col)`` ended up at ``(to_row, to_col)``.
+
+        Everything at or after the edit's end is displaced identically:
+        by a whole number of rows, plus a byte offset that applies only to
+        the row the edit ended on. One such pair therefore captures the
+        cumulative effect of *every* edit before it, which is what lets
+        ``_multi_paste`` walk carets top-down carrying a single mapping."""
+        if r == from_row:
+            return (to_row, to_col + (c - from_col))
+        return (r + (to_row - from_row), c)
+
+    def _multi_paste(mut self, text: String, line_mode: Bool):
+        """Paste at every caret. Two shapes, matching Sublime Text:
+
+        * **Distribute** — the clipboard splits into exactly as many lines
+          as there are carets, so caret *i* (in canonical top-to-bottom
+          order) gets line *i*. This is the round trip for a column of
+          values: multi-select a column, copy it elsewhere, paste it back
+          into another column.
+        * **Broadcast** — otherwise every caret gets the whole clipboard,
+          newlines and all.
+
+        Each caret's selection (if any) is replaced, exactly as the
+        single-caret path does.
+
+        ``line_mode`` is ``paste_clipboard_text``'s whole-line-clipboard
+        flag. When it survives the distribute test, each caret gets the
+        lines inserted *above* its own row and keeps its column — the
+        multi-caret reading of the single-caret behavior.
+
+        Carets are walked top-down, remapping each one's coordinates
+        through ``_remap_past_edit`` before it is used, because an edit
+        renumbers every row below it and shifts the columns on the row it
+        ended on. (Walking bottom-up dodges the remap for the *edits* but
+        not for the resulting caret positions, which is the same problem
+        one step later.)"""
+        if self.read_only:
+            return
+        var carets = self._all_carets_asc()
+        var n = len(carets)
+        if len(text.as_bytes()) == 0 and not self._any_caret_has_selection():
+            return
+        var segs = self._paste_segments(text)
+        var distribute = n > 1 and len(segs) == n
+        var line_above = line_mode and not distribute
+        var pre_dirty_row = carets[0].row
+        self._push_undo()
+        var new_carets = List[Caret]()
+        # Mapping from pre-edit to current coordinates, established by the
+        # previous caret's edit. ``from_row < 0`` means "no edit yet".
+        var from_row = -1
+        var from_col = 0
+        var to_row = 0
+        var to_col = 0
+        for idx in range(n):
+            var c = carets[idx]
+            # Canonical (start <= end) selection range, pre-edit coords.
+            var osr = c.anchor_row
+            var osc = c.anchor_col
+            var oer = c.row
+            var oec = c.col
+            if (oer < osr) or (oer == osr and oec < osc):
+                osr = c.row
+                osc = c.col
+                oer = c.anchor_row
+                oec = c.anchor_col
+            var sr = osr
+            var sc = osc
+            var er = oer
+            var ec = oec
+            if from_row >= 0:
+                var ms = self._remap_past_edit(
+                    osr, osc, from_row, from_col, to_row, to_col,
+                )
+                sr = ms[0]
+                sc = ms[1]
+                var me = self._remap_past_edit(
+                    oer, oec, from_row, from_col, to_row, to_col,
+                )
+                er = me[0]
+                ec = me[1]
+            if sr != er or sc != ec:
+                self._delete_range(sr, sc, er, ec)
+            var piece = segs[idx] if distribute else text
+            var row: Int
+            var col: Int
+            if line_above:
+                var pl = self._insert_text_at(sr, 0, piece)
+                row = pl[0]
+                col = sc
+                var line_n = self.buffer.line_length(row)
+                if col > line_n:
+                    col = line_n
+                to_row = pl[0]
+                to_col = pl[1] + sc
+            else:
+                var pi = self._insert_text_at(sr, sc, piece)
+                row = pi[0]
+                col = pi[1]
+                to_row = pi[0]
+                to_col = pi[1]
+            from_row = oer
+            from_col = oec
+            new_carets.append(
+                Caret(
+                    row, col, utf8_cell_of_byte(self.buffer.line(row), col),
+                    row, col,
+                ),
+            )
+        self._install_carets(new_carets^)
+        self.dirty = True
+        self._mark_hl_dirty(pre_dirty_row)
+
     def apply_fill_strings(mut self, texts: List[String]) -> Bool:
         """Insert one string per caret, in canonical (ascending) caret
         order. Same row-shift accounting as ``_multi_edit_inline`` so
@@ -8984,9 +9131,10 @@ struct Editor(Copyable, Movable):
         elif chord == CLIP_PASTE:
             if self.read_only:
                 return True
-            self._collapse_extras_with_undo()
+            # Multi-caret paste is supported (``_multi_paste``), so no
+            # collapse here — the extras are what makes it a broadcast.
             self.paste_from_clipboard()
-            self._mark_hl_dirty(pre_dirty_row)
+            self._mark_hl_dirty(pre_dirty_row_multi)
         elif (UInt32(0x20) <= k and k < UInt32(0x7F)) \
                 or (UInt32(0xA0) <= k and k < UInt32(0xD800)) \
                 or k > UInt32(0xF8FF):
@@ -9206,8 +9354,14 @@ struct Editor(Copyable, Movable):
         """Replace any selection then insert ``text`` (newlines split lines).
         Pushes an undo step when there's something to do — a paste with
         empty clipboard and no selection is a no-op and won't disturb the
-        undo history. No-op when the editor is read-only."""
+        undo history. No-op when the editor is read-only.
+
+        With multiple cursors active the text lands at *every* caret —
+        see ``_multi_paste`` for the distribute-vs-broadcast rule."""
         if self.read_only:
+            return
+        if self.has_extra_carets():
+            self._multi_paste(text, False)
             return
         if len(text.as_bytes()) == 0 and not self.has_selection():
             return
@@ -9296,11 +9450,13 @@ struct Editor(Copyable, Movable):
         var bytes = text.as_bytes()
         var n = len(bytes)
         var line_mode = (
-            not self.has_selection()
+            not self._any_caret_has_selection()
             and n > 0
             and bytes[n - 1] == 0x0A
         )
-        if line_mode:
+        if self.has_extra_carets():
+            self._multi_paste(text, line_mode)
+        elif line_mode:
             self._paste_as_line(text)
         else:
             self.paste_text(text)
@@ -9591,30 +9747,39 @@ struct Editor(Copyable, Movable):
         self._mark_hl_dirty(sr, er)
         # _refresh_highlights() removed: render path flushes via Editor.flush_highlights
 
-    def _insert_text(mut self, text: String):
+    def _insert_text_at(
+        mut self, row: Int, col: Int, text: String,
+    ) -> Tuple[Int, Int]:
+        """Insert ``text`` at ``(row, col)`` — splitting the line on every
+        ``\\n`` — and return the position just past the inserted text.
+        Touches no caret, so a multi-caret loop can drive it once per
+        caret; ``_insert_text`` is the primary-caret wrapper."""
         var bytes = text.as_bytes()
+        var n = len(bytes)
+        var r = row
+        var c = col
         var line_start = 0
         var i = 0
-        while i < len(bytes):
+        while i < n:
             if bytes[i] == 0x0A:  # '\n'
                 if i > line_start:
-                    self.buffer.insert(
-                        self.selections[0].row, self.selections[0].col,
-                        byte_slice(text, line_start, i),
-                    )
-                    self.selections[0].col += i - line_start
-                var p = self.buffer.split(self.selections[0].row, self.selections[0].col)
-                self.move_to(p[0], p[1], False)
+                    self.buffer.insert(r, c, byte_slice(text, line_start, i))
+                    c += i - line_start
+                var p = self.buffer.split(r, c)
+                r = p[0]
+                c = p[1]
                 line_start = i + 1
             i += 1
-        if line_start < len(bytes):
-            var rest = byte_slice(text, line_start, len(bytes))
-            self.buffer.insert(self.selections[0].row, self.selections[0].col, rest)
-            self.move_to(
-                self.selections[0].row,
-                self.selections[0].col + (len(bytes) - line_start),
-                False,
-            )
+        if line_start < n:
+            self.buffer.insert(r, c, byte_slice(text, line_start, n))
+            c += n - line_start
+        return (r, c)
+
+    def _insert_text(mut self, text: String):
+        var p = self._insert_text_at(
+            self.selections[0].row, self.selections[0].col, text,
+        )
+        self.move_to(p[0], p[1], False)
 
     def longest_line_width(self) -> Int:
         """Widest line in *display columns* — used by the surrounding window
@@ -10134,10 +10299,12 @@ struct Editor(Copyable, Movable):
 
     # --- buffer-level helpers ---------------------------------------------
 
-    def _delete_selection(mut self):
-        var sel = self.selection()
-        var sr = sel[0]; var sc = sel[1]
-        var er = sel[2]; var ec = sel[3]
+    def _delete_range(mut self, sr: Int, sc: Int, er: Int, ec: Int):
+        """Excise the byte range ``(sr, sc)``–``(er, ec)`` from the buffer
+        without touching any caret. ``_delete_selection`` is the
+        caret-moving wrapper; the multi-caret paste path needs the raw
+        splice because it drives every caret's range itself and can't have
+        the primary yanked along the way."""
         if sr == er:
             var line = self.buffer.line(sr)
             self.buffer.lines[sr] = byte_slice(line, 0, sc) + byte_slice(line, ec, len(line.as_bytes()))
@@ -10149,7 +10316,11 @@ struct Editor(Copyable, Movable):
             self.buffer.lines[sr] = head + tail
             for _ in range(er - sr):
                 _ = self.buffer.lines.pop(sr + 1)
-        self.move_to(sr, sc, False)
+
+    def _delete_selection(mut self):
+        var sel = self.selection()
+        self._delete_range(sel[0], sel[1], sel[2], sel[3])
+        self.move_to(sel[0], sel[1], False)
 
     # --- cursor movement primitives ---------------------------------------
 
