@@ -173,7 +173,7 @@ struct OnSaveAction(Copyable, Movable):
 
 @fieldwise_init
 struct TurbokodConfig(Copyable, Movable):
-    """Global preferences. Defaults match the pre-config behavior."""
+    """Global preferences."""
     var line_numbers: Bool
     # Wrap mode: ``WRAP_NONE`` / ``WRAP_SOFT`` / ``WRAP_SMART`` (see the
     # module-level constants). Replaces the old binary ``soft_wrap`` bool;
@@ -282,11 +282,11 @@ struct TurbokodConfig(Copyable, Movable):
     var language_servers: List[LanguageServerOverride]
 
     def __init__(out self):
-        self.line_numbers = False
+        self.line_numbers = True
         self.wrap_mode = WRAP_NONE
         self.smart_wrap_comma_threshold = -1
-        self.git_changes = False
-        self.tab_bar = False
+        self.git_changes = True
+        self.tab_bar = True
         self.minimap = True
         self.sticky_scroll = True
         self.auto_save = True

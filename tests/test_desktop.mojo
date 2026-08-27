@@ -2163,6 +2163,9 @@ def test_desktop_resize_reapplies_clipped_session_rect() raises:
     assert_true(save_session(root, s))
     var d = Desktop()
     d.open_project(root)
+    # Pin the tab bar off: this test is about session-rect refitting, and
+    # the tab bar's row would shift every expected coordinate below.
+    d.config.tab_bar = False
     d._pending_restore = False
     # First restore at the cramped 80x24 workspace clips ay from 8 to 7.
     d._restore_session(Rect(0, 0, 80, 24))
