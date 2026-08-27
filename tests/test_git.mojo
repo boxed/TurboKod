@@ -67,7 +67,8 @@ from turbokod.posix import kill_pid, sleep_ms, wall_clock_ms, which
 from turbokod.config import WRAP_NONE
 from turbokod.events import (
     Event, KEY_BACKSPACE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME,
-    KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_SPACE, MOD_CTRL,
+    KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_SPACE, KEY_UP,
+    MOD_CTRL,
     MOD_META, MOD_SHIFT, MOUSE_BUTTON_LEFT
 )
 from turbokod.geometry import Point, Rect
@@ -3721,6 +3722,101 @@ def test_local_changes_failure_shows_the_whole_output() raises:
     assert_equal(lc.overlay, _OVERLAY_NONE)
 
 
+def test_local_changes_output_overlay_url_is_clickable() raises:
+    """A push whose remote answers with a "create a pull request by
+    visiting <url>" line puts that URL in the full-screen output log.
+    It has to paint as an underlined blue link and open in the browser
+    on click — the log is on screen precisely so the user can act on
+    what it says."""
+    var lc = LocalChanges()
+    lc.open(String("/tmp"))
+    var registry = GrammarRegistry()
+    var screen = Rect(0, 0, 100, 30)
+    lc._open_output_overlay(
+        String(
+            "remote: Create a pull request for 'feature-x' by visiting:\n"
+            "remote:   https://example.com/o/r/pull/new/feature-x\n"
+            "To example.com:o/r.git\n"
+        )
+    )
+    var canvas = Canvas(screen.width(), screen.height())
+    lc.paint(canvas, screen, registry)
+    var bounds = lc._panel_rect(screen)
+    var rect = lc._output_overlay_rect(bounds)
+    # Three lines in a tall viewport: no scroll, so row N of the text is
+    # row N of the body.
+    var y = rect.a.y + 1 + 1
+    var x0 = rect.a.x + 2 + display_columns(String("remote:   "))
+    var link = canvas.get(x0, y)
+    assert_equal(link.glyph, String("h"))
+    assert_true((link.attr.style & STYLE_UNDERLINE) != 0)
+    assert_equal(link.attr.fg, LIGHT_BLUE)
+    # The ``remote:`` prefix before it stays plain.
+    assert_true((canvas.get(x0 - 1, y).attr.style & STYLE_UNDERLINE) == 0)
+    # Clicking anywhere in the span queues the whole URL.
+    _ = lc.handle_mouse(
+        Event.mouse_event(Point(x0 + 5, y), MOUSE_BUTTON_LEFT, True, False),
+        screen, registry,
+    )
+    assert_equal(
+        lc.consume_open_url(),
+        String("https://example.com/o/r/pull/new/feature-x"),
+    )
+    assert_equal(len(lc.consume_open_url().as_bytes()), 0)
+    # The overlay stays up — following the link isn't dismissing the log.
+    assert_equal(lc.overlay, _OVERLAY_OUTPUT)
+    # A click off the link is swallowed like every other modal click.
+    _ = lc.handle_mouse(
+        Event.mouse_event(Point(x0 - 1, y), MOUSE_BUTTON_LEFT, True, False),
+        screen, registry,
+    )
+    assert_equal(len(lc.consume_open_url().as_bytes()), 0)
+
+
+def test_local_changes_output_overlay_links_follow_the_scroll() raises:
+    """Link spans are rebuilt by paint, after the scroll clamp — so a
+    scrolled log hit-tests against the rows actually on screen rather
+    than the ones that were there when the overlay opened."""
+    var lc = LocalChanges()
+    lc.open(String("/tmp"))
+    var registry = GrammarRegistry()
+    # A short screen so the body viewport is only a handful of rows.
+    var screen = Rect(0, 0, 100, 10)
+    var text = String("")
+    for i in range(20):
+        text += String("filler ") + String(i) + String("\n")
+    # No trailing newline: ``split_lines`` keeps a final empty entry, and
+    # this test wants the URL on the very last row.
+    text += String("see https://example.com/done")
+    lc._open_output_overlay(text^)
+    var canvas = Canvas(screen.width(), screen.height())
+    # Opens pinned to the bottom, so the URL is on the last body row.
+    lc.paint(canvas, screen, registry)
+    var bounds = lc._panel_rect(screen)
+    var rect = lc._output_overlay_rect(bounds)
+    var x0 = rect.a.x + 2 + display_columns(String("see "))
+    # Last body row: the frame's bottom two rows are the hint / border.
+    var y = rect.a.y + rect.height() - 2
+    assert_equal(canvas.get(x0, y).glyph, String("h"))
+    _ = lc.handle_mouse(
+        Event.mouse_event(Point(x0, y), MOUSE_BUTTON_LEFT, True, False),
+        screen, registry,
+    )
+    assert_equal(
+        lc.consume_open_url(), String("https://example.com/done"),
+    )
+    # Scroll the URL off the bottom; the same screen position must no
+    # longer be a link.
+    _ = lc.handle_key(_key(KEY_UP), screen, registry)
+    lc.paint(canvas, screen, registry)
+    assert_equal(len(lc._output_links), 0)
+    _ = lc.handle_mouse(
+        Event.mouse_event(Point(x0, y), MOUSE_BUTTON_LEFT, True, False),
+        screen, registry,
+    )
+    assert_equal(len(lc.consume_open_url().as_bytes()), 0)
+
+
 def test_local_changes_flash_expires_on_its_own() raises:
     """The flash ages out without any input — that's what makes it
     non-blocking rather than just quieter."""
@@ -3885,6 +3981,8 @@ def main() raises:
     test_deploy_log_promotes_the_spinner_to_full_screen()
     test_local_changes_success_flashes_without_a_modal()
     test_local_changes_failure_shows_the_whole_output()
+    test_local_changes_output_overlay_url_is_clickable()
+    test_local_changes_output_overlay_links_follow_the_scroll()
     test_local_changes_flash_expires_on_its_own()
     test_local_changes_shift_m_asks_merge_commit_or_straight_history()
     test_local_changes_merge_choice_m_spawns_a_no_ff_merge()

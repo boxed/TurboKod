@@ -60,10 +60,13 @@ per-subcommand regexes for what "boring" looks like):
 * *Success with something to say* — a ``pre-push`` hook, or a Dokku-style
   remote streaming a deploy log back over ``remote:``. The output opens
   full screen (``_OVERLAY_OUTPUT``), scrolled to the bottom and
-  scrollable, and waits for ESC. While such a child is still *running*,
-  ``_promote_if_interesting`` also grows the corner spinner into the same
-  full-screen frame, so a two-minute deploy is watchable live rather than
-  summarized afterwards.
+  scrollable, and waits for ESC. Its ``http(s)://`` spans paint as
+  underlined blue links and open in the browser when clicked — a push
+  that answers with "create a pull request by visiting <url>" is the
+  reason the log is on screen at all. While such a child is still
+  *running*, ``_promote_if_interesting`` also grows the corner spinner
+  into the same full-screen frame, so a two-minute deploy is watchable
+  live rather than summarized afterwards.
 * *Failure* — same full-screen output view, for the same reason: nothing
   on screen changed to explain it.
 
@@ -95,7 +98,7 @@ from .highlight import (
     GrammarRegistry, Highlight, HighlightCache,
     extension_of, highlight_for_extension_cached,
 )
-from .output_links import extract_url_links
+from .output_links import OutputLink, extract_url_links
 from .painter import Painter
 from .file_io import ci_less, join_path, read_file
 from .window import (
@@ -1335,6 +1338,16 @@ struct LocalChanges(Movable):
     # part you want is what the command said last.
     var overlay_output: String
     var overlay_output_scroll: Int
+    # ``http(s)://`` spans in the *visible* rows of that scrollback, in
+    # absolute screen coordinates. A remote that answers a push with a
+    # "create a pull request by visiting <url>" line is the common case,
+    # and the whole point of promoting the log full-screen is that the
+    # user acts on what it says. Rebuilt from scratch by every paint of
+    # the overlay (which is also where the scroll is clamped, so it's the
+    # only place that knows which rows are on screen) and read by the
+    # click hit-test — same paint-populates-links contract the debug and
+    # test panes use.
+    var _output_links: List[OutputLink]
     # Which shape of "boring" output the op in flight is expected to
     # print, plus whether we've already decided this one isn't boring.
     # Sticky: once promoted, we stop re-classifying, so a long deploy log
@@ -1457,6 +1470,7 @@ struct LocalChanges(Movable):
         self._flash_until_ms = 0
         self.overlay_output = String("")
         self.overlay_output_scroll = 0
+        self._output_links = List[OutputLink]()
         self._output_kind = GIT_OUT_OTHER
         self._output_matchers = GitOutputMatchers()
         self._output_promoted = False
@@ -1530,6 +1544,7 @@ struct LocalChanges(Movable):
         self._flash_until_ms = 0
         self.overlay_output = String("")
         self.overlay_output_scroll = 0
+        self._output_links = List[OutputLink]()
         self._output_kind = GIT_OUT_OTHER
         self._output_promoted = False
         self.sidebar_dock.reset()
@@ -1767,6 +1782,7 @@ struct LocalChanges(Movable):
         self._flash_until_ms = 0
         self.overlay_output = String("")
         self.overlay_output_scroll = 0
+        self._output_links = List[OutputLink]()
         self._output_kind = GIT_OUT_OTHER
         self._output_promoted = False
         self.sidebar_dock.reset()
@@ -2606,7 +2622,12 @@ struct LocalChanges(Movable):
         Clamps ``overlay_output_scroll`` here rather than in the key
         handler: paint is the only place that knows the viewport height,
         and the overlay opens with the scroll deliberately over-large to
-        mean "start at the bottom"."""
+        mean "start at the bottom".
+
+        Also rebuilds ``_output_links`` — the URL spans the click
+        hit-test reads — for the same reason: which rows are on screen
+        is only settled once the clamp above has run."""
+        self._output_links = List[OutputLink]()
         var rect = self._output_overlay_rect(container_bounds)
         if rect.width() < 8 or rect.height() < 4:
             return
@@ -2631,14 +2652,33 @@ struct LocalChanges(Movable):
             self.overlay_output_scroll = max_scroll
         if self.overlay_output_scroll < 0:
             self.overlay_output_scroll = 0
+        # Body rows, each scanned for ``http(s)://`` spans that are
+        # stamped underlined-blue over the text already painted (an
+        # attr-only write, so the glyphs stay put) and recorded for the
+        # click hit-test. The overlay doesn't scroll horizontally, so a
+        # cell offset into the line is a screen column plus ``body_x``.
+        var body_x = rect.a.x + 2
+        var x_max = rect.b.x
+        var link_attr = Attr(LIGHT_BLUE, LIGHT_GRAY, STYLE_UNDERLINE)
         for i in range(view_h):
             var idx = self.overlay_output_scroll + i
             if idx >= len(lines):
                 break
-            _ = painter.put_text(
-                canvas, Point(rect.a.x + 2, rect.a.y + 1 + i),
-                lines[idx], text_attr,
-            )
+            var y = rect.a.y + 1 + i
+            _ = painter.put_text(canvas, Point(body_x, y), lines[idx], text_attr)
+            var hits = extract_url_links(lines[idx])
+            for h in range(len(hits)):
+                var x0 = body_x + hits[h].cell_start
+                var x1 = body_x + hits[h].cell_end
+                if x0 >= x_max:
+                    continue
+                if x1 > x_max:
+                    x1 = x_max
+                for x in range(x0, x1):
+                    painter.set_attr(canvas, x, y, link_attr)
+                self._output_links.append(
+                    OutputLink(y, x0, x1, hits[h].path, -1, True)
+                )
         var hint = String(" Up/Down/PgUp/PgDn: scroll   ESC / Enter: close ")
         var hx = rect.b.x - display_columns(hint) - 1
         if hx < rect.a.x + 1:
@@ -2646,6 +2686,23 @@ struct LocalChanges(Movable):
         _ = painter.put_text(
             canvas, Point(hx, rect.b.y - 1), hint, frame,
         )
+
+    def _handle_output_overlay_mouse(mut self, event: Event):
+        """Open the URL under a click in the full-screen output log.
+
+        Spans come from the last paint (``_output_links``), so they're
+        already in absolute screen coordinates and already clipped to the
+        overlay. Guarded to the first press of a click so a double-click
+        can't launch two browser tabs — same rule as the info panel."""
+        if event.button != MOUSE_BUTTON_LEFT or not event.pressed \
+                or event.motion or Int(event.click_count) >= 2:
+            return
+        for i in range(len(self._output_links)):
+            var link = self._output_links[i]
+            if event.pos.y == link.y and event.pos.x >= link.x_start \
+                    and event.pos.x < link.x_end:
+                self.pending_open_url = link.path
+                return
 
     def _scroll_output_overlay(mut self, delta: Int):
         """Move the log viewport. The clamp lives in paint (which knows the
@@ -4169,6 +4226,7 @@ struct LocalChanges(Movable):
         self.overlay_message = String("")
         self.overlay_output = String("")
         self.overlay_output_scroll = 0
+        self._output_links = List[OutputLink]()
         # Queued-but-unconfirmed targets die with the overlay.
         # ``_confirm_delete_branch`` takes its copy before closing.
         if self._git_op != _GITOP_BRANCH_DELETE:
@@ -5125,6 +5183,14 @@ struct LocalChanges(Movable):
         # a look first; everything it doesn't claim is still swallowed.
         if self.overlay == _OVERLAY_EDIT_MSG:
             self._handle_edit_msg_mouse(event, container_bounds)
+            return True
+        # The full-screen output log has the other clickable part: the
+        # ``http(s)://`` spans paint underlined there, and a remote that
+        # ends a push with "create a pull request by visiting <url>" is
+        # exactly the case the log is promoted full-screen for. Anything
+        # that isn't a link stays swallowed like the rest of the modals.
+        if self.overlay == _OVERLAY_OUTPUT:
+            self._handle_output_overlay_mouse(event)
             return True
         if self.overlay != _OVERLAY_NONE:
             return True
