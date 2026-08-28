@@ -2893,7 +2893,17 @@ struct Editor(Copyable, Movable):
             self.buffer.line(self.selections[0].row),
             self.selections[0].col,
         )
-        self.dirty = True
+        # A restore is the one mutation that can land the buffer back on
+        # the last-saved bytes, and that state is genuinely unmodified.
+        # Raising ``dirty`` unconditionally there made focus-out autosave
+        # rewrite a byte-identical file — bumping its mtime and re-running
+        # the on-save formatters for an edit the user had taken back — and
+        # left the modified marker up with nothing to save. So compare
+        # what a save would write against the baseline instead of assuming
+        # every restore is a change. The extra serialization is noise
+        # against what ``_restore`` already costs: it copies every line
+        # and forces a full retokenize below.
+        self.dirty = not self.matches_disk_baseline()
         # Undo/redo restores the entire buffer; we don't know which
         # rows differ from the post-state we last tokenized, so we
         # force a full retokenize. Could narrow this by diffing
@@ -4422,6 +4432,19 @@ struct Editor(Copyable, Movable):
                 append_string_bytes(buf, sep)
             append_string_bytes(buf, line)
         return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=len(buf))))
+
+    def matches_disk_baseline(self) -> Bool:
+        """True when a ``save`` right now would write exactly the bytes
+        already recorded in ``disk_baseline`` — i.e. the buffer is back
+        on the last-saved (or as-loaded) content.
+
+        One asymmetry worth knowing: for a *loaded* file whose content
+        needs trimming or a final newline, ``disk_baseline`` holds the
+        raw file while ``_disk_text`` holds the normalized form, so such
+        a buffer reads as modified even with no edits. That's the
+        conservative direction — a save really would change the file.
+        """
+        return self._disk_text() == self.disk_baseline
 
     def save(mut self) raises -> Bool:
         """Write the buffer back to ``file_path``. Returns False if the

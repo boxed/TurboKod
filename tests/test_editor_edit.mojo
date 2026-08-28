@@ -2277,6 +2277,47 @@ def test_undo_history_still_honors_the_entry_cap() raises:
     assert_true(ed.undo())
 
 
+def test_undo_back_to_saved_content_clears_dirty() raises:
+    """Undoing back to the last-saved bytes leaves the buffer *clean*.
+
+    ``dirty`` used to be a pure mutation flag, so a restore raised it
+    unconditionally: undo-to-original left the modified marker up and
+    made focus-out autosave rewrite a byte-identical file, bumping its
+    mtime and re-running the on-save formatters for an edit the user had
+    taken back. Redo has to put the flag back.
+    """
+    var path = _temp_path(String("_undo_clean.txt"))
+    assert_true(write_file(path, String("alpha\nbeta\n")))
+    var ed = Editor.from_file(path)
+    assert_false(ed.dirty)
+
+    ed.move_to(0, 0, False)
+    _ = ed.handle_key(_key(UInt32(ord("X"))), _VIEW)
+    assert_true(ed.dirty)
+    assert_equal(ed.buffer.line(0), String("Xalpha"))
+
+    assert_true(ed.undo())
+    assert_equal(ed.buffer.line(0), String("alpha"))
+    assert_false(ed.dirty)
+
+    # Redo re-applies the edit, so the buffer is modified again.
+    assert_true(ed.redo())
+    assert_equal(ed.buffer.line(0), String("Xalpha"))
+    assert_true(ed.dirty)
+
+    # The baseline follows the last *save*, not the load: undoing past a
+    # saved edit is still a modification.
+    assert_true(ed.save())
+    assert_false(ed.dirty)
+    assert_true(ed.undo())
+    assert_equal(ed.buffer.line(0), String("alpha"))
+    assert_true(ed.dirty)
+    assert_true(ed.redo())
+    assert_false(ed.dirty)
+
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
 def main() raises:
     setup_test_env()
     test_editor_fold_collapse()
@@ -2387,4 +2428,5 @@ def main() raises:
     test_kwarg_conceal_build_segment_collapses_and_shifts()
     test_undo_history_is_capped_by_bytes_not_just_entries()
     test_undo_history_still_honors_the_entry_cap()
-    print("editor_edit: 108 tests passed")
+    test_undo_back_to_saved_content_clears_dirty()
+    print("editor_edit: 109 tests passed")
