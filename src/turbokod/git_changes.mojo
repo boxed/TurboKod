@@ -23,7 +23,8 @@ from .diff import DiffOp, diff_lines
 from .file_io import find_git_project, join_path, project_relative, stat_file
 from .lsp import capture_command
 from .string_utils import (
-    parse_int_all, split_lines, split_lines_no_trailing, starts_with,
+    parse_int_all, percent_encode_uri_path, split_lines,
+    split_lines_no_trailing, starts_with,
 )
 
 
@@ -1291,6 +1292,159 @@ def main_line_branch(project_root: String) -> String:
         if lines[i] == String("master"):
             found_master = True
     return String("master") if found_master else String("")
+
+
+def branch_push_remote(project_root: String, branch: String) -> String:
+    """The remote ``branch`` would push to: its configured
+    ``branch.<name>.remote``, or ``origin`` when it has no upstream yet.
+
+    Same resolution ``git push`` uses, which is the right one for "where
+    would a pull request for this branch live" — a branch tracking a fork
+    belongs to that fork, not to whatever ``origin`` happens to be."""
+    if len(project_root.as_bytes()) == 0 or len(branch.as_bytes()) == 0:
+        return String("origin")
+    var args = List[String]()
+    args.append(String("config"))
+    args.append(String("--get"))
+    args.append(String("branch.") + branch + String(".remote"))
+    var configured = _trim_one_line(_git_stdout(project_root, args^))
+    return configured^ if len(configured.as_bytes()) > 0 else String("origin")
+
+
+def fetch_git_remote_url(project_root: String, remote: String) -> String:
+    """``git remote get-url <remote>``, trimmed to one line. Empty when
+    the remote isn't configured."""
+    if len(project_root.as_bytes()) == 0 or len(remote.as_bytes()) == 0:
+        return String("")
+    var args = List[String]()
+    args.append(String("remote"))
+    args.append(String("get-url"))
+    args.append(remote)
+    return _trim_one_line(_git_stdout(project_root, args^))
+
+
+def _strip_uri_scheme(url: String) -> String:
+    """Drop a leading ``https://`` / ``http://`` / ``ssh://`` / ``git://``
+    scheme. Returns ``url`` unchanged for the scp-style
+    ``git@host:path`` form, which has no scheme."""
+    var schemes = List[String]()
+    schemes.append(String("https://"))
+    schemes.append(String("http://"))
+    schemes.append(String("ssh://"))
+    schemes.append(String("git+ssh://"))
+    schemes.append(String("git://"))
+    for i in range(len(schemes)):
+        if starts_with(url, schemes[i]):
+            var n = len(schemes[i].as_bytes())
+            return String(StringSpan(unsafe_from_utf8=url.as_bytes()[n:]))
+    return url
+
+
+def github_repo_web_url(remote_url: String) -> String:
+    """``https://github.com/<owner>/<repo>`` for a GitHub remote, or the
+    empty string when ``remote_url`` doesn't point at one.
+
+    Covers the shapes git actually hands back: scp-style
+    ``git@github.com:owner/repo.git``, ``https://github.com/owner/repo.git``,
+    and ``ssh://git@ssh.github.com:443/owner/repo.git``. Userinfo, an
+    explicit port, a trailing slash and the ``.git`` suffix are all
+    stripped.
+
+    Anything else — GitLab, a self-hosted forge, a local path, a GitHub
+    Enterprise host — returns empty *by design*: the caller's next step is
+    a github.com-shaped URL, and guessing the path scheme for another
+    forge would open a 404. Better to say "no GitHub remote" than to
+    launch a browser at nothing.
+    """
+    var s = _strip_uri_scheme(remote_url)
+    var b = s.as_bytes()
+    var n = len(b)
+    if n == 0:
+        return String("")
+    # Everything below indexes into ``b`` rather than reassigning ``s``:
+    # rebinding the string invalidates the span borrowed from it, so the
+    # parse carries offsets instead of shrinking a working copy.
+    #
+    # Userinfo (``git@``, or a ``token:secret@`` pair) runs to the first
+    # ``@`` before any ``/``. Only ``/`` ends the search — a colon can be
+    # userinfo's own user/password separator, so stopping at one would
+    # mistake ``x-token:secret@github.com`` for a host named ``x-token``.
+    var base = 0
+    var i = 0
+    while i < n:
+        if b[i] == 0x40:            # '@'
+            base = i + 1
+            break
+        if b[i] == 0x2F:            # '/' — into the path, no userinfo
+            break
+        i += 1
+    # Host runs to the first ``/`` (URL form) or ``:`` (scp form, or a port).
+    var cut = -1
+    i = base
+    while i < n:
+        if b[i] == 0x2F or b[i] == 0x3A:
+            cut = i
+            break
+        i += 1
+    if cut <= base or cut + 1 >= n:
+        return String("")
+    var host = String(StringSpan(unsafe_from_utf8=b[base:cut]))
+    var pstart = cut + 1
+    # ``:443/owner/repo`` — a port, not the scp form's path. Told apart by
+    # the digits-then-slash shape; an scp path starts with the owner name,
+    # and a GitHub owner can't be all digits.
+    if b[cut] == 0x3A:
+        var j = pstart
+        while j < n and Int(b[j]) >= 0x30 and Int(b[j]) <= 0x39:
+            j += 1
+        if j > pstart and j < n and b[j] == 0x2F:
+            pstart = j + 1
+    if host != String("github.com") and host != String("www.github.com") \
+            and host != String("ssh.github.com"):
+        return String("")
+    # Trailing slashes, then the ``.git`` suffix.
+    var end = n
+    while end > pstart and b[end - 1] == 0x2F:
+        end -= 1
+    if end - pstart >= 4 and b[end - 4] == 0x2E and b[end - 3] == 0x67 \
+            and b[end - 2] == 0x69 and b[end - 1] == 0x74:
+        end -= 4
+    if end <= pstart:
+        return String("")
+    # ``owner/repo`` exactly — one separator, both halves non-empty. A
+    # deeper path (``/tree/main``) isn't a repo root and would produce a
+    # bogus compare URL.
+    var slashes = 0
+    var slash_at = -1
+    for k in range(pstart, end):
+        if b[k] == 0x2F:
+            slashes += 1
+            slash_at = k
+    if slashes != 1 or slash_at == pstart or slash_at == end - 1:
+        return String("")
+    return String("https://github.com/") \
+        + String(StringSpan(unsafe_from_utf8=b[pstart:end]))
+
+
+def github_compare_url(project_root: String, branch: String) -> String:
+    """GitHub's "open a pull request" page for ``branch``, or the empty
+    string when the branch's push remote isn't a GitHub one.
+
+    ``/compare/<branch>?expand=1`` compares the repo's *default* branch
+    against ``branch`` and lands with the pull-request form already
+    expanded, so the page is one button away from an actual PR. The branch
+    name is percent-encoded with ``/`` left literal — ``feature/thing`` is
+    a real path in the compare URL, not an escape."""
+    if len(project_root.as_bytes()) == 0 or len(branch.as_bytes()) == 0:
+        return String("")
+    var remote = branch_push_remote(project_root, branch)
+    var base = github_repo_web_url(
+        fetch_git_remote_url(project_root, remote),
+    )
+    if len(base.as_bytes()) == 0:
+        return String("")
+    return base + String("/compare/") + percent_encode_uri_path(branch) \
+        + String("?expand=1")
 
 
 comptime _SQUASH_SCAN_COMMITS: Int = 500

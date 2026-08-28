@@ -20,6 +20,9 @@ The left sidebar stacks three panels:
   ``git_changes.branch_is_merged``, which compares *content* — a
   rebased or squash-merged branch counts as merged even though its
   commits carry different SHAs and ``git branch -d`` would refuse it.
+  ``o`` opens the branch's GitHub compare page — the create-a-pull-
+  request form — in the browser, for any branch other than
+  ``main`` / ``master`` in a repo whose push remote is on github.com.
 * **Commits** — the last 50 commits on whichever ref is reachable from
   ``HEAD``.
 
@@ -115,6 +118,7 @@ from .git_changes import (
     fetch_git_branches, fetch_git_commits, fetch_git_status,
     fetch_merged_commits,
     format_age,
+    github_compare_url,
     main_line_branch,
     git_state_mtimes, GitStateMtimes,
     parse_unified_diff_files,
@@ -1421,8 +1425,9 @@ struct LocalChanges(Movable):
     # (c / A / d / p / P), so type-to-jump only fires on Branches /
     # Commits — wiring the Files pane would silently steal those
     # action shortcuts from active git workflows. Branches makes the
-    # same trade for two letters: ``M`` (merge) and ``d`` (delete) are
-    # actions there and never reach the prefix buffer.
+    # same trade for three letters: ``M`` (merge), ``d`` (delete) and
+    # ``o`` (open GitHub compare) are actions there and never reach the
+    # prefix buffer.
     var _type_ahead: TypeAhead
     # Async runner for the slow git ops (commit / push / pull / amend /
     # revert). The UI used to call ``git_commit`` / ``git_push`` etc.
@@ -2425,7 +2430,7 @@ struct LocalChanges(Movable):
             )
         elif self.focus == _PANE_BRANCHES:
             hint = String(
-                " Space:switch  M:merge  d:delete  Right:log  ⌘C:copy  ESC:close ",
+                " Space:switch  M:merge  d:delete  o:compare  Right:log  ⌘C:copy  ESC:close ",
             )
         else:
             hint = String(
@@ -3790,8 +3795,8 @@ struct LocalChanges(Movable):
         if k == KEY_SPACE:
             self._handle_space(bounds)
             return True
-        # Branch-pane git operations: M / d. Placed before the
-        # type-to-jump block below, which means those two letters no
+        # Branch-pane git operations: M / d / o. Placed before the
+        # type-to-jump block below, which means those three letters no
         # longer jump the cursor on this pane — the same trade the Files
         # pane already makes for c / A / d / p / P.
         if self.focus == _PANE_BRANCHES:
@@ -3800,6 +3805,9 @@ struct LocalChanges(Movable):
                 return True
             if k == UInt32(0x64):       # 'd' → delete branch
                 self._delete_selected_branch()
+                return True
+            if k == UInt32(0x6F):       # 'o' → open GitHub compare page
+                self._open_branch_compare()
                 return True
         # Commits pane: 'e' → edit the selected commit's message. Same
         # trade as the other panes' bare letters — 'e' no longer
@@ -4706,6 +4714,44 @@ struct LocalChanges(Movable):
             self.overlay_message = String("Delete ") + br.name \
                 + String("? NOT merged into ") + main \
                 + String("; commits will be lost.")
+
+    def _open_branch_compare(mut self):
+        """``o`` on the Branches panel: open the selected branch's GitHub
+        compare page, which is the create-a-pull-request form with base
+        set to the repo's default branch.
+
+        Refused for ``main`` / ``master`` — the compare against the base
+        branch itself is empty, so the keystroke would open a page with
+        nothing on it. Also refused when the branch's push remote isn't
+        GitHub, where saying so beats launching a browser at a URL scheme
+        that forge doesn't use.
+
+        The URL goes into ``pending_open_url`` rather than straight to
+        ``open_url``: the browser launch belongs on the Desktop side, out
+        of the key-dispatch path, and that's the same route the clickable
+        URLs in the branch log already take.
+        """
+        if self.sel_branch < 0 or self.sel_branch >= len(self.branches):
+            self._show_status(String("No branch selected."), False)
+            return
+        var br = self.branches[self.sel_branch]
+        if br.name == String("main") or br.name == String("master"):
+            self._show_status(
+                String("Nothing to compare — ") + br.name
+                + String(" is the base branch."),
+                False,
+            )
+            return
+        var url = github_compare_url(self.root, br.name)
+        if len(url.as_bytes()) == 0:
+            self._show_status(
+                String("No GitHub remote for this repo."), False,
+            )
+            return
+        self.pending_open_url = url^
+        self._show_status(
+            String("Opening compare for ") + br.name + String("…"), True,
+        )
 
     def _confirm_delete_branch(mut self):
         var name = self._git_delete_branch.copy()

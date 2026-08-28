@@ -56,6 +56,7 @@ from turbokod.git_changes import (
     create_reworded_commit, fetch_commit_message, fetch_commit_show,
     fetch_git_branches, fetch_git_commits,
     fetch_git_status, fetch_merged_commits, format_age, git_state_mtimes,
+    github_compare_url, github_repo_web_url,
     has_merge_between, head_short_sha, main_line_branch, stage_file,
     unstage_file
 )
@@ -4137,6 +4138,182 @@ def test_local_changes_staging_a_line_lands_on_the_next_change() raises:
     registry.release()
     _rm_rf(dir)
 
+def test_github_repo_web_url_parses_every_remote_shape() raises:
+    """``github_repo_web_url`` normalizes the remote forms git hands back
+    into one ``https://github.com/owner/repo``, and answers empty for
+    anything that isn't a github.com repo root.
+
+    The empty answers matter as much as the parses: the caller turns this
+    into a github.com-shaped ``/compare/`` URL, so a GitLab or
+    self-hosted remote has to fall through to "no GitHub remote" rather
+    than open a browser at a path that forge doesn't serve."""
+    var want = String("https://github.com/boxed/TurboKod")
+    # scp-style, the default for an SSH clone.
+    assert_equal(
+        github_repo_web_url(String("git@github.com:boxed/TurboKod.git")), want,
+    )
+    # No ``.git`` suffix.
+    assert_equal(
+        github_repo_web_url(String("git@github.com:boxed/TurboKod")), want,
+    )
+    # HTTPS, with and without the suffix / a trailing slash.
+    assert_equal(
+        github_repo_web_url(String("https://github.com/boxed/TurboKod.git")),
+        want,
+    )
+    assert_equal(
+        github_repo_web_url(String("https://github.com/boxed/TurboKod/")),
+        want,
+    )
+    # A token in the userinfo is stripped, not leaked into the web URL.
+    assert_equal(
+        github_repo_web_url(
+            String("https://x-token:secret@github.com/boxed/TurboKod.git"),
+        ),
+        want,
+    )
+    # ``ssh://`` with an explicit port — the firewall-friendly 443 form.
+    assert_equal(
+        github_repo_web_url(
+            String("ssh://git@ssh.github.com:443/boxed/TurboKod.git"),
+        ),
+        want,
+    )
+    # Not GitHub, or not a repo root.
+    assert_equal(
+        len(github_repo_web_url(
+            String("git@gitlab.com:boxed/TurboKod.git"),
+        ).as_bytes()),
+        0,
+    )
+    assert_equal(
+        len(github_repo_web_url(
+            String("git@github.example.com:boxed/TurboKod.git"),
+        ).as_bytes()),
+        0,
+    )
+    assert_equal(
+        len(github_repo_web_url(
+            String("https://github.com/boxed/TurboKod/tree/main"),
+        ).as_bytes()),
+        0,
+    )
+    assert_equal(
+        len(github_repo_web_url(String("/srv/git/turbokod.git")).as_bytes()),
+        0,
+    )
+    assert_equal(len(github_repo_web_url(String("")).as_bytes()), 0)
+
+
+def test_branch_pane_o_opens_the_github_compare_page() raises:
+    """``o`` on a non-main branch queues its GitHub compare URL — the
+    create-a-pull-request form — for the host to open.
+
+    The slash in ``feature/thing`` has to survive as a real path
+    separator; percent-encoding it would send GitHub looking for a branch
+    literally named ``feature%2Fthing``."""
+    var dir = _temp_path(String("_git_compare"))
+    _rm_rf(dir)
+    _ensure_dir(dir)
+    var init_args = List[String]()
+    init_args.append(String("init"))
+    init_args.append(String("-q"))
+    init_args.append(String("-b"))
+    init_args.append(String("main"))
+    if _run_git(dir, init_args^) != 0:
+        # No git available — skip silently.
+        _rm_rf(dir)
+        return
+    var cfg1 = List[String]()
+    cfg1.append(String("config"))
+    cfg1.append(String("user.email"))
+    cfg1.append(String("test@example.com"))
+    _ = _run_git(dir, cfg1^)
+    var cfg2 = List[String]()
+    cfg2.append(String("config"))
+    cfg2.append(String("user.name"))
+    cfg2.append(String("Test"))
+    _ = _run_git(dir, cfg2^)
+    assert_true(write_file(join_path(dir, String("a.txt")), String("alpha\n")))
+    var add = List[String]()
+    add.append(String("add"))
+    add.append(String("a.txt"))
+    _ = _run_git(dir, add^)
+    var commit = List[String]()
+    commit.append(String("commit"))
+    commit.append(String("-q"))
+    commit.append(String("-m"))
+    commit.append(String("init"))
+    _ = _run_git(dir, commit^)
+    var remote = List[String]()
+    remote.append(String("remote"))
+    remote.append(String("add"))
+    remote.append(String("origin"))
+    remote.append(String("git@github.com:boxed/TurboKod.git"))
+    _ = _run_git(dir, remote^)
+    var branch = List[String]()
+    branch.append(String("branch"))
+    branch.append(String("feature/thing"))
+    _ = _run_git(dir, branch^)
+
+    assert_equal(
+        github_compare_url(dir, String("feature/thing")),
+        String(
+            "https://github.com/boxed/TurboKod/compare/feature/thing?expand=1",
+        ),
+    )
+
+    var lc = LocalChanges()
+    lc.open(dir)
+    lc.focus = _PANE_BRANCHES
+    var target = -1
+    for i in range(len(lc.branches)):
+        if lc.branches[i].name == String("feature/thing"):
+            target = i
+    assert_true(target >= 0)
+    lc.sel_branch = target
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    assert_true(
+        lc.handle_key(_key(UInt32(ord("o"))), screen, registry),
+    )
+    assert_equal(
+        lc.consume_open_url(),
+        String(
+            "https://github.com/boxed/TurboKod/compare/feature/thing?expand=1",
+        ),
+    )
+    # Consumed once, so a re-render can't launch a second browser tab.
+    assert_equal(len(lc.consume_open_url().as_bytes()), 0)
+    # Success is non-modal: the compare page is the feedback.
+    assert_equal(lc.overlay, _OVERLAY_NONE)
+    lc.release()
+    _rm_rf(dir)
+
+
+def test_branch_pane_o_refuses_main_and_a_non_github_remote() raises:
+    """``o`` opens nothing on ``main`` (the compare against the base
+    branch is empty) or in a repo with no GitHub remote — and says why
+    modally, since nothing on screen changed to explain the no-op."""
+    var lc = _local_changes_with_branches()
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    lc.sel_branch = 0                       # main
+    assert_true(lc.handle_key(_key(UInt32(ord("o"))), screen, registry))
+    assert_equal(len(lc.consume_open_url().as_bytes()), 0)
+    assert_equal(lc.overlay, _OVERLAY_STATUS)
+    assert_true(_contains(lc.overlay_message, String("base branch")))
+    lc._close_overlay()
+
+    # ``/tmp`` isn't a repo, so ``feature-x`` has no remote to resolve.
+    lc.sel_branch = 1                       # feature-x
+    assert_true(lc.handle_key(_key(UInt32(ord("o"))), screen, registry))
+    assert_equal(len(lc.consume_open_url().as_bytes()), 0)
+    assert_equal(lc.overlay, _OVERLAY_STATUS)
+    assert_true(_contains(lc.overlay_message, String("GitHub")))
+    lc.release()
+
+
 def main() raises:
     setup_test_env()
     test_git_view_overlay_editor_releases_its_find_regex()
@@ -4251,4 +4428,7 @@ def main() raises:
     test_local_changes_reword_head_amends_the_message()
     test_local_changes_reword_older_commit_keeps_its_children()
     test_local_changes_release_stops_an_in_flight_git_child()
-    print("git: 112 tests passed")
+    test_github_repo_web_url_parses_every_remote_shape()
+    test_branch_pane_o_opens_the_github_compare_page()
+    test_branch_pane_o_refuses_main_and_a_non_github_remote()
+    print("git: 115 tests passed")

@@ -666,3 +666,34 @@ def parse_int_prefix(s: String, start: Int, stop: Int) -> Int:
     if not saw:
         return -1
     return n
+
+
+def percent_encode_uri_path(s: String) -> String:
+    """Percent-encode ``s`` for use as a URI path, keeping the RFC 3986
+    unreserved set (``A-Z a-z 0-9 - _ . ~``) and ``/`` literal.
+
+    ``/`` stays unescaped because every caller is encoding something that
+    is *already* a path: a filesystem path for a ``file://`` URI, or a git
+    branch name like ``feature/thing`` whose slashes are real separators in
+    the forge URL. Everything else — spaces, ``#``, ``?``, any non-ASCII
+    byte — becomes ``%XX`` with uppercase hex, which is what spec-compliant
+    servers and language servers expect.
+    """
+    var b = s.as_bytes()
+    var out = List[UInt8]()
+    for i in range(len(b)):
+        var c = Int(b[i])
+        var unreserved = (0x41 <= c and c <= 0x5A) \
+            or (0x61 <= c and c <= 0x7A) \
+            or (0x30 <= c and c <= 0x39) \
+            or c == 0x2D or c == 0x5F or c == 0x2E or c == 0x7E \
+            or c == 0x2F
+        if unreserved:
+            out.append(b[i])
+        else:
+            var hi = (c >> 4) & 0xF
+            var lo = c & 0xF
+            out.append(0x25)            # '%'
+            out.append(UInt8(0x30 + hi) if hi < 10 else UInt8(0x41 + hi - 10))
+            out.append(UInt8(0x30 + lo) if lo < 10 else UInt8(0x41 + lo - 10))
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=len(out))))

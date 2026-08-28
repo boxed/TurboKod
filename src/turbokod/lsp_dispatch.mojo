@@ -34,6 +34,7 @@ from .lsp import (
     LspProcess, json_null_v, lsp_initialize_params,
 )
 from .posix import getcwd_path, getenv_value, monotonic_ms, realpath, which
+from .string_utils import percent_encode_uri_path
 from .highlight import Highlight
 from .colors import Attr, BLACK, EDITOR_BG, WHITE
 
@@ -6143,12 +6144,6 @@ def _text_document_position_params(
     return params^
 
 
-def _uri_hex_nibble(n: Int) -> UInt8:
-    if n < 10:
-        return UInt8(0x30 + n)          # '0'..'9'
-    return UInt8(0x41 + n - 10)         # 'A'..'F'
-
-
 def _uri_hex_val(b: Int) -> Int:
     if 0x30 <= b and b <= 0x39:
         return b - 0x30
@@ -6167,22 +6162,7 @@ def _path_to_uri(path: String) -> String:
     ``_uri_to_path`` and match what spec-compliant servers expect."""
     var resolved = realpath(path)
     var p = resolved if len(resolved.as_bytes()) > 0 else path
-    var b = p.as_bytes()
-    var out = List[UInt8]()
-    for i in range(len(b)):
-        var c = Int(b[i])
-        var unreserved = (0x41 <= c and c <= 0x5A) \
-            or (0x61 <= c and c <= 0x7A) \
-            or (0x30 <= c and c <= 0x39) \
-            or c == 0x2D or c == 0x5F or c == 0x2E or c == 0x7E \
-            or c == 0x2F
-        if unreserved:
-            out.append(b[i])
-        else:
-            out.append(0x25)            # '%'
-            out.append(_uri_hex_nibble((c >> 4) & 0xF))
-            out.append(_uri_hex_nibble(c & 0xF))
-    return String("file://") + String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=len(out))))
+    return String("file://") + percent_encode_uri_path(p)
 
 
 def uri_to_path(uri: String) -> String:
