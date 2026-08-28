@@ -238,6 +238,11 @@ comptime _LC_POLL_INTERVAL_MS: Int = 1000
 # the UI thread because tokenization is synchronous. The user can
 # still navigate the diff and double-click to open the file in the
 # editor where the highlighter runs incrementally.
+# How still the sidebar selection has to be before the right-side
+# panels are rebuilt. Long enough to swallow a key-repeat burst (the
+# fastest OS repeat rates land around 30 ms apart), short enough that a
+# single deliberate Down reads as immediate.
+comptime _SETTLE_MS:      Int = 70
 comptime _HL_SIZE_CAP:    Int = 64 * 1024
 comptime _HL_LONG_LINE:   Int = 2000
 
@@ -751,6 +756,38 @@ def _move_panel_cursor(mut panel: RightPanel, delta: Int, h_in: Int):
         panel.scroll = panel.cursor - h + 1
     if panel.scroll < 0:
         panel.scroll = 0
+
+
+def _seek_panel_to_stageable(mut panel: RightPanel, file_line: Int, h: Int):
+    """Park the cursor on the first stageable row at or after
+    ``file_line`` (1-based, in the panel's *after* file), falling back
+    to the last stageable row when the anchor is past all of them.
+
+    This is what keeps line-by-line staging going: the panel is rebuilt
+    from a fresh diff after every apply, and landing the cursor back at
+    row 0 meant scrolling down to the next change by hand each time.
+    Anchoring on the file line rather than the display row survives the
+    hunk shrinking (or vanishing) under the line that was just staged.
+    """
+    var first_ge = -1
+    var last_any = -1
+    for i in range(len(panel.lines)):
+        if panel.diff_line[i] < 0:
+            continue
+        if i >= len(panel.kind) or i >= len(panel.file_line):
+            continue
+        var k = panel.kind[i]
+        if k != _LINE_ADD and k != _LINE_REM:
+            continue
+        last_any = i
+        if first_ge < 0 and panel.file_line[i] >= file_line:
+            first_ge = i
+    var target = first_ge if first_ge >= 0 else last_any
+    if target < 0:
+        return
+    panel.cursor = 0
+    panel.scroll = 0
+    _move_panel_cursor(panel, target, h)
 
 
 def _strip_first_byte_to_string(s: String) -> String:
@@ -1273,6 +1310,21 @@ struct LocalChanges(Movable):
     # ``"c:N"`` — when the driving sidebar selection changes, all three
     # right panels are rebuilt.
     var _right_key: String
+    # When the sidebar selection last moved (``monotonic_ms``). Building
+    # the right side costs a ``git show`` spawn plus a full-file
+    # tokenize per side — ~10-25 ms — so the paint path defers it while
+    # the selection is still moving under a held arrow key and builds
+    # once the list settles. 0 means "never moved by a keystroke"
+    # (a directly-assigned ``sel_*``, as tests do), which always builds.
+    var _sel_moved_ms: Int
+    # Where to put the right-panel cursor after a line-level stage /
+    # unstage rebuilds the panels. ``_pending_cursor_path`` empty means
+    # "nothing pending"; it's checked against the reselected file so a
+    # stage that drops the file off the list doesn't move some other
+    # file's cursor. See ``_seek_panel_to_stageable``.
+    var _pending_cursor_path: String
+    var _pending_cursor_line: Int
+    var _pending_cursor_pane: Int
     # Splitter overrides. ``-1`` means "use the auto-computed default";
     # any positive value is the user's dragged setpoint and gets
     # clamped to the available space on each frame so resizing the
@@ -1449,6 +1501,10 @@ struct LocalChanges(Movable):
         self.staged = RightPanel()
         self.info = RightPanel()
         self._right_key = String("")
+        self._sel_moved_ms = 0
+        self._pending_cursor_path = String("")
+        self._pending_cursor_line = 0
+        self._pending_cursor_pane = _PANE_RIGHT_UNSTAGED
         self.sidebar_width_user = -1
         self.files_height_user = -1
         self.branches_height_user = -1
@@ -1519,6 +1575,10 @@ struct LocalChanges(Movable):
         self.staged.reset()
         self.info.reset()
         self._right_key = String("")
+        self._sel_moved_ms = 0
+        self._pending_cursor_path = String("")
+        self._pending_cursor_line = 0
+        self._pending_cursor_pane = _PANE_RIGHT_UNSTAGED
         self.sidebar_width_user = -1
         self.files_height_user = -1
         self.branches_height_user = -1
@@ -1757,6 +1817,10 @@ struct LocalChanges(Movable):
         self.staged.reset()
         self.info.reset()
         self._right_key = String("")
+        self._sel_moved_ms = 0
+        self._pending_cursor_path = String("")
+        self._pending_cursor_line = 0
+        self._pending_cursor_pane = _PANE_RIGHT_UNSTAGED
         self.sidebar_width_user = -1
         self.files_height_user = -1
         self.branches_height_user = -1
@@ -1978,7 +2042,8 @@ struct LocalChanges(Movable):
             or self.focus == _PANE_RIGHT_INFO
 
     def _ensure_right_panels(
-        mut self, mut registry: GrammarRegistry,
+        mut self, mut registry: GrammarRegistry, panel_bounds: Rect,
+        defer_while_moving: Bool = False,
     ):
         """Recompute the three right-side panel caches when the driving
         sidebar selection changed. Keying by index (not content) means
@@ -1986,12 +2051,28 @@ struct LocalChanges(Movable):
         explicitly reset ``_right_key`` to force a rebuild.
 
         ``registry`` is the process-wide grammar cache used by
-        ``_populate_diff_panel`` to syntax-colour the diff body lines."""
+        ``_populate_diff_panel`` to syntax-colour the diff body lines.
+
+        ``defer_while_moving`` is set by the paint path only. A build is
+        expensive — a ``git show`` spawn per side plus a full-file
+        tokenize, ~10-25 ms — and under a held arrow key every row the
+        selection passes through would pay it, which is what made
+        scrolling a long file list feel heavy. Deferred until the
+        selection has been still for ``_SETTLE_MS``; the previous file's
+        panels stay on screen meanwhile (they carry their own filename
+        banner, so nothing reads as mislabeled) and the next frame after
+        the list settles fills in the real ones. Both frontends tick on
+        a timer, so that frame always comes. Callers that need content
+        *now* — entering the right pane, clicking a diff row — leave it
+        off and build synchronously."""
         var key = self._focus_key()
         if key == self._right_key \
                 and (len(self.unstaged.lines) > 0
                      or len(self.staged.lines) > 0
                      or len(self.info.lines) > 0):
+            return
+        if defer_while_moving and self._sel_moved_ms > 0 \
+                and monotonic_ms() - self._sel_moved_ms < _SETTLE_MS:
             return
         self._right_key = key
         self.unstaged.reset()
@@ -2001,6 +2082,7 @@ struct LocalChanges(Movable):
         if driving == _PANE_FILES:
             if 0 <= self.sel_file and self.sel_file < len(self.files):
                 self._build_files_right_panels(registry)
+                self._apply_pending_cursor(panel_bounds)
             return
         if driving == _PANE_BRANCHES:
             if 0 <= self.sel_branch and self.sel_branch < len(self.branches):
@@ -2191,32 +2273,36 @@ struct LocalChanges(Movable):
                 self.unstaged,
                 String(" (untracked — press Space on the file to stage it)"),
             )
+        # The index blob is the unstaged side's *before* and the staged
+        # side's *after* — the same ``git show :path``. Fetched at most
+        # once per build: the spawn is the single most expensive thing
+        # here (~9 ms, an order of magnitude over reading the worktree
+        # file), and a file with changes in both columns used to pay it
+        # twice.
+        var index_text = String("")
+        if len(fe.unstaged_diff.as_bytes()) > 0 \
+                or len(fe.staged_diff.as_bytes()) > 0:
+            index_text = fetch_blob_text(self.root, String(""), fe.path)
         if len(fe.unstaged_diff.as_bytes()) > 0:
             var after: String
             try:
                 after = read_file(join_path(self.root, fe.path))
             except:
                 after = String("")
-            var before = fetch_blob_text(
-                self.root, String(""), fe.path,
-            )
             _populate_diff_panel(
                 self.unstaged, fe.unstaged_diff, fe.path,
-                before, after, banner_w, registry,
+                index_text, after, banner_w, registry,
             )
         elif not untracked:
             _emit_info(self.unstaged, String(" (no unstaged changes)"))
         # Staged panel. "After" is the index blob, "before" is HEAD.
         if len(fe.staged_diff.as_bytes()) > 0:
-            var after = fetch_blob_text(
-                self.root, String(""), fe.path,
-            )
             var before = fetch_blob_text(
                 self.root, String("HEAD"), fe.path,
             )
             _populate_diff_panel(
                 self.staged, fe.staged_diff, fe.path,
-                before, after, banner_w, registry,
+                before, index_text, banner_w, registry,
             )
         else:
             _emit_info(self.staged, String(" (no staged changes)"))
@@ -2315,7 +2401,9 @@ struct LocalChanges(Movable):
             canvas, left, right + 1, rows, section_attr, focused_section,
         )
         # Right side: split (file mode) or single info panel.
-        self._ensure_right_panels(registry)
+        self._ensure_right_panels(
+            registry, bounds, defer_while_moving=True,
+        )
         self._paint_right_side(
             canvas, bounds,
             section_attr, splitter_attr,
@@ -3372,6 +3460,11 @@ struct LocalChanges(Movable):
         var new = new_idx
         if new < 0: new = 0
         if new >= n: new = n - 1
+        # Stamp the move for the paint path's build debounce. Clamped
+        # no-ops (Down on the last row) don't count — they'd keep the
+        # right side deferred forever under a held key.
+        if new != self._focused_selection():
+            self._sel_moved_ms = monotonic_ms()
         var h = self._focused_panel_height(container_bounds)
         if h < 1: h = 1
         if self.focus == _PANE_FILES:
@@ -3503,13 +3596,17 @@ struct LocalChanges(Movable):
             self.last_sidebar_focus = _PANE_FILES
             return
 
-    def _focused_right_panel_height(self, container_bounds: Rect) -> Int:
-        if self.focus == _PANE_RIGHT_INFO:
+    def _right_panel_height(self, pane: Int, container_bounds: Rect) -> Int:
+        """Body height (heading row excluded) of one right-side panel."""
+        if pane == _PANE_RIGHT_INFO:
             return self._diff_height(container_bounds) - 1
         var rp = self._right_panes(container_bounds)
-        if self.focus == _PANE_RIGHT_UNSTAGED:
+        if pane == _PANE_RIGHT_UNSTAGED:
             return rp[1] - 1
         return rp[3] - 1
+
+    def _focused_right_panel_height(self, container_bounds: Rect) -> Int:
+        return self._right_panel_height(self.focus, container_bounds)
 
     def _scroll_focused_right(mut self, delta: Int, container_bounds: Rect):
         """Scroll the focused right panel and clamp its cursor.
@@ -3544,7 +3641,7 @@ struct LocalChanges(Movable):
         if self._is_right_focus():
             return
         self.last_sidebar_focus = self.focus
-        self._ensure_right_panels(registry)
+        self._ensure_right_panels(registry, container_bounds)
         var driving = self.last_sidebar_focus
         if driving == _PANE_FILES:
             self.focus = _PANE_RIGHT_UNSTAGED
@@ -3878,9 +3975,52 @@ struct LocalChanges(Movable):
         var patch = build_minimal_patch(source_diff, diff_line_idx, reverse)
         if len(patch.as_bytes()) == 0:
             return
+        # Where the cursor sits *before* the apply, as a line in the
+        # panel's after file. The rebuilt panel won't contain this row
+        # any more (that's the point), so the restore lands on the next
+        # change at or after it — staging a hunk line by line is then a
+        # run of Space presses instead of Space-scroll-Space-scroll.
+        var anchor = 0
+        if reverse:
+            var c = self.staged.cursor
+            if 0 <= c and c < len(self.staged.file_line):
+                anchor = self.staged.file_line[c]
+        else:
+            var c = self.unstaged.cursor
+            if 0 <= c and c < len(self.unstaged.file_line):
+                anchor = self.unstaged.file_line[c]
         if not apply_patch_to_index(self.root, patch, reverse):
             return
-        self._refresh_after_mutation(fe.path)
+        var acted_path = fe.path
+        self._refresh_after_mutation(acted_path)
+        self._pending_cursor_path = acted_path
+        self._pending_cursor_line = anchor
+        self._pending_cursor_pane = \
+            _PANE_RIGHT_STAGED if reverse else _PANE_RIGHT_UNSTAGED
+
+    def _apply_pending_cursor(mut self, panel_bounds: Rect):
+        """Land the right-panel cursor on the next stageable line after a
+        line-level stage / unstage. One-shot: consumed whether or not it
+        finds a target, so a later rebuild doesn't move the cursor out
+        from under the user."""
+        if len(self._pending_cursor_path.as_bytes()) == 0:
+            return
+        var path = self._pending_cursor_path
+        var line = self._pending_cursor_line
+        var pane = self._pending_cursor_pane
+        self._pending_cursor_path = String("")
+        if self.sel_file < 0 or self.sel_file >= len(self.files):
+            return
+        # The file we acted on can drop off the list entirely (its last
+        # unstaged change staged, nothing else pending) — then the
+        # selection is some other file and the anchor means nothing.
+        if self.files[self.sel_file].path != path:
+            return
+        var h = self._right_panel_height(pane, panel_bounds)
+        if pane == _PANE_RIGHT_UNSTAGED:
+            _seek_panel_to_stageable(self.unstaged, line, h)
+        elif pane == _PANE_RIGHT_STAGED:
+            _seek_panel_to_stageable(self.staged, line, h)
 
     def _refresh_after_mutation(mut self, kept_path: String):
         """Re-fetch files after a stage/unstage. Try to keep the user's
@@ -3905,6 +4045,10 @@ struct LocalChanges(Movable):
         self._nudge_files_scroll_up()
         # Force right-pane recompute next paint.
         self._right_key = String("")
+        self._sel_moved_ms = 0
+        self._pending_cursor_path = String("")
+        self._pending_cursor_line = 0
+        self._pending_cursor_pane = _PANE_RIGHT_UNSTAGED
         self.unstaged.reset()
         self.staged.reset()
         self.info.reset()
@@ -3930,6 +4074,10 @@ struct LocalChanges(Movable):
         if self.sel_commit < 0:
             self.sel_commit = 0
         self._right_key = String("")
+        self._sel_moved_ms = 0
+        self._pending_cursor_path = String("")
+        self._pending_cursor_line = 0
+        self._pending_cursor_pane = _PANE_RIGHT_UNSTAGED
         self.unstaged.reset()
         self.staged.reset()
         self.info.reset()
@@ -5263,7 +5411,7 @@ struct LocalChanges(Movable):
                 if not self._is_right_focus():
                     self.last_sidebar_focus = self.focus
                 self.focus = rpane
-                self._ensure_right_panels(registry)
+                self._ensure_right_panels(registry, bounds)
                 # Determine which panel + its top to jump cursor.
                 if rpane == _PANE_RIGHT_INFO:
                     var top = self._list_top(bounds)

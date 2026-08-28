@@ -49,6 +49,48 @@ So per-frame cost lives in `Desktop.paint`, and nearly all of *that* is
 (every `Cell.glyph` is a `String`) but measured cheap — don't optimize it
 without a measurement.
 
+## The git view's per-selection cost
+
+`Desktop.paint` isn't the only thing a frame can wait on. In the Local
+changes modal (`local_changes.mojo`) the *right side* — the unstaged and
+staged diff panels — is rebuilt whenever the driving sidebar selection
+changes, and a rebuild is expensive in a way painting isn't:
+
+| Work | cost per selection |
+|---|---|
+| `git show :path` (index blob) | ~9 ms — a process spawn |
+| `git show HEAD:path` (staged panel's before side) | ~9 ms |
+| `read_file` of the worktree file | ~0.06 ms |
+| Full-file tokenize, per side | ~2.6 ms per 50 KB side |
+
+[`bench/git_view_bench.mojo`](../bench/git_view_bench.mojo) measures it —
+point it at any repo with a dirty tree:
+
+```sh
+./run.sh bench/git_view_bench.mojo /path/to/dirty/repo
+```
+
+Two rules came out of that:
+
+1. **The index blob is fetched once per build.** It is simultaneously
+   the unstaged panel's *before* and the staged panel's *after* — the
+   same `git show :path`, and it used to be spawned twice for any file
+   with changes in both columns.
+2. **The build is deferred while the selection is moving.** Under a held
+   arrow key every row the selection passed through paid the full cost
+   (~14 ms measured over a 111-file tree, more with both columns dirty),
+   which is what made scrolling a long file list feel heavy. Now
+   `_ensure_right_panels` skips the build until the selection has been
+   still for `_SETTLE_MS` (70 ms) and the previous panels stay up
+   meanwhile; both frontends tick on a 50 ms timer, so the frame that
+   fills them in always arrives. A move+paint during a key-repeat burst
+   went from 14 ms to ~0. Only the paint path defers — callers that need
+   content immediately (entering the right pane, clicking a diff row)
+   build synchronously.
+
+The same shape applies to branch and commit selections, which spawn
+`git log` / `git show` per selection through the same path.
+
 ## Hot-path traps (do not reintroduce)
 
 1. **`.copy()` / `var x = bigStruct` in a hot path deep-copies the whole

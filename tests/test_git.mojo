@@ -39,7 +39,8 @@ from turbokod.local_changes import (
     _GITOP_REWORD, _OVERLAY_EDIT_MSG,
     _OVERLAY_MERGE_CHOICE, _OVERLAY_NONE,
     _OVERLAY_OUTPUT, _OVERLAY_STATUS,
-    _PANE_BRANCHES, _PANE_COMMITS, _LINE_ADD
+    _PANE_BRANCHES, _PANE_COMMITS, _PANE_RIGHT_STAGED,
+    _PANE_RIGHT_UNSTAGED, _LINE_ADD, _LINE_REM
 )
 from turbokod.git_output import (
     GIT_OUT_BRANCH_DELETE, GIT_OUT_CHECKOUT, GIT_OUT_COMMIT, GIT_OUT_MERGE,
@@ -63,7 +64,9 @@ from turbokod.highlight import (
     highlight_decorator_attr, highlight_ident_attr, highlight_string_attr
 )
 from turbokod.onig import onig_global_init, onig_tracked_count
-from turbokod.posix import kill_pid, sleep_ms, wall_clock_ms, which
+from turbokod.posix import (
+    kill_pid, monotonic_ms, sleep_ms, wall_clock_ms, which,
+)
 from turbokod.config import WRAP_NONE
 from turbokod.events import (
     Event, KEY_BACKSPACE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME,
@@ -3912,6 +3915,228 @@ def test_local_changes_release_stops_an_in_flight_git_child() raises:
     registry.release()
 
 
+
+def _init_repo_with_commit(dir: String) raises -> Bool:
+    """``git init`` + identity + one commit of ``f.txt``. False when git
+    isn't on PATH, which the callers treat as "skip this test"."""
+    _rm_rf(dir)
+    _ensure_dir(dir)
+    var init_args = List[String]()
+    init_args.append(String("init"))
+    init_args.append(String("-q"))
+    init_args.append(String("-b"))
+    init_args.append(String("main"))
+    if _run_git(dir, init_args^) != 0:
+        _rm_rf(dir)
+        return False
+    var cfg1 = List[String]()
+    cfg1.append(String("config"))
+    cfg1.append(String("user.email"))
+    cfg1.append(String("test@example.com"))
+    _ = _run_git(dir, cfg1^)
+    var cfg2 = List[String]()
+    cfg2.append(String("config"))
+    cfg2.append(String("user.name"))
+    cfg2.append(String("Test"))
+    _ = _run_git(dir, cfg2^)
+    assert_true(
+        write_file(join_path(dir, String("f.txt")), String("a\nb\nc\n")),
+    )
+    var add = List[String]()
+    add.append(String("add"))
+    add.append(String("f.txt"))
+    _ = _run_git(dir, add^)
+    var commit = List[String]()
+    commit.append(String("commit"))
+    commit.append(String("-q"))
+    commit.append(String("-m"))
+    commit.append(String("init"))
+    _ = _run_git(dir, commit^)
+    return True
+
+
+def _panel_has(panel_lines: List[String], kinds: List[Int],
+               text: String, kind: Int) -> Bool:
+    for i in range(len(panel_lines)):
+        if panel_lines[i] == text and kinds[i] == kind:
+            return True
+    return False
+
+
+def test_local_changes_fills_both_panels_for_a_file_changed_twice() raises:
+    """A file with staged *and* unstaged changes populates both right-side
+    panels from a single ``git show :path``.
+
+    The index blob is the unstaged side's *before* and the staged side's
+    *after* — literally the same fetch, and it used to be spawned twice
+    per selection. Sharing it is only safe if both panels still render
+    their own hunks, which is what this pins."""
+    var dir = _temp_path(String("_both_panels"))
+    if not _init_repo_with_commit(dir):
+        return
+    # Stage b -> B, then change c -> C in the worktree only.
+    assert_true(
+        write_file(join_path(dir, String("f.txt")), String("a\nB\nc\n")),
+    )
+    var add = List[String]()
+    add.append(String("add"))
+    add.append(String("f.txt"))
+    _ = _run_git(dir, add^)
+    assert_true(
+        write_file(join_path(dir, String("f.txt")), String("a\nB\nC\n")),
+    )
+    var lc = LocalChanges()
+    lc.open(dir)
+    assert_equal(len(lc.files), 1)
+    var registry = GrammarRegistry()
+    var screen = Rect(0, 0, 120, 40)
+    var canvas = Canvas(screen.width(), screen.height())
+    lc.paint(canvas, screen, registry)
+    # Unstaged: index (B, c) -> worktree (B, C).
+    assert_true(
+        _panel_has(lc.unstaged.lines, lc.unstaged.kind, String("C"), _LINE_ADD),
+    )
+    assert_true(
+        _panel_has(lc.unstaged.lines, lc.unstaged.kind, String("c"), _LINE_REM),
+    )
+    # Staged: HEAD (b) -> index (B).
+    assert_true(
+        _panel_has(lc.staged.lines, lc.staged.kind, String("B"), _LINE_ADD),
+    )
+    assert_true(
+        _panel_has(lc.staged.lines, lc.staged.kind, String("b"), _LINE_REM),
+    )
+    lc.release()
+    registry.release()
+    _rm_rf(dir)
+
+
+def test_local_changes_defers_the_right_side_while_the_selection_moves() raises:
+    """Arrowing through the file list doesn't rebuild the right side per
+    row — it waits for the selection to settle.
+
+    A rebuild costs a ``git show`` spawn plus a full-file tokenize per
+    side (~10-25 ms), so paying it for every row a held arrow key passes
+    through is what made a long list feel heavy. The build is deferred
+    while the selection is moving and runs on the first frame after it
+    stops; the old panels stay up meanwhile."""
+    var dir = _temp_path(String("_settle"))
+    if not _init_repo_with_commit(dir):
+        return
+    assert_true(
+        write_file(join_path(dir, String("f.txt")), String("a\nb\nZ\n")),
+    )
+    assert_true(
+        write_file(join_path(dir, String("g.txt")), String("new\n")),
+    )
+    var lc = LocalChanges()
+    lc.open(dir)
+    assert_equal(len(lc.files), 2)
+    var registry = GrammarRegistry()
+    var screen = Rect(0, 0, 120, 40)
+    var canvas = Canvas(screen.width(), screen.height())
+    lc.paint(canvas, screen, registry)
+    assert_equal(lc._right_key, String("f:0"))
+    # Move, then paint immediately: the file list follows the keystroke,
+    # the right side does not.
+    _ = lc.handle_key(_key(KEY_DOWN), screen, registry)
+    assert_equal(lc.sel_file, 1)
+    lc.paint(canvas, screen, registry)
+    assert_equal(lc._right_key, String("f:0"))
+    # Settled (backdate the stamp rather than sleeping) — next frame builds.
+    lc._sel_moved_ms = monotonic_ms() - 5000
+    lc.paint(canvas, screen, registry)
+    assert_equal(lc._right_key, String("f:1"))
+    # A selection set without a keystroke (the mouse path, and every test
+    # that assigns ``sel_file``) is never deferred.
+    lc.sel_file = 0
+    lc._right_key = String("")
+    lc._sel_moved_ms = 0
+    lc.paint(canvas, screen, registry)
+    assert_equal(lc._right_key, String("f:0"))
+    lc.release()
+    registry.release()
+    _rm_rf(dir)
+
+
+def test_local_changes_staging_a_line_lands_on_the_next_change() raises:
+    """Space on a diff line stages it and leaves the cursor on the *next*
+    changed line, not back at the top of the rebuilt panel.
+
+    Staging a hunk line by line is a run of Space presses; before this
+    the panel rebuild reset the cursor to row 0 and every press had to
+    be preceded by scrolling back down."""
+    var dir = _temp_path(String("_stage_next"))
+    if not _init_repo_with_commit(dir):
+        return
+    # Three separate one-line changes, far enough apart to sit in
+    # distinct hunks.
+    var body = String("")
+    for i in range(1, 41):
+        if i == 5 or i == 20 or i == 35:
+            body += String("changed ") + String(i) + String("\n")
+        else:
+            body += String("line ") + String(i) + String("\n")
+    var base = String("")
+    for i in range(1, 41):
+        base += String("line ") + String(i) + String("\n")
+    assert_true(write_file(join_path(dir, String("f.txt")), base))
+    var add = List[String]()
+    add.append(String("add"))
+    add.append(String("f.txt"))
+    _ = _run_git(dir, add^)
+    var commit = List[String]()
+    commit.append(String("commit"))
+    commit.append(String("-q"))
+    commit.append(String("-m"))
+    commit.append(String("base"))
+    _ = _run_git(dir, commit^)
+    assert_true(write_file(join_path(dir, String("f.txt")), body))
+    var lc = LocalChanges()
+    lc.open(dir)
+    assert_equal(len(lc.files), 1)
+    var registry = GrammarRegistry()
+    var screen = Rect(0, 0, 120, 40)
+    var canvas = Canvas(screen.width(), screen.height())
+    lc.paint(canvas, screen, registry)
+    # Right into the Unstaged panel — it lands on the first stageable row.
+    _ = lc.handle_key(_key(KEY_RIGHT), screen, registry)
+    assert_equal(lc.focus, _PANE_RIGHT_UNSTAGED)
+    var first = lc.unstaged.cursor
+    var first_line = lc.unstaged.file_line[first]
+    assert_true(first_line > 0)
+    # Stage it. The panel rebuilds without that row; the cursor has to
+    # end up on a stageable row further down the file, not at the top.
+    _ = lc.handle_key(_key(KEY_SPACE), screen, registry)
+    lc.paint(canvas, screen, registry)
+    var after = lc.unstaged.cursor
+    assert_true(lc.unstaged.kind[after] == _LINE_ADD
+                or lc.unstaged.kind[after] == _LINE_REM)
+    assert_true(lc.unstaged.file_line[after] >= first_line)
+    # And the panel scrolled to keep it visible.
+    assert_true(after >= lc.unstaged.scroll)
+    # Unstaging from the Staged panel follows the same rule.
+    lc.focus = _PANE_RIGHT_STAGED
+    var s_first = -1
+    for i in range(len(lc.staged.lines)):
+        if lc.staged.diff_line[i] >= 0 \
+                and (lc.staged.kind[i] == _LINE_ADD
+                     or lc.staged.kind[i] == _LINE_REM):
+            s_first = i
+            break
+    assert_true(s_first >= 0)
+    lc.staged.cursor = s_first
+    var s_line = lc.staged.file_line[s_first]
+    _ = lc.handle_key(_key(KEY_SPACE), screen, registry)
+    lc.paint(canvas, screen, registry)
+    if len(lc.files) > 0 and lc.staged.cursor < len(lc.staged.kind):
+        var sc = lc.staged.cursor
+        if lc.staged.diff_line[sc] >= 0:
+            assert_true(lc.staged.file_line[sc] >= s_line)
+    lc.release()
+    registry.release()
+    _rm_rf(dir)
+
 def main() raises:
     setup_test_env()
     test_git_view_overlay_editor_releases_its_find_regex()
@@ -3956,6 +4181,9 @@ def main() raises:
     test_diff_rows_multiline_removal_numbers_skip_removed()
     test_diff_rows_inserted_block_before_modified_line()
     test_diff_view_renders_removed_rows_without_line_numbers()
+    test_local_changes_fills_both_panels_for_a_file_changed_twice()
+    test_local_changes_defers_the_right_side_while_the_selection_moves()
+    test_local_changes_staging_a_line_lands_on_the_next_change()
     test_diff_view_modified_line_shows_old_removed_and_new_added()
     test_diff_view_phantom_syntax_overlay()
     test_diff_view_unhighlighted_text_uses_identifier_color()
@@ -4023,4 +4251,4 @@ def main() raises:
     test_local_changes_reword_head_amends_the_message()
     test_local_changes_reword_older_commit_keeps_its_children()
     test_local_changes_release_stops_an_in_flight_git_child()
-    print("git: 106 tests passed")
+    print("git: 112 tests passed")
