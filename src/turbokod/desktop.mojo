@@ -2474,6 +2474,26 @@ struct Desktop(Movable):
             return True
         return False
 
+    def _fullscreen_modal_active(self) -> Bool:
+        """True when a modal that fills the whole screen rect is up, so
+        painting the workspace beneath it is dead work.
+
+        Both of these fill ``container_bounds`` — which ``paint`` hands
+        them as the full ``screen`` — before drawing anything of their
+        own, so every cell underneath is overwritten. Painting it anyway
+        cost ~10 ms a frame with an editor open (a 200x50 grid, measured
+        by ``bench/git_frame_bench.mojo``): the editor body with its
+        highlights, the file tree, the panes, the chrome, all of it
+        invisible. That was most of the frame, and under a trackpad
+        flick's momentum it was the difference between keeping up and
+        backing the event queue up.
+
+        Only modals verified to cover the full rect belong here. A
+        centered dialog, the movable in-grid Settings, and review mode
+        (which paints a hosted window *over* the workspace rather than
+        instead of it) all still need what's behind them."""
+        return self.local_changes.active or self.project_find.active
+
     def scroll_regions(mut self, screen: Rect) -> List[EditorScrollRegion]:
         """The editor windows the host may smooth-scroll this frame. Phase
         one returns at most the focused editor (avoids occlusion: the
@@ -4256,11 +4276,16 @@ struct Desktop(Movable):
         # session state — single source of truth for the painter.
         self._refresh_target_tabs()
         var ws = self.workspace_rect(screen)
-        Painter(ws).fill(canvas, ws, self.bg_pattern, self.bg_attr)
+        # Everything from here to the modal layer draws behind a
+        # fullscreen modal — see ``_fullscreen_modal_active``. The
+        # housekeeping above still runs; only the drawing is skipped.
+        var covered = self._fullscreen_modal_active()
+        if not covered:
+            Painter(ws).fill(canvas, ws, self.bg_pattern, self.bg_attr)
         # In review mode the hosted editor window owns the surface and is
         # painted last (over the docks/chrome) at the review stage below, so
         # skip the normal multi-window pass entirely.
-        if not self.review.is_reviewing():
+        if not covered and not self.review.is_reviewing():
             self.windows.paint(
                 canvas, self._compute_subdued_windows(),
                 not self._any_dock_focused(),
@@ -4280,30 +4305,32 @@ struct Desktop(Movable):
                     self.file_tree.modified_paths.append(
                         self.windows.windows[i].editor.file_path,
                     )
-        self.file_tree.paint(canvas, screen)
-        # When floating, the tool panels render on the host's separate panel
-        # window (see `paint_panels`); the main surface skips them entirely.
-        if not self.panels_detached:
-            for i in range(len(self.terminal_panes)):
-                self.terminal_panes[i].paint(
-                    canvas, self.terminal_pane_rect(screen, i),
+        if not covered:
+            self.file_tree.paint(canvas, screen)
+            # When floating, the tool panels render on the host's separate
+            # panel window (see `paint_panels`); the main surface skips them
+            # entirely.
+            if not self.panels_detached:
+                for i in range(len(self.terminal_panes)):
+                    self.terminal_panes[i].paint(
+                        canvas, self.terminal_pane_rect(screen, i),
+                    )
+                self.debug_pane.paint(canvas, self.debug_pane_rect(screen))
+                self.find_results_pane.paint(
+                    canvas, self.find_results_pane_rect(screen),
+                    self.grammar_registry,
                 )
-            self.debug_pane.paint(canvas, self.debug_pane_rect(screen))
-            self.find_results_pane.paint(
-                canvas, self.find_results_pane_rect(screen),
-                self.grammar_registry,
-            )
-            self.test_pane.paint(canvas, self.test_pane_rect(screen))
-        # Swift/AppKit host owns the menu — see `host_owns_menu`. Skip the
-        # in-grid paint so the top row stays clear for other content.
-        if not self.host_owns_menu:
-            self.menu_bar.paint(canvas, screen)
-        self._paint_tab_bar(canvas, screen)
-        self.status_bar.paint(canvas, screen)
-        # Non-modal install-progress popup. Sits between the workspace and
-        # the modal dialogs — visible while the user keeps editing, but
-        # dismissed by any modal that pops over the top.
-        self.install_runner.paint(canvas, screen)
+                self.test_pane.paint(canvas, self.test_pane_rect(screen))
+            # Swift/AppKit host owns the menu — see `host_owns_menu`. Skip
+            # the in-grid paint so the top row stays clear for other content.
+            if not self.host_owns_menu:
+                self.menu_bar.paint(canvas, screen)
+            self._paint_tab_bar(canvas, screen)
+            self.status_bar.paint(canvas, screen)
+            # Non-modal install-progress popup. Sits between the workspace
+            # and the modal dialogs — visible while the user keeps editing,
+            # but dismissed by any modal that pops over the top.
+            self.install_runner.paint(canvas, screen)
         # Modal layers float above everything else. Only one is ever active
         # at a time (open_quick_open won't fire while a prompt is up, etc.),
         # so paint order doesn't matter for correctness.

@@ -29,6 +29,7 @@ from turbokod.file_io import (
     basename, delete_path, find_git_project, join_path, project_relative,
     read_file, stat_file, write_file
 )
+from turbokod.editor import Editor, TextBuffer
 from turbokod.file_tree import FILE_TREE_WIDTH
 from turbokod.onig import onig_global_init, onig_tracked_count
 from turbokod.project_targets import (
@@ -2987,6 +2988,81 @@ def test_view_states_are_capped_least_recently_used_first() raises:
     )
 
 
+def test_fullscreen_modal_paint_is_covered_by_the_modal() raises:
+    """``Desktop.paint`` skips the workspace beneath a fullscreen modal,
+    which is only sound while the modal really covers every cell.
+
+    Painting it anyway cost ~10 ms a frame with an editor open — the
+    editor body and its highlights, the file tree, the panes, the
+    chrome, all invisible — which is what backed the event queue up
+    under a trackpad flick. This pins the precondition: a full
+    ``Desktop.paint`` with the modal up must be cell-for-cell identical
+    to the modal painting alone onto a cleared canvas. A modal added to
+    ``_fullscreen_modal_active`` that leaves a gap fails here."""
+    var d = Desktop()
+    d.windows.add(
+        Window.from_file(
+            String("desktop.mojo"), Rect(0, 1, _SCREEN.width(), 20),
+            String("src/turbokod/desktop.mojo"),
+        )
+    )
+    var full = Canvas(_SCREEN.width(), _SCREEN.height())
+    var only = Canvas(_SCREEN.width(), _SCREEN.height())
+    # Local changes: point it at this checkout so it has real content.
+    d.local_changes.open(String("."))
+    assert_true(d.local_changes.active)
+    full.clear(default_attr())
+    d.paint(full, _SCREEN)
+    only.clear(default_attr())
+    d.local_changes.paint(only, _SCREEN, d.grammar_registry)
+    _assert_same_cells(full, only)
+    d.local_changes.close()
+    # Find in Project: same contract.
+    d.project_find.open(String("."), String("desktop"))
+    assert_true(d.project_find.active)
+    full.clear(default_attr())
+    d.paint(full, _SCREEN)
+    only.clear(default_attr())
+    d.project_find.paint(only, _SCREEN, d.grammar_registry)
+    _assert_same_cells(full, only)
+
+
+def _assert_same_cells(imm a: Canvas, imm b: Canvas) raises:
+    assert_equal(len(a.cells), len(b.cells))
+    for i in range(len(a.cells)):
+        assert_equal(a.cells[i].glyph, b.cells[i].glyph)
+        assert_equal(Int(a.cells[i].attr.fg), Int(b.cells[i].attr.fg))
+        assert_equal(Int(a.cells[i].attr.bg), Int(b.cells[i].attr.bg))
+        assert_equal(Int(a.cells[i].attr.style), Int(b.cells[i].attr.style))
+
+
+def test_clamp_scroll_still_pulls_back_a_widened_window() raises:
+    """The per-frame ``clamp_scroll`` skips its horizontal work at
+    ``scroll_x == 0`` — where every step of it is provably a no-op, but
+    ``longest_line_width`` walks the whole buffer to get there (3.2 ms a
+    frame on a 14k-line file, and ``fit_into`` runs it for every editor
+    every frame).
+
+    The case the skip must not break is the one it exists for: scrolled
+    right in a narrow window, then widened until the text fits."""
+    var e = Editor()
+    # Long line first: the re-snap step reads the *cursor* row, so a
+    # short row 0 would collapse scroll_x on its own and the clamp
+    # under test wouldn't be what moved it.
+    e.buffer = TextBuffer(("x" * 200) + String("\nshort\n"))
+    var narrow = Rect(0, 0, 40, 10)
+    e.scroll_x = 150
+    e.clamp_scroll(narrow)
+    assert_equal(e.scroll_x, 150)      # still in range while narrow
+    # Wide enough for the whole longest line: scroll_x has nowhere to go.
+    var wide = Rect(0, 0, 400, 10)
+    e.clamp_scroll(wide)
+    assert_equal(e.scroll_x, 0)
+    # And an already-zero scroll stays zero (the skipped path).
+    e.clamp_scroll(narrow)
+    assert_equal(e.scroll_x, 0)
+
+
 def main() raises:
     setup_test_env()
     test_desktop_take_attention_drains_panes_and_dap()
@@ -3095,4 +3171,6 @@ def main() raises:
     test_find_symbol_falls_back_to_rg_before_the_index_is_ready()
     test_find_symbol_index_sees_unsaved_buffer_text()
     test_shutdown_stops_the_search_subprocesses()
-    print("desktop: 105 tests passed")
+    test_fullscreen_modal_paint_is_covered_by_the_modal()
+    test_clamp_scroll_still_pulls_back_a_widened_window()
+    print("desktop: 107 tests passed")

@@ -233,6 +233,10 @@ comptime _GITOP_REWORD:  Int = 10  # rewrite an unpushed commit's message
 # terminal — so the panels never show a stale worktree. One ``git status``
 # + a few ``stat`` calls per tick; cheap enough at ~1 Hz.
 comptime _LC_POLL_INTERVAL_MS: Int = 1000
+# How quiet the view has to be before the external-change poll spawns
+# its ``git status``. Long enough to sit out a wheel spin's momentum
+# tail, short enough that a refresh still feels immediate after one.
+comptime _LC_INPUT_QUIET_MS:   Int = 250
 
 # Hard caps on the inputs we'll feed to the TextMate tokenizer for the
 # diff side panels. Above either bound we skip syntax highlighting and
@@ -243,10 +247,23 @@ comptime _LC_POLL_INTERVAL_MS: Int = 1000
 # still navigate the diff and double-click to open the file in the
 # editor where the highlighter runs incrementally.
 # How still the sidebar selection has to be before the right-side
-# panels are rebuilt. Long enough to swallow a key-repeat burst (the
-# fastest OS repeat rates land around 30 ms apart), short enough that a
-# single deliberate Down reads as immediate.
+# panels are rebuilt. Short enough that a single deliberate Down reads
+# as immediate — it is only the floor, because a fixed window can't
+# swallow a key-repeat burst it happens to be shorter than: macOS's
+# *default* repeat interval is ~92 ms, so with a flat 70 ms every
+# single repeat settled long enough to pay a full rebuild (~25-45 ms
+# measured on a 2000-file tree, see ``bench/git_view_bench.mojo``) and
+# a held arrow key crawled. The real window is derived from the
+# observed cadence instead — see ``_ensure_frame_settle_ms``.
 comptime _SETTLE_MS:      Int = 70
+# A move landing within this of the previous one counts as part of a
+# burst (held arrow key, wheel spin) rather than a deliberate step.
+# Covers every OS repeat rate fast enough to feel like scrolling;
+# slower cadences leave time for a build between rows anyway.
+comptime _BURST_GAP_MS:   Int = 300
+# Stillness required on top of the burst cadence before building, so
+# the next repeat can't arrive mid-build and waste it.
+comptime _SETTLE_MARGIN_MS: Int = 40
 comptime _HL_SIZE_CAP:    Int = 64 * 1024
 comptime _HL_LONG_LINE:   Int = 2000
 
@@ -722,6 +739,12 @@ def _author_color(author: String) -> UInt8:
     for i in range(len(b)):
         h = (h ^ UInt32(b[i])) * UInt32(16777619)
     return palette[Int(h % UInt32(len(palette)))]
+
+
+def _clamp(v: Int, hi: Int) -> Int:
+    """Clamp a scroll offset into ``[0, hi]``."""
+    if v < 0: return 0
+    return hi if v > hi else v
 
 
 def _scroll_panel(mut panel: RightPanel, delta: Int, h_in: Int):
@@ -1321,6 +1344,17 @@ struct LocalChanges(Movable):
     # once the list settles. 0 means "never moved by a keystroke"
     # (a directly-assigned ``sel_*``, as tests do), which always builds.
     var _sel_moved_ms: Int
+    # When the user last scrolled or moved the selection
+    # (``monotonic_ms``), regardless of whether it changed anything.
+    # Only the external-change poll reads it — see
+    # ``_poll_external_change``.
+    var _input_ms: Int
+    # Gap between the two most recent selection moves, or 0 when the
+    # last move was isolated (no prior move within ``_BURST_GAP_MS``).
+    # This is what makes the build debounce self-tuning: the selection
+    # has to be still for longer than it was *moving*, so no repeat
+    # rate can slip a rebuild between rows.
+    var _sel_move_gap_ms: Int
     # Where to put the right-panel cursor after a line-level stage /
     # unstage rebuilds the panels. ``_pending_cursor_path`` empty means
     # "nothing pending"; it's checked against the reselected file so a
@@ -1507,6 +1541,8 @@ struct LocalChanges(Movable):
         self.info = RightPanel()
         self._right_key = String("")
         self._sel_moved_ms = 0
+        self._sel_move_gap_ms = 0
+        self._input_ms = 0
         self._pending_cursor_path = String("")
         self._pending_cursor_line = 0
         self._pending_cursor_pane = _PANE_RIGHT_UNSTAGED
@@ -1581,6 +1617,8 @@ struct LocalChanges(Movable):
         self.info.reset()
         self._right_key = String("")
         self._sel_moved_ms = 0
+        self._sel_move_gap_ms = 0
+        self._input_ms = 0
         self._pending_cursor_path = String("")
         self._pending_cursor_line = 0
         self._pending_cursor_pane = _PANE_RIGHT_UNSTAGED
@@ -1766,6 +1804,14 @@ struct LocalChanges(Movable):
         var now = monotonic_ms()
         if now - self._last_poll_ms < _LC_POLL_INTERVAL_MS:
             return
+        # Not while the user is mid-gesture. ``fetch_git_status`` is a
+        # synchronous spawn whose cost scales with the tree (~20 ms at
+        # 2000 changed files, and the point of this view is big trees),
+        # so firing it under a wheel spin drops a frame a second into
+        # the middle of the scroll. Nothing external is missed — the
+        # poll just runs on the first quiet frame instead.
+        if self._input_ms > 0 and now - self._input_ms < _LC_INPUT_QUIET_MS:
+            return
         self._last_poll_ms = now
         var statuses = fetch_git_status(self.root)
         var fp = LocalChanges._status_fingerprint(statuses)
@@ -1823,6 +1869,8 @@ struct LocalChanges(Movable):
         self.info.reset()
         self._right_key = String("")
         self._sel_moved_ms = 0
+        self._sel_move_gap_ms = 0
+        self._input_ms = 0
         self._pending_cursor_path = String("")
         self._pending_cursor_line = 0
         self._pending_cursor_pane = _PANE_RIGHT_UNSTAGED
@@ -2046,6 +2094,24 @@ struct LocalChanges(Movable):
             or self.focus == _PANE_RIGHT_STAGED \
             or self.focus == _PANE_RIGHT_INFO
 
+    def _settle_window_ms(self) -> Int:
+        """How long the sidebar selection must hold still before the
+        paint path is allowed to rebuild the right side.
+
+        ``_SETTLE_MS`` alone is a coin flip against the OS key-repeat
+        interval: shorter than the repeat and every single row pays a
+        full rebuild — which is exactly what happens at macOS's default
+        ~92 ms rate. So a burst (moves arriving within ``_BURST_GAP_MS``
+        of each other) widens the window past its own cadence, which
+        makes the debounce hold for any repeat rate — and for wheel and
+        trackpad spins, which arrive faster still. An isolated move
+        keeps the short floor, so a deliberate single Down still shows
+        its diff right away."""
+        if self._sel_move_gap_ms <= 0:
+            return _SETTLE_MS
+        var burst = self._sel_move_gap_ms + _SETTLE_MARGIN_MS
+        return burst if burst > _SETTLE_MS else _SETTLE_MS
+
     def _ensure_right_panels(
         mut self, mut registry: GrammarRegistry, panel_bounds: Rect,
         defer_while_moving: Bool = False,
@@ -2060,16 +2126,16 @@ struct LocalChanges(Movable):
 
         ``defer_while_moving`` is set by the paint path only. A build is
         expensive — a ``git show`` spawn per side plus a full-file
-        tokenize, ~10-25 ms — and under a held arrow key every row the
-        selection passes through would pay it, which is what made
-        scrolling a long file list feel heavy. Deferred until the
-        selection has been still for ``_SETTLE_MS``; the previous file's
-        panels stay on screen meanwhile (they carry their own filename
-        banner, so nothing reads as mislabeled) and the next frame after
-        the list settles fills in the real ones. Both frontends tick on
-        a timer, so that frame always comes. Callers that need content
-        *now* — entering the right pane, clicking a diff row — leave it
-        off and build synchronously."""
+        tokenize, ~25-45 ms on a big tree — and under a held arrow key
+        every row the selection passes through would pay it, which is
+        what made scrolling a long file list feel heavy. Deferred until
+        the selection has been still for ``_settle_window_ms()``; the
+        previous file's panels stay on screen meanwhile (they carry
+        their own filename banner, so nothing reads as mislabeled) and
+        the next frame after the list settles fills in the real ones.
+        Both frontends tick on a timer, so that frame always comes.
+        Callers that need content *now* — entering the right pane,
+        clicking a diff row — leave it off and build synchronously."""
         var key = self._focus_key()
         if key == self._right_key \
                 and (len(self.unstaged.lines) > 0
@@ -2077,7 +2143,8 @@ struct LocalChanges(Movable):
                      or len(self.info.lines) > 0):
             return
         if defer_while_moving and self._sel_moved_ms > 0 \
-                and monotonic_ms() - self._sel_moved_ms < _SETTLE_MS:
+                and monotonic_ms() - self._sel_moved_ms \
+                    < self._settle_window_ms():
             return
         self._right_key = key
         self.unstaged.reset()
@@ -3468,8 +3535,15 @@ struct LocalChanges(Movable):
         # Stamp the move for the paint path's build debounce. Clamped
         # no-ops (Down on the last row) don't count — they'd keep the
         # right side deferred forever under a held key.
+        self._input_ms = monotonic_ms()
         if new != self._focused_selection():
-            self._sel_moved_ms = monotonic_ms()
+            var now = self._input_ms
+            # Remember the cadence, not just the instant: a move that
+            # follows hard on the previous one is a burst, and the
+            # debounce widens to outlast it.
+            var gap = now - self._sel_moved_ms if self._sel_moved_ms > 0 else 0
+            self._sel_move_gap_ms = gap if gap <= _BURST_GAP_MS else 0
+            self._sel_moved_ms = now
         var h = self._focused_panel_height(container_bounds)
         if h < 1: h = 1
         if self.focus == _PANE_FILES:
@@ -4054,6 +4128,8 @@ struct LocalChanges(Movable):
         # Force right-pane recompute next paint.
         self._right_key = String("")
         self._sel_moved_ms = 0
+        self._sel_move_gap_ms = 0
+        self._input_ms = 0
         self._pending_cursor_path = String("")
         self._pending_cursor_line = 0
         self._pending_cursor_pane = _PANE_RIGHT_UNSTAGED
@@ -4083,6 +4159,8 @@ struct LocalChanges(Movable):
             self.sel_commit = 0
         self._right_key = String("")
         self._sel_moved_ms = 0
+        self._sel_move_gap_ms = 0
+        self._input_ms = 0
         self._pending_cursor_path = String("")
         self._pending_cursor_line = 0
         self._pending_cursor_pane = _PANE_RIGHT_UNSTAGED
@@ -5293,6 +5371,74 @@ struct LocalChanges(Movable):
             return _PANE_COMMITS
         return -1
 
+    def _pane_row_count(self, pane: Int) -> Int:
+        """How many display rows a sidebar pane's list has. Files count
+        ``file_rows`` (tree view: directory headers included), which is
+        the list ``scroll_files`` indexes."""
+        if pane == _PANE_FILES: return len(self.file_rows)
+        if pane == _PANE_BRANCHES: return len(self.branches)
+        if pane == _PANE_COMMITS: return len(self.commits)
+        return 0
+
+    def _pane_view_height(self, pane: Int, container_bounds: Rect) -> Int:
+        """Visible body rows of a sidebar pane — its section height less
+        the header row the dock paints."""
+        var rows = self._pane_rows(container_bounds)
+        var h: Int
+        if pane == _PANE_FILES:
+            h = rows[1] - 1
+        elif pane == _PANE_BRANCHES:
+            h = rows[3] - 1
+        elif pane == _PANE_COMMITS:
+            h = rows[5] - 1
+        else:
+            h = 0
+        return 0 if h < 0 else h
+
+    def _scroll_pane_view(
+        mut self, pane: Int, delta: Int, container_bounds: Rect,
+    ):
+        """Move a sidebar pane's viewport without touching its selection
+        — what the wheel does everywhere else in the app (`file_tree`,
+        `dir_browser`, the right-hand diff panels), and what the sidebar
+        pointedly did not.
+
+        It used to move the *selection* one row per notch instead, which
+        made an aggressive wheel spin feel stuck: the list crawled a
+        single row per notch (2000 notches to cross a 2000-file tree,
+        against three rows a notch for every other list), and because
+        each notch changed the selection it also asked for a right-panel
+        rebuild — a ``git show`` spawn per side plus a tokenize — that
+        the settle debounce then had to swallow. Scrolling the view
+        instead makes the whole question moot: the selection doesn't
+        move, so nothing rebuilds, and travel tracks the gesture.
+
+        Focus stays put too. Wheeling over the Commits pane used to
+        focus it, which swapped the right side from the selected file's
+        diff to a commit log mid-spin. Clicking is how a pane is
+        chosen."""
+        self._input_ms = monotonic_ms()
+        var count = self._pane_row_count(pane)
+        var h = self._pane_view_height(pane, container_bounds)
+        if h <= 0:
+            # Collapsed to header-only: nothing is on screen to scroll,
+            # and letting the offset run would leave the pane scrolled
+            # past its end when it's expanded again.
+            return
+        var max_scroll = count - h
+        if max_scroll < 0:
+            max_scroll = 0
+        if pane == _PANE_FILES:
+            self.scroll_files = _clamp(self.scroll_files + delta, max_scroll)
+        elif pane == _PANE_BRANCHES:
+            self.scroll_branches = _clamp(
+                self.scroll_branches + delta, max_scroll,
+            )
+        elif pane == _PANE_COMMITS:
+            self.scroll_commits = _clamp(
+                self.scroll_commits + delta, max_scroll,
+            )
+
     def _right_pane_at(self, pos: Point, container_bounds: Rect) -> Int:
         """Return _PANE_RIGHT_UNSTAGED / _PANE_RIGHT_STAGED /
         _PANE_RIGHT_INFO based on which sub-panel ``pos`` falls in. -1
@@ -5435,11 +5581,7 @@ struct LocalChanges(Movable):
             var pane = self._pane_at(pos, bounds)
             if pane < 0:
                 return True
-            self.focus = pane
-            self.last_sidebar_focus = pane
-            self._set_focused_selection(
-                self._focused_selection() + dy, bounds,
-            )
+            self._scroll_pane_view(pane, 3 * dy, bounds)
             return True
         # --- left-button press: drag-start, focus or selection ----------
         if event.button == MOUSE_BUTTON_LEFT and event.pressed \

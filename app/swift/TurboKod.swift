@@ -1077,8 +1077,13 @@ final class CellView: NSView {
         needsDisplay = true
     }
 
+    /// `quiet` dispatches the event into the core but skips the cursor-shape
+    /// query and the change detection. `detectChange` lays out and hashes the
+    /// whole surface — 5 ms with a real editor open — so a caller emitting a
+    /// run of events in one gesture (see `legacyNotchScroll`) must pass it and
+    /// settle up once at the end, not per event.
     private func sendMouse(_ e: NSEvent, button: UInt8, pressed: UInt8, motion: UInt8,
-                           passive: Bool = false) {
+                           passive: Bool = false, quiet: Bool = false) {
         // See keyDown — scripted capture runs ignore live input.
         if ProcessInfo.processInfo.environment["TK_CAPTURE"] != nil { return }
         let p = convert(e.locationInWindow, from: nil)
@@ -1184,6 +1189,7 @@ final class CellView: NSView {
                 sbDragging = false
             }
         }
+        if quiet { return }
         // Cursor hint.
         let shape = pointerShapeSurface(col, row, cols(), rows())
         switch shape {
@@ -1363,11 +1369,34 @@ final class CellView: NSView {
         if dy == 0 { return }
         let perNotch: CGFloat = e.hasPreciseScrollingDeltas ? CELL_H * 2 : 1
         scrollAccumY += dy
+        // One trackpad event carries enough delta for several notches, and a
+        // flick's momentum keeps them coming at the display rate. Each notch
+        // used to go through the full `sendMouse` tail — cursor-shape query
+        // plus `detectChange`, which lays out and hashes the entire surface at
+        // ~5 ms a call with an editor open. A big swipe therefore asked for
+        // tens of full layouts per event, arriving every 8-16 ms: the app
+        // couldn't keep up, the event queue backed up, and a core pegged
+        // while it drained long after the fingers were off the glass. The
+        // notches go in quiet and the surface is settled once, here.
+        var sent = 0
         while abs(scrollAccumY) >= perNotch {
             let up = scrollAccumY > 0
-            sendMouse(e, button: up ? 4 : 5, pressed: 1, motion: 0)
+            sendMouse(e, button: up ? 4 : 5, pressed: 1, motion: 0, quiet: true)
             scrollAccumY += up ? -perNotch : perNotch
+            sent += 1
         }
+        if sent == 0 { return }
+        // Content moved under a stationary pointer, so the hover shape can
+        // have changed even though the position didn't.
+        let p = convert(e.locationInWindow, from: nil)
+        switch pointerShapeSurface(Int64(max(0, p.x) / CELL_W),
+                                   Int64(max(0, p.y) / CELL_H),
+                                   cols(), rows()) {
+        case 1: NSCursor.iBeam.set()
+        case 2: NSCursor.pointingHand.set()
+        default: NSCursor.arrow.set()
+        }
+        if detectChange() { needsDisplay = true }
     }
 
     /// Horizontal scroll of the *focused* editor (not the pointer's window —

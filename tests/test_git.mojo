@@ -33,13 +33,14 @@ from turbokod.git_changes import (
     diff_buffer_against_head, diff_buffer_marks, parse_unified_diff_files
 )
 from turbokod.local_changes import (
-    LocalChanges, build_minimal_patch, _GITOP_BRANCH_DELETE, _GITOP_CHECKOUT,
+    LocalChanges, build_minimal_patch, _BURST_GAP_MS, _SETTLE_MS,
+    _GITOP_BRANCH_DELETE, _GITOP_CHECKOUT,
     _GITOP_MERGE, _GITOP_NONE, _GITOP_PUSH, _GITOP_REBASE,
     _OVERLAY_DELETE_BRANCH_CONFIRM,
     _GITOP_REWORD, _OVERLAY_EDIT_MSG,
     _OVERLAY_MERGE_CHOICE, _OVERLAY_NONE,
     _OVERLAY_OUTPUT, _OVERLAY_STATUS,
-    _PANE_BRANCHES, _PANE_COMMITS, _PANE_RIGHT_STAGED,
+    _PANE_BRANCHES, _PANE_COMMITS, _PANE_FILES, _PANE_RIGHT_STAGED,
     _PANE_RIGHT_UNSTAGED, _LINE_ADD, _LINE_REM
 )
 from turbokod.git_output import (
@@ -73,7 +74,7 @@ from turbokod.events import (
     Event, KEY_BACKSPACE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME,
     KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_SPACE, KEY_UP,
     MOD_CTRL,
-    MOD_META, MOD_SHIFT, MOUSE_BUTTON_LEFT
+    MOD_META, MOD_SHIFT, MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP
 )
 from turbokod.geometry import Point, Rect
 from turbokod.merge_view import (
@@ -4060,6 +4061,176 @@ def test_local_changes_defers_the_right_side_while_the_selection_moves() raises:
     _rm_rf(dir)
 
 
+def test_local_changes_settle_window_outlasts_the_key_repeat_rate() raises:
+    """The build debounce widens to the cadence the selection is moving
+    at, so no key-repeat rate can slip a rebuild in between rows.
+
+    A flat ``_SETTLE_MS`` window is a coin flip against the OS repeat
+    interval: macOS's default is ~92 ms, longer than the 70 ms floor, so
+    every single repeat used to settle long enough to pay a full
+    rebuild (~25-45 ms on a big tree) and a held arrow key crawled.
+    Cadence is simulated by backdating the move stamps rather than
+    sleeping."""
+    var dir = _temp_path(String("_settle_rate"))
+    if not _init_repo_with_commit(dir):
+        return
+    assert_true(
+        write_file(join_path(dir, String("f.txt")), String("a\nb\nZ\n")),
+    )
+    assert_true(
+        write_file(join_path(dir, String("g.txt")), String("new\n")),
+    )
+    assert_true(
+        write_file(join_path(dir, String("h.txt")), String("third\n")),
+    )
+    var lc = LocalChanges()
+    lc.open(dir)
+    assert_equal(len(lc.files), 3)
+    var registry = GrammarRegistry()
+    var screen = Rect(0, 0, 120, 40)
+    var canvas = Canvas(screen.width(), screen.height())
+    lc.paint(canvas, screen, registry)
+    assert_equal(lc._right_key, String("f:0"))
+    # An isolated move keeps the short floor: a deliberate single Down
+    # still shows its diff on the next settled frame.
+    _ = lc.handle_key(_key(KEY_DOWN), screen, registry)
+    assert_equal(lc._sel_move_gap_ms, 0)
+    assert_equal(lc._settle_window_ms(), _SETTLE_MS)
+    # Now a second move one repeat interval later — that's a burst, and
+    # the window has to grow past the interval itself.
+    var repeat = 92
+    lc._sel_moved_ms = monotonic_ms() - repeat
+    _ = lc.handle_key(_key(KEY_DOWN), screen, registry)
+    assert_equal(lc.sel_file, 2)
+    assert_equal(lc._sel_move_gap_ms, repeat)
+    assert_true(lc._settle_window_ms() > repeat)
+    # Stillness longer than the old flat floor but shorter than the
+    # cadence: the frame the next repeat would land on must not build.
+    lc._sel_moved_ms = monotonic_ms() - (_SETTLE_MS + 5)
+    lc.paint(canvas, screen, registry)
+    assert_equal(lc._right_key, String("f:0"))
+    # Key released — the window elapses and the panels fill in.
+    lc._sel_moved_ms = monotonic_ms() - (lc._settle_window_ms() + 5)
+    lc.paint(canvas, screen, registry)
+    assert_equal(lc._right_key, String("f:2"))
+    # A cadence slower than a burst isn't scrolling; it goes back to the
+    # floor so stepping row by row stays immediate.
+    lc._sel_moved_ms = monotonic_ms() - (_BURST_GAP_MS + 50)
+    _ = lc.handle_key(_key(KEY_UP), screen, registry)
+    assert_equal(lc._sel_move_gap_ms, 0)
+    assert_equal(lc._settle_window_ms(), _SETTLE_MS)
+    lc.release()
+    registry.release()
+    _rm_rf(dir)
+
+
+def test_local_changes_wheel_scrolls_the_sidebar_view() raises:
+    """The wheel over a sidebar pane scrolls its viewport — three rows a
+    notch, selection and focus untouched — like every other list in the
+    app (``file_tree``, ``dir_browser``, the right-hand diff panels).
+
+    It used to move the *selection* one row a notch instead, so an
+    aggressive spin crawled (one row against three everywhere else, on a
+    list whose whole point is being long) and asked for a right-panel
+    rebuild per notch on top of that."""
+    var dir = _temp_path(String("_wheel"))
+    if not _init_repo_with_commit(dir):
+        return
+    for i in range(30):
+        assert_true(
+            write_file(
+                join_path(dir, String("f") + String(i) + String(".txt")),
+                String("x\n"),
+            ),
+        )
+    var lc = LocalChanges()
+    lc.open(dir)
+    assert_true(len(lc.files) >= 30)
+    var registry = GrammarRegistry()
+    var screen = Rect(0, 0, 120, 40)
+    var canvas = Canvas(screen.width(), screen.height())
+    lc.paint(canvas, screen, registry)
+    var sel_before = lc.sel_file
+    var focus_before = lc.focus
+    # A point inside the Files pane body (the pane is the topmost of the
+    # three, a couple of rows below the modal's title + subtitle).
+    var over_files = Point(4, 6)
+    assert_equal(lc._pane_at(over_files, screen), _PANE_FILES)
+    _ = lc.handle_mouse(
+        Event.mouse_event(over_files, MOUSE_WHEEL_DOWN), screen, registry,
+    )
+    assert_equal(lc.scroll_files, 3)
+    assert_equal(lc.sel_file, sel_before)
+    assert_equal(lc.focus, focus_before)
+    # The selection didn't move, so nothing asked the right side to
+    # rebuild — that's what makes a fast spin free.
+    assert_equal(lc._sel_moved_ms, 0)
+    # Clamped at both ends: a hard flick can't run off the list.
+    for _ in range(200):
+        _ = lc.handle_mouse(
+            Event.mouse_event(over_files, MOUSE_WHEEL_DOWN), screen, registry,
+        )
+    var max_scroll = len(lc.file_rows) - lc._pane_view_height(
+        _PANE_FILES, screen,
+    )
+    if max_scroll < 0:
+        max_scroll = 0
+    assert_equal(lc.scroll_files, max_scroll)
+    for _ in range(200):
+        _ = lc.handle_mouse(
+            Event.mouse_event(over_files, MOUSE_WHEEL_UP), screen, registry,
+        )
+    assert_equal(lc.scroll_files, 0)
+    # An arrow key still owns the selection, and pulls the view back to
+    # it from wherever the wheel left off.
+    for _ in range(20):
+        _ = lc.handle_mouse(
+            Event.mouse_event(over_files, MOUSE_WHEEL_DOWN), screen, registry,
+        )
+    assert_true(lc.scroll_files > 0)
+    _ = lc.handle_key(_key(KEY_DOWN), screen, registry)
+    assert_equal(lc.sel_file, sel_before + 1)
+    # ``_nudge_files_scroll_up`` scrolls up *just* enough, so the newly
+    # selected row lands on the pane's top line.
+    assert_equal(lc.scroll_files, lc._file_row_of(lc.sel_file))
+    lc.release()
+    registry.release()
+    _rm_rf(dir)
+
+
+def test_local_changes_poll_waits_for_the_scroll_to_stop() raises:
+    """The external-change poll doesn't spawn its ``git status`` while
+    the user is mid-gesture.
+
+    It's a synchronous spawn whose cost scales with the tree, so firing
+    it on schedule under a wheel spin drops a frame a second into the
+    middle of the scroll. Deferring costs nothing — it runs on the first
+    quiet frame instead."""
+    var dir = _temp_path(String("_pollquiet"))
+    if not _init_repo_with_commit(dir):
+        return
+    assert_true(write_file(join_path(dir, String("a.txt")), String("a\n")))
+    var lc = LocalChanges()
+    lc.open(dir)
+    var registry = GrammarRegistry()
+    var screen = Rect(0, 0, 120, 40)
+    # Make the interval itself due, so only the input gate can hold it.
+    lc._last_poll_ms = monotonic_ms() - 5000
+    var due = lc._last_poll_ms
+    _ = lc.handle_mouse(
+        Event.mouse_event(Point(4, 6), MOUSE_WHEEL_DOWN), screen, registry,
+    )
+    lc._poll_external_change()
+    assert_equal(lc._last_poll_ms, due)
+    # Gesture over (backdate the stamp rather than sleeping): it runs.
+    lc._input_ms = monotonic_ms() - 5000
+    lc._poll_external_change()
+    assert_true(lc._last_poll_ms > due)
+    lc.release()
+    registry.release()
+    _rm_rf(dir)
+
+
 def test_local_changes_staging_a_line_lands_on_the_next_change() raises:
     """Space on a diff line stages it and leaves the cursor on the *next*
     changed line, not back at the top of the rebuilt panel.
@@ -4360,6 +4531,9 @@ def main() raises:
     test_diff_view_renders_removed_rows_without_line_numbers()
     test_local_changes_fills_both_panels_for_a_file_changed_twice()
     test_local_changes_defers_the_right_side_while_the_selection_moves()
+    test_local_changes_settle_window_outlasts_the_key_repeat_rate()
+    test_local_changes_wheel_scrolls_the_sidebar_view()
+    test_local_changes_poll_waits_for_the_scroll_to_stop()
     test_local_changes_staging_a_line_lands_on_the_next_change()
     test_diff_view_modified_line_shows_old_removed_and_new_added()
     test_diff_view_phantom_syntax_overlay()
@@ -4431,4 +4605,4 @@ def main() raises:
     test_github_repo_web_url_parses_every_remote_shape()
     test_branch_pane_o_opens_the_github_compare_page()
     test_branch_pane_o_refuses_main_and_a_non_github_remote()
-    print("git: 115 tests passed")
+    print("git: 118 tests passed")

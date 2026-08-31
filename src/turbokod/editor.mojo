@@ -10941,7 +10941,17 @@ struct Editor(Copyable, Movable):
         """
         if self._is_wrapping():
             self.scroll_x = 0
-        else:
+        elif self.scroll_x != 0:
+            # Only when horizontally scrolled. At ``scroll_x == 0`` every
+            # step below is provably a no-op — ``max_x`` can't go negative
+            # so the clamps don't fire, and the codepoint re-snap maps
+            # byte 0 to cell 0 and back — but ``longest_line_width``
+            # walks the whole buffer measuring display columns per line to
+            # get there. ``fit_into`` calls this for every editor every
+            # frame, so on a 14k-line file that no-op cost 3.2 ms of every
+            # frame (a third of the whole frame, measured by
+            # ``bench/git_frame_bench.mojo``), and horizontal scroll is
+            # zero almost always.
             var total_gutter = self._total_gutter()
             var right_gutter = self._right_gutter()
             var content_w = view.width() - total_gutter - right_gutter
