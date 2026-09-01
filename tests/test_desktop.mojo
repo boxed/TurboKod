@@ -2988,6 +2988,22 @@ def test_view_states_are_capped_least_recently_used_first() raises:
     )
 
 
+def test_project_find_accepts_non_ascii_in_its_query() raises:
+    """End of the wire for the dialog-input fix: an ``ö`` typed into
+    Find in Project lands in the query.
+
+    The gate was in the shared ``TextField``, but this is where it was
+    reported and where the routing has to hold up — ``handle_key``
+    returns True either way, so an unconsumed key is silently dropped
+    rather than falling through to something visible."""
+    var d = Desktop()
+    d.project_find.open(String("."), String(""))
+    assert_true(d.project_find.active)
+    _ = d.project_find.handle_key(_key(UInt32(0xF6)), 0)     # ö
+    _ = d.project_find.handle_key(_key(UInt32(0x6C)), 0)     # l
+    assert_equal(d.project_find.query.text, String("öl"))
+
+
 def test_fullscreen_modal_paint_is_covered_by_the_modal() raises:
     """``Desktop.paint`` skips the workspace beneath a fullscreen modal,
     which is only sound while the modal really covers every cell.
@@ -3171,6 +3187,7 @@ def main() raises:
     test_find_symbol_falls_back_to_rg_before_the_index_is_ready()
     test_find_symbol_index_sees_unsaved_buffer_text()
     test_shutdown_stops_the_search_subprocesses()
+    test_project_find_accepts_non_ascii_in_its_query()
     test_fullscreen_modal_paint_is_covered_by_the_modal()
     test_clamp_scroll_still_pulls_back_a_widened_window()
-    print("desktop: 107 tests passed")
+    print("desktop: 108 tests passed")

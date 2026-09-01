@@ -14,7 +14,8 @@ from turbokod.git_blame import BlameLine
 from turbokod.painter import Painter
 from turbokod.cell import Cell
 from turbokod.colors import (
-    Attr, BLACK, BLUE, CYAN, LIGHT_GRAY, WHITE, default_attr
+    Attr, BLACK, BLUE, CYAN, EDITOR_BG, LIGHT_GRAY, RED, WHITE, YELLOW,
+    default_attr
 )
 from turbokod.theme import Theme
 from turbokod.editor import Editor
@@ -37,6 +38,9 @@ from turbokod.file_io import find_git_project, join_path, stat_file, write_file
 from turbokod.menu import Menu, MenuBar, MenuItem
 from turbokod.project import ProjectMatch, find_in_project, walk_project_files
 from turbokod.find_results_pane import FindResultsPane
+from turbokod.highlight import GrammarRegistry, Highlight
+from turbokod.project_find import paint_match_row
+from turbokod.text_select import PaneTextSelect
 from turbokod.search_options import SearchOptions
 from turbokod.text_field import TextField
 from turbokod.quick_open import QuickOpen, quick_open_match
@@ -205,6 +209,127 @@ def test_blame_popup_caps_a_long_message() raises:
     var rect = p._rect(Rect(0, 0, 80, 24))
     assert_true(rect.a.y >= 0)
     assert_true(rect.height() <= 24)
+
+
+def test_match_row_paints_non_ascii_as_one_cell_each() raises:
+    """A result row shows ``ö`` as ``ö``, not ``??``.
+
+    Both the Find in Project list and the docked Find Results pane paint
+    through ``paint_match_row``, which laid rows down one cell per
+    *byte* with everything >= 0x80 replaced by ``?``. A two-byte glyph
+    therefore rendered as two question marks and shoved the rest of the
+    line a column to the right — including the match highlight, which
+    then landed on the wrong characters."""
+    var canvas = Canvas(60, 4)
+    canvas.clear(default_attr())
+    var panel = Rect(0, 0, 60, 4)
+    var painter = Painter(panel)
+    var m = ProjectMatch(
+        String("/proj/a.txt"), String("a.txt"), 3,
+        String("var Rörm = 1"),
+    )
+    var registry = GrammarRegistry()
+    var cache = List[List[Highlight]]()
+    var cached = List[Bool]()
+    var attr = Attr(YELLOW, EDITOR_BG)
+    var hit_attr = Attr(WHITE, RED)
+    var geom = paint_match_row(
+        canvas, panel, painter, 1, m, False, String("Rörm"),
+        attr, attr, hit_attr, hit_attr, attr, attr,
+        registry, -1, 0, cache, cached, String(""), True,
+    )
+    # One cell per codepoint, ö included.
+    var x = geom.text_x
+    assert_equal(canvas.get(x + 0, 1).glyph, String("v"))
+    assert_equal(canvas.get(x + 4, 1).glyph, String("R"))
+    assert_equal(canvas.get(x + 5, 1).glyph, String("ö"))
+    assert_equal(canvas.get(x + 6, 1).glyph, String("r"))
+    assert_equal(canvas.get(x + 7, 1).glyph, String("m"))
+    assert_equal(canvas.get(x + 9, 1).glyph, String("="))
+    # The hit highlight covers exactly the four cells of "Rörm" — byte
+    # arithmetic would have run one cell past, onto the space.
+    for c in range(4, 8):
+        assert_equal(Int(canvas.get(x + c, 1).attr.bg), Int(hit_attr.bg))
+    assert_equal(Int(canvas.get(x + 8, 1).attr.bg), Int(attr.bg))
+    # The geometry handed to the drag-selection model still speaks bytes
+    # (that's what Cmd+C copies), so "Rörm" is 5 of them.
+    assert_equal(geom.byte_start, 0)
+    assert_equal(geom.byte_end, len(m.line_text.as_bytes()))
+    registry.release()
+
+
+def test_pane_selection_maps_columns_across_multibyte_glyphs() raises:
+    """A drag over a row with non-ASCII selects what the pointer is on.
+
+    ``PaneRow`` mapped byte to column as ``text_x + (b - byte_start)``,
+    so every multi-byte glyph to the left of the pointer skewed the
+    result by a column and a click could land mid-sequence."""
+    var sel = PaneTextSelect()
+    sel.begin_frame()
+    # "aöbö" — bytes 0,1..2,3,4..5 ; columns 0,1,2,3.
+    sel.add_row(0, String("aöbö"), 5, 10, 0, 6, 40)
+    # Column 12 is the 'b' (third glyph), which starts at byte 3.
+    var p = sel.position_at(Point(12, 5))
+    assert_equal(p[0], 0)
+    assert_equal(p[1], 3)
+    # The right half of a multi-byte glyph resolves to its start, never
+    # into the middle of the sequence.
+    assert_equal(sel.position_at(Point(11, 5))[1], 1)
+    # Drag from the 'b' to the end selects "bö", not a byte-skewed span.
+    _ = sel.handle_mouse(
+        Event.mouse_event(Point(12, 5), MOUSE_BUTTON_LEFT, True, False),
+    )
+    _ = sel.handle_mouse(
+        Event.mouse_event(Point(14, 5), MOUSE_BUTTON_LEFT, True, True),
+    )
+    assert_true(sel.has_selection())
+    assert_equal(sel.text(), String("bö"))
+
+
+def test_match_row_slides_a_long_line_to_show_the_hit() raises:
+    """A hit far along a line slides into view, and the slide is
+    measured in columns even when the text before it is multi-byte.
+
+    The slide walks backwards from the hit so its cost is the pane width
+    rather than the line length — these rows can be minified JS."""
+    var canvas = Canvas(60, 4)
+    canvas.clear(default_attr())
+    var panel = Rect(0, 0, 60, 4)
+    var painter = Painter(panel)
+    # 100 ö (200 bytes, 100 columns) then the needle, well past the pane.
+    var line = String("")
+    for _ in range(100):
+        line += String("ö")
+    line += String("Rörm tail")
+    var m = ProjectMatch(
+        String("/proj/a.txt"), String("a.txt"), 1, line,
+    )
+    var registry = GrammarRegistry()
+    var cache = List[List[Highlight]]()
+    var cached = List[Bool]()
+    var attr = Attr(YELLOW, EDITOR_BG)
+    var hit_attr = Attr(WHITE, RED)
+    var geom = paint_match_row(
+        canvas, panel, painter, 1, m, False, String("Rörm"),
+        attr, attr, hit_attr, hit_attr, attr, attr,
+        registry, -1, 0, cache, cached, String(""), True,
+    )
+    # Slid: the run no longer starts at byte 0, and it starts on a
+    # codepoint boundary (an even byte, since every glyph before the
+    # needle is two bytes).
+    assert_true(geom.byte_start > 0)
+    assert_equal(geom.byte_start % 2, 0)
+    # The needle is inside the painted window, and highlighted somewhere
+    # on the row rather than clipped away.
+    assert_true(geom.byte_start <= 200)
+    assert_true(geom.byte_end >= 205)
+    var found = False
+    for x in range(geom.text_x, geom.clip_x):
+        if canvas.get(x, 1).glyph == String("R") \
+                and Int(canvas.get(x, 1).attr.bg) == Int(hit_attr.bg):
+            found = True
+    assert_true(found)
+    registry.release()
 
 
 def test_find_results_pane_multiselect() raises:
@@ -2257,6 +2382,41 @@ def test_find_misspelled_runs_filters_identifiers_and_short_words() raises:
     assert_equal(second_word, String("world"))
 
 
+def test_text_field_types_non_ascii_letters() raises:
+    """A dialog input strip accepts printable non-ASCII.
+
+    Every input field in the app is a ``TextField``, and its printable
+    branch gated on ASCII only: an ``ö`` (codepoint 0xF6, which is what
+    both frontends deliver) fell through unconsumed and the caller
+    swallowed it — no character, no beep. So no accented letter could be
+    typed into Find in Project, Save As, Go to Line, Settings, any of
+    them."""
+    var tf = TextField()
+    var r = tf.handle_key(_key(UInt32(0xF6)))          # ö
+    assert_true(r.consumed)
+    assert_true(r.changed)
+    assert_equal(tf.text, String("ö"))
+    # Cursor advances by the codepoint's *bytes* — ö is two.
+    assert_equal(tf.cursor, 2)
+    # A run of them, mixed with ASCII, and one above the BMP.
+    _ = tf.handle_key(_key(UInt32(0x6C)))              # l
+    _ = tf.handle_key(_key(UInt32(0xE4)))              # ä
+    _ = tf.handle_key(_key(UInt32(0x1F600)))           # emoji
+    assert_equal(tf.text, String("ölä😀"))
+    # Backspace walks whole codepoints back off the end.
+    _ = tf.handle_key(_key(KEY_BACKSPACE))
+    assert_equal(tf.text, String("ölä"))
+    _ = tf.handle_key(_key(KEY_BACKSPACE))
+    assert_equal(tf.text, String("öl"))
+    # Still excluded: C1 controls, surrogates (chr() on a lone one
+    # aborts the process), and the PUA block the KEY_* sentinels use.
+    var before = tf.text
+    for bad in [UInt32(0x9F), UInt32(0xD800), UInt32(0xE000), UInt32(0xF8FF)]:
+        var rr = tf.handle_key(_key(bad))
+        assert_false(rr.changed)
+    assert_equal(tf.text, before)
+
+
 def test_text_field_scrolls_to_keep_cursor_visible() raises:
     """Typing past the strip width must scroll horizontally so the
     caret stays inside the strip — otherwise the user can't see what
@@ -2720,4 +2880,8 @@ def main() raises:
     test_paint_shadow_button_dragged_off_shows_shadow_again()
     test_dir_browser_jump_button_release_inside_jumps()
     test_dir_browser_jump_button_release_outside_cancels()
-    print("dialogs: 107 tests passed")
+    test_text_field_types_non_ascii_letters()
+    test_match_row_paints_non_ascii_as_one_cell_each()
+    test_pane_selection_maps_columns_across_multibyte_glyphs()
+    test_match_row_slides_a_long_line_to_show_the_hit()
+    print("dialogs: 111 tests passed")

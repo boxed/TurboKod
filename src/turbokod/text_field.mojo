@@ -59,7 +59,8 @@ from .events import (
 from .posix import monotonic_ms
 from .geometry import Point, Rect
 from .string_utils import (
-    char_width, codepoint_at, is_word_codepoint, leading_indent_bytes,
+    char_width, codepoint_at, is_printable_text_key, is_word_codepoint,
+    leading_indent_bytes,
     prev_codepoint_start, utf8_byte_of_cell, utf8_cell_of_byte,
     utf8_codepoint_size, utf8_step_forward, word_char_step, word_range_at,
 )
@@ -568,12 +569,21 @@ struct TextField(Copyable, Movable):
             return TextFieldKeyResult(True, False)
         if (event.mods & MOD_ALT) != 0:
             return TextFieldKeyResult(True, False)
-        # Plain printable ASCII: insert at cursor. Coalesce consecutive
-        # presses into one undo group so Cmd+Z rolls back a whole typed
-        # word rather than one character at a time. A selection
-        # replacement or a paused-then-resumed run breaks the group:
-        # the user expects undo to stop at those natural boundaries.
-        if UInt32(0x20) <= k and k < UInt32(0x7F):
+        # Printable text: insert at cursor. The range is the editor's —
+        # see ``is_printable_text_key`` — not ASCII-only, which is what
+        # this branch used to test. An ``ö`` arrives as codepoint 0xF6
+        # from both frontends, failed the ASCII gate, fell out of
+        # ``handle_key`` unconsumed, and was swallowed by the caller: no
+        # character, no beep. Every dialog input strip in the app is one
+        # of these fields, so that was every non-ASCII letter in Find in
+        # Project, Save As, Go to Line, Settings, all of them.
+        #
+        # Coalesce consecutive presses into one undo group so Cmd+Z
+        # rolls back a whole typed word rather than one character at a
+        # time. A selection replacement or a paused-then-resumed run
+        # breaks the group: the user expects undo to stop at those
+        # natural boundaries.
+        if is_printable_text_key(k):
             var now = monotonic_ms()
             var in_run = self._typing_active \
                 and now - self._typing_last_ms <= _TYPING_DEBOUNCE_MS \

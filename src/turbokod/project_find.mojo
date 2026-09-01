@@ -21,7 +21,7 @@ from std.collections.optional import Optional
 from .buttons import (
     BUTTON_FIRED, OptionToggle, paint_option_toggle,
 )
-from .canvas import Canvas
+from .canvas import Canvas, RunCells
 from .painter import Painter
 from .cell import Cell
 from .colors import (
@@ -45,7 +45,10 @@ from .posix import alloc_zero_buffer, monotonic_ms, poll_stdin, read_into
 from .project import ProjectMatch
 from .clipboard import clipboard_chord, CLIP_COPY
 from .search_options import SearchOptions
-from .string_utils import display_columns, split_lines
+from .string_utils import (
+    byte_slice, char_width, codepoint_at, display_columns,
+    prev_codepoint_start, split_lines, TAB_WIDTH,
+)
 from .text_field import TextField, TextFieldKeyResult
 from .text_select import PaneTextSelect
 from .window import close_button_clicked, paint_close_button, paint_window_title
@@ -950,48 +953,40 @@ struct ProjectFind(Movable):
             x += display_columns(marker)
             _ = painter.put_text(canvas, Point(x, y), lineno, ctx_attr)
             x += display_columns(lineno)
-            # Plain text pass — establishes glyph + base attr per cell.
+            # Plain text pass — one cell per *codepoint*, via the same
+            # ``put_text`` everything else paints through, so a
+            # multi-byte glyph is one cell carrying its whole sequence.
+            # This used to emit one cell per byte with anything >= 0x80
+            # replaced by ``?``, which is why an ``ö`` showed up as
+            # ``??`` and pushed the rest of the line a column right.
             var line = self._context_lines[src]
-            var bytes = line.as_bytes()
-            var max = inner_right - x
-            if max < 0: max = 0
-            var end = len(bytes)
-            if end > max: end = max
-            # Register this row for drag selection (byte==cell, painted from
-            # byte 0 at ``x``, clipped at ``inner_right``).
+            var max_cells = inner_right - x
+            if max_cells < 0: max_cells = 0
+            var end = _clip_to_cells(line, 0, max_cells)
+            var run = RunCells(byte_slice(line, 0, end), x, 0)
+            # Register this row for drag selection (painted from byte 0 at
+            # ``x``, clipped at ``inner_right``).
             self.ctxsel.add_row(src, line, y, x, 0, end, inner_right)
-            for i in range(end):
-                var b = Int(bytes[i])
-                var ch = chr(b) if b < 0x80 else String("?")
-                painter.set(canvas, x + i, y, Cell(ch, ctx_attr, 1))
-            # Syntax-highlight overlay for this row. Highlights are
-            # attr-only (glyph already painted above), so order with
-            # respect to the plain pass doesn't matter for content.
+            _ = painter.put_text(
+                canvas, Point(x, y), byte_slice(line, 0, end), ctx_attr,
+            )
+            # Syntax-highlight overlay for this row: attr-only, since the
+            # pass above already laid the glyphs down.
             for h in range(len(self._context_highlights)):
                 var hl = self._context_highlights[h]
                 if hl.row != src:
                     continue
-                var hs = hl.col_start
-                var he = hl.col_end
-                if hs < 0:    hs = 0
-                if he > end:  he = end
-                for i in range(hs, he):
-                    var b = Int(bytes[i])
-                    var ch = chr(b) if b < 0x80 else String("?")
-                    painter.set(canvas, x + i, y, Cell(ch, hl.attr, 1))
+                for c in range(
+                    run.cell_of(hl.col_start), run.cell_of(hl.col_end),
+                ):
+                    painter.set_attr(canvas, x + c, y, hl.attr)
             # Match-substring highlight on the center row only.
             if is_match and len(self.query.text.as_bytes()) > 0:
                 var hit = _find_bytes(line, self.query.text)
                 if hit >= 0:
-                    var hs = hit
                     var he = hit + len(self.query.text.as_bytes())
-                    if he > end: he = end
-                    for i in range(hs, he):
-                        if i < 0 or i >= end:
-                            continue
-                        var b = Int(bytes[i])
-                        var ch = chr(b) if b < 0x80 else String("?")
-                        painter.set(canvas, x + i, y, Cell(ch, hit_attr, 1))
+                    for c in range(run.cell_of(hit), run.cell_of(he)):
+                        painter.set_attr(canvas, x + c, y, hit_attr)
 
     # --- events -----------------------------------------------------------
 
@@ -1266,21 +1261,27 @@ def paint_match_row(
     var bytes = line_stripped.as_bytes()
     var hit = _find_bytes(line_stripped, query)
     # Slide so the hit (if any) is visible inside the available width.
+    # All of this is in *cells*, not bytes: the row is painted one cell
+    # per codepoint, so a line with non-ASCII in it has fewer columns
+    # than bytes and byte arithmetic both over-slid and under-filled it.
     var avail = line_max - line_x
     var start = 0
-    if hit >= 0 and hit + len(query.as_bytes()) > avail:
-        # Center the hit, keeping start >= 0.
-        start = hit - avail // 3
-        if start < 0:
-            start = 0
-    var end = len(bytes)
-    if end - start > avail:
-        end = start + avail
-    # Render plain run.
-    for i in range(start, end):
-        var b = Int(bytes[i])
-        var ch = chr(b) if b < 0x80 else String("?")
-        painter.set(canvas, line_x + (i - start), y, Cell(ch, row_attr, 1))
+    if hit >= 0:
+        # Walking *backwards* from the hit keeps this bounded by the
+        # pane width instead of the line length — a mapping of the whole
+        # line would allocate per row per frame, and these lines can be
+        # minified JS. Reaching byte 0 within ``avail`` columns means the
+        # hit is already on screen and no slide is needed.
+        if _back_cells(line_stripped, hit + len(query.as_bytes()), avail) > 0:
+            # Center the hit, keeping start >= 0.
+            start = _back_cells(line_stripped, hit, avail // 3)
+    var end = _clip_to_cells(line_stripped, start, avail)
+    # Render plain run. ``put_text`` is what gives one cell per
+    # codepoint; painting byte-by-byte with ``?`` for anything >= 0x80
+    # is what showed an ``ö`` as ``??``.
+    var vis = byte_slice(line_stripped, start, end)
+    var run = RunCells(vis, line_x, start)
+    _ = painter.put_text(canvas, Point(line_x, y), vis, row_attr)
     # Syntax-highlight overlay (attr-only). Skipped on the selected
     # row because the solid yellow selection background clashes with
     # the highlighter's blue-background palette — keeping the
@@ -1319,32 +1320,82 @@ def paint_match_row(
                 row_hl_cached[idx] = True
             have_hls = True
         if have_hls:
+            # Attr-only, as the comment above always claimed: the glyph
+            # pass already ran, and re-writing glyphs here is what made
+            # every overlay a second place that had to get UTF-8 right.
             for h in range(len(hls)):
                 var hl = hls[h]
                 if hl.row != 0:
                     continue
-                var hs = hl.col_start
-                var he = hl.col_end
-                if hs < start: hs = start
-                if he > end:   he = end
-                for i in range(hs, he):
-                    var b = Int(bytes[i])
-                    var ch = chr(b) if b < 0x80 else String("?")
-                    painter.set(canvas, line_x + (i - start), y, Cell(ch, hl.attr, 1))
+                for c in range(
+                    run.cell_of(hl.col_start), run.cell_of(hl.col_end),
+                ):
+                    painter.set_attr(canvas, line_x + c, y, hl.attr)
     # Highlight overlay for the hit.
     if hit >= 0 and len(query.as_bytes()) > 0:
-        var hl_start = hit
         var hl_end = hit + len(query.as_bytes())
-        if hl_start < start: hl_start = start
-        if hl_end > end:     hl_end = end
-        for i in range(hl_start, hl_end):
-            var b = Int(bytes[i])
-            var ch = chr(b) if b < 0x80 else String("?")
-            painter.set(canvas, line_x + (i - start), y, Cell(ch, row_hl, 1))
+        for c in range(run.cell_of(hit), run.cell_of(hl_end)):
+            painter.set_attr(canvas, line_x + c, y, row_hl)
     # Leading "…" hint when the line was sliced from the left.
     if start > 0:
         painter.set(canvas, line_x, y, Cell(String("…"), row_attr, 1))
     return RowTextGeom(line_stripped, line_x, start, end, line_max)
+
+
+def _back_cells(text: String, from_byte: Int, n_cells: Int) -> Int:
+    """Byte offset ``n_cells`` display columns left of ``from_byte``,
+    clamped to 0. Walks at most ``n_cells`` codepoints, so it costs the
+    pane's width rather than the line's length.
+
+    A tab counts as a full ``TAB_WIDTH`` here — its true width depends
+    on the absolute column we don't know walking backwards. This only
+    feeds the horizontal-slide heuristic, and ``_lstrip_tabs`` has
+    already removed the leading run, so the imprecision is invisible."""
+    var b = text.as_bytes()
+    var i = from_byte
+    if i > len(b):
+        i = len(b)
+    var left = n_cells
+    while i > 0 and left > 0:
+        var prev = prev_codepoint_start(text, i)
+        if Int(b[prev]) == 0x09:
+            left -= TAB_WIDTH
+        else:
+            left -= char_width(codepoint_at(text, prev)[0])
+        i = prev
+    return i
+
+
+def _clip_to_cells(text: String, start: Int, max_cells: Int) -> Int:
+    """Byte offset one past the last codepoint of ``text[start:]`` that
+    still fits in ``max_cells`` screen columns.
+
+    These panes used to clip by *bytes*, which under-fills the row for
+    any non-ASCII text (an ``ö`` is two bytes, one column) and could cut
+    a multi-byte sequence in half. Mirrors ``put_text``'s stopping rule
+    exactly, tabs and wide glyphs included: a glyph that would straddle
+    the limit is excluded rather than half-painted."""
+    var b = text.as_bytes()
+    var n = len(b)
+    if max_cells <= 0:
+        return start
+    var i = start
+    var cell = 0
+    while i < n:
+        var w: Int
+        var step: Int
+        if Int(b[i]) == 0x09:
+            w = TAB_WIDTH - (cell % TAB_WIDTH)
+            step = 1
+        else:
+            var info = codepoint_at(text, i)
+            w = char_width(info[0])
+            step = info[1]
+        if cell + w > max_cells:
+            break
+        cell += w
+        i += step
+    return i
 
 
 def _clean_scope(s: String) -> String:

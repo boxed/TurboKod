@@ -78,8 +78,8 @@ from .search_options import (
     SearchOptions, SearcherCache, default_search_options,
 )
 from .string_utils import (
-    byte_slice, char_width, codepoint_at, display_columns, is_space_cp,
-    is_word_codepoint,
+    byte_slice, char_width, codepoint_at, display_columns,
+    is_printable_text_key, is_space_cp, is_word_codepoint,
     leading_indent_bytes, prev_codepoint_start, truncate_to_columns,
     utf8_byte_of_cell, utf8_cell_of_byte, utf8_codepoint_size,
     utf8_step_forward, word_char_step, word_range_at, TAB_WIDTH,
@@ -9158,17 +9158,9 @@ struct Editor(Copyable, Movable):
             # collapse here — the extras are what makes it a broadcast.
             self.paste_from_clipboard()
             self._mark_hl_dirty(pre_dirty_row_multi)
-        elif (UInt32(0x20) <= k and k < UInt32(0x7F)) \
-                or (UInt32(0xA0) <= k and k < UInt32(0xD800)) \
-                or k > UInt32(0xF8FF):
-            # Printable text: ASCII (0x20–0x7E), non-ASCII BMP codepoints
-            # (0xA0 up to the surrogate range) and everything above the BMP
-            # PUA (> 0xF8FF) — that last clause is what lets emoji (U+1F600…)
-            # through. Excluded: the C0/C1 control ranges (< 0x20, 0x7F,
-            # 0x80–0x9F), the surrogate range (0xD800–0xDFFF, where chr()
-            # would abort the process), and the 0xE000–0xF8FF PUA block where our KEY_*
-            # special-key sentinels live. PUA glyphs (Nerd Font icons) can't
-            # be typed directly because of that collision, but still paste.
+        elif is_printable_text_key(k):
+            # Printable text — the range and the reasoning behind each
+            # exclusion live in ``is_printable_text_key``.
             # Modified letters are commands, not text — defer to whatever
             # the caller wants to do with them (e.g., a hotkey table).
             # MOD_SHIFT is fine: capitals already arrive with a different

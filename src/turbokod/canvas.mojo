@@ -503,6 +503,63 @@ def wrap_to_width(text: String, width: Int) -> List[String]:
     return lines^
 
 
+struct RunCells(Copyable, Movable):
+    """Byte→cell map for one *painted run* of text — the bytes a pane
+    actually put on screen, starting at column ``origin``.
+
+    A pane that paints a line and then overlays attributes on byte
+    ranges of it (syntax colors, the match highlight, a drag selection)
+    needs to turn a byte offset into a screen column. Doing that as
+    ``origin + (b - byte_start)`` assumes one byte is one cell, which
+    holds only for ASCII: an ``ö`` is two bytes and one cell, so every
+    such pane painted it as two cells — ``??`` — and mapped every
+    following byte one column too far right.
+
+    Build it from the visible substring (not the whole line) so tab
+    stops are measured from the run's own left edge, matching what
+    ``Painter.put_text`` does with ``tab_base``."""
+    var cells: List[Int]      # relative byte -> relative cell
+    var total: Int            # cell just past the last codepoint
+    var origin: Int           # screen column the run was painted at
+    var byte_start: Int       # absolute byte the run starts at
+
+    def __init__(out self, run: String, origin: Int, byte_start: Int):
+        self.cells = utf8_byte_to_cell(run)
+        self.total = utf8_codepoint_count(run)
+        self.origin = origin
+        self.byte_start = byte_start
+
+    def cell_of(self, abs_byte: Int) -> Int:
+        """Cell column, relative to the run's start, of ``abs_byte``.
+        Clamped to the run: before it is 0, at or past its end is
+        ``total`` (the column just past the last glyph). All bytes of one
+        codepoint share a cell, so a byte in the middle of a sequence
+        resolves to that codepoint's column."""
+        var r = abs_byte - self.byte_start
+        if r <= 0:
+            return 0
+        if r >= len(self.cells):
+            return self.total
+        return self.cells[r]
+
+    def col_of(self, abs_byte: Int) -> Int:
+        """Screen column of ``abs_byte``."""
+        return self.origin + self.cell_of(abs_byte)
+
+    def byte_at_cell(self, cell: Int) -> Int:
+        """Absolute byte offset of the first codepoint at or past
+        relative column ``cell`` — the inverse of ``cell_of``, used to
+        slide a run left to a target column and to resolve a click.
+        Returns the run's end byte when ``cell`` is past the last
+        glyph."""
+        if cell <= 0:
+            return self.byte_start
+        for r in range(len(self.cells)):
+            if self.cells[r] >= cell:
+                return self.byte_start + r
+        return self.byte_start + len(self.cells)
+
+
 def utf8_byte_to_cell(text: String) -> List[Int]:
     """Map every byte index in ``text`` to the cell column its codepoint
     occupies under ``Canvas.put_text``'s codepoint-aligned layout.

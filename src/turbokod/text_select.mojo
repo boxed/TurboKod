@@ -23,7 +23,7 @@ the stamped rows alone (no separate backing-line list needed).
 
 from std.collections.list import List
 
-from .canvas import Canvas
+from .canvas import Canvas, RunCells
 from .clipboard import clipboard_copy
 from .colors import Attr
 from .events import Event, EVENT_MOUSE, MOUSE_BUTTON_LEFT
@@ -36,8 +36,11 @@ from .string_utils import byte_slice
 struct PaneRow(ImplicitlyCopyable, Movable):
     """On-screen geometry of one painted, selectable text row.
 
-    Byte==cell model: byte ``b`` of ``text`` (for ``b >= byte_start``) was
-    painted at screen column ``text_x + (b - byte_start)``.
+    Byte↔column goes through ``run_cells`` (``RunCells`` over the
+    *visible* substring), because one byte is one column only for ASCII.
+    The old ``text_x + (b - byte_start)`` model put a drag selection one
+    column further right for every multi-byte glyph to its left, and a
+    click resolved to a byte in the middle of a sequence.
     """
     var key: Int          # stable row identity (source-line / match index)
     var text: String      # full underlying string (what Cmd+C copies)
@@ -46,6 +49,15 @@ struct PaneRow(ImplicitlyCopyable, Movable):
     var byte_start: Int   # first painted byte (left-slide offset; 0 if none)
     var byte_end: Int     # one past the last painted byte (right clip)
     var clip_x: Int       # exclusive right edge for the overlay
+
+    def run_cells(self) -> RunCells:
+        """Byte↔column map for the painted run. Built over the visible
+        substring so tab stops are measured from ``text_x``, matching
+        what ``Painter.put_text`` did when the row was painted."""
+        return RunCells(
+            byte_slice(self.text, self.byte_start, self.byte_end),
+            self.text_x, self.byte_start,
+        )
 
 
 struct PaneTextSelect(Movable):
@@ -168,12 +180,14 @@ struct PaneTextSelect(Movable):
         return best
 
     def position_at(self, pos: Point) -> Tuple[Int, Int]:
-        """Map a screen point to ``(key, byte)``."""
+        """Map a screen point to ``(key, byte)``. The byte always lands
+        on a codepoint boundary — a click on the right half of a
+        multi-byte glyph resolves to its start."""
         var ri = self._row_at_y(pos.y)
         if ri < 0:
             return (0, 0)
         var row = self._rows[ri]
-        var b = row.byte_start + (pos.x - row.text_x)
+        var b = row.run_cells().byte_at_cell(pos.x - row.text_x)
         if b < row.byte_start:
             b = row.byte_start
         if b > row.byte_end:
@@ -247,8 +261,9 @@ struct PaneTextSelect(Movable):
                 hi = e_byte
             if hi <= lo:
                 continue
-            var x0 = row.text_x + (lo - row.byte_start)
-            var x1 = row.text_x + (hi - row.byte_start)
+            var cells = row.run_cells()
+            var x0 = cells.col_of(lo)
+            var x1 = cells.col_of(hi)
             if x1 > row.clip_x:
                 x1 = row.clip_x
             for x in range(x0, x1):

@@ -124,6 +124,31 @@ def escape_drop_paths(paths: String) -> String:
     return out
 
 
+def is_printable_text_key(key: UInt32) -> Bool:
+    """Is ``key`` a codepoint that should be *typed into text*?
+
+    ASCII 0x20-0x7E, the non-ASCII BMP from 0xA0 up to the surrogates,
+    and everything above the BMP private-use area (which is what lets
+    emoji, U+1F600…, through). Excluded, each for a reason:
+
+    * ``< 0x20``, ``0x7F``, ``0x80-0x9F`` — the C0/C1 control ranges.
+    * ``0xD800-0xDFFF`` — surrogates; ``chr()`` on a lone one aborts the
+      process in this toolchain.
+    * ``0xE000-0xF8FF`` — the PUA block our ``KEY_*`` special-key
+      sentinels live in. A PUA glyph (a Nerd Font icon) therefore can't
+      be typed directly, though it still pastes.
+
+    The single source of truth for the rule, because it was written out
+    three times — ``editor``, ``merge_view``, and a fourth site,
+    ``text_field``, that only ever had the ASCII half and so silently
+    dropped every accented letter typed into a dialog. Type-ahead list
+    jumping is a different question and keeps its own
+    ``is_printable_ascii``."""
+    return (UInt32(0x20) <= key and key < UInt32(0x7F)) \
+        or (UInt32(0xA0) <= key and key < UInt32(0xD800)) \
+        or key > UInt32(0xF8FF)
+
+
 def char_width(cp: Int) -> Int:
     """Terminal columns a single codepoint occupies: ``2`` for emoji that
     terminals and our Swift host render double-wide, ``1`` for everything

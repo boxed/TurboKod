@@ -43,7 +43,8 @@ from .events import (
 from .file_io import basename
 from .geometry import Point, Rect
 from .string_utils import (
-    display_columns, prev_codepoint_start, utf8_codepoint_size,
+    display_columns, is_printable_text_key, prev_codepoint_start,
+    utf8_codepoint_size,
 )
 from .view import FocusGroup
 from .window import close_button_clicked, paint_close_button
@@ -647,12 +648,9 @@ struct MergeView(Movable):
         if k == KEY_ENTER:
             self._edit_split()
             return
-        # Printable insert: same range gate the editor uses. Stop before the
-        # surrogate range (0xD800..0xDFFF) — chr() on a lone surrogate aborts
-        # the process in this toolchain.
-        if (UInt32(0x20) <= k and k < UInt32(0x7F)) \
-                or (UInt32(0xA0) <= k and k < UInt32(0xD800)) \
-                or k > UInt32(0xF8FF):
+        # Printable insert: the same range the editor and the dialog
+        # input fields use — see ``is_printable_text_key``.
+        if is_printable_text_key(k):
             if (event.mods & (MOD_CTRL | MOD_ALT | MOD_META)) != 0:
                 return
             self._edit_insert(chr(Int(k)))
