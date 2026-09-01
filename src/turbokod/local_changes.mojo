@@ -13,7 +13,12 @@ The left sidebar stacks three panels:
   selected branch (``git checkout``); ``M`` integrates it into the
   checked-out branch, asking first *how* — ``m`` for a merge commit
   (``git merge --no-ff``) or ``r`` for straight history
-  (``git rebase``); ``d`` deletes it, straight away
+  (``git rebase``). ``r`` on the row is that second answer given up
+  front, running the rebase with no question. The rebase always rewrites
+  the topic branch and never ``main`` / ``master``: selecting the main
+  line from a topic branch replays *your* branch onto it (``git rebase
+  main``), while selecting a topic branch from the main line replays the
+  topic and fast-forwards. ``d`` deletes it, straight away
   when its work is already on ``main`` / ``master`` and behind a y/n
   confirm when it isn't (which is also what an unrecognized main line,
   or the main branch itself, gets). "Already on main" is decided by
@@ -1497,6 +1502,16 @@ struct LocalChanges(Movable):
     var _rebase_onto: String
     # Output of the chain's finished steps, and whether any of them said
     # something non-routine. Spawning the next step resets the runner's
+    # True when ``_git_merge_branch`` is the repo's main line, i.e. the
+    # rebase answer will rewrite the branch we're standing on rather
+    # than the selected one. Set by ``_pick_integration_source`` so the
+    # choice box can describe the direction it will actually take
+    # without spawning git every frame; ``_confirm_merge_rebase``
+    # decides for real.
+    var _merge_target_is_main: Bool
+    # Which side the last rebase rewrote — only used to name the branch
+    # that moved in the success flash.
+    var _rebase_rewrote_current: Bool
     # capture, so a talkative rebase would otherwise scroll away unread
     # before the chain reached the point where it reports.
     var _rebase_log: String
@@ -1590,6 +1605,8 @@ struct LocalChanges(Movable):
         self._rebase_onto = String("")
         self._rebase_log = String("")
         self._rebase_noisy = False
+        self._merge_target_is_main = False
+        self._rebase_rewrote_current = False
         self._discard_diff_idx = -1
         self._pending_commit_message = String("")
         self._poll_status_fp = String("")
@@ -1663,6 +1680,8 @@ struct LocalChanges(Movable):
         self._rebase_onto = String("")
         self._rebase_log = String("")
         self._rebase_noisy = False
+        self._merge_target_is_main = False
+        self._rebase_rewrote_current = False
         self._reload_files()
         self.branches = fetch_git_branches(self.root)
         self.commits = fetch_git_commits(self.root, 50)
@@ -1915,6 +1934,8 @@ struct LocalChanges(Movable):
         self._rebase_onto = String("")
         self._rebase_log = String("")
         self._rebase_noisy = False
+        self._merge_target_is_main = False
+        self._rebase_rewrote_current = False
 
     # --- geometry ---------------------------------------------------------
 
@@ -2497,7 +2518,7 @@ struct LocalChanges(Movable):
             )
         elif self.focus == _PANE_BRANCHES:
             hint = String(
-                " Space:switch  M:merge  d:delete  o:compare  Right:log  ⌘C:copy  ESC:close ",
+                " Space:switch  M:merge  r:rebase  d:delete  o:compare  Right:log  ⌘C:copy  ESC:close ",
             )
         else:
             hint = String(
@@ -2722,10 +2743,18 @@ struct LocalChanges(Movable):
         the hint row is dropped, so a terminal too short for the full box
         loses the explanatory second lines rather than painting over its
         own border. The two hotkey markers are tinted so the answer keys
-        are findable without reading the sentence."""
+        are findable without reading the sentence.
+
+        The rebase line names the branch that will be *rewritten*, which
+        depends on which side is the main line — see
+        ``_confirm_merge_rebase``. Getting that sentence backwards is the
+        whole reason someone would pick this answer by mistake, so it
+        follows the real direction rather than describing one of them."""
         var key_attr = Attr(LIGHT_RED, body.bg)
         var target = self._git_merge_branch.copy()
         var current = self._current_branch_name()
+        # Selected is the main line → we rewrite *current* onto it.
+        var moves_current = self._merge_target_is_main
         var last_row = by + box_h - 2      # the hint row; body stops above it
         var y = by + 1
         _ = body_p.put_text(canvas, Point(bx + 2, y), self.overlay_message, body)
@@ -2752,9 +2781,15 @@ struct LocalChanges(Movable):
             )
             y += 1
         if y < last_row:
+            # Whichever branch this names is the one whose commits get
+            # new SHAs. It used to say "replays <current> onto <target>"
+            # unconditionally, which is backwards for the three-command
+            # shape and was the sentence most likely to be trusted.
+            var replayed = current if moves_current else target
+            var base = target if moves_current else current
             _ = body_p.put_text(
                 canvas, Point(bx + 6, y),
-                String("replays ") + current + String(" onto ") + target
+                String("replays ") + replayed + String(" onto ") + base
                 + String(" (git rebase)"), body,
             )
         _ = body_p.put_text(
@@ -3883,6 +3918,9 @@ struct LocalChanges(Movable):
             if k == UInt32(0x6F):       # 'o' → open GitHub compare page
                 self._open_branch_compare()
                 return True
+            if k == _KEY_R_LOWER:       # 'r' → rebase onto the current branch
+                self._run_rebase()
+                return True
         # Commits pane: 'e' → edit the selected commit's message. Same
         # trade as the other panes' bare letters — 'e' no longer
         # type-jumps here, which is why this sits above the type-to-jump
@@ -4565,9 +4603,11 @@ struct LocalChanges(Movable):
 
         * ``m`` — ``git merge --no-ff``: a merge commit, both histories
           preserved, the integration itself recorded as an event.
-        * ``r`` — ``git rebase``: straight history, our commits replayed
-          on top of the branch. Nothing new is recorded, and the commits
-          being replayed get new SHAs.
+        * ``r`` — ``git rebase``: straight history. Nothing new is
+          recorded, and the replayed commits get new SHAs, so the
+          rewrite always lands on the topic branch and never on the
+          main line — which of the two that is decides the direction.
+          See ``_confirm_merge_rebase``.
 
         ``--no-ff`` rather than a bare ``git merge`` because the choice
         has to mean what it says: bare merge silently fast-forwards when
@@ -4582,26 +4622,64 @@ struct LocalChanges(Movable):
         with ``git merge --abort`` and a rebase with ``git rebase
         --abort``, and either one stopping on a conflict exits non-zero,
         so it surfaces as git's own diagnostic rather than as success."""
+        if not self._pick_integration_source():
+            return
+        self.overlay = _OVERLAY_MERGE_CHOICE
+        self.overlay_input = TextField()
+        self.overlay_message = String("Bring ") + self._git_merge_branch \
+            + String(" into ") + self._current_branch_name() + String(":")
+
+    def _pick_integration_source(mut self) -> Bool:
+        """Validate the Branches selection as something to integrate and
+        stash it in ``_git_merge_branch``. False (with the reason on the
+        status line) when there's nothing to do.
+
+        Shared by both entry points — ``M``, which then asks how, and
+        ``r``, which is the answer — so the two can't drift on which
+        selections they accept."""
         if self.sel_branch < 0 or self.sel_branch >= len(self.branches):
             self._show_status(String("No branch selected."), False)
-            return
+            return False
         var br = self.branches[self.sel_branch]
         if br.is_current:
             self._show_status(
                 String("Can't merge ") + br.name + String(" into itself."),
                 False,
             )
-            return
+            return False
         if self._is_git_busy():
             self._show_status(
                 String("Git operation in progress — please wait."), False,
             )
-            return
+            return False
         self._git_merge_branch = br.name.copy()
-        self.overlay = _OVERLAY_MERGE_CHOICE
-        self.overlay_input = TextField()
-        self.overlay_message = String("Bring ") + br.name \
-            + String(" into ") + self._current_branch_name() + String(":")
+        # Whether the straight-history answer is even on the table, so
+        # the choice box can say so without spawning git every frame.
+        # ``_confirm_merge_rebase`` does its own check — this one only
+        # decides what the user is shown.
+        self._merge_target_is_main = br.name == main_line_branch(self.root)
+        return True
+
+    def _run_rebase(mut self):
+        """``r`` on the Branches panel: integrate the selected branch
+        into the checked-out one with straight history, no question asked.
+
+        ``M`` exists because *whether* to make a merge commit isn't
+        something we can infer — but ``r`` is that question already
+        answered, so there's nothing left to ask. It runs exactly what
+        the overlay's ``r`` runs; see ``_confirm_merge_rebase`` for the
+        rebase-then-fast-forward chain and why the argument order
+        matters.
+
+        Costs ``r`` as a type-to-jump letter on this pane, the same trade
+        ``M`` / ``d`` / ``o`` already make.
+
+        Which branch ends up rewritten depends on which side is the
+        main line — see ``_confirm_merge_rebase``, which owns that for
+        both entry points."""
+        if not self._pick_integration_source():
+            return
+        self._confirm_merge_rebase()
 
     def _current_branch_name(self) -> String:
         """Name of the checked-out branch as the branch list reports it,
@@ -4632,56 +4710,77 @@ struct LocalChanges(Movable):
         )
 
     def _confirm_merge_rebase(mut self):
-        """``r`` in the merge-style overlay — the straight-history answer.
+        """``r`` — the straight-history answer. Which branch gets
+        rewritten depends on which side of the pair is the main line,
+        because **the main line must never be the one rewritten**.
 
-        Three commands, in this order::
+        Standing on a *topic* branch with the main line selected — "get
+        my branch up to date on top of master" — is one command::
 
-            git rebase <current> <branch>   # replay branch onto current
+            git rebase <selected>           # replay HEAD onto selected
+
+        That rewrites the branch you're standing on, which is the topic
+        branch, whose commits are the unpublished ones. The selected
+        branch doesn't move at all.
+
+        Standing on the *integration* branch with a topic selected —
+        a forge's "Rebase and merge" — is three::
+
+            git rebase <current> <selected> # replay selected onto current
             git checkout <current>
-            git merge --ff-only <branch>
+            git merge --ff-only <selected>
 
-        The one-command version of this is ``git rebase <branch>`` run
-        from ``<current>``, and it is **wrong here**: that replays
-        *current's* commits onto ``<branch>``, which rewrites the SHAs of
-        commits on the branch you're standing on. When those commits were
-        already pushed — the normal case for ``main`` — the local branch
-        silently diverges from its upstream, and the next pull reports
-        "have diverged, N and M different commits each" and manufactures
-        a merge that reintroduces the originals.
+        Here the one-command form would be wrong: run from ``<current>``
+        it replays *current's* commits, and when current is ``main``
+        those are already pushed, so the local branch silently diverges
+        from its upstream and the next pull reports "have diverged, N and
+        M different commits each" and manufactures a merge that
+        reintroduces the originals. So the rewrite lands on the topic
+        branch again and the integration branch only moves forward.
+        ``--ff-only`` is load-bearing: after the rebase the fast-forward
+        is guaranteed, so if it somehow isn't, that's a bug worth failing
+        on rather than a merge commit papered over in the answer that
+        exists to avoid merge commits. Those steps are chained in
+        ``tick`` as they reap; a failure at any step stops the chain and
+        reports (see ``_advance_rebase_chain``).
 
-        Rewriting has to land on the *topic* branch, whose commits are
-        the unpublished ones, and the integration branch then only ever
-        moves forward — hence the rebase-then-fast-forward pair, which is
-        what a forge's "Rebase and merge" button does. ``--ff-only`` is
-        load-bearing: after the rebase the fast-forward is guaranteed, so
-        if it somehow isn't, that's a bug worth failing on rather than a
-        merge commit to paper over it in the answer that exists to avoid
-        merge commits.
-
-        The steps are chained in ``tick`` as they reap; a failure at any
-        step stops the chain and reports (see ``_advance_rebase_chain``)."""
+        Both branches of that ``if`` rewrite the topic branch and leave
+        the main line's SHAs alone — which is what makes "rebase the main
+        line onto something else" unreachable rather than merely
+        discouraged. The main line is recognized by name
+        (``main_line_branch``): a repo whose integration branch is called
+        something else falls through to the three-command form, exactly
+        as it did before this distinction existed."""
         var name = self._git_merge_branch.copy()
         var onto = self._current_branch_name()
         self._close_overlay()
         if len(name.as_bytes()) == 0:
             return
         if onto == String("HEAD"):
-            # Detached HEAD: there's no branch ref to fast-forward at the
-            # end, so the chain has nowhere to land.
+            # Detached HEAD: no branch ref to rewrite or to fast-forward,
+            # so neither shape has anywhere to land.
             self._show_status(
                 String("Not on a branch — check one out first."), False,
             )
             return
         self._git_merge_branch = name.copy()
         self._rebase_onto = onto.copy()
-        self._rebase_step = 1
         var argv = List[String]()
         argv.append(String("git"))
         argv.append(String("-C"))
         argv.append(self.root)
         argv.append(String("rebase"))
-        argv.append(onto^)
-        argv.append(name^)
+        if name == main_line_branch(self.root):
+            # Topic branch onto the main line: one command, nothing
+            # chained after it, and the main line is untouched.
+            self._rebase_step = 0
+            self._rebase_rewrote_current = True
+            argv.append(name^)
+        else:
+            self._rebase_step = 1
+            self._rebase_rewrote_current = False
+            argv.append(onto^)
+            argv.append(name^)
         self._start_git_op(
             _GITOP_REBASE, String("git rebase"), argv^, String("Running "),
         )
@@ -5090,8 +5189,14 @@ struct LocalChanges(Movable):
                 fallback = String("merge failed")
         elif op == _GITOP_REBASE:
             if ok:
-                fallback = String("rebased ") + self._git_merge_branch \
-                    + String(" into ") + self._rebase_onto
+                # Name the branch that actually moved — the two shapes
+                # rewrite opposite sides of the pair.
+                if self._rebase_rewrote_current:
+                    fallback = String("rebased ") + self._rebase_onto \
+                        + String(" onto ") + self._git_merge_branch
+                else:
+                    fallback = String("rebased ") + self._git_merge_branch \
+                        + String(" into ") + self._rebase_onto
             else:
                 fallback = String("rebase failed")
         elif op == _GITOP_REWORD:

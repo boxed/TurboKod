@@ -3086,6 +3086,56 @@ def test_local_changes_merge_choice_m_spawns_a_no_ff_merge() raises:
     assert_false(lc.git_runner.is_active())
 
 
+def test_local_changes_r_on_a_branch_rebases_without_asking() raises:
+    """``r`` on a Branches row runs the rebase directly — ``M`` exists to
+    ask *whether* to make a merge commit, and ``r`` is that question
+    already answered.
+
+    Must produce exactly what the overlay's ``r`` produces, including the
+    onto-branch-first argument order (see
+    ``test_local_changes_merge_choice_r_spawns_a_rebase``)."""
+    var lc = _local_changes_with_branches()
+    lc.sel_branch = 1                       # feature-x
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(_key(UInt32(0x72)), screen, registry)   # 'r'
+    # No question on the way through.
+    assert_equal(lc.overlay, _OVERLAY_NONE)
+    assert_equal(lc._git_op, _GITOP_REBASE)
+    assert_true(lc.git_runner.is_active())
+    assert_true(_contains(lc.git_runner.command, String("rebase main feature-x")))
+    _drain_git_op(lc)
+    # The selection is unchanged: 'r' no longer type-jumps on this pane,
+    # which is the trade M / d / o already make.
+    assert_equal(lc.sel_branch, 1)
+    registry.release()
+
+
+def test_local_changes_r_refuses_the_current_branch() raises:
+    """``r`` accepts exactly the selections ``M`` accepts — both go
+    through ``_pick_integration_source``, so they can't drift.
+
+    Rebasing the checked-out branch onto itself is the case that would
+    otherwise spawn a nonsense git command."""
+    var lc = _local_changes_with_branches()
+    lc.sel_branch = 0                       # main, the current branch
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(_key(UInt32(0x72)), screen, registry)
+    assert_equal(lc._git_op, _GITOP_NONE)
+    assert_false(lc.git_runner.is_active())
+    # A refusal is modal (``_show_status`` with ok=False) — nothing on
+    # screen changed, so a banner that ages out would be missed.
+    assert_equal(lc.overlay, _OVERLAY_STATUS)
+    assert_true(_contains(lc.overlay_message, String("into itself")))
+    # Same refusal through M, which never opens the question either.
+    lc._close_overlay()
+    _ = lc.handle_key(_key(UInt32(0x4D)), screen, registry)
+    assert_equal(lc.overlay, _OVERLAY_STATUS)
+    assert_true(_contains(lc.overlay_message, String("into itself")))
+    registry.release()
+
+
 def test_local_changes_merge_choice_r_spawns_a_rebase() raises:
     """``r`` answers "straight history" by replaying the *selected*
     branch onto the current one — ``git rebase <current> <branch>``.
@@ -3197,6 +3247,131 @@ def test_rebase_preserves_current_branch_shas() raises:
     anc.append(String("main"))
     assert_equal(_run_git(dir, anc^), 0)
     _rm_rf(dir)
+
+
+def test_rebase_onto_the_main_line_rewrites_the_topic_branch() raises:
+    """On a topic branch with ``main`` selected, ``r`` rebases *your*
+    branch onto main — ``git rebase main`` — and main doesn't move.
+
+    This is the everyday "get my branch up to date" direction, and it's
+    the one that reads like a mistake if you assume the selected branch
+    is always the one replayed: the three-command shape would rewrite
+    main's published commits. Which side gets rewritten follows which
+    side is the main line, so the topic branch is always the one that
+    takes new SHAs."""
+    var dir = _temp_path(String("_rebase_onto_main"))
+    if not _init_repo_with_commit(dir):
+        return
+    _ = _checkout_new(dir, String("forum"))
+    _ = _commit_file(dir, String("f.txt"), String("f\n"), String("F on forum"))
+    _ = _checkout(dir, String("main"))
+    _ = _commit_file(dir, String("m.txt"), String("m\n"), String("B on main"))
+    _ = _checkout(dir, String("forum"))
+    var main_before = _rev_list(dir, String("main"))
+    assert_equal(len(main_before), 2)
+
+    var lc = LocalChanges()
+    lc.open(dir)
+    lc.focus = _PANE_BRANCHES
+    if not _select_branch(lc, String("main")):
+        _rm_rf(dir)
+        return
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(_key(UInt32(0x72)), screen, registry)   # 'r'
+    assert_equal(lc._git_op, _GITOP_REBASE)
+    # One command, no chain armed behind it.
+    var cmd = lc.git_runner.command
+    assert_true(_contains(cmd, String("rebase main")))
+    assert_false(_contains(cmd, String("rebase forum")))
+    assert_equal(lc._rebase_step, 0)
+    _drain_git_op(lc)
+    assert_equal(lc._git_op, _GITOP_NONE)
+
+    # Still on forum — no checkout dance — and main is untouched.
+    assert_equal(_current_branch(dir), String("forum"))
+    assert_equal(_rev_list(dir, String("main")), main_before)
+    # forum now contains main's commit *and* its own, on one line.
+    assert_equal(read_file(join_path(dir, String("m.txt"))), String("m\n"))
+    assert_equal(read_file(join_path(dir, String("f.txt"))), String("f\n"))
+    var merges = List[String]()
+    merges.append(String("rev-list"))
+    merges.append(String("--merges"))
+    merges.append(String("forum"))
+    assert_equal(
+        len(split_lines_no_trailing(_git_capture(dir, merges^))), 0,
+    )
+    # main is an ancestor of forum now: the branch moved onto it.
+    var anc = List[String]()
+    anc.append(String("merge-base"))
+    anc.append(String("--is-ancestor"))
+    anc.append(String("main"))
+    anc.append(String("forum"))
+    assert_equal(_run_git(dir, anc^), 0)
+    lc.release()
+    registry.release()
+    _rm_rf(dir)
+
+
+def test_merge_choice_box_names_the_branch_that_gets_rewritten() raises:
+    """The choice box's ``[r]`` line has to name the branch whose commits
+    get new SHAs, and that flips with the direction.
+
+    It used to say "replays <current> onto <selected>" unconditionally —
+    backwards for the three-command shape, and the sentence someone
+    deciding between the two answers is most likely to trust."""
+    var dir = _temp_path(String("_rebase_wording"))
+    if not _init_repo_with_commit(dir):
+        return
+    _ = _checkout_new(dir, String("forum"))
+    _ = _commit_file(dir, String("f.txt"), String("f\n"), String("F"))
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    var canvas = Canvas(screen.width(), screen.height())
+
+    # On forum, main selected: forum is rewritten.
+    var lc = LocalChanges()
+    lc.open(dir)
+    lc.focus = _PANE_BRANCHES
+    if not _select_branch(lc, String("main")):
+        _rm_rf(dir)
+        return
+    _ = lc.handle_key(_key(UInt32(0x4D)), screen, registry)
+    assert_equal(lc.overlay, _OVERLAY_MERGE_CHOICE)
+    assert_true(lc._merge_target_is_main)
+    assert_true(_contains(_painted(lc, canvas, screen, registry),
+                          String("replays forum onto main")))
+    lc._close_overlay()
+    lc.release()
+
+    # On main, forum selected: forum is still the one rewritten.
+    _ = _checkout(dir, String("main"))
+    var lc2 = LocalChanges()
+    lc2.open(dir)
+    lc2.focus = _PANE_BRANCHES
+    if _select_branch(lc2, String("forum")):
+        _ = lc2.handle_key(_key(UInt32(0x4D)), screen, registry)
+        assert_equal(lc2.overlay, _OVERLAY_MERGE_CHOICE)
+        assert_false(lc2._merge_target_is_main)
+        assert_true(_contains(_painted(lc2, canvas, screen, registry),
+                              String("replays forum onto main")))
+    lc2.release()
+    registry.release()
+    _rm_rf(dir)
+
+
+def _painted(
+    mut lc: LocalChanges, mut canvas: Canvas, screen: Rect,
+    mut registry: GrammarRegistry,
+) -> String:
+    """One paint of ``lc``, flattened to text for substring assertions."""
+    lc.paint(canvas, screen, registry)
+    var out = String("")
+    for y in range(screen.height()):
+        for x in range(screen.width()):
+            out += canvas.get(x, y).glyph
+        out += String("\n")
+    return out^
 
 
 def test_rebase_success_output_is_routine() raises:
@@ -4102,8 +4277,13 @@ def test_local_changes_settle_window_outlasts_the_key_repeat_rate() raises:
     lc._sel_moved_ms = monotonic_ms() - repeat
     _ = lc.handle_key(_key(KEY_DOWN), screen, registry)
     assert_equal(lc.sel_file, 2)
-    assert_equal(lc._sel_move_gap_ms, repeat)
-    assert_true(lc._settle_window_ms() > repeat)
+    # The gap is read off the real clock, so it's ``repeat`` plus however
+    # long the two statements above took — asserting it exactly is a race
+    # this test lost under load. What matters is that the cadence
+    # registered as a burst and that the window outgrew it.
+    assert_true(lc._sel_move_gap_ms >= repeat)
+    assert_true(lc._sel_move_gap_ms <= _BURST_GAP_MS)
+    assert_true(lc._settle_window_ms() > lc._sel_move_gap_ms)
     # Stillness longer than the old flat floor but shorter than the
     # cadence: the frame the next repeat would land on must not build.
     lc._sel_moved_ms = monotonic_ms() - (_SETTLE_MS + 5)
@@ -4564,9 +4744,13 @@ def main() raises:
     test_local_changes_output_overlay_links_follow_the_scroll()
     test_local_changes_flash_expires_on_its_own()
     test_local_changes_shift_m_asks_merge_commit_or_straight_history()
+    test_local_changes_r_on_a_branch_rebases_without_asking()
+    test_local_changes_r_refuses_the_current_branch()
     test_local_changes_merge_choice_m_spawns_a_no_ff_merge()
     test_local_changes_merge_choice_r_spawns_a_rebase()
     test_rebase_preserves_current_branch_shas()
+    test_rebase_onto_the_main_line_rewrites_the_topic_branch()
+    test_merge_choice_box_names_the_branch_that_gets_rewritten()
     test_rebase_success_output_is_routine()
     test_autostash_pull_output_is_routine()
     test_local_changes_shift_m_on_current_branch_is_a_noop()
@@ -4605,4 +4789,4 @@ def main() raises:
     test_github_repo_web_url_parses_every_remote_shape()
     test_branch_pane_o_opens_the_github_compare_page()
     test_branch_pane_o_refuses_main_and_a_non_github_remote()
-    print("git: 118 tests passed")
+    print("git: 122 tests passed")
