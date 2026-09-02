@@ -1813,6 +1813,29 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // recent-projects list.
     private var chromeDesktop: Int64 = 0
 
+    // MENU_MARK_OPEN in menu.mojo: "open, but not the current one".
+    static let menuMarkOpen = 1
+
+    /// Diamond for the menu's state column, standing in for the checkmark
+    /// on a project that's open in another window (see MENU_MARK_OPEN).
+    /// Template-rendered so it tints with the menu's text color, and sized
+    /// down from the default state-image metrics so it reads as a marker
+    /// rather than competing with the checkmark. nil on a system without
+    /// the symbol, in which case the row just goes unmarked.
+    static let openElsewhereStateImage: NSImage? = {
+        let cfg = NSImage.SymbolConfiguration(pointSize: 8, weight: .semibold)
+        guard let img = NSImage(systemSymbolName: "diamond.fill",
+                                accessibilityDescription: "open in another window")?
+                .withSymbolConfiguration(cfg) else { return nil }
+        img.isTemplate = true
+        return img
+    }()
+
+    // Memo for pushOpenProjects: the raw per-window project paths the
+    // canonicalized payload was last built from, and that payload.
+    private var openProjectsRaw: [String] = []
+    private var openProjectsPayload = ""
+
     // The monospace-family scan (FontCatalog) is ~140 ms and only feeds the
     // Settings ▸ Font picker, so newWindow defers it past the first frame
     // (see afterFirstFrame). This flips true once the scan has run; windows
@@ -2323,9 +2346,36 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return chromeDesktop
     }
 
+    /// Push the set of project roots open across the app onto `h`, so its
+    /// Project menu can mark an entry as already open in another window. A
+    /// Desktop only knows its own project; this is the only channel for the
+    /// rest. Cheap enough to do every frame — the core compares the list and
+    /// early-outs when it hasn't moved.
+    private func pushOpenProjects(to h: Int64) {
+        // The push itself has to happen every frame (`h` follows the key
+        // window), but canonicalizing is a filesystem resolution per
+        // window — so only redo it when the raw project list moves.
+        let raw = views.filter { $0.surface == .main }.compactMap { $0.project }
+        if raw != openProjectsRaw {
+            openProjectsRaw = raw
+            openProjectsPayload = raw.map { canonicalPath($0) }
+                                     .joined(separator: "\n")
+        }
+        let bytes = Array(openProjectsPayload.utf8)
+        bytes.withUnsafeBufferPointer { b in
+            tk_desktop_set_open_projects(
+                h, Int64(Int(bitPattern: b.baseAddress)), Int64(bytes.count))
+        }
+    }
+
     @discardableResult
     func refreshMenu() -> Bool {
         let h = menuHandle()
+        // Before the snapshot, so the Project menu's open-elsewhere markers
+        // are built from the current window set. Unguarded by menuTracking:
+        // the core only rebuilds the menu when the list actually changes,
+        // and a change while a dropdown is open should still land.
+        if h != 0 { pushOpenProjects(to: h) }
         // Only touch NSApp.mainMenu while the app is active. The menu bar is
         // only visible then, and installing it pre-active (during launch,
         // before the appearance is resolved) draws the bar with the wrong
@@ -2422,7 +2472,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     NSApp.helpMenu = submenu
                 }
             case "I":
-                // I\t<label>\t<action>\t<is_separator>\t<checkable>\t<checked>\t<shortcut>
+                // I\t<label>\t<action>\t<is_separator>\t<checkable>\t<checked>\t<shortcut>\t<mark>
                 guard let menu = curSubmenu, parts.count >= 7 else { continue }
                 let label = String(parts[1])
                 let action = String(parts[2])
@@ -2430,6 +2480,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 let checkable = parts[4] == "1"
                 let checked = parts[5] == "1"
                 let shortcut = String(parts[6])
+                // MENU_MARK_* (menu.mojo): the alternate glyph for the
+                // check column. Tolerates an older snapshot without it.
+                let mark = parts.count >= 8 ? Int(parts[7]) ?? 0 : 0
                 if isSep {
                     menu.addItem(.separator())
                     continue
@@ -2467,6 +2520,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 }
                 item.isEnabled = true
                 if checkable { item.state = checked ? .on : .off }
+                // A mark shows in the same column a checkmark would, by
+                // swapping the on-state image rather than the title —
+                // AppKit's own Window menu marks a non-frontmost window
+                // the same way.
+                if !checked, mark == Self.menuMarkOpen,
+                   let img = Self.openElsewhereStateImage {
+                    item.onStateImage = img
+                    item.state = .on
+                }
                 applyShortcut(shortcut, to: item)
                 menu.addItem(item)
             default: continue

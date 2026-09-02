@@ -502,7 +502,7 @@ def test_dropdown_reserves_indent_for_checkable_items() raises:
     ))
     bar.add(Menu(String("View"), items^))
     bar.open_idx = 0
-    assert_true(bar._menu_has_checkable(0))
+    assert_true(bar._menu_has_marks(0))
     var dr = bar._dropdown_rect(80)
     var widest_label = len(String("Line Numbers").as_bytes())
     # 2 (left pad) + 2 (checkbox slot) + label + 2 (right pad)

@@ -19,7 +19,7 @@ from turbokod.view_state_store import (
 )
 from turbokod.drafts_store import StoredDraft, save_drafts
 from turbokod.desktop import (
-    Desktop, PendingSaveAction, _VIEW_STATES_MAX,
+    Desktop, PendingSaveAction, _VIEW_STATES_MAX, _project_menu_labels,
     EDITOR_FIND, EDITOR_NAV_BACK, EDITOR_NAV_FORWARD, EDITOR_NEW,
     EDITOR_REPLACE, EDITOR_SAVE, EDITOR_SAVE_AS, PROJECT_CLOSE_ACTION,
     PROJECT_SETTINGS, PROJECT_FIND, PROJECT_OPEN_RECENT_PREFIX,
@@ -31,6 +31,7 @@ from turbokod.file_io import (
 )
 from turbokod.editor import Editor, TextBuffer
 from turbokod.file_tree import FILE_TREE_WIDTH
+from turbokod.menu import MENU_MARK_NONE, MENU_MARK_OPEN
 from turbokod.onig import onig_global_init, onig_tracked_count
 from turbokod.project_targets import (
     ProjectTargets, RunTarget, load_project_targets, resolved_cwd,
@@ -46,7 +47,7 @@ from turbokod.lsp_dispatch import (
     CompletionItem, DefinitionResolved, TextEditEntry
 )
 from turbokod.lsp import LspProcess
-from turbokod.posix import close_fd, kill_pid, which
+from turbokod.posix import close_fd, kill_pid, realpath, which
 from turbokod.project_grammars import GrammarOverride
 from turbokod.config import (
     MAX_FONT_SIZE, MIN_FONT_SIZE, OnSaveAction, WRAP_SOFT
@@ -184,13 +185,10 @@ def test_desktop_project_lifecycle() raises:
     # Label stays "Project" — the project name lives in the window
     # title bar, not the menu label.
     assert_equal(d.menu_bar.menus[idx].label, String("Project"))
-    # Active-project items: Project Settings..., separator (no other
-    # recents survive — ``_append_recent_project_items`` skips the active
-    # one), close. (The file-tree cycle lives in the host's View menu, not
-    # here.) ``_set_project`` drops the orphan separator only when the
-    # recents block is entirely empty; with a single matching-active recent
-    # we still see one separator (between the project actions and Close
-    # project). Separators carry no action.
+    # Active-project items: Project Settings..., separator, the project
+    # list (the active project included, checked), separator, close. (The
+    # file-tree cycle lives in the host's View menu, not here.) Separators
+    # carry no action.
     assert_equal(
         d.menu_bar.menus[idx].items[0].action, PROJECT_SETTINGS,
     )
@@ -199,23 +197,36 @@ def test_desktop_project_lifecycle() raises:
         d.menu_bar.menus[idx].items[last].action, PROJECT_CLOSE_ACTION,
     )
     assert_true(d.menu_bar.menus[idx].items[last - 1].is_separator)
+    # The active project is listed and checked rather than skipped —
+    # that's what makes the menu say which project this window is.
+    assert_equal(
+        d.menu_bar.menus[idx].items[2].action,
+        PROJECT_OPEN_RECENT_PREFIX + d.project.value(),
+    )
+    assert_true(d.menu_bar.menus[idx].items[2].checkable)
+    assert_true(d.menu_bar.menus[idx].items[2].checked)
+    assert_equal(
+        d.menu_bar.menus[idx].items[2].label, basename(d.project.value()),
+    )
     # Detection is sticky: a second call doesn't reset the project.
     var first = d.project.value()
     d.detect_project_from(String("src/turbokod/desktop.mojo"))
     assert_equal(d.project.value(), first)
     # close_project clears project state but keeps the menu visible.
-    # The label stays "Project" and the dropdown is just the inline
-    # recent-project list now. ``_set_project`` recorded the turbokod
-    # root into ``config.recent_projects`` on the way in, so at least
-    # one direct-pick entry exists here.
+    # The label stays "Project" and the dropdown is just the project
+    # list now — including the project we just closed, unchecked, so
+    # it's one click to come back to it.
+    var was = d.project.value()
     d.close_project()
     assert_false(d.project)
     assert_true(d.menu_bar.menus[idx].visible)
     assert_equal(d.menu_bar.menus[idx].label, String("Project"))
     assert_true(len(d.menu_bar.menus[idx].items) >= 1)
-    assert_true(_starts_with(
-        d.menu_bar.menus[idx].items[0].action, PROJECT_OPEN_RECENT_PREFIX,
-    ))
+    assert_equal(
+        d.menu_bar.menus[idx].items[0].action,
+        PROJECT_OPEN_RECENT_PREFIX + was,
+    )
+    assert_false(d.menu_bar.menus[idx].items[0].checked)
     # After closing, detection works again.
     d.detect_project_from(String("examples/hello.mojo"))
     assert_true(d.project)
@@ -235,15 +246,9 @@ def test_recent_project_pick_routes_to_new_window_when_host_owns_menu() raises:
     d.detect_project_from(String("examples/hello.mojo"))
     var primed = d.project.value()
     d.close_project()
-    # Find the recent-project action we just primed — its index in
-    # ``config.recent_projects`` is the suffix of its menu action.
-    var slot = -1
-    for i in range(len(d.config.recent_projects)):
-        if d.config.recent_projects[i] == primed:
-            slot = i
-            break
-    assert_true(slot >= 0)
-    var action = PROJECT_OPEN_RECENT_PREFIX + String(slot)
+    # The action carries the project root itself, not its slot in
+    # ``config.recent_projects``.
+    var action = PROJECT_OPEN_RECENT_PREFIX + primed
     # Host-owned: dispatch returns the host sentinel and stashes the path.
     d.host_owns_menu = True
     var screen = Rect(0, 0, 80, 24)
@@ -261,6 +266,118 @@ def test_recent_project_pick_routes_to_new_window_when_host_owns_menu() raises:
     assert_false(d._pending_new_window_project)
     assert_true(d.project)
     assert_equal(d.project.value(), primed)
+
+
+def _project_menu_row(imm d: Desktop, path: String) -> Int:
+    """Index of the Project-menu row that opens ``path``, or -1."""
+    var idx = d._project_menu_idx
+    ref items = d.menu_bar.menus[idx].items
+    for i in range(len(items)):
+        if items[i].action == PROJECT_OPEN_RECENT_PREFIX + path:
+            return i
+    return -1
+
+
+def test_project_menu_marks_active_and_open_projects() raises:
+    """The Project menu is a list of recent projects that also says which
+    of them are open: the window's own project is checked, one open in
+    another window is labelled "(open)". Both used to be invisible — the
+    active project was skipped outright, and a sibling window's project
+    was indistinguishable from a plain recent."""
+    var d = Desktop()
+    d.detect_project_from(String("examples/hello.mojo"))
+    var root = d.project.value()
+    # A second project, open in another host window. The host pushes the
+    # full set (ours included) every frame; the recents entry is what our
+    # ``_poll_config_file`` would have adopted from its config write.
+    var other = realpath(String("examples"))
+    var open_now = List[String]()
+    open_now.append(root)
+    open_now.append(other)
+    d.set_open_projects(open_now^)
+    d.config.recent_projects.append(other)
+    # No project change — the per-frame rebuild is what has to notice.
+    d._rebuild_project_menu()
+    var idx = d._project_menu_idx
+    var active_row = _project_menu_row(d, root)
+    var other_row = _project_menu_row(d, other)
+    assert_true(active_row >= 0)
+    assert_true(other_row >= 0)
+    assert_true(d.menu_bar.menus[idx].items[active_row].checked)
+    assert_equal(
+        d.menu_bar.menus[idx].items[active_row].label, basename(root),
+    )
+    # Open elsewhere: marked, but not checked — only one project is *this*
+    # window's. The mark lives in the check column, not the label, so a
+    # project's name stays its name.
+    assert_false(d.menu_bar.menus[idx].items[other_row].checked)
+    assert_equal(d.menu_bar.menus[idx].items[other_row].mark, MENU_MARK_OPEN)
+    assert_equal(
+        d.menu_bar.menus[idx].items[other_row].label, basename(other),
+    )
+    # ...and the active row carries no mark of its own — the checkmark is
+    # the whole signal there.
+    assert_equal(
+        d.menu_bar.menus[idx].items[active_row].mark, MENU_MARK_NONE,
+    )
+    # Picking the active project is a no-op rather than a close-and-reopen.
+    var screen = Rect(0, 0, 80, 24)
+    var result = d.dispatch_action(
+        PROJECT_OPEN_RECENT_PREFIX + root, screen,
+    )
+    assert_false(result)
+    assert_true(d.project)
+    assert_equal(d.project.value(), root)
+
+
+def test_project_menu_pick_follows_its_label_after_recents_reorder() raises:
+    """Regression: the menu used to encode a recent's *slot* in
+    ``config.recent_projects``. Opening a project in any other window or
+    ``tk-tui`` process promotes it to the front of that shared list, and
+    every window adopts the new order through ``_poll_config_file`` — so
+    slots renumbered underneath an already-built menu and a click landed
+    on a different project than the label named (often one that was
+    already open, which looked like nothing happening)."""
+    var d = Desktop()
+    var a = realpath(String("examples"))
+    var b = realpath(String("tests"))
+    d.config.recent_projects.append(a)
+    d.config.recent_projects.append(b)
+    d._rebuild_project_menu()
+    var row = _project_menu_row(d, a)
+    assert_true(row >= 0)
+    var idx = d._project_menu_idx
+    var action = d.menu_bar.menus[idx].items[row].action.copy()
+    assert_equal(d.menu_bar.menus[idx].items[row].label, basename(a))
+    # Another window opens `b`; our next poll adopts its promotion.
+    var reordered = List[String]()
+    reordered.append(b)
+    reordered.append(a)
+    d.config.recent_projects = reordered^
+    # The pick built against the old order still opens what it said.
+    d.host_owns_menu = True
+    var result = d.dispatch_action(action, Rect(0, 0, 80, 24))
+    assert_true(result)
+    assert_equal(result.value(), String("app.new_window"))
+    assert_true(d._pending_new_window_project)
+    assert_equal(d._pending_new_window_project.value(), a)
+
+
+def test_project_menu_labels_disambiguate_shared_directory_names() raises:
+    """A project is named by its directory, deepened one component at a
+    time only for the entries that would otherwise collide."""
+    var paths = List[String]()
+    paths.append(String("/home/me/work/api"))
+    paths.append(String("/home/me/oss/api"))
+    paths.append(String("/home/me/turbokod"))
+    var labels = _project_menu_labels(paths)
+    assert_equal(labels[0], String("work/api"))
+    assert_equal(labels[1], String("oss/api"))
+    assert_equal(labels[2], String("turbokod"))
+    # Trailing slashes don't produce an empty component.
+    var trailing = List[String]()
+    trailing.append(String("/home/me/turbokod/"))
+    assert_equal(_project_menu_labels(trailing)[0], String("turbokod"))
 
 
 def test_desktop_file_tree_cycle_shrinks_workspace() raises:
@@ -3085,6 +3202,9 @@ def main() raises:
     test_open_file_at_golden_when_already_open()
     test_desktop_project_lifecycle()
     test_recent_project_pick_routes_to_new_window_when_host_owns_menu()
+    test_project_menu_marks_active_and_open_projects()
+    test_project_menu_pick_follows_its_label_after_recents_reorder()
+    test_project_menu_labels_disambiguate_shared_directory_names()
     test_desktop_file_tree_cycle_shrinks_workspace()
     test_window_min_size_enforced_at_construction()
     test_window_min_size_survives_workspace_shrink()

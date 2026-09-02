@@ -157,7 +157,7 @@ from .debugger_config import (
     DebuggerSpec, built_in_debuggers, find_debugger_for_language,
     python_debugger_spec_for_venv, python_venv_has_debugpy,
 )
-from .menu import Menu, MenuBar, MenuItem
+from .menu import MENU_MARK_NONE, MENU_MARK_OPEN, Menu, MenuBar, MenuItem
 from .posix import monotonic_ms, sleep_ms, wall_clock_ms, which
 from .project import replace_in_project, walk_project_files
 from .search_options import SearchOptions
@@ -398,13 +398,19 @@ comptime PROJECT_CLOSE_ACTION = String("project:close")
 comptime PROJECT_TREE_ACTION  = String("project:tree:toggle")
 comptime PROJECT_SETTINGS = String("project:settings")
 # Direct-pick recent-project menu entries. ``PROJECT_OPEN_RECENT_PREFIX
-# + <index>`` encodes the slot in ``config.recent_projects`` so the
-# dispatcher can route the click without a parallel lookup table.
+# + <path>`` carries the project root itself, not its slot in
+# ``config.recent_projects``. An index used to be enough — until the
+# list started moving under a built menu: every window and every
+# ``tk-tui`` process adopts another's recents through
+# ``_poll_config_file``, so opening a project anywhere renumbers the
+# slots, and a menu built before that resolved its labels to the wrong
+# projects (usually one that was already open, so the click looked like
+# a no-op). A path can only ever resolve to what the label said.
 # Always present in the project menu (both project-open and no-project
 # states); when a host frontend owns the menu (``host_owns_menu``) a
 # click opens the picked project in a *new* window via the host instead
 # of swapping it in place.
-comptime PROJECT_OPEN_RECENT_PREFIX = String("project:open_recent_idx:")
+comptime PROJECT_OPEN_RECENT_PREFIX = String("project:open_recent:")
 # Host-side action sentinel: matches ``native_api.NEW_WINDOW``. When the
 # Swift host owns the menu, picking a recent project stashes the path
 # on the Desktop and returns this action so the host can spawn a window
@@ -1023,7 +1029,17 @@ struct Desktop(Movable):
     # test-gutter run-icons appear on the project's actual test files (e.g.
     # ``*__tests.py``), not just pytest's defaults. Empty ⇒ defaults.
     var _pytest_file_globs: List[String]
+    # Every project root currently open in *another* surface of the same
+    # app — pushed in by the host (``tk_desktop_set_open_projects``),
+    # because a Desktop is one window and knows nothing about its
+    # siblings. Drives the "(open)" marker in the Project menu. Empty on
+    # the terminal frontend, which is one project per process.
+    var open_projects: List[String]
     var _project_menu_idx: Int       # index into menu_bar.menus, or -1
+    # Signature (active project + open projects + recents) the Project
+    # menu was last built from, so the per-frame rebuild is a string
+    # compare in the steady state.
+    var _project_menu_sig: String
     var _window_menu_idx: Int        # framework-managed Window menu, or -1
     # Snapshots for skipping per-frame menu rebuilds when nothing changed.
     # ``_window_menu_titles`` is the window titles the Window menu was last
@@ -1648,7 +1664,9 @@ struct Desktop(Movable):
         self.host_font_ideal_size = 0
         self.project = Optional[String]()
         self._pytest_file_globs = List[String]()
+        self.open_projects = List[String]()
         self._project_menu_idx = -1
+        self._project_menu_sig = String("")
         self._window_menu_idx = -1
         self._window_menu_titles = List[String]()
         self._window_menu_built = False
@@ -4281,6 +4299,10 @@ struct Desktop(Movable):
         # Rebuild the Window menu from current state so it always reflects
         # what's actually open. (Cheap; one short item list.)
         self._rebuild_window_menu()
+        # Same for the Project menu — its recents move whenever another
+        # window or process opens a project. Both rebuilds are gated on a
+        # cheap signature compare, so the steady state costs nothing.
+        self._rebuild_project_menu()
         # Stamp the right-aligned shortcut text onto each menu item so it
         # picks up user-registered hotkey overrides automatically.
         self._refresh_shortcuts()
@@ -5486,6 +5508,10 @@ struct Desktop(Movable):
         # settings change to a server's argv). Cheap: a poll per closing
         # manager, and the list is empty in the steady state.
         self._drain_closing_lsp()
+        # The window-less chrome Desktop that drives the native menu bar
+        # never paints, so this is the only place its Project menu picks
+        # up a recents change (or the host's open-project list).
+        self._rebuild_project_menu()
         self._close_deleted_file_windows()
         var conflicts = self.windows.check_external_changes()
         for k in range(len(conflicts)):
@@ -5710,12 +5736,11 @@ struct Desktop(Movable):
         # focus-switched across at least two file-backed windows.
         self._recent_files = self.config.recent_files.copy()
         self._rebuild_lsp_specs()
-        # If we're still in the no-project state, refresh the project
-        # menu so the direct-pick recent entries that ``__init__``
-        # couldn't populate (the empty default config had no recents)
-        # appear from the just-loaded list.
-        if not self.project:
-            self._reset_no_project_menu()
+        # Refresh the project menu against the recents we just adopted —
+        # both the entries ``__init__`` couldn't populate (the empty
+        # default config had no recents) and any project another window
+        # or ``tk-tui`` process opened or closed since our last poll.
+        self._rebuild_project_menu()
 
     def _refresh_config_stamp(mut self):
         """Record the config file's ``stat`` as of right now, so the watcher
@@ -5949,11 +5974,11 @@ struct Desktop(Movable):
         self._pytest_file_globs = List[String]()
         self.speller.set_project(String(""))
         self.file_tree.close()
-        # Reset the project menu to its no-project state. The helper
-        # also seeds the dropdown with direct-pick entries for the
-        # most recent projects so the user can switch back without
-        # going through the picker.
-        self._reset_no_project_menu()
+        # Rebuild the project menu for the no-project state: no settings
+        # or close entry, and the project we just closed now shows up as
+        # a plain (unchecked, unmarked) recent so it's one click to come
+        # back to.
+        self._rebuild_project_menu(force=True)
         # Drop the targets list and stop any in-flight run / test — the
         # next project's targets get loaded fresh on ``_set_project``.
         self.run_session.terminate()
@@ -5996,43 +6021,130 @@ struct Desktop(Movable):
         # project then restores exactly these files.
         self._close_all_editor_windows()
 
-    def _append_recent_project_items(self, mut items: List[MenuItem]):
-        """Append up to 10 direct-pick entries from ``config.recent_projects``
-        to ``items``. Skips paths that no longer stat as directories and
-        skips the currently-active project (no point letting the user
-        re-pick it). Each entry's action is ``PROJECT_OPEN_RECENT_PREFIX
-        + <index>``, where the index is the slot in
-        ``config.recent_projects`` so the dispatcher can round-trip back."""
-        var current = String("")
-        if self.project:
-            current = self.project.value()
-        var added = 0
+    def set_open_projects(mut self, var paths: List[String]):
+        """Record which project roots are open elsewhere in the app.
+
+        The host calls this every frame with one entry per window (paths
+        canonicalized the same way ``_set_project`` does), so the Project
+        menu can mark them. Compares before storing — the common case is
+        an unchanged list, and the Project menu's rebuild is keyed off
+        this."""
+        if len(paths) == len(self.open_projects):
+            var same = True
+            for i in range(len(paths)):
+                if paths[i] != self.open_projects[i]:
+                    same = False
+                    break
+            if same:
+                return
+        self.open_projects = paths^
+
+    def _project_menu_paths(self) -> List[String]:
+        """The project roots the Project menu lists, most-recent first.
+
+        Up to 10 entries from ``config.recent_projects`` that still stat
+        as directories, plus every currently-open project that didn't
+        make the cut — an open project always gets a row, because the
+        menu is also how the user gets *back* to it."""
+        var out = List[String]()
         for i in range(len(self.config.recent_projects)):
-            if added >= 10:
+            if len(out) >= 10:
                 break
             var p = self.config.recent_projects[i]
-            if p == current:
+            if _list_has(out, p):
                 continue
             var info = stat_file(p)
             if not info.ok or not info.is_dir():
                 continue
-            items.append(MenuItem(
-                basename(p), PROJECT_OPEN_RECENT_PREFIX + String(i),
-            ))
-            added += 1
+            out.append(p)
+        if self.project and not _list_has(out, self.project.value()):
+            out.append(self.project.value())
+        for i in range(len(self.open_projects)):
+            if not _list_has(out, self.open_projects[i]):
+                out.append(self.open_projects[i])
+        return out^
 
-    def _reset_no_project_menu(mut self):
-        """Populate the right-aligned "Project" menu for the no-project
-        state: just the inline list of recent projects (up to 10),
-        filtered to paths that still stat as directories."""
+    def _project_menu_signature(self) -> String:
+        """Everything the Project menu's contents depend on, flattened
+        into one string. Compared per frame so the rebuild (which stats
+        every recent path) only runs on a real change."""
+        var sig = String("active\n")
+        if self.project:
+            sig += self.project.value()
+            sig += String("\n")
+        sig += String("open\n")
+        for i in range(len(self.open_projects)):
+            sig += self.open_projects[i]
+            sig += String("\n")
+        sig += String("recent\n")
+        for i in range(len(self.config.recent_projects)):
+            sig += self.config.recent_projects[i]
+            sig += String("\n")
+        return sig^
+
+    def _rebuild_project_menu(mut self, force: Bool = False):
+        """Rebuild the right-aligned "Project" menu from current state.
+
+        Called every frame (from ``paint`` and ``process_external_changes``,
+        so the window-less chrome Desktop that drives the native menu bar
+        gets it too) and gated on ``_project_menu_signature``. Rebuilding
+        continuously is the point: the recents list moves whenever *another*
+        window or ``tk-tui`` process opens a project, and a menu built once
+        at project-open time went stale the moment that happened — which is
+        how a closed project failed to reappear here and how the entries
+        came to point at the wrong projects.
+
+        Layout, for both the project-open and the no-project state:
+        Project Settings (only with a project) · the project list · Close
+        project (only with a project). In the mark column: ``✓`` for this
+        window's project, ``◆`` for one open in another window.
+        """
         if self._project_menu_idx < 0:
             return
+        # Never rebuild under an open in-grid dropdown — the MenuBar's
+        # selection index would land on a different item. The signature
+        # is left untouched so the rebuild happens once it closes.
+        if not force and self.menu_bar.open_idx == self._project_menu_idx:
+            return
+        var sig = self._project_menu_signature()
+        if not force and sig == self._project_menu_sig:
+            return
+        self._project_menu_sig = sig^
+        var active = String("")
+        if self.project:
+            active = self.project.value()
         var items = List[MenuItem]()
-        self._append_recent_project_items(items)
+        if self.project:
+            items.append(MenuItem(
+                String("Project Settings..."), PROJECT_SETTINGS,
+            ))
+            items.append(MenuItem.separator())
+        var paths = self._project_menu_paths()
+        var labels = _project_menu_labels(paths)
+        for i in range(len(paths)):
+            var p = paths[i]
+            var is_active = p == active
+            # Both states live in the mark column rather than the label:
+            # a ``✓`` for this window's project, a ``◆`` for one open in
+            # another window. A label suffix would read as part of the
+            # project's name.
+            var mark = MENU_MARK_NONE
+            if not is_active and _list_has(self.open_projects, p):
+                mark = MENU_MARK_OPEN
+            items.append(MenuItem(
+                labels[i], PROJECT_OPEN_RECENT_PREFIX + p,
+                checkable=True, checked=is_active, mark=mark,
+            ))
+        if self.project:
+            if len(paths) > 0:
+                items.append(MenuItem.separator())
+            items.append(MenuItem(
+                String("Close project"), PROJECT_CLOSE_ACTION,
+            ))
         self.menu_bar.menus[self._project_menu_idx].label = String("Project")
         self.menu_bar.menus[self._project_menu_idx].items = items^
         self.menu_bar.menus[self._project_menu_idx].visible = True
-        if self.menu_bar.open_idx == self._project_menu_idx:
+        if force and self.menu_bar.open_idx == self._project_menu_idx:
             self.menu_bar.open_idx = -1
 
     def _close_all_editor_windows(mut self):
@@ -6197,27 +6309,10 @@ struct Desktop(Movable):
         # is a non-fatal best-effort, just like the View-menu toggles.
         if record_recent_project(self.config, canonical):
             self._persist_config()
-        var items = List[MenuItem]()
-        items.append(MenuItem(
-            String("Project Settings..."), PROJECT_SETTINGS,
-        ))
-        # Inline recent-project list lives between the project-specific
-        # actions and Close project — always present (no "..." picker)
-        # so a one-click switch is reachable even with a project open.
-        # Skips the currently-active project in
-        # ``_append_recent_project_items`` to avoid a redundant entry.
-        var recents_start = len(items)
-        items.append(MenuItem.separator())
-        self._append_recent_project_items(items)
-        if len(items) == recents_start + 1:
-            # No surviving recents — drop the orphaned separator we just
-            # added so the menu doesn't show two separators in a row.
-            _ = items.pop()
-        items.append(MenuItem.separator())
-        items.append(MenuItem(String("Close project"), PROJECT_CLOSE_ACTION))
-        self.menu_bar.menus[self._project_menu_idx].label = String("Project")
-        self.menu_bar.menus[self._project_menu_idx].items = items^
-        self.menu_bar.menus[self._project_menu_idx].visible = True
+        # Project menu: settings + the project list (this one now checked)
+        # + close. Forced because the signature it keys off may not have
+        # moved — reopening the same project renames nothing.
+        self._rebuild_project_menu(force=True)
         # Load the per-project target list now that we know the root.
         # Empty/missing config yields an empty ``targets`` list, which
         # the status bar paints as no tabs at all — Cmd+R / Cmd+D
@@ -8238,26 +8333,35 @@ struct Desktop(Movable):
             self._open_recent_picker()
             return Optional[String]()
         if starts_with(action, PROJECT_OPEN_RECENT_PREFIX):
-            var idx = parse_int_prefix(
-                action, len(PROJECT_OPEN_RECENT_PREFIX.as_bytes()),
-                len(action.as_bytes()),
-            )
-            if idx >= 0 and idx < len(self.config.recent_projects):
-                var path = self.config.recent_projects[idx]
-                # On a host frontend (Swift/macOS) that owns the menu,
-                # open the picked project in a *new* window so the
-                # current window's state is preserved. We stash the
-                # path and bubble up the host's "new window" sentinel;
-                # the host reads the path back via
-                # ``take_pending_new_window_project`` after creating
-                # the window. The terminal frontend has no multi-window
-                # story, so it keeps the swap-in-place behavior.
-                if self.host_owns_menu:
-                    self._pending_new_window_project = Optional[String](path)
-                    return Optional[String](_HOST_NEW_WINDOW_ACTION)
-                if self.project:
-                    self.close_project()
-                self.open_project(path)
+            # The payload is the project root itself (see the prefix's
+            # comment) so the pick can't drift onto another project as
+            # the recents list is renumbered underneath the built menu.
+            var prefix_len = len(PROJECT_OPEN_RECENT_PREFIX.as_bytes())
+            var ab = action.as_bytes()
+            if len(ab) <= prefix_len:
+                return Optional[String]()
+            var path = String(StringSpan(unsafe_from_utf8=ab[prefix_len:]))
+            # Picking the project that's already active is a no-op rather
+            # than a close-and-reopen (which would drop the session on
+            # the terminal frontend and duplicate the window on macOS).
+            if self.project and self.project.value() == path:
+                return Optional[String]()
+            # On a host frontend (Swift/macOS) that owns the menu,
+            # open the picked project in a *new* window so the
+            # current window's state is preserved. We stash the
+            # path and bubble up the host's "new window" sentinel;
+            # the host reads the path back via
+            # ``take_pending_new_window_project`` after creating
+            # the window — and focuses the existing window instead
+            # when the project is already open there. The terminal
+            # frontend has no multi-window story, so it keeps the
+            # swap-in-place behavior.
+            if self.host_owns_menu:
+                self._pending_new_window_project = Optional[String](path^)
+                return Optional[String](_HOST_NEW_WINDOW_ACTION)
+            if self.project:
+                self.close_project()
+            self.open_project(path)
             return Optional[String]()
         if action == EDITOR_FIND:
             self._open_find_prompt()
@@ -15747,6 +15851,63 @@ def _recent_display_label(path: String, project_root: String) -> String:
     if pb[len(rb)] != 0x2F:
         return path
     return String(StringSpan(unsafe_from_utf8=pb[len(rb) + 1:]))
+
+
+def _list_has(imm items: List[String], value: String) -> Bool:
+    """True when ``value`` is in ``items`` (exact string match)."""
+    for i in range(len(items)):
+        if items[i] == value:
+            return True
+    return False
+
+
+def _path_tail(path: String, count: Int) -> String:
+    """Return the last ``count`` components of ``path``, e.g.
+    ``_path_tail("/a/b/c", 2)`` → ``"b/c"``. Trailing slashes are
+    ignored; a path with fewer components returns as-is."""
+    var bytes = path.as_bytes()
+    var n = len(bytes)
+    if n == 0 or count <= 0:
+        return path
+    while n > 1 and bytes[n - 1] == 0x2F:
+        n -= 1
+    var start = 0
+    var found = 0
+    var i = n
+    while i > 0:
+        i -= 1
+        if bytes[i] == 0x2F:
+            found += 1
+            if found == count:
+                start = i + 1
+                break
+    if start >= n:
+        return String(StringSpan(unsafe_from_utf8=bytes[:n]))
+    return String(StringSpan(unsafe_from_utf8=bytes[start:n]))
+
+
+def _project_menu_labels(imm paths: List[String]) -> List[String]:
+    """Shortest unambiguous display name per project root.
+
+    A project is its directory name (``turbokod``), until two roots share
+    one (``~/work/api`` and ``~/oss/api``) — then that entry deepens by a
+    component at a time until it's unique. Only the colliding entries
+    deepen, so the common case stays a bare name."""
+    var out = List[String]()
+    for i in range(len(paths)):
+        var depth = 1
+        while depth < 5:
+            var label = _path_tail(paths[i], depth)
+            var dup = False
+            for j in range(len(paths)):
+                if j != i and _path_tail(paths[j], depth) == label:
+                    dup = True
+                    break
+            if not dup:
+                break
+            depth += 1
+        out.append(_path_tail(paths[i], depth))
+    return out^
 
 
 def _clip_rect_to_workspace(rect: Rect, workspace: Rect) -> Rect:

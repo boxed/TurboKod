@@ -21,10 +21,16 @@ Serializes the menu tree as TSV (TAB-separated, NL-terminated rows):
 
 ```
 M<TAB>label<TAB>visible<TAB>is_system<TAB>right_aligned
-I<TAB>label<TAB>action<TAB>is_separator<TAB>checkable<TAB>checked<TAB>shortcut
+I<TAB>label<TAB>action<TAB>is_separator<TAB>checkable<TAB>checked<TAB>shortcut<TAB>mark
 ```
 
 Items belong to the most-recently-emitted `M` row. Booleans render `0`/`1`.
+`mark` is the decimal `MENU_MARK_*` code from `menu.mojo` — the alternate
+glyph for the check column, consulted only when `checked` is `0`. The core
+names the *meaning*, each frontend picks the rendering: the in-grid menu
+paints a glyph, `installMenu` swaps `NSMenuItem.onStateImage`. Today the one
+code is `MENU_MARK_OPEN` (1), which draws a diamond — what AppKit's own
+Window menu uses for a window that's open but not frontmost.
 
 Menus are emitted in **display order** via `MenuBar._display_order_indices()` — same rank-based sequence the terminal frontend's `_layout` uses:
 
@@ -48,6 +54,63 @@ Runs the action string through `Desktop.dispatch_action`. Returns the same host 
 | 5    | New window               |
 
 Swift's `menuActionFired(_:)` handler routes the returned code through the existing `handleAction`.
+
+### `tk_desktop_set_open_projects(h, ptr, n)`
+
+Newline-separated, realpath-canonical project roots — one per host window,
+including the receiving window's own. A `Desktop` *is* one window and can't
+see its siblings, so this is the only channel that tells it a project is
+already open elsewhere; it drives the `(open)` marker in the Project menu.
+Swift pushes it from `pushOpenProjects(to:)` at the top of every
+`refreshMenu()`; the Mojo side compares the list and early-outs when it
+hasn't moved. The terminal frontend never calls it (one project per
+process), which simply leaves the marker off there.
+
+## The Project menu
+
+The right-aligned Project menu is both the project switcher and the display
+of what's open. `Desktop._rebuild_project_menu` builds it for both states:
+
+```
+Project Settings...        (only with a project open)
+---
+✓ turbokod                 (this window's project)
+◆ dryft                    (open in another window)
+  dryft-2                  (a plain recent)
+---                        (only with a project open)
+Close project              (only with a project open)
+```
+
+Both states live in the mark column, never the label — a suffix like
+`dryft (open)` reads as part of the project's name.
+
+Two invariants, both of which the menu got wrong before they were written
+down:
+
+1. **It rebuilds every frame, not at project-open time.** The recents list
+   is shared state with N writers (see the settings section of
+   [CLAUDE.md](../CLAUDE.md)): every window and every `tk-tui` process
+   adopts the others' writes through `_poll_config_file`. A menu built once
+   when the project opened went stale the moment any other window opened or
+   closed one — which is how a project you closed failed to reappear here.
+   `paint` and `process_external_changes` both call the rebuild (the latter
+   because the window-less chrome Desktop that drives the macOS menu bar
+   never paints), gated on `_project_menu_signature` so the steady state is
+   one string compare.
+2. **An entry's action carries the project path, not its slot in
+   `config.recent_projects`.** Opening a project anywhere promotes it to
+   the front of that shared list, renumbering every slot underneath an
+   already-built menu — so an index-encoded pick resolved to a different
+   project than its label named. Usually one that was already open, so the
+   click read as "nothing happened". A path can only ever resolve to what
+   the label said. Regression test:
+   `test_project_menu_pick_follows_its_label_after_recents_reorder`.
+
+Picking the active project is a no-op. Picking any other one returns
+`ACT_NEW_WINDOW` with the path queued for
+`tk_desktop_take_pending_new_window_project`, and the host focuses that
+project's existing window when it has one rather than opening a duplicate.
+The terminal frontend, having no multi-window story, swaps in place.
 
 ## Refresh cadence (Swift side)
 

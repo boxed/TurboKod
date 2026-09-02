@@ -799,6 +799,29 @@ def tk_desktop_set_font_options(h: Int, ptr: Int, n: Int) abi("C"):
 
 
 @export
+def tk_desktop_set_open_projects(h: Int, ptr: Int, n: Int) abi("C"):
+    """Tell this Desktop which project roots are open across the whole
+    app — newline-separated, canonical (realpath'd) UTF-8 paths, one per
+    host window, including this window's own.
+
+    A Desktop is one window and can't see its siblings, so without this
+    the Project menu couldn't tell "already open in another window" from
+    "just a recent". The host pushes the list every frame; the Mojo side
+    early-outs on an unchanged list. The terminal frontend never calls
+    it (one project per process), which leaves the marker off there.
+    """
+    if h == 0:
+        return
+    var text = _string_from(ptr, n)
+    var paths = List[String]()
+    var lines = split_lines_no_trailing(text)
+    for i in range(len(lines)):
+        if len(lines[i].as_bytes()) > 0:
+            paths.append(lines[i])
+    _desk(h)[].set_open_projects(paths^)
+
+
+@export
 def tk_font_version(h: Int) abi("C") -> Int:
     """Monotonic counter that bumps whenever ``config.font`` changes.
     The Swift host polls this each frame (like ``tk_theme_version``) and
@@ -1475,10 +1498,12 @@ def tk_desktop_menu_snapshot(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     Format is one record per line, fields TAB-separated, all ASCII-safe:
 
       ``M\\t<label>\\t<visible>\\t<is_system>\\t<right_aligned>\\n``
-      ``I\\t<label>\\t<action>\\t<is_separator>\\t<checkable>\\t<checked>\\t<shortcut>\\n``
+      ``I\\t<label>\\t<action>\\t<is_separator>\\t<checkable>\\t<checked>\\t<shortcut>\\t<mark>\\n``
 
-    Booleans render as ``0``/``1``; missing strings render as empty
-    fields. Items belong to the most-recently-emitted M record. Returns
+    Booleans render as ``0``/``1``; ``mark`` is the decimal
+    ``MENU_MARK_*`` code (0 = none) for the alternate glyph in the check
+    column; missing strings render as empty fields. Items belong to the
+    most-recently-emitted M record. Returns
     the number of bytes written; if it would exceed ``cap`` the buffer
     is truncated to ``cap`` and the host should grow its allocation
     and retry.
@@ -1505,7 +1530,8 @@ def tk_desktop_menu_snapshot(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
             var it = m.items[ii]
             text = text + String("I") + TAB + it.label + TAB + it.action + TAB \
                  + _b(it.is_separator) + TAB + _b(it.checkable) + TAB \
-                 + _b(it.checked) + TAB + it.shortcut + NL
+                 + _b(it.checked) + TAB + it.shortcut + TAB \
+                 + String(Int(it.mark)) + NL
     var bytes = text.as_bytes()
     var n = len(bytes)
     if n > cap:

@@ -23,6 +23,18 @@ from .string_utils import char_width, codepoint_at, display_columns
 from .type_ahead import TypeAhead, is_printable_ascii, type_ahead_pick
 
 
+# ``MenuItem.mark`` codes. The mark column (see ``MenuItem.checkable``)
+# holds at most one glyph; ``checked`` wins over any mark. The core picks
+# the *meaning*, each frontend picks the rendering — the in-grid menu
+# paints a glyph, the native NSMenu uses a state image.
+comptime MENU_MARK_NONE = UInt8(0)
+# "This exists, but it isn't the current one" — the Project menu's
+# projects that are open in another window. macOS uses a diamond for
+# exactly this in its own Window menu (an open window that isn't
+# frontmost), so both frontends draw a diamond.
+comptime MENU_MARK_OPEN = UInt8(1)
+
+
 struct MenuItem(ImplicitlyCopyable, Movable):
     var label: String
     var action: String
@@ -33,10 +45,15 @@ struct MenuItem(ImplicitlyCopyable, Movable):
     # True. The host (e.g., ``Desktop``) keeps ``checked`` in sync with
     # the underlying state by calling ``MenuBar.set_item_checked``
     # before paint. Non-checkable items render without the prefix —
-    # unless the dropdown contains any checkable item, in which case all
-    # rows pad by 2 cells so labels stay vertically aligned.
+    # unless the dropdown reserves the mark column at all (any item
+    # checkable or marked), in which case all rows pad by 2 cells so
+    # labels stay vertically aligned.
     var checkable: Bool
     var checked: Bool
+    # Alternate glyph for the same column — a ``MENU_MARK_*`` code, only
+    # consulted when ``checked`` is False. Lets an item say "not the
+    # current one, but not nothing either" without a label suffix.
+    var mark: UInt8
 
     def __init__(
         out self,
@@ -45,6 +62,7 @@ struct MenuItem(ImplicitlyCopyable, Movable):
         is_separator: Bool = False,
         checkable: Bool = False,
         checked: Bool = False,
+        mark: UInt8 = MENU_MARK_NONE,
     ):
         self.label = label^
         self.action = action^
@@ -52,6 +70,7 @@ struct MenuItem(ImplicitlyCopyable, Movable):
         self.shortcut = String("")
         self.checkable = checkable
         self.checked = checked
+        self.mark = mark
 
     @staticmethod
     def separator() -> Self:
@@ -65,6 +84,7 @@ struct MenuItem(ImplicitlyCopyable, Movable):
         self.shortcut = copy.shortcut
         self.checkable = copy.checkable
         self.checked = copy.checked
+        self.mark = copy.mark
 
 
 struct Menu(Copyable, Movable):
@@ -262,15 +282,17 @@ struct MenuBar(Movable):
             rx -= w + 1
         return rects^
 
-    def _menu_has_checkable(self, menu_idx: Int) -> Bool:
-        """True when *any* item in this dropdown is checkable. Used to
-        decide whether every row gets a 2-cell label-indent so labels
-        stay aligned in mixed checkable/non-checkable menus."""
+    def _menu_has_marks(self, menu_idx: Int) -> Bool:
+        """True when *any* item in this dropdown reserves the mark column
+        — checkable, or carrying a ``MENU_MARK_*``. Used to decide whether
+        every row gets a 2-cell label-indent so labels stay aligned in a
+        dropdown that mixes marked and unmarked items."""
         if menu_idx < 0 or menu_idx >= len(self.menus):
             return False
         var menu = self.menus[menu_idx].copy()
         for i in range(len(menu.items)):
-            if menu.items[i].checkable:
+            if menu.items[i].checkable \
+                    or menu.items[i].mark != MENU_MARK_NONE:
                 return True
         return False
 
@@ -279,7 +301,7 @@ struct MenuBar(Movable):
             return Rect(0, 0, 0, 0)
         var anchor = self._layout(screen_width)[self.open_idx]
         var menu = self.menus[self.open_idx].copy()
-        var indent = 2 if self._menu_has_checkable(self.open_idx) else 0
+        var indent = 2 if self._menu_has_marks(self.open_idx) else 0
         # Width = max(2 + indent + label + 2, 2 + indent + label + gap + shortcut + 2).
         # The +4 constant covers left padding + right padding; the +6 form adds
         # the 2-cell gap that separates the label from the shortcut.
@@ -407,7 +429,7 @@ struct MenuBar(Movable):
         # a 2-cell prefix between the left padding and the label so the
         # ``✓`` glyph slot lines up across the menu — non-checkable items
         # in the same dropdown just leave that prefix blank.
-        var indent = 2 if self._menu_has_checkable(self.open_idx) else 0
+        var indent = 2 if self._menu_has_marks(self.open_idx) else 0
         for i in range(len(menu.items)):
             var y = rect.a.y + 1 + i
             if menu.items[i].is_separator:
@@ -426,6 +448,8 @@ struct MenuBar(Movable):
                 )
             if menu.items[i].checkable and menu.items[i].checked:
                 painter.set(canvas, rect.a.x + 2, y, Cell(String("✓"), row_attr, 1))
+            elif menu.items[i].mark == MENU_MARK_OPEN:
+                painter.set(canvas, rect.a.x + 2, y, Cell(String("◆"), row_attr, 1))
             var label_x = rect.a.x + 2 + indent
             self._paint_label_hotkey(
                 canvas, painter, label_x, y, menu.items[i].label,

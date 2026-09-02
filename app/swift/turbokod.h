@@ -219,6 +219,13 @@ int32_t tk_desktop_project_settings_mouse(int64_t h, int64_t x, int64_t y, uint8
 int64_t tk_theme_version(int64_t h);
 int64_t tk_theme_palette(int64_t h, int64_t out_ptr, int64_t cap);
 
+// Which project roots are open across the whole app (newline-separated,
+// realpath-canonical UTF-8, one per host window including this one). A
+// Desktop is one window and can't see its siblings; this is what lets the
+// Project menu mark an entry as already open elsewhere. Pushed every frame;
+// the core early-outs on an unchanged list.
+void    tk_desktop_set_open_projects(int64_t h, int64_t ptr, int64_t n);
+
 // Cell font (Settings ▸ Font): the host registers the system's monospace
 // font families once per Desktop (newline-separated UTF-8), which is what
 // makes the Font section appear. tk_font_version bumps whenever the user
