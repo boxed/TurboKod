@@ -1,0 +1,6 @@
+{
+  "_comment": "A server that accepts `shutdown` and never answers, and stays alive past `exit`. Models the case the client's close-handshake grace budgets exist for: the poll must report done once they elapse (so the window/handle is never stranded) and tk_desktop_free / finish_shutdown must then SIGTERM the straggler.",
+  "position_encoding": "utf-8",
+  "ignore_shutdown": true,
+  "ignore_exit": true
+}

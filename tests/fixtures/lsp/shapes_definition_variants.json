@@ -1,0 +1,40 @@
+{
+  "_comment": "textDocument/definition is spec'd as `Definition | DefinitionLink[] | null`, where `Definition = Location | Location[]` and `DefinitionLink = LocationLink`. That is four accepting shapes plus null, and a real server emits exactly one of them — clangd returns Location, gopls LocationLink[], pyright Location[]. Only a scripted server can cover the rest. Each scenario in this family answers a *different* method with a different variant so one spawn exercises them all: the client must resolve every one to the same target.",
+  "position_encoding": "utf-8",
+  "responses": {
+    "textDocument/definition": {
+      "uri": "$SELF",
+      "range": {
+        "start": {"line": 1, "character": 17},
+        "end":   {"line": 1, "character": 23}
+      }
+    },
+    "textDocument/typeDefinition": [
+      {
+        "uri": "$SELF",
+        "range": {
+          "start": {"line": 1, "character": 17},
+          "end":   {"line": 1, "character": 23}
+        }
+      }
+    ],
+    "textDocument/implementation": [
+      {
+        "originSelectionRange": {
+          "start": {"line": 0, "character": 0},
+          "end":   {"line": 0, "character": 1}
+        },
+        "targetUri": "$SELF",
+        "targetRange": {
+          "start": {"line": 1, "character": 0},
+          "end":   {"line": 1, "character": 28}
+        },
+        "targetSelectionRange": {
+          "start": {"line": 1, "character": 17},
+          "end":   {"line": 1, "character": 23}
+        }
+      }
+    ],
+    "textDocument/declaration": null
+  }
+}

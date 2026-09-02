@@ -63,7 +63,14 @@ if [ "$quick" -eq 0 ]; then
   scripts/run_tests.sh || fail=1
 fi
 
-# --- 4. the warning gate -------------------------------------------------
+# --- 4. LSP spec-coverage gate -------------------------------------------
+# Pure Python + a vendored metaModel, so it costs milliseconds. Fails when a
+# method stops being implemented, loses its scenario fixture, or the spec
+# gains one the baseline hasn't triaged. See docs/lsp-conformance.md.
+echo "==> auditing LSP spec coverage"
+python3 scripts/lsp_spec_coverage.py --check || fail=1
+
+# --- 5. the warning gate -------------------------------------------------
 # Hard rule (see CLAUDE.md "Keep the build warning-free"): zero, not "no new".
 warnings="$(grep -h "warning:" "$log_dir"/*.log .build/test-logs/*.build.log \
   2>/dev/null | sort -u)"

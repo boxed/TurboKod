@@ -1059,7 +1059,24 @@ def lsp_initialize_params(
     var file_ops_caps = json_object()
     file_ops_caps.put(String("dynamicRegistration"), json_bool(False))
     file_ops_caps.put(String("didCreate"), json_bool(True))
+    file_ops_caps.put(String("didRename"), json_bool(True))
+    file_ops_caps.put(String("didDelete"), json_bool(True))
     workspace_caps.put(String("fileOperations"), file_ops_caps^)
+    # Advertise the ``documentChanges`` form of WorkspaceEdit. rust-analyzer
+    # and gopls *prefer* it, and per spec a server may only use the form the
+    # client claimed — so without this their renames and quickfix edits
+    # arrive in the ``changes`` map form at best, and at worst (a server that
+    # sends documentChanges regardless) were silently dropped.
+    #
+    # ``resourceOperations`` is deliberately NOT advertised: that is the
+    # separate opt-in for ``CreateFile`` / ``RenameFile`` / ``DeleteFile``
+    # inside a WorkspaceEdit, which we cannot apply. Withholding it means a
+    # compliant server never sends one, and ``_parse_workspace_edit`` refuses
+    # the whole edit rather than half-applying it if one shows up anyway.
+    var ws_edit_caps = json_object()
+    ws_edit_caps.put(String("documentChanges"), json_bool(True))
+    ws_edit_caps.put(String("normalizesLineEndings"), json_bool(False))
+    workspace_caps.put(String("workspaceEdit"), ws_edit_caps^)
     capabilities.put(String("workspace"), workspace_caps^)
     # Advertise UTF-8 position encoding (LSP 3.17 ``general.positionEncodings``).
     # The editor reasons in byte offsets; with UTF-8 negotiated, LSP
@@ -1112,6 +1129,21 @@ def lsp_initialize_params(
         String("codeActionLiteralSupport"), code_action_literal^,
     )
     code_action_caps.put(String("isPreferredSupport"), json_bool(True))
+    # Declare that we can resolve an action's ``edit`` on demand, and that we
+    # round-trip its opaque ``data`` field. Together these tell a server it
+    # may return actions carrying only a title + data and defer the edit to
+    # ``codeAction/resolve`` — which rust-analyzer does by default whether or
+    # not the client asks, so the honest thing is to say we handle it (see
+    # ``_start_code_action_resolves``). ``resolveSupport.properties`` lists
+    # exactly what we'll fetch: the edit, nothing else.
+    code_action_caps.put(String("dataSupport"), json_bool(True))
+    var code_action_resolve = json_object()
+    var code_action_resolve_props = json_array()
+    code_action_resolve_props.append(json_str(String("edit")))
+    code_action_resolve.put(
+        String("properties"), code_action_resolve_props^,
+    )
+    code_action_caps.put(String("resolveSupport"), code_action_resolve^)
     text_doc_caps.put(String("codeAction"), code_action_caps^)
     # Advertise textDocument/diagnostic (the LSP 3.17 pull model). Servers
     # that prefer pull (or only support it) won't push ``publishDiagnostics``

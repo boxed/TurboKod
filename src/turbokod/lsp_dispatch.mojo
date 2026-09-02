@@ -28,12 +28,17 @@ from .json import (
     JsonValue, encode_json, json_array, json_bool, json_float, json_int,
     json_object, json_str, parse_json,
 )
-from .file_io import basename, join_path, parent_path, stat_file
+from .file_io import basename, join_path, parent_path, read_file, stat_file
+from .lsp_position import (
+    LineTable, POS_UTF8, encoding_from_name, encoding_name,
+)
 from .lsp import (
     LSP_NOTIFICATION, LSP_REQUEST, LSP_RESPONSE, LspClient, LspIncoming,
     LspProcess, json_null_v, lsp_initialize_params,
 )
-from .posix import getcwd_path, getenv_value, monotonic_ms, realpath, which
+from .posix import (
+    getcwd_path, getenv_value, monotonic_ms, realpath, sleep_ms, which,
+)
 from .string_utils import percent_encode_uri_path
 from .highlight import Highlight
 from .colors import Attr, BLACK, EDITOR_BG, WHITE
@@ -91,6 +96,41 @@ comptime _STATE_FAILED       = UInt8(3)
 # rust-analyzer / pyright cold start with a fresh cache, but stops
 # short of "user wonders if it's broken." Cheap to bump if needed.
 comptime _DIAG_INFLIGHT_TIMEOUT_MS = 8000
+
+# How many outstanding (request id → document URI) pairs to remember for
+# response position-remapping. Comfortably above the realistic number of
+# concurrently in-flight requests (~25 distinct kinds); the bound only
+# exists so a server that never answers can't grow the list forever.
+comptime _REQ_URI_RING = 64
+
+# Bounds on the shutdown handshake. It is a *poll* state machine
+# (``begin_shutdown`` / ``shutdown_poll`` / ``finish_shutdown``) rather than a
+# blocking wait, because closing a window must be instant: the host retires
+# the manager and drains it off the runloop while the window is already gone.
+# ``shutdown`` is the blocking wrapper, kept for the terminal frontend (which
+# has no "later" — the process is exiting) and for tests.
+#
+# The budgets are wall-clock deadlines, not iteration counts, so they mean the
+# same thing however often the host polls: a server answers ``shutdown`` in
+# single-digit ms, and a wedged one gets SIGTERM once these elapse.
+comptime _SHUTDOWN_POLL_MS = 10
+comptime _SHUTDOWN_RESPONSE_MS = 300
+comptime _SHUTDOWN_EXIT_MS = 200
+
+# Stages of the close handshake. ``IDLE`` means no close is in progress;
+# ``DONE`` means the transport can be torn down (the child exited, or its
+# budget ran out and it has SIGTERM coming).
+comptime _CLOSE_IDLE           = UInt8(0)
+comptime _CLOSE_AWAIT_RESPONSE = UInt8(1)
+comptime _CLOSE_AWAIT_EXIT     = UInt8(2)
+comptime _CLOSE_DONE           = UInt8(3)
+
+# How long to wait for the ``codeAction/resolve`` fan-out before publishing
+# the actions that did resolve. The quick-fix menu shows "Loading fixes…"
+# until then, so this is a UI-latency budget: long enough for a cold
+# rust-analyzer to answer, short enough that a server which accepts a
+# resolve and never replies doesn't leave the menu stuck.
+comptime _CA_RESOLVE_TIMEOUT_MS = 2000
 
 
 @fieldwise_init
@@ -379,8 +419,9 @@ struct CodeAction(Copyable, Movable):
     to "press Enter to accept" once UI lands. ``file_edits`` carries
     the per-file edit groups extracted from the ``WorkspaceEdit.changes``
     map; an empty list means the action carried only a ``Command`` or
-    a more advanced ``documentChanges`` form we don't parse yet, and
-    the host should skip / ignore the entry.
+    a WorkspaceEdit we refused because it also creates/renames/deletes
+    files, and the host should skip / ignore the entry (or resolve it
+    first, if ``data`` is set).
     """
     var title: String
     var kind: String
@@ -392,12 +433,21 @@ struct CodeAction(Copyable, Movable):
     # action has no directly-applicable ``file_edits``.
     var command: String
     var command_args: Optional[JsonValue]
+    # The action exactly as the server sent it, kept so we can hand it back
+    # in a ``codeAction/resolve`` request — the spec's params for that
+    # request *are* a CodeAction, not just its ``data`` field, and servers
+    # (rust-analyzer) reject a synthesized one. Set only when the action
+    # arrived with no inline ``edit``: an action we can already apply needs
+    # no round-trip, and holding the raw JSON for every action would keep
+    # the whole response alive for as long as the menu is open.
+    var unresolved: Optional[JsonValue]
 
     def __init__(
         out self, var title: String, var kind: String, is_preferred: Bool,
         var file_edits: List[CodeActionFileEdit],
         var command: String = String(""),
         var command_args: Optional[JsonValue] = Optional[JsonValue](),
+        var unresolved: Optional[JsonValue] = Optional[JsonValue](),
     ):
         self.title = title^
         self.kind = kind^
@@ -405,6 +455,7 @@ struct CodeAction(Copyable, Movable):
         self.file_edits = file_edits^
         self.command = command^
         self.command_args = command_args^
+        self.unresolved = unresolved^
 
     def __copyinit__(mut self, copy: Self):
         self.title = copy.title
@@ -413,6 +464,168 @@ struct CodeAction(Copyable, Movable):
         self.file_edits = copy.file_edits.copy()
         self.command = copy.command
         self.command_args = copy.command_args
+        self.unresolved = copy.unresolved
+
+
+struct _PositionRemapper(Copyable, Movable):
+    """Rewrites every ``Position.character`` in a JSON payload between the
+    editor's byte columns and the negotiated wire encoding.
+
+    Why a blanket JSON walk rather than a conversion at each of the ~16
+    position-building sites and ~30 result-parsing sites: LSP nests
+    Positions inside a *lot* of shapes (``Location``, ``LocationLink``,
+    ``Diagnostic.relatedInformation``, ``WorkspaceEdit.changes`` keyed by
+    URI, ``documentChanges``, ``InsertReplaceEdit``'s two ranges, opaque
+    ``Command.arguments`` we round-trip verbatim), and a per-site fix has
+    to be remembered at every new site forever. A Position is
+    unambiguously identifiable — an object carrying integer ``line`` and
+    ``character`` — so one walk at the transport boundary covers all of
+    them, and the two directions being the *same* walk is what makes
+    round-tripping opaque server data (``command.arguments``,
+    ``completionItem/resolve``'s echoed item) correct: whatever we
+    decoded on the way in, we re-encode identically on the way out.
+
+    Conversion is per line, so the walk needs the document's text. The
+    URI context comes from the enclosing object's ``uri`` / ``targetUri``
+    / ``textDocument.uri``, or from the key when descending a
+    ``WorkspaceEdit.changes`` map; ``default_uri`` covers results whose
+    positions are implicitly about the request's own document (hover,
+    documentSymbol, formatting …). With no resolvable URI we leave the
+    value alone — a wrong column beats a guessed one.
+
+    ``LineTable``s are cached per path for the life of one walk, so a
+    rename touching 50 edits in one file indexes it once. Open buffers
+    are seeded from ``_doc_texts`` (authoritative — the buffer may be
+    dirty); anything else is read from disk.
+    """
+    var enc: UInt8
+    var paths: List[String]
+    var tables: List[LineTable]
+    var missing: List[String]
+
+    def __init__(out self, enc: UInt8):
+        self.enc = enc
+        self.paths = List[String]()
+        self.tables = List[LineTable]()
+        self.missing = List[String]()
+
+    def __copyinit__(mut self, copy: Self):
+        self.enc = copy.enc
+        self.paths = copy.paths.copy()
+        self.tables = copy.tables.copy()
+        self.missing = copy.missing.copy()
+
+    def seed(mut self, path: String, var text: String):
+        """Pre-load a document's text (an open, possibly dirty buffer)."""
+        for i in range(len(self.paths)):
+            if self.paths[i] == path:
+                self.tables[i] = LineTable(text^)
+                return
+        self.paths.append(path)
+        self.tables.append(LineTable(text^))
+
+    def _slot_for(mut self, path: String) -> Int:
+        """Cache slot for ``path``, reading it from disk on first use.
+        Returns -1 when the file can't be read — the caller then leaves
+        columns untouched rather than converting against empty text."""
+        if len(path.as_bytes()) == 0:
+            return -1
+        for i in range(len(self.paths)):
+            if self.paths[i] == path:
+                return i
+        for i in range(len(self.missing)):
+            if self.missing[i] == path:
+                return -1
+        try:
+            var text = read_file(path)
+            self.paths.append(path)
+            self.tables.append(LineTable(text^))
+        except:
+            self.missing.append(path)
+            return -1
+        return len(self.tables) - 1
+
+    def _uri_of(self, v: JsonValue, inherited: String) -> String:
+        """URI context for ``v``: its own ``uri`` / ``targetUri``, else the
+        ``uri`` of a nested ``textDocument`` (the ``documentChanges``
+        shape), else whatever the parent was carrying."""
+        var direct = v.object_get(String("uri"))
+        if direct and direct.value().is_string():
+            return direct.value().as_str()
+        var target = v.object_get(String("targetUri"))
+        if target and target.value().is_string():
+            return target.value().as_str()
+        var td = v.object_get(String("textDocument"))
+        if td and td.value().is_object():
+            var tdu = td.value().object_get(String("uri"))
+            if tdu and tdu.value().is_string():
+                return tdu.value().as_str()
+        return inherited
+
+    def _is_position(self, v: JsonValue) -> Bool:
+        var ln = v.object_get(String("line"))
+        if not ln or not ln.value().is_int():
+            return False
+        var ch = v.object_get(String("character"))
+        return Bool(ch) and ch.value().is_int()
+
+    def walk(mut self, v: JsonValue, uri: String, to_bytes: Bool) -> JsonValue:
+        """Rebuild ``v`` with every Position's ``character`` converted.
+
+        ``to_bytes`` True is the inbound direction (wire units → byte
+        columns); False is outbound (byte columns → wire units).
+        """
+        if self.enc == POS_UTF8:
+            return v.copy()
+        if v.is_array():
+            var arr = json_array()
+            for i in range(v.array_len()):
+                arr.append(self.walk(v.array_at(i), uri, to_bytes))
+            return arr^
+        if not v.is_object():
+            return v.copy()
+        var ctx = self._uri_of(v, uri)
+        if self._is_position(v):
+            return self._convert_position(v, ctx, to_bytes)
+        var obj = json_object()
+        for i in range(v.object_len()):
+            var key = v.object_key_at(i)
+            var val = v.object_value_at(i)
+            # ``WorkspaceEdit.changes`` is a ``{uri: TextEdit[]}`` map — the
+            # URI context for each group is the *key*, not a field.
+            if key == String("changes") and val.is_object():
+                var changes = json_object()
+                for k in range(val.object_len()):
+                    var curi = val.object_key_at(k)
+                    changes.put(
+                        curi,
+                        self.walk(val.object_value_at(k), curi, to_bytes),
+                    )
+                obj.put(key^, changes^)
+                continue
+            obj.put(key^, self.walk(val, ctx, to_bytes))
+        return obj^
+
+    def _convert_position(
+        mut self, v: JsonValue, uri: String, to_bytes: Bool,
+    ) -> JsonValue:
+        var out = v.copy()
+        var ln_opt = v.object_get(String("line"))
+        var ch_opt = v.object_get(String("character"))
+        if not ln_opt or not ch_opt:
+            return out^
+        var row = ln_opt.value().as_int()
+        var col = ch_opt.value().as_int()
+        var slot = self._slot_for(_uri_to_path(uri))
+        if slot < 0:
+            return out^
+        var converted: Int
+        if to_bytes:
+            converted = self.tables[slot].wire_to_col(row, col, self.enc)
+        else:
+            converted = self.tables[slot].col_to_wire(row, col, self.enc)
+        out.put(String("character"), json_int(converted))
+        return out^
 
 
 struct LspManager(Copyable, Movable):
@@ -433,8 +646,47 @@ struct LspManager(Copyable, Movable):
     # what ``utf-8`` means — so with ``utf-8`` negotiated, the editor's byte
     # columns map straight through, including on lines with multibyte
     # characters. A server that doesn't support the negotiation uses the
-    # spec-mandated default ``utf-16``; recorded here so it's observable.
+    # spec-mandated default ``utf-16``, and then byte columns are *not*
+    # valid ``character`` offsets on any line containing multibyte text —
+    # so every position crossing the transport is converted by
+    # ``_PositionRemapper``. ``_position_enc`` is the parsed tag driving
+    # that; ``_position_encoding`` keeps the raw string for display.
     var _position_encoding: String
+    var _position_enc: UInt8
+    # Line-index cache backing the conversion. Rebuilding it per request
+    # would re-scan every open buffer on every keystroke-triggered
+    # completion, so it is rebuilt only when a document's text actually
+    # changes: ``_remap_epoch`` is bumped by the didOpen/didChange/didClose
+    # paths and ``_remap_cached`` is refreshed lazily on the next use.
+    var _remap_cached: _PositionRemapper
+    var _remap_cached_epoch: Int
+    var _remap_epoch: Int
+    # ``id`` → the ``textDocument.uri`` the request was about, recorded at
+    # send time. A response's positions are usually *implicitly* about the
+    # request's own document (hover range, formatting TextEdits, inlay
+    # hints, folding ranges …) with no URI on the wire, so remapping them
+    # needs that context back. Taking it from the outbound params rather
+    # than a per-request ``_x_path`` field means every request — including
+    # ones added later — gets it for free. Bounded ring: a response we
+    # never see would otherwise leak an entry per request.
+    var _req_uri_ids: List[String]
+    var _req_uris: List[String]
+    # Server-driven invalidation (``workspace/*/refresh``). The server tells
+    # us its previous answers for a whole class of feature are stale — after
+    # a build finishes, a dependency resolves, a config file changes. We used
+    # to reply MethodNotFound, so the server gave up and the stale inlay
+    # hints / code lenses / folding ranges sat there until the buffer's line
+    # count happened to change (the host's debounce key). Two flags rather
+    # than five because that is the granularity the host can act on: one
+    # clears its document-feature debounce key, the other re-pulls
+    # diagnostics.
+    var _refresh_doc_features: Bool
+    var _refresh_diagnostics: Bool
+    # Close-handshake state. See the ``_CLOSE_*`` constants: the handshake is
+    # driven by polls so a window close never waits on a language server.
+    var _close_stage: UInt8
+    var _close_deadline: Int
+    var _close_shutdown_id: String
 
     # Outstanding request ids — strings so they round-trip verbatim
     # whether they ride as JSON ints or JSON strings on the wire (we
@@ -555,6 +807,17 @@ struct LspManager(Copyable, Movable):
     var _code_action_path: String
     var _resolved_code_actions: List[CodeAction]
     var _has_resolved_code_actions: Bool
+    # ``codeAction/resolve`` fan-out. A server with
+    # ``codeActionProvider.resolveProvider`` returns actions with a title and
+    # no ``edit``; we resolve every such action before publishing the list, so
+    # the host's contract ("these are the actions you can apply") is unchanged
+    # and it needs to know nothing about resolve. Ids and the accumulator
+    # slot each one fills run in parallel lists; the list emptying is what
+    # flips ``_has_resolved_code_actions``.
+    var _ca_resolve_ids: List[String]
+    var _ca_resolve_slots: List[Int]
+    var _ca_accum: List[CodeAction]
+    var _ca_resolve_deadline: Int
     # Pending ``textDocument/rename`` request state. Same shape as the
     # code-action slots: an inflight id, an echoed origin path so a stale
     # response can be dropped, and a parked ``WorkspaceEdit`` (reusing the
@@ -670,6 +933,15 @@ struct LspManager(Copyable, Movable):
     var _doclink_path: String
     var _resolved_doclinks: List[TextEditEntry]
     var _has_resolved_doclinks: Bool
+    # ``documentLink/resolve`` fan-out. Unlike the code-action one this does
+    # *not* gate publication: links are decorative, so the list is published
+    # immediately and re-published as each target arrives. The accumulator is
+    # the full list every time, because the host replaces its link set on
+    # each take — handing it only the newly-resolved ones would drop the
+    # rest.
+    var _dl_resolve_ids: List[String]
+    var _dl_resolve_slots: List[Int]
+    var _dl_accum: List[TextEditEntry]
     # Server-initiated status: ``$/progress`` (work-done progress) and
     # ``window/showMessage``. Parked for the host to surface in the status
     # bar — progress only when ``lsp_server_progress`` is on.
@@ -802,6 +1074,17 @@ struct LspManager(Copyable, Movable):
         self.state = _STATE_NOT_STARTED
         self.failure_reason = String("")
         self._position_encoding = String("utf-16")
+        self._position_enc = encoding_from_name(String("utf-16"))
+        self._remap_cached = _PositionRemapper(POS_UTF8)
+        self._remap_cached_epoch = -1
+        self._remap_epoch = 0
+        self._req_uri_ids = List[String]()
+        self._req_uris = List[String]()
+        self._refresh_doc_features = False
+        self._refresh_diagnostics = False
+        self._close_stage = _CLOSE_IDLE
+        self._close_deadline = 0
+        self._close_shutdown_id = String("")
         self._init_id = String("")
         self._inflight_def_id = String("")
         self._inflight_word = String("")
@@ -851,6 +1134,10 @@ struct LspManager(Copyable, Movable):
         self._has_resolved_hover = False
         self._inflight_code_action_id = String("")
         self._code_action_path = String("")
+        self._ca_resolve_ids = List[String]()
+        self._ca_resolve_slots = List[Int]()
+        self._ca_accum = List[CodeAction]()
+        self._ca_resolve_deadline = 0
         self._resolved_code_actions = List[CodeAction]()
         self._has_resolved_code_actions = False
         self._inflight_rename_id = String("")
@@ -913,6 +1200,9 @@ struct LspManager(Copyable, Movable):
         self._codelens_accum = List[TextEditEntry]()
         self._inflight_doclink_id = String("")
         self._doclink_path = String("")
+        self._dl_resolve_ids = List[String]()
+        self._dl_resolve_slots = List[Int]()
+        self._dl_accum = List[TextEditEntry]()
         self._resolved_doclinks = List[TextEditEntry]()
         self._has_resolved_doclinks = False
         self._progress_note = String("")
@@ -978,6 +1268,17 @@ struct LspManager(Copyable, Movable):
         self.state = _STATE_NOT_STARTED
         self.failure_reason = String("")
         self._position_encoding = String("utf-16")
+        self._position_enc = encoding_from_name(String("utf-16"))
+        self._remap_cached = _PositionRemapper(POS_UTF8)
+        self._remap_cached_epoch = -1
+        self._remap_epoch = 0
+        self._req_uri_ids = List[String]()
+        self._req_uris = List[String]()
+        self._refresh_doc_features = False
+        self._refresh_diagnostics = False
+        self._close_stage = _CLOSE_IDLE
+        self._close_deadline = 0
+        self._close_shutdown_id = String("")
         self._init_id = String("")
         self._inflight_def_id = String("")
         self._inflight_word = String("")
@@ -1027,6 +1328,10 @@ struct LspManager(Copyable, Movable):
         self._has_resolved_hover = False
         self._inflight_code_action_id = String("")
         self._code_action_path = String("")
+        self._ca_resolve_ids = List[String]()
+        self._ca_resolve_slots = List[Int]()
+        self._ca_accum = List[CodeAction]()
+        self._ca_resolve_deadline = 0
         self._resolved_code_actions = List[CodeAction]()
         self._has_resolved_code_actions = False
         self._inflight_rename_id = String("")
@@ -1089,6 +1394,9 @@ struct LspManager(Copyable, Movable):
         self._codelens_accum = List[TextEditEntry]()
         self._inflight_doclink_id = String("")
         self._doclink_path = String("")
+        self._dl_resolve_ids = List[String]()
+        self._dl_resolve_slots = List[Int]()
+        self._dl_accum = List[TextEditEntry]()
         self._resolved_doclinks = List[TextEditEntry]()
         self._has_resolved_doclinks = False
         self._progress_note = String("")
@@ -1279,7 +1587,7 @@ struct LspManager(Copyable, Movable):
         params.put(String("textDocument"), _text_document(path))
         var req_id: String
         try:
-            req_id = self.client.send_request(
+            req_id = self._send_request(
                 String("textDocument/diagnostic"), params,
             )
         except:
@@ -1351,7 +1659,7 @@ struct LspManager(Copyable, Movable):
         try:
             var ws_name = basename(resolved_root) \
                 if len(resolved_root.as_bytes()) > 0 else String("")
-            self._init_id = self.client.send_request(
+            self._init_id = self._send_request(
                 String("initialize"),
                 lsp_initialize_params(self._root_uri, ws_name),
             )
@@ -1417,12 +1725,203 @@ struct LspManager(Copyable, Movable):
             return True
         return False
 
+    # --- position encoding ------------------------------------------------
+
+    def _bump_remap_epoch(mut self):
+        """Invalidate the line-index cache — a document's text changed."""
+        self._remap_epoch += 1
+
+    def _ensure_remapper(mut self):
+        """Refresh the cached line index if a document changed since it was
+        built. Open buffers are seeded from ``_doc_texts`` rather than read
+        from disk: a dirty buffer's columns must be converted against the
+        text the *server* was given, not the stale file."""
+        if self._remap_cached_epoch == self._remap_epoch:
+            return
+        var rm = _PositionRemapper(self._position_enc)
+        for i in range(len(self._doc_paths)):
+            rm.seed(self._doc_paths[i], self._doc_texts[i])
+        self._remap_cached = rm^
+        self._remap_cached_epoch = self._remap_epoch
+
+    def _to_wire(mut self, var params: JsonValue) -> JsonValue:
+        """Convert byte columns in outbound ``params`` to wire units."""
+        if self._position_enc == POS_UTF8:
+            return params^
+        self._ensure_remapper()
+        return self._remap_cached.walk(params, String(""), False)
+
+    def _from_wire(mut self, v: JsonValue, uri: String) -> JsonValue:
+        """Convert wire units in an inbound payload to byte columns.
+        ``uri`` is the document the payload is implicitly about (the
+        in-flight request's file) — positions carrying their own ``uri``
+        override it."""
+        if self._position_enc == POS_UTF8:
+            return v.copy()
+        self._ensure_remapper()
+        return self._remap_cached.walk(v, uri, True)
+
+    def _send_request(
+        mut self, method: String, params: JsonValue,
+    ) raises -> String:
+        """Every outbound request funnels through here so byte columns are
+        converted to the negotiated encoding exactly once, and so the
+        request's document is remembered for remapping the response."""
+        var uri = String("")
+        var td = params.object_get(String("textDocument"))
+        if td and td.value().is_object():
+            var u = td.value().object_get(String("uri"))
+            if u and u.value().is_string():
+                uri = u.value().as_str()
+        var id = self.client.send_request(method, self._to_wire(params.copy()))
+        if len(uri.as_bytes()) > 0 and len(id.as_bytes()) > 0:
+            self._req_uri_ids.append(id)
+            self._req_uris.append(uri^)
+            while len(self._req_uri_ids) > _REQ_URI_RING:
+                _ = self._req_uri_ids.pop(0)
+                _ = self._req_uris.pop(0)
+        return id^
+
+    def _take_req_uri(mut self, id: String) -> String:
+        """The document URI recorded for ``id``, consuming the entry.
+        Empty when unknown — the walk then relies on URIs carried in the
+        payload itself and leaves positionless-context values alone."""
+        for i in range(len(self._req_uri_ids)):
+            if self._req_uri_ids[i] == id:
+                var uri = self._req_uris[i]
+                _ = self._req_uri_ids.pop(i)
+                _ = self._req_uris.pop(i)
+                return uri^
+        return String("")
+
+    def _send_notification(mut self, method: String, params: JsonValue) raises:
+        """Outbound-notification twin of ``_send_request``."""
+        self.client.send_notification(method, self._to_wire(params.copy()))
+
     def shutdown(mut self):
-        """Best-effort: terminate the child if alive. Idempotent."""
+        """Close the session, blocking until the handshake finishes.
+
+        The blocking wrapper over ``begin_shutdown`` / ``shutdown_poll`` /
+        ``finish_shutdown``. Use it where there is no "later" to drain in —
+        the terminal frontend (the process is exiting) and tests. The native
+        frontend uses the poll form instead so a window closes instantly.
+        Idempotent."""
         if self.state == _STATE_NOT_STARTED:
             return
+        self.begin_shutdown()
+        while not self.shutdown_poll():
+            sleep_ms(_SHUTDOWN_POLL_MS)
+        self.finish_shutdown()
+
+    def begin_shutdown(mut self):
+        """Start the spec close handshake without waiting for it.
+
+        Sends the ``shutdown`` request and returns. The caller then polls
+        ``shutdown_poll`` until it reports done and calls
+        ``finish_shutdown``; nothing here blocks, so a window can close
+        while its servers are still winding down.
+
+        Why bother at all rather than going straight to SIGTERM: the spec
+        sequence is ``shutdown`` → response → ``exit``, and servers use it.
+        rust-analyzer and jdtls flush caches and workspace state on the way
+        out, and killing them mid-flush makes the *next* session re-index or
+        start from a partially-written cache.
+        """
+        if self.state == _STATE_NOT_STARTED:
+            self._close_stage = _CLOSE_DONE
+            return
+        if self._close_stage != _CLOSE_IDLE:
+            return   # already closing
+        if not self.client.process.alive or self.client.process.pid <= 0:
+            self._close_stage = _CLOSE_DONE
+            return
+        var shutdown_id: String
+        try:
+            shutdown_id = self._send_request(
+                String("shutdown"), json_null_v(),
+            )
+        except:
+            # Couldn't even write the request — the server isn't reading
+            # stdin, so nothing graceful is possible. Let the terminate in
+            # ``finish_shutdown`` deal with it.
+            self._close_stage = _CLOSE_DONE
+            return
+        self._close_shutdown_id = shutdown_id^
+        self._close_stage = _CLOSE_AWAIT_RESPONSE
+        self._close_deadline = monotonic_ms() + _SHUTDOWN_RESPONSE_MS
+
+    def shutdown_poll(mut self) -> Bool:
+        """Advance the close handshake. True once the transport can be torn
+        down — the child exited, or its budget elapsed and it has a SIGTERM
+        coming from ``finish_shutdown``.
+
+        Safe to call at any rate; the budgets are wall-clock deadlines, so
+        polling more often doesn't shorten the grace period and polling less
+        often doesn't extend it past the next call."""
+        if self._close_stage == _CLOSE_DONE or self._close_stage == _CLOSE_IDLE:
+            return True
+        if self.client.process.try_reap():
+            self._close_stage = _CLOSE_DONE
+            return True
+        var now = monotonic_ms()
+        if self._close_stage == _CLOSE_AWAIT_RESPONSE:
+            var acked = False
+            # Drain whatever is queued. A server may flush a backlog of
+            # notifications ahead of its shutdown response, so read until the
+            # pipe is empty rather than giving up after one message.
+            for _ in range(64):
+                var maybe: Optional[LspIncoming]
+                try:
+                    maybe = self.client.poll(Int32(0))
+                except:
+                    self._close_stage = _CLOSE_DONE
+                    return True
+                if not maybe:
+                    break
+                var inc = maybe.value().copy()
+                if inc.kind == LSP_RESPONSE and inc.id \
+                        and _id_to_string(inc.id.value()) \
+                            == self._close_shutdown_id:
+                    acked = True
+                    break
+            if not acked and now < self._close_deadline:
+                return False
+            # Send ``exit`` whether or not the response arrived: an
+            # unacknowledged shutdown is still better followed by exit than
+            # by an immediate signal, and a server that ignores both gets
+            # SIGTERM from ``finish_shutdown`` anyway.
+            try:
+                self._send_notification(String("exit"), json_null_v())
+            except:
+                self._close_stage = _CLOSE_DONE
+                return True
+            self._close_stage = _CLOSE_AWAIT_EXIT
+            self._close_deadline = monotonic_ms() + _SHUTDOWN_EXIT_MS
+            return False
+        # _CLOSE_AWAIT_EXIT: the reap check at the top is what completes
+        # this; here we only enforce the budget.
+        if now >= self._close_deadline:
+            self._close_stage = _CLOSE_DONE
+            return True
+        return False
+
+    def finish_shutdown(mut self):
+        """Tear down the transport once ``shutdown_poll`` reports done.
+
+        ``terminate`` closes the pipe fds and drops the outbound queue even
+        when the child already exited cleanly — a graceful exit clears
+        ``alive``, so the kill and reap steps are skipped and only the fd
+        cleanup runs. A child that ignored ``exit`` gets its SIGTERM here."""
         self.client.terminate()
         self.state = _STATE_NOT_STARTED
+        self._close_stage = _CLOSE_IDLE
+        self._close_shutdown_id = String("")
+        self._close_deadline = 0
+
+    def is_closing(self) -> Bool:
+        """True while a close handshake is in progress."""
+        return self._close_stage == _CLOSE_AWAIT_RESPONSE \
+            or self._close_stage == _CLOSE_AWAIT_EXIT
 
     # --- document lifecycle -----------------------------------------------
 
@@ -1474,7 +1973,7 @@ struct LspManager(Copyable, Movable):
         if self.save_includes_text():
             params.put(String("text"), json_str(text^))
         try:
-            self.client.send_notification(
+            self._send_notification(
                 String("textDocument/didSave"), params,
             )
         except e:
@@ -1509,13 +2008,14 @@ struct LspManager(Copyable, Movable):
         _ = self._doc_paths.pop(idx)
         _ = self._doc_versions.pop(idx)
         _ = self._doc_texts.pop(idx)
+        self._bump_remap_epoch()
         # Drop any "analyzing edits…" spinner state — a closed buffer
         # must not keep one spinning.
         self._clear_diag_inflight(path, 0)
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
         try:
-            self.client.send_notification(
+            self._send_notification(
                 String("textDocument/didClose"), params,
             )
         except e:
@@ -1541,7 +2041,7 @@ struct LspManager(Copyable, Movable):
         changes.append(change^)
         params.put(String("changes"), changes^)
         try:
-            self.client.send_notification(
+            self._send_notification(
                 String("workspace/didChangeWatchedFiles"), params,
             )
         except e:
@@ -1561,17 +2061,16 @@ struct LspManager(Copyable, Movable):
         var params = json_object()
         params.put(String("settings"), json_object())
         try:
-            self.client.send_notification(
+            self._send_notification(
                 String("workspace/didChangeConfiguration"), params,
             )
         except e:
             print("lsp: didChangeConfiguration", ":", String(e))
 
-    def server_wants_did_create(self) -> Bool:
-        """True iff the server advertised
-        ``workspace.fileOperations.didCreate`` — it wants a
-        ``workspace/didCreateFiles`` notification when files are created
-        (so it can fix up imports / index the new file)."""
+    def _server_wants_file_op(self, key: String) -> Bool:
+        """True iff the server advertised ``workspace.fileOperations.<key>``
+        (``didCreate`` / ``didRename`` / ``didDelete``). A boolean ``true``
+        or a registration-options object both count."""
         if not self._capabilities:
             return False
         var caps = self._capabilities.value().copy()
@@ -1585,13 +2084,31 @@ struct LspManager(Copyable, Movable):
         )
         if not fo_opt or not fo_opt.value().is_object():
             return False
-        var dc_opt = fo_opt.value().copy().object_get(String("didCreate"))
-        if not dc_opt:
+        var v_opt = fo_opt.value().copy().object_get(key)
+        if not v_opt:
             return False
-        var dc = dc_opt.value().copy()
-        if dc.is_bool():
-            return dc.as_bool()
-        return dc.is_object()
+        var v = v_opt.value().copy()
+        if v.is_bool():
+            return v.as_bool()
+        return v.is_object()
+
+    def server_wants_did_rename(self) -> Bool:
+        """True iff the server wants ``workspace/didRenameFiles``. This is
+        the one that actually changes behavior for the user: pyright and
+        typescript-language-server rewrite every import of a renamed module
+        when they get it, and do nothing at all when they don't."""
+        return self._server_wants_file_op(String("didRename"))
+
+    def server_wants_did_delete(self) -> Bool:
+        """True iff the server wants ``workspace/didDeleteFiles`` — so it can
+        drop the file from its index instead of holding stale symbols for a
+        path that no longer exists."""
+        return self._server_wants_file_op(String("didDelete"))
+
+    def server_wants_did_create(self) -> Bool:
+        """True iff the server wants ``workspace/didCreateFiles`` — so it can
+        index a newly-created file and fix up imports referring to it."""
+        return self._server_wants_file_op(String("didCreate"))
 
     def notify_did_create_files(mut self, path: String):
         """Send ``workspace/didCreateFiles`` for one newly-created file, but
@@ -1607,11 +2124,59 @@ struct LspManager(Copyable, Movable):
         files.append(f^)
         params.put(String("files"), files^)
         try:
-            self.client.send_notification(
+            self._send_notification(
                 String("workspace/didCreateFiles"), params,
             )
         except e:
             print("lsp: didCreateFiles", path, ":", String(e))
+
+    def notify_did_rename_files(mut self, old_path: String, new_path: String):
+        """Send ``workspace/didRenameFiles`` for one rename.
+
+        This is the file operation that changes what the user sees: pyright
+        and typescript-language-server rewrite every import of a renamed
+        module on this notification, and without it a rename in the file tree
+        silently leaves the project full of imports pointing at the old name.
+
+        Fire-and-forget, and gated on the server advertising interest. Like
+        ``didCreateFiles`` we don't model the registered glob filters — a
+        server may receive an event for a path outside its set and ignore it,
+        which is spec-legal."""
+        if self.state != _STATE_READY or not self.server_wants_did_rename():
+            return
+        var params = json_object()
+        var files = json_array()
+        var f = json_object()
+        f.put(String("oldUri"), json_str(_path_to_uri(old_path)))
+        f.put(String("newUri"), json_str(_path_to_uri(new_path)))
+        files.append(f^)
+        params.put(String("files"), files^)
+        try:
+            self._send_notification(
+                String("workspace/didRenameFiles"), params,
+            )
+        except e:
+            print("lsp: didRenameFiles", old_path, ":", String(e))
+
+    def notify_did_delete_files(mut self, path: String):
+        """Send ``workspace/didDeleteFiles`` for one deleted file or
+        directory, so the server drops it from its index instead of holding
+        stale symbols for a path that no longer exists (which then surface in
+        Find Symbol and go-to-definition as jumps into nothing)."""
+        if self.state != _STATE_READY or not self.server_wants_did_delete():
+            return
+        var params = json_object()
+        var files = json_array()
+        var f = json_object()
+        f.put(String("uri"), json_str(_path_to_uri(path)))
+        files.append(f^)
+        params.put(String("files"), files^)
+        try:
+            self._send_notification(
+                String("workspace/didDeleteFiles"), params,
+            )
+        except e:
+            print("lsp: didDeleteFiles", path, ":", String(e))
 
     def notify_will_save(mut self, path: String, reason: Int):
         """Send ``textDocument/willSave`` (``reason``: 1=manual, 2=after-
@@ -1624,7 +2189,7 @@ struct LspManager(Copyable, Movable):
         params.put(String("textDocument"), _text_document(path))
         params.put(String("reason"), json_int(reason))
         try:
-            self.client.send_notification(
+            self._send_notification(
                 String("textDocument/willSave"), params,
             )
         except e:
@@ -1646,7 +2211,7 @@ struct LspManager(Copyable, Movable):
         params.put(String("textDocument"), _text_document(path))
         params.put(String("reason"), json_int(reason))
         try:
-            self._inflight_willsave_id = self.client.send_request(
+            self._inflight_willsave_id = self._send_request(
                 String("textDocument/willSaveWaitUntil"), params,
             )
         except:
@@ -1697,7 +2262,7 @@ struct LspManager(Copyable, Movable):
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
         try:
-            self._inflight_def_id = self.client.send_request(
+            self._inflight_def_id = self._send_request(
                 String("textDocument/definition"), params,
             )
         except:
@@ -1829,6 +2394,30 @@ struct LspManager(Copyable, Movable):
             return rp_opt.value().as_bool()
         return False
 
+    def server_supports_code_action_resolve(self) -> Bool:
+        """True iff ``codeActionProvider.resolveProvider`` — the server
+        returns actions carrying only a ``title`` + ``data`` and fills in the
+        ``edit`` on a ``codeAction/resolve`` round-trip.
+
+        This is rust-analyzer's default shape. Without the round-trip its
+        actions arrive with no edit and no command, the host filters them out
+        as inapplicable, and the user sees an empty quick-fix menu on a
+        buffer full of fixable diagnostics."""
+        if not self._capabilities:
+            return False
+        var caps = self._capabilities.value().copy()
+        if not caps.is_object():
+            return False
+        var ca_opt = caps.object_get(String("codeActionProvider"))
+        if not ca_opt or not ca_opt.value().is_object():
+            return False
+        var rp_opt = ca_opt.value().copy().object_get(
+            String("resolveProvider"),
+        )
+        if rp_opt and rp_opt.value().is_bool():
+            return rp_opt.value().as_bool()
+        return False
+
     # --- navigate-to-location (typeDefinition / implementation / declaration)
 
     def request_navigation(
@@ -1852,7 +2441,7 @@ struct LspManager(Copyable, Movable):
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
         try:
-            self._inflight_nav_id = self.client.send_request(method, params)
+            self._inflight_nav_id = self._send_request(method, params)
         except:
             self._inflight_nav_id = String("")
             return False
@@ -1891,7 +2480,7 @@ struct LspManager(Copyable, Movable):
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
         try:
-            self._inflight_prepare_rename_id = self.client.send_request(
+            self._inflight_prepare_rename_id = self._send_request(
                 String("textDocument/prepareRename"), params,
             )
         except:
@@ -1944,7 +2533,7 @@ struct LspManager(Copyable, Movable):
         ctx.put(String("includeDeclaration"), json_bool(True))
         params.put(String("context"), ctx^)
         try:
-            self._inflight_ref_id = self.client.send_request(
+            self._inflight_ref_id = self._send_request(
                 String("textDocument/references"), params,
             )
         except:
@@ -1990,7 +2579,7 @@ struct LspManager(Copyable, Movable):
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
         try:
-            self._inflight_symbol_id = self.client.send_request(
+            self._inflight_symbol_id = self._send_request(
                 String("textDocument/documentSymbol"), params,
             )
         except:
@@ -2035,7 +2624,7 @@ struct LspManager(Copyable, Movable):
         var params = json_object()
         params.put(String("query"), json_str(query))
         try:
-            self._inflight_ws_symbol_id = self.client.send_request(
+            self._inflight_ws_symbol_id = self._send_request(
                 String("workspace/symbol"), params,
             )
         except:
@@ -2071,7 +2660,7 @@ struct LspManager(Copyable, Movable):
         var cancel_params = json_object()
         cancel_params.put(String("id"), json_str(request_id))
         try:
-            self.client.send_notification(
+            self._send_notification(
                 String("$/cancelRequest"), cancel_params,
             )
         except e:
@@ -2128,7 +2717,7 @@ struct LspManager(Copyable, Movable):
                 self._inflight_completion_id, String("completion"),
             )
         try:
-            self._inflight_completion_id = self.client.send_request(
+            self._inflight_completion_id = self._send_request(
                 String("textDocument/completion"), params,
             )
         except:
@@ -2228,7 +2817,7 @@ struct LspManager(Copyable, Movable):
             except:
                 pass
         try:
-            self._inflight_resolve_id = self.client.send_request(
+            self._inflight_resolve_id = self._send_request(
                 String("completionItem/resolve"), ci,
             )
         except:
@@ -2281,7 +2870,7 @@ struct LspManager(Copyable, Movable):
         if len(self._inflight_hover_id.as_bytes()) > 0:
             self._send_cancel(self._inflight_hover_id, String("hover"))
         try:
-            self._inflight_hover_id = self.client.send_request(
+            self._inflight_hover_id = self._send_request(
                 String("textDocument/hover"), params,
             )
         except:
@@ -2369,7 +2958,7 @@ struct LspManager(Copyable, Movable):
         ctx.put(String("diagnostics"), diags_arr^)
         params.put(String("context"), ctx^)
         try:
-            self._inflight_code_action_id = self.client.send_request(
+            self._inflight_code_action_id = self._send_request(
                 String("textDocument/codeAction"), params,
             )
         except:
@@ -2379,6 +2968,96 @@ struct LspManager(Copyable, Movable):
         self._resolved_code_actions = List[CodeAction]()
         self._has_resolved_code_actions = False
         return True
+
+    # --- codeAction/resolve ------------------------------------------------
+
+    def _start_code_action_resolves(mut self, var actions: List[CodeAction]):
+        """Park ``actions`` and fire a ``codeAction/resolve`` for each one
+        that arrived without an inline edit.
+
+        Publishing is deferred until every resolve returns (or the deadline
+        passes) so the host sees one settled list rather than a list that
+        grows edits underneath it. When nothing needs resolving — the common
+        case, and every server that isn't rust-analyzer — this publishes
+        immediately and costs a single empty-list check."""
+        self._ca_accum = actions^
+        self._ca_resolve_ids = List[String]()
+        self._ca_resolve_slots = List[Int]()
+        if not self.server_supports_code_action_resolve():
+            self._publish_code_actions_if_settled()
+            return
+        for i in range(len(self._ca_accum)):
+            if len(self._ca_accum[i].file_edits) > 0:
+                continue
+            if not self._ca_accum[i].unresolved:
+                continue
+            var params = self._ca_accum[i].unresolved.value().copy()
+            var rid: String
+            try:
+                rid = self._send_request(
+                    String("codeAction/resolve"), params,
+                )
+            except:
+                continue
+            if len(rid.as_bytes()) == 0:
+                continue
+            self._ca_resolve_ids.append(rid)
+            self._ca_resolve_slots.append(i)
+        if len(self._ca_resolve_ids) > 0:
+            self._ca_resolve_deadline = \
+                monotonic_ms() + _CA_RESOLVE_TIMEOUT_MS
+            _lsp_debug_log(
+                String("→ codeAction/resolve x")
+                + String(len(self._ca_resolve_ids))
+                + String(" lang=") + self._language_id,
+            )
+        self._publish_code_actions_if_settled()
+
+    def _code_action_resolve_slot(self, id: String) -> Int:
+        """Accumulator index the resolve response ``id`` fills, or -1."""
+        for i in range(len(self._ca_resolve_ids)):
+            if self._ca_resolve_ids[i] == id:
+                return self._ca_resolve_slots[i]
+        return -1
+
+    def _drop_code_action_resolve(mut self, id: String):
+        for i in range(len(self._ca_resolve_ids)):
+            if self._ca_resolve_ids[i] == id:
+                _ = self._ca_resolve_ids.pop(i)
+                _ = self._ca_resolve_slots.pop(i)
+                return
+
+    def _publish_code_actions_if_settled(mut self):
+        """Hand the accumulated list to the host once no resolve is
+        outstanding. Idempotent — safe to call after every resolve."""
+        if len(self._ca_resolve_ids) > 0:
+            return
+        self._resolved_code_actions = self._ca_accum^
+        self._ca_accum = List[CodeAction]()
+        self._has_resolved_code_actions = True
+        self._ca_resolve_deadline = 0
+
+    def _expire_code_action_resolves(mut self):
+        """Publish what we have if the resolves haven't come back in time.
+
+        Driven from ``tick``. Without it a server that accepts a resolve and
+        never answers leaves the quick-fix menu on "Loading fixes…" forever;
+        with it the user gets the actions that did resolve (plus any that
+        already had inline edits) and the menu settles."""
+        if len(self._ca_resolve_ids) == 0:
+            return
+        if self._ca_resolve_deadline <= 0:
+            return
+        if monotonic_ms() < self._ca_resolve_deadline:
+            return
+        _lsp_debug_log(
+            String("codeAction/resolve timed out with ")
+            + String(len(self._ca_resolve_ids))
+            + String(" outstanding; publishing partial list"),
+        )
+        self._ca_resolve_ids = List[String]()
+        self._ca_resolve_slots = List[Int]()
+        self._publish_code_actions_if_settled()
 
     def has_pending_code_actions(self) -> Bool:
         """True iff a parsed code-action response is parked for ``take``.
@@ -2417,7 +3096,7 @@ struct LspManager(Copyable, Movable):
         else:
             params.put(String("arguments"), json_array())
         try:
-            _ = self.client.send_request(
+            _ = self._send_request(
                 String("workspace/executeCommand"), params,
             )
         except:
@@ -2449,7 +3128,7 @@ struct LspManager(Copyable, Movable):
         var params = _text_document_position_params(path, line, character)
         params.put(String("newName"), json_str(new_name))
         try:
-            self._inflight_rename_id = self.client.send_request(
+            self._inflight_rename_id = self._send_request(
                 String("textDocument/rename"), params,
             )
         except:
@@ -2493,7 +3172,7 @@ struct LspManager(Copyable, Movable):
         params.put(String("textDocument"), _text_document(path))
         params.put(String("options"), _formatting_options(tab_size, insert_spaces))
         try:
-            self._inflight_formatting_id = self.client.send_request(
+            self._inflight_formatting_id = self._send_request(
                 String("textDocument/formatting"), params,
             )
         except:
@@ -2521,7 +3200,7 @@ struct LspManager(Copyable, Movable):
         params.put(String("range"), rng^)
         params.put(String("options"), _formatting_options(tab_size, insert_spaces))
         try:
-            self._inflight_formatting_id = self.client.send_request(
+            self._inflight_formatting_id = self._send_request(
                 String("textDocument/rangeFormatting"), params,
             )
         except:
@@ -2589,7 +3268,7 @@ struct LspManager(Copyable, Movable):
         params.put(String("ch"), json_str(ch))
         params.put(String("options"), _formatting_options(tab_size, insert_spaces))
         try:
-            self._inflight_ontype_id = self.client.send_request(
+            self._inflight_ontype_id = self._send_request(
                 String("textDocument/onTypeFormatting"), params,
             )
         except:
@@ -2623,7 +3302,7 @@ struct LspManager(Copyable, Movable):
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
         try:
-            self._inflight_moniker_id = self.client.send_request(
+            self._inflight_moniker_id = self._send_request(
                 String("textDocument/moniker"), params,
             )
         except:
@@ -2667,7 +3346,7 @@ struct LspManager(Copyable, Movable):
         params.put(String("color"), color^)
         params.put(String("range"), rng^)
         try:
-            self._inflight_colorpres_id = self.client.send_request(
+            self._inflight_colorpres_id = self._send_request(
                 String("textDocument/colorPresentation"), params,
             )
         except:
@@ -2718,7 +3397,7 @@ struct LspManager(Copyable, Movable):
         ctx.put(String("triggerKind"), json_int(1))  # Invoked
         params.put(String("context"), ctx^)
         try:
-            self._inflight_inlinecomp_id = self.client.send_request(
+            self._inflight_inlinecomp_id = self._send_request(
                 String("textDocument/inlineCompletion"), params,
             )
         except:
@@ -2757,7 +3436,7 @@ struct LspManager(Copyable, Movable):
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
         try:
-            self._inflight_linked_id = self.client.send_request(
+            self._inflight_linked_id = self._send_request(
                 String("textDocument/linkedEditingRange"), params,
             )
         except:
@@ -2801,7 +3480,7 @@ struct LspManager(Copyable, Movable):
         ctx.put(String("stoppedLocation"), stopped^)
         params.put(String("context"), ctx^)
         try:
-            self._inflight_inlineval_id = self.client.send_request(
+            self._inflight_inlineval_id = self._send_request(
                 String("textDocument/inlineValue"), params,
             )
         except:
@@ -2839,7 +3518,7 @@ struct LspManager(Copyable, Movable):
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
         try:
-            self._inflight_folding_id = self.client.send_request(
+            self._inflight_folding_id = self._send_request(
                 String("textDocument/foldingRange"), params,
             )
         except:
@@ -2874,7 +3553,7 @@ struct LspManager(Copyable, Movable):
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
         try:
-            self._inflight_doc_highlight_id = self.client.send_request(
+            self._inflight_doc_highlight_id = self._send_request(
                 String("textDocument/documentHighlight"), params,
             )
         except:
@@ -2909,7 +3588,7 @@ struct LspManager(Copyable, Movable):
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
         try:
-            self._inflight_signature_id = self.client.send_request(
+            self._inflight_signature_id = self._send_request(
                 String("textDocument/signatureHelp"), params,
             )
         except:
@@ -2948,7 +3627,7 @@ struct LspManager(Copyable, Movable):
         rng.put(String("end"), _lsp_position(end_line, 0))
         params.put(String("range"), rng^)
         try:
-            self._inflight_inlay_id = self.client.send_request(
+            self._inflight_inlay_id = self._send_request(
                 String("textDocument/inlayHint"), params,
             )
         except:
@@ -2982,7 +3661,7 @@ struct LspManager(Copyable, Movable):
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
         try:
-            self._inflight_codelens_id = self.client.send_request(
+            self._inflight_codelens_id = self._send_request(
                 String("textDocument/codeLens"), params,
             )
         except:
@@ -3026,7 +3705,7 @@ struct LspManager(Copyable, Movable):
         # row regardless of response ordering.
         self._codelens_resolve_row = _codelens_row_of(lens)
         try:
-            self._inflight_codelens_resolve_id = self.client.send_request(
+            self._inflight_codelens_resolve_id = self._send_request(
                 String("codeLens/resolve"), lens,
             )
         except:
@@ -3056,7 +3735,7 @@ struct LspManager(Copyable, Movable):
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
         try:
-            self._inflight_doclink_id = self.client.send_request(
+            self._inflight_doclink_id = self._send_request(
                 String("textDocument/documentLink"), params,
             )
         except:
@@ -3066,6 +3745,92 @@ struct LspManager(Copyable, Movable):
         self._resolved_doclinks = List[TextEditEntry]()
         self._has_resolved_doclinks = False
         return True
+
+    def server_supports_document_link_resolve(self) -> Bool:
+        """True iff ``documentLinkProvider.resolveProvider`` — the server
+        returns links whose ``target`` it fills in on a
+        ``documentLink/resolve`` round-trip. ``vscode-json-language-server``
+        does this for every ``$ref``."""
+        if not self._capabilities:
+            return False
+        var caps = self._capabilities.value().copy()
+        if not caps.is_object():
+            return False
+        var dl_opt = caps.object_get(String("documentLinkProvider"))
+        if not dl_opt or not dl_opt.value().is_object():
+            return False
+        var rp_opt = dl_opt.value().copy().object_get(
+            String("resolveProvider"),
+        )
+        if rp_opt and rp_opt.value().is_bool():
+            return rp_opt.value().as_bool()
+        return False
+
+    def _start_document_link_resolves(mut self, parsed: DocumentLinkParse):
+        """Publish the links that have targets now, and fire a
+        ``documentLink/resolve`` for each one the server withheld.
+
+        The slot each resolve fills comes from ``parsed.unresolved_slots``,
+        computed during the parse walk — nothing here re-derives which links
+        needed resolving, so there is no second filter to drift out of step
+        and pair a target with the wrong link."""
+        self._dl_accum = parsed.links.copy()
+        self._dl_resolve_ids = List[String]()
+        self._dl_resolve_slots = List[Int]()
+        # Publish immediately: a resolvable link is merely missing until its
+        # target arrives, so there's nothing to gain from making the ones we
+        # already have wait on a round-trip.
+        self._publish_document_links()
+        if not self.server_supports_document_link_resolve():
+            return
+        for k in range(len(parsed.unresolved_slots)):
+            var params = parsed.unresolved_raw[k].copy()
+            var rid: String
+            try:
+                rid = self._send_request(
+                    String("documentLink/resolve"), params,
+                )
+            except:
+                continue
+            if len(rid.as_bytes()) == 0:
+                continue
+            self._dl_resolve_ids.append(rid)
+            self._dl_resolve_slots.append(parsed.unresolved_slots[k])
+        if len(self._dl_resolve_ids) > 0:
+            _lsp_debug_log(
+                String("→ documentLink/resolve x")
+                + String(len(self._dl_resolve_ids))
+                + String(" lang=") + self._language_id,
+            )
+
+    def _publish_document_links(mut self):
+        """Hand the host every link that has a target.
+
+        The accumulator keeps the targetless entries so a resolve response
+        can still find its slot, but they are filtered out of what the host
+        sees: an underlined range that does nothing on click is worse than
+        no underline, which is why the pre-resolve code dropped them
+        outright. A server that never answers the resolve therefore degrades
+        to exactly the old behavior."""
+        var out = List[TextEditEntry]()
+        for i in range(len(self._dl_accum)):
+            if len(self._dl_accum[i].new_text.as_bytes()) > 0:
+                out.append(self._dl_accum[i])
+        self._resolved_doclinks = out^
+        self._has_resolved_doclinks = True
+
+    def _document_link_resolve_slot(self, id: String) -> Int:
+        for i in range(len(self._dl_resolve_ids)):
+            if self._dl_resolve_ids[i] == id:
+                return self._dl_resolve_slots[i]
+        return -1
+
+    def _drop_document_link_resolve(mut self, id: String):
+        for i in range(len(self._dl_resolve_ids)):
+            if self._dl_resolve_ids[i] == id:
+                _ = self._dl_resolve_ids.pop(i)
+                _ = self._dl_resolve_slots.pop(i)
+                return
 
     def has_pending_doclinks(self) -> Bool:
         return self._has_resolved_doclinks
@@ -3095,7 +3860,7 @@ struct LspManager(Copyable, Movable):
         positions.append(_lsp_position(line, character))
         params.put(String("positions"), positions^)
         try:
-            self._inflight_selrange_id = self.client.send_request(
+            self._inflight_selrange_id = self._send_request(
                 String("textDocument/selectionRange"), params,
             )
         except:
@@ -3181,7 +3946,7 @@ struct LspManager(Copyable, Movable):
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
         try:
-            self._inflight_hier_prepare_id = self.client.send_request(
+            self._inflight_hier_prepare_id = self._send_request(
                 prepare_method, params,
             )
         except:
@@ -3218,7 +3983,7 @@ struct LspManager(Copyable, Movable):
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
         try:
-            self._inflight_color_id = self.client.send_request(
+            self._inflight_color_id = self._send_request(
                 String("textDocument/documentColor"), params,
             )
         except:
@@ -3240,6 +4005,22 @@ struct LspManager(Copyable, Movable):
         self._resolved_colors = List[Highlight]()
         self._has_resolved_colors = False
         return out^
+
+    def take_document_refresh(mut self) -> Bool:
+        """True once per ``workspace/{codeLens,inlayHint,inlineValue,foldingRange,textDocumentContent}/refresh``
+        the server sent. The host drops its document-feature debounce key so
+        the next tick re-requests. Consuming clears the flag."""
+        var was = self._refresh_doc_features
+        self._refresh_doc_features = False
+        return was
+
+    def take_diagnostics_refresh(mut self) -> Bool:
+        """True once per ``workspace/diagnostic/refresh``. The pull-diagnostics
+        re-arm already happened in the handler (``_pulled_paths`` was
+        cleared); this is for the host that wants to know it happened."""
+        var was = self._refresh_diagnostics
+        self._refresh_diagnostics = False
+        return was
 
     def has_pending_applyedit(self) -> Bool:
         return self._has_resolved_applyedit
@@ -3295,6 +4076,9 @@ struct LspManager(Copyable, Movable):
         # mid-handshake (no JSON-RPC response coming, just a Python
         # traceback or "error: unrecognized option" on stderr).
         self._absorb_stderr()
+        # Publish a partially-resolved code-action list rather than leaving
+        # the quick-fix menu on "Loading fixes…" if a resolve never answers.
+        self._expire_code_action_resolves()
         # Crash-detection: if the child has exited while we still
         # consider the session live, latch FAILED with whatever stderr
         # carried. Without this the manager stays in INITIALIZING
@@ -3340,6 +4124,15 @@ struct LspManager(Copyable, Movable):
             if msg.kind == LSP_NOTIFICATION:
                 if msg.method and msg.params:
                     var method = msg.method.value()
+                    # ``publishDiagnostics`` ranges are wire-encoded and the
+                    # params carry the ``uri`` the walk needs; the other
+                    # notifications have no positions, so converting them
+                    # all is free and keeps future ones correct.
+                    if self._position_enc != POS_UTF8:
+                        var np = self._from_wire(
+                            msg.params.value(), String(""),
+                        )
+                        msg.params = Optional[JsonValue](np^)
                     if method == String("textDocument/publishDiagnostics"):
                         self._on_publish_diagnostics(msg.params.value())
                     elif method == String("$/progress"):
@@ -3348,6 +4141,13 @@ struct LspManager(Copyable, Movable):
                         self._on_show_message(msg.params.value())
                     elif method == String("window/logMessage"):
                         self._on_log_message(msg.params.value())
+                    elif method == String("$/logTrace"):
+                        # Trace output the server emits when tracing is on.
+                        # Route it to the same capture the info window shows
+                        # as ``window/logMessage`` — it's the only channel a
+                        # server has for "here is what I just did", and we
+                        # were dropping it on the floor.
+                        self._on_log_trace(msg.params.value())
                     elif method == String("telemetry/event"):
                         self._append_log(
                             String("[telemetry] ")
@@ -3355,6 +4155,13 @@ struct LspManager(Copyable, Movable):
                         )
                 continue
             if msg.kind == LSP_REQUEST:
+                # ``workspace/applyEdit`` carries a whole WorkspaceEdit and
+                # ``window/showDocument`` a selection range — both in wire
+                # units, both applied to buffers, so both must be converted
+                # before ``_handle_server_request`` parses them.
+                if self._position_enc != POS_UTF8 and msg.params:
+                    var rp = self._from_wire(msg.params.value(), String(""))
+                    msg.params = Optional[JsonValue](rp^)
                 self._handle_server_request(msg)
                 continue
             if msg.kind != LSP_RESPONSE:
@@ -3367,6 +4174,19 @@ struct LspManager(Copyable, Movable):
             if self.state == _STATE_INITIALIZING and id == self._init_id:
                 self._on_initialize_response(msg)
                 continue
+            # Convert every ``Position.character`` in the result from the
+            # negotiated wire encoding to the byte columns the rest of this
+            # file (and the editor) speak — once, before the id-dispatch
+            # chain, so none of the ~30 parse branches below has to know
+            # the encoding exists. No-op under ``utf-8``. Deliberately
+            # after the initialize branch: the encoding isn't negotiated
+            # until that response is handled, and it carries no positions.
+            if self._position_enc != POS_UTF8 and msg.result:
+                var default_uri = self._take_req_uri(id)
+                var converted = self._from_wire(
+                    msg.result.value(), default_uri,
+                )
+                msg.result = Optional[JsonValue](converted^)
             if id == self._inflight_def_id:
                 var loc = Optional[DefinitionResolved]()
                 var result_dump = String("<no result>")
@@ -3484,9 +4304,28 @@ struct LspManager(Copyable, Movable):
                     + String(" lang=") + self._language_id
                     + String(" count=") + String(len(actions)),
                 )
-                self._resolved_code_actions = actions^
-                self._has_resolved_code_actions = True
                 self._inflight_code_action_id = String("")
+                self._start_code_action_resolves(actions^)
+                continue
+            var ca_slot = self._code_action_resolve_slot(id)
+            if ca_slot >= 0:
+                # A resolved action carries the same fields plus the ``edit``
+                # the initial response withheld. Only the edit is merged: the
+                # title is already on screen, and letting a resolve rewrite it
+                # would change the row the user is looking at.
+                if msg.result and msg.result.value().is_object():
+                    var resolved = _parse_workspace_edit(
+                        _code_action_edit_of(msg.result.value()),
+                    )
+                    self._ca_accum[ca_slot].file_edits = \
+                        resolved.file_edits.copy()
+                    # A resolve may also be where the Command shows up.
+                    if len(self._ca_accum[ca_slot].command.as_bytes()) == 0:
+                        var cmd = _code_action_command_of(msg.result.value())
+                        self._ca_accum[ca_slot].command = cmd[0]
+                        self._ca_accum[ca_slot].command_args = cmd[1].copy()
+                self._drop_code_action_resolve(id)
+                self._publish_code_actions_if_settled()
                 continue
             if id == self._inflight_rename_id:
                 var rename_edits = List[CodeActionFileEdit]()
@@ -3680,12 +4519,21 @@ struct LspManager(Copyable, Movable):
                 self._send_next_codelens_resolve()
                 continue
             if id == self._inflight_doclink_id:
-                var dls = List[TextEditEntry]()
+                var parsed = DocumentLinkParse()
                 if msg.result:
-                    dls = _parse_document_links(msg.result.value())
-                self._resolved_doclinks = dls^
-                self._has_resolved_doclinks = True
+                    parsed = _parse_document_links_full(msg.result.value())
                 self._inflight_doclink_id = String("")
+                self._start_document_link_resolves(parsed)
+                continue
+            var dl_slot = self._document_link_resolve_slot(id)
+            if dl_slot >= 0:
+                if msg.result and msg.result.value().is_object():
+                    var target = _document_link_target_of(msg.result.value())
+                    if len(target.as_bytes()) > 0:
+                        self._dl_accum[dl_slot].new_text = target
+                self._drop_document_link_resolve(id)
+                # Re-publish the whole list, not just this link.
+                self._publish_document_links()
                 continue
             if id == self._inflight_selrange_id:
                 var sr = List[TextEditEntry]()
@@ -3708,11 +4556,12 @@ struct LspManager(Copyable, Movable):
                 if item0:
                     var fp = json_object()
                     fp.put(String("item"), item0.value().copy())
+                    # Local copy: ``_send_request`` takes ``mut self``, so
+                    # handing it a field of ``self`` directly aliases.
+                    var hier_method = self._hierarchy_followup
                     try:
                         self._inflight_hier_followup_id = \
-                            self.client.send_request(
-                                self._hierarchy_followup, fp,
-                            )
+                            self._send_request(hier_method, fp)
                     except:
                         self._inflight_hier_followup_id = String("")
                         self._resolved_hierarchy = List[DefinitionResolved]()
@@ -3984,6 +4833,27 @@ struct LspManager(Copyable, Movable):
             return
         self._server_message = self._language_id + String(": ") + m
         self._has_server_message = True
+
+    def _on_log_trace(mut self, params: JsonValue):
+        """Append a ``$/logTrace`` payload to the captured log.
+
+        ``message`` is the line; the optional ``verbose`` field carries the
+        detail (a full JSON dump, when the server is in ``verbose`` trace
+        mode). Both go in — the whole point of trace output is the detail."""
+        if not params.is_object():
+            return
+        var line = String("")
+        var m_opt = params.object_get(String("message"))
+        if m_opt and m_opt.value().is_string():
+            line = m_opt.value().as_str()
+        var v_opt = params.object_get(String("verbose"))
+        if v_opt and v_opt.value().is_string():
+            var detail = v_opt.value().as_str()
+            if len(detail.as_bytes()) > 0:
+                line = line + String("\n") + detail
+        if len(line.as_bytes()) == 0:
+            return
+        self._append_log(String("[trace] ") + line)
 
     def _on_log_message(mut self, params: JsonValue):
         """Append a ``window/logMessage`` to the rolling log capture,
@@ -4399,6 +5269,41 @@ struct LspManager(Copyable, Movable):
                 )
                 self.client.send_response(id, ok^)
                 return
+            if method == String("workspace/codeLens/refresh") \
+                    or method == String("workspace/inlayHint/refresh") \
+                    or method == String("workspace/inlineValue/refresh") \
+                    or method == String("workspace/foldingRange/refresh") \
+                    or method == String(
+                        "workspace/textDocumentContent/refresh",
+                    ):
+                # "My previous answers for this feature are stale." Reply
+                # null (the spec's success shape) and raise a flag the host
+                # drains to drop its debounce key and re-request. Replying
+                # MethodNotFound instead made the server stop asking, which
+                # is why a rust-analyzer build finishing never updated the
+                # code lenses already on screen.
+                self._refresh_doc_features = True
+                _lsp_debug_log(
+                    String("← server request ") + method
+                    + String(" id=") + id_label + String(" (queued refresh)"),
+                )
+                self.client.send_response(id, json_null_v())
+                return
+            if method == String("workspace/diagnostic/refresh"):
+                # Same, for the pull-diagnostics model. Clearing
+                # ``_pulled_paths`` is what actually re-arms it: the host's
+                # gate is "did the buffer change, or have we never pulled
+                # it?", so forgetting that we pulled makes the next tick
+                # re-request without the host needing to know about refresh
+                # at all.
+                self._pulled_paths = List[String]()
+                self._refresh_diagnostics = True
+                _lsp_debug_log(
+                    String("← server request ") + method
+                    + String(" id=") + id_label + String(" (re-arm pull)"),
+                )
+                self.client.send_response(id, json_null_v())
+                return
             # Unknown method: MethodNotFound (-32601) so the server
             # stops waiting.
             _lsp_debug_log(
@@ -4417,7 +5322,7 @@ struct LspManager(Copyable, Movable):
         # Spec: send the ``initialized`` notification before any other request,
         # then we're free to didOpen / definition / etc.
         try:
-            self.client.send_notification(
+            self._send_notification(
                 String("initialized"), json_object(),
             )
         except e:
@@ -4442,11 +5347,16 @@ struct LspManager(Copyable, Movable):
                 )
                 if enc_opt and enc_opt.value().is_string():
                     self._position_encoding = enc_opt.value().as_str()
-        if self._position_encoding != String("utf-8"):
+        self._position_enc = encoding_from_name(self._position_encoding)
+        # Normalize the display string too, so an unrecognized value is
+        # reported as the encoding we'll actually convert against rather
+        # than as whatever the server claimed.
+        self._position_encoding = encoding_name(self._position_enc)
+        if self._position_enc != POS_UTF8:
             _lsp_debug_log(
                 String("position encoding negotiated as '")
                 + self._position_encoding
-                + String("' (not utf-8); multibyte columns may be off"),
+                + String("' (not utf-8); converting columns per line"),
             )
         # Drain the queue of opens that arrived before we were ready.
         var paths = self._pending_open_paths^
@@ -4466,6 +5376,7 @@ struct LspManager(Copyable, Movable):
             self._doc_paths.append(path)
             self._doc_versions.append(1)
             self._doc_texts.append(text.copy())
+            self._bump_remap_epoch()
             self._send_did_open(path, text^)
         else:
             # Unchanged text → the server already has this exact content.
@@ -4476,6 +5387,7 @@ struct LspManager(Copyable, Movable):
             var version = self._doc_versions[idx] + 1
             self._doc_versions[idx] = version
             self._doc_texts[idx] = text.copy()
+            self._bump_remap_epoch()
             self._send_did_change(path, version, text^)
 
     def diagnostics_inflight_ms_for(mut self, path: String) -> Int:
@@ -4561,7 +5473,7 @@ struct LspManager(Copyable, Movable):
         doc.put(String("text"), json_str(text^))
         params.put(String("textDocument"), doc)
         try:
-            self.client.send_notification(
+            self._send_notification(
                 String("textDocument/didOpen"), params,
             )
         except e:
@@ -4587,7 +5499,7 @@ struct LspManager(Copyable, Movable):
         changes.append(change)
         params.put(String("contentChanges"), changes)
         try:
-            self.client.send_notification(
+            self._send_notification(
                 String("textDocument/didChange"), params,
             )
         except e:
@@ -5202,6 +6114,44 @@ def _hover_contents_to_string(v: JsonValue) -> String:
     return String("")
 
 
+def _code_action_edit_of(v: JsonValue) -> JsonValue:
+    """The ``edit`` object of a CodeAction, or JSON null. Split out so the
+    resolve path reads it the same way the initial parse does."""
+    if not v.is_object():
+        return json_null_v()
+    var e = v.object_get(String("edit"))
+    if e and e.value().is_object():
+        return e.value().copy()
+    return json_null_v()
+
+
+def _code_action_command_of(
+    v: JsonValue,
+) -> Tuple[String, Optional[JsonValue]]:
+    """The ``(command, arguments)`` of a CodeAction. ``command`` is a string
+    when the entry *is* a Command and an object when it's a CodeAction
+    literal carrying one — both shapes are accepted."""
+    var cmd = String("")
+    var args = Optional[JsonValue]()
+    if not v.is_object():
+        return (cmd^, args^)
+    var c_opt = v.object_get(String("command"))
+    if c_opt and c_opt.value().is_string():
+        cmd = c_opt.value().as_str()
+        var a = v.object_get(String("arguments"))
+        if a and a.value().is_array():
+            args = Optional[JsonValue](a.value().copy())
+    elif c_opt and c_opt.value().is_object():
+        var inner = c_opt.value().copy()
+        var c2 = inner.object_get(String("command"))
+        if c2 and c2.value().is_string():
+            cmd = c2.value().as_str()
+        var a2 = inner.object_get(String("arguments"))
+        if a2 and a2.value().is_array():
+            args = Optional[JsonValue](a2.value().copy())
+    return (cmd^, args^)
+
+
 def _parse_code_action_result(v: JsonValue) -> List[CodeAction]:
     """Parse the result of ``textDocument/codeAction``.
 
@@ -5209,12 +6159,15 @@ def _parse_code_action_result(v: JsonValue) -> List[CodeAction]:
     entries (no ``edit`` field — the action is opaquely server-side)
     are skipped: we have no way to apply them without a follow-up
     ``workspace/executeCommand`` round-trip we don't model yet.
-    ``CodeAction`` literals are accepted; their ``edit.changes`` map
-    is normalized into ``CodeActionFileEdit`` groups. ``documentChanges``
-    (the LSP 3.13+ form that carries text-document versions and supports
-    ``CreateFile`` / ``RenameFile`` / ``DeleteFile``) is not parsed yet —
-    actions that only carry ``documentChanges`` come through with an
-    empty ``file_edits`` list so the caller can detect and skip them.
+    ``CodeAction`` literals are accepted; their ``edit`` is normalized
+    into ``CodeActionFileEdit`` groups via ``_parse_workspace_edit``,
+    which handles both the ``changes`` map and the 3.13+
+    ``documentChanges`` array. An action whose WorkspaceEdit also carries
+    ``CreateFile`` / ``RenameFile`` / ``DeleteFile`` comes through with an
+    empty ``file_edits`` list on purpose — see ``WorkspaceEditParse``.
+
+    An action with no ``edit`` at all but a ``data`` field needs a
+    ``codeAction/resolve`` round-trip; ``data`` is preserved for that.
     """
     var out = List[CodeAction]()
     if not v.is_array():
@@ -5241,98 +6194,178 @@ def _parse_code_action_result(v: JsonValue) -> List[CodeAction]:
             is_preferred = pref_opt.value().as_bool()
         var file_edits = List[CodeActionFileEdit]()
         var edit_opt = entry.object_get(String("edit"))
+        var has_inline_edit = False
         if edit_opt and edit_opt.value().is_object():
+            has_inline_edit = True
             file_edits = _parse_workspace_edit_changes(edit_opt.value())
-        # Extract a Command, if any. ``command`` is either a string (this
-        # entry *is* a Command: title + command + arguments at top level)
-        # or an object (a CodeAction literal with a nested Command).
-        var cmd = String("")
-        var cmd_args = Optional[JsonValue]()
-        var cmd_opt = entry.object_get(String("command"))
-        if cmd_opt and cmd_opt.value().is_string():
-            cmd = cmd_opt.value().as_str()
-            var a = entry.object_get(String("arguments"))
-            if a and a.value().is_array():
-                cmd_args = Optional[JsonValue](a.value().copy())
-        elif cmd_opt and cmd_opt.value().is_object():
-            var inner = cmd_opt.value().copy()
-            var c2 = inner.object_get(String("command"))
-            if c2 and c2.value().is_string():
-                cmd = c2.value().as_str()
-            var a2 = inner.object_get(String("arguments"))
-            if a2 and a2.value().is_array():
-                cmd_args = Optional[JsonValue](a2.value().copy())
+        # No inline edit → the action may be resolvable. Keep the entry so
+        # ``_resolve_code_actions`` can hand it back verbatim.
+        var unresolved = Optional[JsonValue]()
+        if not has_inline_edit:
+            unresolved = Optional[JsonValue](entry.copy())
+        # Extract a Command, if any — shared with the resolve path, which
+        # is another place a Command can first appear.
+        var cmd_pair = _code_action_command_of(entry)
+        var cmd = cmd_pair[0]
+        var cmd_args = cmd_pair[1].copy()
         out.append(CodeAction(
             title, kind_str, is_preferred, file_edits^, cmd^, cmd_args^,
+            unresolved^,
         ))
     return out^
 
 
-def _parse_workspace_edit_changes(edit: JsonValue) -> List[CodeActionFileEdit]:
-    """Normalize a LSP ``WorkspaceEdit``'s ``changes`` map into per-file
-    ``CodeActionFileEdit`` groups.
+@fieldwise_init
+struct WorkspaceEditParse(Copyable, Movable):
+    """The outcome of parsing an LSP ``WorkspaceEdit``.
 
-    Shared by ``textDocument/codeAction`` (where the WorkspaceEdit sits
-    under each action's ``edit`` field) and ``textDocument/rename`` (where
-    the response *is* the WorkspaceEdit). Only the ``changes`` form is
-    parsed; ``documentChanges`` (LSP 3.13+ versioned edits / file
-    create/rename/delete) come through empty, so a rename that only emits
-    ``documentChanges`` yields no file edits and the caller reports it as
-    unsupported rather than silently doing nothing wrong."""
+    ``unsupported_ops`` counts ``CreateFile`` / ``RenameFile`` /
+    ``DeleteFile`` entries in a ``documentChanges`` array. It exists because
+    those change the shape of a *correct* failure: a WorkspaceEdit that
+    renames a file and rewrites its references is one atomic refactor, so
+    applying only the text edits leaves the project broken in a way that
+    doing nothing does not. When ``unsupported_ops > 0`` the parse
+    deliberately returns **no** file edits — refuse the whole thing, don't
+    half-apply it.
+    """
+    var file_edits: List[CodeActionFileEdit]
+    var unsupported_ops: Int
+
+    def __copyinit__(mut self, copy: Self):
+        self.file_edits = copy.file_edits.copy()
+        self.unsupported_ops = copy.unsupported_ops
+
+
+def _parse_text_edit_array(v: JsonValue) -> List[TextEditEntry]:
+    """Parse a ``(TextEdit | AnnotatedTextEdit | SnippetTextEdit)[]`` into
+    entries. Shared by the ``changes`` map and ``documentChanges`` forms.
+
+    ``AnnotatedTextEdit`` adds only an ``annotationId``, so it parses as a
+    plain TextEdit. A ``SnippetTextEdit`` carries ``snippet`` instead of
+    ``newText`` and is skipped — inserting its raw ``$1`` placeholders as
+    literal text would be worse than not applying it."""
+    var edits = List[TextEditEntry]()
+    if not v.is_array():
+        return edits^
+    for j in range(v.array_len()):
+        var te = v.array_at(j)
+        if not te.is_object():
+            continue
+        var nt_opt = te.object_get(String("newText"))
+        if not nt_opt or not nt_opt.value().is_string():
+            continue
+        var nt = nt_opt.value().as_str()
+        var rng_opt = te.object_get(String("range"))
+        if not rng_opt or not rng_opt.value().is_object():
+            continue
+        var rng = rng_opt.value().copy()
+        var s_opt = rng.object_get(String("start"))
+        var e_opt = rng.object_get(String("end"))
+        if not s_opt or not e_opt \
+                or not s_opt.value().is_object() \
+                or not e_opt.value().is_object():
+            continue
+        var sl_opt = s_opt.value().object_get(String("line"))
+        var sc_opt = s_opt.value().object_get(String("character"))
+        var el_opt = e_opt.value().object_get(String("line"))
+        var ec_opt = e_opt.value().object_get(String("character"))
+        if not sl_opt or not sc_opt or not el_opt or not ec_opt \
+                or not sl_opt.value().is_int() \
+                or not sc_opt.value().is_int() \
+                or not el_opt.value().is_int() \
+                or not ec_opt.value().is_int():
+            continue
+        edits.append(TextEditEntry(
+            sl_opt.value().as_int(),
+            sc_opt.value().as_int(),
+            el_opt.value().as_int(),
+            ec_opt.value().as_int(),
+            nt,
+        ))
+    return edits^
+
+
+def _parse_workspace_edit(edit: JsonValue) -> WorkspaceEditParse:
+    """Normalize an LSP ``WorkspaceEdit`` into per-file edit groups.
+
+    Both spec forms are handled:
+
+    * ``changes`` — a ``{uri: TextEdit[]}`` map.
+    * ``documentChanges`` — an array of ``TextDocumentEdit``
+      (``{textDocument: {uri, version}, edits}``), optionally interleaved
+      with ``CreateFile`` / ``RenameFile`` / ``DeleteFile`` entries, which
+      are identified by a ``kind`` string and counted as unsupported.
+
+    ``documentChanges`` is the form rust-analyzer and gopls prefer, so
+    parsing it is what makes their renames and quickfixes work at all.
+    A server may only use it when the client advertised
+    ``workspace.workspaceEdit.documentChanges`` — which we now do (see
+    ``lsp_initialize_params``). We deliberately do *not* advertise
+    ``resourceOperations``, so a compliant server will never send the file
+    operations; the counting exists for the ones that do anyway.
+
+    When both forms are present the spec says ``documentChanges`` wins.
+    """
     var file_edits = List[CodeActionFileEdit]()
     if not edit.is_object():
-        return file_edits^
+        return WorkspaceEditParse(file_edits^, 0)
+
+    var dc_opt = edit.object_get(String("documentChanges"))
+    if dc_opt and dc_opt.value().is_array():
+        var dc = dc_opt.value().copy()
+        var unsupported = 0
+        for i in range(dc.array_len()):
+            var entry = dc.array_at(i)
+            if not entry.is_object():
+                continue
+            # A ``kind`` string marks a resource operation (create / rename
+            # / delete). A TextDocumentEdit has no ``kind``.
+            var kind_opt = entry.object_get(String("kind"))
+            if kind_opt and kind_opt.value().is_string():
+                unsupported += 1
+                continue
+            var td_opt = entry.object_get(String("textDocument"))
+            if not td_opt or not td_opt.value().is_object():
+                continue
+            var uri_opt = td_opt.value().object_get(String("uri"))
+            if not uri_opt or not uri_opt.value().is_string():
+                continue
+            var edits_opt = entry.object_get(String("edits"))
+            if not edits_opt:
+                continue
+            var edits = _parse_text_edit_array(edits_opt.value())
+            if len(edits) > 0:
+                file_edits.append(
+                    CodeActionFileEdit(uri_opt.value().as_str(), edits^),
+                )
+        if unsupported > 0:
+            # Refuse the whole edit — see ``WorkspaceEditParse``.
+            return WorkspaceEditParse(List[CodeActionFileEdit](), unsupported)
+        return WorkspaceEditParse(file_edits^, 0)
+
     var changes_opt = edit.object_get(String("changes"))
     if not changes_opt or not changes_opt.value().is_object():
-        return file_edits^
+        return WorkspaceEditParse(file_edits^, 0)
     var changes = changes_opt.value().copy()
     # ``changes`` is an object keyed by URI; the JsonValue exposes its
     # members through obj_v. We don't have a public iterator yet, but we
     # can walk obj_v directly since this module knows the internals.
     for k in range(len(changes.obj_v)):
         var uri = changes.obj_v[k].key
-        var edits_val = changes.obj_v[k].value.copy()
-        if not edits_val.is_array():
-            continue
-        var edits = List[TextEditEntry]()
-        for j in range(edits_val.array_len()):
-            var te = edits_val.array_at(j)
-            if not te.is_object():
-                continue
-            var nt_opt = te.object_get(String("newText"))
-            if not nt_opt or not nt_opt.value().is_string():
-                continue
-            var nt = nt_opt.value().as_str()
-            var rng_opt = te.object_get(String("range"))
-            if not rng_opt or not rng_opt.value().is_object():
-                continue
-            var rng = rng_opt.value().copy()
-            var s_opt = rng.object_get(String("start"))
-            var e_opt = rng.object_get(String("end"))
-            if not s_opt or not e_opt \
-                    or not s_opt.value().is_object() \
-                    or not e_opt.value().is_object():
-                continue
-            var sl_opt = s_opt.value().object_get(String("line"))
-            var sc_opt = s_opt.value().object_get(String("character"))
-            var el_opt = e_opt.value().object_get(String("line"))
-            var ec_opt = e_opt.value().object_get(String("character"))
-            if not sl_opt or not sc_opt or not el_opt or not ec_opt \
-                    or not sl_opt.value().is_int() \
-                    or not sc_opt.value().is_int() \
-                    or not el_opt.value().is_int() \
-                    or not ec_opt.value().is_int():
-                continue
-            edits.append(TextEditEntry(
-                sl_opt.value().as_int(),
-                sc_opt.value().as_int(),
-                el_opt.value().as_int(),
-                ec_opt.value().as_int(),
-                nt,
-            ))
+        var edits = _parse_text_edit_array(changes.obj_v[k].value)
         if len(edits) > 0:
             file_edits.append(CodeActionFileEdit(uri, edits^))
-    return file_edits^
+    return WorkspaceEditParse(file_edits^, 0)
+
+
+def _parse_workspace_edit_changes(edit: JsonValue) -> List[CodeActionFileEdit]:
+    """``_parse_workspace_edit``'s file-edit groups, discarding the
+    unsupported-operation count. Callers that need to tell "no edits" from
+    "refused because it also moves files" use the full parse instead."""
+    # ``.copy()``, not ``^``: moving a field out of the middle of a struct
+    # leaves the rest undestroyable.
+    var parsed = _parse_workspace_edit(edit)
+    return parsed.file_edits.copy()
 
 
 def _parse_diagnostics_array(v: JsonValue) -> List[Diagnostic]:
@@ -5731,23 +6764,58 @@ def _parse_monikers(v: JsonValue) -> String:
     return out^
 
 
-def _parse_document_links(v: JsonValue) -> List[TextEditEntry]:
-    """Parse ``DocumentLink[] | null`` into range carriers whose
-    ``new_text`` is the link ``target`` uri. Links without an inline
-    target (deferred to ``documentLink/resolve``, which we don't do) are
-    skipped rather than shown as dead ranges."""
-    var out = List[TextEditEntry]()
+def _document_link_target_of(v: JsonValue) -> String:
+    """The ``target`` uri of a DocumentLink, or "" when the server deferred
+    it to ``documentLink/resolve``."""
+    if not v.is_object():
+        return String("")
+    var t = v.object_get(String("target"))
+    if t and t.value().is_string():
+        return t.value().as_str()
+    return String("")
+
+
+struct DocumentLinkParse(Copyable, Movable):
+    """One walk of a ``DocumentLink[]``, carrying what both the display path
+    and the resolve path need.
+
+    ``links`` holds **every** well-formed link, targetless ones included with
+    an empty ``new_text``, so an index into it is a stable slot a
+    ``documentLink/resolve`` response can fill. ``unresolved_slots`` are the
+    indices of those targetless entries and ``unresolved_raw`` the original
+    JSON for each, index-parallel with it.
+
+    One function rather than two because the alternative — a parse and a
+    separate "which ones need resolving" scan — has to apply the *same*
+    well-formedness filter in two places to keep its indices aligned, and a
+    later edit to one of them silently pairs resolved targets with the wrong
+    links. Computing the slot during the single walk removes the
+    possibility.
+    """
+    var links: List[TextEditEntry]
+    var unresolved_slots: List[Int]
+    var unresolved_raw: List[JsonValue]
+
+    def __init__(out self):
+        self.links = List[TextEditEntry]()
+        self.unresolved_slots = List[Int]()
+        self.unresolved_raw = List[JsonValue]()
+
+    def __copyinit__(mut self, copy: Self):
+        self.links = copy.links.copy()
+        self.unresolved_slots = copy.unresolved_slots.copy()
+        self.unresolved_raw = copy.unresolved_raw.copy()
+
+
+def _parse_document_links_full(v: JsonValue) -> DocumentLinkParse:
+    """Parse ``DocumentLink[] | null`` in one pass. See
+    ``DocumentLinkParse``."""
+    var out = DocumentLinkParse()
     if not v.is_array():
         return out^
     for i in range(v.array_len()):
         var e = v.array_at(i)
         if not e.is_object():
-            continue
-        var tgt_opt = e.object_get(String("target"))
-        if not tgt_opt or not tgt_opt.value().is_string():
-            continue
-        var target = tgt_opt.value().as_str()
-        if len(target.as_bytes()) == 0:
             continue
         var rng_opt = e.object_get(String("range"))
         if not rng_opt or not rng_opt.value().is_object():
@@ -5764,10 +6832,32 @@ def _parse_document_links(v: JsonValue) -> List[TextEditEntry]:
         if not el_opt or not ec_opt or not el_opt.value().is_int() \
                 or not ec_opt.value().is_int():
             continue
-        out.append(TextEditEntry(
+        var target = _document_link_target_of(e)
+        if len(target.as_bytes()) == 0:
+            out.unresolved_slots.append(len(out.links))
+            out.unresolved_raw.append(e.copy())
+        out.links.append(TextEditEntry(
             sp[0], sp[1], el_opt.value().as_int(), ec_opt.value().as_int(),
             target,
         ))
+    return out^
+
+
+def _parse_document_links(v: JsonValue) -> List[TextEditEntry]:
+    """Range carriers whose ``new_text`` is the link ``target``, for links
+    that have one.
+
+    Targetless links are dropped here — the server deferred them to
+    ``documentLink/resolve``, and an underlined range that does nothing on
+    click is worse than no underline. The resolve path uses
+    ``_parse_document_links_full`` instead, which keeps them as fillable
+    slots, and re-publishes through this same filter once the targets land.
+    """
+    var parsed = _parse_document_links_full(v)
+    var out = List[TextEditEntry]()
+    for i in range(len(parsed.links)):
+        if len(parsed.links[i].new_text.as_bytes()) > 0:
+            out.append(parsed.links[i])
     return out^
 
 

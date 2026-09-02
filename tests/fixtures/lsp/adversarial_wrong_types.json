@@ -1,0 +1,48 @@
+{
+  "_comment": "Every field the spec declares as an object/array/int, sent as the wrong type. Real servers do this — a null where a Range is declared and a string where a number is are the two most common non-conformances, and both used to be crashes in editors that trusted the schema. Every response here must degrade to 'no result', never to a crash and never to a bogus column. Each list carries exactly one well-formed member among the junk, except the diagnostics list, which carries two: one fully valid and one with a valid range but no message (kept on purpose — see the test).",
+  "position_encoding": "utf-8",
+  "responses": {
+    "textDocument/definition": {"uri": 42, "range": "not-a-range"},
+    "textDocument/references": {"not": "an array"},
+    "textDocument/hover": {"contents": 12345},
+    "textDocument/documentSymbol": [
+      {"name": "ok", "kind": 12, "location": {"uri": "$SELF", "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}}},
+      {"name": null, "kind": "twelve"},
+      {"kind": 12},
+      "a bare string where an object belongs",
+      42
+    ],
+    "textDocument/formatting": [
+      {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}, "newText": "ok"},
+      {"range": null, "newText": "dropped"},
+      {"range": {"start": {"line": 0}, "end": {"line": 0, "character": 1}}, "newText": "dropped"},
+      {"newText": "no range at all"},
+      {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}}
+    ],
+    "textDocument/completion": {"items": "not-an-array"},
+    "textDocument/rename": {"changes": "not-a-map"},
+    "textDocument/codeAction": [
+      {"title": "valid", "kind": "quickfix", "edit": {"changes": {"$SELF": [{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}, "newText": "x"}]}}},
+      {"kind": "quickfix"},
+      {"title": null},
+      null
+    ]
+  },
+  "on_did_open": [
+    {
+      "method": "textDocument/publishDiagnostics",
+      "params": {
+        "uri": "$SELF",
+        "diagnostics": [
+          {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3}}, "message": "the one valid entry", "severity": 1},
+          {"range": null, "message": "null range"},
+          {"message": "no range at all"},
+          {"range": {"start": {"line": 0, "character": 0}}, "message": "no end"},
+          {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}},
+          "a string where a Diagnostic belongs",
+          null
+        ]
+      }
+    }
+  ]
+}

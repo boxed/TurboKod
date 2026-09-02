@@ -158,7 +158,7 @@ from .debugger_config import (
     python_debugger_spec_for_venv, python_venv_has_debugpy,
 )
 from .menu import Menu, MenuBar, MenuItem
-from .posix import monotonic_ms, wall_clock_ms, which
+from .posix import monotonic_ms, sleep_ms, wall_clock_ms, which
 from .project import replace_in_project, walk_project_files
 from .search_options import SearchOptions
 from .project_find import ProjectFind
@@ -573,6 +573,12 @@ comptime _CARET_BLINK_HALF_MS = 530
 # ``_poll_config_file``). Half a second: settings are changed by hand, so
 # this only has to beat human patience, and the check is one ``stat``.
 comptime _CONFIG_POLL_MS = 500
+
+# How long to sleep between polls in the *blocking* teardown
+# (``Desktop.shutdown``). Only the terminal frontend, a Cmd+Q cascade and
+# tests take that path; a native window close polls off the runloop instead
+# and never sleeps.
+comptime _LSP_CLOSE_POLL_MS = 10
 
 # When ESC fires at the top level (no menu open, no prompt active), the
 # Desktop returns this so the app can decide whether to quit, ignore, etc.
@@ -1053,6 +1059,12 @@ struct Desktop(Movable):
     var lsp_specs: List[LanguageSpec]
     var lsp_managers: List[LspManager]
     var lsp_languages: List[String]
+    # Managers whose session is being closed but whose child hasn't exited
+    # yet. Retiring a server (Restart, or a settings change to its argv) and
+    # closing a window both used to block the UI thread on the LSP
+    # ``shutdown`` handshake; the manager moves here instead and
+    # ``_drain_closing_lsp`` finishes it off the per-frame tick.
+    var _closing_lsp: List[LspManager]
     # DevDocs-style offline documentation. ``doc_specs`` is the registry;
     # ``doc_stores`` / ``doc_languages`` are parallel lists of loaded
     # docsets keyed by language id. Populated lazily — opening a picker
@@ -1654,6 +1666,7 @@ struct Desktop(Movable):
         self.lsp_specs = built_in_servers()
         self.lsp_managers = List[LspManager]()
         self.lsp_languages = List[String]()
+        self._closing_lsp = List[LspManager]()
         self.doc_specs = built_in_docsets()
         self.doc_stores = List[DocStore]()
         self.doc_languages = List[String]()
@@ -5382,6 +5395,80 @@ struct Desktop(Movable):
                 continue
             self._close_editor_window_at(i)
 
+    def retire_lsp_manager(mut self, idx: Int):
+        """Remove the manager at ``idx`` and close it in the background.
+
+        Used by LSP ▸ Restart and by a settings change that alters a
+        server's argv. Both used to call the blocking ``shutdown`` on the UI
+        thread, so restarting a server froze the editor for as long as that
+        server took to answer — and for a wedged one, for the whole grace
+        budget. The manager moves to ``_closing_lsp`` and
+        ``_drain_closing_lsp`` finishes it off later frames.
+        """
+        if idx < 0 or idx >= len(self.lsp_managers):
+            return
+        var mgr = self.lsp_managers.pop(idx)
+        if idx < len(self.lsp_languages):
+            _ = self.lsp_languages.pop(idx)
+        mgr.begin_shutdown()
+        self._closing_lsp.append(mgr^)
+
+    def _drain_closing_lsp(mut self):
+        """Advance every in-progress close and reap the finished ones.
+
+        Called from ``process_external_changes``, the one per-frame hook both
+        frontends run. Nothing here blocks: each poll either advances a
+        handshake or notices a deadline passed."""
+        var i = 0
+        while i < len(self._closing_lsp):
+            if self._closing_lsp[i].shutdown_poll():
+                self._closing_lsp[i].finish_shutdown()
+                _ = self._closing_lsp.pop(i)
+            else:
+                i += 1
+
+    def begin_shutdown(mut self):
+        """Non-blocking half of ``shutdown``: release everything this window
+        owns and *start* the LSP close handshakes without waiting.
+
+        The native frontend calls this, drops the window, then drains with
+        ``shutdown_poll`` off the runloop before freeing — so closing a
+        window is instant even when a language server is slow to answer.
+
+        Everything except the LSP wait happens here, including the libonig
+        release, whose "nothing may tokenize afterwards" precondition is
+        satisfied the same way it always was: the window is gone, so nothing
+        paints. The only thing still live afterwards is the LSP transports,
+        which don't tokenize.
+        """
+        for i in range(len(self.lsp_managers)):
+            self.lsp_managers[i].begin_shutdown()
+        for i in range(len(self._closing_lsp)):
+            self._closing_lsp[i].begin_shutdown()
+        self._shutdown_non_lsp()
+
+    def shutdown_poll(mut self) -> Bool:
+        """True once every LSP close handshake begun by ``begin_shutdown``
+        has finished. Non-blocking; poll it until it returns True, then
+        ``finish_shutdown``."""
+        var done = True
+        for i in range(len(self.lsp_managers)):
+            if not self.lsp_managers[i].shutdown_poll():
+                done = False
+        for i in range(len(self._closing_lsp)):
+            if not self._closing_lsp[i].shutdown_poll():
+                done = False
+        return done
+
+    def finish_shutdown(mut self):
+        """Tear down the LSP transports after ``shutdown_poll`` reports done
+        (or after the caller gave up waiting). Idempotent."""
+        for i in range(len(self.lsp_managers)):
+            self.lsp_managers[i].finish_shutdown()
+        for i in range(len(self._closing_lsp)):
+            self._closing_lsp[i].finish_shutdown()
+        self._closing_lsp = List[LspManager]()
+
     def process_external_changes(mut self, screen: Rect) raises:
         """Re-stat every editor window and react to any out-of-band
         write. A file removed from disk closes its (clean) editor window;
@@ -5395,6 +5482,10 @@ struct Desktop(Movable):
         # frontends run, and the only one the window-less chrome Desktop
         # that drives the native menu bar ever gets.
         self._poll_config_file()
+        # Advance any language server still winding down (LSP ▸ Restart, a
+        # settings change to a server's argv). Cheap: a poll per closing
+        # manager, and the list is empty in the steady state.
+        self._drain_closing_lsp()
         self._close_deleted_file_windows()
         var conflicts = self.windows.check_external_changes()
         for k in range(len(conflicts)):
@@ -5509,7 +5600,8 @@ struct Desktop(Movable):
     # --- teardown ----------------------------------------------------------
 
     def shutdown(mut self):
-        """Release every OS resource this Desktop owns. Idempotent.
+        """Release every OS resource this Desktop owns, blocking until the
+        LSP close handshakes finish. Idempotent.
 
         Everything here owns something Mojo's destructor can't reclaim: a
         child process, a pipe/pty descriptor, or a libonig handle.
@@ -5529,13 +5621,31 @@ struct Desktop(Movable):
         teardown is explicit and why ``tk_desktop_free`` is the one
         caller that must not forget it.
 
+        **This is the blocking form.** It waits out the LSP ``shutdown`` →
+        ``exit`` handshake, which is right where there is no "later" to
+        drain in: the terminal frontend (the process is exiting), a Cmd+Q
+        cascade, and tests. A native window close must *not* use it — it
+        would stall the close by however long the slowest server takes to
+        answer. That path uses ``begin_shutdown`` / ``shutdown_poll`` /
+        ``finish_shutdown`` and drains off the runloop instead.
+        """
+        self.begin_shutdown()
+        while not self.shutdown_poll():
+            sleep_ms(_LSP_CLOSE_POLL_MS)
+        self.finish_shutdown()
+
+    def _shutdown_non_lsp(mut self):
+        """Everything ``shutdown`` reclaims except the LSP transports.
+
+        Split out so ``begin_shutdown`` can do all of it immediately while
+        the language servers wind down in the background.
+
         Ordering: children first, then the libonig handle registries. The
         grammar release has a hard "nothing may tokenize afterwards"
         precondition, so it goes last, after everything that could still
-        paint is gone.
+        paint is gone. The LSP transports outliving this call is fine —
+        they don't tokenize.
         """
-        for i in range(len(self.lsp_managers)):
-            self.lsp_managers[i].shutdown()
         self.dap.shutdown()
         for i in range(len(self.terminal_panes)):
             self.terminal_panes[i].close()
@@ -5798,9 +5908,10 @@ struct Desktop(Movable):
             var current_argv = self.lsp_managers[mgr_idx].argv()
             if _argv_equal(current_argv, new_argv):
                 continue
-            self.lsp_managers[mgr_idx].shutdown()
-            _ = self.lsp_managers.pop(mgr_idx)
-            _ = self.lsp_languages.pop(mgr_idx)
+            # Retire, don't block: this runs when the user changes a
+            # server's argv in Settings, and waiting out the old server's
+            # handshake there froze the editor mid-keystroke.
+            self.retire_lsp_manager(mgr_idx)
             self._retry_lsp_for_language(lang)
 
     def open_project(mut self, path: String):
@@ -9230,6 +9341,14 @@ struct Desktop(Movable):
         var li = self._lsp_for_path(path)
         if li < 0 or not self.lsp_managers[li].is_ready():
             return
+        # A server-driven ``workspace/*/refresh`` invalidates the answers we
+        # already have, so drop the debounce key and re-request even though
+        # the buffer itself hasn't changed. Without this the stale hints sit
+        # there until the line count happens to change — which for a
+        # rust-analyzer build finishing, or a dependency resolving, can be
+        # never.
+        if self.lsp_managers[li].take_document_refresh():
+            self._inlay_key = String("")
         var lc = self.windows.windows[win_idx].editor.buffer.line_count()
         var key = path + String("|") + String(lc)
         if key == self._inlay_key:
@@ -14308,6 +14427,13 @@ struct Desktop(Movable):
                 String("Rename failed"), Attr(RED, LIGHT_GRAY),
             )
             return
+        # Tell every server the file moved. pyright and
+        # typescript-language-server rewrite the imports referring to it on
+        # this notification; without it the rename leaves the project full of
+        # imports pointing at the old name. No-op unless a server registered
+        # interest (``workspace.fileOperations.didRename``).
+        for ci in range(len(self.lsp_managers)):
+            self.lsp_managers[ci].notify_did_rename_files(old_path, new_path)
         # Repoint open editors. For a file it's the exact-path window; for
         # a directory it's every editor whose path sits under it.
         var old_prefix = old_path + String("/")
@@ -14347,6 +14473,11 @@ struct Desktop(Movable):
                 String("Delete failed"), Attr(RED, LIGHT_GRAY),
             )
             return
+        # Tell every server the path is gone so it drops the file from its
+        # index — otherwise its stale symbols keep surfacing in Find Symbol
+        # and go-to-definition as jumps into a file that no longer exists.
+        for ci in range(len(self.lsp_managers)):
+            self.lsp_managers[ci].notify_did_delete_files(path)
         # Close windows on the deleted path / under the deleted directory.
         # Walk high→low so close_by_index's reindexing can't skip a match.
         var prefix = path + String("/")
@@ -14798,9 +14929,9 @@ struct Desktop(Movable):
         if lsp_idx < 0:
             return
         var lang = self.lsp_languages[lsp_idx]
-        self.lsp_managers[lsp_idx].shutdown()
-        _ = self.lsp_managers.pop(lsp_idx)
-        _ = self.lsp_languages.pop(lsp_idx)
+        # Retire, don't block — LSP ▸ Restart should feel instant, and the
+        # old server's goodbye finishes on later frames.
+        self.retire_lsp_manager(lsp_idx)
         self._retry_lsp_for_language(lang)
         self.status_bar.set_message(
             String("LSP[") + lang + String("]: restarting…"),

@@ -1,0 +1,13 @@
+{
+  "_comment": "A server advertising workspace.fileOperations didCreate/didRename/didDelete, so the client should send workspace/didRenameFiles and didDeleteFiles. pyright and typescript-language-server rewrite imports of a renamed module on that notification; without it a rename leaves the project full of imports pointing at the old name.",
+  "position_encoding": "utf-8",
+  "capabilities": {
+    "workspace": {
+      "fileOperations": {
+        "didCreate": true,
+        "didRename": true,
+        "didDelete": true
+      }
+    }
+  }
+}

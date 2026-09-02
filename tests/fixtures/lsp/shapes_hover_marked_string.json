@@ -1,0 +1,13 @@
+{
+  "_comment": "Hover.contents as the deprecated-but-widespread MarkedString forms: a bare string, and an array mixing a plain string with a {language, value} object. Older servers (and several still-shipped ones) only emit these. The client must join array entries with newlines rather than dropping all but the first.",
+  "position_encoding": "utf-8",
+  "responses": {
+    "textDocument/hover": {
+      "contents": [
+        "first line",
+        {"language": "python", "value": "def f(): ..."},
+        "third line"
+      ]
+    }
+  }
+}

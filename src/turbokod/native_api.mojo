@@ -398,7 +398,51 @@ def tk_desktop_new() abi("C") -> Int:
 
 
 @export
+def tk_desktop_begin_close(h: Int) abi("C"):
+    """Start releasing the window's resources without waiting.
+
+    Everything except the LSP close handshake happens now: child processes
+    terminated, libonig handles released. The language servers are sent
+    ``shutdown`` and left to answer.
+
+    The host calls this the instant the window closes, then polls
+    ``tk_desktop_close_poll`` off the runloop and calls ``tk_desktop_free``
+    when it reports done. That is what keeps window close instant: the app
+    outlives its windows anyway
+    (``applicationShouldTerminateAfterLastWindowClosed`` is False), so there
+    is a runloop to finish the goodbye on.
+
+    Same precondition as ``tk_desktop_free``: the host must have zeroed its
+    view handle first, because no tick or layout may follow.
+    """
+    if h == 0:
+        return
+    _desk(h)[].begin_shutdown()
+
+
+@export
+def tk_desktop_close_poll(h: Int) abi("C") -> Int:
+    """Advance a close started by ``tk_desktop_begin_close``. Returns 1 once
+    every language server has finished its handshake (or run out its grace
+    budget), at which point the host calls ``tk_desktop_free``.
+
+    Non-blocking, and safe to call at any rate: the grace budgets are
+    wall-clock deadlines, so polling more often doesn't shorten them."""
+    if h == 0:
+        return 1
+    return 1 if _desk(h)[].shutdown_poll() else 0
+
+
+@export
 def tk_desktop_free(h: Int) abi("C"):
+    """Release the window's resources and free the handle.
+
+    Safe to call without ``tk_desktop_begin_close`` — it runs the blocking
+    teardown, which is what the Cmd+Q cascade and the headless
+    ``TK_CAPTURE`` path want (there is no runloop left to drain on). After a
+    ``begin_close`` + polls it is the cheap finisher, since the handshakes
+    are already done.
+    """
     if h == 0:
         return
     var p = _desk(h)

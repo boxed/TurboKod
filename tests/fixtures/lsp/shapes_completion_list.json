@@ -1,0 +1,57 @@
+{
+  "_comment": "textDocument/completion is `CompletionItem[] | CompletionList | null`. This is the CompletionList form with isIncomplete plus per-item variants the client has to handle: sortText overriding label order, an insertText differing from label, a textEdit range replacing a span wider than the typed prefix, an insertReplaceEdit (two ranges), and additionalTextEdits (the auto-import line). Each of those is a separate branch in the accept path.",
+  "position_encoding": "utf-8",
+  "responses": {
+    "textDocument/completion": {
+      "isIncomplete": true,
+      "items": [
+        {"label": "zebra", "sortText": "000", "kind": 6, "detail": "sorts first"},
+        {"label": "alpha", "sortText": "999", "kind": 6, "detail": "sorts last"},
+        {
+          "label": "with_insert_text",
+          "insertText": "with_insert_text()",
+          "kind": 3
+        },
+        {
+          "label": "with_text_edit",
+          "kind": 3,
+          "textEdit": {
+            "range": {
+              "start": {"line": 1, "character": 17},
+              "end":   {"line": 1, "character": 23}
+            },
+            "newText": "replaced_span"
+          }
+        },
+        {
+          "label": "with_insert_replace",
+          "kind": 3,
+          "textEdit": {
+            "newText": "insert_replace",
+            "insert": {
+              "start": {"line": 1, "character": 17},
+              "end":   {"line": 1, "character": 20}
+            },
+            "replace": {
+              "start": {"line": 1, "character": 17},
+              "end":   {"line": 1, "character": 23}
+            }
+          }
+        },
+        {
+          "label": "needs_import",
+          "kind": 6,
+          "additionalTextEdits": [
+            {
+              "range": {
+                "start": {"line": 0, "character": 0},
+                "end":   {"line": 0, "character": 0}
+              },
+              "newText": "from typing import Any\n"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -176,6 +176,66 @@ The bottom dock hosts three kinds of output pane, split by how the child process
 
 The Vt-grid behavior shared by both pty panes — grid paint, scrollback view, selection (cell/word/line drag) + copy, and the key→pty / mouse→pty wire encodings — lives in **`terminal_view.mojo`** (`GridSelection` + `paint_grid` + `encode_key`). Each pane keeps its own `Vt` + `PtyProcess` and the chrome/title/command-strip concerns specific to it. Clickable `File "...", line N` / `path:N` traceback links are detected by **`output_links.mojo`** (shared by `DebugPane` and `TestPane`); a pane scans its visible rows each paint, underlines the spans, and turns a click into an `open_file_at`. When you add a tool pane, decide pipe vs pty by whether the child wants a TTY, and reuse `terminal_view` / `output_links` rather than reimplementing.
 
+## LSP: byte columns are not `Position.character`
+
+The editor's columns are **byte** offsets. LSP's `character` is an offset in
+the *negotiated* encoding, and the spec default is **utf-16** — we ask for
+utf-8 in `general.positionEncodings`, but a server that never implemented
+3.17 negotiation silently keeps utf-16, and then every column crossing the
+transport is wrong on any line with multibyte text (an em dash is 3 bytes /
+1 unit; an emoji 4 bytes / **2**). That corrupts rename and formatting edits,
+not just navigation.
+
+`lsp_position.mojo` owns the conversion; `_PositionRemapper` applies it as a
+blanket JSON walk at the transport boundary — outbound through
+`_send_request` / `_send_notification`, inbound at the top of the response
+dispatch plus the notification and server-request branches. **Don't convert
+at individual position-building or parse sites**; a Position is identifiable
+(an object with integer `line` and `character`), one walk covers all ~46 of
+them, and the two directions being the same walk is what makes round-tripping
+opaque server data (`Command.arguments`, resolved completion items) correct.
+
+If you add a request, it gets conversion for free *provided* it goes through
+`_send_request`. Never call `client.send_request` directly from `LspManager`.
+
+Verification is three layers, documented in
+[docs/lsp-conformance.md](docs/lsp-conformance.md): `make lsp-coverage` audits
+the client against the spec's machine-readable metaModel (76/95 methods, zero
+untriaged, gated in `make check`), and `tests/test_lsp_conformance.mojo`
+drives a scripted server (`tests/fixtures/mock_lsp.py`, scenarios in
+`tests/fixtures/lsp/`) through spec-shape and adversarial fixture families.
+Add a scenario JSON rather than Mojo when covering a new payload shape — and
+note the scenario path goes on **argv**, because `LspProcess.spawn` forwards
+only an allowlist of env vars.
+
+An unimplemented method belongs in `DEFERRED` or `WONT_IMPLEMENT` in
+`scripts/lsp_spec_coverage.py`, with a reason. The gate fails on anything in
+neither, which is the point: a deferral filed as a decision is how a backlog
+disappears.
+
+Two safety rules the fixtures encode, because "parse what you can" is wrong
+for both:
+
+- A `WorkspaceEdit` that also creates / renames / deletes files is refused
+  **whole** (`_parse_workspace_edit` counts the resource operations and
+  returns nothing). A rename plus its reference rewrites is one atomic
+  refactor; applying half of it breaks the project in a way that applying
+  none of it doesn't. We advertise `documentChanges` but deliberately not
+  `resourceOperations`.
+- `Desktop`/`LspManager` teardown goes through the LSP `shutdown`/`exit`
+  handshake before SIGTERM, and it is a **poll state machine**
+  (`begin_shutdown` / `shutdown_poll` / `finish_shutdown`) so a window close
+  is instant. The native host calls `tk_desktop_begin_close`, drops the
+  window, then drains via `tk_desktop_close_poll` off the runloop
+  (`drainClosingDesktop`) and frees when done — the app outlives its windows,
+  so there is a runloop to finish the goodbye on. `shutdown()` is the
+  blocking wrapper, for callers with no "later": the terminal frontend (the
+  process is exiting), a Cmd+Q cascade, and tests.
+  **Never block a live-UI path on it** — retiring a server (LSP ▸ Restart, a
+  settings change to its argv) goes through `Desktop.retire_lsp_manager`,
+  which parks the manager on `_closing_lsp` for `process_external_changes` to
+  drain.
+
 ## Case-insensitive search
 
 Anything that compares bytes ignoring case goes through **`case_fold.mojo`** — branchless ASCII folding (`(c - 0x41) <u 26`, `c | is_upper << 5`) with explicit 32-byte SIMD. Don't hand-inline `if 0x41 <= c and c <= 0x5A: c += 0x20` again; that idiom used to be copy-pasted in half a dozen places and each copy sat *inside* an innermost compare loop.
@@ -308,7 +368,7 @@ To hand memory back, call `release()` — explicit, never a destructor, and avai
 
 ### Closing a window must release what it owns
 
-`Desktop.shutdown()` is the teardown path, and `tk_desktop_free` is its only caller. It terminates the window's child processes (LSP managers, DAP, pty terminal/test panes, run + install children, the `rg` behind Find in Project / Find Symbol, and any in-flight on-save formatter) and then releases the libonig handles. Both halves are load-bearing: **no type in `src/turbokod/` can carry a destructor that does this** — `LspProcess` / `PtyProcess` copies alias fd + pid ownership, so a per-instance `__deinit__` would double-close — and the macOS app deliberately outlives its windows (`applicationShouldTerminateAfterLastWindowClosed` is False). Before it existed, closing a project window left its language servers *running* with their pipes held until the user quit the app.
+`Desktop.shutdown()` is the teardown path. `tk_desktop_free` is its only caller — but a native window close reaches the same work through `tk_desktop_begin_close` + `tk_desktop_close_poll` instead, so the window can close before the language servers have finished saying goodbye (see the LSP section above). Both routes end at the same releases; only the waiting differs. It terminates the window's child processes (LSP managers, DAP, pty terminal/test panes, run + install children, the `rg` behind Find in Project / Find Symbol, and any in-flight on-save formatter) and then releases the libonig handles. Both halves are load-bearing: **no type in `src/turbokod/` can carry a destructor that does this** — `LspProcess` / `PtyProcess` copies alias fd + pid ownership, so a per-instance `__deinit__` would double-close — and the macOS app deliberately outlives its windows (`applicationShouldTerminateAfterLastWindowClosed` is False). Before it existed, closing a project window left its language servers *running* with their pipes held until the user quit the app.
 
 If you add anything to `Desktop` that owns a child process, an fd, or a compiled regex, give it a `terminate`/`close`/`release` and call it from `shutdown`. The terminal frontend gets this for free at process exit; the native one does not. Watch for the two shapes that hide from a `shutdown` audit: a resource reclaimed *only* by a per-frame tick (a closed window gets no more frames — that's how the on-save formatters leaked), and a second instance of a type `shutdown` already handles (`LocalChanges.git_runner` is an `InstallRunner` too, and terminating `Desktop.install_runner` never touched it).
 

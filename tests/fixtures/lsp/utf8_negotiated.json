@@ -1,0 +1,33 @@
+{
+  "_comment": "The control for utf16_no_negotiation.json: an LSP 3.17 server that honors our general.positionEncodings request and answers positionEncoding=utf-8. Identical ranges, but expressed in bytes — the client must pass them through unconverted. Same fixture buffer (emdash.py): row 1 'target' bytes [17,23), row 2 'tail' bytes [19,23).",
+  "position_encoding": "utf-8",
+  "responses": {
+    "textDocument/definition": {
+      "uri": "$SELF",
+      "range": {
+        "start": {"line": 1, "character": 17},
+        "end":   {"line": 1, "character": 23}
+      }
+    }
+  },
+  "on_did_open": [
+    {
+      "method": "textDocument/publishDiagnostics",
+      "params": {
+        "uri": "$SELF",
+        "diagnostics": [
+          {
+            "range": {
+              "start": {"line": 1, "character": 17},
+              "end":   {"line": 1, "character": 23}
+            },
+            "severity": 2,
+            "source": "mock",
+            "code": "after-em-dash",
+            "message": "byte columns, passed through"
+          }
+        ]
+      }
+    }
+  ]
+}

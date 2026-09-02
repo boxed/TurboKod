@@ -1,0 +1,7 @@
+{
+  "_comment": "Hover.contents as a single bare string — the oldest MarkedString form, still what some servers emit.",
+  "position_encoding": "utf-8",
+  "responses": {
+    "textDocument/hover": {"contents": "a bare string"}
+  }
+}

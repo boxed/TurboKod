@@ -1,0 +1,20 @@
+{
+  "_comment": "Every request answered with `result: null`. The spec permits it for most of these, and a server that doesn't implement a feature it advertised does it in practice. Nothing may be parked as a pending result: a null must read as 'server answered, found nothing', which is a different state from 'still waiting'.",
+  "position_encoding": "utf-8",
+  "responses": {
+    "textDocument/definition": null,
+    "textDocument/references": null,
+    "textDocument/hover": null,
+    "textDocument/completion": null,
+    "textDocument/documentSymbol": null,
+    "textDocument/formatting": null,
+    "textDocument/rename": null,
+    "textDocument/codeAction": null
+  },
+  "on_did_open": [
+    {
+      "method": "textDocument/publishDiagnostics",
+      "params": {"uri": "$SELF", "diagnostics": []}
+    }
+  ]
+}

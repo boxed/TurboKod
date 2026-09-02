@@ -1,0 +1,18 @@
+{
+  "_comment": "Server-driven invalidation: workspace/inlayHint/refresh and workspace/diagnostic/refresh, sent as requests after didOpen. Both must be answered (null) and both must raise a flag \u2014 replying MethodNotFound made servers stop asking, so a rust-analyzer build finishing never refreshed the code lenses already on screen.",
+  "position_encoding": "utf-8",
+  "server_requests": [
+    {
+      "method": "workspace/inlayHint/refresh",
+      "params": {}
+    },
+    {
+      "method": "workspace/diagnostic/refresh",
+      "params": {}
+    },
+    {
+      "method": "workspace/codeLens/refresh",
+      "params": {}
+    }
+  ]
+}

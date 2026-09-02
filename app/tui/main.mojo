@@ -36,7 +36,7 @@ from std.sys import argv
 from turbokod.app import Application
 from turbokod.canvas import Canvas
 from turbokod.cell import Cell
-from turbokod.colors import Attr
+from turbokod.colors import Attr, BLACK, LIGHT_GRAY
 from turbokod.events import (
     Event,
     EVENT_KEY, EVENT_MOUSE, EVENT_MOD_KEY, EVENT_OPEN_PATH, EVENT_PASTE,
@@ -45,7 +45,10 @@ from turbokod.events import (
 from turbokod.file_dialog import FileDialog
 from turbokod.file_io import stat_file
 from turbokod.geometry import Point, Rect
-from turbokod.posix import chdir_path, getcwd_path, realpath
+from turbokod.string_utils import display_columns
+from turbokod.posix import (
+    chdir_path, getcwd_path, monotonic_ms, realpath, sleep_ms,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +64,13 @@ comptime ACT_OPEN_PROJECT = Int32(4)
 # [codepoint, fg|bg<<8|style<<16|color_mode<<24, underline_color, fg_rgb, bg_rgb].
 comptime CELL_WORDS = 5
 
+# Teardown pacing (see ``_shutdown_with_notice``). Servers almost always
+# answer ``shutdown`` well inside the quiet window, so quitting stays
+# instant and silent; the notice only appears when the wait is long enough
+# that the user would otherwise wonder what happened.
+comptime _QUIET_CLOSE_MS = 150
+comptime _CLOSE_GIVE_UP_MS = 2000
+
 
 # ---------------------------------------------------------------------------
 # C ABI wrappers. These resolve against the bundled ``libturbokod.dylib`` at
@@ -73,6 +83,14 @@ def _tk_new() -> Int:
 
 def _tk_free(h: Int):
     external_call["tk_desktop_free", NoneType](h)
+
+
+def _tk_begin_close(h: Int):
+    external_call["tk_desktop_begin_close", NoneType](h)
+
+
+def _tk_close_poll(h: Int) -> Int:
+    return external_call["tk_desktop_close_poll", Int](h)
 
 
 def _tk_recover_user_shell_path():
@@ -452,7 +470,60 @@ def main() raises:
             file_dialog.open_directory(_dialog_start(last_project))
             file_dialog.set_project(last_project)
 
+    _shutdown_with_notice(h, app)
     app.stop()
+
+
+def _paint_shutdown_notice(mut app: Application) raises:
+    """Centered "Shutting down…" box over whatever is on screen.
+
+    Deliberately painted *over* the last frame rather than clearing it: the
+    editor is what the user was looking at, and blanking the screen to say
+    "wait" reads as a crash."""
+    var screen = app.screen()
+    var text = String(" Shutting down language servers… ")
+    # ``display_columns``, not byte length: the ellipsis is 3 bytes and 1
+    # cell, so a byte count would over-reserve and mis-center the box.
+    var w = display_columns(text) + 2
+    if w > screen.width():
+        w = screen.width()
+    var box_h = 3
+    var x = screen.a.x + (screen.width() - w) // 2
+    var y = screen.a.y + (screen.height() - box_h) // 2
+    var attr = Attr(BLACK, LIGHT_GRAY)
+    var box = Rect.sized(Point(x, y), w, box_h)
+    app.back.fill(box, String(" "), attr)
+    app.back.draw_box(box, attr)
+    _ = app.back.put_text(Point(x + 1, y + 1), text, attr)
+    app.present()
+
+
+def _shutdown_with_notice(h: Int, mut app: Application) raises:
+    """Close the core, showing a notice only if the servers are slow.
+
+    The terminal frontend has no "later" to drain the LSP handshake in — the
+    process is about to exit — so unlike the native host it does have to
+    wait. What it can avoid is waiting *silently*: ``app.stop`` restores the
+    terminal first, so before this existed a slow server showed up as the
+    shell prompt hanging for half a second with nothing to explain it.
+
+    The notice is withheld for ``_QUIET_CLOSE_MS`` because the common case
+    is a server answering in single-digit milliseconds, and flashing a box
+    on every quit would be worse than the silence it replaces.
+    """
+    _tk_begin_close(h)
+    var started = monotonic_ms()
+    var shown = False
+    while _tk_close_poll(h) == 0:
+        var elapsed = monotonic_ms() - started
+        if elapsed >= _CLOSE_GIVE_UP_MS:
+            break
+        if not shown and elapsed >= _QUIET_CLOSE_MS:
+            _paint_shutdown_notice(app)
+            shown = True
+        sleep_ms(10)
+    # Frees the handle whether or not the handshake finished; a server that
+    # never answered gets its SIGTERM in here.
     _tk_free(h)
 
 

@@ -1,0 +1,20 @@
+{
+  "_comment": "Transport-level abuse rather than payload abuse. `$split` writes the frame body in two writes with a pause between, so the client must hold a partial frame instead of parsing what it has — the failure mode is a torn JSON parse on large completion responses, which is exactly when it happens in the wild. `$raw` sends a body that is not JSON. `$no_reply` receives the request and never answers, which must leave the client waiting rather than wedged (and must not block the next request).",
+  "position_encoding": "utf-8",
+  "responses": {
+    "textDocument/definition": {
+      "$split": {
+        "uri": "$SELF",
+        "range": {
+          "start": {"line": 1, "character": 17},
+          "end":   {"line": 1, "character": 23}
+        }
+      }
+    },
+    "textDocument/references": {"$raw": "{this is not valid json at all,,,"},
+    "textDocument/hover": {"$no_reply": true},
+    "textDocument/formatting": [
+      {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}, "newText": "after-the-mess"}
+    ]
+  }
+}

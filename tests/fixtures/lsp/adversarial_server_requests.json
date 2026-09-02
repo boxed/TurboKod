@@ -1,0 +1,47 @@
+{
+  "_comment": "Server-to-client traffic that mutates buffers. workspace/applyEdit carries a whole WorkspaceEdit (a server asking us to rewrite files); window/showDocument names a file and a selection to jump to. Both are applied to a buffer, so both must be position-converted and both must survive a malformed shape. Uses the `changes` map form of WorkspaceEdit; the `documentChanges` form is covered by shapes_document_changes.json.",
+  "omit_position_encoding": true,
+  "server_requests": [
+    {
+      "method": "workspace/applyEdit",
+      "params": {
+        "label": "server-driven rename",
+        "edit": {
+          "changes": {
+            "$SELF": [
+              {
+                "range": {
+                  "start": {
+                    "line": 1,
+                    "character": 15
+                  },
+                  "end": {
+                    "line": 1,
+                    "character": 21
+                  }
+                },
+                "newText": "from_changes_map"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "method": "window/showDocument",
+      "params": {
+        "uri": "$SELF",
+        "selection": {
+          "start": {
+            "line": 2,
+            "character": 17
+          },
+          "end": {
+            "line": 2,
+            "character": 21
+          }
+        }
+      }
+    }
+  ]
+}

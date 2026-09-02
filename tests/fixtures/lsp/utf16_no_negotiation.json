@@ -1,0 +1,81 @@
+{
+  "_comment": "A server that never implemented LSP 3.17 general.positionEncodings: it answers initialize with no positionEncoding field, so the spec default utf-16 applies. Ranges below are in utf-16 code units against tests/fixtures/lsp/emdash.py, whose row 1 carries an em dash (3 bytes / 1 unit) before the target identifier and row 2 an emoji (4 bytes / 2 units). Row 1 'target' is bytes [17,23) but units [15,21); row 2 'tail' is bytes [19,23) but units [17,21) — the emoji is a surrogate pair, so it costs 2 units, not 1.",
+  "omit_position_encoding": true,
+  "responses": {
+    "textDocument/definition": {
+      "uri": "$SELF",
+      "range": {
+        "start": {"line": 1, "character": 15},
+        "end":   {"line": 1, "character": 21}
+      }
+    },
+    "textDocument/references": [
+      {
+        "uri": "$SELF",
+        "range": {
+          "start": {"line": 1, "character": 15},
+          "end":   {"line": 1, "character": 21}
+        }
+      },
+      {
+        "uri": "$SELF",
+        "range": {
+          "start": {"line": 2, "character": 17},
+          "end":   {"line": 2, "character": 21}
+        }
+      }
+    ],
+    "textDocument/formatting": [
+      {
+        "range": {
+          "start": {"line": 2, "character": 17},
+          "end":   {"line": 2, "character": 21}
+        },
+        "newText": "TAIL"
+      }
+    ],
+    "textDocument/rename": {
+      "changes": {
+        "$SELF": [
+          {
+            "range": {
+              "start": {"line": 1, "character": 15},
+              "end":   {"line": 1, "character": 21}
+            },
+            "newText": "renamed"
+          }
+        ]
+      }
+    }
+  },
+  "on_did_open": [
+    {
+      "method": "textDocument/publishDiagnostics",
+      "params": {
+        "uri": "$SELF",
+        "diagnostics": [
+          {
+            "range": {
+              "start": {"line": 1, "character": 15},
+              "end":   {"line": 1, "character": 21}
+            },
+            "severity": 2,
+            "source": "mock",
+            "code": "after-em-dash",
+            "message": "range sits after a multibyte glyph"
+          },
+          {
+            "range": {
+              "start": {"line": 2, "character": 17},
+              "end":   {"line": 2, "character": 21}
+            },
+            "severity": 1,
+            "source": "mock",
+            "code": "after-emoji",
+            "message": "range sits after a surrogate pair"
+          }
+        ]
+      }
+    }
+  ]
+}

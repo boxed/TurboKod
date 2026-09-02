@@ -1,4 +1,5 @@
-.PHONY: build shim app tui test check release screenshots update-lsp-list
+.PHONY: build shim app tui test check release screenshots update-lsp-list \
+	lsp-coverage lsp-coverage-check lsp-coverage-update update-lsp-metamodel
 .DEFAULT_GOAL := build
 
 # ``make`` (default) — build both frontends without launching either.
@@ -88,3 +89,26 @@ screenshots:
 # (helix-editor/helix on master). Commit the resulting JSON.
 update-lsp-list:
 	python3 scripts/refresh_languages.py
+
+# Audit the LSP client against the spec's machine-readable metaModel:
+# which requests / notifications we implement, which have a scenario
+# fixture, and which result properties we never read. See
+# docs/lsp-conformance.md.
+lsp-coverage:
+	python3 scripts/lsp_spec_coverage.py -v
+
+# Same, as a gate: fails when a method stops being implemented, loses its
+# fixture, or the vendored spec gains a method the baseline hasn't triaged.
+lsp-coverage-check:
+	python3 scripts/lsp_spec_coverage.py --check
+
+# Re-triage after a deliberate change (new method implemented, spec bumped).
+lsp-coverage-update:
+	python3 scripts/lsp_spec_coverage.py --update
+
+# Refresh the vendored LSP metaModel from the spec repo. Bumping it will
+# usually fail lsp-coverage-check until the new methods are triaged.
+update-lsp-metamodel:
+	curl -sSfL -o tests/fixtures/lsp/metaModel.json \
+	  https://raw.githubusercontent.com/microsoft/language-server-protocol/gh-pages/_specifications/lsp/3.18/metaModel/metaModel.json
+	python3 scripts/lsp_spec_coverage.py --check || true

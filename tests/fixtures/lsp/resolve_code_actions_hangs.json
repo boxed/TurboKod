@@ -1,0 +1,46 @@
+{
+  "_comment": "A server advertising codeActionProvider.resolveProvider that accepts the resolve request and never answers it. The quick-fix menu must still settle: the actions that had inline edits are published after the resolve deadline rather than the menu hanging on 'Loading fixes...' forever.",
+  "position_encoding": "utf-8",
+  "capabilities": {
+    "codeActionProvider": {
+      "resolveProvider": true
+    }
+  },
+  "responses": {
+    "textDocument/codeAction": [
+      {
+        "title": "never resolves",
+        "kind": "quickfix",
+        "data": {
+          "id": "x"
+        }
+      },
+      {
+        "title": "already inline",
+        "kind": "quickfix",
+        "edit": {
+          "changes": {
+            "$SELF": [
+              {
+                "range": {
+                  "start": {
+                    "line": 0,
+                    "character": 0
+                  },
+                  "end": {
+                    "line": 0,
+                    "character": 0
+                  }
+                },
+                "newText": "inline\n"
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "codeAction/resolve": {
+      "$no_reply": true
+    }
+  }
+}

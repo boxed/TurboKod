@@ -35,6 +35,7 @@ from turbokod.lsp_dispatch import (
     _parse_selection_ranges, _parse_hover_result,
     _parse_prepare_rename_placeholder, _parse_signature_help,
     _parse_references_result, _parse_text_edits,
+    _parse_text_edit_array, _parse_workspace_edit,
     _parse_workspace_edit_changes, _path_to_uri, _uri_to_path
 )
 from turbokod.highlight import (
@@ -1197,6 +1198,132 @@ def test_lsp_initialize_params_advertise_code_action_literal_support() raises:
     assert_true(found_quickfix)
 
 
+def test_lsp_initialize_params_declare_code_action_resolve() raises:
+    """``dataSupport`` + ``resolveSupport.properties: ["edit"]``.
+
+    Together these tell a server it may return actions carrying only a
+    title and an opaque ``data`` blob, deferring the edit to
+    ``codeAction/resolve``. rust-analyzer does that by default whether or
+    not the client asks, so declaring it is the honest description of what
+    we now do — and ``properties`` says exactly what we'll fetch, so a
+    server doesn't withhold something we won't ask for."""
+    var p = lsp_initialize_params(
+        String("file:///tmp/proj"), String("proj"),
+    )
+    var caps = p.object_get(String("capabilities")).value().copy()
+    var text_doc = caps.object_get(String("textDocument")).value().copy()
+    var ca = text_doc.object_get(String("codeAction")).value().copy()
+    assert_true(ca.object_get(String("dataSupport")).value().as_bool())
+    var rs = ca.object_get(String("resolveSupport")).value().copy()
+    var props = rs.object_get(String("properties")).value().copy()
+    assert_true(props.is_array())
+    assert_equal(props.array_len(), 1)
+    assert_equal(props.array_at(0).as_str(), String("edit"))
+
+
+def test_lsp_initialize_params_declare_document_changes_not_resources() raises:
+    """``workspace.workspaceEdit.documentChanges: true`` and **no**
+    ``resourceOperations``.
+
+    Both halves matter. Declaring ``documentChanges`` is what lets
+    rust-analyzer and gopls send the form they prefer — per spec a server
+    may only use the form the client claimed. Withholding
+    ``resourceOperations`` is what stops a compliant server from ever
+    putting a ``CreateFile`` / ``RenameFile`` / ``DeleteFile`` in a
+    WorkspaceEdit, which we cannot apply and therefore refuse whole (see
+    ``_parse_workspace_edit``). Advertising it without implementing the file
+    operations would turn every rename-refactor into a refused edit."""
+    var p = lsp_initialize_params(
+        String("file:///tmp/proj"), String("proj"),
+    )
+    var caps = p.object_get(String("capabilities")).value().copy()
+    var ws = caps.object_get(String("workspace")).value().copy()
+    var we = ws.object_get(String("workspaceEdit")).value().copy()
+    assert_true(we.object_get(String("documentChanges")).value().as_bool())
+    assert_false(we.object_has(String("resourceOperations")))
+    # File-operation notifications we actually send.
+    var fo = ws.object_get(String("fileOperations")).value().copy()
+    assert_true(fo.object_get(String("didCreate")).value().as_bool())
+    assert_true(fo.object_get(String("didRename")).value().as_bool())
+    assert_true(fo.object_get(String("didDelete")).value().as_bool())
+
+
+def test_lsp_parse_workspace_edit_document_changes_form() raises:
+    """The ``documentChanges`` array form parses to the same per-file groups
+    as the ``changes`` map, with the URI read from the nested
+    ``textDocument``."""
+    var v = parse_json(String(
+        "{\"documentChanges\":[{\"textDocument\":"
+        + "{\"uri\":\"file:///a.py\",\"version\":3},"
+        + "\"edits\":[{\"range\":{\"start\":{\"line\":1,"
+        + "\"character\":0},\"end\":{\"line\":1,\"character\":4}},"
+        + "\"newText\":\"spam\"}]}]}"
+    ))
+    var parsed = _parse_workspace_edit(v)
+    assert_equal(parsed.unsupported_ops, 0)
+    assert_equal(len(parsed.file_edits), 1)
+    assert_equal(parsed.file_edits[0].uri, String("file:///a.py"))
+    assert_equal(len(parsed.file_edits[0].edits), 1)
+    assert_equal(parsed.file_edits[0].edits[0].new_text, String("spam"))
+
+
+def test_lsp_parse_workspace_edit_refuses_resource_operations() raises:
+    """A ``documentChanges`` array carrying a resource operation yields
+    **no** edits, and reports how many it refused.
+
+    Half-applying is the failure mode this prevents: a rename plus its
+    reference rewrites is one atomic refactor, and applying only the text
+    edits leaves the project pointing at a file that was supposed to move."""
+    var v = parse_json(String(
+        "{\"documentChanges\":[{\"textDocument\":"
+        + "{\"uri\":\"file:///a.py\",\"version\":1},"
+        + "\"edits\":[{\"range\":{\"start\":{\"line\":0,"
+        + "\"character\":0},\"end\":{\"line\":0,\"character\":1}},"
+        + "\"newText\":\"x\"}]},"
+        + "{\"kind\":\"rename\",\"oldUri\":\"file:///a.py\","
+        + "\"newUri\":\"file:///b.py\"}]}"
+    ))
+    var parsed = _parse_workspace_edit(v)
+    assert_equal(parsed.unsupported_ops, 1)
+    assert_equal(len(parsed.file_edits), 0)
+
+
+def test_lsp_parse_workspace_edit_prefers_document_changes() raises:
+    """When a server sends both forms the spec says ``documentChanges``
+    wins. Servers do send both for backwards compatibility, and taking the
+    ``changes`` map would silently drop the versioning the newer form
+    carries."""
+    var v = parse_json(String(
+        "{\"changes\":{\"file:///old.py\":[{\"range\":{\"start\":"
+        + "{\"line\":0,\"character\":0},\"end\":{\"line\":0,"
+        + "\"character\":1}},\"newText\":\"legacy\"}]},"
+        + "\"documentChanges\":[{\"textDocument\":{\"uri\":"
+        + "\"file:///new.py\",\"version\":1},\"edits\":[{\"range\":"
+        + "{\"start\":{\"line\":0,\"character\":0},\"end\":"
+        + "{\"line\":0,\"character\":1}},\"newText\":\"modern\"}]}]}"
+    ))
+    var parsed = _parse_workspace_edit(v)
+    assert_equal(len(parsed.file_edits), 1)
+    assert_equal(parsed.file_edits[0].uri, String("file:///new.py"))
+    assert_equal(parsed.file_edits[0].edits[0].new_text, String("modern"))
+
+
+def test_lsp_parse_text_edit_array_skips_snippet_edits() raises:
+    """A ``SnippetTextEdit`` carries ``snippet`` instead of ``newText`` and
+    is skipped: inserting its raw ``$1`` placeholders as literal text would
+    be worse than not applying the edit."""
+    var v = parse_json(String(
+        "[{\"range\":{\"start\":{\"line\":0,\"character\":0},"
+        + "\"end\":{\"line\":0,\"character\":1}},\"newText\":\"ok\"},"
+        + "{\"range\":{\"start\":{\"line\":1,\"character\":0},"
+        + "\"end\":{\"line\":1,\"character\":1}},"
+        + "\"snippet\":{\"value\":\"$1\"}}]"
+    ))
+    var edits = _parse_text_edit_array(v)
+    assert_equal(len(edits), 1)
+    assert_equal(edits[0].new_text, String("ok"))
+
+
 def test_lsp_parse_completion_result_array_shape() raises:
     """A bare ``CompletionItem[]`` array (one of the two shapes the
     LSP spec allows) parses to one item per entry. Each item carries
@@ -2091,6 +2218,12 @@ def main() raises:
     test_lsp_parse_document_links()
     test_lsp_parse_prepare_rename_placeholder()
     test_lsp_initialize_params_advertise_code_action_literal_support()
+    test_lsp_initialize_params_declare_code_action_resolve()
+    test_lsp_initialize_params_declare_document_changes_not_resources()
+    test_lsp_parse_workspace_edit_document_changes_form()
+    test_lsp_parse_workspace_edit_refuses_resource_operations()
+    test_lsp_parse_workspace_edit_prefers_document_changes()
+    test_lsp_parse_text_edit_array_skips_snippet_edits()
     test_lsp_parse_completion_result_array_shape()
     test_lsp_parse_completion_result_list_shape()
     test_lsp_parse_completion_result_honors_sort_text()
@@ -2117,4 +2250,4 @@ def main() raises:
     test_lsp_initialize_against_mojo_lsp_server()
     test_ty_offers_quickfix_for_missing_any_import()
     test_taplo_publishes_diagnostics_after_workspace_configuration_probe()
-    print("lsp: 80 tests passed")
+    print("lsp: 86 tests passed")

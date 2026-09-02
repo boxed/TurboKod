@@ -1,0 +1,46 @@
+{
+  "_comment": "A documentChanges array mixing a TextDocumentEdit with resource operations (RenameFile / CreateFile). Applying only the text edit would leave the project referring to a file that was supposed to move \u2014 broken in a way that applying nothing is not. So the whole edit is refused. We don't advertise workspace.workspaceEdit.resourceOperations, so a compliant server never sends this; the fixture covers the ones that do anyway.",
+  "omit_position_encoding": true,
+  "server_requests": [
+    {
+      "method": "workspace/applyEdit",
+      "params": {
+        "label": "rename file + fix imports",
+        "edit": {
+          "documentChanges": [
+            {
+              "textDocument": {
+                "uri": "$SELF",
+                "version": 1
+              },
+              "edits": [
+                {
+                  "range": {
+                    "start": {
+                      "line": 1,
+                      "character": 15
+                    },
+                    "end": {
+                      "line": 1,
+                      "character": 21
+                    }
+                  },
+                  "newText": "must_not_be_applied_alone"
+                }
+              ]
+            },
+            {
+              "kind": "rename",
+              "oldUri": "$SELF",
+              "newUri": "$SELF"
+            },
+            {
+              "kind": "create",
+              "uri": "$SELF"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

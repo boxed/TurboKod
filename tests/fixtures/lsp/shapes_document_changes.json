@@ -1,0 +1,37 @@
+{
+  "_comment": "WorkspaceEdit in the `documentChanges` form (LSP 3.13+): an array of {textDocument: {uri, version}, edits: [...]} instead of the {uri: TextEdit[]} `changes` map. rust-analyzer and gopls prefer this form, and per spec a server may only use the form the client advertised \u2014 so we declare workspace.workspaceEdit.documentChanges and parse it. The URI hangs off a nested textDocument rather than being a map key, which the position remapper resolves and the parse reads. `resourceOperations` stays unadvertised; gaps_resource_operations.json covers what happens when one arrives anyway.",
+  "omit_position_encoding": true,
+  "server_requests": [
+    {
+      "method": "workspace/applyEdit",
+      "params": {
+        "label": "documentChanges form",
+        "edit": {
+          "documentChanges": [
+            {
+              "textDocument": {
+                "uri": "$SELF",
+                "version": 1
+              },
+              "edits": [
+                {
+                  "range": {
+                    "start": {
+                      "line": 1,
+                      "character": 15
+                    },
+                    "end": {
+                      "line": 1,
+                      "character": 21
+                    }
+                  },
+                  "newText": "from_document_changes"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

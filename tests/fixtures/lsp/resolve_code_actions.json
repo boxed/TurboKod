@@ -1,0 +1,80 @@
+{
+  "_comment": "rust-analyzer's actual code-action shape: actions carrying a title and a `data` blob with NO `edit`, plus codeActionProvider.resolveProvider=true. Without a codeAction/resolve round-trip these arrive with no edit and no command, the host filters them out as inapplicable, and the user sees an empty quick-fix menu on a fixable diagnostic. The third action already has an inline edit and must NOT be resolved.",
+  "position_encoding": "utf-8",
+  "capabilities": {
+    "codeActionProvider": {
+      "resolveProvider": true
+    }
+  },
+  "responses": {
+    "textDocument/codeAction": [
+      {
+        "title": "resolve me",
+        "kind": "quickfix",
+        "data": {
+          "id": "fix-1"
+        }
+      },
+      {
+        "title": "resolve me too",
+        "kind": "quickfix",
+        "isPreferred": true,
+        "data": {
+          "id": "fix-2"
+        }
+      },
+      {
+        "title": "already inline",
+        "kind": "quickfix",
+        "edit": {
+          "changes": {
+            "$SELF": [
+              {
+                "range": {
+                  "start": {
+                    "line": 0,
+                    "character": 0
+                  },
+                  "end": {
+                    "line": 0,
+                    "character": 0
+                  }
+                },
+                "newText": "inline\n"
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "codeAction/resolve": {
+      "title": "resolved title should be ignored",
+      "kind": "quickfix",
+      "edit": {
+        "documentChanges": [
+          {
+            "textDocument": {
+              "uri": "$SELF",
+              "version": 1
+            },
+            "edits": [
+              {
+                "range": {
+                  "start": {
+                    "line": 0,
+                    "character": 0
+                  },
+                  "end": {
+                    "line": 0,
+                    "character": 0
+                  }
+                },
+                "newText": "from_resolve\n"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

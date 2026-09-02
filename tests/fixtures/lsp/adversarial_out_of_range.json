@@ -1,0 +1,24 @@
+{
+  "_comment": "Ranges pointing outside the buffer: a row past EOF, a huge character offset (servers emit these for 'to end of line'), an inverted range (end before start), and negative numbers. All must clamp rather than index past the buffer — the position converter's clamping contract, exercised through the real transport. The buffer under test has 3 rows.",
+  "omit_position_encoding": true,
+  "responses": {
+    "textDocument/formatting": [
+      {"range": {"start": {"line": 1, "character": 999999}, "end": {"line": 1, "character": 999999}}, "newText": "past-eol"},
+      {"range": {"start": {"line": 900, "character": 0}, "end": {"line": 900, "character": 5}}, "newText": "past-eof"},
+      {"range": {"start": {"line": 1, "character": 23}, "end": {"line": 1, "character": 17}}, "newText": "inverted"},
+      {"range": {"start": {"line": -3, "character": -9}, "end": {"line": 0, "character": 1}}, "newText": "negative"}
+    ]
+  },
+  "on_did_open": [
+    {
+      "method": "textDocument/publishDiagnostics",
+      "params": {
+        "uri": "$SELF",
+        "diagnostics": [
+          {"range": {"start": {"line": 2, "character": 999999}, "end": {"line": 2, "character": 999999}}, "severity": 1, "message": "past end of a line with an emoji on it"},
+          {"range": {"start": {"line": 4242, "character": 0}, "end": {"line": 4242, "character": 1}}, "severity": 2, "message": "row past EOF"}
+        ]
+      }
+    }
+  ]
+}

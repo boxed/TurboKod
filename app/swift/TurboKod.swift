@@ -3271,7 +3271,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         v.handle = 0
         windows.remove(at: idx)
         views.remove(at: idx)
-        tk_desktop_free(h)
+        // Close is instant; the language servers get their goodbye in the
+        // background. `begin_close` terminates every child except the LSP
+        // transports and sends each server `shutdown`, then we poll off the
+        // runloop and free once they've answered. Blocking here instead
+        // would stall the close by however long the slowest server takes.
+        //
+        // During a Cmd+Q cascade there is no "later" to drain on — the
+        // process exits as soon as applicationShouldTerminate returns — so
+        // that path takes the blocking teardown.
+        if isTerminating {
+            tk_desktop_free(h)
+        } else {
+            tk_desktop_begin_close(h)
+            drainClosingDesktop(h, deadline: Date().addingTimeInterval(2.0))
+        }
         // Save the session each time a window closes so the on-disk state
         // matches what's open. `isTerminating` (set by applicationShould
         // Terminate during Cmd+Q) suppresses these mid-quit saves so they
@@ -3279,6 +3293,31 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if !isTerminating { saveSession() }
         sender.orderOut(nil)
         return false
+    }
+
+    /// Poll a closing Desktop until its language servers have finished the
+    /// LSP `shutdown` → `exit` handshake, then free it.
+    ///
+    /// Re-arms itself every 25 ms rather than looping, so the runloop stays
+    /// responsive — the whole point is that the window is already gone. The
+    /// `deadline` is the backstop: a server that never answers gets SIGTERM
+    /// from `tk_desktop_free`, which is exactly what happened unconditionally
+    /// before this path existed. Freeing is therefore guaranteed on both
+    /// branches, which matters because the handle owns child processes.
+    func drainClosingDesktop(_ h: Int64, deadline: Date) {
+        if h == 0 { return }
+        if tk_desktop_close_poll(h) == 1 || Date() >= deadline {
+            tk_desktop_free(h)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.025) { [weak self] in
+            guard let self = self else {
+                // The app is going away; don't strand the children.
+                tk_desktop_free(h)
+                return
+            }
+            self.drainClosingDesktop(h, deadline: deadline)
+        }
     }
 
     // App stays alive with no windows open (Finder/Safari-style). The user

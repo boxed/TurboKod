@@ -12,6 +12,8 @@
 void    tk_terminate_all(void);
 
 int64_t tk_desktop_new(void);
+void    tk_desktop_begin_close(int64_t h);
+int64_t tk_desktop_close_poll(int64_t h);
 void    tk_desktop_free(int64_t h);
 // Recover the user's full interactive shell $PATH that a Dock launch strips
 // (runs `$SHELL -l -i`, ~100 ms). Call once off the first runloop turn — not

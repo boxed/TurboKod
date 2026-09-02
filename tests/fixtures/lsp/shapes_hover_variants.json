@@ -1,0 +1,20 @@
+{
+  "_comment": "Hover.contents is `MarkupContent | MarkedString | MarkedString[]`, and `MarkedString = string | {language, value}`. Four shapes. Servers pick one and never change, so this is pure scripted-server territory. Each method below carries a different variant; the client must render text for all of them and empty (not a crash) for null.",
+  "position_encoding": "utf-8",
+  "responses": {
+    "textDocument/hover": {
+      "contents": {"kind": "markdown", "value": "markup content"}
+    },
+    "textDocument/signatureHelp": {
+      "signatures": [
+        {
+          "label": "f(a: int, b: str) -> None",
+          "documentation": {"kind": "plaintext", "value": "doc"},
+          "parameters": [{"label": "a: int"}, {"label": "b: str"}]
+        }
+      ],
+      "activeSignature": 0,
+      "activeParameter": 1
+    }
+  }
+}
