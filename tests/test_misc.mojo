@@ -27,7 +27,8 @@ from turbokod.project import replace_in_project
 from turbokod.text_select import PaneTextSelect
 from turbokod.project_targets import resolve_python_interpreter
 from turbokod.string_utils import (
-    char_width, display_columns, escape_drop_paths, tail_to_columns
+    char_width, display_columns, escape_drop_paths, prev_codepoint_start,
+    tail_to_columns
 )
 from turbokod.type_ahead import is_printable_ascii
 from turbokod.lsp_dispatch import CompletionItem, TextEditEntry
@@ -94,6 +95,26 @@ def test_help_hotkeys_opens_readonly_reference() raises:
     # Second dispatch must not open a duplicate.
     _ = d.dispatch_action(HELP_HOTKEYS, screen)
     assert_equal(len(d.windows.windows), before + 1)
+
+
+def test_prev_codepoint_start_tolerates_past_eol_columns() raises:
+    """A byte column past the end of the string degrades to "start of the
+    last codepoint" instead of indexing out of bounds. ``codepoint_at``
+    already tolerates past-EOL and ``utf8_step_forward`` clamps the
+    forward step; this is the backward mirror. A caret column left over
+    from a longer version of the line reaching here used to abort the
+    process, taking the whole app down."""
+    var ascii = String("hello")
+    assert_equal(prev_codepoint_start(ascii, 5), 4)
+    assert_equal(prev_codepoint_start(ascii, 99), 4)
+    assert_equal(prev_codepoint_start(String(""), 7), 0)
+    # "a\u00e4" is 3 bytes: the clamp must land on the lead byte of the
+    # final codepoint, never inside its continuation byte.
+    var multi = String("a\u00e4")
+    assert_equal(len(multi.as_bytes()), 3)
+    assert_equal(prev_codepoint_start(multi, 3), 1)
+    assert_equal(prev_codepoint_start(multi, 42), 1)
+    assert_equal(prev_codepoint_start(multi, 0), 0)
 
 
 def test_emoji_double_width() raises:
@@ -1164,6 +1185,7 @@ def test_config_change_by_another_process_reaches_an_open_window() raises:
 def main() raises:
     setup_test_env()
     test_help_hotkeys_opens_readonly_reference()
+    test_prev_codepoint_start_tolerates_past_eol_columns()
     test_emoji_double_width()
     test_escape_drop_paths_joins_and_trails()
     test_pane_text_select_drag()

@@ -477,11 +477,23 @@ def word_char_step(s: String, col: Int) -> Tuple[Bool, Int]:
 def prev_codepoint_start(s: String, col: Int) -> Int:
     """Byte offset of the codepoint that ends at ``col``. Use to walk
     a byte array backwards one codepoint at a time. ``col == 0`` returns
-    ``0``."""
+    ``0``.
+
+    ``col`` is clamped to ``len(s)`` — the backward mirror of
+    ``utf8_step_forward``'s forward clamp, and the same past-EOL
+    tolerance ``codepoint_at`` has. A ``col`` past the end (a caret
+    column left over from a longer version of the line, a multi-caret
+    ``row_shift`` that overshot) then walks back from the last byte
+    instead of indexing out of bounds, which aborts the process."""
     if col <= 0:
         return 0
     var b = s.as_bytes()
+    var n = len(b)
+    if n == 0:
+        return 0
     var c = col - 1
+    if c > n - 1:
+        c = n - 1
     while c > 0 and (Int(b[c]) & 0xC0) == 0x80:
         c -= 1
     return c
