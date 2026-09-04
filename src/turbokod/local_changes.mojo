@@ -43,6 +43,9 @@ single ``+`` / ``-`` line under the cursor (forward from Unstaged,
 — a commit message, a branch-log subject — paint as underlined blue
 links and open in the system browser when clicked.
 
+``p`` (pull) and ``P`` (push) act on the repo rather than on a
+selection, so they work from any of the three sidebar panels.
+
 Tab / Shift+Tab cycle focus between the three sidebar panels, or
 between the two right-side panels when focus is on the right.
 Up/Down/PgUp/PgDn, Home/End operate on the focused panel; Left-arrow
@@ -1461,12 +1464,14 @@ struct LocalChanges(Movable):
     var sidebar_dock: DockedPanelStack
     # Type-to-jump prefix buffer for whichever sidebar pane currently
     # owns focus. The Files pane keeps its bare-letter git shortcuts
-    # (c / A / d / p / P), so type-to-jump only fires on Branches /
-    # Commits — wiring the Files pane would silently steal those
-    # action shortcuts from active git workflows. Branches makes the
-    # same trade for three letters: ``M`` (merge), ``d`` (delete) and
-    # ``o`` (open GitHub compare) are actions there and never reach the
-    # prefix buffer.
+    # (c / A / d, plus the repo-wide p / P), so type-to-jump only fires
+    # on Branches / Commits — wiring the Files pane would silently steal
+    # those action shortcuts from active git workflows. Those two panes
+    # make the same trade for the letters that *are* actions on them and
+    # so never reach the prefix buffer: ``p`` (pull) and ``P`` (push)
+    # everywhere, plus ``M`` (merge), ``r`` (rebase), ``d`` (delete) and
+    # ``o`` (open GitHub compare) on Branches and ``e`` (reword) on
+    # Commits.
     var _type_ahead: TypeAhead
     # Async runner for the slow git ops (commit / push / pull / amend /
     # revert). The UI used to call ``git_commit`` / ``git_push`` etc.
@@ -2518,11 +2523,11 @@ struct LocalChanges(Movable):
             )
         elif self.focus == _PANE_BRANCHES:
             hint = String(
-                " Space:switch  M:merge  r:rebase  d:delete  o:compare  Right:log  ⌘C:copy  ESC:close ",
+                " Space:switch  M:merge  r:rebase  d:delete  o:compare  p:pull P:push  Right:log  ⌘C:copy  ESC:close ",
             )
         else:
             hint = String(
-                " Tab: pane  Up/Down: select  Right: diff  ⌘C: copy  Enter: open  ESC: close ",
+                " e:reword  p:pull P:push  Tab:pane  Up/Down:select  Right:diff  ⌘C:copy  Enter:open  ESC:close ",
             )
         var hx = bounds.b.x - display_columns(hint) - 1
         if hx < bounds.a.x + 1:
@@ -3868,10 +3873,22 @@ struct LocalChanges(Movable):
         if k == UInt32(0x63) and (event.mods & MOD_META) != 0:
             self._copy_focused()
             return True
-        # File-pane git operations: c / A / d / p / P. These are
-        # repo-level (or selected-file-level) actions that only make
-        # sense when the user is browsing the modified-files list, so
-        # gate on focus to avoid surprising the user when typing through
+        # Pull / push act on the repo as a whole — no selection is
+        # involved — so they fire from any of the three sidebar panes
+        # rather than only from Files. On Branches / Commits that costs
+        # 'p' / 'P' as type-to-jump letters, the same trade those panes
+        # already make for their own bare-letter actions.
+        if not self._is_right_focus():
+            if k == UInt32(0x70):       # 'p' → pull
+                self._run_pull()
+                return True
+            if k == UInt32(0x50):       # 'P' → push
+                self._run_push()
+                return True
+        # File-pane git operations: c / A / d. These act on the
+        # selected file (or on the staged set), so they only make sense
+        # when the user is browsing the modified-files list — gate on
+        # focus to avoid surprising the user when typing through
         # branches / commits / right-pane scrolling.
         if self.focus == _PANE_FILES:
             if k == UInt32(0x63):       # 'c' → commit
@@ -3882,12 +3899,6 @@ struct LocalChanges(Movable):
                 return True
             if k == UInt32(0x64):       # 'd' → revert (discard) selected
                 self._open_revert_confirm()
-                return True
-            if k == UInt32(0x70):       # 'p' → pull
-                self._run_pull()
-                return True
-            if k == UInt32(0x50):       # 'P' → push
-                self._run_push()
                 return True
         if k == KEY_TAB:
             if (event.mods & MOD_SHIFT) != 0:
@@ -3904,10 +3915,10 @@ struct LocalChanges(Movable):
         if k == KEY_SPACE:
             self._handle_space(bounds)
             return True
-        # Branch-pane git operations: M / d / o. Placed before the
-        # type-to-jump block below, which means those three letters no
+        # Branch-pane git operations: M / r / d / o. Placed before the
+        # type-to-jump block below, which means those letters no
         # longer jump the cursor on this pane — the same trade the Files
-        # pane already makes for c / A / d / p / P.
+        # pane already makes for c / A / d.
         if self.focus == _PANE_BRANCHES:
             if k == UInt32(0x4D):       # 'M' (shift+m) → merge into HEAD
                 self._run_merge()
@@ -3983,8 +3994,9 @@ struct LocalChanges(Movable):
             return True
         # Framework type-to-jump on the Branches / Commits panes.
         # Files pane is intentionally excluded so its bare-letter git
-        # shortcuts (c / A / d / p / P) keep working — see the
-        # ``_type_ahead`` field comment for the rationale.
+        # shortcuts (c / A / d) keep working; p / P are handled above
+        # for all three panes — see the ``_type_ahead`` field comment
+        # for the rationale.
         if is_printable_ascii(k) and (
             self.focus == _PANE_BRANCHES or self.focus == _PANE_COMMITS
         ):

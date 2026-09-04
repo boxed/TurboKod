@@ -35,7 +35,7 @@ from turbokod.git_changes import (
 from turbokod.local_changes import (
     LocalChanges, build_minimal_patch, _BURST_GAP_MS, _SETTLE_MS,
     _GITOP_BRANCH_DELETE, _GITOP_CHECKOUT,
-    _GITOP_MERGE, _GITOP_NONE, _GITOP_PUSH, _GITOP_REBASE,
+    _GITOP_MERGE, _GITOP_NONE, _GITOP_PULL, _GITOP_PUSH, _GITOP_REBASE,
     _OVERLAY_DELETE_BRANCH_CONFIRM,
     _GITOP_REWORD, _OVERLAY_EDIT_MSG,
     _OVERLAY_MERGE_CHOICE, _OVERLAY_NONE,
@@ -4092,6 +4092,36 @@ def test_local_changes_release_stops_an_in_flight_git_child() raises:
     registry.release()
 
 
+def test_pull_and_push_work_from_every_sidebar_pane() raises:
+    """``p`` / ``P`` act on the repo rather than on a selection, so they
+    fire from Branches and Commits as well as Files.
+
+    They used to sit inside the ``_PANE_FILES`` gate, which meant a push
+    after reading the commit log needed a Tab back to Files first — and
+    on Branches / Commits the two letters fell through to type-to-jump
+    instead, so they looked like they did nothing.
+    """
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    var panes = List[Int]()
+    panes.append(_PANE_FILES)
+    panes.append(_PANE_BRANCHES)
+    panes.append(_PANE_COMMITS)
+    for i in range(len(panes)):
+        for push in range(2):
+            var lc = _local_changes_with_branches()
+            lc.focus = panes[i]
+            var k = UInt32(0x50) if push == 1 else UInt32(0x70)
+            var want = _GITOP_PUSH if push == 1 else _GITOP_PULL
+            assert_true(lc.handle_key(_key(k), screen, registry))
+            assert_equal(lc._git_op, want)
+            # The keystroke never reached the type-to-jump buffer, so the
+            # selection is where it was.
+            assert_equal(lc.sel_branch, 0)
+            lc.release()
+    registry.release()
+
+
 
 def _init_repo_with_commit(dir: String) raises -> Bool:
     """``git init`` + identity + one commit of ``f.txt``. False when git
@@ -4786,6 +4816,7 @@ def main() raises:
     test_local_changes_reword_head_amends_the_message()
     test_local_changes_reword_older_commit_keeps_its_children()
     test_local_changes_release_stops_an_in_flight_git_child()
+    test_pull_and_push_work_from_every_sidebar_pane()
     test_github_repo_web_url_parses_every_remote_shape()
     test_branch_pane_o_opens_the_github_compare_page()
     test_branch_pane_o_refuses_main_and_a_non_github_remote()
