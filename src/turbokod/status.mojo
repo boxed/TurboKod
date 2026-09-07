@@ -93,6 +93,10 @@ struct StatusBar(Movable):
     # the far left of the bar. Set every frame by the host from its
     # project-level git poll; the bar itself never computes it.
     var git_dirty: Bool
+    # Branch HEAD is on, painted at the far left of the git cluster.
+    # Set every frame by the host alongside ``git_dirty``; empty (not a
+    # repo, no project) paints nothing.
+    var git_branch: String
     # Count of locally committed but unpushed commits (ahead of upstream).
     # Set every frame by the host alongside ``git_dirty``; painted as an
     # "↑N unpushed" indicator next to the dirty dot. 0 ⇒ nothing to push.
@@ -139,6 +143,7 @@ struct StatusBar(Movable):
         self.items = List[StatusItem]()
         self.tabs = List[StatusTab]()
         self.git_dirty = False
+        self.git_branch = String("")
         self.git_unpushed = 0
         self.active_tab = -1
         self.message = String("")
@@ -226,14 +231,25 @@ struct StatusBar(Movable):
             x += display_columns(k) + 1
             _ = painter.put_text(canvas, Point(x, y), d, desc_attr)
             x += display_columns(d) + 2
-        # Project-level git indicator, first thing on the bar: a green dot
-        # plus "uncommitted" tells the user at a glance that the working
-        # tree has changes to commit — no need to open the git/review
-        # features. Painted only when dirty; a clean tree shows nothing.
+        # Project-level git cluster, first thing after the shortcuts:
+        # the current branch, then a green dot plus "uncommitted" to tell
+        # the user at a glance that the working tree has changes to
+        # commit — no need to open the git/review features. The dot is
+        # painted only when dirty; a clean tree shows just the branch.
         # Capture the cluster's left edge so a click anywhere on the
         # indicator(s) can open the git view; ``_git_b_x`` advances with
-        # each painted indicator. Clean repo ⇒ a_x == b_x ⇒ no hit target.
+        # each painted indicator. Nothing painted ⇒ a_x == b_x ⇒ no hit
+        # target (no project, or not a repo).
         self._git_a_x = x
+        # Branch name leads the cluster: "which branch am I on" is the
+        # question that frames the other two indicators, so it reads
+        # left-to-right as "on <branch>, dirty, N to push". Blue to set
+        # it apart from the F-key descriptions sharing this palette.
+        if len(self.git_branch.as_bytes()) > 0:
+            _ = painter.put_text(
+                canvas, Point(x, y), self.git_branch, Attr(BLUE, LIGHT_GRAY),
+            )
+            x += display_columns(self.git_branch) + 2
         if self.git_dirty:
             _ = painter.put_text(canvas, Point(x, y), String("●"), Attr(GREEN, LIGHT_GRAY))
             x += 2
@@ -402,9 +418,10 @@ struct StatusBar(Movable):
         return self._msg_a_x <= pos.x and pos.x < self._msg_b_x
 
     def hit_test_git(self, pos: Point, container_bounds: Rect) -> Bool:
-        """True if ``pos`` lands on the uncommitted/unpushed indicator
-        cluster — the host opens the git view on such a click. False when
-        the repo is clean (nothing painted ⇒ ``_git_a_x == _git_b_x``)."""
+        """True if ``pos`` lands on the branch / uncommitted / unpushed
+        indicator cluster — the host opens the git view on such a click.
+        False when nothing was painted (no project, or not a repo ⇒
+        ``_git_a_x == _git_b_x``)."""
         if pos.y != container_bounds.b.y - 1:
             return False
         if self._git_a_x >= self._git_b_x:

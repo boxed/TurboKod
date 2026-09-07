@@ -812,6 +812,37 @@ def fetch_git_status(project_root: String) -> List[GitFileStatus]:
     return out^
 
 
+def current_branch_name(project_root: String) -> String:
+    """Name of the branch HEAD points at, e.g. ``main``.
+
+    A detached HEAD (``git bisect``, a checked-out tag or sha) has no
+    branch name — ``git rev-parse --abbrev-ref`` answers the literal
+    ``HEAD`` there, which is useless to show, so we fall back to the
+    short sha in parentheses (``(a1b2c3d)``). Empty string when git is
+    unavailable, the path isn't a repo, or the repo has no commits yet
+    (an unborn branch still names itself, but a broken git exits
+    non-zero and ``_git_stdout`` maps that to ``""``)."""
+    if len(project_root.as_bytes()) == 0:
+        return String("")
+    var args = List[String]()
+    args.append(String("rev-parse"))
+    args.append(String("--abbrev-ref"))
+    args.append(String("HEAD"))
+    var raw = _git_stdout(project_root, args^)
+    var name = String(raw.strip())
+    if name != String("HEAD"):
+        return name^
+    var sha_args = List[String]()
+    sha_args.append(String("rev-parse"))
+    sha_args.append(String("--short"))
+    sha_args.append(String("HEAD"))
+    var raw_sha = _git_stdout(project_root, sha_args^)
+    var sha = String(raw_sha.strip())
+    if len(sha.as_bytes()) == 0:
+        return String("")
+    return String("(") + sha + String(")")
+
+
 def count_unpushed_commits(project_root: String) -> Int:
     """Number of commits on the current branch that are ahead of its
     upstream — i.e. committed locally but not yet pushed. Runs

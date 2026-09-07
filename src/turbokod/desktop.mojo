@@ -69,6 +69,7 @@ from .git_changes import (
     GitFileStatus, GitRevertBlock, GitStateMtimes,
     compute_deletion_revert_block, compute_revert_block,
     count_unpushed_commits,
+    current_branch_name,
     diff_buffer_marks, fetch_git_status, fetch_head_text,
     fetch_line_history, git_state_mtimes, project_is_git_repo,
 )
@@ -1586,6 +1587,10 @@ struct Desktop(Movable):
     # refreshed on the same poll as ``_project_dirty``. 0 when up to date,
     # no upstream is configured, or the project isn't a git repo.
     var _project_unpushed: Int
+    # Branch HEAD is on, refreshed on the same poll as ``_project_dirty``
+    # and painted at the far left of the status bar's git cluster. Empty
+    # when the project isn't a git repo (or there's no project).
+    var _project_branch: String
     # Raw (pre-realpath) path of the last focused editor, so the per-frame
     # recents bookkeeping can skip the realpath syscall when focus is steady.
     var _last_focus_raw_path: String
@@ -1807,6 +1812,7 @@ struct Desktop(Movable):
         self._git_root_is_repo = False
         self._project_dirty = False
         self._project_unpushed = 0
+        self._project_branch = String("")
         self._last_git_dirty_check_ms = 0
         self._last_focus_raw_path = String("")
         self._last_input_ms = 0
@@ -3692,10 +3698,12 @@ struct Desktop(Movable):
                 self._last_git_dirty_check_ms = now
                 self._project_dirty = len(fetch_git_status(root)) > 0
                 self._project_unpushed = count_unpushed_commits(root)
+                self._project_branch = current_branch_name(root)
         else:
-            # Not a repo (or no project): never show the indicator.
+            # Not a repo (or no project): never show the indicators.
             self._project_dirty = False
             self._project_unpushed = 0
+            self._project_branch = String("")
         # Caret-blink phase, computed once for the whole frame. When
         # blinking is off the caret is always shown. When on, the caret
         # is solid for the first half of each ~530 ms cycle measured from
@@ -6303,6 +6311,7 @@ struct Desktop(Movable):
         # Clear the dirty indicator until the new project's first poll.
         self._project_dirty = False
         self._project_unpushed = 0
+        self._project_branch = String("")
         self._last_git_dirty_check_ms = 0
         # Record this project at the front of the persistent recents list
         # before any later step might raise — failing to save the config
@@ -7725,7 +7734,7 @@ struct Desktop(Movable):
             return self.dispatch_action(
                 TARGET_SELECT_PREFIX + String(tab_idx), screen,
             )
-        # Click on the far-left git indicator (● uncommitted / ↑ unpushed)
+        # Click on the far-left git cluster (branch / ● uncommitted / ↑ unpushed)
         # opens the git view, so the at-a-glance signal is also the way in.
         if event.kind == EVENT_MOUSE \
                 and event.button == MOUSE_BUTTON_LEFT \
@@ -11790,6 +11799,7 @@ struct Desktop(Movable):
         self.status_bar.set_tabs(tabs^, self.targets.active)
         self.status_bar.git_dirty = self._project_dirty
         self.status_bar.git_unpushed = self._project_unpushed
+        self.status_bar.git_branch = self._project_branch
 
     def _jump_to(
         mut self, target: DefinitionResolved, screen: Rect,

@@ -919,6 +919,33 @@ def test_status_bar_tab_hit_test() raises:
     assert_equal(sb.hit_test_tab(Point(2, 0), Rect(0, 0, 80, 10)), -1)
 
 
+def test_status_bar_paints_branch_left_of_git_indicators() raises:
+    """The git cluster reads left-to-right as branch, then the dirty
+    dot, then the unpushed count — and a click anywhere across it
+    (branch name included) opens the git view."""
+    var sb = StatusBar()
+    sb.git_branch = String("main")
+    sb.git_dirty = True
+    sb.git_unpushed = 2
+    var canvas = Canvas(80, 10)
+    var screen = Rect(0, 0, 80, 10)
+    sb.paint(canvas, screen)
+    var y = 9   # screen.b.y - 1
+    # No F-key items on this bar, so the cluster starts at column 1.
+    assert_equal(canvas.get(1, y).glyph, String("m"))
+    assert_equal(canvas.get(4, y).glyph, String("n"))
+    assert_equal(canvas.get(1, y).attr.fg, BLUE)
+    # Then the dirty dot, two columns past the branch's last glyph.
+    assert_equal(canvas.get(7, y).glyph, String("●"))
+    # A click on the branch name is a click on the cluster.
+    assert_true(sb.hit_test_git(Point(1, y), screen))
+    # A bar with no repo behind it paints nothing and takes no clicks.
+    var clean = StatusBar()
+    var canvas2 = Canvas(80, 10)
+    clean.paint(canvas2, screen)
+    assert_false(clean.hit_test_git(Point(1, y), screen))
+
+
 def test_shadow_button_paints_face_and_shadow() raises:
     """The shared button widget must paint the label on a green
     face and drop a half-block shadow on the right column + the
@@ -1268,6 +1295,7 @@ def main() raises:
     test_menu_click_then_click_flow()
     test_paint_editor_region_does_not_mutate_minimap_spell_state()
     test_status_bar_tab_hit_test()
+    test_status_bar_paints_branch_left_of_git_indicators()
     test_shadow_button_paints_face_and_shadow()
     test_shadow_button_hit_includes_shadow_rows()
     test_paint_drop_shadow_targets_right_and_bottom()
