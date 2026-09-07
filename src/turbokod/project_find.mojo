@@ -1455,6 +1455,87 @@ def _lstrip_tabs(s: String) -> String:
     return String(StringSpan(unsafe_from_utf8=b[i:len(b)]))
 
 
+def _project_find_argv(
+    root: String, query: String, scope: String,
+    glob: String, opts: SearchOptions,
+) -> List[String]:
+    """Build the ``rg`` argv for one project-wide find.
+
+    Split out from ``ProjectFindRunner.start`` so the flag set is
+    assertable without spawning a child — the bug this guards
+    against (a missing ``--hidden``, so nothing under ``.github/``
+    was ever searched) is invisible in any test that only checks
+    parsing or match plumbing."""
+    # Resolve the search root. A blank / slash-only scope falls back
+    # to the whole project; otherwise we search the joined subpath.
+    # rg silently reports nothing (errors land on stderr, which we
+    # don't read) when the subpath doesn't exist, so a typo just
+    # yields an empty result list rather than a crash.
+    var clean = _clean_scope(scope)
+    var search_dir = root
+    if len(clean.as_bytes()) > 0:
+        search_dir = join_path(root, clean)
+    var argv = List[String]()
+    argv.append(String("rg"))
+    argv.append(String("--no-heading"))
+    argv.append(String("--line-number"))
+    argv.append(String("--column"))
+    argv.append(String("--color=never"))
+    # Search dot-prefixed files and directories. rg skips them by
+    # default, which silently hid every hit under ``.github/``,
+    # ``.gitlab-ci.yml``, ``.env``, ``.claude/`` and the rest of a
+    # project's dot tree — a query for a workflow job name returned
+    # zero results with the text sitting right there in
+    # ``.github/workflows/``. ``walk_project_files`` (the non-rg
+    # walker, and the file picker built on it) has always included
+    # dotfiles, so the two surfaces disagreed about what "the
+    # project" is.
+    #
+    # ``.git`` itself is the one exclusion: ``--hidden`` does descend
+    # into it (rg 13 doesn't special-case it), and its packfiles,
+    # refs and COMMIT_EDITMSG are never what a project find is
+    # after. Negated globs beat include globs in rg's override
+    # matcher regardless of order, so the user ``-g`` patterns added
+    # below can't accidentally re-admit it.
+    argv.append(String("--hidden"))
+    argv.append(String("-g"))
+    argv.append(String("!.git/"))
+    # Case mode: explicit ``-s`` / ``-i`` so the toggle's behavior
+    # is unambiguous. Smart-case (the previous default) felt
+    # slightly magical and would silently override the user's
+    # intent when the query happened to contain an uppercase byte.
+    if opts.case_sensitive:
+        argv.append(String("--case-sensitive"))
+    else:
+        argv.append(String("--ignore-case"))
+    if opts.whole_word:
+        argv.append(String("--word-regexp"))
+    if not opts.regex:
+        argv.append(String("-F"))            # fixed-string
+    # Filename globs: one ``-g`` per comma-separated pattern. rg
+    # applies these as include/exclude filters on the file walk, so a
+    # query like ``foo`` with glob ``*.mojo`` only scans Mojo files.
+    var globs = _split_globs(glob)
+    for gi in range(len(globs)):
+        argv.append(String("-g"))
+        argv.append(globs[gi])
+    # Cap how much rg emits per matched line. Without this, a hit
+    # in a minified JS / CSS bundle would push a single multi-MB
+    # match line into our pipe; we'd have to buffer it whole
+    # before finding the trailing ``\n`` (since lines are our
+    # match boundary), and a paint-frame's worth of work would
+    # turn into seconds. ``--max-columns-preview`` keeps the
+    # matched substring visible so the user still sees what they
+    # found, just truncated.
+    argv.append(String("--max-columns"))
+    argv.append(String("1024"))
+    argv.append(String("--max-columns-preview"))
+    argv.append(String("--"))                # end of options
+    argv.append(query)
+    argv.append(search_dir)
+    return argv^
+
+
 struct _RgRunner(Movable):
     """Streaming ripgrep child: spawns ``rg`` as a non-blocking
     subprocess and parses its line-oriented output incrementally as it
@@ -1541,54 +1622,7 @@ struct _RgRunner(Movable):
         ``.*`` toggles between ``-F`` (fixed-string) and rg's regex
         default. ``-w`` works with both modes."""
         self.cancel()
-        # Resolve the search root. A blank / slash-only scope falls back
-        # to the whole project; otherwise we search the joined subpath.
-        # rg silently reports nothing (errors land on stderr, which we
-        # don't read) when the subpath doesn't exist, so a typo just
-        # yields an empty result list rather than a crash.
-        var clean = _clean_scope(scope)
-        var search_dir = root
-        if len(clean.as_bytes()) > 0:
-            search_dir = join_path(root, clean)
-        var argv = List[String]()
-        argv.append(String("rg"))
-        argv.append(String("--no-heading"))
-        argv.append(String("--line-number"))
-        argv.append(String("--column"))
-        argv.append(String("--color=never"))
-        # Case mode: explicit ``-s`` / ``-i`` so the toggle's behavior
-        # is unambiguous. Smart-case (the previous default) felt
-        # slightly magical and would silently override the user's
-        # intent when the query happened to contain an uppercase byte.
-        if opts.case_sensitive:
-            argv.append(String("--case-sensitive"))
-        else:
-            argv.append(String("--ignore-case"))
-        if opts.whole_word:
-            argv.append(String("--word-regexp"))
-        if not opts.regex:
-            argv.append(String("-F"))            # fixed-string
-        # Filename globs: one ``-g`` per comma-separated pattern. rg
-        # applies these as include/exclude filters on the file walk, so a
-        # query like ``foo`` with glob ``*.mojo`` only scans Mojo files.
-        var globs = _split_globs(glob)
-        for gi in range(len(globs)):
-            argv.append(String("-g"))
-            argv.append(globs[gi])
-        # Cap how much rg emits per matched line. Without this, a hit
-        # in a minified JS / CSS bundle would push a single multi-MB
-        # match line into our pipe; we'd have to buffer it whole
-        # before finding the trailing ``\n`` (since lines are our
-        # match boundary), and a paint-frame's worth of work would
-        # turn into seconds. ``--max-columns-preview`` keeps the
-        # matched substring visible so the user still sees what they
-        # found, just truncated.
-        argv.append(String("--max-columns"))
-        argv.append(String("1024"))
-        argv.append(String("--max-columns-preview"))
-        argv.append(String("--"))                # end of options
-        argv.append(query)
-        argv.append(search_dir)
+        var argv = _project_find_argv(root, query, scope, glob, opts)
         try:
             self.proc = LspProcess.spawn(argv)
         except:

@@ -134,6 +134,16 @@ struct _FindSymbolRunner(Movable):
         argv.append(String("--column"))
         argv.append(String("--color=never"))
         argv.append(String("--smart-case"))
+        # Include dot-prefixed files/dirs, minus ``.git`` — same reason
+        # as the project-find runner in ``project_find.mojo``. It matters
+        # doubly here: this runner is only the *fallback* for a cold
+        # ``SymbolIndex``, and the index walks the project through
+        # ``walk_project_files``, which does see dotfiles. Without this
+        # the same query answered differently depending on whether the
+        # index happened to be ready.
+        argv.append(String("--hidden"))
+        argv.append(String("-g"))
+        argv.append(String("!.git/"))
         # Cap per-line preview so a hit inside a minified bundle can't
         # smuggle multi-MB lines into our buffer (mirrors the cap
         # ``project_find`` uses for the same reason).

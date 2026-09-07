@@ -39,7 +39,7 @@ from turbokod.menu import Menu, MenuBar, MenuItem
 from turbokod.project import ProjectMatch, find_in_project, walk_project_files
 from turbokod.find_results_pane import FindResultsPane
 from turbokod.highlight import GrammarRegistry, Highlight
-from turbokod.project_find import paint_match_row
+from turbokod.project_find import _project_find_argv, paint_match_row
 from turbokod.text_select import PaneTextSelect
 from turbokod.search_options import SearchOptions
 from turbokod.text_field import TextField
@@ -2588,6 +2588,62 @@ def test_find_symbol_query_split() raises:
     assert_equal(_query_qualifier(String("pkg.User.method")), String("pkg.User"))
 
 
+def _argv_index(argv: List[String], want: String) -> Int:
+    """Index of ``want`` in ``argv``, or -1. Position matters for the
+    flag/value pairs, so the tests below assert on it rather than just
+    membership."""
+    for i in range(len(argv)):
+        if argv[i] == want:
+            return i
+    return -1
+
+
+def test_project_find_argv_searches_dotfiles_but_not_dot_git() raises:
+    # rg skips dot-prefixed files and directories unless told otherwise,
+    # so without ``--hidden`` a project-wide find never looked inside
+    # ``.github/``, ``.env``, ``.claude/`` … — searching a repo for a
+    # workflow job name returned zero hits with the text sitting in
+    # ``.github/workflows/``. ``walk_project_files`` has always included
+    # dotfiles, and the two surfaces have to agree on what the project is.
+    var opts = SearchOptions(False, False, False)
+    var argv = _project_find_argv(
+        String("/proj"), String("prod_deploy"), String(""), String(""), opts,
+    )
+    assert_true(_argv_index(argv, String("--hidden")) >= 0)
+    # ``--hidden`` also opens up ``.git`` itself (rg 13 doesn't special-case
+    # it), whose packfiles and refs are never a search target.
+    var gi = _argv_index(argv, String("!.git/"))
+    assert_true(gi >= 1)
+    assert_equal(argv[gi - 1], String("-g"))
+    # The pattern and search root stay last, behind ``--``, so a query
+    # starting with ``-`` can't be read as a flag.
+    assert_equal(argv[len(argv) - 1], String("/proj"))
+    assert_equal(argv[len(argv) - 2], String("prod_deploy"))
+    assert_equal(argv[len(argv) - 3], String("--"))
+
+
+def test_project_find_argv_maps_options_scope_and_globs() raises:
+    var opts = SearchOptions(True, True, True)
+    var argv = _project_find_argv(
+        String("/proj"), String("x"), String("src"),
+        String("*.mojo,!*_test.py"), opts,
+    )
+    # A scope narrows rg's root; the parse side still reports paths
+    # relative to the project root.
+    assert_equal(argv[len(argv) - 1], String("/proj/src"))
+    # Cc / W / .* map onto explicit rg flags — regex mode means no ``-F``.
+    assert_true(_argv_index(argv, String("--case-sensitive")) >= 0)
+    assert_true(_argv_index(argv, String("--ignore-case")) < 0)
+    assert_true(_argv_index(argv, String("--word-regexp")) >= 0)
+    assert_true(_argv_index(argv, String("-F")) < 0)
+    # User globs coexist with the ``.git`` exclusion: rg's override
+    # matcher lets a negation win regardless of order, so an include
+    # glob like ``*.mojo`` can't re-admit ``.git/**``.
+    assert_true(_argv_index(argv, String("*.mojo")) >= 0)
+    assert_true(_argv_index(argv, String("!*_test.py")) >= 0)
+    assert_true(_argv_index(argv, String("!.git/")) >= 0)
+
+
 def test_find_symbol_container_match() raises:
     # Exact and case-insensitive container hits.
     assert_true(container_matches_qualifier(String("User"), String("User")))
@@ -2870,6 +2926,8 @@ def main() raises:
     test_text_field_paints_visible_window_after_scroll()
     test_find_symbol_query_keeps_dot()
     test_find_symbol_query_split()
+    test_project_find_argv_searches_dotfiles_but_not_dot_git()
+    test_project_find_argv_maps_options_scope_and_globs()
     test_find_symbol_container_match()
     test_shadow_button_press_captures_and_release_fires()
     test_shadow_button_release_outside_cancels()
