@@ -55,7 +55,8 @@ from turbokod.desktop import (
     EDITOR_NAV_BACK, EDITOR_NAV_FORWARD,
     EDITOR_OPEN_RECENT, EDITOR_PASTE, EDITOR_QUICK_OPEN, EDITOR_REDO,
     EDITOR_RENAME_SYMBOL,
-    EDITOR_REPLACE, EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_TOGGLE_BLAME,
+    EDITOR_REPLACE, EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_SELECT_ALL,
+    EDITOR_TOGGLE_BLAME,
     EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT, EDITOR_TOGGLE_COMPRESS_KWARGS,
     EDITOR_TOGGLE_GIT_CHANGES,
     EDITOR_TOGGLE_LINE_NUMBERS, EDITOR_TOGGLE_MINIMAP,
@@ -128,6 +129,7 @@ def _build_edit_items(has_extra_carets: Bool) -> List[MenuItem]:
     e.append(MenuItem(String("Cut"),   EDITOR_CUT))
     e.append(MenuItem(String("Copy"),  EDITOR_COPY))
     e.append(MenuItem(String("Paste"), EDITOR_PASTE))
+    e.append(MenuItem(String("Select All"), EDITOR_SELECT_ALL))
     e.append(MenuItem(String("Compare selection with clipboard"), EDITOR_COMPARE_CLIPBOARD))
     if has_extra_carets:
         e.append(MenuItem(String("Fill..."), EDITOR_FILL))

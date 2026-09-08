@@ -656,6 +656,20 @@ struct DebugPane(Copyable, Movable):
         self.pending_repl_expr = String("")
         return e^
 
+    def select_all_input(mut self) -> Bool:
+        """Select the whole REPL input line — the pane's half of the
+        framework-wide ``edit:select-all`` action.
+
+        The console line is a real input field, so ``Cmd+A`` while the pane
+        is focused belongs to it and must not reach past the pane into the
+        editor behind. Returns False when the console isn't up (the pane is
+        then pure output, with nothing to select all of).
+        """
+        if not self.repl_enabled:
+            return False
+        self.repl_input.select_all()
+        return True
+
     def _submit_repl(mut self):
         """Latch the current input line for the host to evaluate, push
         it onto history, and clear the field. No-op on an empty line."""

@@ -9128,19 +9128,7 @@ struct Editor(Copyable, Movable):
                 self.dirty = True
                 self._mark_hl_dirty(pre_dirty_row_multi, post_dirty_row_multi)
         elif chord == CLIP_SELECT_ALL:
-            # Ctrl+A — select whole buffer.
-            # Pure selection move: no buffer mutation, no undo, no
-            # extras (a select-all on top of multi-cursor would
-            # collapse to one selection anyway). Anchor at (0, 0),
-            # cursor at end of last line — same direction as a
-            # Shift-Down/End drive so subsequent shift-arrows extend
-            # in the natural direction.
-            self.clear_extra_carets()
-            var n_rows = self.buffer.line_count()
-            if n_rows > 0:
-                var last = n_rows - 1
-                self.move_to(0, 0, False)
-                self.move_to(last, self.buffer.line_length(last), True)
+            self.select_all()
         elif chord == CLIP_COPY:
             # Ctrl+C — non-mutating copy. No undo snapshot needed.
             self.clear_extra_carets()
@@ -9389,6 +9377,27 @@ struct Editor(Copyable, Movable):
         self._insert_text(text)
         self.dirty = True
         self._mark_hl_dirty(pre_dirty_row)
+
+    def select_all(mut self):
+        """Select the whole buffer — the Ctrl/Cmd+A action.
+
+        Pure selection move: no buffer mutation, no undo, no extras (a
+        select-all on top of multi-cursor would collapse to one selection
+        anyway). Anchor at (0, 0), cursor at end of the last line — same
+        direction as a Shift-Down/End drive, so subsequent shift-arrows
+        extend the way the user expects.
+
+        A method rather than a branch inside ``handle_key`` because the
+        desktop's ``edit:select-all`` action (Edit menu / ``Cmd+A`` matched
+        by the host menu before the keystroke reaches us) has to reach the
+        same code.
+        """
+        self.clear_extra_carets()
+        var n_rows = self.buffer.line_count()
+        if n_rows > 0:
+            var last = n_rows - 1
+            self.move_to(0, 0, False)
+            self.move_to(last, self.buffer.line_length(last), True)
 
     def copy_to_clipboard(mut self):
         """Copy the current selection to the system clipboard. With no

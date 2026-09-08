@@ -21,7 +21,8 @@ from turbokod.drafts_store import StoredDraft, save_drafts
 from turbokod.desktop import (
     Desktop, PendingSaveAction, _VIEW_STATES_MAX, _project_menu_labels,
     EDITOR_FIND, EDITOR_NAV_BACK, EDITOR_NAV_FORWARD, EDITOR_NEW,
-    EDITOR_REPLACE, EDITOR_SAVE, EDITOR_SAVE_AS, PROJECT_CLOSE_ACTION,
+    EDITOR_REPLACE, EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_SELECT_ALL,
+    PROJECT_CLOSE_ACTION,
     PROJECT_SETTINGS, PROJECT_FIND, PROJECT_OPEN_RECENT_PREFIX,
     PROJECT_REPLACE, WINDOW_CLOSE_ALL, WINDOW_FOCUS_PREFIX
 )
@@ -56,7 +57,7 @@ from turbokod.settings import Settings
 from turbokod.window import WindowManager
 from turbokod.events import (
     Event, EVENT_FOCUS_OUT, EVENT_RESIZE, KEY_END, KEY_ENTER, KEY_ESC,
-    MOD_META, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE
+    KEY_HOME, MOD_CTRL, MOD_META, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE
 )
 from turbokod.geometry import Point, Rect
 from turbokod.prompt import (
@@ -1093,6 +1094,114 @@ def test_nav_history_back_via_dispatch_action() raises:
     assert_equal(d.windows.windows[d.windows.focused].editor.file_path, path_b)
     _ = external_call["unlink", Int32]((path_a + String("\0")).unsafe_ptr())
     _ = external_call["unlink", Int32]((path_b + String("\0")).unsafe_ptr())
+
+
+def test_cmd_a_selects_all_in_focused_editor() raises:
+    """⌘A must reach the focused editor. ``Editor.handle_key`` has always
+    recognized the chord, but the desktop's global hotkey gate swallowed
+    ``(a, MOD_META)`` with a beep because only the ``Ctrl+A`` alias was
+    registered — so select-all worked on Linux and did nothing on macOS."""
+    var d = Desktop()
+    d.new_file(_SCREEN)
+    var idx = d.windows.focused
+    d.windows.windows[idx].editor.paste_text(String("line one\nline two"))
+    d.windows.windows[idx].editor.move_to(0, 0, False)
+    _ = d.handle_event(_key(UInt32(ord("a")), MOD_META), _SCREEN)
+    var fidx = d.windows.focused
+    assert_true(d.windows.windows[fidx].editor.has_selection())
+    assert_equal(d.windows.windows[fidx].editor.selections[0].anchor_row, 0)
+    assert_equal(d.windows.windows[fidx].editor.selections[0].anchor_col, 0)
+    assert_equal(d.windows.windows[fidx].editor.selections[0].row, 1)
+    assert_equal(d.windows.windows[fidx].editor.selections[0].col, 8)
+
+
+def test_ctrl_a_still_selects_all_in_focused_editor() raises:
+    """The Linux/Windows alias keeps working — it's the terminal
+    frontend's only select-all chord."""
+    var d = Desktop()
+    d.new_file(_SCREEN)
+    var idx = d.windows.focused
+    d.windows.windows[idx].editor.paste_text(String("abc"))
+    d.windows.windows[idx].editor.move_to(0, 0, False)
+    _ = d.handle_event(_key(UInt32(ord("a")), MOD_CTRL), _SCREEN)
+    assert_true(d.windows.windows[d.windows.focused].editor.has_selection())
+
+
+def test_select_all_action_selects_focused_editor() raises:
+    """The Edit-menu / host-⌘A path: AppKit matches the key equivalent and
+    calls ``dispatch_action`` directly, bypassing ``handle_event``."""
+    var d = Desktop()
+    d.new_file(_SCREEN)
+    d.windows.windows[d.windows.focused].editor.paste_text(String("abc"))
+    d.windows.windows[d.windows.focused].editor.move_to(0, 0, False)
+    var left = d.dispatch_action(EDITOR_SELECT_ALL, _SCREEN)
+    assert_false(Bool(left))   # framework consumed the action
+    assert_true(d.windows.windows[d.windows.focused].editor.has_selection())
+
+
+def test_select_all_action_routes_into_focused_modal_field() raises:
+    """With a modal up, the select-all must land in *its* text field, not
+    in the buffer behind the dialog. Same replay path as ⌘C / ⌘V — the
+    action is keystroke-equivalent, so ``_action_replay_event`` re-injects
+    the chord into the modal."""
+    var d = Desktop()
+    d.new_file(_SCREEN)
+    d.windows.windows[d.windows.focused].editor.paste_text(String("abc"))
+    d.windows.windows[d.windows.focused].editor.move_to(0, 0, False)
+    _ = d.dispatch_action(EDITOR_FIND, _SCREEN)
+    assert_true(d.prompt.active)
+    d.prompt.input.set_text(String("needle"))
+    _ = d.prompt.input.handle_key(_key(KEY_HOME))
+    assert_false(d.prompt.input.has_selection())
+    _ = d.dispatch_action(EDITOR_SELECT_ALL, _SCREEN)
+    assert_true(d.prompt.input.has_selection())
+    assert_equal(d.prompt.input.anchor, 0)
+    assert_equal(d.prompt.input.cursor, 6)
+    # The editor behind the dialog is untouched.
+    assert_false(d.windows.windows[d.windows.focused].editor.has_selection())
+
+
+def test_select_all_keystroke_reaches_modal_field() raises:
+    """The terminal frontend's route: the modal stack in ``handle_event``
+    consumes the chord in the focused field ahead of the hotkey lookup."""
+    var d = Desktop()
+    d.new_file(_SCREEN)
+    _ = d.dispatch_action(EDITOR_FIND, _SCREEN)
+    d.prompt.input.set_text(String("needle"))
+    _ = d.prompt.input.handle_key(_key(KEY_HOME))
+    _ = d.handle_event(_key(UInt32(ord("a")), MOD_META), _SCREEN)
+    assert_true(d.prompt.input.has_selection())
+    assert_equal(d.prompt.input.cursor, 6)
+
+
+def test_select_all_is_documented_with_both_aliases() raises:
+    """The shortcuts page folds ⌘A and Ctrl+A into one "Select all" row —
+    the ``doc_only`` Ctrl alias shares the ⌘ binding's ``help`` string."""
+    var d = Desktop()
+    var text = d._hotkeys_help_text()
+    assert_true(String("Cmd+A / Ctrl+A") in text)
+
+
+def test_select_all_declines_to_reach_past_a_focused_pane() raises:
+    """A focused tool pane owns the keyboard: ⌘A arriving from the host
+    menu must not select the buffer in the window behind it."""
+    var d = Desktop()
+    d.new_file(_SCREEN)
+    d.windows.windows[d.windows.focused].editor.paste_text(String("abc"))
+    d.windows.windows[d.windows.focused].editor.move_to(0, 0, False)
+    d.debug_pane.visible = True
+    d.debug_pane.focused = True
+    assert_false(d.select_all_in_focus())   # console line isn't up
+    assert_false(d.windows.windows[d.windows.focused].editor.has_selection())
+    # With the debugger console up, the pane's input field takes it.
+    d.debug_pane.repl_enabled = True
+    d.debug_pane.repl_input.set_text(String("expr"))
+    _ = d.debug_pane.repl_input.handle_key(_key(KEY_HOME))
+    assert_true(d.select_all_in_focus())
+    assert_true(d.debug_pane.repl_input.has_selection())
+    assert_equal(d.debug_pane.repl_input.cursor, 4)
+    assert_false(d.windows.windows[d.windows.focused].editor.has_selection())
+
 
 
 def test_nav_history_cmd_bracket_keys_fire_dispatch() raises:
@@ -3242,6 +3351,13 @@ def main() raises:
     test_nav_history_branching_truncates_forward()
     test_nav_history_back_via_dispatch_action()
     test_nav_history_cmd_bracket_keys_fire_dispatch()
+    test_cmd_a_selects_all_in_focused_editor()
+    test_ctrl_a_still_selects_all_in_focused_editor()
+    test_select_all_action_selects_focused_editor()
+    test_select_all_action_routes_into_focused_modal_field()
+    test_select_all_keystroke_reaches_modal_field()
+    test_select_all_is_documented_with_both_aliases()
+    test_select_all_declines_to_reach_past_a_focused_pane()
     test_window_manager_close_focused()
     test_window_manager_rotate_focus_cycles_in_stable_order()
     test_window_manager_rotate_focus_noop_when_fewer_than_two_windows()

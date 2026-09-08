@@ -382,6 +382,12 @@ comptime GIT_OPEN_ALL_CHANGED       = String("git:open_all_changed")
 comptime EDITOR_CUT           = String("edit:cut")
 comptime EDITOR_COPY          = String("edit:copy")
 comptime EDITOR_PASTE         = String("edit:paste")
+# Select everything in whatever owns keyboard focus — the focused editor's
+# buffer, or the focused input field. Framework-level rather than per-widget:
+# ``select_all_in_focus`` resolves the target the same way
+# ``paste_text_into_focus`` does, so a surface gains the behavior by being
+# reachable through that resolution rather than by re-implementing the chord.
+comptime EDITOR_SELECT_ALL    = String("edit:select-all")
 comptime EDITOR_UNDO          = String("edit:undo")
 comptime EDITOR_REDO          = String("edit:redo")
 # Multi-cursor "Fill..." dialog: lets the user insert either a fixed
@@ -1941,6 +1947,15 @@ struct Desktop(Movable):
             UInt32(ord("v")), MOD_META, EDITOR_PASTE,
             group=HKG_EDIT, help=String("Paste"),
         ))
+        # Select all. A real action rather than just a gate-clearing
+        # ``doc_only`` row (which is all the Ctrl+A alias below needs) so the
+        # Edit menu can carry it and the host's ⌘A key-equivalent lands in
+        # ``dispatch_action`` — which is also what routes the chord into a
+        # focused modal's text field instead of the editor behind the dialog.
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("a")), MOD_META, EDITOR_SELECT_ALL,
+            group=HKG_EDIT, help=String("Select all"),
+        ))
         self._hotkeys.append(Hotkey(
             UInt32(ord("z")), MOD_META, EDITOR_UNDO,
             group=HKG_EDIT, help=String("Undo"),
@@ -2336,7 +2351,11 @@ struct Desktop(Movable):
             group=HKG_EDIT, help=String("Code actions (quickfix / symbol)"),
             doc_shortcut=String("Alt+Enter"), doc_only=True,
         ))
-        # Ctrl+A — select all (editor clipboard chord; handled in-editor).
+        # Ctrl+A — the Linux/Windows select-all alias, folded into the ⌘A
+        # row above by the shared ``help`` string. ``doc_only`` because
+        # ``Editor.handle_key`` recognizes the chord itself (via
+        # ``clipboard_chord``); this row exists to clear the global gate so
+        # the keystroke reaches it.
         self._hotkeys.append(Hotkey(
             ctrl_key("a"), MOD_CTRL, String(""),
             group=HKG_EDIT, help=String("Select all"), doc_only=True,
@@ -3038,6 +3057,43 @@ struct Desktop(Movable):
             self.windows.windows[idx].editor.reveal_cursor(
                 self.windows.windows[idx].interior(),
             )
+            return True
+        return False
+
+    def select_all_in_focus(mut self) -> Bool:
+        """Select everything in whatever owns keyboard focus, exactly like a
+        Ctrl/Cmd+A. Backs the ``EDITOR_SELECT_ALL`` action; returns True when
+        something claimed it.
+
+        Focus resolution mirrors ``paste_text_into_focus`` — that symmetry is
+        the point, since both answer the same question ("who is the text
+        surface right now?") and a new surface should only have to become
+        reachable once.
+
+        A modal text dialog owns input ahead of any editor: its ``TextField``
+        select-alls itself on the ``CLIP_SELECT_ALL`` chord, and
+        ``dispatch_action`` already re-injects the chord into the focused
+        modal field. Decline here so we don't select the buffer *behind* the
+        dialog.
+
+        A focused tool pane likewise keeps the chord: the run pane's console
+        line is a real input field and takes the select-all; the pty-backed
+        panes and the read-only output panes have no select-all of their own,
+        and reaching past them into the editor behind would select the wrong
+        thing — so they swallow it rather than misfire.
+        """
+        if self._modal_owns_input():
+            return False
+        for i in range(len(self.terminal_panes)):
+            if self.terminal_panes[i].focused:
+                return False
+        if self.debug_pane.focused:
+            return self.debug_pane.select_all_input()
+        if self.test_pane.focused or self.find_results_pane.focused:
+            return False
+        if self.windows.focused >= 0 \
+                and self.windows.windows[self.windows.focused].is_editor:
+            self.windows.windows[self.windows.focused].editor.select_all()
             return True
         return False
 
@@ -8146,8 +8202,9 @@ struct Desktop(Movable):
             chords (Word Left/Right, Line Start/End, Grow/Shrink Selection,
             Add Caret Above/Below, …), which encode their chord in the
             action string itself.
-          * The clipboard / history quintet (Paste / Cut / Copy / Undo /
-            Redo), whose chord is looked up from the hotkey table.
+          * The clipboard / history / selection set (Paste / Cut / Copy /
+            Select All / Undo / Redo), whose chord is looked up from the
+            hotkey table.
 
         The modal-input gate at the top of ``dispatch_action`` consults this
         to decide whether an action arriving while a modal owns the screen
@@ -8170,8 +8227,8 @@ struct Desktop(Movable):
                 return Event.key_event(UInt32(keyv), UInt8(modsv))
             return Optional[Event]()
         if action == EDITOR_PASTE or action == EDITOR_CUT \
-                or action == EDITOR_COPY or action == EDITOR_UNDO \
-                or action == EDITOR_REDO:
+                or action == EDITOR_COPY or action == EDITOR_SELECT_ALL \
+                or action == EDITOR_UNDO or action == EDITOR_REDO:
             var i = len(self._hotkeys) - 1
             while i >= 0:
                 if self._hotkeys[i].action == action:
@@ -8617,6 +8674,9 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == EDITOR_PASTE:
             _ = self.paste_text_into_focus(clipboard_paste())
+            return Optional[String]()
+        if action == EDITOR_SELECT_ALL:
+            _ = self.select_all_in_focus()
             return Optional[String]()
         if action == EDITOR_COMPARE_CLIPBOARD:
             self._open_compare_with_clipboard(screen)
