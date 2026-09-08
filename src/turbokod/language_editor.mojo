@@ -44,7 +44,7 @@ from .events import (
 from .geometry import Point, Rect
 from .list_box import ListBox
 from .text_field import TextField
-from .type_ahead import TypeAhead, is_printable_ascii, type_ahead_pick
+from .type_ahead import TypeAhead, is_type_ahead_key, type_ahead_pick
 from .view import DraggableDialog, FocusGroup, RowCursor
 from .window import (
     close_button_clicked, paint_close_button, paint_window_title,
@@ -437,7 +437,8 @@ struct LanguageEditor(Movable):
         # Type-to-jump on the candidates list. Gated on focus so the
         # argv text field below it still consumes letters as text
         # input rather than as a search prefix.
-        if self._focus.is_focused(Int(_FOCUS_LIST)) and is_printable_ascii(k):
+        if self._focus.is_focused(Int(_FOCUS_LIST)) \
+                and is_type_ahead_key(event):
             var hit = type_ahead_pick(
                 self._type_ahead, self.candidates, chr(Int(k)),
             )

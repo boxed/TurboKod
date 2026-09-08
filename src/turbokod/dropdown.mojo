@@ -40,7 +40,7 @@ from .geometry import Point, Rect
 from .picker_input import scroll_to_reveal
 from .string_utils import display_columns
 from .type_ahead import (
-    TypeAhead, is_printable_ascii, starts_with_ci, type_ahead_pick,
+    TypeAhead, is_type_ahead_key, starts_with_ci, type_ahead_pick,
 )
 
 
@@ -342,7 +342,7 @@ struct Dropdown(Copyable, Movable):
         # Mirrors ``DirBrowser.type_to_search`` so a user who already
         # knows the file-list muscle memory gets it for free in
         # dropdowns too.
-        if UInt32(0x20) <= k and k < UInt32(0x7F):
+        if is_type_ahead_key(event):
             _ = self.type_to_search(chr(Int(k)))
             return True
         # Swallow other keys while open — the popup is modal-ish and

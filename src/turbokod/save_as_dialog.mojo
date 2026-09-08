@@ -38,6 +38,7 @@ from .events import (
 from .file_io import basename, join_path, parent_path
 from .geometry import Point, Rect
 from .text_field import TextField
+from .type_ahead import is_type_ahead_key
 from .view import DraggableDialog, FocusGroup, RowCursor
 from .window import (
     close_button_clicked, paint_close_button, paint_window_title,
@@ -294,7 +295,7 @@ struct SaveAsDialog(Movable):
         if k == KEY_BACKSPACE and self._focus.is_focused(_SLOT_LISTING):
             self.browser.ascend()
             return True
-        if UInt32(0x20) <= k and k < UInt32(0x7F):
+        if is_type_ahead_key(event):
             if self._focus.is_focused(_SLOT_LISTING):
                 # Type-to-search: jump the directory selection to the
                 # first folder whose name starts with the accumulated

@@ -30,7 +30,7 @@ from turbokod.string_utils import (
     char_width, display_columns, escape_drop_paths, prev_codepoint_start,
     tail_to_columns
 )
-from turbokod.type_ahead import is_printable_ascii
+from turbokod.type_ahead import is_printable_ascii, is_type_ahead_key
 from turbokod.lsp_dispatch import CompletionItem, TextEditEntry
 from turbokod.git_changes import (
     apply_patch_to_worktree, compute_unstaged_diff, fetch_git_status
@@ -61,7 +61,7 @@ from turbokod.view import centered
 from turbokod.window import Window
 
 from support import (
-    _SCREEN, _contains, _doc_paths, _docs_contains, _ensure_dir, _rm_rf,
+    _SCREEN, _contains, _doc_paths, _docs_contains, _ensure_dir, _key, _rm_rf,
     _run_git, _temp_path, setup_test_env
 )
 
@@ -558,6 +558,30 @@ def test_is_printable_ascii_gates_search_keys() raises:
     assert_true(is_printable_ascii(UInt32(0x20)))   # space
     assert_false(is_printable_ascii(UInt32(0x1F)))  # below printable
     assert_false(is_printable_ascii(UInt32(0x7F)))  # DEL
+
+
+def test_is_type_ahead_key_rejects_command_chords() raises:
+    """The gate every type-to-jump site uses. A ⌘ / Ctrl / Alt chord is a
+    command, not typing: gating on the bare key code let ⌘A (and every
+    other ⌘-letter) snap a focused list's highlight to an unrelated row as
+    a side effect of the shortcut."""
+    assert_true(is_type_ahead_key(_key(UInt32(ord("a")))))
+    assert_false(is_type_ahead_key(_key(UInt32(ord("a")), MOD_META)))
+    assert_false(is_type_ahead_key(_key(UInt32(ord("a")), MOD_CTRL)))
+    assert_false(is_type_ahead_key(_key(UInt32(ord("a")), MOD_ALT)))
+    assert_false(is_type_ahead_key(_key(UInt32(ord("s")), MOD_META)))
+    # Non-printables are still out regardless of modifiers.
+    assert_false(is_type_ahead_key(_key(KEY_UP)))
+    assert_false(is_type_ahead_key(_key(UInt32(0x7F))))
+
+
+def test_is_type_ahead_key_accepts_shifted_typing() raises:
+    """Shift is *not* a command modifier: the native host delivers capital
+    letters and shifted symbols as ``(printable, MOD_SHIFT)``, so excluding
+    it would make an uppercase search prefix a dead key — which is exactly
+    what the menu's old ``mods == 0`` gate did."""
+    assert_true(is_type_ahead_key(_key(UInt32(ord("Z")), MOD_SHIFT)))
+    assert_true(is_type_ahead_key(_key(UInt32(ord("_")), MOD_SHIFT)))
 
 
 def test_expand_save_placeholders_substitutes_filepath() raises:
@@ -1204,6 +1228,8 @@ def main() raises:
     test_alt_letter_opens_menu_by_mnemonic()
     test_detached_settings_clipboard_chord_does_not_recurse()
     test_is_printable_ascii_gates_search_keys()
+    test_is_type_ahead_key_rejects_command_chords()
+    test_is_type_ahead_key_accepts_shifted_typing()
     test_expand_save_placeholders_substitutes_filepath()
     test_pyenv_pin_satisfaction()
     test_extension_of_helper()

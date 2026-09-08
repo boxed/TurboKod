@@ -29,7 +29,7 @@ Two consumption surfaces:
 
 Standard usage of the helper::
 
-    if is_printable_ascii(event.key) and self.focus == _FOCUS_LIST:
+    if is_type_ahead_key(event) and self.focus == _FOCUS_LIST:
         var hit = type_ahead_pick(
             self._type_ahead, self._row_labels(),
             chr(Int(event.key)),
@@ -46,6 +46,7 @@ fall through to no row.
 from std.collections.list import List
 
 from .case_fold import starts_with_ci as _starts_with_ci
+from .events import Event, EVENT_KEY, MOD_ALT, MOD_CTRL, MOD_META
 from .posix import monotonic_ms
 
 
@@ -103,8 +104,40 @@ struct TypeAhead(ImplicitlyCopyable, Movable):
 def is_printable_ascii(key: UInt32) -> Bool:
     """True for ``key`` codes a list widget should treat as "user is
     typing a search prefix". Matches the dropdown/dir-browser gate so
-    every list widget agrees on what counts as a search keystroke."""
+    every list widget agrees on what counts as a search keystroke.
+
+    Prefer ``is_type_ahead_key`` at a widget's gate — a bare key code
+    can't tell typing from a chord, and every site that gated on this
+    alone snapped its highlight on ⌘-shortcuts.
+    """
     return UInt32(0x20) <= key and key < UInt32(0x7F)
+
+
+def is_type_ahead_key(event: Event) -> Bool:
+    """True when ``event`` is a keystroke a focused list should treat as
+    "the user is typing a search prefix". **This is the gate every
+    type-to-jump site should use.**
+
+    Two conditions, and the second is the one that kept getting missed:
+
+    * the key is a printable ASCII character (``is_printable_ascii``);
+    * no Ctrl / Alt / Cmd is held. A chord is a *command*, not typing —
+      ⌘A is select-all, ⌘S is save — and a list that reads the letter
+      out of one snaps its highlight to an unrelated row as a side
+      effect of a shortcut the user aimed somewhere else entirely.
+
+    Shift is deliberately *not* excluded: the native host delivers
+    capital letters and shifted symbols as ``(printable, MOD_SHIFT)``
+    (the same convention ``Desktop._is_gated_combo`` relies on), so
+    gating on ``mods == MOD_NONE`` makes typing an uppercase prefix a
+    dead key. That was the mirror-image bug, and it's why this is one
+    shared predicate rather than a modifier check per call site.
+    """
+    if event.kind != EVENT_KEY:
+        return False
+    if (event.mods & (MOD_CTRL | MOD_ALT | MOD_META)) != 0:
+        return False
+    return is_printable_ascii(event.key)
 
 
 def _find_prefix_in(options: List[String], prefix: String) -> Int:

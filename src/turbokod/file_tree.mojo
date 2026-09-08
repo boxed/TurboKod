@@ -34,7 +34,7 @@ from .file_io import (
 )
 from .geometry import Point, Rect
 from .project import GitignoreMatcher, load_project_gitignore
-from .type_ahead import TypeAhead, is_printable_ascii, type_ahead_pick
+from .type_ahead import TypeAhead, is_type_ahead_key, type_ahead_pick
 
 
 comptime FILE_TREE_WIDTH: Int = 28
@@ -442,7 +442,7 @@ struct FileTree(Movable):
         # selection to the first visible entry whose name starts
         # with the typed prefix. Matches the convention every list
         # widget uses (Settings, dropdowns, dir browser, …).
-        if is_printable_ascii(event.key):
+        if is_type_ahead_key(event):
             var labels = List[String]()
             for i in range(len(self.entries)):
                 labels.append(self.entries[i].name)

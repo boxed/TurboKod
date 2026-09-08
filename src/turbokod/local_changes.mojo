@@ -101,7 +101,7 @@ from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     KEY_BACKSPACE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME, KEY_LEFT,
     KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP,
-    MOD_CTRL, MOD_META, MOD_SHIFT,
+    MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT,
     MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
@@ -148,7 +148,7 @@ from .string_utils import (
     tail_to_columns,
 )
 from .text_field import TextField
-from .type_ahead import TypeAhead, is_printable_ascii, type_ahead_pick
+from .type_ahead import TypeAhead, is_type_ahead_key, type_ahead_pick
 from .buttons import BUTTON_FIRED, ShadowButton, paint_shadow_button
 from .editor import Editor
 from .config import WRAP_SOFT
@@ -3873,6 +3873,21 @@ struct LocalChanges(Movable):
         if k == UInt32(0x63) and (event.mods & MOD_META) != 0:
             self._copy_focused()
             return True
+        # Below here the handler is bare-letter shortcuts, navigation and
+        # type-to-jump, all matched on the key code alone — so swallow any
+        # *other* command chord before one of them reads the letter out of
+        # it. This handler owns input while the sidebar is up (see the
+        # ``_modal_owns_input`` gate), so an unbound ⌘ / Ctrl / Alt combo
+        # arrives here in full, and the bare matches meant ⌘P ran a pull,
+        # ⌘M merged, and ⌘D opened the discard-changes confirm.
+        #
+        # Shift is deliberately not in the mask: it's how a capital letter
+        # is spelled, and 'A' / 'M' / 'P' are real shortcuts. Tab is
+        # excepted so Ctrl+Tab keeps cycling panes (Shift+Tab clears the
+        # mask on its own).
+        if (event.mods & (MOD_CTRL | MOD_ALT | MOD_META)) != 0 \
+                and k != KEY_TAB:
+            return True
         # Pull / push act on the repo as a whole — no selection is
         # involved — so they fire from any of the three sidebar panes
         # rather than only from Files. On Branches / Commits that costs
@@ -3997,7 +4012,7 @@ struct LocalChanges(Movable):
         # shortcuts (c / A / d) keep working; p / P are handled above
         # for all three panes — see the ``_type_ahead`` field comment
         # for the rationale.
-        if is_printable_ascii(k) and (
+        if is_type_ahead_key(event) and (
             self.focus == _PANE_BRANCHES or self.focus == _PANE_COMMITS
         ):
             var labels = List[String]()

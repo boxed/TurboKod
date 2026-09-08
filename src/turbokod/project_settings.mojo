@@ -59,7 +59,7 @@ from .project_grammars import GrammarOverride
 from .project_on_save import on_save_equal
 from .project_targets import ProjectTargets, RunTarget
 from .text_field import TextField
-from .type_ahead import TypeAhead, is_printable_ascii, type_ahead_pick
+from .type_ahead import TypeAhead, is_type_ahead_key, type_ahead_pick
 from .window import paint_window_title
 
 
@@ -1345,7 +1345,7 @@ struct ProjectSettings(Movable):
                 self._gr_commit_fields()
                 return True
         # Type-to-jump on whichever list owns focus.
-        if is_printable_ascii(k):
+        if is_type_ahead_key(event):
             self._handle_type_to_jump(chr(Int(k)))
             return True
         return True

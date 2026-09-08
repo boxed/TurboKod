@@ -72,7 +72,8 @@ from turbokod.posix import (
 from turbokod.config import WRAP_NONE
 from turbokod.events import (
     Event, KEY_BACKSPACE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME,
-    KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_SPACE, KEY_UP,
+    KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_SPACE, KEY_TAB,
+    KEY_UP,
     MOD_CTRL,
     MOD_META, MOD_SHIFT, MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP
 )
@@ -1515,6 +1516,40 @@ def test_local_changes_open_records_status_when_clean() raises:
     assert_true(len(lc.status_message.as_bytes()) > 0)
     lc.close()
     assert_false(lc.active)
+
+
+def test_local_changes_swallows_unbound_command_chords() raises:
+    """Regression: the sidebar's bare-letter git shortcuts matched on the
+    key code alone, so an unbound ⌘ chord had its letter read as the
+    shortcut while the sidebar owned input — ⌘P ran a pull, ⌘M merged.
+    They must be swallowed instead."""
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    var lc = _local_changes_with_branches()
+    lc.sel_branch = 1                       # feature-x
+    _ = lc.handle_key(_key(UInt32(0x70), MOD_META), screen, registry)   # ⌘P
+    assert_equal(lc._git_op, _GITOP_NONE)
+    _ = lc.handle_key(_key(UInt32(0x4D), MOD_META), screen, registry)   # ⌘M
+    assert_equal(lc._git_op, _GITOP_NONE)
+    _ = lc.handle_key(_key(UInt32(0x64), MOD_META), screen, registry)   # ⌘D
+    assert_equal(lc.overlay, _OVERLAY_NONE)
+    # Bare 'p' still pulls — the guard must not disarm the real shortcut.
+    _ = lc.handle_key(_key(UInt32(0x70)), screen, registry)
+    assert_equal(lc._git_op, _GITOP_PULL)
+    lc.release()
+
+
+def test_local_changes_shift_tab_still_cycles_focus_backward() raises:
+    """Shift isn't a command modifier, so the chord guard must let
+    Shift+Tab through — and capital-letter shortcuts ('M' merge, 'P'
+    push) with it."""
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    var lc = _local_changes_with_branches()
+    var before = lc.focus
+    _ = lc.handle_key(_key(KEY_TAB, MOD_SHIFT), screen, registry)
+    assert_true(lc.focus != before)
+    lc.release()
 
 
 def test_local_changes_space_on_branch_checks_it_out() raises:
@@ -4757,6 +4792,8 @@ def main() raises:
     test_goto_change_chunk_navigates_and_builds_preview()
     test_revert_chunk_at_cursor_restores_head()
     test_local_changes_open_records_status_when_clean()
+    test_local_changes_swallows_unbound_command_chords()
+    test_local_changes_shift_tab_still_cycles_focus_backward()
     test_local_changes_space_on_branch_checks_it_out()
     test_local_changes_space_on_current_branch_is_a_noop()
     test_branch_is_merged_reads_the_main_line()

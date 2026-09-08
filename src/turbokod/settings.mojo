@@ -70,7 +70,7 @@ from .events import (
 from .geometry import Point, Rect
 from .string_utils import display_columns
 from .text_field import TextField
-from .type_ahead import TypeAhead, is_printable_ascii, type_ahead_pick
+from .type_ahead import TypeAhead, is_type_ahead_key, type_ahead_pick
 from .window import paint_window_title
 
 
@@ -1850,7 +1850,7 @@ struct Settings(Movable):
         # type "py" to land on the python row regardless of which
         # list (actions / dictionaries / languages) is in front of
         # them.
-        if is_printable_ascii(k):
+        if is_type_ahead_key(event):
             self._handle_type_to_jump(chr(Int(k)))
             return True
         return True

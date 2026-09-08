@@ -35,6 +35,7 @@ from .events import (
 )
 from .file_io import join_path
 from .geometry import Point, Rect
+from .type_ahead import is_type_ahead_key
 from .view import DraggableDialog, RowCursor
 from .window import (
     close_button_clicked, paint_close_button, paint_window_title,
@@ -255,7 +256,7 @@ struct FileDialog(Movable):
         # Finder / Explorer / GNOME Files. Anything non-printable
         # (control chars, function keys, etc.) is just swallowed
         # by the trailing ``return True`` below.
-        if UInt32(0x20) <= k and k < UInt32(0x7F):
+        if is_type_ahead_key(event):
             _ = self.browser.type_to_search(chr(Int(k)), list_h)
             return True
         return True

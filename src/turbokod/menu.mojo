@@ -20,7 +20,7 @@ from .events import (
 )
 from .geometry import Point, Rect
 from .string_utils import char_width, codepoint_at, display_columns
-from .type_ahead import TypeAhead, is_printable_ascii, type_ahead_pick
+from .type_ahead import TypeAhead, is_type_ahead_key, type_ahead_pick
 
 
 # ``MenuItem.mark`` codes. The mark column (see ``MenuItem.checkable``)
@@ -581,8 +581,11 @@ struct MenuBar(Movable):
         # the first item whose label starts with the typed prefix.
         # Mnemonics use Alt+letter (handled in Desktop), so plain
         # letters are free to drive an in-dropdown search.
-        if event.mods == 0 and is_printable_ascii(k) \
-                and self.open_idx >= 0:
+        # ``is_type_ahead_key`` excludes Ctrl / Alt / Cmd chords but
+        # *allows* Shift, which is how the native host spells a capital
+        # letter — the old ``mods == 0`` test made an uppercase prefix a
+        # dead key here.
+        if is_type_ahead_key(event) and self.open_idx >= 0:
             var menu = self.menus[self.open_idx].copy()
             var labels = List[String]()
             for i in range(len(menu.items)):

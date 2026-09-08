@@ -1374,6 +1374,43 @@ def test_settings_languages_list_type_to_jump() raises:
     assert_equal(s.selected_language, expected)
 
 
+def test_settings_list_ignores_command_chords() raises:
+    """Regression: a ⌘ / Ctrl chord used to leak into type-to-jump and move
+    the focused list's selection — so ⌘A (select all) or Ctrl+S (save)
+    silently reselected some unrelated language. The keystroke is still
+    consumed (Settings is modal; nothing may fall through to the workspace
+    behind it) but the selection must not budge."""
+    var s = Settings()
+    s.open(False)
+    s.section = 3
+    s.focus = UInt8(10)  # _FOCUS_LANG_LIST
+    var before = s.selected_language
+    var consumed = s.handle_key(_key(UInt32(ord("r")), MOD_META))
+    assert_true(consumed)
+    assert_equal(s.selected_language, before)
+    s._type_ahead.reset()
+    _ = s.handle_key(_key(UInt32(ord("r")), MOD_CTRL))
+    assert_equal(s.selected_language, before)
+    s._type_ahead.reset()
+    _ = s.handle_key(_key(UInt32(ord("r")), MOD_ALT))
+    assert_equal(s.selected_language, before)
+    # A capital letter is typing, not a chord — the native host spells it
+    # with MOD_SHIFT, so it must still drive the jump.
+    var expected = -1
+    for i in range(len(s.languages_view)):
+        var lid = s.languages_view[i].language_id
+        if len(lid.as_bytes()) > 0:
+            var first = lid.as_bytes()[0]
+            if first == 0x72 or first == 0x52:  # 'r' / 'R'
+                expected = i
+                break
+    if expected < 0:
+        return
+    s._type_ahead.reset()
+    _ = s.handle_key(_key(UInt32(ord("R")), MOD_SHIFT))
+    assert_equal(s.selected_language, expected)
+
+
 def test_settings_actions_list_type_to_jump() raises:
     """Type-to-jump in the Project Settings On-save list: typing a letter
     moves ``selected_os`` to the first row whose label (language id +
@@ -2867,6 +2904,7 @@ def main() raises:
     test_list_box_mouse_wheel_clamps_to_item_count()
     test_settings_languages_list_type_to_jump()
     test_settings_actions_list_type_to_jump()
+    test_settings_list_ignores_command_chords()
     test_action_editor_lang_dropdown_has_options()
     test_action_editor_enter_opens_lang_popup()
     test_dropdown_type_to_search_jumps_to_prefix()
