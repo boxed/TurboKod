@@ -661,6 +661,101 @@ def git_state_mtimes(project_root: String) -> GitStateMtimes:
     return GitStateMtimes(head_mt, index_mt, reflog_mt, reflog_sz)
 
 
+# LSP ``FileChangeType`` values, as carried by ``WatchedFileChange``.
+comptime FILE_CHANGE_CREATED: Int = 1
+comptime FILE_CHANGE_CHANGED: Int = 2
+comptime FILE_CHANGE_DELETED: Int = 3
+
+
+@fieldwise_init
+struct WatchedFileChange(ImplicitlyCopyable, Movable):
+    """One on-disk change to report through
+    ``workspace/didChangeWatchedFiles``: an absolute ``path`` plus the LSP
+    ``FileChangeType`` (``FILE_CHANGE_*``)."""
+    var path: String
+    var change_type: Int
+
+
+def git_head_sha(project_root: String) -> String:
+    """Full sha of the commit HEAD resolves to. Empty when the path isn't
+    a repo, the branch is unborn, or git is unavailable — ``--verify``
+    makes git exit non-zero there instead of echoing ``HEAD`` back."""
+    if len(project_root.as_bytes()) == 0:
+        return String("")
+    var args = List[String]()
+    args.append(String("rev-parse"))
+    args.append(String("--verify"))
+    args.append(String("-q"))
+    args.append(String("HEAD^{commit}"))
+    var raw = _git_stdout(project_root, args^)
+    return String(raw.strip())
+
+
+def parse_name_status_z(
+    stdout: String, repo_root: String,
+) -> List[WatchedFileChange]:
+    """Parse ``git diff --name-status -z --no-renames`` output: repeating
+    ``<status>\\0<path>\\0`` pairs, each path relative to the repo top
+    level (which is why callers pass ``repo_root``, not the project
+    root). ``A`` maps to created, ``D`` to deleted, everything else
+    (``M``, ``T``, …) to changed."""
+    var out = List[WatchedFileChange]()
+    var b = stdout.as_bytes()
+    var i = 0
+    while i < len(b):
+        var s = i
+        while i < len(b) and b[i] != 0x00:
+            i += 1
+        var status_byte = b[s] if i > s else UInt8(0)
+        if i < len(b):
+            i += 1   # status NUL
+        var ps = i
+        while i < len(b) and b[i] != 0x00:
+            i += 1
+        var rel = String(StringSpan(unsafe_from_utf8=b[ps:i]))
+        if i < len(b):
+            i += 1   # path NUL
+        if Int(status_byte) == 0 or len(rel.as_bytes()) == 0:
+            continue
+        var kind = FILE_CHANGE_CHANGED
+        if Int(status_byte) == 0x41:      # 'A'
+            kind = FILE_CHANGE_CREATED
+        elif Int(status_byte) == 0x44:    # 'D'
+            kind = FILE_CHANGE_DELETED
+        out.append(WatchedFileChange(join_path(repo_root, rel), kind))
+    return out^
+
+
+def changed_paths_between(
+    project_root: String, old_sha: String, new_sha: String,
+) -> List[WatchedFileChange]:
+    """Files whose content differs between two commits, as absolute
+    paths with LSP change types — what a branch switch / reset / pull
+    rewrote in the working tree. Local edits git carried across the
+    switch are reported too; a server re-reading an unchanged file is
+    harmless, a server left with a stale one is not. Renames come back
+    as a delete plus a create so a server indexing by path drops the old
+    one. Empty when either sha is empty or the two are equal."""
+    if len(project_root.as_bytes()) == 0 \
+            or len(old_sha.as_bytes()) == 0 \
+            or len(new_sha.as_bytes()) == 0 \
+            or old_sha == new_sha:
+        return List[WatchedFileChange]()
+    var repo_root = project_root
+    var found = find_git_project(project_root)
+    if found:
+        repo_root = found.value()
+    var args = List[String]()
+    args.append(String("diff"))
+    args.append(String("--name-status"))
+    args.append(String("-z"))
+    args.append(String("--no-renames"))
+    args.append(old_sha)
+    args.append(new_sha)
+    var stdout = _git_stdout(project_root, args^)
+    return parse_name_status_z(stdout, repo_root)
+
+
 def compute_local_changes(project_root: String) raises -> String:
     """Spawn ``git -C <root> diff HEAD --no-color`` and return stdout.
 

@@ -94,6 +94,21 @@ def test_editor_external_change_clean_reload_when_buffer_clean() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
+def test_editor_external_change_detects_same_size_rewrite() raises:
+    """Flipping between two branches rewrites a file with the same size
+    inside the same second. ``st_mtime`` alone can't tell the two apart;
+    the nanosecond stamp can, so the reload still fires."""
+    var path = _temp_path(String("_ext_same_size.txt"))
+    assert_true(write_file(path, String("alpha\nbeta\n")))
+    var ed = Editor.from_file(path)
+    assert_true(write_file(path, String("alpha\nbetz\n")))
+    assert_equal(ed.check_for_external_change(), EXT_CHANGE_RELOADED)
+    assert_equal(ed.buffer.line(1), String("betz"))
+    # Nothing new on disk: the refreshed stamp is quiet on the next tick.
+    assert_equal(ed.check_for_external_change(), EXT_CHANGE_NONE)
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
 def test_editor_external_change_skipped_in_review_mode() raises:
     """A review-hosted editor shows a pinned snapshot (commit / index
     blob), with ``file_path`` set only for identity. Its on-disk file
@@ -529,6 +544,7 @@ def test_editor_git_changes_gutter_widens_total_gutter() raises:
 def main() raises:
     setup_test_env()
     test_editor_dirty_flag()
+    test_editor_external_change_detects_same_size_rewrite()
     test_editor_from_file()
     test_editor_save_clears_dirty()
     test_editor_save_as_adopts_path()
@@ -550,4 +566,4 @@ def main() raises:
     test_blame_gutter_click_requests_commit_details()
     test_blame_gutter_click_past_blame_data_still_toggles_breakpoint()
     test_editor_git_changes_gutter_widens_total_gutter()
-    print("editor_io: 20 tests passed")
+    print("editor_io: 21 tests passed")

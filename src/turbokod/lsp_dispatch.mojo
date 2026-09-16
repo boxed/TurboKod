@@ -2023,29 +2023,41 @@ struct LspManager(Copyable, Movable):
 
     def notify_watched_changed(mut self, path: String, change_type: Int):
         """Send ``workspace/didChangeWatchedFiles`` for one on-disk change
-        (``change_type``: 1=created, 2=changed, 3=deleted), but only when
-        ready and the server actually registered a watcher. Lets servers
-        re-index files that changed outside an open buffer — e.g.
-        rust-analyzer reacting to a saved ``Cargo.toml`` or a sibling
-        module the buffer imports. We don't model the registered glob
-        patterns, so a watcher may receive events for paths outside its
-        set; that's spec-legal (servers ignore paths they don't track)
-        and far cheaper than mirroring the matcher."""
-        if self.state != _STATE_READY or not self._watches_files:
+        (``change_type``: 1=created, 2=changed, 3=deleted). The single-file
+        shape the save path uses; see ``notify_watched_changes``."""
+        var paths = List[String]()
+        paths.append(path)
+        var types = List[Int]()
+        types.append(change_type)
+        self.notify_watched_changes(paths, types)
+
+    def notify_watched_changes(
+        mut self, paths: List[String], types: List[Int],
+    ):
+        """Send one ``workspace/didChangeWatchedFiles`` carrying every
+        ``(paths[i], types[i])`` pair (``types``: 1=created, 2=changed,
+        3=deleted), but only when ready and the server actually
+        registered a watcher. Lets servers re-index files that changed
+        outside an open buffer — a saved ``Cargo.toml``, a sibling module
+        the buffer imports, or the hundreds of files a branch switch
+        rewrote (the host's git poll batches those into one call rather
+        than one notification per file). We don't model the registered
+        glob patterns, so a watcher may receive events for paths outside
+        its set; that's spec-legal (servers ignore paths they don't
+        track) and far cheaper than mirroring the matcher."""
+        if self.state != _STATE_READY or not self._watches_files \
+                or len(paths) == 0:
             return
-        var params = json_object()
-        var changes = json_array()
-        var change = json_object()
-        change.put(String("uri"), json_str(_path_to_uri(path)))
-        change.put(String("type"), json_int(change_type))
-        changes.append(change^)
-        params.put(String("changes"), changes^)
         try:
             self._send_notification(
-                String("workspace/didChangeWatchedFiles"), params,
+                String("workspace/didChangeWatchedFiles"),
+                _watched_changes_params(paths, types),
             )
         except e:
-            print("lsp: didChangeWatchedFiles", path, ":", String(e))
+            print(
+                "lsp: didChangeWatchedFiles", len(paths), "changes:",
+                String(e),
+            )
 
     def notify_configuration_changed(mut self):
         """Send ``workspace/didChangeConfiguration`` so the server knows
@@ -7288,3 +7300,23 @@ def _uri_to_path(uri: String) -> String:
         out.append(ub[i])
         i += 1
     return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=len(out))))
+
+
+def _watched_changes_params(
+    paths: List[String], types: List[Int],
+) -> JsonValue:
+    """Build the ``workspace/didChangeWatchedFiles`` params for parallel
+    ``paths`` / ``types`` (LSP ``FileChangeType``: 1 created, 2 changed,
+    3 deleted): one ``changes`` array, so N files cost one notification.
+    A missing type defaults to "changed"."""
+    var params = json_object()
+    var changes = json_array()
+    for i in range(len(paths)):
+        var change = json_object()
+        change.put(String("uri"), json_str(_path_to_uri(paths[i])))
+        change.put(
+            String("type"), json_int(types[i] if i < len(types) else 2),
+        )
+        changes.append(change^)
+    params.put(String("changes"), changes^)
+    return params^

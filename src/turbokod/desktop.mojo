@@ -71,7 +71,8 @@ from .git_changes import (
     count_unpushed_commits,
     current_branch_name,
     diff_buffer_marks, fetch_git_status, fetch_head_text,
-    fetch_line_history, git_state_mtimes, project_is_git_repo,
+    changed_paths_between, fetch_line_history, git_head_sha,
+    git_state_mtimes, project_is_git_repo,
 )
 from .git_gutter_menu import (
     GUTTER_ACTION_NEXT, GUTTER_ACTION_PREV, GUTTER_ACTION_REVERT,
@@ -1575,6 +1576,15 @@ struct Desktop(Movable):
     # yet", so the first observation only seeds the cache.
     var _git_state_mtimes: GitStateMtimes
     var _last_git_state_check_ms: Int
+    # Sha HEAD resolved to when the fingerprint above was last observed.
+    # A fingerprint move with a different sha behind it is a branch switch
+    # / reset / pull: the files that differ between the two commits are
+    # relayed to every language server as ``didChangeWatchedFiles`` so
+    # they re-read what git rewrote under them (see
+    # ``_on_git_head_observed``). Empty until the first observation and
+    # across project switches, never on a mere reseed — that's what lets
+    # a checkout made while the app was in the background be noticed.
+    var _git_head_sha: String
     # Cache of project_is_git_repo for the current project root — repo-vs-not
     # is stable for the session, so recompute only when the root changes
     # rather than walking the tree to ``/`` every frame.
@@ -1814,6 +1824,7 @@ struct Desktop(Movable):
         self._nav_pos = -1
         self._git_state_mtimes = GitStateMtimes.zero()
         self._last_git_state_check_ms = 0
+        self._git_head_sha = String("")
         self._git_root_cached = String("")
         self._git_root_is_repo = False
         self._project_dirty = False
@@ -3735,9 +3746,10 @@ struct Desktop(Movable):
             if now - self._last_git_state_check_ms >= _GIT_POLL_INTERVAL_MS:
                 self._last_git_state_check_ms = now
                 var current = git_state_mtimes(root)
-                if not self._git_state_mtimes.is_zero() \
-                        and not current.is_zero() \
-                        and not current.equals(self._git_state_mtimes):
+                var moved = not self._git_state_mtimes.is_zero() \
+                    and not current.is_zero() \
+                    and not current.equals(self._git_state_mtimes)
+                if moved:
                     for j in range(len(self.windows.windows)):
                         # Review-hosted editors keep their pinned changeset
                         # baseline — don't drop it back to HEAD on a poll.
@@ -3745,6 +3757,14 @@ struct Desktop(Movable):
                                 and not self.windows.windows[j].editor.read_only \
                                 and not self.windows.windows[j].editor.review_mode:
                             self.windows.windows[j].editor.invalidate_git_changes()
+                # Re-resolve HEAD on a move *and* on the seeding
+                # observation: ``force_git_refresh`` zeroes the fingerprint
+                # on focus-gain, so the reseed is how a checkout made
+                # while we were in the background gets compared against
+                # the sha we kept.
+                if not current.is_zero() \
+                        and (moved or self._git_state_mtimes.is_zero()):
+                    self._on_git_head_observed(root)
                 self._git_state_mtimes = current
             # Working-tree dirty flag for the status-bar indicator. Polled
             # on its own (slower) cadence because it shells out to ``git
@@ -3875,6 +3895,46 @@ struct Desktop(Movable):
                         self.windows.windows[i].editor.set_git_deletions(
                             marks.deleted_below.copy(),
                         )
+
+    def _on_git_head_observed(mut self, root: String):
+        """Reconcile the language servers with a HEAD move.
+
+        The per-frame external-change sweep already reloads the *open*
+        buffers a checkout rewrote, and their reload re-syncs the server
+        through the normal didChange path. Nothing did that for the files
+        that aren't open — and we advertise ``didChangeWatchedFiles`` with
+        dynamic registration, which makes servers like rust-analyzer stop
+        watching the disk themselves and rely on us. Until this hook, a
+        branch switch told them about zero of the files it changed, and
+        symbol lookups on anything that moved stayed wrong until the user
+        restarted the server.
+
+        Called from the git-state poll on a fingerprint move (and on its
+        seeding observation — see the poll). ``git rev-parse`` once per
+        move; the diff between the two commits only when the sha actually
+        changed, so a plain ``git add`` costs one rev-parse and nothing
+        else. HEAD-less working-tree moves (``git stash pop``, ``git
+        restore <file>``) are not covered here: they don't change HEAD,
+        and their open buffers still reload through the sweep."""
+        var sha = git_head_sha(root)
+        var previous = self._git_head_sha
+        self._git_head_sha = sha
+        if len(previous.as_bytes()) == 0 or len(sha.as_bytes()) == 0 \
+                or previous == sha:
+            return
+        var changes = changed_paths_between(root, previous, sha)
+        if len(changes) == 0:
+            return
+        var paths = List[String]()
+        var types = List[Int]()
+        for i in range(len(changes)):
+            paths.append(changes[i].path)
+            types.append(changes[i].change_type)
+        # Every running server, not just the one for the focused file — a
+        # switch touches every language at once. No-op for servers that
+        # never registered a watcher.
+        for wi in range(len(self.lsp_managers)):
+            self.lsp_managers[wi].notify_watched_changes(paths, types)
 
     def force_git_refresh(mut self):
         """Drop every editor's cached HEAD baseline so the gutter re-diffs
@@ -6364,6 +6424,7 @@ struct Desktop(Movable):
         # comparing against whatever the previous project was at.
         self._git_state_mtimes = GitStateMtimes.zero()
         self._last_git_state_check_ms = 0
+        self._git_head_sha = String("")
         # Clear the dirty indicator until the new project's first poll.
         self._project_dirty = False
         self._project_unpushed = 0

@@ -1039,9 +1039,12 @@ def lsp_initialize_params(
     workspace_caps.put(String("configuration"), json_bool(True))
     # Advertise workspace/didChangeWatchedFiles with dynamicRegistration so
     # servers know they can register file watchers and expect on-disk
-    # change events from us (we push them on save via
-    # ``notify_watched_changed``). rust-analyzer keys re-indexing of
-    # non-open files — Cargo.toml, generated modules — off this.
+    # change events from us: one per save (``notify_watched_changed``)
+    # and a batch for every file a HEAD move rewrote — branch switch,
+    # reset, pull (``Desktop._on_git_head_observed``). rust-analyzer keys
+    # re-indexing of non-open files — Cargo.toml, generated modules — off
+    # this, and *stops watching on its own* once we offer it, so a change
+    # we don't relay is one it never sees.
     var watched_caps = json_object()
     watched_caps.put(String("dynamicRegistration"), json_bool(True))
     workspace_caps.put(String("didChangeWatchedFiles"), watched_caps^)

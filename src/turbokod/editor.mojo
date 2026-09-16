@@ -1045,6 +1045,7 @@ struct Editor(Copyable, Movable):
     var file_path: String
     var file_size: Int64
     var file_mtime: Int64
+    var file_mtime_nsec: Int64
     var dirty: Bool
     # Last on-disk byte-content we observed for this file, used as the
     # merge base when ``check_for_external_change`` detects a stat
@@ -1627,6 +1628,7 @@ struct Editor(Copyable, Movable):
         self.file_path = String("")
         self.file_size = Int64(0)
         self.file_mtime = Int64(0)
+        self.file_mtime_nsec = Int64(0)
         self.dirty = False
         self.disk_baseline = String("")
         self.editorconfig = EditorConfig()
@@ -1778,6 +1780,7 @@ struct Editor(Copyable, Movable):
         self.file_path = String("")
         self.file_size = Int64(0)
         self.file_mtime = Int64(0)
+        self.file_mtime_nsec = Int64(0)
         self.dirty = False
         self.disk_baseline = String("")
         self.editorconfig = EditorConfig()
@@ -1952,6 +1955,7 @@ struct Editor(Copyable, Movable):
         ed.file_path = path^
         ed.file_size = info.size
         ed.file_mtime = info.mtime_sec
+        ed.file_mtime_nsec = info.mtime_nsec
         ed.dirty = False
         ed.disk_baseline = baseline^
         # No inline tokenization: ``_highlights_dirty`` is True
@@ -1978,6 +1982,7 @@ struct Editor(Copyable, Movable):
         self.file_path = copy.file_path
         self.file_size = copy.file_size
         self.file_mtime = copy.file_mtime
+        self.file_mtime_nsec = copy.file_mtime_nsec
         self.dirty = copy.dirty
         self.disk_baseline = copy.disk_baseline
         self.editorconfig = copy.editorconfig
@@ -4253,7 +4258,11 @@ struct Editor(Copyable, Movable):
         var info = stat_file(self.file_path)
         if not info.ok:
             return EXT_CHANGE_NONE
-        if info.size == self.file_size and info.mtime_sec == self.file_mtime:
+        # Size + mtime to the nanosecond: ``st_mtime`` alone is 1 s
+        # granularity, which misses a same-size rewrite within the second
+        # — exactly what flipping between two branches produces.
+        if info.size == self.file_size and info.mtime_sec == self.file_mtime \
+                and info.mtime_nsec == self.file_mtime_nsec:
             return EXT_CHANGE_NONE
         var text = read_file(self.file_path)
         if not self.dirty:
@@ -4265,6 +4274,7 @@ struct Editor(Copyable, Movable):
             self.disk_baseline = baseline^
             self.file_size = info.size
             self.file_mtime = info.mtime_sec
+            self.file_mtime_nsec = info.mtime_nsec
             # Wholesale buffer swap; speculative shift can't track
             # arbitrary content changes, so clear and let the LSP
             # refresh repopulate.
@@ -4296,6 +4306,7 @@ struct Editor(Copyable, Movable):
             self.merge_pending = True
             self.file_size = info.size
             self.file_mtime = info.mtime_sec
+            self.file_mtime_nsec = info.mtime_nsec
             return EXT_CHANGE_CONFLICT
         # Clean merge: every region is STABLE, so concatenating them
         # yields the merged buffer (identical to the no-conflict output
@@ -4314,6 +4325,7 @@ struct Editor(Copyable, Movable):
         self.disk_baseline = text^
         self.file_size = info.size
         self.file_mtime = info.mtime_sec
+        self.file_mtime_nsec = info.mtime_nsec
         # Clean merge: dirty iff the merged buffer differs from what's
         # currently on disk. (Equal happens when ``theirs`` already
         # contained all of our local edits.)
@@ -4463,6 +4475,7 @@ struct Editor(Copyable, Movable):
         if info.ok:
             self.file_size = info.size
             self.file_mtime = info.mtime_sec
+            self.file_mtime_nsec = info.mtime_nsec
         self.disk_baseline = disk^
         self.dirty = False
         return True
@@ -4489,6 +4502,7 @@ struct Editor(Copyable, Movable):
         if info.ok:
             self.file_size = info.size
             self.file_mtime = info.mtime_sec
+            self.file_mtime_nsec = info.mtime_nsec
         self.disk_baseline = disk^
         self.dirty = False
         # Extension may have changed (e.g., ``.txt`` → ``.mojo``); re-tokenize.

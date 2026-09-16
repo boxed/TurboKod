@@ -29,8 +29,10 @@ from turbokod.git_blame import (
     BlameLine, format_commit_time, parse_blame_porcelain, tz_offset_seconds,
 )
 from turbokod.git_changes import (
+    FILE_CHANGE_CHANGED, FILE_CHANGE_CREATED, FILE_CHANGE_DELETED,
     GIT_CHANGE_ADDED, GIT_CHANGE_MODIFIED, GIT_CHANGE_NONE,
-    diff_buffer_against_head, diff_buffer_marks, parse_unified_diff_files
+    changed_paths_between, diff_buffer_against_head, diff_buffer_marks,
+    git_head_sha, parse_name_status_z, parse_unified_diff_files
 )
 from turbokod.local_changes import (
     LocalChanges, build_minimal_patch, _BURST_GAP_MS, _SETTLE_MS,
@@ -4158,6 +4160,74 @@ def test_pull_and_push_work_from_every_sidebar_pane() raises:
 
 
 
+
+def test_parse_name_status_z_maps_statuses_to_lsp_change_types() raises:
+    """``A`` → created, ``D`` → deleted, ``M`` / ``T`` → changed; paths
+    are joined onto the repo root; a trailing partial record is
+    dropped rather than turned into a bogus entry."""
+    var out = parse_name_status_z(
+        String("M\0pkg/a.py\0A\0new.py\0D\0gone.py\0T\0mode.sh\0M\0"),
+        String("/repo"),
+    )
+    assert_equal(len(out), 4)
+    assert_equal(out[0].path, String("/repo/pkg/a.py"))
+    assert_equal(out[0].change_type, FILE_CHANGE_CHANGED)
+    assert_equal(out[1].path, String("/repo/new.py"))
+    assert_equal(out[1].change_type, FILE_CHANGE_CREATED)
+    assert_equal(out[2].path, String("/repo/gone.py"))
+    assert_equal(out[2].change_type, FILE_CHANGE_DELETED)
+    assert_equal(out[3].path, String("/repo/mode.sh"))
+    assert_equal(out[3].change_type, FILE_CHANGE_CHANGED)
+    assert_equal(len(parse_name_status_z(String(""), String("/repo"))), 0)
+
+
+def test_changed_paths_between_reports_what_a_branch_switch_rewrote() raises:
+    """A branch switch is a HEAD move; the files whose content differs
+    between the two commits are what the language servers must be told
+    about. Modified, added and deleted each map to their LSP change
+    type, paths come back absolute, and the same sha twice is empty."""
+    var dir = _temp_path(String("_watched_switch"))
+    if not _init_repo_with_commit(dir):
+        return
+    assert_true(write_file(join_path(dir, String("b.py")), String("b = 1\n")))
+    assert_equal(_commit_file(dir, String("a.py"), String("a = 1\n"), String("base")), 0)
+    var base = git_head_sha(dir)
+    assert_equal(len(base.as_bytes()), 40)
+    var co = List[String]()
+    co.append(String("checkout"))
+    co.append(String("-q"))
+    co.append(String("-b"))
+    co.append(String("feature"))
+    assert_equal(_run_git(dir, co^), 0)
+    var rm = List[String]()
+    rm.append(String("rm"))
+    rm.append(String("-q"))
+    rm.append(String("b.py"))
+    assert_equal(_run_git(dir, rm^), 0)
+    assert_true(write_file(join_path(dir, String("a.py")), String("a = 2\n")))
+    assert_equal(_commit_file(dir, String("c.py"), String("c = 3\n"), String("tip")), 0)
+    var tip = git_head_sha(dir)
+    assert_equal(len(tip.as_bytes()), 40)
+    assert_true(base != tip)
+    var changes = changed_paths_between(dir, base, tip)
+    assert_equal(len(changes), 3)
+    assert_true(changes[0].path.endswith(String("/a.py")))
+    assert_equal(changes[0].change_type, FILE_CHANGE_CHANGED)
+    assert_true(changes[1].path.endswith(String("/b.py")))
+    assert_equal(changes[1].change_type, FILE_CHANGE_DELETED)
+    assert_true(changes[2].path.endswith(String("/c.py")))
+    assert_equal(changes[2].change_type, FILE_CHANGE_CREATED)
+    assert_true(changes[0].path.startswith(String("/")))
+    # Switching back is the mirror image.
+    var back = changed_paths_between(dir, tip, base)
+    assert_equal(len(back), 3)
+    assert_equal(back[1].change_type, FILE_CHANGE_CREATED)
+    assert_equal(back[2].change_type, FILE_CHANGE_DELETED)
+    assert_equal(len(changed_paths_between(dir, tip, tip)), 0)
+    assert_equal(len(changed_paths_between(dir, String(""), tip)), 0)
+    _rm_rf(dir)
+
+
 def _init_repo_with_commit(dir: String) raises -> Bool:
     """``git init`` + identity + one commit of ``f.txt``. False when git
     isn't on PATH, which the callers treat as "skip this test"."""
@@ -4857,4 +4927,6 @@ def main() raises:
     test_github_repo_web_url_parses_every_remote_shape()
     test_branch_pane_o_opens_the_github_compare_page()
     test_branch_pane_o_refuses_main_and_a_non_github_remote()
-    print("git: 122 tests passed")
+    test_parse_name_status_z_maps_statuses_to_lsp_change_types()
+    test_changed_paths_between_reports_what_a_branch_switch_rewrote()
+    print("git: 124 tests passed")

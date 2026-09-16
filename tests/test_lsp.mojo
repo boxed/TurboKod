@@ -36,7 +36,8 @@ from turbokod.lsp_dispatch import (
     _parse_prepare_rename_placeholder, _parse_signature_help,
     _parse_references_result, _parse_text_edits,
     _parse_text_edit_array, _parse_workspace_edit,
-    _parse_workspace_edit_changes, _path_to_uri, _uri_to_path
+    _parse_workspace_edit_changes, _path_to_uri, _uri_to_path,
+    _watched_changes_params
 )
 from turbokod.highlight import (
     highlight_for_extension, highlight_operator_attr, highlight_string_attr
@@ -860,6 +861,46 @@ def test_lsp_dynamic_capability_registration() raises:
     # Unregister flips the capability back to unsupported.
     mgr._remove_capability_registration(String("textDocument/foldingRange"))
     assert_true(not mgr.server_supports(String("foldingRangeProvider")))
+
+
+def test_watched_changes_batch_into_one_notification() raises:
+    """A branch switch rewrites many files; they go out as one
+    ``didChangeWatchedFiles`` with one ``changes`` entry per file, each
+    carrying its own ``FileChangeType``. A missing type reads as
+    changed. Without a registered watcher (or before ready) the send
+    is a silent no-op — never an error."""
+    var paths = List[String]()
+    paths.append(String("/p/a.py"))
+    paths.append(String("/p/gone.py"))
+    paths.append(String("/p/new.py"))
+    var types = List[Int]()
+    types.append(2)
+    types.append(3)
+    var params = _watched_changes_params(paths, types)
+    var changes = params.object_get(String("changes")).value().copy()
+    assert_true(changes.is_array())
+    assert_equal(changes.array_len(), 3)
+    assert_equal(
+        changes.array_at(0).object_get(String("uri")).value().as_str(),
+        _path_to_uri(String("/p/a.py")),
+    )
+    assert_equal(
+        changes.array_at(0).object_get(String("type")).value().as_int(), 2,
+    )
+    assert_equal(
+        changes.array_at(1).object_get(String("type")).value().as_int(), 3,
+    )
+    assert_equal(
+        changes.array_at(2).object_get(String("uri")).value().as_str(),
+        _path_to_uri(String("/p/new.py")),
+    )
+    assert_equal(
+        changes.array_at(2).object_get(String("type")).value().as_int(), 2,
+    )
+    var mgr = LspManager()
+    mgr._watches_files = True
+    mgr.notify_watched_changes(paths, types)
+    mgr.notify_watched_changed(String("/p/a.py"), 2)
 
 
 def test_lsp_pull_diagnostics_storage() raises:
@@ -2166,6 +2207,7 @@ def main() raises:
     setup_test_env()
     test_rename_path_moves_file()
     test_downloadable_grammar_registry_has_elm()
+    test_watched_changes_batch_into_one_notification()
     test_downloadable_grammar_registry_misses_unknown()
     test_type_ahead_pick_returns_index_or_minus_one()
     test_type_ahead_pick_solo_fallback()
@@ -2250,4 +2292,4 @@ def main() raises:
     test_lsp_initialize_against_mojo_lsp_server()
     test_ty_offers_quickfix_for_missing_any_import()
     test_taplo_publishes_diagnostics_after_workspace_configuration_probe()
-    print("lsp: 86 tests passed")
+    print("lsp: 87 tests passed")
