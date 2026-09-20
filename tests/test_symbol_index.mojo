@@ -17,6 +17,10 @@ that trade is acceptable is that a stale entry is impossible to observe:
 - ``test_search_matches_a_reference_scan`` is the parity test: the SIMD
   blob sweep must agree with a naive per-file tokenize-and-compare over
   the same corpus, including hits at segment and lane boundaries.
+- ``test_search_seeds_from_the_definition_not_the_changelog`` pins the
+  seed ranking (``symbol_seed.mojo``): the location a name is reported
+  at is the definition in source, whatever order the files were
+  indexed in. Without it, Find Symbol for ``Column`` opened HISTORY.rst.
 """
 
 from std.collections.list import List
@@ -25,6 +29,11 @@ from std.testing import assert_equal, assert_false, assert_true
 from turbokod.file_io import read_file, stat_file, write_file
 from turbokod.symbol_index import (
     SYMBOL_MAX_LEN, SYMBOL_MIN_LEN, SymbolHit, SymbolIndex, is_symbol_byte,
+)
+from turbokod.symbol_seed import (
+    SEED_DEF_IN_PROSE, SEED_DEF_IN_SOURCE, SEED_DEF_IN_TEST,
+    SEED_MENTION_IN_PROSE, SEED_MENTION_IN_SOURCE, SEED_MENTION_IN_TEST,
+    is_definition_site, seed_bucket, seed_priority,
 )
 
 from support import _ensure_dir, _rm_rf, _temp_path, setup_test_env
@@ -43,6 +52,15 @@ def _seed(var files: List[Tuple[String, String]]) raises -> String:
     for i in range(len(files)):
         var rel = files[i][0]
         var body = files[i][1]
+        var rb = rel.as_bytes()
+        var last_slash = -1
+        for k in range(len(rb)):
+            if rb[k] == 0x2F:
+                last_slash = k
+        if last_slash > 0:
+            _ensure_dir(root + String("/") + String(
+                StringSpan(unsafe_from_utf8=rb[0:last_slash]),
+            ))
         _ = write_file(root + String("/") + rel, body)
     return root
 
@@ -621,6 +639,203 @@ def test_verify_occurrence_ignores_substring_matches() raises:
     _rm_rf(root)
 
 
+# --- seed ranking ---------------------------------------------------------
+
+
+def _is_def(line: String, name: String) -> Bool:
+    """``is_definition_site`` for the first occurrence of ``name`` in
+    ``line``; the test-side stand-in for the tokenizer's bookkeeping."""
+    var lb = line.as_bytes()
+    var nb = name.as_bytes()
+    var at = -1
+    for i in range(len(lb) - len(nb) + 1):
+        var same = True
+        for k in range(len(nb)):
+            if lb[i + k] != nb[k]:
+                same = False
+                break
+        if same:
+            at = i
+            break
+    if at < 0:
+        return False
+    return is_definition_site(lb, at, at + len(nb))
+
+
+def test_seed_ranking_recognizes_definitions_and_file_kinds() raises:
+    # Occurrence shape: keyword-introduced, or ``Name =`` at column 0.
+    assert_true(_is_def(String("class Column(Part):"), String("Column")))
+    assert_true(_is_def(String("    def handle_key(self):"), String("handle_key")))
+    assert_true(_is_def(String("pub fn run() {"), String("run")))
+    assert_true(_is_def(String("type alias Model ="), String("Model")))
+    assert_true(_is_def(String("\tstruct\tFoo {"), String("Foo")))
+    assert_true(_is_def(String("EDITOR_FIND_SYMBOL = String(\"x\")"),
+                        String("EDITOR_FIND_SYMBOL")))
+    assert_true(_is_def(String("Column = Column"), String("Column")))
+    # Mentions: imports, calls, annotations, indented locals, ``==``.
+    assert_false(_is_def(String("from iommi import Column"), String("Column")))
+    assert_false(_is_def(String("x = Column(attr='a')"), String("Column")))
+    assert_false(_is_def(String("    total = 1"), String("total")))
+    assert_false(_is_def(String("Column == other"), String("Column")))
+    assert_false(_is_def(String("type(Column)"), String("Column")))
+    assert_false(_is_def(String("foo.def Column"), String("Column")))
+    assert_false(_is_def(String("* `Field`/`Column`/`Filter` resolve later"),
+                         String("Column")))
+
+    # File kinds.
+    assert_equal(seed_bucket(seed_priority(String("/p/iommi/table.py"), True)),
+                 SEED_DEF_IN_SOURCE)
+    assert_equal(seed_bucket(seed_priority(String("/p/iommi/base.py"), False)),
+                 SEED_MENTION_IN_SOURCE)
+    assert_equal(seed_bucket(seed_priority(String("/p/docs/test_doc_x.py"), True)),
+                 SEED_DEF_IN_TEST)
+    assert_equal(seed_bucket(seed_priority(String("/p/iommi/table__tests.py"), True)),
+                 SEED_DEF_IN_TEST)
+    assert_equal(seed_bucket(seed_priority(String("/p/tests/helpers.py"), False)),
+                 SEED_MENTION_IN_TEST)
+    assert_equal(seed_bucket(seed_priority(String("/p/src/Foo.spec.ts"), False)),
+                 SEED_MENTION_IN_TEST)
+    assert_equal(seed_bucket(seed_priority(String("/p/HISTORY.rst"), False)),
+                 SEED_MENTION_IN_PROSE)
+    assert_equal(seed_bucket(seed_priority(String("/p/HISTORY.rst"), True)),
+                 SEED_DEF_IN_PROSE)
+    assert_equal(seed_bucket(seed_priority(String("/p/.gitignore"), False)),
+                 SEED_MENTION_IN_PROSE)
+    assert_equal(seed_bucket(seed_priority(String("/p/Makefile"), False)),
+                 SEED_MENTION_IN_PROSE)
+    assert_equal(seed_bucket(seed_priority(String("/p/README.MD"), False)),
+                 SEED_MENTION_IN_PROSE)
+
+    # Ordering: definition in source < definition in a test < mention in
+    # source < anything in prose (even a definition-shaped example), and
+    # the shallower path wins a tie.
+    assert_true(seed_priority(String("/p/iommi/table.py"), True)
+                < seed_priority(String("/p/docs/test_doc_x.py"), True))
+    assert_true(seed_priority(String("/p/docs/test_doc_x.py"), True)
+                < seed_priority(String("/p/iommi/base.py"), False))
+    assert_true(seed_priority(String("/p/iommi/base.py"), False)
+                < seed_priority(String("/p/HISTORY.rst"), True))
+    assert_true(seed_priority(String("/p/iommi/table.py"), True)
+                < seed_priority(String("/p/examples/examples/iommi.py"), True))
+
+
+def _iommi_shaped_corpus() -> List[Tuple[String, String]]:
+    """The files that made ``Column`` land in the changelog, in miniature:
+    a mention in HISTORY.rst and .gitignore, a subclass in a doc test and
+    in an example, an import in base.py, and the real class in table.py."""
+    var files = List[Tuple[String, String]]()
+    files.append((String(".gitignore"), String("docs/Column.rst\n")))
+    files.append((String("HISTORY.rst"), String(
+        "Changelog\n"
+        "\n"
+        "* `.from_model()` resolution for `Field`/`Column`/`Filter` is now"
+        " deferred to `refine_done()`.\n"
+    )))
+    files.append((String("docs/test_doc_production_use.py"), String(
+        "import iommi\n"
+        "\n"
+        "def test_subclass():\n"
+        "    class Column(iommi.Column):\n"
+        "        pass\n"
+    )))
+    files.append((String("examples/examples/app.py"), String(
+        "import iommi\n"
+        "\n"
+        "class Column(iommi.Column):\n"
+        "    pass\n"
+    )))
+    files.append((String("iommi/base.py"), String(
+        "from iommi.table import Column\n"
+    )))
+    files.append((String("iommi/table.py"), String(
+        "from iommi.part import Part\n"
+        "\n"
+        "\n"
+        "class Column(Part):\n"
+        "    pass\n"
+    )))
+    return files^
+
+
+def test_search_seeds_from_the_definition_not_the_changelog() raises:
+    """Whatever order the files are indexed in, ``Column`` is reported at
+    ``class Column(Part)`` in iommi/table.py — not at the changelog bullet
+    that happens to be first alphabetically, not at the import in
+    base.py, and not at the subclass in the doc test or the deeper
+    example."""
+    var files = _iommi_shaped_corpus()
+    var root = _seed(files.copy())
+    var forward = List[String]()
+    var backward = List[String]()
+    for i in range(len(files)):
+        forward.append(files[i][0])
+        backward.append(files[len(files) - 1 - i][0])
+    var orders = List[List[String]]()
+    orders.append(forward^)
+    orders.append(backward^)
+    for o in range(len(orders)):
+        var idx = _built(root, orders[o].copy())
+        var hit = _hit(idx.search(String("Column"), 50), String("Column"))
+        assert_equal(hit.path, root + String("/iommi/table.py"))
+        assert_equal(hit.line, 4)
+        assert_equal(hit.column, 7)
+    _rm_rf(root)
+
+
+def test_a_definition_later_in_the_file_upgrades_the_seed() raises:
+    """Within one file the entry starts at the first mention (the import
+    on line 1) and moves to the first definition-shaped occurrence; a
+    second definition shape further down does not move it again."""
+    var files = List[Tuple[String, String]]()
+    files.append((String("a.py"), String(
+        "from x import Column  # re-export\n"
+        "\n"
+        "\n"
+        "class Column:\n"
+        "    pass\n"
+        "\n"
+        "Column = Column\n"
+    )))
+    var root = _seed(files.copy())
+    var rels = List[String]()
+    rels.append(String("a.py"))
+    var idx = _built(root, rels^)
+    var hit = _hit(idx.search(String("Column"), 50), String("Column"))
+    assert_equal(hit.line, 4)
+    assert_equal(hit.column, 7)
+    # A name that is only ever mentioned keeps its first occurrence.
+    var x = _hit(idx.search(String("x"), 50), String("x"))
+    assert_equal(len(x.name.as_bytes()), 0)   # too short to index
+    var re = _hit(idx.search(String("export"), 50), String("export"))
+    assert_equal(re.line, 1)
+    _rm_rf(root)
+
+
+def test_seed_ranking_survives_reindex_and_compaction() raises:
+    """Re-indexing the definition's file and compacting the blob must
+    keep the definition flag with its entry — a dropped flag would
+    silently demote the seed back to whichever mention came first."""
+    var files = _iommi_shaped_corpus()
+    var root = _seed(files.copy())
+    var rels = List[String]()
+    for i in range(len(files)):
+        rels.append(files[i][0])
+    var idx = _built(root, rels^)
+    # Retire and rebuild every segment from the buffer, twice, so the
+    # dead fraction crosses the compaction threshold; then compact.
+    for _ in range(2):
+        for i in range(len(files)):
+            _ = idx.reindex_from_text(
+                root + String("/") + files[i][0], files[i][1],
+            )
+    idx.compact()
+    assert_equal(idx.dead_bytes, 0)
+    var hit = _hit(idx.search(String("Column"), 50), String("Column"))
+    assert_equal(hit.path, root + String("/iommi/table.py"))
+    assert_equal(hit.line, 4)
+    _rm_rf(root)
+
+
 def main() raises:
     setup_test_env()
     test_indexes_identifiers_with_first_occurrence()
@@ -642,4 +857,8 @@ def main() raises:
     test_verify_occurrence_relocates_a_moved_symbol()
     test_verify_occurrence_rejects_a_vanished_symbol()
     test_verify_occurrence_ignores_substring_matches()
-    print("symbol_index: 19 tests passed")
+    test_seed_ranking_recognizes_definitions_and_file_kinds()
+    test_search_seeds_from_the_definition_not_the_changelog()
+    test_a_definition_later_in_the_file_upgrades_the_seed()
+    test_seed_ranking_survives_reindex_and_compaction()
+    print("symbol_index: 23 tests passed")

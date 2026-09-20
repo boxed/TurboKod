@@ -34,7 +34,12 @@ MB instead of a subprocess over tens of MB.
 
 ``blob`` is a NUL-separated run of identifier names grouped into
 **per-file segments**, deduped only *within* a file. Cross-file dedupe
-happens at query time, over the few hundred hits.
+happens at query time, over the few hundred hits — and that is also
+where the reported location is chosen. Each entry remembers one
+occurrence per file (the definition-shaped one if the file has it,
+else the first mention, see ``symbol_seed.mojo``); ``search`` keeps,
+per name, the occurrence with the best ``seed_priority`` across files
+rather than the first segment it swept.
 
 The obvious alternative — one globally-deduped table — is smaller
 (2.1 MB vs 4.2 MB on the corpus above) but cannot be maintained. To
@@ -92,6 +97,7 @@ from std.collections.optional import Optional
 
 from .case_fold import find_exact
 from .file_io import read_file, stat_file
+from .symbol_seed import is_definition_site, seed_priority
 
 
 comptime SYMBOL_MIN_LEN: Int = 2
@@ -187,7 +193,9 @@ def _slot_capacity_for(n: Int) -> Int:
 
 @fieldwise_init
 struct SymbolHit(ImplicitlyCopyable, Movable):
-    """One query result: the identifier plus where it was first seen."""
+    """One query result: the identifier plus the occurrence that ranks
+    best as a seed (see ``symbol_seed.mojo``) — the definition site when
+    one was recognized, the first mention otherwise."""
     var name: String
     var path: String
     var line: Int      # 1-based
@@ -227,12 +235,20 @@ struct SymbolIndex(Movable):
     var ent_line: List[Int32]
     var ent_col: List[Int32]
     var ent_seg: List[Int32]
+    # True when ``(ent_line, ent_col)`` is a definition-shaped occurrence
+    # (``class Name``, ``def Name``, ``Name = …`` at column 0, …) rather
+    # than the first mention. See ``symbol_seed.mojo``.
+    var ent_def: List[Bool]
 
     # --- per-file bookkeeping ---
     var files: List[String]
     var file_size: List[Int64]
     var file_mtime_sec: List[Int64]
     var file_mtime_nsec: List[Int64]
+    # ``seed_priority`` of the file for a mention / a definition,
+    # computed once at registration so ``search`` does no path work.
+    var file_prio_use: List[Int32]
+    var file_prio_def: List[Int32]
     # Index into ``segments``, or -1 when the file is known but has no
     # live segment (never indexed, unreadable, binary, or too large).
     var file_seg: List[Int32]
@@ -259,10 +275,13 @@ struct SymbolIndex(Movable):
         self.ent_line = List[Int32]()
         self.ent_col = List[Int32]()
         self.ent_seg = List[Int32]()
+        self.ent_def = List[Bool]()
         self.files = List[String]()
         self.file_size = List[Int64]()
         self.file_mtime_sec = List[Int64]()
         self.file_mtime_nsec = List[Int64]()
+        self.file_prio_use = List[Int32]()
+        self.file_prio_def = List[Int32]()
         self.file_seg = List[Int32]()
         self._path_slots = List[Int32]()
         self.segments = List[_Segment]()
@@ -283,10 +302,13 @@ struct SymbolIndex(Movable):
         self.ent_line = List[Int32]()
         self.ent_col = List[Int32]()
         self.ent_seg = List[Int32]()
+        self.ent_def = List[Bool]()
         self.files = List[String]()
         self.file_size = List[Int64]()
         self.file_mtime_sec = List[Int64]()
         self.file_mtime_nsec = List[Int64]()
+        self.file_prio_use = List[Int32]()
+        self.file_prio_def = List[Int32]()
         self.file_seg = List[Int32]()
         self._path_slots = List[Int32]()
         self.segments = List[_Segment]()
@@ -378,14 +400,9 @@ struct SymbolIndex(Movable):
                 if self.file_seg[existing] < 0:
                     queued.append(Int32(existing))
                 continue
-            self.files.append(paths[i])
-            self.file_size.append(Int64(0))
-            self.file_mtime_sec.append(Int64(-1))
-            self.file_mtime_nsec.append(Int64(-1))
-            self.file_seg.append(Int32(-1))
-            self._register_path(len(self.files) - 1)
+            var fid = self._add_file(paths[i])
             keep.append(True)
-            queued.append(Int32(len(self.files) - 1))
+            queued.append(Int32(fid))
         # Retire whatever vanished from the roster.
         for i in range(len(keep)):
             if not keep[i]:
@@ -472,13 +489,7 @@ struct SymbolIndex(Movable):
         """
         var fid = self._file_id(path)
         if fid < 0:
-            self.files.append(path)
-            self.file_size.append(Int64(0))
-            self.file_mtime_sec.append(Int64(-1))
-            self.file_mtime_nsec.append(Int64(-1))
-            self.file_seg.append(Int32(-1))
-            self._register_path(len(self.files) - 1)
-            fid = len(self.files) - 1
+            fid = self._add_file(path)
         self._retire_segment(fid)
         self._add_segment(fid, text.as_bytes())
         self.file_size[fid] = Int64(0)
@@ -487,6 +498,21 @@ struct SymbolIndex(Movable):
         return True
 
     # --- indexing ---------------------------------------------------------
+
+    def _add_file(mut self, path: String) -> Int:
+        """Register a path on the roster with no segment yet; returns
+        its file id. The seed priorities are computed here, once, so
+        the query path never touches the path string."""
+        self.files.append(path)
+        self.file_size.append(Int64(0))
+        self.file_mtime_sec.append(Int64(-1))
+        self.file_mtime_nsec.append(Int64(-1))
+        self.file_prio_use.append(Int32(seed_priority(path, False)))
+        self.file_prio_def.append(Int32(seed_priority(path, True)))
+        self.file_seg.append(Int32(-1))
+        var fid = len(self.files) - 1
+        self._register_path(fid)
+        return fid
 
     def _index_file(mut self, fid: Int) -> Int:
         """Read and tokenize one file, replacing its segment. Returns
@@ -547,6 +573,11 @@ struct SymbolIndex(Movable):
         var mask = slot_cap - 1
         var line = 1
         var line_start = 0
+        # End of the current line, found lazily the first time a token
+        # on it needs the definition check and reused for the rest of
+        # the line — a per-token scan would be quadratic on a one-line
+        # minified file.
+        var line_end = -1
         var i = 0
         var n = len(b)
         while i < n:
@@ -555,6 +586,7 @@ struct SymbolIndex(Movable):
                 line += 1
                 i += 1
                 line_start = i
+                line_end = -1
                 continue
             if not is_symbol_byte(c):
                 i += 1
@@ -571,6 +603,21 @@ struct SymbolIndex(Movable):
             # used to surface.
             if _starts_with_digit(span):
                 continue
+            # Only computed when it can matter: the previous byte on
+            # the line is whitespace (``class Name``) or the token opens
+            # the line (``Name = …``). Every other token — the common
+            # case, ``a.b``, ``f(x)``, ``x, y`` — skips the scan-back.
+            var is_def = False
+            if start == line_start \
+                    or b[start - 1] == 0x20 or b[start - 1] == 0x09:
+                if line_end < 0:
+                    line_end = i
+                    while line_end < n and b[line_end] != 0x0A:
+                        line_end += 1
+                is_def = is_definition_site(
+                    b[line_start:line_end], start - line_start,
+                    i - line_start,
+                )
             var h = Int(_hash_bytes(span)) & mask
             var dup = False
             while Int(slots[h]) != 0:
@@ -578,6 +625,14 @@ struct SymbolIndex(Movable):
                 if Int(self.ent_len[e]) == len(span) \
                         and self._entry_equals(e, span):
                     dup = True
+                    # The first mention was recorded; a definition
+                    # further down the file is the better seed. Only
+                    # the first definition upgrades — ``Name = …`` on
+                    # line 3 is not improved by another on line 300.
+                    if is_def and not self.ent_def[e]:
+                        self.ent_line[e] = Int32(line)
+                        self.ent_col[e] = Int32(start - line_start + 1)
+                        self.ent_def[e] = True
                     break
                 h = (h + 1) & mask
             if dup:
@@ -588,6 +643,7 @@ struct SymbolIndex(Movable):
             self.ent_line.append(Int32(line))
             self.ent_col.append(Int32(start - line_start + 1))
             self.ent_seg.append(Int32(seg_id))
+            self.ent_def.append(is_def)
             for k in range(len(span)):
                 self.blob.append(span[k])
             self.blob.append(0)
@@ -625,6 +681,7 @@ struct SymbolIndex(Movable):
         var new_line = List[Int32]()
         var new_col = List[Int32]()
         var new_seg = List[Int32]()
+        var new_def = List[Bool]()
         var new_segments = List[_Segment]()
         for s in range(len(self.segments)):
             if not self.segments[s].live:
@@ -641,6 +698,7 @@ struct SymbolIndex(Movable):
                 new_line.append(self.ent_line[e])
                 new_col.append(self.ent_col[e])
                 new_seg.append(Int32(new_sid))
+                new_def.append(self.ent_def[e])
                 for k in range(off, off + ln):
                     new_blob.append(self.blob[k])
                 new_blob.append(0)
@@ -655,6 +713,7 @@ struct SymbolIndex(Movable):
         self.ent_line = new_line^
         self.ent_col = new_col^
         self.ent_seg = new_seg^
+        self.ent_def = new_def^
         self.segments = new_segments^
         self.dead_bytes = 0
 
@@ -678,11 +737,22 @@ struct SymbolIndex(Movable):
 
     def search(self, needle: String, cap: Int) -> List[SymbolHit]:
         """Every indexed identifier containing ``needle``, deduped by
-        name, first occurrence wins, up to ``cap`` results.
+        name, up to ``cap`` distinct names.
 
         One SIMD pass over ``blob``. After each hit we resume past the
         entry we landed in: a name can only be reported once, so this
         both avoids re-reporting and skips the rest of a long name.
+
+        Which file's occurrence a name is reported *at* is decided by
+        ``seed_priority``: a definition in source beats a definition in
+        a test beats a bare mention beats anything in prose, with the
+        shallower path winning ties. Blob order — which is roster
+        order, then whatever the revalidation sweep re-indexed — is
+        deliberately not a factor; it once sent ``Column`` to the
+        changelog. The sweep stops once ``cap`` names are collected,
+        so on an over-broad query a name's seed may still be improvable
+        by a segment the sweep never reached; narrowing the query fixes
+        that, and the LSP overrides the seed whenever it is available.
         """
         var out = List[SymbolHit]()
         var nb = needle.as_bytes()
@@ -692,11 +762,16 @@ struct SymbolIndex(Movable):
         # so a name legitimately appears once per file that mentions it,
         # and the picker wants one row per name. A table rather than a
         # rescan of the emitted names — at ``cap`` = 500 the rescan cost
-        # about as much as the blob sweep it was riding on.
+        # about as much as the blob sweep it was riding on. ``slot_out``
+        # is the parallel ``out`` index so a later, better-placed
+        # occurrence can replace the row already emitted for its name.
         var slot_cap = _slot_capacity_for(cap)
         var slots = List[Int32](capacity=slot_cap)
+        var slot_out = List[Int32](capacity=slot_cap)
         for _ in range(slot_cap):
             slots.append(Int32(0))
+            slot_out.append(Int32(0))
+        var out_prio = List[Int32]()
         var mask = slot_cap - 1
         var pos = 0
         while len(out) < cap:
@@ -719,6 +794,9 @@ struct SymbolIndex(Movable):
             if not self.segments[seg].live:
                 continue
             var name_span = Span(self.blob)[off:off + ln]
+            var fid = Int(self.segments[seg].file_id)
+            var prio = self.file_prio_def[fid] if self.ent_def[e] \
+                else self.file_prio_use[fid]
             var h = Int(_hash_bytes(name_span)) & mask
             var dup = False
             while Int(slots[h]) != 0:
@@ -726,12 +804,21 @@ struct SymbolIndex(Movable):
                 if Int(self.ent_len[prev]) == ln \
                         and self._entry_equals(prev, name_span):
                     dup = True
+                    var k = Int(slot_out[h])
+                    if prio < out_prio[k]:
+                        slots[h] = Int32(e + 1)
+                        out_prio[k] = prio
+                        out[k] = SymbolHit(
+                            out[k].name, self.files[fid],
+                            Int(self.ent_line[e]), Int(self.ent_col[e]),
+                        )
                     break
                 h = (h + 1) & mask
             if dup:
                 continue
             slots[h] = Int32(e + 1)
-            var fid = Int(self.segments[seg].file_id)
+            slot_out[h] = Int32(len(out))
+            out_prio.append(prio)
             out.append(SymbolHit(
                 String(StringSpan(unsafe_from_utf8=name_span)),
                 self.files[fid],

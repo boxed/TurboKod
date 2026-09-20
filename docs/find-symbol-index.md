@@ -189,6 +189,68 @@ while the picker is *already open* is not noticed until the next sweep.
 The old per-keystroke rg would have seen it. Mechanism 5 is what keeps
 the consequence to a wasted text scan rather than a wrong jump.
 
+## Which occurrence is the seed
+
+A name occurs in many files; its picker row carries one location. That
+location is the seed for `workspace/symbol`, and — when no language
+server for that language is running or ready, which is the normal
+state when the user is reading documentation — it is where the user
+*lands*. It used to be whichever file the index (or `rg`) swept first.
+On iommi that was the changelog: Find Symbol for `Column` opened
+`HISTORY.rst` on a bullet mentioning the class, with `class
+Column(Part)` untouched in `iommi/table.py`.
+
+[`src/turbokod/symbol_seed.mojo`](../src/turbokod/symbol_seed.mojo)
+ranks candidates with `seed_priority`, lower wins, on two signals:
+
+1. **Occurrence shape.** `is_definition_site` says an identifier is
+   being defined when the previous token on the line is a definition
+   keyword separated by whitespace only (`class Column`, `pub fn run`,
+   `type alias Model`, `const X`), or when it opens the line and a lone
+   `=` follows (`EDITOR_FIND_SYMBOL = …`). Language-agnostic by design:
+   the index tokenizes every file the same way. `type(x)`, `obj.def x`,
+   `from m import X`, `x == y` and indented `x = …` are all mentions.
+2. **File kind.** `file_kind` splits paths into source, test source
+   (conventional directories and affixes: `tests/`, `test_x.py`,
+   `x__tests.py`, `x_test.go`, `x.spec.ts`, `FooTests.swift`) and
+   prose/data (`.rst`, `.md`, `.json`, `.yaml`, `.toml`, dotfiles,
+   extensionless names like `Makefile`).
+
+The buckets, in order: definition in source, definition in a test,
+mention in source, mention in a test, definition-shaped in prose (an
+`.rst` literal block is an *example*), mention in prose. Path depth
+breaks ties, so `iommi/table.py` beats `examples/examples/iommi.py`
+when both define the class.
+
+Both search paths rank through the same function so they agree:
+
+- **Index.** `_add_segment` records one occurrence per name per file —
+  the first mention, upgraded in place to the first definition-shaped
+  occurrence (`ent_def`). `search` dedupes names across segments and
+  keeps the best-priority location rather than the first segment's.
+  The file's two priorities are computed at roster registration
+  (`file_prio_use` / `file_prio_def`), so the query path never touches
+  a path string. The definition check itself only runs for tokens that
+  open a line or follow whitespace, and finds the line end once per
+  line, so a one-line minified file stays linear.
+- **rg fallback.** `FindSymbol.tick` keeps `seen_priority` beside
+  `seen_names`; a later row for a listed name swaps the entry's
+  location when it ranks better. rg's threads report files in arrival
+  order, so without this the changelog won whenever it arrived first.
+
+One limit: `search` stops once `cap` names are collected, so on an
+over-broad query a name's seed may still be improvable by a segment the
+sweep never reached. Narrowing the query fixes that, and the LSP
+overrides the seed whenever it answers.
+
+Tests: `test_seed_ranking_recognizes_definitions_and_file_kinds`,
+`test_search_seeds_from_the_definition_not_the_changelog` (both roster
+orders), `test_a_definition_later_in_the_file_upgrades_the_seed`,
+`test_seed_ranking_survives_reindex_and_compaction` in
+`tests/test_symbol_index.mojo`, and
+`test_find_symbol_rg_fallback_seeds_from_the_definition` in
+`tests/test_desktop.mojo`.
+
 ## Measurements
 
 `./run.sh tests/bench_symbol_index.mojo ~/some/large/repo`, on an

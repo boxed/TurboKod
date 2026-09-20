@@ -48,7 +48,7 @@ from turbokod.lsp_dispatch import (
     CompletionItem, DefinitionResolved, TextEditEntry
 )
 from turbokod.lsp import LspProcess
-from turbokod.posix import close_fd, kill_pid, realpath, which
+from turbokod.posix import close_fd, kill_pid, realpath, sleep_ms, which
 from turbokod.project_grammars import GrammarOverride
 from turbokod.config import (
     MAX_FONT_SIZE, MIN_FONT_SIZE, OnSaveAction, WRAP_SOFT
@@ -3133,6 +3133,50 @@ def test_find_symbol_index_sees_unsaved_buffer_text() raises:
     _rm_rf(root)
 
 
+def test_find_symbol_rg_fallback_seeds_from_the_definition() raises:
+    """The cold-index ``rg`` path must agree with the index on *where* a
+    name is reported: rg's threads hand back files in arrival order, and
+    the changelog mention used to win whenever it arrived first. The
+    definition in source has to replace it however the rows arrive."""
+    if len(which(String("rg")).as_bytes()) == 0:
+        assert_true(True)
+        return
+    var root = _temp_path(String("_fs_rg_seed"))
+    _rm_rf(root)
+    _ensure_dir(root + String("/pkg"))
+    _ = write_file(root + String("/HISTORY.rst"), String(
+        "* `rg_seed_symbol` now resolves later\n"
+    ))
+    _ = write_file(root + String("/pkg/mod.py"), String(
+        "import os\n"
+        "class rg_seed_symbol:\n"
+        "    pass\n"
+    ))
+    var d = Desktop()
+    d.project = Optional[String](root)
+    d._open_find_symbol()
+    assert_false(d.symbol_index.is_ready())
+    d.find_symbol.query.set_text(String("rg_seed"))
+    d.find_symbol.query_dirty = True
+    d._run_find_symbol_query()
+    assert_true(d.find_symbol.runner.active)
+    # Drain the runner directly (not via ``_pump_find_symbol``, which
+    # would finish the index build and answer from it instead).
+    var spins = 0
+    while d.find_symbol.runner.active and spins < 500:
+        d.find_symbol.tick()
+        sleep_ms(10)
+        spins += 1
+    assert_false(d.find_symbol.runner.active)
+    assert_equal(len(d.find_symbol.entries), 1)
+    assert_equal(d.find_symbol.entries[0].name, String("rg_seed_symbol"))
+    assert_equal(d.find_symbol.entries[0].path, root + String("/pkg/mod.py"))
+    assert_equal(d.find_symbol.entries[0].line, 2)
+    assert_equal(d.find_symbol.entries[0].column, 7)
+    d.shutdown()
+    _rm_rf(root)
+
+
 def test_shutdown_stops_the_search_subprocesses() raises:
     """Find in Project / Find Symbol each stream an ``rg`` child; a
     window closed mid-search used to leave it running with our three
@@ -3422,8 +3466,9 @@ def main() raises:
     test_find_symbol_answers_from_the_identifier_index()
     test_find_symbol_falls_back_to_rg_before_the_index_is_ready()
     test_find_symbol_index_sees_unsaved_buffer_text()
+    test_find_symbol_rg_fallback_seeds_from_the_definition()
     test_shutdown_stops_the_search_subprocesses()
     test_project_find_accepts_non_ascii_in_its_query()
     test_fullscreen_modal_paint_is_covered_by_the_modal()
     test_clamp_scroll_still_pulls_back_a_widened_window()
-    print("desktop: 108 tests passed")
+    print("desktop: 109 tests passed")

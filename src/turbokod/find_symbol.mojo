@@ -10,15 +10,17 @@ Triggered by Cmd+Option+O. The picker is a streaming search:
    tuple. We extract the *full identifier* sitting at the matched
    column (walk left + right while the byte is an identifier
    character) and use that as the symbol name.
-3. The first occurrence of each unique symbol name lands in the
-   picker's list. Subsequent occurrences of the same name are
-   ignored — the goal is one entry per symbol, not one entry per
-   usage.
-4. On ``Enter`` the host sends ``textDocument/definition`` to the
-   relevant LSP at the *first occurrence* of the selected name. The
-   LSP follows the (probably-a-usage) hit to the actual definition.
-   Same convergence trick as before, just gated on a list pick
-   instead of a blind first-rg-result.
+3. Each unique symbol name gets one row in the picker's list — one
+   entry per symbol, not one per usage. The row's location is the
+   best-ranked occurrence seen so far (``symbol_seed.mojo``: a
+   definition in source beats a mention beats anything in prose), so
+   a later rg line for a name already listed can replace the row's
+   location without adding a row.
+4. On ``Enter`` the host asks every ready LSP for ``workspace/symbol``
+   under the selected name and jumps to (or offers a chooser over)
+   the definitions it returns. With no LSP answering, the row's
+   location is where the user lands — which is why its ranking
+   matters.
 
 The runner streams output line-by-line so very large projects
 don't block the UI thread on a synchronous full scan; restarts on
@@ -46,6 +48,7 @@ from .picker_input import (
 )
 from .posix import alloc_zero_buffer, poll_stdin, read_into
 from .string_utils import display_columns, starts_with, tail_to_columns
+from .symbol_seed import is_definition_site, seed_priority
 from .text_field import TextField
 from .case_fold import contains_ci, eq_ci
 from .type_ahead import starts_with_ci
@@ -75,9 +78,10 @@ useful for casual typing."""
 
 @fieldwise_init
 struct FindSymbolMatch(ImplicitlyCopyable, Movable):
-    """One picker entry: the symbol name plus the location of its
-    first textual occurrence (used as the seed for the LSP definition
-    lookup on submit)."""
+    """One picker entry: the symbol name plus the textual occurrence
+    that ranks best as a seed for the LSP definition lookup on submit
+    — and as the landing spot when no LSP answers. See
+    ``symbol_seed.mojo`` for the ranking."""
     var name: String
     var path: String        # absolute path
     var line: Int           # 1-based, as rg reports
@@ -243,6 +247,11 @@ struct FindSymbol(Movable):
     # on append. Could swap for a hashed set if dedupe ever becomes hot;
     # at ``_ENTRIES_CAP`` (500) the linear scan is still cheap.
     var seen_names: List[String]
+    # ``seed_priority`` of the occurrence currently held for each name
+    # in ``seen_names`` (same order). rg reports occurrences in whatever
+    # order its threads finish, so a later row for an already-listed
+    # name replaces the entry when it is the better seed.
+    var seen_priority: List[Int]
     var selected: Int
     var scroll: Int
     var submitted: Bool
@@ -288,6 +297,7 @@ struct FindSymbol(Movable):
         self.root = String("")
         self.entries = List[FindSymbolMatch]()
         self.seen_names = List[String]()
+        self.seen_priority = List[Int]()
         self.selected = 0
         self.scroll = 0
         self.submitted = False
@@ -330,6 +340,7 @@ struct FindSymbol(Movable):
                 self.query.select_all()
         self.entries = List[FindSymbolMatch]()
         self.seen_names = List[String]()
+        self.seen_priority = List[Int]()
         self.selected = 0
         self.scroll = 0
         self.submitted = False
@@ -355,6 +366,7 @@ struct FindSymbol(Movable):
         self.root = String("")
         self.entries = List[FindSymbolMatch]()
         self.seen_names = List[String]()
+        self.seen_priority = List[Int]()
         self.selected = 0
         self.scroll = 0
         self.submitted = False
@@ -402,6 +414,7 @@ struct FindSymbol(Movable):
         self.runner.cancel()
         self.entries = choices^
         self.seen_names = List[String]()
+        self.seen_priority = List[Int]()
         self.selected = 0
         self.scroll = 0
         self._user_navigated = False
@@ -439,9 +452,26 @@ struct FindSymbol(Movable):
             var name = _extract_identifier(text, col)
             if len(name.as_bytes()) == 0:
                 continue
-            if _list_contains(self.seen_names, name):
+            var prio = seed_priority(path, is_definition_site(
+                text.as_bytes(), col - 1, col - 1 + len(name.as_bytes()),
+            ))
+            var seen_at = _list_index_of(self.seen_names, name)
+            if seen_at >= 0:
+                # Already listed. rg's thread pool reports files in no
+                # particular order, so the row we hold may be a mention
+                # in the changelog while this one is the definition —
+                # swap the location, keep the row.
+                if prio < self.seen_priority[seen_at]:
+                    self.seen_priority[seen_at] = prio
+                    for k in range(len(self.entries)):
+                        if self.entries[k].name == name:
+                            self.entries[k] = FindSymbolMatch(
+                                name, path, line_no, col,
+                            )
+                            break
                 continue
             self.seen_names.append(name)
+            self.seen_priority.append(prio)
             self.entries.append(FindSymbolMatch(name, path, line_no, col))
             added = True
         if not added:
@@ -500,8 +530,10 @@ struct FindSymbol(Movable):
         self.runner.cancel()
         self.entries = hits^
         self.seen_names = List[String]()
+        self.seen_priority = List[Int]()
         for i in range(len(self.entries)):
             self.seen_names.append(self.entries[i].name)
+            self.seen_priority.append(0)
         _sort_entries_ranked(self.entries, _query_member(self.query.text))
         self.selected = 0
         self.scroll = 0
@@ -517,6 +549,7 @@ struct FindSymbol(Movable):
         """
         self.entries = List[FindSymbolMatch]()
         self.seen_names = List[String]()
+        self.seen_priority = List[Int]()
         self.selected = 0
         self.scroll = 0
         self._user_navigated = False
@@ -917,13 +950,12 @@ def _sort_bucket_alpha(mut bucket: List[FindSymbolMatch]):
             j -= 1
 
 
-def _list_contains(haystack: List[String], needle: String) -> Bool:
-    """Linear membership check. Used for the symbol-name dedupe set;
-    capped by ``_ENTRIES_CAP`` so the O(N²) total cost stays bounded."""
+def _list_index_of(haystack: List[String], needle: String) -> Int:
+    """Position of ``needle`` in ``haystack``, or -1."""
     for i in range(len(haystack)):
         if haystack[i] == needle:
-            return True
-    return False
+            return i
+    return -1
 
 
 def _is_ident_byte(b: UInt8) -> Bool:

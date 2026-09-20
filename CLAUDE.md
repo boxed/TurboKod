@@ -270,6 +270,15 @@ Three things to know before touching it:
    Putting it in `_prepare_symbol_index` looks right and is silently
    undone.
 
+4. **The row's location is ranked, not first-seen.** A name is
+   reported at its best `seed_priority` (`symbol_seed.mojo`: a
+   definition in source beats a definition in a test beats a mention
+   beats anything in `.rst`/`.md`/dotfiles), whatever order the files
+   were indexed in. Both the index and the `rg` fallback rank through
+   that one function. Without it, `Column` in iommi opened the
+   changelog — the seed is where the user lands when no LSP for the
+   language is up, which is the normal state while reading docs.
+
 Adding a search site here means constructing the query through
 `SymbolIndex.search`, and any new location seed must go through
 `verify_occurrence_in` before it reaches an LSP or `_jump_to` — that
