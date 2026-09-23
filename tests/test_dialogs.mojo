@@ -21,8 +21,8 @@ from turbokod.theme import Theme
 from turbokod.editor import Editor
 from turbokod.file_dialog import FileDialog
 from turbokod.find_symbol import (
-    container_matches_qualifier, sanitize_symbol_query, _query_member,
-    _query_qualifier
+    container_matches_qualifier, enclosing_container, sanitize_symbol_query,
+    _query_member, _query_qualifier
 )
 from turbokod.color_convert import (
     srgb_to_rgb255, rgb255_to_srgb, srgb_to_oklab, oklab_to_srgb, srgb_to_hsl,
@@ -2681,6 +2681,33 @@ def test_project_find_argv_maps_options_scope_and_globs() raises:
     assert_true(_argv_index(argv, String("!.git/")) >= 0)
 
 
+def test_find_symbol_enclosing_container() raises:
+    # ty sends no ``containerName``, so the qualifier in
+    # ``Filter.related`` is matched against the enclosing class read
+    # off the source instead.
+    var py = String(
+        "class Filter(Part):\n"          # 0
+        "    x = 1\n"                    # 1
+        "\n"                             # 2
+        "# a column-0 comment\n"         # 3
+        "    @classmethod\n"             # 4
+        "    def related(cls):\n"        # 5
+        "        class Inner:\n"         # 6
+        "            def m(self):\n"     # 7
+        "                pass\n"         # 8
+        "def top():\n"                   # 9
+        "    pass\n"                     # 10
+    )
+    assert_equal(enclosing_container(py, 5), String("Filter"))
+    assert_equal(enclosing_container(py, 7), String("Filter.Inner"))
+    assert_equal(enclosing_container(py, 0), String(""))
+    assert_equal(enclosing_container(py, 10), String(""))
+    assert_equal(enclosing_container(py, 99), String(""))
+    var rs = String("pub struct Foo {\n    x: i32,\n}\nimpl<T> Bar<T> {\n    fn m() {}\n}\n")
+    assert_equal(enclosing_container(rs, 1), String("Foo"))
+    assert_equal(enclosing_container(rs, 4), String("Bar"))
+
+
 def test_find_symbol_container_match() raises:
     # Exact and case-insensitive container hits.
     assert_true(container_matches_qualifier(String("User"), String("User")))
@@ -2967,6 +2994,7 @@ def main() raises:
     test_project_find_argv_searches_dotfiles_but_not_dot_git()
     test_project_find_argv_maps_options_scope_and_globs()
     test_find_symbol_container_match()
+    test_find_symbol_enclosing_container()
     test_shadow_button_press_captures_and_release_fires()
     test_shadow_button_release_outside_cancels()
     test_shadow_button_drag_back_in_re_fires()

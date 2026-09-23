@@ -827,6 +827,52 @@ struct SymbolIndex(Movable):
             ))
         return out^
 
+    def definition_sites(self, name: String) -> List[SymbolHit]:
+        """Every live file's definition-shaped occurrence of exactly
+        ``name``, best ``seed_priority`` first.
+
+        ``search`` reports one row per name at its best-ranked site,
+        which is the wrong one when the user typed a qualifier
+        (``Filter.related`` seeding at ``Column.related``). This is the
+        list the host narrows by enclosing class instead. At most one
+        site per file — segments are deduped by name."""
+        var out = List[SymbolHit]()
+        var prios = List[Int32]()
+        var nb = name.as_bytes()
+        if len(nb) == 0:
+            return out^
+        var pos = 0
+        while True:
+            var at = find_exact(Span(self.blob), nb, pos)
+            if at < 0:
+                break
+            var e = self._entry_at(at)
+            var off = Int(self.ent_off[e])
+            var ln = Int(self.ent_len[e])
+            pos = off + ln + 1
+            if at != off or ln != len(nb) or not self.ent_def[e]:
+                continue
+            var seg = Int(self.ent_seg[e])
+            if not self.segments[seg].live:
+                continue
+            var fid = Int(self.segments[seg].file_id)
+            var prio = self.file_prio_def[fid]
+            var hit = SymbolHit(
+                name, self.files[fid],
+                Int(self.ent_line[e]), Int(self.ent_col[e]),
+            )
+            # Insertion sort: a name is defined in a handful of files.
+            var k = len(out)
+            out.append(hit)
+            prios.append(prio)
+            while k > 0 and prios[k - 1] > prio:
+                out[k] = out[k - 1]
+                prios[k] = prios[k - 1]
+                k -= 1
+            out[k] = hit
+            prios[k] = prio
+        return out^
+
     # --- submit-time verification ----------------------------------------
 
     def verify_occurrence(

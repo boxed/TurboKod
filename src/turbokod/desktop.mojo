@@ -222,6 +222,7 @@ from .symbol_pick import SymbolPick
 from .reference_pick import ReferencePick
 from .find_symbol import (
     FindSymbol, FindSymbolMatch, container_matches_qualifier,
+    enclosing_container,
 )
 from .symbol_index import SymbolIndex
 from .terminal import beep
@@ -13129,6 +13130,25 @@ struct Desktop(Movable):
                 DefinitionResolved(path, line, col), screen,
             )
             return
+        # A ``Class.member`` query: the row's seed is the name's
+        # best-ranked site, which needn't be in that class. Re-seed at
+        # a definition whose enclosing scope matches the qualifier, so
+        # the no-LSP / LSP-found-nothing fallbacks land in the right
+        # class too.
+        if len(qualifier.as_bytes()) > 0 and self.symbol_index.is_ready():
+            var sites = self.symbol_index.definition_sites(name)
+            for k in range(len(sites)):
+                var text = self._snapshot_or_read(sites[k].path)
+                if not text:
+                    continue
+                if container_matches_qualifier(
+                    enclosing_container(text.value(), sites[k].line - 1),
+                    qualifier,
+                ):
+                    path = sites[k].path
+                    line = sites[k].line - 1
+                    col = sites[k].column - 1
+                    break
         # The seed is the identifier index's record of a *textual*
         # occurrence, and the index can be a revalidation sweep behind
         # the file. Check it before anyone navigates to it. Against the
@@ -13231,7 +13251,16 @@ struct Desktop(Movable):
         var qualifier = self._find_symbol_qualifier
         if len(qualifier.as_bytes()) > 0:
             for k in range(len(base)):
-                if container_matches_qualifier(base[k].container, qualifier):
+                var container = base[k].container
+                if len(container.as_bytes()) == 0:
+                    # Some servers (ty) never fill ``containerName``;
+                    # read the enclosing class off the source instead.
+                    var text = self._snapshot_or_read(base[k].path)
+                    if text:
+                        container = enclosing_container(
+                            text.value(), base[k].line,
+                        )
+                if container_matches_qualifier(container, qualifier):
                     filtered.append(base[k])
             if len(filtered) == 0:
                 filtered = base^

@@ -1120,4 +1120,114 @@ def container_matches_qualifier(container: String, qualifier: String) -> Bool:
         or contains_ci(qualifier, container)
 
 
+def enclosing_container(text: String, line: Int) -> String:
+    """The dotted chain of class-like scopes enclosing 0-based ``line``
+    of ``text``, outermost first (``Outer.Inner``); empty at top level.
+
+    The stand-in for ``containerName`` when a server omits it — ty
+    does, so ``Filter.related`` couldn't tell iommi's ``Filter.related``
+    from ``Column.related`` and the qualifier silently stopped
+    narrowing. Indentation-based: walk up to each less-indented line
+    and keep the ones that open a ``class`` / ``struct`` / ``impl`` /
+    …. Exact for Python; for brace languages it's right whenever the
+    body is indented, which is the usual layout. Comment lines are
+    skipped so a column-0 comment inside a class body doesn't read as
+    the end of the class."""
+    var b = text.as_bytes()
+    var n = len(b)
+    # Byte offset of each line start up to and including ``line``.
+    var starts = List[Int]()
+    starts.append(0)
+    var i = 0
+    while i < n and len(starts) <= line:
+        if b[i] == 0x0A:
+            starts.append(i + 1)
+        i += 1
+    if line < 0 or line >= len(starts):
+        return String("")
+    var indent = _line_indent(b, starts[line])
+    var out = String("")
+    var r = line - 1
+    while r >= 0 and indent > 0:
+        var s = starts[r]
+        var ind = _line_indent(b, s)
+        r -= 1
+        var p = s + ind
+        if p >= n or b[p] == 0x0A or b[p] == 0x0D:
+            continue   # blank line
+        if b[p] == 0x23 or (p + 1 < n and b[p] == 0x2F and b[p + 1] == 0x2F):
+            continue   # '#' / '//' comment
+        if ind >= indent:
+            continue
+        indent = ind
+        var name = _container_opener_name(b, p)
+        if len(name.as_bytes()) > 0:
+            out = name + String(".") + out if len(out.as_bytes()) > 0 \
+                else name
+    return out^
+
+
+def _line_indent(b: Span[UInt8, _], start: Int) -> Int:
+    var j = start
+    while j < len(b) and (b[j] == 0x20 or b[j] == 0x09):
+        j += 1
+    return j - start
+
+
+def _container_opener_name(b: Span[UInt8, _], start: Int) -> String:
+    """If the line at ``start`` opens a class-like scope, its name.
+
+    Leading modifiers (``pub``, ``export``, ``abstract``, …) are
+    skipped; generic parameters between the keyword and the name
+    (``impl<T> Foo``) too."""
+    var p = start
+    var n = len(b)
+    while True:
+        var w0 = p
+        while p < n and _is_ident_byte(b[p]):
+            p += 1
+        if p == w0:
+            return String("")
+        var word = String(StringSpan(unsafe_from_utf8=b[w0:p]))
+        while p < n and (b[p] == 0x20 or b[p] == 0x09):
+            p += 1
+        if _is_container_keyword(word):
+            if p < n and b[p] == 0x3C:   # '<' — skip generics
+                var depth = 0
+                while p < n and b[p] != 0x0A:
+                    if b[p] == 0x3C:
+                        depth += 1
+                    elif b[p] == 0x3E:
+                        depth -= 1
+                        if depth == 0:
+                            p += 1
+                            break
+                    p += 1
+                while p < n and (b[p] == 0x20 or b[p] == 0x09):
+                    p += 1
+            var s = p
+            while p < n and _is_ident_byte(b[p]):
+                p += 1
+            return String(StringSpan(unsafe_from_utf8=b[s:p]))
+        if not _is_container_modifier(word):
+            return String("")
+
+
+def _is_container_keyword(w: String) -> Bool:
+    return w == "class" or w == "struct" or w == "trait" \
+        or w == "interface" or w == "enum" or w == "impl" \
+        or w == "object" or w == "module" or w == "namespace" \
+        or w == "protocol" or w == "extension" or w == "record" \
+        or w == "union"
+
+
+def _is_container_modifier(w: String) -> Bool:
+    return w == "pub" or w == "export" or w == "public" \
+        or w == "private" or w == "protected" or w == "internal" \
+        or w == "abstract" or w == "final" or w == "sealed" \
+        or w == "static" or w == "open" or w == "data" \
+        or w == "default" or w == "unsafe" or w == "partial" \
+        or w == "case"
+
+
 

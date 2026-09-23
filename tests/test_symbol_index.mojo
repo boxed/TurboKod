@@ -476,6 +476,38 @@ def test_unsaved_buffer_text_is_searchable() raises:
     _rm_rf(root)
 
 
+def test_definition_sites_lists_every_file_defining_a_name() raises:
+    """``search`` keeps one row per name; a ``Class.member`` query needs
+    every candidate so the host can pick the one in the right class."""
+    var files = List[Tuple[String, String]]()
+    files.append((String("table.py"), String(
+        "class Column:\n    def related(cls):\n        pass\n"
+    )))
+    files.append((String("query.py"), String(
+        "class Filter:\n    def related(cls):\n        pass\n"
+    )))
+    files.append((String("use.py"), String("x = y.related\n")))
+    var root = _seed(files.copy())
+    var rels = List[String]()
+    rels.append(String("table.py"))
+    rels.append(String("query.py"))
+    rels.append(String("use.py"))
+    var idx = _built(root, rels^)
+
+    var sites = idx.definition_sites(String("related"))
+    assert_equal(len(sites), 2)   # the bare mention in use.py is not one
+    var paths = String("")
+    for i in range(len(sites)):
+        assert_equal(sites[i].line, 2)
+        assert_equal(sites[i].column, 9)
+        paths += sites[i].path + String(";")
+    assert_true(root + String("/table.py;") in paths)
+    assert_true(root + String("/query.py;") in paths)
+    # Exact names only — ``search``'s substring match is not wanted here.
+    assert_equal(len(idx.definition_sites(String("relate"))), 0)
+    _rm_rf(root)
+
+
 def test_is_ready_gates_the_fast_path() raises:
     """``find_symbol`` falls back to ``rg`` while this is False, which is
     what keeps a cold index slow rather than incomplete."""
@@ -842,6 +874,7 @@ def main() raises:
     test_short_and_numeric_tokens_are_not_indexed()
     test_a_name_is_reported_once_per_query()
     test_search_respects_the_cap()
+    test_definition_sites_lists_every_file_defining_a_name()
     test_binary_and_oversized_files_are_skipped()
     test_search_matches_a_reference_scan()
     test_reindex_retires_the_old_segment()
