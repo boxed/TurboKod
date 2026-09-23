@@ -78,6 +78,10 @@ struct QuickOpen(Movable):
     # Desktop reads this on submit to decide between ``open_project``
     # and ``open_file``. Reset on every ``open*`` / ``close``.
     var picks_project: Bool
+    # True when the pick is the target of Git ▸ Show History for File
+    # rather than a file to open. Desktop reads this on submit and shows
+    # the file's commit history instead of calling ``open_file``.
+    var picks_history: Bool
     # Cached query strip rect (captured on the most recent ``paint``)
     # so ``handle_mouse`` can route clicks back to the field without
     # re-running layout. Negative width = "no paint yet".
@@ -150,6 +154,7 @@ struct QuickOpen(Movable):
         self.scroll = 0
         self.title = String(" Quick Open ")
         self.picks_project = False
+        self.picks_history = False
         self._input_rect = Rect(0, 0, 0, 0)
         self._revealed_height = 14
         self._indexer = Optional[FileIndexer]()
@@ -207,6 +212,7 @@ struct QuickOpen(Movable):
         self._pending_restore = not has_prefill
         self.title = String(" Quick Open ")
         self.picks_project = False
+        self.picks_history = False
         self.entries = List[String]()
         self.entries_abs = List[String]()
         self.truncated = False
@@ -361,7 +367,20 @@ struct QuickOpen(Movable):
         self.entries = entries^
         self.entries_abs = entries_abs^
         self.picks_project = picks_project
+        self.picks_history = False
         self._refilter()
+
+    def open_for_history(mut self, var root: String, var prefill: String):
+        """The project-file picker as the target chooser for Git ▸ Show
+        History for File. ``prefill`` is the focused file's relative path
+        so Enter goes straight to its history. Kept out of the main
+        picker's saved query / selection — this is a different question
+        than "which file do I want to open"."""
+        self.open(root^, prefill^)
+        self._in_main_open = False
+        self._pending_restore = False
+        self.title = String(" Show History for File ")
+        self.picks_history = True
 
     def close(mut self):
         self.active = False
@@ -394,6 +413,7 @@ struct QuickOpen(Movable):
         self.scroll = 0
         self.title = String(" Quick Open ")
         self.picks_project = False
+        self.picks_history = False
         # Tear down the indexers if still running — SIGTERM the
         # children so they don't keep enumerating after the user
         # dismissed the picker. ``_terminate`` is best-effort; the

@@ -2065,6 +2065,35 @@ def fetch_line_history(
     return entries^
 
 
+def fetch_file_history(
+    project_root: String, rel_path: String, limit: Int = 200,
+) -> List[LineHistoryEntry]:
+    """Run ``git -C <root> log --follow -p -- <rel>`` and return the whole
+    file's history, newest first, each commit carrying its patch for that
+    file — the "show history for file" feature. Same header format as
+    :func:`fetch_line_history`, so :func:`parse_line_history` reads both.
+
+    Empty list when the file is untracked or outside a git repo."""
+    var out = List[LineHistoryEntry]()
+    if len(project_root.as_bytes()) == 0 or len(rel_path.as_bytes()) == 0:
+        return out^
+    var args = List[String]()
+    args.append(String("log"))
+    args.append(String("--follow"))
+    args.append(String("-p"))
+    args.append(String("--no-color"))
+    args.append(String("--date=short"))
+    args.append(String("-") + String(limit))
+    args.append(String("--format=%x1e%h%x1f%an%x1f%ad%x1f%s"))
+    args.append(String("--"))
+    args.append(rel_path)
+    var entries = parse_line_history(_git_stdout(project_root, args^))
+    var unpushed = _fetch_unpushed_short_shas(project_root, limit)
+    for i in range(len(entries)):
+        entries[i].is_pushed = not _list_contains(unpushed, entries[i].short_sha)
+    return entries^
+
+
 def parse_line_history(stdout: String) -> List[LineHistoryEntry]:
     """Parse ``git log -L`` output formatted by :func:`fetch_line_history`
     into per-commit entries. Factored out so it's unit-testable without a

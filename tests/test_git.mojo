@@ -57,7 +57,7 @@ from turbokod.git_changes import (
     GitBranch, GitCommit, GitStateMtimes, apply_patch_to_index,
     branch_is_merged, compute_staged_diff, compute_unstaged_diff,
     create_reworded_commit, fetch_commit_message, fetch_commit_show,
-    fetch_git_branches, fetch_git_commits,
+    fetch_file_history, fetch_git_branches, fetch_git_commits,
     fetch_git_status, fetch_merged_commits, format_age, git_state_mtimes,
     github_compare_url, github_repo_web_url,
     has_merge_between, head_short_sha, main_line_branch, stage_file,
@@ -2508,6 +2508,20 @@ def test_fetch_commit_message_returns_full_body() raises:
     _rm_rf(dir)
 
 
+def test_fetch_file_history_scopes_to_the_file() raises:
+    """Only the commits that touched the file, each with its patch."""
+    var dir = _reword_repo(String("_file_history"))
+    if len(dir.as_bytes()) == 0:
+        return
+    var entries = fetch_file_history(dir, String("f1.txt"))
+    assert_equal(len(entries), 1)
+    assert_equal(entries[0].subject, String("second subject"))
+    assert_true(_contains(entries[0].patch, String("+v1")))
+    assert_false(_contains(entries[0].patch, String("f2.txt")))
+    assert_equal(len(fetch_file_history(dir, String("nope.txt"))), 0)
+    _rm_rf(dir)
+
+
 def test_head_short_sha_matches_the_top_of_the_log() raises:
     var dir = _reword_repo(String("_reword_head"))
     if len(dir.as_bytes()) == 0:
@@ -4912,6 +4926,7 @@ def main() raises:
     test_merge_commit_info_panel_shows_merged_commits_section()
     test_review_mode_builds_changeset_model()
     test_fetch_commit_message_returns_full_body()
+    test_fetch_file_history_scopes_to_the_file()
     test_head_short_sha_matches_the_top_of_the_log()
     test_create_reworded_commit_keeps_tree_and_parent()
     test_has_merge_between_is_false_on_a_linear_history()

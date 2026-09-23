@@ -71,7 +71,8 @@ from .git_changes import (
     count_unpushed_commits,
     current_branch_name,
     diff_buffer_marks, fetch_git_status, fetch_head_text,
-    changed_paths_between, fetch_line_history, git_head_sha,
+    changed_paths_between, fetch_file_history, fetch_line_history,
+    git_head_sha,
     git_state_mtimes, project_is_git_repo,
 )
 from .git_gutter_menu import (
@@ -375,6 +376,9 @@ comptime GIT_REVIEW                 = String("git:review")
 # selected line range (or the cursor's line with no selection), shown in a
 # paned modal: commit list left, range-scoped patch right.
 comptime GIT_HISTORY_SELECTION      = String("git:history_selection")
+# "Show History for File…" — pick a project file (prefilled with the focused
+# editor's) and show its ``git log --follow -p`` in the same paned modal.
+comptime GIT_HISTORY_FILE           = String("git:history_file")
 # "Open all with changes" — for every entry from ``git status`` in the
 # active project, open an editor window. Deletions and untracked-empty
 # entries are skipped (no file to show); already-open files are
@@ -7510,8 +7514,11 @@ struct Desktop(Movable):
                 var primary = self.quick_open.selected_path
                 var paths = self.quick_open.selected_paths.copy()
                 var to_project = self.quick_open.picks_project
+                var to_history = self.quick_open.picks_history
                 self.quick_open.close()
-                if to_project:
+                if to_history:
+                    self._open_file_history(primary)
+                elif to_project:
                     # Project switch: close any current project so
                     # ``open_project``'s "no-op when one is set" guard
                     # doesn't swallow the request, then re-arm. Multi-
@@ -8650,6 +8657,19 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == GIT_OPEN_ALL_CHANGED:
             if self.project:
+        if action == GIT_HISTORY_FILE:
+            if self.project:
+                var root = self.project.value()
+                var prefill = String("")
+                var idx = self._focused_editor_idx()
+                if idx >= 0:
+                    var path = self.windows.windows[idx].editor.file_path
+                    if len(path.as_bytes()) > 0:
+                        prefill = project_relative(
+                            root, path, canonicalize=True,
+                        )
+                self.quick_open.open_for_history(root^, prefill^)
+            return Optional[String]()
                 var root = self.project.value()
                 var statuses = fetch_git_status(root)
                 for i in range(len(statuses)):
@@ -12412,6 +12432,15 @@ struct Desktop(Movable):
         the "Fill..." entry) on whether multi-cursor edits would have
         anything to do."""
         var idx = self._focused_editor_idx()
+    def _open_file_history(mut self, path: String):
+        """Open the paned git-history modal on the whole of ``path``: every
+        commit that touched it (following renames), each with its patch."""
+        if not self.project or len(path.as_bytes()) == 0:
+            return
+        var root = self.project.value()
+        var rel = project_relative(root, path, canonicalize=True)
+        self.history.open(basename(path), fetch_file_history(root, rel))
+
         if idx < 0:
             return False
         return self.windows.windows[idx].editor.has_extra_carets()
