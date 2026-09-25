@@ -27,7 +27,7 @@ clears the state and makes the next file open eligible to set it again.
 from std.collections.list import List
 from std.collections.optional import Optional
 
-from .case_fold import eq_ci
+from .case_fold import eq_ci, fold_byte
 from .canvas import Canvas, utf8_codepoint_count
 from .painter import Painter
 from .colors import (
@@ -138,8 +138,9 @@ from .doc_config import (
 from .doc_pick import DocPick
 from .doc_store import DocEntry, DocStore, html_to_text
 from .language_config import (
-    LanguageSpec, apply_language_overrides, built_in_servers,
-    dependency_dirs_for_language_id, find_language_for_extension,
+    apply_language_overrides, built_in_servers,
+    dependency_dirs_for_language_id, find_language_by_id,
+    find_language_for_extension, LanguageSpec,
 )
 from .lsp_dispatch import (
     CodeAction, CodeActionFileEdit, DefinitionResolved, LspManager,
@@ -626,9 +627,8 @@ def ctrl_key(letter: String) -> UInt32:
     var b = letter.as_bytes()
     if len(b) == 0:
         return UInt32(0)
-    var c = Int(b[0])
-    if 0x41 <= c and c <= 0x5A:
-        c = c + 0x20  # uppercase → lowercase to match the parser's canonical form
+    # Lowercase to match the parser's canonical form.
+    var c = Int(fold_byte(b[0]))
     return UInt32(c)
 
 
@@ -1154,10 +1154,9 @@ struct Desktop(Movable):
     # Right-click on a tab / window title opens this file-actions popup
     # (Rename / Delete). Reuses the generic EditorContextMenu widget — the
     # action ints are interpreted by ``_on_tab_context_menu_submit`` rather
-    # than the symbol handler. ``_file_op_win_idx`` / ``_file_op_path`` pin
-    # the targeted window across the prompt/confirm round-trip.
+    # than the symbol handler. ``_file_op_path`` pins the targeted
+    # file across the prompt/confirm round-trip.
     var tab_context_menu: EditorContextMenu
-    var _file_op_win_idx: Int
     var _file_op_path: String
     var _file_op_is_dir: Bool
     # Origin of an in-flight rename: the path/line/col the request was
@@ -1363,9 +1362,6 @@ struct Desktop(Movable):
     var _inlineval_pending_path: String
     var _inlineval_pending_exprs: List[String]
     var _inlineval_pending_rows: List[Int]
-    # Label of the scope whose variables are in flight. Used to render
-    # ``Locals:`` / ``Globals:`` in the pane when the response lands.
-    var _dap_pending_scope_label: String
     # When ``request_variables`` lands, the response goes to one of two
     # destinations: either the initial scope load (replace top of pane)
     # or a tree expansion (splice into existing rows). These fields
@@ -1713,7 +1709,6 @@ struct Desktop(Movable):
         self._ctx_menu_col = 0
         self._ctx_menu_word = String("")
         self.tab_context_menu = EditorContextMenu()
-        self._file_op_win_idx = -1
         self._file_op_path = String("")
         self._file_op_is_dir = False
         self._rename_path = String("")
@@ -1765,7 +1760,6 @@ struct Desktop(Movable):
         self._inlineval_pending_path = String("")
         self._inlineval_pending_exprs = List[String]()
         self._inlineval_pending_rows = List[Int]()
-        self._dap_pending_scope_label = String("")
         self._dap_var_target_kind = UInt8(0)
         self._dap_var_target_row = -1
         self._dap_var_target_depth = 0
@@ -3047,9 +3041,8 @@ struct Desktop(Movable):
                         Event.paste_event(text),
                     )
                 return True
-        if self.windows.focused >= 0 \
-                and self.windows.windows[self.windows.focused].is_editor:
-            var idx = self.windows.focused
+        var idx = self._focused_editor_idx()
+        if idx >= 0:
             self.windows.windows[idx].editor.paste_clipboard_text(text)
             self.windows.windows[idx].editor.reveal_cursor(
                 self.windows.windows[idx].interior(),
@@ -3088,9 +3081,9 @@ struct Desktop(Movable):
             return self.debug_pane.select_all_input()
         if self.test_pane.focused or self.find_results_pane.focused:
             return False
-        if self.windows.focused >= 0 \
-                and self.windows.windows[self.windows.focused].is_editor:
-            self.windows.windows[self.windows.focused].editor.select_all()
+        var fe = self._focused_editor_idx()
+        if fe >= 0:
+            self.windows.windows[fe].editor.select_all()
             return True
         return False
 
@@ -4942,14 +4935,46 @@ struct Desktop(Movable):
         var title = String("Untitled")
         if self._untitled_count > 1:
             title = title + String(" ") + String(self._untitled_count)
+        _ = self._add_text_window(title^, String(""), screen)
+
+    def _add_text_window(
+        mut self, var title: String, var body: String, screen: Rect,
+        read_only: Bool = False,
+    ) -> Int:
+        """Open an editor window holding ``body`` with ``open_file``'s
+        placement (maximized when the frontmost window is) and return its
+        index. ``read_only`` is for generated views — help, docs, diffs —
+        which also drop line numbers."""
         var workspace = self.workspace_rect(screen)
         var rect = self._default_window_rect(workspace)
         var was_max = self._frontmost_maximized()
-        self.windows.add(Window.editor_window(title^, rect, String("")))
+        self.windows.add(Window.editor_window(title^, rect, body^))
         self._open_count += 1
+        var idx = len(self.windows.windows) - 1
+        if read_only:
+            self.windows.windows[idx].editor.read_only = True
+            self.windows.windows[idx].editor.line_numbers = False
         if was_max:
-            var idx = len(self.windows.windows) - 1
             self.windows.windows[idx].toggle_maximize(workspace)
+        return idx
+
+    def _show_install_failure(
+        mut self, kind: String, result: InstallResult, screen: Rect,
+    ):
+        """Surface a failed installer run: its command + output in a new
+        window titled ``<kind>: <label> (exit N)``, plus a status-bar line
+        pointing at it. Shared by the LSP / grammar / dictionary / docs /
+        debugpy installers."""
+        var exit = String(" (exit ") + String(result.exit_code()) + String(")")
+        _ = self._add_text_window(
+            kind + String(": ") + result.label + exit,
+            String("$ ") + result.command + String("\n\n") + result.output,
+            screen,
+        )
+        self.status_bar.set_message(
+            kind + exit + String(" — see new window"),
+            Attr(LIGHT_RED, LIGHT_GRAY),
+        )
 
     def _maybe_lsp_open(mut self, idx: Int):
         """If the window at ``idx`` is an editor for a recognized source
@@ -5004,6 +5029,20 @@ struct Desktop(Movable):
         self.lsp_managers[lsp_idx].notify_opened(path, text^)
         debug_log(String("[_maybe_lsp_open] after notify_opened"))
 
+    def _install_prompt_blocked(self) -> Bool:
+        """True while a dialog or picker owns the screen, so an "Install
+        X?" confirm must wait rather than stack on top of it. Shared by
+        the LSP / grammar / docs / debugpy install prompts."""
+        return self.prompt.active or self.confirm_dialog.active \
+            or self.merge_view.active \
+            or self.quick_open.active \
+            or self.symbol_pick.active or self.reference_pick.active \
+            or self.find_symbol.active \
+            or self.project_find.active \
+            or self.local_changes.active or self.review.active \
+            or self.history.active \
+            or self.save_as_dialog.active or self.doc_pick.active
+
     def _maybe_prompt_lsp_install(mut self, ext: String):
         """Open the install prompt when ``ext`` belongs to a known language
         whose binary isn't on ``$PATH``.
@@ -5037,15 +5076,7 @@ struct Desktop(Movable):
         # If something else is modal, defer rather than drop. First-
         # deferred wins — once a prompt is queued, opening another
         # unsupported language while still modal doesn't bump it.
-        if self.prompt.active or self.confirm_dialog.active \
-                or self.merge_view.active \
-                or self.quick_open.active \
-                or self.symbol_pick.active or self.reference_pick.active \
-                or self.find_symbol.active \
-                or self.project_find.active \
-                or self.local_changes.active or self.review.active \
-                or self.history.active \
-                or self.save_as_dialog.active or self.doc_pick.active:
+        if self._install_prompt_blocked():
             if len(self._pending_lsp_prompt_ext.as_bytes()) == 0:
                 self._pending_lsp_prompt_ext = ext
             return
@@ -5091,15 +5122,7 @@ struct Desktop(Movable):
         for i in range(len(self._grammar_install_prompted)):
             if self._grammar_install_prompted[i] == spec.language_id:
                 return
-        if self.prompt.active or self.confirm_dialog.active \
-                or self.merge_view.active \
-                or self.quick_open.active \
-                or self.symbol_pick.active or self.reference_pick.active \
-                or self.find_symbol.active \
-                or self.project_find.active \
-                or self.local_changes.active or self.review.active \
-                or self.history.active \
-                or self.save_as_dialog.active or self.doc_pick.active:
+        if self._install_prompt_blocked():
             if len(self._pending_grammar_prompt_ext.as_bytes()) == 0:
                 self._pending_grammar_prompt_ext = ext
             return
@@ -5185,22 +5208,8 @@ struct Desktop(Movable):
                 if matched:
                     self.windows.windows[i].editor.invalidate_highlight_cache()
         else:
-            var title = String("Grammar install failed: ") + result.label \
-                + String(" (exit ") + String(result.exit_code()) + String(")")
-            var workspace = self.workspace_rect(screen)
-            var rect = self._default_window_rect(workspace)
-            var was_max = self._frontmost_maximized()
-            var body = String("$ ") + result.command + String("\n\n") \
-                + result.output
-            self.windows.add(Window.editor_window(title^, rect, body^))
-            self._open_count += 1
-            if was_max:
-                var win_idx = len(self.windows.windows) - 1
-                self.windows.windows[win_idx].toggle_maximize(workspace)
-            self.status_bar.set_message(
-                String("Grammar install failed (exit ")
-                    + String(result.exit_code()) + String(") — see new window"),
-                Attr(LIGHT_RED, LIGHT_GRAY),
+            self._show_install_failure(
+                String("Grammar install failed"), result, screen,
             )
 
     def _start_dict_install(mut self, lang: String):
@@ -5282,22 +5291,8 @@ struct Desktop(Movable):
                 Attr(BLACK, LIGHT_GRAY),
             )
         else:
-            var title = String("Dictionary install failed: ") + result.label \
-                + String(" (exit ") + String(result.exit_code()) + String(")")
-            var workspace = self.workspace_rect(screen)
-            var rect = self._default_window_rect(workspace)
-            var was_max = self._frontmost_maximized()
-            var body = String("$ ") + result.command + String("\n\n") \
-                + result.output
-            self.windows.add(Window.editor_window(title^, rect, body^))
-            self._open_count += 1
-            if was_max:
-                var idx = len(self.windows.windows) - 1
-                self.windows.windows[idx].toggle_maximize(workspace)
-            self.status_bar.set_message(
-                String("Dictionary install failed (exit ")
-                    + String(result.exit_code()) + String(") — see new window"),
-                Attr(LIGHT_RED, LIGHT_GRAY),
+            self._show_install_failure(
+                String("Dictionary install failed"), result, screen,
             )
 
     def _pick_lsp_argv(self, spec_idx: Int) -> List[String]:
@@ -5492,23 +5487,16 @@ struct Desktop(Movable):
         var diff_text = unified_diff(
             a_text, b_text, ed_label, String("(clipboard)"),
         )
-        var workspace = self.workspace_rect(screen)
-        var rect = self._default_window_rect(workspace)
-        var was_max = self._frontmost_maximized()
         var title = String("Compare: ") + self.windows.windows[idx].title \
             + String(" vs clipboard")
-        self.windows.add(Window.editor_window(title^, rect, diff_text^))
-        self._open_count += 1
-        var new_idx = len(self.windows.windows) - 1
-        self.windows.windows[new_idx].editor.read_only = True
-        self.windows.windows[new_idx].editor.line_numbers = False
+        var new_idx = self._add_text_window(
+            title^, diff_text^, screen, read_only=True,
+        )
         # Synthetic ``.diff`` path so the highlighter routes through
         # the bundled diff TextMate grammar. ``check_external_changes``
         # is gated by ``stat_file(...).ok`` and ``save`` by ``read_only``,
         # so the made-up path can't cause file operations.
         self.windows.windows[new_idx].editor.file_path = String("compare.diff")
-        if was_max:
-            self.windows.windows[new_idx].toggle_maximize(workspace)
 
     def _close_deleted_file_windows(mut self):
         """Close editor windows whose backing file has been removed from
@@ -6022,11 +6010,7 @@ struct Desktop(Movable):
         var langs_snapshot = self.lsp_languages.copy()
         for s in range(len(langs_snapshot)):
             var lang = langs_snapshot[s]
-            var spec_idx = -1
-            for k in range(len(self.lsp_specs)):
-                if self.lsp_specs[k].language_id == lang:
-                    spec_idx = k
-                    break
+            var spec_idx = find_language_by_id(self.lsp_specs, lang)
             if spec_idx < 0:
                 continue
             var new_argv = self._pick_lsp_argv(spec_idx)
@@ -8169,10 +8153,10 @@ struct Desktop(Movable):
         return False
 
     def _open_menu_by_mnemonic(mut self, key: UInt32) -> Bool:
-        var k = Int(key)
-        if 0x41 <= k and k <= 0x5A:
-            k = k + 0x20
-        if not (0x61 <= k and k <= 0x7A):
+        if key >= UInt32(0x80):
+            return False
+        var k = fold_byte(UInt8(key))
+        if not (k >= 0x61 and k <= 0x7A):
             return False
         for mi in range(len(self.menu_bar.menus)):
             if not self.menu_bar.menus[mi].visible:
@@ -8180,10 +8164,7 @@ struct Desktop(Movable):
             var lb = self.menu_bar.menus[mi].label.as_bytes()
             if len(lb) == 0:
                 continue
-            var first = Int(lb[0])
-            if 0x41 <= first and first <= 0x5A:
-                first = first + 0x20
-            if first == k:
+            if fold_byte(lb[0]) == k:
                 self.menu_bar.open_menu(mi)
                 return True
         return False
@@ -8573,9 +8554,9 @@ struct Desktop(Movable):
             self._open_doc_pick(screen)
             return Optional[String]()
         if action == EDITOR_TOGGLE_COMMENT:
-            if self.windows.focused >= 0 \
-                    and self.windows.windows[self.windows.focused].is_editor:
-                ref ed = self.windows.windows[self.windows.focused].editor
+            var fe = self._focused_editor_idx()
+            if fe >= 0:
+                ref ed = self.windows.windows[fe].editor
                 # Prefer the catalog-derived comment marker (sourced from
                 # Helix's languages.toml — there is no LSP method for
                 # comment syntax) over the editor's hard-coded fallback.
@@ -8589,9 +8570,9 @@ struct Desktop(Movable):
                 ed.toggle_comment(prefix)
             return Optional[String]()
         if action == EDITOR_TOGGLE_CASE:
-            if self.windows.focused >= 0 \
-                    and self.windows.windows[self.windows.focused].is_editor:
-                self.windows.windows[self.windows.focused].editor.toggle_case()
+            var fe = self._focused_editor_idx()
+            if fe >= 0:
+                self.windows.windows[fe].editor.toggle_case()
             return Optional[String]()
         if action == EDITOR_TOGGLE_LINE_NUMBERS:
             self.config.line_numbers = not self.config.line_numbers
@@ -8709,9 +8690,9 @@ struct Desktop(Movable):
                         self.windows.windows[idx].editor.blame_visible = True
             return Optional[String]()
         if action == EDITOR_CUT:
-            if self.windows.focused >= 0 \
-                    and self.windows.windows[self.windows.focused].is_editor:
-                self.windows.windows[self.windows.focused].editor.cut_to_clipboard()
+            var fe = self._focused_editor_idx()
+            if fe >= 0:
+                self.windows.windows[fe].editor.cut_to_clipboard()
             return Optional[String]()
         if action == EDITOR_COPY:
             # Docked output panes win when one is focused with an active
@@ -8734,9 +8715,9 @@ struct Desktop(Movable):
                     and self.find_results_pane.has_selection():
                 _ = self.find_results_pane.copy_selection_to_clipboard()
                 return Optional[String]()
-            if self.windows.focused >= 0 \
-                    and self.windows.windows[self.windows.focused].is_editor:
-                self.windows.windows[self.windows.focused].editor.copy_to_clipboard()
+            var fe = self._focused_editor_idx()
+            if fe >= 0:
+                self.windows.windows[fe].editor.copy_to_clipboard()
             return Optional[String]()
         if action == EDITOR_PASTE:
             _ = self.paste_text_into_focus(clipboard_paste())
@@ -8748,26 +8729,23 @@ struct Desktop(Movable):
             self._open_compare_with_clipboard(screen)
             return Optional[String]()
         if action == EDITOR_FILL:
-            if self.windows.focused >= 0 \
-                    and self.windows.windows[self.windows.focused].is_editor:
-                var idx = self.windows.focused
+            var idx = self._focused_editor_idx()
+            if idx >= 0:
                 var n = self.windows.windows[idx].editor.caret_count()
                 if n > 1:
                     self.fill_dialog.open(n)
             return Optional[String]()
         if action == EDITOR_UNDO:
-            if self.windows.focused >= 0 \
-                    and self.windows.windows[self.windows.focused].is_editor:
-                var idx = self.windows.focused
+            var idx = self._focused_editor_idx()
+            if idx >= 0:
                 if self.windows.windows[idx].editor.undo():
                     self.windows.windows[idx].editor.reveal_cursor(
                         self.windows.windows[idx].interior(),
                     )
             return Optional[String]()
         if action == EDITOR_REDO:
-            if self.windows.focused >= 0 \
-                    and self.windows.windows[self.windows.focused].is_editor:
-                var idx = self.windows.focused
+            var idx = self._focused_editor_idx()
+            if idx >= 0:
                 if self.windows.windows[idx].editor.redo():
                     self.windows.windows[idx].editor.reveal_cursor(
                         self.windows.windows[idx].interior(),
@@ -8778,18 +8756,7 @@ struct Desktop(Movable):
                 if len(which(String("rg")).as_bytes()) == 0:
                     self.windows.add(_rg_missing_window())
                 else:
-                    var prefill = String("")
-                    var idx = self._focused_editor_idx()
-                    if idx >= 0:
-                        var sel = self.windows.windows[idx].editor.selection_text()
-                        var sb = sel.as_bytes()
-                        var has_newline = False
-                        for i in range(len(sb)):
-                            if sb[i] == 0x0A or sb[i] == 0x0D:
-                                has_newline = True
-                                break
-                        if not has_newline:
-                            prefill = sel
+                    var prefill = self._selection_seed_for_search()
                     self.project_find.open(
                         self.project.value(), prefill,
                         select_prefill=True,
@@ -9494,22 +9461,8 @@ struct Desktop(Movable):
             )
             self._retry_lsp_for_language(lang)
         else:
-            var title = String("Install failed: ") + result.label \
-                + String(" (exit ") + String(result.exit_code()) + String(")")
-            var workspace = self.workspace_rect(screen)
-            var rect = self._default_window_rect(workspace)
-            var was_max = self._frontmost_maximized()
-            var body = String("$ ") + result.command + String("\n\n") \
-                + result.output
-            self.windows.add(Window.editor_window(title^, rect, body^))
-            self._open_count += 1
-            if was_max:
-                var idx = len(self.windows.windows) - 1
-                self.windows.windows[idx].toggle_maximize(workspace)
-            self.status_bar.set_message(
-                String("Install failed (exit ")
-                    + String(result.exit_code()) + String(") — see new window"),
-                Attr(LIGHT_RED, LIGHT_GRAY),
+            self._show_install_failure(
+                String("Install failed"), result, screen,
             )
 
     def _retry_lsp_for_language(mut self, lang: String):
@@ -10059,11 +10012,7 @@ struct Desktop(Movable):
                     state = String("unknown")
                 lines.append(self.lsp_languages[i])
                 var argv = m.argv()
-                var cmd = String("")
-                for k in range(len(argv)):
-                    if k > 0:
-                        cmd += String(" ")
-                    cmd += argv[k]
+                var cmd = String(" ").join(argv)
                 var resolved = String("")
                 if len(argv) > 0:
                     resolved = which(argv[0])
@@ -10109,46 +10058,28 @@ struct Desktop(Movable):
                         lines.append(String("    ") + ltail)
         # Show what python candidates are on $PATH so the user can
         # tell why ty (or pyright) was selected.
-        for i in range(len(self.lsp_specs)):
-            if self.lsp_specs[i].language_id == String("python"):
-                var spec = self.lsp_specs[i].copy()
-                lines.append(String(""))
-                lines.append(String("Python LSP candidates:"))
-                for c in range(len(spec.candidates)):
-                    var cand = spec.candidates[c].copy()
-                    if len(cand.argv) == 0:
-                        continue
-                    var bin = cand.argv[0]
-                    var path = which(bin)
-                    var marker: String
-                    if len(path.as_bytes()) > 0:
-                        marker = String("[found] ") + path
-                    else:
-                        marker = String("[missing]")
-                    var argline = String("")
-                    for k in range(len(cand.argv)):
-                        if k > 0:
-                            argline += String(" ")
-                        argline += cand.argv[k]
-                    lines.append(
-                        String("  ") + marker + String("  ") + argline,
-                    )
-                break
-        var body = String("")
-        for i in range(len(lines)):
-            if i > 0:
-                body += String("\n")
-            body += lines[i]
-        var workspace = self.workspace_rect(screen)
-        var rect = self._default_window_rect(workspace)
-        var was_max = self._frontmost_maximized()
-        self.windows.add(Window.editor_window(
-            String("Language servers"), rect, body^,
-        ))
-        self._open_count += 1
-        if was_max:
-            var idx = len(self.windows.windows) - 1
-            self.windows.windows[idx].toggle_maximize(workspace)
+        var py_idx = find_language_by_id(self.lsp_specs, String("python"))
+        if py_idx >= 0:
+            var spec = self.lsp_specs[py_idx].copy()
+            lines.append(String(""))
+            lines.append(String("Python LSP candidates:"))
+            for c in range(len(spec.candidates)):
+                var cand = spec.candidates[c].copy()
+                if len(cand.argv) == 0:
+                    continue
+                var bin = cand.argv[0]
+                var path = which(bin)
+                var marker: String
+                if len(path.as_bytes()) > 0:
+                    marker = String("[found] ") + path
+                else:
+                    marker = String("[missing]")
+                var argline = String(" ").join(cand.argv)
+                lines.append(
+                    String("  ") + marker + String("  ") + argline,
+                )
+        var body = String("\n").join(lines)
+        _ = self._add_text_window(String("Language servers"), body^, screen)
 
     def _open_dap_info_window(mut self, screen: Rect):
         """Open a window summarizing the current DAP session — adapter
@@ -10182,11 +10113,7 @@ struct Desktop(Movable):
         lines.append(String("state:    ") + state)
         var argv = self.dap.spawn_argv.copy()
         if len(argv) > 0:
-            var cmd = String("")
-            for k in range(len(argv)):
-                if k > 0:
-                    cmd += String(" ")
-                cmd += argv[k]
+            var cmd = String(" ").join(argv)
             var resolved = which(argv[0])
             if len(resolved.as_bytes()) == 0:
                 resolved = String("(not on PATH)")
@@ -10217,21 +10144,8 @@ struct Desktop(Movable):
             if start < len(eb):
                 var tail = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=eb.unsafe_ptr().unsafe_offset(start), length=len(eb) - start)))
                 lines.append(String("  ") + tail)
-        var body = String("")
-        for i in range(len(lines)):
-            if i > 0:
-                body += String("\n")
-            body += lines[i]
-        var workspace = self.workspace_rect(screen)
-        var rect = self._default_window_rect(workspace)
-        var was_max = self._frontmost_maximized()
-        self.windows.add(Window.editor_window(
-            String("Debugger session"), rect, body^,
-        ))
-        self._open_count += 1
-        if was_max:
-            var idx = len(self.windows.windows) - 1
-            self.windows.windows[idx].toggle_maximize(workspace)
+        var body = String("\n").join(lines)
+        _ = self._add_text_window(String("Debugger session"), body^, screen)
 
     def _refresh_lsp_status(mut self):
         """Show the focused editor's language-server state on the right
@@ -10444,7 +10358,6 @@ struct Desktop(Movable):
                 _ = self.dap.request_variables(
                     scopes[pick].variables_reference,
                 )
-                self._dap_pending_scope_label = scopes[pick].name
         if self.dap.has_variables():
             var vars = self.dap.take_variables()
             if self._dap_var_target_kind == UInt8(1):
@@ -10478,22 +10391,16 @@ struct Desktop(Movable):
         var err = self.dap.drain_stderr()
         if len(err.as_bytes()) > 0:
             self.debug_pane.append_output(err, UInt8(1))  # PANE_OUT_STDERR
-        if self.dap.consume_terminated():
-            self._dap_exec_path = String("")
-            self._dap_exec_line = -1
-            self._dap_current_frame_id = -1
-            self._dap_stack_cache = List[DapStackFrame]()
-            self._dap_locals_cache = List[DapVariable]()
-            self._pending_condition_exception = \
-                Optional[DapConditionException]()
-            self.debug_pane.clear()
-        # ``continued`` (Continue / Step*): the program is running again
-        # so the previous stack/locals/watches are stale. Their rows
-        # carry frame ids and variables_references that the adapter has
-        # already discarded — clicking them would request scopes for a
-        # frame that no longer exists. Wipe inspect state; ``set_status``
-        # below repaints the title strip with running indicators.
-        if self.dap.consume_continued():
+        # Terminated, or ``continued`` (Continue / Step*): the program
+        # is running again (or gone) so the previous stack/locals/watches
+        # are stale. Their rows carry frame ids and variables_references
+        # that the adapter has already discarded — clicking them would
+        # request scopes for a frame that no longer exists. Wipe inspect
+        # state; ``set_status`` below repaints the title strip with
+        # running indicators. Both latches are consumed every tick.
+        var terminated = self.dap.consume_terminated()
+        var continued = self.dap.consume_continued()
+        if terminated or continued:
             self._dap_exec_path = String("")
             self._dap_exec_line = -1
             self._dap_current_frame_id = -1
@@ -11149,20 +11056,6 @@ struct Desktop(Movable):
         self._rebuild_pane_inspect(self._dap_locals_cache.copy())
         self._refresh_watches()
 
-    def remove_watch(mut self, expression: String):
-        var new_exprs = List[String]()
-        var new_values = List[String]()
-        for k in range(len(self._dap_watch_exprs)):
-            if self._dap_watch_exprs[k] == expression:
-                continue
-            new_exprs.append(self._dap_watch_exprs[k])
-            if k < len(self._dap_watch_values):
-                new_values.append(self._dap_watch_values[k])
-        self._dap_watch_exprs = new_exprs^
-        self._dap_watch_values = new_values^
-        # Rebuild so the removed row disappears immediately, keeping the
-        # cached locals on screen.
-        self._rebuild_pane_inspect(self._dap_locals_cache.copy())
 
     def remove_watch_at(mut self, index: Int):
         """Remove the watch expression at ordinal ``index`` (its position
@@ -13051,18 +12944,7 @@ struct Desktop(Movable):
         # halves are sliced across frames by ``_pump_find_symbol``, so
         # this call itself is only the ``git ls-files`` walk.
         self._prepare_symbol_index()
-        var prefill = String("")
-        var idx = self._focused_editor_idx()
-        if idx >= 0:
-            var sel = self.windows.windows[idx].editor.selection_text()
-            var sb = sel.as_bytes()
-            var has_newline = False
-            for i in range(len(sb)):
-                if sb[i] == 0x0A or sb[i] == 0x0D:
-                    has_newline = True
-                    break
-            if not has_newline:
-                prefill = sel
+        var prefill = self._selection_seed_for_search()
         self.find_symbol.open(
             self.project.value(), prefill,
             select_prefill=True,
@@ -13509,15 +13391,7 @@ struct Desktop(Movable):
                     Attr(BLACK, LIGHT_GRAY),
                 )
                 return
-        if self.prompt.active or self.confirm_dialog.active \
-                or self.merge_view.active \
-                or self.quick_open.active \
-                or self.symbol_pick.active or self.reference_pick.active \
-                or self.find_symbol.active \
-                or self.project_find.active \
-                or self.local_changes.active or self.review.active \
-                or self.history.active \
-                or self.save_as_dialog.active or self.doc_pick.active:
+        if self._install_prompt_blocked():
             return
         self._doc_install_prompted.append(spec.language_id)
         self._pending_action = _PA_DOC_INSTALL
@@ -13557,15 +13431,7 @@ struct Desktop(Movable):
                 return False
         if self.install_runner.is_active():
             return False
-        if self.prompt.active or self.confirm_dialog.active \
-                or self.merge_view.active \
-                or self.quick_open.active \
-                or self.symbol_pick.active or self.reference_pick.active \
-                or self.find_symbol.active \
-                or self.project_find.active \
-                or self.local_changes.active or self.review.active \
-                or self.history.active \
-                or self.save_as_dialog.active or self.doc_pick.active:
+        if self._install_prompt_blocked():
             return False
         self._debugpy_install_prompted.append(venv_dir)
         self._pending_action = _PA_DEBUGPY_INSTALL
@@ -13600,22 +13466,8 @@ struct Desktop(Movable):
         subsequent F5 starts fresh.
         """
         if not result.ok():
-            var title = String("debugpy install failed: ") + result.label \
-                + String(" (exit ") + String(result.exit_code()) + String(")")
-            var workspace = self.workspace_rect(screen)
-            var rect = self._default_window_rect(workspace)
-            var was_max = self._frontmost_maximized()
-            var body = String("$ ") + result.command + String("\n\n") \
-                + result.output
-            self.windows.add(Window.editor_window(title^, rect, body^))
-            self._open_count += 1
-            if was_max:
-                var idx = len(self.windows.windows) - 1
-                self.windows.windows[idx].toggle_maximize(workspace)
-            self.status_bar.set_message(
-                String("debugpy install failed (exit ")
-                    + String(result.exit_code()) + String(") — see new window"),
-                Attr(LIGHT_RED, LIGHT_GRAY),
+            self._show_install_failure(
+                String("debugpy install failed"), result, screen,
             )
             self._clear_pending_dap_start()
             return
@@ -13714,23 +13566,15 @@ struct Desktop(Movable):
         # is empty or shaped differently — better to install the
         # canonical default than to do nothing.
         var package = String("ty")
-        for i in range(len(self.lsp_specs)):
-            if self.lsp_specs[i].language_id == String("python"):
-                var hint = self.lsp_specs[i].install_hint
-                var prefix = String("pip install ")
-                var hb = hint.as_bytes()
-                var pb = prefix.as_bytes()
-                if len(hb) > len(pb):
-                    var matches = True
-                    for k in range(len(pb)):
-                        if hb[k] != pb[k]:
-                            matches = False
-                            break
-                    if matches:
-                        package = String(StringSpan(
-                            unsafe_from_utf8=hb[len(pb):len(hb)],
-                        ))
-                break
+        var py_idx = find_language_by_id(self.lsp_specs, String("python"))
+        if py_idx >= 0:
+            var hint = self.lsp_specs[py_idx].install_hint
+            var prefix = String("pip install ")
+            if len(hint.as_bytes()) > len(prefix.as_bytes()) \
+                    and starts_with(hint, prefix):
+                package = byte_slice(
+                    hint, len(prefix.as_bytes()), len(hint.as_bytes()),
+                )
         self._venv_lsp_installed.append(venv_dir)
         var cmd = py + String(" -m pip install ") + package
         try:
@@ -13827,22 +13671,8 @@ struct Desktop(Movable):
             # window (focused editor or not) lands on the same docset.
             self._last_doc_lang = lang
         else:
-            var title = String("Docs install failed: ") + result.label \
-                + String(" (exit ") + String(result.exit_code()) + String(")")
-            var workspace = self.workspace_rect(screen)
-            var rect = self._default_window_rect(workspace)
-            var was_max = self._frontmost_maximized()
-            var body = String("$ ") + result.command + String("\n\n") \
-                + result.output
-            self.windows.add(Window.editor_window(title^, rect, body^))
-            self._open_count += 1
-            if was_max:
-                var w_idx = len(self.windows.windows) - 1
-                self.windows.windows[w_idx].toggle_maximize(workspace)
-            self.status_bar.set_message(
-                String("Docs install failed (exit ")
-                    + String(result.exit_code()) + String(") — see new window"),
-                Attr(LIGHT_RED, LIGHT_GRAY),
+            self._show_install_failure(
+                String("Docs install failed"), result, screen,
             )
 
     def _try_docs_fallback(
@@ -14005,16 +13835,9 @@ struct Desktop(Movable):
                 self.windows.focus_by_index(i)
                 return
         var text = self._hotkeys_help_text()
-        var workspace = self.workspace_rect(screen)
-        var rect = self._default_window_rect(workspace)
-        var was_max = self._frontmost_maximized()
-        self.windows.add(Window.editor_window(title^, rect, text^))
-        self._open_count += 1
-        var idx = len(self.windows.windows) - 1
-        self.windows.windows[idx].editor.read_only = True
-        self.windows.windows[idx].editor.line_numbers = False
-        if was_max:
-            self.windows.windows[idx].toggle_maximize(workspace)
+        _ = self._add_text_window(
+            title^, text^, screen, read_only=True,
+        )
 
     def _open_doc_entry(
         mut self, entry_idx: Int, display: String, screen: Rect,
@@ -14049,16 +13872,9 @@ struct Desktop(Movable):
         if len(text.as_bytes()) == 0:
             text = String("(no body — this entry's path was missing from db.json)")
         var title = entry.name + String(" — ") + display
-        var workspace = self.workspace_rect(screen)
-        var rect = self._default_window_rect(workspace)
-        var was_max = self._frontmost_maximized()
-        self.windows.add(Window.editor_window(title^, rect, text^))
-        self._open_count += 1
-        var idx = len(self.windows.windows) - 1
-        self.windows.windows[idx].editor.read_only = True
-        self.windows.windows[idx].editor.line_numbers = False
-        if was_max:
-            self.windows.windows[idx].toggle_maximize(workspace)
+        _ = self._add_text_window(
+            title^, text^, screen, read_only=True,
+        )
 
     def _maybe_open_git_gutter_menu(mut self):
         """Drain ``Editor.consume_git_revert_request`` on the focused
@@ -14556,10 +14372,9 @@ struct Desktop(Movable):
         Returns True when the menu was opened (so the caller swallows the
         event). The popup only appears for file-backed editor windows —
         scratch buffers, help windows, and tool panes have no path to act
-        on. The targeted window is pinned in ``_file_op_win_idx`` /
-        ``_file_op_path`` so the follow-up rename prompt / delete confirm
-        can still find it (and verify it hasn't changed) after the
-        round-trip."""
+        on. The targeted file is pinned in ``_file_op_path`` so the
+        follow-up rename prompt / delete confirm can still find it (and
+        verify it hasn't changed) after the round-trip."""
         if event.kind != EVENT_MOUSE:
             return False
         if event.button != MOUSE_BUTTON_RIGHT or not event.pressed \
@@ -14617,7 +14432,6 @@ struct Desktop(Movable):
         """Pin the target and open the shared Rename/Delete popup anchored
         at ``anchor``. ``win_idx`` is the open editor window for the path
         (or -1 — directories and unopened files have none)."""
-        self._file_op_win_idx = win_idx
         self._file_op_path = path^
         self._file_op_is_dir = is_dir
         var labels = List[String]()
@@ -14638,7 +14452,6 @@ struct Desktop(Movable):
         self.tab_context_menu.close()
         var path = self._file_op_path
         if len(path.as_bytes()) == 0:
-            self._file_op_win_idx = -1
             return Optional[String]()
         if act == _TAB_FILE_ACTION_RENAME:
             self._pending_action = _PA_RENAME_FILE
@@ -14658,7 +14471,6 @@ struct Desktop(Movable):
             )
             return Optional[String]()
         # Dismissed (Esc / click-away) — drop the pinned target.
-        self._file_op_win_idx = -1
         self._file_op_path = String("")
         return Optional[String]()
 
@@ -14683,7 +14495,6 @@ struct Desktop(Movable):
         rewritten too."""
         var old_path = self._file_op_path
         var is_dir = self._file_op_is_dir
-        self._file_op_win_idx = -1
         self._file_op_path = String("")
         if len(old_path.as_bytes()) == 0:
             return
@@ -14746,7 +14557,6 @@ struct Desktop(Movable):
         (or under it), and refresh the tree."""
         var path = self._file_op_path
         var is_dir = self._file_op_is_dir
-        self._file_op_win_idx = -1
         self._file_op_path = String("")
         if len(path.as_bytes()) == 0:
             return
@@ -15736,11 +15546,7 @@ struct Desktop(Movable):
             var lang = self._pending_arg
             self._pending_arg = String("")
             if yes:
-                var spec_idx = -1
-                for i in range(len(self.lsp_specs)):
-                    if self.lsp_specs[i].language_id == lang:
-                        spec_idx = i
-                        break
+                var spec_idx = find_language_by_id(self.lsp_specs, lang)
                 if spec_idx >= 0:
                     var hint = self.lsp_specs[spec_idx].install_hint
                     clipboard_copy(hint)
@@ -15772,7 +15578,6 @@ struct Desktop(Movable):
             if yes:
                 self._do_delete_file()
             else:
-                self._file_op_win_idx = -1
                 self._file_op_path = String("")
             return Optional[String]()
         # Unknown / no pending action — nothing to do.

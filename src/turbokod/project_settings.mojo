@@ -62,6 +62,7 @@ from .project_targets import (
 from .text_field import TextField
 from .type_ahead import TypeAhead, is_type_ahead_key, type_ahead_pick
 from .window import paint_window_title
+from .string_utils import split_whitespace
 
 
 # --- section indices ------------------------------------------------------
@@ -140,32 +141,6 @@ def _format_action(act: OnSaveAction) -> String:
                 line = line + String(" ")
             line = line + act.args[i]
     return line^
-
-
-def _join_args(args: List[String]) -> String:
-    var out = String("")
-    for i in range(len(args)):
-        if i > 0:
-            out = out + String(" ")
-        out = out + args[i]
-    return out^
-
-
-def _split_args(text: String) -> List[String]:
-    var out = List[String]()
-    var b = text.as_bytes()
-    var n = len(b)
-    var start = 0
-    var i = 0
-    while i < n:
-        if b[i] == 0x20:
-            if i > start:
-                out.append(String(StringSpan(unsafe_from_utf8=b[start:i])))
-            start = i + 1
-        i += 1
-    if start < n:
-        out.append(String(StringSpan(unsafe_from_utf8=b[start:n])))
-    return out^
 
 
 def _build_lang_dropdown(var current: String) -> Dropdown:
@@ -576,7 +551,7 @@ struct ProjectSettings(Movable):
         self.program_tf = TextField()
         self.program_tf.set_text(t.program)
         self.args_tf = TextField()
-        self.args_tf.set_text(_join_args(t.args))
+        self.args_tf.set_text(String(" ").join(t.args))
         self.cwd_tf = TextField()
         self.cwd_tf.set_text(t.cwd)
         self.env_tf = TextField()
@@ -589,7 +564,7 @@ struct ProjectSettings(Movable):
         var t = self.targets.targets[self.selected_tg].copy()
         t.name = self.name_tf.text
         t.program = self.program_tf.text
-        t.args = _split_args(self.args_tf.text)
+        t.args = split_whitespace(self.args_tf.text)
         t.cwd = self.cwd_tf.text
         t.env = split_env_field(self.env_tf.text)
         self.targets.targets[self.selected_tg] = t^

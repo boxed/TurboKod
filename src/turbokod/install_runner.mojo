@@ -135,11 +135,7 @@ struct InstallRunner(Movable):
         self.process = LspProcess.spawn(argv)
         # Display ``command`` as a shell-y rendering of argv; only used
         # as the ``$ <command>`` header if a failure window gets opened.
-        var rendered = String("")
-        for i in range(len(argv)):
-            if i > 0:
-                rendered = rendered + String(" ")
-            rendered = rendered + argv[i]
+        var rendered = String(" ").join(argv)
         self.label = label^
         self.command = rendered^
         self.title_prefix = title_prefix^

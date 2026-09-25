@@ -224,13 +224,13 @@ struct LanguageEditor(Movable):
         pass an empty list; for Edit pass the effective candidates of
         the language (built-in or override-merged).
         """
-        var ft_text = _join_space(file_types)
+        var ft_text = String(" ").join(file_types)
         self.lang_tf = TextField()
         self.lang_tf.set_text(language_id^)
         self.file_types_tf = TextField()
         self.file_types_tf.set_text(ft_text^)
         self.candidates = candidates^
-        _ = file_types  # consumed via _join_space copy
+        _ = file_types  # consumed via the join copy
         self._list.reset()
         self._list.set_selected(0 if len(self.candidates) > 0 else -1)
         self.argv_tf = TextField()
@@ -624,15 +624,6 @@ struct LanguageEditor(Movable):
 
 
 # --- helpers --------------------------------------------------------------
-
-
-def _join_space(items: List[String]) -> String:
-    var out = String("")
-    for i in range(len(items)):
-        if i > 0:
-            out = out + String(" ")
-        out = out + items[i]
-    return out^
 
 
 def _split_space(text: String) -> List[String]:

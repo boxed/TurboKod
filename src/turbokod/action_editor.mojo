@@ -50,6 +50,7 @@ from .view import DraggableDialog, FocusGroup, RowCursor
 from .window import (
     close_button_clicked, paint_close_button, paint_window_title,
 )
+from .string_utils import split_whitespace
 
 
 # --- focus discriminants --------------------------------------------------
@@ -182,7 +183,7 @@ struct ActionEditor(Movable):
     #
     # The Args field's text is kept as a single free-form string
     # (with spaces / trailing whitespace preserved) and is only
-    # committed to ``entry.args`` via ``_split_args`` on Save.
+    # committed to ``entry.args`` via ``split_whitespace`` on Save.
     var form: Form
     var _buttons: List[_PlacedButton]
 
@@ -218,7 +219,7 @@ struct ActionEditor(Movable):
         # exclusivity check rejects reading a field on a value we're
         # about to move.
         var seed_lang = entry.language_id
-        var seed_args = _join_args(entry.args)
+        var seed_args = String(" ").join(entry.args)
         var seed_program = entry.program
         var seed_cwd = entry.cwd
         self.entry = entry^
@@ -261,7 +262,7 @@ struct ActionEditor(Movable):
         var out = self.entry.copy()
         out.program = self.form.text(_FOCUS_PROGRAM)
         out.cwd = self.form.text(_FOCUS_CWD)
-        out.args = _split_args(self.form.text(_FOCUS_ARGS))
+        out.args = split_whitespace(self.form.text(_FOCUS_ARGS))
         return out^
 
     # --- painting ---------------------------------------------------
@@ -451,7 +452,7 @@ struct ActionEditor(Movable):
             # host (which reads ``value()``) sees what the user typed.
             self.entry.program = self.form.text(_FOCUS_PROGRAM)
             self.entry.cwd = self.form.text(_FOCUS_CWD)
-            self.entry.args = _split_args(self.form.text(_FOCUS_ARGS))
+            self.entry.args = split_whitespace(self.form.text(_FOCUS_ARGS))
             self.submitted = True
             return True
         if self._focus.is_focused(Int(_FOCUS_CANCEL)):
@@ -618,32 +619,6 @@ def _build_lang_dropdown(var current: String) -> Dropdown:
     var dd = Dropdown(options^, 0)
     dd.set_value(current^)
     return dd^
-
-
-def _join_args(args: List[String]) -> String:
-    var out = String("")
-    for i in range(len(args)):
-        if i > 0:
-            out = out + String(" ")
-        out = out + args[i]
-    return out^
-
-
-def _split_args(text: String) -> List[String]:
-    var out = List[String]()
-    var b = text.as_bytes()
-    var n = len(b)
-    var start = 0
-    var i = 0
-    while i < n:
-        if b[i] == 0x20:
-            if i > start:
-                out.append(String(StringSpan(unsafe_from_utf8=b[start:i])))
-            start = i + 1
-        i += 1
-    if start < n:
-        out.append(String(StringSpan(unsafe_from_utf8=b[start:n])))
-    return out^
 
 
 def _str_pop_byte(s: String) -> String:

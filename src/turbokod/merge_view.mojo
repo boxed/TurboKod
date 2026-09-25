@@ -259,11 +259,7 @@ struct MergeView(Movable):
                     for j in range(len(reg.ours_lines)):
                         out.append(reg.ours_lines[j])
                 ci += 1
-        var text = String("")
-        for i in range(len(out)):
-            if i > 0:
-                text += String("\n")
-            text += out[i]
+        var text = String("\n").join(out)
         return text^
 
     # --- virtual layout --------------------------------------------------

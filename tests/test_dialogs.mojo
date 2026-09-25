@@ -1558,7 +1558,7 @@ def test_action_editor_consumes_browse_path() raises:
 def test_action_editor_args_field_accepts_spaces() raises:
     """Typing ``a b c`` into the Arguments field used to drop the
     interior spaces because the field round-tripped through
-    ``_split_args``/``_join_args`` on every keystroke. The fix holds a
+    the args split/join on every keystroke. The fix holds a
     single string in ``args_text`` while editing and only splits on
     Save, so multiple arguments can actually be typed."""
     var ed = ActionEditor()

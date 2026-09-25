@@ -130,6 +130,24 @@ def split_lines_no_trailing(text: String) -> List[String]:
     return out^
 
 
+def split_whitespace(s: String) -> List[String]:
+    """Split on runs of ASCII whitespace (space, tab, CR, LF), dropping
+    empty pieces — ``"  a b\t c "`` → ``["a", "b", "c"]``."""
+    var b = s.as_bytes()
+    var out = List[String]()
+    var start = -1
+    for i in range(len(b) + 1):
+        var ws = i == len(b) or b[i] == 0x20 or b[i] == 0x09 \
+            or b[i] == 0x0A or b[i] == 0x0D
+        if ws:
+            if start >= 0:
+                out.append(byte_slice(s, start, i))
+                start = -1
+        elif start < 0:
+            start = i
+    return out^
+
+
 def shell_escape_path(path: String) -> String:
     """Backslash-escape the shell-significant ASCII characters in ``path`` so a
     file path dragged onto a terminal pane reaches the program running there

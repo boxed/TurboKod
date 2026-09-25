@@ -58,7 +58,7 @@ from .json import (
     json_get_string, json_get_string_array, parse_json,
 )
 from .posix import getenv_value
-from .string_utils import leading_indent_bytes
+from .string_utils import leading_indent_bytes, split_whitespace
 
 
 comptime TURBOKOD_DIR    = String(".turbokod")
@@ -181,7 +181,7 @@ def _parse_target(node: JsonValue) -> RunTarget:
     if len(t.program.as_bytes()) == 0:
         var run_v = node.object_get(String("run"))
         if run_v and run_v.value().is_string():
-            var parts = _split_command(run_v.value().as_str())
+            var parts = split_whitespace(run_v.value().as_str())
             if len(parts) > 0:
                 t.program = parts[0]
                 if len(t.args) == 0:
@@ -200,26 +200,6 @@ def _parse_target(node: JsonValue) -> RunTarget:
         if len(t.args) == 0:
             t.args = json_get_string_array(debug_v.value(), String("args"))
     return t^
-
-
-def _split_command(s: String) -> List[String]:
-    """Whitespace-split ``s`` into argv-shaped pieces. Used only by
-    the legacy ``run`` migration path — modern configs go through
-    the flat ``program`` / ``args`` keys and never hit this."""
-    var out = List[String]()
-    var b = s.as_bytes()
-    var n = len(b)
-    var start = 0
-    var i = 0
-    while i < n:
-        if b[i] == 0x20 or b[i] == 0x09:
-            if i > start:
-                out.append(String(StringSpan(unsafe_from_utf8=b[start:i])))
-            start = i + 1
-        i += 1
-    if start < n:
-        out.append(String(StringSpan(unsafe_from_utf8=b[start:n])))
-    return out^
 
 
 def _trim_ascii_ws(s: String) -> String:
@@ -258,11 +238,7 @@ def split_env_field(text: String) -> List[String]:
 
 def join_env_field(env: List[String]) -> String:
     """Inverse of ``split_env_field``: ``["A=1", "B=2"]`` → ``"A=1; B=2"``."""
-    var out = String("")
-    for i in range(len(env)):
-        if i > 0:
-            out = out + String("; ")
-        out = out + env[i]
+    var out = String("; ").join(env)
     return out^
 
 
@@ -540,26 +516,6 @@ def _strip(s: String) -> String:
     return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(lo), length=hi - lo)))
 
 
-def _split_ws(s: String) -> List[String]:
-    """Whitespace-split, dropping empties — turns a glob run like
-    ``test_*.py *_test.py`` into individual patterns."""
-    var b = s.as_bytes()
-    var out = List[String]()
-    var start = -1
-    for i in range(len(b)):
-        var c = Int(b[i])
-        var ws = c == 0x20 or c == 0x09 or c == 0x0A or c == 0x0D
-        if ws:
-            if start >= 0:
-                out.append(String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(start), length=i - start))))
-                start = -1
-        elif start < 0:
-            start = i
-    if start >= 0:
-        out.append(String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(start), length=len(b) - start))))
-    return out^
-
-
 def _is_section_header(stripped: String) -> Bool:
     var b = stripped.as_bytes()
     return len(b) >= 2 and Int(b[0]) == 0x5B \
@@ -603,7 +559,7 @@ def _ini_python_files(text: String, section: String) -> List[String]:
             if indent > key_indent and len(stripped.as_bytes()) > 0 \
                     and Int(stripped.as_bytes()[0]) != 0x23 \
                     and Int(stripped.as_bytes()[0]) != 0x3B:
-                for t in _split_ws(stripped):
+                for t in split_whitespace(stripped):
                     out.append(t)
                 continue
             collecting = False  # fall through — this line may be a new key
@@ -616,7 +572,7 @@ def _ini_python_files(text: String, section: String) -> List[String]:
         if kv[1] >= 0 and kv[0] == String("python_files"):
             var b = line.as_bytes()
             var val = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(kv[1]).unsafe_offset(1), length=len(b) - kv[1] - 1)))
-            for t in _split_ws(val):
+            for t in split_whitespace(val):
                 out.append(t)
             key_indent = indent
             collecting = True

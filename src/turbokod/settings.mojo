@@ -2663,11 +2663,7 @@ def _format_language(spec: LanguageSpec, has_override: Bool) -> String:
     """
     var prefix = String("* ") if has_override else String("  ")
     var line = prefix + spec.language_id
-    var ft_text = String("")
-    for i in range(len(spec.file_types)):
-        if i > 0:
-            ft_text = ft_text + String(" ")
-        ft_text = ft_text + spec.file_types[i]
+    var ft_text = String(" ").join(spec.file_types)
     if len(ft_text.as_bytes()) > 0:
         line = line + String("  (") + ft_text + String(")")
     var count = len(spec.candidates)
