@@ -2,6 +2,30 @@ import AppKit
 import CoreText
 import CoreGraphics
 
+/// Call ``body`` with ``s`` as a C-ABI ``(ptr, len)`` UTF-8 argument pair —
+/// the shape every ``tk_*`` entry point that takes a string expects. The
+/// pointer is only valid for the duration of ``body``.
+@discardableResult
+func withUTF8Arg<T>(_ s: String, _ body: (Int64, Int64) -> T) -> T {
+    let bytes = Array(s.utf8)
+    return bytes.withUnsafeBufferPointer { b in
+        body(Int64(Int(bitPattern: b.baseAddress)), Int64(bytes.count))
+    }
+}
+
+/// A scripted headless render (``TK_CAPTURE``) is in progress. Read once:
+/// ``ProcessInfo.environment`` builds a fresh dictionary per access, and the
+/// check sits on every mouse-move / key / timer path.
+let isCapturing = ProcessInfo.processInfo.environment["TK_CAPTURE"] != nil
+
+/// FNV-1a over ``words`` — a cheap "did this buffer change?" fingerprint
+/// for the laid-out frame and the menu snapshot.
+func fnv1a<S: Sequence>(_ words: S) -> UInt64 where S.Element: BinaryInteger {
+    var h: UInt64 = 0xcbf29ce484222325
+    for w in words { h = (h ^ UInt64(w)) &* 0x100000001b3 }
+    return h
+}
+
 // The bundled IBM VGA bitmap font (8×16), matching the terminal/Rust look.
 // Designed at 16px, so 16pt gives an 8pt advance — exactly our cell size.
 // Falls back to Menlo if the bundled TTF is missing.
@@ -434,9 +458,7 @@ final class CellView: NSView {
     private var frameCols = 0, frameRows = 0, frameN = 0
 
     private func hashBuf(_ words: Int) -> UInt64 {
-        var h: UInt64 = 0xcbf29ce484222325
-        for i in 0..<words { h = (h ^ UInt64(buf[i])) &* 0x100000001b3 }
-        return h
+        fnv1a(UnsafeBufferPointer(start: buf, count: words))
     }
 
     override var isFlipped: Bool { true }            // y increases downward (row index)
@@ -1031,7 +1053,7 @@ final class CellView: NSView {
         // typing mid-run would land in the staged buffer — and autosave
         // would write it to the real file on disk. Drop keyboard input
         // entirely while capturing.
-        if ProcessInfo.processInfo.environment["TK_CAPTURE"] != nil { return }
+        if isCapturing { return }
         var key: UInt32 = 0
         if let sp = specialKey(event.keyCode) {
             key = sp
@@ -1052,7 +1074,7 @@ final class CellView: NSView {
     /// in order reconstructs multi-scalar sequences (ZWJ emoji, flags) byte for
     /// byte. mods=0: palette text carries no modifier semantics.
     func insertScalars(_ s: String) {
-        if ProcessInfo.processInfo.environment["TK_CAPTURE"] != nil { return }
+        if isCapturing { return }
         if s.isEmpty { return }
         for scalar in s.unicodeScalars {
             handleAction(keySurface(scalar.value, 0, cols(), rows()))
@@ -1063,7 +1085,7 @@ final class CellView: NSView {
 
     override func flagsChanged(with event: NSEvent) {
         // See keyDown — scripted capture runs ignore live input.
-        if ProcessInfo.processInfo.environment["TK_CAPTURE"] != nil { return }
+        if isCapturing { return }
         // flagsChanged fires for *every* modifier transition; keep the live
         // Shift state current (scrollWheel reads it) before isolating Option's
         // own up/down edges by diffing against the last state.
@@ -1085,7 +1107,7 @@ final class CellView: NSView {
     private func sendMouse(_ e: NSEvent, button: UInt8, pressed: UInt8, motion: UInt8,
                            passive: Bool = false, quiet: Bool = false) {
         // See keyDown — scripted capture runs ignore live input.
-        if ProcessInfo.processInfo.environment["TK_CAPTURE"] != nil { return }
+        if isCapturing { return }
         let p = convert(e.locationInWindow, from: nil)
         // Window-border vertical scrollbar thumb drag: while one is in flight
         // (started by the press hit-test in the core), route motion through
@@ -1222,7 +1244,7 @@ final class CellView: NSView {
     override func mouseMoved(with e: NSEvent) { sendMouse(e, button: 0, pressed: 0, motion: 1, passive: true) }
     override func scrollWheel(with e: NSEvent) {
         // Scripted capture runs ignore live input (matches sendMouse).
-        if ProcessInfo.processInfo.environment["TK_CAPTURE"] != nil { return }
+        if isCapturing { return }
         let dx = e.scrollingDeltaX
         let dy = e.scrollingDeltaY
         let shift = shiftDown || e.modifierFlags.contains(.shift)
@@ -1504,9 +1526,8 @@ final class CellView: NSView {
     /// Terminal pane: hand the raw paths to the core, which shell-escapes and
     /// pastes them (full path, the terminal drag convention — no menu).
     private func dropOnTerminal(_ urls: [URL], _ col: Int64, _ row: Int64) -> Bool {
-        let bytes = Array(urls.map { $0.path }.joined(separator: "\n").utf8)
-        let r = bytes.withUnsafeBufferPointer { b -> Int32 in
-            let ptr = Int64(Int(bitPattern: b.baseAddress)), len = Int64(bytes.count)
+        let paths = urls.map { $0.path }.joined(separator: "\n")
+        let r = withUTF8Arg(paths) { ptr, len -> Int32 in
             switch surface {
             case .main:   return tk_desktop_drop_paths(handle, col, row, ptr, len, Int64(cols()), Int64(rows()))
             case .panels: return tk_desktop_panels_drop_paths(handle, col, row, ptr, len, Int64(cols()), Int64(rows()))
@@ -1550,11 +1571,9 @@ final class CellView: NSView {
         let fmt = choosePathFormat(at: convert(location, from: nil))
         guard fmt >= 0 else { return false }   // dismissed without choosing
         let text = urls.map { formatPath($0, fmt) }.joined(separator: " ")
-        let bytes = Array(text.utf8)
-        let r = bytes.withUnsafeBufferPointer { b -> Int32 in
-            tk_desktop_insert_text(handle, col, row,
-                                   Int64(Int(bitPattern: b.baseAddress)),
-                                   Int64(bytes.count), Int64(cols()), Int64(rows()))
+        let r = withUTF8Arg(text) { ptr, len in
+            tk_desktop_insert_text(handle, col, row, ptr, len,
+                                   Int64(cols()), Int64(rows()))
         }
         return r != 0
     }
@@ -1577,10 +1596,7 @@ final class CellView: NSView {
         let fmt = choosePathFormat(at: anchor)
         guard fmt >= 0 else { return true }   // cancelled — swallow, don't text-paste
         let text = urls.map { formatPath($0, fmt) }.joined(separator: " ")
-        let bytes = Array(text.utf8)
-        _ = bytes.withUnsafeBufferPointer { b in
-            tk_desktop_paste_text(handle, Int64(Int(bitPattern: b.baseAddress)), Int64(bytes.count))
-        }
+        _ = withUTF8Arg(text) { ptr, len in tk_desktop_paste_text(handle, ptr, len) }
         invalidateFrame()
         needsDisplay = true
         return true
@@ -1598,10 +1614,8 @@ final class CellView: NSView {
         guard handle != 0,
               let s = NSPasteboard.general.string(forType: .string) else { return false }
         let text = s.precomposedStringWithCanonicalMapping
-        let bytes = Array(text.utf8)
-        let consumed = bytes.withUnsafeBufferPointer { b in
-            tk_desktop_paste_clipboard_text(
-                handle, Int64(Int(bitPattern: b.baseAddress)), Int64(bytes.count))
+        let consumed = withUTF8Arg(text) { ptr, len in
+            tk_desktop_paste_clipboard_text(handle, ptr, len)
         }
         return consumed != 0
     }
@@ -1749,14 +1763,31 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // shares the main view's Desktop handle. Absent ⇒ panels are docked.
     // See docs/floating-panels.md.
     private var panels: [ObjectIdentifier: (window: NSWindow, view: CellView)] = [:]
-    // Standalone Settings windows, one per project window (keyed by the main
-    // view, like `panels`). Opened/closed by polling tk_desktop_settings_active
-    // each tick — the Mojo side opens Settings via the menu action and closes
-    // it via Esc / its Close button, so the host can't know without asking.
-    private var settingsWins: [ObjectIdentifier: (window: NSWindow, view: CellView)] = [:]
-    // Standalone Project Settings windows — twin of `settingsWins`, polled via
-    // tk_desktop_project_settings_active. Keep the two in lock-step.
-    private var projectSettingsWins: [ObjectIdentifier: (window: NSWindow, view: CellView)] = [:]
+    // Desktop views that render in their own native window (Settings,
+    // Project Settings), one per project window per surface, keyed by the
+    // main view like `panels`. Opened/closed by polling the surface's active
+    // flag each tick — the Mojo side opens them via a menu action and closes
+    // them via Esc / their Close button, so the host can't know without asking.
+    private struct DialogSurface {
+        let surface: CellSurface
+        let title: String
+        let cols: CGFloat, rows: CGFloat   // default size, in cells
+        let isActive: (Int64) -> Int32
+        let close: (Int64) -> Void
+    }
+    private let dialogSurfaces: [DialogSurface] = [
+        // Sized for the settings layout (left rail + right pane) without
+        // dwarfing the editor behind it — the whole point of the separate
+        // window is watching a theme change retint the workspace live.
+        DialogSurface(surface: .settings, title: "Settings", cols: 110, rows: 34,
+                      isActive: tk_desktop_settings_active,
+                      close: tk_desktop_settings_close),
+        DialogSurface(surface: .projectSettings, title: "Project Settings",
+                      cols: 100, rows: 32,
+                      isActive: tk_desktop_project_settings_active,
+                      close: tk_desktop_project_settings_close),
+    ]
+    private var dialogWins: [CellSurface: [ObjectIdentifier: (window: NSWindow, view: CellView)]] = [:]
     // Menu mirror: the snapshot from Mojo's menu_bar, hashed so we only
     // rebuild NSMenu when something actually changed (focus/visibility/
     // checkmark/edit-extras flips). `menuTracking` is set while AppKit is
@@ -2025,7 +2056,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // machines only advance inside tk_desktop_tick, and a capture
             // waiting on TK_CAPTURE_WHEN=debug-stopped would otherwise stall
             // until the watchdog kills the session.
-            let capturing = ProcessInfo.processInfo.environment["TK_CAPTURE"] != nil
+            let capturing = isCapturing
             // Only the key window's Desktop should animate its caret — with
             // several projects open each runs its own Desktop, and a blink
             // in a background window reads as a second live cursor. Stamp
@@ -2101,41 +2132,27 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                       w.occlusionState.contains(.visible) else { continue }
                 if pv.pollFrame() { pv.needsDisplay = true; changed = true }
             }
-            // Settings window lifecycle: the Mojo side opens Settings via the
-            // menu action and closes it via Esc / its Close button — poll the
-            // active flag and open/close the NSWindow on transitions.
-            for v in self.views where v.handle != 0 {
-                let id = ObjectIdentifier(v)
-                let active = tk_desktop_settings_active(v.handle) != 0
-                if active && self.settingsWins[id] == nil {
-                    self.showSettingsWindow(for: v); changed = true
-                } else if !active, self.settingsWins[id] != nil {
-                    self.closeSettingsWindow(for: v); changed = true
+            // Dialog-window lifecycle (Settings, Project Settings): poll each
+            // surface's active flag and open/close the NSWindow on transitions.
+            for d in self.dialogSurfaces {
+                for v in self.views where v.handle != 0 {
+                    let id = ObjectIdentifier(v)
+                    let open = self.dialogWins[d.surface]?[id] != nil
+                    let active = d.isActive(v.handle) != 0
+                    if active && !open {
+                        self.showDialogWindow(d, for: v); changed = true
+                    } else if !active && open {
+                        self.closeDialogWindow(d.surface, for: v); changed = true
+                    }
                 }
-            }
-            // Like the panel views, settings views share the main Desktop and
-            // don't tick — just detect whether the surface needs a repaint.
-            for pair in self.settingsWins.values {
-                let sv = pair.view
-                guard let w = sv.window, w.isVisible,
-                      w.occlusionState.contains(.visible) else { continue }
-                if sv.pollFrame() { sv.needsDisplay = true; changed = true }
-            }
-            // Project Settings window lifecycle — twin of the Settings block.
-            for v in self.views where v.handle != 0 {
-                let id = ObjectIdentifier(v)
-                let active = tk_desktop_project_settings_active(v.handle) != 0
-                if active && self.projectSettingsWins[id] == nil {
-                    self.showProjectSettingsWindow(for: v); changed = true
-                } else if !active, self.projectSettingsWins[id] != nil {
-                    self.closeProjectSettingsWindow(for: v); changed = true
+                // Like the panel views, dialog views share the main Desktop and
+                // don't tick — just detect whether the surface needs a repaint.
+                for pair in (self.dialogWins[d.surface] ?? [:]).values {
+                    let sv = pair.view
+                    guard let w = sv.window, w.isVisible,
+                          w.occlusionState.contains(.visible) else { continue }
+                    if sv.pollFrame() { sv.needsDisplay = true; changed = true }
                 }
-            }
-            for pair in self.projectSettingsWins.values {
-                let sv = pair.view
-                guard let w = sv.window, w.isVisible,
-                      w.occlusionState.contains(.visible) else { continue }
-                if sv.pollFrame() { sv.needsDisplay = true; changed = true }
             }
             self.drainAttention()
             self.idleTicks = changed ? 0 : self.idleTicks &+ 1
@@ -2273,12 +2290,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // debug:toggle_bp just registered.
     private func invokeCaptureActions(_ actions: [String], then done: @escaping () -> Void) {
         guard let action = actions.first, let v = views.first else { done(); return }
-        let bytes = Array(action.utf8)
-        _ = bytes.withUnsafeBufferPointer { b in
-            tk_desktop_menu_invoke(v.handle,
-                Int64(Int(bitPattern: b.baseAddress)),
-                Int64(bytes.count),
-                Int64(v.cols()), Int64(v.rows()))
+        _ = withUTF8Arg(action) { ptr, len in
+            tk_desktop_menu_invoke(v.handle, ptr, len, Int64(v.cols()), Int64(v.rows()))
         }
         v.needsDisplay = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
@@ -2361,10 +2374,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             openProjectsPayload = raw.map { canonicalPath($0) }
                                      .joined(separator: "\n")
         }
-        let bytes = Array(openProjectsPayload.utf8)
-        bytes.withUnsafeBufferPointer { b in
-            tk_desktop_set_open_projects(
-                h, Int64(Int(bitPattern: b.baseAddress)), Int64(bytes.count))
+        withUTF8Arg(openProjectsPayload) { ptr, len in
+            tk_desktop_set_open_projects(h, ptr, len)
         }
     }
 
@@ -2403,11 +2414,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     Int64(Int(bitPattern: buf.baseAddress)), Int64(buf.count)))
             }
         }
-        // FNV-1a hash over the snapshot bytes.
-        var hash: UInt64 = 0xcbf29ce484222325
-        for i in 0..<n {
-            hash = (hash ^ UInt64(menuBuf[i])) &* 0x100000001b3
-        }
+        let hash = fnv1a(menuBuf[0..<n])
         if hash == lastMenuHash { return false }
         lastMenuHash = hash
         let text = String(bytes: menuBuf[0..<n], encoding: .utf8) ?? ""
@@ -2650,8 +2657,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // filename / relative menu as a drop, inserting the chosen form at the
         // caret. Only kicks in for an editor with a file on the clipboard;
         // otherwise falls through to the normal text paste below.
-        if action == "edit:paste",
-           let v = (NSApp.keyWindow?.contentView as? CellView) ?? views.first {
+        let view = keyView() ?? views.first
+        if action == "edit:paste", let v = view {
             // File(s) on the clipboard → the path-format menu.
             if v.pasteFilesWithMenu() { return }
             // Plain text → NFC-normalize in the host (macOS hands out
@@ -2667,16 +2674,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // windows exist) — same handle `refreshMenu` snapshotted from, so
         // the action's source-Desktop state (e.g. the recent-project
         // pending-path stash) is read back from the right place.
-        let view = (NSApp.keyWindow?.contentView as? CellView) ?? views.first
         let h = view?.handle ?? chromeDesktop
         guard h != 0 else { return }
         let cols = Int64(view?.cols() ?? 80)
         let rows = Int64(view?.rows() ?? 24)
-        let bytes = Array(action.utf8)
-        let code = bytes.withUnsafeBufferPointer { b in
-            tk_desktop_menu_invoke(h,
-                Int64(Int(bitPattern: b.baseAddress)), Int64(bytes.count),
-                cols, rows)
+        let code = withUTF8Arg(action) { ptr, len in
+            tk_desktop_menu_invoke(h, ptr, len, cols, rows)
         }
         handleHostAction(code, sourceHandle: h, view: view)
         view?.invalidateFrame()
@@ -3041,10 +3044,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     func openFileAt(_ v: CellView, _ path: String, _ line: Int, _ character: Int) {
-        let bytes = Array(path.utf8)
-        bytes.withUnsafeBufferPointer { b in
-            tk_desktop_open_file_at(v.handle, Int64(Int(bitPattern: b.baseAddress)),
-                                    Int64(bytes.count), Int64(line), Int64(character),
+        withUTF8Arg(path) { ptr, len in
+            tk_desktop_open_file_at(v.handle, ptr, len, Int64(line), Int64(character),
                                     Int64(v.cols()), Int64(v.rows()))
         }
         if v.project == nil, let win = v.window {
@@ -3107,11 +3108,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// the result is a cached static, so later calls are cheap.
     func applyFontOptions(to h: Int64) {
         let families = FontCatalog.monospaceFamilies.joined(separator: "\n")
-        let fb = Array(families.utf8)
-        fb.withUnsafeBufferPointer { b in
-            tk_desktop_set_font_options(h, Int64(Int(bitPattern: b.baseAddress)),
-                                        Int64(fb.count))
-        }
+        withUTF8Arg(families) { ptr, len in tk_desktop_set_font_options(h, ptr, len) }
     }
 
     /// Run once, right after the first frame is on screen. This is where the
@@ -3150,7 +3147,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // baking the cell shadow under those popups.
         tk_desktop_set_host_owns_shadows(h, 1)
         // Likewise the Settings view renders in its own native window (see
-        // settingsWins) — the main surface skips the in-grid overlay and
+        // dialogWins) — the main surface skips the in-grid overlay and
         // stays interactive while Settings is open.
         tk_desktop_set_settings_detached(h, 1)
         // Project Settings likewise renders in its own native window.
@@ -3195,10 +3192,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     func openFile(_ v: CellView, _ path: String) {
-        let bytes = Array(path.utf8)
-        bytes.withUnsafeBufferPointer { b in
-            tk_desktop_open_file(v.handle, Int64(Int(bitPattern: b.baseAddress)),
-                                 Int64(bytes.count), Int64(v.cols()), Int64(v.rows()))
+        withUTF8Arg(path) { ptr, len in
+            tk_desktop_open_file(v.handle, ptr, len, Int64(v.cols()), Int64(v.rows()))
         }
         // File-only windows (no project loaded): title + proxy track the
         // file itself. When a project is loaded the title is the project
@@ -3212,11 +3207,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     func openProject(_ v: CellView, _ path: String) {
-        let bytes = Array(path.utf8)
-        bytes.withUnsafeBufferPointer { b in
-            tk_desktop_open_project(v.handle, Int64(Int(bitPattern: b.baseAddress)),
-                                    Int64(bytes.count))
-        }
+        withUTF8Arg(path) { ptr, len in tk_desktop_open_project(v.handle, ptr, len) }
         v.project = path
         // Title + proxy icon: macOS convention is for project/document
         // windows to show the project name with a draggable folder proxy
@@ -3302,23 +3293,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if let mv = mainViewByObjectId(entry.key) { closePanelWindow(for: mv) }
             return false
         }
-        // Closing the Settings window via the red button closes the Settings
-        // view on the Mojo side too (the reverse of the active-flag poll that
-        // opened this window).
-        if let entry = settingsWins.first(where: { $0.value.window === sender }) {
-            if let mv = mainViewByObjectId(entry.key) {
-                tk_desktop_settings_close(mv.handle)
-                closeSettingsWindow(for: mv)
+        // Closing a dialog window (Settings, Project Settings) via the red
+        // button closes the view on the Mojo side too (the reverse of the
+        // active-flag poll that opened the window).
+        for d in dialogSurfaces {
+            if let entry = dialogWins[d.surface]?.first(where: { $0.value.window === sender }) {
+                if let mv = mainViewByObjectId(entry.key) {
+                    d.close(mv.handle)
+                    closeDialogWindow(d.surface, for: mv)
+                }
+                return false
             }
-            return false
-        }
-        // Same for the Project Settings window (twin of the Settings arm).
-        if let entry = projectSettingsWins.first(where: { $0.value.window === sender }) {
-            if let mv = mainViewByObjectId(entry.key) {
-                tk_desktop_project_settings_close(mv.handle)
-                closeProjectSettingsWindow(for: mv)
-            }
-            return false
         }
         guard let idx = windows.firstIndex(of: sender) else { return false }
         let v = views[idx]
@@ -3327,8 +3312,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // window — without double-freeing the shared Desktop handle.
         if !isTerminating { saveGeometryFor(v) }
         closePanelWindow(for: v, save: false)
-        closeSettingsWindow(for: v, focusMain: false)
-        closeProjectSettingsWindow(for: v, focusMain: false)
+        for d in dialogSurfaces { closeDialogWindow(d.surface, for: v, focusMain: false) }
         let h = v.handle
         v.handle = 0
         windows.remove(at: idx)
@@ -3659,12 +3643,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     // MARK: floating panels — window, toggle, restore, fallback
 
-    // Build the panel window's CellView, sharing the project window's Desktop
-    // handle and rendering only the tool panels.
-    private func makePanelView(for mainView: CellView) -> CellView {
+    // A second CellView over the project window's Desktop handle, rendering
+    // one secondary surface (the tool panels, Settings, …).
+    private func makeSurfaceView(for mainView: CellView, surface: CellSurface) -> CellView {
         let v = CellView()
-        v.handle = mainView.handle
-        v.surface = .panels
+        v.handle = mainView.handle    // shared Desktop, second surface
+        v.surface = surface
         v.mainPeer = mainView
         return v
     }
@@ -3703,7 +3687,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if let existing = panels[id] {
             pv = existing.view; win = existing.window
         } else {
-            pv = makePanelView(for: mainView)
+            pv = makeSurfaceView(for: mainView, surface: .panels)
             win = UnconstrainedWindow(
                 contentRect: frame ?? defaultPanelFrame(besides: mainWin),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -3760,108 +3744,46 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
-    // MARK: standalone Settings window
+    // MARK: standalone dialog windows (Settings, Project Settings)
 
-    private func makeSettingsView(for mainView: CellView) -> CellView {
-        let v = CellView()
-        v.handle = mainView.handle    // shared Desktop, second surface
-        v.surface = .settings
-        v.mainPeer = mainView
-        return v
-    }
-
-    private func defaultSettingsFrame(over mainWin: NSWindow) -> NSRect {
-        // Centered over the project window; sized for the settings layout
-        // (left rail + right pane) without dwarfing the editor behind it —
-        // the whole point of the separate window is watching a theme change
-        // retint the workspace live.
-        let w: CGFloat = 110 * CELL_W, h: CGFloat = 34 * CELL_H
-        let mf = mainWin.frame
-        return NSRect(x: mf.midX - w / 2, y: mf.midY - h / 2, width: w, height: h)
-    }
-
-    private func showSettingsWindow(for mainView: CellView) {
+    private func showDialogWindow(_ d: DialogSurface, for mainView: CellView) {
         guard let mainWin = mainView.window else { return }
         let id = ObjectIdentifier(mainView)
         let sv: CellView
         let win: NSWindow
-        if let existing = settingsWins[id] {
+        if let existing = dialogWins[d.surface]?[id] {
             sv = existing.view; win = existing.window
         } else {
-            sv = makeSettingsView(for: mainView)
+            sv = makeSurfaceView(for: mainView, surface: d.surface)
+            // Centered over the project window.
+            let w = d.cols * CELL_W, h = d.rows * CELL_H
+            let mf = mainWin.frame
             win = UnconstrainedWindow(
-                contentRect: defaultSettingsFrame(over: mainWin),
+                contentRect: NSRect(x: mf.midX - w / 2, y: mf.midY - h / 2,
+                                    width: w, height: h),
                 styleMask: [.titled, .closable, .resizable],
                 backing: .buffered, defer: false)
             win.delegate = self
             win.contentView = sv
             win.makeFirstResponder(sv)
             win.acceptsMouseMovedEvents = true
-            win.title = "Settings"
-            settingsWins[id] = (window: win, view: sv)
+            win.title = d.title
+            dialogWins[d.surface, default: [:]][id] = (window: win, view: sv)
         }
         win.makeKeyAndOrderFront(nil)
         sv.invalidateFrame(); sv.needsDisplay = true
     }
 
-    private func closeSettingsWindow(for mainView: CellView, focusMain: Bool = true) {
+    private func closeDialogWindow(_ surface: CellSurface, for mainView: CellView,
+                                   focusMain: Bool = true) {
         let id = ObjectIdentifier(mainView)
-        guard let pair = settingsWins[id] else { return }
-        settingsWins.removeValue(forKey: id)
+        guard let pair = dialogWins[surface]?[id] else { return }
+        dialogWins[surface]?.removeValue(forKey: id)
         pair.view.handle = 0          // shared handle is owned by the main view
         pair.window.orderOut(nil)     // Sequoia-safe (see windowShouldClose)
-        // Hand focus back to the project window so Esc-closing Settings
+        // Hand focus back to the project window so Esc-closing the dialog
         // drops the user straight back into the editor. Skipped when the
         // project window itself is the one going away.
-        if focusMain { mainView.window?.makeKeyAndOrderFront(nil) }
-    }
-
-    // --- Project Settings window (twin of the Settings window above) ---------
-
-    private func makeProjectSettingsView(for mainView: CellView) -> CellView {
-        let v = CellView()
-        v.handle = mainView.handle    // shared Desktop, second surface
-        v.surface = .projectSettings
-        v.mainPeer = mainView
-        return v
-    }
-
-    private func defaultProjectSettingsFrame(over mainWin: NSWindow) -> NSRect {
-        let w: CGFloat = 100 * CELL_W, h: CGFloat = 32 * CELL_H
-        let mf = mainWin.frame
-        return NSRect(x: mf.midX - w / 2, y: mf.midY - h / 2, width: w, height: h)
-    }
-
-    private func showProjectSettingsWindow(for mainView: CellView) {
-        guard let mainWin = mainView.window else { return }
-        let id = ObjectIdentifier(mainView)
-        let sv: CellView
-        let win: NSWindow
-        if let existing = projectSettingsWins[id] {
-            sv = existing.view; win = existing.window
-        } else {
-            sv = makeProjectSettingsView(for: mainView)
-            win = UnconstrainedWindow(
-                contentRect: defaultProjectSettingsFrame(over: mainWin),
-                styleMask: [.titled, .closable, .resizable],
-                backing: .buffered, defer: false)
-            win.delegate = self
-            win.contentView = sv
-            win.makeFirstResponder(sv)
-            win.acceptsMouseMovedEvents = true
-            win.title = "Project Settings"
-            projectSettingsWins[id] = (window: win, view: sv)
-        }
-        win.makeKeyAndOrderFront(nil)
-        sv.invalidateFrame(); sv.needsDisplay = true
-    }
-
-    private func closeProjectSettingsWindow(for mainView: CellView, focusMain: Bool = true) {
-        let id = ObjectIdentifier(mainView)
-        guard let pair = projectSettingsWins[id] else { return }
-        projectSettingsWins.removeValue(forKey: id)
-        pair.view.handle = 0          // shared handle is owned by the main view
-        pair.window.orderOut(nil)     // Sequoia-safe (see windowShouldClose)
         if focusMain { mainView.window?.makeKeyAndOrderFront(nil) }
     }
 
