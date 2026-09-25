@@ -11,7 +11,7 @@ targets are honored so a stray click can't run an arbitrary command.
 from std.ffi import external_call
 from std.sys.info import CompilationTarget
 
-from .posix import getenv_value
+from .posix import getenv_value, strip_macos_malloc_debug_env
 from .string_utils import shell_single_quote
 
 
@@ -29,18 +29,6 @@ def _starts_with_http(url: String) -> Bool:
     return False
 
 
-def _strip_macos_malloc_debug_env():
-    """Drop the macOS malloc-debug env vars before ``popen`` forks a shell
-    so its libmalloc init can't print scribble diagnostics onto the raw-mode
-    TTY. Same defense as ``clipboard.mojo``; see its note for the why."""
-    var s = String("MallocScribble\0")
-    var ps = String("MallocPreScribble\0")
-    var ge = String("MallocGuardEdges\0")
-    _ = external_call["unsetenv", Int32](s.unsafe_ptr())
-    _ = external_call["unsetenv", Int32](ps.unsafe_ptr())
-    _ = external_call["unsetenv", Int32](ge.unsafe_ptr())
-
-
 def open_url(url: String):
     """Open ``url`` in the system default browser. Best-effort, silent on
     failure. Only ``http(s)://`` URLs are launched.
@@ -52,7 +40,7 @@ def open_url(url: String):
         return
     if len(getenv_value(String("TURBOKOD_FAKE_BROWSER")).as_bytes()) > 0:
         return
-    _strip_macos_malloc_debug_env()
+    strip_macos_malloc_debug_env()
     var opener: String
     comptime if CompilationTarget.is_macos():
         opener = String("open")

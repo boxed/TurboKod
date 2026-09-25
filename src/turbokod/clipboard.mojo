@@ -18,7 +18,7 @@ from std.ffi import external_call
 from std.sys.info import CompilationTarget
 
 from .events import Event, EVENT_KEY, MOD_CTRL, MOD_META
-from .posix import getenv_value
+from .posix import getenv_value, strip_macos_malloc_debug_env
 
 
 # Result tags for ``clipboard_chord``. Plain ``UInt8`` constants in the
@@ -84,30 +84,6 @@ def _paste_command() -> String:
         return String("xclip -selection clipboard -o 2>/dev/null")
 
 
-def _strip_macos_malloc_debug_env():
-    """Remove the macOS malloc-debug env vars from our environment.
-
-    Defensive: if our process was started with ``MallocScribble=1`` (or
-    its siblings) set in the environment, ``popen`` would fork
-    ``/bin/sh -c …`` and the shell's *own* libsystem_malloc would read
-    the var at process init and print "MallocScribble: enabling
-    scribbling to detect mods to free blocks" on stderr — landing on
-    the TTY behind our raw-mode UI and corrupting the visible display.
-
-    Doing this in the parent right before ``popen`` works because our
-    own libmalloc initialized at our dyld load time and won't re-check
-    the var — anything that depended on scribbling for *us* stays
-    active. The Rust pty shim does the equivalent for pty-spawned
-    shells; this is the same fix for the popen path.
-    """
-    var s = String("MallocScribble\0")
-    var ps = String("MallocPreScribble\0")
-    var ge = String("MallocGuardEdges\0")
-    _ = external_call["unsetenv", Int32](s.unsafe_ptr())
-    _ = external_call["unsetenv", Int32](ps.unsafe_ptr())
-    _ = external_call["unsetenv", Int32](ge.unsafe_ptr())
-
-
 def clipboard_copy(text: String):
     """Push ``text`` to the system clipboard. Silent failure on error.
 
@@ -117,7 +93,7 @@ def clipboard_copy(text: String):
     """
     if len(getenv_value(String("TURBOKOD_FAKE_CLIPBOARD")).as_bytes()) > 0:
         return
-    _strip_macos_malloc_debug_env()
+    strip_macos_malloc_debug_env()
     var cmd = _copy_command() + String("\0")
     var mode = String("w\0")
     var fp = external_call["popen", Int](cmd.unsafe_ptr(), mode.unsafe_ptr())
@@ -135,7 +111,7 @@ def clipboard_paste() -> String:
     """Read the system clipboard. Returns empty string on error."""
     if len(getenv_value(String("TURBOKOD_FAKE_CLIPBOARD")).as_bytes()) > 0:
         return String("")
-    _strip_macos_malloc_debug_env()
+    strip_macos_malloc_debug_env()
     var cmd = _paste_command() + String("\0")
     var mode = String("r\0")
     var fp = external_call["popen", Int](cmd.unsafe_ptr(), mode.unsafe_ptr())

@@ -38,7 +38,7 @@ from .events import (
     KEY_ENTER, KEY_ESC,
     MOUSE_BUTTON_LEFT,
 )
-from .file_io import ci_less
+from .file_io import ci_less, project_relative
 from .geometry import center_in, Point, Rect
 from .lsp import LspProcess
 from .picker_input import (
@@ -47,7 +47,8 @@ from .picker_input import (
 )
 from .posix import alloc_zero_buffer, poll_stdin, read_into
 from .string_utils import (
-    display_columns, is_ascii_ident_byte, starts_with, tail_to_columns,
+    display_columns, is_ascii_ident_byte, parse_uint_range, starts_with,
+    tail_to_columns,
 )
 from .symbol_seed import is_definition_site, seed_priority
 from .text_field import TextField
@@ -681,7 +682,7 @@ struct FindSymbol(Movable):
             # not the symbol name (every row in this list shares the
             # name we're disambiguating, so repeating it eats space
             # and reads like noise).
-            var rel = _relativize(entry.path, self.root)
+            var rel = project_relative(self.root, entry.path)
             var label = rel + String(":") + String(entry.line)
             var avail = rect.b.x - 1 - name_x
             if avail < 1:
@@ -901,27 +902,6 @@ def _sort_entries_ranked(
         w += 1
 
 
-def _relativize(path: String, root: String) -> String:
-    """If ``path`` lives under ``root``, return the suffix after the
-    root + ``/`` separator. Otherwise return ``path`` unchanged.
-
-    Used to format chooser-row labels: ``/Users/x/proj/foo/bar.py``
-    becomes ``foo/bar.py`` so the dialog isn't dominated by the
-    leading workspace prefix that's the same for every row anyway."""
-    var rb = root.as_bytes()
-    var pb = path.as_bytes()
-    if len(rb) == 0 or len(pb) < len(rb):
-        return path
-    for i in range(len(rb)):
-        if pb[i] != rb[i]:
-            return path
-    if len(pb) == len(rb):
-        return path
-    if pb[len(rb)] != 0x2F:   # '/'
-        return path
-    return String(StringSpan(unsafe_from_utf8=pb[len(rb) + 1:len(pb)]))
-
-
 def _truncate_path_to(s: String, max_cols: Int) -> String:
     """Truncate ``s`` to at most ``max_cols`` cells, dropping codepoints
     from the *front* and marking elision with a leading ``…``. Paths are
@@ -1007,8 +987,8 @@ def _parse_rg_match_line(
                     k += 1
                 if k > j + 1 and k < len(b) and b[k] == 0x3A:
                     var path = String(StringSpan(unsafe_from_utf8=b[0:i]))
-                    var line_no = _parse_int(b, i + 1, j)
-                    var col_no = _parse_int(b, j + 1, k)
+                    var line_no = parse_uint_range(b, i + 1, j)
+                    var col_no = parse_uint_range(b, j + 1, k)
                     if line_no <= 0 or col_no <= 0:
                         return Optional[Tuple[String, Int, Int, String]]()
                     var text = String(StringSpan(
@@ -1019,20 +999,6 @@ def _parse_rg_match_line(
                     )
         i += 1
     return Optional[Tuple[String, Int, Int, String]]()
-
-
-def _parse_int(b: Span[UInt8, _], start: Int, end: Int) -> Int:
-    var n = 0
-    var any = False
-    for p in range(start, end):
-        var v = Int(b[p])
-        if v < 0x30 or v > 0x39:
-            return -1
-        n = n * 10 + (v - 0x30)
-        any = True
-    if not any:
-        return -1
-    return n
 
 
 def _is_query_byte(b: UInt8) -> Bool:

@@ -81,6 +81,7 @@ from .window import (
     handle_bottom_dock_chrome_mouse, handle_bottom_dock_esc,
     paint_bottom_dock_chrome,
 )
+from .file_io import basename
 # PANEL_STATE_* constants are re-exported from this module for callers
 # that build TitleCommand strips (Desktop) and reason about pane state
 # without going through ``window.mojo`` directly.
@@ -438,7 +439,7 @@ struct DebugPane(Copyable, Movable):
             var f = frames[i]
             var loc = String("")
             if len(f.path.as_bytes()) > 0:
-                loc = _basename(f.path) + String(":") + String(f.line + 1)
+                loc = basename(f.path) + String(":") + String(f.line + 1)
             var name_pad = _pad_right(f.name, 18)
             out.append(PaneRow(
                 PANE_ROW_FRAME,
@@ -1376,17 +1377,6 @@ def _type_attr(type_name: String) -> Attr:
             or type_name == String("frozenset"):
         return Attr(LIGHT_GREEN, PANE_BG)
     return Attr(LIGHT_YELLOW, PANE_BG)
-
-
-def _basename(path: String) -> String:
-    var b = path.as_bytes()
-    var n = len(b)
-    var i = n - 1
-    while i >= 0:
-        if b[i] == 0x2F:
-            return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(i).unsafe_offset(1), length=n - i - 1)))
-        i -= 1
-    return path
 
 
 def _pad_right(s: String, width: Int) -> String:

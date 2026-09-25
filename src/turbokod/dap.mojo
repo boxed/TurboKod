@@ -65,6 +65,11 @@ struct DapIncoming(Copyable, Movable):
     var body: Optional[JsonValue]     # response.body or event.body
     var arguments: Optional[JsonValue]  # for reverse requests
 
+    def ok(self) -> Bool:
+        """A response's ``success``, treating an absent field as success
+        (only an explicit ``false`` is a failure)."""
+        return self.success.value() if self.success else True
+
 
 struct DapClient(Copyable, Movable):
     """Adds DAP envelope handling on top of ``LspProcess``.

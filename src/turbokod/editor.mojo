@@ -22,13 +22,11 @@ from .clipboard import (
     clipboard_copy, clipboard_paste,
 )
 from .colors import (
-    Attr, BLACK, BLUE, CYAN, DARK_GRAY, LIGHT_BLUE, LIGHT_GRAY, LIGHT_GREEN,
+    Attr, BG_TRUECOLOR, BLACK, blend_rgb, BLUE, CARET_BG, CARET_FG, CYAN,
+    DARK_GRAY, DIFF_ADD_BG, DIFF_ADD_EMPH, DIFF_REM_BG, DIFF_REM_EMPH,
+    EDITOR_BG, EDITOR_FG, FG_TRUECOLOR, LIGHT_BLUE, LIGHT_GRAY, LIGHT_GREEN,
     LIGHT_RED, LIGHT_YELLOW, MAGENTA, STYLE_BOLD, STYLE_UNDERLINE,
-    STYLE_UNDERLINE_CURLY, WHITE, YELLOW,
-    CARET_BG, CARET_FG, EDITOR_BG, EDITOR_FG, SYN_IDENT,
-    SYN_STRING, SYN_COMMENT,
-    BG_TRUECOLOR, FG_TRUECOLOR, DIFF_ADD_BG, DIFF_REM_BG,
-    DIFF_ADD_EMPH, DIFF_REM_EMPH,
+    STYLE_UNDERLINE_CURLY, SYN_COMMENT, SYN_IDENT, SYN_STRING, WHITE, YELLOW,
 )
 from .diagnostic_menu import DiagnosticMenuRequest
 from .diff import MergeRegion, REGION_CONFLICT, diff3_regions
@@ -78,9 +76,9 @@ from .search_options import (
 from .string_utils import (
     byte_slice, char_width, codepoint_at, display_columns,
     is_printable_text_key, is_space_cp, is_word_codepoint,
-    leading_indent_bytes, prev_codepoint_start, truncate_to_columns,
-    utf8_byte_of_cell, utf8_cell_of_byte, utf8_codepoint_size,
-    utf8_step_forward, word_char_step, word_range_at, TAB_WIDTH,
+    leading_indent_bytes, prev_codepoint_start, split_lines_no_trailing,
+    TAB_WIDTH, truncate_to_columns, utf8_byte_of_cell, utf8_cell_of_byte,
+    utf8_codepoint_size, utf8_step_forward, word_char_step, word_range_at,
 )
 from .text_view import (
     Selection, VisualLine, paint_selection_overlay,
@@ -299,20 +297,6 @@ comptime _REVIEW_DIM_FG: Int = 38
 comptime _REVIEW_DIM_BG: Int = 30
 
 
-def _review_blend(src: UInt32, dst: UInt32, pct: Int) -> UInt32:
-    """Mix ``src`` ``pct``% toward ``dst`` (both ``0xRRGGBB``)."""
-    var sr = Int((src >> 16) & 0xFF)
-    var sg = Int((src >> 8) & 0xFF)
-    var sb = Int(src & 0xFF)
-    var dr = Int((dst >> 16) & 0xFF)
-    var dg = Int((dst >> 8) & 0xFF)
-    var db = Int(dst & 0xFF)
-    var rr = (sr * (100 - pct) + dr * pct) // 100
-    var rg = (sg * (100 - pct) + dg * pct) // 100
-    var rb = (sb * (100 - pct) + db * pct) // 100
-    return (UInt32(rr) << 16) | (UInt32(rg) << 8) | UInt32(rb)
-
-
 def _review_dim_attr(attr: Attr, palette: List[UInt32]) -> Attr:
     """Dim one unchanged-context cell: darken its background toward black,
     then mix its foreground toward that darkened background so the text
@@ -326,7 +310,7 @@ def _review_dim_attr(attr: Attr, palette: List[UInt32]) -> Attr:
         bg = palette[Int(attr.bg)]
     else:
         bg = black
-    var new_bg = _review_blend(bg, black, _REVIEW_DIM_BG)
+    var new_bg = blend_rgb(bg, black, _REVIEW_DIM_BG)
     var fg: UInt32
     if (attr.color_mode & FG_TRUECOLOR) != 0:
         fg = attr.fg_rgb
@@ -334,7 +318,7 @@ def _review_dim_attr(attr: Attr, palette: List[UInt32]) -> Attr:
         fg = palette[Int(attr.fg)]
     else:
         fg = new_bg
-    var new_fg = _review_blend(fg, new_bg, _REVIEW_DIM_FG)
+    var new_fg = blend_rgb(fg, new_bg, _REVIEW_DIM_FG)
     return attr.with_fg_rgb(new_fg).with_bg_rgb(new_bg)
 
 
@@ -7953,23 +7937,6 @@ struct Editor(Copyable, Movable):
                 return True
         return False
 
-    def _paste_segments(self, text: String) -> List[String]:
-        """Split ``text`` on newlines, dropping the empty tail a trailing
-        newline produces — so a three-line clipboard is three segments
-        whether or not it ends in one."""
-        var out = List[String]()
-        var bytes = text.as_bytes()
-        var n = len(bytes)
-        var start = 0
-        var i = 0
-        while i < n:
-            if bytes[i] == 0x0A:
-                out.append(byte_slice(text, start, i))
-                start = i + 1
-            i += 1
-        if start < n:
-            out.append(byte_slice(text, start, n))
-        return out^
 
     def _remap_past_edit(
         self, r: Int, c: Int,
@@ -8019,7 +7986,7 @@ struct Editor(Copyable, Movable):
         var n = len(carets)
         if len(text.as_bytes()) == 0 and not self._any_caret_has_selection():
             return
-        var segs = self._paste_segments(text)
+        var segs = split_lines_no_trailing(text)
         var distribute = n > 1 and len(segs) == n
         var line_above = line_mode and not distribute
         var pre_dirty_row = carets[0].row

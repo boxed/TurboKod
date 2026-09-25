@@ -1019,20 +1019,11 @@ struct DapManager(Copyable, Movable):
         that. lldb-dap respects the flag; debugpy ignores it and always
         expects 1-based. So we send 1-based unconditionally.
         """
-        var found = -1
-        for i in range(len(self._bp_path)):
-            if self._bp_path[i] == path and self._bp_line[i] == line:
-                found = i
-                break
+        var found = self._bp_index(path, line)
         if found >= 0:
             self._remove_bp_at(found)
         else:
-            self._bp_path.append(path)
-            self._bp_line.append(line)
-            self._bp_condition.append(String(""))
-            self._bp_enabled.append(True)
-            self._bp_wait_for.append(String(""))
-            self._bp_armed.append(True)
+            self._append_bp(path, line, String(""))
         self._push_breakpoints_for_path(path)
 
     def set_breakpoint_condition(
@@ -1042,18 +1033,9 @@ struct DapManager(Copyable, Movable):
         ``(path, line)``. Adds the breakpoint if it didn't exist; an
         empty ``condition`` clears any prior condition without removing
         the breakpoint (use ``toggle_breakpoint`` for removal)."""
-        var found = -1
-        for i in range(len(self._bp_path)):
-            if self._bp_path[i] == path and self._bp_line[i] == line:
-                found = i
-                break
+        var found = self._bp_index(path, line)
         if found < 0:
-            self._bp_path.append(path)
-            self._bp_line.append(line)
-            self._bp_condition.append(condition^)
-            self._bp_enabled.append(True)
-            self._bp_wait_for.append(String(""))
-            self._bp_armed.append(True)
+            self._append_bp(path, line, condition^)
         else:
             self._bp_condition[found] = condition^
         self._push_breakpoints_for_path(path)
@@ -1065,13 +1047,11 @@ struct DapManager(Copyable, Movable):
         No-op when no BP exists at that location — toggling enable on
         a non-existent BP has no obvious meaning, and the right-click
         menu only opens over an existing dot anyway."""
-        for i in range(len(self._bp_path)):
-            if self._bp_path[i] == path and self._bp_line[i] == line:
-                if self._bp_enabled[i] == enabled:
-                    return
-                self._bp_enabled[i] = enabled
-                self._push_breakpoints_for_path(path)
-                return
+        var i = self._bp_index(path, line)
+        if i < 0 or self._bp_enabled[i] == enabled:
+            return
+        self._bp_enabled[i] = enabled
+        self._push_breakpoints_for_path(path)
 
     def set_breakpoint_wait_for(
         mut self, path: String, line: Int, var wait_for: String,
@@ -1080,27 +1060,21 @@ struct DapManager(Copyable, Movable):
         ``(path, line)``. ``wait_for`` is the ``"<path>:<1-based-line>"``
         identifier of the BP that must be hit first; empty clears the
         dependency. No-op when no BP exists at that location."""
-        for i in range(len(self._bp_path)):
-            if self._bp_path[i] == path and self._bp_line[i] == line:
-                if self._bp_wait_for[i] == wait_for:
-                    return
-                self._bp_wait_for[i] = wait_for^
-                # Re-derive ``armed``: empty wait-for is always armed;
-                # non-empty starts disarmed (the trigger has to fire
-                # again before the BP goes live).
-                self._bp_armed[i] = (
-                    len(self._bp_wait_for[i].as_bytes()) == 0
-                )
-                self._push_breakpoints_for_path(path)
-                return
+        var i = self._bp_index(path, line)
+        if i < 0 or self._bp_wait_for[i] == wait_for:
+            return
+        self._bp_wait_for[i] = wait_for^
+        # Re-derive ``armed``: empty wait-for is always armed; non-empty
+        # starts disarmed (the trigger has to fire again before the BP
+        # goes live).
+        self._bp_armed[i] = len(self._bp_wait_for[i].as_bytes()) == 0
+        self._push_breakpoints_for_path(path)
 
     def breakpoint_wait_for(self, path: String, line: Int) -> String:
         """Wait-for trigger key at ``(path, line)``, or empty string
         when none / no BP exists."""
-        for i in range(len(self._bp_path)):
-            if self._bp_path[i] == path and self._bp_line[i] == line:
-                return self._bp_wait_for[i]
-        return String("")
+        var i = self._bp_index(path, line)
+        return self._bp_wait_for[i] if i >= 0 else String("")
 
     def arm_dependents(mut self, path: String, line: Int):
         """Mark every BP whose ``wait_for`` matches ``(path, line)`` as
@@ -1138,43 +1112,24 @@ struct DapManager(Copyable, Movable):
     def breakpoint_condition(self, path: String, line: Int) -> String:
         """Current condition for the breakpoint at ``(path, line)``,
         or empty string when none / unconditional."""
-        for i in range(len(self._bp_path)):
-            if self._bp_path[i] == path and self._bp_line[i] == line:
-                return self._bp_condition[i]
-        return String("")
+        var i = self._bp_index(path, line)
+        return self._bp_condition[i] if i >= 0 else String("")
 
     def breakpoint_enabled(self, path: String, line: Int) -> Bool:
         """Enable state at ``(path, line)``. Defaults to True (the
         most common case) so callers can use this in expressions
         without first probing ``has_breakpoint``."""
-        for i in range(len(self._bp_path)):
-            if self._bp_path[i] == path and self._bp_line[i] == line:
-                return self._bp_enabled[i]
-        return True
+        var i = self._bp_index(path, line)
+        return self._bp_enabled[i] if i >= 0 else True
 
     def _remove_bp_at(mut self, idx: Int):
-        """Compact the parallel breakpoint lists by skipping ``idx``."""
-        var new_paths = List[String]()
-        var new_lines = List[Int]()
-        var new_conds = List[String]()
-        var new_en = List[Bool]()
-        var new_wait = List[String]()
-        var new_armed = List[Bool]()
-        for k in range(len(self._bp_path)):
-            if k == idx:
-                continue
-            new_paths.append(self._bp_path[k])
-            new_lines.append(self._bp_line[k])
-            new_conds.append(self._bp_condition[k])
-            new_en.append(self._bp_enabled[k])
-            new_wait.append(self._bp_wait_for[k])
-            new_armed.append(self._bp_armed[k])
-        self._bp_path = new_paths^
-        self._bp_line = new_lines^
-        self._bp_condition = new_conds^
-        self._bp_enabled = new_en^
-        self._bp_wait_for = new_wait^
-        self._bp_armed = new_armed^
+        """Drop entry ``idx`` from every parallel breakpoint list."""
+        _ = self._bp_path.pop(idx)
+        _ = self._bp_line.pop(idx)
+        _ = self._bp_condition.pop(idx)
+        _ = self._bp_enabled.pop(idx)
+        _ = self._bp_wait_for.pop(idx)
+        _ = self._bp_armed.pop(idx)
 
     def breakpoints_for(self, path: String) -> List[Int]:
         """Return a copy of the breakpoint lines for ``path``, 0-based.
@@ -1269,10 +1224,24 @@ struct DapManager(Copyable, Movable):
         self._bp_armed = armed^
 
     def has_breakpoint(self, path: String, line: Int) -> Bool:
+        return self._bp_index(path, line) >= 0
+
+    def _bp_index(self, path: String, line: Int) -> Int:
+        """Index of the breakpoint at ``(path, line)`` in the parallel
+        ``_bp_*`` lists, or -1."""
         for i in range(len(self._bp_path)):
             if self._bp_path[i] == path and self._bp_line[i] == line:
-                return True
-        return False
+                return i
+        return -1
+
+    def _append_bp(mut self, path: String, line: Int, var condition: String):
+        """Add an enabled, armed, trigger-less breakpoint."""
+        self._bp_path.append(path)
+        self._bp_line.append(line)
+        self._bp_condition.append(condition^)
+        self._bp_enabled.append(True)
+        self._bp_wait_for.append(String(""))
+        self._bp_armed.append(True)
 
     def _distinct_breakpoint_paths(self) -> List[String]:
         """Unique source paths that currently hold a breakpoint."""
@@ -1896,20 +1865,7 @@ struct DapManager(Copyable, Movable):
             if event == String("output"):
                 # Merge into the parent output channel so the user sees
                 # subprocess prints in the same Output panel.
-                if not msg.body or not msg.body.value().is_object():
-                    return
-                var b = msg.body.value().copy()
-                var category = String("console")
-                var text = String("")
-                var c = b.object_get(String("category"))
-                if c and c.value().is_string():
-                    category = c.value().as_str()
-                var o = b.object_get(String("output"))
-                if o and o.value().is_string():
-                    text = o.value().as_str()
-                if len(text.as_bytes()) > 0:
-                    _ = self._maybe_capture_condition_exception(text)
-                    self._output_events.append(DapOutput(category, text))
+                self._on_output_event(msg)
                 return
             if event == String("terminated"):
                 self._subprocess.state = _STATE_TERMINATED
@@ -1928,11 +1884,7 @@ struct DapManager(Copyable, Movable):
                 # Mirror the parent's continued handling. Without this
                 # the inspect view stays stuck "stopped" after a
                 # ``continue`` we sent into the subprocess.
-                self._is_stopped = False
-                self._stopped = Optional[DapStopped]()
-                self._stop_in_subprocess = False
-                self._last_stopped_thread_id = 0
-                self._continued_pending = True
+                self._on_continued_event()
                 return
             return
         if msg.kind == DAP_RESPONSE:
@@ -1941,9 +1893,7 @@ struct DapManager(Copyable, Movable):
             var rseq = msg.request_seq.value()
             if rseq == self._subprocess.inflight_initialize:
                 self._subprocess.inflight_initialize = 0
-                var sub_init_ok = True
-                if msg.success:
-                    sub_init_ok = msg.success.value()
+                var sub_init_ok = msg.ok()
                 if not sub_init_ok:
                     self._subprocess.state = _STATE_FAILED
                     self._subprocess.client.terminate()
@@ -1965,18 +1915,14 @@ struct DapManager(Copyable, Movable):
                 return
             if rseq == self._subprocess.inflight_attach:
                 self._subprocess.inflight_attach = 0
-                var sub_att_ok = True
-                if msg.success:
-                    sub_att_ok = msg.success.value()
+                var sub_att_ok = msg.ok()
                 if not sub_att_ok:
                     self._subprocess.state = _STATE_FAILED
                     self._subprocess.client.terminate()
                 return
             if rseq == self._subprocess.inflight_config_done:
                 self._subprocess.inflight_config_done = 0
-                var sub_cfg_ok = True
-                if msg.success:
-                    sub_cfg_ok = msg.success.value()
+                var sub_cfg_ok = msg.ok()
                 if not sub_cfg_ok:
                     self._subprocess.state = _STATE_FAILED
                     self._subprocess.client.terminate()
@@ -2126,11 +2072,7 @@ struct DapManager(Copyable, Movable):
             self._on_stopped_event(msg, False)
             return
         if event == String("continued"):
-            self._is_stopped = False
-            self._stopped = Optional[DapStopped]()
-            self._stop_in_subprocess = False
-            self._last_stopped_thread_id = 0
-            self._continued_pending = True
+            self._on_continued_event()
             return
         if event == String("terminated"):
             self._terminated_pending = True
@@ -2253,9 +2195,7 @@ struct DapManager(Copyable, Movable):
         # entry-trace printed ``success=True`` and the next line was
         # ``FAIL: initialize rejected``. Split into two statements so
         # the boolean check is unambiguous.
-        var success_ok = True
-        if msg.success:
-            success_ok = msg.success.value()
+        var success_ok = msg.ok()
         if not success_ok:
             self.state = _STATE_FAILED
             var why = String("initialize rejected")
@@ -2319,18 +2259,9 @@ struct DapManager(Copyable, Movable):
         # "run to cursor" row (no user-visible BP).
         var sent_lines = self._inflight_set_breakpoints_lines[idx].copy()
         # Compact inflight tables.
-        var new_seqs = List[Int]()
-        var new_paths = List[String]()
-        var new_lines = List[List[Int]]()
-        for k in range(len(self._inflight_set_breakpoints_seqs)):
-            if k == idx:
-                continue
-            new_seqs.append(self._inflight_set_breakpoints_seqs[k])
-            new_paths.append(self._inflight_set_breakpoints_paths[k])
-            new_lines.append(self._inflight_set_breakpoints_lines[k].copy())
-        self._inflight_set_breakpoints_seqs = new_seqs^
-        self._inflight_set_breakpoints_paths = new_paths^
-        self._inflight_set_breakpoints_lines = new_lines^
+        _ = self._inflight_set_breakpoints_seqs.pop(idx)
+        _ = self._inflight_set_breakpoints_paths.pop(idx)
+        _ = self._inflight_set_breakpoints_lines.pop(idx)
         if not msg.body or not msg.body.value().is_object():
             return
         var b = msg.body.value().copy()
@@ -2390,20 +2321,9 @@ struct DapManager(Copyable, Movable):
         stash the result. ``msg.body`` shape:
         ``{result, type?, variablesReference}``; we surface ``result``
         as the value text and ``type`` as the type when present."""
-        var expr = self._inflight_evaluate_exprs[idx]
-        var ctx = self._inflight_evaluate_contexts[idx]
-        var new_seqs = List[Int]()
-        var new_exprs = List[String]()
-        var new_ctxs = List[String]()
-        for k in range(len(self._inflight_evaluate_seqs)):
-            if k == idx:
-                continue
-            new_seqs.append(self._inflight_evaluate_seqs[k])
-            new_exprs.append(self._inflight_evaluate_exprs[k])
-            new_ctxs.append(self._inflight_evaluate_contexts[k])
-        self._inflight_evaluate_seqs = new_seqs^
-        self._inflight_evaluate_exprs = new_exprs^
-        self._inflight_evaluate_contexts = new_ctxs^
+        _ = self._inflight_evaluate_seqs.pop(idx)
+        var expr = self._inflight_evaluate_exprs.pop(idx)
+        var ctx = self._inflight_evaluate_contexts.pop(idx)
         self._stash_evaluate_result(expr^, ctx^, msg)
 
     def _on_evaluate_response_subprocess(
@@ -2412,20 +2332,9 @@ struct DapManager(Copyable, Movable):
         """Subprocess-channel variant: same body, different inflight
         list. Result lands in the same ``_evaluations_*`` buffers so
         the host's watch fold doesn't care which session answered."""
-        var expr = self._subprocess.inflight_evaluate_exprs[idx]
-        var ctx = self._subprocess.inflight_evaluate_contexts[idx]
-        var new_seqs = List[Int]()
-        var new_exprs = List[String]()
-        var new_ctxs = List[String]()
-        for k in range(len(self._subprocess.inflight_evaluate_seqs)):
-            if k == idx:
-                continue
-            new_seqs.append(self._subprocess.inflight_evaluate_seqs[k])
-            new_exprs.append(self._subprocess.inflight_evaluate_exprs[k])
-            new_ctxs.append(self._subprocess.inflight_evaluate_contexts[k])
-        self._subprocess.inflight_evaluate_seqs = new_seqs^
-        self._subprocess.inflight_evaluate_exprs = new_exprs^
-        self._subprocess.inflight_evaluate_contexts = new_ctxs^
+        _ = self._subprocess.inflight_evaluate_seqs.pop(idx)
+        var expr = self._subprocess.inflight_evaluate_exprs.pop(idx)
+        var ctx = self._subprocess.inflight_evaluate_contexts.pop(idx)
         self._stash_evaluate_result(expr^, ctx^, msg)
 
     def _stash_evaluate_result(
@@ -2438,9 +2347,7 @@ struct DapManager(Copyable, Movable):
         console results apart from watch folds."""
         var value = String("")
         var type_name = String("")
-        var eval_ok = True
-        if msg.success:
-            eval_ok = msg.success.value()
+        var eval_ok = msg.ok()
         if not eval_ok:
             # Error response — surface the message as the value so the
             # watch row reads ``len(items) = <error>`` rather than
@@ -2579,20 +2486,9 @@ struct DapManager(Copyable, Movable):
         host to track which result belongs to which submit."""
         if len(self._test_eval_expr) == 0:
             return Optional[DapTestEvaluation]()
-        var expr = self._test_eval_expr[0]
-        var val = self._test_eval_value[0]
-        var err = self._test_eval_error[0]
-        # Pop index 0 — small list (one inflight expected at a time).
-        var ne = List[String]()
-        var nv = List[String]()
-        var nr = List[Bool]()
-        for k in range(1, len(self._test_eval_expr)):
-            ne.append(self._test_eval_expr[k])
-            nv.append(self._test_eval_value[k])
-            nr.append(self._test_eval_error[k])
-        self._test_eval_expr = ne^
-        self._test_eval_value = nv^
-        self._test_eval_error = nr^
+        var expr = self._test_eval_expr.pop(0)
+        var val = self._test_eval_value.pop(0)
+        var err = self._test_eval_error.pop(0)
         return Optional[DapTestEvaluation](
             DapTestEvaluation(expr^, val^, err),
         )
@@ -2600,16 +2496,8 @@ struct DapManager(Copyable, Movable):
     def _on_test_evaluate_response(mut self, idx: Int, msg: DapIncoming):
         """Pop the parent in-flight slot at ``idx`` and store the value
         (or the error message) in the test-eval result lists."""
-        var expr = self._inflight_test_eval_exprs[idx]
-        var new_seqs = List[Int]()
-        var new_exprs = List[String]()
-        for k in range(len(self._inflight_test_eval_seqs)):
-            if k == idx:
-                continue
-            new_seqs.append(self._inflight_test_eval_seqs[k])
-            new_exprs.append(self._inflight_test_eval_exprs[k])
-        self._inflight_test_eval_seqs = new_seqs^
-        self._inflight_test_eval_exprs = new_exprs^
+        _ = self._inflight_test_eval_seqs.pop(idx)
+        var expr = self._inflight_test_eval_exprs.pop(idx)
         self._stash_test_evaluate_result(expr^, msg)
 
     def _on_test_evaluate_response_subprocess(
@@ -2617,20 +2505,8 @@ struct DapManager(Copyable, Movable):
     ):
         """Subprocess-channel variant — same body, different inflight
         list. Result lands in the same ``_test_eval_*`` buffers."""
-        var expr = self._subprocess.inflight_test_eval_exprs[idx]
-        var new_seqs = List[Int]()
-        var new_exprs = List[String]()
-        for k in range(len(self._subprocess.inflight_test_eval_seqs)):
-            if k == idx:
-                continue
-            new_seqs.append(
-                self._subprocess.inflight_test_eval_seqs[k],
-            )
-            new_exprs.append(
-                self._subprocess.inflight_test_eval_exprs[k],
-            )
-        self._subprocess.inflight_test_eval_seqs = new_seqs^
-        self._subprocess.inflight_test_eval_exprs = new_exprs^
+        _ = self._subprocess.inflight_test_eval_seqs.pop(idx)
+        var expr = self._subprocess.inflight_test_eval_exprs.pop(idx)
         self._stash_test_evaluate_result(expr^, msg)
 
     def _stash_test_evaluate_result(
@@ -2638,9 +2514,7 @@ struct DapManager(Copyable, Movable):
     ):
         var value = String("")
         var is_error = False
-        var test_eval_ok = True
-        if msg.success:
-            test_eval_ok = msg.success.value()
+        var test_eval_ok = msg.ok()
         if not test_eval_ok:
             is_error = True
             if msg.message:
@@ -2716,9 +2590,7 @@ struct DapManager(Copyable, Movable):
         # Spec lets the launch response arrive at any point — even after
         # the program has stopped on entry. We only fail the session if
         # success=false; otherwise the response is informational.
-        var launch_ok = True
-        if msg.success:
-            launch_ok = msg.success.value()
+        var launch_ok = msg.ok()
         if not launch_ok:
             self.state = _STATE_FAILED
             var why = String("launch rejected")
@@ -2728,9 +2600,7 @@ struct DapManager(Copyable, Movable):
             self.client.process.trace(String("FAIL: ") + why)
 
     def _on_config_done_response(mut self, msg: DapIncoming):
-        var cfg_ok = True
-        if msg.success:
-            cfg_ok = msg.success.value()
+        var cfg_ok = msg.ok()
         if not cfg_ok:
             self.state = _STATE_FAILED
             self.failure_reason = String("configurationDone rejected")
@@ -2779,6 +2649,15 @@ struct DapManager(Copyable, Movable):
             self._oneshot_bp_path = String("")
             self._oneshot_bp_line = -1
             self._push_breakpoints_for_path(stale_path)
+
+    def _on_continued_event(mut self):
+        """Execution resumed (parent or subprocess session): drop the
+        stop state and latch ``_continued_pending`` for the host."""
+        self._is_stopped = False
+        self._stopped = Optional[DapStopped]()
+        self._stop_in_subprocess = False
+        self._last_stopped_thread_id = 0
+        self._continued_pending = True
 
     def _on_output_event(mut self, msg: DapIncoming):
         if not msg.body or not msg.body.value().is_object():

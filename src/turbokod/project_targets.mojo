@@ -58,6 +58,7 @@ from .json import (
     json_get_string, json_get_string_array, parse_json,
 )
 from .posix import getenv_value
+from .string_utils import leading_indent_bytes
 
 
 comptime TURBOKOD_DIR    = String(".turbokod")
@@ -523,14 +524,6 @@ def _split_lines(s: String) -> List[String]:
     return out^
 
 
-def _leading_ws(s: String) -> Int:
-    var b = s.as_bytes()
-    var i = 0
-    while i < len(b) and (Int(b[i]) == 0x20 or Int(b[i]) == 0x09):
-        i += 1
-    return i
-
-
 def _strip(s: String) -> String:
     var b = s.as_bytes()
     var n = len(b)
@@ -595,7 +588,7 @@ def _ini_python_files(text: String, section: String) -> List[String]:
     for li in range(len(lines)):
         var line = lines[li]
         var stripped = _strip(line)
-        var indent = _leading_ws(line)
+        var indent = leading_indent_bytes(line)
         if _is_section_header(stripped):
             if stripped == section:
                 in_section = True

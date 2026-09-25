@@ -20,8 +20,8 @@ from std.io.file_descriptor import FileDescriptor
 from std.ffi import external_call
 
 from .json import (
-    JsonValue, encode_json, json_array, json_bool, json_int, json_object,
-    json_str, parse_json,
+    encode_json, json_array, json_bool, json_int, json_null, json_object,
+    json_str, JsonValue, parse_json,
 )
 from .string_utils import utf8_prefix
 from .posix import (
@@ -995,7 +995,7 @@ def lsp_initialize_params(
     params.put(String("processId"), json_int(0))
     var has_root = len(root_uri.as_bytes()) > 0
     params.put(String("rootUri"),
-        json_str(root_uri) if has_root else json_null_v(),
+        json_str(root_uri) if has_root else json_null(),
     )
     var folders = json_array()
     if has_root:
@@ -1004,7 +1004,7 @@ def lsp_initialize_params(
         folder.put(String("name"), json_str(workspace_name))
         folders.append(folder^)
     params.put(String("workspaceFolders"),
-        folders^ if has_root else json_null_v(),
+        folders^ if has_root else json_null(),
     )
     var capabilities = json_object()
     var workspace_caps = json_object()
@@ -1164,7 +1164,3 @@ def _trace_preview(msg: String) -> String:
     return utf8_prefix(msg, 400) + String("…")
 
 
-def json_null_v() -> JsonValue:
-    """Local alias to keep the import list shorter at call sites."""
-    var v = JsonValue()
-    return v^

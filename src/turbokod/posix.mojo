@@ -1020,3 +1020,27 @@ def query_size_via_cursor(fd_in: Int32, fd_out: Int32, timeout_ms: Int32 = 500) 
     if col <= 0 or row <= 0:
         return (0, 0)
     return (col, row)
+
+
+def strip_macos_malloc_debug_env():
+    """Remove the macOS malloc-debug env vars from our environment.
+
+    Defensive: if our process was started with ``MallocScribble=1`` (or
+    its siblings) set in the environment, ``popen`` would fork
+    ``/bin/sh -c …`` and the shell's *own* libsystem_malloc would read
+    the var at process init and print "MallocScribble: enabling
+    scribbling to detect mods to free blocks" on stderr — landing on
+    the TTY behind our raw-mode UI and corrupting the visible display.
+
+    Doing this in the parent right before ``popen`` works because our
+    own libmalloc initialized at our dyld load time and won't re-check
+    the var — anything that depended on scribbling for *us* stays
+    active. The Rust pty shim does the equivalent for pty-spawned
+    shells; this is the same fix for the popen path.
+    """
+    var s = String("MallocScribble\0")
+    var ps = String("MallocPreScribble\0")
+    var ge = String("MallocGuardEdges\0")
+    _ = external_call["unsetenv", Int32](s.unsafe_ptr())
+    _ = external_call["unsetenv", Int32](ps.unsafe_ptr())
+    _ = external_call["unsetenv", Int32](ge.unsafe_ptr())

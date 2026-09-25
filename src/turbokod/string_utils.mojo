@@ -404,19 +404,23 @@ def tail_to_columns(s: String, max_cols: Int) -> String:
     return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(i), length=n - i)))
 
 
+def parse_uint_range(b: Span[UInt8, _], start: Int, end: Int) -> Int:
+    """Parse ``b[start:end]`` as a non-negative decimal; ``-1`` when the
+    range is empty or holds a non-digit."""
+    if end <= start:
+        return -1
+    var n = 0
+    for i in range(start, end):
+        if not is_ascii_digit(b[i]):
+            return -1
+        n = n * 10 + Int(b[i] - 0x30)
+    return n
+
+
 def parse_int_all(s: String) -> Int:
     """Parse ``s`` as a non-negative decimal; return ``-1`` if any byte
     isn't a digit or the string is empty."""
-    var b = s.as_bytes()
-    if len(b) == 0:
-        return -1
-    var n = 0
-    for i in range(len(b)):
-        var c = Int(b[i])
-        if c < 0x30 or c > 0x39:
-            return -1
-        n = n * 10 + (c - 0x30)
-    return n
+    return parse_uint_range(s.as_bytes(), 0, len(s.as_bytes()))
 
 
 def codepoint_at(s: String, col: Int) -> Tuple[Int, Int]:

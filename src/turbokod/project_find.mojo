@@ -46,7 +46,7 @@ from .project import ProjectMatch
 from .clipboard import clipboard_chord, CLIP_COPY
 from .search_options import SearchOptions
 from .string_utils import (
-    byte_slice, char_width, codepoint_at, display_columns,
+    byte_slice, char_width, codepoint_at, display_columns, parse_uint_range,
     prev_codepoint_start, split_lines, TAB_WIDTH,
 )
 from .text_field import TextField, TextFieldKeyResult
@@ -1733,7 +1733,7 @@ def _parse_rg_line(line: String, root: String) -> Optional[ProjectMatch]:
     if p3 < 0:
         return Optional[ProjectMatch]()
     var path = byte_slice(line, 0, p1)
-    var line_no = _parse_uint(line, p1 + 1, p2)
+    var line_no = parse_uint_range(line.as_bytes(), p1 + 1, p2)
     var text = byte_slice(line, p3 + 1, len(line.as_bytes()))
     if line_no <= 0:
         return Optional[ProjectMatch]()
@@ -1762,22 +1762,5 @@ def _scan_to(s: String, start: Int, end: Int, target: UInt8) -> Int:
             return i
         i += 1
     return -1
-
-
-def _parse_uint(s: String, start: Int, end: Int) -> Int:
-    var b = s.as_bytes()
-    var n = 0
-    var any = False
-    var i = start
-    while i < end:
-        var v = Int(b[i])
-        if v < 0x30 or v > 0x39:
-            return -1
-        n = n * 10 + (v - 0x30)
-        any = True
-        i += 1
-    if not any:
-        return -1
-    return n
 
 

@@ -25,8 +25,8 @@ from std.collections.optional import Optional
 from std.ffi import external_call
 
 from .json import (
-    JsonValue, encode_json, json_array, json_bool, json_float, json_int,
-    json_object, json_str, parse_json,
+    encode_json, json_array, json_bool, json_float, json_int, json_null,
+    json_object, json_str, JsonValue, parse_json,
 )
 from .file_io import basename, join_path, parent_path, read_file, stat_file
 from .lsp_position import (
@@ -34,7 +34,7 @@ from .lsp_position import (
 )
 from .lsp import (
     LSP_NOTIFICATION, LSP_REQUEST, LSP_RESPONSE, LspClient, LspIncoming,
-    LspProcess, json_null_v, lsp_initialize_params,
+    LspProcess, lsp_initialize_params,
 )
 from .posix import (
     getcwd_path, getenv_value, monotonic_ms, realpath, sleep_ms, which,
@@ -1838,7 +1838,7 @@ struct LspManager(Copyable, Movable):
         var shutdown_id: String
         try:
             shutdown_id = self._send_request(
-                String("shutdown"), json_null_v(),
+                String("shutdown"), json_null(),
             )
         except:
             # Couldn't even write the request — the server isn't reading
@@ -1891,7 +1891,7 @@ struct LspManager(Copyable, Movable):
             # by an immediate signal, and a server that ignores both gets
             # SIGTERM from ``finish_shutdown`` anyway.
             try:
-                self._send_notification(String("exit"), json_null_v())
+                self._send_notification(String("exit"), json_null())
             except:
                 self._close_stage = _CLOSE_DONE
                 return True
@@ -2083,26 +2083,14 @@ struct LspManager(Copyable, Movable):
         """True iff the server advertised ``workspace.fileOperations.<key>``
         (``didCreate`` / ``didRename`` / ``didDelete``). A boolean ``true``
         or a registration-options object both count."""
-        if not self._capabilities:
-            return False
-        var caps = self._capabilities.value().copy()
-        if not caps.is_object():
-            return False
-        var ws_opt = caps.object_get(String("workspace"))
-        if not ws_opt or not ws_opt.value().is_object():
-            return False
-        var fo_opt = ws_opt.value().copy().object_get(
-            String("fileOperations"),
+        var v = self._cap_at(
+            String("workspace"), String("fileOperations"), key,
         )
-        if not fo_opt or not fo_opt.value().is_object():
+        if not v:
             return False
-        var v_opt = fo_opt.value().copy().object_get(key)
-        if not v_opt:
-            return False
-        var v = v_opt.value().copy()
-        if v.is_bool():
-            return v.as_bool()
-        return v.is_object()
+        if v.value().is_bool():
+            return v.value().as_bool()
+        return v.value().is_object()
 
     def server_wants_did_rename(self) -> Bool:
         """True iff the server wants ``workspace/didRenameFiles``. This is
@@ -2302,80 +2290,65 @@ struct LspManager(Copyable, Movable):
 
     # --- server capability queries ----------------------------------------
 
+    def _cap_at(self, *path: String) -> Optional[JsonValue]:
+        """The value at ``capabilities.<path[0]>.<path[1]>…`` of the
+        initialize response, or empty when any step is absent or not an
+        object. Every capability probe walks through here."""
+        if not self._capabilities:
+            return None
+        var cur = self._capabilities.value().copy()
+        for i in range(len(path)):
+            if not cur.is_object():
+                return None
+            var nxt = cur.object_get(path[i])
+            if not nxt:
+                return None
+            cur = nxt.value().copy()
+        return cur^
+
+    def _cap_bool(self, a: String, b: String, c: String = String("")) -> Bool:
+        """``capabilities.a.b[.c]`` when it's a boolean; False otherwise."""
+        var v = self._cap_at(a, b) if len(c.as_bytes()) == 0 \
+            else self._cap_at(a, b, c)
+        return Bool(v) and v.value().is_bool() and v.value().as_bool()
+
     def server_supports(self, key: String) -> Bool:
         """True iff the server advertised the capability named ``key`` in
         its initialize response (e.g. ``implementationProvider``,
         ``documentFormattingProvider``, ``inlayHintProvider``). A boolean
         ``true`` or any registration-options object/string counts as
         supported; absent or ``false`` counts as unsupported."""
-        if not self._capabilities:
+        var v = self._cap_at(key)
+        if not v:
             return False
-        var caps = self._capabilities.value().copy()
-        if not caps.is_object():
-            return False
-        var v_opt = caps.object_get(key)
-        if not v_opt:
-            return False
-        var v = v_opt.value().copy()
-        if v.is_bool():
-            return v.as_bool()
-        return v.is_object() or v.is_string() or v.is_array()
+        if v.value().is_bool():
+            return v.value().as_bool()
+        return v.value().is_object() or v.value().is_string() \
+            or v.value().is_array()
 
     def server_supports_prepare_rename(self) -> Bool:
         """True iff ``renameProvider`` is an object with
         ``prepareProvider: true`` — i.e. the server implements
         ``textDocument/prepareRename``. Plain ``renameProvider: true``
         means rename works but prepare does not."""
-        if not self._capabilities:
-            return False
-        var caps = self._capabilities.value().copy()
-        if not caps.is_object():
-            return False
-        var rp_opt = caps.object_get(String("renameProvider"))
-        if not rp_opt or not rp_opt.value().is_object():
-            return False
-        var pp_opt = rp_opt.value().copy().object_get(String("prepareProvider"))
-        if pp_opt and pp_opt.value().is_bool():
-            return pp_opt.value().as_bool()
-        return False
+        return self._cap_bool(
+            String("renameProvider"), String("prepareProvider"),
+        )
 
     def save_includes_text(self) -> Bool:
         """True iff the server's ``textDocumentSync.save`` is an object
         with ``includeText: true`` — i.e. it wants the full buffer text
         on ``didSave``. A plain ``save: true`` (or an int sync kind)
         means notify-only, so we send just the URI."""
-        if not self._capabilities:
-            return False
-        var caps = self._capabilities.value().copy()
-        if not caps.is_object():
-            return False
-        var sync_opt = caps.object_get(String("textDocumentSync"))
-        if not sync_opt or not sync_opt.value().is_object():
-            return False
-        var save_opt = sync_opt.value().copy().object_get(String("save"))
-        if not save_opt or not save_opt.value().is_object():
-            return False
-        var inc_opt = save_opt.value().copy().object_get(String("includeText"))
-        if inc_opt and inc_opt.value().is_bool():
-            return inc_opt.value().as_bool()
-        return False
+        return self._cap_bool(
+            String("textDocumentSync"), String("save"), String("includeText"),
+        )
 
     def _text_sync_bool(self, key: String) -> Bool:
         """Read a boolean flag (``willSave`` / ``willSaveWaitUntil``) off
         the object form of ``textDocumentSync``. The int / absent forms
         mean the feature is unsupported."""
-        if not self._capabilities:
-            return False
-        var caps = self._capabilities.value().copy()
-        if not caps.is_object():
-            return False
-        var sync_opt = caps.object_get(String("textDocumentSync"))
-        if not sync_opt or not sync_opt.value().is_object():
-            return False
-        var f_opt = sync_opt.value().copy().object_get(key)
-        if f_opt and f_opt.value().is_bool():
-            return f_opt.value().as_bool()
-        return False
+        return self._cap_bool(String("textDocumentSync"), key)
 
     def server_supports_will_save(self) -> Bool:
         """True iff ``textDocumentSync.willSave`` — the server wants a
@@ -2393,18 +2366,9 @@ struct LspManager(Copyable, Movable):
         ``additionalTextEdits`` (auto-imports) only on a follow-up
         ``completionItem/resolve``. When false, the initial completion
         list is already complete and we never resolve."""
-        if not self._capabilities:
-            return False
-        var caps = self._capabilities.value().copy()
-        if not caps.is_object():
-            return False
-        var cp_opt = caps.object_get(String("completionProvider"))
-        if not cp_opt or not cp_opt.value().is_object():
-            return False
-        var rp_opt = cp_opt.value().copy().object_get(String("resolveProvider"))
-        if rp_opt and rp_opt.value().is_bool():
-            return rp_opt.value().as_bool()
-        return False
+        return self._cap_bool(
+            String("completionProvider"), String("resolveProvider"),
+        )
 
     def server_supports_code_action_resolve(self) -> Bool:
         """True iff ``codeActionProvider.resolveProvider`` — the server
@@ -2415,20 +2379,9 @@ struct LspManager(Copyable, Movable):
         actions arrive with no edit and no command, the host filters them out
         as inapplicable, and the user sees an empty quick-fix menu on a
         buffer full of fixable diagnostics."""
-        if not self._capabilities:
-            return False
-        var caps = self._capabilities.value().copy()
-        if not caps.is_object():
-            return False
-        var ca_opt = caps.object_get(String("codeActionProvider"))
-        if not ca_opt or not ca_opt.value().is_object():
-            return False
-        var rp_opt = ca_opt.value().copy().object_get(
-            String("resolveProvider"),
+        return self._cap_bool(
+            String("codeActionProvider"), String("resolveProvider"),
         )
-        if rp_opt and rp_opt.value().is_bool():
-            return rp_opt.value().as_bool()
-        return False
 
     # --- navigate-to-location (typeDefinition / implementation / declaration)
 
@@ -3241,12 +3194,9 @@ struct LspManager(Copyable, Movable):
         ``onTypeFormatting`` (``firstTriggerCharacter`` +
         ``moreTriggerCharacter[]``), or empty when unsupported. The host
         only fires a request when the just-typed char is in this set."""
-        if not self._capabilities:
-            return String("")
-        var caps = self._capabilities.value().copy()
-        if not caps.is_object():
-            return String("")
-        var p_opt = caps.object_get(String("documentOnTypeFormattingProvider"))
+        var p_opt = self._cap_at(
+            String("documentOnTypeFormattingProvider"),
+        )
         if not p_opt or not p_opt.value().is_object():
             return String("")
         var prov = p_opt.value().copy()
@@ -3691,18 +3641,9 @@ struct LspManager(Copyable, Movable):
         """True iff ``codeLensProvider.resolveProvider`` — lenses arrive
         without a ``command`` and need a ``codeLens/resolve`` to fill the
         title."""
-        if not self._capabilities:
-            return False
-        var caps = self._capabilities.value().copy()
-        if not caps.is_object():
-            return False
-        var cl_opt = caps.object_get(String("codeLensProvider"))
-        if not cl_opt or not cl_opt.value().is_object():
-            return False
-        var rp_opt = cl_opt.value().copy().object_get(String("resolveProvider"))
-        if rp_opt and rp_opt.value().is_bool():
-            return rp_opt.value().as_bool()
-        return False
+        return self._cap_bool(
+            String("codeLensProvider"), String("resolveProvider"),
+        )
 
     def _send_next_codelens_resolve(mut self):
         """Pop the next unresolved lens off the queue and fire a
@@ -3763,20 +3704,9 @@ struct LspManager(Copyable, Movable):
         returns links whose ``target`` it fills in on a
         ``documentLink/resolve`` round-trip. ``vscode-json-language-server``
         does this for every ``$ref``."""
-        if not self._capabilities:
-            return False
-        var caps = self._capabilities.value().copy()
-        if not caps.is_object():
-            return False
-        var dl_opt = caps.object_get(String("documentLinkProvider"))
-        if not dl_opt or not dl_opt.value().is_object():
-            return False
-        var rp_opt = dl_opt.value().copy().object_get(
-            String("resolveProvider"),
+        return self._cap_bool(
+            String("documentLinkProvider"), String("resolveProvider"),
         )
-        if rp_opt and rp_opt.value().is_bool():
-            return rp_opt.value().as_bool()
-        return False
 
     def _start_document_link_resolves(mut self, parsed: DocumentLinkParse):
         """Publish the links that have targets now, and fire a
@@ -4942,7 +4872,7 @@ struct LspManager(Copyable, Movable):
         if not self._msgreq_pending or not self._msgreq_id:
             return
         var id = self._msgreq_id.value().copy()
-        var result = json_null_v()
+        var result = json_null()
         if 0 <= action_index and action_index < len(self._msgreq_actions):
             var item = json_object()
             item.put(
@@ -5086,7 +5016,7 @@ struct LspManager(Copyable, Movable):
                             if cfg_opt:
                                 result.append(cfg_opt.value().copy())
                                 continue
-                        result.append(json_null_v())
+                        result.append(json_null())
                 _lsp_debug_log(
                     String("← server request workspace/configuration id=")
                     + id_label + String(" items=") + String(n),
@@ -5118,7 +5048,7 @@ struct LspManager(Copyable, Movable):
                                 continue
                             var ro = reg.object_get(String("registerOptions"))
                             var options = ro.value().copy() if ro \
-                                else json_null_v()
+                                else json_null()
                             self._apply_capability_registration(
                                 m_opt.value().as_str(), options,
                             )
@@ -5127,7 +5057,7 @@ struct LspManager(Copyable, Movable):
                     String("← server request client/registerCapability id=")
                     + id_label + String(" merged=") + String(merged),
                 )
-                self.client.send_response(id, json_null_v())
+                self.client.send_response(id, json_null())
                 return
             if method == String("client/unregisterCapability"):
                 # Mirror of the register path: write ``false`` for each
@@ -5153,7 +5083,7 @@ struct LspManager(Copyable, Movable):
                     String("← server request client/unregisterCapability id=")
                     + id_label + String(" (removed)"),
                 )
-                self.client.send_response(id, json_null_v())
+                self.client.send_response(id, json_null())
                 return
             if method == String("window/workDoneProgress/create"):
                 # Acknowledge with success. We don't track the progress
@@ -5163,7 +5093,7 @@ struct LspManager(Copyable, Movable):
                     String("← server request ") + method
                     + String(" id=") + id_label + String(" (acked)"),
                 )
-                self.client.send_response(id, json_null_v())
+                self.client.send_response(id, json_null())
                 return
             if method == String("workspace/applyEdit"):
                 # Parse the WorkspaceEdit and park it for the host to apply
@@ -5216,7 +5146,7 @@ struct LspManager(Copyable, Movable):
                         self._server_message = self._language_id \
                             + String(": ") + rmsg
                         self._has_server_message = True
-                    self.client.send_response(id, json_null_v())
+                    self.client.send_response(id, json_null())
                     return
                 self._msgreq_id = Optional[JsonValue](id.copy())
                 self._msgreq_message = rmsg^
@@ -5299,7 +5229,7 @@ struct LspManager(Copyable, Movable):
                     String("← server request ") + method
                     + String(" id=") + id_label + String(" (queued refresh)"),
                 )
-                self.client.send_response(id, json_null_v())
+                self.client.send_response(id, json_null())
                 return
             if method == String("workspace/diagnostic/refresh"):
                 # Same, for the pull-diagnostics model. Clearing
@@ -5314,7 +5244,7 @@ struct LspManager(Copyable, Movable):
                     String("← server request ") + method
                     + String(" id=") + id_label + String(" (re-arm pull)"),
                 )
-                self.client.send_response(id, json_null_v())
+                self.client.send_response(id, json_null())
                 return
             # Unknown method: MethodNotFound (-32601) so the server
             # stops waiting.
@@ -5713,19 +5643,11 @@ def _parse_one_definition(v: JsonValue) -> Optional[DefinitionResolved]:
     var path = _uri_to_path(uri)
     if len(path.as_bytes()) == 0:
         return Optional[DefinitionResolved]()
-    var rng = range_opt.value().copy()
-    var start_opt = rng.object_get(String("start"))
-    if not start_opt:
-        return Optional[DefinitionResolved]()
-    var start = start_opt.value().copy()
-    var line_opt = start.object_get(String("line"))
-    var char_opt = start.object_get(String("character"))
-    if not line_opt or not char_opt:
-        return Optional[DefinitionResolved]()
-    if not line_opt.value().is_int() or not char_opt.value().is_int():
+    var start = _start_pos_of(range_opt.value())
+    if start[0] < 0:
         return Optional[DefinitionResolved]()
     return Optional[DefinitionResolved](DefinitionResolved(
-        path, line_opt.value().as_int(), char_opt.value().as_int(),
+        path, start[0], start[1],
     ))
 
 
@@ -5896,47 +5818,10 @@ def _parse_additional_text_edits(entry: JsonValue) -> List[TextEditEntry]:
     Malformed entries (missing range or newText) are skipped silently —
     losing one auxiliary edit is better than dropping the whole item.
     Returns an empty list when the field is absent or not an array."""
-    var aux_edits = List[TextEditEntry]()
     var aux_opt = entry.object_get(String("additionalTextEdits"))
-    if aux_opt and aux_opt.value().is_array():
-        var aux_arr = aux_opt.value().copy()
-        var aux_n = aux_arr.array_len()
-        for j in range(aux_n):
-            var aux = aux_arr.array_at(j)
-            if not aux.is_object():
-                continue
-            var nt_opt = aux.object_get(String("newText"))
-            if not nt_opt or not nt_opt.value().is_string():
-                continue
-            var aux_new_text = nt_opt.value().as_str()
-            var aux_rng_opt = aux.object_get(String("range"))
-            if not aux_rng_opt or not aux_rng_opt.value().is_object():
-                continue
-            var aux_rng = aux_rng_opt.value().copy()
-            var as_opt = aux_rng.object_get(String("start"))
-            var ae_opt = aux_rng.object_get(String("end"))
-            if not as_opt or not ae_opt \
-                    or not as_opt.value().is_object() \
-                    or not ae_opt.value().is_object():
-                continue
-            var asl_opt = as_opt.value().object_get(String("line"))
-            var asc_opt = as_opt.value().object_get(String("character"))
-            var ael_opt = ae_opt.value().object_get(String("line"))
-            var aec_opt = ae_opt.value().object_get(String("character"))
-            if not asl_opt or not asc_opt or not ael_opt or not aec_opt \
-                    or not asl_opt.value().is_int() \
-                    or not asc_opt.value().is_int() \
-                    or not ael_opt.value().is_int() \
-                    or not aec_opt.value().is_int():
-                continue
-            aux_edits.append(TextEditEntry(
-                asl_opt.value().as_int(),
-                asc_opt.value().as_int(),
-                ael_opt.value().as_int(),
-                aec_opt.value().as_int(),
-                aux_new_text,
-            ))
-    return aux_edits^
+    if not aux_opt:
+        return List[TextEditEntry]()
+    return _parse_text_edits(aux_opt.value())
 
 
 def _parse_completion_result(v: JsonValue) -> List[CompletionItem]:
@@ -6014,27 +5899,14 @@ def _parse_completion_result(v: JsonValue) -> List[CompletionItem]:
                 var rng_obj_opt = te.object_get(String("range"))
                 if not rng_obj_opt:
                     rng_obj_opt = te.object_get(String("replace"))
-                if rng_obj_opt and rng_obj_opt.value().is_object():
-                    var rng_obj = rng_obj_opt.value().copy()
-                    var s_opt = rng_obj.object_get(String("start"))
-                    var e_opt = rng_obj.object_get(String("end"))
-                    if Bool(s_opt) and Bool(e_opt) \
-                            and s_opt.value().is_object() \
-                            and e_opt.value().is_object():
-                        var sl_opt = s_opt.value().object_get(String("line"))
-                        var sc_opt = s_opt.value().object_get(String("character"))
-                        var el_opt = e_opt.value().object_get(String("line"))
-                        var ec_opt = e_opt.value().object_get(String("character"))
-                        if Bool(sl_opt) and Bool(sc_opt) and Bool(el_opt) and Bool(ec_opt) \
-                                and sl_opt.value().is_int() \
-                                and sc_opt.value().is_int() \
-                                and el_opt.value().is_int() \
-                                and ec_opt.value().is_int():
-                            rs_line = sl_opt.value().as_int()
-                            rs_char = sc_opt.value().as_int()
-                            re_line = el_opt.value().as_int()
-                            re_char = ec_opt.value().as_int()
-                            has_range = True
+                if rng_obj_opt:
+                    var r = _parse_range(rng_obj_opt.value())
+                    if r:
+                        rs_line = r.value()[0]
+                        rs_char = r.value()[1]
+                        re_line = r.value()[2]
+                        re_char = r.value()[3]
+                        has_range = True
             if not got_te:
                 var it_opt = entry.object_get(String("insertText"))
                 if it_opt and it_opt.value().is_string():
@@ -6130,11 +6002,11 @@ def _code_action_edit_of(v: JsonValue) -> JsonValue:
     """The ``edit`` object of a CodeAction, or JSON null. Split out so the
     resolve path reads it the same way the initial parse does."""
     if not v.is_object():
-        return json_null_v()
+        return json_null()
     var e = v.object_get(String("edit"))
     if e and e.value().is_object():
         return e.value().copy()
-    return json_null_v()
+    return json_null()
 
 
 def _code_action_command_of(
@@ -6248,55 +6120,6 @@ struct WorkspaceEditParse(Copyable, Movable):
         self.unsupported_ops = copy.unsupported_ops
 
 
-def _parse_text_edit_array(v: JsonValue) -> List[TextEditEntry]:
-    """Parse a ``(TextEdit | AnnotatedTextEdit | SnippetTextEdit)[]`` into
-    entries. Shared by the ``changes`` map and ``documentChanges`` forms.
-
-    ``AnnotatedTextEdit`` adds only an ``annotationId``, so it parses as a
-    plain TextEdit. A ``SnippetTextEdit`` carries ``snippet`` instead of
-    ``newText`` and is skipped — inserting its raw ``$1`` placeholders as
-    literal text would be worse than not applying it."""
-    var edits = List[TextEditEntry]()
-    if not v.is_array():
-        return edits^
-    for j in range(v.array_len()):
-        var te = v.array_at(j)
-        if not te.is_object():
-            continue
-        var nt_opt = te.object_get(String("newText"))
-        if not nt_opt or not nt_opt.value().is_string():
-            continue
-        var nt = nt_opt.value().as_str()
-        var rng_opt = te.object_get(String("range"))
-        if not rng_opt or not rng_opt.value().is_object():
-            continue
-        var rng = rng_opt.value().copy()
-        var s_opt = rng.object_get(String("start"))
-        var e_opt = rng.object_get(String("end"))
-        if not s_opt or not e_opt \
-                or not s_opt.value().is_object() \
-                or not e_opt.value().is_object():
-            continue
-        var sl_opt = s_opt.value().object_get(String("line"))
-        var sc_opt = s_opt.value().object_get(String("character"))
-        var el_opt = e_opt.value().object_get(String("line"))
-        var ec_opt = e_opt.value().object_get(String("character"))
-        if not sl_opt or not sc_opt or not el_opt or not ec_opt \
-                or not sl_opt.value().is_int() \
-                or not sc_opt.value().is_int() \
-                or not el_opt.value().is_int() \
-                or not ec_opt.value().is_int():
-            continue
-        edits.append(TextEditEntry(
-            sl_opt.value().as_int(),
-            sc_opt.value().as_int(),
-            el_opt.value().as_int(),
-            ec_opt.value().as_int(),
-            nt,
-        ))
-    return edits^
-
-
 def _parse_workspace_edit(edit: JsonValue) -> WorkspaceEditParse:
     """Normalize an LSP ``WorkspaceEdit`` into per-file edit groups.
 
@@ -6345,7 +6168,7 @@ def _parse_workspace_edit(edit: JsonValue) -> WorkspaceEditParse:
             var edits_opt = entry.object_get(String("edits"))
             if not edits_opt:
                 continue
-            var edits = _parse_text_edit_array(edits_opt.value())
+            var edits = _parse_text_edits(edits_opt.value())
             if len(edits) > 0:
                 file_edits.append(
                     CodeActionFileEdit(uri_opt.value().as_str(), edits^),
@@ -6364,7 +6187,7 @@ def _parse_workspace_edit(edit: JsonValue) -> WorkspaceEditParse:
     # can walk obj_v directly since this module knows the internals.
     for k in range(len(changes.obj_v)):
         var uri = changes.obj_v[k].key
-        var edits = _parse_text_edit_array(changes.obj_v[k].value)
+        var edits = _parse_text_edits(changes.obj_v[k].value)
         if len(edits) > 0:
             file_edits.append(CodeActionFileEdit(uri, edits^))
     return WorkspaceEditParse(file_edits^, 0)
@@ -6396,21 +6219,10 @@ def _parse_diagnostics_array(v: JsonValue) -> List[Diagnostic]:
         var range_opt = entry.object_get(String("range"))
         if not range_opt:
             continue
-        var rng = range_opt.value().copy()
-        var start_opt = rng.object_get(String("start"))
-        var end_opt = rng.object_get(String("end"))
-        if not start_opt or not end_opt:
+        var r = _parse_range(range_opt.value())
+        if not r:
             continue
-        var sl_opt = start_opt.value().object_get(String("line"))
-        var sc_opt = start_opt.value().object_get(String("character"))
-        var el_opt = end_opt.value().object_get(String("line"))
-        var ec_opt = end_opt.value().object_get(String("character"))
-        if not sl_opt or not sc_opt or not el_opt or not ec_opt:
-            continue
-        if not sl_opt.value().is_int() or not sc_opt.value().is_int() \
-                or not el_opt.value().is_int() \
-                or not ec_opt.value().is_int():
-            continue
+        var rt = r.value()
         var severity = DIAG_SEVERITY_INFO
         var sev_opt = entry.object_get(String("severity"))
         if sev_opt and sev_opt.value().is_int():
@@ -6435,11 +6247,39 @@ def _parse_diagnostics_array(v: JsonValue) -> List[Diagnostic]:
             elif code_opt.value().is_int():
                 code = String(code_opt.value().as_int())
         out.append(Diagnostic(
-            sl_opt.value().as_int(), sc_opt.value().as_int(),
-            el_opt.value().as_int(), ec_opt.value().as_int(),
-            severity, message^, source^, code^,
+            rt[0], rt[1], rt[2], rt[3], severity, message^, source^, code^,
         ))
     return out^
+
+
+def _position_of(v: JsonValue) -> Optional[Tuple[Int, Int]]:
+    """``(line, character)`` of an LSP ``Position`` object, or empty when
+    it isn't one."""
+    if not v.is_object():
+        return None
+    var ln = v.object_get(String("line"))
+    var ch = v.object_get(String("character"))
+    if not ln or not ch or not ln.value().is_int() or not ch.value().is_int():
+        return None
+    return (ln.value().as_int(), ch.value().as_int())
+
+
+def _parse_range(v: JsonValue) -> Optional[Tuple[Int, Int, Int, Int]]:
+    """``(start_line, start_char, end_line, end_char)`` of an LSP ``Range``,
+    or empty unless both ends are well-formed Positions. The one place a
+    Range is taken apart — every result parser that carries one goes
+    through here."""
+    if not v.is_object():
+        return None
+    var s = v.object_get(String("start"))
+    var e = v.object_get(String("end"))
+    if not s or not e:
+        return None
+    var sp = _position_of(s.value())
+    var ep = _position_of(e.value())
+    if not sp or not ep:
+        return None
+    return (sp.value()[0], sp.value()[1], ep.value()[0], ep.value()[1])
 
 
 def _start_pos_of(rng: JsonValue) -> Tuple[Int, Int]:
@@ -6447,17 +6287,13 @@ def _start_pos_of(rng: JsonValue) -> Tuple[Int, Int]:
     ``(-1, -1)`` when the shape doesn't match — caller filters those out."""
     if not rng.is_object():
         return (-1, -1)
-    var start_opt = rng.object_get(String("start"))
-    if not start_opt:
+    var start = rng.object_get(String("start"))
+    if not start:
         return (-1, -1)
-    var start = start_opt.value().copy()
-    var line_opt = start.object_get(String("line"))
-    var char_opt = start.object_get(String("character"))
-    if not line_opt or not char_opt:
+    var p = _position_of(start.value())
+    if not p:
         return (-1, -1)
-    if not line_opt.value().is_int() or not char_opt.value().is_int():
-        return (-1, -1)
-    return (line_opt.value().as_int(), char_opt.value().as_int())
+    return p.value()
 
 
 # --- URI <-> path ----------------------------------------------------------
@@ -6578,15 +6414,11 @@ def _parse_code_lens(v: JsonValue) -> List[TextEditEntry]:
         if not e.is_object():
             continue
         var rng_opt = e.object_get(String("range"))
-        if not rng_opt or not rng_opt.value().is_object():
+        if not rng_opt:
             continue
-        var s_opt = rng_opt.value().object_get(String("start"))
-        if not s_opt or not s_opt.value().is_object():
+        var row = _start_pos_of(rng_opt.value())[0]
+        if row < 0:
             continue
-        var ln = s_opt.value().object_get(String("line"))
-        if not ln or not ln.value().is_int():
-            continue
-        var row = ln.value().as_int()
         var cmd_opt = e.object_get(String("command"))
         if not cmd_opt or not cmd_opt.value().is_object():
             continue
@@ -6830,28 +6662,17 @@ def _parse_document_links_full(v: JsonValue) -> DocumentLinkParse:
         if not e.is_object():
             continue
         var rng_opt = e.object_get(String("range"))
-        if not rng_opt or not rng_opt.value().is_object():
+        if not rng_opt:
             continue
-        var rng = rng_opt.value().copy()
-        var s_opt = rng.object_get(String("start"))
-        var en_opt = rng.object_get(String("end"))
-        if not s_opt or not en_opt or not s_opt.value().is_object() \
-                or not en_opt.value().is_object():
+        var r = _parse_range(rng_opt.value())
+        if not r:
             continue
-        var sp = _start_pos_of(rng)
-        var el_opt = en_opt.value().object_get(String("line"))
-        var ec_opt = en_opt.value().object_get(String("character"))
-        if not el_opt or not ec_opt or not el_opt.value().is_int() \
-                or not ec_opt.value().is_int():
-            continue
+        var t = r.value()
         var target = _document_link_target_of(e)
         if len(target.as_bytes()) == 0:
             out.unresolved_slots.append(len(out.links))
             out.unresolved_raw.append(e.copy())
-        out.links.append(TextEditEntry(
-            sp[0], sp[1], el_opt.value().as_int(), ec_opt.value().as_int(),
-            target,
-        ))
+        out.links.append(TextEditEntry(t[0], t[1], t[2], t[3], target))
     return out^
 
 
@@ -6878,15 +6699,9 @@ def _codelens_row_of(lens: JsonValue) -> Int:
     if not lens.is_object():
         return 0
     var rng = lens.object_get(String("range"))
-    if not rng or not rng.value().is_object():
+    if not rng:
         return 0
-    var s = rng.value().object_get(String("start"))
-    if not s or not s.value().is_object():
-        return 0
-    var ln = s.value().object_get(String("line"))
-    if ln and ln.value().is_int():
-        return ln.value().as_int()
-    return 0
+    return max(0, _start_pos_of(rng.value())[0])
 
 
 def _codelens_title_of(lens: JsonValue) -> String:
@@ -6997,23 +6812,12 @@ def _parse_document_colors(v: JsonValue) -> List[Highlight]:
         # Contrast foreground: dark text on light swatches, light on dark.
         var lum = (r * 299 + g * 587 + b * 114) // 1000
         var fg = BLACK if lum > 140 else WHITE
-        var rng = rng_opt.value().copy()
-        var s_opt = rng.object_get(String("start"))
-        var e2_opt = rng.object_get(String("end"))
-        if not s_opt or not e2_opt or not s_opt.value().is_object() \
-                or not e2_opt.value().is_object():
-            continue
-        var sl = s_opt.value().object_get(String("line"))
-        var sc = s_opt.value().object_get(String("character"))
-        var el = e2_opt.value().object_get(String("line"))
-        var ec = e2_opt.value().object_get(String("character"))
-        if not sl or not sc or not el or not ec \
-                or not sl.value().is_int() or not sc.value().is_int() \
-                or not el.value().is_int() or not ec.value().is_int():
+        var span = _parse_range(rng_opt.value())
+        if not span:
             continue
         # Single-row swatch (color literals don't span lines).
         out.append(Highlight(
-            sl.value().as_int(), sc.value().as_int(), ec.value().as_int(),
+            span.value()[0], span.value()[1], span.value()[3],
             Attr(fg, EDITOR_BG).with_bg_rgb(rgb),
         ))
     return out^
@@ -7035,15 +6839,11 @@ def _hierarchy_item_location(item: JsonValue) -> Optional[DefinitionResolved]:
         rng_opt = item.object_get(String("range"))
     if not rng_opt or not rng_opt.value().is_object():
         return Optional[DefinitionResolved]()
-    var start_opt = rng_opt.value().object_get(String("start"))
-    if not start_opt or not start_opt.value().is_object():
-        return Optional[DefinitionResolved]()
-    var ln = start_opt.value().object_get(String("line"))
-    var ch = start_opt.value().object_get(String("character"))
-    if not ln or not ch or not ln.value().is_int() or not ch.value().is_int():
+    var start = _start_pos_of(rng_opt.value())
+    if start[0] < 0:
         return Optional[DefinitionResolved]()
     return Optional[DefinitionResolved](DefinitionResolved(
-        path, ln.value().as_int(), ch.value().as_int(),
+        path, start[0], start[1],
     ))
 
 
@@ -7085,24 +6885,11 @@ def _parse_selection_ranges(v: JsonValue) -> List[TextEditEntry]:
     while cur.is_object() and depth < 128:
         depth += 1
         var rng_opt = cur.object_get(String("range"))
-        if rng_opt and rng_opt.value().is_object():
-            var rng = rng_opt.value().copy()
-            var s_opt = rng.object_get(String("start"))
-            var e_opt = rng.object_get(String("end"))
-            if Bool(s_opt) and Bool(e_opt) and s_opt.value().is_object() \
-                    and e_opt.value().is_object():
-                var sl = s_opt.value().object_get(String("line"))
-                var sc = s_opt.value().object_get(String("character"))
-                var el = e_opt.value().object_get(String("line"))
-                var ec = e_opt.value().object_get(String("character"))
-                if Bool(sl) and Bool(sc) and Bool(el) and Bool(ec) \
-                        and sl.value().is_int() \
-                        and sc.value().is_int() and el.value().is_int() \
-                        and ec.value().is_int():
-                    out.append(TextEditEntry(
-                        sl.value().as_int(), sc.value().as_int(),
-                        el.value().as_int(), ec.value().as_int(), String(""),
-                    ))
+        if rng_opt:
+            var r = _parse_range(rng_opt.value())
+            if r:
+                var t = r.value()
+                out.append(TextEditEntry(t[0], t[1], t[2], t[3], String("")))
         var parent_opt = cur.object_get(String("parent"))
         if not parent_opt or not parent_opt.value().is_object():
             break
@@ -7169,34 +6956,26 @@ def _parse_document_highlights(v: JsonValue) -> List[TextEditEntry]:
         if not e.is_object():
             continue
         var rng_opt = e.object_get(String("range"))
-        if not rng_opt or not rng_opt.value().is_object():
+        if not rng_opt:
             continue
-        var rng = rng_opt.value().copy()
-        var s_opt = rng.object_get(String("start"))
-        var e_opt = rng.object_get(String("end"))
-        if not s_opt or not e_opt \
-                or not s_opt.value().is_object() \
-                or not e_opt.value().is_object():
+        var r = _parse_range(rng_opt.value())
+        if not r:
             continue
-        var sl = s_opt.value().object_get(String("line"))
-        var sc = s_opt.value().object_get(String("character"))
-        var el = e_opt.value().object_get(String("line"))
-        var ec = e_opt.value().object_get(String("character"))
-        if not sl or not sc or not el or not ec \
-                or not sl.value().is_int() or not sc.value().is_int() \
-                or not el.value().is_int() or not ec.value().is_int():
-            continue
-        out.append(TextEditEntry(
-            sl.value().as_int(), sc.value().as_int(),
-            el.value().as_int(), ec.value().as_int(), String(""),
-        ))
+        var t = r.value()
+        out.append(TextEditEntry(t[0], t[1], t[2], t[3], String("")))
     return out^
 
 
 def _parse_text_edits(v: JsonValue) -> List[TextEditEntry]:
-    """Parse a bare ``TextEdit[] | null`` (the formatting response shape)
-    into ``TextEditEntry`` rows, skipping malformed entries. Reused for any
-    request that returns a flat edit list for a single file."""
+    """Parse a ``(TextEdit | AnnotatedTextEdit | SnippetTextEdit)[] | null``
+    into ``TextEditEntry`` rows, skipping malformed entries. The formatting
+    response shape, and shared by the ``changes`` map and
+    ``documentChanges`` forms of a WorkspaceEdit.
+
+    ``AnnotatedTextEdit`` adds only an ``annotationId``, so it parses as a
+    plain TextEdit. A ``SnippetTextEdit`` carries ``snippet`` instead of
+    ``newText`` and is skipped — inserting its raw ``$1`` placeholders as
+    literal text would be worse than not applying it."""
     var out = List[TextEditEntry]()
     if not v.is_array():
         return out^
@@ -7205,31 +6984,14 @@ def _parse_text_edits(v: JsonValue) -> List[TextEditEntry]:
         if not te.is_object():
             continue
         var nt_opt = te.object_get(String("newText"))
-        if not nt_opt or not nt_opt.value().is_string():
-            continue
-        var nt = nt_opt.value().as_str()
         var rng_opt = te.object_get(String("range"))
-        if not rng_opt or not rng_opt.value().is_object():
+        if not nt_opt or not nt_opt.value().is_string() or not rng_opt:
             continue
-        var rng = rng_opt.value().copy()
-        var s_opt = rng.object_get(String("start"))
-        var e_opt = rng.object_get(String("end"))
-        if not s_opt or not e_opt \
-                or not s_opt.value().is_object() \
-                or not e_opt.value().is_object():
+        var r = _parse_range(rng_opt.value())
+        if not r:
             continue
-        var sl = s_opt.value().object_get(String("line"))
-        var sc = s_opt.value().object_get(String("character"))
-        var el = e_opt.value().object_get(String("line"))
-        var ec = e_opt.value().object_get(String("character"))
-        if not sl or not sc or not el or not ec \
-                or not sl.value().is_int() or not sc.value().is_int() \
-                or not el.value().is_int() or not ec.value().is_int():
-            continue
-        out.append(TextEditEntry(
-            sl.value().as_int(), sc.value().as_int(),
-            el.value().as_int(), ec.value().as_int(), nt,
-        ))
+        var t = r.value()
+        out.append(TextEditEntry(t[0], t[1], t[2], t[3], nt_opt.value().as_str()))
     return out^
 
 

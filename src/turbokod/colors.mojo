@@ -544,3 +544,17 @@ def parse_sgr(text: String, base_attr: Attr) -> Tuple[String, List[ColorRun]]:
             StringSpan(unsafe_from_utf8=Span(unsafe_ptr=clean.unsafe_ptr(), length=len(clean)))
         )
     return (clean_str^, runs^)
+
+
+def blend_rgb(src: UInt32, dst: UInt32, pct: Int) -> UInt32:
+    """Mix ``src`` ``pct``% of the way toward ``dst`` (both ``0xRRGGBB``)."""
+    var sr = Int((src >> 16) & 0xFF)
+    var sg = Int((src >> 8) & 0xFF)
+    var sb = Int(src & 0xFF)
+    var dr = Int((dst >> 16) & 0xFF)
+    var dg = Int((dst >> 8) & 0xFF)
+    var db = Int(dst & 0xFF)
+    var rr = (sr * (100 - pct) + dr * pct) // 100
+    var rg = (sg * (100 - pct) + dg * pct) // 100
+    var rb = (sb * (100 - pct) + db * pct) // 100
+    return (UInt32(rr) << 16) | (UInt32(rg) << 8) | UInt32(rb)

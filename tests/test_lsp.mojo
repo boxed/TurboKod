@@ -35,7 +35,7 @@ from turbokod.lsp_dispatch import (
     _parse_selection_ranges, _parse_hover_result,
     _parse_prepare_rename_placeholder, _parse_signature_help,
     _parse_references_result, _parse_text_edits,
-    _parse_text_edit_array, _parse_workspace_edit,
+    _parse_workspace_edit,
     _parse_workspace_edit_changes, _path_to_uri, _uri_to_path,
     _watched_changes_params
 )
@@ -1360,7 +1360,7 @@ def test_lsp_parse_text_edit_array_skips_snippet_edits() raises:
         + "\"end\":{\"line\":1,\"character\":1}},"
         + "\"snippet\":{\"value\":\"$1\"}}]"
     ))
-    var edits = _parse_text_edit_array(v)
+    var edits = _parse_text_edits(v)
     assert_equal(len(edits), 1)
     assert_equal(edits[0].new_text, String("ok"))
 
