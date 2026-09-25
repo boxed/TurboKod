@@ -16,6 +16,7 @@ directly to screen X without redoing the UTF-8 walk.
 from std.collections.list import List
 
 from .string_utils import char_width, codepoint_at
+from .geometry import Point
 
 
 @fieldwise_init
@@ -42,8 +43,8 @@ struct OutputLink(ImplicitlyCopyable, Movable):
 @fieldwise_init
 struct LinkHit(ImplicitlyCopyable, Movable):
     """Bytes-resolved match for a single link occurrence. ``cell_start`` /
-    ``cell_end`` are codepoint counts from the start of the line, matching
-    how ``Canvas.put_text`` advances columns — so callers can convert
+    ``cell_end`` are cell counts (``char_width`` per codepoint) from the
+    start of the line, matching how ``Canvas.put_text`` advances — so callers can convert
     directly to screen X without redoing the UTF-8 walk.
 
     ``is_url`` True means ``path`` is a ``http(s)://`` URL rather than a
@@ -387,3 +388,21 @@ def extract_url_links(line: String) -> List[LinkHit]:
             cell += char_width(codepoint_at(line, i)[0])
         i += 1
     return out^
+
+
+def extract_all_links(line: String) -> List[LinkHit]:
+    """Every clickable span in ``line``: Python traceback frames, bare
+    ``path:N`` references and ``http(s)://`` URLs."""
+    var hits = extract_python_traceback_links(line)
+    hits.extend(extract_path_line_links(line))
+    hits.extend(extract_url_links(line))
+    return hits^
+
+
+def link_at(links: List[OutputLink], pos: Point) -> Int:
+    """Index of the painted link under screen cell ``pos``, or -1."""
+    for i in range(len(links)):
+        if pos.y == links[i].y and pos.x >= links[i].x_start \
+                and pos.x < links[i].x_end:
+            return i
+    return -1

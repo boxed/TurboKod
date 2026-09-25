@@ -122,6 +122,28 @@ struct PtyProcess(Copyable, Movable):
             self.master_fd, Int32(cols), Int32(rows),
         ))
 
+    def write_all(self, payload: String):
+        """Write ``payload`` to the master, retrying partial writes. The
+        master accepts kilobytes at a time normally; a partial write only
+        happens when the kernel's pty buffer is full (a stuck child not
+        draining), so for keystroke-sized payloads this loops once. On
+        EPIPE / EBADF (child gone — the next tick reaps) or EAGAIN the
+        rest is dropped rather than spinning: holding the loop risks
+        locking the UI on a misbehaving child, and the user can re-press.
+        No-op once the child is gone."""
+        if not self.alive or self.master_fd < 0:
+            return
+        var bytes = payload.as_bytes()
+        var n = len(bytes)
+        var sent = 0
+        while sent < n:
+            var rc = self.write_bytes(
+                bytes.unsafe_ptr().unsafe_offset(sent), n - sent,
+            )
+            if rc <= 0:
+                return
+            sent += rc
+
     def write_bytes(self, ptr: Pointer[UInt8, _], n: Int) -> Int:
         """Best-effort non-blocking write to the master. Returns the
         byte count actually written (may be < ``n``). ``tk_write_nb``

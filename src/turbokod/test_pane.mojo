@@ -26,29 +26,25 @@ cleared by the host each tick.
 from std.collections.list import List
 
 from .canvas import Canvas
-from .clipboard import clipboard_copy
 from .colors import (
     Attr, LIGHT_BLUE, PANE_BG, STYLE_UNDERLINE, WHITE,
 )
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE, EVENT_PASTE,
-    KEY_ESC, KEY_PAGEDOWN, KEY_PAGEUP,
-    MOD_META, MOD_NONE, MOD_SHIFT,
-    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE,
-    MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
+    Event, EVENT_KEY, EVENT_MOUSE, EVENT_PASTE, KEY_ESC, MOD_META, MOD_NONE,
+    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
-from .output_links import (
-    OutputLink, extract_path_line_links, extract_python_traceback_links,
-    extract_url_links,
-)
+from .output_links import extract_all_links, link_at, OutputLink
 from .painter import Painter
 from .posix import (
     alloc_zero_buffer, close_fd, exit_code_from_status, poll_stdin,
     read_into, untrack_child, waitpid_nohang,
 )
 from .pty import PtyProcess
-from .terminal_view import GridSelection, encode_key, paint_grid
+from .terminal_view import (
+    flush_vt_side_effects, forward_key_to_grid, GridSelection, paint_grid,
+    paste_to_pty,
+)
 from .vt import Vt
 from .window import (
     BottomDockedPanel, TitleCommand,
@@ -304,12 +300,7 @@ struct TestPane(Copyable, Movable):
                 self._capture(scratch.unsafe_ptr(), n)
                 total += n
         # Flush emulator side-effects (DSR/DA replies, OSC 52 clipboard).
-        var reply = self.vt.take_reply()
-        if len(reply.as_bytes()) > 0:
-            self._write_to_pty(reply^)
-        var clip = self.vt.take_clipboard()
-        if len(clip.as_bytes()) > 0:
-            clipboard_copy(clip)
+        flush_vt_side_effects(self.pty, self.vt)
         # Once EOF is seen, reap the child to harvest its exit code. The
         # reap can lag a tick or two behind EOF; keep trying until
         # ``waitpid`` reports the pid.
@@ -414,9 +405,7 @@ struct TestPane(Copyable, Movable):
             var line = self._row_text(r)
             if len(line.as_bytes()) == 0:
                 continue
-            var hits = extract_python_traceback_links(line)
-            hits.extend(extract_path_line_links(line))
-            hits.extend(extract_url_links(line))
+            var hits = extract_all_links(line)
             for h in range(len(hits)):
                 var hit = hits[h]
                 var x0 = body.a.x + hit.cell_start
@@ -476,13 +465,8 @@ struct TestPane(Copyable, Movable):
                 self.focused = True
             return True
         # In-flight drag selection keeps consuming past the body edge.
-        if self.sel.sel_dragging:
-            if event.button == MOUSE_BUTTON_LEFT and not event.pressed:
-                self.sel.end_drag(self.vt, event.pos)
-                return True
-            if event.motion:
-                self.sel.extend_drag(self.vt, event.pos)
-                return True
+        if self.sel.continue_drag(self.vt, event):
+            return True
         if not panel.contains(event.pos):
             if event.button != MOUSE_BUTTON_NONE \
                     and event.pressed and not event.motion:
@@ -503,25 +487,16 @@ struct TestPane(Copyable, Movable):
             # Link hit-test first — clicking a ``File "...", line N`` span
             # opens the file, a ``http(s)://`` span the browser, rather
             # than starting a selection.
-            for li in range(len(self._last_links)):
-                var link = self._last_links[li]
-                if event.pos.y == link.y \
-                        and event.pos.x >= link.x_start \
-                        and event.pos.x < link.x_end:
-                    if link.is_url:
-                        self.pending_open_url = link.path
-                    else:
-                        self.pending_open_path = link.path
-                        self.pending_open_line = link.line
-                    return True
-            # Double-click → word, triple → line, else cell drag.
-            if event.click_count >= 3:
-                self.sel.select_line_at(self.vt, event.pos)
+            var li = link_at(self._last_links, event.pos)
+            if li >= 0:
+                ref link = self._last_links[li]
+                if link.is_url:
+                    self.pending_open_url = link.path
+                else:
+                    self.pending_open_path = link.path
+                    self.pending_open_line = link.line
                 return True
-            if event.click_count == 2:
-                self.sel.select_word_at(self.vt, event.pos)
-                return True
-            self.sel.begin_drag(self.vt, event.pos)
+            self.sel.click(self.vt, event)
             return True
         return True
 
@@ -531,12 +506,7 @@ struct TestPane(Copyable, Movable):
         if not self.focused:
             return False
         if event.kind == EVENT_PASTE:
-            if self.vt.bracketed_paste:
-                self._write_to_pty(
-                    String("\x1b[200~") + event.text + String("\x1b[201~")
-                )
-            else:
-                self._write_to_pty(event.text)
+            paste_to_pty(self.pty, self.vt, event.text)
             return True
         if event.kind != EVENT_KEY:
             return False
@@ -551,53 +521,12 @@ struct TestPane(Copyable, Movable):
         if event.key == KEY_ESC and event.mods == MOD_NONE:
             if handle_bottom_dock_esc(self.dock):
                 return True
-            self._write_to_pty(String("\x1b"))
+            self.pty.write_all(String("\x1b"))
             return True
-        # Shift+PgUp/PgDn → scrollback.
-        if event.key == KEY_PAGEUP and (event.mods & MOD_SHIFT) != 0:
-            self.vt.scroll_view_by(self.vt.rows - 2)
-            return True
-        if event.key == KEY_PAGEDOWN and (event.mods & MOD_SHIFT) != 0:
-            self.vt.scroll_view_by(-(self.vt.rows - 2))
-            return True
-        # Cmd+C copies an active selection; otherwise fall through so the
-        # child gets a real Ctrl+C (interrupt the test run).
-        if event.key == UInt32(ord("c")) and event.mods == MOD_META \
-                and self.sel.sel_active:
-            _ = self.copy_selection_to_clipboard()
-            self.sel.clear()
-            return True
-        if self.sel.sel_active:
-            self.sel.sel_active = False
-        # Typing snaps back to the live tail.
-        if self.vt.view_offset != 0:
-            self.vt.reset_view()
-        # Forward the keystroke to the child (Ctrl+C, ``q`` to quit a
-        # pager pytest spawned, pdb input, …). No-op once the child has
-        # exited (``_write_to_pty`` guards on a closed fd).
-        var encoded = encode_key(
-            event.key, event.mods, self.vt.app_cursor_keys,
-        )
-        if len(encoded.as_bytes()) > 0:
-            self._write_to_pty(encoded^)
-            return True
-        return False
+        # Everything else — scrollback, copy, and the keystroke itself
+        # (Ctrl+C, ``q`` to quit a pager pytest spawned, pdb input, …).
+        return forward_key_to_grid(self.pty, self.vt, self.sel, event)
 
-    def _write_to_pty(self, payload: String):
-        if not self.pty.alive or self.pty.master_fd < 0:
-            return
-        var bytes = payload.as_bytes()
-        var n = len(bytes)
-        if n == 0:
-            return
-        var sent = 0
-        while sent < n:
-            var rc = self.pty.write_bytes(bytes.unsafe_ptr().unsafe_offset(sent), n - sent)
-            if rc < 0:
-                return  # EPIPE / EBADF — child gone.
-            if rc == 0:
-                return  # EAGAIN — drop the rest; user re-presses.
-            sent += rc
 
     # --- output capture / lossless resize ------------------------------
 

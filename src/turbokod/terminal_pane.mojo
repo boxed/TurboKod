@@ -38,14 +38,11 @@ from .claude_detect import (
     CLAUDE_CLEAN, CLAUDE_NONE, CLAUDE_WAITING, CLAUDE_WORKING,
     ClaudeStateTracker, claude_state_label,
 )
-from .clipboard import clipboard_copy
 from .colors import Attr, PANE_BG, WHITE
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE, EVENT_PASTE,
-    KEY_ESC, KEY_PAGEDOWN, KEY_PAGEUP,
-    MOD_META, MOD_NONE, MOD_SHIFT,
-    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE,
-    MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
+    Event, EVENT_KEY, EVENT_MOUSE, EVENT_PASTE, KEY_ESC, MOD_META, MOD_NONE,
+    MOD_SHIFT, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_DOWN,
+    MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
 from .painter import Painter
@@ -53,7 +50,10 @@ from .posix import (
     alloc_zero_buffer, getenv_value, monotonic_ms, poll_stdin, read_into,
 )
 from .pty import PtyProcess
-from .terminal_view import GridSelection, encode_key, paint_grid
+from .terminal_view import (
+    flush_vt_side_effects, forward_key_to_grid, GridSelection, paint_grid,
+    paste_to_pty,
+)
 from .vt import Vt
 from .window import (
     BottomDockedPanel, TitleCommand,
@@ -284,7 +284,7 @@ struct TerminalPane(Copyable, Movable):
             # rc files and starts reading, so this runs after the
             # environment is fully set up. ``\r`` is what Enter sends on
             # a real terminal; the pty's cooked mode maps it to newline.
-            self._write_to_pty(self.startup_command + String("\r"))
+            self.pty.write_all(self.startup_command + String("\r"))
 
     def restart(mut self):
         """Kill the current shell and spawn a fresh one. Useful when
@@ -348,12 +348,7 @@ struct TerminalPane(Copyable, Movable):
         #   * OSC 52 clipboard writes → system clipboard.
         # Without this, prompts that probe (oh-my-zsh / starship) stall,
         # and ``vim`` / ``tmux`` yank to clipboard silently drops.
-        var reply = self.vt.take_reply()
-        if len(reply.as_bytes()) > 0:
-            self._write_to_pty(reply^)
-        var clip = self.vt.take_clipboard()
-        if len(clip.as_bytes()) > 0:
-            clipboard_copy(clip)
+        flush_vt_side_effects(self.pty, self.vt)
         # Attention detection lives here (not in ``paint``) so it keeps
         # running while the pane is minimized or the window is occluded —
         # the whole point is alerting a user who is looking elsewhere.
@@ -519,13 +514,8 @@ struct TerminalPane(Copyable, Movable):
         # In-flight drag selection keeps consuming events even past
         # the body edge so the user can drag-select fast without the
         # selection cutting off when they overshoot.
-        if self.sel.sel_dragging:
-            if event.button == MOUSE_BUTTON_LEFT and not event.pressed:
-                self.sel.end_drag(self.vt, event.pos)
-                return True
-            if event.motion:
-                self.sel.extend_drag(self.vt, event.pos)
-                return True
+        if self.sel.continue_drag(self.vt, event):
+            return True
         if not panel.contains(event.pos):
             if event.button != MOUSE_BUTTON_NONE \
                     and event.pressed and not event.motion:
@@ -559,17 +549,7 @@ struct TerminalPane(Copyable, Movable):
             if routes_to_child:
                 self._forward_mouse_to_pty(event, motion=False, released=False)
                 return True
-            # Double-click selects the word under the cursor; triple
-            # selects the whole row. The terminal input parser stamps
-            # ``click_count`` so we don't need timing state of our own
-            # — same machinery already drives editor word-selection.
-            if event.click_count >= 3:
-                self.sel.select_line_at(self.vt, event.pos)
-                return True
-            if event.click_count == 2:
-                self.sel.select_word_at(self.vt, event.pos)
-                return True
-            self.sel.begin_drag(self.vt, event.pos)
+            self.sel.click(self.vt, event)
             return True
         if routes_to_child:
             # Release / motion / non-left presses. We pass motion=True
@@ -598,7 +578,7 @@ struct TerminalPane(Copyable, Movable):
             self.vt, event, motion, released,
         )
         if len(encoded.as_bytes()) > 0:
-            self._write_to_pty(encoded^)
+            self.pty.write_all(encoded)
 
     # --- keys ----------------------------------------------------------
 
@@ -611,12 +591,7 @@ struct TerminalPane(Copyable, Movable):
             # multi-line paste into shells / vim doesn't run each line
             # as a command. Without it the child sees the raw text and
             # treats embedded newlines as Enter.
-            if self.vt.bracketed_paste:
-                self._write_to_pty(
-                    String("\x1b[200~") + event.text + String("\x1b[201~")
-                )
-            else:
-                self._write_to_pty(event.text)
+            paste_to_pty(self.pty, self.vt, event.text)
             return True
         if event.kind != EVENT_KEY:
             return False
@@ -639,68 +614,8 @@ struct TerminalPane(Copyable, Movable):
             var claude = self._claude_tracker.classify(tail, monotonic_ms())
             if claude == CLAUDE_NONE and handle_bottom_dock_esc(self.dock):
                 return True
-            self._write_to_pty(String("\x1b"))
+            self.pty.write_all(String("\x1b"))
             return True
-        # Shift+PgUp/PgDn → scrollback navigation (keyboard-only users
-        # need this since wheel only works with a pointer). Page-sized
-        # chunks match the wheel-scrollback step pattern.
-        if event.key == KEY_PAGEUP and (event.mods & MOD_SHIFT) != 0:
-            self.vt.scroll_view_by(self.vt.rows - 2)
-            return True
-        if event.key == KEY_PAGEDOWN and (event.mods & MOD_SHIFT) != 0:
-            self.vt.scroll_view_by(-(self.vt.rows - 2))
-            return True
-        # Cmd+C with an active selection copies. Without selection,
-        # fall through so the child gets a real Ctrl+C (the more
-        # likely intent when typing in a shell or in claude). The
-        # host's edit:copy dispatch in Desktop also calls
-        # ``copy_selection_to_clipboard`` directly — this branch is
-        # here so terminal-focused Cmd+C still works in code paths
-        # that don't go through that dispatcher.
-        if event.key == UInt32(ord("c")) and event.mods == MOD_META \
-                and self.sel.sel_active:
-            _ = self.copy_selection_to_clipboard()
-            self.sel.clear()
-            return True
-        # Any keystroke clears a finished selection — same as every
-        # terminal app.
-        if self.sel.sel_active:
-            self.sel.sel_active = False
-        # Snap back to the live tail. Typing into the shell almost
-        # always means the user wants to interact with the live prompt
-        # rather than scroll history; making them manually scroll back
-        # to live every time would be annoying. iTerm / GNOME terminal
-        # / kitty all do this.
-        if self.vt.view_offset != 0:
-            self.vt.reset_view()
-        var encoded = encode_key(
-            event.key, event.mods, self.vt.app_cursor_keys,
-        )
-        if len(encoded.as_bytes()) > 0:
-            self._write_to_pty(encoded^)
-            return True
-        return False
+        return forward_key_to_grid(self.pty, self.vt, self.sel, event)
 
-    def _write_to_pty(self, payload: String):
-        if not self.pty.alive or self.pty.master_fd < 0:
-            return
-        var bytes = payload.as_bytes()
-        var n = len(bytes)
-        if n == 0:
-            return
-        var sent = 0
-        # Tiny retry loop. The pty master accepts kilobytes at a time
-        # normally; a partial write only happens if the kernel's pty
-        # buffer is full (a stuck child not draining). For typical
-        # keystroke payloads (1..10 bytes) this loop runs once.
-        while sent < n:
-            var rc = self.pty.write_bytes(bytes.unsafe_ptr().unsafe_offset(sent), n - sent)
-            if rc < 0:
-                return  # EPIPE / EBADF — child gone. Next tick reaps.
-            if rc == 0:
-                # EAGAIN. We could spin; instead drop the rest and
-                # let the user re-press. Holding the loop here risks
-                # locking the UI on a misbehaving child.
-                return
-            sent += rc
 

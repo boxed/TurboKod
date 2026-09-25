@@ -21,16 +21,15 @@ from .cell import Cell
 from .clipboard import clipboard_copy
 from .colors import Attr, BG_TRUECOLOR, FG_TRUECOLOR, PANE_BG, WHITE
 from .events import (
-    Event,
-    KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC,
-    KEY_F1, KEY_F2, KEY_F3, KEY_F4, KEY_F5, KEY_F6, KEY_F7, KEY_F8,
-    KEY_F9, KEY_F10, KEY_F11, KEY_F12,
-    KEY_HOME, KEY_INSERT, KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP,
-    KEY_RIGHT, KEY_TAB, KEY_UP,
-    MOD_ALT, MOD_CTRL, MOD_SHIFT, MOUSE_BUTTON_NONE,
+    Event, KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC,
+    KEY_F1, KEY_F10, KEY_F11, KEY_F12, KEY_F2, KEY_F3, KEY_F4, KEY_F5, KEY_F6,
+    KEY_F7, KEY_F8, KEY_F9, KEY_HOME, KEY_INSERT, KEY_LEFT, KEY_PAGEDOWN,
+    KEY_PAGEUP, KEY_RIGHT, KEY_TAB, KEY_UP, MOD_ALT, MOD_CTRL, MOD_META,
+    MOD_SHIFT, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE,
 )
 from .geometry import Point, Rect
 from .painter import Painter
+from .pty import PtyProcess
 from .vt import Vt
 
 
@@ -189,6 +188,32 @@ struct GridSelection(Copyable, Movable):
         return (r, c)
 
     # --- drag ----------------------------------------------------------
+
+    def continue_drag(mut self, vt: Vt, event: Event) -> Bool:
+        """Feed an in-flight drag selection: a left release ends it, motion
+        extends it. Runs before the pane's body hit-test so a fast drag
+        that overshoots the edge keeps selecting. True when consumed."""
+        if not self.sel_dragging:
+            return False
+        if event.button == MOUSE_BUTTON_LEFT and not event.pressed:
+            self.end_drag(vt, event.pos)
+            return True
+        if event.motion:
+            self.extend_drag(vt, event.pos)
+            return True
+        return False
+
+    def click(mut self, vt: Vt, event: Event):
+        """A left press in the body: triple-click selects the row,
+        double-click the word under the pointer, a single click starts a
+        cell drag. ``click_count`` comes from the input parser, so no
+        timing state lives here."""
+        if event.click_count >= 3:
+            self.select_line_at(vt, event.pos)
+        elif event.click_count == 2:
+            self.select_word_at(vt, event.pos)
+        else:
+            self.begin_drag(vt, event.pos)
 
     def begin_drag(mut self, vt: Vt, pos: Point):
         var rc = self.grid_xy_for_pos(vt, pos)
@@ -671,3 +696,58 @@ def _invert_attr(a: Attr) -> Attr:
         mode = mode | BG_TRUECOLOR
     r.color_mode = mode
     return r
+
+
+def flush_vt_side_effects(pty: PtyProcess, mut vt: Vt):
+    """Deliver what the last ``Vt.feed`` queued: DSR / DA / OSC replies go
+    back to the child, OSC 52 clipboard writes to the system clipboard.
+    Without the replies, prompts that probe (oh-my-zsh / starship) stall;
+    without the clipboard, ``vim`` / ``tmux`` yanks silently drop."""
+    var reply = vt.take_reply()
+    if len(reply.as_bytes()) > 0:
+        pty.write_all(reply)
+    var clip = vt.take_clipboard()
+    if len(clip.as_bytes()) > 0:
+        clipboard_copy(clip)
+
+
+def paste_to_pty(pty: PtyProcess, vt: Vt, text: String):
+    """Send pasted ``text`` to the child — wrapped in ``ESC[200~`` /
+    ``ESC[201~`` when it enabled bracketed paste (DECSET 2004), so a
+    multi-line paste into a shell or vim doesn't run each line as a
+    command."""
+    if vt.bracketed_paste:
+        pty.write_all(String("\x1b[200~") + text + String("\x1b[201~"))
+    else:
+        pty.write_all(text)
+
+
+def forward_key_to_grid(
+    pty: PtyProcess, mut vt: Vt, mut sel: GridSelection, event: Event,
+) -> Bool:
+    """The key handling a pty pane shares once its own chrome keys (Cmd+W,
+    ESC) are dealt with: Shift+PgUp/PgDn scroll the scrollback, Cmd+C
+    copies an active selection (otherwise it falls through so the child
+    gets a real Ctrl+C), any other key clears the selection, snaps the
+    view back to the live tail and goes to the child encoded."""
+    if event.key == KEY_PAGEUP and (event.mods & MOD_SHIFT) != 0:
+        vt.scroll_view_by(vt.rows - 2)
+        return True
+    if event.key == KEY_PAGEDOWN and (event.mods & MOD_SHIFT) != 0:
+        vt.scroll_view_by(-(vt.rows - 2))
+        return True
+    if event.key == UInt32(ord("c")) and event.mods == MOD_META \
+            and sel.sel_active:
+        _ = sel.copy_to_clipboard(vt)
+        sel.clear()
+        return True
+    # Any keystroke clears a finished selection, and typing snaps back to
+    # the live tail — same as every terminal app.
+    sel.sel_active = False
+    if vt.view_offset != 0:
+        vt.reset_view()
+    var encoded = encode_key(event.key, event.mods, vt.app_cursor_keys)
+    if len(encoded.as_bytes()) > 0:
+        pty.write_all(encoded)
+        return True
+    return False
