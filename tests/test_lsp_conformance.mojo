@@ -439,27 +439,6 @@ def test_utf16_conversion_reaches_references_and_workspace_edits() raises:
     m.shutdown()
 
 
-
-def _contains(haystack: String, needle: String) -> Bool:
-    """Substring test — the hover assertions only care that a fragment
-    survived, not where it landed."""
-    var h = haystack.as_bytes()
-    var n = needle.as_bytes()
-    if len(n) == 0:
-        return True
-    if len(n) > len(h):
-        return False
-    for i in range(len(h) - len(n) + 1):
-        var hit = True
-        for k in range(len(n)):
-            if h[i + k] != n[k]:
-                hit = False
-                break
-        if hit:
-            return True
-    return False
-
-
 def _labels(items: List[CompletionItem]) -> List[String]:
     var out = List[String]()
     for i in range(len(items)):
@@ -472,7 +451,6 @@ def _contains_label(labels: List[String], want: String) -> Bool:
         if labels[i] == want:
             return True
     return False
-
 
 
 # ── spec-shape coverage: union variants a real server never all emits ────
@@ -596,9 +574,9 @@ def test_spec_shape_hover_marked_string_array() raises:
     _pump(m)
     var hover = m.take_hover_text()
     assert_true(len(hover.as_bytes()) > 0)
-    assert_true(_contains(hover, String("first line")))
-    assert_true(_contains(hover, String("def f(): ...")))
-    assert_true(_contains(hover, String("third line")))
+    assert_true(String("first line") in hover)
+    assert_true((String("def f(): ...") in hover))
+    assert_true(String("third line") in hover)
     m.shutdown()
 
 
@@ -904,7 +882,6 @@ def test_adversarial_server_requests_are_position_converted() raises:
     assert_equal(m.show_document_char(), 19)   # unit 17 → byte 19
     m.clear_show_document()
     m.shutdown()
-
 
 
 def test_workspace_edit_document_changes_is_parsed_and_converted() raises:
@@ -1450,7 +1427,6 @@ def test_retire_lsp_manager_ignores_an_out_of_range_index() raises:
     assert_equal(len(d.lsp_managers), 0)
     assert_equal(len(d._closing_lsp), 0)
     d.shutdown()
-
 
 
 def main() raises:

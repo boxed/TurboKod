@@ -33,17 +33,10 @@ JOBS="${JOBS:-4}"
 # xargs command line short — an inline ``sh -c`` body long enough to do the
 # logging and error reporting trips BSD xargs' "command line cannot be
 # assembled, too long" limit under ``-I``.
+. scripts/lib.sh
 if [ "${1:-}" = "--build-one" ]; then
-  f="$2"
-  name="$(basename "$f" .mojo)"
-  mkdir -p .build/test-logs
-  if ! TURBOKOD_BUILD_ONLY=1 ./run.sh "$f" > ".build/test-logs/$name.build.log" 2>&1
-  then
-    echo "BUILD FAILED: $f" >&2
-    tail -30 ".build/test-logs/$name.build.log" >&2
-    exit 1
-  fi
-  exit 0
+  build_entry_logged "$2" .build/test-logs .build.log
+  exit $?
 fi
 
 suites=()

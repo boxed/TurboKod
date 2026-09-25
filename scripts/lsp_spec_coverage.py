@@ -145,14 +145,11 @@ def _sent_methods(src: str) -> set[str]:
     Exact: ``_send_request`` / ``_send_notification`` funnel every outbound
     message. Misses the ones dispatched through a variable — see
     ``_referenced_methods``."""
-    out = set()
-    for m in re.finditer(
-        r'_send_(?:request|notification)\(\s*String\(\s*"([^"]+)"', src
-    ):
-        out.add(m.group(1))
-    for m in re.finditer(r'send_request\(\s*String\(\s*"([^"]+)"', src):
-        out.add(m.group(1))
-    return out
+    # ``send_request`` also matches ``_send_request`` and the transport's
+    # own ``client.send_request``.
+    return set(re.findall(
+        r'(?:_send_notification|send_request)\(\s*String\(\s*"([^"]+)"', src
+    ))
 
 
 def _handled_methods(src: str) -> set[str]:

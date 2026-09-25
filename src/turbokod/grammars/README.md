@@ -40,8 +40,9 @@ grammars (always to "less colored", never to "broken"):
   consulted.
 * **No per-instance `OnigRegex.__deinit__`** — handles aren't freed
   when the wrapping struct goes out of scope. Cleanup batches at
-  process exit via the C shim (`onig_shim.c` + the
-  `__attribute__((destructor))` it carries), so leak detectors
+  process exit via the Rust shim's handle registry (`app/turbokod-shim`,
+  freed by a `__mod_term_func` destructor), or explicitly through
+  `release()`, so leak detectors
   stay quiet but the in-session footprint is bounded by
   `HighlightCache`'s grammar reuse rather than by RAII.
 

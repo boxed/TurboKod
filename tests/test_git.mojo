@@ -86,8 +86,8 @@ from turbokod.merge_view import (
 from turbokod.window import Window
 
 from support import (
-    _VIEW, _contains, _ensure_dir, _hl_lines, _key, _rm_rf, _run_git,
-    _starts_with, _temp_path, setup_test_env
+    _ensure_dir, _hl_lines, _key, _rm_rf, _run_git, _temp_path, _VIEW,
+    setup_test_env,
 )
 
 
@@ -1589,7 +1589,7 @@ def test_local_changes_space_on_current_branch_is_a_noop() raises:
     assert_equal(lc._git_op, _GITOP_NONE)
     assert_false(lc.git_runner.is_active())
     assert_equal(lc.overlay, _OVERLAY_NONE)
-    assert_true(_contains(lc.flash_message, String("main")))
+    assert_true(String("main") in lc.flash_message)
 
 
 def test_local_changes_commit_message_url_is_underlined() raises:
@@ -2179,17 +2179,17 @@ def test_local_changes_untracked_file_shows_its_whole_contents() raises:
     # unstaged changes.
     var saw_hint = False
     for i in range(len(lc.unstaged.lines)):
-        if _contains(lc.unstaged.lines[i], String("untracked")):
+        if String("untracked") in lc.unstaged.lines[i]:
             saw_hint = True
         assert_false(
-            _contains(lc.unstaged.lines[i], String("no unstaged changes")),
+            (String("no unstaged changes") in lc.unstaged.lines[i]),
         )
     assert_true(saw_hint)
     # The diff is cached on the entry in git's own new-file shape, so the
     # line-level staging path can build a patch from it.
     var stored = lc.files[0].unstaged_diff
-    assert_true(_contains(stored, String("new file mode")))
-    assert_true(_contains(stored, String("@@ -0,0 +1,3 @@")))
+    assert_true(String("new file mode") in stored)
+    assert_true(String("@@ -0,0 +1,3 @@") in stored)
     # And that patch really applies: staging just ``+second line`` puts
     # that one line in the index and leaves the other two unstaged
     # (status ``AM``). This is the payoff of caching a genuine unified
@@ -2237,11 +2237,11 @@ def test_local_changes_untracked_empty_file_has_no_body_rows() raises:
     var canvas = Canvas(screen.width(), screen.height())
     lc.paint(canvas, screen, registry)
     var stored = lc.files[0].unstaged_diff
-    assert_true(_contains(stored, String("new file mode")))
-    assert_false(_contains(stored, String("@@")))
+    assert_true(String("new file mode") in stored)
+    assert_false(String("@@") in stored)
     var saw_hint = False
     for i in range(len(lc.unstaged.lines)):
-        if _contains(lc.unstaged.lines[i], String("untracked")):
+        if String("untracked") in lc.unstaged.lines[i]:
             saw_hint = True
         assert_true(lc.unstaged.kind[i] != _LINE_ADD)
     assert_true(saw_hint)
@@ -2327,8 +2327,8 @@ def test_merge_commit_log_lists_the_commits_it_brought_in() raises:
         # Every non-merge row has exactly one parent (or none, for base).
         if i != 0:
             assert_false(commits[i].is_merge())
-    assert_true(_contains(subjects, String("feat one")))
-    assert_true(_contains(subjects, String("feat two")))
+    assert_true(String("feat one") in subjects)
+    assert_true(String("feat two") in subjects)
     # The merge's first parent is the mainline side, not the branch.
     var mainline = commits[0].first_parent()
     assert_true(len(mainline.as_bytes()) > 0)
@@ -2340,19 +2340,19 @@ def test_merge_commit_log_lists_the_commits_it_brought_in() raises:
     # The merged-in list is the side branch only: its two commits, and
     # neither the merge itself nor the mainline commit it landed on.
     var merged = fetch_merged_commits(dir, commits[0].short_sha)
-    assert_true(_contains(merged, String("feat one")))
-    assert_true(_contains(merged, String("feat two")))
-    assert_false(_contains(merged, String("Merge feature")))
-    assert_false(_contains(merged, String("main work")))
+    assert_true(String("feat one") in merged)
+    assert_true(String("feat two") in merged)
+    assert_false(String("Merge feature") in merged)
+    assert_false(String("main work") in merged)
     # And a non-merge commit has nothing behind it.
     assert_equal(len(fetch_merged_commits(dir, main_work).as_bytes()), 0)
     # ``git show --first-parent`` gives the merge a diff: what it brought
     # in. Bare ``git show`` on a merge stops after the header.
     var show = fetch_commit_show(dir, commits[0].short_sha)
-    assert_true(_contains(show, String("Merge feature")))
-    assert_true(_contains(show, String("one.txt")))
-    assert_true(_contains(show, String("two.txt")))
-    assert_false(_contains(show, String("main.txt")))
+    assert_true(String("Merge feature") in show)
+    assert_true(String("one.txt") in show)
+    assert_true(String("two.txt") in show)
+    assert_false(String("main.txt") in show)
     _rm_rf(dir)
 
 
@@ -2376,19 +2376,19 @@ def test_merge_commit_info_panel_shows_merged_commits_section() raises:
     var joined = String("")
     for i in range(len(lc.info.lines)):
         joined += lc.info.lines[i] + String("\n")
-    assert_true(_contains(joined, String("Merged 2 commits:")))
-    assert_true(_contains(joined, String("feat one")))
-    assert_true(_contains(joined, String("feat two")))
+    assert_true(String("Merged 2 commits:") in joined)
+    assert_true(String("feat one") in joined)
+    assert_true(String("feat two") in joined)
     # Section order: metadata, then the merged list, then the diff.
     var hdr = -1
     var body = -1
     var dif = -1
     for i in range(len(lc.info.lines)):
-        if _contains(lc.info.lines[i], String("Merge feature")) and hdr < 0:
+        if (String("Merge feature") in lc.info.lines[i]) and hdr < 0:
             hdr = i
-        if _contains(lc.info.lines[i], String("Merged 2 commits:")):
+        if String("Merged 2 commits:") in lc.info.lines[i]:
             body = i
-        if _contains(lc.info.lines[i], String("one.txt")) and dif < 0:
+        if (String("one.txt") in lc.info.lines[i]) and dif < 0:
             dif = i
     assert_true(hdr >= 0 and body > hdr and dif > body)
 
@@ -2516,8 +2516,8 @@ def test_fetch_file_history_scopes_to_the_file() raises:
     var entries = fetch_file_history(dir, String("f1.txt"))
     assert_equal(len(entries), 1)
     assert_equal(entries[0].subject, String("second subject"))
-    assert_true(_contains(entries[0].patch, String("+v1")))
-    assert_false(_contains(entries[0].patch, String("f2.txt")))
+    assert_true(String("+v1") in entries[0].patch)
+    assert_false(String("f2.txt") in entries[0].patch)
     assert_equal(len(fetch_file_history(dir, String("nope.txt"))), 0)
     _rm_rf(dir)
 
@@ -2596,7 +2596,7 @@ def test_local_changes_e_refuses_a_pushed_commit() raises:
     _ = lc.handle_key(_key(UInt32(0x65)), screen, registry)   # 'e'
     assert_equal(lc.overlay, _OVERLAY_STATUS)
     assert_equal(lc._git_op, _GITOP_NONE)
-    assert_true(_contains(lc.overlay_message, String("pushed")))
+    assert_true(String("pushed") in lc.overlay_message)
 
 
 def test_local_changes_e_refuses_a_merge_commit() raises:
@@ -2618,7 +2618,7 @@ def test_local_changes_e_refuses_a_merge_commit() raises:
     _ = lc.handle_key(_key(UInt32(0x65)), screen, registry)
     assert_equal(lc.overlay, _OVERLAY_STATUS)
     assert_equal(lc._git_op, _GITOP_NONE)
-    assert_true(_contains(lc.overlay_message, String("merge")))
+    assert_true(String("merge") in lc.overlay_message)
 
 
 def test_local_changes_e_opens_prefilled_editor_and_esc_cancels() raises:
@@ -2651,9 +2651,9 @@ def test_local_changes_e_opens_prefilled_editor_and_esc_cancels() raises:
         for x in range(screen.width()):
             painted += canvas.get(x, y).glyph
         painted += String("\n")
-    assert_true(_contains(painted, String("Save")))
-    assert_true(_contains(painted, String("Ctrl+")))
-    assert_true(_contains(painted, String("ESC: cancel")))
+    assert_true(String("Save") in painted)
+    assert_true(String("Ctrl+") in painted)
+    assert_true(String("ESC: cancel") in painted)
     # Plain Enter edits rather than submitting.
     _ = lc.handle_key(_key(KEY_ENTER), screen, registry)
     assert_equal(lc.overlay, _OVERLAY_EDIT_MSG)
@@ -2738,11 +2738,11 @@ def test_reword_editor_supports_mouse_selection_and_undo() raises:
     # not something reimplemented here.
     _ = lc.handle_key(_key(KEY_BACKSPACE), screen, registry)
     assert_true(
-        _starts_with(lc.overlay_editor.text_snapshot(), String(" subject")),
+        lc.overlay_editor.text_snapshot().startswith(String(" subject")),
     )
     _ = lc.handle_key(_key(UInt32(0x7A), MOD_META), screen, registry)   # ⌘Z
     assert_true(
-        _starts_with(lc.overlay_editor.text_snapshot(), String("second subject")),
+        lc.overlay_editor.text_snapshot().startswith(String("second subject")),
     )
     _rm_rf(dir)
 
@@ -3090,8 +3090,8 @@ def test_local_changes_shift_m_asks_merge_commit_or_straight_history() raises:
     assert_equal(lc._git_op, _GITOP_NONE)
     assert_false(lc.git_runner.is_active())
     # The question names both branches, in the direction the work moves.
-    assert_true(_contains(lc.overlay_message, String("feature-x")))
-    assert_true(_contains(lc.overlay_message, String("main")))
+    assert_true(String("feature-x") in lc.overlay_message)
+    assert_true(String("main") in lc.overlay_message)
     # Both answers are on screen, with what each one does.
     var canvas = Canvas(screen.width(), screen.height())
     lc.paint(canvas, screen, registry)
@@ -3100,10 +3100,10 @@ def test_local_changes_shift_m_asks_merge_commit_or_straight_history() raises:
         for x in range(screen.width()):
             painted += canvas.get(x, y).glyph
         painted += String("\n")
-    assert_true(_contains(painted, String("[m]")))
-    assert_true(_contains(painted, String("[r]")))
-    assert_true(_contains(painted, String("merge commit")))
-    assert_true(_contains(painted, String("straight history")))
+    assert_true(String("[m]") in painted)
+    assert_true(String("[r]") in painted)
+    assert_true(String("merge commit") in painted)
+    assert_true(String("straight history") in painted)
     # A key that isn't an answer leaves the question standing.
     _ = lc.handle_key(_key(UInt32(0x78)), screen, registry)   # 'x'
     assert_equal(lc.overlay, _OVERLAY_MERGE_CHOICE)
@@ -3128,10 +3128,10 @@ def test_local_changes_merge_choice_m_spawns_a_no_ff_merge() raises:
     assert_true(lc.git_runner.is_active())
     # ``command`` is the runner's shell-y rendering of the argv it spawned.
     var cmd = lc.git_runner.command
-    assert_true(_contains(cmd, String("merge")))
-    assert_true(_contains(cmd, String("--no-ff")))
-    assert_true(_contains(cmd, String("--no-edit")))
-    assert_true(_contains(cmd, String("feature-x")))
+    assert_true(String("merge") in cmd)
+    assert_true(String("--no-ff") in cmd)
+    assert_true(String("--no-edit") in cmd)
+    assert_true(String("feature-x") in cmd)
     _drain_git_op(lc)
     assert_equal(lc._git_op, _GITOP_NONE)
     assert_false(lc.git_runner.is_active())
@@ -3154,7 +3154,7 @@ def test_local_changes_r_on_a_branch_rebases_without_asking() raises:
     assert_equal(lc.overlay, _OVERLAY_NONE)
     assert_equal(lc._git_op, _GITOP_REBASE)
     assert_true(lc.git_runner.is_active())
-    assert_true(_contains(lc.git_runner.command, String("rebase main feature-x")))
+    assert_true(String("rebase main feature-x") in lc.git_runner.command)
     _drain_git_op(lc)
     # The selection is unchanged: 'r' no longer type-jumps on this pane,
     # which is the trade M / d / o already make.
@@ -3178,12 +3178,12 @@ def test_local_changes_r_refuses_the_current_branch() raises:
     # A refusal is modal (``_show_status`` with ok=False) — nothing on
     # screen changed, so a banner that ages out would be missed.
     assert_equal(lc.overlay, _OVERLAY_STATUS)
-    assert_true(_contains(lc.overlay_message, String("into itself")))
+    assert_true(String("into itself") in lc.overlay_message)
     # Same refusal through M, which never opens the question either.
     lc._close_overlay()
     _ = lc.handle_key(_key(UInt32(0x4D)), screen, registry)
     assert_equal(lc.overlay, _OVERLAY_STATUS)
-    assert_true(_contains(lc.overlay_message, String("into itself")))
+    assert_true(String("into itself") in lc.overlay_message)
     registry.release()
 
 
@@ -3206,8 +3206,8 @@ def test_local_changes_merge_choice_r_spawns_a_rebase() raises:
     assert_true(lc.git_runner.is_active())
     var cmd = lc.git_runner.command
     # Onto-branch first, topic branch second — never the bare one-arg form.
-    assert_true(_contains(cmd, String("rebase main feature-x")))
-    assert_false(_contains(cmd, String("merge")))
+    assert_true(String("rebase main feature-x") in cmd)
+    assert_false(String("merge") in cmd)
     _drain_git_op(lc)
     assert_equal(lc._git_op, _GITOP_NONE)
 
@@ -3333,8 +3333,8 @@ def test_rebase_onto_the_main_line_rewrites_the_topic_branch() raises:
     assert_equal(lc._git_op, _GITOP_REBASE)
     # One command, no chain armed behind it.
     var cmd = lc.git_runner.command
-    assert_true(_contains(cmd, String("rebase main")))
-    assert_false(_contains(cmd, String("rebase forum")))
+    assert_true(String("rebase main") in cmd)
+    assert_false(String("rebase forum") in cmd)
     assert_equal(lc._rebase_step, 0)
     _drain_git_op(lc)
     assert_equal(lc._git_op, _GITOP_NONE)
@@ -3390,8 +3390,7 @@ def test_merge_choice_box_names_the_branch_that_gets_rewritten() raises:
     _ = lc.handle_key(_key(UInt32(0x4D)), screen, registry)
     assert_equal(lc.overlay, _OVERLAY_MERGE_CHOICE)
     assert_true(lc._merge_target_is_main)
-    assert_true(_contains(_painted(lc, canvas, screen, registry),
-                          String("replays forum onto main")))
+    assert_true(String("replays forum onto main") in _painted(lc, canvas, screen, registry))
     lc._close_overlay()
     lc.release()
 
@@ -3404,8 +3403,7 @@ def test_merge_choice_box_names_the_branch_that_gets_rewritten() raises:
         _ = lc2.handle_key(_key(UInt32(0x4D)), screen, registry)
         assert_equal(lc2.overlay, _OVERLAY_MERGE_CHOICE)
         assert_false(lc2._merge_target_is_main)
-        assert_true(_contains(_painted(lc2, canvas, screen, registry),
-                              String("replays forum onto main")))
+        assert_true(String("replays forum onto main") in _painted(lc2, canvas, screen, registry))
     lc2.release()
     registry.release()
     _rm_rf(dir)
@@ -3541,7 +3539,7 @@ def test_local_changes_d_on_current_branch_is_refused() raises:
     # A red status flash, explicitly *not* the delete confirmation —
     # there is no "yes, delete it anyway" answer for this case.
     assert_equal(lc.overlay, _OVERLAY_STATUS)
-    assert_true(_contains(lc.overlay_message, String("main")))
+    assert_true(String("main") in lc.overlay_message)
 
 
 def test_local_changes_d_on_unmerged_branch_confirms_first() raises:
@@ -3563,8 +3561,8 @@ def test_local_changes_d_on_unmerged_branch_confirms_first() raises:
     # Confirmation, not a delete.
     assert_equal(lc.overlay, _OVERLAY_DELETE_BRANCH_CONFIRM)
     assert_equal(lc._git_op, _GITOP_NONE)
-    assert_true(_contains(lc.overlay_message, String("unmerged-x")))
-    assert_true(_contains(lc.overlay_message, String("NOT merged")))
+    assert_true(String("unmerged-x") in lc.overlay_message)
+    assert_true(String("NOT merged") in lc.overlay_message)
     # 'n' cancels and leaves the branch alone.
     _ = lc.handle_key(_key(UInt32(0x6E)), screen, registry)
     assert_equal(lc.overlay, _OVERLAY_NONE)
@@ -3648,8 +3646,8 @@ def test_local_changes_branch_pane_paints_age_column() raises:
     var bare_canvas = Canvas(screen.width(), screen.height())
     bare.paint(bare_canvas, screen, registry)
     var bare_painted = _screen_text(bare_canvas, screen)
-    assert_false(_contains(bare_painted, String("37d")))
-    assert_false(_contains(bare_painted, String("5m")))
+    assert_false(String("37d") in bare_painted)
+    assert_false(String("5m") in bare_painted)
 
     var lc = _local_changes_with_branches()
     var now = wall_clock_ms() // 1000
@@ -3660,11 +3658,11 @@ def test_local_changes_branch_pane_paints_age_column() raises:
     var painted = _screen_text(canvas, screen)
     # The current branch shows the marker and *no* age — you're already
     # there, so its age buys nothing and would widen the gutter.
-    assert_true(_contains(painted, String(" * main")))
-    assert_false(_contains(painted, String("37d")))
+    assert_true(String(" * main") in painted)
+    assert_false(String("37d") in painted)
     # Everyone else shows an age, right-aligned into the same gutter, so
     # both names start at the same column.
-    assert_true(_contains(painted, String("5m feature-x")))
+    assert_true(String("5m feature-x") in painted)
 
 
 def test_fetch_git_branches_carries_age_newest_first() raises:
@@ -3914,7 +3912,7 @@ def test_local_changes_success_flashes_without_a_modal() raises:
     var row = String("")
     for x in range(bounds.a.x + 1, bounds.b.x - 1):
         row += canvas.get(x, bounds.a.y + 1).glyph
-    assert_true(_contains(row, lc.flash_message))
+    assert_true(lc.flash_message in row)
     # And a keystroke afterwards is handled normally, not swallowed. Park
     # the cursor on row 0 first: the delete left ``sel_branch`` wherever
     # ``merged-x`` used to be, and ``fetch_git_branches`` sorts by
@@ -4802,7 +4800,7 @@ def test_branch_pane_o_refuses_main_and_a_non_github_remote() raises:
     assert_true(lc.handle_key(_key(UInt32(ord("o"))), screen, registry))
     assert_equal(len(lc.consume_open_url().as_bytes()), 0)
     assert_equal(lc.overlay, _OVERLAY_STATUS)
-    assert_true(_contains(lc.overlay_message, String("base branch")))
+    assert_true(String("base branch") in lc.overlay_message)
     lc._close_overlay()
 
     # ``/tmp`` isn't a repo, so ``feature-x`` has no remote to resolve.
@@ -4810,7 +4808,7 @@ def test_branch_pane_o_refuses_main_and_a_non_github_remote() raises:
     assert_true(lc.handle_key(_key(UInt32(ord("o"))), screen, registry))
     assert_equal(len(lc.consume_open_url().as_bytes()), 0)
     assert_equal(lc.overlay, _OVERLAY_STATUS)
-    assert_true(_contains(lc.overlay_message, String("GitHub")))
+    assert_true(String("GitHub") in lc.overlay_message)
     lc.release()
 
 

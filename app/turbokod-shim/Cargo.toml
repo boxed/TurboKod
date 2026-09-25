@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 # staticlib: produces a libturbokod_shim.a we link into the Mojo
-# binary the same way process_shim.o was linked. We keep crate-type
+# binary. We keep crate-type
 # narrow on purpose — a dylib would pull in Rust's full runtime as a
 # separate library, which complicates DYLD setup in the .app bundle.
 [lib]

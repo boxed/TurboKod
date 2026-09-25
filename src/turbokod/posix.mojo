@@ -338,7 +338,7 @@ def debug_log(msg: String):
     next Mojo line never runs (the file is closed before the call
     returns, so the kernel has already flushed the write).
 
-    Open is wrapped via ``tk_debug_log_open`` (in process_shim.c)
+    Open is wrapped via ``tk_debug_log_open`` (in the Rust shim)
     because Mojo's FFI rejects a second ``open`` binding with a
     different arity, and the rest of the codebase already declares
     the two-arg form."""
@@ -425,7 +425,7 @@ def stdio_pipes() raises -> Tuple[
 def set_nonblocking(fd: Int32) -> Bool:
     """Make ``fd`` non-blocking, preserving any other status flags.
 
-    Routes through ``tk_set_nonblock`` in ``process_shim.c`` rather than
+    Routes through ``tk_set_nonblock`` in the Rust shim rather than
     calling ``fcntl`` directly. ``fcntl``'s third argument is variadic
     in C, and on Apple's ARM64 ABI variadic args go on the stack —
     Mojo's ``external_call`` declares a fixed-arity call and puts the
@@ -574,7 +574,7 @@ def track_child(pid: Int32):
     receives SIGTERM if the parent dies on SIGHUP / SIGTERM / clean
     exit. Idempotent and safe to call with any PID — no-ops on
     ``pid <= 0``. Pair with ``untrack_child`` after a successful reap.
-    Implementation lives in ``process_shim.c``."""
+    Implementation lives in the Rust shim (``app/turbokod-shim``)."""
     if Int(pid) <= 0:
         return
     _ = external_call["tk_track_child_add", Int32](pid)

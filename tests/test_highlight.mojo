@@ -44,9 +44,7 @@ from turbokod.tm_tokenizer import (
 )
 from turbokod.geometry import Rect
 
-from support import (
-    _contains, _hl_lines, _hl_set, _key, _temp_path, setup_test_env
-)
+from support import _hl_lines, _hl_set, _key, _temp_path, setup_test_env
 
 
 def test_grammar_install_command_targets_user_config() raises:
@@ -64,10 +62,10 @@ def test_grammar_install_command_targets_user_config() raises:
     # the helper produces an empty path and we just check ``mkdir -p``
     # still appears (the runner would fail in that case, which is the
     # correct end state for a sandboxed process with no $HOME).
-    assert_true(_contains(cmd, String("mkdir -p")))
-    assert_true(_contains(cmd, String("curl ")))
+    assert_true(String("mkdir -p") in cmd)
+    assert_true(String("curl ") in cmd)
     if len(dest.as_bytes()) > 0:
-        assert_true(_contains(cmd, dest))
+        assert_true(dest in cmd)
 
 
 def test_django_grammar_is_in_downloadable_catalog() raises:

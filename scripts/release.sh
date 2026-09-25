@@ -136,9 +136,8 @@ TURBOKOD_BUILD_ONLY=1 ./run_swift.sh || die "bundle build failed"
 #    machine with no pixi env. Fixpoint over @rpath deps: keep copying missing
 #    dylibs out of the pixi lib dir until nothing new appears.
 # ---------------------------------------------------------------------------
-prefix="$(pixi info --json 2>/dev/null \
-  | python3 -c 'import json,sys;print(json.load(sys.stdin)["environments_info"][0]["prefix"])' 2>/dev/null)"
-[ -z "${prefix:-}" ] && prefix="${root}/.pixi/envs/default"
+. scripts/lib.sh
+prefix="$(resolve_env_prefix)"
 [ -d "$prefix/lib" ] || die "pixi env lib dir not found at $prefix/lib"
 
 note "vendoring runtime dylibs from $prefix/lib..."

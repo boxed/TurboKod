@@ -19,16 +19,10 @@ cd "$(dirname "$0")/.."
 
 # Internal: build one entry point. Re-invoking ourselves keeps the xargs
 # command line short (same trick as run_tests.sh).
+. scripts/lib.sh
 if [ "${1:-}" = "--build-one" ]; then
-  f="$2"
-  name="$(basename "$f" .mojo)"
-  mkdir -p .build/entry-logs
-  if ! TURBOKOD_BUILD_ONLY=1 ./run.sh "$f" > ".build/entry-logs/$name.log" 2>&1; then
-    echo "BUILD FAILED: $f" >&2
-    tail -30 ".build/entry-logs/$name.log" >&2
-    exit 1
-  fi
-  exit 0
+  build_entry_logged "$2" .build/entry-logs .log
+  exit $?
 fi
 
 quick=0

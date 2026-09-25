@@ -50,8 +50,7 @@ from turbokod.geometry import Point, Rect
 from turbokod.window import Window
 
 from support import (
-    _VIEW, _contains, _hl_set, _key, _spell_with_dict, _temp_path,
-    setup_test_env
+    _hl_set, _key, _spell_with_dict, _temp_path, _VIEW, setup_test_env,
 )
 
 
@@ -1600,7 +1599,7 @@ def test_editor_minimap_hover_paints_tooltip() raises:
     var row_text = String("")
     for x in range(view.b.x):
         row_text = row_text + canvas.get(x, 1).glyph
-    assert_true(_contains(row_text, String("helo")))
+    assert_true(String("helo") in row_text)
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
@@ -1770,7 +1769,7 @@ def test_editor_text_hover_diagnostic_renders_tooltip() raises:
         var row_text = String("")
         for x in range(view.b.x):
             row_text = row_text + canvas.get(x, y).glyph
-        if _contains(row_text, String("unknown name")):
+        if String("unknown name") in row_text:
             found = True
             break
     assert_true(found)

@@ -9,6 +9,7 @@ live here — anything used by a single suite stays in that suite's file.
 
 from std.ffi import external_call
 from std.testing import assert_equal, assert_true
+from turbokod.canvas import Canvas
 from turbokod.desktop import Desktop
 from turbokod.file_io import basename
 from turbokod.git_blame import BlameLine
@@ -46,24 +47,13 @@ def _assert_layout_contiguous(line: String, layout: List[VisualLine]) raises:
     assert_equal(layout[len(layout) - 1].byte_end, n)
 
 
-def _contains(s: String, sub: String) -> Bool:
-    var sb = s.as_bytes()
-    var nb = sub.as_bytes()
-    var n = len(nb)
-    var h = len(sb)
-    if n == 0:
-        return True
-    if n > h:
-        return False
-    for i in range(h - n + 1):
-        var hit = True
-        for k in range(n):
-            if sb[i + k] != nb[k]:
-                hit = False
-                break
-        if hit:
-            return True
-    return False
+def _canvas_row(c: Canvas, y: Int, x0: Int, x1: Int) -> String:
+    """The glyphs painted on canvas row ``y`` over ``[x0, x1)``, joined, so
+    a test can substring-match what landed there."""
+    var out = String("")
+    for x in range(x0, x1):
+        out += c.get(x, y).glyph
+    return out^
 
 
 def _doc_paths(d: Desktop) -> List[String]:
@@ -191,17 +181,6 @@ def _spell_with_dict(words: List[String]) -> Speller:
     var s = Speller()
     s.load_words(words)
     return s^
-
-
-def _starts_with(s: String, prefix: String) -> Bool:
-    var sb = s.as_bytes()
-    var pb = prefix.as_bytes()
-    if len(pb) > len(sb):
-        return False
-    for i in range(len(pb)):
-        if sb[i] != pb[i]:
-            return False
-    return True
 
 
 def _temp_path(suffix: String) -> String:

@@ -10,21 +10,16 @@ set -uo pipefail
 cd "$(dirname "$0")"
 root="$(pwd)"
 
-env_prefix="$(pixi info --json 2>/dev/null \
-  | python3 -c 'import json,sys;print(json.load(sys.stdin)["environments_info"][0]["prefix"])' 2>/dev/null)"
-[ -z "${env_prefix:-}" ] && env_prefix="${root}/.pixi/envs/default"
+. scripts/lib.sh
+env_prefix="$(resolve_env_prefix)"
 
-shim_lib="app/turbokod-shim/target/release/libturbokod_shim.a"
+shim_lib="$SHIM_LIB"
 dylib=".build/libturbokod.dylib"
 swiftbin=".build/turbokod_swift"
 tk_tui=".build/tk_tui"
 mkdir -p .build
 
-# Build the Rust shim if needed (pty / onig handle registry / listdir).
-if [ ! -f "$shim_lib" ] || find app/turbokod-shim/src app/turbokod-shim/Cargo.toml -newer "$shim_lib" -print -quit 2>/dev/null | grep -q .; then
-  echo "[run_swift] building rust shim" >&2
-  ( cd app/turbokod-shim && cargo build --release ) || exit 1
-fi
+ensure_shim run_swift || exit 1
 
 # Build the Mojo logic shared-lib when any Mojo source changed.
 if [ ! -f "$dylib" ] || find src "$shim_lib" -newer "$dylib" -print -quit 2>/dev/null | grep -q .; then

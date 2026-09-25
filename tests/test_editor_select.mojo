@@ -26,8 +26,8 @@ from turbokod.events import (
 from turbokod.geometry import Point, Rect
 
 from support import (
-    _VIEW, _assert_layout_contiguous, _contains, _key, _spell_with_dict,
-    _temp_path, setup_test_env
+    _assert_layout_contiguous, _key, _spell_with_dict, _temp_path, _VIEW,
+    setup_test_env,
 )
 
 
@@ -1145,7 +1145,7 @@ def test_editor_multiline_diagnostic_tooltip_renders_each_line() raises:
         var row_text = String("")
         for x in range(left_x + 1, right_x):
             row_text = row_text + canvas.get(x, y).glyph
-        if _contains(row_text, String("\"Meta\" overrides symbol")):
+        if String("\"Meta\" overrides symbol") in row_text:
             found_header = True
             break
     assert_true(found_header)

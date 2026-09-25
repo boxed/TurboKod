@@ -61,8 +61,8 @@ from turbokod.view import centered
 from turbokod.window import Window
 
 from support import (
-    _SCREEN, _contains, _doc_paths, _docs_contains, _ensure_dir, _key, _rm_rf,
-    _run_git, _temp_path, setup_test_env
+    _doc_paths, _docs_contains, _ensure_dir, _key, _rm_rf, _run_git, _SCREEN,
+    _temp_path, setup_test_env,
 )
 
 
@@ -84,14 +84,14 @@ def test_help_hotkeys_opens_readonly_reference() raises:
     var body = String("")
     for r in range(d.windows.windows[idx].editor.buffer.line_count()):
         body = body + d.windows.windows[idx].editor.buffer.line(r) + String("\n")
-    assert_true(_contains(body, String("Grow selection")))
-    assert_true(_contains(body, String("Cmd+Up")))
-    assert_true(_contains(body, String("Save")))
+    assert_true(String("Grow selection") in body)
+    assert_true(String("Cmd+Up") in body)
+    assert_true(String("Save") in body)
     # Aliases sharing one help string merge into a single row.
-    assert_true(_contains(body, String("Ctrl+Space / Ctrl+J")))
+    assert_true(String("Ctrl+Space / Ctrl+J") in body)
     # F2 / Shift+F6 are aliases for LSP rename — also one merged row.
-    assert_true(_contains(body, String("F2 / Shift+F6")))
-    assert_true(_contains(body, String("Rename symbol")))
+    assert_true(String("F2 / Shift+F6") in body)
+    assert_true(String("Rename symbol") in body)
     # Second dispatch must not open a duplicate.
     _ = d.dispatch_action(HELP_HOTKEYS, screen)
     assert_equal(len(d.windows.windows), before + 1)

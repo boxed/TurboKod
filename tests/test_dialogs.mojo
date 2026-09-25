@@ -77,28 +77,8 @@ from turbokod.dir_browser import jump_shortcuts
 from turbokod.colors import GREEN
 
 from support import (
-    _contains, _key, _ps_open, _spell_with_dict, _starts_with, _temp_path,
-    setup_test_env
+    _canvas_row, _key, _ps_open, _spell_with_dict, _temp_path, setup_test_env,
 )
-
-
-def _ends_with(s: String, suffix: String) -> Bool:
-    var sb = s.as_bytes()
-    var fb = suffix.as_bytes()
-    if len(fb) > len(sb):
-        return False
-    for i in range(len(fb)):
-        if sb[len(sb) - len(fb) + i] != fb[i]:
-            return False
-    return True
-
-
-def _canvas_row(c: Canvas, y: Int, x0: Int, x1: Int) -> String:
-    """The glyphs painted on row ``y`` from ``x0`` up to ``x1``, joined."""
-    var out = String("")
-    for x in range(x0, x1):
-        out += c.get(x, y).glyph
-    return out^
 
 
 def _blame_of(
@@ -139,18 +119,18 @@ def test_blame_popup_shows_sha_author_time_and_message() raises:
     assert_equal(rect.a.y, 6)
     assert_true(rect.b.x <= 100)
     var head0 = _canvas_row(c, rect.a.y + 1, rect.a.x + 2, rect.b.x)
-    assert_true(_starts_with(head0, String("abcdef01")))
+    assert_true(head0.startswith(String("abcdef01")))
     var head1 = _canvas_row(c, rect.a.y + 2, rect.a.x + 2, rect.b.x)
-    assert_true(_starts_with(head1, String("Alice <alice@example.com>")))
+    assert_true(head1.startswith(String("Alice <alice@example.com>")))
     var head2 = _canvas_row(c, rect.a.y + 3, rect.a.x + 2, rect.b.x)
     # Author's zone, plus the relative age (1 day after the commit).
-    assert_true(_starts_with(head2, String("2023-11-14 22:13 +0000 (1d ago)")))
+    assert_true(head2.startswith(String("2023-11-14 22:13 +0000 (1d ago)")))
     # Blank spacer, then the message body — the *full* body, not just the
     # porcelain summary.
     var body0 = _canvas_row(c, rect.a.y + 5, rect.a.x + 2, rect.b.x)
-    assert_true(_starts_with(body0, String("Fix the thing")))
+    assert_true(body0.startswith(String("Fix the thing")))
     var body2 = _canvas_row(c, rect.a.y + 7, rect.a.x + 2, rect.b.x)
-    assert_true(_starts_with(body2, String("Because it was broken.")))
+    assert_true(body2.startswith(String("Because it was broken.")))
     # Any key dismisses — there's nothing to navigate.
     _ = p.handle_key(_key(KEY_DOWN))
     assert_false(p.active)
@@ -458,14 +438,14 @@ def test_walk_project_files_finds_known_files() raises:
     var saw_dotfile = False
     var saw_gitignore = False
     for i in range(len(paths)):
-        if _ends_with(paths[i], String("examples/hello.mojo")):
+        if paths[i].endswith(String("examples/hello.mojo")):
             saw_hello = True
-        if _ends_with(paths[i], String("tests/support.mojo")):
+        if paths[i].endswith(String("tests/support.mojo")):
             saw_test = True
-        if _ends_with(paths[i], String("/.gitignore")):
+        if paths[i].endswith(String("/.gitignore")):
             saw_gitignore = True
-        if _contains(paths[i], String("/.git/")) \
-                or _contains(paths[i], String("/.pixi/")):
+        if String("/.git/") in paths[i] \
+                or String("/.pixi/") in paths[i]:
             saw_dotfile = True
     assert_true(saw_hello)
     assert_true(saw_test)
@@ -564,7 +544,7 @@ def test_walk_project_files_respects_gitignore() raises:
     var paths = walk_project_files(root)
     var saw_vendored = False
     for i in range(len(paths)):
-        if _contains(paths[i], String("/vendored/")):
+        if String("/vendored/") in paths[i]:
             saw_vendored = True
             break
     assert_false(saw_vendored)
@@ -573,7 +553,7 @@ def test_walk_project_files_respects_gitignore() raises:
     var all_paths = walk_project_files(root, respect_gitignore=False)
     var any_vendored = False
     for i in range(len(all_paths)):
-        if _contains(all_paths[i], String("/vendored/")):
+        if String("/vendored/") in all_paths[i]:
             any_vendored = True
             break
     assert_true(any_vendored)
@@ -611,9 +591,9 @@ def test_walk_project_files_include_ignored_files_keeps_files_prunes_dirs() rais
     var strict_saw_local = False
     var strict_saw_node = False
     for i in range(len(strict)):
-        if _contains(strict[i], String("settings_local.py")):
+        if String("settings_local.py") in strict[i]:
             strict_saw_local = True
-        if _contains(strict[i], String("/node_modules/")):
+        if String("/node_modules/") in strict[i]:
             strict_saw_node = True
     assert_false(strict_saw_local)
     assert_false(strict_saw_node)
@@ -624,11 +604,11 @@ def test_walk_project_files_include_ignored_files_keeps_files_prunes_dirs() rais
     var picker_saw_main = False
     var picker_saw_node = False
     for i in range(len(picker)):
-        if _contains(picker[i], String("settings_local.py")):
+        if String("settings_local.py") in picker[i]:
             picker_saw_local = True
-        if _contains(picker[i], String("/settings.py")):
+        if String("/settings.py") in picker[i]:
             picker_saw_main = True
-        if _contains(picker[i], String("/node_modules/")):
+        if String("/node_modules/") in picker[i]:
             picker_saw_node = True
     assert_true(picker_saw_local)
     assert_true(picker_saw_main)
@@ -690,7 +670,7 @@ def test_walk_project_files_git_fast_path_includes_ignored_files() raises:
     var strict = walk_project_files(root)
     var strict_saw_local = False
     for i in range(len(strict)):
-        if _contains(strict[i], String("settings_local.py")):
+        if String("settings_local.py") in strict[i]:
             strict_saw_local = True
     assert_false(strict_saw_local)
 
@@ -700,11 +680,11 @@ def test_walk_project_files_git_fast_path_includes_ignored_files() raises:
     var picker_saw_main = False
     var picker_saw_node = False
     for i in range(len(picker)):
-        if _contains(picker[i], String("settings_local.py")):
+        if String("settings_local.py") in picker[i]:
             picker_saw_local = True
-        if _contains(picker[i], String("/settings.py")):
+        if String("/settings.py") in picker[i]:
             picker_saw_main = True
-        if _contains(picker[i], String("/node_modules/")):
+        if String("/node_modules/") in picker[i]:
             picker_saw_node = True
     assert_true(picker_saw_local)
     assert_true(picker_saw_main)
@@ -1693,7 +1673,7 @@ def test_quick_open_filters_as_you_type() raises:
     # Submission produces an absolute path joined with root.
     qo.selected_path = join_path(qo.root, qo.entries[qo.matched[0]])
     qo.submitted = True
-    assert_true(_starts_with(qo.selected_path, root.value()))
+    assert_true(qo.selected_path.startswith(root.value()))
 
 
 def test_quick_open_preserves_query_across_close_and_reopen() raises:

@@ -1,4 +1,5 @@
-//! C-ABI replacement for ``src/turbokod/process_shim.c``.
+//! C-ABI helpers the Mojo core calls (pty spawn, non-blocking I/O, child
+//! registry, listdir, debug-log open, libonig handle registry).
 //!
 //! The Mojo build links this crate's ``libturbokod_shim.a`` and the
 //! Mojo source calls into it via the same ``external_call["tk_…", …]``
@@ -18,8 +19,6 @@
 //! take a `try_lock` so they never deadlock.
 
 use std::ffi::{c_char, c_int, c_long, c_uint, c_void, CStr};
-use std::fs::File;
-use std::io::Write;
 use std::sync::Mutex;
 
 // --- Non-blocking write ---------------------------------------------------
@@ -62,17 +61,27 @@ pub unsafe extern "C" fn tk_write_nb(
 /// which Mojo's fixed-arity FFI can't express.
 #[no_mangle]
 pub extern "C" fn tk_set_nonblock(fd: c_int) -> c_int {
+    set_nonblock(fd) as c_int
+}
+
+fn set_nonblock(fd: c_int) -> bool {
     if fd < 0 {
-        return 0;
+        return false;
     }
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL, 0) };
-    if flags == -1 {
-        return 0;
+    flags != -1
+        && unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } != -1
+}
+
+/// A ``winsize`` for ``cols`` x ``rows``, clamped into ``u16`` (a plain
+/// ``as`` cast would wrap an oversized dimension).
+fn winsize(cols: c_int, rows: c_int) -> libc::winsize {
+    libc::winsize {
+        ws_row: rows.clamp(0, u16::MAX as c_int) as u16,
+        ws_col: cols.clamp(0, u16::MAX as c_int) as u16,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
     }
-    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
-        return 0;
-    }
-    1
 }
 
 // --- Child registry -------------------------------------------------------
@@ -212,54 +221,30 @@ pub unsafe extern "C" fn tk_pty_spawn(
         return -1;
     }
     if libc::grantpt(master) < 0 {
-        let e = errno();
-        libc::close(master);
-        *errno_location() = e;
-        return -1;
+        return fail_closing(&[master]);
     }
     if libc::unlockpt(master) < 0 {
-        let e = errno();
-        libc::close(master);
-        *errno_location() = e;
-        return -1;
+        return fail_closing(&[master]);
     }
     let slave_name = libc::ptsname(master);
     if slave_name.is_null() {
-        let e = errno();
-        libc::close(master);
-        *errno_location() = e;
-        return -1;
+        return fail_closing(&[master]);
     }
     let slave = libc::open(slave_name, libc::O_RDWR | libc::O_NOCTTY);
     if slave < 0 {
-        let e = errno();
-        libc::close(master);
-        *errno_location() = e;
-        return -1;
+        return fail_closing(&[master]);
     }
 
     // Initial window size so the child's first tcgetwinsize returns
     // the right values — saves a SIGWINCH redraw.
     if cols > 0 && rows > 0 {
-        let ws = libc::winsize {
-            // Clamp into u16 directly; the old `as c_uchar` truncated any
-            // dimension > 255 mod 256 (e.g. 480 cols -> 224) before widening,
-            // so a wide window reported the wrong size until the first SIGWINCH.
-            ws_row: rows.clamp(0, u16::MAX as c_int) as u16,
-            ws_col: cols.clamp(0, u16::MAX as c_int) as u16,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
+        let ws = winsize(cols, rows);
         let _ = libc::ioctl(slave, libc::TIOCSWINSZ, &ws);
     }
 
     let pid = libc::fork();
     if pid < 0 {
-        let e = errno();
-        libc::close(slave);
-        libc::close(master);
-        *errno_location() = e;
-        return -1;
+        return fail_closing(&[slave, master]);
     }
     if pid == 0 {
         // Child. Must use only async-signal-safe APIs in principle,
@@ -307,10 +292,7 @@ pub unsafe extern "C" fn tk_pty_spawn(
 
     // Parent.
     libc::close(slave);
-    let flags = libc::fcntl(master, libc::F_GETFL, 0);
-    if flags >= 0 {
-        let _ = libc::fcntl(master, libc::F_SETFL, flags | libc::O_NONBLOCK);
-    }
+    set_nonblock(master);
     tk_track_child_add(pid as c_int);
     *pid_out = pid as c_int;
     *master_fd_out = master;
@@ -331,12 +313,7 @@ pub extern "C" fn tk_pty_set_winsize(fd: c_int, cols: c_int, rows: c_int) -> c_i
     if fd < 0 {
         return -1;
     }
-    let ws = libc::winsize {
-        ws_row: rows as u16,
-        ws_col: cols as u16,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
+    let ws = winsize(cols, rows);
     if unsafe { libc::ioctl(fd, libc::TIOCSWINSZ, &ws) } < 0 {
         -1
     } else {
@@ -638,6 +615,11 @@ pub extern "C" fn tk_onig_free_one(reg: *mut c_void, region: *mut c_void) -> c_i
         return 0;
     };
     let Some(h) = found else { return 0 };
+    free_handle(&h);
+    1
+}
+
+fn free_handle(h: &OnigHandle) {
     unsafe {
         if !h.region.is_null() {
             onig_region_free(h.region, 1);
@@ -646,7 +628,6 @@ pub extern "C" fn tk_onig_free_one(reg: *mut c_void, region: *mut c_void) -> c_i
             onig_free(h.reg);
         }
     }
-    1
 }
 
 /// Free every tracked handle and clear the registry. Idempotent — a
@@ -659,15 +640,8 @@ pub extern "C" fn tk_onig_free_all() {
     } else {
         return;
     };
-    unsafe {
-        for h in &handles {
-            if !h.region.is_null() {
-                onig_region_free(h.region, 1);
-            }
-            if !h.reg.is_null() {
-                onig_free(h.reg);
-            }
-        }
+    for h in &handles {
+        free_handle(h);
     }
 }
 
@@ -797,10 +771,7 @@ pub unsafe extern "C" fn tk_login_shell_path(out: *mut c_char, cap: c_int) -> c_
     libc::close(devnull);
 
     // Make the read end non-blocking so we can poll with a deadline.
-    let flags = libc::fcntl(read_fd, libc::F_GETFL, 0);
-    if flags >= 0 {
-        let _ = libc::fcntl(read_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-    }
+    set_nonblock(read_fd);
 
     let deadline = monotonic_ms() + LOGIN_SHELL_TIMEOUT_MS;
     let mut captured: Vec<u8> = Vec::with_capacity(4096);
@@ -973,6 +944,17 @@ fn raw_debug_pfx(prefix: &[u8], payload: &[u8]) {
     raw_debug(b"\n");
 }
 
+/// Close ``fds`` and return -1, preserving the ``errno`` of the call that
+/// failed (``close`` may clobber it).
+unsafe fn fail_closing(fds: &[c_int]) -> c_int {
+    let e = errno();
+    for &fd in fds {
+        libc::close(fd);
+    }
+    *errno_location() = e;
+    -1
+}
+
 fn errno() -> c_int {
     unsafe { *errno_location() }
 }
@@ -987,18 +969,3 @@ unsafe fn errno_location() -> *mut c_int {
     libc::__errno_location()
 }
 
-// Silence "unused" warnings for items referenced only via the link
-// sections above.
-#[allow(dead_code)]
-fn _force_links() {
-    let _ = INSTALL_HANDLERS;
-    let _ = AUTO_CLEANUP;
-    let _ = ONIG_AUTO_CLEANUP;
-    // Reference Write and File so the imports don't get flagged when
-    // a future trim removes a direct use.
-    let _: fn() -> Option<()> = || {
-        let mut f = File::create("/dev/null").ok()?;
-        let _ = f.write_all(b"");
-        Some(())
-    };
-}

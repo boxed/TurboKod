@@ -188,9 +188,9 @@ struct OnigRegex(ImplicitlyCopyable, Movable):
     removed runs clean. Don't re-litigate this without a new
     experiment; the 1.0 re-test is already done.
 
-    Cleanup happens via a process-wide registry (``onig_shim.c``):
+    Cleanup happens via a process-wide registry in the Rust shim:
     every ``__init__`` calls ``tk_onig_track`` to record the
-    handle pair, and a ``__attribute__((destructor))`` runs at
+    handle pair, and a ``__mod_term_func`` destructor runs at
     program exit to free them all in one batch. So we don't leak
     *between* sessions — leak detectors stay quiet — and the
     in-session footprint is bounded by ``HighlightCache``'s grammar
@@ -240,8 +240,8 @@ struct OnigRegex(ImplicitlyCopyable, Movable):
         if self._region == 0:
             raise Error("onig_region_new failed (out of memory)")
         # Register the (regex_t*, OnigRegion*) pair with the C-side
-        # process registry (``onig_shim.c``). At program exit a
-        # ``__attribute__((destructor))`` walks the registry and
+        # process registry in the Rust shim. At program exit a
+        # ``__mod_term_func`` destructor walks the registry and
         # frees everything in one shot — the substitute for the
         # per-instance ``__deinit__`` we couldn't safely run from
         # Mojo (see the struct doc-comment for the lifecycle saga).

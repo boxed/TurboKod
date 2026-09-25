@@ -12,7 +12,7 @@ The pty itself is a single bidirectional fd on the parent side — the
 child's stdout *and* stderr (the kernel merges them on the slave
 side, same as a real terminal does). The actual work of opening the
 pty, forking with ``setsid`` + ``TIOCSCTTY``, and ``execvp`` is in
-``process_shim.c`` — see ``tk_pty_spawn`` for why we don't use
+the Rust shim (``app/turbokod-shim``) — see ``tk_pty_spawn`` for why we don't use
 ``posix_spawn`` here.
 """
 

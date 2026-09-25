@@ -48,7 +48,7 @@ from turbokod.grammar_install import (
     find_downloadable_grammar_for_extension
 )
 
-from support import _contains, _hl_lines, _temp_path, setup_test_env
+from support import _hl_lines, _temp_path, setup_test_env
 
 
 def _bytes_of(s: String) -> List[UInt8]:
@@ -713,7 +713,7 @@ def test_lsp_parse_code_lens() raises:
     var lenses = _parse_code_lens(v)
     assert_equal(len(lenses), 1)
     assert_equal(lenses[0].start_line, 0)
-    assert_true(_contains(lenses[0].new_text, String("3 references")))
+    assert_true(String("3 references") in lenses[0].new_text)
     var ed = Editor(String("x\ny\nz"))
     ed.set_code_lens(lenses^)
     assert_equal(len(ed.codelens_notes), 1)
@@ -730,8 +730,8 @@ def test_lsp_parse_signature_help() raises:
         + "],\"activeSignature\":0,\"activeParameter\":1}"
     ))
     var s = _parse_signature_help(v)
-    assert_true(_contains(s, String("foo(a: int, b: str)")))
-    assert_true(_contains(s, String("b: str")))
+    assert_true((String("foo(a: int, b: str)") in s))
+    assert_true(String("b: str") in s)
     # Second signature, no params → just the label.
     var v2 = parse_json(String(
         "{\"signatures\":[{\"label\":\"x()\"},{\"label\":\"y(z)\"}],"
@@ -788,8 +788,8 @@ def test_lsp_server_progress_and_show_message() raises:
     )))
     assert_true(mgr.has_pending_progress())
     var note = mgr.take_progress_note()
-    assert_true(_contains(note, String("indexing")))
-    assert_true(_contains(note, String("42%")))
+    assert_true(String("indexing") in note)
+    assert_true(String("42%") in note)
     assert_true(not mgr.has_pending_progress())
     # ``end`` clears to empty (still flagged so the host hides the note).
     mgr._on_progress(parse_json(String(
@@ -801,7 +801,7 @@ def test_lsp_server_progress_and_show_message() raises:
         "{\"type\":3,\"message\":\"server started\"}"
     )))
     assert_true(mgr.has_pending_server_message())
-    assert_true(_contains(mgr.take_server_message(), String("server started")))
+    assert_true(String("server started") in mgr.take_server_message())
 
 
 def test_lsp_server_supports_reads_capabilities() raises:

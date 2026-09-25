@@ -48,9 +48,7 @@ from turbokod.prompt import Prompt
 from turbokod.terminal import parse_input
 from turbokod.window import Window
 
-from support import (
-    _SCREEN, _contains, _empty_menu, _key, _temp_path, setup_test_env
-)
+from support import _empty_menu, _key, _SCREEN, _temp_path, setup_test_env
 
 
 def _has_spell_mark(ed: Editor) -> Bool:
@@ -76,7 +74,7 @@ def test_hotkeys_page_is_generated_from_registry() raises:
         if len(d._hotkeys[i].help.as_bytes()) == 0:
             continue
         documented += 1
-        assert_true(_contains(text, d._hotkeys[i].help))
+        assert_true(d._hotkeys[i].help in text)
     # Sanity: the registry actually carries documented + doc_only entries
     # (guards against the loop silently doing nothing).
     assert_true(documented > 20)
@@ -138,7 +136,7 @@ def test_hotkey_gate_registers_editor_chords() raises:
     # An arbitrary chord nobody bound is NOT registered — the gate swallows it.
     assert_true(not d._combo_registered(UInt32(ord("b")), MOD_META))
     # The git-change navigation now appears on the Keyboard Shortcuts page.
-    assert_true(_contains(d._hotkeys_help_text(), String("Previous change")))
+    assert_true(String("Previous change") in d._hotkeys_help_text())
 
 
 def test_tab_cell_byte_converters_match_put_text() raises:

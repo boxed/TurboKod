@@ -69,18 +69,9 @@ from turbokod.view import Fill, Label, centered
 from turbokod.window import Window
 
 from support import (
-    _SCREEN, _doc_paths, _docs_contains, _ensure_dir, _key, _ps_open, _rm_rf,
-    _temp_path, setup_test_env,
+    _canvas_row, _doc_paths, _docs_contains, _ensure_dir, _key, _ps_open,
+    _rm_rf, _SCREEN, _temp_path, setup_test_env,
 )
-
-
-def _title_row_text(c: Canvas, y: Int, x0: Int, x1: Int) -> String:
-    """Concatenate the glyphs of canvas row ``y`` over ``[x0, x1)`` so a
-    test can substring-match what's painted on a title bar."""
-    var s = String("")
-    for x in range(x0, x1):
-        s += c.get(x, y).glyph
-    return s
 
 
 def _popup_items_one() -> List[CompletionItem]:
@@ -1204,7 +1195,6 @@ def test_select_all_declines_to_reach_past_a_focused_pane() raises:
     assert_false(d.windows.windows[d.windows.focused].editor.has_selection())
 
 
-
 def test_nav_history_cmd_bracket_keys_fire_dispatch() raises:
     """The Cmd+[ event arrives as ``(0x5B, MOD_META)`` — brackets aren't
     letters so the parser doesn't collapse them to ESC, and Cmd is kept
@@ -1649,7 +1639,7 @@ def test_window_manager_title_hover_reveals_full_path_in_titlebar() raises:
     # No hover: short name on the title row, full path absent.
     var c = Canvas(60, 14)
     wm.paint(c)
-    var row = _title_row_text(c, 2, 2, 52)
+    var row = _canvas_row(c, 2, 2, 52)
     assert_true(row.find(String("hello.mojo")) != -1)
     assert_true(row.find(String("/tmp/proj/hello.mojo")) == -1)
     # Hover the title label, repaint: the full path is now revealed.
@@ -1660,7 +1650,7 @@ def test_window_manager_title_hover_reveals_full_path_in_titlebar() raises:
     assert_equal(wm._title_hover_idx, 0)
     var c2 = Canvas(60, 14)
     wm.paint(c2)
-    var row2 = _title_row_text(c2, 2, 2, 52)
+    var row2 = _canvas_row(c2, 2, 2, 52)
     assert_true(row2.find(String("/tmp/proj/hello.mojo")) != -1)
 
 

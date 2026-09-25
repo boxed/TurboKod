@@ -423,7 +423,7 @@ struct LspProcess(Copyable, Movable):
             _ = chdir_path(saved_cwd)
         _ = posix_spawn_file_actions_destroy(fa)
         # Register the child so it gets SIGTERM if the parent dies on
-        # SIGHUP / SIGTERM / clean exit — see ``process_shim.c``.
+        # SIGHUP / SIGTERM / clean exit — see the Rust shim's child registry.
         track_child(pid)
         # Close the child sides in the parent — the kernel keeps the pipe
         # alive as long as either end is open, so leaving them open here

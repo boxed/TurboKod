@@ -98,46 +98,14 @@ trap restore_term EXIT INT TERM
 #     symbols (used by the TextMate-grammar highlighter via FFI).
 #   * ``DYLD/LD_LIBRARY_PATH=env/lib`` at exec time so the resulting
 #     dylib reference resolves when the binary actually runs.
-# ``pixi info`` is the supported way to ask for the env path; fall back
-# to the conventional location when not available so this still works
-# in CI / headless setups that pre-populate ``.pixi``.
-env_prefix="$(pixi info --json 2>/dev/null \
-  | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["environments_info"][0]["prefix"])' \
-  2>/dev/null)"
-if [ -z "${env_prefix:-}" ]; then
-  env_prefix="$(pwd)/.pixi/envs/default"
-fi
+. scripts/lib.sh
+env_prefix="$(resolve_env_prefix)"
 
-# Native shim:
-#   * ``turbokod-shim``  — Rust staticlib (``app/turbokod-shim``)
-#                          providing pty spawn / non-blocking I/O /
-#                          child registry / listdir / debug-log open
-#                          / libonig handle registry. Replaces the
-#                          old ``process_shim.c`` and ``onig_shim.c``;
-#                          Rust gives us bounds-checking + safer
-#                          allocator semantics that matter for the
-#                          intermittent crashes we chased before.
-# Rebuilds only when its sources are newer than the cached staticlib.
-shim_crate="app/turbokod-shim"
-shim_lib="$shim_crate/target/release/libturbokod_shim.a"
-# Rebuild the Rust shim crate when any of its sources is newer than
-# the resulting staticlib. Cargo would also detect this on its own,
-# but the explicit check lets us print a useful "what triggered the
-# rebuild" line above cargo's normal output.
-shim_needs_build=0
-if [ ! -f "$shim_lib" ]; then
-  shim_needs_build=1
-elif find "$shim_crate/src" "$shim_crate/Cargo.toml" -newer "$shim_lib" \
-        -print -quit 2>/dev/null | grep -q .; then
-  shim_needs_build=1
-fi
-if [ "$shim_needs_build" -eq 1 ]; then
-  echo "[run.sh] building rust shim -> $shim_lib" >&2
-  if ! ( cd "$shim_crate" && cargo build --release ); then
-    echo "[run.sh] rust shim build failed; aborting" >&2
-    exit 1
-  fi
-fi
+# Native shim: the Rust staticlib in ``app/turbokod-shim`` (see
+# scripts/lib.sh). Rust gives us bounds-checking + safer allocator
+# semantics that matter for the intermittent crashes we chased before.
+ensure_shim run.sh || exit 1
+shim_lib="$SHIM_LIB"
 proc_obj="$shim_lib"
 
 if [ "$needs_build" -eq 1 ]; then

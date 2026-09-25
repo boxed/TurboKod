@@ -3,7 +3,7 @@
 Spawns a long-running ``sleep`` child via ``LspProcess.spawn`` (so it
 gets registered in the kill-on-parent-death registry), prints the
 child's PID, then sleeps so the test driver shell script can SIGHUP
-us. The signal handler installed by ``process_shim.c`` should fire,
+us. The signal handler installed by the Rust shim should fire,
 SIGTERM the sleep child, and re-raise SIGHUP to terminate us.
 
 Run via ``tests/sighup_integration.sh`` — that script verifies the

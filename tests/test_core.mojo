@@ -82,25 +82,7 @@ from turbokod.prompt import Prompt
 from turbokod.terminal import parse_input
 from turbokod.window import Window
 
-from support import (
-    _SCREEN, _contains, _empty_menu, _key, _temp_path, setup_test_env
-)
-
-
-def _substring_present(haystack: String, needle: String) -> Bool:
-    var hb = haystack.as_bytes()
-    var nb = needle.as_bytes()
-    if len(nb) > len(hb):
-        return False
-    for i in range(len(hb) - len(nb) + 1):
-        var match_at = True
-        for j in range(len(nb)):
-            if hb[i + j] != nb[j]:
-                match_at = False
-                break
-        if match_at:
-            return True
-    return False
+from support import _empty_menu, _key, _SCREEN, _temp_path, setup_test_env
 
 
 def test_claude_detect_empty_buffer_returns_none() raises:
@@ -320,9 +302,9 @@ def test_attr_to_sgr_plain_underline() raises:
     don't accidentally trigger 4:3 parsing in older terminals."""
     var a = Attr(WHITE, BLUE, STYLE_UNDERLINE)
     var s = attr_to_sgr(a)
-    assert_true(_substring_present(s, String(";4;")))
-    assert_false(_substring_present(s, String(";4:3")))
-    assert_false(_substring_present(s, String(";58;")))
+    assert_true(String(";4;") in s)
+    assert_false(String(";4:3") in s)
+    assert_false(String(";58;") in s)
 
 
 def test_attr_to_sgr_curly_colored_underline() raises:
@@ -331,9 +313,9 @@ def test_attr_to_sgr_curly_colored_underline() raises:
     var a = Attr(WHITE, BLUE, STYLE_UNDERLINE | STYLE_UNDERLINE_CURLY) \
         .with_underline_color(Int16(LIGHT_RED))
     var s = attr_to_sgr(a)
-    assert_true(_substring_present(s, String(";4:3")))
+    assert_true(String(";4:3") in s)
     assert_true(
-        _substring_present(s, String(";58;5;") + String(Int(LIGHT_RED)))
+        ((String(";58;5;") + String(Int(LIGHT_RED))) in s)
     )
 
 
@@ -1110,9 +1092,9 @@ def test_file_indexer_ignored_mode_skips_directory_entries() raises:
     var saw_env = False
     var saw_dir_entry = False
     for i in range(len(got)):
-        if _contains(got[i], String("/.env")):
+        if String("/.env") in got[i]:
             saw_env = True
-        if _contains(got[i], String("node_modules")):
+        if String("node_modules") in got[i]:
             saw_dir_entry = True
     assert_true(saw_env)
     assert_false(saw_dir_entry)

@@ -308,8 +308,8 @@ def delete_tree(path: String, is_dir: Bool) -> Bool:
 def list_directory(path: String) -> List[String]:
     """Names in ``path``. Returns an empty list on error.
 
-    Uses a thin C wrapper around ``opendir``/``readdir`` (declared in
-    ``process_shim.c``). The previous implementation routed through
+    Uses a thin wrapper around ``opendir``/``readdir`` in the Rust shim
+    (``tk_listdir_*``). The previous implementation routed through
     ``std.os.listdir`` which has been observed to segfault in certain
     launch-from-bundle environments where Python interop init differs
     from the developer setup. The C path allocates its own buffer
