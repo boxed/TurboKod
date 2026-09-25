@@ -17,7 +17,7 @@ from turbokod.editor import Editor
 from turbokod.file_dialog import FileDialog
 from turbokod.desktop import (
     APP_QUIT_ACTION, Desktop, EDITOR_FIND, EDITOR_OPEN, EDITOR_QUICK_OPEN,
-    GIT_REVIEW, TARGET_TEST,
+    EDITOR_FIND_SYMBOL, GIT_REVIEW, TARGET_TEST,
     EDITOR_SAVE, WINDOW_CLOSE, ctrl_key
 )
 from turbokod.file_io import read_file, write_file
@@ -1298,9 +1298,27 @@ def test_both_frontends_share_one_menu_definition() raises:
     assert_equal(len(native_actions), len(tui_actions) + 2)
 
 
+def test_opening_a_picker_over_another_hands_it_the_keyboard() raises:
+    """Quick Open, then Find Symbol from the native menu (AppKit sends the
+    key-equivalent straight to ``dispatch_action``, skipping the modal
+    routing that would otherwise swallow it). ``handle_event`` routes
+    input to the first active picker, so Quick Open used to stay open
+    underneath and eat every keystroke meant for Find Symbol."""
+    var d = Desktop()
+    d.detect_project_from(String("examples/hello.mojo"))
+    _ = d.handle_event(Event.key_event(UInt32(ord("o")), MOD_META | MOD_SHIFT), _SCREEN)
+    assert_true(d.quick_open.active)
+    _ = d.dispatch_action(EDITOR_FIND_SYMBOL, _SCREEN)
+    assert_false(d.quick_open.active)
+    assert_true(d.find_symbol.active)
+    _ = d.handle_event(Event.key_event(UInt32(ord("x"))), _SCREEN)
+    assert_equal(d.find_symbol.query.text, String("x"))
+
+
 def main() raises:
     setup_test_env()
     test_both_frontends_share_one_menu_definition()
+    test_opening_a_picker_over_another_hands_it_the_keyboard()
     test_hotkeys_page_is_generated_from_registry()
     test_hotkey_gate_registers_editor_chords()
     test_tab_cell_byte_converters_match_put_text()
@@ -1348,4 +1366,4 @@ def main() raises:
     test_floating_panel_title_command_click_beats_splitter()
     test_floating_panel_minimize_bottom_keeps_one_row()
     test_floating_panel_minimize_top_keeps_one_row()
-    print("chrome: 47 tests passed")
+    print("chrome: 48 tests passed")

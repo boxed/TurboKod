@@ -8399,6 +8399,7 @@ struct Desktop(Movable):
                 # Seed the picker with the focused editor's selection (when
                 # single-line) so Quick Open opens pre-searched for whatever
                 # the user just highlighted, fully selected for easy replace.
+                self._close_pickers()
                 self.quick_open.open(
                     self.project.value(), self._selection_seed_for_search(),
                 )
@@ -8599,6 +8600,7 @@ struct Desktop(Movable):
                         prefill = project_relative(
                             root, path, canonicalize=True,
                         )
+                self._close_pickers()
                 self.quick_open.open_for_history(root^, prefill^)
             return Optional[String]()
         if action == GIT_OPEN_ALL_CHANGED:
@@ -8724,6 +8726,7 @@ struct Desktop(Movable):
                     self.windows.add(_rg_missing_window())
                 else:
                     var prefill = self._selection_seed_for_search()
+                    self._close_pickers()
                     self.project_find.open(
                         self.project.value(), prefill,
                         select_prefill=True,
@@ -8734,6 +8737,7 @@ struct Desktop(Movable):
                 if len(which(String("rg")).as_bytes()) == 0:
                     self.windows.add(_rg_missing_window())
                 else:
+                    self._close_pickers()
                     self.project_find.open_replace(
                         self.project.value(),
                         self._selection_seed_for_search(),
@@ -11923,6 +11927,7 @@ struct Desktop(Movable):
         var root = String("")
         if self.project:
             root = self.project.value()
+        self._close_pickers()
         self.reference_pick.open(refs^, word, root^)
 
     def _compute_subdued_windows(self) -> List[Bool]:
@@ -12213,6 +12218,7 @@ struct Desktop(Movable):
             abs_entries.append(p)
         if len(rel_entries) == 0:
             return
+        self._close_pickers()
         self.quick_open.open_recent(root, rel_entries^, abs_entries^)
 
     # --- editor-action helpers --------------------------------------------
@@ -12319,6 +12325,30 @@ struct Desktop(Movable):
                 self.windows.windows[idx].interior(),
                 margin_below=10, margin_above=10,
             )
+
+    def _close_pickers(mut self):
+        """Close every list picker (Quick Open, Go to Symbol, references,
+        Find Symbol, docs, Find in Project) before opening another. They
+        share one modal slot: ``handle_event`` routes input to the first
+        active one, so a second picker opened on top — which a native
+        menu key-equivalent can do, since AppKit dispatches it straight to
+        the action — would render but never receive a keystroke."""
+        if self.quick_open.active:
+            self.quick_open.close()
+        if self.symbol_pick.active:
+            self.symbol_pick.close()
+        if self.reference_pick.active:
+            self.reference_pick.close()
+        if self.find_symbol.active:
+            self.find_symbol.close()
+            self._find_symbol_pending_lsps = List[Int]()
+            self._find_symbol_collected = List[WorkspaceSymbolItem]()
+            self._find_symbol_hit_path = String("")
+            self._find_symbol_qualifier = String("")
+        if self.doc_pick.active:
+            self.doc_pick.close()
+        if self.project_find.active:
+            self.project_find.close()
 
     def _selection_seed_for_search(self) -> String:
         """Return the focused editor's current selection if it's
@@ -12765,6 +12795,7 @@ struct Desktop(Movable):
             path, text^,
         )
         if ok:
+            self._close_pickers()
             self.symbol_pick.open(path)
 
     # --- Find Symbol: index maintenance + query routing ------------------
@@ -12899,6 +12930,7 @@ struct Desktop(Movable):
         # this call itself is only the ``git ls-files`` walk.
         self._prepare_symbol_index()
         var prefill = self._selection_seed_for_search()
+        self._close_pickers()
         self.find_symbol.open(
             self.project.value(), prefill,
             select_prefill=True,
@@ -13301,6 +13333,7 @@ struct Desktop(Movable):
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
             return True
+        self._close_pickers()
         self.doc_pick.open(
             spec.display, self.doc_stores[store_idx].entries.copy(),
         )
@@ -13615,6 +13648,7 @@ struct Desktop(Movable):
             )
             # Open the picker now — the user just opted in to docs, so
             # taking them straight to the listing is the obvious follow-up.
+            self._close_pickers()
             self.doc_pick.open(
                 spec.display, self.doc_stores[store_idx].entries.copy(),
             )
