@@ -24,53 +24,23 @@ from std.sys import size_of
 
 from turbokod.canvas import Canvas
 from turbokod.colors import default_attr
-from turbokod.events import (
-    Event, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT, KEY_DOWN, KEY_LEFT,
-    KEY_RIGHT, KEY_UP,
-)
+from turbokod.events import Event, MOD_CTRL, MOD_META
 from turbokod.geometry import Point, Rect
-from turbokod.menu import Menu, MenuItem
 from turbokod.posix import (
     getenv_value, prepend_user_bin_dirs_to_path, recover_path_deferred_once,
 )
-from turbokod.string_utils import (
-    codepoint_at, escape_drop_paths, split_lines_no_trailing,
-)
+from turbokod.string_utils import escape_drop_paths, split_lines_no_trailing
 from turbokod.theme import theme_by_name
 from turbokod.desktop import (
-    Desktop,
-    APP_QUIT_ACTION, APP_SETTINGS,
-    DEBUG_ADD_WATCH, DEBUG_CONDITIONAL_BP, DEBUG_START_OR_CONTINUE,
-    DEBUG_STEP_IN, DEBUG_STEP_OUT, DEBUG_STEP_OVER, DEBUG_STOP,
-    DEBUG_TOGGLE_BREAKPOINT, DEBUG_TOGGLE_RAISED,
-    DEBUG_FOCUS_PANE,
-    EDITOR_COMPARE_CLIPBOARD, EDITOR_COPY, EDITOR_CUT, EDITOR_FILL,
-    EDITOR_FIND, EDITOR_FIND_NEXT, EDITOR_FIND_PREV, EDITOR_FIND_SYMBOL,
-    EDITOR_GOTO,
-    EDITOR_GOTO_SYMBOL, EDITOR_LOOKUP_DOCS, EDITOR_NEW, EDITOR_OPEN,
-    EDITOR_FORMAT_DOCUMENT, EDITOR_FORMAT_SELECTION,
-    EDITOR_GOTO_DECL, EDITOR_GOTO_IMPL, EDITOR_GOTO_TYPE_DEF,
-    EDITOR_NAV_BACK, EDITOR_NAV_FORWARD,
-    EDITOR_OPEN_RECENT, EDITOR_PASTE, EDITOR_QUICK_OPEN, EDITOR_REDO,
-    EDITOR_RENAME_SYMBOL,
-    EDITOR_REPLACE, EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_SELECT_ALL,
-    EDITOR_TOGGLE_BLAME,
-    EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT, EDITOR_TOGGLE_COMPRESS_KWARGS,
-    EDITOR_TOGGLE_GIT_CHANGES,
-    EDITOR_TOGGLE_LINE_NUMBERS, EDITOR_TOGGLE_MINIMAP,
-    EDITOR_TOGGLE_STICKY_SCROLL,
-    EDITOR_TOGGLE_TAB_BAR, EDITOR_UNDO,
-    FILE_TREE_FOCUS, FILE_TREE_REVEAL,
-    GIT_HISTORY_FILE, GIT_HISTORY_SELECTION, GIT_LOCAL_CHANGES,
-    GIT_OPEN_ALL_CHANGED, GIT_REVIEW,
-    HELP_HOTKEYS,
-    PROJECT_FIND, PROJECT_OPEN, PROJECT_REPLACE, PROJECT_TREE_ACTION,
-    TARGET_RUN, TARGET_TEST, TERMINAL_CLAUDE, TERMINAL_NEW,
-    WINDOW_CLOSE, WINDOW_CLOSE_ALL,
-    WINDOW_ROTATE_NEXT, WINDOW_ROTATE_PREV,
-    synth_key_action,
+    Desktop, APP_QUIT_ACTION, EDITOR_OPEN, EDITOR_PASTE, EDITOR_QUICK_OPEN,
+    PROJECT_OPEN,
 )
 
+from turbokod.host_abi import (
+    ACT_CLOSE_WINDOW, ACT_NEW_WINDOW, ACT_NONE, ACT_OPEN_FILE,
+    ACT_OPEN_PROJECT, ACT_QUICK_OPEN, ACT_QUIT, ACT_TOGGLE_FLOATING_PANELS,
+    pack_canvas, shape_code,
+)
 from turbokod.app_menus import (
     build_menus, NEW_WINDOW, refresh_menu_visibility, TOGGLE_FLOATING_PANELS,
 )
@@ -80,26 +50,27 @@ from turbokod.app_menus import (
 # the host owns the menu (one-project-per-window on macOS). Mirrors
 # ``desktop._HOST_CLOSE_WINDOW_ACTION``.
 comptime CLOSE_WINDOW = String("app.close_window")
-# Action codes returned to Swift. Everything else is handled inside Desktop.
-comptime ACT_NONE                   = Int32(0)
-comptime ACT_QUIT                   = Int32(1)
-comptime ACT_OPEN_FILE              = Int32(2)
-comptime ACT_QUICK_OPEN             = Int32(3)
-comptime ACT_OPEN_PROJECT           = Int32(4)
-comptime ACT_NEW_WINDOW             = Int32(5)
-comptime ACT_CLOSE_WINDOW           = Int32(6)
-comptime ACT_TOGGLE_FLOATING_PANELS = Int32(7)
-
-# Mouse-button ids Swift passes (match events.mojo MOUSE_*).
-comptime _MB_LEFT       = UInt8(1)
-comptime _MB_MIDDLE     = UInt8(2)
-comptime _MB_RIGHT      = UInt8(3)
-comptime _MB_WHEEL_UP   = UInt8(4)
-comptime _MB_WHEEL_DOWN = UInt8(5)
-
 
 def _desk(h: Int) -> Pointer[Desktop, MutUntrackedOrigin]:
     return Pointer[Desktop, MutUntrackedOrigin](unsafe_from_address=h)
+
+
+def _mouse_event(
+    x: Int, y: Int, button: UInt8, pressed: UInt8, motion: UInt8,
+    mods: UInt8, click_count: UInt8,
+) -> Event:
+    """The ``Event`` for a host mouse callback (C booleans as ``UInt8``)."""
+    return Event.mouse_event(
+        Point(x, y), button, pressed != 0, motion != 0, mods, click_count,
+    )
+
+
+def _blank_canvas(cols: Int, rows: Int) -> Canvas:
+    """A ``cols``x``rows`` canvas cleared to the default attribute, ready
+    for one surface's paint."""
+    var canvas = Canvas(cols, rows)
+    canvas.clear(default_attr())
+    return canvas^
 
 
 def _string_from(ptr: Int, n: Int) -> String:
@@ -327,49 +298,15 @@ def tk_desktop_tick(h: Int, cols: Int, rows: Int) abi("C"):
     d.save_actions_tick()
 
 
-def _pack_canvas(imm canvas: Canvas, cols: Int, rows: Int, out_ptr: Int, cap: Int) -> Int:
-    """Pack a laid-out canvas into the caller's ``UInt32`` buffer, 5 words
-    per cell (``[codepoint, fg|bg<<8|style<<16|color_mode<<24, underline,
-    fg_rgb, bg_rgb]``). Returns the number of cells written (clamped to
-    ``cap``). Shared by the main and the floating-panels layout entry points
-    so the packing format stays in one place."""
-    var op = Pointer[UInt32, MutUntrackedOrigin](unsafe_from_address=out_ptr)
-    var n = cols * rows
-    if n > cap:
-        n = cap
-    for i in range(n):
-        var cell = canvas.cells[i]
-        var cp = codepoint_at(cell.glyph, 0)[0]
-        if cp <= 0:
-            cp = 0x20
-        var attr = cell.attr
-        var w1 = UInt32(Int(attr.fg)) \
-            | (UInt32(Int(attr.bg)) << 8) \
-            | (UInt32(Int(attr.style)) << 16) \
-            | (UInt32(Int(attr.color_mode)) << 24)
-        var w2: UInt32
-        if attr.underline_color < 0:
-            w2 = UInt32(0xFFFFFFFF)
-        else:
-            w2 = UInt32(Int(attr.underline_color))
-        op[unsafe_offset=i * 5] = UInt32(cp)
-        op[unsafe_offset=i * 5 + 1] = w1
-        op[unsafe_offset=i * 5 + 2] = w2
-        op[unsafe_offset=i * 5 + 3] = attr.fg_rgb
-        op[unsafe_offset=i * 5 + 4] = attr.bg_rgb
-    return n
-
-
 @export
 def tk_desktop_layout(h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     """Paint the Desktop into a ``cols``x``rows`` grid and pack it into the
     caller's buffer (5 u32 per cell). Returns the number of cells written."""
     if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
         return 0
-    var canvas = Canvas(cols, rows)
-    canvas.clear(default_attr())
+    var canvas = _blank_canvas(cols, rows)
     _desk(h)[].paint(canvas, Rect(0, 0, cols, rows))
-    return _pack_canvas(canvas, cols, rows, out_ptr, cap)
+    return pack_canvas(canvas, cols, rows, out_ptr, cap)
 
 
 @export
@@ -424,12 +361,11 @@ def tk_editor_region_layout(
     by ``(sub + frac) × CELL_H``. Returns the number of cells written."""
     if h == 0 or out_ptr == 0 or region_cols <= 0 or region_rows <= 0:
         return 0
-    var canvas = Canvas(region_cols, region_rows)
-    canvas.clear(default_attr())
+    var canvas = _blank_canvas(region_cols, region_rows)
     _desk(h)[].paint_editor_region(
         win_idx, canvas, region_cols, region_rows, True,
     )
-    return _pack_canvas(canvas, region_cols, region_rows, out_ptr, cap)
+    return pack_canvas(canvas, region_cols, region_rows, out_ptr, cap)
 
 
 @export
@@ -702,10 +638,9 @@ def tk_desktop_layout_panels(
     drives the whole Desktop's per-frame work for both surfaces."""
     if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
         return 0
-    var canvas = Canvas(cols, rows)
-    canvas.clear(default_attr())
+    var canvas = _blank_canvas(cols, rows)
     _desk(h)[].paint_panels(canvas, Rect(0, 0, cols, rows))
-    return _pack_canvas(canvas, cols, rows, out_ptr, cap)
+    return pack_canvas(canvas, cols, rows, out_ptr, cap)
 
 
 @export
@@ -739,9 +674,7 @@ def tk_desktop_panels_mouse(
     ``handle_panels_event``."""
     if h == 0:
         return ACT_NONE
-    var ev = Event.mouse_event(
-        Point(x, y), button, pressed != 0, motion != 0, mods, click_count,
-    )
+    var ev = _mouse_event(x, y, button, pressed, motion, mods, click_count)
     var action: Optional[String]
     try:
         action = _desk(h)[].handle_panels_event(ev, Rect(0, 0, cols, rows))
@@ -759,11 +692,7 @@ def tk_desktop_panels_pointer_shape(
     if h == 0:
         return Int32(0)
     var shape = _desk(h)[].pointer_shape_panels(Point(x, y), Rect(0, 0, cols, rows))
-    if shape == String("text"):
-        return Int32(1)
-    if shape == String("pointer"):
-        return Int32(2)
-    return Int32(0)
+    return shape_code(shape)
 
 
 @export
@@ -916,10 +845,9 @@ def tk_desktop_layout_settings(
     ``tk_desktop_layout``). Returns the number of cells written."""
     if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
         return 0
-    var canvas = Canvas(cols, rows)
-    canvas.clear(default_attr())
+    var canvas = _blank_canvas(cols, rows)
     _desk(h)[].paint_settings(canvas, Rect(0, 0, cols, rows))
-    return _pack_canvas(canvas, cols, rows, out_ptr, cap)
+    return pack_canvas(canvas, cols, rows, out_ptr, cap)
 
 
 @export
@@ -946,9 +874,7 @@ def tk_desktop_settings_mouse(
     """Route a mouse event from the settings window into the Settings view."""
     if h == 0:
         return ACT_NONE
-    var ev = Event.mouse_event(
-        Point(x, y), button, pressed != 0, motion != 0, mods, click_count,
-    )
+    var ev = _mouse_event(x, y, button, pressed, motion, mods, click_count)
     _desk(h)[].handle_settings_event(ev, Rect(0, 0, cols, rows))
     return ACT_NONE
 
@@ -1000,10 +926,9 @@ def tk_desktop_layout_project_settings(
     Returns the number of cells written."""
     if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
         return 0
-    var canvas = Canvas(cols, rows)
-    canvas.clear(default_attr())
+    var canvas = _blank_canvas(cols, rows)
     _desk(h)[].paint_project_settings(canvas, Rect(0, 0, cols, rows))
-    return _pack_canvas(canvas, cols, rows, out_ptr, cap)
+    return pack_canvas(canvas, cols, rows, out_ptr, cap)
 
 
 @export
@@ -1029,9 +954,7 @@ def tk_desktop_project_settings_mouse(
     """Route a mouse event from the Project Settings window into the view."""
     if h == 0:
         return ACT_NONE
-    var ev = Event.mouse_event(
-        Point(x, y), button, pressed != 0, motion != 0, mods, click_count,
-    )
+    var ev = _mouse_event(x, y, button, pressed, motion, mods, click_count)
     _desk(h)[].handle_project_settings_event(ev, Rect(0, 0, cols, rows))
     return ACT_NONE
 
@@ -1082,9 +1005,7 @@ def tk_desktop_mouse(
 ) abi("C") -> Int32:
     if h == 0:
         return ACT_NONE
-    var ev = Event.mouse_event(
-        Point(x, y), button, pressed != 0, motion != 0, mods, click_count,
-    )
+    var ev = _mouse_event(x, y, button, pressed, motion, mods, click_count)
     var action: Optional[String]
     try:
         action = _desk(h)[].handle_event(ev, Rect(0, 0, cols, rows))
@@ -1100,11 +1021,7 @@ def tk_desktop_pointer_shape(h: Int, x: Int, y: Int, cols: Int, rows: Int) abi("
     if h == 0:
         return Int32(0)
     var shape = _desk(h)[].pointer_shape_at(Point(x, y), Rect(0, 0, cols, rows))
-    if shape == String("text"):
-        return Int32(1)
-    if shape == String("pointer"):
-        return Int32(2)
-    return Int32(0)
+    return shape_code(shape)
 
 
 @export
@@ -1205,13 +1122,6 @@ def tk_desktop_paste_clipboard_text(h: Int, text_ptr: Int, text_len: Int) abi("C
         return Int32(0)
     var text = _string_from(text_ptr, text_len)
     return Int32(1) if _desk(h)[].paste_text_into_focus(text) else Int32(0)
-
-
-@export
-def tk_desktop_has_project(h: Int) abi("C") -> Int32:
-    if h == 0:
-        return Int32(0)
-    return Int32(1) if _desk(h)[].project else Int32(0)
 
 
 @export

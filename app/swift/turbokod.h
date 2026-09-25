@@ -118,7 +118,6 @@ int32_t tk_desktop_paste_text(int64_t h, int64_t text_ptr, int64_t text_len);
 // — the host-driven counterpart to in-core Cmd+V. Used for normal text paste
 // so macOS's decomposed pasteboard text (a + U+030A) becomes precomposed (å).
 int32_t tk_desktop_paste_clipboard_text(int64_t h, int64_t text_ptr, int64_t text_len);
-int32_t tk_desktop_has_project(int64_t h);
 void    tk_desktop_set_host_owns_menu(int64_t h, int64_t on);
 // When on, the host draws the editor body popups' drop shadows as a real
 // translucent layer over the live (smooth-scrolled) text; the core stops

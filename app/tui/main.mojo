@@ -16,9 +16,11 @@ loads). By linking the single bundled ``libturbokod.dylib`` and calling its C
 ABI, this binary stays tiny and shares one copy of the core.
 
 Imports are kept to the light, frontend-side modules only (``app``,
-``cell``, ``colors``, ``events``, ``file_dialog``, ``file_io``, ``geometry``,
-``posix`` — none of which pull in ``desktop``/``editor``/``highlight``). The
-heavy core is behind the dylib.
+``colors``, ``events``, ``file_dialog``, ``file_io``, ``geometry``,
+``host_abi``, ``posix``, ``string_utils`` — none of which pull in
+``desktop``/``editor``/``highlight``). The heavy core is behind the dylib;
+``host_abi`` holds the wire format (action codes, cell packing) both sides
+share.
 
 The per-frame contract mirrors the Swift host: ``tk_desktop_tick`` (which does
 external-file reload, menu-visibility, file-tree opens, and LSP/DAP/autosave
@@ -34,14 +36,16 @@ from std.ffi import external_call
 from std.sys import argv
 
 from turbokod.app import Application
-from turbokod.canvas import Canvas
-from turbokod.cell import Cell
 from turbokod.colors import Attr, BLACK, LIGHT_GRAY
 from turbokod.events import (
     EVENT_KEY, EVENT_MOUSE, EVENT_MOD_KEY, EVENT_OPEN_PATH, EVENT_PASTE,
     EVENT_RESIZE,
 )
 from turbokod.file_dialog import FileDialog
+from turbokod.host_abi import (
+    ACT_OPEN_FILE, ACT_OPEN_PROJECT, ACT_QUICK_OPEN, ACT_QUIT, CELL_WORDS,
+    shape_name, unpack_into,
+)
 from turbokod.file_io import parent_path, stat_file
 from turbokod.geometry import Point, Rect
 from turbokod.string_utils import display_columns, split_open_arg
@@ -50,18 +54,7 @@ from turbokod.posix import (
 )
 
 
-# ---------------------------------------------------------------------------
-# C ABI action codes — mirror ``native_api.mojo`` (the ``ACT_*`` constants).
-# Only the ones this host acts on are listed; everything else is a no-op.
-# ---------------------------------------------------------------------------
-comptime ACT_QUIT         = Int32(1)
-comptime ACT_OPEN_FILE    = Int32(2)
-comptime ACT_QUICK_OPEN   = Int32(3)
-comptime ACT_OPEN_PROJECT = Int32(4)
 
-# 5 UInt32 per cell in the layout buffer (see ``_pack_canvas`` in native_api):
-# [codepoint, fg|bg<<8|style<<16|color_mode<<24, underline_color, fg_rgb, bg_rgb].
-comptime CELL_WORDS = 5
 
 # Teardown pacing (see ``_shutdown_with_notice``). Servers almost always
 # answer ``shutdown`` well inside the quiet window, so quitting stays
@@ -223,53 +216,6 @@ def _push_palette(h: Int, mut app: Application):
     app.set_palette(pal)
 
 
-def _shape_name(code: Int32) -> String:
-    if code == Int32(1):
-        return String("text")
-    if code == Int32(2):
-        return String("pointer")
-    return String("default")
-
-
-def _unpack_into(buf: List[UInt32], n: Int, mut canvas: Canvas):
-    """Reconstruct the back canvas from the packed layout buffer.
-
-    The pack drops ``Cell.width`` (it only carries a codepoint), so we
-    recompute it: ``Cell(glyph, attr)`` derives width via ``cell_width`` (2 for
-    emoji), and we force the cell *after* a width-2 glyph to be a width-0
-    continuation — exactly the shape ``Terminal.present`` expects (it skips
-    width-0 cells and advances two columns for width-2). Attr fields are set
-    directly (not via the ``with_*_rgb`` builders) so we mirror precisely what
-    the core packed, with no re-derivation."""
-    var ci = 0
-    while ci < n:
-        var base = ci * CELL_WORDS
-        var cp = Int(buf[base])
-        if cp <= 0:
-            cp = 0x20
-        var w1 = buf[base + 1]
-        var w2 = buf[base + 2]
-        var attr = Attr()
-        attr.fg = UInt8(w1 & 0xFF)
-        attr.bg = UInt8((w1 >> 8) & 0xFF)
-        attr.style = UInt8((w1 >> 16) & 0xFF)
-        attr.color_mode = UInt8((w1 >> 24) & 0xFF)
-        if w2 == UInt32(0xFFFFFFFF):
-            attr.underline_color = Int16(-1)
-        else:
-            attr.underline_color = Int16(Int(w2 & 0xFFFF))
-        attr.fg_rgb = buf[base + 3]
-        attr.bg_rgb = buf[base + 4]
-        var cell = Cell(chr(cp), attr)
-        canvas.cells[ci] = cell
-        if cell.width == 2:
-            if ci + 1 < n:
-                canvas.cells[ci + 1] = Cell(String(""), attr, 0)
-            ci += 2
-        else:
-            ci += 1
-
-
 def main() raises:
     # Absolutize file args against the launch cwd *before* we chdir into the
     # bundle's Resources dir; keep the optional ``\x1f<line>`` jump suffix.
@@ -334,7 +280,7 @@ def main() raises:
             buf_cells = n
 
         var written = _tk_layout(h, cols, rows, Int(layout_buf.unsafe_ptr()), n)
-        _unpack_into(layout_buf, written, app.back)
+        unpack_into(layout_buf, written, app.back)
 
         if file_dialog.active:
             file_dialog.paint(app.back, app.screen())
@@ -355,7 +301,7 @@ def main() raises:
         if ev.kind == EVENT_MOUSE and not file_dialog.active:
             try:
                 app.terminal.set_pointer_shape(
-                    _shape_name(_tk_pointer_shape(h, ev.pos.x, ev.pos.y, cols, rows))
+                    shape_name(_tk_pointer_shape(h, ev.pos.x, ev.pos.y, cols, rows))
                 )
             except:
                 pass
