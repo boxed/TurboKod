@@ -2455,21 +2455,7 @@ struct Editor(Copyable, Movable):
         hint; ``diagnostic_lines[i]`` carries the winning severity
         (or 0 for "clean") so the right-side minimap can color a row
         without re-scanning the whole list."""
-        var n_lines = self.buffer.line_count()
-        var per_row = List[Int]()
-        for _ in range(n_lines):
-            per_row.append(0)
-        for i in range(len(diags)):
-            var d = diags[i]
-            if d.start_row < 0 or d.start_row >= n_lines:
-                continue
-            var sev = d.severity
-            if sev <= 0:
-                continue
-            # Lower numeric value wins (1=Error beats 2=Warning).
-            var prev = per_row[d.start_row]
-            if prev == 0 or sev < prev:
-                per_row[d.start_row] = sev
+        var per_row = self._diagnostic_row_index(diags)
         self.diagnostics = diags^
         self.diagnostic_lines = per_row^
 
@@ -2537,20 +2523,7 @@ struct Editor(Copyable, Movable):
             d.end_row += line_delta
             kept.append(d)
         self.diagnostics = kept^
-        var n_lines = self.buffer.line_count()
-        var per_row = List[Int]()
-        for _ in range(n_lines):
-            per_row.append(0)
-        for i in range(len(self.diagnostics)):
-            var d = self.diagnostics[i]
-            if d.start_row < 0 or d.start_row >= n_lines:
-                continue
-            var sev = d.severity
-            if sev <= 0:
-                continue
-            var prev = per_row[d.start_row]
-            if prev == 0 or sev < prev:
-                per_row[d.start_row] = sev
+        var per_row = self._diagnostic_row_index(self.diagnostics)
         self.diagnostic_lines = per_row^
 
     def consume_lsp_dirty(mut self, now_ms: Int = 0) -> Bool:
@@ -3600,6 +3573,38 @@ struct Editor(Copyable, Movable):
                 )
         return Optional[SpellActionRequest]()
 
+    def _best_diagnostic_at(self, row: Int, col: Int) -> Int:
+        """Index of the most severe diagnostic covering ``(row, col)``, or
+        -1. ``severity`` is the LSP integer (1=Error, …, 4=Hint) — lowest
+        wins, so an error squiggle isn't masked by an info hint that
+        happens to overlap it. Shared by Alt+Enter, right-click and the
+        hover tooltip so they agree on which diagnostic they pick."""
+        var best = -1
+        for d in range(len(self.diagnostics)):
+            if not _diag_covers_cell(self.diagnostics[d], row, col):
+                continue
+            if best < 0 or self.diagnostics[d].severity \
+                    < self.diagnostics[best].severity:
+                best = d
+        return best
+
+    def _diagnostic_row_index(self, diags: List[Diagnostic]) -> List[Int]:
+        """Per buffer row, the most severe diagnostic severity starting on
+        it (0 = clean) — what the minimap colors a row by."""
+        var n_lines = self.buffer.line_count()
+        var per_row = List[Int]()
+        for _ in range(n_lines):
+            per_row.append(0)
+        for i in range(len(diags)):
+            var row = diags[i].start_row
+            var sev = diags[i].severity
+            if row < 0 or row >= n_lines or sev <= 0:
+                continue
+            # Lower numeric value wins (1=Error beats 2=Warning).
+            if per_row[row] == 0 or sev < per_row[row]:
+                per_row[row] = sev
+        return per_row^
+
     def diagnostic_at_cursor(self) -> Optional[Diagnostic]:
         """Return the most-severe diagnostic whose range covers the
         current cursor position, or ``None`` if the cursor isn't inside
@@ -3609,15 +3614,9 @@ struct Editor(Copyable, Movable):
         same cell. ``severity`` is the LSP integer (1=Error, …, 4=Hint)
         — lowest wins so an error squiggle isn't masked by an info hint
         that happens to overlap it."""
-        var best_idx = -1
-        var best_sev = 0
-        for d in range(len(self.diagnostics)):
-            var diag = self.diagnostics[d]
-            if not _diag_covers_cell(diag, self.selections[0].row, self.selections[0].col):
-                continue
-            if best_idx < 0 or diag.severity < best_sev:
-                best_idx = d
-                best_sev = diag.severity
+        var best_idx = self._best_diagnostic_at(
+            self.selections[0].row, self.selections[0].col,
+        )
         if best_idx < 0:
             return Optional[Diagnostic]()
         return Optional[Diagnostic](self.diagnostics[best_idx])
@@ -4995,15 +4994,7 @@ struct Editor(Copyable, Movable):
         # Diagnostic hit test. Pick the lowest-severity-numbered (most
         # severe) match on this cell so an error squiggle isn't masked
         # by an info hint that happens to overlap it.
-        var best_diag_idx = -1
-        var best_diag_sev = 0
-        for d in range(len(self.diagnostics)):
-            var diag = self.diagnostics[d]
-            if not _diag_covers_cell(diag, row, byte_col):
-                continue
-            if best_diag_idx < 0 or diag.severity < best_diag_sev:
-                best_diag_idx = d
-                best_diag_sev = diag.severity
+        var best_diag_idx = self._best_diagnostic_at(row, byte_col)
         if best_diag_idx >= 0:
             var diag = self.diagnostics[best_diag_idx]
             var kind = _diag_severity_to_minimap_kind(diag.severity)
@@ -5145,15 +5136,7 @@ struct Editor(Copyable, Movable):
         var rc = resolved.value()
         var row = rc[0]
         var byte_col = rc[1]
-        var best_idx = -1
-        var best_sev = 0
-        for d in range(len(self.diagnostics)):
-            var diag = self.diagnostics[d]
-            if not _diag_covers_cell(diag, row, byte_col):
-                continue
-            if best_idx < 0 or diag.severity < best_sev:
-                best_idx = d
-                best_sev = diag.severity
+        var best_idx = self._best_diagnostic_at(row, byte_col)
         if best_idx < 0:
             return False
         var diag = self.diagnostics[best_idx]
