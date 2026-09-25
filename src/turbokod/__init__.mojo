@@ -166,9 +166,10 @@ from .project import (
 from .project_find import ProjectFind
 from .project_targets import (
     ProjectTargets, RunTarget,
-    detect_project_language,
+    detect_project_language, join_env_field,
     load_project_targets, resolve_python_interpreter, resolved_cwd,
-    resolved_program, save_project_targets, write_all_targets,
+    resolved_program, save_project_targets, split_env_entry,
+    split_env_field, write_all_targets,
 )
 from .project_settings import ProjectSettings
 from .run_manager import (

@@ -57,7 +57,9 @@ from .highlight import bundled_grammar_languages
 from .language_config import built_in_servers
 from .project_grammars import GrammarOverride
 from .project_on_save import on_save_equal
-from .project_targets import ProjectTargets, RunTarget
+from .project_targets import (
+    ProjectTargets, RunTarget, join_env_field, split_env_field,
+)
 from .text_field import TextField
 from .type_ahead import TypeAhead, is_type_ahead_key, type_ahead_pick
 from .window import paint_window_title
@@ -94,6 +96,9 @@ comptime _FOCUS_GR_EXT     = UInt8(15)
 comptime _FOCUS_GR_LANG    = UInt8(16)
 comptime _FOCUS_GR_ADD     = UInt8(17)
 comptime _FOCUS_GR_REMOVE  = UInt8(18)
+# Appended after the grammars block so the earlier discriminants (which
+# tests spell out numerically) keep their values.
+comptime _FOCUS_TG_ENV     = UInt8(19)
 
 
 # --- button table indices -------------------------------------------------
@@ -112,7 +117,7 @@ comptime _BTN_GR_REMOVE  = 7
 
 comptime _SECTION_W = 14
 comptime _PS_MIN_W  = 70
-comptime _PS_MIN_H  = 18
+comptime _PS_MIN_H  = 21
 
 
 def _section_labels() -> List[String]:
@@ -245,6 +250,7 @@ struct ProjectSettings(Movable):
     var program_tf: TextField
     var args_tf: TextField
     var cwd_tf: TextField
+    var env_tf: TextField
     var tg_lang_dropdown: Dropdown
     var _tg_lang_anchor: Rect
 
@@ -296,6 +302,7 @@ struct ProjectSettings(Movable):
         self.program_tf = TextField()
         self.args_tf = TextField()
         self.cwd_tf = TextField()
+        self.env_tf = TextField()
         self.tg_lang_dropdown = _build_lang_dropdown(String(""))
         self._tg_lang_anchor = Rect(0, 0, 0, 0)
         self.grammars = List[GrammarOverride]()
@@ -561,6 +568,7 @@ struct ProjectSettings(Movable):
             self.program_tf = TextField()
             self.args_tf = TextField()
             self.cwd_tf = TextField()
+            self.env_tf = TextField()
             self.tg_lang_dropdown = _build_lang_dropdown(String(""))
             return
         var t = self.targets.targets[self.selected_tg].copy()
@@ -572,6 +580,8 @@ struct ProjectSettings(Movable):
         self.args_tf.set_text(_join_args(t.args))
         self.cwd_tf = TextField()
         self.cwd_tf.set_text(t.cwd)
+        self.env_tf = TextField()
+        self.env_tf.set_text(join_env_field(t.env))
         self.tg_lang_dropdown = _build_lang_dropdown(t.debug_language)
 
     def _tg_commit_fields(mut self):
@@ -582,6 +592,7 @@ struct ProjectSettings(Movable):
         t.program = self.program_tf.text
         t.args = _split_args(self.args_tf.text)
         t.cwd = self.cwd_tf.text
+        t.env = split_env_field(self.env_tf.text)
         self.targets.targets[self.selected_tg] = t^
         self.targets_dirty = True
 
@@ -767,6 +778,8 @@ struct ProjectSettings(Movable):
             if w > 104:
                 w = 104
             h = ws.height() - 4
+            if h < _PS_MIN_H:
+                h = _PS_MIN_H
             if h > 30:
                 h = 30
             var x = ws.a.x + (ws.width() - w) // 2
@@ -1051,11 +1064,13 @@ struct ProjectSettings(Movable):
         var program_y = y0 + 2
         var args_y = y0 + 4
         var cwd_y = y0 + 6
-        var lang_y = y0 + 9
+        var env_y = y0 + 8
+        var lang_y = y0 + 11
         var name_rect = Rect(field_x, name_y, right_max, name_y + 1)
         var program_rect = Rect(field_x, program_y, right_max, program_y + 1)
         var args_rect = Rect(field_x, args_y, right_max, args_y + 1)
         var cwd_rect = Rect(field_x, cwd_y, right_max, cwd_y + 1)
+        var env_rect = Rect(field_x, env_y, right_max, env_y + 1)
         var lang_rect = Rect(field_x, lang_y, right_max, lang_y + 1)
         self._tg_lang_anchor = lang_rect
         # Left list.
@@ -1078,11 +1093,17 @@ struct ProjectSettings(Movable):
                 canvas, Point(field_x, cwd_y + 1),
                 String("(empty = project root)"), hint,
             )
+            _ = painter.put_text(canvas, Point(label_x, env_y), String("Environment:"), bg)
+            _ = painter.put_text(
+                canvas, Point(field_x, env_y + 1),
+                String("(KEY=VALUE; KEY2=VALUE2)"), hint,
+            )
             _ = painter.put_text(canvas, Point(label_x, lang_y), String("Debug language:"), bg)
             self.name_tf.paint(canvas, name_rect, self.focus == _FOCUS_TG_NAME)
             self.program_tf.paint(canvas, program_rect, self.focus == _FOCUS_TG_PROGRAM)
             self.args_tf.paint(canvas, args_rect, self.focus == _FOCUS_TG_ARGS)
             self.cwd_tf.paint(canvas, cwd_rect, self.focus == _FOCUS_TG_CWD)
+            self.env_tf.paint(canvas, env_rect, self.focus == _FOCUS_TG_ENV)
             self.tg_lang_dropdown.paint(
                 canvas, lang_rect, self.focus == _FOCUS_TG_LANG,
                 Attr(WHITE, BLUE), Attr(BLACK, CYAN),
@@ -1340,6 +1361,10 @@ struct ProjectSettings(Movable):
             if self.cwd_tf.handle_key(event).consumed:
                 self._tg_commit_fields()
                 return True
+        elif self.focus == _FOCUS_TG_ENV:
+            if self.env_tf.handle_key(event).consumed:
+                self._tg_commit_fields()
+                return True
         elif self.focus == _FOCUS_GR_EXT:
             if self.ext_tf.handle_key(event).consumed:
                 self._gr_commit_fields()
@@ -1408,6 +1433,7 @@ struct ProjectSettings(Movable):
                 ordered.append(_FOCUS_TG_PROGRAM)
                 ordered.append(_FOCUS_TG_ARGS)
                 ordered.append(_FOCUS_TG_CWD)
+                ordered.append(_FOCUS_TG_ENV)
                 ordered.append(_FOCUS_TG_LANG)
             ordered.append(_FOCUS_TG_ADD)
             if self.selected_tg >= 0:
@@ -1593,6 +1619,7 @@ struct ProjectSettings(Movable):
         var program_rect = Rect(field_x, y0 + 2, right_max, y0 + 3)
         var args_rect = Rect(field_x, y0 + 4, right_max, y0 + 5)
         var cwd_rect = Rect(field_x, y0 + 6, right_max, y0 + 7)
+        var env_rect = Rect(field_x, y0 + 8, right_max, y0 + 9)
         if self.selected_tg >= 0:
             if self.name_tf.handle_mouse(event, name_rect):
                 self.focus = _FOCUS_TG_NAME
@@ -1605,6 +1632,9 @@ struct ProjectSettings(Movable):
                 return True
             if self.cwd_tf.handle_mouse(event, cwd_rect):
                 self.focus = _FOCUS_TG_CWD
+                return True
+            if self.env_tf.handle_mouse(event, env_rect):
+                self.focus = _FOCUS_TG_ENV
                 return True
         if list_rect.contains(event.pos):
             var idx = self._list_scroll + (event.pos.y - list_rect.a.y)

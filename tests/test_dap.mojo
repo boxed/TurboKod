@@ -44,7 +44,8 @@ from turbokod.project_grammars import GrammarOverride
 from turbokod.config import OnSaveAction
 from turbokod.settings import Settings
 from turbokod.events import (
-    Event, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_UP, MOD_NONE, MOUSE_BUTTON_LEFT
+    Event, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_TAB, KEY_UP, MOD_NONE,
+    MOUSE_BUTTON_LEFT
 )
 from turbokod.geometry import Point, Rect
 from turbokod import Vt
@@ -1482,6 +1483,36 @@ def test_targets_dialog_edit_and_submit() raises:
     assert_true(ps.targets_dirty)
 
 
+def test_targets_dialog_env_field() raises:
+    """The Environment strip loads the target's ``env`` as a semicolon
+    line, and typing into it commits back as a split list."""
+    var src = ProjectTargets()
+    var t1 = RunTarget()
+    t1.name = String("srv")
+    t1.program = String("python")
+    t1.env.append(String("DEBUG=1"))
+    src.targets.append(t1^)
+    src.active = 0
+    var ps = _ps_open_targets(src^)
+    assert_equal(ps.env_tf.text, String("DEBUG=1"))
+    ps.focus = UInt8(19)  # _FOCUS_TG_ENV
+    var typed = String(";X=2")
+    var tb = typed.as_bytes()
+    for i in range(len(tb)):
+        _ = ps.handle_key(_key(UInt32(Int(tb[i]))))
+    var rebuilt = ps.targets_value()
+    assert_equal(len(rebuilt.targets[0].env), 2)
+    assert_equal(rebuilt.targets[0].env[0], String("DEBUG=1"))
+    assert_equal(rebuilt.targets[0].env[1], String("X=2"))
+    assert_true(ps.targets_dirty)
+    # Tab from Working dir lands on Environment, then Debug language.
+    ps.focus = UInt8(10)  # _FOCUS_TG_CWD
+    _ = ps.handle_key(_key(KEY_TAB))
+    assert_equal(ps.focus, UInt8(19))
+    _ = ps.handle_key(_key(KEY_TAB))
+    assert_equal(ps.focus, UInt8(11))  # _FOCUS_TG_LANG
+
+
 def test_targets_dialog_add_and_remove() raises:
     """Add then remove a target in the Targets section returns to the
     original list."""
@@ -1527,6 +1558,59 @@ def test_targets_dialog_esc_discards_edits() raises:
     var ps = _ps_open_targets(src^)
     _ = ps.handle_key(_key(KEY_ESC))
     assert_false(ps.active)
+
+
+def test_dap_launch_arguments_env_object() raises:
+    """A target's ``env`` list rides on the launch body as an object;
+    an empty list adds no ``env`` key at all."""
+    var debs = built_in_debuggers()
+    var idx = find_debugger_for_language(debs, String("python"))
+    assert_true(idx >= 0)
+    var env = List[String]()
+    env.append(String("DEBUG=1"))
+    env.append(String("MSG=a=b"))
+    var body = launch_arguments_for(
+        debs[idx], String("/tmp/main.py"), String("/tmp"), List[String](),
+        False, env,
+    )
+    var env_v = body.object_get(String("env"))
+    assert_true(env_v.value().is_object())
+    assert_equal(
+        env_v.value().object_get(String("DEBUG")).value().as_str(), String("1"),
+    )
+    assert_equal(
+        env_v.value().object_get(String("MSG")).value().as_str(), String("a=b"),
+    )
+    var bare = launch_arguments_for(
+        debs[idx], String("/tmp/main.py"), String("/tmp"), List[String](),
+    )
+    assert_false(bare.object_has(String("env")))
+
+
+def test_run_session_forwards_env() raises:
+    """``RunSession.start`` exports the target's ``env`` entries before
+    exec, so the child sees them — including a value with a space."""
+    var s = RunSession()
+    var args = List[String]()
+    args.append(String("-c"))
+    args.append(String("printf '%s|%s' \"$TK_ENV_A\" \"$TK_ENV_B\""))
+    var env = List[String]()
+    env.append(String("TK_ENV_A=one"))
+    env.append(String("TK_ENV_B=two words"))
+    s.start(String("env-test"), String("sh"), args^, String(""), 0, 0, env^)
+    var captured = String("")
+    var ticks = 0
+    while ticks < 2000:
+        var out = drain_run_output(s)
+        captured = captured + out.stdout
+        if poll_run_exit(s):
+            break
+        ticks += 1
+    var tail = drain_run_output(s)
+    captured = captured + tail.stdout
+    assert_true(s.exited)
+    s.terminate()
+    assert_equal(captured, String("one|two words"))
 
 
 def test_run_session_lifecycle() raises:
@@ -1767,9 +1851,12 @@ def main() raises:
     test_debug_pane_selection_spans_multiple_lines()
     test_debug_pane_plain_click_clears_selection()
     test_targets_dialog_edit_and_submit()
+    test_targets_dialog_env_field()
     test_targets_dialog_add_and_remove()
     test_targets_dialog_save_button_submits()
     test_targets_dialog_esc_discards_edits()
+    test_dap_launch_arguments_env_object()
+    test_run_session_forwards_env()
     test_run_session_lifecycle()
     test_breakpoint_store_round_trip()
     test_breakpoint_store_load_missing_returns_empty()

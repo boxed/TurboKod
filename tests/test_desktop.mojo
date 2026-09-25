@@ -35,8 +35,9 @@ from turbokod.file_tree import FILE_TREE_WIDTH
 from turbokod.menu import MENU_MARK_NONE, MENU_MARK_OPEN
 from turbokod.onig import onig_global_init, onig_tracked_count
 from turbokod.project_targets import (
-    ProjectTargets, RunTarget, load_project_targets, resolved_cwd,
-    resolved_program, save_project_targets
+    ProjectTargets, RunTarget, join_env_field, load_project_targets,
+    resolved_cwd, resolved_program, save_project_targets, split_env_entry,
+    split_env_field, write_all_targets,
 )
 from turbokod.project_settings import ProjectSettings
 from turbokod.project_on_save import (
@@ -1840,7 +1841,8 @@ def test_project_targets_load_parses_fields() raises:
         + " \"program\": \"pixi\", \"args\": [\"run\", \"test\"]},\n"
         + "    {\"name\": \"main\","
         + " \"program\": \"app.py\", \"args\": [\"--verbose\"],"
-        + " \"cwd\": \"sub\", \"language\": \"python\"}\n"
+        + " \"cwd\": \"sub\", \"env\": [\"DEBUG=1\", \"PORT=8000\"],"
+        + " \"language\": \"python\"}\n"
         + "  ]\n"
         + "}\n"
     )
@@ -1855,12 +1857,70 @@ def test_project_targets_load_parses_fields() raises:
     assert_equal(loaded.targets[0].args[0], String("run"))
     assert_equal(loaded.targets[0].args[1], String("test"))
     assert_equal(loaded.targets[0].debug_language, String(""))
+    assert_equal(len(loaded.targets[0].env), 0)
     assert_equal(loaded.targets[1].name, String("main"))
+    assert_equal(len(loaded.targets[1].env), 2)
+    assert_equal(loaded.targets[1].env[0], String("DEBUG=1"))
+    assert_equal(loaded.targets[1].env[1], String("PORT=8000"))
     assert_equal(loaded.targets[1].program, String("app.py"))
     assert_equal(loaded.targets[1].cwd, String("sub"))
     assert_equal(loaded.targets[1].debug_language, String("python"))
     assert_equal(len(loaded.targets[1].args), 1)
     assert_equal(loaded.targets[1].args[0], String("--verbose"))
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((dir + String("\0")).unsafe_ptr())
+    _ = external_call["rmdir", Int32]((root + String("\0")).unsafe_ptr())
+
+
+def test_project_targets_env_field_split_join() raises:
+    """The dialog's semicolon-separated environment line: entries are
+    trimmed, empties dropped, values keep their spaces and ``=``; the
+    join is the canonical ``A=1; B=2`` spelling; and the key/value
+    split (for the DAP ``env`` object) cuts at the first ``=``."""
+    var env = split_env_field(String("  DEBUG=1 ;PORT=8000; ;X=a=b c;;"))
+    assert_equal(len(env), 3)
+    assert_equal(env[0], String("DEBUG=1"))
+    assert_equal(env[1], String("PORT=8000"))
+    assert_equal(env[2], String("X=a=b c"))
+    assert_equal(join_env_field(env), String("DEBUG=1; PORT=8000; X=a=b c"))
+    assert_equal(len(split_env_field(String(""))), 0)
+    assert_equal(len(split_env_field(String(" ; "))), 0)
+    var kv = split_env_entry(String("X=a=b c"))
+    assert_equal(kv[0], String("X"))
+    assert_equal(kv[1], String("a=b c"))
+    var bare = split_env_entry(String("FLAG"))
+    assert_equal(bare[0], String("FLAG"))
+    assert_equal(bare[1], String(""))
+
+
+def test_project_targets_env_roundtrips_through_disk() raises:
+    """``write_all_targets`` persists ``env`` and the loader reads it
+    back; a target without env writes no ``env`` key at all."""
+    var root = _temp_path(String("_targets_env"))
+    _ = external_call["mkdir", Int32](
+        (root + String("\0")).unsafe_ptr(), Int32(0o755),
+    )
+    var src = ProjectTargets()
+    var t1 = RunTarget()
+    t1.name = String("plain")
+    t1.program = String("echo")
+    src.targets.append(t1^)
+    var t2 = RunTarget()
+    t2.name = String("with-env")
+    t2.program = String("echo")
+    t2.env.append(String("DEBUG=1"))
+    t2.env.append(String("MSG=hello world"))
+    src.targets.append(t2^)
+    src.active = 1
+    assert_true(write_all_targets(root, src))
+    var loaded = load_project_targets(root)
+    assert_equal(len(loaded.targets), 2)
+    assert_equal(len(loaded.targets[0].env), 0)
+    assert_equal(len(loaded.targets[1].env), 2)
+    assert_equal(loaded.targets[1].env[0], String("DEBUG=1"))
+    assert_equal(loaded.targets[1].env[1], String("MSG=hello world"))
+    var dir = join_path(root, String(".turbokod"))
+    var path = join_path(dir, String("targets.json"))
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
     _ = external_call["rmdir", Int32]((dir + String("\0")).unsafe_ptr())
     _ = external_call["rmdir", Int32]((root + String("\0")).unsafe_ptr())
@@ -3431,6 +3491,8 @@ def main() raises:
     test_desktop_left_click_outside_popup_dismisses_it()
     test_desktop_left_click_inside_popup_keeps_it_open()
     test_project_targets_load_parses_fields()
+    test_project_targets_env_field_split_join()
+    test_project_targets_env_roundtrips_through_disk()
     test_project_targets_save_roundtrips_active()
     test_project_targets_resolve_paths()
     test_project_on_save_round_trip()

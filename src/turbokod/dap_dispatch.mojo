@@ -732,8 +732,12 @@ struct DapManager(Copyable, Movable):
     def start(
         mut self, spec: DebuggerSpec, program: String, cwd: String,
         var program_args: List[String], stop_on_entry: Bool = False,
+        env: List[String] = List[String](),
     ):
         """Spawn the adapter and kick off the handshake.
+
+        ``env`` is the target's extra ``KEY=VALUE`` list, forwarded on
+        the ``launch`` body (see ``launch_arguments_for``).
 
         Picks the first candidate from ``spec.candidates`` whose argv[0]
         is on ``$PATH``. Returns silently and stays NOT_STARTED if no
@@ -797,7 +801,7 @@ struct DapManager(Copyable, Movable):
         # We keep them as a JsonValue rather than re-deriving from spec
         # so the dispatch doesn't depend on the registry past start.
         self._pending_launch_args = launch_arguments_for(
-            spec, program, cwd, program_args^, stop_on_entry,
+            spec, program, cwd, program_args^, stop_on_entry, env,
         )
         self.state = _STATE_INITIALIZING
         self._state_entered_ms = monotonic_ms()

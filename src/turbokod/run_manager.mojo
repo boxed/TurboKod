@@ -76,6 +76,7 @@ struct RunSession(Movable):
         mut self, var target_name: String, program: String,
         args: List[String], cwd: String,
         cols: Int = 0, rows: Int = 0,
+        env: List[String] = List[String](),
     ) raises:
         """Spawn ``program`` with ``args`` (argv-style, no shell).
         Raises if a run is already in flight — caller should
@@ -94,10 +95,18 @@ struct RunSession(Movable):
         window size — tools like pytest fall back to 80×24 unless these
         env vars are set. Exported *before* the ``cd``/``exec`` so the
         replaced program inherits them.
+
+        ``env`` holds the target's extra ``KEY=VALUE`` entries; each is
+        ``export``-ed the same way, quoted whole, so values with spaces
+        survive. They come after ``COLUMNS``/``LINES`` so a target can
+        override those too.
         """
         if self.active and not self.exited:
             raise Error("run session already active")
-        var pretty = program
+        var pretty = String("")
+        for k in range(len(env)):
+            pretty = pretty + env[k] + String(" ")
+        pretty = pretty + program
         for k in range(len(args)):
             pretty = pretty + String(" ") + args[k]
         # Build the ``sh -c`` line the same way every time so the
@@ -109,6 +118,9 @@ struct RunSession(Movable):
         if len(cwd.as_bytes()) > 0:
             script = String("cd ") + _shell_quote(cwd) \
                 + String(" && ") + script
+        for k in range(len(env)):
+            script = String("export ") + _shell_quote(env[k]) \
+                + String("; ") + script
         if cols > 0 and rows > 0:
             script = String("export COLUMNS=") + String(cols) \
                 + String(" LINES=") + String(rows) + String("; ") + script

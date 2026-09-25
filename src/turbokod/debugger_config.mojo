@@ -29,6 +29,7 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .file_io import join_path, list_directory, stat_file
+from .project_targets import split_env_entry
 from .json import (
     JsonValue, json_array, json_bool, json_int, json_object, json_str,
 )
@@ -298,6 +299,7 @@ def find_debugger_for_language(
 def launch_arguments_for(
     spec: DebuggerSpec, program: String, cwd: String,
     var args: List[String], stop_on_entry: Bool = False,
+    env: List[String] = List[String](),
 ) -> JsonValue:
     """Build the ``arguments`` body for the ``launch`` request.
 
@@ -308,17 +310,28 @@ def launch_arguments_for(
 
     ``stop_on_entry`` is honored where supported — useful when the user
     wants to set additional breakpoints before the program starts running.
+
+    ``env`` is the target's extra ``KEY=VALUE`` list. Every adapter we
+    ship takes it as an ``env`` object on the launch body (debugpy,
+    codelldb, delve; lldb-dap since LLVM 20), layered onto the
+    adapter's own environment. Omitted when empty so adapters that
+    reject an empty object aren't tripped.
     """
+    var body: JsonValue
     if spec.name == String("debugpy"):
-        return _launch_args_debugpy(program, cwd, args^, stop_on_entry)
+        body = _launch_args_debugpy(program, cwd, args^, stop_on_entry)
     elif spec.name == String("lldb-dap"):
-        return _launch_args_lldb(program, cwd, args^, stop_on_entry)
+        body = _launch_args_lldb(program, cwd, args^, stop_on_entry)
     elif spec.name == String("delve"):
-        return _launch_args_delve(program, cwd, args^, stop_on_entry)
-    # Fallback: the union of the common keys. Unknown adapters that
-    # follow the spec literally (program/cwd/args/stopOnEntry) work
-    # off this shape.
-    return _launch_args_generic(program, cwd, args^, stop_on_entry)
+        body = _launch_args_delve(program, cwd, args^, stop_on_entry)
+    else:
+        # Fallback: the union of the common keys. Unknown adapters that
+        # follow the spec literally (program/cwd/args/stopOnEntry) work
+        # off this shape.
+        body = _launch_args_generic(program, cwd, args^, stop_on_entry)
+    if len(env) > 0:
+        body.put(String("env"), _env_list_to_json(env))
+    return body^
 
 
 def _launch_args_debugpy(
@@ -491,6 +504,18 @@ def _launch_args_generic(
     o.put(String("cwd"), json_str(cwd))
     o.put(String("args"), _string_list_to_json(args^))
     o.put(String("stopOnEntry"), json_bool(stop_on_entry))
+    return o^
+
+
+def _env_list_to_json(env: List[String]) -> JsonValue:
+    """``["A=1", "B=x=y"]`` → ``{"A": "1", "B": "x=y"}``. A later
+    duplicate key wins, matching what a shell ``export`` sequence does."""
+    var o = json_object()
+    for i in range(len(env)):
+        var kv = split_env_entry(env[i])
+        if len(kv[0].as_bytes()) == 0:
+            continue
+        o.put(kv[0], json_str(kv[1]))
     return o^
 
 

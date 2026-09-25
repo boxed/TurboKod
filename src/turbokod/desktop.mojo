@@ -1267,6 +1267,7 @@ struct Desktop(Movable):
     var _pending_dap_program: String
     var _pending_dap_cwd: String
     var _pending_dap_args: List[String]
+    var _pending_dap_env: List[String]
     var _pending_dap_venv_dir: String
     # What the current/last debug session is debugging, for the pane
     # title ("Debug - <name>"). Set at every ``dap.start`` call site —
@@ -1760,6 +1761,7 @@ struct Desktop(Movable):
         self._pending_dap_program = String("")
         self._pending_dap_cwd = String("")
         self._pending_dap_args = List[String]()
+        self._pending_dap_env = List[String]()
         self._pending_dap_venv_dir = String("")
         self._debug_target_name = String("")
         self._pending_lsp_prompt_ext = String("")
@@ -8656,8 +8658,6 @@ struct Desktop(Movable):
         if action == GIT_HISTORY_SELECTION:
             self._open_selection_history()
             return Optional[String]()
-        if action == GIT_OPEN_ALL_CHANGED:
-            if self.project:
         if action == GIT_HISTORY_FILE:
             if self.project:
                 var root = self.project.value()
@@ -8671,6 +8671,8 @@ struct Desktop(Movable):
                         )
                 self.quick_open.open_for_history(root^, prefill^)
             return Optional[String]()
+        if action == GIT_OPEN_ALL_CHANGED:
+            if self.project:
                 var root = self.project.value()
                 var statuses = fetch_git_status(root)
                 for i in range(len(statuses)):
@@ -11541,7 +11543,10 @@ struct Desktop(Movable):
         # Build a pretty argv line for the pane log so the user sees
         # exactly what got spawned (resolved paths, not the source
         # config strings).
-        var pretty = program
+        var pretty = String("")
+        for k in range(len(target.env)):
+            pretty = pretty + target.env[k] + String(" ")
+        pretty = pretty + program
         for k in range(len(target.args)):
             pretty = pretty + String(" ") + target.args[k]
         self.debug_pane.append_output(
@@ -11552,7 +11557,7 @@ struct Desktop(Movable):
         try:
             self.run_session.start(
                 String(target.name), program, args^, cwd,
-                term[0], term[1],
+                term[0], term[1], target.env.copy(),
             )
             self.status_bar.set_message(
                 String("running ") + target.name + String("…"),
@@ -11643,10 +11648,11 @@ struct Desktop(Movable):
         self._debug_target_name = target.name
         if self._maybe_prompt_debugpy_install(
             target.debug_language, venv_dir, program, cwd, args.copy(),
+            target.env.copy(),
         ):
             return
         self._maybe_install_python_lsp_in_venv(target.debug_language, venv_dir)
-        self.dap.start(spec, program, cwd, args^)
+        self.dap.start(spec, program, cwd, args^, env=target.env.copy())
         self.debug_pane.clear_all()
         if len(self.dap.spawn_argv) > 0:
             var line = String("$ ")
@@ -12427,12 +12433,6 @@ struct Desktop(Movable):
             title = title + String("-") + String(end)
         self.history.open(title^, entries^)
 
-    def focused_editor_has_extra_carets(self) -> Bool:
-        """True iff the focused window is an editor with more than one
-        caret. Exposed for hosts that want to gate menu items (e.g.
-        the "Fill..." entry) on whether multi-cursor edits would have
-        anything to do."""
-        var idx = self._focused_editor_idx()
     def _open_file_history(mut self, path: String):
         """Open the paned git-history modal on the whole of ``path``: every
         commit that touched it (following renames), each with its patch."""
@@ -12442,6 +12442,12 @@ struct Desktop(Movable):
         var rel = project_relative(root, path, canonicalize=True)
         self.history.open(basename(path), fetch_file_history(root, rel))
 
+    def focused_editor_has_extra_carets(self) -> Bool:
+        """True iff the focused window is an editor with more than one
+        caret. Exposed for hosts that want to gate menu items (e.g.
+        the "Fill..." entry) on whether multi-cursor edits would have
+        anything to do."""
+        var idx = self._focused_editor_idx()
         if idx < 0:
             return False
         return self.windows.windows[idx].editor.has_extra_carets()
@@ -13545,6 +13551,7 @@ struct Desktop(Movable):
     def _maybe_prompt_debugpy_install(
         mut self, language_id: String, venv_dir: String,
         program: String, cwd: String, var args: List[String],
+        var env: List[String] = List[String](),
     ) -> Bool:
         """Open a confirm dialog to install debugpy into ``venv_dir``
         when starting a Python debug session in a venv that doesn't
@@ -13587,6 +13594,7 @@ struct Desktop(Movable):
         self._pending_dap_program = program
         self._pending_dap_cwd = cwd
         self._pending_dap_args = args^
+        self._pending_dap_env = env^
         self.confirm_dialog.open(
             String("debugpy not installed in ") + venv_dir
                 + String(" — install it now?")
@@ -13600,6 +13608,7 @@ struct Desktop(Movable):
         self._pending_dap_program = String("")
         self._pending_dap_cwd = String("")
         self._pending_dap_args = List[String]()
+        self._pending_dap_env = List[String]()
         self._pending_dap_venv_dir = String("")
 
     def _on_debugpy_install_complete(
@@ -13654,9 +13663,10 @@ struct Desktop(Movable):
         var program = self._pending_dap_program
         var cwd = self._pending_dap_cwd
         var args = self._pending_dap_args.copy()
+        var env = self._pending_dap_env.copy()
         self._clear_pending_dap_start()
         self._maybe_install_python_lsp_in_venv(String("python"), venv_dir)
-        self.dap.start(spec, program, cwd, args^)
+        self.dap.start(spec, program, cwd, args^, env=env)
         self.debug_pane.clear_all()
         if len(self.dap.spawn_argv) > 0:
             var line = String("$ ")

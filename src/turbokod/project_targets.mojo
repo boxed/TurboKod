@@ -13,6 +13,11 @@ launched two different ways:
 * ``cwd`` — working directory. Empty means the project root.
   Relative paths are joined onto the project root so a config can
   read ``"cwd": "src"`` without spelling out the absolute path.
+* ``env`` — extra environment variables for the program, each a
+  ``"KEY=VALUE"`` string. Layered on top of the editor's own
+  environment for both the run and the debug launch. The dialog
+  edits them as one semicolon-separated line
+  (``DEBUG=1; PORT=8000``) — see ``split_env_field``.
 * ``debug_language`` — language id (matches ``DebuggerSpec.language_id``)
   used to pick the DAP adapter for the debug action. Empty disables
   Cmd+D for that target.
@@ -26,6 +31,7 @@ Format on disk::
           "program":  "tests/run.py",
           "args":     ["--verbose"],
           "cwd":      "",
+          "env":      ["DEBUG=1", "PORT=8000"],
           "language": "python" }
       ]
     }
@@ -73,6 +79,7 @@ struct RunTarget(Copyable, Movable):
     var program: String
     var args: List[String]
     var cwd: String
+    var env: List[String]
     var debug_language: String
 
     def __init__(out self):
@@ -80,6 +87,7 @@ struct RunTarget(Copyable, Movable):
         self.program = String("")
         self.args = List[String]()
         self.cwd = String("")
+        self.env = List[String]()
         self.debug_language = String("")
 
     def __copyinit__(mut self, copy: Self):
@@ -87,6 +95,7 @@ struct RunTarget(Copyable, Movable):
         self.program = copy.program
         self.args = copy.args.copy()
         self.cwd = copy.cwd
+        self.env = copy.env.copy()
         self.debug_language = copy.debug_language
 
 
@@ -169,6 +178,7 @@ def _parse_target(node: JsonValue) -> RunTarget:
     # New shape — flat keys.
     t.program = json_get_string(node, String("program"))
     t.args = json_get_string_array(node, String("args"))
+    t.env = json_get_string_array(node, String("env"))
     t.debug_language = json_get_string(node, String("language"))
     # Legacy fallback. ``run`` was a shell command string; we drop
     # any space-separated args into ``args`` for backward compat —
@@ -216,6 +226,65 @@ def _split_command(s: String) -> List[String]:
     if start < n:
         out.append(String(StringSpan(unsafe_from_utf8=b[start:n])))
     return out^
+
+
+def _trim_ascii_ws(s: String) -> String:
+    var b = s.as_bytes()
+    var lo = 0
+    var hi = len(b)
+    while lo < hi and (b[lo] == 0x20 or b[lo] == 0x09):
+        lo += 1
+    while hi > lo and (b[hi - 1] == 0x20 or b[hi - 1] == 0x09):
+        hi -= 1
+    return String(StringSpan(unsafe_from_utf8=b[lo:hi]))
+
+
+def split_env_field(text: String) -> List[String]:
+    """Turn the dialog's one-line ``KEY=VALUE; KEY2=VALUE2`` field into
+    the ``env`` list. Entries are separated by ``;``; whitespace around
+    an entry is dropped, and empty entries (a trailing ``;``, ``;;``)
+    are skipped. The entries themselves are kept verbatim — no quoting
+    or ``=`` validation — so a value can contain spaces or ``=``."""
+    var out = List[String]()
+    var b = text.as_bytes()
+    var n = len(b)
+    var start = 0
+    var i = 0
+    while i <= n:
+        if i == n or b[i] == 0x3B:    # ';'
+            var entry = _trim_ascii_ws(
+                String(StringSpan(unsafe_from_utf8=b[start:i]))
+            )
+            if len(entry.as_bytes()) > 0:
+                out.append(entry^)
+            start = i + 1
+        i += 1
+    return out^
+
+
+def join_env_field(env: List[String]) -> String:
+    """Inverse of ``split_env_field``: ``["A=1", "B=2"]`` → ``"A=1; B=2"``."""
+    var out = String("")
+    for i in range(len(env)):
+        if i > 0:
+            out = out + String("; ")
+        out = out + env[i]
+    return out^
+
+
+def split_env_entry(entry: String) -> Tuple[String, String]:
+    """``"KEY=VALUE"`` → ``(KEY, VALUE)``, splitting on the first ``=``.
+    An entry with no ``=`` yields an empty value. Used where the
+    transport wants a key/value object (DAP ``launch.env``) rather than
+    the ``KEY=VALUE`` strings the shell spawn path exports directly."""
+    var b = entry.as_bytes()
+    for i in range(len(b)):
+        if b[i] == 0x3D:    # '='
+            return (
+                String(StringSpan(unsafe_from_utf8=b[0:i])),
+                String(StringSpan(unsafe_from_utf8=b[i + 1:len(b)])),
+            )
+    return (entry, String(""))
 
 
 def load_project_targets(project_root: String) -> ProjectTargets:
@@ -275,6 +344,11 @@ def _encode_target(t: RunTarget) -> JsonValue:
         obj.put(String("args"), args_arr^)
     if len(t.cwd.as_bytes()) > 0:
         obj.put(String("cwd"), json_str(t.cwd))
+    if len(t.env) > 0:
+        var env_arr = json_array()
+        for k in range(len(t.env)):
+            env_arr.append(json_str(t.env[k]))
+        obj.put(String("env"), env_arr^)
     if len(t.debug_language.as_bytes()) > 0:
         obj.put(String("language"), json_str(t.debug_language))
     return obj^
