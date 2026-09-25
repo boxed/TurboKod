@@ -109,7 +109,6 @@ def _diffstat_patterns() -> List[String]:
     mode-change lines. Printed by commit, merge, and pull."""
     var p = List[String]()
     p.append(String("^ *[0-9]+ files? changed.*$"))
-    p.append(String("^ .* \\| +[0-9]+ [+-]*$"))
     p.append(String("^ .* \\| +Bin .*$"))
     p.append(String("^ .* \\| +[0-9]+ [+-]* *$"))
     p.append(String("^ create mode [0-7]+ .*$"))
@@ -168,6 +167,16 @@ def _rebase_patterns() -> List[String]:
     return p^
 
 
+def _merge_patterns() -> List[String]:
+    """What a merge-style integration prints on success — by ``merge``
+    itself and by a ``pull`` configured to merge."""
+    var p = List[String]()
+    p.append(String("^Updating [0-9a-f]+\\.\\.[0-9a-f]+$"))
+    p.append(String("^Fast-forward$"))
+    p.append(String("^Merge made by the '.*' strategy\\.$"))
+    return p^
+
+
 def _branch_state_patterns() -> List[String]:
     """The "where does this branch stand" block git prints after a
     checkout, and the parenthesised hint that follows it."""
@@ -191,51 +200,34 @@ def routine_patterns(kind: Int) -> List[String]:
     if kind == GIT_OUT_COMMIT:
         # "[main 3fdfe00] subject" — also covers "[detached HEAD abc1234]".
         p.append(String("^\\[[^]]+ [0-9a-f]+\\] .*$"))
-        for x in _diffstat_patterns():
-            p.append(x)
+        p.extend(_diffstat_patterns())
     elif kind == GIT_OUT_PUSH:
-        for x in _transport_patterns():
-            p.append(x)
-        for x in _forge_hint_patterns():
-            p.append(x)
+        p.extend(_transport_patterns())
+        p.extend(_forge_hint_patterns())
     elif kind == GIT_OUT_PULL:
-        for x in _transport_patterns():
-            p.append(x)
-        for x in _forge_hint_patterns():
-            p.append(x)
-        for x in _diffstat_patterns():
-            p.append(x)
+        p.extend(_transport_patterns())
+        p.extend(_forge_hint_patterns())
+        p.extend(_diffstat_patterns())
         # A pull is a fetch plus whichever integration the repo is
         # configured for, so the rebase verdicts are pull output too.
-        for x in _rebase_patterns():
-            p.append(x)
-        for x in _autostash_patterns():
-            p.append(x)
-        p.append(String("^Updating [0-9a-f]+\\.\\.[0-9a-f]+$"))
-        p.append(String("^Fast-forward$"))
-        p.append(String("^Merge made by the '.*' strategy\\.$"))
+        p.extend(_rebase_patterns())
+        p.extend(_autostash_patterns())
+        p.extend(_merge_patterns())
     elif kind == GIT_OUT_CHECKOUT:
         p.append(String("^Switched to branch '.*'$"))
         p.append(String("^Switched to a new branch '.*'$"))
         p.append(String("^Already on '.*'$"))
         # Local modifications carried across the switch.
         p.append(String("^[MADRCU]\t.*$"))
-        for x in _branch_state_patterns():
-            p.append(x)
+        p.extend(_branch_state_patterns())
     elif kind == GIT_OUT_MERGE:
-        p.append(String("^Updating [0-9a-f]+\\.\\.[0-9a-f]+$"))
-        p.append(String("^Fast-forward$"))
-        p.append(String("^Merge made by the '.*' strategy\\.$"))
+        p.extend(_merge_patterns())
         p.append(String("^Already up[ -]to[ -]date\\.$"))
-        for x in _diffstat_patterns():
-            p.append(x)
-        for x in _autostash_patterns():
-            p.append(x)
+        p.extend(_diffstat_patterns())
+        p.extend(_autostash_patterns())
     elif kind == GIT_OUT_REBASE:
-        for x in _rebase_patterns():
-            p.append(x)
-        for x in _autostash_patterns():
-            p.append(x)
+        p.extend(_rebase_patterns())
+        p.extend(_autostash_patterns())
     elif kind == GIT_OUT_BRANCH_DELETE:
         p.append(String("^Deleted branch .* \\(was [0-9a-f]+\\)\\.$"))
     elif kind == GIT_OUT_RESTORE:
@@ -301,7 +293,7 @@ struct GitOutputMatcher(Movable):
         compiled patterns. Empty output is routine (git said nothing, so
         there is nothing to read)."""
         if len(self.regexes) == 0:
-            return len(_trimmed(output).as_bytes()) == 0
+            return len(String(output.strip()).as_bytes()) == 0
         var b = output.as_bytes()
         var start = 0
         var i = 0
@@ -321,7 +313,7 @@ struct GitOutputMatcher(Movable):
         return True
 
     def _line_is_routine(self, line: String) -> Bool:
-        var trimmed = _trimmed(line)
+        var trimmed = String(line.strip())
         if len(trimmed.as_bytes()) == 0:
             return True
         for r in range(len(self.regexes)):
@@ -381,18 +373,3 @@ struct GitOutputMatchers(Movable):
         self.matchers = List[GitOutputMatcher]()
 
 
-def _trimmed(s: String) -> String:
-    """``s`` without leading/trailing ASCII whitespace (including ``\\r``,
-    which git emits when it redraws a progress line)."""
-    var b = s.as_bytes()
-    var start = 0
-    var end = len(b)
-    while start < end and (b[start] == 0x20 or b[start] == 0x09
-            or b[start] == 0x0D or b[start] == 0x0A):
-        start += 1
-    while end > start and (b[end - 1] == 0x20 or b[end - 1] == 0x09
-            or b[end - 1] == 0x0D or b[end - 1] == 0x0A):
-        end -= 1
-    if start >= end:
-        return String("")
-    return String(StringSpan(unsafe_from_utf8=b[start:end]))

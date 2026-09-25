@@ -112,14 +112,15 @@ from .painter import Painter
 from .file_io import ci_less, join_path, read_file
 from .window import DockedPanelStack, paint_window_title, paint_window_title_at
 from .git_changes import (
-    ChangedFile, GitBranch, GitCommit, GitFileStatus, apply_patch_to_index,
-    apply_patch_to_worktree, compute_staged_diff, compute_unstaged_diff,
-    compute_untracked_diff, branch_is_merged, create_reworded_commit,
-    fetch_blob_text, fetch_branch_log, fetch_commit_message, fetch_commit_show,
-    has_merge_between, head_short_sha, fetch_git_branches, fetch_git_commits,
-    fetch_git_status, fetch_merged_commits, format_age, github_compare_url,
-    main_line_branch, git_state_mtimes, GitStateMtimes,
-    parse_unified_diff_files, stage_file, unstage_file,
+    apply_patch_to_index, apply_patch_to_worktree, branch_is_merged,
+    ChangedFile, compute_staged_diff, compute_unstaged_diff,
+    compute_untracked_diff, create_reworded_commit, fetch_blob_text,
+    fetch_branch_log, fetch_commit_message, fetch_commit_show,
+    fetch_git_branches, fetch_git_commits, fetch_git_status,
+    fetch_merged_commits, format_age, git_state_mtimes, GitBranch, GitCommit,
+    GitFileStatus, github_compare_url, GitStateMtimes, has_merge_between,
+    head_short_sha, main_line_branch, parse_unified_diff_files,
+    split_show_output, stage_file, unstage_file,
 )
 from .git_output import (
     GIT_OUT_BRANCH_DELETE, GIT_OUT_CHECKOUT, GIT_OUT_COMMIT, GIT_OUT_MERGE,
@@ -235,14 +236,6 @@ comptime _LC_POLL_INTERVAL_MS: Int = 1000
 # tail, short enough that a refresh still feels immediate after one.
 comptime _LC_INPUT_QUIET_MS:   Int = 250
 
-# Hard caps on the inputs we'll feed to the TextMate tokenizer for the
-# diff side panels. Above either bound we skip syntax highlighting and
-# render the diff with gutter colour only — a 200 KB minified JS file
-# can take several seconds to tokenize with the JavaScript grammar
-# (every regex walks every char of every long line), and that stalls
-# the UI thread because tokenization is synchronous. The user can
-# still navigate the diff and double-click to open the file in the
-# editor where the highlighter runs incrementally.
 # How still the sidebar selection has to be before the right-side
 # panels are rebuilt. Short enough that a single deliberate Down reads
 # as immediate — it is only the floor, because a fixed window can't
@@ -261,6 +254,15 @@ comptime _BURST_GAP_MS:   Int = 300
 # Stillness required on top of the burst cadence before building, so
 # the next repeat can't arrive mid-build and waste it.
 comptime _SETTLE_MARGIN_MS: Int = 40
+
+# Hard caps on the inputs we'll feed to the TextMate tokenizer for the
+# diff side panels. Above either bound we skip syntax highlighting and
+# render the diff with gutter colour only — a 200 KB minified JS file
+# can take several seconds to tokenize with the JavaScript grammar
+# (every regex walks every char of every long line), and that stalls
+# the UI thread because tokenization is synchronous. The user can
+# still navigate the diff and double-click to open the file in the
+# editor where the highlighter runs incrementally.
 comptime _HL_SIZE_CAP:    Int = 64 * 1024
 comptime _HL_LONG_LINE:   Int = 2000
 
@@ -293,6 +295,10 @@ struct FileEntry(ImplicitlyCopyable, Movable):
     var worktree: UInt8
     var staged_diff: String
     var unstaged_diff: String
+
+    def is_untracked(self) -> Bool:
+        """Porcelain ``??`` — a file git doesn't track yet."""
+        return self.staged == 0x3F and self.worktree == 0x3F
 
 
 @fieldwise_init
@@ -1463,9 +1469,8 @@ struct LocalChanges(Movable):
     # Commits.
     var _type_ahead: TypeAhead
     # Async runner for the slow git ops (commit / push / pull / amend /
-    # revert). The UI used to call ``git_commit`` / ``git_push`` etc.
-    # synchronously, which froze the modal — and the whole desktop — for
-    # the duration of a push to a slow remote. The runner spawns each
+    # revert). Running them synchronously froze the modal — and the whole
+    # desktop — for the duration of a push to a slow remote. The runner spawns each
     # op as a child process, drains stdout/stderr per frame, and surfaces
     # a non-modal popup with a spinner + tail of the live output. On
     # exit, ``tick`` reaps the result, refreshes the affected panels,
@@ -1494,8 +1499,6 @@ struct LocalChanges(Movable):
     # user answered, i.e. the one the work is being integrated *into*.
     var _rebase_step: Int
     var _rebase_onto: String
-    # Output of the chain's finished steps, and whether any of them said
-    # something non-routine. Spawning the next step resets the runner's
     # True when ``_git_merge_branch`` is the repo's main line, i.e. the
     # rebase answer will rewrite the branch we're standing on rather
     # than the selected one. Set by ``_pick_integration_source`` so the
@@ -1506,6 +1509,8 @@ struct LocalChanges(Movable):
     # Which side the last rebase rewrote — only used to name the branch
     # that moved in the success flash.
     var _rebase_rewrote_current: Bool
+    # Output of the chain's finished steps, and whether any of them said
+    # something non-routine. Spawning the next step resets the runner's
     # capture, so a talkative rebase would otherwise scroll away unread
     # before the chain reached the point where it reports.
     var _rebase_log: String
@@ -2208,29 +2213,15 @@ struct LocalChanges(Movable):
         the diff, because "which commits came in with this merge" is the
         first question a merge row raises and the ``Merge:`` header line
         git prints answers it only in raw SHAs."""
-        var lines = split_lines_no_trailing(show_text)
-        var diff_start = -1
-        for i in range(len(lines)):
-            if starts_with(lines[i], String("diff --git ")):
-                diff_start = i
-                break
-        var meta_end = diff_start if diff_start >= 0 else len(lines)
-        for li in range(meta_end):
-            _emit_info(self.info, lines[li])
+        var parts = split_show_output(show_text)
+        for line in split_lines_no_trailing(parts[0]):
+            _emit_info(self.info, line)
         self._emit_merged_commits(merged_log)
-        if diff_start < 0:
+        var diff_part = parts[1]
+        if len(diff_part.as_bytes()) == 0:
             return
         # Walk per-file diff chunks and feed each one to the same
         # transform the unstaged/staged panels use.
-        var diff_part_bytes = List[UInt8]()
-        for li in range(diff_start, len(lines)):
-            var lb = lines[li].as_bytes()
-            for j in range(len(lb)):
-                diff_part_bytes.append(lb[j])
-            diff_part_bytes.append(0x0A)
-        var diff_part = String(StringSpan(
-            unsafe_from_utf8=Span(diff_part_bytes),
-        ))
         var changed = parse_unified_diff_files(diff_part)
         var banner_w = 200
         # Skip syntax highlighting for commits: a single click in the
@@ -2354,7 +2345,7 @@ struct LocalChanges(Movable):
         # Either fetch may fail (untracked file → no index entry,
         # binary / missing file → no worktree text) — both gracefully
         # degrade to "no full-file highlights for that side".
-        var untracked = (Int(fe.staged) == 0x3F and Int(fe.worktree) == 0x3F)
+        var untracked = fe.is_untracked()
         if untracked:
             _emit_info(
                 self.unstaged,
@@ -3844,11 +3835,7 @@ struct LocalChanges(Movable):
             # popup is the only feedback the user has and dropping the
             # modal would orphan the live child without surfacing its
             # result.
-            if self._is_git_busy():
-                self._show_status(
-                    String("Git operation in progress — please wait."),
-                    False,
-                )
+            if self._refuse_if_git_busy():
                 return True
             self.close()
             return True
@@ -4227,10 +4214,7 @@ struct LocalChanges(Movable):
     def _open_commit_prompt(mut self):
         """Pop the commit-message input. Pre-checks that *something* is
         actually staged so we don't pop a prompt that git will refuse."""
-        if self._is_git_busy():
-            self._show_status(
-                String("Git operation in progress — please wait."), False,
-            )
+        if self._refuse_if_git_busy():
             return
         var have_staged = False
         for i in range(len(self.files)):
@@ -4289,10 +4273,7 @@ struct LocalChanges(Movable):
           default, so a "message-only" edit would silently restructure
           history.
         """
-        if self._is_git_busy():
-            self._show_status(
-                String("Git operation in progress — please wait."), False,
-            )
+        if self._refuse_if_git_busy():
             return
         if self.sel_commit < 0 or self.sel_commit >= len(self.commits):
             return
@@ -4328,10 +4309,7 @@ struct LocalChanges(Movable):
         self.overlay_message = String("")
 
     def _open_amend_confirm(mut self):
-        if self._is_git_busy():
-            self._show_status(
-                String("Git operation in progress — please wait."), False,
-            )
+        if self._refuse_if_git_busy():
             return
         self.overlay = _OVERLAY_AMEND_CONFIRM
         self.overlay_input = TextField()
@@ -4339,10 +4317,7 @@ struct LocalChanges(Movable):
             String("Amend HEAD with --no-edit? Folds staged changes into the last commit.")
 
     def _open_revert_confirm(mut self):
-        if self._is_git_busy():
-            self._show_status(
-                String("Git operation in progress — please wait."), False,
-            )
+        if self._refuse_if_git_busy():
             return
         if self.sel_file < 0 or self.sel_file >= len(self.files):
             self._show_status(String("No file selected."), False)
@@ -4350,7 +4325,7 @@ struct LocalChanges(Movable):
         var fe = self.files[self.sel_file]
         self.overlay = _OVERLAY_REVERT_CONFIRM
         self.overlay_input = TextField()
-        var untracked = (Int(fe.staged) == 0x3F and Int(fe.worktree) == 0x3F)
+        var untracked = fe.is_untracked()
         if untracked:
             self.overlay_message = \
                 String("Delete untracked file ") + fe.path + String("?")
@@ -4364,10 +4339,7 @@ struct LocalChanges(Movable):
         the Unstaged panel's cursor. No-op (with a hint flash) when the
         cursor isn't on a ``+``/``-`` body line — only added/removed lines
         have a change to throw away."""
-        if self._is_git_busy():
-            self._show_status(
-                String("Git operation in progress — please wait."), False,
-            )
+        if self._refuse_if_git_busy():
             return
         if self.sel_file < 0 or self.sel_file >= len(self.files):
             return
@@ -4532,9 +4504,27 @@ struct LocalChanges(Movable):
         popup only renders one at a time."""
         return self._git_op != _GITOP_NONE or self.git_runner.is_active()
 
+    def _git_base_argv(self) -> List[String]:
+        """``git -C <root>`` — the prefix of every async git op."""
+        var argv = List[String]()
+        argv.append(String("git"))
+        argv.append(String("-C"))
+        argv.append(self.root)
+        return argv^
+
+    def _refuse_if_git_busy(mut self) -> Bool:
+        """True (after telling the user) while an async git op is running,
+        so the caller bails instead of starting a second one."""
+        if not self._is_git_busy():
+            return False
+        self._show_status(
+            String("Git operation in progress — please wait."), False,
+        )
+        return True
+
     def _start_git_op(
         mut self, op: Int, var label: String, var argv: List[String],
-        var title_prefix: String,
+        var title_prefix: String = String("Running "),
     ):
         """Spawn an async git child via ``git_runner``. Records the op
         type so ``tick`` knows which refresh to run when the child
@@ -4565,23 +4555,17 @@ struct LocalChanges(Movable):
             )
 
     def _run_pull(mut self):
-        var argv = List[String]()
-        argv.append(String("git"))
-        argv.append(String("-C"))
-        argv.append(self.root)
+        var argv = self._git_base_argv()
         argv.append(String("pull"))
         self._start_git_op(
-            _GITOP_PULL, String("git pull"), argv^, String("Running "),
+            _GITOP_PULL, String("git pull"), argv^,
         )
 
     def _run_push(mut self):
-        var argv = List[String]()
-        argv.append(String("git"))
-        argv.append(String("-C"))
-        argv.append(self.root)
+        var argv = self._git_base_argv()
         argv.append(String("push"))
         self._start_git_op(
-            _GITOP_PUSH, String("git push"), argv^, String("Running "),
+            _GITOP_PUSH, String("git push"), argv^,
         )
 
     def _run_checkout(mut self):
@@ -4599,15 +4583,12 @@ struct LocalChanges(Movable):
                 String("Already on ") + br.name, True,
             )
             return
-        var argv = List[String]()
-        argv.append(String("git"))
-        argv.append(String("-C"))
-        argv.append(self.root)
+        var argv = self._git_base_argv()
         argv.append(String("checkout"))
         argv.append(br.name)
         self._git_checkout_branch = br.name.copy()
         self._start_git_op(
-            _GITOP_CHECKOUT, String("git checkout"), argv^, String("Running "),
+            _GITOP_CHECKOUT, String("git checkout"), argv^,
         )
 
     def _run_merge(mut self):
@@ -4663,10 +4644,7 @@ struct LocalChanges(Movable):
                 False,
             )
             return False
-        if self._is_git_busy():
-            self._show_status(
-                String("Git operation in progress — please wait."), False,
-            )
+        if self._refuse_if_git_busy():
             return False
         self._git_merge_branch = br.name.copy()
         # Whether the straight-history answer is even on the table, so
@@ -4712,17 +4690,14 @@ struct LocalChanges(Movable):
         self._close_overlay()
         if len(name.as_bytes()) == 0:
             return
-        var argv = List[String]()
-        argv.append(String("git"))
-        argv.append(String("-C"))
-        argv.append(self.root)
+        var argv = self._git_base_argv()
         argv.append(String("merge"))
         argv.append(String("--no-ff"))
         argv.append(String("--no-edit"))
         argv.append(name)
         self._git_merge_branch = name^
         self._start_git_op(
-            _GITOP_MERGE, String("git merge"), argv^, String("Running "),
+            _GITOP_MERGE, String("git merge"), argv^,
         )
 
     def _confirm_merge_rebase(mut self):
@@ -4781,10 +4756,7 @@ struct LocalChanges(Movable):
             return
         self._git_merge_branch = name.copy()
         self._rebase_onto = onto.copy()
-        var argv = List[String]()
-        argv.append(String("git"))
-        argv.append(String("-C"))
-        argv.append(self.root)
+        var argv = self._git_base_argv()
         argv.append(String("rebase"))
         if name == main_line_branch(self.root):
             # Topic branch onto the main line: one command, nothing
@@ -4798,7 +4770,7 @@ struct LocalChanges(Movable):
             argv.append(onto^)
             argv.append(name^)
         self._start_git_op(
-            _GITOP_REBASE, String("git rebase"), argv^, String("Running "),
+            _GITOP_REBASE, String("git rebase"), argv^,
         )
         if self._git_op == _GITOP_NONE:
             # Spawn refused or failed; don't leave the chain armed.
@@ -4824,10 +4796,7 @@ struct LocalChanges(Movable):
         if len(onto.as_bytes()) == 0 or len(name.as_bytes()) == 0:
             self._rebase_step = 0
             return False
-        var argv = List[String]()
-        argv.append(String("git"))
-        argv.append(String("-C"))
-        argv.append(self.root)
+        var argv = self._git_base_argv()
         var kind: Int
         if self._rebase_step == 1:
             # The rebase left HEAD on the topic branch; go back to the
@@ -4849,7 +4818,7 @@ struct LocalChanges(Movable):
             self._rebase_step = 0
             return False
         self._start_git_op(
-            _GITOP_REBASE, String("git rebase"), argv^, String("Running "),
+            _GITOP_REBASE, String("git rebase"), argv^,
         )
         if self._git_op == _GITOP_NONE:
             self._rebase_step = 0
@@ -4874,10 +4843,7 @@ struct LocalChanges(Movable):
         The current branch is refused up front: git won't delete the
         branch you're standing on, and saying so is friendlier than
         relaying its error."""
-        if self._is_git_busy():
-            self._show_status(
-                String("Git operation in progress — please wait."), False,
-            )
+        if self._refuse_if_git_busy():
             return
         if self.sel_branch < 0 or self.sel_branch >= len(self.branches):
             self._show_status(String("No branch selected."), False)
@@ -4966,17 +4932,13 @@ struct LocalChanges(Movable):
         judges against **HEAD**, not the main line, so it would also
         refuse a plainly-merged branch whenever you happen to be standing
         on some other feature branch."""
-        var argv = List[String]()
-        argv.append(String("git"))
-        argv.append(String("-C"))
-        argv.append(self.root)
+        var argv = self._git_base_argv()
         argv.append(String("branch"))
         argv.append(String("-D"))
         argv.append(name)
         self._git_delete_branch = name.copy()
         self._start_git_op(
             _GITOP_BRANCH_DELETE, String("git branch -D"), argv^,
-            String("Running "),
         )
 
     def _submit_commit(mut self):
@@ -4984,10 +4946,7 @@ struct LocalChanges(Movable):
         if len(msg.as_bytes()) == 0:
             self._show_status(String("Empty commit message."), False)
             return
-        var argv = List[String]()
-        argv.append(String("git"))
-        argv.append(String("-C"))
-        argv.append(self.root)
+        var argv = self._git_base_argv()
         argv.append(String("commit"))
         argv.append(String("-m"))
         argv.append(msg)
@@ -5000,7 +4959,7 @@ struct LocalChanges(Movable):
         # an inline status overlay on failure.
         self._close_overlay()
         self._start_git_op(
-            _GITOP_COMMIT, String("git commit"), argv^, String("Running "),
+            _GITOP_COMMIT, String("git commit"), argv^,
         )
 
     def _submit_reword(mut self):
@@ -5029,10 +4988,7 @@ struct LocalChanges(Movable):
         if len(sha.as_bytes()) == 0:
             self._close_overlay()
             return
-        var argv = List[String]()
-        argv.append(String("git"))
-        argv.append(String("-C"))
-        argv.append(self.root)
+        var argv = self._git_base_argv()
         if self._reword_is_head:
             argv.append(String("commit"))
             argv.append(String("--amend"))
@@ -5056,20 +5012,17 @@ struct LocalChanges(Movable):
             argv.append(String("HEAD"))
         self._close_overlay()
         self._start_git_op(
-            _GITOP_REWORD, String("git reword"), argv^, String("Running "),
+            _GITOP_REWORD, String("git reword"), argv^,
         )
 
     def _confirm_amend(mut self):
-        var argv = List[String]()
-        argv.append(String("git"))
-        argv.append(String("-C"))
-        argv.append(self.root)
+        var argv = self._git_base_argv()
         argv.append(String("commit"))
         argv.append(String("--amend"))
         argv.append(String("--no-edit"))
         self._close_overlay()
         self._start_git_op(
-            _GITOP_AMEND, String("git amend"), argv^, String("Running "),
+            _GITOP_AMEND, String("git amend"), argv^,
         )
 
     def _confirm_revert(mut self):
@@ -5077,11 +5030,8 @@ struct LocalChanges(Movable):
             self._close_overlay()
             return
         var fe = self.files[self.sel_file]
-        var untracked = (Int(fe.staged) == 0x3F and Int(fe.worktree) == 0x3F)
-        var argv = List[String]()
-        argv.append(String("git"))
-        argv.append(String("-C"))
-        argv.append(self.root)
+        var untracked = fe.is_untracked()
+        var argv = self._git_base_argv()
         if untracked:
             argv.append(String("clean"))
             argv.append(String("-f"))
@@ -5096,7 +5046,7 @@ struct LocalChanges(Movable):
         self._git_revert_untracked = untracked
         self._close_overlay()
         self._start_git_op(
-            _GITOP_REVERT, String("git revert"), argv^, String("Running "),
+            _GITOP_REVERT, String("git revert"), argv^,
         )
 
     def tick(mut self):

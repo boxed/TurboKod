@@ -45,9 +45,9 @@ from .diff import (
 from .file_io import join_path, read_file
 from .geometry import Point, Rect
 from .git_changes import (
-    compute_staged_diff, compute_unstaged_diff,
-    fetch_blob_text, fetch_commit_show,
-    fetch_git_commits, parse_unified_diff_files,
+    compute_staged_diff, compute_unstaged_diff, fetch_blob_text,
+    fetch_commit_show, fetch_git_commits, parse_unified_diff_files,
+    split_show_output,
 )
 from .painter import Painter
 from .string_utils import display_columns, split_lines_no_trailing, starts_with
@@ -67,25 +67,10 @@ comptime _COMMIT_LIMIT: Int = 30
 
 
 def _extract_diff_part(show_text: String) -> String:
-    """Slice the multi-file unified diff out of ``git show`` output:
-    everything from the first ``diff --git`` line onward. Used only to
-    recover the *file list* of a commit (the content comes from blobs);
-    empty when the commit has no diff."""
-    var lines = split_lines_no_trailing(show_text)
-    var diff_start = -1
-    for i in range(len(lines)):
-        if starts_with(lines[i], String("diff --git ")):
-            diff_start = i
-            break
-    if diff_start < 0:
-        return String("")
-    var out = List[UInt8]()
-    for li in range(diff_start, len(lines)):
-        var lb = lines[li].as_bytes()
-        for j in range(len(lb)):
-            out.append(lb[j])
-        out.append(0x0A)
-    return String(StringSpan(unsafe_from_utf8=Span(out)))
+    """The multi-file unified diff part of ``git show`` output. Used only
+    to recover the *file list* of a commit (the content comes from
+    blobs); empty when the commit has no diff."""
+    return split_show_output(show_text)[1]
 
 
 def _diff_is_binary(diff_text: String) -> Bool:

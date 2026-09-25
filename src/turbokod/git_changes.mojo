@@ -23,9 +23,10 @@ from .diff import diff_lines
 from .file_io import find_git_project, join_path, project_relative, stat_file
 from .lsp import capture_command
 from .string_utils import (
-    parse_int_all, percent_encode_uri_path, split_lines,
+    byte_slice, parse_int_all, percent_encode_uri_path, split_lines,
     split_lines_no_trailing, starts_with,
 )
+from .case_fold import find_exact
 
 
 # Per-line change status for the editor's git-changes gutter.
@@ -1038,192 +1039,6 @@ def apply_patch_to_worktree(
 
 
 @fieldwise_init
-struct GitOpResult(ImplicitlyCopyable, Movable):
-    """Outcome of a one-shot git command (commit / pull / push / etc).
-    ``ok`` is True iff the process exited 0; ``message`` is a short
-    human-readable summary the caller can flash in the UI — populated
-    from stderr (for failures) or stdout (for successes), trimmed and
-    de-newlined so it fits one row."""
-    var ok: Bool
-    var message: String
-
-
-def _trim_one_line(s: String) -> String:
-    """Collapse ``s`` to its first non-empty line, stripped of trailing
-    whitespace. Falls back to the empty string when ``s`` is all blank.
-    Used to render git's stdout/stderr inside a single overlay row."""
-    var b = s.as_bytes()
-    var i = 0
-    while i < len(b):
-        # skip leading whitespace
-        while i < len(b) and (b[i] == 0x20 or b[i] == 0x09 \
-                or b[i] == 0x0A or b[i] == 0x0D):
-            i += 1
-        var s_start = i
-        while i < len(b) and b[i] != 0x0A and b[i] != 0x0D:
-            i += 1
-        var line = String(StringSpan(unsafe_from_utf8=b[s_start:i]))
-        # trim trailing whitespace
-        var lb = line.as_bytes()
-        var end = len(lb)
-        while end > 0 and (lb[end - 1] == 0x20 or lb[end - 1] == 0x09):
-            end -= 1
-        if end > 0:
-            return String(StringSpan(unsafe_from_utf8=lb[:end]))
-    return String("")
-
-
-def git_commit(project_root: String, message: String) -> GitOpResult:
-    """``git commit -m <message>``. Reports the first stdout line on
-    success (``[main abc1234] subject``) and the first stderr line on
-    failure (typically ``nothing to commit`` or a hook complaint)."""
-    if len(project_root.as_bytes()) == 0 or len(message.as_bytes()) == 0:
-        return GitOpResult(False, String("empty message"))
-    var args = List[String]()
-    args.append(String("commit"))
-    args.append(String("-m"))
-    args.append(message)
-    try:
-        var r = capture_command(_git_argv(project_root, args^))
-        var ok = Int(r.status) == 0
-        var msg: String
-        if ok:
-            msg = _trim_one_line(r.stdout)
-            if len(msg.as_bytes()) == 0:
-                msg = String("commit ok")
-        else:
-            msg = _trim_one_line(r.stderr)
-            if len(msg.as_bytes()) == 0:
-                msg = _trim_one_line(r.stdout)
-            if len(msg.as_bytes()) == 0:
-                msg = String("commit failed")
-        return GitOpResult(ok, msg^)
-    except:
-        return GitOpResult(False, String("git unavailable"))
-
-
-def git_amend_no_edit(project_root: String) -> GitOpResult:
-    """``git commit --amend --no-edit``: fold staged changes (or just
-    re-touch the commit) into HEAD without prompting for a new message."""
-    if len(project_root.as_bytes()) == 0:
-        return GitOpResult(False, String("no project"))
-    var args = List[String]()
-    args.append(String("commit"))
-    args.append(String("--amend"))
-    args.append(String("--no-edit"))
-    try:
-        var r = capture_command(_git_argv(project_root, args^))
-        var ok = Int(r.status) == 0
-        var msg: String
-        if ok:
-            msg = _trim_one_line(r.stdout)
-            if len(msg.as_bytes()) == 0:
-                msg = String("amend ok")
-        else:
-            msg = _trim_one_line(r.stderr)
-            if len(msg.as_bytes()) == 0:
-                msg = String("amend failed")
-        return GitOpResult(ok, msg^)
-    except:
-        return GitOpResult(False, String("git unavailable"))
-
-
-def git_revert_file(
-    project_root: String, path: String,
-    staged: UInt8, worktree: UInt8,
-) -> GitOpResult:
-    """Discard *all* local changes for ``path``. For tracked files runs
-    ``git checkout HEAD -- <path>`` which restores both index and
-    worktree to HEAD. For untracked files (``??``) runs ``git clean -f
-    -- <path>`` since there's no HEAD version to restore from."""
-    if len(project_root.as_bytes()) == 0 or len(path.as_bytes()) == 0:
-        return GitOpResult(False, String("empty path"))
-    var untracked = (Int(staged) == 0x3F and Int(worktree) == 0x3F)
-    var args = List[String]()
-    if untracked:
-        args.append(String("clean"))
-        args.append(String("-f"))
-        args.append(String("--"))
-        args.append(path)
-    else:
-        args.append(String("checkout"))
-        args.append(String("HEAD"))
-        args.append(String("--"))
-        args.append(path)
-    try:
-        var r = capture_command(_git_argv(project_root, args^))
-        var ok = Int(r.status) == 0
-        var msg: String
-        if ok:
-            if untracked:
-                msg = String("removed untracked file")
-            else:
-                msg = String("reverted ") + path
-        else:
-            msg = _trim_one_line(r.stderr)
-            if len(msg.as_bytes()) == 0:
-                msg = String("revert failed")
-        return GitOpResult(ok, msg^)
-    except:
-        return GitOpResult(False, String("git unavailable"))
-
-
-def git_pull(project_root: String) -> GitOpResult:
-    """``git pull`` (uses repo defaults — branch tracking, ff/rebase
-    settings, etc.). This is a synchronous network call; the surrounding
-    UI blocks until it returns."""
-    if len(project_root.as_bytes()) == 0:
-        return GitOpResult(False, String("no project"))
-    var args = List[String]()
-    args.append(String("pull"))
-    try:
-        var r = capture_command(_git_argv(project_root, args^))
-        var ok = Int(r.status) == 0
-        var msg: String
-        if ok:
-            msg = _trim_one_line(r.stdout)
-            if len(msg.as_bytes()) == 0:
-                msg = String("pull ok")
-        else:
-            msg = _trim_one_line(r.stderr)
-            if len(msg.as_bytes()) == 0:
-                msg = _trim_one_line(r.stdout)
-            if len(msg.as_bytes()) == 0:
-                msg = String("pull failed")
-        return GitOpResult(ok, msg^)
-    except:
-        return GitOpResult(False, String("git unavailable"))
-
-
-def git_push(project_root: String) -> GitOpResult:
-    """``git push`` (uses repo defaults — remote, branch, upstream).
-    Same blocking caveat as ``git_pull``."""
-    if len(project_root.as_bytes()) == 0:
-        return GitOpResult(False, String("no project"))
-    var args = List[String]()
-    args.append(String("push"))
-    try:
-        var r = capture_command(_git_argv(project_root, args^))
-        var ok = Int(r.status) == 0
-        var msg: String
-        if ok:
-            msg = _trim_one_line(r.stderr)  # push reports progress on stderr
-            if len(msg.as_bytes()) == 0:
-                msg = _trim_one_line(r.stdout)
-            if len(msg.as_bytes()) == 0:
-                msg = String("push ok")
-        else:
-            msg = _trim_one_line(r.stderr)
-            if len(msg.as_bytes()) == 0:
-                msg = _trim_one_line(r.stdout)
-            if len(msg.as_bytes()) == 0:
-                msg = String("push failed")
-        return GitOpResult(ok, msg^)
-    except:
-        return GitOpResult(False, String("git unavailable"))
-
-
-@fieldwise_init
 struct GitBranch(ImplicitlyCopyable, Movable):
     """One row of ``git for-each-ref refs/heads``: branch ``name``, the
     short sha its tip points at, the tip commit's subject, whether this
@@ -1418,6 +1233,17 @@ def main_line_branch(project_root: String) -> String:
         if lines[i] == String("master"):
             found_master = True
     return String("master") if found_master else String("")
+
+
+def _trim_one_line(s: String) -> String:
+    """Collapse ``s`` to its first non-empty line, stripped of surrounding
+    whitespace; empty when ``s`` is all blank. Used to render git's
+    stdout/stderr inside a single overlay row."""
+    for line in split_lines_no_trailing(s):
+        var t = String(line.strip())
+        if len(t.as_bytes()) > 0:
+            return t^
+    return String("")
 
 
 def branch_push_remote(project_root: String, branch: String) -> String:
@@ -2152,3 +1978,21 @@ def fetch_branch_log(
     )
     args.append(branch)
     return _git_stdout(project_root, args^)
+
+
+def split_show_output(show_text: String) -> Tuple[String, String]:
+    """Split ``git show`` output at its first ``diff --git`` line into
+    ``(metadata, diff)``: the free-form header meant for humans, and the
+    multi-file unified diff from that line on. ``diff`` is empty when the
+    commit changed no files."""
+    var b = show_text.as_bytes()
+    var marker = String("diff --git ").as_bytes()
+    var at = 0
+    while at < len(b):
+        if find_exact(b, marker, at) == at:
+            return (byte_slice(show_text, 0, at), byte_slice(show_text, at, len(b)))
+        var nl = find_exact(b, String("\n").as_bytes(), at)
+        if nl < 0:
+            break
+        at = nl + 1
+    return (show_text, String(""))
