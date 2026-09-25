@@ -30,7 +30,8 @@ from .geometry import Point, Rect
 from .string_utils import display_columns
 from .view import RowCursor
 from .anchored_menu import (
-    anchored_menu_mouse, anchored_menu_rect, paint_anchored_chrome,
+    anchored_menu_mouse, anchored_menu_rect, menu_step_wrap,
+    paint_anchored_chrome,
 )
 
 
@@ -144,15 +145,7 @@ struct SpellMenu(Movable):
         return 2
 
     def _step(mut self, delta: Int):
-        var n = self._row_count()
-        if n == 0:
-            return
-        var i = self.selected + delta
-        if i < 0:
-            i = n - 1
-        elif i >= n:
-            i = 0
-        self.selected = i
+        self.selected = menu_step_wrap(self.selected, delta, self._row_count())
 
     def _resolve(mut self, action: Int):
         self.action = action

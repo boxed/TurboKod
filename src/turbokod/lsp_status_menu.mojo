@@ -21,15 +21,9 @@ from .events import (
 )
 from .geometry import Point, Rect
 from .string_utils import display_columns
-from .view import RowCursor
 from .anchored_menu import (
-    anchored_menu_mouse, anchored_menu_rect, paint_anchored_chrome,
+    anchored_menu_mouse, anchored_menu_rect, menu_row_y, paint_anchored_chrome,
 )
-
-
-def _row_y(rect: Rect) -> Int:
-    var cursor = RowCursor(rect.a.y + 1)
-    return cursor.place()
 
 
 # ``LspStatusMenu.handle_mouse`` returns the shared ``MENU_HIT_*`` codes
@@ -106,7 +100,7 @@ struct LspStatusMenu(Movable):
         var sel_attr = Attr(BLACK, GREEN)
         paint_anchored_chrome(canvas, rect, attr)
         var painter = Painter(rect)
-        var y0 = _row_y(rect)
+        var y0 = menu_row_y(rect)
         var is_sel = (self.selected == 0)
         var row_attr = sel_attr if is_sel else attr
         if is_sel:
@@ -143,7 +137,7 @@ struct LspStatusMenu(Movable):
             return MENU_HIT_NONE
         var rect = self._rect(container_bounds)
         var r = anchored_menu_mouse(
-            event, rect, _row_y(rect), self._row_count(),
+            event, rect, menu_row_y(rect), self._row_count(),
             self.selected, self.tracking,
         )
         if r.cancel:

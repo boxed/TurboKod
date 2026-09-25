@@ -31,13 +31,9 @@ from .events import (
 from .geometry import Point, Rect
 from .lsp_dispatch import Diagnostic
 from .string_utils import display_columns
-from .view import RowCursor
-from .anchored_menu import anchored_menu_rect, paint_anchored_chrome
-
-
-def _row_y(rect: Rect) -> Int:
-    var cursor = RowCursor(rect.a.y + 1)
-    return cursor.place()
+from .anchored_menu import (
+    anchored_menu_rect, menu_row_y, paint_anchored_chrome,
+)
 
 
 # ``DiagnosticMenu.handle_mouse`` returns the shared ``MENU_HIT_*`` codes
@@ -258,7 +254,7 @@ struct DiagnosticMenu(Movable):
         var disabled_attr = Attr(DARK_GRAY, LIGHT_GRAY)
         paint_anchored_chrome(canvas, rect, attr)
         var painter = Painter(rect)
-        var y0 = _row_y(rect)
+        var y0 = menu_row_y(rect)
         var rows = self._row_count()
         for row in range(rows):
             var y = y0 + row
@@ -337,7 +333,7 @@ struct DiagnosticMenu(Movable):
             if not inside:
                 self._resolve(DIAG_MENU_ACTION_NONE)
                 return MENU_HIT_OUTSIDE
-            var row = event.pos.y - _row_y(rect)
+            var row = event.pos.y - menu_row_y(rect)
             if row < 0 or row >= self._row_count():
                 return MENU_HIT_INSIDE
             if self._is_loading_row(row):
@@ -352,7 +348,7 @@ struct DiagnosticMenu(Movable):
         if not inside:
             self._resolve(DIAG_MENU_ACTION_NONE)
             return MENU_HIT_OUTSIDE
-        var row = event.pos.y - _row_y(rect)
+        var row = event.pos.y - menu_row_y(rect)
         if row < 0 or row >= self._row_count():
             return MENU_HIT_INSIDE
         if self._is_loading_row(row):

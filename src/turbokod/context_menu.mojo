@@ -20,20 +20,14 @@ from .canvas import Canvas
 from .painter import Painter
 from .colors import Attr, BLACK, GREEN, LIGHT_GRAY
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_UP,
-    MENU_HIT_INSIDE, MENU_HIT_NONE, MENU_HIT_OUTSIDE,
-    MOUSE_BUTTON_LEFT,
+    Event, EVENT_KEY, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_UP, MENU_HIT_NONE,
 )
 from .geometry import Point, Rect
 from .string_utils import display_columns
-from .view import RowCursor
-from .anchored_menu import anchored_menu_rect, paint_anchored_chrome
-
-
-def _row_y(rect: Rect) -> Int:
-    var cursor = RowCursor(rect.a.y + 1)
-    return cursor.place()
+from .anchored_menu import (
+    anchored_menu_mouse, anchored_menu_rect, menu_row_y, menu_step_wrap,
+    paint_anchored_chrome,
+)
 
 
 comptime CTX_MENU_ACTION_NONE            = 0
@@ -111,15 +105,7 @@ struct EditorContextMenu(Movable):
         return len(self.labels)
 
     def _step(mut self, delta: Int):
-        var n = self._row_count()
-        if n == 0:
-            return
-        var i = self.selected + delta
-        if i < 0:
-            i = n - 1
-        elif i >= n:
-            i = 0
-        self.selected = i
+        self.selected = menu_step_wrap(self.selected, delta, self._row_count())
 
     def _resolve(mut self, action: Int):
         self.action = action
@@ -154,7 +140,7 @@ struct EditorContextMenu(Movable):
         var sel_attr = Attr(BLACK, GREEN)
         paint_anchored_chrome(canvas, rect, attr)
         var painter = Painter(rect)
-        var y0 = _row_y(rect)
+        var y0 = menu_row_y(rect)
         for row in range(self._row_count()):
             var y = y0 + row
             var is_sel = (self.selected == row)
@@ -197,32 +183,14 @@ struct EditorContextMenu(Movable):
         row)."""
         if not self.active:
             return MENU_HIT_NONE
-        if event.kind != EVENT_MOUSE:
-            return MENU_HIT_NONE
-        if event.button != MOUSE_BUTTON_LEFT or event.motion:
-            return MENU_HIT_NONE
         var rect = self._rect(container_bounds)
-        var inside = rect.contains(event.pos)
-        if event.pressed:
-            if not inside:
-                self._resolve(CTX_MENU_ACTION_NONE)
-                return MENU_HIT_OUTSIDE
-            var row = event.pos.y - _row_y(rect)
-            if row < 0 or row >= self._row_count():
-                return MENU_HIT_INSIDE
-            self.selected = row
-            self.tracking = True
-            return MENU_HIT_INSIDE
-        # Release.
-        if not self.tracking:
-            return MENU_HIT_NONE
-        self.tracking = False
-        if not inside:
+        var r = anchored_menu_mouse(
+            event, rect, menu_row_y(rect), self._row_count(),
+            self.selected, self.tracking,
+        )
+        if r.cancel:
             self._resolve(CTX_MENU_ACTION_NONE)
-            return MENU_HIT_OUTSIDE
-        var row = event.pos.y - _row_y(rect)
-        if row < 0 or row >= self._row_count():
-            return MENU_HIT_INSIDE
-        self.selected = row
-        self._resolve_selected()
-        return MENU_HIT_INSIDE
+        elif r.fired_row >= 0:
+            self.selected = r.fired_row
+            self._resolve_selected()
+        return r.hit

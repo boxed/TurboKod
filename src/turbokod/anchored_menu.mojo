@@ -117,3 +117,22 @@ def anchored_menu_mouse(
     if row < 0 or row >= row_count:
         return MenuMouseResult(MENU_HIT_INSIDE, False, -1)
     return MenuMouseResult(MENU_HIT_INSIDE, False, row)
+
+
+def menu_row_y(rect: Rect) -> Int:
+    """Screen row of an anchored menu's first item: just inside the top
+    border."""
+    return rect.a.y + 1
+
+
+def menu_step_wrap(selected: Int, delta: Int, n: Int) -> Int:
+    """``selected`` moved by ``delta`` over ``n`` rows, wrapping past
+    either end (Up on the first row lands on the last)."""
+    if n == 0:
+        return selected
+    var i = selected + delta
+    if i < 0:
+        return n - 1
+    if i >= n:
+        return 0
+    return i
