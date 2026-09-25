@@ -39,7 +39,7 @@ from .events import (
     MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .editorconfig import EditorConfig, load_editorconfig_for_path
-from .file_io import read_file, stat_file, write_file
+from .file_io import FileInfo, read_file, stat_file, write_file
 from .git_blame import BlameLine
 from .git_changes import (
     GIT_CHANGE_ADDED, GIT_CHANGE_MODIFIED, GIT_CHANGE_NONE,
@@ -74,7 +74,7 @@ from .search_options import (
     SearchOptions, SearcherCache, default_search_options,
 )
 from .string_utils import (
-    byte_slice, char_width, codepoint_at, display_columns,
+    byte_slice, char_width, codepoint_at, display_columns, is_ascii_ident_byte,
     is_printable_text_key, is_space_cp, is_word_codepoint,
     leading_indent_bytes, prev_codepoint_start, split_lines_no_trailing,
     TAB_WIDTH, truncate_to_columns, utf8_byte_of_cell, utf8_cell_of_byte,
@@ -85,6 +85,7 @@ from .text_view import (
     smart_wrap_lines, wrap_lines,
 )
 from .config import WRAP_NONE, WRAP_SMART
+from .case_fold import swap_ascii_case
 
 
 # --- Helpers ----------------------------------------------------------------
@@ -134,17 +135,10 @@ def _is_completion_autotrigger_byte(k: UInt32) -> Bool:
     auto-import suggestions that are noisy when invoked on every
     keystroke.
     """
-    if UInt32(0x30) <= k and k <= UInt32(0x39):  # 0-9
-        return True
-    if UInt32(0x41) <= k and k <= UInt32(0x5A):  # A-Z
-        return True
-    if UInt32(0x61) <= k and k <= UInt32(0x7A):  # a-z
-        return True
-    if k == UInt32(0x5F):  # underscore
-        return True
-    if k == UInt32(0x2E):  # .
-        return True
-    return False
+    if k >= UInt32(0x80):
+        return False
+    return is_ascii_ident_byte(UInt8(k)) or k == UInt32(0x2E)  # or '.'
+
 
 
 def _completion_overlap_start(
@@ -192,6 +186,14 @@ def _rtrim(s: String) -> String:
     if n == len(bytes):
         return s
     return byte_slice(s, 0, n)
+
+
+def _diag_label(diag: Diagnostic) -> String:
+    """``[source] message`` — how a diagnostic reads in tooltips and menus
+    (just the message when the server gave no source)."""
+    if len(diag.source.as_bytes()) > 0:
+        return String("[") + diag.source + String("] ") + diag.message
+    return diag.message
 
 
 def _diag_intersects_row(diag: Diagnostic, row: Int) -> Bool:
@@ -337,7 +339,7 @@ def _lists_equal(a: List[String], b: List[String]) -> Bool:
 def _split_buffer_lines(text: String) -> List[String]:
     """Split disk bytes into the buffer's line-list shape.
 
-    Mirrors ``TextBuffer.__init__`` exactly (split on ``\\n``; trailing
+    ``TextBuffer.__init__`` is built on it (split on ``\\n``; trailing
     ``\\r`` before each ``\\n`` is stripped so CRLF files share their
     line-list shape with LF files; a trailing ``\\n`` produces a
     trailing empty line). Used by the 3-way merge so the merge base,
@@ -354,7 +356,7 @@ def _split_buffer_lines(text: String) -> List[String]:
             var line_end = i
             if line_end > start and bytes[line_end - 1] == 0x0D:
                 line_end -= 1
-            out.append(String(StringSpan(unsafe_from_utf8=bytes[start:line_end])))
+            out.append(byte_slice(text, start, line_end))
             start = i + 1
         i += 1
     var end = len(bytes)
@@ -494,31 +496,10 @@ struct TextBuffer(Copyable, Movable):
         self.lines.append(String(""))
 
     def __init__(out self, var text: String):
-        self.lines = List[String]()
-        var bytes = text.as_bytes()
-        var line_start = 0
-        var i = 0
-        while i < len(bytes):
-            if bytes[i] == 0x0A:  # '\n'
-                # CRLF: drop the trailing '\r' that sits right before
-                # the '\n' so the buffer holds clean text. Whether the
-                # file's line endings are CR or CRLF is tracked
-                # separately (see ``_detect_line_ending``) and re-emitted
-                # at save time via ``EditorConfig.line_separator``.
-                var line_end = i
-                if line_end > line_start and bytes[line_end - 1] == 0x0D:
-                    line_end -= 1
-                self.lines.append(byte_slice(text, line_start, line_end))
-                line_start = i + 1
-            i += 1
-        # Final segment after the last '\n' (or the whole text when no
-        # '\n' was present). Trim a trailing '\r' here too so a file
-        # ending in '\r\n' or a single '\r'-terminated line doesn't
-        # leave a stray '\r' in the last line.
-        var end = len(bytes)
-        if end > line_start and bytes[end - 1] == 0x0D:
-            end -= 1
-        self.lines.append(byte_slice(text, line_start, end))
+        # CRLF is folded to LF here; the file's line ending is tracked
+        # separately (``_detect_line_ending``) and re-emitted at save time
+        # via ``EditorConfig.line_separator``.
+        self.lines = _split_buffer_lines(text)
 
     def __copyinit__(mut self, copy: Self):
         self.lines = copy.lines.copy()
@@ -897,10 +878,7 @@ def _test_ident_at(s: String, off_in: Int) -> String:
         off += 1
     var start = off
     while off < n:
-        var c = Int(b[off])
-        var ok = (c >= 0x41 and c <= 0x5A) or (c >= 0x61 and c <= 0x7A) \
-            or (c >= 0x30 and c <= 0x39) or c == 0x5F
-        if not ok:
+        if not is_ascii_ident_byte(b[off]):
             break
         off += 1
     if off <= start:
@@ -1050,8 +1028,8 @@ struct Editor(Copyable, Movable):
     # (tests, direct construction) on its pre-config behavior.
     var default_trim_trailing_whitespace: Int
     var default_insert_final_newline: Int
-    # Syntax highlighting overlay. ``_highlights_dirty`` triggers
-    # ``_refresh_highlights`` after edits / file loads;
+    # Syntax highlighting overlay. ``_highlights_dirty`` makes the next
+    # ``flush_highlights`` (driven by paint) re-tokenize;
     # ``_hl_dirty_row`` says where to start re-tokenizing — every
     # row below it potentially has stale state (block comment
     # opened, scope changed, etc.). 0 means "the whole buffer"
@@ -1593,156 +1571,7 @@ struct Editor(Copyable, Movable):
     var _hover_result_anchor_y: Int
 
     def __init__(out self):
-        self.buffer = TextBuffer()
-        self.selections = List[Caret]()
-        self.selections.append(Caret(0, 0, 0, 0, 0))
-        self.scroll_y = 0
-        self.scroll_x = 0
-        self.scroll_sub = 0
-        self.scroll_frac = 0.0
-        self._vis_counts = List[Int]()
-        self._vis_prefix = List[Int]()
-        self._vis_w = -1
-        self._vis_mode = -1
-        self._vis_dirty = True
-        self._suppress_overlays = False
-        self.host_owns_shadows = False
-        self.file_path = String("")
-        self.file_size = Int64(0)
-        self.file_mtime = Int64(0)
-        self.file_mtime_nsec = Int64(0)
-        self.dirty = False
-        self.disk_baseline = String("")
-        self.editorconfig = EditorConfig()
-        self.default_trim_trailing_whitespace = -1
-        self.default_insert_final_newline = -1
-        self.highlights = List[Highlight]()
-        self._highlights_dirty = True
-        self._hl_dirty_row = 0
-        self._hl_dirty_max_row = -1
-        self.spell_highlights = List[Highlight]()
-        self.spell_lines = List[Bool]()
-        self.diagnostics = List[Diagnostic]()
-        self.diagnostic_lines = List[Int]()
-        self.occurrence_ranges = List[TextEditEntry]()
-        self.inlay_notes = List[TextEditEntry]()
-        self.codelens_notes = List[TextEditEntry]()
-        self.inline_value_notes = List[TextEditEntry]()
-        self.lsp_select_ranges = List[TextEditEntry]()
-        self.color_highlights = List[Highlight]()
-        self.fold_regions = List[TextEditEntry]()
-        self.folded_starts = List[Int]()
-        self.document_links = List[TextEditEntry]()
-        self.pending_spell_action = Optional[SpellActionRequest]()
-        self.pending_definition = Optional[DefinitionRequest]()
-        self.pending_context_menu = Optional[EditorContextMenuRequest]()
-        self.gutter_width = 0
-        self.breakpoint_lines = List[Int]()
-        self.breakpoint_enabled = List[Bool]()
-        self.breakpoint_conditional = List[Bool]()
-        self.exec_line = -1
-        self.pending_breakpoint_toggle = Optional[Int]()
-        self.pending_breakpoint_menu = Optional[BreakpointMenuRequest]()
-        self.pending_git_revert = Optional[GitRevertRequest]()
-        self.pending_blame_info = Optional[BlameInfoRequest]()
-        self.pending_diagnostic_menu = Optional[DiagnosticMenuRequest]()
-        self.test_rows = List[Int]()
-        self.test_nodes = List[String]()
-        self._tests_dirty = True
-        self.pending_test_run = Optional[TestRunRequest]()
-        self.test_file_globs = List[String]()
-        self.merge_pending = False
-        self.pending_merge_regions = List[MergeRegion]()
-        self.line_numbers = False
-        self.sticky_scroll = True
-        self.wrap_mode = WRAP_NONE
-        self._big_buffer = False
-        self.smart_wrap_comma_threshold = -1
-        self._vmove_streak = False
-        self.compress_kwargs = False
-        self.caret_visible = True
-        self._copy_flash_line = -1
-        self._copy_flash_start_ms = 0
-        self.read_only = False
-        self.review_mode = False
-        self.review_palette = List[UInt32]()
-        self.diff_active = False
-        self.diff_phantom_text = List[String]()
-        self.diff_phantom_hl = List[List[Highlight]]()
-        self.diff_phantom_buckets = List[List[Int]]()
-        self.diff_phantom_emph = List[List[Tuple[Int, Int]]]()
-        self.diff_emph_by_row = List[List[Tuple[Int, Int]]]()
-        self.blame_lines = List[BlameLine]()
-        self.blame_visible = False
-        self.git_changes_visible = False
-        self.git_change_lines = List[Int]()
-        self.git_deleted_below = List[Bool]()
-        self._git_has_changes = False
-        self.minimap_visible = True
-        self._git_head_text = String("")
-        self._git_head_loaded = False
-        self._git_head_present = False
-        self._git_changes_dirty = True
-        self._lsp_dirty = False
-        self._lsp_dirty_stamp_ms = 0
-        self._last_known_line_count = self.buffer.line_count()
-        self._undo_stack = List[EditorSnapshot]()
-        self._redo_stack = List[EditorSnapshot]()
-        self._typing_active = False
-        self._typing_last_ms = 0
-        self._last_click_ms = 0
-        self._last_click_row = -1
-        self._last_click_col = -1
-        self._click_count = 0
-        self._dc_active = False
-        self._dc_anchor_row = 0
-        self._dc_anchor_start = 0
-        self._dc_anchor_end = 0
-        self._tc_active = False
-        self._tc_anchor_row = 0
-        self._hl_cache = HighlightCache()
-        self._search_cache = SearcherCache()
-        self._smart_select_stack = List[Caret]()
-        self._alt_armed = False
-        self._last_alt_tap_ms = 0
-        self._column_mode = False
-        self._box_drag_active = False
-        self._box_anchor_row = 0
-        self._box_anchor_cell = 0
-        self._block_edit_origin = Optional[Caret]()
-        self._minimap_hover_kind = 0
-        self._minimap_hover_buf_row = -1
-        self._minimap_hover_word = String("")
-        self._minimap_hover_x = 0
-        self._minimap_hover_y = 0
-        self._minimap_hover_below = False
-        self.pending_completion_request = Optional[CompletionRequest]()
-        self.pending_signature_help = Optional[HoverRequest]()
-        self.pending_on_type = Optional[HoverRequest]()
-        self.pending_on_type_ch = String("")
-        self.inline_completion_text = String("")
-        self.inline_completion_row = 0
-        self.inline_completion_col = 0
-        self.completion_popup_visible = False
-        self.completion_items = List[CompletionItem]()
-        self.completion_highlight = 0
-        self.completion_scroll = 0
-        self.completion_anchor_row = 0
-        self.completion_anchor_col = 0
-        self.completion_is_message = False
-        self._completion_request_stamp_ms = 0
-        self._completion_cancel_pending = False
-        self._hover_candidate_row = -1
-        self._hover_candidate_col = -1
-        self._hover_candidate_since_ms = 0
-        self._hover_candidate_anchor_x = 0
-        self._hover_candidate_anchor_y = 0
-        self._hover_candidate_emitted = False
-        self._hover_result_text = String("")
-        self._hover_result_row = -1
-        self._hover_result_col = -1
-        self._hover_result_anchor_x = 0
-        self._hover_result_anchor_y = 0
+        self = Self(String(""))
 
     def __init__(out self, var text: String):
         self.buffer = TextBuffer(text^)
@@ -1935,9 +1764,7 @@ struct Editor(Copyable, Movable):
         if len(ed.editorconfig.end_of_line.as_bytes()) == 0:
             ed.editorconfig.end_of_line = detected_eol
         ed.file_path = path^
-        ed.file_size = info.size
-        ed.file_mtime = info.mtime_sec
-        ed.file_mtime_nsec = info.mtime_nsec
+        ed._adopt_stat(info)
         ed.dirty = False
         ed.disk_baseline = baseline^
         # No inline tokenization: ``_highlights_dirty`` is True
@@ -2907,7 +2734,6 @@ struct Editor(Copyable, Movable):
         # Undo/redo lands on a saved state; the next typing should start a
         # new group rather than extend whatever was running before.
         self._typing_active = False
-        # _refresh_highlights() removed: render path flushes via Editor.flush_highlights
 
     # --- multi-cursor helpers --------------------------------------------
     #
@@ -4015,12 +3841,9 @@ struct Editor(Copyable, Movable):
             return Optional[GitRevertRequest]()
         var block = block_opt.value().copy()
         var total_gutter = self._total_gutter()
-        var right_gutter = self._right_gutter()
         var text_x = view.a.x + total_gutter
         var content_h = view.height()
-        var content_w = view.width() - total_gutter - right_gutter
-        if content_w < 1:
-            content_w = 1
+        var content_w = self._content_width(view)
         var layout = self._layout_lines(content_h, content_w)
         var sr = self._screen_row_for(layout, block.buf_start, 0)
         var block_top_y = (view.a.y + sr) if sr >= 0 else -1
@@ -4052,12 +3875,9 @@ struct Editor(Copyable, Movable):
             return Optional[GitRevertRequest]()
         var block = block_opt.value().copy()
         var total_gutter = self._total_gutter()
-        var right_gutter = self._right_gutter()
         var text_x = view.a.x + total_gutter
         var content_h = view.height()
-        var content_w = view.width() - total_gutter - right_gutter
-        if content_w < 1:
-            content_w = 1
+        var content_w = self._content_width(view)
         var layout = self._layout_lines(content_h, content_w)
         var sr = self._screen_row_for(layout, marker_row, 0)
         var block_top_y = (view.a.y + sr) if sr >= 0 else -1
@@ -4255,9 +4075,7 @@ struct Editor(Copyable, Movable):
             self.buffer = TextBuffer(text^)
             self._recompute_big_buffer()
             self.disk_baseline = baseline^
-            self.file_size = info.size
-            self.file_mtime = info.mtime_sec
-            self.file_mtime_nsec = info.mtime_nsec
+            self._adopt_stat(info)
             # Wholesale buffer swap; speculative shift can't track
             # arbitrary content changes, so clear and let the LSP
             # refresh repopulate.
@@ -4287,9 +4105,7 @@ struct Editor(Copyable, Movable):
             # stashed regions stay valid until the user resolves them.
             self.pending_merge_regions = regions^
             self.merge_pending = True
-            self.file_size = info.size
-            self.file_mtime = info.mtime_sec
-            self.file_mtime_nsec = info.mtime_nsec
+            self._adopt_stat(info)
             return EXT_CHANGE_CONFLICT
         # Clean merge: every region is STABLE, so concatenating them
         # yields the merged buffer (identical to the no-conflict output
@@ -4306,9 +4122,7 @@ struct Editor(Copyable, Movable):
         self.clear_diagnostics()
         self._last_known_line_count = self.buffer.line_count()
         self.disk_baseline = text^
-        self.file_size = info.size
-        self.file_mtime = info.mtime_sec
-        self.file_mtime_nsec = info.mtime_nsec
+        self._adopt_stat(info)
         # Clean merge: dirty iff the merged buffer differs from what's
         # currently on disk. (Equal happens when ``theirs`` already
         # contained all of our local edits.)
@@ -4456,9 +4270,7 @@ struct Editor(Copyable, Movable):
         # the new merge base.
         var info = stat_file(self.file_path)
         if info.ok:
-            self.file_size = info.size
-            self.file_mtime = info.mtime_sec
-            self.file_mtime_nsec = info.mtime_nsec
+            self._adopt_stat(info)
         self.disk_baseline = disk^
         self.dirty = False
         return True
@@ -4483,9 +4295,7 @@ struct Editor(Copyable, Movable):
             return False
         var info = stat_file(self.file_path)
         if info.ok:
-            self.file_size = info.size
-            self.file_mtime = info.mtime_sec
-            self.file_mtime_nsec = info.mtime_nsec
+            self._adopt_stat(info)
         self.disk_baseline = disk^
         self.dirty = False
         # Extension may have changed (e.g., ``.txt`` → ``.mojo``): the cached
@@ -4567,7 +4377,6 @@ struct Editor(Copyable, Movable):
             if self.selections[0].col > nlen: self.selections[0].col = nlen
             self.selections[0].anchor_row = self.selections[0].row
             self.selections[0].anchor_col = self.selections[0].col
-            # _refresh_highlights() removed: render path flushes via Editor.flush_highlights
         else:
             # Nothing changed — roll back the speculative snapshot so the
             # undo stack stays in sync and redo isn't clobbered.
@@ -4718,11 +4527,12 @@ struct Editor(Copyable, Movable):
 
     # --- view options ------------------------------------------------------
 
-    def toggle_line_numbers(mut self):
-        self.line_numbers = not self.line_numbers
-
-    def toggle_sticky_scroll(mut self):
-        self.sticky_scroll = not self.sticky_scroll
+    def _adopt_stat(mut self, info: FileInfo):
+        """Record ``info`` as the on-disk state this buffer last matched,
+        so ``check_for_external_change`` doesn't flag our own write/load."""
+        self.file_size = info.size
+        self.file_mtime = info.mtime_sec
+        self.file_mtime_nsec = info.mtime_nsec
 
     def set_blame(mut self, var lines: List[BlameLine]):
         """Replace the blame attribution list and turn the blame
@@ -5083,9 +4893,7 @@ struct Editor(Copyable, Movable):
             var diag = self.diagnostics[d]
             if not _diag_intersects_row(diag, row):
                 continue
-            var msg = diag.message
-            if len(diag.source.as_bytes()) > 0:
-                msg = String("[") + diag.source + String("] ") + msg
+            var msg = _diag_label(diag)
             return msg^
         return String("")
 
@@ -5206,9 +5014,7 @@ struct Editor(Copyable, Movable):
             )
             self._minimap_hover_kind = kind
             self._minimap_hover_buf_row = row
-            var label = diag.message
-            if len(diag.source.as_bytes()) > 0:
-                label = String("[") + diag.source + String("] ") + label
+            var label = _diag_label(diag)
             self._minimap_hover_word = label^
             return
         # Spell hit test. Spell highlights are stored as
@@ -5351,9 +5157,7 @@ struct Editor(Copyable, Movable):
         if best_idx < 0:
             return False
         var diag = self.diagnostics[best_idx]
-        var label = diag.message
-        if len(diag.source.as_bytes()) > 0:
-            label = String("[") + diag.source + String("] ") + label
+        var label = _diag_label(diag)
         self.pending_diagnostic_menu = Optional[DiagnosticMenuRequest](
             DiagnosticMenuRequest(label^, pos.x, pos.y, diag),
         )
@@ -5393,9 +5197,7 @@ struct Editor(Copyable, Movable):
         var content_right = view.b.x - right_gutter
         var content_bottom = view.b.y
         var content_h = view.height()
-        var content_w = view.width() - total_gutter - right_gutter
-        if content_w < 1:
-            content_w = 1
+        var content_w = self._content_width(view)
         var layout = self._layout_lines(content_h, content_w)
         var row = self.selections[0].row
         var col = self.selections[0].col
@@ -5660,11 +5462,8 @@ struct Editor(Copyable, Movable):
         if len(self.completion_items) == 0:
             return Optional[Rect]()
         var total_gutter = self._total_gutter()
-        var right_gutter = self._right_gutter()
         var content_h = view.height()
-        var content_w = view.width() - total_gutter - right_gutter
-        if content_w < 1:
-            content_w = 1
+        var content_w = self._content_width(view)
         var layout = self._layout_lines(content_h, content_w)
         var sr = self._screen_row_for(
             layout, self.completion_anchor_row,
@@ -6125,26 +5924,7 @@ struct Editor(Copyable, Movable):
         var w = text_width
         if w < 1:
             w = 1
-        var tab = self.editorconfig.effective_indent_size()
-        if tab < 1:
-            tab = 4
-        var wrapped: List[VisualLine]
-        if self.wrap_mode == WRAP_SMART and self._smart_wrap_supported():
-            wrapped = smart_wrap_lines(
-                self.buffer.lines, w, tab,
-                line_comment=line_comment_for_extension(
-                    extension_of(self.file_path)
-                ),
-                start_line=self.scroll_y, max_rows=max_rows,
-                comma_threshold=self.smart_wrap_comma_threshold,
-                html_attr=self._smart_html_mode(),
-            )
-        else:
-            wrapped = wrap_lines(
-                self.buffer.lines, w,
-                indent_size=tab, word_aware=True,
-                start_line=self.scroll_y, max_rows=max_rows,
-            )
+        var wrapped = self._wrap(self.buffer.lines, w, self.scroll_y, max_rows)
         if len(self.folded_starts) == 0:
             return wrapped^
         # Drop visual rows whose buffer line is hidden by a collapsed fold.
@@ -9006,10 +8786,7 @@ struct Editor(Copyable, Movable):
                     if caret:
                         ax = caret.value().x
                         ay = caret.value().y
-                    var label = diag.message
-                    if len(diag.source.as_bytes()) > 0:
-                        label = String("[") + diag.source + String("] ") \
-                            + label
+                    var label = _diag_label(diag)
                     self.pending_diagnostic_menu = Optional[
                         DiagnosticMenuRequest
                     ](DiagnosticMenuRequest(label^, ax, ay, diag))
@@ -9703,7 +9480,6 @@ struct Editor(Copyable, Movable):
         # would otherwise leave ``sr+1..er`` painted with stale,
         # uncommented highlights.
         self._mark_hl_dirty(sr, er)
-        # _refresh_highlights() removed: render path flushes via Editor.flush_highlights
 
     def toggle_case(mut self):
         """Invert ASCII case across the current selection (no-op if empty
@@ -9724,13 +9500,7 @@ struct Editor(Copyable, Movable):
             var new_bytes = List[UInt8]()
             for i in range(len(lb)):
                 if col_start <= i and i < col_end:
-                    var b = Int(lb[i])
-                    if 0x41 <= b and b <= 0x5A:
-                        new_bytes.append(UInt8(b + 32))
-                    elif 0x61 <= b and b <= 0x7A:
-                        new_bytes.append(UInt8(b - 32))
-                    else:
-                        new_bytes.append(lb[i])
+                    new_bytes.append(swap_ascii_case(lb[i]))
                 else:
                     new_bytes.append(lb[i])
             self.buffer.lines[r] = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=new_bytes.unsafe_ptr(), length=len(new_bytes))))
@@ -9740,7 +9510,6 @@ struct Editor(Copyable, Movable):
         # incremental tokenizer from early-exiting before it re-colors
         # every edited row.
         self._mark_hl_dirty(sr, er)
-        # _refresh_highlights() removed: render path flushes via Editor.flush_highlights
 
     def _insert_text_at(
         mut self, row: Int, col: Int, text: String,
@@ -9912,7 +9681,6 @@ struct Editor(Copyable, Movable):
         # that line. We stash the row and let Desktop forward to the
         # active DapManager (the editor itself owns no DAP state).
         var total_gutter = self._total_gutter()
-        var right_gutter = self._right_gutter()
         var rel_x = event.pos.x - view.a.x
         var in_gutter = total_gutter > 0 and rel_x >= 0 and rel_x < total_gutter
         var cell_x = rel_x - total_gutter
@@ -9921,9 +9689,7 @@ struct Editor(Copyable, Movable):
         # paint, so soft-wrapped buffer rows resolve to their wrapped
         # segment instead of advancing buffer rows 1:1.
         var content_h = view.height()
-        var content_w = view.width() - total_gutter - right_gutter
-        if content_w < 1:
-            content_w = 1
+        var content_w = self._content_width(view)
         var layout = self._layout_lines(content_h, content_w)
         var screen_row = event.pos.y - view.a.y
         if screen_row < 0:
@@ -10370,24 +10136,7 @@ struct Editor(Copyable, Movable):
             segs = List[VisualLine]()
             segs.append(VisualLine(0, 0, self.buffer.line_length(row), 0, 0, 0))
         else:
-            var tab = self.editorconfig.effective_indent_size()
-            if tab < 1:
-                tab = 4
-            if self.wrap_mode == WRAP_SMART and self._smart_wrap_supported():
-                segs = smart_wrap_lines(
-                    one, w, tab,
-                    line_comment=line_comment_for_extension(
-                        extension_of(self.file_path)
-                    ),
-                    start_line=0, max_rows=-1,
-                    comma_threshold=self.smart_wrap_comma_threshold,
-                    html_attr=self._smart_html_mode(),
-                )
-            else:
-                segs = wrap_lines(
-                    one, w, indent_size=tab, word_aware=True,
-                    start_line=0, max_rows=-1,
-                )
+            segs = self._wrap(one, w)
         # ``one`` is a single-element list, so every segment carries
         # ``line_idx == 0``; rebase to the real buffer row.
         var out = List[VisualLine]()
@@ -10618,11 +10367,7 @@ struct Editor(Copyable, Movable):
 
     def _scroll_to_cursor(mut self, view: Rect):
         var h = view.height()
-        var total_gutter = self._total_gutter()
-        var right_gutter = self._right_gutter()
-        var w = view.width() - total_gutter - right_gutter
-        if w < 1:
-            w = 1
+        var w = self._content_width(view)
         # Any cursor-driven scroll snaps off the smooth-scroll sub-row +
         # fraction: a goto / search / edit / arrow-key that moves the
         # viewport lands on a whole visual row, not a stale offset. The
@@ -10669,26 +10414,35 @@ struct Editor(Copyable, Movable):
             w = 1
         if not self._is_wrapping():
             return 1
-        var tab = self.editorconfig.effective_indent_size()
-        if tab < 1:
-            tab = 4
-        var use_smart = (
-            self.wrap_mode == WRAP_SMART and self._smart_wrap_supported()
-        )
-        var lc = line_comment_for_extension(extension_of(self.file_path))
         var single = List[String]()
         single.append(self.buffer.line(i))
-        var v: List[VisualLine]
-        if use_smart:
-            v = smart_wrap_lines(
-                single, w, tab, line_comment=lc,
+        var n = len(self._wrap(single, w))
+        return 1 if n < 1 else n
+
+    def _wrap(
+        self, lines: List[String], w: Int, start_line: Int = 0,
+        max_rows: Int = -1,
+    ) -> List[VisualLine]:
+        """Wrap ``lines`` at width ``w`` with the active (non-``WRAP_NONE``)
+        mode: smart wrap for languages that support it, soft word-aware
+        wrap with hanging indent otherwise. The single dispatch that
+        painting, cursor movement and scroll-range measurement share, so
+        they can't disagree about where a line breaks."""
+        var tab = self.editorconfig.effective_indent_size()
+        if self.wrap_mode == WRAP_SMART and self._smart_wrap_supported():
+            return smart_wrap_lines(
+                lines, w, tab,
+                line_comment=line_comment_for_extension(
+                    extension_of(self.file_path)
+                ),
+                start_line=start_line, max_rows=max_rows,
                 comma_threshold=self.smart_wrap_comma_threshold,
                 html_attr=self._smart_html_mode(),
             )
-        else:
-            v = wrap_lines(single, w, indent_size=tab, word_aware=True)
-        var n = len(v)
-        return 1 if n < 1 else n
+        return wrap_lines(
+            lines, w, indent_size=tab, word_aware=True,
+            start_line=start_line, max_rows=max_rows,
+        )
 
     def max_scroll_y(self, view: Rect) -> Int:
         """Largest valid ``scroll_y`` for ``view``.
@@ -10714,40 +10468,14 @@ struct Editor(Copyable, Movable):
         if not self._is_wrapping():
             var m = n_lines - content_h
             return 0 if m < 0 else m
-        var total_gutter = self._total_gutter()
-        var right_gutter = self._right_gutter()
-        var content_w = view.width() - total_gutter - right_gutter
-        if content_w < 1:
-            content_w = 1
-        var tab = self.editorconfig.effective_indent_size()
-        if tab < 1:
-            tab = 4
+        var content_w = self._content_width(view)
         # Measure each line with the SAME wrap routine ``_layout_lines``
-        # would paint with, or the scrollbar/wheel range desyncs from
-        # what's on screen.
-        var use_smart = (
-            self.wrap_mode == WRAP_SMART and self._smart_wrap_supported()
-        )
-        var lc = line_comment_for_extension(extension_of(self.file_path))
+        # paints with, or the scrollbar/wheel range desyncs from what's on
+        # screen.
         var rows = 0
         var i = n_lines - 1
         while i >= 0:
-            var single = List[String]()
-            single.append(self.buffer.line(i))
-            var v: List[VisualLine]
-            if use_smart:
-                v = smart_wrap_lines(
-                    single, content_w, tab, line_comment=lc,
-                    comma_threshold=self.smart_wrap_comma_threshold,
-                    html_attr=self._smart_html_mode(),
-                )
-            else:
-                v = wrap_lines(
-                    single, content_w, indent_size=tab, word_aware=True,
-                )
-            var line_rows = len(v)
-            if line_rows < 1:
-                line_rows = 1
+            var line_rows = self._line_visual_rows(i, content_w)
             if rows + line_rows > content_h:
                 break
             rows += line_rows
@@ -10787,10 +10515,6 @@ struct Editor(Copyable, Movable):
         self._vis_mode = self.wrap_mode
         self._vis_dirty = False
 
-    def _smooth_content_w(self, view: Rect) -> Int:
-        var content_w = view.width() - self._total_gutter() - self._right_gutter()
-        return content_w if content_w > 0 else 1
-
     def smooth_begin(mut self, view: Rect) -> Tuple[Float64, Float64]:
         """For the native smooth-scroll host: the current vertical position
         and the maximum, both as continuous *visual-row* coordinates from the
@@ -10807,7 +10531,7 @@ struct Editor(Copyable, Movable):
             if mx < 0.0:
                 mx = 0.0
             return (Float64(self.scroll_y) + self.scroll_frac, mx)
-        self._ensure_vis_metrics(self._smooth_content_w(view))
+        self._ensure_vis_metrics(self._content_width(view))
         var total = self._vis_prefix[len(self._vis_prefix) - 1]
         var mx = Float64(total - content_h)
         if mx < 0.0:
@@ -10845,7 +10569,7 @@ struct Editor(Copyable, Movable):
             self.scroll_sub = 0
             self.scroll_frac = vis - Float64(base)
             return
-        self._ensure_vis_metrics(self._smooth_content_w(view))
+        self._ensure_vis_metrics(self._content_width(view))
         var total = self._vis_prefix[len(self._vis_prefix) - 1]
         var maxv = total - content_h
         if maxv < 0:
@@ -10925,11 +10649,7 @@ struct Editor(Copyable, Movable):
             # frame (a third of the whole frame, measured by
             # ``bench/git_frame_bench.mojo``), and horizontal scroll is
             # zero almost always.
-            var total_gutter = self._total_gutter()
-            var right_gutter = self._right_gutter()
-            var content_w = view.width() - total_gutter - right_gutter
-            if content_w < 1:
-                content_w = 1
+            var content_w = self._content_width(view)
             var max_x = self.longest_line_width() - content_w
             if max_x < 0: max_x = 0
             if self.scroll_x > max_x:
@@ -10981,11 +10701,7 @@ struct Editor(Copyable, Movable):
         golden point even when lines above it wrap to several rows.
         """
         var h = view.height()
-        var total_gutter = self._total_gutter()
-        var right_gutter = self._right_gutter()
-        var w = view.width() - total_gutter - right_gutter
-        if w < 1:
-            w = 1
+        var w = self._content_width(view)
         # Snap off any smooth-scroll sub-row + fraction (see _scroll_to_cursor).
         self.scroll_sub = 0
         self.scroll_frac = 0.0

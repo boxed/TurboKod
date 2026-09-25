@@ -119,8 +119,6 @@ struct EditorConfig(ImplicitlyCopyable, Movable):
         if self.indent_style == String("tab"):
             return String("\t")
         var n = self.effective_indent_size()
-        if n < 1:
-            n = 1
         var buf = List[UInt8]()
         for _ in range(n):
             buf.append(0x20)

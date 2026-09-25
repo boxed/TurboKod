@@ -96,6 +96,16 @@ def fold_byte(c: UInt8) -> UInt8:
 
 
 @always_inline
+def swap_ascii_case(c: UInt8) -> UInt8:
+    """``A``-``Z`` ↔ ``a``-``z``; every other byte unchanged."""
+    if fold_byte(c) != c:
+        return fold_byte(c)
+    if c >= 0x61 and c <= 0x7A:
+        return c - 0x20
+    return c
+
+
+@always_inline
 def _fold_vec(v: SIMD[DType.uint8, FOLD_W]) -> SIMD[DType.uint8, FOLD_W]:
     """:func:`fold_byte` over a whole register. ``lt`` rather than ``<``
     because Mojo's comparison operators are ``Scalar``-only."""
