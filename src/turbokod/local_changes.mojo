@@ -448,16 +448,7 @@ struct RightPanel(Movable):
         self.cursor = 0
 
     def reset(mut self):
-        self.lines = List[String]()
-        self.diff_line = List[Int]()
-        self.kind = List[Int]()
-        self.file_path = List[String]()
-        self.file_line = List[Int]()
-        self.highlights = List[Highlight]()
-        self.links = List[PanelLink]()
-        self.scroll = 0
-        self.scroll_x = 0
-        self.cursor = 0
+        self = Self()
 
     def link_at(self, row: Int, cell: Int) -> String:
         """URL of the link covering cell column ``cell`` of ``row``, or an
@@ -897,30 +888,21 @@ def _is_skip_diff_header(line: String) -> Bool:
 def _emit_filename_banner(
     mut panel: RightPanel, path: String, width: Int,
 ):
-    panel.lines.append(_build_filename_banner(path, width))
-    panel.kind.append(_LINE_FILEHDR)
-    panel.diff_line.append(-1)
-    panel.file_path.append(String(""))
-    panel.file_line.append(0)
+    _emit_body_row(
+        panel, _build_filename_banner(path, width), _LINE_FILEHDR, -1,
+        String(""), 0,
+    )
 
 
 def _emit_blank(mut panel: RightPanel):
-    panel.lines.append(String(""))
-    panel.kind.append(_LINE_BLANK)
-    panel.diff_line.append(-1)
-    panel.file_path.append(String(""))
-    panel.file_line.append(0)
+    _emit_body_row(panel, String(""), _LINE_BLANK, -1, String(""), 0)
 
 
 def _emit_separator(mut panel: RightPanel):
     """A horizontal rule between two hunks of the same file. The text is
     empty — ``_paint_panel_body`` draws the rule across the panel width at
     paint time so it tracks the current panel size."""
-    panel.lines.append(String(""))
-    panel.kind.append(_LINE_SEPARATOR)
-    panel.diff_line.append(-1)
-    panel.file_path.append(String(""))
-    panel.file_line.append(0)
+    _emit_body_row(panel, String(""), _LINE_SEPARATOR, -1, String(""), 0)
 
 
 def _emit_info(mut panel: RightPanel, var text: String):
@@ -936,11 +918,7 @@ def _emit_info(mut panel: RightPanel, var text: String):
         panel.links.append(PanelLink(
             row, hits[i].cell_start, hits[i].cell_end, hits[i].path,
         ))
-    panel.lines.append(text^)
-    panel.kind.append(_LINE_INFO)
-    panel.diff_line.append(-1)
-    panel.file_path.append(String(""))
-    panel.file_line.append(0)
+    _emit_body_row(panel, text^, _LINE_INFO, -1, String(""), 0)
 
 
 def _emit_body_row(
@@ -3533,17 +3511,7 @@ struct LocalChanges(Movable):
         return 0
 
     def _focused_panel_height(self, container_bounds: Rect) -> Int:
-        var rows = self._pane_rows(container_bounds)
-        var h: Int
-        if self.focus == _PANE_FILES:
-            h = rows[1] - 1
-        elif self.focus == _PANE_BRANCHES:
-            h = rows[3] - 1
-        elif self.focus == _PANE_COMMITS:
-            h = rows[5] - 1
-        else:
-            h = 0
-        return 0 if h < 0 else h
+        return self._pane_view_height(self.focus, container_bounds)
 
     def _set_focused_selection(mut self, new_idx: Int, container_bounds: Rect):
         var n = self._focused_count()
