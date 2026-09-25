@@ -29,7 +29,11 @@ from .grammar_install import (
     user_grammar_path_for_ext,
 )
 from .project_grammars import GrammarOverride
-from .string_utils import codepoint_at, is_word_codepoint, prev_codepoint_start, starts_with
+from .case_fold import fold_ascii
+from .string_utils import (
+    byte_slice, codepoint_at, is_word_codepoint, prev_codepoint_start,
+    starts_with,
+)
 from .tm_grammar import Grammar, load_grammar_from_file
 from .tm_tokenizer import (
     Frame, copy_stack, stack_eq,
@@ -788,14 +792,7 @@ def extension_of(path: String) -> String:
         i -= 1
     if i < 0:
         return String("")
-    var ext_bytes = b[i + 1:n]
-    var lower = String("")
-    for k in range(len(ext_bytes)):
-        var v = Int(ext_bytes[k])
-        if 0x41 <= v and v <= 0x5A:
-            v = v + 0x20
-        lower = lower + chr(v)
-    return lower
+    return fold_ascii(byte_slice(path, i + 1, n))
 
 
 def line_comment_for_extension(ext: String) -> String:
@@ -2112,7 +2109,7 @@ def _apply_markdown_fence_injections(
         if len(info.as_bytes()) > 0 and body_last >= row + 1:
             var last_len = len(lines[body_last].as_bytes())
             var body = _StringBody(row + 1, 0, body_last, last_len)
-            _inject_grammar(_to_lower_ascii(info), lines, body, hls, registry)
+            _inject_grammar(fold_ascii(info), lines, body, hls, registry)
 
         row = (close + 1) if close >= 0 else n
 
@@ -2145,7 +2142,7 @@ def _find_language_marker(line: String) -> Optional[_LangMarker]:
             if j > i + nlen:
                 var raw = String(StringSpan(unsafe_from_utf8=b[i + nlen:j]))
                 return Optional[_LangMarker](_LangMarker(
-                    _to_lower_ascii(raw), j,
+                    fold_ascii(raw), j,
                 ))
         i += 1
     return Optional[_LangMarker]()
@@ -2163,16 +2160,6 @@ def _is_lang_char(c: UInt8) -> Bool:
         return True
     return False
 
-
-def _to_lower_ascii(s: String) -> String:
-    var b = s.as_bytes()
-    var out = String("")
-    for k in range(len(b)):
-        var v = Int(b[k])
-        if 0x41 <= v and v <= 0x5A:
-            v = v + 0x20
-        out = out + chr(v)
-    return out^
 
 
 def _find_string_body_after(

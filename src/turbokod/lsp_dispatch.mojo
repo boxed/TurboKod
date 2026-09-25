@@ -39,7 +39,7 @@ from .lsp import (
 from .posix import (
     getcwd_path, getenv_value, monotonic_ms, realpath, sleep_ms, which,
 )
-from .string_utils import percent_encode_uri_path
+from .string_utils import percent_encode_uri_path, utf8_prefix
 from .highlight import Highlight
 from .colors import Attr, BLACK, EDITOR_BG, WHITE
 
@@ -4719,7 +4719,7 @@ struct LspManager(Copyable, Movable):
         if len(cb) <= room:
             self._stderr_log = self._stderr_log + chunk
         else:
-            self._stderr_log = self._stderr_log + String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=cb.unsafe_ptr(), length=room)))
+            self._stderr_log = self._stderr_log + utf8_prefix(chunk, room)
 
     def _on_publish_diagnostics(mut self, params: JsonValue):
         """Replace (not merge) the bucket for the published URI. The

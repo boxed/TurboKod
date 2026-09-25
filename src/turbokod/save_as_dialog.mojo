@@ -128,11 +128,16 @@ struct SaveAsDialog(Movable):
     """Auto-center placement + title-bar move-by-drag. Reset on every
     ``open`` so a freshly-invoked dialog starts centered."""
     var _save_button: ShadowButton
+    # Listing height as last painted. ``compute_dialog_rect`` shrinks the
+    # dialog on a short screen, so keyboard scrolling must use this rather
+    # than the nominal ``_LIST_HEIGHT`` or the selection scrolls off-view.
+    var _list_h: Int
     """Persistent " Save " button on the input row. Press-latch state
     lives here so the button can't drop a captured press between
     paints — repositioned each paint via ``move_to``."""
 
     def __init__(out self):
+        self._list_h = _LIST_HEIGHT
         self.active = False
         self.submitted = False
         self.filename = TextField()
@@ -228,6 +233,7 @@ struct SaveAsDialog(Movable):
             self.browser.dir, dir_attr,
         )
         # Listing.
+        self._list_h = max(1, layout.list_rect.height())
         self.browser.paint(
             canvas, layout.list_rect, self._focus.is_focused(_SLOT_LISTING),
         )
@@ -252,7 +258,7 @@ struct SaveAsDialog(Movable):
         if event.kind != EVENT_KEY:
             return True
         var k = event.key
-        var list_h = _LIST_HEIGHT
+        var list_h = self._list_h
         if k == KEY_ESC:
             self.close()
             return True

@@ -39,7 +39,7 @@ from std.ffi import external_call
 
 from .lsp import LspProcess
 from .posix import monotonic_ms, realpath, tcp_connect, which
-from .string_utils import starts_with
+from .string_utils import starts_with, utf8_suffix
 
 
 # --- state machine --------------------------------------------------------
@@ -839,15 +839,10 @@ struct DapManager(Copyable, Movable):
             # the OS pipe. Cap the buffer at 16 KB, keeping the tail —
             # the most recent output is what tells us why a session died.
             self._stderr_log = self._stderr_log + text
-            var bs = self._stderr_log.as_bytes()
-            if len(bs) > 16384:
-                var start = len(bs) - 16384
-                # Temporary: ``bs`` borrows ``self._stderr_log``, so the
+            if len(self._stderr_log.as_bytes()) > 16384:
+                # Temporary: the slice borrows ``self._stderr_log``, so the
                 # new value has to be built before the assignment lands.
-                var tail = String(StringSpan(unsafe_from_utf8=Span(
-                    unsafe_ptr=bs.unsafe_ptr().unsafe_offset(start),
-                    length=len(bs) - start,
-                )))
+                var tail = utf8_suffix(self._stderr_log, 16384)
                 self._stderr_log = tail^
         return text^
 
@@ -1329,14 +1324,11 @@ struct DapManager(Copyable, Movable):
             # their condition + the gutter still shows a faint dot)
             # but never reach the adapter. Skip without breaking the
             # response-line correlation — the index on the wire only
-            # advances for BPs we actually send.
+            # advances for BPs we actually send. A oneshot landing on a
+            # disabled BP still fires: skipping here leaves
+            # ``have_oneshot_match`` False, so the oneshot branch below
+            # emits it.
             if not self._bp_enabled[i]:
-                if self._oneshot_bp_path == path \
-                        and self._bp_line[i] == self._oneshot_bp_line:
-                    # A oneshot landing on a disabled BP still needs to
-                    # fire. Fall through and emit it via the oneshot
-                    # branch below.
-                    pass
                 continue
             # Wait-for trigger gating: a BP that's enabled but waiting
             # on another BP is held back until ``arm_dependents`` flips

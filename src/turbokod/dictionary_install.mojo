@@ -28,6 +28,7 @@ from std.ffi import external_call
 
 from .file_io import join_path, list_directory, stat_file
 from .posix import getenv_value
+from .string_utils import shell_single_quote
 
 
 struct DownloadableDictionary(ImplicitlyCopyable, Movable):
@@ -165,9 +166,9 @@ def dictionary_install_command(language_id: String, url: String) -> String:
     wordlist."""
     var root = user_dictionaries_root()
     var dest = user_dictionary_path(language_id)
-    return String("set -e; mkdir -p '") + root + String("'; ") \
-        + String("curl -fsSL -o '") + dest + String("' '") \
-        + url + String("'")
+    return String("set -e; mkdir -p ") + shell_single_quote(root) + String("; ") \
+        + String("curl -fsSL -o ") + shell_single_quote(dest) + String(" ") \
+        + shell_single_quote(url)
 
 
 def remove_user_dictionary(language_id: String) -> Bool:

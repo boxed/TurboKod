@@ -23,6 +23,7 @@ from .json import (
     JsonValue, encode_json, json_array, json_bool, json_int, json_object,
     json_str, parse_json,
 )
+from .string_utils import utf8_prefix
 from .posix import (
     POSIX_SPAWN_FILE_ACTIONS_SIZE, SIGTERM,
     alloc_zero_buffer, append_string_bytes, chdir_path, close_fd,
@@ -483,11 +484,9 @@ struct LspProcess(Copyable, Movable):
             # Truncate huge payloads in the trace — full breakpoint
             # lists, big stack traces etc. can run to several KB and
             # the log is meant to be human-readable.
-            var preview = payload
-            var pb = payload.as_bytes()
-            if len(pb) > 400:
-                preview = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=pb.unsafe_ptr(), length=400))) + String("…")
-            self.trace(String("> ") + String(n) + String("B ") + preview)
+            self.trace(
+                String("> ") + String(n) + String("B ") + _trace_preview(payload)
+            )
         append_string_bytes(self._pending_write, hdr)
         append_string_bytes(self._pending_write, payload)
         if len(self._pending_write) > _BUF_CAP_GUARD:
@@ -573,15 +572,9 @@ struct LspProcess(Copyable, Movable):
                 # ``value()`` call and then calling ``value()`` again for
                 # the preview invalidates that first interior reference.
                 var msg = prefab.value()
-                var nbytes = len(msg.as_bytes())
-                var preview = msg
-                if nbytes > 400:
-                    var mb = msg.as_bytes()
-                    preview = String(StringSpan(unsafe_from_utf8=Span(
-                        unsafe_ptr=mb.unsafe_ptr(), length=400,
-                    ))) + String("…")
                 self.trace(
-                    String("< ") + String(nbytes) + String("B ") + preview,
+                    String("< ") + String(len(msg.as_bytes())) + String("B ")
+                    + _trace_preview(msg),
                 )
             return prefab
         var scratch = alloc_zero_buffer(65536)
@@ -615,16 +608,9 @@ struct LspProcess(Copyable, Movable):
                     # Own the message first — see the matching comment in
                     # the pre-drained branch above.
                     var msg = extracted.value()
-                    var nbytes = len(msg.as_bytes())
-                    var preview = msg
-                    if nbytes > 400:
-                        var mb = msg.as_bytes()
-                        preview = String(StringSpan(unsafe_from_utf8=Span(
-                            unsafe_ptr=mb.unsafe_ptr(), length=400,
-                        ))) + String("…")
                     self.trace(
-                        String("< extracted ") + String(nbytes) + String("B ")
-                        + preview,
+                        String("< extracted ") + String(len(msg.as_bytes()))
+                        + String("B ") + _trace_preview(msg),
                     )
                 return extracted
             # No complete message yet — keep draining while bytes are
@@ -1168,6 +1154,14 @@ def lsp_initialize_params(
     capabilities.put(String("textDocument"), text_doc_caps^)
     params.put(String("capabilities"), capabilities^)
     return params^
+
+
+def _trace_preview(msg: String) -> String:
+    """``msg`` capped for the human-readable wire trace (full breakpoint
+    lists, big stack traces etc. run to several KB)."""
+    if len(msg.as_bytes()) <= 400:
+        return msg
+    return utf8_prefix(msg, 400) + String("…")
 
 
 def json_null_v() -> JsonValue:

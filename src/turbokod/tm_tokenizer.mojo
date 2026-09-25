@@ -42,7 +42,7 @@ from .onig import (
     OnigMatch, OnigRegex,
     ONIG_OPTION_NONE, ONIG_OPTION_NOT_BEGIN_POSITION,
 )
-from .string_utils import starts_with
+from .string_utils import byte_slice, starts_with
 from .tm_grammar import (
     Capture, Grammar, Pattern,
     PATTERN_BEGIN_END, PATTERN_BEGIN_WHILE, PATTERN_GROUP,
@@ -842,11 +842,7 @@ def _unpack_groups(packed: String) -> List[String]:
         if i >= len(b) or Int(b[i]) != 0x3A:  # ':'
             break
         i += 1  # skip ':'
-        var piece = String("")
-        for k in range(num):
-            if i + k < len(b):
-                piece += chr(Int(b[i + k]))
-        out.append(piece^)
+        out.append(byte_slice(packed, i, i + num))
         i += num
     return out^
 
@@ -865,10 +861,7 @@ def _extract_group_texts(m: OnigMatch, line: String) -> List[String]:
         if gs < 0 or ge < gs or ge > len(lb):
             out.append(String(""))
             continue
-        var piece = String("")
-        for i in range(gs, ge):
-            piece += chr(Int(lb[i]))
-        out.append(piece^)
+        out.append(byte_slice(line, gs, ge))
     return out^
 
 
@@ -877,7 +870,7 @@ def _escape_regex_literal(s: String) -> String:
     when spliced into a pattern. A captured tag name is normally bare
     word characters, but escaping keeps a capture that happens to hold
     ``.``/``(``/etc. from changing the recompiled end regex's meaning."""
-    var out = String("")
+    var out = List[UInt8]()
     for b in s.as_bytes():
         var c = Int(b)
         # ASCII metacharacters that need a backslash in libonig.
@@ -885,9 +878,9 @@ def _escape_regex_literal(s: String) -> String:
                 or c == 0x2A or c == 0x2B or c == 0x3F or c == 0x28 \
                 or c == 0x29 or c == 0x5B or c == 0x5D or c == 0x7B \
                 or c == 0x7D or c == 0x7C or c == 0x2F:
-            out += "\\"
-        out += chr(c)
-    return out^
+            out.append(0x5C)
+        out.append(b)
+    return String(StringSpan(unsafe_from_utf8=Span(out)))
 
 
 def _substitute_backrefs(src: String, groups: List[String]) -> String:
@@ -897,7 +890,7 @@ def _substitute_backrefs(src: String, groups: List[String]) -> String:
     that didn't participate (or is out of range) becomes empty — the
     same as TextMate, where an absent capture contributes nothing."""
     var b = src.as_bytes()
-    var out = String("")
+    var out = List[UInt8]()
     var i = 0
     while i < len(b):
         var c = Int(b[i])
@@ -906,18 +899,18 @@ def _substitute_backrefs(src: String, groups: List[String]) -> String:
             if d >= 0x31 and d <= 0x39:  # '1'..'9'
                 var gi = d - 0x30
                 if gi < len(groups):
-                    out += _escape_regex_literal(groups[gi])
+                    out.extend(_escape_regex_literal(groups[gi]).as_bytes())
                 # else: out of range → empty substitution
                 i += 2
                 continue
             # Any other escape (incl. "\\") passes through verbatim.
-            out += chr(c)
-            out += chr(d)
+            out.append(b[i])
+            out.append(b[i + 1])
             i += 2
             continue
-        out += chr(c)
+        out.append(b[i])
         i += 1
-    return out^
+    return String(StringSpan(unsafe_from_utf8=Span(out)))
 
 
 def _dyn_end_regex(

@@ -18,6 +18,7 @@ from std.collections.list import List
 
 from .file_io import stat_file
 from .posix import getenv_value
+from .string_utils import shell_single_quote
 
 
 struct DownloadableGrammar(Copyable, Movable):
@@ -177,6 +178,6 @@ def grammar_install_command(lang: String, url: String) -> String:
     don't save a 404 HTML page as the grammar JSON."""
     var dir = user_grammar_dir(lang)
     var dest = user_grammar_path(lang)
-    return String("set -e; mkdir -p '") + dir + String("'; ") \
-        + String("curl -fsSL -o '") + dest + String("' '") \
-        + url + String("'")
+    return String("set -e; mkdir -p ") + shell_single_quote(dir) + String("; ") \
+        + String("curl -fsSL -o ") + shell_single_quote(dest) + String(" ") \
+        + shell_single_quote(url)

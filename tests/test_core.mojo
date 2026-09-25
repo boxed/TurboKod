@@ -43,7 +43,10 @@ from turbokod.file_tree import FileTree, FileTreeEntry
 from turbokod.menu import Menu, MenuBar, MenuItem
 from turbokod.project import FileIndexer
 from turbokod.project_targets import detect_project_language
-from turbokod.string_utils import slice_codepoints, shell_escape_path
+from turbokod.string_utils import (
+    shell_escape_path, shell_single_quote, slice_codepoints, utf8_prefix,
+    utf8_suffix,
+)
 from turbokod.project_on_save import on_save_equal
 from turbokod.quick_open import QuickOpen
 from turbokod.doc_config import (
@@ -359,6 +362,26 @@ def test_shell_escape_path_escapes_metacharacters() raises:
     assert_equal(shell_escape_path(String("/tmp/a—b.txt")),
                  String("/tmp/a—b.txt"))
 
+
+def test_shell_single_quote_keeps_utf8_and_escapes_quotes() raises:
+    """Multi-byte UTF-8 passes through intact (it used to be re-encoded
+    byte by byte through ``chr()``) and an embedded ``'`` closes, escapes
+    and reopens the quote."""
+    assert_equal(shell_single_quote(String("/Users/Hovmöller")),
+                 String("'/Users/Hovmöller'"))
+    assert_equal(shell_single_quote(String("it's")), String("'it'\\''s'"))
+    assert_equal(shell_single_quote(String("")), String("''"))
+
+
+def test_utf8_prefix_and_suffix_respect_codepoint_boundaries() raises:
+    var s = String("aé🔥b")   # 1 + 2 + 4 + 1 bytes
+    assert_equal(utf8_prefix(s, 100), s)
+    assert_equal(utf8_prefix(s, 2), String("a"))      # would split é
+    assert_equal(utf8_prefix(s, 3), String("aé"))
+    assert_equal(utf8_prefix(s, 5), String("aé"))     # would split 🔥
+    assert_equal(utf8_suffix(s, 2), String("b"))      # would split 🔥
+    assert_equal(utf8_suffix(s, 5), String("🔥b"))
+    assert_equal(utf8_suffix(s, 0), String(""))
 
 def test_canvas_box() raises:
     var c = Canvas(10, 5)
@@ -2417,6 +2440,8 @@ def main() raises:
     test_attr_to_sgr_curly_colored_underline()
     test_canvas_put_text()
     test_shell_escape_path_escapes_metacharacters()
+    test_shell_single_quote_keeps_utf8_and_escapes_quotes()
+    test_utf8_prefix_and_suffix_respect_codepoint_boundaries()
     test_canvas_box()
     test_canvas_fill()
     test_parse_input_keys()

@@ -105,8 +105,11 @@ struct FileTree(Movable):
     var _menu_is_dir: Bool
     var _menu_x: Int
     var _menu_y: Int
+    var _list_h: Int
+    """Listing height as last painted, for keyboard scroll-to-selection."""
 
     def __init__(out self):
+        self._list_h = 10
         self.visible = False
         self.root = String("")
         self.width = FILE_TREE_WIDTH
@@ -309,7 +312,7 @@ struct FileTree(Movable):
         inside the separator on the docked side)."""
         return area.a.x if self.dock_left else area.a.x + 1
 
-    def paint(self, mut canvas: Canvas, container_bounds: Rect):
+    def paint(mut self, mut canvas: Canvas, container_bounds: Rect):
         if not self.visible:
             return
         var area = self.rect(container_bounds)
@@ -341,6 +344,7 @@ struct FileTree(Movable):
         # which project is open).
         var list_top = area.a.y
         var list_h = area.b.y - list_top
+        self._list_h = max(1, list_h)
         for i in range(list_h):
             var idx = self.scroll + i
             if idx >= len(self.entries):
@@ -471,13 +475,8 @@ struct FileTree(Movable):
         return w
 
     def _scroll_to_selection(mut self):
-        # Visible-window height isn't known without ``container_bounds``, so
-        # use a conservative fixed visible count — the listing is
-        # right-docked at a fixed width and the host gives us at
-        # least 10 rows in practice. Erring small means we may
-        # over-scroll on tiny terminals; that's preferable to
-        # leaving the selection off-container_bounds.
-        var visible = 10
+        # Height of the listing as last painted (10 until the first paint).
+        var visible = self._list_h
         if self.selected < 0:
             return
         if self.selected < self.scroll:

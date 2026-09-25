@@ -34,6 +34,7 @@ from .posix import (
     monotonic_ms, poll_stdin, read_into, reap_child, untrack_child,
     waitpid_nohang,
 )
+from .string_utils import shell_single_quote
 
 
 struct RunSession(Movable):
@@ -112,14 +113,14 @@ struct RunSession(Movable):
         # Build the ``sh -c`` line the same way every time so the
         # diagnostic ``command`` field always matches what the
         # kernel actually ran.
-        var script = String("exec ") + _shell_quote(program)
+        var script = String("exec ") + shell_single_quote(program)
         for k in range(len(args)):
-            script = script + String(" ") + _shell_quote(args[k])
+            script = script + String(" ") + shell_single_quote(args[k])
         if len(cwd.as_bytes()) > 0:
-            script = String("cd ") + _shell_quote(cwd) \
+            script = String("cd ") + shell_single_quote(cwd) \
                 + String(" && ") + script
         for k in range(len(env)):
-            script = String("export ") + _shell_quote(env[k]) \
+            script = String("export ") + shell_single_quote(env[k]) \
                 + String("; ") + script
         if cols > 0 and rows > 0:
             script = String("export COLUMNS=") + String(cols) \
@@ -241,20 +242,4 @@ def _drain_fd(fd: Int32) -> String:
             break
         out = out + String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=scratch.unsafe_ptr(), length=n)))
         total += n
-    return out^
-
-
-def _shell_quote(s: String) -> String:
-    """Single-quote ``s`` for safe substitution into ``sh -c``.
-    Embedded single quotes are escaped via ``'\\''`` (close-quote,
-    literal-quote, re-open-quote) — the standard POSIX idiom."""
-    var b = s.as_bytes()
-    var out = String("'")
-    for i in range(len(b)):
-        var c = Int(b[i])
-        if c == 0x27:    # '
-            out = out + String("'\\''")
-        else:
-            out = out + chr(c)
-    out = out + String("'")
     return out^

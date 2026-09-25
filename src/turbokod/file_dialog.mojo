@@ -99,12 +99,17 @@ struct FileDialog(Movable):
     ``" Open Project "``) so the same dialog reads correctly in
     either mode."""
     var _open_button: ShadowButton
+    # Listing height as last painted. ``compute_dialog_rect`` shrinks the
+    # dialog on a short screen, so keyboard scrolling must use this rather
+    # than the nominal ``_LIST_HEIGHT`` or the selection scrolls off-view.
+    var _list_h: Int
     """Persistent " Open <X> " button for dirs-only mode. Press
     latch lives here so the button can't lose its captured state
     between paints. Repositioned to the right edge of the buttons
     row on every paint."""
 
     def __init__(out self):
+        self._list_h = _LIST_HEIGHT
         self.active = False
         self.submitted = False
         self.selected_path = String("")
@@ -194,6 +199,7 @@ struct FileDialog(Movable):
             canvas, Point(rect.a.x + 2, layout.current_dir_y),
             self.browser.dir, dir_attr,
         )
+        self._list_h = max(1, layout.list_rect.height())
         self.browser.paint(canvas, layout.list_rect, True)
         # Desktop / Home / Root quick-jump strip just above the hint
         # — green TV-style buttons with shadows; colours are owned
@@ -228,7 +234,7 @@ struct FileDialog(Movable):
         if event.kind != EVENT_KEY:
             return True
         var k = event.key
-        var list_h = _LIST_HEIGHT
+        var list_h = self._list_h
         if k == KEY_ESC:
             self.close()
             return True

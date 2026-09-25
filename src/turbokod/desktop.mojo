@@ -104,7 +104,8 @@ from .lsp_status_menu import (
     LSP_MENU_ACTION_RESTART, LspStatusMenu,
 )
 from .posix import (
-    SIGTERM, alloc_zero_buffer, close_fd, debug_log, getenv_value, kill_pid,
+    SIGTERM, alloc_zero_buffer, close_fd, debug_log, exit_code_from_status,
+    getenv_value, kill_pid,
     poll_stdin, read_into, realpath, reap_child, untrack_child,
     waitpid_nohang,
 )
@@ -3632,6 +3633,11 @@ struct Desktop(Movable):
         if self.debug_pane.is_resizing() \
                 or self.debug_pane.is_on_resize_edge(
                     pos, self.debug_pane_rect(screen)
+                ):
+            return String("ns-resize")
+        if self.find_results_pane.is_resizing() \
+                or self.find_results_pane.is_on_resize_edge(
+                    pos, self.find_results_pane_rect(screen)
                 ):
             return String("ns-resize")
         if self.test_pane.is_resizing() \
@@ -10875,7 +10881,8 @@ struct Desktop(Movable):
                 or self.quick_open.active or self.symbol_pick.active \
                 or self.reference_pick.active or self.find_symbol.active \
                 or self.doc_pick.active or self.project_find.active \
-                or self.local_changes.active or self.review.active:
+                or self.local_changes.active or self.review.active \
+                or self.history.active:
             return False
         if self.project_settings.active and not self.project_settings_detached:
             return False
@@ -12514,9 +12521,9 @@ struct Desktop(Movable):
         on focus-out would steal focus away from the app the user just
         switched to. Per-file save errors are swallowed; we don't want
         a single failing write to break autosave for the rest. The
-        same on-save action plumbing the explicit Ctrl+S path uses
-        runs for each saved file so formatters / linters fire
-        identically in both modes.
+        same ``_after_save`` housekeeping the explicit Ctrl+S path uses
+        runs for each saved file, so formatters / linters and the
+        language server's didSave fire identically in both modes.
         """
         for i in range(len(self.windows.windows)):
             if not self.windows.windows[i].is_editor:
@@ -12530,9 +12537,7 @@ struct Desktop(Movable):
             try:
                 if self.windows.windows[i].editor.save():
                     var saved_path = self.windows.windows[i].editor.file_path
-                    self._maybe_reload_targets(saved_path)
-                    self.windows.windows[i].editor.invalidate_git_changes()
-                    self._run_on_save_actions(saved_path)
+                    self._after_save(i, saved_path)
             except e:
                 print(
                     "desktop: autosave_all_dirty",
@@ -12585,9 +12590,7 @@ struct Desktop(Movable):
                 return
             try:
                 if self.windows.windows[i].editor.save():
-                    self._maybe_reload_targets(prev)
-                    self.windows.windows[i].editor.invalidate_git_changes()
-                    self._run_on_save_actions(prev)
+                    self._after_save(i, prev)
             except e:
                 print("desktop: autosave_on_focus_change", prev, ":", String(e))
             return
@@ -12825,7 +12828,7 @@ struct Desktop(Movable):
             self._drain_save_action_fd(pa.stderr_fd)
             if pa.stdout_fd >= 0: _ = close_fd(pa.stdout_fd)
             if pa.stderr_fd >= 0: _ = close_fd(pa.stderr_fd)
-            var exit_code = (Int(pair[1]) >> 8) & 0xFF
+            var exit_code = exit_code_from_status(Int(pair[1]))
             if exit_code == 0:
                 self.status_bar.set_message(
                     String("on-save: ") + pa.label + String(" ok"),
@@ -13503,7 +13506,7 @@ struct Desktop(Movable):
             return
         if not self.windows.windows[win_idx].is_editor:
             return
-        var editor = self.windows.windows[win_idx].editor.copy()
+        ref editor = self.windows.windows[win_idx].editor
         var row = editor.selections[0].row
         if row < 0 or row >= editor.buffer.line_count():
             return
@@ -14789,7 +14792,11 @@ struct Desktop(Movable):
             if self.windows.windows[i].is_editor:
                 var p = self.windows.windows[i].editor.file_path
                 if p == path or (is_dir and starts_with(p, prefix)):
+                    # Not ``_close_editor_window_at``: a deleted file has no
+                    # view state worth remembering, but its server still
+                    # holds the document open and needs the didClose.
                     _ = self.windows.close_by_index(i)
+                    self._lsp_notify_closed_if_last(p)
             i -= 1
         self._refresh_file_tree()
         self.status_bar.set_message(

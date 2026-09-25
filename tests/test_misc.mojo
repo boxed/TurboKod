@@ -654,6 +654,9 @@ def test_extension_of_helper() raises:
     assert_equal(extension_of(String("Makefile")), String(""))
     assert_equal(extension_of(String("a.b/c")), String(""))   # dot before /
     assert_equal(extension_of(String("")), String(""))
+    # Non-ASCII extensions come back byte-identical (only A-Z is folded).
+    assert_equal(extension_of(String("hello.🔥")), String("🔥"))
+    assert_equal(extension_of(String("x.ÄB")), String("Äb"))
 
 
 def test_document_link_over_template_tag_is_dropped() raises:

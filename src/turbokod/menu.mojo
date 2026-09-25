@@ -400,7 +400,10 @@ struct MenuBar(Movable):
                 seq = 1
             var glyph: String
             if seq == 1:
-                glyph = String(chr(c0))
+                # A stray continuation / truncated byte shows as ``?``,
+                # matching ``Canvas.put_text``; ``chr`` would re-encode
+                # the raw byte as a different codepoint.
+                glyph = String(chr(c0)) if c0 < 0x80 else String("?")
             else:
                 glyph = String(StringSpan(unsafe_from_utf8=b[i:i + seq]))
             var a = hotkey_attr if col == 0 else body_attr

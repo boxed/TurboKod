@@ -319,6 +319,9 @@ struct TestPane(Copyable, Movable):
             if Int(pair[0]) == Int(self.pty.pid):
                 self.exit_code = exit_code_from_status(Int(pair[1]))
                 untrack_child(self.pty.pid)
+                # Reaped: forget the pid so a later ``terminate`` can't
+                # signal or reap whatever process recycles it.
+                self.pty.pid = -1
                 self.exited = True
                 var tag: String
                 if self.exit_code == 0:

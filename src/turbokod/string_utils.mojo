@@ -37,6 +37,31 @@ def byte_slice(s: String, start: Int, end: Int) -> String:
     return String(StringSpan(unsafe_from_utf8=bytes[s_start:s_end]))
 
 
+def utf8_prefix(s: String, max_bytes: Int) -> String:
+    """The longest prefix of ``s`` of at most ``max_bytes`` bytes that ends
+    on a codepoint boundary — a byte cap that can't split a character."""
+    var b = s.as_bytes()
+    if len(b) <= max_bytes:
+        return s
+    var end = max(0, max_bytes)
+    while end > 0 and (b[end] & 0xC0) == 0x80:
+        end -= 1
+    return byte_slice(s, 0, end)
+
+
+def utf8_suffix(s: String, max_bytes: Int) -> String:
+    """The longest suffix of ``s`` of at most ``max_bytes`` bytes that
+    starts on a codepoint boundary."""
+    var b = s.as_bytes()
+    var n = len(b)
+    if n <= max_bytes:
+        return s
+    var start = n - max(0, max_bytes)
+    while start < n and (b[start] & 0xC0) == 0x80:
+        start += 1
+    return byte_slice(s, start, n)
+
+
 def starts_with(s: String, prefix: String) -> Bool:
     """``True`` iff ``s`` begins with ``prefix`` byte-for-byte."""
     var sb = s.as_bytes()
@@ -102,6 +127,25 @@ def shell_escape_path(path: String) -> String:
         if special:
             out.append(0x5C)  # backslash
         out.append(b[i])
+    return String(StringSpan(unsafe_from_utf8=Span(out)))
+
+
+def shell_single_quote(s: String) -> String:
+    """Wrap ``s`` in single quotes for ``/bin/sh``, turning each embedded
+    ``'`` into the standard ``'\\''`` close/escape/reopen sequence. Works on
+    raw bytes so multibyte UTF-8 passes through intact."""
+    var b = s.as_bytes()
+    var out = List[UInt8]()
+    out.append(0x27)
+    for i in range(len(b)):
+        if b[i] == 0x27:
+            out.append(0x27)
+            out.append(0x5C)
+            out.append(0x27)
+            out.append(0x27)
+        else:
+            out.append(b[i])
+    out.append(0x27)
     return String(StringSpan(unsafe_from_utf8=Span(out)))
 
 

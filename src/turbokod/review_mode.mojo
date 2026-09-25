@@ -100,12 +100,6 @@ def _diff_is_binary(diff_text: String) -> Bool:
     return False
 
 
-def _one_char(b: UInt8) -> String:
-    var buf = List[UInt8]()
-    buf.append(b)
-    return String(StringSpan(unsafe_from_utf8=Span(buf)))
-
-
 def _count_changed_lines(before: String, after: String, is_binary: Bool) -> Int:
     """Number of changed (added + removed) rows in the unified diff between
     ``before`` and ``after`` — the same rows the diff view renders as
@@ -195,6 +189,8 @@ struct ReviewMode(Movable):
     var pk_y0: Int
     var pk_x0: Int
     var pk_x1: Int
+    var pk_first: Int   # first label index shown (the list scrolls)
+    var pk_rows: Int    # label rows that fit in the box
 
     def __init__(out self):
         self.active = False
@@ -230,6 +226,8 @@ struct ReviewMode(Movable):
         self.pk_y0 = -1
         self.pk_x0 = -1
         self.pk_x1 = -1
+        self.pk_first = 0
+        self.pk_rows = 0
 
     # --- lifecycle --------------------------------------------------------
 
@@ -588,11 +586,19 @@ struct ReviewMode(Movable):
         self.pk_y0 = y0 + 1
         self.pk_x0 = x0 + 1
         self.pk_x1 = x0 + box_w - 1
-        var rows_shown = box_h - 2
-        for i in range(n):
-            if i >= rows_shown:
+        var rows_shown = max(0, box_h - 2)
+        # Scroll just far enough to keep the cursor on screen when the
+        # list is taller than the box (a short terminal).
+        var first = 0
+        if self.picker_cursor >= rows_shown:
+            first = self.picker_cursor - rows_shown + 1
+        self.pk_first = first
+        self.pk_rows = rows_shown
+        for r in range(rows_shown):
+            var i = first + r
+            if i >= n:
                 break
-            var y = self.pk_y0 + i
+            var y = self.pk_y0 + r
             var row_attr = cursor_attr if i == self.picker_cursor else dialog_bg
             painter.fill(
                 canvas, Rect(self.pk_x0, y, self.pk_x1, y + 1),
@@ -683,17 +689,15 @@ struct ReviewMode(Movable):
         var cx = mid_lo + (mid_w - cw) // 2
         if cx < mid_lo:
             cx = mid_lo
-        var cb = counter.as_bytes()
+        # Paint the counter twice through complementary clips so each half
+        # takes the color of the bar segment beneath it.
         var split = mid_lo + filled
-        for j in range(len(cb)):
-            var sx = cx + j
-            if sx < mid_lo:
-                continue
-            if sx >= mid_hi:
-                break
-            var on_filled = sx < split
-            var attr = Attr(WHITE, GREEN) if on_filled else Attr(BLACK, DARK_GRAY)
-            _ = painter.put_text(canvas, Point(sx, y), _one_char(cb[j]), attr)
+        _ = painter.sub(Rect(mid_lo, y, split, y + 1)).put_text(
+            canvas, Point(cx, y), counter, Attr(WHITE, GREEN),
+        )
+        _ = painter.sub(Rect(split, y, mid_hi, y + 1)).put_text(
+            canvas, Point(cx, y), counter, Attr(BLACK, DARK_GRAY),
+        )
 
     # --- input ------------------------------------------------------------
 
@@ -748,10 +752,11 @@ struct ReviewMode(Movable):
                 and not event.motion:
             var px = event.pos.x
             var py = event.pos.y
-            var n = len(self.picker_labels)
+            var idx = self.pk_first + (py - self.pk_y0)
             if self.pk_x0 <= px and px < self.pk_x1 \
-                    and self.pk_y0 <= py and py < self.pk_y0 + n:
-                self.picker_cursor = py - self.pk_y0
+                    and self.pk_y0 <= py and py < self.pk_y0 + self.pk_rows \
+                    and idx < len(self.picker_labels):
+                self.picker_cursor = idx
                 self._start_review()
 
     def _handle_review_key(mut self, event: Event) -> Bool:

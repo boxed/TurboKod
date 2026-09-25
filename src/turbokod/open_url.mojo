@@ -12,6 +12,7 @@ from std.ffi import external_call
 from std.sys.info import CompilationTarget
 
 from .posix import getenv_value
+from .string_utils import shell_single_quote
 
 
 def _starts_with_http(url: String) -> Bool:
@@ -26,29 +27,6 @@ def _starts_with_http(url: String) -> Bool:
             and b[7] == 0x2F:
         return True   # https://
     return False
-
-
-def _shell_single_quote(s: String) -> String:
-    """Wrap ``s`` in single quotes for ``/bin/sh``, turning each embedded
-    ``'`` into the standard ``'\\''`` close/escape/reopen sequence. Copies
-    quote-free runs as byte slices so multibyte UTF-8 passes through intact.
-    """
-    var b = s.as_bytes()
-    var n = len(b)
-    var out = String("'")
-    var start = 0
-    var i = 0
-    while i < n:
-        if b[i] == 0x27:  # '
-            if i > start:
-                out += String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(start), length=i - start)))
-            out += String("'\\''")
-            start = i + 1
-        i += 1
-    if start < n:
-        out += String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(start), length=n - start)))
-    out += String("'")
-    return out^
 
 
 def _strip_macos_malloc_debug_env():
@@ -81,7 +59,7 @@ def open_url(url: String):
     else:
         opener = String("xdg-open")
     # Background + redirect so a slow opener can't stall the UI loop.
-    var cmd = opener + String(" ") + _shell_single_quote(url) \
+    var cmd = opener + String(" ") + shell_single_quote(url) \
         + String(" >/dev/null 2>&1 &\0")
     var mode = String("r\0")
     var fp = external_call["popen", Int](cmd.unsafe_ptr(), mode.unsafe_ptr())

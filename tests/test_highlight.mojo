@@ -39,7 +39,9 @@ from turbokod.grammar_install import (
 from turbokod.project_grammars import GrammarOverride
 from turbokod.onig import OnigRegex, onig_global_init, onig_tracked_count
 from turbokod.tm_grammar import load_grammar_from_string
-from turbokod.tm_tokenizer import tokenize_with_grammar
+from turbokod.tm_tokenizer import (
+    _pack_groups, _substitute_backrefs, _unpack_groups, tokenize_with_grammar,
+)
 from turbokod.geometry import Rect
 
 from support import (
@@ -2132,8 +2134,33 @@ def test_backreference_end_regexes_are_released_per_line() raises:
     g.release()
 
 
+def test_html_to_text_decodes_non_ascii_numeric_entities() raises:
+    """Numeric entities decode to the real UTF-8 bytes. Each byte used to be
+    built with ``chr()``, which encodes a *codepoint*, so ``&#233;`` came
+    out as the four-byte mojibake ``Ã©``."""
+    var rendered = html_to_text(String("<p>caf&#233; &#x1F525;</p>"))
+    assert_true(String("café 🔥") in rendered)
+
+
+def test_backref_substitution_keeps_non_ascii_captures() raises:
+    """A begin capture holding non-ASCII text survives the pack/unpack
+    round trip and splices into the end regex byte-for-byte (a heredoc
+    delimiter like ``ÉOF`` must match itself, not a re-encoded copy)."""
+    var groups = List[String]()
+    groups.append(String("<<ÉOF"))
+    groups.append(String("ÉOF"))
+    var unpacked = _unpack_groups(_pack_groups(groups))
+    assert_equal(len(unpacked), 2)
+    assert_equal(unpacked[1], String("ÉOF"))
+    assert_equal(
+        _substitute_backrefs(String("^\\1$"), unpacked), String("^ÉOF$"),
+    )
+
+
 def main() raises:
     setup_test_env()
+    test_html_to_text_decodes_non_ascii_numeric_entities()
+    test_backref_substitution_keeps_non_ascii_captures()
     test_grammar_install_command_targets_user_config()
     test_django_grammar_is_in_downloadable_catalog()
     test_grammar_registry_override_routes_to_alternate_grammar()

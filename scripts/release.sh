@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a self-contained, signed (and, when creds exist, notarized + stapled)
+# Build a self-contained, Developer ID signed, notarized + stapled
 # TurboKod.app, zip it, and publish it to the GitHub Releases page.
 #
 # Unlike `make app`, the bundle this produces is portable *across machines*:
@@ -51,18 +51,22 @@ arch="$(uname -m)"
 # ---------------------------------------------------------------------------
 : "${TURBOKOD_NOTARY_PROFILE:=turbokod-notary}"
 
-preflight_identity="${TURBOKOD_SIGN_IDENTITY:-}"
-[ -n "$preflight_identity" ] || preflight_identity="$(security find-identity -v -p codesigning \
+identity="${TURBOKOD_SIGN_IDENTITY:-}"
+[ -n "$identity" ] || identity="$(security find-identity -v -p codesigning \
   | awk -F'"' '/Developer ID Application/{print $2; exit}')"
-[ -n "$preflight_identity" ] \
+[ -n "$identity" ] \
   || die "no 'Developer ID Application' identity in the keychain. A published release must be Developer ID signed + notarized; refusing to continue (ad-hoc signing is not allowed for releases)."
 
+# Resolved once here and reused at notarization time, so the credentials
+# that passed pre-flight are the ones actually submitted.
 if xcrun notarytool history --keychain-profile "$TURBOKOD_NOTARY_PROFILE" >/dev/null 2>&1; then
-  : # keychain profile credentials are valid
+  notary_args=(--keychain-profile "$TURBOKOD_NOTARY_PROFILE")
 elif [ -n "${TURBOKOD_NOTARY_APPLE_ID:-}" ] \
   && [ -n "${TURBOKOD_NOTARY_PASSWORD:-}" ] \
   && [ -n "${TURBOKOD_NOTARY_TEAM_ID:-}" ]; then
-  : # explicit Apple-ID credentials provided
+  notary_args=(--apple-id "$TURBOKOD_NOTARY_APPLE_ID" \
+               --password "$TURBOKOD_NOTARY_PASSWORD" \
+               --team-id "$TURBOKOD_NOTARY_TEAM_ID")
 else
   die "notary credentials unavailable: keychain profile '$TURBOKOD_NOTARY_PROFILE' not found and TURBOKOD_NOTARY_APPLE_ID/_PASSWORD/_TEAM_ID unset. Run 'xcrun notarytool store-credentials' (or set those env vars). Releases must be notarized; refusing to continue."
 fi
@@ -166,26 +170,10 @@ done
 install_name_tool -delete_rpath "$prefix/lib" "$contents/MacOS/TurboKod" 2>/dev/null
 
 # ---------------------------------------------------------------------------
-# 5. Sign. Developer ID + hardened runtime when available; else ad-hoc.
+# 5. Sign: Developer ID + hardened runtime (identity resolved in pre-flight).
 # ---------------------------------------------------------------------------
-identity="${TURBOKOD_SIGN_IDENTITY:-}"
-if [ -z "$identity" ]; then
-  identity="$(security find-identity -v -p codesigning \
-    | awk -F'"' '/Developer ID Application/{print $2; exit}')"
-fi
-
-if [ -z "$identity" ]; then
-  note "warning: no 'Developer ID Application' identity found - ad-hoc signing."
-  note "         The release will run only after a manual Gatekeeper override; notarization is impossible without it."
-  identity="-"
-fi
-
 sign_dylib() {
-  if [ "$identity" = "-" ]; then
-    codesign --force --sign - "$1"
-  else
-    codesign --force --options runtime --timestamp --sign "$identity" "$1"
-  fi
+  codesign --force --options runtime --timestamp --sign "$identity" "$1"
 }
 
 note "signing with: $identity"
@@ -198,55 +186,26 @@ find "$fwk" -name '*.dylib' -print0 | while IFS= read -r -d '' lib; do
 done
 [ -f "$contents/MacOS/tk-tui" ] && sign_dylib "$contents/MacOS/tk-tui"
 # ...then the bundle (which signs the main executable), with entitlements +
-# hardened runtime when we have a real identity.
-if [ "$identity" = "-" ]; then
-  codesign --force --sign - "$app" || die "codesign (ad-hoc) failed"
-else
-  codesign --force --options runtime --timestamp \
-    --entitlements "$entitlements" --sign "$identity" "$app" \
-    || die "codesign (Developer ID) failed"
-fi
+# hardened runtime.
+codesign --force --options runtime --timestamp \
+  --entitlements "$entitlements" --sign "$identity" "$app" \
+  || die "codesign (Developer ID) failed"
 codesign --verify --deep --strict --verbose=2 "$app" || die "signature verification failed"
 
 # ---------------------------------------------------------------------------
-# 6. Notarize + staple (only meaningful with a real identity + creds).
+# 6. Notarize + staple. Mandatory: never publish a release that wasn't stapled.
 # ---------------------------------------------------------------------------
 # Version-less asset name so the homepage can link the stable
 # /releases/latest/download/<name> URL (the version lives in the tag + title).
 zip=".build/TurboKod-macos-$arch.zip"
-notarized=0
-if [ "$identity" != "-" ]; then
-  notary_args=()
-  if [ -n "${TURBOKOD_NOTARY_PROFILE:-}" ]; then
-    notary_args=(--keychain-profile "$TURBOKOD_NOTARY_PROFILE")
-  elif [ -n "${TURBOKOD_NOTARY_APPLE_ID:-}" ] \
-    && [ -n "${TURBOKOD_NOTARY_PASSWORD:-}" ] \
-    && [ -n "${TURBOKOD_NOTARY_TEAM_ID:-}" ]; then
-    notary_args=(--apple-id "$TURBOKOD_NOTARY_APPLE_ID" \
-                 --password "$TURBOKOD_NOTARY_PASSWORD" \
-                 --team-id "$TURBOKOD_NOTARY_TEAM_ID")
-  fi
-
-  if [ "${#notary_args[@]}" -gt 0 ]; then
-    note "submitting to Apple notary service (this can take a few minutes)..."
-    rm -f "$zip"
-    ditto -c -k --keepParent "$app" "$zip"
-    if xcrun notarytool submit "$zip" "${notary_args[@]}" --wait; then
-      note "stapling notarization ticket..."
-      xcrun stapler staple "$app" || die "stapler failed"
-      xcrun stapler validate "$app" || die "staple validation failed"
-      notarized=1
-    else
-      die "notarytool submission failed (see log above; 'xcrun notarytool log <id> ...' for details)"
-    fi
-  else
-    die "no notary credentials resolved at notarization time (should have been caught by pre-flight)."
-  fi
-fi
-
-# Notarization is mandatory: never publish a release that wasn't stapled.
-[ "$notarized" = 1 ] \
-  || die "refusing to publish a non-notarized release (identity='$identity', notarized=$notarized). A release must be Developer ID signed + Apple-notarized + stapled."
+note "submitting to Apple notary service (this can take a few minutes)..."
+rm -f "$zip"
+ditto -c -k --keepParent "$app" "$zip"
+xcrun notarytool submit "$zip" "${notary_args[@]}" --wait \
+  || die "notarytool submission failed (see log above; 'xcrun notarytool log <id> ...' for details)"
+note "stapling notarization ticket..."
+xcrun stapler staple "$app" || die "stapler failed"
+xcrun stapler validate "$app" || die "staple validation failed"
 
 # ---------------------------------------------------------------------------
 # 7. Final distribution zip (rebuilt after stapling so it carries the ticket).
@@ -258,18 +217,10 @@ note "packaged: $zip"
 # ---------------------------------------------------------------------------
 # 8. Publish to GitHub Releases. The tag was already created + pushed above.
 # ---------------------------------------------------------------------------
-sign_state="ad-hoc signed (not notarized)"
-[ "$identity" != "-" ] && sign_state="Developer ID signed"
-[ "$notarized" = 1 ] && sign_state="Developer ID signed + notarized + stapled"
-
 body="TurboKod $VERSION - native macOS app (macos-$arch).
 
-- ${sign_state}.
+- Developer ID signed + notarized + stapled.
 - Self-contained bundle (Mojo runtime + libonig vendored)."
-if [ "$notarized" != 1 ]; then
-  body="$body
-- Not notarized: first launch needs Control-click > Open (or 'xattr -dr com.apple.quarantine TurboKod.app')."
-fi
 
 if gh release view "$tag" >/dev/null 2>&1; then
   note "release $tag exists - uploading asset (clobbering)..."

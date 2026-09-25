@@ -2005,6 +2005,7 @@ struct Editor(Copyable, Movable):
         self.color_highlights = copy.color_highlights.copy()
         self.fold_regions = copy.fold_regions.copy()
         self.folded_starts = copy.folded_starts.copy()
+        self.document_links = copy.document_links.copy()
         self.pending_spell_action = copy.pending_spell_action
         self.pending_definition = copy.pending_definition
         self.pending_context_menu = copy.pending_context_menu
@@ -4505,8 +4506,11 @@ struct Editor(Copyable, Movable):
             self.file_mtime_nsec = info.mtime_nsec
         self.disk_baseline = disk^
         self.dirty = False
-        # Extension may have changed (e.g., ``.txt`` → ``.mojo``); re-tokenize.
-        # _refresh_highlights() removed: render path flushes via Editor.flush_highlights
+        # Extension may have changed (e.g., ``.txt`` → ``.mojo``): the cached
+        # tokenizer state belongs to the old grammar, so retokenize from
+        # scratch, and rescan the test gutter under the new language.
+        self.invalidate_highlight_cache()
+        self._tests_dirty = True
         return True
 
     def replace_all(
@@ -6803,7 +6807,7 @@ struct Editor(Copyable, Movable):
                     in_sel = sel_eol \
                         and sel_e_line == self.buffer.line_count() - 1
                 if in_sel:
-                    var tcells = display_columns(text)
+                    var tcells = utf8_codepoint_count(text)
                     var cc = 0
                     while cc <= tcells:
                         var sx = text_x0 + cc
@@ -7426,19 +7430,11 @@ struct Editor(Copyable, Movable):
                 if len(note.as_bytes()) > 0:
                     var note_attr = Attr(DARK_GRAY, EDITOR_BG)
                     var nx = seg_x0 + visible_cell_count + 2
-                    var note_cps = note
-                    var nb = note_cps.as_bytes()
-                    var bi = 0
-                    while bi < len(nb) and nx < content_right:
-                        var cp_len = utf8_codepoint_size(Int(nb[bi]))
-                        if bi + cp_len > len(nb):
-                            cp_len = 1
-                        var glyph = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=nb.unsafe_ptr().unsafe_offset(bi), length=cp_len)))
-                        _ = painter.put_text(
-                            canvas, Point(nx, sy_hl), glyph, note_attr,
-                        )
-                        nx += 1
-                        bi += cp_len
+                    # One clipped ``put_text`` so wide glyphs advance two
+                    # cells, as everywhere else.
+                    _ = painter.sub(
+                        Rect(nx, sy_hl, content_right, sy_hl + 1)
+                    ).put_text(canvas, Point(nx, sy_hl), note, note_attr)
                 # LSP inline-completion ghost text: dim, right after the
                 # caret. Only on its anchor row, only while the caret is
                 # still at the anchor, and only when that anchor is at
@@ -7458,17 +7454,13 @@ struct Editor(Copyable, Movable):
                             break
                     var gx = seg_x0 + visible_cell_count
                     var ghost_attr = Attr(DARK_GRAY, EDITOR_BG)
-                    var gbi = 0
-                    while gbi < gn and gx < content_right:
-                        var gcp = utf8_codepoint_size(Int(gb[gbi]))
-                        if gbi + gcp > gn:
-                            gcp = 1
-                        var gglyph = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=gb.unsafe_ptr().unsafe_offset(gbi), length=gcp)))
-                        _ = painter.put_text(
-                            canvas, Point(gx, sy_hl), gglyph, ghost_attr,
-                        )
-                        gx += 1
-                        gbi += gcp
+                    _ = painter.sub(
+                        Rect(gx, sy_hl, content_right, sy_hl + 1)
+                    ).put_text(
+                        canvas, Point(gx, sy_hl),
+                        byte_slice(self.inline_completion_text, 0, gn),
+                        ghost_attr,
+                    )
         # Selection pass — one ``paint_selection_overlay`` call per
         # caret with a non-empty selection. ``extend_past_eol`` opts
         # into the editor's "show the trailing newline" UX, so empty
@@ -9035,20 +9027,20 @@ struct Editor(Copyable, Movable):
                     self.pending_spell_action = sa
                     return True
                 # Diagnostic at the cursor? Open the diagnostic menu
-                # anchored at the squiggle's start so the user can pick
-                # a quickfix (e.g. "import typing.Any") — same code path
-                # as right-clicking the squiggle. The byte→screen
-                # mapping is approximate (mirrors the spell-menu anchor
-                # path) and the menu's ``_rect`` clamps to screen.
+                # anchored at the caret (which sits inside the squiggle) so
+                # the user can pick a quickfix (e.g. "import typing.Any") —
+                # same code path as right-clicking the squiggle. The caret
+                # point accounts for gutters, wrap and multibyte text; the
+                # menu's ``_rect`` clamps to screen.
                 var dn = self.diagnostic_at_cursor()
                 if dn:
                     var diag = dn.value()
-                    var ax = view.a.x + (diag.start_col - self.scroll_x)
-                    var ay = view.a.y + (diag.start_row - self.scroll_y)
-                    if ax < view.a.x:
-                        ax = view.a.x
-                    if ay < view.a.y:
-                        ay = view.a.y
+                    var ax = view.a.x
+                    var ay = view.a.y
+                    var caret = self._cursor_screen_point(view)
+                    if caret:
+                        ax = caret.value().x
+                        ay = caret.value().y
                     var label = diag.message
                     if len(diag.source.as_bytes()) > 0:
                         label = String("[") + diag.source + String("] ") \
@@ -9823,13 +9815,14 @@ struct Editor(Copyable, Movable):
         """Widest line in *display columns* — used by the surrounding window
         to size its horizontal scroll bar and to clamp horizontal scroll.
 
-        Display columns (not byte length): the scroll axis and the bar's
+        Painted cells (not byte length): the scroll axis and the bar's
         ``visible`` extent are both in cells, so measuring the line in bytes
         inflated the range on multi-byte lines and let the editor scroll past
-        the content into blank space."""
+        the content into blank space. ``utf8_codepoint_count`` rather than
+        ``display_columns`` so tabs count at their expanded width, as painted."""
         var m = 0
         for i in range(self.buffer.line_count()):
-            var n = display_columns(self.buffer.line(i))
+            var n = utf8_codepoint_count(self.buffer.line(i))
             if n > m: m = n
         return m
 

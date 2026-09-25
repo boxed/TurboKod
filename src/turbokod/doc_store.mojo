@@ -41,6 +41,7 @@ DevDocs JSON shape (as shipped by https://documents.devdocs.io/):
 from std.collections.list import List
 from std.collections.optional import Optional
 
+from .case_fold import fold_ascii
 from .file_io import join_path, read_file, stat_file
 from .json import JsonValue, parse_json
 
@@ -562,15 +563,7 @@ def _classify_tag(tag: String) -> Tuple[String, Int]:
             break
         i += 1
     var name = String(StringSpan(unsafe_from_utf8=b[start:i]))
-    # Lower-case ASCII.
-    var nb = name.as_bytes()
-    var lower = String("")
-    for k in range(len(nb)):
-        var ch = Int(nb[k])
-        if 0x41 <= ch and ch <= 0x5A:
-            ch += 0x20
-        lower = lower + chr(ch)
-    return (lower^, is_close)
+    return (fold_ascii(name), is_close)
 
 
 def _is_block_tag(name: String) -> Bool:
@@ -688,30 +681,8 @@ def _decode_entity(name: String) -> String:
         # would feed invalid UTF-8 to unsafe_from_utf8. Fall back to the literal.
         if cp > 0x10FFFF or (0xD800 <= cp and cp <= 0xDFFF):
             return String("&") + name + String(";")
-        return _utf8_from_codepoint(cp)
+        return chr(cp)
     return String("&") + name + String(";")
-
-
-def _utf8_from_codepoint(cp: Int) -> String:
-    """Encode a Unicode codepoint as a UTF-8 string. ``chr()`` only
-    handles ASCII, so the multi-byte branches assemble the bytes by
-    hand (same as ``json._emit_utf8``)."""
-    var out = String("")
-    if cp < 0x80:
-        out = out + chr(cp)
-    elif cp < 0x800:
-        out = out + chr(0xC0 | (cp >> 6))
-        out = out + chr(0x80 | (cp & 0x3F))
-    elif cp < 0x10000:
-        out = out + chr(0xE0 | (cp >> 12))
-        out = out + chr(0x80 | ((cp >> 6) & 0x3F))
-        out = out + chr(0x80 | (cp & 0x3F))
-    else:
-        out = out + chr(0xF0 | (cp >> 18))
-        out = out + chr(0x80 | ((cp >> 12) & 0x3F))
-        out = out + chr(0x80 | ((cp >> 6) & 0x3F))
-        out = out + chr(0x80 | (cp & 0x3F))
-    return out^
 
 
 # --- Table renderer --------------------------------------------------------
