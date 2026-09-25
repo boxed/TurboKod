@@ -37,125 +37,13 @@ from std.collections.list import List
 from std.collections.optional import Optional
 from std.sys import argv
 
+from turbokod.app_menus import build_menus, refresh_menu_visibility
+from turbokod.string_utils import split_open_arg
 from turbokod import (
-    APP_QUIT_ACTION, APP_SETTINGS, Application, Event, DEBUG_ADD_WATCH,
-    DEBUG_CONDITIONAL_BP, DEBUG_START_OR_CONTINUE, DEBUG_STEP_IN,
-    DEBUG_STEP_OUT, DEBUG_STEP_OVER, DEBUG_STOP, DEBUG_TOGGLE_BREAKPOINT,
-    DEBUG_TOGGLE_RAISED, Desktop, FileDialog, Menu, MenuItem,
-    EDITOR_COMPARE_CLIPBOARD, EDITOR_COPY, EDITOR_CUT, EDITOR_FILL,
-    EDITOR_FIND, EDITOR_FIND_NEXT, EDITOR_FIND_PREV, EDITOR_FORMAT_DOCUMENT,
-    EDITOR_FORMAT_SELECTION, EDITOR_GOTO, EDITOR_GOTO_DECL, EDITOR_GOTO_IMPL,
-    EDITOR_GOTO_TYPE_DEF, EDITOR_GOTO_SYMBOL, EDITOR_LOOKUP_DOCS, EDITOR_NEW,
-    EDITOR_OPEN, EDITOR_OPEN_RECENT, EDITOR_PASTE, EDITOR_QUICK_OPEN,
-    EDITOR_REDO, EDITOR_RENAME_SYMBOL, EDITOR_REPLACE, EDITOR_SAVE,
-    EDITOR_SAVE_AS, EDITOR_SELECT_ALL, EDITOR_TOGGLE_BLAME, EDITOR_TOGGLE_CASE,
-    EDITOR_TOGGLE_COMMENT, EDITOR_TOGGLE_COMPRESS_KWARGS,
-    EDITOR_TOGGLE_GIT_CHANGES, EDITOR_TOGGLE_LINE_NUMBERS,
-    EDITOR_TOGGLE_MINIMAP, EDITOR_TOGGLE_STICKY_SCROLL, EDITOR_TOGGLE_TAB_BAR,
-    EDITOR_UNDO, EVENT_KEY, EVENT_MOUSE, EVENT_OPEN_PATH, EVENT_RESIZE,
-    FILE_TREE_REVEAL, GIT_LOCAL_CHANGES, GIT_OPEN_ALL_CHANGED, HELP_HOTKEYS,
-    PROJECT_FIND, PROJECT_OPEN, PROJECT_REPLACE, PROJECT_TREE_ACTION,
-    TARGET_RUN, TERMINAL_NEW, WINDOW_CLOSE, WINDOW_CLOSE_ALL, stat_file,
+    APP_QUIT_ACTION, Application, Event, Desktop, FileDialog, EDITOR_OPEN,
+    EDITOR_QUICK_OPEN, EVENT_KEY, EVENT_MOUSE, EVENT_OPEN_PATH, EVENT_RESIZE,
+    PROJECT_OPEN, stat_file,
 )
-
-
-def _mk_menu(var label: String, *items: Tuple[String, String]) -> Menu:
-    var list = List[MenuItem]()
-    for it in items:
-        list.append(MenuItem(it[0], it[1]))
-    return Menu(label^, list^)
-
-
-def _build_edit_items(has_extra_carets: Bool) -> List[MenuItem]:
-    """Edit-menu items. ``has_extra_carets`` injects a ``Fill...``
-    entry under Paste — only meaningful when the focused editor has
-    more than one caret, so the host rebuilds this list every paint
-    and the row appears / disappears as the user adds / removes
-    carets."""
-    var edit_items = List[MenuItem]()
-    edit_items.append(MenuItem(String("Undo"),  EDITOR_UNDO))
-    edit_items.append(MenuItem(String("Redo"),  EDITOR_REDO))
-    edit_items.append(MenuItem.separator())
-    edit_items.append(MenuItem(String("Cut"),   EDITOR_CUT))
-    edit_items.append(MenuItem(String("Copy"),  EDITOR_COPY))
-    edit_items.append(MenuItem(String("Paste"), EDITOR_PASTE))
-    edit_items.append(MenuItem(String("Select All"), EDITOR_SELECT_ALL))
-    edit_items.append(MenuItem(
-        String("Compare selection with clipboard"),
-        EDITOR_COMPARE_CLIPBOARD,
-    ))
-    if has_extra_carets:
-        edit_items.append(MenuItem(String("Fill..."), EDITOR_FILL))
-    edit_items.append(MenuItem.separator())
-    edit_items.append(MenuItem(String("Find..."),               EDITOR_FIND))
-    edit_items.append(MenuItem(String("Find Next"),             EDITOR_FIND_NEXT))
-    edit_items.append(MenuItem(String("Find Previous"),         EDITOR_FIND_PREV))
-    edit_items.append(MenuItem(String("Replace..."),            EDITOR_REPLACE))
-    edit_items.append(MenuItem(String("Find in project..."),    PROJECT_FIND))
-    edit_items.append(MenuItem(String("Replace in project..."), PROJECT_REPLACE))
-    edit_items.append(MenuItem(String("Go to Line..."),         EDITOR_GOTO))
-    edit_items.append(MenuItem(String("Go to Symbol..."),       EDITOR_GOTO_SYMBOL))
-    edit_items.append(MenuItem(String("Go to Type Definition"), EDITOR_GOTO_TYPE_DEF))
-    edit_items.append(MenuItem(String("Go to Implementation"),  EDITOR_GOTO_IMPL))
-    edit_items.append(MenuItem(String("Go to Declaration"),     EDITOR_GOTO_DECL))
-    edit_items.append(MenuItem(String("Rename Symbol..."),      EDITOR_RENAME_SYMBOL))
-    edit_items.append(MenuItem(String("Format Document"),       EDITOR_FORMAT_DOCUMENT))
-    edit_items.append(MenuItem(String("Format Selection"),      EDITOR_FORMAT_SELECTION))
-    edit_items.append(MenuItem(String("Look up in docs..."),    EDITOR_LOOKUP_DOCS))
-    edit_items.append(MenuItem(String("Toggle Comment"),        EDITOR_TOGGLE_COMMENT))
-    edit_items.append(MenuItem(String("Toggle Case"),           EDITOR_TOGGLE_CASE))
-    return edit_items^
-
-
-def _refresh_edit_menu_items(mut desktop: Desktop):
-    """Rebuild the Edit menu's items in place to reflect the current
-    multi-cursor state of the focused editor. Skipped while any menu
-    is open so the user doesn't see the dropdown's rows shift under
-    their cursor mid-interaction."""
-    if desktop.menu_bar.is_open():
-        return
-    var has_extras = desktop.focused_editor_has_extra_carets()
-    for i in range(len(desktop.menu_bar.menus)):
-        if desktop.menu_bar.menus[i].label == String("Edit"):
-            desktop.menu_bar.menus[i].items = _build_edit_items(has_extras)
-            return
-
-
-def _split_open_arg_path(arg: String) -> String:
-    """Path portion of an open-arg, with the optional ``\\x1f<line>``
-    suffix stripped. The native wrapper appends ``\\x1f<line>`` when
-    translating ``turbokod://open?...&line=N`` URLs; pure paths come
-    through unchanged."""
-    var b = arg.as_bytes()
-    for i in range(len(b)):
-        if b[i] == 0x1F:
-            return String(StringSpan(unsafe_from_utf8=b[:i]))
-    return arg
-
-
-def _split_open_arg_line(arg: String) -> Int:
-    """Line portion of an open-arg (1-based), or 0 when absent /
-    malformed. Mirrors ``_split_open_arg_path`` so a single arg can be
-    interpreted with two cheap byte scans."""
-    var b = arg.as_bytes()
-    var sep = -1
-    for i in range(len(b)):
-        if b[i] == 0x1F:
-            sep = i
-            break
-    if sep < 0:
-        return 0
-    var n = 0
-    var saw = False
-    var p = sep + 1
-    while p < len(b):
-        var c = Int(b[p])
-        if c < 0x30 or c > 0x39:
-            break
-        n = n * 10 + (c - 0x30)
-        saw = True
-        p += 1
-    return n if saw else 0
 
 
 def main() raises:
@@ -172,95 +60,7 @@ def main() raises:
         var last_theme_version = desktop.theme_version
         var file_dialog = FileDialog()
 
-        # Hamburger menu (≡) — app-level commands that don't belong on the
-        # File/Edit/View axis. Quit lives here so the File menu can stay
-        # focused on document operations.
-        var hamburger_items = List[MenuItem]()
-        hamburger_items.append(MenuItem(String("Settings"), APP_SETTINGS))
-        hamburger_items.append(MenuItem.separator())
-        hamburger_items.append(MenuItem(String("Quit"), APP_QUIT_ACTION))
-        desktop.menu_bar.add(Menu(
-            String("≡"), hamburger_items^, is_system=True,
-        ))
-        desktop.menu_bar.add(_mk_menu(String("File"),
-            (String("New"), EDITOR_NEW),
-            (String("New terminal pane"), TERMINAL_NEW),
-            (String("Open..."), EDITOR_OPEN),
-            (String("Open project..."), PROJECT_OPEN),
-            (String("Quick open..."), EDITOR_QUICK_OPEN),
-            (String("Open recent..."), EDITOR_OPEN_RECENT),
-            (String("Close"), WINDOW_CLOSE),
-            (String("Close all"), WINDOW_CLOSE_ALL),
-            (String("Save"), EDITOR_SAVE),
-            (String("Save as..."), EDITOR_SAVE_AS),
-        ))
-        # Edit menu — built via ``_build_edit_items`` so the per-frame
-        # refresh below can swap rows in/out without duplicating the
-        # row list at every call site. ``Fill...`` lands here when the
-        # focused editor has more than one caret.
-        desktop.menu_bar.add(Menu(
-            String("Edit"), _build_edit_items(False),
-        ))
-        # View menu items are checkable toggles — the host's _mk_menu
-        # helper produces non-checkable items, so build this menu
-        # explicitly so each item carries ``checkable=True``. Desktop
-        # syncs the ``checked`` flag from ``self.config`` before paint.
-        var view_items = List[MenuItem]()
-        view_items.append(MenuItem(
-            String("Line Numbers"), EDITOR_TOGGLE_LINE_NUMBERS,
-            checkable=True,
-        ))
-        view_items.append(MenuItem(
-            String("Git Changes"), EDITOR_TOGGLE_GIT_CHANGES,
-            checkable=True,
-        ))
-        view_items.append(MenuItem(
-            String("Tab Bar"), EDITOR_TOGGLE_TAB_BAR,
-            checkable=True,
-        ))
-        view_items.append(MenuItem(
-            String("Minimap"), EDITOR_TOGGLE_MINIMAP,
-            checkable=True,
-        ))
-        view_items.append(MenuItem(
-            String("Sticky Scroll"), EDITOR_TOGGLE_STICKY_SCROLL,
-            checkable=True,
-        ))
-        view_items.append(MenuItem(
-            String("Compress Keyword Args"), EDITOR_TOGGLE_COMPRESS_KWARGS,
-            checkable=True,
-        ))
-        view_items.append(MenuItem.separator())
-        # Three-way cycle (hidden → right → left) rather than a checkbox;
-        # Desktop re-stamps the label from the live state every paint.
-        view_items.append(MenuItem(
-            String("File tree: hidden"), PROJECT_TREE_ACTION,
-        ))
-        view_items.append(MenuItem(
-            String("Show in file tree"), FILE_TREE_REVEAL,
-        ))
-        desktop.menu_bar.add(Menu(String("View"), view_items^))
-        desktop.menu_bar.add(_mk_menu(String("Git"),
-            (String("Toggle Blame"),       EDITOR_TOGGLE_BLAME),
-            (String("Show diff viewer"), GIT_LOCAL_CHANGES),
-            (String("Open all with changes"), GIT_OPEN_ALL_CHANGED),
-        ))
-        var debug_items = List[MenuItem]()
-        debug_items.append(MenuItem(String("Run"), TARGET_RUN))
-        debug_items.append(MenuItem.separator())
-        debug_items.append(MenuItem(String("Start / Continue"),       DEBUG_START_OR_CONTINUE))
-        debug_items.append(MenuItem(String("Stop"),                   DEBUG_STOP))
-        debug_items.append(MenuItem(String("Toggle Breakpoint"),      DEBUG_TOGGLE_BREAKPOINT))
-        debug_items.append(MenuItem(String("Conditional Breakpoint..."), DEBUG_CONDITIONAL_BP))
-        debug_items.append(MenuItem(String("Step Over"),              DEBUG_STEP_OVER))
-        debug_items.append(MenuItem(String("Step Into"),              DEBUG_STEP_IN))
-        debug_items.append(MenuItem(String("Step Out"),               DEBUG_STEP_OUT))
-        debug_items.append(MenuItem(String("Add Watch..."),           DEBUG_ADD_WATCH))
-        debug_items.append(MenuItem(String("Toggle Break on Raised"), DEBUG_TOGGLE_RAISED))
-        desktop.menu_bar.add(Menu(String("Debug"), debug_items^))
-        desktop.menu_bar.add(_mk_menu(String("Help"),
-            (String("Keyboard Shortcuts"), HELP_HOTKEYS),
-        ))
+        build_menus(desktop, native=False)
         # The "Window" menu is owned by Desktop and rebuilt every frame from
         # the actual window list — host doesn't add one.
 
@@ -277,8 +77,9 @@ def main() raises:
         var args = argv()
         for i in range(1, len(args)):
             var raw = String(args[i])
-            var path = _split_open_arg_path(raw)
-            var line = _split_open_arg_line(raw)
+            var parsed = split_open_arg(raw)
+            var path = parsed[0]
+            var line = parsed[1]
             var info = stat_file(path)
             if info.ok and info.is_dir():
                 desktop.open_project(path)
@@ -323,34 +124,7 @@ def main() raises:
                     desktop.process_external_changes(app.screen())
                 except e:
                     error_log.append(String("reload: ") + String(e))
-                desktop.menu_bar.set_visible_by_label(
-                    String("Edit"), desktop.windows.focused_is_editor(),
-                )
-                # View stays reachable whenever a project is open (even
-                # with no editor focused) — the file-tree cycle lives
-                # there now.
-                var view_visible = desktop.windows.focused_is_editor()
-                if not view_visible and desktop.project:
-                    view_visible = True
-                desktop.menu_bar.set_visible_by_label(
-                    String("View"), view_visible,
-                )
-                # Toggle the ``Fill...`` row in/out of the Edit menu
-                # based on whether the focused editor has multiple
-                # carets — Fill is only meaningful then. Skipped while
-                # a menu is open so rows don't shift under the user's
-                # cursor mid-interaction.
-                _refresh_edit_menu_items(desktop)
-                # Git menu: visible while an editor is focused (Toggle
-                # Blame applies to it) or whenever a project is set
-                # (Show diff viewer is project-scoped and shouldn't
-                # require opening a file first).
-                var git_visible = desktop.windows.focused_is_editor()
-                if not git_visible and desktop.project:
-                    git_visible = True
-                desktop.menu_bar.set_visible_by_label(
-                    String("Git"), git_visible,
-                )
+                refresh_menu_visibility(desktop)
                 var tree_open = desktop.file_tree.consume_open()
                 if tree_open:
                     var p = tree_open.value()

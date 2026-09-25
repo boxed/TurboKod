@@ -146,11 +146,11 @@ target/test/debug (re)start → raise only.
 ### Menu surface
 
 A new **View ▸ Floating panels** item, checkable, action
-`app.toggle_floating_panels`. Added in `native_api._build_menus` so both
-frontends share the definition (per the menu-surface rule in
+`app.toggle_floating_panels`. Added in `app_menus.build_menus` (only with
+`native=True`, since only a windowing host can act on it) so the frontends share the definition (per the menu-surface rule in
 [native-menu.md](native-menu.md) — never hardcode NSMenu items in Swift). The
 checkmark mirrors `panels_detached`, synced each tick in
-`_refresh_menu_visibility`. The action is a **host action**: `dispatch_action`
+`app_menus.refresh_menu_visibility`. The action is a **host action**: `dispatch_action`
 returns it unhandled, `_action_code` maps it to `ACT_TOGGLE_FLOATING_PANELS`,
 and Swift owns the actual window create/destroy and then calls
 `tk_desktop_set_panels_detached` to update the flag (and thus the checkmark).

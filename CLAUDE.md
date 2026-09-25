@@ -49,7 +49,7 @@ a native `NSOpenPanel` for the same Open / Quick-Open / Open-Project actions).
 
 ### Menu surface
 
-`Desktop.menu_bar` holds the menu definitions for both frontends; how it's *displayed* depends on the frontend. The terminal frontend paints it in-grid; the Swift frontend hides the in-grid version and mirrors it as a native `NSMenu` via `Desktop.host_owns_menu` + the snapshot/invoke C ABI. Both surfaces share the menu data, so any change to `_build_menus` (in `native_api.mojo`) / project menu / Window menu / Edit-menu-extras logic shows up in both immediately. Don't bypass `menu_bar` by hardcoding NSMenu items in `TurboKod.swift`.
+`Desktop.menu_bar` holds the menu definitions for both frontends; how it's *displayed* depends on the frontend. The terminal frontend paints it in-grid; the Swift frontend hides the in-grid version and mirrors it as a native `NSMenu` via `Desktop.host_owns_menu` + the snapshot/invoke C ABI. Both surfaces share the menu data, so any change to `build_menus` (in `app_menus.mojo`, called by both `native_api.mojo` and `examples/desktop.mojo`) / project menu / Window menu / Edit-menu-extras logic shows up in both immediately. Don't bypass `menu_bar` by hardcoding NSMenu items in `TurboKod.swift`.
 
 Full details in [docs/native-menu.md](docs/native-menu.md).
 

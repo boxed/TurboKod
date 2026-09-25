@@ -42,9 +42,9 @@ from turbokod.events import (
     EVENT_RESIZE,
 )
 from turbokod.file_dialog import FileDialog
-from turbokod.file_io import stat_file
+from turbokod.file_io import parent_path, stat_file
 from turbokod.geometry import Point, Rect
-from turbokod.string_utils import display_columns
+from turbokod.string_utils import display_columns, split_open_arg
 from turbokod.posix import (
     chdir_path, getcwd_path, monotonic_ms, realpath, sleep_ms,
 )
@@ -153,53 +153,6 @@ def _tk_pointer_shape(h: Int, x: Int, y: Int, cols: Int, rows: Int) -> Int32:
     return external_call["tk_desktop_pointer_shape", Int32](h, x, y, cols, rows)
 
 
-# ---------------------------------------------------------------------------
-# Open-arg parsing — a path optionally suffixed with ``\x1f<line>`` (1-based),
-# which a second ``tk`` invocation / URL forward can carry. Copied from
-# ``examples/desktop.mojo`` (byte-only, no core deps).
-# ---------------------------------------------------------------------------
-def _split_open_arg_path(arg: String) -> String:
-    var b = arg.as_bytes()
-    for i in range(len(b)):
-        if b[i] == 0x1F:
-            return String(StringSpan(unsafe_from_utf8=b[:i]))
-    return arg
-
-
-def _split_open_arg_line(arg: String) -> Int:
-    var b = arg.as_bytes()
-    var sep = -1
-    for i in range(len(b)):
-        if b[i] == 0x1F:
-            sep = i
-            break
-    if sep < 0:
-        return 0
-    var n = 0
-    var saw = False
-    var p = sep + 1
-    while p < len(b):
-        var c = Int(b[p])
-        if c < 0x30 or c > 0x39:
-            break
-        n = n * 10 + (c - 0x30)
-        saw = True
-        p += 1
-    return n if saw else 0
-
-
-def _dirname(path: String) -> String:
-    """Directory portion of ``path`` (everything before the last ``/``)."""
-    var b = path.as_bytes()
-    var last = -1
-    for i in range(len(b)):
-        if b[i] == 0x2F:  # '/'
-            last = i
-    if last <= 0:
-        return String("/")
-    return String(StringSpan(unsafe_from_utf8=b[:last]))
-
-
 def _abspath(path: String) -> String:
     """Resolve ``path`` to an absolute path. Uses ``realpath`` when it exists;
     for a not-yet-created file (``realpath`` fails) fall back to joining the
@@ -246,7 +199,7 @@ def _chdir_to_resources_if_bundled():
     var real = realpath(exe)
     if real.byte_length() == 0:
         real = exe
-    var macos_dir = _dirname(real)  # .../Contents/MacOS
+    var macos_dir = parent_path(real)  # .../Contents/MacOS
     var resources = realpath(macos_dir + String("/../Resources"))
     if resources.byte_length() == 0:
         return
@@ -324,8 +277,9 @@ def main() raises:
     var all_args = argv()
     for i in range(1, len(all_args)):
         var raw = String(all_args[i])
-        var path = _split_open_arg_path(raw)
-        var line = _split_open_arg_line(raw)
+        var parsed = split_open_arg(raw)
+        var path = parsed[0]
+        var line = parsed[1]
         var ap = _abspath(path)
         if line > 0:
             open_args.append(ap + chr(0x1F) + String(line))
@@ -535,8 +489,9 @@ def _dialog_start(project: Optional[String]) -> String:
 def _open_arg(
     h: Int, raw: String, cols: Int, rows: Int, mut last_project: Optional[String],
 ):
-    var path = _split_open_arg_path(raw)
-    var line = _split_open_arg_line(raw)
+    var parsed = split_open_arg(raw)
+    var path = parsed[0]
+    var line = parsed[1]
     var info = stat_file(path)
     if info.ok and info.is_dir():
         _tk_open_project(h, Int(path.unsafe_ptr()), len(path.as_bytes()))

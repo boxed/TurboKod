@@ -17,10 +17,14 @@ from turbokod.editor import Editor
 from turbokod.file_dialog import FileDialog
 from turbokod.desktop import (
     APP_QUIT_ACTION, Desktop, EDITOR_FIND, EDITOR_OPEN, EDITOR_QUICK_OPEN,
+    GIT_REVIEW, TARGET_TEST,
     EDITOR_SAVE, WINDOW_CLOSE, ctrl_key
 )
 from turbokod.file_io import read_file, write_file
 from turbokod.file_tree import FILE_TREE_WIDTH
+from turbokod.app_menus import (
+    NEW_WINDOW, TOGGLE_FLOATING_PANELS, build_menus,
+)
 from turbokod.menu import Menu, MenuBar, MenuItem
 from turbokod.buttons import (
     ShadowButton, paint_shadow_button, shadow_button_hit
@@ -1260,8 +1264,45 @@ def test_floating_panel_minimize_top_keeps_one_row() raises:
     assert_equal(slots[1].rect.b.y, 40)
 
 
+def _menu_actions(d: Desktop) -> List[String]:
+    var out = List[String]()
+    for i in range(len(d.menu_bar.menus)):
+        for j in range(len(d.menu_bar.menus[i].items)):
+            out.append(d.menu_bar.menus[i].items[j].action)
+    return out^
+
+
+def _menu_labels(d: Desktop) -> List[String]:
+    var out = List[String]()
+    for i in range(len(d.menu_bar.menus)):
+        out.append(d.menu_bar.menus[i].label)
+    return out^
+
+
+def test_both_frontends_share_one_menu_definition() raises:
+    """The terminal and native frontends build the same menus; only the
+    host-only items (New window, Floating panels) differ. The terminal
+    demo used to carry its own copy, which had silently lost the whole
+    Navigation menu, Debug ▸ Test and Git ▸ Review."""
+    var tui = Desktop()
+    build_menus(tui, native=False)
+    var native = Desktop()
+    build_menus(native, native=True)
+    assert_true(String("Navigation") in _menu_labels(tui))
+    var tui_actions = _menu_actions(tui)
+    var native_actions = _menu_actions(native)
+    assert_true(TARGET_TEST in tui_actions)
+    assert_true(GIT_REVIEW in tui_actions)
+    assert_false(NEW_WINDOW in tui_actions)
+    assert_false(TOGGLE_FLOATING_PANELS in tui_actions)
+    assert_true(NEW_WINDOW in native_actions)
+    assert_true(TOGGLE_FLOATING_PANELS in native_actions)
+    assert_equal(len(native_actions), len(tui_actions) + 2)
+
+
 def main() raises:
     setup_test_env()
+    test_both_frontends_share_one_menu_definition()
     test_hotkeys_page_is_generated_from_registry()
     test_hotkey_gate_registers_editor_chords()
     test_tab_cell_byte_converters_match_put_text()
@@ -1309,4 +1350,4 @@ def main() raises:
     test_floating_panel_title_command_click_beats_splitter()
     test_floating_panel_minimize_bottom_keeps_one_row()
     test_floating_panel_minimize_top_keeps_one_row()
-    print("chrome: 46 tests passed")
+    print("chrome: 47 tests passed")

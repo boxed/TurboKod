@@ -821,3 +821,17 @@ def percent_encode_uri_path(s: String) -> String:
             out.append(UInt8(0x30 + hi) if hi < 10 else UInt8(0x41 + hi - 10))
             out.append(UInt8(0x30 + lo) if lo < 10 else UInt8(0x41 + lo - 10))
     return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=len(out))))
+
+
+def split_open_arg(arg: String) -> Tuple[String, Int]:
+    """Split a launcher open-arg ``<path>[\\x1f<line>]`` into
+    ``(path, line)``, ``line`` 1-based or 0 when absent / malformed. The
+    native wrapper and a second ``tk`` invocation append ``\\x1f<line>``
+    when forwarding a ``turbokod://open?...&line=N`` URL; plain paths come
+    through unchanged."""
+    var b = arg.as_bytes()
+    for i in range(len(b)):
+        if b[i] == 0x1F:
+            var line = parse_int_prefix(arg, i + 1, len(b))
+            return (byte_slice(arg, 0, i), line if line > 0 else 0)
+    return (arg, 0)
