@@ -25,8 +25,7 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .dap import (
-    DAP_EVENT, DAP_REQUEST, DAP_RESPONSE,
-    DapClient, DapIncoming, dap_initialize_arguments,
+    DAP_EVENT, DAP_RESPONSE, DapClient, DapIncoming, dap_initialize_arguments,
 )
 from .debugger_config import (
     DAP_REQUEST_ATTACH, DAP_REQUEST_LAUNCH,

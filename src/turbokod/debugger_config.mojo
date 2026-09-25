@@ -26,13 +26,10 @@ entries here when the need is real, not speculative.
 """
 
 from std.collections.list import List
-from std.collections.optional import Optional
 
 from .file_io import join_path, list_directory, stat_file
 from .project_targets import split_env_entry
-from .json import (
-    JsonValue, json_array, json_bool, json_int, json_object, json_str,
-)
+from .json import JsonValue, json_array, json_bool, json_object, json_str
 
 
 # --- transport hints -------------------------------------------------------

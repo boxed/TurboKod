@@ -21,17 +21,14 @@ anything we observe is purely the protocol layer's behavior.
 """
 
 from std.collections.list import List
-from std.collections.optional import Optional
 from std.ffi import external_call
 from std.sys import argv
 
 from turbokod.canvas import Canvas
-from turbokod.dap_dispatch import (
-    DapManager, DapStackFrame, DapVariable,
-)
+from turbokod.dap_dispatch import DapManager, DapStackFrame
 from turbokod.debug_pane import DebugPane
 from turbokod.debugger_config import (
-    DebuggerSpec, built_in_debuggers, find_debugger_for_language,
+    built_in_debuggers, find_debugger_for_language,
 )
 from turbokod.desktop import Desktop, DEBUG_START_OR_CONTINUE
 from turbokod.file_io import write_file

@@ -31,8 +31,8 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .json import (
-    JsonValue, encode_json, json_array, json_bool, json_int, json_null,
-    json_object, json_str, parse_json,
+    JsonValue, encode_json, json_bool, json_int, json_object, json_str,
+    parse_json,
 )
 from .lsp import LspProcess
 

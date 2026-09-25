@@ -27,7 +27,6 @@ grammar misbehaves):
 """
 
 from std.collections.list import List
-from std.collections.optional import Optional
 
 from .file_io import read_file
 from .json import JsonValue, parse_json

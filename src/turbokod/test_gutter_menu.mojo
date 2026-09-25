@@ -9,11 +9,9 @@ the pytest ``node_id`` from the click straight through to the host on
 resolve, so the host doesn't re-derive which test was clicked.
 """
 
-from std.collections.list import List
 
 from .canvas import Canvas
 from .painter import Painter
-from .cell import Cell
 from .colors import (
     Attr, BLACK, GREEN, LIGHT_GRAY,
 )

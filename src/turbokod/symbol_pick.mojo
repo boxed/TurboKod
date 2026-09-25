@@ -14,7 +14,6 @@ the same fuzzy-with-word-boundary feel they're already used to.
 from std.collections.list import List
 
 from .canvas import Canvas
-from .cell import Cell
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, YELLOW
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,

@@ -8,9 +8,8 @@ the path computation, and the nested ``mkdir`` so the three stores don't
 each carry their own copy.
 """
 
-from std.ffi import external_call
 
-from .file_io import join_path
+from .file_io import join_path, make_dir
 from .posix import getenv_value
 
 
@@ -51,20 +50,13 @@ def per_user_path(project_root: String, file_name: String) -> String:
     return join_path(dir, file_name)
 
 
-def _mkdir(path: String):
-    if len(path.as_bytes()) == 0:
-        return
-    var c_path = path + String("\0")
-    _ = external_call["mkdir", Int32](c_path.unsafe_ptr(), Int32(0o755))
-
-
 def ensure_per_user_dir(project_root: String):
     """``mkdir`` only creates one level, so walk the parents top-down to
     create the ``per_user/<username>`` nesting on first use."""
     if len(project_root.as_bytes()) == 0:
         return
     var top = join_path(project_root, _DIR_PROJECT)
-    _mkdir(top)
+    make_dir(top)
     var per_user = join_path(top, _DIR_PER_USER)
-    _mkdir(per_user)
-    _mkdir(join_path(per_user, current_username()))
+    make_dir(per_user)
+    make_dir(join_path(per_user, current_username()))

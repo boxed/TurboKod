@@ -14,29 +14,25 @@ from std.ffi import external_call
 from std.io.file_descriptor import FileDescriptor
 
 from .canvas import Canvas
-from .cell import Cell, blank_cell
-from .colors import Attr, attr_to_sgr, attr_to_sgr_rgb, attr_to_sgr_indexed, default_attr
+from .cell import Cell
+from .colors import (
+    attr_to_sgr, attr_to_sgr_rgb, attr_to_sgr_indexed, default_attr,
+)
 from .events import (
-    DOUBLE_CLICK_MS,
-    Event, EVENT_FOCUS_IN, EVENT_FOCUS_OUT, EVENT_KEY, EVENT_MOUSE,
-    EVENT_NONE, EVENT_OPEN_PATH, EVENT_RESIZE, EVENT_QUIT,
-    KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT,
-    KEY_HOME, KEY_END, KEY_PAGEUP, KEY_PAGEDOWN, KEY_INSERT, KEY_DELETE,
-    KEY_F1, KEY_F2, KEY_F3, KEY_F4, KEY_F5, KEY_F6,
-    KEY_F7, KEY_F8, KEY_F9, KEY_F10, KEY_F11, KEY_F12,
-    KEY_ENTER, KEY_TAB, KEY_BACKSPACE, KEY_ESC,
-    MOD_NONE, MOD_SHIFT, MOD_ALT, MOD_CTRL, MOD_META,
-    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_MIDDLE, MOUSE_BUTTON_NONE,
-    MOUSE_BUTTON_RIGHT,
-    MOUSE_WHEEL_UP, MOUSE_WHEEL_DOWN,
+    DOUBLE_CLICK_MS, Event, EVENT_MOUSE, EVENT_NONE, EVENT_OPEN_PATH,
+    EVENT_RESIZE, KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_HOME, KEY_END,
+    KEY_PAGEUP, KEY_PAGEDOWN, KEY_INSERT, KEY_DELETE, KEY_F1, KEY_F2, KEY_F3,
+    KEY_F4, KEY_F5, KEY_F6, KEY_F7, KEY_F8, KEY_F9, KEY_F10, KEY_F11, KEY_F12,
+    KEY_ENTER, KEY_TAB, KEY_BACKSPACE, KEY_ESC, MOD_NONE, MOD_SHIFT, MOD_ALT,
+    MOD_CTRL, MOD_META, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_MIDDLE,
+    MOUSE_BUTTON_NONE, MOUSE_BUTTON_RIGHT, MOUSE_WHEEL_UP, MOUSE_WHEEL_DOWN,
 )
 from .geometry import Point
 from .posix import (
-    STDIN_FD, STDOUT_FD, TCSANOW, TERMIOS_SIZE,
-    alloc_zero_buffer, append_string_bytes, cfmakeraw, get_window_size,
-    getenv_value, monotonic_ms, poll_stdin, query_size_via_cursor,
-    read_into, set_nonblocking,
-    tcflush, tcgetattr, tciflush_value, tcsetattr, write_buffer, write_string,
+    STDIN_FD, STDOUT_FD, TCSANOW, TERMIOS_SIZE, alloc_zero_buffer,
+    append_string_bytes, cfmakeraw, get_window_size, getenv_value,
+    monotonic_ms, poll_stdin, query_size_via_cursor, read_into, tcflush,
+    tcgetattr, tciflush_value, tcsetattr, write_buffer, write_string,
 )
 
 
@@ -105,24 +101,6 @@ def beep():
     write_string(STDOUT_FD, SEQ_BELL)
 
 
-def _contains(haystack: String, needle: String) -> Bool:
-    var hb = haystack.as_bytes()
-    var nb = needle.as_bytes()
-    if len(nb) == 0:
-        return True
-    if len(nb) > len(hb):
-        return False
-    for i in range(len(hb) - len(nb) + 1):
-        var match_at = True
-        for j in range(len(nb)):
-            if hb[i + j] != nb[j]:
-                match_at = False
-                break
-        if match_at:
-            return True
-    return False
-
-
 def terminal_supports_extended_underline() -> Bool:
     """``True`` when the host terminal is known to handle the
     colon-separated ``SGR 4:3`` (curly underline) and ``SGR 58:5:N``
@@ -171,13 +149,13 @@ def terminal_supports_extended_underline() -> Bool:
     if term_program == String("vscode"):
         return True
     var term = getenv_value(String("TERM"))
-    if _contains(term, String("kitty")):
+    if String("kitty") in term:
         return True
-    if _contains(term, String("alacritty")):
+    if String("alacritty") in term:
         return True
-    if _contains(term, String("wezterm")):
+    if String("wezterm") in term:
         return True
-    if _contains(term, String("foot")):
+    if String("foot") in term:
         return True
     var vte = getenv_value(String("VTE_VERSION"))
     if len(vte.as_bytes()) > 0:

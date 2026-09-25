@@ -12,7 +12,7 @@ LSP spawn relies on.
 
 from std.collections.list import List
 
-from turbokod.desktop import _contains_substr, _lsp_bypass_pyenv_shim
+from turbokod.desktop import _lsp_bypass_pyenv_shim
 from turbokod.highlight import (
     highlight_comment_attr, highlight_for_extension,
     highlight_ident_attr, highlight_keyword_attr, highlight_operator_attr,
@@ -109,17 +109,4 @@ def main() raises:
     if _lsp_bypass_pyenv_shim(String("python")):
         raise Error(String("python must NOT bypass pyenv shims"))
 
-    # _contains_substr — the predicate the resolver uses to detect shims.
-    if not _contains_substr(
-        String("/Users/x/.pyenv/shims/esbonio"), String("/.pyenv/shims/"),
-    ):
-        raise Error(String("shim path should match"))
-    if _contains_substr(
-        String("/opt/homebrew/bin/esbonio"), String("/.pyenv/shims/"),
-    ):
-        raise Error(String("non-shim path must not match"))
-    if not _contains_substr(String("abc"), String("")):
-        raise Error(String("empty needle must always match"))
-    if _contains_substr(String("a"), String("abc")):
-        raise Error(String("needle longer than haystack must not match"))
     print(String("lsp helpers OK"))

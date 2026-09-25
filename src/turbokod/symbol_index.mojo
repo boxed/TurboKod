@@ -98,6 +98,7 @@ from std.collections.optional import Optional
 from .case_fold import find_exact
 from .file_io import read_file, stat_file
 from .symbol_seed import is_definition_site, seed_priority
+from .string_utils import is_ascii_ident_byte
 
 
 comptime SYMBOL_MIN_LEN: Int = 2
@@ -135,20 +136,6 @@ the first block is a near-perfect binary tell and costs nothing."""
 comptime _COMPACT_DEAD_FRACTION: Int = 50
 """Percent of ``blob`` that must be dead segments before ``compact``
 bothers rewriting it."""
-
-
-def is_symbol_byte(b: UInt8) -> Bool:
-    """``[A-Za-z0-9_]`` — the identifier alphabet the picker works in.
-
-    Deliberately ASCII-only, matching ``find_symbol._is_ident_byte``.
-    The two must agree: this decides what lands in the index, that one
-    decides what the host extracts from a line, and a disagreement
-    shows up as a picker entry that cannot be navigated to."""
-    var c = Int(b)
-    return (0x61 <= c and c <= 0x7A) \
-        or (0x41 <= c and c <= 0x5A) \
-        or (0x30 <= c and c <= 0x39) \
-        or c == 0x5F
 
 
 def _starts_with_digit(b: Span[UInt8, _]) -> Bool:
@@ -588,11 +575,11 @@ struct SymbolIndex(Movable):
                 line_start = i
                 line_end = -1
                 continue
-            if not is_symbol_byte(c):
+            if not is_ascii_ident_byte(c):
                 i += 1
                 continue
             var start = i
-            while i < n and is_symbol_byte(b[i]):
+            while i < n and is_ascii_ident_byte(b[i]):
                 i += 1
             var span = b[start:i]
             if len(span) < SYMBOL_MIN_LEN or len(span) > SYMBOL_MAX_LEN:
@@ -930,10 +917,10 @@ struct SymbolIndex(Movable):
             # Whole-identifier only: the picker's entries are whole
             # identifiers, so a hit inside a longer name is a different
             # symbol and must not satisfy the check.
-            if at > 0 and is_symbol_byte(b[at - 1]):
+            if at > 0 and is_ascii_ident_byte(b[at - 1]):
                 continue
             var after = at + len(nb)
-            if after < len(b) and is_symbol_byte(b[after]):
+            if after < len(b) and is_ascii_ident_byte(b[after]):
                 continue
             var col = at - line_start + 1
             if cur_line == line and col == column:

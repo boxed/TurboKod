@@ -26,9 +26,10 @@ that trade is acceptable is that a stale entry is impossible to observe:
 from std.collections.list import List
 from std.testing import assert_equal, assert_false, assert_true
 
-from turbokod.file_io import read_file, stat_file, write_file
+from turbokod.file_io import stat_file, write_file
+from turbokod.string_utils import is_ascii_ident_byte
 from turbokod.symbol_index import (
-    SYMBOL_MAX_LEN, SYMBOL_MIN_LEN, SymbolHit, SymbolIndex, is_symbol_byte,
+    SYMBOL_MAX_LEN, SYMBOL_MIN_LEN, SymbolHit, SymbolIndex,
 )
 from turbokod.symbol_seed import (
     SEED_DEF_IN_PROSE, SEED_DEF_IN_SOURCE, SEED_DEF_IN_TEST,
@@ -119,11 +120,11 @@ def _reference_search(
         var b = files[f][1].as_bytes()
         var i = 0
         while i < len(b):
-            if not is_symbol_byte(b[i]):
+            if not is_ascii_ident_byte(b[i]):
                 i += 1
                 continue
             var start = i
-            while i < len(b) and is_symbol_byte(b[i]):
+            while i < len(b) and is_ascii_ident_byte(b[i]):
                 i += 1
             var n = i - start
             if n < SYMBOL_MIN_LEN or n > SYMBOL_MAX_LEN:

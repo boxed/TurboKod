@@ -25,10 +25,8 @@ from std.sys import size_of
 from turbokod.canvas import Canvas
 from turbokod.colors import default_attr
 from turbokod.events import (
-    Event, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT,
-    KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_UP,
-    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_MIDDLE, MOUSE_BUTTON_RIGHT,
-    MOUSE_WHEEL_UP, MOUSE_WHEEL_DOWN,
+    Event, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT, KEY_DOWN, KEY_LEFT,
+    KEY_RIGHT, KEY_UP,
 )
 from turbokod.geometry import Point, Rect
 from turbokod.menu import Menu, MenuItem

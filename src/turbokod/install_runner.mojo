@@ -23,7 +23,7 @@ from std.collections.optional import Optional
 
 from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
-from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, WHITE, YELLOW
+from .colors import Attr, BLACK, LIGHT_GRAY, YELLOW
 from .geometry import Point, Rect
 from .lsp import LspProcess
 from .string_utils import display_columns

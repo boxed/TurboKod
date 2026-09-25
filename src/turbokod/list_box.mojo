@@ -47,7 +47,6 @@ through (so the host can gate on focus first).
 from std.collections.list import List
 
 from .canvas import Canvas
-from .cell import Cell
 from .colors import Attr, BLACK, BLUE, GREEN, WHITE
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,

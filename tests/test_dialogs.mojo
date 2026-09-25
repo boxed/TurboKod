@@ -70,8 +70,8 @@ from turbokod.prompt import Prompt
 from turbokod.view import centered
 
 from turbokod.buttons import (
-    BUTTON_CANCELED, BUTTON_CAPTURED, BUTTON_FIRED, BUTTON_NONE,
-    ShadowButton, paint_shadow_button, shadow_button_hit
+    BUTTON_CANCELED, BUTTON_CAPTURED, BUTTON_FIRED, BUTTON_NONE, ShadowButton,
+    paint_shadow_button,
 )
 from turbokod.dir_browser import jump_shortcuts
 from turbokod.colors import GREEN

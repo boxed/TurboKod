@@ -41,7 +41,7 @@ from .events import (
     MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .editorconfig import EditorConfig, load_editorconfig_for_path
-from .file_io import FileInfo, read_file, stat_file, write_file
+from .file_io import read_file, stat_file, write_file
 from .git_blame import BlameLine
 from .git_changes import (
     GIT_CHANGE_ADDED, GIT_CHANGE_MODIFIED, GIT_CHANGE_NONE,
@@ -50,10 +50,8 @@ from .git_changes import (
 )
 from .highlight import (
     CompletionRequest, DefinitionRequest, EditorContextMenuRequest,
-    GrammarRegistry, Highlight,
-    HighlightCache, HoverRequest, extension_of,
-    highlight_comment_attr,
-    highlight_for_extension, highlight_incremental, highlight_string_attr,
+    GrammarRegistry, Highlight, HighlightCache, HoverRequest, extension_of,
+    highlight_comment_attr, highlight_incremental, highlight_string_attr,
     line_comment_for_extension, word_at,
 )
 from .kwarg_conceal import (

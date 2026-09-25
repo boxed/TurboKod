@@ -31,12 +31,8 @@ from .buttons import (
 )
 from .canvas import Canvas, utf8_codepoint_count, wrap_to_width
 from .painter import Painter
-from .cell import Cell
-from .colors import Attr, BLACK, GREEN, LIGHT_GRAY, WHITE, YELLOW
-from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE, KEY_ENTER, KEY_ESC, KEY_TAB,
-    MOUSE_BUTTON_LEFT,
-)
+from .colors import Attr, BLACK, GREEN, LIGHT_GRAY, YELLOW
+from .events import Event, EVENT_KEY, EVENT_MOUSE, KEY_ENTER, KEY_ESC, KEY_TAB
 from .geometry import Point, Rect
 from .search_options import SearchOptions
 from .text_field import TextField

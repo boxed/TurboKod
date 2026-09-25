@@ -25,13 +25,12 @@ Missing file / malformed JSON / missing keys all degrade to an empty list
 """
 
 from std.collections.list import List
-from std.ffi import external_call
 
 from .config import OnSaveAction
-from .file_io import join_path, read_file, stat_file, write_file
+from .file_io import join_path, load_json_object, make_dir, write_file
 from .json import (
-    JsonValue, encode_json, json_array, json_get_string,
-    json_get_string_array, json_object, json_str, parse_json,
+    encode_json, json_array, json_get_string, json_get_string_array,
+    json_object, json_str,
 )
 
 
@@ -76,13 +75,6 @@ def _on_save_path(project_root: String) -> String:
     return join_path(dir, _ON_SAVE_FILE)
 
 
-def _ensure_dir(path: String):
-    if len(path.as_bytes()) == 0:
-        return
-    var c_path = path + String("\0")
-    _ = external_call["mkdir", Int32](c_path.unsafe_ptr(), Int32(0o755))
-
-
 def load_project_on_save(project_root: String) -> List[OnSaveAction]:
     """Load ``<project>/.turbokod/on_save.json``. Returns an empty list on
     any failure (no project, missing file, malformed JSON, missing keys)."""
@@ -90,21 +82,10 @@ def load_project_on_save(project_root: String) -> List[OnSaveAction]:
     var path = _on_save_path(project_root)
     if len(path.as_bytes()) == 0:
         return out^
-    var info = stat_file(path)
-    if not info.ok:
+    var loaded = load_json_object(path)
+    if not loaded:
         return out^
-    var text: String
-    try:
-        text = read_file(path)
-    except:
-        return out^
-    var root: JsonValue
-    try:
-        root = parse_json(text)
-    except:
-        return out^
-    if not root.is_object():
-        return out^
+    var root = loaded.value().copy()
     var arr_v = root.object_get(String("actions"))
     if not arr_v or not arr_v.value().is_array():
         return out^
@@ -137,7 +118,7 @@ def write_project_on_save(
     var path = _on_save_path(project_root)
     if len(path.as_bytes()) == 0:
         return False
-    _ensure_dir(_on_save_dir(project_root))
+    make_dir(_on_save_dir(project_root))
     var arr = json_array()
     for i in range(len(actions)):
         var act = actions[i].copy()

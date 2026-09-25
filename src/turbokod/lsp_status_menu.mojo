@@ -8,7 +8,6 @@ the status-bar message rect, and for routing keyboard / mouse events
 to it before any other widget while ``active`` is True.
 """
 
-from std.collections.list import List
 
 from .canvas import Canvas
 from .painter import Painter

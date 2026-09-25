@@ -733,7 +733,7 @@ def _emit_capture_subtokens(
     inside a capture's ``patterns`` would still match its own
     range, but its end would have to be on the same line.
     """
-    var sub = _slice_string(line, sub_start, sub_end)
+    var sub = byte_slice(line, sub_start, sub_end)
     var sb = sub.as_bytes()
     var n = len(sb)
     var pos = 0
@@ -771,22 +771,6 @@ def _emit_capture_subtokens(
         # would need to refit OnigMatch offsets and isn't worth
         # the complexity for the handful of grammars that do it.
         pos = me
-
-
-def _slice_string(s: String, start: Int, end: Int) -> String:
-    """Byte-slice helper. Mojo's StringSpan accepts unsafe-from-utf8
-    construction; the caller guarantees the bounds are codepoint-
-    aligned (libonig matches at codepoint boundaries)."""
-    var b = s.as_bytes()
-    var s_clamped = start
-    var e_clamped = end
-    if s_clamped < 0:
-        s_clamped = 0
-    if e_clamped > len(b):
-        e_clamped = len(b)
-    if e_clamped <= s_clamped:
-        return String("")
-    return String(StringSpan(unsafe_from_utf8=b[s_clamped:e_clamped]))
 
 
 def _emit_unmatched(
@@ -1184,8 +1168,6 @@ def _scope_attr(scope: String) -> Optional[Attr]:
     if starts_with(scope, String("variable")):
         return Optional[Attr](highlight_ident_attr())
     return Optional[Attr]()
-
-
 
 
 def _split_scopes(chain: String) -> List[String]:

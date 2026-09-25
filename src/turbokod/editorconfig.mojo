@@ -27,24 +27,10 @@ from std.collections.list import List
 from .case_fold import fold_ascii
 from .file_io import join_path, parent_path, read_file, stat_file
 from .posix import realpath
-from .string_utils import parse_int_all, starts_with
+from .string_utils import byte_slice, parse_int_all, starts_with
 
 
 # --- helpers ---------------------------------------------------------------
-
-
-def _slice(s: String, start: Int, end: Int) -> String:
-    var bytes = s.as_bytes()
-    var s_start = start
-    var s_end = end
-    if s_start < 0: s_start = 0
-    if s_end > len(bytes): s_end = len(bytes)
-    if s_start >= s_end: return String("")
-    return String(StringSpan(unsafe_from_utf8=bytes[s_start:s_end]))
-
-
-def _to_lower(s: String) -> String:
-    return fold_ascii(s)
 
 
 def _strip(s: String) -> String:
@@ -56,7 +42,7 @@ def _strip(s: String) -> String:
     var j = n
     while j > i and (bytes[j - 1] == 0x20 or bytes[j - 1] == 0x09):
         j -= 1
-    return _slice(s, i, j)
+    return byte_slice(s, i, j)
 
 
 def _ends_with_byte(s: String, b: UInt8) -> Bool:
@@ -66,7 +52,7 @@ def _ends_with_byte(s: String, b: UInt8) -> Bool:
 
 def _parse_bool(s: String) -> Int:
     """Returns 1 for ``true``, 0 for ``false``, ``-1`` for anything else."""
-    var lower = _to_lower(s)
+    var lower = fold_ascii(s)
     if lower == String("true"):
         return 1
     if lower == String("false"):
@@ -150,9 +136,9 @@ struct EditorConfig(ImplicitlyCopyable, Movable):
 
     def _set(mut self, key: String, value: String):
         """Apply one ``key = value`` pair. Unknown keys are ignored."""
-        var k = _to_lower(_strip(key))
+        var k = fold_ascii(_strip(key))
         var v = _strip(value)
-        var vl = _to_lower(v)
+        var vl = fold_ascii(v)
         if k == String("indent_style"):
             if vl == String("tab") or vl == String("space"):
                 self.indent_style = vl
@@ -263,7 +249,7 @@ def parse_editorconfig(dir: String, contents: String) -> EditorConfigFile:
         # Strip trailing \r.
         if line_end > i and bytes[line_end - 1] == 0x0D:
             line_end -= 1
-        var raw = _slice(contents, i, line_end)
+        var raw = byte_slice(contents, i, line_end)
         var line = _strip(raw)
         var lb = line.as_bytes()
         i = j + 1   # advance past the \n
@@ -286,7 +272,7 @@ def parse_editorconfig(dir: String, contents: String) -> EditorConfigFile:
                 file.sections.append(prev^)
                 current_keys = List[String]()
                 current_values = List[String]()
-            current_pat = _slice(line, 1, k)
+            current_pat = byte_slice(line, 1, k)
             has_section = True
             continue
         # key = value
@@ -297,12 +283,12 @@ def parse_editorconfig(dir: String, contents: String) -> EditorConfigFile:
                 break
         if eq < 0:
             continue
-        var key = _strip(_slice(line, 0, eq))
-        var value = _strip(_slice(line, eq + 1, len(lb)))
+        var key = _strip(byte_slice(line, 0, eq))
+        var value = _strip(byte_slice(line, eq + 1, len(lb)))
         if not has_section:
             # Global block — only ``root`` is meaningful.
-            if _to_lower(key) == String("root") \
-                    and _to_lower(value) == String("true"):
+            if fold_ascii(key) == String("root") \
+                    and fold_ascii(value) == String("true"):
                 file.is_root = True
             continue
         current_keys.append(key^)
@@ -385,8 +371,8 @@ def _expand_alternations(pat: String) -> List[String]:
             if end >= len(bytes):
                 break    # unclosed brace; treat the rest as literal
             var alts = _split_alts(bytes, i + 1, end)
-            var prefix = _slice(pat, 0, i)
-            var suffix = _slice(pat, end + 1, len(bytes))
+            var prefix = byte_slice(pat, 0, i)
+            var suffix = byte_slice(pat, end + 1, len(bytes))
             var out = List[String]()
             for k in range(len(alts)):
                 var combined = prefix + alts[k] + suffix
@@ -537,10 +523,10 @@ def match_section(pattern: String, rel_path: String) -> Bool:
     var pat = pattern
     # Trailing slash isn't significant for matching files; drop it.
     if _ends_with_byte(pat, 0x2F):
-        pat = _slice(pat, 0, len(pat.as_bytes()) - 1)
+        pat = byte_slice(pat, 0, len(pat.as_bytes()) - 1)
     var has_slash: Bool
     if starts_with(pat, String("/")):
-        pat = _slice(pat, 1, len(pat.as_bytes()))
+        pat = byte_slice(pat, 1, len(pat.as_bytes()))
         has_slash = True
     else:
         has_slash = _pattern_has_internal_slash(pat)
@@ -587,7 +573,7 @@ def _abs_file(file_path: String) -> String:
         var i = n - 1
         while i >= 0 and bytes[i] != 0x2F:
             i -= 1
-        var name = _slice(file_path, i + 1, n)
+        var name = byte_slice(file_path, i + 1, n)
         return join_path(parent_abs, name)
     return file_path
 
@@ -598,7 +584,7 @@ def _relative_path(abs_file: String, ec_dir: String) -> String:
         prefix = prefix + String("/")
     if not starts_with(abs_file, prefix):
         return abs_file
-    return _slice(abs_file, len(prefix.as_bytes()),
+    return byte_slice(abs_file, len(prefix.as_bytes()),
                   len(abs_file.as_bytes()))
 
 

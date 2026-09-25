@@ -32,7 +32,6 @@ and cleared by the host each tick.
 """
 
 from std.collections.list import List
-from std.ffi import external_call
 
 from .canvas import Canvas
 from .claude_detect import (

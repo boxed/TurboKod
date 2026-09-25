@@ -18,7 +18,6 @@ from std.collections.list import List
 
 from .canvas import Canvas
 from .painter import Painter
-from .cell import Cell
 from .colors import (
     Attr, BLACK, DARK_GRAY, GREEN, LIGHT_GRAY, WHITE,
 )

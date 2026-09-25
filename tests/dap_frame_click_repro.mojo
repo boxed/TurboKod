@@ -23,10 +23,9 @@ pass, the click crash is genuinely UI-side and not in the data path.
 """
 
 from std.collections.list import List
-from std.collections.optional import Optional
 from std.ffi import external_call
 
-from turbokod.dap_dispatch import DapManager, DapStackFrame
+from turbokod.dap_dispatch import DapManager
 from turbokod.debugger_config import (
     built_in_debuggers, find_debugger_for_language,
 )

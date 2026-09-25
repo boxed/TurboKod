@@ -16,6 +16,8 @@ from std.sys.info import CompilationTarget
 
 from .case_fold import fold_byte
 from .posix import alloc_zero_buffer, realpath
+from .string_utils import byte_slice
+from .json import JsonValue, parse_json
 
 
 comptime O_RDONLY: Int32 = 0
@@ -154,6 +156,21 @@ def read_file(path: String) raises -> String:
     return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=total)))
 
 
+def load_json_object(path: String) -> Optional[JsonValue]:
+    """Read and parse ``path`` as a JSON object. Empty when the file is
+    missing or unreadable, isn't valid JSON, or holds a non-object — the
+    stores all treat those the same way ("nothing saved yet")."""
+    if not stat_file(path).ok:
+        return None
+    try:
+        var root = parse_json(read_file(path))
+        if root.is_object():
+            return root^
+    except:
+        pass
+    return None
+
+
 def write_file(path: String, content: String) -> Bool:
     """Write ``content`` to ``path`` atomically. Returns True on success.
 
@@ -221,6 +238,26 @@ def write_file(path: String, content: String) -> Bool:
         return True
     _ = external_call["unlink", Int32](c_tmp.unsafe_ptr())
     return False
+
+
+def make_dir(path: String):
+    """Best-effort ``mkdir(path, 0755)``; an existing directory (or any
+    other failure) is ignored. Creates one level only — see
+    ``make_parent_dirs`` for the recursive form."""
+    if len(path.as_bytes()) == 0:
+        return
+    var c_path = path + String("\0")
+    _ = external_call["mkdir", Int32](c_path.unsafe_ptr(), Int32(0o755))
+
+
+def make_parent_dirs(path: String):
+    """Best-effort ``make_dir`` of every prefix of ``path`` up to (but not
+    including) its last component, so a fresh ``~/.config/turbokod`` or
+    ``<project>/.turbokod`` exists before the first write."""
+    var b = path.as_bytes()
+    for i in range(1, len(b)):
+        if b[i] == 0x2F:  # '/'
+            make_dir(byte_slice(path, 0, i))
 
 
 def rename_path(src: String, dst: String) -> Bool:
@@ -409,6 +446,16 @@ def project_relative(
     if fb[len(rb)] != 0x2F:
         return full
     return String(StringSpan(unsafe_from_utf8=fb[len(rb) + 1:]))
+
+
+def project_absolute(project_root: String, stored: String) -> String:
+    """Inverse of ``project_relative``: anchor a stored relative path onto
+    the project root. Absolute paths, empty paths and empty roots pass
+    through unchanged."""
+    var b = stored.as_bytes()
+    if len(b) == 0 or b[0] == 0x2F or len(project_root.as_bytes()) == 0:
+        return stored
+    return join_path(project_root, stored)
 
 
 def parent_path(path: String) -> String:

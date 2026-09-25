@@ -19,7 +19,7 @@ pty, forking with ``setsid`` + ``TIOCSCTTY``, and ``execvp`` is in
 from std.collections.list import List
 from std.ffi import external_call
 
-from .lsp import ArgvBuffer, _build_argv_buffer
+from .lsp import _build_argv_buffer
 from .posix import (
     close_fd, kill_pid, reap_child, SIGTERM, untrack_child, waitpid_nohang,
 )

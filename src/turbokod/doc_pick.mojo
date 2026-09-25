@@ -13,7 +13,6 @@ the same fuzzy-with-word-boundary feel as Quick Open / Go to Symbol.
 from std.collections.list import List
 
 from .canvas import Canvas
-from .cell import Cell
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, YELLOW
 from .doc_store import DocEntry
 from .events import (

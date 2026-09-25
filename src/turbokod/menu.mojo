@@ -14,9 +14,8 @@ from .painter import Painter
 from .cell import Cell
 from .colors import Attr, BLACK, GREEN, LIGHT_GRAY, RED, WHITE
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP,
-    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE,
+    Event, EVENT_KEY, EVENT_MOUSE, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT,
+    KEY_UP, MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
 from .string_utils import char_width, codepoint_at, display_columns

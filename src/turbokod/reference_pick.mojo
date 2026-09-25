@@ -12,14 +12,12 @@ picker doesn't have to model a loading state or a "no results" view.
 from std.collections.list import List
 
 from .canvas import Canvas
-from .cell import Cell
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, YELLOW
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     KEY_ENTER, KEY_ESC,
     MOUSE_BUTTON_LEFT,
 )
-from .file_io import basename
 from .geometry import Point, Rect, center_in
 from .lsp_dispatch import DefinitionResolved
 from .picker_input import (
@@ -112,7 +110,7 @@ struct ReferencePick(Movable):
         if len(self.project_root.as_bytes()) == 0:
             return path
         var root = self.project_root
-        if not _ends_with_slash(root):
+        if not root.endswith("/"):
             root = root + String("/")
         if starts_with(path, root):
             var pb = path.as_bytes()
@@ -238,8 +236,3 @@ struct ReferencePick(Movable):
         self.scroll = scroll_to_reveal(self.scroll, self.selected, self._revealed_height)
 
 
-def _ends_with_slash(s: String) -> Bool:
-    var b = s.as_bytes()
-    if len(b) == 0:
-        return False
-    return b[len(b) - 1] == 0x2F

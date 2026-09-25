@@ -13,7 +13,9 @@ theme, font, and more. Other settings can join later by extending
 from std.collections.optional import Optional
 from std.ffi import external_call
 
-from .file_io import FileInfo, read_file, rename_path, stat_file, write_file
+from .file_io import (
+    FileInfo, make_dir, read_file, rename_path, stat_file, write_file,
+)
 from .json import (
     JsonValue, encode_json, json_array, json_bool, json_int, json_object,
     json_str, json_get_bool, json_get_int, json_get_string,
@@ -79,16 +81,6 @@ def default_font_label() -> String:
     of the Font list; ``Desktop.set_font`` maps it back to the empty
     string so the config file stays frontend-agnostic."""
     return String("IBM VGA 8x16 (built-in)")
-
-
-def _ensure_dir(path: String):
-    """Best-effort ``mkdir`` ignoring ``EEXIST``. We don't recurse; the
-    caller attempts both ``~/.config`` and ``~/.config/turbokod`` to
-    cover machines where ``~/.config`` doesn't exist yet."""
-    if len(path.as_bytes()) == 0:
-        return
-    var c_path = path + String("\0")
-    _ = external_call["mkdir", Int32](c_path.unsafe_ptr(), Int32(0o755))
 
 
 struct LanguageServerOverride(Copyable, Movable):
@@ -751,8 +743,8 @@ def _write_config(config: TurbokodConfig) -> Bool:
         return False
     var home = getenv_value(String("HOME"))
     if len(home.as_bytes()) > 0:
-        _ensure_dir(home + String("/.config"))
-    _ensure_dir(_config_dir())
+        make_dir(home + String("/.config"))
+    make_dir(_config_dir())
     return write_file(path, encode_json(_config_to_json(config)) + String("\n"))
 
 

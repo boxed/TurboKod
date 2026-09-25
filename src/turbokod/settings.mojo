@@ -29,7 +29,6 @@ user can still see context. Esc closes (same as the [Close] button).
 """
 
 from std.collections.list import List
-from std.collections.optional import Optional
 
 from .buttons import (
     BUTTON_FIRED, BUTTON_NONE, Checkbox, ShadowButton,
@@ -37,11 +36,10 @@ from .buttons import (
 )
 from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
-from .cell import Cell
 from .colors import (
-    Attr, BLACK, BLUE, BORDER_FOCUS, CYAN, DARK_GRAY, GREEN, LIGHT_GRAY, RED,
-    WHITE, EDITOR_BG, EDITOR_FG, SYN_KEYWORD, SYN_STRING, SYN_COMMENT,
-    SYN_NUMBER, SYN_IDENT,
+    Attr, BLACK, BLUE, BORDER_FOCUS, CYAN, GREEN, LIGHT_GRAY, RED, WHITE,
+    EDITOR_BG, EDITOR_FG, SYN_KEYWORD, SYN_STRING, SYN_COMMENT, SYN_NUMBER,
+    SYN_IDENT,
 )
 from .theme import theme_names
 from .config import (
@@ -53,8 +51,8 @@ from .dictionary_install import (
     user_dictionary_installed,
 )
 from .language_config import (
-    LanguageSpec, ServerCandidate, apply_language_overrides,
-    built_in_servers, find_language_by_id, find_language_for_extension,
+    LanguageSpec, apply_language_overrides, built_in_servers,
+    find_language_by_id, find_language_for_extension,
 )
 from .language_editor import LanguageEditor
 from .dropdown import (
@@ -62,10 +60,9 @@ from .dropdown import (
     DROPDOWN_HIT_POPUP, Dropdown,
 )
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_SPACE, KEY_TAB, KEY_UP,
-    MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT,
-    MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
+    Event, EVENT_KEY, EVENT_MOUSE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_SPACE,
+    KEY_TAB, KEY_UP, MOD_SHIFT, MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN,
+    MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
 from .string_utils import display_columns

@@ -26,7 +26,7 @@ fresh install / remove takes effect without restart.
 from std.collections.list import List
 from std.ffi import external_call
 
-from .file_io import join_path, list_directory, stat_file
+from .file_io import list_directory, stat_file
 from .posix import getenv_value
 from .string_utils import shell_single_quote
 

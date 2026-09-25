@@ -50,16 +50,12 @@ constants is the smoothest pattern available, and matches what
 from std.collections.list import List
 
 from .canvas import Canvas
-from .string_utils import (
-    char_width, codepoint_at, display_columns, truncate_to_columns,
-)
+from .string_utils import display_columns, truncate_to_columns
 from .painter import Painter
 from .cell import Cell
-from .clipboard import clipboard_copy
 from .colors import (
-    Attr, BLACK, BLUE, CYAN, DARK_GRAY, LIGHT_BLUE, LIGHT_GREEN,
-    LIGHT_MAGENTA, LIGHT_RED, LIGHT_YELLOW, PANE_BG, PANE_FG, RED,
-    STYLE_UNDERLINE, WHITE, YELLOW,
+    Attr, BLACK, DARK_GRAY, LIGHT_BLUE, LIGHT_GREEN, LIGHT_MAGENTA, LIGHT_RED,
+    LIGHT_YELLOW, PANE_BG, PANE_FG, RED, STYLE_UNDERLINE, WHITE, YELLOW,
 )
 from .dap_dispatch import DapStackFrame, DapVariable
 from .events import (

@@ -25,7 +25,7 @@ yields an empty parse and the caller silently no-ops.
 from std.collections.list import List
 from std.collections.optional import Optional
 
-from .file_io import find_git_project, parent_path
+from .file_io import find_git_project
 from .git_changes import fetch_commit_message
 from .lsp import capture_command
 from .posix import realpath

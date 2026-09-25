@@ -34,14 +34,13 @@ from .cell import Cell
 from .clipboard import clipboard_copy
 from .colors import Attr, BLACK, CYAN, ColorRun, parse_sgr
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_DOWN, KEY_END, KEY_HOME, KEY_PAGEDOWN, KEY_PAGEUP, KEY_UP,
+    Event, EVENT_KEY, EVENT_MOUSE, KEY_END, KEY_HOME, KEY_PAGEDOWN, KEY_PAGEUP,
     MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
 from .string_utils import (
     byte_slice, char_width, codepoint_at, is_word_codepoint,
-    leading_indent_bytes, utf8_codepoint_size, word_range_at, TAB_WIDTH,
+    leading_indent_bytes, word_range_at, TAB_WIDTH,
 )
 
 

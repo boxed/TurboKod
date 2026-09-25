@@ -6,12 +6,10 @@ Run with::
 """
 
 from turbokod import (
-    Application, Attr, Frame, Label, Point, Rect,
-    BLUE, BLACK, CYAN, WHITE, YELLOW,
-    EVENT_KEY, KEY_ESC,
-    centered,
+    Application, Attr, Frame, Label, Rect, BLUE, BLACK, CYAN, WHITE, YELLOW,
+    EVENT_KEY, KEY_ESC, centered,
 )
-from turbokod.view import Drawable, Fill
+from turbokod.view import Fill
 
 
 def main() raises:

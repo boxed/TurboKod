@@ -14,7 +14,7 @@ close glyph) dismisses with no choice. The host reads ``submitted`` then
 """
 
 from .canvas import Canvas, wrap_to_width
-from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, WHITE, YELLOW
+from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, WHITE
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_UP,

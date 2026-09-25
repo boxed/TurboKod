@@ -26,12 +26,11 @@ from .buttons import (
 )
 from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
-from .colors import Attr, BLACK, BLUE, BORDER_FOCUS, GREEN, LIGHT_GRAY, WHITE
+from .colors import Attr, BLACK, BLUE, BORDER_FOCUS, GREEN, LIGHT_GRAY
 from .dir_browser import DirBrowser
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_UP, KEY_PAGEDOWN, KEY_PAGEUP,
-    MOUSE_BUTTON_LEFT,
+    Event, EVENT_KEY, EVENT_MOUSE, KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC,
+    KEY_UP, KEY_PAGEDOWN, KEY_PAGEUP,
 )
 from .file_io import join_path
 from .geometry import Point, Rect

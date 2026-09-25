@@ -10,11 +10,7 @@ Run with::
     mojo run -I src examples/checkerboard.mojo
 """
 
-from turbokod import (
-    Application, Attr, Point,
-    BLACK, WHITE,
-    EVENT_KEY, KEY_ESC,
-)
+from turbokod import Application, Attr, BLACK, WHITE, EVENT_KEY, KEY_ESC
 from turbokod.cell import Cell
 
 

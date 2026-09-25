@@ -30,7 +30,7 @@ from std.collections.list import List
 from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
 from .cell import Cell
-from .colors import Attr, BLACK, GREEN, LIGHT_GRAY, WHITE
+from .colors import Attr, BLACK, GREEN, LIGHT_GRAY
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_PAGEDOWN, KEY_PAGEUP, KEY_UP,
@@ -39,9 +39,7 @@ from .events import (
 from .geometry import Point, Rect
 from .picker_input import scroll_to_reveal
 from .string_utils import display_columns
-from .type_ahead import (
-    TypeAhead, is_type_ahead_key, starts_with_ci, type_ahead_pick,
-)
+from .type_ahead import TypeAhead, is_type_ahead_key, type_ahead_pick
 
 
 # Hit-test result codes for ``Dropdown.handle_mouse``.

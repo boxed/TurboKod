@@ -22,7 +22,6 @@ from std.collections.optional import Optional
 
 from .canvas import Canvas
 from .case_fold import find_folded, fold_ascii
-from .cell import Cell
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, YELLOW
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,

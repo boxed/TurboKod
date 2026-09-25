@@ -17,11 +17,9 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .buttons import (
-    BUTTON_CANCELED, BUTTON_CAPTURED, BUTTON_FIRED, BUTTON_NONE,
-    ShadowButton, paint_shadow_button,
+    BUTTON_FIRED, BUTTON_NONE, ShadowButton, paint_shadow_button,
 )
 from .canvas import Canvas
-from .cell import Cell
 from .colors import (
     Attr, BLACK, BLUE, CYAN, GREEN, LIGHT_CYAN, LIGHT_GRAY,
     LIGHT_YELLOW, WHITE,

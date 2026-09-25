@@ -29,12 +29,9 @@ something, just with the default grammar.
 """
 
 from std.collections.list import List
-from std.ffi import external_call
 
-from .file_io import join_path, read_file, stat_file, write_file
-from .json import (
-    JsonValue, encode_json, json_object, json_str, parse_json,
-)
+from .file_io import join_path, load_json_object, make_dir, write_file
+from .json import encode_json, json_object, json_str
 
 
 comptime _TURBOKOD_DIR    = String(".turbokod")
@@ -62,13 +59,6 @@ def _grammars_path(project_root: String) -> String:
     return join_path(dir, _GRAMMARS_FILE)
 
 
-def _ensure_dir(path: String):
-    if len(path.as_bytes()) == 0:
-        return
-    var c_path = path + String("\0")
-    _ = external_call["mkdir", Int32](c_path.unsafe_ptr(), Int32(0o755))
-
-
 def load_project_grammar_overrides(
     project_root: String,
 ) -> List[GrammarOverride]:
@@ -80,21 +70,10 @@ def load_project_grammar_overrides(
     var path = _grammars_path(project_root)
     if len(path.as_bytes()) == 0:
         return out^
-    var info = stat_file(path)
-    if not info.ok:
+    var loaded = load_json_object(path)
+    if not loaded:
         return out^
-    var text: String
-    try:
-        text = read_file(path)
-    except:
-        return out^
-    var root: JsonValue
-    try:
-        root = parse_json(text)
-    except:
-        return out^
-    if not root.is_object():
-        return out^
+    var root = loaded.value().copy()
     var exts_v = root.object_get(String("extensions"))
     if not exts_v or not exts_v.value().is_object():
         return out^
@@ -127,7 +106,7 @@ def write_grammar_overrides(
     var path = _grammars_path(project_root)
     if len(path.as_bytes()) == 0:
         return False
-    _ensure_dir(_grammars_dir(project_root))
+    make_dir(_grammars_dir(project_root))
     var exts = json_object()
     var seen = List[String]()
     for i in range(len(overrides)):

@@ -19,7 +19,7 @@ discarded by ``capture_command`` and we return an empty string.
 from std.collections.list import List
 from std.collections.optional import Optional
 
-from .diff import DiffOp, diff_lines
+from .diff import diff_lines
 from .file_io import find_git_project, join_path, project_relative, stat_file
 from .lsp import capture_command
 from .string_utils import (

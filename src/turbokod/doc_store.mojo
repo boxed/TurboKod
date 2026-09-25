@@ -39,11 +39,10 @@ DevDocs JSON shape (as shipped by https://documents.devdocs.io/):
 """
 
 from std.collections.list import List
-from std.collections.optional import Optional
 
 from .case_fold import fold_ascii
 from .file_io import join_path, read_file, stat_file
-from .json import JsonValue, parse_json
+from .json import parse_json
 
 
 @fieldwise_init

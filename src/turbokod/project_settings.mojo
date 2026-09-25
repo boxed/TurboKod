@@ -30,7 +30,6 @@ set. There is no Save button — closing the window ends the interaction.
 """
 
 from std.collections.list import List
-from std.collections.optional import Optional
 
 from .action_editor import ActionEditor
 from .buttons import (

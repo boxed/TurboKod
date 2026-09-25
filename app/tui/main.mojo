@@ -38,7 +38,6 @@ from turbokod.canvas import Canvas
 from turbokod.cell import Cell
 from turbokod.colors import Attr, BLACK, LIGHT_GRAY
 from turbokod.events import (
-    Event,
     EVENT_KEY, EVENT_MOUSE, EVENT_MOD_KEY, EVENT_OPEN_PATH, EVENT_PASTE,
     EVENT_RESIZE,
 )

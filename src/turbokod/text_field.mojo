@@ -29,7 +29,7 @@ the keystroke (existing pickers gate their refilter on ``changed``).
 
 from std.collections.list import List
 
-from .canvas import Canvas, utf8_byte_to_cell, utf8_codepoint_count
+from .canvas import Canvas, utf8_codepoint_count
 from .painter import Painter
 from .cell import Cell
 from .clipboard import (
@@ -59,10 +59,9 @@ from .events import (
 from .posix import monotonic_ms
 from .geometry import Point, Rect
 from .string_utils import (
-    char_width, codepoint_at, is_printable_text_key, is_word_codepoint,
-    leading_indent_bytes,
-    prev_codepoint_start, utf8_byte_of_cell, utf8_cell_of_byte,
-    utf8_codepoint_size, utf8_step_forward, word_char_step, word_range_at,
+    codepoint_at, is_printable_text_key, is_word_codepoint,
+    leading_indent_bytes, prev_codepoint_start, utf8_byte_of_cell,
+    utf8_cell_of_byte, utf8_step_forward, word_char_step, word_range_at,
 )
 
 

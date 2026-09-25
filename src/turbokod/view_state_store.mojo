@@ -30,10 +30,11 @@ malformed or missing file silently yields an empty list.
 
 from std.collections.list import List
 
-from .file_io import join_path, project_relative, read_file, stat_file, write_file
+from .file_io import (
+    load_json_object, project_absolute, project_relative, write_file,
+)
 from .json import (
-    JsonValue, encode_json, json_array, json_object, json_str,
-    parse_json, json_get_int, json_get_string,
+    encode_json, json_array, json_object, json_str, json_get_string,
     encode_int_pair, read_int_pair,
 )
 from .per_user_store import ensure_per_user_dir, per_user_path
@@ -60,17 +61,6 @@ def _vs_path(project_root: String) -> String:
     return per_user_path(project_root, VS_FILE)
 
 
-def _resolve_vs_path(project_root: String, stored: String) -> String:
-    var b = stored.as_bytes()
-    if len(b) == 0:
-        return stored
-    if b[0] == 0x2F:
-        return stored
-    if len(project_root.as_bytes()) == 0:
-        return stored
-    return join_path(project_root, stored)
-
-
 def load_view_states(project_root: String) -> List[StoredViewState]:
     """Parse the per-user view-states file. Any failure (missing file,
     malformed JSON, missing keys) yields an empty list."""
@@ -78,21 +68,10 @@ def load_view_states(project_root: String) -> List[StoredViewState]:
     var path = _vs_path(project_root)
     if len(path.as_bytes()) == 0:
         return out^
-    var info = stat_file(path)
-    if not info.ok:
+    var loaded = load_json_object(path)
+    if not loaded:
         return out^
-    var text: String
-    try:
-        text = read_file(path)
-    except:
-        return out^
-    var root: JsonValue
-    try:
-        root = parse_json(text)
-    except:
-        return out^
-    if not root.is_object():
-        return out^
+    var root = loaded.value().copy()
     var arr_v = root.object_get(String("views"))
     if not arr_v or not arr_v.value().is_array():
         return out^
@@ -104,7 +83,7 @@ def load_view_states(project_root: String) -> List[StoredViewState]:
         var raw_path = json_get_string(node, String("path"))
         if len(raw_path.as_bytes()) == 0:
             continue
-        var resolved = _resolve_vs_path(project_root, raw_path)
+        var resolved = project_absolute(project_root, raw_path)
         var cursor = read_int_pair(node, String("cursor"), 0, 0)
         var scroll = read_int_pair(node, String("scroll"), 0, 0)
         out.append(StoredViewState(

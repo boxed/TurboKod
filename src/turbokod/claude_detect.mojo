@@ -25,6 +25,8 @@ title bar still reflects that Claude is present.
 
 from std.collections.list import List
 
+from .case_fold import fold_ascii
+
 
 comptime CLAUDE_NONE    = UInt8(0)
 """Claude Code is not detected in the visible output."""
@@ -100,7 +102,7 @@ def detect_claude_state(lines: List[String]) -> UInt8:
     # and the concatenated-rows checks read from this.
     var rows_lc = List[String]()
     for i in range(start, n):
-        rows_lc.append(_to_lower(lines[i]))
+        rows_lc.append(fold_ascii(lines[i]))
     var joined_bytes = List[UInt8]()
     for i in range(len(rows_lc)):
         var rb = rows_lc[i].as_bytes()
@@ -299,31 +301,6 @@ def _join_lines(lines: List[String]) -> String:
     return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=len(out))))
 
 
-def _contains(haystack: String, needle: String) -> Bool:
-    """Byte-level substring search. The lines we scan may have ANSI
-    color escapes embedded around (but not inside) the marker strings
-    we look for, so a plain byte search is sufficient and avoids the
-    cost of stripping escapes."""
-    var h = haystack.as_bytes()
-    var nd = needle.as_bytes()
-    var hl = len(h)
-    var nl = len(nd)
-    if nl == 0:
-        return True
-    if nl > hl:
-        return False
-    var limit = hl - nl + 1
-    for i in range(limit):
-        var matched = True
-        for j in range(nl):
-            if h[i + j] != nd[j]:
-                matched = False
-                break
-        if matched:
-            return True
-    return False
-
-
 def _any_contains(rows_lc: List[String], joined: String, needle_lc: String) -> Bool:
     """True if ``needle_lc`` is in any individual row or in the
     concatenation of all rows. Caller passes the lowercased needle and
@@ -331,9 +308,9 @@ def _any_contains(rows_lc: List[String], joined: String, needle_lc: String) -> B
     marker. The joined check catches markers that wrapped across rows
     in a narrow pane."""
     for i in range(len(rows_lc)):
-        if _contains(rows_lc[i], needle_lc):
+        if needle_lc in rows_lc[i]:
             return True
-    return _contains(joined, needle_lc)
+    return needle_lc in joined
 
 
 def _any_spinner_row(rows_lc: List[String]) -> Bool:
@@ -344,7 +321,7 @@ def _any_spinner_row(rows_lc: List[String]) -> Bool:
     the parenthesized timer block ``(Ns · …)``."""
     for i in range(len(rows_lc)):
         var row = rows_lc[i]
-        if not _contains(row, String("(")):
+        if String("(") not in row:
             continue
         if _row_starts_with_any_spinner(row):
             return True
@@ -389,21 +366,3 @@ def _row_starts_with_glyph_space(row_lc: String, glyph: String) -> Bool:
     return b[i + gl] == UInt8(0x20)
 
 
-def _to_lower(s: String) -> String:
-    """ASCII-only lowercase. Claude Code's marker strings are all
-    plain ASCII (``esc to interrupt``, ``? for shortcuts``, etc.), so
-    a byte-level uppercase→lowercase mapping is sufficient; multibyte
-    sequences (the brand glyph, middle dots) pass through unchanged.
-    Used so the detector matches across ``esc`` / ``Esc`` / ``ESC``
-    variants without maintaining a per-marker alternate list."""
-    var src = s.as_bytes()
-    var n = len(src)
-    var out = List[UInt8]()
-    out.reserve(n)
-    for i in range(n):
-        var b = src[i]
-        if b >= UInt8(0x41) and b <= UInt8(0x5A):
-            out.append(b + UInt8(0x20))
-        else:
-            out.append(b)
-    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=n)))

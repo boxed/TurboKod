@@ -22,9 +22,8 @@ from .colors import (
     Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, WHITE,
 )
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_ENTER, KEY_ESC, KEY_LEFT, KEY_RIGHT, KEY_TAB,
-    MOUSE_BUTTON_LEFT,
+    Event, EVENT_KEY, EVENT_MOUSE, KEY_ENTER, KEY_ESC, KEY_LEFT, KEY_RIGHT,
+    KEY_TAB,
 )
 from .geometry import Rect, center_in
 from .view import centered_row_start, FocusGroup

@@ -26,7 +26,6 @@ sharing would add branches everywhere.
 """
 
 from std.collections.list import List
-from std.collections.optional import Optional
 
 from .lsp import LspProcess
 from .posix import (

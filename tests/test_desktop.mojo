@@ -11,7 +11,7 @@ from turbokod.canvas import Canvas
 from turbokod.claude_detect import CLAUDE_WAITING, CLAUDE_WORKING
 from turbokod.colors import default_attr
 from turbokod.session_store import (
-    Session, SessionWindow, _resolve_session_path, _session_path,
+    Session, SessionWindow, _session_path,
     encode_session, load_session, save_session
 )
 from turbokod.view_state_store import (
@@ -27,8 +27,8 @@ from turbokod.desktop import (
     PROJECT_REPLACE, WINDOW_CLOSE_ALL, WINDOW_FOCUS_PREFIX
 )
 from turbokod.file_io import (
-    basename, delete_path, find_git_project, join_path, project_relative,
-    read_file, stat_file, write_file
+    basename, delete_path, find_git_project, join_path, project_absolute,
+    project_relative, read_file, stat_file, write_file
 )
 from turbokod.editor import Editor, TextBuffer
 from turbokod.file_tree import FILE_TREE_WIDTH
@@ -69,8 +69,8 @@ from turbokod.view import Fill, Label, centered
 from turbokod.window import Window
 
 from support import (
-    _SCREEN, _doc_paths, _docs_contains, _ensure_dir, _key, _ps_open,
-    _rm_rf, _starts_with, _temp_path, setup_test_env
+    _SCREEN, _doc_paths, _docs_contains, _ensure_dir, _key, _ps_open, _rm_rf,
+    _temp_path, setup_test_env,
 )
 
 
@@ -2302,9 +2302,9 @@ def test_session_relative_path_round_trip() raises:
     assert_equal(rel_in, String("src/main.mojo"))
     var rel_out = project_relative(root, outside)
     assert_equal(rel_out, outside)
-    var resolved_in = _resolve_session_path(root, rel_in)
+    var resolved_in = project_absolute(root, rel_in)
     assert_equal(resolved_in, inside)
-    var resolved_out = _resolve_session_path(root, rel_out)
+    var resolved_out = project_absolute(root, rel_out)
     assert_equal(resolved_out, outside)
 
 

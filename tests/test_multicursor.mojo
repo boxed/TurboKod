@@ -8,8 +8,8 @@ from std.testing import assert_equal, assert_false, assert_true
 
 from turbokod.editor import Caret, Editor
 from turbokod.events import (
-    Event, EVENT_KEY, KEY_BACKSPACE, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_UP,
-    MOD_ALT, MOD_CTRL, MOD_KEY_ALT, MOD_META, MOD_NONE, MOD_SHIFT,
+    Event, KEY_BACKSPACE, KEY_DOWN, KEY_LEFT, KEY_RIGHT, MOD_ALT, MOD_CTRL,
+    MOD_KEY_ALT, MOD_META, MOD_NONE, MOD_SHIFT,
 )
 from turbokod.geometry import Point, Rect
 

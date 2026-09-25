@@ -21,7 +21,6 @@ Filed as a Mojo bug — see the comment in
 ``src/turbokod/terminal.mojo`` for the workaround status.
 """
 
-from std.collections.list import List
 from std.ffi import external_call
 
 from turbokod.posix import (

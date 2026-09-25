@@ -15,15 +15,14 @@ from std.collections.list import List
 from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
 from .cell import Cell
-from .colors import Attr, BLACK, BORDER_FOCUS, DARK_GRAY, EDITOR_BG, EDITOR_FG, GREEN, LIGHT_GRAY, LIGHT_YELLOW, PANE_BG, PANE_FG, WHITE, YELLOW
-from .editor import (
-    EXT_CHANGE_CONFLICT, EXT_CHANGE_MERGED, EXT_CHANGE_NONE,
-    EXT_CHANGE_RELOADED, Editor,
+from .colors import (
+    Attr, BORDER_FOCUS, DARK_GRAY, EDITOR_BG, EDITOR_FG, GREEN, LIGHT_GRAY,
+    LIGHT_YELLOW, PANE_BG, PANE_FG, WHITE, YELLOW,
 )
+from .editor import EXT_CHANGE_CONFLICT, Editor
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE,
-    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_BUTTON_RIGHT,
-    MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
+    Event, EVENT_MOUSE, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE,
+    MOUSE_BUTTON_RIGHT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .file_io import basename, parent_path
 from .geometry import Point, Rect

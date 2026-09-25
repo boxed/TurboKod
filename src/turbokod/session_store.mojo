@@ -32,14 +32,11 @@ just doesn't restore anything.
 
 from std.collections.list import List
 
-from .file_io import (
-    join_path, read_file, stat_file, write_file,
-)
+from .file_io import load_json_object, write_file
 from .json import (
     JsonValue, encode_json, json_array, json_bool, json_int, json_object,
-    json_str, parse_json,
-    json_get_bool, json_get_int, json_get_string,
-    encode_int_pair, encode_int_quad, read_int_pair, read_int_quad,
+    json_str, json_get_bool, json_get_int, json_get_string, encode_int_pair,
+    encode_int_quad, read_int_pair, read_int_quad,
 )
 from .per_user_store import ensure_per_user_dir, per_user_path
 
@@ -136,32 +133,6 @@ def _session_path(project_root: String) -> String:
     return per_user_path(project_root, SESSION_FILE)
 
 
-def _has_prefix(s: String, prefix: String) -> Bool:
-    var sb = s.as_bytes()
-    var pb = prefix.as_bytes()
-    if len(pb) > len(sb):
-        return False
-    for i in range(len(pb)):
-        if sb[i] != pb[i]:
-            return False
-    return True
-
-
-def _resolve_session_path(project_root: String, stored: String) -> String:
-    """Inverse of ``_session_relative``: anchor a stored relative path
-    onto the project root. Absolute paths and empty roots pass
-    through. ``..``-prefixed entries are kept as-is — the user is
-    presumed to have authored them deliberately if any."""
-    var b = stored.as_bytes()
-    if len(b) == 0:
-        return stored
-    if b[0] == 0x2F:        # absolute
-        return stored
-    if len(project_root.as_bytes()) == 0:
-        return stored
-    return join_path(project_root, stored)
-
-
 def _int_array(value: JsonValue) -> List[Int]:
     var out = List[Int]()
     if not value.is_array():
@@ -211,21 +182,10 @@ def load_session(project_root: String) -> Session:
     var path = _session_path(project_root)
     if len(path.as_bytes()) == 0:
         return out^
-    var info = stat_file(path)
-    if not info.ok:
+    var loaded = load_json_object(path)
+    if not loaded:
         return out^
-    var text: String
-    try:
-        text = read_file(path)
-    except:
-        return out^
-    var root: JsonValue
-    try:
-        root = parse_json(text)
-    except:
-        return out^
-    if not root.is_object():
-        return out^
+    var root = loaded.value().copy()
     var arr_v = root.object_get(String("windows"))
     if not arr_v or not arr_v.value().is_array():
         return out^
@@ -244,8 +204,6 @@ def load_session(project_root: String) -> Session:
     if out.focused < 0 or out.focused >= len(out.windows):
         out.focused = len(out.windows) - 1
     return out^
-
-
 
 
 def _encode_session_window(w: SessionWindow) -> JsonValue:

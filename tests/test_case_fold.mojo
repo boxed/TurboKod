@@ -15,7 +15,6 @@ only shows up when a match straddles a lane edge.
 """
 
 from std.collections.list import List
-from std.collections.optional import Optional
 from std.testing import assert_equal, assert_false, assert_true
 
 from turbokod.case_fold import (

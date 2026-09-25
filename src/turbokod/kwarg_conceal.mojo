@@ -24,7 +24,9 @@ that live on a single physical line.
 """
 
 from .canvas import TAB_WIDTH
-from .string_utils import char_width, codepoint_at, utf8_codepoint_size
+from .string_utils import (
+    char_width, codepoint_at, utf8_codepoint_size,
+)
 
 
 def _is_ident_byte(b: Int) -> Bool:
@@ -167,13 +169,6 @@ def kwarg_conceal_ranges(
             continue
         i = label_end
     return out^
-
-
-def _byte_slice(s: String, lo: Int, hi: Int) -> String:
-    if hi <= lo:
-        return String("")
-    var bytes = s.as_bytes()
-    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=bytes.unsafe_ptr().unsafe_offset(lo), length=hi - lo)))
 
 
 def build_concealed_segment(

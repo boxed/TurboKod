@@ -31,13 +31,12 @@ from .grammar_install import (
 from .project_grammars import GrammarOverride
 from .case_fold import fold_ascii
 from .string_utils import (
-    byte_slice, codepoint_at, is_word_codepoint, prev_codepoint_start,
-    starts_with,
+    byte_slice, codepoint_at, is_ascii_digit, is_ascii_ident_byte,
+    is_ascii_ident_start, is_word_codepoint, prev_codepoint_start, starts_with,
 )
 from .tm_grammar import Grammar, load_grammar_from_file
 from .tm_tokenizer import (
-    Frame, copy_stack, stack_eq,
-    tokenize_lines_from, tokenize_with_grammar_full,
+    Frame, tokenize_lines_from, tokenize_with_grammar_full,
 )
 
 
@@ -704,17 +703,6 @@ def _fallback_for_extension(
     return List[Highlight]()
 
 
-# ``_try_textmate`` lived here: an uncached "load a grammar, tokenize,
-# drop it" helper used only by ``highlight_for_extension``. Both of its
-# callers now route through ``highlight_incremental``, which does the
-# same dispatch against a caller-owned registry (and applies the Django
-# template overlay this path silently skipped). It's gone rather than
-# kept-but-unused because its contract — compile a grammar and discard
-# the handle — is unimplementable without leaking: libonig allocations
-# are owned by the shim's registry, so a dropped ``Grammar`` strands its
-# whole pattern set. See the ``OnigRegex`` doc comment.
-
-
 def _has_nonempty_line(lines: List[String]) -> Bool:
     """Returns True if ``lines`` contains at least one non-empty
     line. Used to disambiguate "grammar produced nothing" from
@@ -727,43 +715,7 @@ def _has_nonempty_line(lines: List[String]) -> Bool:
 
 # --- shared lexical helpers ------------------------------------------------
 #
-# Used by ``_highlight_generic_line`` (the fallback per-language
-# tokenizer) and ``word_at`` (the editor's identifier-around-cursor
-# helper). The bespoke Mojo/Python tokenizer that previously lived
-# here was retired in favor of TextMate grammars in
-# ``src/turbokod/grammars/{python,mojo}.tmLanguage.json``.
-
-
-# --- bespoke Mojo/Python per-line tokenizer (retired) ----------------------
-# The block that lived here was the original triple-quote/docstring-aware
-# tokenizer for ``.mojo`` / ``.py``. It was removed once those file types
-# moved onto TextMate grammars (``grammars/{python,mojo}.tmLanguage.json``).
-# What remains below is the lexical-classification helpers
-# (``_is_ident_start`` etc.) that the *generic* fallback tokenizer and
-# ``word_at`` still depend on.
-
-
-def _is_ident_start(c: UInt8) -> Bool:
-    var v = Int(c)
-    if v == 0x5F:  # _
-        return True
-    if 0x41 <= v and v <= 0x5A:
-        return True
-    if 0x61 <= v and v <= 0x7A:
-        return True
-    return False
-
-
-def _is_ident_part(c: UInt8) -> Bool:
-    if _is_ident_start(c):
-        return True
-    var v = Int(c)
-    return 0x30 <= v and v <= 0x39
-
-
-def _is_digit(c: UInt8) -> Bool:
-    var v = Int(c)
-    return 0x30 <= v and v <= 0x39
+# Used by ``_highlight_generic_line`` (the fallback per-language tokenizer).
 
 
 def _is_operator(c: UInt8) -> Bool:
@@ -774,7 +726,6 @@ def _is_operator(c: UInt8) -> Bool:
         or v == 0x7E or v == 0x40 or v == 0x28 or v == 0x29 \
         or v == 0x2E or v == 0x3A or v == 0x5B or v == 0x5D \
         or v == 0x7B or v == 0x7D
-
 
 
 # --- editor-side helpers ---------------------------------------------------
@@ -1431,9 +1382,9 @@ def _md_list_marker_len(line: String, indent: Int) -> Int:
             return 1
         return 0
     # Ordered: digits then . or ) then a space/tab.
-    if _is_digit(c):
+    if is_ascii_digit(c):
         var k = indent
-        while k < n and _is_digit(b[k]):
+        while k < n and is_ascii_digit(b[k]):
             k += 1
         if k < n and (b[k] == 0x2E or b[k] == 0x29):  # . or )
             var mk = k + 1
@@ -1778,9 +1729,9 @@ def _highlight_generic_line(
             continue
 
         # Identifier or keyword.
-        if _is_ident_start(c):
+        if is_ascii_ident_start(c):
             var start = i
-            while i < n and _is_ident_part(b[i]):
+            while i < n and is_ascii_ident_byte(b[i]):
                 i += 1
             var word = String(StringSpan(unsafe_from_utf8=b[start:i]))
             if _is_keyword_in(word, spec.keywords):
@@ -1790,9 +1741,9 @@ def _highlight_generic_line(
             continue
 
         # Number.
-        if _is_digit(c):
+        if is_ascii_digit(c):
             var start = i
-            while i < n and (_is_digit(b[i]) or b[i] == 0x2E):
+            while i < n and (is_ascii_digit(b[i]) or b[i] == 0x2E):
                 i += 1
             out.append(Highlight(row, start, i, highlight_number_attr()))
             continue
@@ -2159,7 +2110,6 @@ def _is_lang_char(c: UInt8) -> Bool:
     if v == 0x2D or v == 0x5F or v == 0x2B:
         return True
     return False
-
 
 
 def _find_string_body_after(

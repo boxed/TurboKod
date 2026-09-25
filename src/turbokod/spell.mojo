@@ -23,13 +23,16 @@ Filtering rules in ``find_misspelled_runs``:
 """
 
 from std.collections.list import List
-from std.ffi import external_call
 
 from .dictionary_install import user_dictionaries_root
-from .file_io import join_path, list_directory, read_file, stat_file, write_file
+from .file_io import (
+    join_path, list_directory, make_parent_dirs, read_file, stat_file,
+    write_file,
+)
 from .posix import debug_log, getenv_value
 from .string_utils import (
-    codepoint_at, is_word_codepoint, split_lines_no_trailing, word_char_step,
+    byte_slice, codepoint_at, is_ascii_digit, is_ascii_ident_byte,
+    split_lines_no_trailing, word_char_step,
 )
 
 
@@ -61,27 +64,6 @@ def project_dict_path(project_root: String) -> String:
     return project_root + String("/.turbokod/dictionary.txt")
 
 
-def _ensure_parent_dir(path: String):
-    """Best-effort ``mkdir`` of every prefix of ``path`` up to (but not
-    including) the file. Mirrors ``config._ensure_dir`` but walks each
-    slash so a fresh ``~/.config/turbokod`` or ``<project>/.turbokod``
-    gets created before the first write."""
-    var b = path.as_bytes()
-    var n = len(b)
-    if n == 0:
-        return
-    var i = 1
-    while i < n:
-        if b[i] == 0x2F:  # '/'
-            var prefix = String(StringSpan(unsafe_from_utf8=b[0:i]))
-            if len(prefix.as_bytes()) > 0:
-                var c_path = prefix + String("\0")
-                _ = external_call["mkdir", Int32](
-                    c_path.unsafe_ptr(), Int32(0o755),
-                )
-        i += 1
-
-
 @fieldwise_init
 struct SpellActionRequest(ImplicitlyCopyable, Movable):
     """Payload emitted by the editor when the user hits Alt+Enter on a
@@ -104,7 +86,7 @@ def _append_to_file(path: String, line: String) -> Bool:
     Returns False on write failure or empty path."""
     if len(path.as_bytes()) == 0:
         return False
-    _ensure_parent_dir(path)
+    make_parent_dirs(path)
     var existing = String("")
     var info = stat_file(path)
     if info.ok:
@@ -238,7 +220,7 @@ struct Speller(Movable):
             return
         for i in range(len(entries)):
             var name = entries[i]
-            if not _has_txt_suffix(name):
+            if not name.endswith(".txt"):
                 continue
             var path = join_path(dir, name)
             try:
@@ -272,7 +254,7 @@ struct Speller(Movable):
             return
         for i in range(len(entries)):
             var name = entries[i]
-            if not _has_txt_suffix(name):
+            if not name.endswith(".txt"):
                 continue
             var path = join_path(dir, name)
             try:
@@ -356,7 +338,7 @@ struct Speller(Movable):
             var name = entries[i]
             if name == String(".") or name == String(".."):
                 continue
-            if not _has_xml_suffix(name):
+            if not name.endswith(".xml"):
                 continue
             var path = join_path(dict_dir, name)
             debug_log(String("[_load_idea_dictionaries] reading ") + path)
@@ -461,54 +443,54 @@ struct Speller(Movable):
         var n = len(b)
         # Possessive / contracted "is": foo's -> foo (also covers it's, he's).
         if n >= 3 and b[n - 2] == 0x27 and b[n - 1] == 0x73:
-            if self._has(_slice(lw, 0, n - 2)):
+            if self._has(byte_slice(lw, 0, n - 2)):
                 return True
         # Negative contraction "n't": hasn't -> has, wouldn't -> would,
         # didn't -> did. Most English negative contractions follow this
         # pattern; the few that don't (won't, shan't, ain't) fall through
         # to the "'t" stripper below or to the user dictionary.
         if n >= 5 and b[n - 3] == 0x6E and b[n - 2] == 0x27 and b[n - 1] == 0x74:
-            if self._has(_slice(lw, 0, n - 3)):
+            if self._has(byte_slice(lw, 0, n - 3)):
                 return True
         # Bare "'t" contraction: can't -> can, won't -> won. Tighter
         # than n't because two-letter heads (ai't, sh't) are noise.
         if n >= 5 and b[n - 2] == 0x27 and b[n - 1] == 0x74:
-            if self._has(_slice(lw, 0, n - 2)):
+            if self._has(byte_slice(lw, 0, n - 2)):
                 return True
         # "'re": they're -> they, you're -> you.
         if n >= 5 and b[n - 3] == 0x27 and b[n - 2] == 0x72 and b[n - 1] == 0x65:
-            if self._has(_slice(lw, 0, n - 3)):
+            if self._has(byte_slice(lw, 0, n - 3)):
                 return True
         # "'ve": they've -> they, would've -> would.
         if n >= 5 and b[n - 3] == 0x27 and b[n - 2] == 0x76 and b[n - 1] == 0x65:
-            if self._has(_slice(lw, 0, n - 3)):
+            if self._has(byte_slice(lw, 0, n - 3)):
                 return True
         # "'ll": they'll -> they, you'll -> you.
         if n >= 5 and b[n - 3] == 0x27 and b[n - 2] == 0x6C and b[n - 1] == 0x6C:
-            if self._has(_slice(lw, 0, n - 3)):
+            if self._has(byte_slice(lw, 0, n - 3)):
                 return True
         # "'d": they'd -> they, would'd... rare but cheap to support.
         if n >= 5 and b[n - 2] == 0x27 and b[n - 1] == 0x64:
-            if self._has(_slice(lw, 0, n - 2)):
+            if self._has(byte_slice(lw, 0, n - 2)):
                 return True
         # Plural: foos -> foo, dishes -> dish
         if n >= 4 and b[n - 1] == 0x73:
-            if self._has(_slice(lw, 0, n - 1)):
+            if self._has(byte_slice(lw, 0, n - 1)):
                 return True
             if n >= 5 and b[n - 2] == 0x65:
-                if self._has(_slice(lw, 0, n - 2)):
+                if self._has(byte_slice(lw, 0, n - 2)):
                     return True
         # Past tense: walked -> walk, loved -> love
         if n >= 5 and b[n - 2] == 0x65 and b[n - 1] == 0x64:
-            if self._has(_slice(lw, 0, n - 2)):
+            if self._has(byte_slice(lw, 0, n - 2)):
                 return True
-            if self._has(_slice(lw, 0, n - 1)):
+            if self._has(byte_slice(lw, 0, n - 1)):
                 return True
         # Gerund: walking -> walk, loving -> love
         if n >= 6 and b[n - 3] == 0x69 and b[n - 2] == 0x6E and b[n - 1] == 0x67:
-            if self._has(_slice(lw, 0, n - 3)):
+            if self._has(byte_slice(lw, 0, n - 3)):
                 return True
-            if self._has(_slice(lw, 0, n - 3) + String("e")):
+            if self._has(byte_slice(lw, 0, n - 3) + String("e")):
                 return True
         return False
 
@@ -549,12 +531,12 @@ def find_misspelled_runs(
         # produce a clean ``foo`` lookup (it's part of a token, not
         # English prose).
         var step = word_char_step(text, i)
-        if step[0] or _is_digit(c) or c == 0x5F:
+        if step[0] or is_ascii_digit(c) or c == 0x5F:
             var run_start = i
             var letters_only = True
             while i < n:
                 var d = b[i]
-                if _is_digit(d) or d == 0x5F:
+                if is_ascii_digit(d) or d == 0x5F:
                     letters_only = False
                     i += 1
                 elif (
@@ -607,7 +589,7 @@ def find_misspelled_runs(
                 continue
             if has_internal_upper:
                 continue
-            var word = _slice(text, run_start, word_end)
+            var word = byte_slice(text, run_start, word_end)
             if not self_speller.check_word(word):
                 out.append((run_start, word_end))
         else:
@@ -649,7 +631,7 @@ def has_spell_noinspection_directive(text: String) -> Bool:
         # Word boundary on the left and a whitespace separator on the
         # right — ``noinspections`` (sic) or ``xnoinspection`` don't
         # count.
-        var ok_left = i == 0 or not _is_ident_byte(b[i - 1])
+        var ok_left = i == 0 or not is_ascii_ident_byte(b[i - 1])
         var after = i + kn
         var ok_right = (
             after < n and (b[after] == 0x20 or b[after] == 0x09)
@@ -668,7 +650,7 @@ def has_spell_noinspection_directive(text: String) -> Bool:
                     break
                 p += 1
             if p > t_start:
-                var token = _slice(text, t_start, p)
+                var token = byte_slice(text, t_start, p)
                 if (
                     token == String("SpellCheckingInspection")
                     or token == String("All")
@@ -684,15 +666,6 @@ def has_spell_noinspection_directive(text: String) -> Bool:
             break
         i = p if p > i else i + 1
     return False
-
-
-def _is_ident_byte(c: UInt8) -> Bool:
-    return (
-        (c >= 0x41 and c <= 0x5A)
-        or (c >= 0x61 and c <= 0x7A)
-        or (c >= 0x30 and c <= 0x39)
-        or c == 0x5F
-    )
 
 
 def _bucket(w: String) -> Int:
@@ -843,39 +816,8 @@ def _emit_utf8(mut out: List[UInt8], cp: Int):
     out.append(UInt8(0x80 | (cp & 0x3F)))
 
 
-def _slice(s: String, start: Int, end: Int) -> String:
-    var b = s.as_bytes()
-    return String(StringSpan(unsafe_from_utf8=b[start:end]))
-
-
 def _is_letter(c: UInt8) -> Bool:
     return (c >= 0x41 and c <= 0x5A) or (c >= 0x61 and c <= 0x7A)
-
-
-def _is_digit(c: UInt8) -> Bool:
-    return c >= 0x30 and c <= 0x39
-
-
-def _has_xml_suffix(name: String) -> Bool:
-    var b = name.as_bytes()
-    var n = len(b)
-    if n < 4:
-        return False
-    return (
-        b[n - 4] == 0x2E and b[n - 3] == 0x78
-        and b[n - 2] == 0x6D and b[n - 1] == 0x6C
-    )
-
-
-def _has_txt_suffix(name: String) -> Bool:
-    var b = name.as_bytes()
-    var n = len(b)
-    if n < 4:
-        return False
-    return (
-        b[n - 4] == 0x2E and b[n - 3] == 0x74
-        and b[n - 2] == 0x78 and b[n - 1] == 0x74
-    )
 
 
 def _strip_word(line: String) -> String:

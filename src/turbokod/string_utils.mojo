@@ -74,6 +74,27 @@ def starts_with(s: String, prefix: String) -> Bool:
     return True
 
 
+def is_ascii_digit(b: UInt8) -> Bool:
+    """``[0-9]``."""
+    return b >= 0x30 and b <= 0x39
+
+
+def is_ascii_ident_start(b: UInt8) -> Bool:
+    """``[A-Za-z_]`` — a byte that can open an ASCII identifier."""
+    return (b >= 0x41 and b <= 0x5A) or (b >= 0x61 and b <= 0x7A) \
+        or b == 0x5F
+
+
+def is_ascii_ident_byte(b: UInt8) -> Bool:
+    """``[A-Za-z0-9_]`` — the ASCII identifier alphabet.
+
+    One definition on purpose: the symbol index decides what gets indexed
+    with it and Find Symbol decides what it extracts from a line with it,
+    and a disagreement shows up as a picker entry that cannot be navigated
+    to."""
+    return is_ascii_ident_start(b) or is_ascii_digit(b)
+
+
 def split_lines(text: String) -> List[String]:
     """Split on ``\\n``, keeping a final empty entry when ``text`` ends
     with a newline. This matches ``TextBuffer``'s "trailing newline →

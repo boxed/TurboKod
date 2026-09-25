@@ -22,9 +22,7 @@ from std.collections.list import List
 from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
 from .cell import Cell
-from .colors import (
-    Attr, BLACK, GREEN, LIGHT_GRAY, RED, WHITE,
-)
+from .colors import Attr, BLACK, GREEN, RED, WHITE
 from .events import (
     Event, EVENT_KEY,
     KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_UP,

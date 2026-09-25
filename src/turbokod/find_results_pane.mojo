@@ -22,7 +22,6 @@ layout machinery treats it as just another tool pane. Row rendering reuses
 from std.collections.list import List
 
 from .canvas import Canvas
-from .cell import Cell
 from .clipboard import clipboard_copy
 from .colors import (
     Attr, BLACK, CYAN, EDITOR_BG, EDITOR_FG, RED, WHITE, YELLOW,
@@ -38,7 +37,6 @@ from .picker_input import picker_nav_key, picker_wheel_scroll, scroll_to_reveal
 from .posix import monotonic_ms
 from .project import ProjectMatch
 from .project_find import paint_match_row
-from .string_utils import display_columns
 from .text_select import PaneTextSelect
 from .window import (
     BottomDockedPanel, handle_bottom_dock_chrome_mouse,

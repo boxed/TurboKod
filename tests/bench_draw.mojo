@@ -11,12 +11,10 @@ per frame; multiply by the frame rate (20 Hz active, 4 Hz idle) to get
 the steady CPU cost of that phase.
 """
 
-from std.ffi import external_call
 
 from turbokod.canvas import Canvas
 from turbokod.colors import default_attr
 from turbokod.desktop import Desktop
-from turbokod.file_io import write_file
 from turbokod.geometry import Point, Rect
 from turbokod.posix import getenv_value, monotonic_ms
 from turbokod.string_utils import codepoint_at

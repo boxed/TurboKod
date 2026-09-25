@@ -28,10 +28,11 @@ A malformed or missing file silently yields an empty list.
 
 from std.collections.list import List
 
-from .file_io import join_path, project_relative, read_file, stat_file, write_file
+from .file_io import (
+    load_json_object, project_absolute, project_relative, write_file,
+)
 from .json import (
-    JsonValue, encode_json, json_array, json_bool, json_int, json_object,
-    json_str, parse_json,
+    encode_json, json_array, json_bool, json_int, json_object, json_str,
     json_get_bool, json_get_int, json_get_string,
 )
 from .per_user_store import ensure_per_user_dir, per_user_path
@@ -68,19 +69,6 @@ def _bp_path(project_root: String) -> String:
     return per_user_path(project_root, BP_FILE)
 
 
-def _resolve_bp_path(project_root: String, stored: String) -> String:
-    """Anchor a relative ``stored`` path onto ``project_root``. Absolute
-    paths and empty roots pass through unchanged."""
-    var b = stored.as_bytes()
-    if len(b) == 0:
-        return stored
-    if b[0] == 0x2F:
-        return stored
-    if len(project_root.as_bytes()) == 0:
-        return stored
-    return join_path(project_root, stored)
-
-
 def load_breakpoints(project_root: String) -> List[StoredBreakpoint]:
     """Parse the per-user breakpoints file. Any failure (missing file,
     malformed JSON, missing keys) yields an empty list — the caller
@@ -89,21 +77,10 @@ def load_breakpoints(project_root: String) -> List[StoredBreakpoint]:
     var path = _bp_path(project_root)
     if len(path.as_bytes()) == 0:
         return out^
-    var info = stat_file(path)
-    if not info.ok:
+    var loaded = load_json_object(path)
+    if not loaded:
         return out^
-    var text: String
-    try:
-        text = read_file(path)
-    except:
-        return out^
-    var root: JsonValue
-    try:
-        root = parse_json(text)
-    except:
-        return out^
-    if not root.is_object():
-        return out^
+    var root = loaded.value().copy()
     var arr_v = root.object_get(String("breakpoints"))
     if not arr_v or not arr_v.value().is_array():
         return out^
@@ -118,7 +95,7 @@ def load_breakpoints(project_root: String) -> List[StoredBreakpoint]:
         var line = json_get_int(node, String("line"), -1)
         if line < 0:
             continue
-        var resolved = _resolve_bp_path(project_root, raw_path)
+        var resolved = project_absolute(project_root, raw_path)
         var cond = json_get_string(node, String("condition"))
         # Missing ``enabled`` (older files, or hand-edited JSON) defaults
         # to True — preserves prior behaviour of always-firing BPs.

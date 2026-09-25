@@ -50,14 +50,14 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .file_io import (
-    join_path, list_directory, read_file, stat_file, write_file,
+    join_path, list_directory, load_json_object, make_dir, read_file,
+    stat_file, write_file,
 )
 from .json import (
     JsonValue, encode_json, json_array, json_object, json_str,
     json_get_string, json_get_string_array, parse_json,
 )
 from .posix import getenv_value
-from std.ffi import external_call
 
 
 comptime TURBOKOD_DIR    = String(".turbokod")
@@ -150,13 +150,6 @@ def _targets_path(project_root: String) -> String:
     if len(dir.as_bytes()) == 0:
         return String("")
     return join_path(dir, TARGETS_FILE)
-
-
-def _ensure_dir(path: String):
-    if len(path.as_bytes()) == 0:
-        return
-    var c_path = path + String("\0")
-    _ = external_call["mkdir", Int32](c_path.unsafe_ptr(), Int32(0o755))
 
 
 def _parse_target(node: JsonValue) -> RunTarget:
@@ -294,21 +287,10 @@ def load_project_targets(project_root: String) -> ProjectTargets:
     var path = _targets_path(project_root)
     if len(path.as_bytes()) == 0:
         return out^
-    var info = stat_file(path)
-    if not info.ok:
+    var loaded = load_json_object(path)
+    if not loaded:
         return out^
-    var text: String
-    try:
-        text = read_file(path)
-    except:
-        return out^
-    var root: JsonValue
-    try:
-        root = parse_json(text)
-    except:
-        return out^
-    if not root.is_object():
-        return out^
+    var root = loaded.value().copy()
     var arr_v = root.object_get(String("targets"))
     if not arr_v or not arr_v.value().is_array():
         return out^
@@ -368,7 +350,7 @@ def write_all_targets(
     var path = _targets_path(project_root)
     if len(path.as_bytes()) == 0:
         return False
-    _ensure_dir(_targets_dir(project_root))
+    make_dir(_targets_dir(project_root))
     var active_name = String("")
     if targets.has_active():
         active_name = targets.targets[targets.active].name
@@ -397,7 +379,7 @@ def save_project_targets(
     var path = _targets_path(project_root)
     if len(path.as_bytes()) == 0:
         return False
-    _ensure_dir(_targets_dir(project_root))
+    make_dir(_targets_dir(project_root))
     var active_name = String("")
     if targets.has_active():
         active_name = targets.targets[targets.active].name
@@ -449,14 +431,6 @@ def resolved_cwd(project_root: String, target_cwd: String) -> String:
     return join_path(project_root, target_cwd)
 
 
-def _contains_slash(s: String) -> Bool:
-    var b = s.as_bytes()
-    for i in range(len(b)):
-        if b[i] == 0x2F:
-            return True
-    return False
-
-
 def resolved_program(
     project_root: String, target_cwd: String, program: String,
 ) -> String:
@@ -483,7 +457,7 @@ def resolved_program(
     var b = program.as_bytes()
     if b[0] == 0x2F:
         return program
-    if not _contains_slash(program):
+    if "/" not in program:
         return program
     var cwd = resolved_cwd(project_root, target_cwd)
     return join_path(cwd, program)
@@ -526,20 +500,9 @@ def detect_project_language(project_root: String) -> String:
         var name = entries[i]
         if name == String(".") or name == String(".."):
             continue
-        if _ends_with(name, String(".py")):
+        if name.endswith(String(".py")):
             return String("python")
     return String("")
-
-
-def _ends_with(s: String, suffix: String) -> Bool:
-    var sb = s.as_bytes()
-    var fb = suffix.as_bytes()
-    if len(fb) > len(sb):
-        return False
-    for i in range(len(fb)):
-        if sb[len(sb) - len(fb) + i] != fb[i]:
-            return False
-    return True
 
 
 def _split_lines(s: String) -> List[String]:

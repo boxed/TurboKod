@@ -85,7 +85,6 @@ per-subcommand regexes for what "boring" looks like):
 three-way choice is made.
 """
 
-from collections import Optional
 
 from std.collections.list import List
 
@@ -98,11 +97,10 @@ from .colors import (
     LIGHT_RED, LIGHT_YELLOW, MAGENTA, STYLE_UNDERLINE, WHITE, YELLOW,
 )
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_BACKSPACE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME, KEY_LEFT,
-    KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP,
-    MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT,
-    MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
+    Event, EVENT_KEY, EVENT_MOUSE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC,
+    KEY_HOME, KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_SPACE,
+    KEY_TAB, KEY_UP, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT, MOUSE_BUTTON_LEFT,
+    MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
 from .highlight import (
@@ -112,25 +110,16 @@ from .highlight import (
 from .output_links import OutputLink, extract_url_links
 from .painter import Painter
 from .file_io import ci_less, join_path, read_file
-from .window import (
-    DockChromeHit, DockedPanelStack,
-    paint_window_title, paint_window_title_at,
-)
+from .window import DockedPanelStack, paint_window_title, paint_window_title_at
 from .git_changes import (
-    ChangedFile, GitBranch, GitCommit, GitFileStatus, GitOpResult,
-    apply_patch_to_index, apply_patch_to_worktree,
-    compute_staged_diff, compute_unstaged_diff, compute_untracked_diff,
-    branch_is_merged, create_reworded_commit,
+    ChangedFile, GitBranch, GitCommit, GitFileStatus, apply_patch_to_index,
+    apply_patch_to_worktree, compute_staged_diff, compute_unstaged_diff,
+    compute_untracked_diff, branch_is_merged, create_reworded_commit,
     fetch_blob_text, fetch_branch_log, fetch_commit_message, fetch_commit_show,
-    has_merge_between, head_short_sha,
-    fetch_git_branches, fetch_git_commits, fetch_git_status,
-    fetch_merged_commits,
-    format_age,
-    github_compare_url,
-    main_line_branch,
-    git_state_mtimes, GitStateMtimes,
-    parse_unified_diff_files,
-    stage_file, unstage_file,
+    has_merge_between, head_short_sha, fetch_git_branches, fetch_git_commits,
+    fetch_git_status, fetch_merged_commits, format_age, github_compare_url,
+    main_line_branch, git_state_mtimes, GitStateMtimes,
+    parse_unified_diff_files, stage_file, unstage_file,
 )
 from .git_output import (
     GIT_OUT_BRANCH_DELETE, GIT_OUT_CHECKOUT, GIT_OUT_COMMIT, GIT_OUT_MERGE,

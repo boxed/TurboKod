@@ -190,18 +190,10 @@ def _glob_match_at(pattern: String, pi: Int, text: String, ti: Int) -> Bool:
     return j == len(pb)
 
 
-def _has_byte(s: String, b: UInt8) -> Bool:
-    var bs = s.as_bytes()
-    for i in range(len(bs)):
-        if bs[i] == b:
-            return True
-    return False
-
-
 def _gitignore_path_match(p: GitignorePattern, rel: String) -> Bool:
     if p.anchored:
         return _glob_match(p.glob, rel)
-    var glob_has_slash = _has_byte(p.glob, 0x2F)
+    var glob_has_slash = "/" in p.glob
     if not glob_has_slash:
         # Match any single path component.
         var comps = _split_path_components(rel)

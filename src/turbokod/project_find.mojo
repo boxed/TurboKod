@@ -36,10 +36,10 @@ from .events import (
 from .file_io import join_path, project_relative, read_file, stat_file
 from .geometry import Point, Rect
 from .highlight import (
-    GrammarRegistry, Highlight, HighlightCache,
-    extension_of, highlight_for_extension, highlight_for_extension_cached,
+    GrammarRegistry, Highlight, HighlightCache, extension_of,
+    highlight_for_extension_cached,
 )
-from .lsp import CaptureResult, LspProcess, capture_command
+from .lsp import LspProcess
 from .picker_input import picker_nav_key, picker_wheel_scroll
 from .posix import alloc_zero_buffer, monotonic_ms, poll_stdin, read_into
 from .project import ProjectMatch
@@ -52,6 +52,7 @@ from .string_utils import (
 from .text_field import TextField, TextFieldKeyResult
 from .text_select import PaneTextSelect
 from .window import close_button_clicked, paint_close_button, paint_window_title
+from .case_fold import find_exact
 
 
 comptime _DEBOUNCE_MS: Int = 300
@@ -982,7 +983,7 @@ struct ProjectFind(Movable):
                     painter.set_attr(canvas, x + c, y, hl.attr)
             # Match-substring highlight on the center row only.
             if is_match and len(self.query.text.as_bytes()) > 0:
-                var hit = _find_bytes(line, self.query.text)
+                var hit = find_exact(line.as_bytes(), self.query.text.as_bytes(), 0)
                 if hit >= 0:
                     var he = hit + len(self.query.text.as_bytes())
                     for c in range(run.cell_of(hit), run.cell_of(he)):
@@ -1259,7 +1260,8 @@ def paint_match_row(
         return RowTextGeom(String(""), line_x, 0, 0, line_x)
     var line_stripped = _lstrip_tabs(m.line_text)
     var bytes = line_stripped.as_bytes()
-    var hit = _find_bytes(line_stripped, query)
+    var hit = find_exact(bytes, query.as_bytes(), 0) \
+        if len(query.as_bytes()) > 0 else -1
     # Slide so the hit (if any) is visible inside the available width.
     # All of this is in *cells*, not bytes: the row is painted one cell
     # per codepoint, so a line with non-ASCII in it has fewer columns
@@ -1730,9 +1732,9 @@ def _parse_rg_line(line: String, root: String) -> Optional[ProjectMatch]:
     var p3 = _scan_to(line, p2 + 1, len(line.as_bytes()), 0x3A)  # third ':'
     if p3 < 0:
         return Optional[ProjectMatch]()
-    var path = _slice_str(line, 0, p1)
+    var path = byte_slice(line, 0, p1)
     var line_no = _parse_uint(line, p1 + 1, p2)
-    var text = _slice_str(line, p3 + 1, len(line.as_bytes()))
+    var text = byte_slice(line, p3 + 1, len(line.as_bytes()))
     if line_no <= 0:
         return Optional[ProjectMatch]()
     # Truncate the matched-line text up front. We display at most a few
@@ -1746,7 +1748,7 @@ def _parse_rg_line(line: String, root: String) -> Optional[ProjectMatch]:
         var cut = _MATCH_TEXT_CAP
         while cut > 0 and (Int(tb[cut]) & 0xC0) == 0x80:
             cut -= 1
-        text = _slice_str(text, 0, cut)
+        text = byte_slice(text, 0, cut)
     return Optional[ProjectMatch](ProjectMatch(
         path, project_relative(root, path), line_no, text,
     ))
@@ -1779,27 +1781,3 @@ def _parse_uint(s: String, start: Int, end: Int) -> Int:
     return n
 
 
-def _slice_str(s: String, start: Int, end: Int) -> String:
-    var b = s.as_bytes()
-    if start >= end:
-        return String("")
-    return String(StringSpan(unsafe_from_utf8=b[start:end]))
-
-
-def _find_bytes(haystack: String, needle: String) -> Int:
-    """First byte offset of ``needle`` in ``haystack``, or ``-1``."""
-    var hb = haystack.as_bytes()
-    var nb = needle.as_bytes()
-    if len(nb) == 0 or len(nb) > len(hb):
-        return -1
-    var i = 0
-    while i + len(nb) <= len(hb):
-        var ok = True
-        for j in range(len(nb)):
-            if hb[i + j] != nb[j]:
-                ok = False
-                break
-        if ok:
-            return i
-        i += 1
-    return -1

@@ -31,7 +31,7 @@ from .case_fold import eq_ci
 from .canvas import Canvas, utf8_codepoint_count
 from .painter import Painter
 from .colors import (
-    Attr, BLACK, BLUE, EDITOR_BG, EDITOR_FG, LIGHT_GRAY, LIGHT_RED, RED, YELLOW,
+    Attr, BLACK, EDITOR_BG, EDITOR_FG, LIGHT_GRAY, LIGHT_RED, RED,
 )
 from .theme import Theme, theme_by_name
 from .events import (
@@ -54,26 +54,23 @@ from .config import (
     record_recent_project, save_config, save_config_merged, try_read_config,
 )
 from .diff import (
-    DIFF_ROW_REMOVED, DiffRow, build_diff_rows, diff_row_emphasis,
-    diff_row_partner, unified_diff,
+    DIFF_ROW_REMOVED, build_diff_rows, diff_row_emphasis, diff_row_partner,
+    unified_diff,
 )
 from .file_io import (
     basename, delete_tree, find_git_project, join_path, list_directory,
-    parent_path, project_relative, read_file, rename_path, stat_file,
-    write_file,
+    parent_path, project_absolute, project_relative, read_file, rename_path,
+    stat_file, write_file,
 )
 from .blame_popup import BlamePopup
 from .git_blame import blame_commit_message, compute_blame
 from .git_changes import (
-    GIT_CHANGE_NONE,
-    GitFileStatus, GitRevertBlock, GitStateMtimes,
+    GIT_CHANGE_NONE, GitRevertBlock, GitStateMtimes,
     compute_deletion_revert_block, compute_revert_block,
-    count_unpushed_commits,
-    current_branch_name,
-    diff_buffer_marks, fetch_git_status, fetch_head_text,
-    changed_paths_between, fetch_file_history, fetch_line_history,
-    git_head_sha,
-    git_state_mtimes, project_is_git_repo,
+    count_unpushed_commits, current_branch_name, diff_buffer_marks,
+    fetch_git_status, fetch_head_text, changed_paths_between,
+    fetch_file_history, fetch_line_history, git_head_sha, git_state_mtimes,
+    project_is_git_repo,
 )
 from .git_gutter_menu import (
     GUTTER_ACTION_NEXT, GUTTER_ACTION_PREV, GUTTER_ACTION_REVERT,
@@ -125,10 +122,9 @@ from .local_changes import LocalChanges
 from .review_mode import ReviewMode
 from .selection_history import SelectionHistory
 from .grammar_install import (
-    DownloadableGrammar, built_in_downloadable_grammars,
-    find_downloadable_grammar_by_language,
-    find_downloadable_grammar_for_extension,
-    grammar_install_command, user_grammar_installed,
+    built_in_downloadable_grammars, find_downloadable_grammar_by_language,
+    find_downloadable_grammar_for_extension, grammar_install_command,
+    user_grammar_installed,
 )
 from .dictionary_install import (
     built_in_downloadable_dictionaries,
@@ -168,13 +164,9 @@ from .search_options import SearchOptions
 from .project_find import ProjectFind
 from .find_results_pane import FindResultsPane
 from .project_targets import (
-    ProjectTargets, RunTarget, load_project_targets,
-    detect_project_language,
-    pytest_python_files,
-    python_venv_dir,
-    resolve_python_interpreter, resolved_cwd, resolved_program,
-    save_project_targets,
-    write_all_targets,
+    ProjectTargets, load_project_targets, detect_project_language,
+    pytest_python_files, python_venv_dir, resolve_python_interpreter,
+    resolved_cwd, resolved_program, save_project_targets, write_all_targets,
 )
 from .project_grammars import (
     GrammarOverride, load_project_grammar_overrides, write_grammar_overrides,
@@ -183,8 +175,7 @@ from .project_on_save import (
     load_project_on_save, on_save_equal, write_project_on_save,
 )
 from .breakpoint_dialog import (
-    BP_ERR_CANCEL, BP_ERR_DISABLE, BP_ERR_TRY,
-    BreakpointConditionErrorDialog, BreakpointMenu,
+    BP_ERR_DISABLE, BP_ERR_TRY, BreakpointConditionErrorDialog, BreakpointMenu,
 )
 from .confirm_dialog import ConfirmDialog
 from .message_request_dialog import MessageRequestDialog
@@ -203,7 +194,7 @@ from .string_utils import (
     starts_with, utf8_cell_of_byte,
 )
 from .session_store import (
-    Session, SessionWindow, _resolve_session_path,
+    Session, SessionWindow,
     encode_session, load_session, save_session,
 )
 from .breakpoint_store import (
@@ -621,19 +612,6 @@ comptime _TREE_LABEL_LEFT   = String("File tree: left")
 comptime _PA_REPLACE_DO          = String("__pa_replace_do")
 comptime _PA_BP_CONDITION        = String("__pa_bp_condition")
 comptime _PA_ADD_WATCH           = String("__pa_add_watch")
-
-
-def _ends_with(s: String, suffix: String) -> Bool:
-    """True when ``s`` ends with ``suffix`` (byte comparison)."""
-    var sb = s.as_bytes()
-    var fb = suffix.as_bytes()
-    if len(fb) > len(sb):
-        return False
-    var off = len(sb) - len(fb)
-    for i in range(len(fb)):
-        if sb[off + i] != fb[i]:
-            return False
-    return True
 
 
 def ctrl_key(letter: String) -> UInt32:
@@ -5357,9 +5335,7 @@ struct Desktop(Movable):
             if self.project:
                 root = self.project.value()
             var bypass = _lsp_bypass_pyenv_shim(spec.language_id)
-            if not bypass and _contains_substr(
-                resolved, String("/.pyenv/shims/"),
-            ):
+            if not bypass and String("/.pyenv/shims/") in resolved:
                 bypass = _pyenv_shim_would_fail(root)
             if bypass:
                 var real = String("")
@@ -7057,7 +7033,7 @@ struct Desktop(Movable):
                 session_to_window.append(-1)
                 continue
             var sw = session.windows[i]
-            var resolved = _resolve_session_path(root, sw.path)
+            var resolved = project_absolute(root, sw.path)
             var rect = _clip_rect_to_workspace(
                 Rect(sw.rect_a_x, sw.rect_a_y, sw.rect_b_x, sw.rect_b_y),
                 workspace,
@@ -7192,7 +7168,7 @@ struct Desktop(Movable):
         var root = self.project.value()
         for i in range(len(session.windows)):
             var sw = session.windows[i]
-            var resolved = _resolve_session_path(root, sw.path)
+            var resolved = project_absolute(root, sw.path)
             var existing = self._find_window_for_path(resolved)
             if existing < 0:
                 continue
@@ -9992,9 +9968,9 @@ struct Desktop(Movable):
         var fallback = String("")
         for i in range(len(files)):
             var f = files[i]
-            if _ends_with(f, want_t) or _ends_with(f, want_j):
+            if f.endswith(want_t) or f.endswith(want_j):
                 return f
-            if len(fallback.as_bytes()) == 0 and _ends_with(f, want_any):
+            if len(fallback.as_bytes()) == 0 and f.endswith(want_any):
                 fallback = f
         return fallback
 
@@ -11008,7 +10984,7 @@ struct Desktop(Movable):
         var root = self.project.value()
         # Normalize with a trailing ``/`` so ``/proj`` doesn't
         # accidentally match ``/projectX/...``.
-        if len(root.as_bytes()) > 0 and not _ends_with_slash(root):
+        if len(root.as_bytes()) > 0 and not root.endswith("/"):
             root = root + String("/")
         var out = List[DapStackFrame]()
         for i in range(len(frames)):
@@ -12105,7 +12081,7 @@ struct Desktop(Movable):
         var root = String("")
         if self.project:
             root = self.project.value()
-        if len(root.as_bytes()) > 0 and not _ends_with_slash(root):
+        if len(root.as_bytes()) > 0 and not root.endswith("/"):
             root = root + String("/")
         for i in range(len(self.windows.windows)):
             out.append(self._is_window_subdued(self.windows.windows[i], root))
@@ -16000,8 +15976,6 @@ def _find_doc_entry_for_word(
     return -1
 
 
-
-
 def _expand_save_placeholders(arg: String, saved_path: String) -> String:
     """Replace every literal ``$FilePath$`` in ``arg`` with ``saved_path``.
 
@@ -16036,8 +16010,6 @@ def _expand_save_placeholders(arg: String, saved_path: String) -> String:
     if run_start < n:
         out = out + String(StringSpan(unsafe_from_utf8=b[run_start:n]))
     return out
-
-
 
 
 def _recent_display_label(path: String, project_root: String) -> String:
@@ -16190,11 +16162,6 @@ def _category_to_pane(category: String) -> UInt8:
     return UInt8(0)       # PANE_OUT_STDOUT
 
 
-def _ends_with_slash(s: String) -> Bool:
-    var b = s.as_bytes()
-    return len(b) > 0 and b[len(b) - 1] == 0x2F
-
-
 def _same_file(a: String, b: String) -> Bool:
     """True if ``a`` and ``b`` resolve to the same on-disk file. Used to
     match a DAP stack-frame source path against editor file paths even
@@ -16206,8 +16173,6 @@ def _same_file(a: String, b: String) -> Bool:
     var ra = realpath(a)
     var rb = realpath(b)
     return len(ra.as_bytes()) > 0 and ra == rb
-
-
 
 
 def _lsp_bypass_pyenv_shim(language_id: String) -> Bool:
@@ -16245,7 +16210,7 @@ def _resolve_pyenv_shim_to_real(path: String, name: String) -> String:
     rather than parsing ``$PYENV_ROOT`` because the rare custom-root
     user can still set a non-shim path in their language overrides.
     """
-    if not _contains_substr(path, String("/.pyenv/shims/")):
+    if String("/.pyenv/shims/") not in path:
         return String("")
     var home = getenv_value(String("HOME"))
     if len(home.as_bytes()) == 0:
@@ -16340,24 +16305,6 @@ def _pyenv_pins_satisfied(
         if not found:
             return False
     return True
-
-
-def _contains_substr(haystack: String, needle: String) -> Bool:
-    var hb = haystack.as_bytes()
-    var nb = needle.as_bytes()
-    if len(nb) == 0:
-        return True
-    if len(nb) > len(hb):
-        return False
-    for i in range(len(hb) - len(nb) + 1):
-        var matched = True
-        for k in range(len(nb)):
-            if hb[i + k] != nb[k]:
-                matched = False
-                break
-        if matched:
-            return True
-    return False
 
 
 def _argv_equal(a: List[String], b: List[String]) -> Bool:

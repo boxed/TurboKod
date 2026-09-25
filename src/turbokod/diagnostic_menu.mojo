@@ -18,13 +18,10 @@ routing keyboard / mouse events to it before any other widget.
 """
 
 from std.collections.list import List
-from std.collections.optional import Optional
 
 from .canvas import Canvas
 from .painter import Painter
-from .colors import (
-    Attr, BLACK, DARK_GRAY, GREEN, LIGHT_GRAY, WHITE,
-)
+from .colors import Attr, BLACK, DARK_GRAY, GREEN, LIGHT_GRAY
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
     KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_UP,

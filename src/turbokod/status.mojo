@@ -11,7 +11,7 @@ from std.collections.list import List
 
 from .canvas import Canvas, popup_size_for_text
 from .painter import Painter, paint_tooltip_popup
-from .colors import Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, RED, WHITE, YELLOW
+from .colors import Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, RED, WHITE
 from .events import (
     Event, EVENT_MOUSE, MOUSE_BUTTON_LEFT,
 )

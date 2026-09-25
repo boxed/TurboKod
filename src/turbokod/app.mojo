@@ -26,7 +26,7 @@ from std.collections.list import List
 
 from .canvas import Canvas
 from .colors import default_attr
-from .events import Event, EVENT_KEY, EVENT_QUIT, EVENT_RESIZE, KEY_ESC
+from .events import Event, EVENT_RESIZE
 from .geometry import Rect
 from .terminal import Terminal
 

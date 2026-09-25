@@ -32,7 +32,6 @@ from std.collections.optional import Optional
 
 from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
-from .cell import Cell
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, RED, YELLOW
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
@@ -47,12 +46,14 @@ from .picker_input import (
     scroll_to_reveal,
 )
 from .posix import alloc_zero_buffer, poll_stdin, read_into
-from .string_utils import display_columns, starts_with, tail_to_columns
+from .string_utils import (
+    display_columns, is_ascii_ident_byte, starts_with, tail_to_columns,
+)
 from .symbol_seed import is_definition_site, seed_priority
 from .text_field import TextField
 from .case_fold import contains_ci, eq_ci
 from .type_ahead import starts_with_ci
-from .window import paint_close_button, paint_window_title
+from .window import paint_window_title
 
 
 comptime _LABEL = String(" Find: ")
@@ -958,14 +959,6 @@ def _list_index_of(haystack: List[String], needle: String) -> Int:
     return -1
 
 
-def _is_ident_byte(b: UInt8) -> Bool:
-    var c = Int(b)
-    return (0x30 <= c and c <= 0x39) \
-        or (0x41 <= c and c <= 0x5A) \
-        or (0x61 <= c and c <= 0x7A) \
-        or c == 0x5F
-
-
 def _extract_identifier(line: String, col_1based: Int) -> String:
     """Walk left + right from ``col_1based`` (rg's 1-based byte column)
     while the byte is in ``[A-Za-z0-9_]``. Returns the full identifier
@@ -977,12 +970,12 @@ def _extract_identifier(line: String, col_1based: Int) -> String:
     if col_1based <= 0 or col_1based > len(b):
         return String("")
     var start = col_1based - 1
-    if not _is_ident_byte(b[start]):
+    if not is_ascii_ident_byte(b[start]):
         return String("")
-    while start > 0 and _is_ident_byte(b[start - 1]):
+    while start > 0 and is_ascii_ident_byte(b[start - 1]):
         start -= 1
     var end = col_1based - 1
-    while end < len(b) and _is_ident_byte(b[end]):
+    while end < len(b) and is_ascii_ident_byte(b[end]):
         end += 1
     return String(StringSpan(unsafe_from_utf8=b[start:end]))
 
@@ -1047,12 +1040,12 @@ def _is_query_byte(b: UInt8) -> Bool:
     ``.`` so the user can type a qualified ``Class.member`` name.
 
     The dot is deliberately *not* an identifier byte (see
-    ``_is_ident_byte``) — it's only a segment separator the picker
+    ``is_ascii_ident_byte``) — it's only a segment separator the picker
     splits on (``_query_member`` / ``_query_qualifier``). The member
     that actually reaches rg's regex is pure identifier bytes, so the
     regex/flag-injection guard ``sanitize_symbol_query`` exists for
     still holds."""
-    return _is_ident_byte(b) or Int(b) == 0x2E   # '.'
+    return is_ascii_ident_byte(b) or Int(b) == 0x2E   # '.'
 
 
 def sanitize_symbol_query(query: String) -> String:
@@ -1184,7 +1177,7 @@ def _container_opener_name(b: Span[UInt8, _], start: Int) -> String:
     var n = len(b)
     while True:
         var w0 = p
-        while p < n and _is_ident_byte(b[p]):
+        while p < n and is_ascii_ident_byte(b[p]):
             p += 1
         if p == w0:
             return String("")
@@ -1206,7 +1199,7 @@ def _container_opener_name(b: Span[UInt8, _], start: Int) -> String:
                 while p < n and (b[p] == 0x20 or b[p] == 0x09):
                     p += 1
             var s = p
-            while p < n and _is_ident_byte(b[p]):
+            while p < n and is_ascii_ident_byte(b[p]):
                 p += 1
             return String(StringSpan(unsafe_from_utf8=b[s:p]))
         if not _is_container_modifier(word):
@@ -1228,6 +1221,5 @@ def _is_container_modifier(w: String) -> Bool:
         or w == "static" or w == "open" or w == "data" \
         or w == "default" or w == "unsafe" or w == "partial" \
         or w == "case"
-
 
 

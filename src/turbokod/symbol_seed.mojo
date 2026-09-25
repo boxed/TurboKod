@@ -35,6 +35,7 @@ through ``seed_priority`` so the two paths agree on the seed.
 
 from .case_fold import fold_ascii
 from .file_io import basename
+from .string_utils import is_ascii_ident_byte
 
 
 comptime SEED_DEF_IN_SOURCE: Int = 0
@@ -123,7 +124,7 @@ def is_definition_site(line: Span[UInt8, _], start: Int, end: Int) -> Bool:
         # is the first thing on the line.
         return False
     var prev_end = k
-    while k > 0 and _is_word_byte(line[k - 1]):
+    while k > 0 and is_ascii_ident_byte(line[k - 1]):
         k -= 1
     if k == prev_end:
         return False
@@ -177,12 +178,6 @@ def _eq(word: Span[UInt8, _], lit: StringSpan) -> Bool:
         if word[i] != lb[i]:
             return False
     return True
-
-
-def _is_word_byte(b: UInt8) -> Bool:
-    var c = Int(b)
-    return (0x30 <= c and c <= 0x39) or (0x41 <= c and c <= 0x5A) \
-        or (0x61 <= c and c <= 0x7A) or c == 0x5F
 
 
 # --- file kind ---------------------------------------------------------------

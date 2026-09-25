@@ -33,20 +33,14 @@ from .buttons import (
 )
 from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
-from .cell import Cell
 from .colors import (
-    Attr, BLACK, BLUE, BORDER_FOCUS, CYAN, GREEN, LIGHT_GRAY, RED, WHITE,
+    Attr, BLACK, BLUE, BORDER_FOCUS, CYAN, GREEN, LIGHT_GRAY, WHITE,
 )
 from .config import OnSaveAction
-from .dropdown import (
-    DROPDOWN_HIT_BODY, DROPDOWN_HIT_NONE, DROPDOWN_HIT_OUTSIDE,
-    DROPDOWN_HIT_POPUP, Dropdown,
-)
+from .dropdown import DROPDOWN_HIT_NONE, DROPDOWN_HIT_OUTSIDE, Dropdown
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_LEFT, KEY_RIGHT,
-    KEY_TAB, KEY_UP,
-    MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT,
+    Event, EVENT_KEY, EVENT_MOUSE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_LEFT,
+    KEY_RIGHT, KEY_TAB, MOD_SHIFT, MOUSE_BUTTON_LEFT,
 )
 from .file_dialog import FileDialog
 from .geometry import Point, Rect

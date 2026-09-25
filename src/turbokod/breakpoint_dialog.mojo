@@ -19,7 +19,6 @@ widget.
 """
 
 from std.collections.list import List
-from std.collections.optional import Optional
 
 from .buttons import (
     BUTTON_FIRED, BUTTON_NONE, Checkbox, ShadowButton, paint_checkbox,
@@ -27,23 +26,19 @@ from .buttons import (
 )
 from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
-from .cell import Cell
 from .colors import (
-    Attr, BLACK, BLUE, CYAN, DARK_GRAY, GREEN, LIGHT_GRAY, LIGHT_RED,
-    LIGHT_YELLOW, WHITE,
+    Attr, BLACK, BLUE, CYAN, GREEN, LIGHT_GRAY, LIGHT_RED, WHITE,
 )
 from .dropdown import (
-    DROPDOWN_HIT_BODY, DROPDOWN_HIT_NONE, DROPDOWN_HIT_OUTSIDE,
-    DROPDOWN_HIT_POPUP, Dropdown,
+    DROPDOWN_HIT_BODY, DROPDOWN_HIT_OUTSIDE, DROPDOWN_HIT_POPUP, Dropdown,
 )
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_ENTER, KEY_ESC, KEY_LEFT, KEY_RIGHT, KEY_SPACE, KEY_TAB,
-    KEY_UP, KEY_DOWN, MOD_SHIFT, MOUSE_BUTTON_LEFT,
+    Event, EVENT_KEY, EVENT_MOUSE, KEY_ENTER, KEY_ESC, KEY_SPACE, KEY_TAB,
+    MOD_SHIFT,
 )
 from .geometry import Point, Rect, center_in
 from .string_utils import display_columns, tail_to_columns
-from .text_field import TextField, text_field_bg
+from .text_field import TextField
 from .view import centered_row_start, FocusGroup, RowCursor
 from .window import close_button_clicked, paint_close_button
 

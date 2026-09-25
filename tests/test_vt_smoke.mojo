@@ -11,7 +11,6 @@ Run with::
     ./run.sh tests/test_vt_smoke.mojo
 """
 
-from std.collections.list import List
 from std.testing import assert_equal, assert_false, assert_true
 
 from turbokod.vt import Vt
