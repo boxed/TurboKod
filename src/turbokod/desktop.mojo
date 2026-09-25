@@ -6646,16 +6646,20 @@ struct Desktop(Movable):
             _ = self._view_states.pop(0)
 
     def _capture_view_state_for_window(mut self, idx: Int):
-        """Update ``_view_states`` from window ``idx`` right before that
-        window is removed. Without this the next paint's refresh would
-        see the window already gone and the user's last scroll position
-        would be lost. No-op for non-editors and Untitled buffers."""
+        """Update ``_view_states`` from window ``idx``. Called for every
+        window by ``_refresh_view_states_from_windows``, and right before a
+        window is removed — without that, the next refresh would see it
+        already gone and the user's last scroll position would be lost.
+        No-op for non-editors and Untitled buffers."""
         if idx < 0 or idx >= len(self.windows.windows):
             return
         if not self.windows.windows[idx].is_editor:
             return
-        # Transient (review) windows never write view state — see
-        # ``_refresh_view_states_from_windows``.
+        # Transient windows (review buffers) are never real documents:
+        # recording their scroll/cursor would overwrite the saved view state
+        # for that path, so a later normal open of the file would land at
+        # the review scroll position instead of where the user left it —
+        # same exclusion as the session snapshot.
         if self.windows.windows[idx]._transient:
             return
         var fp = self.windows.windows[idx].editor.file_path
@@ -6688,36 +6692,7 @@ struct Desktop(Movable):
         against. Existing entries for other files are kept untouched so
         a closed-then-reopened file still finds its saved scroll."""
         for i in range(len(self.windows.windows)):
-            if not self.windows.windows[i].is_editor:
-                continue
-            # Transient windows (review buffers) are never real documents:
-            # recording their scroll/cursor would overwrite the saved view
-            # state for that path, so a later normal open of the file would
-            # land at the review scroll position instead of where the user
-            # left it. Skip them — same exclusion as the session snapshot.
-            if self.windows.windows[i]._transient:
-                continue
-            var fp = self.windows.windows[i].editor.file_path
-            if len(fp.as_bytes()) == 0:
-                continue
-            var idx = self._find_view_state(fp)
-            if idx >= 0:
-                self._view_states[idx].cursor_row = \
-                    self.windows.windows[i].editor.selections[0].row
-                self._view_states[idx].cursor_col = \
-                    self.windows.windows[i].editor.selections[0].col
-                self._view_states[idx].scroll_x = \
-                    self.windows.windows[i].editor.scroll_x
-                self._view_states[idx].scroll_y = \
-                    self.windows.windows[i].editor.scroll_y
-            else:
-                self._view_states.append(StoredViewState(
-                    fp,
-                    self.windows.windows[i].editor.selections[0].row,
-                    self.windows.windows[i].editor.selections[0].col,
-                    self.windows.windows[i].editor.scroll_x,
-                    self.windows.windows[i].editor.scroll_y,
-                ))
+            self._capture_view_state_for_window(i)
 
     def _save_view_states_if_changed(mut self):
         """Refresh entries from the live editors, then re-encode and
@@ -8476,13 +8451,9 @@ struct Desktop(Movable):
                 return Optional[String]()
             var idx = self._focused_editor_idx()
             if idx >= 0:
-                if self.windows.windows[idx].editor.find_next(
-                    self._last_search, self._last_search_opts,
-                ):
-                    self.windows.windows[idx].editor.reveal_cursor(
-                        self.windows.windows[idx].interior(),
-                        margin_below=10, margin_above=10,
-                    )
+                var needle = self._last_search
+                var opts = self._last_search_opts
+                self._find_step(idx, needle, opts, True)
             return Optional[String]()
         if action == EDITOR_FIND_PREV:
             # Mirror of Find Next, walking backward from the current
@@ -8492,13 +8463,9 @@ struct Desktop(Movable):
                 return Optional[String]()
             var idx = self._focused_editor_idx()
             if idx >= 0:
-                if self.windows.windows[idx].editor.find_prev(
-                    self._last_search, self._last_search_opts,
-                ):
-                    self.windows.windows[idx].editor.reveal_cursor(
-                        self.windows.windows[idx].interior(),
-                        margin_below=10, margin_above=10,
-                    )
+                var needle = self._last_search
+                var opts = self._last_search_opts
+                self._find_step(idx, needle, opts, False)
             return Optional[String]()
         if action == EDITOR_REPLACE:
             self._open_replace_prompt()
@@ -11858,12 +11825,13 @@ struct Desktop(Movable):
             return
         if not self.windows.windows[existing].is_editor:
             return
-        self.windows.windows[existing].editor.move_to(
-            target.line, target.character, False, True,
-        )
-        self.windows.windows[existing].editor.reveal_cursor(
-            self.windows.windows[existing].interior(), golden=golden,
-        )
+        # Clamp: the location may be stale (a server answering for an older
+        # buffer, a nav-history point in a file edited since).
+        ref ed = self.windows.windows[existing].editor
+        var row = min(max(target.line, 0), max(ed.buffer.line_count() - 1, 0))
+        var col = min(max(target.character, 0), ed.buffer.line_length(row))
+        ed.move_to(row, col, False, True)
+        ed.reveal_cursor(self.windows.windows[existing].interior(), golden=golden)
         # A deliberate jump (goto-def, references, Find Symbol, find-results
         # double-click, …) should also bring the editor's OS window to the
         # front + key — the trigger may have come from a floating panel
@@ -12158,38 +12126,9 @@ struct Desktop(Movable):
         self._jump_to_nav(p, screen)
 
     def _jump_to_nav(mut self, p: NavPoint, screen: Rect):
-        """Focus (or re-open) ``p.file_path`` and place the cursor at
-        ``(p.row, p.col)``. Mirrors ``_jump_to`` but takes a NavPoint
-        so the call sites stay tidy."""
-        var existing = self._find_window_for_path(p.file_path)
-        if existing < 0:
-            try:
-                self.open_file(p.file_path, screen)
-            except:
-                return
-            existing = len(self.windows.windows) - 1
-        else:
-            self.windows.focus_by_index(existing)
-        if existing < 0 or existing >= len(self.windows.windows):
-            return
-        if not self.windows.windows[existing].is_editor:
-            return
-        var lc = self.windows.windows[existing].editor.buffer.line_count()
-        var row = p.row
-        if row < 0:
-            row = 0
-        if lc > 0 and row >= lc:
-            row = lc - 1
-        var col = p.col
-        if col < 0:
-            col = 0
-        self.windows.windows[existing].editor.move_to(row, col, False, True)
-        # Nav-history back/forward is a deliberate jump — golden-center it.
-        self.windows.windows[existing].editor.reveal_cursor(
-            self.windows.windows[existing].interior(), golden=True,
-        )
-        # Deliberate jump: raise the editor's OS window (see ``_jump_to``).
-        self.main_focus_request = True
+        """Nav-history back/forward: a deliberate jump like any other, so
+        it goes through ``_jump_to`` (golden-centered, window raised)."""
+        self._jump_to(DefinitionResolved(p.file_path, p.row, p.col), screen)
 
     def _open_recent_picker(mut self):
         """Open the QuickOpen picker over the recents list, skipping the
@@ -12365,6 +12304,21 @@ struct Desktop(Movable):
             select_prefill=True, show_options=True,
         )
         self.prompt.set_search_options(self._last_search_opts)
+
+    def _find_step(
+        mut self, idx: Int, needle: String, opts: SearchOptions, forward: Bool,
+    ):
+        """Step editor ``idx`` to the next (``forward``) or previous match
+        and scroll it into view with a wide symmetric margin, so walking
+        through matches doesn't yank the view on every hit."""
+        ref ed = self.windows.windows[idx].editor
+        var found = ed.find_next(needle, opts) if forward \
+            else ed.find_prev(needle, opts)
+        if found:
+            ed.reveal_cursor(
+                self.windows.windows[idx].interior(),
+                margin_below=10, margin_above=10,
+            )
 
     def _selection_seed_for_search(self) -> String:
         """Return the focused editor's current selection if it's
@@ -15611,13 +15565,7 @@ struct Desktop(Movable):
             self._last_search_opts = opts
             var idx = self._focused_editor_idx()
             if idx >= 0:
-                if self.windows.windows[idx].editor.find_next(
-                    text, self._last_search_opts,
-                ):
-                    self.windows.windows[idx].editor.reveal_cursor(
-                        self.windows.windows[idx].interior(),
-                        margin_below=10, margin_above=10,
-                    )
+                self._find_step(idx, text, opts, True)
             return Optional[String]()
         if pa == _PA_DOC_INSTALL or pa == _PA_GRAMMAR_INSTALL \
                 or pa == _PA_LSP_INSTALL or pa == _PA_DEBUGPY_INSTALL:
@@ -15684,18 +15632,10 @@ struct Desktop(Movable):
                     # the dialog found is a primary-caret selection.
                     self.windows.windows[idx].editor.clear_extra_carets()
                     self.windows.windows[idx].editor.paste_text(replacement)
-                if self.windows.windows[idx].editor.find_next(find, opts):
-                    self.windows.windows[idx].editor.reveal_cursor(
-                        self.windows.windows[idx].interior(),
-                        margin_below=10, margin_above=10,
-                    )
+                self._find_step(idx, find, opts, True)
                 return Optional[String]()
             # SUBMIT_FIND_NEXT (Enter / Find next button) — just walk.
-            if self.windows.windows[idx].editor.find_next(find, opts):
-                self.windows.windows[idx].editor.reveal_cursor(
-                    self.windows.windows[idx].interior(),
-                    margin_below=10, margin_above=10,
-                )
+            self._find_step(idx, find, opts, True)
             return Optional[String]()
         if pa == _PA_BP_CONDITION:
             # ``_pending_arg`` carries ``path|line`` from when the
