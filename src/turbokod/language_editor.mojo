@@ -28,12 +28,10 @@ priority list. For user-added languages everything is editable and
 
 from std.collections.list import List
 
-from .buttons import (
-    BUTTON_FIRED, BUTTON_NONE, ShadowButton, paint_shadow_button,
-)
+from .buttons import BUTTON_FIRED, BUTTON_NONE, PlacedButton, ShadowButton
 from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
-from .colors import Attr, BLACK, BLUE, BORDER_FOCUS, CYAN, GREEN, LIGHT_GRAY, WHITE
+from .colors import Attr, BLACK, BLUE, BORDER_FOCUS, CYAN, LIGHT_GRAY
 from .config import LanguageServerOverride
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE,
@@ -142,13 +140,6 @@ def _build_layout(rect: Rect) -> _Layout:
     )
 
 
-@fieldwise_init
-struct _PlacedButton(ImplicitlyCopyable, Movable):
-    var button: ShadowButton
-    var focus: UInt8
-    var enabled: Bool
-
-
 struct LanguageEditor(Movable):
     var active: Bool
     var submitted: Bool
@@ -176,7 +167,7 @@ struct LanguageEditor(Movable):
     old hand-rolled ``_next_focus`` recomputed on every call."""
     var _dlg: DraggableDialog
     """Auto-center placement + title-bar move-by-drag."""
-    var _buttons: List[_PlacedButton]
+    var _buttons: List[PlacedButton]
     var _type_ahead: TypeAhead
     """Type-to-jump prefix buffer for the candidates list. Reset on
     open / close and on focus changes away from the list so the next
@@ -195,23 +186,23 @@ struct LanguageEditor(Movable):
         self._focus.focus_force(Int(_FOCUS_LANG))
         self._dlg = DraggableDialog()
         self._type_ahead = TypeAhead()
-        self._buttons = List[_PlacedButton]()
-        self._buttons.append(_PlacedButton(
+        self._buttons = List[PlacedButton]()
+        self._buttons.append(PlacedButton(
             ShadowButton(String(" + Add "), 0, 0), _FOCUS_ADD, True,
         ))
-        self._buttons.append(_PlacedButton(
+        self._buttons.append(PlacedButton(
             ShadowButton(String(" - Remove "), 0, 0), _FOCUS_REMOVE, True,
         ))
-        self._buttons.append(_PlacedButton(
+        self._buttons.append(PlacedButton(
             ShadowButton(String(" Up "), 0, 0), _FOCUS_UP, True,
         ))
-        self._buttons.append(_PlacedButton(
+        self._buttons.append(PlacedButton(
             ShadowButton(String(" Down "), 0, 0), _FOCUS_DOWN, True,
         ))
-        self._buttons.append(_PlacedButton(
+        self._buttons.append(PlacedButton(
             ShadowButton(String(" Save "), 0, 0), _FOCUS_SAVE, True,
         ))
-        self._buttons.append(_PlacedButton(
+        self._buttons.append(PlacedButton(
             ShadowButton(String(" Cancel "), 0, 0), _FOCUS_CANCEL, True,
         ))
 
@@ -393,15 +384,8 @@ struct LanguageEditor(Movable):
         self._buttons[_BTN_CANCEL].button.move_to(cancel_x, bottom_y)
 
     def _paint_button(mut self, mut canvas: Canvas, idx: Int):
-        var pb = self._buttons[idx]
-        var face: Attr
-        if not pb.enabled:
-            face = Attr(WHITE, GREEN)
-        elif self._focus.is_focused(Int(pb.focus)):
-            face = Attr(WHITE, BLUE)
-        else:
-            face = Attr(BLACK, GREEN)
-        paint_shadow_button(canvas, pb.button, face, LIGHT_GRAY)
+        ref pb = self._buttons[idx]
+        pb.paint(canvas, self._focus.is_focused(Int(pb.focus)))
 
     # --- key handling -----------------------------------------------
 

@@ -746,16 +746,16 @@ def test_settings_windowed_default_is_centered_dialog() raises:
     var c = Canvas(100, 40)
     c.clear(default_attr())
     s.paint(c, Rect(0, 0, 100, 40))
-    assert_true(s.bounds.a.y >= 1)
-    assert_true(s.bounds.b.y <= 39)
-    assert_true(s.bounds.width() <= 104)
-    assert_true(s.bounds.a.x > 0)
+    assert_true(s.dlg.bounds.a.y >= 1)
+    assert_true(s.dlg.bounds.b.y <= 39)
+    assert_true(s.dlg.bounds.width() <= 104)
+    assert_true(s.dlg.bounds.a.x > 0)
     # The dialog's top-left corner carries the double-line box; a cell
     # left of the dialog is untouched workspace.
     assert_equal(
-        c.get(s.bounds.a.x, s.bounds.a.y).glyph, String("╔"),
+        c.get(s.dlg.bounds.a.x, s.dlg.bounds.a.y).glyph, String("╔"),
     )
-    var outside = c.get(0, s.bounds.a.y)
+    var outside = c.get(0, s.dlg.bounds.a.y)
     assert_equal(outside.attr.fg, default_attr().fg)
     assert_equal(outside.attr.bg, default_attr().bg)
 
@@ -769,7 +769,7 @@ def test_settings_windowed_move_and_resize() raises:
     var screen = Rect(0, 0, 100, 40)
     var c = Canvas(100, 40)
     s.paint(c, screen)   # establish default bounds
-    var b0 = s.bounds
+    var b0 = s.dlg.bounds
     # Move: press on the title row, drag +3 cols / +2 rows, release.
     _ = s.handle_mouse(Event.mouse_event(
         Point(b0.a.x + 5, b0.a.y), MOUSE_BUTTON_LEFT, True, False,
@@ -780,12 +780,12 @@ def test_settings_windowed_move_and_resize() raises:
     _ = s.handle_mouse(Event.mouse_event(
         Point(b0.a.x + 8, b0.a.y + 2), MOUSE_BUTTON_LEFT, False, False,
     ), screen)
-    assert_equal(s.bounds.a.x, b0.a.x + 3)
-    assert_equal(s.bounds.a.y, b0.a.y + 2)
-    assert_equal(s.bounds.width(), b0.width())
-    assert_equal(s.bounds.height(), b0.height())
+    assert_equal(s.dlg.bounds.a.x, b0.a.x + 3)
+    assert_equal(s.dlg.bounds.a.y, b0.a.y + 2)
+    assert_equal(s.dlg.bounds.width(), b0.width())
+    assert_equal(s.dlg.bounds.height(), b0.height())
     # Resize: press the bottom-right corner, drag inward 10 cols / 3 rows.
-    var b1 = s.bounds
+    var b1 = s.dlg.bounds
     _ = s.handle_mouse(Event.mouse_event(
         Point(b1.b.x - 1, b1.b.y - 1), MOUSE_BUTTON_LEFT, True, False,
     ), screen)
@@ -795,15 +795,15 @@ def test_settings_windowed_move_and_resize() raises:
     _ = s.handle_mouse(Event.mouse_event(
         Point(b1.b.x - 11, b1.b.y - 4), MOUSE_BUTTON_LEFT, False, False,
     ), screen)
-    assert_equal(s.bounds.width(), b1.width() - 10)
-    assert_equal(s.bounds.height(), b1.height() - 3)
+    assert_equal(s.dlg.bounds.width(), b1.width() - 10)
+    assert_equal(s.dlg.bounds.height(), b1.height() - 3)
     # Bounds survive close + reopen (session-persistent size/position).
-    var kept = s.bounds
+    var kept = s.dlg.bounds
     s.close()
     s.open(False)
     s.paint(c, screen)
-    assert_equal(s.bounds.a.x, kept.a.x)
-    assert_equal(s.bounds.width(), kept.width())
+    assert_equal(s.dlg.bounds.a.x, kept.a.x)
+    assert_equal(s.dlg.bounds.width(), kept.width())
 
 
 def test_settings_detached_fills_surface() raises:
@@ -831,7 +831,7 @@ def test_settings_detached_fills_surface() raises:
     var c2 = Canvas(80, 24)
     c2.clear(default_attr())
     s2.paint(c2, Rect(0, 0, 80, 24))
-    assert_equal(c2.get(s2.bounds.a.x, s2.bounds.a.y).glyph, String("╔"))
+    assert_equal(c2.get(s2.dlg.bounds.a.x, s2.dlg.bounds.a.y).glyph, String("╔"))
 
 
 def test_settings_open_empty_parks_selection_at_minus_one() raises:

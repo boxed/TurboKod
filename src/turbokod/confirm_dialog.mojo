@@ -14,13 +14,10 @@ a network download. Callers that want Yes pre-focused pass
 """
 
 from .buttons import (
-    BUTTON_FIRED, BUTTON_NONE,
-    ShadowButton, paint_shadow_button,
+    button_face, BUTTON_FIRED, BUTTON_NONE, paint_shadow_button, ShadowButton,
 )
 from .canvas import Canvas, wrap_to_width
-from .colors import (
-    Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, WHITE,
-)
+from .colors import Attr, BLACK, LIGHT_GRAY
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE, KEY_ENTER, KEY_ESC, KEY_LEFT, KEY_RIGHT,
     KEY_TAB,
@@ -152,16 +149,13 @@ struct ConfirmDialog(Movable):
         # button's shadow cell fires the action without moving focus there.
         self._focus.update(_SLOT_YES, self._yes_button.hit_rect())
         self._focus.update(_SLOT_NO, self._no_button.hit_rect())
-        var yes_face: Attr
-        var no_face: Attr
-        if self._focus.is_focused(_SLOT_YES):
-            yes_face = Attr(WHITE, BLUE)
-            no_face = Attr(BLACK, GREEN)
-        else:
-            yes_face = Attr(BLACK, GREEN)
-            no_face = Attr(WHITE, BLUE)
-        paint_shadow_button(canvas, self._yes_button, yes_face, LIGHT_GRAY)
-        paint_shadow_button(canvas, self._no_button, no_face, LIGHT_GRAY)
+        var yes_focused = self._focus.is_focused(_SLOT_YES)
+        paint_shadow_button(
+            canvas, self._yes_button, button_face(yes_focused), LIGHT_GRAY,
+        )
+        paint_shadow_button(
+            canvas, self._no_button, button_face(not yes_focused), LIGHT_GRAY,
+        )
 
     def _resolve(mut self, yes: Bool):
         self.confirmed = yes

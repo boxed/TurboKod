@@ -31,8 +31,8 @@ user can still see context. Esc closes (same as the [Close] button).
 from std.collections.list import List
 
 from .buttons import (
-    BUTTON_FIRED, BUTTON_NONE, Checkbox, ShadowButton,
-    paint_checkbox, paint_shadow_button,
+    BUTTON_FIRED, BUTTON_NONE, Checkbox, paint_checkbox, PlacedButton,
+    ShadowButton,
 )
 from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
@@ -69,6 +69,7 @@ from .string_utils import display_columns
 from .text_field import TextField
 from .type_ahead import TypeAhead, is_type_ahead_key, type_ahead_pick
 from .window import paint_window_title
+from .view import paint_section_rail, ResizableDialog
 
 
 # --- focus discriminants --------------------------------------------------
@@ -205,13 +206,6 @@ def _clamp_numeric_field(mut tf: TextField, max_len: Int):
         tf.set_text(out^)
 
 
-@fieldwise_init
-struct _PlacedButton(ImplicitlyCopyable, Movable):
-    var button: ShadowButton
-    var focus: UInt8
-    var enabled: Bool
-
-
 # --- Settings -------------------------------------------------------------
 
 
@@ -260,7 +254,7 @@ struct Settings(Movable):
     """Counterpart for ``selected_dict``."""
     var _last_scroll_language: Int
     """Counterpart for ``selected_language``."""
-    var _buttons: List[_PlacedButton]
+    var _buttons: List[PlacedButton]
     """Persistent button table — Close first, then the per-section
     Spell / Languages / Font buttons."""
     var _save_dropdown: Dropdown
@@ -386,19 +380,12 @@ struct Settings(Movable):
     macOS frontend; see ``Desktop.set_settings_detached``). The dialog then
     fills the whole surface and the in-grid move/resize chrome is disabled —
     the native window provides both."""
-    var bounds: Rect
+    var dlg: ResizableDialog
     """In-grid dialog rect (terminal frontend). Centered by default, then
     movable by dragging the title row and resizable by dragging the left /
     right / bottom border — so the workspace behind stays visible while a
     theme change retints it live. Session-persistent across open/close;
     ``_ensure_bounds`` re-clamps it against the current container_bounds."""
-    var _moving: Bool
-    var _move_dx: Int
-    var _move_dy: Int
-    var _resizing: Bool
-    var _rs_left: Bool
-    var _rs_right: Bool
-    var _rs_bottom: Bool
     var _type_ahead: TypeAhead
     """Shared type-to-jump prefix buffer for whichever section list
     currently owns focus. Reset on focus / section changes so a
@@ -428,35 +415,35 @@ struct Settings(Movable):
         self._list_scroll = 0
         self._last_scroll_dict = -2
         self._last_scroll_language = -2
-        self._buttons = List[_PlacedButton]()
-        self._buttons.append(_PlacedButton(
+        self._buttons = List[PlacedButton]()
+        self._buttons.append(PlacedButton(
             ShadowButton(String(" Close "), 0, 0), _FOCUS_CLOSE, True,
         ))
-        self._buttons.append(_PlacedButton(
+        self._buttons.append(PlacedButton(
             ShadowButton(String(" + Install "), 0, 0),
             _FOCUS_DICT_INSTALL, True,
         ))
-        self._buttons.append(_PlacedButton(
+        self._buttons.append(PlacedButton(
             ShadowButton(String(" - Remove "), 0, 0),
             _FOCUS_DICT_REMOVE, True,
         ))
-        self._buttons.append(_PlacedButton(
+        self._buttons.append(PlacedButton(
             ShadowButton(String(" + Add "), 0, 0), _FOCUS_LANG_ADD, True,
         ))
-        self._buttons.append(_PlacedButton(
+        self._buttons.append(PlacedButton(
             ShadowButton(String(" Edit "), 0, 0), _FOCUS_LANG_EDIT, True,
         ))
-        self._buttons.append(_PlacedButton(
+        self._buttons.append(PlacedButton(
             ShadowButton(String(" - Remove "), 0, 0),
             _FOCUS_LANG_REMOVE, True,
         ))
-        self._buttons.append(_PlacedButton(
+        self._buttons.append(PlacedButton(
             ShadowButton(String(" - "), 0, 0), _FOCUS_FONT_SMALLER, True,
         ))
-        self._buttons.append(_PlacedButton(
+        self._buttons.append(PlacedButton(
             ShadowButton(String(" + "), 0, 0), _FOCUS_FONT_LARGER, True,
         ))
-        self._buttons.append(_PlacedButton(
+        self._buttons.append(PlacedButton(
             ShadowButton(String(" Restore ideal "), 0, 0),
             _FOCUS_FONT_IDEAL, True,
         ))
@@ -528,14 +515,7 @@ struct Settings(Movable):
         self._font_effective_size = 0
         self._font_ideal_size = 0
         self.detached = False
-        self.bounds = Rect(0, 0, 0, 0)
-        self._moving = False
-        self._move_dx = 0
-        self._move_dy = 0
-        self._resizing = False
-        self._rs_left = False
-        self._rs_right = False
-        self._rs_bottom = False
+        self.dlg = ResizableDialog(_SETTINGS_MIN_W, _SETTINGS_MIN_H)
         self._type_ahead = TypeAhead()
 
     def open(
@@ -673,8 +653,7 @@ struct Settings(Movable):
         self.active = False
         # Drop any in-flight move/resize drag; ``bounds`` itself is kept so
         # the next open reuses the user's size + position.
-        self._moving = False
-        self._resizing = False
+        self.dlg.cancel_drag()
         self.auto_save = False
         self.trim_trailing_whitespace = False
         self.ensure_final_newline = False
@@ -775,137 +754,22 @@ struct Settings(Movable):
         whole dialog follows a move/resize for free."""
         if self.detached:
             return container_bounds
-        return self.bounds
-
-    def _host_workspace(self, container_bounds: Rect) -> Rect:
-        """The area the in-grid dialog may occupy — ``container_bounds`` minus the
-        menu bar (row 0) and status bar (last row), which the host keeps
-        painting so the user keeps their bearings."""
-        var top = 1 if container_bounds.b.y > 2 else 0
-        var bottom = container_bounds.b.y - 1 if container_bounds.b.y > 2 else container_bounds.b.y
-        return Rect(container_bounds.a.x, top, container_bounds.b.x, bottom)
+        return self.dlg.bounds
 
     def _ensure_bounds(mut self, container_bounds: Rect):
-        """Initialize ``bounds`` (centered default) on first open and clamp
-        it back into the workspace after a terminal resize. No-op when the
-        host owns the window (detached)."""
-        if self.detached:
-            return
-        var ws = self._host_workspace(container_bounds)
-        var w = self.bounds.width()
-        var h = self.bounds.height()
-        if w < _SETTINGS_MIN_W or h < _SETTINGS_MIN_H:
-            # First open (or degenerate): centered, big enough to be
-            # comfortable, small enough to leave the workspace visible
-            # around it (that's the point — live theme preview).
-            w = ws.width() - 8
-            if w > 104:
-                w = 104
-            h = ws.height() - 4
-            if h > 30:
-                h = 30
-            var x = ws.a.x + (ws.width() - w) // 2
-            var y = ws.a.y + (ws.height() - h) // 2
-            self.bounds = Rect(x, y, x + w, y + h)
-        # Shrink to fit, then slide fully on-container_bounds.
-        var b = self.bounds
-        if b.width() > ws.width():
-            b = Rect(b.a.x, b.a.y, b.a.x + ws.width(), b.b.y)
-        if b.height() > ws.height():
-            b = Rect(b.a.x, b.a.y, b.b.x, b.a.y + ws.height())
-        var dx = 0
-        var dy = 0
-        if b.a.x < ws.a.x:
-            dx = ws.a.x - b.a.x
-        if b.b.x > ws.b.x:
-            dx = ws.b.x - b.b.x
-        if b.a.y < ws.a.y:
-            dy = ws.a.y - b.a.y
-        if b.b.y > ws.b.y:
-            dy = ws.b.y - b.b.y
-        self.bounds = Rect(b.a.x + dx, b.a.y + dy, b.b.x + dx, b.b.y + dy)
+        """Keep the in-grid ``dlg.bounds`` valid against the current
+        container. No-op when the host owns the window (detached)."""
+        if not self.detached:
+            self.dlg.ensure_bounds(container_bounds)
 
     def _handle_window_chrome(
         mut self, event: Event, rect: Rect, container_bounds: Rect,
     ) -> Bool:
-        """In-grid window chrome: drag the title row to move, drag the
-        left / right / bottom border (corners included) to resize. An
-        in-flight drag owns every event until the button is released —
-        even when the cursor wanders outside the dialog (mirrors
-        ``WindowStack``'s drag/resize state machine). Returns True when
-        the event was consumed."""
+        """In-grid move / resize chrome (see ``ResizableDialog``); the
+        native window provides both when detached."""
         if self.detached:
             return False
-        var ws = self._host_workspace(container_bounds)
-        if self._moving:
-            if event.button == MOUSE_BUTTON_LEFT and not event.pressed:
-                self._moving = False
-                return True
-            var w = self.bounds.width()
-            var h = self.bounds.height()
-            var nx = event.pos.x - self._move_dx
-            var ny = event.pos.y - self._move_dy
-            if nx < ws.a.x:
-                nx = ws.a.x
-            if ny < ws.a.y:
-                ny = ws.a.y
-            if nx + w > ws.b.x:
-                nx = ws.b.x - w
-            if ny + h > ws.b.y:
-                ny = ws.b.y - h
-            self.bounds = Rect(nx, ny, nx + w, ny + h)
-            return True
-        if self._resizing:
-            if event.button == MOUSE_BUTTON_LEFT and not event.pressed:
-                self._resizing = False
-                return True
-            var ax = self.bounds.a.x
-            var ay = self.bounds.a.y
-            var bx = self.bounds.b.x
-            var by = self.bounds.b.y
-            if self._rs_left:
-                ax = event.pos.x
-                if ax < ws.a.x:
-                    ax = ws.a.x
-                if bx - ax < _SETTINGS_MIN_W:
-                    ax = bx - _SETTINGS_MIN_W
-            if self._rs_right:
-                bx = event.pos.x + 1
-                if bx > ws.b.x:
-                    bx = ws.b.x
-                if bx - ax < _SETTINGS_MIN_W:
-                    bx = ax + _SETTINGS_MIN_W
-            if self._rs_bottom:
-                by = event.pos.y + 1
-                if by > ws.b.y:
-                    by = ws.b.y
-                if by - ay < _SETTINGS_MIN_H:
-                    by = ay + _SETTINGS_MIN_H
-            self.bounds = Rect(ax, ay, bx, by)
-            return True
-        if event.button != MOUSE_BUTTON_LEFT or not event.pressed \
-                or event.motion:
-            return False
-        var inside_x = event.pos.x >= rect.a.x and event.pos.x < rect.b.x
-        var inside_y = event.pos.y >= rect.a.y and event.pos.y < rect.b.y
-        if not (inside_x and inside_y):
-            return False
-        # Title row (top border) moves; the other three borders resize.
-        if event.pos.y == rect.a.y:
-            self._moving = True
-            self._move_dx = event.pos.x - rect.a.x
-            self._move_dy = event.pos.y - rect.a.y
-            return True
-        var on_left = event.pos.x == rect.a.x
-        var on_right = event.pos.x == rect.b.x - 1
-        var on_bottom = event.pos.y == rect.b.y - 1
-        if on_left or on_right or on_bottom:
-            self._resizing = True
-            self._rs_left = on_left
-            self._rs_right = on_right
-            self._rs_bottom = on_bottom
-            return True
-        return False
+        return self.dlg.handle_chrome(event, rect, container_bounds)
 
     def _labels(self) -> List[String]:
         """Section labels for this instance — the Font section only
@@ -928,29 +792,10 @@ struct Settings(Movable):
     def _paint_sections(
         self, mut canvas: Canvas, painter: Painter, rect: Rect,
     ):
-        var inner = self._sections_rect(rect)
-        var sub = painter.sub(inner)
-        var body_attr = Attr(BLACK, CYAN)
-        sub.fill(canvas, inner, String(" "), body_attr)
-        var labels = self._labels()
-        for i in range(len(labels)):
-            var y = inner.a.y + i
-            if y >= inner.b.y:
-                break
-            var attr = body_attr
-            if i == self.section:
-                attr = (
-                    Attr(WHITE, BLUE) if self.focus == _FOCUS_SECTIONS
-                    else Attr(BLACK, GREEN)
-                )
-                sub.fill(
-                    canvas,
-                    Rect(inner.a.x, y, inner.b.x, y + 1),
-                    String(" "), attr,
-                )
-            _ = sub.put_text(
-                canvas, Point(inner.a.x + 1, y), labels[i], attr,
-            )
+        paint_section_rail(
+            canvas, painter, self._sections_rect(rect), self._labels(),
+            self.section, self.focus == _FOCUS_SECTIONS,
+        )
 
     def _paint_right_pane(
         mut self, mut canvas: Canvas, painter: Painter, rect: Rect,
@@ -1723,15 +1568,8 @@ struct Settings(Movable):
         self._paint_button(canvas, _BTN_CLOSE)
 
     def _paint_button(mut self, mut canvas: Canvas, idx: Int):
-        var pb = self._buttons[idx]
-        var face: Attr
-        if not pb.enabled:
-            face = Attr(WHITE, GREEN)
-        elif self.focus == pb.focus:
-            face = Attr(WHITE, BLUE)
-        else:
-            face = Attr(BLACK, GREEN)
-        paint_shadow_button(canvas, pb.button, face, LIGHT_GRAY)
+        ref pb = self._buttons[idx]
+        pb.paint(canvas, self.focus == pb.focus)
 
     # --- key handling -----------------------------------------------
 

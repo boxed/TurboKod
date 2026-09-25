@@ -28,14 +28,10 @@ sees ``submitted``.
 
 from std.collections.list import List
 
-from .buttons import (
-    BUTTON_FIRED, BUTTON_NONE, ShadowButton, paint_shadow_button,
-)
+from .buttons import BUTTON_FIRED, BUTTON_NONE, PlacedButton, ShadowButton
 from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
-from .colors import (
-    Attr, BLACK, BLUE, BORDER_FOCUS, CYAN, GREEN, LIGHT_GRAY, WHITE,
-)
+from .colors import Attr, BLACK, BLUE, BORDER_FOCUS, CYAN, LIGHT_GRAY, WHITE
 from .config import OnSaveAction
 from .dropdown import DROPDOWN_HIT_NONE, DROPDOWN_HIT_OUTSIDE, Dropdown
 from .events import (
@@ -133,13 +129,6 @@ def _build_layout(rect: Rect) -> _Layout:
     )
 
 
-@fieldwise_init
-struct _PlacedButton(ImplicitlyCopyable, Movable):
-    var button: ShadowButton
-    var focus: UInt8
-    var enabled: Bool
-
-
 # --- ActionEditor ---------------------------------------------------------
 
 
@@ -185,7 +174,7 @@ struct ActionEditor(Movable):
     # (with spaces / trailing whitespace preserved) and is only
     # committed to ``entry.args`` via ``split_whitespace`` on Save.
     var form: Form
-    var _buttons: List[_PlacedButton]
+    var _buttons: List[PlacedButton]
 
     def __init__(out self):
         self.active = False
@@ -201,14 +190,14 @@ struct ActionEditor(Movable):
         self.form.add(_FOCUS_PROGRAM)
         self.form.add(_FOCUS_ARGS)
         self.form.add(_FOCUS_CWD)
-        self._buttons = List[_PlacedButton]()
-        self._buttons.append(_PlacedButton(
+        self._buttons = List[PlacedButton]()
+        self._buttons.append(PlacedButton(
             ShadowButton(String(" Browse "), 0, 0), _FOCUS_BROWSE, True,
         ))
-        self._buttons.append(_PlacedButton(
+        self._buttons.append(PlacedButton(
             ShadowButton(String(" Save "), 0, 0), _FOCUS_SAVE, True,
         ))
-        self._buttons.append(_PlacedButton(
+        self._buttons.append(PlacedButton(
             ShadowButton(String(" Cancel "), 0, 0), _FOCUS_CANCEL, True,
         ))
 
@@ -371,13 +360,8 @@ struct ActionEditor(Movable):
             self._paint_button(canvas, i)
 
     def _paint_button(mut self, mut canvas: Canvas, idx: Int):
-        var pb = self._buttons[idx]
-        var face: Attr
-        if self._focus.is_focused(Int(pb.focus)):
-            face = Attr(WHITE, BLUE)
-        else:
-            face = Attr(BLACK, GREEN)
-        paint_shadow_button(canvas, pb.button, face, LIGHT_GRAY)
+        ref pb = self._buttons[idx]
+        pb.paint(canvas, self._focus.is_focused(Int(pb.focus)))
 
     # --- key handling -----------------------------------------------
 

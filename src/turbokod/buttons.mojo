@@ -30,7 +30,7 @@ font issue.
 
 from .canvas import Canvas
 from .cell import Cell
-from .colors import Attr, PANE_BG
+from .colors import Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, PANE_BG, WHITE
 from .events import Event, EVENT_MOUSE, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE
 from .geometry import Point, Rect
 from .string_utils import display_columns
@@ -439,6 +439,31 @@ def paint_checkbox(
     var glyph = String("[x]") if cb.on else String("[ ]")
     var text = String(" ") + glyph + String(" ") + cb.label + String(" ")
     _ = canvas.put_text(Point(cb.x, cb.y), text, attr, max_x)
+
+
+def button_face(focused: Bool, enabled: Bool = True) -> Attr:
+    """The Turbo Vision button face: white-on-blue when focused,
+    black-on-green otherwise, white-on-green (dimmed label) when disabled."""
+    if not enabled:
+        return Attr(WHITE, GREEN)
+    if focused:
+        return Attr(WHITE, BLUE)
+    return Attr(BLACK, GREEN)
+
+
+@fieldwise_init
+struct PlacedButton(ImplicitlyCopyable, Movable):
+    """A dialog's shadow button plus the focus slot it activates and
+    whether it's currently enabled — the shape the settings-style dialogs
+    keep their button row in."""
+    var button: ShadowButton
+    var focus: UInt8
+    var enabled: Bool
+
+    def paint(self, mut canvas: Canvas, focused: Bool):
+        paint_shadow_button(
+            canvas, self.button, button_face(focused, self.enabled), LIGHT_GRAY,
+        )
 
 
 def shadow_button_hit(button: ShadowButton, event: Event) -> Bool:

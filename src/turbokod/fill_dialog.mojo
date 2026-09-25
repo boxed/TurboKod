@@ -17,8 +17,8 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .buttons import (
-    BUTTON_FIRED, BUTTON_NONE, Checkbox, ShadowButton, paint_checkbox,
-    paint_shadow_button,
+    button_face, BUTTON_FIRED, BUTTON_NONE, Checkbox, paint_checkbox,
+    paint_shadow_button, ShadowButton,
 )
 from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
@@ -497,19 +497,14 @@ struct FillDialog(Movable):
         # shadow-cell click focuses-or-not depending on which ran last.
         self._focus.update(_SLOT_OK, self._ok.hit_rect())
         self._focus.update(_SLOT_CANCEL, self._cancel.hit_rect())
-        var ok_face: Attr
-        var cancel_face: Attr
-        if self._focus.is_focused(_SLOT_OK):
-            ok_face = Attr(WHITE, BLUE)
-            cancel_face = Attr(BLACK, GREEN)
-        elif self._focus.is_focused(_SLOT_CANCEL):
-            ok_face = Attr(BLACK, GREEN)
-            cancel_face = Attr(WHITE, BLUE)
-        else:
-            ok_face = Attr(BLACK, GREEN)
-            cancel_face = Attr(BLACK, GREEN)
-        paint_shadow_button(canvas, self._ok, ok_face, LIGHT_GRAY)
-        paint_shadow_button(canvas, self._cancel, cancel_face, LIGHT_GRAY)
+        paint_shadow_button(
+            canvas, self._ok, button_face(self._focus.is_focused(_SLOT_OK)),
+            LIGHT_GRAY,
+        )
+        paint_shadow_button(
+            canvas, self._cancel,
+            button_face(self._focus.is_focused(_SLOT_CANCEL)), LIGHT_GRAY,
+        )
 
     def paint_popup(self, mut canvas: Canvas, container_bounds: Rect):
         """Render any open dropdown popup on top of the rest of the
