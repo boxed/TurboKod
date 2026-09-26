@@ -6037,7 +6037,7 @@ struct Desktop(Movable):
             if mgr_idx < 0:
                 continue
             var current_argv = self.lsp_managers[mgr_idx].argv()
-            if _argv_equal(current_argv, new_argv):
+            if current_argv == new_argv:
                 continue
             # Retire, don't block: this runs when the user changes a
             # server's argv in Settings, and waiting out the old server's
@@ -6157,16 +6157,16 @@ struct Desktop(Movable):
             if len(out) >= 10:
                 break
             var p = self.config.recent_projects[i]
-            if _list_has(out, p):
+            if p in out:
                 continue
             var info = stat_file(p)
             if not info.ok or not info.is_dir():
                 continue
             out.append(p)
-        if self.project and not _list_has(out, self.project.value()):
+        if self.project and self.project.value() not in out:
             out.append(self.project.value())
         for i in range(len(self.open_projects)):
-            if not _list_has(out, self.open_projects[i]):
+            if self.open_projects[i] not in out:
                 out.append(self.open_projects[i])
         return out^
 
@@ -6235,7 +6235,7 @@ struct Desktop(Movable):
             # another window. A label suffix would read as part of the
             # project's name.
             var mark = MENU_MARK_NONE
-            if not is_active and _list_has(self.open_projects, p):
+            if not is_active and p in self.open_projects:
                 mark = MENU_MARK_OPEN
             items.append(MenuItem(
                 labels[i], PROJECT_OPEN_RECENT_PREFIX + p,
@@ -9060,9 +9060,7 @@ struct Desktop(Movable):
             # (0 → rg hit fallback, 1 → jump, ≥2 → chooser).
             if self.find_symbol.active \
                     and not self.find_symbol.is_choosing() \
-                    and _list_contains_int(
-                        self._find_symbol_pending_lsps, i,
-                    ) \
+                    and i in self._find_symbol_pending_lsps \
                     and self.lsp_managers[i].has_pending_workspace_symbols():
                 var ws_items = self.lsp_managers[i].take_workspace_symbols()
                 for k in range(len(ws_items)):
@@ -15652,14 +15650,6 @@ def _recent_display_label(path: String, project_root: String) -> String:
     return String(StringSpan(unsafe_from_utf8=pb[len(rb) + 1:]))
 
 
-def _list_has(imm items: List[String], value: String) -> Bool:
-    """True when ``value`` is in ``items`` (exact string match)."""
-    for i in range(len(items)):
-        if items[i] == value:
-            return True
-    return False
-
-
 def _path_tail(path: String, count: Int) -> String:
     """Return the last ``count`` components of ``path``, e.g.
     ``_path_tail("/a/b/c", 2)`` → ``"b/c"``. Trailing slashes are
@@ -15953,19 +15943,6 @@ def _pyenv_pins_satisfied(
     return True
 
 
-def _argv_equal(a: List[String], b: List[String]) -> Bool:
-    """Element-wise equality for two argv lists. Used to detect when a
-    settings change (server re-ordering, candidate add/remove) means
-    a spawned LSP manager's argv no longer matches the now-preferred
-    binary and we should restart it."""
-    if len(a) != len(b):
-        return False
-    for i in range(len(a)):
-        if a[i] != b[i]:
-            return False
-    return True
-
-
 def _mojo_include_dirs(root: String) -> List[String]:
     """``-I`` paths for ``mojo-lsp-server``: the project root, plus
     ``<root>/src`` if it exists.
@@ -16096,16 +16073,6 @@ def _refresh_status_for(
             ),
             owner=String("lsp"),
         )
-
-
-def _list_contains_int(haystack: List[Int], needle: Int) -> Bool:
-    """Linear membership check for ``List[Int]``. Used by the Find
-    Symbol pending-LSP tracking — the list is bounded by the number
-    of running LSPs (typically 1–3), so the O(N) cost is negligible."""
-    for i in range(len(haystack)):
-        if haystack[i] == needle:
-            return True
-    return False
 
 
 def _list_remove_int(mut haystack: List[Int], needle: Int):

@@ -808,15 +808,6 @@ def _release_config_lock(fd: Int32):
     _ = close_fd(fd)
 
 
-def _str_lists_equal(a: List[String], b: List[String]) -> Bool:
-    if len(a) != len(b):
-        return False
-    for i in range(len(a)):
-        if a[i] != b[i]:
-            return False
-    return True
-
-
 def lsp_overrides_equal(
     a: List[LanguageServerOverride], b: List[LanguageServerOverride],
 ) -> Bool:
@@ -828,12 +819,12 @@ def lsp_overrides_equal(
     for i in range(len(a)):
         if a[i].language_id != b[i].language_id:
             return False
-        if not _str_lists_equal(a[i].file_types, b[i].file_types):
+        if a[i].file_types != b[i].file_types:
             return False
         if len(a[i].argvs) != len(b[i].argvs):
             return False
         for k in range(len(a[i].argvs)):
-            if not _str_lists_equal(a[i].argvs[k], b[i].argvs[k]):
+            if a[i].argvs[k] != b[i].argvs[k]:
                 return False
     return True
 
@@ -848,7 +839,7 @@ def _merge_recents(
     entries only the file has, so a path another window opened is
     preserved rather than dropped.
     """
-    if _str_lists_equal(mine, base):
+    if mine == base:
         return disk.copy()
     var out = mine.copy()
     for i in range(len(disk)):

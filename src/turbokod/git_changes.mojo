@@ -1619,13 +1619,6 @@ def _fetch_unpushed_short_shas(
     return out^
 
 
-def _list_contains(shas: List[String], sha: String) -> Bool:
-    for i in range(len(shas)):
-        if shas[i] == sha:
-            return True
-    return False
-
-
 def _extract_tags(decoration: String) -> String:
     """Pull tag names out of a ``%D`` ref decoration string. ``%D`` is a
     comma+space separated list of refs like
@@ -1677,7 +1670,7 @@ def fetch_git_commits(
         if len(line.as_bytes()) == 0:
             continue
         var fields = _split_tab_fields(line, 6)
-        var pushed = not _list_contains(unpushed, fields[0])
+        var pushed = fields[0] not in unpushed
         var tags = _extract_tags(fields[3])
         out.append(
             GitCommit(
@@ -1861,7 +1854,7 @@ def _run_history_log(
     var entries = parse_line_history(_git_stdout(project_root, args^))
     var unpushed = _fetch_unpushed_short_shas(project_root, limit)
     for i in range(len(entries)):
-        entries[i].is_pushed = not _list_contains(unpushed, entries[i].short_sha)
+        entries[i].is_pushed = entries[i].short_sha not in unpushed
     return entries^
 
 

@@ -233,13 +233,6 @@ def _picker_skip_dirs() -> List[String]:
     return s^
 
 
-def _name_in(name: String, names: List[String]) -> Bool:
-    for i in range(len(names)):
-        if names[i] == name:
-            return True
-    return False
-
-
 def _git_ls_files_argv(root: String, ignored_only: Bool) -> List[String]:
     """Argv for the two ``git ls-files`` enumerations the picker uses.
 
@@ -590,7 +583,7 @@ def walk_project_files(
             if not info.ok:
                 continue
             if info.is_dir():
-                if _name_in(name, skip):
+                if name in skip:
                     continue
                 if matcher.ignored(rel, True):
                     continue

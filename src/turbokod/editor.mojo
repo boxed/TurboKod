@@ -351,18 +351,6 @@ def _review_dim_attr(attr: Attr, palette: List[UInt32]) -> Attr:
     return attr.with_fg_rgb(new_fg).with_bg_rgb(new_bg)
 
 
-def _lists_equal(a: List[String], b: List[String]) -> Bool:
-    """Element-wise equality for two ``List[String]``. Used after a
-    3-way merge to decide whether the merged buffer matches the
-    just-read on-disk content (clean = leaves the buffer non-dirty)."""
-    if len(a) != len(b):
-        return False
-    for i in range(len(a)):
-        if a[i] != b[i]:
-            return False
-    return True
-
-
 def _split_buffer_lines(text: String) -> List[String]:
     """Split disk bytes into the buffer's line-list shape.
 
@@ -3754,7 +3742,7 @@ struct Editor(Copyable, Movable):
         re-triggers detection on an actual change, so the host can call it
         every frame cheaply — the first call after a project loads flips
         the gutter on without churning on idle frames."""
-        if not _lists_equal(globs, self.test_file_globs):
+        if globs != self.test_file_globs:
             self.test_file_globs = globs.copy()
             self._tests_dirty = True
 
@@ -4101,7 +4089,7 @@ struct Editor(Copyable, Movable):
         # Clean merge: dirty iff the merged buffer differs from what's
         # currently on disk. (Equal happens when ``theirs`` already
         # contained all of our local edits.)
-        self.dirty = not _lists_equal(self.buffer.lines, theirs_lines)
+        self.dirty = self.buffer.lines != theirs_lines
         self._after_buffer_swap()
         return EXT_CHANGE_MERGED
 

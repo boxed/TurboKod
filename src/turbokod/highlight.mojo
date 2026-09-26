@@ -1671,7 +1671,7 @@ def _highlight_generic_line(
             while i < n and is_ascii_ident_byte(b[i]):
                 i += 1
             var word = String(StringSpan(unsafe_from_utf8=b[start:i]))
-            if _is_keyword_in(word, spec.keywords):
+            if word in spec.keywords:
                 out.append(Highlight(row, start, i, highlight_keyword_attr()))
             else:
                 out.append(Highlight(row, start, i, highlight_ident_attr()))
@@ -1695,16 +1695,6 @@ def _highlight_generic_line(
 
         i += 1
     return state
-
-
-def _is_keyword_in(word: String, keywords: List[String]) -> Bool:
-    """Linear membership test. Keyword lists are short (a few dozen
-    entries) and the call site already paid the identifier-extraction
-    cost, so a hash table would be over-engineering."""
-    for k in range(len(keywords)):
-        if keywords[k] == word:
-            return True
-    return False
 
 
 def _to_bytes_list(s: String) -> List[UInt8]:

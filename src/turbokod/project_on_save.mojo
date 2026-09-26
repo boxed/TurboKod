@@ -38,15 +38,6 @@ comptime _TURBOKOD_DIR  = String(".turbokod")
 comptime _ON_SAVE_FILE   = String("on_save.json")
 
 
-def _args_equal(a: List[String], b: List[String]) -> Bool:
-    if len(a) != len(b):
-        return False
-    for i in range(len(a)):
-        if a[i] != b[i]:
-            return False
-    return True
-
-
 def on_save_equal(a: OnSaveAction, b: OnSaveAction) -> Bool:
     """Structural identity for on-save actions: equal across all four
     fields. ``OnSaveAction`` carries no id key, so this is what decides
@@ -58,7 +49,7 @@ def on_save_equal(a: OnSaveAction, b: OnSaveAction) -> Bool:
         a.language_id == b.language_id
         and a.program == b.program
         and a.cwd == b.cwd
-        and _args_equal(a.args, b.args)
+        and a.args == b.args
     )
 
 
