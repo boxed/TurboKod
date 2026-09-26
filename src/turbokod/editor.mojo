@@ -7646,15 +7646,14 @@ struct Editor(Copyable, Movable):
         """
         if self.read_only:
             return False
-        var carets_check = self._all_carets_asc()
-        if len(carets_check) != len(texts):
-            return False
-        for i in range(len(carets_check)):
-            if carets_check[i].row != carets_check[i].anchor_row:
-                return False
-        var pre_dirty_row = carets_check[0].row
-        self._push_undo()
         var carets = self._all_carets_asc()
+        if len(carets) != len(texts):
+            return False
+        for i in range(len(carets)):
+            if carets[i].row != carets[i].anchor_row:
+                return False
+        var pre_dirty_row = carets[0].row
+        self._push_undo()
         var new_carets = List[Caret]()
         var prev_row = -1
         var row_shift = 0
@@ -7665,21 +7664,8 @@ struct Editor(Copyable, Movable):
                 prev_row = c.row
             var text = texts[i]
             var n_text = len(text.as_bytes())
-            var actual_cur = c.col + row_shift
-            var actual_anc = c.anchor_col + row_shift
-            var has_sel = c.col != c.anchor_col
-            var actual_sc: Int
-            var actual_ec: Int
-            if has_sel:
-                if actual_cur < actual_anc:
-                    actual_sc = actual_cur
-                    actual_ec = actual_anc
-                else:
-                    actual_sc = actual_anc
-                    actual_ec = actual_cur
-            else:
-                actual_sc = actual_cur
-                actual_ec = actual_cur
+            var actual_sc = min(c.col, c.anchor_col) + row_shift
+            var actual_ec = max(c.col, c.anchor_col) + row_shift
             var line = self.buffer.line(c.row)
             var line_n = len(line.as_bytes())
             self.buffer.lines[c.row] = byte_slice(line, 0, actual_sc) \
