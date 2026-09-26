@@ -1098,14 +1098,8 @@ struct DapManager(Copyable, Movable):
             if self._bp_armed[i]:
                 continue
             self._bp_armed[i] = True
-            var p = self._bp_path[i]
-            var seen = False
-            for k in range(len(changed_paths)):
-                if changed_paths[k] == p:
-                    seen = True
-                    break
-            if not seen:
-                changed_paths.append(p)
+            if self._bp_path[i] not in changed_paths:
+                changed_paths.append(self._bp_path[i])
         for k in range(len(changed_paths)):
             self._push_breakpoints_for_path(changed_paths[k])
 
@@ -1245,16 +1239,7 @@ struct DapManager(Copyable, Movable):
 
     def _distinct_breakpoint_paths(self) -> List[String]:
         """Unique source paths that currently hold a breakpoint."""
-        var out = List[String]()
-        for i in range(len(self._bp_path)):
-            var seen = False
-            for k in range(len(out)):
-                if out[k] == self._bp_path[i]:
-                    seen = True
-                    break
-            if not seen:
-                out.append(self._bp_path[i])
-        return out^
+        return _distinct(self._bp_path)
 
     def _push_breakpoints_for_path(mut self, path: String):
         """Send ``setBreakpoints`` for ``path`` if the adapter is in a
@@ -1373,20 +1358,13 @@ struct DapManager(Copyable, Movable):
             self._send_set_exception_breakpoints()
 
     def exception_filters(self) -> List[String]:
-        var out = List[String]()
-        for i in range(len(self._exception_filters)):
-            out.append(self._exception_filters[i])
-        return out^
+        return self._exception_filters.copy()
 
     def _send_set_exception_breakpoints(mut self):
-        var args = json_object()
-        var arr = json_array()
-        for i in range(len(self._exception_filters)):
-            arr.append(json_str(self._exception_filters[i]))
-        args.put(String("filters"), arr)
         try:
             _ = self.client.send_request(
-                String("setExceptionBreakpoints"), args,
+                String("setExceptionBreakpoints"),
+                _exception_breakpoints_args(self._exception_filters),
             )
         except e:
             print("dap: setExceptionBreakpoints:", String(e))
@@ -1422,8 +1400,7 @@ struct DapManager(Copyable, Movable):
         if frame_id != 0:
             args.put(String("frameId"), json_int(frame_id))
         args.put(String("context"), json_str(context^))
-        var via_subprocess = self._last_inspect_in_subprocess \
-            and self._subprocess.state == _STATE_RUNNING
+        var via_subprocess = self._inspect_via_subprocess()
         var seq: Int
         try:
             if via_subprocess:
@@ -1601,8 +1578,7 @@ struct DapManager(Copyable, Movable):
             return False
         var args = json_object()
         args.put(String("frameId"), json_int(frame_id))
-        var via_subprocess = self._last_inspect_in_subprocess \
-            and self._subprocess.state == _STATE_RUNNING
+        var via_subprocess = self._inspect_via_subprocess()
         try:
             if via_subprocess:
                 self._subprocess.inflight_scopes = \
@@ -1622,8 +1598,7 @@ struct DapManager(Copyable, Movable):
             return False
         var args = json_object()
         args.put(String("variablesReference"), json_int(variables_reference))
-        var via_subprocess = self._last_inspect_in_subprocess \
-            and self._subprocess.state == _STATE_RUNNING
+        var via_subprocess = self._inspect_via_subprocess()
         try:
             if via_subprocess:
                 self._subprocess.inflight_variables = \
@@ -1895,8 +1870,7 @@ struct DapManager(Copyable, Movable):
                 self._subprocess.inflight_initialize = 0
                 var sub_init_ok = msg.ok()
                 if not sub_init_ok:
-                    self._subprocess.state = _STATE_FAILED
-                    self._subprocess.client.terminate()
+                    self._fail_subprocess()
                     return
                 # Now send attach with the args debugpy gave us.
                 try:
@@ -1906,8 +1880,7 @@ struct DapManager(Copyable, Movable):
                             self._subprocess.pending_attach_args,
                         )
                 except:
-                    self._subprocess.state = _STATE_FAILED
-                    self._subprocess.client.terminate()
+                    self._fail_subprocess()
                     return
                 self._subprocess.state = _STATE_LAUNCHING
                 if self._subprocess.got_initialized_event:
@@ -1917,15 +1890,13 @@ struct DapManager(Copyable, Movable):
                 self._subprocess.inflight_attach = 0
                 var sub_att_ok = msg.ok()
                 if not sub_att_ok:
-                    self._subprocess.state = _STATE_FAILED
-                    self._subprocess.client.terminate()
+                    self._fail_subprocess()
                 return
             if rseq == self._subprocess.inflight_config_done:
                 self._subprocess.inflight_config_done = 0
                 var sub_cfg_ok = msg.ok()
                 if not sub_cfg_ok:
-                    self._subprocess.state = _STATE_FAILED
-                    self._subprocess.client.terminate()
+                    self._fail_subprocess()
                     return
                 self._subprocess.state = _STATE_RUNNING
                 return
@@ -1979,31 +1950,31 @@ struct DapManager(Copyable, Movable):
             except e:
                 print("dap: subprocess reverse-request not-supported reply:", String(e))
 
+    def _inspect_via_subprocess(self) -> Bool:
+        """Route evaluate / variables requests to the forked-subprocess
+        session: the last stop's frames live there and it's still up."""
+        return self._last_inspect_in_subprocess \
+            and self._subprocess.state == _STATE_RUNNING
+
+    def _fail_subprocess(mut self):
+        """Give up on the forked-subprocess session: mark it failed and
+        drop its connection."""
+        self._subprocess.state = _STATE_FAILED
+        self._subprocess.client.terminate()
+
     def _subprocess_configure(mut self):
         """Push breakpoints + exception filters, then ``configurationDone``."""
         # Subprocess attach is debugpy-only (the ``debugpyAttach`` event
         # that opens this socket is a debugpy extension), so the same
         # condition-exception override the parent does applies here too.
-        var sdp = json_object()
-        sdp.put(String("skipSuspendOnBreakpointException"), json_array())
-        sdp.put(String("skipPrintBreakpointException"), json_array())
         try:
             _ = self._subprocess.client.send_request(
-                String("setDebuggerProperty"), sdp^,
+                String("setDebuggerProperty"), _debugpy_condition_property_args(),
             )
         except e:
             print("dap: subprocess setDebuggerProperty:", String(e))
         # setBreakpoints per source path.
-        var paths = List[String]()
-        for i in range(len(self._subprocess.bp_paths)):
-            var p = self._subprocess.bp_paths[i]
-            var seen = False
-            for k in range(len(paths)):
-                if paths[k] == p:
-                    seen = True
-                    break
-            if not seen:
-                paths.append(p)
+        var paths = _distinct(self._subprocess.bp_paths)
         for i in range(len(paths)):
             var path = paths[i]
             var src = json_object()
@@ -2036,14 +2007,10 @@ struct DapManager(Copyable, Movable):
             except e:
                 print("dap: subprocess _configure setBreakpoints", path, ":", String(e))
         # setExceptionBreakpoints — same defaults as parent.
-        var ex_args = json_object()
-        var arr = json_array()
-        for i in range(len(self._exception_filters)):
-            arr.append(json_str(self._exception_filters[i]))
-        ex_args.put(String("filters"), arr^)
         try:
             _ = self._subprocess.client.send_request(
-                String("setExceptionBreakpoints"), ex_args^,
+                String("setExceptionBreakpoints"),
+                _exception_breakpoints_args(self._exception_filters),
             )
         except e:
             print("dap: subprocess _configure setExceptionBreakpoints:", String(e))
@@ -2053,8 +2020,7 @@ struct DapManager(Copyable, Movable):
                     String("configurationDone"), json_object(),
                 )
         except:
-            self._subprocess.state = _STATE_FAILED
-            self._subprocess.client.terminate()
+            self._fail_subprocess()
             return
         self._subprocess.state = _STATE_CONFIGURING
 
@@ -2455,8 +2421,7 @@ struct DapManager(Copyable, Movable):
         if frame_id != 0:
             args.put(String("frameId"), json_int(frame_id))
         args.put(String("context"), json_str(String("watch")))
-        var via_subprocess = self._last_inspect_in_subprocess \
-            and self._subprocess.state == _STATE_RUNNING
+        var via_subprocess = self._inspect_via_subprocess()
         var seq: Int
         try:
             if via_subprocess:
@@ -2549,12 +2514,9 @@ struct DapManager(Copyable, Movable):
         which other adapters don't recognize — gate on adapter name."""
         if self.adapter_name != String("debugpy"):
             return
-        var args = json_object()
-        args.put(String("skipSuspendOnBreakpointException"), json_array())
-        args.put(String("skipPrintBreakpointException"), json_array())
         try:
             _ = self.client.send_request(
-                String("setDebuggerProperty"), args^,
+                String("setDebuggerProperty"), _debugpy_condition_property_args(),
             )
         except e:
             print("dap: setDebuggerProperty (debugpy):", String(e))
@@ -3028,4 +2990,33 @@ def _parse_variables(body_opt: Optional[JsonValue]) -> List[DapVariable]:
         out.append(DapVariable(
             name_opt.value().as_str(), value, type_name, vref,
         ))
+    return out^
+
+
+def _debugpy_condition_property_args() -> JsonValue:
+    """``setDebuggerProperty`` arguments that stop pydevd from swallowing
+    exceptions raised while evaluating a breakpoint condition (see
+    ``_send_set_debugger_property_debugpy``)."""
+    var args = json_object()
+    args.put(String("skipSuspendOnBreakpointException"), json_array())
+    args.put(String("skipPrintBreakpointException"), json_array())
+    return args^
+
+
+def _exception_breakpoints_args(filters: List[String]) -> JsonValue:
+    """``setExceptionBreakpoints`` arguments for ``filters``."""
+    var arr = json_array()
+    for i in range(len(filters)):
+        arr.append(json_str(filters[i]))
+    var args = json_object()
+    args.put(String("filters"), arr^)
+    return args^
+
+
+def _distinct(items: List[String]) -> List[String]:
+    """``items`` with duplicates dropped, first-seen order kept."""
+    var out = List[String]()
+    for i in range(len(items)):
+        if items[i] not in out:
+            out.append(items[i])
     return out^
