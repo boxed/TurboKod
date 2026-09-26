@@ -19,6 +19,7 @@ from turbokod.type_ahead import TypeAhead, type_ahead_pick
 from turbokod.lsp import (
     LSP_NOTIFICATION, LSP_REQUEST, LSP_RESPONSE, LspClient, LspIncoming,
     LspProcess, _drop_prefix, _find_double_crlf, _parse_content_length,
+    capture_command,
     classify_message, lsp_initialize_params
 )
 from turbokod.lsp_dispatch import (
@@ -2203,7 +2204,21 @@ def test_taplo_publishes_diagnostics_after_workspace_configuration_probe() raise
         )
 
 
+def test_capture_command_survives_a_child_flooding_stderr() raises:
+    """A child that writes more than a pipe buffer to stderr before it
+    closes stdout. Draining stdout to EOF first used to deadlock: the
+    child blocked on the full stderr pipe and never closed stdout."""
+    var argv = List[String]()
+    argv.append(String("/bin/sh"))
+    argv.append(String("-c"))
+    argv.append(String("head -c 200000 /dev/zero | tr '\\0' x >&2; echo ok"))
+    var r = capture_command(argv)
+    assert_equal(r.stdout, String("ok\n"))
+    assert_equal(len(r.stderr.as_bytes()), 200000)
+
+
 def main() raises:
+    test_capture_command_survives_a_child_flooding_stderr()
     setup_test_env()
     test_rename_path_moves_file()
     test_downloadable_grammar_registry_has_elm()
@@ -2292,4 +2307,4 @@ def main() raises:
     test_lsp_initialize_against_mojo_lsp_server()
     test_ty_offers_quickfix_for_missing_any_import()
     test_taplo_publishes_diagnostics_after_workspace_configuration_probe()
-    print("lsp: 87 tests passed")
+    print("lsp: 88 tests passed")

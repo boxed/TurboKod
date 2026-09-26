@@ -147,24 +147,24 @@ struct CaptureResult(Movable):
     var status: Int32
 
 
-def capture_command(
-    argv: List[String], stdin_text: String = String(""),
-) raises -> CaptureResult:
-    """Run ``argv`` to completion, return ``(stdout, exit_status)``.
+def _spawn_piped(
+    argv: List[String], cwd: String,
+) raises -> Tuple[Int32, Int32, Int32, Int32]:
+    """``posix_spawnp`` ``argv`` with three pipes wired onto its stdin /
+    stdout / stderr, returning ``(pid, stdin_w, stdout_r, stderr_r)`` — the
+    parent-side ends. The child-side ends are closed in the parent right
+    after the spawn so EOF propagates when either side hangs up, and the
+    child is registered for SIGTERM-on-exit.
 
-    Stderr is read but discarded. The child inherits an allowlisted
-    parent environment (see ``_build_envp_from_parent``). Reads are
-    blocking and the call returns only after the child exits, so this
-    is unsuitable for long-running servers — use ``LspProcess`` for
-    those — but ideal for one-shot tools like ``rg`` or ``git``.
+    ``cwd`` (when non-empty) is the working directory the child starts in.
+    ``posix_spawn`` doesn't take a cwd argument portably, so we save the
+    parent's cwd, ``chdir`` to ``cwd`` across the spawn, then restore.
 
-    Raises if argv is empty or posix_spawnp fails. A non-zero
-    exit_status is **not** an error: command-line tools commonly use
-    exit 1 to mean "no results" (e.g., grep / rg with no matches), and
-    callers want to distinguish that from a spawn failure.
-    """
+    Raises if argv is empty or the spawn fails; nothing leaks either way."""
     if len(argv) == 0:
         raise Error("argv must not be empty")
+    # Parent's view: ``stdin_w`` writes to child stdin, ``stdout_r``
+    # reads child stdout, ``stderr_r`` reads child stderr.
     var pipes = stdio_pipes()
     var stdin_r = pipes[0]
     var stdin_w = pipes[1]
@@ -180,6 +180,8 @@ def capture_command(
         _ = close_fd(stdout_r); _ = close_fd(stdout_w)
         _ = close_fd(stderr_r); _ = close_fd(stderr_w)
         raise Error("posix_spawn_file_actions_init failed")
+    # Child side: dup pipe ends onto stdin/stdout/stderr, then close
+    # the parent ends in the child.
     _ = posix_spawn_file_actions_adddup2(fa, stdin_r,  Int32(0))
     _ = posix_spawn_file_actions_adddup2(fa, stdout_w, Int32(1))
     _ = posix_spawn_file_actions_adddup2(fa, stderr_w, Int32(2))
@@ -191,23 +193,73 @@ def capture_command(
     _ = posix_spawn_file_actions_addclose(fa, stderr_w)
 
     var argv_buf = _build_argv_buffer(argv)
+    # Forward the parent's environ. Critical for ``mojo-lsp-server``,
+    # which uses ``MODULAR_HOME`` (and friends) to locate its own
+    # ``std`` package; with an empty env it falls back to ``/opt/modular``,
+    # fails to read it, and rejects every document with "unable to
+    # locate module 'std'" — turning every definition request into ``[]``.
     var envp_buf = _build_envp_from_parent()
+    # Save parent cwd, chdir into ``cwd`` for the spawn, restore after.
+    # ``posix_spawn`` doesn't take a cwd portably; the child inherits
+    # whatever directory the parent is in at fork time, then exec'd.
+    # We restore unconditionally (even on spawn failure) so a failed
+    # LSP launch doesn't leave the editor in the project's directory.
+    var saved_cwd = String("")
+    var did_chdir = False
+    if len(cwd.as_bytes()) > 0:
+        saved_cwd = getcwd_path()
+        if Int(chdir_path(cwd)) == 0:
+            did_chdir = True
     var pid: Int32
     try:
         pid = posix_spawnp_call(
             argv_buf.pointers, envp_buf.pointers, fa, argv[0],
         )
     except:
+        if did_chdir and len(saved_cwd.as_bytes()) > 0:
+            _ = chdir_path(saved_cwd)
         _ = posix_spawn_file_actions_destroy(fa)
         _ = close_fd(stdin_r); _ = close_fd(stdin_w)
         _ = close_fd(stdout_r); _ = close_fd(stdout_w)
         _ = close_fd(stderr_r); _ = close_fd(stderr_w)
         raise Error("posix_spawnp failed")
+    if did_chdir and len(saved_cwd.as_bytes()) > 0:
+        _ = chdir_path(saved_cwd)
     _ = posix_spawn_file_actions_destroy(fa)
+    # Register the child so it gets SIGTERM if the parent dies on
+    # SIGHUP / SIGTERM / clean exit — see the Rust shim's child registry.
     track_child(pid)
+    # Close the child sides in the parent — the kernel keeps the pipe
+    # alive as long as either end is open, so leaving them open here
+    # would prevent EOF when the child closes its descriptor.
     _ = close_fd(stdin_r)
     _ = close_fd(stdout_w)
     _ = close_fd(stderr_w)
+    return (pid, stdin_w, stdout_r, stderr_r)
+
+
+def capture_command(
+    argv: List[String], stdin_text: String = String(""),
+) raises -> CaptureResult:
+    """Run ``argv`` to completion and return its stdout, stderr and raw
+    wait status.
+
+    The child inherits an allowlisted
+    parent environment (see ``_build_envp_from_parent``). Reads are
+    blocking and the call returns only after the child exits, so this
+    is unsuitable for long-running servers — use ``LspProcess`` for
+    those — but ideal for one-shot tools like ``rg`` or ``git``.
+
+    Raises if argv is empty or posix_spawnp fails. A non-zero
+    exit_status is **not** an error: command-line tools commonly use
+    exit 1 to mean "no results" (e.g., grep / rg with no matches), and
+    callers want to distinguish that from a spawn failure.
+    """
+    var spawned = _spawn_piped(argv, String(""))
+    var pid = spawned[0]
+    var stdin_w = spawned[1]
+    var stdout_r = spawned[2]
+    var stderr_r = spawned[3]
 
     # Send stdin (if any), then close to signal EOF — without this many
     # tools that read stdin (e.g. ``rg`` reading from stdin) would hang.
@@ -220,32 +272,56 @@ def capture_command(
         write_buffer(stdin_w, sb)
     _ = close_fd(stdin_w)
 
-    # Drain stdout + stderr to EOF (blocking reads). Capturing both —
-    # rather than discarding stderr — costs nothing since the drain has
-    # to happen anyway to keep the child from blocking on a full pipe,
-    # and lets git callers surface useful failure messages.
-    var out = _drain_to_eof(stdout_r)
-    var err = _drain_to_eof(stderr_r)
+    # Drain stdout + stderr to EOF together. Capturing stderr lets git
+    # callers surface useful failure messages, and draining the two in
+    # lockstep is what keeps a child that fills one pipe while we wait on
+    # the other from deadlocking us both.
+    var drained = _drain_both_to_eof(stdout_r, stderr_r)
     _ = close_fd(stdout_r)
     _ = close_fd(stderr_r)
+    var out = drained[0]
+    var err = drained[1]
 
     var status = waitpid_blocking(pid)
     untrack_child(pid)
     return CaptureResult(out^, err^, status)
 
 
-def _drain_to_eof(fd: Int32) -> String:
-    # Accumulate into a byte buffer and build the String once: ``out = out +
-    # chunk`` reallocated the whole drain per read (O(n^2)), and this drains
-    # ``rg`` / git output that can run to many MB.
-    var buf = List[UInt8]()
+def _drain_both_to_eof(out_fd: Int32, err_fd: Int32) -> Tuple[String, String]:
+    """Read two pipes to EOF, whichever has data first. Reading one to EOF
+    before starting the other deadlocks as soon as the child writes more
+    than a pipe buffer (~64 KB) to the second: it blocks on the full pipe
+    and never closes the first. Bytes accumulate in buffers and each
+    String is built once (``out = out + chunk`` was O(n^2) on the many-MB
+    ``rg`` / git output this drains)."""
+    var bufs = List[List[UInt8]]()
+    bufs.append(List[UInt8]())
+    bufs.append(List[UInt8]())
+    var fds = List[Int32]()
+    fds.append(out_fd)
+    fds.append(err_fd)
+    var open = List[Bool]()
+    open.append(True)
+    open.append(True)
     var scratch = alloc_zero_buffer(8192)
-    while True:
-        var n = read_into(fd, scratch, 8192)
-        if n <= 0:
-            break
-        append_string_bytes(buf, String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=scratch.unsafe_ptr(), length=n))))
-    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=len(buf))))
+    while open[0] or open[1]:
+        var progressed = False
+        for i in range(2):
+            if not open[i] or not poll_stdin(fds[i], Int32(0)):
+                continue
+            var n = read_into(fds[i], scratch, 8192)
+            if n <= 0:
+                open[i] = False
+            else:
+                bufs[i].extend(Span(scratch)[0:n])
+            progressed = True
+        if not progressed:
+            # Nothing ready: block briefly on whichever is still open.
+            _ = poll_stdin(fds[0] if open[0] else fds[1], Int32(20))
+    return (
+        String(StringSpan(unsafe_from_utf8=Span(bufs[0]))),
+        String(StringSpan(unsafe_from_utf8=Span(bufs[1]))),
+    )
 
 
 # --- LspProcess -----------------------------------------------------------
@@ -357,86 +433,12 @@ struct LspProcess(Copyable, Movable):
         the child's cwd as a fallback workspace root for module
         resolution when ``workspaceFolders`` is missing or ambiguous.
         """
-        if len(argv) == 0:
-            raise Error("argv must not be empty")
-        # Parent's view: ``stdin_w`` writes to child stdin, ``stdout_r``
-        # reads child stdout, ``stderr_r`` reads child stderr.
-        var pipes = stdio_pipes()
-        var stdin_r = pipes[0]
-        var stdin_w = pipes[1]
-        var stdout_r = pipes[2]
-        var stdout_w = pipes[3]
-        var stderr_r = pipes[4]
-        var stderr_w = pipes[5]
-
-        var fa = alloc_zero_buffer(POSIX_SPAWN_FILE_ACTIONS_SIZE)
-        var rc_init = posix_spawn_file_actions_init(fa)
-        if Int(rc_init) != 0:
-            _ = close_fd(stdin_r); _ = close_fd(stdin_w)
-            _ = close_fd(stdout_r); _ = close_fd(stdout_w)
-            _ = close_fd(stderr_r); _ = close_fd(stderr_w)
-            raise Error("posix_spawn_file_actions_init failed")
-        # Child side: dup pipe ends onto stdin/stdout/stderr, then close
-        # the parent ends in the child.
-        _ = posix_spawn_file_actions_adddup2(fa, stdin_r,  Int32(0))
-        _ = posix_spawn_file_actions_adddup2(fa, stdout_w, Int32(1))
-        _ = posix_spawn_file_actions_adddup2(fa, stderr_w, Int32(2))
-        _ = posix_spawn_file_actions_addclose(fa, stdin_w)
-        _ = posix_spawn_file_actions_addclose(fa, stdout_r)
-        _ = posix_spawn_file_actions_addclose(fa, stderr_r)
-        _ = posix_spawn_file_actions_addclose(fa, stdin_r)
-        _ = posix_spawn_file_actions_addclose(fa, stdout_w)
-        _ = posix_spawn_file_actions_addclose(fa, stderr_w)
-
-        var argv_buf = _build_argv_buffer(argv)
-        # Forward the parent's environ. Critical for ``mojo-lsp-server``,
-        # which uses ``MODULAR_HOME`` (and friends) to locate its own
-        # ``std`` package; with an empty env it falls back to ``/opt/modular``,
-        # fails to read it, and rejects every document with "unable to
-        # locate module 'std'" — turning every definition request into ``[]``.
-        var envp_buf = _build_envp_from_parent()
-        # Save parent cwd, chdir into ``cwd`` for the spawn, restore after.
-        # ``posix_spawn`` doesn't take a cwd portably; the child inherits
-        # whatever directory the parent is in at fork time, then exec'd.
-        # We restore unconditionally (even on spawn failure) so a failed
-        # LSP launch doesn't leave the editor in the project's directory.
-        var saved_cwd = String("")
-        var did_chdir = False
-        if len(cwd.as_bytes()) > 0:
-            saved_cwd = getcwd_path()
-            if Int(chdir_path(cwd)) == 0:
-                did_chdir = True
-        var pid: Int32
-        try:
-            pid = posix_spawnp_call(
-                argv_buf.pointers, envp_buf.pointers, fa, argv[0],
-            )
-        except:
-            if did_chdir and len(saved_cwd.as_bytes()) > 0:
-                _ = chdir_path(saved_cwd)
-            _ = posix_spawn_file_actions_destroy(fa)
-            _ = close_fd(stdin_r); _ = close_fd(stdin_w)
-            _ = close_fd(stdout_r); _ = close_fd(stdout_w)
-            _ = close_fd(stderr_r); _ = close_fd(stderr_w)
-            raise Error("posix_spawnp failed")
-        if did_chdir and len(saved_cwd.as_bytes()) > 0:
-            _ = chdir_path(saved_cwd)
-        _ = posix_spawn_file_actions_destroy(fa)
-        # Register the child so it gets SIGTERM if the parent dies on
-        # SIGHUP / SIGTERM / clean exit — see the Rust shim's child registry.
-        track_child(pid)
-        # Close the child sides in the parent — the kernel keeps the pipe
-        # alive as long as either end is open, so leaving them open here
-        # would prevent EOF when the child closes its descriptor.
-        _ = close_fd(stdin_r)
-        _ = close_fd(stdout_w)
-        _ = close_fd(stderr_w)
-
+        var spawned = _spawn_piped(argv, cwd)
         var proc = LspProcess()
-        proc.pid = pid
-        proc.stdin_fd = stdin_w
-        proc.stdout_fd = stdout_r
-        proc.stderr_fd = stderr_r
+        proc.pid = spawned[0]
+        proc.stdin_fd = spawned[1]
+        proc.stdout_fd = spawned[2]
+        proc.stderr_fd = spawned[3]
         proc.alive = True
         # Reading the stdout/stderr pipes non-blocking lets ``poll_message``
         # drain whatever's available in one shot without risking a hang.
