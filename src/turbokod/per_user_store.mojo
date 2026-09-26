@@ -9,7 +9,7 @@ each carry their own copy.
 """
 
 
-from .file_io import join_path, make_dir
+from .file_io import join_path, make_dir, write_file
 from .posix import getenv_value
 
 
@@ -60,3 +60,16 @@ def ensure_per_user_dir(project_root: String):
     var per_user = join_path(top, _DIR_PER_USER)
     make_dir(per_user)
     make_dir(join_path(per_user, current_username()))
+
+
+def write_per_user_file(
+    project_root: String, file_name: String, content: String,
+) -> Bool:
+    """Write ``content`` to ``file_name`` in the per-user dir, creating the
+    directory chain first. False for an empty root or a failed write —
+    the stores' callers retry on their next save."""
+    var path = per_user_path(project_root, file_name)
+    if len(path.as_bytes()) == 0:
+        return False
+    ensure_per_user_dir(project_root)
+    return write_file(path, content)

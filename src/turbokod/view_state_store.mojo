@@ -31,13 +31,13 @@ malformed or missing file silently yields an empty list.
 from std.collections.list import List
 
 from .file_io import (
-    load_json_object, project_absolute, project_relative, write_file,
+    load_json_object, project_absolute, project_relative,
 )
 from .json import (
     encode_json, json_array, json_object, json_str, json_get_string,
     encode_int_pair, read_int_pair,
 )
-from .per_user_store import ensure_per_user_dir, per_user_path
+from .per_user_store import per_user_path, write_per_user_file
 
 
 comptime VS_FILE = String("view_states.json")
@@ -122,8 +122,4 @@ def save_view_states(
     """Rewrite the per-user view-states file. Creates the directory
     chain (``.turbokod/per_user/<username>``) if missing. Returns the
     underlying ``write_file`` success bool."""
-    var path = _vs_path(project_root)
-    if len(path.as_bytes()) == 0:
-        return False
-    ensure_per_user_dir(project_root)
-    return write_file(path, encode_view_states(project_root, views))
+    return write_per_user_file(project_root, VS_FILE, encode_view_states(project_root, views))

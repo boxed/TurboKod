@@ -40,13 +40,13 @@ restore any drafts.
 
 from std.collections.list import List
 
-from .file_io import load_json_object, write_file
+from .file_io import load_json_object
 from .json import (
     JsonValue, encode_json, json_array, json_bool, json_int, json_object,
     json_str, json_get_bool, json_get_int, json_get_string, encode_int_pair,
     encode_int_quad, read_int_pair, read_int_quad,
 )
-from .per_user_store import ensure_per_user_dir, per_user_path
+from .per_user_store import per_user_path, write_per_user_file
 
 
 comptime DRAFTS_FILE = String("drafts.json")
@@ -187,8 +187,4 @@ def save_drafts(project_root: String, drafts: List[StoredDraft]) -> Bool:
     (``.turbokod/per_user/<username>``) if missing. Returns the
     underlying ``write_file`` success bool — the Desktop ignores
     failures (we'll retry next paint)."""
-    var path = _drafts_path(project_root)
-    if len(path.as_bytes()) == 0:
-        return False
-    ensure_per_user_dir(project_root)
-    return write_file(path, encode_drafts(drafts))
+    return write_per_user_file(project_root, DRAFTS_FILE, encode_drafts(drafts))

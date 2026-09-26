@@ -29,13 +29,13 @@ A malformed or missing file silently yields an empty list.
 from std.collections.list import List
 
 from .file_io import (
-    load_json_object, project_absolute, project_relative, write_file,
+    load_json_object, project_absolute, project_relative,
 )
 from .json import (
     encode_json, json_array, json_bool, json_int, json_object, json_str,
     json_get_bool, json_get_int, json_get_string,
 )
-from .per_user_store import ensure_per_user_dir, per_user_path
+from .per_user_store import per_user_path, write_per_user_file
 
 
 comptime BP_FILE = String("breakpoints.json")
@@ -141,8 +141,4 @@ def save_breakpoints(
     """Rewrite the per-user breakpoints file. Creates the directory
     chain (``.turbokod/per_user/<username>``) if missing. Returns the
     underlying ``write_file`` success bool."""
-    var path = _bp_path(project_root)
-    if len(path.as_bytes()) == 0:
-        return False
-    ensure_per_user_dir(project_root)
-    return write_file(path, encode_breakpoints(project_root, breakpoints))
+    return write_per_user_file(project_root, BP_FILE, encode_breakpoints(project_root, breakpoints))

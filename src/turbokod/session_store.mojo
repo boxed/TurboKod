@@ -32,14 +32,14 @@ just doesn't restore anything.
 
 from std.collections.list import List
 
-from .file_io import load_json_object, write_file
+from .file_io import load_json_object
 from .geometry import Rect
 from .json import (
     JsonValue, encode_json, json_array, json_bool, json_int, json_object,
     json_str, json_get_bool, json_get_int, json_get_string, encode_int_pair,
     encode_int_quad, read_int_pair, read_int_quad,
 )
-from .per_user_store import ensure_per_user_dir, per_user_path
+from .per_user_store import per_user_path, write_per_user_file
 
 
 comptime SESSION_FILE = String("session.json")
@@ -241,8 +241,4 @@ def save_session(project_root: String, session: Session) -> Bool:
     from ``session``. Creates the directory chain if missing. Returns
     the underlying ``write_file`` success bool — the Desktop ignores
     failures (the user can keep editing; we'll just retry next paint)."""
-    var path = _session_path(project_root)
-    if len(path.as_bytes()) == 0:
-        return False
-    ensure_per_user_dir(project_root)
-    return write_file(path, encode_session(session))
+    return write_per_user_file(project_root, SESSION_FILE, encode_session(session))
