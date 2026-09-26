@@ -21,20 +21,26 @@ Output is GNU-style unified diff with three lines of context, including
 
 from std.collections.list import List
 
-from .string_utils import split_lines
+from .string_utils import leading_indent_bytes, split_lines
 
 
 @fieldwise_init
 struct DiffOp(ImplicitlyCopyable, Movable):
     """One step of a line-level edit script.
 
-    ``kind``: 0 = equal, 1 = delete (line from a), 2 = insert (line from b).
+    ``kind``: ``OP_EQUAL``, ``OP_DELETE`` (line from a) or ``OP_INSERT``
+    (line from b).
     ``a_index`` / ``b_index`` are line indices into the inputs (-1 when not
     applicable, e.g. ``b_index`` for a delete).
     """
     var kind: Int
     var a_index: Int
     var b_index: Int
+
+
+comptime OP_EQUAL:  Int = 0
+comptime OP_DELETE: Int = 1
+comptime OP_INSERT: Int = 2
 
 
 def diff_lines(a: List[String], b: List[String]) -> List[DiffOp]:
@@ -112,20 +118,20 @@ def diff_lines(a: List[String], b: List[String]) -> List[DiffOp]:
         # Snake first (in reverse): walk diagonally down-left until either
         # x or y reaches the predecessor's coordinate.
         while x_cur > prev_x and y_cur > prev_y:
-            ops_rev.append(DiffOp(0, x_cur - 1, y_cur - 1))
+            ops_rev.append(DiffOp(OP_EQUAL, x_cur - 1, y_cur - 1))
             x_cur -= 1
             y_cur -= 1
         # Then the single non-diagonal step from (prev_x, prev_y).
         if x_cur > prev_x:
-            ops_rev.append(DiffOp(1, prev_x, -1))    # delete a[prev_x]
+            ops_rev.append(DiffOp(OP_DELETE, prev_x, -1))
         elif y_cur > prev_y:
-            ops_rev.append(DiffOp(2, -1, prev_y))    # insert b[prev_y]
+            ops_rev.append(DiffOp(OP_INSERT, -1, prev_y))
         x_cur = prev_x
         y_cur = prev_y
         d_cur -= 1
     # Common prefix (all equals) at d=0.
     while x_cur > 0 and y_cur > 0:
-        ops_rev.append(DiffOp(0, x_cur - 1, y_cur - 1))
+        ops_rev.append(DiffOp(OP_EQUAL, x_cur - 1, y_cur - 1))
         x_cur -= 1
         y_cur -= 1
 
@@ -187,7 +193,7 @@ def build_diff_rows(before: List[String], after: List[String]) -> List[DiffRow]:
     var i = 0
     var n = len(ops)
     while i < n:
-        if ops[i].kind == 0:
+        if ops[i].kind == OP_EQUAL:
             out.append(DiffRow(
                 ops[i].b_index, after[ops[i].b_index], DIFF_ROW_CONTEXT,
                 ops[i].b_index,
@@ -199,7 +205,7 @@ def build_diff_rows(before: List[String], after: List[String]) -> List[DiffRow]:
         var run_rem = List[Int]()
         var run_add = List[Int]()
         while i < n and ops[i].kind != 0:
-            if ops[i].kind == 1:
+            if ops[i].kind == OP_DELETE:
                 run_rem.append(ops[i].a_index)
             else:
                 run_add.append(ops[i].b_index)
@@ -228,10 +234,7 @@ def _codepoints_with_offsets(s: String) -> Tuple[List[String], List[Int]]:
         var j = i + 1
         while j < n and (Int(b[j]) & 0xC0) == 0x80:
             j += 1
-        var buf = List[UInt8]()
-        for k in range(i, j):
-            buf.append(b[k])
-        cps.append(String(StringSpan(unsafe_from_utf8=Span(buf))))
+        cps.append(String(StringSpan(unsafe_from_utf8=b[i:j])))
         i = j
     offs.append(n)
     return (cps^, offs^)
@@ -252,44 +255,24 @@ def intraline_ranges(
     ref b_cp = bo[0]
     ref b_off = bo[1]
     var ops = diff_lines(a_cp, b_cp)
-    var del_lo = -1
-    var del_hi = -1
-    var ins_lo = -1
-    var ins_hi = -1
     for i in range(len(ops)):
-        if ops[i].kind == 1:        # delete (old codepoint)
-            var lo = a_off[ops[i].a_index]
-            var hi = a_off[ops[i].a_index + 1]
-            if del_lo >= 0 and del_hi == lo:
-                del_hi = hi
-            else:
-                if del_lo >= 0:
-                    old_out.append((del_lo, del_hi))
-                del_lo = lo
-                del_hi = hi
-        elif ops[i].kind == 2:      # insert (new codepoint)
-            var lo = b_off[ops[i].b_index]
-            var hi = b_off[ops[i].b_index + 1]
-            if ins_lo >= 0 and ins_hi == lo:
-                ins_hi = hi
-            else:
-                if ins_lo >= 0:
-                    new_out.append((ins_lo, ins_hi))
-                ins_lo = lo
-                ins_hi = hi
-        else:                       # equal — flush both pending runs
-            if del_lo >= 0:
-                old_out.append((del_lo, del_hi))
-                del_lo = -1
-                del_hi = -1
-            if ins_lo >= 0:
-                new_out.append((ins_lo, ins_hi))
-                ins_lo = -1
-                ins_hi = -1
-    if del_lo >= 0:
-        old_out.append((del_lo, del_hi))
-    if ins_lo >= 0:
-        new_out.append((ins_lo, ins_hi))
+        if ops[i].kind == OP_DELETE:
+            var k = ops[i].a_index
+            _push_merged(old_out, a_off[k], a_off[k + 1])
+        elif ops[i].kind == OP_INSERT:
+            var k = ops[i].b_index
+            _push_merged(new_out, b_off[k], b_off[k + 1])
+
+
+def _push_merged(mut out: List[Tuple[Int, Int]], lo: Int, hi: Int):
+    """Append ``[lo, hi)``, extending the last range instead when it ends
+    exactly at ``lo``. Same-side edits split by an equal codepoint can't
+    touch — the equal one sits between them — so adjacency is exactly
+    "contiguous edit"."""
+    if len(out) > 0 and out[len(out) - 1][1] == lo:
+        out[len(out) - 1] = (out[len(out) - 1][0], hi)
+    else:
+        out.append((lo, hi))
 
 
 def _lstrip_ws(s: String) -> String:
@@ -299,10 +282,7 @@ def _lstrip_ws(s: String) -> String:
     (8 shared spaces over a ~16-char line), which is enough to mis-pair
     unrelated lines in a restructured block."""
     var b = s.as_bytes()
-    var i = 0
-    while i < len(b) and (b[i] == 0x20 or b[i] == 0x09):
-        i += 1
-    return String(StringSpan(unsafe_from_utf8=b[i:len(b)]))
+    return String(StringSpan(unsafe_from_utf8=b[leading_indent_bytes(s):len(b)]))
 
 
 def _line_similarity(a: String, b: String) -> Float64:
@@ -320,7 +300,7 @@ def _line_similarity(a: String, b: String) -> Float64:
     var ops = diff_lines(a_cp, b_cp)
     var common = 0
     for i in range(len(ops)):
-        if ops[i].kind == 0:
+        if ops[i].kind == OP_EQUAL:
             common += 1
     return Float64(common) / Float64(denom)
 
@@ -484,7 +464,7 @@ def unified_diff(
     var n = len(ops)
     while i < n:
         # Skip leading equals.
-        while i < n and ops[i].kind == 0:
+        while i < n and ops[i].kind == OP_EQUAL:
             i += 1
         if i >= n:
             break
@@ -492,7 +472,7 @@ def unified_diff(
         var hunk_start = i
         var leading = 0
         while leading < context and hunk_start > 0 \
-                and ops[hunk_start - 1].kind == 0:
+                and ops[hunk_start - 1].kind == OP_EQUAL:
             hunk_start -= 1
             leading += 1
         # Extend forward, swallowing runs of equals shorter than 2*context.
@@ -502,7 +482,7 @@ def unified_diff(
                 hunk_end += 1
                 continue
             var run_start = hunk_end
-            while hunk_end < n and ops[hunk_end].kind == 0:
+            while hunk_end < n and ops[hunk_end].kind == OP_EQUAL:
                 hunk_end += 1
             var run_len = hunk_end - run_start
             if hunk_end >= n or run_len > 2 * context:
@@ -519,14 +499,14 @@ def unified_diff(
         var b_count = 0
         for j in range(hunk_start, hunk_end):
             var op = ops[j]
-            if op.kind == 0:
+            if op.kind == OP_EQUAL:
                 if a_first < 0:
                     a_first = op.a_index
                 if b_first < 0:
                     b_first = op.b_index
                 a_count += 1
                 b_count += 1
-            elif op.kind == 1:
+            elif op.kind == OP_DELETE:
                 if a_first < 0:
                     a_first = op.a_index
                 a_count += 1
@@ -546,7 +526,7 @@ def unified_diff(
         var j = hunk_start
         while j < hunk_end:
             var op = ops[j]
-            if op.kind == 0:
+            if op.kind == OP_EQUAL:
                 out += String(" ") + a_lines[op.a_index] + String("\n")
                 j += 1
                 continue
@@ -554,10 +534,10 @@ def unified_diff(
             while run_end < hunk_end and ops[run_end].kind != 0:
                 run_end += 1
             for k in range(j, run_end):
-                if ops[k].kind == 1:
+                if ops[k].kind == OP_DELETE:
                     out += String("-") + a_lines[ops[k].a_index] + String("\n")
             for k in range(j, run_end):
-                if ops[k].kind == 2:
+                if ops[k].kind == OP_INSERT:
                     out += String("+") + b_lines[ops[k].b_index] + String("\n")
             j = run_end
         i = hunk_end
@@ -616,6 +596,13 @@ struct MergeRegion(Copyable, Movable):
     var base_lines: List[String]
 
 
+def _append_range(
+    mut dst: List[String], src: List[String], lo: Int, hi: Int,
+):
+    for k in range(lo, hi):
+        dst.append(src[k])
+
+
 def _equal_match_map(ops: List[DiffOp], a_len: Int) -> List[Int]:
     """For each index ``i`` in the ``a`` input of a Myers diff, return
     the matching index in ``b`` (when ``ops`` contains a kind==0 op for
@@ -624,7 +611,7 @@ def _equal_match_map(ops: List[DiffOp], a_len: Int) -> List[Int]:
     for _ in range(a_len):
         out.append(-1)
     for i in range(len(ops)):
-        if ops[i].kind == 0 and ops[i].a_index >= 0:
+        if ops[i].kind == OP_EQUAL and ops[i].a_index >= 0:
             out[ops[i].a_index] = ops[i].b_index
     return out^
 
@@ -776,24 +763,19 @@ def diff3_merge(
 
     for r in regions:
         if r.kind == CHUNK_BASE:
-            for k in range(r.b_lo, r.b_hi):
-                out_lines.append(base[k])
+            _append_range(out_lines, base, r.b_lo, r.b_hi)
         elif r.kind == CHUNK_THEIRS:
-            for k in range(r.t_lo, r.t_hi):
-                out_lines.append(theirs[k])
+            _append_range(out_lines, theirs, r.t_lo, r.t_hi)
         elif r.kind == CHUNK_OURS:
-            for k in range(r.o_lo, r.o_hi):
-                out_lines.append(ours[k])
+            _append_range(out_lines, ours, r.o_lo, r.o_hi)
         else:
             if first_conflict_row < 0:
                 first_conflict_row = len(out_lines)
             conflicts += 1
             out_lines.append(String("<<<<<<< ") + ours_label)
-            for k in range(r.o_lo, r.o_hi):
-                out_lines.append(ours[k])
+            _append_range(out_lines, ours, r.o_lo, r.o_hi)
             out_lines.append(String("======="))
-            for k in range(r.t_lo, r.t_hi):
-                out_lines.append(theirs[k])
+            _append_range(out_lines, theirs, r.t_lo, r.t_hi)
             out_lines.append(String(">>>>>>> ") + theirs_label)
         if r.anchor_line >= 0:
             out_lines.append(base[r.anchor_line])
@@ -825,14 +807,11 @@ def diff3_regions(
 
     for r in regions:
         if r.kind == CHUNK_BASE:
-            for k in range(r.b_lo, r.b_hi):
-                pending.append(base[k])
+            _append_range(pending, base, r.b_lo, r.b_hi)
         elif r.kind == CHUNK_THEIRS:
-            for k in range(r.t_lo, r.t_hi):
-                pending.append(theirs[k])
+            _append_range(pending, theirs, r.t_lo, r.t_hi)
         elif r.kind == CHUNK_OURS:
-            for k in range(r.o_lo, r.o_hi):
-                pending.append(ours[k])
+            _append_range(pending, ours, r.o_lo, r.o_hi)
         else:
             # Genuine conflict — flush the pending stable run first so
             # region order matches document order.
@@ -843,14 +822,11 @@ def diff3_regions(
                 ))
                 pending = List[String]()
             var ours_slice = List[String]()
-            for k in range(r.o_lo, r.o_hi):
-                ours_slice.append(ours[k])
+            _append_range(ours_slice, ours, r.o_lo, r.o_hi)
             var theirs_slice = List[String]()
-            for k in range(r.t_lo, r.t_hi):
-                theirs_slice.append(theirs[k])
+            _append_range(theirs_slice, theirs, r.t_lo, r.t_hi)
             var base_slice = List[String]()
-            for k in range(r.b_lo, r.b_hi):
-                base_slice.append(base[k])
+            _append_range(base_slice, base, r.b_lo, r.b_hi)
             out.append(MergeRegion(
                 REGION_CONFLICT, List[String](),
                 ours_slice^, theirs_slice^, base_slice^,

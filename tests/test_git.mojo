@@ -16,7 +16,7 @@ from turbokod.colors import (
 )
 from turbokod.theme import built_in_themes
 from turbokod.diff import (
-    DIFF_ROW_ADDED, DIFF_ROW_CONTEXT, DIFF_ROW_REMOVED, DiffRow, MergeRegion,
+    OP_DELETE, OP_EQUAL, OP_INSERT, DIFF_ROW_ADDED, DIFF_ROW_CONTEXT, DIFF_ROW_REMOVED, DiffRow, MergeRegion,
     REGION_CONFLICT, REGION_STABLE, build_diff_rows, diff3_merge,
     diff3_regions, diff_lines, diff_row_emphasis, diff_row_line_label,
     diff_row_partner, intraline_ranges, unified_diff
@@ -782,9 +782,9 @@ def test_diff_lines_pure_insert() raises:
     var inserts = 0
     var deletes = 0
     for i in range(len(ops)):
-        if ops[i].kind == 0:
+        if ops[i].kind == OP_EQUAL:
             equals += 1
-        elif ops[i].kind == 1:
+        elif ops[i].kind == OP_DELETE:
             deletes += 1
         else:
             inserts += 1
@@ -807,9 +807,9 @@ def test_diff_lines_pure_delete() raises:
     var inserts = 0
     var deletes = 0
     for i in range(len(ops)):
-        if ops[i].kind == 0:
+        if ops[i].kind == OP_EQUAL:
             equals += 1
-        elif ops[i].kind == 1:
+        elif ops[i].kind == OP_DELETE:
             deletes += 1
         else:
             inserts += 1
@@ -835,9 +835,9 @@ def test_diff_lines_replace_round_trips() raises:
     # should match b exactly when the script is applied.
     var produced = List[String]()
     for i in range(len(ops)):
-        if ops[i].kind == 0:
+        if ops[i].kind == OP_EQUAL:
             produced.append(a[ops[i].a_index])
-        elif ops[i].kind == 2:
+        elif ops[i].kind == OP_INSERT:
             produced.append(b[ops[i].b_index])
     assert_equal(len(produced), len(b))
     for i in range(len(b)):

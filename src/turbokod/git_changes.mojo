@@ -19,7 +19,7 @@ discarded by ``capture_command`` and we return an empty string.
 from std.collections.list import List
 from std.collections.optional import Optional
 
-from .diff import diff_lines
+from .diff import OP_DELETE, OP_EQUAL, diff_lines
 from .file_io import find_git_project, join_path, project_relative, stat_file
 from .lsp import capture_command
 from .string_utils import (
@@ -122,7 +122,7 @@ def compute_revert_block(
     var i = 0
     var n = len(ops)
     while i < n:
-        if ops[i].kind == 0:
+        if ops[i].kind == OP_EQUAL:
             i += 1
             continue
         # Scan the whole non-equal run.
@@ -135,7 +135,7 @@ def compute_revert_block(
         var head_start = -1
         var head_end_excl = -1
         for j in range(run_start, i):
-            if ops[j].kind == 1:    # delete from a (head)
+            if ops[j].kind == OP_DELETE:    # delete from a (head)
                 if head_start == -1:
                     head_start = ops[j].a_index
                 head_end_excl = ops[j].a_index + 1
@@ -362,7 +362,7 @@ def diff_buffer_marks(
     # a following pure-deletion run sits just below. -1 before any row.
     var last_buf_row = -1
     while i < n:
-        if ops[i].kind == 0:
+        if ops[i].kind == OP_EQUAL:
             last_buf_row = ops[i].b_index
             i += 1
             continue
@@ -376,7 +376,7 @@ def diff_buffer_marks(
         var ins_bi = List[Int]()      # buffer rows inserted in this run
         var del_ai = List[Int]()      # head rows deleted in this run
         while i < n and ops[i].kind != 0:
-            if ops[i].kind == 1:
+            if ops[i].kind == OP_DELETE:
                 del_ai.append(ops[i].a_index)
             elif 0 <= ops[i].b_index and ops[i].b_index < nb:
                 ins_bi.append(ops[i].b_index)
@@ -450,7 +450,7 @@ def compute_deletion_revert_block(
     var n = len(ops)
     var last_buf_row = -1
     while i < n:
-        if ops[i].kind == 0:
+        if ops[i].kind == OP_EQUAL:
             last_buf_row = ops[i].b_index
             i += 1
             continue
@@ -459,7 +459,7 @@ def compute_deletion_revert_block(
         var head_end_excl = -1
         var has_ins = False
         while i < n and ops[i].kind != 0:
-            if ops[i].kind == 1:
+            if ops[i].kind == OP_DELETE:
                 if head_start == -1:
                     head_start = ops[i].a_index
                 head_end_excl = ops[i].a_index + 1
