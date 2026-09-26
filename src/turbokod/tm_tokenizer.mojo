@@ -42,6 +42,7 @@ from .onig import (
     OnigMatch, OnigRegex,
     ONIG_OPTION_NONE, ONIG_OPTION_NOT_BEGIN_POSITION,
 )
+from .search_options import regex_escape_literal
 from .string_utils import byte_slice, starts_with
 from .tm_grammar import (
     Capture, Grammar, Pattern,
@@ -849,24 +850,6 @@ def _extract_group_texts(m: OnigMatch, line: String) -> List[String]:
     return out^
 
 
-def _escape_regex_literal(s: String) -> String:
-    """Escape the regex metacharacters in ``s`` so it matches literally
-    when spliced into a pattern. A captured tag name is normally bare
-    word characters, but escaping keeps a capture that happens to hold
-    ``.``/``(``/etc. from changing the recompiled end regex's meaning."""
-    var out = List[UInt8]()
-    for b in s.as_bytes():
-        var c = Int(b)
-        # ASCII metacharacters that need a backslash in libonig.
-        if c == 0x5C or c == 0x2E or c == 0x5E or c == 0x24 \
-                or c == 0x2A or c == 0x2B or c == 0x3F or c == 0x28 \
-                or c == 0x29 or c == 0x5B or c == 0x5D or c == 0x7B \
-                or c == 0x7D or c == 0x7C or c == 0x2F:
-            out.append(0x5C)
-        out.append(b)
-    return String(StringSpan(unsafe_from_utf8=Span(out)))
-
-
 def _substitute_backrefs(src: String, groups: List[String]) -> String:
     """Replace ``\\1``..``\\9`` in ``src`` with the regex-escaped text of
     the corresponding begin-match group, leaving ``\\\\`` (escaped
@@ -883,7 +866,7 @@ def _substitute_backrefs(src: String, groups: List[String]) -> String:
             if d >= 0x31 and d <= 0x39:  # '1'..'9'
                 var gi = d - 0x30
                 if gi < len(groups):
-                    out.extend(_escape_regex_literal(groups[gi]).as_bytes())
+                    out.extend(regex_escape_literal(groups[gi]).as_bytes())
                 # else: out of range → empty substitution
                 i += 2
                 continue

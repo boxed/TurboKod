@@ -29,7 +29,7 @@ grammar misbehaves):
 from std.collections.list import List
 
 from .file_io import read_file
-from .json import JsonValue, parse_json
+from .json import JsonValue, json_get_string, parse_json
 from .onig import OnigRegex
 from .string_utils import parse_int_all
 
@@ -574,11 +574,7 @@ def _compile_pattern(
         # Defensive: a malformed grammar shouldn't crash the editor.
         # Append a no-op INCLUDE that points at a non-existent key
         # so the tokenizer skips it.
-        patterns.append(Pattern(
-            PATTERN_INCLUDE, String(""), String(""), -1, -1,
-            List[Int](), String("__none__"),
-        ))
-        return len(patterns) - 1
+        return _append_dead_pattern(patterns)
 
     # ``include``: store and return; no regexes to compile.
     # Also: if the include's target is an external grammar scope
@@ -619,8 +615,8 @@ def _compile_pattern(
             )
             return idx
 
-    var name_str = _string_or_empty(node, String("name"))
-    var content_name = _string_or_empty(node, String("contentName"))
+    var name_str = json_get_string(node, String("name"))
+    var content_name = json_get_string(node, String("contentName"))
 
     var match_v = node.object_get(String("match"))
     var begin_v = node.object_get(String("begin"))
@@ -648,11 +644,7 @@ def _compile_pattern(
             ))
             return len(patterns) - 1
         except:
-            patterns.append(Pattern(
-                PATTERN_INCLUDE, String(""), String(""), -1, -1,
-                List[Int](), String("__none__"),
-            ))
-            return len(patterns) - 1
+            return _append_dead_pattern(patterns)
 
     if begin_v:
         var begin_str = begin_v.value().as_str()
@@ -663,11 +655,7 @@ def _compile_pattern(
         var while_v = node.object_get(String("while"))
         if not end_v and not while_v:
             # ``begin`` without either is malformed — skip.
-            patterns.append(Pattern(
-                PATTERN_INCLUDE, String(""), String(""), -1, -1,
-                List[Int](), String("__none__"),
-            ))
-            return len(patterns) - 1
+            return _append_dead_pattern(patterns)
         var second_str: String
         var pattern_kind: UInt8
         if end_v:
@@ -689,11 +677,7 @@ def _compile_pattern(
             regexes.append(second_rx^)
             end_idx = len(regexes) - 1
         except:
-            patterns.append(Pattern(
-                PATTERN_INCLUDE, String(""), String(""), -1, -1,
-                List[Int](), String("__none__"),
-            ))
-            return len(patterns) - 1
+            return _append_dead_pattern(patterns)
 
         # Nested patterns must be compiled before the parent is
         # appended so we know each child's index. Otherwise the
@@ -788,6 +772,13 @@ def _compile_pattern(
         ))
         return len(patterns) - 1
     # Truly empty entry — fall back to a no-op include.
+    return _append_dead_pattern(patterns)
+
+
+def _append_dead_pattern(mut patterns: List[Pattern]) -> Int:
+    """Append a no-op INCLUDE of the non-existent ``__none__`` key — what
+    a malformed or uncompilable entry becomes, so the tokenizer skips it
+    instead of the whole grammar failing to load — and return its index."""
     patterns.append(Pattern(
         PATTERN_INCLUDE, String(""), String(""), -1, -1,
         List[Int](), String("__none__"),
@@ -871,15 +862,3 @@ def _parse_captures(
             continue
         out.append(Capture(idx, name_str^, nested^))
     return out^
-
-
-
-
-def _string_or_empty(node: JsonValue, key: String) -> String:
-    var v = node.object_get(key)
-    if not v:
-        return String("")
-    var sv = v.value().copy()
-    if not sv.is_string():
-        return String("")
-    return sv.as_str()

@@ -62,22 +62,19 @@ def regex_escape_literal(needle: String) -> String:
     when the user has opted into whole-word or case-insensitive but
     *not* regex — we still need a regex to express the boundary or
     ``(?i)`` flag, so the literal needle is escaped first."""
-    var out = String("")
-    var b = needle.as_bytes()
-    for i in range(len(b)):
-        var c = Int(b[i])
-        # Conservative set: every metachar libonig recognizes in the
-        # default syntax, plus a backslash for the escape itself.
-        if c == 0x5C or c == 0x5E or c == 0x24 or c == 0x2E \
-                or c == 0x7C or c == 0x3F or c == 0x2A or c == 0x2B \
-                or c == 0x28 or c == 0x29 or c == 0x5B or c == 0x5D \
-                or c == 0x7B or c == 0x7D:
-            out = out + String("\\")
-        var ch = chr(c) if c < 0x80 else String(StringSpan(
-            unsafe_from_utf8=b[i:i + 1],
-        ))
-        out = out + ch
-    return out
+    var out = List[UInt8]()
+    for b in needle.as_bytes():
+        var c = Int(b)
+        # Every metachar libonig recognizes in the default syntax, the
+        # backslash for the escape itself, and ``/`` (harmless escaped,
+        # and a delimiter in some grammar contexts).
+        if c == 0x5C or c == 0x2E or c == 0x5E or c == 0x24 \
+                or c == 0x2A or c == 0x2B or c == 0x3F or c == 0x28 \
+                or c == 0x29 or c == 0x5B or c == 0x5D or c == 0x7B \
+                or c == 0x7D or c == 0x7C or c == 0x2F:
+            out.append(0x5C)
+        out.append(b)
+    return String(StringSpan(unsafe_from_utf8=Span(out)))
 
 
 def build_search_regex(

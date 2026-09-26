@@ -371,25 +371,7 @@ def contains_ci(haystack: String, needle: String) -> Bool:
 
 def eq_ci(a: String, b: String) -> Bool:
     """ASCII case-insensitive string equality."""
-    var ab = a.as_bytes()
-    var bb = b.as_bytes()
-    var n = len(ab)
-    if n != len(bb):
-        return False
-    var pa = ab.unsafe_ptr()
-    var pb = bb.unsafe_ptr()
-    var diff = SIMD[DType.uint8, FOLD_W](0)
-    var i = 0
-    while i + FOLD_W <= n:
-        diff |= _fold_vec(pa.unsafe_offset(i).unsafe_load[width=FOLD_W]()) ^ _fold_vec(
-            pb.unsafe_offset(i).unsafe_load[width=FOLD_W]()
-        )
-        i += FOLD_W
-    var acc = diff.reduce_or()
-    while i < n:
-        acc |= fold_byte(pa[unsafe_offset=i]) ^ fold_byte(pb[unsafe_offset=i])
-        i += 1
-    return acc == 0
+    return len(a.as_bytes()) == len(b.as_bytes()) and starts_with_ci(a, b)
 
 
 def starts_with_ci(name: String, prefix: String) -> Bool:

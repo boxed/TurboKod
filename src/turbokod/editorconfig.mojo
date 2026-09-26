@@ -25,7 +25,7 @@ they show up rarely and the spec marks them optional.
 from std.collections.list import List
 
 from .case_fold import fold_ascii
-from .file_io import join_path, parent_path, read_file, stat_file
+from .file_io import basename, join_path, parent_path, read_file, stat_file
 from .posix import realpath
 from .string_utils import byte_slice, parse_int_all, starts_with
 
@@ -564,15 +564,7 @@ def _abs_file(file_path: String) -> String:
     var parent = parent_path(file_path)
     var parent_abs = realpath(parent)
     if len(parent_abs.as_bytes()) > 0:
-        # basename(): inline a simple last-segment extraction so we don't
-        # need to widen file_io's surface here.
-        var bytes = file_path.as_bytes()
-        var n = len(bytes)
-        var i = n - 1
-        while i >= 0 and bytes[i] != 0x2F:
-            i -= 1
-        var name = byte_slice(file_path, i + 1, n)
-        return join_path(parent_abs, name)
+        return join_path(parent_abs, basename(file_path))
     return file_path
 
 

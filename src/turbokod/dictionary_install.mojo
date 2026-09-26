@@ -24,9 +24,8 @@ fresh install / remove takes effect without restart.
 """
 
 from std.collections.list import List
-from std.ffi import external_call
 
-from .file_io import list_directory, stat_file
+from .file_io import delete_path, list_directory, stat_file
 from .posix import getenv_value
 from .string_utils import shell_single_quote
 
@@ -181,6 +180,4 @@ def remove_user_dictionary(language_id: String) -> Bool:
         return False
     if not stat_file(path).ok:
         return True
-    var c_path = path + String("\0")
-    var rc = external_call["unlink", Int32](c_path.unsafe_ptr())
-    return Int(rc) == 0
+    return delete_path(path)
