@@ -16,7 +16,7 @@ input. The caller wraps the call in ``if picker_nav_key(...): self._scroll_to_se
 """
 
 from .events import (
-    KEY_DOWN, KEY_PAGEDOWN, KEY_PAGEUP, KEY_UP,
+    Event, KEY_DOWN, KEY_PAGEDOWN, KEY_PAGEUP, KEY_UP, MOUSE_BUTTON_LEFT,
     MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
@@ -124,3 +124,19 @@ def picker_wheel_scroll(
                 scroll = max_scroll
         return True
     return False
+
+
+def picker_row_at(
+    event: Event, rect: Rect, layout: PickerLayout, scroll: Int, count: Int,
+) -> Int:
+    """The list row a left press lands on, or -1 — for a press elsewhere,
+    another button, a release or motion, or a click past the last row."""
+    if event.button != MOUSE_BUTTON_LEFT or not event.pressed or event.motion:
+        return -1
+    if not rect.contains(event.pos):
+        return -1
+    var r = event.pos.y - layout.list_top
+    if r < 0 or r >= layout.list_height:
+        return -1
+    var idx = scroll + r
+    return idx if idx < count else -1

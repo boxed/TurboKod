@@ -33,15 +33,11 @@ from std.collections.optional import Optional
 from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, RED, YELLOW
-from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_ENTER, KEY_ESC,
-    MOUSE_BUTTON_LEFT,
-)
+from .events import Event, EVENT_KEY, EVENT_MOUSE, KEY_ENTER, KEY_ESC
 from .file_io import ci_less, project_relative
 from .geometry import center_in, Point, Rect
 from .picker_input import (
-    build_picker_layout, picker_nav_key, picker_wheel_scroll,
+    build_picker_layout, picker_nav_key, picker_row_at, picker_wheel_scroll,
     scroll_to_reveal,
 )
 from .string_utils import (
@@ -713,17 +709,10 @@ struct FindSymbol(Movable):
                 layout.list_height,
             ):
                 return True
-        if event.button != MOUSE_BUTTON_LEFT:
-            return True
-        if not event.pressed or event.motion:
-            return True
-        if not rect.contains(event.pos):
-            return True
-        if event.pos.y < layout.list_top \
-                or event.pos.y >= layout.list_top + layout.list_height:
-            return True
-        var idx = self.scroll + (event.pos.y - layout.list_top)
-        if idx < 0 or idx >= len(self.entries):
+        var idx = picker_row_at(
+            event, rect, layout, self.scroll, len(self.entries),
+        )
+        if idx < 0:
             return True
         if idx == self.selected:
             var entry = self.entries[idx]

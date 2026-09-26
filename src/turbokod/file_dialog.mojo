@@ -29,8 +29,7 @@ from .painter import Painter
 from .colors import Attr, BLACK, BLUE, BORDER_FOCUS, GREEN, LIGHT_GRAY
 from .dir_browser import DirBrowser
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE, KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC,
-    KEY_UP, KEY_PAGEDOWN, KEY_PAGEUP,
+    Event, EVENT_KEY, EVENT_MOUSE, KEY_BACKSPACE, KEY_ENTER, KEY_ESC,
 )
 from .file_io import join_path
 from .geometry import Point, Rect
@@ -237,17 +236,7 @@ struct FileDialog(Movable):
         if k == KEY_ESC:
             self.close()
             return True
-        if k == KEY_UP:
-            self.browser.move_by(-1, list_h)
-            return True
-        if k == KEY_DOWN:
-            self.browser.move_by(1, list_h)
-            return True
-        if k == KEY_PAGEUP:
-            self.browser.move_by(-10, list_h)
-            return True
-        if k == KEY_PAGEDOWN:
-            self.browser.move_by(10, list_h)
+        if self.browser.handle_nav_key(k, list_h):
             return True
         if k == KEY_BACKSPACE:
             self.browser.ascend()

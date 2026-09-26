@@ -22,11 +22,8 @@ from .colors import (
     Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, LIGHT_GREEN, WHITE, YELLOW,
 )
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME,
-    KEY_PAGEDOWN, KEY_PAGEUP, KEY_UP,
-    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_BUTTON_RIGHT,
-    MOUSE_WHEEL_UP, MOUSE_WHEEL_DOWN,
+    Event, EVENT_KEY, EVENT_MOUSE, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME,
+    KEY_UP, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_BUTTON_RIGHT,
 )
 from .file_io import (
     join_path, list_directory, project_relative, sort_directory_listing,
@@ -35,6 +32,7 @@ from .file_io import (
 from .geometry import Point, Rect
 from .project import GitignoreMatcher, load_project_gitignore
 from .type_ahead import TypeAhead, is_type_ahead_key, type_ahead_pick
+from .picker_input import picker_nav_key, picker_wheel_scroll, scroll_to_reveal
 
 
 comptime FILE_TREE_WIDTH: Int = 28
@@ -399,30 +397,12 @@ struct FileTree(Movable):
         if event.key == KEY_ESC:
             self.focused = False
             return True
-        if event.key == KEY_UP:
-            if self.selected > 0:
-                self.selected -= 1
-            elif self.selected < 0 and len(self.entries) > 0:
-                self.selected = 0
+        # With nothing selected yet, Up lands on the first row like Down.
+        if event.key == KEY_UP and self.selected < 0 and len(self.entries) > 0:
+            self.selected = 0
             self._scroll_to_selection()
             return True
-        if event.key == KEY_DOWN:
-            if self.selected < 0 and len(self.entries) > 0:
-                self.selected = 0
-            elif self.selected + 1 < len(self.entries):
-                self.selected += 1
-            self._scroll_to_selection()
-            return True
-        if event.key == KEY_PAGEUP:
-            self.selected -= 10
-            if self.selected < 0:
-                self.selected = 0
-            self._scroll_to_selection()
-            return True
-        if event.key == KEY_PAGEDOWN:
-            self.selected += 10
-            if self.selected >= len(self.entries):
-                self.selected = len(self.entries) - 1
+        if picker_nav_key(event.key, len(self.entries), self.selected):
             self._scroll_to_selection()
             return True
         if event.key == KEY_HOME:
@@ -476,13 +456,8 @@ struct FileTree(Movable):
 
     def _scroll_to_selection(mut self):
         # Height of the listing as last painted (10 until the first paint).
-        var visible = self._list_h
-        if self.selected < 0:
-            return
-        if self.selected < self.scroll:
-            self.scroll = self.selected
-        elif self.selected >= self.scroll + visible:
-            self.scroll = self.selected - visible + 1
+        if self.selected >= 0:
+            self.scroll = scroll_to_reveal(self.scroll, self.selected, self._list_h)
 
     def is_on_resize_edge(self, pos: Point, container_bounds: Rect) -> Bool:
         """Hit-test for the separator column — the row-tall handle the
@@ -535,21 +510,9 @@ struct FileTree(Movable):
             return False
         # Wheel anywhere over the panel scrolls the listing.
         if event.pressed and not event.motion:
-            if event.button == MOUSE_WHEEL_UP:
-                if self.scroll > 0:
-                    self.scroll -= 3
-                    if self.scroll < 0:
-                        self.scroll = 0
-                return True
-            if event.button == MOUSE_WHEEL_DOWN:
-                var list_h = area.b.y - area.a.y
-                var max_scroll = len(self.entries) - list_h
-                if max_scroll < 0:
-                    max_scroll = 0
-                if self.scroll < max_scroll:
-                    self.scroll += 3
-                    if self.scroll > max_scroll:
-                        self.scroll = max_scroll
+            if picker_wheel_scroll(
+                event.button, self.scroll, len(self.entries), area.height(),
+            ):
                 return True
         # Right-click on a row stamps a context-menu request the Desktop
         # drains to open the Rename/Delete popup. Also takes focus and

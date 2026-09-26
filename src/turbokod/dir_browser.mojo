@@ -25,8 +25,8 @@ from .colors import (
     LIGHT_YELLOW, WHITE,
 )
 from .events import (
-    Event, EVENT_MOUSE,
-    MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
+    Event, EVENT_MOUSE, KEY_DOWN, KEY_PAGEDOWN, KEY_PAGEUP, KEY_UP,
+    MOUSE_BUTTON_LEFT,
 )
 from .file_io import (
     join_path, list_directory_typed, parent_path, sort_directory_listing,
@@ -35,8 +35,8 @@ from .geometry import Point, Rect
 from .painter import Painter
 from .posix import getenv_value, realpath
 from .string_utils import display_columns
-from .case_fold import starts_with_ci
-from .type_ahead import TypeAhead
+from .type_ahead import type_ahead_pick, TypeAhead
+from .picker_input import picker_wheel_scroll, scroll_to_reveal
 
 
 @fieldwise_init
@@ -335,16 +335,22 @@ struct DirBrowser(Movable):
         the new selection stays visible. ``list_h`` is the visible row
         count of the listing area (passed in because only the host knows
         the dialog geometry)."""
-        var n = len(self.entries)
-        if n == 0:
-            return
-        var s = self.selected + delta
-        if s < 0:
-            s = 0
-        if s >= n:
-            s = n - 1
-        self.selected = s
-        self._scroll_to_selection(list_h)
+        self.set_selection(self.selected + delta, list_h)
+
+    def handle_nav_key(mut self, k: UInt32, list_h: Int) -> Bool:
+        """Up / Down / PageUp / PageDown move the selection; True iff
+        ``k`` was one of them."""
+        if k == KEY_UP:
+            self.move_by(-1, list_h)
+        elif k == KEY_DOWN:
+            self.move_by(1, list_h)
+        elif k == KEY_PAGEUP:
+            self.move_by(-10, list_h)
+        elif k == KEY_PAGEDOWN:
+            self.move_by(10, list_h)
+        else:
+            return False
+        return True
 
     def set_selection(mut self, idx: Int, list_h: Int):
         var n = len(self.entries)
@@ -373,37 +379,22 @@ struct DirBrowser(Movable):
         letter after a stale prefix lands somewhere useful instead
         of feeling like a dead key.
         """
-        var prefix = self._type_ahead.append(ch)
-        if self._find_and_select(prefix^, list_h):
-            return True
-        if len(self._type_ahead.buf.as_bytes()) > 1:
-            var solo = self._type_ahead.solo_fallback(ch)
-            if self._find_and_select(solo^, list_h):
-                return True
-        return False
-
-    def _find_and_select(mut self, var prefix: String, list_h: Int) -> Bool:
-        """Locate the first entry (other than ``..``) whose name
-        starts with ``prefix`` (case-insensitive). Returns True and
-        updates the selection if one is found."""
-        var pb = prefix.as_bytes()
-        if len(pb) == 0:
-            return False
+        # ``..`` becomes an empty label, which ``type_ahead_pick`` skips.
+        var labels = List[String]()
         for i in range(len(self.entries)):
-            if self.entries[i] == String(".."):
-                continue
-            if starts_with_ci(self.entries[i], prefix):
-                self.set_selection(i, list_h)
-                return True
-        return False
+            labels.append(
+                String("") if self.entries[i] == String("..")
+                else self.entries[i]
+            )
+        var idx = type_ahead_pick(self._type_ahead, labels, ch)
+        if idx < 0:
+            return False
+        self.set_selection(idx, list_h)
+        return True
 
     def _scroll_to_selection(mut self, list_h: Int):
-        if list_h < 1:
-            return
-        if self.selected < self.scroll:
-            self.scroll = self.selected
-        elif self.selected >= self.scroll + list_h:
-            self.scroll = self.selected - list_h + 1
+        if list_h >= 1:
+            self.scroll = scroll_to_reveal(self.scroll, self.selected, list_h)
 
     # --- painting ---------------------------------------------------------
 
@@ -481,20 +472,10 @@ struct DirBrowser(Movable):
         if event.kind != EVENT_MOUSE:
             return -1
         if event.pressed and not event.motion:
-            if event.button == MOUSE_WHEEL_UP:
-                if self.scroll > 0:
-                    self.scroll -= 3
-                    if self.scroll < 0:
-                        self.scroll = 0
-                return -2
-            if event.button == MOUSE_WHEEL_DOWN:
-                var max_scroll = len(self.entries) - list_rect.height()
-                if max_scroll < 0:
-                    max_scroll = 0
-                if self.scroll < max_scroll:
-                    self.scroll += 3
-                    if self.scroll > max_scroll:
-                        self.scroll = max_scroll
+            if picker_wheel_scroll(
+                event.button, self.scroll, len(self.entries),
+                list_rect.height(),
+            ):
                 return -2
         if event.button != MOUSE_BUTTON_LEFT:
             return -1

@@ -24,13 +24,11 @@ from .canvas import Canvas
 from .case_fold import find_folded, fold_ascii
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, YELLOW
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_ENTER, KEY_ESC,
-    MOD_SHIFT, MOUSE_BUTTON_LEFT,
+    Event, EVENT_KEY, EVENT_MOUSE, KEY_ENTER, KEY_ESC, MOD_SHIFT,
 )
 from .geometry import center_in, Point, Rect
 from .picker_input import (
-    build_picker_layout, picker_nav_key, picker_wheel_scroll,
+    build_picker_layout, picker_nav_key, picker_row_at, picker_wheel_scroll,
     scroll_to_reveal,
 )
 from .project import FileIndexer, QUICK_OPEN_FILE_CAP, walk_project_files
@@ -446,16 +444,9 @@ struct QuickOpen(Movable):
         and append the matching indices to ``matched`` (in entry order).
         An empty query matches every entry. Caller owns ``matched``'s
         prior contents and the ``_filtered_count`` high-water mark."""
-        if len(self.query.text.as_bytes()) == 0:
-            for i in range(start, len(self.entries)):
-                self.matched.append(i)
-        else:
-            # Split + fold the query once for the whole sweep, not once
-            # per entry — the entry list runs to tens of thousands.
-            var parts = split_query_parts(self.query.text)
-            for i in range(start, len(self.entries)):
-                if quick_open_match_parts(self.entries[i], parts):
-                    self.matched.append(i)
+        self.matched.extend(
+            filter_indices_by_query(self.entries, self.query.text, start)
+        )
 
     def _filter_appended(mut self):
         """Incremental filter for ``tick``: entries are append-only and
@@ -641,17 +632,10 @@ struct QuickOpen(Movable):
                 # mode so the next ``_refilter`` doesn't snap back.
                 self._pending_restore = False
                 return True
-        if event.button != MOUSE_BUTTON_LEFT:
-            return True
-        if not event.pressed or event.motion:
-            return True
-        if not rect.contains(event.pos):
-            return True
-        if event.pos.y < layout.list_top \
-                or event.pos.y >= layout.list_top + layout.list_height:
-            return True
-        var idx = self.scroll + (event.pos.y - layout.list_top)
-        if idx < 0 or idx >= len(self.matched):
+        var idx = picker_row_at(
+            event, rect, layout, self.scroll, len(self.matched),
+        )
+        if idx < 0:
             return True
         # Shift+click extends the multi-select (anchor stays); plain
         # click collapses to a single-row selection. Click-on-already-
@@ -736,20 +720,24 @@ def quick_open_match_parts(path: String, folded_parts: List[String]) -> Bool:
 
 
 def filter_indices_by_query(
-    haystacks: List[String], query: String,
+    haystacks: List[String], query: String, start: Int = 0,
 ) -> List[Int]:
     """Indices into ``haystacks`` that match ``query`` under
     ``quick_open_match`` rules — all indices when the query is empty. The
     symbol / docs pickers precompute their ``container.name`` /
     ``type.name`` haystacks (parallel to their entry lists) in ``open`` /
-    ``set_entries`` and filter through this on every keystroke."""
+    ``set_entries`` and filter through this on every keystroke. ``start``
+    skips a prefix already filtered (Quick Open's entries arrive
+    append-only while the project walk streams in)."""
     var out = List[Int]()
     if len(query.as_bytes()) == 0:
-        for i in range(len(haystacks)):
+        for i in range(start, len(haystacks)):
             out.append(i)
     else:
+        # Split + fold the query once for the whole sweep, not once per
+        # entry — Quick Open's list runs to tens of thousands.
         var parts = split_query_parts(query)
-        for i in range(len(haystacks)):
+        for i in range(start, len(haystacks)):
             if quick_open_match_parts(haystacks[i], parts):
                 out.append(i)
     return out^

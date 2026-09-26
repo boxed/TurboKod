@@ -15,14 +15,10 @@ from std.collections.list import List
 from .canvas import Canvas
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, YELLOW
 from .doc_store import DocEntry
-from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_ENTER, KEY_ESC,
-    MOUSE_BUTTON_LEFT,
-)
+from .events import Event, EVENT_KEY, EVENT_MOUSE, KEY_ENTER, KEY_ESC
 from .geometry import Point, Rect, center_in
 from .picker_input import (
-    build_picker_layout, picker_nav_key, picker_wheel_scroll,
+    build_picker_layout, picker_nav_key, picker_row_at, picker_wheel_scroll,
     scroll_to_reveal,
 )
 from .quick_open import filter_indices_by_query
@@ -251,17 +247,10 @@ struct DocPick(Movable):
                 layout.list_height,
             ):
                 return True
-        if event.button != MOUSE_BUTTON_LEFT:
-            return True
-        if not event.pressed or event.motion:
-            return True
-        if not rect.contains(event.pos):
-            return True
-        if event.pos.y < layout.list_top \
-                or event.pos.y >= layout.list_top + layout.list_height:
-            return True
-        var idx = self.scroll + (event.pos.y - layout.list_top)
-        if idx < 0 or idx >= len(self.matched):
+        var idx = picker_row_at(
+            event, rect, layout, self.scroll, len(self.matched),
+        )
+        if idx < 0:
             return True
         if idx == self.selected:
             self.selected_index = self.matched[idx]
