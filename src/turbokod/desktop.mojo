@@ -840,6 +840,13 @@ struct EditorScrollRegion(ImplicitlyCopyable, Movable):
     var right_gutter: Int
 
 
+comptime _SLOT_TEST = 0
+comptime _SLOT_FIND = 1
+comptime _SLOT_DEBUG = 2
+comptime _SLOT_TERMINALS = 3
+"""Bottom-dock stacking order, counted up from the status / tab strip."""
+
+
 struct Desktop(Movable):
     var menu_bar: MenuBar
     # When True, the host frontend (e.g. the Swift/AppKit app) owns the
@@ -2462,21 +2469,8 @@ struct Desktop(Movable):
         # here — the editor area grows into the space they used to occupy.
         # The bottom chrome (status / tab strip) still belongs to this window.
         if not self.panels_detached:
-            if self.test_pane.visible:
-                bottom -= self._test_pane_height(screen)
-                if bottom < 1:
-                    bottom = 1
-            if self.find_results_pane.visible:
-                bottom -= self._find_results_pane_height(screen)
-                if bottom < 1:
-                    bottom = 1
-            if self.debug_pane.visible:
-                bottom -= self._debug_pane_height(screen)
-                if bottom < 1:
-                    bottom = 1
-            bottom -= self._terminal_stack_height(screen)
-            if bottom < 1:
-                bottom = 1
+            bottom = max(1, self._dock_slot_bottom(screen, _SLOT_TERMINALS)
+                         - self._terminal_stack_height(screen))
         # Row 0 is normally reserved for the in-grid menu bar; when the
         # host owns the menu, that row is free for the workspace.
         var top = 0 if self.host_owns_menu else 1
@@ -2697,6 +2691,19 @@ struct Desktop(Movable):
             return right
         return screen.b.x
 
+    def _dock_slot_bottom(self, screen: Rect, slot: Int) -> Int:
+        """Bottom edge of bottom-dock ``slot``: the status / tab strip,
+        minus every visible pane stacked below it. Slots count up from
+        the strip — test, Find Results, run/debug, then the terminals."""
+        var bottom = screen.b.y - self._bottom_chrome_height(screen)
+        if slot > _SLOT_TEST and self.test_pane.visible:
+            bottom -= self._test_pane_height(screen)
+        if slot > _SLOT_FIND and self.find_results_pane.visible:
+            bottom -= self._find_results_pane_height(screen)
+        if slot > _SLOT_DEBUG and self.debug_pane.visible:
+            bottom -= self._debug_pane_height(screen)
+        return bottom
+
     def debug_pane_rect(self, screen: Rect) -> Rect:
         """Where the bottom-docked run/debug pane lives — above the
         status bar (and the tab bar, when visible) and above the test
@@ -2705,12 +2712,7 @@ struct Desktop(Movable):
         above it, and the run/debug pane stacks above the test pane."""
         if not self.debug_pane.visible:
             return Rect.empty()
-        var chrome = self._bottom_chrome_height(screen)
-        var bottom = screen.b.y - chrome
-        if self.test_pane.visible:
-            bottom -= self._test_pane_height(screen)
-        if self.find_results_pane.visible:
-            bottom -= self._find_results_pane_height(screen)
+        var bottom = self._dock_slot_bottom(screen, _SLOT_DEBUG)
         var top = bottom - self._debug_pane_height(screen)
         if top < 1:
             top = 1
@@ -2734,12 +2736,12 @@ struct Desktop(Movable):
         ``debug_pane_rect`` so the two output panes read as a stack."""
         if not self.test_pane.visible:
             return Rect.empty()
-        var chrome = self._bottom_chrome_height(screen)
-        var top = screen.b.y - chrome - self._test_pane_height(screen)
+        var bottom = self._dock_slot_bottom(screen, _SLOT_TEST)
+        var top = bottom - self._test_pane_height(screen)
         if top < 1:
             top = 1
         return Rect(self._panel_left(screen), top,
-                    self._panel_right(screen), screen.b.y - chrome)
+                    self._panel_right(screen), bottom)
 
     def _test_pane_height(self, screen: Rect) -> Int:
         """Effective rendered height for the test pane — same
@@ -2780,10 +2782,7 @@ struct Desktop(Movable):
         ``test_pane_rect`` so the panes read as one stack."""
         if not self.find_results_pane.visible:
             return Rect.empty()
-        var chrome = self._bottom_chrome_height(screen)
-        var bottom = screen.b.y - chrome
-        if self.test_pane.visible:
-            bottom -= self._test_pane_height(screen)
+        var bottom = self._dock_slot_bottom(screen, _SLOT_FIND)
         var top = bottom - self._find_results_pane_height(screen)
         if top < 1:
             top = 1
@@ -2809,13 +2808,7 @@ struct Desktop(Movable):
         if idx < 0 or idx >= n:
             return Rect.empty()
         var chrome = self._bottom_chrome_height(screen)
-        var stack_bottom = screen.b.y - chrome
-        if self.test_pane.visible:
-            stack_bottom -= self._test_pane_height(screen)
-        if self.find_results_pane.visible:
-            stack_bottom -= self._find_results_pane_height(screen)
-        if self.debug_pane.visible:
-            stack_bottom -= self._debug_pane_height(screen)
+        var stack_bottom = self._dock_slot_bottom(screen, _SLOT_TERMINALS)
         if stack_bottom < 2:
             return Rect.empty()
         # Stack top = stack_bottom - sum(heights). Each pane's slot is
@@ -8283,6 +8276,15 @@ struct Desktop(Movable):
             except:
                 pass
 
+    def _stop_debug_and_run(mut self):
+        """Shut down the DAP session and any plain run in flight, so one
+        "Stop" covers both DEBUG and RUN modes (Shift+F5, the pane's Stop
+        and close buttons). Both halves are idempotent when idle."""
+        self.dap.shutdown()
+        self._dap_exec_path = String("")
+        self._dap_exec_line = -1
+        self.run_session.terminate()
+
     def dispatch_action(
         mut self, action: String, screen: Rect,
     ) -> Optional[String]:
@@ -8840,14 +8842,7 @@ struct Desktop(Movable):
             _ = self.dap.pause()
             return Optional[String]()
         if action == DEBUG_STOP:
-            self.dap.shutdown()
-            self._dap_exec_path = String("")
-            self._dap_exec_line = -1
-            # Also kill any plain-run that's in flight, so the same
-            # action handles both DEBUG and RUN modes' "Stop" button
-            # (and Shift+F5 in either context). ``terminate`` is
-            # idempotent when no run is active.
-            self.run_session.terminate()
+            self._stop_debug_and_run()
             return Optional[String]()
         if action == DEBUG_ADD_WATCH:
             self._pending_action = _PA_ADD_WATCH
@@ -8909,10 +8904,7 @@ struct Desktop(Movable):
             # release the post-run hold, drop focus off the pane, and
             # let dap_tick's next pass hide the pane on its own (the
             # visibility expression is fully driven by these flags).
-            self.dap.shutdown()
-            self._dap_exec_path = String("")
-            self._dap_exec_line = -1
-            self.run_session.terminate()
+            self._stop_debug_and_run()
             self._run_output_held = False
             if self.debug_pane.focused:
                 self._focus_dock(DOCK_NONE)
@@ -11842,11 +11834,8 @@ struct Desktop(Movable):
         # Path match: the manager stores the path the editor knows the
         # file under; the response may use a different absolute form
         # (symlinks, etc). ``realpath`` normalizes both sides.
-        if origin_path != target.path:
-            var op = realpath(origin_path)
-            var tp = realpath(target.path)
-            if len(op.as_bytes()) == 0 or op != tp:
-                return False
+        if not _same_file(origin_path, target.path):
+            return False
         # Column inside the resolved token's span [target.character,
         # target.character + len(word)). The LSP returns the start of
         # the def's identifier; the user can have clicked anywhere
@@ -12589,17 +12578,7 @@ struct Desktop(Movable):
         argv.append(String("sh"))
         argv.append(String("-c"))
         argv.append(cmd^)
-        var label = act.program
-        var b = label.as_bytes()
-        var slash = -1
-        for k in range(len(b)):
-            if b[k] == 0x2F:
-                slash = k
-        if slash >= 0:
-            # Temporary: ``b`` borrows ``label``, so building the basename
-            # and assigning it in one expression would alias.
-            var basename = String(StringSpan(unsafe_from_utf8=b[slash + 1:]))
-            label = basename^
+        var label = basename(act.program)
         try:
             var proc = LspProcess.spawn(argv)
             # On-save actions don't read from stdin — close it now so
@@ -13684,16 +13663,10 @@ struct Desktop(Movable):
 
     def _hk_row(self, label: String, shortcut: String) -> String:
         """One aligned ``label … shortcut`` line for the Keyboard
-        Shortcuts page. Labels are ASCII, so byte length is column
-        count. A blank shortcut still renders (a few entries are
-        purely informational)."""
-        var pad = 30 - len(label.as_bytes())
-        if pad < 2:
-            pad = 2
-        var spaces = String("")
-        for _ in range(pad):
-            spaces = spaces + String(" ")
-        return String("  ") + label + spaces + shortcut + String("\n")
+        Shortcuts page. A blank shortcut still renders (a few entries
+        are purely informational)."""
+        var pad = max(2, 30 - display_columns(label))
+        return String("  ") + label + String(" ") * pad + shortcut + String("\n")
 
     def _hk_doc_shortcut(self, hk: Hotkey) -> String:
         """The shortcut text to print for one hotkey: its explicit
@@ -14453,7 +14426,7 @@ struct Desktop(Movable):
         self._file_op_path = String("")
         if len(old_path.as_bytes()) == 0:
             return
-        var trimmed = self._trim_spaces(new_name)
+        var trimmed = String(new_name.strip())
         if len(trimmed.as_bytes()) == 0:
             return
         var new_path: String
@@ -14543,20 +14516,6 @@ struct Desktop(Movable):
         self.status_bar.set_message(
             String("Deleted ") + basename(path), Attr(BLACK, LIGHT_GRAY),
         )
-
-    def _trim_spaces(self, s: String) -> String:
-        """Strip leading/trailing ASCII spaces and tabs from ``s``."""
-        var b = s.as_bytes()
-        var n = len(b)
-        var lo = 0
-        while lo < n and (b[lo] == 0x20 or b[lo] == 0x09):
-            lo += 1
-        var hi = n
-        while hi > lo and (b[hi - 1] == 0x20 or b[hi - 1] == 0x09):
-            hi -= 1
-        if lo == 0 and hi == n:
-            return s
-        return String(StringSpan(unsafe_from_utf8=b[lo:hi]))
 
     def _maybe_open_context_menu(mut self):
         """Drain ``Editor.consume_context_menu_request`` on the focused
