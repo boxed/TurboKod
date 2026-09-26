@@ -40,12 +40,10 @@ from .events import (
 )
 from .file_io import ci_less, project_relative
 from .geometry import center_in, Point, Rect
-from .lsp import LspProcess
 from .picker_input import (
     build_picker_layout, picker_nav_key, picker_wheel_scroll,
     scroll_to_reveal,
 )
-from .posix import alloc_zero_buffer, poll_stdin, read_into
 from .string_utils import (
     display_columns, is_ascii_ident_byte, parse_uint_range, starts_with,
     tail_to_columns,
@@ -55,6 +53,7 @@ from .text_field import TextField
 from .case_fold import contains_ci, eq_ci
 from .type_ahead import starts_with_ci
 from .window import paint_window_title
+from .line_stream import LineStream
 
 
 comptime _LABEL = String(" Find: ")
@@ -99,32 +98,21 @@ struct _FindSymbolRunner(Movable):
     cancels any prior child first so a fast typist can't pile up
     zombie rg processes.
 
-    We deliberately don't use ``LspProcess.poll_message`` (the
-    Content-Length framer) — rg writes plain newline-terminated
-    text. The line splitting is local to this runner.
+    rg writes plain newline-terminated text, so the child runs as a
+    ``LineStream`` rather than through the LSP Content-Length framer.
     """
 
-    var proc: LspProcess
-    var active: Bool
-    var _buf: List[UInt8]
-    var _scan_pos: Int
+    var stream: LineStream
 
     def __init__(out self):
-        self.proc = LspProcess()
-        self.active = False
-        self._buf = List[UInt8]()
-        self._scan_pos = 0
+        self.stream = LineStream()
 
     def is_active(self) -> Bool:
-        return self.active
+        return self.stream.is_active()
 
     def cancel(mut self):
         """Stop the running child (if any) and reset state. Idempotent."""
-        if self.active:
-            self.proc.terminate()
-        self.active = False
-        self._buf = List[UInt8]()
-        self._scan_pos = 0
+        self.stream.cancel()
 
     def start(mut self, query: String, root: String) -> Bool:
         """Spawn ``rg`` for ``query`` rooted at ``root``. The pattern
@@ -132,7 +120,6 @@ struct _FindSymbolRunner(Movable):
         the query — anywhere — counts as a hit. Returns False on
         spawn failure (e.g. ``rg`` missing from PATH).
         """
-        self.cancel()
         var argv = List[String]()
         argv.append(String("rg"))
         argv.append(String("--no-heading"))
@@ -162,12 +149,7 @@ struct _FindSymbolRunner(Movable):
         )
         argv.append(String("--"))
         argv.append(root)
-        try:
-            self.proc = LspProcess.spawn(argv)
-        except:
-            return False
-        self.active = True
-        return True
+        return self.stream.start(argv)
 
     def tick(mut self) -> List[Tuple[String, Int, Int, String]]:
         """Drain whatever bytes are queued on rg's stdout, parse as
@@ -175,55 +157,13 @@ struct _FindSymbolRunner(Movable):
         ``(path, line, column, text)`` tuples. The caller owns the
         per-symbol-name dedupe.
 
-        Reads in a single capped batch (~64 KB) so a noisy query
-        can't hijack the frame budget. Anything we don't read this
-        frame stays in the kernel pipe buffer for the next ``tick``.
-        """
+        Reads are capped per frame (see ``LineStream.tick``)."""
         var out = List[Tuple[String, Int, Int, String]]()
-        if not self.active:
-            return out^
-        var scratch = alloc_zero_buffer(8192)
-        var total = 0
-        var got_eof = False
-        while total < 65536:
-            if not poll_stdin(self.proc.stdout_fd, Int32(0)):
-                break
-            var n = read_into(self.proc.stdout_fd, scratch, 8192)
-            if n < 0:
-                break
-            if n == 0:
-                got_eof = True
-                break
-            self._buf.extend(Span(scratch)[0:n])
-            total += n
-        # Walk only the new bytes — ``_scan_pos`` carries forward
-        # so a single huge unterminated tail isn't rescanned every
-        # tick.
-        var consumed = 0
-        var i = self._scan_pos
-        while i < len(self._buf):
-            if self._buf[i] == 0x0A:
-                if i > consumed:
-                    var line_str = String(StringSpan(
-                        unsafe_from_utf8=Span(self._buf)[consumed:i],
-                    ))
-                    var parsed = _parse_rg_match_line(line_str)
-                    if parsed:
-                        out.append(parsed.value())
-                consumed = i + 1
-            i += 1
-        if consumed > 0:
-            var tail = List[UInt8]()
-            tail.extend(Span(self._buf)[consumed:len(self._buf)])
-            self._buf = tail^
-            self._scan_pos = 0
-        else:
-            self._scan_pos = len(self._buf)
-        if got_eof:
-            self.proc.terminate()
-            self.active = False
-            self._buf = List[UInt8]()
-            self._scan_pos = 0
+        var got = self.stream.tick()
+        for line in got[0]:
+            var parsed = _parse_rg_match_line(line)
+            if parsed:
+                out.append(parsed.value())
         return out^
 
 

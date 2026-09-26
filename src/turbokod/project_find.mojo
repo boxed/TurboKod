@@ -39,9 +39,8 @@ from .highlight import (
     GrammarRegistry, Highlight, HighlightCache, extension_of,
     highlight_for_extension_cached,
 )
-from .lsp import LspProcess
 from .picker_input import picker_nav_key, picker_wheel_scroll
-from .posix import alloc_zero_buffer, monotonic_ms, poll_stdin, read_into
+from .posix import monotonic_ms
 from .project import ProjectMatch
 from .clipboard import clipboard_chord, CLIP_COPY
 from .search_options import SearchOptions
@@ -53,6 +52,7 @@ from .text_field import TextField, TextFieldKeyResult
 from .text_select import PaneTextSelect
 from .window import close_button_clicked, paint_close_button, paint_window_title
 from .case_fold import find_exact
+from .line_stream import LineStream
 
 
 comptime _DEBOUNCE_MS: Int = 300
@@ -1546,55 +1546,36 @@ struct _RgRunner(Movable):
 
     State machine:
 
-    * idle: ``active == False``, ``proc.alive == False``.
-    * running: ``active == True``; ``tick()`` drains stdout.
-    * draining: ``active == True``, child has exited (EOF on stdout)
-      but our line buffer might still hold bytes. ``tick()`` walks them
-      out and then transitions back to idle.
+    * idle: the ``LineStream`` is inactive.
+    * running: ``tick()`` drains stdout and parses complete lines; at
+      EOF the stream reaps the child and goes idle again.
 
     The runner only ever *appends* to its match list — callers can
     snapshot via ``drain_new()`` mid-search without losing earlier
     rows. Re-spawning via ``start()`` cancels any in-flight child first.
     """
 
-    var proc: LspProcess
-    var active: Bool
+    var stream: LineStream
     var root: String
     var query: String
-    var _buf: List[UInt8]   # incoming bytes not yet split on '\n'
-    # How far we've already scanned ``_buf`` for a newline. Persists
-    # across ticks so a single huge unterminated line (e.g. a multi-MB
-    # match preview that ``--max-columns`` somehow let through) doesn't
-    # rescan ``_buf[0..]`` on every tick — that turned line-finding
-    # into O(N²) over the search lifetime.
-    var _scan_pos: Int
     var _new: List[ProjectMatch]   # parsed but not yet handed to caller
 
     def __init__(out self):
-        self.proc = LspProcess()
-        self.active = False
+        self.stream = LineStream()
         self.root = String("")
         self.query = String("")
-        self._buf = List[UInt8]()
-        self._scan_pos = 0
         self._new = List[ProjectMatch]()
 
     def is_active(self) -> Bool:
-        return self.active
+        return self.stream.is_active()
 
     def cancel(mut self):
         """Stop the running child (if any) and reset state.
 
-        Safe to call when idle. Sends SIGTERM via ``LspProcess.terminate``
-        and waits for the child to exit; ``rg`` reacts immediately to
-        SIGTERM so the wait is microseconds in practice."""
-        if self.active:
-            self.proc.terminate()
-        self.active = False
+        Safe to call when idle; ``rg`` exits on SIGTERM at once."""
+        self.stream.cancel()
         self.root = String("")
         self.query = String("")
-        self._buf = List[UInt8]()
-        self._scan_pos = 0
         self._new = List[ProjectMatch]()
 
     def start(
@@ -1625,11 +1606,8 @@ struct _RgRunner(Movable):
         default. ``-w`` works with both modes."""
         self.cancel()
         var argv = _project_find_argv(root, query, scope, glob, opts)
-        try:
-            self.proc = LspProcess.spawn(argv)
-        except:
+        if not self.stream.start(argv):
             return False
-        self.active = True
         self.root = root
         self.query = query
         return True
@@ -1644,70 +1622,15 @@ struct _RgRunner(Movable):
         frame can't be hijacked by a high-volume query — anything we
         don't read this frame stays in the kernel pipe buffer for the
         next ``tick``."""
-        if not self.active:
+        if not self.stream.is_active():
             return False
-        var changed = False
-        # Read up to ~64 KB per frame. rg writes line-buffered when its
-        # stdout is a pipe; for typical queries this is plenty per
-        # frame, and it bounds the cost of pumping a runaway query.
-        var scratch = alloc_zero_buffer(8192)
-        var total = 0
-        var got_eof = False
-        while total < 65536:
-            if not poll_stdin(self.proc.stdout_fd, Int32(0)):
-                break
-            var n = read_into(self.proc.stdout_fd, scratch, 8192)
-            if n < 0:
-                # EAGAIN-equivalent: nothing ready right now.
-                break
-            if n == 0:
-                got_eof = True
-                break
-            for i in range(n):
-                self._buf.append(scratch[i])
-            total += n
-        # Parse complete lines (terminated by '\n'). Scan only the
-        # newly-appended bytes (``_scan_pos`` carries forward from
-        # last tick) so a long unterminated tail doesn't get rescanned
-        # on every tick.
-        var consumed = 0
-        var i = self._scan_pos
-        while i < len(self._buf):
-            if self._buf[i] == 0x0A:
-                if i > consumed:
-                    var line_str = String(StringSpan(
-                        unsafe_from_utf8=Span(self._buf)[consumed:i],
-                    ))
-                    var m = _parse_rg_line(line_str, self.root)
-                    if m:
-                        self._new.append(m.value())
-                        changed = True
-                consumed = i + 1
-            i += 1
-        if consumed > 0:
-            # Drop the parsed prefix from _buf in one tail-copy. The
-            # unscanned remainder (``_buf[consumed:]``) becomes the new
-            # ``_buf`` and the scan resumes at its start next tick.
-            var tail = List[UInt8]()
-            for j in range(consumed, len(self._buf)):
-                tail.append(self._buf[j])
-            self._buf = tail^
-            self._scan_pos = 0
-        else:
-            # No newline this tick: remember how far we got so the
-            # next tick picks up where we left off.
-            self._scan_pos = len(self._buf)
-        # Process exited (EOF on stdout): reap the child, drop any
-        # trailing partial line (rg always terminates lines), and
-        # transition to idle. ``terminate`` is safe to call after a
-        # natural exit — ``kill`` returns ESRCH, ``waitpid`` reaps
-        # the zombie.
-        if got_eof:
-            self.proc.terminate()
-            self.active = False
-            self._buf = List[UInt8]()
-            self._scan_pos = 0
-            changed = True
+        var got = self.stream.tick()
+        var changed = got[1]   # a finished search is a change too
+        for line in got[0]:
+            var m = _parse_rg_line(line, self.root)
+            if m:
+                self._new.append(m.value())
+                changed = True
         return changed
 
     def drain_new(mut self) -> List[ProjectMatch]:

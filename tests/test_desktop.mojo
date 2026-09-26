@@ -3120,7 +3120,7 @@ def test_find_symbol_answers_from_the_identifier_index() raises:
     assert_equal(d.find_symbol.entries[0].name, String("indexed_symbol"))
     assert_equal(d.find_symbol.entries[0].line, 2)
     # Served from the index, so no rg child was ever spawned.
-    assert_false(d.find_symbol.runner.active)
+    assert_false(d.find_symbol.runner.is_active())
     d.shutdown()
     _rm_rf(root)
 
@@ -3144,9 +3144,9 @@ def test_find_symbol_falls_back_to_rg_before_the_index_is_ready() raises:
     d.find_symbol.query.set_text(String("cold_sym"))
     d.find_symbol.query_dirty = True
     d._run_find_symbol_query()
-    assert_true(d.find_symbol.runner.active)
+    assert_true(d.find_symbol.runner.is_active())
     d.shutdown()
-    assert_false(d.find_symbol.runner.active)
+    assert_false(d.find_symbol.runner.is_active())
     _rm_rf(root)
 
 
@@ -3209,15 +3209,15 @@ def test_find_symbol_rg_fallback_seeds_from_the_definition() raises:
     d.find_symbol.query.set_text(String("rg_seed"))
     d.find_symbol.query_dirty = True
     d._run_find_symbol_query()
-    assert_true(d.find_symbol.runner.active)
+    assert_true(d.find_symbol.runner.is_active())
     # Drain the runner directly (not via ``_pump_find_symbol``, which
     # would finish the index build and answer from it instead).
     var spins = 0
-    while d.find_symbol.runner.active and spins < 500:
+    while d.find_symbol.runner.is_active() and spins < 500:
         d.find_symbol.tick()
         sleep_ms(10)
         spins += 1
-    assert_false(d.find_symbol.runner.active)
+    assert_false(d.find_symbol.runner.is_active())
     assert_equal(len(d.find_symbol.entries), 1)
     assert_equal(d.find_symbol.entries[0].name, String("rg_seed_symbol"))
     assert_equal(d.find_symbol.entries[0].path, root + String("/pkg/mod.py"))
@@ -3238,10 +3238,10 @@ def test_shutdown_stops_the_search_subprocesses() raises:
     var d = Desktop()
     var root = String("/Users")
     assert_true(d.find_symbol.runner.start(String("interface"), root))
-    assert_true(d.find_symbol.runner.active)
-    var sym_pid = d.find_symbol.runner.proc.pid
+    assert_true(d.find_symbol.runner.is_active())
+    var sym_pid = d.find_symbol.runner.stream.proc.pid
     d.shutdown()
-    assert_false(d.find_symbol.runner.active)
+    assert_false(d.find_symbol.runner.is_active())
     assert_true(Int(kill_pid(sym_pid, Int32(0))) != 0)
 
 
