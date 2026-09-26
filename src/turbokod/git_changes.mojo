@@ -24,7 +24,7 @@ from .file_io import find_git_project, join_path, project_relative, stat_file
 from .lsp import capture_command
 from .string_utils import (
     byte_slice, parse_int_all, percent_encode_uri_path, split_lines,
-    split_lines_no_trailing, starts_with,
+    split_lines_no_trailing, split_whitespace, starts_with,
 )
 from .case_fold import find_exact
 
@@ -1113,11 +1113,7 @@ struct GitCommit(ImplicitlyCopyable, Movable):
     def first_parent(self) -> String:
         """The first short SHA in ``parents`` — the mainline side of a
         merge. Empty for a root commit."""
-        var b = self.parents.as_bytes()
-        for i in range(len(b)):
-            if b[i] == 0x20:
-                return String(StringSpan(unsafe_from_utf8=b[0:i]))
-        return self.parents
+        return _first_field(self.parents)
 
 
 @fieldwise_init
@@ -1803,17 +1799,7 @@ def create_reworded_commit(
     pargs.append(String("--parents"))
     pargs.append(String("-1"))
     pargs.append(sha)
-    var parent_line = _git_stdout(project_root, pargs^).strip()
-    var fields = List[String]()
-    var pb = parent_line.as_bytes()
-    var start = 0
-    for i in range(len(pb)):
-        if pb[i] == 0x20:
-            if i > start:
-                fields.append(String(StringSpan(unsafe_from_utf8=pb[start:i])))
-            start = i + 1
-    if start < len(pb):
-        fields.append(String(StringSpan(unsafe_from_utf8=pb[start:len(pb)])))
+    var fields = split_whitespace(_git_stdout(project_root, pargs^))
     var args = List[String]()
     args.append(String("commit-tree"))
     args.append(sha + String("^{tree}"))
@@ -1822,6 +1808,11 @@ def create_reworded_commit(
         args.append(String("-p"))
         args.append(fields[i])
     return String(_git_stdout(project_root, args^, message).strip())
+
+
+comptime _SHORT_LOG_PRETTY = "--pretty=format:%h  %ad  %an%n    %s%n"
+"""The branch-log / merged-commits right-pane format: sha, date, author,
+then the indented subject."""
 
 
 def fetch_merged_commits(
@@ -1845,11 +1836,33 @@ def fetch_merged_commits(
     args.append(String("-") + String(limit))
     args.append(String("--no-color"))
     args.append(String("--date=short"))
-    args.append(String("--pretty=format:%h  %ad  %an%n    %s%n"))
+    args.append(String(_SHORT_LOG_PRETTY))
     args.append(sha + String("^@"))
     args.append(String("--not"))
     args.append(sha + String("^1"))
     return _git_stdout(project_root, args^)
+
+
+def _run_history_log(
+    project_root: String, var args: List[String], limit: Int,
+    pathspec: String = String(""),
+) -> List[LineHistoryEntry]:
+    """Append the shared history options (then ``-- <pathspec>`` when
+    given) to a ``git log`` argv, run it, parse the RS/US-delimited
+    headers, and flag local-only commits — the same unpushed set the
+    commits pane uses, abbreviated to match ``%h``."""
+    args.append(String("--no-color"))
+    args.append(String("--date=short"))
+    args.append(String("-") + String(limit))
+    args.append(String("--format=%x1e%h%x1f%an%x1f%ad%x1f%s"))
+    if len(pathspec.as_bytes()) > 0:
+        args.append(String("--"))
+        args.append(pathspec)
+    var entries = parse_line_history(_git_stdout(project_root, args^))
+    var unpushed = _fetch_unpushed_short_shas(project_root, limit)
+    for i in range(len(entries)):
+        entries[i].is_pushed = not _list_contains(unpushed, entries[i].short_sha)
+    return entries^
 
 
 def fetch_line_history(
@@ -1861,7 +1874,7 @@ def fetch_line_history(
     for selection" feature. ``git log -L`` follows the lines across
     renames automatically.
 
-    The ``--format`` below makes each commit's header
+    The ``--format`` (see :func:`_run_history_log`) makes each commit's header
     ``\\x1e<sha>\\x1f<author>\\x1f<date>\\x1f<subject>\\n``: an ASCII RS
     (0x1e) prefixes every commit and US (0x1f) separates the fields, so
     the blocks parse cleanly regardless of what the diff body contains.
@@ -1880,17 +1893,7 @@ def fetch_line_history(
         String("-L") + String(lo) + String(",") + String(hi)
         + String(":") + rel_path
     )
-    args.append(String("--no-color"))
-    args.append(String("--date=short"))
-    args.append(String("-") + String(limit))
-    args.append(String("--format=%x1e%h%x1f%an%x1f%ad%x1f%s"))
-    var entries = parse_line_history(_git_stdout(project_root, args^))
-    # Flag local-only commits so the list can mark them — same
-    # unpushed set the commits pane uses, abbreviated to match ``%h``.
-    var unpushed = _fetch_unpushed_short_shas(project_root, limit)
-    for i in range(len(entries)):
-        entries[i].is_pushed = not _list_contains(unpushed, entries[i].short_sha)
-    return entries^
+    return _run_history_log(project_root, args^, limit)
 
 
 def fetch_file_history(
@@ -1909,17 +1912,7 @@ def fetch_file_history(
     args.append(String("log"))
     args.append(String("--follow"))
     args.append(String("-p"))
-    args.append(String("--no-color"))
-    args.append(String("--date=short"))
-    args.append(String("-") + String(limit))
-    args.append(String("--format=%x1e%h%x1f%an%x1f%ad%x1f%s"))
-    args.append(String("--"))
-    args.append(rel_path)
-    var entries = parse_line_history(_git_stdout(project_root, args^))
-    var unpushed = _fetch_unpushed_short_shas(project_root, limit)
-    for i in range(len(entries)):
-        entries[i].is_pushed = not _list_contains(unpushed, entries[i].short_sha)
-    return entries^
+    return _run_history_log(project_root, args^, limit, rel_path)
 
 
 def parse_line_history(stdout: String) -> List[LineHistoryEntry]:
@@ -1975,9 +1968,7 @@ def fetch_branch_log(
     args.append(String("-") + String(limit))
     args.append(String("--no-color"))
     args.append(String("--date=short"))
-    args.append(
-        String("--pretty=format:%h  %ad  %an%n    %s%n"),
-    )
+    args.append(String(_SHORT_LOG_PRETTY))
     args.append(branch)
     return _git_stdout(project_root, args^)
 
