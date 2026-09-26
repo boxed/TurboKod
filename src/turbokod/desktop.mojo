@@ -5418,6 +5418,20 @@ struct Desktop(Movable):
                 return i
         return -1
 
+    def _ready_lsp_for_path(
+        self, path: String, capability: String = String(""),
+    ) -> Int:
+        """``_lsp_for_path``, but ``-1`` unless that server is ready and —
+        when ``capability`` names a ``ServerCapabilities`` key — supports
+        it. The gate every request site wants before it sends."""
+        var li = self._lsp_for_path(path)
+        if li < 0 or not self.lsp_managers[li].is_ready():
+            return -1
+        if len(capability.as_bytes()) > 0 \
+                and not self.lsp_managers[li].server_supports(capability):
+            return -1
+        return li
+
     def _lsp_notify_closed_if_last(mut self, path: String):
         """Send ``textDocument/didClose`` for ``path`` to its language
         server, but only when no *other* surviving editor window still
@@ -9501,8 +9515,8 @@ struct Desktop(Movable):
         var path = self.windows.windows[win_idx].editor.file_path
         if len(path.as_bytes()) == 0:
             return
-        var li = self._lsp_for_path(path)
-        if li < 0 or not self.lsp_managers[li].is_ready():
+        var li = self._ready_lsp_for_path(path)
+        if li < 0:
             return
         # A server-driven ``workspace/*/refresh`` invalidates the answers we
         # already have, so drop the debounce key and re-request even though
@@ -9551,11 +9565,8 @@ struct Desktop(Movable):
         var key = path + String("|") + String(row) + String("|") + String(col)
         if key == self._selrange_pos:
             return
-        var li = self._lsp_for_path(path)
-        if li < 0 or not self.lsp_managers[li].is_ready() \
-                or not self.lsp_managers[li].server_supports(
-                    String("selectionRangeProvider"),
-                ):
+        var li = self._ready_lsp_for_path(path, String("selectionRangeProvider"))
+        if li < 0:
             return
         self._selrange_pos = key
         var text = self.windows.windows[win_idx].editor.text_snapshot()
@@ -9573,11 +9584,8 @@ struct Desktop(Movable):
         var path = self.windows.windows[win_idx].editor.file_path
         if len(path.as_bytes()) == 0:
             return
-        var li = self._lsp_for_path(path)
-        if li < 0 or not self.lsp_managers[li].is_ready() \
-                or not self.lsp_managers[li].server_supports(
-                    String("foldingRangeProvider"),
-                ):
+        var li = self._ready_lsp_for_path(path, String("foldingRangeProvider"))
+        if li < 0:
             return
         var lc = self.windows.windows[win_idx].editor.buffer.line_count()
         var key = path + String("|") + String(lc)
@@ -9598,11 +9606,8 @@ struct Desktop(Movable):
         var path = self.windows.windows[win_idx].editor.file_path
         if len(path.as_bytes()) == 0:
             return
-        var li = self._lsp_for_path(path)
-        if li < 0 or not self.lsp_managers[li].is_ready() \
-                or not self.lsp_managers[li].server_supports(
-                    String("signatureHelpProvider"),
-                ):
+        var li = self._ready_lsp_for_path(path, String("signatureHelpProvider"))
+        if li < 0:
             return
         var text = self.windows.windows[win_idx].editor.text_snapshot()
         _ = self.lsp_managers[li].request_signature_help(
@@ -9623,8 +9628,8 @@ struct Desktop(Movable):
         var path = self.windows.windows[win_idx].editor.file_path
         if len(path.as_bytes()) == 0:
             return
-        var li = self._lsp_for_path(path)
-        if li < 0 or not self.lsp_managers[li].is_ready():
+        var li = self._ready_lsp_for_path(path)
+        if li < 0:
             return
         var triggers = self.lsp_managers[li].on_type_trigger_chars()
         if len(triggers.as_bytes()) == 0:
@@ -9656,11 +9661,8 @@ struct Desktop(Movable):
         end-of-line annotations."""
         if len(path.as_bytes()) == 0:
             return
-        var li = self._lsp_for_path(path)
-        if li < 0 or not self.lsp_managers[li].is_ready() \
-                or not self.lsp_managers[li].server_supports(
-                    String("inlineValueProvider"),
-                ):
+        var li = self._ready_lsp_for_path(path, String("inlineValueProvider"))
+        if li < 0:
             return
         var w = self._find_window_for_path(path)
         if w < 0 or not self.windows.windows[w].is_editor:
@@ -9720,11 +9722,8 @@ struct Desktop(Movable):
         var key = path + String("|") + String(row) + String("|") + String(col)
         if key == self._doc_hl_pos:
             return
-        var li = self._lsp_for_path(path)
-        if li < 0 or not self.lsp_managers[li].is_ready() \
-                or not self.lsp_managers[li].server_supports(
-                    String("documentHighlightProvider"),
-                ):
+        var li = self._ready_lsp_for_path(path, String("documentHighlightProvider"))
+        if li < 0:
             return
         self._doc_hl_pos = key
         var text = self.windows.windows[win_idx].editor.text_snapshot()
@@ -12460,8 +12459,8 @@ struct Desktop(Movable):
         # LSP pre-save hooks (only for a buffer we're actually going to
         # write — not read-only).
         if not self.windows.windows[idx].editor.read_only:
-            var lwi = self._lsp_for_path(path)
-            if lwi >= 0 and self.lsp_managers[lwi].is_ready():
+            var lwi = self._ready_lsp_for_path(path)
+            if lwi >= 0:
                 # Notify the server a save is imminent (reason 1 = manual).
                 self.lsp_managers[lwi].notify_will_save(path, 1)
                 # willSaveWaitUntil: let the server inject edits before the
@@ -12488,11 +12487,8 @@ struct Desktop(Movable):
         if self.config.lsp_format_on_save \
                 and self._format_then_save_path != path \
                 and not self.windows.windows[idx].editor.read_only:
-            var li = self._lsp_for_path(path)
-            if li >= 0 and self.lsp_managers[li].is_ready() \
-                    and self.lsp_managers[li].server_supports(
-                        String("documentFormattingProvider"),
-                    ):
+            var li = self._ready_lsp_for_path(path, String("documentFormattingProvider"))
+            if li >= 0:
                 var text = self.windows.windows[idx].editor.text_snapshot()
                 if self.lsp_managers[li].request_formatting(path, text^):
                     self._format_then_save_path = path
@@ -14020,8 +14016,8 @@ struct Desktop(Movable):
         # is actually ready — otherwise we just leave the menu with
         # only the Copy row, no spinner.
         var path = self.windows.windows[idx].editor.file_path
-        var li = self._lsp_for_path(path)
-        if li < 0 or not self.lsp_managers[li].is_ready():
+        var li = self._ready_lsp_for_path(path)
+        if li < 0:
             return
         var text = self.windows.windows[idx].editor.text_snapshot()
         var ok = self.lsp_managers[li].request_code_actions(
@@ -14123,8 +14119,8 @@ struct Desktop(Movable):
             # (handled by _drain_apply_edits).
             if len(action.command.as_bytes()) > 0:
                 var cpath = self.windows.windows[editor_idx].editor.file_path
-                var cli = self._lsp_for_path(cpath)
-                if cli >= 0 and self.lsp_managers[cli].is_ready():
+                var cli = self._ready_lsp_for_path(cpath)
+                if cli >= 0:
                     _ = self.lsp_managers[cli].request_execute_command(
                         action.command, action.command_args.copy(),
                     )
@@ -14172,8 +14168,8 @@ struct Desktop(Movable):
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
             return
-        var lsp_idx = self._lsp_for_path(path)
-        if lsp_idx < 0 or not self.lsp_managers[lsp_idx].is_ready():
+        var lsp_idx = self._ready_lsp_for_path(path)
+        if lsp_idx < 0:
             self.status_bar.set_message(
                 String("Rename: LSP not ready for this file type"),
                 Attr(RED, LIGHT_GRAY),
@@ -14237,8 +14233,8 @@ struct Desktop(Movable):
         var path = self._rename_path
         if len(path.as_bytes()) == 0:
             return
-        var lsp_idx = self._lsp_for_path(path)
-        if lsp_idx < 0 or not self.lsp_managers[lsp_idx].is_ready():
+        var lsp_idx = self._ready_lsp_for_path(path)
+        if lsp_idx < 0:
             self.status_bar.set_message(
                 String("Rename: LSP not ready"), Attr(RED, LIGHT_GRAY),
             )
@@ -14726,8 +14722,8 @@ struct Desktop(Movable):
             var path = self.windows.windows[idx].editor.file_path
             if len(path.as_bytes()) == 0:
                 return
-            var lsp_idx = self._lsp_for_path(path)
-            if lsp_idx < 0 or not self.lsp_managers[lsp_idx].is_ready():
+            var lsp_idx = self._ready_lsp_for_path(path)
+            if lsp_idx < 0:
                 self.status_bar.set_message(
                     String("References: LSP not ready"),
                     Attr(RED, LIGHT_GRAY),
@@ -14744,8 +14740,8 @@ struct Desktop(Movable):
             var path = self.windows.windows[idx].editor.file_path
             if len(path.as_bytes()) == 0:
                 return
-            var lsp_idx = self._lsp_for_path(path)
-            if lsp_idx < 0 or not self.lsp_managers[lsp_idx].is_ready():
+            var lsp_idx = self._ready_lsp_for_path(path)
+            if lsp_idx < 0:
                 return
             var text = self.windows.windows[idx].editor.text_snapshot()
             if act == CTX_MENU_ACTION_CALLERS:
@@ -14769,8 +14765,8 @@ struct Desktop(Movable):
             var path = self.windows.windows[idx].editor.file_path
             if len(path.as_bytes()) == 0:
                 return
-            var lsp_idx = self._lsp_for_path(path)
-            if lsp_idx < 0 or not self.lsp_managers[lsp_idx].is_ready():
+            var lsp_idx = self._ready_lsp_for_path(path)
+            if lsp_idx < 0:
                 return
             var text = self.windows.windows[idx].editor.text_snapshot()
             _ = self.lsp_managers[lsp_idx].request_moniker(
@@ -14781,8 +14777,8 @@ struct Desktop(Movable):
             var path = self.windows.windows[idx].editor.file_path
             if len(path.as_bytes()) == 0:
                 return
-            var lsp_idx = self._lsp_for_path(path)
-            if lsp_idx < 0 or not self.lsp_managers[lsp_idx].is_ready():
+            var lsp_idx = self._ready_lsp_for_path(path)
+            if lsp_idx < 0:
                 return
             var sw_opt = self.windows.windows[idx].editor.color_at(row, col)
             if not sw_opt:
@@ -14818,8 +14814,8 @@ struct Desktop(Movable):
             var path = self.windows.windows[idx].editor.file_path
             if len(path.as_bytes()) == 0:
                 return
-            var lsp_idx = self._lsp_for_path(path)
-            if lsp_idx < 0 or not self.lsp_managers[lsp_idx].is_ready():
+            var lsp_idx = self._ready_lsp_for_path(path)
+            if lsp_idx < 0:
                 return
             var text = self.windows.windows[idx].editor.text_snapshot()
             _ = self.lsp_managers[lsp_idx].request_inline_completion(
@@ -14830,8 +14826,8 @@ struct Desktop(Movable):
             var path = self.windows.windows[idx].editor.file_path
             if len(path.as_bytes()) == 0:
                 return
-            var lsp_idx = self._lsp_for_path(path)
-            if lsp_idx < 0 or not self.lsp_managers[lsp_idx].is_ready():
+            var lsp_idx = self._ready_lsp_for_path(path)
+            if lsp_idx < 0:
                 return
             var text = self.windows.windows[idx].editor.text_snapshot()
             _ = self.lsp_managers[lsp_idx].request_linked_editing(
@@ -14858,8 +14854,8 @@ struct Desktop(Movable):
         var path = self.windows.windows[win_idx].editor.file_path
         if len(path.as_bytes()) == 0:
             return
-        var lsp_idx = self._lsp_for_path(path)
-        if lsp_idx < 0 or not self.lsp_managers[lsp_idx].is_ready():
+        var lsp_idx = self._ready_lsp_for_path(path)
+        if lsp_idx < 0:
             self.status_bar.set_message(
                 String("LSP not ready for this file type"),
                 Attr(RED, LIGHT_GRAY),
@@ -14892,11 +14888,8 @@ struct Desktop(Movable):
         var path = self.windows.windows[idx].editor.file_path
         if len(path.as_bytes()) == 0:
             return
-        var li = self._lsp_for_path(path)
-        if li < 0 or not self.lsp_managers[li].is_ready() \
-                or not self.lsp_managers[li].server_supports(
-                    String("documentFormattingProvider"),
-                ):
+        var li = self._ready_lsp_for_path(path, String("documentFormattingProvider"))
+        if li < 0:
             self.status_bar.set_message(
                 String("Formatting not available for this file type"),
                 Attr(RED, LIGHT_GRAY),
@@ -14918,11 +14911,8 @@ struct Desktop(Movable):
         var path = self.windows.windows[idx].editor.file_path
         if len(path.as_bytes()) == 0:
             return
-        var li = self._lsp_for_path(path)
-        if li < 0 or not self.lsp_managers[li].is_ready() \
-                or not self.lsp_managers[li].server_supports(
-                    String("documentRangeFormattingProvider"),
-                ):
+        var li = self._ready_lsp_for_path(path, String("documentRangeFormattingProvider"))
+        if li < 0:
             self.status_bar.set_message(
                 String("Range formatting not available"),
                 Attr(RED, LIGHT_GRAY),
