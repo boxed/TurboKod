@@ -825,12 +825,7 @@ final class CellView: NSView {
         // drawPopupShadow paints it later as a translucent layer), so re-blit
         // just that box on top, untranslated. (Clip + redraw the whole main
         // buffer: only the overlay box cells land.)
-        var ob = [Int32](repeating: 0, count: 4)
-        let hasOverlay = ob.withUnsafeMutableBufferPointer { b in
-            Int(tk_editor_overlay_bounds(handle, Int64(cols()), Int64(rows()),
-                Int64(Int(bitPattern: b.baseAddress))))
-        }
-        if hasOverlay == 1 {
+        if let ob = overlayBounds() {
             let oclip = CGRect(x: CGFloat(ob[0]) * CELL_W, y: CGFloat(ob[1]) * CELL_H,
                                width: CGFloat(ob[2]) * CELL_W,
                                height: CGFloat(ob[3]) * CELL_H)
@@ -839,6 +834,17 @@ final class CellView: NSView {
             drawCells(ctx, buf, mainN, mainCols, originX: 0, originY: 0)
             ctx.restoreGState()
         }
+    }
+
+    /// The focused editor's body popup box `[x, y, w, h]` in cells, or nil
+    /// when no popup is up.
+    private func overlayBounds() -> [Int32]? {
+        var ob = [Int32](repeating: 0, count: 4)
+        let has = ob.withUnsafeMutableBufferPointer { b in
+            Int(tk_editor_overlay_bounds(handle, Int64(cols()), Int64(rows()),
+                Int64(Int(bitPattern: b.baseAddress))))
+        }
+        return has == 1 ? ob : nil
     }
 
     /// Translucent drop shadow under the focused editor's body popup (minimap
@@ -851,12 +857,7 @@ final class CellView: NSView {
     /// The strips sit outside the box, so drawing last never covers it.
     private func drawPopupShadow(_ ctx: CGContext) {
         guard handle != 0, surface == .main else { return }
-        var ob = [Int32](repeating: 0, count: 4)
-        let has = ob.withUnsafeMutableBufferPointer { b in
-            Int(tk_editor_overlay_bounds(handle, Int64(cols()), Int64(rows()),
-                Int64(Int(bitPattern: b.baseAddress))))
-        }
-        guard has == 1, ob[2] > 0, ob[3] > 0 else { return }
+        guard let ob = overlayBounds(), ob[2] > 0, ob[3] > 0 else { return }
         // Clip to the editor interior so the shadow can't bleed past the popup's
         // reserved right margin onto chrome / the next pane. No region (a rare
         // edge: completion popup open over a lingering minimap tooltip) → skip
@@ -1296,6 +1297,20 @@ final class CellView: NSView {
         legacyNotchScroll(e)
     }
 
+    /// Load the continuous scroll position + clamp for region `r` from the
+    /// core (O(lines) for a wrapped editor; trivial otherwise).
+    private func seedSmooth(_ r: SmoothRegion) {
+        var m = [Int32](repeating: 0, count: 2)
+        m.withUnsafeMutableBufferPointer { b in
+            _ = tk_editor_smooth_begin(handle, Int64(r.winIdx),
+                Int64(cols()), Int64(rows()),
+                Int64(Int(bitPattern: b.baseAddress)))
+        }
+        smoothWinIdx = r.winIdx
+        smoothLines = CGFloat(m[0]) / 1000.0
+        smoothMax = Int(m[1]) / 1000
+    }
+
     /// Mouse-wheel (non-precise) scroll of the focused editor. Each detent
     /// moves the OS-reported line delta (typically ~1 line, scaled by the
     /// system scroll-speed setting) — not the core's fixed 3-line notch — and
@@ -1306,15 +1321,7 @@ final class CellView: NSView {
         // Seed from the core when starting fresh (no precise gesture or ease
         // already in flight), so the target tracks the real current position.
         if springTimer == nil && !smoothActive {
-            var m = [Int32](repeating: 0, count: 2)
-            m.withUnsafeMutableBufferPointer { b in
-                _ = tk_editor_smooth_begin(handle, Int64(r.winIdx),
-                    Int64(cols()), Int64(rows()),
-                    Int64(Int(bitPattern: b.baseAddress)))
-            }
-            smoothWinIdx = r.winIdx
-            smoothLines = CGFloat(m[0]) / 1000.0
-            smoothMax = Int(m[1]) / 1000
+            seedSmooth(r)
             springTarget = smoothLines
         }
         // One line per unit of line-based delta (positive = up). The core's
@@ -1344,17 +1351,7 @@ final class CellView: NSView {
         }
         cancelSpring()
         if e.phase == .began || !smoothActive {
-            // Seed the continuous position + clamp from the core (O(lines)
-            // once per gesture for a wrapped editor; trivial otherwise).
-            var m = [Int32](repeating: 0, count: 2)
-            m.withUnsafeMutableBufferPointer { b in
-                _ = tk_editor_smooth_begin(handle, Int64(r.winIdx),
-                    Int64(cols()), Int64(rows()),
-                    Int64(Int(bitPattern: b.baseAddress)))
-            }
-            smoothWinIdx = r.winIdx
-            smoothLines = CGFloat(m[0]) / 1000.0
-            smoothMax = Int(m[1]) / 1000
+            seedSmooth(r)   // once per gesture
             smoothActive = true
         }
         // Positive scrollingDeltaY scrolls up (toward the top), matching the
@@ -1932,19 +1929,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let openWork: () -> Void = { [weak self] in
             guard let self else { return }
             if args.count > 1 {
+                // CLI ``./run_swift.sh <project-or-file>``: same as a Dock
+                // drop, except a path that doesn't exist yet still opens
+                // as a new file buffer.
                 let p = args[1]
-                var isDir: ObjCBool = false
-                FileManager.default.fileExists(atPath: p, isDirectory: &isDir)
-                if isDir.boolValue {
-                    // CLI ``./run_swift.sh /path/to/project`` — pre-apply the
-                    // project's remembered frame so it opens at its previous
-                    // size, not the 1000×640 default.
-                    self.persistSession = true
-                    let v = self.newWindow(frame: self.loadProjectFrame(p))
-                    self.openProject(v, p)
+                if FileManager.default.fileExists(atPath: p) {
+                    self.openDroppedPath(p)
                 } else {
-                    let v = self.newWindow()
-                    self.openFile(v, p)
+                    self.openFile(self.newWindow(), p)
                 }
             } else if !self.pendingOpenPaths.isEmpty {
                 // Launched by dropping folders/files on the Dock icon (or
@@ -2404,16 +2396,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Snapshot into the existing buffer; grow and retry until it fits.
         // A single grow could still truncate a menu more than 2x the buffer,
         // so loop (n == count signals the snapshot filled the whole buffer).
-        var n = menuBuf.withUnsafeMutableBufferPointer { buf -> Int in
-            Int(tk_desktop_menu_snapshot(h,
-                Int64(Int(bitPattern: buf.baseAddress)), Int64(buf.count)))
-        }
-        while n == menuBuf.count {
-            menuBuf = [UInt8](repeating: 0, count: menuBuf.count * 2)
+        var n = 0
+        while true {
             n = menuBuf.withUnsafeMutableBufferPointer { buf -> Int in
                 Int(tk_desktop_menu_snapshot(h,
                     Int64(Int(bitPattern: buf.baseAddress)), Int64(buf.count)))
             }
+            if n < menuBuf.count { break }
+            menuBuf = [UInt8](repeating: 0, count: menuBuf.count * 2)
         }
         let hash = fnv1a(menuBuf[0..<n])
         if hash == lastMenuHash { return false }
@@ -2462,10 +2452,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if curIsSystem {
                     sawSystem = true
                     // macOS app-menu conventions on top of Mojo's items.
-                    submenu.addItem(NSMenuItem(title: "About TurboKod",
-                                               action: #selector(aboutAction),
-                                               keyEquivalent: ""))
-                    submenu.addItem(.separator())
+                    addAboutItem(to: submenu)
                 }
                 let item = NSMenuItem()
                 item.title = title
@@ -2548,10 +2535,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // one so macOS has an app-menu slot to label.
         if !sawSystem {
             let appSub = NSMenu(title: "TurboKod")
-            appSub.addItem(NSMenuItem(title: "About TurboKod",
-                                      action: #selector(aboutAction),
-                                      keyEquivalent: ""))
-            appSub.addItem(.separator())
+            addAboutItem(to: appSub)
             appSub.addItem(NSMenuItem(
                 title: "Quit TurboKod",
                 action: #selector(NSApplication.terminate(_:)),
@@ -2872,6 +2856,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @objc func openAction() { openFilePanel(keyView()) }
     @objc func openProjectAction() { openProjectPanel(keyView()) }
 
+    // The macOS app-menu convention on top of Mojo's items: "About"
+    // followed by a separator.
+    private func addAboutItem(to menu: NSMenu) {
+        menu.addItem(NSMenuItem(title: "About TurboKod",
+                                action: #selector(aboutAction),
+                                keyEquivalent: ""))
+        menu.addItem(.separator())
+    }
+
     // macOS "About TurboKod" — a small panel with a link to the project
     // on GitHub. Handled entirely in the Swift host (the item is a macOS
     // app-menu convention, not part of Mojo's shared menu).
@@ -3021,9 +3014,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     // Open one forwarded filesystem path in its own fresh window: a
-    // directory becomes a project (the Mojo core records it into the
-    // recent-projects list via open_project → _set_project); anything
-    // else opens as a file buffer.
+    // directory becomes a project at its remembered frame (the Mojo core
+    // records it into the recent-projects list via open_project →
+    // _set_project); anything else opens as a file buffer.
     func openDroppedPath(_ path: String) {
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir)
