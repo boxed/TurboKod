@@ -745,6 +745,17 @@ def leading_indent_bytes(line: String) -> Int:
     return i
 
 
+def trailing_ws_start(line: String, end: Int) -> Int:
+    """Where the run of ASCII spaces / tabs ending at byte ``end`` begins —
+    ``end`` itself when ``line[end - 1]`` isn't whitespace. The mirror of
+    ``leading_indent_bytes``."""
+    var bytes = line.as_bytes()
+    var p = min(end, len(bytes))
+    while p > 0 and (bytes[p - 1] == 0x20 or bytes[p - 1] == 0x09):
+        p -= 1
+    return p
+
+
 def slice_codepoints(s: String, lo_cell: Int, hi_cell: Int) -> String:
     """Substring of ``s`` covering codepoints ``[lo_cell, hi_cell)``.
 

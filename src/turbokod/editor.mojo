@@ -77,7 +77,7 @@ from .string_utils import (
     byte_slice, char_width, codepoint_at, display_columns, is_ascii_ident_byte,
     is_printable_text_key, is_space_cp, is_word_codepoint,
     leading_indent_bytes, prev_codepoint_start, split_lines_no_trailing,
-    TAB_WIDTH, truncate_to_columns, utf8_byte_of_cell, utf8_cell_of_byte,
+    TAB_WIDTH, trailing_ws_start, truncate_to_columns, utf8_byte_of_cell, utf8_cell_of_byte,
     utf8_codepoint_size, utf8_step_forward, word_char_step, word_range_at,
 )
 from .text_view import (
@@ -179,11 +179,8 @@ def _completion_overlap_start(
 def _rtrim(s: String) -> String:
     """Drop trailing ASCII spaces and tabs. Used by ``_disk_text`` to honor
     the editorconfig ``trim_trailing_whitespace`` property."""
-    var bytes = s.as_bytes()
-    var n = len(bytes)
-    while n > 0 and (bytes[n - 1] == 0x20 or bytes[n - 1] == 0x09):
-        n -= 1
-    if n == len(bytes):
+    var n = trailing_ws_start(s, len(s.as_bytes()))
+    if n == len(s.as_bytes()):
         return s
     return byte_slice(s, 0, n)
 
@@ -2058,14 +2055,8 @@ struct Editor(Copyable, Movable):
         var n = self.buffer.line_count()
         for i in range(n):
             var line = self.buffer.line(i)
-            var b = line.as_bytes()
-            var m = len(b)
-            var indent = 0
-            while indent < m and (
-                Int(b[indent]) == 0x20 or Int(b[indent]) == 0x09
-            ):
-                indent += 1
-            if indent >= m:
+            var indent = leading_indent_bytes(line)
+            if indent >= len(line.as_bytes()):
                 continue  # blank / whitespace-only line
             # Pop classes we've dedented back out of.
             while len(stk_indent) > 0 \
@@ -10735,16 +10726,8 @@ def _smart_indent_for_enter(
     cheap to plumb through synchronously; this captures the 80% case.
     """
     var bytes = line.as_bytes()
-    var n = len(bytes)
-    var i = 0
-    while i < n and (bytes[i] == 0x20 or bytes[i] == 0x09):
-        i += 1
-    var base = byte_slice(line, 0, i)
-    var p = split_col
-    if p > n:
-        p = n
-    while p > 0 and (bytes[p - 1] == 0x20 or bytes[p - 1] == 0x09):
-        p -= 1
+    var base = byte_slice(line, 0, leading_indent_bytes(line))
+    var p = trailing_ws_start(line, split_col)
     if p > 0:
         var last = bytes[p - 1]
         if last == 0x7B or last == 0x28 or last == 0x5B or last == 0x3A:
@@ -10897,15 +10880,8 @@ def _smart_line_content_range(line: String) -> Tuple[Int, Int]:
     """Byte range of the non-whitespace content on ``line`` — leading
     whitespace and trailing whitespace stripped. Empty range for blank
     lines."""
-    var bytes = line.as_bytes()
-    var n = len(bytes)
-    var s = 0
-    while s < n and (bytes[s] == 0x20 or bytes[s] == 0x09):
-        s += 1
-    var e = n
-    while e > s and (bytes[e - 1] == 0x20 or bytes[e - 1] == 0x09):
-        e -= 1
-    return (s, e)
+    var s = leading_indent_bytes(line)
+    return (s, max(s, trailing_ws_start(line, len(line.as_bytes()))))
 
 
 def _smart_strictly_contains(
