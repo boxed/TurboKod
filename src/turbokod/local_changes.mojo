@@ -1595,70 +1595,10 @@ struct LocalChanges(Movable):
         for a real project are sub-millisecond `git` invocations each,
         and tearing down the modal is the user's "refresh" gesture so a
         debounced re-run isn't worth the complexity."""
+        # Start from the same clean slate ``close`` leaves behind.
+        self.close()
         self.root = root^
         self.active = True
-        self.submitted = False
-        self.focus = _PANE_FILES
-        self.last_sidebar_focus = _PANE_FILES
-        self.sel_file = 0
-        self.sel_branch = 0
-        self.sel_commit = 0
-        self.scroll_files = 0
-        self.scroll_branches = 0
-        self.scroll_commits = 0
-        self.unstaged.reset()
-        self.staged.reset()
-        self.info.reset()
-        self._right_key = String("")
-        self._sel_moved_ms = 0
-        self._sel_move_gap_ms = 0
-        self._input_ms = 0
-        self._pending_cursor_path = String("")
-        self._pending_cursor_line = 0
-        self._pending_cursor_pane = _PANE_RIGHT_UNSTAGED
-        self.sidebar_width_user = -1
-        self.files_height_user = -1
-        self.branches_height_user = -1
-        self.unstaged_height_user = -1
-        self._drag_kind = _DRAG_NONE
-        self.selected_path = String("")
-        self.selected_line = 0
-        self.pending_open_url = String("")
-        self.status_message = String("")
-        self.overlay = _OVERLAY_NONE
-        self.overlay_input = TextField()
-        self.overlay_message = String("")
-        # Hand back the commit-message editor's Find regex before the
-        # value is overwritten — an ``Editor`` going out of scope
-        # reclaims nothing (see ``Window.release``).
-        self.overlay_editor.release_search_cache()
-        self.overlay_editor = Editor(String(""))
-        self._reword_sha = String("")
-        self._reword_is_head = False
-        self._reword_save_btn = ShadowButton(String(_SAVE_BTN_LABEL), 0, 0)
-        self._reword_area_rect = Rect(0, 0, 0, 0)
-        self.flash_message = String("")
-        self._flash_until_ms = 0
-        self.overlay_output = String("")
-        self.overlay_output_scroll = 0
-        self._output_links = List[OutputLink]()
-        self._output_kind = GIT_OUT_OTHER
-        self._output_promoted = False
-        self.sidebar_dock.reset()
-        self._type_ahead.reset()
-        self._git_op = _GITOP_NONE
-        self._git_op_label = String("")
-        self._git_revert_path = String("")
-        self._git_revert_untracked = False
-        self._git_checkout_branch = String("")
-        self._git_merge_branch = String("")
-        self._git_delete_branch = String("")
-        self._rebase_step = 0
-        self._rebase_onto = String("")
-        self._rebase_log = String("")
-        self._rebase_noisy = False
-        self._merge_target_is_main = False
-        self._rebase_rewrote_current = False
         self._reload_files()
         self.branches = fetch_git_branches(self.root)
         self.commits = fetch_git_commits(self.root, 50)
@@ -1845,6 +1785,10 @@ struct LocalChanges(Movable):
         self.overlay_editor.release_search_cache()
 
     def close(mut self):
+        """Hide the view and reset its per-session state (selections,
+        panels, overlays, in-flight op bookkeeping); ``open`` starts from
+        this same reset. ``_pending_commit_message`` is deliberately kept —
+        an unsent commit message survives closing the view."""
         self.active = False
         self.submitted = False
         self.root = String("")
@@ -1860,16 +1804,7 @@ struct LocalChanges(Movable):
         self.scroll_files = 0
         self.scroll_branches = 0
         self.scroll_commits = 0
-        self.unstaged.reset()
-        self.staged.reset()
-        self.info.reset()
-        self._right_key = String("")
-        self._sel_moved_ms = 0
-        self._sel_move_gap_ms = 0
-        self._input_ms = 0
-        self._pending_cursor_path = String("")
-        self._pending_cursor_line = 0
-        self._pending_cursor_pane = _PANE_RIGHT_UNSTAGED
+        self._invalidate_right_panels()
         self.sidebar_width_user = -1
         self.files_height_user = -1
         self.branches_height_user = -1
@@ -4134,7 +4069,12 @@ struct LocalChanges(Movable):
             new_idx = 0
         self.sel_file = new_idx
         self._nudge_files_scroll_up()
-        # Force right-pane recompute next paint.
+        self._invalidate_right_panels()
+
+    def _invalidate_right_panels(mut self):
+        """Empty the three right-hand panels and forget what they were
+        built for, so the next paint recomputes them from the current
+        selection (and drops any pending cursor restore / settle timer)."""
         self._right_key = String("")
         self._sel_moved_ms = 0
         self._sel_move_gap_ms = 0
@@ -4166,16 +4106,7 @@ struct LocalChanges(Movable):
             self.sel_commit = len(self.commits) - 1
         if self.sel_commit < 0:
             self.sel_commit = 0
-        self._right_key = String("")
-        self._sel_moved_ms = 0
-        self._sel_move_gap_ms = 0
-        self._input_ms = 0
-        self._pending_cursor_path = String("")
-        self._pending_cursor_line = 0
-        self._pending_cursor_pane = _PANE_RIGHT_UNSTAGED
-        self.unstaged.reset()
-        self.staged.reset()
-        self.info.reset()
+        self._invalidate_right_panels()
 
     # --- overlay (commit / confirm / status) ------------------------------
 
