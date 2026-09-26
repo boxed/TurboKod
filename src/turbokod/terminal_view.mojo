@@ -30,6 +30,7 @@ from .events import (
 from .geometry import Point, Rect
 from .painter import Painter
 from .pty import PtyProcess
+from .string_utils import append_utf8
 from .vt import Vt
 
 
@@ -592,7 +593,9 @@ def encode_key(key: UInt32, mods: UInt8, app_cursor: Bool = False) -> String:
                 return prefix + _ascii_to_string(UInt8(0))
             # Other Ctrl+printable → just send the character; xterm's
             # behavior is similar (some glyphs aren't C0-mappable).
-        return prefix + _codepoint_to_utf8(UInt32(ch))
+        var buf = List[UInt8]()
+        append_utf8(buf, Int(ch))
+        return prefix + String(StringSpan(unsafe_from_utf8=Span(buf)))
     return String("")
 
 
@@ -608,29 +611,6 @@ def _csi_mod_tilde(num: Int, mod_byte: Int) -> String:
     Modified PageUp/PageDown/Insert/Delete and F5..F12."""
     return String("\x1b[") + String(num) + String(";") \
         + String(mod_byte) + String("~")
-
-
-def _codepoint_to_utf8(cp: UInt32) -> String:
-    """Encode a Unicode codepoint to its UTF-8 byte sequence as a
-    String. The pty child reads bytes — we convert from Mojo's
-    codepoint-as-UInt32 representation back to wire bytes."""
-    var c = Int(cp)
-    var buf = List[UInt8]()
-    if c < 0x80:
-        buf.append(UInt8(c))
-    elif c < 0x800:
-        buf.append(UInt8(0xC0 | (c >> 6)))
-        buf.append(UInt8(0x80 | (c & 0x3F)))
-    elif c < 0x10000:
-        buf.append(UInt8(0xE0 | (c >> 12)))
-        buf.append(UInt8(0x80 | ((c >> 6) & 0x3F)))
-        buf.append(UInt8(0x80 | (c & 0x3F)))
-    else:
-        buf.append(UInt8(0xF0 | (c >> 18)))
-        buf.append(UInt8(0x80 | ((c >> 12) & 0x3F)))
-        buf.append(UInt8(0x80 | ((c >> 6) & 0x3F)))
-        buf.append(UInt8(0x80 | (c & 0x3F)))
-    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=len(buf))))
 
 
 def _ascii_to_string(b: UInt8) -> String:

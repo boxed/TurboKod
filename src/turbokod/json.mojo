@@ -21,6 +21,8 @@ encodings stay stable in tests.
 from std.collections.list import List
 from std.collections.optional import Optional
 
+from .string_utils import append_utf8
+
 
 # --- JsonValue -------------------------------------------------------------
 
@@ -540,7 +542,7 @@ def _parse_string(text: String, pos: Int) raises -> Tuple[String, Int]:
                         cp = 0xFFFD
                 elif 0xDC00 <= cp and cp <= 0xDFFF:
                     cp = 0xFFFD
-                _emit_utf8(cp, out)
+                append_utf8(out, cp)
             else:
                 raise Error("bad string escape")
             continue
@@ -549,23 +551,6 @@ def _parse_string(text: String, pos: Int) raises -> Tuple[String, Int]:
         out.append(bytes[p])
         p += 1
     raise Error("unterminated string")
-
-
-def _emit_utf8(cp: Int, mut out: List[UInt8]):
-    if cp < 0x80:
-        out.append(UInt8(cp))
-    elif cp < 0x800:
-        out.append(UInt8(0xC0 | (cp >> 6)))
-        out.append(UInt8(0x80 | (cp & 0x3F)))
-    elif cp < 0x10000:
-        out.append(UInt8(0xE0 | (cp >> 12)))
-        out.append(UInt8(0x80 | ((cp >> 6) & 0x3F)))
-        out.append(UInt8(0x80 | (cp & 0x3F)))
-    else:
-        out.append(UInt8(0xF0 | (cp >> 18)))
-        out.append(UInt8(0x80 | ((cp >> 12) & 0x3F)))
-        out.append(UInt8(0x80 | ((cp >> 6) & 0x3F)))
-        out.append(UInt8(0x80 | (cp & 0x3F)))
 
 
 def _hex_value(c: Int) raises -> Int:

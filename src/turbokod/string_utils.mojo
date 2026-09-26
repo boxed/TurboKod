@@ -853,3 +853,29 @@ def split_open_arg(arg: String) -> Tuple[String, Int]:
             var line = parse_int_prefix(arg, i + 1, len(b))
             return (byte_slice(arg, 0, i), line if line > 0 else 0)
     return (arg, 0)
+
+
+def append_utf8(mut out: List[UInt8], cp: Int):
+    """Append ``cp``'s UTF-8 encoding to ``out``. Handles the full
+    1- to 4-byte range so any normalized codepoint round-trips
+    cleanly. Negative / oversized inputs are clamped to ``?``
+    rather than emitted as malformed UTF-8."""
+    if cp < 0 or cp > 0x10FFFF:
+        out.append(UInt8(0x3F))
+        return
+    if cp < 0x80:
+        out.append(UInt8(cp))
+        return
+    if cp < 0x800:
+        out.append(UInt8(0xC0 | (cp >> 6)))
+        out.append(UInt8(0x80 | (cp & 0x3F)))
+        return
+    if cp < 0x10000:
+        out.append(UInt8(0xE0 | (cp >> 12)))
+        out.append(UInt8(0x80 | ((cp >> 6) & 0x3F)))
+        out.append(UInt8(0x80 | (cp & 0x3F)))
+        return
+    out.append(UInt8(0xF0 | (cp >> 18)))
+    out.append(UInt8(0x80 | ((cp >> 12) & 0x3F)))
+    out.append(UInt8(0x80 | ((cp >> 6) & 0x3F)))
+    out.append(UInt8(0x80 | (cp & 0x3F)))

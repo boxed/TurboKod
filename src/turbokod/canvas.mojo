@@ -36,15 +36,7 @@ def _control_picture_glyph(b: Int) -> String:
         cp = 0x2421
     else:
         cp = 0x2400 + b
-    # UTF-8 three-byte form for U+2400..U+24FF: 1110xxxx 10xxxxxx 10xxxxxx.
-    # ``chr()`` encodes each value as the UTF-8 of *that codepoint*, so
-    # the obvious ``chr(b1) + chr(b2) + chr(b3)`` doubles the byte count
-    # for values >= 0x80. Build the bytes directly instead.
-    var buf = List[UInt8]()
-    buf.append(UInt8(0xE0 | (cp >> 12)))
-    buf.append(UInt8(0x80 | ((cp >> 6) & 0x3F)))
-    buf.append(UInt8(0x80 | (cp & 0x3F)))
-    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=len(buf))))
+    return chr(cp)
 
 
 @fieldwise_init
