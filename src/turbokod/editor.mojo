@@ -188,6 +188,36 @@ def _rtrim(s: String) -> String:
     return byte_slice(s, 0, n)
 
 
+@always_inline
+def _span_cells(
+    cell_map: List[Int], cell_count: Int, lo: Int, hi: Int,
+) -> Tuple[Int, Int]:
+    """The ``[start, end)`` cell columns a painted segment's bytes
+    ``[lo, hi)`` cover, clamped to the segment. ``cell_map`` is the
+    segment's byte → cell map and ``cell_count`` its total width; an
+    empty result means the span misses the segment. Every paint overlay
+    (syntax, spell, diagnostics, links, matches, …) maps through here, so
+    a wide glyph is recolored once however many bytes feed it."""
+    var b0 = max(lo, 0)
+    var b1 = min(hi, len(cell_map))
+    if b0 >= b1:
+        return (0, 0)
+    return (cell_map[b0], cell_map[b1] if b1 < len(cell_map) else cell_count)
+
+
+@always_inline
+def _paint_attr_span(
+    mut canvas: Canvas, painter: Painter, x0: Int, x_max: Int, y: Int,
+    cells: Tuple[Int, Int], attr: Attr,
+):
+    """Set ``attr`` on cells ``cells`` of the segment starting at screen
+    column ``x0``, stopping at ``x_max`` (the content edge)."""
+    for c in range(cells[0], cells[1]):
+        if x0 + c >= x_max:
+            break
+        painter.set_attr(canvas, x0 + c, y, attr)
+
+
 def _diag_label(diag: Diagnostic) -> String:
     """``[source] message`` — how a diagnostic reads in tooltips and menus
     (just the message when the server gave no source)."""
@@ -6484,22 +6514,12 @@ struct Editor(Copyable, Movable):
             # Before-file syntax overlay (fg only, keep the red wash bg).
             if p_idx < len(self.diff_phantom_hl) \
                     and len(self.diff_phantom_hl[p_idx]) > 0:
-                var bytes_n = len(text.as_bytes())
                 var b2c = utf8_byte_to_cell(text)
                 var cells = utf8_codepoint_count(text)
                 for hi in range(len(self.diff_phantom_hl[p_idx])):
                     var hl = self.diff_phantom_hl[p_idx][hi]
-                    var lo = hl.col_start
-                    var h4 = hl.col_end
-                    if lo < 0:
-                        lo = 0
-                    if h4 > bytes_n:
-                        h4 = bytes_n
-                    if lo >= h4:
-                        continue
-                    var cell_lo = b2c[lo]
-                    var cell_hi = b2c[h4] if h4 < bytes_n else cells
-                    for cc in range(cell_lo, cell_hi):
+                    var span = _span_cells(b2c, cells, hl.col_start, hl.col_end)
+                    for cc in range(span[0], span[1]):
                         var sx = text_x0 + cc
                         if sx >= content_right:
                             break
@@ -6514,22 +6534,12 @@ struct Editor(Copyable, Movable):
             # actually changed within this (modified) line.
             if p_idx < len(self.diff_phantom_emph) \
                     and len(self.diff_phantom_emph[p_idx]) > 0:
-                var ebytes = len(text.as_bytes())
                 var eb2c = utf8_byte_to_cell(text)
                 var ecells = utf8_codepoint_count(text)
                 for er in range(len(self.diff_phantom_emph[p_idx])):
                     var rng = self.diff_phantom_emph[p_idx][er]
-                    var elo = rng[0]
-                    var ehi = rng[1]
-                    if elo < 0:
-                        elo = 0
-                    if ehi > ebytes:
-                        ehi = ebytes
-                    if elo >= ehi:
-                        continue
-                    var ecl = eb2c[elo]
-                    var ech = eb2c[ehi] if ehi < ebytes else ecells
-                    for cc in range(ecl, ech):
+                    var span = _span_cells(eb2c, ecells, rng[0], rng[1])
+                    for cc in range(span[0], span[1]):
                         var sx = text_x0 + cc
                         if sx >= content_right:
                             break
@@ -6893,7 +6903,6 @@ struct Editor(Copyable, Movable):
             # offsets index it directly), and concealed bytes collapse to the
             # display cell they sit in — overlays land on the painted text.
             ref visible_cell_map = cell_maps[screen_row]
-            var visible_byte_count = len(visible_cell_map)
             var visible_cell_count = cell_counts[screen_row]
             var sy_hl = view.a.y + screen_row
             # Syntax-highlight overlay: change the attr on cells covered by
@@ -6902,52 +6911,32 @@ struct Editor(Copyable, Movable):
             ref row_bucket = hl_buckets[buf_row - vis_lo]
             for hb in range(len(row_bucket)):
                 var hl = self.highlights[row_bucket[hb]]
-                var hl_byte_start = hl.col_start - start_byte
-                var hl_byte_end = hl.col_end - start_byte
-                if hl_byte_start < 0:
-                    hl_byte_start = 0
-                if hl_byte_end > visible_byte_count:
-                    hl_byte_end = visible_byte_count
-                if hl_byte_start >= hl_byte_end:
+                var hl_cells = _span_cells(
+                    visible_cell_map, visible_cell_count, hl.col_start - start_byte, hl.col_end - start_byte,
+                )
+                if hl_cells[0] >= hl_cells[1]:
                     continue
                 # Walk by codepoint via the cell map: each new cell column
                 # we hit gets recoloured exactly once even though several
                 # bytes feed into it.
-                var hl_cell_start = visible_cell_map[hl_byte_start]
-                var hl_cell_end: Int
-                if hl_byte_end < visible_byte_count:
-                    hl_cell_end = visible_cell_map[hl_byte_end]
-                else:
-                    hl_cell_end = visible_cell_count
-                for cell_off in range(hl_cell_start, hl_cell_end):
-                    var sx_hl = seg_x0 + cell_off
-                    if sx_hl >= content_right:
-                        break
-                    painter.set_attr(canvas, sx_hl, sy_hl, hl.attr)
+                _paint_attr_span(
+                    canvas, painter, seg_x0, content_right, sy_hl, hl_cells,
+                    hl.attr,
+                )
             # documentColor swatch overlay: recolor the color literal's
             # cells to the literal's actual color (truecolor bg).
             ref color_bucket = color_buckets[buf_row - vis_lo]
             for cm in range(len(color_bucket)):
                 var ch2 = self.color_highlights[color_bucket[cm]]
-                var c2_byte_start = ch2.col_start - start_byte
-                var c2_byte_end = ch2.col_end - start_byte
-                if c2_byte_start < 0:
-                    c2_byte_start = 0
-                if c2_byte_end > visible_byte_count:
-                    c2_byte_end = visible_byte_count
-                if c2_byte_start >= c2_byte_end:
+                var c2_cells = _span_cells(
+                    visible_cell_map, visible_cell_count, ch2.col_start - start_byte, ch2.col_end - start_byte,
+                )
+                if c2_cells[0] >= c2_cells[1]:
                     continue
-                var c2_cell_start = visible_cell_map[c2_byte_start]
-                var c2_cell_end: Int
-                if c2_byte_end < visible_byte_count:
-                    c2_cell_end = visible_cell_map[c2_byte_end]
-                else:
-                    c2_cell_end = visible_cell_count
-                for cell_off in range(c2_cell_start, c2_cell_end):
-                    var sx_c2 = seg_x0 + cell_off
-                    if sx_c2 >= content_right:
-                        break
-                    painter.set_attr(canvas, sx_c2, sy_hl, ch2.attr)
+                _paint_attr_span(
+                    canvas, painter, seg_x0, content_right, sy_hl, c2_cells,
+                    ch2.attr,
+                )
             # Spell-check overlay: same byte-to-cell mapping as the
             # syntax pass above, but reapplies the *same* fg/bg with
             # ``STYLE_UNDERLINE`` ORed in. Painted after the syntax
@@ -6956,25 +6945,15 @@ struct Editor(Copyable, Movable):
             ref sp_bucket = spell_buckets[buf_row - vis_lo]
             for sb in range(len(sp_bucket)):
                 var sh = self.spell_highlights[sp_bucket[sb]]
-                var sh_byte_start = sh.col_start - start_byte
-                var sh_byte_end = sh.col_end - start_byte
-                if sh_byte_start < 0:
-                    sh_byte_start = 0
-                if sh_byte_end > visible_byte_count:
-                    sh_byte_end = visible_byte_count
-                if sh_byte_start >= sh_byte_end:
+                var sh_cells = _span_cells(
+                    visible_cell_map, visible_cell_count, sh.col_start - start_byte, sh.col_end - start_byte,
+                )
+                if sh_cells[0] >= sh_cells[1]:
                     continue
-                var sh_cell_start = visible_cell_map[sh_byte_start]
-                var sh_cell_end: Int
-                if sh_byte_end < visible_byte_count:
-                    sh_cell_end = visible_cell_map[sh_byte_end]
-                else:
-                    sh_cell_end = visible_cell_count
-                for cell_off in range(sh_cell_start, sh_cell_end):
-                    var sx_sh = seg_x0 + cell_off
-                    if sx_sh >= content_right:
-                        break
-                    painter.set_attr(canvas, sx_sh, sy_hl, sh.attr)
+                _paint_attr_span(
+                    canvas, painter, seg_x0, content_right, sy_hl, sh_cells,
+                    sh.attr,
+                )
             # Diagnostic overlay: third underline pass. Unlike spell —
             # which already knows the host attr from the syntax
             # highlight it sits on — diagnostics can land anywhere
@@ -6990,27 +6969,18 @@ struct Editor(Copyable, Movable):
                 var d_hi = _diag_byte_end_for_row(
                     diag, buf_row, len(line.as_bytes()),
                 )
-                var d_byte_start = d_lo - start_byte
-                var d_byte_end = d_hi - start_byte
-                if d_byte_start < 0:
-                    d_byte_start = 0
-                if d_byte_end > visible_byte_count:
-                    d_byte_end = visible_byte_count
-                if d_byte_start >= d_byte_end:
+                var d_cells = _span_cells(
+                    visible_cell_map, visible_cell_count, d_lo - start_byte, d_hi - start_byte,
+                )
+                if d_cells[0] >= d_cells[1]:
                     continue
-                var d_cell_start = visible_cell_map[d_byte_start]
-                var d_cell_end: Int
-                if d_byte_end < visible_byte_count:
-                    d_cell_end = visible_cell_map[d_byte_end]
-                else:
-                    d_cell_end = visible_cell_count
                 var underline_color = _diag_underline_color(diag.severity)
                 var add_style: UInt8
                 if diag_extended:
                     add_style = STYLE_UNDERLINE | STYLE_UNDERLINE_CURLY
                 else:
                     add_style = STYLE_UNDERLINE
-                for cell_off in range(d_cell_start, d_cell_end):
+                for cell_off in range(d_cells[0], d_cells[1]):
                     var sx_d = seg_x0 + cell_off
                     if sx_d >= content_right:
                         break
@@ -7034,21 +7004,12 @@ struct Editor(Copyable, Movable):
                 var dk_nb = len(line.as_bytes())
                 var dk_lo = dk.start_char if buf_row == dk.start_line else 0
                 var dk_hi = dk.end_char if buf_row == dk.end_line else dk_nb
-                var dk_byte_start = dk_lo - start_byte
-                var dk_byte_end = dk_hi - start_byte
-                if dk_byte_start < 0:
-                    dk_byte_start = 0
-                if dk_byte_end > visible_byte_count:
-                    dk_byte_end = visible_byte_count
-                if dk_byte_start >= dk_byte_end:
+                var dk_cells = _span_cells(
+                    visible_cell_map, visible_cell_count, dk_lo - start_byte, dk_hi - start_byte,
+                )
+                if dk_cells[0] >= dk_cells[1]:
                     continue
-                var dk_cell_start = visible_cell_map[dk_byte_start]
-                var dk_cell_end: Int
-                if dk_byte_end < visible_byte_count:
-                    dk_cell_end = visible_cell_map[dk_byte_end]
-                else:
-                    dk_cell_end = visible_cell_count
-                for cell_off in range(dk_cell_start, dk_cell_end):
+                for cell_off in range(dk_cells[0], dk_cells[1]):
                     var sx_dk = seg_x0 + cell_off
                     if sx_dk >= content_right:
                         break
@@ -7084,29 +7045,15 @@ struct Editor(Copyable, Movable):
                     if matched:
                         if not (buf_row == match_sel_row \
                                 and ii == match_sel_byte):
-                            var m_lo = ii
-                            var m_hi = ii + match_needle_n
-                            if m_lo < start_byte:
-                                m_lo = start_byte
-                            if m_hi > end_byte:
-                                m_hi = end_byte
-                            if m_hi > m_lo:
-                                var m_byte_start = m_lo - start_byte
-                                var m_byte_end = m_hi - start_byte
-                                var m_cell_start = \
-                                    visible_cell_map[m_byte_start]
-                                var m_cell_end: Int
-                                if m_byte_end < visible_byte_count:
-                                    m_cell_end = visible_cell_map[m_byte_end]
-                                else:
-                                    m_cell_end = visible_cell_count
-                                for cell_off in range(m_cell_start, m_cell_end):
-                                    var sx_m = seg_x0 + cell_off
-                                    if sx_m >= content_right:
-                                        break
-                                    painter.set_attr(
-                                        canvas, sx_m, sy_hl, match_attr,
-                                    )
+                            _paint_attr_span(
+                                canvas, painter, seg_x0, content_right, sy_hl,
+                                _span_cells(
+                                    visible_cell_map, visible_cell_count,
+                                    ii - start_byte,
+                                    ii + match_needle_n - start_byte,
+                                ),
+                                match_attr,
+                            )
                         ii += match_needle_n
                     else:
                         ii += 1
@@ -7123,25 +7070,15 @@ struct Editor(Copyable, Movable):
                 var line_nb2 = len(line.as_bytes())
                 var o_lo = oc.start_char if buf_row == oc.start_line else 0
                 var o_hi = oc.end_char if buf_row == oc.end_line else line_nb2
-                var o_byte_start = o_lo - start_byte
-                var o_byte_end = o_hi - start_byte
-                if o_byte_start < 0:
-                    o_byte_start = 0
-                if o_byte_end > visible_byte_count:
-                    o_byte_end = visible_byte_count
-                if o_byte_start >= o_byte_end:
+                var o_cells = _span_cells(
+                    visible_cell_map, visible_cell_count, o_lo - start_byte, o_hi - start_byte,
+                )
+                if o_cells[0] >= o_cells[1]:
                     continue
-                var o_cell_start = visible_cell_map[o_byte_start]
-                var o_cell_end: Int
-                if o_byte_end < visible_byte_count:
-                    o_cell_end = visible_cell_map[o_byte_end]
-                else:
-                    o_cell_end = visible_cell_count
-                for cell_off in range(o_cell_start, o_cell_end):
-                    var sx_o = seg_x0 + cell_off
-                    if sx_o >= content_right:
-                        break
-                    painter.set_attr(canvas, sx_o, sy_hl, match_attr)
+                _paint_attr_span(
+                    canvas, painter, seg_x0, content_right, sy_hl, o_cells,
+                    match_attr,
+                )
             # End-of-line virtual annotations (inlay hints + code lens).
             # Only on the last visual segment of a buffer row so a
             # soft-wrapped line shows them once, at the true line end.
@@ -7343,31 +7280,16 @@ struct Editor(Copyable, Movable):
                     # Re-apply this row's syntax highlights so the sticky
                     # header is coloured exactly like the real line.
                     var cmap = utf8_byte_to_cell(line)
-                    var nbytes = len(cmap)
                     var ncells = utf8_codepoint_count(line)
                     for h in range(len(self.highlights)):
-                        if self.highlights[h].row != brow:
+                        ref hl = self.highlights[h]
+                        if hl.row != brow:
                             continue
-                        var hl = self.highlights[h]
-                        var bs = hl.col_start
-                        var be = hl.col_end
-                        if bs < 0:
-                            bs = 0
-                        if be > nbytes:
-                            be = nbytes
-                        if bs >= be:
-                            continue
-                        var cs = cmap[bs]
-                        var ce: Int
-                        if be < nbytes:
-                            ce = cmap[be]
-                        else:
-                            ce = ncells
-                        for co in range(cs, ce):
-                            var sx = text_x0 + co
-                            if sx >= content_right:
-                                break
-                            painter.set_attr(canvas, sx, sy, hl.attr)
+                        _paint_attr_span(
+                            canvas, painter, text_x0, content_right, sy,
+                            _span_cells(cmap, ncells, hl.col_start, hl.col_end),
+                            hl.attr,
+                        )
                 # Divider under the band: underline every cell of the
                 # bottom sticky row (glyphs + syntax colours survive; both
                 # frontends render underline).
@@ -7416,22 +7338,12 @@ struct Editor(Copyable, Movable):
                         and brow < len(self.diff_emph_by_row) \
                         and len(self.diff_emph_by_row[brow]) > 0:
                     var line = self.buffer.line(brow)
-                    var lbytes = len(line.as_bytes())
                     var lb2c = utf8_byte_to_cell(line)
                     var lcells = utf8_codepoint_count(line)
                     for er in range(len(self.diff_emph_by_row[brow])):
                         var rng = self.diff_emph_by_row[brow][er]
-                        var elo = rng[0]
-                        var ehi = rng[1]
-                        if elo < 0:
-                            elo = 0
-                        if ehi > lbytes:
-                            ehi = lbytes
-                        if elo >= ehi:
-                            continue
-                        var ecl = lb2c[elo]
-                        var ech = lb2c[ehi] if ehi < lbytes else lcells
-                        for cc in range(ecl, ech):
+                        var span = _span_cells(lb2c, lcells, rng[0], rng[1])
+                        for cc in range(span[0], span[1]):
                             var sx = text_x0 + cc
                             if sx >= wash_r:
                                 break
