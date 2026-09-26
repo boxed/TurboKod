@@ -4062,15 +4062,7 @@ struct Editor(Copyable, Movable):
             self._recompute_big_buffer()
             self.disk_baseline = baseline^
             self._adopt_stat(info)
-            # Wholesale buffer swap; speculative shift can't track
-            # arbitrary content changes, so clear and let the LSP
-            # refresh repopulate.
-            self.clear_diagnostics()
-            self._last_known_line_count = self.buffer.line_count()
-            self.refresh_highlights()
-            self._clamp_cursor_after_reload()
-            self.selections[0].anchor_row = self.selections[0].row
-            self.selections[0].anchor_col = self.selections[0].col
+            self._after_buffer_swap()
             return EXT_CHANGE_RELOADED
         # Dirty: 3-way merge against the previous on-disk content.
         var base_lines = _split_buffer_lines(self.disk_baseline)
@@ -4104,21 +4096,27 @@ struct Editor(Copyable, Movable):
         # Ctrl+Z to back out of the merge if they don't like it.
         self._push_undo()
         self.buffer.lines = merged^
-        # Same reasoning as the clean-reload branch.
-        self.clear_diagnostics()
-        self._last_known_line_count = self.buffer.line_count()
         self.disk_baseline = text^
         self._adopt_stat(info)
         # Clean merge: dirty iff the merged buffer differs from what's
         # currently on disk. (Equal happens when ``theirs`` already
         # contained all of our local edits.)
-        var dirty_after = not _lists_equal(self.buffer.lines, theirs_lines)
-        self.dirty = dirty_after
+        self.dirty = not _lists_equal(self.buffer.lines, theirs_lines)
+        self._after_buffer_swap()
+        return EXT_CHANGE_MERGED
+
+    def _after_buffer_swap(mut self):
+        """Bookkeeping after a reload or merge replaced the buffer
+        wholesale. Speculative diagnostic shifting can't track arbitrary
+        content changes, so diagnostics are cleared for the LSP refresh to
+        repopulate; highlights are redone; the cursor is pulled back in
+        bounds with its selection collapsed."""
+        self.clear_diagnostics()
+        self._last_known_line_count = self.buffer.line_count()
+        self.refresh_highlights()
         self._clamp_cursor_after_reload()
         self.selections[0].anchor_row = self.selections[0].row
         self.selections[0].anchor_col = self.selections[0].col
-        self.refresh_highlights()
-        return EXT_CHANGE_MERGED
 
     def _clamp_cursor_after_reload(mut self):
         """Pull the primary cursor back inside the new buffer bounds and
@@ -4251,15 +4249,19 @@ struct Editor(Copyable, Movable):
         var disk = self._disk_text()
         if not write_file(self.file_path, disk):
             return False
-        # Refresh stat info so check_for_external_change doesn't pick up our
-        # own write as an external change. Adopt the just-written bytes as
-        # the new merge base.
+        self._adopt_written(disk^)
+        return True
+
+    def _adopt_written(mut self, var disk: String):
+        """After writing ``disk`` to ``file_path``: refresh the stat so
+        ``check_for_external_change`` doesn't mistake our own write for an
+        external one, adopt the bytes as the new merge base, and go
+        clean."""
         var info = stat_file(self.file_path)
         if info.ok:
             self._adopt_stat(info)
         self.disk_baseline = disk^
         self.dirty = False
-        return True
 
     def save_as(mut self, var path: String) raises -> Bool:
         """Write the buffer to ``path`` and adopt it as the new backing file.
@@ -4279,11 +4281,7 @@ struct Editor(Copyable, Movable):
             self.file_path = prev_path^
             self.editorconfig = prev_config^
             return False
-        var info = stat_file(self.file_path)
-        if info.ok:
-            self._adopt_stat(info)
-        self.disk_baseline = disk^
-        self.dirty = False
+        self._adopt_written(disk^)
         # Extension may have changed (e.g., ``.txt`` → ``.mojo``): the cached
         # tokenizer state belongs to the old grammar, so retokenize from
         # scratch, and rescan the test gutter under the new language.
