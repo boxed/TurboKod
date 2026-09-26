@@ -6956,16 +6956,11 @@ def _uri_to_path(uri: String) -> String:
     (spec-compliant servers encode spaces / non-ASCII in path bytes; an
     undecoded ``%20`` wouldn't match a ``_doc_paths`` entry or open on
     disk). A malformed ``%`` is left as a literal byte."""
-    var prefix = String("file://")
-    var pb = prefix.as_bytes()
-    var ub = uri.as_bytes()
-    if len(ub) < len(pb):
+    if not uri.startswith("file://"):
         return uri
-    for i in range(len(pb)):
-        if ub[i] != pb[i]:
-            return uri
+    var ub = uri.as_bytes()
     var out = List[UInt8]()
-    var i = len(pb)
+    var i = 7    # past ``file://``
     while i < len(ub):
         if ub[i] == 0x25 and i + 2 < len(ub):   # '%XX'
             var hi = hex_digit_value(Int(ub[i + 1]))

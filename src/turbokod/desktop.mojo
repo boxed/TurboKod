@@ -6753,11 +6753,8 @@ struct Desktop(Movable):
         var prefix = String("Untitled")
         var tb = title.as_bytes()
         var pb = prefix.as_bytes()
-        if len(tb) < len(pb):
+        if not title.startswith("Untitled"):
             return 0
-        for i in range(len(pb)):
-            if tb[i] != pb[i]:
-                return 0
         if len(tb) == len(pb):
             return 1
         # Expect "Untitled <n>": a single space then digits.

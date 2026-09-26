@@ -227,19 +227,10 @@ def python_venv_has_debugpy(venv_dir: String) -> Bool:
         return True
     var lib_dir = join_path(venv_dir, String("lib"))
     var entries = list_directory(lib_dir)
-    var prefix = String("python")
-    var pb = prefix.as_bytes()
     for i in range(len(entries)):
         var name = entries[i]
-        var nb = name.as_bytes()
-        if len(nb) <= len(pb):
-            continue
-        var matches = True
-        for k in range(len(pb)):
-            if nb[k] != pb[k]:
-                matches = False
-                break
-        if not matches:
+        # ``python3.X`` — a bare ``python`` isn't a version dir.
+        if len(name.as_bytes()) <= 6 or not name.startswith("python"):
             continue
         var pkg = join_path(
             join_path(join_path(lib_dir, name), String("site-packages")),
