@@ -9924,32 +9924,14 @@ struct Desktop(Movable):
                 var err = m.captured_stderr()
                 if len(err.as_bytes()) > 0:
                     lines.append(String("  stderr:"))
-                    var start = 0
-                    var eb = err.as_bytes()
-                    for k in range(len(eb)):
-                        if eb[k] == 0x0A:
-                            var seg = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=eb.unsafe_ptr().unsafe_offset(start), length=k - start)))
-                            lines.append(String("    ") + seg)
-                            start = k + 1
-                    if start < len(eb):
-                        var tail = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=eb.unsafe_ptr().unsafe_offset(start), length=len(eb) - start)))
-                        lines.append(String("    ") + tail)
+                    _append_indented(lines, err, String("    "))
                 # Server protocol log (window/logMessage + telemetry/event)
                 # — a server that explains a problem via logMessage rather
                 # than crashing is otherwise invisible.
                 var lg = m.captured_log()
                 if len(lg.as_bytes()) > 0:
                     lines.append(String("  log:"))
-                    var lstart = 0
-                    var lb = lg.as_bytes()
-                    for k in range(len(lb)):
-                        if lb[k] == 0x0A:
-                            var seg = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=lb.unsafe_ptr().unsafe_offset(lstart), length=k - lstart)))
-                            lines.append(String("    ") + seg)
-                            lstart = k + 1
-                    if lstart < len(lb):
-                        var ltail = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=lb.unsafe_ptr().unsafe_offset(lstart), length=len(lb) - lstart)))
-                        lines.append(String("    ") + ltail)
+                    _append_indented(lines, lg, String("    "))
         # Show what python candidates are on $PATH so the user can
         # tell why ty (or pyright) was selected.
         var py_idx = find_language_by_id(self.lsp_specs, String("python"))
@@ -10028,16 +10010,7 @@ struct Desktop(Movable):
         if len(err.as_bytes()) > 0:
             lines.append(String(""))
             lines.append(String("stderr:"))
-            var start = 0
-            var eb = err.as_bytes()
-            for k in range(len(eb)):
-                if eb[k] == 0x0A:
-                    var seg = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=eb.unsafe_ptr().unsafe_offset(start), length=k - start)))
-                    lines.append(String("  ") + seg)
-                    start = k + 1
-            if start < len(eb):
-                var tail = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=eb.unsafe_ptr().unsafe_offset(start), length=len(eb) - start)))
-                lines.append(String("  ") + tail)
+            _append_indented(lines, err, String("  "))
         var body = String("\n").join(lines)
         _ = self._add_text_window(String("Debugger session"), body^, screen)
 
@@ -15773,6 +15746,13 @@ def _apply_session_view(mut editor: Editor, sw: SessionWindow):
     editor.selections[0].anchor_col = sw.cursor_col
     editor.scroll_x = sw.scroll_x
     editor.scroll_y = sw.scroll_y
+
+
+def _append_indented(mut lines: List[String], text: String, pad: String):
+    """Append each line of ``text`` to ``lines`` behind ``pad`` — how the
+    info windows nest a captured stderr / log under its heading."""
+    for line in split_lines_no_trailing(text):
+        lines.append(pad + line)
 
 
 def _project_python(project_root: String) -> String:
