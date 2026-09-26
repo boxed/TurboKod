@@ -252,22 +252,9 @@ struct BreakpointMenu(Movable):
         # ESC / Cancel. Same chrome the editor windows and other dialogs
         # use, painted via the shared ``paint_close_button`` helper.
         paint_close_button(canvas, Point(rect.a.x, rect.a.y), attr)
-        # Title — show file:line.
-        var title = String(" Breakpoint at ")
-        var loc = self.path + String(":") + String(self.line + 1)
-        # Cap the location to the dialog interior so it can't bleed
-        # past the right border on a long path.
-        var avail = rect.width() - 2 - display_columns(title) - 1
-        if avail < 0: avail = 0
-        if display_columns(loc) > avail:
-            # Trim the head so the visible tail keeps the filename. Reserve
-            # one column for the "…" prefix, and truncate by display columns
-            # so a multi-byte path isn't sliced mid-codepoint.
-            var visible = avail - 1
-            if visible < 0: visible = 0
-            loc = String("…") + tail_to_columns(loc, visible)
-        _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, layout.title_y), title + loc, attr,
+        _paint_location_title(
+            canvas, painter, rect, layout.title_y, attr,
+            String(" Breakpoint at "), self.path, self.line,
         )
         # Enabled checkbox: render the box+label on a contrasting
         # chip so the click target reads as wider than just the 3-cell
@@ -679,23 +666,9 @@ struct BreakpointConditionErrorDialog(Movable):
         # ESC / Cancel. Same chrome the editor windows and other dialogs
         # use, painted via the shared ``paint_close_button`` helper.
         paint_close_button(canvas, Point(rect.a.x, rect.a.y), attr)
-        var title = String(" Bad breakpoint condition — ")
-        # Title bytes != cols (the em-dash is 3 bytes / 1 col); trim
-        # budget has to be in display columns, not bytes.
-        var title_cols = display_columns(title)
-        var loc = self.path + String(":") + String(self.line + 1)
-        var avail = rect.width() - 2 - title_cols - 1
-        if avail < 0: avail = 0
-        if display_columns(loc) > avail:
-            # Trim the head so the visible tail keeps filename + line. Reserve
-            # one column for the "…" prefix, and truncate by display columns
-            # so a multi-byte path isn't sliced mid-codepoint.
-            var visible = avail - 1
-            if visible < 0: visible = 0
-            loc = String("…") + tail_to_columns(loc, visible)
-        _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, layout.title_y),
-            title + loc, attr,
+        _paint_location_title(
+            canvas, painter, rect, layout.title_y, attr,
+            String(" Bad breakpoint condition — "), self.path, self.line,
         )
         # Error line.
         _ = painter.put_text(
@@ -886,3 +859,18 @@ def _wait_for_value(dd: Dropdown) -> String:
     if v == _WAIT_FOR_NONE:
         return String("")
     return v^
+
+
+def _paint_location_title(
+    mut canvas: Canvas, painter: Painter, rect: Rect, y: Int, attr: Attr,
+    title: String, path: String, line: Int,
+):
+    """``<title><path>:<line+1>`` on row ``y``, with the location capped
+    to the dialog interior: a long path loses its head (``…`` prefix) so
+    the visible tail keeps the filename and line. Budgets are in display
+    columns, so a multi-byte title or path isn't sliced mid-codepoint."""
+    var loc = path + String(":") + String(line + 1)
+    var avail = max(0, rect.width() - 2 - display_columns(title) - 1)
+    if display_columns(loc) > avail:
+        loc = String("…") + tail_to_columns(loc, max(0, avail - 1))
+    _ = painter.put_text(canvas, Point(rect.a.x + 2, y), title + loc, attr)
