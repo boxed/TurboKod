@@ -531,17 +531,31 @@ def _git_argv(project_root: String, var args: List[String]) -> List[String]:
     return argv^
 
 
-def _git_stdout(project_root: String, var args: List[String]) -> String:
-    """Run ``git -C <root> <args...>``; return stdout, or ``""`` on a
-    non-zero exit or spawn failure. The common shape for the read-only
-    queries (diffs, status, log, show)."""
+def _git_capture(
+    project_root: String, var args: List[String],
+    stdin_text: String = String(""),
+) -> Optional[String]:
+    """Run ``git -C <root> <args...>`` (optionally feeding ``stdin_text``);
+    stdout on success, empty on a non-zero exit or spawn failure."""
     try:
-        var r = capture_command(_git_argv(project_root, args^))
+        var r = capture_command(_git_argv(project_root, args^), stdin_text)
         if Int(r.status) != 0:
-            return String("")
+            return None
         return r.stdout
     except:
-        return String("")
+        return None
+
+
+def _git_stdout(
+    project_root: String, var args: List[String],
+    stdin_text: String = String(""),
+) -> String:
+    """:func:`_git_capture`, with failure as ``""``. The common shape for
+    the read-only queries (diffs, status, log, show), and — with
+    ``stdin_text`` — ``git patch-id``, which reads a diff rather than
+    taking a revision."""
+    var out = _git_capture(project_root, args^, stdin_text)
+    return out.value() if out else String("")
 
 
 def _git_ok(
@@ -576,14 +590,8 @@ def fetch_head_text(project_root: String, file_path: String) -> Optional[String]
     var args = List[String]()
     args.append(String("show"))
     args.append(String("HEAD:") + rel^)
-    try:
-        var result = capture_command(_git_argv(project_root, args^))
-        # Non-zero exit = path not in HEAD; treat as "no baseline".
-        if Int(result.status) != 0:
-            return Optional[String]()
-        return Optional[String](result.stdout)
-    except:
-        return Optional[String]()
+    # Non-zero exit = path not in HEAD; treat as "no baseline".
+    return _git_capture(project_root, args^)
 
 
 def project_is_git_repo(project_root: String) -> Bool:
@@ -928,12 +936,7 @@ def current_branch_name(project_root: String) -> String:
     var name = String(raw.strip())
     if name != String("HEAD"):
         return name^
-    var sha_args = List[String]()
-    sha_args.append(String("rev-parse"))
-    sha_args.append(String("--short"))
-    sha_args.append(String("HEAD"))
-    var raw_sha = _git_stdout(project_root, sha_args^)
-    var sha = String(raw_sha.strip())
+    var sha = head_short_sha(project_root)
     if len(sha.as_bytes()) == 0:
         return String("")
     return String("(") + sha + String(")")
@@ -1004,16 +1007,7 @@ def apply_patch_to_index(
     stderr because the only legitimate failures are "patch doesn't
     apply" (already handled by the caller's refresh) and "git missing"
     (already handled by the surrounding repo gate)."""
-    if len(project_root.as_bytes()) == 0 or len(patch.as_bytes()) == 0:
-        return False
-    var args = List[String]()
-    args.append(String("apply"))
-    args.append(String("--cached"))
-    args.append(String("--recount"))
-    if reverse:
-        args.append(String("--reverse"))
-    args.append(String("-"))
-    return _git_ok(project_root, args^, patch)
+    return _git_apply(project_root, patch, reverse, cached=True)
 
 
 def apply_patch_to_worktree(
@@ -1027,10 +1021,20 @@ def apply_patch_to_worktree(
     hunks without exact @@ counts. Returns False on any non-zero exit
     (the only legitimate failure is "patch doesn't apply", which the
     caller's refresh already reconciles)."""
+    return _git_apply(project_root, patch, reverse, cached=False)
+
+
+def _git_apply(
+    project_root: String, patch: String, reverse: Bool, cached: Bool,
+) -> Bool:
+    """Pipe ``patch`` to ``git apply --recount`` (``--cached`` for the
+    index, ``--reverse`` to undo)."""
     if len(project_root.as_bytes()) == 0 or len(patch.as_bytes()) == 0:
         return False
     var args = List[String]()
     args.append(String("apply"))
+    if cached:
+        args.append(String("--cached"))
     args.append(String("--recount"))
     if reverse:
         args.append(String("--reverse"))
@@ -1422,21 +1426,6 @@ comptime _SQUASH_SCAN_MAX_FILES: Int = 512
 rather than build an unbounded pathspec argv."""
 
 
-def _git_stdout_stdin(
-    project_root: String, var args: List[String], stdin_text: String,
-) -> String:
-    """:func:`_git_stdout` with something piped into the child's stdin —
-    the shape ``git patch-id`` needs, since it reads a diff rather than
-    taking a revision."""
-    try:
-        var r = capture_command(_git_argv(project_root, args^), stdin_text)
-        if Int(r.status) != 0:
-            return String("")
-        return r.stdout
-    except:
-        return String("")
-
-
 def _first_field(line: String) -> String:
     """Everything up to the first space. ``git patch-id`` prints
     ``<patch-id> <commit-id>``; we only ever want the first."""
@@ -1529,7 +1518,7 @@ def _change_already_landed(
     pid_args.append(String("patch-id"))
     pid_args.append(String("--stable"))
     var want_lines = split_lines_no_trailing(
-        _git_stdout_stdin(project_root, pid_args^, combined),
+        _git_stdout(project_root, pid_args^, combined),
     )
     if len(want_lines) == 0:
         return False
@@ -1553,7 +1542,7 @@ def _change_already_landed(
     scan_args.append(String("patch-id"))
     scan_args.append(String("--stable"))
     var got = split_lines_no_trailing(
-        _git_stdout_stdin(project_root, scan_args^, sweep),
+        _git_stdout(project_root, scan_args^, sweep),
     )
     for i in range(len(got)):
         if _first_field(got[i]) == want:
@@ -1832,7 +1821,7 @@ def create_reworded_commit(
     for i in range(1, len(fields)):
         args.append(String("-p"))
         args.append(fields[i])
-    return String(_git_stdout_stdin(project_root, args^, message).strip())
+    return String(_git_stdout(project_root, args^, message).strip())
 
 
 def fetch_merged_commits(
