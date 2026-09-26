@@ -124,13 +124,6 @@ def rgb255_to_srgb(r: Int, g: Int, b: Int) -> Tuple[Float64, Float64, Float64]:
     return (Float64(r) / 255.0, Float64(g) / 255.0, Float64(b) / 255.0)
 
 
-def pack_rgb(r: Int, g: Int, b: Int) -> UInt32:
-    var rr = UInt32(_clamp(Float64(r), 0.0, 255.0))
-    var gg = UInt32(_clamp(Float64(g), 0.0, 255.0))
-    var bb = UInt32(_clamp(Float64(b), 0.0, 255.0))
-    return (rr << 16) | (gg << 8) | bb
-
-
 def unpack_rgb(rgb: UInt32) -> Tuple[Int, Int, Int]:
     return (
         Int((rgb >> 16) & 0xFF),

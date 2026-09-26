@@ -32,17 +32,6 @@ from .project_targets import split_env_entry
 from .json import JsonValue, json_array, json_bool, json_object, json_str
 
 
-# --- transport hints -------------------------------------------------------
-
-comptime DAP_TRANSPORT_STDIO = UInt8(0)
-"""Adapter speaks DAP over its own stdin/stdout — like an LSP server."""
-
-comptime DAP_TRANSPORT_TCP = UInt8(1)
-"""Adapter listens on a TCP port we connect to. Not yet implemented in
-the transport layer; entries are tagged this way so future TCP support
-can light them up without changing the registry shape."""
-
-
 # --- request kind ---------------------------------------------------------
 
 comptime DAP_REQUEST_LAUNCH = UInt8(0)
@@ -64,15 +53,9 @@ struct AdapterCandidate(Copyable, Movable):
     for native binaries it's a single-element list.
     """
     var argv: List[String]
-    var transport: UInt8
 
-    def __init__(out self, var argv: List[String], transport: UInt8):
+    def __init__(out self, var argv: List[String]):
         self.argv = argv^
-        self.transport = transport
-
-    def __copyinit__(mut self, copy: Self):
-        self.argv = copy.argv.copy()
-        self.transport = copy.transport
 
 
 struct DebuggerSpec(Copyable, Movable):
@@ -99,39 +82,29 @@ struct DebuggerSpec(Copyable, Movable):
         self.request_kind = request_kind
         self.name = name^
 
-    def __copyinit__(mut self, copy: Self):
-        self.language_id = copy.language_id
-        self.candidates = copy.candidates.copy()
-        self.request_kind = copy.request_kind
-        self.name = copy.name
-
 
 # --- helpers ---------------------------------------------------------------
 
 
-def _argv1(a: String, transport: UInt8 = DAP_TRANSPORT_STDIO) -> AdapterCandidate:
+def _argv1(a: String) -> AdapterCandidate:
     var v = List[String]()
     v.append(a)
-    return AdapterCandidate(v^, transport)
+    return AdapterCandidate(v^)
 
 
-def _argv2(
-    a: String, b: String, transport: UInt8 = DAP_TRANSPORT_STDIO,
-) -> AdapterCandidate:
+def _argv2(a: String, b: String) -> AdapterCandidate:
     var v = List[String]()
     v.append(a)
     v.append(b)
-    return AdapterCandidate(v^, transport)
+    return AdapterCandidate(v^)
 
 
-def _argv3(
-    a: String, b: String, c: String, transport: UInt8 = DAP_TRANSPORT_STDIO,
-) -> AdapterCandidate:
+def _argv3(a: String, b: String, c: String) -> AdapterCandidate:
     var v = List[String]()
     v.append(a)
     v.append(b)
     v.append(c)
-    return AdapterCandidate(v^, transport)
+    return AdapterCandidate(v^)
 
 
 # --- built-ins ------------------------------------------------------------

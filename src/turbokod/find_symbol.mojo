@@ -50,8 +50,7 @@ from .string_utils import (
 )
 from .symbol_seed import is_definition_site, seed_priority
 from .text_field import TextField
-from .case_fold import contains_ci, eq_ci
-from .type_ahead import starts_with_ci
+from .case_fold import contains_ci, eq_ci, starts_with_ci
 from .window import paint_window_title
 from .line_stream import LineStream
 

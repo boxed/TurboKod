@@ -111,12 +111,6 @@ def onig_tracked_count() -> Int:
     return Int(external_call["tk_onig_tracked_count", Int32]())
 
 
-def onig_global_end():
-    """Optional: release libonig's internal tables. Not required for
-    correctness — present for completeness."""
-    _ = external_call["onig_end", Int]()
-
-
 struct OnigMatch(Copyable, Movable):
     """Half-open ``[start, end)`` byte offsets of a regex match
     plus per-group bounds.

@@ -33,6 +33,7 @@ from .case_fold import fold_ascii
 from .string_utils import (
     byte_slice, codepoint_at, is_ascii_digit, is_ascii_ident_byte,
     is_ascii_ident_start, is_word_codepoint, prev_codepoint_start, starts_with,
+    string_list,
 )
 from .tm_grammar import Grammar, load_grammar_from_file
 from .tm_tokenizer import (
@@ -130,23 +131,23 @@ def _bundled_grammars() -> List[_BundledGrammar]:
     runtime can't fully resolve, so ``.md`` goes through the dedicated
     ``_highlight_markdown`` fallback instead."""
     var out = List[_BundledGrammar]()
-    out.append(_BundledGrammar(String("python"), _kw("py", "pyi", "pyw")))
-    out.append(_BundledGrammar(String("mojo"), _kw("mojo", "🔥")))
-    out.append(_BundledGrammar(String("rust"), _kw("rs")))
-    out.append(_BundledGrammar(String("json"), _kw("json", "jsonc")))
-    out.append(_BundledGrammar(String("go"), _kw("go")))
-    out.append(_BundledGrammar(String("typescript"), _kw("ts", "tsx")))
-    out.append(_BundledGrammar(String("javascript"), _kw("js", "jsx", "mjs", "cjs")))
-    out.append(_BundledGrammar(String("ruby"), _kw("rb")))
-    out.append(_BundledGrammar(String("cpp"), _kw("c", "h", "cc", "cpp", "cxx", "hpp", "hh", "hxx")))
-    out.append(_BundledGrammar(String("shell"), _kw("sh", "bash")))
-    out.append(_BundledGrammar(String("sql"), _kw("sql")))
-    out.append(_BundledGrammar(String("yaml"), _kw("yaml", "yml")))
-    out.append(_BundledGrammar(String("html"), _kw("html", "htm")))
-    out.append(_BundledGrammar(String("css"), _kw("css")))
-    out.append(_BundledGrammar(String("diff"), _kw("diff", "patch")))
+    out.append(_BundledGrammar(String("python"), string_list("py", "pyi", "pyw")))
+    out.append(_BundledGrammar(String("mojo"), string_list("mojo", "🔥")))
+    out.append(_BundledGrammar(String("rust"), string_list("rs")))
+    out.append(_BundledGrammar(String("json"), string_list("json", "jsonc")))
+    out.append(_BundledGrammar(String("go"), string_list("go")))
+    out.append(_BundledGrammar(String("typescript"), string_list("ts", "tsx")))
+    out.append(_BundledGrammar(String("javascript"), string_list("js", "jsx", "mjs", "cjs")))
+    out.append(_BundledGrammar(String("ruby"), string_list("rb")))
+    out.append(_BundledGrammar(String("cpp"), string_list("c", "h", "cc", "cpp", "cxx", "hpp", "hh", "hxx")))
+    out.append(_BundledGrammar(String("shell"), string_list("sh", "bash")))
+    out.append(_BundledGrammar(String("sql"), string_list("sql")))
+    out.append(_BundledGrammar(String("yaml"), string_list("yaml", "yml")))
+    out.append(_BundledGrammar(String("html"), string_list("html", "htm")))
+    out.append(_BundledGrammar(String("css"), string_list("css")))
+    out.append(_BundledGrammar(String("diff"), string_list("diff", "patch")))
     out.append(_BundledGrammar(String("markdown"), List[String]()))
-    out.append(_BundledGrammar(String("rst"), _kw("rst", "rest")))
+    out.append(_BundledGrammar(String("rst"), string_list("rst", "rest")))
     return out^
 
 
@@ -994,16 +995,9 @@ def _lang_spec_for_ext(ext: String) -> Optional[LangSpec]:
     return Optional[LangSpec]()
 
 
-def _kw(*words: String) -> List[String]:
-    var out = List[String]()
-    for w in words:
-        out.append(String(w))
-    return out^
-
-
 def _spec_rust() -> Optional[LangSpec]:
     return LangSpec(
-        _kw(
+        string_list(
             String("as"), String("async"), String("await"), String("break"),
             String("const"), String("continue"), String("crate"),
             String("dyn"), String("else"), String("enum"), String("extern"),
@@ -1029,7 +1023,7 @@ def _spec_rust() -> Optional[LangSpec]:
 
 def _spec_c() -> Optional[LangSpec]:
     return LangSpec(
-        _kw(
+        string_list(
             String("auto"), String("break"), String("case"), String("char"),
             String("class"), String("const"), String("constexpr"),
             String("continue"), String("default"), String("delete"),
@@ -1058,7 +1052,7 @@ def _spec_c() -> Optional[LangSpec]:
 
 def _spec_go() -> Optional[LangSpec]:
     return LangSpec(
-        _kw(
+        string_list(
             String("break"), String("case"), String("chan"), String("const"),
             String("continue"), String("default"), String("defer"),
             String("else"), String("fallthrough"), String("for"),
@@ -1081,7 +1075,7 @@ def _spec_go() -> Optional[LangSpec]:
 
 def _spec_ts() -> Optional[LangSpec]:
     return LangSpec(
-        _kw(
+        string_list(
             String("abstract"), String("any"), String("as"), String("async"),
             String("await"), String("boolean"), String("break"),
             String("case"), String("catch"), String("class"),
@@ -1111,7 +1105,7 @@ def _spec_ts() -> Optional[LangSpec]:
 
 def _spec_zig() -> Optional[LangSpec]:
     return LangSpec(
-        _kw(
+        string_list(
             String("addrspace"), String("align"), String("allowzero"),
             String("and"), String("anyframe"), String("anytype"),
             String("asm"), String("async"), String("await"), String("break"),
@@ -1139,7 +1133,7 @@ def _spec_zig() -> Optional[LangSpec]:
 
 def _spec_jvm_like() -> Optional[LangSpec]:
     return LangSpec(
-        _kw(
+        string_list(
             String("abstract"), String("as"), String("break"), String("case"),
             String("catch"), String("class"), String("const"), String("continue"),
             String("data"), String("def"), String("default"), String("do"),
@@ -1163,7 +1157,7 @@ def _spec_jvm_like() -> Optional[LangSpec]:
 
 def _spec_bash() -> Optional[LangSpec]:
     return LangSpec(
-        _kw(
+        string_list(
             String("if"), String("then"), String("else"), String("elif"),
             String("fi"), String("for"), String("in"), String("do"),
             String("done"), String("while"), String("until"), String("case"),
@@ -1180,7 +1174,7 @@ def _spec_bash() -> Optional[LangSpec]:
 
 def _spec_ruby() -> Optional[LangSpec]:
     return LangSpec(
-        _kw(
+        string_list(
             String("alias"), String("and"), String("begin"), String("break"),
             String("case"), String("class"), String("def"), String("defined?"),
             String("do"), String("else"), String("elsif"), String("end"),
@@ -1201,14 +1195,14 @@ def _spec_json() -> Optional[LangSpec]:
     # JSONC supports // and /*..*/; plain JSON doesn't, but accepting them
     # is harmless on a strict file (they just won't appear).
     return LangSpec(
-        _kw(String("true"), String("false"), String("null")),
+        string_list(String("true"), String("false"), String("null")),
         String("//"), String("/*"), String("*/"), String("\""),
     )
 
 
 def _spec_yaml() -> Optional[LangSpec]:
     return LangSpec(
-        _kw(
+        string_list(
             String("true"), String("false"), String("null"), String("yes"),
             String("no"), String("on"), String("off"),
         ),
@@ -1218,7 +1212,7 @@ def _spec_yaml() -> Optional[LangSpec]:
 
 def _spec_toml() -> Optional[LangSpec]:
     return LangSpec(
-        _kw(String("true"), String("false")),
+        string_list(String("true"), String("false")),
         String("#"), String(""), String(""), String("\"'"),
     )
 

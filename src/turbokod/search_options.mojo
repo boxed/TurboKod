@@ -46,8 +46,6 @@ struct SearchOptions(ImplicitlyCopyable, Movable):
         self.whole_word = copy.whole_word
         self.regex = copy.regex
 
-    def any_set(self) -> Bool:
-        return self.case_sensitive or self.whole_word or self.regex
 
 
 def default_search_options() -> SearchOptions:

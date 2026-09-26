@@ -18,7 +18,7 @@ from std.collections.list import List
 
 from .file_io import stat_file
 from .posix import getenv_value
-from .string_utils import shell_single_quote
+from .string_utils import shell_single_quote, string_list
 
 
 struct DownloadableGrammar(Copyable, Movable):
@@ -51,13 +51,6 @@ struct DownloadableGrammar(Copyable, Movable):
         self.display = copy.display
 
 
-def _exts(*items: String) -> List[String]:
-    var out = List[String]()
-    for x in items:
-        out.append(String(x))
-    return out^
-
-
 def built_in_downloadable_grammars() -> List[DownloadableGrammar]:
     """The fixed catalog. Add an entry per language we want to offer.
 
@@ -71,7 +64,7 @@ def built_in_downloadable_grammars() -> List[DownloadableGrammar]:
     var out = List[DownloadableGrammar]()
     out.append(DownloadableGrammar(
         String("elm"),
-        _exts(String("elm")),
+        string_list(String("elm")),
         String(
             "https://raw.githubusercontent.com/"
             "elm-tooling/elm-language-client-vscode/"

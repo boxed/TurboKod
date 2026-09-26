@@ -22,7 +22,7 @@ Why DevDocs:
 
 from std.collections.list import List
 
-from .string_utils import shell_single_quote
+from .string_utils import shell_single_quote, string_list
 
 
 comptime DEVDOCS_BASE = String("https://documents.devdocs.io/")
@@ -61,13 +61,6 @@ struct DocSpec(Copyable, Movable):
         self.display = copy.display
 
 
-def _exts(*items: String) -> List[String]:
-    var out = List[String]()
-    for x in items:
-        out.append(String(x))
-    return out^
-
-
 def built_in_docsets() -> List[DocSpec]:
     """Curated set of DevDocs slugs matching the languages we already
     grammar-highlight or run an LSP for.
@@ -81,22 +74,22 @@ def built_in_docsets() -> List[DocSpec]:
 
     out.append(DocSpec(
         String("python"),
-        _exts(String("py"), String("pyi"), String("pyw")),
+        string_list(String("py"), String("pyi"), String("pyw")),
         String("python~3.12"), String("Python 3.12"),
     ))
     out.append(DocSpec(
         String("rust"),
-        _exts(String("rs")),
+        string_list(String("rs")),
         String("rust"), String("Rust"),
     ))
     out.append(DocSpec(
         String("go"),
-        _exts(String("go")),
+        string_list(String("go")),
         String("go"), String("Go"),
     ))
     out.append(DocSpec(
         String("typescript"),
-        _exts(
+        string_list(
             String("ts"), String("tsx"), String("js"), String("jsx"),
             String("mjs"), String("cjs"),
         ),
@@ -104,7 +97,7 @@ def built_in_docsets() -> List[DocSpec]:
     ))
     out.append(DocSpec(
         String("cpp"),
-        _exts(
+        string_list(
             String("c"), String("h"), String("cc"), String("cpp"),
             String("cxx"), String("hpp"), String("hh"), String("hxx"),
         ),
@@ -112,22 +105,22 @@ def built_in_docsets() -> List[DocSpec]:
     ))
     out.append(DocSpec(
         String("ruby"),
-        _exts(String("rb")),
+        string_list(String("rb")),
         String("ruby~3.3"), String("Ruby 3.3"),
     ))
     out.append(DocSpec(
         String("bash"),
-        _exts(String("sh"), String("bash")),
+        string_list(String("sh"), String("bash")),
         String("bash"), String("Bash"),
     ))
     out.append(DocSpec(
         String("html"),
-        _exts(String("html"), String("htm")),
+        string_list(String("html"), String("htm")),
         String("html"), String("HTML"),
     ))
     out.append(DocSpec(
         String("css"),
-        _exts(String("css")),
+        string_list(String("css")),
         String("css"), String("CSS"),
     ))
 

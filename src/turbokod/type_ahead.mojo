@@ -45,7 +45,7 @@ fall through to no row.
 
 from std.collections.list import List
 
-from .case_fold import starts_with_ci as _starts_with_ci
+from .case_fold import starts_with_ci
 from .events import Event, EVENT_KEY, MOD_ALT, MOD_CTRL, MOD_META
 from .posix import monotonic_ms
 
@@ -181,13 +181,3 @@ def type_ahead_pick(
     return -1
 
 
-def starts_with_ci(name: String, prefix: String) -> Bool:
-    """ASCII-case-insensitive prefix test. UTF-8 case folding is
-    non-trivial; restricting to ASCII keeps the comparison cheap and
-    matches the way the rest of this codebase already sorts/compares
-    names (see ``_sort_entries_ci`` in ``file_io``).
-
-    Re-exported from ``case_fold`` so the type-ahead callers
-    (``dropdown``, ``dir_browser``, ``find_symbol``) keep importing it
-    from here."""
-    return _starts_with_ci(name, prefix)

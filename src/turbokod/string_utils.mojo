@@ -130,6 +130,14 @@ def split_lines_no_trailing(text: String) -> List[String]:
     return out^
 
 
+def string_list(*items: String) -> List[String]:
+    """A ``List[String]`` of the arguments — for literal tables."""
+    var out = List[String]()
+    for x in items:
+        out.append(String(x))
+    return out^
+
+
 def split_whitespace(s: String) -> List[String]:
     """Split on runs of ASCII whitespace (space, tab, CR, LF), dropping
     empty pieces — ``"  a b\t c "`` → ``["a", "b", "c"]``."""

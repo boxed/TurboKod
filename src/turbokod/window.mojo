@@ -263,13 +263,6 @@ struct TitleCommandHit(ImplicitlyCopyable, Movable):
     var x_end: Int
 
 
-def _label_cell_count(s: String) -> Int:
-    """Display-cell width of ``s`` — matches the per-glyph advance
-    ``Canvas.put_text`` uses (emoji count two), so a label's painted
-    width equals this when nothing was clipped."""
-    return display_columns(s)
-
-
 def paint_title_commands(
     mut canvas: Canvas, p: Point,
     commands: List[TitleCommand],
@@ -304,7 +297,7 @@ def paint_title_commands(
     x += 2
     for i in range(len(commands)):
         var c = commands[i]
-        var label_cells = _label_cell_count(c.label)
+        var label_cells = display_columns(c.label)
         if x + label_cells > max_x:
             break
         var x0 = x
@@ -1859,12 +1852,6 @@ struct WindowManager(Movable):
                 self.windows[i]._has_baseline = True
             self.windows[i]._last_observed_rect = self.windows[i].rect
 
-    def focus_by_title(mut self, title: String):
-        for i in range(len(self.windows)):
-            if self.windows[i].title == title:
-                self.focused = i
-                self._raise_in_z(i)
-                return
 
     def focus_by_index(mut self, idx: Int):
         """Focus window ``idx`` and raise it to the top of the z-order.

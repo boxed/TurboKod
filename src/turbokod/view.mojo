@@ -307,10 +307,6 @@ struct FocusGroup(Movable):
     def slot_count(self) -> Int:
         return len(self.slots)
 
-    def is_visitable(self, idx: Int) -> Bool:
-        if idx < 0 or idx >= len(self.slots):
-            return False
-        return self.slots[idx].visitable
 
     def set_visitable(mut self, idx: Int, visitable: Bool):
         """Toggle slot ``idx``'s participation in the tab walk without
@@ -345,16 +341,6 @@ struct FocusGroup(Movable):
                 return
         self.focused = -1
 
-    def handle_tab(mut self, event: Event) -> Bool:
-        """Eat Tab / Shift+Tab and cycle focus. Returns True iff the
-        event was consumed."""
-        if event.kind != EVENT_KEY:
-            return False
-        if event.key != KEY_TAB:
-            return False
-        var backward = (event.mods & MOD_SHIFT) != 0
-        self.cycle(backward)
-        return True
 
     def hit_test(self, event: Event) -> Int:
         """If ``event`` is a left-press (press-and-not-motion, i.e. a
@@ -456,8 +442,6 @@ struct DraggableDialog(ImplicitlyCopyable, Movable):
         by ``compute_dialog_rect``), else auto-centered in ``container_bounds``."""
         return compute_dialog_rect(container_bounds, self.pos, width, height)
 
-    def is_dragging(self) -> Bool:
-        return Bool(self._drag)
 
     def handle_drag_continue(mut self, event: Event) -> Bool:
         """Advance or end an in-progress title-bar drag. Returns True

@@ -26,8 +26,6 @@ struct Point(ImplicitlyCopyable, Movable):
     def __ne__(self, other: Point) -> Bool:
         return not (self == other)
 
-    def to_string(self) -> String:
-        return String("Point(") + String(self.x) + String(", ") + String(self.y) + String(")")
 
 
 struct Rect(ImplicitlyCopyable, Movable):

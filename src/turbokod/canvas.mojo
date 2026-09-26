@@ -284,15 +284,7 @@ struct Canvas(Copyable, Movable):
         self.set(x0, y1, Cell(bl, attr, 1))
         self.set(x1, y1, Cell(br, attr, 1))
 
-    def draw_hline(mut self, p: Point, length: Int, glyph: String, attr: Attr):
-        var cell = Cell(glyph, attr, 1)
-        for i in range(length):
-            self.set(p.x + i, p.y, cell)
 
-    def draw_vline(mut self, p: Point, length: Int, glyph: String, attr: Attr):
-        var cell = Cell(glyph, attr, 1)
-        for i in range(length):
-            self.set(p.x, p.y + i, cell)
 
     def put_wrapped_text(
         mut self, rect: Rect, text: String, attr: Attr,

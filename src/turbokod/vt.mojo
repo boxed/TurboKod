@@ -170,10 +170,6 @@ struct Vt(Copyable, Movable):
     pane displays this in its chrome alongside the Claude-state
     label (see ``claude_detect.mojo``)."""
 
-    var bell_pending: Bool
-    """BEL (0x07) latched here so the pane can flash the title
-    once and clear; we don't otherwise act on it. Set by the parser,
-    consumed by ``take_bell``."""
 
     # --- parser state ---------------------------------------------------
     var _state: UInt8
@@ -295,7 +291,6 @@ struct Vt(Copyable, Movable):
         self.wrap_pending = False
         self.cursor_visible = True
         self.title      = String("")
-        self.bell_pending = False
         self._state     = _S_GROUND
         self._csi_params = List[Int]()
         self._csi_current = 0
@@ -342,7 +337,6 @@ struct Vt(Copyable, Movable):
         self.wrap_pending = copy.wrap_pending
         self.cursor_visible = copy.cursor_visible
         self.title      = copy.title
-        self.bell_pending = copy.bell_pending
         self._state     = copy._state
         self._csi_params = copy._csi_params.copy()
         self._csi_current = copy._csi_current
@@ -576,20 +570,10 @@ struct Vt(Copyable, Movable):
         bytes.append(UInt8(y + 32))
         return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=bytes.unsafe_ptr(), length=len(bytes))))
 
-    def take_bell(mut self) -> Bool:
-        """Consume the latched-bell flag. Returns True iff a BEL
-        arrived since the last call. The pane uses this to flash a
-        visual indicator without echoing a beep to its own host
-        terminal."""
-        var b = self.bell_pending
-        self.bell_pending = False
-        return b
 
     def _idx(self, r: Int, c: Int) -> Int:
         return r * self.cols + c
 
-    def _row_start(self, r: Int) -> Int:
-        return r * self.cols
 
     def _grid_ref_set(mut self, idx: Int, cell: Cell):
         """Write into whichever grid is currently in use. Pulling
@@ -716,8 +700,7 @@ struct Vt(Copyable, Movable):
         if b == 0x1B:  # ESC
             self._enter_esc()
             return
-        if b == 0x07:  # BEL
-            self.bell_pending = True
+        if b == 0x07:  # BEL — no audible bell; ignore
             return
         if b == 0x08:  # BS
             if self.cur_c > 0:
@@ -1580,7 +1563,6 @@ struct Vt(Copyable, Movable):
         self.wrap_pending = False
         self.cursor_visible = True
         self.title      = String("")
-        self.bell_pending = False
         # RIS is a hard reset — also drop the mode flags any previous
         # child enabled. Otherwise a fresh shell coming up after a
         # ``vim`` crash would inherit alt-screen mouse tracking /

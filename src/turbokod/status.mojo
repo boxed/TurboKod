@@ -355,11 +355,6 @@ struct StatusBar(Movable):
         self._hover_x = pos.x
         self._hover_y = pos.y
 
-    def clear_hover(mut self):
-        """Force the tooltip dwell timer back to "no hover", e.g.
-        when a popup or modal opens above the bar and we don't want
-        a stale hover from before the modal to keep ticking."""
-        self._hover_since_ms = -1
 
     def paint_tooltip(self, mut canvas: Canvas, container_bounds: Rect):
         """Overlay the message-tooltip popup if the dwell has exceeded

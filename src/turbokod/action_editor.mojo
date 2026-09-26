@@ -605,8 +605,3 @@ def _build_lang_dropdown(var current: String) -> Dropdown:
     return dd^
 
 
-def _str_pop_byte(s: String) -> String:
-    var b = s.as_bytes()
-    if len(b) == 0:
-        return s
-    return String(StringSpan(unsafe_from_utf8=b[:len(b) - 1]))

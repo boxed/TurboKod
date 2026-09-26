@@ -35,7 +35,8 @@ from .geometry import Point, Rect
 from .painter import Painter
 from .posix import getenv_value, realpath
 from .string_utils import display_columns
-from .type_ahead import TypeAhead, starts_with_ci
+from .case_fold import starts_with_ci
+from .type_ahead import TypeAhead
 
 
 @fieldwise_init
