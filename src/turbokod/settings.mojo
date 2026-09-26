@@ -651,14 +651,10 @@ struct Settings(Movable):
         self._list_scroll = 0
         self._save_dropdown.close()
         self._wrap_dropdown.close()
-        self._trim_cb.pressed = False
-        self._trim_cb.pressed_inside = False
-        self._final_nl_cb.pressed = False
-        self._final_nl_cb.pressed_inside = False
-        self._compress_cb.pressed = False
-        self._compress_cb.pressed_inside = False
-        self._blink_cb.pressed = False
-        self._blink_cb.pressed_inside = False
+        self._trim_cb.reset_press()
+        self._final_nl_cb.reset_press()
+        self._compress_cb.reset_press()
+        self._blink_cb.reset_press()
         self._reset_ls_checkbox_press()
         self.dict_specs = List[DownloadableDictionary]()
         self.selected_dict = -1
@@ -670,8 +666,7 @@ struct Settings(Movable):
         self.language_editor.close()
         self._type_ahead.reset()
         for i in range(len(self._buttons)):
-            self._buttons[i].button.pressed = False
-            self._buttons[i].button.pressed_inside = False
+            self._buttons[i].button.reset_press()
 
     def ack_dirty(mut self):
         """Host calls this after persisting the config to disk."""
@@ -1689,8 +1684,7 @@ struct Settings(Movable):
         """Clear press/press-inside state on all Language Server
         checkboxes — called from ``close`` so a reopen starts clean."""
         for i in range(len(self._ls_cbs)):
-            self._ls_cbs[i].pressed = False
-            self._ls_cbs[i].pressed_inside = False
+            self._ls_cbs[i].reset_press()
 
     def comma_threshold_value(self) -> Int:
         """Parse the comma-threshold field into the persisted int. Empty

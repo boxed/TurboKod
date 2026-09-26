@@ -249,8 +249,7 @@ struct LanguageEditor(Movable):
         self._dlg.reset()
         self._type_ahead.reset()
         for i in range(len(self._buttons)):
-            self._buttons[i].button.pressed = False
-            self._buttons[i].button.pressed_inside = False
+            self._buttons[i].button.reset_press()
 
     def value(self) -> LanguageServerOverride:
         """Snapshot the editor state into a ``LanguageServerOverride``.

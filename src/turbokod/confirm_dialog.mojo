@@ -82,10 +82,8 @@ struct ConfirmDialog(Movable):
         self.submitted = False
         self.confirmed = False
         self._focus.focus_force(_SLOT_YES if default_yes else _SLOT_NO)
-        self._yes_button.pressed = False
-        self._yes_button.pressed_inside = False
-        self._no_button.pressed = False
-        self._no_button.pressed_inside = False
+        self._yes_button.reset_press()
+        self._no_button.reset_press()
 
     def close(mut self):
         self.active = False
@@ -93,10 +91,8 @@ struct ConfirmDialog(Movable):
         self.confirmed = False
         self.message = String("")
         self._focus.focus_force(_SLOT_NO)
-        self._yes_button.pressed = False
-        self._yes_button.pressed_inside = False
-        self._no_button.pressed = False
-        self._no_button.pressed_inside = False
+        self._yes_button.reset_press()
+        self._no_button.reset_press()
 
     def _layout(self, container_bounds: Rect) -> Rect:
         var width = _DEFAULT_WIDTH
@@ -115,8 +111,6 @@ struct ConfirmDialog(Movable):
         var height = 1 + msg_rows + 1 + 1 + 1 + 1
         if height < _MIN_HEIGHT:
             height = _MIN_HEIGHT
-        if height > container_bounds.b.y - 4:
-            height = container_bounds.b.y - 4
         return center_in(container_bounds, width, height)
 
     def paint(mut self, mut canvas: Canvas, container_bounds: Rect):

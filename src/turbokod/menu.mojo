@@ -18,7 +18,7 @@ from .events import (
     KEY_UP, MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
-from .string_utils import char_width, codepoint_at, display_columns
+from .string_utils import byte_slice, char_width, codepoint_at, display_columns
 from .type_ahead import TypeAhead, is_type_ahead_key, type_ahead_pick
 
 
@@ -382,31 +382,18 @@ struct MenuBar(Movable):
         glyph (not per continuation byte) and a wide emoji occupies two
         cells with an empty continuation cell — matching what ``_layout`` /
         ``_dropdown_rect`` reserve."""
-        var b = label.as_bytes()
-        var n = len(b)
+        var n = len(label.as_bytes())
         var i = 0
         var col = 0
         while i < n:
-            var c0 = Int(b[i])
-            var seq = 1
-            if (c0 & 0xE0) == 0xC0:
-                seq = 2
-            elif (c0 & 0xF0) == 0xE0:
-                seq = 3
-            elif (c0 & 0xF8) == 0xF0:
-                seq = 4
-            if i + seq > n:
-                seq = 1
-            var glyph: String
-            if seq == 1:
-                # A stray continuation / truncated byte shows as ``?``,
-                # matching ``Canvas.put_text``; ``chr`` would re-encode
-                # the raw byte as a different codepoint.
-                glyph = String(chr(c0)) if c0 < 0x80 else String("?")
-            else:
-                glyph = String(StringSpan(unsafe_from_utf8=b[i:i + seq]))
+            var dec = codepoint_at(label, i)
+            var seq = dec[1]
+            # A malformed byte (a lone non-ASCII byte) shows as ``?``,
+            # matching ``Canvas.put_text``.
+            var glyph = String("?") if seq == 1 and dec[0] >= 0x80 \
+                else byte_slice(label, i, i + seq)
             var a = hotkey_attr if col == 0 else body_attr
-            var w = char_width(codepoint_at(label, i)[0])
+            var w = char_width(dec[0])
             painter.set(canvas, x + col, y, Cell(glyph, a, w))
             if w == 2:
                 painter.set(canvas, x + col + 1, y, Cell(String(""), a, 0))

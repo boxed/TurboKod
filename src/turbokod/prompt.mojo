@@ -246,12 +246,9 @@ struct Prompt(Movable):
         self.toggle_regex.hovered = False
         # Reset button press latches so a stale "pressed" state from
         # the previous open can't bleed into the next dialog.
-        self._btn_find_next.pressed = False
-        self._btn_find_next.pressed_inside = False
-        self._btn_replace.pressed = False
-        self._btn_replace.pressed_inside = False
-        self._btn_replace_all.pressed = False
-        self._btn_replace_all.pressed_inside = False
+        self._btn_find_next.reset_press()
+        self._btn_replace.reset_press()
+        self._btn_replace_all.reset_press()
 
     def search_options(self) -> SearchOptions:
         """Read back the toggle states as a ``SearchOptions``. Caller

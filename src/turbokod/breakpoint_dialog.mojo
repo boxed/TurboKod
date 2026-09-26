@@ -190,10 +190,8 @@ struct BreakpointMenu(Movable):
         self.condition = TextField()
         self.condition.set_text(condition^)
         self._focus.focus_force(_SLOT_CONDITION)
-        self._ok.pressed = False
-        self._ok.pressed_inside = False
-        self._cancel.pressed = False
-        self._cancel.pressed_inside = False
+        self._ok.reset_press()
+        self._cancel.reset_press()
         self._confirmed = False
 
     def close(mut self):
@@ -205,10 +203,8 @@ struct BreakpointMenu(Movable):
             List[String](), String(""),
         )
         self.condition = TextField()
-        self._ok.pressed = False
-        self._ok.pressed_inside = False
-        self._cancel.pressed = False
-        self._cancel.pressed_inside = False
+        self._ok.reset_press()
+        self._cancel.reset_press()
         self._confirmed = False
 
     def result(self) -> BreakpointMenuResult:
@@ -627,12 +623,9 @@ struct BreakpointConditionErrorDialog(Movable):
         self.condition = TextField()
         self.condition.set_text(condition^)
         self._focus.focus_force(_ERR_SLOT_CONDITION)
-        self._try.pressed = False
-        self._try.pressed_inside = False
-        self._disable.pressed = False
-        self._disable.pressed_inside = False
-        self._cancel.pressed = False
-        self._cancel.pressed_inside = False
+        self._try.reset_press()
+        self._disable.reset_press()
+        self._cancel.reset_press()
 
     def close(mut self):
         self.active = False

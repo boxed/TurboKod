@@ -197,10 +197,8 @@ struct MergeView(Movable):
         self.edit_row = 0
         self.edit_col = 0
         self._focus.focus_force(_SLOT_APPLY)
-        self._apply_button.pressed = False
-        self._apply_button.pressed_inside = False
-        self._cancel_button.pressed = False
-        self._cancel_button.pressed_inside = False
+        self._apply_button.reset_press()
+        self._cancel_button.reset_press()
 
     def close(mut self):
         self.active = False

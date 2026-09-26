@@ -147,10 +147,8 @@ struct ColorPickerDialog(Movable):
         self._cancel_button = ShadowButton(String(" Cancel "), 0, 0)
 
     def _reset_buttons(mut self):
-        self._apply_button.pressed = False
-        self._apply_button.pressed_inside = False
-        self._cancel_button.pressed = False
-        self._cancel_button.pressed_inside = False
+        self._apply_button.reset_press()
+        self._cancel_button.reset_press()
 
     def open(mut self, rgb_packed: UInt32):
         """Open the picker seeded from a packed ``0xRRGGBB`` swatch color,
@@ -247,13 +245,7 @@ struct ColorPickerDialog(Movable):
     # --- layout -----------------------------------------------------------
 
     def _layout(self, container: Rect) -> Rect:
-        var w = _WIDTH
-        if w > container.b.x - 4:
-            w = container.b.x - 4
-        var h = _HEIGHT
-        if h > container.b.y - 4:
-            h = container.b.y - 4
-        return center_in(container, w, h)
+        return center_in(container, _WIDTH, _HEIGHT)
 
     def _mode_arrows_x(self, rect: Rect) -> Tuple[Int, Int]:
         """Screen x of the ``‹`` and ``›`` glyphs in the color-space row,

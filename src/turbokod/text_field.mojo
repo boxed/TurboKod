@@ -202,26 +202,6 @@ struct TextField(Copyable, Movable):
         self._dc_anchor_start = copy._dc_anchor_start
         self._dc_anchor_end = copy._dc_anchor_end
 
-    def copy(self) -> Self:
-        var out = Self()
-        out.text = self.text
-        out.cursor = self.cursor
-        out.anchor = self.anchor
-        out._drag = self._drag
-        out._scroll = self._scroll
-        out._undo = self._undo.copy()
-        out._redo = self._redo.copy()
-        out._typing_active = self._typing_active
-        out._typing_last_ms = self._typing_last_ms
-        out._last_click_ms = self._last_click_ms
-        out._last_click_byte = self._last_click_byte
-        out._click_count = self._click_count
-        out._dc_active = self._dc_active
-        out._tc_active = self._tc_active
-        out._dc_anchor_start = self._dc_anchor_start
-        out._dc_anchor_end = self._dc_anchor_end
-        return out^
-
     # --- programmatic mutation -----------------------------------------
 
     def set_text(mut self, var t: String):
@@ -892,12 +872,6 @@ struct Form(Movable):
     def __copyinit__(mut self, copy: Self):
         self._fields = copy._fields.copy()
         self._keys = copy._keys.copy()
-
-    def copy(self) -> Self:
-        var out = Self()
-        out._fields = self._fields.copy()
-        out._keys = self._keys.copy()
-        return out^
 
     def add(mut self, focus_key: UInt8):
         """Register a fresh empty field bound to ``focus_key``. The

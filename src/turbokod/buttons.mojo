@@ -141,6 +141,12 @@ struct ShadowButton(ImplicitlyCopyable, Movable):
     is now armed to cancel — and also decides ``FIRED`` vs.
     ``CANCELED`` on release."""
 
+
+    def reset_press(mut self):
+        """Forget any in-flight press (e.g. when the dialog closes)."""
+        self.pressed = False
+        self.pressed_inside = False
+
     def __init__(out self, var label: String, x: Int, y: Int):
         self.label = label^
         self.x = x
@@ -289,6 +295,12 @@ struct OptionToggle(ImplicitlyCopyable, Movable):
     var pressed_inside: Bool
     var hovered: Bool
 
+
+    def reset_press(mut self):
+        """Forget any in-flight press (e.g. when the dialog closes)."""
+        self.pressed = False
+        self.pressed_inside = False
+
     def __init__(
         out self, var label: String, var tooltip: String,
         x: Int = 0, y: Int = 0,
@@ -377,6 +389,12 @@ struct Checkbox(ImplicitlyCopyable, Movable):
     var y: Int
     var pressed: Bool
     var pressed_inside: Bool
+
+
+    def reset_press(mut self):
+        """Forget any in-flight press (e.g. when the dialog closes)."""
+        self.pressed = False
+        self.pressed_inside = False
 
     def __init__(
         out self, var label: String,

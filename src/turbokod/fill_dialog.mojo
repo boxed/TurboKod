@@ -257,10 +257,8 @@ struct FillDialog(Movable):
         fmt_opts.append(_FMT_BIN)
         self.format_ = Dropdown(fmt_opts^, 0)
         self._focus.focus_force(_SLOT_INITIAL)
-        self._ok.pressed = False
-        self._ok.pressed_inside = False
-        self._cancel.pressed = False
-        self._cancel.pressed_inside = False
+        self._ok.reset_press()
+        self._cancel.reset_press()
         self._confirmed = False
 
     def close(mut self):
@@ -272,10 +270,8 @@ struct FillDialog(Movable):
         self.text = TextField()
         self.initial = TextField()
         self.increment = TextField()
-        self._ok.pressed = False
-        self._ok.pressed_inside = False
-        self._cancel.pressed = False
-        self._cancel.pressed_inside = False
+        self._ok.reset_press()
+        self._cancel.reset_press()
         self._confirmed = False
 
     def confirmed(self) -> Bool:
@@ -350,10 +346,7 @@ struct FillDialog(Movable):
         # text label / text / blank / initial label / initial / blank /
         # increment label / increment / blank / pad checkbox / blank /
         # format label / format / blank / buttons / shadow / bottom
-        var height = 23
-        if height > container_bounds.b.y - 4:
-            height = container_bounds.b.y - 4
-        return center_in(container_bounds, width, height)
+        return center_in(container_bounds, width, 23)
 
     def _position_pad(mut self, layout: _FillLayout, dlg: Rect):
         self.pad.move_to(dlg.a.x + 2, layout.pad_y)

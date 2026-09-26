@@ -359,8 +359,7 @@ struct ProjectSettings(Movable):
         self.gr_lang_dropdown.close()
         self._type_ahead.reset()
         for i in range(len(self._buttons)):
-            self._buttons[i].button.pressed = False
-            self._buttons[i].button.pressed_inside = False
+            self._buttons[i].button.reset_press()
 
     def ack_on_save_dirty(mut self):
         self.on_save_dirty = False

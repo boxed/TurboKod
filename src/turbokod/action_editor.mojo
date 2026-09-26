@@ -240,8 +240,7 @@ struct ActionEditor(Movable):
         self.form.add(_FOCUS_ARGS)
         self.form.add(_FOCUS_CWD)
         for i in range(len(self._buttons)):
-            self._buttons[i].button.pressed = False
-            self._buttons[i].button.pressed_inside = False
+            self._buttons[i].button.reset_press()
 
     def value(self) -> OnSaveAction:
         # Snapshot the editable fields back into ``entry`` before
