@@ -62,6 +62,7 @@ from .type_ahead import TypeAhead, is_type_ahead_key, type_ahead_pick
 from .window import paint_window_title
 from .string_utils import split_whitespace
 from .view import paint_section_rail, ResizableDialog
+from .list_box import clamp_list_scroll, paint_list_rows
 
 
 # --- section indices ------------------------------------------------------
@@ -839,46 +840,26 @@ struct ProjectSettings(Movable):
 
     def _paint_on_save_list(
         mut self, mut canvas: Canvas, painter: Painter, list_rect: Rect,
-        rows: List[OnSaveAction],
+        rows_in: List[OnSaveAction],
     ):
         var visible = list_rect.height()
-        if self.selected_os >= 0 \
-                and self.selected_os != self._last_scroll_os:
-            if self.selected_os < self._list_scroll:
-                self._list_scroll = self.selected_os
-            elif self.selected_os >= self._list_scroll + visible:
-                self._list_scroll = self.selected_os - visible + 1
+        self._list_scroll = clamp_list_scroll(
+            self._list_scroll, self.selected_os, self._last_scroll_os, visible, len(rows_in),
+        )
         self._last_scroll_os = self.selected_os
-        if self._list_scroll < 0:
-            self._list_scroll = 0
-        var max_scroll = len(rows) - visible
-        if max_scroll < 0:
-            max_scroll = 0
-        if self._list_scroll > max_scroll:
-            self._list_scroll = max_scroll
-        var body_attr = Attr(BLACK, CYAN)
-        for r in range(visible):
-            var idx = self._list_scroll + r
-            if idx >= len(rows):
-                break
-            var act = rows[idx].copy()
-            var attr = body_attr
-            if idx == self.selected_os:
-                attr = (
-                    Attr(WHITE, BLUE) if self.focus == _FOCUS_OS_LIST
-                    else Attr(BLACK, GREEN)
-                )
-                painter.fill(
-                    canvas, Rect(list_rect.a.x, list_rect.a.y + r,
-                         list_rect.b.x, list_rect.a.y + r + 1),
-                    String(" "), attr,
-                )
+        var rows = List[String]()
+        for idx in range(
+            self._list_scroll, min(self._list_scroll + visible, len(rows_in)),
+        ):
+            var act = rows_in[idx].copy()
             var mark = String("[x] ") if self._os_is_enabled(act) \
                 else String("[ ] ")
-            _ = painter.put_text(
-                canvas, Point(list_rect.a.x + 1, list_rect.a.y + r),
-                mark + _format_action(act), attr,
-            )
+            rows.append(mark + _format_action(act))
+        var body_attr = Attr(BLACK, CYAN)
+        paint_list_rows(
+            canvas, painter, list_rect, self._list_scroll, rows,
+            self.selected_os, self.focus == _FOCUS_OS_LIST, body_attr,
+        )
 
     def _paint_targets_section(
         mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
@@ -956,41 +937,23 @@ struct ProjectSettings(Movable):
         var body_attr = Attr(BLACK, CYAN)
         painter.fill(canvas, list_rect, String(" "), body_attr)
         var visible = list_rect.height()
-        if self.selected_tg >= 0 and self.selected_tg != self._last_scroll_tg:
-            if self.selected_tg < self._list_scroll:
-                self._list_scroll = self.selected_tg
-            elif self.selected_tg >= self._list_scroll + visible:
-                self._list_scroll = self.selected_tg - visible + 1
+        self._list_scroll = clamp_list_scroll(
+            self._list_scroll, self.selected_tg, self._last_scroll_tg, visible, len(self.targets.targets),
+        )
         self._last_scroll_tg = self.selected_tg
-        if self._list_scroll < 0:
-            self._list_scroll = 0
-        var max_scroll = len(self.targets.targets) - visible
-        if max_scroll < 0:
-            max_scroll = 0
-        if self._list_scroll > max_scroll:
-            self._list_scroll = max_scroll
-        for r in range(visible):
-            var idx = self._list_scroll + r
-            if idx >= len(self.targets.targets):
-                break
+        var rows = List[String]()
+        for idx in range(
+            self._list_scroll, min(self._list_scroll + visible, len(self.targets.targets)),
+        ):
             var name = self.targets.targets[idx].name
             var marker = String("● ") if name == self.targets_active_name \
                 else String("  ")
-            var attr = body_attr
-            if idx == self.selected_tg:
-                attr = (
-                    Attr(WHITE, BLUE) if self.focus == _FOCUS_TG_LIST
-                    else Attr(BLACK, GREEN)
-                )
-                painter.fill(
-                    canvas, Rect(list_rect.a.x, list_rect.a.y + r,
-                         list_rect.b.x, list_rect.a.y + r + 1),
-                    String(" "), attr,
-                )
-            _ = painter.put_text(
-                canvas, Point(list_rect.a.x, list_rect.a.y + r),
-                marker + name, attr,
-            )
+            rows.append(marker + name)
+        paint_list_rows(
+            canvas, painter, list_rect, self._list_scroll, rows,
+            self.selected_tg, self.focus == _FOCUS_TG_LIST, body_attr,
+            indent=0,
+        )
 
     def _paint_grammars_section(
         mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
@@ -1044,43 +1007,25 @@ struct ProjectSettings(Movable):
         var body_attr = Attr(BLACK, CYAN)
         painter.fill(canvas, list_rect, String(" "), body_attr)
         var visible = list_rect.height()
-        if self.selected_gr >= 0 and self.selected_gr != self._last_scroll_gr:
-            if self.selected_gr < self._list_scroll:
-                self._list_scroll = self.selected_gr
-            elif self.selected_gr >= self._list_scroll + visible:
-                self._list_scroll = self.selected_gr - visible + 1
+        self._list_scroll = clamp_list_scroll(
+            self._list_scroll, self.selected_gr, self._last_scroll_gr, visible, len(self.grammars),
+        )
         self._last_scroll_gr = self.selected_gr
-        if self._list_scroll < 0:
-            self._list_scroll = 0
-        var max_scroll = len(self.grammars) - visible
-        if max_scroll < 0:
-            max_scroll = 0
-        if self._list_scroll > max_scroll:
-            self._list_scroll = max_scroll
-        for r in range(visible):
-            var idx = self._list_scroll + r
-            if idx >= len(self.grammars):
-                break
-            var e = self.grammars[idx].copy()
+        var rows = List[String]()
+        for idx in range(
+            self._list_scroll, min(self._list_scroll + visible, len(self.grammars)),
+        ):
+            ref e = self.grammars[idx]
             var ext_label = e.ext if len(e.ext.as_bytes()) > 0 \
                 else String("(ext?)")
-            var lang_label = e.language_id if len(e.language_id.as_bytes()) > 0 \
-                else String("(language?)")
-            var attr = body_attr
-            if idx == self.selected_gr:
-                attr = (
-                    Attr(WHITE, BLUE) if self.focus == _FOCUS_GR_LIST
-                    else Attr(BLACK, GREEN)
-                )
-                painter.fill(
-                    canvas, Rect(list_rect.a.x, list_rect.a.y + r,
-                         list_rect.b.x, list_rect.a.y + r + 1),
-                    String(" "), attr,
-                )
-            _ = painter.put_text(
-                canvas, Point(list_rect.a.x, list_rect.a.y + r),
-                ext_label + String(" → ") + lang_label, attr,
-            )
+            var lang_label = e.language_id \
+                if len(e.language_id.as_bytes()) > 0 else String("(language?)")
+            rows.append(ext_label + String(" → ") + lang_label)
+        paint_list_rows(
+            canvas, painter, list_rect, self._list_scroll, rows,
+            self.selected_gr, self.focus == _FOCUS_GR_LIST, body_attr,
+            indent=0,
+        )
 
     def _paint_close_button(mut self, mut canvas: Canvas, rect: Rect):
         var close = self._buttons[_BTN_CLOSE]

@@ -70,6 +70,7 @@ from .text_field import TextField
 from .type_ahead import TypeAhead, is_type_ahead_key, type_ahead_pick
 from .window import paint_window_title
 from .view import paint_section_rail, ResizableDialog
+from .list_box import clamp_list_scroll, paint_list_rows
 
 
 # --- focus discriminants --------------------------------------------------
@@ -897,42 +898,21 @@ struct Settings(Movable):
             return
         var list_rect = Rect(inner.a.x, list_top, inner.b.x, list_bottom)
         var visible = list_rect.height()
-        # Change-only viewport snap — see _paint_actions_list.
-        if self.selected_font >= 0 \
-                and self.selected_font != self._last_scroll_font:
-            if self.selected_font < self._list_scroll:
-                self._list_scroll = self.selected_font
-            elif self.selected_font >= self._list_scroll + visible:
-                self._list_scroll = self.selected_font - visible + 1
+        self._list_scroll = clamp_list_scroll(
+            self._list_scroll, self.selected_font, self._last_scroll_font, visible, len(self._font_names),
+        )
         self._last_scroll_font = self.selected_font
-        if self._list_scroll < 0:
-            self._list_scroll = 0
-        var max_scroll = len(self._font_names) - visible
-        if max_scroll < 0:
-            max_scroll = 0
-        if self._list_scroll > max_scroll:
-            self._list_scroll = max_scroll
+        var rows = List[String]()
+        for idx in range(
+            self._list_scroll, min(self._list_scroll + visible, len(self._font_names)),
+        ):
+            rows.append(self._font_names[idx])
         var body_attr = Attr(BLACK, CYAN)
         painter.fill(canvas, list_rect, String(" "), body_attr)
-        for r in range(visible):
-            var idx = self._list_scroll + r
-            if idx >= len(self._font_names):
-                break
-            var y = list_rect.a.y + r
-            var attr = body_attr
-            if idx == self.selected_font:
-                attr = (
-                    Attr(WHITE, BLUE) if self.focus == _FOCUS_FONT_LIST
-                    else Attr(BLACK, GREEN)
-                )
-                painter.fill(
-                    canvas, Rect(list_rect.a.x, y, list_rect.b.x, y + 1),
-                    String(" "), attr,
-                )
-            _ = painter.put_text(
-                canvas, Point(list_rect.a.x + 1, y),
-                self._font_names[idx], attr,
-            )
+        paint_list_rows(
+            canvas, painter, list_rect, self._list_scroll, rows,
+            self.selected_font, self.focus == _FOCUS_FONT_LIST, body_attr,
+        )
         _ = painter.put_text(
             canvas, Point(inner.a.x, inner.b.y),
             String("↑↓ to preview live — change is saved automatically"),
@@ -1318,54 +1298,28 @@ struct Settings(Movable):
     def _paint_dict_list(
         mut self, mut canvas: Canvas, painter: Painter, list_rect: Rect,
     ):
-        """One row per catalog entry: ``[X] German    (de)``.
-
-        Uses the same scroll bookkeeping as the actions list so a long
-        catalog stays usable in a short window."""
+        """One row per catalog entry: ``[X] German    (de)``."""
         var visible = list_rect.height()
-        # See _paint_actions_list for the rationale behind the
-        # change-only snap.
-        if self.selected_dict >= 0 \
-                and self.selected_dict != self._last_scroll_dict:
-            if self.selected_dict < self._list_scroll:
-                self._list_scroll = self.selected_dict
-            elif self.selected_dict >= self._list_scroll + visible:
-                self._list_scroll = self.selected_dict - visible + 1
+        self._list_scroll = clamp_list_scroll(
+            self._list_scroll, self.selected_dict, self._last_scroll_dict, visible, len(self.dict_specs),
+        )
         self._last_scroll_dict = self.selected_dict
-        if self._list_scroll < 0:
-            self._list_scroll = 0
-        var max_scroll = len(self.dict_specs) - visible
-        if max_scroll < 0:
-            max_scroll = 0
-        if self._list_scroll > max_scroll:
-            self._list_scroll = max_scroll
-        var body_attr = Attr(BLACK, CYAN)
-        for r in range(visible):
-            var idx = self._list_scroll + r
-            if idx >= len(self.dict_specs):
-                break
+        var rows = List[String]()
+        for idx in range(
+            self._list_scroll, min(self._list_scroll + visible, len(self.dict_specs)),
+        ):
             var spec = self.dict_specs[idx]
-            var attr = body_attr
-            if idx == self.selected_dict:
-                attr = (
-                    Attr(WHITE, BLUE) if self.focus == _FOCUS_DICT_LIST
-                    else Attr(BLACK, GREEN)
-                )
-                painter.fill(
-                    canvas,
-                    Rect(list_rect.a.x, list_rect.a.y + r,
-                         list_rect.b.x, list_rect.a.y + r + 1),
-                    String(" "), attr,
-                )
             var mark = String("[X] ") if user_dictionary_installed(
                 spec.language_id,
             ) else String("[ ] ")
-            var line = mark + spec.display + String("  (") \
-                + spec.language_id + String(")")
-            _ = painter.put_text(
-                canvas, Point(list_rect.a.x + 1, list_rect.a.y + r),
-                line, attr,
+            rows.append(
+                mark + spec.display + String("  (") + spec.language_id + String(")")
             )
+        var body_attr = Attr(BLACK, CYAN)
+        paint_list_rows(
+            canvas, painter, list_rect, self._list_scroll, rows,
+            self.selected_dict, self.focus == _FOCUS_DICT_LIST, body_attr,
+        )
 
     def _paint_languages_section(
         mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
@@ -1445,49 +1399,24 @@ struct Settings(Movable):
         mut self, mut canvas: Canvas, painter: Painter, list_rect: Rect,
     ):
         var visible = list_rect.height()
-        # See _paint_actions_list for the rationale behind the
-        # change-only snap.
-        if self.selected_language >= 0 \
-                and self.selected_language != self._last_scroll_language:
-            if self.selected_language < self._list_scroll:
-                self._list_scroll = self.selected_language
-            elif self.selected_language >= self._list_scroll + visible:
-                self._list_scroll = self.selected_language - visible + 1
+        self._list_scroll = clamp_list_scroll(
+            self._list_scroll, self.selected_language, self._last_scroll_language, visible, len(self.languages_view),
+        )
         self._last_scroll_language = self.selected_language
-        if self._list_scroll < 0:
-            self._list_scroll = 0
-        var max_scroll = len(self.languages_view) - visible
-        if max_scroll < 0:
-            max_scroll = 0
-        if self._list_scroll > max_scroll:
-            self._list_scroll = max_scroll
-        var body_attr = Attr(BLACK, CYAN)
-        for r in range(visible):
-            var idx = self._list_scroll + r
-            if idx >= len(self.languages_view):
-                break
+        var rows = List[String]()
+        for idx in range(
+            self._list_scroll, min(self._list_scroll + visible, len(self.languages_view)),
+        ):
             var spec = self.languages_view[idx].copy()
-            var attr = body_attr
-            if idx == self.selected_language:
-                attr = (
-                    Attr(WHITE, BLUE) if self.focus == _FOCUS_LANG_LIST
-                    else Attr(BLACK, GREEN)
-                )
-                painter.fill(
-                    canvas,
-                    Rect(list_rect.a.x, list_rect.a.y + r,
-                         list_rect.b.x, list_rect.a.y + r + 1),
-                    String(" "), attr,
-                )
-            var line = _format_language(
-                spec, _has_override(
-                    self.language_overrides, spec.language_id,
-                ),
-            )
-            _ = painter.put_text(
-                canvas, Point(list_rect.a.x + 1, list_rect.a.y + r),
-                line, attr,
-            )
+            rows.append(_format_language(
+                spec, _has_override(self.language_overrides, spec.language_id),
+            ))
+        var body_attr = Attr(BLACK, CYAN)
+        paint_list_rows(
+            canvas, painter, list_rect, self._list_scroll, rows,
+            self.selected_language, self.focus == _FOCUS_LANG_LIST,
+            body_attr,
+        )
 
     def _paint_close_button(mut self, mut canvas: Canvas, rect: Rect):
         var close = self._buttons[_BTN_CLOSE]

@@ -58,6 +58,42 @@ from .painter import Painter
 from .picker_input import scroll_to_reveal
 
 
+def clamp_list_scroll(
+    scroll: Int, selected: Int, last_snap: Int, visible: Int, count: Int,
+) -> Int:
+    """A list's scroll offset for this paint. Snaps the selection into
+    view only when it changed since the last paint (``last_snap``) — so
+    the wheel can move the viewport without the next paint yanking it
+    back — then clamps to ``[0, count - visible]``."""
+    var s = scroll
+    if selected >= 0 and selected != last_snap:
+        s = scroll_to_reveal(s, selected, visible)
+    return max(0, min(s, max(count - visible, 0)))
+
+
+def paint_list_rows(
+    mut canvas: Canvas, painter: Painter, bounds: Rect, first: Int,
+    rows: List[String], selected: Int, focused: Bool, body_attr: Attr,
+    indent: Int = 1,
+):
+    """Paint ``rows`` — the labels of items ``first``, ``first + 1``, … —
+    one per line from the top of ``bounds``. The ``selected`` item's line
+    is filled edge to edge: white-on-blue while the list has focus,
+    black-on-green otherwise. The caller fills the body."""
+    for r in range(min(len(rows), bounds.height())):
+        var y = bounds.a.y + r
+        var attr = body_attr
+        if first + r == selected:
+            attr = Attr(WHITE, BLUE) if focused else Attr(BLACK, GREEN)
+            painter.fill(
+                canvas, Rect(bounds.a.x, y, bounds.b.x, y + 1), String(" "),
+                attr,
+            )
+        _ = painter.put_text(
+            canvas, Point(bounds.a.x + indent, y), rows[r], attr,
+        )
+
+
 struct ListBox(Copyable, Movable):
     """Scrollable, selectable list. State is just selection and scroll
     offset — the items themselves stay on the host dialog and are
@@ -124,37 +160,18 @@ struct ListBox(Copyable, Movable):
         var visible = bounds.height()
         if visible <= 0:
             return
-        if self.selected >= 0 and self.selected != self._last_scroll_sel:
-            self._scroll = scroll_to_reveal(self._scroll, self.selected, visible)
+        self._scroll = clamp_list_scroll(
+            self._scroll, self.selected, self._last_scroll_sel, visible,
+            len(items),
+        )
         self._last_scroll_sel = self.selected
-        if self._scroll < 0:
-            self._scroll = 0
-        var max_scroll = len(items) - visible
-        if max_scroll < 0:
-            max_scroll = 0
-        if self._scroll > max_scroll:
-            self._scroll = max_scroll
-        for r in range(visible):
-            var idx = self._scroll + r
-            if idx >= len(items):
-                break
-            var attr = body_attr
-            if idx == self.selected:
-                attr = (
-                    Attr(WHITE, BLUE) if focused else Attr(BLACK, GREEN)
-                )
-                painter.fill(
-                    canvas,
-                    Rect(
-                        bounds.a.x, bounds.a.y + r,
-                        bounds.b.x, bounds.a.y + r + 1,
-                    ),
-                    String(" "), attr,
-                )
-            _ = painter.put_text(
-                canvas, Point(bounds.a.x + 1, bounds.a.y + r),
-                items[idx], attr,
-            )
+        var rows = List[String]()
+        for idx in range(self._scroll, min(self._scroll + visible, len(items))):
+            rows.append(items[idx])
+        paint_list_rows(
+            canvas, painter, bounds, self._scroll, rows, self.selected,
+            focused, body_attr,
+        )
 
     def paint_empty_hint(
         self,
