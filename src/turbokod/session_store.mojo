@@ -89,23 +89,6 @@ struct SessionWindow(ImplicitlyCopyable, Movable):
         self.scroll_y = 0
         self.last_focus_ms = 0
 
-    def __copyinit__(mut self, copy: Self):
-        self.path = copy.path
-        self.rect_a_x = copy.rect_a_x
-        self.rect_a_y = copy.rect_a_y
-        self.rect_b_x = copy.rect_b_x
-        self.rect_b_y = copy.rect_b_y
-        self.is_maximized = copy.is_maximized
-        self.restore_a_x = copy.restore_a_x
-        self.restore_a_y = copy.restore_a_y
-        self.restore_b_x = copy.restore_b_x
-        self.restore_b_y = copy.restore_b_y
-        self.cursor_row = copy.cursor_row
-        self.cursor_col = copy.cursor_col
-        self.scroll_x = copy.scroll_x
-        self.scroll_y = copy.scroll_y
-        self.last_focus_ms = copy.last_focus_ms
-
 
 struct Session(Movable):
     """Snapshot of the windows in a project, plus z-order and focus.
