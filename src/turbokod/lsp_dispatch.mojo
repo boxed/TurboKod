@@ -41,7 +41,7 @@ from .posix import (
     getcwd_path, getenv_value, monotonic_ms, realpath, sleep_ms, which,
 )
 from .string_utils import (
-    percent_encode_uri_path, string_list, strip_trailing_newlines, utf8_prefix,
+    hex_digit_value, percent_encode_uri_path, string_list, strip_trailing_newlines, utf8_prefix,
 )
 from .highlight import Highlight
 from .colors import Attr, BLACK, EDITOR_BG, WHITE
@@ -6933,16 +6933,6 @@ def _text_document_position_params(
     return params^
 
 
-def _uri_hex_val(b: Int) -> Int:
-    if 0x30 <= b and b <= 0x39:
-        return b - 0x30
-    if 0x41 <= b and b <= 0x46:
-        return b - 0x41 + 10
-    if 0x61 <= b and b <= 0x66:
-        return b - 0x61 + 10
-    return -1
-
-
 def _path_to_uri(path: String) -> String:
     """``/abs/path`` → ``file:///abs/path``. Resolves through realpath when
     possible so the server sees the same canonical form across calls.
@@ -6978,8 +6968,8 @@ def _uri_to_path(uri: String) -> String:
     var i = len(pb)
     while i < len(ub):
         if ub[i] == 0x25 and i + 2 < len(ub):   # '%XX'
-            var hi = _uri_hex_val(Int(ub[i + 1]))
-            var lo = _uri_hex_val(Int(ub[i + 2]))
+            var hi = hex_digit_value(Int(ub[i + 1]))
+            var lo = hex_digit_value(Int(ub[i + 2]))
             if hi >= 0 and lo >= 0:
                 out.append(UInt8((hi << 4) | lo))
                 i += 3

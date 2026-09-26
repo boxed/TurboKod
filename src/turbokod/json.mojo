@@ -21,7 +21,7 @@ encodings stay stable in tests.
 from std.collections.list import List
 from std.collections.optional import Optional
 
-from .string_utils import append_utf8
+from .string_utils import append_utf8, hex_digit_byte, hex_digit_value
 
 
 # --- JsonValue -------------------------------------------------------------
@@ -369,17 +369,11 @@ def _encode_string(s: String, mut buf: List[UInt8]):
         elif c < 0x20:
             buf.append(UInt8(0x5C)); buf.append(UInt8(0x75))
             buf.append(UInt8(0x30)); buf.append(UInt8(0x30))
-            buf.append(UInt8(_hex_nibble_byte((c >> 4) & 0xF)))
-            buf.append(UInt8(_hex_nibble_byte(c & 0xF)))
+            buf.append(UInt8(hex_digit_byte((c >> 4) & 0xF)))
+            buf.append(UInt8(hex_digit_byte(c & 0xF)))
         else:
             buf.append(UInt8(c))
     buf.append(UInt8(0x22))
-
-
-def _hex_nibble_byte(n: Int) -> Int:
-    if n < 10:
-        return 0x30 + n
-    return 0x61 + (n - 10)
 
 
 def _append_bytes(mut buf: List[UInt8], s: String):
@@ -554,13 +548,10 @@ def _parse_string(text: String, pos: Int) raises -> Tuple[String, Int]:
 
 
 def _hex_value(c: Int) raises -> Int:
-    if 0x30 <= c and c <= 0x39:
-        return c - 0x30
-    if 0x41 <= c and c <= 0x46:
-        return c - 0x41 + 10
-    if 0x61 <= c and c <= 0x66:
-        return c - 0x61 + 10
-    raise Error("bad hex digit")
+    var v = hex_digit_value(c)
+    if v < 0:
+        raise Error("bad hex digit")
+    return v
 
 
 def _parse_number(text: String, pos: Int) raises -> Tuple[JsonValue, Int]:

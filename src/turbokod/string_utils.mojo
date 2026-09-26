@@ -879,3 +879,19 @@ def append_utf8(mut out: List[UInt8], cp: Int):
     out.append(UInt8(0x80 | ((cp >> 12) & 0x3F)))
     out.append(UInt8(0x80 | ((cp >> 6) & 0x3F)))
     out.append(UInt8(0x80 | (cp & 0x3F)))
+
+
+def hex_digit_value(b: Int) -> Int:
+    """Value of ASCII hex digit ``b`` (either case), or ``-1``."""
+    if 0x30 <= b and b <= 0x39:
+        return b - 0x30
+    if 0x41 <= b and b <= 0x46:
+        return b - 0x41 + 10
+    if 0x61 <= b and b <= 0x66:
+        return b - 0x61 + 10
+    return -1
+
+
+def hex_digit_byte(n: Int) -> Int:
+    """Lowercase ASCII hex digit for nibble ``n`` (0..15)."""
+    return 0x30 + n if n < 10 else 0x61 + (n - 10)

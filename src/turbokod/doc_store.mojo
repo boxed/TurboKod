@@ -43,7 +43,7 @@ from std.collections.list import List
 from .case_fold import fold_ascii
 from .file_io import join_path, read_file, stat_file
 from .json import parse_json
-from .string_utils import display_columns
+from .string_utils import display_columns, hex_digit_value
 
 
 @fieldwise_init
@@ -655,15 +655,10 @@ def _decode_entity(name: String) -> String:
         var cp = 0
         if b[1] == 0x78 or b[1] == 0x58:    # '#x' or '#X'
             for i in range(2, len(b)):
-                var ch = Int(b[i])
-                if 0x30 <= ch and ch <= 0x39:
-                    cp = cp * 16 + (ch - 0x30)
-                elif 0x41 <= ch and ch <= 0x46:
-                    cp = cp * 16 + (ch - 0x41 + 10)
-                elif 0x61 <= ch and ch <= 0x66:
-                    cp = cp * 16 + (ch - 0x61 + 10)
-                else:
+                var d = hex_digit_value(Int(b[i]))
+                if d < 0:
                     return String("&") + name + String(";")
+                cp = cp * 16 + d
                 if cp > 0x10FFFF:    # past the last valid codepoint; stop accumulating
                     cp = 0x110000
         else:

@@ -18,6 +18,8 @@ Color spaces and their channel ranges as the picker presents them:
 
 from std.math import cbrt
 
+from .string_utils import hex_digit_byte
+
 
 # --- small numeric helpers -------------------------------------------------
 
@@ -271,9 +273,7 @@ def hsl_to_srgb(
 
 
 def _hex_digit(d: Int) -> String:
-    if d < 10:
-        return chr(ord("0") + d)
-    return chr(ord("a") + d - 10)
+    return chr(hex_digit_byte(d))
 
 
 def _hex2(v: Int) -> String:

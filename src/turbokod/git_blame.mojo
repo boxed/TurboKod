@@ -31,7 +31,7 @@ from .lsp import capture_command
 from .posix import realpath
 from .string_utils import (
     byte_slice, parse_int_all, parse_int_prefix, split_lines_no_trailing,
-    starts_with,
+    hex_digit_value, starts_with,
 )
 
 
@@ -135,13 +135,6 @@ def format_commit_time(unix_time: Int, tz: String) -> String:
     return out^
 
 
-def _is_hex(b: Int) -> Bool:
-    if 0x30 <= b and b <= 0x39: return True
-    if 0x61 <= b and b <= 0x66: return True
-    if 0x41 <= b and b <= 0x46: return True
-    return False
-
-
 
 
 def _looks_like_header(line: String) -> Bool:
@@ -150,7 +143,7 @@ def _looks_like_header(line: String) -> Bool:
     if len(b) < 41:
         return False
     for i in range(40):
-        if not _is_hex(Int(b[i])):
+        if hex_digit_value(Int(b[i])) < 0:
             return False
     return b[40] == 0x20
 
