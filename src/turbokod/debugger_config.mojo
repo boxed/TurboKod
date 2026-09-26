@@ -27,8 +27,9 @@ entries here when the need is real, not speculative.
 
 from std.collections.list import List
 
-from .file_io import join_path, list_directory, stat_file
+from .file_io import basename, join_path, list_directory, stat_file
 from .project_targets import split_env_entry
+from .string_utils import is_ascii_digit
 from .json import JsonValue, json_array, json_bool, json_object, json_str
 
 
@@ -358,10 +359,7 @@ def _launch_args_debugpy(
     if _is_python_interpreter(program) and len(args) >= 1:
         if args[0] == String("-m") and len(args) >= 2:
             module_name = args[1]
-            var rest = List[String]()
-            for i in range(2, len(args)):
-                rest.append(args[i])
-            args = rest^
+            args = _drop_front(args, 2)
         elif not _starts_with_dash(args[0]):
             # ``python script.py [args...]`` → debug ``script.py`` with
             # the residual args as its argv. Skipped when ``args[0]``
@@ -370,10 +368,7 @@ def _launch_args_debugpy(
             # better to forward the unrewritten args and let debugpy
             # error explicitly than to silently drop a flag.
             script_program = args[0]
-            var rest = List[String]()
-            for i in range(1, len(args)):
-                rest.append(args[i])
-            args = rest^
+            args = _drop_front(args, 1)
     var o = json_object()
     if len(module_name.as_bytes()) > 0:
         o.put(String("module"), json_str(module_name))
@@ -388,6 +383,13 @@ def _launch_args_debugpy(
     o.put(String("justMyCode"), json_bool(False))
     o.put(String("subProcess"), json_bool(True))
     return o^
+
+
+def _drop_front(args: List[String], n: Int) -> List[String]:
+    var rest = List[String]()
+    for i in range(n, len(args)):
+        rest.append(args[i])
+    return rest^
 
 
 def _starts_with_dash(s: String) -> Bool:
@@ -405,27 +407,15 @@ def _is_python_interpreter(program: String) -> Bool:
     by a binary literally named ``mypython``, since the prefix has
     to be ``python`` exactly at the start of the basename.
     """
-    var pb = program.as_bytes()
-    var n = len(pb)
-    var start = n
-    while start > 0 and pb[start - 1] != 0x2F:    # '/'
-        start -= 1
-    var basename_len = n - start
-    var prefix = String("python")
-    var pre_b = prefix.as_bytes()
-    if basename_len < len(pre_b):
+    var name = basename(program)
+    if not name.startswith("python"):
         return False
-    for k in range(len(pre_b)):
-        if pb[start + k] != pre_b[k]:
-            return False
     # Trailing chars after "python" must be empty / digits / dots,
     # so ``python``, ``python3``, ``python3.11`` match but ``pythonw``
     # and ``python-config`` don't.
-    for k in range(len(pre_b), basename_len):
-        var c = pb[start + k]
-        var is_digit = c >= 0x30 and c <= 0x39
-        var is_dot = c == 0x2E
-        if not (is_digit or is_dot):
+    var nb = name.as_bytes()
+    for k in range(6, len(nb)):
+        if not (is_ascii_digit(nb[k]) or nb[k] == 0x2E):
             return False
     return True
 
@@ -437,12 +427,7 @@ def _launch_args_lldb(
     """``lldb-dap`` / ``codelldb``: ``program`` + ``args`` + ``cwd``
     + ``stopOnEntry``. ``runInTerminal`` is intentionally *not* set —
     we'd need to answer the reverse request, which we don't yet."""
-    var o = json_object()
-    o.put(String("program"), json_str(program))
-    o.put(String("cwd"), json_str(cwd))
-    o.put(String("args"), _string_list_to_json(args^))
-    o.put(String("stopOnEntry"), json_bool(stop_on_entry))
-    return o^
+    return _launch_args_generic(program, cwd, args^, stop_on_entry)
 
 
 def _launch_args_delve(
@@ -456,12 +441,8 @@ def _launch_args_delve(
     already be a built binary — we default to ``debug`` because pointing
     at a ``.go`` file is the more common entry point.
     """
-    var o = json_object()
+    var o = _launch_args_generic(program, cwd, args^, stop_on_entry)
     o.put(String("mode"), json_str(String("debug")))
-    o.put(String("program"), json_str(program))
-    o.put(String("cwd"), json_str(cwd))
-    o.put(String("args"), _string_list_to_json(args^))
-    o.put(String("stopOnEntry"), json_bool(stop_on_entry))
     return o^
 
 
@@ -469,6 +450,8 @@ def _launch_args_generic(
     program: String, cwd: String, var args: List[String],
     stop_on_entry: Bool,
 ) -> JsonValue:
+    """The spec-literal launch body: ``program`` / ``cwd`` / ``args`` /
+    ``stopOnEntry``."""
     var o = json_object()
     o.put(String("program"), json_str(program))
     o.put(String("cwd"), json_str(cwd))
