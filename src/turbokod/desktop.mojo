@@ -223,6 +223,7 @@ from .terminal_pane import TERMINAL_PANE_CLOSE, TerminalPane
 from .test_pane import (
     TEST_CLEAR_OUTPUT, TEST_PANE_CLOSE, TEST_RERUN, TEST_STOP, TestPane,
 )
+from .editor import Editor
 from .window import (
     DOCK_MIN_HEIGHT, MIN_WIN_H, MIN_WIN_W, PANEL_STATE_NORMAL,
     TitleCommand, Window, WindowManager,
@@ -6949,13 +6950,7 @@ struct Desktop(Movable):
         # first paint and pushes the real dimensions a few ms later;
         # without re-application, rects saved at the larger size would
         # stay clipped to 80x24 forever.
-        var session_copy = Session()
-        for i in range(len(session.windows)):
-            session_copy.windows.append(session.windows[i])
-        for i in range(len(session.z_order)):
-            session_copy.z_order.append(session.z_order[i])
-        session_copy.focused = session.focused
-        self._pending_restore_refit = Optional[Session](session_copy^)
+        self._pending_restore_refit = Optional[Session](session.copy())
         var workspace = self.workspace_rect(screen)
         var root = self.project.value()
         # Honor the per-project open-window cap: when the saved session
@@ -6999,15 +6994,8 @@ struct Desktop(Movable):
                 continue
             var sw = session.windows[i]
             var resolved = project_absolute(root, sw.path)
-            var rect = _clip_rect_to_workspace(
-                Rect(sw.rect_a_x, sw.rect_a_y, sw.rect_b_x, sw.rect_b_y),
-                workspace,
-            )
-            var restore = _clip_rect_to_workspace(
-                Rect(sw.restore_a_x, sw.restore_a_y,
-                     sw.restore_b_x, sw.restore_b_y),
-                workspace,
-            )
+            var rect = _clip_rect_to_workspace(sw.rect(), workspace)
+            var restore = _clip_rect_to_workspace(sw.restore_rect(), workspace)
             var existing = self._find_window_for_path(resolved)
             if existing >= 0:
                 # The window for this file is already open — likely the
@@ -7020,18 +7008,8 @@ struct Desktop(Movable):
                 # ``_restore_rect`` with the current rect, which would
                 # erase the per-window un-maximized rect we just loaded
                 # from disk.
-                if sw.is_maximized:
-                    self.windows.windows[existing].rect = workspace
-                else:
-                    self.windows.windows[existing].rect = rect
-                self.windows.windows[existing].is_maximized = sw.is_maximized
-                self.windows.windows[existing]._restore_rect = restore
-                self.windows.windows[existing].editor.selections[0].row = sw.cursor_row
-                self.windows.windows[existing].editor.selections[0].anchor_row = sw.cursor_row
-                self.windows.windows[existing].editor.selections[0].col = sw.cursor_col
-                self.windows.windows[existing].editor.selections[0].anchor_col = sw.cursor_col
-                self.windows.windows[existing].editor.scroll_x = sw.scroll_x
-                self.windows.windows[existing].editor.scroll_y = sw.scroll_y
+                self._place_session_window(existing, sw, workspace)
+                _apply_session_view(self.windows.windows[existing].editor, sw)
                 # Keep the more-recent of the two: this window may have
                 # just been opened (stamped "now" by ``open_file``), which
                 # must win over the older persisted value.
@@ -7049,22 +7027,7 @@ struct Desktop(Movable):
                 var w = Window.from_file(basename(resolved), rect, resolved)
                 w._restore_rect = restore
                 w._last_focus_ms = sw.last_focus_ms
-                # Apply per-buffer view state. Bounds-check the cursor
-                # against the restored buffer so a stale row from a
-                # file that's since been truncated doesn't put us off
-                # the end.
-                var line_count = w.editor.buffer.line_count()
-                var cr = sw.cursor_row
-                if cr < 0:
-                    cr = 0
-                if line_count > 0 and cr >= line_count:
-                    cr = line_count - 1
-                w.editor.selections[0].row = cr
-                w.editor.selections[0].anchor_row = cr
-                w.editor.selections[0].col = sw.cursor_col
-                w.editor.selections[0].anchor_col = sw.cursor_col
-                w.editor.scroll_x = sw.scroll_x
-                w.editor.scroll_y = sw.scroll_y
+                _apply_session_view(w.editor, sw)
                 self.windows.add(w^)
                 var idx = len(self.windows.windows) - 1
                 if sw.is_maximized:
@@ -7117,6 +7080,25 @@ struct Desktop(Movable):
         self._last_session_json = encode_session(self._snapshot_session())
         debug_log(String("[_restore_session] EXIT"))
 
+    def _place_session_window(
+        mut self, idx: Int, sw: SessionWindow, workspace: Rect,
+    ):
+        """Put open window ``idx`` where session entry ``sw`` says, clipped
+        to ``workspace``. Sets ``is_maximized`` / ``rect`` directly rather
+        than calling ``toggle_maximize``, which would clobber
+        ``_restore_rect`` (the saved un-maximized rect) with the current
+        one."""
+        if sw.is_maximized:
+            self.windows.windows[idx].rect = workspace
+        else:
+            self.windows.windows[idx].rect = _clip_rect_to_workspace(
+                sw.rect(), workspace,
+            )
+        self.windows.windows[idx].is_maximized = sw.is_maximized
+        self.windows.windows[idx]._restore_rect = _clip_rect_to_workspace(
+            sw.restore_rect(), workspace,
+        )
+
     def _reapply_session_rects(mut self, screen: Rect):
         """Re-apply saved rects from ``_pending_restore_refit`` to any
         already-open editor windows whose ``file_path`` matches a
@@ -7135,23 +7117,8 @@ struct Desktop(Movable):
             var sw = session.windows[i]
             var resolved = project_absolute(root, sw.path)
             var existing = self._find_window_for_path(resolved)
-            if existing < 0:
-                continue
-            var rect = _clip_rect_to_workspace(
-                Rect(sw.rect_a_x, sw.rect_a_y, sw.rect_b_x, sw.rect_b_y),
-                workspace,
-            )
-            var restore = _clip_rect_to_workspace(
-                Rect(sw.restore_a_x, sw.restore_a_y,
-                     sw.restore_b_x, sw.restore_b_y),
-                workspace,
-            )
-            if sw.is_maximized:
-                self.windows.windows[existing].rect = workspace
-            else:
-                self.windows.windows[existing].rect = rect
-            self.windows.windows[existing].is_maximized = sw.is_maximized
-            self.windows.windows[existing]._restore_rect = restore
+            if existing >= 0:
+                self._place_session_window(existing, sw, workspace)
         # Re-baseline the window manager's workspace snapshot to the
         # workspace we just restored against — otherwise the next paint
         # would see "workspace changed since last fit" (the startup
@@ -15814,6 +15781,22 @@ def _category_to_pane(category: String) -> UInt8:
     if category == String("console") or category == String("important"):
         return UInt8(2)   # PANE_OUT_CONSOLE
     return UInt8(0)       # PANE_OUT_STDOUT
+
+
+def _apply_session_view(mut editor: Editor, sw: SessionWindow):
+    """Restore a buffer's caret and scroll from a session entry. The row
+    is clamped to the buffer so a file truncated since the session was
+    saved can't put the caret past its end."""
+    var line_count = editor.buffer.line_count()
+    var cr = max(0, sw.cursor_row)
+    if line_count > 0 and cr >= line_count:
+        cr = line_count - 1
+    editor.selections[0].row = cr
+    editor.selections[0].anchor_row = cr
+    editor.selections[0].col = sw.cursor_col
+    editor.selections[0].anchor_col = sw.cursor_col
+    editor.scroll_x = sw.scroll_x
+    editor.scroll_y = sw.scroll_y
 
 
 def _project_python(project_root: String) -> String:

@@ -33,6 +33,7 @@ just doesn't restore anything.
 from std.collections.list import List
 
 from .file_io import load_json_object, write_file
+from .geometry import Rect
 from .json import (
     JsonValue, encode_json, json_array, json_bool, json_int, json_object,
     json_str, json_get_bool, json_get_int, json_get_string, encode_int_pair,
@@ -89,8 +90,16 @@ struct SessionWindow(ImplicitlyCopyable, Movable):
         self.scroll_y = 0
         self.last_focus_ms = 0
 
+    def rect(self) -> Rect:
+        return Rect(self.rect_a_x, self.rect_a_y, self.rect_b_x, self.rect_b_y)
 
-struct Session(Movable):
+    def restore_rect(self) -> Rect:
+        return Rect(
+            self.restore_a_x, self.restore_a_y,
+            self.restore_b_x, self.restore_b_y,
+        )
+
+struct Session(Copyable, Movable):
     """Snapshot of the windows in a project, plus z-order and focus.
 
     ``z_order`` and ``focused`` index into ``windows``. Both default to
