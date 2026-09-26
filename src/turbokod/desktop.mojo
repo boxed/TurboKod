@@ -3404,6 +3404,16 @@ struct Desktop(Movable):
                 return True
         return False
 
+    def _tool_panes_key(mut self, event: Event) -> Bool:
+        """Offer a key to the bottom tool panes (terminals, run/debug,
+        Find Results, tests); True when one — the focused one — took it."""
+        for i in range(len(self.terminal_panes)):
+            if self.terminal_panes[i].handle_key(event):
+                return True
+        return self.debug_pane.handle_key(event) \
+            or self.find_results_pane.handle_key(event) \
+            or self.test_pane.handle_key(event)
+
     def handle_panels_event(
         mut self, event: Event, screen: Rect,
     ) raises -> Optional[String]:
@@ -3412,15 +3422,7 @@ struct Desktop(Movable):
         returns an unhandled action string for the host the same way (e.g. a
         link click in the debug output that opens a file)."""
         if event.kind == EVENT_KEY:
-            for i in range(len(self.terminal_panes)):
-                if self.terminal_panes[i].handle_key(event):
-                    return Optional[String]()
-            if self.debug_pane.handle_key(event):
-                return Optional[String]()
-            if self.find_results_pane.handle_key(event):
-                return Optional[String]()
-            if self.test_pane.handle_key(event):
-                return Optional[String]()
+            _ = self._tool_panes_key(event)
             return Optional[String]()
         if event.kind != EVENT_MOUSE:
             return Optional[String]()
@@ -7673,16 +7675,8 @@ struct Desktop(Movable):
             # When floating, the panels live on the host's separate window and
             # take their keys through `handle_panels_event` — the main surface
             # routes only to the file tree and the focused editor.
-            if not self.panels_detached:
-                for i in range(len(self.terminal_panes)):
-                    if self.terminal_panes[i].handle_key(event):
-                        return Optional[String]()
-                if self.debug_pane.handle_key(event):
-                    return Optional[String]()
-                if self.find_results_pane.handle_key(event):
-                    return Optional[String]()
-                if self.test_pane.handle_key(event):
-                    return Optional[String]()
+            if not self.panels_detached and self._tool_panes_key(event):
+                return Optional[String]()
             if self.file_tree.handle_key(event):
                 return Optional[String]()
             return self._handle_key(event, screen)
