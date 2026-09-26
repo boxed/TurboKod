@@ -4883,6 +4883,24 @@ struct Desktop(Movable):
         # this each tick; the terminal frontend never reads it.
         self.main_focus_request = True
 
+    def _open_pane_link(
+        mut self, req: Tuple[String, Int], url: String, screen: Rect,
+    ):
+        """Act on a tool pane's clicked link: a ``(path, 1-based line)``
+        file link opens (or focuses) the file at that line; a URL opens in
+        the browser. Either may be empty. A failed open is logged, not
+        fatal — a traceback from an earlier run can name a path that has
+        since moved."""
+        if len(req[0].as_bytes()) > 0:
+            try:
+                self.open_file_at(
+                    self._resolve_pane_link_path(req[0]), req[1] - 1, 0, screen,
+                )
+            except e:
+                print("desktop: pane link open_file_at", req[0], ":", String(e))
+        if len(url.as_bytes()) > 0:
+            open_url(url)
+
     def _resolve_pane_link_path(self, path: String) -> String:
         """Resolve an output-pane link path before opening it.
 
@@ -10108,20 +10126,11 @@ struct Desktop(Movable):
         # and jump to the line. Failures are logged but not fatal —
         # opening can raise on a missing file, and stack traces from a
         # previous run can easily reference paths that have since moved.
-        var oreq = self.debug_pane.consume_open_request()
-        if len(oreq[0].as_bytes()) > 0:
-            try:
-                self.open_file_at(
-                    self._resolve_pane_link_path(oreq[0]),
-                    oreq[1] - 1, 0, screen,
-                )
-            except e:
-                print("desktop: debug_pane open_file_at", oreq[0], ":", String(e))
-        # Output-log URL click: a ``http(s)://`` span clicked in the run /
-        # debug output opens in the system default browser.
-        var ourl = self.debug_pane.consume_open_url()
-        if len(ourl.as_bytes()) > 0:
-            open_url(ourl)
+        # A ``http(s)://`` span opens in the system default browser.
+        self._open_pane_link(
+            self.debug_pane.consume_open_request(),
+            self.debug_pane.consume_open_url(), screen,
+        )
         # Interactive console submit: the user pressed Enter on the
         # ``>>>`` line. Echo the expression and fire an ``evaluate``
         # against the current frame; the result lands later via
@@ -10146,18 +10155,10 @@ struct Desktop(Movable):
         # …and the same ``File "<path>", line N`` link channel — a click
         # on a traceback line in the test runner output should jump to
         # the source just like the debug pane above.
-        var treq = self.test_pane.consume_open_request()
-        if len(treq[0].as_bytes()) > 0:
-            try:
-                self.open_file_at(
-                    self._resolve_pane_link_path(treq[0]),
-                    treq[1] - 1, 0, screen,
-                )
-            except e:
-                print("desktop: test_pane open_file_at", treq[0], ":", String(e))
-        var turl = self.test_pane.consume_open_url()
-        if len(turl.as_bytes()) > 0:
-            open_url(turl)
+        self._open_pane_link(
+            self.test_pane.consume_open_request(),
+            self.test_pane.consume_open_url(), screen,
+        )
         # Find Results pane: ``[■]`` / Cmd+W close, plus the multi-select
         # open queue (Enter / double-click). Drained here in dap_tick so it
         # runs every frame regardless of any debug session.
