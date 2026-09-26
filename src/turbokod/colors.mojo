@@ -213,18 +213,14 @@ struct Attr(ImplicitlyCopyable, Movable):
         var a = self
         a.color_mode = a.color_mode | FG_TRUECOLOR
         a.fg_rgb = rgb
-        a.fg = _rgb_to_256(
-            Int((rgb >> 16) & 0xFF), Int((rgb >> 8) & 0xFF), Int(rgb & 0xFF)
-        )
+        a.fg = _rgb_to_256_packed(rgb)
         return a
 
     def with_bg_rgb(self, rgb: UInt32) -> Attr:
         var a = self
         a.color_mode = a.color_mode | BG_TRUECOLOR
         a.bg_rgb = rgb
-        a.bg = _rgb_to_256(
-            Int((rgb >> 16) & 0xFF), Int((rgb >> 8) & 0xFF), Int(rgb & 0xFF)
-        )
+        a.bg = _rgb_to_256_packed(rgb)
         return a
 
     def __eq__(self, other: Attr) -> Bool:
