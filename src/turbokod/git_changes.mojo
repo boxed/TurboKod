@@ -1246,6 +1246,19 @@ def _trim_one_line(s: String) -> String:
     return String("")
 
 
+def fetch_git_remotes(project_root: String) -> List[String]:
+    """Names of the repo's configured remotes (``git remote``), in git's
+    order. Empty when there are none or git is unavailable."""
+    var args = List[String]()
+    args.append(String("remote"))
+    var out = List[String]()
+    for line in split_lines_no_trailing(_git_stdout(project_root, args^)):
+        var name = String(line.strip())
+        if len(name.as_bytes()) > 0:
+            out.append(name^)
+    return out^
+
+
 def branch_push_remote(project_root: String, branch: String) -> String:
     """The remote ``branch`` would push to: its configured
     ``branch.<name>.remote``, or ``origin`` when it has no upstream yet.

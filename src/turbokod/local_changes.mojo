@@ -43,7 +43,8 @@ single ``+`` / ``-`` line under the cursor (forward from Unstaged,
 — a commit message, a branch-log subject — paint as underlined blue
 links and open in the system browser when clicked.
 
-``p`` (pull) and ``P`` (push) act on the repo rather than on a
+``p`` (pull), ``P`` (push) and Ctrl+P (push to a remote chosen from a
+list — type to jump, Enter to push) act on the repo rather than on a
 selection, so they work from any of the three sidebar panels.
 
 Tab / Shift+Tab cycle focus between the three sidebar panels, or
@@ -113,10 +114,10 @@ from .file_io import ci_less, join_path, read_file
 from .window import DockedPanelStack, paint_window_title, paint_window_title_at
 from .git_changes import (
     apply_patch_to_index, apply_patch_to_worktree, branch_is_merged,
-    ChangedFile, compute_staged_diff, compute_unstaged_diff,
-    compute_untracked_diff, create_reworded_commit, fetch_blob_text,
-    fetch_branch_log, fetch_commit_message, fetch_commit_show,
-    fetch_git_branches, fetch_git_commits, fetch_git_status,
+    branch_push_remote, ChangedFile, compute_staged_diff,
+    compute_unstaged_diff, compute_untracked_diff, create_reworded_commit,
+    fetch_blob_text, fetch_branch_log, fetch_commit_message, fetch_commit_show,
+    fetch_git_branches, fetch_git_commits, fetch_git_remotes, fetch_git_status,
     fetch_merged_commits, format_age, git_state_mtimes, GitBranch, GitCommit,
     GitFileStatus, github_compare_url, GitStateMtimes, has_merge_between,
     head_short_sha, main_line_branch, parse_unified_diff_files,
@@ -142,6 +143,8 @@ from .type_ahead import TypeAhead, is_type_ahead_key, type_ahead_pick
 from .buttons import BUTTON_FIRED, ShadowButton, paint_shadow_button
 from .editor import Editor
 from .config import WRAP_SOFT
+from .list_box import clamp_list_scroll, paint_list_rows
+from .picker_input import picker_nav_key
 
 
 comptime _SIDEBAR_MIN: Int = 28
@@ -180,6 +183,8 @@ comptime _OVERLAY_DELETE_BRANCH_CONFIRM: Int = 6  # y/n: force-delete an unmerge
 comptime _OVERLAY_OUTPUT: Int = 7   # full-screen scrollback of a git op's output
 comptime _OVERLAY_MERGE_CHOICE: Int = 8  # m/r: merge commit or rebase
 comptime _OVERLAY_EDIT_MSG: Int = 9  # multi-line edit of a commit message
+comptime _OVERLAY_REMOTE_PICK: Int = 10  # choose a remote to push to
+comptime _REMOTE_PICK_MAX_ROWS: Int = 10
 
 # Save-button face for the message editor. The chord is spelled out on
 # the button because Enter is taken by newlines in a multi-line input, so
@@ -1446,6 +1451,12 @@ struct LocalChanges(Movable):
     # ``o`` (open GitHub compare) on Branches and ``e`` (reword) on
     # Commits.
     var _type_ahead: TypeAhead
+    # Ctrl+P "push to remote" picker: the remotes offered, the highlighted
+    # one, its scroll, and where the list was last painted (mouse hits).
+    var _remotes: List[String]
+    var _remote_sel: Int
+    var _remote_scroll: Int
+    var _remote_list_rect: Rect
     # Async runner for the slow git ops (commit / push / pull / amend /
     # revert). Running them synchronously froze the modal — and the whole
     # desktop — for the duration of a push to a slow remote. The runner spawns each
@@ -1570,6 +1581,10 @@ struct LocalChanges(Movable):
         _ = self.sidebar_dock.add(String("Branches"))
         _ = self.sidebar_dock.add(String("Commits"))
         self._type_ahead = TypeAhead()
+        self._remotes = List[String]()
+        self._remote_sel = 0
+        self._remote_scroll = 0
+        self._remote_list_rect = Rect(0, 0, 0, 0)
         self.git_runner = InstallRunner()
         self._git_op = _GITOP_NONE
         self._git_op_label = String("")
@@ -2412,15 +2427,15 @@ struct LocalChanges(Movable):
             )
         elif self.focus == _PANE_FILES:
             hint = String(
-                " c:commit A:amend d:revert p:pull P:push  Space:stage  ⌘C:copy  Enter:open  ESC:close ",
+                " c:commit A:amend d:revert p:pull P:push ^P:push to…  Space:stage  ⌘C:copy  Enter:open  ESC:close ",
             )
         elif self.focus == _PANE_BRANCHES:
             hint = String(
-                " Space:switch  M:merge  r:rebase  d:delete  o:compare  p:pull P:push  Right:log  ⌘C:copy  ESC:close ",
+                " Space:switch  M:merge  r:rebase  d:delete  o:compare  p:pull P:push ^P:push to…  Right:log  ⌘C:copy  ESC:close ",
             )
         else:
             hint = String(
-                " e:reword  p:pull P:push  Tab:pane  Up/Down:select  Right:diff  ⌘C:copy  Enter:open  ESC:close ",
+                " e:reword  p:pull P:push ^P:push to…  Tab:pane  Up/Down:select  Right:diff  ⌘C:copy  Enter:open  ESC:close ",
             )
         var hx = bounds.b.x - display_columns(hint) - 1
         if hx < bounds.a.x + 1:
@@ -2478,6 +2493,10 @@ struct LocalChanges(Movable):
             var max_h2 = container_bounds.height() - 2
             if box_h > max_h2:
                 box_h = max_h2 if max_h2 >= 7 else 7
+        if self.overlay == _OVERLAY_REMOTE_PICK:
+            # One row per remote (capped; the list scrolls), a blank row
+            # and the hint row, inside the border.
+            box_h = min(len(self._remotes), _REMOTE_PICK_MAX_ROWS) + 4
         var bx = container_bounds.a.x + (container_bounds.width() - box_w) // 2
         var by = container_bounds.a.y + (container_bounds.height() - box_h) // 2
         var rect = Rect(bx, by, bx + box_w, by + box_h)
@@ -2507,6 +2526,10 @@ struct LocalChanges(Movable):
             prompt_text = String("")
         elif self.overlay == _OVERLAY_MERGE_CHOICE:
             title = String(" Merge branch ")
+            prompt_text = String("")
+        elif self.overlay == _OVERLAY_REMOTE_PICK:
+            title = String(" Push ") + self._current_branch_name() \
+                + String(" to remote ")
             prompt_text = String("")
         else:
             title = String(" Status ")
@@ -2552,6 +2575,32 @@ struct LocalChanges(Movable):
         if self.overlay == _OVERLAY_MERGE_CHOICE:
             self._paint_merge_choice(
                 canvas, body_p, bx, by, box_w, box_h, body,
+            )
+            return
+        if self.overlay == _OVERLAY_REMOTE_PICK:
+            var list_rect = Rect(
+                bx + 2, by + 1, bx + box_w - 2, by + box_h - 3,
+            )
+            self._remote_list_rect = list_rect
+            self._remote_scroll = clamp_list_scroll(
+                self._remote_scroll, self._remote_sel, -1,
+                list_rect.height(), len(self._remotes),
+            )
+            var rows = List[String]()
+            for i in range(
+                self._remote_scroll,
+                min(self._remote_scroll + list_rect.height(), len(self._remotes)),
+            ):
+                rows.append(self._remotes[i])
+            var list_bg = Attr(BLACK, CYAN)
+            body_p.fill(canvas, list_rect, String(" "), list_bg)
+            paint_list_rows(
+                canvas, body_p, list_rect, self._remote_scroll, rows,
+                self._remote_sel, True, list_bg,
+            )
+            _ = body_p.put_text(
+                canvas, Point(bx + 2, by + box_h - 2),
+                String("Type to jump  Enter: push  ESC: cancel"), body,
             )
             return
         # Confirmation overlays.
@@ -3764,6 +3813,13 @@ struct LocalChanges(Movable):
         # is spelled, and 'A' / 'M' / 'P' are real shortcuts. Tab is
         # excepted so Ctrl+Tab keeps cycling panes (Shift+Tab clears the
         # mask on its own).
+        # Ctrl+P → push to a remote picked from a list. Sits next to
+        # 'p' / 'P' (repo-wide, so any sidebar pane) but has to be matched
+        # before the chord swallow below.
+        if k == UInt32(0x70) and event.mods == MOD_CTRL \
+                and not self._is_right_focus():
+            self._open_remote_picker()
+            return True
         if (event.mods & (MOD_CTRL | MOD_ALT | MOD_META)) != 0 \
                 and k != KEY_TAB:
             return True
@@ -4466,6 +4522,79 @@ struct LocalChanges(Movable):
         self._start_git_op(
             _GITOP_PUSH, String("git push"), argv^,
         )
+
+    def _open_remote_picker(mut self):
+        """Ctrl+P: pick which remote to push the current branch to."""
+        if self._refuse_if_git_busy():
+            return
+        var remotes = fetch_git_remotes(self.root)
+        if len(remotes) == 0:
+            self._show_status(String("No remotes configured."), False)
+            return
+        self._remotes = remotes^
+        # Start on the remote a plain push would use, so Enter right away
+        # does the expected thing.
+        var default = branch_push_remote(self.root, self._current_branch_name())
+        self._remote_sel = 0
+        for i in range(len(self._remotes)):
+            if self._remotes[i] == default:
+                self._remote_sel = i
+                break
+        self._remote_scroll = 0
+        self._type_ahead.reset()
+        self.overlay = _OVERLAY_REMOTE_PICK
+
+    def _remote_picker_key(mut self, event: Event):
+        """Keys while the remote picker is open (ESC is handled by the
+        overlay router): arrows / paging / Home / End move, a printable
+        key jumps to the first remote starting with what's been typed so
+        far, Enter pushes to the highlighted one."""
+        var k = event.key
+        var n = len(self._remotes)
+        if k == KEY_ENTER:
+            self._push_to_selected_remote()
+            return
+        if picker_nav_key(k, n, self._remote_sel):
+            return
+        if k == KEY_HOME:
+            self._remote_sel = 0
+            return
+        if k == KEY_END:
+            self._remote_sel = n - 1
+            return
+        if is_type_ahead_key(event):
+            var hit = type_ahead_pick(self._type_ahead, self._remotes, chr(Int(k)))
+            if hit >= 0:
+                self._remote_sel = hit
+
+    def _remote_picker_mouse(mut self, event: Event):
+        """A click selects a remote; clicking the highlighted one pushes."""
+        if event.button != MOUSE_BUTTON_LEFT or not event.pressed \
+                or event.motion:
+            return
+        var r = self._remote_list_rect
+        if not r.contains(event.pos):
+            return
+        var idx = self._remote_scroll + (event.pos.y - r.a.y)
+        if idx >= len(self._remotes):
+            return
+        if idx == self._remote_sel:
+            self._push_to_selected_remote()
+        else:
+            self._remote_sel = idx
+
+    def _push_to_selected_remote(mut self):
+        """``git push <remote> HEAD``: the current branch to the same-named
+        branch on the chosen remote, whatever its configured upstream."""
+        if self._remote_sel < 0 or self._remote_sel >= len(self._remotes):
+            return
+        var remote = self._remotes[self._remote_sel]
+        self._close_overlay()
+        var argv = self._git_base_argv()
+        argv.append(String("push"))
+        argv.append(remote)
+        argv.append(String("HEAD"))
+        self._start_git_op(_GITOP_PUSH, String("git push ") + remote, argv^)
 
     def _run_checkout(mut self):
         """``git checkout`` the selected branch. Already-current branch is
@@ -5210,6 +5339,9 @@ struct LocalChanges(Movable):
             elif k == _KEY_R_LOWER or k == _KEY_R_UPPER:
                 self._confirm_merge_rebase()
             return True
+        if self.overlay == _OVERLAY_REMOTE_PICK:
+            self._remote_picker_key(event)
+            return True
         # Confirmation overlays.
         if k == _KEY_Y_LOWER or k == _KEY_Y_UPPER:
             if self.overlay == _OVERLAY_AMEND_CONFIRM:
@@ -5501,6 +5633,9 @@ struct LocalChanges(Movable):
         # that isn't a link stays swallowed like the rest of the modals.
         if self.overlay == _OVERLAY_OUTPUT:
             self._handle_output_overlay_mouse(event)
+            return True
+        if self.overlay == _OVERLAY_REMOTE_PICK:
+            self._remote_picker_mouse(event)
             return True
         if self.overlay != _OVERLAY_NONE:
             return True

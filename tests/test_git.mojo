@@ -40,7 +40,7 @@ from turbokod.local_changes import (
     _GITOP_MERGE, _GITOP_NONE, _GITOP_PULL, _GITOP_PUSH, _GITOP_REBASE,
     _OVERLAY_DELETE_BRANCH_CONFIRM,
     _GITOP_REWORD, _OVERLAY_EDIT_MSG,
-    _OVERLAY_MERGE_CHOICE, _OVERLAY_NONE,
+    _OVERLAY_MERGE_CHOICE, _OVERLAY_NONE, _OVERLAY_REMOTE_PICK,
     _OVERLAY_OUTPUT, _OVERLAY_STATUS,
     _PANE_BRANCHES, _PANE_COMMITS, _PANE_FILES, _PANE_RIGHT_STAGED,
     _PANE_RIGHT_UNSTAGED, _LINE_ADD, _LINE_REM
@@ -4812,7 +4812,64 @@ def test_branch_pane_o_refuses_main_and_a_non_github_remote() raises:
     lc.release()
 
 
+def _git_args(*items: String) -> List[String]:
+    var out = List[String]()
+    for x in items:
+        out.append(String(x))
+    return out^
+
+
+def test_local_changes_ctrl_p_pushes_to_a_picked_remote() raises:
+    """Ctrl+P opens a remote picker: it starts on the remote a plain push
+    would use, typing jumps to the first remote with that prefix, arrows
+    move, and Enter pushes the current branch to the chosen remote."""
+    var root = _temp_path(String("_remote_pick"))
+    _rm_rf(root)
+    _ensure_dir(root)
+    _ = _run_git(root, _git_args(String("init"), String("-q"), String("-b"), String("main")))
+    for name in [String("origin"), String("upstream"), String("fork"), String("upload")]:
+        _ = _run_git(root, _git_args(
+            String("remote"), String("add"), name, String("/nonexistent/") + name,
+        ))
+    var lc = LocalChanges()
+    lc.open(root)
+    lc.focus = _PANE_FILES
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(_key(UInt32(ord("p")), MOD_CTRL), screen, registry)
+    assert_equal(lc.overlay, _OVERLAY_REMOTE_PICK)
+    assert_equal(len(lc._remotes), 4)
+    # No upstream configured → a plain push would go to origin.
+    assert_equal(lc._remotes[lc._remote_sel], String("origin"))
+    # The picker lists every remote.
+    var canvas = Canvas(screen.width(), screen.height())
+    lc.paint(canvas, screen, registry)
+    var painted = String("")
+    for y in range(screen.height()):
+        for x in range(screen.width()):
+            painted += canvas.get(x, y).glyph
+    for name in [String("origin"), String("upstream"), String("fork"), String("upload")]:
+        assert_true(name in painted)
+    # ``git remote`` lists alphabetically: fork, origin, upload, upstream.
+    # Type-to-jump accumulates: "u" → upload, "ups" → upstream.
+    _ = lc.handle_key(_key(UInt32(ord("u"))), screen, registry)
+    assert_equal(lc._remotes[lc._remote_sel], String("upload"))
+    _ = lc.handle_key(_key(UInt32(ord("p"))), screen, registry)
+    _ = lc.handle_key(_key(UInt32(ord("s"))), screen, registry)
+    assert_equal(lc._remotes[lc._remote_sel], String("upstream"))
+    # Arrows still move.
+    _ = lc.handle_key(_key(KEY_UP), screen, registry)
+    assert_equal(lc._remotes[lc._remote_sel], String("upload"))
+    _ = lc.handle_key(_key(KEY_ENTER), screen, registry)
+    assert_equal(lc.overlay, _OVERLAY_NONE)
+    assert_equal(lc._git_op, _GITOP_PUSH)
+    assert_true(String("push upload HEAD") in lc.git_runner.command)
+    _drain_git_op(lc)
+    _rm_rf(root)
+
+
 def main() raises:
+    test_local_changes_ctrl_p_pushes_to_a_picked_remote()
     setup_test_env()
     test_git_view_overlay_editor_releases_its_find_regex()
     test_diff3_merge_clean_when_only_ours_changed()
@@ -4942,4 +4999,4 @@ def main() raises:
     test_branch_pane_o_refuses_main_and_a_non_github_remote()
     test_parse_name_status_z_maps_statuses_to_lsp_change_types()
     test_changed_paths_between_reports_what_a_branch_switch_rewrote()
-    print("git: 124 tests passed")
+    print("git: 125 tests passed")
