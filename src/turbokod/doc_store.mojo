@@ -43,6 +43,7 @@ from std.collections.list import List
 from .case_fold import fold_ascii
 from .file_io import join_path, read_file, stat_file
 from .json import parse_json
+from .string_utils import display_columns
 
 
 @fieldwise_init
@@ -829,7 +830,7 @@ def _render_table(mut out: List[UInt8], inner: String):
         widths.append(3)    # ``---`` is the minimum legal separator cell
     for ri in range(len(rows)):
         for ci in range(ncols):
-            var w = _utf8_codepoint_count(rows[ri][ci])
+            var w = display_columns(rows[ri][ci])
             if w > widths[ci]:
                 widths[ci] = w
     for ri in range(len(rows)):
@@ -842,13 +843,13 @@ def _emit_table_row(
     mut out: List[UInt8], cells: List[String], widths: List[Int],
 ):
     """``| cell1 | cell2 | ... |\\n`` with each cell right-padded with
-    spaces to ``widths[ci]`` codepoints so the columns line up in
+    spaces to ``widths[ci]`` cells so the columns line up in
     monospace."""
     out.append(0x7C)    # '|'
     for ci in range(len(cells)):
         out.append(0x20)
         _extend(out, cells[ci])
-        var pad = widths[ci] - _utf8_codepoint_count(cells[ci])
+        var pad = widths[ci] - display_columns(cells[ci])
         for _ in range(pad):
             out.append(0x20)
         out.append(0x20)
@@ -896,18 +897,3 @@ def _flatten_cell(s: String) -> String:
     while len(out) > 0 and out[len(out) - 1] == 0x20:
         _ = out.pop()
     return String(StringSpan(unsafe_from_utf8=Span(out)))
-
-
-def _utf8_codepoint_count(s: String) -> Int:
-    """Number of Unicode codepoints in ``s``. We count UTF-8 lead bytes
-    (``b & 0xC0 != 0x80``) so multi-byte runes contribute one column
-    each — close enough for column-padding latin-script docs and
-    cheap to compute. CJK widths aren't accounted for (those would
-    need an East-Asian-width table); those columns will simply be
-    under-padded by one cell."""
-    var b = s.as_bytes()
-    var count = 0
-    for i in range(len(b)):
-        if (Int(b[i]) & 0xC0) != 0x80:
-            count += 1
-    return count

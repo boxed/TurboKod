@@ -2002,6 +2002,16 @@ def test_html_to_text_table_renders_as_gfm_table() raises:
     assert_true(found)
 
 
+def test_html_to_text_table_pads_emoji_by_display_width() raises:
+    """An emoji occupies two cells, so its column padding must count two —
+    padding by codepoints left every row after it one column off."""
+    var rendered = html_to_text(String(
+        "<table><tr><th>Col</th></tr><tr><td>🙂</td></tr></table>",
+    ))
+    assert_true(String("| 🙂  |") in rendered)
+    assert_true(String("| Col |") in rendered)
+
+
 def test_html_to_text_table_escapes_pipes_in_cells() raises:
     """A literal ``|`` inside a cell would otherwise terminate the cell
     early and shift every column to its right; we escape as ``\\|``."""
@@ -2213,8 +2223,9 @@ def main() raises:
     test_html_to_text_preserves_pre()
     test_html_to_text_strips_script_and_style()
     test_html_to_text_table_renders_as_gfm_table()
+    test_html_to_text_table_pads_emoji_by_display_width()
     test_html_to_text_table_escapes_pipes_in_cells()
     test_markdown_highlights_headings_code_and_emphasis()
     test_markdown_fenced_code_uses_embedded_grammar()
     test_backreference_end_regexes_are_released_per_line()
-    print("highlight: 57 tests passed")
+    print("highlight: 58 tests passed")
