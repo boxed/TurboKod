@@ -4663,22 +4663,14 @@ struct Desktop(Movable):
             if self.settings.wrap_mode != self.config.wrap_mode:
                 self.config.wrap_mode = self.settings.wrap_mode
                 self._apply_view_config()
-                for i in range(len(self.windows.windows)):
-                    if self.windows.windows[i].is_editor:
-                        self.windows.windows[i].editor.reveal_cursor(
-                            self.windows.windows[i].interior(),
-                        )
+                self._reveal_all_cursors()
             # Smart-wrap comma trigger. Re-layout (and re-reveal cursors,
             # since the row mapping shifts) on change, same as wrap mode.
             var new_comma = self.settings.comma_threshold_value()
             if new_comma != self.config.smart_wrap_comma_threshold:
                 self.config.smart_wrap_comma_threshold = new_comma
                 self._apply_view_config()
-                for i in range(len(self.windows.windows)):
-                    if self.windows.windows[i].is_editor:
-                        self.windows.windows[i].editor.reveal_cursor(
-                            self.windows.windows[i].interior(),
-                        )
+                self._reveal_all_cursors()
             # Max open windows. Lowering the cap takes effect immediately:
             # close the least-recently-used clean documents down to the
             # new limit.
@@ -4974,7 +4966,6 @@ struct Desktop(Movable):
         non-empty ``install_hint`` (otherwise we'd have nothing actionable
         to suggest). Truly unknown extensions stay a silent no-op.
         """
-        debug_log(String("[_maybe_lsp_open] ENTER idx=") + String(idx))
         var path = self._editor_path_at(idx)
         if len(path.as_bytes()) == 0:
             return
@@ -4986,7 +4977,6 @@ struct Desktop(Movable):
         # unconditionally; the helper bails fast when there's nothing
         # to ask about.
         self._maybe_prompt_grammar_install(ext)
-        debug_log(String("[_maybe_lsp_open] after grammar prompt"))
         # IntelliJ-style ``# language=NAME`` markers in the buffer
         # also count as "languages this file uses." Surface a grammar
         # install prompt for each unique embedded language whose
@@ -5000,7 +4990,6 @@ struct Desktop(Movable):
             + String(len(embedded)))
         for k in range(len(embedded)):
             self._maybe_prompt_grammar_install(embedded[k])
-        debug_log(String("[_maybe_lsp_open] before _ensure_lsp_for_extension"))
         var lsp_idx = self._ensure_lsp_for_extension(ext)
         debug_log(String("[_maybe_lsp_open] lsp_idx=") + String(lsp_idx))
         if lsp_idx < 0:
@@ -5010,7 +4999,6 @@ struct Desktop(Movable):
         debug_log(String("[_maybe_lsp_open] text snapshot bytes=")
             + String(len(text.as_bytes())))
         self.lsp_managers[lsp_idx].notify_opened(path, text^)
-        debug_log(String("[_maybe_lsp_open] after notify_opened"))
 
     def _install_prompt_blocked(self) -> Bool:
         """True while a dialog or picker owns the screen, so an "Install
@@ -5246,14 +5234,29 @@ struct Desktop(Movable):
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
             return
-        self.speller.reload()
-        for i in range(len(self.windows.windows)):
-            if self.windows.windows[i].is_editor:
-                self.windows.windows[i].editor.invalidate_spell()
+        self._reload_speller()
         self.status_bar.set_message(
             String("Removed ") + label + String(" dictionary"),
             Attr(BLACK, LIGHT_GRAY),
         )
+
+    def _reload_speller(mut self):
+        """Reload the dictionaries from disk and drop every editor's spell
+        marks so the next paint rechecks against the new word set."""
+        self.speller.reload()
+        for i in range(len(self.windows.windows)):
+            if self.windows.windows[i].is_editor:
+                self.windows.windows[i].editor.invalidate_spell()
+
+    def _reveal_all_cursors(mut self):
+        """Re-reveal every editor's cursor — after a layout change (wrap
+        mode, smart-wrap threshold) that remaps buffer rows to screen
+        rows."""
+        for i in range(len(self.windows.windows)):
+            if self.windows.windows[i].is_editor:
+                self.windows.windows[i].editor.reveal_cursor(
+                    self.windows.windows[i].interior(),
+                )
 
     def _on_dict_install_complete(
         mut self, result: InstallResult, screen: Rect,
@@ -5265,10 +5268,7 @@ struct Desktop(Movable):
         install failures."""
         self._dict_install_lang = String("")
         if result.ok():
-            self.speller.reload()
-            for i in range(len(self.windows.windows)):
-                if self.windows.windows[i].is_editor:
-                    self.windows.windows[i].editor.invalidate_spell()
+            self._reload_speller()
             self.status_bar.set_message(
                 String("Installed ") + result.label,
                 Attr(BLACK, LIGHT_GRAY),
@@ -6056,9 +6056,7 @@ struct Desktop(Movable):
         ``.git`` lives) rather than ``app/``, while a non-repo
         directory still gets treated as a project.
         """
-        debug_log(String("[open_project] ENTER path=") + path)
         if self.project:
-            debug_log(String("[open_project] already open, returning"))
             return
         var found = find_git_project(path)
         if found:
@@ -6067,7 +6065,6 @@ struct Desktop(Movable):
         else:
             debug_log(String("[open_project] no git, using path"))
             self._set_project(path)
-        debug_log(String("[open_project] EXIT"))
 
     def close_project(mut self):
         # Flush any pending view-state changes for the still-open editor
@@ -6387,7 +6384,6 @@ struct Desktop(Movable):
             self._close_editor_window_at(victim)
 
     def _set_project(mut self, path: String):
-        debug_log(String("[_set_project] ENTER path=") + path)
         # Resolve so a label like ``.`` becomes the actual directory name,
         # and so the stored project path is canonical for downstream
         # comparisons. Fall back to the input on resolution failure.
@@ -6426,7 +6422,6 @@ struct Desktop(Movable):
         # the status bar paints as no tabs at all — Cmd+R / Cmd+D
         # silently no-op until the user authors ``.turbokod/targets.json``.
         self.targets = load_project_targets(canonical)
-        debug_log(String("[_set_project] after load_project_targets"))
         # Per-project grammar overrides — ``.turbokod/grammars.json``
         # lets a project say "use the django-html grammar for .html"
         # without changing the bundled extension map. Empty / missing
@@ -6463,7 +6458,6 @@ struct Desktop(Movable):
         # dictionaries (.turbokod/dictionary.txt + .idea/dictionaries/*.xml)
         # so the team's shared vocabulary doesn't trigger spell flags.
         self.speller.set_project(canonical)
-        debug_log(String("[_set_project] after speller.set_project"))
         # Seed the DAP manager from the per-user breakpoints file. We
         # do this here (rather than lazily on first F5) so the gutter
         # already shows red dots before the user starts a session, and
@@ -6484,24 +6478,20 @@ struct Desktop(Movable):
         self.dap.restore_breakpoints(
             bp_paths^, bp_lines^, bp_conds^, bp_enabled^, bp_wait_for^,
         )
-        debug_log(String("[_set_project] after dap.restore_breakpoints"))
         # Seed the change-detection cache with the encoding of what we
         # just loaded so the immediate post-restore ``dap_tick`` doesn't
         # re-write the file with the same bytes.
         self._last_breakpoints_json = encode_breakpoints(
             canonical, self._snapshot_breakpoints(),
         )
-        debug_log(String("[_set_project] after encode_breakpoints"))
         # Load per-file view states. The Desktop refreshes entries for
         # open editors on every paint and writes the file when the
         # encoding changes, so a closed-then-reopened file lands back
         # at the saved scroll position.
         self._view_states = load_view_states(canonical)
-        debug_log(String("[_set_project] after load_view_states"))
         self._last_view_states_json = encode_view_states(
             canonical, self._view_states,
         )
-        debug_log(String("[_set_project] after encode_view_states"))
         # Arm a session restore for the next ``paint`` — that's the
         # earliest place we have ``screen`` to clip restored rects
         # against. The restore code merges by file path (existing
@@ -6511,7 +6501,6 @@ struct Desktop(Movable):
         # already on screen — they're not file-backed and so aren't
         # in the session.
         self._pending_restore = True
-        debug_log(String("[_set_project] EXIT"))
 
     # --- session restore / save -------------------------------------------
 
@@ -6930,9 +6919,7 @@ struct Desktop(Movable):
         windows. Z-order and focus are reapplied at the end so the
         user lands on the same window they left.
         """
-        debug_log(String("[_restore_session] ENTER"))
         if not self.project:
-            debug_log(String("[_restore_session] no project, return"))
             return
         var session = load_session(self.project.value())
         debug_log(String("[_restore_session] load_session got n_windows=")
@@ -7078,7 +7065,6 @@ struct Desktop(Movable):
         # just loaded so the immediate post-restore ``paint`` doesn't
         # re-write the file with the same bytes.
         self._last_session_json = encode_session(self._snapshot_session())
-        debug_log(String("[_restore_session] EXIT"))
 
     def _place_session_window(
         mut self, idx: Int, sw: SessionWindow, workspace: Rect,
