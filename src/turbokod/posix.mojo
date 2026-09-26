@@ -1039,3 +1039,16 @@ def strip_macos_malloc_debug_env():
     _ = external_call["unsetenv", Int32](s.unsafe_ptr())
     _ = external_call["unsetenv", Int32](ps.unsafe_ptr())
     _ = external_call["unsetenv", Int32](ge.unsafe_ptr())
+
+
+def user_config_path(sub: String = String("")) -> String:
+    """``~/.config/turbokod`` (or ``~/.config/turbokod/<sub>``); empty when
+    ``$HOME`` is unset — sandboxed processes — which callers read as "no
+    per-user files available"."""
+    var home = getenv_value(String("HOME"))
+    if len(home.as_bytes()) == 0:
+        return String("")
+    var dir = home + String("/.config/turbokod")
+    if len(sub.as_bytes()) == 0:
+        return dir
+    return dir + String("/") + sub

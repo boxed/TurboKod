@@ -17,7 +17,7 @@ next paint without restart.
 from std.collections.list import List
 
 from .file_io import stat_file
-from .posix import getenv_value
+from .posix import user_config_path
 from .string_utils import shell_single_quote, string_list
 
 
@@ -116,10 +116,7 @@ def user_grammar_root() -> String:
     """``~/.config/turbokod/languages``. Empty when ``$HOME`` is unset
     (sandboxed processes); callers treat that as "no user grammars
     available" and skip both load and install."""
-    var home = getenv_value(String("HOME"))
-    if len(home.as_bytes()) == 0:
-        return String("")
-    return home + String("/.config/turbokod/languages")
+    return user_config_path(String("languages"))
 
 
 def user_grammar_dir(lang: String) -> String:

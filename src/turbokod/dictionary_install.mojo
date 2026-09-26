@@ -26,7 +26,7 @@ fresh install / remove takes effect without restart.
 from std.collections.list import List
 
 from .file_io import delete_path, list_directory, stat_file
-from .posix import getenv_value
+from .posix import user_config_path
 from .string_utils import shell_single_quote
 
 
@@ -109,10 +109,7 @@ def user_dictionaries_root() -> String:
     """``~/.config/turbokod/dictionaries``. Empty when ``$HOME`` is unset
     (sandboxed processes); callers treat that as "no user dictionaries
     available" and skip both load and install."""
-    var home = getenv_value(String("HOME"))
-    if len(home.as_bytes()) == 0:
-        return String("")
-    return home + String("/.config/turbokod/dictionaries")
+    return user_config_path(String("dictionaries"))
 
 
 def user_dictionary_path(language_id: String) -> String:

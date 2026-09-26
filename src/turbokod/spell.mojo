@@ -29,7 +29,7 @@ from .file_io import (
     join_path, list_directory, make_parent_dirs, read_file, stat_file,
     write_file,
 )
-from .posix import debug_log, getenv_value
+from .posix import debug_log, user_config_path
 from .string_utils import (
     append_utf8,
     byte_slice, codepoint_at, is_ascii_digit, is_ascii_ident_byte,
@@ -48,10 +48,7 @@ def user_dict_path() -> String:
     """``~/.config/turbokod/dictionary.txt``, or ``""`` when ``$HOME``
     is unset. One word per line; appended whenever the user picks
     "Add to user dictionary" on a misspelled word."""
-    var home = getenv_value(String("HOME"))
-    if len(home.as_bytes()) == 0:
-        return String("")
-    return home + String("/.config/turbokod/dictionary.txt")
+    return user_config_path(String("dictionary.txt"))
 
 
 def project_dict_path(project_root: String) -> String:

@@ -21,7 +21,7 @@ from .json import (
     json_str, json_get_bool, json_get_int, json_get_string,
     json_get_string_array, parse_json,
 )
-from .posix import close_fd, getenv_value
+from .posix import close_fd, getenv_value, user_config_path
 
 
 # Wrap mode (Settings ▸ Editor). Persisted as ``TurbokodConfig.wrap_mode``
@@ -48,10 +48,7 @@ def _config_dir() -> String:
     """Directory that holds the config file. Empty when ``$HOME`` is
     unset (e.g. inside an unusual sandbox); callers treat that as
     "no persistent config available" and skip both load and save."""
-    var home = getenv_value(String("HOME"))
-    if len(home.as_bytes()) == 0:
-        return String("")
-    return home + String("/.config/turbokod")
+    return user_config_path()
 
 
 def _config_path() -> String:
