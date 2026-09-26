@@ -110,76 +110,67 @@ def highlight_for_extension(
     return hls^
 
 
+@fieldwise_init
+struct _BundledGrammar(Copyable, Movable):
+    """A grammar shipped in-tree: its ``language_id`` and the file
+    extensions it highlights. The JSON lives at
+    ``src/turbokod/grammars/<language_id>.tmLanguage.json``."""
+    var lang: String
+    var exts: List[String]
+
+
+def _bundled_grammars() -> List[_BundledGrammar]:
+    """The single source of truth for in-tree grammars — both the
+    by-extension lookup and the by-``language_id`` (project override)
+    lookup derive from it. Adding a grammar is one row here plus the JSON
+    file under ``src/turbokod/grammars/``.
+
+    Markdown is bundled but deliberately mapped to no extension: its
+    vscode grammar leans on external-grammar embedding (code fences) the
+    runtime can't fully resolve, so ``.md`` goes through the dedicated
+    ``_highlight_markdown`` fallback instead."""
+    var out = List[_BundledGrammar]()
+    out.append(_BundledGrammar(String("python"), _kw("py", "pyi", "pyw")))
+    out.append(_BundledGrammar(String("mojo"), _kw("mojo", "🔥")))
+    out.append(_BundledGrammar(String("rust"), _kw("rs")))
+    out.append(_BundledGrammar(String("json"), _kw("json", "jsonc")))
+    out.append(_BundledGrammar(String("go"), _kw("go")))
+    out.append(_BundledGrammar(String("typescript"), _kw("ts", "tsx")))
+    out.append(_BundledGrammar(String("javascript"), _kw("js", "jsx", "mjs", "cjs")))
+    out.append(_BundledGrammar(String("ruby"), _kw("rb")))
+    out.append(_BundledGrammar(String("cpp"), _kw("c", "h", "cc", "cpp", "cxx", "hpp", "hh", "hxx")))
+    out.append(_BundledGrammar(String("shell"), _kw("sh", "bash")))
+    out.append(_BundledGrammar(String("sql"), _kw("sql")))
+    out.append(_BundledGrammar(String("yaml"), _kw("yaml", "yml")))
+    out.append(_BundledGrammar(String("html"), _kw("html", "htm")))
+    out.append(_BundledGrammar(String("css"), _kw("css")))
+    out.append(_BundledGrammar(String("diff"), _kw("diff", "patch")))
+    out.append(_BundledGrammar(String("markdown"), List[String]()))
+    out.append(_BundledGrammar(String("rst"), _kw("rst", "rest")))
+    return out^
+
+
+def _bundled_grammar_json(lang: String) -> String:
+    return String("src/turbokod/grammars/") + lang + String(".tmLanguage.json")
+
+
 def bundled_grammar_languages() -> List[String]:
-    """The ``language_id`` of every grammar shipped in-tree. Keep in
-    sync with ``_bundled_grammar_path_for_language`` below — this is the
-    list form of the same source of truth, used to populate the
-    project-grammar override picker. Downloadable-but-unbundled
-    languages (elm, django-html) come from
+    """The ``language_id`` of every grammar shipped in-tree, used to
+    populate the project-grammar override picker. Downloadable-but-
+    unbundled languages (elm, django-html) come from
     ``built_in_downloadable_grammars`` and are merged in by the picker."""
     var out = List[String]()
-    out.append(String("python"))
-    out.append(String("mojo"))
-    out.append(String("rust"))
-    out.append(String("json"))
-    out.append(String("go"))
-    out.append(String("typescript"))
-    out.append(String("javascript"))
-    out.append(String("ruby"))
-    out.append(String("cpp"))
-    out.append(String("shell"))
-    out.append(String("sql"))
-    out.append(String("yaml"))
-    out.append(String("html"))
-    out.append(String("css"))
-    out.append(String("diff"))
-    out.append(String("markdown"))
-    out.append(String("rst"))
+    for g in _bundled_grammars():
+        out.append(g.lang)
     return out^
 
 
 def _bundled_grammar_path_for_language(lang: String) -> String:
-    """Return the bundled grammar JSON path for ``language_id``
-    (``"python"``, ``"rust"``, ``"django-html"``, …), or ``""`` when
-    no grammar with that id is shipped in-tree. Same source of truth
-    as ``_grammar_path_for_ext``; the two functions exist because the
-    bundled map is keyed by *extension* (one language can own
-    several) while overrides resolve by *language_id*.
-    """
-    if lang == String("python"):
-        return String("src/turbokod/grammars/python.tmLanguage.json")
-    if lang == String("mojo"):
-        return String("src/turbokod/grammars/mojo.tmLanguage.json")
-    if lang == String("rust"):
-        return String("src/turbokod/grammars/rust.tmLanguage.json")
-    if lang == String("json"):
-        return String("src/turbokod/grammars/json.tmLanguage.json")
-    if lang == String("go"):
-        return String("src/turbokod/grammars/go.tmLanguage.json")
-    if lang == String("typescript"):
-        return String("src/turbokod/grammars/typescript.tmLanguage.json")
-    if lang == String("javascript"):
-        return String("src/turbokod/grammars/javascript.tmLanguage.json")
-    if lang == String("ruby"):
-        return String("src/turbokod/grammars/ruby.tmLanguage.json")
-    if lang == String("cpp"):
-        return String("src/turbokod/grammars/cpp.tmLanguage.json")
-    if lang == String("shell"):
-        return String("src/turbokod/grammars/shell.tmLanguage.json")
-    if lang == String("sql"):
-        return String("src/turbokod/grammars/sql.tmLanguage.json")
-    if lang == String("yaml"):
-        return String("src/turbokod/grammars/yaml.tmLanguage.json")
-    if lang == String("html"):
-        return String("src/turbokod/grammars/html.tmLanguage.json")
-    if lang == String("css"):
-        return String("src/turbokod/grammars/css.tmLanguage.json")
-    if lang == String("diff"):
-        return String("src/turbokod/grammars/diff.tmLanguage.json")
-    if lang == String("markdown"):
-        return String("src/turbokod/grammars/markdown.tmLanguage.json")
-    if lang == String("rst"):
-        return String("src/turbokod/grammars/rst.tmLanguage.json")
+    """The bundled grammar JSON path for ``language_id``, or ``""`` when
+    no grammar with that id is shipped in-tree."""
+    for g in _bundled_grammars():
+        if g.lang == lang:
+            return _bundled_grammar_json(lang)
     return String("")
 
 
@@ -191,70 +182,22 @@ def _grammar_path_for_language(lang: String) -> String:
     var bundled = _bundled_grammar_path_for_language(lang)
     if len(bundled.as_bytes()) > 0:
         return bundled
-    var user = user_grammar_path(lang)
-    if len(user.as_bytes()) == 0:
-        return String("")
-    return user
+    return user_grammar_path(lang)
 
 
 def _grammar_path_for_ext(ext: String) -> String:
-    """Map extension → grammar JSON path, relative to project root.
+    """Map extension → grammar JSON path, relative to project root; empty
+    means "no grammar for this extension".
 
-    Empty string means "no grammar for this extension." Adding a
-    new grammar is one entry here plus the JSON file under
-    ``src/turbokod/grammars/``. The companion
-    ``_bundled_grammar_path_for_language`` resolves by ``language_id``
-    for the project-override path; keep the two in sync.
-    """
-    if ext == String("py") or ext == String("pyi") or ext == String("pyw"):
-        return String("src/turbokod/grammars/python.tmLanguage.json")
-    if ext == String("mojo") or ext == String("🔥"):
-        return String("src/turbokod/grammars/mojo.tmLanguage.json")
-    if ext == String("rs"):
-        return String("src/turbokod/grammars/rust.tmLanguage.json")
-    if ext == String("json") or ext == String("jsonc"):
-        return String("src/turbokod/grammars/json.tmLanguage.json")
-    if ext == String("go"):
-        return String("src/turbokod/grammars/go.tmLanguage.json")
-    if ext == String("ts") or ext == String("tsx"):
-        return String("src/turbokod/grammars/typescript.tmLanguage.json")
-    if ext == String("js") or ext == String("jsx") \
-            or ext == String("mjs") or ext == String("cjs"):
-        return String("src/turbokod/grammars/javascript.tmLanguage.json")
-    if ext == String("rb"):
-        return String("src/turbokod/grammars/ruby.tmLanguage.json")
-    if ext == String("c") or ext == String("h") or ext == String("cc") \
-            or ext == String("cpp") or ext == String("cxx") \
-            or ext == String("hpp") or ext == String("hh") \
-            or ext == String("hxx"):
-        return String("src/turbokod/grammars/cpp.tmLanguage.json")
-    if ext == String("sh") or ext == String("bash"):
-        return String("src/turbokod/grammars/shell.tmLanguage.json")
-    if ext == String("sql"):
-        return String("src/turbokod/grammars/sql.tmLanguage.json")
-    if ext == String("yaml") or ext == String("yml"):
-        return String("src/turbokod/grammars/yaml.tmLanguage.json")
-    if ext == String("html") or ext == String("htm"):
-        return String("src/turbokod/grammars/html.tmLanguage.json")
-    if ext == String("css"):
-        return String("src/turbokod/grammars/css.tmLanguage.json")
-    if ext == String("diff") or ext == String("patch"):
-        return String("src/turbokod/grammars/diff.tmLanguage.json")
-    if ext == String("rst") or ext == String("rest"):
-        return String("src/turbokod/grammars/rst.tmLanguage.json")
-    # Markdown — the vscode grammar is dominated by ``while`` rules
-    # (block-context tracking) and external-grammar embedding (code
-    # fences). Without those, leaving it on the generic fallback
-    # actually produces nothing for ``.md`` today; keeping the
-    # grammar bundled but unmapped lets a follow-up wire it up once
-    # we grow ``while`` support.
-    #
-    # Final fallback: a downloadable grammar the user already
-    # accepted the install prompt for, sitting at
-    # ``~/.config/turbokod/languages/<lang>/<lang>.tmLanguage.json``.
-    # Returns empty if the registry doesn't know this extension or
-    # the file isn't on disk yet, in which case the highlighter
-    # degrades to its generic per-language fallback.
+    Falls back to a downloadable grammar the user already accepted the
+    install prompt for, sitting at
+    ``~/.config/turbokod/languages/<lang>/<lang>.tmLanguage.json`` —
+    empty if the registry doesn't know this extension or the file isn't
+    on disk yet, in which case the highlighter degrades to its generic
+    per-language fallback."""
+    for g in _bundled_grammars():
+        if ext in g.exts:
+            return _bundled_grammar_json(g.lang)
     return user_grammar_path_for_ext(ext)
 
 
