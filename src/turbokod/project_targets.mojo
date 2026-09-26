@@ -202,17 +202,6 @@ def _parse_target(node: JsonValue) -> RunTarget:
     return t^
 
 
-def _trim_ascii_ws(s: String) -> String:
-    var b = s.as_bytes()
-    var lo = 0
-    var hi = len(b)
-    while lo < hi and (b[lo] == 0x20 or b[lo] == 0x09):
-        lo += 1
-    while hi > lo and (b[hi - 1] == 0x20 or b[hi - 1] == 0x09):
-        hi -= 1
-    return String(StringSpan(unsafe_from_utf8=b[lo:hi]))
-
-
 def split_env_field(text: String) -> List[String]:
     """Turn the dialog's one-line ``KEY=VALUE; KEY2=VALUE2`` field into
     the ``env`` list. Entries are separated by ``;``; whitespace around
@@ -226,9 +215,7 @@ def split_env_field(text: String) -> List[String]:
     var i = 0
     while i <= n:
         if i == n or b[i] == 0x3B:    # ';'
-            var entry = _trim_ascii_ws(
-                String(StringSpan(unsafe_from_utf8=b[start:i]))
-            )
+            var entry = String(StringSpan(unsafe_from_utf8=b[start:i]).strip())
             if len(entry.as_bytes()) > 0:
                 out.append(entry^)
             start = i + 1
@@ -500,22 +487,6 @@ def _split_lines(s: String) -> List[String]:
     return out^
 
 
-def _strip(s: String) -> String:
-    var b = s.as_bytes()
-    var n = len(b)
-    var lo = 0
-    while lo < n and (Int(b[lo]) == 0x20 or Int(b[lo]) == 0x09
-            or Int(b[lo]) == 0x0D):
-        lo += 1
-    var hi = n
-    while hi > lo and (Int(b[hi - 1]) == 0x20 or Int(b[hi - 1]) == 0x09
-            or Int(b[hi - 1]) == 0x0D):
-        hi -= 1
-    if hi <= lo:
-        return String("")
-    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(lo), length=hi - lo)))
-
-
 def _is_section_header(stripped: String) -> Bool:
     var b = stripped.as_bytes()
     return len(b) >= 2 and Int(b[0]) == 0x5B \
@@ -528,7 +499,7 @@ def _key_before_sep(line: String) -> Tuple[String, Int]:
     var b = line.as_bytes()
     for i in range(len(b)):
         if Int(b[i]) == 0x3D or Int(b[i]) == 0x3A:  # '=' or ':'
-            return (_strip(String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr(), length=i)))), i)
+            return (String(StringSpan(unsafe_from_utf8=b[0:i]).strip()), i)
     return (String(""), -1)
 
 
@@ -543,7 +514,7 @@ def _ini_python_files(text: String, section: String) -> List[String]:
     var key_indent = 0
     for li in range(len(lines)):
         var line = lines[li]
-        var stripped = _strip(line)
+        var stripped = String(line.strip())
         var indent = leading_indent_bytes(line)
         if _is_section_header(stripped):
             if stripped == section:
@@ -631,7 +602,7 @@ def _toml_python_files(text: String) -> List[String]:
     var out = List[String]()
     var in_section = False
     for li in range(len(lines)):
-        var stripped = _strip(lines[li])
+        var stripped = String(lines[li].strip())
         if _is_section_header(stripped):
             in_section = stripped == String("[tool.pytest.ini_options]")
             continue
@@ -640,7 +611,7 @@ def _toml_python_files(text: String) -> List[String]:
         var kv = _key_before_sep(lines[li])
         if kv[1] >= 0 and kv[0] == String("python_files"):
             var b = lines[li].as_bytes()
-            var val = _strip(String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(kv[1]).unsafe_offset(1), length=len(b) - kv[1] - 1))))
+            var val = String(StringSpan(unsafe_from_utf8=b[kv[1] + 1:len(b)]).strip())
             for t in _toml_quoted_tokens(val):
                 out.append(t)
             # Multi-line array: the opening line had no closing ``]``, so

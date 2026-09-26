@@ -74,7 +74,7 @@ struct GitignoreMatcher(Copyable, Movable):
         var m = GitignoreMatcher()
         var lines = split_lines_no_trailing(text)
         for li in range(len(lines)):
-            var line = _strip(lines[li])
+            var line = String(lines[li].strip())
             var lb = line.as_bytes()
             if len(lb) == 0:
                 continue
@@ -113,20 +113,6 @@ struct GitignoreMatcher(Copyable, Movable):
             if _gitignore_path_match(p, rel_path):
                 result = not p.negate
         return result
-
-
-def _strip(s: String) -> String:
-    var b = s.as_bytes()
-    var n = len(b)
-    var i = 0
-    while i < n and (b[i] == 0x20 or b[i] == 0x09 or b[i] == 0x0D):
-        i += 1
-    var j = n
-    while j > i and (b[j - 1] == 0x20 or b[j - 1] == 0x09 or b[j - 1] == 0x0D):
-        j -= 1
-    if i == 0 and j == n:
-        return s
-    return String(StringSpan(unsafe_from_utf8=b[i:j]))
 
 
 def _split_path_components(path: String) -> List[String]:

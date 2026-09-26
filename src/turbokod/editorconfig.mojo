@@ -33,18 +33,6 @@ from .string_utils import byte_slice, parse_int_all, starts_with
 # --- helpers ---------------------------------------------------------------
 
 
-def _strip(s: String) -> String:
-    var bytes = s.as_bytes()
-    var n = len(bytes)
-    var i = 0
-    while i < n and (bytes[i] == 0x20 or bytes[i] == 0x09):
-        i += 1
-    var j = n
-    while j > i and (bytes[j - 1] == 0x20 or bytes[j - 1] == 0x09):
-        j -= 1
-    return byte_slice(s, i, j)
-
-
 def _ends_with_byte(s: String, b: UInt8) -> Bool:
     var sb = s.as_bytes()
     return len(sb) > 0 and sb[len(sb) - 1] == b
@@ -134,8 +122,8 @@ struct EditorConfig(ImplicitlyCopyable, Movable):
 
     def _set(mut self, key: String, value: String):
         """Apply one ``key = value`` pair. Unknown keys are ignored."""
-        var k = fold_ascii(_strip(key))
-        var v = _strip(value)
+        var k = fold_ascii(String(key.strip()))
+        var v = String(value.strip())
         var vl = fold_ascii(v)
         if k == String("indent_style"):
             if vl == String("tab") or vl == String("space"):
@@ -248,7 +236,7 @@ def parse_editorconfig(dir: String, contents: String) -> EditorConfigFile:
         if line_end > i and bytes[line_end - 1] == 0x0D:
             line_end -= 1
         var raw = byte_slice(contents, i, line_end)
-        var line = _strip(raw)
+        var line = String(raw.strip())
         var lb = line.as_bytes()
         i = j + 1   # advance past the \n
         if len(lb) == 0:
@@ -281,8 +269,8 @@ def parse_editorconfig(dir: String, contents: String) -> EditorConfigFile:
                 break
         if eq < 0:
             continue
-        var key = _strip(byte_slice(line, 0, eq))
-        var value = _strip(byte_slice(line, eq + 1, len(lb)))
+        var key = String(byte_slice(line, 0, eq).strip())
+        var value = String(byte_slice(line, eq + 1, len(lb)).strip())
         if not has_section:
             # Global block — only ``root`` is meaningful.
             if fold_ascii(key) == String("root") \
