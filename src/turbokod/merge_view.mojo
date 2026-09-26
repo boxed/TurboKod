@@ -40,7 +40,7 @@ from .events import (
     MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .file_io import basename
-from .geometry import Point, Rect
+from .geometry import Point, Rect, center_in
 from .string_utils import (
     display_columns, is_printable_text_key, prev_codepoint_start,
     utf8_codepoint_size,
@@ -216,17 +216,34 @@ struct MergeView(Movable):
 
     # --- resolution ------------------------------------------------------
 
-    def _all_resolved(self) -> Bool:
-        for i in range(len(self.states)):
-            if self.states[i].choice == CHOICE_NONE:
-                return False
-        return True
-
     def _first_unresolved(self) -> Int:
         for i in range(len(self.states)):
             if self.states[i].choice == CHOICE_NONE:
                 return i
         return -1
+
+    def _try_apply(mut self):
+        """Finish when every conflict is resolved; otherwise move to the
+        first one that isn't."""
+        var first = self._first_unresolved()
+        if first < 0:
+            self.done = True
+        else:
+            self.current = first
+
+    def _choice_lines(self, ri: Int, ci: Int) -> List[String]:
+        """The lines conflict ``ci`` (region ``ri``) resolves to under its
+        current choice. Unpicked resolves like LOCAL."""
+        ref reg = self.regions[ri]
+        var ch = self.states[ci].choice
+        if ch == CHOICE_EDIT:
+            return self.states[ci].edited_lines.copy()
+        if ch == CHOICE_DISK:
+            return reg.theirs_lines.copy()
+        var out = reg.ours_lines.copy()
+        if ch == CHOICE_BOTH:
+            out.extend(reg.theirs_lines.copy())
+        return out^
 
     def resolved_text(self) -> String:
         """Assemble the merged buffer text from the stable runs and each
@@ -235,27 +252,10 @@ struct MergeView(Movable):
         var out = List[String]()
         var ci = 0
         for ri in range(len(self.regions)):
-            ref reg = self.regions[ri]
-            if reg.kind == REGION_STABLE:
-                for j in range(len(reg.lines)):
-                    out.append(reg.lines[j])
+            if self.regions[ri].kind == REGION_STABLE:
+                out.extend(self.regions[ri].lines.copy())
             else:
-                var ch = self.states[ci].choice
-                if ch == CHOICE_DISK:
-                    for j in range(len(reg.theirs_lines)):
-                        out.append(reg.theirs_lines[j])
-                elif ch == CHOICE_BOTH:
-                    for j in range(len(reg.ours_lines)):
-                        out.append(reg.ours_lines[j])
-                    for j in range(len(reg.theirs_lines)):
-                        out.append(reg.theirs_lines[j])
-                elif ch == CHOICE_EDIT:
-                    for j in range(len(self.states[ci].edited_lines)):
-                        out.append(self.states[ci].edited_lines[j])
-                else:
-                    # CHOICE_LOCAL and the defensive CHOICE_NONE fallback.
-                    for j in range(len(reg.ours_lines)):
-                        out.append(reg.ours_lines[j])
+                out.extend(self._choice_lines(ri, ci))
                 ci += 1
         var text = String("\n").join(out)
         return text^
@@ -325,21 +325,9 @@ struct MergeView(Movable):
         return -1
 
     def _layout(self, container_bounds: Rect) -> Rect:
-        var width = 100
-        if width > container_bounds.b.x - 4:
-            width = container_bounds.b.x - 4
-        if width < 30:
-            width = 30
-        var height = 40
-        if height > container_bounds.b.y - 4:
-            height = container_bounds.b.y - 4
-        if height < 10:
-            height = 10
-        var x = (container_bounds.b.x - width) // 2
-        var y = (container_bounds.b.y - height) // 2
-        if x < 0: x = 0
-        if y < 0: y = 0
-        return Rect(x, y, x + width, y + height)
+        var width = max(30, min(100, container_bounds.b.x - 4))
+        var height = max(10, min(40, container_bounds.b.y - 4))
+        return center_in(container_bounds, width, height)
 
     def _content_rect(self, rect: Rect) -> Rect:
         # Box border (1) + title row (1) at top; status row + button row
@@ -514,18 +502,8 @@ struct MergeView(Movable):
             return
         var ci = self.current
         var ri = self._current_region_index()
-        # Seed the editable lines from the current choice. Default is the
-        # local edits (covers CHOICE_LOCAL and the not-yet-picked case),
-        # and is also the base the CHOICE_BOTH branch appends onto.
-        var seed = self.regions[ri].ours_lines.copy()
-        var ch = self.states[ci].choice
-        if ch == CHOICE_EDIT:
-            seed = self.states[ci].edited_lines.copy()
-        elif ch == CHOICE_DISK:
-            seed = self.regions[ri].theirs_lines.copy()
-        elif ch == CHOICE_BOTH:
-            for j in range(len(self.regions[ri].theirs_lines)):
-                seed.append(self.regions[ri].theirs_lines[j])
+        # Seed the editable lines from what the current choice resolves to.
+        var seed = self._choice_lines(ri, ci)
         if len(seed) == 0:
             seed.append(String(""))
         self.states[ci].edited_lines = seed^
@@ -566,26 +544,19 @@ struct MergeView(Movable):
                     self.current = (self.current + 1) % self.conflict_count
             return True
         if k == KEY_UP:
-            self.scroll -= 1
-            if self.scroll < 0:
-                self.scroll = 0
+            self.scroll = max(0, self.scroll - 1)
             return True
         if k == KEY_DOWN:
             self.scroll += 1
             return True
         if k == KEY_PAGEUP:
-            self.scroll -= 10
-            if self.scroll < 0:
-                self.scroll = 0
+            self.scroll = max(0, self.scroll - 10)
             return True
         if k == KEY_PAGEDOWN:
             self.scroll += 10
             return True
         if k == KEY_ENTER:
-            if self._all_resolved():
-                self.done = True
-            else:
-                self.current = self._first_unresolved()
+            self._try_apply()
             return True
         # Letter shortcuts (raw codepoints; no char constants exist).
         if k == UInt32(0x6C) or k == UInt32(0x4C):       # l / L
@@ -717,9 +688,7 @@ struct MergeView(Movable):
             return True
         # Mouse wheel scrolls the merged document.
         if event.button == MOUSE_WHEEL_UP:
-            self.scroll -= 3
-            if self.scroll < 0:
-                self.scroll = 0
+            self.scroll = max(0, self.scroll - 3)
             return True
         if event.button == MOUSE_WHEEL_DOWN:
             self.scroll += 3
@@ -753,10 +722,7 @@ struct MergeView(Movable):
         var s = self._apply_button.handle_mouse(event)
         if s != BUTTON_NONE:
             if s == BUTTON_FIRED:
-                if self._all_resolved():
-                    self.done = True
-                else:
-                    self.current = self._first_unresolved()
+                self._try_apply()
             return True
         s = self._cancel_button.handle_mouse(event)
         if s != BUTTON_NONE:
