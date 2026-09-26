@@ -132,7 +132,10 @@ from .git_output import (
 from .posix import monotonic_ms, wall_clock_ms
 from .install_runner import InstallRunner
 from .string_utils import (
+    byte_slice,
     display_columns,
+    is_ascii_digit,
+    parse_uint_range,
     split_lines,
     split_lines_no_trailing,
     starts_with,
@@ -440,6 +443,13 @@ struct RightPanel(Movable):
     var scroll_x: Int
     var cursor: Int
 
+    def jump_target(self, li: Int) -> Tuple[String, Int]:
+        """The ``(path, line)`` row ``li`` maps to, or ``("", 0)`` —
+        which ``_try_submit_jump`` ignores — when it maps to none."""
+        if 0 <= li and li < len(self.file_line) and li < len(self.file_path):
+            return (self.file_path[li], self.file_line[li])
+        return (String(""), 0)
+
     def __init__(out self):
         self.lines = List[String]()
         self.diff_line = List[Int]()
@@ -475,20 +485,14 @@ def _convert_to_context(line: String) -> String:
     the rest of the line untouched. Used by ``_build_minimal_patch`` to
     demote unselected ± lines to context so they stay in the target
     file when the patch is applied."""
-    var b = line.as_bytes()
-    if len(b) == 0:
+    var n = len(line.as_bytes())
+    if n == 0:
         return line
-    var out = List[UInt8]()
-    out.append(0x20)
-    for i in range(1, len(b)):
-        out.append(b[i])
-    return String(StringSpan(unsafe_from_utf8=Span(out)))
+    return String(" ") + byte_slice(line, 1, n)
 
 
 def _append_line(mut buf: List[UInt8], line: String):
-    var b = line.as_bytes()
-    for i in range(len(b)):
-        buf.append(b[i])
+    buf.extend(line.as_bytes())
     buf.append(0x0A)
 
 
@@ -626,9 +630,20 @@ def _byte_to_string(b: UInt8) -> String:
     """Wrap a single byte as a one-char ``String``. Used for rendering
     porcelain status codes (always ASCII) one column at a time so the
     X column and Y column can take different colors."""
-    var buf = List[UInt8]()
-    buf.append(b)
-    return String(StringSpan(unsafe_from_utf8=Span(buf)))
+    return chr(Int(b))
+
+
+def _first_char_len(b: Span[UInt8, _]) -> Int:
+    """Byte length of the first UTF-8 codepoint in ``b`` (0 when empty),
+    capped to the bytes actually present."""
+    if len(b) == 0:
+        return 0
+    var c = Int(b[0])
+    var n = 1
+    if c >= 0xF0:    n = 4
+    elif c >= 0xE0:  n = 3
+    elif c >= 0xC0:  n = 2
+    return min(n, len(b))
 
 
 def _take_first_char(s: String) -> String:
@@ -636,15 +651,7 @@ def _take_first_char(s: String) -> String:
     or empty when ``s`` is empty. Used by ``_author_abbrev`` so a
     multi-byte initial (``Ö``, ``É``, …) survives the abbreviation."""
     var b = s.as_bytes()
-    if len(b) == 0:
-        return String("")
-    var c = Int(b[0])
-    var n = 1
-    if c >= 0xF0:    n = 4
-    elif c >= 0xE0:  n = 3
-    elif c >= 0xC0:  n = 2
-    if n > len(b): n = len(b)
-    return String(StringSpan(unsafe_from_utf8=b[:n]))
+    return String(StringSpan(unsafe_from_utf8=b[:_first_char_len(b)]))
 
 
 def _take_after_first_char(s: String) -> String:
@@ -652,15 +659,7 @@ def _take_after_first_char(s: String) -> String:
     codepoint. Lets us pull the second char out of a single-word author
     name (``Madonna`` → ``Ma``) without re-walking the string."""
     var b = s.as_bytes()
-    if len(b) == 0:
-        return String("")
-    var c = Int(b[0])
-    var n = 1
-    if c >= 0xF0:    n = 4
-    elif c >= 0xE0:  n = 3
-    elif c >= 0xC0:  n = 2
-    if n > len(b): n = len(b)
-    return String(StringSpan(unsafe_from_utf8=b[n:len(b)]))
+    return String(StringSpan(unsafe_from_utf8=b[_first_char_len(b):len(b)]))
 
 
 def _ascii_upper_str(s: String) -> String:
@@ -821,10 +820,7 @@ def _strip_first_byte_to_string(s: String) -> String:
     prefix). Returns an empty ``String`` when ``s`` is shorter than one
     byte. The diff prefix is always ASCII so byte-strip is codepoint-
     safe."""
-    var b = s.as_bytes()
-    if len(b) <= 1:
-        return String("")
-    return String(StringSpan(unsafe_from_utf8=b[1:]))
+    return byte_slice(s, 1, len(s.as_bytes()))
 
 
 def _build_filename_banner(path: String, width: Int) -> String:
@@ -974,6 +970,15 @@ def _underline_row_links(
             painter.set_attr(canvas, x, y, attr)
 
 
+def _scan_uint(b: Span[UInt8, _], mut i: Int) -> Int:
+    """Read the decimal digits at ``b[i:]``, advancing ``i`` past them;
+    ``-1`` when there are none."""
+    var start = i
+    while i < len(b) and is_ascii_digit(b[i]):
+        i += 1
+    return parse_uint_range(b, start, i)
+
+
 def _parse_hunk_starts(line: String, mut old_start: Int, mut new_start: Int):
     """Parse ``-a[,b] +c[,d]`` from a ``@@ -a,b +c,d @@`` hunk header.
     Sets ``old_start`` / ``new_start`` to 1-based line numbers, or -1
@@ -992,17 +997,7 @@ def _parse_hunk_starts(line: String, mut old_start: Int, mut new_start: Int):
     # ``-a[,b]``
     if i < n and Int(b[i]) == 0x2D:
         i += 1
-        var v = 0
-        var have = False
-        while i < n:
-            var c = Int(b[i])
-            if c < 0x30 or c > 0x39:
-                break
-            v = v * 10 + (c - 0x30)
-            have = True
-            i += 1
-        if have:
-            old_start = v
+        old_start = _scan_uint(b, i)
         # Skip the ``,b`` portion if present.
         while i < n and Int(b[i]) != 0x20 and Int(b[i]) != 0x09:
             i += 1
@@ -1011,17 +1006,7 @@ def _parse_hunk_starts(line: String, mut old_start: Int, mut new_start: Int):
     # ``+c[,d]``
     if i < n and Int(b[i]) == 0x2B:
         i += 1
-        var v = 0
-        var have = False
-        while i < n:
-            var c = Int(b[i])
-            if c < 0x30 or c > 0x39:
-                break
-            v = v * 10 + (c - 0x30)
-            have = True
-            i += 1
-        if have:
-            new_start = v
+        new_start = _scan_uint(b, i)
 
 
 def _first_change_line(diff_text: String) -> Int:
@@ -5584,6 +5569,9 @@ struct LocalChanges(Movable):
         self.pending_open_url = String("")
         return u^
 
+    def _submit_jump_target(mut self, target: Tuple[String, Int]):
+        _ = self._try_submit_jump(target[0], target[1])
+
     def _try_submit_jump(
         mut self, var path: String, line: Int,
     ) -> Bool:
@@ -5723,13 +5711,8 @@ struct LocalChanges(Movable):
                                 self.pending_open_url = url^
                                 return True
                         self.info.cursor = li
-                        if Int(event.click_count) >= 2 \
-                                and li < len(self.info.file_line) \
-                                and li < len(self.info.file_path):
-                            var path = self.info.file_path[li].copy()
-                            var line = self.info.file_line[li]
-                            if self._try_submit_jump(path^, line):
-                                return True
+                        if Int(event.click_count) >= 2:
+                            self._submit_jump_target(self.info.jump_target(li))
                     return True
                 var rp = self._right_panes(bounds)
                 if rpane == _PANE_RIGHT_UNSTAGED:
@@ -5738,13 +5721,8 @@ struct LocalChanges(Movable):
                     var li = self.unstaged.scroll + (pos.y - rp[0] - 1)
                     if 0 <= li and li < len(self.unstaged.lines):
                         self.unstaged.cursor = li
-                        if Int(event.click_count) >= 2 \
-                                and li < len(self.unstaged.file_line) \
-                                and li < len(self.unstaged.file_path):
-                            var path = self.unstaged.file_path[li].copy()
-                            var line = self.unstaged.file_line[li]
-                            if self._try_submit_jump(path^, line):
-                                return True
+                        if Int(event.click_count) >= 2:
+                            self._submit_jump_target(self.unstaged.jump_target(li))
                     return True
                 # Staged.
                 if pos.y == rp[2]:
@@ -5752,13 +5730,8 @@ struct LocalChanges(Movable):
                 var li = self.staged.scroll + (pos.y - rp[2] - 1)
                 if 0 <= li and li < len(self.staged.lines):
                     self.staged.cursor = li
-                    if Int(event.click_count) >= 2 \
-                            and li < len(self.staged.file_line) \
-                            and li < len(self.staged.file_path):
-                        var path = self.staged.file_path[li].copy()
-                        var line = self.staged.file_line[li]
-                        if self._try_submit_jump(path^, line):
-                            return True
+                    if Int(event.click_count) >= 2:
+                        self._submit_jump_target(self.staged.jump_target(li))
                 return True
             # Sidebar click.
             var pane = self._pane_at(pos, bounds)
