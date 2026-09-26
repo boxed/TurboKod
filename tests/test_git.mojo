@@ -51,7 +51,9 @@ from turbokod.git_output import (
     GitOutputMatcher, GitOutputMatchers, complete_lines,
 )
 from turbokod.project import GitignoreMatcher
-from turbokod.string_utils import display_columns, split_lines_no_trailing
+from turbokod.string_utils import (
+    display_columns, split_lines_no_trailing, string_list,
+)
 from turbokod.lsp import capture_command
 from turbokod.git_changes import (
     GitBranch, GitCommit, GitStateMtimes, apply_patch_to_index,
@@ -86,8 +88,8 @@ from turbokod.merge_view import (
 from turbokod.window import Window
 
 from support import (
-    _ensure_dir, _hl_lines, _key, _rm_rf, _run_git, _temp_path, _VIEW,
-    setup_test_env,
+    _ensure_dir, _git_capture, _git_out, _hl_lines, _key, _rm_rf, _run_git,
+    _temp_path, _VIEW, setup_test_env,
 )
 
 
@@ -770,13 +772,8 @@ def test_diff_identical_inputs_have_no_hunks() raises:
 
 def test_diff_lines_pure_insert() raises:
     """Inserting one line in the middle: one delete-free, one insert op."""
-    var a = List[String]()
-    a.append(String("one"))
-    a.append(String("three"))
-    var b = List[String]()
-    b.append(String("one"))
-    b.append(String("two"))
-    b.append(String("three"))
+    var a = string_list(String("one"), String("three"))
+    var b = string_list(String("one"), String("two"), String("three"))
     var ops = diff_lines(a, b)
     var equals = 0
     var inserts = 0
@@ -795,13 +792,8 @@ def test_diff_lines_pure_insert() raises:
 
 def test_diff_lines_pure_delete() raises:
     """Removing one line: one delete op, no inserts."""
-    var a = List[String]()
-    a.append(String("one"))
-    a.append(String("two"))
-    a.append(String("three"))
-    var b = List[String]()
-    b.append(String("one"))
-    b.append(String("three"))
+    var a = string_list(String("one"), String("two"), String("three"))
+    var b = string_list(String("one"), String("three"))
     var ops = diff_lines(a, b)
     var equals = 0
     var inserts = 0
@@ -820,15 +812,13 @@ def test_diff_lines_pure_delete() raises:
 
 def test_diff_lines_replace_round_trips() raises:
     """Applying the edit script must turn ``a`` into ``b`` exactly."""
-    var a = List[String]()
-    a.append(String("the quick brown fox"))
-    a.append(String("jumps over"))
-    a.append(String("the lazy dog"))
-    var b = List[String]()
-    b.append(String("the quick red fox"))
-    b.append(String("hops over"))
-    b.append(String("the lazy dog"))
-    b.append(String("end"))
+    var a = string_list(
+        String("the quick brown fox"), String("jumps over"), String("the lazy dog"),
+    )
+    var b = string_list(
+        String("the quick red fox"), String("hops over"), String("the lazy dog"),
+        String("end"),
+    )
     var ops = diff_lines(a, b)
     # Replay: equal/delete consume from a, insert produces from b. The
     # produced sequence (equal lines from a, plus inserts from b in order)
@@ -1045,9 +1035,7 @@ def test_diff_modified_line_keeps_inserted_block_added() raises:
         + String("    chain = create(template, skip=True, **props)\n")
         + String("    return chain\n")
     )
-    var buffer = List[String]()
-    buffer.append(String("    template = lookup()"))
-    buffer.append(String(""))
+    var buffer = string_list(String("    template = lookup()"), String(""))
     buffer.append(String("    # explain why we force the flag"))      # inserted
     buffer.append(String("    # second comment line"))                # inserted
     buffer.append(String("    # third comment line"))                 # inserted
@@ -1398,11 +1386,10 @@ def test_diff_row_partner_skips_dissimilar_in_restructure() raises:
     stays a clean removed-then-added block.
 
     Mirrors the ``auto__include=[...]`` → ``auto__include=dict(...)`` case."""
-    var before = List[String]()
-    before.append(String("    auto__include=["))
-    before.append(String("        'project',"))
-    before.append(String("        'rating',"))
-    before.append(String("    ],"))
+    var before = string_list(
+        String("    auto__include=["), String("        'project',"),
+        String("        'rating',"), String("    ],"),
+    )
     before.append(String("        project_customer_journey=dict("))
     var after = List[String]()
     after.append(String("    auto__include=dict("))
@@ -1732,37 +1719,27 @@ def test_git_state_mtimes_nonzero_after_init_commit() raises:
     var dir = _temp_path(String("_git_mtime_init"))
     _rm_rf(dir)
     _ensure_dir(dir)
-    var init_args = List[String]()
-    init_args.append(String("init"))
-    init_args.append(String("-q"))
-    init_args.append(String("-b"))
-    init_args.append(String("main"))
+    var init_args = string_list(
+        String("init"), String("-q"), String("-b"), String("main"),
+    )
     var rc = _run_git(dir, init_args^)
     if rc != 0:
         # No git on PATH — skip silently, matching the staging test.
         _rm_rf(dir)
         return
-    var cfg1 = List[String]()
-    cfg1.append(String("config"))
-    cfg1.append(String("user.email"))
-    cfg1.append(String("test@example.com"))
+    var cfg1 = string_list(
+        String("config"), String("user.email"), String("test@example.com"),
+    )
     _ = _run_git(dir, cfg1^)
-    var cfg2 = List[String]()
-    cfg2.append(String("config"))
-    cfg2.append(String("user.name"))
-    cfg2.append(String("Test"))
+    var cfg2 = string_list(String("config"), String("user.name"), String("Test"))
     _ = _run_git(dir, cfg2^)
     var f = join_path(dir, String("a.txt"))
     assert_true(write_file(f, String("hello\n")))
-    var add = List[String]()
-    add.append(String("add"))
-    add.append(String("a.txt"))
+    var add = string_list(String("add"), String("a.txt"))
     _ = _run_git(dir, add^)
-    var commit = List[String]()
-    commit.append(String("commit"))
-    commit.append(String("-q"))
-    commit.append(String("-m"))
-    commit.append(String("init"))
+    var commit = string_list(
+        String("commit"), String("-q"), String("-m"), String("init"),
+    )
     _ = _run_git(dir, commit^)
     var mt = git_state_mtimes(dir)
     assert_true(mt.head_mtime != Int64(0))
@@ -1783,15 +1760,11 @@ def test_git_state_mtimes_nonzero_after_init_commit() raises:
     # commit made in the in-app terminal (no host focus-gain to force a
     # refresh).
     assert_true(write_file(f, String("hello\nworld\n")))
-    var add2 = List[String]()
-    add2.append(String("add"))
-    add2.append(String("a.txt"))
+    var add2 = string_list(String("add"), String("a.txt"))
     _ = _run_git(dir, add2^)
-    var commit2 = List[String]()
-    commit2.append(String("commit"))
-    commit2.append(String("-q"))
-    commit2.append(String("-m"))
-    commit2.append(String("second"))
+    var commit2 = string_list(
+        String("commit"), String("-q"), String("-m"), String("second"),
+    )
     _ = _run_git(dir, commit2^)
     var mt2 = git_state_mtimes(dir)
     assert_true(not mt2.equals(mt))
@@ -1821,36 +1794,26 @@ def test_git_status_poll_leaves_the_index_alone() raises:
     var dir = _temp_path(String("_git_nolock"))
     _rm_rf(dir)
     _ensure_dir(dir)
-    var init_args = List[String]()
-    init_args.append(String("init"))
-    init_args.append(String("-q"))
-    init_args.append(String("-b"))
-    init_args.append(String("main"))
+    var init_args = string_list(
+        String("init"), String("-q"), String("-b"), String("main"),
+    )
     if _run_git(dir, init_args^) != 0:
         # No git available — skip silently.
         _rm_rf(dir)
         return
-    var cfg1 = List[String]()
-    cfg1.append(String("config"))
-    cfg1.append(String("user.email"))
-    cfg1.append(String("test@example.com"))
+    var cfg1 = string_list(
+        String("config"), String("user.email"), String("test@example.com"),
+    )
     _ = _run_git(dir, cfg1^)
-    var cfg2 = List[String]()
-    cfg2.append(String("config"))
-    cfg2.append(String("user.name"))
-    cfg2.append(String("Test"))
+    var cfg2 = string_list(String("config"), String("user.name"), String("Test"))
     _ = _run_git(dir, cfg2^)
     var f = join_path(dir, String("a.txt"))
     assert_true(write_file(f, String("alpha\n")))
-    var add = List[String]()
-    add.append(String("add"))
-    add.append(String("a.txt"))
+    var add = string_list(String("add"), String("a.txt"))
     _ = _run_git(dir, add^)
-    var commit = List[String]()
-    commit.append(String("commit"))
-    commit.append(String("-q"))
-    commit.append(String("-m"))
-    commit.append(String("init"))
+    var commit = string_list(
+        String("commit"), String("-q"), String("-m"), String("init"),
+    )
     _ = _run_git(dir, commit^)
     # Cross a second boundary so a rewrite would be visible at ``stat``'s
     # one-second resolution, then make the index's stat cache stale.
@@ -1878,11 +1841,9 @@ def test_stage_unstage_round_trip_against_real_git() raises:
     # ``git init -q`` so we don't pollute test output. Pass ``-b main``
     # to avoid the default-branch warning that newer git emits — we
     # don't care which branch, just that the call succeeds.
-    var init_args = List[String]()
-    init_args.append(String("init"))
-    init_args.append(String("-q"))
-    init_args.append(String("-b"))
-    init_args.append(String("main"))
+    var init_args = string_list(
+        String("init"), String("-q"), String("-b"), String("main"),
+    )
     var rc = _run_git(dir, init_args^)
     if rc != 0:
         # No git available — skip silently.
@@ -1890,28 +1851,20 @@ def test_stage_unstage_round_trip_against_real_git() raises:
         return
     # Configure user so commit doesn't fail; ``-c`` per-invocation would
     # be cleaner but we'd have to plumb it through every helper call.
-    var cfg1 = List[String]()
-    cfg1.append(String("config"))
-    cfg1.append(String("user.email"))
-    cfg1.append(String("test@example.com"))
+    var cfg1 = string_list(
+        String("config"), String("user.email"), String("test@example.com"),
+    )
     _ = _run_git(dir, cfg1^)
-    var cfg2 = List[String]()
-    cfg2.append(String("config"))
-    cfg2.append(String("user.name"))
-    cfg2.append(String("Test"))
+    var cfg2 = string_list(String("config"), String("user.name"), String("Test"))
     _ = _run_git(dir, cfg2^)
     # Initial commit of a known-content file.
     var f = join_path(dir, String("a.txt"))
     assert_true(write_file(f, String("alpha\nbeta\ngamma\n")))
-    var add_initial = List[String]()
-    add_initial.append(String("add"))
-    add_initial.append(String("a.txt"))
+    var add_initial = string_list(String("add"), String("a.txt"))
     _ = _run_git(dir, add_initial^)
-    var commit_args = List[String]()
-    commit_args.append(String("commit"))
-    commit_args.append(String("-q"))
-    commit_args.append(String("-m"))
-    commit_args.append(String("init"))
+    var commit_args = string_list(
+        String("commit"), String("-q"), String("-m"), String("init"),
+    )
     _ = _run_git(dir, commit_args^)
     # Modify the file.
     assert_true(write_file(f, String("alpha\nbeta-modified\ngamma\n")))
@@ -1990,11 +1943,9 @@ def test_fetch_git_status_expands_untracked_directories() raises:
     var dir = _temp_path(String("_status_uall"))
     _rm_rf(dir)
     _ensure_dir(dir)
-    var init_args = List[String]()
-    init_args.append(String("init"))
-    init_args.append(String("-q"))
-    init_args.append(String("-b"))
-    init_args.append(String("main"))
+    var init_args = string_list(
+        String("init"), String("-q"), String("-b"), String("main"),
+    )
     if _run_git(dir, init_args^) != 0:
         _rm_rf(dir)
         return
@@ -2043,11 +1994,9 @@ def test_local_changes_files_panel_is_a_tree() raises:
     var dir = _temp_path(String("_files_tree"))
     _rm_rf(dir)
     _ensure_dir(dir)
-    var init_args = List[String]()
-    init_args.append(String("init"))
-    init_args.append(String("-q"))
-    init_args.append(String("-b"))
-    init_args.append(String("main"))
+    var init_args = string_list(
+        String("init"), String("-q"), String("-b"), String("main"),
+    )
     if _run_git(dir, init_args^) != 0:
         _rm_rf(dir)
         return
@@ -2113,37 +2062,27 @@ def test_local_changes_untracked_file_shows_its_whole_contents() raises:
     var dir = _temp_path(String("_untracked_diff"))
     _rm_rf(dir)
     _ensure_dir(dir)
-    var init_args = List[String]()
-    init_args.append(String("init"))
-    init_args.append(String("-q"))
-    init_args.append(String("-b"))
-    init_args.append(String("main"))
+    var init_args = string_list(
+        String("init"), String("-q"), String("-b"), String("main"),
+    )
     if _run_git(dir, init_args^) != 0:
         _rm_rf(dir)
         return
-    var cfg1 = List[String]()
-    cfg1.append(String("config"))
-    cfg1.append(String("user.email"))
-    cfg1.append(String("test@example.com"))
+    var cfg1 = string_list(
+        String("config"), String("user.email"), String("test@example.com"),
+    )
     _ = _run_git(dir, cfg1^)
-    var cfg2 = List[String]()
-    cfg2.append(String("config"))
-    cfg2.append(String("user.name"))
-    cfg2.append(String("Test"))
+    var cfg2 = string_list(String("config"), String("user.name"), String("Test"))
     _ = _run_git(dir, cfg2^)
     # A committed file so HEAD resolves; the untracked one is the subject.
     assert_true(
         write_file(join_path(dir, String("tracked.txt")), String("base\n")),
     )
-    var add = List[String]()
-    add.append(String("add"))
-    add.append(String("tracked.txt"))
+    var add = string_list(String("add"), String("tracked.txt"))
     _ = _run_git(dir, add^)
-    var commit = List[String]()
-    commit.append(String("commit"))
-    commit.append(String("-q"))
-    commit.append(String("-m"))
-    commit.append(String("init"))
+    var commit = string_list(
+        String("commit"), String("-q"), String("-m"), String("init"),
+    )
     _ = _run_git(dir, commit^)
     assert_true(
         write_file(
@@ -2163,10 +2102,9 @@ def test_local_changes_untracked_file_shows_its_whole_contents() raises:
     var canvas = Canvas(screen.width(), screen.height())
     lc.paint(canvas, screen, registry)
     # Every content line shows up as an addition row.
-    var want = List[String]()
-    want.append(String("first line"))
-    want.append(String("second line"))
-    want.append(String("third line"))
+    var want = string_list(
+        String("first line"), String("second line"), String("third line"),
+    )
     for w in range(len(want)):
         var found = False
         for i in range(len(lc.unstaged.lines)):
@@ -2220,11 +2158,9 @@ def test_local_changes_untracked_empty_file_has_no_body_rows() raises:
     var dir = _temp_path(String("_untracked_empty"))
     _rm_rf(dir)
     _ensure_dir(dir)
-    var init_args = List[String]()
-    init_args.append(String("init"))
-    init_args.append(String("-q"))
-    init_args.append(String("-b"))
-    init_args.append(String("main"))
+    var init_args = string_list(
+        String("init"), String("-q"), String("-b"), String("main"),
+    )
     if _run_git(dir, init_args^) != 0:
         _rm_rf(dir)
         return
@@ -2259,23 +2195,17 @@ def _init_repo_with_a_merge() raises -> String:
     var dir = _temp_path(String("_merge_log"))
     _rm_rf(dir)
     _ensure_dir(dir)
-    var init_args = List[String]()
-    init_args.append(String("init"))
-    init_args.append(String("-q"))
-    init_args.append(String("-b"))
-    init_args.append(String("main"))
+    var init_args = string_list(
+        String("init"), String("-q"), String("-b"), String("main"),
+    )
     if _run_git(dir, init_args^) != 0:
         _rm_rf(dir)
         return String("")
-    var cfg1 = List[String]()
-    cfg1.append(String("config"))
-    cfg1.append(String("user.email"))
-    cfg1.append(String("test@example.com"))
+    var cfg1 = string_list(
+        String("config"), String("user.email"), String("test@example.com"),
+    )
     _ = _run_git(dir, cfg1^)
-    var cfg2 = List[String]()
-    cfg2.append(String("config"))
-    cfg2.append(String("user.name"))
-    cfg2.append(String("Test"))
+    var cfg2 = string_list(String("config"), String("user.name"), String("Test"))
     _ = _run_git(dir, cfg2^)
     _ = _commit_file(
         dir, String("base.txt"), String("base\n"), String("base"),
@@ -2291,13 +2221,10 @@ def _init_repo_with_a_merge() raises -> String:
     _ = _commit_file(
         dir, String("main.txt"), String("main\n"), String("main work"),
     )
-    var m = List[String]()
-    m.append(String("merge"))
-    m.append(String("-q"))
-    m.append(String("--no-ff"))
-    m.append(String("feature"))
-    m.append(String("-m"))
-    m.append(String("Merge feature"))
+    var m = string_list(
+        String("merge"), String("-q"), String("--no-ff"), String("feature"),
+        String("-m"), String("Merge feature"),
+    )
     if _run_git(dir, m^) != 0:
         _rm_rf(dir)
         return String("")
@@ -2452,40 +2379,29 @@ def _reword_repo(tag: String) raises -> String:
     var dir = _temp_path(tag)
     _rm_rf(dir)
     _ensure_dir(dir)
-    var init_args = List[String]()
-    init_args.append(String("init"))
-    init_args.append(String("-q"))
-    init_args.append(String("-b"))
-    init_args.append(String("main"))
+    var init_args = string_list(
+        String("init"), String("-q"), String("-b"), String("main"),
+    )
     if _run_git(dir, init_args^) != 0:
         _rm_rf(dir)
         return String("")
-    var cfg1 = List[String]()
-    cfg1.append(String("config"))
-    cfg1.append(String("user.email"))
-    cfg1.append(String("test@example.com"))
+    var cfg1 = string_list(
+        String("config"), String("user.email"), String("test@example.com"),
+    )
     _ = _run_git(dir, cfg1^)
-    var cfg2 = List[String]()
-    cfg2.append(String("config"))
-    cfg2.append(String("user.name"))
-    cfg2.append(String("Test"))
+    var cfg2 = string_list(String("config"), String("user.name"), String("Test"))
     _ = _run_git(dir, cfg2^)
-    var subjects = List[String]()
-    subjects.append(String("first"))
-    subjects.append(String("second subject\n\nsecond body line"))
-    subjects.append(String("third"))
+    var subjects = string_list(
+        String("first"), String("second subject\n\nsecond body line"), String("third"),
+    )
     for i in range(len(subjects)):
         var f = join_path(dir, String("f") + String(i) + String(".txt"))
         assert_true(write_file(f, String("v") + String(i) + String("\n")))
-        var add = List[String]()
-        add.append(String("add"))
-        add.append(String("."))
+        var add = string_list(String("add"), String("."))
         _ = _run_git(dir, add^)
-        var commit = List[String]()
-        commit.append(String("commit"))
-        commit.append(String("-q"))
-        commit.append(String("-m"))
-        commit.append(subjects[i])
+        var commit = string_list(
+            String("commit"), String("-q"), String("-m"), subjects[i],
+        )
         _ = _run_git(dir, commit^)
     return dir^
 
@@ -2548,20 +2464,12 @@ def test_create_reworded_commit_keeps_tree_and_parent() raises:
     # Message changed...
     assert_equal(fetch_commit_message(dir, new_sha), String("rewritten"))
     # ...tree did not.
-    var t1 = List[String]()
-    t1.append(String("rev-parse"))
-    t1.append(old_sha + String("^{tree}"))
-    var t2 = List[String]()
-    t2.append(String("rev-parse"))
-    t2.append(new_sha + String("^{tree}"))
+    var t1 = string_list(String("rev-parse"), old_sha + String("^{tree}"))
+    var t2 = string_list(String("rev-parse"), new_sha + String("^{tree}"))
     assert_equal(_git_out(dir, t1^), _git_out(dir, t2^))
     # ...and neither did the parent.
-    var p1 = List[String]()
-    p1.append(String("rev-parse"))
-    p1.append(old_sha + String("^"))
-    var p2 = List[String]()
-    p2.append(String("rev-parse"))
-    p2.append(new_sha + String("^"))
+    var p1 = string_list(String("rev-parse"), old_sha + String("^"))
+    var p2 = string_list(String("rev-parse"), new_sha + String("^"))
     assert_equal(_git_out(dir, p1^), _git_out(dir, p2^))
     # Nothing moved: HEAD is untouched, so a failure here leaves no mess.
     assert_equal(head_short_sha(dir), commits[0].short_sha)
@@ -2821,19 +2729,6 @@ def test_local_changes_reword_older_commit_keeps_its_children() raises:
     _rm_rf(dir)
 
 
-def _git_out(dir: String, var args: List[String]) raises -> String:
-    """``git -C dir <args>`` stdout, trimmed. Test-local since the
-    production helper is private to ``git_changes``."""
-    var argv = List[String]()
-    argv.append(String("git"))
-    argv.append(String("-C"))
-    argv.append(dir)
-    for i in range(len(args)):
-        argv.append(args[i])
-    var r = capture_command(argv^)
-    return String(r.stdout.strip())
-
-
 def _drain_git_op(mut lc: LocalChanges):
     """Spin ``tick`` until the in-flight git child reaps, so a test
     doesn't leave a zombie behind. Non-blocking, so this is a spin."""
@@ -2844,29 +2739,17 @@ def _drain_git_op(mut lc: LocalChanges):
 
 
 def _checkout(dir: String, name: String) raises -> Int:
-    var a = List[String]()
-    a.append(String("checkout"))
-    a.append(String("-q"))
-    a.append(name)
+    var a = string_list(String("checkout"), String("-q"), name)
     return _run_git(dir, a^)
 
 
 def _checkout_new(dir: String, name: String) raises -> Int:
-    var a = List[String]()
-    a.append(String("checkout"))
-    a.append(String("-q"))
-    a.append(String("-b"))
-    a.append(name)
+    var a = string_list(String("checkout"), String("-q"), String("-b"), name)
     return _run_git(dir, a^)
 
 
 def _checkout_new_at(dir: String, name: String, start: String) raises -> Int:
-    var a = List[String]()
-    a.append(String("checkout"))
-    a.append(String("-q"))
-    a.append(String("-b"))
-    a.append(name)
-    a.append(start)
+    var a = string_list(String("checkout"), String("-q"), String("-b"), name, start)
     return _run_git(dir, a^)
 
 
@@ -2875,15 +2758,9 @@ def _commit_file(
 ) raises -> Int:
     if not write_file(join_path(dir, name), body):
         return -1
-    var add = List[String]()
-    add.append(String("add"))
-    add.append(String("-A"))
+    var add = string_list(String("add"), String("-A"))
     _ = _run_git(dir, add^)
-    var c = List[String]()
-    c.append(String("commit"))
-    c.append(String("-q"))
-    c.append(String("-m"))
-    c.append(message)
+    var c = string_list(String("commit"), String("-q"), String("-m"), message)
     return _run_git(dir, c^)
 
 
@@ -2902,42 +2779,30 @@ def _init_repo_with_branches() raises -> String:
     var dir = _temp_path(String("_branch_ops"))
     _rm_rf(dir)
     _ensure_dir(dir)
-    var init_args = List[String]()
-    init_args.append(String("init"))
-    init_args.append(String("-q"))
-    init_args.append(String("-b"))
-    init_args.append(String("main"))
+    var init_args = string_list(
+        String("init"), String("-q"), String("-b"), String("main"),
+    )
     var rc = _run_git(dir, init_args^)
     if rc != 0:
         # No git on PATH — skip silently, matching the other repo tests.
         _rm_rf(dir)
         return String("")
-    var cfg1 = List[String]()
-    cfg1.append(String("config"))
-    cfg1.append(String("user.email"))
-    cfg1.append(String("test@example.com"))
+    var cfg1 = string_list(
+        String("config"), String("user.email"), String("test@example.com"),
+    )
     _ = _run_git(dir, cfg1^)
-    var cfg2 = List[String]()
-    cfg2.append(String("config"))
-    cfg2.append(String("user.name"))
-    cfg2.append(String("Test"))
+    var cfg2 = string_list(String("config"), String("user.name"), String("Test"))
     _ = _run_git(dir, cfg2^)
     if not write_file(join_path(dir, String("a.txt")), String("one\n")):
         return String("")
-    var add = List[String]()
-    add.append(String("add"))
-    add.append(String("a.txt"))
+    var add = string_list(String("add"), String("a.txt"))
     _ = _run_git(dir, add^)
-    var commit = List[String]()
-    commit.append(String("commit"))
-    commit.append(String("-q"))
-    commit.append(String("-m"))
-    commit.append(String("init"))
+    var commit = string_list(
+        String("commit"), String("-q"), String("-m"), String("init"),
+    )
     _ = _run_git(dir, commit^)
     # merged-x: same tip as main, nothing to lose.
-    var br1 = List[String]()
-    br1.append(String("branch"))
-    br1.append(String("merged-x"))
+    var br1 = string_list(String("branch"), String("merged-x"))
     _ = _run_git(dir, br1^)
     # rebased-x: one commit, replayed onto a moved main. git rebase
     # gives it a fresh SHA, so only a patch-id comparison finds it.
@@ -2946,23 +2811,14 @@ def _init_repo_with_branches() raises -> String:
     _ = _checkout(dir, String("main"))
     _ = _commit_file(dir, String("moved.txt"), String("m\n"), String("moved"))
     _ = _checkout_new_at(dir, String("_tmp"), String("rebased-x"))
-    var reb = List[String]()
-    reb.append(String("rebase"))
-    reb.append(String("-q"))
-    reb.append(String("main"))
+    var reb = string_list(String("rebase"), String("-q"), String("main"))
     _ = _run_git(dir, reb^)
     _ = _checkout(dir, String("main"))
-    var ff = List[String]()
-    ff.append(String("merge"))
-    ff.append(String("-q"))
-    ff.append(String("--ff-only"))
-    ff.append(String("_tmp"))
+    var ff = string_list(
+        String("merge"), String("-q"), String("--ff-only"), String("_tmp"),
+    )
     _ = _run_git(dir, ff^)
-    var delt = List[String]()
-    delt.append(String("branch"))
-    delt.append(String("-q"))
-    delt.append(String("-D"))
-    delt.append(String("_tmp"))
+    var delt = string_list(String("branch"), String("-q"), String("-D"), String("_tmp"))
     _ = _run_git(dir, delt^)
     # squashed-x: two commits collapsed into one on main. Per-commit
     # patch-ids all miss; only the combined diff matches.
@@ -2970,17 +2826,13 @@ def _init_repo_with_branches() raises -> String:
     _ = _commit_file(dir, String("s1.txt"), String("s1\n"), String("s1"))
     _ = _commit_file(dir, String("s2.txt"), String("s2\n"), String("s2"))
     _ = _checkout(dir, String("main"))
-    var sq = List[String]()
-    sq.append(String("merge"))
-    sq.append(String("-q"))
-    sq.append(String("--squash"))
-    sq.append(String("squashed-x"))
+    var sq = string_list(
+        String("merge"), String("-q"), String("--squash"), String("squashed-x"),
+    )
     _ = _run_git(dir, sq^)
-    var sqc = List[String]()
-    sqc.append(String("commit"))
-    sqc.append(String("-q"))
-    sqc.append(String("-m"))
-    sqc.append(String("squash it"))
+    var sqc = string_list(
+        String("commit"), String("-q"), String("-m"), String("squash it"),
+    )
     _ = _run_git(dir, sqc^)
     # unmerged-x: one commit main doesn't have, in any form.
     _ = _checkout_new_at(dir, String("unmerged-x"), String("main"))
@@ -3018,30 +2870,14 @@ def test_branch_is_merged_sees_through_rebase_and_squash() raises:
     _rm_rf(dir)
 
 
-def _git_capture(dir: String, var args: List[String]) raises -> String:
-    """``_run_git`` but returning stdout instead of the exit status."""
-    var argv = List[String]()
-    argv.append(String("git"))
-    argv.append(String("-C"))
-    argv.append(dir)
-    for i in range(len(args)):
-        argv.append(args[i])
-    return capture_command(argv).stdout
-
-
 def _rev_list(dir: String, rev: String) raises -> List[String]:
     """Every commit SHA reachable from ``rev``, newest first."""
-    var a = List[String]()
-    a.append(String("rev-list"))
-    a.append(rev)
+    var a = string_list(String("rev-list"), rev)
     return split_lines_no_trailing(_git_capture(dir, a^))
 
 
 def _current_branch(dir: String) raises -> String:
-    var a = List[String]()
-    a.append(String("rev-parse"))
-    a.append(String("--abbrev-ref"))
-    a.append(String("HEAD"))
+    var a = string_list(String("rev-parse"), String("--abbrev-ref"), String("HEAD"))
     var lines = split_lines_no_trailing(_git_capture(dir, a^))
     return lines[0].copy() if len(lines) > 0 else String("")
 
@@ -3049,11 +2885,9 @@ def _current_branch(dir: String) raises -> String:
 def _is_ancestor_of_main(dir: String, branch: String) raises -> Bool:
     """The plain-ancestry check on its own, so the test above can show
     that it's the one that would have gotten these wrong."""
-    var a = List[String]()
-    a.append(String("merge-base"))
-    a.append(String("--is-ancestor"))
-    a.append(branch)
-    a.append(String("main"))
+    var a = string_list(
+        String("merge-base"), String("--is-ancestor"), branch, String("main"),
+    )
     return _run_git(dir, a^) == 0
 
 
@@ -3229,23 +3063,17 @@ def test_rebase_preserves_current_branch_shas() raises:
     var dir = _temp_path(String("_rebase_dir"))
     _rm_rf(dir)
     _ensure_dir(dir)
-    var init_args = List[String]()
-    init_args.append(String("init"))
-    init_args.append(String("-q"))
-    init_args.append(String("-b"))
-    init_args.append(String("main"))
+    var init_args = string_list(
+        String("init"), String("-q"), String("-b"), String("main"),
+    )
     if _run_git(dir, init_args^) != 0:
         _rm_rf(dir)
         return                              # no git on PATH
-    var cfg1 = List[String]()
-    cfg1.append(String("config"))
-    cfg1.append(String("user.email"))
-    cfg1.append(String("test@example.com"))
+    var cfg1 = string_list(
+        String("config"), String("user.email"), String("test@example.com"),
+    )
     _ = _run_git(dir, cfg1^)
-    var cfg2 = List[String]()
-    cfg2.append(String("config"))
-    cfg2.append(String("user.name"))
-    cfg2.append(String("Test"))
+    var cfg2 = string_list(String("config"), String("user.name"), String("Test"))
     _ = _run_git(dir, cfg2^)
 
     _ = _commit_file(dir, String("base.txt"), String("base\n"), String("A"))
@@ -3283,19 +3111,15 @@ def test_rebase_preserves_current_branch_shas() raises:
         assert_true(kept)
     # feature-x's work arrived, and as one line — no merge commit.
     assert_equal(read_file(join_path(dir, String("f.txt"))), String("f\n"))
-    var merges = List[String]()
-    merges.append(String("rev-list"))
-    merges.append(String("--merges"))
-    merges.append(String("main"))
+    var merges = string_list(String("rev-list"), String("--merges"), String("main"))
     assert_equal(
         len(split_lines_no_trailing(_git_capture(dir, merges^))), 0,
     )
     # The branch ref moved with the rewrite, so it's a plain ancestor now.
-    var anc = List[String]()
-    anc.append(String("merge-base"))
-    anc.append(String("--is-ancestor"))
-    anc.append(String("feature-x"))
-    anc.append(String("main"))
+    var anc = string_list(
+        String("merge-base"), String("--is-ancestor"), String("feature-x"),
+        String("main"),
+    )
     assert_equal(_run_git(dir, anc^), 0)
     _rm_rf(dir)
 
@@ -3345,19 +3169,14 @@ def test_rebase_onto_the_main_line_rewrites_the_topic_branch() raises:
     # forum now contains main's commit *and* its own, on one line.
     assert_equal(read_file(join_path(dir, String("m.txt"))), String("m\n"))
     assert_equal(read_file(join_path(dir, String("f.txt"))), String("f\n"))
-    var merges = List[String]()
-    merges.append(String("rev-list"))
-    merges.append(String("--merges"))
-    merges.append(String("forum"))
+    var merges = string_list(String("rev-list"), String("--merges"), String("forum"))
     assert_equal(
         len(split_lines_no_trailing(_git_capture(dir, merges^))), 0,
     )
     # main is an ancestor of forum now: the branch moved onto it.
-    var anc = List[String]()
-    anc.append(String("merge-base"))
-    anc.append(String("--is-ancestor"))
-    anc.append(String("main"))
-    anc.append(String("forum"))
+    var anc = string_list(
+        String("merge-base"), String("--is-ancestor"), String("main"), String("forum"),
+    )
     assert_equal(_run_git(dir, anc^), 0)
     lc.release()
     registry.release()
@@ -4205,16 +4024,11 @@ def test_changed_paths_between_reports_what_a_branch_switch_rewrote() raises:
     assert_equal(_commit_file(dir, String("a.py"), String("a = 1\n"), String("base")), 0)
     var base = git_head_sha(dir)
     assert_equal(len(base.as_bytes()), 40)
-    var co = List[String]()
-    co.append(String("checkout"))
-    co.append(String("-q"))
-    co.append(String("-b"))
-    co.append(String("feature"))
+    var co = string_list(
+        String("checkout"), String("-q"), String("-b"), String("feature"),
+    )
     assert_equal(_run_git(dir, co^), 0)
-    var rm = List[String]()
-    rm.append(String("rm"))
-    rm.append(String("-q"))
-    rm.append(String("b.py"))
+    var rm = string_list(String("rm"), String("-q"), String("b.py"))
     assert_equal(_run_git(dir, rm^), 0)
     assert_true(write_file(join_path(dir, String("a.py")), String("a = 2\n")))
     assert_equal(_commit_file(dir, String("c.py"), String("c = 3\n"), String("tip")), 0)
@@ -4245,36 +4059,26 @@ def _init_repo_with_commit(dir: String) raises -> Bool:
     isn't on PATH, which the callers treat as "skip this test"."""
     _rm_rf(dir)
     _ensure_dir(dir)
-    var init_args = List[String]()
-    init_args.append(String("init"))
-    init_args.append(String("-q"))
-    init_args.append(String("-b"))
-    init_args.append(String("main"))
+    var init_args = string_list(
+        String("init"), String("-q"), String("-b"), String("main"),
+    )
     if _run_git(dir, init_args^) != 0:
         _rm_rf(dir)
         return False
-    var cfg1 = List[String]()
-    cfg1.append(String("config"))
-    cfg1.append(String("user.email"))
-    cfg1.append(String("test@example.com"))
+    var cfg1 = string_list(
+        String("config"), String("user.email"), String("test@example.com"),
+    )
     _ = _run_git(dir, cfg1^)
-    var cfg2 = List[String]()
-    cfg2.append(String("config"))
-    cfg2.append(String("user.name"))
-    cfg2.append(String("Test"))
+    var cfg2 = string_list(String("config"), String("user.name"), String("Test"))
     _ = _run_git(dir, cfg2^)
     assert_true(
         write_file(join_path(dir, String("f.txt")), String("a\nb\nc\n")),
     )
-    var add = List[String]()
-    add.append(String("add"))
-    add.append(String("f.txt"))
+    var add = string_list(String("add"), String("f.txt"))
     _ = _run_git(dir, add^)
-    var commit = List[String]()
-    commit.append(String("commit"))
-    commit.append(String("-q"))
-    commit.append(String("-m"))
-    commit.append(String("init"))
+    var commit = string_list(
+        String("commit"), String("-q"), String("-m"), String("init"),
+    )
     _ = _run_git(dir, commit^)
     return True
 
@@ -4302,9 +4106,7 @@ def test_local_changes_fills_both_panels_for_a_file_changed_twice() raises:
     assert_true(
         write_file(join_path(dir, String("f.txt")), String("a\nB\nc\n")),
     )
-    var add = List[String]()
-    add.append(String("add"))
-    add.append(String("f.txt"))
+    var add = string_list(String("add"), String("f.txt"))
     _ = _run_git(dir, add^)
     assert_true(
         write_file(join_path(dir, String("f.txt")), String("a\nB\nC\n")),
@@ -4580,15 +4382,11 @@ def test_local_changes_staging_a_line_lands_on_the_next_change() raises:
     for i in range(1, 41):
         base += String("line ") + String(i) + String("\n")
     assert_true(write_file(join_path(dir, String("f.txt")), base))
-    var add = List[String]()
-    add.append(String("add"))
-    add.append(String("f.txt"))
+    var add = string_list(String("add"), String("f.txt"))
     _ = _run_git(dir, add^)
-    var commit = List[String]()
-    commit.append(String("commit"))
-    commit.append(String("-q"))
-    commit.append(String("-m"))
-    commit.append(String("base"))
+    var commit = string_list(
+        String("commit"), String("-q"), String("-m"), String("base"),
+    )
     _ = _run_git(dir, commit^)
     assert_true(write_file(join_path(dir, String("f.txt")), body))
     var lc = LocalChanges()
@@ -4713,45 +4511,32 @@ def test_branch_pane_o_opens_the_github_compare_page() raises:
     var dir = _temp_path(String("_git_compare"))
     _rm_rf(dir)
     _ensure_dir(dir)
-    var init_args = List[String]()
-    init_args.append(String("init"))
-    init_args.append(String("-q"))
-    init_args.append(String("-b"))
-    init_args.append(String("main"))
+    var init_args = string_list(
+        String("init"), String("-q"), String("-b"), String("main"),
+    )
     if _run_git(dir, init_args^) != 0:
         # No git available — skip silently.
         _rm_rf(dir)
         return
-    var cfg1 = List[String]()
-    cfg1.append(String("config"))
-    cfg1.append(String("user.email"))
-    cfg1.append(String("test@example.com"))
+    var cfg1 = string_list(
+        String("config"), String("user.email"), String("test@example.com"),
+    )
     _ = _run_git(dir, cfg1^)
-    var cfg2 = List[String]()
-    cfg2.append(String("config"))
-    cfg2.append(String("user.name"))
-    cfg2.append(String("Test"))
+    var cfg2 = string_list(String("config"), String("user.name"), String("Test"))
     _ = _run_git(dir, cfg2^)
     assert_true(write_file(join_path(dir, String("a.txt")), String("alpha\n")))
-    var add = List[String]()
-    add.append(String("add"))
-    add.append(String("a.txt"))
+    var add = string_list(String("add"), String("a.txt"))
     _ = _run_git(dir, add^)
-    var commit = List[String]()
-    commit.append(String("commit"))
-    commit.append(String("-q"))
-    commit.append(String("-m"))
-    commit.append(String("init"))
+    var commit = string_list(
+        String("commit"), String("-q"), String("-m"), String("init"),
+    )
     _ = _run_git(dir, commit^)
-    var remote = List[String]()
-    remote.append(String("remote"))
-    remote.append(String("add"))
-    remote.append(String("origin"))
-    remote.append(String("git@github.com:boxed/TurboKod.git"))
+    var remote = string_list(
+        String("remote"), String("add"), String("origin"),
+        String("git@github.com:boxed/TurboKod.git"),
+    )
     _ = _run_git(dir, remote^)
-    var branch = List[String]()
-    branch.append(String("branch"))
-    branch.append(String("feature/thing"))
+    var branch = string_list(String("branch"), String("feature/thing"))
     _ = _run_git(dir, branch^)
 
     assert_equal(
@@ -4812,13 +4597,6 @@ def test_branch_pane_o_refuses_main_and_a_non_github_remote() raises:
     lc.release()
 
 
-def _git_args(*items: String) -> List[String]:
-    var out = List[String]()
-    for x in items:
-        out.append(String(x))
-    return out^
-
-
 def test_local_changes_ctrl_p_pushes_to_a_picked_remote() raises:
     """Ctrl+P opens a remote picker: it starts on the remote a plain push
     would use, typing jumps to the first remote with that prefix, arrows
@@ -4826,9 +4604,9 @@ def test_local_changes_ctrl_p_pushes_to_a_picked_remote() raises:
     var root = _temp_path(String("_remote_pick"))
     _rm_rf(root)
     _ensure_dir(root)
-    _ = _run_git(root, _git_args(String("init"), String("-q"), String("-b"), String("main")))
+    _ = _run_git(root, string_list(String("init"), String("-q"), String("-b"), String("main")))
     for name in [String("origin"), String("upstream"), String("fork"), String("upload")]:
-        _ = _run_git(root, _git_args(
+        _ = _run_git(root, string_list(
             String("remote"), String("add"), name, String("/nonexistent/") + name,
         ))
     var lc = LocalChanges()

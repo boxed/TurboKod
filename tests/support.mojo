@@ -16,6 +16,7 @@ from turbokod.git_blame import BlameLine
 from turbokod.menu import Menu, MenuItem
 from turbokod.project_targets import ProjectTargets
 from turbokod.project_settings import ProjectSettings
+from turbokod.string_utils import string_list
 from turbokod.text_view import VisualLine
 from turbokod.lsp import capture_command
 from turbokod.highlight import Highlight
@@ -164,14 +165,23 @@ def _run_git(root: String, var args: List[String]) raises -> Int:
     """Wrapper around ``capture_command`` for the staging integration
     test below. Returns the exit status. We rebuild the argv with
     ``git -C <root>`` in front so the test doesn't have to repeat it."""
-    var argv = List[String]()
-    argv.append(String("git"))
-    argv.append(String("-C"))
-    argv.append(root)
-    for i in range(len(args)):
-        argv.append(args[i])
-    var r = capture_command(argv)
-    return Int(r.status)
+    return Int(capture_command(_git_argv(root, args^)).status)
+
+
+def _git_argv(root: String, var args: List[String]) -> List[String]:
+    var argv = string_list(String("git"), String("-C"), root)
+    argv.extend(args^)
+    return argv^
+
+
+def _git_capture(root: String, var args: List[String]) raises -> String:
+    """``_run_git`` but returning stdout instead of the exit status."""
+    return capture_command(_git_argv(root, args^)).stdout
+
+
+def _git_out(root: String, var args: List[String]) raises -> String:
+    """``git -C root <args>`` stdout, trimmed."""
+    return String(_git_capture(root, args^).strip())
 
 
 def _spell_with_dict(words: List[String]) -> Speller:

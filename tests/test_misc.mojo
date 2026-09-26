@@ -28,7 +28,7 @@ from turbokod.text_select import PaneTextSelect
 from turbokod.project_targets import resolve_python_interpreter
 from turbokod.string_utils import (
     char_width, display_columns, escape_drop_paths, prev_codepoint_start,
-    tail_to_columns
+    string_list, tail_to_columns
 )
 from turbokod.type_ahead import is_printable_ascii, is_type_ahead_key
 from turbokod.lsp_dispatch import CompletionItem, TextEditEntry
@@ -917,36 +917,26 @@ def test_discard_line_round_trip_against_real_git() raises:
     var dir = _temp_path(String("_discard_int"))
     _rm_rf(dir)
     _ensure_dir(dir)
-    var init_args = List[String]()
-    init_args.append(String("init"))
-    init_args.append(String("-q"))
-    init_args.append(String("-b"))
-    init_args.append(String("main"))
+    var init_args = string_list(
+        String("init"), String("-q"), String("-b"), String("main"),
+    )
     var rc = _run_git(dir, init_args^)
     if rc != 0:
         _rm_rf(dir)
         return
-    var cfg1 = List[String]()
-    cfg1.append(String("config"))
-    cfg1.append(String("user.email"))
-    cfg1.append(String("test@example.com"))
+    var cfg1 = string_list(
+        String("config"), String("user.email"), String("test@example.com"),
+    )
     _ = _run_git(dir, cfg1^)
-    var cfg2 = List[String]()
-    cfg2.append(String("config"))
-    cfg2.append(String("user.name"))
-    cfg2.append(String("Test"))
+    var cfg2 = string_list(String("config"), String("user.name"), String("Test"))
     _ = _run_git(dir, cfg2^)
     var f = join_path(dir, String("a.txt"))
     assert_true(write_file(f, String("alpha\nbeta\ngamma\n")))
-    var add_initial = List[String]()
-    add_initial.append(String("add"))
-    add_initial.append(String("a.txt"))
+    var add_initial = string_list(String("add"), String("a.txt"))
     _ = _run_git(dir, add_initial^)
-    var commit_args = List[String]()
-    commit_args.append(String("commit"))
-    commit_args.append(String("-q"))
-    commit_args.append(String("-m"))
-    commit_args.append(String("init"))
+    var commit_args = string_list(
+        String("commit"), String("-q"), String("-m"), String("init"),
+    )
     _ = _run_git(dir, commit_args^)
     # Two independent additions: NEW1 after beta, NEW2 after gamma.
     assert_true(write_file(f, String("alpha\nbeta\nNEW1\ngamma\nNEW2\n")))
