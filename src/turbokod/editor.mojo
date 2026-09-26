@@ -3253,12 +3253,11 @@ struct Editor(Copyable, Movable):
         var info = codepoint_at(line, prev)
         return is_word_codepoint(info[0])
 
-    def _stamp_completion_request(mut self):
+    def _stamp_completion_request(mut self, manual: Bool = False):
         """Stamp ``pending_completion_request`` at the current cursor.
-        Helper for the as-you-type auto-trigger paths so they don't
-        each duplicate the prefix-start lookup. ``manual=False`` —
-        an empty response on this path silently dismisses the popup
-        rather than showing ``<no completion found>``.
+        Shared by Ctrl+Space (``manual=True``) and the as-you-type
+        auto-trigger paths. On an auto-trigger an empty response silently
+        dismisses the popup rather than showing ``<no completion found>``.
 
         Also refreshes ``_completion_request_stamp_ms``: while the user
         is typing this keeps resetting and the host's debounced
@@ -3268,7 +3267,7 @@ struct Editor(Copyable, Movable):
         var start_col = self.completion_prefix_start()
         self.pending_completion_request = Optional[CompletionRequest](
             CompletionRequest(
-                self.selections[0].row, self.selections[0].col, start_col, False,
+                self.selections[0].row, self.selections[0].col, start_col, manual,
             ),
         )
         self._completion_request_stamp_ms = monotonic_ms()
@@ -8301,13 +8300,7 @@ struct Editor(Copyable, Movable):
         # so accept that too.
         if (event.mods == MOD_CTRL and event.key == KEY_SPACE) \
                 or (event.mods == MOD_NONE and event.key == UInt32(0)):
-            var start_col = self.completion_prefix_start()
-            self.pending_completion_request = Optional[CompletionRequest](
-                CompletionRequest(
-                    self.selections[0].row, self.selections[0].col, start_col, True,
-                ),
-            )
-            self._completion_request_stamp_ms = monotonic_ms()
+            self._stamp_completion_request(manual=True)
             return True
         # Capture the typing-group flag before any branch touches it, then
         # default to "broken" — every non-typing path (cursor moves, edits,
@@ -10202,21 +10195,22 @@ struct Editor(Copyable, Movable):
             self.scroll_y = self.selections[0].row
         elif self.selections[0].row >= self.scroll_y + h:
             self.scroll_y = self.selections[0].row - h + 1
+        self._fit_cursor_in_row(h, w)
+
+    def _fit_cursor_in_row(mut self, h: Int, w: Int):
+        """Finish a vertical scroll: keep the cursor on screen along the
+        other axis. Wrapping has no horizontal scroll (text reflows), so
+        instead make sure the cursor's *visual* row fits — if the row's
+        wraps push it past the bottom, anchor ``scroll_y`` to the cursor
+        row. Otherwise scroll horizontally, in cell columns converted back
+        to a byte offset so ``scroll_x`` always lands on a codepoint
+        boundary (``paint``'s slicing would corrupt UTF-8 otherwise)."""
         if self._is_wrapping():
-            # No horizontal scroll on the wrap path: text reflows
-            # vertically instead. Walk wrapped segments to make sure the
-            # cursor's screen row fits inside the view; if the buffer
-            # row's wraps push the cursor past the bottom, anchor
-            # ``scroll_y`` to the cursor row so the cursor is on the
-            # first visible line.
             self.scroll_x = 0
             var layout = self._layout_lines(h, w)
             if self._cursor_screen_row(layout) < 0:
                 self.scroll_y = self.selections[0].row
             return
-        # Horizontal scroll math is done in cell columns and converted back
-        # to a byte offset so ``scroll_x`` always lands on a codepoint
-        # boundary — the slicing in ``paint`` would corrupt UTF-8 otherwise.
         var line = self.buffer.line(self.selections[0].row)
         var cur_cell = utf8_cell_of_byte(line, self.selections[0].col)
         var scroll_cell = utf8_cell_of_byte(line, self.scroll_x)
@@ -10579,20 +10573,7 @@ struct Editor(Copyable, Movable):
                 self.scroll_y = bottom - h + 1
             if self.scroll_y < 0:
                 self.scroll_y = 0
-        if self._is_wrapping():
-            self.scroll_x = 0
-            var layout = self._layout_lines(h, w)
-            if self._cursor_screen_row(layout) < 0:
-                self.scroll_y = self.selections[0].row
-            return
-        var line = self.buffer.line(self.selections[0].row)
-        var cur_cell = utf8_cell_of_byte(line, self.selections[0].col)
-        var scroll_cell = utf8_cell_of_byte(line, self.scroll_x)
-        if cur_cell < scroll_cell:
-            scroll_cell = cur_cell
-        elif cur_cell >= scroll_cell + w:
-            scroll_cell = cur_cell - w + 1
-        self.scroll_x = utf8_byte_of_cell(line, scroll_cell)
+        self._fit_cursor_in_row(h, w)
 
 
 def _caret_less(a: Caret, b: Caret) -> Bool:
