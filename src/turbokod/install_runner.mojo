@@ -26,7 +26,7 @@ from .painter import Painter
 from .colors import Attr, BLACK, LIGHT_GRAY, YELLOW
 from .geometry import Point, Rect
 from .lsp import LspProcess
-from .string_utils import display_columns
+from .string_utils import display_columns, split_lines_no_trailing
 from .window import paint_window_title_at
 from .posix import (
     alloc_zero_buffer, append_string_bytes, close_fd, exit_code_from_status,
@@ -110,9 +110,16 @@ struct InstallRunner(Movable):
         argv.append(String("-c"))
         argv.append(command)
         self.process = LspProcess.spawn(argv)
+        self._arm(label^, command^, String("Installing "))
+
+    def _arm(
+        mut self, var label: String, var command: String,
+        var title_prefix: String,
+    ):
+        """Start tracking the just-spawned ``process``."""
         self.label = label^
         self.command = command^
-        self.title_prefix = String("Installing ")
+        self.title_prefix = title_prefix^
         self.output = String("")
         self.full_screen = False
         self._spinner_anchor_ms = monotonic_ms()
@@ -135,14 +142,7 @@ struct InstallRunner(Movable):
         self.process = LspProcess.spawn(argv)
         # Display ``command`` as a shell-y rendering of argv; only used
         # as the ``$ <command>`` header if a failure window gets opened.
-        var rendered = String(" ").join(argv)
-        self.label = label^
-        self.command = rendered^
-        self.title_prefix = title_prefix^
-        self.output = String("")
-        self.full_screen = False
-        self._spinner_anchor_ms = monotonic_ms()
-        self.active = True
+        self._arm(label^, String(" ").join(argv), title_prefix^)
 
     def tick(mut self) -> Optional[InstallResult]:
         """Drain whatever's available on the child's stdout / stderr and
@@ -334,36 +334,11 @@ def _last_lines(text: String, n: Int) -> List[String]:
     column with a control char.
     """
     var lines = List[String]()
-    var b = text.as_bytes()
-    var i = 0
-    var line_start = 0
-    while i < len(b):
-        if b[i] == 0x0A:
-            var end = i
-            # Strip trailing CR / spaces.
-            while end > line_start \
-                    and (b[end - 1] == 0x0D or b[end - 1] == 0x20
-                         or b[end - 1] == 0x09):
-                end -= 1
-            if end > line_start:
-                lines.append(String(StringSpan(
-                    unsafe_from_utf8=b[line_start:end],
-                )))
-            line_start = i + 1
-        i += 1
-    if line_start < len(b):
-        var end = len(b)
-        while end > line_start \
-                and (b[end - 1] == 0x0D or b[end - 1] == 0x20
-                     or b[end - 1] == 0x09):
-            end -= 1
-        if end > line_start:
-            lines.append(String(StringSpan(
-                unsafe_from_utf8=b[line_start:end],
-            )))
+    for line in split_lines_no_trailing(text):
+        # Strip trailing CR / spaces / tabs.
+        var t = String(line.rstrip())
+        if len(t.as_bytes()) > 0:
+            lines.append(t^)
     if len(lines) <= n:
         return lines^
-    var tail = List[String]()
-    for k in range(len(lines) - n, len(lines)):
-        tail.append(lines[k])
-    return tail^
+    return List[String](lines[len(lines) - n:])

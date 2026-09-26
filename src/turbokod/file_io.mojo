@@ -308,50 +308,21 @@ def delete_tree(path: String, is_dir: Bool) -> Bool:
 def list_directory(path: String) -> List[String]:
     """Names in ``path``. Returns an empty list on error.
 
-    Uses a thin wrapper around ``opendir``/``readdir`` in the Rust shim
-    (``tk_listdir_*``). The previous implementation routed through
-    ``std.os.listdir`` which has been observed to segfault in certain
-    launch-from-bundle environments where Python interop init differs
-    from the developer setup. The C path allocates its own buffer
-    (``tk_listdir`` mallocs, returns a pointer through ``out_buf``; we
-    copy the entries out and free)."""
-    from .posix import debug_log
-    debug_log(String("[list_directory] ENTER path=") + path)
+    The names of ``list_directory_typed``."""
     var out = List[String]()
-    var c_path = path + String("\0")
-    debug_log(String("[list_directory] calling tk_listdir"))
-    var n_entries = Int(external_call["tk_listdir", Int32](
-        c_path.unsafe_ptr(),
-    ))
-    debug_log(String("[list_directory] tk_listdir n_entries=")
-        + String(n_entries))
-    if n_entries < 0:
-        return out^
-    # Pull entries one at a time into a small fixed buffer. 4096 bytes
-    # is the maximum filename length on every filesystem we care about
-    # (HFS+/APFS: 255 codepoints, ext4: 255 bytes, NTFS: 255 chars).
-    var name_buf = List[UInt8]()
-    for _ in range(4096):
-        name_buf.append(0)
-    for i in range(n_entries):
-        var got = Int(external_call["tk_listdir_get_name", Int32](
-            Int32(i),
-            name_buf.unsafe_ptr(),
-            Int32(4096),
-        ))
-        if got > 0:
-            out.append(String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=name_buf.unsafe_ptr(), length=got))))
-    _ = external_call["tk_listdir_done", NoneType]()
-    debug_log(String("[list_directory] EXIT n=") + String(len(out)))
+    for entry in list_directory_typed(path):
+        out.append(entry[0])
     return out^
 
 
 def list_directory_typed(path: String) -> List[Tuple[String, Bool]]:
     """Names in ``path`` paired with ``is_dir``. Empty list on error.
 
-    Same ``tk_listdir`` / ``tk_listdir_get_name`` / ``tk_listdir_done``
-    dance as ``list_directory``, but also pulls each entry's raw dirent
-    ``d_type`` via ``tk_listdir_get_type`` so we avoid a per-entry
+    Goes through the Rust shim's ``opendir``/``readdir`` wrapper
+    (``tk_listdir_*``) — ``std.os.listdir`` has been observed to segfault
+    in launch-from-bundle environments where Python interop init differs.
+    Each entry's raw dirent ``d_type`` comes via ``tk_listdir_get_type``
+    so we avoid a per-entry
     ``stat`` syscall. ``DT_DIR`` answers ``is_dir`` directly;
     ``DT_UNKNOWN`` / ``DT_LNK`` (and anything else ambiguous) fall back
     to ``stat_file`` so a symlink-to-dir still counts as a dir."""
@@ -362,9 +333,9 @@ def list_directory_typed(path: String) -> List[Tuple[String, Bool]]:
     ))
     if n_entries < 0:
         return out^
-    var name_buf = List[UInt8]()
-    for _ in range(4096):
-        name_buf.append(0)
+    # 4096 bytes covers the longest filename on every filesystem we care
+    # about (HFS+/APFS: 255 codepoints, ext4: 255 bytes, NTFS: 255 chars).
+    var name_buf = alloc_zero_buffer(4096)
     for i in range(n_entries):
         var got = Int(external_call["tk_listdir_get_name", Int32](
             Int32(i),

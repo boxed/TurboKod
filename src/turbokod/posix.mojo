@@ -122,6 +122,17 @@ def tcflush(fd: Int32, queue_selector: Int32) -> Int32:
 # --- Monotonic clock --------------------------------------------------------
 
 
+def _clock_ms(clock_id: Int32) -> Int:
+    """``clock_gettime(clock_id)`` in milliseconds, or 0 on failure."""
+    var ts = alloc_zero_buffer(TIMESPEC_SIZE)
+    var rc = external_call["clock_gettime", Int32](clock_id, ts.unsafe_ptr())
+    if Int(rc) != 0:
+        return 0
+    var sec = Int(ts.unsafe_ptr().unsafe_bitcast[Int64]()[unsafe_offset=0])
+    var nsec = Int(ts.unsafe_ptr().unsafe_bitcast[Int64]()[unsafe_offset=1])
+    return sec * 1000 + nsec // 1_000_000
+
+
 def monotonic_ms() -> Int:
     """Milliseconds from a monotonic source (``CLOCK_MONOTONIC``).
 
@@ -131,15 +142,7 @@ def monotonic_ms() -> Int:
     the syscall fails (a clean fallback: callers comparing two readings
     just see "no time has passed" and behave as if firing immediately).
     """
-    var ts = alloc_zero_buffer(TIMESPEC_SIZE)
-    var rc = external_call["clock_gettime", Int32](
-        clock_monotonic_id(), ts.unsafe_ptr(),
-    )
-    if Int(rc) != 0:
-        return 0
-    var sec = Int(ts.unsafe_ptr().unsafe_bitcast[Int64]()[unsafe_offset=0])
-    var nsec = Int(ts.unsafe_ptr().unsafe_bitcast[Int64]()[unsafe_offset=1])
-    return sec * 1000 + nsec // 1_000_000
+    return _clock_ms(clock_monotonic_id())
 
 
 def wall_clock_ms() -> Int:
@@ -152,15 +155,7 @@ def wall_clock_ms() -> Int:
     no per-platform id is needed. Returns ``0`` if the syscall fails;
     callers treat that as "epoch", i.e. the least-recently-used value.
     """
-    var ts = alloc_zero_buffer(TIMESPEC_SIZE)
-    var rc = external_call["clock_gettime", Int32](
-        Int32(0), ts.unsafe_ptr(),
-    )
-    if Int(rc) != 0:
-        return 0
-    var sec = Int(ts.unsafe_ptr().unsafe_bitcast[Int64]()[unsafe_offset=0])
-    var nsec = Int(ts.unsafe_ptr().unsafe_bitcast[Int64]()[unsafe_offset=1])
-    return sec * 1000 + nsec // 1_000_000
+    return _clock_ms(Int32(0))
 
 
 # --- I/O multiplexing -------------------------------------------------------

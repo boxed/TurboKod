@@ -21,7 +21,7 @@ from .json import (
     json_str, json_get_bool, json_get_int, json_get_string,
     json_get_string_array, parse_json,
 )
-from .posix import getenv_value
+from .posix import close_fd, getenv_value
 
 
 # Wrap mode (Settings ▸ Editor). Persisted as ``TurbokodConfig.wrap_mode``
@@ -338,6 +338,23 @@ struct TurbokodConfig(Copyable, Movable):
         self.language_servers = copy.language_servers.copy()
 
 
+def _promote_recent(mut entries: List[String], path: String, cap: Int) -> Bool:
+    """Move ``path`` to the front of ``entries`` (dropping any other copy)
+    and trim to ``cap``. False — nothing changed — when ``path`` is empty
+    or already first."""
+    if len(path.as_bytes()) == 0:
+        return False
+    if len(entries) > 0 and entries[0] == path:
+        return False
+    var out = List[String]()
+    out.append(path)
+    for i in range(len(entries)):
+        if entries[i] != path and len(out) < cap:
+            out.append(entries[i])
+    entries = out^
+    return True
+
+
 def record_recent_project(
     mut config: TurbokodConfig, var path: String,
 ) -> Bool:
@@ -347,19 +364,7 @@ def record_recent_project(
     callers use this to skip a redundant ``save_config`` when the project
     is already at the front (mirrors ``record_recent_file``). Empty paths
     are ignored."""
-    if len(path.as_bytes()) == 0:
-        return False
-    if len(config.recent_projects) > 0 and config.recent_projects[0] == path:
-        return False
-    var new_list = List[String]()
-    new_list.append(path)
-    for i in range(len(config.recent_projects)):
-        if config.recent_projects[i] != path:
-            new_list.append(config.recent_projects[i])
-    while len(new_list) > _RECENT_PROJECTS_MAX:
-        _ = new_list.pop(len(new_list) - 1)
-    config.recent_projects = new_list^
-    return True
+    return _promote_recent(config.recent_projects, path, _RECENT_PROJECTS_MAX)
 
 
 def record_recent_file(
@@ -370,19 +375,7 @@ def record_recent_file(
     iff the list actually changed — callers use this to skip a redundant
     ``save_config`` write when the focused file is already at the
     front. Empty paths are ignored."""
-    if len(path.as_bytes()) == 0:
-        return False
-    if len(config.recent_files) > 0 and config.recent_files[0] == path:
-        return False
-    var new_list = List[String]()
-    new_list.append(path)
-    for i in range(len(config.recent_files)):
-        if config.recent_files[i] != path:
-            new_list.append(config.recent_files[i])
-    while len(new_list) > _RECENT_FILES_MAX:
-        _ = new_list.pop(len(new_list) - 1)
-    config.recent_files = new_list^
-    return True
+    return _promote_recent(config.recent_files, path, _RECENT_FILES_MAX)
 
 
 @fieldwise_init
@@ -806,7 +799,7 @@ def _acquire_config_lock() -> Int32:
     if fd < 0:
         return Int32(-1)
     if external_call["flock", Int32](fd, _LOCK_EX) != Int32(0):
-        _ = external_call["close", Int32](fd)
+        _ = close_fd(fd)
         return Int32(-1)
     return fd
 
@@ -815,7 +808,7 @@ def _release_config_lock(fd: Int32):
     if fd < 0:
         return
     _ = external_call["flock", Int32](fd, _LOCK_UN)
-    _ = external_call["close", Int32](fd)
+    _ = close_fd(fd)
 
 
 def _str_lists_equal(a: List[String], b: List[String]) -> Bool:

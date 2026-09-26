@@ -154,19 +154,9 @@ struct GridSelection(Copyable, Movable):
             var c_end   = sc1 if r == sr1 else vt.cols
             if c_end > vt.cols: c_end = vt.cols
             if c_start < 0: c_start = 0
-            var row_bytes = List[UInt8]()
-            for c in range(c_start, c_end):
-                # View-aware lookup so a selection made while scrolled
-                # back captures the historical text, not the live tail.
-                var g = vt.view_cell_at(r, c).glyph.as_bytes()
-                for k in range(len(g)):
-                    row_bytes.append(g[k])
-            # Strip trailing spaces — the grid is rectangular but content
-            # rarely fills the row, and copy should give visible text.
-            var end = len(row_bytes)
-            while end > 0 and row_bytes[end - 1] == 0x20:
-                end -= 1
-            out = out + String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=row_bytes.unsafe_ptr(), length=end)))
+            # View-aware so a selection made while scrolled back captures
+            # the historical text, not the live tail.
+            out += vt.row_text(r, c_start, c_end)
             if r < sr1:
                 out = out + String("\n")
         return out^

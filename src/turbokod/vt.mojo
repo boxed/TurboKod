@@ -382,20 +382,39 @@ struct Vt(Copyable, Movable):
         var out = List[String]()
         if n <= 0:
             return out^
-        var start = self.rows - n
-        if start < 0: start = 0
-        for r in range(start, self.rows):
-            var bytes = List[UInt8]()
-            for c in range(self.cols):
-                var g = self.cell_at(r, c).glyph.as_bytes()
-                for k in range(len(g)):
-                    bytes.append(g[k])
-            # Trim trailing spaces (each row is padded to full width).
-            var end = len(bytes)
-            while end > 0 and bytes[end - 1] == 0x20:
-                end -= 1
-            out.append(String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=bytes.unsafe_ptr(), length=end))))
+        for r in range(max(self.rows - n, 0), self.rows):
+            out.append(self.row_text(r, view=False))
         return out^
+
+    def row_text(
+        self, r: Int, c0: Int = 0, c1: Int = -1, view: Bool = True,
+    ) -> String:
+        """Glyphs of row ``r`` over columns ``[c0, c1)`` (``c1 < 0`` means
+        to the right edge), trailing spaces trimmed — the grid is padded to
+        full width but callers want the visible text. ``view`` reads the
+        row as the user sees it (scrolled back, see ``view_cell_at``);
+        otherwise the live grid. A scrollback row is copied once, not once
+        per cell."""
+        var end_c = self.cols if c1 < 0 else min(c1, self.cols)
+        var start_c = max(c0, 0)
+        var bytes = List[UInt8]()
+        var sb_len = len(self.scrollback)
+        var abs_row = (sb_len - self.view_offset) + r
+        if view and self.view_offset > 0 and not self.using_alt \
+                and 0 <= r and r < self.rows and abs_row < sb_len:
+            if abs_row >= 0:
+                var row = self.scrollback[abs_row].copy()
+                for c in range(start_c, min(end_c, len(row))):
+                    bytes.extend(row[c].glyph.as_bytes())
+        else:
+            var live_r = abs_row - sb_len if view and self.view_offset > 0 \
+                and not self.using_alt else r
+            for c in range(start_c, end_c):
+                bytes.extend(self.cell_at(live_r, c).glyph.as_bytes())
+        var end = len(bytes)
+        while end > 0 and bytes[end - 1] == 0x20:
+            end -= 1
+        return String(StringSpan(unsafe_from_utf8=Span(bytes)[0:end]))
 
     def view_cell_at(self, r: Int, c: Int) -> Cell:
         """Cell as seen by the user at view-row ``r``, accounting for
