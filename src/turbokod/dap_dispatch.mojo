@@ -16,9 +16,9 @@ control, surfaced events for the UI layer.
   ``request_variables`` so the UI can lazily fetch debug state when
   the user expands a frame / scope / variable.
 
-Limitations on purpose: one adapter per manager (not multi-session),
-no conditional / hit-count breakpoints yet, no watch expressions, no
-exception filters. Add when needed.
+Limitations on purpose: one adapter per manager, plus the one forked
+debugpy subprocess session (no general multi-session), and no hit-count
+breakpoints.
 """
 
 from std.collections.list import List
@@ -32,13 +32,14 @@ from .debugger_config import (
     DebuggerSpec, launch_arguments_for,
 )
 from .json import (
-    JsonValue, json_array, json_bool, json_int, json_object, json_str,
+    json_array, json_bool, json_get_int, json_get_string, json_int,
+    json_object, json_str, JsonValue,
 )
 from std.ffi import external_call
 
 from .lsp import LspProcess
 from .posix import monotonic_ms, realpath, tcp_connect, which
-from .string_utils import starts_with, utf8_suffix
+from .string_utils import starts_with, strip_trailing_newlines, utf8_suffix
 
 
 # --- state machine --------------------------------------------------------
@@ -831,7 +832,7 @@ struct DapManager(Copyable, Movable):
         var text = self.client.process.drain_stderr()
         if len(text.as_bytes()) > 0:
             self.client.process.trace(
-                String("stderr: ") + _trim_trailing_newline(text),
+                String("stderr: ") + strip_trailing_newlines(text),
             )
             # Keep a persistent copy so the info window can show what
             # the adapter said even though this call has already drained
@@ -2245,10 +2246,7 @@ struct DapManager(Copyable, Movable):
                 continue
             if verified_opt.value().as_bool():
                 continue
-            var msg_text = String("")
-            var m = entry.object_get(String("message"))
-            if m and m.value().is_string():
-                msg_text = m.value().as_str()
+            var msg_text = json_get_string(entry, String("message"))
             if i >= len(sent_lines):
                 continue
             var line = sent_lines[i]
@@ -2673,19 +2671,13 @@ struct DapManager(Copyable, Movable):
         var hv = co.object_get(String("host"))
         if hv and hv.value().is_string():
             host = hv.value().as_str()
-        var port = 0
-        var pv = co.object_get(String("port"))
-        if pv and pv.value().is_int():
-            port = pv.value().as_int()
+        var port = json_get_int(co, String("port"), 0)
         if port <= 0:
             self.client.process.trace(String(
                 "debugpyAttach: missing/invalid port; ignoring",
             ))
             return
-        var spi = -1
-        var sv = b.object_get(String("subProcessId"))
-        if sv and sv.value().is_int():
-            spi = sv.value().as_int()
+        var spi = json_get_int(b, String("subProcessId"), -1)
         var name = String("Subprocess")
         var nv = b.object_get(String("name"))
         if nv and nv.value().is_string():
@@ -2771,15 +2763,6 @@ struct DapManager(Copyable, Movable):
 
 
 # --- module-level helpers -------------------------------------------------
-
-
-def _trim_trailing_newline(s: String) -> String:
-    """``s`` minus a single trailing ``\\n``, if any. Keeps trace lines
-    one-per-line in the log file."""
-    var b = s.as_bytes()
-    if len(b) > 0 and b[len(b) - 1] == 0x0A:
-        return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr(), length=len(b) - 1)))
-    return s
 
 
 def _last_nonempty_line(text: String) -> String:

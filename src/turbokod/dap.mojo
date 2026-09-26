@@ -22,9 +22,8 @@ Adapters can also send requests *to* the client (``runInTerminal``,
 ``startDebugging``); we surface those through the same ``DapIncoming``
 classification so the dispatch layer can answer them.
 
-Phase 2 here doesn't yet wire responses into the editor — that lives in
-``dap_dispatch.mojo`` (handshake, breakpoints, threads, stack frames,
-scopes, variables, execution control).
+The session logic — handshake, breakpoints, threads, stack frames,
+scopes, variables, execution control — lives in ``dap_dispatch.mojo``.
 """
 
 from std.collections.list import List

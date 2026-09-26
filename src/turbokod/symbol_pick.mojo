@@ -4,7 +4,7 @@ A modal centered dialog, like ``QuickOpen``, but populated from a
 ``textDocument/documentSymbol`` response instead of the project file
 walk. The Desktop opens the picker (in a "loading…" state), kicks off
 the LSP request, and feeds the result list in via ``set_entries`` once
-``lsp.consume_symbols`` returns. Selection submits ``(line, character)``
+``LspManager.take_symbols`` returns. Selection submits ``(line, character)``
 which the host uses to move the cursor.
 
 The match algorithm is borrowed from ``quick_open_match`` so users get

@@ -9,8 +9,7 @@ This module is layered:
   serializers, and a ``poll`` that classifies each incoming framed payload
   into a tagged ``LspIncoming``.
 
-Phase 2 doesn't yet wire the responses into the editor — Phase 3 maps
-``textDocument/definition`` responses onto ``Window.from_file`` calls.
+``lsp_dispatch.LspManager`` drives these per language server.
 """
 
 from std.collections.list import List
@@ -657,17 +656,18 @@ struct LspProcess(Copyable, Movable):
         on ``write(stderr, …)`` and never reaches the code that
         replies to our ``initialize`` — appearing as a total hang.
         """
-        var out = String("")
         if self.stderr_fd < 0:
-            return out
-        var total = 0
+            return String("")
+        # Accumulate bytes and build the String once — ``out = out + chunk``
+        # reallocated the whole drain per read.
+        var buf = List[UInt8]()
         var scratch = alloc_zero_buffer(4096)
-        while poll_stdin(self.stderr_fd, Int32(0)) and total < 65536:
+        while poll_stdin(self.stderr_fd, Int32(0)) and len(buf) < 65536:
             var m = read_into(self.stderr_fd, scratch, 4096)
             if m <= 0:
                 break
-            out = out + String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=scratch.unsafe_ptr(), length=m)))
-            total += m
+            buf.extend(Span(scratch)[0:m])
+        var out = String(StringSpan(unsafe_from_utf8=Span(buf)))
         return out
 
     def terminate(mut self):

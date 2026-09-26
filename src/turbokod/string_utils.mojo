@@ -138,6 +138,16 @@ def string_list(*items: String) -> List[String]:
     return out^
 
 
+def strip_trailing_newlines(s: String) -> String:
+    """``s`` without any trailing ``\\r`` / ``\\n`` — for turning a line of
+    captured output into one log / status line."""
+    var b = s.as_bytes()
+    var end = len(b)
+    while end > 0 and (b[end - 1] == 0x0A or b[end - 1] == 0x0D):
+        end -= 1
+    return s if end == len(b) else byte_slice(s, 0, end)
+
+
 def split_whitespace(s: String) -> List[String]:
     """Split on runs of ASCII whitespace (space, tab, CR, LF), dropping
     empty pieces — ``"  a b\t c "`` → ``["a", "b", "c"]``."""
