@@ -688,7 +688,8 @@ def tk_desktop_panels_mouse(
 def tk_desktop_panels_pointer_shape(
     h: Int, x: Int, y: Int, cols: Int, rows: Int,
 ) abi("C") -> Int32:
-    """0 = default, 1 = text, 2 = pointer — for the panel window."""
+    """A ``host_abi.SHAPE_*`` code for the pointer at ``(x, y)`` in the
+    panel window."""
     if h == 0:
         return Int32(0)
     var shape = _desk(h)[].pointer_shape_panels(Point(x, y), Rect(0, 0, cols, rows))
@@ -1017,7 +1018,7 @@ def tk_desktop_mouse(
 
 @export
 def tk_desktop_pointer_shape(h: Int, x: Int, y: Int, cols: Int, rows: Int) abi("C") -> Int32:
-    """0 = default, 1 = text, 2 = pointer."""
+    """A ``host_abi.SHAPE_*`` code for the pointer at ``(x, y)``."""
     if h == 0:
         return Int32(0)
     var shape = _desk(h)[].pointer_shape_at(Point(x, y), Rect(0, 0, cols, rows))

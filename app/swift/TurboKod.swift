@@ -510,6 +510,17 @@ final class CellView: NSView {
         case .projectSettings: return tk_desktop_project_settings_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r), cc)
         }
     }
+    /// Show the cursor for a ``host_abi.SHAPE_*`` code.
+    private func applyCursorShape(_ code: Int32) {
+        switch code {
+        case 1: NSCursor.iBeam.set()
+        case 2: NSCursor.pointingHand.set()
+        case 3: NSCursor.resizeUpDown.set()
+        case 4: NSCursor.resizeLeftRight.set()
+        default: NSCursor.arrow.set()
+        }
+    }
+
     private func pointerShapeSurface(_ col: Int64, _ row: Int64, _ c: Int, _ r: Int) -> Int32 {
         switch surface {
         case .main:     return tk_desktop_pointer_shape(handle, col, row, Int64(c), Int64(r))
@@ -1213,12 +1224,7 @@ final class CellView: NSView {
         }
         if quiet { return }
         // Cursor hint.
-        let shape = pointerShapeSurface(col, row, cols(), rows())
-        switch shape {
-        case 1: NSCursor.iBeam.set()
-        case 2: NSCursor.pointingHand.set()
-        default: NSCursor.arrow.set()
-        }
+        applyCursorShape(pointerShapeSurface(col, row, cols(), rows()))
         if passive {
             // Bare mouse motion (no button). macOS delivers these at the
             // display refresh rate; laying out + repainting the whole Desktop
@@ -1411,13 +1417,9 @@ final class CellView: NSView {
         // Content moved under a stationary pointer, so the hover shape can
         // have changed even though the position didn't.
         let p = convert(e.locationInWindow, from: nil)
-        switch pointerShapeSurface(Int64(max(0, p.x) / CELL_W),
-                                   Int64(max(0, p.y) / CELL_H),
-                                   cols(), rows()) {
-        case 1: NSCursor.iBeam.set()
-        case 2: NSCursor.pointingHand.set()
-        default: NSCursor.arrow.set()
-        }
+        applyCursorShape(pointerShapeSurface(Int64(max(0, p.x) / CELL_W),
+                                             Int64(max(0, p.y) / CELL_H),
+                                             cols(), rows()))
         if detectChange() { needsDisplay = true }
     }
 

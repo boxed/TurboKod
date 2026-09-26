@@ -43,6 +43,7 @@ from turbokod.file_tree import FileTree, FileTreeEntry
 from turbokod.menu import Menu, MenuBar, MenuItem
 from turbokod.project import FileIndexer
 from turbokod.project_targets import detect_project_language
+from turbokod.host_abi import SHAPE_NS_RESIZE, shape_code, shape_name
 from turbokod.string_utils import (
     shell_escape_path, shell_single_quote, slice_codepoints, utf8_prefix,
     utf8_suffix,
@@ -2397,6 +2398,18 @@ def test_write_file_in_place_fallback_replaces_fully() raises:
     _ = delete_path(path)
 
 
+def test_pointer_shape_codes_round_trip() raises:
+    """Every shape the core reports survives the host ABI. The resize
+    shapes used to collapse to "default", so neither native host showed
+    a resize cursor over a pane edge."""
+    for name in [
+        String("default"), String("text"), String("pointer"),
+        String("ns-resize"), String("ew-resize"),
+    ]:
+        assert_equal(shape_name(shape_code(name)), name)
+    assert_equal(shape_code(String("ns-resize")), SHAPE_NS_RESIZE)
+
+
 def main() raises:
     setup_test_env()
     test_claude_detect_empty_buffer_returns_none()
@@ -2423,6 +2436,7 @@ def main() raises:
     test_canvas_put_text()
     test_shell_escape_path_escapes_metacharacters()
     test_shell_single_quote_keeps_utf8_and_escapes_quotes()
+    test_pointer_shape_codes_round_trip()
     test_utf8_prefix_and_suffix_respect_codepoint_boundaries()
     test_canvas_box()
     test_canvas_fill()
@@ -2517,4 +2531,4 @@ def main() raises:
     test_detect_skips_non_test_file()
     test_detect_custom_python_files_glob()
     test_write_file_in_place_fallback_replaces_fully()
-    print("core: 116 tests passed")
+    print("core: 117 tests passed")

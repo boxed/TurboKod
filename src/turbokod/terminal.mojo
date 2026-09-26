@@ -319,7 +319,8 @@ struct Terminal:
         flash ``__mvc_cursor:...`` in their title bar, which is worse
         UX than just leaving the cursor alone. Supported shapes match
         the winit ``CursorIcon`` taxonomy: ``"default"``, ``"text"``,
-        ``"pointer"``. Repeat calls with the same shape are no-ops."""
+        ``"pointer"``, ``"ns-resize"``, ``"ew-resize"``. Repeat calls with
+        the same shape are no-ops."""
         if not self._started:
             return
         if shape == self._last_pointer_shape:

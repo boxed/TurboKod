@@ -88,6 +88,8 @@ int32_t tk_desktop_mouse(int64_t h, int64_t x, int64_t y, uint8_t button,
 // the AppKit host's flagsChanged. mod_id is a MOD_KEY_* value (2 = Alt).
 // Drives the editor's Alt-tap and tap-then-hold multi-cursor gestures.
 int32_t tk_desktop_mod_key(int64_t h, uint32_t mod_id, uint8_t pressed);
+// Pointer shape at (x, y): 0 default, 1 text, 2 pointer, 3 ns-resize,
+// 4 ew-resize (host_abi.mojo SHAPE_*).
 int32_t tk_desktop_pointer_shape(int64_t h, int64_t x, int64_t y,
                                  int64_t cols, int64_t rows);
 // Host drag-and-drop of file(s) onto the main window. paths is a

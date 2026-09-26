@@ -30,6 +30,8 @@ comptime ACT_TOGGLE_FLOATING_PANELS = Int32(7)
 comptime SHAPE_DEFAULT = Int32(0)
 comptime SHAPE_TEXT    = Int32(1)
 comptime SHAPE_POINTER = Int32(2)
+comptime SHAPE_NS_RESIZE = Int32(3)   # over a pane's top edge / dragging it
+comptime SHAPE_EW_RESIZE = Int32(4)   # over the file tree's edge
 
 # ``UInt32`` words per cell in the layout buffer:
 # ``[codepoint, fg|bg<<8|style<<16|color_mode<<24, underline_color, fg_rgb,
@@ -43,6 +45,10 @@ def shape_code(shape: String) -> Int32:
         return SHAPE_TEXT
     if shape == String("pointer"):
         return SHAPE_POINTER
+    if shape == String("ns-resize"):
+        return SHAPE_NS_RESIZE
+    if shape == String("ew-resize"):
+        return SHAPE_EW_RESIZE
     return SHAPE_DEFAULT
 
 
@@ -52,6 +58,10 @@ def shape_name(code: Int32) -> String:
         return String("text")
     if code == SHAPE_POINTER:
         return String("pointer")
+    if code == SHAPE_NS_RESIZE:
+        return String("ns-resize")
+    if code == SHAPE_EW_RESIZE:
+        return String("ew-resize")
     return String("default")
 
 
