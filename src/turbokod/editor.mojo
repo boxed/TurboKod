@@ -4777,68 +4777,42 @@ struct Editor(Copyable, Movable):
         behind a 1-character whitespace edit; info / hint sit below
         spell so a 'consider renaming' hint doesn't overpower a
         real misspelling."""
-        var n_diag = len(self.diagnostic_lines)
-        var ds = start if start < n_diag else n_diag
-        var de = end if end < n_diag else n_diag
-        # Walk once for severity 1 (error), then 2 (warning).
-        for li in range(ds, de):
-            if self.diagnostic_lines[li] == DIAG_SEVERITY_ERROR:
-                return 3
-        for li in range(ds, de):
-            if self.diagnostic_lines[li] == DIAG_SEVERITY_WARNING:
-                return 4
-        var n_git = len(self.git_change_lines)
-        var s = start if start < n_git else n_git
-        var e = end if end < n_git else n_git
-        for li in range(s, e):
-            if self.git_change_lines[li] != GIT_CHANGE_NONE:
-                return 1
-        var n_sp = len(self.spell_lines)
-        s = start if start < n_sp else n_sp
-        e = end if end < n_sp else n_sp
-        for li in range(s, e):
-            if self.spell_lines[li]:
-                return 2
-        for li in range(ds, de):
-            if self.diagnostic_lines[li] == DIAG_SEVERITY_INFO:
-                return 5
-        for li in range(ds, de):
-            if self.diagnostic_lines[li] == DIAG_SEVERITY_HINT:
-                return 6
-        return 0
+        return self._minimap_first_mark(start, end)[0]
 
     def _minimap_first_marked_buf_row(self, start: Int, end: Int) -> Int:
         """First buffer row in ``[start, end)`` that carries a mark,
         in the same priority order as ``_minimap_kind_in_slice``.
         Returns ``-1`` when the slice has no marks."""
-        var n_diag = len(self.diagnostic_lines)
-        var ds = start if start < n_diag else n_diag
-        var de = end if end < n_diag else n_diag
+        return self._minimap_first_mark(start, end)[1]
+
+    def _minimap_first_mark(self, start: Int, end: Int) -> Tuple[Int, Int]:
+        """``(kind, row)`` of the priority-winning mark in ``[start, end)``
+        — the first row carrying the highest-priority kind — or
+        ``(0, -1)`` for a clean slice. See ``_minimap_kind_in_slice`` for
+        the kinds and their order."""
+        var ds = min(start, len(self.diagnostic_lines))
+        var de = min(end, len(self.diagnostic_lines))
         for li in range(ds, de):
             if self.diagnostic_lines[li] == DIAG_SEVERITY_ERROR:
-                return li
+                return (3, li)
         for li in range(ds, de):
             if self.diagnostic_lines[li] == DIAG_SEVERITY_WARNING:
-                return li
-        var n_git = len(self.git_change_lines)
-        var s = start if start < n_git else n_git
-        var e = end if end < n_git else n_git
-        for li in range(s, e):
+                return (4, li)
+        for li in range(min(start, len(self.git_change_lines)),
+                        min(end, len(self.git_change_lines))):
             if self.git_change_lines[li] != GIT_CHANGE_NONE:
-                return li
-        var n_sp = len(self.spell_lines)
-        s = start if start < n_sp else n_sp
-        e = end if end < n_sp else n_sp
-        for li in range(s, e):
+                return (1, li)
+        for li in range(min(start, len(self.spell_lines)),
+                        min(end, len(self.spell_lines))):
             if self.spell_lines[li]:
-                return li
+                return (2, li)
         for li in range(ds, de):
             if self.diagnostic_lines[li] == DIAG_SEVERITY_INFO:
-                return li
+                return (5, li)
         for li in range(ds, de):
             if self.diagnostic_lines[li] == DIAG_SEVERITY_HINT:
-                return li
-        return -1
+                return (6, li)
+        return (0, -1)
 
     def _minimap_attr_for_slice(self, start: Int, end: Int) -> Optional[Attr]:
         """Source registry for the right-side projection — same priority
