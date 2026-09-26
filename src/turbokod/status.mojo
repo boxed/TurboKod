@@ -18,6 +18,7 @@ from .events import (
 from .geometry import Point, Rect
 from .posix import monotonic_ms
 from .string_utils import display_columns
+from .anchored_menu import anchored_menu_rect
 
 
 # Braille spinner frames. ~80 ms per frame ⇒ one full rotation per 800 ms,
@@ -384,19 +385,10 @@ struct StatusBar(Movable):
         # hovered message instead of off-container_bounds below the bottom row.
         # Right-align the box to the message rect when possible so it
         # visually points at the spinner rather than dangling left.
-        var bx = self._msg_b_x - w
-        if bx < 0:
-            bx = 0
-        if bx + w > container_bounds.b.x:
-            bx = container_bounds.b.x - w
-        var by = self._hover_y - h
-        if by < 0:
-            by = self._hover_y + 1
-            if by + h > container_bounds.b.y:
-                by = container_bounds.b.y - h
-                if by < 0:
-                    by = 0
-        var r = Rect(bx, by, bx + w, by + h)
+        # Right-aligned with the message, just above the hovered cell.
+        var r = anchored_menu_rect(
+            self._msg_b_x - w, self._hover_y, w, h, container_bounds, True,
+        )
         paint_tooltip_popup(canvas, r, self.message_tooltip)
 
     def hit_test_message(self, pos: Point, container_bounds: Rect) -> Bool:

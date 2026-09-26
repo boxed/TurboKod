@@ -15,7 +15,7 @@ from .canvas import (
     Canvas, paint_drop_shadow, popup_size_for_text,
     utf8_byte_to_cell, utf8_codepoint_count,
 )
-from .painter import Painter
+from .painter import paint_tooltip_popup, Painter
 from .cell import Cell
 from .clipboard import (
     CLIP_COPY, CLIP_CUT, CLIP_PASTE, CLIP_SELECT_ALL, clipboard_chord,
@@ -3103,9 +3103,7 @@ struct Editor(Copyable, Movable):
                 or self._hover_candidate_col != col:
             return
         if len(text.as_bytes()) == 0:
-            self._hover_result_text = String("")
-            self._hover_result_row = -1
-            self._hover_result_col = -1
+            self._clear_hover_result()
             return
         self._hover_result_text = text^
         self._hover_result_row = row
@@ -3121,6 +3119,10 @@ struct Editor(Copyable, Movable):
         self._hover_candidate_row = -1
         self._hover_candidate_col = -1
         self._hover_candidate_emitted = False
+        self._clear_hover_result()
+
+    def _clear_hover_result(mut self):
+        """Drop the displayed hover popup (the dwell candidate stays)."""
         self._hover_result_text = String("")
         self._hover_result_row = -1
         self._hover_result_col = -1
@@ -3486,47 +3488,9 @@ struct Editor(Copyable, Movable):
         # the nudge the cursor would float into the wrong row.
         var hl_low = pre
         var hl_high = pre
-        var aux = item.additional_text_edits.copy()
-        var m = len(aux)
-        if m > 1:
-            for ii in range(1, m):
-                var jj = ii
-                while jj > 0 and (
-                    aux[jj].start_line > aux[jj - 1].start_line
-                    or (
-                        aux[jj].start_line == aux[jj - 1].start_line
-                        and aux[jj].start_char > aux[jj - 1].start_char
-                    )
-                ):
-                    var tmp = aux[jj]
-                    aux[jj] = aux[jj - 1]
-                    aux[jj - 1] = tmp
-                    jj -= 1
-        for k in range(m):
-            var ed = aux[k]
-            var res = self._apply_buffer_edit_raw(
-                ed.start_line, ed.start_char,
-                ed.end_line, ed.end_char, ed.new_text,
-            )
-            # Relocate the caret + anchor past this edit: shift by the
-            # line delta when the edit ended above them, or track the
-            # relocated tail when it ended on the same row before them.
-            var cur = self._shift_pos_after_edit(
-                self.selections[0].row, self.selections[0].col,
-                res[1], res[2], res[0], res[3],
-            )
-            var anc = self._shift_pos_after_edit(
-                self.selections[0].anchor_row, self.selections[0].anchor_col,
-                res[1], res[2], res[0], res[3],
-            )
-            self.selections[0].row = cur[0]
-            self.selections[0].col = cur[1]
-            self.selections[0].anchor_row = anc[0]
-            self.selections[0].anchor_col = anc[1]
-            if ed.start_line < hl_low:
-                hl_low = ed.start_line
-            if ed.end_line > hl_high:
-                hl_high = ed.end_line
+        self._apply_edits_desc(
+            item.additional_text_edits.copy(), hl_low, hl_high,
+        )
         self.dirty = True
         self._mark_hl_dirty(hl_low, hl_high)
         self.close_completion_popup()
@@ -3677,47 +3641,31 @@ struct Editor(Copyable, Movable):
                     edits.append(file_edits[k].edits[j])
         return self.apply_text_edits(edits^)
 
-    def apply_text_edits(mut self, var edits: List[TextEditEntry]) -> Bool:
-        """Apply a flat ``TextEdit[]`` to this buffer. Used by formatting
-        (a whole-file ``TextEdit[]``) and by ``apply_code_action_edits``
-        after it filters a WorkspaceEdit down to this file. Edits are
-        sorted descending by start position so an earlier edit doesn't
-        shift positions of later ones; the cursor/anchor are nudged for
-        line-count deltas. Returns True iff at least one edit applied."""
-        if self.read_only:
-            return False
-        if len(edits) == 0:
-            return False
-        # Descending sort by (start_line, start_char) so we apply later
-        # edits first — earlier-position edits are then still at their
-        # original coordinates when we get to them.
+    def _apply_edits_desc(
+        mut self, var edits: List[TextEditEntry], mut hl_low: Int,
+        mut hl_high: Int,
+    ):
+        """Apply ``edits`` (buffer coordinates) without touching undo.
+        They're sorted descending by start first, so applying one never
+        shifts the coordinates of those still to come; the primary caret
+        and its anchor are relocated past each edit (by the line delta when
+        it ended above them, tracking the relocated tail when it ended on
+        their row). ``hl_low`` / ``hl_high`` are widened to the rows
+        touched, for ``_mark_hl_dirty``."""
         var m = len(edits)
-        if m > 1:
-            for ii in range(1, m):
-                var jj = ii
-                while jj > 0 and (
-                    edits[jj].start_line > edits[jj - 1].start_line
-                    or (
-                        edits[jj].start_line == edits[jj - 1].start_line
-                        and edits[jj].start_char > edits[jj - 1].start_char
-                    )
-                ):
-                    var tmp = edits[jj]
-                    edits[jj] = edits[jj - 1]
-                    edits[jj - 1] = tmp
-                    jj -= 1
-        self._push_undo()
-        self._typing_active = False
-        var hl_low = self.selections[0].row
-        # High-water mark: the *highest* row any edit touches. A rename
-        # replaces the symbol at several rows in place (no line-count
-        # change), so without this the incremental tokenizer early-exits
-        # at the topmost edited row — whose post-stack rejoins the cached
-        # trajectory immediately — and splices stale highlights over the
-        # renamed rows below it. Edits that insert/delete newlines change
-        # the line count, which forces a full retokenize where the mark is
-        # ignored, so tracking start_line here is safe.
-        var hl_high = -1
+        for ii in range(1, m):
+            var jj = ii
+            while jj > 0 and (
+                edits[jj].start_line > edits[jj - 1].start_line
+                or (
+                    edits[jj].start_line == edits[jj - 1].start_line
+                    and edits[jj].start_char > edits[jj - 1].start_char
+                )
+            ):
+                var tmp = edits[jj]
+                edits[jj] = edits[jj - 1]
+                edits[jj - 1] = tmp
+                jj -= 1
         for k in range(m):
             var ed = edits[k]
             var res = self._apply_buffer_edit_raw(
@@ -3740,6 +3688,31 @@ struct Editor(Copyable, Movable):
                 hl_low = ed.start_line
             if ed.end_line > hl_high:
                 hl_high = ed.end_line
+
+    def apply_text_edits(mut self, var edits: List[TextEditEntry]) -> Bool:
+        """Apply a flat ``TextEdit[]`` to this buffer. Used by formatting
+        (a whole-file ``TextEdit[]``) and by ``apply_code_action_edits``
+        after it filters a WorkspaceEdit down to this file. Edits are
+        sorted descending by start position so an earlier edit doesn't
+        shift positions of later ones; the cursor/anchor are nudged for
+        line-count deltas. Returns True iff at least one edit applied."""
+        if self.read_only:
+            return False
+        if len(edits) == 0:
+            return False
+        self._push_undo()
+        self._typing_active = False
+        var hl_low = self.selections[0].row
+        # High-water mark: the *highest* row any edit touches. A rename
+        # replaces the symbol at several rows in place (no line-count
+        # change), so without this the incremental tokenizer early-exits
+        # at the topmost edited row — whose post-stack rejoins the cached
+        # trajectory immediately — and splices stale highlights over the
+        # renamed rows below it. Edits that insert/delete newlines change
+        # the line count, which forces a full retokenize where the mark is
+        # ignored, so tracking start_line here is safe.
+        var hl_high = -1
+        self._apply_edits_desc(edits^, hl_low, hl_high)
         self.dirty = True
         self._mark_hl_dirty(hl_low, hl_high)
         return True
@@ -3791,13 +3764,7 @@ struct Editor(Copyable, Movable):
         re-triggers detection on an actual change, so the host can call it
         every frame cheaply — the first call after a project loads flips
         the gutter on without churning on idle frames."""
-        var same = len(globs) == len(self.test_file_globs)
-        if same:
-            for k in range(len(globs)):
-                if globs[k] != self.test_file_globs[k]:
-                    same = False
-                    break
-        if not same:
+        if not _lists_equal(globs, self.test_file_globs):
             self.test_file_globs = globs.copy()
             self._tests_dirty = True
 
@@ -5127,9 +5094,7 @@ struct Editor(Copyable, Movable):
         self._hover_candidate_anchor_x = seg_x0 + cell_off
         self._hover_candidate_anchor_y = pos.y
         self._hover_candidate_emitted = False
-        self._hover_result_text = String("")
-        self._hover_result_row = -1
-        self._hover_result_col = -1
+        self._clear_hover_result()
 
     def _clear_hover_candidate(mut self):
         """Drop the dwell candidate and any displayed result. Used when
@@ -5138,12 +5103,7 @@ struct Editor(Copyable, Movable):
         if self._hover_candidate_row < 0 \
                 and len(self._hover_result_text.as_bytes()) == 0:
             return
-        self._hover_candidate_row = -1
-        self._hover_candidate_col = -1
-        self._hover_candidate_emitted = False
-        self._hover_result_text = String("")
-        self._hover_result_row = -1
-        self._hover_result_col = -1
+        self.clear_hover_state()
 
     def _maybe_request_diagnostic_menu(
         mut self, pos: Point, view: Rect,
@@ -5728,24 +5688,10 @@ struct Editor(Copyable, Movable):
         var w = l[2]
         var h = l[3]
         var label = l[4]
-        var r = Rect(l[0], l[1], l[0] + w, l[1] + h)
-        var attr = Attr(BLACK, LIGHT_GRAY)
-        # Drop shadow first (compositing under ``r``), then the box
-        # itself: fill bg, draw border, soft-wrap body text inside the
-        # 1-cell padding ring. ``put_wrapped_text`` wraps to the
-        # interior width and clips to its rect, so the message can't
-        # overflow the popup.
-        if not self.host_owns_shadows:
-            paint_drop_shadow(canvas, r)
-        var tt_painter = Painter(r)
-        tt_painter.fill(canvas, r, String(" "), attr)
-        tt_painter.draw_box(canvas, r, attr, False)
-        var msg_rect = Rect(
-            r.a.x + 2, r.a.y + 1,
-            r.b.x - 2, r.b.y - 1,
+        paint_tooltip_popup(
+            canvas, Rect(l[0], l[1], l[0] + w, l[1] + h), label,
+            shadow=not self.host_owns_shadows,
         )
-        if msg_rect.width() > 0 and msg_rect.height() > 0:
-            _ = canvas.put_wrapped_text(msg_rect, label, attr)
 
     def _hover_popup_layout(
         self, view: Rect,
@@ -5797,19 +5743,10 @@ struct Editor(Copyable, Movable):
         var w = l[2]
         var h = l[3]
         var label = l[4]
-        var r = Rect(l[0], l[1], l[0] + w, l[1] + h)
-        var attr = Attr(BLACK, LIGHT_GRAY)
-        if not self.host_owns_shadows:
-            paint_drop_shadow(canvas, r)
-        var tt_painter = Painter(r)
-        tt_painter.fill(canvas, r, String(" "), attr)
-        tt_painter.draw_box(canvas, r, attr, False)
-        var msg_rect = Rect(
-            r.a.x + 2, r.a.y + 1,
-            r.b.x - 2, r.b.y - 1,
+        paint_tooltip_popup(
+            canvas, Rect(l[0], l[1], l[0] + w, l[1] + h), label,
+            shadow=not self.host_owns_shadows,
         )
-        if msg_rect.width() > 0 and msg_rect.height() > 0:
-            _ = canvas.put_wrapped_text(msg_rect, label, attr)
 
     def active_overlay_bounds(self, view: Rect) -> Optional[Rect]:
         """Screen-space bounding rect of whichever screen-anchored body overlay

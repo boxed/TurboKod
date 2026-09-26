@@ -186,13 +186,18 @@ struct Painter(Copyable, Movable):
         return self.sub(rect.inset(1, 1))
 
 
-def paint_tooltip_popup(mut canvas: Canvas, r: Rect, text: String):
+def paint_tooltip_popup(
+    mut canvas: Canvas, r: Rect, text: String, shadow: Bool = True,
+):
     """Paint a tooltip popup at ``r``: drop shadow, a filled box with a
     border, and ``text`` wrapped into the interior. The standard chrome
-    shared by the status-bar message tooltip and the window-title tooltip;
-    callers own anchor and size computation (via ``popup_size_for_text``)."""
+    shared by the status-bar message tooltip and the editor's hover and
+    minimap popups; callers own anchor and size computation (via
+    ``popup_size_for_text``). ``shadow=False`` when the host draws the
+    shadow itself (the macOS app's translucent layer)."""
     var attr = Attr(BLACK, LIGHT_GRAY)
-    paint_drop_shadow(canvas, r)
+    if shadow:
+        paint_drop_shadow(canvas, r)
     var painter = Painter(r)
     painter.fill(canvas, r, String(" "), attr)
     painter.draw_box(canvas, r, attr, False)
