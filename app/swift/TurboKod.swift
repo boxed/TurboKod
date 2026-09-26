@@ -540,13 +540,17 @@ final class CellView: NSView {
         regionBuf.deallocate()
     }
 
-    private func ensureBuf(_ cells: Int) {
-        if cells > bufCells {
-            buf.deallocate()
-            buf = UnsafeMutablePointer<UInt32>.allocate(capacity: cells * CELL_WORDS)
-            bufCells = cells
+    // Grow-only cell buffer: reallocate when `cells` exceeds `capacity`.
+    private static func growCells(_ p: inout UnsafeMutablePointer<UInt32>,
+                                  _ capacity: inout Int, _ cells: Int) {
+        if cells > capacity {
+            p.deallocate()
+            p = UnsafeMutablePointer<UInt32>.allocate(capacity: cells * CELL_WORDS)
+            capacity = cells
         }
     }
+
+    private func ensureBuf(_ cells: Int) { Self.growCells(&buf, &bufCells, cells) }
 
     /// Run the Mojo per-frame tick + layout into `buf` and report whether the
     /// resulting frame differs from the one last presented. The timer uses this
@@ -778,12 +782,7 @@ final class CellView: NSView {
     }
 
     private func ensureRegionBuf(_ cells: Int) {
-        if cells > regionBufCells {
-            regionBuf.deallocate()
-            regionBuf = UnsafeMutablePointer<UInt32>.allocate(
-                capacity: cells * CELL_WORDS)
-            regionBufCells = cells
-        }
+        Self.growCells(&regionBuf, &regionBufCells, cells)
     }
 
     /// After the full-frame draw, overdraw the focused editor's body shifted
@@ -2870,14 +2869,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     @objc func newWindowAction() { _ = newWindow() }
-    @objc func openAction() {
-        if let v = keyView() { openFilePanel(v) }
-        else { openFilePanelInNewWindow() }
-    }
-    @objc func openProjectAction() {
-        if let v = keyView() { openProjectPanel(v) }
-        else { openProjectPanelInNewWindow() }
-    }
+    @objc func openAction() { openFilePanel(keyView()) }
+    @objc func openProjectAction() { openProjectPanel(keyView()) }
 
     // macOS "About TurboKod" — a small panel with a link to the project
     // on GitHub. Handled entirely in the Swift host (the item is a macOS
@@ -2929,12 +2922,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         switch action {
         case .none: break   // handled inside Desktop; nothing for the host
         case .quit: NSApp.terminate(nil)
-        case .openFile, .quickOpen:
-            if let v = view { openFilePanel(v) }
-            else { openFilePanelInNewWindow() }
-        case .openProject:
-            if let v = view { openProjectPanel(v) }
-            else { openProjectPanelInNewWindow() }
+        case .openFile, .quickOpen: openFilePanel(view)
+        case .openProject: openProjectPanel(view)
         case .newWindow:
             // Two paths share this code: a plain File ▸ New window (no
             // payload) and a Project ▸ <recent> pick (path queued on the
@@ -2974,29 +2963,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 toggleFloatingPanels(v.surface == .panels ? (v.mainPeer ?? v) : v)
             }
         }
-    }
-
-    // No-window variants of the file/project open panels: spawn a fresh
-    // window and load the user's pick into it. Used when the user fires
-    // Open… / Open project… from the menu while no windows are open.
-    private func openFilePanelInNewWindow() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = true
-        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
-        let nv = newWindow()
-        for url in panel.urls { openFile(nv, url.path) }
-    }
-
-    private func openProjectPanelInNewWindow() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let url = panel.urls.first else { return }
-        let nv = newWindow(frame: loadProjectFrame(url.path))
-        openProject(nv, url.path)
     }
 
     // Dock drag-and-drop and "Open With": macOS hands us the dropped
@@ -3050,10 +3016,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             tk_desktop_open_file_at(v.handle, ptr, len, Int64(line), Int64(character),
                                     Int64(v.cols()), Int64(v.rows()))
         }
-        if v.project == nil, let win = v.window {
-            win.title = URL(fileURLWithPath: path).lastPathComponent
-            win.representedURL = URL(fileURLWithPath: path)
-        }
+        if v.project == nil { setWindowPath(v, path) }
         v.needsDisplay = true
     }
 
@@ -3193,6 +3156,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return view
     }
 
+    // Title the window after `path` and give it that path's proxy icon.
+    private func setWindowPath(_ v: CellView, _ path: String) {
+        guard let win = v.window else { return }
+        let url = URL(fileURLWithPath: path)
+        win.title = url.lastPathComponent
+        win.representedURL = url
+    }
+
     func openFile(_ v: CellView, _ path: String) {
         withUTF8Arg(path) { ptr, len in
             tk_desktop_open_file(v.handle, ptr, len, Int64(v.cols()), Int64(v.rows()))
@@ -3201,10 +3172,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // file itself. When a project is loaded the title is the project
         // name and stays put even as additional files are opened — the
         // window represents the project, not the active buffer.
-        if v.project == nil, let win = v.window {
-            win.title = URL(fileURLWithPath: path).lastPathComponent
-            win.representedURL = URL(fileURLWithPath: path)
-        }
+        if v.project == nil { setWindowPath(v, path) }
         v.needsDisplay = true
     }
 
@@ -3217,10 +3185,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // AppKit picks up the icon from the URL itself (the OS folder icon
         // for a directory, the file's icon for a file). Cmd-click the title
         // for the path popover; drag the icon to other apps.
-        if let win = v.window {
-            win.title = URL(fileURLWithPath: path).lastPathComponent
-            win.representedURL = URL(fileURLWithPath: path)
-        }
+        setWindowPath(v, path)
         // Apply the per-display-config layout: size the window and float or
         // dock the tool panels per what was saved for the current set of
         // screens. New-window-at-launch paths pre-apply the main frame via
@@ -3231,35 +3196,38 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         v.needsDisplay = true
     }
 
-    func openFilePanel(_ v: CellView) {
+    // One NSOpenPanel for files (multi-select) or a directory (single).
+    // nil when the user cancels.
+    private func runOpenPanel(directories: Bool) -> [URL]? {
         let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = true
-        if panel.runModal() == .OK {
-            for url in panel.urls { openFile(v, url.path) }
-        }
+        panel.canChooseFiles = !directories
+        panel.canChooseDirectories = directories
+        panel.allowsMultipleSelection = !directories
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return nil }
+        return panel.urls
     }
 
-    func openProjectPanel(_ v: CellView) {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        if panel.runModal() == .OK, let url = panel.urls.first {
-            // A window already showing a project can't swap its root in
-            // place — the Mojo Desktop is one-project-per-window and
-            // open_project no-ops once a project is set (so the pick
-            // would silently do nothing and never reach the recents
-            // list). Open it in a fresh window instead, matching how
-            // Project ▸ <recent> behaves. An empty/file-only window
-            // adopts the project directly.
-            if v.project != nil {
-                let nv = newWindow(frame: loadProjectFrame(url.path))
-                openProject(nv, url.path)
-            } else {
-                openProject(v, url.path)
-            }
+    // File ▸ Open…: load the picks into `v`, or into a fresh window when
+    // no window is open (dropping the user's pick on the floor is worse).
+    func openFilePanel(_ v: CellView?) {
+        guard let urls = runOpenPanel(directories: false) else { return }
+        let target = v ?? newWindow()
+        for url in urls { openFile(target, url.path) }
+    }
+
+    func openProjectPanel(_ v: CellView?) {
+        guard let url = runOpenPanel(directories: true)?.first else { return }
+        // A window already showing a project can't swap its root in
+        // place — the Mojo Desktop is one-project-per-window and
+        // open_project no-ops once a project is set (so the pick
+        // would silently do nothing and never reach the recents
+        // list). Open it in a fresh window instead, matching how
+        // Project ▸ <recent> behaves. An empty/file-only window
+        // adopts the project directly.
+        if let v = v, v.project == nil {
+            openProject(v, url.path)
+        } else {
+            openProject(newWindow(frame: loadProjectFrame(url.path)), url.path)
         }
     }
 
