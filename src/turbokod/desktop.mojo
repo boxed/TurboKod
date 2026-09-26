@@ -11226,13 +11226,7 @@ struct Desktop(Movable):
         # console-category line removes the ambiguity. Also visible
         # before the first event arrives, which matters when the
         # adapter crashes silently.
-        if len(self.dap.spawn_argv) > 0:
-            var line = String("$ ")
-            for k in range(len(self.dap.spawn_argv)):
-                if k > 0:
-                    line = line + String(" ")
-                line = line + self.dap.spawn_argv[k]
-            self.debug_pane.append_output(line, UInt8(2))   # PANE_OUT_CONSOLE
+        if self._echo_dap_spawn_line():
             self.debug_pane.visible = True
             # Surface the floating panel window on this run-to-cursor —
             # orderFront, not focus (keyboard focus stays in the editor).
@@ -11435,13 +11429,7 @@ struct Desktop(Movable):
             return
         # Stop any in-flight run for this target — the user just
         # asked for a debug session of the same thing.
-        self.run_session.terminate()
-        self._run_output_held = False
-        # Tear down any prior debug session before starting a new one.
-        if self.dap.is_active():
-            self.dap.shutdown()
-        if self.dap.is_failed() or self.dap.is_terminated():
-            self.dap.reset_for_restart()
+        self._reset_debug_slot()
         var cwd = resolved_cwd(self.project.value(), target.cwd)
         var program_seed = resolve_python_interpreter(
             self.project.value(), target.program,
@@ -11472,22 +11460,42 @@ struct Desktop(Movable):
             return
         self._maybe_install_python_lsp_in_venv(target.debug_language, venv_dir)
         self.dap.start(spec, program, cwd, args^, env=target.env.copy())
-        self.debug_pane.clear_all()
-        if len(self.dap.spawn_argv) > 0:
-            var line = String("$ ")
-            for k in range(len(self.dap.spawn_argv)):
-                if k > 0:
-                    line = line + String(" ")
-                line = line + self.dap.spawn_argv[k]
-            self.debug_pane.append_output(line, UInt8(2))  # PANE_OUT_CONSOLE
-        self.debug_pane.visible = True
-        # Surface the floating panel window on this (re)start — orderFront,
-        # not focus (the host keeps keyboard focus in the editor).
-        self.panel_front_request = True
+        self._show_dap_spawn()
         self.status_bar.set_message(
             String("debugging ") + target.name + String("…"),
             Attr(BLACK, LIGHT_GRAY),
         )
+
+    def _python_test_root(mut self, label: String) -> String:
+        """The project root when its tests can run (a Python project), else
+        ``""`` after explaining why on the status bar. The active target's
+        language wins when set (the user already said what kind of project
+        this is); otherwise the project root is probed for markers."""
+        if not self.project:
+            self.status_bar.set_message(
+                label + String(": open a project first"),
+                Attr(BLACK, LIGHT_GRAY),
+            )
+            return String("")
+        var project_root = self.project.value()
+        var language = String("")
+        if self.targets.has_active():
+            language = self.targets.targets[self.targets.active].debug_language
+        if len(language.as_bytes()) == 0:
+            language = detect_project_language(project_root)
+        if language == String("python"):
+            return project_root
+        var hint: String
+        if len(language.as_bytes()) == 0:
+            hint = label + String(
+                ": couldn't detect project language —"
+                " no pyproject.toml / setup.py / *.py at root"
+            )
+        else:
+            hint = label + String(": no test runner configured for '") \
+                + language + String("'")
+        self.status_bar.set_message(hint, Attr(LIGHT_RED, LIGHT_GRAY))
+        return String("")
 
     def _target_test(mut self, node_id: String = String("")):
         """Cmd+T: run the project's test suite.
@@ -11513,39 +11521,10 @@ struct Desktop(Movable):
         Re-running tests terminates only the previous *test* child, not
         the target run.
         """
-        if not self.project:
-            self.status_bar.set_message(
-                String("test: open a project first"),
-                Attr(BLACK, LIGHT_GRAY),
-            )
+        var project_root = self._python_test_root(String("test"))
+        if len(project_root.as_bytes()) == 0:
             return
-        var project_root = self.project.value()
-        # Active-target language wins when set (the user has already
-        # told us what kind of project this is via the targets dialog);
-        # otherwise probe the project root for known markers.
-        var language = String("")
-        if self.targets.has_active():
-            language = self.targets.targets[self.targets.active].debug_language
-        if len(language.as_bytes()) == 0:
-            language = detect_project_language(project_root)
-        if language != String("python"):
-            var hint: String
-            if len(language.as_bytes()) == 0:
-                hint = String(
-                    "test: couldn't detect project language —"
-                    " no pyproject.toml / setup.py / *.py at root"
-                )
-            else:
-                hint = String("test: no test runner configured for '") \
-                    + language + String("'")
-            self.status_bar.set_message(hint, Attr(LIGHT_RED, LIGHT_GRAY))
-            return
-        var program_seed = resolve_python_interpreter(
-            project_root, String("python"),
-        )
-        var program = resolved_program(
-            project_root, String(""), program_seed,
-        )
+        var program = _project_python(project_root)
         var args = List[String]()
         args.append(String("-m"))
         args.append(String("pytest"))
@@ -11591,30 +11570,10 @@ struct Desktop(Movable):
         ``_target_debug`` for adapter setup, debugpy install gating,
         and the run/debug single-slot teardown.
         """
-        if not self.project:
-            self.status_bar.set_message(
-                String("test (debug): open a project first"),
-                Attr(BLACK, LIGHT_GRAY),
-            )
+        var project_root = self._python_test_root(String("test (debug)"))
+        if len(project_root.as_bytes()) == 0:
             return
-        var project_root = self.project.value()
-        var language = String("")
-        if self.targets.has_active():
-            language = self.targets.targets[self.targets.active].debug_language
-        if len(language.as_bytes()) == 0:
-            language = detect_project_language(project_root)
-        if language != String("python"):
-            var hint: String
-            if len(language.as_bytes()) == 0:
-                hint = String(
-                    "test (debug): couldn't detect project language —"
-                    " no pyproject.toml / setup.py / *.py at root"
-                )
-            else:
-                hint = String("test (debug): no test runner configured for '") \
-                    + language + String("'")
-            self.status_bar.set_message(hint, Attr(LIGHT_RED, LIGHT_GRAY))
-            return
+        var language = String("python")
         var deb_idx = find_debugger_for_language(self.dap_specs, language)
         if deb_idx < 0:
             self.status_bar.set_message(
@@ -11623,12 +11582,7 @@ struct Desktop(Movable):
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
             return
-        var program_seed = resolve_python_interpreter(
-            project_root, String("python"),
-        )
-        var program = resolved_program(
-            project_root, String(""), program_seed,
-        )
+        var program = _project_python(project_root)
         var args = List[String]()
         args.append(String("-m"))
         args.append(String("pytest"))
@@ -11649,25 +11603,9 @@ struct Desktop(Movable):
             return
         self._maybe_install_python_lsp_in_venv(language, venv_dir)
         # Stop any prior run / debug — the debug pane is single-slot.
-        self.run_session.terminate()
-        self._run_output_held = False
-        if self.dap.is_active():
-            self.dap.shutdown()
-        if self.dap.is_failed() or self.dap.is_terminated():
-            self.dap.reset_for_restart()
+        self._reset_debug_slot()
         self.dap.start(spec, program, project_root, args^)
-        self.debug_pane.clear_all()
-        if len(self.dap.spawn_argv) > 0:
-            var line = String("$ ")
-            for k in range(len(self.dap.spawn_argv)):
-                if k > 0:
-                    line = line + String(" ")
-                line = line + self.dap.spawn_argv[k]
-            self.debug_pane.append_output(line, UInt8(2))  # PANE_OUT_CONSOLE
-        self.debug_pane.visible = True
-        # Surface the floating panel window on this (re)start — orderFront,
-        # not focus (the host keeps keyboard focus in the editor).
-        self.panel_front_request = True
+        self._show_dap_spawn()
         self.status_bar.set_message(
             String("debugging tests…"),
             Attr(BLACK, LIGHT_GRAY),
@@ -13435,18 +13373,41 @@ struct Desktop(Movable):
         self._clear_pending_dap_start()
         self._maybe_install_python_lsp_in_venv(String("python"), venv_dir)
         self.dap.start(spec, program, cwd, args^, env=env)
+        self._show_dap_spawn()
+
+    def _echo_dap_spawn_line(mut self) -> Bool:
+        """Log the adapter's resolved ``$ argv`` line to the debug pane so
+        the user sees exactly what was spawned (and which adapter was
+        picked) before its first event. False when nothing was spawned."""
+        if len(self.dap.spawn_argv) == 0:
+            return False
+        self.debug_pane.append_output(
+            String("$ ") + String(" ").join(self.dap.spawn_argv),
+            UInt8(2),  # PANE_OUT_CONSOLE
+        )
+        return True
+
+    def _show_dap_spawn(mut self):
+        """Fresh debug pane for a just-started session: clear it, echo the
+        spawn line, show it, and surface the floating panel window
+        (orderFront, not focus — keyboard focus stays in the editor)."""
         self.debug_pane.clear_all()
-        if len(self.dap.spawn_argv) > 0:
-            var line = String("$ ")
-            for k in range(len(self.dap.spawn_argv)):
-                if k > 0:
-                    line = line + String(" ")
-                line = line + self.dap.spawn_argv[k]
-            self.debug_pane.append_output(line, UInt8(2))   # PANE_OUT_CONSOLE
+        _ = self._echo_dap_spawn_line()
         self.debug_pane.visible = True
-        # Surface the floating panel window on this (re)start — orderFront,
-        # not focus (the host keeps keyboard focus in the editor).
         self.panel_front_request = True
+
+    def _reset_debug_slot(mut self):
+        """Free the single run/debug slot for a new debug session: stop
+        any plain run, shut down a live DAP session, and return a
+        terminated / failed manager to NOT_STARTED. ``reset_for_restart``
+        keeps the user's breakpoints and exception filters, which
+        replacing ``self.dap`` would drop."""
+        self.run_session.terminate()
+        self._run_output_held = False
+        if self.dap.is_active():
+            self.dap.shutdown()
+        if self.dap.is_failed() or self.dap.is_terminated():
+            self.dap.reset_for_restart()
 
     def _maybe_install_python_lsp_in_venv(
         mut self, language_id: String, venv_dir: String,
@@ -15853,6 +15814,15 @@ def _category_to_pane(category: String) -> UInt8:
     if category == String("console") or category == String("important"):
         return UInt8(2)   # PANE_OUT_CONSOLE
     return UInt8(0)       # PANE_OUT_STDOUT
+
+
+def _project_python(project_root: String) -> String:
+    """The interpreter to run project tools with: the project venv's
+    ``python`` when there is one, else ``python`` from PATH."""
+    return resolved_program(
+        project_root, String(""),
+        resolve_python_interpreter(project_root, String("python")),
+    )
 
 
 def _same_file(a: String, b: String) -> Bool:
