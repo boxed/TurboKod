@@ -2588,9 +2588,7 @@ struct Desktop(Movable):
         host shifts off the top (``sub``), the partially-visible bottom line,
         and a rubber-band edge all have content. The host composites this
         clipped to the interior, translated up by ``(sub + frac) * CELL_H``."""
-        if win_idx < 0 or win_idx >= len(self.windows.windows):
-            return
-        if not self.windows.windows[win_idx].is_editor:
+        if not self._is_editor_at(win_idx):
             return
         # Render from the *already-flushed* state — do NOT flush here. The
         # main `paint` (which also paints the right-edge minimap gutter) runs
@@ -2613,8 +2611,7 @@ struct Desktop(Movable):
         """Seed a smooth-scroll gesture on editor ``win_idx``: returns its
         current vertical position and the maximum, both as continuous
         visual-row coordinates. Returns ``(0, 0)`` for a bad index."""
-        if win_idx < 0 or win_idx >= len(self.windows.windows) \
-                or not self.windows.windows[win_idx].is_editor:
+        if not self._is_editor_at(win_idx):
             return (0.0, 0.0)
         var interior = self.windows.windows[win_idx].interior()
         return self.windows.windows[win_idx].editor.smooth_begin(interior)
@@ -2622,8 +2619,7 @@ struct Desktop(Movable):
     def smooth_set(mut self, win_idx: Int, screen: Rect, vis: Float64):
         """Apply a host-driven smooth-scroll position (a global visual-row
         coordinate) to editor ``win_idx``."""
-        if win_idx < 0 or win_idx >= len(self.windows.windows) \
-                or not self.windows.windows[win_idx].is_editor:
+        if not self._is_editor_at(win_idx):
             return
         var interior = self.windows.windows[win_idx].interior()
         self.windows.windows[win_idx].editor.smooth_set(interior, vis)
@@ -2650,8 +2646,7 @@ struct Desktop(Movable):
     def minimap_to(mut self, win_idx: Int, frac: Float64):
         """Scroll editor ``win_idx`` proportionally from a sub-cell-precise
         minimap / scrollbar drag (``frac`` in [0, 1])."""
-        if win_idx < 0 or win_idx >= len(self.windows.windows) \
-                or not self.windows.windows[win_idx].is_editor:
+        if not self._is_editor_at(win_idx):
             return
         var interior = self.windows.windows[win_idx].interior()
         self.windows.windows[win_idx].editor.minimap_to(interior, frac)
@@ -4880,9 +4875,7 @@ struct Desktop(Movable):
             existing = len(self.windows.windows) - 1
         else:
             self.windows.focus_by_index(existing)
-        if existing < 0 or existing >= len(self.windows.windows):
-            return
-        if not self.windows.windows[existing].is_editor:
+        if not self._is_editor_at(existing):
             return
         var lc = self.windows.windows[existing].editor.buffer.line_count()
         var row = line
@@ -4988,11 +4981,7 @@ struct Desktop(Movable):
         to suggest). Truly unknown extensions stay a silent no-op.
         """
         debug_log(String("[_maybe_lsp_open] ENTER idx=") + String(idx))
-        if idx < 0 or idx >= len(self.windows.windows):
-            return
-        if not self.windows.windows[idx].is_editor:
-            return
-        var path = self.windows.windows[idx].editor.file_path
+        var path = self._editor_path_at(idx)
         if len(path.as_bytes()) == 0:
             return
         debug_log(String("[_maybe_lsp_open] path=") + path)
@@ -5417,6 +5406,18 @@ struct Desktop(Movable):
             if self.lsp_languages[i] == lang:
                 return i
         return -1
+
+    def _is_editor_at(self, win_idx: Int) -> Bool:
+        """True when ``win_idx`` is in range and names an editor window."""
+        return 0 <= win_idx and win_idx < len(self.windows.windows) \
+            and self.windows.windows[win_idx].is_editor
+
+    def _editor_path_at(self, win_idx: Int) -> String:
+        """The file path of editor window ``win_idx``; ``""`` when the
+        index is out of range, not an editor, or the buffer is unsaved."""
+        if not self._is_editor_at(win_idx):
+            return String("")
+        return self.windows.windows[win_idx].editor.file_path
 
     def _ready_lsp_for_path(
         self, path: String, capability: String = String(""),
@@ -6665,9 +6666,7 @@ struct Desktop(Movable):
         window is removed — without that, the next refresh would see it
         already gone and the user's last scroll position would be lost.
         No-op for non-editors and Untitled buffers."""
-        if idx < 0 or idx >= len(self.windows.windows):
-            return
-        if not self.windows.windows[idx].is_editor:
+        if not self._is_editor_at(idx):
             return
         # Transient windows (review buffers) are never real documents:
         # recording their scroll/cursor would overwrite the saved view state
@@ -9508,11 +9507,7 @@ struct Desktop(Movable):
                 and not self.config.lsp_document_colors \
                 and not self.config.lsp_document_links:
             return
-        if win_idx < 0 or win_idx >= len(self.windows.windows):
-            return
-        if not self.windows.windows[win_idx].is_editor:
-            return
-        var path = self.windows.windows[win_idx].editor.file_path
+        var path = self._editor_path_at(win_idx)
         if len(path.as_bytes()) == 0:
             return
         var li = self._ready_lsp_for_path(path)
@@ -9553,11 +9548,7 @@ struct Desktop(Movable):
         when the server supports it, so the editor's smart-select grow can
         walk semantic ranges. Not behind a user setting — it transparently
         improves a user-initiated action (grow/shrink selection)."""
-        if win_idx < 0 or win_idx >= len(self.windows.windows):
-            return
-        if not self.windows.windows[win_idx].is_editor:
-            return
-        var path = self.windows.windows[win_idx].editor.file_path
+        var path = self._editor_path_at(win_idx)
         if len(path.as_bytes()) == 0:
             return
         var row = self.windows.windows[win_idx].editor.selections[0].row
@@ -9577,11 +9568,7 @@ struct Desktop(Movable):
         key (``path|linecount``) changes and the server supports it. Not
         behind a user setting — it just adds a dim marker on foldable
         blocks."""
-        if win_idx < 0 or win_idx >= len(self.windows.windows):
-            return
-        if not self.windows.windows[win_idx].is_editor:
-            return
-        var path = self.windows.windows[win_idx].editor.file_path
+        var path = self._editor_path_at(win_idx)
         if len(path.as_bytes()) == 0:
             return
         var li = self._ready_lsp_for_path(path, String("foldingRangeProvider"))
@@ -9702,11 +9689,7 @@ struct Desktop(Movable):
                     self.windows.windows[win_idx].editor \
                         .clear_document_highlights()
             return
-        if win_idx < 0 or win_idx >= len(self.windows.windows):
-            return
-        if not self.windows.windows[win_idx].is_editor:
-            return
-        var path = self.windows.windows[win_idx].editor.file_path
+        var path = self._editor_path_at(win_idx)
         if len(path.as_bytes()) == 0:
             return
         var row = self.windows.windows[win_idx].editor.selections[0].row
@@ -9738,9 +9721,7 @@ struct Desktop(Movable):
         never waits on the server. Fires at most once per item (the
         ``resolved`` flag gates re-asks) and only when the server defers
         these fields (``resolveProvider``)."""
-        if win_idx < 0 or win_idx >= len(self.windows.windows):
-            return
-        if not self.windows.windows[win_idx].is_editor:
+        if not self._is_editor_at(win_idx):
             return
         if not self.windows.windows[win_idx].editor.completion_popup_visible:
             return
@@ -11824,9 +11805,7 @@ struct Desktop(Movable):
             existing = len(self.windows.windows) - 1
         else:
             self.windows.focus_by_index(existing)
-        if existing < 0 or existing >= len(self.windows.windows):
-            return
-        if not self.windows.windows[existing].is_editor:
+        if not self._is_editor_at(existing):
             return
         # Clamp: the location may be stale (a server answering for an older
         # buffer, a nav-history point in a file edited since).
@@ -12175,9 +12154,7 @@ struct Desktop(Movable):
         while zi >= 0:
             var widx = self.windows.z_order[zi]
             zi -= 1
-            if widx < 0 or widx >= len(self.windows.windows):
-                continue
-            if not self.windows.windows[widx].is_editor:
+            if not self._is_editor_at(widx):
                 continue
             var p = self.windows.windows[widx].editor.file_path
             if len(p.as_bytes()) == 0:
@@ -13343,9 +13320,7 @@ struct Desktop(Movable):
         focused editor's cursor (if any). No-op for buffers with no
         identifier under the cursor (whitespace, punctuation, etc.) —
         the user just gets the full entry list."""
-        if win_idx < 0 or win_idx >= len(self.windows.windows):
-            return
-        if not self.windows.windows[win_idx].is_editor:
+        if not self._is_editor_at(win_idx):
             return
         ref editor = self.windows.windows[win_idx].editor
         var row = editor.selections[0].row
@@ -14151,9 +14126,7 @@ struct Desktop(Movable):
         server is ready and an identifier sits at ``(row, col)``, then
         opens the name prompt and stashes the origin so the submit handler
         can fire ``textDocument/rename`` even if the cursor later moved."""
-        if win_idx < 0 or win_idx >= len(self.windows.windows):
-            return
-        if not self.windows.windows[win_idx].is_editor:
+        if not self._is_editor_at(win_idx):
             return
         if len(word.as_bytes()) == 0:
             self.status_bar.set_message(
@@ -14299,9 +14272,7 @@ struct Desktop(Movable):
                 except:
                     continue
                 win_idx = self._find_window_for_path(path)
-            if win_idx < 0 or win_idx >= len(self.windows.windows):
-                continue
-            if not self.windows.windows[win_idx].is_editor:
+            if not self._is_editor_at(win_idx):
                 continue
             # ``apply_code_action_edits`` filters by the editor's own URI,
             # so handing it just this file's group applies exactly that.
@@ -14691,9 +14662,7 @@ struct Desktop(Movable):
         self.editor_context_menu.close()
         self._ctx_menu_editor_idx = -1
         self._ctx_menu_word = String("")
-        if idx < 0 or idx >= len(self.windows.windows):
-            return
-        if not self.windows.windows[idx].is_editor:
+        if not self._is_editor_at(idx):
             return
         if act == CTX_MENU_ACTION_RENAME:
             self._begin_rename_at(idx, row, col, word^)
@@ -14847,11 +14816,7 @@ struct Desktop(Movable):
         """Fire a typeDefinition / implementation / declaration request
         for the symbol at ``(row, col)`` in the given editor. The resolved
         target is drained in ``lsp_tick`` and jumped to."""
-        if win_idx < 0 or win_idx >= len(self.windows.windows):
-            return
-        if not self.windows.windows[win_idx].is_editor:
-            return
-        var path = self.windows.windows[win_idx].editor.file_path
+        var path = self._editor_path_at(win_idx)
         if len(path.as_bytes()) == 0:
             return
         var lsp_idx = self._ready_lsp_for_path(path)
