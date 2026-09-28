@@ -4031,7 +4031,10 @@ struct Desktop(Movable):
         # ``_review_arm_editor`` (and re-computed per edit when editable). The
         # window is closed on exit unless the user left unsaved edits in it
         # (see ``_review_teardown``).
-        var editable = self.review.is_editable() and not binary
+        # A deleted file has no worktree file to edit — and saving the empty
+        # buffer would resurrect it — so it gets a read-only buffer too.
+        var editable = self.review.is_editable() and not binary \
+            and not self.review.current_is_deleted()
         var idx2: Int
         if editable:
             try:
@@ -4205,7 +4208,14 @@ struct Desktop(Movable):
                     boundary = r
             else:
                 r += 1
-        if not found:
+        if total_chunks == 0 and self.review.current_changed_lines() > 0:
+            # Only removed lines (a deleted file, or a file that just lost
+            # some lines): the gutter has no +/~ chunk, but the file is still
+            # one change to review, not "0 of 0".
+            total_chunks = 1
+            cur_chunk = 1
+            boundary = -1
+        elif not found:
             cur_chunk = total_chunks
             boundary = -1
         elif cur_chunk == total_chunks:

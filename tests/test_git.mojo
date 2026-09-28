@@ -5,6 +5,7 @@ One of the per-topic suites split out of the former
 and ``scripts/run_tests.sh`` runs every suite.
 """
 
+from std.collections.optional import Optional
 from std.ffi import external_call
 from std.testing import assert_equal, assert_false, assert_true
 from turbokod.canvas import Canvas
@@ -688,6 +689,66 @@ def test_review_progress_spans_whole_changeset() raises:
     rv.build_from_pairs(paths, befores, afters)
     assert_equal(len(rv.file_changed_lines), len(rv.file_paths))
     assert_equal(len(rv.file_changed_lines), 3)
+
+
+def test_review_includes_added_and_deleted_files() raises:
+    """The unstaged review must list a brand-new (untracked) file — ``git
+    diff`` never reports one — and must offer "Unstaged changes" when that's
+    the only change. A deleted file is listed, flagged, hosted read-only (an
+    edit+save would resurrect it) and counts as one change rather than
+    "0 of 0", even though the gutter has no +/~ chunk for it."""
+    var dir = _temp_path(String("_review_add_del"))
+    _rm_rf(dir)
+    _ensure_dir(dir)
+    if _run_git(dir, string_list(String("init"), String("-q"))) != 0:
+        _rm_rf(dir)
+        return
+    _ = _run_git(dir, string_list(
+        String("config"), String("user.email"), String("test@example.com"),
+    ))
+    _ = _run_git(dir, string_list(String("config"), String("user.name"), String("T")))
+    assert_true(write_file(join_path(dir, String("gone.txt")), String("x\ny\n")))
+    _ = _run_git(dir, string_list(String("add"), String(".")))
+    _ = _run_git(dir, string_list(String("commit"), String("-qm"), String("one")))
+
+    # Only an untracked file: the picker must still offer the unstaged review.
+    assert_true(write_file(join_path(dir, String("added.txt")), String("new\n")))
+    var rv = ReviewMode()
+    rv.open(dir)
+    assert_equal(rv.picker_labels[0], String("Unstaged changes"))
+    rv.close()
+
+    _ = external_call["unlink", Int32](
+        (join_path(dir, String("gone.txt")) + String("\0")).unsafe_ptr()
+    )
+    var d = Desktop()
+    d.project = Optional[String](dir)
+    d.review.open(dir)
+    d.review.picker_cursor = 0
+    d.review._start_review()
+    assert_equal(d.review.file_count(), 2)
+    assert_equal(d.review.file_paths[0], String("added.txt"))
+    assert_equal(d.review.file_after[0], String("new\n"))
+    assert_false(d.review.file_deleted[0])
+    assert_equal(d.review.file_paths[1], String("gone.txt"))
+    assert_true(d.review.file_deleted[1])
+
+    var screen = Rect(0, 0, 100, 30)
+    var canvas = Canvas(100, 30)
+    d.paint(canvas, screen)
+    d.paint(canvas, screen)
+    assert_equal(d.review.current_path(), String("added.txt"))
+    assert_equal(d.review.change_total, 1)
+    d._review_goto_change(1)
+    d.paint(canvas, screen)
+    d.paint(canvas, screen)
+    assert_equal(d.review.current_path(), String("gone.txt"))
+    assert_true(d.windows.windows[d._review_win_idx].editor.read_only)
+    assert_equal(d.review.change_index, 1)
+    assert_equal(d.review.change_total, 1)
+    d.review.close()
+    d._review_teardown()
+    _rm_rf(dir)
 
 
 def test_git_gutter_no_diff_when_buffer_matches_crlf_head() raises:
@@ -4666,6 +4727,7 @@ def main() raises:
     test_review_teardown_saves_and_closes_editable_window()
     test_review_goto_change_saves_edits()
     test_review_progress_spans_whole_changeset()
+    test_review_includes_added_and_deleted_files()
     test_git_gutter_no_diff_when_buffer_matches_crlf_head()
     test_gitignore_matches_directory_pattern()
     test_gitignore_matches_glob_and_negate()

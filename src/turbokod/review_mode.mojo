@@ -45,8 +45,9 @@ from .diff import (
 from .file_io import join_path, read_file
 from .geometry import Point, Rect
 from .git_changes import (
-    compute_staged_diff, compute_unstaged_diff, fetch_blob_text,
-    fetch_commit_show, fetch_git_commits, parse_unified_diff_files,
+    ChangedFile, compute_staged_diff, compute_unstaged_diff,
+    compute_untracked_diff, fetch_blob_text, fetch_commit_show,
+    fetch_git_commits, fetch_git_status, parse_unified_diff_files,
     split_show_output,
 )
 from .painter import Painter
@@ -83,6 +84,45 @@ def _diff_is_binary(diff_text: String) -> Bool:
         if starts_with(lines[i], String("GIT binary patch")):
             return True
     return False
+
+
+def _diff_is_deletion(diff_text: String) -> Bool:
+    """``True`` when this file's diff deletes it outright. The review body
+    for such a file is a read-only empty buffer with the old content woven
+    in as removed lines — there's no worktree file left to edit."""
+    var lines = split_lines_no_trailing(diff_text)
+    for i in range(len(lines)):
+        if starts_with(lines[i], String("deleted file mode")):
+            return True
+        if lines[i] == String("+++ /dev/null"):
+            return True
+    return False
+
+
+def _untracked_paths(root: String) -> List[String]:
+    """Repo-relative paths of the untracked (``??``) files. ``git diff``
+    never reports them, but to a reviewer a brand-new file is as much a
+    part of the unstaged changes as an edited one."""
+    var out = List[String]()
+    var statuses = fetch_git_status(root)
+    for i in range(len(statuses)):
+        if Int(statuses[i].staged) == 0x3F and Int(statuses[i].worktree) == 0x3F:
+            out.append(statuses[i].path)
+    return out^
+
+
+def _add_untracked(mut changed: List[ChangedFile], root: String):
+    """Merge the untracked files into ``changed`` as all-additions diffs,
+    keeping the list in path order (both git sources are already sorted)."""
+    var paths = _untracked_paths(root)
+    for i in range(len(paths)):
+        var cf = ChangedFile(paths[i], compute_untracked_diff(root, paths[i]))
+        var at = len(changed)
+        for j in range(len(changed)):
+            if changed[j].path > paths[i]:
+                at = j
+                break
+        changed.insert(at, cf)
 
 
 def _count_changed_lines(before: String, after: String, is_binary: Bool) -> Int:
@@ -124,6 +164,8 @@ struct ReviewMode(Movable):
     var file_before: List[String]
     var file_after: List[String]
     var file_binary: List[Bool]
+    # True for a file the changeset deletes — its body is read-only.
+    var file_deleted: List[Bool]
     # Changed (added + modified) line count per file, computed once at build.
     # Drives the line-weighted progress bar: a file's / change's share of the
     # bar is proportional to how many lines it touches, not just its count.
@@ -192,6 +234,7 @@ struct ReviewMode(Movable):
         self.file_before = List[String]()
         self.file_after = List[String]()
         self.file_binary = List[Bool]()
+        self.file_deleted = List[Bool]()
         self.file_changed_lines = List[Int]()
         self.cur_file = 0
         self.change_index = 0
@@ -280,6 +323,7 @@ struct ReviewMode(Movable):
         self.file_before = List[String]()
         self.file_after = List[String]()
         self.file_binary = List[Bool]()
+        self.file_deleted = List[Bool]()
         # Must be cleared too — ``_build_model`` *appends* to it, so leaving
         # stale entries here would misalign it with ``file_paths`` and inflate
         # the progress-bar denominator on every re-opened review.
@@ -297,8 +341,9 @@ struct ReviewMode(Movable):
         self.picker_sha = List[String]()
         # Only offer the unstaged / staged entries when there's actually a
         # diff on that side — an empty ``git diff`` would just open a blank
-        # reviewer, so don't list it.
-        if len(compute_unstaged_diff(self.root).as_bytes()) > 0:
+        # reviewer, so don't list it. New untracked files count as unstaged.
+        if len(compute_unstaged_diff(self.root).as_bytes()) > 0 \
+                or len(_untracked_paths(self.root)) > 0:
             self.picker_labels.append(String("Unstaged changes"))
             self.picker_kind.append(_SRC_UNSTAGED)
             self.picker_sha.append(String(""))
@@ -344,6 +389,8 @@ struct ReviewMode(Movable):
         else:
             diff_text = _extract_diff_part(fetch_commit_show(self.root, self.sha))
         var changed = parse_unified_diff_files(diff_text)
+        if self.src == _SRC_UNSTAGED:
+            _add_untracked(changed, self.root)
         for fi in range(len(changed)):
             var cf = changed[fi]
             var is_binary = _diff_is_binary(cf.diff)
@@ -372,6 +419,7 @@ struct ReviewMode(Movable):
             self.file_before.append(before)
             self.file_after.append(after)
             self.file_binary.append(is_binary)
+            self.file_deleted.append(_diff_is_deletion(cf.diff))
             self.file_changed_lines.append(
                 _count_changed_lines(before, after, is_binary)
             )
@@ -389,6 +437,7 @@ struct ReviewMode(Movable):
             self.file_before.append(befores[i])
             self.file_after.append(afters[i])
             self.file_binary.append(False)
+            self.file_deleted.append(False)
             self.file_changed_lines.append(
                 _count_changed_lines(befores[i], afters[i], False)
             )
@@ -422,6 +471,16 @@ struct ReviewMode(Movable):
         if 0 <= self.cur_file and self.cur_file < len(self.file_binary):
             return self.file_binary[self.cur_file]
         return False
+
+    def current_is_deleted(self) -> Bool:
+        if 0 <= self.cur_file and self.cur_file < len(self.file_deleted):
+            return self.file_deleted[self.cur_file]
+        return False
+
+    def current_changed_lines(self) -> Int:
+        if 0 <= self.cur_file and self.cur_file < len(self.file_changed_lines):
+            return self.file_changed_lines[self.cur_file]
+        return 0
 
     def is_editable(self) -> Bool:
         """Only unstaged reviews edit the live worktree file."""
