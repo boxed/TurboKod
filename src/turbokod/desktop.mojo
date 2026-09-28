@@ -333,6 +333,7 @@ comptime _PA_RENAME_FILE      = String("file:rename")
 comptime _PA_DELETE_FILE      = String("file:delete")
 comptime EDITOR_TOGGLE_COMMENT = String("edit:comment")
 comptime EDITOR_TOGGLE_CASE   = String("edit:case")
+comptime EDITOR_SORT_LINES    = String("edit:sort_lines")
 comptime EDITOR_TOGGLE_LINE_NUMBERS = String("view:line_numbers")
 # View-menu toggle for the keyword-argument "soft compress" display option
 # (``foo(a=a)`` → ``foo(=a)`` off the caret line). Display-only; the flag
@@ -8528,6 +8529,11 @@ struct Desktop(Movable):
             var fe = self._focused_editor_idx()
             if fe >= 0:
                 self.windows.windows[fe].editor.toggle_case()
+            return Optional[String]()
+        if action == EDITOR_SORT_LINES:
+            var fe = self._focused_editor_idx()
+            if fe >= 0:
+                self.windows.windows[fe].editor.sort_lines()
             return Optional[String]()
         if action == EDITOR_TOGGLE_LINE_NUMBERS:
             self.config.line_numbers = not self.config.line_numbers

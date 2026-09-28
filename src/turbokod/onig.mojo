@@ -100,6 +100,43 @@ def onig_global_init() raises:
     _ = _resolve_syntax()
 
 
+# ``INTERNAL_ONIGENC_CASE_FOLD_MULTI_CHAR`` — full Unicode case folding,
+# where one codepoint may fold to several (``ß`` -> ``ss``).
+comptime _ONIGENC_CASE_FOLD_MULTI_CHAR: UInt32 = 1 << 30
+# ``ONIGENC_MBC_CASE_FOLD_MAXLEN``: the most bytes one fold step writes.
+comptime _ONIGENC_MBC_CASE_FOLD_MAXLEN: Int = 18
+
+
+def unicode_case_fold(s: String) raises -> String:
+    """Full Unicode case fold of ``s`` (``Å`` -> ``å``, ``ß`` -> ``ss``),
+    using libonig's own tables — the ones its ``(?i)`` matching folds with,
+    so we don't carry a second copy of the Unicode data.
+
+    ``onigenc_unicode_mbc_case_fold`` is what ``OnigEncodingUTF8``'s
+    ``mbc_case_fold`` slot points at; we call the exported function
+    directly because ``external_call`` can't call through a struct's
+    function pointer. Each call folds one codepoint and advances the
+    cursor it's handed."""
+    var b = s.as_bytes()
+    var n = len(b)
+    var enc = _resolve_enc()
+    var cursor = List[Int]()
+    cursor.append(Int(b.unsafe_ptr()))
+    var stop = Int(b.unsafe_ptr()) + n
+    var buf = List[UInt8](length=_ONIGENC_MBC_CASE_FOLD_MAXLEN, fill=0)
+    var out = List[UInt8](capacity=n)
+    while cursor[0] < stop:
+        var k = Int(external_call["onigenc_unicode_mbc_case_fold", Int32](
+            enc, _ONIGENC_CASE_FOLD_MULTI_CHAR, cursor.unsafe_ptr(), stop,
+            buf.unsafe_ptr(),
+        ))
+        for i in range(k):
+            out.append(buf[i])
+    return String(StringSpan(
+        unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=len(out)),
+    ))
+
+
 def onig_tracked_count() -> Int:
     """How many compiled regexes are currently alive — registered with the
     shim and not yet freed.

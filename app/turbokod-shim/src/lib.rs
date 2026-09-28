@@ -969,3 +969,144 @@ unsafe fn errno_location() -> *mut c_int {
     libc::__errno_location()
 }
 
+
+// ---------------------------------------------------------------------------
+// Locale-aware line sorting (Edit ▸ Sort Lines).
+//
+// Case folding alone orders by codepoint, which is wrong for most
+// languages with letters past ASCII: Swedish wants å ä ö after z (codepoint
+// order gives ä å ö), German wants ä next to a. That's collation, so on macOS
+// we hand it to CoreFoundation with the user's current locale. Elsewhere the
+// entry point reports "unsupported" and the Mojo side falls back to Unicode
+// case folding.
+
+/// Stable, case-insensitive, locale-aware sort of `n` UTF-8 strings given as
+/// parallel `ptrs` / `lens` arrays. Writes the sorted order (indices into the
+/// input) to `out_perm`. `locale` / `locale_len` name a locale identifier
+/// (e.g. `sv_SE`); an empty one means the user's current locale. Returns 1 on
+/// success and 0 when no collator is available (non-macOS, or a string that
+/// isn't valid UTF-8) — `out_perm` is then left untouched.
+#[no_mangle]
+pub unsafe extern "C" fn tk_collate_sort(
+    ptrs: *const *const u8,
+    lens: *const usize,
+    n: usize,
+    locale: *const u8,
+    locale_len: usize,
+    out_perm: *mut usize,
+) -> c_int {
+    collate::sort(ptrs, lens, n, locale, locale_len, out_perm)
+}
+
+#[cfg(target_os = "macos")]
+mod collate {
+    use std::ffi::c_void;
+    use std::os::raw::c_int;
+
+    type CFRef = *const c_void;
+
+    #[repr(C)]
+    struct CFRange {
+        location: isize,
+        length: isize,
+    }
+
+    const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+    const K_CF_COMPARE_CASE_INSENSITIVE: usize = 1;
+    const K_CF_COMPARE_NONLITERAL: usize = 16;
+    const K_CF_COMPARE_LOCALIZED: usize = 32;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFStringCreateWithBytes(
+            alloc: CFRef, bytes: *const u8, num_bytes: isize,
+            encoding: u32, is_external_representation: u8,
+        ) -> CFRef;
+        fn CFStringGetLength(s: CFRef) -> isize;
+        fn CFStringCompareWithOptionsAndLocale(
+            a: CFRef, b: CFRef, range: CFRange, options: usize, locale: CFRef,
+        ) -> isize;
+        fn CFLocaleCopyCurrent() -> CFRef;
+        fn CFLocaleCreate(alloc: CFRef, identifier: CFRef) -> CFRef;
+        fn CFRelease(cf: CFRef);
+    }
+
+    unsafe fn cf_string(p: *const u8, len: usize) -> CFRef {
+        CFStringCreateWithBytes(
+            std::ptr::null(), p, len as isize, K_CF_STRING_ENCODING_UTF8, 0,
+        )
+    }
+
+    pub unsafe fn sort(
+        ptrs: *const *const u8,
+        lens: *const usize,
+        n: usize,
+        locale: *const u8,
+        locale_len: usize,
+        out_perm: *mut usize,
+    ) -> c_int {
+        let mut strings: Vec<CFRef> = Vec::with_capacity(n);
+        for i in 0..n {
+            let s = cf_string(*ptrs.add(i), *lens.add(i));
+            if s.is_null() {
+                for &s in &strings {
+                    CFRelease(s);
+                }
+                return 0;
+            }
+            strings.push(s);
+        }
+        let loc = if locale_len == 0 {
+            CFLocaleCopyCurrent()
+        } else {
+            let id = cf_string(locale, locale_len);
+            if id.is_null() {
+                CFLocaleCopyCurrent()
+            } else {
+                let l = CFLocaleCreate(std::ptr::null(), id);
+                CFRelease(id);
+                l
+            }
+        };
+        let opts = K_CF_COMPARE_CASE_INSENSITIVE
+            | K_CF_COMPARE_NONLITERAL
+            | K_CF_COMPARE_LOCALIZED;
+        let mut perm: Vec<usize> = (0..n).collect();
+        // `sort_by` is stable: lines the collator calls equal keep their order.
+        perm.sort_by(|&a, &b| {
+            let sa = strings[a];
+            let r = CFStringCompareWithOptionsAndLocale(
+                sa, strings[b],
+                CFRange { location: 0, length: CFStringGetLength(sa) },
+                opts, loc,
+            );
+            r.cmp(&0)
+        });
+        for (i, &p) in perm.iter().enumerate() {
+            *out_perm.add(i) = p;
+        }
+        for &s in &strings {
+            CFRelease(s);
+        }
+        if !loc.is_null() {
+            CFRelease(loc);
+        }
+        1
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod collate {
+    use std::os::raw::c_int;
+
+    pub unsafe fn sort(
+        _ptrs: *const *const u8,
+        _lens: *const usize,
+        _n: usize,
+        _locale: *const u8,
+        _locale_len: usize,
+        _out_perm: *mut usize,
+    ) -> c_int {
+        0
+    }
+}

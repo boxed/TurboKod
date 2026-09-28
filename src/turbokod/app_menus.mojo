@@ -26,7 +26,7 @@ from .desktop import (
     EDITOR_RENAME_SYMBOL,
     EDITOR_REPLACE, EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_SELECT_ALL,
     EDITOR_TOGGLE_BLAME,
-    EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT, EDITOR_TOGGLE_COMPRESS_KWARGS,
+    EDITOR_SORT_LINES, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT, EDITOR_TOGGLE_COMPRESS_KWARGS,
     EDITOR_TOGGLE_GIT_CHANGES,
     EDITOR_TOGGLE_LINE_NUMBERS, EDITOR_TOGGLE_MINIMAP,
     EDITOR_TOGGLE_STICKY_SCROLL,
@@ -94,6 +94,7 @@ def build_edit_items(has_extra_carets: Bool) -> List[MenuItem]:
     e.append(MenuItem(String("Look up in docs..."),    EDITOR_LOOKUP_DOCS))
     e.append(MenuItem(String("Toggle Comment"),        EDITOR_TOGGLE_COMMENT))
     e.append(MenuItem(String("Toggle Case"),           EDITOR_TOGGLE_CASE))
+    e.append(MenuItem(String("Sort Lines"),            EDITOR_SORT_LINES))
     return e^
 
 

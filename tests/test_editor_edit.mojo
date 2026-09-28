@@ -38,6 +38,8 @@ from turbokod.highlight import (
     highlight_keyword_attr, highlight_string_attr
 )
 from turbokod.posix import which
+from turbokod.line_sort import sorted_lines_collated, sorted_lines_folded
+from std.sys.info import CompilationTarget
 from turbokod.spell import Speller, user_dict_path
 from turbokod.config import WRAP_NONE, WRAP_SOFT
 from turbokod.events import (
@@ -558,6 +560,69 @@ def test_editor_toggle_case() raises:
     ed.move_to(0, 5, True)         # select "Hello"
     ed.toggle_case()
     assert_equal(ed.buffer.line(0), String("hELLO World"))
+
+
+def test_editor_sort_lines() raises:
+    # No selection: the whole buffer, case-insensitive and stable.
+    var ed = Editor(String("pear\nApple\nbanana\napple\nBanana"))
+    ed.sort_lines()
+    assert_equal(ed.buffer.line(0), String("Apple"))
+    assert_equal(ed.buffer.line(1), String("apple"))
+    assert_equal(ed.buffer.line(2), String("banana"))
+    assert_equal(ed.buffer.line(3), String("Banana"))
+    assert_equal(ed.buffer.line(4), String("pear"))
+    assert_true(ed.dirty)
+    # Selection ending at column 0 excludes that trailing row.
+    var ed2 = Editor(String("z\nc\nB\na"))
+    ed2.move_to(1, 1, False)
+    ed2.move_to(3, 0, True)
+    ed2.sort_lines()
+    assert_equal(ed2.buffer.line(0), String("z"))
+    assert_equal(ed2.buffer.line(1), String("B"))
+    assert_equal(ed2.buffer.line(2), String("c"))
+    assert_equal(ed2.buffer.line(3), String("a"))
+    # Undo restores the original order.
+    _ = ed2.undo()
+    assert_equal(ed2.buffer.line(1), String("c"))
+
+
+def _words(s: String) -> List[String]:
+    var out = List[String]()
+    for w in s.split(" "):
+        out.append(String(w))
+    return out^
+
+
+def _joined(rows: List[String]) -> String:
+    var out = String("")
+    for i in range(len(rows)):
+        if i > 0:
+            out += " "
+        out += rows[i]
+    return out^
+
+
+def test_sort_lines_folded_is_unicode_case_insensitive() raises:
+    """The fallback folds full Unicode case (``Ä`` == ``ä``, ``ß`` == ``ss``)
+    and then orders by codepoint — so ``ä`` (U+E4) before ``å`` (U+E5),
+    which is exactly why macOS collates instead."""
+    var rows = _words(String("Öl apa Åsa ägg Zebra ÄPPLE Straße strasse"))
+    assert_equal(
+        _joined(sorted_lines_folded(rows)),
+        String("apa Straße strasse Zebra ägg ÄPPLE Åsa Öl"),
+    )
+
+
+def test_sort_lines_collated_follows_the_locale() raises:
+    comptime if not CompilationTarget.is_macos():
+        return
+    var rows = _words(String("Öl apa Åsa ägg Zebra ÄPPLE"))
+    var sv = sorted_lines_collated(rows, String("sv_SE"))
+    assert_true(Bool(sv))
+    assert_equal(_joined(sv.value()), String("apa Zebra Åsa ägg ÄPPLE Öl"))
+    var de = sorted_lines_collated(rows, String("de_DE"))
+    assert_true(Bool(de))
+    assert_equal(_joined(de.value()), String("ägg apa ÄPPLE Åsa Öl Zebra"))
 
 
 def test_editor_replace_all() raises:
@@ -2350,6 +2415,9 @@ def main() raises:
     test_editor_toggle_comment_common_indent()
     test_editor_toggle_comment_skips_blank_lines()
     test_editor_toggle_case()
+    test_editor_sort_lines()
+    test_sort_lines_folded_is_unicode_case_insensitive()
+    test_sort_lines_collated_follows_the_locale()
     test_editor_replace_all()
     test_editor_uses_editorconfig_indent()
     test_editor_tab_indents_selected_lines()
@@ -2428,4 +2496,4 @@ def main() raises:
     test_undo_history_is_capped_by_bytes_not_just_entries()
     test_undo_history_still_honors_the_entry_cap()
     test_undo_back_to_saved_content_clears_dirty()
-    print("editor_edit: 109 tests passed")
+    print("editor_edit: 112 tests passed")

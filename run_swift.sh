@@ -26,7 +26,7 @@ if [ ! -f "$dylib" ] || find src "$shim_lib" -newer "$dylib" -print -quit 2>/dev
   echo "[run_swift] building Mojo shared-lib -> $dylib" >&2
   if ! pixi run mojo build --emit shared-lib -I src \
       -Xlinker "-L${env_prefix}/lib" -Xlinker "-lonig" \
-      -Xlinker "$shim_lib" \
+      -Xlinker "$shim_lib" ${SHIM_SYS_LINK[@]+"${SHIM_SYS_LINK[@]}"} \
       -o "$dylib" src/turbokod/native_api.mojo; then
     echo "[run_swift] Mojo shared-lib build failed" >&2
     exit 1

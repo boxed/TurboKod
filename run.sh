@@ -114,7 +114,7 @@ if [ "$needs_build" -eq 1 ]; then
     -I src ${debug_flags[@]+"${debug_flags[@]}"} \
     -Xlinker "-L${env_prefix}/lib" \
     -Xlinker "-lonig" \
-    -Xlinker "$proc_obj" \
+    -Xlinker "$proc_obj" ${SHIM_SYS_LINK[@]+"${SHIM_SYS_LINK[@]}"} \
     -o "$bin" "$src"; then
     # Without this guard, ``exec "$bin"`` below would silently run the
     # previous successful build — making "all tests passed" mean

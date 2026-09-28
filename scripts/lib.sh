@@ -20,6 +20,15 @@ resolve_env_prefix() {
 SHIM_CRATE="app/turbokod-shim"
 SHIM_LIB="$SHIM_CRATE/target/release/libturbokod_shim.a"
 
+# System libraries the shim needs at final link. A Rust staticlib doesn't carry
+# its ``#[link]`` directives into the consumer's link, so every Mojo link line
+# that takes ``$SHIM_LIB`` also expands this: ``"${SHIM_SYS_LINK[@]}"``.
+# CoreFoundation backs the locale-aware Sort Lines collator.
+SHIM_SYS_LINK=()
+if [ "$(uname -s)" = "Darwin" ]; then
+  SHIM_SYS_LINK=(-Xlinker -framework -Xlinker CoreFoundation)
+fi
+
 # Rebuild the shim when any of its sources is newer than the staticlib.
 # Cargo would detect this on its own; the explicit check keeps a no-op run
 # free of cargo's startup cost and lets us say what's being built. ``$1`` is

@@ -86,6 +86,7 @@ from .text_view import (
 )
 from .config import WRAP_NONE, WRAP_SMART
 from .case_fold import swap_ascii_case
+from .line_sort import sorted_lines_ci
 
 
 # --- Helpers ----------------------------------------------------------------
@@ -9271,6 +9272,47 @@ struct Editor(Copyable, Movable):
         # lowest changed row, ``er`` the high-water mark that keeps the
         # incremental tokenizer from early-exiting before it re-colors
         # every edited row.
+        self._mark_hl_dirty(sr, er)
+
+    def sort_lines(mut self):
+        """Sort the lines touched by the selection alphabetically, ignoring
+        case; with no selection, sort the whole buffer. Ordered by the
+        user's locale where the platform can collate, by Unicode case fold
+        otherwise (see ``line_sort.mojo``). Stable, so lines differing only
+        in case keep their relative order. No-op when read-only or when the
+        lines are already in order."""
+        if self.read_only:
+            return
+        var sr = 0
+        var er = self.buffer.line_count() - 1
+        var ends_at_next_row = False
+        if self.has_selection():
+            var rng = self._line_op_range()
+            sr = rng[0]
+            er = rng[1]
+            ends_at_next_row = self.selection()[2] > er
+        if er <= sr:
+            return
+        var rows = List[String]()
+        for r in range(sr, er + 1):
+            rows.append(self.buffer.line(r))
+        var sorted = sorted_lines_ci(rows)
+        var changed = False
+        for i in range(len(rows)):
+            if sorted[i] != rows[i]:
+                changed = True
+                break
+        if not changed:
+            return
+        self._push_undo()
+        for i in range(len(sorted)):
+            self.buffer.lines[sr + i] = sorted[i]
+        self.dirty = True
+        self.move_to(sr, 0, False)
+        if ends_at_next_row:
+            self.move_to(er + 1, 0, True)
+        else:
+            self.move_to(er, len(self.buffer.line(er).as_bytes()), True)
         self._mark_hl_dirty(sr, er)
 
     def _insert_text_at(
