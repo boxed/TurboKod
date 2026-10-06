@@ -1284,6 +1284,12 @@ struct Editor(Copyable, Movable):
     # copied. ``-1`` means no flash is pending.
     var _copy_flash_line: Int
     var _copy_flash_start_ms: Int
+    # The text of the last multi-caret whole-line copy/cut (no selection,
+    # several carets). A clipboard ending in ``\n`` normally distributes
+    # inline across carets, like a pasted column of values; only when it
+    # is exactly this text does ``_multi_paste`` give each caret its line
+    # *above* it, so copy-lines → paste over the same carets round-trips.
+    var _line_copy_text: String
     # ``read_only`` makes every mutating operation a no-op: typing,
     # backspace/delete, paste, cut, undo/redo, replace_all,
     # toggle_comment, toggle_case. Cursor movement, selection, copy,
@@ -1659,6 +1665,7 @@ struct Editor(Copyable, Movable):
         self.compress_kwargs = False
         self.caret_visible = True
         self._copy_flash_line = -1
+        self._line_copy_text = String("")
         self._copy_flash_start_ms = 0
         self.read_only = False
         self.review_mode = False
@@ -1860,6 +1867,7 @@ struct Editor(Copyable, Movable):
         self.compress_kwargs = copy.compress_kwargs
         self.caret_visible = copy.caret_visible
         self._copy_flash_line = copy._copy_flash_line
+        self._line_copy_text = copy._line_copy_text
         self._copy_flash_start_ms = copy._copy_flash_start_ms
         self.read_only = copy.read_only
         self.review_mode = copy.review_mode
@@ -7533,9 +7541,11 @@ struct Editor(Copyable, Movable):
         single-caret path does.
 
         ``line_mode`` is ``paste_clipboard_text``'s whole-line-clipboard
-        flag. When it survives the distribute test, each caret gets the
-        lines inserted *above* its own row and keeps its column — the
-        multi-caret reading of the single-caret behavior.
+        flag: each caret gets the lines inserted *above* its own row and
+        keeps its column — the multi-caret reading of the single-caret
+        behavior. Distributed, that holds only for the text of our own
+        multi-caret line copy (``_line_copy_text``), giving one line above
+        each caret; any other trailing-newline clipboard distributes inline.
 
         Carets are walked top-down, remapping each one's coordinates
         through ``_remap_past_edit`` before it is used, because an edit
@@ -7551,7 +7561,12 @@ struct Editor(Copyable, Movable):
             return
         var segs = split_lines_no_trailing(text)
         var distribute = n > 1 and len(segs) == n
-        var line_above = line_mode and not distribute
+        # Distributed, a trailing-newline clipboard is usually a column of
+        # values meant to land inline; it keeps its whole-line meaning only
+        # when it came from our own multi-caret line copy.
+        var line_above = line_mode and (
+            not distribute or text == self._line_copy_text
+        )
         var pre_dirty_row = carets[0].row
         self._push_undo()
         var new_carets = List[Caret]()
@@ -7591,6 +7606,8 @@ struct Editor(Copyable, Movable):
             if sr != er or sc != ec:
                 self._delete_range(sr, sc, er, ec)
             var piece = segs[idx] if distribute else text
+            if distribute and line_above:
+                piece += String("\n")
             var row: Int
             var col: Int
             if line_above:
@@ -8641,13 +8658,13 @@ struct Editor(Copyable, Movable):
         elif chord == CLIP_SELECT_ALL:
             self.select_all()
         elif chord == CLIP_COPY:
-            # Ctrl+C — non-mutating copy. No undo snapshot needed.
-            self.clear_extra_carets()
+            # Ctrl+C — non-mutating copy. No undo snapshot needed. The
+            # carets stay: a multi-caret copy is usually followed by a
+            # paste back over the same column.
             self.copy_to_clipboard()
         elif chord == CLIP_CUT:
             if self.read_only:
                 return True
-            self._collapse_extras_with_undo()
             self.cut_to_clipboard()
             self._mark_hl_dirty(pre_dirty_row)
         elif chord == CLIP_PASTE:
@@ -8789,9 +8806,28 @@ struct Editor(Copyable, Movable):
         woven into the copy in the order they're shown, so dragging across a
         change and copying yields exactly what's on screen — kept and deleted
         lines interleaved. See ``_diff_selection_text``."""
+        if self.has_extra_carets() and self._any_caret_has_selection():
+            return self._multi_selection_text()
         if self.diff_active and self.has_selection():
             return self._diff_selection_text()
         return self._selection_view().extracted_text(self.buffer.lines)
+
+    def _multi_selection_text(self) -> String:
+        """``selection_text`` with several carets: each caret's selection,
+        top to bottom, joined by newlines. A caret with an empty selection
+        contributes an empty line rather than being skipped, so the line
+        count always equals the caret count — which is what lets
+        ``_multi_paste`` distribute the copy back one line per caret."""
+        var carets = self._all_carets_asc()
+        var out = String("")
+        for i in range(len(carets)):
+            var c = carets[i]
+            if i > 0:
+                out += String("\n")
+            out += Selection(
+                True, False, c.anchor_row, c.anchor_col, c.row, c.col,
+            ).extracted_text(self.buffer.lines)
+        return out^
 
     def _diff_selection_text(self) -> String:
         """``selection_text`` for an inline-diff view: the selected real
@@ -8914,9 +8950,17 @@ struct Editor(Copyable, Movable):
         """Copy the current selection to the system clipboard. With no
         selection, copy the whole current line including its trailing
         newline — matches the behavior in VS Code/Sublime/JetBrains
-        where Ctrl+C with an empty selection grabs the cursor's line."""
-        if self.has_selection():
+        where Ctrl+C with an empty selection grabs the cursor's line.
+
+        With several carets, any of them holding a selection makes this a
+        multi-selection copy (see ``_multi_selection_text``)."""
+        if self.has_selection() or (
+            self.has_extra_carets() and self._any_caret_has_selection()
+        ):
             clipboard_copy(self.selection_text())
+        elif self.has_extra_carets():
+            self._line_copy_text = self._caret_lines_text()
+            clipboard_copy(self._line_copy_text)
         else:
             var r = self.selections[0].row
             clipboard_copy(self.buffer.line(r) + String("\n"))
@@ -8931,7 +8975,18 @@ struct Editor(Copyable, Movable):
         """Copy the selection to the clipboard, then remove it from the
         buffer. With no selection, cut the whole current line (including
         its trailing newline). Read-only editors fall through to a copy
-        without mutating the buffer."""
+        without mutating the buffer.
+
+        With several carets holding selections, every caret's selection is
+        copied (newline-joined, see ``_multi_selection_text``) and removed,
+        leaving a caret where each one was."""
+        if self.has_extra_carets() and self._any_caret_has_selection():
+            clipboard_copy(self.selection_text())
+            if not self.read_only:
+                # An empty paste over every caret is exactly "delete each
+                # selection, keep the carets", with the undo step.
+                self._multi_paste(String(""), False)
+            return
         if self.has_selection():
             if self.read_only:
                 clipboard_copy(self.selection_text())
@@ -8945,6 +9000,12 @@ struct Editor(Copyable, Movable):
             self._delete_selection()
             self.dirty = True
             self._mark_hl_dirty(pre)
+            return
+        if self.has_extra_carets():
+            self._line_copy_text = self._caret_lines_text()
+            clipboard_copy(self._line_copy_text)
+            if not self.read_only:
+                self._cut_caret_lines()
             return
         # Whole-line mode.
         var r = self.selections[0].row
@@ -8967,6 +9028,53 @@ struct Editor(Copyable, Movable):
             self.move_to(nr, 0, False)
         self.dirty = True
         self._mark_hl_dirty(r)
+
+    def _caret_rows_asc(self) -> List[Int]:
+        """The distinct rows holding a caret, top to bottom."""
+        var carets = self._all_carets_asc()
+        var rows = List[Int]()
+        for i in range(len(carets)):
+            var r = carets[i].row
+            if len(rows) == 0 or rows[len(rows) - 1] != r:
+                rows.append(r)
+        return rows^
+
+    def _caret_lines_text(self) -> String:
+        """The no-selection multi-caret copy: every caret's whole line,
+        each with its trailing newline, top to bottom (a row with two
+        carets is copied once). The trailing newline makes it a
+        line-clipboard, so pasting it back over the same carets puts each
+        line above its own caret — see ``_multi_paste``."""
+        var rows = self._caret_rows_asc()
+        var out = String("")
+        for i in range(len(rows)):
+            out += self.buffer.line(rows[i]) + String("\n")
+        return out^
+
+    def _cut_caret_lines(mut self):
+        """Remove every caret's line (the no-selection multi-caret cut),
+        leaving one caret at column 0 of the line that moved up into each
+        removed line's place. Keeps one empty line if the cut empties
+        the buffer, like the single-caret cut."""
+        var rows = self._caret_rows_asc()
+        self._push_undo()
+        var i = len(rows) - 1
+        while i >= 0:
+            _ = self.buffer.lines.pop(rows[i])
+            i -= 1
+        if self.buffer.line_count() == 0:
+            self.buffer.lines.append(String(""))
+        var max_row = self.buffer.line_count() - 1
+        var carets = List[Caret]()
+        for k in range(len(rows)):
+            # ``k`` removed rows sat above this one.
+            var nr = rows[k] - k
+            if nr > max_row:
+                nr = max_row
+            carets.append(Caret(nr, 0, 0, nr, 0))
+        self._install_carets(carets^)
+        self.dirty = True
+        self._mark_hl_dirty(rows[0])
 
     def paste_from_clipboard(mut self):
         """Replace any selection with the system clipboard's contents.

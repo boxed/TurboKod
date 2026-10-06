@@ -736,6 +736,101 @@ def test_paste_empty_clipboard_with_carets_is_a_noop() raises:
     assert_false(ed.undo())
 
 
+def _select_names_before_colon() raises -> Editor:
+    """A block of ``    name: 0,`` rows with a caret on each selecting
+    ``name`` — what a block edit plus a word-extend produces. Non-ASCII
+    names, so the byte columns differ per row."""
+    var ed = Editor(String("{\n    bygg: 0,\n    måleri: 0,\n    ventilation: 0,\n}\n"))
+    ed.selections[0] = Caret(1, 8, 8, 1, 4)
+    ed._add_caret(Caret(2, 11, 6, 2, 4))
+    ed._add_caret(Caret(3, 15, 15, 3, 4))
+    return ed^
+
+
+def test_copy_joins_every_carets_selection() raises:
+    var ed = _select_names_before_colon()
+    assert_equal(ed.selection_text(), String("bygg\nmåleri\nventilation"))
+    # Copy leaves the carets alone, so a paste can go straight back.
+    ed.copy_to_clipboard()
+    assert_equal(ed.caret_count(), 3)
+
+
+def test_copy_keeps_line_per_caret_with_empty_selection() raises:
+    # A caret with nothing selected still contributes a (blank) line, so
+    # the copy distributes back one line per caret.
+    var ed = _select_names_before_colon()
+    ed.selections[1] = Caret(2, 4, 4, 2, 4)
+    assert_equal(ed.selection_text(), String("bygg\n\nventilation"))
+
+
+def test_cut_removes_every_carets_selection() raises:
+    var ed = _select_names_before_colon()
+    ed.cut_to_clipboard()
+    assert_equal(ed.buffer.line(1), String("    : 0,"))
+    assert_equal(ed.buffer.line(2), String("    : 0,"))
+    assert_equal(ed.buffer.line(3), String("    : 0,"))
+    assert_equal(ed.caret_count(), 3)
+    assert_true(ed.undo())
+    assert_equal(ed.buffer.line(2), String("    måleri: 0,"))
+
+
+def test_copy_then_paste_over_same_carets_round_trips() raises:
+    var ed = _select_names_before_colon()
+    var text = ed.selection_text()
+    ed.paste_clipboard_text(text)
+    assert_equal(ed.buffer.line(1), String("    bygg: 0,"))
+    assert_equal(ed.buffer.line(2), String("    måleri: 0,"))
+    assert_equal(ed.buffer.line(3), String("    ventilation: 0,"))
+
+
+def test_copied_column_distributes_into_another_column() raises:
+    var ed = _select_names_before_colon()
+    var text = ed.selection_text()
+    # Fresh carets just after each ``0`` — the copied names land one per row.
+    ed.selections[0] = Caret(1, 11, 11, 1, 11)
+    ed.clear_extra_carets()
+    ed._add_caret(Caret(2, 14, 13, 2, 14))
+    ed._add_caret(Caret(3, 18, 18, 3, 18))
+    ed.paste_clipboard_text(text)
+    assert_equal(ed.buffer.line(1), String("    bygg: 0bygg,"))
+    assert_equal(ed.buffer.line(2), String("    måleri: 0måleri,"))
+    assert_equal(ed.buffer.line(3), String("    ventilation: 0ventilation,"))
+
+
+def test_copy_without_selection_takes_every_carets_line() raises:
+    var ed = Editor(String("aaa\nbbb\nccc\n"))
+    ed.selections[0] = Caret(0, 1, 1, 0, 1)
+    ed._add_caret(Caret(2, 1, 1, 2, 1))
+    ed.copy_to_clipboard()
+    assert_equal(ed._line_copy_text, String("aaa\nccc\n"))
+    assert_equal(ed.caret_count(), 2)
+    # Pasting it back over the same carets duplicates each caret's line
+    # above it, rather than splicing the lines in mid-row.
+    ed.paste_clipboard_text(String("aaa\nccc\n"))
+    assert_equal(ed.buffer.line(0), String("aaa"))
+    assert_equal(ed.buffer.line(1), String("aaa"))
+    assert_equal(ed.buffer.line(2), String("bbb"))
+    assert_equal(ed.buffer.line(3), String("ccc"))
+    assert_equal(ed.buffer.line(4), String("ccc"))
+    assert_equal(ed.selections[0].row, 1)
+    assert_equal(ed.selections[1].row, 4)
+
+
+def test_cut_without_selection_removes_every_carets_line() raises:
+    var ed = Editor(String("aaa\nbbb\nccc\nddd"))
+    ed.selections[0] = Caret(0, 1, 1, 0, 1)
+    ed._add_caret(Caret(2, 1, 1, 2, 1))
+    ed.cut_to_clipboard()
+    assert_equal(ed.buffer.line_count(), 2)
+    assert_equal(ed.buffer.line(0), String("bbb"))
+    assert_equal(ed.buffer.line(1), String("ddd"))
+    assert_equal(ed.caret_count(), 2)
+    assert_equal(ed.selections[0].row, 0)
+    assert_equal(ed.selections[1].row, 1)
+    assert_true(ed.undo())
+    assert_equal(ed.buffer.line(2), String("ccc"))
+
+
 def main() raises:
     test_primary_only_by_default()
     test_add_caret_below_then_above()
@@ -780,4 +875,11 @@ def main() raises:
     test_paste_line_clipboard_inserts_above_each_caret()
     test_undo_restores_extras_after_paste()
     test_paste_empty_clipboard_with_carets_is_a_noop()
+    test_copy_joins_every_carets_selection()
+    test_copy_keeps_line_per_caret_with_empty_selection()
+    test_cut_removes_every_carets_selection()
+    test_copy_then_paste_over_same_carets_round_trips()
+    test_copied_column_distributes_into_another_column()
+    test_copy_without_selection_takes_every_carets_line()
+    test_cut_without_selection_removes_every_carets_line()
     print("All multi-cursor tests passed.")
