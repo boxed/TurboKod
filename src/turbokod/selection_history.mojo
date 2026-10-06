@@ -37,7 +37,13 @@ from .geometry import Point, Rect
 from .git_changes import LineHistoryEntry
 from .list_box import ListBox
 from .painter import Painter
-from .string_utils import display_columns, split_lines_no_trailing, starts_with
+from .string_utils import (
+    display_columns, split_lines_no_trailing, starts_with, truncate_to_columns,
+)
+
+
+# Widest the commit list's author column gets; longer names are truncated.
+comptime _AUTHOR_MAX_COLS = 16
 
 
 @fieldwise_init
@@ -105,19 +111,32 @@ struct SelectionHistory(Movable):
         self.patch_scroll = 0
 
     def _list_items(self) -> List[String]:
-        """``<mark><sha>  <date>  <subject>`` per commit. ``<mark>`` is a
-        leading ``↑`` for a commit that isn't yet pushed to a remote
-        (two spaces otherwise, so the columns stay aligned). A glyph —
-        not a color — because the list widget paints the whole selected
-        row in one highlight color, so a tint would vanish on the
-        selected line; the arrow stays legible there. Truncation to the
-        pane width is the list widget's job (it clips to its bounds)."""
+        """``<mark><sha>  <date>  <author>  <subject>`` per commit.
+        ``<mark>`` is a leading ``↑`` for a commit that isn't yet pushed
+        to a remote (two spaces otherwise, so the columns stay aligned).
+        A glyph — not a color — because the list widget paints the whole
+        selected row in one highlight color, so a tint would vanish on
+        the selected line; the arrow stays legible there. The author
+        column is padded to the widest author, capped at
+        ``_AUTHOR_MAX_COLS`` so one long name can't push every subject
+        off the pane. Truncation to the pane width is the list widget's
+        job (it clips to its bounds)."""
+        var author_w = 0
+        for i in range(len(self.entries)):
+            var w = display_columns(self.entries[i].author)
+            if w > author_w:
+                author_w = w
+        if author_w > _AUTHOR_MAX_COLS:
+            author_w = _AUTHOR_MAX_COLS
         var out = List[String]()
         for i in range(len(self.entries)):
             var e = self.entries[i]
             var mark = String("  ") if e.is_pushed else String("↑ ")
+            var author = truncate_to_columns(e.author, author_w)
+            var pad = author_w - display_columns(author)
             out.append(
                 mark + e.short_sha + String("  ") + e.date
+                + String("  ") + author + String(" ") * pad
                 + String("  ") + e.subject
             )
         return out^

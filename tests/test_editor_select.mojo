@@ -428,6 +428,9 @@ def test_selection_history_paint_and_keys() raises:
     # Row 1 is pushed: no marker (space), sha still in the same column.
     assert_equal(c.get(1, 3).glyph, String(" "))
     assert_equal(c.get(3, 3).glyph, String("b"))
+    # Author follows the date: 1 indent + 2 mark + 7 sha + 2 + 10 date + 2.
+    assert_equal(c.get(24, 2).glyph, String("A"))
+    assert_equal(c.get(24, 3).glyph, String("B"))
     # Right pane (divider at x=32 for an 80-wide screen) shows the
     # selected commit's patch, starting with its hunk header.
     assert_equal(c.get(33, 2).glyph, String("@"))
