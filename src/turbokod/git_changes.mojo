@@ -1052,12 +1052,38 @@ struct GitBranch(ImplicitlyCopyable, Movable):
     ``committer_unix`` is what the branch pane's age column renders and
     what the list is sorted by; it's ``0`` when git didn't report a
     parseable date (never for a real ref, but synthetic rows in tests
-    leave it unset)."""
+    leave it unset).
+
+    ``remote`` is empty for a local branch. For a remote-tracking branch
+    it names the remote, and ``name`` is the ref as git shortens it
+    (``origin/feature``); :meth:`remote_branch_name` is the part after
+    the remote, which is what the remote itself calls the branch."""
     var name: String
     var short_sha: String
     var subject: String
     var is_current: Bool
     var committer_unix: Int
+    var remote: String
+
+    def is_remote(self) -> Bool:
+        return len(self.remote.as_bytes()) > 0
+
+    def remote_branch_name(self) -> String:
+        """The branch's name on its remote (``feature`` for
+        ``origin/feature``); just ``name`` for a local branch."""
+        return strip_remote_prefix(self.name, self.remote)
+
+
+def strip_remote_prefix(name: String, remote: String) -> String:
+    """``origin/feature`` → ``feature`` for ``remote`` ``origin``.
+    ``name`` unchanged when ``remote`` is empty or doesn't prefix it."""
+    if len(remote.as_bytes()) == 0 \
+            or not name.startswith(remote + String("/")):
+        return name.copy()
+    var b = name.as_bytes()
+    return String(
+        StringSpan(unsafe_from_utf8=b[len(remote.as_bytes()) + 1:len(b)]),
+    )
 
 
 def format_age(seconds: Int) -> String:
@@ -1206,7 +1232,55 @@ def fetch_git_branches(project_root: String) -> List[GitBranch]:
         var when = parse_int_all(fields[3])
         out.append(
             GitBranch(fields[1], fields[2], fields[4], is_cur,
-                      when if when > 0 else 0),
+                      when if when > 0 else 0, String("")),
+        )
+    return out^
+
+
+def fetch_git_remote_branches(project_root: String) -> List[GitBranch]:
+    """Remote-tracking branches (``refs/remotes``), newest commit first.
+
+    The ``<remote>/HEAD`` symref is skipped — it's an alias for one of the
+    other rows, not a branch. Each row's ``remote`` is the longest
+    configured remote name prefixing the ref, so a remote whose name
+    itself contains a ``/`` still splits correctly; a ref under no
+    configured remote (left behind by ``git remote remove``) is skipped,
+    since there'd be nowhere to delete it from."""
+    var out = List[GitBranch]()
+    if len(project_root.as_bytes()) == 0:
+        return out^
+    var remotes = fetch_git_remotes(project_root)
+    if len(remotes) == 0:
+        return out^
+    var args = List[String]()
+    args.append(String("for-each-ref"))
+    args.append(String("--sort=-committerdate"))
+    args.append(
+        String(
+            "--format=%(symref)%09%(refname:lstrip=2)%09%(objectname:short)"
+            "%09%(committerdate:unix)%09%(subject)"
+        ),
+    )
+    args.append(String("refs/remotes"))
+    var stdout = _git_stdout(project_root, args^)
+    for line in split_lines_no_trailing(stdout):
+        if len(line.as_bytes()) == 0:
+            continue
+        var fields = _split_tab_fields(String(line), 5)
+        if len(fields[0].as_bytes()) > 0:
+            continue
+        var name = fields[1]
+        var remote = String("")
+        for r in remotes:
+            if len(r.as_bytes()) > len(remote.as_bytes()) \
+                    and name.startswith(r + String("/")):
+                remote = r.copy()
+        if len(remote.as_bytes()) == 0:
+            continue
+        var when = parse_int_all(fields[3])
+        out.append(
+            GitBranch(name, fields[2], fields[4], False,
+                      when if when > 0 else 0, remote^),
         )
     return out^
 
@@ -1391,7 +1465,9 @@ def github_repo_web_url(remote_url: String) -> String:
         + String(StringSpan(unsafe_from_utf8=b[pstart:end]))
 
 
-def github_compare_url(project_root: String, branch: String) -> String:
+def github_compare_url(
+    project_root: String, branch: String, remote: String = String(""),
+) -> String:
     """GitHub's "open a pull request" page for ``branch``, or the empty
     string when the branch's push remote isn't a GitHub one.
 
@@ -1399,12 +1475,17 @@ def github_compare_url(project_root: String, branch: String) -> String:
     against ``branch`` and lands with the pull-request form already
     expanded, so the page is one button away from an actual PR. The branch
     name is percent-encoded with ``/`` left literal — ``feature/thing`` is
-    a real path in the compare URL, not an escape."""
+    a real path in the compare URL, not an escape.
+
+    ``remote`` overrides the push-remote lookup — for a remote-tracking
+    branch, whose remote is already known."""
     if len(project_root.as_bytes()) == 0 or len(branch.as_bytes()) == 0:
         return String("")
-    var remote = branch_push_remote(project_root, branch)
+    var r = remote.copy()
+    if len(r.as_bytes()) == 0:
+        r = branch_push_remote(project_root, branch)
     var base = github_repo_web_url(
-        fetch_git_remote_url(project_root, remote),
+        fetch_git_remote_url(project_root, r),
     )
     if len(base.as_bytes()) == 0:
         return String("")

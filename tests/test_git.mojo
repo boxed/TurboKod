@@ -39,8 +39,8 @@ from turbokod.local_changes import (
     LocalChanges, build_minimal_patch, _BURST_GAP_MS, _SETTLE_MS,
     _GITOP_BRANCH_DELETE, _GITOP_CHECKOUT,
     _GITOP_MERGE, _GITOP_NONE, _GITOP_PULL, _GITOP_PUSH, _GITOP_REBASE,
-    _OVERLAY_DELETE_BRANCH_CONFIRM,
-    _GITOP_REWORD, _OVERLAY_EDIT_MSG,
+    _OVERLAY_DELETE_BRANCH_CONFIRM, _OVERLAY_DELETE_REMOTE_TYPED,
+    _GITOP_REMOTE_BRANCH_DELETE, _GITOP_REWORD, _OVERLAY_EDIT_MSG,
     _OVERLAY_MERGE_CHOICE, _OVERLAY_NONE, _OVERLAY_REMOTE_PICK,
     _OVERLAY_OUTPUT, _OVERLAY_STATUS,
     _PANE_BRANCHES, _PANE_COMMITS, _PANE_FILES, _PANE_RIGHT_STAGED,
@@ -61,6 +61,7 @@ from turbokod.git_changes import (
     branch_is_merged, compute_staged_diff, compute_unstaged_diff,
     create_reworded_commit, fetch_commit_message, fetch_commit_show,
     fetch_file_history, fetch_git_branches, fetch_git_commits,
+    fetch_git_remote_branches,
     fetch_git_status, fetch_merged_commits, format_age, git_state_mtimes,
     github_compare_url, github_repo_web_url,
     has_merge_between, head_short_sha, main_line_branch, stage_file,
@@ -263,11 +264,14 @@ def _local_changes_with_branches() -> LocalChanges:
     var lc = LocalChanges()
     lc.open(String("/tmp"))
     lc.branches.append(
-        GitBranch(String("main"), String("aaa1111"), String("tip"), True, 0),
+        GitBranch(
+            String("main"), String("aaa1111"), String("tip"), True, 0,
+            String(""),
+        ),
     )
     lc.branches.append(
         GitBranch(
-            String("feature-x"), String("bbb2222"), String("wip"), False, 0,
+            String("feature-x"), String("bbb2222"), String("wip"), False, 0, String(""),
         ),
     )
     lc.focus = _PANE_BRANCHES
@@ -3465,6 +3469,173 @@ def test_local_changes_d_on_unmerged_branch_confirms_first() raises:
     _rm_rf(dir)
 
 
+def _init_repo_with_remote_branches() raises -> String:
+    """``_init_repo_with_branches`` plus a bare ``origin`` holding
+    ``main``, ``merged-x`` and ``unmerged-x``, fetched so the
+    remote-tracking refs (and the ``origin/HEAD`` symref) exist locally.
+    The bare repo lives in ``<dir>_origin.git``."""
+    var dir = _init_repo_with_branches()
+    if len(dir.as_bytes()) == 0:
+        return dir^
+    var bare = dir + String("_origin.git")
+    _rm_rf(bare)
+    _ = _run_git(
+        dir, string_list(String("init"), String("-q"), String("--bare"), bare),
+    )
+    _ = _run_git(
+        dir, string_list(String("remote"), String("add"), String("origin"), bare),
+    )
+    _ = _run_git(
+        dir,
+        string_list(
+            String("push"), String("-q"), String("origin"), String("main"),
+            String("merged-x"), String("unmerged-x"),
+        ),
+    )
+    _ = _run_git(
+        dir, string_list(String("fetch"), String("-q"), String("origin")),
+    )
+    _ = _run_git(
+        dir,
+        string_list(
+            String("remote"), String("set-head"), String("origin"),
+            String("main"),
+        ),
+    )
+    return dir^
+
+
+def _has_remote_branch(dir: String, name: String) -> Bool:
+    for b in fetch_git_remote_branches(dir):
+        if b.name == name:
+            return True
+    return False
+
+
+def _type_text(mut lc: LocalChanges, text: String) raises:
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    for cp in text.codepoints():
+        _ = lc.handle_key(_key(UInt32(cp.to_u32())), screen, registry)
+
+
+def test_fetch_git_remote_branches_skips_head_and_splits_remote() raises:
+    var dir = _init_repo_with_remote_branches()
+    if len(dir.as_bytes()) == 0:
+        return
+    var remote = fetch_git_remote_branches(dir)
+    var names = List[String]()
+    for b in remote:
+        assert_equal(b.remote, String("origin"))
+        assert_false(b.is_current)
+        names.append(b.name)
+    assert_equal(len(remote), 3)
+    assert_true(String("origin/main") in names)
+    assert_true(String("origin/unmerged-x") in names)
+    assert_false(String("origin/HEAD") in names)
+    for b in remote:
+        if b.name == String("origin/unmerged-x"):
+            assert_equal(b.remote_branch_name(), String("unmerged-x"))
+    _rm_rf(dir)
+    _rm_rf(dir + String("_origin.git"))
+
+
+def test_local_changes_lists_remote_branches_after_local() raises:
+    var dir = _init_repo_with_remote_branches()
+    if len(dir.as_bytes()) == 0:
+        return
+    var lc = LocalChanges()
+    lc.open(dir)
+    var seen_remote = False
+    for i in range(len(lc.branches)):
+        if lc.branches[i].is_remote():
+            seen_remote = True
+        else:
+            # No local row after the first remote one.
+            assert_false(seen_remote)
+    assert_true(seen_remote)
+    _rm_rf(dir)
+    _rm_rf(dir + String("_origin.git"))
+
+
+def test_local_changes_d_on_unmerged_remote_branch_needs_typed_prefix() raises:
+    """Deleting unmerged work on the remote can't be a reflexive ``y``:
+    the first three characters of the name have to be typed."""
+    var dir = _init_repo_with_remote_branches()
+    if len(dir.as_bytes()) == 0:
+        return
+    var lc = LocalChanges()
+    lc.open(dir)
+    lc.focus = _PANE_BRANCHES
+    assert_true(_select_branch(lc, String("origin/unmerged-x")))
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(_key(UInt32(0x64)), screen, registry)
+    assert_equal(lc.overlay, _OVERLAY_DELETE_REMOTE_TYPED)
+    assert_true(String("NOT merged") in lc.overlay_message)
+    # ``y`` is just a character here, and the wrong one.
+    _ = lc.handle_key(_key(UInt32(0x79)), screen, registry)
+    _ = lc.handle_key(_key(KEY_ENTER), screen, registry)
+    assert_equal(lc.overlay, _OVERLAY_DELETE_REMOTE_TYPED)
+    assert_equal(lc._git_op, _GITOP_NONE)
+    _ = lc.handle_key(_key(KEY_BACKSPACE), screen, registry)
+    _type_text(lc, String("unm"))
+    _ = lc.handle_key(_key(KEY_ENTER), screen, registry)
+    assert_equal(lc._git_op, _GITOP_REMOTE_BRANCH_DELETE)
+    _drain_git_op(lc)
+    assert_false(_has_remote_branch(dir, String("origin/unmerged-x")))
+    # Only the remote copy went; the local branch is untouched.
+    var local_left = False
+    for b in fetch_git_branches(dir):
+        if b.name == String("unmerged-x"):
+            local_left = True
+    assert_true(local_left)
+    _rm_rf(dir)
+    _rm_rf(dir + String("_origin.git"))
+
+
+def test_local_changes_d_on_merged_remote_branch_asks_y_n() raises:
+    var dir = _init_repo_with_remote_branches()
+    if len(dir.as_bytes()) == 0:
+        return
+    var lc = LocalChanges()
+    lc.open(dir)
+    lc.focus = _PANE_BRANCHES
+    assert_true(_select_branch(lc, String("origin/merged-x")))
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(_key(UInt32(0x64)), screen, registry)
+    assert_equal(lc.overlay, _OVERLAY_DELETE_BRANCH_CONFIRM)
+    assert_equal(lc._git_op, _GITOP_NONE)
+    _ = lc.handle_key(_key(UInt32(0x79)), screen, registry)
+    assert_equal(lc._git_op, _GITOP_REMOTE_BRANCH_DELETE)
+    _drain_git_op(lc)
+    assert_false(_has_remote_branch(dir, String("origin/merged-x")))
+    _rm_rf(dir)
+    _rm_rf(dir + String("_origin.git"))
+
+
+def test_local_changes_d_on_remote_main_needs_typed_prefix() raises:
+    """``origin/main`` is an ancestor of ``main``, so it looks merged — but
+    it's the remote's main line and must take the typed path."""
+    var dir = _init_repo_with_remote_branches()
+    if len(dir.as_bytes()) == 0:
+        return
+    var lc = LocalChanges()
+    lc.open(dir)
+    lc.focus = _PANE_BRANCHES
+    assert_true(_select_branch(lc, String("origin/main")))
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(_key(UInt32(0x64)), screen, registry)
+    assert_equal(lc.overlay, _OVERLAY_DELETE_REMOTE_TYPED)
+    _ = lc.handle_key(_key(KEY_ESC), screen, registry)
+    assert_equal(lc.overlay, _OVERLAY_NONE)
+    assert_true(_has_remote_branch(dir, String("origin/main")))
+    _rm_rf(dir)
+    _rm_rf(dir + String("_origin.git"))
+
+
 def test_local_changes_d_on_merged_branch_deletes_immediately() raises:
     """A branch already contained in main loses nothing, so ``d`` acts
     straight away — no overlay in the way."""
@@ -4803,6 +4974,11 @@ def main() raises:
     test_local_changes_d_on_current_branch_is_refused()
     test_local_changes_d_on_unmerged_branch_confirms_first()
     test_local_changes_d_on_merged_branch_deletes_immediately()
+    test_fetch_git_remote_branches_skips_head_and_splits_remote()
+    test_local_changes_lists_remote_branches_after_local()
+    test_local_changes_d_on_unmerged_remote_branch_needs_typed_prefix()
+    test_local_changes_d_on_merged_remote_branch_asks_y_n()
+    test_local_changes_d_on_remote_main_needs_typed_prefix()
     test_format_age_picks_one_unit()
     test_local_changes_branch_pane_paints_age_column()
     test_fetch_git_branches_carries_age_newest_first()

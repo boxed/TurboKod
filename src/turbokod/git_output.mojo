@@ -77,6 +77,8 @@ def _transport_patterns() -> List[String]:
     p.append(String("^ *\\* \\[new branch\\] +\\S+ +-> +\\S+$"))
     p.append(String("^ *\\* \\[new tag\\] +\\S+ +-> +\\S+$"))
     p.append(String("^ *- \\[deleted\\] +.*-> +\\S+$"))
+    # ``git push <remote> --delete <branch>`` has no ``->`` column.
+    p.append(String("^ *- \\[deleted\\] +\\S+$"))
     p.append(String("^ *\\* branch +\\S+ +-> FETCH_HEAD$"))
     p.append(String("^branch '.*' set up to track .*$"))
     return p^

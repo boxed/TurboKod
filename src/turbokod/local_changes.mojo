@@ -9,7 +9,13 @@ The left sidebar stacks three panels:
   toggles whole-file staged status (``git add`` if there's anything in
   the worktree column, ``git restore --staged`` otherwise).
 * **Branches** — local branches sorted by most recent commit, with the
-  currently checked-out branch tagged ``*``. Space checks out the
+  currently checked-out branch tagged ``*``, followed by the
+  remote-tracking branches (``origin/feature``) painted dimmed. On a
+  remote row Space checks out a local branch tracking it (or the
+  existing local one), ``o`` compares it, and ``d`` deletes it *on the
+  remote* (``git push <remote> --delete``): a y/n confirm when its work
+  is already on the main line, otherwise the first three characters of
+  its name have to be typed. ``M`` / ``r`` don't apply to remote rows. Space checks out the
   selected branch (``git checkout``); ``M`` integrates it into the
   checked-out branch, asking first *how* — ``m`` for a merge commit
   (``git merge --no-ff``) or ``r`` for straight history
@@ -28,7 +34,7 @@ The left sidebar stacks three panels:
   ``o`` opens the branch's GitHub compare page — the create-a-pull-
   request form — in the browser, for any branch other than
   ``main`` / ``master`` in a repo whose push remote is on github.com.
-* **Commits** — the last 50 commits on whichever ref is reachable from
+* **Commits** — the last 500 commits on whichever ref is reachable from
   ``HEAD``.
 
 The right side is split: when a file is selected it shows two stacked
@@ -117,11 +123,12 @@ from .git_changes import (
     branch_push_remote, ChangedFile, compute_staged_diff,
     compute_unstaged_diff, compute_untracked_diff, create_reworded_commit,
     fetch_blob_text, fetch_branch_log, fetch_commit_message, fetch_commit_show,
-    fetch_git_branches, fetch_git_commits, fetch_git_remotes, fetch_git_status,
-    fetch_merged_commits, format_age, git_state_mtimes, GitBranch, GitCommit,
-    GitFileStatus, github_compare_url, GitStateMtimes, has_merge_between,
-    head_short_sha, main_line_branch, parse_unified_diff_files,
-    split_show_output, stage_file, unstage_file,
+    fetch_git_branches, fetch_git_commits, fetch_git_remote_branches,
+    fetch_git_remotes, fetch_git_status, fetch_merged_commits, format_age,
+    git_state_mtimes, GitBranch, GitCommit, GitFileStatus,
+    github_compare_url, GitStateMtimes, has_merge_between, head_short_sha,
+    main_line_branch, parse_unified_diff_files, split_show_output,
+    stage_file, strip_remote_prefix, unstage_file,
 )
 from .git_output import (
     GIT_OUT_BRANCH_DELETE, GIT_OUT_CHECKOUT, GIT_OUT_COMMIT, GIT_OUT_MERGE,
@@ -152,6 +159,7 @@ from .picker_input import picker_nav_key
 
 comptime _SIDEBAR_MIN: Int = 28
 comptime _SIDEBAR_MAX: Int = 56
+comptime _COMMIT_LIMIT: Int = 500
 
 comptime _PANE_FILES:           Int = 0
 comptime _PANE_BRANCHES:        Int = 1
@@ -187,6 +195,7 @@ comptime _OVERLAY_OUTPUT: Int = 7   # full-screen scrollback of a git op's outpu
 comptime _OVERLAY_MERGE_CHOICE: Int = 8  # m/r: merge commit or rebase
 comptime _OVERLAY_EDIT_MSG: Int = 9  # multi-line edit of a commit message
 comptime _OVERLAY_REMOTE_PICK: Int = 10  # choose a remote to push to
+comptime _OVERLAY_DELETE_REMOTE_TYPED: Int = 11  # type a prefix: delete an unmerged remote branch
 comptime _REMOTE_PICK_MAX_ROWS: Int = 10
 
 # Save-button face for the message editor. The chord is spelled out on
@@ -206,6 +215,11 @@ comptime _FLASH_MS: Int = 4000
 # rather than a viewport-derived one: the key handler has no bounds, and
 # paint clamps whatever it produces.
 comptime _OUTPUT_PAGE: Int = 15
+
+# How much of an unmerged remote branch's name has to be typed before it
+# is deleted from the remote. Enough that it can't be a stray keystroke,
+# and that it has to be *this* branch.
+comptime _REMOTE_DELETE_TYPED_PREFIX: Int = 3
 
 # Y/N answer keys (upper- and lowercase ASCII) for confirmation overlays.
 comptime _KEY_Y_UPPER = UInt32(0x59)
@@ -233,6 +247,7 @@ comptime _GITOP_MERGE:   Int = 7
 comptime _GITOP_BRANCH_DELETE: Int = 8
 comptime _GITOP_REBASE:  Int = 9
 comptime _GITOP_REWORD:  Int = 10  # rewrite an unpushed commit's message
+comptime _GITOP_REMOTE_BRANCH_DELETE: Int = 11  # git push <remote> --delete
 
 # How often (ms) the open modal re-checks git for state that changed on
 # disk behind our back — a save in an editor, a commit/checkout in another
@@ -1466,6 +1481,10 @@ struct LocalChanges(Movable):
     # from, so it's set before the answer rather than at spawn time.
     var _git_merge_branch: String
     var _git_delete_branch: String
+    # Remote the branch in ``_git_delete_branch`` lives on, for a delete
+    # of a remote-tracking branch (_GITOP_REMOTE_BRANCH_DELETE); empty for
+    # a local delete. Set and cleared together with it.
+    var _git_delete_remote: String
     # Straight-history integration is three git commands, not one (see
     # ``_confirm_merge_rebase``). ``_rebase_step`` is which one is in
     # flight — 0 none, 1 rebase, 2 checkout back, 3 fast-forward merge —
@@ -1578,6 +1597,7 @@ struct LocalChanges(Movable):
         self._git_checkout_branch = String("")
         self._git_merge_branch = String("")
         self._git_delete_branch = String("")
+        self._git_delete_remote = String("")
         self._rebase_step = 0
         self._rebase_onto = String("")
         self._rebase_log = String("")
@@ -1600,8 +1620,8 @@ struct LocalChanges(Movable):
         self.root = root^
         self.active = True
         self._reload_files()
-        self.branches = fetch_git_branches(self.root)
-        self.commits = fetch_git_commits(self.root, 50)
+        self._load_branches()
+        self.commits = fetch_git_commits(self.root, _COMMIT_LIMIT)
         # If the worktree is clean *and* there are no commits / branches
         # at all the modal isn't really useful — leave the banner up.
         if len(self.files) == 0 \
@@ -1842,6 +1862,7 @@ struct LocalChanges(Movable):
         self._git_checkout_branch = String("")
         self._git_merge_branch = String("")
         self._git_delete_branch = String("")
+        self._git_delete_remote = String("")
         self._rebase_step = 0
         self._rebase_onto = String("")
         self._rebase_log = String("")
@@ -2509,6 +2530,10 @@ struct LocalChanges(Movable):
         elif self.overlay == _OVERLAY_DELETE_BRANCH_CONFIRM:
             title = String(" Delete branch ")
             prompt_text = String("")
+        elif self.overlay == _OVERLAY_DELETE_REMOTE_TYPED:
+            title = String(" Delete remote branch ")
+            prompt_text = String("type ") \
+                + self._remote_delete_prefix() + String(": ")
         elif self.overlay == _OVERLAY_MERGE_CHOICE:
             title = String(" Merge branch ")
             prompt_text = String("")
@@ -2541,6 +2566,22 @@ struct LocalChanges(Movable):
             return
         if self.overlay == _OVERLAY_EDIT_MSG:
             self._paint_edit_msg(canvas, body_p, bx, by, box_w, box_h, body)
+            return
+        if self.overlay == _OVERLAY_DELETE_REMOTE_TYPED:
+            _ = body_p.put_text(
+                canvas, Point(bx + 2, by + 1), self.overlay_message, body,
+            )
+            _ = body_p.put_text(
+                canvas, Point(bx + 2, by + 2), prompt_text, body,
+            )
+            var typed_x = bx + 2 + display_columns(prompt_text)
+            self.overlay_input.paint(
+                canvas, Rect(typed_x, by + 2, bx + box_w - 1, by + 3), True,
+            )
+            _ = body_p.put_text(
+                canvas, Point(bx + 2, by + box_h - 2),
+                String("Enter: delete   ESC: cancel"), body,
+            )
             return
         if self.overlay == _OVERLAY_STATUS:
             # Failure-only: successes report through ``flash_message`` on
@@ -3030,12 +3071,18 @@ struct LocalChanges(Movable):
                 Rect(left, y, right + 1, y + 1), String(" "), attr,
             )
             var br = self.branches[idx]
+            # Remote-tracking rows are faded: dark gray text, kept on the
+            # selection bar too (over the bar's background) so the row
+            # still reads as remote while it's the one being acted on.
+            var name_attr = attr
+            if br.is_remote():
+                name_attr = Attr(DARK_GRAY, attr.bg)
             if narrow:
                 self._paint_truncated(
                     canvas, left + 1, y, right + 1,
                     (String("* ") if br.is_current else String("  "))
                     + br.name,
-                    attr,
+                    name_attr,
                 )
                 continue
             # ``*`` in the row's own colour (it's identity); the age dim,
@@ -3055,7 +3102,7 @@ struct LocalChanges(Movable):
                     gutter_attr, right + 1,
                 )
             self._paint_truncated(
-                canvas, name_x, y, right + 1, br.name, attr,
+                canvas, name_x, y, right + 1, br.name, name_attr,
             )
 
     def _paint_commits(
@@ -4127,13 +4174,20 @@ struct LocalChanges(Movable):
         self.staged.reset()
         self.info.reset()
 
+    def _load_branches(mut self):
+        """Local branches, then the remote-tracking ones — remote rows
+        always sort below every local one, so the branches you work on
+        stay at the top however recently a remote one moved."""
+        self.branches = fetch_git_branches(self.root)
+        self.branches.extend(fetch_git_remote_branches(self.root))
+
     def _refresh_full(mut self):
         """Reload everything (files + branches + commits) and clear the
         right-pane cache. Used after commit / amend / pull / push since
         any of those can shuffle every list."""
         self._reload_files()
-        self.branches = fetch_git_branches(self.root)
-        self.commits = fetch_git_commits(self.root, 50)
+        self._load_branches()
+        self.commits = fetch_git_commits(self.root, _COMMIT_LIMIT)
         if self.sel_file >= len(self.files):
             self.sel_file = len(self.files) - 1
         if self.sel_file < 0:
@@ -4384,6 +4438,8 @@ struct LocalChanges(Movable):
             return GIT_OUT_COMMIT if self._reword_is_head else GIT_OUT_REBASE
         if op == _GITOP_BRANCH_DELETE:
             return GIT_OUT_BRANCH_DELETE
+        if op == _GITOP_REMOTE_BRANCH_DELETE:
+            return GIT_OUT_PUSH
         if op == _GITOP_REVERT:
             return GIT_OUT_RESTORE
         return GIT_OUT_OTHER
@@ -4429,8 +4485,10 @@ struct LocalChanges(Movable):
         self._output_links = List[OutputLink]()
         # Queued-but-unconfirmed targets die with the overlay.
         # ``_confirm_delete_branch`` takes its copy before closing.
-        if self._git_op != _GITOP_BRANCH_DELETE:
+        if self._git_op != _GITOP_BRANCH_DELETE \
+                and self._git_op != _GITOP_REMOTE_BRANCH_DELETE:
             self._git_delete_branch = String("")
+            self._git_delete_remote = String("")
         # Same for the merge-style choice, whose two answers
         # (``_confirm_merge_commit`` / ``_confirm_merge_rebase``) also copy
         # the branch out and restore it after closing.
@@ -4598,11 +4656,30 @@ struct LocalChanges(Movable):
             return
         var argv = self._git_base_argv()
         argv.append(String("checkout"))
-        argv.append(br.name)
-        self._git_checkout_branch = br.name.copy()
+        if br.is_remote():
+            # Checking out ``origin/x`` itself would detach HEAD. Switch to
+            # the local branch of that name, creating it to track this
+            # one when there isn't one yet.
+            var local = br.remote_branch_name()
+            if not self._has_local_branch(local):
+                argv.append(String("--track"))
+                argv.append(br.name)
+            else:
+                argv.append(local)
+            self._git_checkout_branch = local^
+        else:
+            argv.append(br.name)
+            self._git_checkout_branch = br.name.copy()
         self._start_git_op(
             _GITOP_CHECKOUT, String("git checkout"), argv^,
         )
+
+    def _has_local_branch(self, name: String) -> Bool:
+        for i in range(len(self.branches)):
+            var b = self.branches[i]
+            if not b.is_remote() and b.name == name:
+                return True
+        return False
 
     def _run_merge(mut self):
         """``M`` on the Branches panel: integrate the selected branch into
@@ -4654,6 +4731,15 @@ struct LocalChanges(Movable):
         if br.is_current:
             self._show_status(
                 String("Can't merge ") + br.name + String(" into itself."),
+                False,
+            )
+            return False
+        if br.is_remote():
+            # The rebase chain checks the selected branch out and rewrites
+            # it, which a remote-tracking ref can't be.
+            self._show_status(
+                br.name + String(" is a remote branch — Space checks out")
+                + String(" a local one to merge or rebase."),
                 False,
             )
             return False
@@ -4862,6 +4948,9 @@ struct LocalChanges(Movable):
             self._show_status(String("No branch selected."), False)
             return
         var br = self.branches[self.sel_branch]
+        if br.is_remote():
+            self._delete_selected_remote_branch(br)
+            return
         if br.is_current:
             self._show_status(
                 String("Can't delete the checked-out branch ") + br.name
@@ -4887,6 +4976,62 @@ struct LocalChanges(Movable):
                 + String("? NOT merged into ") + main \
                 + String("; commits will be lost.")
 
+    def _delete_selected_remote_branch(mut self, br: GitBranch):
+        """``d`` on a remote-tracking row: delete the branch on its remote.
+
+        Never without asking — this reaches past the local repo, and
+        unlike a local ``branch -D`` there's no reflog on our side of the
+        wire to recover it from. When the work is already on the main
+        line a y/n is enough; otherwise the first
+        ``_REMOTE_DELETE_TYPED_PREFIX`` characters of the name have to be
+        typed, so it can't happen on a reflexive ``y``.
+
+        ``branch_is_merged`` compares against the local main line by
+        name, so ``origin/main`` would look merged into ``main``; the
+        remote's own main line is forced down the typed path."""
+        var short = br.remote_branch_name()
+        self._git_delete_branch = br.name.copy()
+        self._git_delete_remote = br.remote.copy()
+        self.overlay_input = TextField()
+        var main = main_line_branch(self.root)
+        var is_main = short == String("main") or short == String("master") \
+            or short == main
+        if not is_main and branch_is_merged(self.root, br.name):
+            self.overlay = _OVERLAY_DELETE_BRANCH_CONFIRM
+            self.overlay_message = String("Delete ") + short \
+                + String(" on ") + br.remote + String("? Merged into ") \
+                + main + String(".")
+            return
+        self.overlay = _OVERLAY_DELETE_REMOTE_TYPED
+        if is_main:
+            self.overlay_message = String("Delete ") + short \
+                + String(" on ") + br.remote \
+                + String(" — the main branch?")
+        elif len(main.as_bytes()) == 0:
+            self.overlay_message = String("Delete ") + short \
+                + String(" on ") + br.remote \
+                + String("? No main/master to check it against.")
+        else:
+            self.overlay_message = String("Delete ") + short \
+                + String(" on ") + br.remote + String("? NOT merged into ") \
+                + main + String(".")
+
+    def _remote_delete_prefix(self) -> String:
+        """What the typed confirm wants: the first
+        ``_REMOTE_DELETE_TYPED_PREFIX`` codepoints of the branch's name
+        on its remote (the whole name when it's shorter)."""
+        var name = strip_remote_prefix(
+            self._git_delete_branch, self._git_delete_remote,
+        )
+        var out = String("")
+        var n = 0
+        for cp in name.codepoint_slices():
+            if n == _REMOTE_DELETE_TYPED_PREFIX:
+                break
+            out += cp
+            n += 1
+        return out^
+
     def _open_branch_compare(mut self):
         """``o`` on the Branches panel: open the selected branch's GitHub
         compare page, which is the create-a-pull-request form with base
@@ -4907,14 +5052,15 @@ struct LocalChanges(Movable):
             self._show_status(String("No branch selected."), False)
             return
         var br = self.branches[self.sel_branch]
-        if br.name == String("main") or br.name == String("master"):
+        var short = br.remote_branch_name()
+        if short == String("main") or short == String("master"):
             self._show_status(
                 String("Nothing to compare — ") + br.name
                 + String(" is the base branch."),
                 False,
             )
             return
-        var url = github_compare_url(self.root, br.name)
+        var url = github_compare_url(self.root, short, br.remote)
         if len(url.as_bytes()) == 0:
             self._show_status(
                 String("No GitHub remote for this repo."), False,
@@ -4927,10 +5073,33 @@ struct LocalChanges(Movable):
 
     def _confirm_delete_branch(mut self):
         var name = self._git_delete_branch.copy()
+        var remote = self._git_delete_remote.copy()
         self._close_overlay()
         if len(name.as_bytes()) == 0:
             return
+        if len(remote.as_bytes()) > 0:
+            self._start_remote_branch_delete(name, remote)
+            return
         self._start_branch_delete(name)
+
+    def _start_remote_branch_delete(mut self, name: String, remote: String):
+        """Spawn ``git push <remote> --delete <branch>``. ``name`` is the
+        remote-tracking ref (``origin/feature``); git prunes it locally
+        once the remote accepts the delete, so the refresh drops the
+        row."""
+        var short = strip_remote_prefix(name, remote)
+        if short == name:
+            return
+        var argv = self._git_base_argv()
+        argv.append(String("push"))
+        argv.append(remote)
+        argv.append(String("--delete"))
+        argv.append(short^)
+        self._git_delete_branch = name.copy()
+        self._git_delete_remote = remote.copy()
+        self._start_git_op(
+            _GITOP_REMOTE_BRANCH_DELETE, String("git push --delete"), argv^,
+        )
 
     def _start_branch_delete(mut self, name: String):
         """Spawn ``git branch -D``.
@@ -5102,6 +5271,7 @@ struct LocalChanges(Movable):
             self._git_checkout_branch = String("")
             self._git_merge_branch = String("")
             self._git_delete_branch = String("")
+            self._git_delete_remote = String("")
             # Whatever step was in flight is the last one we drive — the
             # view that would report the rest is gone.
             self._rebase_step = 0
@@ -5188,6 +5358,16 @@ struct LocalChanges(Movable):
                 fallback = String("deleted ") + self._git_delete_branch
             else:
                 fallback = String("delete failed")
+        elif op == _GITOP_REMOTE_BRANCH_DELETE:
+            if ok:
+                fallback = String("deleted ") + self._git_delete_branch \
+                    + String(" on the remote")
+                # Push's last line is `` - [deleted]  feature``, which
+                # says less than our own one-liner.
+                if routine:
+                    summary = String("")
+            else:
+                fallback = String("remote delete failed")
         else:
             fallback = String("done") if ok else String("failed")
         var had_output = len(summary.as_bytes()) > 0
@@ -5225,8 +5405,9 @@ struct LocalChanges(Movable):
         if op == _GITOP_MERGE or op == _GITOP_REBASE:
             self._git_merge_branch = String("")
             self._rebase_onto = String("")
-        if op == _GITOP_BRANCH_DELETE:
+        if op == _GITOP_BRANCH_DELETE or op == _GITOP_REMOTE_BRANCH_DELETE:
             self._git_delete_branch = String("")
+            self._git_delete_remote = String("")
         if op == _GITOP_REWORD:
             self._reword_sha = String("")
             self._reword_is_head = False
@@ -5306,6 +5487,13 @@ struct LocalChanges(Movable):
                 return True
             # Swallow anything else so a stray key can't reach the list
             # underneath while a modal editor is open.
+            return True
+        if self.overlay == _OVERLAY_DELETE_REMOTE_TYPED:
+            if k == KEY_ENTER:
+                if self.overlay_input.text == self._remote_delete_prefix():
+                    self._confirm_delete_branch()
+                return True
+            _ = self.overlay_input.handle_key(event)
             return True
         if self.overlay == _OVERLAY_COMMIT:
             if k == KEY_ENTER:
