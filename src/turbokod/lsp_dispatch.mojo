@@ -867,6 +867,11 @@ struct LspManager(Copyable, Movable):
     # the same edit-application path rename/code-actions use.
     var _inflight_formatting_id: String
     var _formatting_path: String
+    # The buffer text the request was made against. The edits' ranges
+    # only mean anything against exactly this text, so the host drops
+    # them if the buffer has moved on (typing, a merged outside write)
+    # by the time they arrive. Same for ``_willsave_text``.
+    var _formatting_text: String
     var _resolved_formatting_edits: List[TextEditEntry]
     var _has_resolved_formatting: Bool
     # ``textDocument/onTypeFormatting`` — format-as-you-type. Fired when a
@@ -1027,6 +1032,7 @@ struct LspManager(Copyable, Movable):
     # applies them then writes (see ``_drain_willsave``).
     var _inflight_willsave_id: String
     var _willsave_path: String
+    var _willsave_text: String
     var _resolved_willsave_edits: List[TextEditEntry]
     var _has_resolved_willsave: Bool
     # ``window/showMessageRequest`` — a server request that blocks until the
@@ -1180,6 +1186,7 @@ struct LspManager(Copyable, Movable):
         self._has_resolved_rename = False
         self._inflight_formatting_id = String("")
         self._formatting_path = String("")
+        self._formatting_text = String("")
         self._resolved_formatting_edits = List[TextEditEntry]()
         self._has_resolved_formatting = False
         self._inflight_ontype_id = String("")
@@ -1261,6 +1268,7 @@ struct LspManager(Copyable, Movable):
         self._pulled_paths = List[String]()
         self._inflight_willsave_id = String("")
         self._willsave_path = String("")
+        self._willsave_text = String("")
         self._resolved_willsave_edits = List[TextEditEntry]()
         self._has_resolved_willsave = False
         self._msgreq_pending = False
@@ -1372,6 +1380,7 @@ struct LspManager(Copyable, Movable):
         self._has_resolved_rename = False
         self._inflight_formatting_id = String("")
         self._formatting_path = String("")
+        self._formatting_text = String("")
         self._resolved_formatting_edits = List[TextEditEntry]()
         self._has_resolved_formatting = False
         self._inflight_ontype_id = String("")
@@ -1453,6 +1462,7 @@ struct LspManager(Copyable, Movable):
         self._pulled_paths = List[String]()
         self._inflight_willsave_id = String("")
         self._willsave_path = String("")
+        self._willsave_text = String("")
         self._resolved_willsave_edits = List[TextEditEntry]()
         self._has_resolved_willsave = False
         self._msgreq_pending = False
@@ -2230,6 +2240,7 @@ struct LspManager(Copyable, Movable):
         if self.state != _STATE_READY \
                 or not self.server_supports_will_save_wait_until():
             return False
+        self._willsave_text = text.copy()
         self._send_open_or_change(path, text^)
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
@@ -2251,6 +2262,10 @@ struct LspManager(Copyable, Movable):
 
     def pending_willsave_path(self) -> String:
         return self._willsave_path
+
+    def pending_willsave_text(self) -> String:
+        """The buffer text the pending willSaveWaitUntil was made against."""
+        return self._willsave_text
 
     def take_willsave_edits(mut self) -> List[TextEditEntry]:
         var out = self._resolved_willsave_edits^
@@ -3139,6 +3154,7 @@ struct LspManager(Copyable, Movable):
         resulting ``TextEdit[]`` is parked for the host to apply."""
         if self.state != _STATE_READY:
             return False
+        self._formatting_text = text.copy()
         self._send_open_or_change(path, text^)
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
@@ -3163,6 +3179,7 @@ struct LspManager(Copyable, Movable):
         """Send ``textDocument/rangeFormatting`` for the given range."""
         if self.state != _STATE_READY:
             return False
+        self._formatting_text = text.copy()
         self._send_open_or_change(path, text^)
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
@@ -3186,6 +3203,10 @@ struct LspManager(Copyable, Movable):
 
     def pending_formatting_path(self) -> String:
         return self._formatting_path
+
+    def pending_formatting_text(self) -> String:
+        """The buffer text the pending formatting request was made against."""
+        return self._formatting_text
 
     def take_formatting_edits(mut self) -> List[TextEditEntry]:
         """Move out the parked formatting ``TextEdit[]``. Clears the flag."""

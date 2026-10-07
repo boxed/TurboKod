@@ -173,6 +173,19 @@ def load_json_object(path: String) -> Optional[JsonValue]:
 
 def write_file(path: String, content: String) -> Bool:
     """Write ``content`` to ``path`` atomically. Returns True on success.
+    See ``write_file_stamped`` for the details."""
+    return write_file_stamped(path, content).ok
+
+
+def write_file_stamped(path: String, content: String) -> FileInfo:
+    """Write ``content`` to ``path`` atomically and return the stat of the
+    file *we* wrote (``ok=False`` on failure).
+
+    The stamp is taken from the temp file before it's renamed into place
+    (rename keeps the inode, so size + mtime carry over). Stat'ing the
+    path afterwards instead would race: a write by another process
+    landing between our rename and that stat would be recorded as our
+    own, and the editor would never notice it.
 
     Writes to a sibling temp file, fsyncs, then ``rename(2)`` over the
     target — so a crash, full disk, or partial write can never leave the
@@ -199,7 +212,9 @@ def write_file(path: String, content: String) -> Bool:
     var ptr = bytes.unsafe_ptr()
     var c_path = path + String("\0")
 
-    var c_tmp = path + String(".tk-tmp") + String("\0")
+    var failed = FileInfo(Int64(0), Int64(0), Int64(0), UInt32(0), False)
+    var tmp = path + String(".tk-tmp")
+    var c_tmp = tmp + String("\0")
     var fd = external_call["creat", Int32](c_tmp.unsafe_ptr(), Int32(0o644))
     var atomic = fd >= 0
     if not atomic:
@@ -207,7 +222,7 @@ def write_file(path: String, content: String) -> Bool:
         # without truncating up front — see the docstring.
         fd = external_call["open", Int32](c_path.unsafe_ptr(), O_WRONLY)
         if fd < 0:
-            return False
+            return failed
 
     var written = 0
     var ok = True
@@ -228,16 +243,18 @@ def write_file(path: String, content: String) -> Bool:
             _ = external_call["ftruncate", Int32](Int(fd), Int(total))
         _ = external_call["fsync", Int32](fd)
         _ = external_call["close", Int32](fd)
-        return ok
+        # No temp file to stamp; this fallback keeps the stat-after race.
+        return stat_file(path) if ok else failed
 
     _ = external_call["fsync", Int32](fd)
     _ = external_call["close", Int32](fd)
-    if ok and external_call["rename", Int32](
+    var stamp = stat_file(tmp) if ok else failed
+    if stamp.ok and external_call["rename", Int32](
         c_tmp.unsafe_ptr(), c_path.unsafe_ptr()
     ) == Int32(0):
-        return True
+        return stamp
     _ = external_call["unlink", Int32](c_tmp.unsafe_ptr())
-    return False
+    return failed
 
 
 def make_dir(path: String):

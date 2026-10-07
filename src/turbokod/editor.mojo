@@ -39,7 +39,9 @@ from .events import (
     MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .editorconfig import EditorConfig, load_editorconfig_for_path
-from .file_io import FileInfo, read_file, stat_file, write_file
+from .file_io import (
+    FileInfo, read_file, stat_file, write_file_stamped,
+)
 from .git_blame import BlameLine
 from .git_changes import (
     GIT_CHANGE_ADDED, GIT_CHANGE_MODIFIED, GIT_CHANGE_NONE,
@@ -1223,6 +1225,20 @@ struct Editor(Copyable, Movable):
     # ``consume_merge_regions`` returns the regions and clears the flag.
     var merge_pending: Bool
     var pending_merge_regions: List[MergeRegion]
+    # True from the moment a conflicting on-disk change is detected until
+    # it's merged into the buffer (resolved in the ``MergeView``, or a
+    # later re-merge comes out clean). While set, the file on disk holds
+    # changes the buffer doesn't, so ``save`` must not write it: it
+    # re-runs the merge instead and refuses on a conflict. Unlike
+    # ``merge_pending`` this survives the host consuming the regions —
+    # an open or cancelled merge view leaves it set, which is what keeps
+    # autosave from writing the local text over the other change.
+    var disk_conflict: Bool
+    # The on-disk content the pending conflict was computed against.
+    # Becomes the merge base once the user's resolution is written, so a
+    # write that lands while the merge view is open is merged against
+    # what the user actually saw rather than the pre-conflict baseline.
+    var _conflict_disk_text: String
     # View options. ``line_numbers`` paints a right-aligned line-number
     # gutter to the right of the debugger gutter; its width is derived
     # from ``buffer.line_count()`` at paint time. ``wrap_mode`` is one of
@@ -1656,6 +1672,8 @@ struct Editor(Copyable, Movable):
         self.test_file_globs = List[String]()
         self.merge_pending = False
         self.pending_merge_regions = List[MergeRegion]()
+        self.disk_conflict = False
+        self._conflict_disk_text = String("")
         self.line_numbers = False
         self.sticky_scroll = True
         self.wrap_mode = WRAP_NONE
@@ -1772,8 +1790,12 @@ struct Editor(Copyable, Movable):
 
     @staticmethod
     def from_file(var path: String) raises -> Self:
-        var text = read_file(path)
+        # Stat *before* reading: a write landing in between then leaves
+        # the recorded stamp older than the bytes, which the next poll
+        # sees as a change and re-reads. The other order would record the
+        # newer stamp against the older bytes and miss that write forever.
         var info = stat_file(path)
+        var text = read_file(path)
         # Keep a copy of the on-disk bytes as the merge base for any
         # later 3-way merge against an external write.
         var baseline = text
@@ -1858,6 +1880,8 @@ struct Editor(Copyable, Movable):
         self.test_file_globs = copy.test_file_globs.copy()
         self.merge_pending = copy.merge_pending
         self.pending_merge_regions = copy.pending_merge_regions.copy()
+        self.disk_conflict = copy.disk_conflict
+        self._conflict_disk_text = copy._conflict_disk_text
         self.line_numbers = copy.line_numbers
         self.sticky_scroll = copy.sticky_scroll
         self.wrap_mode = copy.wrap_mode
@@ -4005,6 +4029,9 @@ struct Editor(Copyable, Movable):
         self.selections[0].anchor_col = self.selections[0].col
         self.merge_pending = False
         self.pending_merge_regions = List[MergeRegion]()
+        self.disk_conflict = False
+        self.disk_baseline = self._conflict_disk_text^
+        self._conflict_disk_text = String("")
         self.refresh_highlights()
         return self.save()
 
@@ -4050,6 +4077,12 @@ struct Editor(Copyable, Movable):
         if info.size == self.file_size and info.mtime_sec == self.file_mtime \
                 and info.mtime_nsec == self.file_mtime_nsec:
             return EXT_CHANGE_NONE
+        return self._reconcile_with_disk(info)
+
+    def _reconcile_with_disk(mut self, info: FileInfo) raises -> Int:
+        """Bring the buffer up to date with the on-disk file whose stat is
+        ``info``: reload when clean, 3-way merge when dirty. Returns the
+        ``EXT_CHANGE_*`` outcome; see ``check_for_external_change``."""
         var text = read_file(self.file_path)
         if not self.dirty:
             # Clean reload: buffer matches the previous baseline, just
@@ -4059,6 +4092,7 @@ struct Editor(Copyable, Movable):
             self._recompute_big_buffer()
             self.disk_baseline = baseline^
             self._adopt_stat(info)
+            self._clear_disk_conflict()
             self._after_buffer_swap()
             return EXT_CHANGE_RELOADED
         # Dirty: 3-way merge against the previous on-disk content.
@@ -4080,6 +4114,8 @@ struct Editor(Copyable, Movable):
             # stashed regions stay valid until the user resolves them.
             self.pending_merge_regions = regions^
             self.merge_pending = True
+            self.disk_conflict = True
+            self._conflict_disk_text = text^
             self._adopt_stat(info)
             return EXT_CHANGE_CONFLICT
         # Clean merge: every region is STABLE, so concatenating them
@@ -4095,12 +4131,17 @@ struct Editor(Copyable, Movable):
         self.buffer.lines = merged^
         self.disk_baseline = text^
         self._adopt_stat(info)
+        self._clear_disk_conflict()
         # Clean merge: dirty iff the merged buffer differs from what's
         # currently on disk. (Equal happens when ``theirs`` already
         # contained all of our local edits.)
         self.dirty = self.buffer.lines != theirs_lines
         self._after_buffer_swap()
         return EXT_CHANGE_MERGED
+
+    def _clear_disk_conflict(mut self):
+        self.disk_conflict = False
+        self._conflict_disk_text = String("")
 
     def _after_buffer_swap(mut self):
         """Bookkeeping after a reload or merge replaced the buffer
@@ -4238,27 +4279,62 @@ struct Editor(Copyable, Movable):
 
     def save(mut self) raises -> Bool:
         """Write the buffer back to ``file_path``. Returns False if the
-        editor has no backing path (caller should trigger Save As) or the
-        write fails.
+        editor has no backing path (caller should trigger Save As), the
+        write fails, or the file on disk holds changes the buffer hasn't
+        merged yet (see below).
+
+        **Never writes over a change it hasn't seen.** Outside writes are
+        normally picked up by the per-frame ``check_for_external_change``
+        poll, but a save can land between such a write and the next poll
+        — and since a save adopts the new stat, the other write would
+        then be lost without a trace. So the file is re-stat'ed first,
+        and a change is merged in exactly as the poll would: a clean merge
+        is applied and the merged buffer written, a conflict stashes the
+        regions for the host's ``MergeView`` and nothing is written.
+
+        The same goes while ``disk_conflict`` is set (a merge view is open
+        or was cancelled): the merge is re-run against the current disk,
+        and the save only goes ahead once it comes out clean.
         """
         if len(self.file_path.as_bytes()) == 0:
             return False
-        var disk = self._disk_text()
-        if not write_file(self.file_path, disk):
+        if self.merge_pending:
+            # Regions already stashed for the host; resolving them is the
+            # only way forward.
             return False
-        self._adopt_written(disk^)
+        # Review-hosted editors don't track the file's stat (see
+        # ``check_for_external_change``), so there's nothing to compare.
+        if not self.review_mode:
+            var info = stat_file(self.file_path)
+            if info.ok and (
+                self.disk_conflict
+                or info.size != self.file_size
+                or info.mtime_sec != self.file_mtime
+                or info.mtime_nsec != self.file_mtime_nsec
+            ):
+                var status = self._reconcile_with_disk(info)
+                if status == EXT_CHANGE_CONFLICT:
+                    return False
+                if status == EXT_CHANGE_RELOADED:
+                    # The buffer was clean: it now *is* the disk content,
+                    # so there's nothing of ours left to write.
+                    return True
+        var disk = self._disk_text()
+        var stamp = write_file_stamped(self.file_path, disk)
+        if not stamp.ok:
+            return False
+        self._adopt_written(disk^, stamp)
         return True
 
-    def _adopt_written(mut self, var disk: String):
-        """After writing ``disk`` to ``file_path``: refresh the stat so
-        ``check_for_external_change`` doesn't mistake our own write for an
-        external one, adopt the bytes as the new merge base, and go
-        clean."""
-        var info = stat_file(self.file_path)
-        if info.ok:
-            self._adopt_stat(info)
+    def _adopt_written(mut self, var disk: String, stamp: FileInfo):
+        """After writing ``disk`` to ``file_path``: record the stat of the
+        file we wrote (``write_file_stamped``'s, taken before the rename,
+        so a later write by someone else still reads as a change), adopt
+        the bytes as the new merge base, and go clean."""
+        self._adopt_stat(stamp)
         self.disk_baseline = disk^
         self.dirty = False
+        self._clear_disk_conflict()
 
     def save_as(mut self, var path: String) raises -> Bool:
         """Write the buffer to ``path`` and adopt it as the new backing file.
@@ -4274,11 +4350,12 @@ struct Editor(Copyable, Movable):
         self.editorconfig = load_editorconfig_for_path(path)
         self.file_path = path^
         var disk = self._disk_text()
-        if not write_file(self.file_path, disk):
+        var stamp = write_file_stamped(self.file_path, disk)
+        if not stamp.ok:
             self.file_path = prev_path^
             self.editorconfig = prev_config^
             return False
-        self._adopt_written(disk^)
+        self._adopt_written(disk^, stamp)
         # Extension may have changed (e.g., ``.txt`` → ``.mojo``): the cached
         # tokenizer state belongs to the old grammar, so retokenize from
         # scratch, and rescan the test gutter under the new language.

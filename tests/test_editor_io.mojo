@@ -12,7 +12,9 @@ from turbokod.editor import (
     EXT_CHANGE_CONFLICT, EXT_CHANGE_MERGED, EXT_CHANGE_NONE,
     EXT_CHANGE_RELOADED, Editor
 )
-from turbokod.file_io import read_file, write_file
+from turbokod.file_io import (
+    read_file, stat_file, write_file, write_file_stamped,
+)
 from turbokod.git_blame import BlameLine
 from turbokod.git_changes import (
     GIT_CHANGE_ADDED, GIT_CHANGE_MODIFIED, GIT_CHANGE_NONE
@@ -305,6 +307,123 @@ def test_editor_merge_resolve_writes_disk() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
+def _replace_line_1_with_ours(mut ed: Editor) raises:
+    ed.move_to(1, 0, False)
+    ed.move_to(1, 1, True)
+    for c in String("OURS").codepoints():
+        _ = ed.handle_key(Event.key_event(UInt32(c.to_u32())), _VIEW)
+    assert_equal(ed.buffer.line(1), String("OURS"))
+
+
+def _unlink(path: String):
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+def test_editor_save_merges_an_unseen_disjoint_write() raises:
+    """A save that lands before the poll has seen an outside write must
+    not write over it: the change is merged in and both edits reach
+    disk."""
+    var path = _temp_path(String("_save_unseen_merge.txt"))
+    assert_true(write_file(path, String("a\nb\nc\nd\ne\n")))
+    var ed = Editor.from_file(path)
+    _ = ed.handle_key(Event.key_event(UInt32(ord("X"))), _VIEW)
+    assert_true(write_file(path, String("a\nb\nc\nd\nEEE\n")))
+    # No check_for_external_change in between — straight to save.
+    assert_true(ed.save())
+    assert_false(ed.dirty)
+    assert_equal(read_file(path), String("Xa\nb\nc\nd\nEEE\n"))
+    _unlink(path)
+
+
+def test_editor_save_refuses_an_unseen_conflicting_write() raises:
+    var path = _temp_path(String("_save_unseen_conflict.txt"))
+    assert_true(write_file(path, String("a\nb\nc\n")))
+    var ed = Editor.from_file(path)
+    _replace_line_1_with_ours(ed)
+    assert_true(write_file(path, String("a\nTHEIRS\nc\n")))
+    assert_false(ed.save())
+    # Disk keeps the other writer's version; the buffer keeps ours.
+    assert_equal(read_file(path), String("a\nTHEIRS\nc\n"))
+    assert_equal(ed.buffer.line(1), String("OURS"))
+    assert_true(ed.dirty)
+    assert_true(ed.merge_pending)
+    assert_true(ed.disk_conflict)
+    _unlink(path)
+
+
+def test_editor_save_refuses_while_merge_open_or_cancelled() raises:
+    """Once the host has taken the regions (merge view open), and after
+    the user cancels it, a save — e.g. autosave on focus-out — must
+    re-run the merge rather than write the local text over the other
+    change."""
+    var path = _temp_path(String("_save_merge_cancelled.txt"))
+    assert_true(write_file(path, String("a\nb\nc\n")))
+    var ed = Editor.from_file(path)
+    _replace_line_1_with_ours(ed)
+    assert_true(write_file(path, String("a\nTHEIRS\nc\n")))
+    assert_equal(ed.check_for_external_change(), EXT_CHANGE_CONFLICT)
+    _ = ed.consume_merge_regions()
+    # Merge view is open: autosave fires.
+    assert_false(ed.save())
+    assert_equal(read_file(path), String("a\nTHEIRS\nc\n"))
+    # Cancelled: the host clears merge_pending; the next save asks again.
+    ed.merge_pending = False
+    assert_false(ed.save())
+    assert_true(ed.merge_pending)
+    assert_equal(read_file(path), String("a\nTHEIRS\nc\n"))
+    # Editing the conflict away makes the re-merge clean, and the save
+    # goes through with both sides' lines.
+    _ = ed.consume_merge_regions()
+    ed.merge_pending = False
+    ed.move_to(1, 0, False)
+    ed.move_to(1, 4, True)
+    for c in String("THEIRS").codepoints():
+        _ = ed.handle_key(Event.key_event(UInt32(c.to_u32())), _VIEW)
+    assert_true(ed.save())
+    assert_false(ed.disk_conflict)
+    assert_equal(read_file(path), String("a\nTHEIRS\nc\n"))
+    _unlink(path)
+
+
+def test_editor_merge_resolution_survives_a_write_during_the_merge() raises:
+    """The resolution is merged against the disk text the user resolved
+    against, so a later save sees no spurious conflict."""
+    var path = _temp_path(String("_save_after_resolve.txt"))
+    assert_true(write_file(path, String("a\nb\nc\n")))
+    var ed = Editor.from_file(path)
+    _replace_line_1_with_ours(ed)
+    assert_true(write_file(path, String("a\nTHEIRS\nc\n")))
+    assert_equal(ed.check_for_external_change(), EXT_CHANGE_CONFLICT)
+    var regions = ed.consume_merge_regions()
+    var mv = MergeView()
+    mv.open(regions^, 0, path)
+    for i in range(len(mv.states)):
+        mv.states[i].choice = CHOICE_BOTH
+    assert_true(ed.apply_resolved_merge(mv.resolved_text()))
+    assert_false(ed.disk_conflict)
+    assert_equal(ed.disk_baseline, read_file(path))
+    _unlink(path)
+
+
+def test_editor_save_of_clean_buffer_adopts_unseen_write() raises:
+    var path = _temp_path(String("_save_clean_unseen.txt"))
+    assert_true(write_file(path, String("one\n")))
+    var ed = Editor.from_file(path)
+    assert_true(write_file(path, String("two two\n")))
+    assert_true(ed.save())
+    assert_equal(read_file(path), String("two two\n"))
+    assert_equal(ed.buffer.line(0), String("two two"))
+    _unlink(path)
+
+
+def test_write_file_stamped_matches_the_written_file() raises:
+    var path = _temp_path(String("_stamped.txt"))
+    var stamp = write_file_stamped(path, String("hello\n"))
+    assert_true(stamp.ok)
+    assert_true(stamp.same_content_stamp(stat_file(path)))
+    _unlink(path)
+
+
 def test_editor_save_applies_editorconfig_transforms() raises:
     """``save`` should trim trailing whitespace and ensure a final newline
     when the editorconfig says to. The fixture's top-level ``[*]`` sets
@@ -555,6 +674,12 @@ def main() raises:
     test_editor_external_change_clears_dirty_when_disk_already_has_our_edits()
     test_editor_external_change_conflict_stashes_regions()
     test_editor_merge_resolve_writes_disk()
+    test_editor_save_merges_an_unseen_disjoint_write()
+    test_editor_save_refuses_an_unseen_conflicting_write()
+    test_editor_save_refuses_while_merge_open_or_cancelled()
+    test_editor_merge_resolution_survives_a_write_during_the_merge()
+    test_editor_save_of_clean_buffer_adopts_unseen_write()
+    test_write_file_stamped_matches_the_written_file()
     test_editor_save_applies_editorconfig_transforms()
     test_editor_save_uses_editorconfig_line_endings()
     test_editor_save_applies_global_transform_defaults()
@@ -566,4 +691,4 @@ def main() raises:
     test_blame_gutter_click_requests_commit_details()
     test_blame_gutter_click_past_blame_data_still_toggles_breakpoint()
     test_editor_git_changes_gutter_widens_total_gutter()
-    print("editor_io: 21 tests passed")
+    print("editor_io: 27 tests passed")

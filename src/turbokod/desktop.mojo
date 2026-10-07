@@ -5655,6 +5655,14 @@ struct Desktop(Movable):
         self._rebuild_project_menu()
         self._close_deleted_file_windows()
         var conflicts = self.windows.check_external_changes()
+        # A conflict can also be found by a *save* (``Editor.save`` re-checks
+        # the disk before writing), which no poll will report again — the
+        # stat was already adopted. ``merge_pending`` is the source of
+        # truth either way.
+        for i in range(len(self.windows.windows)):
+            if self.windows.windows[i].is_editor \
+                    and self.windows.windows[i].editor.merge_pending:
+                conflicts.append(i)
         for k in range(len(conflicts)):
             var idx = conflicts[k]
             var dup = False
@@ -5721,12 +5729,17 @@ struct Desktop(Movable):
     def _on_merge_cancel(mut self, screen: Rect):
         # Leave the local edits intact: the buffer was never touched and
         # ``disk_baseline`` still holds the pre-conflict content. The
-        # stat was already advanced when the conflict was detected, so it
-        # won't auto-re-fire; the user keeps editing and a later save
-        # overwrites the on-disk version.
+        # stat was already advanced when the conflict was detected, so the
+        # poll won't re-fire — but ``disk_conflict`` stays set, so the next
+        # save (explicit or autosave) re-runs the merge and asks again
+        # instead of writing the local text over the other change.
         var idx = self._relocate_merge_target()
         if idx >= 0:
             self.windows.windows[idx].editor.merge_pending = False
+            self.status_bar.set_message(
+                String("Merge postponed — it will be offered again on save"),
+                Attr(BLACK, LIGHT_GRAY),
+            )
         self.merge_view.close()
         self._open_next_merge(screen)
 
@@ -12335,13 +12348,29 @@ struct Desktop(Movable):
             self._format_then_save_path = String("")
         if self._willsave_then_save_path == path:
             self._willsave_then_save_path = String("")
+        self._save_editor(idx, String("_do_save"))
+
+    def _save_editor(mut self, idx: Int, who: String):
+        """``Editor.save`` plus ``_after_save`` when it actually wrote.
+
+        A save can be refused because the file changed on disk in a way
+        that conflicts with the buffer (see ``Editor.save``); then
+        nothing was written, so no on-save actions or didSave, and the
+        status bar says why. The merge view itself opens from
+        ``process_external_changes``."""
         try:
-            _ = self.windows.windows[idx].editor.save()
-            var saved_path = self.windows.windows[idx].editor.file_path
-            self._after_save(idx, saved_path)
+            if self.windows.windows[idx].editor.save():
+                var saved_path = self.windows.windows[idx].editor.file_path
+                self._after_save(idx, saved_path)
+            elif self.windows.windows[idx].editor.disk_conflict:
+                self.status_bar.set_message(
+                    String("Not saved: the file changed on disk — ")
+                    + String("resolve the merge first"),
+                    Attr(LIGHT_RED, LIGHT_GRAY),
+                )
         except e:
             print(
-                "desktop: _do_save",
+                "desktop:", who,
                 self.windows.windows[idx].editor.file_path,
                 ":", String(e),
             )
@@ -14758,23 +14787,25 @@ struct Desktop(Movable):
             if not self.lsp_managers[i].has_pending_formatting():
                 continue
             var fpath = self.lsp_managers[i].pending_formatting_path()
+            var ftext = self.lsp_managers[i].pending_formatting_text()
             var fedits = self.lsp_managers[i].take_formatting_edits()
             var win = self._find_window_for_path(fpath)
             if win < 0 or not self.windows.windows[win].is_editor:
                 if self._format_then_save_path == fpath:
                     self._format_then_save_path = String("")
                 continue
-            if len(fedits) > 0:
+            # The edits' ranges are against the text the request carried;
+            # on a buffer that has changed since (typing, a merged outside
+            # write) they'd land in the wrong places. Drop them — a pending
+            # save still goes ahead, just unformatted.
+            if len(fedits) > 0 and self.windows.windows[win] \
+                    .editor.text_snapshot() == ftext:
                 _ = self.windows.windows[win].editor.apply_text_edits(
                     fedits^,
                 )
             if self._format_then_save_path == fpath:
                 self._format_then_save_path = String("")
-                try:
-                    _ = self.windows.windows[win].editor.save()
-                    self._after_save(win, fpath)
-                except e:
-                    print("desktop: format-on-save", fpath, ":", String(e))
+                self._save_editor(win, String("format-on-save"))
 
     def _drain_willsave(mut self):
         """Apply any parked textDocument/willSaveWaitUntil ``TextEdit[]`` to
@@ -14785,23 +14816,22 @@ struct Desktop(Movable):
             if not self.lsp_managers[i].has_pending_willsave():
                 continue
             var wpath = self.lsp_managers[i].pending_willsave_path()
+            var wtext = self.lsp_managers[i].pending_willsave_text()
             var wedits = self.lsp_managers[i].take_willsave_edits()
             var win = self._find_window_for_path(wpath)
             if win < 0 or not self.windows.windows[win].is_editor:
                 if self._willsave_then_save_path == wpath:
                     self._willsave_then_save_path = String("")
                 continue
-            if len(wedits) > 0:
+            # Stale-range guard — see ``_drain_formatting``.
+            if len(wedits) > 0 and self.windows.windows[win] \
+                    .editor.text_snapshot() == wtext:
                 _ = self.windows.windows[win].editor.apply_text_edits(
                     wedits^,
                 )
             if self._willsave_then_save_path == wpath:
                 self._willsave_then_save_path = String("")
-                try:
-                    _ = self.windows.windows[win].editor.save()
-                    self._after_save(win, wpath)
-                except e:
-                    print("desktop: willSaveWaitUntil", wpath, ":", String(e))
+                self._save_editor(win, String("willSaveWaitUntil"))
 
     def _on_lsp_status_menu_submit(mut self):
         """Resolve the LSP status-bar right-click menu. The only action
