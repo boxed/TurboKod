@@ -101,7 +101,8 @@ from .clipboard import clipboard_copy
 from .colors import (
     Attr, BLACK, BORDER_FOCUS, CYAN, DARK_GRAY, EDITOR_BG, EDITOR_FG,
     GREEN, LIGHT_BLUE, LIGHT_CYAN, LIGHT_GRAY, LIGHT_GREEN, LIGHT_MAGENTA,
-    LIGHT_RED, LIGHT_YELLOW, MAGENTA, STYLE_UNDERLINE, WHITE, YELLOW,
+    LIGHT_RED, LIGHT_YELLOW, MAGENTA, STYLE_UNDERLINE, SYN_IDENT, WHITE,
+    YELLOW,
 )
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC,
@@ -279,8 +280,9 @@ comptime _BURST_GAP_MS:   Int = 300
 comptime _SETTLE_MARGIN_MS: Int = 40
 
 # Hard caps on the inputs we'll feed to the TextMate tokenizer for the
-# diff side panels. Above either bound we skip syntax highlighting and
-# render the diff with gutter colour only — a 200 KB minified JS file
+# diff side panels in one go. A file above either bound is tokenized in
+# windows around its hunks instead, and a window above them is left
+# with gutter colour only — a 200 KB minified JS file
 # can take several seconds to tokenize with the JavaScript grammar
 # (every regex walks every char of every long line), and that stalls
 # the UI thread because tokenization is synchronous. The user can
@@ -288,6 +290,11 @@ comptime _SETTLE_MARGIN_MS: Int = 40
 # editor where the highlighter runs incrementally.
 comptime _HL_SIZE_CAP:    Int = 64 * 1024
 comptime _HL_LONG_LINE:   Int = 2000
+# Lines of leading context tokenized above each hunk of a file too big
+# to tokenize whole (see ``_emit_panel_highlights``) — enough to open
+# the enclosing block comment / template literal / docstring in the
+# common case, cheap enough to do per hunk.
+comptime _HL_WINDOW_CONTEXT: Int = 60
 
 # Right-pane line kinds — drives the gutter glyph + colouring strategy
 # in ``_paint_panel_body``. ``CTX`` / ``ADD`` / ``REM`` lines have had
@@ -1041,7 +1048,9 @@ def _first_change_line(diff_text: String) -> Int:
         if len(b) >= 2 and Int(b[0]) == 0x40 and Int(b[1]) == 0x40:
             _parse_hunk_starts(ln, old_line, new_line)
             continue
-        if _is_skip_diff_header(ln):
+        # Headers precede the first hunk; inside one, ``--- x`` is a
+        # removed ``-- x`` (see ``_populate_diff_panel``).
+        if new_line < 0 and _is_skip_diff_header(ln):
             continue
         if len(b) == 0:
             if new_line > 0:
@@ -1065,41 +1074,35 @@ def _emit_panel_highlights(
     side_text: String,
     file_path: String,
     display_to_side_row: List[Int],
+    row_offset: Int,
     mut registry: GrammarRegistry,
 ):
     """Tokenize ``side_text`` (the full file content for one side of
     the diff — before or after) and copy each emitted highlight to
     every display row in ``display_to_side_row`` that maps to it.
+    ``display_to_side_row`` is indexed from the diff's first row (its
+    banner), which sits ``row_offset`` rows into the panel.
 
-    Tokenizing the full file rather than just the diff body lets the
-    grammar resolve multi-line scopes that begin or end outside the
-    visible hunks. Same call path as ``Editor.flush_highlights``: the
-    process-wide ``GrammarRegistry`` caches the loaded grammar across
-    panels.
+    A file within ``_HL_SIZE_CAP`` with no line over ``_HL_LONG_LINE``
+    is tokenized whole, so multi-line scopes that begin or end outside
+    the visible hunks resolve exactly. Same call path as
+    ``Editor.flush_highlights``: the process-wide ``GrammarRegistry``
+    caches the loaded grammar across panels.
 
-    Skipped on inputs above ``_HL_SIZE_CAP`` bytes or with any line
-    longer than ``_HL_LONG_LINE`` codepoints — the JavaScript /
-    TypeScript grammars walk every regex across every char of every
-    long line, and a 200 KB minified file stalls the UI thread for
-    seconds. The diff still renders with gutter colours in that case;
-    double-clicking opens the worktree file in the editor where the
-    highlighter runs incrementally."""
+    Anything bigger is tokenized in **windows**: each run of displayed
+    rows, plus ``_HL_WINDOW_CONTEXT`` lines above it for the grammar to
+    pick up its scope, as an independent slice. Tokenizing the whole
+    file would stall the UI thread (the JavaScript / TypeScript grammars
+    walk every regex across every char), and skipping highlighting
+    outright left most real-world JS without any — a 70 KB module is
+    ordinary. The price is that a scope opened more than
+    ``_HL_WINDOW_CONTEXT`` lines above a hunk isn't seen. Each window
+    stays within ``_HL_SIZE_CAP``; over-long lines (minified code) are
+    left uncoloured."""
     if len(side_text.as_bytes()) == 0:
-        return
-    if len(side_text.as_bytes()) > _HL_SIZE_CAP:
         return
     var side_lines = split_lines_no_trailing(side_text)
     if len(side_lines) == 0:
-        return
-    for li in range(len(side_lines)):
-        if len(side_lines[li].as_bytes()) > _HL_LONG_LINE:
-            return
-    var ext = extension_of(file_path)
-    var cache = HighlightCache()
-    var hls = highlight_for_extension_cached(
-        ext, side_lines, registry, cache,
-    )
-    if len(hls) == 0:
         return
     # Inverse map: for each side row, the list of display rows that
     # render that line. Keeps the emit loop O(hits) rather than
@@ -1111,14 +1114,107 @@ def _emit_panel_highlights(
         var r = display_to_side_row[d]
         if 0 <= r and r < len(side_lines):
             inv[r].append(d)
+    var whole = len(side_text.as_bytes()) <= _HL_SIZE_CAP
+    if whole:
+        for li in range(len(side_lines)):
+            if len(side_lines[li].as_bytes()) > _HL_LONG_LINE:
+                whole = False
+                break
+    var ext = extension_of(file_path)
+    if whole:
+        _emit_window_highlights(
+            panel, side_lines, 0, 0, len(side_lines), inv, row_offset, ext,
+            registry,
+        )
+        return
+    # Displayed side rows, ascending, grouped into runs. Two runs closer
+    # than the context margin share one, so a dense diff doesn't
+    # re-tokenize the same lines once per hunk.
+    var r = 0
+    var n = len(side_lines)
+    while r < n:
+        if len(inv[r]) == 0:
+            r += 1
+            continue
+        var hi = r
+        var k = r + 1
+        while k < n and k <= hi + _HL_WINDOW_CONTEXT:
+            if len(inv[k]) > 0:
+                hi = k
+            k += 1
+        # Cut the run into pieces of at most half the byte budget (a new
+        # file's diff is one run over the whole file), then spend what's
+        # left of the budget on context above each piece. Long-lined
+        # files (i18n tables) get less context rather than none.
+        var start = r
+        while start <= hi:
+            var end = start
+            var cost = 0
+            while end <= hi:
+                var c = _hl_line_cost(side_lines[end])
+                if end > start and cost + c > _HL_SIZE_CAP // 2:
+                    break
+                cost += c
+                end += 1
+            var begin = start
+            while begin > 0 and start - begin < _HL_WINDOW_CONTEXT:
+                var c = _hl_line_cost(side_lines[begin - 1])
+                if cost + c > _HL_SIZE_CAP:
+                    break
+                cost += c
+                begin -= 1
+            _emit_window_highlights(
+                panel, side_lines, begin, start, end, inv, row_offset, ext,
+                registry,
+            )
+            start = end
+        r = hi + 1
+
+
+def _hl_line_cost(line: String) -> Int:
+    """Bytes a line contributes to a tokenizer window — nothing for an
+    over-long line, which ``_emit_window_highlights`` blanks."""
+    var nb = len(line.as_bytes())
+    return 1 if nb > _HL_LONG_LINE else nb + 1
+
+
+def _emit_window_highlights(
+    mut panel: RightPanel,
+    side_lines: List[String],
+    begin: Int, first: Int, end: Int,
+    inv: List[List[Int]],
+    row_offset: Int,
+    ext: String,
+    mut registry: GrammarRegistry,
+):
+    """Tokenize ``side_lines[begin:end]`` on its own and emit the
+    highlights for the rows in ``[first, end)`` that ``inv`` says are
+    displayed. ``[begin, first)`` is context only: tokenized so scopes
+    opened there carry over, but those rows belong to the previous
+    window (if any) and aren't emitted twice.
+
+    A line longer than ``_HL_LONG_LINE`` is tokenized as empty and left
+    uncoloured rather than disqualifying the window: one long string
+    table entry (an i18n file) shouldn't cost every line around it its
+    colour."""
+    var lines = List[String]()
+    for i in range(begin, end):
+        if len(side_lines[i].as_bytes()) > _HL_LONG_LINE:
+            lines.append(String(""))
+        else:
+            lines.append(side_lines[i])
+    var cache = HighlightCache()
+    var hls = highlight_for_extension_cached(ext, lines, registry, cache)
     for h in range(len(hls)):
         var hl = hls[h]
-        if hl.row < 0 or hl.row >= len(inv):
+        var row = begin + hl.row
+        if hl.row < 0 or row < first or row >= end \
+                or len(side_lines[row].as_bytes()) > _HL_LONG_LINE:
             continue
-        for k in range(len(inv[hl.row])):
+        for k in range(len(inv[row])):
             panel.highlights.append(
                 Highlight(
-                    inv[hl.row][k],
+                    row_offset + inv[row][k],
                     hl.col_start, hl.col_end, hl.attr,
                 ),
             )
@@ -1150,9 +1246,13 @@ def _populate_diff_panel(
     resolve correctly even when only part of the construct lives in
     the visible hunks. Highlights from the *after* file go onto ``+``
     and context rows; highlights from the *before* file go onto ``-``
-    rows. Either side can be empty (untracked file → no before; binary
-    file or fetch failure → no after) — those rows just paint without
-    a syntax overlay."""
+    rows. Context rows take only the *after* side's highlights (the
+    before side's only when there's no after text): the two sides can
+    disagree about a context line's scope — an added ``\"\"\"`` turns
+    the unchanged lines below it into string — and the after side is
+    what the file is now. Either side can be empty (untracked file → no
+    before; binary file or fetch failure → no after) — those rows just
+    paint without a syntax overlay."""
     var src_lines = split_lines_no_trailing(diff_text)
     var banner_idx = len(panel.lines)
     _emit_filename_banner(panel, file_path, banner_width)
@@ -1176,6 +1276,9 @@ def _populate_diff_panel(
     var new_line: Int = -1
     var old_line: Int = -1
     var seen_hunk = False
+    # Context rows map to the before side only when there's no after
+    # text to colour them from — see the docstring.
+    var ctx_uses_before = len(after_text.as_bytes()) == 0
     for i in range(len(src_lines)):
         var ln = src_lines[i]
         var b = ln.as_bytes()
@@ -1190,7 +1293,13 @@ def _populate_diff_panel(
             seen_hunk = True
             _parse_hunk_starts(ln, old_line, new_line)
             continue
-        if _is_skip_diff_header(ln):
+        # Machine headers only appear before the first hunk. Past it, a
+        # removed ``-- comment`` (SQL, Lua) reads as ``--- …`` and an added
+        # ``++x`` as ``+++…``; skipping those would drop body rows and
+        # throw every later row out of step with both files.
+        if starts_with(ln, String("diff --git ")):
+            seen_hunk = False
+        if not seen_hunk and _is_skip_diff_header(ln):
             continue
         # ``jump_line`` for body rows: the 1-based line in the *after*
         # file the user lands on when they double-click this row. For
@@ -1208,7 +1317,7 @@ def _populate_diff_panel(
                 new_line - 1 if new_line > 0 else -1,
             )
             display_to_before_row.append(
-                old_line - 1 if old_line > 0 else -1,
+                old_line - 1 if old_line > 0 and ctx_uses_before else -1,
             )
             if new_line > 0:
                 new_line += 1
@@ -1259,7 +1368,7 @@ def _populate_diff_panel(
                 new_line - 1 if new_line > 0 else -1,
             )
             display_to_before_row.append(
-                old_line - 1 if old_line > 0 else -1,
+                old_line - 1 if old_line > 0 and ctx_uses_before else -1,
             )
             if new_line > 0:
                 new_line += 1
@@ -1280,10 +1389,12 @@ def _populate_diff_panel(
     display_to_after_row.append(-1)
     display_to_before_row.append(-1)
     _emit_panel_highlights(
-        panel, after_text, file_path, display_to_after_row, registry,
+        panel, after_text, file_path, display_to_after_row, banner_idx,
+        registry,
     )
     _emit_panel_highlights(
-        panel, before_text, file_path, display_to_before_row, registry,
+        panel, before_text, file_path, display_to_before_row, banner_idx,
+        registry,
     )
 
 
@@ -3309,14 +3420,12 @@ struct LocalChanges(Movable):
         var painter = Painter(area)
         var cursor_active = Attr(BLACK, YELLOW)
         var cursor_inactive = Attr(BLACK, LIGHT_GRAY)
-        # Base text colour for diff body rows. ``LIGHT_GREEN`` matches
-        # the editor's untokenised baseline (``editor.mojo`` paint), so
-        # the syntax-highlight overlay ends up colouring exactly the
-        # same scopes the editor would — keywords go ``WHITE``, strings
-        # ``RED``, comments ``CYAN``, etc. — and idents/variables stay
-        # ``LIGHT_GREEN`` which reads as the default text colour rather
-        # than a highlight.
-        var body_bg = Attr(LIGHT_GREEN, EDITOR_BG)
+        # Base text colour for diff body rows: ``SYN_IDENT``, the editor's
+        # untokenised baseline (``editor.mojo`` paint), so the overlay
+        # colours exactly the scopes the editor would and plain text
+        # matches the editor under every theme. (A fixed ANSI slot only
+        # happened to match under the default theme.)
+        var body_bg = Attr(SYN_IDENT, EDITOR_BG)
         # Add/remove gutter cells. Saturated bg + black fg gives a
         # solid coloured block on the left edge that reads as a status
         # band even at a glance — easier to spot than a fg-only glyph
@@ -3475,25 +3584,31 @@ struct LocalChanges(Movable):
             # after-file — the populate step already routed them to
             # the right side via ``display_to_*_row``.
             if has_gutter and len(hl_buckets[i]) > 0:
+                # ``byte_to_cell`` is over the whole line, so highlight
+                # bytes stay absolute and the cells scrolled off the left
+                # are subtracted afterwards — converting a scroll-relative
+                # byte offset through it would mis-place every highlight
+                # after a multi-byte character once scrolled sideways.
                 var byte_to_cell = utf8_byte_to_cell(line)
                 var byte_count = len(bytes)
                 var cell_count = utf8_codepoint_count(line)
+                var skipped = _cells_skipped(line, panel.scroll_x)
                 for bi in range(len(hl_buckets[i])):
                     var hl = panel.highlights[hl_buckets[i][bi]]
-                    var hl_byte_lo = hl.col_start - panel.scroll_x
-                    var hl_byte_hi = hl.col_end - panel.scroll_x
-                    if hl_byte_lo < 0:
-                        hl_byte_lo = 0
+                    var hl_byte_lo = hl.col_start
+                    var hl_byte_hi = hl.col_end
+                    if hl_byte_lo < panel.scroll_x:
+                        hl_byte_lo = panel.scroll_x
                     if hl_byte_hi > byte_count:
                         hl_byte_hi = byte_count
                     if hl_byte_lo >= hl_byte_hi:
                         continue
-                    var hl_cell_lo = byte_to_cell[hl_byte_lo]
+                    var hl_cell_lo = byte_to_cell[hl_byte_lo] - skipped
                     var hl_cell_hi: Int
                     if hl_byte_hi < byte_count:
-                        hl_cell_hi = byte_to_cell[hl_byte_hi]
+                        hl_cell_hi = byte_to_cell[hl_byte_hi] - skipped
                     else:
-                        hl_cell_hi = cell_count
+                        hl_cell_hi = cell_count - skipped
                     for c in range(hl_cell_lo, hl_cell_hi):
                         var sx = body_x + c
                         if sx >= area.b.x:

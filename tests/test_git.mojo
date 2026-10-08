@@ -36,7 +36,8 @@ from turbokod.git_changes import (
     git_head_sha, parse_name_status_z, parse_unified_diff_files
 )
 from turbokod.local_changes import (
-    LocalChanges, build_minimal_patch, _BURST_GAP_MS, _SETTLE_MS,
+    LocalChanges, RightPanel, build_minimal_patch, _emit_info,
+    _populate_diff_panel, _LINE_CTX, _BURST_GAP_MS, _SETTLE_MS,
     _GITOP_BRANCH_DELETE, _GITOP_CHECKOUT,
     _GITOP_MERGE, _GITOP_NONE, _GITOP_PULL, _GITOP_PUSH, _GITOP_REBASE,
     _OVERLAY_DELETE_BRANCH_CONFIRM, _OVERLAY_DELETE_REMOTE_TYPED,
@@ -3636,6 +3637,114 @@ def test_local_changes_d_on_remote_main_needs_typed_prefix() raises:
     _rm_rf(dir + String("_origin.git"))
 
 
+def _panel_row_with(panel: RightPanel, text: String, kind: Int) -> Int:
+    for r in range(len(panel.lines)):
+        if panel.lines[r] == text and panel.kind[r] == kind:
+            return r
+    return -1
+
+
+def test_diff_panel_highlights_land_below_a_leading_hint_row() raises:
+    """The untracked-file hint sits above the diff; highlights used to be
+    placed as if the diff started at row 0, i.e. one row too high."""
+    var diff = String(
+        "@@ -0,0 +1,2 @@\n+import os\n+x = 1\n"
+    )
+    var after = String("import os\nx = 1\n")
+    var panel = RightPanel()
+    _emit_info(panel, String(" (hint)"))
+    var reg = GrammarRegistry()
+    _populate_diff_panel(
+        panel, diff, String("x.py"), String(""), after, 40, reg,
+    )
+    var saw_import = False
+    for h in panel.highlights:
+        var line = panel.lines[h.row]
+        assert_true(h.col_end <= len(line.as_bytes()))
+        if line == String("import os") and h.col_start == 0:
+            saw_import = True
+            assert_equal(h.col_end, 6)
+    assert_true(saw_import)
+    reg.release()
+
+
+def test_diff_panel_keeps_removed_sql_comment_rows() raises:
+    """A removed ``-- note`` arrives as ``--- note``, which looks like a
+    diff header; it must stay a body row or every later row slips."""
+    var diff = String(
+        "--- a/q.sql\n+++ b/q.sql\n@@ -1,2 +1,2 @@\n"
+        "--- note\n+++new\n select 1;\n"
+    )
+    var panel = RightPanel()
+    var reg = GrammarRegistry()
+    _populate_diff_panel(
+        panel, diff, String("q.sql"), String("-- note\nselect 1;\n"),
+        String("++new\nselect 1;\n"), 40, reg,
+    )
+    assert_true(_panel_row_with(panel, String("-- note"), _LINE_REM) >= 0)
+    assert_true(_panel_row_with(panel, String("++new"), _LINE_ADD) >= 0)
+    assert_true(_panel_row_with(panel, String("select 1;"), _LINE_CTX) >= 0)
+    reg.release()
+
+
+def test_diff_panel_context_rows_take_after_side_colors() raises:
+    """Opening a triple-quoted string above unchanged lines turns them
+    into string content in the *after* file; the before side's
+    tokens (an ``=``, a number) must not be painted over that."""
+    var before = String("a = 1\n")
+    var after = String("s = \"\"\"\na = 1\n\"\"\"\n")
+    var diff = String(
+        "@@ -1 +1,3 @@\n+s = \"\"\"\n a = 1\n+\"\"\"\n"
+    )
+    var panel = RightPanel()
+    var reg = GrammarRegistry()
+    _populate_diff_panel(
+        panel, diff, String("x.py"), before, after, 40, reg,
+    )
+    var row = _panel_row_with(panel, String("a = 1"), _LINE_CTX)
+    assert_true(row >= 0)
+    var n = 0
+    for h in panel.highlights:
+        if h.row == row:
+            n += 1
+            assert_true(h.attr == highlight_string_attr())
+    assert_true(n > 0)
+    reg.release()
+
+
+def test_diff_panel_highlights_a_file_too_big_to_tokenize_whole() raises:
+    """Over the whole-file cap the panel tokenizes a window around each
+    hunk instead of skipping highlighting (most real JS modules are past
+    64 KB)."""
+    var before_lines = List[String]()
+    for i in range(7000):
+        before_lines.append(String("var value") + String(i) + String(" = 1;"))
+    var before = String("\n").join(before_lines) + String("\n")
+    var after_lines = before_lines.copy()
+    after_lines[5000] = String("const changed = 2;")
+    var after = String("\n").join(after_lines) + String("\n")
+    assert_true(len(after.as_bytes()) > 64 * 1024)
+    var diff = String("@@ -5001 +5001 @@\n-") + before_lines[5000] \
+        + String("\n+const changed = 2;\n")
+    var panel = RightPanel()
+    var reg = GrammarRegistry()
+    _populate_diff_panel(
+        panel, diff, String("big.js"), before, after, 40, reg,
+    )
+    var add_row = _panel_row_with(panel, String("const changed = 2;"), _LINE_ADD)
+    var rem_row = _panel_row_with(panel, before_lines[5000], _LINE_REM)
+    var add_hls = 0
+    var rem_hls = 0
+    for h in panel.highlights:
+        if h.row == add_row:
+            add_hls += 1
+        if h.row == rem_row:
+            rem_hls += 1
+    assert_true(add_hls > 0)
+    assert_true(rem_hls > 0)
+    reg.release()
+
+
 def test_local_changes_d_on_merged_branch_deletes_immediately() raises:
     """A branch already contained in main loses nothing, so ``d`` acts
     straight away — no overlay in the way."""
@@ -4974,6 +5083,10 @@ def main() raises:
     test_local_changes_d_on_current_branch_is_refused()
     test_local_changes_d_on_unmerged_branch_confirms_first()
     test_local_changes_d_on_merged_branch_deletes_immediately()
+    test_diff_panel_highlights_land_below_a_leading_hint_row()
+    test_diff_panel_keeps_removed_sql_comment_rows()
+    test_diff_panel_context_rows_take_after_side_colors()
+    test_diff_panel_highlights_a_file_too_big_to_tokenize_whole()
     test_fetch_git_remote_branches_skips_head_and_splits_remote()
     test_local_changes_lists_remote_branches_after_local()
     test_local_changes_d_on_unmerged_remote_branch_needs_typed_prefix()
