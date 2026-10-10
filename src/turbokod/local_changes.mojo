@@ -1228,6 +1228,7 @@ def _populate_diff_panel(
     after_text: String,
     banner_width: Int,
     mut registry: GrammarRegistry,
+    sides_from_diff: Bool = False,
 ):
     """Transform a per-file unified diff into the human-facing layout
     the panel paints: a ``-- path ---`` banner, a blank, the body lines
@@ -1252,8 +1253,19 @@ def _populate_diff_panel(
     the unchanged lines below it into string — and the after side is
     what the file is now. Either side can be empty (untracked file → no
     before; binary file or fetch failure → no after) — those rows just
-    paint without a syntax overlay."""
+    paint without a syntax overlay.
+
+    ``sides_from_diff`` ignores ``before_text`` / ``after_text`` and
+    instead tokenizes each side as just the lines the diff carries
+    (context + added for after, context + removed for before). No blob
+    fetch, and the cost scales with the diff rather than the files —
+    what a commit touching dozens of big files needs. Scopes opened
+    outside the hunks aren't seen."""
     var src_lines = split_lines_no_trailing(diff_text)
+    # ``sides_from_diff``: each side's lines in diff order; the display
+    # maps then index these instead of the full files.
+    var syn_after = List[String]()
+    var syn_before = List[String]()
     var banner_idx = len(panel.lines)
     _emit_filename_banner(panel, file_path, banner_width)
     # Make the file-name banner double-clickable: point it at the first
@@ -1278,7 +1290,9 @@ def _populate_diff_panel(
     var seen_hunk = False
     # Context rows map to the before side only when there's no after
     # text to colour them from — see the docstring.
-    var ctx_uses_before = len(after_text.as_bytes()) == 0
+    var ctx_uses_before = (
+        len(after_text.as_bytes()) == 0 and not sides_from_diff
+    )
     for i in range(len(src_lines)):
         var ln = src_lines[i]
         var b = ln.as_bytes()
@@ -1313,12 +1327,18 @@ def _populate_diff_panel(
             _emit_body_row(
                 panel, String(""), _LINE_CTX, i, file_path, jump,
             )
-            display_to_after_row.append(
-                new_line - 1 if new_line > 0 else -1,
-            )
-            display_to_before_row.append(
-                old_line - 1 if old_line > 0 and ctx_uses_before else -1,
-            )
+            if sides_from_diff:
+                syn_after.append(String(""))
+                syn_before.append(String(""))
+                display_to_after_row.append(len(syn_after) - 1)
+                display_to_before_row.append(-1)
+            else:
+                display_to_after_row.append(
+                    new_line - 1 if new_line > 0 else -1,
+                )
+                display_to_before_row.append(
+                    old_line - 1 if old_line > 0 and ctx_uses_before else -1,
+                )
             if new_line > 0:
                 new_line += 1
             if old_line > 0:
@@ -1338,9 +1358,13 @@ def _populate_diff_panel(
                 panel, _strip_first_byte_to_string(ln),
                 _LINE_ADD, i, file_path, jump,
             )
-            display_to_after_row.append(
-                new_line - 1 if new_line > 0 else -1,
-            )
+            if sides_from_diff:
+                syn_after.append(_strip_first_byte_to_string(ln))
+                display_to_after_row.append(len(syn_after) - 1)
+            else:
+                display_to_after_row.append(
+                    new_line - 1 if new_line > 0 else -1,
+                )
             display_to_before_row.append(-1)
             if new_line > 0:
                 new_line += 1
@@ -1352,9 +1376,13 @@ def _populate_diff_panel(
                 _LINE_REM, i, file_path, jump,
             )
             display_to_after_row.append(-1)
-            display_to_before_row.append(
-                old_line - 1 if old_line > 0 else -1,
-            )
+            if sides_from_diff:
+                syn_before.append(_strip_first_byte_to_string(ln))
+                display_to_before_row.append(len(syn_before) - 1)
+            else:
+                display_to_before_row.append(
+                    old_line - 1 if old_line > 0 else -1,
+                )
             if old_line > 0:
                 old_line += 1
             continue
@@ -1364,12 +1392,18 @@ def _populate_diff_panel(
                 panel, _strip_first_byte_to_string(ln),
                 _LINE_CTX, i, file_path, jump,
             )
-            display_to_after_row.append(
-                new_line - 1 if new_line > 0 else -1,
-            )
-            display_to_before_row.append(
-                old_line - 1 if old_line > 0 and ctx_uses_before else -1,
-            )
+            if sides_from_diff:
+                syn_after.append(_strip_first_byte_to_string(ln))
+                syn_before.append(_strip_first_byte_to_string(ln))
+                display_to_after_row.append(len(syn_after) - 1)
+                display_to_before_row.append(-1)
+            else:
+                display_to_after_row.append(
+                    new_line - 1 if new_line > 0 else -1,
+                )
+                display_to_before_row.append(
+                    old_line - 1 if old_line > 0 and ctx_uses_before else -1,
+                )
             if new_line > 0:
                 new_line += 1
             if old_line > 0:
@@ -1388,6 +1422,16 @@ def _populate_diff_panel(
     display_to_before_row.append(-1)
     display_to_after_row.append(-1)
     display_to_before_row.append(-1)
+    if sides_from_diff:
+        _emit_panel_highlights(
+            panel, String("\n").join(syn_after), file_path,
+            display_to_after_row, banner_idx, registry,
+        )
+        _emit_panel_highlights(
+            panel, String("\n").join(syn_before), file_path,
+            display_to_before_row, banner_idx, registry,
+        )
+        return
     _emit_panel_highlights(
         panel, after_text, file_path, display_to_after_row, banner_idx,
         registry,
@@ -2269,16 +2313,16 @@ struct LocalChanges(Movable):
         # transform the unstaged/staged panels use.
         var changed = parse_unified_diff_files(diff_part)
         var banner_w = 200
-        # Skip syntax highlighting for commits: a single click in the
-        # log can land on a commit that touched dozens of large files,
-        # and tokenizing both blobs for each one stalls the UI.
-        # Gutter colour + plain text is enough information to read the
-        # diff; double-clicking still opens the worktree file at the
-        # right line, where the editor's full highlighter takes over.
+        # Highlight from the diff's own lines, not the full blobs: a
+        # single click in the log can land on a commit that touched
+        # dozens of large files, and fetching + tokenizing both blobs
+        # for each one stalls the UI. The diff is already in hand, and
+        # tokenizing it costs what the diff costs.
         for k in range(len(changed)):
             _populate_diff_panel(
                 self.info, changed[k].diff, changed[k].path,
                 String(""), String(""), banner_w, registry,
+                sides_from_diff=True,
             )
 
     def _emit_merged_commits(mut self, merged_log: String):
@@ -4299,10 +4343,38 @@ struct LocalChanges(Movable):
     def _refresh_full(mut self):
         """Reload everything (files + branches + commits) and clear the
         right-pane cache. Used after commit / amend / pull / push since
-        any of those can shuffle every list."""
+        any of those can shuffle every list.
+
+        The branch and commit selections follow their *name* / *SHA*
+        rather than their row: a commit landing from another terminal
+        pushes every row down one, and keeping the index would silently
+        swap the commit under the user's eyes. The followed row also
+        keeps its on-screen position, so the list doesn't scroll under
+        it either. Gone from the list (an amend, a deleted branch) → the
+        index clamp below, as before."""
+        var kept_sha = String("")
+        if 0 <= self.sel_commit and self.sel_commit < len(self.commits):
+            kept_sha = self.commits[self.sel_commit].short_sha
+        var commit_off = self.sel_commit - self.scroll_commits
+        var kept_branch = String("")
+        if 0 <= self.sel_branch and self.sel_branch < len(self.branches):
+            kept_branch = self.branches[self.sel_branch].name
+        var branch_off = self.sel_branch - self.scroll_branches
         self._reload_files()
         self._load_branches()
         self.commits = fetch_git_commits(self.root, _COMMIT_LIMIT)
+        if len(kept_sha.as_bytes()) > 0:
+            for i in range(len(self.commits)):
+                if self.commits[i].short_sha == kept_sha:
+                    self.sel_commit = i
+                    self.scroll_commits = max(0, i - commit_off)
+                    break
+        if len(kept_branch.as_bytes()) > 0:
+            for i in range(len(self.branches)):
+                if self.branches[i].name == kept_branch:
+                    self.sel_branch = i
+                    self.scroll_branches = max(0, i - branch_off)
+                    break
         if self.sel_file >= len(self.files):
             self.sel_file = len(self.files) - 1
         if self.sel_file < 0:

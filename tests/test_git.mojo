@@ -3745,6 +3745,68 @@ def test_diff_panel_highlights_a_file_too_big_to_tokenize_whole() raises:
     reg.release()
 
 
+def test_commit_info_diff_is_syntax_highlighted() raises:
+    """Clicking a commit used to show its diff uncoloured: the panel
+    skipped highlighting rather than fetch both blobs per file. It now
+    tokenizes the lines the diff carries, so both an added and a removed
+    row get colour."""
+    var lc = LocalChanges()
+    lc.open(String("/tmp"))
+    var registry = GrammarRegistry()
+    lc._populate_commit_info(
+        String(
+            "commit abc1234\nAuthor: A <a@b.c>\n\n    Change\n"
+            "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n"
+            "@@ -1,2 +1,2 @@\n import os\n-x = 1\n+def f(): pass\n"
+        ),
+        String(""),
+        registry,
+    )
+    var ctx_row = _panel_row_with(lc.info, String("import os"), _LINE_CTX)
+    var rem_row = _panel_row_with(lc.info, String("x = 1"), _LINE_REM)
+    var add_row = _panel_row_with(lc.info, String("def f(): pass"), _LINE_ADD)
+    assert_true(ctx_row >= 0 and rem_row >= 0 and add_row >= 0)
+    var ctx_hls = 0
+    var rem_hls = 0
+    var add_hls = 0
+    for h in lc.info.highlights:
+        assert_true(h.col_end <= len(lc.info.lines[h.row].as_bytes()))
+        if h.row == ctx_row:
+            ctx_hls += 1
+        if h.row == rem_row:
+            rem_hls += 1
+        if h.row == add_row:
+            add_hls += 1
+    assert_true(ctx_hls > 0)
+    assert_true(rem_hls > 0)
+    assert_true(add_hls > 0)
+    registry.release()
+
+
+def test_refresh_keeps_selected_commit_by_sha() raises:
+    """A commit made elsewhere while the view is open pushes every row
+    down; the selection must stay on the commit the user was reading,
+    not on whatever now sits at its old index."""
+    var dir = _init_repo_with_branches()
+    if len(dir.as_bytes()) == 0:
+        return
+    var lc = LocalChanges()
+    lc.open(dir)
+    assert_true(len(lc.commits) >= 2)
+    lc.focus = _PANE_COMMITS
+    lc.sel_commit = 1
+    var sha = lc.commits[1].short_sha
+    assert_equal(
+        _commit_file(dir, String("new.txt"), String("x\n"), String("later")),
+        0,
+    )
+    lc._refresh_full()
+    assert_equal(lc.sel_commit, 2)
+    assert_equal(lc.commits[lc.sel_commit].short_sha, sha)
+    assert_equal(lc.scroll_commits, 1)
+    _rm_rf(dir)
+
+
 def test_local_changes_d_on_merged_branch_deletes_immediately() raises:
     """A branch already contained in main loses nothing, so ``d`` acts
     straight away — no overlay in the way."""
@@ -5087,6 +5149,8 @@ def main() raises:
     test_diff_panel_keeps_removed_sql_comment_rows()
     test_diff_panel_context_rows_take_after_side_colors()
     test_diff_panel_highlights_a_file_too_big_to_tokenize_whole()
+    test_commit_info_diff_is_syntax_highlighted()
+    test_refresh_keeps_selected_commit_by_sha()
     test_fetch_git_remote_branches_skips_head_and_splits_remote()
     test_local_changes_lists_remote_branches_after_local()
     test_local_changes_d_on_unmerged_remote_branch_needs_typed_prefix()
@@ -5128,4 +5192,4 @@ def main() raises:
     test_branch_pane_o_refuses_main_and_a_non_github_remote()
     test_parse_name_status_z_maps_statuses_to_lsp_change_types()
     test_changed_paths_between_reports_what_a_branch_switch_rewrote()
-    print("git: 125 tests passed")
+    print("git: 127 tests passed")
