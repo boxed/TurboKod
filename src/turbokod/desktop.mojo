@@ -608,6 +608,10 @@ comptime HELP_HOTKEYS         = String("help:hotkeys")
 comptime _TREE_LABEL_HIDDEN = String("File tree: hidden")
 comptime _TREE_LABEL_RIGHT  = String("File tree: right")
 comptime _TREE_LABEL_LEFT   = String("File tree: left")
+# While reviewing, the same item drives review's own (separate) tree.
+comptime _REVIEW_TREE_LABEL_HIDDEN = String("Review file tree: hidden")
+comptime _REVIEW_TREE_LABEL_RIGHT  = String("Review file tree: right")
+comptime _REVIEW_TREE_LABEL_LEFT   = String("Review file tree: left")
 
 # Internal pending-action values for the Replace prompt. The prompt
 # itself now carries two input rows (find + replace), so this is just
@@ -974,6 +978,15 @@ struct Desktop(Movable):
     # adjacent file: +1 = land on that file's first change, -1 = its last.
     # Applied once the newly-hosted editor's git-change lines are ready.
     var _review_pending_chunk_edge: Int
+    # Review's own file tree (View ▸ File tree, while reviewing): the same
+    # widget as ``file_tree`` but a separate setting, listing only the
+    # changeset's files (added green, deleted red). ``_review_tree_on`` is
+    # the setting — it outlives a review so the next one shows it again;
+    # ``review_tree.dock_left`` is its side. ``_review_tree_gen`` is the
+    # ``ReviewMode.model_gen`` the listing was built from.
+    var review_tree: FileTree
+    var _review_tree_on: Bool
+    var _review_tree_gen: Int
     # Project Settings view (Project ▸ Project Settings...). Second-surface
     # screen — native window on macOS, in-grid dialog in the terminal —
     # consolidating per-project on-save actions, run/debug targets, and
@@ -1660,6 +1673,10 @@ struct Desktop(Movable):
         self._review_win_idx = -1
         self._review_host_path = String("")
         self._review_pending_chunk_edge = 0
+        self.review_tree = FileTree()
+        self.review_tree.click_opens = True
+        self._review_tree_on = False
+        self._review_tree_gen = -1
         self.project_settings = ProjectSettings()
         self.project_settings_detached = False
         self.project_on_save = List[OnSaveAction]()
@@ -3580,6 +3597,11 @@ struct Desktop(Movable):
         if self.local_changes.active:
             return String("default")
         if self.review.active:
+            if self.review.is_reviewing() and (
+                self.review_tree.is_resizing()
+                or self.review_tree.is_on_resize_edge(pos, screen)
+            ):
+                return String("ew-resize")
             return String("default")
         if self.history.active:
             return String("default")
@@ -3689,7 +3711,12 @@ struct Desktop(Movable):
         # The file-tree item cycles three states instead of checking a
         # box, so its *label* carries the state.
         var tree_label = _TREE_LABEL_HIDDEN
-        if self.file_tree.visible:
+        if self.review.is_reviewing():
+            tree_label = _REVIEW_TREE_LABEL_HIDDEN
+            if self._review_tree_on:
+                tree_label = _REVIEW_TREE_LABEL_LEFT \
+                    if self.review_tree.dock_left else _REVIEW_TREE_LABEL_RIGHT
+        elif self.file_tree.visible:
             tree_label = _TREE_LABEL_LEFT if self.file_tree.dock_left \
                 else _TREE_LABEL_RIGHT
         self.menu_bar.set_item_label(PROJECT_TREE_ACTION, tree_label)
@@ -3947,8 +3974,8 @@ struct Desktop(Movable):
         ``review_mode`` flag + pinned baseline this same frame."""
         if not self.review.is_reviewing():
             return
-        var top_y = 0 if self.host_owns_menu else 1
-        var rws = self.review.body_rect(screen, top_y)
+        self._review_sync_tree()
+        var rws = self._review_body_rect(screen)
         # Focus moved off the hosted window. Only *leave* review when it
         # genuinely landed on a different file (a cmd+click cross-file jump);
         # plain focus drift — or focus on a window for the same review file —
@@ -4064,6 +4091,68 @@ struct Desktop(Movable):
             # results are approximate; for unstaged it's the live file.
             self._maybe_lsp_open(idx2)
         self._review_update_counter()
+
+    def _review_body_rect(self, screen: Rect) -> Rect:
+        """The hosted editor's rect: review's body, less the review file
+        tree on its docked side when that's shown."""
+        var top_y = 0 if self.host_owns_menu else 1
+        var r = self.review.body_rect(screen, top_y)
+        if self.review_tree.visible:
+            if self.review_tree.dock_left:
+                r.a.x = min(r.b.x, r.a.x + self.review_tree.width)
+            else:
+                r.b.x = max(r.a.x, r.b.x - self.review_tree.width)
+        return r
+
+    def _review_sync_tree(mut self):
+        """Keep the review file tree in step with its setting and the
+        changeset: rebuild the listing when the file list changed, and keep
+        the selection on the file under review."""
+        if not self._review_tree_on or not self.project:
+            if self.review_tree.visible:
+                self.review_tree.close()
+            return
+        self.review_tree.top = 0 if self.host_owns_menu else 1
+        var root = self.project.value()
+        if not self.review_tree.visible \
+                or self._review_tree_gen != self.review.model_gen:
+            self._review_tree_gen = self.review.model_gen
+            self.review_tree.open_fixed(root, self.review.file_paths)
+            for i in range(self.review.file_count()):
+                var full = join_path(root, self.review.file_paths[i])
+                if self.review.file_is_added(i):
+                    self.review_tree.added_paths.append(full)
+                elif self.review.file_is_deleted(i):
+                    self.review_tree.removed_paths.append(full)
+        var cur = self.review.current_path()
+        if len(cur.as_bytes()) == 0:
+            return
+        var abs = join_path(root, cur)
+        var sel = self.review_tree.selected
+        if sel < 0 or sel >= len(self.review_tree.entries) \
+                or self.review_tree.entries[sel].path != abs:
+            self.review_tree.reveal(abs)
+
+    def _review_tree_drain(mut self):
+        """After the review tree handled an event: a file it opened (one
+        click, or Enter) becomes the file under review, landing on its first
+        change — also when it already was the file under review. A right-click's Rename/Delete request is
+        dropped — the listing is a changeset, not the filesystem."""
+        _ = self.review_tree.consume_menu_request()
+        var opened = self.review_tree.consume_open()
+        if not opened or not self.project:
+            return
+        var rel = project_relative(
+            self.project.value(), opened.value(), empty_on_exact=True,
+        )
+        for i in range(self.review.file_count()):
+            if self.review.file_paths[i] == rel:
+                self._review_flush_edits()
+                self._review_pending_chunk_edge = 1
+                if not self.review.goto_file(i):
+                    # Same file: no re-host to pick up the pending edge.
+                    self._review_apply_chunk_edge()
+                return
 
     def _review_arm_editor(
         mut self, idx: Int, var abs: String, var before: String,
@@ -4544,7 +4633,7 @@ struct Desktop(Movable):
                 # the rect the editor paints + hit-tests against is the full
                 # review body for both this paint and the next frame's events.
                 self.windows.windows[ridx].rect = \
-                    self.review.body_rect(screen, review_top_y)
+                    self._review_body_rect(screen)
                 # Hand the editor the live palette so its review paint pass
                 # can dim unchanged context lines in real RGB (theme-aware).
                 self.windows.windows[ridx].editor.review_palette = \
@@ -4554,6 +4643,7 @@ struct Desktop(Movable):
                     basename(self.windows.windows[ridx].editor.file_path),
                     True, ridx + 1, False,
                 )
+            self.review_tree.paint(canvas, screen)
         self.review.paint(canvas, screen, review_top_y)
         # Git history for selection — a paned modal over the whole
         # surface, same top_y convention as review (below the in-grid
@@ -7170,6 +7260,19 @@ struct Desktop(Movable):
         else:
             self.file_tree.close()
 
+    def _cycle_review_tree(mut self):
+        """Review's counterpart of ``_cycle_file_tree``, on its own
+        setting: hidden → docked right → docked left → hidden. The listing
+        itself is (re)built by ``_review_sync_tree``."""
+        if not self._review_tree_on:
+            self._review_tree_on = True
+            self.review_tree.dock_left = False
+        elif not self.review_tree.dock_left:
+            self.review_tree.dock_left = True
+        else:
+            self._review_tree_on = False
+        self._review_tree_gen = -1
+
     def _reveal_in_file_tree(mut self):
         """View ▸ Show in file tree: open the tree if it's hidden (on
         its remembered dock side), expand down to the focused editor's
@@ -7617,6 +7720,16 @@ struct Desktop(Movable):
                 _ = self.review.handle_event(event, screen, review_top_y)
                 if not self.review.active:
                     self._review_teardown()
+                return Optional[String]()
+            # The review file tree, when it has keyboard focus, takes keys
+            # first (its Esc only drops focus, like the main tree's); mouse
+            # events over it are its own.
+            if event.kind == EVENT_KEY and self.review_tree.handle_key(event):
+                self._review_tree_drain()
+                return Optional[String]()
+            if event.kind == EVENT_MOUSE \
+                    and self.review_tree.handle_mouse(event, screen):
+                self._review_tree_drain()
                 return Optional[String]()
             # Review — ReviewMode claims only its chrome (Esc, toolbar,
             # file-to-file nav); everything else is forwarded to the hosted
@@ -8331,7 +8444,10 @@ struct Desktop(Movable):
             self.close_project()
             return Optional[String]()
         if action == PROJECT_TREE_ACTION:
-            self._cycle_file_tree()
+            if self.review.is_reviewing():
+                self._cycle_review_tree()
+            else:
+                self._cycle_file_tree()
             return Optional[String]()
         if action == PROJECT_SETTINGS:
             self._open_project_settings()

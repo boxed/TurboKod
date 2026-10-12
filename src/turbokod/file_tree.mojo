@@ -10,6 +10,12 @@ had narrowed by that amount.
 Internally ``entries`` is a flat list with a ``depth`` per entry — expanding
 a directory inserts its children right after it with ``depth + 1``; collapsing
 removes the contiguous run of deeper entries that follow.
+
+``open_fixed`` switches a tree to a *fixed listing*: instead of reading the
+filesystem it lists only a given set of project-relative paths (and the
+directories leading to them). Review mode uses this to show just the files a
+changeset touches, with ``added_paths`` / ``removed_paths`` tinting new files
+green and deleted files red.
 """
 
 from std.collections.list import List
@@ -19,7 +25,7 @@ from .canvas import Canvas
 from .painter import Painter
 from .cell import Cell
 from .colors import (
-    Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, LIGHT_GREEN, WHITE, YELLOW,
+    Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, LIGHT_GREEN, RED, WHITE, YELLOW,
 )
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME,
@@ -31,8 +37,16 @@ from .file_io import (
 )
 from .geometry import Point, Rect
 from .project import GitignoreMatcher, load_project_gitignore
+from .string_utils import starts_with
 from .type_ahead import TypeAhead, is_type_ahead_key, type_ahead_pick
 from .picker_input import picker_nav_key, picker_wheel_scroll, scroll_to_reveal
+
+
+def _contains(paths: List[String], path: String) -> Bool:
+    for i in range(len(paths)):
+        if paths[i] == path:
+            return True
+    return False
 
 
 comptime FILE_TREE_WIDTH: Int = 28
@@ -105,9 +119,27 @@ struct FileTree(Movable):
     var _menu_y: Int
     var _list_h: Int
     """Listing height as last painted, for keyboard scroll-to-selection."""
+    var _fixed: Bool
+    """True after ``open_fixed``: the listing comes from ``_fixed_rel``
+    rather than the filesystem."""
+    var _fixed_rel: List[String]
+    """Project-relative file paths of a fixed listing."""
+    var click_opens: Bool
+    """When True a single click on a file opens it (instead of select,
+    then click again). Review's tree sets this: there a file click is a
+    jump, not a step toward one."""
+    var added_paths: List[String]
+    """Full paths painted green (files a changeset adds)."""
+    var removed_paths: List[String]
+    """Full paths painted red (files a changeset deletes)."""
 
     def __init__(out self):
         self._list_h = 10
+        self.click_opens = False
+        self._fixed = False
+        self._fixed_rel = List[String]()
+        self.added_paths = List[String]()
+        self.removed_paths = List[String]()
         self.visible = False
         self.root = String("")
         self.width = FILE_TREE_WIDTH
@@ -130,8 +162,28 @@ struct FileTree(Movable):
         self._menu_y = 0
 
     def open(mut self, var root: String):
+        self._fixed = False
+        self._fixed_rel = List[String]()
         self.root = root^
         self._gitignore = load_project_gitignore(self.root)
+        self._load_root()
+
+    def open_fixed(mut self, var root: String, rel_paths: List[String]):
+        """Open as a fixed listing of ``rel_paths`` (project-relative files)
+        instead of the filesystem, with every directory expanded — the list
+        is a changeset, so it's short and the whole of it is the point."""
+        self._fixed = True
+        self._fixed_rel = rel_paths.copy()
+        self.root = root^
+        self._gitignore = GitignoreMatcher()
+        self._load_root()
+        var i = 0
+        while i < len(self.entries):
+            if self.entries[i].is_dir and not self.entries[i].is_expanded:
+                self._toggle_expand(i)
+            i += 1
+
+    def _load_root(mut self):
         self.entries = List[FileTreeEntry]()
         var children = self._list_dir(self.root, 0)
         for i in range(len(children)):
@@ -155,6 +207,10 @@ struct FileTree(Movable):
         self.focused = False
         self._resizing = False
         self._gitignore = GitignoreMatcher()
+        self._fixed = False
+        self._fixed_rel = List[String]()
+        self.added_paths = List[String]()
+        self.removed_paths = List[String]()
 
     def consume_open(mut self) -> Optional[String]:
         """If a file was just opened, return its path and clear the flag."""
@@ -178,6 +234,8 @@ struct FileTree(Movable):
         same helper the open-file dialog uses, so both views show the
         user identical ordering.
         """
+        if self._fixed:
+            return self._list_fixed(path, depth)
         var raw = list_directory(path)
         var names = List[String]()
         var is_dirs = List[Bool]()
@@ -196,6 +254,45 @@ struct FileTree(Movable):
                 continue
             names.append(name)
             is_dirs.append(is_dir)
+        sort_directory_listing(names, is_dirs)
+        var out = List[FileTreeEntry]()
+        for i in range(len(names)):
+            out.append(FileTreeEntry(
+                names[i], join_path(path, names[i]),
+                depth, is_dirs[i], False,
+            ))
+        return out^
+
+    def _list_fixed(self, path: String, depth: Int) -> List[FileTreeEntry]:
+        """Fixed-listing counterpart of ``_list_dir``: the immediate children
+        of ``path`` implied by ``_fixed_rel`` — a file listed directly under
+        it, or a directory some listed file lies beneath."""
+        var rel_prefix = project_relative(self.root, path, empty_on_exact=True)
+        var under = String("") if len(rel_prefix.as_bytes()) == 0 \
+            else rel_prefix + String("/")
+        var ub = len(under.as_bytes())
+        var names = List[String]()
+        var is_dirs = List[Bool]()
+        for i in range(len(self._fixed_rel)):
+            var rel = self._fixed_rel[i]
+            if not starts_with(rel, under):
+                continue
+            var rb = rel.as_bytes()
+            var end = ub
+            while end < len(rb) and rb[end] != 0x2F:
+                end += 1
+            if end == ub:
+                continue
+            var name = String(StringSpan(unsafe_from_utf8=rb[ub:end]))
+            var is_dir = end < len(rb)
+            var seen = False
+            for j in range(len(names)):
+                if names[j] == name and is_dirs[j] == is_dir:
+                    seen = True
+                    break
+            if not seen:
+                names.append(name)
+                is_dirs.append(is_dir)
         sort_directory_listing(names, is_dirs)
         var out = List[FileTreeEntry]()
         for i in range(len(names)):
@@ -285,10 +382,7 @@ struct FileTree(Movable):
                 self._scroll_to_selection()
 
     def _is_modified(self, path: String) -> Bool:
-        for i in range(len(self.modified_paths)):
-            if self.modified_paths[i] == path:
-                return True
-        return False
+        return _contains(self.modified_paths, path)
 
     # --- geometry & paint -------------------------------------------------
 
@@ -363,6 +457,12 @@ struct FileTree(Movable):
                     attr = Attr(WHITE, GREEN)
                 else:
                     attr = attr.with_bg(LIGHT_GREEN)
+            # Changeset status (fixed listings): added green, deleted red.
+            if not e.is_dir:
+                if _contains(self.added_paths, e.path):
+                    attr = attr.with_fg(GREEN)
+                elif _contains(self.removed_paths, e.path):
+                    attr = attr.with_fg(RED)
             # Paint the row background first so selection covers full width.
             painter.fill(
                 canvas,
@@ -545,6 +645,11 @@ struct FileTree(Movable):
                 == self._content_x(area) + 2 * self.entries[idx].depth:
             self.selected = idx
             self._toggle_expand(idx)
+            return True
+        if self.click_opens and not self.entries[idx].is_dir:
+            self.selected = idx
+            self.opened_path = self.entries[idx].path
+            self.submitted = True
             return True
         if idx == self.selected:
             # Second click on the same entry: directories toggle, files open.

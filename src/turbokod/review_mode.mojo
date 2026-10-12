@@ -2,8 +2,9 @@
 
 Unlike ``LocalChanges`` (a lazygit-style multi-pane modal built for
 *staging* individual lines), ReviewMode is built for *reading* a change
-file-by-file. The user picks a changeset — unstaged, staged, or a
-specific commit — and steps through it.
+file-by-file. The user picks a changeset — unstaged, staged, a specific
+commit (the picker's Commits tab), or a whole branch diffed against the
+main line (the Branches tab) — and steps through it.
 
 ReviewMode itself is only the **picker + navigation chrome + changeset
 model**: it enumerates the changed files (path + before/after text per
@@ -16,7 +17,7 @@ popup that shows removed lines, all for free from the normal editor path.
 
 Per review type:
 * **unstaged** — the real worktree file, editable + savable;
-* **staged / commit** — a read-only buffer of the historical blob.
+* **staged / commit / branch** — a read-only buffer of the historical blob.
 
 The diff baseline is pinned to each file's "before" text so the gutter +
 change navigation reflect the picked changeset rather than HEAD.
@@ -31,9 +32,10 @@ macOS frontends with no host-specific code.
 """
 
 from .canvas import Canvas, paint_drop_shadow
+from .cell import Cell
 from .colors import Attr, BLACK, CYAN, DARK_GRAY, GREEN, LIGHT_GRAY, WHITE
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE,
+    Event, EVENT_KEY, EVENT_MOUSE, KEY_TAB,
     KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME, KEY_LEFT, KEY_RIGHT,
     KEY_PAGEDOWN, KEY_PAGEUP, KEY_UP,
     MOD_CTRL, MOD_META, MOD_SHIFT,
@@ -45,10 +47,11 @@ from .diff import (
 from .file_io import join_path, read_file
 from .geometry import Point, Rect
 from .git_changes import (
-    ChangedFile, compute_staged_diff, compute_unstaged_diff,
-    compute_untracked_diff, fetch_blob_text, fetch_commit_show,
-    fetch_git_commits, fetch_git_status, parse_unified_diff_files,
-    split_show_output,
+    ChangedFile, compute_range_diff, compute_staged_diff,
+    compute_unstaged_diff, compute_untracked_diff, fetch_blob_text,
+    fetch_commit_show, fetch_git_branches, fetch_git_commits,
+    fetch_git_status, main_line_branch, merge_base,
+    parse_unified_diff_files, split_show_output,
 )
 from .painter import Painter
 from .string_utils import display_columns, split_lines_no_trailing, starts_with
@@ -62,6 +65,11 @@ comptime _MODE_REVIEW: Int = 1
 comptime _SRC_UNSTAGED: Int = 0
 comptime _SRC_STAGED:   Int = 1
 comptime _SRC_COMMIT:   Int = 2
+comptime _SRC_BRANCH:   Int = 3
+
+# --- picker tabs ------------------------------------------------------------
+comptime _TAB_COMMITS:  Int = 0
+comptime _TAB_BRANCHES: Int = 1
 
 # Number of recent commits offered in the picker.
 comptime _COMMIT_LIMIT: Int = 30
@@ -96,6 +104,20 @@ def _diff_is_deletion(diff_text: String) -> Bool:
             return True
         if lines[i] == String("+++ /dev/null"):
             return True
+    return False
+
+
+def _diff_is_addition(diff_text: String) -> Bool:
+    """``True`` when this file's diff creates it (incl. untracked files,
+    whose ``--no-index`` diff carries the same header)."""
+    var lines = split_lines_no_trailing(diff_text)
+    for i in range(len(lines)):
+        if starts_with(lines[i], String("new file mode")):
+            return True
+        if lines[i] == String("--- /dev/null"):
+            return True
+        if starts_with(lines[i], String("@@")):
+            return False
     return False
 
 
@@ -147,12 +169,22 @@ struct ReviewMode(Movable):
     var mode: Int
     var root: String
 
-    # Picker state. Parallel lists: option label, source kind, commit SHA
-    # (empty for the unstaged / staged rows).
+    # Picker state. Two tabs (Commits, Branches), each three parallel
+    # lists: option label, source kind, and ref — a commit SHA, a branch
+    # name, or empty for the unstaged / staged rows. ``picker_*`` is the
+    # *shown* tab's lists; ``_tab_*`` hold both, indexed by tab.
     var picker_labels: List[String]
     var picker_kind: List[Int]
     var picker_sha: List[String]
     var picker_cursor: Int
+    var picker_tab: Int
+    var _tab_labels: List[List[String]]
+    var _tab_kind: List[List[Int]]
+    var _tab_sha: List[List[String]]
+    var _tab_cursor: List[Int]
+    # The main line (``main`` / ``master``) branches are diffed against;
+    # empty when the repo has neither.
+    var main_branch: String
 
     # Current changeset. ``src`` / ``sha`` identify it; the parallel
     # ``file_*`` lists hold one entry per changed file. ``cur_file`` is
@@ -166,6 +198,11 @@ struct ReviewMode(Movable):
     var file_binary: List[Bool]
     # True for a file the changeset deletes — its body is read-only.
     var file_deleted: List[Bool]
+    # True for a file the changeset creates (incl. untracked files).
+    var file_added: List[Bool]
+    # Bumped whenever the file list is rebuilt, so the host can tell when
+    # anything derived from it (the review file tree) is stale.
+    var model_gen: Int
     # Changed (added + modified) line count per file, computed once at build.
     # Drives the line-weighted progress bar: a file's / change's share of the
     # bar is proportional to how many lines it touches, not just its count.
@@ -218,6 +255,9 @@ struct ReviewMode(Movable):
     var pk_x1: Int
     var pk_first: Int   # first label index shown (the list scrolls)
     var pk_rows: Int    # label rows that fit in the box
+    var pk_tab_y: Int   # tab-header row
+    var pk_tab_lo: List[Int]  # per-tab header x-span [lo, hi)
+    var pk_tab_hi: List[Int]
 
     def __init__(out self):
         self.active = False
@@ -227,6 +267,12 @@ struct ReviewMode(Movable):
         self.picker_kind = List[Int]()
         self.picker_sha = List[String]()
         self.picker_cursor = 0
+        self.picker_tab = _TAB_COMMITS
+        self._tab_labels = List[List[String]]()
+        self._tab_kind = List[List[Int]]()
+        self._tab_sha = List[List[String]]()
+        self._tab_cursor = List[Int]()
+        self.main_branch = String("")
         self.src = _SRC_UNSTAGED
         self.sha = String("")
         self.title = String("")
@@ -235,6 +281,8 @@ struct ReviewMode(Movable):
         self.file_after = List[String]()
         self.file_binary = List[Bool]()
         self.file_deleted = List[Bool]()
+        self.file_added = List[Bool]()
+        self.model_gen = 0
         self.file_changed_lines = List[Int]()
         self.cur_file = 0
         self.change_index = 0
@@ -256,6 +304,9 @@ struct ReviewMode(Movable):
         self.pk_x1 = -1
         self.pk_first = 0
         self.pk_rows = 0
+        self.pk_tab_y = -1
+        self.pk_tab_lo = List[Int]()
+        self.pk_tab_hi = List[Int]()
 
     # --- lifecycle --------------------------------------------------------
 
@@ -269,14 +320,18 @@ struct ReviewMode(Movable):
         self.mode = _MODE_PICKER
         self._reset_review()
         self._build_picker()
-        # Pre-select the changeset we last reviewed (if it's still listed),
-        # so Enter resumes it; otherwise start at the top.
-        self.picker_cursor = 0
-        for i in range(len(self.picker_labels)):
-            if self._key_for(self.picker_kind[i], self.picker_sha[i]) \
-                    == self.last_key:
-                self.picker_cursor = i
-                break
+        # Pre-select the changeset we last reviewed (if it's still listed,
+        # on whichever tab), so Enter resumes it; otherwise start at the top
+        # of the Commits tab.
+        var tab = _TAB_COMMITS
+        for t in range(len(self._tab_labels)):
+            for i in range(len(self._tab_labels[t])):
+                if self._key_for(self._tab_kind[t][i], self._tab_sha[t][i]) \
+                        == self.last_key:
+                    tab = t
+                    self._tab_cursor[t] = i
+        self.picker_tab = -1   # nothing shown yet — keep the pre-selection
+        self._show_tab(tab)
 
     def close(mut self):
         """Deactivate, remembering the current file for this changeset so a
@@ -287,6 +342,10 @@ struct ReviewMode(Movable):
         self.picker_labels = List[String]()
         self.picker_kind = List[Int]()
         self.picker_sha = List[String]()
+        self._tab_labels = List[List[String]]()
+        self._tab_kind = List[List[Int]]()
+        self._tab_sha = List[List[String]]()
+        self._tab_cursor = List[Int]()
         self._reset_review()
 
     def _key_for(self, kind: Int, sha: String) -> String:
@@ -324,6 +383,8 @@ struct ReviewMode(Movable):
         self.file_after = List[String]()
         self.file_binary = List[Bool]()
         self.file_deleted = List[Bool]()
+        self.file_added = List[Bool]()
+        self.model_gen += 1
         # Must be cleared too — ``_build_model`` *appends* to it, so leaving
         # stale entries here would misalign it with ``file_paths`` and inflate
         # the progress-bar denominator on every re-opened review.
@@ -339,6 +400,7 @@ struct ReviewMode(Movable):
         self.picker_labels = List[String]()
         self.picker_kind = List[Int]()
         self.picker_sha = List[String]()
+        # Commits tab: unstaged / staged + recent commits.
         # Only offer the unstaged / staged entries when there's actually a
         # diff on that side — an empty ``git diff`` would just open a blank
         # reviewer, so don't list it. New untracked files count as unstaged.
@@ -357,6 +419,49 @@ struct ReviewMode(Movable):
             self.picker_labels.append(c.short_sha + String("  ") + c.subject)
             self.picker_kind.append(_SRC_COMMIT)
             self.picker_sha.append(c.short_sha)
+        self._tab_labels = List[List[String]]()
+        self._tab_kind = List[List[Int]]()
+        self._tab_sha = List[List[String]]()
+        self._tab_cursor = List[Int]()
+        self._tab_labels.append(self.picker_labels.copy())
+        self._tab_kind.append(self.picker_kind.copy())
+        self._tab_sha.append(self.picker_sha.copy())
+        self._tab_cursor.append(0)
+        # Branches tab: every local branch but the main line, each diffed
+        # as a whole against where it forked from main.
+        var b_labels = List[String]()
+        var b_kind = List[Int]()
+        var b_sha = List[String]()
+        self.main_branch = main_line_branch(self.root)
+        if len(self.main_branch.as_bytes()) > 0:
+            var branches = fetch_git_branches(self.root)
+            for i in range(len(branches)):
+                if branches[i].name == self.main_branch:
+                    continue
+                b_labels.append(
+                    branches[i].name + String("  ") + branches[i].subject
+                )
+                b_kind.append(_SRC_BRANCH)
+                b_sha.append(branches[i].name)
+        self._tab_labels.append(b_labels^)
+        self._tab_kind.append(b_kind^)
+        self._tab_sha.append(b_sha^)
+        self._tab_cursor.append(0)
+
+    def _show_tab(mut self, tab: Int):
+        """Make ``tab`` the shown picker tab, remembering the cursor of the
+        one it replaces so flipping back and forth keeps each tab's place."""
+        if tab < 0 or tab >= len(self._tab_labels):
+            return
+        if 0 <= self.picker_tab and self.picker_tab < len(self._tab_cursor):
+            self._tab_cursor[self.picker_tab] = self.picker_cursor
+        self.picker_tab = tab
+        self.picker_labels = self._tab_labels[tab].copy()
+        self.picker_kind = self._tab_kind[tab].copy()
+        self.picker_sha = self._tab_sha[tab].copy()
+        self.picker_cursor = self._tab_cursor[tab]
+        if self.picker_cursor >= len(self.picker_labels):
+            self.picker_cursor = 0
 
     def _start_review(mut self):
         if self.picker_cursor < 0 or self.picker_cursor >= len(self.picker_labels):
@@ -364,6 +469,8 @@ struct ReviewMode(Movable):
         self.src = self.picker_kind[self.picker_cursor]
         self.sha = self.picker_sha[self.picker_cursor]
         self.title = self.picker_labels[self.picker_cursor]
+        if self.src == _SRC_BRANCH:
+            self.title = self.sha + String(" vs ") + self.main_branch
         self.last_key = self._mem_key()
         self._build_model()
         # Restore the file we were last on for this changeset (if any).
@@ -382,10 +489,19 @@ struct ReviewMode(Movable):
         by the host."""
         self._reset_review()
         var diff_text: String
+        # A branch is diffed from its fork point with the main line, so
+        # main's own later commits don't show up as reverse changes.
+        var base = String("")
+        if self.src == _SRC_BRANCH:
+            base = merge_base(self.root, self.main_branch, self.sha)
+            if len(base.as_bytes()) == 0:
+                base = self.main_branch
         if self.src == _SRC_UNSTAGED:
             diff_text = compute_unstaged_diff(self.root)
         elif self.src == _SRC_STAGED:
             diff_text = compute_staged_diff(self.root)
+        elif self.src == _SRC_BRANCH:
+            diff_text = compute_range_diff(self.root, base, self.sha)
         else:
             diff_text = _extract_diff_part(fetch_commit_show(self.root, self.sha))
         var changed = parse_unified_diff_files(diff_text)
@@ -408,6 +524,10 @@ struct ReviewMode(Movable):
                     # after = index blob, before = HEAD blob.
                     before = fetch_blob_text(self.root, String("HEAD"), cf.path)
                     after = fetch_blob_text(self.root, String(""), cf.path)
+                elif self.src == _SRC_BRANCH:
+                    # after = branch tip blob, before = fork-point blob.
+                    before = fetch_blob_text(self.root, base, cf.path)
+                    after = fetch_blob_text(self.root, self.sha, cf.path)
                 else:
                     # after = commit blob, before = parent blob (empty for
                     # a file's first appearance → shows as all-added).
@@ -420,6 +540,7 @@ struct ReviewMode(Movable):
             self.file_after.append(after)
             self.file_binary.append(is_binary)
             self.file_deleted.append(_diff_is_deletion(cf.diff))
+            self.file_added.append(_diff_is_addition(cf.diff))
             self.file_changed_lines.append(
                 _count_changed_lines(before, after, is_binary)
             )
@@ -437,7 +558,14 @@ struct ReviewMode(Movable):
             self.file_before.append(befores[i])
             self.file_after.append(afters[i])
             self.file_binary.append(False)
-            self.file_deleted.append(False)
+            self.file_deleted.append(
+                len(afters[i].as_bytes()) == 0
+                and len(befores[i].as_bytes()) > 0
+            )
+            self.file_added.append(
+                len(befores[i].as_bytes()) == 0
+                and len(afters[i].as_bytes()) > 0
+            )
             self.file_changed_lines.append(
                 _count_changed_lines(befores[i], afters[i], False)
             )
@@ -554,6 +682,23 @@ struct ReviewMode(Movable):
             b = last
         return self._cum_prefix[b]
 
+    def file_is_added(self, idx: Int) -> Bool:
+        if 0 <= idx and idx < len(self.file_added):
+            return self.file_added[idx]
+        return False
+
+    def file_is_deleted(self, idx: Int) -> Bool:
+        if 0 <= idx and idx < len(self.file_deleted):
+            return self.file_deleted[idx]
+        return False
+
+    def goto_file(mut self, idx: Int) -> Bool:
+        """Jump straight to file ``idx`` (the review file tree's click).
+        Returns True if the current file actually changed."""
+        var before = self.cur_file
+        self._goto_file(idx)
+        return self.cur_file != before
+
     def consume_nav(mut self) -> Int:
         var n = self.pending_nav
         self.pending_nav = 0
@@ -598,19 +743,35 @@ struct ReviewMode(Movable):
     def _paint_picker(mut self, mut canvas: Canvas, screen: Rect, top_y: Int):
         var dialog_bg = Attr(BLACK, LIGHT_GRAY)
         var cursor_attr = Attr(BLACK, CYAN)
+        var tab_on = Attr(WHITE, BLACK)
         var title = String(" Review changes ")
+        var tab_names = List[String]()
+        tab_names.append(String(" Commits "))
+        tab_names.append(String(" Branches "))
+        var hint = String("←/→")
         var n = len(self.picker_labels)
+        # Size the box over *both* tabs so flipping tabs doesn't make it jump.
         var maxw = display_columns(title)
-        for i in range(n):
-            var w = display_columns(self.picker_labels[i])
-            if w > maxw:
-                maxw = w
+        var tabs_w = display_columns(hint) + 2
+        for t in range(len(tab_names)):
+            tabs_w += display_columns(tab_names[t]) + 1
+        if tabs_w > maxw:
+            maxw = tabs_w
+        var max_rows = 1
+        for t in range(len(self._tab_labels)):
+            if len(self._tab_labels[t]) > max_rows:
+                max_rows = len(self._tab_labels[t])
+            for i in range(len(self._tab_labels[t])):
+                var w = display_columns(self._tab_labels[t][i])
+                if w > maxw:
+                    maxw = w
         var box_w = maxw + 4
         if box_w > screen.width() - 2:
             box_w = screen.width() - 2
         if box_w < 12:
             box_w = 12
-        var box_h = n + 2
+        # Border, tab row, rule, list rows, border.
+        var box_h = max_rows + 4
         var avail = screen.b.y - top_y
         if box_h > avail:
             box_h = avail
@@ -627,10 +788,46 @@ struct ReviewMode(Movable):
         painter.draw_box(canvas, box, dialog_bg)
         var tx = x0 + (box_w - display_columns(title)) // 2
         _ = painter.put_text(canvas, Point(tx, y0), title, dialog_bg)
-        self.pk_y0 = y0 + 1
+        # Tab header + a rule under it.
+        self.pk_tab_y = y0 + 1
+        self.pk_tab_lo = List[Int]()
+        self.pk_tab_hi = List[Int]()
+        var hx = x0 + 2
+        for t in range(len(tab_names)):
+            var w = display_columns(tab_names[t])
+            self.pk_tab_lo.append(hx)
+            self.pk_tab_hi.append(hx + w)
+            _ = painter.put_text(
+                canvas, Point(hx, self.pk_tab_y), tab_names[t],
+                tab_on if t == self.picker_tab else dialog_bg,
+            )
+            hx += w + 1
+        _ = painter.put_text(
+            canvas,
+            Point(x0 + box_w - 2 - display_columns(hint), self.pk_tab_y),
+            hint, Attr(DARK_GRAY, LIGHT_GRAY),
+        )
+        for x in range(x0, x0 + box_w):
+            var g = String("─")
+            if x == x0:
+                g = String("├")
+            elif x == x0 + box_w - 1:
+                g = String("┤")
+            painter.set(canvas, x, y0 + 2, Cell(g, dialog_bg, 1))
+        self.pk_y0 = y0 + 3
         self.pk_x0 = x0 + 1
         self.pk_x1 = x0 + box_w - 1
-        var rows_shown = max(0, box_h - 2)
+        var rows_shown = max(0, box_h - 4)
+        if n == 0 and rows_shown > 0:
+            var empty = String("No commits to review")
+            if self.picker_tab == _TAB_BRANCHES:
+                empty = String("No branches to compare") \
+                    if len(self.main_branch.as_bytes()) > 0 \
+                    else String("No main/master branch to compare with")
+            _ = painter.put_text(
+                canvas, Point(x0 + 2, self.pk_y0), empty,
+                Attr(DARK_GRAY, LIGHT_GRAY),
+            )
         # Scroll just far enough to keep the cursor on screen when the
         # list is taller than the box (a short terminal).
         var first = 0
@@ -648,7 +845,9 @@ struct ReviewMode(Movable):
                 canvas, Rect(self.pk_x0, y, self.pk_x1, y + 1),
                 String(" "), row_attr,
             )
-            _ = painter.put_text(
+            # Clip inside the frame so a long commit subject can't overwrite
+            # the right border.
+            _ = painter.sub(Rect(self.pk_x0, y, self.pk_x1 - 1, y + 1)).put_text(
                 canvas, Point(x0 + 2, y), self.picker_labels[i], row_attr,
             )
 
@@ -772,7 +971,13 @@ struct ReviewMode(Movable):
             self.close()
             return
         var n = len(self.picker_labels)
-        if event.key == KEY_UP:
+        if event.key == KEY_LEFT:
+            self._show_tab(self.picker_tab - 1)
+        elif event.key == KEY_RIGHT:
+            self._show_tab(self.picker_tab + 1)
+        elif event.key == KEY_TAB:
+            self._show_tab((self.picker_tab + 1) % 2)
+        elif event.key == KEY_UP:
             if self.picker_cursor > 0:
                 self.picker_cursor -= 1
         elif event.key == KEY_DOWN:
@@ -796,6 +1001,11 @@ struct ReviewMode(Movable):
                 and not event.motion:
             var px = event.pos.x
             var py = event.pos.y
+            if py == self.pk_tab_y:
+                for t in range(len(self.pk_tab_lo)):
+                    if self.pk_tab_lo[t] <= px and px < self.pk_tab_hi[t]:
+                        self._show_tab(t)
+                return
             var idx = self.pk_first + (py - self.pk_y0)
             if self.pk_x0 <= px and px < self.pk_x1 \
                     and self.pk_y0 <= py and py < self.pk_y0 + self.pk_rows \

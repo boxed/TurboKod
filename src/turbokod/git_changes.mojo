@@ -795,6 +795,19 @@ def compute_staged_diff(project_root: String) -> String:
     return _git_stdout(project_root, args^)
 
 
+def compute_range_diff(project_root: String, base: String, tip: String) -> String:
+    """``git diff --no-color <base> <tip>`` — two committed trees against
+    each other (a whole branch versus its merge base). Empty on failure."""
+    if len(project_root.as_bytes()) == 0:
+        return String("")
+    var args = List[String]()
+    args.append(String("diff"))
+    args.append(String("--no-color"))
+    args.append(base)
+    args.append(tip)
+    return _git_stdout(project_root, args^)
+
+
 def compute_unstaged_diff(project_root: String) -> String:
     """``git diff --no-color`` — worktree versus index. Empty on failure."""
     if len(project_root.as_bytes()) == 0:
@@ -1511,6 +1524,12 @@ def _first_field(line: String) -> String:
         if b[i] == 0x20:
             return String(StringSpan(unsafe_from_utf8=b[0:i]))
     return line
+
+
+def merge_base(project_root: String, a: String, b: String) -> String:
+    """``git merge-base a b`` — the commit a branch forked from; empty when
+    git can't find one."""
+    return _merge_base(project_root, a, b)
 
 
 def _merge_base(project_root: String, a: String, b: String) -> String:

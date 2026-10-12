@@ -14,7 +14,7 @@ from turbokod.claude_detect import (
 )
 from turbokod.cell import Cell
 from turbokod.colors import (
-    Attr, BLACK, BLUE, DARK_GRAY, GREEN, LIGHT_GRAY, LIGHT_GREEN, LIGHT_RED,
+    Attr, BLACK, BLUE, DARK_GRAY, GREEN, LIGHT_GRAY, LIGHT_GREEN, LIGHT_RED, RED,
     STYLE_UNDERLINE, STYLE_UNDERLINE_CURLY, WHITE, YELLOW, BORDER_FOCUS,
     CARET_BG, CARET_FG, EDITOR_BG, EDITOR_FG, SYN_IDENT, PANE_BG, attr_to_sgr,
     attr_to_sgr_rgb, attr_to_sgr_indexed, default_attr
@@ -737,6 +737,44 @@ def test_file_tree_modified_rows_tinted_like_tab_bar() raises:
     t.paint(c, screen)
     assert_equal(c.get(cx, row_y).attr.bg, GREEN)
     assert_equal(c.get(cx, row_y).attr.fg, WHITE)
+
+
+def test_file_tree_fixed_listing() raises:
+    """``open_fixed`` lists only the given paths and the directories leading
+    to them (all expanded, dirs first) without touching the filesystem, and
+    tints added files green and removed files red."""
+    var t = FileTree()
+    var paths = List[String]()
+    paths.append(String("top.txt"))
+    paths.append(String("src/a.txt"))
+    paths.append(String("src/sub/b.txt"))
+    t.open_fixed(String("/nonexistent_proj"), paths)
+    assert_true(t.visible)
+    assert_equal(len(t.entries), 5)
+    assert_equal(t.entries[0].name, String("src"))
+    assert_true(t.entries[0].is_dir and t.entries[0].is_expanded)
+    assert_equal(t.entries[1].name, String("sub"))
+    assert_equal(t.entries[1].depth, 1)
+    assert_equal(t.entries[2].path, String("/nonexistent_proj/src/sub/b.txt"))
+    assert_equal(t.entries[2].depth, 2)
+    assert_equal(t.entries[3].name, String("a.txt"))
+    assert_equal(t.entries[4].name, String("top.txt"))
+    # Collapse + re-expand goes through the fixed listing too.
+    t._toggle_expand(0)
+    assert_equal(len(t.entries), 2)
+    t._toggle_expand(0)
+    assert_equal(len(t.entries), 4)
+    t.added_paths.append(String("/nonexistent_proj/src/a.txt"))
+    t.removed_paths.append(String("/nonexistent_proj/top.txt"))
+    var screen = Rect(0, 0, 100, 40)
+    var area = t.rect(screen)
+    var c = Canvas(screen.width(), screen.height())
+    t.paint(c, screen)
+    var cx = area.a.x + 1 + 4             # inside the depth-1 label
+    assert_equal(c.get(cx, area.a.y + 2).attr.fg, GREEN)   # src/a.txt
+    assert_equal(c.get(area.a.x + 3, area.a.y + 3).attr.fg, RED)  # top.txt
+    t.close()
+    assert_false(t._fixed)
 
 
 def test_write_file_round_trip() raises:
@@ -2455,6 +2493,7 @@ def main() raises:
     test_file_tree_starts_at_top_row_when_host_owns_menu()
     test_file_tree_reveal_expands_and_selects()
     test_file_tree_modified_rows_tinted_like_tab_bar()
+    test_file_tree_fixed_listing()
     test_write_file_round_trip()
     test_editorconfig_parse_basic()
     test_editorconfig_match_section()

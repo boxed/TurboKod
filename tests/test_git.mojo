@@ -54,7 +54,7 @@ from turbokod.git_output import (
 )
 from turbokod.project import GitignoreMatcher
 from turbokod.string_utils import (
-    display_columns, split_lines_no_trailing, string_list,
+    display_columns, split_lines_no_trailing, starts_with, string_list,
 )
 from turbokod.lsp import capture_command
 from turbokod.git_changes import (
@@ -751,6 +751,121 @@ def test_review_includes_added_and_deleted_files() raises:
     assert_true(d.windows.windows[d._review_win_idx].editor.read_only)
     assert_equal(d.review.change_index, 1)
     assert_equal(d.review.change_total, 1)
+    d.review.close()
+    d._review_teardown()
+    _rm_rf(dir)
+
+
+def test_review_branches_tab_and_review_file_tree() raises:
+    """The picker's Branches tab (Left/Right switch tabs) reviews a whole
+    branch against its fork point with the main line. Review's own file
+    tree (a separate setting from the main tree) lists just the changeset,
+    flags added / deleted files, narrows the hosted editor, and clicking a
+    file in it moves review to that file."""
+    var dir = _temp_path(String("_review_branch"))
+    _rm_rf(dir)
+    _ensure_dir(dir)
+    if _run_git(dir, string_list(String("init"), String("-q"))) != 0:
+        _rm_rf(dir)
+        return
+    _ = _run_git(dir, string_list(
+        String("config"), String("user.email"), String("test@example.com"),
+    ))
+    _ = _run_git(dir, string_list(String("config"), String("user.name"), String("T")))
+    assert_true(write_file(join_path(dir, String("keep.txt")), String("a\nb\n")))
+    assert_true(write_file(join_path(dir, String("gone.txt")), String("x\n")))
+    _ = _run_git(dir, string_list(String("add"), String(".")))
+    _ = _run_git(dir, string_list(String("commit"), String("-qm"), String("one")))
+    _ = _run_git(dir, string_list(String("branch"), String("-M"), String("main")))
+    _ = _run_git(dir, string_list(String("checkout"), String("-qb"), String("feature")))
+    _ensure_dir(join_path(dir, String("lib")))
+    assert_true(write_file(join_path(dir, String("lib/new.txt")), String("n\n")))
+    assert_true(write_file(join_path(dir, String("keep.txt")), String("a\nB\n")))
+    _ = _run_git(dir, string_list(String("rm"), String("-q"), String("gone.txt")))
+    _ = _run_git(dir, string_list(String("add"), String(".")))
+    _ = _run_git(dir, string_list(String("commit"), String("-qm"), String("feat")))
+    _ = _run_git(dir, string_list(String("checkout"), String("-q"), String("main")))
+    # A later main-line commit must not show up in the branch's review.
+    assert_true(write_file(join_path(dir, String("mainonly.txt")), String("m\n")))
+    _ = _run_git(dir, string_list(String("add"), String(".")))
+    _ = _run_git(dir, string_list(String("commit"), String("-qm"), String("main2")))
+
+    var d = Desktop()
+    d.project = Optional[String](dir)
+    var screen = Rect(0, 0, 100, 30)
+    d.review.open(dir)
+    assert_equal(d.review.picker_tab, 0)
+    _ = d.review.handle_event(Event.key_event(KEY_RIGHT), screen, 1)
+    assert_equal(d.review.picker_tab, 1)
+    assert_equal(len(d.review.picker_labels), 1)
+    assert_true(starts_with(d.review.picker_labels[0], String("feature")))
+    _ = d.review.handle_event(Event.key_event(KEY_LEFT), screen, 1)
+    assert_equal(d.review.picker_tab, 0)
+    _ = d.review.handle_event(Event.key_event(KEY_RIGHT), screen, 1)
+    _ = d.review.handle_event(Event.key_event(KEY_ENTER), screen, 1)
+    assert_true(d.review.is_reviewing())
+    assert_equal(d.review.file_count(), 3)
+    assert_equal(d.review.file_paths[0], String("gone.txt"))
+    assert_true(d.review.file_is_deleted(0))
+    assert_equal(d.review.file_paths[1], String("keep.txt"))
+    assert_equal(d.review.file_before[1], String("a\nb\n"))
+    assert_equal(d.review.file_after[1], String("a\nB\n"))
+    assert_equal(d.review.file_paths[2], String("lib/new.txt"))
+    assert_true(d.review.file_is_added(2))
+
+    var canvas = Canvas(100, 30)
+    d.paint(canvas, screen)
+    var full_w = d.windows.windows[d._review_win_idx].rect.width()
+    # The main tree's setting is untouched by the review tree's.
+    d._cycle_review_tree()
+    d.paint(canvas, screen)
+    assert_true(d.review_tree.visible)
+    assert_false(d.file_tree.visible)
+    assert_equal(
+        d.windows.windows[d._review_win_idx].rect.width(),
+        full_w - d.review_tree.width,
+    )
+    # gone.txt, keep.txt, lib/, lib/new.txt — lib sorts first (dirs first).
+    assert_equal(len(d.review_tree.entries), 4)
+    assert_equal(d.review_tree.entries[0].name, String("lib"))
+    assert_equal(d.review_tree.added_paths[0], join_path(dir, String("lib/new.txt")))
+    assert_equal(d.review_tree.removed_paths[0], join_path(dir, String("gone.txt")))
+    # Selection follows the file under review.
+    assert_equal(
+        d.review_tree.entries[d.review_tree.selected].path,
+        join_path(dir, d.review.current_path()),
+    )
+    # A single click on keep.txt moves review to it, on its first change.
+    var area = d.review_tree.rect(screen)
+    var keep_row = -1
+    for i in range(len(d.review_tree.entries)):
+        if d.review_tree.entries[i].name == String("keep.txt"):
+            keep_row = i
+    var click = Event.mouse_event(
+        Point(area.a.x + 3, area.a.y + keep_row), MOUSE_BUTTON_LEFT, True, False,
+    )
+    _ = d.handle_event(click, screen)
+    assert_equal(d.review.current_path(), String("keep.txt"))
+    d.paint(canvas, screen)
+    d.paint(canvas, screen)
+    assert_equal(
+        d.windows.windows[d._review_win_idx].editor.file_path,
+        join_path(dir, String("keep.txt")),
+    )
+    # keep.txt's only change is row 1 ("B").
+    assert_equal(d.windows.windows[d._review_win_idx].editor.selections[0].row, 1)
+    # Clicking the file already under review jumps back to its first change.
+    d.windows.windows[d._review_win_idx].editor.move_to(0, 0, False, True)
+    _ = d.handle_event(click, screen)
+    assert_equal(d.windows.windows[d._review_win_idx].editor.selections[0].row, 1)
+    # Right → left → hidden.
+    d._cycle_review_tree()
+    d.paint(canvas, screen)
+    assert_true(d.review_tree.dock_left)
+    assert_equal(d.windows.windows[d._review_win_idx].rect.a.x, d.review_tree.width)
+    d._cycle_review_tree()
+    d.paint(canvas, screen)
+    assert_false(d.review_tree.visible)
     d.review.close()
     d._review_teardown()
     _rm_rf(dir)
@@ -5070,6 +5185,7 @@ def main() raises:
     test_review_goto_change_saves_edits()
     test_review_progress_spans_whole_changeset()
     test_review_includes_added_and_deleted_files()
+    test_review_branches_tab_and_review_file_tree()
     test_git_gutter_no_diff_when_buffer_matches_crlf_head()
     test_gitignore_matches_directory_pattern()
     test_gitignore_matches_glob_and_negate()
