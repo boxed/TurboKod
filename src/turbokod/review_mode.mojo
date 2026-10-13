@@ -17,7 +17,11 @@ popup that shows removed lines, all for free from the normal editor path.
 
 Per review type:
 * **unstaged** — the real worktree file, editable + savable;
-* **staged / commit / branch** — a read-only buffer of the historical blob.
+* **branch, checked out** — the worktree file, editable like unstaged;
+* **staged / commit / branch not checked out** — a read-only buffer of the
+  historical blob. Picking a branch that isn't checked out raises a
+  ``checkout_request`` the host answers (offer to check it out, or explain
+  why it can't) before calling ``start_branch_review``.
 
 The diff baseline is pinned to each file's "before" text so the gutter +
 change navigation reflect the picked changeset rather than HEAD.
@@ -49,12 +53,13 @@ from .geometry import Point, Rect
 from .git_changes import (
     ChangedFile, compute_range_diff, compute_staged_diff,
     compute_unstaged_diff, compute_untracked_diff, fetch_blob_text,
-    fetch_commit_show, fetch_git_branches, fetch_git_commits,
+    current_branch_name, fetch_commit_show, fetch_git_branches,
+    fetch_git_commits,
     fetch_git_status, main_line_branch, merge_base,
     parse_unified_diff_files, split_show_output,
 )
 from .painter import Painter
-from .string_utils import display_columns, split_lines_no_trailing, starts_with
+from .string_utils import display_columns, split_lines_no_trailing
 
 
 # --- sub-states -------------------------------------------------------------
@@ -82,43 +87,48 @@ def _extract_diff_part(show_text: String) -> String:
     return split_show_output(show_text)[1]
 
 
-def _diff_is_binary(diff_text: String) -> Bool:
-    """``True`` when git reported this file as binary (no text diff to
-    splice). Such files get a one-line placeholder instead of content."""
-    var lines = split_lines_no_trailing(diff_text)
-    for i in range(len(lines)):
-        if starts_with(lines[i], String("Binary files ")):
-            return True
-        if starts_with(lines[i], String("GIT binary patch")):
-            return True
-    return False
+@fieldwise_init
+struct _DiffSummary(ImplicitlyCopyable, Movable):
+    """What the model needs from one file's slice of a unified diff."""
+    var binary: Bool    # git reported it binary — no text diff to show
+    var deleted: Bool   # the changeset deletes the file outright
+    var added: Bool     # the changeset creates it (incl. untracked files)
+    var changed: Int    # ``+`` / ``-`` rows across its hunks
 
 
-def _diff_is_deletion(diff_text: String) -> Bool:
-    """``True`` when this file's diff deletes it outright. The review body
-    for such a file is a read-only empty buffer with the old content woven
-    in as removed lines — there's no worktree file left to edit."""
-    var lines = split_lines_no_trailing(diff_text)
-    for i in range(len(lines)):
-        if starts_with(lines[i], String("deleted file mode")):
-            return True
-        if lines[i] == String("+++ /dev/null"):
-            return True
-    return False
-
-
-def _diff_is_addition(diff_text: String) -> Bool:
-    """``True`` when this file's diff creates it (incl. untracked files,
-    whose ``--no-index`` diff carries the same header)."""
-    var lines = split_lines_no_trailing(diff_text)
-    for i in range(len(lines)):
-        if starts_with(lines[i], String("new file mode")):
-            return True
-        if lines[i] == String("--- /dev/null"):
-            return True
-        if starts_with(lines[i], String("@@")):
-            return False
-    return False
+def _summarize_diff(diff_text: String) -> _DiffSummary:
+    """One byte-level pass over a file's diff chunk: the header flags
+    (everything before the first ``@@``) and the changed-row count. The
+    count is git's, which is what lets a changeset be listed without
+    fetching every file's text — ``ReviewMode._load_file`` swaps in the
+    exact ``build_diff_rows`` count once a file is actually shown."""
+    var b = diff_text.as_bytes()
+    var n = len(b)
+    var binary = False
+    var deleted = False
+    var added = False
+    var changed = 0
+    var in_hunks = False
+    var ls = 0
+    while ls < n:
+        var le = ls
+        while le < n and b[le] != 0x0A:
+            le += 1
+        var line = StringSpan(unsafe_from_utf8=b[ls:le])
+        if in_hunks:
+            if le > ls and (b[ls] == 0x2B or b[ls] == 0x2D):  # + / -
+                changed += 1
+        elif line.startswith("@@"):
+            in_hunks = True
+        elif line.startswith("Binary files ") \
+                or line.startswith("GIT binary patch"):
+            binary = True
+        elif line.startswith("deleted file mode") or line == "+++ /dev/null":
+            deleted = True
+        elif line.startswith("new file mode") or line == "--- /dev/null":
+            added = True
+        ls = le + 1
+    return _DiffSummary(binary, deleted, added, changed)
 
 
 def _untracked_paths(root: String) -> List[String]:
@@ -185,6 +195,14 @@ struct ReviewMode(Movable):
     # The main line (``main`` / ``master``) branches are diffed against;
     # empty when the repo has neither.
     var main_branch: String
+    # The checked-out branch, read when the picker is built.
+    var current_branch: String
+    # True for a branch review of the checked-out branch: the after side is
+    # the worktree and the body is editable.
+    var branch_checked_out: Bool
+    # Branch the user picked that isn't checked out; drained by the host
+    # (``consume_checkout_request``), which asks and then starts the review.
+    var checkout_request: String
 
     # Current changeset. ``src`` / ``sha`` identify it; the parallel
     # ``file_*`` lists hold one entry per changed file. ``cur_file`` is
@@ -193,8 +211,15 @@ struct ReviewMode(Movable):
     var sha: String
     var title: String
     var file_paths: List[String]    # repo-relative
+    # Before/after text, loaded on demand (``_load_file``) when a file is
+    # first shown: fetching every file's blobs up front is two ``git show``
+    # spawns per file, which on a big branch froze the UI for seconds.
     var file_before: List[String]
     var file_after: List[String]
+    var file_loaded: List[Bool]
+    # The ref a branch review's "before" side is read from (its fork point
+    # with the main line); empty for the other sources.
+    var base_ref: String
     var file_binary: List[Bool]
     # True for a file the changeset deletes — its body is read-only.
     var file_deleted: List[Bool]
@@ -273,12 +298,17 @@ struct ReviewMode(Movable):
         self._tab_sha = List[List[String]]()
         self._tab_cursor = List[Int]()
         self.main_branch = String("")
+        self.current_branch = String("")
+        self.branch_checked_out = False
+        self.checkout_request = String("")
         self.src = _SRC_UNSTAGED
         self.sha = String("")
         self.title = String("")
         self.file_paths = List[String]()
         self.file_before = List[String]()
         self.file_after = List[String]()
+        self.file_loaded = List[Bool]()
+        self.base_ref = String("")
         self.file_binary = List[Bool]()
         self.file_deleted = List[Bool]()
         self.file_added = List[Bool]()
@@ -346,6 +376,7 @@ struct ReviewMode(Movable):
         self._tab_kind = List[List[Int]]()
         self._tab_sha = List[List[String]]()
         self._tab_cursor = List[Int]()
+        self.checkout_request = String("")
         self._reset_review()
 
     def _key_for(self, kind: Int, sha: String) -> String:
@@ -381,6 +412,8 @@ struct ReviewMode(Movable):
         self.file_paths = List[String]()
         self.file_before = List[String]()
         self.file_after = List[String]()
+        self.file_loaded = List[Bool]()
+        self.base_ref = String("")
         self.file_binary = List[Bool]()
         self.file_deleted = List[Bool]()
         self.file_added = List[Bool]()
@@ -433,6 +466,7 @@ struct ReviewMode(Movable):
         var b_kind = List[Int]()
         var b_sha = List[String]()
         self.main_branch = main_line_branch(self.root)
+        self.current_branch = current_branch_name(self.root)
         if len(self.main_branch.as_bytes()) > 0:
             var branches = fetch_git_branches(self.root)
             for i in range(len(branches)):
@@ -463,12 +497,21 @@ struct ReviewMode(Movable):
         if self.picker_cursor >= len(self.picker_labels):
             self.picker_cursor = 0
 
-    def _start_review(mut self):
+    def _start_review(mut self, ask_checkout: Bool = True):
         if self.picker_cursor < 0 or self.picker_cursor >= len(self.picker_labels):
+            return
+        # A branch that isn't checked out can only be reviewed read-only;
+        # hand the host the chance to offer a checkout first.
+        if ask_checkout \
+                and self.picker_kind[self.picker_cursor] == _SRC_BRANCH \
+                and self.picker_sha[self.picker_cursor] != self.current_branch:
+            self.checkout_request = self.picker_sha[self.picker_cursor]
             return
         self.src = self.picker_kind[self.picker_cursor]
         self.sha = self.picker_sha[self.picker_cursor]
         self.title = self.picker_labels[self.picker_cursor]
+        self.branch_checked_out = self.src == _SRC_BRANCH \
+            and self.sha == self.current_branch
         if self.src == _SRC_BRANCH:
             self.title = self.sha + String(" vs ") + self.main_branch
         self.last_key = self._mem_key()
@@ -477,6 +520,7 @@ struct ReviewMode(Movable):
         self.cur_file = self._recall_file()
         if self.cur_file < 0 or self.cur_file >= self.file_count():
             self.cur_file = 0
+        self.load_file(self.cur_file)
         self.change_index = 0
         self.change_total = 0
         self.mode = _MODE_REVIEW
@@ -484,66 +528,88 @@ struct ReviewMode(Movable):
     # --- model build ------------------------------------------------------
 
     def _build_model(mut self):
-        """Enumerate the changed files for ``src`` / ``sha`` and capture
-        each file's before/after text. The body editor is built from these
-        by the host."""
+        """Enumerate the changed files for ``src`` / ``sha`` from one git
+        diff. Per-file text is *not* fetched here — ``load_file`` does that
+        when a file is shown, so the cost of opening a review doesn't grow
+        with the number of files in it."""
         self._reset_review()
         var diff_text: String
         # A branch is diffed from its fork point with the main line, so
         # main's own later commits don't show up as reverse changes.
-        var base = String("")
         if self.src == _SRC_BRANCH:
-            base = merge_base(self.root, self.main_branch, self.sha)
-            if len(base.as_bytes()) == 0:
-                base = self.main_branch
+            self.base_ref = merge_base(self.root, self.main_branch, self.sha)
+            if len(self.base_ref.as_bytes()) == 0:
+                self.base_ref = self.main_branch
         if self.src == _SRC_UNSTAGED:
             diff_text = compute_unstaged_diff(self.root)
         elif self.src == _SRC_STAGED:
             diff_text = compute_staged_diff(self.root)
         elif self.src == _SRC_BRANCH:
-            diff_text = compute_range_diff(self.root, base, self.sha)
+            # Checked out: diff against the worktree, so edits made while
+            # reviewing (not yet committed) are part of what's reviewed.
+            diff_text = compute_range_diff(
+                self.root, self.base_ref,
+                String("") if self.branch_checked_out else self.sha,
+            )
         else:
             diff_text = _extract_diff_part(fetch_commit_show(self.root, self.sha))
         var changed = parse_unified_diff_files(diff_text)
         if self.src == _SRC_UNSTAGED:
             _add_untracked(changed, self.root)
         for fi in range(len(changed)):
-            var cf = changed[fi]
-            var is_binary = _diff_is_binary(cf.diff)
-            var before = String("")
-            var after = String("")
-            if not is_binary:
-                if self.src == _SRC_UNSTAGED:
-                    # after = worktree file, before = index blob.
-                    before = fetch_blob_text(self.root, String(""), cf.path)
-                    try:
-                        after = read_file(join_path(self.root, cf.path))
-                    except:
-                        after = String("")
-                elif self.src == _SRC_STAGED:
-                    # after = index blob, before = HEAD blob.
-                    before = fetch_blob_text(self.root, String("HEAD"), cf.path)
-                    after = fetch_blob_text(self.root, String(""), cf.path)
-                elif self.src == _SRC_BRANCH:
-                    # after = branch tip blob, before = fork-point blob.
-                    before = fetch_blob_text(self.root, base, cf.path)
-                    after = fetch_blob_text(self.root, self.sha, cf.path)
-                else:
-                    # after = commit blob, before = parent blob (empty for
-                    # a file's first appearance → shows as all-added).
-                    before = fetch_blob_text(
-                        self.root, self.sha + String("~1"), cf.path,
-                    )
-                    after = fetch_blob_text(self.root, self.sha, cf.path)
-            self.file_paths.append(cf.path)
-            self.file_before.append(before)
-            self.file_after.append(after)
-            self.file_binary.append(is_binary)
-            self.file_deleted.append(_diff_is_deletion(cf.diff))
-            self.file_added.append(_diff_is_addition(cf.diff))
+            var summary = _summarize_diff(changed[fi].diff)
+            self.file_paths.append(changed[fi].path)
+            self.file_before.append(String(""))
+            self.file_after.append(String(""))
+            # A binary file has no text to load.
+            self.file_loaded.append(summary.binary)
+            self.file_binary.append(summary.binary)
+            self.file_deleted.append(summary.deleted)
+            self.file_added.append(summary.added)
             self.file_changed_lines.append(
-                _count_changed_lines(before, after, is_binary)
+                0 if summary.binary else summary.changed
             )
+
+    def load_file(mut self, idx: Int):
+        """Fetch file ``idx``'s before/after text if not yet loaded, and
+        replace git's changed-row estimate with the exact ``build_diff_rows``
+        count — the basis ``changed_lines_through`` uses, so the progress
+        bar's numerator and denominator agree on every file shown."""
+        if idx < 0 or idx >= len(self.file_loaded) or self.file_loaded[idx]:
+            return
+        var path = self.file_paths[idx]
+        var before: String
+        var after: String
+        if self.src == _SRC_UNSTAGED or self.branch_checked_out:
+            # after = worktree file; before = index blob (unstaged) or the
+            # fork-point blob (checked-out branch).
+            if self.src == _SRC_UNSTAGED:
+                before = fetch_blob_text(self.root, String(""), path)
+            else:
+                before = fetch_blob_text(self.root, self.base_ref, path)
+            try:
+                after = read_file(join_path(self.root, path))
+            except:
+                after = String("")
+        elif self.src == _SRC_STAGED:
+            # after = index blob, before = HEAD blob.
+            before = fetch_blob_text(self.root, String("HEAD"), path)
+            after = fetch_blob_text(self.root, String(""), path)
+        elif self.src == _SRC_BRANCH:
+            # after = branch tip blob, before = fork-point blob.
+            before = fetch_blob_text(self.root, self.base_ref, path)
+            after = fetch_blob_text(self.root, self.sha, path)
+        else:
+            # after = commit blob, before = parent blob (empty for a file's
+            # first appearance → shows as all-added).
+            before = fetch_blob_text(self.root, self.sha + String("~1"), path)
+            after = fetch_blob_text(self.root, self.sha, path)
+        self.file_changed_lines[idx] = _count_changed_lines(before, after, False)
+        self.file_before[idx] = before^
+        self.file_after[idx] = after^
+        self.file_loaded[idx] = True
+        if self._cum_file == idx:
+            self._cum_file = -1
 
     def build_from_pairs(
         mut self,
@@ -557,6 +623,7 @@ struct ReviewMode(Movable):
             self.file_paths.append(paths[i])
             self.file_before.append(befores[i])
             self.file_after.append(afters[i])
+            self.file_loaded.append(True)
             self.file_binary.append(False)
             self.file_deleted.append(
                 len(afters[i].as_bytes()) == 0
@@ -611,8 +678,24 @@ struct ReviewMode(Movable):
         return 0
 
     def is_editable(self) -> Bool:
-        """Only unstaged reviews edit the live worktree file."""
-        return self.src == _SRC_UNSTAGED
+        """Unstaged reviews and reviews of the checked-out branch edit the
+        live worktree file."""
+        return self.src == _SRC_UNSTAGED or self.branch_checked_out
+
+    def consume_checkout_request(mut self) -> String:
+        """The branch a pick asked to have checked out (empty if none)."""
+        var b = self.checkout_request
+        self.checkout_request = String("")
+        return b^
+
+    def start_branch_review(mut self, checked_out: Bool):
+        """Start the review of the picked branch after the host answered its
+        ``checkout_request``: ``checked_out`` means it's now the current
+        branch (editable review), otherwise it's reviewed read-only."""
+        if checked_out and 0 <= self.picker_cursor \
+                and self.picker_cursor < len(self.picker_sha):
+            self.current_branch = self.picker_sha[self.picker_cursor]
+        self._start_review(ask_checkout=False)
 
     def set_change_counter(mut self, index: Int, total: Int, cum_lines: Int):
         self.change_index = index
@@ -720,6 +803,7 @@ struct ReviewMode(Movable):
         if i >= self.file_count():
             i = self.file_count() - 1
         self.cur_file = i
+        self.load_file(i)
         self.change_index = 0
         self.change_total = 0
 

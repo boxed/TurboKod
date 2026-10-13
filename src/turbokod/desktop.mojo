@@ -67,8 +67,9 @@ from .git_blame import blame_commit_message, compute_blame
 from .git_changes import (
     GIT_CHANGE_NONE, GitRevertBlock, GitStateMtimes,
     compute_deletion_revert_block, compute_revert_block,
-    count_unpushed_commits, current_branch_name, diff_buffer_marks,
-    fetch_git_status, fetch_head_text, changed_paths_between,
+    checkout_branch, count_unpushed_commits, current_branch_name,
+    diff_buffer_marks, fetch_git_status, fetch_head_text,
+    changed_paths_between, has_tracked_changes,
     fetch_file_history, fetch_line_history, git_head_sha, git_state_mtimes,
     project_is_git_repo,
 )
@@ -251,6 +252,11 @@ comptime EDITOR_FIND_PREV     = String("edit:find_prev")
 # public action — it never enters ``dispatch_action`` because the prompt
 # is triggered programmatically from ``_maybe_lsp_open``.
 comptime _PA_LSP_INSTALL      = String("lsp:install")
+# Review picked a branch that isn't checked out: "check it out to edit?"
+# (``_PA_REVIEW_CHECKOUT``), or — with local changes in the way — "can't;
+# review read-only instead?" (``_PA_REVIEW_READONLY``).
+comptime _PA_REVIEW_CHECKOUT  = String("review:checkout")
+comptime _PA_REVIEW_READONLY  = String("review:readonly")
 # "Look up in docs" — Ctrl+K opens the picker for the focused editor's
 # language, prompting to install the offline DevDocs database the first
 # time it's used per language.
@@ -4133,6 +4139,64 @@ struct Desktop(Movable):
                 or self.review_tree.entries[sel].path != abs:
             self.review_tree.reveal(abs)
 
+    def _review_answer_checkout_request(mut self):
+        """The picker chose a branch that isn't checked out. Editing in
+        review means editing the worktree, so offer to check the branch out
+        — unless tracked files have local changes, which a checkout would
+        carry over or refuse on (unsaved editor buffers count too); then say
+        so and offer read-only review."""
+        var branch = self.review.consume_checkout_request()
+        if len(branch.as_bytes()) == 0 or not self.project:
+            return
+        self._pending_arg = branch
+        var unsaved = False
+        for i in range(len(self.windows.windows)):
+            if self.windows.windows[i].is_editor \
+                    and not self.windows.windows[i]._transient \
+                    and self.windows.windows[i].editor.dirty:
+                unsaved = True
+        if unsaved or has_tracked_changes(self.project.value()):
+            self._pending_action = _PA_REVIEW_READONLY
+            self.confirm_dialog.open(
+                String("Can't check out ") + branch
+                + String(" to edit it: there are local changes. Commit or")
+                + String(" stash them first. Review it read-only instead?"),
+                default_yes=True,
+            )
+        else:
+            self._pending_action = _PA_REVIEW_CHECKOUT
+            self.confirm_dialog.open(
+                String("Check out ") + branch
+                + String(" so you can edit it while reviewing?")
+                + String(" (No reviews it read-only.)"),
+                default_yes=True,
+            )
+
+    def _review_resolve_checkout(mut self, pa: String, yes: Bool):
+        """Act on the answer to ``_review_answer_checkout_request``."""
+        var branch = self._pending_arg
+        self._pending_arg = String("")
+        if not self.review.active or not self.project:
+            return
+        if pa == _PA_REVIEW_READONLY:
+            if yes:
+                self.review.start_branch_review(False)
+            return   # No: back to the picker
+        if not yes:
+            self.review.start_branch_review(False)
+            return
+        if checkout_branch(self.project.value(), branch):
+            self.status_bar.set_message(
+                String("Checked out ") + branch, Attr(BLACK, LIGHT_GRAY),
+            )
+            self.review.start_branch_review(True)
+        else:
+            self.status_bar.set_message(
+                String("git checkout ") + branch + String(" failed"),
+                Attr(BLACK, LIGHT_GRAY),
+            )
+            self.review.start_branch_review(False)
+
     def _review_tree_drain(mut self):
         """After the review tree handled an event: a file it opened (one
         click, or Enter) becomes the file under review, landing on its first
@@ -4569,7 +4633,10 @@ struct Desktop(Movable):
         # at a time (open_quick_open won't fire while a prompt is up, etc.),
         # so paint order doesn't matter for correctness.
         self.prompt.paint(canvas, screen)
-        self.confirm_dialog.paint(canvas, screen)
+        # Review paints over every modal (below), so a confirm it raised
+        # (checkout a branch?) is painted again after it.
+        if not self.review.active:
+            self.confirm_dialog.paint(canvas, screen)
         self.message_request_dialog.paint(canvas, screen)
         self.color_picker.paint(canvas, screen)
         self.merge_view.paint(canvas, screen)
@@ -4645,6 +4712,8 @@ struct Desktop(Movable):
                 )
             self.review_tree.paint(canvas, screen)
         self.review.paint(canvas, screen, review_top_y)
+        if self.review.active:
+            self.confirm_dialog.paint(canvas, screen)
         # Git history for selection — a paned modal over the whole
         # surface, same top_y convention as review (below the in-grid
         # menu, over everything else).
@@ -7720,6 +7789,8 @@ struct Desktop(Movable):
                 _ = self.review.handle_event(event, screen, review_top_y)
                 if not self.review.active:
                     self._review_teardown()
+                else:
+                    self._review_answer_checkout_request()
                 return Optional[String]()
             # The review file tree, when it has keyboard focus, takes keys
             # first (its Esc only drops focus, like the main tree's); mouse
@@ -15423,6 +15494,9 @@ struct Desktop(Movable):
         self.confirm_dialog.close()
         var pa = self._pending_action
         self._pending_action = String("")
+        if pa == _PA_REVIEW_CHECKOUT or pa == _PA_REVIEW_READONLY:
+            self._review_resolve_checkout(pa, yes)
+            return Optional[String]()
         if pa == _PA_DOC_INSTALL:
             var lang = self._pending_arg
             self._pending_arg = String("")

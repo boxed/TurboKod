@@ -60,7 +60,7 @@ from turbokod.lsp import capture_command
 from turbokod.git_changes import (
     GitBranch, GitCommit, GitStateMtimes, apply_patch_to_index,
     branch_is_merged, compute_staged_diff, compute_unstaged_diff,
-    create_reworded_commit, fetch_commit_message, fetch_commit_show,
+    create_reworded_commit, current_branch_name, fetch_commit_message, fetch_commit_show,
     fetch_file_history, fetch_git_branches, fetch_git_commits,
     fetch_git_remote_branches,
     fetch_git_status, fetch_merged_commits, format_age, git_state_mtimes,
@@ -802,12 +802,26 @@ def test_review_branches_tab_and_review_file_tree() raises:
     _ = d.review.handle_event(Event.key_event(KEY_LEFT), screen, 1)
     assert_equal(d.review.picker_tab, 0)
     _ = d.review.handle_event(Event.key_event(KEY_RIGHT), screen, 1)
-    _ = d.review.handle_event(Event.key_event(KEY_ENTER), screen, 1)
+    # "feature" isn't checked out: picking it asks to check it out first.
+    _ = d.handle_event(Event.key_event(KEY_ENTER), screen)
+    assert_false(d.review.is_reviewing())
+    assert_true(d.confirm_dialog.active)
+    assert_true(starts_with(d.confirm_dialog.message, String("Check out feature")))
+    # No → review it read-only, without switching branches.
+    _ = d.handle_event(Event.key_event(UInt32(ord("n"))), screen)
     assert_true(d.review.is_reviewing())
+    assert_false(d.review.is_editable())
+    assert_equal(current_branch_name(dir), String("main"))
     assert_equal(d.review.file_count(), 3)
     assert_equal(d.review.file_paths[0], String("gone.txt"))
     assert_true(d.review.file_is_deleted(0))
     assert_equal(d.review.file_paths[1], String("keep.txt"))
+    # Text is fetched lazily, when a file is first shown — opening a review
+    # mustn't cost two git spawns per file. Git's row count stands in until.
+    assert_false(d.review.file_loaded[1])
+    assert_equal(d.review.file_changed_lines[1], 2)
+    d.review.load_file(1)
+    assert_true(d.review.file_loaded[1])
     assert_equal(d.review.file_before[1], String("a\nb\n"))
     assert_equal(d.review.file_after[1], String("a\nB\n"))
     assert_equal(d.review.file_paths[2], String("lib/new.txt"))
@@ -866,6 +880,45 @@ def test_review_branches_tab_and_review_file_tree() raises:
     d._cycle_review_tree()
     d.paint(canvas, screen)
     assert_false(d.review_tree.visible)
+    d.review.close()
+    d._review_teardown()
+
+    # Local changes block the checkout: say so, offer read-only; No goes
+    # back to the picker.
+    assert_true(write_file(join_path(dir, String("keep.txt")), String("dirty\n")))
+    d.review.open(dir)
+    _ = d.review.handle_event(Event.key_event(KEY_RIGHT), screen, 1)
+    _ = d.handle_event(Event.key_event(KEY_ENTER), screen)
+    assert_true(d.confirm_dialog.active)
+    assert_true(starts_with(d.confirm_dialog.message, String("Can't check out feature")))
+    _ = d.handle_event(Event.key_event(UInt32(ord("n"))), screen)
+    assert_true(d.review.active)
+    assert_false(d.review.is_reviewing())
+    assert_equal(current_branch_name(dir), String("main"))
+    _ = _run_git(dir, string_list(String("checkout"), String("--"), String("keep.txt")))
+
+    # Clean worktree: Yes checks the branch out and the review is editable,
+    # saving straight to the worktree.
+    _ = d.handle_event(Event.key_event(KEY_ENTER), screen)
+    assert_true(starts_with(d.confirm_dialog.message, String("Check out feature")))
+    _ = d.handle_event(Event.key_event(UInt32(ord("y"))), screen)
+    assert_equal(current_branch_name(dir), String("feature"))
+    assert_true(d.review.is_reviewing())
+    assert_true(d.review.is_editable())
+    assert_equal(d.review.file_count(), 3)
+    var ki = -1
+    for i in range(d.review.file_count()):
+        if d.review.file_paths[i] == String("keep.txt"):
+            ki = i
+    _ = d.review.goto_file(ki)
+    d.paint(canvas, screen)
+    d.paint(canvas, screen)
+    var rwi = d._review_win_idx
+    assert_false(d.windows.windows[rwi].editor.read_only)
+    d.windows.windows[rwi].editor.move_to(0, 0, False, True)
+    _ = d.handle_event(Event.key_event(UInt32(ord("Z"))), screen)
+    d._review_flush_edits()
+    assert_equal(read_file(join_path(dir, String("keep.txt"))), String("Za\nB\n"))
     d.review.close()
     d._review_teardown()
     _rm_rf(dir)

@@ -797,15 +797,38 @@ def compute_staged_diff(project_root: String) -> String:
 
 def compute_range_diff(project_root: String, base: String, tip: String) -> String:
     """``git diff --no-color <base> <tip>`` — two committed trees against
-    each other (a whole branch versus its merge base). Empty on failure."""
+    each other (a whole branch versus its merge base). An empty ``tip``
+    diffs ``base`` against the worktree instead (a checked-out branch,
+    including edits not yet committed). Empty on failure."""
     if len(project_root.as_bytes()) == 0:
         return String("")
     var args = List[String]()
     args.append(String("diff"))
     args.append(String("--no-color"))
     args.append(base)
-    args.append(tip)
+    if len(tip.as_bytes()) > 0:
+        args.append(tip)
     return _git_stdout(project_root, args^)
+
+
+def has_tracked_changes(project_root: String) -> Bool:
+    """True when the index or worktree differs from HEAD for any tracked
+    file — the state in which switching branches could carry or clobber
+    work. Untracked files don't count."""
+    var st = fetch_git_status(project_root)
+    for i in range(len(st)):
+        if not (Int(st[i].staged) == 0x3F and Int(st[i].worktree) == 0x3F):
+            return True
+    return False
+
+
+def checkout_branch(project_root: String, branch: String) -> Bool:
+    """``git checkout <branch>``; True on success."""
+    var args = List[String]()
+    args.append(String("checkout"))
+    args.append(String("-q"))
+    args.append(branch)
+    return _git_ok(project_root, args^)
 
 
 def compute_unstaged_diff(project_root: String) -> String:
