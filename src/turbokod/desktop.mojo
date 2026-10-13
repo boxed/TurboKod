@@ -51,7 +51,7 @@ from .config import (
     MAX_FONT_SIZE, MIN_FONT_SIZE, OnSaveAction,
     TurbokodConfig, WRAP_NONE, config_file_stamp, default_font_label,
     load_config, lsp_overrides_equal, merge_config, record_recent_file,
-    record_recent_project, save_config, save_config_merged, try_read_config,
+    record_recent_project, save_config_merged, try_read_config,
 )
 from .diff import (
     DIFF_ROW_REMOVED, build_diff_rows, diff_row_emphasis, diff_row_partner,
@@ -6105,14 +6105,15 @@ struct Desktop(Movable):
         if not self.config_persistable:
             return
         if not self._config_from_disk:
-            # We never read the file, so ``_config_baseline`` is defaults
-            # rather than "what the file held when we last looked". Merging
-            # against that reads every field as unchanged and would adopt
-            # the whole file over our state. Only a Desktop built straight
-            # from ``__init__`` gets here — i.e. tests, which deliberately
-            # keep deterministic defaults; every frontend calls
-            # ``load_config_from_disk`` first.
-            _ = save_config(self.config)
+            # We never read the file, so we hold defaults, not the user's
+            # settings — and must never write them. Every frontend calls
+            # ``load_config_from_disk`` first; only a Desktop built straight
+            # from ``__init__`` gets here (tests, scripts driving the core).
+            # This used to overwrite the file with those defaults, and any
+            # running app then adopted them on its next merge (its own value
+            # was unchanged, so the file's won) — silently wiping e.g. the
+            # user's custom language servers whenever such a script ran
+            # without a scratch $HOME.
             return
         var saved = save_config_merged(self.config, self._config_baseline)
         if not saved.ok:
