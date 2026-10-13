@@ -2580,11 +2580,11 @@ struct LocalChanges(Movable):
         var hint: String
         if self.focus == _PANE_RIGHT_UNSTAGED:
             hint = String(
-                " Up/Down: line  Space: stage  d: discard line  ⌘C: copy  Left: back  ESC: close ",
+                " Up/Down: line  Space: stage  d: discard line  p:pull P:push  ⌘C: copy  Left: back  ESC: close ",
             )
         elif self._is_right_focus():
             hint = String(
-                " Up/Down: line  Tab: panel  Space: stage/unstage  ⌘C: copy  Left: back  ESC: close ",
+                " Up/Down: line  Tab: panel  Space: stage/unstage  p:pull P:push  ⌘C: copy  Left: back  ESC: close ",
             )
         elif self.focus == _PANE_FILES:
             hint = String(
@@ -4005,27 +4005,25 @@ struct LocalChanges(Movable):
         # excepted so Ctrl+Tab keeps cycling panes (Shift+Tab clears the
         # mask on its own).
         # Ctrl+P → push to a remote picked from a list. Sits next to
-        # 'p' / 'P' (repo-wide, so any sidebar pane) but has to be matched
+        # 'p' / 'P' (repo-wide, so any pane) but has to be matched
         # before the chord swallow below.
-        if k == UInt32(0x70) and event.mods == MOD_CTRL \
-                and not self._is_right_focus():
+        if k == UInt32(0x70) and event.mods == MOD_CTRL:
             self._open_remote_picker()
             return True
         if (event.mods & (MOD_CTRL | MOD_ALT | MOD_META)) != 0 \
                 and k != KEY_TAB:
             return True
         # Pull / push act on the repo as a whole — no selection is
-        # involved — so they fire from any of the three sidebar panes
-        # rather than only from Files. On Branches / Commits that costs
-        # 'p' / 'P' as type-to-jump letters, the same trade those panes
-        # already make for their own bare-letter actions.
-        if not self._is_right_focus():
-            if k == UInt32(0x70):       # 'p' → pull
-                self._run_pull()
-                return True
-            if k == UInt32(0x50):       # 'P' → push
-                self._run_push()
-                return True
+        # involved — so they fire from every pane, the right-side
+        # unstaged / staged / info subpanes included. On Branches /
+        # Commits that costs 'p' / 'P' as type-to-jump letters, the same
+        # trade those panes already make for their own bare-letter actions.
+        if k == UInt32(0x70):           # 'p' → pull
+            self._run_pull()
+            return True
+        if k == UInt32(0x50):           # 'P' → push
+            self._run_push()
+            return True
         # File-pane git operations: c / A / d. These act on the
         # selected file (or on the staged set), so they only make sense
         # when the user is browsing the modified-files list — gate on

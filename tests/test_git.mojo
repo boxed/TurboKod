@@ -45,7 +45,7 @@ from turbokod.local_changes import (
     _OVERLAY_MERGE_CHOICE, _OVERLAY_NONE, _OVERLAY_REMOTE_PICK,
     _OVERLAY_OUTPUT, _OVERLAY_STATUS,
     _PANE_BRANCHES, _PANE_COMMITS, _PANE_FILES, _PANE_RIGHT_STAGED,
-    _PANE_RIGHT_UNSTAGED, _LINE_ADD, _LINE_REM
+    _PANE_RIGHT_INFO, _PANE_RIGHT_UNSTAGED, _LINE_ADD, _LINE_REM
 )
 from turbokod.git_output import (
     GIT_OUT_BRANCH_DELETE, GIT_OUT_CHECKOUT, GIT_OUT_COMMIT, GIT_OUT_MERGE,
@@ -4531,9 +4531,11 @@ def test_local_changes_release_stops_an_in_flight_git_child() raises:
     registry.release()
 
 
-def test_pull_and_push_work_from_every_sidebar_pane() raises:
+def test_pull_and_push_work_from_every_pane() raises:
     """``p`` / ``P`` act on the repo rather than on a selection, so they
-    fire from Branches and Commits as well as Files.
+    fire from Branches and Commits as well as Files — and from the
+    right-side unstaged / staged / info subpanes, where they used to be
+    gated off and silently ignored.
 
     They used to sit inside the ``_PANE_FILES`` gate, which meant a push
     after reading the commit log needed a Tab back to Files first — and
@@ -4546,6 +4548,9 @@ def test_pull_and_push_work_from_every_sidebar_pane() raises:
     panes.append(_PANE_FILES)
     panes.append(_PANE_BRANCHES)
     panes.append(_PANE_COMMITS)
+    panes.append(_PANE_RIGHT_UNSTAGED)
+    panes.append(_PANE_RIGHT_STAGED)
+    panes.append(_PANE_RIGHT_INFO)
     for i in range(len(panes)):
         for push in range(2):
             var lc = _local_changes_with_branches()
@@ -5355,7 +5360,7 @@ def main() raises:
     test_local_changes_reword_head_amends_the_message()
     test_local_changes_reword_older_commit_keeps_its_children()
     test_local_changes_release_stops_an_in_flight_git_child()
-    test_pull_and_push_work_from_every_sidebar_pane()
+    test_pull_and_push_work_from_every_pane()
     test_github_repo_web_url_parses_every_remote_shape()
     test_branch_pane_o_opens_the_github_compare_page()
     test_branch_pane_o_refuses_main_and_a_non_github_remote()
