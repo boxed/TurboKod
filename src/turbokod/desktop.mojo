@@ -10345,6 +10345,16 @@ struct Desktop(Movable):
         var repl_expr = self.debug_pane.consume_repl_submit()
         if len(repl_expr.as_bytes()) > 0:
             self._submit_repl_eval(repl_expr^)
+        # Console completions: forward the pane's request for the word
+        # being typed, and hand the adapter's answer back to its popup.
+        var creq = self.debug_pane.consume_completion_request()
+        if creq:
+            _ = self.dap.request_completions(
+                creq.value()[0], creq.value()[1], self._dap_current_frame_id,
+            )
+        if self.dap.has_completions():
+            var cres = self.dap.take_completions()
+            self.debug_pane.set_completions(cres[0], cres[1], cres[2].copy())
         # Title-strip command click (▶ Cont, ⏸ Pause, …). The pane
         # stamps the action id; we route it through the same
         # dispatch_action path the keyboard shortcut uses, so a click

@@ -54,12 +54,13 @@ from .string_utils import display_columns, truncate_to_columns
 from .painter import Painter
 from .cell import Cell
 from .colors import (
-    Attr, BLACK, DARK_GRAY, LIGHT_BLUE, LIGHT_GREEN, LIGHT_MAGENTA, LIGHT_RED,
+    Attr, BLACK, DARK_GRAY, LIGHT_BLUE, LIGHT_GRAY, LIGHT_GREEN, LIGHT_MAGENTA,
+    LIGHT_RED,
     LIGHT_YELLOW, PANE_BG, PANE_FG, RED, STYLE_UNDERLINE, WHITE, YELLOW,
 )
-from .dap_dispatch import DapStackFrame, DapVariable
+from .dap_dispatch import DapCompletion, DapStackFrame, DapVariable
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE,
+    Event, EVENT_KEY, EVENT_MOUSE, KEY_TAB,
     KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME, KEY_PAGEDOWN, KEY_PAGEUP,
     KEY_UP, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_DOWN,
     MOUSE_WHEEL_UP,
@@ -249,6 +250,17 @@ struct DebugPane(Copyable, Movable):
     """Screen-x where the input strip (after the ``>>>`` prompt) begins."""
     var _last_repl_x_max: Int
     """Screen-x just past the right edge of the input strip."""
+    # Console completions (DAP ``completions``). Typing an identifier
+    # character or ``.`` latches ``pending_completion`` for the host to send
+    # a request; the answer comes back through ``set_completions``. The
+    # popup lists the targets matching the word before the cursor, so an
+    # answer to a slightly older keystroke still filters correctly.
+    var pending_completion: Bool
+    var _cmp_items: List[DapCompletion]
+    var _cmp_open: Bool
+    var _cmp_sel: Int       # index into the *visible* (filtered) list
+    var _cmp_first: Int     # first visible row painted (the list scrolls)
+    var _cmp_rect: Rect     # popup as last painted; empty when not shown
 
     # --- pending intents -- consumed each frame by Desktop.dap_tick ---
     var pending_frame_id: Int           # -1 = none
@@ -341,6 +353,12 @@ struct DebugPane(Copyable, Movable):
         self.repl_history = List[String]()
         self.repl_hist_idx = 0
         self.pending_repl_expr = String("")
+        self.pending_completion = False
+        self._cmp_items = List[DapCompletion]()
+        self._cmp_open = False
+        self._cmp_sel = 0
+        self._cmp_first = 0
+        self._cmp_rect = Rect.empty()
         self._last_repl_y = -1
         self._last_repl_x0 = 0
         self._last_repl_x_max = 0
@@ -382,6 +400,12 @@ struct DebugPane(Copyable, Movable):
         self.repl_history = copy.repl_history.copy()
         self.repl_hist_idx = copy.repl_hist_idx
         self.pending_repl_expr = copy.pending_repl_expr
+        self.pending_completion = copy.pending_completion
+        self._cmp_items = copy._cmp_items.copy()
+        self._cmp_open = copy._cmp_open
+        self._cmp_sel = copy._cmp_sel
+        self._cmp_first = copy._cmp_first
+        self._cmp_rect = copy._cmp_rect
         self._last_repl_y = copy._last_repl_y
         self._last_repl_x0 = copy._last_repl_x0
         self._last_repl_x_max = copy._last_repl_x_max
@@ -665,9 +689,138 @@ struct DebugPane(Copyable, Movable):
         self.repl_input.select_all()
         return True
 
+    # --- console completions ---------------------------------------------
+
+    def consume_completion_request(mut self) -> Optional[Tuple[String, Int]]:
+        """``(text, cursor)`` to ask the adapter to complete — ``cursor`` in
+        UTF-16 units, what DAP columns count — or None. Drained per tick."""
+        if not self.pending_completion:
+            return None
+        self.pending_completion = False
+        if not self.repl_enabled:
+            return None
+        return (
+            self.repl_input.text.copy(),
+            _utf16_len(self.repl_input.text, self.repl_input.cursor),
+        )
+
+    def set_completions(
+        mut self, text: String, cursor: Int, var items: List[DapCompletion],
+    ):
+        """Take an adapter answer for ``(text, cursor)``. Dropped unless the
+        line still starts with that text (the user only typed on since) —
+        an answer for text that was since deleted or changed would offer
+        completions for something no longer there."""
+        if not self.repl_enabled:
+            return
+        var cur = self.repl_input.text.as_bytes()
+        var t = text.as_bytes()
+        if len(t) > len(cur) or _utf16_len(self.repl_input.text,
+                self.repl_input.cursor) < cursor:
+            return
+        for i in range(len(t)):
+            if t[i] != cur[i]:
+                return
+        self._cmp_items = items^
+        self._cmp_sel = 0
+        self._cmp_first = 0
+        self._cmp_open = len(self._visible_completions()) > 0
+
+    def completion_labels(self) -> List[String]:
+        """Labels currently offered by the popup (empty when it's closed)."""
+        var out = List[String]()
+        if not self._cmp_open:
+            return out^
+        var vis = self._visible_completions()
+        for i in range(len(vis)):
+            out.append(self._cmp_items[vis[i]].label)
+        return out^
+
+    def _close_completions(mut self):
+        self._cmp_open = False
+        self._cmp_items = List[DapCompletion]()
+        self._cmp_rect = Rect.empty()
+
+    def _word_start(self) -> Int:
+        """Byte offset where the identifier ending at the cursor starts."""
+        var b = self.repl_input.text.as_bytes()
+        var i = min(self.repl_input.cursor, len(b))
+        while i > 0 and _is_ident_byte(b[i - 1]):
+            i -= 1
+        return i
+
+    def _visible_completions(self) -> List[Int]:
+        """Indices of the items matching the word before the cursor
+        (case-insensitive prefix of the label)."""
+        var out = List[Int]()
+        var b = self.repl_input.text.as_bytes()
+        var ws = self._word_start()
+        var we = min(self.repl_input.cursor, len(b))
+        for i in range(len(self._cmp_items)):
+            var lb = self._cmp_items[i].label.as_bytes()
+            if len(lb) < we - ws:
+                continue
+            var ok = True
+            for k in range(we - ws):
+                if _lower(lb[k]) != _lower(b[ws + k]):
+                    ok = False
+                    break
+            if ok:
+                out.append(i)
+        return out^
+
+    def _accept_completion(mut self):
+        """Replace the word before the cursor with the selected target's
+        text (or the adapter's own span when it gave one)."""
+        var vis = self._visible_completions()
+        if self._cmp_sel < 0 or self._cmp_sel >= len(vis):
+            self._close_completions()
+            return
+        var item = self._cmp_items[vis[self._cmp_sel]]
+        var b = self.repl_input.text.as_bytes()
+        var end = min(self.repl_input.cursor, len(b))
+        # Always the word before the cursor — not the adapter's ``start``:
+        # debugpy sends it 0-based where DAP's default is 1-based, so it
+        # can't be trusted across adapters, and the user may have typed
+        # past the answer's request anyway.
+        var start = self._word_start()
+        var new_text = (
+            String(StringSpan(unsafe_from_utf8=b[0:start])) + item.text
+            + String(StringSpan(unsafe_from_utf8=b[end:len(b)]))
+        )
+        var caret = start + len(item.text.as_bytes())
+        self.repl_input.set_text(new_text^)
+        self.repl_input.cursor = caret
+        self.repl_input.anchor = caret
+        self._close_completions()
+
+    def _completion_key(mut self, event: Event) -> Bool:
+        """Keys the open popup claims: Up/Down pick, Tab/Enter accept, Esc
+        closes. False when the popup isn't showing anything."""
+        if not self._cmp_open:
+            return False
+        var n = len(self._visible_completions())
+        if n == 0:
+            self._close_completions()
+            return False
+        if event.key == KEY_UP:
+            self._cmp_sel = n - 1 if self._cmp_sel <= 0 else self._cmp_sel - 1
+            return True
+        if event.key == KEY_DOWN:
+            self._cmp_sel = 0 if self._cmp_sel >= n - 1 else self._cmp_sel + 1
+            return True
+        if event.key == KEY_TAB or event.key == KEY_ENTER:
+            self._accept_completion()
+            return True
+        if event.key == KEY_ESC:
+            self._close_completions()
+            return True
+        return False
+
     def _submit_repl(mut self):
         """Latch the current input line for the host to evaluate, push
         it onto history, and clear the field. No-op on an empty line."""
+        self._close_completions()
         var expr = self.repl_input.text
         if len(expr.as_bytes()) == 0:
             return
@@ -1035,6 +1188,61 @@ struct DebugPane(Copyable, Movable):
                     self.focused,
                 )
         self._last_repl_y = repl_y
+        self._cmp_rect = Rect.empty()
+        if repl_y >= 0 and self._cmp_open:
+            self._paint_completions(canvas, painter, panel, repl_y)
+
+    def _paint_completions(
+        mut self, mut canvas: Canvas, painter: Painter, panel: Rect,
+        repl_y: Int,
+    ):
+        """The completion popup, stacked upward from the ``>>>`` line and
+        left-aligned on the word being completed."""
+        var vis = self._visible_completions()
+        var n = len(vis)
+        var rows = min(n, 8, repl_y - panel.a.y - 1)
+        if rows <= 0:
+            return
+        if self._cmp_sel >= n:
+            self._cmp_sel = n - 1
+        if self._cmp_sel < self._cmp_first:
+            self._cmp_first = self._cmp_sel
+        if self._cmp_sel >= self._cmp_first + rows:
+            self._cmp_first = self._cmp_sel - rows + 1
+        var label_w = 0
+        var type_w = 0
+        for i in range(n):
+            label_w = max(label_w, display_columns(self._cmp_items[vis[i]].label))
+            type_w = max(type_w, display_columns(self._cmp_items[vis[i]].type_name))
+        var w = label_w + 2 + (type_w + 2 if type_w > 0 else 0)
+        w = min(w, panel.width())
+        var b = self.repl_input.text.as_bytes()
+        var x = self._last_repl_x0 + display_columns(
+            String(StringSpan(unsafe_from_utf8=b[0:self._word_start()])),
+        ) - 1
+        if x + w > panel.b.x:
+            x = panel.b.x - w
+        if x < panel.a.x:
+            x = panel.a.x
+        var rect = Rect(x, repl_y - rows, x + w, repl_y)
+        self._cmp_rect = rect
+        var attr = Attr(BLACK, LIGHT_GRAY)
+        var sel_attr = Attr(BLACK, LIGHT_GREEN)
+        var type_attr = Attr(WHITE, DARK_GRAY)
+        var pop = painter.sub(rect)
+        pop.fill(canvas, rect, String(" "), attr)
+        var type_x = rect.b.x - type_w - 1
+        for r in range(rows):
+            var vi = self._cmp_first + r
+            if vi >= n:
+                break
+            var item = self._cmp_items[vis[vi]]
+            var y = rect.a.y + r
+            var row_attr = sel_attr if vi == self._cmp_sel else attr
+            pop.fill(canvas, Rect(rect.a.x, y, rect.b.x, y + 1), String(" "), row_attr)
+            _ = pop.put_text(canvas, Point(rect.a.x + 1, y), item.label, row_attr)
+            if type_w > 0 and len(item.type_name.as_bytes()) > 0:
+                _ = pop.put_text(canvas, Point(type_x, y), item.type_name, type_attr)
 
     # --- input -----------------------------------------------------------
 
@@ -1100,6 +1308,21 @@ struct DebugPane(Copyable, Movable):
         # drag above — drag-state owners get first dibs.
         if self.output.selection.dragging:
             return self.output.handle_mouse(event)
+        if self._cmp_open and self._cmp_rect.contains(event.pos):
+            if event.button == MOUSE_BUTTON_LEFT and event.pressed \
+                    and not event.motion:
+                self.focused = True
+                self._cmp_sel = self._cmp_first + (event.pos.y - self._cmp_rect.a.y)
+                self._accept_completion()
+            elif event.pressed and (event.button == MOUSE_WHEEL_UP
+                                    or event.button == MOUSE_WHEEL_DOWN):
+                var n = len(self._visible_completions())
+                var d = -1 if event.button == MOUSE_WHEEL_UP else 1
+                self._cmp_sel = max(0, min(n - 1, self._cmp_sel + d))
+            return True
+        if self._cmp_open and event.button == MOUSE_BUTTON_LEFT \
+                and event.pressed and not event.motion:
+            self._close_completions()
         if not panel.contains(event.pos):
             # Bare hover under mouse-mode 1003 must not steal focus.
             if event.button != MOUSE_BUTTON_NONE and event.pressed and not event.motion:
@@ -1195,6 +1418,8 @@ struct DebugPane(Copyable, Movable):
         # body to escape out of, and falling further (e.g. dismissing
         # the pane) belongs to the host's own ESC path, so we leave it
         # alone there.
+        if self.repl_enabled and self._completion_key(event):
+            return True
         if event.key == KEY_ESC:
             return handle_bottom_dock_esc(self.dock)
         # Interactive console: while the debugger is paused the bottom
@@ -1208,10 +1433,16 @@ struct DebugPane(Copyable, Movable):
             if event.key == KEY_ENTER:
                 self._submit_repl()
                 return True
+            if event.key == KEY_TAB and event.mods == 0:
+                # Tab with no popup up asks for completions explicitly.
+                self.pending_completion = True
+                return True
             if event.key == KEY_UP:
+                self._close_completions()
                 self._repl_history_prev()
                 return True
             if event.key == KEY_DOWN:
+                self._close_completions()
                 self._repl_history_next()
                 return True
             if event.key == KEY_PAGEUP:
@@ -1220,7 +1451,20 @@ struct DebugPane(Copyable, Movable):
             if event.key == KEY_PAGEDOWN:
                 self.output.scroll_by(8)
                 return True
-            return self.repl_input.handle_key(event).consumed
+            var r = self.repl_input.handle_key(event)
+            if r.changed:
+                # Typing an identifier character or ``.`` (re)asks the
+                # adapter; anything else ends the word being completed.
+                var b = self.repl_input.text.as_bytes()
+                var c = self.repl_input.cursor
+                if c > 0 and c <= len(b) \
+                        and (_is_ident_byte(b[c - 1]) or b[c - 1] == 0x2E):
+                    self.pending_completion = True
+                else:
+                    self._close_completions()
+            elif r.consumed:
+                self._close_completions()
+            return r.consumed
         # Arrow keys drive the right column (locals + watches) since
         # that's where the deep / scrollable content lives. The stack
         # column rarely needs scrolling and reaches the user via
@@ -1386,4 +1630,35 @@ def _pad_right(s: String, width: Int) -> String:
         out = out + String(" ")
     return out^
 
+
+def _is_ident_byte(c: UInt8) -> Bool:
+    """Identifier byte for console completion: ASCII letters, digits,
+    ``_``, and any non-ASCII (UTF-8) byte."""
+    return (c >= 0x61 and c <= 0x7A) or (c >= 0x41 and c <= 0x5A) \
+        or (c >= 0x30 and c <= 0x39) or c == 0x5F or c >= 0x80
+
+
+def _lower(c: UInt8) -> UInt8:
+    return c + 0x20 if c >= 0x41 and c <= 0x5A else c
+
+
+def _utf16_len(s: String, end_byte: Int) -> Int:
+    """UTF-16 code units in ``s[:end_byte]`` — DAP's column unit."""
+    var b = s.as_bytes()
+    var n = 0
+    var i = 0
+    var end = min(end_byte, len(b))
+    while i < end:
+        var c = b[i]
+        if c < 0x80:
+            i += 1
+        elif c < 0xE0:
+            i += 2
+        elif c < 0xF0:
+            i += 3
+        else:
+            i += 4
+            n += 1   # astral codepoint: a surrogate pair
+        n += 1
+    return n
 

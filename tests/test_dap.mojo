@@ -5,6 +5,7 @@ One of the per-topic suites split out of the former
 and ``scripts/run_tests.sh`` runs every suite.
 """
 
+from std.collections.optional import Optional
 from std.ffi import external_call
 from std.testing import assert_equal, assert_false, assert_true
 from turbokod.canvas import Canvas
@@ -21,7 +22,9 @@ from turbokod.file_io import join_path, stat_file, write_file
 from turbokod.project_targets import (
     ProjectTargets, RunTarget, pytest_python_files
 )
-from turbokod.debug_pane import DEBUG_PANE_CLOSE, DebugPane, PANE_MODE_RUN
+from turbokod.debug_pane import (
+    DEBUG_PANE_CLOSE, DebugPane, PANE_MODE_DEBUG, PANE_MODE_RUN,
+)
 from turbokod.run_manager import RunSession, drain_run_output, poll_run_exit
 from turbokod.project_settings import ProjectSettings
 from turbokod.json import JsonValue, json_object, parse_json
@@ -30,8 +33,8 @@ from turbokod.dap import (
     dap_initialize_arguments
 )
 from turbokod.dap_dispatch import (
-    DapManager, DapStackFrame, DapVariable, _STATE_FAILED,
-    _STATE_INITIALIZING, _STATE_TERMINATED, _parse_scopes,
+    DapCompletion, DapManager, DapStackFrame, DapVariable, _STATE_FAILED,
+    _STATE_INITIALIZING, _STATE_TERMINATED, _parse_completions, _parse_scopes,
     _parse_stack_trace, _parse_threads, _parse_variables
 )
 from turbokod.debugger_config import (
@@ -71,6 +74,93 @@ def _ps_open_targets(var src: ProjectTargets) -> ProjectSettings:
     )
     ps.section = 1  # Targets
     return ps^
+
+
+def _cmp(label: String, type_name: String) -> DapCompletion:
+    return DapCompletion(label, label, type_name, 0, 0)
+
+
+def test_debug_pane_console_completions() raises:
+    """Typing in the console asks the host for completions; the popup lists
+    the answer filtered by the word before the cursor, Up/Down pick, Tab
+    accepts (replacing the word), Esc closes, and an answer for text the
+    user has since changed is dropped."""
+    var pane = DebugPane()
+    pane.focused = True
+    pane.repl_enabled = True
+    pane.set_mode(PANE_MODE_DEBUG)
+    _ = pane.handle_key(Event.key_event(UInt32(ord("o")), MOD_NONE))
+    _ = pane.handle_key(Event.key_event(UInt32(ord("s")), MOD_NONE))
+    _ = pane.handle_key(Event.key_event(UInt32(ord(".")), MOD_NONE))
+    _ = pane.handle_key(Event.key_event(UInt32(ord("p")), MOD_NONE))
+    var req = pane.consume_completion_request()
+    assert_true(Bool(req))
+    assert_equal(req.value()[0], String("os.p"))
+    assert_equal(req.value()[1], 4)
+    assert_false(Bool(pane.consume_completion_request()))   # drained
+    var items = List[DapCompletion]()
+    items.append(_cmp(String("path"), String("module")))
+    items.append(_cmp(String("pardir"), String("field")))
+    items.append(_cmp(String("sep"), String("field")))
+    pane.set_completions(String("os.p"), 4, items^)
+    var labels = pane.completion_labels()
+    assert_equal(len(labels), 2)              # "sep" doesn't match "p"
+    assert_equal(labels[0], String("path"))
+    # The popup paints above the console line.
+    var canvas = Canvas(80, 20)
+    pane.visible = True
+    pane.paint(canvas, Rect(0, 0, 80, 20))
+    assert_true(pane._cmp_rect.height() == 2)
+    assert_equal(pane._cmp_rect.b.y, pane._last_repl_y)
+    # Typing narrows the same answer; Down/Up walk it.
+    _ = pane.handle_key(Event.key_event(UInt32(ord("a")), MOD_NONE))
+    assert_equal(len(pane.completion_labels()), 2)
+    _ = pane.handle_key(Event.key_event(KEY_DOWN, MOD_NONE))
+    # Tab accepts the selection, replacing the word being typed.
+    assert_true(pane.handle_key(Event.key_event(KEY_TAB, MOD_NONE)))
+    assert_equal(pane.repl_input.text, String("os.pardir"))
+    assert_equal(pane.repl_input.cursor, 9)
+    assert_equal(len(pane.completion_labels()), 0)
+    # Enter with the popup open accepts instead of submitting.
+    pane.repl_input.clear()
+    _ = pane.handle_key(Event.key_event(UInt32(ord("p")), MOD_NONE))
+    var more = List[DapCompletion]()
+    more.append(_cmp(String("print"), String("function")))
+    pane.set_completions(String("p"), 1, more^)
+    assert_true(pane.handle_key(Event.key_event(KEY_ENTER, MOD_NONE)))
+    assert_equal(pane.repl_input.text, String("print"))
+    assert_equal(pane.consume_repl_submit(), String(""))
+    # Esc closes the popup without touching the text (or the dock).
+    var again = List[DapCompletion]()
+    again.append(_cmp(String("print"), String("function")))
+    pane.set_completions(String("print"), 5, again^)
+    assert_equal(len(pane.completion_labels()), 1)
+    assert_true(pane.handle_key(Event.key_event(KEY_ESC, MOD_NONE)))
+    assert_equal(len(pane.completion_labels()), 0)
+    assert_equal(pane.repl_input.text, String("print"))
+    # A stale answer — for text the user has since deleted — is dropped.
+    var stale = List[DapCompletion]()
+    stale.append(_cmp(String("zzz"), String("")))
+    pane.set_completions(String("zz"), 2, stale^)
+    assert_equal(len(pane.completion_labels()), 0)
+    # Tab with no popup asks for completions explicitly.
+    assert_true(pane.handle_key(Event.key_event(KEY_TAB, MOD_NONE)))
+    assert_true(Bool(pane.consume_completion_request()))
+
+
+def test_parse_completions() raises:
+    var body = parse_json(String(
+        '{"targets": [{"label": "path", "type": "module", "start": 3,'
+        ' "length": 2}, {"label": "x", "text": "x()"}, {"nolabel": 1}]}'
+    ))
+    var out = _parse_completions(Optional[JsonValue](body^))
+    assert_equal(len(out), 2)
+    assert_equal(out[0].label, String("path"))
+    assert_equal(out[0].type_name, String("module"))
+    assert_equal(out[0].start, 3)
+    assert_equal(out[0].length, 2)
+    assert_equal(out[1].text, String("x()"))
+    assert_equal(out[1].start, -1)
 
 
 def test_debug_pane_repl_console() raises:
@@ -1797,6 +1887,8 @@ def test_dap_reset_for_restart_closes_the_previous_sessions_fds() raises:
 def main() raises:
     setup_test_env()
     test_debug_pane_repl_console()
+    test_debug_pane_console_completions()
+    test_parse_completions()
     test_pytest_link_opens_project_relative_file()
     test_dap_classify_response()
     test_dap_classify_event()

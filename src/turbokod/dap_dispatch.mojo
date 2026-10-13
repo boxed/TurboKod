@@ -125,6 +125,20 @@ struct DapThread(ImplicitlyCopyable, Movable):
 
 
 @fieldwise_init
+struct DapCompletion(ImplicitlyCopyable, Movable):
+    """One target from a ``completions`` response. ``text`` is what to
+    insert (``label`` when the adapter sent none). ``start`` / ``length``
+    are the adapter's replaced span as sent (``start = -1`` when absent).
+    Adapters disagree on its base (debugpy sends 0-based against DAP's
+    1-based default), so the console doesn't rely on it."""
+    var label: String
+    var text: String
+    var type_name: String
+    var start: Int
+    var length: Int
+
+
+@fieldwise_init
 struct DapScope(ImplicitlyCopyable, Movable):
     """One scope from a ``scopes`` response. ``variables_reference`` is
     the handle the UI feeds into a follow-up ``variables`` request to
@@ -264,6 +278,7 @@ struct SubprocessAttach(Copyable, Movable):
     var inflight_evaluate_contexts: List[String]
     var inflight_test_eval_seqs: List[Int]
     var inflight_test_eval_exprs: List[String]
+    var inflight_completions: Int
     var got_initialized_event: Bool
     var pending_attach_args: JsonValue
     # Mirror of the parent's breakpoints at attach time. Sent to the
@@ -294,6 +309,7 @@ struct SubprocessAttach(Copyable, Movable):
         self.inflight_evaluate_exprs = List[String]()
         self.inflight_evaluate_contexts = List[String]()
         self.inflight_test_eval_seqs = List[Int]()
+        self.inflight_completions = 0
         self.inflight_test_eval_exprs = List[String]()
         self.got_initialized_event = False
         self.pending_attach_args = JsonValue()
@@ -321,6 +337,7 @@ struct SubprocessAttach(Copyable, Movable):
         self.inflight_evaluate_exprs = List[String]()
         self.inflight_evaluate_contexts = List[String]()
         self.inflight_test_eval_seqs = List[Int]()
+        self.inflight_completions = 0
         self.inflight_test_eval_exprs = List[String]()
         self.got_initialized_event = False
         self.pending_attach_args = JsonValue()
@@ -361,6 +378,21 @@ struct DapManager(Copyable, Movable):
     # Capabilities returned by the adapter (parked from initialize response).
     var _supports_configuration_done: Bool
     var _supports_terminate_request: Bool
+    # ``supportsCompletionsRequest`` from the capabilities — gates the
+    # console's completion requests.
+    var _supports_completions: Bool
+    # Console completions: one request in flight at a time (``_inflight_
+    # completions`` / the subprocess twin), the newest answer parked in
+    # ``_completions`` until the host drains it. ``_completions_text`` /
+    # ``_completions_column`` echo what the answer is for, so the host can
+    # drop one that the user has since typed past.
+    var _inflight_completions: Int
+    var _completions_req_text: String
+    var _completions_req_column: Int
+    var _completions: List[DapCompletion]
+    var _completions_ready: Bool
+    var _completions_text: String
+    var _completions_column: Int
 
     # Whether we've seen the ``initialized`` event. We track this
     # separately from the launch response because the spec lets either
@@ -579,6 +611,14 @@ struct DapManager(Copyable, Movable):
         self._evaluations_context = List[String]()
         self._evaluations_is_error = List[Bool]()
         self._inflight_test_eval_seqs = List[Int]()
+        self._supports_completions = False
+        self._inflight_completions = 0
+        self._completions_req_text = String("")
+        self._completions_req_column = 0
+        self._completions = List[DapCompletion]()
+        self._completions_ready = False
+        self._completions_text = String("")
+        self._completions_column = 0
         self._inflight_test_eval_exprs = List[String]()
         self._test_eval_expr = List[String]()
         self._test_eval_value = List[String]()
@@ -653,6 +693,14 @@ struct DapManager(Copyable, Movable):
         self._evaluations_context = List[String]()
         self._evaluations_is_error = List[Bool]()
         self._inflight_test_eval_seqs = List[Int]()
+        self._supports_completions = False
+        self._inflight_completions = 0
+        self._completions_req_text = String("")
+        self._completions_req_column = 0
+        self._completions = List[DapCompletion]()
+        self._completions_ready = False
+        self._completions_text = String("")
+        self._completions_column = 0
         self._inflight_test_eval_exprs = List[String]()
         self._test_eval_expr = List[String]()
         self._test_eval_value = List[String]()
@@ -972,6 +1020,14 @@ struct DapManager(Copyable, Movable):
         self._evaluations_context = List[String]()
         self._evaluations_is_error = List[Bool]()
         self._inflight_test_eval_seqs = List[Int]()
+        self._supports_completions = False
+        self._inflight_completions = 0
+        self._completions_req_text = String("")
+        self._completions_req_column = 0
+        self._completions = List[DapCompletion]()
+        self._completions_ready = False
+        self._completions_text = String("")
+        self._completions_column = 0
         self._inflight_test_eval_exprs = List[String]()
         self._test_eval_expr = List[String]()
         self._test_eval_value = List[String]()
@@ -1424,6 +1480,63 @@ struct DapManager(Copyable, Movable):
             self._inflight_evaluate_exprs.append(expression^)
             self._inflight_evaluate_contexts.append(ctx^)
         return True
+
+    # --- completions (debug console) --------------------------------------
+
+    def supports_completions(self) -> Bool:
+        return self._supports_completions
+
+    def request_completions(
+        mut self, var text: String, column: Int, frame_id: Int,
+    ) -> Bool:
+        """Ask the adapter what could complete ``text`` at ``column``
+        (0-based UTF-16 offset of the cursor). Only one request is kept in
+        flight — a newer one replaces the older (its late answer is
+        dropped) — since only the latest keystroke's answer matters. The
+        result lands via ``take_completions``. Routes like ``evaluate``."""
+        if not self.is_active() or not self._supports_completions:
+            return False
+        var args = json_object()
+        args.put(String("text"), json_str(text))
+        # Columns are 1-based on the wire (we never send columnsStartAt1).
+        args.put(String("column"), json_int(column + 1))
+        if frame_id != 0:
+            args.put(String("frameId"), json_int(frame_id))
+        var via_subprocess = self._inspect_via_subprocess()
+        try:
+            if via_subprocess:
+                self._subprocess.inflight_completions = \
+                    self._subprocess.client.send_request(
+                        String("completions"), args,
+                    )
+            else:
+                self._inflight_completions = self.client.send_request(
+                    String("completions"), args,
+                )
+        except:
+            return False
+        self._completions_req_text = text^
+        self._completions_req_column = column
+        return True
+
+    def has_completions(self) -> Bool:
+        return self._completions_ready
+
+    def take_completions(mut self) -> Tuple[String, Int, List[DapCompletion]]:
+        """Drain the newest completions answer as ``(text, column,
+        targets)`` — the request text/column it answers, then the
+        targets."""
+        self._completions_ready = False
+        var items = self._completions^
+        self._completions = List[DapCompletion]()
+        return (self._completions_text, self._completions_column, items^)
+
+    def _stash_completions(mut self, msg: DapIncoming):
+        self._completions = _parse_completions(msg.body) \
+            if msg.ok() else List[DapCompletion]()
+        self._completions_text = self._completions_req_text
+        self._completions_column = self._completions_req_column
+        self._completions_ready = True
 
     def has_evaluations(self) -> Bool:
         return len(self._evaluations_expr) > 0
@@ -1918,6 +2031,10 @@ struct DapManager(Copyable, Movable):
                 self._pending_vars_ready = True
                 self._subprocess.inflight_variables = 0
                 return
+            if rseq == self._subprocess.inflight_completions:
+                self._subprocess.inflight_completions = 0
+                self._stash_completions(msg)
+                return
             # Watch / REPL evaluate response routed via subprocess.
             # Output destination is the same as the parent path
             # (``_evaluations_*``) so the host's watch fold treats it
@@ -2095,6 +2212,10 @@ struct DapManager(Copyable, Movable):
             self._pending_vars_ready = True
             self._inflight_variables = 0
             return
+        if rseq == self._inflight_completions:
+            self._inflight_completions = 0
+            self._stash_completions(msg)
+            return
         # Evaluate response — match against the in-flight evaluate
         # seq list to recover which expression this answered.
         var eidx = -1
@@ -2180,6 +2301,9 @@ struct DapManager(Copyable, Movable):
             var tr = b.object_get(String("supportsTerminateRequest"))
             if tr and tr.value().is_bool():
                 self._supports_terminate_request = tr.value().as_bool()
+            var cp = b.object_get(String("supportsCompletionsRequest"))
+            if cp and cp.value().is_bool():
+                self._supports_completions = cp.value().as_bool()
         # Now send launch / attach.
         var cmd: String
         if self._launch_request_kind == DAP_REQUEST_ATTACH:
@@ -2906,6 +3030,43 @@ def _parse_stack_trace(body_opt: Optional[JsonValue]) -> List[DapStackFrame]:
             id_opt.value().as_int(), name_opt.value().as_str(),
             path, line, col, subtle,
         ))
+    return out^
+
+
+def _parse_completions(body_opt: Optional[JsonValue]) -> List[DapCompletion]:
+    """``completions`` response body → targets, ``start`` kept as sent."""
+    var out = List[DapCompletion]()
+    if not body_opt or not body_opt.value().is_object():
+        return out^
+    var arr_opt = body_opt.value().object_get(String("targets"))
+    if not arr_opt or not arr_opt.value().is_array():
+        return out^
+    var arr = arr_opt.value().copy()
+    for i in range(arr.array_len()):
+        var t = arr.array_at(i)
+        if not t.is_object():
+            continue
+        var label_opt = t.object_get(String("label"))
+        if not label_opt or not label_opt.value().is_string():
+            continue
+        var label = label_opt.value().as_str()
+        var text = label
+        var text_opt = t.object_get(String("text"))
+        if text_opt and text_opt.value().is_string():
+            text = text_opt.value().as_str()
+        var type_name = String("")
+        var type_opt = t.object_get(String("type"))
+        if type_opt and type_opt.value().is_string():
+            type_name = type_opt.value().as_str()
+        var start = -1
+        var start_opt = t.object_get(String("start"))
+        if start_opt and start_opt.value().is_int():
+            start = start_opt.value().as_int()
+        var length = 0
+        var len_opt = t.object_get(String("length"))
+        if len_opt and len_opt.value().is_int():
+            length = len_opt.value().as_int()
+        out.append(DapCompletion(label^, text^, type_name^, start, length))
     return out^
 
 
