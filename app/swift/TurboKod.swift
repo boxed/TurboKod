@@ -464,6 +464,13 @@ final class CellView: NSView {
     override var isFlipped: Bool { true }            // y increases downward (row index)
     override var acceptsFirstResponder: Bool { true }
     override var wantsDefaultClipping: Bool { false }
+    // The floating panels window is a companion to the project window, which
+    // normally holds key focus (e.g. after a breakpoint stop jumps the editor).
+    // Without click-through, AppKit spends the first click only activating the
+    // panels window, so a click on the debug console's `>>>` line never
+    // reached the pane — it stayed unfocused and the typing that followed was
+    // dropped. Let that first click through to the panel under it.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { surface == .panels }
 
     func cols() -> Int { max(1, Int(bounds.width / CELL_W)) }
     func rows() -> Int { max(1, Int(bounds.height / CELL_H)) }

@@ -38,6 +38,7 @@ from turbokod.window import (
     DockedPanelStack, PANEL_STATE_MAXIMIZED, PANEL_STATE_MINIMIZED,
     PANEL_STATE_NORMAL, TitleCommand, WindowManager, paint_title_commands
 )
+from turbokod.debug_pane import PANE_MODE_DEBUG
 from turbokod.events import (
     Event, EVENT_KEY, KEY_BACKSPACE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC,
     KEY_F5, KEY_LEFT, KEY_RIGHT, KEY_UP, MOD_ALT, MOD_CTRL, MOD_META,
@@ -1225,6 +1226,32 @@ def test_floating_panel_title_command_click_beats_splitter() raises:
     assert_true(d.debug_pane.dock.is_resizing())
 
 
+def test_floating_debug_console_takes_focus_and_typing() raises:
+    """Floating panels: a click on the paused debug pane's ``>>>`` line
+    focuses the pane, and keys sent to the panel window type into the
+    console field."""
+    var d = Desktop()
+    d.panels_detached = True
+    d.debug_pane.visible = True
+    d.debug_pane.set_mode(PANE_MODE_DEBUG)
+    d.debug_pane.repl_enabled = True
+    var screen = Rect(0, 0, 80, 30)
+    var canvas = Canvas(80, 30)
+    canvas.clear(default_attr())
+    d.paint_panels(canvas, screen)
+    assert_true(d.debug_pane._last_repl_y >= 0)
+    var p = Point(d.debug_pane._last_repl_x0 + 1, d.debug_pane._last_repl_y)
+    _ = d.handle_panels_event(
+        Event.mouse_event(p, MOUSE_BUTTON_LEFT, True, False), screen,
+    )
+    _ = d.handle_panels_event(
+        Event.mouse_event(p, MOUSE_BUTTON_LEFT, False, False), screen,
+    )
+    assert_true(d.debug_pane.focused)
+    _ = d.handle_panels_event(Event.key_event(UInt32(ord("x"))), screen)
+    assert_equal(d.debug_pane.repl_input.text, String("x"))
+
+
 def test_floating_panel_minimize_bottom_keeps_one_row() raises:
     """Minimizing the *bottom* panel in the floating window must collapse
     it to its single header row — the upper panel becomes the absorber and
@@ -1365,5 +1392,6 @@ def main() raises:
     test_floating_panel_top_border_does_not_self_resize()
     test_floating_panel_title_command_click_beats_splitter()
     test_floating_panel_minimize_bottom_keeps_one_row()
+    test_floating_debug_console_takes_focus_and_typing()
     test_floating_panel_minimize_top_keeps_one_row()
     print("chrome: 48 tests passed")
