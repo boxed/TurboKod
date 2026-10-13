@@ -261,6 +261,16 @@ struct DebugPane(Copyable, Movable):
     var _cmp_sel: Int       # index into the *visible* (filtered) list
     var _cmp_first: Int     # first visible row painted (the list scrolls)
     var _cmp_rect: Rect     # popup as last painted; empty when not shown
+    # Key completion inside ``expr[`` / ``expr['``: the popup offers the
+    # container's keys instead of names. ``_cmp_anchor`` is where the typed
+    # key starts (the quote, if any) — the span the filter matches and an
+    # accept replaces; -1 in plain name mode. ``pending_keys_expr`` asks the
+    # host for ``expr``'s keys; ``_keys_for`` / ``_key_names`` cache the
+    # answer so typing more of the key just re-filters.
+    var _cmp_anchor: Int
+    var pending_keys_expr: String
+    var _keys_for: String
+    var _key_names: List[String]
 
     # --- pending intents -- consumed each frame by Desktop.dap_tick ---
     var pending_frame_id: Int           # -1 = none
@@ -359,6 +369,10 @@ struct DebugPane(Copyable, Movable):
         self._cmp_sel = 0
         self._cmp_first = 0
         self._cmp_rect = Rect.empty()
+        self._cmp_anchor = -1
+        self.pending_keys_expr = String("")
+        self._keys_for = String("")
+        self._key_names = List[String]()
         self._last_repl_y = -1
         self._last_repl_x0 = 0
         self._last_repl_x_max = 0
@@ -406,6 +420,10 @@ struct DebugPane(Copyable, Movable):
         self._cmp_sel = copy._cmp_sel
         self._cmp_first = copy._cmp_first
         self._cmp_rect = copy._cmp_rect
+        self._cmp_anchor = copy._cmp_anchor
+        self.pending_keys_expr = copy.pending_keys_expr
+        self._keys_for = copy._keys_for
+        self._key_names = copy._key_names.copy()
         self._last_repl_y = copy._last_repl_y
         self._last_repl_x0 = copy._last_repl_x0
         self._last_repl_x_max = copy._last_repl_x_max
@@ -711,8 +729,8 @@ struct DebugPane(Copyable, Movable):
         line still starts with that text (the user only typed on since) —
         an answer for text that was since deleted or changed would offer
         completions for something no longer there."""
-        if not self.repl_enabled:
-            return
+        if not self.repl_enabled or self._cmp_anchor >= 0:
+            return   # gone, or the cursor is in a key position now
         var cur = self.repl_input.text.as_bytes()
         var t = text.as_bytes()
         if len(t) > len(cur) or _utf16_len(self.repl_input.text,
@@ -725,6 +743,122 @@ struct DebugPane(Copyable, Movable):
         self._cmp_sel = 0
         self._cmp_first = 0
         self._cmp_open = len(self._visible_completions()) > 0
+
+    def consume_keys_request(mut self) -> String:
+        """Container expression whose keys the popup wants, or ``""``."""
+        var e = self.pending_keys_expr
+        self.pending_keys_expr = String("")
+        return e^ if self.repl_enabled else String("")
+
+    def set_container_keys(mut self, expr: String, var names: List[String]):
+        """Take the keys (adapter child names, i.e. key reprs) of ``expr``.
+        Dropped unless the cursor is still in a key position on it."""
+        var ctx = self._key_context()
+        if not ctx or ctx.value()[0] != expr:
+            return
+        self._keys_for = expr
+        self._key_names = names^
+        self._cmp_anchor = ctx.value()[1]
+        self._refresh_key_items(ctx.value()[2])
+
+    def _refresh_key_items(mut self, quote: UInt8):
+        """Rebuild the popup from the cached keys for the quote the user
+        typed: a string key is shown — and inserted — in that quote, so
+        ``foo["`` offers ``"a"`` even though the repr says ``'a'``. Each
+        insertion closes the subscript with ``]``."""
+        var items = List[DapCompletion]()
+        for i in range(len(self._key_names)):
+            var label = self._key_names[i]
+            var lb = label.as_bytes()
+            if quote != 0 and len(lb) >= 2 and (lb[0] == 0x27 or lb[0] == 0x22) \
+                    and lb[0] != quote:
+                var q = String(chr(Int(quote)))
+                label = q + String(StringSpan(unsafe_from_utf8=lb[1:len(lb) - 1])) + q
+            items.append(DapCompletion(
+                label, label + String("]"), String("key"), -1, 0,
+            ))
+        self._cmp_items = items^
+        self._cmp_sel = 0
+        self._cmp_first = 0
+        self._cmp_open = len(self._visible_completions()) > 0
+
+    def _key_context(self) -> Optional[Tuple[String, Int, UInt8]]:
+        """When the cursor sits on a subscript key — ``expr[``, ``expr['ab``,
+        ``expr[1`` — return ``(expr, anchor, quote)``: the container
+        expression, where the typed key starts, and its opening quote (0 if
+        none). None elsewhere, including ``expr[name`` (an index by
+        variable, which plain name completion covers)."""
+        var b = self.repl_input.text.as_bytes()
+        var cur = min(self.repl_input.cursor, len(b))
+        var i = cur
+        while i > 0 and b[i - 1] != 0x5B and b[i - 1] != 0x5D \
+                and b[i - 1] != 0x27 and b[i - 1] != 0x22:
+            i -= 1
+        var quote = UInt8(0)
+        if i > 0 and (b[i - 1] == 0x27 or b[i - 1] == 0x22):
+            quote = b[i - 1]
+            i -= 1
+        var anchor = i
+        if i == 0 or b[i - 1] != 0x5B:
+            return None
+        if quote == 0 and anchor < cur:
+            var c = b[anchor]
+            if (c >= 0x61 and c <= 0x7A) or (c >= 0x41 and c <= 0x5A) \
+                    or c == 0x5F:
+                return None
+        var bracket = i - 1
+        var j = bracket
+        while j > 0:
+            var c = b[j - 1]
+            if _is_ident_byte(c) or c == 0x2E:
+                j -= 1
+            elif c == 0x5D or c == 0x29:   # ] ) — skip a balanced group
+                var open = UInt8(0x5B) if c == 0x5D else UInt8(0x28)
+                var depth = 0
+                var k = j - 1
+                while k >= 0:
+                    if b[k] == c:
+                        depth += 1
+                    elif b[k] == open:
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    k -= 1
+                if k < 0:
+                    return None
+                j = k
+            else:
+                break
+        if j == bracket:
+            return None   # ``[`` opens a list literal, not a subscript
+        var expr = String(StringSpan(unsafe_from_utf8=b[j:bracket]))
+        return (expr^, anchor, quote)
+
+    def _update_completion_mode(mut self):
+        """After an edit: in a key position, filter the cached keys (or ask
+        for them); otherwise plain name completion as before."""
+        var ctx = self._key_context()
+        if ctx:
+            self.pending_completion = False   # a name answer is moot now
+            self._cmp_anchor = ctx.value()[1]
+            if ctx.value()[0] != self._keys_for:
+                self._close_completions()
+                self._cmp_anchor = ctx.value()[1]
+                self.pending_keys_expr = ctx.value()[0]
+            else:
+                self._refresh_key_items(ctx.value()[2])
+            return
+        self.pending_keys_expr = String("")   # left the key position
+        if self._cmp_anchor >= 0:
+            self._close_completions()
+            self._keys_for = String("")
+        var b = self.repl_input.text.as_bytes()
+        var c = self.repl_input.cursor
+        if c > 0 and c <= len(b) \
+                and (_is_ident_byte(b[c - 1]) or b[c - 1] == 0x2E):
+            self.pending_completion = True
+        else:
+            self._close_completions()
 
     def completion_labels(self) -> List[String]:
         """Labels currently offered by the popup (empty when it's closed)."""
@@ -740,9 +874,13 @@ struct DebugPane(Copyable, Movable):
         self._cmp_open = False
         self._cmp_items = List[DapCompletion]()
         self._cmp_rect = Rect.empty()
+        self._cmp_anchor = -1
 
     def _word_start(self) -> Int:
-        """Byte offset where the identifier ending at the cursor starts."""
+        """Byte offset where the text being completed starts: the key
+        anchor in a subscript, else the identifier ending at the cursor."""
+        if self._cmp_anchor >= 0:
+            return min(self._cmp_anchor, self.repl_input.cursor)
         var b = self.repl_input.text.as_bytes()
         var i = min(self.repl_input.cursor, len(b))
         while i > 0 and _is_ident_byte(b[i - 1]):
@@ -760,9 +898,12 @@ struct DebugPane(Copyable, Movable):
             var lb = self._cmp_items[i].label.as_bytes()
             if len(lb) < we - ws:
                 continue
+            # Keys match exactly; names case-insensitively (like debugpy).
+            var exact = self._cmp_anchor >= 0
             var ok = True
             for k in range(we - ws):
-                if _lower(lb[k]) != _lower(b[ws + k]):
+                if (lb[k] != b[ws + k]) if exact \
+                        else (_lower(lb[k]) != _lower(b[ws + k])):
                     ok = False
                     break
             if ok:
@@ -784,11 +925,20 @@ struct DebugPane(Copyable, Movable):
         # can't be trusted across adapters, and the user may have typed
         # past the answer's request anyway.
         var start = self._word_start()
+        var ins = item.text
+        # Don't double a ``]`` the user already typed after the cursor.
+        var ib = ins.as_bytes()
+        if self._cmp_anchor >= 0 and end < len(b) and b[end] == 0x5D \
+                and len(ib) > 0 and ib[len(ib) - 1] == 0x5D:
+            var trimmed = String(StringSpan(unsafe_from_utf8=ib[0:len(ib) - 1]))
+            ins = trimmed^
         var new_text = (
-            String(StringSpan(unsafe_from_utf8=b[0:start])) + item.text
+            String(StringSpan(unsafe_from_utf8=b[0:start])) + ins
             + String(StringSpan(unsafe_from_utf8=b[end:len(b)]))
         )
         var caret = start + len(item.text.as_bytes())
+        if caret > start + len(ins.as_bytes()):
+            caret = start + len(ins.as_bytes()) + 1   # step over the ]
         self.repl_input.set_text(new_text^)
         self.repl_input.cursor = caret
         self.repl_input.anchor = caret
@@ -821,6 +971,7 @@ struct DebugPane(Copyable, Movable):
         """Latch the current input line for the host to evaluate, push
         it onto history, and clear the field. No-op on an empty line."""
         self._close_completions()
+        self._keys_for = String("")
         var expr = self.repl_input.text
         if len(expr.as_bytes()) == 0:
             return
@@ -1435,7 +1586,12 @@ struct DebugPane(Copyable, Movable):
                 return True
             if event.key == KEY_TAB and event.mods == 0:
                 # Tab with no popup up asks for completions explicitly.
-                self.pending_completion = True
+                var ctx = self._key_context()
+                if ctx:
+                    self._cmp_anchor = ctx.value()[1]
+                    self.pending_keys_expr = ctx.value()[0]
+                else:
+                    self.pending_completion = True
                 return True
             if event.key == KEY_UP:
                 self._close_completions()
@@ -1454,14 +1610,9 @@ struct DebugPane(Copyable, Movable):
             var r = self.repl_input.handle_key(event)
             if r.changed:
                 # Typing an identifier character or ``.`` (re)asks the
-                # adapter; anything else ends the word being completed.
-                var b = self.repl_input.text.as_bytes()
-                var c = self.repl_input.cursor
-                if c > 0 and c <= len(b) \
-                        and (_is_ident_byte(b[c - 1]) or b[c - 1] == 0x2E):
-                    self.pending_completion = True
-                else:
-                    self._close_completions()
+                # adapter for names; inside ``expr[`` it offers keys;
+                # anything else ends the word being completed.
+                self._update_completion_mode()
             elif r.consumed:
                 self._close_completions()
             return r.consumed

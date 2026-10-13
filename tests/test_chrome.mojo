@@ -1394,4 +1394,4 @@ def main() raises:
     test_floating_panel_minimize_bottom_keeps_one_row()
     test_floating_debug_console_takes_focus_and_typing()
     test_floating_panel_minimize_top_keeps_one_row()
-    print("chrome: 48 tests passed")
+    print("chrome: 49 tests passed")

@@ -279,6 +279,8 @@ struct SubprocessAttach(Copyable, Movable):
     var inflight_test_eval_seqs: List[Int]
     var inflight_test_eval_exprs: List[String]
     var inflight_completions: Int
+    var inflight_keys_eval: Int
+    var inflight_keys_vars: Int
     var got_initialized_event: Bool
     var pending_attach_args: JsonValue
     # Mirror of the parent's breakpoints at attach time. Sent to the
@@ -310,6 +312,8 @@ struct SubprocessAttach(Copyable, Movable):
         self.inflight_evaluate_contexts = List[String]()
         self.inflight_test_eval_seqs = List[Int]()
         self.inflight_completions = 0
+        self.inflight_keys_eval = 0
+        self.inflight_keys_vars = 0
         self.inflight_test_eval_exprs = List[String]()
         self.got_initialized_event = False
         self.pending_attach_args = JsonValue()
@@ -338,6 +342,8 @@ struct SubprocessAttach(Copyable, Movable):
         self.inflight_evaluate_contexts = List[String]()
         self.inflight_test_eval_seqs = List[Int]()
         self.inflight_completions = 0
+        self.inflight_keys_eval = 0
+        self.inflight_keys_vars = 0
         self.inflight_test_eval_exprs = List[String]()
         self.got_initialized_event = False
         self.pending_attach_args = JsonValue()
@@ -393,6 +399,24 @@ struct DapManager(Copyable, Movable):
     var _completions_ready: Bool
     var _completions_text: String
     var _completions_column: Int
+    # Console key completion (``foo['``): evaluate the container, then fetch
+    # its children — a mapping's children are named by key repr. Own seq
+    # slots (``_inflight_keys_*``), not the watch / variables-pane ones, so
+    # it can't steal their answers. ``_keys`` holds the drained result for
+    # ``_keys_expr``.
+    var _inflight_keys_eval: Int
+    var _inflight_keys_vars: Int
+    var _keys_req_expr: String
+    var _keys: List[String]
+    var _keys_ready: Bool
+    var _keys_expr: String
+    # Which pass the in-flight key fetch is on: 0 = the container's own
+    # children (a real dict: named by key repr), 1 = the Python fallback
+    # for dict-likes (``list((expr).keys())``, keys read from the element
+    # *values*). ``_keys_via_sub`` remembers which session to ask.
+    var _keys_stage: Int
+    var _keys_via_sub: Bool
+    var _keys_frame_id: Int
 
     # Whether we've seen the ``initialized`` event. We track this
     # separately from the launch response because the spec lets either
@@ -619,6 +643,15 @@ struct DapManager(Copyable, Movable):
         self._completions_ready = False
         self._completions_text = String("")
         self._completions_column = 0
+        self._inflight_keys_eval = 0
+        self._inflight_keys_vars = 0
+        self._keys_req_expr = String("")
+        self._keys = List[String]()
+        self._keys_ready = False
+        self._keys_expr = String("")
+        self._keys_stage = 0
+        self._keys_via_sub = False
+        self._keys_frame_id = 0
         self._inflight_test_eval_exprs = List[String]()
         self._test_eval_expr = List[String]()
         self._test_eval_value = List[String]()
@@ -701,6 +734,15 @@ struct DapManager(Copyable, Movable):
         self._completions_ready = False
         self._completions_text = String("")
         self._completions_column = 0
+        self._inflight_keys_eval = 0
+        self._inflight_keys_vars = 0
+        self._keys_req_expr = String("")
+        self._keys = List[String]()
+        self._keys_ready = False
+        self._keys_expr = String("")
+        self._keys_stage = 0
+        self._keys_via_sub = False
+        self._keys_frame_id = 0
         self._inflight_test_eval_exprs = List[String]()
         self._test_eval_expr = List[String]()
         self._test_eval_value = List[String]()
@@ -1028,6 +1070,15 @@ struct DapManager(Copyable, Movable):
         self._completions_ready = False
         self._completions_text = String("")
         self._completions_column = 0
+        self._inflight_keys_eval = 0
+        self._inflight_keys_vars = 0
+        self._keys_req_expr = String("")
+        self._keys = List[String]()
+        self._keys_ready = False
+        self._keys_expr = String("")
+        self._keys_stage = 0
+        self._keys_via_sub = False
+        self._keys_frame_id = 0
         self._inflight_test_eval_exprs = List[String]()
         self._test_eval_expr = List[String]()
         self._test_eval_value = List[String]()
@@ -1538,6 +1589,103 @@ struct DapManager(Copyable, Movable):
         self._completions_column = self._completions_req_column
         self._completions_ready = True
 
+    def request_container_keys(mut self, var expr: String, frame_id: Int) -> Bool:
+        """Start fetching the keys of the container ``expr`` evaluates to:
+        ``evaluate`` it, then (on the answer) ``variables`` on its
+        reference. The keys land via ``take_container_keys``. Like
+        completions, only the newest request is answered."""
+        if not self.is_active():
+            return False
+        self._keys_req_expr = expr.copy()
+        self._keys_frame_id = frame_id
+        self._keys_stage = 0
+        self._keys_via_sub = self._inspect_via_subprocess()
+        return self._send_keys_eval(expr^)
+
+    def _send_keys_eval(mut self, var expr: String) -> Bool:
+        var args = json_object()
+        args.put(String("expression"), json_str(expr))
+        if self._keys_frame_id != 0:
+            args.put(String("frameId"), json_int(self._keys_frame_id))
+        args.put(String("context"), json_str(String("watch")))
+        try:
+            if self._keys_via_sub:
+                self._subprocess.inflight_keys_eval = \
+                    self._subprocess.client.send_request(
+                        String("evaluate"), args,
+                    )
+            else:
+                self._inflight_keys_eval = self.client.send_request(
+                    String("evaluate"), args,
+                )
+        except:
+            return False
+        return True
+
+    def has_container_keys(self) -> Bool:
+        return self._keys_ready
+
+    def take_container_keys(mut self) -> Tuple[String, List[String]]:
+        """``(expr, keys)`` — key reprs as the adapter names them."""
+        self._keys_ready = False
+        var k = self._keys^
+        self._keys = List[String]()
+        return (self._keys_expr, k^)
+
+    def _on_keys_eval(mut self, msg: DapIncoming):
+        """Container evaluated: ask for its children, or give up (no
+        children → nothing to offer)."""
+        var var_ref = 0
+        if msg.ok() and msg.body and msg.body.value().is_object():
+            var r = msg.body.value().object_get(String("variablesReference"))
+            if r and r.value().is_int():
+                var_ref = r.value().as_int()
+        if var_ref <= 0:
+            self._finish_keys(List[String]())
+            return
+        var args = json_object()
+        args.put(String("variablesReference"), json_int(var_ref))
+        try:
+            if self._keys_via_sub:
+                self._subprocess.inflight_keys_vars = \
+                    self._subprocess.client.send_request(
+                        String("variables"), args,
+                    )
+            else:
+                self._inflight_keys_vars = self.client.send_request(
+                    String("variables"), args,
+                )
+        except:
+            self._finish_keys(List[String]())
+
+    def _on_keys_vars(mut self, msg: DapIncoming):
+        var keys = List[String]()
+        if msg.ok():
+            var vars = _parse_variables(msg.body)
+            for i in range(len(vars)):
+                if self._keys_stage == 0:
+                    if _is_key_name(vars[i].name):
+                        keys.append(vars[i].name)
+                elif _is_index_name(vars[i].name):
+                    # Fallback list: element values are the key reprs.
+                    keys.append(vars[i].value)
+        # Nothing keyed among the children: a dict-like that isn't a dict
+        # (Django's ``request.session``, a ``UserDict`` wrapper, …) lists
+        # its attributes there instead. In Python, ask it for its keys.
+        if len(keys) == 0 and self._keys_stage == 0 \
+                and self.language_id == String("python"):
+            self._keys_stage = 1
+            if self._send_keys_eval(
+                String("list((") + self._keys_req_expr + String(").keys())")
+            ):
+                return
+        self._finish_keys(keys^)
+
+    def _finish_keys(mut self, var keys: List[String]):
+        self._keys = keys^
+        self._keys_expr = self._keys_req_expr
+        self._keys_ready = True
+
     def has_evaluations(self) -> Bool:
         return len(self._evaluations_expr) > 0
 
@@ -2035,6 +2183,14 @@ struct DapManager(Copyable, Movable):
                 self._subprocess.inflight_completions = 0
                 self._stash_completions(msg)
                 return
+            if rseq == self._subprocess.inflight_keys_eval:
+                self._subprocess.inflight_keys_eval = 0
+                self._on_keys_eval(msg)
+                return
+            if rseq == self._subprocess.inflight_keys_vars:
+                self._subprocess.inflight_keys_vars = 0
+                self._on_keys_vars(msg)
+                return
             # Watch / REPL evaluate response routed via subprocess.
             # Output destination is the same as the parent path
             # (``_evaluations_*``) so the host's watch fold treats it
@@ -2215,6 +2371,14 @@ struct DapManager(Copyable, Movable):
         if rseq == self._inflight_completions:
             self._inflight_completions = 0
             self._stash_completions(msg)
+            return
+        if rseq == self._inflight_keys_eval:
+            self._inflight_keys_eval = 0
+            self._on_keys_eval(msg)
+            return
+        if rseq == self._inflight_keys_vars:
+            self._inflight_keys_vars = 0
+            self._on_keys_vars(msg)
             return
         # Evaluate response — match against the in-flight evaluate
         # seq list to recover which expression this answered.
@@ -3031,6 +3195,34 @@ def _parse_stack_trace(body_opt: Optional[JsonValue]) -> List[DapStackFrame]:
             path, line, col, subtle,
         ))
     return out^
+
+
+def _is_key_name(name: String) -> Bool:
+    """A child name that's a mapping key repr (``'a'``, ``"a"``, ``1``,
+    ``-2``, ``(1, 2)``, ``None``/``True``/``False``) rather than one of the
+    adapter's synthetic rows (debugpy's ``len()``, ``special variables``,
+    ``function variables``, …) or an attribute name."""
+    var b = name.as_bytes()
+    if len(b) == 0:
+        return False
+    var c = b[0]
+    if c == 0x27 or c == 0x22 or c == 0x28 or c == 0x2D:   # ' " ( -
+        return True
+    if c >= 0x30 and c <= 0x39:
+        return True
+    return name == String("None") or name == String("True") \
+        or name == String("False")
+
+
+def _is_index_name(name: String) -> Bool:
+    """A list element's child name (``0``, ``12``) — not ``len()`` etc."""
+    var b = name.as_bytes()
+    if len(b) == 0:
+        return False
+    for i in range(len(b)):
+        if b[i] < 0x30 or b[i] > 0x39:
+            return False
+    return True
 
 
 def _parse_completions(body_opt: Optional[JsonValue]) -> List[DapCompletion]:

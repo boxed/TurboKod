@@ -5361,4 +5361,4 @@ def main() raises:
     test_branch_pane_o_refuses_main_and_a_non_github_remote()
     test_parse_name_status_z_maps_statuses_to_lsp_change_types()
     test_changed_paths_between_reports_what_a_branch_switch_rewrote()
-    print("git: 127 tests passed")
+    print("git: 142 tests passed")

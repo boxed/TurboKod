@@ -34,7 +34,9 @@ from turbokod.dap import (
 )
 from turbokod.dap_dispatch import (
     DapCompletion, DapManager, DapStackFrame, DapVariable, _STATE_FAILED,
-    _STATE_INITIALIZING, _STATE_TERMINATED, _parse_completions, _parse_scopes,
+    _STATE_INITIALIZING, _STATE_TERMINATED, _is_index_name, _is_key_name,
+    _parse_completions,
+    _parse_scopes,
     _parse_stack_trace, _parse_threads, _parse_variables
 )
 from turbokod.debugger_config import (
@@ -146,6 +148,90 @@ def test_debug_pane_console_completions() raises:
     # Tab with no popup asks for completions explicitly.
     assert_true(pane.handle_key(Event.key_event(KEY_TAB, MOD_NONE)))
     assert_true(Bool(pane.consume_completion_request()))
+
+
+def test_debug_pane_console_key_completions() raises:
+    """Inside ``expr[`` the console offers the container's keys: it asks
+    the host for ``expr``'s keys once, filters them exactly as the key is
+    typed, shows string keys in the quote the user typed, and inserts the
+    key with the closing ``]``. ``expr[name`` stays name completion."""
+    var pane = DebugPane()
+    pane.focused = True
+    pane.repl_enabled = True
+    pane.set_mode(PANE_MODE_DEBUG)
+    for cp in String("d['b']['").codepoints():
+        _ = pane.handle_key(Event.key_event(UInt32(Int(cp)), MOD_NONE))
+    assert_equal(pane.consume_keys_request(), String("d['b']"))
+    assert_false(pane.consume_completion_request().__bool__())
+    var keys = List[String]()
+    keys.append(String("'alpha'"))
+    keys.append(String("'beta'"))
+    keys.append(String("7"))
+    pane.set_container_keys(String("d['b']"), keys^)
+    var labels = pane.completion_labels()
+    assert_equal(len(labels), 2)                 # 7 isn't a quoted key
+    assert_equal(labels[0], String("'alpha'"))
+    # More of the key filters the cached answer — no new request.
+    _ = pane.handle_key(Event.key_event(UInt32(ord("b")), MOD_NONE))
+    assert_equal(pane.consume_keys_request(), String(""))
+    assert_equal(len(pane.completion_labels()), 1)
+    assert_true(pane.handle_key(Event.key_event(KEY_TAB, MOD_NONE)))
+    assert_equal(pane.repl_input.text, String("d['b']['beta']"))
+    # A double quote re-renders string keys in that quote.
+    pane.repl_input.clear()
+    for cp in String("d['b'][\"").codepoints():
+        _ = pane.handle_key(Event.key_event(UInt32(Int(cp)), MOD_NONE))
+    # Retyping passed through ``d[`` (another container), so ``d['b']``
+    # is asked for afresh.
+    assert_equal(pane.consume_keys_request(), String("d['b']"))
+    var keys2 = List[String]()
+    keys2.append(String("'alpha'"))
+    pane.set_container_keys(String("d['b']"), keys2^)
+    labels = pane.completion_labels()
+    assert_equal(labels[0], String("\"alpha\""))
+    assert_true(pane.handle_key(Event.key_event(KEY_ENTER, MOD_NONE)))
+    assert_equal(pane.repl_input.text, String("d['b'][\"alpha\"]"))
+    # No quote: every key, inserted as its repr.
+    pane.repl_input.clear()
+    for cp in String("xs[").codepoints():
+        _ = pane.handle_key(Event.key_event(UInt32(Int(cp)), MOD_NONE))
+    assert_equal(pane.consume_keys_request(), String("xs"))
+    var idx = List[String]()
+    idx.append(String("0"))
+    idx.append(String("1"))
+    pane.set_container_keys(String("xs"), idx^)
+    assert_equal(len(pane.completion_labels()), 2)
+    # An index by variable name, and a list literal, aren't key positions.
+    pane.repl_input.clear()
+    for cp in String("xs[i").codepoints():
+        _ = pane.handle_key(Event.key_event(UInt32(Int(cp)), MOD_NONE))
+    assert_equal(pane.consume_keys_request(), String(""))
+    assert_true(pane.consume_completion_request().__bool__())
+    pane.repl_input.clear()
+    _ = pane.handle_key(Event.key_event(UInt32(ord("[")), MOD_NONE))
+    assert_equal(pane.consume_keys_request(), String(""))
+    # Keys for an expression the cursor has left are dropped.
+    var late = List[String]()
+    late.append(String("'z'"))
+    pane.set_container_keys(String("xs"), late^)
+    assert_equal(len(pane.completion_labels()), 0)
+
+
+def test_is_key_name() raises:
+    assert_true(_is_key_name(String("'a'")))
+    assert_true(_is_key_name(String("\"a\"")))
+    assert_true(_is_key_name(String("3")))
+    assert_true(_is_key_name(String("-1")))
+    assert_true(_is_key_name(String("(1, 2)")))
+    assert_true(_is_key_name(String("None")))
+    assert_false(_is_key_name(String("len()")))
+    assert_false(_is_key_name(String("special variables")))
+    assert_false(_is_key_name(String("")))
+    # The dict-like fallback reads keys from a list's elements.
+    assert_true(_is_index_name(String("0")))
+    assert_true(_is_index_name(String("12")))
+    assert_false(_is_index_name(String("len()")))
+    assert_false(_is_index_name(String("")))
 
 
 def test_parse_completions() raises:
@@ -1889,6 +1975,8 @@ def main() raises:
     test_debug_pane_repl_console()
     test_debug_pane_console_completions()
     test_parse_completions()
+    test_debug_pane_console_key_completions()
+    test_is_key_name()
     test_pytest_link_opens_project_relative_file()
     test_dap_classify_response()
     test_dap_classify_event()
@@ -1954,4 +2042,4 @@ def main() raises:
     test_breakpoint_store_load_missing_returns_empty()
     test_breakpoint_store_per_user_path()
     test_dap_reset_for_restart_closes_the_previous_sessions_fds()
-    print("dap: 62 tests passed")
+    print("dap: 70 tests passed")

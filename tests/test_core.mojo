@@ -2570,4 +2570,4 @@ def main() raises:
     test_detect_skips_non_test_file()
     test_detect_custom_python_files_glob()
     test_write_file_in_place_fallback_replaces_fully()
-    print("core: 117 tests passed")
+    print("core: 120 tests passed")

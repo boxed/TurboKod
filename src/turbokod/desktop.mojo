@@ -10355,6 +10355,15 @@ struct Desktop(Movable):
         if self.dap.has_completions():
             var cres = self.dap.take_completions()
             self.debug_pane.set_completions(cres[0], cres[1], cres[2].copy())
+        # …and the keys of a container the console is subscripting.
+        var kreq = self.debug_pane.consume_keys_request()
+        if len(kreq.as_bytes()) > 0:
+            _ = self.dap.request_container_keys(
+                kreq^, self._dap_current_frame_id,
+            )
+        if self.dap.has_container_keys():
+            var kres = self.dap.take_container_keys()
+            self.debug_pane.set_container_keys(kres[0], kres[1].copy())
         # Title-strip command click (▶ Cont, ⏸ Pause, …). The pane
         # stamps the action id; we route it through the same
         # dispatch_action path the keyboard shortcut uses, so a click
