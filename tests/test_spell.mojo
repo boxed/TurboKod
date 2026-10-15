@@ -228,6 +228,32 @@ def test_speller_load_default_includes_bundled_programmer_terms() raises:
     assert_true(s.check_word(String("hashable")))
 
 
+def test_speller_load_default_includes_modern_english() raises:
+    """The bundled SCOWL ``english.txt`` must cover inflected and modern
+    words. macOS's ``/usr/share/dict/words`` is Webster's 1934 with no
+    inflections, and the suffix stripper can't reach y→ies, doubled
+    consonants or irregular forms. Every word here once had to be
+    added to a project dictionary by hand."""
+    var s = Speller()
+    s.load_default()
+    var words = List[String]()
+    for w in [
+        "newer", "planned", "sitemap", "downtime", "superuser",
+        "modifies", "applies", "held", "queries", "planning",
+        "verified", "troubleshooting", "checklist", "paid",
+        "recursively", "deterministically", "companies", "submitted",
+        "summing", "loudest", "catalog", "died", "overridden",
+        "copies", "supplied", "notifies", "identified", "meantime",
+        "quantities", "standalone",
+    ]:
+        words.append(String(w))
+    for i in range(len(words)):
+        if not s.check_word(words[i]):
+            raise Error(String("not in dictionary: ") + words[i])
+    # A typo must still be caught.
+    assert_false(s.check_word(String("recieve")))
+
+
 def test_speller_load_default_layers_user_dictionary() raises:
     """A subsequent ``Speller`` started after ``add_user_word`` writes
     the file should pick the addition up via ``load_default``. Verifies
@@ -328,10 +354,10 @@ def test_speller_reload_drops_removed_dictionary() raises:
         (dir + String("\0")).unsafe_ptr(), UInt32(0o755),
     )
     var dict_path = dir + String("/sv.txt")
-    assert_true(write_file(dict_path, String("smörgåsbord\n")))
+    assert_true(write_file(dict_path, String("kanelbullarna\n")))
     var s = Speller()
     s.load_default()
-    assert_true(s.check_word(String("smörgåsbord")))
+    assert_true(s.check_word(String("kanelbullarna")))
     # Drop the file and reload — the word must no longer be considered
     # known. Other layers (OS dict, bundled programmer terms) keep
     # ``loaded`` True so ``check_word`` doesn't fall into the
@@ -339,7 +365,7 @@ def test_speller_reload_drops_removed_dictionary() raises:
     _ = external_call["unlink", Int32]((dict_path + String("\0")).unsafe_ptr())
     s.reload()
     assert_true(s.loaded)
-    assert_false(s.check_word(String("smörgåsbord")))
+    assert_false(s.check_word(String("kanelbullarna")))
 
 
 def test_speller_add_project_word_persists_in_project_dir() raises:
@@ -509,6 +535,7 @@ def main() raises:
     test_speller_set_project_with_no_idea_dir_is_noop()
     test_speller_add_user_word_persists_and_check_word_passes()
     test_speller_load_default_includes_bundled_programmer_terms()
+    test_speller_load_default_includes_modern_english()
     test_speller_load_default_layers_user_dictionary()
     test_speller_normalizes_unicode_for_lookup()
     test_speller_load_default_layers_user_language_dictionaries()
@@ -520,4 +547,4 @@ def main() raises:
     test_spell_menu_enter_on_project_enabled_resolves_with_add_project()
     test_spell_menu_esc_dismisses()
     test_has_spell_noinspection_directive_parses_intellij_forms()
-    print("spell: 19 tests passed")
+    print("spell: 20 tests passed")

@@ -37,11 +37,12 @@ from .string_utils import (
 )
 
 
-# 4096 buckets keyed by FNV-1a low bits. Bucketing keeps lookup at
-# O(bucket_size) ≈ 60 string compares for the 235k-word macOS list,
-# without pulling in a real hash map. Lookup is the dominant cost so
-# it's worth the extra 32 KB of List headers.
-comptime _N_BUCKETS = UInt32(4096)
+# 8192 buckets keyed by FNV-1a low bits. Bucketing keeps lookup at
+# O(bucket_size) ≈ 45 string compares for the ~350k words loaded on
+# macOS (OS list + bundled SCOWL English + programmer lists), without
+# pulling in a real hash map. Lookup is the dominant cost so it's
+# worth the extra List headers.
+comptime _N_BUCKETS = UInt32(8192)
 
 
 def user_dict_path() -> String:
@@ -138,10 +139,14 @@ struct Speller(Movable):
         """Layer five word sources, in order, into ``buckets``:
 
         1. The OS-supplied wordlist (``/usr/share/dict/words`` and
-           friends) — broad English vocabulary.
-        2. The bundled programmer wordlists under
-           ``src/turbokod/data/wordlists/`` (vendored from
-           ``streetsidesoftware/cspell-dicts``, MIT) — software terms
+           friends) — broad but archaic English vocabulary (on macOS
+           it's Webster's 1934, with no inflected forms).
+        2. The bundled wordlists under ``src/turbokod/data/wordlists/``:
+           ``english.txt`` (SCOWL en_US size 60) for modern English
+           with every inflection spelled out (``applies``, ``planned``,
+           ``held``, ``downtime``), plus the programmer wordlists
+           (vendored from ``streetsidesoftware/cspell-dicts``, MIT) —
+           software terms
            that the OS list lacks (``bitwise``, ``hashable``,
            ``tokenizer``, ``regex``, ``bcrypt``, …) and per-language
            jargon for the most common languages we ship grammars for.
