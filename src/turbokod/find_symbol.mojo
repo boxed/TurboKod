@@ -34,7 +34,7 @@ from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, RED, YELLOW
 from .events import Event, EVENT_KEY, EVENT_MOUSE, KEY_ENTER, KEY_ESC
-from .file_io import ci_less, project_relative
+from .file_io import ci_less, project_relative, read_file
 from .geometry import center_in, Point, Rect
 from .picker_input import (
     build_picker_layout, picker_nav_key, picker_row_at, picker_wheel_scroll,
@@ -44,7 +44,9 @@ from .string_utils import (
     display_columns, is_ascii_ident_byte, parse_uint_range, starts_with,
     tail_to_columns,
 )
-from .symbol_seed import is_definition_site, seed_priority
+from .symbol_seed import (
+    is_definition_keyword, is_definition_site, seed_priority,
+)
 from .text_field import TextField
 from .case_fold import contains_ci, eq_ci, starts_with_ci
 from .window import paint_window_title
@@ -72,16 +74,31 @@ mostly noise. Two characters is enough to make the result list
 useful for casual typing."""
 
 
-@fieldwise_init
 struct FindSymbolMatch(ImplicitlyCopyable, Movable):
     """One picker entry: the symbol name plus the textual occurrence
     that ranks best as a seed for the LSP definition lookup on submit
     — and as the landing spot when no LSP answers. See
-    ``symbol_seed.mojo`` for the ranking."""
+    ``symbol_seed.mojo`` for the ranking.
+
+    ``container`` is set only on rows answering a ``Class.member``
+    query from that class's body (``container_members_matching``): the
+    location is then the member's definition itself, so the row is
+    labelled ``Class.member`` and submit jumps straight to it."""
     var name: String
     var path: String        # absolute path
     var line: Int           # 1-based, as rg reports
     var column: Int         # 1-based, as rg reports
+    var container: String
+
+    def __init__(
+        out self, name: String, path: String, line: Int, column: Int,
+        container: String = String(""),
+    ):
+        self.name = name
+        self.path = path
+        self.line = line
+        self.column = column
+        self.container = container
 
 
 # --- streaming rg runner ---------------------------------------------------
@@ -115,36 +132,25 @@ struct _FindSymbolRunner(Movable):
         the query — anywhere — counts as a hit. Returns False on
         spawn failure (e.g. ``rg`` missing from PATH).
         """
-        var argv = List[String]()
-        argv.append(String("rg"))
-        argv.append(String("--no-heading"))
-        argv.append(String("--line-number"))
-        argv.append(String("--column"))
-        argv.append(String("--color=never"))
-        argv.append(String("--smart-case"))
-        # Include dot-prefixed files/dirs, minus ``.git`` — same reason
-        # as the project-find runner in ``project_find.mojo``. It matters
-        # doubly here: this runner is only the *fallback* for a cold
-        # ``SymbolIndex``, and the index walks the project through
-        # ``walk_project_files``, which does see dotfiles. Without this
-        # the same query answered differently depending on whether the
-        # index happened to be ready.
-        argv.append(String("--hidden"))
-        argv.append(String("-g"))
-        argv.append(String("!.git/"))
-        # Cap per-line preview so a hit inside a minified bundle can't
-        # smuggle multi-MB lines into our buffer (mirrors the cap
-        # ``project_find`` uses for the same reason).
-        argv.append(String("--max-columns"))
-        argv.append(String("1024"))
-        argv.append(String("--max-columns-preview"))
-        argv.append(String("-e"))
-        argv.append(
+        return self.stream.start(_rg_argv(
             String("\\b[A-Za-z0-9_]*") + query + String("[A-Za-z0-9_]*\\b"),
-        )
-        argv.append(String("--"))
-        argv.append(root)
-        return self.stream.start(argv)
+            root, smart_case=True,
+        ))
+
+    def start_container(mut self, name: String, root: String) -> Bool:
+        """Spawn ``rg`` for lines that may open a class-like scope
+        called ``name``: a container keyword somewhere before the whole
+        word ``name``. Loose on purpose — the caller verifies each hit
+        with ``container_members_matching``, which rejects comments and
+        mentions. Case-sensitive, since class names are."""
+        return self.stream.start(_rg_argv(
+            String(
+                "\\b(?:class|struct|trait|interface|enum|impl|object"
+                "|protocol|extension|record|union|module|namespace)\\b"
+                ".*\\b"
+            ) + name + String("\\b"),
+            root, smart_case=False,
+        ))
 
     def tick(mut self) -> List[Tuple[String, Int, Int, String]]:
         """Drain whatever bytes are queued on rg's stdout, parse as
@@ -160,6 +166,40 @@ struct _FindSymbolRunner(Movable):
             if parsed:
                 out.append(parsed.value())
         return out^
+
+
+def _rg_argv(pattern: String, root: String, smart_case: Bool) -> List[String]:
+    """``rg`` argv for the Find Symbol runner: ``path:line:col:text``
+    rows for every match of ``pattern`` under ``root``."""
+    var argv = List[String]()
+    argv.append(String("rg"))
+    argv.append(String("--no-heading"))
+    argv.append(String("--line-number"))
+    argv.append(String("--column"))
+    argv.append(String("--color=never"))
+    if smart_case:
+        argv.append(String("--smart-case"))
+    # Include dot-prefixed files/dirs, minus ``.git`` — same reason
+    # as the project-find runner in ``project_find.mojo``. It matters
+    # doubly here: this runner is only the *fallback* for a cold
+    # ``SymbolIndex``, and the index walks the project through
+    # ``walk_project_files``, which does see dotfiles. Without this
+    # the same query answered differently depending on whether the
+    # index happened to be ready.
+    argv.append(String("--hidden"))
+    argv.append(String("-g"))
+    argv.append(String("!.git/"))
+    # Cap per-line preview so a hit inside a minified bundle can't
+    # smuggle multi-MB lines into our buffer (mirrors the cap
+    # ``project_find`` uses for the same reason).
+    argv.append(String("--max-columns"))
+    argv.append(String("1024"))
+    argv.append(String("--max-columns-preview"))
+    argv.append(String("-e"))
+    argv.append(pattern)
+    argv.append(String("--"))
+    argv.append(root)
+    return argv^
 
 
 # --- Picker ----------------------------------------------------------------
@@ -203,6 +243,10 @@ struct FindSymbol(Movable):
     # The host matches it against the LSP ``containerName`` to pick the
     # right ``has_permission`` when several classes define one.
     var selected_qualifier: String
+    # The submitted row's ``container`` — non-empty when the row is a
+    # member found in the qualifier's class body, i.e. its location is
+    # already the definition.
+    var selected_container: String
     var state: UInt8
     var status_message: String
     var runner: _FindSymbolRunner
@@ -213,6 +257,12 @@ struct FindSymbol(Movable):
     # choice out of here is what stops this module from having to know
     # about projects, indexes, or frame budgets.
     var query_dirty: Bool
+    # True while ``runner`` is searching for the *class* of a
+    # ``Class.member`` query rather than for the member text: hits are
+    # class openers whose bodies ``_tick_class_rows`` reads for members.
+    # Searching the member text alone would list every identifier that
+    # merely contains it, from any class or none.
+    var _class_mode: Bool
     # True once the user has actively navigated (arrow keys, page,
     # home/end, or click-to-select). Drives whether streaming inserts
     # follow the user's chosen entry by name (preserve selection) or
@@ -243,6 +293,7 @@ struct FindSymbol(Movable):
         self.selected_column = 0
         self.selected_name = String("")
         self.selected_qualifier = String("")
+        self.selected_container = String("")
         self.state = _STATE_IDLE
         self.status_message = String("")
         self.runner = _FindSymbolRunner()
@@ -251,6 +302,7 @@ struct FindSymbol(Movable):
         self._chooser_mode = False
         self._chooser_name = String("")
         self.query_dirty = False
+        self._class_mode = False
 
     def open(
         mut self,
@@ -286,6 +338,7 @@ struct FindSymbol(Movable):
         self.selected_column = 0
         self.selected_name = String("")
         self.selected_qualifier = String("")
+        self.selected_container = String("")
         self.state = _STATE_IDLE
         self.status_message = String("")
         self.runner.cancel()
@@ -293,6 +346,7 @@ struct FindSymbol(Movable):
         self._user_navigated = False
         self._chooser_mode = False
         self._chooser_name = String("")
+        self._class_mode = False
         # The host re-runs the search on the next frame, choosing the
         # index or ``rg``; see ``query_dirty``.
         self.query_dirty = True
@@ -308,6 +362,7 @@ struct FindSymbol(Movable):
         self.scroll = 0
         self.submitted = False
         self.selected_qualifier = String("")
+        self.selected_container = String("")
         self.state = _STATE_IDLE
         self.status_message = String("")
         self.runner.cancel()
@@ -316,6 +371,7 @@ struct FindSymbol(Movable):
         self._chooser_mode = False
         self._chooser_name = String("")
         self.query_dirty = False
+        self._class_mode = False
 
     def set_pending(mut self, var msg: String):
         self.state = _STATE_PENDING
@@ -373,6 +429,9 @@ struct FindSymbol(Movable):
         if not self.active or not self.runner.is_active():
             return
         var rows = self.runner.tick()
+        if self._class_mode:
+            self._tick_class_rows(rows)
+            return
         var added = False
         for i in range(len(rows)):
             if len(self.entries) >= _ENTRIES_CAP:
@@ -432,6 +491,49 @@ struct FindSymbol(Movable):
         self.selected = 0
         self.scroll = 0
 
+    def _tick_class_rows(
+        mut self, rows: List[Tuple[String, Int, Int, String]],
+    ):
+        """Class-mode half of ``tick``: each row is a line that may open
+        the qualifier's class; read that file's class body for members
+        matching the query. When the search ends with nothing (no such
+        class, or an inherited member) fall back to the plain member
+        search, as the index path does."""
+        var qualifier = _query_qualifier(self.query.text)
+        var cls = _last_segment(qualifier)
+        var member = _query_member(self.query.text)
+        var added = False
+        for i in range(len(rows)):
+            var path = rows[i][0]
+            var line0 = rows[i][1] - 1
+            var text: String
+            try:
+                text = read_file(path)
+            except:
+                continue
+            var chain = enclosing_container(text, line0)
+            var full = chain + String(".") + cls \
+                if len(chain.as_bytes()) > 0 else cls
+            if not container_matches_qualifier(full, qualifier):
+                continue
+            var found = container_members_matching(text, line0, cls, member)
+            for j in range(len(found)):
+                if len(self.entries) >= _ENTRIES_CAP:
+                    break
+                self.entries.append(FindSymbolMatch(
+                    found[j][0], path, found[j][1], found[j][2], full,
+                ))
+                added = True
+        if not self.runner.is_active() and len(self.entries) == 0:
+            self._class_mode = False
+            _ = self.runner.start(member, self.root)
+            return
+        if added:
+            _sort_entries_ranked(self.entries, member)
+            if not self._user_navigated:
+                self.selected = 0
+                self.scroll = 0
+
     def take_query_dirty(mut self) -> Bool:
         """Consume the "query changed, re-run the search" flag."""
         var d = self.query_dirty
@@ -446,6 +548,11 @@ struct FindSymbol(Movable):
         the qualifier half is a container hint resolved later via the
         LSP and never appears at a definition site."""
         return _query_member(self.query.text)
+
+    def query_qualifier(self) -> String:
+        """The qualifier segment of the live query — ``User`` for
+        ``User.has_permission``, empty for a bare name."""
+        return _query_qualifier(self.query.text)
 
     def min_query_len(self) -> Int:
         """Shortest member the picker will search for. Below this a
@@ -465,6 +572,7 @@ struct FindSymbol(Movable):
         the user has navigated.
         """
         self.runner.cancel()
+        self._class_mode = False
         self.entries = hits^
         self.seen_names = List[String]()
         self.seen_priority = List[Int]()
@@ -490,6 +598,7 @@ struct FindSymbol(Movable):
         self.selected = 0
         self.scroll = 0
         self._user_navigated = False
+        self._class_mode = False
         self.runner.cancel()
         # rg searches for the *member* segment only — the qualifier is
         # a container hint resolved later via the LSP, and it never
@@ -499,6 +608,13 @@ struct FindSymbol(Movable):
         if len(member.as_bytes()) < _MIN_QUERY_LEN:
             return
         if len(self.root.as_bytes()) == 0:
+            return
+        # A ``Class.member`` query looks for the class, then reads its
+        # body — the same answer the index path gives.
+        var cls = _last_segment(_query_qualifier(self.query.text))
+        if len(cls.as_bytes()) > 0 \
+                and self.runner.start_container(cls, self.root):
+            self._class_mode = True
             return
         _ = self.runner.start(member, self.root)
 
@@ -609,8 +725,11 @@ struct FindSymbol(Movable):
             )
             var name_x = rect.a.x + 2
             if not self._chooser_mode:
+                var row_label = entry.name
+                if len(entry.container.as_bytes()) > 0:
+                    row_label = entry.container + String(".") + entry.name
                 _ = painter.put_text(
-                    canvas, Point(name_x, top + i), entry.name, row_attr,
+                    canvas, Point(name_x, top + i), row_label, row_attr,
                 )
                 continue
             # Chooser row: ``relative-path:line``. Show just the path,
@@ -658,6 +777,7 @@ struct FindSymbol(Movable):
             self.selected_column = entry.column
             self.selected_name = entry.name
             self.selected_qualifier = _query_qualifier(self.query.text)
+            self.selected_container = entry.container
             self.submitted = True
             return True
         if picker_nav_key(k, len(self.entries), self.selected):
@@ -721,6 +841,7 @@ struct FindSymbol(Movable):
             self.selected_column = entry.column
             self.selected_name = entry.name
             self.selected_qualifier = _query_qualifier(self.query.text)
+            self.selected_container = entry.container
             self.submitted = True
             return True
         self.selected = idx
@@ -975,6 +1096,11 @@ def _query_member(q: String) -> String:
     return String(StringSpan(unsafe_from_utf8=b[start:len(b)]))
 
 
+def _last_segment(q: String) -> String:
+    """The part of a dotted name after its last ``.``."""
+    return _query_member(q)
+
+
 def _query_qualifier(q: String) -> String:
     """Everything before the last ``.`` (the trailing dot dropped) —
     the container hint used to disambiguate which class/module owns
@@ -1117,3 +1243,105 @@ def _is_container_modifier(w: String) -> Bool:
         or w == "case"
 
 
+
+
+def container_members_matching(
+    text: String, line: Int, container: String, member_query: String,
+) -> List[Tuple[String, Int, Int]]:
+    """Members of the class-like scope ``container`` opened on 0-based
+    ``line`` of ``text`` whose name contains ``member_query``
+    (case-insensitively), as ``(name, line, column)``, 1-based.
+
+    What a ``Class.member`` query lists. The identifier index has no
+    notion of scope, and its definition test deliberately ignores an
+    indented ``name = …`` (that is mostly locals), so a class attribute
+    such as a Django field could never be found through it. Reading the
+    one class body instead is exact and cheap.
+
+    Indentation-based, like ``enclosing_container``: the body is every
+    line indented past the opener, up to the first one that is not
+    (a dedent, or a closing ``}``), and members are the lines at the
+    body's own indent. Empty when ``line`` does not open ``container``.
+    """
+    var out = List[Tuple[String, Int, Int]]()
+    var b = text.as_bytes()
+    var n = len(b)
+    var p = 0
+    var ln = 0
+    while ln < line and p < n:
+        if b[p] == 0x0A:
+            ln += 1
+        p += 1
+    if ln != line or line < 0:
+        return out^
+    var opener_indent = _line_indent(b, p)
+    if _container_opener_name(b, p + opener_indent) != container:
+        return out^
+    while p < n and b[p] != 0x0A:
+        p += 1
+    p += 1
+    ln += 1
+    var member_indent = -1
+    while p < n:
+        var e = p
+        while e < n and b[e] != 0x0A:
+            e += 1
+        var ind = _line_indent(b, p)
+        var q = p + ind
+        var skip = q >= e or b[q] == 0x0D or b[q] == 0x23 \
+            or (q + 1 < e and b[q] == 0x2F and b[q + 1] == 0x2F)
+        if not skip:
+            if member_indent < 0 and ind == opener_indent and b[q] == 0x7B:
+                pass    # ``{`` on its own line under the opener
+            elif ind <= opener_indent:
+                break
+            else:
+                if member_indent < 0:
+                    member_indent = ind
+                if ind == member_indent:
+                    var span = _member_name_span(b, q, e)
+                    if span[1] > span[0]:
+                        var name = String(
+                            StringSpan(unsafe_from_utf8=b[span[0]:span[1]]),
+                        )
+                        if contains_ci(name, member_query):
+                            out.append((name, ln + 1, span[0] - p + 1))
+        p = e + 1
+        ln += 1
+    return out^
+
+
+def _member_name_span(b: Span[UInt8, _], start: Int, end: Int) -> Tuple[Int, Int]:
+    """Byte span of the member a class-body line declares, or ``(0, 0)``.
+
+    Skips leading definition keywords and modifiers (``def``,
+    ``async``, ``pub fn``, ``static var``, …); the name is then the next
+    identifier, provided ``=``, ``:`` or ``(`` follows it — which
+    covers ``def f(``, ``x = …``, ``x: int``, ``class Meta:`` and the
+    brace languages' ``f(): T {`` — while rejecting prose that happens
+    to sit at the member indent inside a multi-line docstring."""
+    var p = start
+    while True:
+        var w0 = p
+        if p >= end or (b[p] >= 0x30 and b[p] <= 0x39):
+            return (0, 0)
+        while p < end and is_ascii_ident_byte(b[p]):
+            p += 1
+        if p == w0:
+            return (0, 0)
+        var w1 = p
+        while p < end and (b[p] == 0x20 or b[p] == 0x09):
+            p += 1
+        var follows_name = p < end and (
+            (b[p] == 0x3D and (p + 1 >= end or b[p + 1] != 0x3D))
+            or b[p] == 0x3A or b[p] == 0x28
+        )
+        if follows_name:
+            return (w0, w1)
+        var word = String(StringSpan(unsafe_from_utf8=b[w0:w1]))
+        if not (is_definition_keyword(b[w0:w1])
+                or _is_container_keyword(word)
+                or _is_container_modifier(word)
+                or word == "async" or word == "override"
+                or word == "readonly" or word == "mut"):
+            return (0, 0)

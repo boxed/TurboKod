@@ -251,6 +251,34 @@ orders), `test_a_definition_later_in_the_file_upgrades_the_seed`,
 `test_find_symbol_rg_fallback_seeds_from_the_definition` in
 `tests/test_desktop.mojo`.
 
+## Qualified queries (`Class.member`)
+
+The index has no notion of scope, and its definition test ignores an
+indented `name = …` (mostly locals), so a class attribute — a Django
+field like `ActionChain.status` — is never a definition-shaped site.
+Searching only the member segment therefore listed a bare `status`
+seeded at whatever `status` ranked best (a `def status` view in another
+file), and the qualifier had nothing to narrow to on submit.
+
+So a query with a qualifier is answered from the class bodies instead
+(`Desktop._qualified_member_matches`): `definition_sites` of the
+qualifier's last segment finds the class, and
+`container_members_matching` reads that body's members, by indentation
+like `enclosing_container`. Rows carry a `container` and paint as
+`ActionChain.status`; their location *is* the definition, so submit
+verifies it and jumps without the LSP round-trip. When no class or no
+member matches (an inherited member, say) the query falls back to the
+plain member search.
+
+While the index is cold, a qualified query's `rg` fallback searches for
+the *class* rather than the member text (`start_container`: a container
+keyword before the whole-word class name), then reads each hit's body
+through the same `container_members_matching`. Searching the member
+text would list `estimado` from a locale file for `ActionChain.est`.
+Waiting for the index instead is not an option: the first build reads
+1 MiB a frame, which is seconds on a 260 MiB checkout. When the class
+search ends empty the runner falls back to the plain member search.
+
 ## Measurements
 
 `./run.sh tests/bench_symbol_index.mojo ~/some/large/repo`, on an

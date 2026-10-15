@@ -37,6 +37,7 @@ from turbokod.symbol_seed import (
     is_definition_site, seed_bucket, seed_priority,
 )
 
+from turbokod.find_symbol import container_members_matching
 from support import _ensure_dir, _rm_rf, _temp_path, setup_test_env
 
 
@@ -869,8 +870,64 @@ def test_seed_ranking_survives_reindex_and_compaction() raises:
     _rm_rf(root)
 
 
+def test_container_members_matching_reads_the_class_body() raises:
+    """``Class.member`` queries list the class's own members — fields
+    included, which the index's definition test can't see because an
+    indented ``name = …`` is usually a local."""
+    var py = String(
+        "class Other:\n"                                    # 0
+        "    status = 1\n"                                  # 1
+        "\n"                                                # 2
+        "class ActionChain(DryftModel):\n"                  # 3
+        "    status = CharField(\n"                         # 4
+        "        default='not_started',\n"                  # 5
+        "    )\n"                                           # 6
+        "    status_timestamp: DateTimeField = None\n"      # 7
+        "    #: status of the chain\n"                      # 8
+        "    @property\n"                                   # 9
+        "    def status_label(self):\n"                     # 10
+        "        status_local = 3\n"                        # 11
+        "    class Meta:\n"                                 # 12
+        "        ordering = ['order']\n"                    # 13
+        "def status_top():\n"                               # 14
+        "    pass\n"                                        # 15
+    )
+    var got = container_members_matching(
+        py, 3, String("ActionChain"), String("status"),
+    )
+    assert_equal(len(got), 3)
+    assert_equal(got[0][0], String("status"))
+    assert_equal(got[0][1], 5)
+    assert_equal(got[0][2], 5)
+    assert_equal(got[1][0], String("status_timestamp"))
+    assert_equal(got[2][0], String("status_label"))
+    assert_equal(got[2][1], 11)
+    # Case-insensitive on the member, and nested classes are members.
+    var meta = container_members_matching(
+        py, 3, String("ActionChain"), String("META"),
+    )
+    assert_equal(len(meta), 1)
+    assert_equal(meta[0][0], String("Meta"))
+    # The line must open the named container.
+    assert_equal(len(container_members_matching(
+        py, 0, String("ActionChain"), String("status"),
+    )), 0)
+    # Brace languages, including a brace on its own line.
+    var rs = String(
+        "pub struct Chain\n{\n    pub status: u8,\n}\n"
+        "impl Chain {\n    pub fn status_text(&self) {}\n}\n"
+    )
+    var f = container_members_matching(rs, 0, String("Chain"), String("stat"))
+    assert_equal(len(f), 1)
+    assert_equal(f[0][0], String("status"))
+    var m = container_members_matching(rs, 4, String("Chain"), String("stat"))
+    assert_equal(len(m), 1)
+    assert_equal(m[0][0], String("status_text"))
+
+
 def main() raises:
     setup_test_env()
+    test_container_members_matching_reads_the_class_body()
     test_indexes_identifiers_with_first_occurrence()
     test_short_and_numeric_tokens_are_not_indexed()
     test_a_name_is_reported_once_per_query()
@@ -895,4 +952,4 @@ def main() raises:
     test_search_seeds_from_the_definition_not_the_changelog()
     test_a_definition_later_in_the_file_upgrades_the_seed()
     test_seed_ranking_survives_reindex_and_compaction()
-    print("symbol_index: 23 tests passed")
+    print("symbol_index: 24 tests passed")

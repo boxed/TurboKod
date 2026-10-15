@@ -3227,6 +3227,85 @@ def test_find_symbol_rg_fallback_seeds_from_the_definition() raises:
     _rm_rf(root)
 
 
+def test_find_symbol_qualified_query_lists_and_jumps_to_class_members() raises:
+    """``ActionChain.status`` must list ``ActionChain.status`` and land
+    on that class's field. The field is an indented ``status = …``,
+    which the index never counts as a definition, so the plain name
+    search seeded at some other ``status`` (a ``def status`` view in
+    another file) and the qualifier had nothing to narrow to."""
+    var root = _temp_path(String("_fs_qualified"))
+    _rm_rf(root)
+    _ensure_dir(root)
+    _ = write_file(root + String("/a_views.py"), String(
+        "def status(request):\n"
+        "    pass\n"
+    ))
+    _ = write_file(root + String("/models.py"), String(
+        "class Project(Model):\n"
+        "    status = CharField()\n"
+        "\n"
+        "class ActionChain(Model):\n"
+        "    order = IntegerField()\n"
+        "    status = CharField()\n"
+    ))
+    var d = Desktop()
+    d.project = Optional[String](root)
+    d._open_find_symbol()
+    # Typed before the index is ready: the rg fallback must look for
+    # the class and read its body, not list every ``status`` (the
+    # ``def status`` view included).
+    assert_false(d.symbol_index.is_ready())
+    d.find_symbol.query.set_text(String("ActionChain.status"))
+    d.find_symbol.query_dirty = True
+    d._run_find_symbol_query()
+    if len(which(String("rg")).as_bytes()) > 0:
+        assert_true(d.find_symbol.runner.is_active())
+        var spins = 0
+        while d.find_symbol.runner.is_active() and spins < 500:
+            d.find_symbol.tick()
+            sleep_ms(10)
+            spins += 1
+        assert_equal(len(d.find_symbol.entries), 1)
+        assert_equal(d.find_symbol.entries[0].container, String("ActionChain"))
+        assert_equal(d.find_symbol.entries[0].line, 6)
+
+    # The index path gives the same answer once it's ready.
+    var frames = 0
+    while not d.symbol_index.is_ready() and frames < 200:
+        d._pump_find_symbol()
+        frames += 1
+    assert_true(d.symbol_index.is_ready())
+    d.find_symbol.query_dirty = True
+    d._pump_find_symbol()
+    assert_equal(len(d.find_symbol.entries), 1)
+    var e = d.find_symbol.entries[0]
+    assert_equal(e.name, String("status"))
+    assert_equal(e.container, String("ActionChain"))
+    assert_equal(e.path, root + String("/models.py"))
+    assert_equal(e.line, 6)
+
+    # No LSP is running; Enter must still land on the field.
+    _ = d.find_symbol.handle_key(Event.key_event(KEY_ENTER))
+    assert_true(d.find_symbol.take_submitted())
+    d._submit_find_symbol(_SCREEN)
+    assert_false(d.find_symbol.active)
+    var idx = d._focused_editor_idx()
+    assert_true(idx >= 0)
+    assert_equal(
+        d.windows.windows[idx].editor.file_path, root + String("/models.py"),
+    )
+    assert_equal(d.windows.windows[idx].editor.selections[0].row, 5)
+
+    # A member the class doesn't have falls back to the plain search.
+    d._open_find_symbol()
+    d.find_symbol.query.set_text(String("ActionChain.ordering_nope"))
+    d.find_symbol.query_dirty = True
+    d._pump_find_symbol()
+    assert_equal(len(d.find_symbol.entries), 0)
+    d.shutdown()
+    _rm_rf(root)
+
+
 def test_shutdown_stops_the_search_subprocesses() raises:
     """Find in Project / Find Symbol each stream an ``rg`` child; a
     window closed mid-search used to leave it running with our three
@@ -3519,8 +3598,9 @@ def main() raises:
     test_find_symbol_falls_back_to_rg_before_the_index_is_ready()
     test_find_symbol_index_sees_unsaved_buffer_text()
     test_find_symbol_rg_fallback_seeds_from_the_definition()
+    test_find_symbol_qualified_query_lists_and_jumps_to_class_members()
     test_shutdown_stops_the_search_subprocesses()
     test_project_find_accepts_non_ascii_in_its_query()
     test_fullscreen_modal_paint_is_covered_by_the_modal()
     test_clamp_scroll_still_pulls_back_a_widened_window()
-    print("desktop: 109 tests passed")
+    print("desktop: 110 tests passed")

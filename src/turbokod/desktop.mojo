@@ -216,7 +216,7 @@ from .symbol_pick import SymbolPick
 from .reference_pick import ReferencePick
 from .find_symbol import (
     FindSymbol, FindSymbolMatch, container_matches_qualifier,
-    enclosing_container,
+    container_members_matching, enclosing_container,
 )
 from .symbol_index import SymbolIndex
 from .terminal import beep
@@ -12909,8 +12909,13 @@ struct Desktop(Movable):
         if len(member.as_bytes()) < self.find_symbol.min_query_len():
             self.find_symbol.apply_index_results(List[FindSymbolMatch]())
             return
+        var qualifier = self.find_symbol.query_qualifier()
         if not self.symbol_index.is_ready():
             self.find_symbol.restart_runner()
+            return
+        var members = self._qualified_member_matches(qualifier, member)
+        if len(members) > 0:
+            self.find_symbol.apply_index_results(members^)
             return
         var hits = self.symbol_index.search(member, FIND_SYMBOL_RESULT_CAP)
         var out = List[FindSymbolMatch](capacity=len(hits))
@@ -12919,6 +12924,49 @@ struct Desktop(Movable):
                 hits[i].name, hits[i].path, hits[i].line, hits[i].column,
             ))
         self.find_symbol.apply_index_results(out^)
+
+    def _qualified_member_matches(
+        self, qualifier: String, member: String,
+    ) -> List[FindSymbolMatch]:
+        """For a ``Class.member`` query: the members of every class
+        named like the qualifier's last segment whose name contains
+        ``member``, read off the class bodies. Empty for a bare query,
+        or when no such class (or member) exists — the caller then
+        falls back to the plain name search, so an inherited member
+        still turns up, just unqualified."""
+        var out = List[FindSymbolMatch]()
+        if len(qualifier.as_bytes()) == 0:
+            return out^
+        var qb = qualifier.as_bytes()
+        var cut = 0
+        for i in range(len(qb)):
+            if qb[i] == 0x2E:   # '.'
+                cut = i + 1
+        var cls = String(StringSpan(unsafe_from_utf8=qb[cut:len(qb)]))
+        if len(cls.as_bytes()) == 0:
+            return out^
+        var sites = self.symbol_index.definition_sites(cls)
+        for k in range(min(len(sites), 16)):
+            var text = self._snapshot_or_read(sites[k].path)
+            if not text:
+                continue
+            var line0 = sites[k].line - 1
+            var chain = enclosing_container(text.value(), line0)
+            var full = chain + String(".") + cls \
+                if len(chain.as_bytes()) > 0 else cls
+            if not container_matches_qualifier(full, qualifier):
+                continue
+            var found = container_members_matching(
+                text.value(), line0, cls, member,
+            )
+            for j in range(len(found)):
+                if len(out) >= FIND_SYMBOL_RESULT_CAP:
+                    return out^
+                out.append(FindSymbolMatch(
+                    found[j][0], sites[k].path, found[j][1], found[j][2],
+                    full,
+                ))
+        return out^
 
     def _prepare_symbol_index(mut self):
         """Point the index at the current project and get it revalidating.
@@ -13041,6 +13089,23 @@ struct Desktop(Movable):
                 DefinitionResolved(path, line, col), screen,
             )
             return
+        # A row read off the qualifier's class body is the member's
+        # definition already — no LSP lookup, which could only lose
+        # it (servers list fields under the bare name, often from
+        # every class that has one).
+        if len(self.find_symbol.selected_container.as_bytes()) > 0:
+            var member_src = self._snapshot_or_read(path)
+            if member_src:
+                var at = self.symbol_index.verify_occurrence_in(
+                    name, member_src.value(), line + 1, col + 1,
+                )
+                if at:
+                    self.find_symbol.close()
+                    self._find_symbol_pending_lsps = List[Int]()
+                    self._jump_to(DefinitionResolved(
+                        path, at.value()[0] - 1, at.value()[1] - 1,
+                    ), screen)
+                    return
         # A ``Class.member`` query: the row's seed is the name's
         # best-ranked site, which needn't be in that class. Re-seed at
         # a definition whose enclosing scope matches the qualifier, so
