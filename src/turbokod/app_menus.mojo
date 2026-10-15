@@ -12,7 +12,8 @@ from .desktop import (
     Desktop,
     APP_QUIT_ACTION, APP_SETTINGS,
     DEBUG_ADD_WATCH, DEBUG_CONDITIONAL_BP, DEBUG_START_OR_CONTINUE,
-    DEBUG_STEP_IN, DEBUG_STEP_OUT, DEBUG_STEP_OVER, DEBUG_STOP,
+    DEBUG_RUN_TO_CURSOR, DEBUG_STEP_IN, DEBUG_STEP_OUT, DEBUG_STEP_OVER,
+    DEBUG_STOP,
     DEBUG_TOGGLE_BREAKPOINT, DEBUG_TOGGLE_RAISED,
     DEBUG_FOCUS_PANE,
     EDITOR_COMPARE_CLIPBOARD, EDITOR_COPY, EDITOR_CUT, EDITOR_FILL,
@@ -216,6 +217,7 @@ def build_menus(mut d: Desktop, native: Bool):
     dbg.append(MenuItem(String("Step Over"), DEBUG_STEP_OVER))
     dbg.append(MenuItem(String("Step Into"), DEBUG_STEP_IN))
     dbg.append(MenuItem(String("Step Out"), DEBUG_STEP_OUT))
+    dbg.append(MenuItem(String("Run to Cursor"), DEBUG_RUN_TO_CURSOR))
     dbg.append(MenuItem(String("Add Watch..."), DEBUG_ADD_WATCH))
     dbg.append(MenuItem(String("Toggle Break on Raised"), DEBUG_TOGGLE_RAISED))
     d.menu_bar.add(Menu(String("Debug"), dbg^))
