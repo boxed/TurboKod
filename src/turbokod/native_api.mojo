@@ -267,6 +267,16 @@ def tk_desktop_open_file_at(
 
 
 @export
+def tk_desktop_busy(h: Int) abi("C") -> Int32:
+    """1 while the Desktop has frame-sliced work the user is waiting on
+    (``Desktop.has_background_work``): a terminal host should then poll
+    for input without blocking so the work runs every frame."""
+    if h == 0:
+        return 0
+    return 1 if _desk(h)[].has_background_work() else 0
+
+
+@export
 def tk_desktop_tick(h: Int, cols: Int, rows: Int) abi("C"):
     """Per-frame housekeeping Swift runs before laying out: external-change
     reload, menu visibility, file-tree opens, and the LSP/DAP/autosave

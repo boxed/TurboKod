@@ -17,6 +17,8 @@ from turbokod.selection_history import SelectionHistory
 from turbokod.text_view import Selection, smart_wrap_lines, wrap_lines
 from turbokod.lsp_dispatch import DIAG_SEVERITY_ERROR, Diagnostic
 from turbokod.highlight import GrammarRegistry
+from turbokod.spell import Speller
+from turbokod.spell_scan import misspelled_spans
 from turbokod.posix import which
 from turbokod.events import (
     Event, KEY_BACKSPACE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_LEFT,
@@ -1012,6 +1014,52 @@ def test_smart_wrap_lines_html_attr_breaks_all_attributes() raises:
     assert_equal(layout[6].indent_cells, 0)
 
 
+def _assert_spell_matches_full_pass(ed: Editor, speller: Speller) raises:
+    var full = misspelled_spans(ed.buffer.lines, speller)
+    assert_equal(len(ed.spell_highlights), len(full))
+    for k in range(len(full)):
+        assert_equal(ed.spell_highlights[k].row, full[k][0])
+        assert_equal(ed.spell_highlights[k].col_start, full[k][1])
+        assert_equal(ed.spell_highlights[k].col_end, full[k][2])
+
+
+def test_editor_spell_incremental_matches_full_pass() raises:
+    """The editor re-checks only the lines an edit changed; after edits
+    that change, insert and delete lines — and one that moves a
+    ``noinspection`` directive — its squiggles must equal a fresh
+    whole-buffer pass. Identifiers count: ``helo_value`` flags ``helo``."""
+    var words = List[String]()
+    for w in ["hello", "world", "value", "noinspection"]:
+        words.append(String(w))
+    var speller = _spell_with_dict(words)
+    var path = _temp_path(String("_spell_incr.py"))
+    assert_true(write_file(path, String(
+        "helo_value = 1\n# hello world\nwrold = 2\n# helo\nhelo()\n"
+    )))
+    var ed = Editor.from_file(path)
+    var registry = GrammarRegistry()
+    ed.flush_highlights(registry, speller)
+    _assert_spell_matches_full_pass(ed, speller)
+    assert_equal(len(ed.spell_highlights), 4)
+    # Change a line in the middle.
+    ed.buffer.lines[1] = String("# hello wrld")
+    ed.invalidate_spell()
+    ed.flush_highlights(registry, speller)
+    _assert_spell_matches_full_pass(ed, speller)
+    # Insert lines, including a directive that suppresses the next one.
+    ed.buffer.lines.insert(2, String("# noinspection SpellCheckingInspection"))
+    ed.buffer.lines.insert(0, String("# zzzz qqqqq"))
+    ed.invalidate_spell()
+    ed.flush_highlights(registry, speller)
+    _assert_spell_matches_full_pass(ed, speller)
+    # Delete a line.
+    _ = ed.buffer.lines.pop(1)
+    ed.invalidate_spell()
+    ed.flush_highlights(registry, speller)
+    _assert_spell_matches_full_pass(ed, speller)
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
 def test_editor_alt_enter_on_misspelling_emits_pending_action() raises:
     """Alt+Enter while the cursor is parked inside a misspelled-word
     underline should stamp ``pending_spell_action`` with that word
@@ -1204,7 +1252,8 @@ def main() raises:
     test_smart_wrap_lines_style_attr_semicolons_in_url_and_string()
     test_smart_wrap_lines_html_attr_generalizes_to_onclick()
     test_smart_wrap_lines_html_attr_breaks_all_attributes()
+    test_editor_spell_incremental_matches_full_pass()
     test_editor_alt_enter_on_misspelling_emits_pending_action()
     test_editor_alt_enter_outside_misspelling_does_not_consume()
     test_editor_multiline_diagnostic_tooltip_renders_each_line()
-    print("editor_select: 51 tests passed")
+    print("editor_select: 52 tests passed")

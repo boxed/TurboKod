@@ -2380,23 +2380,31 @@ def test_find_misspelled_runs_keeps_unicode_letters_in_word() raises:
     assert_equal(rng[1], 8)
 
 
-def test_find_misspelled_runs_filters_identifiers_and_short_words() raises:
-    """Word-shape filters should suppress: <4 letters, all caps, mixed
-    case mid-word, identifier fragments with digits/underscores."""
+def test_find_misspelled_runs_splits_identifiers() raises:
+    """Spell checking doesn't care what language the text is in:
+    identifiers split at underscores, digits and camelCase, and each
+    piece is checked. Pieces under 4 letters and all-caps pieces
+    (acronyms, constants) are skipped."""
     var words = List[String]()
-    words.append(String("hello"))
+    for w in ["hello", "world", "flush", "server", "parse"]:
+        words.append(String(w))
     var s = _spell_with_dict(words)
-    var text = String("ok URL flushHighlights foo_bar123 helo world hello")
+    var text = String(
+        "ok URL flushHighlghts foo_helo123 world hello HTTPServer "
+        "parseJSON MAX_VALUE"
+    )
     var runs = find_misspelled_runs(s, text)
-    # ``ok`` (too short), ``URL`` (acronym), ``flushHighlights``
-    # (internal cap), ``foo_bar123`` (identifier), ``hello`` (in dict)
-    # all skipped. Only ``helo`` and ``world`` should flag.
-    assert_equal(len(runs), 2)
     var b = text.as_bytes()
-    var first_word = String(StringSpan(unsafe_from_utf8=b[runs[0][0]:runs[0][1]]))
-    var second_word = String(StringSpan(unsafe_from_utf8=b[runs[1][0]:runs[1][1]]))
-    assert_equal(first_word, String("helo"))
-    assert_equal(second_word, String("world"))
+    var got = List[String]()
+    for r in range(len(runs)):
+        got.append(String(StringSpan(unsafe_from_utf8=b[runs[r][0]:runs[r][1]])))
+    # ``flushHighlghts`` → ``flush`` (known) + ``Highlghts`` (typo);
+    # ``foo_helo123`` → ``foo`` (short) + ``helo`` (typo); ``HTTPServer``
+    # → ``HTTP`` (acronym) + ``Server``; ``parseJSON`` → ``parse`` +
+    # ``JSON``; ``MAX_VALUE`` is all caps.
+    assert_equal(len(got), 2)
+    assert_equal(got[0], String("Highlghts"))
+    assert_equal(got[1], String("helo"))
 
 
 def test_text_field_types_non_ascii_letters() raises:
@@ -2960,7 +2968,7 @@ def main() raises:
     test_confirm_dialog_default_yes_focuses_yes()
     test_confirm_dialog_paints_inside_dialog_rect()
     test_find_misspelled_runs_keeps_unicode_letters_in_word()
-    test_find_misspelled_runs_filters_identifiers_and_short_words()
+    test_find_misspelled_runs_splits_identifiers()
     test_text_field_scrolls_to_keep_cursor_visible()
     test_text_field_scrolls_back_when_cursor_moves_left_of_view()
     test_text_field_click_maps_to_text_byte_via_scroll()

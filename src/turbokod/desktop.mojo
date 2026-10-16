@@ -184,6 +184,10 @@ from .message_request_dialog import MessageRequestDialog
 from .color_picker import ColorPickerDialog
 from .merge_view import MergeView
 from .fill_dialog import FillDialog
+from .spell_scan import spell_scan_files
+from .spelling_dialog import (
+    SPELLING_ADD_PROJECT, SPELLING_ADD_USER, SpellingDialog,
+)
 from .prompt import (
     Prompt,
     SUBMIT_DEFAULT, SUBMIT_FIND_NEXT, SUBMIT_REPLACE, SUBMIT_REPLACE_ALL,
@@ -411,6 +415,7 @@ comptime PROJECT_REPLACE      = String("edit:project_replace")
 comptime PROJECT_CLOSE_ACTION = String("project:close")
 comptime PROJECT_TREE_ACTION  = String("project:tree:toggle")
 comptime PROJECT_SETTINGS = String("project:settings")
+comptime PROJECT_SPELLING = String("project:spelling")
 # Direct-pick recent-project menu entries. ``PROJECT_OPEN_RECENT_PREFIX
 # + <path>`` carries the project root itself, not its slot in
 # ``config.recent_projects``. An index used to be enough — until the
@@ -1246,6 +1251,9 @@ struct Desktop(Movable):
     # generates one string per caret (a fixed text, or a numeric
     # sequence) and routes it through ``Editor.apply_fill_strings``.
     var fill_dialog: FillDialog
+    # Project ▸ Spelling: the project-wide misspelling list. Owns its
+    # scan, which ``paint`` advances a frame's budget at a time.
+    var spelling_dialog: SpellingDialog
     # Language ids we've already prompted-to-install for in this session.
     # The prompt is one-shot per language: once the user says yes or no,
     # opening another file of the same language doesn't re-nag.
@@ -1760,6 +1768,7 @@ struct Desktop(Movable):
         self.breakpoint_menu = BreakpointMenu()
         self.breakpoint_error = BreakpointConditionErrorDialog()
         self.fill_dialog = FillDialog()
+        self.spelling_dialog = SpellingDialog()
         self._lsp_install_prompted = List[String]()
         self._venv_lsp_installed = List[String]()
         self._debugpy_install_prompted = List[String]()
@@ -2519,6 +2528,7 @@ struct Desktop(Movable):
         ``scroll_regions`` declines smooth scroll while one is active."""
         if self.prompt.active or self.confirm_dialog.active \
                 or self.message_request_dialog.active \
+                or self.spelling_dialog.active \
                 or self.color_picker.active or self.merge_view.active \
                 or self.save_as_dialog.active or self.quick_open.active \
                 or self.symbol_pick.active or self.reference_pick.active \
@@ -2536,7 +2546,8 @@ struct Desktop(Movable):
                 or self.tab_context_menu.active \
                 or self.lsp_status_menu.active \
                 or self.breakpoint_menu.active \
-                or self.breakpoint_error.active or self.fill_dialog.active:
+                or self.breakpoint_error.active or self.fill_dialog.active \
+                or self.spelling_dialog.active:
             return True
         return False
 
@@ -4450,6 +4461,8 @@ struct Desktop(Movable):
         # and also spends this frame's slice of index build /
         # revalidation work.
         self._pump_find_symbol()
+        # Project ▸ Spelling scans the project a frame's budget at a time.
+        self.spelling_dialog.tick(self.speller)
         # QuickOpen does the same with ``git ls-files`` — its async
         # FileIndexer trickles entries in over multiple frames so the
         # dialog opens immediately even on giant projects.
@@ -4669,6 +4682,7 @@ struct Desktop(Movable):
         # Mode / format dropdown popups overlay the rest of the Fill
         # dialog. Same z-order pattern as ``breakpoint_menu``.
         self.fill_dialog.paint_popup(canvas, screen)
+        self.spelling_dialog.paint(canvas, screen)
         # Settings overlay — paints over the workspace but below the
         # modal dialogs so an in-flight prompt is still visible. Drains
         # ``settings.dirty`` into the persisted config so user changes
@@ -6425,6 +6439,7 @@ struct Desktop(Movable):
             items.append(MenuItem(
                 String("Project Settings..."), PROJECT_SETTINGS,
             ))
+            items.append(MenuItem(String("Spelling..."), PROJECT_SPELLING))
             items.append(MenuItem.separator())
         var paths = self._project_menu_paths()
         var labels = _project_menu_labels(paths)
@@ -7476,6 +7491,14 @@ struct Desktop(Movable):
             if self.fill_dialog.submitted:
                 self._on_fill_dialog_submit()
             return Optional[String]()
+        if self.spelling_dialog.active:
+            if event.kind == EVENT_KEY:
+                _ = self.spelling_dialog.handle_key(event)
+            elif event.kind == EVENT_MOUSE:
+                _ = self.spelling_dialog.handle_mouse(event, screen)
+            if self.spelling_dialog.submitted:
+                self._on_spelling_dialog_submit()
+            return Optional[String]()
         if self.git_gutter_menu.active:
             # Same modality story as ``spell_menu`` — opens contextually
             # over the gutter, eats every event until resolved.
@@ -8359,6 +8382,7 @@ struct Desktop(Movable):
         """
         return self.spell_menu.active or self.breakpoint_error.active \
             or self.breakpoint_menu.active or self.fill_dialog.active \
+            or self.spelling_dialog.active \
             or self.git_gutter_menu.active or self.test_gutter_menu.active \
             or self.blame_popup.active \
             or self.diagnostic_menu.active or self.editor_context_menu.active \
@@ -8523,6 +8547,9 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == PROJECT_SETTINGS:
             self._open_project_settings()
+            return Optional[String]()
+        if action == PROJECT_SPELLING:
+            self._open_spelling_dialog()
             return Optional[String]()
         if action == APP_SETTINGS:
             var cur_ext = String("")
@@ -10846,6 +10873,7 @@ struct Desktop(Movable):
             return False
         if self.spell_menu.active or self.breakpoint_error.active \
                 or self.breakpoint_menu.active or self.fill_dialog.active \
+                or self.spelling_dialog.active \
                 or self.git_gutter_menu.active or self.test_gutter_menu.active \
                 or self.blame_popup.active \
                 or self.diagnostic_menu.active \
@@ -15515,6 +15543,53 @@ struct Desktop(Movable):
         for i in range(len(self.windows.windows)):
             if self.windows.windows[i].is_editor:
                 self.windows.windows[i].editor.invalidate_spell()
+
+    def has_background_work(self) -> Bool:
+        """True while frame-sliced work is running that the user is
+        waiting on (the Project ▸ Spelling scan). The terminal loops
+        poll for input without a timeout while this holds, so the work
+        advances every frame instead of once per 50 ms idle wait."""
+        return self.spelling_dialog.active and self.spelling_dialog.scan.active
+
+    def _open_spelling_dialog(mut self):
+        """Project ▸ Spelling: scan every project file for words the
+        spell checker flags and list them by frequency."""
+        if not self.project:
+            self.status_bar.set_message(
+                String("Spelling: open a project first"),
+                Attr(RED, LIGHT_GRAY),
+            )
+            return
+        self.speller.load_default()
+        self.spelling_dialog.open(
+            spell_scan_files(self.project.value()), True,
+        )
+
+    def _on_spelling_dialog_submit(mut self):
+        """Add the dialog's selected words to the project or user
+        dictionary, then drop them from its list and from every
+        editor's squiggles."""
+        var keys = self.spelling_dialog.selected_keys()
+        var to_project = \
+            self.spelling_dialog.action == SPELLING_ADD_PROJECT
+        var persisted = True
+        for i in range(len(keys)):
+            if to_project:
+                persisted = self.speller.add_project_word(keys[i]) \
+                    and persisted
+            else:
+                persisted = self.speller.add_user_word(keys[i]) and persisted
+        self.spelling_dialog.acknowledge(keys)
+        for i in range(len(self.windows.windows)):
+            if self.windows.windows[i].is_editor:
+                self.windows.windows[i].editor.invalidate_spell()
+        var where = String("project") if to_project else String("user")
+        var msg = String("Spelling: added ") + String(len(keys)) \
+            + String(" word") + (String("") if len(keys) == 1 else String("s")) \
+            + String(" to the ") + where + String(" dictionary")
+        if not persisted:
+            msg = msg + String(" (session only — couldn't write the file)")
+        self.status_bar.set_message(msg, Attr(BLACK, LIGHT_GRAY))
 
     def _on_colorpres_submit(mut self):
         """Apply the colorPresentation the user picked (rewriting the color

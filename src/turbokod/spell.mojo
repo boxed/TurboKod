@@ -1,25 +1,17 @@
-"""Spell checker for code comments and string literals.
+"""Spell checker.
 
-Loads a wordlist (defaults to ``/usr/share/dict/words`` on macOS;
-falls back to common Linux paths) into a hash-bucketed set keyed by
-lowercase word. Lookup is case-insensitive and strips a few common
-suffixes (``'s``, ``s``, ``es``, ``ed``, ``ing``) so plurals and
-conjugations don't trigger false positives even when only the base
-form is in the dictionary.
+Loads a wordlist (the bundled SCOWL English list plus, on macOS,
+``/usr/share/dict/words``; common Linux paths otherwise) into a
+hash-bucketed set keyed by lowercase word. Lookup is case-insensitive
+and strips a few common suffixes (``'s``, ``s``, ``es``, ``ed``,
+``ing``) so plurals and conjugations don't trigger false positives even
+when only the base form is in the dictionary.
 
-Used by the editor to overlay ``STYLE_UNDERLINE`` on misspelled words
-inside comment / string highlights — code identifiers paint untouched
-because we only spell-check inside those scopes.
-
-Filtering rules in ``find_misspelled_runs``:
-
-* Tokens are runs of ASCII letters only (``[A-Za-z]+``).
-* Less than 4 letters → skipped (too noisy: "ok", "to", "of").
-* All uppercase → skipped (acronyms: ``URL``, ``HTTP``).
-* Internal capitals (``flushHighlights``) → skipped (identifier
-  fragment that leaked into a docstring).
-* Inside a longer ``[A-Za-z0-9_]`` run → skipped (``foo_bar123``
-  fragments shouldn't be queried as English).
+Checking is plain text processing, independent of syntax highlighting:
+``find_misspelled_runs`` splits any text into words — identifiers
+included, at underscores, digits and camelCase boundaries — so the
+editor's squiggles and Project ▸ Spelling apply the same rules to
+every file type. See ``find_misspelled_runs`` for the word rules.
 """
 
 from std.collections.list import List
@@ -33,7 +25,7 @@ from .posix import debug_log, user_config_path
 from .string_utils import (
     append_utf8,
     byte_slice, codepoint_at, is_ascii_digit, is_ascii_ident_byte,
-    split_lines_no_trailing, word_char_step,
+    is_word_codepoint, split_lines_no_trailing, word_char_step,
 )
 
 
@@ -120,6 +112,10 @@ struct Speller(Movable):
     var buckets: List[List[String]]
     var project_buckets: List[List[String]]
     var loaded: Bool
+    var version: Int
+    """Bumps whenever the set of known words changes, so a caller that
+    caches per-line results (``Editor._refresh_spell``) knows to drop
+    them."""
     # Path of the project dictionary currently in ``project_buckets``;
     # empty means "no project loaded." Tracked so ``set_project`` can
     # short-circuit re-load when the project hasn't actually changed.
@@ -133,6 +129,7 @@ struct Speller(Movable):
         for _ in range(Int(_N_BUCKETS)):
             self.project_buckets.append(List[String]())
         self.loaded = False
+        self.version = 0
         self.project_root = String("")
 
     def load_default(mut self):
@@ -204,6 +201,7 @@ struct Speller(Movable):
         for i in range(len(self.buckets)):
             self.buckets[i] = List[String]()
         self.loaded = False
+        self.version += 1
         self.load_default()
 
     def _load_user_language_dictionaries(mut self):
@@ -302,6 +300,7 @@ struct Speller(Movable):
         for i in range(len(self.project_buckets)):
             self.project_buckets[i] = List[String]()
         self.project_root = project_root
+        self.version += 1
         if len(project_root.as_bytes()) == 0:
             debug_log(String("[speller.set_project] empty root, returning"))
             return
@@ -369,6 +368,7 @@ struct Speller(Movable):
                 continue
             var b = _bucket(w)
             self.project_buckets[b].append(w^)
+        self.version += 1
 
     def add_user_word(mut self, word: String) -> Bool:
         """Add ``word`` to the user dictionary in memory and on disk.
@@ -389,6 +389,7 @@ struct Speller(Movable):
             return True  # already known — don't grow the bucket / dup the file
         var b = _bucket(lw)
         self.buckets[b].append(lw)
+        self.version += 1
         var path = user_dict_path()
         if len(path.as_bytes()) == 0:
             return False
@@ -411,6 +412,7 @@ struct Speller(Movable):
             return True  # already known — don't grow the bucket / dup the file
         var b = _bucket(lw)
         self.project_buckets[b].append(lw)
+        self.version += 1
         var path = project_dict_path(self.project_root)
         if len(path.as_bytes()) == 0:
             return False
@@ -430,6 +432,7 @@ struct Speller(Movable):
             var b = _bucket(w)
             self.buckets[b].append(w^)
         self.loaded = True
+        self.version += 1
 
     def check_word(self, word: String) -> Bool:
         """``True`` if ``word`` (or a stripped form) is in the dictionary.
@@ -513,14 +516,18 @@ struct Speller(Movable):
 def find_misspelled_runs(
     self_speller: Speller, text: String,
 ) -> List[Tuple[Int, Int]]:
-    """Return ``(byte_start, byte_end)`` pairs for misspelled words in
-    ``text``. Filtering rules are described in the module docstring.
+    """``(byte_start, byte_end)`` of every misspelled word in ``text``.
 
-    Operates on a single text region (one comment / string highlight)
-    rather than the whole buffer, so byte offsets are local to the
-    given slice; the caller adds the region's row + col_start to
-    place the underline.
-    """
+    Language-agnostic on purpose: there's no notion of comment, string
+    or code here, so ``foo_bar``, ``fooBar`` and ``foo bar`` all check
+    ``foo`` and ``bar`` whatever file they're in. Words are runs of
+    letters (Unicode included, so ``Godkänn`` is one word); digits,
+    underscores and punctuation separate them, and camelCase splits
+    inside a run — ``fooBar`` → ``foo`` + ``Bar``, ``HTTPServer`` →
+    ``HTTP`` + ``Server``. An apostrophe between two ASCII letters stays
+    in the word so ``check_word``'s contraction strippers see ``hasn't``
+    whole. Segments under 4 bytes and all-caps ones (acronyms,
+    ``SCREAMING_CASE``) aren't checked."""
     var out = List[Tuple[Int, Int]]()
     if not self_speller.loaded:
         return out^
@@ -528,76 +535,85 @@ def find_misspelled_runs(
     var n = len(b)
     var i = 0
     while i < n:
-        var c = b[i]
-        # Identifier-ish run: letters with embedded digits / underscores.
-        # We swallow the whole run so a word like ``foo123`` doesn't
-        # produce a clean ``foo`` lookup (it's part of a token, not
-        # English prose).
-        var step = word_char_step(text, i)
-        if step[0] or is_ascii_digit(c) or c == 0x5F:
-            var run_start = i
-            var letters_only = True
-            while i < n:
-                var d = b[i]
-                if is_ascii_digit(d) or d == 0x5F:
-                    letters_only = False
-                    i += 1
-                elif (
-                    d == 0x27
-                    and i > run_start and _is_letter(b[i - 1])
-                    and i + 1 < n and _is_letter(b[i + 1])
-                ):
-                    # Apostrophe between two ASCII letters — part of a
-                    # contraction or possessive (it's, hasn't, Bob's).
-                    # Keep it in the run so check_word's contraction
-                    # strippers can fire; without this, "hasn't"
-                    # tokenizes as ["hasn", "t"] and the head ("hasn")
-                    # is flagged as a misspelling.
-                    i += 1
-                else:
-                    var s = word_char_step(text, i)
-                    if s[0]:
-                        # Letter (ASCII or Unicode). Walks by UTF-8
-                        # codepoint so non-ASCII letters (``ä``, Cyrillic,
-                        # CJK) join the run instead of breaking it.
-                        i += s[1]
-                    else:
-                        break
-            if not letters_only:
-                continue
-            # Pure-letter run (possibly with internal apostrophes). Apply
-            # word-shape filters. Counts use the raw byte length, which
-            # includes the apostrophe — fine because apostrophe-containing
-            # words (it's, hasn't) are at least 4 chars by construction.
-            var word_end = i
-            var word_len = word_end - run_start
-            if word_len < 4:
-                continue
-            var has_lower = False
-            var has_internal_upper = False
-            for j in range(run_start, word_end):
-                var ch = b[j]
-                if ch >= 0x61 and ch <= 0x7A:
-                    has_lower = True
-                elif ch >= 0x41 and ch <= 0x5A:
-                    if j > run_start:
-                        has_internal_upper = True
-                elif ch >= 0x80:
-                    # Non-ASCII letter byte: treat as lowercase-equivalent so
-                    # all-non-ASCII words (Cyrillic, Greek, all-accented) are
-                    # still checked instead of silently skipped. The all-caps
-                    # acronym skip stays reserved for genuinely all-ASCII runs.
-                    has_lower = True
-            if not has_lower:
-                continue
-            if has_internal_upper:
-                continue
-            var word = byte_slice(text, run_start, word_end)
-            if not self_speller.check_word(word):
-                out.append((run_start, word_end))
-        else:
-            i += 1
+        var info = codepoint_at(text, i)
+        if not _is_letter_cp(info[0]):
+            i += info[1]
+            continue
+        var seg = i
+        var j = i
+        var prev_upper = False
+        var prev2_upper = False
+        var prev_start = -1
+        while j < n:
+            var c = codepoint_at(text, j)
+            if _is_letter_cp(c[0]):
+                var up = _is_upper_cp(c[0])
+                if prev_start >= 0:
+                    if up and not prev_upper:
+                        # fooBar: a capital after a lowercase letter.
+                        _check_segment(self_speller, text, seg, j, out)
+                        seg = j
+                    elif not up and prev_upper and prev2_upper \
+                            and prev_start > seg:
+                        # HTTPServer: the last capital of a run starts
+                        # the next word.
+                        _check_segment(self_speller, text, seg, prev_start, out)
+                        seg = prev_start
+                prev2_upper = prev_upper
+                prev_upper = up
+                prev_start = j
+                j += c[1]
+            elif b[j] == 0x27 and j > seg and _is_letter(b[j - 1]) \
+                    and j + 1 < n and _is_letter(b[j + 1]):
+                j += 1
+            else:
+                break
+        _check_segment(self_speller, text, seg, j, out)
+        i = j
     return out^
+
+
+def _check_segment(
+    speller: Speller, text: String, start: Int, end: Int,
+    mut out: List[Tuple[Int, Int]],
+):
+    if end - start < 4:
+        return
+    var has_lower = False
+    var k = start
+    while k < end:
+        var c = codepoint_at(text, k)
+        if c[0] != 0x27 and not _is_upper_cp(c[0]):
+            has_lower = True
+            break
+        k += c[1]
+    if not has_lower:
+        return
+    if not speller.check_word(byte_slice(text, start, end)):
+        out.append((start, end))
+
+
+def _is_letter_cp(cp: Int) -> Bool:
+    """A word codepoint that is a letter: ``is_word_codepoint`` minus
+    the ASCII digits and underscore it also accepts."""
+    if cp < 0x80:
+        return (cp >= 0x41 and cp <= 0x5A) or (cp >= 0x61 and cp <= 0x7A)
+    return is_word_codepoint(cp)
+
+
+def _is_upper_cp(cp: Int) -> Bool:
+    """Uppercase for camelCase splitting: ASCII, Latin-1, Greek and
+    Cyrillic capitals. Letters outside those ranges count as lowercase,
+    which only means a case change there doesn't split a word."""
+    if cp >= 0x41 and cp <= 0x5A:
+        return True
+    if cp >= 0xC0 and cp <= 0xDE and cp != 0xD7:
+        return True
+    if cp >= 0x391 and cp <= 0x3A9:
+        return True
+    if cp >= 0x400 and cp <= 0x42F:
+        return True
+    return False
 
 
 def has_spell_noinspection_directive(text: String) -> Bool:
@@ -669,6 +685,14 @@ def has_spell_noinspection_directive(text: String) -> Bool:
             break
         i = p if p > i else i + 1
     return False
+
+
+def spell_key(word: String) -> String:
+    """The case-folded, NFC-composed form the speller stores and looks
+    words up by — what two spellings of "the same word" share. Public
+    so callers that group flagged words (the project spell scan) agree
+    with the dictionary about what counts as one word."""
+    return _normalize(word)
 
 
 def _bucket(w: String) -> Int:

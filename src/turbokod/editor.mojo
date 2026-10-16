@@ -1076,6 +1076,14 @@ struct Editor(Copyable, Movable):
     # the user can scan the file at a glance.
     var spell_highlights: List[Highlight]
     var spell_lines: List[Bool]
+    # Per-line spell results from the last refresh, keyed by the line's
+    # text, so an edit re-checks only the lines it changed (see
+    # ``_refresh_spell``). ``_spell_version`` is the ``Speller.version``
+    # they were computed against; a dictionary change drops them.
+    var _spell_text: List[String]
+    var _spell_runs: List[List[Tuple[Int, Int]]]
+    var _spell_directive: List[Bool]
+    var _spell_version: Int
     # LSP diagnostics overlay. ``diagnostics`` is the most recent set
     # routed in by ``Desktop.lsp_tick`` from
     # ``LspManager.take_diagnostics_for(file_path)``; the editor itself
@@ -1641,6 +1649,10 @@ struct Editor(Copyable, Movable):
         self._hl_dirty_max_row = -1
         self.spell_highlights = List[Highlight]()
         self.spell_lines = List[Bool]()
+        self._spell_text = List[String]()
+        self._spell_runs = List[List[Tuple[Int, Int]]]()
+        self._spell_directive = List[Bool]()
+        self._spell_version = -1
         self.diagnostics = List[Diagnostic]()
         self.diagnostic_lines = List[Int]()
         self.occurrence_ranges = List[TextEditEntry]()
@@ -1849,6 +1861,10 @@ struct Editor(Copyable, Movable):
         self._hl_dirty_max_row = copy._hl_dirty_max_row
         self.spell_highlights = copy.spell_highlights.copy()
         self.spell_lines = copy.spell_lines.copy()
+        self._spell_text = copy._spell_text.copy()
+        self._spell_runs = copy._spell_runs.copy()
+        self._spell_directive = copy._spell_directive.copy()
+        self._spell_version = copy._spell_version
         self.diagnostics = copy.diagnostics.copy()
         self.diagnostic_lines = copy.diagnostic_lines.copy()
         self.occurrence_ranges = copy.occurrence_ranges.copy()
@@ -2112,102 +2128,95 @@ struct Editor(Copyable, Movable):
 
     def _refresh_spell(mut self, speller: Speller):
         """Rebuild ``spell_highlights`` and ``spell_lines`` from the
-        current ``self.highlights``. Walks every comment / string
-        highlight, runs the words through the speller, and emits an
-        underline-only highlight for each misspelling.
+        buffer text. Every word is checked — identifiers included,
+        split at underscores, digits and camelCase
+        (``find_misspelled_runs``) — independent of the syntax
+        highlighting, with the same rules as Project ▸ Spelling
+        (``spell_scan.misspelled_spans``).
 
         On terminals that support the colon-separated SGR extensions
         (iTerm2, kitty, vte, Windows Terminal, …) the misspelled word
-        keeps its host fg/bg and gets a *red curly underline* —
+        keeps its syntax color and gets a *red curly underline* —
         ``SGR 4:3`` + ``SGR 58:5:1`` — the classic VS Code squiggle.
         On terminals that don't (Apple Terminal.app, basic xterm) we
         fall back to ``LIGHT_RED`` foreground + plain ``SGR 4`` so the
-        flag is at least visible; the underline alone would be
-        invisible because cyan-on-cyan blends.
+        flag is at least visible; the underline alone takes the text
+        color and would blend in.
 
         ``spell_lines[i]`` is set True for any row that gained a
-        highlight so the right-side minimap can project a marker."""
+        highlight so the right-side minimap can project a marker.
+
+        Incremental: this runs after every edit, and checking every word
+        of a 16k-line file took 23 ms. Per-line results are cached with
+        the line's text; the unchanged rows at the top and bottom of the
+        buffer (matched from both ends, so inserting or deleting lines
+        doesn't invalidate everything below) are reused, and only the
+        rows between are re-checked. A ``noinspection`` directive
+        covers the next row too, so suppression is reapplied over the
+        whole buffer from the cached per-row flags each time."""
         self.spell_highlights = List[Highlight]()
         self.spell_lines = List[Bool]()
         for _ in range(self.buffer.line_count()):
             self.spell_lines.append(False)
         if not speller.loaded:
             return
-        var comment_attr = highlight_comment_attr()
-        var string_attr = highlight_string_attr()
-        var extended = terminal_supports_extended_underline()
-        # First pass: honor IntelliJ-style ``noinspection`` directives
-        # in comments. A directive on row N suppresses spell flags on
-        # row N (so ``noinspection`` itself isn't flagged) and on row
-        # N+1, mirroring IntelliJ's "applies to next code element"
-        # behavior.
-        var n_lines = self.buffer.line_count()
-        var suppressed = List[Bool]()
-        var row_has_comment = List[Bool]()
-        for _ in range(n_lines):
-            suppressed.append(False)
-            row_has_comment.append(False)
-        for h in range(len(self.highlights)):
-            var hl = self.highlights[h]
-            if hl.attr != comment_attr:
+        # The stored attr only carries the squiggle: paint layers its
+        # style / underline color onto whatever syntax color the cell
+        # already has (see the spell overlay pass), so a misspelled
+        # identifier keeps its identifier color.
+        var squiggle: Attr
+        if terminal_supports_extended_underline():
+            # Curly red underline as its own channel; fg untouched.
+            squiggle = Attr(EDITOR_FG, EDITOR_BG, STYLE_UNDERLINE | STYLE_UNDERLINE_CURLY) \
+                .with_underline_color(Int16(LIGHT_RED))
+        else:
+            # Plain underline takes the fg color, so paint the word red
+            # to make the flag visible at all.
+            squiggle = Attr(LIGHT_RED, EDITOR_BG, STYLE_UNDERLINE)
+        if self._spell_version != speller.version:
+            self._spell_text = List[String]()
+            self._spell_runs = List[List[Tuple[Int, Int]]]()
+            self._spell_directive = List[Bool]()
+            self._spell_version = speller.version
+        ref lines = self.buffer.lines
+        var n = len(lines)
+        var old_n = len(self._spell_text)
+        var pre = 0
+        while pre < n and pre < old_n and lines[pre] == self._spell_text[pre]:
+            pre += 1
+        var suf = 0
+        while suf < n - pre and suf < old_n - pre \
+                and lines[n - 1 - suf] == self._spell_text[old_n - 1 - suf]:
+            suf += 1
+        if pre < n - suf or n != old_n:
+            var text = List[String](capacity=n)
+            var runs = List[List[Tuple[Int, Int]]](capacity=n)
+            var directive = List[Bool](capacity=n)
+            for r in range(pre):
+                text.append(self._spell_text[r])
+                runs.append(self._spell_runs[r].copy())
+                directive.append(self._spell_directive[r])
+            for r in range(pre, n - suf):
+                text.append(lines[r])
+                runs.append(find_misspelled_runs(speller, lines[r]))
+                directive.append(has_spell_noinspection_directive(lines[r]))
+            for r in range(old_n - suf, old_n):
+                text.append(self._spell_text[r])
+                runs.append(self._spell_runs[r].copy())
+                directive.append(self._spell_directive[r])
+            self._spell_text = text^
+            self._spell_runs = runs^
+            self._spell_directive = directive^
+        for row in range(n):
+            if self._spell_directive[row] \
+                    or (row > 0 and self._spell_directive[row - 1]):
                 continue
-            if hl.row < 0 or hl.row >= n_lines:
-                continue
-            row_has_comment[hl.row] = True
-        for r in range(n_lines):
-            if not row_has_comment[r]:
-                continue
-            if has_spell_noinspection_directive(self.buffer.line(r)):
-                suppressed[r] = True
-                if r + 1 < n_lines:
-                    suppressed[r + 1] = True
-        for h in range(len(self.highlights)):
-            var hl = self.highlights[h]
-            var is_comment = hl.attr == comment_attr
-            var is_string = hl.attr == string_attr
-            if not (is_comment or is_string):
-                continue
-            if hl.row < 0 or hl.row >= n_lines:
-                continue
-            if suppressed[hl.row]:
-                continue
-            var line = self.buffer.line(hl.row)
-            var line_bytes = line.as_bytes()
-            var lo = hl.col_start
-            var hi = hl.col_end
-            if lo < 0:
-                lo = 0
-            if hi > len(line_bytes):
-                hi = len(line_bytes)
-            if lo >= hi:
-                continue
-            var slice_text = String(
-                StringSpan(unsafe_from_utf8=line_bytes[lo:hi])
-            )
-            var runs = find_misspelled_runs(speller, slice_text)
-            if len(runs) == 0:
-                continue
-            var underline_attr: Attr
-            if extended:
-                # Keep the host comment/string color, add curly red
-                # underline as a separate channel.
-                underline_attr = hl.attr.add_style(
-                    STYLE_UNDERLINE | STYLE_UNDERLINE_CURLY,
-                ).with_underline_color(Int16(LIGHT_RED))
-            else:
-                # Plain underline: paint the word red so the flag
-                # itself is visible (the line would otherwise blend
-                # into the cyan comment text).
-                underline_attr = hl.attr.with_fg(LIGHT_RED).add_style(
-                    STYLE_UNDERLINE,
-                )
-            for r in range(len(runs)):
-                var rs = runs[r][0] + lo
-                var re = runs[r][1] + lo
+            ref row_runs = self._spell_runs[row]
+            for k in range(len(row_runs)):
                 self.spell_highlights.append(
-                    Highlight(hl.row, rs, re, underline_attr)
+                    Highlight(row, row_runs[k][0], row_runs[k][1], squiggle)
                 )
-            self.spell_lines[hl.row] = True
+                self.spell_lines[row] = True
 
     def invalidate_spell(mut self):
         """Force ``flush_highlights`` to rerun ``_refresh_spell`` on
@@ -6911,10 +6920,11 @@ struct Editor(Copyable, Movable):
                     ch2.attr,
                 )
             # Spell-check overlay: same byte-to-cell mapping as the
-            # syntax pass above, but reapplies the *same* fg/bg with
-            # ``STYLE_UNDERLINE`` ORed in. Painted after the syntax
-            # pass so the underline lands on the comment/string color
-            # rather than getting flattened back to plain text.
+            # syntax pass above. A misspelling can sit on any token, so
+            # — like the diagnostic pass below — read the cell's syntax
+            # attr and layer the squiggle (style + underline color, and
+            # the red fg on terminals without a separate underline
+            # color) onto it.
             ref sp_bucket = spell_buckets[buf_row - vis_lo]
             for sb in range(len(sp_bucket)):
                 var sh = self.spell_highlights[sp_bucket[sb]]
@@ -6923,10 +6933,20 @@ struct Editor(Copyable, Movable):
                 )
                 if sh_cells[0] >= sh_cells[1]:
                     continue
-                _paint_attr_span(
-                    canvas, painter, seg_x0, content_right, sy_hl, sh_cells,
-                    sh.attr,
-                )
+                var curly = (sh.attr.style & STYLE_UNDERLINE_CURLY) != 0
+                for cell_off in range(sh_cells[0], sh_cells[1]):
+                    var sx_s = seg_x0 + cell_off
+                    if sx_s >= content_right:
+                        break
+                    var cell_attr = canvas.get(sx_s, sy_hl).attr \
+                        .add_style(sh.attr.style)
+                    if curly:
+                        cell_attr = cell_attr.with_underline_color(
+                            sh.attr.underline_color,
+                        )
+                    else:
+                        cell_attr = cell_attr.with_fg(sh.attr.fg)
+                    painter.set_attr(canvas, sx_s, sy_hl, cell_attr)
             # Diagnostic overlay: third underline pass. Unlike spell —
             # which already knows the host attr from the syntax
             # highlight it sits on — diagnostics can land anywhere

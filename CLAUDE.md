@@ -485,6 +485,16 @@ Three things bite when porting older code, all of which the 1.0 compiler catches
 The context-manager protocol is still deliberately avoided — use explicit
 `start()`/`stop()` instead.
 
+**No `std.runtime.asyncrt` (`TaskGroup`, async tasks) in `src/turbokod/`.**
+Mojo's async runtime is initialized by a Mojo `main`. The native app and
+`tk-tui` load the core as `libturbokod.dylib` from a non-Mojo host, so the
+first task segfaults (null deref in `libKGENCompilerRTShared`) — while every
+test suite and bench, being a standalone Mojo binary, passes. Project ▸
+Spelling shipped a `TaskGroup` scan and crashed the app this way; see
+[docs/project-spelling.md](docs/project-spelling.md). Slice work across frames
+instead, and verify anything runtime-related by driving the dylib from a
+non-Mojo host (Python `ctypes` works).
+
 ## C++ reference build (only when comparing to the original)
 
 ```sh

@@ -89,6 +89,10 @@ def _tk_recover_user_shell_path():
     external_call["tk_recover_user_shell_path", NoneType]()
 
 
+def _tk_busy(h: Int) -> Bool:
+    return external_call["tk_desktop_busy", Int32](h) != 0
+
+
 def _tk_tick(h: Int, cols: Int, rows: Int):
     external_call["tk_desktop_tick", NoneType](h, cols, rows)
 
@@ -287,7 +291,9 @@ def main() raises:
 
         app.present()
 
-        var maybe_ev = app.next_event(50)
+        # A frame-sliced job (Project ▸ Spelling's scan) advances once a
+        # frame; don't sit out a 50 ms input wait between its frames.
+        var maybe_ev = app.next_event(1 if _tk_busy(h) else 50)
         if not maybe_ev:
             continue
         var ev = maybe_ev.value()

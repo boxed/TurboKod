@@ -197,7 +197,9 @@ def main() raises:
                             String("iter ") + String(iter_n)
                             + String(" before-poll_event"),
                         )
-                    maybe_ev = app.terminal.poll_event(50)
+                    maybe_ev = app.terminal.poll_event(
+                        1 if desktop.has_background_work() else 50,
+                    )
                     if desktop.dap.is_active():
                         desktop.dap.client.process.trace(
                             String("iter ") + String(iter_n)

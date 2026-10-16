@@ -18,10 +18,20 @@ from turbokod.spell_menu import (
     SpellMenu
 )
 from turbokod.settings import Settings
-from turbokod.events import Event, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_UP
-from turbokod.geometry import Point
+from turbokod.events import (
+    Event, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_TAB, KEY_UP, MOUSE_BUTTON_LEFT,
+)
+from turbokod.geometry import Point, Rect
+from turbokod.canvas import Canvas
 
-from support import _spell_with_dict, setup_test_env
+from turbokod.spell_scan import ProjectSpellScan, spell_scan_files
+from turbokod.spelling_dialog import (
+    SPELLING_ADD_PROJECT, SPELLING_ADD_USER, SpellingDialog,
+)
+from turbokod.events import MOD_META, MOD_SHIFT, KEY_SPACE
+from support import (
+    _ensure_dir, _rm_rf, _spell_with_dict, _temp_path, setup_test_env,
+)
 
 
 def test_speller_check_word_basic() raises:
@@ -525,6 +535,182 @@ def test_has_spell_noinspection_directive_parses_intellij_forms() raises:
     ))
 
 
+def _scan_fixture(root: String) raises -> List[String]:
+    _rm_rf(root)
+    _ensure_dir(root)
+    var files = List[String]()
+    files.append(root + String("/a.py"))
+    _ = write_file(files[0], String(
+        "# zorbly zorbly words here\n"
+        "zorbly = 1  # identifiers are checked too\n"
+        "s = 'Zorbly and frobnix'\n"
+        "# noinspection SpellCheckingInspection\n"
+        "# frobnix is suppressed on this line\n"
+    ))
+    files.append(root + String("/b.py"))
+    _ = write_file(files[1], String("# frobnix's quux words\n"))
+    files.append(root + String("/blob.bin"))
+    _ = write_file(files[2], String("zorbly\x00zorbly\n"))
+    files.append(root + String("/missing.py"))
+    return files^
+
+
+def _fixture_speller() -> Speller:
+    var dict_words = List[String]()
+    for w in ["words", "here", "identifiers", "are", "never", "checked",
+              "and", "noinspection", "is", "suppressed", "on", "this",
+              "line", "SpellCheckingInspection"]:
+        dict_words.append(String(w))
+    return _spell_with_dict(dict_words)
+
+
+def test_project_spell_scan_counts_flagged_words() raises:
+    """Counts every word the editor would underline — identifiers too,
+    nothing under a ``noinspection`` directive — folds case and
+    possessives into one row, and skips binary and unreadable files."""
+    var root = _temp_path(String("_spell_scan"))
+    var files = _scan_fixture(root)
+    var speller = _fixture_speller()
+    var scan = ProjectSpellScan()
+    scan.start(files^)
+    var spins = 0
+    while scan.step(5, speller) and spins < 1000:
+        spins += 1
+    assert_false(scan.active)
+    assert_equal(scan.files_checked, 2)
+    var zorbly = -1
+    var frobnix = -1
+    var quux = -1
+    for i in range(len(scan.words)):
+        if scan.words[i].key == String("zorbly"):
+            zorbly = i
+        elif scan.words[i].key == String("frobnix"):
+            frobnix = i
+        elif scan.words[i].key == String("quux"):
+            quux = i
+    assert_equal(len(scan.words), 3)
+    # Two in the first comment, the identifier, and the capitalized one
+    # in the string.
+    assert_equal(scan.words[zorbly].count, 4)
+    assert_equal(scan.words[zorbly].word, String("zorbly"))
+    assert_equal(scan.words[zorbly].line, 1)
+    # ``frobnix's`` groups with ``frobnix``; the suppressed line doesn't count.
+    assert_equal(scan.words[frobnix].count, 2)
+    assert_equal(scan.words[quux].count, 1)
+    var drop = List[String]()
+    drop.append(String("zorbly"))
+    scan.remove_keys(drop)
+    assert_equal(len(scan.words), 2)
+    _rm_rf(root)
+
+
+def test_project_spell_scan_counts_across_many_files() raises:
+    """Every file is checked exactly once however the time budget slices
+    the work, and progress reaches 100%."""
+    var root = _temp_path(String("_spell_many"))
+    _rm_rf(root)
+    _ensure_dir(root)
+    var files = List[String]()
+    for i in range(24):
+        var p = root + String("/f") + String(i) + String(".py")
+        var body = String("")
+        for k in range(i + 1):
+            body += String("# zorbly line ") + String(k) + String(" quuxed\n")
+        _ = write_file(p, body)
+        files.append(p)
+    var speller = _fixture_speller()
+    var scan = ProjectSpellScan()
+    scan.start(files^)
+    var spins = 0
+    while scan.step(0, speller) and spins < 5000:
+        spins += 1
+    assert_false(scan.active)
+    assert_equal(scan.files_checked, 24)
+    assert_equal(len(scan.words), 2)    # zorbly, quuxed
+    for i in range(len(scan.words)):
+        assert_equal(scan.words[i].count, 300)
+    assert_true(scan.progress() >= 1.0)
+    _rm_rf(root)
+
+
+def test_spell_scan_files_skips_binaries_by_extension() raises:
+    """Binaries are dropped before anything is read: known extensions,
+    and everything inside a bundle directory that has one — but only
+    below the project root, so a root under ``Foo.app/`` still scans."""
+    var root = _temp_path(String("_spell_files.app"))
+    _rm_rf(root)
+    _ensure_dir(root + String("/Design.pxd/data"))
+    _ = write_file(root + String("/a.py"), String("# hi\n"))
+    _ = write_file(root + String("/photo.JPG"), String("x"))
+    _ = write_file(root + String("/font.woff2"), String("x"))
+    _ = write_file(root + String("/Design.pxd/data/blob"), String("x"))
+    var files = spell_scan_files(root)
+    assert_equal(len(files), 1)
+    assert_true(files[0].endswith("/a.py"))
+    _rm_rf(root)
+
+
+def test_spelling_dialog_multi_select_and_submit() raises:
+    """Rows sort by count; click, Shift-click, Cmd-click and Space build
+    the selection; an Add button submits the selected keys and
+    ``acknowledge`` removes them."""
+    var root = _temp_path(String("_spell_dialog"))
+    var files = _scan_fixture(root)
+    var speller = _fixture_speller()
+    var d = SpellingDialog()
+    d.open(files^, True)
+    var spins = 0
+    while d.scan.active and spins < 1000:
+        d.tick(speller)
+        spins += 1
+    d.tick(speller)
+    var screen = Rect(0, 0, 100, 40)
+    var canvas = Canvas(100, 40)
+    d.paint(canvas, screen)
+    assert_equal(len(d.order), 3)
+    assert_equal(d.scan.words[d.order[0]].key, String("zorbly"))
+    assert_equal(d.scan.words[d.order[1]].key, String("frobnix"))
+    assert_equal(d.scan.words[d.order[2]].key, String("quux"))
+    # Click row 0, Shift-click row 2: all three.
+    var top = d._list_rect.a.y
+    var x = d._list_rect.a.x + 4
+    _ = d.handle_mouse(Event.mouse_event(Point(x, top), MOUSE_BUTTON_LEFT), screen)
+    _ = d.handle_mouse(
+        Event.mouse_event(Point(x, top + 2), MOUSE_BUTTON_LEFT, mods=MOD_SHIFT),
+        screen,
+    )
+    assert_equal(len(d.selected_keys()), 3)
+    # Cmd-click row 1 drops it.
+    _ = d.handle_mouse(
+        Event.mouse_event(Point(x, top + 1), MOUSE_BUTTON_LEFT, mods=MOD_META),
+        screen,
+    )
+    var keys = d.selected_keys()
+    assert_equal(len(keys), 2)
+    assert_equal(keys[0], String("zorbly"))
+    assert_equal(keys[1], String("quux"))
+    # Space toggles the cursor row (row 1) back in.
+    _ = d.handle_key(Event.key_event(KEY_SPACE))
+    assert_equal(len(d.selected_keys()), 3)
+    # Down moves the cursor and selects just that row.
+    _ = d.handle_key(Event.key_event(KEY_DOWN))
+    keys = d.selected_keys()
+    assert_equal(len(keys), 1)
+    assert_equal(keys[0], String("quux"))
+    # Tab to "Add to User" and press Enter.
+    _ = d.handle_key(Event.key_event(KEY_TAB))
+    _ = d.handle_key(Event.key_event(KEY_TAB))
+    _ = d.handle_key(Event.key_event(KEY_ENTER))
+    assert_true(d.submitted)
+    assert_equal(d.action, SPELLING_ADD_USER)
+    d.acknowledge(d.selected_keys())
+    assert_false(d.submitted)
+    assert_equal(len(d.order), 2)
+    _ = d.handle_key(Event.key_event(KEY_ESC))
+    assert_false(d.active)
+    _rm_rf(root)
+
+
 def main() raises:
     setup_test_env()
     test_speller_check_word_basic()
@@ -547,4 +733,8 @@ def main() raises:
     test_spell_menu_enter_on_project_enabled_resolves_with_add_project()
     test_spell_menu_esc_dismisses()
     test_has_spell_noinspection_directive_parses_intellij_forms()
-    print("spell: 20 tests passed")
+    test_project_spell_scan_counts_flagged_words()
+    test_project_spell_scan_counts_across_many_files()
+    test_spell_scan_files_skips_binaries_by_extension()
+    test_spelling_dialog_multi_select_and_submit()
+    print("spell: 24 tests passed")

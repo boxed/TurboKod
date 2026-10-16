@@ -58,7 +58,7 @@ from turbokod.settings import Settings
 from turbokod.window import WindowManager
 from turbokod.events import (
     Event, EVENT_FOCUS_OUT, EVENT_RESIZE, KEY_END, KEY_ENTER, KEY_ESC,
-    KEY_HOME, MOD_CTRL, MOD_META, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE
+    KEY_HOME, KEY_TAB, MOD_CTRL, MOD_META, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE
 )
 from turbokod.geometry import Point, Rect
 from turbokod.prompt import (
@@ -178,13 +178,17 @@ def test_desktop_project_lifecycle() raises:
     # Label stays "Project" — the project name lives in the window
     # title bar, not the menu label.
     assert_equal(d.menu_bar.menus[idx].label, String("Project"))
-    # Active-project items: Project Settings..., separator, the project
-    # list (the active project included, checked), separator, close. (The
-    # file-tree cycle lives in the host's View menu, not here.) Separators
-    # carry no action.
+    # Active-project items: Project Settings..., Spelling..., separator,
+    # the project list (the active project included, checked), separator,
+    # close. (The file-tree cycle lives in the host's View menu, not
+    # here.) Separators carry no action.
     assert_equal(
         d.menu_bar.menus[idx].items[0].action, PROJECT_SETTINGS,
     )
+    assert_equal(
+        d.menu_bar.menus[idx].items[1].label, String("Spelling..."),
+    )
+    assert_true(d.menu_bar.menus[idx].items[2].is_separator)
     var last = len(d.menu_bar.menus[idx].items) - 1
     assert_equal(
         d.menu_bar.menus[idx].items[last].action, PROJECT_CLOSE_ACTION,
@@ -193,13 +197,13 @@ def test_desktop_project_lifecycle() raises:
     # The active project is listed and checked rather than skipped —
     # that's what makes the menu say which project this window is.
     assert_equal(
-        d.menu_bar.menus[idx].items[2].action,
+        d.menu_bar.menus[idx].items[3].action,
         PROJECT_OPEN_RECENT_PREFIX + d.project.value(),
     )
-    assert_true(d.menu_bar.menus[idx].items[2].checkable)
-    assert_true(d.menu_bar.menus[idx].items[2].checked)
+    assert_true(d.menu_bar.menus[idx].items[3].checkable)
+    assert_true(d.menu_bar.menus[idx].items[3].checked)
     assert_equal(
-        d.menu_bar.menus[idx].items[2].label, basename(d.project.value()),
+        d.menu_bar.menus[idx].items[3].label, basename(d.project.value()),
     )
     # Detection is sticky: a second call doesn't reset the project.
     var first = d.project.value()
@@ -3306,6 +3310,61 @@ def test_find_symbol_qualified_query_lists_and_jumps_to_class_members() raises:
     _rm_rf(root)
 
 
+def test_project_spelling_dialog_adds_to_project_dictionary() raises:
+    """Project ▸ Spelling end to end: the menu offers it, the scan finds
+    the project's misspelling, and "Add to Project" writes it to the
+    project dictionary so the speller stops flagging it."""
+    var root = _temp_path(String("_spelling_dialog"))
+    _rm_rf(root)
+    _ensure_dir(root)
+    _ = write_file(root + String("/mod.py"), String(
+        "# the zorblyfrax helper\n"
+        "x = 'zorblyfrax again'\n"
+    ))
+    var d = Desktop()
+    d.project = Optional[String](root)
+    d.speller.set_project(root)
+    d._rebuild_project_menu(force=True)
+    var found = False
+    var items = d.menu_bar.menus[d._project_menu_idx].items.copy()
+    for i in range(len(items)):
+        if items[i].label == String("Spelling..."):
+            found = True
+    assert_true(found)
+
+    d._open_spelling_dialog()
+    assert_true(d.spelling_dialog.active)
+    var frames = 0
+    while d.spelling_dialog.scan.active and frames < 500:
+        d.spelling_dialog.tick(d.speller)
+        frames += 1
+    d.spelling_dialog.tick(d.speller)
+    var row = -1
+    for i in range(len(d.spelling_dialog.order)):
+        var w = d.spelling_dialog.scan.words[d.spelling_dialog.order[i]]
+        if w.key == String("zorblyfrax"):
+            row = i
+            assert_equal(w.count, 2)
+    assert_true(row >= 0)
+    d.spelling_dialog.cursor = row
+    d.spelling_dialog._select_only(row)
+    # Tab to "Add to Project", Enter — through the Desktop's routing.
+    _ = d.handle_event(Event.key_event(KEY_TAB), _SCREEN)
+    _ = d.handle_event(Event.key_event(KEY_ENTER), _SCREEN)
+    assert_true(d.speller.check_word(String("zorblyfrax")))
+    var dict_text = read_file(root + String("/.turbokod/dictionary.txt"))
+    assert_true(String("zorblyfrax") in dict_text)
+    for i in range(len(d.spelling_dialog.order)):
+        assert_true(
+            d.spelling_dialog.scan.words[d.spelling_dialog.order[i]].key
+                != String("zorblyfrax"),
+        )
+    _ = d.handle_event(Event.key_event(KEY_ESC), _SCREEN)
+    assert_false(d.spelling_dialog.active)
+    d.shutdown()
+    _rm_rf(root)
+
+
 def test_shutdown_stops_the_search_subprocesses() raises:
     """Find in Project / Find Symbol each stream an ``rg`` child; a
     window closed mid-search used to leave it running with our three
@@ -3599,8 +3658,9 @@ def main() raises:
     test_find_symbol_index_sees_unsaved_buffer_text()
     test_find_symbol_rg_fallback_seeds_from_the_definition()
     test_find_symbol_qualified_query_lists_and_jumps_to_class_members()
+    test_project_spelling_dialog_adds_to_project_dictionary()
     test_shutdown_stops_the_search_subprocesses()
     test_project_find_accepts_non_ascii_in_its_query()
     test_fullscreen_modal_paint_is_covered_by_the_modal()
     test_clamp_scroll_still_pulls_back_a_widened_window()
-    print("desktop: 110 tests passed")
+    print("desktop: 111 tests passed")
