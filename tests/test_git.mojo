@@ -5222,6 +5222,32 @@ def test_local_changes_ctrl_p_pushes_to_a_picked_remote() raises:
     _rm_rf(root)
 
 
+def test_commit_info_file_summary_rows_point_at_their_diff() raises:
+    """A commit's info panel opens with a per-file summary; each row's
+    ``file_line`` is the panel row where that file's diff begins."""
+    var lc = LocalChanges()
+    lc.open(String("/tmp"))
+    var registry = GrammarRegistry()
+    var show = String(
+        "commit abc1234\nAuthor: A <a@b.c>\n\n    msg\n\n"
+        "diff --git a/x.txt b/x.txt\nindex 1..2 100644\n"
+        "--- a/x.txt\n+++ b/x.txt\n@@ -3,2 +7,3 @@\n a\n+b\n+c\n-d\n"
+        "diff --git a/gone.txt b/gone.txt\ndeleted file mode 100644\n"
+        "index 1..0\n--- a/gone.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-z\n"
+    )
+    lc._populate_commit_info(show, String(""), registry)
+    var starts = List[Int]()
+    var summary = 0
+    for i in range(len(lc.info.lines)):
+        if Int(lc.info.kind[i]) == 2 and len(lc.info.file_path[i].as_bytes()) > 0:
+            summary += 1
+            starts.append(lc.info.file_line[i])
+            assert_true(lc.info.file_line[i] > i)
+            assert_true(lc.info.file_line[i] < len(lc.info.lines))
+    assert_equal(summary, 2)
+    assert_true(starts[0] < starts[1])
+
+
 def main() raises:
     test_local_changes_ctrl_p_pushes_to_a_picked_remote()
     setup_test_env()
@@ -5366,4 +5392,5 @@ def main() raises:
     test_branch_pane_o_refuses_main_and_a_non_github_remote()
     test_parse_name_status_z_maps_statuses_to_lsp_change_types()
     test_changed_paths_between_reports_what_a_branch_switch_rewrote()
-    print("git: 142 tests passed")
+    test_commit_info_file_summary_rows_point_at_their_diff()
+    print("git: 143 tests passed")

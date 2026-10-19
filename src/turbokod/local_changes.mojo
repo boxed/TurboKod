@@ -2312,6 +2312,7 @@ struct LocalChanges(Movable):
         # Walk per-file diff chunks and feed each one to the same
         # transform the unstaged/staged panels use.
         var changed = parse_unified_diff_files(diff_part)
+        var summary_rows = self._emit_commit_file_summary(changed)
         var banner_w = 200
         # Highlight from the diff's own lines, not the full blobs: a
         # single click in the log can land on a commit that touched
@@ -2319,11 +2320,86 @@ struct LocalChanges(Movable):
         # for each one stalls the UI. The diff is already in hand, and
         # tokenizing it costs what the diff costs.
         for k in range(len(changed)):
+            # Summary row -> where this file's diff starts, so a click
+            # can scroll there.
+            if summary_rows[k] >= 0:
+                self.info.file_line[summary_rows[k]] = len(self.info.lines)
             _populate_diff_panel(
                 self.info, changed[k].diff, changed[k].path,
                 String(""), String(""), banner_w, registry,
                 sides_from_diff=True,
             )
+
+    def _emit_commit_file_summary(
+        mut self, changed: List[ChangedFile],
+    ) -> List[Int]:
+        """Emit a per-file overview (status letter, path, +added/-removed)
+        ahead of a commit's diffs. Returns each file's summary row index;
+        the caller fills in ``file_line`` with the row where that file's
+        diff starts, and a click scrolls the panel there. These are the
+        only ``_LINE_INFO`` rows with a path, which is how the click
+        handler spots them."""
+        var out = List[Int]()
+        if len(changed) == 0:
+            return out^
+        var rows = List[String]()
+        var paths = List[String]()
+        var total_add = 0
+        var total_del = 0
+        var width = 0
+        for k in range(len(changed)):
+            var w = display_columns(changed[k].path)
+            if w > width:
+                width = w
+        for k in range(len(changed)):
+            var status = String("M")
+            var added = 0
+            var removed = 0
+            var seen_hunk = False
+            var lines = split_lines_no_trailing(changed[k].diff)
+            for li in range(len(lines)):
+                var b = lines[li].as_bytes()
+                if len(b) == 0:
+                    continue
+                if not seen_hunk:
+                    if lines[li].startswith("new file mode"):
+                        status = String("A")
+                    elif lines[li].startswith("deleted file mode"):
+                        status = String("D")
+                    elif lines[li].startswith("rename to "):
+                        status = String("R")
+                    elif b[0] == 0x40:
+                        seen_hunk = True
+                    continue
+                if b[0] == 0x2B:
+                    added += 1
+                elif b[0] == 0x2D:
+                    removed += 1
+            total_add += added
+            total_del += removed
+            var pad = String("")
+            for _ in range(width - display_columns(changed[k].path)):
+                pad += " "
+            rows.append(
+                String("  ") + status + String("  ") + changed[k].path
+                + pad + String("  +") + String(added)
+                + String(" -") + String(removed)
+            )
+            paths.append(changed[k].path)
+        _emit_info(self.info, String(""))
+        var noun = String(" files") if len(changed) != 1 else String(" file")
+        _emit_info(
+            self.info,
+            String(len(changed)) + noun + String(" changed, +")
+            + String(total_add) + String(" -") + String(total_del),
+        )
+        for k in range(len(rows)):
+            out.append(len(self.info.lines))
+            _emit_body_row(
+                self.info, rows[k].copy(), _LINE_INFO, -1, paths[k], 1,
+            )
+        _emit_info(self.info, String(""))
+        return out^
 
     def _emit_merged_commits(mut self, merged_log: String):
         """Emit the "Merged commits" section for a merge commit.
@@ -6084,6 +6160,16 @@ struct LocalChanges(Movable):
                                 self.pending_open_url = url^
                                 return True
                         self.info.cursor = li
+                        # File-summary row: scroll to that file's diff.
+                        if self.info.kind[li] == _LINE_INFO \
+                                and len(self.info.file_path[li].as_bytes()) > 0:
+                            var target = self.info.file_line[li]
+                            _scroll_panel(
+                                self.info, target - self.info.scroll,
+                                self._right_panel_height(rpane, bounds),
+                            )
+                            self.info.cursor = target
+                            return True
                         if Int(event.click_count) >= 2:
                             self._submit_jump_target(self.info.jump_target(li))
                     return True
