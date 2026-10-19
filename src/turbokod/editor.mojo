@@ -2957,25 +2957,24 @@ struct Editor(Copyable, Movable):
         Used by the keystroke handler to decide whether to take the
         multi-caret fast path or to collapse extras first."""
         var carets = self._all_carets_asc()
+        var any_acts = op == 0
         for i in range(len(carets)):
             var c = carets[i]
             if c.row != c.anchor_row:
                 # Cross-row selection — fall back.
                 return False
-            var has_sel = c.col != c.anchor_col
-            if has_sel:
-                # Same-row selection satisfies the boundary requirement
-                # for any op: typing replaces it, backspace/delete is
-                # the selection deletion itself.
+            if c.col != c.anchor_col:
+                # Same-row selection: the selection is what's edited.
+                any_acts = True
                 continue
-            if op == 1:
-                if c.col == 0:
-                    return False
-            elif op == 2:
-                var n = self.buffer.line_length(c.row)
-                if c.col >= n:
-                    return False
-        return True
+            # A bare caret that can't backspace/delete (col 0 / end of
+            # row, e.g. a short row in a block selection) is skipped by
+            # ``_multi_edit_inline`` rather than aborting the whole edit.
+            if op == 1 and c.col > 0:
+                any_acts = True
+            elif op == 2 and c.col < self.buffer.line_length(c.row):
+                any_acts = True
+        return any_acts
 
     def _all_carets_col0(self) -> Bool:
         """Returns True iff every caret sits at column 0 with no
@@ -7539,6 +7538,13 @@ struct Editor(Copyable, Movable):
                     actual_ec = actual_cur
             else:
                 var line_ro = self.buffer.line(c.row)
+                if (op == 1 and actual_cur <= 0) \
+                        or (op == 2 and actual_cur >= len(line_ro.as_bytes())):
+                    # Nothing to delete for this caret: keep it as is.
+                    new_carets.append(
+                        Caret(c.row, actual_cur, c.desired_col, c.row, actual_cur),
+                    )
+                    continue
                 if op == 1:
                     actual_sc = prev_codepoint_start(line_ro, actual_cur)
                     actual_ec = actual_cur

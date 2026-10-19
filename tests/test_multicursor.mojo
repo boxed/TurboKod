@@ -550,6 +550,33 @@ def test_delete_replaces_selection_at_each_caret() raises:
     assert_equal(ed.buffer.line(1), String("f"))
 
 
+def test_delete_and_backspace_skip_carets_with_nothing_to_delete() raises:
+    # Block selection over a short row: that row's caret sits at EOL
+    # (Delete) / col 0 (Backspace) and must not abort the other rows.
+    var ed = Editor(String("abc\n\nxyz\n"))
+    ed.selections[0].anchor_row = 0
+    ed.selections[0].anchor_col = 0
+    ed.selections[0].row = 0
+    ed.selections[0].col = 0
+    ed._add_caret(Caret(1, 0, 0, 1, 0))
+    ed._add_caret(Caret(2, 0, 0, 2, 0))
+    var view = _view()
+    _ = ed.handle_key(Event.key_event(UInt32(0xE019), MOD_NONE), view)
+    assert_equal(ed.buffer.line(0), String("bc"))
+    assert_equal(ed.buffer.line(1), String(""))
+    assert_equal(ed.buffer.line(2), String("yz"))
+    assert_equal(ed.caret_count(), 3)
+    var ed2 = Editor(String("abc\n\nxyz\n"))
+    ed2.selections[0] = Caret(0, 2, 2, 0, 2)
+    ed2._add_caret(Caret(1, 0, 0, 1, 0))
+    ed2._add_caret(Caret(2, 2, 2, 2, 2))
+    _ = ed2.handle_key(Event.key_event(KEY_BACKSPACE, MOD_NONE), view)
+    assert_equal(ed2.buffer.line(0), String("ac"))
+    assert_equal(ed2.buffer.line(1), String(""))
+    assert_equal(ed2.buffer.line(2), String("xz"))
+    assert_equal(ed2.caret_count(), 3)
+
+
 def test_typing_two_selections_same_row_shifts_correctly() raises:
     # Two non-overlapping same-row selections.
     # "[fo]o [ba]r" — selections "fo" (cols 0-2) and "ba" (cols 4-6).
@@ -864,6 +891,7 @@ def main() raises:
     test_typing_replaces_each_carets_selection()
     test_backspace_deletes_selection_at_each_caret()
     test_delete_replaces_selection_at_each_caret()
+    test_delete_and_backspace_skip_carets_with_nothing_to_delete()
     test_typing_two_selections_same_row_shifts_correctly()
     test_typing_falls_back_when_selection_crosses_rows()
     test_cross_row_selections_merge_when_they_touch()
