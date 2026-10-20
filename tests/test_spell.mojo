@@ -644,6 +644,10 @@ def test_spell_scan_files_skips_binaries_by_extension() raises:
     _ = write_file(root + String("/photo.JPG"), String("x"))
     _ = write_file(root + String("/font.woff2"), String("x"))
     _ = write_file(root + String("/Design.pxd/data/blob"), String("x"))
+    # Translation catalogs are other languages' text, not misspellings.
+    _ = write_file(root + String("/django.po"), String("msgid \"x\"\n"))
+    _ = write_file(root + String("/django.pot"), String("msgid \"x\"\n"))
+    _ = write_file(root + String("/django.mo"), String("x"))
     var files = spell_scan_files(root)
     assert_equal(len(files), 1)
     assert_true(files[0].endswith("/a.py"))

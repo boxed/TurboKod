@@ -108,7 +108,8 @@ def _bucket(key: String) -> Int:
 def spell_scan_files(root: String) -> List[String]:
     """The files Project ▸ Spelling should read: the project's files
     (gitignored ones excluded, as everywhere) minus binaries recognized
-    by extension, without opening them.
+    by extension, without opening them, and translation catalogs
+    (``.po`` / ``.pot`` / ``.mo``), which are other languages' text.
 
     Deliberately not ``git ls-files --eol``: git decides "binary" by
     looking for a NUL in the first 8000 bytes — the same test ``_load``
@@ -118,9 +119,16 @@ def spell_scan_files(root: String) -> List[String]:
     var files = walk_project_files(root)
     var out = List[String]()
     for i in range(len(files)):
+        if _is_translation_catalog(files[i]):
+            continue
         if not _in_binary_path(files[i], len(root.as_bytes())):
             out.append(files[i])
     return out^
+
+
+def _is_translation_catalog(path: String) -> Bool:
+    var ext = fold_ascii(extension_of(path))
+    return ext == "po" or ext == "pot" or ext == "mo"
 
 
 def _in_binary_path(path: String, root_len: Int) -> Bool:
