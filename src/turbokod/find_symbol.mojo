@@ -263,6 +263,9 @@ struct FindSymbol(Movable):
     # Searching the member text alone would list every identifier that
     # merely contains it, from any class or none.
     var _class_mode: Bool
+    # True once a class opener matching the qualifier was seen in this
+    # class-mode search; an empty result is then final (no fallback).
+    var _class_matched: Bool
     # True once the user has actively navigated (arrow keys, page,
     # home/end, or click-to-select). Drives whether streaming inserts
     # follow the user's chosen entry by name (preserve selection) or
@@ -303,6 +306,7 @@ struct FindSymbol(Movable):
         self._chooser_name = String("")
         self.query_dirty = False
         self._class_mode = False
+        self._class_matched = False
 
     def open(
         mut self,
@@ -498,7 +502,8 @@ struct FindSymbol(Movable):
         the qualifier's class; read that file's class body for members
         matching the query. When the search ends with nothing (no such
         class, or an inherited member) fall back to the plain member
-        search, as the index path does."""
+        search, as the index path does — unless a class did match, in
+        which case the empty result is the answer."""
         var qualifier = _query_qualifier(self.query.text)
         var cls = _last_segment(qualifier)
         var member = _query_member(self.query.text)
@@ -516,6 +521,8 @@ struct FindSymbol(Movable):
                 if len(chain.as_bytes()) > 0 else cls
             if not container_matches_qualifier(full, qualifier):
                 continue
+            if opens_container(text, line0, cls):
+                self._class_matched = True
             var found = container_members_matching(text, line0, cls, member)
             for j in range(len(found)):
                 if len(self.entries) >= _ENTRIES_CAP:
@@ -524,7 +531,8 @@ struct FindSymbol(Movable):
                     found[j][0], path, found[j][1], found[j][2], full,
                 ))
                 added = True
-        if not self.runner.is_active() and len(self.entries) == 0:
+        if not self.runner.is_active() and len(self.entries) == 0 \
+                and not self._class_matched:
             self._class_mode = False
             _ = self.runner.start(member, self.root)
             return
@@ -599,6 +607,7 @@ struct FindSymbol(Movable):
         self.scroll = 0
         self._user_navigated = False
         self._class_mode = False
+        self._class_matched = False
         self.runner.cancel()
         # rg searches for the *member* segment only — the qualifier is
         # a container hint resolved later via the LSP, and it never
@@ -1243,6 +1252,22 @@ def _is_container_modifier(w: String) -> Bool:
         or w == "case"
 
 
+
+
+def opens_container(text: String, line: Int, container: String) -> Bool:
+    """Does 0-based ``line`` of ``text`` open the class-like scope
+    ``container``?"""
+    var b = text.as_bytes()
+    var n = len(b)
+    var p = 0
+    var ln = 0
+    while ln < line and p < n:
+        if b[p] == 0x0A:
+            ln += 1
+        p += 1
+    if ln != line or line < 0:
+        return False
+    return _container_opener_name(b, p + _line_indent(b, p)) == container
 
 
 def container_members_matching(

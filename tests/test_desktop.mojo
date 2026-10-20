@@ -3300,12 +3300,47 @@ def test_find_symbol_qualified_query_lists_and_jumps_to_class_members() raises:
     )
     assert_equal(d.windows.windows[idx].editor.selections[0].row, 5)
 
-    # A member the class doesn't have falls back to the plain search.
+    # A member the class doesn't have lists nothing.
     d._open_find_symbol()
     d.find_symbol.query.set_text(String("ActionChain.ordering_nope"))
     d.find_symbol.query_dirty = True
     d._pump_find_symbol()
     assert_equal(len(d.find_symbol.entries), 0)
+    d.shutdown()
+    _rm_rf(root)
+
+
+def test_find_symbol_qualified_query_for_absent_member_lists_nothing() raises:
+    """``Action.__post_init__`` where ``Action`` exists but declares no
+    such member must list nothing, not every other ``__post_init__``.
+    An unknown class still falls back to the plain member search."""
+    var root = _temp_path(String("_fs_qualified_absent"))
+    _rm_rf(root)
+    _ensure_dir(root)
+    _ = write_file(root + String("/m.py"), String(
+        "class Other:\n"
+        "    def __post_init__(self):\n"
+        "        pass\n"
+        "\n"
+        "class Action:\n"
+        "    name = 1\n"
+    ))
+    var d = Desktop()
+    d.project = Optional[String](root)
+    d._open_find_symbol()
+    var frames = 0
+    while not d.symbol_index.is_ready() and frames < 200:
+        d._pump_find_symbol()
+        frames += 1
+    assert_true(d.symbol_index.is_ready())
+    d.find_symbol.query.set_text(String("Action.__post_init__"))
+    d.find_symbol.query_dirty = True
+    d._pump_find_symbol()
+    assert_equal(len(d.find_symbol.entries), 0)
+    d.find_symbol.query.set_text(String("Nope.__post_init__"))
+    d.find_symbol.query_dirty = True
+    d._pump_find_symbol()
+    assert_equal(len(d.find_symbol.entries), 1)
     d.shutdown()
     _rm_rf(root)
 
@@ -3658,6 +3693,7 @@ def main() raises:
     test_find_symbol_index_sees_unsaved_buffer_text()
     test_find_symbol_rg_fallback_seeds_from_the_definition()
     test_find_symbol_qualified_query_lists_and_jumps_to_class_members()
+    test_find_symbol_qualified_query_for_absent_member_lists_nothing()
     test_project_spelling_dialog_adds_to_project_dictionary()
     test_shutdown_stops_the_search_subprocesses()
     test_project_find_accepts_non_ascii_in_its_query()

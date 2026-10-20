@@ -220,7 +220,7 @@ from .symbol_pick import SymbolPick
 from .reference_pick import ReferencePick
 from .find_symbol import (
     FindSymbol, FindSymbolMatch, container_matches_qualifier,
-    container_members_matching, enclosing_container,
+    container_members_matching, enclosing_container, opens_container,
 )
 from .symbol_index import SymbolIndex
 from .terminal import beep
@@ -7766,6 +7766,7 @@ struct Desktop(Movable):
                     self.project_find.matches.copy(),
                     self.project_find.query.text,
                     self.project_find.root,
+                    self.project_find._last_searched_opts.whole_word,
                 )
                 self.project_find.close()
                 self._focus_dock(DOCK_FIND_RESULTS_PANE)
@@ -12941,8 +12942,11 @@ struct Desktop(Movable):
         if not self.symbol_index.is_ready():
             self.find_symbol.restart_runner()
             return
-        var members = self._qualified_member_matches(qualifier, member)
-        if len(members) > 0:
+        var class_found = False
+        var members = self._qualified_member_matches(
+            qualifier, member, class_found,
+        )
+        if len(members) > 0 or class_found:
             self.find_symbol.apply_index_results(members^)
             return
         var hits = self.symbol_index.search(member, FIND_SYMBOL_RESULT_CAP)
@@ -12954,14 +12958,17 @@ struct Desktop(Movable):
         self.find_symbol.apply_index_results(out^)
 
     def _qualified_member_matches(
-        self, qualifier: String, member: String,
+        self, qualifier: String, member: String, mut class_found: Bool,
     ) -> List[FindSymbolMatch]:
         """For a ``Class.member`` query: the members of every class
         named like the qualifier's last segment whose name contains
         ``member``, read off the class bodies. Empty for a bare query,
-        or when no such class (or member) exists — the caller then
-        falls back to the plain name search, so an inherited member
-        still turns up, just unqualified."""
+        or when no such class exists — the caller then falls back to
+        the plain name search. ``class_found`` reports whether a class
+        matching the qualifier was seen; if so, an empty result means
+        the class has no such member and must stay empty (a search for
+        ``Action.__post_init__`` must not list every other
+        ``__post_init__``)."""
         var out = List[FindSymbolMatch]()
         if len(qualifier.as_bytes()) == 0:
             return out^
@@ -12984,6 +12991,8 @@ struct Desktop(Movable):
                 if len(chain.as_bytes()) > 0 else cls
             if not container_matches_qualifier(full, qualifier):
                 continue
+            if opens_container(text.value(), line0, cls):
+                class_found = True
             var found = container_members_matching(
                 text.value(), line0, cls, member,
             )
