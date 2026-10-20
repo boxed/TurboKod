@@ -576,6 +576,35 @@ def test_highlight_triple_quoted_string_spans_lines() raises:
     assert_true(saw_inline_string)
 
 
+def test_highlight_triple_quoted_string_with_escaped_quotes() raises:
+    """Three escaped quotes followed by three real ones close a
+    triple-quoted string on the *real* quotes. Without an escape rule
+    inside the triple string, the end regex matched the last escaped
+    quote plus two real ones, closed one quote early, and the stray
+    quote opened a single-line string that ran to end of file."""
+    var lines = _hl_lines(
+        String("P = \"\"\"Your request:"),
+        String("\\\"\\\"\\\""),
+        String("{x}"),
+        String("\\\"\\\"\\\"\"\"\""),
+        String(""),
+        String("def f(): pass"),
+        String("s = \"unterminated"),
+        String("def g(): pass"),
+    )
+    var hls = highlight_for_extension(String("py"), lines)
+    var saw_def_5 = False
+    var saw_def_7 = False
+    for i in range(len(hls)):
+        if hls[i].row == 5 or hls[i].row == 7:
+            assert_true(hls[i].attr != highlight_string_attr())
+        if hls[i].attr == highlight_keyword_attr():
+            if hls[i].row == 5: saw_def_5 = True
+            if hls[i].row == 7: saw_def_7 = True
+    assert_true(saw_def_5)
+    assert_true(saw_def_7)
+
+
 def test_highlight_unknown_extension_returns_empty() raises:
     var lines = _hl_lines(String("fn main():"), String("  pass"))
     var hls = highlight_for_extension(String("txt"), lines)
@@ -2185,6 +2214,7 @@ def main() raises:
     test_template_include_at_extracts_quoted_path()
     test_highlight_for_extension_recognizes_mojo()
     test_highlight_triple_quoted_string_spans_lines()
+    test_highlight_triple_quoted_string_with_escaped_quotes()
     test_highlight_unknown_extension_returns_empty()
     test_highlight_rust_keywords_strings_comments()
     test_highlight_rust_block_comment_spans_lines()

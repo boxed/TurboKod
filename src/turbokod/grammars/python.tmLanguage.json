@@ -27,26 +27,38 @@
     "docstring_double": {
       "begin": "^\\s*\"{3}",
       "end": "\"{3}",
-      "name": "comment.block.documentation.python"
+      "name": "comment.block.documentation.python",
+      "patterns": [
+        { "match": "\\\\." }
+      ]
     },
     "docstring_single": {
       "begin": "^\\s*'{3}",
       "end": "'{3}",
-      "name": "comment.block.documentation.python"
+      "name": "comment.block.documentation.python",
+      "patterns": [
+        { "match": "\\\\." }
+      ]
     },
     "string_triple_double": {
       "begin": "(?:[bBrRfFuU]|[bB][rR]|[rR][bB]|[fF][rR]|[rR][fF])?\"{3}",
       "end": "\"{3}",
-      "name": "string.quoted.triple.double.python"
+      "name": "string.quoted.triple.double.python",
+      "patterns": [
+        { "match": "\\\\.", "name": "constant.character.escape.python" }
+      ]
     },
     "string_triple_single": {
       "begin": "(?:[bBrRfFuU]|[bB][rR]|[rR][bB]|[fF][rR]|[rR][fF])?'{3}",
       "end": "'{3}",
-      "name": "string.quoted.triple.single.python"
+      "name": "string.quoted.triple.single.python",
+      "patterns": [
+        { "match": "\\\\.", "name": "constant.character.escape.python" }
+      ]
     },
     "string_double": {
       "begin": "(?:[bBrRfFuU]|[bB][rR]|[rR][bB]|[fF][rR]|[rR][fF])?\"",
-      "end": "\"",
+      "end": "\"|(?<!\\\\)$",
       "name": "string.quoted.double.python",
       "patterns": [
         { "match": "\\\\.", "name": "constant.character.escape.python" }
@@ -54,7 +66,7 @@
     },
     "string_single": {
       "begin": "(?:[bBrRfFuU]|[bB][rR]|[rR][bB]|[fF][rR]|[rR][fF])?'",
-      "end": "'",
+      "end": "'|(?<!\\\\)$",
       "name": "string.quoted.single.python",
       "patterns": [
         { "match": "\\\\.", "name": "constant.character.escape.python" }
