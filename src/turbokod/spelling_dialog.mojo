@@ -7,30 +7,30 @@ scan is done. Rows stream in while it runs and the list re-sorts by
 count on every frame that changed it; the cursor follows its word once
 the user has moved it, and otherwise stays on the top row.
 
-Selection is multi: click selects one row, Shift-click / Shift-arrows
-extend a range, Ctrl- or Cmd-click / Space toggle a row, Ctrl+A
-selects everything. "Add to Project" / "Add to User" hand the selected
-words to the host (``submitted`` + ``action``), which writes them to
-the dictionary and calls ``remove_words`` so the rows disappear.
+The list is a multi-select ``ListBox`` (Windows extended-selection
+behavior — see ``list_box.mojo`` for the click / drag / key rules).
+"Add to Project" / "Add to User" hand the selected words to the host
+(``submitted`` + ``action``), which writes them to the dictionary and
+calls ``remove_words`` so the rows disappear.
 
-Selection is held by word *key*, not row index, because rows move
-whenever the list re-sorts.
+``ListBox`` selects by row index, but rows move whenever the list
+re-sorts, so ``_resort`` carries the selection across by word *key*.
 """
 
+from std.collections.dict import Dict
 from std.collections.list import List
 
 from .buttons import (
     BUTTON_FIRED, BUTTON_NONE, button_face, paint_shadow_button, ShadowButton,
 )
 from .canvas import Canvas
-from .colors import Attr, BLACK, BLUE, CYAN, DARK_GRAY, LIGHT_GRAY, WHITE
+from .colors import Attr, BLACK, BLUE, DARK_GRAY, LIGHT_GRAY
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC,
-    KEY_HOME, KEY_PAGEDOWN, KEY_PAGEUP, KEY_SPACE, KEY_TAB, KEY_UP,
-    MOD_CTRL, MOD_META, MOD_SHIFT, MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN,
-    MOUSE_WHEEL_UP,
+    Event, EVENT_KEY, EVENT_MOUSE, KEY_ENTER, KEY_ESC, KEY_TAB, MOD_SHIFT,
+    MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect, center_in
+from .list_box import ListBox
 from .spell import Speller
 from .spell_scan import ProjectSpellScan, SpellScanWord
 from .string_utils import display_columns
@@ -57,8 +57,19 @@ comptime _MAX_WIDTH = 72
 comptime _COUNT_W = 8
 """Columns for the right-aligned count, including its gap."""
 
-comptime _KEY_A = UInt32(0x61)
-comptime _KEY_A_UPPER = UInt32(0x41)
+
+struct _CarriedSelection(Copyable, Movable):
+    """A selection expressed as word keys, so it survives a re-sort."""
+    var active: Bool
+    var keys: List[String]
+    var caret: String
+    var anchor: String
+
+    def __init__(out self):
+        self.active = False
+        self.keys = List[String]()
+        self.caret = String("")
+        self.anchor = String("")
 
 
 struct SpellingDialog(Movable):
@@ -71,13 +82,8 @@ struct SpellingDialog(Movable):
     var order: List[Int]
     """Rows on screen: indices into ``scan.words``, by count descending."""
     var _sorted_version: Int
-    var selected: List[String]
-    """Keys of the selected rows."""
-    var cursor: Int
-    """Row (index into ``order``) the keyboard is on."""
-    var _anchor_key: String
-    """Range anchor for Shift-click / Shift-arrows."""
-    var scroll: Int
+    var list: ListBox
+    """Selection, caret and scroll over ``order``'s rows."""
     var _list_rect: Rect
     var _project_button: ShadowButton
     var _user_button: ShadowButton
@@ -92,10 +98,7 @@ struct SpellingDialog(Movable):
         self.scan = ProjectSpellScan()
         self.order = List[Int]()
         self._sorted_version = -1
-        self.selected = List[String]()
-        self.cursor = 0
-        self._anchor_key = String("")
-        self.scroll = 0
+        self.list = ListBox(multi=True)
         self._list_rect = Rect(0, 0, 0, 0)
         self._project_button = ShadowButton(String(" Add to Project "), 0, 0)
         self._user_button = ShadowButton(String(" Add to User "), 0, 0)
@@ -112,10 +115,7 @@ struct SpellingDialog(Movable):
         self.scan.start(files^)
         self.order = List[Int]()
         self._sorted_version = -1
-        self.selected = List[String]()
-        self.cursor = 0
-        self._anchor_key = String("")
-        self.scroll = 0
+        self.list.reset()
         self._focus.focus_force(_SLOT_LIST)
         self._project_button.reset_press()
         self._user_button.reset_press()
@@ -127,7 +127,7 @@ struct SpellingDialog(Movable):
         self.action = SPELLING_NONE
         self.scan.cancel()
         self.order = List[Int]()
-        self.selected = List[String]()
+        self.list.reset()
 
     def tick(mut self, speller: Speller):
         """Advance the scan by one frame's budget and keep the list
@@ -137,11 +137,7 @@ struct SpellingDialog(Movable):
         if self.scan.active:
             _ = self.scan.step(_SCAN_BUDGET_MS, speller)
         if self._sorted_version != self.scan.version:
-            var cursor_key = String("")
-            if len(self.selected) > 0 and 0 <= self.cursor \
-                    and self.cursor < len(self.order):
-                cursor_key = self._key_at(self.cursor)
-            self._resort(cursor_key)
+            self._resort(self._carried_selection())
 
     # --- results ----------------------------------------------------------
 
@@ -149,9 +145,8 @@ struct SpellingDialog(Movable):
         """Selected words in list order — what an Add button applies to."""
         var out = List[String]()
         for i in range(len(self.order)):
-            var key = self.scan.words[self.order[i]].key
-            if self._is_selected(key):
-                out.append(key)
+            if self.list.is_selected(i):
+                out.append(self._key_at(i))
         return out^
 
     def acknowledge(mut self, added: List[String]):
@@ -159,45 +154,67 @@ struct SpellingDialog(Movable):
         selection, keeping the cursor near where it was."""
         self.submitted = False
         self.action = SPELLING_NONE
+        var caret = max(self.list.selected, 0)
         # ``order`` indexes the word list ``remove_keys`` is about to
-        # shrink, so drop it before anything reads it again. The cursor
+        # shrink, so drop it before anything reads it again. The caret
         # keeps its row number rather than following a removed word.
         self.order = List[Int]()
         self.scan.remove_keys(added)
-        self.selected = List[String]()
-        self._anchor_key = String("")
-        self._resort(String(""))
-        if self.cursor >= len(self.order):
-            self.cursor = max(len(self.order) - 1, 0)
+        self._resort(_CarriedSelection())
         if len(self.order) > 0:
-            var key = self.scan.words[self.order[self.cursor]].key
-            self.selected.append(key)
-            self._anchor_key = key
-
-    def _is_selected(self, key: String) -> Bool:
-        for i in range(len(self.selected)):
-            if self.selected[i] == key:
-                return True
-        return False
+            self.list.set_selected(min(caret, len(self.order) - 1))
 
     # --- sorting ----------------------------------------------------------
 
-    def _resort(mut self, cursor_key: String):
-        """Rebuild ``order`` (count descending, then word), keeping the
-        cursor on ``cursor_key`` when it's still listed."""
+    def _carried_selection(self) -> _CarriedSelection:
+        """The selection as word keys, to survive a re-sort. Nothing is
+        carried until the user has selected something: before that the
+        caret just stays on its row, the top one."""
+        var c = _CarriedSelection()
+        if self.list.selected_count() == 0:
+            return c^
+        c.active = True
+        c.keys = self.selected_keys()
+        if 0 <= self.list.selected and self.list.selected < len(self.order):
+            c.caret = self._key_at(self.list.selected)
+        var a = self.list.anchor()
+        if 0 <= a and a < len(self.order):
+            c.anchor = self._key_at(a)
+        return c^
+
+    def _resort(mut self, carried: _CarriedSelection):
+        """Rebuild ``order`` (count descending, then word) and re-apply
+        ``carried`` to the new row numbers."""
         var idx = List[Int](capacity=len(self.scan.words))
         for i in range(len(self.scan.words)):
             idx.append(i)
         _merge_sort(idx, self.scan.words)
         self.order = idx^
         self._sorted_version = self.scan.version
-        if len(cursor_key.as_bytes()) > 0:
-            for i in range(len(self.order)):
-                if self.scan.words[self.order[i]].key == cursor_key:
-                    self.cursor = i
-                    break
-        if self.cursor >= len(self.order):
-            self.cursor = max(len(self.order) - 1, 0)
+        var n = len(self.order)
+        if not carried.active:
+            self.list.set_selection(
+                List[Int](), max(min(self.list.selected, n - 1), 0),
+                self.list.anchor(), n,
+            )
+            return
+        var wanted = Dict[String, Bool]()
+        for i in range(len(carried.keys)):
+            wanted[carried.keys[i]] = True
+        var rows = List[Int]()
+        var caret = -1
+        var anchor = -1
+        for i in range(n):
+            var key = self._key_at(i)
+            if key in wanted:
+                rows.append(i)
+            if key == carried.caret:
+                caret = i
+            if key == carried.anchor:
+                anchor = i
+        if caret < 0:
+            caret = max(min(self.list.selected, n - 1), 0)
+        self.list.set_selection(rows, caret, anchor, n)
 
     # --- layout + paint ---------------------------------------------------
 
@@ -235,30 +252,24 @@ struct SpellingDialog(Movable):
         var list_top = y
         var list_bottom = rect.b.y - 4
         self._list_rect = Rect(rect.a.x + 1, list_top, rect.b.x - 1, list_bottom)
-        var rows = list_bottom - list_top
-        self._clamp_scroll(rows)
         var list_focused = self._focus.is_focused(_SLOT_LIST)
-        var sel_attr = Attr(WHITE, BLUE) if list_focused else Attr(BLACK, CYAN)
+        var first = self.list.prepare(self._list_rect, len(self.order))
+        var labels = List[String]()
+        for i in range(
+            first,
+            min(first + max(self._list_rect.height(), 0), len(self.order)),
+        ):
+            var w = self.scan.words[self.order[i]]
+            # Count right-aligned in its column, then the word; the
+            # list's own one-cell indent puts the count at ``x0``.
+            var count = String(w.count)
+            var pad = max(_COUNT_W - 2 - display_columns(count), 0)
+            labels.append(String(" ") * pad + count + String("  ") + w.word)
+        self.list.paint_rows(canvas, self._list_rect, labels, list_focused, bg)
         if len(self.order) == 0:
             var msg = String("Looking for misspellings…") if self.scan.active \
                 else String("No misspellings found.")
             _ = painter.put_text(canvas, Point(x0, list_top), msg, dim)
-        for r in range(rows):
-            var i = self.scroll + r
-            if i >= len(self.order):
-                break
-            var w = self.scan.words[self.order[i]]
-            var row_attr = sel_attr if self._is_selected(w.key) else bg
-            painter.fill(
-                canvas, Rect(rect.a.x + 1, list_top + r, rect.b.x - 1, list_top + r + 1),
-                String(" "), row_attr,
-            )
-            if list_focused and i == self.cursor:
-                _ = painter.put_text(canvas, Point(rect.a.x + 1, list_top + r), String("►"), row_attr)
-            var count = String(w.count)
-            var cx = x0 + _COUNT_W - 2 - display_columns(count)
-            _ = painter.put_text(canvas, Point(cx, list_top + r), count, row_attr)
-            _ = painter.put_text(canvas, Point(x0 + _COUNT_W, list_top + r), w.word, row_attr)
         # Buttons.
         var by = rect.b.y - 3
         var gap = 2
@@ -269,7 +280,8 @@ struct SpellingDialog(Movable):
         self._project_button.move_to(bx, by)
         self._user_button.move_to(bx + pw + gap, by)
         self._close_button.move_to(bx + pw + gap + uw + gap, by)
-        var any_sel = len(self.selected) > 0
+        var n_selected = self.list.selected_count()
+        var any_sel = n_selected > 0
         self._focus.update(_SLOT_LIST, self._list_rect)
         self._focus.update(
             _SLOT_PROJECT, self._project_button.hit_rect(),
@@ -294,26 +306,13 @@ struct SpellingDialog(Movable):
         )
         _ = painter.put_text(
             canvas, Point(x0, by),
-            String(String(len(self.selected)) + String(" selected")), dim,
+            String(String(n_selected) + String(" selected")), dim,
         )
-
-    def _clamp_scroll(mut self, rows: Int):
-        if rows <= 0:
-            return
-        if self.cursor < self.scroll:
-            self.scroll = self.cursor
-        if self.cursor >= self.scroll + rows:
-            self.scroll = self.cursor - rows + 1
-        var max_scroll = max(len(self.order) - rows, 0)
-        if self.scroll > max_scroll:
-            self.scroll = max_scroll
-        if self.scroll < 0:
-            self.scroll = 0
 
     # --- events -----------------------------------------------------------
 
     def _submit(mut self, action: Int):
-        if len(self.selected) == 0:
+        if self.list.selected_count() == 0:
             return
         if action == SPELLING_ADD_PROJECT and not self.has_project:
             return
@@ -322,52 +321,6 @@ struct SpellingDialog(Movable):
 
     def _key_at(self, i: Int) -> String:
         return self.scan.words[self.order[i]].key
-
-    def _select_only(mut self, i: Int):
-        self.selected = List[String]()
-        if 0 <= i and i < len(self.order):
-            var key = self._key_at(i)
-            self.selected.append(key)
-            self._anchor_key = key
-
-    def _toggle(mut self, i: Int):
-        if i < 0 or i >= len(self.order):
-            return
-        var key = self._key_at(i)
-        var kept = List[String]()
-        var was = False
-        for k in range(len(self.selected)):
-            if self.selected[k] == key:
-                was = True
-            else:
-                kept.append(self.selected[k])
-        if not was:
-            kept.append(key)
-        self.selected = kept^
-        self._anchor_key = key
-
-    def _select_range_to(mut self, i: Int):
-        """Select from the anchor row to ``i`` inclusive."""
-        var a = -1
-        for k in range(len(self.order)):
-            if self._key_at(k) == self._anchor_key:
-                a = k
-                break
-        if a < 0:
-            self._select_only(i)
-            return
-        self.selected = List[String]()
-        for k in range(min(a, i), max(a, i) + 1):
-            self.selected.append(self._key_at(k))
-
-    def _move_cursor(mut self, to: Int, extend: Bool):
-        if len(self.order) == 0:
-            return
-        self.cursor = max(0, min(to, len(self.order) - 1))
-        if extend:
-            self._select_range_to(self.cursor)
-        else:
-            self._select_only(self.cursor)
 
     def handle_key(mut self, event: Event) -> Bool:
         if not self.active:
@@ -389,31 +342,9 @@ struct SpellingDialog(Movable):
             elif self._focus.is_focused(_SLOT_CLOSE):
                 self.close()
             return True
-        if (k == _KEY_A or k == _KEY_A_UPPER) \
-                and (event.mods & (MOD_CTRL | MOD_META)) != 0:
-            self.selected = List[String]()
-            for i in range(len(self.order)):
-                self.selected.append(self._key_at(i))
-            return True
-        var extend = (event.mods & MOD_SHIFT) != 0
         var page = max(self._list_rect.height() - 1, 1)
-        if k == KEY_UP:
-            self._move_cursor(self.cursor - 1, extend)
-        elif k == KEY_DOWN:
-            self._move_cursor(self.cursor + 1, extend)
-        elif k == KEY_PAGEUP:
-            self._move_cursor(self.cursor - page, extend)
-        elif k == KEY_PAGEDOWN:
-            self._move_cursor(self.cursor + page, extend)
-        elif k == KEY_HOME:
-            self._move_cursor(0, extend)
-        elif k == KEY_END:
-            self._move_cursor(len(self.order) - 1, extend)
-        elif k == KEY_SPACE:
-            self._toggle(self.cursor)
-        else:
-            return True
-        self._focus.focus_force(_SLOT_LIST)
+        if self.list.handle_nav_key(event, len(self.order), page):
+            self._focus.focus_force(_SLOT_LIST)
         return True
 
     def handle_mouse(mut self, event: Event, bounds: Rect) -> Bool:
@@ -425,17 +356,8 @@ struct SpellingDialog(Movable):
         if close_button_clicked(rect, event):
             self.close()
             return True
-        if event.pressed and not event.motion:
-            if event.button == MOUSE_WHEEL_UP:
-                self.scroll = max(self.scroll - 3, 0)
-                self.cursor = min(self.cursor, self.scroll + self._list_rect.height() - 1)
-                self.cursor = max(self.cursor, self.scroll)
-                return True
-            if event.button == MOUSE_WHEEL_DOWN:
-                var max_scroll = max(len(self.order) - self._list_rect.height(), 0)
-                self.scroll = min(self.scroll + 3, max_scroll)
-                self.cursor = max(self.cursor, self.scroll)
-                return True
+        if self.list.handle_mouse_drag(event, self._list_rect, len(self.order)):
+            return True
         var s = self._project_button.handle_mouse(event)
         if s != BUTTON_NONE:
             if s == BUTTON_FIRED:
@@ -451,19 +373,10 @@ struct SpellingDialog(Movable):
             if s == BUTTON_FIRED:
                 self.close()
             return True
-        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
-                and not event.motion and self._list_rect.contains(event.pos):
-            var i = self.scroll + (event.pos.y - self._list_rect.a.y)
-            if i >= len(self.order):
-                return True
-            self._focus.focus_force(_SLOT_LIST)
-            self.cursor = i
-            if (event.mods & MOD_SHIFT) != 0:
-                self._select_range_to(i)
-            elif (event.mods & (MOD_CTRL | MOD_META)) != 0:
-                self._toggle(i)
-            else:
-                self._select_only(i)
+        if self.list.handle_mouse_press(event, self._list_rect, len(self.order)):
+            if event.button == MOUSE_BUTTON_LEFT:
+                self._focus.focus_force(_SLOT_LIST)
+            return True
         return True
 
 

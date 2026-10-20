@@ -3381,8 +3381,7 @@ def test_project_spelling_dialog_adds_to_project_dictionary() raises:
             row = i
             assert_equal(w.count, 2)
     assert_true(row >= 0)
-    d.spelling_dialog.cursor = row
-    d.spelling_dialog._select_only(row)
+    d.spelling_dialog.list.set_selected(row)
     # Tab to "Add to Project", Enter — through the Desktop's routing.
     _ = d.handle_event(Event.key_event(KEY_TAB), _SCREEN)
     _ = d.handle_event(Event.key_event(KEY_ENTER), _SCREEN)

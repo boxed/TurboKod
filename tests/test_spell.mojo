@@ -28,7 +28,7 @@ from turbokod.spell_scan import ProjectSpellScan, spell_scan_files
 from turbokod.spelling_dialog import (
     SPELLING_ADD_PROJECT, SPELLING_ADD_USER, SpellingDialog,
 )
-from turbokod.events import MOD_META, MOD_SHIFT, KEY_SPACE
+from turbokod.events import MOD_CTRL, MOD_META, MOD_SHIFT, KEY_SPACE
 from support import (
     _ensure_dir, _rm_rf, _spell_with_dict, _temp_path, setup_test_env,
 )
@@ -655,7 +655,7 @@ def test_spell_scan_files_skips_binaries_by_extension() raises:
 
 
 def test_spelling_dialog_multi_select_and_submit() raises:
-    """Rows sort by count; click, Shift-click, Cmd-click and Space build
+    """Rows sort by count; click, Shift-click, Cmd-click and Ctrl+Space build
     the selection; an Add button submits the selected keys and
     ``acknowledge`` removes them."""
     var root = _temp_path(String("_spell_dialog"))
@@ -693,8 +693,8 @@ def test_spelling_dialog_multi_select_and_submit() raises:
     assert_equal(len(keys), 2)
     assert_equal(keys[0], String("zorbly"))
     assert_equal(keys[1], String("quux"))
-    # Space toggles the cursor row (row 1) back in.
-    _ = d.handle_key(Event.key_event(KEY_SPACE))
+    # Ctrl+Space toggles the caret row (row 1) back in.
+    _ = d.handle_key(Event.key_event(KEY_SPACE, MOD_CTRL))
     assert_equal(len(d.selected_keys()), 3)
     # Down moves the cursor and selects just that row.
     _ = d.handle_key(Event.key_event(KEY_DOWN))
