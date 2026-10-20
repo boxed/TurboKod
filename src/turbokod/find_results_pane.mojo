@@ -59,6 +59,7 @@ struct FindResultsPane(Movable):
     var dock: BottomDockedPanel
     var matches: List[ProjectMatch]
     var query: String                  # the search term (for hit highlight)
+    var whole_word: Bool               # hit highlight skips mid-word hits
     var root: String
     var selected: Int                  # cursor row (keyboard nav + range end)
     var anchor: Int                    # Shift-range origin
@@ -84,6 +85,7 @@ struct FindResultsPane(Movable):
         self.dock = BottomDockedPanel(preferred_height=12)
         self.matches = List[ProjectMatch]()
         self.query = String("")
+        self.whole_word = False
         self.root = String("")
         self.selected = 0
         self.anchor = 0
@@ -98,13 +100,14 @@ struct FindResultsPane(Movable):
 
     def load(
         mut self, var matches: List[ProjectMatch], var query: String,
-        var root: String,
+        var root: String, whole_word: Bool = False,
     ):
         """Replace the displayed result set and show the pane. Resets
         selection / scroll / marks; the dock's size + min/max state is left
         as the user last set it so re-running a search keeps the layout."""
         self.matches = matches^
         self.query = query^
+        self.whole_word = whole_word
         self.root = root^
         self.selected = 0
         self.anchor = 0
@@ -316,7 +319,7 @@ struct FindResultsPane(Movable):
                 row_line, sel_line, hl_attr, hl_attr, row_path, sel_path,
                 registry, idx, hl_deadline,
                 self._row_hl_cache, self._row_hl_cached,
-                mark, force_plain,
+                mark, force_plain, self.whole_word,
             )
             self.textsel.add_row(
                 idx, geom.text, body.a.y + i, geom.text_x,

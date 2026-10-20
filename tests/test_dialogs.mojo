@@ -39,7 +39,7 @@ from turbokod.menu import Menu, MenuBar, MenuItem
 from turbokod.project import ProjectMatch, find_in_project, walk_project_files
 from turbokod.find_results_pane import FindResultsPane
 from turbokod.highlight import GrammarRegistry, Highlight
-from turbokod.project_find import _project_find_argv, paint_match_row
+from turbokod.project_find import _project_find_argv, find_hit, paint_match_row
 from turbokod.text_select import PaneTextSelect
 from turbokod.search_options import SearchOptions
 from turbokod.text_field import TextField
@@ -2901,8 +2901,20 @@ def test_dir_browser_jump_button_release_outside_cancels() raises:
     assert_true(browser.dir == start_dir)
 
 
+def test_find_hit_whole_word_skips_mid_word_occurrences() raises:
+    """``wait`` highlighted inside ``await`` on a line rg matched only
+    for its other, whole-word ``wait``."""
+    var line = String("await asyncio.wait(x)")
+    var n = String("wait")
+    assert_equal(find_hit(line.as_bytes(), n.as_bytes(), False), 1)
+    assert_equal(find_hit(line.as_bytes(), n.as_bytes(), True), 14)
+    var only = String("await foo()")
+    assert_equal(find_hit(only.as_bytes(), n.as_bytes(), True), -1)
+
+
 def main() raises:
     setup_test_env()
+    test_find_hit_whole_word_skips_mid_word_occurrences()
     test_blame_popup_shows_sha_author_time_and_message()
     test_blame_popup_falls_back_to_summary_and_flags_uncommitted()
     test_blame_popup_caps_a_long_message()

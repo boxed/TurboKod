@@ -46,7 +46,7 @@ from .clipboard import clipboard_chord, CLIP_COPY
 from .search_options import SearchOptions
 from .string_utils import (
     byte_slice, char_width, codepoint_at, display_columns, parse_uint_range,
-    prev_codepoint_start, split_lines, TAB_WIDTH,
+    is_ascii_ident_byte, prev_codepoint_start, split_lines, TAB_WIDTH,
 )
 from .text_field import TextField, TextFieldKeyResult
 from .text_select import PaneTextSelect
@@ -910,6 +910,7 @@ struct ProjectFind(Movable):
             line_attr, sel_line, hl_attr, sel_hl_attr, path_attr, sel_path,
             registry, idx, hl_deadline,
             self._row_hl_cache, self._row_hl_cached,
+            whole_word=self._last_searched_opts.whole_word,
         )
 
     def _paint_context(
@@ -983,7 +984,10 @@ struct ProjectFind(Movable):
                     painter.set_attr(canvas, x + c, y, hl.attr)
             # Match-substring highlight on the center row only.
             if is_match and len(self.query.text.as_bytes()) > 0:
-                var hit = find_exact(line.as_bytes(), self.query.text.as_bytes(), 0)
+                var hit = find_hit(
+                    line.as_bytes(), self.query.text.as_bytes(),
+                    self._last_searched_opts.whole_word,
+                )
                 if hit >= 0:
                     var he = hit + len(self.query.text.as_bytes())
                     for c in range(run.cell_of(hit), run.cell_of(he)):
@@ -1208,6 +1212,27 @@ struct RowTextGeom(ImplicitlyCopyable, Movable):
     var clip_x: Int       # exclusive right edge (before the path label)
 
 
+def find_hit(
+    hb: Span[UInt8, _], needle: Span[UInt8, _], whole_word: Bool,
+) -> Int:
+    """Byte offset of the first occurrence of ``needle`` in ``hb`` to
+    highlight, or -1. With ``whole_word`` an occurrence flanked by
+    identifier bytes (``wait`` inside ``await``) is skipped, matching
+    what ``rg --word-regexp`` accepted the line for."""
+    var at = find_exact(hb, needle, 0)
+    if not whole_word:
+        return at
+    var n = len(needle)
+    while at >= 0:
+        var before_ok = at == 0 or not is_ascii_ident_byte(hb[at - 1])
+        var after_ok = at + n >= len(hb) \
+            or not is_ascii_ident_byte(hb[at + n])
+        if before_ok and after_ok:
+            return at
+        at = find_exact(hb, needle, at + 1)
+    return -1
+
+
 def paint_match_row(
     mut canvas: Canvas, container_bounds: Rect, painter: Painter,
     y: Int, m: ProjectMatch, is_sel: Bool, query: String,
@@ -1220,6 +1245,7 @@ def paint_match_row(
     mut row_hl_cached: List[Bool],
     mark: String = String(""),
     force_plain: Bool = False,
+    whole_word: Bool = False,
 ) -> RowTextGeom:
     """Paint one search-result row inside ``container_bounds`` at row ``y``:
     the matched line text (hit span highlighted) on the left, the
@@ -1260,7 +1286,7 @@ def paint_match_row(
         return RowTextGeom(String(""), line_x, 0, 0, line_x)
     var line_stripped = _lstrip_tabs(m.line_text)
     var bytes = line_stripped.as_bytes()
-    var hit = find_exact(bytes, query.as_bytes(), 0) \
+    var hit = find_hit(bytes, query.as_bytes(), whole_word) \
         if len(query.as_bytes()) > 0 else -1
     # Slide so the hit (if any) is visible inside the available width.
     # All of this is in *cells*, not bytes: the row is painted one cell
