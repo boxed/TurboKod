@@ -3954,7 +3954,8 @@ def test_commit_info_diff_is_syntax_highlighted() raises:
 def test_refresh_keeps_selected_commit_by_sha() raises:
     """A commit made elsewhere while the view is open pushes every row
     down; the selection must stay on the commit the user was reading,
-    not on whatever now sits at its old index."""
+    not on whatever now sits at its old index. The list scrolls to the
+    top so the new commit is visible."""
     var dir = _init_repo_with_branches()
     if len(dir.as_bytes()) == 0:
         return
@@ -3971,7 +3972,30 @@ def test_refresh_keeps_selected_commit_by_sha() raises:
     lc._refresh_full()
     assert_equal(lc.sel_commit, 2)
     assert_equal(lc.commits[lc.sel_commit].short_sha, sha)
-    assert_equal(lc.scroll_commits, 1)
+    assert_equal(lc.scroll_commits, 0)
+    _rm_rf(dir)
+
+
+def test_refresh_selects_top_when_selected_commit_is_gone() raises:
+    """Amending the selected tip replaces it with a new sha; the
+    selection falls to the top item instead of clamping an old index."""
+    var dir = _init_repo_with_branches()
+    if len(dir.as_bytes()) == 0:
+        return
+    var lc = LocalChanges()
+    lc.open(dir)
+    assert_true(len(lc.commits) >= 2)
+    lc.focus = _PANE_COMMITS
+    lc.sel_commit = 0
+    var sha = lc.commits[0].short_sha
+    assert_equal(_run_git(dir, string_list(
+        String("commit"), String("-q"), String("--amend"),
+        String("-m"), String("amended"),
+    )), 0)
+    lc._refresh_full()
+    assert_equal(lc.sel_commit, 0)
+    assert_equal(lc.scroll_commits, 0)
+    assert_true(lc.commits[0].short_sha != sha)
     _rm_rf(dir)
 
 
@@ -5351,6 +5375,7 @@ def main() raises:
     test_diff_panel_highlights_a_file_too_big_to_tokenize_whole()
     test_commit_info_diff_is_syntax_highlighted()
     test_refresh_keeps_selected_commit_by_sha()
+    test_refresh_selects_top_when_selected_commit_is_gone()
     test_fetch_git_remote_branches_skips_head_and_splits_remote()
     test_local_changes_lists_remote_branches_after_local()
     test_local_changes_d_on_unmerged_remote_branch_needs_typed_prefix()
@@ -5393,4 +5418,4 @@ def main() raises:
     test_parse_name_status_z_maps_statuses_to_lsp_change_types()
     test_changed_paths_between_reports_what_a_branch_switch_rewrote()
     test_commit_info_file_summary_rows_point_at_their_diff()
-    print("git: 143 tests passed")
+    print("git: 144 tests passed")

@@ -4424,12 +4424,16 @@ struct LocalChanges(Movable):
         pushes every row down one, and keeping the index would silently
         swap the commit under the user's eyes. The followed row also
         keeps its on-screen position, so the list doesn't scroll under
-        it either. Gone from the list (an amend, a deleted branch) → the
-        index clamp below, as before."""
+        it either — except when new commits arrived, where the commit list
+        scrolls to the top (selection unchanged) so they're visible. A
+        commit gone from the list (an amend) selects the top item."""
         var kept_sha = String("")
         if 0 <= self.sel_commit and self.sel_commit < len(self.commits):
             kept_sha = self.commits[self.sel_commit].short_sha
         var commit_off = self.sel_commit - self.scroll_commits
+        var old_top_sha = String("")
+        if len(self.commits) > 0:
+            old_top_sha = self.commits[0].short_sha
         var kept_branch = String("")
         if 0 <= self.sel_branch and self.sel_branch < len(self.branches):
             kept_branch = self.branches[self.sel_branch].name
@@ -4437,12 +4441,24 @@ struct LocalChanges(Movable):
         self._reload_files()
         self._load_branches()
         self.commits = fetch_git_commits(self.root, _COMMIT_LIMIT)
+        var new_top_sha = String("")
+        if len(self.commits) > 0:
+            new_top_sha = self.commits[0].short_sha
+        var found_commit = False
         if len(kept_sha.as_bytes()) > 0:
             for i in range(len(self.commits)):
                 if self.commits[i].short_sha == kept_sha:
                     self.sel_commit = i
                     self.scroll_commits = max(0, i - commit_off)
+                    found_commit = True
                     break
+        if not found_commit:
+            # Selected commit left the branch: fall to the top item.
+            self.sel_commit = 0
+            self.scroll_commits = 0
+        elif new_top_sha != old_top_sha:
+            # New commits arrived: show them; the selection stays put.
+            self.scroll_commits = 0
         if len(kept_branch.as_bytes()) > 0:
             for i in range(len(self.branches)):
                 if self.branches[i].name == kept_branch:
