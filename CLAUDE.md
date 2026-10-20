@@ -16,7 +16,7 @@ A port of Turbo Vision to Mojo. Two distinct trees:
 The Mojo core (`src/turbokod/`) is the model; it has **two supported frontends** sitting on top of it, and both are first-class — neither may be broken by changes to the core:
 
 1. **Terminal** — `./run.sh <entry>.mojo` builds a standalone Mojo binary that drives the user's terminal in raw mode via `terminal.mojo` (ANSI output, escape-sequence input). This is the simplest path and what `examples/` and ad-hoc demos use.
-2. **Native macOS (Swift)** — `./run_swift.sh [project]` builds the Mojo core as a shared library (`libturbokod.dylib`) exposing the C ABI in `native_api.mojo`, and runs it under a Swift/AppKit host (`app/swift/TurboKod.swift`) that owns the window, menu bar, font rendering (Px437 bitmap, 8×16 cells), and input. This is the shipped desktop app (`TurboKod.app`).
+2. **Native macOS (Swift)** — `./run_swift.sh [project]` builds the Mojo core as a shared library (`libturbokod.dylib`) exposing the C ABI in `native_api.mojo`, and runs it under a Swift/AppKit host (`app/swift/TurboKod.swift`) that owns the window, menu bar, font rendering (IBM VGA, 8×16pt cells: a bundled 16×32 redraw that embeds the original Px437 8×16 pixels for 1x screens), and input. This is the shipped desktop app (`TurboKod.app`).
 
 Both consume the same `Desktop` / `Canvas` / `Event` machinery. New core features should reach both surfaces — terminal-only or Swift-only changes to anything below the frontend boundary are a smell. Concretely: if you touch `desktop.mojo`, `editor.mojo`, anything in `src/turbokod/` other than `terminal.mojo` or `native_api.mojo`, verify both paths still build and run.
 

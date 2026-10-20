@@ -1324,15 +1324,25 @@ def test_desktop_set_font_maps_default_label_to_empty() raises:
     config file stays label-free) and bumps ``font_version`` on every
     change so the Swift host refetches."""
     var d = Desktop()
-    assert_equal(d.font_label(), String("IBM VGA 8x16 (built-in)"))
+    assert_equal(d.font_label(), String("IBM VGA (built-in)"))
     var v0 = d.font_version
     d.set_font(String("Menlo"))
     assert_equal(d.config.font, String("Menlo"))
     assert_equal(d.font_label(), String("Menlo"))
     assert_equal(d.font_version, v0 + 1)
-    d.set_font(String("IBM VGA 8x16 (built-in)"))
+    d.set_font(String("IBM VGA (built-in)"))
     assert_equal(d.config.font, String(""))
     assert_equal(d.font_version, v0 + 2)
+
+
+def test_desktop_set_font_maps_classic_label() raises:
+    """The classic built-in row stores the original font's family name,
+    which the Swift host matches to pin Px437 8x16 at every size, and
+    reads back as its label."""
+    var d = Desktop()
+    d.set_font(String("IBM VGA 8x16 classic (built-in)"))
+    assert_equal(d.config.font, String("Px437 IBM VGA 8x16"))
+    assert_equal(d.font_label(), String("IBM VGA 8x16 classic (built-in)"))
 
 
 def test_desktop_set_font_size_clamps_and_bumps_version() raises:
@@ -3630,6 +3640,7 @@ def main() raises:
     test_window_menu_items_show_ctrl_n_shortcut()
     test_project_settings_on_save_seeds_state()
     test_desktop_set_font_maps_default_label_to_empty()
+    test_desktop_set_font_maps_classic_label()
     test_desktop_set_font_size_clamps_and_bumps_version()
     test_desktop_routes_alt_tap_to_focused_editor()
     test_window_manager_fit_into_keeps_maximized_pinned()

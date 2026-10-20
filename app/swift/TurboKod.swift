@@ -26,12 +26,27 @@ func fnv1a<S: Sequence>(_ words: S) -> UInt64 where S.Element: BinaryInteger {
     return h
 }
 
-// The bundled IBM VGA bitmap font (8×16), matching the terminal/Rust look.
-// Designed at 16px, so 16pt gives an 8pt advance — exactly our cell size.
+// The bundled IBM VGA fonts, both with a 1:2 cell and the same vertical
+// metrics, so 16pt gives an 8×16pt cell either way:
+// - TurboKodVGA16x32.ttf (the default): a 16×32 redraw of the VGA font as
+//   outlines, plus the original 8×16 pixels as an embedded 16px bitmap
+//   strike. Core Text picks the strike when a cell is 16 device pixels tall
+//   (16pt on a 1x screen) and the 16×32 outlines otherwise (Retina, 32px+).
+// - Px437_IBM_VGA_8x16.ttf (Settings ▸ Font ▸ classic): the original 8×16
+//   font at every size.
+let BUNDLED_FONT_FILE = "TurboKodVGA16x32.ttf"
+let CLASSIC_FONT_FILE = "Px437_IBM_VGA_8x16.ttf"
+// config.font value that selects the classic font — CLASSIC_FONT in config.mojo.
+let CLASSIC_FONT_NAME = "Px437 IBM VGA 8x16"
+// Family names of the bundled fonts, kept out of the system font list:
+// they're registered in-process, so FontCatalog would otherwise list them
+// alongside the built-in rows.
+let BUNDLED_FONT_FAMILIES: Set<String> = ["TurboKod VGA 16x32", CLASSIC_FONT_NAME]
+
 // Falls back to Menlo if the bundled TTF is missing.
-func loadCellFont(size: CGFloat = 16) -> NSFont {
+func loadCellFont(size: CGFloat = 16, file: String = BUNDLED_FONT_FILE) -> NSFont {
     if let res = Bundle.main.resourcePath {
-        let url = URL(fileURLWithPath: res + "/Px437_IBM_VGA_8x16.ttf")
+        let url = URL(fileURLWithPath: res + "/" + file)
         if FileManager.default.fileExists(atPath: url.path) {
             CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
             if let descs = CTFontManagerCreateFontDescriptorsFromURL(url as CFURL)
@@ -55,9 +70,24 @@ let VECTOR_FONT_DEFAULT_SIZE = 13
 // recomputes the cell metrics — every CellView reads these globals per draw,
 // so the whole grid reflows on the next frame. `cellFontIsBitmap` gates the
 // no-antialias path: bitmap glyphs at their pixel-exact size must render
-// crisp, everything else must not.
+// crisp, everything else must not. `cellFontIsAdaptive` marks the default
+// bundled font, whose pixel-exact sizes depend on the screen's backing
+// scale — see `cellFontRendersCrisp`.
 var cellFont = loadCellFont()
 var cellFontIsBitmap = true
+var cellFontIsAdaptive = true
+
+/// Whether cells should render without antialiasing on a screen with
+/// `backingScale`. The default bundled font is pixel-exact when a cell is
+/// 16 device pixels tall (its embedded 8×16 strike) or a multiple of 32
+/// (its 16×32 outlines); every other font follows `cellFontIsBitmap`.
+func cellFontRendersCrisp(backingScale: CGFloat) -> Bool {
+    if cellFontIsAdaptive {
+        let px = Int((CGFloat(cellFontEffectiveSize) * backingScale).rounded())
+        return px == 16 || px % 32 == 0
+    }
+    return cellFontIsBitmap
+}
 
 // Per-codepoint "does the cell font actually have a glyph for this?" cache.
 // The bundled Px437 bitmap font only covers CP437, so codepoints outside it
@@ -100,7 +130,7 @@ enum FontCatalog {
         let fm = NSFontManager.shared
         var out: [String] = []
         for family in fm.availableFontFamilies {
-            if family.hasPrefix(".") { continue }
+            if family.hasPrefix(".") || BUNDLED_FONT_FAMILIES.contains(family) { continue }
             guard let members = fm.availableMembers(ofFontFamily: family),
                   let first = members.first,
                   let name = first[0] as? String,
@@ -173,24 +203,27 @@ func bitmapStrikePPEM(_ font: NSFont) -> Int {
     } ?? 0
 }
 
-/// The bundled Px437 font at `size` points (0 = its 16px design size).
-/// The glyph grid is exactly 8×16 at 16pt, so the cell scales as a strict
-/// 1:2 box. Crisp (no-AA) rendering only at integer multiples of the
-/// design size, where the bitmap pixels land exactly on cell pixels —
-/// fractional scales look better antialiased.
-private func applyBundledCellFont(_ size: CGFloat) {
+/// A bundled VGA font at `size` points (0 = its 16pt design size): the
+/// default 16×32 font, or the original Px437 8×16 when `classic`. Either
+/// glyph grid is exactly 8×16pt at 16pt, so the cell scales as a strict
+/// 1:2 box. Crisp (no-AA) rendering only where the pixels land exactly on
+/// device pixels (`cellFontRendersCrisp`) — fractional scales look better
+/// antialiased. For the classic font that's integer multiples of 16pt.
+private func applyBundledCellFont(_ size: CGFloat, classic: Bool = false) {
     let eff = size > 0 ? size : CGFloat(BITMAP_FONT_DEFAULT_SIZE)
-    cellFont = loadCellFont(size: eff)
+    cellFont = loadCellFont(size: eff, file: classic ? CLASSIC_FONT_FILE : BUNDLED_FONT_FILE)
     cellFontGlyphCache.removeAll()
     cellFontEffectiveSize = Int(eff.rounded())
     cellFontIdealSize = BITMAP_FONT_DEFAULT_SIZE
     cellFontIsBitmap = cellFontEffectiveSize % BITMAP_FONT_DEFAULT_SIZE == 0
+    cellFontIsAdaptive = !classic
     CELL_W = max(1, (eff / 2).rounded())
     CELL_H = max(1, eff.rounded())
 }
 
 /// Switch the cell font to `name` (a family from `monospaceFontFamilies`;
-/// empty = the bundled bitmap font) at `size` points (0 = the font's
+/// empty = the bundled VGA font, CLASSIC_FONT_NAME = the original 8×16
+/// one) at `size` points (0 = the font's
 /// default) and recompute CELL_W/CELL_H from its metrics. No-op when both
 /// are already active. Derives `cellFontEffectiveSize` / `cellFontIdealSize`
 /// for the caller to report back to the Mojo core.
@@ -198,8 +231,8 @@ func applyCellFont(_ name: String, size: CGFloat = 0) {
     if name == currentCellFontName && size == currentCellFontSize { return }
     currentCellFontName = name
     currentCellFontSize = size
-    if name.isEmpty {
-        applyBundledCellFont(size)
+    if name.isEmpty || name == CLASSIC_FONT_NAME {
+        applyBundledCellFont(size, classic: !name.isEmpty)
         return
     }
     let eff = size > 0 ? size : CGFloat(VECTOR_FONT_DEFAULT_SIZE)
@@ -213,6 +246,7 @@ func applyCellFont(_ name: String, size: CGFloat = 0) {
     }
     cellFont = f
     cellFontGlyphCache.removeAll()
+    cellFontIsAdaptive = false
     cellFontEffectiveSize = Int(eff.rounded())
     cellFontIdealSize = bitmapStrikePPEM(f)
     // A font with embedded bitmap strikes renders crisp (no AA) at exactly
@@ -653,12 +687,12 @@ final class CellView: NSView {
         guard handle != 0, let ctx = NSGraphicsContext.current?.cgContext else { return }
         refreshFontIfNeeded()
         refreshPaletteIfNeeded()
-        // Px437 is a pixel font — render it crisp (no anti-aliasing / font
-        // smoothing) or the bitmap glyphs come out blurred. Cells are on
+        // The VGA fonts are pixel fonts — render them crisp (no anti-aliasing
+        // / font smoothing) or the glyphs come out blurred. Cells are on
         // integer pixel boundaries so hard-edged rasterization is exact.
         // Vector fonts (Settings ▸ Font) want the opposite: hard-edged
         // rasterization makes them jagged, so antialias those.
-        let aa = !cellFontIsBitmap
+        let aa = !cellFontRendersCrisp(backingScale: window?.backingScaleFactor ?? 1)
         ctx.setShouldAntialias(aa)
         ctx.setShouldSmoothFonts(aa)
         ctx.setAllowsAntialiasing(aa)

@@ -1,12 +1,16 @@
 Embedded font
 =============
 
-The embedded font file `Px437_IBM_3270pc.ttf` is from the Oldschool PC
-Font Resource by VileR:
+The embedded font file `app/assets/Px437_IBM_VGA_8x16.ttf` is from the
+Oldschool PC Font Resource by VileR:
 
     https://int10h.org/oldschool-pc-fonts/
 
-It is distributed under the Creative Commons Attribution-ShareAlike 4.0
+`app/assets/TurboKodVGA16x32.ttf` is a derivative of it by Anders
+Hovmöller: the glyphs redrawn on a 16×32 pixel grid, with the original
+8×16 bitmaps embedded unchanged as a 16px bitmap strike.
+
+Both are distributed under the Creative Commons Attribution-ShareAlike 4.0
 International License (CC BY-SA 4.0):
 
     https://creativecommons.org/licenses/by-sa/4.0/

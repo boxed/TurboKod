@@ -49,7 +49,8 @@ from .clipboard import clipboard_copy, clipboard_paste
 from .open_url import open_url
 from .config import (
     MAX_FONT_SIZE, MIN_FONT_SIZE, OnSaveAction,
-    TurbokodConfig, WRAP_NONE, config_file_stamp, default_font_label,
+    CLASSIC_FONT, TurbokodConfig, WRAP_NONE, classic_font_label,
+    config_file_stamp, default_font_label,
     load_config, lsp_overrides_equal, merge_config, record_recent_file,
     record_recent_project, save_config_merged, try_read_config,
 )
@@ -6186,12 +6187,14 @@ struct Desktop(Movable):
 
     def set_font(mut self, label: String):
         """Switch the cell font (native macOS frontend). ``label`` is a row
-        from the Settings Font list; the built-in default maps back to the
-        empty string so the config file doesn't bake in a display label.
-        Bumps ``font_version`` so the Swift host refetches the name and
-        rebuilds its cell font + metrics."""
+        from the Settings Font list; the built-in rows map back to the
+        empty string / ``CLASSIC_FONT`` so the config file doesn't bake in
+        a display label. Bumps ``font_version`` so the Swift host refetches
+        the name and rebuilds its cell font + metrics."""
         if label == default_font_label():
             self.config.font = String("")
+        elif label == classic_font_label():
+            self.config.font = String(CLASSIC_FONT)
         else:
             self.config.font = label
         self.font_version += 1
@@ -6214,9 +6217,11 @@ struct Desktop(Movable):
 
     def font_label(self) -> String:
         """The Settings-facing label for the active ``config.font`` —
-        the built-in default's empty string renders as its label."""
+        the built-in rows' config values render as their labels."""
         if len(self.config.font.as_bytes()) == 0:
             return default_font_label()
+        if self.config.font == CLASSIC_FONT:
+            return classic_font_label()
         return self.config.font
 
     def _rebuild_lsp_specs(mut self):
@@ -8559,13 +8564,14 @@ struct Desktop(Movable):
                 cur_ext = extension_of(
                     self.windows.windows[fidx_settings].editor.file_path,
                 )
-            # Font list for the Settings Font section: built-in default
-            # first, then the host-registered monospace families. Left
-            # empty when the host registered none (terminal frontend),
-            # which hides the section.
+            # Font list for the Settings Font section: the built-in VGA
+            # fonts first, then the host-registered monospace families.
+            # Left empty when the host registered none (terminal
+            # frontend), which hides the section.
             var font_names = List[String]()
             if len(self.host_font_names) > 0:
                 font_names.append(default_font_label())
+                font_names.append(classic_font_label())
                 for i in range(len(self.host_font_names)):
                     font_names.append(self.host_font_names[i])
             self.settings.open(

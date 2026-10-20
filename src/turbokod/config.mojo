@@ -73,11 +73,24 @@ comptime DEFAULT_MAX_OPEN_WINDOWS = 20
 
 
 def default_font_label() -> String:
-    """Display label for the built-in bitmap font (the ``font`` config
-    field's empty-string default). Settings shows this as the first row
-    of the Font list; ``Desktop.set_font`` maps it back to the empty
-    string so the config file stays frontend-agnostic."""
-    return String("IBM VGA 8x16 (built-in)")
+    """Display label for the built-in VGA font (the ``font`` config
+    field's empty-string default): the bundled 16x32 redraw, which embeds
+    the original 8x16 pixels for 16px rendering. Settings shows this as
+    the first row of the Font list; ``Desktop.set_font`` maps it back to
+    the empty string so the config file stays frontend-agnostic."""
+    return String("IBM VGA (built-in)")
+
+
+# ``font`` config value that pins the original Px437 IBM VGA 8x16 font at
+# every size — the family name of the bundled TTF. The Swift host matches
+# it to load that file rather than looking the family up.
+comptime CLASSIC_FONT = "Px437 IBM VGA 8x16"
+
+
+def classic_font_label() -> String:
+    """Display label for ``CLASSIC_FONT`` — the second row of the Font
+    list. ``Desktop.set_font`` maps it to ``CLASSIC_FONT``."""
+    return String("IBM VGA 8x16 classic (built-in)")
 
 
 struct LanguageServerOverride(Copyable, Movable):
@@ -235,8 +248,11 @@ struct TurbokodConfig(Copyable, Movable):
     var theme: String
     # Settings ▸ Font (native macOS frontend only). Family name of the
     # monospace font the Swift host renders cells with. Empty means the
-    # bundled Px437 IBM VGA bitmap font. The terminal frontend ignores it
-    # — the terminal emulator owns the font there.
+    # bundled IBM VGA font: the 16x32 redraw, which draws the original
+    # 8x16 pixels wherever a cell is 16 device pixels tall. ``CLASSIC_FONT``
+    # pins the original Px437 IBM VGA 8x16 font at every size. The
+    # terminal frontend ignores it — the terminal emulator owns the font
+    # there.
     var font: String
     # Settings ▸ Font size in points (native macOS frontend only). 0 means
     # "the font's default size" — 16 for the bundled bitmap font (its
