@@ -2407,6 +2407,31 @@ def test_find_misspelled_runs_splits_identifiers() raises:
     assert_equal(got[1], String("helo"))
 
 
+def test_find_misspelled_runs_splits_quote_apostrophes() raises:
+    """``f'dryft`` is a quote character followed by a word, not a
+    contraction: retry each side of the apostrophe, flag only the
+    piece that fails, and leave real contractions alone."""
+    var words = List[String]()
+    for w in ["hello", "world", "dryft", "have"]:
+        words.append(String(w))
+    var s = _spell_with_dict(words)
+    var text = String("f'dryft hasn't f'helo")
+    var runs = find_misspelled_runs(s, text)
+    var b = text.as_bytes()
+    var got = List[String]()
+    for r in range(len(runs)):
+        got.append(String(StringSpan(unsafe_from_utf8=b[runs[r][0]:runs[r][1]])))
+    # ``hasn't`` stays whole (contraction of a known word is not asserted
+    # here: ``has`` isn't in the tiny dict, so it may be flagged whole).
+    var seen_helo = False
+    for g in got:
+        assert_true(g != String("f'dryft"))
+        assert_true(g != String("dryft"))
+        if g == String("helo"):
+            seen_helo = True
+    assert_true(seen_helo)
+
+
 def test_text_field_types_non_ascii_letters() raises:
     """A dialog input strip accepts printable non-ASCII.
 
@@ -2969,6 +2994,7 @@ def main() raises:
     test_confirm_dialog_paints_inside_dialog_rect()
     test_find_misspelled_runs_keeps_unicode_letters_in_word()
     test_find_misspelled_runs_splits_identifiers()
+    test_find_misspelled_runs_splits_quote_apostrophes()
     test_text_field_scrolls_to_keep_cursor_visible()
     test_text_field_scrolls_back_when_cursor_moves_left_of_view()
     test_text_field_click_maps_to_text_byte_via_scroll()

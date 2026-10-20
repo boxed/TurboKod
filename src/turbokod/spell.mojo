@@ -589,6 +589,50 @@ def _check_segment(
         k += c[1]
     if not has_lower:
         return
+    if speller.check_word(byte_slice(text, start, end)):
+        return
+    # Not a word as a whole. An apostrophe inside it may be English
+    # (``hasn't``, which ``check_word`` already handles) or a quote
+    # character in code (``f'dryft``, ``'a'+b``): retry each side of every
+    # apostrophe on its own and flag only the pieces that still fail.
+    var has_apos = False
+    k = start
+    while k < end:
+        if text.as_bytes()[k] == 0x27:
+            has_apos = True
+            break
+        k += 1
+    if not has_apos:
+        out.append((start, end))
+        return
+    var piece = start
+    k = start
+    while k <= end:
+        if k == end or text.as_bytes()[k] == 0x27:
+            if k > piece:
+                _check_segment_piece(speller, text, piece, k, out)
+            piece = k + 1
+        k += 1
+
+
+def _check_segment_piece(
+    speller: Speller, text: String, start: Int, end: Int,
+    mut out: List[Tuple[Int, Int]],
+):
+    """One apostrophe-free side of a split segment: same length and
+    all-caps rules as ``_check_segment``, no further splitting."""
+    if end - start < 4:
+        return
+    var has_lower = False
+    var k = start
+    while k < end:
+        var c = codepoint_at(text, k)
+        if not _is_upper_cp(c[0]):
+            has_lower = True
+            break
+        k += c[1]
+    if not has_lower:
+        return
     if not speller.check_word(byte_slice(text, start, end)):
         out.append((start, end))
 
