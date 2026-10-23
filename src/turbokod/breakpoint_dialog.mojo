@@ -847,7 +847,7 @@ def _build_wait_for_dropdown(
         entries.append(options[k])
     var dd = Dropdown(entries^, 0)
     if len(current.as_bytes()) > 0:
-        dd.set_value(current^)
+        dd.set_value(current)
     return dd^
 
 

@@ -589,7 +589,7 @@ def fetch_head_text(project_root: String, file_path: String) -> Optional[String]
         return Optional[String]()
     var args = List[String]()
     args.append(String("show"))
-    args.append(String("HEAD:") + rel^)
+    args.append(String("HEAD:") + rel)
     # Non-zero exit = path not in HEAD; treat as "no baseline".
     return _git_capture(project_root, args^)
 

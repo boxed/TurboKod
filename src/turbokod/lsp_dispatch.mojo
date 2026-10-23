@@ -79,7 +79,7 @@ def _lsp_debug_log(line: String):
         return
     var bytes = full.as_bytes()
     _ = external_call["write", Int](
-        Int(fd), bytes.unsafe_ptr(), UInt(len(bytes)),
+        fd, bytes.unsafe_ptr(), len(bytes),
     )
     _ = external_call["close", Int32](fd)
 
@@ -604,7 +604,7 @@ struct _PositionRemapper(Copyable, Movable):
                         curi,
                         self.walk(val.object_value_at(k), curi, to_bytes),
                     )
-                obj.put(key^, changes^)
+                obj.put(key^, changes)
                 continue
             obj.put(key^, self.walk(val, ctx, to_bytes))
         return obj^
@@ -2155,8 +2155,8 @@ struct LspManager(Copyable, Movable):
         var files = json_array()
         var f = json_object()
         f.put(String("uri"), json_str(_path_to_uri(path)))
-        files.append(f^)
-        params.put(String("files"), files^)
+        files.append(f)
+        params.put(String("files"), files)
         try:
             self._send_notification(
                 String("workspace/didCreateFiles"), params,
@@ -2183,8 +2183,8 @@ struct LspManager(Copyable, Movable):
         var f = json_object()
         f.put(String("oldUri"), json_str(_path_to_uri(old_path)))
         f.put(String("newUri"), json_str(_path_to_uri(new_path)))
-        files.append(f^)
-        params.put(String("files"), files^)
+        files.append(f)
+        params.put(String("files"), files)
         try:
             self._send_notification(
                 String("workspace/didRenameFiles"), params,
@@ -2203,8 +2203,8 @@ struct LspManager(Copyable, Movable):
         var files = json_array()
         var f = json_object()
         f.put(String("uri"), json_str(_path_to_uri(path)))
-        files.append(f^)
-        params.put(String("files"), files^)
+        files.append(f)
+        params.put(String("files"), files)
         try:
             self._send_notification(
                 String("workspace/didDeleteFiles"), params,
@@ -2535,7 +2535,7 @@ struct LspManager(Copyable, Movable):
         var params = _text_document_position_params(path, line, character)
         var ctx = json_object()
         ctx.put(String("includeDeclaration"), json_bool(True))
-        params.put(String("context"), ctx^)
+        params.put(String("context"), ctx)
         try:
             self._inflight_ref_id = self._send_request(
                 String("textDocument/references"), params,
@@ -2706,7 +2706,7 @@ struct LspManager(Copyable, Movable):
         # auto-import suggestions when the user explicitly invoked.
         var ctx = json_object()
         ctx.put(String("triggerKind"), json_int(1))
-        params.put(String("context"), ctx^)
+        params.put(String("context"), ctx)
         # If a previous completion is still in flight, tell the server
         # to stop computing it via ``$/cancelRequest``. Without this
         # the server keeps a worker pinned on a stale prefix and our
@@ -2940,13 +2940,13 @@ struct LspManager(Copyable, Movable):
         var rng = _lsp_range(
             diag.start_row, diag.start_col, diag.end_row, diag.end_col,
         )
-        params.put(String("range"), rng^)
+        params.put(String("range"), rng)
         var ctx = json_object()
         var diag_obj = json_object()
         var d_rng = _lsp_range(
             diag.start_row, diag.start_col, diag.end_row, diag.end_col,
         )
-        diag_obj.put(String("range"), d_rng^)
+        diag_obj.put(String("range"), d_rng)
         diag_obj.put(String("severity"), json_int(diag.severity))
         if len(diag.message.as_bytes()) > 0:
             diag_obj.put(String("message"), json_str(diag.message))
@@ -2958,9 +2958,9 @@ struct LspManager(Copyable, Movable):
         if len(diag.code.as_bytes()) > 0:
             diag_obj.put(String("code"), json_str(diag.code))
         var diags_arr = json_array()
-        diags_arr.append(diag_obj^)
-        ctx.put(String("diagnostics"), diags_arr^)
-        params.put(String("context"), ctx^)
+        diags_arr.append(diag_obj)
+        ctx.put(String("diagnostics"), diags_arr)
+        params.put(String("context"), ctx)
         try:
             self._inflight_code_action_id = self._send_request(
                 String("textDocument/codeAction"), params,
@@ -3184,7 +3184,7 @@ struct LspManager(Copyable, Movable):
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
         var rng = _lsp_range(start_line, start_char, end_line, end_char)
-        params.put(String("range"), rng^)
+        params.put(String("range"), rng)
         params.put(String("options"), _formatting_options(tab_size, insert_spaces))
         try:
             self._inflight_formatting_id = self._send_request(
@@ -3327,8 +3327,8 @@ struct LspManager(Copyable, Movable):
         var rng = _lsp_range(start_line, start_char, end_line, end_char)
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
-        params.put(String("color"), color^)
-        params.put(String("range"), rng^)
+        params.put(String("color"), color)
+        params.put(String("range"), rng)
         try:
             self._inflight_colorpres_id = self._send_request(
                 String("textDocument/colorPresentation"), params,
@@ -3377,7 +3377,7 @@ struct LspManager(Copyable, Movable):
         var params = _text_document_position_params(path, line, character)
         var ctx = json_object()
         ctx.put(String("triggerKind"), json_int(1))  # Invoked
-        params.put(String("context"), ctx^)
+        params.put(String("context"), ctx)
         try:
             self._inflight_inlinecomp_id = self._send_request(
                 String("textDocument/inlineCompletion"), params,
@@ -3451,12 +3451,12 @@ struct LspManager(Copyable, Movable):
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
         var rng = _lsp_range(start_line, 0, end_line, 0)
-        params.put(String("range"), rng^)
+        params.put(String("range"), rng)
         var ctx = json_object()
         ctx.put(String("frameId"), json_int(frame_id))
         var stopped = _lsp_range(stopped_line, 0, stopped_line, 0)
-        ctx.put(String("stoppedLocation"), stopped^)
-        params.put(String("context"), ctx^)
+        ctx.put(String("stoppedLocation"), stopped)
+        params.put(String("context"), ctx)
         try:
             self._inflight_inlineval_id = self._send_request(
                 String("textDocument/inlineValue"), params,
@@ -3601,7 +3601,7 @@ struct LspManager(Copyable, Movable):
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
         var rng = _lsp_range(start_line, 0, end_line, 0)
-        params.put(String("range"), rng^)
+        params.put(String("range"), rng)
         try:
             self._inflight_inlay_id = self._send_request(
                 String("textDocument/inlayHint"), params,
@@ -3799,7 +3799,7 @@ struct LspManager(Copyable, Movable):
         params.put(String("textDocument"), _text_document(path))
         var positions = json_array()
         positions.append(_lsp_position(line, character))
-        params.put(String("positions"), positions^)
+        params.put(String("positions"), positions)
         try:
             self._inflight_selrange_id = self._send_request(
                 String("textDocument/selectionRange"), params,
@@ -4606,7 +4606,7 @@ struct LspManager(Copyable, Movable):
         var sphinx = json_object()
         var python_arr = json_array()
         python_arr.append(json_str(python_cmd))
-        sphinx.put(String("pythonCommand"), python_arr^)
+        sphinx.put(String("pythonCommand"), python_arr)
         var build_arr = json_array()
         build_arr.append(json_str(String("sphinx-build")))
         build_arr.append(json_str(String("-M")))
@@ -4618,9 +4618,9 @@ struct LspManager(Copyable, Movable):
         var out_dir = String("/tmp/turbokod-esbonio-")
         out_dir = out_dir + basename(src_dir) + String("-build")
         build_arr.append(json_str(out_dir))
-        sphinx.put(String("buildCommand"), build_arr^)
+        sphinx.put(String("buildCommand"), build_arr)
         var cfg = json_object()
-        cfg.put(String("sphinx"), sphinx^)
+        cfg.put(String("sphinx"), sphinx)
         _lsp_debug_log(
             String("esbonio config: src=") + src_dir
             + String(" python=") + python_cmd
@@ -4874,7 +4874,7 @@ struct LspManager(Copyable, Movable):
             )
             result = item^
         try:
-            self.client.send_response(id, result^)
+            self.client.send_response(id, result)
         except e:
             print("lsp: showMessageRequest response:", String(e))
         self._msgreq_pending = False
@@ -5014,7 +5014,7 @@ struct LspManager(Copyable, Movable):
                     String("← server request workspace/configuration id=")
                     + id_label + String(" items=") + String(n),
                 )
-                self.client.send_response(id, result^)
+                self.client.send_response(id, result)
                 return
             if method == String("client/registerCapability"):
                 # Merge each registration into the cached capabilities so
@@ -5109,7 +5109,7 @@ struct LspManager(Copyable, Movable):
                     String("← server request workspace/applyEdit id=")
                     + id_label + String(" files=") + String(edit_count),
                 )
-                self.client.send_response(id, resp^)
+                self.client.send_response(id, resp)
                 return
             if method == String("window/showMessageRequest"):
                 # Park the message + action titles + request id for a modal;
@@ -5163,12 +5163,12 @@ struct LspManager(Copyable, Movable):
                         String("name"),
                         json_str(basename(_uri_to_path(self._root_uri))),
                     )
-                    folders.append(f^)
+                    folders.append(f)
                 _lsp_debug_log(
                     String("← server request workspace/workspaceFolders id=")
                     + id_label,
                 )
-                self.client.send_response(id, folders^)
+                self.client.send_response(id, folders)
                 return
             if method == String("window/showDocument"):
                 # Park the open request (file → editor, or external URL) for
@@ -5202,7 +5202,7 @@ struct LspManager(Copyable, Movable):
                     String("← server request window/showDocument id=")
                     + id_label + String(" external=") + String(external),
                 )
-                self.client.send_response(id, ok^)
+                self.client.send_response(id, ok)
                 return
             if method == String("workspace/codeLens/refresh") \
                     or method == String("workspace/inlayHint/refresh") \
@@ -7010,6 +7010,6 @@ def _watched_changes_params(
         change.put(
             String("type"), json_int(types[i] if i < len(types) else 2),
         )
-        changes.append(change^)
-    params.put(String("changes"), changes^)
+        changes.append(change)
+    params.put(String("changes"), changes)
     return params^

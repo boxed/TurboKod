@@ -228,7 +228,7 @@ def write_file_stamped(path: String, content: String) -> FileInfo:
     var ok = True
     while written < total:
         var n = external_call["write", Int](
-            Int(fd), ptr.unsafe_offset(written), UInt(total - written),
+            fd, ptr.unsafe_offset(written), total - written,
         )
         if n <= 0:
             ok = False

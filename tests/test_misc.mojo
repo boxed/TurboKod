@@ -1077,7 +1077,7 @@ def _flip_json(v: JsonValue) -> JsonValue:
         var item = json_object()
         item.put(String("language_id"), json_str(String("zz")))
         item.put(String("program"), json_str(String("/bin/true")))
-        out.append(item^)
+        out.append(item)
         return out^
     return v.copy()
 

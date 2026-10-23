@@ -430,9 +430,12 @@ The deliberate exceptions: **iterative search** (Find Next/Prev, Replace's step-
 
 ## Mojo-version sensitivity
 
-**The code targets Mojo 1.0.0**, pinned via `modular = ">=26.5"` in `pixi.toml`
-(that's the `modular` release whose `mojo` is 1.0.0 — check with `pixi run mojo --version`).
-Mojo's syntax churned a lot pre-1.0; 1.0 is the stable baseline. The idioms in use:
+**The code targets Mojo 1.2.0**, pinned via `modular = ">=26.7"` in `pixi.toml`
+(that's the `modular` release whose `mojo` is 1.2.0 — check with `pixi run mojo --version`).
+Mojo's syntax churned a lot pre-1.0; 1.0 is the stable baseline. `pixi.lock` is
+the toolchain stamp in every build cache (`run.sh`, `run_swift.sh`), so a bump
+rebuilds everything — without that, a stale binary from the old compiler would
+keep running. The idioms in use:
 
 - `@fieldwise_init` + explicit trait conformance (`Copyable, Movable`) on value-type structs — *not* the old `@value`.
 - Every function is `def`. There is no `fn` in this codebase, including `@export def` for the C ABI.
@@ -481,6 +484,23 @@ Three things bite when porting older code, all of which the 1.0 compiler catches
    `field has non-'Deinitable' type`. Declaring `__deinit__` breaks the cycle;
    fields are still destroyed automatically. `JsonValue` in `json.mojo` is the
    worked example, with the reasoning in a comment.
+
+What the 1.2 bump changed:
+
+- `FileDescriptor` is now `RawFileDescriptor` and holds a `c_int`:
+  `RawFileDescriptor(c_int(fd))`.
+- **A raw `external_call["write", …]` must match the stdlib's signature** —
+  `(Int32 fd, ptr, Int len) -> Int`. `RawFileDescriptor.write_bytes` declares
+  `write` that way, and a second declaration with other types (we used to pass
+  `Int(fd)` / `UInt(len)`) fails at LLVM lowering with "existing function with
+  conflicting signature". Same rule for `read`.
+- `x^` on an argument the callee only borrows is now a warning ("the transfer
+  has no effect"); just drop the `^`.
+- **Compiler bug: an all-`pass` `if`/`elif` chain skips its `elif`
+  conditions.** `if a(): pass` / `elif b(): pass` (no `else`) never calls
+  `b()`, side effects included. A real body in any branch, or an `else`, makes
+  it compile correctly. Write `if not a(): _ = b()` instead. This is what
+  silently stopped the Find Symbol index from ever becoming ready.
 
 The context-manager protocol is still deliberately avoided — use explicit
 `start()`/`stop()` instead.

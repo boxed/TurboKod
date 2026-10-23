@@ -2269,14 +2269,14 @@ struct DapManager(Copyable, Movable):
                         String("condition"),
                         json_str(self._subprocess.bp_conditions[k]),
                     )
-                bps.append(bp^)
+                bps.append(bp)
             var args = json_object()
-            args.put(String("source"), src^)
-            args.put(String("breakpoints"), bps^)
+            args.put(String("source"), src)
+            args.put(String("breakpoints"), bps)
             args.put(String("sourceModified"), json_bool(False))
             try:
                 _ = self._subprocess.client.send_request(
-                    String("setBreakpoints"), args^,
+                    String("setBreakpoints"), args,
                 )
             except e:
                 print("dap: subprocess _configure setBreakpoints", path, ":", String(e))
@@ -3345,7 +3345,7 @@ def _exception_breakpoints_args(filters: List[String]) -> JsonValue:
     for i in range(len(filters)):
         arr.append(json_str(filters[i]))
     var args = json_object()
-    args.put(String("filters"), arr^)
+    args.put(String("filters"), arr)
     return args^
 
 

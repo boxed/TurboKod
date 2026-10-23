@@ -1844,7 +1844,7 @@ def test_lsp_initialize_against_mojo_lsp_server() raises:
     params.put(String("processId"), json_int(0))
     params.put(String("rootUri"), json_null())
     params.put(String("capabilities"), json_object())
-    var req_id = client.send_request(String("initialize"), params^)
+    var req_id = client.send_request(String("initialize"), params)
     var got: Optional[LspIncoming] = Optional[LspIncoming]()
     for _ in range(100):
         var maybe = client.poll(Int32(50))
@@ -1927,8 +1927,8 @@ def test_ty_offers_quickfix_for_missing_any_import() raises:
     var folder = json_object()
     folder.put(String("uri"), json_str(root_uri))
     folder.put(String("name"), json_str(String("ty_quickfix")))
-    folders.append(folder^)
-    params.put(String("workspaceFolders"), folders^)
+    folders.append(folder)
+    params.put(String("workspaceFolders"), folders)
     var caps = json_object()
     var text_doc_caps = json_object()
     var ca_caps = json_object()
@@ -1937,13 +1937,13 @@ def test_ty_offers_quickfix_for_missing_any_import() raises:
     var kind_values = json_array()
     kind_values.append(json_str(String("")))
     kind_values.append(json_str(String("quickfix")))
-    ca_kind.put(String("valueSet"), kind_values^)
-    ca_literal.put(String("codeActionKind"), ca_kind^)
-    ca_caps.put(String("codeActionLiteralSupport"), ca_literal^)
-    text_doc_caps.put(String("codeAction"), ca_caps^)
-    caps.put(String("textDocument"), text_doc_caps^)
-    params.put(String("capabilities"), caps^)
-    var init_id = client.send_request(String("initialize"), params^)
+    ca_kind.put(String("valueSet"), kind_values)
+    ca_literal.put(String("codeActionKind"), ca_kind)
+    ca_caps.put(String("codeActionLiteralSupport"), ca_literal)
+    text_doc_caps.put(String("codeAction"), ca_caps)
+    caps.put(String("textDocument"), text_doc_caps)
+    params.put(String("capabilities"), caps)
+    var init_id = client.send_request(String("initialize"), params)
 
     var saw_init = False
     for _ in range(200):
@@ -1968,8 +1968,8 @@ def test_ty_offers_quickfix_for_missing_any_import() raises:
     doc.put(String("text"), json_str(
         String("def f(x: Any) -> Any:\n    return x\n")
     ))
-    did_open.put(String("textDocument"), doc^)
-    client.send_notification(String("textDocument/didOpen"), did_open^)
+    did_open.put(String("textDocument"), doc)
+    client.send_notification(String("textDocument/didOpen"), did_open)
 
     # Drain notifications until publishDiagnostics for our URI arrives
     # with a non-empty diagnostic list. ty emits one publishDiagnostics
@@ -2032,14 +2032,14 @@ def test_ty_offers_quickfix_for_missing_any_import() raises:
     var ca_params = json_object()
     var ca_doc = json_object()
     ca_doc.put(String("uri"), json_str(doc_uri))
-    ca_params.put(String("textDocument"), ca_doc^)
+    ca_params.put(String("textDocument"), ca_doc)
     ca_params.put(String("range"), range_v.copy())
     var ctx = json_object()
     var ctx_diags = json_array()
-    ctx_diags.append(min_diag^)
-    ctx.put(String("diagnostics"), ctx_diags^)
-    ca_params.put(String("context"), ctx^)
-    var ca_id = client.send_request(String("textDocument/codeAction"), ca_params^)
+    ctx_diags.append(min_diag)
+    ctx.put(String("diagnostics"), ctx_diags)
+    ca_params.put(String("context"), ctx)
+    var ca_id = client.send_request(String("textDocument/codeAction"), ca_params)
 
     var ca_result: Optional[JsonValue] = Optional[JsonValue]()
     for _ in range(200):

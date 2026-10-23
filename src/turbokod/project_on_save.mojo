@@ -121,9 +121,9 @@ def write_project_on_save(
         var aarr = json_array()
         for k in range(len(act.args)):
             aarr.append(json_str(act.args[k]))
-        obj.put(String("args"), aarr^)
+        obj.put(String("args"), aarr)
         obj.put(String("cwd"), json_str(act.cwd))
-        arr.append(obj^)
+        arr.append(obj)
     var root = json_object()
-    root.put(String("actions"), arr^)
+    root.put(String("actions"), arr)
     return write_file(path, encode_json(root) + String("\n"))

@@ -700,11 +700,11 @@ def _config_to_json(config: TurbokodConfig) -> JsonValue:
     var rp = json_array()
     for i in range(len(config.recent_projects)):
         rp.append(json_str(config.recent_projects[i]))
-    root.put(String("recent_projects"), rp^)
+    root.put(String("recent_projects"), rp)
     var rf = json_array()
     for i in range(len(config.recent_files)):
         rf.append(json_str(config.recent_files[i]))
-    root.put(String("recent_files"), rf^)
+    root.put(String("recent_files"), rf)
     var osa = json_array()
     for i in range(len(config.on_save_actions)):
         var act = config.on_save_actions[i].copy()
@@ -714,10 +714,10 @@ def _config_to_json(config: TurbokodConfig) -> JsonValue:
         var aarr = json_array()
         for k in range(len(act.args)):
             aarr.append(json_str(act.args[k]))
-        obj.put(String("args"), aarr^)
+        obj.put(String("args"), aarr)
         obj.put(String("cwd"), json_str(act.cwd))
-        osa.append(obj^)
-    root.put(String("on_save_actions"), osa^)
+        osa.append(obj)
+    root.put(String("on_save_actions"), osa)
     var lsv = json_array()
     for i in range(len(config.language_servers)):
         var ov = config.language_servers[i].copy()
@@ -726,16 +726,16 @@ def _config_to_json(config: TurbokodConfig) -> JsonValue:
         var ft = json_array()
         for k in range(len(ov.file_types)):
             ft.append(json_str(ov.file_types[k]))
-        obj.put(String("file_types"), ft^)
+        obj.put(String("file_types"), ft)
         var aa = json_array()
         for k in range(len(ov.argvs)):
             var inner = json_array()
             for m in range(len(ov.argvs[k])):
                 inner.append(json_str(ov.argvs[k][m]))
-            aa.append(inner^)
-        obj.put(String("argvs"), aa^)
-        lsv.append(obj^)
-    root.put(String("language_servers"), lsv^)
+            aa.append(inner)
+        obj.put(String("argvs"), aa)
+        lsv.append(obj)
+    root.put(String("language_servers"), lsv)
     return root^
 
 
@@ -896,7 +896,7 @@ def _merge_json_objects(
         var base_v = base.object_get(key)
         if base_v and encode_json(base_v.value()) == encode_json(mine_v):
             continue
-        out.put(key, mine_v^)
+        out.put(key, mine_v)
     return out^
 
 

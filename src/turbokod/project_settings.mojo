@@ -151,7 +151,7 @@ def _build_lang_dropdown(var current: String) -> Dropdown:
     for i in range(len(specs)):
         options.append(specs[i].language_id)
     var dd = Dropdown(options^, 0)
-    dd.set_value(current^)
+    dd.set_value(current)
     return dd^
 
 
@@ -174,7 +174,7 @@ def _build_grammar_dropdown(var current: String) -> Dropdown:
         if not dup:
             options.append(lang)
     var dd = Dropdown(options^, 0)
-    dd.set_value(current^)
+    dd.set_value(current)
     return dd^
 
 

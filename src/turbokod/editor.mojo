@@ -4637,7 +4637,7 @@ struct Editor(Copyable, Movable):
         ``apply_revert_block`` would splice ``\\r``-laden lines back
         into the buffer.
         """
-        self._git_head_text = _normalize_crlf(text^)
+        self._git_head_text = _normalize_crlf(text)
         self._git_head_loaded = True
         self._git_head_present = present
         self._git_changes_dirty = True

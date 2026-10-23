@@ -600,7 +600,7 @@ def _build_lang_dropdown(var current: String) -> Dropdown:
         options.append(String("yaml"))
         options.append(String("markdown"))
     var dd = Dropdown(options^, 0)
-    dd.set_value(current^)
+    dd.set_value(current)
     return dd^
 
 

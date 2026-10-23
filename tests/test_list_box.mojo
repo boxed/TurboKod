@@ -248,7 +248,7 @@ def test_set_selection_remaps_after_rows_move() raises:
     rows.append(7)
     rows.append(2)
     rows.append(99)  # out of range: dropped
-    lb.set_selection(rows^, 2, 7, 10)
+    lb.set_selection(rows, 2, 7, 10)
     assert_equal(_rows(lb), String("2,7"))
     assert_equal(lb.selected, 2)
     assert_equal(lb.anchor(), 7)

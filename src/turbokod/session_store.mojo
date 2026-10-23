@@ -228,11 +228,11 @@ def encode_session(session: Session) -> String:
     var z = json_array()
     for i in range(len(session.z_order)):
         z.append(json_int(session.z_order[i]))
-    root.put(String("z_order"), z^)
+    root.put(String("z_order"), z)
     var arr = json_array()
     for i in range(len(session.windows)):
         arr.append(_encode_session_window(session.windows[i]))
-    root.put(String("windows"), arr^)
+    root.put(String("windows"), arr)
     return encode_json(root) + String("\n")
 
 

@@ -67,7 +67,9 @@ fi
 # in ``src/``, the entry point itself, and the C shims linked into it
 # (a shim rebuild needs a binary rebuild — they're statically linked).
 # ``find -newer`` returns the first match and we short-circuit on
-# -print -quit, so this scales fine as the package grows.
+# -print -quit, so this scales fine as the package grows. ``pixi.lock`` is
+# the toolchain stamp: a Mojo version bump rewrites it, and a binary built
+# by the old compiler must not survive that.
 #
 # A sibling ``support.mojo`` next to the entry point counts as a dependency
 # too: the test suites import their shared fixtures from ``tests/support.mojo``,
@@ -82,7 +84,8 @@ needs_build=1
 if [ -x "$bin" ]; then
   newer=$(find "${deps[@]}" -name '*.mojo' -newer "$bin" -print -quit 2>/dev/null)
   if [ -z "$newer" ] \
-     && [ ! "app/turbokod-shim/target/release/libturbokod_shim.a" -nt "$bin" ]; then
+     && [ ! "app/turbokod-shim/target/release/libturbokod_shim.a" -nt "$bin" ] \
+     && [ ! pixi.lock -nt "$bin" ]; then
     needs_build=0
   fi
 fi

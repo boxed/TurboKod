@@ -21,8 +21,10 @@ mkdir -p .build
 
 ensure_shim run_swift || exit 1
 
-# Build the Mojo logic shared-lib when any Mojo source changed.
-if [ ! -f "$dylib" ] || find src "$shim_lib" -newer "$dylib" -print -quit 2>/dev/null | grep -q .; then
+# Build the Mojo logic shared-lib when any Mojo source changed, or the
+# toolchain did (a Mojo bump rewrites ``pixi.lock``; without it the stale
+# dylib from the old compiler would be reused).
+if [ ! -f "$dylib" ] || find src "$shim_lib" pixi.lock -newer "$dylib" -print -quit 2>/dev/null | grep -q .; then
   echo "[run_swift] building Mojo shared-lib -> $dylib" >&2
   if ! pixi run mojo build --emit shared-lib -I src \
       -Xlinker "-L${env_prefix}/lib" -Xlinker "-lonig" \

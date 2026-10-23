@@ -130,8 +130,8 @@ def encode_breakpoints(
             bp.put(
                 String("wait_for"), json_str(breakpoints[i].wait_for),
             )
-        arr.append(bp^)
-    root.put(String("breakpoints"), arr^)
+        arr.append(bp)
+    root.put(String("breakpoints"), arr)
     return encode_json(root) + String("\n")
 
 

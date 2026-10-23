@@ -132,7 +132,7 @@ struct ReferencePick(Movable):
         if len(self.word.as_bytes()) > 0:
             title = title + String(": ") + self.word
         title = title + String(" ")
-        paint_window_title(canvas, rect, title^, bg, bg)
+        paint_window_title(canvas, rect, title, bg, bg)
         var top = self._list_top(rect)
         var h = self._list_height(rect)
         self._revealed_height = h

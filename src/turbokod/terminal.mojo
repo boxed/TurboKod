@@ -11,7 +11,8 @@ touch the OS at all, so they're easy to unit-test (see ``tests/test_basic.mojo``
 from std.collections.list import List
 from std.collections.optional import Optional
 from std.ffi import external_call
-from std.io.file_descriptor import FileDescriptor
+from std.io.file_descriptor import RawFileDescriptor
+from std.ffi import c_int
 
 from .canvas import Canvas
 from .cell import Cell
@@ -274,7 +275,7 @@ struct Terminal:
         var bytes = line.as_bytes()
         if len(bytes) == 0:
             return
-        var f = FileDescriptor(Int(self.trace_fd))
+        var f = RawFileDescriptor(c_int(self.trace_fd))
         f.write_bytes(bytes)
 
 

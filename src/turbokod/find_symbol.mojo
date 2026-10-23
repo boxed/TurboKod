@@ -326,7 +326,7 @@ struct FindSymbol(Movable):
         self.active = True
         self.query = TextField()
         self.root = root^
-        var sanitized = sanitize_symbol_query(prefill^)
+        var sanitized = sanitize_symbol_query(prefill)
         if len(sanitized.as_bytes()) > 0:
             self.query.set_text(sanitized)
             if select_prefill:

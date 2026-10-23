@@ -877,7 +877,7 @@ def test_test_pane_runs_command_on_pty() raises:
     var args = List[String]()
     args.append(String("-c"))
     args.append(String("printf hi; exit 7"))
-    pane.run(String("sh"), args^, String(""))
+    pane.run(String("sh"), args, String(""))
     assert_true(pane.running())
     # Pump the pty until the child exits. Bounded so a stuck child fails
     # the test rather than hanging the suite.
@@ -1773,7 +1773,7 @@ def test_run_session_forwards_env() raises:
     var env = List[String]()
     env.append(String("TK_ENV_A=one"))
     env.append(String("TK_ENV_B=two words"))
-    s.start(String("env-test"), String("sh"), args^, String(""), 0, 0, env^)
+    s.start(String("env-test"), String("sh"), args, String(""), 0, 0, env)
     var captured = String("")
     var ticks = 0
     while ticks < 2000:
@@ -1797,7 +1797,7 @@ def test_run_session_lifecycle() raises:
     args.append(String("-c"))
     args.append(String("printf 'hi\\n'; exit 7"))
     s.start(
-        String("echo-test"), String("sh"), args^, String(""),
+        String("echo-test"), String("sh"), args, String(""),
     )
     assert_true(s.is_active())
     assert_true(s.matches(String("echo-test")))

@@ -178,7 +178,7 @@ def encode_drafts(drafts: List[StoredDraft]) -> String:
     var arr = json_array()
     for i in range(len(drafts)):
         arr.append(_encode_draft(drafts[i]))
-    root.put(String("drafts"), arr^)
+    root.put(String("drafts"), arr)
     return encode_json(root) + String("\n")
 
 

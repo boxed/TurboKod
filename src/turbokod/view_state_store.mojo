@@ -111,8 +111,8 @@ def encode_view_states(
             String("scroll"),
             encode_int_pair(views[i].scroll_x, views[i].scroll_y),
         )
-        arr.append(v^)
-    root.put(String("views"), arr^)
+        arr.append(v)
+    root.put(String("views"), arr)
     return encode_json(root) + String("\n")
 
 

@@ -3,7 +3,7 @@
 Pure Mojo via ``external_call`` — no Python interop, no ncurses. We bind only
 what the rest of the package uses: termios (raw mode), ioctl (window size),
 poll (timeout-aware input wait), read (stdin bytes). Stdout writes go through
-``std.io.file_descriptor.FileDescriptor`` because Mojo reserves the bare
+``std.io.file_descriptor.RawFileDescriptor`` because Mojo reserves the bare
 ``write`` external_call symbol for its own use.
 
 Where C functions take an opaque struct pointer (termios, winsize, pollfd) we
@@ -15,7 +15,8 @@ the ``external_call`` avoids that whole song and dance.
 
 from std.collections.list import List
 from std.ffi import external_call
-from std.io.file_descriptor import FileDescriptor
+from std.io.file_descriptor import RawFileDescriptor
+from std.ffi import c_int
 from std.sys.info import CompilationTarget
 
 
@@ -241,9 +242,9 @@ def read_into(fd: Int32, mut buf: List[UInt8], count: Int) -> Int:
     the byte count actually read, or -1 on error / 0 on EOF.
 
     Direct ``external_call["read", Int]`` — the libc ``read(2)``
-    symbol. Earlier we routed this through ``FileDescriptor.read_bytes``
+    symbol. Earlier we routed this through ``RawFileDescriptor.read_bytes``
     on a hunch that the symbol collided with a Mojo stdlib
-    registration (the way ``write`` does), but ``FileDescriptor.read_bytes``
+    registration (the way ``write`` does), but ``RawFileDescriptor.read_bytes``
     turns out to segfault on raw-mode TTY fds in this Mojo build,
     so we go straight to the syscall instead. The LSP / DAP message
     framers have used this path for thousands of pipe reads without
@@ -314,7 +315,7 @@ def write_buffer(fd: Int32, mut buf: List[UInt8]):
     """Write ``buf`` (a byte accumulator) to ``fd`` in one syscall."""
     if len(buf) == 0:
         return
-    var f = FileDescriptor(Int(fd))
+    var f = RawFileDescriptor(c_int(fd))
     f.write_bytes(Span(buf))
 
 
@@ -348,7 +349,7 @@ def debug_log(msg: String):
     var line = msg + String("\n")
     var bytes = line.as_bytes()
     _ = external_call["write", Int](
-        Int(fd), bytes.unsafe_ptr(), UInt(len(bytes)),
+        fd, bytes.unsafe_ptr(), len(bytes),
     )
     _ = external_call["close", Int32](fd)
 
@@ -357,8 +358,8 @@ def debug_log(msg: String):
 
 
 def write_string(fd: Int32, s: String):
-    """Write ``s`` to ``fd`` via ``FileDescriptor.write_string``."""
-    var f = FileDescriptor(Int(fd))
+    """Write ``s`` to ``fd`` via ``RawFileDescriptor.write_string``."""
+    var f = RawFileDescriptor(c_int(fd))
     f.write_string(StringSpan(s))
 
 

@@ -1709,7 +1709,7 @@ def test_json_round_trip_lsp_envelope() raises:
     req.put(String("jsonrpc"), json_str(String("2.0")))
     req.put(String("id"), json_int(1))
     req.put(String("method"), json_str(String("initialize")))
-    req.put(String("params"), params^)
+    req.put(String("params"), params)
     var encoded = encode_json(req)
     assert_equal(
         encoded,

@@ -1181,7 +1181,7 @@ struct TextLog(Copyable, Movable):
             self.line_runs[idx].append(
                 ColorRun(r.start + base_len, r.end + base_len, r.attr)
             )
-        self.lines[idx] = self.lines[idx] + seg^
+        self.lines[idx] = self.lines[idx] + seg
         if self._layout_w >= 0:
             # Drop the mutated line's stale visual rows, then re-append
             # its freshly-wrapped rows. Rows are grouped by ``line_idx``

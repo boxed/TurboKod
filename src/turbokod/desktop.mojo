@@ -5584,7 +5584,7 @@ struct Desktop(Movable):
         if self.project:
             root = self.project.value()
         var manager = LspManager()
-        manager.start_with(lang, argv^, root)
+        manager.start_with(lang, argv, root)
         self.lsp_managers.append(manager^)
         self.lsp_languages.append(lang)
         return len(self.lsp_managers) - 1
@@ -5896,7 +5896,7 @@ struct Desktop(Movable):
             # land the result on disk so their work isn't lost (skips the
             # editorconfig transforms ``save`` would apply; acceptable
             # for this edge case).
-            _ = write_file(self.merge_view.file_path, text^)
+            _ = write_file(self.merge_view.file_path, text)
         self.merge_view.close()
         self._open_next_merge(screen)
 
@@ -9440,7 +9440,7 @@ struct Desktop(Movable):
                 var lr = self.lsp_managers[i].take_linked_ranges()
                 var lw = self._focused_editor_idx()
                 if lw >= 0 and len(lr) >= 2:
-                    self.windows.windows[lw].editor.begin_linked_edit(lr^)
+                    self.windows.windows[lw].editor.begin_linked_edit(lr)
             # inlineValue → end-of-line annotations on the stopped file.
             if self.lsp_managers[i].has_inline_values():
                 var ivs = self.lsp_managers[i].take_inline_values()
@@ -10405,14 +10405,14 @@ struct Desktop(Movable):
         # and Shift+F5 share one code path.
         var cmd = self.debug_pane.consume_command_id()
         if len(cmd.as_bytes()) > 0:
-            _ = self.dispatch_action(cmd^, screen)
+            _ = self.dispatch_action(cmd, screen)
         # Test pane shares the same title-strip / [■] command channel
         # (Stop / Re-run / Clear / close). It's held open after the run
         # exits, so consume here in dap_tick — which runs every frame —
         # rather than test_tick, which early-outs once the session ends.
         var tcmd = self.test_pane.consume_command_id()
         if len(tcmd.as_bytes()) > 0:
-            _ = self.dispatch_action(tcmd^, screen)
+            _ = self.dispatch_action(tcmd, screen)
         # …and the same ``File "<path>", line N`` link channel — a click
         # on a traceback line in the test runner output should jump to
         # the source just like the debug pane above.
@@ -11556,7 +11556,7 @@ struct Desktop(Movable):
         var term = self._bottom_pane_term_size()
         try:
             self.run_session.start(
-                String(target.name), program, args^, cwd,
+                String(target.name), program, args, cwd,
                 term[0], term[1], target.env.copy(),
             )
             self.status_bar.set_message(
@@ -11732,7 +11732,7 @@ struct Desktop(Movable):
         # not focus (the host keeps keyboard focus in the editor).
         self.panel_front_request = True
         try:
-            self.test_pane.run(program, args^, project_root)
+            self.test_pane.run(program, args, project_root)
             self.status_bar.set_message(
                 String("running tests…"),
                 Attr(BLACK, LIGHT_GRAY),
@@ -12910,12 +12910,13 @@ struct Desktop(Movable):
             # 1 MiB of file content per frame. At the ~600 MiB/s this
             # tokenizes at, that is well under a frame; the cost that
             # actually bounds it is the per-file read syscalls.
-            if self.symbol_index.build_step(_SYMBOL_INDEX_BUILD_BUDGET):
-                pass
-            elif self.symbol_index.revalidate_step(
-                _SYMBOL_INDEX_STAT_BUDGET,
-            ):
-                pass
+            # Not ``if build_step(..): pass / elif revalidate_step(..):
+            # pass`` — Mojo 1.2 never evaluates the ``elif`` condition of
+            # an all-``pass`` chain, so the sweep never ran.
+            if not self.symbol_index.build_step(_SYMBOL_INDEX_BUILD_BUDGET):
+                _ = self.symbol_index.revalidate_step(
+                    _SYMBOL_INDEX_STAT_BUDGET,
+                )
             # Falling through with a not-ready index is fine — the query
             # below routes to rg until the build lands, then switches
             # over on whichever frame finishes it.
@@ -14096,7 +14097,7 @@ struct Desktop(Movable):
             self.windows.windows[idx].editor.file_path, req.blame.sha,
         )
         self.blame_popup.open(
-            req.blame, message^, wall_clock_ms() // 1000,
+            req.blame, message, wall_clock_ms() // 1000,
             Point(req.anchor_x, req.anchor_y),
         )
 
@@ -15247,7 +15248,7 @@ struct Desktop(Movable):
             return
         if self.windows.windows[idx].editor.caret_count() != expected_n:
             return
-        if self.windows.windows[idx].editor.apply_fill_strings(texts^):
+        if self.windows.windows[idx].editor.apply_fill_strings(texts):
             self.windows.windows[idx].editor.reveal_cursor(
                 self.windows.windows[idx].interior(),
             )

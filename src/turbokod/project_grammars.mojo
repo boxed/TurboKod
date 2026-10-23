@@ -124,5 +124,5 @@ def write_grammar_overrides(
         seen.append(ext)
         exts.put(ext, json_str(lang))
     var root = json_object()
-    root.put(String("extensions"), exts^)
+    root.put(String("extensions"), exts)
     return write_file(path, encode_json(root) + String("\n"))

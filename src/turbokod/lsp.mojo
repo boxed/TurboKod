@@ -15,7 +15,8 @@ This module is layered:
 from std.collections.list import List
 from std.collections.optional import Optional
 
-from std.io.file_descriptor import FileDescriptor
+from std.io.file_descriptor import RawFileDescriptor
+from std.ffi import c_int
 from std.ffi import external_call
 
 from .json import (
@@ -107,7 +108,7 @@ def _build_envp_from_parent() -> ArgvBuffer:
     # nothing. The handshake then hangs at INITIALIZING with no error.
     # Setting PYTHONUNBUFFERED=1 makes Python flush on every write.
     pairs.append(String("PYTHONUNBUFFERED=1"))
-    return _build_argv_buffer(pairs^)
+    return _build_argv_buffer(pairs)
 
 
 def _build_argv_buffer(args: List[String]) -> ArgvBuffer:
@@ -364,7 +365,7 @@ struct LspProcess(Copyable, Movable):
     # single line. The whole point of streaming the log is so that a
     # hung session still leaves a complete-up-to-the-hang trail on
     # disk — no need for the host loop to be alive to flush. We
-    # ``write()`` directly via ``FileDescriptor`` (no userspace
+    # ``write()`` directly via ``RawFileDescriptor`` (no userspace
     # buffering) so each call is durable on return.
     #
     # Set it through ``own_trace_fd`` / ``borrow_trace_fd`` rather than
@@ -464,7 +465,7 @@ struct LspProcess(Copyable, Movable):
         var bytes = stamped.as_bytes()
         if len(bytes) == 0:
             return
-        var f = FileDescriptor(Int(self.trace_fd))
+        var f = RawFileDescriptor(c_int(self.trace_fd))
         f.write_bytes(bytes)
 
     def write_message(mut self, payload: String) raises:
@@ -927,7 +928,7 @@ struct LspClient(Copyable, Movable):
         var err = json_object()
         err.put(String("code"), json_int(code))
         err.put(String("message"), json_str(message))
-        envelope.put(String("error"), err^)
+        envelope.put(String("error"), err)
         self.process.write_message(encode_json(envelope))
 
     def poll(mut self, timeout_ms: Int32) raises -> Optional[LspIncoming]:
@@ -1004,7 +1005,7 @@ def lsp_initialize_params(
         var folder = json_object()
         folder.put(String("uri"), json_str(root_uri))
         folder.put(String("name"), json_str(workspace_name))
-        folders.append(folder^)
+        folders.append(folder)
     params.put(String("workspaceFolders"),
         folders^ if has_root else json_null(),
     )
@@ -1017,7 +1018,7 @@ def lsp_initialize_params(
     # never declared it.
     var symbol_caps = json_object()
     symbol_caps.put(String("dynamicRegistration"), json_bool(False))
-    workspace_caps.put(String("symbol"), symbol_caps^)
+    workspace_caps.put(String("symbol"), symbol_caps)
     # Advertise workspace/configuration so servers know they can ask
     # us for per-section settings. The ``tick`` request handler replies
     # with ``null`` per item (= "use server defaults"). Servers like
@@ -1035,14 +1036,14 @@ def lsp_initialize_params(
     # we don't relay is one it never sees.
     var watched_caps = json_object()
     watched_caps.put(String("dynamicRegistration"), json_bool(True))
-    workspace_caps.put(String("didChangeWatchedFiles"), watched_caps^)
+    workspace_caps.put(String("didChangeWatchedFiles"), watched_caps)
     # Advertise workspace/didChangeConfiguration so servers accept our
     # "settings changed, please re-read" kick (sent when the user changes
     # settings — see ``notify_configuration_changed``).
     var didchange_cfg_caps = json_object()
     didchange_cfg_caps.put(String("dynamicRegistration"), json_bool(True))
     workspace_caps.put(
-        String("didChangeConfiguration"), didchange_cfg_caps^,
+        String("didChangeConfiguration"), didchange_cfg_caps,
     )
     # Advertise workspace/didCreateFiles so servers that fix up imports /
     # index on file creation know we'll notify them (sent on Save As of a
@@ -1052,7 +1053,7 @@ def lsp_initialize_params(
     file_ops_caps.put(String("didCreate"), json_bool(True))
     file_ops_caps.put(String("didRename"), json_bool(True))
     file_ops_caps.put(String("didDelete"), json_bool(True))
-    workspace_caps.put(String("fileOperations"), file_ops_caps^)
+    workspace_caps.put(String("fileOperations"), file_ops_caps)
     # Advertise the ``documentChanges`` form of WorkspaceEdit. rust-analyzer
     # and gopls *prefer* it, and per spec a server may only use the form the
     # client claimed — so without this their renames and quickfix edits
@@ -1067,8 +1068,8 @@ def lsp_initialize_params(
     var ws_edit_caps = json_object()
     ws_edit_caps.put(String("documentChanges"), json_bool(True))
     ws_edit_caps.put(String("normalizesLineEndings"), json_bool(False))
-    workspace_caps.put(String("workspaceEdit"), ws_edit_caps^)
-    capabilities.put(String("workspace"), workspace_caps^)
+    workspace_caps.put(String("workspaceEdit"), ws_edit_caps)
+    capabilities.put(String("workspace"), workspace_caps)
     # Advertise UTF-8 position encoding (LSP 3.17 ``general.positionEncodings``).
     # The editor reasons in byte offsets; with UTF-8 negotiated, LSP
     # ``character`` offsets ARE byte offsets, so positions map straight through
@@ -1079,8 +1080,8 @@ def lsp_initialize_params(
     var encodings = json_array()
     encodings.append(json_str(String("utf-8")))
     encodings.append(json_str(String("utf-16")))
-    general_caps.put(String("positionEncodings"), encodings^)
-    capabilities.put(String("general"), general_caps^)
+    general_caps.put(String("positionEncodings"), encodings)
+    capabilities.put(String("general"), general_caps)
     # Advertise textDocument/completion so servers know to honor our
     # requests. ``snippetSupport: False`` keeps responses to plain-text
     # inserts — the editor doesn't render snippet placeholders, so a
@@ -1095,12 +1096,12 @@ def lsp_initialize_params(
     sync_caps.put(String("dynamicRegistration"), json_bool(False))
     sync_caps.put(String("willSave"), json_bool(True))
     sync_caps.put(String("willSaveWaitUntil"), json_bool(True))
-    text_doc_caps.put(String("synchronization"), sync_caps^)
+    text_doc_caps.put(String("synchronization"), sync_caps)
     var completion_caps = json_object()
     var completion_item_caps = json_object()
     completion_item_caps.put(String("snippetSupport"), json_bool(False))
-    completion_caps.put(String("completionItem"), completion_item_caps^)
-    text_doc_caps.put(String("completion"), completion_caps^)
+    completion_caps.put(String("completionItem"), completion_item_caps)
+    text_doc_caps.put(String("completion"), completion_caps)
     # Advertise codeAction with ``codeActionLiteralSupport``. Without this,
     # servers like ty / pyright return only opaque ``Command`` entries
     # (or nothing) — we need the literal ``CodeAction`` form so we can
@@ -1114,10 +1115,10 @@ def lsp_initialize_params(
     var code_action_kinds = json_array()
     code_action_kinds.append(json_str(String("")))
     code_action_kinds.append(json_str(String("quickfix")))
-    code_action_kind.put(String("valueSet"), code_action_kinds^)
-    code_action_literal.put(String("codeActionKind"), code_action_kind^)
+    code_action_kind.put(String("valueSet"), code_action_kinds)
+    code_action_literal.put(String("codeActionKind"), code_action_kind)
     code_action_caps.put(
-        String("codeActionLiteralSupport"), code_action_literal^,
+        String("codeActionLiteralSupport"), code_action_literal,
     )
     code_action_caps.put(String("isPreferredSupport"), json_bool(True))
     # Declare that we can resolve an action's ``edit`` on demand, and that we
@@ -1132,10 +1133,10 @@ def lsp_initialize_params(
     var code_action_resolve_props = json_array()
     code_action_resolve_props.append(json_str(String("edit")))
     code_action_resolve.put(
-        String("properties"), code_action_resolve_props^,
+        String("properties"), code_action_resolve_props,
     )
-    code_action_caps.put(String("resolveSupport"), code_action_resolve^)
-    text_doc_caps.put(String("codeAction"), code_action_caps^)
+    code_action_caps.put(String("resolveSupport"), code_action_resolve)
+    text_doc_caps.put(String("codeAction"), code_action_caps)
     # Advertise textDocument/diagnostic (the LSP 3.17 pull model). Servers
     # that prefer pull (or only support it) won't push ``publishDiagnostics``
     # unless the client declares this; we then request a report per document
@@ -1144,7 +1145,7 @@ def lsp_initialize_params(
     var diagnostic_caps = json_object()
     diagnostic_caps.put(String("dynamicRegistration"), json_bool(True))
     diagnostic_caps.put(String("relatedDocumentSupport"), json_bool(False))
-    text_doc_caps.put(String("diagnostic"), diagnostic_caps^)
+    text_doc_caps.put(String("diagnostic"), diagnostic_caps)
     # NB: we deliberately do NOT advertise ``textDocument/semanticTokens``.
     # LSP semantic highlighting (the server-computed recolor overlay on top
     # of the local TextMate pass) was removed: on a large file it costs the
@@ -1153,8 +1154,8 @@ def lsp_initialize_params(
     # refinement we don't want. Not advertising the capability means servers
     # skip the work entirely. See docs/performance.md
     # "Removed feature: LSP semantic highlighting".
-    capabilities.put(String("textDocument"), text_doc_caps^)
-    params.put(String("capabilities"), capabilities^)
+    capabilities.put(String("textDocument"), text_doc_caps)
+    params.put(String("capabilities"), capabilities)
     return params^
 
 

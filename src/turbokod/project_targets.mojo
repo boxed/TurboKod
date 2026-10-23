@@ -287,14 +287,14 @@ def _encode_target(t: RunTarget) -> JsonValue:
         var args_arr = json_array()
         for k in range(len(t.args)):
             args_arr.append(json_str(t.args[k]))
-        obj.put(String("args"), args_arr^)
+        obj.put(String("args"), args_arr)
     if len(t.cwd.as_bytes()) > 0:
         obj.put(String("cwd"), json_str(t.cwd))
     if len(t.env) > 0:
         var env_arr = json_array()
         for k in range(len(t.env)):
             env_arr.append(json_str(t.env[k]))
-        obj.put(String("env"), env_arr^)
+        obj.put(String("env"), env_arr)
     if len(t.debug_language.as_bytes()) > 0:
         obj.put(String("language"), json_str(t.debug_language))
     return obj^
@@ -323,7 +323,7 @@ def write_all_targets(
     var arr = json_array()
     for i in range(len(targets.targets)):
         arr.append(_encode_target(targets.targets[i]))
-    root.put(String("targets"), arr^)
+    root.put(String("targets"), arr)
     return write_file(path, encode_json(root) + String("\n"))
 
 
@@ -378,7 +378,7 @@ def save_project_targets(
     var arr = json_array()
     for i in range(len(targets.targets)):
         arr.append(_encode_target(targets.targets[i]))
-    stub.put(String("targets"), arr^)
+    stub.put(String("targets"), arr)
     return write_file(path, encode_json(stub) + String("\n"))
 
 
