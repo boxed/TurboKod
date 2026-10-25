@@ -169,10 +169,11 @@ def _scratch_dir(name: String) raises -> String:
     """
     # Per process, so concurrent runs don't share the mock's request log;
     # directories of runs that have exited are swept rather than piling up.
-    var base = getcwd_path() + String("/.build/lsp_conformance")
+    var build = getcwd_path() + String("/.build")
+    var base = build + String("/lsp_conformance")
     var own = base + String("/") + _process_dir_name()
     var dir = own + String("/") + name
-    for d in [base, own, dir]:
+    for d in [build, base, own, dir]:
         _ = external_call["mkdir", Int32](
             (d + String("\0")).unsafe_ptr(), UInt32(0o755),
         )
