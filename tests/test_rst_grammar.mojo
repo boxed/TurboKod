@@ -1,16 +1,14 @@
-"""Standalone smoke test for the bundled rST TextMate grammar.
+"""Smoke test for the bundled rST TextMate grammar: one line per construct,
+checked against the attr each should paint with. Broader than
+``test_highlight_rst_grammar_paints_common_constructs`` in
+``test_highlight.mojo``.
 
-Lives outside ``test_basic.mojo`` so it can be exercised without
-running the full suite (which currently has unrelated failures in
-this checkout). Once ``test_basic.mojo`` is green again, the same
-assertions are duplicated in
-``test_highlight_rst_grammar_paints_common_constructs`` there.
-
-Also smoke-tests the pyenv-shim resolver predicates that the rST
-LSP spawn relies on.
+Also smoke-tests the pyenv-shim resolver predicate that the rST LSP spawn
+relies on.
 """
 
 from std.collections.list import List
+from std.testing import TestSuite
 
 from turbokod.desktop import _lsp_bypass_pyenv_shim
 from turbokod.highlight import (
@@ -27,7 +25,7 @@ def _lines(*texts: String) -> List[String]:
     return out^
 
 
-def main() raises:
+def test_rst_grammar_paints_each_construct() raises:
     var lines = _lines(
         String("Section Title"),
         String("============="),
@@ -99,14 +97,13 @@ def main() raises:
     if not saw_field_ident:
         raise Error(String("missing field-list highlight"))
 
-    print(
-        String("rST grammar OK: ") + String(len(hls)) + String(" highlights")
-    )
 
-    # _lsp_bypass_pyenv_shim: rst opts out, python does not.
+def test_rst_bypasses_pyenv_shims_python_does_not() raises:
     if not _lsp_bypass_pyenv_shim(String("rst")):
         raise Error(String("rst should bypass pyenv shims"))
     if _lsp_bypass_pyenv_shim(String("python")):
         raise Error(String("python must NOT bypass pyenv shims"))
 
-    print(String("lsp helpers OK"))
+
+def main() raises:
+    TestSuite.discover_tests[__functions_in_module()]().run()

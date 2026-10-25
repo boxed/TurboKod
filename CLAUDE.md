@@ -108,7 +108,7 @@ First build of a fresh entry point is ~8–12 s; cached re-runs are ~0.5 s.
 
 ### The test suites
 
-`tests/` holds one entry point per topic — `tests/test_editor_edit.mojo`, `tests/test_git.mojo`, `tests/test_lsp.mojo` and so on — each with its own `main()` that calls every test in the file. Shared fixtures (`_key`, `_SCREEN`, `_temp_path`, `_run_git`, …) live in `tests/support.mojo`, which the suites import as a sibling module (no extra `-I` needed). Together they exercise everything that doesn't need a TTY.
+`tests/` holds one entry point per topic — `tests/test_editor_edit.mojo`, `tests/test_git.mojo`, `tests/test_lsp.mojo` and so on — each run by `std.testing.TestSuite`: `main()` is just `setup_test_env()` plus `TestSuite.discover_tests[__functions_in_module()]().run()`, which runs every `test_*` function in the file (in definition order), keeps going past a failure, and reports PASS/FAIL per test. Shared fixtures (`_key`, `_SCREEN`, `_temp_path`, `_run_git`, …) live in `tests/support.mojo`, which the suites import as a sibling module (no extra `-I` needed). Together they exercise everything that doesn't need a TTY.
 
 ```sh
 scripts/run_tests.sh              # all suites: build concurrently, run serially
@@ -117,7 +117,7 @@ scripts/run_tests.sh git editor   # only suites whose filename matches a filter
 
 The runner builds all suites in parallel and then runs them **one at a time** — they share a scratch `$HOME` (`/tmp/turbokod_test_home`, set up by `setup_test_env`) and a couple of tests write config files into it, so concurrent runs would race. It fails the run on any compiler warning.
 
-When you add a test, put it in the topic file it belongs to **and add the call to that file's `main()`** — nothing auto-discovers tests. (The monolith this replaced had 43 tests that were defined but never called, which is how three of them came to encode behaviour the product had long since changed.)
+When you add a test, put it in the topic file it belongs to as a top-level `def test_<name>() raises:` — discovery is by name, and that exact signature is required (anything else fails the suite at *run* time with "nonconforming signature", not at build time). Corollary: never name a helper `test_*`; prefix it `_`. Run one test with `./run.sh tests/test_git.mojo --only <test_name>` (`--skip` also works). (The hand-written `main()` lists this replaced let tests be defined but never called — the old monolith had 43, three of which encoded behaviour the product had long since changed.)
 
 This was one 23k-line `tests/test_basic.mojo` until it crossed a compile-time cliff in this Mojo version: a full `mojo build` went from ~5 minutes to over two hours, so it stopped being run at all. Same tests, 16 files, ~2m40s cold and seconds warm. Keep the files roughly under ~2.5k lines and this stays true.
 

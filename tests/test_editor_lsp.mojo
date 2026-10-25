@@ -6,7 +6,7 @@ and ``scripts/run_tests.sh`` runs every suite.
 """
 
 from std.ffi import external_call
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from turbokod.canvas import Canvas
 from turbokod.colors import BLUE, LIGHT_GRAY, default_attr
 from turbokod.editor import Editor
@@ -694,30 +694,4 @@ def test_editor_long_diagnostic_tooltip_fills_popup_interior() raises:
 
 def main() raises:
     setup_test_env()
-    test_editor_meta_click_emits_definition_request()
-    test_editor_meta_click_outside_identifier_is_silent()
-    test_editor_hover_dwell_emits_request_for_word_under_mouse()
-    test_editor_completion_prefix_start_walks_back_through_word()
-    test_editor_cursor_move_inside_word_keeps_popup_alive()
-    test_editor_ctrl_space_marks_request_manual()
-    test_editor_autotrigger_request_is_not_manual()
-    test_editor_autotrigger_request_debounced_until_settled()
-    test_editor_autotrigger_request_released_after_debounce()
-    test_editor_manual_completion_request_bypasses_debounce()
-    test_editor_close_completion_popup_clears_pending_request()
-    test_editor_accept_completion_replaces_prefix()
-    test_editor_accept_completion_overlap_widens_anchor()
-    test_editor_accept_completion_overlap_leaves_disjoint_text_alone()
-    test_editor_accept_completion_uses_text_edit_range()
-    test_editor_accept_completion_applies_additional_text_edits()
-    test_editor_diagnostic_at_cursor_picks_most_severe()
-    test_editor_apply_code_action_edits_inserts_typing_import()
-    test_editor_clear_diagnostics_drops_per_row_index()
-    test_editor_diagnostics_unchanged_on_inline_edit()
-    test_editor_diagnostics_shifted_on_line_insertion()
-    test_editor_diagnostics_dropped_on_deleted_row_shifted_below()
-    test_editor_diagnostics_preserved_above_edit()
-    test_editor_active_overlay_bounds_covers_painted_tooltip()
-    test_editor_long_diagnostic_tooltip_through_window()
-    test_editor_long_diagnostic_tooltip_fills_popup_interior()
-    print("editor_lsp: 26 tests passed")
+    TestSuite.discover_tests[__functions_in_module()]().run()

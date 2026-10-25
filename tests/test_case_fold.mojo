@@ -15,7 +15,7 @@ only shows up when a match straddles a lane edge.
 """
 
 from std.collections.list import List
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from turbokod.case_fold import (
     contains_ci, eq_ci, find_ci, find_exact, find_folded, fold_ascii,
@@ -695,28 +695,4 @@ def test_quick_open_match_parts_matches_the_unhoisted_form() raises:
 
 def main() raises:
     setup_test_env()
-    test_fold_byte_covers_exactly_the_ascii_upper_range()
-    test_fold_leaves_utf8_intact_and_length_unchanged()
-    test_is_ascii_scans_the_whole_buffer()
-    test_fold_ascii_into_reports_ascii_purity()
-    test_find_ci_matches_the_reference_implementation()
-    test_fold_and_search_cross_simd_lane_boundary()
-    test_scan_folded_reports_non_ascii_even_after_a_hit()
-    test_find_exact_is_case_sensitive()
-    test_eq_ci_and_starts_with_ci_agree_with_reference()
-    test_line_searcher_matches_libonig_exactly()
-    test_line_searcher_honors_case_sensitive_and_word_and_regex()
-    test_line_searcher_non_ascii_needle_uses_regex()
-    test_searcher_cache_reuses_the_compiled_regex()
-    test_searcher_matches_whole_drives_the_replace_button()
-    test_line_searcher_rsearch_finds_rightmost_before_limit()
-    test_editor_find_is_case_insensitive_by_default()
-    test_editor_find_prev_walks_backwards()
-    test_editor_find_on_non_ascii_line_still_folds_unicode()
-    test_editor_replace_all_case_insensitive_and_offsets()
-    test_editor_replace_all_case_sensitive_only_hits_exact()
-    test_project_replace_preserves_line_endings()
-    test_project_find_reports_case_insensitive_hits()
-    test_project_search_does_not_strand_its_regex()
-    test_quick_open_match_parts_matches_the_unhoisted_form()
-    print("case_fold: 24 tests passed")
+    TestSuite.discover_tests[__functions_in_module()]().run()

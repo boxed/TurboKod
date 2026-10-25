@@ -5,7 +5,7 @@ One of the per-topic suites split out of the former
 and ``scripts/run_tests.sh`` runs every suite.
 """
 
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from turbokod.canvas import Canvas
 from turbokod.claude_detect import (
     CLAUDE_ACTIVE, CLAUDE_NONE, CLAUDE_WAITING, CLAUDE_WORKING
@@ -655,37 +655,4 @@ def test_sgr_parse() raises:
 
 def main() raises:
     setup_test_env()
-    test_terminal_pane_attention_on_working_to_waiting()
-    test_terminal_double_click_selects_word()
-    test_terminal_double_click_drag_extends_by_word()
-    test_terminal_double_click_drag_backward_by_word()
-    test_terminal_triple_click_drag_extends_by_line()
-    test_terminal_parses_modified_arrows()
-    test_terminal_parses_bare_modifier_transition()
-    test_terminal_parses_shift_tab()
-    test_terminal_parses_alt_letter_as_letter()
-    test_terminal_pane_esc_steps_chrome_ladder_without_claude()
-    test_terminal_pane_esc_bypasses_chrome_ladder_in_claude_mode()
-    test_sgr_mouse_wheel_up()
-    test_sgr_mouse_motion_no_button()
-    test_text_log_incremental_layout_matches_full_rewrap()
-    test_text_log_incremental_layout_handles_trim()
-    test_text_log_full_rewrap_on_width_change()
-    test_text_log_streaming_appends_continue_open_line()
-    test_text_log_discrete_appends_stay_separate_rows()
-    test_text_log_streaming_continuation_keeps_layout_cache()
-    test_text_log_autoscroll_pins_to_bottom_on_append()
-    test_text_log_scroll_stays_in_sync_during_autoscroll()
-    test_vt_da1_reply_on_csi_c()
-    test_vt_dsr_6_reply_uses_1_based_cursor()
-    test_vt_decset_2004_bracketed_paste_flag()
-    test_vt_decset_1_app_cursor_keys()
-    test_vt_decset_1004_focus_events_round_trip()
-    test_vt_truecolor_fg_keeps_rgb_and_folds_index()
-    test_vt_truecolor_bg_keeps_rgb()
-    test_vt_osc_52_decodes_base64_to_clipboard()
-    test_vt_osc_52_query_does_not_leak_clipboard()
-    test_vt_decscusr_tracks_cursor_shape()
-    test_vt_ris_clears_mode_flags()
-    test_sgr_parse()
-    print("panes: 33 tests passed")
+    TestSuite.discover_tests[__functions_in_module()]().run()

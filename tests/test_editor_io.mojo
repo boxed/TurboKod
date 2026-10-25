@@ -6,7 +6,7 @@ and ``scripts/run_tests.sh`` runs every suite.
 """
 
 from std.ffi import external_call
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from turbokod.diff import REGION_CONFLICT
 from turbokod.editor import (
     EXT_CHANGE_CONFLICT, EXT_CHANGE_MERGED, EXT_CHANGE_NONE,
@@ -662,33 +662,4 @@ def test_editor_git_changes_gutter_widens_total_gutter() raises:
 
 def main() raises:
     setup_test_env()
-    test_editor_dirty_flag()
-    test_editor_external_change_detects_same_size_rewrite()
-    test_editor_from_file()
-    test_editor_save_clears_dirty()
-    test_editor_save_as_adopts_path()
-    test_editor_external_change_clean_reload_when_buffer_clean()
-    test_editor_external_change_skipped_in_review_mode()
-    test_editor_external_change_refreshes_highlights()
-    test_editor_external_change_auto_merges_disjoint_edits()
-    test_editor_external_change_clears_dirty_when_disk_already_has_our_edits()
-    test_editor_external_change_conflict_stashes_regions()
-    test_editor_merge_resolve_writes_disk()
-    test_editor_save_merges_an_unseen_disjoint_write()
-    test_editor_save_refuses_an_unseen_conflicting_write()
-    test_editor_save_refuses_while_merge_open_or_cancelled()
-    test_editor_merge_resolution_survives_a_write_during_the_merge()
-    test_editor_save_of_clean_buffer_adopts_unseen_write()
-    test_write_file_stamped_matches_the_written_file()
-    test_editor_save_applies_editorconfig_transforms()
-    test_editor_save_uses_editorconfig_line_endings()
-    test_editor_save_applies_global_transform_defaults()
-    test_editor_editorconfig_overrides_global_transform_default()
-    test_editor_gutter_click_emits_breakpoint_toggle()
-    test_editor_gutter_click_below_eof_is_ignored()
-    test_editor_gutter_drag_motion_does_not_toggle()
-    test_editor_blame_gutter_widens_total_gutter()
-    test_blame_gutter_click_requests_commit_details()
-    test_blame_gutter_click_past_blame_data_still_toggles_breakpoint()
-    test_editor_git_changes_gutter_widens_total_gutter()
-    print("editor_io: 27 tests passed")
+    TestSuite.discover_tests[__functions_in_module()]().run()

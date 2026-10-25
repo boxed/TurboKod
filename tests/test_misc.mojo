@@ -6,7 +6,7 @@ and ``scripts/run_tests.sh`` runs every suite.
 """
 
 from std.ffi import external_call
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from turbokod.canvas import Canvas, utf8_byte_to_cell, utf8_codepoint_count
 from turbokod.colors import Attr, BLACK, WHITE, default_attr
 from turbokod.editor import Editor, TextBuffer
@@ -1201,43 +1201,4 @@ def test_config_change_by_another_process_reaches_an_open_window() raises:
 
 def main() raises:
     setup_test_env()
-    test_help_hotkeys_opens_readonly_reference()
-    test_prev_codepoint_start_tolerates_past_eol_columns()
-    test_emoji_double_width()
-    test_escape_drop_paths_joins_and_trails()
-    test_pane_text_select_drag()
-    test_hit_title_command_returns_id_under_cursor()
-    test_event_factories()
-    test_centered()
-    test_text_buffer_split_and_join()
-    test_basename()
-    test_right_aligned_menu_layout()
-    test_delete_tree_file_and_recursive_dir()
-    test_text_buffer_strips_crlf_on_split()
-    test_dispatch_paste_targets_focused_terminal_pane()
-    test_app_focus_out_saves_all_dirty_windows_by_default()
-    test_normalize_ctrl_letter_preserves_cmd_bracket()
-    test_format_hotkey_renders_combinations()
-    test_alt_letter_opens_menu_by_mnemonic()
-    test_detached_settings_clipboard_chord_does_not_recurse()
-    test_is_printable_ascii_gates_search_keys()
-    test_is_type_ahead_key_rejects_command_chords()
-    test_is_type_ahead_key_accepts_shifted_typing()
-    test_expand_save_placeholders_substitutes_filepath()
-    test_pyenv_pin_satisfaction()
-    test_extension_of_helper()
-    test_document_link_over_template_tag_is_dropped()
-    test_big_buffer_disables_wrap_and_highlight()
-    test_replace_in_project_round_trip()
-    test_fit_title_path_keeps_tail_with_ellipsis()
-    test_partial_sgr_mouse_does_not_emit_esc()
-    test_accept_completion_multibyte_prefix_deletes_codepoints()
-    test_resolve_python_interpreter()
-    test_restore_caps_to_most_recently_focused()
-    test_discard_line_round_trip_against_real_git()
-    test_corrupt_config_is_not_clobbered_with_defaults()
-    test_merge_config_keeps_every_writers_change()
-    test_merge_covers_every_persisted_field()
-    test_second_window_does_not_revert_first_windows_setting()
-    test_config_change_by_another_process_reaches_an_open_window()
-    print("misc: 36 tests passed")
+    TestSuite.discover_tests[__functions_in_module()]().run()

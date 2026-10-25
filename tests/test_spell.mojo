@@ -6,7 +6,7 @@ and ``scripts/run_tests.sh`` runs every suite.
 """
 
 from std.ffi import external_call
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from turbokod.file_io import read_file, stat_file, write_file
 from turbokod.posix import getenv_value, which
 from turbokod.spell import (
@@ -717,28 +717,4 @@ def test_spelling_dialog_multi_select_and_submit() raises:
 
 def main() raises:
     setup_test_env()
-    test_speller_check_word_basic()
-    test_speller_strips_common_suffixes()
-    test_speller_handles_english_contractions()
-    test_speller_unloaded_returns_true_for_everything()
-    test_speller_set_project_loads_idea_dictionary()
-    test_speller_set_project_with_no_idea_dir_is_noop()
-    test_speller_add_user_word_persists_and_check_word_passes()
-    test_speller_load_default_includes_bundled_programmer_terms()
-    test_speller_load_default_includes_modern_english()
-    test_speller_load_default_layers_user_dictionary()
-    test_speller_normalizes_unicode_for_lookup()
-    test_speller_load_default_layers_user_language_dictionaries()
-    test_speller_reload_drops_removed_dictionary()
-    test_speller_add_project_word_persists_in_project_dir()
-    test_spell_menu_open_close_default_selection()
-    test_spell_menu_enter_on_user_resolves_with_add_user()
-    test_spell_menu_enter_on_project_disabled_stays_open()
-    test_spell_menu_enter_on_project_enabled_resolves_with_add_project()
-    test_spell_menu_esc_dismisses()
-    test_has_spell_noinspection_directive_parses_intellij_forms()
-    test_project_spell_scan_counts_flagged_words()
-    test_project_spell_scan_counts_across_many_files()
-    test_spell_scan_files_skips_binaries_by_extension()
-    test_spelling_dialog_multi_select_and_submit()
-    print("spell: 24 tests passed")
+    TestSuite.discover_tests[__functions_in_module()]().run()

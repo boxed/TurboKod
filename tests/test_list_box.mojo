@@ -1,7 +1,7 @@
 """``ListBox`` selection: single-select, and the Windows extended-selection
 rules for ``multi=True`` (click / Ctrl / Shift / drag / keyboard)."""
 
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from turbokod.events import (
     Event, KEY_DOWN, KEY_END, KEY_HOME, KEY_PAGEDOWN, KEY_SPACE, KEY_UP,
     MOD_CTRL, MOD_META, MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT,
@@ -258,17 +258,4 @@ def test_set_selection_remaps_after_rows_move() raises:
 
 
 def main() raises:
-    test_single_select_ignores_modifiers()
-    test_multi_click_ctrl_shift()
-    test_ctrl_shift_range_deselects_when_anchor_toggled_off()
-    test_multi_click_on_empty_area_changes_nothing()
-    test_multi_keyboard_arrows()
-    test_multi_home_end_page()
-    test_multi_select_all()
-    test_multi_drag_selects_range_and_autoscrolls()
-    test_press_after_lost_release_is_still_a_press()
-    test_paint_marks_caret_and_anchor()
-    test_single_drag_follows_pointer()
-    test_wheel_scrolls_three_rows_and_leaves_selection()
-    test_set_selection_remaps_after_rows_move()
-    print("list_box: 13 tests passed")
+    TestSuite.discover_tests[__functions_in_module()]().run()

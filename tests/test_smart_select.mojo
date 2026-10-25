@@ -4,7 +4,7 @@ Run with:
     ./run.sh tests/test_smart_select.mojo
 """
 
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from turbokod.editor import Editor
 from turbokod.events import (
@@ -223,16 +223,4 @@ def test_cmd_up_at_whole_file_is_noop() raises:
 
 
 def main() raises:
-    test_cmd_up_on_caret_selects_word()
-    test_cmd_up_after_word_extends_to_dotted_path()
-    test_cmd_up_inside_string_grows_to_quotes()
-    test_cmd_up_brackets_then_line_then_file()
-    test_cmd_up_grows_to_indent_block_and_file()
-    test_cmd_down_rewinds_through_history()
-    test_other_key_resets_smart_select_history()
-    test_cmd_down_with_empty_history_is_noop()
-    test_cmd_up_at_whole_file_is_noop()
-    test_cmd_up_grows_through_nested_brackets()
-    test_cmd_up_grows_across_multiline_brackets()
-    test_cmd_up_grows_existing_user_selection()
-    print("all smart-select tests passed")
+    TestSuite.discover_tests[__functions_in_module()]().run()

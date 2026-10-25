@@ -11,7 +11,7 @@ Run with::
     ./run.sh tests/test_vt_smoke.mojo
 """
 
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from turbokod.vt import Vt
 
@@ -269,27 +269,4 @@ def test_vt_save_restore_cursor_via_decsc() raises:
 
 
 def main() raises:
-    test_vt_plain_text_paints_cells_left_to_right()
-    test_vt_cr_and_lf_move_cursor()
-    test_vt_cup_moves_cursor_one_indexed()
-    test_vt_sgr_red_then_reset()
-    test_vt_auto_wrap_delays_until_next_glyph()
-    test_vt_alt_screen_swap_and_restore()
-    test_vt_osc_2_sets_title()
-    test_vt_erase_in_line_from_cursor()
-    test_vt_scroll_on_lf_at_bottom()
-    test_vt_utf8_multi_byte_glyph_placed_in_one_cell()
-    test_vt_resize_preserves_top_left_content()
-    test_vt_cursor_visibility_dec_25()
-    test_vt_scrollback_captures_rows_off_the_top()
-    test_vt_view_offset_shows_scrollback_above_live()
-    test_vt_scroll_view_clamps_to_scrollback_extents()
-    test_vt_scrollback_does_not_fill_on_alt_screen()
-    test_vt_view_offset_pinned_when_new_output_arrives()
-    test_vt_mouse_tracking_off_by_default()
-    test_vt_mouse_sgr_press_release_encoding()
-    test_vt_mouse_modifier_bits_encoded()
-    test_vt_mouse_wheel_codes()
-    test_vt_mouse_motion_bit_set_on_drag()
-    test_vt_save_restore_cursor_via_decsc()
-    print("all vt tests passed")
+    TestSuite.discover_tests[__functions_in_module()]().run()

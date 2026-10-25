@@ -5,7 +5,7 @@ One of the per-topic suites split out of the former
 and ``scripts/run_tests.sh`` runs every suite.
 """
 
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from turbokod.canvas import Canvas
 from turbokod.painter import Painter
 from turbokod.colors import Attr, BLACK, WHITE
@@ -438,25 +438,4 @@ def test_text_view_selection_extracts_text() raises:
 
 def main() raises:
     setup_test_env()
-    test_caret_blink_phase_math()
-    test_caret_blink_resets_on_synth_key_movement()
-    test_scrollbar_hidden_when_content_fits()
-    test_scrollbar_hidden_when_too_short()
-    test_scrollbar_paints_arrows_and_thumb()
-    test_scrollbar_thumb_tracks_scroll_position()
-    test_scrollbar_hit_arrow_zones()
-    test_scrollbar_hit_thumb_returns_drag_offset()
-    test_scrollbar_hit_page_zones()
-    test_scrollbar_hit_off_axis_returns_none()
-    test_scrollbar_drag_to_extremes()
-    test_scrollbar_track_jump_centers_target()
-    test_scrollbar_horizontal_paints_arrows_on_axis()
-    test_hscrollbar_reaches_last_column()
-    test_hscrollbar_shift_wheel_scrolls_horizontally()
-    test_reveal_cursor_golden_ratio()
-    test_softwrap_visual_updown()
-    test_text_view_wrap_lines_breaks_at_width()
-    test_text_view_wrap_lines_word_aware_with_indent()
-    test_text_view_wrap_lines_keeps_string_whole()
-    test_text_view_selection_extracts_text()
-    print("editor_view: 21 tests passed")
+    TestSuite.discover_tests[__functions_in_module()]().run()

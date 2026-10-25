@@ -26,7 +26,7 @@ Scenario authoring notes are in the mock server's docstring.
 from std.collections.list import List
 from std.collections.optional import Optional
 from std.ffi import external_call
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from turbokod.desktop import Desktop
 from turbokod.file_io import delete_path, read_file, stat_file, write_file
@@ -1431,38 +1431,4 @@ def test_retire_lsp_manager_ignores_an_out_of_range_index() raises:
 
 def main() raises:
     setup_test_env()
-    test_position_encoding_names_round_trip()
-    test_utf16_conversion_counts_em_dash_as_one_unit()
-    test_utf16_conversion_counts_emoji_as_a_surrogate_pair()
-    test_position_conversion_snaps_inside_a_codepoint()
-    test_position_conversion_clamps_past_end_of_line()
-    test_line_table_indexes_rows_and_strips_crlf()
-    test_line_table_empty_and_trailing_newline()
-    test_server_without_negotiation_gets_utf16_columns_converted()
-    test_server_negotiating_utf8_passes_columns_through()
-    test_utf16_conversion_reaches_references_and_workspace_edits()
-    test_spec_shape_definition_accepts_every_variant()
-    test_spec_shape_hover_markup_content()
-    test_spec_shape_hover_bare_string()
-    test_spec_shape_hover_marked_string_array()
-    test_spec_shape_completion_list_and_item_variants()
-    test_adversarial_wrong_types_degrade_without_crashing()
-    test_adversarial_null_results_read_as_answered_not_pending()
-    test_adversarial_out_of_range_positions_clamp()
-    test_adversarial_framing_split_frames_and_garbage()
-    test_adversarial_server_requests_are_position_converted()
-    test_workspace_edit_document_changes_is_parsed_and_converted()
-    test_workspace_edit_with_file_operations_is_refused_whole()
-    test_code_action_resolve_fills_in_the_withheld_edit()
-    test_document_link_resolve_fills_in_a_deferred_target()
-    test_file_rename_and_delete_notify_the_server()
-    test_file_operations_are_silent_when_the_server_opts_out()
-    test_code_action_resolve_that_never_answers_still_settles()
-    test_server_refresh_requests_are_answered_and_raise_a_flag()
-    test_shutdown_performs_the_spec_handshake()
-    test_begin_shutdown_returns_immediately_and_polls_to_done()
-    test_shutdown_poll_bounds_a_server_that_never_answers()
-    test_retiring_a_server_leaves_the_list_at_once_and_drains_later()
-    test_retire_lsp_manager_ignores_an_out_of_range_index()
-    test_shutdown_is_idempotent_and_survives_a_dead_server()
-    print("lsp_conformance: 35 tests passed")
+    TestSuite.discover_tests[__functions_in_module()]().run()

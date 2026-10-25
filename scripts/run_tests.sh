@@ -18,6 +18,8 @@
 # Usage:
 #   scripts/run_tests.sh              # all suites
 #   scripts/run_tests.sh git editor   # only suites whose name matches a filter
+#
+# A single test: ./run.sh tests/test_git.mojo --only <test_name>
 set -uo pipefail
 
 # Absolute path to this script, resolved *before* the cd so the parallel build
@@ -83,14 +85,19 @@ for f in "${suites[@]}"; do
   name=$(basename "$f" .mojo)
   out=$(./run.sh "$f" 2>&1)
   rc=$?
-  last=$(printf '%s' "$out" | tail -1)
+  # Suites run under std.testing.TestSuite, which ends with a line like
+  # ``Summary [ 25355.780 ] 144 tests run: 144 passed , 0 failed , 0 skipped``.
+  summary=$(printf '%s\n' "$out" | grep '^Summary' | tail -1)
   if [ "$rc" -ne 0 ]; then
     failed+=("$name")
     printf '  FAIL  %-22s\n' "$name"
-    printf '%s\n' "$out" | tail -12 | sed 's/^/        /'
+    # Everything but the per-test PASS lines: the FAIL entries with their
+    # assertion detail, the summary, or a build/crash message.
+    printf '%s\n' "$out" | grep -v '^ *PASS ' | head -60 | sed 's/^/        /'
   else
-    printf '  ok    %-22s %s\n' "$name" "$last"
-    n=$(printf '%s' "$last" | sed -n 's/.*: \([0-9]*\) tests passed/\1/p')
+    n=$(printf '%s' "$summary" | sed -n 's/.* \([0-9]*\) passed .*/\1/p')
+    secs=$(printf '%s' "$summary" | sed -n 's/^Summary \[ *\([0-9]*\)\.[0-9]* \].*/\1/p')
+    printf '  ok    %-22s %s tests (%ss)\n' "$name" "${n:-?}" "$(( ${secs:-0} / 1000 ))"
     total=$(( total + ${n:-0} ))
   fi
 done

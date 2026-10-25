@@ -20,7 +20,7 @@ Run with::
 """
 
 from std.collections.list import List
-from std.testing import assert_equal, assert_true
+from std.testing import TestSuite, assert_equal, assert_true
 
 from turbokod.posix import (
     alloc_zero_buffer, getenv_value, poll_stdin, read_into, setenv_value,
@@ -241,11 +241,4 @@ def test_terminal_pane_reclaims_the_pty_when_the_shell_exits() raises:
 
 
 def main() raises:
-    test_pty_echo_writes_into_grid()
-    test_pty_printf_ansi_color_lands_as_red_fg()
-    test_pty_child_runs_in_requested_cwd()
-    test_pty_isatty_detected_by_child()
-    test_pty_terminate_reaps_the_child()
-    test_pty_terminate_after_the_child_exited_on_its_own()
-    test_terminal_pane_reclaims_the_pty_when_the_shell_exits()
-    print("all pty smoke tests passed")
+    TestSuite.discover_tests[__functions_in_module()]().run()

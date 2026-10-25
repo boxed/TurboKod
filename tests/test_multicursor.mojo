@@ -4,7 +4,7 @@ Kept as its own suite (like every other file here since ``test_basic.mojo``
 was split up); ``scripts/run_tests.sh`` runs it along with the rest.
 """
 
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from turbokod.editor import Caret, Editor
 from turbokod.events import (
@@ -859,55 +859,4 @@ def test_cut_without_selection_removes_every_carets_line() raises:
 
 
 def main() raises:
-    test_primary_only_by_default()
-    test_add_caret_below_then_above()
-    test_add_caret_above_at_row_zero_is_noop()
-    test_add_caret_below_past_eof_is_noop()
-    test_movement_applies_to_every_caret()
-    test_typing_inserts_at_every_caret()
-    test_typing_two_carets_same_row_shifts_correctly()
-    test_backspace_at_every_caret()
-    test_collapse_extras_on_enter()
-    test_undo_restores_extras()
-    test_clear_extra_carets()
-    test_carets_merge_when_movement_collides()
-    test_three_carets_delete_inline()
-    test_backspace_at_col_zero_joins_lines_per_caret()
-    test_typing_three_carets_same_row()
-    test_ctrl_alt_down_adds_caret()
-    test_alt_tap_converts_multiline_selection_to_block_edit()
-    test_alt_tap_excludes_trailing_row_when_selection_ends_at_col_zero()
-    test_alt_tap_with_no_selection_is_silent()
-    test_alt_press_with_intervening_key_is_not_a_tap()
-    test_column_mode_tap_then_hold_draws_cursors()
-    test_alt_hold_without_prior_tap_does_not_enter_column_mode()
-    test_shift_right_extends_each_selection_on_separate_rows()
-    test_two_adjacent_carets_merge_when_selections_touch()
-    test_two_carets_merge_when_selections_overlap()
-    test_backward_selection_merge_keeps_direction()
-    test_cmd_right_jumps_each_caret_to_line_end()
-    test_cmd_left_smart_home_each_caret()
-    test_cmd_shift_right_extends_each_caret_to_line_end()
-    test_typing_replaces_each_carets_selection()
-    test_backspace_deletes_selection_at_each_caret()
-    test_delete_replaces_selection_at_each_caret()
-    test_delete_and_backspace_skip_carets_with_nothing_to_delete()
-    test_typing_two_selections_same_row_shifts_correctly()
-    test_typing_falls_back_when_selection_crosses_rows()
-    test_cross_row_selections_merge_when_they_touch()
-    test_paste_broadcasts_to_every_caret()
-    test_paste_two_carets_same_row_shifts_correctly()
-    test_paste_replaces_each_carets_selection()
-    test_paste_distributes_when_line_count_matches_caret_count()
-    test_paste_multiline_broadcast_renumbers_lower_carets()
-    test_paste_line_clipboard_inserts_above_each_caret()
-    test_undo_restores_extras_after_paste()
-    test_paste_empty_clipboard_with_carets_is_a_noop()
-    test_copy_joins_every_carets_selection()
-    test_copy_keeps_line_per_caret_with_empty_selection()
-    test_cut_removes_every_carets_selection()
-    test_copy_then_paste_over_same_carets_round_trips()
-    test_copied_column_distributes_into_another_column()
-    test_copy_without_selection_takes_every_carets_line()
-    test_cut_without_selection_removes_every_carets_line()
-    print("All multi-cursor tests passed.")
+    TestSuite.discover_tests[__functions_in_module()]().run()

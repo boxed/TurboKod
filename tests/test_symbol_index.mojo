@@ -24,7 +24,7 @@ that trade is acceptable is that a stale entry is impossible to observe:
 """
 
 from std.collections.list import List
-from std.testing import assert_equal, assert_false, assert_true
+from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from turbokod.file_io import stat_file, write_file
 from turbokod.string_utils import is_ascii_ident_byte
@@ -927,29 +927,4 @@ def test_container_members_matching_reads_the_class_body() raises:
 
 def main() raises:
     setup_test_env()
-    test_container_members_matching_reads_the_class_body()
-    test_indexes_identifiers_with_first_occurrence()
-    test_short_and_numeric_tokens_are_not_indexed()
-    test_a_name_is_reported_once_per_query()
-    test_search_respects_the_cap()
-    test_definition_sites_lists_every_file_defining_a_name()
-    test_binary_and_oversized_files_are_skipped()
-    test_search_matches_a_reference_scan()
-    test_reindex_retires_the_old_segment()
-    test_a_name_surviving_in_another_file_still_matches()
-    test_deleted_file_stops_matching()
-    test_new_file_is_picked_up_without_losing_existing_segments()
-    test_revalidation_catches_a_same_second_rewrite()
-    test_revalidation_leaves_untouched_files_alone()
-    test_unsaved_buffer_text_is_searchable()
-    test_is_ready_gates_the_fast_path()
-    test_compaction_preserves_every_live_entry()
-    test_verify_occurrence_confirms_a_fresh_seed()
-    test_verify_occurrence_relocates_a_moved_symbol()
-    test_verify_occurrence_rejects_a_vanished_symbol()
-    test_verify_occurrence_ignores_substring_matches()
-    test_seed_ranking_recognizes_definitions_and_file_kinds()
-    test_search_seeds_from_the_definition_not_the_changelog()
-    test_a_definition_later_in_the_file_upgrades_the_seed()
-    test_seed_ranking_survives_reindex_and_compaction()
-    print("symbol_index: 24 tests passed")
+    TestSuite.discover_tests[__functions_in_module()]().run()
