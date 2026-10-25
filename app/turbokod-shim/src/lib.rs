@@ -242,14 +242,45 @@ pub unsafe extern "C" fn tk_pty_spawn(
         let _ = libc::ioctl(slave, libc::TIOCSWINSZ, &ws);
     }
 
+    // Block every signal across the fork. Between fork and exec the child
+    // still runs the parent's handlers — the Mojo runtime's own SIGTERM /
+    // SIGINT / SIGHUP handler, installed over ours, which doesn't exit. A
+    // ``terminate`` that lands in that window (spawn immediately followed
+    // by kill) was swallowed by it, then exec dropped the handler and the
+    // child ran on as if never signalled: ~1 in 400 spawns leaked a child
+    // that ``reap_child`` gave up on. With signals blocked, an early
+    // SIGTERM stays pending until the child has reset its handlers below.
+    let mut all: libc::sigset_t = std::mem::zeroed();
+    let mut old_mask: libc::sigset_t = std::mem::zeroed();
+    libc::sigfillset(&mut all);
+    libc::pthread_sigmask(libc::SIG_SETMASK, &all, &mut old_mask);
+
     let pid = libc::fork();
     if pid < 0 {
+        libc::pthread_sigmask(libc::SIG_SETMASK, &old_mask, std::ptr::null_mut());
         return fail_closing(&[slave, master]);
     }
     if pid == 0 {
-        // Child. Must use only async-signal-safe APIs in principle,
-        // but Mojo is single-threaded so libc state isn't racy. We
-        // permit setenv / chdir.
+        // Child. Reset every caught signal to SIG_DFL — exactly what exec
+        // would do, just early enough that a pending SIGTERM gets the
+        // default action — then unblock. Ignored signals stay ignored, as
+        // they would across exec.
+        for sig in 1..NSIG {
+            let mut cur: libc::sigaction = std::mem::zeroed();
+            if libc::sigaction(sig, std::ptr::null(), &mut cur) == 0
+                && cur.sa_sigaction != libc::SIG_DFL
+                && cur.sa_sigaction != libc::SIG_IGN
+            {
+                let mut dfl: libc::sigaction = std::mem::zeroed();
+                dfl.sa_sigaction = libc::SIG_DFL;
+                libc::sigemptyset(&mut dfl.sa_mask);
+                libc::sigaction(sig, &dfl, std::ptr::null_mut());
+            }
+        }
+        libc::pthread_sigmask(libc::SIG_SETMASK, &old_mask, std::ptr::null_mut());
+        // Must use only async-signal-safe APIs in principle, but Mojo is
+        // single-threaded so libc state isn't racy. We permit setenv /
+        // chdir.
         if libc::setsid() < 0 {
             libc::_exit(127);
         }
@@ -291,6 +322,7 @@ pub unsafe extern "C" fn tk_pty_spawn(
     }
 
     // Parent.
+    libc::pthread_sigmask(libc::SIG_SETMASK, &old_mask, std::ptr::null_mut());
     libc::close(slave);
     set_nonblock(master);
     tk_track_child_add(pid as c_int);
@@ -298,6 +330,12 @@ pub unsafe extern "C" fn tk_pty_spawn(
     *master_fd_out = master;
     0
 }
+
+/// Signal-number bound (`NSIG` in `signal.h`); libc 0.2 doesn't export it.
+#[cfg(target_os = "macos")]
+const NSIG: c_int = 32;
+#[cfg(target_os = "linux")]
+const NSIG: c_int = 65;
 
 /// On Linux this is in `linux/termios.h`; on Darwin it's in `sys/ttycom.h`.
 /// libc 0.2 exposes it only on Linux, so we hand-roll the macOS value.
