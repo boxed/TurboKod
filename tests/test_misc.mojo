@@ -62,7 +62,7 @@ from turbokod.window import Window
 
 from support import (
     _doc_paths, _docs_contains, _ensure_dir, _key, _rm_rf, _run_git, _SCREEN,
-    _temp_path, setup_test_env,
+    _temp_path, _test_home, setup_test_env,
 )
 
 
@@ -853,7 +853,7 @@ def test_restore_caps_to_most_recently_focused() raises:
     most-recently-focused ``cap`` documents (always including the
     focused one), so a launch with a huge saved session doesn't pay to
     reconstruct every window on the first frame."""
-    var root = String("/tmp/turbokod_restore_cap_test")
+    var root = _temp_path(String("_restore_cap_test"))
     var cleanup = String("rm -rf '") + root + String("'\0")
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
     _ = external_call["mkdir", Int32](
@@ -986,7 +986,7 @@ def test_corrupt_config_is_not_clobbered_with_defaults() raises:
     the caller knows the defaults are safe to write only because the
     original is out of the way.
     """
-    var home = String("/tmp/turbokod_test_home")
+    var home = _test_home()
     var dir = home + String("/.config/turbokod")
     var path = dir + String("/config.json")
     var corrupt_glob = path + String(".corrupt")
@@ -1125,7 +1125,7 @@ def test_second_window_does_not_revert_first_windows_setting() raises:
     first had changed — and since switching files persists the recents list,
     that happened constantly in normal use.
     """
-    var home = String("/tmp/turbokod_test_home")
+    var home = _test_home()
     var path = home + String("/.config/turbokod/config.json")
     _ = delete_path(path)
 
@@ -1168,7 +1168,7 @@ def test_config_change_by_another_process_reaches_an_open_window() raises:
     """Settings are global to the app, so a change made elsewhere — another
     window, or a ``tk-tui`` session sharing the same config file — has to
     reach an already-open Desktop without a restart."""
-    var home = String("/tmp/turbokod_test_home")
+    var home = _test_home()
     var path = home + String("/.config/turbokod/config.json")
     _ = delete_path(path)
 

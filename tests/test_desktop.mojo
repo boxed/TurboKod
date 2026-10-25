@@ -2043,7 +2043,7 @@ def test_project_settings_grammars_add_remove() raises:
     then remove it — each step raises ``grammars_dirty``."""
     var ps = ProjectSettings()
     ps.open(
-        String("/tmp/turbokod_ps_unit"), ProjectTargets(),
+        _temp_path(String("_ps_unit")), ProjectTargets(),
         List[GrammarOverride](), List[OnSaveAction](), List[OnSaveAction](),
     )
     ps.section = 2  # Grammars
@@ -2081,7 +2081,7 @@ def test_project_settings_paint_smoke() raises:
     grammars.append(GrammarOverride(String("html"), String("django-html")))
     var ps = ProjectSettings()
     ps.open(
-        String("/tmp/turbokod_ps_unit"), src^, grammars^, lib^,
+        _temp_path(String("_ps_unit")), src^, grammars^, lib^,
         List[OnSaveAction](),
     )
     var screen = Rect(0, 0, 100, 40)
@@ -2104,7 +2104,7 @@ def test_session_round_trip() raises:
     encoded from. Covers the full ``encode_session`` → ``parse_json``
     → ``load_session`` path against a temp project root so the test
     doesn't touch the repo's own per-user session file."""
-    var root = String("/tmp/turbokod_session_test_round_trip")
+    var root = _temp_path(String("_session_test_round_trip"))
     # Clean up any prior run so a stale ``.turbokod/`` doesn't shadow
     # the empty-state assertion below.
     _ = external_call["system", Int32](
@@ -2180,7 +2180,7 @@ def test_session_per_user_path() raises:
     to breakpoints.json / view_states.json — keeps each developer's
     open-window set separate, so an accidental ``git add .turbokod``
     doesn't restore a teammate's layout on this checkout."""
-    var root = String("/tmp/turbokod_session_per_user_test")
+    var root = _temp_path(String("_session_per_user_test"))
     _ = external_call["system", Int32](
         (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
     )
@@ -2228,7 +2228,7 @@ def test_view_state_store_round_trip() raises:
     survives moving the project; absolute paths pass through. The
     store keys by absolute path and load reattaches the project root
     to project-relative entries on the way back."""
-    var root = String("/tmp/turbokod_vs_test_round_trip")
+    var root = _temp_path(String("_vs_test_round_trip"))
     _ = external_call["system", Int32](
         (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
     )
@@ -2272,7 +2272,7 @@ def test_view_state_store_per_user_path() raises:
     breakpoints.json — keeps each developer's scroll positions
     separate, so an accidental ``git add .turbokod`` doesn't replace
     a teammate's set."""
-    var root = String("/tmp/turbokod_vs_per_user_test")
+    var root = _temp_path(String("_vs_per_user_test"))
     _ = external_call["system", Int32](
         (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
     )
@@ -2317,7 +2317,7 @@ def test_desktop_restores_session_from_disk() raises:
     confirm the desktop replays it: a window for the saved file shows
     up, the rect / cursor / scroll are reapplied, and the focused
     index points at the saved entry."""
-    var root = String("/tmp/turbokod_session_restore_test")
+    var root = _temp_path(String("_session_restore_test"))
     var cleanup = String("rm -rf '") + root + String("'\0")
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
     _ = external_call["mkdir", Int32](
@@ -2374,7 +2374,7 @@ def test_desktop_restores_drafts_from_disk() raises:
     crucially the buffer reports itself as *dirty* (unsaved) even though
     the bytes came off disk — the draft file is an autosave shadow, not
     a real save."""
-    var root = String("/tmp/turbokod_drafts_restore_test")
+    var root = _temp_path(String("_drafts_restore_test"))
     var cleanup = String("rm -rf '") + root + String("'\0")
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
     _ = external_call["mkdir", Int32](
@@ -2427,7 +2427,7 @@ def test_desktop_resize_reapplies_clipped_session_rect() raises:
     apply the originally-saved rects against the now-correct
     workspace, instead of leaving windows stuck at their initial
     clip values forever."""
-    var root = String("/tmp/turbokod_resize_reapply_test")
+    var root = _temp_path(String("_resize_reapply_test"))
     var cleanup = String("rm -rf '") + root + String("'\0")
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
     _ = external_call["mkdir", Int32](
@@ -2483,7 +2483,7 @@ def test_desktop_arms_session_restore_when_non_editor_windows_present() raises:
     adds non-file-backed demo windows before opening a file blocked the
     restore path entirely, and the subsequent save then overwrote the
     on-disk session with the cascade-default rect."""
-    var root = String("/tmp/turbokod_set_project_arms_restore_test")
+    var root = _temp_path(String("_set_project_arms_restore_test"))
     var cleanup = String("rm -rf '") + root + String("'\0")
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
     _ = external_call["mkdir", Int32](
@@ -2511,7 +2511,7 @@ def test_desktop_restores_non_maximized_rect_not_restore_rect() raises:
     — not at ``restore_rect``. Regression for: new windows pulled in
     from session were being constructed with ``restore``, so a moved
     non-maximized window came back at its original cascade slot."""
-    var root = String("/tmp/turbokod_restore_rect_vs_rect_test")
+    var root = _temp_path(String("_restore_rect_vs_rect_test"))
     var cleanup = String("rm -rf '") + root + String("'\0")
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
     _ = external_call["mkdir", Int32](
@@ -2563,7 +2563,7 @@ def test_desktop_snapshot_captures_per_window_rects() raises:
     """Each open file-backed window must show up in the snapshot with
     its own rect. Regression guard: a copy bug or wrong loop variable
     would yield identical rects across the session entries."""
-    var root = String("/tmp/turbokod_snapshot_rects_test")
+    var root = _temp_path(String("_snapshot_rects_test"))
     var cleanup = String("rm -rf '") + root + String("'\0")
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
     _ = external_call["mkdir", Int32](
@@ -2623,7 +2623,7 @@ def test_desktop_restores_multiple_windows_at_distinct_positions() raises:
     not both at the same position. Regression guard against snapshot
     or restore code accidentally copying one window's rect into the
     others (e.g. a closure-capture or single-Rect-buffer bug)."""
-    var root = String("/tmp/turbokod_session_multi_test")
+    var root = _temp_path(String("_session_multi_test"))
     var cleanup = String("rm -rf '") + root + String("'\0")
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
     _ = external_call["mkdir", Int32](
@@ -2701,7 +2701,7 @@ def test_desktop_restores_maximized_window_keeps_per_window_restore_rect() raise
     pre-max layout — not to the shared workspace rect. Regression for
     the bug where ``toggle_maximize`` clobbered the just-loaded
     ``_restore_rect``."""
-    var root = String("/tmp/turbokod_session_max_test")
+    var root = _temp_path(String("_session_max_test"))
     var cleanup = String("rm -rf '") + root + String("'\0")
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
     _ = external_call["mkdir", Int32](
@@ -2747,7 +2747,7 @@ def test_desktop_save_then_restore_round_trip_through_paint() raises:
     ``Desktop`` against the same project and confirm the saved layout
     is restored. Covers the full ``_save_session_if_changed`` →
     ``load_session`` → ``_restore_session`` loop."""
-    var root = String("/tmp/turbokod_session_e2e_test")
+    var root = _temp_path(String("_session_e2e_test"))
     var cleanup = String("rm -rf '") + root + String("'\0")
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
     _ = external_call["mkdir", Int32](
@@ -2812,7 +2812,7 @@ def test_window_cap_evicts_least_recently_used() raises:
     """With ``max_open_windows`` set, opening a document past the cap
     closes the least-recently-focused *clean* document — never the
     focused one, and never one with unsaved changes."""
-    var root = String("/tmp/turbokod_window_cap_test")
+    var root = _temp_path(String("_window_cap_test"))
     var cleanup = String("rm -rf '") + root + String("'\0")
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
     _ = external_call["mkdir", Int32](
@@ -2860,7 +2860,7 @@ def test_window_cap_evicts_least_recently_used() raises:
 def test_window_cap_disabled_when_zero() raises:
     """``max_open_windows == 0`` means no limit — opening many documents
     never evicts."""
-    var root = String("/tmp/turbokod_window_cap_off_test")
+    var root = _temp_path(String("_window_cap_off_test"))
     var cleanup = String("rm -rf '") + root + String("'\0")
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
     _ = external_call["mkdir", Int32](
@@ -3455,7 +3455,7 @@ def test_view_states_are_capped_least_recently_used_first() raises:
     front and a file the user keeps returning to survives an arbitrary
     amount of browsing in between.
     """
-    var root = String("/tmp/turbokod_vs_test_cap")
+    var root = _temp_path(String("_vs_test_cap"))
     _ = external_call["system", Int32](
         (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
     )

@@ -115,7 +115,7 @@ scripts/run_tests.sh              # all suites: build concurrently, run serially
 scripts/run_tests.sh git editor   # only suites whose filename matches a filter
 ```
 
-The runner builds all suites in parallel and then runs them **one at a time** — they share a scratch `$HOME` (`/tmp/turbokod_test_home`, set up by `setup_test_env`) and a couple of tests write config files into it, so concurrent runs would race. It fails the run on any compiler warning.
+The runner builds all suites in parallel and then runs them one at a time, which keeps the output readable. Suites are safe to run concurrently, including several copies of the same one (mutation testing does this): each process gets its own scratch `$HOME` under `/tmp/turbokod_test_home/<pid>-<start ms>` (`setup_test_env`; tests that write into it use `_test_home()`), and anything else a test writes goes under `_temp_path(...)` or another per-process path. `_sweep_process_dirs` deletes the dirs of processes that have exited. Keep new tests that way: no fixed scratch paths. The runner fails the run on any compiler warning.
 
 When you add a test, put it in the topic file it belongs to as a top-level `def test_<name>() raises:` — discovery is by name, and that exact signature is required (anything else fails the suite at *run* time with "nonconforming signature", not at build time). Corollary: never name a helper `test_*`; prefix it `_`. Run one test with `./run.sh tests/test_git.mojo --only <test_name>` (`--skip` also works). (The hand-written `main()` lists this replaced let tests be defined but never called — the old monolith had 43, three of which encoded behaviour the product had long since changed.)
 

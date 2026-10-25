@@ -11,7 +11,8 @@ from std.ffi import external_call
 from std.testing import assert_equal, assert_true
 from turbokod.canvas import Canvas
 from turbokod.desktop import Desktop
-from turbokod.file_io import basename
+from turbokod.file_io import basename, delete_tree, list_directory
+from turbokod.posix import getenv_value, kill_pid, monotonic_ms
 from turbokod.git_blame import BlameLine
 from turbokod.menu import Menu, MenuItem
 from turbokod.project_targets import ProjectTargets
@@ -147,7 +148,7 @@ def _ps_open(
     unit tests assert on the in-memory working state, not persistence."""
     var ps = ProjectSettings()
     ps.open(
-        String("/tmp/turbokod_ps_unit"), ProjectTargets(),
+        _temp_path(String("_ps_unit")), ProjectTargets(),
         List[GrammarOverride](), lib^, pa^,
     )
     return ps^
@@ -194,10 +195,45 @@ def _spell_with_dict(words: List[String]) -> Speller:
 
 
 def _temp_path(suffix: String) -> String:
-    """Cheap unique path under /tmp; pid+suffix is enough for our serial test
-    suite (no parallelism)."""
+    """Cheap unique path under /tmp; pid+suffix is unique per process, so
+    suites can run concurrently."""
     var pid = external_call["getpid", Int32]()
     return String("/tmp/turbokod_test_") + String(Int(pid)) + suffix
+
+
+comptime _TEST_HOMES = "/tmp/turbokod_test_home"
+
+
+def _test_home() -> String:
+    """This process's scratch $HOME (set up by ``setup_test_env``)."""
+    return getenv_value(String("HOME"))
+
+
+def _process_dir_name() -> String:
+    """``<pid>-<start ms>``: unique to this test process, and the name of its
+    scratch $HOME. Name per-process scratch dirs after it so
+    ``_sweep_process_dirs`` can clean them up."""
+    return basename(_test_home())
+
+
+def _sweep_process_dirs(parent: String):
+    """Delete ``<pid>-<start ms>`` dirs in ``parent`` whose process has exited.
+
+    Per-process scratch dirs keep concurrent suites apart; this keeps them
+    from piling up. The start time keeps a recycled pid from ever matching
+    an old directory, so a live one is never swept.
+    """
+    for name in list_directory(parent):
+        var parts = name.split("-")
+        if len(parts) != 2:
+            continue
+        var pid: Int
+        try:
+            pid = Int(String(parts[0]))
+        except:
+            continue
+        if kill_pid(Int32(pid), Int32(0)) != 0:
+            _ = delete_tree(parent + String("/") + name, True)
 
 
 def setup_test_env():
@@ -209,12 +245,17 @@ def setup_test_env():
     the redirect a test run clobbers the developer's real config. The
     clipboard stub keeps cut/copy tests off the system pasteboard.
 
-    The scratch $HOME is a fixed path (not per-pid): a couple of tests write
-    into it directly and then read it back through the config loader, so the
-    two have to agree. That's also why suites are run one at a time rather
-    than concurrently — see scripts/run_tests.sh.
+    The scratch $HOME is per process (``_test_home()``), so suites can run
+    concurrently — tests that write into it directly get it from there.
     """
-    var test_home = String("/tmp/turbokod_test_home")
+    _ = external_call["mkdir", Int32](
+        (String(_TEST_HOMES) + String("\0")).unsafe_ptr(), Int32(0o755)
+    )
+    _sweep_process_dirs(String(_TEST_HOMES))
+    var pid = Int(external_call["getpid", Int32]())
+    var test_home = String(_TEST_HOMES) + String("/") + String(pid) + String("-") + String(
+        monotonic_ms()
+    )
     var c_home_dir = test_home + String("\0")
     _ = external_call["mkdir", Int32](c_home_dir.unsafe_ptr(), Int32(0o755))
     var c_name = String("HOME\0")

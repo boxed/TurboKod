@@ -3,3 +3,4 @@ tvision/
 .pixi/
 .turbokod
 .claude
+tests/fixtures/editorconfig/test_save_*.txt

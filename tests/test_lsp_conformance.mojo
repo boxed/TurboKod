@@ -42,7 +42,7 @@ from turbokod.lsp_position import (
 )
 from turbokod.posix import getcwd_path, monotonic_ms, sleep_ms, which
 
-from support import _SCREEN, setup_test_env
+from support import _process_dir_name, _SCREEN, _sweep_process_dirs, setup_test_env
 
 
 # ── harness ──────────────────────────────────────────────────────────────
@@ -78,10 +78,9 @@ def _start_mock(
     argv.append(getcwd_path() + String("/") + _MOCK)
     argv.append(_scenario_path(scenario))
     if len(log_path.as_bytes()) > 0:
-        # The mock appends, and the scratch directory is stable across runs
-        # (deliberately — see ``_scratch_dir``), so a stale log would leave
-        # the previous run's messages in front of this one's. Assertions like
-        # "exit was the last thing sent" then read the wrong run.
+        # The mock appends, so start from an empty log: anything already in
+        # it would sit in front of this run's messages, and assertions like
+        # "exit was the last thing sent" would read the wrong run.
         _ = delete_path(log_path)
         argv.append(log_path)
     m.start_with(String("python"), argv, root)
@@ -168,17 +167,16 @@ def _scratch_dir(name: String) raises -> String:
     traceable to this project. ``.build/`` is already gitignored and
     already where the build caches live.
     """
-    # Stable per-test name, not pid-suffixed: the suites run serially (see
-    # scripts/run_tests.sh), so there is no collision to avoid, and a pid
-    # suffix would leave a fresh directory behind on every run.
-    var dir = getcwd_path() + String("/.build/lsp_conformance/") + name
-    _ = external_call["mkdir", Int32](
-        (getcwd_path() + String("/.build/lsp_conformance\0")).unsafe_ptr(),
-        UInt32(0o755),
-    )
-    _ = external_call["mkdir", Int32](
-        (dir + String("\0")).unsafe_ptr(), UInt32(0o755),
-    )
+    # Per process, so concurrent runs don't share the mock's request log;
+    # directories of runs that have exited are swept rather than piling up.
+    var base = getcwd_path() + String("/.build/lsp_conformance")
+    var own = base + String("/") + _process_dir_name()
+    var dir = own + String("/") + name
+    for d in [base, own, dir]:
+        _ = external_call["mkdir", Int32](
+            (d + String("\0")).unsafe_ptr(), UInt32(0o755),
+        )
+    _sweep_process_dirs(base)
     return dir^
 
 

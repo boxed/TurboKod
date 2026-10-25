@@ -71,7 +71,7 @@ def _find_glyph_x(c: Canvas, y: Int, glyph: String) -> Int:
 def _ps_open_targets(var src: ProjectTargets) -> ProjectSettings:
     var ps = ProjectSettings()
     ps.open(
-        String("/tmp/turbokod_ps_unit"), src^, List[GrammarOverride](),
+        _temp_path(String("_ps_unit")), src^, List[GrammarOverride](),
         List[OnSaveAction](), List[OnSaveAction](),
     )
     ps.section = 1  # Targets
@@ -1844,7 +1844,7 @@ def test_breakpoint_store_round_trip() raises:
     the file survives moving the project directory; absolute paths
     pass through. ``load_breakpoints`` re-anchors relatives onto the
     current root."""
-    var root = String("/tmp/turbokod_bp_test_round_trip")
+    var root = _temp_path(String("_bp_test_round_trip"))
     _ = external_call["system", Int32](
         (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
     )
@@ -1904,7 +1904,7 @@ def test_breakpoint_store_per_user_path() raises:
     the expected sub-path. Without this isolation an accidental
     ``git add .turbokod`` on a checkout would replace a teammate's
     breakpoint set with the committer's."""
-    var root = String("/tmp/turbokod_bp_per_user_test")
+    var root = _temp_path(String("_bp_per_user_test"))
     _ = external_call["system", Int32](
         (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
     )

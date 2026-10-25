@@ -83,7 +83,9 @@ from turbokod.prompt import Prompt
 from turbokod.terminal import parse_input
 from turbokod.window import Window
 
-from support import _empty_menu, _key, _SCREEN, _temp_path, setup_test_env
+from support import (
+    _empty_menu, _key, _SCREEN, _temp_path, _test_home, setup_test_env,
+)
 
 
 def test_claude_detect_empty_buffer_returns_none() raises:
@@ -1989,7 +1991,7 @@ def test_drafts_store_round_trip() raises:
     and decode back to the same fields. Unlike the session store there's
     no path involved — the content is the payload that survives a
     restart."""
-    var root = String("/tmp/turbokod_drafts_round_trip")
+    var root = _temp_path(String("_drafts_round_trip"))
     var cleanup = String("rm -rf '") + root + String("'\0")
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
     _ = external_call["mkdir", Int32](
@@ -2408,7 +2410,7 @@ def test_write_file_in_place_fallback_replaces_fully() raises:
     ``ftruncate``-ing away a stale tail when the new content is shorter —
     not leave a hybrid of new-prefix + old-suffix.
     """
-    var dir = String("/tmp/turbokod_test_home/ro_writedir")
+    var dir = _test_home() + String("/ro_writedir")
     var path = dir + String("/data.txt")
     var c_dir = dir + String("\0")
 

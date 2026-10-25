@@ -10,10 +10,10 @@
 # Two phases, deliberately:
 #   1. BUILD all suites concurrently. Separate ``mojo build`` invocations with
 #      separate outputs, so they only contend for CPU.
-#   2. RUN them one at a time. Suites share a scratch $HOME
-#      (/tmp/turbokod_test_home — see ``setup_test_env`` in support.mojo) and
-#      a couple of tests write config files into it, so concurrent runs would
-#      race. Running is fast; only the build needed parallelising.
+#   2. RUN them one at a time, which keeps the output readable. Concurrent
+#      runs are safe (each process gets its own scratch $HOME and temp dirs —
+#      see ``setup_test_env`` in support.mojo), but running is fast; only the
+#      build needed parallelising.
 #
 # Usage:
 #   scripts/run_tests.sh              # all suites

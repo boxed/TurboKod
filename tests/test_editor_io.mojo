@@ -427,8 +427,11 @@ def test_write_file_stamped_matches_the_written_file() raises:
 def test_editor_save_applies_editorconfig_transforms() raises:
     """``save`` should trim trailing whitespace and ensure a final newline
     when the editorconfig says to. The fixture's top-level ``[*]`` sets
-    both, so saving a .txt file inside the fixture tree exercises both."""
-    var path = String("tests/fixtures/editorconfig/test_save.txt")
+    both, so saving a .txt file inside the fixture tree exercises both.
+    The name is per process, so concurrent runs don't share the file."""
+    var path = String("tests/fixtures/editorconfig/test_save_") + String(
+        Int(external_call["getpid", Int32]())
+    ) + String(".txt")
     # Bootstrap with a payload that ``trim`` + ``final newline`` will rewrite.
     assert_true(write_file(path, String("alpha   \nbeta")))
     var ed = Editor.from_file(path)
