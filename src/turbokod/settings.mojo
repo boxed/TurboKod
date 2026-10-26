@@ -97,6 +97,10 @@ comptime _FOCUS_COMPRESS_KW   = UInt8(22)
 comptime _FOCUS_COMMA_WRAP    = UInt8(23)
 comptime _FOCUS_BLINK_CURSOR  = UInt8(24)
 comptime _FOCUS_MAX_WINDOWS   = UInt8(34)
+comptime _FOCUS_PROJ_LIST     = UInt8(35)
+comptime _FOCUS_PROJ_INPUT    = UInt8(36)
+comptime _FOCUS_PROJ_ADD      = UInt8(37)
+comptime _FOCUS_PROJ_REMOVE   = UInt8(38)
 # Language Server section checkboxes.
 comptime _FOCUS_LS_FORMAT_ON_SAVE = UInt8(25)
 comptime _FOCUS_LS_SIGNATURE      = UInt8(26)
@@ -116,7 +120,8 @@ comptime _SECTION_SPELL           = 1
 comptime _SECTION_LANGUAGES       = 2
 comptime _SECTION_THEME           = 3
 comptime _SECTION_LANGUAGE_SERVER = 4
-comptime _SECTION_FONT            = 5
+comptime _SECTION_PROJECTS        = 5
+comptime _SECTION_FONT            = 6
 
 
 # --- layout ---------------------------------------------------------------
@@ -143,6 +148,8 @@ comptime _BTN_LANG_REMOVE  = 5
 comptime _BTN_FONT_SMALLER = 6
 comptime _BTN_FONT_LARGER  = 7
 comptime _BTN_FONT_IDEAL   = 8
+comptime _BTN_PROJ_ADD     = 9
+comptime _BTN_PROJ_REMOVE  = 10
 
 # Width of the inline dropdown strip in the Editor section. Wide enough
 # for "Automatic" plus the right-edge ``▼`` indicator.
@@ -161,6 +168,7 @@ def _section_labels(include_font: Bool) -> List[String]:
     out.append(String("Languages"))
     out.append(String("Theme"))
     out.append(String("Language Server"))
+    out.append(String("Projects"))
     if include_font:
         out.append(String("Font"))
     return out^
@@ -324,6 +332,17 @@ struct Settings(Movable):
     """The Language Server section's checkboxes, one per ``ls_*`` flag, in
     focus order: ``_ls_cbs[i]`` is focus slot ``_FOCUS_LS_FORMAT_ON_SAVE + i``
     and mirrors ``_ls_get(i)``."""
+    var project_dirs: List[String]
+    """Working copy of ``TurbokodConfig.project_dirs`` — Settings ▸
+    Projects. Add / Remove edit it in place and raise ``dirty``."""
+    var selected_project_dir: Int
+    """Row in ``project_dirs`` highlighted in the Projects pane."""
+    var _last_scroll_proj: Int
+    """Counterpart of ``_last_scroll_dict`` for ``selected_project_dir``."""
+    var _proj_tf: TextField
+    """Projects ▸ folder path being typed; Enter or [+ Add] appends it."""
+    var _proj_input_anchor: Rect
+    """Last-painted bounds of ``_proj_tf`` (mouse hit-test cache)."""
     var dict_specs: List[DownloadableDictionary]
     """Catalog of downloadable spell-check dictionaries shown in the
     Spell-check pane. Snapshotted on ``open`` so the list and the
@@ -459,6 +478,13 @@ struct Settings(Movable):
             ShadowButton(String(" Restore ideal "), 0, 0),
             _FOCUS_FONT_IDEAL, True,
         ))
+        self._buttons.append(PlacedButton(
+            ShadowButton(String(" + Add "), 0, 0), _FOCUS_PROJ_ADD, True,
+        ))
+        self._buttons.append(PlacedButton(
+            ShadowButton(String(" - Remove "), 0, 0),
+            _FOCUS_PROJ_REMOVE, True,
+        ))
         self._save_dropdown = Dropdown(_save_behavior_options(), 0)
         self._save_dd_anchor = Rect(0, 0, 0, 0)
         self._wrap_dropdown = Dropdown(_wrap_mode_options(), 0)
@@ -482,6 +508,11 @@ struct Settings(Movable):
         self._ls_cbs = List[Checkbox]()
         for label in _ls_labels():
             self._ls_cbs.append(Checkbox(label, 0, 0, False))
+        self.project_dirs = List[String]()
+        self.selected_project_dir = -1
+        self._last_scroll_proj = -2
+        self._proj_tf = TextField()
+        self._proj_input_anchor = Rect(0, 0, 0, 0)
         self.dict_specs = List[DownloadableDictionary]()
         self.selected_dict = 0
         self.pending_dict_install_lang = String("")
@@ -530,8 +561,13 @@ struct Settings(Movable):
         ls_document_colors: Bool = False,
         ls_linked_editing: Bool = False,
         ls_server_progress: Bool = True,
+        var project_dirs: List[String] = List[String](),
     ):
         self.auto_save = auto_save
+        self.project_dirs = project_dirs^
+        self.selected_project_dir = 0 if len(self.project_dirs) > 0 else -1
+        self._last_scroll_proj = -2
+        self._proj_tf.set_text(String(""))
         self.wrap_mode = wrap_mode
         self.trim_trailing_whitespace = trim_trailing_whitespace
         self.ensure_final_newline = ensure_final_newline
@@ -794,6 +830,8 @@ struct Settings(Movable):
             self._paint_theme_section(canvas, sub, inner)
         elif self.section == _SECTION_LANGUAGE_SERVER:
             self._paint_language_server_section(canvas, sub, inner)
+        elif self.section == _SECTION_PROJECTS:
+            self._paint_projects_section(canvas, sub, inner)
         elif self.section == _SECTION_FONT:
             self._paint_font_section(canvas, sub, inner)
 
@@ -1390,6 +1428,116 @@ struct Settings(Movable):
         self._paint_button(canvas, _BTN_LANG_EDIT)
         self._paint_button(canvas, _BTN_LANG_REMOVE)
 
+    def _paint_projects_section(
+        mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
+    ):
+        """Parent folders whose subfolders File ▸ Quick open project
+        offers. A folder field + [+ Add] below the list appends one;
+        [- Remove] drops the selected row."""
+        var hint = Attr(BLUE, LIGHT_GRAY)
+        _ = painter.put_text(
+            canvas, Point(inner.a.x, inner.a.y + 1),
+            String("Folders whose subfolders Quick open project (Cmd+Shift+O) lists."),
+            hint,
+        )
+        var list_top = inner.a.y + 2
+        var list_bottom = inner.b.y - 5
+        if list_bottom <= list_top:
+            return
+        var list_rect = Rect(inner.a.x, list_top, inner.b.x, list_bottom)
+        var body_attr = Attr(BLACK, CYAN)
+        painter.fill(canvas, list_rect, String(" "), body_attr)
+        if len(self.project_dirs) == 0:
+            _ = painter.put_text(
+                canvas, Point(list_rect.a.x + 1, list_rect.a.y),
+                String("(none — type a folder below and press [+ Add])"),
+                hint,
+            )
+        else:
+            var visible = list_rect.height()
+            self._list_scroll = clamp_list_scroll(
+                self._list_scroll, self.selected_project_dir,
+                self._last_scroll_proj, visible, len(self.project_dirs),
+            )
+            self._last_scroll_proj = self.selected_project_dir
+            var rows = List[String]()
+            for idx in range(
+                self._list_scroll,
+                min(self._list_scroll + visible, len(self.project_dirs)),
+            ):
+                rows.append(self.project_dirs[idx])
+            paint_list_rows(
+                canvas, painter, list_rect, self._list_scroll, rows,
+                self.selected_project_dir,
+                self.focus == _FOCUS_PROJ_LIST, body_attr,
+            )
+        # Folder input row.
+        var label = String("Folder:")
+        _ = painter.put_text(
+            canvas, Point(inner.a.x, list_bottom), label,
+            Attr(BLACK, LIGHT_GRAY),
+        )
+        var box_x = inner.a.x + display_columns(label) + 1
+        var box = Rect(box_x, list_bottom, inner.b.x, list_bottom + 1)
+        self._proj_input_anchor = box
+        self._proj_tf.paint(canvas, box, self.focus == _FOCUS_PROJ_INPUT)
+        # Buttons row.
+        var btn_y = list_bottom + 2
+        var add_x = inner.a.x
+        self._buttons[_BTN_PROJ_ADD].button.move_to(add_x, btn_y)
+        var rm_x = (
+            add_x + self._buttons[_BTN_PROJ_ADD].button.total_width() + 1
+        )
+        self._buttons[_BTN_PROJ_REMOVE].button.move_to(rm_x, btn_y)
+        self._buttons[_BTN_PROJ_ADD].enabled = (
+            len(String(self._proj_tf.text.strip()).as_bytes()) > 0
+        )
+        self._buttons[_BTN_PROJ_REMOVE].enabled = self._has_project_dir_sel()
+        self._paint_button(canvas, _BTN_PROJ_ADD)
+        self._paint_button(canvas, _BTN_PROJ_REMOVE)
+
+    def _has_project_dir_sel(self) -> Bool:
+        return 0 <= self.selected_project_dir \
+            and self.selected_project_dir < len(self.project_dirs)
+
+    def _add_project_dir(mut self):
+        """Append the typed folder (trailing slashes dropped, duplicates
+        ignored) and clear the field."""
+        var t = String(self._proj_tf.text.strip())
+        var b = t.as_bytes()
+        var n = len(b)
+        while n > 1 and b[n - 1] == 0x2F:
+            n -= 1
+        var path = String(StringSpan(unsafe_from_utf8=b[:n]))
+        if n == 0:
+            return
+        self._proj_tf.set_text(String(""))
+        for i in range(len(self.project_dirs)):
+            if self.project_dirs[i] == path:
+                self.selected_project_dir = i
+                return
+        self.project_dirs.append(path^)
+        self.selected_project_dir = len(self.project_dirs) - 1
+        self.dirty = True
+
+    def _remove_project_dir(mut self):
+        if not self._has_project_dir_sel():
+            return
+        _ = self.project_dirs.pop(self.selected_project_dir)
+        if self.selected_project_dir >= len(self.project_dirs):
+            self.selected_project_dir = len(self.project_dirs) - 1
+        self.dirty = True
+
+    def _step_project_dir(mut self, delta: Int):
+        if len(self.project_dirs) == 0:
+            return
+        var s = self.selected_project_dir + delta
+        if s < 0:
+            s = 0
+        if s >= len(self.project_dirs):
+            s = len(self.project_dirs) - 1
+        self.selected_project_dir = s
+
     def _paint_languages_list(
         mut self, mut canvas: Canvas, painter: Painter, list_rect: Rect,
     ):
@@ -1472,6 +1620,8 @@ struct Settings(Movable):
                 self._step_theme(-1)
             elif self.focus == _FOCUS_FONT_LIST:
                 self._step_font(-1)
+            elif self.focus == _FOCUS_PROJ_LIST:
+                self._step_project_dir(-1)
             return True
         if k == KEY_DOWN:
             if self.focus == _FOCUS_SECTIONS:
@@ -1484,6 +1634,8 @@ struct Settings(Movable):
                 self._step_theme(1)
             elif self.focus == _FOCUS_FONT_LIST:
                 self._step_font(1)
+            elif self.focus == _FOCUS_PROJ_LIST:
+                self._step_project_dir(1)
             elif self.focus == _FOCUS_SAVE_BEHAVIOR:
                 # Closed: open the popup. Forward the keystroke so
                 # the highlight starts on the committed row.
@@ -1534,6 +1686,9 @@ struct Settings(Movable):
                     _clamp_numeric_field(self._mw_tf, 4)
                     self.dirty = True
                 return True
+        if self.focus == _FOCUS_PROJ_INPUT:
+            _ = self._proj_tf.handle_key(event)
+            return True
         # Type-to-jump on whichever section list currently owns focus.
         # Each section produces its own row labels so the user can
         # type "py" to land on the python row regardless of which
@@ -1773,6 +1928,14 @@ struct Settings(Movable):
             ordered.append(_FOCUS_LS_DOC_COLORS)
             ordered.append(_FOCUS_LS_LINKED_EDITING)
             ordered.append(_FOCUS_LS_PROGRESS)
+        elif self.section == _SECTION_PROJECTS:
+            if len(self.project_dirs) > 0:
+                ordered.append(_FOCUS_PROJ_LIST)
+            ordered.append(_FOCUS_PROJ_INPUT)
+            if len(String(self._proj_tf.text.strip()).as_bytes()) > 0:
+                ordered.append(_FOCUS_PROJ_ADD)
+            if self._has_project_dir_sel():
+                ordered.append(_FOCUS_PROJ_REMOVE)
         elif self.section == _SECTION_FONT:
             if len(self._font_names) > 0:
                 ordered.append(_FOCUS_FONT_LIST)
@@ -2003,6 +2166,12 @@ struct Settings(Movable):
         if self.focus == _FOCUS_LANG_LIST:
             self._edit_language()
             return True
+        if self.focus == _FOCUS_PROJ_INPUT or self.focus == _FOCUS_PROJ_ADD:
+            self._add_project_dir()
+            return True
+        if self.focus == _FOCUS_PROJ_REMOVE:
+            self._remove_project_dir()
+            return True
         if self.focus == _FOCUS_FONT_SMALLER:
             self._bump_font_size(-1)
             return True
@@ -2124,6 +2293,10 @@ struct Settings(Movable):
             if self._mw_tf.handle_mouse(event, self._max_windows_anchor):
                 self.focus = _FOCUS_MAX_WINDOWS
                 return True
+        if self.section == _SECTION_PROJECTS:
+            if self._proj_tf.handle_mouse(event, self._proj_input_anchor):
+                self.focus = _FOCUS_PROJ_INPUT
+                return True
         if self.section == _SECTION_LANGUAGE_SERVER:
             for i in range(len(self._ls_cbs)):
                 var status = self._ls_cbs[i].handle_mouse(event)
@@ -2188,6 +2361,17 @@ struct Settings(Movable):
                         and self.selected_language < len(self.languages_view):
                     self._edit_language()
                 return True
+        elif self.section == _SECTION_PROJECTS:
+            var list_top = rect.a.y + 2 + 2
+            var list_bottom = rect.b.y - 2 - 5
+            var inner = self._right_rect(rect)
+            var list_rect = Rect(inner.a.x, list_top, inner.b.x, list_bottom)
+            if list_rect.contains(event.pos):
+                var idx = self._list_scroll + (event.pos.y - list_rect.a.y)
+                if 0 <= idx and idx < len(self.project_dirs):
+                    self.selected_project_dir = idx
+                self.focus = _FOCUS_PROJ_LIST
+                return True
         elif self.section == _SECTION_THEME:
             var inner = self._right_rect(rect)
             var split = inner.a.x + 20
@@ -2245,6 +2429,8 @@ struct Settings(Movable):
                 idx == _BTN_LANG_ADD or idx == _BTN_LANG_EDIT
                 or idx == _BTN_LANG_REMOVE
             )
+        if self.section == _SECTION_PROJECTS:
+            return idx == _BTN_PROJ_ADD or idx == _BTN_PROJ_REMOVE
         if self.section == _SECTION_FONT:
             if idx == _BTN_FONT_IDEAL:
                 # Not painted at all when the host reported no ideal —

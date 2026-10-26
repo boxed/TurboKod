@@ -1093,14 +1093,16 @@ def test_settings_open_unknown_extension_falls_back_to_first() raises:
 def test_settings_font_section_requires_host_fonts() raises:
     """The Font section only exists when the host registered font
     options (the native macOS frontend). Without them — the terminal
-    frontend — the rail ends at Theme."""
+    frontend — the rail ends at Projects."""
     var s = Settings()
     s.open(False)
     var labels = s._labels()
-    # Editor, Spell check, Languages, Theme, Language Server — no Font.
-    assert_equal(len(labels), 5)
+    # Editor, Spell check, Languages, Theme, Language Server, Projects —
+    # no Font.
+    assert_equal(len(labels), 6)
     assert_equal(labels[3], String("Theme"))
     assert_equal(labels[4], String("Language Server"))
+    assert_equal(labels[5], String("Projects"))
     s.close()
     var fonts = List[String]()
     fonts.append(String("IBM VGA 8x16 (built-in)"))
@@ -1112,8 +1114,8 @@ def test_settings_font_section_requires_host_fonts() raises:
         String("Menlo"), fonts^,
     )
     labels = s._labels()
-    assert_equal(len(labels), 6)
-    assert_equal(labels[5], String("Font"))
+    assert_equal(len(labels), 7)
+    assert_equal(labels[6], String("Font"))
     # The active font row is pre-selected.
     assert_equal(s.selected_font, 1)
     assert_equal(s.font_choice, String("Menlo"))

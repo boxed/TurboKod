@@ -60,8 +60,8 @@ from .diff import (
 )
 from .file_io import (
     basename, delete_tree, find_git_project, join_path, list_directory,
-    parent_path, project_absolute, project_relative, read_file, rename_path,
-    stat_file, write_file,
+    list_directory_typed, parent_path, project_absolute, project_relative,
+    read_file, rename_path, stat_file, write_file,
 )
 from .blame_popup import BlamePopup
 from .git_blame import blame_commit_message, compute_blame
@@ -453,6 +453,9 @@ comptime _HOST_CLOSE_WINDOW_ACTION = String("app.close_window")
 # host can drive its own ``FileDialog`` instance and route the picked
 # directory back through ``open_project``.
 comptime PROJECT_OPEN         = String("project:open")
+# "Quick open project..." — filter-as-you-type picker over the immediate
+# subdirectories of every Settings ▸ Projects folder.
+comptime PROJECT_QUICK_OPEN   = String("project:quick_open")
 # Debugger actions. ``DEBUG_START_OR_CONTINUE`` is a single F5-style
 # binding: starts the session if none is active, continues if stopped.
 comptime DEBUG_START_OR_CONTINUE = String("debug:start_or_continue")
@@ -1917,12 +1920,18 @@ struct Desktop(Movable):
             UInt32(ord("o")), MOD_META, EDITOR_OPEN,
             group=HKG_FILES, help=String("Open..."),
         ))
-        # Cmd+Shift+O — Quick Open (type-to-filter file picker). Plain
-        # Cmd+O bubbles ``file:open`` up to the host's FileDialog; Quick
-        # Open is the project-aware fast picker.
+        # Cmd+P — Quick Open (type-to-filter file picker). Plain Cmd+O
+        # bubbles ``file:open`` up to the host's FileDialog; Quick Open is
+        # the project-aware fast picker.
         self._hotkeys.append(Hotkey(
-            UInt32(ord("o")), MOD_META | MOD_SHIFT, EDITOR_QUICK_OPEN,
+            UInt32(ord("p")), MOD_META, EDITOR_QUICK_OPEN,
             group=HKG_FILES, help=String("Quick open..."),
+        ))
+        # Cmd+Shift+O — the same picker over the Settings ▸ Projects
+        # folders' subdirectories.
+        self._hotkeys.append(Hotkey(
+            UInt32(ord("o")), MOD_META | MOD_SHIFT, PROJECT_QUICK_OPEN,
+            group=HKG_FILES, help=String("Quick open project..."),
         ))
         self._hotkeys.append(Hotkey(
             UInt32(ord("e")), MOD_META, EDITOR_OPEN_RECENT,
@@ -4830,6 +4839,7 @@ struct Desktop(Movable):
             self.config.language_servers = (
                 self.settings.language_overrides.copy()
             )
+            self.config.project_dirs = self.settings.project_dirs.copy()
             # Apply a theme change live (retints chrome + syntax) before
             # persisting. ``set_theme`` updates ``config.theme`` too, so the
             # ``save_config`` below writes the new name.
@@ -7668,15 +7678,9 @@ struct Desktop(Movable):
                 if to_history:
                     self._open_file_history(primary)
                 elif to_project:
-                    # Project switch: close any current project so
-                    # ``open_project``'s "no-op when one is set" guard
-                    # doesn't swallow the request, then re-arm. Multi-
-                    # select isn't meaningful here — recents-as-projects
-                    # always submits a single row — so we just use the
-                    # primary path.
-                    if self.project:
-                        self.close_project()
-                    self.open_project(primary)
+                    # Multi-select isn't meaningful here — a project pick
+                    # always submits a single row — so use the primary.
+                    return self._switch_to_project(primary)
                 else:
                     # Open every file in the multi-select range. We
                     # leave the primary (cursor) path for last so it
@@ -8604,6 +8608,7 @@ struct Desktop(Movable):
                 self.config.lsp_document_colors,
                 self.config.lsp_linked_editing,
                 self.config.lsp_server_progress,
+                self.config.project_dirs.copy(),
             )
             return Optional[String]()
         if action == HELP_HOTKEYS:
@@ -8620,6 +8625,9 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == EDITOR_DUPLICATE:
             self._open_duplicate_prompt()
+            return Optional[String]()
+        if action == PROJECT_QUICK_OPEN:
+            self._open_project_picker()
             return Optional[String]()
         if action == EDITOR_QUICK_OPEN:
             # Project-aware: only meaningful when a project is set. Without
@@ -8647,28 +8655,7 @@ struct Desktop(Movable):
             if len(ab) <= prefix_len:
                 return Optional[String]()
             var path = String(StringSpan(unsafe_from_utf8=ab[prefix_len:]))
-            # Picking the project that's already active is a no-op rather
-            # than a close-and-reopen (which would drop the session on
-            # the terminal frontend and duplicate the window on macOS).
-            if self.project and self.project.value() == path:
-                return Optional[String]()
-            # On a host frontend (Swift/macOS) that owns the menu,
-            # open the picked project in a *new* window so the
-            # current window's state is preserved. We stash the
-            # path and bubble up the host's "new window" sentinel;
-            # the host reads the path back via
-            # ``take_pending_new_window_project`` after creating
-            # the window — and focuses the existing window instead
-            # when the project is already open there. The terminal
-            # frontend has no multi-window story, so it keeps the
-            # swap-in-place behavior.
-            if self.host_owns_menu:
-                self._pending_new_window_project = Optional[String](path^)
-                return Optional[String](_HOST_NEW_WINDOW_ACTION)
-            if self.project:
-                self.close_project()
-            self.open_project(path)
-            return Optional[String]()
+            return self._switch_to_project(path)
         if action == EDITOR_FIND:
             self._open_find_prompt()
             return Optional[String]()
@@ -14724,6 +14711,88 @@ struct Desktop(Movable):
             Attr(BLACK, LIGHT_GRAY),
         )
 
+    def _switch_to_project(mut self, var path: String) -> Optional[String]:
+        """Make ``path`` the active project: the shared tail of a recent-
+        project menu pick and Quick open project. Returns the host action
+        to bubble (a new window on macOS), if any."""
+        # Picking the project that's already active is a no-op rather
+        # than a close-and-reopen (which would drop the session on
+        # the terminal frontend and duplicate the window on macOS).
+        if self.project and self.project.value() == path:
+            return Optional[String]()
+        # On a host frontend (Swift/macOS) that owns the menu,
+        # open the picked project in a *new* window so the
+        # current window's state is preserved. We stash the
+        # path and bubble up the host's "new window" sentinel;
+        # the host reads the path back via
+        # ``take_pending_new_window_project`` after creating
+        # the window — and focuses the existing window instead
+        # when the project is already open there. The terminal
+        # frontend has no multi-window story, so it keeps the
+        # swap-in-place behavior.
+        if self.host_owns_menu:
+            self._pending_new_window_project = Optional[String](path^)
+            return Optional[String](_HOST_NEW_WINDOW_ACTION)
+        if self.project:
+            self.close_project()
+        self.open_project(path)
+        return Optional[String]()
+
+    def _open_project_picker(mut self):
+        """Quick open project (Cmd+Shift+O): the Quick Open picker over
+        every immediate, non-hidden subdirectory of the Settings ▸
+        Projects folders. Rows show ``~``-abbreviated paths so the filter
+        matches the parent folder name too."""
+        if len(self.config.project_dirs) == 0:
+            self.status_bar.set_message(
+                String("No project folders — add some in Settings ▸ Projects"),
+                Attr(RED, LIGHT_GRAY),
+            )
+            return
+        var home = getenv_value(String("HOME"))
+        var labels = List[String]()
+        var paths = List[String]()
+        for d in range(len(self.config.project_dirs)):
+            var root = _expand_home(self.config.project_dirs[d], home)
+            var subdirs = List[String]()
+            for entry in list_directory_typed(root):
+                if not entry[1]:
+                    continue
+                var name = entry[0]
+                if len(name.as_bytes()) == 0 or name.as_bytes()[0] == 0x2E:
+                    continue
+                subdirs.append(name)
+            # Insertion sort — a folder of projects is a few dozen names.
+            for a in range(1, len(subdirs)):
+                var b = a
+                while b > 0 and subdirs[b] < subdirs[b - 1]:
+                    var t = subdirs[b]
+                    subdirs[b] = subdirs[b - 1]
+                    subdirs[b - 1] = t^
+                    b -= 1
+            for k in range(len(subdirs)):
+                var full = join_path(root, subdirs[k])
+                var dup = False
+                for q in range(len(paths)):
+                    if paths[q] == full:
+                        dup = True
+                        break
+                if dup:
+                    continue
+                labels.append(_abbreviate_home(full, home))
+                paths.append(full^)
+        if len(paths) == 0:
+            self.status_bar.set_message(
+                String("No projects found in the Settings ▸ Projects folders"),
+                Attr(RED, LIGHT_GRAY),
+            )
+            return
+        self._close_pickers()
+        self.quick_open.open_recent(
+            String(""), labels^, paths^, picks_project=True,
+            title=String(" Open Project "),
+        )
+
     def _open_duplicate_prompt(mut self):
         """File ▸ Duplicate…: pin the focused editor's file and ask for the
         copy's name, prefilled with ``<stem> copy<ext>`` (fully selected, so
@@ -16583,3 +16652,25 @@ def _duplicate_name(name: String) -> String:
         return name + String(" copy")
     return byte_slice(name, 0, dot) + String(" copy") \
         + byte_slice(name, dot, len(b))
+
+
+def _expand_home(path: String, home: String) -> String:
+    """``~`` / ``~/x`` → ``$HOME`` / ``$HOME/x``; anything else verbatim."""
+    var b = path.as_bytes()
+    if len(b) == 0 or b[0] != 0x7E or len(home.as_bytes()) == 0:
+        return path
+    if len(b) == 1:
+        return home
+    if b[1] != 0x2F:
+        return path
+    return home + String(StringSpan(unsafe_from_utf8=b[1:]))
+
+
+def _abbreviate_home(path: String, home: String) -> String:
+    """Inverse of ``_expand_home`` for display: ``$HOME/x`` → ``~/x``."""
+    var hb = home.as_bytes()
+    if len(hb) == 0 or not starts_with(path, home + String("/")):
+        return path
+    return String("~") + String(
+        StringSpan(unsafe_from_utf8=path.as_bytes()[len(hb):])
+    )

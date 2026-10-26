@@ -335,6 +335,7 @@ struct QuickOpen(Movable):
     def open_recent(
         mut self, var root: String, var entries: List[String],
         var entries_abs: List[String], picks_project: Bool = False,
+        var title: String = String(""),
     ):
         """Open with a caller-supplied list of paths (display + absolute).
 
@@ -358,9 +359,12 @@ struct QuickOpen(Movable):
         self.selected = 0
         self.anchor = 0
         self.scroll = 0
-        self.title = String(
-            " Open Recent Project " if picks_project else " Open Recent "
-        )
+        if len(title.as_bytes()) > 0:
+            self.title = title^
+        else:
+            self.title = String(
+                " Open Recent Project " if picks_project else " Open Recent "
+            )
         self.entries = entries^
         self.entries_abs = entries_abs^
         self.picks_project = picks_project

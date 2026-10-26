@@ -630,18 +630,18 @@ def test_cmd_o_bubbles_file_open() raises:
     assert_false(d.quick_open.active)
 
 
-def test_cmd_shift_o_opens_quick_open_when_project_active() raises:
+def test_cmd_p_opens_quick_open_when_project_active() raises:
     var d = Desktop()
     d.detect_project_from(String("examples/hello.mojo"))
-    var ev = Event.key_event(UInt32(ord("o")), MOD_META | MOD_SHIFT)
+    var ev = Event.key_event(UInt32(ord("p")), MOD_META)
     var maybe = d.handle_event(ev, _SCREEN)
     assert_false(Bool(maybe))
     assert_true(d.quick_open.active)
 
 
-def test_cmd_shift_o_bubbles_when_no_project() raises:
+def test_cmd_p_bubbles_when_no_project() raises:
     var d = Desktop()
-    var ev = Event.key_event(UInt32(ord("o")), MOD_META | MOD_SHIFT)
+    var ev = Event.key_event(UInt32(ord("p")), MOD_META)
     var maybe = d.handle_event(ev, _SCREEN)
     assert_true(Bool(maybe))
     assert_equal(maybe.value(), EDITOR_QUICK_OPEN)
@@ -1333,7 +1333,7 @@ def test_opening_a_picker_over_another_hands_it_the_keyboard() raises:
     underneath and eat every keystroke meant for Find Symbol."""
     var d = Desktop()
     d.detect_project_from(String("examples/hello.mojo"))
-    _ = d.handle_event(Event.key_event(UInt32(ord("o")), MOD_META | MOD_SHIFT), _SCREEN)
+    _ = d.handle_event(Event.key_event(UInt32(ord("p")), MOD_META), _SCREEN)
     assert_true(d.quick_open.active)
     _ = d.dispatch_action(EDITOR_FIND_SYMBOL, _SCREEN)
     assert_false(d.quick_open.active)

@@ -270,6 +270,10 @@ struct TurbokodConfig(Copyable, Movable):
     # first. Updated by ``Desktop._set_project`` and surfaced via the
     # File ▸ "Open recent project..." picker.
     var recent_projects: List[String]
+    # Settings ▸ Projects: parent directories whose immediate
+    # subdirectories are the candidates in File ▸ "Quick open project..."
+    # (Cmd+Shift+O). Stored as typed, so ``~`` survives; expanded at use.
+    var project_dirs: List[String]
     # Canonical absolute paths of recently focused file-backed editors,
     # most-recent first. Updated by ``Desktop._track_recent_focus``
     # whenever the focused file changes, and surfaced via the File ▸
@@ -313,6 +317,7 @@ struct TurbokodConfig(Copyable, Movable):
         self.font_size = 0
         self.max_open_windows = DEFAULT_MAX_OPEN_WINDOWS
         self.recent_projects = List[String]()
+        self.project_dirs = List[String]()
         self.recent_files = List[String]()
         self.on_save_actions = List[OnSaveAction]()
         self.language_servers = List[LanguageServerOverride]()
@@ -346,6 +351,7 @@ struct TurbokodConfig(Copyable, Movable):
         self.font_size = copy.font_size
         self.max_open_windows = copy.max_open_windows
         self.recent_projects = copy.recent_projects.copy()
+        self.project_dirs = copy.project_dirs.copy()
         self.recent_files = copy.recent_files.copy()
         self.on_save_actions = copy.on_save_actions.copy()
         self.language_servers = copy.language_servers.copy()
@@ -543,6 +549,9 @@ def _config_from_json(root: JsonValue) raises -> TurbokodConfig:
     cfg.recent_files = json_get_string_array(
         root, String("recent_files"),
     )
+    cfg.project_dirs = json_get_string_array(
+        root, String("project_dirs"),
+    )
     var osa = root.object_get(String("on_save_actions"))
     if osa and osa.value().is_array():
         var arr = osa.value().copy()
@@ -705,6 +714,10 @@ def _config_to_json(config: TurbokodConfig) -> JsonValue:
     for i in range(len(config.recent_files)):
         rf.append(json_str(config.recent_files[i]))
     root.put(String("recent_files"), rf)
+    var pd = json_array()
+    for i in range(len(config.project_dirs)):
+        pd.append(json_str(config.project_dirs[i]))
+    root.put(String("project_dirs"), pd)
     var osa = json_array()
     for i in range(len(config.on_save_actions)):
         var act = config.on_save_actions[i].copy()
