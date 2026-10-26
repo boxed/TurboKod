@@ -245,6 +245,9 @@ comptime EDITOR_NEW           = String("file:new")
 comptime EDITOR_OPEN          = String("file:open")
 comptime EDITOR_SAVE          = String("file:save")
 comptime EDITOR_SAVE_AS       = String("file:save_as")
+# Copy the focused file next to itself under a name the user types, then
+# open the copy.
+comptime EDITOR_DUPLICATE     = String("file:duplicate")
 comptime EDITOR_QUICK_OPEN    = String("file:quick_open")
 # "Open Recent" — same picker as Quick Open, but populated from a list
 # of recently focused file-backed editor windows (most-recent first),
@@ -342,6 +345,7 @@ comptime _TAB_FILE_ACTION_RENAME = 101
 comptime _TAB_FILE_ACTION_DELETE = 102
 comptime _PA_RENAME_FILE      = String("file:rename")
 comptime _PA_DELETE_FILE      = String("file:delete")
+comptime _PA_DUPLICATE_FILE   = String("file:duplicate:do")
 comptime EDITOR_TOGGLE_COMMENT = String("edit:comment")
 comptime EDITOR_TOGGLE_CASE   = String("edit:case")
 comptime EDITOR_SORT_LINES    = String("edit:sort_lines")
@@ -8614,6 +8618,9 @@ struct Desktop(Movable):
         if action == EDITOR_SAVE_AS:
             self._open_save_as_dialog()
             return Optional[String]()
+        if action == EDITOR_DUPLICATE:
+            self._open_duplicate_prompt()
+            return Optional[String]()
         if action == EDITOR_QUICK_OPEN:
             # Project-aware: only meaningful when a project is set. Without
             # one, bubble the action up so the host can fall back to its
@@ -14717,6 +14724,83 @@ struct Desktop(Movable):
             Attr(BLACK, LIGHT_GRAY),
         )
 
+    def _open_duplicate_prompt(mut self):
+        """File ▸ Duplicate…: pin the focused editor's file and ask for the
+        copy's name, prefilled with ``<stem> copy<ext>`` (fully selected, so
+        Enter accepts it and typing replaces it)."""
+        var idx = self._focused_editor_idx()
+        if idx < 0:
+            return
+        var path = self.windows.windows[idx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            self.status_bar.set_message(
+                String("Duplicate: save the file first"),
+                Attr(RED, LIGHT_GRAY),
+            )
+            return
+        self._file_op_path = path
+        self._file_op_is_dir = False
+        self._pending_action = _PA_DUPLICATE_FILE
+        self.prompt.open(
+            String("Duplicate '") + basename(path) + String("' as: "),
+            _duplicate_name(basename(path)), select_prefill=True,
+        )
+
+    def _do_duplicate_file(mut self, var new_name: String):
+        """Submit-handler tail for ``_PA_DUPLICATE_FILE``: write the source
+        editor's buffer (unsaved edits included — the copy is what the user
+        is looking at) to the new name and open it. Name resolution matches
+        ``_do_rename_file``: relative to the source's directory unless
+        absolute. An existing target is refused rather than clobbered."""
+        var src_path = self._file_op_path
+        self._file_op_path = String("")
+        if len(src_path.as_bytes()) == 0:
+            return
+        var trimmed = String(new_name.strip())
+        if len(trimmed.as_bytes()) == 0:
+            return
+        var new_path: String
+        if trimmed.as_bytes()[0] == 0x2F:    # absolute
+            new_path = trimmed
+        else:
+            new_path = join_path(parent_path(src_path), trimmed)
+        if stat_file(new_path).ok:
+            self.status_bar.set_message(
+                String("Duplicate: '") + basename(new_path)
+                    + String("' already exists"),
+                Attr(RED, LIGHT_GRAY),
+            )
+            return
+        var content: String
+        var win = self._find_window_for_path(src_path)
+        if win >= 0:
+            content = self.windows.windows[win].editor.text_snapshot()
+        else:
+            try:
+                content = read_file(src_path)
+            except:
+                self.status_bar.set_message(
+                    String("Duplicate failed"), Attr(RED, LIGHT_GRAY),
+                )
+                return
+        if not write_file(new_path, content):
+            self.status_bar.set_message(
+                String("Duplicate failed"), Attr(RED, LIGHT_GRAY),
+            )
+            return
+        for ci in range(len(self.lsp_managers)):
+            self.lsp_managers[ci].notify_did_create_files(new_path)
+        self._refresh_file_tree()
+        var screen = self._last_screen
+        try:
+            self.open_file(new_path, screen)
+        except:
+            pass
+        self.status_bar.set_message(
+            String("Duplicated as ") + basename(new_path),
+            Attr(BLACK, LIGHT_GRAY),
+        )
+
     def _do_delete_file(mut self):
         """Confirm-handler tail for ``_PA_DELETE_FILE``: delete the pinned
         path (recursively for a directory), close any open editors on it
@@ -15824,6 +15908,9 @@ struct Desktop(Movable):
         if pa == _PA_RENAME_FILE:
             self._do_rename_file(text)
             return Optional[String]()
+        if pa == _PA_DUPLICATE_FILE:
+            self._do_duplicate_file(text)
+            return Optional[String]()
         if pa == EDITOR_GOTO:
             self._last_goto_line = text
             var idx = self._focused_editor_idx()
@@ -16480,3 +16567,19 @@ def _summary_window(
         + String(files_changed) + String(" file(s)."),
     )
     return Window(String("Replace in project"), Rect(10, 6, 64, 14), content^)
+
+
+def _duplicate_name(name: String) -> String:
+    """Default name offered by File ▸ Duplicate…: ``foo.py`` → ``foo copy.py``.
+    The extension is split at the last dot; a leading dot (``.bashrc``) is
+    part of the stem, not an extension."""
+    var b = name.as_bytes()
+    var dot = -1
+    for i in range(len(b) - 1, 0, -1):
+        if b[i] == 0x2E:
+            dot = i
+            break
+    if dot < 0:
+        return name + String(" copy")
+    return byte_slice(name, 0, dot) + String(" copy") \
+        + byte_slice(name, dot, len(b))

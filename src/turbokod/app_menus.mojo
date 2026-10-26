@@ -25,6 +25,7 @@ from .desktop import (
     EDITOR_NAV_BACK, EDITOR_NAV_FORWARD,
     EDITOR_OPEN_RECENT, EDITOR_PASTE, EDITOR_QUICK_OPEN, EDITOR_REDO,
     EDITOR_RENAME_SYMBOL,
+    EDITOR_DUPLICATE,
     EDITOR_REPLACE, EDITOR_SAVE, EDITOR_SAVE_AS, EDITOR_SELECT_ALL,
     EDITOR_TOGGLE_BLAME,
     EDITOR_SORT_LINES, EDITOR_TOGGLE_CASE, EDITOR_TOGGLE_COMMENT, EDITOR_TOGGLE_COMPRESS_KWARGS,
@@ -122,6 +123,7 @@ def build_menus(mut d: Desktop, native: Bool):
         (String("Close all"), WINDOW_CLOSE_ALL),
         (String("Save"), EDITOR_SAVE),
         (String("Save as..."), EDITOR_SAVE_AS),
+        (String("Duplicate..."), EDITOR_DUPLICATE),
     ))
     if native:
         # After "New": the host opens another Desktop window.

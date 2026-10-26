@@ -7,13 +7,14 @@ and ``scripts/run_tests.sh`` runs every suite.
 
 from std.ffi import external_call
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
+from turbokod.desktop import Desktop, EDITOR_DUPLICATE, _duplicate_name
 from turbokod.diff import REGION_CONFLICT
 from turbokod.editor import (
     EXT_CHANGE_CONFLICT, EXT_CHANGE_MERGED, EXT_CHANGE_NONE,
     EXT_CHANGE_RELOADED, Editor
 )
 from turbokod.file_io import (
-    read_file, stat_file, write_file, write_file_stamped,
+    basename, read_file, stat_file, write_file, write_file_stamped,
 )
 from turbokod.git_blame import BlameLine
 from turbokod.git_changes import (
@@ -23,11 +24,15 @@ from turbokod.highlight import GrammarRegistry, highlight_for_extension
 from turbokod.posix import which
 from turbokod.spell import Speller
 from turbokod.settings import Settings
-from turbokod.events import Event, KEY_END, KEY_RIGHT, MOUSE_BUTTON_LEFT
+from turbokod.events import (
+    Event, KEY_END, KEY_ENTER, KEY_RIGHT, MOUSE_BUTTON_LEFT
+)
 from turbokod.geometry import Point, Rect
 from turbokod.merge_view import CHOICE_BOTH, MergeView
 
-from support import _VIEW, _blame, _key, _temp_path, setup_test_env
+from support import (
+    _SCREEN, _VIEW, _blame, _key, _temp_path, setup_test_env
+)
 
 
 def test_editor_dirty_flag() raises:
@@ -661,6 +666,44 @@ def test_editor_git_changes_gutter_widens_total_gutter() raises:
     ed.invalidate_git_changes()
     # Visible flag still on, but no data → no column.
     assert_equal(ed._git_changes_gutter(), 0)
+
+
+def test_duplicate_name_inserts_copy_before_extension() raises:
+    assert_equal(_duplicate_name(String("foo.py")), String("foo copy.py"))
+    assert_equal(_duplicate_name(String("a.tar.gz")), String("a.tar copy.gz"))
+    assert_equal(_duplicate_name(String("Makefile")), String("Makefile copy"))
+    assert_equal(_duplicate_name(String(".bashrc")), String(".bashrc copy"))
+
+
+def test_desktop_duplicate_writes_buffer_and_opens_copy() raises:
+    """File ▸ Duplicate… prompts for a name, writes the buffer (unsaved
+    edits included) next to the source, and opens the copy. An existing
+    target is refused, not overwritten."""
+    var src = _temp_path(String("_dup_src.txt"))
+    var dst_name = basename(_temp_path(String("_dup_dst.txt")))
+    var dst = _temp_path(String("_dup_dst.txt"))
+    _ = write_file(src, String("on disk\n"))
+    var d = Desktop()
+    d.open_file(src, _SCREEN)
+    _ = d.handle_event(_key(UInt32(ord("X"))), _SCREEN)   # unsaved edit
+    _ = d.dispatch_action(EDITOR_DUPLICATE, _SCREEN)
+    assert_true(d.prompt.active)
+    assert_equal(d.prompt.input.text, _duplicate_name(basename(src)))
+    d.prompt.input.set_text(dst_name)
+    _ = d.handle_event(Event.key_event(KEY_ENTER), _SCREEN)
+    assert_true(stat_file(dst).ok)
+    assert_equal(read_file(dst), String("Xon disk\n"))
+    assert_equal(read_file(src), String("on disk\n"))
+    var idx = d._focused_editor_idx()
+    assert_equal(d.windows.windows[idx].editor.file_path, dst)
+    # Duplicating onto an existing name leaves it untouched.
+    _ = d.dispatch_action(EDITOR_DUPLICATE, _SCREEN)
+    d.prompt.input.set_text(basename(src))
+    _ = d.handle_event(Event.key_event(KEY_ENTER), _SCREEN)
+    assert_equal(read_file(src), String("on disk\n"))
+    d.shutdown()
+    _ = external_call["unlink", Int32]((src + String("\0")).unsafe_ptr())
+    _ = external_call["unlink", Int32]((dst + String("\0")).unsafe_ptr())
 
 
 def main() raises:
