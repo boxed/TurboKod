@@ -68,7 +68,7 @@ from .git_blame import blame_commit_message, compute_blame
 from .git_changes import (
     GIT_CHANGE_NONE, GitRevertBlock, GitStateMtimes,
     compute_deletion_revert_block, compute_revert_block,
-    checkout_branch, count_unpushed_commits, current_branch_name,
+    checkout_branch,
     diff_buffer_marks, fetch_git_status, fetch_head_text,
     changed_paths_between, has_tracked_changes,
     fetch_file_history, fetch_line_history, git_head_sha, git_state_mtimes,
@@ -165,6 +165,7 @@ from .posix import monotonic_ms, sleep_ms, wall_clock_ms, which
 from .project import replace_in_project, walk_project_files
 from .search_options import SearchOptions
 from .project_find import ProjectFind
+from .git_status_poll import GitStatusPoller
 from .find_results_pane import FindResultsPane
 from .project_targets import (
     ProjectTargets, load_project_targets, detect_project_language,
@@ -1623,6 +1624,9 @@ struct Desktop(Movable):
     # (staged, unstaged, or untracked).
     var _project_dirty: Bool
     var _last_git_dirty_check_ms: Int
+    # The ``git status`` child behind the three status-bar fields, read
+    # across frames so the poll never blocks a paint (``git_status_poll``).
+    var _git_status_poller: GitStatusPoller
     # Count of commits ahead of upstream — committed locally but not yet
     # pushed. Surfaced next to the dirty indicator on the status bar and
     # refreshed on the same poll as ``_project_dirty``. 0 when up to date,
@@ -1860,6 +1864,7 @@ struct Desktop(Movable):
         self._project_unpushed = 0
         self._project_branch = String("")
         self._last_git_dirty_check_ms = 0
+        self._git_status_poller = GitStatusPoller()
         self._last_focus_raw_path = String("")
         self._last_input_ms = 0
         self._last_focused_editor_path = String("")
@@ -3792,25 +3797,29 @@ struct Desktop(Movable):
                                 and not self.windows.windows[j].editor.review_mode:
                             self.windows.windows[j].editor.invalidate_git_changes()
                 # Re-resolve HEAD on a move *and* on the seeding
-                # observation: ``force_git_refresh`` zeroes the fingerprint
-                # on focus-gain, so the reseed is how a checkout made
-                # while we were in the background gets compared against
-                # the sha we kept.
+                # observation (first poll after a project open).
                 if not current.is_zero() \
                         and (moved or self._git_state_mtimes.is_zero()):
                     self._on_git_head_observed(root)
                 self._git_state_mtimes = current
-            # Working-tree dirty flag for the status-bar indicator. Polled
-            # on its own (slower) cadence because it shells out to ``git
-            # status`` — non-empty output means there's something to
-            # commit (staged, unstaged, or untracked).
-            if now - self._last_git_dirty_check_ms >= _GIT_DIRTY_POLL_INTERVAL_MS:
+            # Status-bar branch / dirty / unpushed. Polled on its own
+            # (slower) cadence because it shells out to ``git status`` —
+            # asynchronously: the child is started here and read on later
+            # frames, so a slow status (a big untracked tree) never stalls
+            # a paint. The fields keep their last values until it lands.
+            if not self._git_status_poller.is_active() \
+                    and now - self._last_git_dirty_check_ms \
+                        >= _GIT_DIRTY_POLL_INTERVAL_MS:
                 self._last_git_dirty_check_ms = now
-                self._project_dirty = len(fetch_git_status(root)) > 0
-                self._project_unpushed = count_unpushed_commits(root)
-                self._project_branch = current_branch_name(root)
+                _ = self._git_status_poller.start(root)
+            var status = self._git_status_poller.tick()
+            if status:
+                self._project_dirty = status.value().dirty
+                self._project_unpushed = status.value().unpushed
+                self._project_branch = status.value().branch
         else:
             # Not a repo (or no project): never show the indicators.
+            self._git_status_poller.cancel()
             self._project_dirty = False
             self._project_unpushed = 0
             self._project_branch = String("")
@@ -3971,27 +3980,24 @@ struct Desktop(Movable):
             self.lsp_managers[wi].notify_watched_changes(paths, types)
 
     def force_git_refresh(mut self):
-        """Drop every editor's cached HEAD baseline so the gutter re-diffs
-        against ``git show HEAD:<path>`` on the next paint — *unconditionally*,
-        without waiting for the 1 Hz ``.git/HEAD``/``.git/index`` mtime poll.
+        """Re-check git state on the next paint instead of waiting out the
+        poll intervals. Called on host focus-gain (Cmd+Tab back): the user
+        may have committed, checked out, or edited files in another app.
 
-        Called on host focus-gain. The user may have committed, checked out,
-        or simply edited files in another app while we were in the background;
-        a worktree-only change doesn't move the mtimes the cheap poll watches,
-        so the gutter would otherwise read stale until the next save or HEAD
-        move. Cheap here — the actual ``git show`` re-fetch is deferred to the
-        lazy gutter recompute on the next paint, and the in-process Myers diff
-        is per-frame anyway. We also reset the poll baseline so the periodic
-        poll reseeds (and doesn't immediately re-invalidate) the mtimes."""
-        for j in range(len(self.windows.windows)):
-            if self.windows.windows[j].is_editor \
-                    and not self.windows.windows[j].editor.read_only \
-                    and not self.windows.windows[j].editor.review_mode:
-                self.windows.windows[j].editor.invalidate_git_changes()
+        Both checks run on the very next paint and neither blocks it. The
+        HEAD fingerprint stat is cheap, and it compares against the
+        fingerprint *kept* from before we lost focus, so a commit or
+        checkout made meanwhile reads as a move and invalidates the gutter
+        baselines like any other. The status-bar summary goes through the
+        async ``git status`` poller.
+
+        It deliberately does *not* drop every editor's HEAD baseline. It
+        used to, which made the paint right after activation run a
+        synchronous ``git show`` per open file — the frame the windows come
+        forward in. A worktree-only edit doesn't need it: HEAD's content is
+        unchanged, and the reloaded buffer re-diffs in-process against the
+        baseline we already have."""
         self._last_git_state_check_ms = 0
-        self._git_state_mtimes = GitStateMtimes.zero()
-        # Re-check the dirty indicator promptly too — a commit or worktree
-        # edit may have happened while we were in the background.
         self._last_git_dirty_check_ms = 0
 
     # --- review hosting ---------------------------------------------------
@@ -6028,6 +6034,7 @@ struct Desktop(Movable):
         # our three descriptors held.
         self.project_find.close()
         self.find_symbol.close()
+        self._git_status_poller.cancel()
         self._terminate_pending_save_actions()
         # Per-editor search regexes: one live handle per editor that ran
         # a Find, invisible to the grammar registry release below.
@@ -6641,7 +6648,9 @@ struct Desktop(Movable):
         self._git_state_mtimes = GitStateMtimes.zero()
         self._last_git_state_check_ms = 0
         self._git_head_sha = String("")
-        # Clear the dirty indicator until the new project's first poll.
+        # Clear the dirty indicator until the new project's first poll,
+        # and drop a status still running against the old root.
+        self._git_status_poller.cancel()
         self._project_dirty = False
         self._project_unpushed = 0
         self._project_branch = String("")
