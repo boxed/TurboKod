@@ -1437,7 +1437,7 @@ struct Settings(Movable):
         var hint = Attr(BLUE, LIGHT_GRAY)
         _ = painter.put_text(
             canvas, Point(inner.a.x, inner.a.y + 1),
-            String("Folders whose subfolders Quick open project (Cmd+Shift+O) lists."),
+            String("Folders whose subfolders Quick open project (Cmd+P) lists."),
             hint,
         )
         var list_top = inner.a.y + 2

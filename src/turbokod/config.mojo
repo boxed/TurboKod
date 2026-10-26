@@ -272,7 +272,7 @@ struct TurbokodConfig(Copyable, Movable):
     var recent_projects: List[String]
     # Settings ▸ Projects: parent directories whose immediate
     # subdirectories are the candidates in File ▸ "Quick open project..."
-    # (Cmd+Shift+O). Stored as typed, so ``~`` survives; expanded at use.
+    # (Cmd+P). Stored as typed, so ``~`` survives; expanded at use.
     var project_dirs: List[String]
     # Canonical absolute paths of recently focused file-backed editors,
     # most-recent first. Updated by ``Desktop._track_recent_focus``

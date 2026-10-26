@@ -1920,17 +1920,17 @@ struct Desktop(Movable):
             UInt32(ord("o")), MOD_META, EDITOR_OPEN,
             group=HKG_FILES, help=String("Open..."),
         ))
-        # Cmd+P — Quick Open (type-to-filter file picker). Plain Cmd+O
-        # bubbles ``file:open`` up to the host's FileDialog; Quick Open is
-        # the project-aware fast picker.
+        # Cmd+Shift+O — Quick Open (type-to-filter file picker). Plain
+        # Cmd+O bubbles ``file:open`` up to the host's FileDialog; Quick
+        # Open is the project-aware fast picker.
         self._hotkeys.append(Hotkey(
-            UInt32(ord("p")), MOD_META, EDITOR_QUICK_OPEN,
+            UInt32(ord("o")), MOD_META | MOD_SHIFT, EDITOR_QUICK_OPEN,
             group=HKG_FILES, help=String("Quick open..."),
         ))
-        # Cmd+Shift+O — the same picker over the Settings ▸ Projects
-        # folders' subdirectories.
+        # Cmd+P — the same picker over the Settings ▸ Projects folders'
+        # subdirectories.
         self._hotkeys.append(Hotkey(
-            UInt32(ord("o")), MOD_META | MOD_SHIFT, PROJECT_QUICK_OPEN,
+            UInt32(ord("p")), MOD_META, PROJECT_QUICK_OPEN,
             group=HKG_FILES, help=String("Quick open project..."),
         ))
         self._hotkeys.append(Hotkey(
@@ -14739,7 +14739,7 @@ struct Desktop(Movable):
         return Optional[String]()
 
     def _open_project_picker(mut self):
-        """Quick open project (Cmd+Shift+O): the Quick Open picker over
+        """Quick open project (Cmd+P): the Quick Open picker over
         every immediate, non-hidden subdirectory of the Settings ▸
         Projects folders. Rows show ``~``-abbreviated paths so the filter
         matches the parent folder name too."""

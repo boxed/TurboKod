@@ -1,4 +1,4 @@
-"""Settings ▸ Projects and File ▸ Quick open project (Cmd+Shift+O).
+"""Settings ▸ Projects and File ▸ Quick open project (Cmd+P).
 
 Shared fixtures live in ``tests/support.mojo`` and
 ``scripts/run_tests.sh`` runs every suite.
@@ -9,7 +9,7 @@ from turbokod.config import TurbokodConfig, _config_from_json, _config_to_json
 from turbokod.desktop import (
     Desktop, PROJECT_QUICK_OPEN, _abbreviate_home, _expand_home
 )
-from turbokod.events import Event, KEY_ENTER
+from turbokod.events import Event, KEY_ENTER, MOD_META
 from turbokod.file_io import join_path, write_file
 from turbokod.settings import Settings, _FOCUS_PROJ_INPUT, _FOCUS_PROJ_REMOVE
 
@@ -96,6 +96,16 @@ def test_quick_open_project_lists_subdirectories() raises:
     # ``open_project`` canonicalizes (``/tmp`` → ``/private/tmp``).
     assert_true(d.project.value().endswith(String("/qop_projects/alpha")))
     d.shutdown()
+
+
+def test_cmd_p_opens_quick_open_project() raises:
+    var root = join_path(_test_home(), String("qop_hotkey"))
+    _ensure_dir(join_path(root, String("one")))
+    var d = Desktop()
+    d.config.project_dirs.append(root)
+    _ = d.handle_event(Event.key_event(UInt32(ord("p")), MOD_META), _SCREEN)
+    assert_true(d.quick_open.active)
+    assert_true(d.quick_open.picks_project)
 
 
 def test_quick_open_project_without_folders_does_not_open() raises:
