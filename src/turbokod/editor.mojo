@@ -3321,9 +3321,16 @@ struct Editor(Copyable, Movable):
         when applying multiple edits in sequence.
         """
         var n_lines = self.buffer.line_count()
-        if n_lines == 0 or sl < 0 or sl >= n_lines:
+        if n_lines == 0 or sl < 0:
             return (0, -1, 0, 0)
         var sc2 = sc
+        if sl >= n_lines:
+            # past the last line, as when a server appends to a file
+            # without a final newline: the end of the buffer
+            return self._apply_buffer_edit_raw(
+                n_lines - 1, len(self.buffer.line(n_lines - 1).as_bytes()),
+                max(el, n_lines - 1), ec, new_text,
+            )
         if sc2 < 0: sc2 = 0
         var s_line = self.buffer.line(sl)
         var s_ln = len(s_line.as_bytes())
@@ -3670,8 +3677,13 @@ struct Editor(Copyable, Movable):
         and its anchor are relocated past each edit (by the line delta when
         it ended above them, tracking the relocated tail when it ended on
         their row). ``hl_low`` / ``hl_high`` are widened to the rows
-        touched, for ``_mark_hl_dirty``."""
+        touched, for ``_mark_hl_dirty``.
+
+        Inserts at the same position must come out in array order (LSP),
+        so those are applied last first: each lands in front of the one
+        applied before it. Reversing before the (stable) sort does that."""
         var m = len(edits)
+        edits.reverse()
         for ii in range(1, m):
             var jj = ii
             while jj > 0 and (
