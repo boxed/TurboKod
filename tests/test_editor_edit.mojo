@@ -641,6 +641,51 @@ def test_editor_replace_all() raises:
     assert_equal(ed.replace_all(String(""), String("Q")), 0)
 
 
+def test_editor_replace_all_once_still_needs_saving() raises:
+    var ed = Editor(String("a\nfoo\nb"))
+    assert_equal(ed.replace_all(String("foo"), String("bar")), 1)
+    assert_true(ed.dirty)
+
+
+def test_editor_replace_all_keeps_the_caret_on_the_last_line() raises:
+    var ed = Editor(String("foo\nfoo\nfoo bar"))
+    ed.move_to(2, 7, False)
+    assert_equal(ed.replace_all(String("foo"), String("X")), 3)
+    assert_equal(ed.selections[0].row, 2)
+    # the line got shorter under it
+    assert_equal(ed.selections[0].col, 5)
+
+
+def test_editor_replace_all_rehighlights_from_the_top() raises:
+    var ed = Editor(String("foo\nbar\nfoo"))
+    ed._hl_dirty_row = ed.buffer.line_count()  # as after highlighting
+    _ = ed.replace_all(String("foo"), String("X"))
+    assert_equal(ed._hl_dirty_row, 0)
+
+
+def test_editor_replace_all_zero_width_regex() raises:
+    var opts = SearchOptions(True, False, True)
+    var ed = Editor(String("ab\n\ncd"))
+    assert_equal(ed.replace_all(String("$"), String(";"), opts), 3)
+    assert_equal(ed.buffer.line(0), String("ab;"))
+    assert_equal(ed.buffer.line(1), String(";"))
+    assert_equal(ed.buffer.line(2), String("cd;"))
+    var ed2 = Editor(String("abc"))
+    assert_equal(ed2.replace_all(String("x*"), String("-"), opts), 4)
+    assert_equal(ed2.buffer.line(0), String("-a-b-c-"))
+
+
+def test_editor_replace_all_leaves_read_only_and_bad_patterns_alone() raises:
+    var ed = Editor(String("foo"))
+    ed.read_only = True
+    assert_equal(ed.replace_all(String("foo"), String("bar")), 0)
+    assert_equal(ed.buffer.line(0), String("foo"))
+    ed.read_only = False
+    assert_equal(ed.replace_all(String("(foo"), String("bar"), SearchOptions(True, False, True)), 0)
+    assert_equal(ed.buffer.line(0), String("foo"))
+    assert_false(ed.dirty)
+
+
 def test_editor_uses_editorconfig_indent() raises:
     """Tab key respects ``indent_style`` / ``indent_size`` from editorconfig.
     The fixture sets ``[*.{c,h}]`` to ``indent_style=tab``, so opening a
