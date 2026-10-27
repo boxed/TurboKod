@@ -43,13 +43,50 @@ comptime OP_DELETE: Int = 1
 comptime OP_INSERT: Int = 2
 
 
+comptime _DIFF_MAX_D = 2000
+"""Beyond this many differences ``diff_lines`` stops looking for the
+shortest script and reports the rest as one replaced block. The search
+keeps a snapshot per difference (``2d+1`` ints at depth ``d``), so this
+bounds it to about 32 MB; a precise diff of a file a formatter rewrote is
+worth less than a responsive editor (it runs per paint, for the change
+gutter). A 3-way merge over such a block comes out a conflict, never a
+wrong merge."""
+
+
 def diff_lines(a: List[String], b: List[String]) -> List[DiffOp]:
     """Myers diff over two line lists. Returns the edit script in
     forward (input-order) form: a sequence of equal / delete / insert
     operations whose application turns ``a`` into ``b``.
+
+    The common prefix and suffix are matched up front, so the search only
+    covers what differs, and is cut off at ``_DIFF_MAX_D`` differences.
     """
-    var n = len(a)
-    var m = len(b)
+    var n_all = len(a)
+    var m_all = len(b)
+    var lo = 0
+    while lo < n_all and lo < m_all and a[lo] == b[lo]:
+        lo += 1
+    var tail = 0
+    while tail < n_all - lo and tail < m_all - lo and a[n_all - 1 - tail] == b[m_all - 1 - tail]:
+        tail += 1
+    var ops = List[DiffOp]()
+    for i in range(lo):
+        ops.append(DiffOp(OP_EQUAL, i, i))
+    var middle = _myers(a, b, lo, n_all - tail, lo, m_all - tail)
+    for op in middle:
+        ops.append(op)
+    for t in range(tail):
+        ops.append(DiffOp(OP_EQUAL, n_all - tail + t, m_all - tail + t))
+    return ops^
+
+
+def _myers(
+    a: List[String], b: List[String], a_lo: Int, a_hi: Int, b_lo: Int, b_hi: Int,
+) -> List[DiffOp]:
+    """The edit script for ``a[a_lo:a_hi]`` to ``b[b_lo:b_hi]``, with
+    indices into ``a`` and ``b``."""
+    var n = a_hi - a_lo
+    var m = b_hi - b_lo
     var max_d = n + m
     if max_d == 0:
         return List[DiffOp]()
@@ -58,13 +95,15 @@ def diff_lines(a: List[String], b: List[String]) -> List[DiffOp]:
     var v = List[Int]()
     for _ in range(size):
         v.append(0)
-    # Snapshot of V *before* each d was computed; trace[d] is V at depth d-1.
+    # trace[d] is V before depth d was computed, for k in [-d, d] only
+    # (at index k + d): the rest isn't read back, and copying all of V per
+    # depth made a big rewrite take gigabytes.
     var trace = List[List[Int]]()
     var found_d = -1
-    for d in range(max_d + 1):
+    for d in range(min(max_d, _DIFF_MAX_D) + 1):
         var snap = List[Int]()
-        for i in range(size):
-            snap.append(v[i])
+        for k in range(-d, d + 1):
+            snap.append(v[k + offset])
         trace.append(snap^)
         var k = -d
         var done = False
@@ -82,7 +121,7 @@ def diff_lines(a: List[String], b: List[String]) -> List[DiffOp]:
                 else:
                     x = right
             var y = x - k
-            while x < n and y < m and a[x] == b[y]:
+            while x < n and y < m and a[a_lo + x] == b[b_lo + y]:
                 x += 1
                 y += 1
             v[k + offset] = x
@@ -93,6 +132,14 @@ def diff_lines(a: List[String], b: List[String]) -> List[DiffOp]:
             k += 2
         if done:
             break
+    if found_d < 0:
+        # too different: one block
+        var block = List[DiffOp]()
+        for i in range(n):
+            block.append(DiffOp(OP_DELETE, a_lo + i, -1))
+        for j in range(m):
+            block.append(DiffOp(OP_INSERT, -1, b_lo + j))
+        return block^
 
     # Trace back. Emit ops in reverse, then reverse the list.
     var ops_rev = List[DiffOp]()
@@ -107,31 +154,31 @@ def diff_lines(a: List[String], b: List[String]) -> List[DiffOp]:
         elif k_cur == d_cur:
             prev_k = k_cur - 1
         else:
-            var down = trace[d_cur][k_cur + 1 + offset]
-            var right = trace[d_cur][k_cur - 1 + offset] + 1
+            var down = trace[d_cur][k_cur + 1 + d_cur]
+            var right = trace[d_cur][k_cur - 1 + d_cur] + 1
             if down > right:
                 prev_k = k_cur + 1
             else:
                 prev_k = k_cur - 1
-        var prev_x = trace[d_cur][prev_k + offset]
+        var prev_x = trace[d_cur][prev_k + d_cur]
         var prev_y = prev_x - prev_k
         # Snake first (in reverse): walk diagonally down-left until either
         # x or y reaches the predecessor's coordinate.
         while x_cur > prev_x and y_cur > prev_y:
-            ops_rev.append(DiffOp(OP_EQUAL, x_cur - 1, y_cur - 1))
+            ops_rev.append(DiffOp(OP_EQUAL, a_lo + x_cur - 1, b_lo + y_cur - 1))
             x_cur -= 1
             y_cur -= 1
         # Then the single non-diagonal step from (prev_x, prev_y).
         if x_cur > prev_x:
-            ops_rev.append(DiffOp(OP_DELETE, prev_x, -1))
+            ops_rev.append(DiffOp(OP_DELETE, a_lo + prev_x, -1))
         elif y_cur > prev_y:
-            ops_rev.append(DiffOp(OP_INSERT, -1, prev_y))
+            ops_rev.append(DiffOp(OP_INSERT, -1, b_lo + prev_y))
         x_cur = prev_x
         y_cur = prev_y
         d_cur -= 1
     # Common prefix (all equals) at d=0.
     while x_cur > 0 and y_cur > 0:
-        ops_rev.append(DiffOp(OP_EQUAL, x_cur - 1, y_cur - 1))
+        ops_rev.append(DiffOp(OP_EQUAL, a_lo + x_cur - 1, b_lo + y_cur - 1))
         x_cur -= 1
         y_cur -= 1
 
