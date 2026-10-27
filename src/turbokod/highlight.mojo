@@ -1936,7 +1936,7 @@ def _md_fence_info(line: String, start: Int) -> String:
     var s = i
     while i < n and b[i] != 0x20 and b[i] != 0x09:
         i += 1
-    if i <= s:
+    if i <= s:  # pragma: no mutate (i == s gives "" either way)
         return String("")
     return String(StringSpan(unsafe_from_utf8=b[s:i]))
 
