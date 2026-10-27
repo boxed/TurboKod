@@ -294,9 +294,7 @@ def test_pytest_link_opens_project_relative_file() raises:
     the file resolved against the PROJECT ROOT, not the process cwd, and
     the window survives the next paint. Regression: clicking opened a
     cwd-relative (usually nonexistent) path that then vanished."""
-    var dir = String("/tmp/turbokod_pytestlink_") + String(
-        Int(external_call["getpid", Int32]())
-    )
+    var dir = _temp_path(String("_pytestlink"))
     _ = external_call["mkdir", Int32](
         (dir + String("\0")).unsafe_ptr(), UInt32(0o755),
     )

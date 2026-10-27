@@ -195,10 +195,17 @@ def _spell_with_dict(words: List[String]) -> Speller:
 
 
 def _temp_path(suffix: String) -> String:
-    """Cheap unique path under /tmp; pid+suffix is unique per process, so
-    suites can run concurrently."""
+    """Cheap unique path for a test file, inside this process's scratch
+    $HOME (see ``setup_test_env``), which is swept once the process is
+    gone. Directly in /tmp they were never deleted: tens of thousands
+    piled up, and every test listing /tmp (the Save As dialog) slowed
+    down with them."""
     var pid = external_call["getpid", Int32]()
-    return String("/tmp/turbokod_test_") + String(Int(pid)) + suffix
+    var home = _test_home()
+    if not home.startswith(String(_TEST_HOMES) + String("/")):
+        # setup_test_env hasn't run: $HOME is the real one
+        return String("/tmp/turbokod_test_") + String(Int(pid)) + suffix
+    return home + String("/turbokod_test_") + String(Int(pid)) + suffix
 
 
 comptime _TEST_HOMES = "/tmp/turbokod_test_home"
