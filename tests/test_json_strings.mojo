@@ -43,6 +43,13 @@ def test_a_lone_surrogate_becomes_a_replacement_character() raises:
     assert_equal(_parse_str("\"\\udbffx\""), "\ufffdx")
     # just outside the surrogate range
     assert_equal(_parse_str("\"\\ud7ff\\ue000\""), chr(0xD7FF) + chr(0xE000))
+    # the edges of the low half
+    assert_equal(_parse_str("\"\\udc00\""), "\ufffd")
+    assert_equal(_parse_str("\"\\udc00\\udc00\""), "\ufffd\ufffd")
+    assert_equal(_parse_str("\"\\ud800\\ue000\""), "\ufffd" + chr(0xE000))
+    # what follows a high surrogate is only a low one when it's an escape
+    assert_equal(_parse_str("\"\\ud83dxudc00\""), "\ufffdxudc00")
+    assert_equal(_parse_str("\"\\ud83dabxyzw\""), "\ufffdabxyzw")
 
 
 def test_broken_strings_are_errors() raises:
