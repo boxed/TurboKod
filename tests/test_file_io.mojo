@@ -1,0 +1,72 @@
+"""``file_io``: saving and deleting must never touch more, or less, than
+the file the user means."""
+
+from std.ffi import external_call
+from std.testing import TestSuite, assert_equal, assert_false, assert_true
+from turbokod.file_io import delete_tree, read_file, stat_file, write_file
+from turbokod.lsp import capture_command
+from turbokod.posix import getcwd_path
+
+
+def _sh(script: String) raises -> String:
+    var argv = List[String]()
+    argv.append(String("sh"))
+    argv.append(String("-c"))
+    argv.append(script)
+    return capture_command(argv).stdout
+
+
+def _scratch(name: String) raises -> String:
+    """A fresh directory under ``.build`` for this process."""
+    var pid = external_call["getpid", Int32]()
+    var dir = getcwd_path() + "/.build/file_io_test_" + String(Int(pid)) + "/" + name
+    _ = _sh("rm -rf '" + dir + "' && mkdir -p '" + dir + "'")
+    return dir
+
+
+def test_deleting_a_directory_leaves_what_its_symlinks_point_to() raises:
+    var dir = _scratch("delete_links")
+    _ = _sh(
+        "cd '" + dir + "' && mkdir -p outside tree/sub && echo keep > outside/precious.txt"
+        + " && echo x > tree/sub/file.txt && ln -s ../outside tree/link"
+    )
+    assert_true(delete_tree(dir + "/tree", True))
+    assert_false(stat_file(dir + "/tree").ok)
+    assert_equal(read_file(dir + "/outside/precious.txt"), "keep\n")
+
+
+def test_deleting_a_symlink_to_a_directory_removes_only_the_link() raises:
+    var dir = _scratch("delete_link_itself")
+    _ = _sh("cd '" + dir + "' && mkdir outside && echo keep > outside/precious.txt && ln -s outside link")
+    # the file tree lists a symlink to a directory as a directory
+    assert_true(delete_tree(dir + "/link", True))
+    assert_equal(_sh("cd '" + dir + "' && ls"), "outside\n")
+    assert_equal(read_file(dir + "/outside/precious.txt"), "keep\n")
+
+
+def test_saving_keeps_the_file_mode() raises:
+    var dir = _scratch("modes")
+    _ = _sh("cd '" + dir + "' && echo old > run.sh && chmod 755 run.sh && echo old > secret && chmod 600 secret")
+    assert_true(write_file(dir + "/run.sh", "new\n"))
+    assert_true(write_file(dir + "/secret", "new\n"))
+    assert_equal(_sh("cd '" + dir + "' && stat -f '%Lp' run.sh secret 2>/dev/null || stat -c '%a' run.sh secret"), "755\n600\n")
+    assert_equal(read_file(dir + "/run.sh"), "new\n")
+
+
+def test_saving_through_a_symlink_writes_its_target() raises:
+    var dir = _scratch("save_link")
+    _ = _sh("cd '" + dir + "' && echo old > real.txt && ln -s real.txt link.txt")
+    assert_true(write_file(dir + "/link.txt", "new\n"))
+    assert_equal(_sh("cd '" + dir + "' && test -L link.txt && echo still a link"), "still a link\n")
+    assert_equal(read_file(dir + "/real.txt"), "new\n")
+
+
+def test_saving_a_new_file() raises:
+    var dir = _scratch("new_file")
+    assert_true(write_file(dir + "/fresh.txt", "hello\n"))
+    assert_equal(read_file(dir + "/fresh.txt"), "hello\n")
+    assert_equal(_sh("cd '" + dir + "' && ls"), "fresh.txt\n")
+
+
+def main() raises:
+    TestSuite.discover_tests[__functions_in_module()]().run()

@@ -55,6 +55,7 @@ def _stat_mtime_nsec_offset() -> Int:
 
 comptime _S_IFMT  = UInt32(0o170000)
 comptime _S_IFDIR = UInt32(0o040000)
+comptime _S_IFLNK = UInt32(0o120000)
 
 
 @fieldwise_init
@@ -109,6 +110,16 @@ def stat_file(path: String) -> FileInfo:
     var mtime_ns = p64[unsafe_offset=_stat_mtime_nsec_offset() // 8]
     var mode = _stat_mode(buf)
     return FileInfo(size, mtime, mtime_ns, mode, True)
+
+
+def is_symlink(path: String) -> Bool:
+    """Whether ``path`` itself is a symbolic link (``lstat``, which doesn't
+    follow it the way ``stat_file`` does)."""
+    var c_path = path + String("\0")
+    var buf = alloc_zero_buffer(STAT_BUF_SIZE)
+    if Int(external_call["lstat", Int32](c_path.unsafe_ptr(), buf.unsafe_ptr())) != 0:
+        return False
+    return (_stat_mode(buf) & _S_IFMT) == _S_IFLNK
 
 
 def read_file(path: String) raises -> String:
@@ -210,13 +221,26 @@ def write_file_stamped(path: String, content: String) -> FileInfo:
     var bytes = content.as_bytes()
     var total = len(bytes)
     var ptr = bytes.unsafe_ptr()
-    var c_path = path + String("\0")
+    # Through a symlink, the file it points to gets the new content:
+    # renaming over the link would replace it with a plain file, and the
+    # file it pointed to would keep the old content.
+    var target = path
+    if is_symlink(path):
+        var resolved = realpath(path)
+        if len(resolved.as_bytes()) > 0:
+            target = resolved
+    var c_path = target + String("\0")
+    # The new file replaces the old one, so it takes its permissions: an
+    # executable stays executable, a private file stays private.
+    var before = stat_file(target)
 
     var failed = FileInfo(Int64(0), Int64(0), Int64(0), UInt32(0), False)
-    var tmp = path + String(".tk-tmp")
+    var tmp = target + String(".tk-tmp")
     var c_tmp = tmp + String("\0")
     var fd = external_call["creat", Int32](c_tmp.unsafe_ptr(), Int32(0o644))
     var atomic = fd >= 0
+    if atomic and before.ok:
+        _ = external_call["fchmod", Int32](fd, before.mode & UInt32(0o7777))
     if not atomic:
         # No sibling temp possible (read-only dir). Overwrite in place
         # without truncating up front — see the docstring.
@@ -244,7 +268,7 @@ def write_file_stamped(path: String, content: String) -> FileInfo:
         _ = external_call["fsync", Int32](fd)
         _ = external_call["close", Int32](fd)
         # No temp file to stamp; this fallback keeps the stat-after race.
-        return stat_file(path) if ok else failed
+        return stat_file(target) if ok else failed
 
     _ = external_call["fsync", Int32](fd)
     _ = external_call["close", Int32](fd)
@@ -303,7 +327,10 @@ def delete_tree(path: String, is_dir: Bool) -> Bool:
     emptied recursively (children first) and then ``rmdir``ed. Returns
     True only when everything was removed. Used by the file-tree
     context-menu "Delete" action, which can target directories."""
-    if not is_dir:
+    # A symlink goes, never what it points to: the listing calls a link to
+    # a directory a directory, and following it would empty that directory,
+    # wherever it is.
+    if not is_dir or is_symlink(path):
         return delete_path(path)
     var children = list_directory_typed(path)
     var ok = True
