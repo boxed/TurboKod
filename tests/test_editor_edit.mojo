@@ -2371,8 +2371,61 @@ def test_undo_history_is_capped_by_bytes_not_just_entries() raises:
     assert_true(len(ed._undo_stack) < 200)
     assert_true(len(ed._undo_stack) < _UNDO_STACK_LIMIT)
     assert_true(total <= _UNDO_STACK_BYTE_BUDGET)
-    # …and it still keeps a usable amount of history.
-    assert_true(len(ed._undo_stack) >= _UNDO_STACK_MIN_ENTRIES)
+    # …and it keeps as much history as fits
+    assert_equal(len(ed._undo_stack), _UNDO_STACK_BYTE_BUDGET // per_snapshot)
+
+
+def test_undo_history_keeps_a_floor_of_entries_for_huge_files() raises:
+    """A file so big that fewer than the floor fit the budget still keeps
+    the floor's worth of undo steps."""
+    var chunk = String("")
+    for _ in range(64):
+        chunk = chunk + String("0123456789abcdef")
+    var lines = List[String]()
+    for _ in range(10 * 1024):  # ~10 MB: 6 fit the budget
+        lines.append(chunk)
+    var ed = Editor(String(""))
+    ed.buffer.lines = lines^
+    for _ in range(_UNDO_STACK_MIN_ENTRIES + 3):
+        ed._push_undo()
+    assert_equal(len(ed._undo_stack), _UNDO_STACK_MIN_ENTRIES)
+
+
+def test_undo_history_drops_the_oldest_entries() raises:
+    var ed = Editor(String("0"))
+    for i in range(_UNDO_STACK_LIMIT + 5):
+        ed.buffer.lines[0] = String(i)
+        ed._push_undo()
+    assert_equal(ed._undo_stack[0].lines[0], String("5"))
+    assert_equal(ed._undo_stack[1].lines[0], String("6"))
+    assert_equal(ed._undo_stack[len(ed._undo_stack) - 1].lines[0], String(_UNDO_STACK_LIMIT + 4))
+
+
+def test_typing_after_another_edit_is_its_own_undo_step() raises:
+    var ed = Editor(String("foo"))
+    ed.move_to(0, 3, False)
+    _ = ed.handle_key(Event.key_event(UInt32(ord("x"))), _VIEW)
+    assert_equal(ed.replace_all(String("foo"), String("bar")), 1)
+    _ = ed.handle_key(Event.key_event(UInt32(ord("y"))), _VIEW)
+    assert_equal(ed.buffer.line(0), String("barxy"))
+    assert_true(ed.undo())
+    assert_equal(ed.buffer.line(0), String("barx"))
+    assert_true(ed.undo())
+    assert_equal(ed.buffer.line(0), String("foox"))
+
+
+def test_undo_and_redo_leave_a_read_only_buffer_alone() raises:
+    var ed = Editor(String("foo"))
+    assert_equal(ed.replace_all(String("foo"), String("bar")), 1)
+    assert_false(ed.redo())
+    ed.read_only = True
+    assert_false(ed.undo())
+    assert_equal(ed.buffer.line(0), String("bar"))
+    ed.read_only = False
+    assert_true(ed.undo())
+    ed.read_only = True
+    assert_false(ed.redo())
+    assert_equal(ed.buffer.line(0), String("foo"))
 
 
 def test_undo_history_still_honors_the_entry_cap() raises:
