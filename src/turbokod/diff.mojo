@@ -481,6 +481,23 @@ def _hunk_header(a_start: Int, a_count: Int, b_start: Int, b_count: Int) -> Stri
     return String("@@ ") + a_part + String(" ") + b_part + String(" @@")
 
 
+def _diff_input_lines(text: String) -> Tuple[List[String], Bool]:
+    """``text``'s lines, as ``diff`` sees them (no empty line after a final
+    newline), and whether the last one has no newline."""
+    var lines = split_lines(text)
+    var last = lines.pop()
+    if len(last.as_bytes()) == 0:
+        return (lines^, False)
+    lines.append(last^)
+    return (lines^, True)
+
+
+def _no_newline_note(lines: List[String], index: Int, open: Bool) -> String:
+    if open and index == len(lines) - 1:
+        return String("\\ No newline at end of file\n")
+    return String("")
+
+
 def unified_diff(
     a: String,
     b: String,
@@ -496,9 +513,25 @@ def unified_diff(
     callers that want to detect "no changes" can grep for the absence of
     ``@@`` in the output.
     """
-    var a_lines = split_lines(a)
-    var b_lines = split_lines(b)
-    var ops = diff_lines(a_lines, b_lines)
+    var a_split = _diff_input_lines(a)
+    var b_split = _diff_input_lines(b)
+    ref a_lines = a_split[0]
+    ref b_lines = b_split[0]
+    var a_open = a_split[1]
+    var b_open = b_split[1]
+    var ops: List[DiffOp]
+    if a_open == b_open:
+        ops = diff_lines(a_lines, b_lines)
+    else:
+        # A last line with a newline and one without differ: compare with
+        # a mark (lines never hold ``\n``) on the one without.
+        var a_cmp = a_lines.copy()
+        var b_cmp = b_lines.copy()
+        if a_open:
+            a_cmp[len(a_cmp) - 1] += "\n"
+        else:
+            b_cmp[len(b_cmp) - 1] += "\n"
+        ops = diff_lines(a_cmp, b_cmp)
 
     var out = String("--- ") + a_label + String("\n")
     out += String("+++ ") + b_label + String("\n")
@@ -571,6 +604,7 @@ def unified_diff(
             var op = ops[j]
             if op.kind == OP_EQUAL:
                 out += String(" ") + a_lines[op.a_index] + String("\n")
+                out += _no_newline_note(a_lines, op.a_index, a_open)
                 j += 1
                 continue
             var run_end = j
@@ -579,9 +613,11 @@ def unified_diff(
             for k in range(j, run_end):
                 if ops[k].kind == OP_DELETE:
                     out += String("-") + a_lines[ops[k].a_index] + String("\n")
+                    out += _no_newline_note(a_lines, ops[k].a_index, a_open)
             for k in range(j, run_end):
                 if ops[k].kind == OP_INSERT:
                     out += String("+") + b_lines[ops[k].b_index] + String("\n")
+                    out += _no_newline_note(b_lines, ops[k].b_index, b_open)
             j = run_end
         i = hunk_end
     return out^
