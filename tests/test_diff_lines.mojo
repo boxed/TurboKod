@@ -55,6 +55,9 @@ def test_small_cases_give_shortest_scripts() raises:
     assert_equal(_check(_lines("xabcx"), _lines("xacbx")), 2)
     assert_equal(_check(_lines("aaaab"), _lines("baaaa")), 2)
     assert_equal(_check(_lines("abcdef"), _lines("abXdeY")), 4)
+    # only deletions, or only insertions, around kept lines
+    assert_equal(_check(_lines("axbyc"), _lines("abc")), 2)
+    assert_equal(_check(_lines("abc"), _lines("axbyc")), 2)
     assert_equal(_check(_lines("prefix-middle-suffix"), _lines("prefix-MIDDLE-suffix")), 12)
 
 

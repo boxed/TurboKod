@@ -176,11 +176,7 @@ def _myers(
         x_cur = prev_x
         y_cur = prev_y
         d_cur -= 1
-    # Common prefix (all equals) at d=0.
-    while x_cur > 0 and y_cur > 0:
-        ops_rev.append(DiffOp(OP_EQUAL, a_lo + x_cur - 1, b_lo + y_cur - 1))
-        x_cur -= 1
-        y_cur -= 1
+    # (No common prefix is left at d=0: ``diff_lines`` matched it already.)
 
     var ops = List[DiffOp]()
     var i = len(ops_rev) - 1
