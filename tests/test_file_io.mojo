@@ -68,6 +68,27 @@ def test_saving_a_new_file() raises:
     assert_equal(_sh("cd '" + dir + "' && ls"), "fresh.txt\n")
 
 
+def test_a_new_file_is_not_executable() raises:
+    var dir = _scratch("new_mode")
+    assert_true(write_file(dir + "/fresh.txt", "x\n"))
+    assert_equal(_sh("cd '" + dir + "' && test -x fresh.txt || echo not executable"), "not executable\n")
+
+
+def test_saving_through_a_dangling_symlink_still_saves() raises:
+    var dir = _scratch("dangling")
+    _ = _sh("cd '" + dir + "' && ln -s missing.txt link.txt")
+    assert_true(write_file(dir + "/link.txt", "saved\n"))
+    assert_equal(read_file(dir + "/link.txt"), "saved\n")
+
+
+def test_a_directory_that_cant_be_fully_deleted_reports_failure() raises:
+    var dir = _scratch("locked")
+    _ = _sh("cd '" + dir + "' && mkdir -p tree/locked && echo x > tree/locked/f && chmod 555 tree/locked")
+    assert_false(delete_tree(dir + "/tree", True))
+    _ = _sh("chmod 755 '" + dir + "/tree/locked'")
+    assert_equal(read_file(dir + "/tree/locked/f"), "x\n")
+
+
 def test_an_unreadable_store_file_is_kept_for_recovery() raises:
     # the stores save over what they load: a file they can't read would be
     # overwritten with nothing
@@ -80,6 +101,9 @@ def test_an_unreadable_store_file_is_kept_for_recovery() raises:
     assert_true(write_file(dir + "/drafts.json", "[]"))
     assert_false(Bool(load_json_object(dir + "/drafts.json")))
     assert_equal(read_file(dir + "/drafts.json.corrupt.1"), "[]")
+    assert_true(write_file(dir + "/drafts.json", "3"))
+    assert_false(Bool(load_json_object(dir + "/drafts.json")))
+    assert_equal(read_file(dir + "/drafts.json.corrupt.2"), "3")
 
 
 def test_a_missing_store_file_is_nothing_saved_yet() raises:
