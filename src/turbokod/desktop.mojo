@@ -6941,7 +6941,9 @@ struct Desktop(Movable):
         """Refresh entries from the live editors, then re-encode and
         write the per-user view-states file only when the encoding
         differs from the previously-written one. Skipped when no
-        project is open — there's nowhere to write."""
+        project is open — there's nowhere to write. (Unlike the session
+        and drafts, these are loaded in ``_set_project``, so saving before
+        the restore is fine.)"""
         if not self.project:
             return
         self._refresh_view_states_from_windows()
@@ -6962,8 +6964,10 @@ struct Desktop(Movable):
         starts clean rather than restoring a stale window. The
         ``close_project`` flow clears ``self.project`` *before*
         dropping its editor windows, so the project guard here keeps
-        the on-disk session intact for restore on reopen."""
-        if not self.project:
+        the on-disk session intact for restore on reopen. Not while a
+        restore is pending, for the same reason as
+        ``_save_drafts_if_changed``."""
+        if not self.project or self._pending_restore:
             return
         var session = self._snapshot_session()
         var encoded = encode_session(session)
@@ -7053,8 +7057,13 @@ struct Desktop(Movable):
         scratch buffer from being lost on quit even when the host never
         delivers a focus-out first. A window saved-as to a real file (now
         carrying a path) or closed simply drops out of the snapshot, so
-        its draft is removed on the next write."""
-        if not self.project:
+        its draft is removed on the next write.
+
+        Not while a restore is pending: until then the on-disk drafts are
+        the only copy, and this would write the (still empty) set over
+        them — a focus-out between ``_set_project`` and the next paint did
+        exactly that."""
+        if not self.project or self._pending_restore:
             return
         var drafts = self._snapshot_drafts()
         var encoded = encode_drafts(drafts)
@@ -14852,7 +14861,9 @@ struct Desktop(Movable):
         var content: String
         var win = self._find_window_for_path(src_path)
         if win >= 0:
-            content = self.windows.windows[win].editor.text_snapshot()
+            # What a save would write: ``text_snapshot`` joins with ``\n``,
+            # which turned a CRLF file's copy into LF.
+            content = self.windows.windows[win].editor._disk_text()
         else:
             try:
                 content = read_file(src_path)
