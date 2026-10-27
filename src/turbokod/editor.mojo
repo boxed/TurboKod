@@ -78,7 +78,7 @@ from .search_options import (
 from .string_utils import (
     byte_slice, char_width, codepoint_at, display_columns, is_ascii_ident_byte,
     is_printable_text_key, is_space_cp, is_word_codepoint,
-    leading_indent_bytes, prev_codepoint_start, split_lines_no_trailing,
+    leading_indent_bytes, past_empty_match, prev_codepoint_start, split_lines_no_trailing,
     TAB_WIDTH, trailing_ws_start, truncate_to_columns, utf8_byte_of_cell, utf8_cell_of_byte,
     utf8_codepoint_size, utf8_step_forward, word_char_step, word_range_at,
 )
@@ -4430,10 +4430,10 @@ struct Editor(Copyable, Movable):
                 count += 1
                 line_changed = True
                 if mv.end == mv.start:
-                    # Zero-width match (regex mode only): advance one byte
-                    # so the loop can't spin forever.
+                    # Zero-width match (regex mode only): advance one
+                    # character so the loop can't spin forever.
                     seg_start = mv.start
-                    pos = mv.start + 1
+                    pos = past_empty_match(lb, mv.start)
                 else:
                     seg_start = mv.end
                     pos = mv.end

@@ -24,7 +24,7 @@ from .posix import (
 from .search_options import (
     LineSearcher, SearchOptions, default_search_options,
 )
-from .string_utils import split_lines_no_trailing
+from .string_utils import past_empty_match, split_lines_no_trailing
 
 
 @fieldwise_init
@@ -803,7 +803,7 @@ def _regex_replace_count(
         count += 1
         if mv.end == mv.start:
             seg_start = mv.start
-            pos = mv.start + 1
+            pos = past_empty_match(hb, mv.start)
         else:
             seg_start = mv.end
             pos = mv.end

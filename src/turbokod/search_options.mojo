@@ -22,6 +22,7 @@ from std.collections.optional import Optional
 
 from .case_fold import find_exact, fold_ascii, is_ascii, scan_folded
 from .onig import OnigRegex
+from .string_utils import past_empty_match
 
 
 struct SearchOptions(ImplicitlyCopyable, Movable):
@@ -300,7 +301,7 @@ struct LineSearcher(ImplicitlyCopyable, Movable):
             best = Optional[MatchSpan](mv)
             # Zero-width matches (possible in regex mode only) still have
             # to advance or this loop never terminates.
-            pos = mv.end if mv.end > mv.start else mv.start + 1
+            pos = mv.end if mv.end > mv.start else past_empty_match(line.as_bytes(), mv.start)
         return best^
 
 

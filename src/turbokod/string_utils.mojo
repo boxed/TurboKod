@@ -732,6 +732,16 @@ def utf8_step_forward(s: String, col: Int) -> Int:
     return nxt
 
 
+def past_empty_match(text: Span[UInt8, _], at: Int) -> Int:
+    """Where to search next after an empty regex match at byte ``at``: past
+    the whole character there, as a search starting inside one can match
+    inside it (and a replacement would split it); past the end at the end,
+    so a ``while pos <= len`` walk stops."""
+    if at >= len(text):
+        return at + 1
+    return min(at + utf8_codepoint_size(Int(text[at])), len(text))
+
+
 def leading_indent_bytes(line: String) -> Int:
     """Byte count of leading ASCII spaces and tabs. Each space/tab
     counts as one byte under the editor's byte-as-cell column model,

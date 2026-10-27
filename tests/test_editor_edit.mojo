@@ -673,6 +673,10 @@ def test_editor_replace_all_zero_width_regex() raises:
     var ed2 = Editor(String("abc"))
     assert_equal(ed2.replace_all(String("x*"), String("-"), opts), 4)
     assert_equal(ed2.buffer.line(0), String("-a-b-c-"))
+    # a step past an empty match must not land inside a character
+    var ed3 = Editor(String("é😀b"))
+    assert_equal(ed3.replace_all(String("x*"), String("-"), opts), 4)
+    assert_equal(ed3.buffer.line(0), String("-é-😀-b-"))
 
 
 def test_editor_replace_all_leaves_read_only_and_bad_patterns_alone() raises:
