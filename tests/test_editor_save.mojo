@@ -1,6 +1,7 @@
 """``Editor.save``: what reaches the disk, and never over a change the
 editor hasn't seen."""
 
+from std.ffi import external_call
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from turbokod.editor import Editor
 from turbokod.file_io import read_file, write_file
@@ -29,6 +30,56 @@ def test_a_same_second_same_size_outside_change_is_merged_not_overwritten() rais
     ed.dirty = True
     assert_true(ed.save())
     assert_equal(read_file(path), "one!\nmid\nTWO\n")
+
+
+def test_a_same_size_outside_change_on_a_whole_second_clock_is_merged() raises:
+    # filesystems with one-second timestamps: the nanoseconds never differ
+    var path = _temp_path(String("_save_race_seconds.txt"))
+    assert_true(write_file(path, "one\nmid\ntwo\n"))
+    _touch(path, "2020-01-01T00:00:00")
+    var ed = Editor.from_file(path)
+    assert_true(write_file(path, "one\nmid\nTWO\n"))
+    _touch(path, "2020-01-01T00:00:03")
+    ed.buffer.insert(0, 3, "!")
+    ed.dirty = True
+    assert_true(ed.save())
+    assert_equal(read_file(path), "one!\nmid\nTWO\n")
+
+
+def test_new_files_are_not_executable() raises:
+    var path = _temp_path(String("_save_new_mode.txt"))
+    _ = capture_command(["rm", "-f", path])
+    assert_true(write_file(path, "x\n"))
+    var mode = String(capture_command(["stat", "-f", "%Lp", path]).stdout.strip())
+    if mode.byte_length() == 0:  # GNU stat
+        mode = String(capture_command(["stat", "-c", "%a", path]).stdout.strip())
+    assert_equal(mode.byte_length(), 3)
+    for digit in mode.codepoint_slices():
+        assert_true(digit in "0246", mode)  # no execute bit, whatever the umask
+
+
+def test_a_write_the_disk_cant_take_fails_and_keeps_the_old_file() raises:
+    # a file size limit makes the write come up short, as a full disk does
+    var path = _temp_path(String("_save_full.txt"))
+    assert_true(write_file(path, "old\n"))
+    var big = String("")
+    for _ in range(500):
+        big += "0123456789"
+    comptime RLIMIT_FSIZE = Int32(1)
+    comptime SIGXFSZ = Int32(25)
+    var previous = external_call["signal", Int](SIGXFSZ, Int(1))  # SIG_IGN
+    var limits = List[UInt64](length=2, fill=0)
+    _ = external_call["getrlimit", Int32](RLIMIT_FSIZE, limits.unsafe_ptr())
+    var small = List[UInt64](length=2, fill=0)
+    small[0] = 1000
+    small[1] = limits[1]
+    _ = external_call["setrlimit", Int32](RLIMIT_FSIZE, small.unsafe_ptr())
+    var ok = write_file(path, big)
+    _ = external_call["setrlimit", Int32](RLIMIT_FSIZE, limits.unsafe_ptr())
+    _ = external_call["signal", Int](SIGXFSZ, previous)
+    assert_false(ok)
+    assert_equal(read_file(path), "old\n")
+    assert_equal(capture_command(["ls", path + ".tk-tmp"]).status != 0, True)
 
 
 def test_saving_without_a_file_does_nothing() raises:
