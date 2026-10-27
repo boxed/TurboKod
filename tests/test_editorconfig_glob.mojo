@@ -52,6 +52,12 @@ def test_character_classes() raises:
     assert_true(match_section("[a-c].txt", "c.txt"))
     assert_false(match_section("[a-c].txt", "d.txt"))
     assert_true(match_section("[xa-c].txt", "x.txt"))
+    assert_true(match_section("[a-cx].txt", "x.txt"))
+    assert_true(match_section("[!abc].txt", "!.txt"))
+    assert_false(match_section("[ab]x", "]x"))
+    # a dash at the end is a dash
+    assert_true(match_section("[a-]", "-"))
+    assert_true(match_section("[a-]", "a"))
     assert_false(match_section("x/[ab]", "x/"))
     assert_false(match_section("x[/]y", "x/y"))
 
@@ -69,6 +75,15 @@ def test_alternations() raises:
     assert_true(match_section("{a,{b,c}}.x", "c.x"))
     assert_true(match_section("{a,b}{1,2}", "b2"))
     assert_true(match_section("{a,b", "{a,b"))
+    assert_true(match_section("{a,{b,c}}.x", "a.x"))
+    assert_true(match_section("{{a,b},c}.x", "a.x"))
+    assert_true(match_section("{{a,b},c}.x", "c.x"))
+    assert_true(match_section("{x,{y,{z,w}}}.q", "w.q"))
+    assert_true(match_section("{}x", "x"))
+    assert_true(match_section("{a,b}c", "ac"))
+    assert_false(match_section("{a,b}c", "a"))
+    assert_true(match_section("/{src,lib}/x.c", "lib/x.c"))
+    assert_false(match_section("/{src,lib}/x.c", "doc/x.c"))
 
 
 def main() raises:
