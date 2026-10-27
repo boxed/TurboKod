@@ -281,6 +281,11 @@ def parse_unified_diff_files(diff: String) -> List[ChangedFile]:
     return out^
 
 
+# About how many line comparisons ``diff_buffer_marks`` may spend pairing
+# the deletes and inserts of one run of changes.
+comptime _PAIRING_BUDGET = 200_000
+
+
 def _line_pair_score(a: String, b: String) -> Int:
     """Similarity of two lines for delete↔insert pairing: bytes of shared
     leading prefix plus shared trailing suffix (non-overlapping). Two near-
@@ -399,32 +404,39 @@ def diff_buffer_marks(
         for k in range(len(ins_bi)):
             out[ins_bi[k]] = GIT_CHANGE_ADDED
         if pair_count > 0:
+            var ni = len(ins_bi)
+            var nd = len(del_ai)
+            # This runs on every edit: in a big run (a reformatted file, a
+            # pasted-over block) each insert is only compared with the
+            # deletes around its own position in the run, so the work
+            # stays near ``_PAIRING_BUDGET`` comparisons.
+            var reach = max(1, _PAIRING_BUDGET // ni // 2)
             var scores = List[Int]()
-            for k in range(len(ins_bi)):
+            var top = -1
+            for k in range(ni):
                 var best = -1
-                for d in range(len(del_ai)):
+                var lo = 0
+                var hi = nd
+                if ni * nd > _PAIRING_BUDGET:
+                    var mid = k * nd // ni
+                    lo = max(0, mid - reach)
+                    hi = min(nd, mid + reach + 1)
+                for d in range(lo, hi):
                     var ai = del_ai[d]
                     if 0 <= ai and ai < len(head_lines):
                         var s = _line_pair_score(head_lines[ai], buffer_lines[ins_bi[k]])
                         if s > best:
                             best = s
                 scores.append(best)
-            var used = List[Bool]()
-            for _ in range(len(ins_bi)):
-                used.append(False)
-            var marked = 0
-            while marked < pair_count:
-                var best_k = -1
-                var best_score = -2
-                for k in range(len(ins_bi)):
-                    if not used[k] and scores[k] > best_score:
-                        best_score = scores[k]
-                        best_k = k
-                if best_k < 0:
-                    break
-                used[best_k] = True
-                out[ins_bi[best_k]] = GIT_CHANGE_MODIFIED
-                marked += 1
+                top = max(top, best)
+            # The ``pair_count`` best-scoring inserts are the modified
+            # lines, the earlier one first among equals.
+            var order = List[Int]()
+            for k in range(ni):
+                order.append((top - scores[k]) * ni + k)
+            sort(order)
+            for r in range(pair_count):
+                out[ins_bi[order[r] % ni]] = GIT_CHANGE_MODIFIED
     return BufferDiffMarks(out^, deleted_below^)
 
 
