@@ -3,7 +3,7 @@ the file the user means."""
 
 from std.ffi import external_call
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
-from turbokod.file_io import delete_tree, read_file, stat_file, write_file
+from turbokod.file_io import delete_tree, load_json_object, read_file, stat_file, write_file
 from turbokod.lsp import capture_command
 from turbokod.posix import getcwd_path
 
@@ -66,6 +66,33 @@ def test_saving_a_new_file() raises:
     assert_true(write_file(dir + "/fresh.txt", "hello\n"))
     assert_equal(read_file(dir + "/fresh.txt"), "hello\n")
     assert_equal(_sh("cd '" + dir + "' && ls"), "fresh.txt\n")
+
+
+def test_an_unreadable_store_file_is_kept_for_recovery() raises:
+    # the stores save over what they load: a file they can't read would be
+    # overwritten with nothing
+    var dir = _scratch("corrupt")
+    assert_true(write_file(dir + "/drafts.json", "{\"drafts\": [{\"content\": \"unsaved wo"))
+    assert_false(Bool(load_json_object(dir + "/drafts.json")))
+    assert_false(stat_file(dir + "/drafts.json").ok)
+    assert_equal(read_file(dir + "/drafts.json.corrupt"), "{\"drafts\": [{\"content\": \"unsaved wo")
+    # and a second one doesn't replace the first
+    assert_true(write_file(dir + "/drafts.json", "[]"))
+    assert_false(Bool(load_json_object(dir + "/drafts.json")))
+    assert_equal(read_file(dir + "/drafts.json.corrupt.1"), "[]")
+
+
+def test_a_missing_store_file_is_nothing_saved_yet() raises:
+    var dir = _scratch("missing")
+    assert_false(Bool(load_json_object(dir + "/drafts.json")))
+    assert_equal(_sh("cd '" + dir + "' && ls"), "")
+
+
+def test_a_store_file_reads_back() raises:
+    var dir = _scratch("good")
+    assert_true(write_file(dir + "/s.json", "{\"a\": 1}"))
+    assert_true(Bool(load_json_object(dir + "/s.json")))
+    assert_true(stat_file(dir + "/s.json").ok)
 
 
 def main() raises:

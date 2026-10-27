@@ -14,7 +14,7 @@ from std.collections.optional import Optional
 from std.ffi import external_call
 
 from .file_io import (
-    FileInfo, make_dir, read_file, rename_path, stat_file, write_file,
+    FileInfo, make_dir, move_aside, read_file, rename_path, stat_file, write_file,
 )
 from .json import (
     JsonValue, encode_json, json_array, json_bool, json_int, json_object,
@@ -417,26 +417,11 @@ struct ConfigLoad(Copyable, Movable):
     var persistable: Bool
 
 
-def _move_config_aside(path: String) -> Bool:
-    """Rename an unreadable config to ``config.json.corrupt[.N]`` so it's
-    preserved for recovery and the next save can start clean. Returns True
-    if the file was moved out of the way (or already gone)."""
-    var base = path + String(".corrupt")
-    var target = base
-    var n = 1
-    while stat_file(target).ok:
-        target = base + String(".") + String(n)
-        n += 1
-        if n > 100:
-            return False
-    return rename_path(path, target)
-
-
 def _on_load_failed(path: String) -> ConfigLoad:
     """An existing config file couldn't be read/parsed. Move it aside and
     return defaults that are persistable only if we got the file out of the
     way — otherwise refuse to overwrite it on the next save."""
-    var moved = _move_config_aside(path)
+    var moved = move_aside(path)
     return ConfigLoad(TurbokodConfig(), moved)
 
 

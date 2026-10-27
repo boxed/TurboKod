@@ -167,10 +167,30 @@ def read_file(path: String) raises -> String:
     return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=total)))
 
 
+def move_aside(path: String) -> Bool:
+    """Rename an unreadable file to ``<path>.corrupt[.N]`` so it's
+    preserved for recovery and the next save can start clean. Returns True
+    if the file was moved out of the way."""
+    var base = path + String(".corrupt")
+    var target = base
+    var n = 1
+    while stat_file(target).ok:
+        target = base + String(".") + String(n)
+        n += 1
+        if n > 100:
+            return False
+    return rename_path(path, target)
+
+
 def load_json_object(path: String) -> Optional[JsonValue]:
     """Read and parse ``path`` as a JSON object. Empty when the file is
     missing or unreadable, isn't valid JSON, or holds a non-object — the
-    stores all treat those the same way ("nothing saved yet")."""
+    stores all treat those the same way ("nothing saved yet").
+
+    A file that's there but can't be read is moved aside (``move_aside``):
+    the stores save over what they loaded, so it would otherwise be
+    overwritten with nothing — every unsaved draft, a hand-edited project
+    setting with a typo in it."""
     if not stat_file(path).ok:
         return None
     try:
@@ -179,6 +199,7 @@ def load_json_object(path: String) -> Optional[JsonValue]:
             return root^
     except:
         pass
+    _ = move_aside(path)
     return None
 
 
