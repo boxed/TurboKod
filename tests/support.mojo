@@ -7,7 +7,7 @@ parallel and runs them one at a time. Fixtures used by more than one suite
 live here — anything used by a single suite stays in that suite's file.
 """
 
-from std.ffi import external_call
+from std.ffi import ErrNo, external_call, get_errno
 from std.testing import assert_equal, assert_true
 from turbokod.canvas import Canvas
 from turbokod.desktop import Desktop
@@ -232,7 +232,8 @@ def _sweep_process_dirs(parent: String):
             pid = Int(String(parts[0]))
         except:
             continue
-        if kill_pid(Int32(pid), Int32(0)) != 0:
+        # EPERM means it's alive but not ours to signal (a sandbox, say)
+        if kill_pid(Int32(pid), Int32(0)) != 0 and get_errno() == ErrNo.ESRCH:
             _ = delete_tree(parent + String("/") + name, True)
 
 
