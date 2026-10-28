@@ -18,8 +18,10 @@ It is being built in phases:
 4. **Popup menus** as `NSMenu`, a **first-launch** look chooser, and the
    **git view** as a native sheet: all done (see below).
 5. **In-file Find / Replace** is a find bar under the tabs (see below).
-6. Still in-grid: Fill, Breakpoint, the color picker, Settings' content,
-   review mode, merge view, history, the file tree and status bar.
+6. **The color picker** is a sheet with the system color well; **the file
+   tree** is a native source list (see below).
+7. Still in-grid: Fill, Breakpoint, Settings' content, review mode, merge
+   view, history, the status bar and the tool panels.
 
 ## How a dialog becomes native
 
@@ -128,6 +130,25 @@ the streaming `rg` runner. The host shows them as one sheet,
 Tab titles size to their text; only when they don't all fit do the widest
 shrink, down to a shared cap. A squeezed title drops its extension first,
 then the end of its stem (`project_api.py` → `project_api` → `project_…`).
+
+## File tree
+
+The file tree stays the core's: the model, the flat visible-entry list,
+expansion and selection. The host lays `FileTreeOverlay`, a sidebar-material
+`NSTableView` with Finder file icons, over its cells. It's a subview of the
+cell view, framed from `FileTree.content_rect` (the panel minus its
+separator column).
+
+- The separator column is still painted by the core, so dragging it resizes
+  the tree exactly as before.
+- Row actions go through `tk_desktop_tree_act`: select, toggle, open, or
+  menu.
+- Opening only stages `opened_path` / `submitted`, as a click does. The tick
+  drains it.
+- The context menu arms the core's own Rename / Delete popup, which then
+  shows as an `NSMenu` through the popup path.
+- The overlay is lifted whenever `native_tree_shown()` is false: the tree is
+  hidden, or a full-screen modal covers it.
 
 ## Find bar
 

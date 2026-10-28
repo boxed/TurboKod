@@ -9016,6 +9016,22 @@ struct Desktop(Movable):
             self._open_doc_entry(entry_idx, display, screen)
             self.doc_pick.close()
 
+    # --- macOS-style UI: the file tree as a native source list ----------
+
+    def native_tree_shown(self) -> Bool:
+        return self.native_ui() and self.file_tree.visible \
+            and not self._fullscreen_modal_active()
+
+    def native_tree_menu(mut self, idx: Int, anchor: Point):
+        """Right-click on a native tree row: the same Rename / Delete menu
+        (an NSMenu itself, natively)."""
+        self.file_tree.native_menu(idx, anchor)
+        self._focus_dock(DOCK_FILE_TREE)
+        self._maybe_open_file_tree_menu()
+
+    def native_tree_focus(mut self):
+        self._focus_dock(DOCK_FILE_TREE)
+
     def native_picker_kind(self) -> String:
         if not self.native_ui():
             return String("")

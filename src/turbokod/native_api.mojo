@@ -1421,6 +1421,72 @@ def tk_desktop_tab_close(h: Int, idx: Int) abi("C"):
     _desk(h)[].close_tab(idx)
 
 
+# --- macOS-style UI: file tree ------------------------------------------------
+
+
+@export
+def tk_desktop_tree(
+    h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
+) abi("C") -> Int:
+    """The file tree for the native source list laid over its cells:
+    ``{x, y, w, h}`` (the listing's cell rect, separator excluded),
+    ``root``, ``selected``, ``focused`` and ``entries: [[name, depth,
+    is_dir, expanded, modified]]``. 0 when the tree isn't shown natively.
+    Same buffer contract as ``tk_desktop_native_dialog``."""
+    if h == 0:
+        return 0
+    ref d = _desk(h)[]
+    if not d.native_tree_shown():
+        return 0
+    ref t = d.file_tree
+    var r = t.content_rect(Rect(0, 0, cols, rows))
+    var o = json_object()
+    o.put(String("x"), json_int(r.a.x))
+    o.put(String("y"), json_int(r.a.y))
+    o.put(String("w"), json_int(r.width()))
+    o.put(String("h"), json_int(r.height()))
+    o.put(String("root"), json_str(t.root))
+    o.put(String("selected"), json_int(t.selected))
+    o.put(String("focused"), json_bool(t.focused))
+    var es = json_array()
+    for i in range(len(t.entries)):
+        ref e = t.entries[i]
+        var row = json_array()
+        row.append(json_str(e.name))
+        row.append(json_int(e.depth))
+        row.append(json_bool(e.is_dir))
+        row.append(json_bool(e.is_expanded))
+        var modified = False
+        for k in range(len(t.modified_paths)):
+            if t.modified_paths[k] == e.path:
+                modified = True
+                break
+        row.append(json_bool(modified))
+        row.append(json_str(e.path))
+        es.append(row)
+    o.put(String("entries"), es)
+    return _write_out(encode_json(o), out_ptr, cap)
+
+
+@export
+def tk_desktop_tree_act(h: Int, op: Int, idx: Int, x: Int, y: Int) abi("C"):
+    """A native tree row was acted on: ``op`` 0 select, 1 expand / collapse,
+    2 open (file) or toggle (directory), 3 context menu anchored at cell
+    ``x``, ``y``."""
+    if h == 0:
+        return
+    ref d = _desk(h)[]
+    if op == 0:
+        d.file_tree.native_select(idx)
+        d.native_tree_focus()
+    elif op == 1:
+        d.file_tree.native_toggle(idx)
+    elif op == 2:
+        d.file_tree.native_open(idx)
+    elif op == 3:
+        d.native_tree_menu(idx, Point(x, y))
+
+
 # --- macOS-style UI: find bar -----------------------------------------------
 
 

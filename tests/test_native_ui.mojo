@@ -355,6 +355,30 @@ def test_native_color_pick_is_written_in_the_chosen_notation() raises:
     assert_true(String("255") in cp.result_text)
 
 
+def test_native_tree_rows_open_toggle_and_arm_the_menu() raises:
+    var root = _temp_path(String("_native_tree"))
+    _ = _run_git(String("/"), string_list(String("init"), String("-q"), root))
+    _ = write_file(root + String("/b.txt"), String("b\n"))
+    _ = _run_git(String("/"), string_list(String("-C"), root, String("status")))
+    var d = _native_desktop(String("x\n"))
+    d.file_tree.open(root)
+    d.file_tree.visible = True
+    assert_true(d.native_tree_shown())
+    var r = d.file_tree.content_rect(_SCREEN)
+    assert_true(r.width() == d.file_tree.width - 1)   # separator stays core's
+    var idx = -1
+    for i in range(len(d.file_tree.entries)):
+        if d.file_tree.entries[i].name == String("b.txt"):
+            idx = i
+    assert_true(idx >= 0)
+    d.file_tree.native_open(idx)
+    var opened = d.file_tree.consume_open()
+    assert_true(Bool(opened))
+    assert_true(opened.value().endswith(String("/b.txt")))
+    d.native_tree_menu(idx, Point(2, 3))
+    assert_equal(d.native_popup_kind(), String("tab_context"))
+
+
 def main() raises:
     setup_test_env()
     TestSuite.discover_tests[__functions_in_module()]().run()

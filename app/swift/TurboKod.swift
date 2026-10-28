@@ -1815,6 +1815,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     var gitSheets: [ObjectIdentifier: GitController] = [:]
     // macOS-style UI: each window's find bar (a titlebar accessory).
     var findBars: [ObjectIdentifier: (accessory: NSTitlebarAccessoryViewController, bar: FindBar)] = [:]
+    // macOS-style UI: the native file tree laid over each window's tree cells.
+    var trees: [ObjectIdentifier: FileTreeOverlay] = [:]
+    var treeBuf = [UInt8](repeating: 0, count: 1 << 16)
     // Menu mirror: the snapshot from Mojo's menu_bar, hashed so we only
     // rebuild NSMenu when something actually changed (focus/visibility/
     // checkmark/edit-extras flips). `menuTracking` is set while AppKit is
@@ -2211,6 +2214,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if self.pollPopup(v) { changed = true }
                 if self.pollGit(v) { changed = true }
                 if self.pollFindBar(v) { changed = true }
+                if self.pollTree(v) { changed = true }
             }
             self.drainAttention()
             self.idleTicks = changed ? 0 : self.idleTicks &+ 1
@@ -3390,6 +3394,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         popups[ObjectIdentifier(v)] = nil
         gitSheets[ObjectIdentifier(v)] = nil
         findBars[ObjectIdentifier(v)] = nil
+        trees[ObjectIdentifier(v)] = nil
         // Close is instant; the language servers get their goodbye in the
         // background. `begin_close` terminates every child except the LSP
         // transports and sends each server `shutdown`, then we poll off the
@@ -3943,6 +3948,27 @@ extension AppController {
         guard let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_native_dialog(h, $0, $1) })
         else { return nil }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    /// Lay (or lift) the native source list over the file tree's cells.
+    func pollTree(_ v: CellView) -> Bool {
+        let id = ObjectIdentifier(v)
+        let cols = Int64(v.cols()), rows = Int64(v.rows())
+        guard let data = readCoreJSON(&treeBuf, { tk_desktop_tree(v.handle, cols, rows, $0, $1) }) else {
+            if let t = trees[id] {
+                t.removeFromSuperview()
+                trees[id] = nil
+                return true
+            }
+            return false
+        }
+        let t = trees[id] ?? {
+            let t = FileTreeOverlay(view: v)
+            v.addSubview(t)
+            trees[id] = t
+            return t
+        }()
+        return t.update(data)
     }
 
     /// Show the find bar when the core asked for Find / Replace; hide it
@@ -6569,5 +6595,220 @@ final class FindBar: NSView, NSSearchFieldDelegate {
         default:
             return false
         }
+    }
+}
+
+
+// MARK: - macOS-style UI: file tree
+//
+// A native source list laid over the file tree's cells (a subview of the
+// cell view, framed from the core's cell rect). The core keeps the model —
+// the flat visible-entry list, expansion, selection — and the separator
+// column it still paints stays the resize handle. Row actions go back
+// through `tk_desktop_tree_act`; the context menu is the core's own
+// Rename / Delete popup, which arrives here as an NSMenu.
+
+final class FileTreeTable: NSTableView {
+    var onKey: ((String) -> Bool)?
+    override func keyDown(with e: NSEvent) {
+        let k: String
+        switch e.keyCode {
+        case 36, 76: k = "enter"
+        case 123: k = "left"
+        case 124: k = "right"
+        default: k = ""
+        }
+        if !k.isEmpty, onKey?(k) == true { return }
+        super.keyDown(with: e)
+    }
+}
+
+final class FileTreeOverlay: NSVisualEffectView, NSTableViewDataSource, NSTableViewDelegate {
+    private weak var cellView: CellView?
+    private let table = FileTreeTable()
+    private let scroll = NSScrollView()
+    private var entries: [[Any]] = []
+    private var lastData = Data()
+    private var syncing = false
+    private var iconCache: [String: NSImage] = [:]
+
+    init(view: CellView) {
+        cellView = view
+        super.init(frame: .zero)
+        material = .sidebar
+        blendingMode = .withinWindow
+        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("c"))
+        table.addTableColumn(col)
+        table.headerView = nil
+        table.style = .sourceList
+        table.rowHeight = 22
+        table.backgroundColor = .clear
+        table.dataSource = self
+        table.delegate = self
+        table.target = self
+        table.doubleAction = #selector(doubleClicked)
+        table.menu = NSMenu()
+        table.menu?.delegate = self
+        table.onKey = { [weak self] k in self?.key(k) ?? false }
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(scroll)
+        NSLayoutConstraint.activate([
+            scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    /// Adopt a `tk_desktop_tree` payload; true when it changed anything.
+    func update(_ data: Data) -> Bool {
+        guard data != lastData,
+              let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return false }
+        lastData = data
+        let x = CGFloat(o["x"] as? Int ?? 0), y = CGFloat(o["y"] as? Int ?? 0)
+        let w = CGFloat(o["w"] as? Int ?? 0), h = CGFloat(o["h"] as? Int ?? 0)
+        let f = NSRect(x: x * CELL_W, y: y * CELL_H, width: w * CELL_W, height: h * CELL_H)
+        if frame != f { frame = f }
+        let newEntries = o["entries"] as? [[Any]] ?? []
+        let changed = newEntries.count != entries.count
+            || !zip(newEntries, entries).allSatisfy { NSArray(array: $0).isEqual(to: $1) }
+        entries = newEntries
+        syncing = true
+        if changed { table.reloadData() }
+        let sel = o["selected"] as? Int ?? -1
+        if sel >= 0 && sel < entries.count {
+            if table.selectedRow != sel {
+                table.selectRowIndexes(IndexSet(integer: sel), byExtendingSelection: false)
+                table.scrollRowToVisible(sel)
+            }
+        } else {
+            table.deselectAll(nil)
+        }
+        syncing = false
+        return true
+    }
+
+    private func act(_ op: Int, _ idx: Int, _ at: NSPoint = .zero) {
+        guard let v = cellView, v.handle != 0 else { return }
+        tk_desktop_tree_act(v.handle, Int64(op), Int64(idx),
+                            Int64(at.x / CELL_W), Int64(at.y / CELL_H))
+        lastData = Data()
+        v.invalidateFrame()
+        v.needsDisplay = true
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { entries.count }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row i: Int) -> NSView? {
+        let e = entries[i]
+        let name = e[0] as? String ?? ""
+        let depth = e[1] as? Int ?? 0
+        let isDir = e[2] as? Bool ?? false
+        let expanded = e[3] as? Bool ?? false
+        let modified = e[4] as? Bool ?? false
+        let path = e.count > 5 ? (e[5] as? String ?? "") : ""
+        let cell = NSTableCellView()
+        let indent = CGFloat(depth) * 14 + 2
+        var x = indent
+        if isDir {
+            let chevron = NSButton(image: NSImage(systemSymbolName: expanded ? "chevron.down" : "chevron.right",
+                                                  accessibilityDescription: expanded ? "Collapse" : "Expand")!,
+                                   target: self, action: #selector(chevronClicked(_:)))
+            chevron.isBordered = false
+            chevron.tag = i
+            chevron.imageScaling = .scaleProportionallyDown
+            chevron.frame = NSRect(x: x, y: 3, width: 14, height: 16)
+            chevron.contentTintColor = .secondaryLabelColor
+            cell.addSubview(chevron)
+        }
+        x += 16
+        let icon = NSImageView(frame: NSRect(x: x, y: 3, width: 16, height: 16))
+        icon.image = self.icon(path: path, isDir: isDir)
+        cell.addSubview(icon)
+        let label = NSTextField(labelWithString: name)
+        label.frame = NSRect(x: x + 20, y: 3, width: 1000, height: 16)
+        label.lineBreakMode = .byTruncatingMiddle
+        label.font = .systemFont(ofSize: 13)
+        label.textColor = modified ? .systemOrange : .labelColor
+        cell.addSubview(label)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: x + 20),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: -4),
+            label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+        ])
+        if modified {
+            label.stringValue = name + "  ●"
+        }
+        return cell
+    }
+
+    private func icon(path: String, isDir: Bool) -> NSImage {
+        let key = isDir ? "/dir" : (path as NSString).pathExtension
+        if let i = iconCache[key] { return i }
+        let img: NSImage
+        if isDir {
+            img = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: "Folder")
+                ?? NSWorkspace.shared.icon(for: .folder)
+            img.isTemplate = true
+        } else {
+            img = NSWorkspace.shared.icon(forFile: path)
+        }
+        img.size = NSSize(width: 16, height: 16)
+        iconCache[key] = img
+        return img
+    }
+
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { nil }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        guard !syncing, table.selectedRow >= 0 else { return }
+        act(0, table.selectedRow)
+    }
+
+    @objc private func chevronClicked(_ b: NSButton) { act(1, b.tag) }
+
+    @objc private func doubleClicked() {
+        let row = table.clickedRow >= 0 ? table.clickedRow : table.selectedRow
+        guard row >= 0 else { return }
+        open(row)
+    }
+
+    private func open(_ row: Int) {
+        let isDir = entries[row][2] as? Bool ?? false
+        act(2, row)
+        // A file lands in the editor: hand it the keyboard.
+        if !isDir, let v = cellView { v.window?.makeFirstResponder(v) }
+    }
+
+    private func key(_ k: String) -> Bool {
+        let row = table.selectedRow
+        guard row >= 0, row < entries.count else { return false }
+        let isDir = entries[row][2] as? Bool ?? false
+        let expanded = entries[row][3] as? Bool ?? false
+        switch k {
+        case "enter": open(row); return true
+        case "right" where isDir && !expanded: act(1, row); return true
+        case "left" where isDir && expanded: act(1, row); return true
+        default: return false
+        }
+    }
+}
+
+extension FileTreeOverlay: NSMenuDelegate {
+    /// Right-click: arm the core's own row menu (Rename / Delete), which
+    /// pops up as an NSMenu through the popup poll. Nothing shows here.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let row = table.clickedRow
+        guard row >= 0, let v = cellView, let ev = NSApp.currentEvent else { return }
+        let p = v.convert(ev.locationInWindow, from: nil)
+        DispatchQueue.main.async { [weak self] in self?.act(3, row, p) }
     }
 }

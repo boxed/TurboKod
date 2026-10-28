@@ -662,6 +662,51 @@ struct FileTree(Movable):
         self.selected = idx
         return True
 
+    # --- native host (macOS-style UI) ------------------------------------
+    #
+    # The host lays a native source list over ``content_rect`` and reports
+    # what a click on a row would have done.
+
+    def content_rect(self, container_bounds: Rect) -> Rect:
+        """The listing's cells — the panel minus its separator column."""
+        var area = self.rect(container_bounds)
+        if self.dock_left:
+            return Rect(area.a.x, area.a.y, area.b.x - 1, area.b.y)
+        return Rect(area.a.x + 1, area.a.y, area.b.x, area.b.y)
+
+    def native_select(mut self, idx: Int):
+        if idx < 0 or idx >= len(self.entries):
+            return
+        self.selected = idx
+        self.focused = True
+
+    def native_toggle(mut self, idx: Int):
+        self.native_select(idx)
+        self._toggle_expand(idx)
+
+    def native_open(mut self, idx: Int):
+        """Open a file row (the tick drains it like a click's), or toggle a
+        directory."""
+        self.native_select(idx)
+        if idx < 0 or idx >= len(self.entries):
+            return
+        if self.entries[idx].is_dir:
+            self._toggle_expand(idx)
+            return
+        self.opened_path = self.entries[idx].path
+        self.submitted = True
+
+    def native_menu(mut self, idx: Int, anchor: Point):
+        """Arm the row's context menu, as a right-click on it does."""
+        self.native_select(idx)
+        if idx < 0 or idx >= len(self.entries):
+            return
+        self._menu_req = True
+        self._menu_path = self.entries[idx].path
+        self._menu_is_dir = self.entries[idx].is_dir
+        self._menu_x = anchor.x
+        self._menu_y = anchor.y
+
     def consume_menu_request(mut self) -> Optional[Tuple[String, Bool, Int, Int]]:
         """If a right-click armed a context-menu request, return
         ``(path, is_dir, anchor_x, anchor_y)`` and clear it; otherwise
