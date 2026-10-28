@@ -3,7 +3,7 @@ the on-disk copy is the only one there is until then."""
 
 from std.ffi import external_call
 from std.testing import TestSuite, assert_equal
-from turbokod.desktop import Desktop
+from turbokod.desktop import Desktop, HELP_HOTKEYS
 from turbokod.drafts_store import StoredDraft, load_drafts, save_drafts
 from turbokod.events import Event
 from turbokod.geometry import Rect
@@ -69,6 +69,21 @@ def test_a_draft_comes_back_as_it_was_saved() raises:
     )
     assert_equal(b.is_maximized, True)
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
+
+
+def test_only_typed_untitled_buffers_are_kept_as_drafts() raises:
+    # help, docs and info windows have no file either; kept as drafts, they
+    # came back after a restart as unsaved "Untitled" buffers
+    var screen = Rect(0, 0, 80, 30)
+    var d = Desktop()
+    _ = d.dispatch_action(HELP_HOTKEYS, screen)
+    _ = d._add_text_window(String("Language servers"), String("pyright: ready"), screen)
+    d.new_file(screen)
+    _ = d.handle_event(Event.key_event(UInt32(ord("x"))), screen)
+    var drafts = d._snapshot_drafts()
+    assert_equal(len(drafts), 1)
+    assert_equal(drafts[0].content, String("x"))
+    assert_equal(drafts[0].seq, 1)
 
 
 def main() raises:

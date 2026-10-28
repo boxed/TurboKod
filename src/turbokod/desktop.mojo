@@ -7015,17 +7015,21 @@ struct Desktop(Movable):
     def _snapshot_drafts(self) -> List[StoredDraft]:
         """Build the list of untitled (file-less) editor buffers to
         persist. An untitled window qualifies when it's an editor, has
-        no ``file_path``, and holds non-empty content — a pristine empty
-        scratch buffer has nothing worth surviving a restart, and
-        skipping it also keeps the drafts file from churning while the
-        user merely tabs past a blank Untitled window. The buffer stays
-        ``dirty`` in the UI regardless; this is an autosave shadow, not
-        a real save."""
+        no ``file_path``, and holds unsaved, non-empty content — a
+        pristine empty scratch buffer has nothing worth surviving a
+        restart, and skipping it also keeps the drafts file from churning
+        while the user merely tabs past a blank Untitled window. Help,
+        docs and info windows have no file either, but nothing typed into
+        them: kept, they came back as unsaved Untitled buffers. The buffer
+        stays ``dirty`` in the UI regardless; this is an autosave shadow,
+        not a real save."""
         var out = List[StoredDraft]()
         for i in range(len(self.windows.windows)):
             if not self.windows.windows[i].is_editor:
                 continue
             if len(self.windows.windows[i].editor.file_path.as_bytes()) != 0:
+                continue
+            if not self.windows.windows[i].editor.dirty:
                 continue
             var content = self.windows.windows[i].editor.text_snapshot()
             if len(content.as_bytes()) == 0:
