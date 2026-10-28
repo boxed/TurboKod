@@ -1680,11 +1680,13 @@ def _change_already_landed(
     var name_args = List[String]()
     name_args.append(String("diff"))
     name_args.append(String("--name-only"))
+    name_args.append(String("-z"))  # paths as they are, not quoted
     name_args.append(base)
     name_args.append(branch)
-    var files = split_lines_no_trailing(
-        _git_stdout(project_root, name_args^),
-    )
+    var files = List[String]()
+    for f in _git_stdout(project_root, name_args^).split("\0"):
+        if f.byte_length() > 0:
+            files.append(String(f))
     if len(files) == 0:
         # The branch's net change against the merge base is empty, so
         # there is by definition nothing in it to lose.
