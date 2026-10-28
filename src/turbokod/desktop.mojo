@@ -14554,7 +14554,21 @@ struct Desktop(Movable):
         for li in range(len(self.lsp_managers)):
             if not self.lsp_managers[li].has_pending_rename():
                 continue
+            var path = self.lsp_managers[li].pending_rename_path()
+            var asked_on = self.lsp_managers[li].pending_rename_text()
             var edits = self.lsp_managers[li].take_rename_edits()
+            # The edits' positions are for the text the rename was asked on:
+            # typed into since, they'd land in the wrong places.
+            var win = self._find_window_for_path(path)
+            if len(edits) > 0 and win >= 0 and self._is_editor_at(win) \
+                    and self.windows.windows[win].editor.text_snapshot() != asked_on:
+                self._rename_path = String("")
+                self.status_bar.set_message(
+                    String("Not renamed: the file changed while waiting for ")
+                    + String("the language server. Rename again."),
+                    Attr(RED, LIGHT_GRAY),
+                )
+                continue
             self._apply_rename_edits(edits^, screen)
 
     def _drain_apply_edits(mut self, screen: Rect):

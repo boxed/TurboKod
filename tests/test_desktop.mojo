@@ -46,7 +46,8 @@ from turbokod.project_on_save import (
 from turbokod.install_runner import InstallRunner
 from turbokod.json import parse_json
 from turbokod.lsp_dispatch import (
-    CompletionItem, DefinitionResolved, TextEditEntry
+    CodeActionFileEdit, CompletionItem, DefinitionResolved, LspManager,
+    TextEditEntry, _path_to_uri,
 )
 from turbokod.lsp import LspProcess
 from turbokod.posix import close_fd, kill_pid, realpath, sleep_ms, which
@@ -947,6 +948,35 @@ def test_quitting_saves_edits_with_auto_save() raises:
     var path = _dirty_file_desktop(d, String("_close_quit.txt"), True)
     d.shutdown()
     assert_equal(read_file(path), String("xold\n"))
+
+
+def _park_rename(mut d: Desktop, path: String, asked_on: String, col: Int):
+    var mgr = LspManager()
+    var edits = List[TextEditEntry]()
+    edits.append(TextEditEntry(0, col, 0, col + 3, String("bar")))
+    var file_edits = List[CodeActionFileEdit]()
+    file_edits.append(CodeActionFileEdit(_path_to_uri(path), edits^))
+    mgr._rename_path = path
+    mgr._rename_text = asked_on
+    mgr._resolved_rename_edits = file_edits^
+    mgr._has_resolved_rename = True
+    d.lsp_managers.append(mgr^)
+
+
+def test_a_rename_answered_after_more_typing_is_dropped() raises:
+    var path = _temp_path(String("_rename_stale.py"))
+    assert_true(write_file(path, String("def foo(): pass\n")))
+    var d = Desktop()
+    d.open_file(path, _SCREEN)
+    _park_rename(d, path, String("def foo(): pass\n"), 4)
+    _ = d.handle_event(Event.key_event(UInt32(ord("#"))), _SCREEN)
+    d._drain_rename_edits(_SCREEN)
+    assert_equal(d.windows.windows[0].editor.buffer.line(0), String("#def foo(): pass"))
+    assert_true(d.status_bar.message.startswith("Not renamed"), d.status_bar.message)
+    # unchanged, it's applied
+    _park_rename(d, path, d.windows.windows[0].editor.text_snapshot(), 5)
+    d._drain_rename_edits(_SCREEN)
+    assert_equal(d.windows.windows[0].editor.buffer.line(0), String("#def bar(): pass"))
 
 
 def test_desktop_window_menu_lists_open_windows() raises:

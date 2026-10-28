@@ -860,6 +860,8 @@ struct LspManager(Copyable, Movable):
     # ``CodeActionFileEdit`` grouping since rename returns the same shape).
     var _inflight_rename_id: String
     var _rename_path: String
+    # The text the rename was asked for against, as ``_formatting_text``.
+    var _rename_text: String
     var _resolved_rename_edits: List[CodeActionFileEdit]
     var _has_resolved_rename: Bool
     # ``textDocument/formatting`` + ``rangeFormatting`` — both return a flat
@@ -1182,6 +1184,7 @@ struct LspManager(Copyable, Movable):
         self._has_resolved_code_actions = False
         self._inflight_rename_id = String("")
         self._rename_path = String("")
+        self._rename_text = String("")
         self._resolved_rename_edits = List[CodeActionFileEdit]()
         self._has_resolved_rename = False
         self._inflight_formatting_id = String("")
@@ -1376,6 +1379,7 @@ struct LspManager(Copyable, Movable):
         self._has_resolved_code_actions = False
         self._inflight_rename_id = String("")
         self._rename_path = String("")
+        self._rename_text = String("")
         self._resolved_rename_edits = List[CodeActionFileEdit]()
         self._has_resolved_rename = False
         self._inflight_formatting_id = String("")
@@ -3111,6 +3115,7 @@ struct LspManager(Copyable, Movable):
             + String(" character=") + String(character)
             + String(" new_name=") + new_name,
         )
+        self._rename_text = text.copy()
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
         params.put(String("newName"), json_str(new_name))
@@ -3135,6 +3140,10 @@ struct LspManager(Copyable, Movable):
     def pending_rename_path(self) -> String:
         """Path the most recent rename request was issued for."""
         return self._rename_path
+
+    def pending_rename_text(self) -> String:
+        """The text of that file the rename was asked for against."""
+        return self._rename_text
 
     def take_rename_edits(mut self) -> List[CodeActionFileEdit]:
         """Move the parked rename edits out of the manager. Clears the
