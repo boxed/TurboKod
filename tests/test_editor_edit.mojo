@@ -2494,6 +2494,34 @@ def test_the_caret_never_lands_inside_a_character_or_outside_the_buffer() raises
     assert_equal(ed.text_snapshot(), String("axé\nby"))
 
 
+def test_pasting_and_deleting_many_lines_in_the_middle() raises:
+    var text = String("")
+    for i in range(100):
+        text += String(i) + "\n"
+    var ed = Editor(text)
+    ed.move_to(50, 1)  # "5|0"
+    ed.paste_text(String("a\nb\nc"))
+    assert_equal(ed.buffer.line(49), String("49"))
+    assert_equal(ed.buffer.line(50), String("5a"))
+    assert_equal(ed.buffer.line(51), String("b"))
+    assert_equal(ed.buffer.line(52), String("c0"))
+    assert_equal(ed.buffer.line(53), String("51"))
+    assert_equal(ed.selections[0].row, 52)
+    assert_equal(ed.selections[0].col, 1)
+    assert_equal(ed.buffer.line_count(), 103)
+    # select from inside row 10 to inside row 90 and type over it
+    ed.move_to(10, 1)
+    ed.move_to(90, 1, True)
+    ed.paste_text(String("X"))
+    assert_equal(ed.buffer.line(9), String("9"))
+    assert_equal(ed.buffer.line(10), String("1X8"))  # "1|0" + "8|8" (rows moved by 2)
+    assert_equal(ed.buffer.line(11), String("89"))
+    assert_equal(ed.buffer.line_count(), 23)
+    _ = ed.undo()
+    assert_equal(ed.buffer.line_count(), 103)
+    assert_equal(ed.buffer.line(52), String("c0"))
+
+
 def main() raises:
     setup_test_env()
     TestSuite.discover_tests[__functions_in_module()]().run()

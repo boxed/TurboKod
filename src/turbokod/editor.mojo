@@ -591,15 +591,43 @@ struct TextBuffer(Copyable, Movable):
         var head = byte_slice(line, 0, pos)
         var tail = byte_slice(line, pos, n)
         self.lines[row] = head
-        # Append-and-shift rather than relying on List.insert which may not
-        # exist on all Mojo versions.
-        self.lines.append(String(""))
-        var i = len(self.lines) - 1
-        while i > row + 1:
-            self.lines[i] = self.lines[i - 1]
-            i -= 1
-        self.lines[row + 1] = tail
+        # ``insert`` moves the rows below in one go; shifting them a row at
+        # a time copied every one of them.
+        self.lines.insert(row + 1, tail^)
         return (row + 1, 0)
+
+    def delete_rows(mut self, at: Int, k: Int):
+        """Remove the ``k`` rows from ``at``, moving the rows below once:
+        once per row, deleting a big selection took seconds."""
+        if k <= 0:
+            return
+        if k == 1:
+            _ = self.lines.pop(at)
+            return
+        for i in range(at, len(self.lines) - k):
+            self.lines.swap_elements(i, i + k)
+        for _ in range(k):
+            _ = self.lines.pop()
+
+    def insert_rows(mut self, at: Int, var rows: List[String]):
+        """Put ``rows`` in front of row ``at``, moving the rows below once
+        for all of them: once per row, pasting thousands of lines into a
+        big file took seconds."""
+        var k = len(rows)
+        if k == 0:
+            return
+        if k == 1:
+            self.lines.insert(at, rows[0])
+            return
+        var old = len(self.lines)
+        for _ in range(k):
+            self.lines.append(String(""))
+        var i = old - 1
+        while i >= at:
+            self.lines.swap_elements(i, i + k)
+            i -= 1
+        for j in range(k):
+            self.lines[at + j] = rows[j]
 
 
 # --- Undo / redo ------------------------------------------------------------
@@ -3394,9 +3422,7 @@ struct Editor(Copyable, Movable):
 
         # Collapse the deleted span into the start row.
         self.buffer.lines[sl] = prefix
-        var to_remove = el2 - sl
-        for _ in range(to_remove):
-            _ = self.buffer.lines.pop(sl + 1)
+        self.buffer.delete_rows(sl + 1, el2 - sl)
 
         # Split ``new_text`` on '\n': the first piece joins the start row,
         # each further one becomes a row of its own below it. ``insert``
@@ -9592,24 +9618,31 @@ struct Editor(Copyable, Movable):
         caret; ``_insert_text`` is the primary-caret wrapper."""
         var bytes = text.as_bytes()
         var n = len(bytes)
-        var r = row
-        var c = col
+        var pieces = List[String]()
         var line_start = 0
-        var i = 0
-        while i < n:
+        for i in range(n):
             if bytes[i] == 0x0A:  # '\n'
-                if i > line_start:
-                    self.buffer.insert(r, c, byte_slice(text, line_start, i))
-                    c += i - line_start
-                var p = self.buffer.split(r, c)
-                r = p[0]
-                c = p[1]
+                pieces.append(byte_slice(text, line_start, i))
                 line_start = i + 1
-            i += 1
-        if line_start < n:
-            self.buffer.insert(r, c, byte_slice(text, line_start, n))
-            c += n - line_start
-        return (r, c)
+        if len(pieces) == 0:
+            self.buffer.insert(row, col, text)
+            return (row, col + n)
+        if row < 0 or row >= self.buffer.line_count():
+            return (row, col)
+        # The first piece ends the caret's line, each further one is a new
+        # row, and the last (after the final '\n') goes in front of what
+        # followed the caret: all the new rows go in at once.
+        var line = self.buffer.lines[row]
+        var c = min(max(col, 0), len(line.as_bytes()))
+        var last = byte_slice(text, line_start, n)
+        var end_col = len(last.as_bytes())
+        self.buffer.lines[row] = byte_slice(line, 0, c) + pieces[0]
+        var rows = List[String]()
+        for k in range(1, len(pieces)):
+            rows.append(pieces[k])
+        rows.append(last + byte_slice(line, c, len(line.as_bytes())))
+        self.buffer.insert_rows(row + 1, rows^)
+        return (row + len(pieces), end_col)
 
     def _insert_text(mut self, text: String):
         var p = self._insert_text_at(
@@ -10152,8 +10185,7 @@ struct Editor(Copyable, Movable):
             var head = byte_slice(first, 0, sc)
             var tail = byte_slice(last, ec, len(last.as_bytes()))
             self.buffer.lines[sr] = head + tail
-            for _ in range(er - sr):
-                _ = self.buffer.lines.pop(sr + 1)
+            self.buffer.delete_rows(sr + 1, er - sr)
 
     def _delete_selection(mut self):
         var sel = self.selection()
