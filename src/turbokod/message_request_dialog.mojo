@@ -129,6 +129,11 @@ struct MessageRequestDialog(Movable):
         self.selected_index = index
         self.submitted = True
 
+    def answer(mut self, index: Int):
+        """Resolve from the native host's alert: an action index, or -1
+        when it was dismissed."""
+        self._resolve(index if index >= 0 and index < len(self.actions) else -1)
+
     def handle_key(mut self, event: Event) -> Bool:
         if not self.active:
             return False

@@ -4757,18 +4757,22 @@ struct Desktop(Movable):
         # (checkout a branch?) is painted again after it.
         if not self.review.active and not native:
             self.confirm_dialog.paint(canvas, screen)
-        self.message_request_dialog.paint(canvas, screen)
+        if not native:
+            self.message_request_dialog.paint(canvas, screen)
         self.color_picker.paint(canvas, screen)
         self.merge_view.paint(canvas, screen)
         if not (native and self.quick_open.active):
             self.quick_open.paint(canvas, screen)
         if not native:
             self.save_as_dialog.paint(canvas, screen)
-        self.symbol_pick.paint(canvas, screen)
-        self.reference_pick.paint(canvas, screen)
+        if not (native and self.symbol_pick.active):
+            self.symbol_pick.paint(canvas, screen)
+        if not (native and self.reference_pick.active):
+            self.reference_pick.paint(canvas, screen)
         if not (native and self.find_symbol.active):
             self.find_symbol.paint(canvas, screen)
-        self.doc_pick.paint(canvas, screen)
+        if not (native and self.doc_pick.active):
+            self.doc_pick.paint(canvas, screen)
         if not (native and self.project_find.active):
             self.project_find.paint(canvas, screen, self.grammar_registry)
         if not (native and self.local_changes.active):
@@ -7873,10 +7877,7 @@ struct Desktop(Movable):
             else:
                 _ = self.message_request_dialog.handle_mouse(event, screen)
             if self.message_request_dialog.submitted:
-                if self._colorpres_mgr_idx >= 0:
-                    self._on_colorpres_submit()
-                else:
-                    self._on_message_request_submit()
+                self._after_message_request()
             return Optional[String]()
         if self.color_picker.active:
             if event.kind == EVENT_KEY:
@@ -7929,28 +7930,14 @@ struct Desktop(Movable):
                 _ = self.symbol_pick.handle_key(event)
             else:
                 _ = self.symbol_pick.handle_mouse(event, screen)
-            if self.symbol_pick.submitted:
-                var line = self.symbol_pick.selected_line
-                var character = self.symbol_pick.selected_character
-                var path = self.symbol_pick.path
-                self.symbol_pick.close()
-                self._jump_to(
-                    DefinitionResolved(path, line, character), screen,
-                )
+            self._after_symbol_pick(screen)
             return Optional[String]()
         if self.reference_pick.active:
             if event.kind == EVENT_KEY:
                 _ = self.reference_pick.handle_key(event)
             else:
                 _ = self.reference_pick.handle_mouse(event, screen)
-            if self.reference_pick.submitted:
-                var path = self.reference_pick.selected_path
-                var line = self.reference_pick.selected_line
-                var character = self.reference_pick.selected_character
-                self.reference_pick.close()
-                self._jump_to(
-                    DefinitionResolved(path, line, character), screen,
-                )
+            self._after_reference_pick(screen)
             return Optional[String]()
         if self.find_symbol.active:
             if event.kind == EVENT_KEY:
@@ -7968,11 +7955,7 @@ struct Desktop(Movable):
                 _ = self.doc_pick.handle_key(event)
             else:
                 _ = self.doc_pick.handle_mouse(event, screen)
-            if self.doc_pick.submitted:
-                var entry_idx = self.doc_pick.selected_index
-                var display = self.doc_pick.display
-                self._open_doc_entry(entry_idx, display, screen)
-                self.doc_pick.close()
+            self._after_doc_pick(screen)
             return Optional[String]()
         if self.project_find.active:
             if event.kind == EVENT_KEY:
@@ -8678,7 +8661,23 @@ struct Desktop(Movable):
         if not self.native_ui():
             return False
         return self.confirm_dialog.active or self.native_prompt_active() \
-            or self.save_as_dialog.active
+            or self.save_as_dialog.active or self.message_request_dialog.active
+
+    def _after_message_request(mut self):
+        """The message-request list was answered: it either picked a color
+        presentation or answers an LSP ``window/showMessageRequest``."""
+        if self._colorpres_mgr_idx >= 0:
+            self._on_colorpres_submit()
+        else:
+            self._on_message_request_submit()
+
+    def native_choice_answer(mut self, index: Int):
+        """Answer the message-request list from a native alert (-1 =
+        dismissed)."""
+        if not self.message_request_dialog.active:
+            return
+        self.message_request_dialog.answer(index)
+        self._after_message_request()
 
     def native_confirm_answer(mut self, choice: Int) -> Optional[String]:
         if not self.confirm_dialog.active:
@@ -8974,6 +8973,29 @@ struct Desktop(Movable):
         self.local_changes.close()
         return True
 
+    def _after_symbol_pick(mut self, screen: Rect) raises:
+        if self.symbol_pick.submitted:
+            var line = self.symbol_pick.selected_line
+            var character = self.symbol_pick.selected_character
+            var path = self.symbol_pick.path
+            self.symbol_pick.close()
+            self._jump_to(DefinitionResolved(path, line, character), screen)
+
+    def _after_reference_pick(mut self, screen: Rect) raises:
+        if self.reference_pick.submitted:
+            var path = self.reference_pick.selected_path
+            var line = self.reference_pick.selected_line
+            var character = self.reference_pick.selected_character
+            self.reference_pick.close()
+            self._jump_to(DefinitionResolved(path, line, character), screen)
+
+    def _after_doc_pick(mut self, screen: Rect) raises:
+        if self.doc_pick.submitted:
+            var entry_idx = self.doc_pick.selected_index
+            var display = self.doc_pick.display
+            self._open_doc_entry(entry_idx, display, screen)
+            self.doc_pick.close()
+
     def native_picker_kind(self) -> String:
         if not self.native_ui():
             return String("")
@@ -8983,6 +9005,12 @@ struct Desktop(Movable):
             return String("find_symbol")
         if self.project_find.active:
             return String("project_find")
+        if self.symbol_pick.active:
+            return String("symbol_pick")
+        if self.reference_pick.active:
+            return String("reference_pick")
+        if self.doc_pick.active:
+            return String("doc_pick")
         return String("")
 
     def native_picker_set(mut self, field: String, var text: String):
@@ -8993,6 +9021,10 @@ struct Desktop(Movable):
             self.find_symbol.set_query(text^)
         elif kind == String("project_find"):
             self.project_find.set_field(field, text^, monotonic_ms())
+        elif kind == String("symbol_pick") and field == String("query"):
+            self.symbol_pick.set_query(text^)
+        elif kind == String("doc_pick") and field == String("query"):
+            self.doc_pick.set_query(text^)
 
     def native_picker_option(mut self, name: String, on: Bool):
         if self.native_picker_kind() == String("project_find"):
@@ -9006,6 +9038,15 @@ struct Desktop(Movable):
             self.find_symbol.select(idx)
         elif kind == String("project_find"):
             self.project_find.select(idx)
+        elif kind == String("symbol_pick"):
+            if idx >= 0 and idx < len(self.symbol_pick.matched):
+                self.symbol_pick.selected = idx
+        elif kind == String("reference_pick"):
+            if idx >= 0 and idx < len(self.reference_pick.entries):
+                self.reference_pick.selected = idx
+        elif kind == String("doc_pick"):
+            if idx >= 0 and idx < len(self.doc_pick.matched):
+                self.doc_pick.selected = idx
 
     def native_picker_activate(
         mut self, idx: Int, anchor: Int, screen: Rect,
@@ -9024,6 +9065,15 @@ struct Desktop(Movable):
         elif kind == String("project_find"):
             self.project_find.submit()
             self._after_project_find(screen)
+        elif kind == String("symbol_pick"):
+            _ = self.symbol_pick.handle_key(Event.key_event(KEY_ENTER))
+            self._after_symbol_pick(screen)
+        elif kind == String("reference_pick"):
+            _ = self.reference_pick.handle_key(Event.key_event(KEY_ENTER))
+            self._after_reference_pick(screen)
+        elif kind == String("doc_pick"):
+            _ = self.doc_pick.handle_key(Event.key_event(KEY_ENTER))
+            self._after_doc_pick(screen)
         return Optional[String]()
 
     def native_picker_action(mut self, name: String, screen: Rect) raises:
@@ -9048,6 +9098,12 @@ struct Desktop(Movable):
             self._find_symbol_closed()
         elif kind == String("project_find"):
             self.project_find.close()
+        elif kind == String("symbol_pick"):
+            self.symbol_pick.close()
+        elif kind == String("reference_pick"):
+            self.reference_pick.close()
+        elif kind == String("doc_pick"):
+            self.doc_pick.close()
 
     def _find_symbol_closed(mut self):
         """Find Symbol was dismissed: drop any in-flight LSP bookkeeping

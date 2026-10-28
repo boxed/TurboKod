@@ -125,6 +125,13 @@ struct SymbolPick(Movable):
 
     # --- filtering --------------------------------------------------------
 
+    def set_query(mut self, var text: String):
+        """The native search field's text (macOS-style UI)."""
+        if text == self.query.text:
+            return
+        self.query.set_text(text^)
+        self._refilter()
+
     def _refilter(mut self):
         # Match against the precomputed ``container.name`` haystacks
         # (parallel to ``entries``, built in ``set_entries``) so users can

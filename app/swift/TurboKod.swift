@@ -2401,6 +2401,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About TurboKod",
                         action: #selector(aboutAction), keyEquivalent: "")
+        appMenu.addItem(withTitle: "Welcome to TurboKod…",
+                        action: #selector(welcomeAction), keyEquivalent: "")
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit TurboKod",
                         action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -2954,8 +2956,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         menu.addItem(NSMenuItem(title: "About TurboKod",
                                 action: #selector(aboutAction),
                                 keyEquivalent: ""))
+        // Reopens the first-launch look / theme / font chooser any time.
+        menu.addItem(NSMenuItem(title: "Welcome to TurboKod…",
+                                action: #selector(welcomeAction),
+                                keyEquivalent: ""))
         menu.addItem(.separator())
     }
+
+    @objc func welcomeAction() { showWelcome(force: true) }
 
     // macOS "About TurboKod" — a small panel with a link to the project
     // on GitHub. Handled entirely in the Swift host (the item is a macOS
@@ -4064,15 +4072,29 @@ extension AppController {
 
     /// First launch: ask for the look (macOS-style or retro), theme and font.
     /// Scripted captures skip it unless TK_WELCOME asks for it.
-    func showWelcomeIfNeeded() {
+    func showWelcomeIfNeeded() { showWelcome(force: false) }
+
+    /// `force`: from TurboKod ▸ Welcome to TurboKod…, regardless of whether
+    /// it was answered before.
+    func showWelcome(force: Bool) {
         let env = ProcessInfo.processInfo.environment
-        guard welcome == nil, !isCapturing || env["TK_WELCOME"] != nil else { return }
+        if let w = welcome { w.window.makeKeyAndOrderFront(nil); return }
+        guard force || !isCapturing || env["TK_WELCOME"] != nil else { return }
         let h = views.first?.handle ?? chromeDesktop
-        guard h != 0, tk_desktop_welcome_needed(h) != 0 || env["TK_WELCOME"] != nil,
+        guard h != 0, force || tk_desktop_welcome_needed(h) != 0 || env["TK_WELCOME"] != nil,
               let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_welcome_options(h, $0, $1) }),
               let opts = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         else { return }
-        let w = WelcomeController(options: opts) { [weak self] json, done in
+        let w = WelcomeController(options: opts, palette: { [weak self] in
+            var p = [UInt32](repeating: 0, count: 256)
+            let h = self?.views.first?.handle ?? self?.chromeDesktop ?? 0
+            if h != 0 {
+                p.withUnsafeMutableBufferPointer { b in
+                    _ = tk_theme_palette(h, Int64(Int(bitPattern: b.baseAddress)), Int64(b.count))
+                }
+            }
+            return p
+        }) { [weak self] json, done in
             guard let self = self else { return }
             let h = self.views.first?.handle ?? self.chromeDesktop
             guard h != 0 else { return }
@@ -4103,6 +4125,7 @@ extension AppController {
         case "confirm": showConfirmSheet(dialog, for: v, in: win)
         case "prompt": showPromptSheet(dialog, for: v, in: win)
         case "save_as": showSavePanel(dialog, for: v, in: win)
+        case "choice": showChoiceSheet(dialog, for: v, in: win)
         default: return false
         }
         return true
@@ -4178,6 +4201,23 @@ extension AppController {
                     tk_desktop_native_prompt_answer(v.handle, ptr, len, ok ? 1 : 0)
                 }
             }
+        }
+    }
+
+    /// A list of named actions from a language server (or the color
+    /// presentations of a color): one button per action, plus Dismiss.
+    private func showChoiceSheet(_ d: [String: Any], for v: CellView, in win: NSWindow) {
+        let actions = d["actions"] as? [String] ?? []
+        let alert = NSAlert()
+        alert.messageText = d["message"] as? String ?? ""
+        for a in actions { alert.addButton(withTitle: a) }
+        alert.addButton(withTitle: actions.isEmpty ? "OK" : "Dismiss").keyEquivalent = "\u{1b}"
+        nativeSheets[ObjectIdentifier(v)] = alert.window
+        alert.beginSheetModal(for: win) { [weak self, weak v] resp in
+            guard let self = self, let v = v, resp != .abort else { return }
+            let i = resp.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+            let index = i >= 0 && i < actions.count ? i : -1
+            self.finishNativeSheet(v) { tk_desktop_native_choice_answer(v.handle, Int64(index)); return 0 }
         }
     }
 
@@ -4538,7 +4578,7 @@ final class PickerController: NSObject, NSTableViewDataSource, NSTableViewDelega
     private func build() {
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         search.placeholderString = kind == "quick_open" ? "File name"
-            : kind == "find_symbol" ? "Symbol name" : "Search"
+            : kind == "find_symbol" || kind == "symbol_pick" ? "Symbol name" : "Search"
         search.delegate = self
         search.sendsSearchStringImmediately = true
         search.font = .systemFont(ofSize: 15)
@@ -4619,7 +4659,8 @@ final class PickerController: NSObject, NSTableViewDataSource, NSTableViewDelega
         status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelClicked))
         cancel.keyEquivalent = "\u{1b}"
-        let open = NSButton(title: kind == "find_symbol" ? "Go to Symbol" : "Open",
+        let open = NSButton(title: kind == "find_symbol" || kind == "symbol_pick" ? "Go to Symbol"
+                                 : kind == "reference_pick" ? "Go to Reference" : "Open",
                             target: self, action: #selector(activateClicked))
         open.keyEquivalent = "\r"
         var bottom: [NSView] = [status, NSView(), cancel]
@@ -4731,6 +4772,8 @@ final class PickerController: NSObject, NSTableViewDataSource, NSTableViewDelega
                 actionButton?.title = rm ? "Replace All" : "Show in Panel"
             }
             DispatchQueue.main.async { self.search.currentEditor()?.selectAll(nil) }
+            // A list with nothing to type into (References) drops the field.
+            search.isHidden = !(st["searchable"] as? Bool ?? true)
         }
         actionButton?.isEnabled = (st["count"] as? Int ?? 0) > 0
         count = st["count"] as? Int ?? 0
@@ -5122,10 +5165,14 @@ final class WelcomeController: NSObject, NSWindowDelegate {
     private let builtinFonts: [String]
     private var nativeUI: Bool
     private var finished = false
+    private let palette: () -> [UInt32]
+    private let preview = NSTextView()
     private static let sizes = [0, 11, 12, 13, 14, 15, 16, 18, 20, 24]
 
-    init(options o: [String: Any], apply: @escaping (String, Bool) -> Void) {
+    init(options o: [String: Any], palette: @escaping () -> [UInt32],
+         apply: @escaping (String, Bool) -> Void) {
         self.apply = apply
+        self.palette = palette
         builtinFonts = o["builtin_fonts"] as? [String] ?? []
         nativeUI = o["native_ui"] as? Bool ?? false
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 600),
@@ -5180,7 +5227,24 @@ final class WelcomeController: NSObject, NSWindowDelegate {
         start.bezelColor = .controlAccentColor
         start.controlSize = .large
 
-        let stack = NSStackView(views: [heading, sub, cards, grid, start])
+        // The pickers apply to either look: center them under both cards,
+        // not wherever the grid's own width would push them.
+        let gridBox = NSView()
+        grid.translatesAutoresizingMaskIntoConstraints = false
+        gridBox.addSubview(grid)
+        NSLayoutConstraint.activate([
+            grid.centerXAnchor.constraint(equalTo: gridBox.centerXAnchor),
+            grid.topAnchor.constraint(equalTo: gridBox.topAnchor),
+            grid.bottomAnchor.constraint(equalTo: gridBox.bottomAnchor),
+            grid.leadingAnchor.constraint(greaterThanOrEqualTo: gridBox.leadingAnchor),
+        ])
+        preview.isEditable = false
+        preview.isSelectable = false
+        preview.textContainerInset = NSSize(width: 14, height: 12)
+        preview.wantsLayer = true
+        preview.layer?.cornerRadius = 8
+        preview.heightAnchor.constraint(equalToConstant: 150).isActive = true
+        let stack = NSStackView(views: [heading, sub, cards, gridBox, preview, start])
         stack.orientation = .vertical
         stack.alignment = .centerX
         stack.spacing = 18
@@ -5190,6 +5254,8 @@ final class WelcomeController: NSObject, NSWindowDelegate {
         stack.translatesAutoresizingMaskIntoConstraints = false
         cards.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -64).isActive = true
         cards.heightAnchor.constraint(equalToConstant: 260).isActive = true
+        gridBox.widthAnchor.constraint(equalTo: cards.widthAnchor).isActive = true
+        preview.widthAnchor.constraint(equalTo: cards.widthAnchor).isActive = true
         sub.widthAnchor.constraint(equalTo: cards.widthAnchor).isActive = true
         sub.alignment = .center
         let content = NSView()
@@ -5208,6 +5274,58 @@ final class WelcomeController: NSObject, NSWindowDelegate {
         content.layoutSubtreeIfNeeded()
         window.setContentSize(NSSize(width: 760, height: stack.fittingSize.height))
         refreshCards()
+        renderPreview()
+    }
+
+    // MARK: live preview
+
+    /// The chosen font at the chosen size, resolved the way the editor
+    /// resolves it: the two built-in rows are the bundled VGA fonts (16pt
+    /// default), anything else a system monospace family (13pt default).
+    private func previewFont() -> NSFont {
+        let name = fontPopup.titleOfSelectedItem ?? ""
+        let size = CGFloat(Self.sizes[max(0, sizePopup.indexOfSelectedItem)])
+        if let i = builtinFonts.firstIndex(of: name) {
+            return loadCellFont(size: size > 0 ? size : 16,
+                                file: i == 1 ? CLASSIC_FONT_FILE : BUNDLED_FONT_FILE)
+        }
+        let s = size > 0 ? size : 13
+        return NSFontManager.shared.font(withFamily: name, traits: [], weight: 5, size: s)
+            ?? .monospacedSystemFont(ofSize: s, weight: .regular)
+    }
+
+    /// A few lines of code painted through the theme's editor and syntax
+    /// slots (EDITOR_BG / EDITOR_FG = 16 / 17, SYN_* = 18…24).
+    private func renderPreview() {
+        let pal = palette()
+        func c(_ slot: Int) -> NSColor {
+            let v = Int(slot < pal.count ? pal[slot] : 0xFFFFFF)
+            return PickerController.rgb(v)
+        }
+        let (fg, kw, str, com, num, ident, deco, op) = (17, 18, 19, 20, 21, 22, 23, 24)
+        let lines: [[(String, Int)]] = [
+            [("# A taste of your editor", com)],
+            [("@", deco), ("dataclass", deco)],
+            [("class", kw), (" ", fg), ("Point", ident), (":", op)],
+            [("    x", fg), (":", op), (" ", fg), ("int", kw), (" = ", op), ("0", num)],
+            [("", fg)],
+            [("def", kw), (" ", fg), ("greet", ident), ("(", op), ("name", fg), (")", op), (":", op)],
+            [("    count", fg), (" = ", op), ("42", num)],
+            [("    return", kw), (" ", fg), ("f\"Hello, {name}!\"", str)],
+        ]
+        let font = previewFont()
+        let out = NSMutableAttributedString()
+        for (i, line) in lines.enumerated() {
+            for (text, slot) in line {
+                out.append(NSAttributedString(string: text, attributes: [
+                    .font: font, .foregroundColor: c(slot)]))
+            }
+            if i + 1 < lines.count {
+                out.append(NSAttributedString(string: "\n", attributes: [.font: font]))
+            }
+        }
+        preview.textStorage?.setAttributedString(out)
+        preview.backgroundColor = c(16)
     }
 
     private func label(_ s: String) -> NSTextField {
@@ -5260,6 +5378,7 @@ final class WelcomeController: NSObject, NSWindowDelegate {
         guard let data = try? JSONSerialization.data(withJSONObject: o),
               let json = String(data: data, encoding: .utf8) else { return }
         apply(json, done)
+        renderPreview()   // the core has the new theme now
     }
 
     @objc private func getStarted() { window.close() }

@@ -113,6 +113,13 @@ struct DocPick(Movable):
 
     # --- filtering --------------------------------------------------------
 
+    def set_query(mut self, var text: String):
+        """The native search field's text (macOS-style UI)."""
+        if text == self.query.text:
+            return
+        self.query.set_text(text^)
+        self._refilter()
+
     def _refilter(mut self):
         # Match against the precomputed ``type.name`` haystacks (parallel to
         # ``entries``, built in ``open``) so the user can type a section

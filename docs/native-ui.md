@@ -12,8 +12,9 @@ It is being built in phases:
    Save As (`NSSavePanel`).
 2. **Tabs** — done: editors fill the workspace under a native tab strip
    instead of overlapping in-grid windows (see below).
-3. **Pickers** — done for Quick Open, Find Symbol and Find / Replace in
-   Project: one native sheet (see below).
+3. **Pickers** — done for Quick Open, Find Symbol, Find / Replace in
+   Project, document symbols, references and DevDocs: one native sheet (see
+   below). LSP message requests are a native alert (`choice`).
 4. **Popup menus** as `NSMenu`, a **first-launch** look chooser, and the
    **git view** as a native sheet: all done (see below).
 5. Still in-grid: Find / Replace (in-file), Fill, Breakpoint, the color
@@ -199,6 +200,10 @@ Modern macOS (`native_ui`) and Retro, plus theme, font and size popups.
   families.
 - Scripted captures skip the window unless `TK_WELCOME=1`, which also makes
   `TK_CAPTURE` grab it.
+- TurboKod ▸ Welcome to TurboKod… reopens it at any time.
+- A preview pane under the popups paints a code sample through the theme's
+  actual editor and syntax slots (re-read from the core after every apply),
+  in the chosen font and size.
 
 ## Scripted captures
 

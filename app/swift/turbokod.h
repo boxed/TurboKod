@@ -142,6 +142,7 @@ int32_t tk_desktop_native_confirm_answer(int64_t h, int64_t choice);
 int32_t tk_desktop_native_prompt_answer(int64_t h, int64_t ptr, int64_t len,
                                         int64_t ok);
 void tk_desktop_native_save_as_answer(int64_t h, int64_t ptr, int64_t len);
+void tk_desktop_native_choice_answer(int64_t h, int64_t index);
 // macOS-style UI tab strip: _native_ui is 1 while the mode is on; _tabs writes
 // {"focused": i, "tabs": [{"title", "path", "dirty"}]} (same buffer contract
 // as _native_dialog); _tab_select / _tab_close act on a window index.

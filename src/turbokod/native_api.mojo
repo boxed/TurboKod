@@ -1313,6 +1313,13 @@ def _native_dialog_json(ref d: Desktop) -> String:
             String("destructive"),
             json_int(d.confirm_dialog.destructive_index()),
         )
+    elif d.message_request_dialog.active:
+        o.put(String("kind"), json_str(String("choice")))
+        o.put(String("message"), json_str(d.message_request_dialog.message))
+        var acts = json_array()
+        for i in range(len(d.message_request_dialog.actions)):
+            acts.append(json_str(d.message_request_dialog.actions[i]))
+        o.put(String("actions"), acts)
     elif d.native_prompt_active():
         o.put(String("kind"), json_str(String("prompt")))
         o.put(String("label"), json_str(d.prompt.label))
@@ -1758,6 +1765,30 @@ def _picker_state_json(ref d: Desktop) -> String:
         elif q.truncated:
             status = String("Showing the first files only")
         o.put(String("status"), json_str(status))
+    elif kind == String("symbol_pick"):
+        ref sp = d.symbol_pick
+        o.put(String("title"), json_str(String("Go to Symbol in ") + basename(sp.path)))
+        o.put(String("query"), json_str(sp.query.text))
+        o.put(String("count"), json_int(len(sp.matched)))
+        o.put(String("selected"), json_int(sp.selected))
+        o.put(String("status"), json_str(
+            String("Asking the language server…") if sp.loading else String("")
+        ))
+    elif kind == String("reference_pick"):
+        ref rp = d.reference_pick
+        o.put(String("title"), json_str(String("References to ") + rp.word))
+        o.put(String("query"), json_str(String("")))
+        o.put(String("searchable"), json_bool(False))
+        o.put(String("count"), json_int(len(rp.entries)))
+        o.put(String("selected"), json_int(rp.selected))
+        o.put(String("status"), json_str(String(len(rp.entries)) + String(" references")))
+    elif kind == String("doc_pick"):
+        ref dp = d.doc_pick
+        o.put(String("title"), json_str(dp.display + String(" documentation")))
+        o.put(String("query"), json_str(dp.query.text))
+        o.put(String("count"), json_int(len(dp.matched)))
+        o.put(String("selected"), json_int(dp.selected))
+        o.put(String("status"), json_str(String("")))
     elif kind == String("find_symbol"):
         ref f = d.find_symbol
         o.put(String("title"), json_str(String("Find Symbol")))
@@ -1818,6 +1849,37 @@ def _picker_rows_json(ref d: Desktop, start: Int, n: Int) -> String:
             if len(e.container.as_bytes()) > 0:
                 detail = e.container + String(" — ") + detail
             r.put(String("detail"), json_str(detail))
+            rows.append(r)
+    elif kind == String("symbol_pick"):
+        ref sp = d.symbol_pick
+        var end = min(start + n, len(sp.matched))
+        for i in range(max(start, 0), end):
+            ref e = sp.entries[sp.matched[i]]
+            var r = json_object()
+            r.put(String("title"), json_str(e.name))
+            var detail = String("line ") + String(e.line + 1)
+            if len(e.container.as_bytes()) > 0:
+                detail = e.container + String(" · ") + detail
+            r.put(String("detail"), json_str(detail))
+            rows.append(r)
+    elif kind == String("reference_pick"):
+        ref rp = d.reference_pick
+        var end = min(start + n, len(rp.entries))
+        for i in range(max(start, 0), end):
+            ref e = rp.entries[i]
+            var rel = project_relative(rp.project_root, e.path)
+            var r = json_object()
+            r.put(String("title"), json_str(basename(rel) + String(":") + String(e.line + 1)))
+            r.put(String("detail"), json_str(parent_path(rel)))
+            rows.append(r)
+    elif kind == String("doc_pick"):
+        ref dp = d.doc_pick
+        var end = min(start + n, len(dp.matched))
+        for i in range(max(start, 0), end):
+            ref e = dp.entries[dp.matched[i]]
+            var r = json_object()
+            r.put(String("title"), json_str(e.name))
+            r.put(String("detail"), json_str(e.type_name))
             rows.append(r)
     elif kind == String("project_find"):
         ref p = d.project_find
@@ -1987,6 +2049,15 @@ def tk_desktop_native_confirm_answer(h: Int, choice: Int) abi("C") -> Int32:
     if h == 0:
         return ACT_NONE
     return _action_code(_desk(h)[].native_confirm_answer(choice))
+
+
+@export
+def tk_desktop_native_choice_answer(h: Int, index: Int) abi("C"):
+    """Answer a ``choice`` dialog (an LSP message request, or a color
+    presentation): the picked action's index, -1 when dismissed."""
+    if h == 0:
+        return
+    _desk(h)[].native_choice_answer(index)
 
 
 @export
