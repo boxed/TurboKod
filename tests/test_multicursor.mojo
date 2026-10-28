@@ -7,6 +7,7 @@ was split up); ``scripts/run_tests.sh`` runs it along with the rest.
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from turbokod.editor import Caret, Editor
+from turbokod.lsp_dispatch import TextEditEntry
 from turbokod.events import (
     Event, KEY_BACKSPACE, KEY_DOWN, KEY_LEFT, KEY_RIGHT, MOD_ALT, MOD_CTRL,
     MOD_KEY_ALT, MOD_META, MOD_NONE, MOD_SHIFT,
@@ -856,6 +857,28 @@ def test_cut_without_selection_removes_every_carets_line() raises:
     assert_equal(ed.selections[1].row, 1)
     assert_true(ed.undo())
     assert_equal(ed.buffer.line(2), String("ccc"))
+
+
+def test_linked_ranges_from_an_older_buffer_dont_crash_typing() raises:
+    # a range past the last line, one past its line's end, one inside "é"
+    var ed = Editor(String("abc\nxy\néé"))
+    var ranges = List[TextEditEntry]()
+    ranges.append(TextEditEntry(0, 0, 0, 3, String("")))
+    ranges.append(TextEditEntry(1, 0, 1, 3, String("")))
+    ranges.append(TextEditEntry(2, 0, 2, 3, String("")))
+    ranges.append(TextEditEntry(7, 0, 7, 3, String("")))
+    ed.move_to(0, 3, False)
+    ed.begin_linked_edit(ranges)
+    _ = ed.handle_key(Event.key_event(UInt32(ord("Z"))), Rect(0, 0, 40, 10))
+    assert_equal(ed.text_snapshot(), String("abcZ\nxyZ\néZé"))
+
+
+def test_carets_are_kept_inside_the_buffer() raises:
+    var ed = Editor(String("ab\né"))
+    ed._add_caret(Caret(9, 9, 9, 9, 9))
+    ed._add_caret(Caret(1, 1, 1, 1, 1))
+    _ = ed.handle_key(Event.key_event(UInt32(ord("Z"))), Rect(0, 0, 40, 10))
+    assert_equal(ed.text_snapshot(), String("Zab\nZéZ"))
 
 
 def main() raises:

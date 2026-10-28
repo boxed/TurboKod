@@ -2436,9 +2436,16 @@ struct Editor(Copyable, Movable):
         for i in range(len(ranges)):
             if i == host:
                 continue
+            # A range from a response to an older version of the buffer
+            # can point past its end; a caret there aborted on the next
+            # keystroke, taking every unsaved buffer with it.
+            if ranges[i].start_line < 0 \
+                    or ranges[i].start_line >= self.buffer.line_count():
+                continue
             var col = ranges[i].start_char + offset
             if col > ranges[i].end_char:
                 col = ranges[i].end_char
+            col = utf8_floor(self.buffer.line(ranges[i].start_line), col)
             self._add_caret(
                 Caret(ranges[i].start_line, col, col, ranges[i].start_line, col)
             )
@@ -2855,6 +2862,16 @@ struct Editor(Copyable, Movable):
         here would break the rest of the editor's assumptions."""
         if len(carets) == 0:
             return
+        # Every caret on a real row, on a character start: one outside the
+        # buffer aborts the next edit.
+        var last_row = self.buffer.line_count() - 1
+        for i in range(len(carets)):
+            carets[i].row = min(max(carets[i].row, 0), last_row)
+            carets[i].col = utf8_floor(self.buffer.lines[carets[i].row], carets[i].col)
+            carets[i].anchor_row = min(max(carets[i].anchor_row, 0), last_row)
+            carets[i].anchor_col = utf8_floor(
+                self.buffer.lines[carets[i].anchor_row], carets[i].anchor_col,
+            )
         # Sort ascending by (row, col).
         var n = len(carets)
         for i in range(1, n):
