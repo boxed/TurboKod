@@ -222,6 +222,9 @@ int64_t tk_desktop_review(int64_t h, int64_t cols, int64_t rows, int64_t out_ptr
 // state, hint, close, commands: [[label, id]]}] (0 = none native); _pane_act
 // op 0 focus, 1 close, 2 minimize, 3 maximize, 4 run command id (string).
 int64_t tk_desktop_panes(int64_t h, int64_t cols, int64_t rows, int64_t out_ptr, int64_t cap);
+// macOS-style UI editor scroller: {win, x, y, w, h, cur, max} for the focused
+// frameless editor (visual rows x 1000); drive it with tk_editor_minimap_to.
+int64_t tk_desktop_editor_scroller(int64_t h, int64_t cols, int64_t rows, int64_t out_ptr, int64_t cap);
 void tk_desktop_pane_act(int64_t h, int64_t kind, int64_t idx, int64_t op, int64_t ptr, int64_t len);
 void tk_desktop_review_act(int64_t h, int64_t op, int64_t arg);
 void tk_desktop_tree_act(int64_t h, int64_t op, int64_t idx, int64_t x, int64_t y);

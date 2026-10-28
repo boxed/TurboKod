@@ -200,6 +200,17 @@ Each pane's one-row header is native:
   `pending_command_id`; the tick drains both.
 - The floating-panels window keeps the grid headers.
 
+## Editor scroller
+
+Frameless tabbed editors have no grid scroll bar. `EditorScroller` is a
+macOS-style overlay scroller down the focused editor's right edge:
+
+- It's fed by `tk_desktop_editor_scroller`: the interior rect plus
+  `smooth_begin`'s wrap-aware position and maximum in visual rows.
+- Its knob color contrasts with the theme's editor background.
+- Dragging it, or clicking the track, scrolls through
+  `tk_editor_minimap_to`, the minimap's proportional path.
+
 ## Settings window
 
 With the macOS-style UI on, `APP_SETTINGS` opens the same `Settings` state

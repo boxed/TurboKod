@@ -1906,6 +1906,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // macOS-style UI: native headers over the docked tool panes, per window
     // and keyed "kind:idx".
     var paneHeaders: [ObjectIdentifier: [String: PaneHeader]] = [:]
+    // macOS-style UI: an overlay scroller on the focused editor, per window.
+    var scrollers: [ObjectIdentifier: EditorScroller] = [:]
     var treeBuf = [UInt8](repeating: 0, count: 1 << 16)
     // Menu mirror: the snapshot from Mojo's menu_bar, hashed so we only
     // rebuild NSMenu when something actually changed (focus/visibility/
@@ -2310,6 +2312,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if self.pollMerge(v) { changed = true }
                 if self.pollReview(v) { changed = true }
                 if self.pollPaneHeaders(v) { changed = true }
+                if self.pollScroller(v) { changed = true }
             }
             self.drainAttention()
             self.idleTicks = changed ? 0 : self.idleTicks &+ 1
@@ -3500,6 +3503,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         reviewPickers[ObjectIdentifier(v)] = nil
         reviewBars[ObjectIdentifier(v)] = nil
         paneHeaders[ObjectIdentifier(v)] = nil
+        scrollers[ObjectIdentifier(v)] = nil
         // Close is instant; the language servers get their goodbye in the
         // background. `begin_close` terminates every child except the LSP
         // transports and sends each server `shutdown`, then we poll off the
@@ -4053,6 +4057,25 @@ extension AppController {
         guard let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_native_dialog(h, $0, $1) })
         else { return nil }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    /// Keep the focused editor's overlay scroller in step with its position.
+    func pollScroller(_ v: CellView) -> Bool {
+        let id = ObjectIdentifier(v)
+        let cols = Int64(v.cols()), rows = Int64(v.rows())
+        let o = readCoreJSON(&nativeDialogBuf, { tk_desktop_editor_scroller(v.handle, cols, rows, $0, $1) })
+            .flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
+        guard let o = o, (o["max"] as? Int ?? 0) > 0 else {
+            if let sc = scrollers.removeValue(forKey: id) { sc.removeFromSuperview(); return true }
+            return false
+        }
+        let sc = scrollers[id] ?? {
+            let s = EditorScroller(view: v)
+            v.addSubview(s)
+            scrollers[id] = s
+            return s
+        }()
+        return sc.update(o)
     }
 
     /// Lay native headers over the docked tool panes' header rows.
@@ -8650,4 +8673,113 @@ final class PaneHeader: NSView {
 
     @objc private func controlClicked(_ b: NSButton) { act(b.tag) }
     @objc private func commandClicked(_ b: NSButton) { act(4, b.identifier?.rawValue ?? "") }
+}
+
+
+// MARK: - macOS-style UI: editor overlay scroller
+//
+// Frameless tabbed editors have no grid scroll bar; this is a macOS-style
+// overlay scroller down the focused editor's right edge: a slim rounded
+// knob sized and placed from the core's wrap-aware position, which widens on
+// hover. Dragging it (or clicking the track) scrolls through
+// `tk_editor_minimap_to`, the same proportional path the minimap uses.
+
+final class EditorScroller: NSView {
+    private weak var cellView: CellView?
+    private var win = 0
+    private var cur = 0.0, maxv = 0.0, rows = 1.0
+    private var lastData = Data()
+    private var hovering = false
+    private var dragOffset: CGFloat? = nil
+    /// Light knob on a dark editor, dark on a light one — like an overlay
+    /// scroller over its content.
+    private var ink = NSColor.white
+
+    init(view: CellView) {
+        cellView = view
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override var isFlipped: Bool { true }
+
+    func update(_ o: [String: Any]) -> Bool {
+        guard let data = try? JSONSerialization.data(withJSONObject: o), data != lastData else { return false }
+        lastData = data
+        win = o["win"] as? Int ?? 0
+        cur = Double(o["cur"] as? Int ?? 0) / 1000
+        maxv = Double(o["max"] as? Int ?? 0) / 1000
+        rows = Double(max(o["h"] as? Int ?? 1, 1))
+        let bg = o["bg"] as? Int ?? 0
+        let lum = 0.299 * Double((bg >> 16) & 0xFF) + 0.587 * Double((bg >> 8) & 0xFF) + 0.114 * Double(bg & 0xFF)
+        ink = lum < 128 ? .white : .black
+        let x = CGFloat((o["x"] as? Int ?? 0) + (o["w"] as? Int ?? 0)) * CELL_W
+        let f = NSRect(x: x - 11, y: CGFloat(o["y"] as? Int ?? 0) * CELL_H,
+                       width: 11, height: CGFloat(o["h"] as? Int ?? 0) * CELL_H)
+        if frame != f { frame = f }
+        needsDisplay = true
+        return true
+    }
+
+    private var knob: NSRect {
+        let h = bounds.height
+        let kh = max(28, h * CGFloat(rows / (maxv + rows)))
+        let ky = maxv > 0 ? (h - kh) * CGFloat(cur / maxv) : 0
+        let w: CGFloat = hovering || dragOffset != nil ? 8 : 5
+        return NSRect(x: bounds.width - w - 2, y: ky + 2, width: w, height: kh - 4)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if hovering || dragOffset != nil {
+            ink.withAlphaComponent(0.08).setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 5, yRadius: 5).fill()
+        }
+        ink.withAlphaComponent(hovering || dragOffset != nil ? 0.6 : 0.42).setFill()
+        let k = knob
+        NSBezierPath(roundedRect: k, xRadius: k.width / 2, yRadius: k.width / 2).fill()
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for t in trackingAreas { removeTrackingArea(t) }
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                       owner: self, userInfo: nil))
+    }
+
+    override func mouseEntered(with e: NSEvent) { hovering = true; needsDisplay = true }
+    override func mouseExited(with e: NSEvent) { hovering = false; needsDisplay = true }
+
+    private func scroll(toKnobTop y: CGFloat) {
+        guard let v = cellView, v.handle != 0 else { return }
+        let travel = bounds.height - knob.height - 4
+        let frac = travel > 0 ? min(max(y / travel, 0), 1) : 0
+        tk_editor_minimap_to(v.handle, Int64(win), Int64(frac * 1_000_000))
+        cur = Double(frac) * maxv
+        needsDisplay = true
+        v.invalidateFrame()
+        v.needsDisplay = true
+    }
+
+    override func mouseDown(with e: NSEvent) {
+        let p = convert(e.locationInWindow, from: nil)
+        let k = knob
+        if k.insetBy(dx: -4, dy: 0).contains(p) {
+            dragOffset = p.y - k.minY
+        } else {
+            // Track click: center the knob there, then keep dragging.
+            dragOffset = k.height / 2
+            scroll(toKnobTop: p.y - k.height / 2)
+        }
+    }
+
+    override func mouseDragged(with e: NSEvent) {
+        guard let off = dragOffset else { return }
+        scroll(toKnobTop: convert(e.locationInWindow, from: nil).y - off)
+    }
+
+    override func mouseUp(with e: NSEvent) {
+        dragOffset = nil
+        needsDisplay = true
+    }
 }

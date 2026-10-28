@@ -1977,6 +1977,42 @@ def tk_desktop_tree_act(h: Int, op: Int, idx: Int, x: Int, y: Int) abi("C"):
         d.native_tree_menu(idx, Point(x, y))
 
 
+# --- macOS-style UI: editor scroller --------------------------------------------
+
+
+@export
+def tk_desktop_editor_scroller(
+    h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
+) abi("C") -> Int:
+    """The focused editor's vertical scroll for a native overlay scroller
+    (frameless tabbed editors have no grid scroll bar): ``{win, x, y, w, h,
+    cur, max}`` — the editor's interior cells and its position / maximum
+    in visual rows × 1000 (wrap-aware). Drive it with
+    ``tk_editor_minimap_to``. 0 when there's nothing to show."""
+    if h == 0:
+        return 0
+    ref d = _desk(h)[]
+    if not d.native_ui() or not d.windows.tabbed \
+            or not d.windows.focused_is_editor() \
+            or d._fullscreen_modal_active() or d.history.active \
+            or d.merge_view.active or d.review.active:
+        return 0
+    var win = d.windows.focused
+    var r = d.windows.windows[win].interior()
+    var m = d.smooth_begin(win, Rect(0, 0, cols, rows))
+    var o = json_object()
+    o.put(String("win"), json_int(win))
+    o.put(String("x"), json_int(r.a.x))
+    o.put(String("y"), json_int(r.a.y))
+    o.put(String("w"), json_int(r.width()))
+    o.put(String("h"), json_int(r.height()))
+    o.put(String("cur"), json_int(Int(m[0] * 1000.0)))
+    o.put(String("max"), json_int(Int(m[1] * 1000.0)))
+    # The editor background, so the knob can contrast with it.
+    o.put(String("bg"), json_int(Int(d.active_theme.palette[Int(EDITOR_BG)])))
+    return _write_out(encode_json(o), out_ptr, cap)
+
+
 # --- macOS-style UI: tool-pane headers -----------------------------------------
 
 
