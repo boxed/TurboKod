@@ -1210,11 +1210,12 @@ def tk_desktop_menu_snapshot(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     Format is one record per line, fields TAB-separated, all ASCII-safe:
 
       ``M\\t<label>\\t<visible>\\t<is_system>\\t<right_aligned>\\n``
-      ``I\\t<label>\\t<action>\\t<is_separator>\\t<checkable>\\t<checked>\\t<shortcut>\\t<mark>\\n``
+      ``I\\t<label>\\t<action>\\t<is_separator>\\t<checkable>\\t<checked>\\t<shortcut>\\t<mark>\\t<icon>\\n``
 
     Booleans render as ``0``/``1``; ``mark`` is the decimal
     ``MENU_MARK_*`` code (0 = none) for the alternate glyph in the check
-    column; missing strings render as empty fields. Items belong to the
+    column; ``icon`` is an SF Symbol name or empty; missing strings render
+    as empty fields. Items belong to the
     most-recently-emitted M record. Returns
     the number of bytes written; if it would exceed ``cap`` the buffer
     is truncated to ``cap`` and the host should grow its allocation
@@ -1243,7 +1244,7 @@ def tk_desktop_menu_snapshot(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
             text = text + String("I") + TAB + it.label + TAB + it.action + TAB \
                  + _b(it.is_separator) + TAB + _b(it.checkable) + TAB \
                  + _b(it.checked) + TAB + it.shortcut + TAB \
-                 + String(Int(it.mark)) + NL
+                 + String(Int(it.mark)) + TAB + it.icon + NL
     var bytes = text.as_bytes()
     var n = len(bytes)
     if n > cap:

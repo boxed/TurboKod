@@ -21,7 +21,7 @@ Serializes the menu tree as TSV (TAB-separated, NL-terminated rows):
 
 ```
 M<TAB>label<TAB>visible<TAB>is_system<TAB>right_aligned
-I<TAB>label<TAB>action<TAB>is_separator<TAB>checkable<TAB>checked<TAB>shortcut<TAB>mark
+I<TAB>label<TAB>action<TAB>is_separator<TAB>checkable<TAB>checked<TAB>shortcut<TAB>mark<TAB>icon
 ```
 
 Items belong to the most-recently-emitted `M` row. Booleans render `0`/`1`.
@@ -31,6 +31,8 @@ names the *meaning*, each frontend picks the rendering: the in-grid menu
 paints a glyph, `installMenu` swaps `NSMenuItem.onStateImage`. Today the one
 code is `MENU_MARK_OPEN` (1), which draws a diamond — what AppKit's own
 Window menu uses for a window that's open but not frontmost.
+
+`icon` is an SF Symbol name (empty for none) — see *Icons* below.
 
 Menus are emitted in **display order** via `MenuBar._display_order_indices()` — same rank-based sequence the terminal frontend's `_layout` uses:
 
@@ -121,6 +123,22 @@ Swift's 50 ms render timer calls `refreshMenu()`. The TSV is hashed (FNV-1a); re
 - **App menu slot**: Mojo's `≡` system menu (with Settings + Quit) lands in the macOS app-menu slot. `installMenu` prepends "About TurboKod" + a separator there, since macOS convention expects it.
 - **Shortcuts**: Mojo emits `"Cmd+Shift+S"`-style display strings; `applyShortcut` parses them into `NSEvent.ModifierFlags` + `keyEquivalent`. Letters: lowercase by default, kept uppercase when Shift is in the mask. Special keys: Up/Down/Left/Right/Home/End/PgUp/PgDn/Tab/Enter/Esc/Space/BkSp/Del/F1-F12 → corresponding `NSEvent` function-key codepoints.
 - **Help menu + search**: the Mojo core adds a `Help` menu in `app_menus.build_menus`, holding "Keyboard Shortcuts" → `HELP_HOTKEYS`. `_display_order_indices` pins a left-aligned `Help` menu dead last — *after* the right-aligned `Project` menu — so the NSMenu bar ends with `… Project, Help`, matching the macOS convention that Help is the rightmost menu. (`_menu_rank` still ranks Help at 100 so it's last in the terminal's left cluster, where `_layout` does the positioning.) When `installMenu` builds a submenu titled `Help` it assigns it to `NSApp.helpMenu`, which is what makes AppKit attach its built-in search field (searches every menu item across the bar). `helpMenu` is reset to `nil` at the top of each rebuild so a snapshot without a Help menu can't leave a dangling reference. The `HELP_HOTKEYS` action opens a read-only editor buffer (see `Desktop._open_hotkeys_help`) whose body is **generated**, not hardcoded: `_hotkeys_help_text` loops the global `_hotkeys` registry and prints every entry that carries a `group` + `help`, so the page can't drift from the bindings the app actually has. Each `Hotkey` now carries documentation metadata (`group`, `help`, `doc_shortcut`, `doc_only`); see the struct doc in `desktop.mojo`. Groups render in a fixed order (`HKG_*` constants), unknown groups are appended (never dropped), and entries that share one `help` string merge into a single row (`Ctrl+Space / Ctrl+J / F2`). Editor-level chords that `Editor.handle_key` owns directly (Cmd+Up/Down smart-select, Cmd+Left/Right, Ctrl+Alt+Up/Down multi-caret, …) appear as `doc_only` rows — listed on the page but skipped by the desktop dispatch loop so the editor keeps handling them. Adding a binding to the registry with a group + help is all it takes to document it.
+
+## Icons
+
+`MenuItem.icon` names an SF Symbol for the native menu; the in-grid menu
+ignores it. Following the HIG, icons are **landmarks, not decoration**: one
+on the first item of a separator-delimited group (Undo, Cut, Find…, Go to
+Line…, Rename Symbol…, Toggle Bookmark, …), so the eye can jump between
+groups in a long menu. Don't add one to every row, to toggles (the check
+column already marks them), or to the Project / Window lists. The same
+action gets the same symbol in every menu it appears in (Go to Line in Edit
+and Navigation, the file tree in View and Navigation).
+
+`installMenu` draws each symbol centered in a fixed 18×16 box and gives the
+imageless rows of an iconed menu a blank one of the same size: symbols vary
+in width, and macOS 15 doesn't reserve an image column, so titles would
+otherwise start at ragged x positions.
 
 ## Adding a new menu item
 

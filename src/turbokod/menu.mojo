@@ -53,6 +53,11 @@ struct MenuItem(ImplicitlyCopyable, Movable):
     # consulted when ``checked`` is False. Lets an item say "not the
     # current one, but not nothing either" without a label suffix.
     var mark: UInt8
+    # SF Symbol name for the native macOS menu ("" = none). Presentation
+    # only: the in-grid menu ignores it (the bitmap font has no glyphs for
+    # it). Used sparingly — one landmark per group, not one per item; see
+    # docs/native-menu.md.
+    var icon: String
 
     def __init__(
         out self,
@@ -62,6 +67,7 @@ struct MenuItem(ImplicitlyCopyable, Movable):
         checkable: Bool = False,
         checked: Bool = False,
         mark: UInt8 = MENU_MARK_NONE,
+        icon: String = String(""),
     ):
         self.label = label^
         self.action = action^
@@ -70,6 +76,7 @@ struct MenuItem(ImplicitlyCopyable, Movable):
         self.checkable = checkable
         self.checked = checked
         self.mark = mark
+        self.icon = icon
 
     @staticmethod
     def separator() -> Self:
@@ -84,6 +91,7 @@ struct MenuItem(ImplicitlyCopyable, Movable):
         self.checkable = copy.checkable
         self.checked = copy.checked
         self.mark = copy.mark
+        self.icon = copy.icon
 
 
 struct Menu(Copyable, Movable):

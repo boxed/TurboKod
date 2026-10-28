@@ -1901,6 +1901,34 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return img
     }()
 
+    /// Menu-item icons: an SF Symbol from the snapshot's `icon` field, drawn
+    /// centered in one fixed box. Symbols differ in width, and macOS 15
+    /// doesn't reserve an image column for the rows without one, so a mixed
+    /// menu would otherwise start every title at a different x. `""` is the
+    /// blank spacer the imageless rows of an iconed menu get for the same
+    /// reason. Template images, so they tint with the menu highlight.
+    private static var menuIconCache: [String: NSImage] = [:]
+    static func menuIcon(_ name: String) -> NSImage {
+        if let img = menuIconCache[name] { return img }
+        let box = NSSize(width: 18, height: 16)
+        let cfg = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+        let sym = name.isEmpty ? nil
+            : NSImage(systemSymbolName: name, accessibilityDescription: nil)?
+                .withSymbolConfiguration(cfg)
+        let img = NSImage(size: box, flipped: false) { rect in
+            guard let sym = sym else { return true }
+            let s = sym.size
+            let k = min(1, rect.width / s.width, rect.height / s.height)
+            let w = s.width * k, h = s.height * k
+            sym.draw(in: NSRect(x: (rect.width - w) / 2, y: (rect.height - h) / 2,
+                                width: w, height: h))
+            return true
+        }
+        img.isTemplate = true
+        menuIconCache[name] = img
+        return img
+    }
+
     // Memo for pushOpenProjects: the raw per-window project paths the
     // canonicalized payload was last built from, and that payload.
     private var openProjectsRaw: [String] = []
@@ -2508,7 +2536,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     NSApp.helpMenu = submenu
                 }
             case "I":
-                // I\t<label>\t<action>\t<is_separator>\t<checkable>\t<checked>\t<shortcut>\t<mark>
+                // I\t<label>\t<action>\t<is_separator>\t<checkable>\t<checked>\t<shortcut>\t<mark>\t<icon>
                 guard let menu = curSubmenu, parts.count >= 7 else { continue }
                 let label = String(parts[1])
                 let action = String(parts[2])
@@ -2519,6 +2547,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // MENU_MARK_* (menu.mojo): the alternate glyph for the
                 // check column. Tolerates an older snapshot without it.
                 let mark = parts.count >= 8 ? Int(parts[7]) ?? 0 : 0
+                let icon = parts.count >= 9 ? String(parts[8]) : ""
                 if isSep {
                     menu.addItem(.separator())
                     continue
@@ -2565,9 +2594,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     item.onStateImage = img
                     item.state = .on
                 }
+                if !icon.isEmpty { item.image = Self.menuIcon(icon) }
                 applyShortcut(shortcut, to: item)
                 menu.addItem(item)
             default: continue
+            }
+        }
+
+        // Line up titles in menus that carry any icon (see `menuIcon`).
+        for top in mainMenu.items {
+            guard let sub = top.submenu,
+                  sub.items.contains(where: { $0.image != nil }) else { continue }
+            for it in sub.items where !it.isSeparatorItem && it.image == nil {
+                it.image = Self.menuIcon("")
             }
         }
 

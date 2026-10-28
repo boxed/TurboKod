@@ -62,19 +62,14 @@ comptime NEW_WINDOW = String("app.new_window")
 comptime TOGGLE_FLOATING_PANELS = String("app.toggle_floating_panels")
 
 
-def _mk_menu(var label: String, *items: Tuple[String, String]) -> Menu:
-    var list = List[MenuItem]()
-    for it in items:
-        list.append(MenuItem(it[0], it[1]))
-    return Menu(label^, list^)
-
-
 def build_edit_items(has_extra_carets: Bool) -> List[MenuItem]:
+    # Icons mark the first item of a group (see docs/native-menu.md) —
+    # landmarks for scanning, not decoration on every row.
     var e = List[MenuItem]()
-    e.append(MenuItem(String("Undo"),  EDITOR_UNDO))
+    e.append(MenuItem(String("Undo"),  EDITOR_UNDO, icon=String("arrow.uturn.backward")))
     e.append(MenuItem(String("Redo"),  EDITOR_REDO))
     e.append(MenuItem.separator())
-    e.append(MenuItem(String("Cut"),   EDITOR_CUT))
+    e.append(MenuItem(String("Cut"),   EDITOR_CUT, icon=String("scissors")))
     e.append(MenuItem(String("Copy"),  EDITOR_COPY))
     e.append(MenuItem(String("Paste"), EDITOR_PASTE))
     e.append(MenuItem(String("Select All"), EDITOR_SELECT_ALL))
@@ -82,28 +77,30 @@ def build_edit_items(has_extra_carets: Bool) -> List[MenuItem]:
     if has_extra_carets:
         e.append(MenuItem(String("Fill..."), EDITOR_FILL))
     e.append(MenuItem.separator())
-    e.append(MenuItem(String("Find..."),               EDITOR_FIND))
+    e.append(MenuItem(String("Find..."),               EDITOR_FIND, icon=String("magnifyingglass")))
     e.append(MenuItem(String("Find Next"),             EDITOR_FIND_NEXT))
     e.append(MenuItem(String("Find Previous"),         EDITOR_FIND_PREV))
     e.append(MenuItem(String("Replace..."),            EDITOR_REPLACE))
     e.append(MenuItem(String("Find in project..."),    PROJECT_FIND))
     e.append(MenuItem(String("Replace in project..."), PROJECT_REPLACE))
-    e.append(MenuItem(String("Go to Line..."),         EDITOR_GOTO))
+    e.append(MenuItem.separator())
+    e.append(MenuItem(String("Go to Line..."),         EDITOR_GOTO, icon=String("arrow.right.to.line")))
     e.append(MenuItem(String("Go to Symbol..."),       EDITOR_GOTO_SYMBOL))
     e.append(MenuItem(String("Go to Type Definition"), EDITOR_GOTO_TYPE_DEF))
     e.append(MenuItem(String("Go to Implementation"),  EDITOR_GOTO_IMPL))
     e.append(MenuItem(String("Go to Declaration"),     EDITOR_GOTO_DECL))
-    e.append(MenuItem(String("Rename Symbol..."),      EDITOR_RENAME_SYMBOL))
+    e.append(MenuItem(String("Look up in docs..."),    EDITOR_LOOKUP_DOCS))
+    e.append(MenuItem.separator())
+    e.append(MenuItem(String("Rename Symbol..."),      EDITOR_RENAME_SYMBOL, icon=String("pencil")))
     e.append(MenuItem(String("Format Document"),       EDITOR_FORMAT_DOCUMENT))
     e.append(MenuItem(String("Format Selection"),      EDITOR_FORMAT_SELECTION))
-    e.append(MenuItem(String("Look up in docs..."),    EDITOR_LOOKUP_DOCS))
     e.append(MenuItem(String("Toggle Comment"),        EDITOR_TOGGLE_COMMENT))
     e.append(MenuItem(String("Toggle Case"),           EDITOR_TOGGLE_CASE))
     e.append(MenuItem(String("Sort Lines"),            EDITOR_SORT_LINES))
     # Bookmarks. Marking the lines that match a search is the Find
     # dialog's Mark all / Unmark all.
     e.append(MenuItem.separator())
-    e.append(MenuItem(String("Toggle Bookmark"),         EDITOR_BOOKMARK_TOGGLE))
+    e.append(MenuItem(String("Toggle Bookmark"),         EDITOR_BOOKMARK_TOGGLE, icon=String("bookmark")))
     e.append(MenuItem(String("Next Bookmark"),           EDITOR_BOOKMARK_NEXT))
     e.append(MenuItem(String("Previous Bookmark"),       EDITOR_BOOKMARK_PREV))
     e.append(MenuItem(String("Invert Bookmarks"),        EDITOR_BOOKMARK_INVERT))
@@ -121,30 +118,33 @@ def build_menus(mut d: Desktop, native: Bool):
     ``native`` adds the items only a windowing host can act on (New
     window, Floating panels)."""
     var ham = List[MenuItem]()
-    ham.append(MenuItem(String("Settings"), APP_SETTINGS))
+    ham.append(MenuItem(String("Settings"), APP_SETTINGS, icon=String("gearshape")))
     ham.append(MenuItem.separator())
     ham.append(MenuItem(String("Quit"), APP_QUIT_ACTION))
     d.menu_bar.add(Menu(String("≡"), ham^, is_system=True))
-    d.menu_bar.add(_mk_menu(String("File"),
-        (String("New"), EDITOR_NEW),
-        (String("New terminal pane"), TERMINAL_NEW),
-        (String("New Claude pane"), TERMINAL_CLAUDE),
-        (String("Open..."), EDITOR_OPEN),
-        (String("Open project..."), PROJECT_OPEN),
-        (String("Quick open project..."), PROJECT_QUICK_OPEN),
-        (String("Quick open..."), EDITOR_QUICK_OPEN),
-        (String("Open recent..."), EDITOR_OPEN_RECENT),
-        (String("Close"), WINDOW_CLOSE),
-        (String("Close all"), WINDOW_CLOSE_ALL),
-        (String("Save"), EDITOR_SAVE),
-        (String("Save as..."), EDITOR_SAVE_AS),
-        (String("Duplicate..."), EDITOR_DUPLICATE),
-    ))
+    # Grouped the macOS way: create | open | project | close | save.
+    var f = List[MenuItem]()
+    f.append(MenuItem(String("New"), EDITOR_NEW, icon=String("doc.badge.plus")))
     if native:
-        # After "New": the host opens another Desktop window.
-        d.menu_bar.menus[len(d.menu_bar.menus) - 1].items.insert(
-            1, MenuItem(String("New window"), NEW_WINDOW),
-        )
+        # The host opens another Desktop window.
+        f.append(MenuItem(String("New window"), NEW_WINDOW))
+    f.append(MenuItem(String("New terminal pane"), TERMINAL_NEW, icon=String("terminal")))
+    f.append(MenuItem(String("New Claude pane"), TERMINAL_CLAUDE))
+    f.append(MenuItem.separator())
+    f.append(MenuItem(String("Open..."), EDITOR_OPEN, icon=String("folder")))
+    f.append(MenuItem(String("Quick open..."), EDITOR_QUICK_OPEN))
+    f.append(MenuItem(String("Open recent..."), EDITOR_OPEN_RECENT))
+    f.append(MenuItem.separator())
+    f.append(MenuItem(String("Open project..."), PROJECT_OPEN))
+    f.append(MenuItem(String("Quick open project..."), PROJECT_QUICK_OPEN))
+    f.append(MenuItem.separator())
+    f.append(MenuItem(String("Close"), WINDOW_CLOSE))
+    f.append(MenuItem(String("Close all"), WINDOW_CLOSE_ALL))
+    f.append(MenuItem.separator())
+    f.append(MenuItem(String("Save"), EDITOR_SAVE, icon=String("square.and.arrow.down")))
+    f.append(MenuItem(String("Save as..."), EDITOR_SAVE_AS))
+    f.append(MenuItem(String("Duplicate..."), EDITOR_DUPLICATE))
+    d.menu_bar.add(Menu(String("File"), f^))
     d.menu_bar.add(Menu(String("Edit"), build_edit_items(False)))
     var v = List[MenuItem]()
     v.append(MenuItem(String("Line Numbers"), EDITOR_TOGGLE_LINE_NUMBERS, checkable=True))
@@ -162,7 +162,10 @@ def build_menus(mut d: Desktop, native: Bool):
     # Three-way cycle (hidden → right → left); the label is re-stamped
     # from the live state every paint by ``_apply_view_config``, so this
     # initial text only has to match the no-tree default.
-    v.append(MenuItem(String("File tree: hidden"), PROJECT_TREE_ACTION))
+    v.append(MenuItem(
+        String("File tree: hidden"), PROJECT_TREE_ACTION,
+        icon=String("sidebar.left"),
+    ))
     v.append(MenuItem(String("Show in file tree"), FILE_TREE_REVEAL))
     if native:
         # Float the tool panels (terminal / debug / test) into a separate
@@ -179,15 +182,23 @@ def build_menus(mut d: Desktop, native: Bool):
     # ``_refresh_shortcuts``. Every item here matches a registered hotkey, so
     # the Keyboard Shortcuts page and this menu can't drift apart.
     var nav = List[MenuItem]()
-    nav.append(MenuItem(String("Go to Line..."),    EDITOR_GOTO))
+    nav.append(MenuItem(
+        String("Go to Line..."), EDITOR_GOTO, icon=String("arrow.right.to.line"),
+    ))
     nav.append(MenuItem(String("Go to Symbol..."),  EDITOR_GOTO_SYMBOL))
     nav.append(MenuItem(String("Find Symbol..."),   EDITOR_FIND_SYMBOL))
     nav.append(MenuItem.separator())
     nav.append(MenuItem(String("Find Next"),        EDITOR_FIND_NEXT))
     nav.append(MenuItem(String("Find Previous"),    EDITOR_FIND_PREV))
-    nav.append(MenuItem(String("Navigate Back"),    EDITOR_NAV_BACK))
+    nav.append(MenuItem.separator())
+    nav.append(MenuItem(
+        String("Navigate Back"), EDITOR_NAV_BACK, icon=String("chevron.backward"),
+    ))
     nav.append(MenuItem(String("Navigate Forward"), EDITOR_NAV_FORWARD))
-    nav.append(MenuItem(String("Next Bookmark"),     EDITOR_BOOKMARK_NEXT))
+    nav.append(MenuItem.separator())
+    nav.append(MenuItem(
+        String("Next Bookmark"), EDITOR_BOOKMARK_NEXT, icon=String("bookmark"),
+    ))
     nav.append(MenuItem(String("Previous Bookmark"), EDITOR_BOOKMARK_PREV))
     nav.append(MenuItem.separator())
     nav.append(MenuItem(String("Word Left"),
@@ -208,37 +219,43 @@ def build_menus(mut d: Desktop, native: Bool):
         synth_key_action(KEY_DOWN, MOD_CTRL | MOD_ALT)))
     nav.append(MenuItem.separator())
     nav.append(MenuItem(String("Previous Change"),
-        synth_key_action(KEY_UP, MOD_CTRL | MOD_SHIFT)))
+        synth_key_action(KEY_UP, MOD_CTRL | MOD_SHIFT),
+        icon=String("plus.forwardslash.minus")))
     nav.append(MenuItem(String("Next Change"),
         synth_key_action(KEY_DOWN, MOD_CTRL | MOD_SHIFT)))
     nav.append(MenuItem.separator())
-    nav.append(MenuItem(String("Previous Window"), WINDOW_ROTATE_PREV))
+    nav.append(MenuItem(
+        String("Previous Window"), WINDOW_ROTATE_PREV, icon=String("macwindow"),
+    ))
     nav.append(MenuItem(String("Next Window"),     WINDOW_ROTATE_NEXT))
     nav.append(MenuItem(String("Focus File Tree"), FILE_TREE_FOCUS))
     nav.append(MenuItem(String("Focus Debug Pane"), DEBUG_FOCUS_PANE))
     d.menu_bar.add(Menu(String("Navigation"), nav^))
-    d.menu_bar.add(_mk_menu(String("Git"),
-        (String("Toggle Blame"), EDITOR_TOGGLE_BLAME),
-        (String("Show diff viewer"), GIT_LOCAL_CHANGES),
-        (String("Review changes…"), GIT_REVIEW),
-        (String("Show History for Selection"), GIT_HISTORY_SELECTION),
-        (String("Show History for File…"), GIT_HISTORY_FILE),
-        (String("Open all with changes"), GIT_OPEN_ALL_CHANGED),
-    ))
+    var g = List[MenuItem]()
+    g.append(MenuItem(String("Show diff viewer"), GIT_LOCAL_CHANGES, icon=String("plus.forwardslash.minus")))
+    g.append(MenuItem(String("Review changes…"), GIT_REVIEW))
+    g.append(MenuItem(String("Open all with changes"), GIT_OPEN_ALL_CHANGED))
+    g.append(MenuItem.separator())
+    g.append(MenuItem(String("Show History for Selection"), GIT_HISTORY_SELECTION, icon=String("clock.arrow.circlepath")))
+    g.append(MenuItem(String("Show History for File…"), GIT_HISTORY_FILE))
+    g.append(MenuItem(String("Toggle Blame"), EDITOR_TOGGLE_BLAME))
+    d.menu_bar.add(Menu(String("Git"), g^))
     var dbg = List[MenuItem]()
-    dbg.append(MenuItem(String("Run"), TARGET_RUN))
+    dbg.append(MenuItem(String("Run"), TARGET_RUN, icon=String("play")))
     dbg.append(MenuItem(String("Test"), TARGET_TEST))
     dbg.append(MenuItem.separator())
-    dbg.append(MenuItem(String("Start / Continue"), DEBUG_START_OR_CONTINUE))
+    dbg.append(MenuItem(String("Start / Continue"), DEBUG_START_OR_CONTINUE, icon=String("ladybug")))
     dbg.append(MenuItem(String("Stop"), DEBUG_STOP))
-    dbg.append(MenuItem(String("Toggle Breakpoint"), DEBUG_TOGGLE_BREAKPOINT))
-    dbg.append(MenuItem(String("Conditional Breakpoint..."), DEBUG_CONDITIONAL_BP))
     dbg.append(MenuItem(String("Step Over"), DEBUG_STEP_OVER))
     dbg.append(MenuItem(String("Step Into"), DEBUG_STEP_IN))
     dbg.append(MenuItem(String("Step Out"), DEBUG_STEP_OUT))
     dbg.append(MenuItem(String("Run to Cursor"), DEBUG_RUN_TO_CURSOR))
-    dbg.append(MenuItem(String("Add Watch..."), DEBUG_ADD_WATCH))
+    dbg.append(MenuItem.separator())
+    dbg.append(MenuItem(String("Toggle Breakpoint"), DEBUG_TOGGLE_BREAKPOINT, icon=String("smallcircle.filled.circle")))
+    dbg.append(MenuItem(String("Conditional Breakpoint..."), DEBUG_CONDITIONAL_BP))
     dbg.append(MenuItem(String("Toggle Break on Raised"), DEBUG_TOGGLE_RAISED))
+    dbg.append(MenuItem.separator())
+    dbg.append(MenuItem(String("Add Watch..."), DEBUG_ADD_WATCH, icon=String("eye")))
     d.menu_bar.add(Menu(String("Debug"), dbg^))
     # Help — rank 100, so it lands rightmost (see ``_menu_rank``). The
     # native frontend turns a menu titled "Help" into the standard macOS
@@ -246,9 +263,11 @@ def build_menus(mut d: Desktop, native: Bool):
     # in TurboKod.swift. "Keyboard Shortcuts" opens the read-only
     # reference covering every binding, including the editor-level chords
     # (Cmd+Up/Down, …) that have no menu item of their own.
-    d.menu_bar.add(_mk_menu(String("Help"),
-        (String("Keyboard Shortcuts"), HELP_HOTKEYS),
+    var help = List[MenuItem]()
+    help.append(MenuItem(
+        String("Keyboard Shortcuts"), HELP_HOTKEYS, icon=String("keyboard"),
     ))
+    d.menu_bar.add(Menu(String("Help"), help^))
 
 
 def refresh_menu_visibility(mut d: Desktop):
