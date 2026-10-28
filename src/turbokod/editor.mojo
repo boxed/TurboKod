@@ -62,7 +62,7 @@ from .lsp_dispatch import (
     CodeAction, CodeActionFileEdit,
     CompletionItem, DIAG_SEVERITY_ERROR, DIAG_SEVERITY_HINT,
     DIAG_SEVERITY_INFO, DIAG_SEVERITY_WARNING, Diagnostic, TextEditEntry,
-    _path_to_uri,
+    uri_to_path,
 )
 from .spell import (
     Speller, SpellActionRequest, find_misspelled_runs,
@@ -71,7 +71,7 @@ from .spell import (
 from .terminal import terminal_supports_extended_underline
 from std.collections.optional import Optional
 from .geometry import Point, Rect
-from .posix import append_string_bytes, monotonic_ms
+from .posix import append_string_bytes, monotonic_ms, realpath
 from .search_options import (
     SearchOptions, SearcherCache, default_search_options,
 )
@@ -411,6 +411,11 @@ def _normalize_crlf(text: String) -> String:
         out.append(b)
         i += 1
     return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=len(out))))
+
+
+def _canonical_path(path: String) -> String:
+    var resolved = realpath(path)
+    return resolved if len(resolved.as_bytes()) > 0 else path
 
 
 def _detect_line_ending(text: String) -> String:
@@ -3683,10 +3688,13 @@ struct Editor(Copyable, Movable):
         the top of the file."""
         if self.read_only:
             return False
-        var my_uri = _path_to_uri(self.file_path)
+        # By path, not URI: servers encode paths their own ways ("(" as
+        # is or %28, %c3 or %C3), and an edit for this file that didn't
+        # match was dropped, leaving a rename half done.
+        var my_path = _canonical_path(self.file_path)
         var edits = List[TextEditEntry]()
         for k in range(len(file_edits)):
-            if file_edits[k].uri == my_uri:
+            if _canonical_path(uri_to_path(file_edits[k].uri)) == my_path:
                 for j in range(len(file_edits[k].edits)):
                     edits.append(file_edits[k].edits[j])
         return self.apply_text_edits(edits^)

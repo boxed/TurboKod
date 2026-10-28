@@ -365,6 +365,27 @@ def test_editor_diagnostic_at_cursor_picks_most_severe() raises:
     assert_false(Bool(ed.diagnostic_at_cursor()))
 
 
+def test_code_action_edits_find_the_file_however_its_uri_is_encoded() raises:
+    # we send "(" as %28; a server may send it back as is, and lowercase hex
+    var path = _temp_path(String("_quickfix (copy) é.py"))
+    assert_true(write_file(path, String("x\n")))
+    var ed = Editor.from_file(path)
+    var uri = String("file://")
+    for c in path.codepoint_slices():
+        if c == " ":
+            uri += "%20"
+        elif c == "é":
+            uri += "%c3%a9"
+        else:
+            uri += c
+    var edits = List[TextEditEntry]()
+    edits.append(TextEditEntry(0, 0, 0, 0, String("y")))
+    var file_edits = List[CodeActionFileEdit]()
+    file_edits.append(CodeActionFileEdit(uri, edits^))
+    assert_true(ed.apply_code_action_edits(file_edits^))
+    assert_equal(ed.buffer.line(0), String("yx"))
+
+
 def test_editor_apply_code_action_edits_inserts_typing_import() raises:
     """``Editor.apply_code_action_edits`` should apply the WorkspaceEdit
     a LSP quickfix carried for *this* editor's file. The canonical
