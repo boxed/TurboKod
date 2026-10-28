@@ -207,6 +207,9 @@ int64_t tk_desktop_spelling_rows(int64_t h, int64_t out_ptr, int64_t cap);
 void tk_desktop_spelling_act(int64_t h, int64_t action, int64_t ptr, int64_t len);
 int64_t tk_desktop_prefs(int64_t h, int64_t out_ptr, int64_t cap);
 void tk_desktop_prefs_set(int64_t h, int64_t ptr, int64_t len);
+// The list sections (languages, dictionaries, projects) and their buttons.
+int64_t tk_desktop_prefs_lists(int64_t h, int64_t out_ptr, int64_t cap);
+void tk_desktop_prefs_list_act(int64_t h, int64_t op, int64_t idx, int64_t ptr, int64_t len);
 void tk_desktop_prefs_close(int64_t h);
 void tk_desktop_prefs_advanced(int64_t h);
 int64_t tk_desktop_tree(int64_t h, int64_t cols, int64_t rows, int64_t out_ptr, int64_t cap);

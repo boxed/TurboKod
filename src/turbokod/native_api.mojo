@@ -28,6 +28,7 @@ from turbokod.events import Event, MOD_CTRL, MOD_META
 from turbokod.geometry import Point, Rect
 from turbokod.local_changes import RightPanel
 from turbokod.json import (
+    json_get_string_array,
     JsonValue, encode_json, json_array, json_bool, json_int, json_object, json_str,
 )
 from turbokod.posix import (
@@ -47,6 +48,7 @@ from turbokod.string_utils import byte_slice
 from turbokod.config import classic_font_label, default_font_label
 from turbokod.json import json_get_bool, json_get_int, json_get_string, parse_json
 from turbokod.theme import theme_names
+from turbokod.dictionary_install import user_dictionary_installed
 from turbokod.search_options import SearchOptions
 from turbokod.breakpoint_dialog import BP_ERR_CANCEL, BP_ERR_DISABLE, BP_ERR_TRY
 from turbokod.git_changes import format_age
@@ -1767,6 +1769,79 @@ def tk_desktop_prefs(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     o.put(String("themes"), _strings(theme_names()))
     o.put(String("fonts"), _strings(st.font_names()))
     return _write_out(encode_json(o), out_ptr, cap)
+
+
+@export
+def tk_desktop_prefs_lists(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
+    """The list sections of the native Settings window: ``languages:
+    [[id, file_types, servers (one command per line), overridden]]``,
+    ``dictionaries: [[display, installed]]``, ``projects: [dir]``."""
+    if h == 0:
+        return 0
+    ref d = _desk(h)[]
+    if not d.settings.active or not d.settings_native:
+        return 0
+    ref st = d.settings
+    var o = json_object()
+    var langs = json_array()
+    for i in range(len(st.languages_view)):
+        ref spec = st.languages_view[i]
+        var r = json_array()
+        r.append(json_str(spec.language_id))
+        r.append(json_str(String(" ").join(spec.file_types)))
+        var servers = String("")
+        for k in range(len(spec.candidates)):
+            if k > 0:
+                servers += String("\n")
+            servers += String(" ").join(spec.candidates[k].argv)
+        r.append(json_str(servers))
+        r.append(json_bool(st.native_has_override(spec.language_id)))
+        langs.append(r)
+    o.put(String("languages"), langs)
+    var dicts = json_array()
+    for i in range(len(st.dict_specs)):
+        var r = json_array()
+        r.append(json_str(st.dict_specs[i].display))
+        r.append(json_bool(user_dictionary_installed(st.dict_specs[i].language_id)))
+        dicts.append(r)
+    o.put(String("dictionaries"), dicts)
+    o.put(String("projects"), _strings(st.project_dirs))
+    return _write_out(encode_json(o), out_ptr, cap)
+
+
+@export
+def tk_desktop_prefs_list_act(
+    h: Int, op: Int, idx: Int, ptr: Int, n: Int,
+) abi("C"):
+    """A list-section button: ``op`` 0 add project folder (JSON string),
+    1 remove project ``idx``, 2 install dictionary ``idx``, 3 remove it,
+    4 save language (JSON ``{id, file_types, servers: [line]}``), 5 remove
+    language ``idx``'s override."""
+    if h == 0:
+        return
+    ref st = _desk(h)[].settings
+    if not st.active:
+        return
+    try:
+        if op == 0:
+            st.native_add_project(parse_json(_string_from(ptr, n)).as_str())
+        elif op == 1:
+            st.native_remove_project(idx)
+        elif op == 2:
+            st.native_dictionary(idx, True)
+        elif op == 3:
+            st.native_dictionary(idx, False)
+        elif op == 4:
+            var o = parse_json(_string_from(ptr, n))
+            st.native_save_language(
+                json_get_string(o, String("id")),
+                json_get_string(o, String("file_types")),
+                json_get_string_array(o, String("servers")),
+            )
+        elif op == 5:
+            st.native_remove_language(idx)
+    except:
+        pass
 
 
 @export

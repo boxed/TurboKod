@@ -4173,6 +4173,7 @@ extension AppController {
                 return true
             }
             pc.update(data)
+            pc.refreshLists()
             return false
         }
         guard let data = data,
@@ -7170,6 +7171,10 @@ final class PrefsController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     private let sizePopup = NSPopUpButton()
     private var builtins: [String] = []
     private var lastData = Data()
+    private lazy var lists = PrefsLists(view: view, window: window)
+    private let tabView = NSTabView()
+
+    func refreshLists() { lists.refresh() }
 
     private static let lsp: [(String, String)] = [
         ("ls_format_on_save", "Format on save"),
@@ -7186,7 +7191,7 @@ final class PrefsController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     init(values o: [String: Any], view: CellView, onClose: @escaping () -> Void) {
         self.view = view
         self.onClose = onClose
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 520),
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 540),
                           styleMask: [.titled, .closable], backing: .buffered, defer: false)
         super.init()
         window.title = "Settings"
@@ -7315,27 +7320,23 @@ final class PrefsController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         for (key, title) in Self.lsp { lspRows.append([empty, check(title, key, o)]) }
         let features = pane(lspRows)
 
-        let tabs = NSTabView()
-        for (title, v) in [("General", general), ("Appearance", appearance), ("Language Features", features)] {
+        let tabs = tabView
+        for (title, v) in [("General", general), ("Appearance", appearance), ("Language Features", features),
+                           ("Languages", lists.languagesPane()), ("Spelling", lists.dictionariesPane()),
+                           ("Projects", lists.projectsPane())] {
             let item = NSTabViewItem(identifier: title)
             item.label = title
             item.view = v
             tabs.addTabViewItem(item)
         }
-        let advanced = NSButton(title: "Advanced Settings…", target: self, action: #selector(advancedClicked))
-        advanced.toolTip = "Language servers, spelling dictionaries, projects and languages"
         let content = NSView()
-        for v in [tabs, advanced] as [NSView] {
-            v.translatesAutoresizingMaskIntoConstraints = false
-            content.addSubview(v)
-        }
+        tabs.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(tabs)
         NSLayoutConstraint.activate([
             tabs.topAnchor.constraint(equalTo: content.topAnchor, constant: 12),
             tabs.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
             tabs.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
-            advanced.topAnchor.constraint(equalTo: tabs.bottomAnchor, constant: 10),
-            advanced.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
-            advanced.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -14),
+            tabs.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
         ])
         window.contentView = content
         renderPreview()
@@ -7377,6 +7378,10 @@ final class PrefsController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     }
 
     func show() {
+        refreshLists()
+        if isCapturing, let t = Int(ProcessInfo.processInfo.environment["TK_CAPTURE_PREFS_TAB"] ?? "") {
+            tabView.selectTabViewItem(at: t)   // scripted screenshots
+        }
         window.center()
         window.makeKeyAndOrderFront(nil)
     }
@@ -7385,13 +7390,6 @@ final class PrefsController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         guard !dismissed else { return }
         dismissed = true
         closingForAdvanced = true   // the core already closed it
-        window.close()
-    }
-
-    @objc private func advancedClicked() {
-        guard let h = view?.handle, h != 0 else { return }
-        closingForAdvanced = true
-        tk_desktop_prefs_advanced(h)
         window.close()
     }
 
@@ -8225,4 +8223,278 @@ final class ReviewBar: NSVisualEffectView {
     @objc private func nextClicked() { act(3) }
     @objc private func doneClicked() { act(2) }
     @objc private func fileChosen() { act(5, files.indexOfSelectedItem) }
+}
+
+
+// MARK: - Settings list sections (Languages, Spelling, Projects)
+//
+// Tables over `tk_desktop_prefs_lists`, refetched every tick but redrawn only
+// on change (a dictionary install finishes asynchronously). Each button is a
+// `tk_desktop_prefs_list_act` op that runs the in-grid section's own method.
+
+final class PrefsLists: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+    private weak var view: CellView?
+    private weak var window: NSWindow?
+    private var languages: [[Any]] = []
+    private var dictionaries: [[Any]] = []
+    private var projects: [String] = []
+    private var lastData = Data()
+    private let langTable = NSTableView()
+    private let dictTable = NSTableView()
+    private let projTable = NSTableView()
+    private let removeOverride = NSButton(title: "Remove Override", target: nil, action: nil)
+    private let install = NSButton(title: "Install", target: nil, action: nil)
+    private let uninstall = NSButton(title: "Remove", target: nil, action: nil)
+    private var buf = [UInt8](repeating: 0, count: 1 << 15)
+
+    init(view: CellView?, window: NSWindow) {
+        self.view = view
+        self.window = window
+        super.init()
+    }
+
+    // MARK: data
+
+    func refresh() {
+        guard let h = view?.handle, h != 0 else { return }
+        var n = 0
+        while true {
+            n = buf.withUnsafeMutableBufferPointer { b -> Int in
+                Int(tk_desktop_prefs_lists(h, Int64(Int(bitPattern: b.baseAddress)), Int64(b.count)))
+            }
+            if n <= buf.count { break }
+            buf = [UInt8](repeating: 0, count: n)
+        }
+        guard n > 0 else { return }
+        let data = Data(buf[0..<n])
+        guard data != lastData,
+              let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
+        lastData = data
+        languages = o["languages"] as? [[Any]] ?? []
+        dictionaries = o["dictionaries"] as? [[Any]] ?? []
+        projects = o["projects"] as? [String] ?? []
+        for t in [langTable, dictTable, projTable] {
+            let sel = t.selectedRowIndexes
+            t.reloadData()
+            t.selectRowIndexes(sel, byExtendingSelection: false)
+        }
+        updateButtons()
+    }
+
+    private func act(_ op: Int, _ idx: Int, _ payload: Any = "") {
+        guard let h = view?.handle, h != 0 else { return }
+        let json = (try? JSONSerialization.data(withJSONObject: payload, options: .fragmentsAllowed))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "\"\""
+        withUTF8Arg(json) { p, l in tk_desktop_prefs_list_act(h, Int64(op), Int64(idx), p, l) }
+        lastData = Data()
+        // The core applies and persists on its next frame.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in self?.refresh() }
+    }
+
+    // MARK: panes
+
+    private func table(_ t: NSTableView, _ cols: [(String, String, CGFloat)]) -> NSScrollView {
+        for (id, title, w) in cols {
+            let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
+            c.title = title
+            c.width = w
+            t.addTableColumn(c)
+        }
+        t.usesAlternatingRowBackgroundColors = true
+        t.dataSource = self
+        t.delegate = self
+        let s = NSScrollView()
+        s.documentView = t
+        s.hasVerticalScroller = true
+        s.borderType = .bezelBorder
+        return s
+    }
+
+    private func pane(_ intro: String, _ scroll: NSScrollView, _ buttons: [NSButton]) -> NSView {
+        let note = NSTextField(wrappingLabelWithString: intro)
+        note.textColor = .secondaryLabelColor
+        note.font = .systemFont(ofSize: 12)
+        let bar = NSStackView(views: buttons + [NSView()])
+        let v = NSView()
+        for x in [note, scroll, bar] as [NSView] {
+            x.translatesAutoresizingMaskIntoConstraints = false
+            v.addSubview(x)
+            NSLayoutConstraint.activate([
+                x.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
+                x.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -16),
+            ])
+        }
+        NSLayoutConstraint.activate([
+            note.topAnchor.constraint(equalTo: v.topAnchor, constant: 14),
+            scroll.topAnchor.constraint(equalTo: note.bottomAnchor, constant: 8),
+            bar.topAnchor.constraint(equalTo: scroll.bottomAnchor, constant: 8),
+            bar.bottomAnchor.constraint(equalTo: v.bottomAnchor, constant: -14),
+        ])
+        return v
+    }
+
+    private func button(_ title: String, _ sel: Selector) -> NSButton {
+        let b = NSButton(title: title, target: self, action: sel)
+        return b
+    }
+
+    func languagesPane() -> NSView {
+        langTable.target = self
+        langTable.doubleAction = #selector(editLanguage)
+        removeOverride.target = self
+        removeOverride.action = #selector(removeLanguage)
+        return pane("Which language server runs for which file types. Your changes override the built-in choices.",
+                    table(langTable, [("id", "Language", 120), ("types", "File types", 180), ("server", "Server", 300)]),
+                    [button("Add…", #selector(addLanguage)), button("Edit…", #selector(editLanguage)), removeOverride])
+    }
+
+    func dictionariesPane() -> NSView {
+        install.target = self
+        install.action = #selector(installDictionary)
+        uninstall.target = self
+        uninstall.action = #selector(removeDictionary)
+        return pane("Extra spell-check dictionaries for other languages, downloaded once.",
+                    table(dictTable, [("name", "Dictionary", 360), ("status", "Status", 160)]),
+                    [install, uninstall])
+    }
+
+    func projectsPane() -> NSView {
+        return pane("Folders that hold your projects — their subfolders are offered when you open a project.",
+                    table(projTable, [("dir", "Folder", 560)]),
+                    [button("Add…", #selector(addProject)), button("Remove", #selector(removeProject))])
+    }
+
+    // MARK: table
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        tableView === langTable ? languages.count : tableView === dictTable ? dictionaries.count : projects.count
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row i: Int) -> NSView? {
+        let id = tableColumn?.identifier.rawValue ?? ""
+        var text = ""
+        var color = NSColor.labelColor
+        if tableView === langTable {
+            let r = languages[i]
+            switch id {
+            case "id":
+                text = r[0] as? String ?? ""
+                if r.count > 3 && (r[3] as? Bool ?? false) { text += "  (yours)" }
+            case "types": text = r[1] as? String ?? ""
+            default:
+                text = ((r[2] as? String ?? "").components(separatedBy: "\n").first ?? "")
+                if text.isEmpty { text = "none"; color = .secondaryLabelColor }
+            }
+        } else if tableView === dictTable {
+            let r = dictionaries[i]
+            if id == "name" { text = r[0] as? String ?? "" } else {
+                let installed = r.count > 1 && (r[1] as? Bool ?? false)
+                text = installed ? "Installed" : "Not installed"
+                color = installed ? .systemGreen : .secondaryLabelColor
+            }
+        } else {
+            text = projects[i]
+        }
+        let l = NSTextField(labelWithString: text)
+        l.lineBreakMode = .byTruncatingMiddle
+        l.textColor = color
+        return l
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) { updateButtons() }
+
+    private func updateButtons() {
+        let lr = langTable.selectedRow
+        removeOverride.isEnabled = lr >= 0 && lr < languages.count
+            && languages[lr].count > 3 && (languages[lr][3] as? Bool ?? false)
+        let dr = dictTable.selectedRow
+        let installed = dr >= 0 && dr < dictionaries.count && dictionaries[dr].count > 1
+            && (dictionaries[dr][1] as? Bool ?? false)
+        install.isEnabled = dr >= 0 && !installed
+        uninstall.isEnabled = dr >= 0 && installed
+    }
+
+    // MARK: actions
+
+    @objc private func addProject() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.prompt = "Add"
+        guard let w = window else { return }
+        panel.beginSheetModal(for: w) { [weak self] r in
+            guard r == .OK, let url = panel.url else { return }
+            self?.act(0, -1, url.path)
+        }
+    }
+
+    @objc private func removeProject() {
+        guard projTable.selectedRow >= 0 else { return }
+        act(1, projTable.selectedRow)
+    }
+
+    @objc private func installDictionary() {
+        guard dictTable.selectedRow >= 0 else { return }
+        act(2, dictTable.selectedRow)
+    }
+
+    @objc private func removeDictionary() {
+        guard dictTable.selectedRow >= 0 else { return }
+        act(3, dictTable.selectedRow)
+    }
+
+    @objc private func removeLanguage() {
+        guard langTable.selectedRow >= 0 else { return }
+        act(5, langTable.selectedRow)
+    }
+
+    @objc private func addLanguage() { languageSheet(row: nil) }
+
+    @objc private func editLanguage() {
+        let r = langTable.clickedRow >= 0 ? langTable.clickedRow : langTable.selectedRow
+        guard r >= 0, r < languages.count else { return }
+        languageSheet(row: languages[r])
+    }
+
+    /// Add / edit a language's routing: its id, the file types, and the
+    /// server command lines in priority order (the first one found runs).
+    private func languageSheet(row: [Any]?) {
+        guard let w = window else { return }
+        let alert = NSAlert()
+        alert.messageText = row == nil ? "Add Language" : "Edit \(row?[0] as? String ?? "")"
+        alert.informativeText = "Server commands are tried top to bottom; the first one installed runs. Leave it empty for no language server."
+        let id = NSTextField(string: row?[0] as? String ?? "")
+        id.isEditable = row == nil
+        id.placeholderString = "e.g. elixir"
+        let types = NSTextField(string: row?[1] as? String ?? "")
+        types.placeholderString = "e.g. ex exs"
+        let sv = NSScrollView(frame: NSRect(x: 0, y: 0, width: 340, height: 90))
+        let servers = NSTextView(frame: sv.bounds)
+        servers.isRichText = false
+        servers.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        servers.string = row?[2] as? String ?? ""
+        servers.autoresizingMask = [.width]
+        sv.documentView = servers
+        sv.hasVerticalScroller = true
+        sv.borderType = .bezelBorder
+        sv.heightAnchor.constraint(equalToConstant: 90).isActive = true
+        func label(_ s: String) -> NSTextField { let l = NSTextField(labelWithString: s); l.alignment = .right; return l }
+        let grid = NSGridView(views: [[label("Language:"), id], [label("File types:"), types], [label("Servers:"), sv]])
+        grid.rowSpacing = 8
+        grid.column(at: 1).width = 340
+        grid.rowAlignment = .firstBaseline
+        grid.layoutSubtreeIfNeeded()
+        grid.frame = NSRect(origin: .zero, size: grid.fittingSize)
+        alert.accessoryView = grid
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
+        alert.window.initialFirstResponder = row == nil ? id : types
+        alert.beginSheetModal(for: w) { [weak self] r in
+            guard r == .alertFirstButtonReturn else { return }
+            let lines = servers.string.components(separatedBy: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            self?.act(4, -1, ["id": id.stringValue.trimmingCharacters(in: .whitespaces),
+                              "file_types": types.stringValue, "servers": lines])
+        }
+    }
 }

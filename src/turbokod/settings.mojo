@@ -54,7 +54,7 @@ from .language_config import (
     LanguageSpec, apply_language_overrides, built_in_servers,
     find_language_by_id, find_language_for_extension,
 )
-from .language_editor import LanguageEditor
+from .language_editor import LanguageEditor, _split_space
 from .dropdown import (
     DROPDOWN_HIT_BODY, DROPDOWN_HIT_NONE, DROPDOWN_HIT_OUTSIDE,
     DROPDOWN_HIT_POPUP, Dropdown,
@@ -758,6 +758,59 @@ struct Settings(Movable):
 
     def font_names(self) -> List[String]:
         return self._font_names.copy()
+
+    def native_add_project(mut self, var path: String):
+        self._proj_tf.set_text(path^)
+        self._add_project_dir()
+
+    def native_remove_project(mut self, i: Int):
+        if i < 0 or i >= len(self.project_dirs):
+            return
+        self.selected_project_dir = i
+        self._remove_project_dir()
+
+    def native_dictionary(mut self, i: Int, install: Bool):
+        """Install / remove catalog dictionary ``i`` — queued for the
+        Desktop exactly as the in-grid buttons queue it."""
+        if i < 0 or i >= len(self.dict_specs):
+            return
+        self.selected_dict = i
+        if install:
+            self._request_dict_install()
+        else:
+            self._request_dict_remove()
+
+    def native_save_language(
+        mut self, var language_id: String, file_types: String,
+        servers: List[String],
+    ):
+        """The native language editor's Save: ``file_types`` and each
+        server command line are split the way the in-grid editor splits
+        them (whitespace, quotes keep a token together)."""
+        var ov = LanguageServerOverride()
+        ov.language_id = language_id^
+        ov.file_types = _split_space(file_types)
+        for i in range(len(servers)):
+            var argv = _split_space(servers[i])
+            if len(argv) > 0:
+                ov.argvs.append(argv^)
+        if len(ov.language_id.as_bytes()) == 0:
+            return
+        self._apply_language_override(ov)
+
+    def native_remove_language(mut self, i: Int):
+        """Drop the user's override for language row ``i`` (back to the
+        built-in servers, or gone if it was user-added)."""
+        if i < 0 or i >= len(self.languages_view):
+            return
+        self.selected_language = i
+        self._remove_language_override()
+
+    def native_has_override(self, language_id: String) -> Bool:
+        for i in range(len(self.language_overrides)):
+            if self.language_overrides[i].language_id == language_id:
+                return True
+        return False
 
     def ack_dirty(mut self):
         """Host calls this after persisting the config to disk."""
@@ -2138,6 +2191,11 @@ struct Settings(Movable):
         self.language_editor.close()
         if len(entry.language_id.as_bytes()) == 0:
             return
+        self._apply_language_override(entry)
+
+    def _apply_language_override(mut self, entry: LanguageServerOverride):
+        """Splice ``entry`` into ``language_overrides`` (the in-grid
+        language editor's OK and the native one's Save both land here)."""
         # Splice the override into ``language_overrides``: replace if a
         # row already exists for this language id, append otherwise.
         var rebuilt = List[LanguageServerOverride]()

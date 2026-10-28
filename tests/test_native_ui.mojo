@@ -508,6 +508,28 @@ def test_native_review_picks_navigates_and_ends() raises:
     assert_false(d.review.active)
 
 
+def test_native_settings_lists_go_through_the_sections_own_methods() raises:
+    var d = _native_desktop(String("x\n"))
+    _ = d.dispatch_action(APP_SETTINGS, _SCREEN)
+    ref st = d.settings
+    st.native_add_project(String("/tmp/somewhere/"))
+    assert_equal(st.project_dirs[len(st.project_dirs) - 1], String("/tmp/somewhere"))
+    st.native_remove_project(len(st.project_dirs) - 1)
+    st.native_save_language(
+        String("zzlang"), String("zz zzz"),
+        [String("zz-ls --stdio"), String("")],
+    )
+    assert_true(st.native_has_override(String("zzlang")))
+    var row = -1
+    for i in range(len(st.languages_view)):
+        if st.languages_view[i].language_id == String("zzlang"):
+            row = i
+    assert_true(row >= 0)
+    assert_equal(len(st.languages_view[row].candidates), 1)   # blank line dropped
+    st.native_remove_language(row)
+    assert_false(st.native_has_override(String("zzlang")))
+
+
 def main() raises:
     setup_test_env()
     TestSuite.discover_tests[__functions_in_module()]().run()

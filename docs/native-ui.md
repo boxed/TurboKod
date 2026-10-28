@@ -30,8 +30,9 @@ It is being built in phases:
    hands over to the grid Settings window for the specialist sections.
 10. **Spelling, Git history, the on-disk-change merge and review mode** are
     native too (see "Full-screen tools").
-11. Deliberately still the grid: the editor body, the terminal / debug /
-    test panels, and the "Advanced Settings…" window.
+11. Deliberately still the grid: the editor body and the panels' contents
+    (a terminal emulator). Both are built on the cell grid, and native
+    chrome goes around them instead.
 
 ## How a dialog becomes native
 
@@ -198,10 +199,15 @@ It never writes config itself:
   dirty. The Desktop's per-frame settings sync applies them, side effects
   included: stale inlay hints cleared, cursors re-revealed on a wrap
   change, the window cap enforced, LSP re-configured.
-- Paint re-mirrors those fields into the in-grid widgets, so **"Advanced
-  Settings…"** (`tk_desktop_prefs_advanced`, which clears
-  `settings_native`) shows the grid window with the same values and every
-  section: language servers, spelling dictionaries, projects, languages.
+- **The list sections** (Languages, Spelling, Projects) read
+  `tk_desktop_prefs_lists` and act through `tk_desktop_prefs_list_act`.
+  That calls the section's own methods: `_add_project_dir`,
+  `_request_dict_install` / `_remove`, and `_apply_language_override`. The
+  last one is shared with the in-grid language editor's OK.
+- Language server command lines are split by the in-grid editor's
+  `_split_space` (whitespace, with quotes keeping a token together).
+- Every section is native, so there's no "Advanced Settings…" escape
+  hatch.
 
 ## File tree
 
