@@ -1894,6 +1894,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // macOS-style UI: the native Settings window (one per Desktop that opened it).
     var prefsWindows: [ObjectIdentifier: PrefsController] = [:]
     var projectPrefsWindows: [ObjectIdentifier: ProjectPrefsController] = [:]
+    // Declarative dialogs (ui_tree.mojo) projected natively, per window.
+    var declarative: [ObjectIdentifier: DeclarativeController] = [:]
     // macOS-style UI: Project ▸ Spelling as a sheet, per window.
     var spellingSheets: [ObjectIdentifier: SpellingController] = [:]
     // macOS-style UI: Git history as a sheet, per window.
@@ -2301,6 +2303,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             for v in self.views where v.handle != 0 {
                 if self.pollNativeDialog(v) { changed = true }
+                if self.pollDeclarative(v) { changed = true }
                 if self.pollTabStrip(v) { changed = true }
                 if self.pollPicker(v) { changed = true }
                 if self.pollPopup(v) { changed = true }
@@ -3500,6 +3503,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         trees[ObjectIdentifier(v)] = nil
         if let p = prefsWindows.removeValue(forKey: ObjectIdentifier(v)) { p.dismiss() }
         if let p = projectPrefsWindows.removeValue(forKey: ObjectIdentifier(v)) { p.dismiss() }
+        declarative[ObjectIdentifier(v)] = nil
         spellingSheets[ObjectIdentifier(v)] = nil
         historySheets[ObjectIdentifier(v)] = nil
         mergeSheets[ObjectIdentifier(v)] = nil
@@ -4502,6 +4506,29 @@ extension AppController {
         w.show()
     }
 
+    /// Project the open declarative dialog (`tk_desktop_ui`) as a sheet.
+    func pollDeclarative(_ v: CellView) -> Bool {
+        let id = ObjectIdentifier(v)
+        let o = readCoreJSON(&nativeDialogBuf, { tk_desktop_ui(v.handle, $0, $1) })
+            .flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
+        let name = o?["name"] as? String
+        if let dc = declarative[id], dc.name != name {
+            declarative[id] = nil
+            dc.dismiss()
+            return true
+        }
+        guard let o = o, let name = name, let tree = o["tree"] as? [String: Any] else { return false }
+        if let dc = declarative[id] {
+            return dc.update(tree)
+        }
+        guard let win = v.window, win.isVisible, win.attachedSheet == nil else { return false }
+        let dc = DeclarativeController(name: name, view: v)
+        declarative[id] = dc
+        _ = dc.update(tree)
+        dc.present(in: win)
+        return true
+    }
+
     /// Show, or retract, `v`'s native dialog. True when anything changed.
     func pollNativeDialog(_ v: CellView) -> Bool {
         let id = ObjectIdentifier(v)
@@ -4523,7 +4550,6 @@ extension AppController {
         case "save_as": showSavePanel(dialog, for: v, in: win)
         case "choice": showChoiceSheet(dialog, for: v, in: win)
         case "color": showColorSheet(dialog, for: v, in: win)
-        case "form": showFormSheet(dialog, for: v, in: win)
         default: return false
         }
         return true
@@ -4650,80 +4676,6 @@ extension AppController {
             let mode = format.indexOfSelectedItem
             self.finishNativeSheet(v) {
                 tk_desktop_native_color_answer(v.handle, Int64(packed), Int64(mode), ok ? 1 : 0)
-                return 0
-            }
-        }
-    }
-
-    /// A small form (Fill, Breakpoint, a failed breakpoint condition): one
-    /// native control per field in a grid, the dialog's own buttons (the
-    /// first is the default, the last is Cancel).
-    private func showFormSheet(_ d: [String: Any], for v: CellView, in win: NSWindow) {
-        let alert = NSAlert()
-        alert.messageText = d["title"] as? String ?? ""
-        alert.informativeText = d["message"] as? String ?? ""
-        var rows: [[NSView]] = []
-        var read: [String: () -> Any] = [:]
-        for f in d["fields"] as? [[String: Any]] ?? [] {
-            let id = f["id"] as? String ?? ""
-            let label = NSTextField(labelWithString: (f["label"] as? String ?? "") + ":")
-            label.alignment = .right
-            switch f["type"] as? String ?? "" {
-            case "check":
-                let cb = NSButton(checkboxWithTitle: f["label"] as? String ?? "", target: nil, action: nil)
-                cb.state = (f["value"] as? Bool ?? false) ? .on : .off
-                rows.append([NSGridCell.emptyContentView, cb])
-                read[id] = { cb.state == .on }
-            case "choice":
-                let pop = NSPopUpButton()
-                pop.addItems(withTitles: f["options"] as? [String] ?? [])
-                pop.selectItem(at: f["value"] as? Int ?? 0)
-                rows.append([label, pop])
-                read[id] = { pop.indexOfSelectedItem }
-            case "info":
-                let sv = NSScrollView(frame: NSRect(x: 0, y: 0, width: 300, height: 90))
-                let tv = NSTextView(frame: sv.bounds)
-                tv.isEditable = false
-                tv.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-                tv.string = f["value"] as? String ?? ""
-                tv.autoresizingMask = [.width]
-                sv.documentView = tv
-                sv.hasVerticalScroller = true
-                sv.borderType = .bezelBorder
-                sv.heightAnchor.constraint(equalToConstant: 90).isActive = true
-                rows.append([label, sv])
-            default:
-                let tf = NSTextField(string: f["value"] as? String ?? "")
-                tf.usesSingleLineMode = true
-                rows.append([label, tf])
-                read[id] = { tf.stringValue }
-            }
-        }
-        let grid = NSGridView(views: rows)
-        grid.rowSpacing = 8
-        grid.columnSpacing = 8
-        grid.column(at: 0).xPlacement = .trailing
-        grid.column(at: 1).width = 300
-        grid.layoutSubtreeIfNeeded()
-        grid.frame = NSRect(origin: .zero, size: grid.fittingSize)
-        alert.accessoryView = grid
-        let buttons = d["buttons"] as? [String] ?? ["OK", "Cancel"]
-        for (i, b) in buttons.enumerated() {
-            let btn = alert.addButton(withTitle: b)
-            if i == buttons.count - 1 { btn.keyEquivalent = "\u{1b}" }
-        }
-        nativeSheets[ObjectIdentifier(v)] = alert.window
-        alert.beginSheetModal(for: win) { [weak self, weak v] resp in
-            guard let self = self, let v = v, resp != .abort else { return }
-            let button = resp.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
-            var values: [String: Any] = [:]
-            for (k, r) in read { values[k] = r() }
-            let json = (try? JSONSerialization.data(withJSONObject: values))
-                .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
-            self.finishNativeSheet(v) {
-                withUTF8Arg(json) { p, l in
-                    tk_desktop_native_form_answer(v.handle, Int64(button), p, l)
-                }
                 return 0
             }
         }
@@ -9202,4 +9154,360 @@ final class ChooseFile: NSObject {
         p.canChooseDirectories = false
         if p.runModal() == .OK, let url = p.url { field?.stringValue = url.path }
     }
+}
+
+// MARK: - declarative UI: the native projector
+//
+// Builds AppKit views from a `ui_tree.mojo` tree (`tk_desktop_ui`) — the
+// same description the grid projector (`ui_grid.mojo`) lays out in cells.
+// Edits and button presses go back as `set` / `act` events
+// (`tk_desktop_ui_event`), which the core applies exactly as it applies the
+// grid's. The views are rebuilt only when the tree's *shape* changes (node
+// kinds, keys, options); otherwise values update in place, so a field being
+// typed in keeps its focus and cursor.
+
+final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDataSource,
+                                   NSTableViewDelegate, NSTabViewDelegate {
+    let name: String
+    private weak var view: CellView?
+    private let panel: NSPanel
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let host = NSView()
+    private var shape = ""
+    private var views: [String: NSView] = [:]
+    private var tables: [ObjectIdentifier: (key: String, node: [String: Any])] = [:]
+    private var dismissed = false
+    private var lastTree: [String: Any] = [:]
+
+    // Mirrors the UI_* flag bits in ui_tree.mojo.
+    private static let DISABLED = 1 << 0, DEFAULT = 1 << 1, CANCEL = 1 << 2, DESTRUCTIVE = 1 << 3
+    private static let CENTER = 1 << 4, SECONDARY = 1 << 5, HEADING = 1 << 6, CHECKABLE = 1 << 8
+
+    init(name: String, view: CellView) {
+        self.name = name
+        self.view = view
+        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 480, height: 240),
+                        styleMask: [.titled], backing: .buffered, defer: true)
+        super.init()
+        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.lineBreakMode = .byTruncatingMiddle
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let content = NSView()
+        for v in [titleLabel, host] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(v)
+            NSLayoutConstraint.activate([
+                v.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
+                v.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
+            ])
+        }
+        NSLayoutConstraint.activate([
+            titleLabel.topAnchor.constraint(equalTo: content.topAnchor, constant: 16),
+            host.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 12),
+            host.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
+        ])
+        panel.contentView = content
+    }
+
+    func present(in win: NSWindow) {
+        fitPanel()
+        win.beginSheet(panel, completionHandler: nil)
+    }
+
+    private func fitPanel() {
+        panel.contentView?.layoutSubtreeIfNeeded()
+        let fit = panel.contentView?.fittingSize ?? NSSize(width: 480, height: 240)
+        panel.setContentSize(NSSize(width: max(420, fit.width), height: fit.height))
+    }
+
+    func dismiss() {
+        guard !dismissed else { return }
+        dismissed = true
+        panel.sheetParent?.endSheet(panel)
+    }
+
+    // MARK: events
+
+    private func send(_ events: [[Any]]) {
+        guard let h = view?.handle, h != 0,
+              let d = try? JSONSerialization.data(withJSONObject: ["name": name, "events": events]),
+              let json = String(data: d, encoding: .utf8) else { return }
+        withUTF8Arg(json) { p, l in tk_desktop_ui_event(h, p, l) }
+        view?.invalidateFrame()
+        view?.needsDisplay = true
+    }
+
+    private func set(_ key: String, _ value: String) { send([[false, key, value]]) }
+    private func act(_ key: String) { send([[true, key, ""]]) }
+
+    // MARK: tree → views
+
+    private static func shapeOf(_ n: [String: Any]) -> String {
+        var s = "\(n["k"] as? String ?? "")|\(n["key"] as? String ?? "")"
+        if let o = n["opts"] as? [String] { s += "[" + o.joined(separator: ",") + "]" }
+        for c in n["kids"] as? [[String: Any]] ?? [] { s += "(" + shapeOf(c) + ")" }
+        return s
+    }
+
+    /// Adopt a tree: rebuild on a new shape, else update in place.
+    func update(_ tree: [String: Any]) -> Bool {
+        if NSDictionary(dictionary: tree).isEqual(to: lastTree) { return false }
+        lastTree = tree
+        titleLabel.stringValue = tree["text"] as? String ?? ""
+        let body = (tree["kids"] as? [[String: Any]])?.first ?? [:]
+        let sh = Self.shapeOf(body)
+        if sh != shape {
+            shape = sh
+            views = [:]
+            tables = [:]
+            for sub in host.subviews { sub.removeFromSuperview() }
+            let v = build(body, path: "0")
+            v.translatesAutoresizingMaskIntoConstraints = false
+            host.addSubview(v)
+            NSLayoutConstraint.activate([
+                v.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+                v.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+                v.topAnchor.constraint(equalTo: host.topAnchor),
+                v.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+            ])
+            if !dismissed, panel.sheetParent != nil { fitPanel() }
+        }
+        apply(body, path: "0")
+        return true
+    }
+
+    private func has(_ n: [String: Any], _ bit: Int) -> Bool { (n["f"] as? Int ?? 0) & bit != 0 }
+
+    private func build(_ n: [String: Any], path: String) -> NSView {
+        let kids = n["kids"] as? [[String: Any]] ?? []
+        let key = n["key"] as? String ?? ""
+        var out: NSView
+        switch n["k"] as? String ?? "" {
+        case "vstack":
+            let st = NSStackView(views: kids.enumerated().map { build($1, path: "\(path).\($0)") })
+            st.orientation = .vertical
+            st.alignment = .leading
+            st.spacing = (n["n"] as? Int ?? 0) > 0 ? 14 : 4
+            for v in st.arrangedSubviews {
+                v.widthAnchor.constraint(equalTo: st.widthAnchor).isActive = true
+            }
+            out = st
+        case "hstack":
+            var subs = kids.enumerated().map { build($1, path: "\(path).\($0)") }
+            let center = has(n, Self.CENTER)
+            if center { subs = [NSView()] + subs + [NSView()] }
+            let st = NSStackView(views: subs)
+            st.orientation = .horizontal
+            st.spacing = 8
+            if center { subs.first!.widthAnchor.constraint(equalTo: subs.last!.widthAnchor).isActive = true }
+            out = st
+        case "form", "row":
+            let rows = (n["k"] as? String) == "row" ? [n] : kids
+            let grid = NSGridView(views: rows.enumerated().map { (i, r) -> [NSView] in
+                let text = r["text"] as? String ?? ""
+                let l = NSTextField(labelWithString: text.isEmpty ? "" : text + ":")
+                l.alignment = .right
+                views["\(path).\(i).label"] = l
+                let c = build((r["kids"] as? [[String: Any]])?.first ?? [:], path: "\(path).\(i).0")
+                return [l, c]
+            })
+            grid.rowSpacing = 8
+            grid.columnSpacing = 8
+            grid.rowAlignment = .firstBaseline
+            grid.column(at: 0).xPlacement = .trailing
+            out = grid
+        case "tabs":
+            let tv = NSTabView()
+            for (i, page) in kids.enumerated() {
+                let item = NSTabViewItem(identifier: "\(i)")
+                item.label = page["text"] as? String ?? ""
+                item.view = build(page, path: "\(path).\(i)")
+                tv.addTabViewItem(item)
+            }
+            tv.delegate = self
+            tv.identifier = NSUserInterfaceItemIdentifier(key)
+            out = tv
+        case "label":
+            out = NSTextField(wrappingLabelWithString: n["text"] as? String ?? "")
+        case "text":
+            let f = NSTextField(string: n["value"] as? String ?? "")
+            f.placeholderString = n["ph"] as? String
+            f.delegate = self
+            f.identifier = NSUserInterfaceItemIdentifier(key)
+            f.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
+            out = f
+        case "check":
+            let b = NSButton(checkboxWithTitle: n["text"] as? String ?? "", target: self,
+                             action: #selector(checkChanged(_:)))
+            b.identifier = NSUserInterfaceItemIdentifier(key)
+            out = b
+        case "choice":
+            let p = NSPopUpButton()
+            p.addItems(withTitles: n["opts"] as? [String] ?? [])
+            p.target = self
+            p.action = #selector(choiceChanged(_:))
+            p.identifier = NSUserInterfaceItemIdentifier(key)
+            out = p
+        case "table":
+            let t = NSTableView()
+            for (i, title) in (n["opts"] as? [String] ?? []).enumerated() {
+                let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("\(i)"))
+                c.title = title
+                t.addTableColumn(c)
+            }
+            t.usesAlternatingRowBackgroundColors = true
+            t.dataSource = self
+            t.delegate = self
+            t.target = self
+            t.doubleAction = #selector(tableActivated(_:))
+            let sv = NSScrollView()
+            sv.documentView = t
+            sv.hasVerticalScroller = true
+            sv.borderType = .bezelBorder
+            let rows = max(n["h"] as? Int ?? 6, 3)
+            sv.heightAnchor.constraint(greaterThanOrEqualToConstant: CGFloat(rows) * 22 + 24).isActive = true
+            sv.widthAnchor.constraint(greaterThanOrEqualToConstant: 360).isActive = true
+            tables[ObjectIdentifier(t)] = (key, n)
+            views[path + ".table"] = t
+            out = sv
+        case "button":
+            let b = NSButton(title: n["text"] as? String ?? "", target: self, action: #selector(buttonPressed(_:)))
+            b.identifier = NSUserInterfaceItemIdentifier(key)
+            if has(n, Self.DEFAULT) { b.keyEquivalent = "\r" }
+            if has(n, Self.CANCEL) { b.keyEquivalent = "\u{1b}" }
+            if has(n, Self.DESTRUCTIVE) { b.hasDestructiveAction = true }
+            out = b
+        case "separator":
+            let b = NSBox()
+            b.boxType = .separator
+            out = b
+        default:
+            let sp = NSView()
+            sp.setContentHuggingPriority(.defaultLow, for: .vertical)
+            out = sp
+        }
+        views[path] = out
+        return out
+    }
+
+    /// Push the tree's current values into the existing views.
+    private func apply(_ n: [String: Any], path: String) {
+        let kids = n["kids"] as? [[String: Any]] ?? []
+        let enabled = !has(n, Self.DISABLED)
+        let v = views[path]
+        switch n["k"] as? String ?? "" {
+        case "label":
+            if let l = v as? NSTextField {
+                l.stringValue = n["text"] as? String ?? ""
+                l.textColor = has(n, Self.SECONDARY) ? .secondaryLabelColor
+                    : has(n, Self.HEADING) ? .systemRed : .labelColor
+                l.font = .systemFont(ofSize: 13, weight: has(n, Self.HEADING) ? .semibold : .regular)
+            }
+        case "text":
+            if let f = v as? NSTextField {
+                // Never overwrite the field being typed in.
+                if f.currentEditor() == nil { f.stringValue = n["value"] as? String ?? "" }
+                f.isEnabled = enabled
+            }
+        case "check":
+            if let b = v as? NSButton { b.state = (n["n"] as? Int ?? 0) != 0 ? .on : .off; b.isEnabled = enabled }
+        case "choice":
+            if let p = v as? NSPopUpButton { p.selectItem(at: n["n"] as? Int ?? 0); p.isEnabled = enabled }
+        case "button":
+            if let b = v as? NSButton { b.title = n["text"] as? String ?? ""; b.isEnabled = enabled }
+        case "tabs":
+            if let tv = v as? NSTabView, let cur = tv.selectedTabViewItem {
+                let sel = n["n"] as? Int ?? 0
+                if sel < tv.numberOfTabViewItems && tv.indexOfTabViewItem(cur) != sel {
+                    tv.selectTabViewItem(at: sel)
+                }
+            }
+        case "table":
+            if let t = views[path + ".table"] as? NSTableView {
+                tables[ObjectIdentifier(t)] = (n["key"] as? String ?? "", n)
+                t.reloadData()
+                let sel = n["n"] as? Int ?? -1
+                if sel >= 0 && sel < t.numberOfRows {
+                    t.selectRowIndexes(IndexSet(integer: sel), byExtendingSelection: false)
+                }
+            }
+        case "form", "row":
+            let rows = (n["k"] as? String) == "row" ? [n] : kids
+            for (i, r) in rows.enumerated() {
+                let control = (r["kids"] as? [[String: Any]])?.first ?? [:]
+                if let l = views["\(path).\(i).label"] as? NSTextField {
+                    l.textColor = has(control, Self.DISABLED) ? .tertiaryLabelColor : .labelColor
+                }
+                apply(control, path: "\(path).\(i).0")
+            }
+            return
+        default:
+            break
+        }
+        for (i, c) in kids.enumerated() { apply(c, path: "\(path).\(i)") }
+    }
+
+    // MARK: control actions
+
+    func controlTextDidChange(_ obj: Notification) {
+        guard let f = obj.object as? NSTextField, let key = f.identifier?.rawValue else { return }
+        set(key, f.stringValue)
+    }
+
+    @objc private func checkChanged(_ b: NSButton) {
+        guard let key = b.identifier?.rawValue else { return }
+        set(key, b.state == .on ? "1" : "0")
+    }
+
+    @objc private func choiceChanged(_ p: NSPopUpButton) {
+        guard let key = p.identifier?.rawValue else { return }
+        set(key, "\(p.indexOfSelectedItem)")
+    }
+
+    @objc private func buttonPressed(_ b: NSButton) {
+        guard let key = b.identifier?.rawValue else { return }
+        panel.makeFirstResponder(nil)   // commit a field mid-edit first
+        act(key)
+    }
+
+    func tabView(_ tabView: NSTabView, didSelect item: NSTabViewItem?) {
+        guard let key = tabView.identifier?.rawValue, let item = item else { return }
+        set(key, "\(tabView.indexOfTabViewItem(item))")
+    }
+
+    // MARK: tables
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        (tables[ObjectIdentifier(tableView)]?.node["rows"] as? [[String]])?.count ?? 0
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard let entry = tables[ObjectIdentifier(tableView)],
+              let rows = entry.node["rows"] as? [[String]], row < rows.count else { return nil }
+        let col = Int(tableColumn?.identifier.rawValue ?? "0") ?? 0
+        let cell = col < rows[row].count ? rows[row][col] : ""
+        if col == 0 && has(entry.node, Self.CHECKABLE) {
+            let b = NSButton(checkboxWithTitle: "", target: self, action: #selector(rowToggled(_:)))
+            b.state = cell == "1" ? .on : .off
+            b.tag = row
+            return b
+        }
+        let l = NSTextField(labelWithString: cell)
+        l.lineBreakMode = .byTruncatingMiddle
+        return l
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        guard let t = notification.object as? NSTableView, let entry = tables[ObjectIdentifier(t)],
+              t.selectedRow >= 0, t.selectedRow != (entry.node["n"] as? Int ?? -1) else { return }
+        set(entry.key, "\(t.selectedRow)")
+    }
+
+    @objc private func tableActivated(_ t: NSTableView) {
+        guard let entry = tables[ObjectIdentifier(t)], let action = entry.node["value"] as? String,
+              !action.isEmpty else { return }
+        act(action)
+    }
+
+    @objc private func rowToggled(_ b: NSButton) { act("toggle:\(b.tag)") }
 }

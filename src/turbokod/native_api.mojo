@@ -49,10 +49,11 @@ from turbokod.string_utils import byte_slice
 from turbokod.config import classic_font_label, default_font_label
 from turbokod.json import json_get_bool, json_get_int, json_get_string, parse_json
 from turbokod.theme import theme_names
+from turbokod.ui_grid import UIEvent
+from turbokod.ui_tree import ui_to_json
 from turbokod.project_targets import join_env_field
 from turbokod.dictionary_install import user_dictionary_installed
 from turbokod.search_options import SearchOptions
-from turbokod.breakpoint_dialog import BP_ERR_CANCEL, BP_ERR_DISABLE, BP_ERR_TRY
 from turbokod.git_changes import format_age
 from turbokod.diff import REGION_STABLE
 from turbokod.posix import wall_clock_ms
@@ -1314,36 +1315,6 @@ def _strings(items: List[String]) -> JsonValue:
     return a^
 
 
-def _form_text(id: String, label: String, value: String) -> JsonValue:
-    var f = json_object()
-    f.put(String("id"), json_str(id))
-    f.put(String("type"), json_str(String("text")))
-    f.put(String("label"), json_str(label))
-    f.put(String("value"), json_str(value))
-    return f^
-
-
-def _form_check(id: String, label: String, on: Bool) -> JsonValue:
-    var f = json_object()
-    f.put(String("id"), json_str(id))
-    f.put(String("type"), json_str(String("check")))
-    f.put(String("label"), json_str(label))
-    f.put(String("value"), json_bool(on))
-    return f^
-
-
-def _form_choice(
-    id: String, label: String, options: List[String], index: Int,
-) -> JsonValue:
-    var f = json_object()
-    f.put(String("id"), json_str(id))
-    f.put(String("type"), json_str(String("choice")))
-    f.put(String("label"), json_str(label))
-    f.put(String("options"), _strings(options))
-    f.put(String("value"), json_int(index))
-    return f^
-
-
 def _native_dialog_json(ref d: Desktop) -> String:
     """The dialog the host should be showing natively, as JSON, or empty."""
     if not d.native_dialog_active():
@@ -1361,56 +1332,6 @@ def _native_dialog_json(ref d: Desktop) -> String:
             String("destructive"),
             json_int(d.confirm_dialog.destructive_index()),
         )
-    elif d.fill_dialog.active:
-        ref f = d.fill_dialog
-        o.put(String("kind"), json_str(String("form")))
-        o.put(String("title"), json_str(
-            String("Fill ") + String(f.caret_count) + String(" cursors")
-        ))
-        var fields = json_array()
-        fields.append(_form_choice(String("mode"), String("Insert"), f.mode.options, f.mode.index))
-        fields.append(_form_text(String("text"), String("Text to insert"), f.text.text))
-        fields.append(_form_text(String("initial"), String("Initial number"), f.initial.text))
-        fields.append(_form_text(String("increment"), String("Increment"), f.increment.text))
-        fields.append(_form_choice(String("format"), String("Number format"), f.format_.options, f.format_.index))
-        fields.append(_form_check(String("pad"), String("Pad with leading zeros"), f.pad.on))
-        o.put(String("fields"), fields)
-        o.put(String("buttons"), _strings([String("Fill"), String("Cancel")]))
-    elif d.breakpoint_menu.active:
-        ref b = d.breakpoint_menu
-        o.put(String("kind"), json_str(String("form")))
-        o.put(String("title"), json_str(
-            String("Breakpoint at ") + basename(b.path) + String(":") + String(b.line)
-        ))
-        var fields = json_array()
-        fields.append(_form_check(String("enabled"), String("Enabled"), b.enabled.on))
-        fields.append(_form_choice(String("wait_for"), String("Enable after breakpoint"), b.wait_for.options, b.wait_for.index))
-        fields.append(_form_text(String("condition"), String("Condition"), b.condition.text))
-        o.put(String("fields"), fields)
-        o.put(String("buttons"), _strings([String("Apply"), String("Cancel")]))
-    elif d.breakpoint_error.active:
-        ref e = d.breakpoint_error
-        o.put(String("kind"), json_str(String("form")))
-        o.put(String("title"), json_str(String("Breakpoint condition failed")))
-        o.put(String("message"), json_str(e.error))
-        var fields = json_array()
-        var locals_text = String("")
-        for i in range(len(e.locals_)):
-            if i > 0:
-                locals_text += String("\n")
-            locals_text += e.locals_[i]
-        if len(locals_text.as_bytes()) > 0:
-            var info = json_object()
-            info.put(String("id"), json_str(String("locals")))
-            info.put(String("type"), json_str(String("info")))
-            info.put(String("label"), json_str(String("Locals")))
-            info.put(String("value"), json_str(locals_text))
-            fields.append(info)
-        fields.append(_form_text(String("condition"), String("Condition"), e.condition.text))
-        o.put(String("fields"), fields)
-        o.put(String("buttons"), _strings(
-            [String("Try Again"), String("Disable & Continue"), String("Cancel")]
-        ))
     elif d.color_picker.active:
         o.put(String("kind"), json_str(String("color")))
         o.put(String("rgb"), json_int(d.color_picker.current_rgb_packed()))
@@ -2981,42 +2902,46 @@ def tk_desktop_native_color_answer(
 
 
 @export
-def tk_desktop_native_form_answer(
-    h: Int, button: Int, ptr: Int, n: Int,
-) abi("C"):
-    """Answer a ``form`` dialog: the pressed button's index (the last one
-    is Cancel) and the fields' values as ``{id: value}`` JSON."""
+def tk_desktop_ui(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
+    """The open declarative dialog for the native projector: ``{name,
+    tree}`` with ``tree`` the ``ui_to_json`` of its ``ui()``. 0 when none is
+    up natively. Same buffer contract as ``tk_desktop_native_dialog``."""
+    if h == 0:
+        return 0
+    ref d = _desk(h)[]
+    if not d.native_ui_surface_active():
+        return 0
+    var name = d.ui_surface()
+    var o = json_object()
+    o.put(String("name"), json_str(name))
+    o.put(String("tree"), ui_to_json(d.ui_tree(name)))
+    return _write_out(encode_json(o), out_ptr, cap)
+
+
+@export
+def tk_desktop_ui_event(h: Int, ptr: Int, n: Int) abi("C"):
+    """What the user did in the native projection of dialog ``name``:
+    ``{name, events: [[is_action, key, value]]}`` — applied exactly as the
+    grid projector's events are (``Desktop.ui_apply``)."""
     if h == 0:
         return
     ref d = _desk(h)[]
     try:
-        var v = parse_json(_string_from(ptr, n))
-        if d.fill_dialog.active:
-            d.native_fill_answer(
-                button == 0,
-                json_get_int(v, String("mode"), 0),
-                json_get_string(v, String("text")),
-                json_get_string(v, String("initial")),
-                json_get_string(v, String("increment")),
-                json_get_bool(v, String("pad"), False),
-                json_get_int(v, String("format"), 0),
-            )
-        elif d.breakpoint_menu.active:
-            d.native_breakpoint_answer(
-                button == 0,
-                json_get_bool(v, String("enabled"), True),
-                json_get_int(v, String("wait_for"), 0),
-                json_get_string(v, String("condition")),
-            )
-        elif d.breakpoint_error.active:
-            var act = BP_ERR_CANCEL
-            if button == 0:
-                act = BP_ERR_TRY
-            elif button == 1:
-                act = BP_ERR_DISABLE
-            d.native_breakpoint_error_answer(
-                act, json_get_string(v, String("condition")),
-            )
+        var o = parse_json(_string_from(ptr, n))
+        var name = json_get_string(o, String("name"))
+        if name != d.ui_surface():
+            return   # it closed (or another took over) meanwhile
+        var evs = List[UIEvent]()
+        var a = o.object_get(String("events"))
+        if a:
+            var arr = a.value().copy()
+            for i in range(arr.array_len()):
+                var e = arr.array_at(i)
+                evs.append(UIEvent(
+                    e.array_at(0).as_bool(), e.array_at(1).as_str(),
+                    e.array_at(2).as_str(),
+                ))
+        d.ui_apply(name, evs)
     except:
         pass
 

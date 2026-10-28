@@ -120,6 +120,8 @@ from .spell_menu import (
     SPELL_ACTION_ADD_PROJECT, SPELL_ACTION_ADD_USER, SpellMenu,
 )
 from .anchored_menu import NativeMenuItem
+from .ui_grid import GridForm, UIEvent
+from .ui_tree import UINode
 from .install_runner import InstallResult, InstallRunner
 from .local_changes import LocalChanges
 from .review_mode import ReviewMode
@@ -1136,6 +1138,10 @@ struct Desktop(Movable):
     for and the host's find bar should show (one-shot, taken by the
     host); empty otherwise."""
     var native_find_seed: String
+    var ui_grid: GridForm
+    """The grid projection of the open declarative dialog (``ui_surface``)
+    — one, since only one modal is up at a time."""
+    var _ui_grid_owner: String
     var settings_native: Bool
     """The open Settings is shown as the host's native Settings window
     (macOS-style UI) rather than the grid one."""
@@ -1786,6 +1792,8 @@ struct Desktop(Movable):
         self._last_search_opts = SearchOptions()
         self.native_find_request = String("")
         self.native_find_seed = String("")
+        self.ui_grid = GridForm()
+        self._ui_grid_owner = String("")
         self.settings_native = False
         self.project_settings_native = False
         self._last_goto_line = String("")
@@ -4823,16 +4831,12 @@ struct Desktop(Movable):
         if not (native and self.lsp_status_menu.active):
             self.lsp_status_menu.paint(canvas, screen)
         if not native:
-            self.breakpoint_menu.paint(canvas, screen)
-            # Wait-for dropdown popup overlays the rest of the breakpoint
-            # dialog. Paint after the dialog body so the popup z-orders on
-            # top — same pattern as ``Settings`` / ``ActionEditor``.
-            self.breakpoint_menu.paint_popup(canvas, screen)
-            self.breakpoint_error.paint(canvas, screen)
-            self.fill_dialog.paint(canvas, screen)
-            # Mode / format dropdown popups overlay the rest of the Fill
-            # dialog. Same z-order pattern as ``breakpoint_menu``.
-            self.fill_dialog.paint_popup(canvas, screen)
+            # The open declarative dialog, if any, through the grid
+            # projector (natively the host draws it from ``ui_tree``).
+            var surface = self.ui_surface()
+            if len(surface.as_bytes()) > 0:
+                self._ui_grid_for(surface)
+                self.ui_grid.paint(self.ui_tree(surface), canvas, screen)
         if not (native and self.spelling_dialog.active):
             self.spelling_dialog.paint(canvas, screen)
         # Settings overlay — paints over the workspace but below the
@@ -7750,6 +7754,7 @@ struct Desktop(Movable):
         if self.native_dialog_active() or self.native_git_active() \
                 or self.native_spelling_active() or self.native_history_active() \
                 or self.native_merge_active() or self.native_review_picker() \
+                or self.native_ui_surface_active() \
                 or len(self.native_popup_kind().as_bytes()) > 0:
             # The host is showing this dialog as a native sheet (or the
             # popup as an NSMenu), which is modal — anything that still
@@ -7769,32 +7774,16 @@ struct Desktop(Movable):
             if self.spell_menu.submitted:
                 self._on_spell_menu_submit()
             return Optional[String]()
-        if self.breakpoint_error.active:
-            # Condition-error fix dialog gets priority over the regular
-            # right-click menu — it's the second-stage modal that pops
-            # *because* the first stage submitted with a bad condition.
-            if event.kind == EVENT_KEY:
-                _ = self.breakpoint_error.handle_key(event)
-            else:
-                _ = self.breakpoint_error.handle_mouse(event, screen)
-            if self.breakpoint_error.submitted:
-                self._on_breakpoint_error_submit()
-            return Optional[String]()
-        if self.breakpoint_menu.active:
-            if event.kind == EVENT_KEY:
-                _ = self.breakpoint_menu.handle_key(event)
-            else:
-                _ = self.breakpoint_menu.handle_mouse(event, screen)
-            if self.breakpoint_menu.submitted:
-                self._on_breakpoint_menu_submit()
-            return Optional[String]()
-        if self.fill_dialog.active:
-            if event.kind == EVENT_KEY:
-                _ = self.fill_dialog.handle_key(event)
-            else:
-                _ = self.fill_dialog.handle_mouse(event, screen)
-            if self.fill_dialog.submitted:
-                self._on_fill_dialog_submit()
+        var surface = self.ui_surface()
+        if len(surface.as_bytes()) > 0:
+            # A declarative dialog (``ui_surface``): the grid projector
+            # turns the event into edits / actions, the dialog applies
+            # them. Fully modal.
+            self._ui_grid_for(surface)
+            var evs = self.ui_grid.handle_event(
+                self.ui_tree(surface), event, screen,
+            )
+            self.ui_apply(surface, evs)
             return Optional[String]()
         if self.spelling_dialog.active:
             if event.kind == EVENT_KEY:
@@ -8696,8 +8685,7 @@ struct Desktop(Movable):
             return False
         return self.confirm_dialog.active or self.native_prompt_active() \
             or self.save_as_dialog.active or self.message_request_dialog.active \
-            or self.color_picker.active or self.fill_dialog.active \
-            or self.breakpoint_menu.active or self.breakpoint_error.active
+            or self.color_picker.active
 
     def _after_message_request(mut self):
         """The message-request list was answered: it either picked a color
@@ -8718,33 +8706,66 @@ struct Desktop(Movable):
             self.color_picker.native_cancel()
         self._on_color_picker_submit()
 
-    def native_fill_answer(
-        mut self, ok: Bool, mode: Int, var text: String, var initial: String,
-        var increment: String, pad: Bool, format_: Int,
-    ):
-        if not self.fill_dialog.active:
-            return
-        self.fill_dialog.native_answer(
-            ok, mode, text^, initial^, increment^, pad, format_,
-        )
-        if self.fill_dialog.submitted:
+    # --- declarative dialogs ----------------------------------------------
+    #
+    # A dialog that describes itself (``ui`` / ``ui_set`` / ``ui_act``,
+    # see ``ui_tree.mojo``) is drawn by the grid projector here, or natively
+    # by the host from the same tree (``tk_desktop_ui``). Both report back
+    # through ``ui_apply``.
+
+    def native_ui_surface_active(self) -> Bool:
+        return self.native_ui() and len(self.ui_surface().as_bytes()) > 0
+
+    def ui_surface(self) -> String:
+        """The open declarative dialog, by name, or empty."""
+        if self.breakpoint_error.active:
+            return String("breakpoint_error")
+        if self.breakpoint_menu.active:
+            return String("breakpoint")
+        if self.fill_dialog.active:
+            return String("fill")
+        return String("")
+
+    def ui_tree(self, name: String) -> UINode:
+        if name == String("breakpoint_error"):
+            return self.breakpoint_error.ui()
+        if name == String("breakpoint"):
+            return self.breakpoint_menu.ui()
+        return self.fill_dialog.ui()
+
+    def ui_apply(mut self, name: String, events: List[UIEvent]):
+        """Apply the user's edits / actions to dialog ``name``, then run its
+        submit handler when one of them finished it."""
+        for i in range(len(events)):
+            ref e = events[i]
+            if name == String("breakpoint_error"):
+                if e.is_action:
+                    self.breakpoint_error.ui_act(e.key)
+                else:
+                    self.breakpoint_error.ui_set(e.key, e.value)
+            elif name == String("breakpoint"):
+                if e.is_action:
+                    self.breakpoint_menu.ui_act(e.key)
+                else:
+                    self.breakpoint_menu.ui_set(e.key, e.value)
+            elif name == String("fill"):
+                if e.is_action:
+                    self.fill_dialog.ui_act(e.key)
+                else:
+                    self.fill_dialog.ui_set(e.key, e.value)
+        if name == String("breakpoint_error") and self.breakpoint_error.submitted:
+            self._on_breakpoint_error_submit()
+        elif name == String("breakpoint") and self.breakpoint_menu.submitted:
+            self._on_breakpoint_menu_submit()
+        elif name == String("fill") and self.fill_dialog.submitted:
             self._on_fill_dialog_submit()
 
-    def native_breakpoint_answer(
-        mut self, ok: Bool, enabled: Bool, wait_for: Int, var condition: String,
-    ):
-        if not self.breakpoint_menu.active:
-            return
-        self.breakpoint_menu.native_answer(ok, enabled, wait_for, condition^)
-        self._on_breakpoint_menu_submit()
-
-    def native_breakpoint_error_answer(
-        mut self, action: UInt8, var condition: String,
-    ):
-        if not self.breakpoint_error.active:
-            return
-        self.breakpoint_error.native_answer(action, condition^)
-        self._on_breakpoint_error_submit()
+    def _ui_grid_for(mut self, name: String):
+        """A different dialog took the grid projector: drop the previous
+        one's cursors, scrolls and focus."""
+        if name != self._ui_grid_owner:
+            self.ui_grid.reset()
+            self._ui_grid_owner = name
 
     def native_choice_answer(mut self, index: Int):
         """Answer the message-request list from a native alert (-1 =
@@ -16500,7 +16521,7 @@ struct Desktop(Movable):
         var act = self.breakpoint_error.action
         var path = self.breakpoint_error.path
         var line = self.breakpoint_error.line
-        var new_cond = self.breakpoint_error.condition.text
+        var new_cond = self.breakpoint_error.condition
         if act == BP_ERR_TRY:
             # Apply the new condition; the manager pushes a fresh
             # ``setBreakpoints``. The response either fires ``set_error``
@@ -16574,7 +16595,7 @@ struct Desktop(Movable):
         var act = self.breakpoint_error.action
         var path = self.breakpoint_error.path
         var line = self.breakpoint_error.line
-        var new_cond = self.breakpoint_error.condition.text
+        var new_cond = self.breakpoint_error.condition
         if act == BP_ERR_TRY:
             # A second Try while the first ``evaluate`` round-trip is
             # still in flight: just consume the press and let the
@@ -16636,7 +16657,7 @@ struct Desktop(Movable):
         # Clean evaluation: persist the edited condition.
         var path = self.breakpoint_error.path
         var line = self.breakpoint_error.line
-        var new_cond = self.breakpoint_error.condition.text
+        var new_cond = self.breakpoint_error.condition
         self.dap.set_breakpoint_condition(path, line, new_cond)
         self._close_runtime_breakpoint_error()
         # Auto-continue when the fixed condition evaluates falsy:

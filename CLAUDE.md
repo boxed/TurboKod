@@ -71,6 +71,16 @@ and editors a native overlay scroller.
 Swift trap: constants below `app.run()` in `TurboKod.swift` (the main file)
 read 0 — use `static let`s in an enum. Full details in [docs/native-ui.md](docs/native-ui.md).
 
+### Declarative dialogs
+
+New dialogs describe themselves once (`ui()` → a `UINode` tree, plus
+`ui_set` / `ui_act`) and are drawn by two projectors: `ui_grid.mojo` in cells
+(one set of layout rules — margins, right-aligned form labels, centered
+buttons) and the Swift `DeclarativeController` natively. Register a dialog in
+`Desktop.ui_surface` / `ui_tree` / `ui_apply`; don't hand-place grid widgets
+or hand-build a Swift twin. Full details in
+[docs/declarative-ui.md](docs/declarative-ui.md).
+
 ### Floating panels (native macOS)
 
 A per-project toggle (View ▸ Floating panels) floats the tool panels (terminal /

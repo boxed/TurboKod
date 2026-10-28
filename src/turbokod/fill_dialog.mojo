@@ -16,42 +16,14 @@ that ``Tab`` walks, and Esc to cancel.
 from std.collections.list import List
 from std.collections.optional import Optional
 
-from .buttons import (
-    button_face, BUTTON_FIRED, BUTTON_NONE, Checkbox, paint_checkbox,
-    paint_shadow_button, ShadowButton,
+from .ui_tree import (
+    UI_CANCEL, UI_DEFAULT, UI_SECONDARY, UINode, ui_bool, ui_buttons,
+    ui_check, ui_choice, ui_dialog, ui_form, ui_int, ui_label, ui_row,
+    ui_text, ui_vstack, ui_button,
 )
-from .canvas import Canvas, paint_drop_shadow
-from .painter import Painter
-from .colors import (
-    Attr, BLACK, BLUE, CYAN, GREEN, LIGHT_GRAY, WHITE,
-)
-from .dropdown import DROPDOWN_HIT_BODY, DROPDOWN_HIT_POPUP, Dropdown
-from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE, KEY_ENTER, KEY_ESC, KEY_SPACE, KEY_TAB,
-    MOD_SHIFT,
-)
-from .geometry import Point, Rect, center_in
-from .text_field import TextField
-from .view import centered_row_start, FocusGroup, RowCursor
-from .window import close_button_clicked, paint_close_button
 
 
-comptime _DLG_WIDTH = 56
-comptime _MIN_WIDTH = 36
-
-# Tab order. Slots are registered in this order; ``cycle`` walks the
-# visitable ones. Mode-dependent visitability is refreshed each paint
-# so Tab skips the inputs that don't apply to the current mode.
-comptime _SLOT_MODE      = 0
-comptime _SLOT_TEXT      = 1
-comptime _SLOT_INITIAL   = 2
-comptime _SLOT_INCREMENT = 3
-comptime _SLOT_PAD       = 4
-comptime _SLOT_FORMAT    = 5
-comptime _SLOT_OK        = 6
-comptime _SLOT_CANCEL    = 7
-
-# Dropdown labels for the mode picker.
+# Choice labels for the mode picker.
 comptime _MODE_TEXT    = String("Text")
 comptime _MODE_NUMBERS = String("Numbers")
 
@@ -60,53 +32,6 @@ comptime _FMT_DEC = String("Decimal")
 comptime _FMT_HEX = String("Hexadecimal")
 comptime _FMT_OCT = String("Octal")
 comptime _FMT_BIN = String("Binary")
-
-
-@fieldwise_init
-struct _FillLayout(ImplicitlyCopyable, Movable):
-    """Pre-computed rects + row anchors for the dialog. Built once per
-    paint so geometry never lags the live container_bounds size."""
-    var title_y: Int
-    var mode_label_y: Int
-    var mode_rect: Rect
-    var text_label_y: Int
-    var text_rect: Rect
-    var initial_label_y: Int
-    var initial_rect: Rect
-    var increment_label_y: Int
-    var increment_rect: Rect
-    var pad_y: Int
-    var format_label_y: Int
-    var format_rect: Rect
-    var buttons_y: Int
-
-
-def _build_layout(rect: Rect) -> _FillLayout:
-    var cursor = RowCursor(rect.a.y + 1)
-    var title_y = cursor.place()
-    var mode_label_y = cursor.place()
-    var mode_y = cursor.place_tight()
-    var text_label_y = cursor.place()
-    var text_y = cursor.place_tight()
-    var initial_label_y = cursor.place()
-    var initial_y = cursor.place_tight()
-    var increment_label_y = cursor.place()
-    var increment_y = cursor.place_tight()
-    var pad_y = cursor.place()
-    var format_label_y = cursor.place()
-    var format_y = cursor.place_tight()
-    var left = rect.a.x + 2
-    var right = rect.b.x - 2
-    return _FillLayout(
-        title_y,
-        mode_label_y, Rect(left, mode_y, right, mode_y + 1),
-        text_label_y, Rect(left, text_y, right, text_y + 1),
-        initial_label_y, Rect(left, initial_y, right, initial_y + 1),
-        increment_label_y, Rect(left, increment_y, right, increment_y + 1),
-        pad_y,
-        format_label_y, Rect(left, format_y, right, format_y + 1),
-        rect.b.y - 3,
-    )
 
 
 def _parse_signed_int(s: String) -> Optional[Int]:
@@ -187,98 +112,128 @@ def _digit_width(value: Int, base: Int) -> Int:
 
 
 struct FillDialog(Movable):
-    """Modal "Fill..." dialog. Held by the host across paints so the
-    inner ``ShadowButton``s retain latch state and the dropdowns hold
-    their selection between events.
-    """
+    """Modal "Fill..." dialog: plain state plus its declarative UI
+    (``ui`` / ``ui_set`` / ``ui_act``) — the grid projector and the native
+    one both draw it from ``ui()``."""
 
     var active: Bool
     var submitted: Bool
     var caret_count: Int
-    var mode: Dropdown
-    var text: TextField
-    var initial: TextField
-    var increment: TextField
-    var pad: Checkbox
-    var format_: Dropdown
-    var _focus: FocusGroup
-    var _ok: ShadowButton
-    var _cancel: ShadowButton
+    var mode: Int
+    """Index into ``_mode_options()``: text or numbers."""
+    var text: String
+    var initial: String
+    var increment: String
+    var pad: Bool
+    var format_: Int
+    """Index into ``_format_options()``."""
+    var error: String
+    """Why OK was refused (an unparsable number); shown under the form."""
     var _confirmed: Bool
 
     def __init__(out self):
         self.active = False
         self.submitted = False
         self.caret_count = 0
-        var mode_opts = List[String]()
-        mode_opts.append(_MODE_TEXT)
-        mode_opts.append(_MODE_NUMBERS)
-        self.mode = Dropdown(mode_opts^, 1)
-        self.text = TextField()
-        self.initial = TextField()
-        self.increment = TextField()
-        self.pad = Checkbox(String("Pad with leading zeros"), 0, 0, False)
-        var fmt_opts = List[String]()
-        fmt_opts.append(_FMT_DEC)
-        fmt_opts.append(_FMT_HEX)
-        fmt_opts.append(_FMT_OCT)
-        fmt_opts.append(_FMT_BIN)
-        self.format_ = Dropdown(fmt_opts^, 0)
-        self._focus = FocusGroup(8)
-        self._focus.focus_force(_SLOT_INITIAL)
-        self._ok = ShadowButton(String(" OK "), 0, 0)
-        self._cancel = ShadowButton(String(" Cancel "), 0, 0)
+        self.mode = 1
+        self.text = String("")
+        self.initial = String("1")
+        self.increment = String("1")
+        self.pad = False
+        self.format_ = 0
+        self.error = String("")
         self._confirmed = False
 
     def open(mut self, caret_count: Int):
         """Re-arm the dialog for a fresh invocation. The host passes the
         number of carets so ``generate`` can later produce exactly one
         string per caret without the caller having to thread it back
-        in."""
+        in. Each field is re-seeded so a prior session's edits don't
+        carry over silently."""
+        self = FillDialog()
         self.active = True
-        self.submitted = False
         self.caret_count = caret_count
-        # Seed each field with sensible defaults each time so a prior
-        # session's edits don't carry over silently.
-        var mode_opts = List[String]()
-        mode_opts.append(_MODE_TEXT)
-        mode_opts.append(_MODE_NUMBERS)
-        self.mode = Dropdown(mode_opts^, 1)
-        self.text = TextField()
-        self.initial = TextField()
-        self.initial.set_text(String("1"))
-        self.increment = TextField()
-        self.increment.set_text(String("1"))
-        self.pad = Checkbox(String("Pad with leading zeros"), 0, 0, False)
-        var fmt_opts = List[String]()
-        fmt_opts.append(_FMT_DEC)
-        fmt_opts.append(_FMT_HEX)
-        fmt_opts.append(_FMT_OCT)
-        fmt_opts.append(_FMT_BIN)
-        self.format_ = Dropdown(fmt_opts^, 0)
-        self._focus.focus_force(_SLOT_INITIAL)
-        self._ok.reset_press()
-        self._cancel.reset_press()
-        self._confirmed = False
 
     def close(mut self):
-        self.active = False
-        self.submitted = False
-        self.caret_count = 0
-        self.mode.close()
-        self.format_.close()
-        self.text = TextField()
-        self.initial = TextField()
-        self.increment = TextField()
-        self._ok.reset_press()
-        self._cancel.reset_press()
-        self._confirmed = False
+        self = FillDialog()
 
     def confirmed(self) -> Bool:
         return self._confirmed
 
     def is_numbers_mode(self) -> Bool:
-        return self.mode.value() == _MODE_NUMBERS
+        return self.mode == 1
+
+    # --- declarative UI ------------------------------------------------
+
+    def ui(self) -> UINode:
+        var numbers = self.is_numbers_mode()
+        var rows = List[UINode]()
+        rows.append(ui_row(String("Insert"), ui_choice(
+            String("mode"), _mode_options(), self.mode,
+        )))
+        rows.append(ui_row(String("Text to insert"), ui_text(
+            String("text"), self.text, enabled=not numbers,
+        )))
+        rows.append(ui_row(String("Initial number"), ui_text(
+            String("initial"), self.initial, enabled=numbers,
+        )))
+        rows.append(ui_row(String("Increment"), ui_text(
+            String("increment"), self.increment, enabled=numbers,
+        )))
+        rows.append(ui_row(String("Number format"), ui_choice(
+            String("format"), _format_options(), self.format_, enabled=numbers,
+        )))
+        rows.append(ui_row(String(""), ui_check(
+            String("pad"), String("Pad with leading zeros"), self.pad,
+            enabled=numbers,
+        )))
+        var body = List[UINode]()
+        body.append(ui_form(rows^))
+        if len(self.error.as_bytes()) > 0:
+            body.append(ui_label(self.error, UI_SECONDARY))
+        var buttons = List[UINode]()
+        buttons.append(ui_button(String("cancel"), String("Cancel"), UI_CANCEL))
+        buttons.append(ui_button(String("ok"), String("Fill"), UI_DEFAULT))
+        body.append(ui_buttons(buttons^))
+        return ui_dialog(
+            String("Fill ") + String(self.caret_count) + String(" cursors"),
+            String("cancel"), ui_vstack(body^),
+        )
+
+    def ui_set(mut self, key: String, value: String):
+        if key == String("mode"):
+            self.mode = ui_int(value, self.mode)
+        elif key == String("text"):
+            self.text = value
+        elif key == String("initial"):
+            self.initial = value
+        elif key == String("increment"):
+            self.increment = value
+        elif key == String("format"):
+            self.format_ = ui_int(value, self.format_)
+        elif key == String("pad"):
+            self.pad = ui_bool(value)
+        self.error = String("")
+
+    def ui_act(mut self, id: String):
+        if id == String("cancel"):
+            self._resolve(False)
+        elif id == String("ok"):
+            self._resolve(True)
+
+    def native_answer(
+        mut self, ok: Bool, mode: Int, var text: String, var initial: String,
+        var increment: String, pad: Bool, format_: Int,
+    ):
+        """All the fields at once, then OK / Cancel through the same
+        validation (an unparsable number leaves the dialog open)."""
+        self.mode = mode
+        self.format_ = format_
+        self.text = text^
+        self.initial = initial^
+        self.increment = increment^
+        self.pad = pad
+        self._resolve(ok)
 
     def generate(self, n: Int) -> List[String]:
         """Build the list of strings the host inserts at each caret.
@@ -297,22 +252,21 @@ struct FillDialog(Movable):
         var out = List[String]()
         if not self.is_numbers_mode():
             for _ in range(n):
-                out.append(self.text.text)
+                out.append(self.text)
             return out^
-        var init_opt = _parse_signed_int(self.initial.text)
-        var inc_opt = _parse_signed_int(self.increment.text)
+        var init_opt = _parse_signed_int(self.initial)
+        var inc_opt = _parse_signed_int(self.increment)
         var init_v = init_opt.value() if init_opt else 0
         var inc_v = inc_opt.value() if inc_opt else 0
         var base = 10
-        var fmt = self.format_.value()
-        if fmt == _FMT_HEX:
+        if self.format_ == 1:
             base = 16
-        elif fmt == _FMT_OCT:
+        elif self.format_ == 2:
             base = 8
-        elif fmt == _FMT_BIN:
+        elif self.format_ == 3:
             base = 2
         var min_w = 0
-        if self.pad.on and n > 0:
+        if self.pad and n > 0:
             # Width is the widest absolute-value digit count across the
             # whole series so every entry pads to the same length.
             for i in range(n):
@@ -328,370 +282,34 @@ struct FillDialog(Movable):
     def _can_submit(self) -> Bool:
         """Numbers mode requires both initial and increment to parse as
         signed decimals. Text mode is always submittable (an empty
-        string is a valid insertion — it's the multi-caret equivalent
-        of "do nothing per caret")."""
+        string fill is a legitimate "clear these spots" operation)."""
         if not self.is_numbers_mode():
             return True
-        var init_opt = _parse_signed_int(self.initial.text)
-        var inc_opt = _parse_signed_int(self.increment.text)
-        return Bool(init_opt) and Bool(inc_opt)
-
-    def _layout(self, container_bounds: Rect) -> Rect:
-        var width = _DLG_WIDTH
-        if width > container_bounds.b.x - 4:
-            width = container_bounds.b.x - 4
-        if width < _MIN_WIDTH:
-            width = _MIN_WIDTH
-        # Rows: top / title / blank / mode label / mode / blank /
-        # text label / text / blank / initial label / initial / blank /
-        # increment label / increment / blank / pad checkbox / blank /
-        # format label / format / blank / buttons / shadow / bottom
-        return center_in(container_bounds, width, 23)
-
-    def _position_pad(mut self, layout: _FillLayout, dlg: Rect):
-        self.pad.move_to(dlg.a.x + 2, layout.pad_y)
-
-    def _refresh_focus_visitability(mut self, layout: _FillLayout):
-        """Numbers / text mode hide each other's inputs from the Tab
-        walk so a press doesn't land on a control the user can't see
-        a use for."""
-        var numbers = self.is_numbers_mode()
-        self._focus.update(_SLOT_MODE, layout.mode_rect, True)
-        self._focus.update(_SLOT_TEXT, layout.text_rect, not numbers)
-        self._focus.update(_SLOT_INITIAL, layout.initial_rect, numbers)
-        self._focus.update(_SLOT_INCREMENT, layout.increment_rect, numbers)
-        self._focus.update(_SLOT_PAD, self.pad.hit_rect(), numbers)
-        self._focus.update(_SLOT_FORMAT, layout.format_rect, numbers)
-
-    def paint(mut self, mut canvas: Canvas, container_bounds: Rect):
-        if not self.active:
-            return
-        var attr = Attr(BLACK, LIGHT_GRAY)
-        var label_attr = Attr(BLACK, LIGHT_GRAY)
-        var disabled_attr = Attr(WHITE, LIGHT_GRAY)
-        var rect = self._layout(container_bounds)
-        var layout = _build_layout(rect)
-        paint_drop_shadow(canvas, rect)
-        var painter = Painter(rect)
-        painter.fill(canvas, rect, String(" "), attr)
-        painter = painter.draw_box_inner(canvas, rect, attr, False)
-        paint_close_button(canvas, Point(rect.a.x, rect.a.y), attr)
-        _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, layout.title_y),
-            String(" Fill ") + String(self.caret_count)
-            + String(" cursors "), attr,
-        )
-        self._position_pad(layout, rect)
-        self._refresh_focus_visitability(layout)
-        var numbers = self.is_numbers_mode()
-        # Mode label + dropdown.
-        _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, layout.mode_label_y),
-            String("Insert:"), label_attr,
-        )
-        self.mode.paint(
-            canvas, layout.mode_rect,
-            self._focus.is_focused(_SLOT_MODE),
-            Attr(WHITE, BLUE), Attr(BLACK, CYAN),
-        )
-        # Text label + field — visible/usable only in text mode.
-        var text_label_attr = label_attr if not numbers else disabled_attr
-        _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, layout.text_label_y),
-            String("Text to insert:"), text_label_attr,
-        )
-        if not numbers:
-            self.text.paint(
-                canvas, layout.text_rect,
-                self._focus.is_focused(_SLOT_TEXT),
-            )
-        else:
-            # Greyed-out placeholder so the row still reads as
-            # "a field that exists but doesn't apply right now".
-            var p2 = Painter(layout.text_rect)
-            p2.fill(
-                canvas, layout.text_rect, String(" "),
-                Attr(WHITE, LIGHT_GRAY),
-            )
-        # Numeric inputs.
-        var num_label_attr = label_attr if numbers else disabled_attr
-        _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, layout.initial_label_y),
-            String("Initial number:"), num_label_attr,
-        )
-        if numbers:
-            self.initial.paint(
-                canvas, layout.initial_rect,
-                self._focus.is_focused(_SLOT_INITIAL),
-            )
-        else:
-            var p3 = Painter(layout.initial_rect)
-            p3.fill(
-                canvas, layout.initial_rect, String(" "),
-                Attr(WHITE, LIGHT_GRAY),
-            )
-        _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, layout.increment_label_y),
-            String("Increment:"), num_label_attr,
-        )
-        if numbers:
-            self.increment.paint(
-                canvas, layout.increment_rect,
-                self._focus.is_focused(_SLOT_INCREMENT),
-            )
-        else:
-            var p4 = Painter(layout.increment_rect)
-            p4.fill(
-                canvas, layout.increment_rect, String(" "),
-                Attr(WHITE, LIGHT_GRAY),
-            )
-        # Pad checkbox.
-        if numbers:
-            paint_checkbox(
-                canvas, self.pad,
-                Attr(BLACK, CYAN), Attr(BLACK, GREEN),
-                self._focus.is_focused(_SLOT_PAD),
-                rect.b.x - 1,
-            )
-        else:
-            _ = painter.put_text(
-                canvas, Point(rect.a.x + 2, layout.pad_y),
-                self.pad.label, disabled_attr,
-            )
-        # Format dropdown.
-        _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, layout.format_label_y),
-            String("Number format:"), num_label_attr,
-        )
-        if numbers:
-            self.format_.paint(
-                canvas, layout.format_rect,
-                self._focus.is_focused(_SLOT_FORMAT),
-                Attr(WHITE, BLUE), Attr(BLACK, CYAN),
-            )
-        else:
-            var p5 = Painter(layout.format_rect)
-            p5.fill(
-                canvas, layout.format_rect, String(" "),
-                Attr(WHITE, LIGHT_GRAY),
-            )
-        # Buttons.
-        var by = layout.buttons_y
-        var ok_w = self._ok.total_width()
-        var cancel_w = self._cancel.total_width()
-        var gap = 2
-        var total = ok_w + gap + cancel_w
-        var bx = centered_row_start(rect, total)
-        self._ok.move_to(bx, by)
-        self._cancel.move_to(bx + ok_w + gap, by)
-        # Use the buttons' hit_rect (face + shadow) so the focus slot
-        # matches exactly where the button's own handle_mouse fires —
-        # handle_mouse registers the same rects, so paint must agree or a
-        # shadow-cell click focuses-or-not depending on which ran last.
-        self._focus.update(_SLOT_OK, self._ok.hit_rect())
-        self._focus.update(_SLOT_CANCEL, self._cancel.hit_rect())
-        paint_shadow_button(
-            canvas, self._ok, button_face(self._focus.is_focused(_SLOT_OK)),
-            LIGHT_GRAY,
-        )
-        paint_shadow_button(
-            canvas, self._cancel,
-            button_face(self._focus.is_focused(_SLOT_CANCEL)), LIGHT_GRAY,
-        )
-
-    def paint_popup(self, mut canvas: Canvas, container_bounds: Rect):
-        """Render any open dropdown popup on top of the rest of the
-        dialog. The host invokes this after every other modal layer so
-        the popup overlays them — same z-order pattern as
-        ``BreakpointMenu``."""
-        if not self.active:
-            return
-        var rect = self._layout(container_bounds)
-        var layout = _build_layout(rect)
-        if self.mode.is_open:
-            self.mode.paint_popup(canvas, layout.mode_rect, container_bounds)
-        if self.format_.is_open and self.is_numbers_mode():
-            self.format_.paint_popup(canvas, layout.format_rect, container_bounds)
-
-    def native_answer(
-        mut self, ok: Bool, mode: Int, var text: String, var initial: String,
-        var increment: String, pad: Bool, format_: Int,
-    ):
-        """The native form's values, then OK / Cancel through the same
-        validation the in-grid buttons get (an unparsable number leaves
-        the dialog open)."""
-        if mode >= 0 and mode < len(self.mode.options):
-            self.mode.index = mode
-        if format_ >= 0 and format_ < len(self.format_.options):
-            self.format_.index = format_
-        self.text.set_text(text^)
-        self.initial.set_text(initial^)
-        self.increment.set_text(increment^)
-        self.pad.on = pad
-        self._resolve(ok)
+        return Bool(_parse_signed_int(self.initial)) \
+            and Bool(_parse_signed_int(self.increment))
 
     def _resolve(mut self, confirmed: Bool):
         if confirmed and not self._can_submit():
-            # Refocus a problematic field rather than silently failing.
-            var init_opt = _parse_signed_int(self.initial.text)
-            if not init_opt:
-                self._focus.focus_force(_SLOT_INITIAL)
+            if not _parse_signed_int(self.initial):
+                self.error = String("The initial number must be a whole number.")
             else:
-                self._focus.focus_force(_SLOT_INCREMENT)
+                self.error = String("The increment must be a whole number.")
             return
         self.submitted = True
         self._confirmed = confirmed
 
-    def _focus_next(mut self, backward: Bool = False):
-        if self._focus.is_focused(_SLOT_MODE):
-            self.mode.close()
-        if self._focus.is_focused(_SLOT_FORMAT):
-            self.format_.close()
-        self._focus.cycle(backward)
 
-    def handle_key(mut self, event: Event) -> Bool:
-        if not self.active:
-            return False
-        if event.kind != EVENT_KEY:
-            return True
-        var k = event.key
-        # While a dropdown popup is open, route to it first so Up/Down/
-        # Enter navigate options instead of leaking into focus walk.
-        if self._focus.is_focused(_SLOT_MODE) and self.mode.is_open:
-            if k == KEY_ESC:
-                self.mode.close()
-                return True
-            if self.mode.handle_key(event):
-                return True
-        if self._focus.is_focused(_SLOT_FORMAT) and self.format_.is_open:
-            if k == KEY_ESC:
-                self.format_.close()
-                return True
-            if self.format_.handle_key(event):
-                return True
-        if k == KEY_ESC:
-            self._resolve(False)
-            return True
-        if k == KEY_TAB:
-            var backward = (event.mods & MOD_SHIFT) != 0
-            self._focus_next(backward)
-            return True
-        if k == KEY_ENTER:
-            if self._focus.is_focused(_SLOT_MODE):
-                _ = self.mode.handle_key(event)
-                return True
-            if self._focus.is_focused(_SLOT_FORMAT):
-                _ = self.format_.handle_key(event)
-                return True
-            if self._focus.is_focused(_SLOT_PAD):
-                self.pad.toggle()
-                return True
-            if self._focus.is_focused(_SLOT_CANCEL):
-                self._resolve(False)
-                return True
-            self._resolve(True)
-            return True
-        if self._focus.is_focused(_SLOT_MODE):
-            if self.mode.handle_key(event):
-                return True
-            return True
-        if self._focus.is_focused(_SLOT_FORMAT):
-            if self.format_.handle_key(event):
-                return True
-            return True
-        if self._focus.is_focused(_SLOT_PAD):
-            if k == KEY_SPACE:
-                self.pad.toggle()
-                return True
-            return True
-        if self._focus.is_focused(_SLOT_TEXT):
-            var r = self.text.handle_key(event)
-            if r.consumed:
-                return True
-            return True
-        if self._focus.is_focused(_SLOT_INITIAL):
-            var r2 = self.initial.handle_key(event)
-            if r2.consumed:
-                return True
-            return True
-        if self._focus.is_focused(_SLOT_INCREMENT):
-            var r3 = self.increment.handle_key(event)
-            if r3.consumed:
-                return True
-            return True
-        return True
+def _mode_options() -> List[String]:
+    var o = List[String]()
+    o.append(_MODE_TEXT)
+    o.append(_MODE_NUMBERS)
+    return o^
 
-    def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Bool:
-        if not self.active:
-            return False
-        if event.kind != EVENT_MOUSE:
-            return True
-        var rect = self._layout(container_bounds)
-        var layout = _build_layout(rect)
-        self._position_pad(layout, rect)
-        # Standard close button — equivalent to Esc / Cancel.
-        if close_button_clicked(rect, event):
-            self._resolve(False)
-            return True
-        # Open popups overlay everything else — route to them first so
-        # a click on the popup doesn't also shift focus underneath.
-        if self.mode.is_open:
-            var h1 = self.mode.handle_mouse(
-                layout.mode_rect, container_bounds, event,
-            )
-            if h1 == DROPDOWN_HIT_BODY or h1 == DROPDOWN_HIT_POPUP:
-                self._focus.focus_force(_SLOT_MODE)
-                return True
-        if self.format_.is_open and self.is_numbers_mode():
-            var h2 = self.format_.handle_mouse(
-                layout.format_rect, container_bounds, event,
-            )
-            if h2 == DROPDOWN_HIT_BODY or h2 == DROPDOWN_HIT_POPUP:
-                self._focus.focus_force(_SLOT_FORMAT)
-                return True
-        self._refresh_focus_visitability(layout)
-        self._focus.update(_SLOT_OK, self._ok.hit_rect(), True)
-        self._focus.update(_SLOT_CANCEL, self._cancel.hit_rect(), True)
-        _ = self._focus.handle_click(event)
-        # Pad checkbox: captures press / commit on release inside chip.
-        if self.is_numbers_mode():
-            var cb_status = self.pad.handle_mouse(event)
-            if cb_status != BUTTON_NONE:
-                if cb_status == BUTTON_FIRED:
-                    self.pad.toggle()
-                return True
-        # Closed-dropdown click on the strip toggles it open.
-        if not self.mode.is_open:
-            var h3 = self.mode.handle_mouse(
-                layout.mode_rect, container_bounds, event,
-            )
-            if h3 == DROPDOWN_HIT_BODY:
-                return True
-        if self.is_numbers_mode() and not self.format_.is_open:
-            var h4 = self.format_.handle_mouse(
-                layout.format_rect, container_bounds, event,
-            )
-            if h4 == DROPDOWN_HIT_BODY:
-                return True
-        # Forward to focused text input.
-        if self._focus.is_focused(_SLOT_TEXT):
-            if self.text.handle_mouse(event, layout.text_rect):
-                return True
-        if self._focus.is_focused(_SLOT_INITIAL):
-            if self.initial.handle_mouse(event, layout.initial_rect):
-                return True
-        if self._focus.is_focused(_SLOT_INCREMENT):
-            if self.increment.handle_mouse(event, layout.increment_rect):
-                return True
-        # Buttons.
-        var s = self._ok.handle_mouse(event)
-        if s != BUTTON_NONE:
-            if s == BUTTON_FIRED:
-                self._resolve(True)
-            return True
-        s = self._cancel.handle_mouse(event)
-        if s != BUTTON_NONE:
-            if s == BUTTON_FIRED:
-                self._resolve(False)
-            return True
-        return True
+
+def _format_options() -> List[String]:
+    var o = List[String]()
+    o.append(_FMT_DEC)
+    o.append(_FMT_HEX)
+    o.append(_FMT_OCT)
+    o.append(_FMT_BIN)
+    return o^
