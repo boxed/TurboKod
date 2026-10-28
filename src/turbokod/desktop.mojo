@@ -4867,7 +4867,7 @@ struct Desktop(Movable):
         # Git history for selection — a paned modal over the whole
         # surface, same top_y convention as review (below the in-grid
         # menu, over everything else).
-        if self.history.active:
+        if self.history.active and not self.native_ui():
             self.history.paint(canvas, screen, review_top_y)
         # Status-bar message tooltip — painted last so the popup
         # z-orders above every dock, modal, and menu. No-op unless the
@@ -7730,7 +7730,7 @@ struct Desktop(Movable):
             _ = self.windows.handle_mod_key(event)
             return Optional[String]()
         if self.native_dialog_active() or self.native_git_active() \
-                or self.native_spelling_active() \
+                or self.native_spelling_active() or self.native_history_active() \
                 or len(self.native_popup_kind().as_bytes()) > 0:
             # The host is showing this dialog as a native sheet (or the
             # popup as an NSMenu), which is modal — anything that still
@@ -8994,6 +8994,15 @@ struct Desktop(Movable):
     # these (selection, a key, an overlay answer) and then the same
     # ``_after_local_changes`` the in-grid path runs.
 
+    def native_history_active(self) -> Bool:
+        return self.native_ui() and self.history.active
+
+    def native_history_select(mut self, idx: Int):
+        if idx < 0 or idx >= len(self.history.entries):
+            return
+        self.history.list.set_selected(idx)
+        self.history.patch_scroll = 0
+
     def native_spelling_active(self) -> Bool:
         return self.native_ui() and self.spelling_dialog.active
 
@@ -9066,8 +9075,13 @@ struct Desktop(Movable):
     # --- macOS-style UI: the file tree as a native source list ----------
 
     def native_tree_shown(self) -> Bool:
+        """The native source list is laid over the tree's cells — not while
+        a full-screen tool (git view, Find in Project, history, merge,
+        review) owns the window, or it would float over that tool."""
         return self.native_ui() and self.file_tree.visible \
-            and not self._fullscreen_modal_active()
+            and not self._fullscreen_modal_active() \
+            and not self.history.active and not self.merge_view.active \
+            and not self.review.active
 
     def native_tree_menu(mut self, idx: Int, anchor: Point):
         """Right-click on a native tree row: the same Rename / Delete menu

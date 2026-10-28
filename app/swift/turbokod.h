@@ -188,6 +188,12 @@ void tk_desktop_picker_close(int64_t h);
 // macOS-style UI Project ▸ Spelling sheet: _spelling state (0 = not up), _rows
 // [[word, count, path, line]] in display order, _act 1 = add rows (JSON index
 // array) to the project dictionary, 2 = to the user's, 0 = close.
+// macOS-style UI Git history sheet: _history {title, selected, entries: [[sha,
+// author, date, subject, pushed]]} (0 = not up), _history_patch one entry's
+// patch, _history_act op 0 = select idx, 1 = close.
+int64_t tk_desktop_history(int64_t h, int64_t out_ptr, int64_t cap);
+int64_t tk_desktop_history_patch(int64_t h, int64_t idx, int64_t out_ptr, int64_t cap);
+void tk_desktop_history_act(int64_t h, int64_t op, int64_t idx);
 int64_t tk_desktop_spelling(int64_t h, int64_t out_ptr, int64_t cap);
 int64_t tk_desktop_spelling_rows(int64_t h, int64_t out_ptr, int64_t cap);
 void tk_desktop_spelling_act(int64_t h, int64_t action, int64_t ptr, int64_t len);

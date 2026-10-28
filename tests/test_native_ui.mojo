@@ -14,6 +14,7 @@ from turbokod.desktop import (
 from turbokod.search_options import SearchOptions
 from turbokod.color_picker import ColorPickerDialog, MODE_RGB
 from turbokod.fill_dialog import FillDialog
+from turbokod.git_changes import LineHistoryEntry
 from turbokod.events import Event, KEY_ENTER
 from turbokod.geometry import Point, Rect
 from turbokod.window import Window
@@ -434,6 +435,29 @@ def test_native_spelling_sheet_takes_over_the_grid_dialog() raises:
     assert_true(d.spelling_dialog.active)
     d.spelling_dialog.close()
     assert_false(d.native_spelling_active())
+
+
+def test_native_history_selects_and_hides_the_tree_overlay() raises:
+    var d = _native_desktop(String("x\n"))
+    d.file_tree.visible = True
+    assert_true(d.native_tree_shown())
+    var es = List[LineHistoryEntry]()
+    es.append(LineHistoryEntry(
+        String("aaa1111"), String("Ann"), String("2026-10-01"),
+        String("first"), String("+a\n"), True,
+    ))
+    es.append(LineHistoryEntry(
+        String("bbb2222"), String("Bo"), String("2026-10-02"),
+        String("second"), String("+b\n"), False,
+    ))
+    d.history.open(String("a.txt"), es^)
+    assert_true(d.native_history_active())
+    # The source list must not float over the full-screen history.
+    assert_false(d.native_tree_shown())
+    d.native_history_select(1)
+    assert_equal(d.history.list.selected, 1)
+    d.history.close()
+    assert_true(d.native_tree_shown())
 
 
 def main() raises:

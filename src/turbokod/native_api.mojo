@@ -1510,6 +1510,64 @@ def tk_desktop_tab_close(h: Int, idx: Int) abi("C"):
     _desk(h)[].close_tab(idx)
 
 
+# --- macOS-style UI: Git history ----------------------------------------------
+
+
+@export
+def tk_desktop_history(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
+    """Git ▸ History (of a file or a selection) for the native sheet:
+    ``{title, selected, entries: [[sha, author, date, subject, pushed]]}``
+    — patches come one at a time from ``tk_desktop_history_patch``. 0 when
+    it isn't up natively."""
+    if h == 0:
+        return 0
+    ref d = _desk(h)[]
+    if not d.native_history_active():
+        return 0
+    ref hs = d.history
+    var o = json_object()
+    o.put(String("title"), json_str(hs.title))
+    o.put(String("selected"), json_int(hs.list.selected))
+    var es = json_array()
+    for i in range(len(hs.entries)):
+        ref e = hs.entries[i]
+        var r = json_array()
+        r.append(json_str(e.short_sha))
+        r.append(json_str(e.author))
+        r.append(json_str(e.date))
+        r.append(json_str(e.subject))
+        r.append(json_bool(e.is_pushed))
+        es.append(r)
+    o.put(String("entries"), es)
+    return _write_out(encode_json(o), out_ptr, cap)
+
+
+@export
+def tk_desktop_history_patch(
+    h: Int, idx: Int, out_ptr: Int, cap: Int,
+) abi("C") -> Int:
+    """Entry ``idx``'s patch text (raw ``git log -p`` output)."""
+    if h == 0:
+        return 0
+    ref d = _desk(h)[]
+    if not d.native_history_active() or idx < 0 \
+            or idx >= len(d.history.entries):
+        return 0
+    return _write_out(d.history.entries[idx].patch, out_ptr, cap)
+
+
+@export
+def tk_desktop_history_act(h: Int, op: Int, idx: Int) abi("C"):
+    """``op`` 0 selects entry ``idx``, 1 closes the history."""
+    if h == 0:
+        return
+    ref d = _desk(h)[]
+    if op == 0:
+        d.native_history_select(idx)
+    elif op == 1:
+        d.history.close()
+
+
 # --- macOS-style UI: Spelling ------------------------------------------------
 
 

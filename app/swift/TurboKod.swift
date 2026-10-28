@@ -1895,6 +1895,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     var prefsWindows: [ObjectIdentifier: PrefsController] = [:]
     // macOS-style UI: Project ▸ Spelling as a sheet, per window.
     var spellingSheets: [ObjectIdentifier: SpellingController] = [:]
+    // macOS-style UI: Git history as a sheet, per window.
+    var historySheets: [ObjectIdentifier: HistoryController] = [:]
     var treeBuf = [UInt8](repeating: 0, count: 1 << 16)
     // Menu mirror: the snapshot from Mojo's menu_bar, hashed so we only
     // rebuild NSMenu when something actually changed (focus/visibility/
@@ -2295,6 +2297,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if self.pollTree(v) { changed = true }
                 if self.pollPrefs(v) { changed = true }
                 if self.pollSpelling(v) { changed = true }
+                if self.pollHistory(v) { changed = true }
             }
             self.drainAttention()
             self.idleTicks = changed ? 0 : self.idleTicks &+ 1
@@ -3480,6 +3483,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         trees[ObjectIdentifier(v)] = nil
         if let p = prefsWindows.removeValue(forKey: ObjectIdentifier(v)) { p.dismiss() }
         spellingSheets[ObjectIdentifier(v)] = nil
+        historySheets[ObjectIdentifier(v)] = nil
         // Close is instant; the language servers get their goodbye in the
         // background. `begin_close` terminates every child except the LSP
         // transports and sends each server `shutdown`, then we poll off the
@@ -4033,6 +4037,27 @@ extension AppController {
         guard let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_native_dialog(h, $0, $1) })
         else { return nil }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    /// Show, refresh or retract `v`'s Git history sheet.
+    func pollHistory(_ v: CellView) -> Bool {
+        let id = ObjectIdentifier(v)
+        let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_history(v.handle, $0, $1) })
+        if let hc = historySheets[id] {
+            guard let data = data else {
+                historySheets[id] = nil
+                hc.dismiss()
+                return true
+            }
+            return hc.update(data)
+        }
+        guard let data = data, let win = v.window, win.isVisible, win.attachedSheet == nil
+        else { return false }
+        let hc = HistoryController(view: v)
+        historySheets[id] = hc
+        _ = hc.update(data)
+        hc.present(in: win)
+        return true
     }
 
     /// Show, refresh or retract `v`'s Spelling sheet.
@@ -7467,4 +7492,190 @@ final class SpellingController: NSObject, NSTableViewDataSource, NSTableViewDele
     @objc private func addProjectClicked() { act(1) }
     @objc private func addUserClicked() { act(2) }
     @objc private func closeClicked() { act(0) }
+}
+
+
+// MARK: - macOS-style UI: Git history sheet
+//
+// Git ▸ History of a file or a selection: commits on the left, the selected
+// commit's patch on the right, colored like the grid view colors it (by
+// line prefix) on the theme's editor background. The core fetched
+// everything when it opened; this only selects and closes.
+
+final class HistoryController: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+    private weak var view: CellView?
+    private let panel: NSPanel
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let table = GitTable()
+    private let patch = NSTextView()
+    private var entries: [[Any]] = []
+    private var lastData = Data()
+    private var shown = -1
+    private var syncing = false
+    private var dismissed = false
+    private var buf = [UInt8](repeating: 0, count: 1 << 16)
+
+    init(view: CellView) {
+        self.view = view
+        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 680),
+                        styleMask: [.titled, .resizable], backing: .buffered, defer: true)
+        super.init()
+        titleLabel.font = .systemFont(ofSize: 14, weight: .semibold)
+        titleLabel.lineBreakMode = .byTruncatingMiddle
+        let close = NSButton(title: "Close", target: self, action: #selector(closeClicked))
+        close.keyEquivalent = "\u{1b}"
+        let top = NSStackView(views: [NSImageView(image: NSImage(systemSymbolName: "clock.arrow.circlepath",
+                                                                 accessibilityDescription: "History") ?? NSImage()),
+                                      titleLabel, NSView(), close])
+        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("c"))
+        table.addTableColumn(col)
+        table.headerView = nil
+        table.rowHeight = 38
+        table.style = .inset
+        table.dataSource = self
+        table.delegate = self
+        table.onKey = { [weak self] k in
+            if k == "esc" { self?.closeClicked(); return true }
+            return false
+        }
+        let tableScroll = NSScrollView()
+        tableScroll.documentView = table
+        tableScroll.hasVerticalScroller = true
+        patch.isEditable = false
+        patch.textContainerInset = NSSize(width: 6, height: 6)
+        patch.isHorizontallyResizable = true
+        patch.textContainer?.widthTracksTextView = false
+        patch.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                                    height: CGFloat.greatestFiniteMagnitude)
+        let patchScroll = NSScrollView()
+        patchScroll.documentView = patch
+        patchScroll.hasVerticalScroller = true
+        patchScroll.hasHorizontalScroller = true
+        let split = NSSplitView()
+        split.isVertical = true
+        split.dividerStyle = .thin
+        split.addArrangedSubview(tableScroll)
+        split.addArrangedSubview(patchScroll)
+        tableScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 260).isActive = true
+        split.setHoldingPriority(NSLayoutConstraint.Priority(260), forSubviewAt: 0)
+        let content = NSView()
+        for v in [top, split] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(v)
+            NSLayoutConstraint.activate([
+                v.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
+                v.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
+            ])
+        }
+        NSLayoutConstraint.activate([
+            top.topAnchor.constraint(equalTo: content.topAnchor, constant: 12),
+            split.topAnchor.constraint(equalTo: top.bottomAnchor, constant: 10),
+            split.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12),
+        ])
+        panel.contentView = content
+        splitView = split
+    }
+
+    private var splitView: NSSplitView?
+
+    func present(in win: NSWindow) {
+        let room = win.contentLayoutRect.size
+        panel.setContentSize(NSSize(width: max(700, room.width - 40), height: max(460, room.height - 30)))
+        panel.contentView?.layoutSubtreeIfNeeded()
+        splitView?.setPosition(min(380, panel.frame.width * 0.36), ofDividerAt: 0)
+        win.beginSheet(panel, completionHandler: nil)
+        panel.makeFirstResponder(table)
+    }
+
+    func dismiss() {
+        guard !dismissed else { return }
+        dismissed = true
+        panel.sheetParent?.endSheet(panel)
+    }
+
+    func update(_ data: Data) -> Bool {
+        guard data != lastData,
+              let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return false }
+        lastData = data
+        titleLabel.stringValue = o["title"] as? String ?? "History"
+        let newEntries = o["entries"] as? [[Any]] ?? []
+        if newEntries.count != entries.count { entries = newEntries; table.reloadData() }
+        let sel = o["selected"] as? Int ?? -1
+        syncing = true
+        if sel >= 0 && sel < entries.count && table.selectedRow != sel {
+            table.selectRowIndexes(IndexSet(integer: sel), byExtendingSelection: false)
+            table.scrollRowToVisible(sel)
+        }
+        syncing = false
+        if sel != shown { showPatch(sel) }
+        return true
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { entries.count }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row i: Int) -> NSView? {
+        let e = entries[i]
+        let cell = GitRowCell()
+        let pushed = e.count > 4 ? (e[4] as? Bool ?? true) : true
+        cell.set(title: e.count > 3 ? (e[3] as? String ?? "") : "",
+                 detail: "\(e[0] as? String ?? "") · \(e.count > 1 ? (e[1] as? String ?? "") : "") · \(e.count > 2 ? (e[2] as? String ?? "") : "")",
+                 badge: pushed ? "" : "↑ unpushed", badgeColor: .systemRed)
+        return cell
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        guard !syncing, let h = view?.handle, h != 0, table.selectedRow >= 0 else { return }
+        tk_desktop_history_act(h, 0, Int64(table.selectedRow))
+        lastData = Data()
+    }
+
+    private func showPatch(_ idx: Int) {
+        shown = idx
+        guard let h = view?.handle, h != 0, idx >= 0 else { patch.string = ""; return }
+        var n = 0
+        while true {
+            n = buf.withUnsafeMutableBufferPointer { b -> Int in
+                Int(tk_desktop_history_patch(h, Int64(idx), Int64(Int(bitPattern: b.baseAddress)), Int64(b.count)))
+            }
+            if n <= buf.count { break }
+            buf = [UInt8](repeating: 0, count: n)
+        }
+        let text = String(decoding: buf[0..<max(n, 0)], as: UTF8.self)
+        var pal = [UInt32](repeating: 0, count: 256)
+        pal.withUnsafeMutableBufferPointer { b in
+            _ = tk_theme_palette(h, Int64(Int(bitPattern: b.baseAddress)), Int64(b.count))
+        }
+        let bg = PickerController.rgb(Int(pal[16])), fg = PickerController.rgb(Int(pal[17]))
+        let mono = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        let out = NSMutableAttributedString()
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            var attrs: [NSAttributedString.Key: Any] = [.font: mono, .foregroundColor: fg]
+            if line.hasPrefix("@@") {
+                attrs[.foregroundColor] = NSColor.systemTeal
+            } else if line.hasPrefix("+++") || line.hasPrefix("---") {
+                attrs[.foregroundColor] = fg.withAlphaComponent(0.55)
+            } else if line.hasPrefix("diff --git") || line.hasPrefix("index ") || line.hasPrefix("rename ")
+                        || line.hasPrefix("new file") || line.hasPrefix("deleted file") {
+                attrs[.foregroundColor] = NSColor.systemYellow
+                attrs[.font] = NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
+            } else if line.hasPrefix("+") {
+                attrs[.backgroundColor] = NSColor.systemGreen.withAlphaComponent(0.22)
+            } else if line.hasPrefix("-") {
+                attrs[.backgroundColor] = NSColor.systemRed.withAlphaComponent(0.22)
+            }
+            out.append(NSAttributedString(string: String(line) + "\n", attributes: attrs))
+        }
+        patch.textStorage?.setAttributedString(out)
+        patch.backgroundColor = bg
+        patch.enclosingScrollView?.backgroundColor = bg
+        patch.scrollToBeginningOfDocument(nil)
+    }
+
+    @objc private func closeClicked() {
+        guard let h = view?.handle, h != 0 else { return }
+        tk_desktop_history_act(h, 1, 0)
+        view?.invalidateFrame()
+        view?.needsDisplay = true
+    }
 }
