@@ -10,6 +10,7 @@ on EOF / cancel.
 """
 
 from std.collections.list import List
+from std.collections.optional import Optional
 
 from .lsp import LspProcess
 from .posix import alloc_zero_buffer, poll_stdin, read_into
@@ -102,3 +103,63 @@ struct LineStream(Movable):
         if got_eof:
             self.cancel()
         return (lines^, got_eof)
+
+
+struct OutputStream(Movable):
+    """A child process whose whole stdout is wanted, read across frames
+    without blocking the UI thread: for output that isn't lines, such as
+    ``git status -z``."""
+    var proc: LspProcess
+    var active: Bool
+    var _buf: List[UInt8]
+
+    def __init__(out self):
+        self.proc = LspProcess()
+        self.active = False
+        self._buf = List[UInt8]()
+
+    def is_active(self) -> Bool:
+        return self.active
+
+    def start(mut self, argv: List[String]) -> Bool:
+        """Cancel any running child, then spawn ``argv``. False when the
+        spawn failed."""
+        self.cancel()
+        try:
+            self.proc = LspProcess.spawn(argv)
+        except:
+            return False
+        self.active = True
+        return True
+
+    def cancel(mut self):
+        """Stop the child (if any) and drop what it wrote. Idempotent."""
+        if self.active:
+            self.proc.terminate()
+        self.active = False
+        self._buf = List[UInt8]()
+
+    def tick(mut self) -> Optional[String]:
+        """Read what's available (capped); the whole output once the child
+        reached EOF, when it has been reaped and the stream is idle again."""
+        if not self.active:
+            return None
+        var scratch = alloc_zero_buffer(8192)
+        var total = 0
+        var got_eof = False
+        while total < _READ_CAP_PER_TICK:
+            if not poll_stdin(self.proc.stdout_fd, Int32(0)):
+                break
+            var n = read_into(self.proc.stdout_fd, scratch, 8192)
+            if n < 0:
+                break
+            if n == 0:
+                got_eof = True
+                break
+            self._buf.extend(Span(scratch)[0:n])
+            total += n
+        if not got_eof:
+            return None
+        var out = String(StringSpan(unsafe_from_utf8=Span(self._buf)))
+        self.cancel()
+        return out^

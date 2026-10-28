@@ -4978,10 +4978,9 @@ def test_local_changes_poll_waits_for_the_scroll_to_stop() raises:
     """The external-change poll doesn't spawn its ``git status`` while
     the user is mid-gesture.
 
-    It's a synchronous spawn whose cost scales with the tree, so firing
-    it on schedule under a wheel spin drops a frame a second into the
-    middle of the scroll. Deferring costs nothing — it runs on the first
-    quiet frame instead."""
+    Reading its output, and the refresh a change brings, would still drop
+    a frame in the middle of the scroll. Deferring costs nothing — it runs
+    on the first quiet frame instead."""
     var dir = _temp_path(String("_pollquiet"))
     if not _init_repo_with_commit(dir):
         return
@@ -5004,6 +5003,39 @@ def test_local_changes_poll_waits_for_the_scroll_to_stop() raises:
     assert_true(lc._last_poll_ms > due)
     lc.release()
     registry.release()
+    _rm_rf(dir)
+
+
+def test_local_changes_poll_reads_git_status_without_waiting_for_it() raises:
+    # Run synchronously, the poll's ``git status`` held up the UI for as
+    # long as git took, every second: 60-90 ms on a 7000-file repo
+    var dir = _temp_path(String("_pollasync"))
+    if not _init_repo_with_commit(dir):
+        return
+    var lc = LocalChanges()
+    lc.open(dir)
+    var before = len(lc.files)
+    assert_true(write_file(join_path(dir, String("new.txt")), String("n\n")))
+    lc._last_poll_ms = monotonic_ms() - 5000
+    lc._poll_external_change()
+    # started, not waited for
+    assert_true(lc._poll_git.is_active())
+    assert_equal(len(lc.files), before)
+    var waited = 0
+    while lc._poll_git.is_active() and waited < 5000:
+        sleep_ms(10)
+        waited += 10
+        lc._poll_external_change()
+    assert_equal(len(lc.files), before + 1)
+    # nothing changed since: the next poll leaves the panels alone
+    lc._last_poll_ms = monotonic_ms() - 5000
+    lc._poll_external_change()
+    while lc._poll_git.is_active() and waited < 10000:
+        sleep_ms(10)
+        waited += 10
+        lc._poll_external_change()
+    assert_equal(len(lc.files), before + 1)
+    lc.release()
     _rm_rf(dir)
 
 

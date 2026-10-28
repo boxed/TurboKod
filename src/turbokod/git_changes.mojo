@@ -983,15 +983,29 @@ def fetch_git_status(project_root: String) -> List[GitFileStatus]:
     individually. A directory row would have no diff, couldn't be
     opened, and hid how many files a new folder actually brought in.
     """
-    var out = List[GitFileStatus]()
     if len(project_root.as_bytes()) == 0:
-        return out^
+        return List[GitFileStatus]()
+    return parse_git_status(_git_stdout(project_root, _git_status_args()))
+
+
+def _git_status_args() -> List[String]:
     var args = List[String]()
     args.append(String("status"))
     args.append(String("--porcelain=v1"))
     args.append(String("-z"))
     args.append(String("--untracked-files=all"))
-    var stdout = _git_stdout(project_root, args^)
+    return args^
+
+
+def git_status_argv(project_root: String) -> List[String]:
+    """The whole command line ``fetch_git_status`` runs, for running it
+    without waiting (``parse_git_status`` reads what it prints)."""
+    return _git_argv(project_root, _git_status_args())
+
+
+def parse_git_status(stdout: String) -> List[GitFileStatus]:
+    """The rows of ``git status --porcelain=v1 -z`` output."""
+    var out = List[GitFileStatus]()
     var b = stdout.as_bytes()
     var i = 0
     while i + 3 <= len(b):

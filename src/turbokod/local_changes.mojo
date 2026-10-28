@@ -126,11 +126,13 @@ from .git_changes import (
     fetch_blob_text, fetch_branch_log, fetch_commit_message, fetch_commit_show,
     fetch_git_branches, fetch_git_commits, fetch_git_remote_branches,
     fetch_git_remotes, fetch_git_status, fetch_merged_commits, format_age,
-    git_state_mtimes, GitBranch, GitCommit, GitFileStatus,
+    git_state_mtimes, git_status_argv, GitBranch, GitCommit, GitFileStatus,
     github_compare_url, GitStateMtimes, has_merge_between, head_short_sha,
-    main_line_branch, parse_unified_diff_files, split_show_output,
+    main_line_branch, parse_git_status, parse_unified_diff_files,
+    split_show_output,
     stage_file, strip_remote_prefix, unstage_file,
 )
+from .line_stream import OutputStream
 from .git_output import (
     GIT_OUT_BRANCH_DELETE, GIT_OUT_CHECKOUT, GIT_OUT_COMMIT, GIT_OUT_MERGE,
     GIT_OUT_OTHER, GIT_OUT_PULL, GIT_OUT_PUSH, GIT_OUT_REBASE,
@@ -1679,6 +1681,10 @@ struct LocalChanges(Movable):
     var _poll_status_fp: String
     var _poll_state: GitStateMtimes
     var _last_poll_ms: Int
+    var _poll_git: OutputStream
+    """The poll's ``git status``, read across frames: run synchronously
+    it held up the UI for as long as git took (60-90 ms every second on
+    a 7000-file repo)."""
 
     def __init__(out self):
         self.active = False
@@ -1763,6 +1769,7 @@ struct LocalChanges(Movable):
         self._poll_status_fp = String("")
         self._poll_state = GitStateMtimes.zero()
         self._last_poll_ms = 0
+        self._poll_git = OutputStream()
 
     def open(mut self, var root: String):
         """Populate all three panels synchronously. Diff/branches/log
@@ -1905,25 +1912,32 @@ struct LocalChanges(Movable):
         fingerprint catches worktree + index changes; the ``.git`` mtime
         fingerprint catches commits / checkouts that leave the worktree
         unchanged but reshuffle the Branches / Commits panels."""
-        if not self.active:
+        if not self.active or self._git_op != _GITOP_NONE \
+                or self.overlay != _OVERLAY_NONE:
+            # What a status started before one of our own ops says can't
+            # be told apart from what the op did
+            self._poll_git.cancel()
             return
-        if self._git_op != _GITOP_NONE:
-            return
-        if self.overlay != _OVERLAY_NONE:
+        if self._poll_git.is_active():
+            var out = self._poll_git.tick()
+            if out:
+                self._poll_compare(parse_git_status(out.value()))
             return
         var now = monotonic_ms()
         if now - self._last_poll_ms < _LC_POLL_INTERVAL_MS:
             return
-        # Not while the user is mid-gesture. ``fetch_git_status`` is a
-        # synchronous spawn whose cost scales with the tree (~20 ms at
-        # 2000 changed files, and the point of this view is big trees),
-        # so firing it under a wheel spin drops a frame a second into
-        # the middle of the scroll. Nothing external is missed — the
-        # poll just runs on the first quiet frame instead.
+        # Not while the user is mid-gesture: reading git's output, and the
+        # refresh a change brings, would still drop a frame in the middle
+        # of a scroll. Nothing external is missed — the poll just runs on
+        # the first quiet frame instead.
         if self._input_ms > 0 and now - self._input_ms < _LC_INPUT_QUIET_MS:
             return
         self._last_poll_ms = now
-        var statuses = fetch_git_status(self.root)
+        _ = self._poll_git.start(git_status_argv(self.root))
+
+    def _poll_compare(mut self, statuses: List[GitFileStatus]):
+        """Reload when the polled ``git status`` or the ``.git`` metadata
+        differ from what the panels show."""
         var fp = LocalChanges._status_fingerprint(statuses)
         var state = git_state_mtimes(self.root)
         if fp == self._poll_status_fp and state.equals(self._poll_state):
@@ -1955,6 +1969,7 @@ struct LocalChanges(Movable):
         the alternative is a stranded handle the moment Find is wired
         into the reword box."""
         self.git_runner.terminate()
+        self._poll_git.cancel()
         self._output_matchers.release()
         self.overlay_editor.release_search_cache()
 
@@ -1963,6 +1978,7 @@ struct LocalChanges(Movable):
         panels, overlays, in-flight op bookkeeping); ``open`` starts from
         this same reset. ``_pending_commit_message`` is deliberately kept —
         an unsent commit message survives closing the view."""
+        self._poll_git.cancel()
         self.active = False
         self.submitted = False
         self.root = String("")
