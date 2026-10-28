@@ -186,7 +186,7 @@ def _measure(n: UINode) -> Tuple[Int, Int]:
             label_w = max(label_w, display_columns(_form_label(n.children[i].text)))
             var c = _measure(n.children[i].children[0])
             control_w = max(control_w, c[0])
-            h += c[1]
+            h += c[1] + _form_gap(n, i)
         return (label_w + _LABEL_GAP + control_w, h)
     if k == UI_VSTACK:
         var w = 0
@@ -247,6 +247,20 @@ def _browse_seed(path: String) -> String:
     if i <= 0:
         return String("/")
     return String(StringSpan(unsafe_from_utf8=b[:i]))
+
+
+def _form_gap(n: UINode, i: Int) -> Int:
+    """Blank rows above form row ``i``: the form's spacing, except inside a
+    cluster of checkboxes that label themselves (no form label), which stay
+    together like a Turbo Vision check-box group."""
+    if i == 0:
+        return 0
+    ref a = n.children[i - 1]
+    ref b = n.children[i]
+    if len(a.text.as_bytes()) == 0 and len(b.text.as_bytes()) == 0 \
+            and a.children[0].kind == UI_CHECK and b.children[0].kind == UI_CHECK:
+        return 0
+    return n.number
 
 
 def _stretches(n: UINode) -> Bool:
@@ -340,8 +354,12 @@ def _arrange(n: UINode, r: Rect, mut out: List[_Placed]):
         var label_w = 0
         for i in range(len(n.children)):
             label_w = max(label_w, display_columns(_form_label(n.children[i].text)))
+        # The gaps between rows go first when the screen is short.
+        var spaced = _measure(n)[1] <= r.height()
         var y = r.a.y
         for i in range(len(n.children)):
+            if spaced:
+                y += _form_gap(n, i)
             ref row = n.children[i]
             var c = _measure(row.children[0])
             # Right-aligned label, controls sharing one left edge.

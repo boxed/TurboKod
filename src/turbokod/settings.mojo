@@ -436,7 +436,7 @@ struct Settings(Movable):
         var rows = List[UINode]()
         for i in range(len(keys)):
             rows.append(ui_check(keys[i], labels[i], self._ls_get(keys[i])))
-        return ui_vstack(rows^, 0)
+        return ui_vstack(rows^)
 
     def _languages_ui(self) -> UINode:
         var rows = List[List[String]]()

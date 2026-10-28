@@ -37,7 +37,7 @@ comptime UI_VSTACK    = 2
 comptime UI_HSTACK    = 3
 comptime UI_FORM      = 4
 """Rows of ``UI_ROW``: labels right-aligned in one column, controls in the
-next."""
+next; ``number`` blank rows between rows (where there's room)."""
 comptime UI_ROW       = 5
 """One form row: ``text`` is the label, the one child the control."""
 comptime UI_TABS      = 6
@@ -178,9 +178,10 @@ def ui_buttons(var children: List[UINode]) -> UINode:
     return ui_hstack(children^, 2, True)
 
 
-def ui_form(var rows: List[UINode]) -> UINode:
+def ui_form(var rows: List[UINode], spacing: Int = 1) -> UINode:
     var n = UINode(UI_FORM)
     n.children = rows^
+    n.number = spacing
     return n^
 
 
