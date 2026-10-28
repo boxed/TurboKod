@@ -26,10 +26,16 @@ from .onig import unicode_case_fold
 def sorted_lines_ci(rows: List[String]) -> List[String]:
     """``rows`` sorted case-insensitively: collated for the user's locale
     where the platform can, Unicode-folded otherwise."""
-    var collated = sorted_lines_collated(rows, String(""))
+    return _permuted(rows, sorted_order_ci(rows))
+
+
+def sorted_order_ci(rows: List[String]) -> List[Int]:
+    """The indices of ``rows`` in ``sorted_lines_ci`` order, for moving
+    what belongs to each line (its bookmark) along with it."""
+    var collated = _collated_order(rows, String(""))
     if collated:
         return collated.value().copy()
-    return sorted_lines_folded(rows)
+    return _stable_order(_folded_keys(rows))
 
 
 def sorted_lines_collated(
@@ -38,6 +44,15 @@ def sorted_lines_collated(
     """``rows`` sorted by the platform collator for ``locale`` (an identifier
     like ``sv_SE``; empty means the user's current locale). Empty when there
     is no collator — anywhere but macOS — or it refused the input."""
+    var perm = _collated_order(rows, locale)
+    if not perm:
+        return Optional[List[String]]()
+    return Optional[List[String]](_permuted(rows, perm.value()))
+
+
+def _collated_order(
+    rows: List[String], locale: String,
+) -> Optional[List[Int]]:
     var n = len(rows)
     var ptrs = List[Int](capacity=n)
     var lens = List[Int](capacity=n)
@@ -52,16 +67,20 @@ def sorted_lines_collated(
         lb.unsafe_ptr(), len(lb), perm.unsafe_ptr(),
     )
     if ok == 0:
-        return Optional[List[String]]()
-    return Optional[List[String]](_permuted(rows, perm))
+        return Optional[List[Int]]()
+    return Optional[List[Int]](perm^)
 
 
 def sorted_lines_folded(rows: List[String]) -> List[String]:
     """``rows`` sorted by their full Unicode case fold, in codepoint order."""
+    return _permuted(rows, _stable_order(_folded_keys(rows)))
+
+
+def _folded_keys(rows: List[String]) -> List[String]:
     var keys = List[String](capacity=len(rows))
     for i in range(len(rows)):
         keys.append(_fold(rows[i]))
-    return _permuted(rows, _stable_order(keys))
+    return keys^
 
 
 def _fold(s: String) -> String:

@@ -88,7 +88,7 @@ from .text_view import (
 )
 from .config import WRAP_NONE, WRAP_SMART
 from .case_fold import swap_ascii_case
-from .line_sort import sorted_lines_ci
+from .line_sort import sorted_order_ci
 
 
 # --- Helpers ----------------------------------------------------------------
@@ -9977,17 +9977,22 @@ struct Editor(Copyable, Movable):
         var rows = List[String]()
         for r in range(sr, er + 1):
             rows.append(self.buffer.line(r))
-        var sorted = sorted_lines_ci(rows)
+        var order = sorted_order_ci(rows)
         var changed = False
         for i in range(len(rows)):
-            if sorted[i] != rows[i]:
+            if rows[order[i]] != rows[i]:
                 changed = True
                 break
         if not changed:
             return
         self._push_undo()
-        for i in range(len(sorted)):
-            self.buffer.lines[sr + i] = sorted[i]
+        # A bookmark goes with its line's text
+        var marked = List[Bool](capacity=len(rows))
+        for i in range(len(rows)):
+            marked.append(self.buffer.is_marked(sr + i))
+        for i in range(len(order)):
+            self.buffer.lines[sr + i] = rows[order[i]]
+            self.buffer.set_mark(sr + i, marked[order[i]])
         self.dirty = True
         self.move_to(sr, 0, False)
         if ends_at_next_row:

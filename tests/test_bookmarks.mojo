@@ -229,6 +229,21 @@ def test_delete_bookmarked_lines_and_undo_brings_them_back() raises:
     assert_equal(ed.bookmark_count(), 0)
 
 
+def test_sorting_lines_takes_their_bookmarks_along() raises:
+    # Else Delete bookmarked lines after a sort deletes other lines
+    var ed = _editor(String("top\npear\nApple\nfig\nbanana"), 0, 1, 3)
+    ed.move_to(1, 0, False)
+    ed.move_to(4, 6, True)
+    ed.sort_lines()
+    assert_equal(_text(ed.buffer), "top|Apple|banana|fig|pear")
+    assert_equal(_marked(ed.buffer), "0,3,4")
+    assert_true(ed.undo())
+    assert_equal(_marked(ed.buffer), "0,1,3")
+    _ = ed.redo()
+    assert_equal(ed.delete_bookmarked_lines(), 3)
+    assert_equal(_text(ed.buffer), "Apple|banana")
+
+
 def test_deleting_every_line_leaves_one_empty_line() raises:
     var ed = _editor(String("a\nb"), 0, 1)
     assert_equal(ed.cut_bookmarked_lines(), 2)
