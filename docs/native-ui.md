@@ -20,8 +20,9 @@ It is being built in phases:
 5. **In-file Find / Replace** is a find bar under the tabs (see below).
 6. **The color picker** is a sheet with the system color well; **the file
    tree** is a native source list (see below).
-7. Still in-grid: Fill, Breakpoint, Settings' content, review mode, merge
-   view, history, the status bar and the tool panels.
+7. **The status bar** is re-typeset natively by the host (see below).
+8. Still in-grid: Fill, Breakpoint, Settings' content, review mode, merge
+   view, history and the tool panels.
 
 ## How a dialog becomes native
 
@@ -149,6 +150,21 @@ separator column).
   shows as an `NSMenu` through the popup path.
 - The overlay is lifted whenever `native_tree_shown()` is false: the tree is
   hidden, or a full-screen modal covers it.
+
+## Status bar
+
+The status row is presentation-only. `CellView.drawNativeStatusBar` redraws
+the bottom row's cells, already in the layout buffer, as a window-colored
+bar in system type:
+
+- Each run of same-colored cells is drawn at its own cell column, so every
+  click target the core hit-tests stays where it is. There's no ABI and no
+  core change.
+- A run on a non-bar background becomes an accent pill.
+- A run in a non-default color keeps its color (the green uncommitted dot,
+  a red LSP error).
+- The cell pass turns anti-aliasing off for the pixel font, so this pass
+  turns it back on.
 
 ## Find bar
 

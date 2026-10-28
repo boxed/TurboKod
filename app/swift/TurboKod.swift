@@ -729,6 +729,10 @@ final class CellView: NSView {
         // shadow torn off the un-shifted frame. Runs at rest too (the composite
         // early-returns when not scrolling).
         if surface == .main { drawPopupShadow(ctx) }
+        // macOS-style UI: the bottom (status) row re-typeset as a native bar.
+        if surface == .main && r > 1 && tk_desktop_native_ui(handle) != 0 {
+            drawNativeStatusBar(buf, n, c, r)
+        }
         // First main-surface frame is now on screen. Kick the deferred
         // startup work (PATH recovery, font-family scan) on the next runloop
         // turn so it runs *after* this draw flushes — not inside it. One-shot
@@ -739,6 +743,76 @@ final class CellView: NSView {
         }
     }
     static var didFirstMainPaint = false
+
+    /// The status row in system type on a window-colored bar. Each run of
+    /// same-colored cells is redrawn at its own cell column, so every click
+    /// target (git area, run targets, LSP status) stays exactly where the
+    /// core hit-tests it — this is presentation only. Runs whose background
+    /// differs from the bar's become pills; runs in a non-default color keep
+    /// it (the green "uncommitted" dot, a red LSP error).
+    private func drawNativeStatusBar(_ p: UnsafeMutablePointer<UInt32>, _ n: Int, _ c: Int, _ r: Int) {
+        let row = r - 1
+        let start = row * c
+        guard start + c <= n else { return }
+        var bgCount: [UInt32: Int] = [:], fgCount: [UInt32: Int] = [:]
+        for i in start..<(start + c) {
+            let (fg, bg, _) = cellColors(p, i)
+            bgCount[bg, default: 0] += 1
+            if p[i * CELL_WORDS] & 0x1FFFFF > 0x20 { fgCount[fg, default: 0] += 1 }
+        }
+        let barBg = bgCount.max { $0.value < $1.value }?.key ?? 0
+        let barFg = fgCount.max { $0.value < $1.value }?.key ?? 0
+        let y = CGFloat(row) * CELL_H
+        // The cell pass turned anti-aliasing off for the pixel font; system
+        // type needs it back on.
+        if let ctx = NSGraphicsContext.current?.cgContext {
+            ctx.setShouldAntialias(true)
+            ctx.setAllowsAntialiasing(true)
+            ctx.setShouldSmoothFonts(true)
+            ctx.setAllowsFontSmoothing(true)
+        }
+        NSGraphicsContext.current?.shouldAntialias = true
+        let bar = NSRect(x: 0, y: y, width: bounds.width, height: bounds.height - y)
+        NSColor.windowBackgroundColor.setFill()
+        bar.fill()
+        NSColor.separatorColor.setFill()
+        NSRect(x: 0, y: y, width: bounds.width, height: 1).fill()
+        let font = NSFont.systemFont(ofSize: min(12, max(10, CELL_H * 0.68)))
+        var i = 0
+        while i < c {
+            let (fg, bg, _) = cellColors(p, start + i)
+            var j = i
+            var text = ""
+            while j < c {
+                let (f2, b2, _) = cellColors(p, start + j)
+                if f2 != fg || b2 != bg { break }
+                let cp = p[(start + j) * CELL_WORDS] & 0x1FFFFF
+                text.unicodeScalars.append(Unicode.Scalar(cp > 0 ? cp : 0x20) ?? " ")
+                j += 1
+            }
+            let trimmed = text.trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty {
+                let lead = CGFloat(text.prefix { $0 == " " }.count)
+                let x = CGFloat(i) * CELL_W + lead * CELL_W
+                let color: NSColor = fg == barFg ? .secondaryLabelColor : nscolor(fg)
+                let pill = bg != barBg
+                let attrs: [NSAttributedString.Key: Any] = [
+                    .font: pill ? NSFont.systemFont(ofSize: font.pointSize, weight: .medium) : font,
+                    .foregroundColor: pill ? NSColor.labelColor : color,
+                ]
+                let size = (trimmed as NSString).size(withAttributes: attrs)
+                if pill {
+                    let pr = NSRect(x: CGFloat(i) * CELL_W + 1, y: y + 2,
+                                    width: CGFloat(j - i) * CELL_W - 2, height: CELL_H - 3)
+                    NSColor.controlAccentColor.withAlphaComponent(0.22).setFill()
+                    NSBezierPath(roundedRect: pr, xRadius: 4, yRadius: 4).fill()
+                }
+                (trimmed as NSString).draw(at: NSPoint(x: x, y: y + (CELL_H - size.height) / 2 + 0.5),
+                                           withAttributes: attrs)
+            }
+            i = j
+        }
+    }
 
     /// Paint `n` packed cells from buffer `p` (`c` columns) at pixel origin
     /// (`originX`, `originY`). Two passes — all backgrounds, then glyphs +
