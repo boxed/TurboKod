@@ -195,6 +195,43 @@ def test_staging_the_last_line_of_a_file_without_a_final_newline() raises:
     _rm_rf(dir)
 
 
+def _paths(diff: String) -> String:
+    var out = String("")
+    for f in parse_unified_diff_files(diff):
+        out += "[" + f.path + "]"
+    return out^
+
+
+def test_paths_with_spaces_and_quoted_paths() raises:
+    # git ends a header holding a space with a tab, and quotes, C-escaped,
+    # one with non-ASCII or special bytes
+    assert_equal(_paths(
+        "diff --git a/a b.txt b/a b.txt\n--- a/a b.txt\t\n+++ b/a b.txt\t\n@@ -1 +1 @@\n-a\n+b\n"
+    ), "[a b.txt]")
+    assert_equal(_paths(
+        "diff --git \"a/caf\\303\\251.txt\" \"b/caf\\303\\251.txt\"\n"
+        "--- \"a/caf\\303\\251.txt\"\n+++ \"b/caf\\303\\251.txt\"\n@@ -1 +1 @@\n-a\n+b\n"
+    ), "[café.txt]")
+    assert_equal(_paths(
+        "diff --git x y\n--- \"a/q\\\"t\\\\b\\tc\"\n+++ /dev/null\n@@ -1 +0,0 @@\n-a\n"
+    ), "[q\"t\\b\tc]")
+
+
+def test_paths_git_quotes_come_back_as_they_are_on_disk() raises:
+    var dir = _repo("_stage_names", "a\n", "a\n")
+    assert_true(write_file(dir + "/café.txt", "a\n"))
+    assert_true(write_file(dir + "/a b.txt", "a\n"))
+    _ = _run_git(dir, string_list("add", "."))
+    _ = _run_git(dir, string_list(
+        "-c", "user.name=T", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false",
+        "commit", "-q", "-m", "names",
+    ))
+    assert_true(write_file(dir + "/café.txt", "b\n"))
+    assert_true(write_file(dir + "/a b.txt", "b\n"))
+    assert_equal(_paths(compute_unstaged_diff(dir)), "[a b.txt][café.txt]")
+    _rm_rf(dir)
+
+
 def main() raises:
     setup_test_env()
     TestSuite.discover_tests[__functions_in_module()]().run()

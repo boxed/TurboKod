@@ -174,18 +174,71 @@ def _strip_prefix_b(line: String) -> String:
     """Strip the leading ``+++ b/`` (or ``--- a/``) marker from a path
     header, leaving the bare relative path. The ``a/`` and ``b/``
     pseudo-roots are git's convention; not all renderers emit them, but
-    ``git diff`` always does for the worktree path."""
+    ``git diff`` always does for the worktree path.
+
+    Git ends the header with a tab when the path has a space in it, and
+    writes a path with non-ASCII or special bytes in quotes, C-escaped
+    (``"b/caf\\303\\251.txt"``): both are undone, or the path matched no
+    file and its changes showed as none."""
     var bytes = line.as_bytes()
     var n = len(bytes)
     if n < 6:
         return line
-    # ``+++ ``  or  ``--- ``
-    var ofs = 4
-    if ofs < n and bytes[ofs] == 0x62 and ofs + 1 < n and bytes[ofs + 1] == 0x2F:
-        ofs += 2
-    elif ofs < n and bytes[ofs] == 0x61 and ofs + 1 < n and bytes[ofs + 1] == 0x2F:
-        ofs += 2
-    return String(StringSpan(unsafe_from_utf8=bytes[ofs:n]))
+    var ofs = 4  # past ``+++ `` or ``--- ``
+    var end = n
+    if end > ofs and bytes[end - 1] == 0x09:
+        end -= 1
+    var path: String
+    if bytes[ofs] == 0x22 and end - ofs >= 2 and bytes[end - 1] == 0x22:
+        path = _unquote_c(String(StringSpan(unsafe_from_utf8=bytes[ofs + 1:end - 1])))
+    else:
+        path = String(StringSpan(unsafe_from_utf8=bytes[ofs:end]))
+    var pb = path.as_bytes()
+    if len(pb) >= 2 and (pb[0] == 0x62 or pb[0] == 0x61) and pb[1] == 0x2F:
+        return String(StringSpan(unsafe_from_utf8=pb[2:len(pb)]))
+    return path^
+
+
+def _unquote_c(quoted: String) -> String:
+    """The bytes of a C-quoted path (git's quoting, without the quotes)."""
+    var s = quoted.as_bytes()
+    var out = List[UInt8]()
+    var i = 0
+    var n = len(s)
+    while i < n:
+        var c = Int(s[i])
+        if c != 0x5C or i + 1 >= n:
+            out.append(UInt8(c))
+            i += 1
+            continue
+        var e = Int(s[i + 1])
+        if 0x30 <= e and e <= 0x37:  # \ooo, a byte in octal
+            var v = 0
+            var k = i + 1
+            while k < n and k < i + 4 and 0x30 <= Int(s[k]) and Int(s[k]) <= 0x37:
+                v = v * 8 + Int(s[k]) - 0x30
+                k += 1
+            out.append(UInt8(v & 0xFF))
+            i = k
+            continue
+        if e == 0x6E:
+            out.append(0x0A)
+        elif e == 0x74:
+            out.append(0x09)
+        elif e == 0x72:
+            out.append(0x0D)
+        elif e == 0x61:
+            out.append(0x07)
+        elif e == 0x62:
+            out.append(0x08)
+        elif e == 0x66:
+            out.append(0x0C)
+        elif e == 0x76:
+            out.append(0x0B)
+        else:
+            out.append(UInt8(e))  # \" and \\
+        i += 2
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=len(out))))
 
 
 def parse_unified_diff_files(diff: String) -> List[ChangedFile]:
