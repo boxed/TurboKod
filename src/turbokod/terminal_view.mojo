@@ -5,8 +5,10 @@ Both the shell terminal (``terminal_pane.mojo``) and the test runner
 pane and let the user select / copy / scroll it and (for the shell)
 type into it. The grid-view behavior — the cell+cursor paint loop, the
 mouse-driven selection state machine (cell / word / line drag), and the
-key→pty / mouse→pty wire encodings — is identical between them and lives
-here so neither pane reimplements it.
+key→pty / mouse→pty forwarding — is identical between them and lives here
+so neither pane reimplements it. The wire encodings themselves are Ghostty's
+(``Vt.encode_key`` / ``Vt.encode_mouse``), so they track whatever modes the
+program enabled.
 
 The owning pane keeps the ``Vt`` and the ``PtyProcess`` (the pty is a
 kernel handle the pane's lifecycle owns); this module's functions take
@@ -19,18 +21,13 @@ from std.collections.list import List
 from .canvas import Canvas
 from .cell import Cell
 from .clipboard import clipboard_copy
-from .colors import Attr, BG_TRUECOLOR, FG_TRUECOLOR, PANE_BG, WHITE
+from .colors import Attr, BG_TRUECOLOR, FG_TRUECOLOR
 from .events import (
-    Event, KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC,
-    KEY_F1, KEY_F10, KEY_F11, KEY_F12, KEY_F2, KEY_F3, KEY_F4, KEY_F5, KEY_F6,
-    KEY_F7, KEY_F8, KEY_F9, KEY_HOME, KEY_INSERT, KEY_LEFT, KEY_PAGEDOWN,
-    KEY_PAGEUP, KEY_RIGHT, KEY_TAB, KEY_UP, MOD_ALT, MOD_CTRL, MOD_META,
-    MOD_SHIFT, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE,
+    Event, KEY_PAGEDOWN, KEY_PAGEUP, MOD_META, MOD_SHIFT, MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
 from .painter import Painter
 from .pty import PtyProcess
-from .string_utils import append_utf8
 from .vt import Vt
 
 
@@ -152,8 +149,8 @@ struct GridSelection(Copyable, Movable):
         var out = String("")
         for r in range(sr0, sr1 + 1):
             var c_start = sc0 if r == sr0 else 0
-            var c_end   = sc1 if r == sr1 else vt.cols
-            if c_end > vt.cols: c_end = vt.cols
+            var c_end   = sc1 if r == sr1 else vt.cols()
+            if c_end > vt.cols(): c_end = vt.cols()
             if c_start < 0: c_start = 0
             # View-aware so a selection made while scrolled back captures
             # the historical text, not the live tail.
@@ -172,10 +169,12 @@ struct GridSelection(Copyable, Movable):
             return (0, 0)
         var r = pos.y - self._last_body.a.y
         var c = pos.x - self._last_body.a.x
+        var rows = vt.rows()
+        var cols = vt.cols()
         if r < 0: r = 0
-        if r >= vt.rows: r = vt.rows - 1
+        if r >= rows: r = rows - 1
         if c < 0: c = 0
-        if c > vt.cols: c = vt.cols
+        if c > cols: c = cols
         return (r, c)
 
     # --- drag ----------------------------------------------------------
@@ -248,19 +247,20 @@ struct GridSelection(Copyable, Movable):
         """``(lo, hi)`` of the word-class run around column ``c_in`` on
         row ``r`` — ``lo`` inclusive, ``hi`` exclusive. A separator cell
         returns just that single cell."""
+        var grid = vt.grid()
         var c = c_in
-        if c >= vt.cols: c = vt.cols - 1
+        if c >= grid.cols: c = grid.cols - 1
         if c < 0: c = 0
-        if not _is_word_glyph(vt.view_cell_at(r, c).glyph):
+        if not _is_word_glyph(grid.cell(r, c).glyph):
             return (c, c + 1)
         var lo = c
         while lo > 0:
-            if not _is_word_glyph(vt.view_cell_at(r, lo - 1).glyph):
+            if not _is_word_glyph(grid.cell(r, lo - 1).glyph):
                 break
             lo -= 1
         var hi = c
-        while hi + 1 < vt.cols:
-            if not _is_word_glyph(vt.view_cell_at(r, hi + 1).glyph):
+        while hi + 1 < grid.cols:
+            if not _is_word_glyph(grid.cell(r, hi + 1).glyph):
                 break
             hi += 1
         return (lo, hi + 1)
@@ -270,7 +270,7 @@ struct GridSelection(Copyable, Movable):
         var rc = self.grid_xy_for_pos(vt, pos)
         var r = rc[0]
         var c = rc[1]
-        if c >= vt.cols: c = vt.cols - 1
+        if c >= vt.cols(): c = vt.cols() - 1
         if c < 0:
             self.sel_active = False
             return
@@ -319,7 +319,7 @@ struct GridSelection(Copyable, Movable):
         self.sel_anchor_r = r
         self.sel_anchor_c = 0
         self.sel_focus_r = r
-        self.sel_focus_c = vt.cols
+        self.sel_focus_c = vt.cols()
         self.sel_active = True
         self.sel_dragging = True
         self._drag_word = False
@@ -334,10 +334,10 @@ struct GridSelection(Copyable, Movable):
             self.sel_anchor_r = ar
             self.sel_anchor_c = 0
             self.sel_focus_r = r
-            self.sel_focus_c = vt.cols
+            self.sel_focus_c = vt.cols()
         else:
             self.sel_anchor_r = ar
-            self.sel_anchor_c = vt.cols
+            self.sel_anchor_c = vt.cols()
             self.sel_focus_r = r
             self.sel_focus_c = 0
         self.sel_active = True
@@ -345,36 +345,19 @@ struct GridSelection(Copyable, Movable):
     # --- mouse forward -------------------------------------------------
 
     def encode_mouse_forward(
-        self, vt: Vt, event: Event, motion: Bool, released: Bool,
+        self, vt: Vt, event: Event, action: Int,
     ) -> String:
-        """Convert a panel-relative ``Event`` to an xterm mouse byte
-        sequence for the child. Returns empty outside the body or when
-        the encoder can't represent the coordinates (legacy mode at
-        column > 223). The caller writes the bytes to the pty."""
+        """Convert a panel-relative ``Event`` to the mouse report the child
+        asked for (``action`` is a ``vt.MOUSE_*`` value). Returns empty
+        outside the body, or when the child enabled no report for it. The
+        caller writes the bytes to the pty."""
         if self._last_body.is_empty():
             return String("")
         var r = event.pos.y - self._last_body.a.y
         var c = event.pos.x - self._last_body.a.x
-        if r < 0 or r >= vt.rows or c < 0 or c >= vt.cols:
+        if r < 0 or r >= vt.rows() or c < 0 or c >= vt.cols():
             return String("")
-        var btn_for_encoder = Int(event.button) - 1
-        if event.button == MOUSE_BUTTON_NONE:
-            # Motion without a button-change — encode as button 0 with
-            # the motion bit set (xterm's "release-button" SGR semantics).
-            btn_for_encoder = 0
-        if Int(event.button) == 4:    # MOUSE_WHEEL_UP
-            btn_for_encoder = 4
-        elif Int(event.button) == 5:  # MOUSE_WHEEL_DOWN
-            btn_for_encoder = 5
-        return vt.encode_mouse(
-            button=btn_for_encoder,
-            col=c, row=r,
-            motion=motion,
-            released=released,
-            shift=(event.mods & MOD_SHIFT) != 0,
-            meta=(event.mods & MOD_ALT) != 0,
-            ctrl=(event.mods & MOD_CTRL) != 0,
-        )
+        return vt.encode_mouse(action, event.button, c, r, event.mods)
 
 
 # --- grid paint -----------------------------------------------------------
@@ -388,235 +371,31 @@ def paint_grid(
     clip rect protects neighbouring panes). Overlays the selection and,
     when ``focused``, a reverse-video cursor caret.
 
-    When the user is scrolled back, the historical rows live in
-    ``vt.scrollback`` as ``List[List[Cell]]``. Reading ``scrollback[i]``
-    returns by value, so we copy each scrollback row exactly ONCE per
-    paint pass rather than once per cell (``view_cell_at`` would copy the
-    whole row on every cell lookup — O(rows×cols²) allocs and measurable
-    lag when scrolled into a long history)."""
-    var sb_len = len(vt.scrollback)
-    var scrolled_back = vt.view_offset > 0 and not vt.using_alt
-    for r in range(vt.rows):
-        var sb_row = List[Cell]()
-        var use_sb = False
-        if scrolled_back:
-            var abs_row = (sb_len - vt.view_offset) + r
-            if abs_row >= 0 and abs_row < sb_len:
-                sb_row = vt.scrollback[abs_row].copy()
-                use_sb = True
-        for c in range(vt.cols):
-            var cell: Cell
-            if use_sb:
-                if c < len(sb_row):
-                    cell = sb_row[c]
-                else:
-                    cell = Cell(String(" "), Attr(WHITE, PANE_BG), 1)
-            elif scrolled_back:
-                # Scrolled back into the live tail's residual rows
-                # (when scrollback is shorter than view_offset).
-                var abs_row = (sb_len - vt.view_offset) + r
-                cell = vt.cell_at(abs_row - sb_len, c)
-            else:
-                cell = vt.cell_at(r, c)
-            var attr = cell.attr
+    Reads the viewport — scrollback included when the user has scrolled
+    up — from one snapshot, so a frame costs one pass over the cells."""
+    var grid = vt.grid()
+    for r in range(grid.rows):
+        for c in range(grid.cols):
+            var cell = grid.cell(r, c)
             # Selection overlay: invert the selected cells — the same
             # affordance every terminal uses (xterm, iTerm, alacritty).
             if sel.cell_in_selection(r, c):
-                attr = _invert_attr(attr)
-            painter.set(
-                canvas, body.a.x + c, body.a.y + r,
-                Cell(cell.glyph, attr, cell.width),
-            )
+                cell.attr = _invert_attr(cell.attr)
+            painter.set(canvas, body.a.x + c, body.a.y + r, cell)
     # Cursor caret: reverse-video block over the cursor cell when the
     # pane is focused, the child hasn't hidden the cursor (``?25l``),
     # the cursor is in bounds, and the user isn't scrolled back (a
     # scrolled-back view is read-only history; painting the live cursor
     # on a historical row would be confusing).
-    if focused and vt.cursor_visible and vt.view_offset == 0:
-        var cr = vt.cur_r
-        var cc = vt.cur_c
-        if 0 <= cr and cr < vt.rows and 0 <= cc and cc < vt.cols:
-            var cell = vt.cell_at(cr, cc)
+    if focused and vt.cursor_visible() and vt.view_offset() == 0:
+        var cr = vt.cursor_row()
+        var cc = vt.cursor_col()
+        if 0 <= cr and cr < grid.rows and 0 <= cc and cc < grid.cols:
+            var cell = grid.cell(cr, cc)
             painter.set(
                 canvas, body.a.x + cc, body.a.y + cr,
                 Cell(cell.glyph, _invert_attr(cell.attr), cell.width),
             )
-
-
-# --- key encoding ---------------------------------------------------------
-
-
-def encode_key(key: UInt32, mods: UInt8, app_cursor: Bool = False) -> String:
-    """Translate a Mojo key + modifier into the byte sequence a real
-    pty child expects on its stdin. Mirrors what xterm sends.
-
-    Modifiers:
-      * Ctrl + letter → 0x01..0x1A (the canonical "control character").
-      * Alt + key     → ESC prefix, same as xterm's meta-as-prefix.
-      * Shift / Ctrl / Alt with named keys (arrows, Home/End/PageUp/
-        PageDown, F1..F12, Tab) use the xterm CSI 1;Nc format where
-        N = 1 + shift*1 + alt*2 + ctrl*4. Without this, word-motion
-        bindings in zsh/bash and vim window-nav (Ctrl+Right etc.)
-        don't work.
-      * ``app_cursor`` honors DECCKM (``?1``) — arrow / Home / End
-        come out as SS3 (``ESC O A``) instead of CSI (``ESC [ A``).
-        ``less`` / ``man`` flip this on; without honoring it their
-        readline bindings break.
-      * Cmd/Meta is reserved for the host (Cmd+C copy, etc.)."""
-    var alt = (mods & MOD_ALT) != 0
-    var ctrl = (mods & MOD_CTRL) != 0
-    var shift = (mods & MOD_SHIFT) != 0
-    var prefix = String("\x1b") if alt else String("")
-    # xterm-style modifier byte: 1 + shift*1 + alt*2 + ctrl*4 (encoded
-    # as ASCII digits in the CSI parameter slot). 1 == no modifier;
-    # we only insert the param block when the byte > 1.
-    var mod_byte = 1
-    if shift: mod_byte += 1
-    if alt:   mod_byte += 2
-    if ctrl:  mod_byte += 4
-    var has_mods = mod_byte > 1
-    # When the modifier param is set we drop the ESC prefix — the
-    # modifier param IS the encoding for alt now; doubling it would
-    # send ESC ESC [ 1;N…, which apps would parse as alt-ESC.
-    if has_mods:
-        prefix = String("")
-
-    if key == KEY_ENTER:
-        # ``\r`` (CR). Most tty drivers translate CR → NL via ICRNL, so
-        # the child reads it as ``\n``. Sending ``\n`` directly would
-        # skip that and confuse programs that distinguish (``read -r``).
-        return prefix + String("\r")
-    if key == KEY_TAB:
-        # Shift+Tab → ``CSI Z`` (kcbt) so reverse-tab navigation works
-        # (fzf, completion menus, vim's window cycler).
-        if shift and not ctrl and not alt:
-            return String("\x1b[Z")
-        return prefix + String("\t")
-    if key == KEY_BACKSPACE:
-        # Most modern terminals send DEL (0x7F) for Backspace and let
-        # the line discipline translate it via ``stty erase``. Ctrl+
-        # Backspace sends BS (0x08) — many readline configs bind it to
-        # backward-kill-word.
-        if ctrl:
-            return prefix + String("\x08")
-        return prefix + String("\x7f")
-    if key == KEY_ESC:
-        return prefix + String("\x1b")
-    # Arrows / Home / End — three forms depending on DECCKM + mods:
-    #   1. modified           → ``ESC [ 1 ; N c``  (xterm modifyOtherKeys)
-    #   2. unmodified, no app  → ``ESC [ c``        (CSI form)
-    #   3. unmodified, app on  → ``ESC O c``        (SS3 form)
-    if key == KEY_UP:
-        if has_mods: return _csi_mod(String("A"), mod_byte)
-        return prefix + (String("\x1bOA") if app_cursor else String("\x1b[A"))
-    if key == KEY_DOWN:
-        if has_mods: return _csi_mod(String("B"), mod_byte)
-        return prefix + (String("\x1bOB") if app_cursor else String("\x1b[B"))
-    if key == KEY_RIGHT:
-        if has_mods: return _csi_mod(String("C"), mod_byte)
-        return prefix + (String("\x1bOC") if app_cursor else String("\x1b[C"))
-    if key == KEY_LEFT:
-        if has_mods: return _csi_mod(String("D"), mod_byte)
-        return prefix + (String("\x1bOD") if app_cursor else String("\x1b[D"))
-    if key == KEY_HOME:
-        if has_mods: return _csi_mod(String("H"), mod_byte)
-        return prefix + (String("\x1bOH") if app_cursor else String("\x1b[H"))
-    if key == KEY_END:
-        if has_mods: return _csi_mod(String("F"), mod_byte)
-        return prefix + (String("\x1bOF") if app_cursor else String("\x1b[F"))
-    # ``~``-terminated nav / function keys — modifier param goes before
-    # the tilde (``ESC [ 5 ; N ~``).
-    if key == KEY_PAGEUP:
-        if has_mods: return _csi_mod_tilde(5, mod_byte)
-        return prefix + String("\x1b[5~")
-    if key == KEY_PAGEDOWN:
-        if has_mods: return _csi_mod_tilde(6, mod_byte)
-        return prefix + String("\x1b[6~")
-    if key == KEY_INSERT:
-        if has_mods: return _csi_mod_tilde(2, mod_byte)
-        return prefix + String("\x1b[2~")
-    if key == KEY_DELETE:
-        if has_mods: return _csi_mod_tilde(3, mod_byte)
-        return prefix + String("\x1b[3~")
-    # Function keys — SS3 form for F1..F4, CSI ~ form for F5+. Matches
-    # xterm-256color's terminfo.
-    if key == KEY_F1:
-        if has_mods: return _csi_mod(String("P"), mod_byte)
-        return prefix + String("\x1bOP")
-    if key == KEY_F2:
-        if has_mods: return _csi_mod(String("Q"), mod_byte)
-        return prefix + String("\x1bOQ")
-    if key == KEY_F3:
-        if has_mods: return _csi_mod(String("R"), mod_byte)
-        return prefix + String("\x1bOR")
-    if key == KEY_F4:
-        if has_mods: return _csi_mod(String("S"), mod_byte)
-        return prefix + String("\x1bOS")
-    if key == KEY_F5:
-        if has_mods: return _csi_mod_tilde(15, mod_byte)
-        return prefix + String("\x1b[15~")
-    if key == KEY_F6:
-        if has_mods: return _csi_mod_tilde(17, mod_byte)
-        return prefix + String("\x1b[17~")
-    if key == KEY_F7:
-        if has_mods: return _csi_mod_tilde(18, mod_byte)
-        return prefix + String("\x1b[18~")
-    if key == KEY_F8:
-        if has_mods: return _csi_mod_tilde(19, mod_byte)
-        return prefix + String("\x1b[19~")
-    if key == KEY_F9:
-        if has_mods: return _csi_mod_tilde(20, mod_byte)
-        return prefix + String("\x1b[20~")
-    if key == KEY_F10:
-        if has_mods: return _csi_mod_tilde(21, mod_byte)
-        return prefix + String("\x1b[21~")
-    if key == KEY_F11:
-        if has_mods: return _csi_mod_tilde(23, mod_byte)
-        return prefix + String("\x1b[23~")
-    if key == KEY_F12:
-        if has_mods: return _csi_mod_tilde(24, mod_byte)
-        return prefix + String("\x1b[24~")
-
-    # Printable character key.
-    var ch = Int(key)
-    if ch >= 0x20 and ch < 0x10FFFF and ch < 0xE000:
-        # Ctrl + ascii letter / @ / [ / \ / ] / ^ / _ → C0 control byte.
-        if ctrl:
-            var upper = ch
-            if upper >= 0x61 and upper <= 0x7A:  # lower → upper
-                upper = upper - 0x20
-            if upper >= 0x40 and upper <= 0x5F:
-                var b = upper - 0x40
-                return prefix + _ascii_to_string(UInt8(b))
-            # Ctrl+space / Ctrl+2 → NUL.
-            if upper == 0x20 or upper == 0x32:
-                return prefix + _ascii_to_string(UInt8(0))
-            # Other Ctrl+printable → just send the character; xterm's
-            # behavior is similar (some glyphs aren't C0-mappable).
-        var buf = List[UInt8]()
-        append_utf8(buf, Int(ch))
-        return prefix + String(StringSpan(unsafe_from_utf8=Span(buf)))
-    return String("")
-
-
-def _csi_mod(letter: String, mod_byte: Int) -> String:
-    """xterm modifier-encoded form: ``ESC [ 1 ; N c`` where ``c`` is the
-    final letter (A/B/C/D/H/F/P/Q/R/S). Modified arrows, Home/End,
-    F1..F4."""
-    return String("\x1b[1;") + String(mod_byte) + letter
-
-
-def _csi_mod_tilde(num: Int, mod_byte: Int) -> String:
-    """xterm modifier-encoded ``~``-terminated form: ``ESC [ n ; N ~``.
-    Modified PageUp/PageDown/Insert/Delete and F5..F12."""
-    return String("\x1b[") + String(num) + String(";") \
-        + String(mod_byte) + String("~")
-
-
-def _ascii_to_string(b: UInt8) -> String:
-    var buf = List[UInt8]()
-    buf.append(b)
-    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=1)))
 
 
 # --- visual helpers -------------------------------------------------------
@@ -686,7 +465,7 @@ def paste_to_pty(pty: PtyProcess, vt: Vt, text: String):
     ``ESC[201~`` when it enabled bracketed paste (DECSET 2004), so a
     multi-line paste into a shell or vim doesn't run each line as a
     command."""
-    if vt.bracketed_paste:
+    if vt.bracketed_paste():
         pty.write_all(String("\x1b[200~") + text + String("\x1b[201~"))
     else:
         pty.write_all(text)
@@ -701,10 +480,10 @@ def forward_key_to_grid(
     gets a real Ctrl+C), any other key clears the selection, snaps the
     view back to the live tail and goes to the child encoded."""
     if event.key == KEY_PAGEUP and (event.mods & MOD_SHIFT) != 0:
-        vt.scroll_view_by(vt.rows - 2)
+        vt.scroll_view_by(vt.rows() - 2)
         return True
     if event.key == KEY_PAGEDOWN and (event.mods & MOD_SHIFT) != 0:
-        vt.scroll_view_by(-(vt.rows - 2))
+        vt.scroll_view_by(-(vt.rows() - 2))
         return True
     if event.key == UInt32(ord("c")) and event.mods == MOD_META \
             and sel.sel_active:
@@ -714,9 +493,9 @@ def forward_key_to_grid(
     # Any keystroke clears a finished selection, and typing snaps back to
     # the live tail — same as every terminal app.
     sel.sel_active = False
-    if vt.view_offset != 0:
+    if vt.view_offset() != 0:
         vt.reset_view()
-    var encoded = encode_key(event.key, event.mods, vt.app_cursor_keys)
+    var encoded = vt.encode_key(event.key, event.mods)
     if len(encoded.as_bytes()) > 0:
         pty.write_all(encoded)
         return True

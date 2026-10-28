@@ -53,14 +53,6 @@ from .window import (
 )
 
 
-comptime _RAW_CAP = 2_000_000
-"""Cap on the captured output stream used for lossless resize replay
-(see ``_capture`` / ``_rebuild_vt``). ~2 MB covers any realistic test
-run; past it we stop capturing and resize falls back to the destructive
-``Vt.resize`` (a shell-terminal-style truncate) rather than growing the
-buffer without bound."""
-
-
 comptime TEST_STOP          = String("test:stop")
 comptime TEST_RERUN         = String("test:rerun")
 comptime TEST_CLEAR_OUTPUT  = String("test:clear_output")
@@ -83,7 +75,9 @@ struct TestPane(Copyable, Movable):
     var vt: Vt
     """Terminal emulator state — the pane body is this grid, top-left
     anchored. Resized (+ ``pty.set_winsize``) whenever the body rect
-    changes so pytest reflows to the pane width."""
+    changes so pytest reflows to the pane width; the emulator reflows the
+    output already on screen, so a shrink-then-grow loses nothing even
+    after the child has exited."""
     var sel: GridSelection
     """Mouse selection over the grid, shared with the shell terminal."""
 
@@ -100,19 +94,6 @@ struct TestPane(Copyable, Movable):
     actual exit."""
     var last_command: String
     """Pretty argv of the in-flight / last run, for the ``$`` banner."""
-
-    # --- lossless-resize replay ----------------------------------------
-    var _raw: List[UInt8]
-    """Every byte fed to the emulator this run (banner + child output +
-    exit banner). ``Vt.resize`` is destructive on shrink — it discards
-    columns/rows past the new size — and the test pane's static post-exit
-    output has no live child to repaint it, so shrinking then growing
-    would lose content. Instead we replay this stream into a fresh ``Vt``
-    on a settled size change (``_rebuild_vt``), which re-wraps losslessly
-    to the new width. Bounded by ``_RAW_CAP``."""
-    var _raw_overflow: Bool
-    """Set once ``_raw`` would exceed ``_RAW_CAP``; thereafter capture
-    stops and resize falls back to the destructive ``Vt.resize``."""
 
     # --- link bookkeeping (rebuilt each paint) -------------------------
     var _last_links: List[OutputLink]
@@ -136,8 +117,6 @@ struct TestPane(Copyable, Movable):
         self.exit_code = 0
         self._eof = False
         self.last_command = String("")
-        self._raw = List[UInt8]()
-        self._raw_overflow = False
         self._last_links = List[OutputLink]()
         self.pending_open_path = String("")
         self.pending_open_line = 0
@@ -152,6 +131,7 @@ struct TestPane(Copyable, Movable):
         # copies are only Mojo value-semantics in tests. Reset to a fresh
         # inert process so neither destructor double-closes.
         self.pty = PtyProcess()
+        # Shared, not copied: ``Vt`` is a handle the original pane owns.
         self.vt = copy.vt
         self.sel = copy.sel
         self.started = copy.started
@@ -159,8 +139,6 @@ struct TestPane(Copyable, Movable):
         self.exit_code = copy.exit_code
         self._eof = copy._eof
         self.last_command = copy.last_command
-        self._raw = copy._raw
-        self._raw_overflow = copy._raw_overflow
         self._last_links = copy._last_links
         self.pending_open_path = copy.pending_open_path
         self.pending_open_line = copy.pending_open_line
@@ -214,15 +192,11 @@ struct TestPane(Copyable, Movable):
         any prior child first and resets the grid. The child sees a real
         TTY, so no ``--color=yes`` / ``COLUMNS`` plumbing is needed."""
         self.pty.terminate()
-        # Preserve the current grid size across re-runs (the last paint
-        # sized it to the pane); a never-painted pane keeps the 80×24
-        # default and reflows on the first frame.
-        var c = self.vt.cols
-        var r = self.vt.rows
-        self.vt = Vt(c, r)
+        # A blank grid at the current size (the last paint sized it to the
+        # pane; a never-painted pane keeps 80×24 and reflows on the first
+        # frame).
+        self.vt.reset()
         self.sel.clear()
-        self._raw = List[UInt8]()
-        self._raw_overflow = False
         self.exited = False
         self._eof = False
         self.exit_code = 0
@@ -239,7 +213,7 @@ struct TestPane(Copyable, Movable):
         for k in range(len(args)):
             argv.append(args[k])
         self.pty = PtyProcess.spawn(
-            argv, cwd=cwd, cols=self.vt.cols, rows=self.vt.rows,
+            argv, cwd=cwd, cols=self.vt.cols(), rows=self.vt.rows(),
         )
 
     def stop(mut self):
@@ -261,17 +235,17 @@ struct TestPane(Copyable, Movable):
         self.started = False
         self.exited = False
 
+    def release(mut self):
+        """Free the emulator, for ``Desktop.shutdown``. ``close`` keeps it:
+        the pane is a fixture of the window and its output stays readable
+        across a close and re-open."""
+        self.vt.release()
+
     def clear(mut self):
         """Wipe the grid (Clear button). Doesn't kill a running child —
-        new output keeps streaming into the fresh grid. Also drops the
-        replay buffer so a later resize doesn't bring the cleared output
-        back."""
-        var c = self.vt.cols
-        var r = self.vt.rows
-        self.vt = Vt(c, r)
+        new output keeps streaming into the blank grid."""
+        self.vt.reset()
         self.sel.clear()
-        self._raw = List[UInt8]()
-        self._raw_overflow = False
 
     # --- per-tick drain ------------------------------------------------
 
@@ -297,7 +271,6 @@ struct TestPane(Copyable, Movable):
                     unsafe_ptr=scratch.unsafe_ptr(), length=n,
                 )
                 self.vt.feed(span)
-                self._capture(scratch.unsafe_ptr(), n)
                 total += n
         # Flush emulator side-effects (DSR/DA replies, OSC 52 clipboard).
         flush_vt_side_effects(self.pty, self.vt)
@@ -373,18 +346,11 @@ struct TestPane(Copyable, Movable):
         if bw <= 0 or bh <= 0:
             self.sel._last_body = Rect.empty()
             return
-        # Sync grid size to the body. ``Vt.resize`` truncates on shrink,
-        # which would lose the static post-exit output (nothing repaints
-        # it), so instead we replay the captured stream into a fresh grid
-        # — the emulator re-wraps to the new width, so a shrink-then-grow
-        # round-trips losslessly. ``_raw`` is the source of truth, so
-        # this is safe to do every frame (incl. during a resize drag);
-        # ``_raw_overflow`` falls back to the cheap destructive resize.
-        if bw != self.vt.cols or bh != self.vt.rows:
-            if self._raw_overflow:
-                self.vt.resize(bw, bh)
-            else:
-                self._rebuild_vt(bw, bh)
+        # Sync grid size to the body. The emulator reflows the output on
+        # resize, so the static post-exit text (nothing repaints it)
+        # survives a shrink-then-grow.
+        if bw != self.vt.cols() or bh != self.vt.rows():
+            self.vt.resize(bw, bh)
             if self.pty.alive:
                 _ = self.pty.set_winsize(bw, bh)
         self.sel._last_body = body
@@ -401,8 +367,9 @@ struct TestPane(Copyable, Movable):
         # from the scanners are codepoint columns, matching the grid's
         # one-cell-per-column layout (link text is ASCII).
         var link_attr = Attr(LIGHT_BLUE, PANE_BG, STYLE_UNDERLINE)
-        for r in range(self.vt.rows):
-            var line = self._row_text(r)
+        var grid = self.vt.grid()
+        for r in range(grid.rows):
+            var line = grid.row_text(r)
             if len(line.as_bytes()) == 0:
                 continue
             var hits = extract_all_links(line)
@@ -422,11 +389,6 @@ struct TestPane(Copyable, Movable):
                 self._last_links.append(OutputLink(
                     line_y, x0, x1, hit.path, hit.line, hit.is_url,
                 ))
-
-    def _row_text(self, r: Int) -> String:
-        """On-screen row ``r`` as a String (view-aware so a scrolled-back
-        row scans its historical text). Trailing spaces trimmed."""
-        return self.vt.row_text(r)
 
     # --- copy / selection delegates ------------------------------------
 
@@ -518,34 +480,8 @@ struct TestPane(Copyable, Movable):
         return forward_key_to_grid(self.pty, self.vt, self.sel, event)
 
 
-    # --- output capture / lossless resize ------------------------------
+    # --- output ---------------------------------------------------------
 
     def _emit(mut self, s: String):
-        """Feed a host-generated banner to the emulator *and* record it
-        for resize replay."""
+        """Feed a host-generated banner to the emulator."""
         self.vt.feed_string(s)
-        var b = s.as_bytes()
-        self._capture(b.unsafe_ptr(), len(b))
-
-    def _capture(mut self, ptr: Pointer[UInt8, _], n: Int):
-        """Append ``n`` display-bound bytes to the replay buffer, latching
-        overflow at ``_RAW_CAP``. Replies / clipboard writes (Vt→child)
-        are deliberately not captured — only what's on screen."""
-        if self._raw_overflow:
-            return
-        for i in range(n):
-            self._raw.append(ptr[unsafe_offset=i])
-        if len(self._raw) > _RAW_CAP:
-            self._raw_overflow = True
-
-    def _rebuild_vt(mut self, cols: Int, rows: Int):
-        """Rebuild the grid at ``cols`` × ``rows`` by replaying the
-        captured stream. The emulator re-wraps text to the new width, so
-        a shrink-then-grow round-trips losslessly — unlike ``Vt.resize``,
-        which discards the off-grid columns/rows."""
-        self.vt = Vt(cols, rows)
-        if len(self._raw) > 0:
-            var span = Span[UInt8, origin_of(self._raw)](
-                unsafe_ptr=self._raw.unsafe_ptr(), length=len(self._raw),
-            )
-            self.vt.feed(span)

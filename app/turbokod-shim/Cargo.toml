@@ -24,3 +24,7 @@ libc = "0.2"
 lto           = "thin"
 codegen-units = 1
 opt-level     = 3
+
+[build-dependencies]
+# Compiles src/tk_vt.c, the C glue over libghostty-vt (see build.rs).
+cc = "1"

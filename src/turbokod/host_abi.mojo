@@ -34,8 +34,10 @@ comptime SHAPE_NS_RESIZE = Int32(3)   # over a pane's top edge / dragging it
 comptime SHAPE_EW_RESIZE = Int32(4)   # over the file tree's edge
 
 # ``UInt32`` words per cell in the layout buffer:
-# ``[codepoint, fg|bg<<8|style<<16|color_mode<<24, underline_color, fg_rgb,
-# bg_rgb]``. ``app/swift/TurboKod.swift`` reads the same layout.
+# ``[codepoint|width<<24, fg|bg<<8|style<<16|color_mode<<24, underline_color,
+# fg_rgb, bg_rgb]``. ``app/swift/TurboKod.swift`` reads the same layout.
+# ``width`` is the cell's (0, 1 or 2) so a host never recomputes it from the
+# codepoint and can't drift from ``char_width``.
 comptime CELL_WORDS = 5
 
 
@@ -91,7 +93,7 @@ def pack_canvas(
             w2 = UInt32(0xFFFFFFFF)
         else:
             w2 = UInt32(Int(attr.underline_color))
-        op[unsafe_offset=base] = UInt32(cp)
+        op[unsafe_offset=base] = UInt32(cp) | (UInt32(cell.width & 0x3) << 24)
         op[unsafe_offset=base + 1] = w1
         op[unsafe_offset=base + 2] = w2
         op[unsafe_offset=base + 3] = attr.fg_rgb
@@ -102,17 +104,15 @@ def pack_canvas(
 def unpack_into(buf: List[UInt32], n: Int, mut canvas: Canvas):
     """Reconstruct a canvas from a ``pack_canvas`` buffer (the host side).
 
-    The pack drops ``Cell.width`` (it only carries a codepoint), so we
-    recompute it: ``Cell(glyph, attr)`` derives width via ``cell_width`` (2 for
-    emoji), and we force the cell *after* a width-2 glyph to be a width-0
-    continuation — exactly the shape ``Terminal.present`` expects (it skips
-    width-0 cells and advances two columns for width-2). Attr fields are set
-    directly (not via the ``with_*_rgb`` builders) so we mirror precisely what
-    the core packed, with no re-derivation."""
-    var ci = 0
-    while ci < n:
+    Widths come from the pack, so a wide glyph and its width-0 continuation
+    arrive exactly as the core painted them — the shape ``Terminal.present``
+    expects (it skips width-0 cells and advances two columns for width-2).
+    Attr fields are set directly (not via the ``with_*_rgb`` builders) so we
+    mirror precisely what the core packed, with no re-derivation."""
+    for ci in range(n):
         var base = ci * CELL_WORDS
-        var cp = Int(buf[base])
+        var cp = Int(buf[base] & 0x1FFFFF)
+        var width = Int(buf[base] >> 24)
         if cp <= 0:
             cp = 0x20
         var w1 = buf[base + 1]
@@ -128,11 +128,7 @@ def unpack_into(buf: List[UInt32], n: Int, mut canvas: Canvas):
             attr.underline_color = Int16(Int(w2 & 0xFFFF))
         attr.fg_rgb = buf[base + 3]
         attr.bg_rgb = buf[base + 4]
-        var cell = Cell(chr(cp), attr)
-        canvas.cells[ci] = cell
-        if cell.width == 2:
-            if ci + 1 < n:
-                canvas.cells[ci + 1] = Cell(String(""), attr, 0)
-            ci += 2
+        if width == 0:
+            canvas.cells[ci] = Cell(String(""), attr, 0)
         else:
-            ci += 1
+            canvas.cells[ci] = Cell(chr(cp), attr, width)

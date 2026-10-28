@@ -80,15 +80,6 @@ support="$(dirname -- "$src")/support.mojo"
 if [ -f "$support" ] && [ "$support" != "$src" ]; then
   deps+=("$support")
 fi
-needs_build=1
-if [ -x "$bin" ]; then
-  newer=$(find "${deps[@]}" -name '*.mojo' -newer "$bin" -print -quit 2>/dev/null)
-  if [ -z "$newer" ] \
-     && [ ! "app/turbokod-shim/target/release/libturbokod_shim.a" -nt "$bin" ] \
-     && [ ! pixi.lock -nt "$bin" ]; then
-    needs_build=0
-  fi
-fi
 
 restore_term() {
   printf '\e[?1049l\e[?25h\e[?1000l\e[?1003l\e[?1006l\e[0m' 2>/dev/null || true
@@ -110,6 +101,18 @@ env_prefix="$(resolve_env_prefix)"
 ensure_shim run.sh || exit 1
 shim_lib="$SHIM_LIB"
 proc_obj="$shim_lib"
+
+# After ``ensure_shim``: a shim rebuild (or a libghostty-vt bump under it)
+# must make this binary stale *this* run, not the next one.
+needs_build=1
+if [ -x "$bin" ]; then
+  newer=$(find "${deps[@]}" -name '*.mojo' -newer "$bin" -print -quit 2>/dev/null)
+  if [ -z "$newer" ] \
+     && [ ! "app/turbokod-shim/target/release/libturbokod_shim.a" -nt "$bin" ] \
+     && [ ! pixi.lock -nt "$bin" ]; then
+    needs_build=0
+  fi
+fi
 
 if [ "$needs_build" -eq 1 ]; then
   echo "[run.sh] building $src -> $bin" >&2

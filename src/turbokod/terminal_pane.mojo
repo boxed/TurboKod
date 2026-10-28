@@ -54,7 +54,7 @@ from .terminal_view import (
     flush_vt_side_effects, forward_key_to_grid, GridSelection, paint_grid,
     paste_to_pty,
 )
-from .vt import Vt
+from .vt import MOUSE_MOTION, MOUSE_PRESS, MOUSE_RELEASE, Vt
 from .window import (
     BottomDockedPanel, TitleCommand,
     handle_bottom_dock_chrome_mouse, handle_bottom_dock_esc,
@@ -197,6 +197,8 @@ struct TerminalPane(Copyable, Movable):
         # Mojo value semantics in tests. Reset to a fresh process in
         # the copy so neither destructor double-closes.
         self.pty = PtyProcess()
+        # The copy shares the emulator (``Vt`` is a handle); the original
+        # pane owns it and is the one that releases it.
         self.vt = copy.vt
         self.sel = copy.sel
         self.cwd = copy.cwd
@@ -255,6 +257,12 @@ struct TerminalPane(Copyable, Movable):
         self.focused = False
         self.pty.terminate()
 
+    def release(mut self):
+        """Free the emulator. ``close`` keeps it so a re-open shows the old
+        screen; this is for when the pane itself goes away (its close
+        button, or ``Desktop.shutdown``). Call ``close`` first."""
+        self.vt.release()
+
     def ensure_started(mut self) raises:
         """Spawn the shell if not already running.
 
@@ -276,7 +284,7 @@ struct TerminalPane(Copyable, Movable):
         # what they want, and login mode adds startup latency.
         self.pty = PtyProcess.spawn(
             argv, cwd=self.cwd,
-            cols=self.vt.cols, rows=self.vt.rows,
+            cols=self.vt.cols(), rows=self.vt.rows(),
         )
         if len(self.startup_command.as_bytes()) > 0:
             # Queue the command on the shell's stdin. The bytes sit in
@@ -290,10 +298,9 @@ struct TerminalPane(Copyable, Movable):
         """Kill the current shell and spawn a fresh one. Useful when
         the shell ends up in a wedged state."""
         self.pty.terminate()
-        # Wipe the visible grid so the new session starts clean.
-        # Equivalent to ``ESC c`` (RIS) which we honor anyway, but
-        # explicit reset is more obvious for a UI-driven restart.
-        self.vt = Vt(self.vt.cols, self.vt.rows)
+        # Wipe the grid, scrollback and modes so the new session starts
+        # clean (a full reset, as ``ESC c`` would do).
+        self.vt.reset()
         try:
             self.ensure_started()
         except e:
@@ -449,8 +456,9 @@ struct TerminalPane(Copyable, Movable):
         # Claude wins because users opening a Claude session care
         # more about its state than the shell's PS1-derived title.
         var displayed_title = String("Terminal")
-        if len(self.vt.title.as_bytes()) > 0:
-            displayed_title = self.vt.title
+        var osc_title = self.vt.title()
+        if len(osc_title.as_bytes()) > 0:
+            displayed_title = osc_title
         # Claude state is classified once per frame by ``tick`` (which the
         # loop runs before ``paint``) and cached in ``_claude_title_state``;
         # reuse it here rather than rescanning the grid tail and
@@ -476,7 +484,7 @@ struct TerminalPane(Copyable, Movable):
         if bw <= 0 or bh <= 0:
             self.sel._last_body = Rect.empty()
             return
-        if bw != self.vt.cols or bh != self.vt.rows:
+        if bw != self.vt.cols() or bh != self.vt.rows():
             self.vt.resize(bw, bh)
             if self.pty.alive:
                 _ = self.pty.set_winsize(bw, bh)
@@ -531,7 +539,7 @@ struct TerminalPane(Copyable, Movable):
             self.focused = True
             if self.vt.tracks_mouse() \
                     and (event.mods & MOD_SHIFT) == 0:
-                self._forward_mouse_to_pty(event, motion=False, released=False)
+                self._forward_mouse_to_pty(event, MOUSE_PRESS)
                 return True
             var dir = 3 if event.button == MOUSE_WHEEL_UP else -3
             self.vt.scroll_view_by(dir)
@@ -547,36 +555,27 @@ struct TerminalPane(Copyable, Movable):
                 and not event.motion:
             self.focused = True
             if routes_to_child:
-                self._forward_mouse_to_pty(event, motion=False, released=False)
+                self._forward_mouse_to_pty(event, MOUSE_PRESS)
                 return True
             self.sel.click(self.vt, event)
             return True
         if routes_to_child:
-            # Release / motion / non-left presses. We pass motion=True
-            # when the event flag says so, released=True when the
-            # event isn't a press. The encoder filters out non-tracked
-            # motion events (e.g. plain hover when only 1000 is on).
-            if event.motion and not self.vt.mouse_track_btn_motion \
-                    and not self.vt.mouse_track_any_motion:
-                return True
-            self._forward_mouse_to_pty(
-                event,
-                motion=event.motion,
-                released=event.button != MOUSE_BUTTON_NONE \
-                    and not event.pressed,
-            )
+            # Release / motion / non-left presses. The encoder drops what
+            # the child didn't ask for (plain hover when only 1000 is on).
+            var action = MOUSE_PRESS
+            if event.motion:
+                action = MOUSE_MOTION
+            elif event.button != MOUSE_BUTTON_NONE and not event.pressed:
+                action = MOUSE_RELEASE
+            self._forward_mouse_to_pty(event, action)
             return True
         return True
 
-    def _forward_mouse_to_pty(
-        self, event: Event, motion: Bool, released: Bool,
-    ):
-        """Encode a panel-relative mouse ``Event`` to xterm bytes via the
-        shared view and write them to the pty master. No-op outside the
-        body or when the encoder can't represent the coordinates."""
-        var encoded = self.sel.encode_mouse_forward(
-            self.vt, event, motion, released,
-        )
+    def _forward_mouse_to_pty(self, event: Event, action: Int):
+        """Encode a panel-relative mouse ``Event`` (``action`` a
+        ``MOUSE_*``) via the shared view and write it to the pty master.
+        No-op outside the body or when the child asked for no report."""
+        var encoded = self.sel.encode_mouse_forward(self.vt, event, action)
         if len(encoded.as_bytes()) > 0:
             self.pty.write_all(encoded)
 

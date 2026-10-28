@@ -890,18 +890,17 @@ def test_test_pane_runs_command_on_pty() raises:
 
 def test_test_pane_resize_preserves_content() raises:
     """Shrinking the pane's width then growing it back must not lose
-    content. ``Vt.resize`` truncates on shrink, so the pane replays its
-    captured output stream into a fresh grid on every size change — a
-    narrow→wide round-trip therefore reproduces exactly the grid a
-    direct wide render produces."""
+    content: the emulator reflows soft-wrapped lines on resize, so a
+    narrow→wide round-trip reproduces exactly the grid a direct wide render
+    produces — including after the child exited, when nothing repaints."""
     var line1 = String("alpha bravo charlie delta echo foxtrot golf\r\n")
     var line2 = String("second-line-marker-xyz\r\n")
     var pane = TestPane()
     pane.visible = True
     pane._emit(line1)
     pane._emit(line2)
-    # Wide → narrow → wide. The narrow pass truncates a naive Vt grid;
-    # the replay must bring the off-grid text back on the wide pass.
+    # Wide → narrow → wide. The narrow pass wraps the long line; the wide
+    # pass must unwrap it again.
     var wide = Rect(Point(0, 0), Point(50, 10))
     var narrow = Rect(Point(0, 0), Point(20, 10))
     var cw = Canvas(50, 10)
@@ -918,9 +917,9 @@ def test_test_pane_resize_preserves_content() raises:
     var cd = Canvas(50, 10)
     direct.paint(cd, wide)
     # Every grid row must match the reference — no lost content.
-    assert_equal(pane.vt.rows, direct.vt.rows)
-    for r in range(pane.vt.rows):
-        assert_equal(pane._row_text(r), direct._row_text(r))
+    assert_equal(pane.vt.rows(), direct.vt.rows())
+    for r in range(pane.vt.rows()):
+        assert_equal(pane.vt.row_text(r), direct.vt.row_text(r))
 
 
 def test_test_pane_detects_traceback_link() raises:
@@ -931,9 +930,7 @@ def test_test_pane_detects_traceback_link() raises:
     var pane = TestPane()
     pane.visible = True
     # Canned pytest-style traceback line fed straight into the emulator
-    # (no pty needed — link detection runs off the grid). Fed through
-    # ``_emit`` so it's captured for resize replay, matching the real
-    # output path.
+    # (no pty needed — link detection runs off the grid).
     pane._emit(
         String("E   File \"app/models.py\", line 7, in handler\r\n")
     )

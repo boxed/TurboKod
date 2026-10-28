@@ -60,6 +60,9 @@ fi
 log_dir=".build/test-logs"
 mkdir -p "$log_dir"
 
+# The shim (and libghostty-vt under it) once, serially: every parallel
+# ``run.sh`` below would otherwise race to build it from a cold checkout.
+ensure_shim "$(basename "$0")" || exit 1
 echo "==> building ${#suites[@]} suite(s) with -j$JOBS"
 build_start=$(date +%s)
 printf '%s\n' "${suites[@]}" | xargs -P "$JOBS" -n1 "$self" --build-one

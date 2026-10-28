@@ -66,6 +66,7 @@ from turbokod.prompt import (
     SUBMIT_FIND_NEXT, SUBMIT_REPLACE, SUBMIT_REPLACE_ALL
 )
 from turbokod.terminal_pane import TerminalPane
+from turbokod.vt import vt_live_count
 from turbokod.view import Fill, Label, centered
 from turbokod.window import Window
 
@@ -3166,6 +3167,22 @@ def test_desktop_shutdown_releases_its_libonig_handles() raises:
     d.shutdown()
     assert_equal(onig_tracked_count(), live)
     _ = delete_path(path)
+
+
+def test_desktop_shutdown_releases_its_terminal_emulators() raises:
+    """Every pty pane owns a libghostty-vt terminal (a few MB with its
+    scrollback) that no destructor can free — ``Vt`` copies alias it. The
+    test pane has one from the start, each terminal pane brings its own,
+    and shutdown has to hand them all back, twice-safely."""
+    var live = vt_live_count()
+    var d = Desktop()
+    d.terminal_panes.append(TerminalPane())
+    d.terminal_panes.append(TerminalPane())
+    assert_true(vt_live_count() >= live + 3)
+    d.shutdown()
+    assert_equal(vt_live_count(), live)
+    d.shutdown()
+    assert_equal(vt_live_count(), live)
 
 
 def test_closing_a_window_releases_its_find_regex() raises:

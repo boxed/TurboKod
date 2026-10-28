@@ -37,6 +37,9 @@ fail=0
 # --- 1. every standalone entry point -------------------------------------
 # examples/ and bench/ are the ones no other target compiles.
 entries=(examples/*.mojo bench/*.mojo)
+# The shim (and libghostty-vt under it) once, serially: every parallel
+# ``run.sh`` below would otherwise race to build it from a cold checkout.
+ensure_shim "$(basename "$0")" || exit 1
 echo "==> building ${#entries[@]} entry point(s) with -j$JOBS"
 printf '%s\n' "${entries[@]}" | xargs -P "$JOBS" -n1 "$self" --build-one \
   || fail=1

@@ -118,15 +118,21 @@ def test_prev_codepoint_start_tolerates_past_eol_columns() raises:
 
 
 def test_emoji_double_width() raises:
-    """Emoji occupy two cells end-to-end: ``char_width`` reports 2,
+    """Wide glyphs (emoji, CJK) occupy two cells end-to-end: ``char_width`` reports 2,
     ``display_columns`` / ``utf8_byte_to_cell`` / ``utf8_codepoint_count``
     all count two, and ``put_text`` paints the glyph plus an empty
     width-0 continuation cell so following text stays aligned."""
     assert_equal(char_width(0x1F680), 2)  # 🚀
     assert_equal(char_width(0x2B50), 2)   # ⭐
     assert_equal(char_width(ord("A")), 1)
-    # CJK is intentionally still narrow (East-Asian width not modeled).
-    assert_equal(char_width(0x65E5), 1)   # 日
+    # East-Asian wide text is two cells too (Ghostty's table).
+    assert_equal(char_width(0x65E5), 2)   # 日
+    assert_equal(display_columns(String("日本")), 4)
+    # Deliberate departures from Ghostty: every codepoint keeps a cell, so a
+    # combining mark is 1, not 0; a regional indicator stays 1 so a flag is
+    # two cells, not four.
+    assert_equal(char_width(0x0301), 1)
+    assert_equal(char_width(0x1F1F8), 1)
 
     assert_equal(display_columns(String("a🚀b")), 4)
 

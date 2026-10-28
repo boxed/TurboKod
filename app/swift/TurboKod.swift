@@ -762,15 +762,19 @@ final class CellView: NSView {
         }
         let attrs: [NSAttributedString.Key: Any] = [.font: cellFont]
         for i in 0..<n {
-            let cp = p[i * CELL_WORDS]
+            // Word 0 is the codepoint, with the core's cell width (0 / 1 / 2)
+            // in the top byte — we never recompute it from the codepoint.
+            let w0 = p[i * CELL_WORDS]
+            let cp = w0 & 0x1FFFFF
+            let wide = (w0 >> 24) == 2
             let (fg, _, style) = cellColors(p, i)
             let col = i % c, row = i / c
             let x = originX + CGFloat(col) * CELL_W
             let y = originY + CGFloat(row) * CELL_H
             if cp != 0x20 && cp != 0, let scalar = Unicode.Scalar(cp) {
                 let s = String(scalar) as NSString
-                if charWidth(cp) == 2 {
-                    drawEmoji(s, cellX: x, cellY: y, cellW: CELL_W * 2)
+                if wide {
+                    drawWide(s, fg: fg, cellX: x, cellY: y, cellW: CELL_W * 2)
                 } else if cellFontHasGlyph(cp) {
                     var a = attrs
                     a[.foregroundColor] = nscolor(fg)
@@ -977,48 +981,16 @@ final class CellView: NSView {
         springTimer = t
     }
 
-    /// Display width of a codepoint in grid cells: 2 for the emoji blocks
-    /// terminals render double-wide, 1 otherwise. Ported verbatim from
-    /// `char_width` in `string_utils.mojo` — the two MUST agree, or the Mojo
-    /// core's cell layout and this renderer disagree on where glyphs land.
-    private func charWidth(_ cp: UInt32) -> Int {
-        if cp < 0x231A { return 1 }
-        switch cp {
-        case 0x231A, 0x231B, 0x2329, 0x232A,
-             0x23F0, 0x23F3,
-             0x25FD, 0x25FE, 0x2614, 0x2615,
-             0x267F, 0x2693, 0x26A1, 0x26AA, 0x26AB,
-             0x26BD, 0x26BE, 0x26C4, 0x26C5, 0x26CE, 0x26D4, 0x26EA,
-             0x26F2, 0x26F3, 0x26F5, 0x26FA, 0x26FD,
-             0x2705, 0x270A, 0x270B, 0x2728, 0x274C, 0x274E,
-             0x2757, 0x27B0, 0x27BF,
-             0x2B1B, 0x2B1C, 0x2B50, 0x2B55,
-             0x1F004, 0x1F0CF, 0x1F18E:
-            return 2
-        default:
-            break
-        }
-        if (0x23E9...0x23EC).contains(cp) { return 2 }
-        if (0x2648...0x2653).contains(cp) { return 2 }
-        if (0x2753...0x2755).contains(cp) { return 2 }
-        if (0x2795...0x2797).contains(cp) { return 2 }
-        if (0x1F191...0x1F19A).contains(cp) { return 2 }
-        if (0x1F200...0x1F2FF).contains(cp) { return 2 }
-        if (0x1F300...0x1F64F).contains(cp) { return 2 }
-        if (0x1F680...0x1F6FF).contains(cp) { return 2 }
-        if (0x1F900...0x1F9FF).contains(cp) { return 2 }
-        if (0x1FA70...0x1FAFF).contains(cp) { return 2 }
-        return 1
-    }
-
-    /// Draw a color-emoji glyph shrunk to fit a `cellW`×`CELL_H` box, centered.
-    /// Apple Color Emoji at the cell-font point size massively overflows the
-    /// cell; emoji glyph metrics scale linearly with point size, so we measure
-    /// at a reference size and pick the size whose rendered glyph fits within
-    /// (cellW, CELL_H). Reserving two cells (cellW = 2·CELL_W) gives the glyph
-    /// a near-square box, so it renders far larger than in a single cell.
-    private func drawEmoji(_ s: NSString, cellX x: CGFloat, cellY y: CGFloat,
-                           cellW: CGFloat) {
+    /// Draw a wide (two-cell) glyph — an emoji or a CJK character — shrunk to
+    /// fit a `cellW`×`CELL_H` box, centered. The bitmap cell font has neither,
+    /// so this is the system font's fallback. Apple Color Emoji at the
+    /// cell-font point size massively overflows the cell; glyph metrics scale
+    /// linearly with point size, so we measure at a reference size and pick
+    /// the size whose rendered glyph fits within (cellW, CELL_H). Reserving two
+    /// cells (cellW = 2·CELL_W) gives the glyph a near-square box. `fg` colors
+    /// text glyphs; color emoji ignore it.
+    private func drawWide(_ s: NSString, fg: UInt32, cellX x: CGFloat,
+                          cellY y: CGFloat, cellW: CGFloat) {
         let ref: CGFloat = CELL_H
         let probe = s.size(withAttributes: [.font: NSFont.systemFont(ofSize: ref)])
         guard probe.width > 0, probe.height > 0 else { return }
@@ -1027,7 +999,7 @@ final class CellView: NSView {
         let glyph = s.size(withAttributes: [.font: font])
         s.draw(at: NSPoint(x: x + (cellW - glyph.width) / 2,
                            y: y + (CELL_H - glyph.height) / 2),
-               withAttributes: [.font: font])
+               withAttributes: [.font: font, .foregroundColor: nscolor(fg)])
     }
 
     /// Draw a single-width codepoint the cell font has no glyph for. Letting

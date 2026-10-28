@@ -122,13 +122,12 @@ struct Canvas(Copyable, Movable):
         Codepoint-aligned: each codepoint occupies one cell carrying the
         full UTF-8 byte sequence as its glyph string. Callers that hold
         byte indices (the editor's overlay paths) need
-        ``utf8_byte_to_cell`` to translate. Emoji (``char_width`` == 2)
-        occupy two cells: the glyph cell carries ``width=2`` and is
-        followed by an empty ``width=0`` continuation cell so the
-        frontends know to skip the right half. A wide glyph that would
-        straddle the right limit isn't painted (we stop) rather than
-        spilling a half-glyph past the edge. East-Asian fullwidth is
-        *not* modeled — only emoji widen.
+        ``utf8_byte_to_cell`` to translate. Wide codepoints — emoji, CJK
+        (``char_width`` == 2) — occupy two cells: the glyph cell carries
+        ``width=2`` and is followed by an empty ``width=0`` continuation
+        cell so the frontends know to skip the right half. A wide glyph
+        that would straddle the right limit isn't painted (we stop) rather
+        than spilling a half-glyph past the edge.
         Tab bytes (``0x09``) are expanded to spaces here — emitting the
         raw ``\\t`` byte to the terminal would let the terminal advance
         the cursor by however many columns *it* chose, breaking every

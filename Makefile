@@ -26,6 +26,7 @@ build: shim
 # parallel step keeps app+tui from both triggering a cold ``cargo build``
 # against the shared target dir at the same time.
 shim:
+	@scripts/build_ghostty.sh
 	@cd app/turbokod-shim && cargo build --release -q
 
 # Build .build/TurboKod.app — Rust shim + Mojo dylib + Swift binary,

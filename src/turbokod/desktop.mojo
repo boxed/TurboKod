@@ -6104,11 +6104,17 @@ struct Desktop(Movable):
         precondition, so it goes last, after everything that could still
         paint is gone. The LSP transports outliving this call is fine —
         they don't tokenize.
+
+        The pty panes' emulators (libghostty-vt terminals, a few MB each
+        with scrollback) go here too: ``close`` deliberately keeps them so
+        a re-opened pane shows its old screen.
         """
         self.dap.shutdown()
         for i in range(len(self.terminal_panes)):
             self.terminal_panes[i].close()
+            self.terminal_panes[i].release()
         self.test_pane.close()
+        self.test_pane.release()
         self.run_session.terminate()
         self.install_runner.terminate()
         self.quick_open.close()
@@ -10953,8 +10959,10 @@ struct Desktop(Movable):
                 if cmd == TERMINAL_PANE_CLOSE:
                     # Tear down the shell before dropping the value —
                     # ``close`` is idempotent and the only place that
-                    # SIGTERMs the child + closes the pipe fds.
+                    # SIGTERMs the child + closes the pipe fds — and free
+                    # the emulator, which nothing else would.
                     self.terminal_panes[i].close()
+                    self.terminal_panes[i].release()
                     var removed = self.terminal_panes.pop(i)
                     _ = removed
                     continue

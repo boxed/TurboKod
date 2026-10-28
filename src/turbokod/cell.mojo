@@ -7,11 +7,11 @@ now we treat each cell as exactly one Mojo `String` value, which the writer is
 responsible for keeping to one or two terminal columns.
 
 `width` is the number of terminal columns the glyph occupies: ``1`` for
-normal cells, ``2`` for emoji (the continuation half is a ``width=0`` blank),
-``0`` for the empty continuation cell itself. Width is derived from the glyph
-by `cell_width()` below, which delegates to `char_width` so it stays in lock
-step with `Canvas.put_text`. East-Asian fullwidth and zero-width combining
-marks are not yet modeled — only emoji widen.
+normal cells, ``2`` for wide glyphs — emoji, CJK — (the continuation half is a
+``width=0`` blank), ``0`` for the empty continuation cell itself. Width is
+derived from the glyph by `cell_width()` below, which delegates to
+`char_width` so it stays in lock step with `Canvas.put_text`. Zero-width
+combining marks are not modeled: each still gets a cell of its own.
 """
 
 from .colors import Attr, default_attr

@@ -9,6 +9,7 @@ from the desktop copy by exactly one ``<`` vs. ``<=`` in a bounds check).
 """
 
 from std.collections.list import List
+from std.ffi import external_call
 
 
 # Number of cells a tab byte expands to. ``Canvas.put_text`` aligns each
@@ -261,122 +262,47 @@ def is_printable_text_key(key: UInt32) -> Bool:
 
 
 def char_width(cp: Int) -> Int:
-    """Terminal columns a single codepoint occupies: ``2`` for emoji that
-    terminals and our Swift host render double-wide, ``1`` for everything
+    """Cells a single codepoint occupies: ``2`` for wide codepoints (emoji,
+    CJK and other East Asian wide / fullwidth text), ``1`` for everything
     else.
 
     This is the single source of truth for cell width. Every loop that
     converts between a byte/codepoint position and a screen column — in
     ``Canvas.put_text``, the soft-wrap segmenter, the editor's
-    byte↔cell converters, the overlay cell maps, and the Swift renderer
-    (which ports the same ranges) — funnels through it, so the layout
-    the editor reasons about always matches what is painted.
+    byte↔cell converters, the overlay cell maps — funnels through it, so
+    the layout the editor reasons about always matches what is painted.
+    The Swift renderer doesn't recompute it: ``pack_canvas`` sends each
+    cell's width along.
 
-    The wide set is the standard ``wcwidth`` "wide emoji" table — the
-    blocks where most terminal emulators advance the cursor by two. We
-    deliberately leave a few things at width 1 to *agree* with terminals
-    rather than be maximally pretty: regional-indicator letters
-    (``0x1F1E6..0x1F1FF``) stay 1 so a two-codepoint flag reserves two
-    cells total instead of four, and East-Asian fullwidth / combining
-    marks are still unmodeled (a known limitation, see ``CLAUDE.md``)."""
-    # Fast path: everything below the first wide codepoint (all ASCII,
-    # Latin, Cyrillic, CJK punctuation up to the angle brackets, …) is
-    # one cell.
-    if cp < 0x231A:
+    The table is Ghostty's (``ghostty_unicode_codepoint_width``), the same
+    one the terminal panes lay out their output with, so an editor and a
+    terminal agree on where a glyph lands. Two deliberate departures, both
+    because every codepoint here gets a cell of its own:
+
+    * Ghostty's zero-width codepoints (combining marks, ZWJ, variation
+      selectors, controls) count as 1. A terminal attaches them to the
+      previous cell; we don't model grapheme clusters, so they keep a
+      cell rather than collapsing onto a neighbor.
+    * Regional-indicator letters (``0x1F1E6..0x1F1FF``) stay 1, so a
+      two-codepoint flag reserves two cells, as most terminals render it,
+      instead of four."""
+    # Fast path: the first wide codepoint is U+1100 (Hangul Jamo), so
+    # ASCII, Latin, Greek, Cyrillic, Hebrew, Arabic, Indic … are all one
+    # cell without a call.
+    if cp < 0x1100:
         return 1
-    # --- BMP emoji that render wide ---
-    if cp == 0x231A or cp == 0x231B:
-        return 2
-    if cp == 0x2329 or cp == 0x232A:
-        return 2
-    if 0x23E9 <= cp and cp <= 0x23EC:
-        return 2
-    if cp == 0x23F0 or cp == 0x23F3:
-        return 2
-    if cp == 0x25FD or cp == 0x25FE:
-        return 2
-    if cp == 0x2614 or cp == 0x2615:
-        return 2
-    if 0x2648 <= cp and cp <= 0x2653:
-        return 2
-    if cp == 0x267F:
-        return 2
-    if cp == 0x2693:
-        return 2
-    if cp == 0x26A1:
-        return 2
-    if cp == 0x26AA or cp == 0x26AB:
-        return 2
-    if cp == 0x26BD or cp == 0x26BE:
-        return 2
-    if cp == 0x26C4 or cp == 0x26C5:
-        return 2
-    if cp == 0x26CE:
-        return 2
-    if cp == 0x26D4:
-        return 2
-    if cp == 0x26EA:
-        return 2
-    if cp == 0x26F2 or cp == 0x26F3:
-        return 2
-    if cp == 0x26F5:
-        return 2
-    if cp == 0x26FA:
-        return 2
-    if cp == 0x26FD:
-        return 2
-    if cp == 0x2705:
-        return 2
-    if cp == 0x270A or cp == 0x270B:
-        return 2
-    if cp == 0x2728:
-        return 2
-    if cp == 0x274C:
-        return 2
-    if cp == 0x274E:
-        return 2
-    if 0x2753 <= cp and cp <= 0x2755:
-        return 2
-    if cp == 0x2757:
-        return 2
-    if 0x2795 <= cp and cp <= 0x2797:
-        return 2
-    if cp == 0x27B0:
-        return 2
-    if cp == 0x27BF:
-        return 2
-    if cp == 0x2B1B or cp == 0x2B1C:
-        return 2
-    if cp == 0x2B50:
-        return 2
-    if cp == 0x2B55:
-        return 2
-    # --- SMP emoji blocks that render wide ---
-    if cp == 0x1F004:
-        return 2
-    if cp == 0x1F0CF:
-        return 2
-    if cp == 0x1F18E:
-        return 2
-    if 0x1F191 <= cp and cp <= 0x1F19A:
-        return 2
-    if 0x1F200 <= cp and cp <= 0x1F2FF:
-        return 2
-    if 0x1F300 <= cp and cp <= 0x1F64F:
-        return 2
-    if 0x1F680 <= cp and cp <= 0x1F6FF:
-        return 2
-    if 0x1F900 <= cp and cp <= 0x1F9FF:
-        return 2
-    if 0x1FA70 <= cp and cp <= 0x1FAFF:
-        return 2
-    return 1
+    if 0x1F1E6 <= cp and cp <= 0x1F1FF:
+        return 1
+    var w = Int(external_call["ghostty_unicode_codepoint_width", UInt8](
+        UInt32(cp)
+    ))
+    return 2 if w == 2 else 1
 
 
 def display_columns(s: String) -> Int:
     """Count terminal cells ``s`` occupies when painted by
-    ``Canvas.put_text`` — emoji count 2, everything else 1 (see
-    ``char_width``).
+    ``Canvas.put_text`` — wide glyphs (emoji, CJK) count 2, everything
+    else 1 (see ``char_width``).
 
     Use this (not ``len(s.as_bytes())``) anywhere the result is fed
     into layout: dropdown widths, title-bar offsets, status-bar

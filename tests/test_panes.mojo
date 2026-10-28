@@ -11,8 +11,7 @@ from turbokod.claude_detect import (
     CLAUDE_ACTIVE, CLAUDE_NONE, CLAUDE_WAITING, CLAUDE_WORKING
 )
 from turbokod.colors import (
-    Attr, BLACK, LIGHT_GRAY, RED, FG_TRUECOLOR, BG_TRUECOLOR, _rgb_to_256,
-    attr_to_sgr, default_attr, parse_sgr
+    Attr, BLACK, LIGHT_GRAY, RED, attr_to_sgr, default_attr, parse_sgr
 )
 from turbokod.debug_pane import DebugPane
 from turbokod.text_view import TextLog, VisualLine, wrap_lines
@@ -26,7 +25,6 @@ from turbokod.events import (
 )
 from turbokod.geometry import Point, Rect
 from turbokod.terminal import parse_input
-from turbokod import Vt
 from turbokod.terminal_pane import TerminalPane
 
 from support import setup_test_env
@@ -40,7 +38,7 @@ def _terminal_pane_with_text(text: String) -> TerminalPane:
     pane.vt.feed_string(text)
     # Body starts one row below the panel top (the chrome border row),
     # so a body click lands at y >= 1 and never trips chrome hit-tests.
-    pane.sel._last_body = Rect(Point(0, 1), Point(pane.vt.cols, 25))
+    pane.sel._last_body = Rect(Point(0, 1), Point(pane.vt.cols(), 25))
     return pane^
 
 
@@ -484,144 +482,6 @@ def test_text_log_scroll_stays_in_sync_during_autoscroll() raises:
     assert_false(log.autoscroll)
     log.paint(canvas, view)
     assert_equal(log.last_first_visual, 14)
-
-
-def test_vt_da1_reply_on_csi_c() raises:
-    """``ESC[c`` (DA1) must enqueue a reply on the Vt's outbound
-    queue. Real-world: starship / oh-my-zsh probe with this; without
-    a reply the prompt stalls a beat on every redraw."""
-    var vt = Vt(80, 24)
-    vt.feed_string(String("\x1b[c"))
-    var reply = vt.take_reply()
-    assert_equal(reply, String("\x1b[?6c"))
-    # Drained — second call is empty.
-    assert_equal(vt.take_reply(), String(""))
-
-
-def test_vt_dsr_6_reply_uses_1_based_cursor() raises:
-    """``ESC[6n`` (DSR cursor position) must reply with 1-based
-    coordinates. The cursor at (cur_r=2, cur_c=3) reports ``3;4R``."""
-    var vt = Vt(80, 24)
-    # Move cursor to row 3, col 4 (1-based via CUP).
-    vt.feed_string(String("\x1b[3;4H"))
-    vt.feed_string(String("\x1b[6n"))
-    assert_equal(vt.take_reply(), String("\x1b[3;4R"))
-
-
-def test_vt_decset_2004_bracketed_paste_flag() raises:
-    """``ESC[?2004h`` enables bracketed-paste mode; ``l`` disables.
-    The pane reads this flag to decide whether to wrap pasted text."""
-    var vt = Vt(80, 24)
-    assert_false(vt.bracketed_paste)
-    vt.feed_string(String("\x1b[?2004h"))
-    assert_true(vt.bracketed_paste)
-    vt.feed_string(String("\x1b[?2004l"))
-    assert_false(vt.bracketed_paste)
-
-
-def test_vt_decset_1_app_cursor_keys() raises:
-    """DECCKM (``ESC[?1h``) flips arrow encoding from CSI to SS3 in
-    the pane. We just verify the Vt tracks the flag."""
-    var vt = Vt(80, 24)
-    assert_false(vt.app_cursor_keys)
-    vt.feed_string(String("\x1b[?1h"))
-    assert_true(vt.app_cursor_keys)
-    vt.feed_string(String("\x1b[?1l"))
-    assert_false(vt.app_cursor_keys)
-
-
-def test_vt_decset_1004_focus_events_round_trip() raises:
-    """With ``?1004`` on, ``notify_focus_change`` emits ``ESC[I``
-    (focus-in) / ``ESC[O`` (focus-out). With it off, nothing."""
-    var vt = Vt(80, 24)
-    # Off by default — no emit.
-    vt.notify_focus_change(True)
-    assert_equal(vt.take_reply(), String(""))
-    vt.feed_string(String("\x1b[?1004h"))
-    vt.notify_focus_change(True)
-    assert_equal(vt.take_reply(), String("\x1b[I"))
-    vt.notify_focus_change(False)
-    assert_equal(vt.take_reply(), String("\x1b[O"))
-
-
-def test_vt_truecolor_fg_keeps_rgb_and_folds_index() raises:
-    """``ESC[38;2;r;g;b m`` must preserve the exact 24-bit RGB on the
-    cell's attr (``FG_TRUECOLOR`` set, ``fg_rgb`` = the packed value) so
-    truecolor terminals / the native app render it faithfully — while
-    still baking the nearest-256 fold into ``fg`` so 256-color terminals
-    degrade without extra logic."""
-    var vt = Vt(80, 24)
-    vt.feed_string(String("\x1b[38;2;10;20;30mX"))
-    var cell = vt.cell_at(0, 0)
-    assert_equal(cell.glyph, String("X"))
-    assert_true((cell.attr.color_mode & FG_TRUECOLOR) != 0)
-    assert_equal(Int(cell.attr.fg_rgb), 0x0A141E)
-    # Degrade path: the palette index is the rgb→256 fold, not raw RGB.
-    assert_equal(cell.attr.fg, _rgb_to_256(10, 20, 30))
-    # A subsequent indexed color clears the truecolor flag (no stale RGB).
-    vt.feed_string(String("\x1b[31mY"))
-    var cell2 = vt.cell_at(0, 1)
-    assert_true((cell2.attr.color_mode & FG_TRUECOLOR) == 0)
-    assert_equal(Int(cell2.attr.fg_rgb), 0)
-    assert_equal(cell2.attr.fg, RED)
-
-
-def test_vt_truecolor_bg_keeps_rgb() raises:
-    """``ESC[48;2;r;g;b m`` preserves the background RGB the same way."""
-    var vt = Vt(80, 24)
-    vt.feed_string(String("\x1b[48;2;200;100;50mZ"))
-    var cell = vt.cell_at(0, 0)
-    assert_true((cell.attr.color_mode & BG_TRUECOLOR) != 0)
-    assert_equal(Int(cell.attr.bg_rgb), 0xC86432)
-
-
-def test_vt_osc_52_decodes_base64_to_clipboard() raises:
-    """OSC 52 ``c;<base64>`` decodes to bytes the pane can hand to
-    the system clipboard. ``aGVsbG8=`` is the canonical 'hello' test
-    vector."""
-    var vt = Vt(80, 24)
-    vt.feed_string(String("\x1b]52;c;aGVsbG8=\x07"))
-    assert_equal(vt.take_clipboard(), String("hello"))
-    # Drained — second call is empty.
-    assert_equal(vt.take_clipboard(), String(""))
-
-
-def test_vt_osc_52_query_does_not_leak_clipboard() raises:
-    """A query (``?`` in place of base64) must not produce a
-    clipboard payload — leaking host clipboard contents to whatever
-    the child is would be a security regression."""
-    var vt = Vt(80, 24)
-    vt.feed_string(String("\x1b]52;c;?\x07"))
-    assert_equal(vt.take_clipboard(), String(""))
-
-
-def test_vt_decscusr_tracks_cursor_shape() raises:
-    """``CSI 4 SP q`` sets cursor_shape to 4 (steady underline). Out
-    of range falls back to 0 so a malformed sequence can't leave the
-    field in a nonsense state."""
-    var vt = Vt(80, 24)
-    vt.feed_string(String("\x1b[4 q"))
-    assert_equal(Int(vt.cursor_shape), 4)
-    vt.feed_string(String("\x1b[99 q"))
-    assert_equal(Int(vt.cursor_shape), 0)
-
-
-def test_vt_ris_clears_mode_flags() raises:
-    """``ESC c`` (RIS) is a hard reset. Mouse tracking, bracketed
-    paste, focus events, app-cursor-keys all clear — otherwise a
-    fresh shell coming up after vim crashed inherits the dead
-    program's modes and routes events to the wrong handler."""
-    var vt = Vt(80, 24)
-    vt.feed_string(String("\x1b[?1000h\x1b[?2004h\x1b[?1004h\x1b[?1h"))
-    assert_true(vt.mouse_track_press)
-    assert_true(vt.bracketed_paste)
-    assert_true(vt.focus_events)
-    assert_true(vt.app_cursor_keys)
-    vt.feed_string(String("\x1bc"))
-    assert_false(vt.mouse_track_press)
-    assert_false(vt.bracketed_paste)
-    assert_false(vt.focus_events)
-    assert_false(vt.app_cursor_keys)
 
 
 def test_sgr_parse() raises:

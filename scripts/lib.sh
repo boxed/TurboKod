@@ -16,7 +16,8 @@ resolve_env_prefix() {
 }
 
 # The Rust shim staticlib every Mojo build links (pty spawn / non-blocking
-# I/O / child registry / listdir / debug-log open / libonig handle registry).
+# I/O / child registry / listdir / debug-log open / libonig handle registry,
+# plus libghostty-vt and its C glue — see app/turbokod-shim/build.rs).
 SHIM_CRATE="app/turbokod-shim"
 SHIM_LIB="$SHIM_CRATE/target/release/libturbokod_shim.a"
 
@@ -29,12 +30,22 @@ if [ "$(uname -s)" = "Darwin" ]; then
   SHIM_SYS_LINK=(-Xlinker -framework -Xlinker CoreFoundation)
 fi
 
-# Rebuild the shim when any of its sources is newer than the staticlib.
-# Cargo would detect this on its own; the explicit check keeps a no-op run
-# free of cargo's startup cost and lets us say what's being built. ``$1`` is
-# the log tag (``run.sh`` / ``run_swift``). Returns non-zero on failure.
+# libghostty-vt, built by scripts/build_ghostty.sh and bundled into the shim
+# by its build.rs (the terminal emulator behind the shell / test panes).
+GHOSTTY_LIB=".build/ghostty/lib/libghostty-vt.a"
+
+# Rebuild the shim when any of its sources (or libghostty-vt) is newer than
+# the staticlib. Cargo would detect this on its own; the explicit check keeps
+# a no-op run free of cargo's startup cost and lets us say what's being built.
+# ``$1`` is the log tag (``run.sh`` / ``run_swift``). Returns non-zero on
+# failure.
 ensure_shim() {
-  if [ -f "$SHIM_LIB" ] && ! find "$SHIM_CRATE/src" "$SHIM_CRATE/Cargo.toml" \
+  if ! scripts/build_ghostty.sh; then
+    echo "[$1] libghostty-vt build failed" >&2
+    return 1
+  fi
+  if [ -f "$SHIM_LIB" ] && [ ! "$GHOSTTY_LIB" -nt "$SHIM_LIB" ] \
+      && ! find "$SHIM_CRATE/src" "$SHIM_CRATE/Cargo.toml" "$SHIM_CRATE/build.rs" \
       -newer "$SHIM_LIB" -print -quit 2>/dev/null | grep -q .; then
     return 0
   fi
