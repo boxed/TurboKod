@@ -80,7 +80,8 @@ from .search_options import (
 from .string_utils import (
     byte_slice, char_width, codepoint_at, display_columns, is_ascii_ident_byte,
     is_printable_text_key, is_space_cp, is_word_codepoint,
-    leading_indent_bytes, past_empty_match, prev_codepoint_start, split_lines_no_trailing,
+    leading_indent_bytes, past_empty_match, prev_codepoint_start, split_lines,
+    split_lines_no_trailing,
     TAB_WIDTH, trailing_ws_start, truncate_to_columns, utf8_byte_of_cell, utf8_cell_of_byte,
     utf8_codepoint_size, utf8_floor, utf8_step_forward, word_char_step, word_range_at,
 )
@@ -1669,6 +1670,9 @@ struct Editor(Copyable, Movable):
     # (piggy-backing on ``_mark_hl_dirty``) so the desktop paint pass
     # re-runs the line-diff.
     var _git_head_text: String
+    var _git_head_lines: List[String]
+    """``_git_head_text`` split as the gutter's diff wants it, once: done
+    on every edit it cost 7 ms per keystroke on a 150k-line file."""
     var _git_head_loaded: Bool
     var _git_head_present: Bool
     var _git_changes_dirty: Bool
@@ -1990,6 +1994,7 @@ struct Editor(Copyable, Movable):
         self._git_has_changes = False
         self.minimap_visible = True
         self._git_head_text = String("")
+        self._git_head_lines = List[String]()
         self._git_head_loaded = False
         self._git_head_present = False
         self._git_changes_dirty = True
@@ -2205,6 +2210,7 @@ struct Editor(Copyable, Movable):
         self._git_has_changes = copy._git_has_changes
         self.minimap_visible = copy.minimap_visible
         self._git_head_text = copy._git_head_text
+        self._git_head_lines = copy._git_head_lines.copy()
         self._git_head_loaded = copy._git_head_loaded
         self._git_head_present = copy._git_head_present
         self._git_changes_dirty = copy._git_changes_dirty
@@ -5079,6 +5085,7 @@ struct Editor(Copyable, Movable):
         into the buffer.
         """
         self._git_head_text = _normalize_crlf(text)
+        self._git_head_lines = split_lines(self._git_head_text)
         self._git_head_loaded = True
         self._git_head_present = present
         self._git_changes_dirty = True
@@ -5122,6 +5129,7 @@ struct Editor(Copyable, Movable):
         self.git_deleted_below = List[Bool]()
         self._git_has_changes = False
         self._git_head_text = String("")
+        self._git_head_lines = List[String]()
         self._git_head_loaded = False
         self._git_head_present = False
         self._git_changes_dirty = True
