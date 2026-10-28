@@ -234,6 +234,18 @@ struct FindResultsPane(Movable):
 
     # --- paint ------------------------------------------------------------
 
+    def header_title(self) -> String:
+        """``Find: <query> (N hits, M selected)``."""
+        var title = String("Find Results")
+        if len(self.query.as_bytes()) > 0:
+            title = String("Find: ") + self.query
+        var info = String(" (") + String(len(self.matches)) + String(" hits")
+        var sel_n = self._marked_count()
+        if sel_n > 0:
+            info += String(", ") + String(sel_n) + String(" selected")
+        info += String(")")
+        return title + info
+
     def paint(
         mut self, mut canvas: Canvas, panel: Rect, mut registry: GrammarRegistry,
     ):
@@ -254,16 +266,9 @@ struct FindResultsPane(Movable):
         var painter = Painter(panel)
         painter.fill(canvas, panel, String(" "), bg)
         # Title row: ``Find: <query> (N hits, M selected)``.
-        var title = String("Find Results")
-        if len(self.query.as_bytes()) > 0:
-            title = String("Find: ") + self.query
-        var info = String(" (") + String(len(self.matches)) + String(" hits")
-        var sel_n = self._marked_count()
-        if sel_n > 0:
-            info += String(", ") + String(sel_n) + String(" selected")
-        info += String(")")
         var body = paint_bottom_dock_chrome(
-            canvas, painter, panel, title + info, self.focused, self.dock,
+            canvas, painter, panel, self.header_title(), self.focused,
+            self.dock,
             hotkey_label=String(""),
         )
         # MINIMIZED → only the title row painted; nothing more to do, but

@@ -234,7 +234,8 @@ from .test_pane import (
 )
 from .editor import Editor
 from .window import (
-    DOCK_MIN_HEIGHT, MIN_WIN_H, MIN_WIN_W, PANEL_STATE_NORMAL,
+    BottomDockedPanel, DOCK_MIN_HEIGHT, MIN_WIN_H, MIN_WIN_W,
+    PANEL_STATE_MAXIMIZED, PANEL_STATE_MINIMIZED, PANEL_STATE_NORMAL,
     TitleCommand, Window, WindowManager,
     compute_display_titles, hit_title_command,
 )
@@ -4578,6 +4579,7 @@ struct Desktop(Movable):
         # key handler (before the next paint) can size child terminals
         # to the actual pane width — see ``_bottom_pane_term_size``.
         self._last_screen = screen
+        self._sync_host_chrome()
         # Drive any per-frame timers before drawing — the project-find
         # widget runs its 200 ms debounce off this clock.
         self.project_find.tick(monotonic_ms())
@@ -9064,6 +9066,46 @@ struct Desktop(Movable):
         for i in range(len(self.review.file_changed_lines)):
             den += self.review.file_changed_lines[i]
         return (min(num, den), den)
+
+    # --- macOS-style UI: tool-pane headers -------------------------------
+
+    def native_panes_shown(self) -> Bool:
+        """Docked panes get native headers — not while floating (the panel
+        window keeps the grid chrome) or while a full-screen tool covers
+        the docks."""
+        return self.native_ui() and not self.panels_detached \
+            and not self._fullscreen_modal_active() \
+            and not self.history.active and not self.merge_view.active \
+            and not self.review.active
+
+    def _sync_host_chrome(mut self):
+        var on = self.native_panes_shown()
+        for i in range(len(self.terminal_panes)):
+            self.terminal_panes[i].dock.host_chrome = on
+        self.debug_pane.dock.host_chrome = on
+        self.test_pane.dock.host_chrome = on
+        self.find_results_pane.dock.host_chrome = on
+
+    def native_pane_act(
+        mut self, kind: UInt8, idx: Int, op: Int, var command_id: String,
+    ):
+        """A native pane header's control: ``op`` 0 focus, 1 close (the
+        ``[■]`` path), 2 minimize / restore, 3 maximize / restore, 4 run
+        command ``command_id`` (the title-row label's path)."""
+        if kind == DOCK_TERMINAL:
+            if idx < 0 or idx >= len(self.terminal_panes):
+                return
+            _pane_dock_act(self.terminal_panes[idx].dock, op, command_id)
+        elif kind == DOCK_DEBUG_PANE:
+            _pane_dock_act(self.debug_pane.dock, op, command_id)
+        elif kind == DOCK_TEST_PANE:
+            _pane_dock_act(self.test_pane.dock, op, command_id)
+        elif kind == DOCK_FIND_RESULTS_PANE:
+            _pane_dock_act(self.find_results_pane.dock, op, command_id)
+        else:
+            return
+        if op != 1:
+            self._focus_dock(kind, idx)
 
     def native_merge_active(self) -> Bool:
         return self.native_ui() and self.merge_view.active
@@ -17698,3 +17740,20 @@ def _abbreviate_home(path: String, home: String) -> String:
     return String("~") + String(
         StringSpan(unsafe_from_utf8=path.as_bytes()[len(hb):])
     )
+
+
+def _pane_dock_act(mut dock: BottomDockedPanel, op: Int, var command_id: String):
+    """One native pane-header control on ``dock`` — the same state changes
+    the grid header's buttons make (see ``Desktop.native_pane_act``)."""
+    if op == 1:
+        dock.request_close()
+    elif op == 2:
+        dock.set_state(
+            PANEL_STATE_NORMAL if dock.is_minimized() else PANEL_STATE_MINIMIZED
+        )
+    elif op == 3:
+        dock.set_state(
+            PANEL_STATE_NORMAL if dock.is_maximized() else PANEL_STATE_MAXIMIZED
+        )
+    elif op == 4:
+        dock.pending_command_id = command_id^

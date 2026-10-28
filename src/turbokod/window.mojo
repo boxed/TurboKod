@@ -519,6 +519,12 @@ struct BottomDockedPanel(Copyable, Movable):
     button — panels that aren't user-dismissible (e.g. the debug pane,
     which the host owns) leave this unset."""
 
+    var host_chrome: Bool
+    """The host draws this panel's header natively (macOS-style UI): the
+    core paints the header row blank and arms no button / command hit
+    zones on it, so the whole row is the resize handle and the host's
+    overlay owns the controls."""
+
     def __init__(out self, preferred_height: Int = 14):
         self.state = PANEL_STATE_NORMAL
         self.preferred_height = preferred_height
@@ -528,6 +534,7 @@ struct BottomDockedPanel(Copyable, Movable):
         self.last_cmd_hits = List[TitleCommandHit]()
         self.resizing = False
         self.close_button_id = String("")
+        self.host_chrome = False
 
     def __copyinit__(mut self, copy: Self):
         self.state = copy.state
@@ -538,6 +545,7 @@ struct BottomDockedPanel(Copyable, Movable):
         self.last_cmd_hits = copy.last_cmd_hits.copy()
         self.resizing = copy.resizing
         self.close_button_id = copy.close_button_id
+        self.host_chrome = copy.host_chrome
 
     def is_minimized(self) -> Bool:
         return self.state == PANEL_STATE_MINIMIZED
@@ -637,6 +645,14 @@ def paint_bottom_dock_chrome(
     var title_attr = Attr(LIGHT_YELLOW, PANE_BG)
     var body_bg = Attr(WHITE, PANE_BG)
     var top = panel.a.y
+    if dock.host_chrome:
+        for x in range(panel.a.x, panel.b.x):
+            painter.set(canvas, x, top, Cell(String(" "), body_bg, 1))
+        dock.chrome_hits = PanelChromeHits()
+        dock.last_cmd_hits = List[TitleCommandHit]()
+        if dock.state == PANEL_STATE_MINIMIZED:
+            return Rect.empty()
+        return Rect(panel.a.x, top + 1, panel.b.x, panel.b.y)
     var top_glyph = String("═") if focused else String("─")
     for x in range(panel.a.x, panel.b.x):
         painter.set(canvas, x, top, Cell(top_glyph, border, 1))

@@ -180,6 +180,26 @@ path calls.
 - `native_tree_shown()` is false under history, merge and review, so the
   project tree's overlay never floats over them.
 
+## Tool-pane headers
+
+The docked panes (terminal, run / debug, tests, find results) keep their
+content on the grid. A terminal emulator and the run log *are* cell grids.
+Each pane's one-row header is native:
+
+- `BottomDockedPanel.host_chrome`, synced every frame from
+  `native_panes_shown()`, makes `paint_bottom_dock_chrome` paint the row
+  blank and arm no button or command hit zones. The whole row is then just
+  the core's resize handle and focus target.
+- `tk_desktop_panes` lists each visible pane's header: rect, `header_title()`
+  (factored out of each pane's paint), state, and commands (the grid's
+  `[Label]`s, minus the brackets).
+- `PaneHeader` overlays the row. Its `hitTest` claims only its buttons, so
+  dragging anywhere else on the row still resizes the pane.
+- Each control is `tk_desktop_pane_act`, which makes the same state change
+  the grid buttons do. Close is `request_close` and a command latches
+  `pending_command_id`; the tick drains both.
+- The floating-panels window keeps the grid headers.
+
 ## Settings window
 
 With the macOS-style UI on, `APP_SETTINGS` opens the same `Settings` state

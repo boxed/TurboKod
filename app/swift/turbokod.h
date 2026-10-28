@@ -218,6 +218,11 @@ int64_t tk_desktop_tree(int64_t h, int64_t cols, int64_t rows, int64_t out_ptr, 
 // editable, bar}} (0 = not up natively); _review_act op 0 tab, 1 pick row,
 // 2 cancel / end, 3 next change, 4 previous change, 5 review file arg.
 int64_t tk_desktop_review(int64_t h, int64_t cols, int64_t rows, int64_t out_ptr, int64_t cap);
+// macOS-style UI tool-pane headers: _panes [{kind, idx, x, y, w, title, focused,
+// state, hint, close, commands: [[label, id]]}] (0 = none native); _pane_act
+// op 0 focus, 1 close, 2 minimize, 3 maximize, 4 run command id (string).
+int64_t tk_desktop_panes(int64_t h, int64_t cols, int64_t rows, int64_t out_ptr, int64_t cap);
+void tk_desktop_pane_act(int64_t h, int64_t kind, int64_t idx, int64_t op, int64_t ptr, int64_t len);
 void tk_desktop_review_act(int64_t h, int64_t op, int64_t arg);
 void tk_desktop_tree_act(int64_t h, int64_t op, int64_t idx, int64_t x, int64_t y);
 int64_t tk_desktop_take_find_request(int64_t h, int64_t out_ptr, int64_t cap);

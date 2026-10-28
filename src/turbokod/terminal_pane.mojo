@@ -442,6 +442,23 @@ struct TerminalPane(Copyable, Movable):
 
     # --- paint ---------------------------------------------------------
 
+    def header_title(self) -> String:
+        """The header's title: Claude's state, else the OSC title the child
+        set, else "Terminal"."""
+        var displayed_title = String("Terminal")
+        var osc_title = self.vt.title()
+        if len(osc_title.as_bytes()) > 0:
+            displayed_title = osc_title
+        # Claude state is classified once per frame by ``tick`` (which the
+        # loop runs before ``paint``) and cached in ``_claude_title_state``;
+        # reuse it here rather than rescanning the grid tail and
+        # re-classifying.
+        var claude_state = self._claude_title_state
+        if claude_state != CLAUDE_NONE:
+            displayed_title = String("Claude · ") \
+                + claude_state_label(claude_state)
+        return displayed_title^
+
     def paint(mut self, mut canvas: Canvas, panel: Rect):
         if not self.visible or panel.is_empty():
             return
@@ -455,18 +472,7 @@ struct TerminalPane(Copyable, Movable):
         # then the OSC title the child has set, then a static default.
         # Claude wins because users opening a Claude session care
         # more about its state than the shell's PS1-derived title.
-        var displayed_title = String("Terminal")
-        var osc_title = self.vt.title()
-        if len(osc_title.as_bytes()) > 0:
-            displayed_title = osc_title
-        # Claude state is classified once per frame by ``tick`` (which the
-        # loop runs before ``paint``) and cached in ``_claude_title_state``;
-        # reuse it here rather than rescanning the grid tail and
-        # re-classifying.
-        var claude_state = self._claude_title_state
-        if claude_state != CLAUDE_NONE:
-            displayed_title = String("Claude · ") \
-                + claude_state_label(claude_state)
+        var displayed_title = self.header_title()
         var body = paint_bottom_dock_chrome(
             canvas, painter, panel, displayed_title,
             self.focused, self.dock, String("T"),

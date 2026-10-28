@@ -38,9 +38,10 @@ from turbokod.string_utils import escape_drop_paths, split_lines_no_trailing
 from turbokod.theme import theme_by_name
 from turbokod.desktop import (
     Desktop, APP_QUIT_ACTION, EDITOR_OPEN, EDITOR_PASTE, EDITOR_QUICK_OPEN,
-    PROJECT_OPEN, WINDOW_FOCUS_PREFIX,
+    PROJECT_OPEN, WINDOW_FOCUS_PREFIX, DOCK_DEBUG_PANE, DOCK_FIND_RESULTS_PANE,
+    DOCK_TERMINAL, DOCK_TEST_PANE,
 )
-from turbokod.window import compute_display_titles
+from turbokod.window import BottomDockedPanel, compute_display_titles
 from turbokod.file_tree import FileTree
 from turbokod.file_io import basename, parent_path, project_relative
 from turbokod.colors import EDITOR_BG, EDITOR_FG, FG_TRUECOLOR
@@ -1974,6 +1975,102 @@ def tk_desktop_tree_act(h: Int, op: Int, idx: Int, x: Int, y: Int) abi("C"):
         d.file_tree.native_open(idx)
     elif op == 3:
         d.native_tree_menu(idx, Point(x, y))
+
+
+# --- macOS-style UI: tool-pane headers -----------------------------------------
+
+
+def _pane_json(
+    kind: Int, idx: Int, r: Rect, title: String, focused: Bool,
+    ref dock: BottomDockedPanel, hint: String,
+) -> JsonValue:
+    var o = json_object()
+    o.put(String("kind"), json_int(kind))
+    o.put(String("idx"), json_int(idx))
+    o.put(String("x"), json_int(r.a.x))
+    o.put(String("y"), json_int(r.a.y))
+    o.put(String("w"), json_int(r.width()))
+    o.put(String("title"), json_str(title))
+    o.put(String("focused"), json_bool(focused))
+    o.put(String("state"), json_int(Int(dock.state)))
+    o.put(String("hint"), json_str(hint))
+    o.put(String("close"), json_bool(len(dock.close_button_id.as_bytes()) > 0))
+    var cmds = json_array()
+    for i in range(len(dock.commands)):
+        # The grid draws ``[Label]``; a native button wants just the label.
+        var label = dock.commands[i].label
+        var b = label.as_bytes()
+        if len(b) >= 2 and b[0] == 0x5B and b[len(b) - 1] == 0x5D:
+            label = byte_slice(label, 1, len(b) - 1)
+        var c = json_array()
+        c.append(json_str(label))
+        c.append(json_str(dock.commands[i].id))
+        cmds.append(c)
+    o.put(String("commands"), cmds)
+    return o^
+
+
+@export
+def tk_desktop_panes(
+    h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
+) abi("C") -> Int:
+    """The docked tool panes' headers for the native overlay: an array of
+    ``{kind, idx, x, y, w, title, focused, state, hint, close, commands:
+    [[label, id]]}`` (the header is the one row at ``y``). 0 when panes
+    don't get native headers."""
+    if h == 0:
+        return 0
+    ref d = _desk(h)[]
+    if not d.native_panes_shown():
+        return 0
+    var screen = Rect(0, 0, cols, rows)
+    var a = json_array()
+    for i in range(len(d.terminal_panes)):
+        var r = d.terminal_pane_rect(screen, i)
+        if r.is_empty():
+            continue
+        a.append(_pane_json(
+            Int(DOCK_TERMINAL), i, r, d.terminal_panes[i].header_title(),
+            d.terminal_panes[i].focused, d.terminal_panes[i].dock, String("T"),
+        ))
+    if d.debug_pane.visible:
+        var r = d.debug_pane_rect(screen)
+        if not r.is_empty():
+            a.append(_pane_json(
+                Int(DOCK_DEBUG_PANE), 0, r, d.debug_pane.header_title(),
+                d.debug_pane.focused, d.debug_pane.dock, String("9"),
+            ))
+    if d.find_results_pane.visible:
+        var r = d.find_results_pane_rect(screen)
+        if not r.is_empty():
+            a.append(_pane_json(
+                Int(DOCK_FIND_RESULTS_PANE), 0, r,
+                d.find_results_pane.header_title(),
+                d.find_results_pane.focused, d.find_results_pane.dock,
+                String(""),
+            ))
+    if d.test_pane.visible:
+        var r = d.test_pane_rect(screen)
+        if not r.is_empty():
+            a.append(_pane_json(
+                Int(DOCK_TEST_PANE), 0, r, d.test_pane.header_title(),
+                d.test_pane.focused, d.test_pane.dock, String(""),
+            ))
+    if a.array_len() == 0:
+        return 0
+    return _write_out(encode_json(a), out_ptr, cap)
+
+
+@export
+def tk_desktop_pane_act(
+    h: Int, kind: Int, idx: Int, op: Int, ptr: Int, n: Int,
+) abi("C"):
+    """A native pane header control: ``op`` 0 focus, 1 close, 2 minimize /
+    restore, 3 maximize / restore, 4 run the command whose id is the
+    string."""
+    if h == 0:
+        return
+    _desk(h)[].native_pane_act(UInt8(kind), idx, op, _string_from(ptr, n))
 
 
 # --- macOS-style UI: review mode ----------------------------------------------

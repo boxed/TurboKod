@@ -8,8 +8,8 @@ from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from turbokod.canvas import Canvas
 from turbokod.colors import default_attr
 from turbokod.desktop import (
-    APP_SETTINGS, Desktop, EDITOR_FIND, EDITOR_GOTO, EDITOR_REPLACE,
-    VIEW_NATIVE_UI,
+    APP_SETTINGS, DOCK_DEBUG_PANE, Desktop, EDITOR_FIND, EDITOR_GOTO,
+    EDITOR_REPLACE, VIEW_NATIVE_UI,
 )
 from turbokod.search_options import SearchOptions
 from turbokod.color_picker import ColorPickerDialog, MODE_RGB
@@ -528,6 +528,23 @@ def test_native_settings_lists_go_through_the_sections_own_methods() raises:
     assert_equal(len(st.languages_view[row].candidates), 1)   # blank line dropped
     st.native_remove_language(row)
     assert_false(st.native_has_override(String("zzlang")))
+
+
+def test_native_pane_headers_take_over_the_header_row() raises:
+    var d = _native_desktop(String("x\n"))
+    var canvas = Canvas(_SCREEN.b.x, _SCREEN.b.y)
+    canvas.clear(default_attr())
+    d.paint(canvas, _SCREEN)
+    assert_true(d.debug_pane.dock.host_chrome)
+    d.native_pane_act(DOCK_DEBUG_PANE, 0, 2, String(""))
+    assert_true(d.debug_pane.dock.is_minimized())
+    d.native_pane_act(DOCK_DEBUG_PANE, 0, 2, String(""))
+    assert_false(d.debug_pane.dock.is_minimized())
+    d.native_pane_act(DOCK_DEBUG_PANE, 0, 4, String("debug:stop"))
+    assert_equal(d.debug_pane.dock.consume_command_id(), String("debug:stop"))
+    d.config.native_ui = False
+    d.paint(canvas, _SCREEN)
+    assert_false(d.debug_pane.dock.host_chrome)
 
 
 def main() raises:

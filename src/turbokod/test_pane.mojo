@@ -312,6 +312,16 @@ struct TestPane(Copyable, Movable):
 
     # --- paint ---------------------------------------------------------
 
+    def header_title(self) -> String:
+        if self.exited:
+            if self.exit_code == 0:
+                return String("Tests — passed")
+            return String("Tests — failed (") + String(self.exit_code) \
+                + String(")")
+        if self.started:
+            return String("Tests — running")
+        return String("Tests")
+
     def paint(mut self, mut canvas: Canvas, panel: Rect):
         if not self.visible or panel.is_empty():
             return
@@ -323,17 +333,7 @@ struct TestPane(Copyable, Movable):
         self._last_links = List[OutputLink]()
         # Commands change with run state, so rebuild every frame.
         self.dock.commands = self.build_commands()
-        var title: String
-        if self.exited:
-            if self.exit_code == 0:
-                title = String("Tests — passed")
-            else:
-                title = String("Tests — failed (") \
-                    + String(self.exit_code) + String(")")
-        elif self.started:
-            title = String("Tests — running")
-        else:
-            title = String("Tests")
+        var title = self.header_title()
         var body = paint_bottom_dock_chrome(
             canvas, painter, panel, title, self.focused, self.dock,
             String(""),

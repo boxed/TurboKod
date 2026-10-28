@@ -1903,6 +1903,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // over the toolbar row while reviewing.
     var reviewPickers: [ObjectIdentifier: ReviewPickerController] = [:]
     var reviewBars: [ObjectIdentifier: ReviewBar] = [:]
+    // macOS-style UI: native headers over the docked tool panes, per window
+    // and keyed "kind:idx".
+    var paneHeaders: [ObjectIdentifier: [String: PaneHeader]] = [:]
     var treeBuf = [UInt8](repeating: 0, count: 1 << 16)
     // Menu mirror: the snapshot from Mojo's menu_bar, hashed so we only
     // rebuild NSMenu when something actually changed (focus/visibility/
@@ -2306,6 +2309,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if self.pollHistory(v) { changed = true }
                 if self.pollMerge(v) { changed = true }
                 if self.pollReview(v) { changed = true }
+                if self.pollPaneHeaders(v) { changed = true }
             }
             self.drainAttention()
             self.idleTicks = changed ? 0 : self.idleTicks &+ 1
@@ -3495,6 +3499,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         mergeSheets[ObjectIdentifier(v)] = nil
         reviewPickers[ObjectIdentifier(v)] = nil
         reviewBars[ObjectIdentifier(v)] = nil
+        paneHeaders[ObjectIdentifier(v)] = nil
         // Close is instant; the language servers get their goodbye in the
         // background. `begin_close` terminates every child except the LSP
         // transports and sends each server `shutdown`, then we poll off the
@@ -4048,6 +4053,35 @@ extension AppController {
         guard let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_native_dialog(h, $0, $1) })
         else { return nil }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    /// Lay native headers over the docked tool panes' header rows.
+    func pollPaneHeaders(_ v: CellView) -> Bool {
+        let id = ObjectIdentifier(v)
+        let cols = Int64(v.cols()), rows = Int64(v.rows())
+        let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_panes(v.handle, cols, rows, $0, $1) })
+        let list = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [[String: Any]] } ?? []
+        var current = paneHeaders[id] ?? [:]
+        var changed = false
+        var seen = Set<String>()
+        for p in list {
+            let key = "\(p["kind"] as? Int ?? 0):\(p["idx"] as? Int ?? 0)"
+            seen.insert(key)
+            let hv = current[key] ?? {
+                let h = PaneHeader(view: v)
+                v.addSubview(h)
+                current[key] = h
+                return h
+            }()
+            if hv.update(p) { changed = true }
+        }
+        for (key, hv) in current where !seen.contains(key) {
+            hv.removeFromSuperview()
+            current[key] = nil
+            changed = true
+        }
+        paneHeaders[id] = current
+        return changed
     }
 
     /// Review mode: the picker sheet while choosing, the native bar while
@@ -8497,4 +8531,123 @@ final class PrefsLists: NSObject, NSTableViewDataSource, NSTableViewDelegate {
                               "file_types": types.stringValue, "servers": lines])
         }
     }
+}
+
+
+// MARK: - macOS-style UI: tool-pane headers
+//
+// One bar over each docked pane's header row: title, the pane's commands
+// (Clear / Restart, Continue / Step…, Re-run…) as borderless buttons, and
+// minimize / maximize / close. The pane's content stays the core's grid.
+// The core paints that row blank with no hit zones and keeps it as the
+// resize handle, so this view lets every click that isn't on a button fall
+// through to the cell view (`hitTest`).
+
+final class PaneHeader: NSView {
+    private weak var cellView: CellView?
+    private var kind = 0, idx = 0
+    private let title = NSTextField(labelWithString: "")
+    private let commands = NSStackView()
+    private let minimize = NSButton()
+    private let maximize = NSButton()
+    private let close = NSButton()
+    private var lastData = Data()
+    private var focused = false
+
+    init(view: CellView) {
+        cellView = view
+        super.init(frame: .zero)
+        title.font = .systemFont(ofSize: 11, weight: .semibold)
+        title.lineBreakMode = .byTruncatingTail
+        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        commands.spacing = 2
+        for (b, sym, tip, op) in [(minimize, "minus", "Minimize", 2), (maximize, "arrow.up.left.and.arrow.down.right", "Maximize", 3),
+                                  (close, "xmark", "Close", 1)] {
+            b.image = NSImage(systemSymbolName: sym, accessibilityDescription: tip)?
+                .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
+            b.isBordered = false
+            b.toolTip = tip
+            b.tag = op
+            b.target = self
+            b.action = #selector(controlClicked(_:))
+            b.contentTintColor = .secondaryLabelColor
+        }
+        let stack = NSStackView(views: [title, commands, NSView(), minimize, maximize, close])
+        stack.spacing = 8
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 6)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override var isFlipped: Bool { true }
+
+    /// Only the buttons are ours; the rest of the row is the core's resize
+    /// handle and focus target.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let v = super.hitTest(point)
+        return v is NSButton ? v : nil
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.windowBackgroundColor.setFill()
+        bounds.fill()
+        NSColor.separatorColor.setFill()
+        NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
+        if focused {
+            NSColor.controlAccentColor.setFill()
+            NSRect(x: 0, y: bounds.height - 2, width: bounds.width, height: 2).fill()
+        }
+    }
+
+    func update(_ p: [String: Any]) -> Bool {
+        guard let data = try? JSONSerialization.data(withJSONObject: p), data != lastData else { return false }
+        lastData = data
+        kind = p["kind"] as? Int ?? 0
+        idx = p["idx"] as? Int ?? 0
+        let f = NSRect(x: CGFloat(p["x"] as? Int ?? 0) * CELL_W, y: CGFloat(p["y"] as? Int ?? 0) * CELL_H,
+                       width: CGFloat(p["w"] as? Int ?? 0) * CELL_W, height: CELL_H)
+        if frame != f { frame = f }
+        focused = p["focused"] as? Bool ?? false
+        title.stringValue = p["title"] as? String ?? ""
+        title.textColor = focused ? .labelColor : .secondaryLabelColor
+        let state = p["state"] as? Int ?? 0
+        minimize.image = NSImage(systemSymbolName: state == 1 ? "chevron.up" : "minus",
+                                 accessibilityDescription: state == 1 ? "Restore" : "Minimize")?
+            .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
+        maximize.image = NSImage(systemSymbolName: state == 2 ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
+                                 accessibilityDescription: state == 2 ? "Restore" : "Maximize")?
+            .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
+        close.isHidden = !(p["close"] as? Bool ?? false)
+        for v in commands.arrangedSubviews { commands.removeArrangedSubview(v); v.removeFromSuperview() }
+        for c in p["commands"] as? [[String]] ?? [] where c.count == 2 {
+            let b = NSButton(title: c[0], target: self, action: #selector(commandClicked(_:)))
+            b.isBordered = false
+            b.font = .systemFont(ofSize: 11)
+            b.contentTintColor = .controlAccentColor
+            b.identifier = NSUserInterfaceItemIdentifier(c[1])
+            commands.addArrangedSubview(b)
+        }
+        needsDisplay = true
+        return true
+    }
+
+    private func act(_ op: Int, _ cmd: String = "") {
+        guard let v = cellView, v.handle != 0 else { return }
+        withUTF8Arg(cmd) { p, l in tk_desktop_pane_act(v.handle, Int64(kind), Int64(idx), Int64(op), p, l) }
+        lastData = Data()
+        v.window?.makeFirstResponder(v)
+        v.invalidateFrame()
+        v.needsDisplay = true
+    }
+
+    @objc private func controlClicked(_ b: NSButton) { act(b.tag) }
+    @objc private func commandClicked(_ b: NSButton) { act(4, b.identifier?.rawValue ?? "") }
 }

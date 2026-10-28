@@ -1007,6 +1007,12 @@ struct DebugPane(Copyable, Movable):
 
     # --- paint -----------------------------------------------------------
 
+    def header_title(self) -> String:
+        if len(self.title.as_bytes()) > 0:
+            return self.title
+        return String("Run") if self.mode == PANE_MODE_RUN \
+            else String("Debug")
+
     def paint(mut self, mut canvas: Canvas, panel: Rect):
         """Paint inspect (top) + output (bottom) sections. Stamps the
         screen-y origins so ``handle_mouse`` can later map clicks back
@@ -1042,12 +1048,7 @@ struct DebugPane(Copyable, Movable):
         self._last_repl_y = -1
         painter.fill(canvas, panel, String(" "), bg)
         var top = panel.a.y
-        var title_text: String
-        if len(self.title.as_bytes()) > 0:
-            title_text = self.title
-        else:
-            title_text = String("Run") if self.mode == PANE_MODE_RUN \
-                else String("Debug")
+        var title_text = self.header_title()
         var body = paint_bottom_dock_chrome(
             canvas, painter, panel, title_text, self.focused, self.dock,
         )
