@@ -15,6 +15,7 @@ from turbokod.search_options import SearchOptions
 from turbokod.color_picker import ColorPickerDialog, MODE_RGB
 from turbokod.fill_dialog import FillDialog
 from turbokod.project_settings import grammar_options
+from turbokod.theme import theme_names
 from turbokod.ui_grid import ui_act, ui_set
 from turbokod.git_changes import LineHistoryEntry
 from turbokod.diff import MergeRegion, REGION_CONFLICT, REGION_STABLE
@@ -32,6 +33,7 @@ def _native_desktop(text: String) -> Desktop:
     var d = Desktop()
     d.host_owns_menu = True
     d.config.native_ui = True
+    d.set_settings_detached(True)   # as the macOS host does
     d.windows.add(Window.editor_window(
         String("buf"), Rect(0, 1, 60, 20), text,
     ))
@@ -409,13 +411,21 @@ def test_native_settings_edit_the_same_state_and_sync_into_config() raises:
     _ = d.dispatch_action(APP_SETTINGS, _SCREEN)
     assert_true(d.settings.active)
     assert_true(d.settings_native)
+    # Its own window, not a modal: the workspace stays usable.
+    assert_equal(len(d.ui_surfaces()), 0)
+    assert_false(d.native_ui_surface_active())
+    assert_equal(len(d.settings_surfaces()), 1)
     var was = d.config.trim_trailing_whitespace
-    d.settings.native_set_bool(String("trim_trailing_whitespace"), not was)
-    d.settings.native_set_str(String("theme"), String("Dracula"))
-    d.settings.native_set_int(String("max_open_windows"), 7)
-    var canvas = Canvas(_SCREEN.b.x, _SCREEN.b.y)
-    canvas.clear(default_attr())
-    d.paint(canvas, _SCREEN)   # the per-frame settings sync
+    var themes = theme_names()
+    var dracula = 0
+    for i in range(len(themes)):
+        if themes[i] == String("Dracula"):
+            dracula = i
+    d.ui_apply(String("settings"), [
+        ui_set(String("trim_trailing_whitespace"), String("0") if was else String("1")),
+        ui_set(String("theme"), String(dracula)),
+        ui_set(String("max_open_windows"), String("7")),
+    ])
     assert_true(d.config.trim_trailing_whitespace != was)
     assert_equal(d.config.theme, String("Dracula"))
     assert_equal(d.config.max_open_windows, 7)
@@ -510,26 +520,30 @@ def test_native_review_picks_navigates_and_ends() raises:
     assert_false(d.review.active)
 
 
-def test_native_settings_lists_go_through_the_sections_own_methods() raises:
+def test_native_settings_language_editor_stacks_on_the_settings_window() raises:
+    """Settings ▸ Languages ▸ Add opens the language editor over the
+    Settings window (its window stack), and its Save lands an override."""
     var d = _native_desktop(String("x\n"))
     _ = d.dispatch_action(APP_SETTINGS, _SCREEN)
-    ref st = d.settings
-    st.native_add_project(String("/tmp/somewhere/"))
-    assert_equal(st.project_dirs[len(st.project_dirs) - 1], String("/tmp/somewhere"))
-    st.native_remove_project(len(st.project_dirs) - 1)
-    st.native_save_language(
-        String("zzlang"), String("zz zzz"),
-        [String("zz-ls --stdio"), String("")],
-    )
-    assert_true(st.native_has_override(String("zzlang")))
-    var row = -1
-    for i in range(len(st.languages_view)):
-        if st.languages_view[i].language_id == String("zzlang"):
-            row = i
-    assert_true(row >= 0)
-    assert_equal(len(st.languages_view[row].candidates), 1)   # blank line dropped
-    st.native_remove_language(row)
-    assert_false(st.native_has_override(String("zzlang")))
+    d.ui_apply(String("settings"), [ui_act(String("lang_add"))])
+    assert_equal(len(d.settings_surfaces()), 2)
+    assert_false(d.native_ui_surface_active())
+    d.ui_apply(String("language_editor"), [
+        ui_set(String("language_id"), String("zzlang")),
+        ui_set(String("file_types"), String("zz zzz")),
+        ui_set(String("command"), String("zz-ls --stdio")),
+        ui_act(String("add")),
+        ui_act(String("save")),
+    ])
+    assert_equal(len(d.settings_surfaces()), 1)
+    var found = False
+    for i in range(len(d.config.language_servers)):
+        if d.config.language_servers[i].language_id == String("zzlang"):
+            found = True
+            assert_equal(len(d.config.language_servers[i].file_types), 2)
+    assert_true(found)
+    d.ui_apply(String("settings"), [ui_act(String("close"))])
+    assert_false(d.settings.active)
 
 
 def test_native_pane_headers_take_over_the_header_row() raises:

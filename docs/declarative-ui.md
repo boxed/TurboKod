@@ -36,6 +36,16 @@ with the handler that runs when it submits. That is all the wiring there is:
 - **Native:** the host polls `tk_desktop_ui` and answers with
   `tk_desktop_ui_event`.
 
+### Windows of their own
+
+Settings isn't modal on macOS: it opens in its own window so the workspace
+stays usable and a theme change is visible as it happens. `settings_surfaces()`
+is that window's stack, kept out of `ui_surfaces()` while
+`settings_detached`. The classic look paints it through `settings_grids`
+into the host's Settings cell window (`GridForm.fill` lays the dialog over
+the whole window). The macOS-style UI gets it as `tk_desktop_ui`'s `window`
+stack and shows level 0 as a window.
+
 ### Stacked dialogs
 
 A dialog can open another on top of itself — Project Settings' On save tab
@@ -55,11 +65,12 @@ A confirm raised while a dialog is up goes on top of its sheet
 | `ui_form(rows)` / `ui_row(label, control)` | Labels in one column, controls in the next. |
 | `ui_tabs(key, selected, pages)` / `ui_page(label, body)` | Tabbed pages. |
 | `ui_label(text, flags)` | `UI_SECONDARY` / `UI_HEADING` styles. |
-| `ui_text` / `ui_check` / `ui_choice` | Bound to a `key`; `enabled=False` greys them. |
+| `ui_text` / `ui_check` / `ui_choice` | Bound to a `key`; `enabled=False` greys them. `ui_text(width=n)` sizes a field for `n` characters instead of stretching it. |
 | `ui_path(key, value, placeholder, enabled)` | A text field with a Browse button: the grid's file dialog, natively an open panel. |
 | `ui_table(key, columns, rows, selected, activate, height, checkable)` | Rows of cells. |
 | `ui_button(id, label, flags)` | `UI_DEFAULT` answers Return, `UI_CANCEL` Esc; also `UI_DESTRUCTIVE`, `UI_HOTKEY`. |
 | `ui_separator` / `ui_spacer` | Spacing. |
+| `ui_preview(font, size, builtins, version)` | Sample code in the live theme's editor colors. |
 
 Keys are unique per dialog. The grid projector keeps the widget state that
 isn't the dialog's business (a field's cursor, a pop-up being open, a
@@ -103,7 +114,8 @@ value], …]}'` sends events to a dialog as soon as its sheet is up.
 ## Converted so far
 
 Fill (Edit ▸ Fill…), the breakpoint dialog, the failed-condition dialog,
-Project Settings and its on-save action editor. Their hand-placed grid code,
+Project Settings and its on-save action editor, Settings and its language
+editor. Their hand-placed grid code,
 the old native `form` sheet, the separate Project Settings cell window and
 its hand-built native twin are gone. Project Settings applies each edit as
 it's made. Close runs `_sync_project_settings` before it resets the working

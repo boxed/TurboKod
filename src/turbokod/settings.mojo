@@ -1,47 +1,28 @@
-"""Fullscreen Settings view.
+"""Settings — the global preferences, as a tabbed dialog:
 
-Activated from the hamburger menu. Layout::
+* **General** — save behavior, on-save whitespace fixes, line wrapping,
+  the open-document cap, keyword-argument compression, caret blink;
+* **Appearance** — theme, and on the native macOS frontend the font, its
+  size and the look (classic or macOS-style UI), over a live preview;
+* **Language Features** — the per-feature language-server gates;
+* **Languages** — each language's server priority (``LanguageEditor`` on
+  top for Add / Edit);
+* **Spelling** — the downloadable dictionaries;
+* **Projects** — the folders Quick open project lists.
 
-    ╔══ Settings ══════════════════════════════════════════════════════╗
-    ║ ┌────────────────┐ Actions on save                               ║
-    ║ │ Actions on save│ ┌─────────────────────────────────────────┐   ║
-    ║ │ Editor         │ │ python  /usr/local/bin/black --quiet $F │   ║
-    ║ │                │ │ rust    /usr/local/bin/rustfmt          │   ║
-    ║ │                │ └─────────────────────────────────────────┘   ║
-    ║ │                │ [+ Add] [✎ Edit] [- Remove]                   ║
-    ║ │                │                                               ║
-    ║ └────────────────┘                                               ║
-    ║                                                                  ║
-    ║                                              [ Close ]           ║
-    ╚══════════════════════════════════════════════════════════════════╝
-
-Sections live in a left-rail list. The right pane changes per
-section. Adding a new section is two entries (a string label in
-``_section_labels`` and a ``_paint_section_*`` arm).
+Plain state plus a declarative UI (``ui`` / ``ui_set`` / ``ui_act``, see
+``ui_tree.mojo``). In the terminal it's a dialog over the workspace; on
+macOS it gets its own window — the grid projection in a cell window, or a
+native window in the macOS-style UI — so the workspace stays visible while
+a theme change retints it.
 
 Edits commit immediately to the working copies (``self.auto_save`` etc).
-The host syncs them back into ``TurbokodConfig`` on every paint when
-``self.dirty`` is True and writes the updated config to disk.
-
-The view *takes over the workspace* but doesn't repaint the menu bar
-or status bar — the host keeps painting those above and below so the
-user can still see context. Esc closes (same as the [Close] button).
+The host syncs them back into ``TurbokodConfig`` while ``self.dirty`` is
+set (``Desktop._sync_settings``) and writes the config to disk.
 """
 
 from std.collections.list import List
 
-from .buttons import (
-    BUTTON_FIRED, BUTTON_NONE, Checkbox, paint_checkbox, PlacedButton,
-    ShadowButton,
-)
-from .canvas import Canvas, paint_drop_shadow
-from .painter import Painter
-from .colors import (
-    Attr, BLACK, BLUE, BORDER_FOCUS, CYAN, GREEN, LIGHT_GRAY, RED, WHITE,
-    EDITOR_BG, EDITOR_FG, SYN_KEYWORD, SYN_STRING, SYN_COMMENT, SYN_NUMBER,
-    SYN_IDENT,
-)
-from .theme import theme_names
 from .config import (
     DEFAULT_MAX_OPEN_WINDOWS, LanguageServerOverride,
     MAX_FONT_SIZE, MIN_FONT_SIZE, WRAP_NONE,
@@ -54,214 +35,97 @@ from .language_config import (
     LanguageSpec, apply_language_overrides, built_in_servers,
     find_language_by_id, find_language_for_extension,
 )
-from .language_editor import LanguageEditor, _split_space
-from .dropdown import (
-    DROPDOWN_HIT_BODY, DROPDOWN_HIT_NONE, DROPDOWN_HIT_OUTSIDE,
-    DROPDOWN_HIT_POPUP, Dropdown,
+from .language_editor import LanguageEditor
+from .theme import theme_names
+from .ui_tree import (
+    UI_DEFAULT, UI_DISABLED, UI_SECONDARY, UINode, ui_bool, ui_button,
+    ui_buttons, ui_check, ui_choice, ui_dialog, ui_form, ui_hstack, ui_int,
+    ui_label, ui_page, ui_preview, ui_row, ui_table, ui_tabs, ui_text,
+    ui_vstack,
 )
-from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_SPACE,
-    KEY_TAB, KEY_UP, MOD_SHIFT, MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN,
-    MOUSE_WHEEL_UP,
-)
-from .geometry import Point, Rect
-from .string_utils import display_columns
-from .text_field import TextField
-from .type_ahead import TypeAhead, is_type_ahead_key, type_ahead_pick
-from .window import paint_window_title
-from .view import paint_section_rail, ResizableDialog
-from .list_box import clamp_list_scroll, paint_list_rows
 
 
-# --- focus discriminants --------------------------------------------------
-
-comptime _FOCUS_SECTIONS      = UInt8(0)
-comptime _FOCUS_CLOSE         = UInt8(5)
-comptime _FOCUS_SAVE_BEHAVIOR = UInt8(6)
-comptime _FOCUS_TRIM_WS       = UInt8(14)
-comptime _FOCUS_FINAL_NL      = UInt8(15)
-comptime _FOCUS_DICT_LIST     = UInt8(7)
-comptime _FOCUS_DICT_INSTALL  = UInt8(8)
-comptime _FOCUS_DICT_REMOVE   = UInt8(9)
-comptime _FOCUS_LANG_LIST     = UInt8(10)
-comptime _FOCUS_LANG_ADD      = UInt8(11)
-comptime _FOCUS_LANG_EDIT     = UInt8(12)
-comptime _FOCUS_LANG_REMOVE   = UInt8(13)
-comptime _FOCUS_THEME_LIST    = UInt8(16)
-comptime _FOCUS_FONT_LIST     = UInt8(17)
-comptime _FOCUS_FONT_SMALLER  = UInt8(18)
-comptime _FOCUS_FONT_LARGER   = UInt8(19)
-comptime _FOCUS_FONT_IDEAL    = UInt8(20)
-comptime _FOCUS_WRAP_MODE     = UInt8(21)
-comptime _FOCUS_COMPRESS_KW   = UInt8(22)
-comptime _FOCUS_COMMA_WRAP    = UInt8(23)
-comptime _FOCUS_BLINK_CURSOR  = UInt8(24)
-comptime _FOCUS_MAX_WINDOWS   = UInt8(34)
-comptime _FOCUS_PROJ_LIST     = UInt8(35)
-comptime _FOCUS_PROJ_INPUT    = UInt8(36)
-comptime _FOCUS_PROJ_ADD      = UInt8(37)
-comptime _FOCUS_PROJ_REMOVE   = UInt8(38)
-# Language Server section checkboxes.
-comptime _FOCUS_LS_FORMAT_ON_SAVE = UInt8(25)
-comptime _FOCUS_LS_SIGNATURE      = UInt8(26)
-comptime _FOCUS_LS_DOC_HIGHLIGHT  = UInt8(27)
-comptime _FOCUS_LS_DOC_LINKS      = UInt8(28)
-comptime _FOCUS_LS_INLAY_HINTS    = UInt8(29)
-comptime _FOCUS_LS_CODE_LENS      = UInt8(30)
-comptime _FOCUS_LS_DOC_COLORS     = UInt8(31)
-comptime _FOCUS_LS_LINKED_EDITING = UInt8(32)
-comptime _FOCUS_LS_PROGRESS       = UInt8(33)
+comptime SECTION_GENERAL    = 0
+comptime SECTION_APPEARANCE = 1
+comptime SECTION_FEATURES   = 2
+comptime SECTION_LANGUAGES  = 3
+comptime SECTION_SPELLING   = 4
+comptime SECTION_PROJECTS   = 5
 
 
-# --- section indices ------------------------------------------------------
-
-comptime _SECTION_EDITOR          = 0
-comptime _SECTION_SPELL           = 1
-comptime _SECTION_LANGUAGES       = 2
-comptime _SECTION_THEME           = 3
-comptime _SECTION_LANGUAGE_SERVER = 4
-comptime _SECTION_PROJECTS        = 5
-comptime _SECTION_FONT            = 6
-
-
-# --- layout ---------------------------------------------------------------
-
-comptime _SECTION_W = 22
-
-# Minimum in-grid dialog size (terminal frontend). Wide enough for the left
-# rail plus a usable right pane; tall enough for the section lists.
-comptime _SETTINGS_MIN_W = 64
-comptime _SETTINGS_MIN_H = 16
-
-
-# --- button table indices -------------------------------------------------
-# ``Settings._buttons`` is a flat list rather than per-section sublists so
-# the press latches survive across paints and section switches. The names
-# below are the canonical mapping; callers should not hand-write the ints.
-
-comptime _BTN_CLOSE        = 0
-comptime _BTN_DICT_INSTALL = 1
-comptime _BTN_DICT_REMOVE  = 2
-comptime _BTN_LANG_ADD     = 3
-comptime _BTN_LANG_EDIT    = 4
-comptime _BTN_LANG_REMOVE  = 5
-comptime _BTN_FONT_SMALLER = 6
-comptime _BTN_FONT_LARGER  = 7
-comptime _BTN_FONT_IDEAL   = 8
-comptime _BTN_PROJ_ADD     = 9
-comptime _BTN_PROJ_REMOVE  = 10
-
-# Width of the inline dropdown strip in the Editor section. Wide enough
-# for "Automatic" plus the right-edge ``▼`` indicator.
-comptime _SAVE_DD_W = 16
-
-
-def _section_labels(include_font: Bool) -> List[String]:
-    """Section names rendered in the left rail. Add new section names
-    here and a matching ``_paint_section_*`` / ``_handle_*`` branch
-    below; nothing else needs to change. ``Font`` only exists when the
-    host registered font options (the native macOS frontend) — the
-    terminal emulator owns the font on the terminal frontend."""
-    var out = List[String]()
-    out.append(String("Editor"))
-    out.append(String("Spell check"))
-    out.append(String("Languages"))
-    out.append(String("Theme"))
-    out.append(String("Language Server"))
-    out.append(String("Projects"))
-    if include_font:
-        out.append(String("Font"))
-    return out^
-
-
-def _save_behavior_options() -> List[String]:
-    """Dropdown options for the Editor ▸ Save behavior picker. Order
-    here is the order rendered in the popup; index 0 is the default
-    when no value is committed."""
-    var out = List[String]()
-    out.append(String("Manual"))
-    out.append(String("Automatic"))
-    return out^
-
-
-def _wrap_mode_options() -> List[String]:
-    """Dropdown options for the Editor ▸ Wrap picker. Index order is in
-    lock-step with the ``WRAP_NONE`` / ``WRAP_SOFT`` / ``WRAP_SMART``
-    constants (0 / 1 / 2)."""
-    var out = List[String]()
-    out.append(String("No wrap"))
-    out.append(String("Soft wrap"))
-    out.append(String("Smart wrap"))
-    return out^
-
-
-def _clamp_numeric_field(mut tf: TextField, max_len: Int):
-    """Keep only the leading ``max_len`` digits of a numeric inline field.
-
-    Called after every mutation of the comma-threshold / max-windows
-    ``TextField`` so a paste, a stray non-digit, or an over-long value can't
-    survive. Only rewrites the field (which resets the caret to the end and
-    drops undo history) when the text actually violates the constraint —
-    ordinary digit typing leaves the caret and undo stack untouched."""
-    var bytes = tf.text.as_bytes()
-    var out = String("")
-    var count = 0
-    for i in range(len(bytes)):
-        var b = bytes[i]
-        if b >= UInt8(0x30) and b <= UInt8(0x39) and count < max_len:
-            out += chr(Int(b))
-            count += 1
-    if out != tf.text:
-        tf.set_text(out^)
+def _ls_keys() -> List[String]:
+    """The Language Features checkboxes' keys, in display order."""
+    return [
+        String("ls_format_on_save"), String("ls_signature_help"),
+        String("ls_document_highlight"), String("ls_document_links"),
+        String("ls_inlay_hints"), String("ls_code_lens"),
+        String("ls_document_colors"), String("ls_linked_editing"),
+        String("ls_server_progress"),
+    ]
 
 
 def _ls_labels() -> List[String]:
-    """Language Server section checkbox labels, in ``_FOCUS_LS_*`` order
-    (``_FOCUS_LS_FORMAT_ON_SAVE`` first, contiguous)."""
-    var out = List[String]()
-    out.append(String("Format on save"))
-    out.append(String("Signature help (parameter hints)"))
-    out.append(String("Highlight occurrences at cursor"))
-    out.append(String("Clickable document links"))
-    out.append(String("Inlay hints (inline types / parameter names)"))
-    out.append(String("Code lens (inline actions)"))
-    out.append(String("Color swatches"))
-    out.append(String("Linked editing (rename matching ranges together)"))
-    out.append(String("Show server progress"))
+    return [
+        String("Format on save"),
+        String("Signature help while typing"),
+        String("Highlight occurrences of the symbol at the caret"),
+        String("Clickable links in documents"),
+        String("Inlay hints (inline types and parameter names)"),
+        String("Code lens (actionable annotations)"),
+        String("Color swatches"),
+        String("Linked editing (rename matching tags together)"),
+        String("Show language-server progress"),
+    ]
+
+
+def _digits(text: String, max_len: Int) -> String:
+    """The leading ``max_len`` digits of ``text`` — what a numeric field
+    keeps of a paste or a stray character."""
+    var bytes = text.as_bytes()
+    var out = String("")
+    for i in range(len(bytes)):
+        var b = bytes[i]
+        if b >= UInt8(0x30) and b <= UInt8(0x39) and len(out.as_bytes()) < max_len:
+            out += chr(Int(b))
     return out^
 
 
-# --- Settings -------------------------------------------------------------
+def _parse_digits(text: String, empty: Int) -> Int:
+    var bytes = text.as_bytes()
+    if len(bytes) == 0:
+        return empty
+    var v = 0
+    for i in range(len(bytes)):
+        var d = Int(bytes[i]) - 0x30
+        if d < 0 or d > 9:
+            return empty
+        v = v * 10 + d
+    return v
 
 
 struct Settings(Movable):
     var active: Bool
     var dirty: Bool
-    """Set when a setting has been mutated. Host watches this flag and
-    writes ``TurbokodConfig`` to disk; ``ack_dirty`` clears it after a
-    successful write."""
+    """Set when a setting has been mutated. The host applies and writes
+    ``TurbokodConfig``; ``ack_dirty`` clears it."""
+    var close_requested: Bool
+    """Close was pressed; the host syncs the last edits, then closes."""
+    var section: Int
+
+    # General.
     var auto_save: Bool
-    """Working copy of ``TurbokodConfig.auto_save`` — Editor ▸ Save
-    behavior. ``False`` means Manual (Ctrl+S only), ``True`` means
-    Automatic. Driven by ``_save_dropdown``."""
     var wrap_mode: Int
-    """Working copy of ``TurbokodConfig.wrap_mode`` — Editor ▸ Wrap
-    (``WRAP_NONE`` / ``WRAP_SOFT`` / ``WRAP_SMART``). Driven by
-    ``_wrap_dropdown``; the host applies + persists it on the next config
-    sync when it differs from ``config.wrap_mode``."""
+    """``WRAP_NONE`` / ``WRAP_SOFT`` / ``WRAP_SMART``."""
     var trim_trailing_whitespace: Bool
-    """Working copy of ``TurbokodConfig.trim_trailing_whitespace`` —
-    Editor ▸ "Trim trailing whitespace". Driven by ``_trim_cb``."""
     var ensure_final_newline: Bool
-    """Working copy of ``TurbokodConfig.ensure_final_newline`` — Editor
-    ▸ "Ensure newline at end of files". Driven by ``_final_nl_cb``."""
     var compress_kwargs: Bool
-    """Working copy of ``TurbokodConfig.compress_kwargs`` — Editor ▸
-    "Compress keyword arguments". Driven by ``_compress_cb``."""
     var cursor_blink: Bool
-    """Working copy of ``TurbokodConfig.cursor_blink`` — Editor ▸
-    "Blinking cursor". Driven by ``_blink_cb``."""
-    # Working copies of the Language Server section's per-feature gates.
+    var comma_text: String
+    """Smart wrap's comma trigger as typed: digits, empty = off."""
+    var max_windows_text: String
+    """The open-document cap as typed: digits, empty = no limit."""
+
+    # Language Features.
     var ls_format_on_save: Bool
     var ls_signature_help: Bool
     var ls_document_highlight: Bool
@@ -271,167 +135,61 @@ struct Settings(Movable):
     var ls_document_colors: Bool
     var ls_linked_editing: Bool
     var ls_server_progress: Bool
-    var section: Int
-    """Index into ``_section_labels`` for the active section."""
-    var focus: UInt8
-    var _list_scroll: Int
-    var _last_scroll_dict: Int
-    """Counterpart for ``selected_dict``."""
-    var _last_scroll_language: Int
-    """Counterpart for ``selected_language``."""
-    var _buttons: List[PlacedButton]
-    """Persistent button table — Close first, then the per-section
-    Spell / Languages / Font buttons."""
-    var _save_dropdown: Dropdown
-    """Stateful Save-behavior picker. Index is in lock-step with
-    ``auto_save`` (0 = Manual, 1 = Automatic) and the popup state
-    persists across paints so a click on the strip can show the
-    popup on the next refresh."""
-    var _save_dd_anchor: Rect
-    """Last-painted bounds of the dropdown strip. Cached so mouse
-    events arriving between paints can hit-test against the same
-    rectangle the user just clicked."""
-    var _wrap_dropdown: Dropdown
-    """Stateful Wrap-mode picker. Index is in lock-step with
-    ``wrap_mode`` (0 = No wrap, 1 = Soft wrap, 2 = Smart wrap)."""
-    var _wrap_dd_anchor: Rect
-    """Last-painted bounds of the Wrap dropdown strip (mouse hit-test
-    cache, mirrors ``_save_dd_anchor``)."""
-    var _comma_tf: TextField
-    """Editable digit field — Editor ▸ "Smart wrap: break at commas". Empty
-    means "no comma trigger, only window width" (the ``-1`` sentinel). Backed
-    by the shared ``TextField`` so it gets cursor movement, drag-select,
-    double/triple-click, undo, and clipboard for free; ``handle_key``
-    re-filters the text to at most 3 digits after every edit. The host reads
-    the parsed value via ``comma_threshold_value`` on the next config sync."""
-    var _comma_input_anchor: Rect
-    """Last-painted bounds of the comma-threshold input box (mouse hit-test
-    cache, mirrors ``_wrap_dd_anchor``)."""
-    var _mw_tf: TextField
-    """Editable digit field — Editor ▸ "Max open windows". Empty (or ``0``)
-    means "no limit". Shared ``TextField`` like ``_comma_tf``; re-filtered to
-    at most 4 digits. The host reads the parsed value via
-    ``max_open_windows_value`` on the next config sync."""
-    var _max_windows_anchor: Rect
-    """Last-painted bounds of the max-open-windows input box (mouse
-    hit-test cache, mirrors ``_comma_input_anchor``)."""
-    var _trim_cb: Checkbox
-    """Editor ▸ "Trim trailing whitespace" toggle. ``on`` tracks
-    ``trim_trailing_whitespace``; position is set each paint so the
-    press/release state machine hit-tests against the live row."""
-    var _final_nl_cb: Checkbox
-    """Editor ▸ "Ensure newline at end of files" toggle. Mirrors
-    ``ensure_final_newline``."""
-    var _compress_cb: Checkbox
-    """Editor ▸ "Compress keyword arguments" toggle. Mirrors
-    ``compress_kwargs``."""
-    var _blink_cb: Checkbox
-    """Editor ▸ "Blinking cursor" toggle. Mirrors ``cursor_blink``."""
-    # Language Server section checkboxes, mirroring the ``ls_*`` bools.
-    var _ls_cbs: List[Checkbox]
-    """The Language Server section's checkboxes, one per ``ls_*`` flag, in
-    focus order: ``_ls_cbs[i]`` is focus slot ``_FOCUS_LS_FORMAT_ON_SAVE + i``
-    and mirrors ``_ls_get(i)``."""
-    var project_dirs: List[String]
-    """Working copy of ``TurbokodConfig.project_dirs`` — Settings ▸
-    Projects. Add / Remove edit it in place and raise ``dirty``."""
-    var selected_project_dir: Int
-    """Row in ``project_dirs`` highlighted in the Projects pane."""
-    var _last_scroll_proj: Int
-    """Counterpart of ``_last_scroll_dict`` for ``selected_project_dir``."""
-    var _proj_tf: TextField
-    """Projects ▸ folder path being typed; Enter or [+ Add] appends it."""
-    var _proj_input_anchor: Rect
-    """Last-painted bounds of ``_proj_tf`` (mouse hit-test cache)."""
-    var dict_specs: List[DownloadableDictionary]
-    """Catalog of downloadable spell-check dictionaries shown in the
-    Spell-check pane. Snapshotted on ``open`` so the list and the
-    install/remove buttons agree across paints."""
-    var selected_dict: Int
-    """Row in ``dict_specs`` that's highlighted in the Spell-check pane."""
-    var pending_dict_install_lang: String
-    """When non-empty, host should kick off an install for this language
-    on the next ``paint``. The host clears it after picking up the
-    request — Settings emits one request at a time."""
-    var pending_dict_remove_lang: String
-    """When non-empty, host should remove the on-disk wordlist for this
-    language on the next ``paint`` and reload the speller. Host clears
-    after picking up."""
-    var language_overrides: List[LanguageServerOverride]
-    """Working copy of ``TurbokodConfig.language_servers`` — the
-    Languages section's authoritative state. Edits commit immediately
-    on Save in the language editor; the host writes back to config on
-    every paint when ``self.dirty`` is True."""
-    var languages_view: List[LanguageSpec]
-    """Effective per-paint snapshot of all languages: built-in plus
-    user overrides applied. Rebuilt on ``open`` and after every
-    language editor commit so the right pane reflects the user's
-    latest priority list."""
-    var selected_language: Int
-    """Row in ``languages_view`` that's highlighted in the right pane."""
-    var language_editor: LanguageEditor
+
+    # Appearance.
     var theme_choice: String
-    """Working copy of ``TurbokodConfig.theme`` — the Theme section's
-    authoritative value. Changing the selection in the theme list commits
-    here and raises ``dirty``; the host applies it live via
-    ``Desktop.set_theme`` and persists on the next config sync."""
-    var selected_theme: Int
-    """Row in ``_theme_names`` that's highlighted in the Theme pane."""
     var _theme_names: List[String]
-    """Snapshot of the available theme names (``theme.theme_names()``)."""
     var font_choice: String
-    """Working copy of the active font label — the Font section's
-    authoritative value. Index 0 of ``_font_names`` is the built-in
-    bitmap font's label; changing the selection commits here and raises
-    ``dirty``, and the host applies it live via ``Desktop.set_font``."""
-    var selected_font: Int
-    """Row in ``_font_names`` that's highlighted in the Font pane."""
     var _font_names: List[String]
-    """Host-provided font labels (built-in default first, then the
-    system's monospace families). Empty on the terminal frontend, which
-    hides the Font section entirely."""
-    var _last_scroll_font: Int
-    """Counterpart of ``_last_scroll_dict`` for ``selected_font``."""
+    """Host-provided font labels (the two built-in fonts first, then the
+    system's monospace families). Empty on the terminal frontend, where
+    the terminal owns the font."""
     var font_size_choice: Int
-    """Working copy of ``TurbokodConfig.font_size`` — 0 means "the
-    font's default size", anything else is an explicit point size. The
-    size stepper writes here and raises ``dirty``; the host applies it
-    live via ``Desktop.set_font_size``."""
+    """0 means the font's default size."""
     var _font_effective_size: Int
-    """Host-reported point size actually rendering right now (resolves
-    the 0-means-default case for display). Refreshed every paint via
-    ``update_font_info`` so it tracks live font-family changes."""
+    """The size actually rendering (resolves 0); reported by the host."""
     var _font_ideal_size: Int
-    """Host-reported design size of the active font — 16 for the
-    built-in bitmap font, the embedded bitmap-strike ppem for true
-    bitmap fonts, 0 when unknown (ordinary vector fonts). Gates the
-    "Restore ideal" button."""
-    var detached: Bool
-    """True when the host renders Settings in its own native window (the
-    macOS frontend; see ``Desktop.set_settings_detached``). The dialog then
-    fills the whole surface and the in-grid move/resize chrome is disabled —
-    the native window provides both."""
-    var dlg: ResizableDialog
-    """In-grid dialog rect (terminal frontend). Centered by default, then
-    movable by dragging the title row and resizable by dragging the left /
-    right / bottom border — so the workspace behind stays visible while a
-    theme change retints it live. Session-persistent across open/close;
-    ``_ensure_bounds`` re-clamps it against the current container_bounds."""
-    var _type_ahead: TypeAhead
-    """Shared type-to-jump prefix buffer for whichever section list
-    currently owns focus. Reset on focus / section changes so a
-    stale buffer doesn't misroute the first keystroke after the
-    user moves between panes."""
+    """The active font's design size, 0 when unknown; reported by the host."""
+    var offer_native_ui: Bool
+    """The host can show the macOS-style UI (the native macOS frontend)."""
+    var native_ui: Bool
+    var palette_version: Int
+    """Bumped by the host when the palette changes, so the preview repaints."""
+
+    # Languages.
+    var language_overrides: List[LanguageServerOverride]
+    """Working copy of ``TurbokodConfig.language_servers``."""
+    var languages_view: List[LanguageSpec]
+    """Built-in languages with the overrides applied — what the list shows."""
+    var selected_language: Int
+    var language_editor: LanguageEditor
+
+    # Spelling.
+    var dict_specs: List[DownloadableDictionary]
+    var selected_dict: Int
+    var pending_dict_install_lang: String
+    """When non-empty, the host starts installing this dictionary (and
+    clears it with ``ack_dict_install``)."""
+    var pending_dict_remove_lang: String
+
+    # Projects.
+    var project_dirs: List[String]
+    var selected_project_dir: Int
+    var project_input: String
 
     def __init__(out self):
         self.active = False
         self.dirty = False
+        self.close_requested = False
+        self.section = SECTION_GENERAL
         self.auto_save = False
         self.wrap_mode = WRAP_NONE
         self.trim_trailing_whitespace = False
         self.ensure_final_newline = False
         self.compress_kwargs = False
         self.cursor_blink = False
+        self.comma_text = String("")
+        self.max_windows_text = String("")
         self.ls_format_on_save = False
         self.ls_signature_help = False
         self.ls_document_highlight = False
@@ -441,99 +199,27 @@ struct Settings(Movable):
         self.ls_document_colors = False
         self.ls_linked_editing = False
         self.ls_server_progress = False
-        self.section = 0
-        self.focus = _FOCUS_SECTIONS
-        self._list_scroll = 0
-        self._last_scroll_dict = -2
-        self._last_scroll_language = -2
-        self._buttons = List[PlacedButton]()
-        self._buttons.append(PlacedButton(
-            ShadowButton(String(" Close "), 0, 0), _FOCUS_CLOSE, True,
-        ))
-        self._buttons.append(PlacedButton(
-            ShadowButton(String(" + Install "), 0, 0),
-            _FOCUS_DICT_INSTALL, True,
-        ))
-        self._buttons.append(PlacedButton(
-            ShadowButton(String(" - Remove "), 0, 0),
-            _FOCUS_DICT_REMOVE, True,
-        ))
-        self._buttons.append(PlacedButton(
-            ShadowButton(String(" + Add "), 0, 0), _FOCUS_LANG_ADD, True,
-        ))
-        self._buttons.append(PlacedButton(
-            ShadowButton(String(" Edit "), 0, 0), _FOCUS_LANG_EDIT, True,
-        ))
-        self._buttons.append(PlacedButton(
-            ShadowButton(String(" - Remove "), 0, 0),
-            _FOCUS_LANG_REMOVE, True,
-        ))
-        self._buttons.append(PlacedButton(
-            ShadowButton(String(" - "), 0, 0), _FOCUS_FONT_SMALLER, True,
-        ))
-        self._buttons.append(PlacedButton(
-            ShadowButton(String(" + "), 0, 0), _FOCUS_FONT_LARGER, True,
-        ))
-        self._buttons.append(PlacedButton(
-            ShadowButton(String(" Restore ideal "), 0, 0),
-            _FOCUS_FONT_IDEAL, True,
-        ))
-        self._buttons.append(PlacedButton(
-            ShadowButton(String(" + Add "), 0, 0), _FOCUS_PROJ_ADD, True,
-        ))
-        self._buttons.append(PlacedButton(
-            ShadowButton(String(" - Remove "), 0, 0),
-            _FOCUS_PROJ_REMOVE, True,
-        ))
-        self._save_dropdown = Dropdown(_save_behavior_options(), 0)
-        self._save_dd_anchor = Rect(0, 0, 0, 0)
-        self._wrap_dropdown = Dropdown(_wrap_mode_options(), 0)
-        self._wrap_dd_anchor = Rect(0, 0, 0, 0)
-        self._comma_tf = TextField()
-        self._comma_input_anchor = Rect(0, 0, 0, 0)
-        self._mw_tf = TextField()
-        self._max_windows_anchor = Rect(0, 0, 0, 0)
-        self._trim_cb = Checkbox(
-            String("Trim trailing whitespace"), 0, 0, False,
-        )
-        self._final_nl_cb = Checkbox(
-            String("Ensure newline at end of files"), 0, 0, False,
-        )
-        self._compress_cb = Checkbox(
-            String("Compress keyword arguments"), 0, 0, False,
-        )
-        self._blink_cb = Checkbox(
-            String("Blinking cursor"), 0, 0, False,
-        )
-        self._ls_cbs = List[Checkbox]()
-        for label in _ls_labels():
-            self._ls_cbs.append(Checkbox(label, 0, 0, False))
-        self.project_dirs = List[String]()
-        self.selected_project_dir = -1
-        self._last_scroll_proj = -2
-        self._proj_tf = TextField()
-        self._proj_input_anchor = Rect(0, 0, 0, 0)
-        self.dict_specs = List[DownloadableDictionary]()
-        self.selected_dict = 0
-        self.pending_dict_install_lang = String("")
-        self.pending_dict_remove_lang = String("")
+        self.theme_choice = String("Turbo C++ 3.0")
+        self._theme_names = theme_names()
+        self.font_choice = String("")
+        self._font_names = List[String]()
+        self.font_size_choice = 0
+        self._font_effective_size = 0
+        self._font_ideal_size = 0
+        self.offer_native_ui = False
+        self.native_ui = False
+        self.palette_version = 0
         self.language_overrides = List[LanguageServerOverride]()
         self.languages_view = List[LanguageSpec]()
         self.selected_language = -1
         self.language_editor = LanguageEditor()
-        self.theme_choice = String("Turbo C++ 3.0")
-        self.selected_theme = 0
-        self._theme_names = theme_names()
-        self.font_choice = String("")
-        self.selected_font = 0
-        self._font_names = List[String]()
-        self._last_scroll_font = -2
-        self.font_size_choice = 0
-        self._font_effective_size = 0
-        self._font_ideal_size = 0
-        self.detached = False
-        self.dlg = ResizableDialog(_SETTINGS_MIN_W, _SETTINGS_MIN_H)
-        self._type_ahead = TypeAhead()
+        self.dict_specs = List[DownloadableDictionary]()
+        self.selected_dict = -1
+        self.pending_dict_install_lang = String("")
+        self.pending_dict_remove_lang = String("")
+        self.project_dirs = List[String]()
+        self.selected_project_dir = -1
+        self.project_input = String("")
 
     def open(
         mut self, auto_save: Bool,
@@ -563,20 +249,17 @@ struct Settings(Movable):
         ls_server_progress: Bool = True,
         var project_dirs: List[String] = List[String](),
     ):
+        self = Settings()
+        self.active = True
         self.auto_save = auto_save
-        self.project_dirs = project_dirs^
-        self.selected_project_dir = 0 if len(self.project_dirs) > 0 else -1
-        self._last_scroll_proj = -2
-        self._proj_tf.set_text(String(""))
-        self.wrap_mode = wrap_mode
         self.trim_trailing_whitespace = trim_trailing_whitespace
         self.ensure_final_newline = ensure_final_newline
         self.compress_kwargs = compress_kwargs
         self.cursor_blink = cursor_blink
-        self._trim_cb.on = trim_trailing_whitespace
-        self._final_nl_cb.on = ensure_final_newline
-        self._compress_cb.on = compress_kwargs
-        self._blink_cb.on = cursor_blink
+        self.wrap_mode = wrap_mode
+        self.comma_text = String("") if comma_threshold < 0 else String(comma_threshold)
+        self.max_windows_text = String("") if max_open_windows <= 0 \
+            else String(max_open_windows)
         self.ls_format_on_save = ls_format_on_save
         self.ls_signature_help = ls_signature_help
         self.ls_document_highlight = ls_document_highlight
@@ -586,138 +269,378 @@ struct Settings(Movable):
         self.ls_document_colors = ls_document_colors
         self.ls_linked_editing = ls_linked_editing
         self.ls_server_progress = ls_server_progress
-        self._sync_ls_checkboxes()
-        self.active = True
-        self.dirty = False
-        self.section = 0
-        self.focus = _FOCUS_SECTIONS
-        self._list_scroll = 0
-        self._last_scroll_dict = -2
-        self._last_scroll_language = -2
-        self._last_scroll_font = -2
-        self._save_dropdown = Dropdown(
-            _save_behavior_options(), 1 if auto_save else 0,
-        )
-        self._wrap_dropdown = Dropdown(_wrap_mode_options(), wrap_mode)
-        # Negative sentinel renders as an empty field; any value >= 0 shows
-        # its digits.
-        if comma_threshold < 0:
-            self._comma_tf.set_text(String(""))
-        else:
-            self._comma_tf.set_text(String(comma_threshold))
-        # 0 (or negative) is "no limit" and renders as an empty field;
-        # any positive value shows its digits.
-        if max_open_windows <= 0:
-            self._mw_tf.set_text(String(""))
-        else:
-            self._mw_tf.set_text(String(max_open_windows))
-        self.dict_specs = built_in_downloadable_dictionaries()
-        self.selected_dict = 0 if len(self.dict_specs) > 0 else -1
-        self.pending_dict_install_lang = String("")
-        self.pending_dict_remove_lang = String("")
+        self.theme_choice = theme
+        self.font_choice = font
+        self._font_names = font_names^
+        self.font_size_choice = font_size
+        self._font_effective_size = font_effective_size
+        self._font_ideal_size = font_ideal_size
         self.language_overrides = language_overrides^
         self._rebuild_languages_view()
-        # Pre-select the focused editor's language so the Languages
-        # section opens on the row the user is most likely to care
-        # about — the scroll-snap in _paint_languages_list brings it
-        # into view on the next paint.
+        # Open Languages on the focused editor's language: the row the
+        # user most likely came to change.
         var lang_idx = -1
         if len(current_language_ext.as_bytes()) > 0:
             lang_idx = find_language_for_extension(
                 self.languages_view, current_language_ext,
             )
-        if lang_idx < 0:
-            lang_idx = 0 if len(self.languages_view) > 0 else -1
+        if lang_idx < 0 and len(self.languages_view) > 0:
+            lang_idx = 0
         self.selected_language = lang_idx
-        # Theme section: snapshot the catalog and select the active theme.
-        self._theme_names = theme_names()
-        self.theme_choice = theme
-        self.selected_theme = 0
-        for i in range(len(self._theme_names)):
-            if self._theme_names[i] == theme:
-                self.selected_theme = i
-                break
-        # Font section: host-provided labels (empty on the terminal
-        # frontend, which hides the section). Select the active font.
-        self._font_names = font_names^
-        self.font_choice = font
-        self.selected_font = 0
-        for i in range(len(self._font_names)):
-            if self._font_names[i] == font:
-                self.selected_font = i
-                break
-        self.font_size_choice = font_size
-        self._font_effective_size = font_effective_size
-        self._font_ideal_size = font_ideal_size
+        self.dict_specs = built_in_downloadable_dictionaries()
+        self.selected_dict = 0 if len(self.dict_specs) > 0 else -1
+        self.project_dirs = project_dirs^
+        self.selected_project_dir = 0 if len(self.project_dirs) > 0 else -1
+
+    def close(mut self):
+        self = Settings()
 
     def update_font_info(mut self, effective: Int, ideal: Int):
-        """Host pushes the live effective/ideal sizes every paint —
-        a font-family change mid-dialog changes both, and the values
-        only become known a frame after the host applies the font.
-        Display-only; never touches ``dirty``."""
+        """The host reports the live effective / ideal sizes every frame (a
+        family change moves both, a frame after it's applied). Display
+        only; never dirties."""
         self._font_effective_size = effective
         self._font_ideal_size = ideal
 
-    def _rebuild_languages_view(mut self):
-        self.languages_view = apply_language_overrides(
-            built_in_servers(), self.language_overrides,
-        )
+    def ack_dirty(mut self):
+        self.dirty = False
 
-    def close(mut self):
-        self.active = False
-        # Drop any in-flight move/resize drag; ``bounds`` itself is kept so
-        # the next open reuses the user's size + position.
-        self.dlg.cancel_drag()
-        self.auto_save = False
-        self.trim_trailing_whitespace = False
-        self.ensure_final_newline = False
-        self.compress_kwargs = False
-        self.cursor_blink = False
-        self.ls_format_on_save = False
-        self.ls_signature_help = False
-        self.ls_document_highlight = False
-        self.ls_document_links = False
-        self.ls_inlay_hints = False
-        self.ls_code_lens = False
-        self.ls_document_colors = False
-        self.ls_linked_editing = False
-        self.ls_server_progress = False
-        self.section = 0
-        self.focus = _FOCUS_SECTIONS
-        self._list_scroll = 0
-        self._save_dropdown.close()
-        self._wrap_dropdown.close()
-        self._trim_cb.reset_press()
-        self._final_nl_cb.reset_press()
-        self._compress_cb.reset_press()
-        self._blink_cb.reset_press()
-        self._reset_ls_checkbox_press()
-        self.dict_specs = List[DownloadableDictionary]()
-        self.selected_dict = -1
+    def ack_dict_install(mut self):
         self.pending_dict_install_lang = String("")
+
+    def ack_dict_remove(mut self):
         self.pending_dict_remove_lang = String("")
-        self.language_overrides = List[LanguageServerOverride]()
-        self.languages_view = List[LanguageSpec]()
-        self.selected_language = -1
-        self.language_editor.close()
-        self._type_ahead.reset()
-        for i in range(len(self._buttons)):
-            self._buttons[i].button.reset_press()
 
-    # --- native host (macOS-style UI) ------------------------------------
-    #
-    # The native Settings window edits these same fields; marking ``dirty``
-    # hands them to the Desktop's per-frame sync, which applies each with
-    # its side effects exactly as for an in-grid edit. Paint re-mirrors the
-    # fields into the in-grid widgets, so "Advanced Settings…" shows them.
+    def font_names(self) -> List[String]:
+        return self._font_names.copy()
 
-    def native_set_bool(mut self, key: String, on: Bool):
-        if key == String("auto_save"): self.auto_save = on
-        elif key == String("trim_trailing_whitespace"): self.trim_trailing_whitespace = on
-        elif key == String("ensure_final_newline"): self.ensure_final_newline = on
-        elif key == String("compress_kwargs"): self.compress_kwargs = on
-        elif key == String("cursor_blink"): self.cursor_blink = on
-        elif key == String("ls_format_on_save"): self.ls_format_on_save = on
+    def comma_threshold_value(self) -> Int:
+        """Smart wrap's comma trigger: -1 when the field is empty (off)."""
+        return _parse_digits(self.comma_text, -1)
+
+    def max_open_windows_value(self) -> Int:
+        """The open-document cap: 0 when the field is empty (no limit)."""
+        return _parse_digits(self.max_windows_text, 0)
+
+    # --- declarative UI -------------------------------------------------
+
+    def ui(self) -> UINode:
+        var pages = List[UINode]()
+        pages.append(ui_page(String("General"), self._general_ui()))
+        pages.append(ui_page(String("Appearance"), self._appearance_ui()))
+        pages.append(ui_page(String("LSP Features"), self._features_ui()))
+        pages.append(ui_page(String("Languages"), self._languages_ui()))
+        pages.append(ui_page(String("Spelling"), self._spelling_ui()))
+        pages.append(ui_page(String("Projects"), self._projects_ui()))
+        var buttons = List[UINode]()
+        buttons.append(ui_button(String("close"), String("Close"), UI_DEFAULT))
+        var body = List[UINode]()
+        body.append(ui_tabs(String("section"), self.section, pages^))
+        body.append(ui_buttons(buttons^))
+        return ui_dialog(String("Settings"), String("close"), ui_vstack(body^))
+
+    def _general_ui(self) -> UINode:
+        var rows = List[UINode]()
+        rows.append(ui_row(String("Saving"), ui_choice(
+            String("auto_save"), [String("Manual"), String("Automatic")],
+            1 if self.auto_save else 0,
+        )))
+        rows.append(ui_row(String(""), ui_check(
+            String("trim_trailing_whitespace"),
+            String("Trim trailing whitespace on save"),
+            self.trim_trailing_whitespace,
+        )))
+        rows.append(ui_row(String(""), ui_check(
+            String("ensure_final_newline"),
+            String("Ensure a final newline on save"), self.ensure_final_newline,
+        )))
+        rows.append(ui_row(String("Line wrapping"), ui_choice(
+            String("wrap_mode"),
+            [String("None"), String("Soft"), String("Smart")], self.wrap_mode,
+        )))
+        rows.append(ui_row(String("Smart wrap at commas"), ui_text(
+            String("comma_threshold"), self.comma_text, String("Off"), width=8,
+        )))
+        rows.append(ui_row(String("Open documents"), ui_text(
+            String("max_open_windows"), self.max_windows_text, String("No limit"),
+            width=8,
+        )))
+        rows.append(ui_row(String(""), ui_check(
+            String("compress_kwargs"), String("Compress keyword arguments"),
+            self.compress_kwargs,
+        )))
+        rows.append(ui_row(String(""), ui_check(
+            String("cursor_blink"), String("Blinking caret"), self.cursor_blink,
+        )))
+        return ui_form(rows^)
+
+    def _font_size_shown(self) -> Int:
+        if self.font_size_choice > 0:
+            return self.font_size_choice
+        if self._font_effective_size > 0:
+            return self._font_effective_size
+        return 16
+
+    def _appearance_ui(self) -> UINode:
+        var rows = List[UINode]()
+        if self.offer_native_ui:
+            rows.append(ui_row(String(""), ui_check(
+                String("native_ui"),
+                String("macOS-style UI (native tabs, sheets and pickers)"),
+                self.native_ui,
+            )))
+        var theme = 0
+        for i in range(len(self._theme_names)):
+            if self._theme_names[i] == self.theme_choice:
+                theme = i
+        rows.append(ui_row(String("Theme"), ui_choice(
+            String("theme"), self._theme_names.copy(), theme,
+        )))
+        var builtins = List[String]()
+        if len(self._font_names) > 0:
+            var font = 0
+            for i in range(len(self._font_names)):
+                if self._font_names[i] == self.font_choice:
+                    font = i
+            rows.append(ui_row(String("Font"), ui_choice(
+                String("font"), self._font_names.copy(), font,
+            )))
+            var size = self._font_size_shown()
+            var ideal = self._font_ideal_size
+            var steps = List[UINode]()
+            steps.append(ui_label(String(size) + String(" pt")))
+            steps.append(ui_button(
+                String("font_smaller"), String("Smaller"),
+                0 if size > MIN_FONT_SIZE else UI_DISABLED,
+            ))
+            steps.append(ui_button(
+                String("font_larger"), String("Larger"),
+                0 if size < MAX_FONT_SIZE else UI_DISABLED,
+            ))
+            steps.append(ui_button(
+                String("font_ideal"), String("Ideal Size"),
+                0 if ideal > 0 and ideal != size else UI_DISABLED,
+            ))
+            rows.append(ui_row(String("Size"), ui_hstack(steps^)))
+            for i in range(min(2, len(self._font_names))):
+                builtins.append(self._font_names[i])
+        rows.append(ui_row(String(""), ui_preview(
+            self.font_choice, self.font_size_choice, builtins^,
+            String(self.palette_version),
+        )))
+        return ui_form(rows^)
+
+    def _features_ui(self) -> UINode:
+        var keys = _ls_keys()
+        var labels = _ls_labels()
+        var rows = List[UINode]()
+        for i in range(len(keys)):
+            rows.append(ui_check(keys[i], labels[i], self._ls_get(keys[i])))
+        return ui_vstack(rows^, 0)
+
+    def _languages_ui(self) -> UINode:
+        var rows = List[List[String]]()
+        for i in range(len(self.languages_view)):
+            ref spec = self.languages_view[i]
+            var servers = String("")
+            for j in range(len(spec.candidates)):
+                if j > 0:
+                    servers += String(", ")
+                servers += _join_argv(spec.candidates[j].argv)
+            rows.append([
+                spec.language_id
+                    + (String(" *") if _has_override(self.language_overrides, spec.language_id)
+                       else String("")),
+                String(" ").join(spec.file_types),
+                servers,
+            ])
+        var has = self.selected_language >= 0 \
+            and self.selected_language < len(self.languages_view)
+        var custom = has and _has_override(
+            self.language_overrides, self.languages_view[self.selected_language].language_id,
+        )
+        var buttons = List[UINode]()
+        buttons.append(ui_button(String("lang_add"), String("Add…")))
+        buttons.append(ui_button(String("lang_edit"), String("Edit…"), 0 if has else UI_DISABLED))
+        buttons.append(ui_button(
+            String("lang_remove"), String("Restore Default"), 0 if custom else UI_DISABLED,
+        ))
+        var body = List[UINode]()
+        body.append(ui_label(
+            String("Language servers per language, highest priority first. * marks your changes."),
+            UI_SECONDARY,
+        ))
+        body.append(ui_table(
+            String("languages"),
+            [String("Language"), String("File types"), String("Servers")],
+            rows^, self.selected_language, String("lang_edit"), 8,
+        ))
+        body.append(ui_hstack(buttons^))
+        return ui_vstack(body^)
+
+    def _spelling_ui(self) -> UINode:
+        var rows = List[List[String]]()
+        var sel_installed = False
+        for i in range(len(self.dict_specs)):
+            var installed = user_dictionary_installed(self.dict_specs[i].language_id)
+            if i == self.selected_dict:
+                sel_installed = installed
+            rows.append([
+                self.dict_specs[i].display, self.dict_specs[i].language_id,
+                String("Installed") if installed else String(""),
+            ])
+        var has = self.selected_dict >= 0 and self.selected_dict < len(self.dict_specs)
+        var buttons = List[UINode]()
+        buttons.append(ui_button(
+            String("dict_install"), String("Install"),
+            0 if has and not sel_installed else UI_DISABLED,
+        ))
+        buttons.append(ui_button(
+            String("dict_remove"), String("Remove"),
+            0 if has and sel_installed else UI_DISABLED,
+        ))
+        var body = List[UINode]()
+        body.append(ui_label(
+            String("English is built in. Install a dictionary to spell-check another language."),
+            UI_SECONDARY,
+        ))
+        body.append(ui_table(
+            String("dictionaries"),
+            [String("Language"), String("Code"), String("Status")],
+            rows^, self.selected_dict, String(""), 8,
+        ))
+        body.append(ui_hstack(buttons^))
+        return ui_vstack(body^)
+
+    def _projects_ui(self) -> UINode:
+        var rows = List[List[String]]()
+        for i in range(len(self.project_dirs)):
+            rows.append([self.project_dirs[i]])
+        var has = self.selected_project_dir >= 0 \
+            and self.selected_project_dir < len(self.project_dirs)
+        var add = List[UINode]()
+        add.append(ui_row(String("Folder"), ui_text(
+            String("project_input"), self.project_input, String("~/Projects"),
+        )))
+        var add_row = List[UINode]()
+        add_row.append(ui_form(add^))
+        add_row.append(ui_button(
+            String("proj_add"), String("Add"),
+            0 if len(String(self.project_input.strip()).as_bytes()) > 0 else UI_DISABLED,
+        ))
+        var buttons = List[UINode]()
+        buttons.append(ui_button(String("proj_remove"), String("Remove"), 0 if has else UI_DISABLED))
+        var body = List[UINode]()
+        body.append(ui_label(
+            String("Folders whose subfolders Quick open project lists."),
+            UI_SECONDARY,
+        ))
+        body.append(ui_table(
+            String("projects"), [String("Folder")], rows^,
+            self.selected_project_dir, String(""), 8,
+        ))
+        body.append(ui_hstack(buttons^))
+        body.append(ui_hstack(add_row^))
+        return ui_vstack(body^)
+
+    def ui_set(mut self, key: String, value: String):
+        if key == String("section"):
+            var s = ui_int(value, self.section)
+            if s >= 0 and s <= SECTION_PROJECTS:
+                self.section = s
+            return
+        if key == String("languages"):
+            var s = ui_int(value, self.selected_language)
+            if s >= 0 and s < len(self.languages_view):
+                self.selected_language = s
+            return
+        if key == String("dictionaries"):
+            var s = ui_int(value, self.selected_dict)
+            if s >= 0 and s < len(self.dict_specs):
+                self.selected_dict = s
+            return
+        if key == String("projects"):
+            var s = ui_int(value, self.selected_project_dir)
+            if s >= 0 and s < len(self.project_dirs):
+                self.selected_project_dir = s
+            return
+        if key == String("project_input"):
+            self.project_input = value
+            return
+        # Everything below is a setting.
+        if key == String("auto_save"):
+            self.auto_save = ui_int(value) == 1
+        elif key == String("wrap_mode"):
+            var w = ui_int(value, self.wrap_mode)
+            if w >= 0 and w <= 2:
+                self.wrap_mode = w
+        elif key == String("comma_threshold"):
+            self.comma_text = _digits(value, 3)
+        elif key == String("max_open_windows"):
+            self.max_windows_text = _digits(value, 4)
+        elif key == String("trim_trailing_whitespace"):
+            self.trim_trailing_whitespace = ui_bool(value)
+        elif key == String("ensure_final_newline"):
+            self.ensure_final_newline = ui_bool(value)
+        elif key == String("compress_kwargs"):
+            self.compress_kwargs = ui_bool(value)
+        elif key == String("cursor_blink"):
+            self.cursor_blink = ui_bool(value)
+        elif key == String("native_ui"):
+            self.native_ui = ui_bool(value)
+        elif key == String("theme"):
+            var i = ui_int(value)
+            if i < 0 or i >= len(self._theme_names):
+                return
+            self.theme_choice = self._theme_names[i]
+        elif key == String("font"):
+            var i = ui_int(value)
+            if i < 0 or i >= len(self._font_names):
+                return
+            self.font_choice = self._font_names[i]
+        elif not self._ls_set(key, ui_bool(value)):
+            return
+        self.dirty = True
+
+    def ui_act(mut self, id: String):
+        if id == String("close"):
+            self.close_requested = True
+        elif id == String("font_smaller"):
+            self._set_font_size(self._font_size_shown() - 1)
+        elif id == String("font_larger"):
+            self._set_font_size(self._font_size_shown() + 1)
+        elif id == String("font_ideal"):
+            if self._font_ideal_size > 0:
+                self._set_font_size(self._font_ideal_size)
+        elif id == String("lang_add"):
+            self.language_editor.open(String(""), List[String](), List[String](), False)
+        elif id == String("lang_edit"):
+            self._edit_language()
+        elif id == String("lang_remove"):
+            self._remove_language_override()
+        elif id == String("dict_install"):
+            self._request_dict(True)
+        elif id == String("dict_remove"):
+            self._request_dict(False)
+        elif id == String("proj_add"):
+            self._add_project_dir()
+        elif id == String("proj_remove"):
+            self._remove_project_dir()
+
+    def _ls_get(self, key: String) -> Bool:
+        if key == String("ls_format_on_save"): return self.ls_format_on_save
+        if key == String("ls_signature_help"): return self.ls_signature_help
+        if key == String("ls_document_highlight"): return self.ls_document_highlight
+        if key == String("ls_document_links"): return self.ls_document_links
+        if key == String("ls_inlay_hints"): return self.ls_inlay_hints
+        if key == String("ls_code_lens"): return self.ls_code_lens
+        if key == String("ls_document_colors"): return self.ls_document_colors
+        if key == String("ls_linked_editing"): return self.ls_linked_editing
+        return self.ls_server_progress
+
+    def _ls_set(mut self, key: String, on: Bool) -> Bool:
+        """Set language-feature gate ``key``; False when it isn't one."""
+        if key == String("ls_format_on_save"): self.ls_format_on_save = on
         elif key == String("ls_signature_help"): self.ls_signature_help = on
         elif key == String("ls_document_highlight"): self.ls_document_highlight = on
         elif key == String("ls_document_links"): self.ls_document_links = on
@@ -727,1482 +650,66 @@ struct Settings(Movable):
         elif key == String("ls_linked_editing"): self.ls_linked_editing = on
         elif key == String("ls_server_progress"): self.ls_server_progress = on
         else:
-            return
-        self._sync_ls_checkboxes()
-        self.dirty = True
-
-    def native_set_int(mut self, key: String, value: Int):
-        """``wrap_mode``, ``font_size``, ``max_open_windows`` (0 = no cap)
-        and ``comma_threshold`` (-1 = off)."""
-        if key == String("wrap_mode"):
-            self.wrap_mode = value
-        elif key == String("font_size"):
-            self.font_size_choice = value
-        elif key == String("max_open_windows"):
-            self._mw_tf.set_text(String("") if value <= 0 else String(value))
-        elif key == String("comma_threshold"):
-            self._comma_tf.set_text(String("") if value < 0 else String(value))
-        else:
-            return
-        self.dirty = True
-
-    def native_set_str(mut self, key: String, var value: String):
-        """``theme`` (a theme name) and ``font`` (a Font-list label)."""
-        if key == String("theme"):
-            self.theme_choice = value^
-        elif key == String("font"):
-            self.font_choice = value^
-        else:
-            return
-        self.dirty = True
-
-    def font_names(self) -> List[String]:
-        return self._font_names.copy()
-
-    def native_add_project(mut self, var path: String):
-        self._proj_tf.set_text(path^)
-        self._add_project_dir()
-
-    def native_remove_project(mut self, i: Int):
-        if i < 0 or i >= len(self.project_dirs):
-            return
-        self.selected_project_dir = i
-        self._remove_project_dir()
-
-    def native_dictionary(mut self, i: Int, install: Bool):
-        """Install / remove catalog dictionary ``i`` — queued for the
-        Desktop exactly as the in-grid buttons queue it."""
-        if i < 0 or i >= len(self.dict_specs):
-            return
-        self.selected_dict = i
-        if install:
-            self._request_dict_install()
-        else:
-            self._request_dict_remove()
-
-    def native_save_language(
-        mut self, var language_id: String, file_types: String,
-        servers: List[String],
-    ):
-        """The native language editor's Save: ``file_types`` and each
-        server command line are split the way the in-grid editor splits
-        them (whitespace, quotes keep a token together)."""
-        var ov = LanguageServerOverride()
-        ov.language_id = language_id^
-        ov.file_types = _split_space(file_types)
-        for i in range(len(servers)):
-            var argv = _split_space(servers[i])
-            if len(argv) > 0:
-                ov.argvs.append(argv^)
-        if len(ov.language_id.as_bytes()) == 0:
-            return
-        self._apply_language_override(ov)
-
-    def native_remove_language(mut self, i: Int):
-        """Drop the user's override for language row ``i`` (back to the
-        built-in servers, or gone if it was user-added)."""
-        if i < 0 or i >= len(self.languages_view):
-            return
-        self.selected_language = i
-        self._remove_language_override()
-
-    def native_has_override(self, language_id: String) -> Bool:
-        for i in range(len(self.language_overrides)):
-            if self.language_overrides[i].language_id == language_id:
-                return True
-        return False
-
-    def ack_dirty(mut self):
-        """Host calls this after persisting the config to disk."""
-        self.dirty = False
-
-    # --- painting ---------------------------------------------------
-
-    def paint(mut self, mut canvas: Canvas, container_bounds: Rect):
-        if not self.active:
-            return
-        self._ensure_bounds(container_bounds)
-        var rect = self._workspace_rect(container_bounds)
-        # In-grid the dialog floats over the workspace — drop a shadow so it
-        # reads as lifted (the host window provides this when detached).
-        if not self.detached:
-            paint_drop_shadow(canvas, rect)
-        var bg = Attr(BLACK, LIGHT_GRAY)
-        # Bind every write inside the Settings dialog to its workspace
-        # rect — ``rect`` excludes the menu bar above and status bar
-        # below, so even an over-wide section row can't bleed into
-        # them.
-        var painter = Painter(rect)
-        painter.fill(canvas, rect, String(" "), bg)
-        # In-grid the dialog draws its own window chrome (border + title);
-        # detached the native window's title bar already provides both, so
-        # painting them again would be redundant.
-        if not self.detached:
-            var border = Attr(BORDER_FOCUS, LIGHT_GRAY)
-            painter.draw_box(canvas, rect, border, True)
-            paint_window_title(canvas, rect, String(" Settings "), bg, bg)
-        # Left rail.
-        self._paint_sections(canvas, painter, rect)
-        # Right pane: section header + per-section content.
-        self._paint_right_pane(canvas, painter, rect)
-        # Bottom-right Close button.
-        self._paint_close_button(canvas, rect)
-        # Save-behavior popup floats above the right pane so a long
-        # option list isn't clipped by neighbouring widgets. Painted
-        # before the action editor so a modal Add/Edit dialog still
-        # wins z-order.
-        if self.section == _SECTION_EDITOR and self._save_dropdown.is_open:
-            self._save_dropdown.paint_popup(
-                canvas, self._save_dd_anchor, container_bounds,
-            )
-        if self.section == _SECTION_EDITOR and self._wrap_dropdown.is_open:
-            self._wrap_dropdown.paint_popup(
-                canvas, self._wrap_dd_anchor, container_bounds,
-            )
-        # Editor floats on top.
-        if self.language_editor.active:
-            self.language_editor.paint(canvas, container_bounds)
-
-    def _workspace_rect(self, container_bounds: Rect) -> Rect:
-        """The dialog's rect. Detached (native settings window) it fills the
-        whole surface; in-grid (terminal) it's the movable / resizable
-        ``bounds``, which ``_ensure_bounds`` keeps valid against the current
-        container_bounds. Every geometry helper and hit-test derives from this, so the
-        whole dialog follows a move/resize for free."""
-        if self.detached:
-            return container_bounds
-        return self.dlg.bounds
-
-    def _ensure_bounds(mut self, container_bounds: Rect):
-        """Keep the in-grid ``dlg.bounds`` valid against the current
-        container. No-op when the host owns the window (detached)."""
-        if not self.detached:
-            self.dlg.ensure_bounds(container_bounds)
-
-    def _handle_window_chrome(
-        mut self, event: Event, rect: Rect, container_bounds: Rect,
-    ) -> Bool:
-        """In-grid move / resize chrome (see ``ResizableDialog``); the
-        native window provides both when detached."""
-        if self.detached:
             return False
-        return self.dlg.handle_chrome(event, rect, container_bounds)
+        return True
 
-    def _labels(self) -> List[String]:
-        """Section labels for this instance — the Font section only
-        exists when the host registered font options."""
-        return _section_labels(len(self._font_names) > 0)
-
-    def _sections_rect(self, rect: Rect) -> Rect:
-        """Inner area of the left rail (inside the framed border)."""
-        return Rect(
-            rect.a.x + 2, rect.a.y + 2,
-            rect.a.x + 2 + _SECTION_W, rect.b.y - 2,
-        )
-
-    def _right_rect(self, rect: Rect) -> Rect:
-        return Rect(
-            rect.a.x + 2 + _SECTION_W + 2, rect.a.y + 2,
-            rect.b.x - 2, rect.b.y - 2,
-        )
-
-    def _paint_sections(
-        self, mut canvas: Canvas, painter: Painter, rect: Rect,
-    ):
-        paint_section_rail(
-            canvas, painter, self._sections_rect(rect), self._labels(),
-            self.section, self.focus == _FOCUS_SECTIONS,
-        )
-
-    def _paint_right_pane(
-        mut self, mut canvas: Canvas, painter: Painter, rect: Rect,
-    ):
-        var inner = self._right_rect(rect)
-        var sub = painter.sub(inner)
-        var bg = Attr(BLACK, LIGHT_GRAY)
-        # Header.
-        var labels = self._labels()
-        if 0 <= self.section and self.section < len(labels):
-            _ = sub.put_text(
-                canvas, Point(inner.a.x, inner.a.y),
-                labels[self.section], bg,
-            )
-        # Section content.
-        if self.section == _SECTION_EDITOR:
-            self._paint_editor_section(canvas, sub, inner)
-        elif self.section == _SECTION_SPELL:
-            self._paint_spell_section(canvas, sub, inner)
-        elif self.section == _SECTION_LANGUAGES:
-            self._paint_languages_section(canvas, sub, inner)
-        elif self.section == _SECTION_THEME:
-            self._paint_theme_section(canvas, sub, inner)
-        elif self.section == _SECTION_LANGUAGE_SERVER:
-            self._paint_language_server_section(canvas, sub, inner)
-        elif self.section == _SECTION_PROJECTS:
-            self._paint_projects_section(canvas, sub, inner)
-        elif self.section == _SECTION_FONT:
-            self._paint_font_section(canvas, sub, inner)
-
-    def _font_display_size(self) -> Int:
-        """The point size to show in the stepper: the explicit choice,
-        or the host-reported effective size when the choice is 0 (the
-        font's default). Falls back to 16 before the host has reported
-        anything (shouldn't happen in practice — the report lands on
-        the first frame)."""
-        if self.font_size_choice > 0:
-            return self.font_size_choice
-        if self._font_effective_size > 0:
-            return self._font_effective_size
-        return 16
-
-    def _bump_font_size(mut self, delta: Int):
-        """Step the size by ``delta`` from the currently displayed
-        value, clamped, committing an explicit size + ``dirty``."""
-        var s = self._font_display_size() + delta
-        if s < MIN_FONT_SIZE:
-            s = MIN_FONT_SIZE
-        if s > MAX_FONT_SIZE:
-            s = MAX_FONT_SIZE
+    def _set_font_size(mut self, size: Int):
+        var s = max(MIN_FONT_SIZE, min(size, MAX_FONT_SIZE))
         if s != self.font_size_choice:
             self.font_size_choice = s
             self.dirty = True
 
-    def _restore_ideal_font_size(mut self):
-        """Snap the size back to the active font's design size (the
-        host-reported ideal). No-op when the host reported none."""
-        if self._font_ideal_size <= 0:
-            return
-        if self.font_size_choice != self._font_ideal_size:
-            self.font_size_choice = self._font_ideal_size
-            self.dirty = True
+    # --- languages -------------------------------------------------------
 
-    def _paint_font_section(
-        mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
-    ):
-        """A size stepper row, then a scrollable list of the host's
-        monospace font families (the built-in bitmap font first).
-        Selecting a row applies it live — the whole UI re-renders in
-        the new font, which *is* the preview — so there's no separate
-        sample pane like the Theme section's."""
-        var hint = Attr(BLUE, LIGHT_GRAY)
-        var bg = Attr(BLACK, LIGHT_GRAY)
-        # Size stepper: ``Size: [ - ] 16 pt [ + ]   [ Restore ideal ]``.
-        # Buttons claim two rows (face + drop shadow).
-        var size_y = inner.a.y + 2
-        var x = inner.a.x
-        _ = painter.put_text(canvas, Point(x, size_y), String("Size:"), bg)
-        x += 6
-        self._buttons[_BTN_FONT_SMALLER].button.move_to(x, size_y)
-        self._buttons[_BTN_FONT_SMALLER].enabled = (
-            self._font_display_size() > MIN_FONT_SIZE
-        )
-        x += self._buttons[_BTN_FONT_SMALLER].button.total_width() + 1
-        var size_label = String(self._font_display_size()) + String(" pt")
-        if self.font_size_choice == 0:
-            size_label += String(" (default)")
-        _ = painter.put_text(canvas, Point(x, size_y), size_label, bg)
-        x += display_columns(size_label) + 1
-        self._buttons[_BTN_FONT_LARGER].button.move_to(x, size_y)
-        self._buttons[_BTN_FONT_LARGER].enabled = (
-            self._font_display_size() < MAX_FONT_SIZE
-        )
-        x += self._buttons[_BTN_FONT_LARGER].button.total_width() + 3
-        # "Restore ideal" only renders when the active font has a known
-        # design size (the built-in bitmap font, or a font with embedded
-        # bitmap strikes) *and* it fits — buttons paint straight to the
-        # canvas (no painter clipping), so an overflow would spill past
-        # the dialog border. Greyed out while already at that size.
-        var ideal_visible = False
-        if self._font_ideal_size > 0:
-            self._buttons[_BTN_FONT_IDEAL].button.label = (
-                String(" Restore ideal (")
-                + String(self._font_ideal_size) + String(" pt) ")
-            )
-            ideal_visible = (
-                x + self._buttons[_BTN_FONT_IDEAL].button.total_width()
-                <= inner.b.x
-            )
-        if ideal_visible:
-            self._buttons[_BTN_FONT_IDEAL].button.move_to(x, size_y)
-            self._buttons[_BTN_FONT_IDEAL].enabled = (
-                self._font_display_size() != self._font_ideal_size
-            )
-        else:
-            self._buttons[_BTN_FONT_IDEAL].enabled = False
-        self._paint_button(canvas, _BTN_FONT_SMALLER)
-        self._paint_button(canvas, _BTN_FONT_LARGER)
-        if ideal_visible:
-            self._paint_button(canvas, _BTN_FONT_IDEAL)
-        var list_top = inner.a.y + 5
-        var list_bottom = inner.b.y - 1
-        if list_bottom <= list_top:
-            return
-        var list_rect = Rect(inner.a.x, list_top, inner.b.x, list_bottom)
-        var visible = list_rect.height()
-        self._list_scroll = clamp_list_scroll(
-            self._list_scroll, self.selected_font, self._last_scroll_font, visible, len(self._font_names),
-        )
-        self._last_scroll_font = self.selected_font
-        var rows = List[String]()
-        for idx in range(
-            self._list_scroll, min(self._list_scroll + visible, len(self._font_names)),
-        ):
-            rows.append(self._font_names[idx])
-        var body_attr = Attr(BLACK, CYAN)
-        painter.fill(canvas, list_rect, String(" "), body_attr)
-        paint_list_rows(
-            canvas, painter, list_rect, self._list_scroll, rows,
-            self.selected_font, self.focus == _FOCUS_FONT_LIST, body_attr,
-        )
-        _ = painter.put_text(
-            canvas, Point(inner.a.x, inner.b.y),
-            String("↑↓ to preview live — change is saved automatically"),
-            hint,
-        )
-
-    def _paint_theme_section(
-        mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
-    ):
-        """Left: scrollable list of theme names. Right: a live preview that
-        paints a faux title bar, menu strip, and a few syntax-colored code
-        lines using the active palette's chrome + reserved syntax indices.
-        Selecting a theme applies it live (the whole dialog retints on the
-        next frame), so the preview tracks the real thing."""
-        var hint = Attr(BLUE, LIGHT_GRAY)
-        var list_top = inner.a.y + 2
-        var list_bottom = inner.b.y - 1
-        if list_bottom <= list_top:
-            return
-        # The list occupies the left ~18 columns of the right pane; the
-        # preview fills the remainder.
-        var list_w = 20
-        var split = inner.a.x + list_w
-        if split > inner.b.x - 12:
-            split = inner.b.x - 12
-        var list_rect = Rect(inner.a.x, list_top, split, list_bottom)
-        var body_attr = Attr(BLACK, CYAN)
-        painter.fill(canvas, list_rect, String(" "), body_attr)
-        for i in range(len(self._theme_names)):
-            var y = list_rect.a.y + i
-            if y >= list_rect.b.y:
-                break
-            var attr = body_attr
-            if i == self.selected_theme:
-                attr = (
-                    Attr(WHITE, BLUE) if self.focus == _FOCUS_THEME_LIST
-                    else Attr(BLACK, GREEN)
-                )
-                painter.fill(
-                    canvas, Rect(list_rect.a.x, y, list_rect.b.x, y + 1),
-                    String(" "), attr,
-                )
-            _ = painter.put_text(
-                canvas, Point(list_rect.a.x + 1, y),
-                self._theme_names[i], attr,
-            )
-        _ = painter.put_text(
-            canvas, Point(inner.a.x, inner.b.y),
-            String("↑↓ to preview live — change is saved automatically"),
-            hint,
-        )
-        # Preview pane to the right of the list.
-        var px = split + 2
-        if px < inner.b.x - 4:
-            self._paint_theme_preview(
-                canvas, painter,
-                Rect(px, list_top, inner.b.x, list_bottom),
-            )
-
-    def _paint_theme_preview(
-        self, mut canvas: Canvas, painter: Painter, box: Rect,
-    ):
-        """Sample of the active theme: a title bar, a menu strip, and a few
-        lines of fake code colored with the reserved syntax slots. All cells
-        carry palette indices; the frontend resolves them through the live
-        theme, so this mirrors exactly how editors will look."""
-        if box.width() < 8 or box.height() < 6:
-            return
-        var menu_bar = Attr(BLACK, LIGHT_GRAY)
-        var menu_key = Attr(RED, LIGHT_GRAY)
-        var title = Attr(BLACK, LIGHT_GRAY)
-        var ed = Attr(EDITOR_FG, EDITOR_BG)
-        # Title row.
-        painter.fill(canvas, Rect(box.a.x, box.a.y, box.b.x, box.a.y + 1),
-                     String("─"), title)
-        _ = painter.put_text(
-            canvas, Point(box.a.x + 1, box.a.y), String(" sample.py "), title,
-        )
-        # Menu strip.
-        var my = box.a.y + 1
-        painter.fill(canvas, Rect(box.a.x, my, box.b.x, my + 1),
-                     String(" "), menu_bar)
-        _ = painter.put_text(canvas, Point(box.a.x + 1, my),
-                             String("File  Edit  View"), menu_bar)
-        _ = painter.put_text(canvas, Point(box.a.x + 1, my), String("F"),
-                             menu_key)
-        # Editor body.
-        var body = Rect(box.a.x, my + 1, box.b.x, box.b.y)
-        painter.fill(canvas, body, String(" "), ed)
-        var ky = Attr(SYN_KEYWORD, EDITOR_BG)
-        var st = Attr(SYN_STRING, EDITOR_BG)
-        var cm = Attr(SYN_COMMENT, EDITOR_BG)
-        var nu = Attr(SYN_NUMBER, EDITOR_BG)
-        # Identifiers (function names, calls) paint with the ident slot —
-        # same as the editor's real scope mapping (entity.name.function /
-        # support.function → ident), which is also the unhighlighted-text
-        # baseline. ``ed`` is only the punctuation/plain-cell color.
-        var id = Attr(SYN_IDENT, EDITOR_BG)
-        var x0 = body.a.x + 1
-        var ry = body.a.y
-        if ry < body.b.y:
-            _ = painter.put_text(canvas, Point(x0, ry),
-                                 String("# greet the world"), cm)
-        ry += 1
-        if ry < body.b.y:
-            var cx = x0
-            cx += painter.put_text(canvas, Point(cx, ry), String("def "), ky)
-            cx += painter.put_text(canvas, Point(cx, ry), String("main"), id)
-            _ = painter.put_text(canvas, Point(cx, ry), String("():"), ed)
-        ry += 1
-        if ry < body.b.y:
-            var cx2 = x0 + 4
-            cx2 += painter.put_text(canvas, Point(cx2, ry), String("print"), id)
-            cx2 += painter.put_text(canvas, Point(cx2, ry), String("("), ed)
-            cx2 += painter.put_text(canvas, Point(cx2, ry),
-                                    String('"hello"'), st)
-            _ = painter.put_text(canvas, Point(cx2, ry), String(")"), ed)
-        ry += 1
-        if ry < body.b.y:
-            var cx3 = x0 + 4
-            cx3 += painter.put_text(canvas, Point(cx3, ry), String("return "),
-                                    ky)
-            _ = painter.put_text(canvas, Point(cx3, ry), String("42"), nu)
-
-    def _paint_editor_section(
-        mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
-    ):
-        """Editor preferences pane: the inline ``Save behavior`` dropdown
-        plus the two on-save transform checkboxes."""
-        var bg = Attr(BLACK, LIGHT_GRAY)
-        var hint = Attr(BLUE, LIGHT_GRAY)
-        var label = String("Save behavior:")
-        var label_y = inner.a.y + 2
-        _ = painter.put_text(
-            canvas, Point(inner.a.x, label_y), label, bg,
-        )
-        # Anchor the strip directly to the right of the label, leaving
-        # one column of padding so the value isn't flush against the
-        # colon.
-        var dd_x = inner.a.x + display_columns(label) + 1
-        var dd_w = _SAVE_DD_W
-        if dd_x + dd_w > inner.b.x:
-            dd_w = inner.b.x - dd_x
-            if dd_w < 4:
-                return
-        var dd_rect = Rect(dd_x, label_y, dd_x + dd_w, label_y + 1)
-        self._save_dd_anchor = dd_rect
-        # Keep ``_save_dropdown.index`` in sync with ``auto_save`` —
-        # the user can mutate ``auto_save`` directly via tests, and
-        # we don't want a stale index to override that.
-        var want_idx = 1 if self.auto_save else 0
-        if self._save_dropdown.index != want_idx:
-            self._save_dropdown.index = want_idx
-        var has_focus = self.focus == _FOCUS_SAVE_BEHAVIOR
-        self._save_dropdown.paint(
-            canvas, dd_rect, has_focus,
-            Attr(WHITE, BLUE), Attr(BLACK, CYAN),
-        )
-        _ = painter.put_text(
-            canvas, Point(inner.a.x, label_y + 2),
-            String("Manual: save with Ctrl+S. Automatic: save on focus changes."),
-            hint,
-        )
-        # Wrap-mode dropdown, anchored after its label the same way the
-        # Save-behavior strip is. Index stays in lock-step with
-        # ``self.wrap_mode`` (mutable directly in tests, same contract).
-        var wrap_label = String("Wrap:")
-        var wrap_y = label_y + 4
-        _ = painter.put_text(
-            canvas, Point(inner.a.x, wrap_y), wrap_label, bg,
-        )
-        var wrap_dd_x = inner.a.x + display_columns(wrap_label) + 1
-        var wrap_dd_w = _SAVE_DD_W
-        if wrap_dd_x + wrap_dd_w > inner.b.x:
-            wrap_dd_w = inner.b.x - wrap_dd_x
-        if wrap_dd_w >= 4:
-            var wrap_rect = Rect(
-                wrap_dd_x, wrap_y, wrap_dd_x + wrap_dd_w, wrap_y + 1,
-            )
-            self._wrap_dd_anchor = wrap_rect
-            if self._wrap_dropdown.index != self.wrap_mode:
-                self._wrap_dropdown.index = self.wrap_mode
-            self._wrap_dropdown.paint(
-                canvas, wrap_rect, self.focus == _FOCUS_WRAP_MODE,
-                Attr(WHITE, BLUE), Attr(BLACK, CYAN),
-            )
-        _ = painter.put_text(
-            canvas, Point(inner.a.x, wrap_y + 2),
-            String("Smart wrap breaks long calls one item per line (code files)."),
-            hint,
-        )
-        # Smart-wrap comma trigger: a small inline numeric field. Empty means
-        # "only window width breaks lines"; a number N means "also break a
-        # call with more than N commas even when it fits". Sits on its own row
-        # under the wrap hint; the trailing copy explains the empty case.
-        var comma_y = wrap_y + 3
-        var comma_label = String("Also break over:")
-        _ = painter.put_text(
-            canvas, Point(inner.a.x, comma_y), comma_label, bg,
-        )
-        var box_x = inner.a.x + display_columns(comma_label) + 1
-        var box_w = 5
-        var box_rect = Rect(box_x, comma_y, box_x + box_w, comma_y + 1)
-        self._comma_input_anchor = box_rect
-        var comma_focused = self.focus == _FOCUS_COMMA_WRAP
-        if len(self._comma_tf.text.as_bytes()) == 0 and not comma_focused:
-            # Empty + unfocused: faint "—" placeholder so the box doesn't
-            # read as a rendering glitch. The TextField paints the cyan
-            # field + caret itself once focused or non-empty.
-            painter.fill(canvas, box_rect, String(" "), Attr(BLACK, CYAN))
-            _ = painter.put_text(
-                canvas, Point(box_x, comma_y), String("—"), Attr(BLACK, CYAN),
-            )
-        else:
-            self._comma_tf.paint(canvas, box_rect, comma_focused)
-        _ = painter.put_text(
-            canvas, Point(box_x + box_w + 1, comma_y),
-            String("commas (blank = window width only)"), hint,
-        )
-        # On-save transform checkboxes. Both keep their glyph in lock-step
-        # with the working-copy bools (the bools can be mutated directly
-        # in tests, same contract as the dropdown's ``want_idx`` sync).
-        self._trim_cb.on = self.trim_trailing_whitespace
-        self._final_nl_cb.on = self.ensure_final_newline
-        var chip = Attr(BLACK, CYAN)
-        var focus_attr = Attr(WHITE, BLUE)
-        self._trim_cb.move_to(inner.a.x, label_y + 8)
-        paint_checkbox(
-            canvas, self._trim_cb, chip, focus_attr,
-            self.focus == _FOCUS_TRIM_WS, inner.b.x,
-        )
-        self._final_nl_cb.move_to(inner.a.x, label_y + 9)
-        paint_checkbox(
-            canvas, self._final_nl_cb, chip, focus_attr,
-            self.focus == _FOCUS_FINAL_NL, inner.b.x,
-        )
-        _ = painter.put_text(
-            canvas, Point(inner.a.x, label_y + 11),
-            String("Applied on every save unless a project .editorconfig overrides it."),
-            hint,
-        )
-        # Display-only toggle (not a save transform), so it sits below the
-        # save-behavior hint with its own one-liner.
-        self._compress_cb.on = self.compress_kwargs
-        self._compress_cb.move_to(inner.a.x, label_y + 13)
-        paint_checkbox(
-            canvas, self._compress_cb, chip, focus_attr,
-            self.focus == _FOCUS_COMPRESS_KW, inner.b.x,
-        )
-        _ = painter.put_text(
-            canvas, Point(inner.a.x, label_y + 14),
-            String("Hide redundant name=name call args off the caret line (Python/Mojo/Swift)."),
-            hint,
-        )
-        # Caret blink toggle — like compress, a pure display preference, so
-        # it sits below with its own one-liner.
-        self._blink_cb.on = self.cursor_blink
-        self._blink_cb.move_to(inner.a.x, label_y + 16)
-        paint_checkbox(
-            canvas, self._blink_cb, chip, focus_attr,
-            self.focus == _FOCUS_BLINK_CURSOR, inner.b.x,
-        )
-        _ = painter.put_text(
-            canvas, Point(inner.a.x, label_y + 17),
-            String("Blink the text cursor when idle; it stays solid while you type."),
-            hint,
-        )
-        # Max open windows: an inline numeric field mirroring the comma
-        # field. Empty means "no limit"; a number N closes the
-        # least-recently-used document once a project holds more than N.
-        var mw_y = label_y + 19
-        var mw_label = String("Max open windows:")
-        _ = painter.put_text(
-            canvas, Point(inner.a.x, mw_y), mw_label, bg,
-        )
-        var mw_box_x = inner.a.x + display_columns(mw_label) + 1
-        var mw_box_w = 6
-        var mw_box_rect = Rect(mw_box_x, mw_y, mw_box_x + mw_box_w, mw_y + 1)
-        self._max_windows_anchor = mw_box_rect
-        var mw_focused = self.focus == _FOCUS_MAX_WINDOWS
-        if len(self._mw_tf.text.as_bytes()) == 0 and not mw_focused:
-            painter.fill(canvas, mw_box_rect, String(" "), Attr(BLACK, CYAN))
-            _ = painter.put_text(
-                canvas, Point(mw_box_x, mw_y), String("—"), Attr(BLACK, CYAN),
-            )
-        else:
-            self._mw_tf.paint(canvas, mw_box_rect, mw_focused)
-        _ = painter.put_text(
-            canvas, Point(mw_box_x + mw_box_w + 1, mw_y),
-            String("per project (blank = no limit); least-used closes first"), hint,
-        )
-
-    def _paint_language_server_section(
-        mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
-    ):
-        """Per-feature gates for the optional LSP capabilities. Each only
-        takes effect when the active server also advertises the matching
-        provider — the note at the top says so."""
-        var hint = Attr(BLUE, LIGHT_GRAY)
-        var chip = Attr(BLACK, CYAN)
-        var focus_attr = Attr(WHITE, BLUE)
-        var y = inner.a.y + 2
-        _ = painter.put_text(
-            canvas, Point(inner.a.x, y),
-            String("Each applies only when the language server supports it."),
-            hint,
-        )
-        y += 2
-        # Sync every checkbox's glyph with its working-copy bool, then
-        # stack them one per row. Keep this order in lock-step with
-        # ``_next_focus`` so Tab walks top-to-bottom.
-        self._sync_ls_checkboxes()
-        for i in range(len(self._ls_cbs)):
-            self._ls_cbs[i].move_to(inner.a.x, y + i)
-            paint_checkbox(
-                canvas, self._ls_cbs[i], chip, focus_attr,
-                self.focus == _FOCUS_LS_FORMAT_ON_SAVE + UInt8(i), inner.b.x,
-            )
-
-    def _paint_spell_section(
-        mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
-    ):
-        """List of catalog dictionaries with an "[X] installed" marker
-        plus an Install / Remove button row. English is built-in (OS
-        ``/usr/share/dict/words`` plus the bundled programmer wordlists)
-        and isn't shown — these are the optional extra-language packs."""
-        var hint = Attr(BLUE, LIGHT_GRAY)
-        var list_top = inner.a.y + 2
-        var list_bottom = inner.b.y - 5
-        if list_bottom <= list_top:
-            return
-        var list_rect = Rect(inner.a.x, list_top, inner.b.x, list_bottom)
-        var body_attr = Attr(BLACK, CYAN)
-        painter.fill(canvas, list_rect, String(" "), body_attr)
-        if len(self.dict_specs) == 0:
-            _ = painter.put_text(
-                canvas, Point(list_rect.a.x + 1, list_rect.a.y),
-                String("(no downloadable dictionaries available)"),
-                hint,
-            )
-        else:
-            self._paint_dict_list(canvas, painter, list_rect)
-        # Helper line under the list. Different copy depending on whether
-        # the highlighted row is installed, so the user knows which button
-        # is meaningful.
-        var help = String(
-            "Press Install to download; words appear on the next paint."
-        )
-        var sel_installed = False
-        if 0 <= self.selected_dict and self.selected_dict < len(self.dict_specs):
-            sel_installed = user_dictionary_installed(
-                self.dict_specs[self.selected_dict].language_id,
-            )
-            if sel_installed:
-                help = String(
-                    "Press Remove to delete the on-disk wordlist."
-                )
-        _ = painter.put_text(
-            canvas, Point(inner.a.x, list_bottom), help, hint,
-        )
-        # Install / Remove buttons row.
-        var btn_y = list_bottom + 2
-        var ix_x = inner.a.x
-        self._buttons[_BTN_DICT_INSTALL].button.move_to(ix_x, btn_y)
-        var rm_x = ix_x \
-            + self._buttons[_BTN_DICT_INSTALL].button.total_width() + 1
-        self._buttons[_BTN_DICT_REMOVE].button.move_to(rm_x, btn_y)
-        var has_sel = (self.selected_dict >= 0
-                       and self.selected_dict < len(self.dict_specs))
-        # Install enabled when a row is selected and not yet installed;
-        # Remove enabled when selected row is installed. Both greyed out
-        # when no selection (catalog empty) or when the action would be a
-        # no-op against the current state.
-        self._buttons[_BTN_DICT_INSTALL].enabled = (
-            has_sel and not sel_installed
-        )
-        self._buttons[_BTN_DICT_REMOVE].enabled = (
-            has_sel and sel_installed
-        )
-        self._paint_button(canvas, _BTN_DICT_INSTALL)
-        self._paint_button(canvas, _BTN_DICT_REMOVE)
-
-    def _paint_dict_list(
-        mut self, mut canvas: Canvas, painter: Painter, list_rect: Rect,
-    ):
-        """One row per catalog entry: ``[X] German    (de)``."""
-        var visible = list_rect.height()
-        self._list_scroll = clamp_list_scroll(
-            self._list_scroll, self.selected_dict, self._last_scroll_dict, visible, len(self.dict_specs),
-        )
-        self._last_scroll_dict = self.selected_dict
-        var rows = List[String]()
-        for idx in range(
-            self._list_scroll, min(self._list_scroll + visible, len(self.dict_specs)),
-        ):
-            var spec = self.dict_specs[idx]
-            var mark = String("[X] ") if user_dictionary_installed(
-                spec.language_id,
-            ) else String("[ ] ")
-            rows.append(
-                mark + spec.display + String("  (") + spec.language_id + String(")")
-            )
-        var body_attr = Attr(BLACK, CYAN)
-        paint_list_rows(
-            canvas, painter, list_rect, self._list_scroll, rows,
-            self.selected_dict, self.focus == _FOCUS_DICT_LIST, body_attr,
-        )
-
-    def _paint_languages_section(
-        mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
-    ):
-        """List of languages (built-in + user) with their effective
-        server priority. Add / Edit / Remove buttons mirror the
-        Actions section layout."""
-        var hint = Attr(BLUE, LIGHT_GRAY)
-        var list_top = inner.a.y + 2
-        var list_bottom = inner.b.y - 5
-        if list_bottom <= list_top:
-            return
-        var list_rect = Rect(inner.a.x, list_top, inner.b.x, list_bottom)
-        var body_attr = Attr(BLACK, CYAN)
-        painter.fill(canvas, list_rect, String(" "), body_attr)
-        if len(self.languages_view) == 0:
-            _ = painter.put_text(
-                canvas, Point(list_rect.a.x + 1, list_rect.a.y),
-                String("(no languages — press [+ Add])"),
-                hint,
-            )
-        else:
-            self._paint_languages_list(canvas, painter, list_rect)
-        # Helper line.
-        var help: String
-        if self.selected_language >= 0 \
-                and self.selected_language < len(self.languages_view):
-            var spec = self.languages_view[self.selected_language].copy()
-            if _has_override(self.language_overrides, spec.language_id):
-                help = String(
-                    "Edit to change priority. Remove restores defaults."
-                )
-            else:
-                help = String(
-                    "Edit to override the built-in server priority."
-                )
-        else:
-            help = String(
-                "Edit a language to change its server priority."
-            )
-        _ = painter.put_text(
-            canvas, Point(inner.a.x, list_bottom), help, hint,
-        )
-        # Buttons row.
-        var btn_y = list_bottom + 2
-        var add_x = inner.a.x
-        self._buttons[_BTN_LANG_ADD].button.move_to(add_x, btn_y)
-        var edit_x = (
-            add_x
-            + self._buttons[_BTN_LANG_ADD].button.total_width() + 1
-        )
-        self._buttons[_BTN_LANG_EDIT].button.move_to(edit_x, btn_y)
-        var rm_x = (
-            edit_x
-            + self._buttons[_BTN_LANG_EDIT].button.total_width() + 1
-        )
-        self._buttons[_BTN_LANG_REMOVE].button.move_to(rm_x, btn_y)
-        var has_sel = (
-            self.selected_language >= 0
-            and self.selected_language < len(self.languages_view)
-        )
-        self._buttons[_BTN_LANG_EDIT].enabled = has_sel
-        # Remove only meaningful for languages with a user override —
-        # there's no built-in "default" to revert to otherwise.
-        var remove_enabled = False
-        if has_sel:
-            var spec = self.languages_view[self.selected_language].copy()
-            remove_enabled = _has_override(
-                self.language_overrides, spec.language_id,
-            )
-        self._buttons[_BTN_LANG_REMOVE].enabled = remove_enabled
-        self._paint_button(canvas, _BTN_LANG_ADD)
-        self._paint_button(canvas, _BTN_LANG_EDIT)
-        self._paint_button(canvas, _BTN_LANG_REMOVE)
-
-    def _paint_projects_section(
-        mut self, mut canvas: Canvas, painter: Painter, inner: Rect,
-    ):
-        """Parent folders whose subfolders File ▸ Quick open project
-        offers. A folder field + [+ Add] below the list appends one;
-        [- Remove] drops the selected row."""
-        var hint = Attr(BLUE, LIGHT_GRAY)
-        _ = painter.put_text(
-            canvas, Point(inner.a.x, inner.a.y + 1),
-            String("Folders whose subfolders Quick open project (Cmd+P) lists."),
-            hint,
-        )
-        var list_top = inner.a.y + 2
-        var list_bottom = inner.b.y - 5
-        if list_bottom <= list_top:
-            return
-        var list_rect = Rect(inner.a.x, list_top, inner.b.x, list_bottom)
-        var body_attr = Attr(BLACK, CYAN)
-        painter.fill(canvas, list_rect, String(" "), body_attr)
-        if len(self.project_dirs) == 0:
-            _ = painter.put_text(
-                canvas, Point(list_rect.a.x + 1, list_rect.a.y),
-                String("(none — type a folder below and press [+ Add])"),
-                hint,
-            )
-        else:
-            var visible = list_rect.height()
-            self._list_scroll = clamp_list_scroll(
-                self._list_scroll, self.selected_project_dir,
-                self._last_scroll_proj, visible, len(self.project_dirs),
-            )
-            self._last_scroll_proj = self.selected_project_dir
-            var rows = List[String]()
-            for idx in range(
-                self._list_scroll,
-                min(self._list_scroll + visible, len(self.project_dirs)),
-            ):
-                rows.append(self.project_dirs[idx])
-            paint_list_rows(
-                canvas, painter, list_rect, self._list_scroll, rows,
-                self.selected_project_dir,
-                self.focus == _FOCUS_PROJ_LIST, body_attr,
-            )
-        # Folder input row.
-        var label = String("Folder:")
-        _ = painter.put_text(
-            canvas, Point(inner.a.x, list_bottom), label,
-            Attr(BLACK, LIGHT_GRAY),
-        )
-        var box_x = inner.a.x + display_columns(label) + 1
-        var box = Rect(box_x, list_bottom, inner.b.x, list_bottom + 1)
-        self._proj_input_anchor = box
-        self._proj_tf.paint(canvas, box, self.focus == _FOCUS_PROJ_INPUT)
-        # Buttons row.
-        var btn_y = list_bottom + 2
-        var add_x = inner.a.x
-        self._buttons[_BTN_PROJ_ADD].button.move_to(add_x, btn_y)
-        var rm_x = (
-            add_x + self._buttons[_BTN_PROJ_ADD].button.total_width() + 1
-        )
-        self._buttons[_BTN_PROJ_REMOVE].button.move_to(rm_x, btn_y)
-        self._buttons[_BTN_PROJ_ADD].enabled = (
-            len(String(self._proj_tf.text.strip()).as_bytes()) > 0
-        )
-        self._buttons[_BTN_PROJ_REMOVE].enabled = self._has_project_dir_sel()
-        self._paint_button(canvas, _BTN_PROJ_ADD)
-        self._paint_button(canvas, _BTN_PROJ_REMOVE)
-
-    def _has_project_dir_sel(self) -> Bool:
-        return 0 <= self.selected_project_dir \
-            and self.selected_project_dir < len(self.project_dirs)
-
-    def _add_project_dir(mut self):
-        """Append the typed folder (trailing slashes dropped, duplicates
-        ignored) and clear the field."""
-        var t = String(self._proj_tf.text.strip())
-        var b = t.as_bytes()
-        var n = len(b)
-        while n > 1 and b[n - 1] == 0x2F:
-            n -= 1
-        var path = String(StringSpan(unsafe_from_utf8=b[:n]))
-        if n == 0:
-            return
-        self._proj_tf.set_text(String(""))
-        for i in range(len(self.project_dirs)):
-            if self.project_dirs[i] == path:
-                self.selected_project_dir = i
-                return
-        self.project_dirs.append(path^)
-        self.selected_project_dir = len(self.project_dirs) - 1
-        self.dirty = True
-
-    def _remove_project_dir(mut self):
-        if not self._has_project_dir_sel():
-            return
-        _ = self.project_dirs.pop(self.selected_project_dir)
-        if self.selected_project_dir >= len(self.project_dirs):
-            self.selected_project_dir = len(self.project_dirs) - 1
-        self.dirty = True
-
-    def _step_project_dir(mut self, delta: Int):
-        if len(self.project_dirs) == 0:
-            return
-        var s = self.selected_project_dir + delta
-        if s < 0:
-            s = 0
-        if s >= len(self.project_dirs):
-            s = len(self.project_dirs) - 1
-        self.selected_project_dir = s
-
-    def _paint_languages_list(
-        mut self, mut canvas: Canvas, painter: Painter, list_rect: Rect,
-    ):
-        var visible = list_rect.height()
-        self._list_scroll = clamp_list_scroll(
-            self._list_scroll, self.selected_language, self._last_scroll_language, visible, len(self.languages_view),
-        )
-        self._last_scroll_language = self.selected_language
-        var rows = List[String]()
-        for idx in range(
-            self._list_scroll, min(self._list_scroll + visible, len(self.languages_view)),
-        ):
-            var spec = self.languages_view[idx].copy()
-            rows.append(_format_language(
-                spec, _has_override(self.language_overrides, spec.language_id),
-            ))
-        var body_attr = Attr(BLACK, CYAN)
-        paint_list_rows(
-            canvas, painter, list_rect, self._list_scroll, rows,
-            self.selected_language, self.focus == _FOCUS_LANG_LIST,
-            body_attr,
-        )
-
-    def _paint_close_button(mut self, mut canvas: Canvas, rect: Rect):
-        var close = self._buttons[_BTN_CLOSE]
-        var btn_w = close.button.face_width()
-        var btn_x = rect.b.x - 2 - (btn_w + 1)
-        var btn_y = rect.b.y - 3
-        self._buttons[_BTN_CLOSE].button.move_to(btn_x, btn_y)
-        self._paint_button(canvas, _BTN_CLOSE)
-
-    def _paint_button(mut self, mut canvas: Canvas, idx: Int):
-        ref pb = self._buttons[idx]
-        pb.paint(canvas, self.focus == pb.focus)
-
-    # --- key handling -----------------------------------------------
-
-    def handle_key(mut self, event: Event) -> Bool:
-        if not self.active:
-            return False
-        if self.language_editor.active:
-            _ = self.language_editor.handle_key(event)
-            self._maybe_consume_language_editor()
-            return True
-        if event.kind != EVENT_KEY:
-            return True
-        # Save-behavior dropdown swallows keys while open (the popup
-        # is modal-ish — see ``Dropdown.handle_key``). Esc closes the
-        # popup before it would close the whole Settings view.
-        if (self.focus == _FOCUS_SAVE_BEHAVIOR
-                and self._save_dropdown.is_open):
-            var prev_idx = self._save_dropdown.index
-            _ = self._save_dropdown.handle_key(event)
-            self._sync_dropdown_commit(prev_idx)
-            return True
-        if (self.focus == _FOCUS_WRAP_MODE
-                and self._wrap_dropdown.is_open):
-            var prev_idx = self._wrap_dropdown.index
-            _ = self._wrap_dropdown.handle_key(event)
-            self._sync_wrap_commit(prev_idx)
-            return True
-        var k = event.key
-        if k == KEY_ESC:
-            self.close()
-            return True
-        if k == KEY_TAB:
-            var backward = (event.mods & MOD_SHIFT) != 0
-            self.focus = self._next_focus(self.focus, backward)
-            return True
-        if k == KEY_ENTER:
-            return self._activate_focus()
-        if k == KEY_UP:
-            if self.focus == _FOCUS_SECTIONS:
-                self._step_section(-1)
-            elif self.focus == _FOCUS_DICT_LIST:
-                self._step_dict(-1)
-            elif self.focus == _FOCUS_LANG_LIST:
-                self._step_language(-1)
-            elif self.focus == _FOCUS_THEME_LIST:
-                self._step_theme(-1)
-            elif self.focus == _FOCUS_FONT_LIST:
-                self._step_font(-1)
-            elif self.focus == _FOCUS_PROJ_LIST:
-                self._step_project_dir(-1)
-            return True
-        if k == KEY_DOWN:
-            if self.focus == _FOCUS_SECTIONS:
-                self._step_section(1)
-            elif self.focus == _FOCUS_DICT_LIST:
-                self._step_dict(1)
-            elif self.focus == _FOCUS_LANG_LIST:
-                self._step_language(1)
-            elif self.focus == _FOCUS_THEME_LIST:
-                self._step_theme(1)
-            elif self.focus == _FOCUS_FONT_LIST:
-                self._step_font(1)
-            elif self.focus == _FOCUS_PROJ_LIST:
-                self._step_project_dir(1)
-            elif self.focus == _FOCUS_SAVE_BEHAVIOR:
-                # Closed: open the popup. Forward the keystroke so
-                # the highlight starts on the committed row.
-                var prev_idx = self._save_dropdown.index
-                _ = self._save_dropdown.handle_key(event)
-                self._sync_dropdown_commit(prev_idx)
-            elif self.focus == _FOCUS_WRAP_MODE:
-                var prev_idx = self._wrap_dropdown.index
-                _ = self._wrap_dropdown.handle_key(event)
-                self._sync_wrap_commit(prev_idx)
-            return True
-        # Space toggles a focused Editor-section checkbox (matches the
-        # cluster-item behavior in the modal dialogs). Intercepted ahead
-        # of the type-to-jump fallthrough so it doesn't leak in as a
-        # search character.
-        if k == KEY_SPACE:
-            if self.focus == _FOCUS_TRIM_WS:
-                self._toggle_trim_ws()
-                return True
-            if self.focus == _FOCUS_FINAL_NL:
-                self._toggle_final_nl()
-                return True
-            if self.focus == _FOCUS_COMPRESS_KW:
-                self._toggle_compress_kwargs()
-                return True
-            if self.focus == _FOCUS_BLINK_CURSOR:
-                self._toggle_blink_cursor()
-                return True
-            if self._toggle_ls_focus(self.focus):
-                return True
-        # Numeric inline fields route through the shared TextField (cursor
-        # movement, drag-select, double/triple-click, undo, clipboard), ahead
-        # of the type-to-jump fallthrough so the keys edit the value instead
-        # of leaking in as a list search prefix. After every mutation we
-        # re-filter to digits + a max length so a paste or stray letter can't
-        # leave a non-numeric value.
-        if self.focus == _FOCUS_COMMA_WRAP:
-            var r = self._comma_tf.handle_key(event)
-            if r.consumed:
-                if r.changed:
-                    _clamp_numeric_field(self._comma_tf, 3)
-                    self.dirty = True
-                return True
-        if self.focus == _FOCUS_MAX_WINDOWS:
-            var r = self._mw_tf.handle_key(event)
-            if r.consumed:
-                if r.changed:
-                    _clamp_numeric_field(self._mw_tf, 4)
-                    self.dirty = True
-                return True
-        if self.focus == _FOCUS_PROJ_INPUT:
-            _ = self._proj_tf.handle_key(event)
-            return True
-        # Type-to-jump on whichever section list currently owns focus.
-        # Each section produces its own row labels so the user can
-        # type "py" to land on the python row regardless of which
-        # list (actions / dictionaries / languages) is in front of
-        # them.
-        if is_type_ahead_key(event):
-            self._handle_type_to_jump(chr(Int(k)))
-            return True
-        return True
-
-    def _handle_type_to_jump(mut self, ch: String):
-        """Route a printable keystroke into the type-to-jump helper
-        and update the focused list's selection. No-op when focus is
-        on a non-list widget; the keystroke is still consumed by the
-        caller so it doesn't leak back to the underlying workspace."""
-        if self.focus == _FOCUS_DICT_LIST:
-            var labels = List[String]()
-            for i in range(len(self.dict_specs)):
-                labels.append(self.dict_specs[i].display)
-            var hit = type_ahead_pick(self._type_ahead, labels, ch)
-            if hit >= 0:
-                self.selected_dict = hit
-        elif self.focus == _FOCUS_LANG_LIST:
-            var labels = List[String]()
-            for i in range(len(self.languages_view)):
-                labels.append(self.languages_view[i].language_id)
-            var hit = type_ahead_pick(self._type_ahead, labels, ch)
-            if hit >= 0:
-                self.selected_language = hit
-        elif self.focus == _FOCUS_THEME_LIST:
-            var hit = type_ahead_pick(self._type_ahead, self._theme_names, ch)
-            if hit >= 0:
-                self._commit_theme(hit)
-        elif self.focus == _FOCUS_FONT_LIST:
-            var hit = type_ahead_pick(self._type_ahead, self._font_names, ch)
-            if hit >= 0:
-                self._commit_font(hit)
-
-    def _sync_dropdown_commit(mut self, prev_idx: Int):
-        """If the dropdown's committed index moved, propagate it back
-        to ``auto_save`` and raise ``dirty``. Called after every event
-        that's been routed into ``_save_dropdown`` so the host's
-        persistence loop sees the change on the next paint."""
-        if self._save_dropdown.index == prev_idx:
-            return
-        var new_auto = self._save_dropdown.index == 1
-        if new_auto != self.auto_save:
-            self.auto_save = new_auto
-            self.dirty = True
-
-    def _sync_wrap_commit(mut self, prev_idx: Int):
-        """If the Wrap dropdown's committed index moved, propagate it to
-        ``wrap_mode`` and raise ``dirty`` (the index *is* the
-        ``WRAP_*`` value). Mirrors ``_sync_dropdown_commit``."""
-        if self._wrap_dropdown.index == prev_idx:
-            return
-        if self._wrap_dropdown.index != self.wrap_mode:
-            self.wrap_mode = self._wrap_dropdown.index
-            self.dirty = True
-
-    def _toggle_trim_ws(mut self):
-        """Flip the trailing-whitespace toggle, keep the checkbox glyph
-        in sync, and raise ``dirty`` so the host persists it."""
-        self.trim_trailing_whitespace = not self.trim_trailing_whitespace
-        self._trim_cb.on = self.trim_trailing_whitespace
-        self.dirty = True
-
-    def _toggle_final_nl(mut self):
-        """Counterpart for the final-newline toggle."""
-        self.ensure_final_newline = not self.ensure_final_newline
-        self._final_nl_cb.on = self.ensure_final_newline
-        self.dirty = True
-
-    def _toggle_compress_kwargs(mut self):
-        """Counterpart for the compress-keyword-arguments toggle."""
-        self.compress_kwargs = not self.compress_kwargs
-        self._compress_cb.on = self.compress_kwargs
-        self.dirty = True
-
-    def _toggle_blink_cursor(mut self):
-        """Counterpart for the blinking-cursor toggle."""
-        self.cursor_blink = not self.cursor_blink
-        self._blink_cb.on = self.cursor_blink
-        self.dirty = True
-
-    # --- Language Server section toggles -----------------------------------
-
-    def _ls_get(self, i: Int) -> Bool:
-        """The ``ls_*`` flag behind Language Server checkbox ``i``."""
-        if i == 0:
-            return self.ls_format_on_save
-        if i == 1:
-            return self.ls_signature_help
-        if i == 2:
-            return self.ls_document_highlight
-        if i == 3:
-            return self.ls_document_links
-        if i == 4:
-            return self.ls_inlay_hints
-        if i == 5:
-            return self.ls_code_lens
-        if i == 6:
-            return self.ls_document_colors
-        if i == 7:
-            return self.ls_linked_editing
-        if i == 8:
-            return self.ls_server_progress
-        return False
-
-    def _ls_set(mut self, i: Int, on: Bool):
-        if i == 0:
-            self.ls_format_on_save = on
-        elif i == 1:
-            self.ls_signature_help = on
-        elif i == 2:
-            self.ls_document_highlight = on
-        elif i == 3:
-            self.ls_document_links = on
-        elif i == 4:
-            self.ls_inlay_hints = on
-        elif i == 5:
-            self.ls_code_lens = on
-        elif i == 6:
-            self.ls_document_colors = on
-        elif i == 7:
-            self.ls_linked_editing = on
-        elif i == 8:
-            self.ls_server_progress = on
-
-    def _sync_ls_checkboxes(mut self):
-        """Mirror every ``ls_*`` flag onto its checkbox glyph."""
-        for i in range(len(self._ls_cbs)):
-            self._ls_cbs[i].on = self._ls_get(i)
-
-    def _toggle_ls_focus(mut self, focus: UInt8) -> Bool:
-        """Toggle the Language Server checkbox at focus slot ``focus``.
-        Returns True iff ``focus`` is one of them — shared by the keyboard
-        (Space/Enter) and mouse paths."""
-        var i = Int(focus) - Int(_FOCUS_LS_FORMAT_ON_SAVE)
-        if i < 0 or i >= len(self._ls_cbs):
-            return False
-        self._ls_set(i, not self._ls_get(i))
-        self._ls_cbs[i].on = self._ls_get(i)
-        self.dirty = True
-        return True
-
-    def _reset_ls_checkbox_press(mut self):
-        """Clear press/press-inside state on all Language Server
-        checkboxes — called from ``close`` so a reopen starts clean."""
-        for i in range(len(self._ls_cbs)):
-            self._ls_cbs[i].reset_press()
-
-    def comma_threshold_value(self) -> Int:
-        """Parse the comma-threshold field into the persisted int. Empty
-        input → ``-1`` (no comma trigger). ``handle_key`` keeps the field
-        digits-only, so this never has to cope with sign or stray
-        characters."""
-        var bytes = self._comma_tf.text.as_bytes()
-        if len(bytes) == 0:
-            return -1
-        var v = 0
-        for i in range(len(bytes)):
-            var d = Int(bytes[i]) - 0x30
-            if d < 0 or d > 9:
-                return -1
-            v = v * 10 + d
-        return v
-
-    def max_open_windows_value(self) -> Int:
-        """Parse the max-open-windows field into the persisted int. Empty
-        input → ``0`` (no limit). ``handle_key`` keeps the field digits-only,
-        so this never has to cope with sign or stray characters."""
-        var bytes = self._mw_tf.text.as_bytes()
-        if len(bytes) == 0:
-            return 0
-        var v = 0
-        for i in range(len(bytes)):
-            var d = Int(bytes[i]) - 0x30
-            if d < 0 or d > 9:
-                return 0
-            v = v * 10 + d
-        return v
-
-    def _next_focus(self, current: UInt8, backward: Bool) -> UInt8:
-        # Walk only the widgets that exist on the active section;
-        # otherwise Tab from the rail would land on Add/Edit even
-        # when Editor is selected.
-        var ordered = List[UInt8]()
-        ordered.append(_FOCUS_SECTIONS)
-        if self.section == _SECTION_EDITOR:
-            ordered.append(_FOCUS_SAVE_BEHAVIOR)
-            ordered.append(_FOCUS_WRAP_MODE)
-            ordered.append(_FOCUS_COMMA_WRAP)
-            ordered.append(_FOCUS_TRIM_WS)
-            ordered.append(_FOCUS_FINAL_NL)
-            ordered.append(_FOCUS_COMPRESS_KW)
-            ordered.append(_FOCUS_BLINK_CURSOR)
-            ordered.append(_FOCUS_MAX_WINDOWS)
-        elif self.section == _SECTION_SPELL:
-            if len(self.dict_specs) > 0:
-                ordered.append(_FOCUS_DICT_LIST)
-            # Mirror the actions section: skip whichever button isn't
-            # meaningful for the current selection so Tab doesn't land
-            # on a greyed-out button.
-            var sel_installed = False
-            if 0 <= self.selected_dict \
-                    and self.selected_dict < len(self.dict_specs):
-                sel_installed = user_dictionary_installed(
-                    self.dict_specs[self.selected_dict].language_id,
-                )
-            if self.selected_dict >= 0 and not sel_installed:
-                ordered.append(_FOCUS_DICT_INSTALL)
-            if self.selected_dict >= 0 and sel_installed:
-                ordered.append(_FOCUS_DICT_REMOVE)
-        elif self.section == _SECTION_LANGUAGES:
-            if len(self.languages_view) > 0:
-                ordered.append(_FOCUS_LANG_LIST)
-            ordered.append(_FOCUS_LANG_ADD)
-            if self.selected_language >= 0 \
-                    and self.selected_language < len(self.languages_view):
-                ordered.append(_FOCUS_LANG_EDIT)
-                var spec = self.languages_view[self.selected_language].copy()
-                if _has_override(
-                    self.language_overrides, spec.language_id,
-                ):
-                    ordered.append(_FOCUS_LANG_REMOVE)
-        elif self.section == _SECTION_THEME:
-            if len(self._theme_names) > 0:
-                ordered.append(_FOCUS_THEME_LIST)
-        elif self.section == _SECTION_LANGUAGE_SERVER:
-            ordered.append(_FOCUS_LS_FORMAT_ON_SAVE)
-            ordered.append(_FOCUS_LS_SIGNATURE)
-            ordered.append(_FOCUS_LS_DOC_HIGHLIGHT)
-            ordered.append(_FOCUS_LS_DOC_LINKS)
-            ordered.append(_FOCUS_LS_INLAY_HINTS)
-            ordered.append(_FOCUS_LS_CODE_LENS)
-            ordered.append(_FOCUS_LS_DOC_COLORS)
-            ordered.append(_FOCUS_LS_LINKED_EDITING)
-            ordered.append(_FOCUS_LS_PROGRESS)
-        elif self.section == _SECTION_PROJECTS:
-            if len(self.project_dirs) > 0:
-                ordered.append(_FOCUS_PROJ_LIST)
-            ordered.append(_FOCUS_PROJ_INPUT)
-            if len(String(self._proj_tf.text.strip()).as_bytes()) > 0:
-                ordered.append(_FOCUS_PROJ_ADD)
-            if self._has_project_dir_sel():
-                ordered.append(_FOCUS_PROJ_REMOVE)
-        elif self.section == _SECTION_FONT:
-            if len(self._font_names) > 0:
-                ordered.append(_FOCUS_FONT_LIST)
-            ordered.append(_FOCUS_FONT_SMALLER)
-            ordered.append(_FOCUS_FONT_LARGER)
-            if self._font_ideal_size > 0:
-                ordered.append(_FOCUS_FONT_IDEAL)
-        ordered.append(_FOCUS_CLOSE)
-        var pos = -1
-        for i in range(len(ordered)):
-            if ordered[i] == current:
-                pos = i
-                break
-        if pos < 0:
-            return ordered[0]
-        var n = len(ordered)
-        if backward:
-            return ordered[(pos - 1 + n) % n]
-        return ordered[(pos + 1) % n]
-
-    def _step_section(mut self, delta: Int):
-        var labels = self._labels()
-        if len(labels) == 0:
-            return
-        var s = self.section + delta
-        if s < 0:
-            s = 0
-        if s >= len(labels):
-            s = len(labels) - 1
-        if s != self.section:
-            # Switching sections invalidates dropdown popup state from
-            # the previous section — close them so a stale popup doesn't
-            # paint over the new pane.
-            self._save_dropdown.close()
-            self._wrap_dropdown.close()
-            # Drop any in-flight type-to-jump prefix so the first
-            # keystroke after the jump starts a fresh search.
-            self._type_ahead.reset()
-        self.section = s
-
-    def _step_dict(mut self, delta: Int):
-        if len(self.dict_specs) == 0:
-            return
-        var s = self.selected_dict + delta
-        if s < 0:
-            s = 0
-        if s >= len(self.dict_specs):
-            s = len(self.dict_specs) - 1
-        self.selected_dict = s
-
-    def _step_language(mut self, delta: Int):
-        if len(self.languages_view) == 0:
-            return
-        var s = self.selected_language + delta
-        if s < 0:
-            s = 0
-        if s >= len(self.languages_view):
-            s = len(self.languages_view) - 1
-        self.selected_language = s
-
-    def _commit_theme(mut self, idx: Int):
-        """Select theme row ``idx`` and, if it changed the choice, commit it
-        and raise ``dirty`` so the host applies + persists it."""
-        if idx < 0 or idx >= len(self._theme_names):
-            return
-        self.selected_theme = idx
-        if self._theme_names[idx] != self.theme_choice:
-            self.theme_choice = self._theme_names[idx]
-            self.dirty = True
-
-    def _step_theme(mut self, delta: Int):
-        if len(self._theme_names) == 0:
-            return
-        var s = self.selected_theme + delta
-        if s < 0:
-            s = 0
-        if s >= len(self._theme_names):
-            s = len(self._theme_names) - 1
-        self._commit_theme(s)
-
-    def _commit_font(mut self, idx: Int):
-        """Select font row ``idx`` and, if it changed the choice, commit it
-        and raise ``dirty`` so the host applies + persists it."""
-        if idx < 0 or idx >= len(self._font_names):
-            return
-        self.selected_font = idx
-        if self._font_names[idx] != self.font_choice:
-            self.font_choice = self._font_names[idx]
-            self.dirty = True
-
-    def _step_font(mut self, delta: Int):
-        if len(self._font_names) == 0:
-            return
-        var s = self.selected_font + delta
-        if s < 0:
-            s = 0
-        if s >= len(self._font_names):
-            s = len(self._font_names) - 1
-        self._commit_font(s)
-
-    def _add_language(mut self):
-        var argvs = List[String]()
-        var ft = List[String]()
-        self.language_editor.open(
-            String(""), ft^, argvs^, False,
+    def _rebuild_languages_view(mut self):
+        self.languages_view = apply_language_overrides(
+            built_in_servers(), self.language_overrides,
         )
 
     def _edit_language(mut self):
         if self.selected_language < 0 \
                 or self.selected_language >= len(self.languages_view):
             return
-        var spec = self.languages_view[self.selected_language].copy()
+        ref spec = self.languages_view[self.selected_language]
         var argvs = List[String]()
         for i in range(len(spec.candidates)):
             argvs.append(_join_argv(spec.candidates[i].argv))
-        var built_in = built_in_servers()
         var is_existing = find_language_by_id(
-            built_in, spec.language_id,
+            built_in_servers(), spec.language_id,
         ) >= 0
-        var file_types = spec.file_types.copy()
         self.language_editor.open(
-            spec.language_id, file_types^, argvs^, is_existing,
+            spec.language_id, spec.file_types, argvs^, is_existing,
         )
 
     def _remove_language_override(mut self):
+        """Drop the user's override for the selected language: back to the
+        built-in servers, or gone if the user added it."""
         if self.selected_language < 0 \
                 or self.selected_language >= len(self.languages_view):
             return
-        var spec = self.languages_view[self.selected_language].copy()
+        var id = self.languages_view[self.selected_language].language_id
         var rebuilt = List[LanguageServerOverride]()
         for i in range(len(self.language_overrides)):
-            if self.language_overrides[i].language_id == spec.language_id:
-                continue
-            rebuilt.append(self.language_overrides[i].copy())
+            if self.language_overrides[i].language_id != id:
+                rebuilt.append(self.language_overrides[i].copy())
         self.language_overrides = rebuilt^
         self.dirty = True
         self._rebuild_languages_view()
         if self.selected_language >= len(self.languages_view):
             self.selected_language = len(self.languages_view) - 1
 
-    def _maybe_consume_language_editor(mut self):
+    def consume_language_editor(mut self):
+        """Store the language editor's result once it was saved."""
         if not self.language_editor.submitted:
             return
         var entry = self.language_editor.value()
         self.language_editor.close()
         if len(entry.language_id.as_bytes()) == 0:
             return
-        self._apply_language_override(entry)
-
-    def _apply_language_override(mut self, entry: LanguageServerOverride):
-        """Splice ``entry`` into ``language_overrides`` (the in-grid
-        language editor's OK and the native one's Save both land here)."""
-        # Splice the override into ``language_overrides``: replace if a
-        # row already exists for this language id, append otherwise.
         var rebuilt = List[LanguageServerOverride]()
         var replaced = False
         for i in range(len(self.language_overrides)):
-            if self.language_overrides[i].language_id \
-                    == entry.language_id:
+            if self.language_overrides[i].language_id == entry.language_id:
                 rebuilt.append(entry.copy())
                 replaced = True
             else:
@@ -2212,345 +719,55 @@ struct Settings(Movable):
         self.language_overrides = rebuilt^
         self.dirty = True
         self._rebuild_languages_view()
-        # Keep the cursor on the just-edited language so a follow-up
-        # Enter / Edit lands back on it.
         for i in range(len(self.languages_view)):
             if self.languages_view[i].language_id == entry.language_id:
                 self.selected_language = i
                 break
-        self.focus = _FOCUS_LANG_LIST
 
-    def _activate_focus(mut self) -> Bool:
-        if self.focus == _FOCUS_CLOSE:
-            self.close()
-            return True
-        if self.focus == _FOCUS_SAVE_BEHAVIOR:
-            var prev_idx = self._save_dropdown.index
-            self._save_dropdown.toggle()
-            self._sync_dropdown_commit(prev_idx)
-            return True
-        if self.focus == _FOCUS_WRAP_MODE:
-            var prev_idx = self._wrap_dropdown.index
-            self._wrap_dropdown.toggle()
-            self._sync_wrap_commit(prev_idx)
-            return True
-        if self.focus == _FOCUS_TRIM_WS:
-            self._toggle_trim_ws()
-            return True
-        if self.focus == _FOCUS_FINAL_NL:
-            self._toggle_final_nl()
-            return True
-        if self.focus == _FOCUS_COMPRESS_KW:
-            self._toggle_compress_kwargs()
-            return True
-        if self.focus == _FOCUS_BLINK_CURSOR:
-            self._toggle_blink_cursor()
-            return True
-        if self._toggle_ls_focus(self.focus):
-            return True
-        if self.focus == _FOCUS_DICT_INSTALL:
-            self._request_dict_install()
-            return True
-        if self.focus == _FOCUS_DICT_REMOVE:
-            self._request_dict_remove()
-            return True
-        if self.focus == _FOCUS_DICT_LIST:
-            # Enter on a row triggers the action that's meaningful for it
-            # — the same as if the user had Tabbed to the corresponding
-            # button and pressed Enter. Saves a keystroke for the common
-            # "highlight, install" flow.
-            if 0 <= self.selected_dict \
-                    and self.selected_dict < len(self.dict_specs):
-                var lang = self.dict_specs[self.selected_dict].language_id
-                if user_dictionary_installed(lang):
-                    self._request_dict_remove()
-                else:
-                    self._request_dict_install()
-            return True
-        if self.focus == _FOCUS_LANG_ADD:
-            self._add_language()
-            return True
-        if self.focus == _FOCUS_LANG_EDIT:
-            self._edit_language()
-            return True
-        if self.focus == _FOCUS_LANG_REMOVE:
-            self._remove_language_override()
-            return True
-        if self.focus == _FOCUS_LANG_LIST:
-            self._edit_language()
-            return True
-        if self.focus == _FOCUS_PROJ_INPUT or self.focus == _FOCUS_PROJ_ADD:
-            self._add_project_dir()
-            return True
-        if self.focus == _FOCUS_PROJ_REMOVE:
-            self._remove_project_dir()
-            return True
-        if self.focus == _FOCUS_FONT_SMALLER:
-            self._bump_font_size(-1)
-            return True
-        if self.focus == _FOCUS_FONT_LARGER:
-            self._bump_font_size(1)
-            return True
-        if self.focus == _FOCUS_FONT_IDEAL:
-            self._restore_ideal_font_size()
-            return True
-        return True
+    # --- spelling --------------------------------------------------------
 
-    def _request_dict_install(mut self):
-        if self.selected_dict < 0 \
-                or self.selected_dict >= len(self.dict_specs):
+    def _request_dict(mut self, install: Bool):
+        """Queue an install / remove of the selected dictionary for the
+        host — only when it would change something."""
+        if self.selected_dict < 0 or self.selected_dict >= len(self.dict_specs):
             return
         var lang = self.dict_specs[self.selected_dict].language_id
-        if user_dictionary_installed(lang):
+        var installed = user_dictionary_installed(lang)
+        if install and not installed:
+            self.pending_dict_install_lang = lang
+        elif not install and installed:
+            self.pending_dict_remove_lang = lang
+
+    # --- projects --------------------------------------------------------
+
+    def _add_project_dir(mut self):
+        """Append the typed folder (trailing slashes dropped, duplicates
+        ignored) and clear the field."""
+        var t = String(self.project_input.strip())
+        var b = t.as_bytes()
+        var n = len(b)
+        while n > 1 and b[n - 1] == 0x2F:
+            n -= 1
+        if n == 0:
             return
-        self.pending_dict_install_lang = lang
+        var path = String(StringSpan(unsafe_from_utf8=b[:n]))
+        self.project_input = String("")
+        for i in range(len(self.project_dirs)):
+            if self.project_dirs[i] == path:
+                self.selected_project_dir = i
+                return
+        self.project_dirs.append(path^)
+        self.selected_project_dir = len(self.project_dirs) - 1
+        self.dirty = True
 
-    def _request_dict_remove(mut self):
-        if self.selected_dict < 0 \
-                or self.selected_dict >= len(self.dict_specs):
+    def _remove_project_dir(mut self):
+        if self.selected_project_dir < 0 \
+                or self.selected_project_dir >= len(self.project_dirs):
             return
-        var lang = self.dict_specs[self.selected_dict].language_id
-        if not user_dictionary_installed(lang):
-            return
-        self.pending_dict_remove_lang = lang
-
-    def ack_dict_install(mut self):
-        """Host calls this after picking up ``pending_dict_install_lang``
-        and starting the install — clears the field so the request fires
-        once."""
-        self.pending_dict_install_lang = String("")
-
-    def ack_dict_remove(mut self):
-        """Host calls this after performing the remove."""
-        self.pending_dict_remove_lang = String("")
-
-    # --- mouse ------------------------------------------------------
-
-    def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Bool:
-        if not self.active:
-            return False
-        if self.language_editor.active:
-            _ = self.language_editor.handle_mouse(event, container_bounds)
-            self._maybe_consume_language_editor()
-            return True
-        if event.kind != EVENT_MOUSE:
-            return True
-        self._ensure_bounds(container_bounds)
-        var rect = self._workspace_rect(container_bounds)
-        # Move / resize chrome first — an in-flight drag owns every event,
-        # and border presses must win over the widgets inside.
-        if self._handle_window_chrome(event, rect, container_bounds):
-            return True
-        # Save-behavior dropdown gets first crack on the editor section
-        # — both for body clicks (which would otherwise miss the focus
-        # walk) and for popup clicks (which sit *above* the dialog
-        # body so subsequent hit-tests must skip them).
-        if self.section == _SECTION_EDITOR:
-            var prev_idx = self._save_dropdown.index
-            var hit = self._save_dropdown.handle_mouse(
-                self._save_dd_anchor, container_bounds, event,
-            )
-            self._sync_dropdown_commit(prev_idx)
-            if hit == DROPDOWN_HIT_BODY:
-                self.focus = _FOCUS_SAVE_BEHAVIOR
-                return True
-            if hit == DROPDOWN_HIT_POPUP:
-                return True
-            # ``DROPDOWN_HIT_OUTSIDE`` and ``DROPDOWN_HIT_NONE`` both
-            # fall through to the regular dispatch; the popup has
-            # already auto-closed in the OUTSIDE case.
-            # Wrap-mode dropdown — same first-crack treatment.
-            var prev_wrap = self._wrap_dropdown.index
-            var wrap_hit = self._wrap_dropdown.handle_mouse(
-                self._wrap_dd_anchor, container_bounds, event,
-            )
-            self._sync_wrap_commit(prev_wrap)
-            if wrap_hit == DROPDOWN_HIT_BODY:
-                self.focus = _FOCUS_WRAP_MODE
-                return True
-            if wrap_hit == DROPDOWN_HIT_POPUP:
-                return True
-            # On-save transform checkboxes. Each runs the shared press /
-            # drag / release state machine; we own the toggle so it only
-            # flips on a release that lands back on the chip.
-            var trim_status = self._trim_cb.handle_mouse(event)
-            if trim_status != BUTTON_NONE:
-                if trim_status == BUTTON_FIRED:
-                    self.focus = _FOCUS_TRIM_WS
-                    self._toggle_trim_ws()
-                return True
-            var nl_status = self._final_nl_cb.handle_mouse(event)
-            if nl_status != BUTTON_NONE:
-                if nl_status == BUTTON_FIRED:
-                    self.focus = _FOCUS_FINAL_NL
-                    self._toggle_final_nl()
-                return True
-            var compress_status = self._compress_cb.handle_mouse(event)
-            if compress_status != BUTTON_NONE:
-                if compress_status == BUTTON_FIRED:
-                    self.focus = _FOCUS_COMPRESS_KW
-                    self._toggle_compress_kwargs()
-                return True
-            var blink_status = self._blink_cb.handle_mouse(event)
-            if blink_status != BUTTON_NONE:
-                if blink_status == BUTTON_FIRED:
-                    self.focus = _FOCUS_BLINK_CURSOR
-                    self._toggle_blink_cursor()
-                return True
-            # Numeric inline fields route mouse through the shared TextField
-            # so a click positions the caret and a drag selects text — the
-            # field owns its own drag / multi-click state machine.
-            if self._comma_tf.handle_mouse(event, self._comma_input_anchor):
-                self.focus = _FOCUS_COMMA_WRAP
-                return True
-            if self._mw_tf.handle_mouse(event, self._max_windows_anchor):
-                self.focus = _FOCUS_MAX_WINDOWS
-                return True
-        if self.section == _SECTION_PROJECTS:
-            if self._proj_tf.handle_mouse(event, self._proj_input_anchor):
-                self.focus = _FOCUS_PROJ_INPUT
-                return True
-        if self.section == _SECTION_LANGUAGE_SERVER:
-            for i in range(len(self._ls_cbs)):
-                var status = self._ls_cbs[i].handle_mouse(event)
-                if status == BUTTON_NONE:
-                    continue
-                if status == BUTTON_FIRED:
-                    self.focus = _FOCUS_LS_FORMAT_ON_SAVE + UInt8(i)
-                    _ = self._toggle_ls_focus(self.focus)
-                return True
-        if self._dispatch_buttons(event):
-            return True
-        if event.button == MOUSE_WHEEL_UP:
-            if self._right_rect(rect).contains(event.pos):
-                self._list_scroll -= 1
-                if self._list_scroll < 0:
-                    self._list_scroll = 0
-                return True
-        if event.button == MOUSE_WHEEL_DOWN:
-            if self._right_rect(rect).contains(event.pos):
-                self._list_scroll += 1
-                return True
-        if event.button != MOUSE_BUTTON_LEFT or not event.pressed \
-                or event.motion:
-            return True
-        # Left rail.
-        var sec = self._sections_rect(rect)
-        if sec.contains(event.pos):
-            var idx = event.pos.y - sec.a.y
-            var labels = self._labels()
-            if 0 <= idx and idx < len(labels):
-                if idx != self.section:
-                    self._save_dropdown.close()
-                    self._wrap_dropdown.close()
-                self.section = idx
-                self.focus = _FOCUS_SECTIONS
-            return True
-        # Right pane list — the dictionaries / languages / theme / font
-        # lists share geometry; dispatch by section.
-        if self.section == _SECTION_SPELL:
-            var list_top = rect.a.y + 2 + 2
-            var list_bottom = rect.b.y - 2 - 5
-            var inner = self._right_rect(rect)
-            var list_rect = Rect(inner.a.x, list_top, inner.b.x, list_bottom)
-            if list_rect.contains(event.pos):
-                var idx = self._list_scroll + (event.pos.y - list_rect.a.y)
-                if 0 <= idx and idx < len(self.dict_specs):
-                    self.selected_dict = idx
-                self.focus = _FOCUS_DICT_LIST
-                return True
-        elif self.section == _SECTION_LANGUAGES:
-            var list_top = rect.a.y + 2 + 2
-            var list_bottom = rect.b.y - 2 - 5
-            var inner = self._right_rect(rect)
-            var list_rect = Rect(inner.a.x, list_top, inner.b.x, list_bottom)
-            if list_rect.contains(event.pos):
-                var idx = self._list_scroll + (event.pos.y - list_rect.a.y)
-                if 0 <= idx and idx < len(self.languages_view):
-                    self.selected_language = idx
-                self.focus = _FOCUS_LANG_LIST
-                if Int(event.click_count) >= 2 \
-                        and 0 <= self.selected_language \
-                        and self.selected_language < len(self.languages_view):
-                    self._edit_language()
-                return True
-        elif self.section == _SECTION_PROJECTS:
-            var list_top = rect.a.y + 2 + 2
-            var list_bottom = rect.b.y - 2 - 5
-            var inner = self._right_rect(rect)
-            var list_rect = Rect(inner.a.x, list_top, inner.b.x, list_bottom)
-            if list_rect.contains(event.pos):
-                var idx = self._list_scroll + (event.pos.y - list_rect.a.y)
-                if 0 <= idx and idx < len(self.project_dirs):
-                    self.selected_project_dir = idx
-                self.focus = _FOCUS_PROJ_LIST
-                return True
-        elif self.section == _SECTION_THEME:
-            var inner = self._right_rect(rect)
-            var split = inner.a.x + 20
-            if split > inner.b.x - 12:
-                split = inner.b.x - 12
-            var list_rect = Rect(
-                inner.a.x, inner.a.y + 2, split, inner.b.y - 1,
-            )
-            if list_rect.contains(event.pos):
-                var idx = event.pos.y - list_rect.a.y
-                self._commit_theme(idx)
-                self.focus = _FOCUS_THEME_LIST
-                return True
-        elif self.section == _SECTION_FONT:
-            var inner = self._right_rect(rect)
-            # +5: the size-stepper row (face + shadow + a blank row)
-            # sits above the family list — keep in sync with
-            # ``_paint_font_section``.
-            var list_rect = Rect(
-                inner.a.x, inner.a.y + 5, inner.b.x, inner.b.y - 1,
-            )
-            if list_rect.contains(event.pos):
-                var idx = self._list_scroll + (event.pos.y - list_rect.a.y)
-                self._commit_font(idx)
-                self.focus = _FOCUS_FONT_LIST
-                return True
-        return True
-
-    def _dispatch_buttons(mut self, event: Event) -> Bool:
-        # Only dispatch buttons that belong to the current section (plus
-        # the always-on Close button). Buttons not painted this frame
-        # still hold their last-painted positions from a different
-        # section; without this gate, a click in the spell pane that
-        # happens to fall under where Add/Edit/Remove last rendered
-        # would fire them.
-        for i in range(len(self._buttons)):
-            if not self._button_active_for_section(i):
-                continue
-            var status = self._buttons[i].button.handle_mouse(event)
-            if status == BUTTON_NONE:
-                continue
-            if status == BUTTON_FIRED and self._buttons[i].enabled:
-                self.focus = self._buttons[i].focus
-                _ = self._activate_focus()
-            return True
-        return False
-
-    def _button_active_for_section(self, idx: Int) -> Bool:
-        if idx == _BTN_CLOSE:
-            return True
-        if self.section == _SECTION_SPELL:
-            return idx == _BTN_DICT_INSTALL or idx == _BTN_DICT_REMOVE
-        if self.section == _SECTION_LANGUAGES:
-            return (
-                idx == _BTN_LANG_ADD or idx == _BTN_LANG_EDIT
-                or idx == _BTN_LANG_REMOVE
-            )
-        if self.section == _SECTION_PROJECTS:
-            return idx == _BTN_PROJ_ADD or idx == _BTN_PROJ_REMOVE
-        if self.section == _SECTION_FONT:
-            if idx == _BTN_FONT_IDEAL:
-                # Not painted at all when the host reported no ideal —
-                # its stale rect must not eat clicks.
-                return self._font_ideal_size > 0
-            return idx == _BTN_FONT_SMALLER or idx == _BTN_FONT_LARGER
-        return False
+        _ = self.project_dirs.pop(self.selected_project_dir)
+        if self.selected_project_dir >= len(self.project_dirs):
+            self.selected_project_dir = len(self.project_dirs) - 1
+        self.dirty = True
 
 
 # --- helpers --------------------------------------------------------------
@@ -2563,29 +780,6 @@ def _has_override(
         if overrides[i].language_id == language_id:
             return True
     return False
-
-
-def _format_language(spec: LanguageSpec, has_override: Bool) -> String:
-    """One-line label: ``<id>  <ext1 ext2>  <count> server(s)``.
-
-    A ``*`` prefix marks languages with a user override so the section
-    list doubles as a "what have I customized" dashboard.
-    """
-    var prefix = String("* ") if has_override else String("  ")
-    var line = prefix + spec.language_id
-    var ft_text = String(" ").join(spec.file_types)
-    if len(ft_text.as_bytes()) > 0:
-        line = line + String("  (") + ft_text + String(")")
-    var count = len(spec.candidates)
-    var count_str: String
-    if count == 0:
-        count_str = String("no servers")
-    elif count == 1:
-        count_str = String("1 server")
-    else:
-        count_str = String(count) + String(" servers")
-    line = line + String("  — ") + count_str
-    return line^
 
 
 def _join_argv(argv: List[String]) -> String:

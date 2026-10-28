@@ -347,100 +347,58 @@ def test_language_catalog_carries_comment_tokens() raises:
 
 
 def test_language_editor_save_emits_override() raises:
-    """The editor's ``value()`` after Save must surface the user's
-    fields verbatim — language id, file types, and the joined argv
-    list split back into argv arrays."""
+    """``value()`` after Save surfaces the fields verbatim — language id,
+    file types — and each server line split back into an argv; a blank
+    server line is dropped."""
     var ed = LanguageEditor()
     var argvs = List[String]()
     argvs.append(String("foo --bar baz"))
-    ed.open(
-        String("xyzlang"), List[String](), argvs^, False,
-    )
-    # Type a second server.
-    ed._add_candidate()
-    ed.argv_tf.set_text(String("other --quiet"))
-    ed.candidates[ed._list.selected] = ed.argv_tf.text
+    ed.open(String("xyzlang"), List[String](), argvs^, False)
+    assert_equal(ed.command, String("foo --bar baz"))
+    ed.ui_set(String("file_types"), String("xyz xy"))
+    ed.ui_act(String("add"))
+    assert_equal(ed.selected, 1)
+    ed.ui_set(String("command"), String("other --quiet"))
+    ed.ui_act(String("add"))   # left blank
+    ed.ui_act(String("save"))
+    assert_true(ed.submitted)
     var out = ed.value()
     assert_equal(out.language_id, String("xyzlang"))
+    assert_equal(len(out.file_types), 2)
     assert_equal(len(out.argvs), 2)
     assert_equal(len(out.argvs[0]), 3)
     assert_equal(out.argvs[0][0], String("foo"))
     assert_equal(out.argvs[1][0], String("other"))
 
 
-def test_language_editor_paint_does_not_damage_dialog_border() raises:
-    """End-to-end regression: open the editor with an argv string that
-    exceeds the list width, paint it, and assert the dialog's right
-    border at every list row is still a vertical bar — proving the
-    candidate text was clipped before it could reach the frame."""
-    var screen = Rect(0, 0, 100, 40)
+def test_language_editor_built_in_keeps_its_id() raises:
+    """A built-in language's id and file types are read-only."""
     var ed = LanguageEditor()
-    var argvs = List[String]()
-    # A line longer than the dialog interior — used to overflow into
-    # the dialog right border.
-    argvs.append(String(
-        "some-language-server --very-long-flag /very/long/path/to/binary"
-        " --extra-args-that-keep-going-and-going"
-    ))
-    argvs.append(String("short"))
-    ed.open(
-        String("xyzlang"), List[String](), argvs^, False,
-    )
-    var c = Canvas(screen.b.x, screen.b.y)
-    ed.paint(c, screen)
-    # Dialog right border lives at ``rect.b.x - 1``. Walk the dialog
-    # rows that overlap the list rect and confirm the border glyph is
-    # still the double-line vertical we drew at frame time. ``║`` is
-    # the only legal value; anything else means a candidate string
-    # leaked past the list's right edge.
-    var dialog = Rect(
-        (screen.b.x - 70) // 2, (screen.b.y - 21) // 2,
-        (screen.b.x - 70) // 2 + 70, (screen.b.y - 21) // 2 + 21,
-    )
-    for y in range(dialog.a.y + 1, dialog.b.y - 1):
-        var glyph = c.get(dialog.b.x - 1, y).glyph
-        assert_equal(glyph, String("║"))
-
-
-def test_language_editor_list_type_to_jump() raises:
-    """The candidate list in the LanguageEditor is also a list
-    widget — typing 'p' lands on the first server whose argv starts
-    with 'p'. Argv strip mirrors the new selection so the user
-    can keep editing."""
-    var ed = LanguageEditor()
-    var argvs = List[String]()
-    argvs.append(String("apple-lsp"))
-    argvs.append(String("banana-lsp"))
-    argvs.append(String("pyright"))
-    ed.open(
-        String("xyzlang"), List[String](), argvs^, False,
-    )
-    ed._focus.focus_force(2)  # _FOCUS_LIST
-    _ = ed.handle_key(_key(UInt32(ord("p"))))
-    assert_equal(ed._list.selected, 2)
-    assert_equal(ed.argv_tf.text, String("pyright"))
+    ed.open(String("python"), [String("py")], List[String](), True)
+    ed.ui_set(String("language_id"), String("snake"))
+    ed.ui_set(String("file_types"), String("snk"))
+    assert_equal(ed.language_id, String("python"))
+    assert_equal(ed.file_types, String("py"))
 
 
 def test_language_editor_move_candidate_reorders() raises:
-    """Up/Down buttons swap the selected entry with its neighbour,
-    keeping the cursor on the just-moved row."""
+    """Move Up / Down swap the selected server with its neighbour, keeping
+    the selection on it; past either end it's a no-op."""
     var ed = LanguageEditor()
     var argvs = List[String]()
     argvs.append(String("a"))
     argvs.append(String("b"))
     argvs.append(String("c"))
-    ed.open(
-        String("xyzlang"), List[String](), argvs^, False,
-    )
-    ed._list.selected = 0
-    ed._move_candidate(1)
+    ed.open(String("xyzlang"), List[String](), argvs^, False)
+    ed.ui_set(String("servers"), String("0"))
+    ed.ui_act(String("down"))
     assert_equal(ed.candidates[0], String("b"))
     assert_equal(ed.candidates[1], String("a"))
-    assert_equal(ed._list.selected, 1)
-    # Out-of-bounds is a no-op.
-    ed._list.selected = 2
-    ed._move_candidate(1)
-    assert_equal(ed._list.selected, 2)
+    assert_equal(ed.selected, 1)
+    ed.ui_set(String("servers"), String("2"))
+    assert_equal(ed.command, String("c"))
+    ed.ui_act(String("down"))
+    assert_equal(ed.selected, 2)
     assert_equal(ed.candidates[2], String("c"))
 
 

@@ -45,7 +45,8 @@ comptime UI_TABS      = 6
 page whose ``text`` is its tab label."""
 comptime UI_LABEL     = 7
 comptime UI_TEXT      = 8
-"""Single-line text field bound to ``key``; ``value`` is its text."""
+"""Single-line text field bound to ``key``; ``value`` is its text;
+``number``, when set, the characters it's sized for (it doesn't stretch)."""
 comptime UI_CHECK     = 9
 comptime UI_CHOICE    = 10
 """Pop-up choice bound to ``key``: ``options``, selected ``number``."""
@@ -58,6 +59,11 @@ comptime UI_BUTTON    = 12
 comptime UI_SEPARATOR = 13
 comptime UI_SPACER    = 14
 """Takes the spare height of a ``UI_VSTACK``."""
+comptime UI_PREVIEW   = 15
+"""A few lines of sample code in the live theme's editor colors: ``text``
+is the font label, ``number`` the font size (0 = its default), ``options``
+the built-in font labels, ``value`` a token that changes whenever the
+palette does (so a projector knows to repaint)."""
 
 
 # --- flags --------------------------------------------------------------------
@@ -211,11 +217,13 @@ def ui_label(var text: String, flags: Int = 0) -> UINode:
 def ui_text(
     var key: String, var value: String,
     var placeholder: String = String(""), enabled: Bool = True,
+    width: Int = 0,
 ) -> UINode:
     var n = UINode(UI_TEXT)
     n.key = key^
     n.value = value^
     n.placeholder = placeholder^
+    n.number = width
     if not enabled:
         n.flags |= UI_DISABLED
     return n^
@@ -289,6 +297,17 @@ def ui_spacer() -> UINode:
     return UINode(UI_SPACER)
 
 
+def ui_preview(
+    var font: String, size: Int, var builtins: List[String], var version: String,
+) -> UINode:
+    var n = UINode(UI_PREVIEW)
+    n.text = font^
+    n.number = size
+    n.options = builtins^
+    n.value = version^
+    return n^
+
+
 def ui_bool(value: String) -> Bool:
     """A checkbox's ``set`` value."""
     return value == String("1")
@@ -319,6 +338,7 @@ def _kind_name(kind: Int) -> String:
     if kind == UI_TABLE: return String("table")
     if kind == UI_BUTTON: return String("button")
     if kind == UI_SEPARATOR: return String("separator")
+    if kind == UI_PREVIEW: return String("preview")
     return String("spacer")
 
 

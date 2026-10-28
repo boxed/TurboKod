@@ -4,16 +4,18 @@ TurboKod ships a set of color themes that retint **both** syntax highlighting
 **and** the UI chrome (menus, window frames, dialogs, desktop background, tool
 panels). The default is **Turbo C++ 3.0** — the classic blue Turbo Vision look,
 pixel-identical to how the app rendered before themes existed. Pick another from
-**Settings ▸ Theme**; the change applies live (the whole UI retints as you arrow
-through the list) and persists to `~/.config/turbokod/config.json`.
+**Settings ▸ Appearance ▸ Theme**; the change applies live (the whole UI
+retints, and the code preview under the picker with it) and persists to
+`~/.config/turbokod/config.json`.
 
-To make the live preview useful, Settings doesn't cover the workspace: on macOS
-it opens in its **own native window** (same second-surface pattern as the
-floating panels — `Desktop.settings_detached`, `tk_desktop_layout_settings` /
-`tk_desktop_settings_*`, polled via `tk_desktop_settings_active`), leaving the
-project window fully interactive; in the terminal it's a centered **floating
-dialog** you can move (drag the title row) and resize (drag the left/right/
-bottom border), with the editor visible around it.
+Settings is a declarative dialog (see [declarative-ui.md](declarative-ui.md)).
+On macOS it doesn't cover the workspace, so the live retint is visible: it
+opens in its **own window**, leaving the project window fully interactive.
+That window is either the grid projection in a cell window (the classic look:
+`Desktop.settings_detached`, `tk_desktop_layout_settings` /
+`tk_desktop_settings_*`, polled via `tk_desktop_settings_active`) or a native
+one (the macOS-style UI: `tk_desktop_ui`'s `window` stack). In the terminal
+it's a dialog over the workspace; the preview shows the theme there.
 
 Bundled themes: Turbo C++ 3.0, Monokai, Dracula, One Dark, Gruvbox Dark,
 Solarized Dark, Solarized Light, GitHub Light, One Light, Turbo Pascal 7,

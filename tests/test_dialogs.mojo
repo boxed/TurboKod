@@ -57,9 +57,9 @@ from turbokod.config import (
     LanguageServerOverride, MIN_FONT_SIZE, OnSaveAction, TurbokodConfig
 )
 from turbokod.dropdown import Dropdown
-from turbokod.settings import (
-    Settings, _FOCUS_LS_INLAY_HINTS, _FOCUS_MAX_WINDOWS
-)
+from turbokod.settings import Settings
+from turbokod.json import encode_json
+from turbokod.ui_tree import ui_to_json
 from turbokod.events import (
     Event, KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_HOME, KEY_LEFT, KEY_TAB,
     KEY_UP, MOD_ALT, MOD_CTRL, MOD_META, MOD_NONE, MOD_SHIFT,
@@ -701,8 +701,7 @@ def test_walk_project_files_git_fast_path_includes_ignored_files() raises:
 
 
 def test_settings_open_seeds_state() raises:
-    """Settings ``open`` parks focus on the section rail (arrow keys move
-    sections) and starts not-dirty."""
+    """Settings opens on General, not dirty; close resets it."""
     var s = Settings()
     s.open(False)
     assert_true(s.active)
@@ -713,9 +712,9 @@ def test_settings_open_seeds_state() raises:
 
 
 def test_settings_language_server_section_seeds_and_toggles() raises:
-    """The Language Server section seeds its checkboxes from the ``ls_*``
-    params, and toggling one flips the working copy + raises dirty so the
-    host's persistence loop writes it back."""
+    """The Language Features checkboxes seed from the ``ls_*`` params, and
+    toggling one flips the working copy and raises dirty so the host's
+    persistence loop writes it back."""
     var s = Settings()
     s.open(
         False, List[LanguageServerOverride](),
@@ -732,108 +731,35 @@ def test_settings_language_server_section_seeds_and_toggles() raises:
     assert_true(s.ls_document_highlight)
     assert_false(s.ls_code_lens)
     assert_false(s.dirty)
-    # Toggling by focus id flips the working copy and marks dirty.
-    _ = s._toggle_ls_focus(_FOCUS_LS_INLAY_HINTS)
+    s.ui_set(String("ls_inlay_hints"), String("0"))
     assert_false(s.ls_inlay_hints)
     assert_true(s.dirty)
 
 
-def test_settings_windowed_default_is_centered_dialog() raises:
-    """In-grid (terminal) Settings is a centered floating dialog, not a
-    workspace takeover — the editor behind it stays visible so a theme
-    change retints it live. The first paint establishes the default
-    bounds inside the workspace (rows 1..h-1, menu/status excluded)."""
+def test_settings_grid_layout_fits_the_screen() raises:
+    """Every tab, through the grid projector, stays inside the screen —
+    on a roomy one, an 80x24 terminal, and filling the host's window."""
     var s = Settings()
-    s.open(False)
-    var c = Canvas(100, 40)
-    c.clear(default_attr())
-    s.paint(c, Rect(0, 0, 100, 40))
-    assert_true(s.dlg.bounds.a.y >= 1)
-    assert_true(s.dlg.bounds.b.y <= 39)
-    assert_true(s.dlg.bounds.width() <= 104)
-    assert_true(s.dlg.bounds.a.x > 0)
-    # The dialog's top-left corner carries the double-line box; a cell
-    # left of the dialog is untouched workspace.
-    assert_equal(
-        c.get(s.dlg.bounds.a.x, s.dlg.bounds.a.y).glyph, String("╔"),
+    var fonts: List[String] = [String("IBM VGA 8x16 (built-in)"), String("Menlo")]
+    s.open(
+        False, List[LanguageServerOverride](),
+        String(""), True, True, False, String("Turbo C++ 3.0"),
+        String("Menlo"), fonts^,
     )
-    var outside = c.get(0, s.dlg.bounds.a.y)
-    assert_equal(outside.attr.fg, default_attr().fg)
-    assert_equal(outside.attr.bg, default_attr().bg)
-
-
-def test_settings_windowed_move_and_resize() raises:
-    """Dragging the title row moves the dialog; dragging the bottom-right
-    corner resizes it (mirrors WindowStack's chrome). The drag owns events
-    until release, and sizes clamp to the minimums."""
-    var s = Settings()
-    s.open(False)
-    var screen = Rect(0, 0, 100, 40)
-    var c = Canvas(100, 40)
-    s.paint(c, screen)   # establish default bounds
-    var b0 = s.dlg.bounds
-    # Move: press on the title row, drag +3 cols / +2 rows, release.
-    _ = s.handle_mouse(Event.mouse_event(
-        Point(b0.a.x + 5, b0.a.y), MOUSE_BUTTON_LEFT, True, False,
-    ), screen)
-    _ = s.handle_mouse(Event.mouse_event(
-        Point(b0.a.x + 8, b0.a.y + 2), MOUSE_BUTTON_LEFT, True, True,
-    ), screen)
-    _ = s.handle_mouse(Event.mouse_event(
-        Point(b0.a.x + 8, b0.a.y + 2), MOUSE_BUTTON_LEFT, False, False,
-    ), screen)
-    assert_equal(s.dlg.bounds.a.x, b0.a.x + 3)
-    assert_equal(s.dlg.bounds.a.y, b0.a.y + 2)
-    assert_equal(s.dlg.bounds.width(), b0.width())
-    assert_equal(s.dlg.bounds.height(), b0.height())
-    # Resize: press the bottom-right corner, drag inward 10 cols / 3 rows.
-    var b1 = s.dlg.bounds
-    _ = s.handle_mouse(Event.mouse_event(
-        Point(b1.b.x - 1, b1.b.y - 1), MOUSE_BUTTON_LEFT, True, False,
-    ), screen)
-    _ = s.handle_mouse(Event.mouse_event(
-        Point(b1.b.x - 11, b1.b.y - 4), MOUSE_BUTTON_LEFT, True, True,
-    ), screen)
-    _ = s.handle_mouse(Event.mouse_event(
-        Point(b1.b.x - 11, b1.b.y - 4), MOUSE_BUTTON_LEFT, False, False,
-    ), screen)
-    assert_equal(s.dlg.bounds.width(), b1.width() - 10)
-    assert_equal(s.dlg.bounds.height(), b1.height() - 3)
-    # Bounds survive close + reopen (session-persistent size/position).
-    var kept = s.dlg.bounds
-    s.close()
-    s.open(False)
-    s.paint(c, screen)
-    assert_equal(s.dlg.bounds.a.x, kept.a.x)
-    assert_equal(s.dlg.bounds.width(), kept.width())
-
-
-def test_settings_detached_fills_surface() raises:
-    """Detached (native settings window) the dialog fills the whole
-    surface and skips the in-grid window chrome — the host window
-    provides the title bar, close button, and move/resize instead."""
-    var s = Settings()
-    s.detached = True
-    s.open(False)
-    var c = Canvas(80, 24)
-    c.clear(default_attr())
-    s.paint(c, Rect(0, 0, 80, 24))
-    # No border box, no " Settings " title — just the dialog bg fill
-    # edge to edge.
-    assert_equal(c.get(0, 0).glyph, String(" "))
-    assert_equal(c.get(79, 23).glyph, String(" "))
-    var title_found = False
-    for x in range(80):
-        if c.get(x, 0).glyph == String("S"):
-            title_found = True
-    assert_false(title_found)
-    # In-grid still draws its own chrome.
-    var s2 = Settings()
-    s2.open(False)
-    var c2 = Canvas(80, 24)
-    c2.clear(default_attr())
-    s2.paint(c2, Rect(0, 0, 80, 24))
-    assert_equal(c2.get(s2.dlg.bounds.a.x, s2.dlg.bounds.a.y).glyph, String("╔"))
+    s.offer_native_ui = True
+    for size in [(100, 40), (80, 24)]:
+        for fill in [False, True]:
+            var screen = Rect(0, 0, size[0], size[1])
+            var grid = GridForm()
+            grid.fill = fill
+            for sec in range(6):
+                s.section = sec
+                var c = Canvas(size[0], size[1])
+                c.clear(default_attr())
+                grid.paint(s.ui(), c, screen)
+                var f = grid.frame()
+                assert_true(f.a.x >= 0 and f.a.y >= 0)
+                assert_true(f.b.x <= size[0] and f.b.y <= size[1])
 
 
 def test_settings_open_empty_parks_selection_at_minus_one() raises:
@@ -911,139 +837,55 @@ def test_settings_editor_submit_replaces_existing_entry() raises:
     assert_true(ps.on_save_dirty)
 
 
-def test_settings_open_seeds_save_behavior_dropdown() raises:
-    """``open(actions, auto_save)`` must seed both the working copy
-    and the dropdown's index so the painted strip and the persisted
-    value agree on first paint."""
+def test_settings_save_behavior_choice() raises:
+    """Saving: the choice seeds from ``auto_save`` and picking Automatic
+    commits it and raises dirty; re-picking the same one doesn't."""
     var s = Settings()
     s.open(True)
     assert_true(s.auto_save)
-    assert_equal(s._save_dropdown.index, 1)
     s.close()
     s.open(False)
-    assert_false(s.auto_save)
-    assert_equal(s._save_dropdown.index, 0)
-
-
-def test_settings_save_behavior_commit_marks_dirty() raises:
-    """Switching the dropdown commits Manual → Automatic, mirrors the
-    new value into ``auto_save``, and raises ``dirty`` so the host
-    persists ``TurbokodConfig.auto_save`` on the next paint."""
-    var s = Settings()
-    s.open(False)
-    # Simulate the user opening the popup, moving to "Automatic", and
-    # pressing Enter — same final state ``Dropdown.handle_key`` lands
-    # on, observed by ``_sync_dropdown_commit``.
-    var prev_idx = s._save_dropdown.index
-    s._save_dropdown.index = 1
-    s._sync_dropdown_commit(prev_idx)
+    s.ui_set(String("auto_save"), String("1"))
     assert_true(s.auto_save)
     assert_true(s.dirty)
-
-
-def test_settings_save_behavior_no_change_no_dirty() raises:
-    """Re-committing the same value (Manual → Manual) must not raise
-    ``dirty`` — otherwise the host would write the config on every
-    open/close cycle even when nothing changed."""
-    var s = Settings()
-    s.open(False)
-    var prev_idx = s._save_dropdown.index
-    # Index unchanged — the dropdown closed without committing a new
-    # value (Esc, click-outside, or Enter on the same row).
-    s._sync_dropdown_commit(prev_idx)
+    s.ack_dirty()
+    s.ui_set(String("auto_save"), String("0"))
     assert_false(s.auto_save)
-    assert_false(s.dirty)
 
 
-def test_settings_open_seeds_editor_toggles() raises:
-    """``open`` must seed the Editor-section toggle working copies and
-    their checkbox glyphs from the passed-in config values (defaulting
-    to on)."""
+def test_settings_editor_toggles() raises:
+    """The on-save checkboxes seed from ``open`` and each toggle commits
+    the working copy and raises dirty."""
     var s = Settings()
-    s.open(
-        True,
-        List[LanguageServerOverride](), String(""),
-        True, True,
-    )
+    s.open(False, List[LanguageServerOverride](), String(""), True, True)
     assert_true(s.trim_trailing_whitespace)
     assert_true(s.ensure_final_newline)
-    assert_true(s._trim_cb.on)
-    assert_true(s._final_nl_cb.on)
-    s.close()
-    s.open(
-        True,
-        List[LanguageServerOverride](), String(""),
-        False, False,
-    )
+    s.ui_set(String("trim_trailing_whitespace"), String("0"))
     assert_false(s.trim_trailing_whitespace)
-    assert_false(s.ensure_final_newline)
-    assert_false(s._trim_cb.on)
-    assert_false(s._final_nl_cb.on)
-
-
-def test_settings_editor_toggle_marks_dirty() raises:
-    """Toggling either Editor checkbox flips the working copy, keeps the
-    checkbox glyph in sync, and raises ``dirty`` so the host persists it."""
-    var s = Settings()
-    s.open(
-        True,
-        List[LanguageServerOverride](), String(""),
-        True, True,
-    )
-    s._toggle_trim_ws()
-    assert_false(s.trim_trailing_whitespace)
-    assert_false(s._trim_cb.on)
     assert_true(s.dirty)
-    s.dirty = False
-    s._toggle_final_nl()
+    s.ui_set(String("ensure_final_newline"), String("0"))
     assert_false(s.ensure_final_newline)
-    assert_false(s._final_nl_cb.on)
-    assert_true(s.dirty)
 
 
 def test_settings_max_open_windows_seeds_and_edits() raises:
-    """``open`` seeds the max-open-windows field from config (0 → blank =
-    no limit; a positive value shows its digits), and the inline editor
-    appends digits / backspaces, parsing back to the persisted int while
-    raising ``dirty``."""
+    """Open documents: the cap shows as digits (empty = no limit), a
+    typed value keeps only its leading four digits, and the host reads it
+    back through ``max_open_windows_value``."""
     var s = Settings()
-    s.open(
-        True,
-        List[LanguageServerOverride](), String(""),
-        True, True,
-        max_open_windows=20,
-    )
-    assert_equal(s._mw_tf.text, String("20"))
+    s.open(False, max_open_windows=20)
+    assert_equal(s.max_windows_text, String("20"))
     assert_equal(s.max_open_windows_value(), 20)
-    assert_false(s.dirty)
-    # 0 (no limit) renders as an empty field and parses back to 0.
     s.close()
-    s.open(
-        True,
-        List[LanguageServerOverride](), String(""),
-        True, True,
-        max_open_windows=0,
-    )
-    assert_equal(len(s._mw_tf.text.as_bytes()), 0)
+    s.open(False, max_open_windows=0)
+    assert_equal(len(s.max_windows_text.as_bytes()), 0)
     assert_equal(s.max_open_windows_value(), 0)
-    # Editing the field through the shared TextField (digits append,
-    # Backspace removes, value reparses) once it owns focus.
-    s.focus = _FOCUS_MAX_WINDOWS
-    s.dirty = False
-    _ = s.handle_key(Event.key_event(UInt32(ord("5")), MOD_NONE))
-    _ = s.handle_key(Event.key_event(UInt32(ord("0")), MOD_NONE))
-    assert_equal(s._mw_tf.text, String("50"))
-    assert_equal(s.max_open_windows_value(), 50)
+    s.ui_set(String("max_open_windows"), String("5x0"))
+    assert_equal(s.max_windows_text, String("50"))
     assert_true(s.dirty)
-    _ = s.handle_key(Event.key_event(KEY_BACKSPACE, MOD_NONE))
-    assert_equal(s.max_open_windows_value(), 5)
-    # Non-digit input is filtered out, leaving the value unchanged.
-    _ = s.handle_key(Event.key_event(UInt32(ord("x")), MOD_NONE))
-    assert_equal(s.max_open_windows_value(), 5)
-    # Field is capped at 4 digits so it can't overflow the box.
-    s._mw_tf.set_text(String("9999"))
-    _ = s.handle_key(Event.key_event(UInt32(ord("9")), MOD_NONE))
-    assert_equal(len(s._mw_tf.text.as_bytes()), 4)
+    s.ui_set(String("max_open_windows"), String("123456"))
+    assert_equal(s.max_windows_text, String("1234"))
+    s.ui_set(String("comma_threshold"), String(""))
+    assert_equal(s.comma_threshold_value(), -1)
 
 
 def test_settings_languages_section_seeded() raises:
@@ -1092,129 +934,92 @@ def test_settings_open_unknown_extension_falls_back_to_first() raises:
     assert_equal(s.selected_language, 0)
 
 
-def test_settings_font_section_requires_host_fonts() raises:
-    """The Font section only exists when the host registered font
-    options (the native macOS frontend). Without them — the terminal
-    frontend — the rail ends at Projects."""
+def test_settings_font_rows_require_host_fonts() raises:
+    """Appearance only has Font and Size when the host registered fonts
+    (the native macOS frontend); the terminal owns the font otherwise."""
     var s = Settings()
     s.open(False)
-    var labels = s._labels()
-    # Editor, Spell check, Languages, Theme, Language Server, Projects —
-    # no Font.
-    assert_equal(len(labels), 6)
-    assert_equal(labels[3], String("Theme"))
-    assert_equal(labels[4], String("Language Server"))
-    assert_equal(labels[5], String("Projects"))
+    var plain = ui_to_json(s.ui())
+    assert_false(String("\"font_larger\"") in encode_json(plain))
     s.close()
-    var fonts = List[String]()
-    fonts.append(String("IBM VGA 8x16 (built-in)"))
-    fonts.append(String("Menlo"))
-    fonts.append(String("Monaco"))
+    var fonts: List[String] = [
+        String("IBM VGA 8x16 (built-in)"), String("Classic"), String("Menlo"),
+    ]
     s.open(
         False, List[LanguageServerOverride](),
         String(""), True, True, False, String("Turbo C++ 3.0"),
         String("Menlo"), fonts^,
     )
-    labels = s._labels()
-    assert_equal(len(labels), 7)
-    assert_equal(labels[6], String("Font"))
-    # The active font row is pre-selected.
-    assert_equal(s.selected_font, 1)
-    assert_equal(s.font_choice, String("Menlo"))
-
-
-def test_settings_font_step_commits_and_marks_dirty() raises:
-    """Arrowing through the Font list commits the new choice and raises
-    ``dirty`` so the host applies + persists it — same live-preview
-    contract as the Theme list."""
-    var s = Settings()
-    var fonts = List[String]()
-    fonts.append(String("IBM VGA 8x16 (built-in)"))
-    fonts.append(String("Menlo"))
-    s.open(
-        False, List[LanguageServerOverride](),
-        String(""), True, True, False, String("Turbo C++ 3.0"),
-        String("IBM VGA 8x16 (built-in)"), fonts^,
-    )
-    assert_equal(s.selected_font, 0)
-    assert_false(s.dirty)
-    s._step_font(1)
-    assert_equal(s.selected_font, 1)
-    assert_equal(s.font_choice, String("Menlo"))
+    assert_true(String("\"font_larger\"") in encode_json(ui_to_json(s.ui())))
+    s.ui_set(String("font"), String("0"))
+    assert_equal(s.font_choice, String("IBM VGA 8x16 (built-in)"))
     assert_true(s.dirty)
-    # Stepping past the end clamps without re-dirtying a fresh ack.
-    s.ack_dirty()
-    s._step_font(1)
-    assert_equal(s.selected_font, 1)
-    assert_false(s.dirty)
 
 
-def test_settings_font_size_stepper_commits_and_marks_dirty() raises:
-    """The Font pane's size stepper steps from the *displayed* size (the
-    explicit choice, or the host-reported effective size when the choice
-    is 0), clamps, commits an explicit size, and raises ``dirty``."""
+def test_settings_font_size_steps_and_ideal() raises:
+    """Smaller / Larger step from the size shown (the explicit choice, or
+    the host-reported effective size when it's 0), clamp, and dirty; Ideal
+    Size snaps to the host-reported design size."""
     var s = Settings()
-    var fonts = List[String]()
-    fonts.append(String("IBM VGA 8x16 (built-in)"))
+    var fonts: List[String] = [String("IBM VGA 8x16 (built-in)")]
     s.open(
         False, List[LanguageServerOverride](),
         String(""), True, True, False, String("Turbo C++ 3.0"),
         String("IBM VGA 8x16 (built-in)"), fonts^,
-        0,    # font_size: default
-        16,   # host-reported effective size
-        16,   # host-reported ideal size
+        0, 16, 16,
     )
-    assert_equal(s.font_size_choice, 0)
-    assert_equal(s._font_display_size(), 16)
-    assert_false(s.dirty)
-    # First bump turns the default into an explicit 17.
-    s._bump_font_size(1)
+    s.ui_act(String("font_larger"))
     assert_equal(s.font_size_choice, 17)
     assert_true(s.dirty)
     s.ack_dirty()
-    # Subsequent bumps step the explicit value.
-    s._bump_font_size(-1)
+    s.ui_act(String("font_ideal"))
     assert_equal(s.font_size_choice, 16)
     assert_true(s.dirty)
     s.ack_dirty()
-    # Clamped at the bottom of the range: stepping to the floor dirties
-    # once, stepping past it is a no-op.
-    s.font_size_choice = MIN_FONT_SIZE + 1
-    s._bump_font_size(-1)
-    assert_equal(s.font_size_choice, MIN_FONT_SIZE)
-    s.ack_dirty()
-    s._bump_font_size(-1)
+    s.font_size_choice = MIN_FONT_SIZE
+    s.ui_act(String("font_smaller"))
     assert_equal(s.font_size_choice, MIN_FONT_SIZE)
     assert_false(s.dirty)
-
-
-def test_settings_restore_ideal_font_size() raises:
-    """"Restore ideal" snaps the explicit size to the host-reported
-    design size; it's a no-op when the host reported none (vector
-    fonts) or when already there."""
-    var s = Settings()
-    var fonts = List[String]()
-    fonts.append(String("IBM VGA 8x16 (built-in)"))
-    s.open(
-        False, List[LanguageServerOverride](),
-        String(""), True, True, False, String("Turbo C++ 3.0"),
-        String("IBM VGA 8x16 (built-in)"), fonts^,
-        20, 20, 16,
-    )
-    s._restore_ideal_font_size()
-    assert_equal(s.font_size_choice, 16)
-    assert_true(s.dirty)
-    s.ack_dirty()
-    # Already at the ideal: no re-dirty.
-    s._restore_ideal_font_size()
-    assert_false(s.dirty)
-    # Host reports no ideal (e.g. the user picked a vector font while
-    # the dialog was open): the button does nothing.
+    # No ideal reported (a vector font): Ideal Size does nothing.
     s.update_font_info(13, 0)
     s.font_size_choice = 20
-    s._restore_ideal_font_size()
+    s.ui_act(String("font_ideal"))
     assert_equal(s.font_size_choice, 20)
-    assert_false(s.dirty)
+
+
+def test_settings_theme_choice_commits() raises:
+    var s = Settings()
+    s.open(False)
+    s.ui_set(String("theme"), String("1"))
+    assert_true(s.theme_choice != String("Turbo C++ 3.0"))
+    assert_true(s.dirty)
+
+
+def test_settings_language_editor_round_trip() raises:
+    """Edit opens the language editor on the selected language; adding a
+    server, moving it to the top and saving stores an override with that
+    priority."""
+    var s = Settings()
+    s.open(False, List[LanguageServerOverride](), String("py"))
+    s.ui_act(String("lang_edit"))
+    assert_true(s.language_editor.active)
+    assert_true(s.language_editor.is_existing)
+    var n = len(s.language_editor.candidates)
+    var first = s.language_editor.candidates[0]
+    s.language_editor.ui_act(String("add"))
+    s.language_editor.ui_set(String("command"), String("mylsp --stdio"))
+    assert_equal(len(s.language_editor.candidates), n + 1)
+    assert_equal(s.language_editor.candidates[0], first)
+    for _ in range(n):
+        s.language_editor.ui_act(String("up"))
+    assert_equal(s.language_editor.selected, 0)
+    s.language_editor.ui_act(String("save"))
+    s.consume_language_editor()
+    assert_false(s.language_editor.active)
+    assert_true(s.dirty)
+    assert_equal(len(s.language_overrides), 1)
+    assert_equal(s.language_overrides[0].argvs[0][0], String("mylsp"))
+    assert_equal(s.languages_view[s.selected_language].language_id, String("python"))
 
 
 def test_settings_remove_language_override_marks_dirty() raises:
@@ -1328,18 +1133,12 @@ def test_list_box_mouse_wheel_clamps_to_item_count() raises:
 
 
 def test_settings_languages_list_type_to_jump() raises:
-    """The Languages section list is type-to-jump. After focusing the
-    list, typing a letter must move ``selected_language`` to the
-    first language whose id starts with the typed prefix — no
-    explicit hookup per list, the framework helper drives it."""
+    """The Languages table is type-to-jump: a letter selects the first
+    language starting with it; a ⌘ / Ctrl / Alt chord is a command, not
+    typing, and leaves the selection alone; a Shift-ed capital is typing."""
     var s = Settings()
     s.open(False)
-    # Park the user on the Languages section list.
     s.section = 3
-    s.focus = UInt8(10)  # _FOCUS_LANG_LIST
-    # Find the index where 'r' would land — the first language id
-    # starting with "r" — so the assert is independent of catalog
-    # order changes.
     var expected = -1
     for i in range(len(s.languages_view)):
         var lid = s.languages_view[i].language_id
@@ -1349,49 +1148,21 @@ def test_settings_languages_list_type_to_jump() raises:
                 expected = i
                 break
     if expected < 0:
-        # Bundled JSON missing or no 'r' language — skip rather than
-        # fail; ``built_in_servers`` returning an empty list is
-        # already tested elsewhere.
         return
-    var consumed = s.handle_key(_key(UInt32(ord("r"))))
-    assert_true(consumed)
-    assert_equal(s.selected_language, expected)
-
-
-def test_settings_list_ignores_command_chords() raises:
-    """Regression: a ⌘ / Ctrl chord used to leak into type-to-jump and move
-    the focused list's selection — so ⌘A (select all) or Ctrl+S (save)
-    silently reselected some unrelated language. The keystroke is still
-    consumed (Settings is modal; nothing may fall through to the workspace
-    behind it) but the selection must not budge."""
-    var s = Settings()
-    s.open(False)
-    s.section = 3
-    s.focus = UInt8(10)  # _FOCUS_LANG_LIST
+    var grid = GridForm()
+    var screen = Rect(0, 0, 100, 40)
+    var c = Canvas(100, 40)
+    grid.paint(s.ui(), c, screen)
+    grid.focus_key = String("languages")
     var before = s.selected_language
-    var consumed = s.handle_key(_key(UInt32(ord("r")), MOD_META))
-    assert_true(consumed)
+    for mods in [MOD_META, MOD_CTRL, MOD_ALT]:
+        for e in grid.handle_event(s.ui(), _key(UInt32(ord("r")), mods), screen):
+            if e.key == String("languages"):
+                s.ui_set(e.key, e.value)
     assert_equal(s.selected_language, before)
-    s._type_ahead.reset()
-    _ = s.handle_key(_key(UInt32(ord("r")), MOD_CTRL))
-    assert_equal(s.selected_language, before)
-    s._type_ahead.reset()
-    _ = s.handle_key(_key(UInt32(ord("r")), MOD_ALT))
-    assert_equal(s.selected_language, before)
-    # A capital letter is typing, not a chord — the native host spells it
-    # with MOD_SHIFT, so it must still drive the jump.
-    var expected = -1
-    for i in range(len(s.languages_view)):
-        var lid = s.languages_view[i].language_id
-        if len(lid.as_bytes()) > 0:
-            var first = lid.as_bytes()[0]
-            if first == 0x72 or first == 0x52:  # 'r' / 'R'
-                expected = i
-                break
-    if expected < 0:
-        return
-    s._type_ahead.reset()
-    _ = s.handle_key(_key(UInt32(ord("R")), MOD_SHIFT))
+    grid._type_ahead.reset()
+    for e in grid.handle_event(s.ui(), _key(UInt32(ord("R")), MOD_SHIFT), screen):
+        s.ui_set(e.key, e.value)
     assert_equal(s.selected_language, expected)
 
 

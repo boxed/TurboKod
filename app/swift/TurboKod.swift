@@ -1882,9 +1882,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // macOS-style UI: the native file tree laid over each window's tree cells.
     var trees: [ObjectIdentifier: FileTreeOverlay] = [:]
     // macOS-style UI: the native Settings window (one per Desktop that opened it).
-    var prefsWindows: [ObjectIdentifier: PrefsController] = [:]
     // Declarative dialogs (ui_tree.mojo) projected natively, per window.
     var declarative: [ObjectIdentifier: [DeclarativeController]] = [:]
+    // …and Settings in its own window, with what it opened as sheets on it.
+    var declarativeWindows: [ObjectIdentifier: [DeclarativeController]] = [:]
     // macOS-style UI: Project ▸ Spelling as a sheet, per window.
     var spellingSheets: [ObjectIdentifier: SpellingController] = [:]
     // macOS-style UI: Git history as a sheet, per window.
@@ -2299,7 +2300,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if self.pollGit(v) { changed = true }
                 if self.pollFindBar(v) { changed = true }
                 if self.pollTree(v) { changed = true }
-                if self.pollPrefs(v) { changed = true }
                 if self.pollSpelling(v) { changed = true }
                 if self.pollHistory(v) { changed = true }
                 if self.pollMerge(v) { changed = true }
@@ -3487,7 +3487,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         gitSheets[ObjectIdentifier(v)] = nil
         findBars[ObjectIdentifier(v)] = nil
         trees[ObjectIdentifier(v)] = nil
-        if let p = prefsWindows.removeValue(forKey: ObjectIdentifier(v)) { p.dismiss() }
+        for dc in (declarativeWindows.removeValue(forKey: ObjectIdentifier(v)) ?? []).reversed() {
+            dc.dismiss()
+        }
         declarative[ObjectIdentifier(v)] = nil
         spellingSheets[ObjectIdentifier(v)] = nil
         historySheets[ObjectIdentifier(v)] = nil
@@ -4211,34 +4213,6 @@ extension AppController {
         return true
     }
 
-    /// Open, refresh or retire the native Settings window for `v`.
-    func pollPrefs(_ v: CellView) -> Bool {
-        let id = ObjectIdentifier(v)
-        let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_prefs(v.handle, $0, $1) })
-        if let pc = prefsWindows[id] {
-            guard let data = data else {
-                prefsWindows[id] = nil
-                pc.dismiss()
-                return true
-            }
-            pc.update(data)
-            pc.refreshLists()
-            return false
-        }
-        guard let data = data,
-              let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        else { return false }
-        let pc = PrefsController(values: o, view: v) { [weak self, weak v] in
-            // Closed by the user: the core's Settings closes with it.
-            guard let v = v else { return }
-            self?.prefsWindows[ObjectIdentifier(v)] = nil
-            if v.handle != 0 { tk_desktop_prefs_close(v.handle) }
-        }
-        prefsWindows[id] = pc
-        pc.show()
-        return true
-    }
-
     /// Lay (or lift) the native source list over the file tree's cells.
     func pollTree(_ v: CellView) -> Bool {
         let id = ObjectIdentifier(v)
@@ -4471,8 +4445,20 @@ extension AppController {
         let id = ObjectIdentifier(v)
         let o = readCoreJSON(&nativeDialogBuf, { tk_desktop_ui(v.handle, $0, $1) })
             .flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
-        let stack = o?["stack"] as? [[String: Any]] ?? []
         var live = declarative[id] ?? []
+        var windowed = declarativeWindows[id] ?? []
+        let a = reconcile(&live, o?["stack"] as? [[String: Any]] ?? [], for: v, asWindow: false)
+        let b = reconcile(&windowed, o?["window"] as? [[String: Any]] ?? [], for: v, asWindow: true)
+        declarative[id] = live.isEmpty ? nil : live
+        declarativeWindows[id] = windowed.isEmpty ? nil : windowed
+        return a || b
+    }
+
+    /// Bring `live` in line with the core's `stack` of dialogs (bottom
+    /// first). Level 0 is a sheet on `v`'s window — or, `asWindow`, a window
+    /// of its own; every level above is a sheet on the one below it.
+    private func reconcile(_ live: inout [DeclarativeController], _ stack: [[String: Any]],
+                           for v: CellView, asWindow: Bool) -> Bool {
         var changed = false
         // Retire every level from the first whose dialog changed, top down.
         var keep = 0
@@ -4490,12 +4476,17 @@ extension AppController {
                 if live[i].update(tree) { changed = true }
                 continue
             }
-            // A dialog opened by another goes on top of that one's sheet.
-            guard let win = i == 0 ? v.window : live[i - 1].window,
-                  win.isVisible, win.attachedSheet == nil else { break }
-            let dc = DeclarativeController(name: name, view: v)
-            _ = dc.update(tree)
-            dc.present(in: win)
+            let dc = DeclarativeController(name: name, view: v, asWindow: asWindow && i == 0)
+            if asWindow && i == 0 {
+                _ = dc.update(tree)
+                dc.show()
+            } else {
+                // A dialog opened by another goes on top of that one's sheet.
+                guard let win = i == 0 ? v.window : live[i - 1].window,
+                      win.isVisible, win.attachedSheet == nil else { break }
+                _ = dc.update(tree)
+                dc.present(in: win)
+            }
             live.append(dc)
             changed = true
             // Scripted screenshots: TK_CAPTURE_UI='{"<name>": [[is_action,
@@ -4506,7 +4497,6 @@ extension AppController {
                 dc.send(evs)
             }
         }
-        declarative[id] = live.isEmpty ? nil : live
         return changed
     }
 
@@ -7180,255 +7170,6 @@ final class CodePreview: NSTextView {
 }
 
 
-// MARK: - macOS-style UI: Settings window
-//
-// The everyday settings as a native window — General, Appearance, Language
-// Features — over the same `Settings` state the grid window edits: each
-// change goes in through `tk_desktop_prefs_set` and the Desktop's per-frame
-// settings sync applies it, side effects and persistence included.
-// "Advanced Settings…" hands the open Settings to the grid window, which has
-// every section (language servers, spelling dictionaries, projects).
-
-final class PrefsController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
-    private let window: NSWindow
-    private weak var view: CellView?
-    private let onClose: () -> Void
-    private var closingForAdvanced = false
-    private var dismissed = false
-    private let preview = CodePreview()
-    private let themePopup = NSPopUpButton()
-    private let fontPopup = NSPopUpButton()
-    private let sizePopup = NSPopUpButton()
-    private var builtins: [String] = []
-    private var lastData = Data()
-    private lazy var lists = PrefsLists(view: view, window: window)
-    private let tabView = NSTabView()
-
-    func refreshLists() { lists.refresh() }
-
-    private static let lsp: [(String, String)] = [
-        ("ls_format_on_save", "Format on save"),
-        ("ls_signature_help", "Signature help while typing"),
-        ("ls_document_highlight", "Highlight occurrences of the symbol at the caret"),
-        ("ls_document_links", "Clickable links in documents"),
-        ("ls_inlay_hints", "Inlay hints (inline types and parameter names)"),
-        ("ls_code_lens", "Code lens (actionable annotations)"),
-        ("ls_document_colors", "Color swatches"),
-        ("ls_linked_editing", "Linked editing (rename matching tags together)"),
-        ("ls_server_progress", "Show language-server progress"),
-    ]
-
-    init(values o: [String: Any], view: CellView, onClose: @escaping () -> Void) {
-        self.view = view
-        self.onClose = onClose
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 540),
-                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        super.init()
-        window.title = "Settings"
-        window.isReleasedWhenClosed = false
-        window.delegate = self
-        build(o)
-    }
-
-    // MARK: building
-
-    private func set(_ key: String, _ value: Any) {
-        guard let h = view?.handle, h != 0,
-              let d = try? JSONSerialization.data(withJSONObject: [key: value]),
-              let json = String(data: d, encoding: .utf8) else { return }
-        withUTF8Arg(json) { p, l in tk_desktop_prefs_set(h, p, l) }
-    }
-
-    private func check(_ title: String, _ key: String, _ o: [String: Any]) -> NSButton {
-        let b = NSButton(checkboxWithTitle: title, target: self, action: #selector(checkChanged(_:)))
-        b.identifier = NSUserInterfaceItemIdentifier(key)
-        b.state = (o[key] as? Bool ?? false) ? .on : .off
-        return b
-    }
-
-    @objc private func checkChanged(_ b: NSButton) {
-        guard let key = b.identifier?.rawValue else { return }
-        set(key, b.state == .on)
-    }
-
-    private func popup(_ items: [String], _ selected: Int, _ key: String) -> NSPopUpButton {
-        let p = NSPopUpButton()
-        p.addItems(withTitles: items)
-        p.selectItem(at: selected)
-        p.identifier = NSUserInterfaceItemIdentifier(key)
-        p.target = self
-        p.action = #selector(popupChanged(_:))
-        return p
-    }
-
-    @objc private func popupChanged(_ p: NSPopUpButton) {
-        switch p.identifier?.rawValue ?? "" {
-        case "auto_save": set("auto_save", p.indexOfSelectedItem == 1)
-        case "wrap_mode": set("wrap_mode", p.indexOfSelectedItem)
-        default: break
-        }
-    }
-
-    private func numberField(_ value: Int, empty: Int, _ key: String) -> NSTextField {
-        let f = NSTextField(string: value == empty || value < 0 ? "" : "\(value)")
-        f.placeholderString = key == "max_open_windows" ? "No limit" : "Off"
-        f.identifier = NSUserInterfaceItemIdentifier(key)
-        f.delegate = self
-        f.widthAnchor.constraint(equalToConstant: 80).isActive = true
-        return f
-    }
-
-    func controlTextDidEndEditing(_ obj: Notification) {
-        guard let f = obj.object as? NSTextField, let key = f.identifier?.rawValue else { return }
-        let n = Int(f.stringValue.trimmingCharacters(in: .whitespaces))
-        set(key, n ?? (key == "max_open_windows" ? 0 : -1))
-    }
-
-    private func label(_ s: String) -> NSTextField {
-        let l = NSTextField(labelWithString: s)
-        l.alignment = .right
-        return l
-    }
-
-    private func pane(_ rows: [[NSView]]) -> NSView {
-        let grid = NSGridView(views: rows)
-        grid.rowSpacing = 10
-        grid.columnSpacing = 10
-        grid.column(at: 0).xPlacement = .trailing
-        grid.rowAlignment = .firstBaseline
-        grid.translatesAutoresizingMaskIntoConstraints = false
-        let v = NSView()
-        v.addSubview(grid)
-        NSLayoutConstraint.activate([
-            grid.topAnchor.constraint(equalTo: v.topAnchor, constant: 20),
-            grid.centerXAnchor.constraint(equalTo: v.centerXAnchor),
-            grid.leadingAnchor.constraint(greaterThanOrEqualTo: v.leadingAnchor, constant: 20),
-        ])
-        return v
-    }
-
-    private func build(_ o: [String: Any]) {
-        let empty = NSGridCell.emptyContentView
-        let general = pane([
-            [label("Saving:"), popup(["Manual", "Automatic"], (o["auto_save"] as? Bool ?? false) ? 1 : 0, "auto_save")],
-            [empty, check("Trim trailing whitespace on save", "trim_trailing_whitespace", o)],
-            [empty, check("Ensure a final newline on save", "ensure_final_newline", o)],
-            [label("Line wrapping:"), popup(["None", "Soft", "Smart"], o["wrap_mode"] as? Int ?? 0, "wrap_mode")],
-            [label("Smart wrap at commas:"), numberField(o["comma_threshold"] as? Int ?? -1, empty: -1, "comma_threshold")],
-            [label("Open documents:"), numberField(o["max_open_windows"] as? Int ?? 0, empty: 0, "max_open_windows")],
-            [empty, check("Compress keyword arguments", "compress_kwargs", o)],
-            [empty, check("Blinking caret", "cursor_blink", o)],
-        ])
-
-        builtins = Array((o["fonts"] as? [String] ?? []).prefix(2))
-        themePopup.addItems(withTitles: o["themes"] as? [String] ?? [])
-        themePopup.selectItem(withTitle: o["theme"] as? String ?? "")
-        fontPopup.addItems(withTitles: o["fonts"] as? [String] ?? [])
-        fontPopup.selectItem(withTitle: o["font"] as? String ?? "")
-        sizePopup.addItems(withTitles: CodePreview.sizes.map { $0 == 0 ? "Default" : "\($0) pt" })
-        sizePopup.selectItem(at: CodePreview.sizes.firstIndex(of: o["font_size"] as? Int ?? 0) ?? 0)
-        for p in [themePopup, fontPopup, sizePopup] {
-            p.target = self
-            p.action = #selector(appearanceChanged(_:))
-        }
-        let look = NSButton(checkboxWithTitle: "macOS-style UI (native tabs, sheets and pickers)",
-                            target: self, action: #selector(lookChanged(_:)))
-        look.state = (o["native_ui"] as? Bool ?? false) ? .on : .off
-        preview.heightAnchor.constraint(equalToConstant: 150).isActive = true
-        preview.widthAnchor.constraint(equalToConstant: 460).isActive = true
-        let appearance = pane([
-            [empty, look],
-            [label("Theme:"), themePopup],
-            [label("Font:"), fontPopup],
-            [label("Size:"), sizePopup],
-            [empty, preview],
-        ])
-        themePopup.widthAnchor.constraint(equalToConstant: 260).isActive = true
-        fontPopup.widthAnchor.constraint(equalToConstant: 260).isActive = true
-
-        var lspRows: [[NSView]] = []
-        for (key, title) in Self.lsp { lspRows.append([empty, check(title, key, o)]) }
-        let features = pane(lspRows)
-
-        let tabs = tabView
-        for (title, v) in [("General", general), ("Appearance", appearance), ("Language Features", features),
-                           ("Languages", lists.languagesPane()), ("Spelling", lists.dictionariesPane()),
-                           ("Projects", lists.projectsPane())] {
-            let item = NSTabViewItem(identifier: title)
-            item.label = title
-            item.view = v
-            tabs.addTabViewItem(item)
-        }
-        let content = NSView()
-        tabs.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(tabs)
-        NSLayoutConstraint.activate([
-            tabs.topAnchor.constraint(equalTo: content.topAnchor, constant: 12),
-            tabs.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
-            tabs.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
-            tabs.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
-        ])
-        window.contentView = content
-        renderPreview()
-    }
-
-    @objc private func appearanceChanged(_ p: NSPopUpButton) {
-        if p === themePopup { set("theme", themePopup.titleOfSelectedItem ?? "") }
-        if p === fontPopup { set("font", fontPopup.titleOfSelectedItem ?? "") }
-        if p === sizePopup { set("font_size", CodePreview.sizes[max(0, sizePopup.indexOfSelectedItem)]) }
-        renderPreview()
-    }
-
-    @objc private func lookChanged(_ b: NSButton) {
-        guard let v = view, v.handle != 0 else { return }
-        _ = withUTF8Arg("view:native_ui") { p, l in
-            tk_desktop_menu_invoke(v.handle, p, l, Int64(v.cols()), Int64(v.rows()))
-        }
-    }
-
-    private func renderPreview() {
-        var pal = [UInt32](repeating: 0, count: 256)
-        if let h = view?.handle, h != 0 {
-            pal.withUnsafeMutableBufferPointer { b in
-                _ = tk_theme_palette(h, Int64(Int(bitPattern: b.baseAddress)), Int64(b.count))
-            }
-        }
-        preview.render(palette: pal,
-                       font: CodePreview.font(label: fontPopup.titleOfSelectedItem ?? "",
-                                              size: CodePreview.sizes[max(0, sizePopup.indexOfSelectedItem)],
-                                              builtins: builtins))
-    }
-
-    /// The core applies a theme on its next frame; re-read the palette when
-    /// its state moves so the preview follows.
-    func update(_ data: Data) {
-        guard data != lastData else { return }
-        lastData = data
-        renderPreview()
-    }
-
-    func show() {
-        refreshLists()
-        if isCapturing, let t = Int(ProcessInfo.processInfo.environment["TK_CAPTURE_PREFS_TAB"] ?? "") {
-            tabView.selectTabViewItem(at: t)   // scripted screenshots
-        }
-        window.center()
-        window.makeKeyAndOrderFront(nil)
-    }
-
-    func dismiss() {
-        guard !dismissed else { return }
-        dismissed = true
-        closingForAdvanced = true   // the core already closed it
-        window.close()
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        if !closingForAdvanced { onClose() }
-    }
-}
-
-
 // MARK: - macOS-style UI: Spelling sheet
 //
 // Project ▸ Spelling: the core runs the incremental project scan and keeps
@@ -8256,280 +7997,6 @@ final class ReviewBar: NSVisualEffectView {
 }
 
 
-// MARK: - Settings list sections (Languages, Spelling, Projects)
-//
-// Tables over `tk_desktop_prefs_lists`, refetched every tick but redrawn only
-// on change (a dictionary install finishes asynchronously). Each button is a
-// `tk_desktop_prefs_list_act` op that runs the in-grid section's own method.
-
-final class PrefsLists: NSObject, NSTableViewDataSource, NSTableViewDelegate {
-    private weak var view: CellView?
-    private weak var window: NSWindow?
-    private var languages: [[Any]] = []
-    private var dictionaries: [[Any]] = []
-    private var projects: [String] = []
-    private var lastData = Data()
-    private let langTable = NSTableView()
-    private let dictTable = NSTableView()
-    private let projTable = NSTableView()
-    private let removeOverride = NSButton(title: "Remove Override", target: nil, action: nil)
-    private let install = NSButton(title: "Install", target: nil, action: nil)
-    private let uninstall = NSButton(title: "Remove", target: nil, action: nil)
-    private var buf = [UInt8](repeating: 0, count: 1 << 15)
-
-    init(view: CellView?, window: NSWindow) {
-        self.view = view
-        self.window = window
-        super.init()
-    }
-
-    // MARK: data
-
-    func refresh() {
-        guard let h = view?.handle, h != 0 else { return }
-        var n = 0
-        while true {
-            n = buf.withUnsafeMutableBufferPointer { b -> Int in
-                Int(tk_desktop_prefs_lists(h, Int64(Int(bitPattern: b.baseAddress)), Int64(b.count)))
-            }
-            if n <= buf.count { break }
-            buf = [UInt8](repeating: 0, count: n)
-        }
-        guard n > 0 else { return }
-        let data = Data(buf[0..<n])
-        guard data != lastData,
-              let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
-        lastData = data
-        languages = o["languages"] as? [[Any]] ?? []
-        dictionaries = o["dictionaries"] as? [[Any]] ?? []
-        projects = o["projects"] as? [String] ?? []
-        for t in [langTable, dictTable, projTable] {
-            let sel = t.selectedRowIndexes
-            t.reloadData()
-            t.selectRowIndexes(sel, byExtendingSelection: false)
-        }
-        updateButtons()
-    }
-
-    private func act(_ op: Int, _ idx: Int, _ payload: Any = "") {
-        guard let h = view?.handle, h != 0 else { return }
-        let json = (try? JSONSerialization.data(withJSONObject: payload, options: .fragmentsAllowed))
-            .flatMap { String(data: $0, encoding: .utf8) } ?? "\"\""
-        withUTF8Arg(json) { p, l in tk_desktop_prefs_list_act(h, Int64(op), Int64(idx), p, l) }
-        lastData = Data()
-        // The core applies and persists on its next frame.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in self?.refresh() }
-    }
-
-    // MARK: panes
-
-    private func table(_ t: NSTableView, _ cols: [(String, String, CGFloat)]) -> NSScrollView {
-        for (id, title, w) in cols {
-            let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
-            c.title = title
-            c.width = w
-            t.addTableColumn(c)
-        }
-        t.usesAlternatingRowBackgroundColors = true
-        t.dataSource = self
-        t.delegate = self
-        let s = NSScrollView()
-        s.documentView = t
-        s.hasVerticalScroller = true
-        s.borderType = .bezelBorder
-        return s
-    }
-
-    private func pane(_ intro: String, _ scroll: NSScrollView, _ buttons: [NSButton]) -> NSView {
-        let note = NSTextField(wrappingLabelWithString: intro)
-        note.textColor = .secondaryLabelColor
-        note.font = .systemFont(ofSize: 12)
-        let bar = NSStackView(views: buttons + [NSView()])
-        let v = NSView()
-        for x in [note, scroll, bar] as [NSView] {
-            x.translatesAutoresizingMaskIntoConstraints = false
-            v.addSubview(x)
-            NSLayoutConstraint.activate([
-                x.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
-                x.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -16),
-            ])
-        }
-        NSLayoutConstraint.activate([
-            note.topAnchor.constraint(equalTo: v.topAnchor, constant: 14),
-            scroll.topAnchor.constraint(equalTo: note.bottomAnchor, constant: 8),
-            bar.topAnchor.constraint(equalTo: scroll.bottomAnchor, constant: 8),
-            bar.bottomAnchor.constraint(equalTo: v.bottomAnchor, constant: -14),
-        ])
-        return v
-    }
-
-    private func button(_ title: String, _ sel: Selector) -> NSButton {
-        let b = NSButton(title: title, target: self, action: sel)
-        return b
-    }
-
-    func languagesPane() -> NSView {
-        langTable.target = self
-        langTable.doubleAction = #selector(editLanguage)
-        removeOverride.target = self
-        removeOverride.action = #selector(removeLanguage)
-        return pane("Which language server runs for which file types. Your changes override the built-in choices.",
-                    table(langTable, [("id", "Language", 120), ("types", "File types", 180), ("server", "Server", 300)]),
-                    [button("Add…", #selector(addLanguage)), button("Edit…", #selector(editLanguage)), removeOverride])
-    }
-
-    func dictionariesPane() -> NSView {
-        install.target = self
-        install.action = #selector(installDictionary)
-        uninstall.target = self
-        uninstall.action = #selector(removeDictionary)
-        return pane("Extra spell-check dictionaries for other languages, downloaded once.",
-                    table(dictTable, [("name", "Dictionary", 360), ("status", "Status", 160)]),
-                    [install, uninstall])
-    }
-
-    func projectsPane() -> NSView {
-        return pane("Folders that hold your projects — their subfolders are offered when you open a project.",
-                    table(projTable, [("dir", "Folder", 560)]),
-                    [button("Add…", #selector(addProject)), button("Remove", #selector(removeProject))])
-    }
-
-    // MARK: table
-
-    func numberOfRows(in tableView: NSTableView) -> Int {
-        tableView === langTable ? languages.count : tableView === dictTable ? dictionaries.count : projects.count
-    }
-
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row i: Int) -> NSView? {
-        let id = tableColumn?.identifier.rawValue ?? ""
-        var text = ""
-        var color = NSColor.labelColor
-        if tableView === langTable {
-            let r = languages[i]
-            switch id {
-            case "id":
-                text = r[0] as? String ?? ""
-                if r.count > 3 && (r[3] as? Bool ?? false) { text += "  (yours)" }
-            case "types": text = r[1] as? String ?? ""
-            default:
-                text = ((r[2] as? String ?? "").components(separatedBy: "\n").first ?? "")
-                if text.isEmpty { text = "none"; color = .secondaryLabelColor }
-            }
-        } else if tableView === dictTable {
-            let r = dictionaries[i]
-            if id == "name" { text = r[0] as? String ?? "" } else {
-                let installed = r.count > 1 && (r[1] as? Bool ?? false)
-                text = installed ? "Installed" : "Not installed"
-                color = installed ? .systemGreen : .secondaryLabelColor
-            }
-        } else {
-            text = projects[i]
-        }
-        let l = NSTextField(labelWithString: text)
-        l.lineBreakMode = .byTruncatingMiddle
-        l.textColor = color
-        return l
-    }
-
-    func tableViewSelectionDidChange(_ notification: Notification) { updateButtons() }
-
-    private func updateButtons() {
-        let lr = langTable.selectedRow
-        removeOverride.isEnabled = lr >= 0 && lr < languages.count
-            && languages[lr].count > 3 && (languages[lr][3] as? Bool ?? false)
-        let dr = dictTable.selectedRow
-        let installed = dr >= 0 && dr < dictionaries.count && dictionaries[dr].count > 1
-            && (dictionaries[dr][1] as? Bool ?? false)
-        install.isEnabled = dr >= 0 && !installed
-        uninstall.isEnabled = dr >= 0 && installed
-    }
-
-    // MARK: actions
-
-    @objc private func addProject() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.prompt = "Add"
-        guard let w = window else { return }
-        panel.beginSheetModal(for: w) { [weak self] r in
-            guard r == .OK, let url = panel.url else { return }
-            self?.act(0, -1, url.path)
-        }
-    }
-
-    @objc private func removeProject() {
-        guard projTable.selectedRow >= 0 else { return }
-        act(1, projTable.selectedRow)
-    }
-
-    @objc private func installDictionary() {
-        guard dictTable.selectedRow >= 0 else { return }
-        act(2, dictTable.selectedRow)
-    }
-
-    @objc private func removeDictionary() {
-        guard dictTable.selectedRow >= 0 else { return }
-        act(3, dictTable.selectedRow)
-    }
-
-    @objc private func removeLanguage() {
-        guard langTable.selectedRow >= 0 else { return }
-        act(5, langTable.selectedRow)
-    }
-
-    @objc private func addLanguage() { languageSheet(row: nil) }
-
-    @objc private func editLanguage() {
-        let r = langTable.clickedRow >= 0 ? langTable.clickedRow : langTable.selectedRow
-        guard r >= 0, r < languages.count else { return }
-        languageSheet(row: languages[r])
-    }
-
-    /// Add / edit a language's routing: its id, the file types, and the
-    /// server command lines in priority order (the first one found runs).
-    private func languageSheet(row: [Any]?) {
-        guard let w = window else { return }
-        let alert = NSAlert()
-        alert.messageText = row == nil ? "Add Language" : "Edit \(row?[0] as? String ?? "")"
-        alert.informativeText = "Server commands are tried top to bottom; the first one installed runs. Leave it empty for no language server."
-        let id = NSTextField(string: row?[0] as? String ?? "")
-        id.isEditable = row == nil
-        id.placeholderString = "e.g. elixir"
-        let types = NSTextField(string: row?[1] as? String ?? "")
-        types.placeholderString = "e.g. ex exs"
-        let sv = NSScrollView(frame: NSRect(x: 0, y: 0, width: 340, height: 90))
-        let servers = NSTextView(frame: sv.bounds)
-        servers.isRichText = false
-        servers.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        servers.string = row?[2] as? String ?? ""
-        servers.autoresizingMask = [.width]
-        sv.documentView = servers
-        sv.hasVerticalScroller = true
-        sv.borderType = .bezelBorder
-        sv.heightAnchor.constraint(equalToConstant: 90).isActive = true
-        func label(_ s: String) -> NSTextField { let l = NSTextField(labelWithString: s); l.alignment = .right; return l }
-        let grid = NSGridView(views: [[label("Language:"), id], [label("File types:"), types], [label("Servers:"), sv]])
-        grid.rowSpacing = 8
-        grid.column(at: 1).width = 340
-        grid.rowAlignment = .firstBaseline
-        grid.layoutSubtreeIfNeeded()
-        grid.frame = NSRect(origin: .zero, size: grid.fittingSize)
-        alert.accessoryView = grid
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
-        alert.window.initialFirstResponder = row == nil ? id : types
-        alert.beginSheetModal(for: w) { [weak self] r in
-            guard r == .alertFirstButtonReturn else { return }
-            let lines = servers.string.components(separatedBy: "\n")
-                .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-            self?.act(4, -1, ["id": id.stringValue.trimmingCharacters(in: .whitespaces),
-                              "file_types": types.stringValue, "servers": lines])
-        }
-    }
-}
-
-
 // MARK: - macOS-style UI: tool-pane headers
 //
 // One bar over each docked pane's header row: title, the pane's commands
@@ -8769,10 +8236,14 @@ final class EditorScroller: NSView {
 // typed in keeps its focus and cursor.
 
 final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDataSource,
-                                   NSTableViewDelegate, NSTabViewDelegate {
+                                   NSTableViewDelegate, NSTabViewDelegate, NSWindowDelegate {
     let name: String
     private weak var view: CellView?
-    private let panel: NSPanel
+    private let panel: NSWindow
+    /// A window of its own (Settings) rather than a sheet: titled in its
+    /// title bar, closed with its close button.
+    private let asWindow: Bool
+    private var cancelKey = ""
     private let titleLabel = NSTextField(labelWithString: "")
     private let host = NSView()
     private var shape = ""
@@ -8788,12 +8259,18 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
 
     var window: NSWindow { panel }
 
-    init(name: String, view: CellView) {
+    init(name: String, view: CellView, asWindow: Bool = false) {
         self.name = name
         self.view = view
-        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 480, height: 240),
-                        styleMask: [.titled], backing: .buffered, defer: true)
+        self.asWindow = asWindow
+        panel = asWindow
+            ? NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 240),
+                       styleMask: [.titled, .closable], backing: .buffered, defer: true)
+            : NSPanel(contentRect: NSRect(x: 0, y: 0, width: 480, height: 240),
+                      styleMask: [.titled], backing: .buffered, defer: true)
         super.init()
+        panel.isReleasedWhenClosed = false
+        panel.delegate = self
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         titleLabel.lineBreakMode = .byTruncatingMiddle
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -8808,15 +8285,30 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
         }
         NSLayoutConstraint.activate([
             titleLabel.topAnchor.constraint(equalTo: content.topAnchor, constant: 16),
-            host.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 12),
+            host.topAnchor.constraint(equalTo: asWindow ? content.topAnchor : titleLabel.bottomAnchor,
+                                      constant: asWindow ? 16 : 12),
             host.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
         ])
+        titleLabel.isHidden = asWindow
         panel.contentView = content
     }
 
     func present(in win: NSWindow) {
         fitPanel()
         win.beginSheet(panel, completionHandler: nil)
+    }
+
+    func show() {
+        fitPanel()
+        panel.center()
+        panel.makeKeyAndOrderFront(nil)
+    }
+
+    /// The close button runs the dialog's cancel action; the core then
+    /// drops it and `dismiss` follows.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if !cancelKey.isEmpty { act(cancelKey) }
+        return false
     }
 
     private func fitPanel() {
@@ -8828,7 +8320,7 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
     func dismiss() {
         guard !dismissed else { return }
         dismissed = true
-        panel.sheetParent?.endSheet(panel)
+        if asWindow { panel.orderOut(nil) } else { panel.sheetParent?.endSheet(panel) }
     }
 
     // MARK: events
@@ -8859,6 +8351,8 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
         if NSDictionary(dictionary: tree).isEqual(to: lastTree) { return false }
         lastTree = tree
         titleLabel.stringValue = tree["text"] as? String ?? ""
+        panel.title = titleLabel.stringValue
+        cancelKey = tree["key"] as? String ?? ""
         let body = (tree["kids"] as? [[String: Any]])?.first ?? [:]
         let sh = Self.shapeOf(body)
         if sh != shape {
@@ -8875,7 +8369,7 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
                 v.topAnchor.constraint(equalTo: host.topAnchor),
                 v.bottomAnchor.constraint(equalTo: host.bottomAnchor),
             ])
-            if !dismissed, panel.sheetParent != nil { fitPanel() }
+            if !dismissed, panel.sheetParent != nil || (asWindow && panel.isVisible) { fitPanel() }
         }
         apply(body, path: "0")
         return true
@@ -8962,7 +8456,11 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
             f.placeholderString = n["ph"] as? String
             f.delegate = self
             f.identifier = NSUserInterfaceItemIdentifier(key)
-            f.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
+            if let chars = n["n"] as? Int, chars > 0 {
+                f.widthAnchor.constraint(equalToConstant: CGFloat(chars) * 9 + 24).isActive = true
+            } else {
+                f.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
+            }
             out = f
             if has(n, Self.BROWSE) {
                 let b = NSButton(title: "Browse…", target: self, action: #selector(browse(_:)))
@@ -9019,6 +8517,11 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
             let b = NSBox()
             b.boxType = .separator
             out = b
+        case "preview":
+            let p = CodePreview()
+            p.heightAnchor.constraint(equalToConstant: 150).isActive = true
+            p.widthAnchor.constraint(greaterThanOrEqualToConstant: 420).isActive = true
+            out = p
         default:
             let sp = NSView()
             sp.setContentHuggingPriority(.defaultLow, for: .vertical)
@@ -9054,6 +8557,18 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
             if let p = v as? NSPopUpButton { p.selectItem(at: n["n"] as? Int ?? 0); p.isEnabled = enabled }
         case "button":
             if let b = v as? NSButton { b.title = n["text"] as? String ?? ""; b.isEnabled = enabled }
+        case "preview":
+            if let p = v as? CodePreview {
+                var pal = [UInt32](repeating: 0, count: 256)
+                if let h = view?.handle, h != 0 {
+                    pal.withUnsafeMutableBufferPointer { b in
+                        _ = tk_theme_palette(h, Int64(Int(bitPattern: b.baseAddress)), Int64(b.count))
+                    }
+                }
+                p.render(palette: pal, font: CodePreview.font(
+                    label: n["text"] as? String ?? "", size: n["n"] as? Int ?? 0,
+                    builtins: n["opts"] as? [String] ?? []))
+            }
         case "tabs":
             if let tv = v as? NSTabView, let cur = tv.selectedTabViewItem {
                 let sel = n["n"] as? Int ?? 0

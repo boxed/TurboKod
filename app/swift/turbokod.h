@@ -143,8 +143,9 @@ int32_t tk_desktop_native_prompt_answer(int64_t h, int64_t ptr, int64_t len,
                                         int64_t ok);
 void tk_desktop_native_save_as_answer(int64_t h, int64_t ptr, int64_t len);
 void tk_desktop_native_choice_answer(int64_t h, int64_t index);
-// Declarative dialogs (ui_tree.mojo): _ui writes {stack: [{name, tree}]} for the
-// open ones, bottom first (0 = none natively); _ui_event sends {name, events: [[is_action, key, value]]}.
+// Declarative dialogs (ui_tree.mojo): _ui writes {stack: [{name, tree}], window:
+// [{name, tree}]} for the open ones, bottom first — stack the modal sheets, window
+// Settings in its own window (0 = none natively); _ui_event sends {name, events: [[is_action, key, value]]}.
 int64_t tk_desktop_ui(int64_t h, int64_t out_ptr, int64_t cap);
 void tk_desktop_ui_event(int64_t h, int64_t ptr, int64_t len);
 void tk_desktop_native_color_answer(int64_t h, int64_t rgb, int64_t mode, int64_t ok);
@@ -184,10 +185,6 @@ void tk_desktop_picker_close(int64_t h);
 // macOS-style UI file tree: _tree writes {x, y, w, h (cells), root, selected,
 // focused, entries: [[name, depth, is_dir, expanded, modified, path]]} (0 = not
 // shown natively); _tree_act: op 0 select, 1 toggle, 2 open, 3 menu at (x, y).
-// macOS-style UI Settings window over the same Settings state: _prefs writes the
-// values + theme / font lists (0 = not open natively), _prefs_set takes a JSON
-// {key: value}, _prefs_close closes it, _prefs_advanced hands over to the grid
-// Settings window (every section).
 // macOS-style UI Project ▸ Spelling sheet: _spelling state (0 = not up), _rows
 // [[word, count, path, line]] in display order, _act 1 = add rows (JSON index
 // array) to the project dictionary, 2 = to the user's, 0 = close.
@@ -208,13 +205,6 @@ void tk_desktop_history_act(int64_t h, int64_t op, int64_t idx);
 int64_t tk_desktop_spelling(int64_t h, int64_t out_ptr, int64_t cap);
 int64_t tk_desktop_spelling_rows(int64_t h, int64_t out_ptr, int64_t cap);
 void tk_desktop_spelling_act(int64_t h, int64_t action, int64_t ptr, int64_t len);
-int64_t tk_desktop_prefs(int64_t h, int64_t out_ptr, int64_t cap);
-void tk_desktop_prefs_set(int64_t h, int64_t ptr, int64_t len);
-// The list sections (languages, dictionaries, projects) and their buttons.
-int64_t tk_desktop_prefs_lists(int64_t h, int64_t out_ptr, int64_t cap);
-void tk_desktop_prefs_list_act(int64_t h, int64_t op, int64_t idx, int64_t ptr, int64_t len);
-void tk_desktop_prefs_close(int64_t h);
-void tk_desktop_prefs_advanced(int64_t h);
 int64_t tk_desktop_tree(int64_t h, int64_t cols, int64_t rows, int64_t out_ptr, int64_t cap);
 // macOS-style UI review mode: _review {mode: picker {tab, labels, cursor} |
 // reviewing {title, files, cur_file, change_index, change_total, num, den,

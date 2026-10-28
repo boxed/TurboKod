@@ -33,7 +33,9 @@ from .buttons import (
 from .canvas import Canvas
 from .cell import Cell
 from .colors import (
-    Attr, BLACK, BLUE, CYAN, DARK_GRAY, GREEN, LIGHT_GRAY, RED, WHITE, YELLOW,
+    Attr, BLACK, BLUE, CYAN, DARK_GRAY, EDITOR_BG, EDITOR_FG, GREEN,
+    LIGHT_GRAY, RED, SYN_COMMENT, SYN_DECORATOR, SYN_IDENT, SYN_KEYWORD,
+    SYN_NUMBER, SYN_OPERATOR, SYN_STRING, WHITE, YELLOW,
 )
 from .dropdown import DROPDOWN_HIT_BODY, DROPDOWN_HIT_POPUP, Dropdown
 from .events import (
@@ -45,14 +47,15 @@ from .file_dialog import FileDialog
 from .geometry import Point, Rect, center_in
 from .list_box import ListBox
 from .painter import Painter
-from .string_utils import display_columns
+from .string_utils import display_columns, truncate_to_columns
 from .text_field import TextField
 from .type_ahead import TypeAhead, is_type_ahead_key, type_ahead_pick
 from .ui_tree import (
     UI_BROWSE, UI_BUTTON, UI_CANCEL, UI_CENTER, UI_CHECK, UI_CHECKABLE, UI_CHOICE,
     UI_DEFAULT, UI_DESTRUCTIVE, UI_DIALOG, UI_FORM, UI_HEADING, UI_HOTKEY,
     UI_HSTACK, UI_LABEL, UI_ROW, UI_SECONDARY, UI_SEPARATOR, UI_SPACER,
-    UI_DISABLED, UI_TABLE, UI_TABS, UI_TEXT, UI_VSTACK, UINode, ui_button,
+    UI_DISABLED, UI_PREVIEW, UI_TABLE, UI_TABS, UI_TEXT, UI_VSTACK, UINode,
+    ui_button,
 )
 from .window import close_button_clicked, paint_modal_frame, paint_window_title
 
@@ -63,6 +66,9 @@ comptime _LABEL_GAP = 2
 comptime _TEXT_MIN_W = 24
 comptime _TABLE_MIN_W = 30
 comptime _CHOICE_MIN_W = 10
+comptime _COLUMN_MAX_W = 24
+"""A table column (but the last) never grows past this; longer cells are
+cut with an ellipsis, so one long value can't push the rest off."""
 comptime _BROWSE_PREFIX = "browse:"
 """The grid's own action for a path field's Browse button — handled here,
 never reported to the dialog."""
@@ -116,7 +122,18 @@ def _column_widths(n: UINode) -> List[Int]:
                 w = 3
             if w > widths[c]:
                 widths[c] = w
+    for c in range(len(widths) - 1):
+        widths[c] = min(widths[c], _COLUMN_MAX_W)
     return widths^
+
+
+def _fit(text: String, width: Int) -> String:
+    """``text`` cut to ``width`` columns, with an ellipsis when it was cut."""
+    if display_columns(text) <= width:
+        return text
+    if width <= 1:
+        return truncate_to_columns(text, width)
+    return truncate_to_columns(text, width - 1) + String("…")
 
 
 def _form_label(text: String) -> String:
@@ -132,7 +149,8 @@ def _measure(n: UINode) -> Tuple[Int, Int]:
     if k == UI_LABEL:
         return (display_columns(n.text), 1)
     if k == UI_TEXT:
-        var w = max(_TEXT_MIN_W, display_columns(n.value) + 2)
+        var w = n.number + 2 if n.number > 0 \
+            else max(_TEXT_MIN_W, display_columns(n.value) + 2)
         if n.has(UI_BROWSE):
             return (w + _LABEL_GAP + _measure(_browse_button(n))[0], 2)
         return (w, 1)
@@ -149,6 +167,8 @@ def _measure(n: UINode) -> Tuple[Int, Int]:
         return (1, 1)
     if k == UI_SPACER:
         return (0, 0)
+    if k == UI_PREVIEW:
+        return (40, len(_preview_lines()))
     if k == UI_TABLE:
         var widths = _column_widths(n)
         var w = 2
@@ -232,8 +252,10 @@ def _browse_seed(path: String) -> String:
 def _stretches(n: UINode) -> Bool:
     """Takes spare width in a row (fields and tables), versus keeping its
     natural width (labels, checkboxes, choices, buttons)."""
-    return n.kind == UI_TEXT or n.kind == UI_TABLE or n.kind == UI_SEPARATOR \
-        or n.kind == UI_FORM or n.kind == UI_VSTACK or n.kind == UI_TABS
+    return (n.kind == UI_TEXT and n.number == 0) or n.kind == UI_TABLE \
+        or n.kind == UI_SEPARATOR \
+        or n.kind == UI_FORM or n.kind == UI_VSTACK or n.kind == UI_TABS \
+        or n.kind == UI_PREVIEW
 
 
 def _arrange(n: UINode, r: Rect, mut out: List[_Placed]):
@@ -387,6 +409,10 @@ struct GridForm(Movable):
     var _browse_key: String
     """The path field the open file dialog will fill."""
     var _type_ahead: TypeAhead
+    var fill: Bool
+    """Lay the dialog out over the whole screen rather than centered at its
+    natural size — for a host window that is the dialog (classic macOS
+    Settings)."""
 
     def __init__(out self):
         self.focus_key = String("")
@@ -406,6 +432,7 @@ struct GridForm(Movable):
         self._file_dialog = FileDialog()
         self._browse_key = String("")
         self._type_ahead = TypeAhead()
+        self.fill = False
 
     def reset(mut self):
         self.focus_key = String("")
@@ -484,7 +511,7 @@ struct GridForm(Movable):
         var m = _measure(root)
         var w = min(m[0], screen.width() - 2)
         var h = min(m[1], screen.height() - 2)
-        self._frame = center_in(screen, max(w, 10), max(h, 5))
+        self._frame = screen if self.fill else center_in(screen, max(w, 10), max(h, 5))
         var body = Rect(
             self._frame.a.x + 1 + _MARGIN_X, self._frame.a.y + 1 + _MARGIN_Y,
             self._frame.b.x - 1 - _MARGIN_X, self._frame.b.y - 1 - _MARGIN_Y,
@@ -528,7 +555,8 @@ struct GridForm(Movable):
         self._layout(root, screen)
         var bg = Attr(BLACK, LIGHT_GRAY)
         _ = paint_modal_frame(canvas, self._frame, bg)
-        if len(root.text.as_bytes()) > 0:
+        # Filling a host window, the window's own title bar has the title.
+        if len(root.text.as_bytes()) > 0 and not self.fill:
             paint_window_title(
                 canvas, self._frame, String(" ") + root.text + String(" "), bg, bg,
             )
@@ -551,6 +579,12 @@ struct GridForm(Movable):
                 var fi = self._field(p.node)
                 if p.node.enabled():
                     self._fields[fi].paint(canvas, p.rect, focused)
+                    if not focused and len(self._fields[fi].text.as_bytes()) == 0:
+                        _ = painter.put_text(
+                            canvas, Point(p.rect.a.x + 1, p.rect.a.y),
+                            _fit(p.node.placeholder, p.rect.width() - 1),
+                            Attr(DARK_GRAY, CYAN),
+                        )
                 else:
                     painter.fill(canvas, p.rect, String(" "), Attr(DARK_GRAY, LIGHT_GRAY))
                     _ = painter.put_text(
@@ -597,6 +631,8 @@ struct GridForm(Movable):
                     painter.set(canvas, x, p.rect.a.y, _sep_cell())
             elif k == UI_TABLE:
                 self._paint_table(canvas, p.node, p.rect, focused)
+            elif k == UI_PREVIEW:
+                _paint_preview(canvas, painter, p.rect)
             elif k == UI_TABS:
                 self._paint_tabs(canvas, p.node, p.rect, focused)
         # Open pop-ups overlay the rest.
@@ -611,8 +647,11 @@ struct GridForm(Movable):
         # Header row.
         var x = r.a.x + 1
         for c in range(len(n.options)):
+            var w = widths[c] if c < len(widths) else 0
             _ = painter.put_text(
-                canvas, Point(x, r.a.y), n.options[c], Attr(DARK_GRAY, LIGHT_GRAY),
+                canvas, Point(x, r.a.y),
+                _fit(n.options[c], w) if c + 1 < len(n.options) else n.options[c],
+                Attr(DARK_GRAY, LIGHT_GRAY),
             )
             x += (widths[c] if c < len(widths) else 0) + 2
         var body = Rect(r.a.x, r.a.y + 1, r.b.x, r.b.y)
@@ -626,6 +665,8 @@ struct GridForm(Movable):
                 if n.has(UI_CHECKABLE) and c == 0:
                     cell = String("[x]") if cell == String("1") else String("[ ]")
                 var w = widths[c] if c < len(widths) else 0
+                if c + 1 < len(n.rows[i]):
+                    cell = _fit(cell, w)
                 line += cell
                 if c + 1 < len(n.rows[i]):
                     line += String(" ") * (max(0, w - display_columns(cell)) + 2)
@@ -928,6 +969,40 @@ struct GridForm(Movable):
                             out.append(ui_set(p.node.key, String(t)))
                 return
             return
+
+
+def _preview_lines() -> List[List[Tuple[String, UInt8]]]:
+    """The sample code a preview shows — the same lines as the native one
+    (``CodePreview`` in TurboKod.swift), as (text, palette slot) runs."""
+    var fg = EDITOR_FG
+    return [
+        [(String("# A taste of your editor"), SYN_COMMENT)],
+        [(String("@"), SYN_DECORATOR), (String("dataclass"), SYN_DECORATOR)],
+        [(String("class"), SYN_KEYWORD), (String(" "), fg), (String("Point"), SYN_IDENT),
+         (String(":"), SYN_OPERATOR)],
+        [(String("    x"), fg), (String(":"), SYN_OPERATOR), (String(" "), fg),
+         (String("int"), SYN_KEYWORD), (String(" = "), SYN_OPERATOR), (String("0"), SYN_NUMBER)],
+        [(String(""), fg)],
+        [(String("def"), SYN_KEYWORD), (String(" "), fg), (String("greet"), SYN_IDENT),
+         (String("("), SYN_OPERATOR), (String("name"), fg), (String(")"), SYN_OPERATOR),
+         (String(":"), SYN_OPERATOR)],
+        [(String("    count"), fg), (String(" = "), SYN_OPERATOR), (String("42"), SYN_NUMBER)],
+        [(String("    return"), SYN_KEYWORD), (String(" "), fg),
+         (String('f"Hello, {name}!"'), SYN_STRING)],
+    ]
+
+
+def _paint_preview(mut canvas: Canvas, painter: Painter, r: Rect):
+    """Sample code in palette slots, so it retints with the live theme."""
+    painter.fill(canvas, r, String(" "), Attr(EDITOR_FG, EDITOR_BG))
+    var lines = _preview_lines()
+    for y in range(min(len(lines), r.height())):
+        var x = r.a.x + 1
+        for i in range(len(lines[y])):
+            x += painter.put_text(
+                canvas, Point(x, r.a.y + y), lines[y][i][0],
+                Attr(lines[y][i][1], EDITOR_BG),
+            )
 
 
 def _sep_cell() -> Cell:

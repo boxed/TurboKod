@@ -1137,6 +1137,9 @@ struct Desktop(Movable):
     for and the host's find bar should show (one-shot, taken by the
     host); empty otherwise."""
     var native_find_seed: String
+    var settings_grids: List[GridForm]
+    """The grid projection of Settings (and its language editor) in the
+    host's separate Settings window (``paint_settings``)."""
     var ui_grids: List[GridForm]
     """The grid projections of the open declarative dialogs
     (``ui_surfaces``), bottom first."""
@@ -1788,6 +1791,7 @@ struct Desktop(Movable):
         self._last_search_opts = SearchOptions()
         self.native_find_request = String("")
         self.native_find_seed = String("")
+        self.settings_grids = List[GridForm]()
         self.ui_grids = List[GridForm]()
         self._ui_grid_owners = List[String]()
         self.settings_native = False
@@ -3585,30 +3589,36 @@ struct Desktop(Movable):
         on ``Settings`` makes it fill the whole surface instead of its
         movable in-grid bounds."""
         self.settings_detached = on
-        self.settings.detached = on
 
     def paint_settings(mut self, mut canvas: Canvas, screen: Rect):
         """Paint the Settings view to fill the host's separate settings
         window (companion to ``paint_panels``). When Settings just closed
         and the host hasn't hidden the window yet, paint a flat dialog
         surface rather than leaving stale cells."""
-        if not self.settings.active:
+        var surfaces = self._sync_settings_grids()
+        if len(surfaces) == 0:
             Painter(screen).fill(
                 canvas, screen, String(" "), Attr(BLACK, LIGHT_GRAY),
             )
             return
-        self.settings.paint(canvas, screen)
+        for i in range(len(surfaces)):
+            self.settings_grids[i].paint(
+                self.ui_tree(surfaces[i]), canvas, screen,
+                i == len(surfaces) - 1,
+            )
 
     def handle_settings_event(mut self, event: Event, screen: Rect):
         """Route a key/mouse event from the host's settings window into the
         Settings view. The companion to ``handle_event`` for the detached
         settings surface."""
-        if not self.settings.active:
+        var surfaces = self._sync_settings_grids()
+        if len(surfaces) == 0:
             return
-        if event.kind == EVENT_KEY:
-            _ = self.settings.handle_key(event)
-        elif event.kind == EVENT_MOUSE:
-            _ = self.settings.handle_mouse(event, screen)
+        var top = len(surfaces) - 1
+        var evs = self.settings_grids[top].handle_event(
+            self.ui_tree(surfaces[top]), event, screen,
+        )
+        self.ui_apply(surfaces[top], evs)
 
     def pointer_shape_panels(self, pos: Point, screen: Rect) -> String:
         """Pointer hint for the panel window. The terminal body and pane
@@ -4804,15 +4814,6 @@ struct Desktop(Movable):
             self.lsp_status_menu.paint(canvas, screen)
         if not (native and self.spelling_dialog.active):
             self.spelling_dialog.paint(canvas, screen)
-        # Settings overlay — paints over the workspace but below the
-        # modal dialogs so an in-flight prompt is still visible. Drains
-        # ``settings.dirty`` into the persisted config so user changes
-        # survive a restart without an explicit "save settings" step.
-        # When detached, the host's separate settings window paints it
-        # (``paint_settings``) — but the dirty-sync below still runs here,
-        # because the main surface's paint is the per-frame persistence hook.
-        if not self.settings_detached:
-            self.settings.paint(canvas, screen)
         # Project Settings persists its edits as they're made.
         self._sync_project_settings()
         # Review mode — a full-screen changeset reader. Painted above the
@@ -4859,158 +4860,7 @@ struct Desktop(Movable):
         # which owns the bottom row.
         if not self.review.is_reviewing():
             self.status_bar.paint_tooltip(canvas, screen)
-        # Keep the Font pane's size readout live: changing the family
-        # mid-dialog changes the effective/ideal sizes the host reports,
-        # and the report arrives a frame after ``set_font`` bumps the
-        # version — so refresh every paint, not just on open.
-        if self.settings.active:
-            self.settings.update_font_info(
-                self.host_font_effective_size, self.host_font_ideal_size,
-            )
-        if self.settings.active and self.settings.dirty:
-            self.config.auto_save = self.settings.auto_save
-            self.config.trim_trailing_whitespace = (
-                self.settings.trim_trailing_whitespace
-            )
-            self.config.ensure_final_newline = (
-                self.settings.ensure_final_newline
-            )
-            # Keyword-arg compression is a pure display toggle — push it into
-            # every editor on change so the next paint reflects it.
-            if self.settings.compress_kwargs != self.config.compress_kwargs:
-                self.config.compress_kwargs = self.settings.compress_kwargs
-                self._apply_view_config()
-            # Caret blink: a pure paint toggle — the next frame's
-            # ``_apply_view_config`` reads the new value, no extra apply.
-            self.config.cursor_blink = self.settings.cursor_blink
-            # Language Server per-feature gates — plain bool copies; the
-            # feature code reads ``self.config.lsp_*`` at request/paint time.
-            self.config.lsp_format_on_save = self.settings.ls_format_on_save
-            self.config.lsp_signature_help = self.settings.ls_signature_help
-            self.config.lsp_document_highlight = (
-                self.settings.ls_document_highlight
-            )
-            # The annotation features below share the ``_inlay_key``
-            # debounce and push results into per-editor overlays. Toggling
-            # any of them has to take effect live, not on restart:
-            #  - turned OFF: clear the stale overlay on every editor (paint
-            #    has no gate, so it'd keep showing the last response);
-            #  - turned ON: invalidate the debounce key so the next
-            #    ``_maybe_request_inlay_codelens`` actually re-requests
-            #    instead of short-circuiting on the unchanged buffer.
-            var inlay_changed = (
-                self.settings.ls_inlay_hints != self.config.lsp_inlay_hints
-            )
-            var codelens_changed = (
-                self.settings.ls_code_lens != self.config.lsp_code_lens
-            )
-            var colors_changed = (
-                self.settings.ls_document_colors
-                != self.config.lsp_document_colors
-            )
-            var links_changed = (
-                self.settings.ls_document_links
-                != self.config.lsp_document_links
-            )
-            self.config.lsp_inlay_hints = self.settings.ls_inlay_hints
-            self.config.lsp_code_lens = self.settings.ls_code_lens
-            self.config.lsp_document_colors = self.settings.ls_document_colors
-            self.config.lsp_document_links = self.settings.ls_document_links
-            if inlay_changed or codelens_changed \
-                    or colors_changed or links_changed:
-                # Force a re-request next frame (covers every turn-on).
-                self._inlay_key = String("")
-                for wi in range(len(self.windows.windows)):
-                    if not self.windows.windows[wi].is_editor:
-                        continue
-                    if inlay_changed and not self.config.lsp_inlay_hints:
-                        self.windows.windows[wi].editor.set_inlay_hints(
-                            List[TextEditEntry]()
-                        )
-                    if codelens_changed and not self.config.lsp_code_lens:
-                        self.windows.windows[wi].editor.set_code_lens(
-                            List[TextEditEntry]()
-                        )
-                    if colors_changed and not self.config.lsp_document_colors:
-                        self.windows.windows[wi].editor.set_color_swatches(
-                            List[Highlight]()
-                        )
-                    if links_changed and not self.config.lsp_document_links:
-                        self.windows.windows[wi].editor.set_document_links(
-                            List[TextEditEntry]()
-                        )
-            self.config.lsp_linked_editing = self.settings.ls_linked_editing
-            self.config.lsp_server_progress = self.settings.ls_server_progress
-            self.config.language_servers = (
-                self.settings.language_overrides.copy()
-            )
-            self.config.project_dirs = self.settings.project_dirs.copy()
-            # Apply a theme change live (retints chrome + syntax) before
-            # persisting. ``set_theme`` updates ``config.theme`` too, so the
-            # ``save_config`` below writes the new name.
-            if self.settings.theme_choice != self.config.theme:
-                var new_theme = self.settings.theme_choice.copy()
-                self.set_theme(new_theme)
-            # Same live-apply for a font change — ``set_font`` updates
-            # ``config.font`` and bumps ``font_version`` for the host.
-            if len(self.settings._font_names) > 0 \
-                    and self.settings.font_choice != self.font_label():
-                var new_font = self.settings.font_choice.copy()
-                self.set_font(new_font)
-            # And for a size change — ``set_font_size`` clamps, updates
-            # ``config.font_size``, and bumps ``font_version``.
-            if len(self.settings._font_names) > 0 \
-                    and self.settings.font_size_choice \
-                        != self.config.font_size:
-                self.set_font_size(self.settings.font_size_choice)
-            # Wrap mode (Settings ▸ Editor). Applying it re-pushes the value
-            # into every editor and re-reveals each cursor, since the
-            # buffer-row ↔ screen-row relationship changes with the mode.
-            if self.settings.wrap_mode != self.config.wrap_mode:
-                self.config.wrap_mode = self.settings.wrap_mode
-                self._apply_view_config()
-                self._reveal_all_cursors()
-            # Smart-wrap comma trigger. Re-layout (and re-reveal cursors,
-            # since the row mapping shifts) on change, same as wrap mode.
-            var new_comma = self.settings.comma_threshold_value()
-            if new_comma != self.config.smart_wrap_comma_threshold:
-                self.config.smart_wrap_comma_threshold = new_comma
-                self._apply_view_config()
-                self._reveal_all_cursors()
-            # Max open windows. Lowering the cap takes effect immediately:
-            # close the least-recently-used clean documents down to the
-            # new limit.
-            var new_max = self.settings.max_open_windows_value()
-            if new_max != self.config.max_open_windows:
-                self.config.max_open_windows = new_max
-                self._enforce_window_cap()
-            self._persist_config()
-            self._rebuild_lsp_specs()
-            # Kick every running server to re-read its configuration — a
-            # pull-config server re-issues workspace/configuration, which
-            # we answer. Cheap and idempotent; servers ignore it if they
-            # don't care.
-            for ci in range(len(self.lsp_managers)):
-                self.lsp_managers[ci].notify_configuration_changed()
-            self.settings.ack_dirty()
-        # Drain pending dictionary install / remove requests emitted by
-        # the Spell-check pane. Install routes through the shared
-        # ``InstallRunner`` (single-slot, queued via status bar); remove
-        # is sync — delete the file, reload the speller, invalidate
-        # spell highlights so the next paint redraws without stale
-        # underlines.
-        if self.settings.active:
-            # Copy the language id off ``settings`` first so the
-            # ``_start_dict_install`` / ``_do_dict_remove`` calls don't
-            # alias a field on ``self.settings`` while we hold ``mut self``.
-            var dict_install = self.settings.pending_dict_install_lang
-            if len(dict_install.as_bytes()) > 0:
-                self.settings.ack_dict_install()
-                self._start_dict_install(dict_install)
-            var dict_remove = self.settings.pending_dict_remove_lang
-            if len(dict_remove.as_bytes()) > 0:
-                self.settings.ack_dict_remove()
-                self._do_dict_remove(dict_remove)
+        self._sync_settings()
         # Persist the window session if it changed since the last save.
         # No-op when no project is open or no file-backed windows are
         # showing — closing the last window leaves the previously-saved
@@ -8002,16 +7852,6 @@ struct Desktop(Movable):
                 )
             self._after_local_changes(screen)
             return Optional[String]()
-        if self.settings.active and not self.settings_detached:
-            # In-grid Settings is modal over the workspace. Detached, the
-            # host's settings window routes events via
-            # ``handle_settings_event`` and the main window stays fully
-            # interactive — that's what makes the live theme preview useful.
-            if event.kind == EVENT_KEY:
-                _ = self.settings.handle_key(event)
-            else:
-                _ = self.settings.handle_mouse(event, screen)
-            return Optional[String]()
         if event.kind == EVENT_KEY:
             # Side panels absorb arrow / Enter / Esc when focused;
             # if neither claims the key, fall through to the regular
@@ -8673,6 +8513,8 @@ struct Desktop(Movable):
         one when a dialog opens another on top (Project Settings' action
         editor)."""
         var out = List[String]()
+        if not self.settings_detached:
+            out.extend(self.settings_surfaces())
         if self.project_settings.active:
             out.append(String("project_settings"))
             if self.project_settings.editor.active:
@@ -8685,6 +8527,18 @@ struct Desktop(Movable):
             out.append(String("fill"))
         return out^
 
+    def settings_surfaces(self) -> List[String]:
+        """Settings and the language editor on top of it, when open. A
+        modal over the workspace in the terminal; on macOS in its own
+        window (``paint_settings`` / natively ``tk_desktop_ui``'s
+        ``window``), which leaves the workspace usable."""
+        var out = List[String]()
+        if self.settings.active:
+            out.append(String("settings"))
+            if self.settings.language_editor.active:
+                out.append(String("language_editor"))
+        return out^
+
     def ui_surface(self) -> String:
         """The top declarative dialog — the one input goes to — or empty."""
         var all = self.ui_surfaces()
@@ -8693,6 +8547,10 @@ struct Desktop(Movable):
         return all[len(all) - 1]
 
     def ui_tree(self, name: String) -> UINode:
+        if name == String("settings"):
+            return self.settings.ui()
+        if name == String("language_editor"):
+            return self.settings.language_editor.ui()
         if name == String("project_settings"):
             return self.project_settings.ui()
         if name == String("action_editor"):
@@ -8708,7 +8566,17 @@ struct Desktop(Movable):
         submit handler when one of them finished it."""
         for i in range(len(events)):
             ref e = events[i]
-            if name == String("project_settings"):
+            if name == String("settings"):
+                if e.is_action:
+                    self.settings.ui_act(e.key)
+                else:
+                    self.settings.ui_set(e.key, e.value)
+            elif name == String("language_editor"):
+                if e.is_action:
+                    self.settings.language_editor.ui_act(e.key)
+                else:
+                    self.settings.language_editor.ui_set(e.key, e.value)
+            elif name == String("project_settings"):
                 if e.is_action:
                     self.project_settings.ui_act(e.key)
                 else:
@@ -8733,7 +8601,13 @@ struct Desktop(Movable):
                     self.fill_dialog.ui_act(e.key)
                 else:
                     self.fill_dialog.ui_set(e.key, e.value)
-        if name == String("project_settings") or name == String("action_editor"):
+        if name == String("settings") or name == String("language_editor"):
+            self.settings.consume_language_editor()
+            # Apply before a Close resets the working state.
+            self._sync_settings()
+            if self.settings.close_requested:
+                self.settings.close()
+        elif name == String("project_settings") or name == String("action_editor"):
             self.project_settings.consume_editor()
             # Persist before a Close resets the working state.
             self._sync_project_settings()
@@ -8745,6 +8619,19 @@ struct Desktop(Movable):
             self._on_breakpoint_menu_submit()
         elif name == String("fill") and self.fill_dialog.submitted:
             self._on_fill_dialog_submit()
+
+    def _sync_settings_grids(mut self) -> List[String]:
+        """``_sync_ui_grids`` for the separate Settings window; the dialog
+        fills it."""
+        var surfaces = self.settings_surfaces()
+        while len(self.settings_grids) > len(surfaces):
+            _ = self.settings_grids.pop()
+        for i in range(len(surfaces)):
+            if i >= len(self.settings_grids):
+                var g = GridForm()
+                g.fill = i == 0
+                self.settings_grids.append(g^)
+        return surfaces^
 
     def _sync_ui_grids(mut self) -> List[String]:
         """One grid projector per open declarative dialog. A level whose
@@ -9509,8 +9396,10 @@ struct Desktop(Movable):
                 self.config.lsp_server_progress,
                 self.config.project_dirs.copy(),
             )
-            # The macOS-style UI shows its own Settings window over the
-            # same state; "Advanced Settings…" switches back to this one.
+            self.settings.offer_native_ui = self.host_owns_menu
+            self.settings.native_ui = self.config.native_ui
+            # The macOS-style UI shows Settings as a native window; the
+            # classic look as the grid one, in the host's cell window.
             self.settings_native = self.native_ui()
             return Optional[String]()
         if action == HELP_HOTKEYS:
@@ -12361,6 +12250,169 @@ struct Desktop(Movable):
             self.config.on_save_actions.copy(),
             self.project_on_save.copy(),
         )
+
+    def _sync_settings(mut self):
+        """Apply and persist Settings edits while it's open (each frame,
+        and before a Close resets the working state), with each one's side
+        effects; then start any dictionary install / remove it queued."""
+        # Keep the Font pane's size readout live: changing the family
+        # mid-dialog changes the effective/ideal sizes the host reports,
+        # and the report arrives a frame after ``set_font`` bumps the
+        # version — so refresh every paint, not just on open.
+        if not self.settings.active:
+            return
+        self.settings.update_font_info(
+            self.host_font_effective_size, self.host_font_ideal_size,
+        )
+        self.settings.palette_version = self.theme_version
+        if self.settings.dirty:
+            self.config.auto_save = self.settings.auto_save
+            self.config.trim_trailing_whitespace = (
+                self.settings.trim_trailing_whitespace
+            )
+            self.config.ensure_final_newline = (
+                self.settings.ensure_final_newline
+            )
+            # Keyword-arg compression is a pure display toggle — push it into
+            # every editor on change so the next paint reflects it.
+            if self.settings.compress_kwargs != self.config.compress_kwargs:
+                self.config.compress_kwargs = self.settings.compress_kwargs
+                self._apply_view_config()
+            # Caret blink: a pure paint toggle — the next frame's
+            # ``_apply_view_config`` reads the new value, no extra apply.
+            self.config.cursor_blink = self.settings.cursor_blink
+            # The look (macOS-style UI or classic), the same as View ▸
+            # macOS-style UI.
+            if self.settings.native_ui != self.config.native_ui:
+                self.config.native_ui = self.settings.native_ui
+                self._apply_view_config()
+            # Language Server per-feature gates — plain bool copies; the
+            # feature code reads ``self.config.lsp_*`` at request/paint time.
+            self.config.lsp_format_on_save = self.settings.ls_format_on_save
+            self.config.lsp_signature_help = self.settings.ls_signature_help
+            self.config.lsp_document_highlight = (
+                self.settings.ls_document_highlight
+            )
+            # The annotation features below share the ``_inlay_key``
+            # debounce and push results into per-editor overlays. Toggling
+            # any of them has to take effect live, not on restart:
+            #  - turned OFF: clear the stale overlay on every editor (paint
+            #    has no gate, so it'd keep showing the last response);
+            #  - turned ON: invalidate the debounce key so the next
+            #    ``_maybe_request_inlay_codelens`` actually re-requests
+            #    instead of short-circuiting on the unchanged buffer.
+            var inlay_changed = (
+                self.settings.ls_inlay_hints != self.config.lsp_inlay_hints
+            )
+            var codelens_changed = (
+                self.settings.ls_code_lens != self.config.lsp_code_lens
+            )
+            var colors_changed = (
+                self.settings.ls_document_colors
+                != self.config.lsp_document_colors
+            )
+            var links_changed = (
+                self.settings.ls_document_links
+                != self.config.lsp_document_links
+            )
+            self.config.lsp_inlay_hints = self.settings.ls_inlay_hints
+            self.config.lsp_code_lens = self.settings.ls_code_lens
+            self.config.lsp_document_colors = self.settings.ls_document_colors
+            self.config.lsp_document_links = self.settings.ls_document_links
+            if inlay_changed or codelens_changed \
+                    or colors_changed or links_changed:
+                # Force a re-request next frame (covers every turn-on).
+                self._inlay_key = String("")
+                for wi in range(len(self.windows.windows)):
+                    if not self.windows.windows[wi].is_editor:
+                        continue
+                    if inlay_changed and not self.config.lsp_inlay_hints:
+                        self.windows.windows[wi].editor.set_inlay_hints(
+                            List[TextEditEntry]()
+                        )
+                    if codelens_changed and not self.config.lsp_code_lens:
+                        self.windows.windows[wi].editor.set_code_lens(
+                            List[TextEditEntry]()
+                        )
+                    if colors_changed and not self.config.lsp_document_colors:
+                        self.windows.windows[wi].editor.set_color_swatches(
+                            List[Highlight]()
+                        )
+                    if links_changed and not self.config.lsp_document_links:
+                        self.windows.windows[wi].editor.set_document_links(
+                            List[TextEditEntry]()
+                        )
+            self.config.lsp_linked_editing = self.settings.ls_linked_editing
+            self.config.lsp_server_progress = self.settings.ls_server_progress
+            self.config.language_servers = (
+                self.settings.language_overrides.copy()
+            )
+            self.config.project_dirs = self.settings.project_dirs.copy()
+            # Apply a theme change live (retints chrome + syntax) before
+            # persisting. ``set_theme`` updates ``config.theme`` too, so the
+            # ``save_config`` below writes the new name.
+            if self.settings.theme_choice != self.config.theme:
+                var new_theme = self.settings.theme_choice.copy()
+                self.set_theme(new_theme)
+            # Same live-apply for a font change — ``set_font`` updates
+            # ``config.font`` and bumps ``font_version`` for the host.
+            if len(self.settings._font_names) > 0 \
+                    and self.settings.font_choice != self.font_label():
+                var new_font = self.settings.font_choice.copy()
+                self.set_font(new_font)
+            # And for a size change — ``set_font_size`` clamps, updates
+            # ``config.font_size``, and bumps ``font_version``.
+            if len(self.settings._font_names) > 0 \
+                    and self.settings.font_size_choice \
+                        != self.config.font_size:
+                self.set_font_size(self.settings.font_size_choice)
+            # Wrap mode (Settings ▸ Editor). Applying it re-pushes the value
+            # into every editor and re-reveals each cursor, since the
+            # buffer-row ↔ screen-row relationship changes with the mode.
+            if self.settings.wrap_mode != self.config.wrap_mode:
+                self.config.wrap_mode = self.settings.wrap_mode
+                self._apply_view_config()
+                self._reveal_all_cursors()
+            # Smart-wrap comma trigger. Re-layout (and re-reveal cursors,
+            # since the row mapping shifts) on change, same as wrap mode.
+            var new_comma = self.settings.comma_threshold_value()
+            if new_comma != self.config.smart_wrap_comma_threshold:
+                self.config.smart_wrap_comma_threshold = new_comma
+                self._apply_view_config()
+                self._reveal_all_cursors()
+            # Max open windows. Lowering the cap takes effect immediately:
+            # close the least-recently-used clean documents down to the
+            # new limit.
+            var new_max = self.settings.max_open_windows_value()
+            if new_max != self.config.max_open_windows:
+                self.config.max_open_windows = new_max
+                self._enforce_window_cap()
+            self._persist_config()
+            self._rebuild_lsp_specs()
+            # Kick every running server to re-read its configuration — a
+            # pull-config server re-issues workspace/configuration, which
+            # we answer. Cheap and idempotent; servers ignore it if they
+            # don't care.
+            for ci in range(len(self.lsp_managers)):
+                self.lsp_managers[ci].notify_configuration_changed()
+            self.settings.ack_dirty()
+        # Drain pending dictionary install / remove requests emitted by
+        # the Spell-check pane. Install routes through the shared
+        # ``InstallRunner`` (single-slot, queued via status bar); remove
+        # is sync — delete the file, reload the speller, invalidate
+        # spell highlights so the next paint redraws without stale
+        # underlines.
+        # Copy the language id off ``settings`` first so the
+        # ``_start_dict_install`` / ``_do_dict_remove`` calls don't
+        # alias a field on ``self.settings`` while we hold ``mut self``.
+        var dict_install = self.settings.pending_dict_install_lang
+        if len(dict_install.as_bytes()) > 0:
+            self.settings.ack_dict_install()
+            self._start_dict_install(dict_install)
+        var dict_remove = self.settings.pending_dict_remove_lang
+        if len(dict_remove.as_bytes()) > 0:
+            self.settings.ack_dict_remove()
+            self._do_dict_remove(dict_remove)
 
     def _sync_project_settings(mut self):
         """Per-frame persistence hook for Project Settings, mirroring the

@@ -11,14 +11,9 @@ from turbokod.desktop import (
 )
 from turbokod.events import Event, KEY_ENTER, MOD_META
 from turbokod.file_io import join_path, write_file
-from turbokod.settings import Settings, _FOCUS_PROJ_INPUT, _FOCUS_PROJ_REMOVE
+from turbokod.settings import Settings
 
 from support import _SCREEN, _ensure_dir, _key, _test_home, setup_test_env
-
-
-def _type(mut s: Settings, text: String):
-    for cp in text.codepoints():
-        _ = s.handle_key(_key(UInt32(Int(cp))))
 
 
 def test_project_dirs_round_trip_through_config_json() raises:
@@ -47,28 +42,26 @@ def test_home_expansion_and_abbreviation() raises:
 
 
 def test_settings_projects_add_and_remove() raises:
-    """Typing a folder and pressing Enter appends it (trailing slash
-    dropped, duplicates ignored) and raises ``dirty``; Remove drops the
-    selected row."""
+    """Adding a typed folder appends it (trailing slash dropped, duplicates
+    just selected) and raises ``dirty``; Remove drops the selected row."""
     var existing = List[String]()
     existing.append(String("/work"))
     var s = Settings()
     s.open(False, project_dirs=existing^)
     assert_equal(s.selected_project_dir, 0)
-    s.focus = _FOCUS_PROJ_INPUT
-    _type(s, String("~/Projects/"))
-    _ = s.handle_key(Event.key_event(KEY_ENTER))
+    s.ui_set(String("project_input"), String("~/Projects/"))
+    s.ui_act(String("proj_add"))
     assert_true(s.dirty)
     assert_equal(len(s.project_dirs), 2)
     assert_equal(s.project_dirs[1], String("~/Projects"))
     assert_equal(s.selected_project_dir, 1)
+    assert_equal(s.project_input, String(""))
     # Re-adding an existing folder just selects it.
-    _type(s, String("/work"))
-    _ = s.handle_key(Event.key_event(KEY_ENTER))
+    s.ui_set(String("project_input"), String("/work"))
+    s.ui_act(String("proj_add"))
     assert_equal(len(s.project_dirs), 2)
     assert_equal(s.selected_project_dir, 0)
-    s.focus = _FOCUS_PROJ_REMOVE
-    _ = s.handle_key(Event.key_event(KEY_ENTER))
+    s.ui_act(String("proj_remove"))
     assert_equal(len(s.project_dirs), 1)
     assert_equal(s.project_dirs[0], String("~/Projects"))
 

@@ -534,22 +534,17 @@ def test_detached_settings_clipboard_chord_does_not_recurse() raises:
     d.set_settings_detached(True)
     d.settings.open(False)
     assert_true(d.settings.active)
-    # Open the language editor and focus its argv strip with a selection.
     d.settings.language_editor.open(
         String("lang"), List[String](), List[String](), False,
     )
-    d.settings.language_editor._add_candidate()
-    d.settings.language_editor.argv_tf.set_text(String("pylsp --stdio"))
-    d.settings.language_editor.argv_tf.select_all()
-    assert_true(d.settings.language_editor.argv_tf.has_selection())
-    # Pre-fix this recursed to a stack overflow; post-fix it returns and
-    # the chord reaches the argv field (cut deletes the selection).
+    d.settings.language_editor.command = String("pylsp --stdio")
+    var canvas = Canvas(_SCREEN.b.x, _SCREEN.b.y)
+    d.paint_settings(canvas, _SCREEN)
+    # Pre-fix this recursed to a stack overflow; post-fix it returns, the
+    # chord going to the Settings window's top dialog.
     var maybe = d.dispatch_action(EDITOR_CUT, _SCREEN)
     assert_false(Bool(maybe))
-    assert_equal(
-        len(d.settings.language_editor.argv_tf.text.as_bytes()), 0,
-    )
-    # A paste chord likewise returns rather than recursing.
+    assert_true(d.settings.language_editor.active)
     var maybe2 = d.dispatch_action(EDITOR_PASTE, _SCREEN)
     assert_false(Bool(maybe2))
 

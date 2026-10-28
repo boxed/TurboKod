@@ -1572,165 +1572,6 @@ def tk_desktop_spelling_act(h: Int, action: Int, ptr: Int, n: Int) abi("C"):
     d.native_spelling_add(action, rows)
 
 
-# --- macOS-style UI: Settings window -----------------------------------------
-
-
-@export
-def tk_desktop_prefs(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
-    """The open Settings for the native Settings window: every everyday
-    value plus the theme and font lists. 0 when it isn't open natively.
-    Same buffer contract as ``tk_desktop_native_dialog``."""
-    if h == 0:
-        return 0
-    ref d = _desk(h)[]
-    if not d.settings.active or not d.settings_native:
-        return 0
-    ref st = d.settings
-    var o = json_object()
-    o.put(String("native_ui"), json_bool(d.config.native_ui))
-    o.put(String("auto_save"), json_bool(st.auto_save))
-    o.put(String("wrap_mode"), json_int(st.wrap_mode))
-    o.put(String("trim_trailing_whitespace"), json_bool(st.trim_trailing_whitespace))
-    o.put(String("ensure_final_newline"), json_bool(st.ensure_final_newline))
-    o.put(String("compress_kwargs"), json_bool(st.compress_kwargs))
-    o.put(String("cursor_blink"), json_bool(st.cursor_blink))
-    o.put(String("max_open_windows"), json_int(d.config.max_open_windows))
-    o.put(String("comma_threshold"), json_int(d.config.smart_wrap_comma_threshold))
-    o.put(String("ls_format_on_save"), json_bool(st.ls_format_on_save))
-    o.put(String("ls_signature_help"), json_bool(st.ls_signature_help))
-    o.put(String("ls_document_highlight"), json_bool(st.ls_document_highlight))
-    o.put(String("ls_document_links"), json_bool(st.ls_document_links))
-    o.put(String("ls_inlay_hints"), json_bool(st.ls_inlay_hints))
-    o.put(String("ls_code_lens"), json_bool(st.ls_code_lens))
-    o.put(String("ls_document_colors"), json_bool(st.ls_document_colors))
-    o.put(String("ls_linked_editing"), json_bool(st.ls_linked_editing))
-    o.put(String("ls_server_progress"), json_bool(st.ls_server_progress))
-    o.put(String("theme"), json_str(st.theme_choice))
-    o.put(String("font"), json_str(d.font_label()))
-    o.put(String("font_size"), json_int(d.config.font_size))
-    o.put(String("themes"), _strings(theme_names()))
-    o.put(String("fonts"), _strings(st.font_names()))
-    return _write_out(encode_json(o), out_ptr, cap)
-
-
-@export
-def tk_desktop_prefs_lists(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
-    """The list sections of the native Settings window: ``languages:
-    [[id, file_types, servers (one command per line), overridden]]``,
-    ``dictionaries: [[display, installed]]``, ``projects: [dir]``."""
-    if h == 0:
-        return 0
-    ref d = _desk(h)[]
-    if not d.settings.active or not d.settings_native:
-        return 0
-    ref st = d.settings
-    var o = json_object()
-    var langs = json_array()
-    for i in range(len(st.languages_view)):
-        ref spec = st.languages_view[i]
-        var r = json_array()
-        r.append(json_str(spec.language_id))
-        r.append(json_str(String(" ").join(spec.file_types)))
-        var servers = String("")
-        for k in range(len(spec.candidates)):
-            if k > 0:
-                servers += String("\n")
-            servers += String(" ").join(spec.candidates[k].argv)
-        r.append(json_str(servers))
-        r.append(json_bool(st.native_has_override(spec.language_id)))
-        langs.append(r)
-    o.put(String("languages"), langs)
-    var dicts = json_array()
-    for i in range(len(st.dict_specs)):
-        var r = json_array()
-        r.append(json_str(st.dict_specs[i].display))
-        r.append(json_bool(user_dictionary_installed(st.dict_specs[i].language_id)))
-        dicts.append(r)
-    o.put(String("dictionaries"), dicts)
-    o.put(String("projects"), _strings(st.project_dirs))
-    return _write_out(encode_json(o), out_ptr, cap)
-
-
-@export
-def tk_desktop_prefs_list_act(
-    h: Int, op: Int, idx: Int, ptr: Int, n: Int,
-) abi("C"):
-    """A list-section button: ``op`` 0 add project folder (JSON string),
-    1 remove project ``idx``, 2 install dictionary ``idx``, 3 remove it,
-    4 save language (JSON ``{id, file_types, servers: [line]}``), 5 remove
-    language ``idx``'s override."""
-    if h == 0:
-        return
-    ref st = _desk(h)[].settings
-    if not st.active:
-        return
-    try:
-        if op == 0:
-            st.native_add_project(parse_json(_string_from(ptr, n)).as_str())
-        elif op == 1:
-            st.native_remove_project(idx)
-        elif op == 2:
-            st.native_dictionary(idx, True)
-        elif op == 3:
-            st.native_dictionary(idx, False)
-        elif op == 4:
-            var o = parse_json(_string_from(ptr, n))
-            st.native_save_language(
-                json_get_string(o, String("id")),
-                json_get_string(o, String("file_types")),
-                json_get_string_array(o, String("servers")),
-            )
-        elif op == 5:
-            st.native_remove_language(idx)
-    except:
-        pass
-
-
-@export
-def tk_desktop_prefs_set(h: Int, ptr: Int, n: Int) abi("C"):
-    """Change Settings values from the native window: a JSON object of
-    ``{key: value}`` — bools, ints or strings by key (see
-    ``Settings.native_set_*``)."""
-    if h == 0:
-        return
-    ref st = _desk(h)[].settings
-    if not st.active:
-        return
-    try:
-        var o = parse_json(_string_from(ptr, n))
-        for i in range(o.object_len()):
-            var key = o.object_key_at(i)
-            var v = o.object_value_at(i)
-            if v.is_bool():
-                st.native_set_bool(key, v.as_bool())
-            elif v.is_int():
-                st.native_set_int(key, v.as_int())
-            elif v.is_string():
-                st.native_set_str(key, v.as_str())
-    except:
-        pass
-
-
-@export
-def tk_desktop_prefs_close(h: Int) abi("C"):
-    """The native Settings window closed."""
-    if h == 0:
-        return
-    ref d = _desk(h)[]
-    if d.settings_native:
-        d.settings.close()
-        d.settings_native = False
-
-
-@export
-def tk_desktop_prefs_advanced(h: Int) abi("C"):
-    """"Advanced Settings…": hand the open Settings to the grid window,
-    which has every section (languages, servers, spelling, projects)."""
-    if h == 0:
-        return
-    _desk(h)[].settings_native = False
-
-
 # --- macOS-style UI: file tree ------------------------------------------------
 
 
@@ -2721,24 +2562,32 @@ def tk_desktop_native_color_answer(
 @export
 def tk_desktop_ui(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     """The open declarative dialogs for the native projector, bottom first:
-    ``{stack: [{name, tree}]}`` with ``tree`` the ``ui_to_json`` of each
-    one's ``ui()``. 0 when none is up natively. Same buffer contract as
-    ``tk_desktop_native_dialog``."""
+    ``{stack: [{name, tree}], window: [{name, tree}]}`` with ``tree`` the
+    ``ui_to_json`` of each one's ``ui()``. ``stack`` holds the modal
+    dialogs (sheets on the window), ``window`` Settings and what it opened
+    (its own window, the workspace staying usable). 0 when neither is up
+    natively. Same buffer contract as ``tk_desktop_native_dialog``."""
     if h == 0:
         return 0
     ref d = _desk(h)[]
-    if not d.native_ui_surface_active():
+    var modal = d.ui_surfaces() if d.native_ui_surface_active() else List[String]()
+    var window = d.settings_surfaces() if d.settings_native else List[String]()
+    if len(modal) == 0 and len(window) == 0:
         return 0
-    var names = d.ui_surfaces()
+    var out = json_object()
+    out.put(String("stack"), _ui_stack_json(d, modal))
+    out.put(String("window"), _ui_stack_json(d, window))
+    return _write_out(encode_json(out), out_ptr, cap)
+
+
+def _ui_stack_json(ref d: Desktop, names: List[String]) -> JsonValue:
     var stack = json_array()
     for i in range(len(names)):
         var o = json_object()
         o.put(String("name"), json_str(names[i]))
         o.put(String("tree"), ui_to_json(d.ui_tree(names[i])))
         stack.append(o)
-    var out = json_object()
-    out.put(String("stack"), stack)
-    return _write_out(encode_json(out), out_ptr, cap)
+    return stack^
 
 
 @export
@@ -2752,7 +2601,11 @@ def tk_desktop_ui_event(h: Int, ptr: Int, n: Int) abi("C"):
     try:
         var o = parse_json(_string_from(ptr, n))
         var name = json_get_string(o, String("name"))
-        if name != d.ui_surface():
+        var window = d.settings_surfaces()
+        if name != d.ui_surface() and not (
+            d.settings_native and len(window) > 0
+            and name == window[len(window) - 1]
+        ):
             return   # it closed (or another took over) meanwhile
         var evs = List[UIEvent]()
         var a = o.object_get(String("events"))

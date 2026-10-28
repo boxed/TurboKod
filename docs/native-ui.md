@@ -26,8 +26,7 @@ It is being built in phases:
    info) and buttons, and the answer sets the struct's fields before its
    own resolve, so validation (an unparsable Fill number) still keeps the
    dialog open and the sheet comes back.
-9. **Settings** opens as a native window (see below). "Advanced Settings…"
-   hands over to the grid Settings window for the specialist sections.
+9. **Settings** opens as a native window (see below).
 10. **Spelling, Git history, the on-disk-change merge and review mode** are
     native too (see "Full-screen tools").
 11. Deliberately still the grid: the editor body and the panels' contents
@@ -219,32 +218,22 @@ macOS-style overlay scroller down the focused editor's right edge:
 
 ## Settings window
 
-With the macOS-style UI on, `APP_SETTINGS` opens the same `Settings` state
-as always, but sets `settings_native`. `tk_desktop_settings_active` then
-reports false, so the grid window stays shut, and the host shows
-`PrefsController` instead. It has three tabs:
+Settings is a declarative dialog (see [declarative-ui.md](declarative-ui.md)).
+With the macOS-style UI on, `APP_SETTINGS` sets `settings_native`:
+`tk_desktop_settings_active` then reports false, so the grid cell window stays
+shut, and `tk_desktop_ui` sends Settings (and the language editor it opens)
+as its `window` stack. The host shows level 0 as a window of its own, not a
+sheet, so the workspace stays usable, and puts anything above it on it as a
+sheet. The window's close button runs the dialog's Close.
 
-- **General:** saving, whitespace, wrapping, the open-document cap.
-- **Appearance:** the look toggle, theme, font and size, with the
-  `CodePreview` shared with the welcome window.
-- **Language Features:** the per-feature LSP switches.
+It never writes config itself: each edit sets the same working copy and
+marks the struct dirty, and `Desktop._sync_settings` applies it, side effects
+included (stale inlay hints cleared, cursors re-revealed on a wrap change,
+the window cap enforced, LSP re-configured). Close syncs before it resets.
 
-It never writes config itself:
-
-- **Edits** go through `tk_desktop_prefs_set` → `Settings.native_set_*`,
-  which set the same fields an in-grid edit sets and mark the struct
-  dirty. The Desktop's per-frame settings sync applies them, side effects
-  included: stale inlay hints cleared, cursors re-revealed on a wrap
-  change, the window cap enforced, LSP re-configured.
-- **The list sections** (Languages, Spelling, Projects) read
-  `tk_desktop_prefs_lists` and act through `tk_desktop_prefs_list_act`.
-  That calls the section's own methods: `_add_project_dir`,
-  `_request_dict_install` / `_remove`, and `_apply_language_override`. The
-  last one is shared with the in-grid language editor's OK.
-- Language server command lines are split by the in-grid editor's
-  `_split_space` (whitespace, with quotes keeping a token together).
-- Every section is native, so there's no "Advanced Settings…" escape
-  hatch.
+The preview node is the `CodePreview` shared with the welcome window. Its
+tree carries the palette version, so it repaints once the core has applied a
+new theme.
 
 ## File tree
 

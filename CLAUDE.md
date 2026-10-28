@@ -65,8 +65,8 @@ in Project run as one native picker sheet over the core's own search
 machinery (`tk_desktop_picker*`); popups are `NSMenu`s; the git view,
 Spelling, history, merge and review are native sheets / overlays driving the
 core through the same methods the grid path calls; the file tree and status
-bar are native overlays over their cells; Settings is a native window over
-the same state struct, Project Settings a declarative dialog (below); tool panes get native headers
+bar are native overlays over their cells; Settings and Project Settings are
+declarative dialogs (below), Settings in a window of its own; tool panes get native headers
 and editors a native overlay scroller.
 Swift trap: constants below `app.run()` in `TurboKod.swift` (the main file)
 read 0 — use `static let`s in an enum. Full details in [docs/native-ui.md](docs/native-ui.md).
@@ -345,9 +345,9 @@ the ~450 `Attr(...)` paint sites. Reserved indices `16..29` (`EDITOR_BG/FG`, the
 tool-pane + caret + border colors from the ANSI-16 chrome slots. `Desktop.active_theme` owns the palette;
 `set_theme` bumps `theme_version` so both frontends refetch. Theme switching is a
 pure palette swap — no re-tokenize. Settings itself doesn't cover the workspace
-(so the preview is live): on macOS it's a separate native window (same
-second-surface pattern as floating panels, `tk_desktop_*_settings`), in the
-terminal a movable/resizable in-grid dialog. Full details in
+on macOS (so the retint is visible): it gets a window of its own, the grid
+projection in a cell window (`tk_desktop_*_settings`) or a native one; in the
+terminal it's a dialog with a live code preview. Full details in
 [docs/themes.md](docs/themes.md).
 
 ## Syntax highlighting
