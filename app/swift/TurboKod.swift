@@ -1799,6 +1799,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                       close: tk_desktop_project_settings_close),
     ]
     private var dialogWins: [CellSurface: [ObjectIdentifier: (window: NSWindow, view: CellView)]] = [:]
+    // macOS-style UI: the native sheet currently showing each view's core
+    // dialog (see the "native dialogs" extension at the bottom of the file).
+    var nativeSheets: [ObjectIdentifier: NSWindow] = [:]
+    var nativeDialogBuf = [UInt8](repeating: 0, count: 4096)
     // Menu mirror: the snapshot from Mojo's menu_bar, hashed so we only
     // rebuild NSMenu when something actually changed (focus/visibility/
     // checkmark/edit-extras flips). `menuTracking` is set while AppKit is
@@ -2187,6 +2191,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                           w.occlusionState.contains(.visible) else { continue }
                     if sv.pollFrame() { sv.needsDisplay = true; changed = true }
                 }
+            }
+            for v in self.views where v.handle != 0 {
+                if self.pollNativeDialog(v) { changed = true }
             }
             self.drainAttention()
             self.idleTicks = changed ? 0 : self.idleTicks &+ 1
@@ -2690,6 +2697,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// existing handler (Open/Quit/etc.).
     @objc func menuActionFired(_ sender: NSMenuItem) {
         guard let action = sender.representedObject as? String else { return }
+        // A native text field has focus (a macOS-style UI sheet, a save
+        // panel): the Edit menu's key equivalents belong to it, not to the
+        // editor behind it.
+        if NSApp.keyWindow?.firstResponder is NSText,
+           let sel = Self.textFieldEditActions[action] {
+            NSApp.sendAction(sel, to: nil, from: sender)
+            return
+        }
         // Paste of a file (e.g. copied in Finder) offers the same full-path /
         // filename / relative menu as a drop, inserting the chosen form at the
         // caret. Only kicks in for an editor with a file on the clipboard;
@@ -3845,3 +3860,157 @@ let controller = AppController()
 app.delegate = controller
 app.activate(ignoringOtherApps: true)
 app.run()
+
+
+// MARK: - macOS-style UI: native dialogs
+//
+// With View ▸ macOS-style UI on, the core stops painting its confirm / prompt /
+// save-as dialogs and describes them over `tk_desktop_native_dialog` instead.
+// Each tick polls every window; a newly reported dialog is shown as a sheet,
+// and the sheet's answer goes back through `tk_desktop_native_*_answer`, which
+// runs the same submit handler as the in-grid dialog. If the core drops the
+// dialog itself while the sheet is up, the sheet is ended without answering.
+
+extension AppController {
+    static let textFieldEditActions: [String: Selector] = [
+        "edit:cut": #selector(NSText.cut(_:)),
+        "edit:copy": #selector(NSText.copy(_:)),
+        "edit:paste": #selector(NSText.paste(_:)),
+        "edit:select-all": #selector(NSText.selectAll(_:)),
+        "edit:undo": Selector(("undo:")),
+        "edit:redo": Selector(("redo:")),
+    ]
+
+    private func nativeDialogJSON(_ h: Int64) -> [String: Any]? {
+        var n = 0
+        while true {
+            n = nativeDialogBuf.withUnsafeMutableBufferPointer { buf -> Int in
+                Int(tk_desktop_native_dialog(h,
+                    Int64(Int(bitPattern: buf.baseAddress)), Int64(buf.count)))
+            }
+            if n <= nativeDialogBuf.count { break }
+            nativeDialogBuf = [UInt8](repeating: 0, count: n)
+        }
+        guard n > 0 else { return nil }
+        return (try? JSONSerialization.jsonObject(
+            with: Data(nativeDialogBuf[0..<n]))) as? [String: Any]
+    }
+
+    /// Show, or retract, `v`'s native dialog. True when anything changed.
+    func pollNativeDialog(_ v: CellView) -> Bool {
+        let id = ObjectIdentifier(v)
+        let dialog = nativeDialogJSON(v.handle)
+        if let sheet = nativeSheets[id] {
+            if dialog == nil {
+                nativeSheets[id] = nil
+                sheet.sheetParent?.endSheet(sheet, returnCode: .abort)
+                return true
+            }
+            return false
+        }
+        guard let dialog = dialog, let kind = dialog["kind"] as? String,
+              let win = v.window, win.isVisible, win.attachedSheet == nil
+        else { return false }
+        switch kind {
+        case "confirm": showConfirmSheet(dialog, for: v, in: win)
+        case "prompt": showPromptSheet(dialog, for: v, in: win)
+        case "save_as": showSavePanel(dialog, for: v, in: win)
+        default: return false
+        }
+        return true
+    }
+
+    /// Common tail for every sheet: forget it, run the answer, and act on
+    /// whatever host action the core's submit handler handed back.
+    private func finishNativeSheet(_ v: CellView, _ answer: () -> Int32) {
+        nativeSheets[ObjectIdentifier(v)] = nil
+        guard v.handle != 0 else { return }
+        let code = answer()
+        handleHostAction(code, sourceHandle: v.handle, view: v)
+        v.invalidateFrame()
+        v.needsDisplay = true
+    }
+
+    private func showConfirmSheet(_ d: [String: Any], for v: CellView, in win: NSWindow) {
+        let labels = d["buttons"] as? [String] ?? []
+        guard !labels.isEmpty else { return }
+        let def = min(max(d["default"] as? Int ?? 0, 0), labels.count - 1)
+        let destructive = d["destructive"] as? Int ?? -1
+        let alert = NSAlert()
+        alert.messageText = d["message"] as? String ?? ""
+        alert.alertStyle = destructive >= 0 ? .warning : .informational
+        // NSAlert lays buttons out right to left and gives the first one
+        // Return: add the default, then the rest from the right, so the row
+        // reads in the core's left-to-right order with the default rightmost.
+        var order = [def]
+        for i in stride(from: labels.count - 1, through: 0, by: -1) where i != def {
+            order.append(i)
+        }
+        for (pos, i) in order.enumerated() {
+            let b = alert.addButton(withTitle: labels[i])
+            if i == destructive { b.hasDestructiveAction = true }
+            if labels[i] == "Cancel" {
+                b.keyEquivalent = "\u{1b}"
+            } else if pos > 0, let c = labels[i].lowercased().first {
+                // The in-grid dialog answers to each label's first letter;
+                // natively that's the ⌘-letter convention (⌘D, Don't Save).
+                b.keyEquivalent = String(c)
+                b.keyEquivalentModifierMask = .command
+            }
+        }
+        nativeSheets[ObjectIdentifier(v)] = alert.window
+        alert.beginSheetModal(for: win) { [weak self, weak v] resp in
+            guard let self = self, let v = v, resp != .abort else { return }
+            let pos = resp.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+            let choice = pos >= 0 && pos < order.count ? order[pos] : -1
+            self.finishNativeSheet(v) { tk_desktop_native_confirm_answer(v.handle, Int64(choice)) }
+        }
+    }
+
+    private func showPromptSheet(_ d: [String: Any], for v: CellView, in win: NSWindow) {
+        let alert = NSAlert()
+        var label = (d["label"] as? String ?? "").trimmingCharacters(in: .whitespaces)
+        if label.hasSuffix(":") { label.removeLast() }
+        alert.messageText = label
+        alert.addButton(withTitle: d["action"] as? String ?? "OK")
+        alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 22))
+        field.stringValue = d["text"] as? String ?? ""
+        field.usesSingleLineMode = true
+        field.cell?.isScrollable = true
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        nativeSheets[ObjectIdentifier(v)] = alert.window
+        alert.beginSheetModal(for: win) { [weak self, weak v] resp in
+            guard let self = self, let v = v, resp != .abort else { return }
+            let ok = resp == .alertFirstButtonReturn
+            let text = field.stringValue
+            self.finishNativeSheet(v) {
+                withUTF8Arg(text) { ptr, len in
+                    tk_desktop_native_prompt_answer(v.handle, ptr, len, ok ? 1 : 0)
+                }
+            }
+        }
+    }
+
+    private func showSavePanel(_ d: [String: Any], for v: CellView, in win: NSWindow) {
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        let dir = d["dir"] as? String ?? ""
+        if !dir.isEmpty {
+            panel.directoryURL = URL(fileURLWithPath: dir, isDirectory: true)
+        }
+        panel.nameFieldStringValue = d["name"] as? String ?? ""
+        nativeSheets[ObjectIdentifier(v)] = panel
+        panel.beginSheetModal(for: win) { [weak self, weak v] resp in
+            guard let self = self, let v = v, resp != .abort else { return }
+            let path = resp == .OK ? (panel.url?.path ?? "") : ""
+            self.finishNativeSheet(v) {
+                withUTF8Arg(path) { ptr, len in
+                    tk_desktop_native_save_as_answer(v.handle, ptr, len)
+                }
+                return 0
+            }
+        }
+    }
+}

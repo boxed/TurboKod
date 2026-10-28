@@ -26,6 +26,9 @@ from turbokod.canvas import Canvas
 from turbokod.colors import default_attr
 from turbokod.events import Event, MOD_CTRL, MOD_META
 from turbokod.geometry import Point, Rect
+from turbokod.json import (
+    encode_json, json_array, json_int, json_object, json_str,
+)
 from turbokod.posix import (
     getenv_value, prepend_user_bin_dirs_to_path, recover_path_deferred_once,
 )
@@ -1278,6 +1281,89 @@ def tk_desktop_menu_invoke(
     # the host (so it can route framework-level actions like Quit / Open
     # via its own UI). Map that the same way handle_event does.
     return _action_code(result)
+
+
+# --- macOS-style UI: native dialogs ---------------------------------------
+
+
+def _native_dialog_json(ref d: Desktop) -> String:
+    """The dialog the host should be showing natively, as JSON, or empty."""
+    if not d.native_dialog_active():
+        return String("")
+    var o = json_object()
+    if d.confirm_dialog.active:
+        o.put(String("kind"), json_str(String("confirm")))
+        o.put(String("message"), json_str(d.confirm_dialog.message))
+        var buttons = json_array()
+        for i in range(len(d.confirm_dialog.labels)):
+            buttons.append(json_str(d.confirm_dialog.labels[i]))
+        o.put(String("buttons"), buttons)
+        o.put(String("default"), json_int(d.confirm_dialog.default_index))
+        o.put(
+            String("destructive"),
+            json_int(d.confirm_dialog.destructive_index()),
+        )
+    elif d.native_prompt_active():
+        o.put(String("kind"), json_str(String("prompt")))
+        o.put(String("label"), json_str(d.prompt.label))
+        o.put(String("text"), json_str(d.prompt.input.text))
+        o.put(String("action"), json_str(d.native_prompt_action()))
+    else:
+        o.put(String("kind"), json_str(String("save_as")))
+        o.put(String("dir"), json_str(d.save_as_dialog.browser.dir))
+        o.put(String("name"), json_str(d.save_as_dialog.filename.text))
+    return encode_json(o)
+
+
+@export
+def tk_desktop_native_dialog(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
+    """Describe the dialog the host should show as a native sheet (the
+    macOS-style UI), as UTF-8 JSON with a ``kind`` of ``confirm`` /
+    ``prompt`` / ``save_as``. Returns the byte length: 0 when no such
+    dialog is up, and a length larger than ``cap`` (nothing written) when
+    the buffer is too small, so the host can grow it and retry."""
+    if h == 0:
+        return 0
+    var text = _native_dialog_json(_desk(h)[])
+    var bytes = text.as_bytes()
+    var n = len(bytes)
+    if n == 0 or n > cap or out_ptr == 0:
+        return n
+    var op = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=out_ptr)
+    for i in range(n):
+        op[unsafe_offset=i] = bytes[i]
+    return n
+
+
+@export
+def tk_desktop_native_confirm_answer(h: Int, choice: Int) abi("C") -> Int32:
+    """Answer the native confirm sheet: the pressed button's index, or -1
+    when it was dismissed. Returns a host action code, like a menu invoke."""
+    if h == 0:
+        return ACT_NONE
+    return _action_code(_desk(h)[].native_confirm_answer(choice))
+
+
+@export
+def tk_desktop_native_prompt_answer(
+    h: Int, ptr: Int, n: Int, ok: Int,
+) abi("C") -> Int32:
+    """Answer the native prompt sheet with the entered text (``ok`` = 0
+    when cancelled). Returns a host action code."""
+    if h == 0:
+        return ACT_NONE
+    return _action_code(
+        _desk(h)[].native_prompt_answer(_string_from(ptr, n), ok != 0)
+    )
+
+
+@export
+def tk_desktop_native_save_as_answer(h: Int, ptr: Int, n: Int) abi("C"):
+    """Answer the native save panel with the chosen absolute path, or an
+    empty one (``n`` = 0) when cancelled."""
+    if h == 0:
+        return
+    _desk(h)[].native_save_as_answer(_string_from(ptr, n))
 
 
 @export

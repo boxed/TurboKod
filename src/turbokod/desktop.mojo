@@ -380,6 +380,10 @@ comptime EDITOR_TOGGLE_COMPRESS_KWARGS = String("view:compress_kwargs")
 # status bar. Like the other view toggles, the flag lives on
 # ``TurbokodConfig`` so it survives across sessions.
 comptime EDITOR_TOGGLE_TAB_BAR      = String("view:tab_bar")
+# View-menu toggle for the macOS-style UI (native app only): dialogs are
+# handed to the host as real AppKit sheets / panels. See
+# ``Desktop.native_dialogs`` and docs/native-ui.md.
+comptime VIEW_NATIVE_UI            = String("view:native_ui")
 # View-menu toggle for the per-line "+/~" change-bar gutter. The flag
 # lives on ``TurbokodConfig`` so it survives across sessions; the
 # column itself only paints when a ``.git`` is reachable from the
@@ -3790,6 +3794,7 @@ struct Desktop(Movable):
         self.menu_bar.set_item_checked(
             EDITOR_TOGGLE_TAB_BAR, self.config.tab_bar,
         )
+        self.menu_bar.set_item_checked(VIEW_NATIVE_UI, self.config.native_ui)
         self.menu_bar.set_item_checked(
             EDITOR_TOGGLE_MINIMAP, self.config.minimap,
         )
@@ -3982,11 +3987,10 @@ struct Desktop(Movable):
                     # do per paint while the user types.
                     if self.windows.windows[i].editor._git_head_present \
                             and self.windows.windows[i].editor._git_changes_dirty:
-                        var buf_lines = \
-                            self.windows.windows[i].editor.buffer.lines.copy()
-                        var head_text = \
-                            self.windows.windows[i].editor._git_head_text
-                        var marks = diff_buffer_marks(head_text, buf_lines)
+                        var marks = diff_buffer_marks(
+                            self.windows.windows[i].editor._git_head_lines,
+                            self.windows.windows[i].editor.buffer.lines,
+                        )
                         self.windows.windows[i].editor.set_git_changes(
                             marks.statuses.copy(),
                         )
@@ -4738,16 +4742,20 @@ struct Desktop(Movable):
         # Modal layers float above everything else. Only one is ever active
         # at a time (open_quick_open won't fire while a prompt is up, etc.),
         # so paint order doesn't matter for correctness.
-        self.prompt.paint(canvas, screen)
+        # A dialog the host shows natively (macOS-style UI) isn't painted.
+        var native = self.native_dialogs()
+        if not (native and self.native_prompt_active()):
+            self.prompt.paint(canvas, screen)
         # Review paints over every modal (below), so a confirm it raised
         # (checkout a branch?) is painted again after it.
-        if not self.review.active:
+        if not self.review.active and not native:
             self.confirm_dialog.paint(canvas, screen)
         self.message_request_dialog.paint(canvas, screen)
         self.color_picker.paint(canvas, screen)
         self.merge_view.paint(canvas, screen)
         self.quick_open.paint(canvas, screen)
-        self.save_as_dialog.paint(canvas, screen)
+        if not native:
+            self.save_as_dialog.paint(canvas, screen)
         self.symbol_pick.paint(canvas, screen)
         self.reference_pick.paint(canvas, screen)
         self.find_symbol.paint(canvas, screen)
@@ -4819,7 +4827,7 @@ struct Desktop(Movable):
                 )
             self.review_tree.paint(canvas, screen)
         self.review.paint(canvas, screen, review_top_y)
-        if self.review.active:
+        if self.review.active and not native:
             self.confirm_dialog.paint(canvas, screen)
         # Git history for selection — a paned modal over the whole
         # surface, same top_y convention as review (below the in-grid
@@ -7651,6 +7659,11 @@ struct Desktop(Movable):
         if event.kind == EVENT_MOD_KEY:
             _ = self.windows.handle_mod_key(event)
             return Optional[String]()
+        if self.native_dialog_active():
+            # The host is showing this dialog as a native sheet, which is
+            # modal to the window — anything that still reaches us (a
+            # replayed menu chord) must not answer it behind the sheet's back.
+            return Optional[String]()
         if self.spell_menu.active:
             # Spell-action popup is the topmost modal: it opens
             # contextually over the cursor, so any other modal
@@ -8651,6 +8664,85 @@ struct Desktop(Movable):
                 i -= 1
         return Optional[Event]()
 
+    # --- macOS-style UI: dialogs shown by the host ---------------------
+    #
+    # With ``config.native_ui`` on and a host that owns the menu (the
+    # native app), the dialogs below stay the source of truth for *state*
+    # — openers and submit handlers are unchanged — but the host renders
+    # them as AppKit sheets: it polls ``native_dialog_active`` and the
+    # dialog's fields (``tk_desktop_native_dialog``), and reports the
+    # answer through ``native_*_answer``, which runs the same submit path
+    # a click on the in-grid button would.
+
+    def native_dialogs(self) -> Bool:
+        return self.host_owns_menu and self.config.native_ui
+
+    def native_prompt_active(self) -> Bool:
+        """A single-field prompt (rename, go to line, …) is up. Find and
+        Replace keep their in-grid dialog: they stay open across matches
+        and carry option toggles."""
+        return self.prompt.active and not self.prompt.has_second \
+            and not self.prompt.show_options
+
+    def native_prompt_action(self) -> String:
+        """The label for a native prompt's confirm button — named for what
+        it does, like every other confirmation (never a bare OK)."""
+        var pa = self._pending_action
+        if pa == EDITOR_GOTO:
+            return String("Go")
+        if pa == _PA_RENAME or pa == _PA_RENAME_FILE:
+            return String("Rename")
+        if pa == _PA_DUPLICATE_FILE:
+            return String("Duplicate")
+        if pa == _PA_BP_CONDITION:
+            return String("Set Condition")
+        if pa == _PA_ADD_WATCH:
+            return String("Add Watch")
+        return String("OK")
+
+    def native_dialog_active(self) -> Bool:
+        if not self.native_dialogs():
+            return False
+        return self.confirm_dialog.active or self.native_prompt_active() \
+            or self.save_as_dialog.active
+
+    def native_confirm_answer(mut self, choice: Int) -> Optional[String]:
+        if not self.confirm_dialog.active:
+            return Optional[String]()
+        self.confirm_dialog.answer(choice)
+        return self._on_confirm_submit()
+
+    def native_prompt_answer(
+        mut self, var text: String, ok: Bool,
+    ) -> Optional[String]:
+        if not self.native_prompt_active():
+            return Optional[String]()
+        if not ok:
+            self.prompt.close()
+            return Optional[String]()
+        self.prompt.input.set_text(text^)
+        self.prompt.submit_kind = SUBMIT_DEFAULT
+        self.prompt.submitted = True
+        return self._on_prompt_submit()
+
+    def native_save_as_answer(mut self, path: String):
+        """``path`` is empty when the save panel was cancelled. The panel
+        already asked before replacing an existing file."""
+        if not self.save_as_dialog.active:
+            return
+        self.save_as_dialog.close()
+        if len(path.as_bytes()) == 0:
+            self._close_after_save_as_idx = -1
+            return
+        try:
+            self._save_focused_as(path)
+        except:
+            self.status_bar.set_message(
+                String("Can't save ") + basename(path), Attr(RED, LIGHT_GRAY),
+            )
+            return
+        self._close_if_saved_as()
+
     def _replay_through_modal(mut self, ev: Event, screen: Rect):
         """Feed a replayed chord into whichever modal currently owns input.
 
@@ -8979,6 +9071,11 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == EDITOR_TOGGLE_TAB_BAR:
             self.config.tab_bar = not self.config.tab_bar
+            self._apply_view_config()
+            self._persist_config()
+            return Optional[String]()
+        if action == VIEW_NATIVE_UI:
+            self.config.native_ui = not self.config.native_ui
             self._apply_view_config()
             self._persist_config()
             return Optional[String]()

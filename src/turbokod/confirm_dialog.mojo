@@ -69,6 +69,11 @@ struct ConfirmDialog(Movable):
     var _confirm_index: Int
     """The button that sets ``confirmed`` (``open``'s action), or -1."""
     var _focus: FocusGroup
+    var labels: List[String]
+    """Button labels as passed to ``open_choices`` — what a native host
+    (macOS-style UI) puts on its own alert buttons."""
+    var default_index: Int
+    """The button focused on open (the one Enter presses)."""
 
     def __init__(out self):
         self.active = False
@@ -81,6 +86,8 @@ struct ConfirmDialog(Movable):
         self._destructive = -1
         self._confirm_index = -1
         self._focus = FocusGroup(0)
+        self.labels = List[String]()
+        self.default_index = 0
 
     def open(
         mut self, var message: String, action: String,
@@ -121,6 +128,8 @@ struct ConfirmDialog(Movable):
             self._keys.append(key)
         self._focus = FocusGroup(len(labels))
         self._focus.focus_force(default_index)
+        self.labels = labels.copy()
+        self.default_index = default_index
         self._destructive = destructive_index
         self._confirm_index = -1
         self.message = message^
@@ -140,6 +149,21 @@ struct ConfirmDialog(Movable):
         self._destructive = -1
         self._confirm_index = -1
         self._focus = FocusGroup(0)
+        self.labels = List[String]()
+        self.default_index = 0
+
+    def destructive_index(self) -> Int:
+        return self._destructive
+
+    def answer(mut self, choice: Int):
+        """Resolve as if button ``choice`` (or ``CONFIRM_DISMISSED``) was
+        pressed — the native host's alert reports its answer this way."""
+        if not self.active:
+            return
+        if choice < 0 or choice >= len(self._buttons):
+            self._resolve(CONFIRM_DISMISSED)
+        else:
+            self._resolve(choice)
 
     def _layout(self, container_bounds: Rect) -> Rect:
         var width = _DEFAULT_WIDTH

@@ -53,6 +53,15 @@ a native `NSOpenPanel` for the same Open / Quick-Open / Open-Project actions).
 
 Full details in [docs/native-menu.md](docs/native-menu.md).
 
+### macOS-style UI (native macOS)
+
+View ▸ macOS-style UI (`config.native_ui`) hands dialogs to the Swift host as
+real AppKit sheets. The core keeps each dialog's state and submit handler; the
+host polls `tk_desktop_native_dialog` (JSON) and answers via
+`tk_desktop_native_*_answer`, which runs the same submit path as the in-grid
+button. In progress (confirm / single-field prompts / Save As so far; tabs
+next). Full details in [docs/native-ui.md](docs/native-ui.md).
+
 ### Floating panels (native macOS)
 
 A per-project toggle (View ▸ Floating panels) floats the tool panels (terminal /

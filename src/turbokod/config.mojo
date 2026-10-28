@@ -190,6 +190,9 @@ struct TurbokodConfig(Copyable, Movable):
     var smart_wrap_comma_threshold: Int
     var git_changes: Bool
     var tab_bar: Bool
+    # macOS-style UI (native app only): dialogs become real AppKit
+    # sheets/panels instead of in-grid Turbo Vision boxes.
+    var native_ui: Bool
     # Right-side minimap gutter: a fixed-height projection of the whole
     # file that surfaces uncommitted-change markers regardless of
     # ``scroll_y``. The gutter only paints when there's data to show
@@ -296,6 +299,7 @@ struct TurbokodConfig(Copyable, Movable):
         self.smart_wrap_comma_threshold = -1
         self.git_changes = True
         self.tab_bar = True
+        self.native_ui = False
         self.minimap = True
         self.sticky_scroll = True
         self.auto_save = True
@@ -330,6 +334,7 @@ struct TurbokodConfig(Copyable, Movable):
         self.smart_wrap_comma_threshold = copy.smart_wrap_comma_threshold
         self.git_changes = copy.git_changes
         self.tab_bar = copy.tab_bar
+        self.native_ui = copy.native_ui
         self.minimap = copy.minimap
         self.sticky_scroll = copy.sticky_scroll
         self.auto_save = copy.auto_save
@@ -456,6 +461,7 @@ def _config_from_json(root: JsonValue) raises -> TurbokodConfig:
         root, String("git_changes"), cfg.git_changes,
     )
     cfg.tab_bar = json_get_bool(root, String("tab_bar"), cfg.tab_bar)
+    cfg.native_ui = json_get_bool(root, String("native_ui"), cfg.native_ui)
     cfg.minimap = json_get_bool(root, String("minimap"), cfg.minimap)
     cfg.sticky_scroll = json_get_bool(
         root, String("sticky_scroll"), cfg.sticky_scroll,
@@ -646,6 +652,7 @@ def _config_to_json(config: TurbokodConfig) -> JsonValue:
     )
     root.put(String("git_changes"), json_bool(config.git_changes))
     root.put(String("tab_bar"), json_bool(config.tab_bar))
+    root.put(String("native_ui"), json_bool(config.native_ui))
     root.put(String("minimap"), json_bool(config.minimap))
     root.put(String("sticky_scroll"), json_bool(config.sticky_scroll))
     root.put(String("auto_save"), json_bool(config.auto_save))

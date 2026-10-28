@@ -132,6 +132,16 @@ int32_t tk_desktop_menu_invoke(int64_t h, int64_t action_ptr, int64_t action_len
                                int64_t cols, int64_t rows);
 int64_t tk_desktop_take_pending_new_window_project(int64_t h, int64_t out_ptr,
                                                    int64_t cap);
+// macOS-style UI (View ▸ macOS-style UI): the core hands dialogs to the host.
+// _native_dialog writes a JSON description ({"kind": "confirm" | "prompt" |
+// "save_as", …}) of the dialog to show as a sheet, 0 when none; a return
+// larger than cap means grow the buffer and retry. The _answer calls resolve
+// it through the same submit path the in-grid dialog uses.
+int64_t tk_desktop_native_dialog(int64_t h, int64_t out_ptr, int64_t cap);
+int32_t tk_desktop_native_confirm_answer(int64_t h, int64_t choice);
+int32_t tk_desktop_native_prompt_answer(int64_t h, int64_t ptr, int64_t len,
+                                        int64_t ok);
+void tk_desktop_native_save_as_answer(int64_t h, int64_t ptr, int64_t len);
 // 1 while a DAP session is paused at a breakpoint. Polled by the scripted
 // screenshot path (TK_CAPTURE_WHEN=debug-stopped) — see scripts/screenshots.sh.
 int32_t tk_desktop_debug_stopped(int64_t h);
