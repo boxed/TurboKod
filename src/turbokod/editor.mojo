@@ -415,6 +415,20 @@ def _normalize_crlf(text: String) -> String:
     return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=len(out))))
 
 
+def _mapped_row(row_map: List[Int], row: Int) -> Int:
+    """Where ``row`` went, per ``row_map`` (new row of each old one, -1
+    for a line that went): a gone line's row is as far below the last
+    line before it that stayed. Clamped by whoever installs the caret."""
+    if row < 0 or row >= len(row_map):
+        return row
+    var k = row
+    while k >= 0 and row_map[k] < 0:
+        k -= 1
+    if k < 0:
+        return row
+    return row_map[k] + (row - k)
+
+
 def _canonical_path(path: String) -> String:
     var resolved = realpath(path)
     return resolved if len(resolved.as_bytes()) > 0 else path
@@ -4227,6 +4241,8 @@ struct Editor(Copyable, Movable):
             nr = max_row
         if nr < 0:
             nr = 0
+        # One caret, there: others could be past the end now
+        self.clear_extra_carets()
         self.move_to(nr, 0, False)
         self.dirty = True
         self._mark_hl_dirty(bs)
@@ -4422,13 +4438,11 @@ struct Editor(Copyable, Movable):
         ``save`` returns. Snapshots undo first so a stray resolution is
         recoverable with Ctrl+Z."""
         self._push_undo()
-        self.buffer.replace_lines(_split_buffer_lines(text), List[Bool]())
+        self._swap_in_lines(_split_buffer_lines(text))
         self._recompute_big_buffer()
         self.clear_diagnostics()
         self._last_known_line_count = self.buffer.line_count()
         self._clamp_cursor_after_reload()
-        self.selections[0].anchor_row = self.selections[0].row
-        self.selections[0].anchor_col = self.selections[0].col
         self.merge_pending = False
         self.pending_merge_regions = List[MergeRegion]()
         self.disk_conflict = False
@@ -4504,7 +4518,7 @@ struct Editor(Copyable, Movable):
                 # back past it to the text before the last edit, and the
                 # changes made on disk are gone at the next save.
                 self._push_undo()
-            self.buffer.replace_lines(lines^, List[Bool]())
+            self._swap_in_lines(lines^)
             self._recompute_big_buffer()
             self.disk_baseline = baseline^
             self._adopt_stat(info)
@@ -4544,7 +4558,7 @@ struct Editor(Copyable, Movable):
         # Snapshot for undo before mutating — gives the user a single
         # Ctrl+Z to back out of the merge if they don't like it.
         self._push_undo()
-        self.buffer.replace_lines(merged^, List[Bool]())
+        self._swap_in_lines(merged^)
         self.disk_baseline = text^
         self._adopt_stat(info)
         self._clear_disk_conflict()
@@ -4569,29 +4583,41 @@ struct Editor(Copyable, Movable):
         self._last_known_line_count = self.buffer.line_count()
         self.refresh_highlights()
         self._clamp_cursor_after_reload()
-        self.selections[0].anchor_row = self.selections[0].row
-        self.selections[0].anchor_col = self.selections[0].col
+
+    def _swap_in_lines(mut self, var new_lines: List[String]):
+        """Replace the buffer with ``new_lines`` (a reload or merge), the
+        bookmarks and carets staying with the lines they were on: a line
+        the new text has too takes them along, and a caret on one it
+        hasn't goes as far below the last line it has as it was."""
+        var ops = diff_lines(self.buffer.lines, new_lines)
+        var row_map = List[Int](length=self.buffer.line_count(), fill=-1)
+        var marks = List[Bool]()
+        if self.buffer.mark_count > 0:
+            marks = List[Bool](length=len(new_lines), fill=False)
+        for op in ops:
+            if op.kind == OP_EQUAL:
+                row_map[op.a_index] = op.b_index
+                if len(marks) > 0:
+                    marks[op.b_index] = self.buffer.is_marked(op.a_index)
+        for c in range(len(self.selections)):
+            self.selections[c].row = _mapped_row(row_map, self.selections[c].row)
+            self.selections[c].anchor_row = _mapped_row(row_map, self.selections[c].anchor_row)
+        self.buffer.replace_lines(new_lines^, marks)
 
     def _clamp_cursor_after_reload(mut self):
-        """Pull the primary cursor back inside the new buffer bounds and
-        recompute ``desired_col``. Used after a reload or merge replaces
-        ``buffer.lines`` so a cursor that was past the previous EOL
-        doesn't end up dangling."""
-        var max_row = self.buffer.line_count() - 1
-        if max_row < 0:
-            max_row = 0
-        if self.selections[0].row > max_row:
-            self.selections[0].row = max_row
-        if self.selections[0].row < 0:
-            self.selections[0].row = 0
-        var n = self.buffer.line_length(self.selections[0].row)
-        if self.selections[0].col > n:
-            self.selections[0].col = n
-        if self.selections[0].col < 0:
-            self.selections[0].col = 0
-        self.selections[0].desired_col = utf8_cell_of_byte(
-            self.buffer.line(self.selections[0].row), self.selections[0].col,
-        )
+        """Pull every caret back inside the new buffer bounds with its
+        selection collapsed, and recompute ``desired_col``. Used after a
+        reload or merge replaces ``buffer.lines`` so a caret that was past
+        the previous EOL doesn't end up dangling: one past the last line
+        aborts the next keystroke."""
+        for c in range(len(self.selections)):
+            self.selections[c].anchor_row = self.selections[c].row
+            self.selections[c].anchor_col = self.selections[c].col
+        self._install_carets(self.selections.copy())
+        for c in range(len(self.selections)):
+            self.selections[c].desired_col = utf8_cell_of_byte(
+                self.buffer.line(self.selections[c].row), self.selections[c].col,
+            )
 
     # --- saving ------------------------------------------------------------
 

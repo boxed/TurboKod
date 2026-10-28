@@ -11,14 +11,14 @@ from turbokod.desktop import Desktop, EDITOR_DUPLICATE, _duplicate_name
 from turbokod.diff import REGION_CONFLICT
 from turbokod.editor import (
     EXT_CHANGE_CONFLICT, EXT_CHANGE_MERGED, EXT_CHANGE_NONE,
-    EXT_CHANGE_RELOADED, Editor
+    EXT_CHANGE_RELOADED, Caret, Editor
 )
 from turbokod.file_io import (
     basename, read_file, stat_file, write_file, write_file_stamped,
 )
 from turbokod.git_blame import BlameLine
 from turbokod.git_changes import (
-    GIT_CHANGE_ADDED, GIT_CHANGE_MODIFIED, GIT_CHANGE_NONE
+    GIT_CHANGE_ADDED, GIT_CHANGE_MODIFIED, GIT_CHANGE_NONE, GitRevertBlock
 )
 from turbokod.highlight import GrammarRegistry, highlight_for_extension
 from turbokod.posix import which
@@ -121,6 +121,56 @@ def test_undo_after_a_reload_takes_back_the_reload_first() raises:
     assert_true(ed.undo())
     assert_equal(ed.text_snapshot(), String("one\ntwo\n"))
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+def test_a_reload_that_shortens_the_file_keeps_every_caret_in_it() raises:
+    # A second caret was left past the end, and the next keystroke
+    # aborted the editor with every unsaved buffer in it
+    var path = _temp_path(String("_ext_carets.txt"))
+    assert_true(write_file(path, String("a\nb\nc\nd\ne\nf\n")))
+    var ed = Editor.from_file(path)
+    ed.selections = List[Caret]()
+    # (row, col, desired col, anchor row, anchor col)
+    ed.selections.append(Caret(0, 1, 1, 0, 1))
+    ed.selections.append(Caret(5, 1, 1, 5, 1))
+    assert_true(write_file(path, String("a\n")))
+    assert_equal(ed.check_for_external_change(), EXT_CHANGE_RELOADED)
+    for c in ed.selections:
+        assert_true(c.row < ed.buffer.line_count())
+        assert_true(c.anchor_row < ed.buffer.line_count())
+    _ = ed.handle_key(Event.key_event(UInt32(ord("x"))), _VIEW)
+    assert_equal(ed.buffer.line(0), String("ax"))
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+def test_a_reload_keeps_bookmarks_and_the_caret_on_their_lines() raises:
+    # Lines added above and below by a formatter or a pull
+    var path = _temp_path(String("_ext_marks.txt"))
+    assert_true(write_file(path, String("a\nb\nc\nd\ne\n")))
+    var ed = Editor.from_file(path)
+    ed.buffer.set_mark(1, True)
+    ed.buffer.set_mark(3, True)
+    ed.move_to(2, 1, False)
+    assert_true(write_file(path, String("new\na\nb\nc\nmid\nd\nE\n")))
+    assert_equal(ed.check_for_external_change(), EXT_CHANGE_RELOADED)
+    assert_true(ed.buffer.is_marked(2))
+    assert_true(ed.buffer.is_marked(5))
+    assert_equal(ed.buffer.mark_count, 2)
+    assert_equal(ed.primary_caret().row, 3)
+    assert_equal(ed.primary_caret().col, 1)
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+def test_reverting_a_change_leaves_no_caret_past_the_end() raises:
+    var ed = Editor(String("a\nadded\nadded\nadded"))
+    ed.selections = List[Caret]()
+    ed.selections.append(Caret(1, 0, 0, 1, 0))
+    ed.selections.append(Caret(3, 2, 2, 3, 2))
+    ed.apply_revert_block(GitRevertBlock(1, 4, List[String]()))
+    assert_equal(ed.text_snapshot(), String("a"))
+    assert_equal(len(ed.selections), 1)
+    _ = ed.handle_key(Event.key_event(UInt32(ord("x"))), _VIEW)
+    assert_equal(ed.text_snapshot(), String("xa"))
 
 
 def test_editor_external_change_detects_same_size_rewrite() raises:
