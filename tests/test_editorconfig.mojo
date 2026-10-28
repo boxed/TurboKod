@@ -120,11 +120,25 @@ def test_keys_and_values_ignore_case() raises:
     var c = _config(
         " Indent_Style ", "TAB", "END_OF_LINE", "CRLF",
         "Trim_Trailing_Whitespace", "False", "insert_final_newline", "TRUE",
+        "Charset", "UTF-8",
     )
+    assert_equal(c.charset, "utf-8")
     assert_equal(c.indent_style, "tab")
     assert_equal(c.end_of_line, "crlf")
     assert_equal(c.trim_trailing_whitespace, 0)
     assert_equal(c.insert_final_newline, 1)
+
+
+def test_the_smallest_values_count() raises:
+    var c = _config(
+        "indent_size", "1", "tab_width", "1", "max_line_length", "1",
+        "trim_trailing_whitespace", "false", "insert_final_newline", "false",
+    )
+    assert_equal(c.indent_size, 1)
+    assert_equal(c.tab_width, 1)
+    assert_equal(c.max_line_length, 1)
+    assert_equal(c.trim_trailing_whitespace, 0)
+    assert_equal(c.insert_final_newline, 0)
 
 
 def test_indent_size_tab_uses_the_tab_width() raises:
