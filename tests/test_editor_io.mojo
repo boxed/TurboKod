@@ -101,6 +101,28 @@ def test_editor_external_change_clean_reload_when_buffer_clean() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
+def test_undo_after_a_reload_takes_back_the_reload_first() raises:
+    # It went back to before the last edit, past what changed on disk:
+    # a git pull's lines vanished from the buffer, and the next save
+    # wrote over them
+    var path = _temp_path(String("_ext_undo.txt"))
+    assert_true(write_file(path, String("one\ntwo\n")))
+    var ed = Editor.from_file(path)
+    ed.move_to(0, 3, False)
+    ed.paste_text(String("X"))
+    assert_true(ed.save())
+    assert_true(write_file(path, String("oneX\ntwo\nfrom the pull\n")))
+    assert_equal(ed.check_for_external_change(), EXT_CHANGE_RELOADED)
+    assert_true(ed.undo())
+    assert_equal(ed.text_snapshot(), String("oneX\ntwo\n"))
+    assert_true(ed.redo())
+    assert_equal(ed.text_snapshot(), String("oneX\ntwo\nfrom the pull\n"))
+    assert_true(ed.undo())
+    assert_true(ed.undo())
+    assert_equal(ed.text_snapshot(), String("one\ntwo\n"))
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
 def test_editor_external_change_detects_same_size_rewrite() raises:
     """Flipping between two branches rewrites a file with the same size
     inside the same second. ``st_mtime`` alone can't tell the two apart;

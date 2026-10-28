@@ -4494,7 +4494,13 @@ struct Editor(Copyable, Movable):
             # Clean reload: buffer matches the previous baseline, just
             # adopt the new bytes.
             var baseline = text
-            self.buffer.replace_lines(_split_buffer_lines(text), List[Bool]())
+            var lines = _split_buffer_lines(text)
+            if lines != self.buffer.lines:
+                # An undo step of its own: otherwise the next undo goes
+                # back past it to the text before the last edit, and the
+                # changes made on disk are gone at the next save.
+                self._push_undo()
+            self.buffer.replace_lines(lines^, List[Bool]())
             self._recompute_big_buffer()
             self.disk_baseline = baseline^
             self._adopt_stat(info)
