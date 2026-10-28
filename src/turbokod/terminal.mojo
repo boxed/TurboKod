@@ -727,6 +727,29 @@ def _csi_mods_from(mod_num: Int) -> UInt8:
     return mods
 
 
+def _tilde_key(num: Int) -> UInt32:
+    """The key a ``CSI <num> ~`` sequence names, or 0 for none we know."""
+    if num == 1:  return KEY_HOME
+    if num == 2:  return KEY_INSERT
+    if num == 3:  return KEY_DELETE
+    if num == 4:  return KEY_END
+    if num == 5:  return KEY_PAGEUP
+    if num == 6:  return KEY_PAGEDOWN
+    if num == 11: return KEY_F1
+    if num == 12: return KEY_F2
+    if num == 13: return KEY_F3
+    if num == 14: return KEY_F4
+    if num == 15: return KEY_F5
+    if num == 17: return KEY_F6
+    if num == 18: return KEY_F7
+    if num == 19: return KEY_F8
+    if num == 20: return KEY_F9
+    if num == 21: return KEY_F10
+    if num == 23: return KEY_F11
+    if num == 24: return KEY_F12
+    return UInt32(0)
+
+
 def _named_key_for_cp(cp: Int) -> UInt32:
     """If ``cp`` is one of the C0 control bytes that has its own
     ``KEY_*`` constant — CR/LF for Enter, TAB for Tab, BS/DEL for
@@ -858,27 +881,15 @@ def _parse_csi(data: String) -> Tuple[Event, Int]:
         params.append(cur)
 
     if final == 0x7E:
-        if len(params) == 1:
-            var num1 = params[0]
-            if num1 == 1:  return (Event.key_event(KEY_HOME), consumed)
-            if num1 == 2:  return (Event.key_event(KEY_INSERT), consumed)
-            if num1 == 3:  return (Event.key_event(KEY_DELETE), consumed)
-            if num1 == 4:  return (Event.key_event(KEY_END), consumed)
-            if num1 == 5:  return (Event.key_event(KEY_PAGEUP), consumed)
-            if num1 == 6:  return (Event.key_event(KEY_PAGEDOWN), consumed)
-            if num1 == 11: return (Event.key_event(KEY_F1), consumed)
-            if num1 == 12: return (Event.key_event(KEY_F2), consumed)
-            if num1 == 13: return (Event.key_event(KEY_F3), consumed)
-            if num1 == 14: return (Event.key_event(KEY_F4), consumed)
-            if num1 == 15: return (Event.key_event(KEY_F5), consumed)
-            if num1 == 17: return (Event.key_event(KEY_F6), consumed)
-            if num1 == 18: return (Event.key_event(KEY_F7), consumed)
-            if num1 == 19: return (Event.key_event(KEY_F8), consumed)
-            if num1 == 20: return (Event.key_event(KEY_F9), consumed)
-            if num1 == 21: return (Event.key_event(KEY_F10), consumed)
-            if num1 == 23: return (Event.key_event(KEY_F11), consumed)
-            if num1 == 24: return (Event.key_event(KEY_F12), consumed)
-            return (Event(), consumed)
+        if len(params) == 1 or len(params) == 2:
+            # ``CSI <n> ~``, or ``CSI <n> ; <mod> ~`` for the modified key
+            # (Ctrl+F2 is ``CSI 12 ; 5 ~``).
+            var mods = _csi_mods_from(params[1]) if len(params) == 2 \
+                else MOD_NONE
+            var key = _tilde_key(params[0])
+            if key == UInt32(0):
+                return (Event(), consumed)
+            return (Event.key_event(key, mods), consumed)
         if len(params) == 3 and params[0] == 27:
             # modifyOtherKeys=2: CSI 27 ; <mod> ; <codepoint> ~
             var mods = _csi_mods_from(params[1])
@@ -903,6 +914,12 @@ def _parse_csi(data: String) -> Tuple[Event, Int]:
         if final == 0x46: return (Event.key_event(KEY_END, mods), consumed)
         # CSI 1 ; <mod> Z — Shift+Tab on terminals that report modifiers.
         if final == 0x5A: return (Event.key_event(KEY_TAB, mods), consumed)
+        # CSI 1 ; <mod> P..S — modified F1..F4 (the SS3 forms carry no
+        # modifier, so xterm switches to these).
+        if final == 0x50: return (Event.key_event(KEY_F1, mods), consumed)
+        if final == 0x51: return (Event.key_event(KEY_F2, mods), consumed)
+        if final == 0x52: return (Event.key_event(KEY_F3, mods), consumed)
+        if final == 0x53: return (Event.key_event(KEY_F4, mods), consumed)
         if final == 0x75:  # 'u' — kitty kbd protocol
             var named = _named_key_for_cp(num1)
             if named != UInt32(0):

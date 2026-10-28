@@ -192,7 +192,8 @@ from .spelling_dialog import (
 )
 from .prompt import (
     Prompt,
-    SUBMIT_DEFAULT, SUBMIT_FIND_NEXT, SUBMIT_REPLACE, SUBMIT_REPLACE_ALL,
+    SUBMIT_DEFAULT, SUBMIT_FIND_NEXT, SUBMIT_MARK_ALL, SUBMIT_REPLACE,
+    SUBMIT_REPLACE_ALL, SUBMIT_UNMARK_ALL,
 )
 from .quick_open import QuickOpen
 from .run_manager import RunSession, drain_run_output, poll_run_exit
@@ -352,6 +353,17 @@ comptime _PA_CLOSE_UNSAVED    = String("window:close:unsaved")
 comptime EDITOR_TOGGLE_COMMENT = String("edit:comment")
 comptime EDITOR_TOGGLE_CASE   = String("edit:case")
 comptime EDITOR_SORT_LINES    = String("edit:sort_lines")
+# TextPad-style line bookmarks (Edit menu; the flags live on the Editor's
+# ``TextBuffer``). Mark / unmark lines matching a search is the Find
+# dialog's [ Mark all ] / [ Unmark all ] buttons.
+comptime EDITOR_BOOKMARK_TOGGLE = String("edit:bookmark_toggle")
+comptime EDITOR_BOOKMARK_NEXT   = String("edit:bookmark_next")
+comptime EDITOR_BOOKMARK_PREV   = String("edit:bookmark_prev")
+comptime EDITOR_BOOKMARK_CLEAR  = String("edit:bookmark_clear")
+comptime EDITOR_BOOKMARK_INVERT = String("edit:bookmark_invert")
+comptime EDITOR_BOOKMARK_COPY   = String("edit:bookmark_copy")
+comptime EDITOR_BOOKMARK_CUT    = String("edit:bookmark_cut")
+comptime EDITOR_BOOKMARK_DELETE = String("edit:bookmark_delete")
 comptime EDITOR_TOGGLE_LINE_NUMBERS = String("view:line_numbers")
 # View-menu toggle for the keyword-argument "soft compress" display option
 # (``foo(a=a)`` → ``foo(=a)`` off the caret line). Display-only; the flag
@@ -641,6 +653,11 @@ comptime _REVIEW_TREE_LABEL_LEFT   = String("Review file tree: left")
 comptime _PA_REPLACE_DO          = String("__pa_replace_do")
 comptime _PA_BP_CONDITION        = String("__pa_bp_condition")
 comptime _PA_ADD_WATCH           = String("__pa_add_watch")
+
+
+def _count_noun(n: Int, noun: String) -> String:
+    """``1 line``, ``3 lines``."""
+    return String(n) + String(" ") + noun + (String("") if n == 1 else String("s"))
 
 
 def ctrl_key(letter: String) -> UInt32:
@@ -2112,6 +2129,26 @@ struct Desktop(Movable):
         self._hotkeys.append(Hotkey(
             UInt32(ord("h")), MOD_CTRL | MOD_SHIFT, GIT_HISTORY_SELECTION,
             group=HKG_GIT, help=String("Show history for selection"),
+        ))
+        # Bookmarks, on F2 as in TextPad — except that plain F2 is the
+        # LSP-standard rename below, so next / previous move to Alt.
+        # Ctrl+F2 is TextPad's toggle; Cmd+F2 is the alias for the macOS
+        # app, where the system can claim Ctrl+F2 (focus the menu bar).
+        self._hotkeys.append(Hotkey(
+            KEY_F2, MOD_META, EDITOR_BOOKMARK_TOGGLE,
+            group=HKG_EDIT, help=String("Toggle bookmark"),
+        ))
+        self._hotkeys.append(Hotkey(
+            KEY_F2, MOD_CTRL, EDITOR_BOOKMARK_TOGGLE,
+            group=HKG_EDIT, help=String("Toggle bookmark"),
+        ))
+        self._hotkeys.append(Hotkey(
+            KEY_F2, MOD_ALT, EDITOR_BOOKMARK_NEXT,
+            group=HKG_FIND, help=String("Next bookmark"),
+        ))
+        self._hotkeys.append(Hotkey(
+            KEY_F2, MOD_ALT | MOD_SHIFT, EDITOR_BOOKMARK_PREV,
+            group=HKG_FIND, help=String("Previous bookmark"),
         ))
         # LSP completion request. Two default triggers so at least one
         # survives macOS's input-source hijack of Ctrl+Space:
@@ -8861,6 +8898,9 @@ struct Desktop(Movable):
             if fe >= 0:
                 self.windows.windows[fe].editor.sort_lines()
             return Optional[String]()
+        if action.startswith(String("edit:bookmark_")):
+            self._bookmark_action(action)
+            return Optional[String]()
         if action == EDITOR_TOGGLE_LINE_NUMBERS:
             self.config.line_numbers = not self.config.line_numbers
             self._apply_view_config()
@@ -12504,7 +12544,7 @@ struct Desktop(Movable):
             seed = self._last_search
         self.prompt.open(
             String("Find: "), seed^,
-            select_prefill=True, show_options=True,
+            select_prefill=True, show_options=True, mark_buttons=True,
         )
         self.prompt.set_search_options(self._last_search_opts)
 
@@ -12535,6 +12575,54 @@ struct Desktop(Movable):
                 self.windows.windows[idx].interior(),
                 margin_below=10, margin_above=10,
             )
+
+    def _bookmark_action(mut self, action: String):
+        """Run an Edit ▸ bookmark command on the focused editor and say
+        what it did on the status bar."""
+        var idx = self._focused_editor_idx()
+        if idx < 0:
+            return
+        ref ed = self.windows.windows[idx].editor
+        var msg = String("")
+        if action == EDITOR_BOOKMARK_TOGGLE:
+            ed.toggle_bookmark()
+        elif action == EDITOR_BOOKMARK_NEXT or action == EDITOR_BOOKMARK_PREV:
+            if not ed.goto_bookmark(
+                action == EDITOR_BOOKMARK_NEXT,
+                self.windows.windows[idx].interior(),
+            ):
+                msg = String("No bookmarks")
+        elif action == EDITOR_BOOKMARK_CLEAR:
+            ed.clear_bookmarks()
+        elif action == EDITOR_BOOKMARK_INVERT:
+            ed.invert_bookmarks()
+            msg = _count_noun(ed.bookmark_count(), String("bookmarked line"))
+        elif action == EDITOR_BOOKMARK_COPY:
+            msg = String("Copied ") + _count_noun(
+                ed.copy_bookmarked_lines(), String("bookmarked line"),
+            )
+        elif action == EDITOR_BOOKMARK_CUT:
+            msg = String("Cut ") + _count_noun(
+                ed.cut_bookmarked_lines(), String("bookmarked line"),
+            )
+        elif action == EDITOR_BOOKMARK_DELETE:
+            msg = String("Deleted ") + _count_noun(
+                ed.delete_bookmarked_lines(), String("bookmarked line"),
+            )
+        if len(msg.as_bytes()) > 0:
+            self.status_bar.set_message(msg^, Attr(BLACK, LIGHT_GRAY))
+
+    def _mark_matching_lines(
+        mut self, idx: Int, needle: String, opts: SearchOptions, on: Bool,
+    ):
+        """The Find dialog's Mark all / Unmark all."""
+        var n = self.windows.windows[idx].editor.mark_matching_lines(
+            needle, opts, on,
+        )
+        var msg = String("Bookmarked ") if on else String("Unbookmarked ")
+        self.status_bar.set_message(
+            msg + _count_noun(n, String("line")), Attr(BLACK, LIGHT_GRAY),
+        )
 
     def _close_pickers(mut self):
         """Close every list picker (Quick Open, Go to Symbol, references,
@@ -16115,7 +16203,13 @@ struct Desktop(Movable):
             self._last_search_opts = opts
             var idx = self._focused_editor_idx()
             if idx >= 0:
-                self._find_step(idx, text, opts, True)
+                if submit_kind == SUBMIT_MARK_ALL \
+                        or submit_kind == SUBMIT_UNMARK_ALL:
+                    self._mark_matching_lines(
+                        idx, text, opts, submit_kind == SUBMIT_MARK_ALL,
+                    )
+                else:
+                    self._find_step(idx, text, opts, True)
             return Optional[String]()
         if pa == _PA_DOC_INSTALL or pa == _PA_GRAMMAR_INSTALL \
                 or pa == _PA_LSP_INSTALL or pa == _PA_DEBUGPY_INSTALL:

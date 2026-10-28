@@ -422,6 +422,21 @@ When a cell column lands on the **right half** of a wide glyph, the cell→byte 
 
 East-Asian fullwidth (CJK) and zero-width combining marks are **still not modeled** — only emoji widen. Regional-indicator letters (flags) deliberately stay width 1 so a two-codepoint flag reserves two cells total, matching most terminals. If CJK ever needs real wide handling, extend `char_width` (and its Swift twin) — everything downstream already respects it. The regression test is `test_emoji_double_width` in `tests/test_misc.mojo`.
 
+## Bookmarks ride on `TextBuffer`'s structural edits
+
+Line bookmarks (Edit ▸ Bookmarks, the Find dialog's Mark all / Unmark all)
+are a `List[Bool]` on `TextBuffer` (`marks`, empty while nothing is marked),
+parallel to `lines`. They follow their line's text because the buffer's own
+structural operations — `split`, the joins in `delete_at` / `delete_before`,
+`join_span`, `insert_rows`, `delete_rows`, `replace_lines` — keep them in step.
+So **never reshape `buffer.lines` directly** (`lines.pop`, `lines.insert`,
+`buffer.lines = …`, `self.buffer = TextBuffer(…)` on a live editor): go through
+those methods, or the bookmarks land on the wrong rows. Writing a row's
+*content* (`buffer.lines[r] = …`) is fine. Whole-buffer swaps (undo, reload,
+merge, revert) use `replace_lines`, which keeps the marks of the unchanged
+prefix/suffix and takes the rest from the undo snapshot. Tests:
+`tests/test_bookmarks.mojo`.
+
 ## Jump-to commands center at the golden ratio
 
 **Every deliberate "jump to a location" parks the target at the golden-ratio line (~38% down the viewport), not at the top or a screen edge.** Use `Editor.reveal_cursor(view, golden=True)` after a `move_to`. This applies to *all* of them — go-to-definition / references / type-def / implementation / declaration, go-to-line, go-to-symbol, find-symbol, nav-history back/forward, output-pane / `turbokod://` link opens, next/previous git-change (`goto_change_chunk`) including the review-mode changeset reviewer, and clicking a stack frame in the debug pane (`consume_frame_click`). When you add a new navigation command, golden-reveal it too. (Debugger *single-stepping* is the one navigation that deliberately stays edge-scroll — the stop-event jump in `dap_tick` uses `golden=False` so stepping line-by-line doesn't yank the view.)

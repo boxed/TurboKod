@@ -16,6 +16,9 @@ from .desktop import (
     DEBUG_STOP,
     DEBUG_TOGGLE_BREAKPOINT, DEBUG_TOGGLE_RAISED,
     DEBUG_FOCUS_PANE,
+    EDITOR_BOOKMARK_CLEAR, EDITOR_BOOKMARK_COPY, EDITOR_BOOKMARK_CUT,
+    EDITOR_BOOKMARK_DELETE, EDITOR_BOOKMARK_INVERT, EDITOR_BOOKMARK_NEXT,
+    EDITOR_BOOKMARK_PREV, EDITOR_BOOKMARK_TOGGLE,
     EDITOR_COMPARE_CLIPBOARD, EDITOR_COPY, EDITOR_CUT, EDITOR_FILL,
     EDITOR_FIND, EDITOR_FIND_NEXT, EDITOR_FIND_PREV, EDITOR_FIND_SYMBOL,
     EDITOR_GOTO,
@@ -97,6 +100,17 @@ def build_edit_items(has_extra_carets: Bool) -> List[MenuItem]:
     e.append(MenuItem(String("Toggle Comment"),        EDITOR_TOGGLE_COMMENT))
     e.append(MenuItem(String("Toggle Case"),           EDITOR_TOGGLE_CASE))
     e.append(MenuItem(String("Sort Lines"),            EDITOR_SORT_LINES))
+    # Bookmarks. Marking the lines that match a search is the Find
+    # dialog's Mark all / Unmark all.
+    e.append(MenuItem.separator())
+    e.append(MenuItem(String("Toggle Bookmark"),         EDITOR_BOOKMARK_TOGGLE))
+    e.append(MenuItem(String("Next Bookmark"),           EDITOR_BOOKMARK_NEXT))
+    e.append(MenuItem(String("Previous Bookmark"),       EDITOR_BOOKMARK_PREV))
+    e.append(MenuItem(String("Invert Bookmarks"),        EDITOR_BOOKMARK_INVERT))
+    e.append(MenuItem(String("Clear All Bookmarks"),     EDITOR_BOOKMARK_CLEAR))
+    e.append(MenuItem(String("Copy Bookmarked Lines"),   EDITOR_BOOKMARK_COPY))
+    e.append(MenuItem(String("Cut Bookmarked Lines"),    EDITOR_BOOKMARK_CUT))
+    e.append(MenuItem(String("Delete Bookmarked Lines"), EDITOR_BOOKMARK_DELETE))
     return e^
 
 
@@ -173,6 +187,8 @@ def build_menus(mut d: Desktop, native: Bool):
     nav.append(MenuItem(String("Find Previous"),    EDITOR_FIND_PREV))
     nav.append(MenuItem(String("Navigate Back"),    EDITOR_NAV_BACK))
     nav.append(MenuItem(String("Navigate Forward"), EDITOR_NAV_FORWARD))
+    nav.append(MenuItem(String("Next Bookmark"),     EDITOR_BOOKMARK_NEXT))
+    nav.append(MenuItem(String("Previous Bookmark"), EDITOR_BOOKMARK_PREV))
     nav.append(MenuItem.separator())
     nav.append(MenuItem(String("Word Left"),
         synth_key_action(KEY_LEFT, MOD_ALT)))

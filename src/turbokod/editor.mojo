@@ -25,7 +25,7 @@ from .colors import (
     Attr, BG_TRUECOLOR, BLACK, blend_rgb, BLUE, CARET_BG, CARET_FG, CYAN,
     DARK_GRAY, DIFF_ADD_BG, DIFF_ADD_EMPH, DIFF_REM_BG, DIFF_REM_EMPH,
     EDITOR_BG, EDITOR_FG, FG_TRUECOLOR, LIGHT_BLUE, LIGHT_GRAY, LIGHT_GREEN,
-    LIGHT_RED, LIGHT_YELLOW, MAGENTA, STYLE_BOLD, STYLE_UNDERLINE,
+    LIGHT_MAGENTA, LIGHT_RED, LIGHT_YELLOW, MAGENTA, STYLE_BOLD, STYLE_UNDERLINE,
     STYLE_UNDERLINE_CURLY, SYN_COMMENT, SYN_IDENT, SYN_STRING, WHITE, YELLOW,
 )
 from .diagnostic_menu import DiagnosticMenuRequest
@@ -510,22 +510,63 @@ def _seg_byte_of_cell(
 # --- TextBuffer -------------------------------------------------------------
 
 
+def _bookmark_attr() -> Attr:
+    """A bookmarked row's line-number cells (or its marker cell, with
+    line numbers off), and its mark in the minimap."""
+    return Attr(BLACK, LIGHT_MAGENTA)
+
+
+def _merged_mark(
+    head_mark: Bool, head_len: Int, tail_mark: Bool, tail_len: Int,
+) -> Bool:
+    """Whether the row made by joining a head and a tail is bookmarked.
+
+    A bookmark belongs to its line's text, so it goes with whichever side
+    keeps text: either side's mark when both do, the one side's mark when
+    only one does. Deleting a bookmarked line's text and its newline
+    (selecting from column 0 of it to column 0 of the next) leaves an
+    empty head, so the bookmark goes with the deleted text rather than
+    jumping onto the line below."""
+    if head_len > 0 and tail_len > 0:
+        return head_mark or tail_mark
+    if head_len > 0:
+        return head_mark
+    if tail_len > 0:
+        return tail_mark
+    return head_mark or tail_mark
+
+
 struct TextBuffer(Copyable, Movable):
     """Line-oriented buffer. Always has at least one (possibly empty) line."""
     var lines: List[String]
+    var marks: List[Bool]
+    """Bookmarked rows (Edit ▸ Bookmarks). Empty while nothing is
+    bookmarked, so a buffer without bookmarks pays nothing; otherwise
+    parallel to ``lines``. The structural edits below (``split``, the
+    joins, ``join_span``, ``insert_rows``, ``delete_rows``,
+    ``replace_lines``) keep it in step, which is what makes a bookmark
+    follow its line's text through edits. Reshaping ``lines`` directly
+    instead leaves bookmarks on the wrong rows."""
+    var mark_count: Int
 
     def __init__(out self):
         self.lines = List[String]()
         self.lines.append(String(""))
+        self.marks = List[Bool]()
+        self.mark_count = 0
 
     def __init__(out self, var text: String):
         # CRLF is folded to LF here; the file's line ending is tracked
         # separately (``_detect_line_ending``) and re-emitted at save time
         # via ``EditorConfig.line_separator``.
         self.lines = _split_buffer_lines(text)
+        self.marks = List[Bool]()
+        self.mark_count = 0
 
     def __copyinit__(mut self, copy: Self):
         self.lines = copy.lines.copy()
+        self.marks = copy.marks.copy()
+        self.mark_count = copy.mark_count
 
     def line_count(self) -> Int:
         return len(self.lines)
@@ -539,6 +580,108 @@ struct TextBuffer(Copyable, Movable):
         if 0 <= row and row < len(self.lines):
             return len(self.lines[row].as_bytes())
         return 0
+
+    # --- bookmarks ---------------------------------------------------------
+
+    def is_marked(self, row: Int) -> Bool:
+        return 0 <= row and row < len(self.marks) and self.marks[row]
+
+    def set_mark(mut self, row: Int, on: Bool):
+        if row < 0 or row >= len(self.lines) or self.is_marked(row) == on:
+            return
+        if len(self.marks) != len(self.lines):
+            self._fit_marks()
+        self.marks[row] = on
+        self.mark_count += 1 if on else -1
+        if self.mark_count == 0:
+            self.clear_marks()
+
+    def move_mark(mut self, src: Int, dst: Int):
+        """Move ``src``'s bookmark to ``dst`` (when ``src`` has one) — for
+        an insert that pushed the bookmarked text down to another row."""
+        if src == dst or not self.is_marked(src):
+            return
+        self.set_mark(dst, True)
+        self.set_mark(src, False)
+
+    def clear_marks(mut self):
+        self.marks = List[Bool]()
+        self.mark_count = 0
+
+    def invert_marks(mut self):
+        self._fit_marks()
+        for i in range(len(self.marks)):
+            self.marks[i] = not self.marks[i]
+        self.mark_count = len(self.marks) - self.mark_count
+        if self.mark_count == 0:
+            self.clear_marks()
+
+    def _fit_marks(mut self):
+        """Make ``marks`` parallel to ``lines`` (padding with unmarked
+        rows) before writing one."""
+        var n = len(self.lines)
+        if len(self.marks) == n:
+            return
+        while len(self.marks) > n:
+            _ = self.marks.pop()
+        while len(self.marks) < n:
+            self.marks.append(False)
+        self.mark_count = 0
+        for i in range(n):
+            if self.marks[i]:
+                self.mark_count += 1
+
+    def _insert_marks(mut self, at: Int, k: Int):
+        """Unmarked rows for ``k`` lines put in front of row ``at``."""
+        if len(self.marks) == 0 or k <= 0:
+            return
+        var old = len(self.marks)
+        for _ in range(k):
+            self.marks.append(False)
+        var i = old - 1
+        while i >= at:
+            self.marks[i + k] = self.marks[i]
+            self.marks[i] = False
+            i -= 1
+
+    def _delete_marks(mut self, at: Int, k: Int):
+        """Drop the marks of the ``k`` rows from ``at``."""
+        if len(self.marks) == 0 or k <= 0:
+            return
+        var end = min(at + k, len(self.marks))
+        for i in range(at, end):
+            if self.marks[i]:
+                self.mark_count -= 1
+        var removed = end - at
+        for i in range(at, len(self.marks) - removed):
+            self.marks[i] = self.marks[i + removed]
+        for _ in range(removed):
+            _ = self.marks.pop()
+        if self.mark_count == 0:
+            self.clear_marks()
+
+    def delete_marked_rows(mut self) -> Int:
+        """Remove every bookmarked row, returning how many went. One
+        compacting pass that moves each surviving row once, so deleting
+        thousands of scattered rows costs the same as deleting one."""
+        var removed = self.mark_count
+        if removed == 0:
+            return 0
+        var w = 0
+        for r in range(len(self.lines)):
+            if self.is_marked(r):
+                continue
+            if w != r:
+                self.lines.swap_elements(w, r)
+            w += 1
+        while len(self.lines) > w:
+            _ = self.lines.pop()
+        self.clear_marks()
+        if len(self.lines) == 0:
+            self.lines.append(String(""))
+        return removed
+
+    # --- edits -------------------------------------------------------------
 
     def insert(mut self, row: Int, col: Int, text: String):
         if row < 0 or row >= len(self.lines):
@@ -558,8 +701,8 @@ struct TextBuffer(Copyable, Movable):
         var n = len(line.as_bytes())
         if col >= n:
             if row + 1 < len(self.lines):
-                self.lines[row] = line + self.lines[row + 1]
-                _ = self.lines.pop(row + 1)
+                var nxt_line = self.lines[row + 1]
+                self.join_span(row, row + 1, line, nxt_line)
             return
         var nxt = utf8_step_forward(line, col)
         self.lines[row] = byte_slice(line, 0, col) + byte_slice(line, nxt, n)
@@ -574,10 +717,27 @@ struct TextBuffer(Copyable, Movable):
         if row > 0:
             var prev = self.lines[row - 1]
             var prev_len = len(prev.as_bytes())
-            self.lines[row - 1] = prev + self.lines[row]
-            _ = self.lines.pop(row)
+            var cur_line = self.lines[row]
+            self.join_span(row - 1, row, prev, cur_line)
             return (row - 1, prev_len)
         return (row, col)
+
+    def join_span(mut self, sr: Int, er: Int, head: String, tail: String):
+        """Make rows ``sr..er`` the one row ``head + tail`` — deleting a
+        range that starts in row ``sr`` and ends in row ``er``, ``head``
+        and ``tail`` being what's left of those two rows. The joined row
+        is bookmarked per ``_merged_mark``."""
+        if len(self.marks) > 0:
+            var m = _merged_mark(
+                self.is_marked(sr), len(head.as_bytes()),
+                self.is_marked(er), len(tail.as_bytes()),
+            )
+            # Mark ``er`` too, so clearing ``sr`` can't drop the last
+            # bookmark (and with it the list) before ``delete_rows``.
+            self.set_mark(er, m)
+            self.set_mark(sr, m)
+        self.lines[sr] = head + tail
+        self.delete_rows(sr + 1, er - sr)
 
     def split(mut self, row: Int, col: Int) -> Tuple[Int, Int]:
         """Split line at col (Enter key). Returns the new cursor (row+1, 0)."""
@@ -594,6 +754,10 @@ struct TextBuffer(Copyable, Movable):
         # ``insert`` moves the rows below in one go; shifting them a row at
         # a time copied every one of them.
         self.lines.insert(row + 1, tail^)
+        self._insert_marks(row + 1, 1)
+        if pos == 0 and n > 0:
+            # Enter at the start of a line pushes its text down a row.
+            self.move_mark(row, row + 1)
         return (row + 1, 0)
 
     def delete_rows(mut self, at: Int, k: Int):
@@ -601,6 +765,7 @@ struct TextBuffer(Copyable, Movable):
         once per row, deleting a big selection took seconds."""
         if k <= 0:
             return
+        self._delete_marks(at, k)
         if k == 1:
             _ = self.lines.pop(at)
             return
@@ -616,6 +781,7 @@ struct TextBuffer(Copyable, Movable):
         var k = len(rows)
         if k == 0:
             return
+        self._insert_marks(at, k)
         if k == 1:
             self.lines.insert(at, rows[0])
             return
@@ -628,6 +794,53 @@ struct TextBuffer(Copyable, Movable):
             i -= 1
         for j in range(k):
             self.lines[at + j] = rows[j]
+
+    def replace_lines(
+        mut self, var new_lines: List[String], new_marks: List[Bool],
+    ):
+        """Swap in a whole new line list — undo / redo, a reload or merge
+        from disk, a git revert — carrying the bookmarks across.
+
+        Rows in the unchanged prefix and suffix keep their bookmarks (the
+        suffix ones shifted by the line-count change). The changed rows
+        between take ``new_marks``, which is parallel to ``new_lines`` or
+        empty for none: what an undo snapshot remembered for them, so
+        undoing Delete bookmarked lines brings the bookmarks back too.
+        Costs one string compare per unchanged row, against the copy of
+        every row the swap already made."""
+        if len(new_lines) == 0:
+            new_lines.append(String(""))
+        if len(self.marks) == 0 and len(new_marks) == 0:
+            self.lines = new_lines^
+            return
+        var old_n = len(self.lines)
+        var new_n = len(new_lines)
+        var lim = min(old_n, new_n)
+        var p = 0
+        while p < lim and self.lines[p] == new_lines[p]:
+            p += 1
+        var s = 0
+        while s < lim - p and self.lines[old_n - 1 - s] == new_lines[new_n - 1 - s]:
+            s += 1
+        var marks = List[Bool](capacity=new_n)
+        var count = 0
+        for i in range(new_n):
+            var m: Bool
+            if i < p:
+                m = self.is_marked(i)
+            elif i >= new_n - s:
+                m = self.is_marked(i - new_n + old_n)
+            else:
+                m = i < len(new_marks) and new_marks[i]
+            marks.append(m)
+            if m:
+                count += 1
+        self.lines = new_lines^
+        if count == 0:
+            self.clear_marks()
+        else:
+            self.marks = marks^
+            self.mark_count = count
 
 
 # --- Undo / redo ------------------------------------------------------------
@@ -949,6 +1162,9 @@ struct EditorSnapshot(Copyable, Movable):
     Editor's field of the same name (non-empty, primary at index 0)."""
     var lines: List[String]
     var selections: List[Caret]
+    var marks: List[Bool]
+    """The buffer's bookmarks (``TextBuffer.marks``), for the rows
+    ``TextBuffer.replace_lines`` can't carry across the restore."""
     var byte_size: Int
     """Bytes of text this snapshot holds, stamped at construction.
 
@@ -961,17 +1177,20 @@ struct EditorSnapshot(Copyable, Movable):
         out self,
         var lines: List[String],
         var selections: List[Caret],
+        var marks: List[Bool],
     ):
         var total = 0
         for i in range(len(lines)):
             total += len(lines[i].as_bytes()) + 1
         self.lines = lines^
         self.selections = selections^
+        self.marks = marks^
         self.byte_size = total
 
     def __copyinit__(mut self, copy: Self):
         self.lines = copy.lines.copy()
         self.selections = copy.selections.copy()
+        self.marks = copy.marks.copy()
         self.byte_size = copy.byte_size
 
 
@@ -2731,6 +2950,7 @@ struct Editor(Copyable, Movable):
         return EditorSnapshot(
             self.buffer.lines.copy(),
             self.selections.copy(),
+            self.buffer.marks.copy(),
         )
 
     def _push_undo(mut self):
@@ -2773,7 +2993,7 @@ struct Editor(Copyable, Movable):
             _ = self._undo_stack.pop(0)
 
     def _restore(mut self, snap: EditorSnapshot):
-        self.buffer.lines = snap.lines.copy()
+        self.buffer.replace_lines(snap.lines.copy(), snap.marks)
         self.selections = snap.selections.copy()
         # Reset the primary's ``desired_col`` from the restored cursor
         # position so vertical movement after the undo lands where the
@@ -3420,9 +3640,15 @@ struct Editor(Copyable, Movable):
         var prefix = byte_slice(s_line, 0, sc2)
         var suffix = byte_slice(e_line, ec2, e_ln)
 
-        # Collapse the deleted span into the start row.
-        self.buffer.lines[sl] = prefix
-        self.buffer.delete_rows(sl + 1, el2 - sl)
+        # Collapse the deleted span into the start row. The bookmark is
+        # decided by the text that survives, ``prefix`` and ``suffix`` —
+        # ``join_span`` only sees the prefix, the suffix comes back below.
+        var mark = _merged_mark(
+            self.buffer.is_marked(sl), len(prefix.as_bytes()),
+            self.buffer.is_marked(el2), len(suffix.as_bytes()),
+        )
+        self.buffer.join_span(sl, el2, prefix, String(""))
+        self.buffer.set_mark(sl, mark)
 
         # Split ``new_text`` on '\n': the first piece joins the start row,
         # each further one becomes a row of its own below it, all put in
@@ -3451,6 +3677,9 @@ struct Editor(Copyable, Movable):
         self.buffer.lines[current_row] = (
             self.buffer.lines[current_row] + suffix
         )
+        if len(prefix.as_bytes()) == 0 and len(suffix.as_bytes()) > 0:
+            # Only the suffix survived, and it ended up on the last row.
+            self.buffer.move_mark(sl, current_row)
 
         return (self.buffer.line_count() - n_lines, el2, ec2, suffix_col)
 
@@ -3896,7 +4125,7 @@ struct Editor(Copyable, Movable):
         # rest of the editor can index lines[0] safely.
         if len(new_lines) == 0:
             new_lines.append(String(""))
-        self.buffer.lines = new_lines^
+        self.buffer.replace_lines(new_lines^, List[Bool]())
         var max_row = self.buffer.line_count() - 1
         var nr = bs
         if nr > max_row:
@@ -4098,7 +4327,7 @@ struct Editor(Copyable, Movable):
         ``save`` returns. Snapshots undo first so a stray resolution is
         recoverable with Ctrl+Z."""
         self._push_undo()
-        self.buffer = TextBuffer(text^)
+        self.buffer.replace_lines(_split_buffer_lines(text), List[Bool]())
         self._recompute_big_buffer()
         self.clear_diagnostics()
         self._last_known_line_count = self.buffer.line_count()
@@ -4174,7 +4403,7 @@ struct Editor(Copyable, Movable):
             # Clean reload: buffer matches the previous baseline, just
             # adopt the new bytes.
             var baseline = text
-            self.buffer = TextBuffer(text^)
+            self.buffer.replace_lines(_split_buffer_lines(text), List[Bool]())
             self._recompute_big_buffer()
             self.disk_baseline = baseline^
             self._adopt_stat(info)
@@ -4214,7 +4443,7 @@ struct Editor(Copyable, Movable):
         # Snapshot for undo before mutating — gives the user a single
         # Ctrl+Z to back out of the merge if they don't like it.
         self._push_undo()
-        self.buffer.lines = merged^
+        self.buffer.replace_lines(merged^, List[Bool]())
         self.disk_baseline = text^
         self._adopt_stat(info)
         self._clear_disk_conflict()
@@ -4826,9 +5055,10 @@ struct Editor(Copyable, Movable):
 
     def _line_number_gutter(self) -> Int:
         """Width of the line-number gutter in cells, including a trailing
-        space. Zero when line numbers are off."""
+        space. With line numbers off it's the one cell that shows the
+        bookmarks, or zero when there are none."""
         if not self.line_numbers:
-            return 0
+            return 1 if self.buffer.mark_count > 0 else 0
         var n = self.buffer.line_count()
         var digits = 1
         var v = n
@@ -4868,6 +5098,8 @@ struct Editor(Copyable, Movable):
         editors with nothing to show give the full width back to text."""
         if not self.minimap_visible:
             return 0
+        if self.buffer.mark_count > 0:
+            return 1
         if len(self.git_change_lines) > 0:
             return 1
         if self._has_spell_issues():
@@ -4899,6 +5131,8 @@ struct Editor(Copyable, Movable):
             n = len(self.spell_lines)
         if len(self.diagnostic_lines) > n:
             n = len(self.diagnostic_lines)
+        if self.buffer.mark_count > 0 and self.buffer.line_count() > n:
+            n = self.buffer.line_count()
         return n
 
     def _minimap_buf_range_for_screen_row(
@@ -4936,12 +5170,13 @@ struct Editor(Copyable, Movable):
 
         Kinds: ``0`` (clean), ``1`` (git change), ``2`` (spell),
         ``3`` (LSP error), ``4`` (LSP warning), ``5`` (LSP info),
-        ``6`` (LSP hint). Priority order, highest first:
-        error → warning → git → spell → info → hint. Errors and
-        warnings outrank git/spell so a real problem isn't hidden
-        behind a 1-character whitespace edit; info / hint sit below
-        spell so a 'consider renaming' hint doesn't overpower a
-        real misspelling."""
+        ``6`` (LSP hint), ``7`` (bookmark). Priority order, highest
+        first: error → warning → bookmark → git → spell → info → hint.
+        Errors and warnings outrank git/spell so a real problem isn't
+        hidden behind a 1-character whitespace edit; bookmarks outrank
+        the automatic marks because the user put them there to find them
+        again; info / hint sit below spell so a 'consider renaming' hint
+        doesn't overpower a real misspelling."""
         return self._minimap_first_mark(start, end)[0]
 
     def _minimap_first_marked_buf_row(self, start: Int, end: Int) -> Int:
@@ -4963,6 +5198,10 @@ struct Editor(Copyable, Movable):
         for li in range(ds, de):
             if self.diagnostic_lines[li] == DIAG_SEVERITY_WARNING:
                 return (4, li)
+        if self.buffer.mark_count > 0:
+            for li in range(start, min(end, self.buffer.line_count())):
+                if self.buffer.is_marked(li):
+                    return (7, li)
         for li in range(min(start, len(self.git_change_lines)),
                         min(end, len(self.git_change_lines))):
             if self.git_change_lines[li] != GIT_CHANGE_NONE:
@@ -4995,6 +5234,8 @@ struct Editor(Copyable, Movable):
             return Optional[Attr](Attr(LIGHT_BLUE, EDITOR_BG))
         if kind == 6:
             return Optional[Attr](Attr(DARK_GRAY, EDITOR_BG))
+        if kind == 7:
+            return Optional[Attr](Attr(LIGHT_MAGENTA, EDITOR_BG))
         return Optional[Attr]()
 
     def _minimap_first_misspelled_word(self, row: Int) -> String:
@@ -5747,6 +5988,9 @@ struct Editor(Copyable, Movable):
             else:
                 label = prefix + String("line ") \
                     + String(self._minimap_hover_buf_row + 1)
+        elif self._minimap_hover_kind == 7:
+            label = String("Bookmark on line ") \
+                + String(self._minimap_hover_buf_row + 1)
         else:
             return None
         # Reserve 2 cells on the right of ``view`` for the drop-shadow
@@ -6720,7 +6964,16 @@ struct Editor(Copyable, Movable):
                 # the review's inline diff): it belongs to no buffer line, so
                 # it gets no line number — the blank gutter is what visually
                 # distinguishes it from the real, numbered lines.
-                if ln_gutter > 0 and is_first_seg and buf_row >= 0:
+                var marked = is_first_seg and self.buffer.is_marked(buf_row)
+                if marked:
+                    # Bookmark: a block behind the number, leaving the
+                    # separator column (the whole cell with no numbers).
+                    for gx in range(max(ln_gutter - 1, 1)):
+                        painter.set(
+                            canvas, view.a.x + gx, sy_g,
+                            Cell(String(" "), _bookmark_attr(), 1),
+                        )
+                if self.line_numbers and is_first_seg and buf_row >= 0:
                     var num_str = String(buf_row + 1)
                     var num_w = len(num_str.as_bytes())
                     # Right-align inside the line-number gutter, leaving
@@ -6729,7 +6982,8 @@ struct Editor(Copyable, Movable):
                     if sx < view.a.x:
                         sx = view.a.x
                     _ = painter.put_text(
-                        canvas, Point(sx, sy_g), num_str, ln_attr,
+                        canvas, Point(sx, sy_g), num_str,
+                        _bookmark_attr() if marked else ln_attr,
                     )
                 if dap_gutter > 0 and is_first_seg:
                     for k in range(len(self.breakpoint_lines)):
@@ -7335,14 +7589,22 @@ struct Editor(Copyable, Movable):
                             canvas, gx, sy, Cell(String(" "), blank_attr, 1),
                         )
                     # Line number, right-aligned in the line-number gutter.
-                    if ln_gutter > 0:
+                    var marked = self.buffer.is_marked(brow)
+                    if marked:
+                        for gx in range(max(ln_gutter - 1, 1)):
+                            painter.set(
+                                canvas, view.a.x + gx, sy,
+                                Cell(String(" "), _bookmark_attr(), 1),
+                            )
+                    if self.line_numbers:
                         var num_str = String(brow + 1)
                         var num_w = len(num_str.as_bytes())
                         var nx = view.a.x + (ln_gutter - 1) - num_w
                         if nx < view.a.x:
                             nx = view.a.x
                         _ = painter.put_text(
-                            canvas, Point(nx, sy), num_str, ln_attr,
+                            canvas, Point(nx, sy), num_str,
+                            _bookmark_attr() if marked else ln_attr,
                         )
                     # Line text from column 0 — sticky headers live at the
                     # left margin, so ignore horizontal scroll; clip to the
@@ -7675,9 +7937,7 @@ struct Editor(Copyable, Movable):
                 new_carets.append(Caret(0, 0, 0, 0, 0))
                 continue
             var prev_len = self.buffer.line_length(row - 1)
-            self.buffer.lines[row - 1] = self.buffer.line(row - 1) \
-                + self.buffer.line(row)
-            _ = self.buffer.lines.pop(row)
+            _ = self.buffer.delete_before(row, 0)
             removed += 1
             var desired = utf8_cell_of_byte(
                 self.buffer.line(row - 1), prev_len,
@@ -9206,9 +9466,10 @@ struct Editor(Copyable, Movable):
         if self.buffer.line_count() == 1:
             # Only line in the buffer — keep one (now empty) line.
             self.buffer.lines[0] = String("")
+            self.buffer.clear_marks()
             self.move_to(0, 0, False)
         else:
-            _ = self.buffer.lines.pop(r)
+            self.buffer.delete_rows(r, 1)
             var max_row = self.buffer.line_count() - 1
             var nr = r
             if nr > max_row:
@@ -9248,9 +9509,10 @@ struct Editor(Copyable, Movable):
         self._push_undo()
         var i = len(rows) - 1
         while i >= 0:
-            _ = self.buffer.lines.pop(rows[i])
+            self.buffer.delete_rows(rows[i], 1)
             i -= 1
         if self.buffer.line_count() == 0:
+            # Every row (and so every bookmark) is gone.
             self.buffer.lines.append(String(""))
         var max_row = self.buffer.line_count() - 1
         var carets = List[Caret]()
@@ -9324,6 +9586,129 @@ struct Editor(Copyable, Movable):
         var max_r = self.buffer.line_count() - 1
         if r > max_r: r = max_r
         self.move_to(r, 0, False)
+
+    # --- bookmarks --------------------------------------------------------
+    #
+    # TextPad-style line bookmarks. The flags live on ``TextBuffer`` (see
+    # ``TextBuffer.marks``), whose structural edits keep each one on its
+    # line; these are the commands on top. Each is at most one pass over
+    # the rows, so they stay instant on files of hundreds of thousands of
+    # lines. Setting or clearing bookmarks isn't an undo step (like
+    # TextPad); deleting the lines is, and undoing it restores them.
+
+    def bookmark_count(self) -> Int:
+        return self.buffer.mark_count
+
+    def is_bookmarked(self, row: Int) -> Bool:
+        return self.buffer.is_marked(row)
+
+    def toggle_bookmark(mut self):
+        """Toggle the bookmark on every caret's line."""
+        var rows = self._caret_rows_asc()
+        for i in range(len(rows)):
+            self.buffer.set_mark(rows[i], not self.buffer.is_marked(rows[i]))
+
+    def clear_bookmarks(mut self):
+        self.buffer.clear_marks()
+
+    def invert_bookmarks(mut self):
+        self.buffer.invert_marks()
+
+    def mark_matching_lines(
+        mut self, needle: String, opts: SearchOptions, on: Bool,
+    ) -> Int:
+        """Bookmark (``on``) or un-bookmark every line with a match for
+        ``needle``, through the same cached searcher as Find. Returns how
+        many lines changed. A zero-width match counts, so the regex
+        ``^$`` marks the blank lines."""
+        if len(needle.as_bytes()) == 0:
+            return 0
+        var searcher = self._search_cache.get(needle, opts)
+        if not searcher.usable():
+            return 0
+        var changed = 0
+        for r in range(self.buffer.line_count()):
+            if self.buffer.is_marked(r) == on:
+                continue
+            if searcher.search(self.buffer.lines[r], 0):
+                self.buffer.set_mark(r, on)
+                changed += 1
+        return changed
+
+    def goto_bookmark(mut self, forward: Bool, view: Rect) -> Bool:
+        """Jump to the next (``forward``) or previous bookmarked line,
+        wrapping around the file. False when there are no bookmarks."""
+        if self.buffer.mark_count == 0:
+            return False
+        var n = self.buffer.line_count()
+        var cur = self.selections[0].row
+        for step in range(1, n + 1):
+            var r = cur + step if forward else cur - step
+            if r >= n:
+                r -= n
+            elif r < 0:
+                r += n
+            if self.buffer.is_marked(r):
+                self.clear_extra_carets()
+                self.move_to(r, 0, False)
+                self.reveal_cursor(view, golden=True)
+                return True
+        return False
+
+    def bookmarked_text(self) -> String:
+        """Every bookmarked line with its newline, top to bottom: a
+        line-clipboard, like the no-selection copy, so pasting puts the
+        lines back as whole lines."""
+        var out = String("")
+        if self.buffer.mark_count == 0:
+            return out^
+        for r in range(self.buffer.line_count()):
+            if self.buffer.is_marked(r):
+                out += self.buffer.lines[r]
+                out += String("\n")
+        return out^
+
+    def copy_bookmarked_lines(mut self) -> Int:
+        """Copy the bookmarked lines; returns how many."""
+        var n = self.buffer.mark_count
+        if n > 0:
+            clipboard_copy(self.bookmarked_text())
+        return n
+
+    def cut_bookmarked_lines(mut self) -> Int:
+        """Copy the bookmarked lines, then delete them (copy only when the
+        buffer is read-only, like the plain cut). Returns how many."""
+        var n = self.copy_bookmarked_lines()
+        if n > 0 and not self.read_only:
+            _ = self.delete_bookmarked_lines()
+        return n
+
+    def delete_bookmarked_lines(mut self) -> Int:
+        """Delete every bookmarked line as one undo step; returns how
+        many. The caret stays on its line, or moves to the line after it
+        when its own line goes."""
+        if self.read_only or self.buffer.mark_count == 0:
+            return 0
+        self._push_undo()
+        var cur = self.selections[0].row
+        var first = -1
+        var above = 0
+        for r in range(self.buffer.line_count()):
+            if self.buffer.is_marked(r):
+                if first < 0:
+                    first = r
+                if r < cur:
+                    above += 1
+        var n = self.buffer.delete_marked_rows()
+        self.clear_extra_carets()
+        var nr = min(cur - above, self.buffer.line_count() - 1)
+        self.move_to(max(nr, 0), 0, False)
+        self.dirty = True
+        # Scattered deletions defeat the speculative diagnostic shift;
+        # the LSP refresh repopulates them.
+        self.clear_diagnostics()
+        self._mark_hl_dirty(first)
+        return n
 
     def selection_is_search_match(
         mut self, needle: String,
@@ -9644,6 +10029,9 @@ struct Editor(Copyable, Movable):
             rows.append(pieces[k])
         rows.append(last + byte_slice(line, c, len(line.as_bytes())))
         self.buffer.insert_rows(row + 1, rows^)
+        if c == 0 and len(line.as_bytes()) > 0:
+            # Inserting at the start of a line pushes its text down.
+            self.buffer.move_mark(row, row + len(pieces))
         return (row + len(pieces), end_col)
 
     def _insert_text(mut self, text: String):
@@ -10186,8 +10574,7 @@ struct Editor(Copyable, Movable):
             var last = self.buffer.line(er)
             var head = byte_slice(first, 0, sc)
             var tail = byte_slice(last, ec, len(last.as_bytes()))
-            self.buffer.lines[sr] = head + tail
-            self.buffer.delete_rows(sr + 1, er - sr)
+            self.buffer.join_span(sr, er, head, tail)
 
     def _delete_selection(mut self):
         var sel = self.selection()

@@ -23,6 +23,11 @@ Enter is wired to Find Next. The caller reads ``submit_kind`` to learn
 which button fired and decides whether to keep the dialog open between
 submissions (the host typically keeps it open through Find Next and
 Replace, and closes it on Replace All).
+
+``open(..., mark_buttons=True)`` (the in-file Find) puts a button row
+under the single field too: [ Find next ], [ Mark all ], [ Unmark all ],
+the last two bookmarking / un-bookmarking every line with a match.
+Alt+Enter and Alt+Shift+Enter are their keyboard equivalents.
 """
 
 from .buttons import (
@@ -31,8 +36,11 @@ from .buttons import (
 )
 from .canvas import Canvas, utf8_codepoint_count, wrap_to_width
 from .painter import Painter
-from .colors import Attr, BLACK, GREEN, LIGHT_GRAY, YELLOW
-from .events import Event, EVENT_KEY, EVENT_MOUSE, KEY_ENTER, KEY_ESC, KEY_TAB
+from .colors import Attr, BLACK, DARK_GRAY, GREEN, LIGHT_GRAY, YELLOW
+from .events import (
+    Event, EVENT_KEY, EVENT_MOUSE, KEY_ENTER, KEY_ESC, KEY_TAB, MOD_ALT,
+    MOD_SHIFT,
+)
 from .geometry import Point, Rect
 from .search_options import SearchOptions
 from .text_field import TextField
@@ -65,6 +73,8 @@ comptime SUBMIT_DEFAULT     = UInt8(0)
 comptime SUBMIT_FIND_NEXT   = UInt8(1)
 comptime SUBMIT_REPLACE     = UInt8(2)
 comptime SUBMIT_REPLACE_ALL = UInt8(3)
+comptime SUBMIT_MARK_ALL    = UInt8(4)
+comptime SUBMIT_UNMARK_ALL  = UInt8(5)
 
 
 struct Prompt(Movable):
@@ -95,6 +105,11 @@ struct Prompt(Movable):
     var _btn_find_next: ShadowButton
     var _btn_replace: ShadowButton
     var _btn_replace_all: ShadowButton
+    # The Find dialog's button row (``show_mark_buttons``), which also
+    # uses ``_btn_find_next``.
+    var show_mark_buttons: Bool
+    var _btn_mark_all: ShadowButton
+    var _btn_unmark_all: ShadowButton
     # Cached rect for the input strip, captured on the most recent
     # ``paint`` so ``handle_mouse`` can route clicks back to the
     # field without re-running the layout. Negative width means "no
@@ -146,6 +161,9 @@ struct Prompt(Movable):
         self._btn_replace_all = ShadowButton(
             String(" Replace all "), 0, 0,
         )
+        self.show_mark_buttons = False
+        self._btn_mark_all = ShadowButton(String(" Mark all "), 0, 0)
+        self._btn_unmark_all = ShadowButton(String(" Unmark all "), 0, 0)
 
     def open(
         mut self,
@@ -153,6 +171,7 @@ struct Prompt(Movable):
         var prefill: String = String(""),
         select_prefill: Bool = False,
         show_options: Bool = False,
+        mark_buttons: Bool = False,
     ):
         """Open the prompt with ``label`` and an optional ``prefill``.
 
@@ -165,6 +184,9 @@ struct Prompt(Movable):
         right edge of the input row. The toggle state persists across
         opens so the user keeps their last choice; pass False (the
         default) for non-search prompts so the toggles stay hidden.
+
+        ``mark_buttons=True`` adds the Find / Mark all / Unmark all
+        button row (it needs ``show_options`` for the row above it).
         """
         self.label = label^
         self.input = TextField()
@@ -181,6 +203,7 @@ struct Prompt(Movable):
         self._input_rect = Rect(0, 0, 0, 0)
         self._second_input_rect = Rect(0, 0, 0, 0)
         self.show_options = show_options
+        self.show_mark_buttons = mark_buttons and show_options
 
     def open_replace(
         mut self,
@@ -225,6 +248,7 @@ struct Prompt(Movable):
         self._input_rect = Rect(0, 0, 0, 0)
         self._second_input_rect = Rect(0, 0, 0, 0)
         self.show_options = show_options
+        self.show_mark_buttons = False
 
     def close(mut self):
         self.active = False
@@ -239,6 +263,7 @@ struct Prompt(Movable):
         self._input_rect = Rect(0, 0, 0, 0)
         self._second_input_rect = Rect(0, 0, 0, 0)
         self.show_options = False
+        self.show_mark_buttons = False
         # Drop hover state so a stale tooltip doesn't pop the next time
         # the prompt opens before the cursor has moved.
         self.toggle_case.hovered = False
@@ -249,6 +274,8 @@ struct Prompt(Movable):
         self._btn_find_next.reset_press()
         self._btn_replace.reset_press()
         self._btn_replace_all.reset_press()
+        self._btn_mark_all.reset_press()
+        self._btn_unmark_all.reset_press()
 
     def search_options(self) -> SearchOptions:
         """Read back the toggle states as a ``SearchOptions``. Caller
@@ -323,6 +350,8 @@ struct Prompt(Movable):
             height += 5
         elif self.show_options:
             height += 1   # toggle-tooltip row under the input
+            if self.show_mark_buttons:
+                height += 2   # button row + its shadow row
         if height > container_bounds.b.y - 4:
             height = container_bounds.b.y - 4
         if height < 3:
@@ -437,6 +466,14 @@ struct Prompt(Movable):
                     _ = painter.put_text(
                         canvas, Point(content_x, tip_y), tip, attr,
                     )
+                elif self.show_mark_buttons:
+                    _ = painter.put_text(
+                        canvas, Point(content_x, tip_y),
+                        String("Alt+Enter marks all, Alt+Shift+Enter unmarks"),
+                        Attr(DARK_GRAY, LIGHT_GRAY),
+                    )
+            if self.show_mark_buttons:
+                self._paint_buttons(canvas, rect, clip_x, input_y + 2, True)
 
     def _paint_two_field(
         mut self, mut canvas: Canvas, rect: Rect, attr: Attr,
@@ -514,27 +551,43 @@ struct Prompt(Movable):
                 _ = painter.put_text(
                     canvas, Point(content_x, tip_y), tip, attr,
                 )
-        # Center the three buttons on ``button_y``. The button row
-        # claims its own y plus the row below for the drop shadow,
-        # which is why ``_layout`` reserves an extra row above the
-        # bottom border.
+        self._paint_buttons(canvas, rect, clip_x, button_y, False)
+
+    def _paint_buttons(
+        mut self, mut canvas: Canvas, rect: Rect, clip_x: Int,
+        button_y: Int, mark: Bool,
+    ):
+        """Center the three action buttons on ``button_y``: Find next,
+        then Mark all / Unmark all (``mark``) or Replace / Replace all.
+        The row claims its own y plus the row below for the drop shadow,
+        which is why ``_layout`` reserves an extra row above the bottom
+        border."""
         var b1_w = self._btn_find_next.total_width()
-        var b2_w = self._btn_replace.total_width()
-        var b3_w = self._btn_replace_all.total_width()
+        var b2_w = self._btn_mark_all.total_width() if mark \
+            else self._btn_replace.total_width()
+        var b3_w = self._btn_unmark_all.total_width() if mark \
+            else self._btn_replace_all.total_width()
         var bgap = 2
         var btotal = b1_w + bgap + b2_w + bgap + b3_w
         var bx = rect.a.x + (rect.width() - btotal) // 2
         if bx < rect.a.x + 2:
             bx = rect.a.x + 2
         self._btn_find_next.move_to(bx, button_y)
-        bx += b1_w + bgap
-        self._btn_replace.move_to(bx, button_y)
-        bx += b2_w + bgap
-        self._btn_replace_all.move_to(bx, button_y)
         var face = Attr(BLACK, GREEN)
         paint_shadow_button(canvas, self._btn_find_next, face, LIGHT_GRAY, clip_x)
-        paint_shadow_button(canvas, self._btn_replace, face, LIGHT_GRAY, clip_x)
-        paint_shadow_button(canvas, self._btn_replace_all, face, LIGHT_GRAY, clip_x)
+        bx += b1_w + bgap
+        if mark:
+            self._btn_mark_all.move_to(bx, button_y)
+            bx += b2_w + bgap
+            self._btn_unmark_all.move_to(bx, button_y)
+            paint_shadow_button(canvas, self._btn_mark_all, face, LIGHT_GRAY, clip_x)
+            paint_shadow_button(canvas, self._btn_unmark_all, face, LIGHT_GRAY, clip_x)
+        else:
+            self._btn_replace.move_to(bx, button_y)
+            bx += b2_w + bgap
+            self._btn_replace_all.move_to(bx, button_y)
+            paint_shadow_button(canvas, self._btn_replace, face, LIGHT_GRAY, clip_x)
+            paint_shadow_button(canvas, self._btn_replace_all, face, LIGHT_GRAY, clip_x)
 
     def handle_key(mut self, event: Event) -> Bool:
         """Returns True if the event was consumed by the prompt."""
@@ -548,7 +601,10 @@ struct Prompt(Movable):
             # Two-field Replace dialog: Enter walks matches the same way
             # repeatedly hitting Find Next would. The dedicated buttons
             # are how the user triggers Replace / Replace All.
-            if self.has_second:
+            if self.show_mark_buttons and (event.mods & MOD_ALT) != 0:
+                self.submit_kind = SUBMIT_UNMARK_ALL \
+                    if (event.mods & MOD_SHIFT) != 0 else SUBMIT_MARK_ALL
+            elif self.has_second:
                 self.submit_kind = SUBMIT_FIND_NEXT
             else:
                 self.submit_kind = SUBMIT_DEFAULT
@@ -651,6 +707,26 @@ struct Prompt(Movable):
                 return True
             _ = self.input.handle_mouse(event, self._input_rect)
             return True
+        if self.show_mark_buttons:
+            # Same press-latch routing as the Replace buttons above.
+            if self._btn_find_next.handle_mouse(event) == BUTTON_FIRED:
+                self.submitted = True
+                self.submit_kind = SUBMIT_FIND_NEXT
+                return True
+            if self._btn_find_next.pressed:
+                return True
+            if self._btn_mark_all.handle_mouse(event) == BUTTON_FIRED:
+                self.submitted = True
+                self.submit_kind = SUBMIT_MARK_ALL
+                return True
+            if self._btn_mark_all.pressed:
+                return True
+            if self._btn_unmark_all.handle_mouse(event) == BUTTON_FIRED:
+                self.submitted = True
+                self.submit_kind = SUBMIT_UNMARK_ALL
+                return True
+            if self._btn_unmark_all.pressed:
+                return True
         if self._input_rect.width() <= 0:
             return True
         _ = self.input.handle_mouse(event, self._input_rect)
