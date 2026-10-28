@@ -125,7 +125,11 @@ struct EditorConfig(ImplicitlyCopyable, Movable):
         var k = fold_ascii(String(key.strip()))
         var v = String(value.strip())
         var vl = fold_ascii(v)
-        if k == String("indent_style"):
+        if vl == String("unset"):
+            # Per the spec, takes back whatever a wider section set: e.g.
+            # ``[*.md]`` keeping the trailing spaces ``[*]`` would trim.
+            self._unset(k)
+        elif k == String("indent_style"):
             if vl == String("tab") or vl == String("space"):
                 self.indent_style = vl
         elif k == String("indent_size"):
@@ -159,6 +163,26 @@ struct EditorConfig(ImplicitlyCopyable, Movable):
             var n = parse_int_all(vl)
             if n > 0:
                 self.max_line_length = n
+
+
+    def _unset(mut self, key: String):
+        var default = EditorConfig()
+        if key == String("indent_style"):
+            self.indent_style = default.indent_style
+        elif key == String("indent_size"):
+            self.indent_size = default.indent_size
+        elif key == String("tab_width"):
+            self.tab_width = default.tab_width
+        elif key == String("end_of_line"):
+            self.end_of_line = default.end_of_line
+        elif key == String("charset"):
+            self.charset = default.charset
+        elif key == String("trim_trailing_whitespace"):
+            self.trim_trailing_whitespace = default.trim_trailing_whitespace
+        elif key == String("insert_final_newline"):
+            self.insert_final_newline = default.insert_final_newline
+        elif key == String("max_line_length"):
+            self.max_line_length = default.max_line_length
 
 
 # --- INI-ish parsing -------------------------------------------------------
