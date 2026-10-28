@@ -583,7 +583,11 @@ def walk_project_files(
             if not info.ok:
                 continue
             if info.is_dir():
-                if name in skip:
+                # Not into a linked folder, as git doesn't: one linking
+                # back up the tree lists everything under it again, once
+                # per lap (and Replace in Project replaces it that many
+                # times), and two make the walk never end.
+                if name in skip or is_symlink(full):
                     continue
                 if matcher.ignored(rel, True):
                     continue

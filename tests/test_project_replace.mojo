@@ -100,6 +100,28 @@ def test_a_linked_file_is_replaced_once() raises:
     _rm_rf(root)
 
 
+def test_linked_folders_are_not_entered() raises:
+    # Two links back up the tree made the walk endless; one listed every
+    # file again per lap, each replaced again
+    var root = _project("_proj_dirlink")
+    _ensure_dir(root + "/a")
+    assert_true(write_file(root + "/a/f.txt", "foo\n"))
+    _ = capture_command(string_list("ln", "-s", "..", root + "/a/up"))
+    _ = capture_command(string_list("ln", "-s", "..", root + "/a/up2"))
+    var outside = _temp_path("_proj_dirlink_outside")
+    _rm_rf(outside)
+    _ensure_dir(outside)
+    assert_true(write_file(outside + "/g.txt", "foo\n"))
+    _ = capture_command(string_list("ln", "-s", outside, root + "/out"))
+    var summary = replace_in_project(root, "foo", "foobar")
+    assert_equal(summary[0], 1)
+    assert_equal(summary[1], 1)
+    assert_equal(read_file(root + "/a/f.txt"), "foobar\n")
+    assert_equal(read_file(outside + "/g.txt"), "foo\n")
+    _rm_rf(root)
+    _rm_rf(outside)
+
+
 def main() raises:
     setup_test_env()
     TestSuite.discover_tests[__functions_in_module()]().run()
