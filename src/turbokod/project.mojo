@@ -12,7 +12,7 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .file_io import (
-    join_path, list_directory, project_relative, read_file, stat_file,
+    is_symlink, join_path, list_directory, project_relative, read_file, stat_file,
     write_file,
 )
 from .lsp import LspProcess, capture_command
@@ -692,6 +692,11 @@ def replace_in_project(
         var paths = walk_project_files(root)
         for p in range(len(paths)):
             var full = paths[p]
+            # Writing goes through a link to its target: one inside the
+            # project is replaced on its own (twice was "foo" -> "foobarbar"),
+            # and one outside isn't the project's to change.
+            if is_symlink(full):
+                continue
             var text: String
             try:
                 text = read_file(full)

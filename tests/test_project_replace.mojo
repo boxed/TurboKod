@@ -3,6 +3,8 @@ change, binary files are left alone, and no character is ever split."""
 
 from std.testing import TestSuite, assert_equal, assert_true
 from turbokod.file_io import read_file, write_file
+from turbokod.lsp import capture_command
+from turbokod.string_utils import string_list
 from turbokod.onig import onig_global_init
 from turbokod.project import replace_in_project
 from turbokod.search_options import LineSearcher, SearchOptions
@@ -81,6 +83,21 @@ def test_searching_backwards_never_stops_inside_a_character() raises:
     assert_equal(s.rsearch("é😀b", 5).value().start, 2)
     assert_equal(s.rsearch("é😀b", 6).value().start, 6)
     s.release()
+
+
+def test_a_linked_file_is_replaced_once() raises:
+    var root = _project("_proj_symlink")
+    _ensure_dir(root + "/docs")
+    assert_true(write_file(root + "/docs/README.md", "foo\n"))
+    _ = capture_command(string_list("ln", "-s", "docs/README.md", root + "/README.md"))
+    var outside = _temp_path("_proj_symlink_outside.txt")
+    assert_true(write_file(outside, "foo\n"))
+    _ = capture_command(string_list("ln", "-s", outside, root + "/out.txt"))
+    var summary = replace_in_project(root, "foo", "foobar")
+    assert_equal(summary[0], 1)
+    assert_equal(read_file(root + "/docs/README.md"), "foobar\n")
+    assert_equal(read_file(outside), "foo\n")
+    _rm_rf(root)
 
 
 def main() raises:
