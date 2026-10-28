@@ -81,6 +81,9 @@ field (the confirm dialogs' one-key answers)."""
 comptime UI_CHECKABLE   = 1 << 8
 """Table: the first cell of each row is "1" / "0" and shows as a checkbox;
 Space or a click on it runs ``toggle:<row>``."""
+comptime UI_BROWSE      = 1 << 9
+"""Text: a file path, with a Browse button beside it that picks one (the
+grid's file dialog, natively an open panel) and sets the field."""
 
 
 struct UINode(Copyable, Movable, Deinitable):
@@ -215,6 +218,16 @@ def ui_text(
     n.placeholder = placeholder^
     if not enabled:
         n.flags |= UI_DISABLED
+    return n^
+
+
+def ui_path(
+    var key: String, var value: String,
+    var placeholder: String = String(""), enabled: Bool = True,
+) -> UINode:
+    """A text field for a file path, with a Browse button."""
+    var n = ui_text(key^, value^, placeholder^, enabled)
+    n.flags |= UI_BROWSE
     return n^
 
 

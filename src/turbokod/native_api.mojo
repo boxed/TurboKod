@@ -51,7 +51,6 @@ from turbokod.json import json_get_bool, json_get_int, json_get_string, parse_js
 from turbokod.theme import theme_names
 from turbokod.ui_grid import UIEvent
 from turbokod.ui_tree import ui_to_json
-from turbokod.project_targets import join_env_field
 from turbokod.dictionary_install import user_dictionary_installed
 from turbokod.search_options import SearchOptions
 from turbokod.git_changes import format_age
@@ -913,88 +912,6 @@ def tk_desktop_settings_mouse(
     return ACT_NONE
 
 
-# --- Project Settings window surface -----------------------------------------
-#
-# Twin of the Settings surface above: the macOS host renders Project Settings
-# (On save / Targets / Grammars) in its own native window. The host polls
-# ``tk_desktop_project_settings_active`` each tick and opens/closes the NSWindow
-# on transitions. Keep this block in lock-step with the Settings block above.
-
-
-@export
-def tk_desktop_set_project_settings_detached(h: Int, on: Int) abi("C"):
-    """Tell the Desktop the Project Settings view renders on a separate host
-    window. The terminal frontend never sets this — there it's a
-    movable/resizable in-grid dialog."""
-    if h == 0:
-        return
-    _desk(h)[].set_project_settings_detached(on != 0)
-
-
-@export
-def tk_desktop_project_settings_active(h: Int) abi("C") -> Int32:
-    """1 while the Project Settings view is open. The host polls this per tick
-    and shows/hides its window on transitions."""
-    if h == 0:
-        return Int32(0)
-    # The native Project Settings window (macOS-style UI) stands in.
-    if _desk(h)[].project_settings.active \
-            and not _desk(h)[].project_settings_native:
-        return Int32(1)
-    return Int32(0)
-
-
-@export
-def tk_desktop_project_settings_close(h: Int) abi("C"):
-    """Close the Project Settings view — the host calls this when the user
-    closes the window via its native close button."""
-    if h == 0:
-        return
-    _desk(h)[].project_settings.close()
-
-
-@export
-def tk_desktop_layout_project_settings(
-    h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
-) abi("C") -> Int:
-    """Paint the Project Settings view into the host's window and pack it into
-    the caller's buffer (same 5-u32-per-cell format as ``tk_desktop_layout``).
-    Returns the number of cells written."""
-    if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
-        return 0
-    var canvas = _blank_canvas(cols, rows)
-    _desk(h)[].paint_project_settings(canvas, Rect(0, 0, cols, rows))
-    return pack_canvas(canvas, cols, rows, out_ptr, cap)
-
-
-@export
-def tk_desktop_project_settings_key(
-    h: Int, key: UInt32, mods: UInt8, cols: Int, rows: Int,
-) abi("C") -> Int32:
-    """Route a keystroke from the Project Settings window into the view.
-    Project Settings never produces host actions, so this returns ACT_NONE."""
-    if h == 0:
-        return ACT_NONE
-    var k = _canon_ctrl_key(key, mods)
-    _desk(h)[].handle_project_settings_event(
-        Event.key_event(k, mods), Rect(0, 0, cols, rows),
-    )
-    return ACT_NONE
-
-
-@export
-def tk_desktop_project_settings_mouse(
-    h: Int, x: Int, y: Int, button: UInt8, pressed: UInt8, motion: UInt8,
-    mods: UInt8, cols: Int, rows: Int, click_count: UInt8,
-) abi("C") -> Int32:
-    """Route a mouse event from the Project Settings window into the view."""
-    if h == 0:
-        return ACT_NONE
-    var ev = _mouse_event(x, y, button, pressed, motion, mods, click_count)
-    _desk(h)[].handle_project_settings_event(ev, Rect(0, 0, cols, rows))
-    return ACT_NONE
-
-
 @export
 def tk_desktop_key(h: Int, key: UInt32, mods: UInt8, cols: Int, rows: Int) abi("C") -> Int32:
     if h == 0:
@@ -1812,106 +1729,6 @@ def tk_desktop_prefs_advanced(h: Int) abi("C"):
     if h == 0:
         return
     _desk(h)[].settings_native = False
-
-
-# --- macOS-style UI: Project Settings window ----------------------------------
-
-
-@export
-def tk_desktop_project_prefs(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
-    """The open Project Settings for the native window: ``{root,
-    on_save: [[enabled, language, program, args, cwd]], targets: [[name,
-    program, args, cwd, env, debug_language]], grammars: [[ext,
-    language]], languages, grammar_languages}``. 0 when it isn't open
-    natively."""
-    if h == 0:
-        return 0
-    ref d = _desk(h)[]
-    if not d.project_settings.active or not d.project_settings_native:
-        return 0
-    ref ps = d.project_settings
-    var o = json_object()
-    o.put(String("root"), json_str(ps.project_root))
-    var os = json_array()
-    var rows = ps.native_os_rows()
-    for i in range(len(rows)):
-        var r = json_array()
-        r.append(json_bool(ps.native_os_enabled(rows[i])))
-        r.append(json_str(rows[i].language_id))
-        r.append(json_str(rows[i].program))
-        r.append(json_str(String(" ").join(rows[i].args)))
-        r.append(json_str(rows[i].cwd))
-        os.append(r)
-    o.put(String("on_save"), os)
-    var tg = json_array()
-    for i in range(len(ps.targets.targets)):
-        ref t = ps.targets.targets[i]
-        var r = json_array()
-        r.append(json_str(t.name))
-        r.append(json_str(t.program))
-        r.append(json_str(String(" ").join(t.args)))
-        r.append(json_str(t.cwd))
-        r.append(json_str(join_env_field(t.env)))
-        r.append(json_str(t.debug_language))
-        tg.append(r)
-    o.put(String("targets"), tg)
-    var gr = json_array()
-    for i in range(len(ps.grammars)):
-        var r = json_array()
-        r.append(json_str(ps.grammars[i].ext))
-        r.append(json_str(ps.grammars[i].language_id))
-        gr.append(r)
-    o.put(String("grammars"), gr)
-    o.put(String("languages"), _strings(ps.native_language_options()))
-    o.put(String("grammar_languages"), _strings(ps.native_grammar_options()))
-    return _write_out(encode_json(o), out_ptr, cap)
-
-
-@export
-def tk_desktop_project_prefs_act(
-    h: Int, op: Int, idx: Int, ptr: Int, n: Int,
-) abi("C"):
-    """Project Settings edits: ``op`` 0 toggle On-save ``idx``, 1 save
-    On-save ``idx`` (-1 adds; JSON ``[language, program, args, cwd]``), 2
-    remove On-save ``idx``, 3 set target ``idx`` (JSON ``[name, program,
-    args, cwd, env, debug_language]``), 4 add a target, 5 remove target
-    ``idx``, 6 set grammar ``idx`` (JSON ``[ext, language]``), 7 add a
-    grammar mapping, 8 remove grammar ``idx``, 9 close the window."""
-    if h == 0:
-        return
-    ref d = _desk(h)[]
-    ref ps = d.project_settings
-    if not ps.active:
-        return
-    try:
-        var v = List[String]()
-        if n > 0:
-            var a = parse_json(_string_from(ptr, n))
-            for i in range(a.array_len()):
-                v.append(a.array_at(i).as_str())
-        if op == 0:
-            ps.native_os_toggle(idx)
-        elif op == 1 and len(v) == 4:
-            ps.native_os_save(idx, v[0], v[1], v[2], v[3])
-        elif op == 2:
-            ps.native_os_remove(idx)
-        elif op == 3 and len(v) == 6:
-            ps.native_tg_set(idx, v[0], v[1], v[2], v[3], v[4], v[5])
-        elif op == 4:
-            ps.native_tg_add()
-        elif op == 5:
-            ps.native_tg_remove(idx)
-        elif op == 6 and len(v) == 2:
-            ps.native_gr_set(idx, v[0], v[1])
-        elif op == 7:
-            ps.native_gr_add()
-        elif op == 8:
-            ps.native_gr_remove(idx)
-        elif op == 9:
-            ps.close()
-            d.project_settings_native = False
-    except:
-        pass
 
 
 # --- macOS-style UI: file tree ------------------------------------------------
@@ -2903,19 +2720,25 @@ def tk_desktop_native_color_answer(
 
 @export
 def tk_desktop_ui(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
-    """The open declarative dialog for the native projector: ``{name,
-    tree}`` with ``tree`` the ``ui_to_json`` of its ``ui()``. 0 when none is
-    up natively. Same buffer contract as ``tk_desktop_native_dialog``."""
+    """The open declarative dialogs for the native projector, bottom first:
+    ``{stack: [{name, tree}]}`` with ``tree`` the ``ui_to_json`` of each
+    one's ``ui()``. 0 when none is up natively. Same buffer contract as
+    ``tk_desktop_native_dialog``."""
     if h == 0:
         return 0
     ref d = _desk(h)[]
     if not d.native_ui_surface_active():
         return 0
-    var name = d.ui_surface()
-    var o = json_object()
-    o.put(String("name"), json_str(name))
-    o.put(String("tree"), ui_to_json(d.ui_tree(name)))
-    return _write_out(encode_json(o), out_ptr, cap)
+    var names = d.ui_surfaces()
+    var stack = json_array()
+    for i in range(len(names)):
+        var o = json_object()
+        o.put(String("name"), json_str(names[i]))
+        o.put(String("tree"), ui_to_json(d.ui_tree(names[i])))
+        stack.append(o)
+    var out = json_object()
+    out.put(String("stack"), stack)
+    return _write_out(encode_json(out), out_ptr, cap)
 
 
 @export

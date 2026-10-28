@@ -116,7 +116,7 @@ def test_fill_dialog_end_to_end_through_the_grid() raises:
     assert_true(_find(canvas, String("Initial number:"))[1] >= 0)
     # Focus starts on the mode choice; Tab skips the disabled text field.
     _ = d.handle_event(Event.key_event(KEY_TAB), _SCREEN)
-    assert_equal(d.ui_grid.focus_key, String("initial"))
+    assert_equal(d.ui_grids[len(d.ui_grids) - 1].focus_key, String("initial"))
     _ = d.handle_event(Event.key_event(KEY_BACKSPACE), _SCREEN)
     _ = d.handle_event(Event.key_event(UInt32(ord("5"))), _SCREEN)
     assert_equal(d.fill_dialog.initial, String("5"))
@@ -153,7 +153,7 @@ def test_breakpoint_dialog_end_to_end_through_the_grid() raises:
     # enabled → wait_for → condition.
     _ = d.handle_event(Event.key_event(KEY_TAB), _SCREEN)
     _ = d.handle_event(Event.key_event(KEY_TAB), _SCREEN)
-    assert_equal(d.ui_grid.focus_key, String("condition"))
+    assert_equal(d.ui_grids[len(d.ui_grids) - 1].focus_key, String("condition"))
     _ = d.handle_event(Event.key_event(UInt32(ord("x"))), _SCREEN)
     assert_equal(d.breakpoint_menu.condition, String("x"))
     assert_equal(d.breakpoint_menu.result().condition, String("x"))

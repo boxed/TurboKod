@@ -65,8 +65,8 @@ in Project run as one native picker sheet over the core's own search
 machinery (`tk_desktop_picker*`); popups are `NSMenu`s; the git view,
 Spelling, history, merge and review are native sheets / overlays driving the
 core through the same methods the grid path calls; the file tree and status
-bar are native overlays over their cells; Settings and Project Settings are
-native windows over the same state structs; tool panes get native headers
+bar are native overlays over their cells; Settings is a native window over
+the same state struct, Project Settings a declarative dialog (below); tool panes get native headers
 and editors a native overlay scroller.
 Swift trap: constants below `app.run()` in `TurboKod.swift` (the main file)
 read 0 — use `static let`s in an enum. Full details in [docs/native-ui.md](docs/native-ui.md).
@@ -77,7 +77,7 @@ New dialogs describe themselves once (`ui()` → a `UINode` tree, plus
 `ui_set` / `ui_act`) and are drawn by two projectors: `ui_grid.mojo` in cells
 (one set of layout rules — margins, right-aligned form labels, centered
 buttons) and the Swift `DeclarativeController` natively. Register a dialog in
-`Desktop.ui_surface` / `ui_tree` / `ui_apply`; don't hand-place grid widgets
+`Desktop.ui_surfaces` / `ui_tree` / `ui_apply`; don't hand-place grid widgets
 or hand-build a Swift twin. Full details in
 [docs/declarative-ui.md](docs/declarative-ui.md).
 

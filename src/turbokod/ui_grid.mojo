@@ -15,7 +15,9 @@ dialog lines up the same way:
   edge two columns further;
 * one blank row between a stack's children (``ui_vstack`` spacing);
 * button rows centered, buttons two columns apart; text fields and tables
-  stretch to the width they're given.
+  stretch to the width they're given;
+* a path field (``ui_path``) gets a Browse button two columns to its right,
+  which opens a file dialog over the form.
 
 Widget state that isn't the dialog's business — a field's cursor and
 selection, a pop-up being open, a button's press latch, a table's scroll —
@@ -39,16 +41,18 @@ from .events import (
     KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP, MOD_ALT, MOD_CTRL, MOD_META,
     MOD_SHIFT, MOUSE_BUTTON_LEFT,
 )
+from .file_dialog import FileDialog
 from .geometry import Point, Rect, center_in
 from .list_box import ListBox
 from .painter import Painter
 from .string_utils import display_columns
 from .text_field import TextField
+from .type_ahead import TypeAhead, is_type_ahead_key, type_ahead_pick
 from .ui_tree import (
-    UI_BUTTON, UI_CANCEL, UI_CENTER, UI_CHECK, UI_CHECKABLE, UI_CHOICE,
+    UI_BROWSE, UI_BUTTON, UI_CANCEL, UI_CENTER, UI_CHECK, UI_CHECKABLE, UI_CHOICE,
     UI_DEFAULT, UI_DESTRUCTIVE, UI_DIALOG, UI_FORM, UI_HEADING, UI_HOTKEY,
     UI_HSTACK, UI_LABEL, UI_ROW, UI_SECONDARY, UI_SEPARATOR, UI_SPACER,
-    UI_TABLE, UI_TABS, UI_TEXT, UI_VSTACK, UINode,
+    UI_DISABLED, UI_TABLE, UI_TABS, UI_TEXT, UI_VSTACK, UINode, ui_button,
 )
 from .window import close_button_clicked, paint_modal_frame, paint_window_title
 
@@ -59,6 +63,9 @@ comptime _LABEL_GAP = 2
 comptime _TEXT_MIN_W = 24
 comptime _TABLE_MIN_W = 30
 comptime _CHOICE_MIN_W = 10
+comptime _BROWSE_PREFIX = "browse:"
+"""The grid's own action for a path field's Browse button — handled here,
+never reported to the dialog."""
 
 
 @fieldwise_init
@@ -125,7 +132,10 @@ def _measure(n: UINode) -> Tuple[Int, Int]:
     if k == UI_LABEL:
         return (display_columns(n.text), 1)
     if k == UI_TEXT:
-        return (max(_TEXT_MIN_W, display_columns(n.value) + 2), 1)
+        var w = max(_TEXT_MIN_W, display_columns(n.value) + 2)
+        if n.has(UI_BROWSE):
+            return (w + _LABEL_GAP + _measure(_browse_button(n))[0], 2)
+        return (w, 1)
     if k == UI_CHECK:
         return (display_columns(n.text) + 6, 1)
     if k == UI_CHOICE:
@@ -199,6 +209,26 @@ def _measure(n: UINode) -> Tuple[Int, Int]:
     return (0, 0)
 
 
+def _browse_button(n: UINode) -> UINode:
+    """The Browse button a path field (``UI_BROWSE``) is drawn with."""
+    var b = ui_button(String(_BROWSE_PREFIX) + n.key, String("Browse"))
+    if not n.enabled():
+        b.flags |= UI_DISABLED
+    return b^
+
+
+def _browse_seed(path: String) -> String:
+    """Where Browse starts: the directory of the path already typed, else
+    the root."""
+    var b = path.as_bytes()
+    var i = len(b) - 1
+    while i >= 0 and b[i] != 0x2F:
+        i -= 1
+    if i <= 0:
+        return String("/")
+    return String(StringSpan(unsafe_from_utf8=b[:i]))
+
+
 def _stretches(n: UINode) -> Bool:
     """Takes spare width in a row (fields and tables), versus keeping its
     natural width (labels, checkboxes, choices, buttons)."""
@@ -223,17 +253,25 @@ def _arrange(n: UINode, r: Rect, mut out: List[_Placed]):
                 used += n.number
             used += c[1]
             shown += 1
-        var spare = max(0, r.height() - used)
+        var spare = r.height() - used
         # Spare height goes to spacers, else to the last table (a list
-        # that can show more rows).
-        if spacers == 0:
+        # that can show more rows) — which is also what gives rows back
+        # when the screen is too short for the whole dialog.
+        if spacers == 0 or spare < 0:
             for i in range(len(n.children) - 1, -1, -1):
                 if n.children[i].kind == UI_TABLE or (
                     n.children[i].kind == UI_TABS
                 ):
-                    heights[i] += spare
-                    spare = 0
+                    var h = max(heights[i] + spare, 2)
+                    spare -= h - heights[i]
+                    heights[i] = h
                     break
+        # Still too short: close up the gaps between children.
+        var gap = n.number
+        if spare < 0 and shown > 1:
+            spare += (shown - 1) * gap
+            gap = 0
+        spare = max(spare, 0)
         var y = r.a.y
         shown = 0
         for i in range(len(n.children)):
@@ -241,7 +279,7 @@ def _arrange(n: UINode, r: Rect, mut out: List[_Placed]):
             if n.children[i].kind == UI_SPACER:
                 h = spare // spacers if spacers > 0 else 0
             elif shown > 0:
-                y += n.number
+                y += gap
             if n.children[i].kind != UI_SPACER:
                 shown += 1
             _arrange(n.children[i], Rect(r.a.x, y, r.b.x, min(y + h, r.b.y)), out)
@@ -312,6 +350,14 @@ def _arrange(n: UINode, r: Rect, mut out: List[_Placed]):
         return
     if k == UI_SPACER:
         return
+    if k == UI_TEXT and n.has(UI_BROWSE):
+        var b = _browse_button(n)
+        var bw = _measure(b)[0]
+        var fw = max(1, r.width() - bw - _LABEL_GAP)
+        out.append(_Placed(n.copy(), Rect(r.a.x, r.a.y, r.a.x + fw, r.a.y + 1)))
+        var bx = r.a.x + fw + _LABEL_GAP
+        out.append(_Placed(b^, Rect(bx, r.a.y, bx + bw, r.a.y + 2)))
+        return
     # Leaves keep their natural size unless they stretch.
     var m = _measure(n)
     var w = r.width() if _stretches(n) else min(m[0], r.width())
@@ -337,6 +383,10 @@ struct GridForm(Movable):
     var _buttons: List[ShadowButton]
     var _open_drop: String
     var _screen: Rect
+    var _file_dialog: FileDialog
+    var _browse_key: String
+    """The path field the open file dialog will fill."""
+    var _type_ahead: TypeAhead
 
     def __init__(out self):
         self.focus_key = String("")
@@ -353,6 +403,9 @@ struct GridForm(Movable):
         self._buttons = List[ShadowButton]()
         self._open_drop = String("")
         self._screen = Rect(0, 0, 0, 0)
+        self._file_dialog = FileDialog()
+        self._browse_key = String("")
+        self._type_ahead = TypeAhead()
 
     def reset(mut self):
         self.focus_key = String("")
@@ -366,6 +419,9 @@ struct GridForm(Movable):
         self._button_keys = List[String]()
         self._buttons = List[ShadowButton]()
         self._open_drop = String("")
+        self._file_dialog.close()
+        self._browse_key = String("")
+        self._type_ahead.reset()
 
     # --- widget state, keyed by node key ------------------------------
 
@@ -463,7 +519,12 @@ struct GridForm(Movable):
 
     # --- paint ---------------------------------------------------------
 
-    def paint(mut self, root: UINode, mut canvas: Canvas, screen: Rect):
+    def paint(
+        mut self, root: UINode, mut canvas: Canvas, screen: Rect,
+        active: Bool = True,
+    ):
+        """Draw the dialog. ``active`` False draws it without focus — a
+        dialog stacked under another one."""
         self._layout(root, screen)
         var bg = Attr(BLACK, LIGHT_GRAY)
         _ = paint_modal_frame(canvas, self._frame, bg)
@@ -476,7 +537,8 @@ struct GridForm(Movable):
         var popup_rect = Rect(0, 0, 0, 0)
         for i in range(len(self._placed)):
             var p = self._placed[i].copy()
-            var focused = p.node.key == self.focus_key and _is_focusable(p.node)
+            var focused = active and p.node.key == self.focus_key \
+                and _is_focusable(p.node)
             var k = p.node.kind
             if k == UI_LABEL:
                 var attr = bg
@@ -540,6 +602,8 @@ struct GridForm(Movable):
         # Open pop-ups overlay the rest.
         if popup >= 0:
             self._drops[popup].paint_popup(canvas, popup_rect, screen)
+        if self._file_dialog.active:
+            self._file_dialog.paint(canvas, screen)
 
     def _paint_table(mut self, mut canvas: Canvas, n: UINode, r: Rect, focused: Bool):
         var widths = _column_widths(n)
@@ -635,11 +699,38 @@ struct GridForm(Movable):
         dialog's while it's open (modal)."""
         self._layout(root, screen)
         var out = List[UIEvent]()
+        if self._file_dialog.active:
+            # Browse's file dialog is modal over the form.
+            if event.kind == EVENT_KEY:
+                _ = self._file_dialog.handle_key(event)
+            elif event.kind == EVENT_MOUSE:
+                _ = self._file_dialog.handle_mouse(event, screen)
+            if self._file_dialog.submitted:
+                out.append(ui_set(self._browse_key, self._file_dialog.selected_path))
+                self.focus_key = self._browse_key
+                self._file_dialog.close()
+            return out^
         if event.kind == EVENT_KEY:
             self._key(event, out)
         elif event.kind == EVENT_MOUSE:
             self._mouse(event, out)
-        return out^
+        # A Browse button is the grid's own business: open the file dialog
+        # at the field's directory.
+        var kept = List[UIEvent]()
+        for i in range(len(out)):
+            if out[i].is_action and out[i].key.startswith(_BROWSE_PREFIX):
+                var key = String(StringSpan(
+                    unsafe_from_utf8=out[i].key.as_bytes()[len(String(_BROWSE_PREFIX).as_bytes()):]
+                ))
+                var seed = String("")
+                for j in range(len(self._placed)):
+                    if self._placed[j].node.key == key:
+                        seed = self._placed[j].node.value
+                self._browse_key = key
+                self._file_dialog.open(_browse_seed(seed))
+            else:
+                kept.append(out[i].copy())
+        return kept^
 
     def _key(mut self, event: Event, mut out: List[UIEvent]):
         var k = event.key
@@ -734,6 +825,18 @@ struct GridForm(Movable):
             if k == KEY_SPACE and n.has(UI_CHECKABLE):
                 if n.number >= 0:
                     out.append(ui_act(String("toggle:") + String(n.number)))
+                return
+            if is_type_ahead_key(event) and k != KEY_SPACE:
+                # Type-to-jump on the row's first text column.
+                var labels = List[String]()
+                var col = 1 if n.has(UI_CHECKABLE) else 0
+                for r in range(len(n.rows)):
+                    labels.append(n.rows[r][col] if col < len(n.rows[r]) else String(""))
+                var hit = type_ahead_pick(
+                    self._type_ahead, labels, String(chr(Int(k))),
+                )
+                if hit >= 0 and hit != n.number:
+                    out.append(ui_set(n.key, String(hit)))
                 return
             var i = self._list(n)
             var page = max(self._placed[fi].rect.height() - 2, 1)

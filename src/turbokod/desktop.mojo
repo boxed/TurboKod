@@ -1046,7 +1046,6 @@ struct Desktop(Movable):
     # grammar overrides. Edits sync back to disk per-section on every paint
     # while a section's dirty flag is set.
     var project_settings: ProjectSettings
-    var project_settings_detached: Bool
     # Cached copy of the open project's enabled on-save actions
     # (``.turbokod/on_save.json``). Loaded in ``_set_project`` and refreshed
     # by the Project-Settings sync; ``_run_on_save_actions`` walks this, not
@@ -1138,15 +1137,13 @@ struct Desktop(Movable):
     for and the host's find bar should show (one-shot, taken by the
     host); empty otherwise."""
     var native_find_seed: String
-    var ui_grid: GridForm
-    """The grid projection of the open declarative dialog (``ui_surface``)
-    — one, since only one modal is up at a time."""
-    var _ui_grid_owner: String
+    var ui_grids: List[GridForm]
+    """The grid projections of the open declarative dialogs
+    (``ui_surfaces``), bottom first."""
+    var _ui_grid_owners: List[String]
     var settings_native: Bool
     """The open Settings is shown as the host's native Settings window
     (macOS-style UI) rather than the grid one."""
-    var project_settings_native: Bool
-    """Project Settings shows as the host's native window."""
     var _last_goto_line: String      # last Go-to-line input, prefilled on reopen
     var _open_count: Int             # cascade counter for Desktop.open_file
     var _untitled_count: Int         # bumped per ``new_file`` for unique titles
@@ -1762,7 +1759,6 @@ struct Desktop(Movable):
         self._review_tree_on = False
         self._review_tree_gen = -1
         self.project_settings = ProjectSettings()
-        self.project_settings_detached = False
         self.project_on_save = List[OnSaveAction]()
         self.settings = Settings()
         self.settings_detached = False
@@ -1792,10 +1788,9 @@ struct Desktop(Movable):
         self._last_search_opts = SearchOptions()
         self.native_find_request = String("")
         self.native_find_seed = String("")
-        self.ui_grid = GridForm()
-        self._ui_grid_owner = String("")
+        self.ui_grids = List[GridForm]()
+        self._ui_grid_owners = List[String]()
         self.settings_native = False
-        self.project_settings_native = False
         self._last_goto_line = String("")
         self._pending_new_window_project = Optional[String]()
         self._open_count = 0
@@ -3615,37 +3610,6 @@ struct Desktop(Movable):
         elif event.kind == EVENT_MOUSE:
             _ = self.settings.handle_mouse(event, screen)
 
-    # NOTE: keep these three in lock-step with the Settings twins above —
-    # the native frontend mirrors the same second-surface plumbing.
-    def set_project_settings_detached(mut self, on: Bool):
-        """Tell the Desktop the Project Settings view renders in a separate
-        host window (macOS). Mirrors ``set_settings_detached``."""
-        self.project_settings_detached = on
-        self.project_settings.detached = on
-
-    def paint_project_settings(mut self, mut canvas: Canvas, screen: Rect):
-        """Paint Project Settings to fill the host's separate window.
-        Mirrors ``paint_settings``."""
-        if not self.project_settings.active:
-            Painter(screen).fill(
-                canvas, screen, String(" "), Attr(BLACK, LIGHT_GRAY),
-            )
-            return
-        self.project_settings.paint(canvas, screen)
-
-    def handle_project_settings_event(
-        mut self, event: Event, screen: Rect,
-    ):
-        """Route a key/mouse event from the host's Project Settings window.
-        Mirrors ``handle_settings_event``."""
-        if not self.project_settings.active:
-            return
-        if event.kind == EVENT_KEY:
-            _ = self.project_settings.handle_key(event)
-        elif event.kind == EVENT_MOUSE:
-            _ = self.project_settings.handle_mouse(event, screen)
-        self._sync_project_settings()
-
     def pointer_shape_panels(self, pos: Point, screen: Rect) -> String:
         """Pointer hint for the panel window. The terminal body and pane
         chrome read fine with the default arrow; the one exception is a
@@ -3730,9 +3694,7 @@ struct Desktop(Movable):
             return String("default")
         if self.history.active:
             return String("default")
-        if self.project_settings.active and not self.project_settings_detached:
-            if self.project_settings.is_input_at(pos, screen):
-                return String("text")
+        if len(self.ui_surface().as_bytes()) > 0:
             return String("default")
         # Resize edges of the docked side panels — checked before the
         # window pass so the cursor flips the moment the user crosses
@@ -4785,6 +4747,16 @@ struct Desktop(Movable):
         # so paint order doesn't matter for correctness.
         # A dialog the host shows natively (macOS-style UI) isn't painted.
         var native = self.native_ui()
+        if not native:
+            # Open declarative dialogs through the grid projector, the top
+            # one live (natively the host draws them from ``ui_tree``). Below
+            # the prompts and confirms, which can open over them.
+            var surfaces = self._sync_ui_grids()
+            for i in range(len(surfaces)):
+                self.ui_grids[i].paint(
+                    self.ui_tree(surfaces[i]), canvas, screen,
+                    i == len(surfaces) - 1,
+                )
         if not (native and self.native_prompt_active()):
             self.prompt.paint(canvas, screen)
         # Review paints over every modal (below), so a confirm it raised
@@ -4830,13 +4802,6 @@ struct Desktop(Movable):
             self.tab_context_menu.paint(canvas, screen)
         if not (native and self.lsp_status_menu.active):
             self.lsp_status_menu.paint(canvas, screen)
-        if not native:
-            # The open declarative dialog, if any, through the grid
-            # projector (natively the host draws it from ``ui_tree``).
-            var surface = self.ui_surface()
-            if len(surface.as_bytes()) > 0:
-                self._ui_grid_for(surface)
-                self.ui_grid.paint(self.ui_tree(surface), canvas, screen)
         if not (native and self.spelling_dialog.active):
             self.spelling_dialog.paint(canvas, screen)
         # Settings overlay — paints over the workspace but below the
@@ -4848,11 +4813,7 @@ struct Desktop(Movable):
         # because the main surface's paint is the per-frame persistence hook.
         if not self.settings_detached:
             self.settings.paint(canvas, screen)
-        # Project Settings overlay — same second-surface treatment as
-        # Settings. In-grid it paints over the workspace; detached the
-        # host's window paints it, but the dirty-sync below still runs here.
-        if not self.project_settings_detached:
-            self.project_settings.paint(canvas, screen)
+        # Project Settings persists its edits as they're made.
         self._sync_project_settings()
         # Review mode — a full-screen changeset reader. Painted above the
         # workspace + every modal (it owns the whole surface), but below
@@ -7774,17 +7735,6 @@ struct Desktop(Movable):
             if self.spell_menu.submitted:
                 self._on_spell_menu_submit()
             return Optional[String]()
-        var surface = self.ui_surface()
-        if len(surface.as_bytes()) > 0:
-            # A declarative dialog (``ui_surface``): the grid projector
-            # turns the event into edits / actions, the dialog applies
-            # them. Fully modal.
-            self._ui_grid_for(surface)
-            var evs = self.ui_grid.handle_event(
-                self.ui_tree(surface), event, screen,
-            )
-            self.ui_apply(surface, evs)
-            return Optional[String]()
         if self.spelling_dialog.active:
             if event.kind == EVENT_KEY:
                 _ = self.spelling_dialog.handle_key(event)
@@ -7940,6 +7890,17 @@ struct Desktop(Movable):
             elif not self.save_as_dialog.active:
                 self._close_after_save_as_idx = -1   # cancelled
             return Optional[String]()
+        var surface = self.ui_surface()
+        if len(surface.as_bytes()) > 0:
+            # A declarative dialog (``ui_surface``): the grid projector
+            # turns the event into edits / actions, the dialog applies
+            # them. Fully modal.
+            var top = len(self._sync_ui_grids()) - 1
+            var evs = self.ui_grids[top].handle_event(
+                self.ui_tree(surface), event, screen,
+            )
+            self.ui_apply(surface, evs)
+            return Optional[String]()
         if self.quick_open.active:
             if event.kind == EVENT_KEY:
                 _ = self.quick_open.handle_key(event)
@@ -8040,15 +8001,6 @@ struct Desktop(Movable):
                     event, screen, self.grammar_registry,
                 )
             self._after_local_changes(screen)
-            return Optional[String]()
-        if self.project_settings.active and not self.project_settings_detached:
-            # In-grid Project Settings is modal over the workspace; the
-            # per-section dirty-sync runs after the event is handled.
-            if event.kind == EVENT_KEY:
-                _ = self.project_settings.handle_key(event)
-            else:
-                _ = self.project_settings.handle_mouse(event, screen)
-            self._sync_project_settings()
             return Optional[String]()
         if self.settings.active and not self.settings_detached:
             # In-grid Settings is modal over the workspace. Detached, the
@@ -8716,17 +8668,35 @@ struct Desktop(Movable):
     def native_ui_surface_active(self) -> Bool:
         return self.native_ui() and len(self.ui_surface().as_bytes()) > 0
 
-    def ui_surface(self) -> String:
-        """The open declarative dialog, by name, or empty."""
+    def ui_surfaces(self) -> List[String]:
+        """The open declarative dialogs by name, bottom first — more than
+        one when a dialog opens another on top (Project Settings' action
+        editor)."""
+        var out = List[String]()
+        if self.project_settings.active:
+            out.append(String("project_settings"))
+            if self.project_settings.editor.active:
+                out.append(String("action_editor"))
         if self.breakpoint_error.active:
-            return String("breakpoint_error")
-        if self.breakpoint_menu.active:
-            return String("breakpoint")
-        if self.fill_dialog.active:
-            return String("fill")
-        return String("")
+            out.append(String("breakpoint_error"))
+        elif self.breakpoint_menu.active:
+            out.append(String("breakpoint"))
+        elif self.fill_dialog.active:
+            out.append(String("fill"))
+        return out^
+
+    def ui_surface(self) -> String:
+        """The top declarative dialog — the one input goes to — or empty."""
+        var all = self.ui_surfaces()
+        if len(all) == 0:
+            return String("")
+        return all[len(all) - 1]
 
     def ui_tree(self, name: String) -> UINode:
+        if name == String("project_settings"):
+            return self.project_settings.ui()
+        if name == String("action_editor"):
+            return self.project_settings.editor.ui()
         if name == String("breakpoint_error"):
             return self.breakpoint_error.ui()
         if name == String("breakpoint"):
@@ -8738,7 +8708,17 @@ struct Desktop(Movable):
         submit handler when one of them finished it."""
         for i in range(len(events)):
             ref e = events[i]
-            if name == String("breakpoint_error"):
+            if name == String("project_settings"):
+                if e.is_action:
+                    self.project_settings.ui_act(e.key)
+                else:
+                    self.project_settings.ui_set(e.key, e.value)
+            elif name == String("action_editor"):
+                if e.is_action:
+                    self.project_settings.editor.ui_act(e.key)
+                else:
+                    self.project_settings.editor.ui_set(e.key, e.value)
+            elif name == String("breakpoint_error"):
                 if e.is_action:
                     self.breakpoint_error.ui_act(e.key)
                 else:
@@ -8753,19 +8733,35 @@ struct Desktop(Movable):
                     self.fill_dialog.ui_act(e.key)
                 else:
                     self.fill_dialog.ui_set(e.key, e.value)
-        if name == String("breakpoint_error") and self.breakpoint_error.submitted:
+        if name == String("project_settings") or name == String("action_editor"):
+            self.project_settings.consume_editor()
+            # Persist before a Close resets the working state.
+            self._sync_project_settings()
+            if self.project_settings.close_requested:
+                self.project_settings.close()
+        elif name == String("breakpoint_error") and self.breakpoint_error.submitted:
             self._on_breakpoint_error_submit()
         elif name == String("breakpoint") and self.breakpoint_menu.submitted:
             self._on_breakpoint_menu_submit()
         elif name == String("fill") and self.fill_dialog.submitted:
             self._on_fill_dialog_submit()
 
-    def _ui_grid_for(mut self, name: String):
-        """A different dialog took the grid projector: drop the previous
-        one's cursors, scrolls and focus."""
-        if name != self._ui_grid_owner:
-            self.ui_grid.reset()
-            self._ui_grid_owner = name
+    def _sync_ui_grids(mut self) -> List[String]:
+        """One grid projector per open declarative dialog. A level whose
+        dialog changed starts fresh (no stale cursors, scrolls or focus).
+        Returns ``ui_surfaces``."""
+        var surfaces = self.ui_surfaces()
+        while len(self.ui_grids) > len(surfaces):
+            _ = self.ui_grids.pop()
+            _ = self._ui_grid_owners.pop()
+        for i in range(len(surfaces)):
+            if i >= len(self.ui_grids):
+                self.ui_grids.append(GridForm())
+                self._ui_grid_owners.append(surfaces[i])
+            elif self._ui_grid_owners[i] != surfaces[i]:
+                self.ui_grids[i].reset()
+                self._ui_grid_owners[i] = surfaces[i]
+        return surfaces^
 
     def native_choice_answer(mut self, index: Int):
         """Answer the message-request list from a native alert (-1 =
@@ -9380,9 +9376,7 @@ struct Desktop(Movable):
         re-match, and recurse. Dispatch it straight into the settings surface
         instead — which is also what's focused.
         """
-        if self.project_settings.active and self.project_settings_detached:
-            self.handle_project_settings_event(ev, screen)
-        elif self.settings.active and self.settings_detached:
+        if self.settings.active and self.settings_detached:
             self.handle_settings_event(ev, screen)
         else:
             try:
@@ -11820,7 +11814,7 @@ struct Desktop(Movable):
                 or self.local_changes.active or self.review.active \
                 or self.history.active:
             return False
-        if self.project_settings.active and not self.project_settings_detached:
+        if self.project_settings.active:
             return False
         if self.settings.active and not self.settings_detached:
             return False
@@ -12360,21 +12354,13 @@ struct Desktop(Movable):
         var snapshot = ProjectTargets()
         snapshot.targets = self.targets.targets.copy()
         snapshot.active = self.targets.active
-        var cur_ext = String("")
-        var fidx = self._focused_editor_idx()
-        if fidx >= 0:
-            cur_ext = extension_of(
-                self.windows.windows[fidx].editor.file_path,
-            )
         self.project_settings.open(
             root,
             snapshot^,
             self.grammar_registry.overrides.copy(),
             self.config.on_save_actions.copy(),
             self.project_on_save.copy(),
-            cur_ext,
         )
-        self.project_settings_native = self.native_ui()
 
     def _sync_project_settings(mut self):
         """Per-frame persistence hook for Project Settings, mirroring the

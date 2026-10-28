@@ -28,13 +28,23 @@ def ui_set(mut self, key: String, value: String)
 def ui_act(mut self, id: String)
 ```
 
-Then register it in `Desktop`'s `ui_surface` / `ui_tree` / `ui_apply`, with
-the handler that runs when it submits. That is all the wiring there is:
+Then register it in `Desktop`'s `ui_surfaces` / `ui_tree` / `ui_apply`,
+with the handler that runs when it submits. That is all the wiring there is:
 
-- **Grid:** `handle_event` and `paint` route through `ui_grid` for whatever
-  `ui_surface()` names.
+- **Grid:** `paint` draws every open surface through its own `GridForm`
+  (`ui_grids`), and `handle_event` routes to the top one.
 - **Native:** the host polls `tk_desktop_ui` and answers with
   `tk_desktop_ui_event`.
+
+### Stacked dialogs
+
+A dialog can open another on top of itself — Project Settings' On save tab
+opens the action editor. `ui_surfaces()` lists the open ones bottom first,
+and `ui_surface()` is the top one, which gets the input. The grid paints the
+lower ones without focus. Natively each level is a sheet on the one below
+it, and `tk_desktop_ui` sends the whole stack (`{stack: [{name, tree}]}`).
+A confirm raised while a dialog is up goes on top of its sheet
+(`sheetHost`), and in the grid it paints over the dialogs.
 
 ## The node set (`ui_tree.mojo`)
 
@@ -46,6 +56,7 @@ the handler that runs when it submits. That is all the wiring there is:
 | `ui_tabs(key, selected, pages)` / `ui_page(label, body)` | Tabbed pages. |
 | `ui_label(text, flags)` | `UI_SECONDARY` / `UI_HEADING` styles. |
 | `ui_text` / `ui_check` / `ui_choice` | Bound to a `key`; `enabled=False` greys them. |
+| `ui_path(key, value, placeholder, enabled)` | A text field with a Browse button: the grid's file dialog, natively an open panel. |
 | `ui_table(key, columns, rows, selected, activate, height, checkable)` | Rows of cells. |
 | `ui_button(id, label, flags)` | `UI_DEFAULT` answers Return, `UI_CANCEL` Esc; also `UI_DESTRUCTIVE`, `UI_HOTKEY`. |
 | `ui_separator` / `ui_spacer` | Spacing. |
@@ -67,17 +78,34 @@ lines up the same way:
 - **Buttons:** button rows are centered, with buttons two columns apart.
 - **Sizing:** text fields and tables stretch to the width they're given; a
   stack's spare height goes to a spacer, else to its last table.
+- **Short screens:** the dialog never outgrows the screen. A stack takes
+  the rows it's short from its last table (down to a header and one row),
+  then closes up the gaps between its children.
+- **Tables:** typing a letter jumps to the first row whose first text column
+  starts with it.
 
 ## Native projector
 
 `DeclarativeController` rebuilds its views only when the tree's *shape*
 changes (node kinds, keys, choice options). Otherwise it pushes values into
 the existing views, and never overwrites a text field that is being typed
-in, so focus and the cursor survive every frame.
+in, so focus and the cursor survive every frame. Keep a dialog's shape
+stable: disable a control rather than leaving it out, so the views aren't
+rebuilt under the user.
+
+An `NSTabView` doesn't size itself to its pages, so each page is pinned
+into its item's view and the tab view is given the largest page's fitting
+size.
+
+For scripted screenshots, `TK_CAPTURE_UI='{"<name>": [[is_action, key,
+value], …]}'` sends events to a dialog as soon as its sheet is up.
 
 ## Converted so far
 
-Fill (Edit ▸ Fill…), the breakpoint dialog, and the failed-condition
-dialog. Their hand-placed grid code and the old native `form` sheet are
-gone. Validation is part of the dialog: Fill's "must be a whole number"
+Fill (Edit ▸ Fill…), the breakpoint dialog, the failed-condition dialog,
+Project Settings and its on-save action editor. Their hand-placed grid code,
+the old native `form` sheet, the separate Project Settings cell window and
+its hand-built native twin are gone. Project Settings applies each edit as
+it's made. Close runs `_sync_project_settings` before it resets the working
+state. Validation is part of the dialog: Fill's "must be a whole number"
 shows as a label in both projections.

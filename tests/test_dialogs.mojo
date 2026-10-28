@@ -52,6 +52,7 @@ from turbokod.lsp import capture_command
 from turbokod.posix import monotonic_ms, which
 from turbokod.spell import find_misspelled_runs
 from turbokod.action_editor import ActionEditor
+from turbokod.ui_grid import GridForm
 from turbokod.config import (
     LanguageServerOverride, MIN_FONT_SIZE, OnSaveAction, TurbokodConfig
 )
@@ -864,12 +865,12 @@ def test_settings_editor_submit_appends_new_entry() raises:
     """Add → edit fields → submit appends to the library *and* enables it
     for the project (a copy into project_actions), raising on_save_dirty."""
     var ps = _ps_open(List[OnSaveAction](), List[OnSaveAction]())
-    ps._os_add()
+    ps.ui_act(String("os_add"))
     assert_true(ps.editor.active)
-    ps.editor.entry.language_id = String("python")
-    ps.editor.form.set_text(UInt8(1), String("/usr/bin/black"))
-    ps.editor.submitted = True
-    ps._maybe_consume_editor()
+    ps.editor.language_id = String("python")
+    ps.editor.ui_set(String("program"), String("/usr/bin/black"))
+    ps.editor.ui_act(String("save"))
+    ps.consume_editor()
     assert_false(ps.editor.active)
     assert_equal(len(ps.library), 1)
     assert_equal(ps.library[0].language_id, String("python"))
@@ -895,10 +896,10 @@ def test_settings_editor_submit_replaces_existing_entry() raises:
     ))
     var ps = _ps_open(lib^, pa^)
     ps.selected_os = 0
-    ps._os_edit()
-    ps.editor.form.set_text(UInt8(1), String("/opt/bin/black-edge"))
-    ps.editor.submitted = True
-    ps._maybe_consume_editor()
+    ps.ui_act(String("os_edit"))
+    ps.editor.ui_set(String("program"), String("/opt/bin/black-edge"))
+    ps.editor.ui_act(String("save"))
+    ps.consume_editor()
     # Library entry replaced…
     assert_equal(len(ps.library), 1)
     assert_equal(ps.library[0].program, String("/opt/bin/black-edge"))
@@ -1395,9 +1396,9 @@ def test_settings_list_ignores_command_chords() raises:
 
 
 def test_settings_actions_list_type_to_jump() raises:
-    """Type-to-jump in the Project Settings On-save list: typing a letter
-    moves ``selected_os`` to the first row whose label (language id +
-    program) starts with that letter."""
+    """Type-to-jump in the Project Settings On-save table (the grid
+    projector's table type-ahead): typing a letter selects the first row
+    whose language starts with it; a letter matching nothing keeps it."""
     var lib = List[OnSaveAction]()
     lib.append(OnSaveAction(
         String("python"), String("/usr/bin/black"),
@@ -1408,53 +1409,30 @@ def test_settings_actions_list_type_to_jump() raises:
         List[String](), String(""),
     ))
     var ps = _ps_open(lib^, List[OnSaveAction]())
-    ps.section = 0  # On save
-    ps.focus = UInt8(2)  # _FOCUS_OS_LIST
-    _ = ps.handle_key(_key(UInt32(ord("r"))))
+    var grid = GridForm()
+    var screen = Rect(0, 0, 100, 40)
+    var c = Canvas(100, 40)
+    grid.paint(ps.ui(), c, screen)
+    grid.focus_key = String("os")
+    for e in grid.handle_event(ps.ui(), _key(UInt32(ord("r"))), screen):
+        ps.ui_set(e.key, e.value)
     assert_equal(ps.selected_os, 1)
-    # No-match keystroke: selection survives.
-    ps._type_ahead.reset()
-    _ = ps.handle_key(_key(UInt32(ord("z"))))
+    grid._type_ahead.reset()
+    assert_equal(len(grid.handle_event(ps.ui(), _key(UInt32(ord("z"))), screen)), 0)
     assert_equal(ps.selected_os, 1)
 
 
-def test_action_editor_lang_dropdown_has_options() raises:
-    """The dropdown's language options are sourced from
-    ``built_in_servers()``. If that returns an empty list (e.g. because
-    the bundled languages.json isn't on disk relative to cwd), the
-    user sees a one-option dropdown showing "(none)" and the field
-    looks broken. Guard against the empty case so a regression here
-    surfaces as a test failure rather than an in-the-wild "the
-    dropdown for language is empty" bug report.
-    """
+def test_action_editor_language_choice_has_options() raises:
+    """The language choice is sourced from ``built_in_servers()``. If that
+    returns nothing (the bundled languages.json not reachable from cwd),
+    the user would see a one-option "(any)" choice that looks broken, so
+    an empty registry falls back to a hand-picked list."""
     var ed = ActionEditor()
     ed.open(OnSaveAction(), -1)
-    var dd = ed._lang_dropdown(String(""))
-    # Always at least the empty "(any)" sentinel — if it's the only
-    # entry, the language registry didn't load.
-    assert_true(len(dd.options) >= 2,
-        msg=String("dropdown only has the empty sentinel — built_in_servers() "
-                   "returned no languages (cwd missing the bundled JSON?)"))
-
-
-def test_action_editor_enter_opens_lang_popup() raises:
-    """Pressing Enter on the focused (closed) language dropdown opens
-    its popup. Without this, clicks/Enter were no-ops and users had no
-    way to discover the available languages — earlier code rebuilt the
-    dropdown stateless each paint, so any toggle was discarded
-    immediately."""
-    var ed = ActionEditor()
-    ed.open(OnSaveAction(), -1)
-    ed._focus.focus_force(0)  # _FOCUS_LANG
-    assert_false(ed.lang_dropdown.is_open)
-    var ev = Event.key_event(KEY_ENTER, MOD_NONE)
-    _ = ed.handle_key(ev)
-    assert_true(ed.lang_dropdown.is_open)
-    # Esc on an open popup just closes the popup, not the dialog.
-    var esc = Event.key_event(KEY_ESC, MOD_NONE)
-    _ = ed.handle_key(esc)
-    assert_false(ed.lang_dropdown.is_open)
-    assert_true(ed.active)
+    assert_true(len(ed.language_options()) >= 2,
+        msg=String("the language choice only has the empty sentinel"))
+    ed.ui_set(String("language"), String("1"))
+    assert_equal(ed.language_id, ed.language_options()[1])
 
 
 def test_dropdown_type_to_search_jumps_to_prefix() raises:
@@ -1523,53 +1501,24 @@ def test_dropdown_type_to_search_resets_on_close() raises:
     assert_equal(dd._type_ahead.buf, String(""))
 
 
-def test_action_editor_consumes_browse_path() raises:
-    """When the embedded file dialog submits, the picked path must
-    land in the program field (not the cwd field, not nowhere). This
-    is the contract that lets the user click a file in Browse and end
-    up with that path filled in for them."""
-    var ed = ActionEditor()
-    ed.open(OnSaveAction(), -1)
-    ed.file_dialog.open(String("/"))
-    ed.file_dialog.selected_path = String("/usr/bin/black")
-    ed.file_dialog.submitted = True
-    ed._maybe_consume_browse()
-    assert_false(ed.file_dialog.active)
-    assert_equal(ed.form.text(UInt8(1)), String("/usr/bin/black"))
-
-
 def test_action_editor_args_field_accepts_spaces() raises:
-    """Typing ``a b c`` into the Arguments field used to drop the
-    interior spaces because the field round-tripped through
-    the args split/join on every keystroke. The fix holds a
-    single string in ``args_text`` while editing and only splits on
-    Save, so multiple arguments can actually be typed."""
+    """Arguments stay one free-form string while editing — trailing space
+    and all — and are split only on Save, so several can be typed."""
     var ed = ActionEditor()
     ed.open(OnSaveAction(), -1)
-    ed._focus.focus_force(3)  # _FOCUS_ARGS
-    var letters = String("a b c")
-    var lb = letters.as_bytes()
-    for i in range(len(lb)):
-        var ev = Event.key_event(UInt32(Int(lb[i])), MOD_NONE)
-        _ = ed.handle_key(ev)
-    assert_equal(ed.form.text(UInt8(3)), String("a b c"))
-    # The committed list is empty until Save fires.
-    assert_equal(len(ed.entry.args), 0)
-    ed._focus.focus_force(5)  # _FOCUS_SAVE
-    var enter = Event.key_event(KEY_ENTER, MOD_NONE)
-    _ = ed.handle_key(enter)
+    ed.ui_set(String("args"), String("a b "))
+    assert_equal(ed.args, String("a b "))
+    ed.ui_set(String("args"), String("a b c"))
+    ed.ui_act(String("save"))
     assert_true(ed.submitted)
-    assert_equal(len(ed.entry.args), 3)
-    assert_equal(ed.entry.args[0], String("a"))
-    assert_equal(ed.entry.args[1], String("b"))
-    assert_equal(ed.entry.args[2], String("c"))
+    var v = ed.value()
+    assert_equal(len(v.args), 3)
+    assert_equal(v.args[2], String("c"))
 
 
 def test_action_editor_args_buffer_seeded_from_entry() raises:
-    """Editing an existing action seeds the args edit-buffer with the
-    space-joined existing args. Without this, opening a record with
-    args ``["--quiet", "$FilePath$"]`` would show an empty Arguments
-    field and the user would lose their config the moment they saved."""
+    """Editing an existing action seeds Arguments with the space-joined
+    args, so saving it unchanged doesn't drop them."""
     var args = List[String]()
     args.append(String("--quiet"))
     args.append(String("$FilePath$"))
@@ -1577,8 +1526,9 @@ def test_action_editor_args_buffer_seeded_from_entry() raises:
         String("python"), String("/usr/bin/black"), args^, String(""),
     )
     var ed = ActionEditor()
-    ed.open(existing^, 0)
-    assert_equal(ed.form.text(UInt8(3)), String("--quiet $FilePath$"))
+    ed.open(existing, 0)
+    assert_equal(ed.args, String("--quiet $FilePath$"))
+    assert_equal(len(ed.value().args), 2)
 
 
 def test_quick_open_match_rules() raises:

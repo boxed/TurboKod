@@ -143,8 +143,8 @@ int32_t tk_desktop_native_prompt_answer(int64_t h, int64_t ptr, int64_t len,
                                         int64_t ok);
 void tk_desktop_native_save_as_answer(int64_t h, int64_t ptr, int64_t len);
 void tk_desktop_native_choice_answer(int64_t h, int64_t index);
-// Declarative dialogs (ui_tree.mojo): _ui writes {name, tree} for the open one
-// (0 = none natively); _ui_event sends {name, events: [[is_action, key, value]]}.
+// Declarative dialogs (ui_tree.mojo): _ui writes {stack: [{name, tree}]} for the
+// open ones, bottom first (0 = none natively); _ui_event sends {name, events: [[is_action, key, value]]}.
 int64_t tk_desktop_ui(int64_t h, int64_t out_ptr, int64_t cap);
 void tk_desktop_ui_event(int64_t h, int64_t ptr, int64_t len);
 void tk_desktop_native_color_answer(int64_t h, int64_t rgb, int64_t mode, int64_t ok);
@@ -209,11 +209,6 @@ int64_t tk_desktop_spelling(int64_t h, int64_t out_ptr, int64_t cap);
 int64_t tk_desktop_spelling_rows(int64_t h, int64_t out_ptr, int64_t cap);
 void tk_desktop_spelling_act(int64_t h, int64_t action, int64_t ptr, int64_t len);
 int64_t tk_desktop_prefs(int64_t h, int64_t out_ptr, int64_t cap);
-// macOS-style UI Project Settings window over the same ProjectSettings state:
-// _project_prefs {root, on_save, targets, grammars, languages,
-// grammar_languages} (0 = not open natively); _project_prefs_act edits / closes.
-int64_t tk_desktop_project_prefs(int64_t h, int64_t out_ptr, int64_t cap);
-void tk_desktop_project_prefs_act(int64_t h, int64_t op, int64_t idx, int64_t ptr, int64_t len);
 void tk_desktop_prefs_set(int64_t h, int64_t ptr, int64_t len);
 // The list sections (languages, dictionaries, projects) and their buttons.
 int64_t tk_desktop_prefs_lists(int64_t h, int64_t out_ptr, int64_t cap);
@@ -322,22 +317,6 @@ int32_t tk_desktop_settings_key(int64_t h, uint32_t key, uint8_t mods,
 int32_t tk_desktop_settings_mouse(int64_t h, int64_t x, int64_t y, uint8_t button,
                                   uint8_t pressed, uint8_t motion, uint8_t mods,
                                   int64_t cols, int64_t rows, uint8_t click_count);
-
-// Project Settings view in its own native window — twin of the Settings
-// surface above (On save / Targets / Grammars). Same host protocol:
-// _set_project_settings_detached once, poll _project_settings_active each tick,
-// drive with _layout_project_settings + _project_settings_key/mouse,
-// _project_settings_close for the native red-button close.
-void    tk_desktop_set_project_settings_detached(int64_t h, int64_t on);
-int32_t tk_desktop_project_settings_active(int64_t h);
-void    tk_desktop_project_settings_close(int64_t h);
-int64_t tk_desktop_layout_project_settings(int64_t h, int64_t cols, int64_t rows,
-                                           int64_t out_ptr, int64_t cap);
-int32_t tk_desktop_project_settings_key(int64_t h, uint32_t key, uint8_t mods,
-                                        int64_t cols, int64_t rows);
-int32_t tk_desktop_project_settings_mouse(int64_t h, int64_t x, int64_t y, uint8_t button,
-                                          uint8_t pressed, uint8_t motion, uint8_t mods,
-                                          int64_t cols, int64_t rows, uint8_t click_count);
 
 // Color theme: the host resolves cell color indices through the active
 // theme's 256-entry RGB palette. tk_theme_version bumps whenever the user

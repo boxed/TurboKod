@@ -14,6 +14,8 @@ from turbokod.desktop import (
 from turbokod.search_options import SearchOptions
 from turbokod.color_picker import ColorPickerDialog, MODE_RGB
 from turbokod.fill_dialog import FillDialog
+from turbokod.project_settings import grammar_options
+from turbokod.ui_grid import ui_act, ui_set
 from turbokod.git_changes import LineHistoryEntry
 from turbokod.diff import MergeRegion, REGION_CONFLICT, REGION_STABLE
 from turbokod.merge_view import CHOICE_DISK
@@ -553,20 +555,35 @@ def test_native_project_settings_edit_through_the_sections_and_sync() raises:
     d.open_project(root)
     _ = d.dispatch_action(PROJECT_SETTINGS, _SCREEN)
     assert_true(d.project_settings.active)
-    assert_true(d.project_settings_native)
-    ref ps = d.project_settings
-    ps.native_tg_add()
-    var i = len(ps.targets.targets) - 1
-    ps.native_tg_set(
-        i, String("app"), String("python3"), String("main.py --fast"),
-        String(""), String("A=1"), String(""),
-    )
-    ps.native_gr_add()
-    ps.native_gr_set(len(ps.grammars) - 1, String("tmpl"), String("html"))
-    ps.native_os_save(-1, String("python"), String("/bin/echo"), String("hi"), String(""))
-    var canvas = Canvas(_SCREEN.b.x, _SCREEN.b.y)
-    canvas.clear(default_attr())
-    d.paint(canvas, _SCREEN)   # the per-frame project-settings sync
+    assert_true(d.native_ui_surface_active())
+    assert_equal(d.ui_surface(), String("project_settings"))
+    var name = String("project_settings")
+    d.ui_apply(name, [ui_act(String("tg_add"))])
+    d.ui_apply(name, [
+        ui_set(String("tg_name"), String("app")),
+        ui_set(String("tg_program"), String("python3")),
+        ui_set(String("tg_args"), String("main.py --fast")),
+        ui_set(String("tg_env"), String("A=1")),
+    ])
+    d.ui_apply(name, [ui_act(String("gr_add")), ui_set(String("gr_ext"), String("tmpl"))])
+    var opts = grammar_options()
+    var html = 0
+    for k in range(len(opts)):
+        if opts[k] == String("html"):
+            html = k
+    d.ui_apply(name, [ui_set(String("gr_lang"), String(html))])
+    # Add opens the action editor on top; its Save lands in the library.
+    d.ui_apply(name, [ui_act(String("os_add"))])
+    assert_equal(len(d.ui_surfaces()), 2)
+    assert_equal(d.ui_surface(), String("action_editor"))
+    d.ui_apply(String("action_editor"), [
+        ui_set(String("program"), String("/bin/echo")),
+        ui_set(String("args"), String("hi")),
+        ui_act(String("save")),
+    ])
+    assert_equal(d.ui_surface(), String("project_settings"))
+    d.ui_apply(name, [ui_act(String("close"))])   # syncs, then closes
+    assert_false(d.project_settings.active)
     var found = False
     for k in range(len(d.targets.targets)):
         if d.targets.targets[k].name == String("app"):

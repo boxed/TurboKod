@@ -40,6 +40,7 @@ from turbokod.project_targets import (
     split_env_field, write_all_targets,
 )
 from turbokod.project_settings import ProjectSettings
+from turbokod.ui_grid import GridForm
 from turbokod.project_on_save import (
     load_project_on_save, write_project_on_save
 )
@@ -2242,26 +2243,24 @@ def test_project_settings_grammars_add_remove() raises:
         _temp_path(String("_ps_unit")), ProjectTargets(),
         List[GrammarOverride](), List[OnSaveAction](), List[OnSaveAction](),
     )
-    ps.section = 2  # Grammars
-    ps.focus = UInt8(17)  # _FOCUS_GR_ADD
-    _ = ps.handle_key(_key(KEY_ENTER))
+    ps.ui_set(String("section"), String("2"))  # Grammars
+    ps.ui_act(String("gr_add"))
     assert_equal(len(ps.grammars), 1)
     assert_true(ps.grammars_dirty)
-    ps.focus = UInt8(15)  # _FOCUS_GR_EXT
-    _ = ps.handle_key(_key(UInt32(ord("h"))))
-    _ = ps.handle_key(_key(UInt32(ord("t"))))
-    _ = ps.handle_key(_key(UInt32(ord("m"))))
-    _ = ps.handle_key(_key(UInt32(ord("l"))))
+    ps.ui_set(String("gr_ext"), String("html"))
     assert_equal(ps.grammars[0].ext, String("html"))
-    ps.focus = UInt8(18)  # _FOCUS_GR_REMOVE
-    _ = ps.handle_key(_key(KEY_ENTER))
+    assert_equal(len(ps.grammars_install_check), 0)   # not on a keystroke
+    ps.ui_set(String("gr_lang"), String("1"))
+    assert_true(len(ps.grammars[0].language_id.as_bytes()) > 0)
+    assert_equal(len(ps.grammars_install_check), 1)
+    ps.ui_act(String("gr_remove"))
     assert_equal(len(ps.grammars), 0)
 
 
 def test_project_settings_paint_smoke() raises:
-    """Paint each Project Settings section (in-grid + detached) onto a
-    canvas — exercises the layout / sub-painter math that the logic-only
-    tests skip. A crash or out-of-bounds write fails the test."""
+    """Paint each Project Settings tab through the grid projector, on a
+    roomy screen and a cramped one — exercises the layout math the
+    logic-only tests skip. A crash or out-of-bounds write fails the test."""
     var lib = List[OnSaveAction]()
     lib.append(OnSaveAction(
         String("python"), String("/usr/bin/black"),
@@ -2280,19 +2279,14 @@ def test_project_settings_paint_smoke() raises:
         _temp_path(String("_ps_unit")), src^, grammars^, lib^,
         List[OnSaveAction](),
     )
-    var screen = Rect(0, 0, 100, 40)
-    for sec in range(3):
-        ps.section = sec
-        var c = Canvas(100, 40)
-        c.clear(default_attr())
-        ps.paint(c, screen)
-    # Detached fills the whole surface (native window path).
-    ps.detached = True
-    for sec in range(3):
-        ps.section = sec
-        var c2 = Canvas(100, 40)
-        c2.clear(default_attr())
-        ps.paint(c2, screen)
+    for size in [(100, 40), (60, 16)]:
+        var screen = Rect(0, 0, size[0], size[1])
+        var grid = GridForm()
+        for sec in range(3):
+            ps.section = sec
+            var c = Canvas(size[0], size[1])
+            c.clear(default_attr())
+            grid.paint(ps.ui(), c, screen)
 
 
 def test_session_round_trip() raises:

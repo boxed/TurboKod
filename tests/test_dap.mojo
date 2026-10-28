@@ -1627,7 +1627,7 @@ def test_debug_pane_plain_click_clears_selection() raises:
 
 def test_targets_dialog_edit_and_submit() raises:
     """Project Settings Targets section: open with two targets, type into
-    the focused Name field — ``targets_value`` reflects the edit, raises
+    the Name field — ``targets_value`` reflects the edit, raises
     ``targets_dirty``, and keeps the active marker on the original row."""
     var src = ProjectTargets()
     var t1 = RunTarget()
@@ -1646,8 +1646,7 @@ def test_targets_dialog_edit_and_submit() raises:
     assert_equal(len(ps.targets.targets), 2)
     # ``selected_tg`` honors ``active`` — index 1 (beta).
     assert_equal(ps.selected_tg, 1)
-    ps.focus = UInt8(7)  # _FOCUS_TG_NAME
-    _ = ps.handle_key(_key(UInt32(ord("X"))))
+    ps.ui_set(String("tg_name"), String("betaX"))
     var rebuilt = ps.targets_value()
     assert_equal(rebuilt.targets[1].name, String("betaX"))
     assert_equal(rebuilt.targets[rebuilt.active].name, String("betaX"))
@@ -1655,8 +1654,8 @@ def test_targets_dialog_edit_and_submit() raises:
 
 
 def test_targets_dialog_env_field() raises:
-    """The Environment strip loads the target's ``env`` as a semicolon
-    line, and typing into it commits back as a split list."""
+    """The Environment field loads the target's ``env`` as a semicolon
+    line, and editing it commits back as a split list."""
     var src = ProjectTargets()
     var t1 = RunTarget()
     t1.name = String("srv")
@@ -1665,23 +1664,13 @@ def test_targets_dialog_env_field() raises:
     src.targets.append(t1^)
     src.active = 0
     var ps = _ps_open_targets(src^)
-    assert_equal(ps.env_tf.text, String("DEBUG=1"))
-    ps.focus = UInt8(19)  # _FOCUS_TG_ENV
-    var typed = String(";X=2")
-    var tb = typed.as_bytes()
-    for i in range(len(tb)):
-        _ = ps.handle_key(_key(UInt32(Int(tb[i]))))
+    assert_equal(ps.tg_env, String("DEBUG=1"))
+    ps.ui_set(String("tg_env"), String("DEBUG=1;X=2"))
     var rebuilt = ps.targets_value()
     assert_equal(len(rebuilt.targets[0].env), 2)
     assert_equal(rebuilt.targets[0].env[0], String("DEBUG=1"))
     assert_equal(rebuilt.targets[0].env[1], String("X=2"))
     assert_true(ps.targets_dirty)
-    # Tab from Working dir lands on Environment, then Debug language.
-    ps.focus = UInt8(10)  # _FOCUS_TG_CWD
-    _ = ps.handle_key(_key(KEY_TAB))
-    assert_equal(ps.focus, UInt8(19))
-    _ = ps.handle_key(_key(KEY_TAB))
-    assert_equal(ps.focus, UInt8(11))  # _FOCUS_TG_LANG
 
 
 def test_targets_dialog_add_and_remove() raises:
@@ -1694,12 +1683,11 @@ def test_targets_dialog_add_and_remove() raises:
     src.targets.append(t1^)
     src.active = 0
     var ps = _ps_open_targets(src^)
-    ps.focus = UInt8(12)  # _FOCUS_TG_ADD
-    _ = ps.handle_key(_key(KEY_ENTER))
+    ps.ui_act(String("tg_add"))
     assert_equal(len(ps.targets.targets), 2)
     assert_equal(ps.selected_tg, 1)
-    ps.focus = UInt8(13)  # _FOCUS_TG_REMOVE
-    _ = ps.handle_key(_key(KEY_ENTER))
+    assert_equal(ps.tg_name, String("new"))
+    ps.ui_act(String("tg_remove"))
     assert_equal(len(ps.targets.targets), 1)
     assert_equal(ps.targets.targets[0].name, String("only"))
 
@@ -1714,21 +1702,24 @@ def test_targets_dialog_save_button_submits() raises:
     src.active = 0
     var ps = _ps_open_targets(src^)
     assert_false(ps.targets_dirty)
-    ps.focus = UInt8(12)  # _FOCUS_TG_ADD
-    _ = ps.handle_key(_key(KEY_ENTER))
+    ps.ui_act(String("tg_add"))
     assert_true(ps.targets_dirty)
 
 
-def test_targets_dialog_esc_discards_edits() raises:
-    """Esc closes the Project Settings view."""
+def test_targets_dialog_debug_language_choice() raises:
+    """The Debug language choice lists ``(none)`` first and stores the
+    picked language id (``""`` for none) on the selected target."""
     var src = ProjectTargets()
     var t1 = RunTarget()
     t1.name = String("a")
     src.targets.append(t1^)
     src.active = 0
     var ps = _ps_open_targets(src^)
-    _ = ps.handle_key(_key(KEY_ESC))
-    assert_false(ps.active)
+    ps.ui_set(String("tg_lang"), String("1"))
+    var lang = ps.targets.targets[0].debug_language
+    assert_true(len(lang.as_bytes()) > 0)
+    ps.ui_set(String("tg_lang"), String("0"))
+    assert_equal(ps.targets.targets[0].debug_language, String(""))
 
 
 def test_dap_launch_arguments_env_object() raises:
