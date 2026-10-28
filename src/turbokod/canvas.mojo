@@ -571,6 +571,11 @@ def utf8_byte_to_cell(text: String) -> List[Int]:
             cell += TAB_WIDTH - (cell % TAB_WIDTH)
             i += 1
             continue
+        if b < 0x80:  # ASCII is one cell: skip decoding (long lines)
+            result.append(cell)
+            cell += 1
+            i += 1
+            continue
         var seq_len = utf8_codepoint_size(b)
         if i + seq_len > n:
             seq_len = n - i
@@ -597,6 +602,10 @@ def utf8_codepoint_count(text: String) -> Int:
         var b = Int(bytes[i])
         if b == 0x09:
             count += TAB_WIDTH - (count % TAB_WIDTH)
+            i += 1
+            continue
+        if b < 0x80:  # ASCII is one cell: skip decoding (long lines)
+            count += 1
             i += 1
             continue
         var seq_len = utf8_codepoint_size(b)
