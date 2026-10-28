@@ -421,6 +421,21 @@ def test_speller_add_project_word_persists_in_project_dir() raises:
     _ = external_call["rmdir", Int32]((dir + String("\0")).unsafe_ptr())
 
 
+def test_a_dictionary_that_cant_be_read_isnt_written_over() raises:
+    var dir = _temp_path(String("_proj_dict_unreadable"))
+    _rm_rf(dir)
+    _ensure_dir(dir + "/.turbokod")
+    var dict_path = project_dict_path(dir)
+    assert_true(write_file(dict_path, "alpha\nbeta\n"))
+    var s = Speller()
+    s.set_project(dir)
+    _ = external_call["chmod", Int32]((dict_path + "\0").unsafe_ptr(), UInt16(0))
+    assert_false(s.add_project_word(String("gamma")))
+    _ = external_call["chmod", Int32]((dict_path + "\0").unsafe_ptr(), UInt16(0o644))
+    assert_equal(read_file(dict_path), "alpha\nbeta\n")
+    _rm_rf(dir)
+
+
 def test_spell_menu_open_close_default_selection() raises:
     """Open positions selection on row 0 (user dict) regardless of
     whether the project row is enabled — that's the safe default

@@ -123,14 +123,26 @@ def is_symlink(path: String) -> Bool:
 
 
 def read_file(path: String) raises -> String:
-    """Read the entire file as a UTF-8 string. Empty string on error."""
+    """Read the entire file as a UTF-8 string. Empty string on error: use
+    ``read_existing_file`` where that must not look like an empty file."""
+    try:
+        return read_existing_file(path)
+    except:
+        return String("")
+
+
+def read_existing_file(path: String) raises -> String:
+    """Read the entire file as a UTF-8 string, raising when it can't be
+    opened or read. The editor needs the difference: a file it couldn't
+    read, taken as empty, would be saved over with what was typed into it.
+    """
     var c_path = path + String("\0")
     # stat before open: ``stat_file`` can raise, and doing it while we hold
     # an open descriptor would leak it on the way out.
     var info = stat_file(path)
     var fd = external_call["open", Int32](c_path.unsafe_ptr(), O_RDONLY)
     if fd < 0:
-        return String("")
+        raise Error(String("can't open ") + path)
     var size = Int(info.size)
     if size <= 0:
         _ = external_call["close", Int32](fd)
@@ -151,13 +163,13 @@ def read_file(path: String) raises -> String:
             break  # true EOF — file shrank since stat; return what we have
         if got < 0:
             # Read error, most likely a transient EINTR (signal mid-read).
-            # Retry a bounded number of times; a persistent error returns ""
-            # rather than a partial buffer that would masquerade as the whole
-            # file and become the save baseline.
+            # Retry a bounded number of times; a persistent error raises
+            # rather than returning a partial buffer that would masquerade
+            # as the whole file and become the save baseline.
             retries += 1
             if retries > 8:
                 _ = external_call["close", Int32](fd)
-                return String("")
+                raise Error(String("can't read ") + path)
             continue
         retries = 0
         total += got

@@ -61,7 +61,7 @@ from .diff import (
 from .file_io import (
     basename, delete_tree, find_git_project, join_path, list_directory,
     list_directory_typed, parent_path, project_absolute, project_relative,
-    read_file, rename_path, stat_file, write_file,
+    read_existing_file, read_file, rename_path, stat_file, write_file,
 )
 from .blame_popup import BlamePopup
 from .git_blame import blame_commit_message, compute_blame
@@ -5007,7 +5007,14 @@ struct Desktop(Movable):
         var workspace = self.workspace_rect(screen)
         var rect = self._default_window_rect(workspace)
         var was_max = self._frontmost_maximized()
-        var w = Window.from_file(basename(path), rect, path)
+        var w: Window
+        try:
+            w = Window.from_file(basename(path), rect, path)
+        except e:
+            self.status_bar.set_message(
+                String("Can't read ") + basename(path), Attr(RED, LIGHT_GRAY),
+            )
+            raise e^
         # Re-apply any saved view state for this file (scroll + cursor).
         # Survives across window close, project close, and process
         # restart via ``.turbokod/per_user/<username>/view_states.json``;
@@ -13356,7 +13363,7 @@ struct Desktop(Movable):
                     self.windows.windows[i].editor.text_snapshot(),
                 )
         try:
-            return Optional[String](read_file(path))
+            return Optional[String](read_existing_file(path))
         except:
             return Optional[String]()
 
@@ -14866,7 +14873,7 @@ struct Desktop(Movable):
             content = self.windows.windows[win].editor._disk_text()
         else:
             try:
-                content = read_file(src_path)
+                content = read_existing_file(src_path)
             except:
                 self.status_bar.set_message(
                     String("Duplicate failed"), Attr(RED, LIGHT_GRAY),

@@ -6,7 +6,7 @@ and ``scripts/run_tests.sh`` runs every suite.
 """
 
 from std.ffi import external_call
-from std.testing import TestSuite, assert_equal, assert_false, assert_true
+from std.testing import TestSuite, assert_equal, assert_false, assert_raises, assert_true
 from turbokod.canvas import Canvas
 from turbokod.claude_detect import CLAUDE_WAITING, CLAUDE_WORKING
 from turbokod.colors import default_attr
@@ -715,6 +715,19 @@ def test_desktop_open_file_uses_80_percent_size() raises:
     # First open lands at the workspace origin (no cascade yet).
     assert_equal(d.windows.windows[0].rect.a.x, ws.a.x)
     assert_equal(d.windows.windows[0].rect.a.y, ws.a.y)
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+def test_a_file_that_cant_be_read_isnt_opened() raises:
+    var path = _temp_path(String("_open_unreadable.txt"))
+    assert_true(write_file(path, String("hello\n")))
+    _ = external_call["chmod", Int32]((path + String("\0")).unsafe_ptr(), UInt16(0))
+    var d = Desktop()
+    with assert_raises():
+        d.open_file(path, _SCREEN)
+    assert_equal(len(d.windows.windows), 0)
+    assert_true(d.status_bar.message.startswith("Can't read "), d.status_bar.message)
+    assert_true(d.status_bar.message.endswith("_open_unreadable.txt"), d.status_bar.message)
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 

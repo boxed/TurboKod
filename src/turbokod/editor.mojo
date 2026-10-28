@@ -40,7 +40,7 @@ from .events import (
 )
 from .editorconfig import EditorConfig, load_editorconfig_for_path
 from .file_io import (
-    FileInfo, read_file, stat_file, write_file_stamped,
+    FileInfo, read_existing_file, read_file, stat_file, write_file_stamped,
 )
 from .git_blame import BlameLine
 from .git_changes import (
@@ -738,6 +738,10 @@ comptime EXT_CHANGE_CONFLICT = 3
 untouched; the structured merge regions are stashed in
 ``pending_merge_regions`` (``merge_pending`` set). The caller resolves
 them interactively via ``consume_merge_regions`` + a ``MergeView``."""
+
+comptime EXT_CHANGE_UNREADABLE = 4
+"""The file changed but can't be read. Nothing changes, and the stat isn't
+adopted, so the next check tries again."""
 
 
 @fieldwise_init
@@ -1807,7 +1811,9 @@ struct Editor(Copyable, Movable):
         # sees as a change and re-reads. The other order would record the
         # newer stamp against the older bytes and miss that write forever.
         var info = stat_file(path)
-        var text = read_file(path)
+        # A file that isn't there yet opens empty; one that's there but
+        # can't be read must not, or saving would write over it.
+        var text = read_existing_file(path) if info.ok else String("")
         # Keep a copy of the on-disk bytes as the merge base for any
         # later 3-way merge against an external write.
         var baseline = text
@@ -4070,8 +4076,11 @@ struct Editor(Copyable, Movable):
           regions are stashed in ``pending_merge_regions`` (with
           ``merge_pending`` set) for the host to resolve interactively
           via ``consume_merge_regions`` + a ``MergeView`` modal.
+        * ``EXT_CHANGE_UNREADABLE`` — the file changed but can't be read;
+          nothing changes, and the next check tries again.
 
-        The stat info is updated on every non-``NONE`` return so the next
+        The stat info is updated on every return but ``NONE`` and
+        ``UNREADABLE`` so the next
         tick won't re-trigger on the same write. ``disk_baseline`` is
         updated on reload and clean merge, but deliberately left at the
         previous content on a conflict so the stashed regions stay valid
@@ -4103,7 +4112,12 @@ struct Editor(Copyable, Movable):
         """Bring the buffer up to date with the on-disk file whose stat is
         ``info``: reload when clean, 3-way merge when dirty. Returns the
         ``EXT_CHANGE_*`` outcome; see ``check_for_external_change``."""
-        var text = read_file(self.file_path)
+        var text: String
+        try:
+            text = read_existing_file(self.file_path)
+        except:
+            # Taking it as empty would reload a clean buffer as empty.
+            return EXT_CHANGE_UNREADABLE
         if not self.dirty:
             # Clean reload: buffer matches the previous baseline, just
             # adopt the new bytes.
@@ -4333,7 +4347,9 @@ struct Editor(Copyable, Movable):
                 or info.mtime_nsec != self.file_mtime_nsec
             ):
                 var status = self._reconcile_with_disk(info)
-                if status == EXT_CHANGE_CONFLICT:
+                if status == EXT_CHANGE_CONFLICT \
+                        or status == EXT_CHANGE_UNREADABLE:
+                    # Writing would lose a change we couldn't read.
                     return False
                 if status == EXT_CHANGE_RELOADED:
                     # The buffer was clean: it now *is* the disk content,

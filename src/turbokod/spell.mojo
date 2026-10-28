@@ -18,8 +18,8 @@ from std.collections.list import List
 
 from .dictionary_install import user_dictionaries_root
 from .file_io import (
-    join_path, list_directory, make_parent_dirs, read_file, stat_file,
-    write_file,
+    join_path, list_directory, make_parent_dirs, read_existing_file,
+    read_file, stat_file, write_file,
 )
 from .posix import debug_log, user_config_path
 from .string_utils import (
@@ -81,10 +81,11 @@ def _append_to_file(path: String, line: String) -> Bool:
     var existing = String("")
     var info = stat_file(path)
     if info.ok:
+        # Taken as empty, every word already in it would be written over.
         try:
-            existing = read_file(path)
+            existing = read_existing_file(path)
         except:
-            existing = String("")
+            return False
     if len(existing.as_bytes()) > 0:
         var eb = existing.as_bytes()
         if eb[len(eb) - 1] != 0x0A:

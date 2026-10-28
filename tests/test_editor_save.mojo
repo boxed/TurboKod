@@ -2,8 +2,8 @@
 editor hasn't seen."""
 
 from std.ffi import external_call
-from std.testing import TestSuite, assert_equal, assert_false, assert_true
-from turbokod.editor import Editor
+from std.testing import TestSuite, assert_equal, assert_false, assert_raises, assert_true
+from turbokod.editor import EXT_CHANGE_RELOADED, EXT_CHANGE_UNREADABLE, Editor
 from turbokod.file_io import read_file, write_file
 from turbokod.lsp import capture_command
 from support import _temp_path, setup_test_env
@@ -146,6 +146,65 @@ def test_an_empty_file_stays_empty() raises:
     ed.dirty = True
     assert_true(ed.save())
     assert_equal(read_file(path), "")
+
+
+def _chmod(path: String, mode: Int):
+    _ = external_call["chmod", Int32]((path + "\0").unsafe_ptr(), UInt16(mode))
+
+
+def test_a_file_that_cant_be_read_isnt_opened_as_empty() raises:
+    # saving the empty buffer would replace what's in it
+    var path = _temp_path(String("_save_unreadable.txt"))
+    assert_true(write_file(path, "secret\n"))
+    _chmod(path, 0)
+    with assert_raises():
+        _ = Editor.from_file(path)
+    _chmod(path, 0o644)
+    assert_equal(read_file(path), "secret\n")
+
+
+def test_a_file_that_isnt_there_yet_opens_empty() raises:
+    var path = _temp_path(String("_save_new_file.txt"))
+    _ = capture_command(["rm", "-f", path])
+    var ed = Editor.from_file(path)
+    assert_equal(ed.buffer.line_count(), 1)
+    assert_equal(ed.buffer.line(0), "")
+    ed.buffer.insert(0, 0, "new")
+    ed.dirty = True
+    assert_true(ed.save())
+    assert_equal(read_file(path), "new")
+
+
+def test_a_change_that_cant_be_read_is_neither_loaded_nor_saved_over() raises:
+    var path = _temp_path(String("_save_change_unreadable.txt"))
+    assert_true(write_file(path, "a\nm\nz\n"))
+    var ed = Editor.from_file(path)
+    assert_true(write_file(path, "a\nm\nz\nb\n"))
+    _chmod(path, 0)
+    assert_equal(ed.check_for_external_change(), EXT_CHANGE_UNREADABLE)
+    assert_equal(ed.buffer.line(0), "a")
+    assert_false(ed.dirty)
+    ed.buffer.insert(0, 0, "x")
+    ed.dirty = True
+    assert_false(ed.save())
+    assert_true(ed.dirty)
+    _chmod(path, 0o644)
+    assert_equal(read_file(path), "a\nm\nz\nb\n")
+    # once it can be read, the change is merged in
+    assert_true(ed.save())
+    assert_equal(read_file(path), "xa\nm\nz\nb\n")
+
+
+def test_a_clean_buffer_reloads_once_the_change_can_be_read() raises:
+    var path = _temp_path(String("_reload_unreadable.txt"))
+    assert_true(write_file(path, "a\n"))
+    var ed = Editor.from_file(path)
+    assert_true(write_file(path, "a\nb\n"))
+    _chmod(path, 0)
+    assert_equal(ed.check_for_external_change(), EXT_CHANGE_UNREADABLE)
+    _chmod(path, 0o644)
+    assert_equal(ed.check_for_external_change(), EXT_CHANGE_RELOADED)
+    assert_equal(ed.buffer.line(1), "b")
 
 
 def main() raises:
