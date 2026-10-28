@@ -26,8 +26,10 @@ It is being built in phases:
    info) and buttons, and the answer sets the struct's fields before its
    own resolve, so validation (an unparsable Fill number) still keeps the
    dialog open and the sheet comes back.
-9. Still in-grid: Settings' content, the Spelling list, review mode, merge
-   view, history and the tool panels.
+9. **Settings** opens as a native window (see below). "Advanced Settings…"
+   hands over to the grid Settings window for the specialist sections.
+10. Still in-grid: the Spelling list, review mode, merge view, history and
+    the tool panels.
 
 ## How a dialog becomes native
 
@@ -136,6 +138,30 @@ the streaming `rg` runner. The host shows them as one sheet,
 Tab titles size to their text; only when they don't all fit do the widest
 shrink, down to a shared cap. A squeezed title drops its extension first,
 then the end of its stem (`project_api.py` → `project_api` → `project_…`).
+
+## Settings window
+
+With the macOS-style UI on, `APP_SETTINGS` opens the same `Settings` state
+as always, but sets `settings_native`. `tk_desktop_settings_active` then
+reports false, so the grid window stays shut, and the host shows
+`PrefsController` instead. It has three tabs:
+
+- **General:** saving, whitespace, wrapping, the open-document cap.
+- **Appearance:** the look toggle, theme, font and size, with the
+  `CodePreview` shared with the welcome window.
+- **Language Features:** the per-feature LSP switches.
+
+It never writes config itself:
+
+- **Edits** go through `tk_desktop_prefs_set` → `Settings.native_set_*`,
+  which set the same fields an in-grid edit sets and mark the struct
+  dirty. The Desktop's per-frame settings sync applies them, side effects
+  included: stale inlay hints cleared, cursors re-revealed on a wrap
+  change, the window cap enforced, LSP re-configured.
+- Paint re-mirrors those fields into the in-grid widgets, so **"Advanced
+  Settings…"** (`tk_desktop_prefs_advanced`, which clears
+  `settings_native`) shows the grid window with the same values and every
+  section: language servers, spelling dictionaries, projects, languages.
 
 ## File tree
 

@@ -704,6 +704,61 @@ struct Settings(Movable):
         for i in range(len(self._buttons)):
             self._buttons[i].button.reset_press()
 
+    # --- native host (macOS-style UI) ------------------------------------
+    #
+    # The native Settings window edits these same fields; marking ``dirty``
+    # hands them to the Desktop's per-frame sync, which applies each with
+    # its side effects exactly as for an in-grid edit. Paint re-mirrors the
+    # fields into the in-grid widgets, so "Advanced Settings…" shows them.
+
+    def native_set_bool(mut self, key: String, on: Bool):
+        if key == String("auto_save"): self.auto_save = on
+        elif key == String("trim_trailing_whitespace"): self.trim_trailing_whitespace = on
+        elif key == String("ensure_final_newline"): self.ensure_final_newline = on
+        elif key == String("compress_kwargs"): self.compress_kwargs = on
+        elif key == String("cursor_blink"): self.cursor_blink = on
+        elif key == String("ls_format_on_save"): self.ls_format_on_save = on
+        elif key == String("ls_signature_help"): self.ls_signature_help = on
+        elif key == String("ls_document_highlight"): self.ls_document_highlight = on
+        elif key == String("ls_document_links"): self.ls_document_links = on
+        elif key == String("ls_inlay_hints"): self.ls_inlay_hints = on
+        elif key == String("ls_code_lens"): self.ls_code_lens = on
+        elif key == String("ls_document_colors"): self.ls_document_colors = on
+        elif key == String("ls_linked_editing"): self.ls_linked_editing = on
+        elif key == String("ls_server_progress"): self.ls_server_progress = on
+        else:
+            return
+        self._sync_ls_checkboxes()
+        self.dirty = True
+
+    def native_set_int(mut self, key: String, value: Int):
+        """``wrap_mode``, ``font_size``, ``max_open_windows`` (0 = no cap)
+        and ``comma_threshold`` (-1 = off)."""
+        if key == String("wrap_mode"):
+            self.wrap_mode = value
+        elif key == String("font_size"):
+            self.font_size_choice = value
+        elif key == String("max_open_windows"):
+            self._mw_tf.set_text(String("") if value <= 0 else String(value))
+        elif key == String("comma_threshold"):
+            self._comma_tf.set_text(String("") if value < 0 else String(value))
+        else:
+            return
+        self.dirty = True
+
+    def native_set_str(mut self, key: String, var value: String):
+        """``theme`` (a theme name) and ``font`` (a Font-list label)."""
+        if key == String("theme"):
+            self.theme_choice = value^
+        elif key == String("font"):
+            self.font_choice = value^
+        else:
+            return
+        self.dirty = True
+
+    def font_names(self) -> List[String]:
+        return self._font_names.copy()
+
     def ack_dirty(mut self):
         """Host calls this after persisting the config to disk."""
         self.dirty = False

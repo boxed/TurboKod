@@ -1135,6 +1135,9 @@ struct Desktop(Movable):
     for and the host's find bar should show (one-shot, taken by the
     host); empty otherwise."""
     var native_find_seed: String
+    var settings_native: Bool
+    """The open Settings is shown as the host's native Settings window
+    (macOS-style UI) rather than the grid one."""
     var _last_goto_line: String      # last Go-to-line input, prefilled on reopen
     var _open_count: Int             # cascade counter for Desktop.open_file
     var _untitled_count: Int         # bumped per ``new_file`` for unique titles
@@ -1780,6 +1783,7 @@ struct Desktop(Movable):
         self._last_search_opts = SearchOptions()
         self.native_find_request = String("")
         self.native_find_seed = String("")
+        self.settings_native = False
         self._last_goto_line = String("")
         self._pending_new_window_project = Optional[String]()
         self._open_count = 0
@@ -9328,6 +9332,9 @@ struct Desktop(Movable):
                 self.config.lsp_server_progress,
                 self.config.project_dirs.copy(),
             )
+            # The macOS-style UI shows its own Settings window over the
+            # same state; "Advanced Settings…" switches back to this one.
+            self.settings_native = self.native_ui()
             return Optional[String]()
         if action == HELP_HOTKEYS:
             self._open_hotkeys_help(screen)

@@ -8,7 +8,8 @@ from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from turbokod.canvas import Canvas
 from turbokod.colors import default_attr
 from turbokod.desktop import (
-    Desktop, EDITOR_FIND, EDITOR_GOTO, EDITOR_REPLACE, VIEW_NATIVE_UI,
+    APP_SETTINGS, Desktop, EDITOR_FIND, EDITOR_GOTO, EDITOR_REPLACE,
+    VIEW_NATIVE_UI,
 )
 from turbokod.search_options import SearchOptions
 from turbokod.color_picker import ColorPickerDialog, MODE_RGB
@@ -396,6 +397,30 @@ def test_native_fill_answer_with_a_bad_number_stays_open() raises:
     f.open(2)
     f.native_answer(True, 1, String(""), String("x"), String("1"), False, 0)
     assert_false(f.submitted)   # the sheet comes back for a fix
+
+
+def test_native_settings_edit_the_same_state_and_sync_into_config() raises:
+    var d = _native_desktop(String("x\n"))
+    _ = d.dispatch_action(APP_SETTINGS, _SCREEN)
+    assert_true(d.settings.active)
+    assert_true(d.settings_native)
+    var was = d.config.trim_trailing_whitespace
+    d.settings.native_set_bool(String("trim_trailing_whitespace"), not was)
+    d.settings.native_set_str(String("theme"), String("Dracula"))
+    d.settings.native_set_int(String("max_open_windows"), 7)
+    var canvas = Canvas(_SCREEN.b.x, _SCREEN.b.y)
+    canvas.clear(default_attr())
+    d.paint(canvas, _SCREEN)   # the per-frame settings sync
+    assert_true(d.config.trim_trailing_whitespace != was)
+    assert_equal(d.config.theme, String("Dracula"))
+    assert_equal(d.config.max_open_windows, 7)
+
+
+def test_settings_stay_in_grid_without_native_ui() raises:
+    var d = Desktop()
+    _ = d.dispatch_action(APP_SETTINGS, _SCREEN)
+    assert_true(d.settings.active)
+    assert_false(d.settings_native)
 
 
 def main() raises:

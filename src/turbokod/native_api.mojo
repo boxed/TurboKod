@@ -779,7 +779,8 @@ def tk_desktop_settings_active(h: Int) abi("C") -> Int32:
     know without asking)."""
     if h == 0:
         return Int32(0)
-    if _desk(h)[].settings.active:
+    # The native Settings window (macOS-style UI) stands in for this one.
+    if _desk(h)[].settings.active and not _desk(h)[].settings_native:
         return Int32(1)
     return Int32(0)
 
@@ -1507,6 +1508,92 @@ def tk_desktop_tab_close(h: Int, idx: Int) abi("C"):
     if h == 0:
         return
     _desk(h)[].close_tab(idx)
+
+
+# --- macOS-style UI: Settings window -----------------------------------------
+
+
+@export
+def tk_desktop_prefs(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
+    """The open Settings for the native Settings window: every everyday
+    value plus the theme and font lists. 0 when it isn't open natively.
+    Same buffer contract as ``tk_desktop_native_dialog``."""
+    if h == 0:
+        return 0
+    ref d = _desk(h)[]
+    if not d.settings.active or not d.settings_native:
+        return 0
+    ref st = d.settings
+    var o = json_object()
+    o.put(String("native_ui"), json_bool(d.config.native_ui))
+    o.put(String("auto_save"), json_bool(st.auto_save))
+    o.put(String("wrap_mode"), json_int(st.wrap_mode))
+    o.put(String("trim_trailing_whitespace"), json_bool(st.trim_trailing_whitespace))
+    o.put(String("ensure_final_newline"), json_bool(st.ensure_final_newline))
+    o.put(String("compress_kwargs"), json_bool(st.compress_kwargs))
+    o.put(String("cursor_blink"), json_bool(st.cursor_blink))
+    o.put(String("max_open_windows"), json_int(d.config.max_open_windows))
+    o.put(String("comma_threshold"), json_int(d.config.smart_wrap_comma_threshold))
+    o.put(String("ls_format_on_save"), json_bool(st.ls_format_on_save))
+    o.put(String("ls_signature_help"), json_bool(st.ls_signature_help))
+    o.put(String("ls_document_highlight"), json_bool(st.ls_document_highlight))
+    o.put(String("ls_document_links"), json_bool(st.ls_document_links))
+    o.put(String("ls_inlay_hints"), json_bool(st.ls_inlay_hints))
+    o.put(String("ls_code_lens"), json_bool(st.ls_code_lens))
+    o.put(String("ls_document_colors"), json_bool(st.ls_document_colors))
+    o.put(String("ls_linked_editing"), json_bool(st.ls_linked_editing))
+    o.put(String("ls_server_progress"), json_bool(st.ls_server_progress))
+    o.put(String("theme"), json_str(st.theme_choice))
+    o.put(String("font"), json_str(d.font_label()))
+    o.put(String("font_size"), json_int(d.config.font_size))
+    o.put(String("themes"), _strings(theme_names()))
+    o.put(String("fonts"), _strings(st.font_names()))
+    return _write_out(encode_json(o), out_ptr, cap)
+
+
+@export
+def tk_desktop_prefs_set(h: Int, ptr: Int, n: Int) abi("C"):
+    """Change Settings values from the native window: a JSON object of
+    ``{key: value}`` — bools, ints or strings by key (see
+    ``Settings.native_set_*``)."""
+    if h == 0:
+        return
+    ref st = _desk(h)[].settings
+    if not st.active:
+        return
+    try:
+        var o = parse_json(_string_from(ptr, n))
+        for i in range(o.object_len()):
+            var key = o.object_key_at(i)
+            var v = o.object_value_at(i)
+            if v.is_bool():
+                st.native_set_bool(key, v.as_bool())
+            elif v.is_int():
+                st.native_set_int(key, v.as_int())
+            elif v.is_string():
+                st.native_set_str(key, v.as_str())
+    except:
+        pass
+
+
+@export
+def tk_desktop_prefs_close(h: Int) abi("C"):
+    """The native Settings window closed."""
+    if h == 0:
+        return
+    ref d = _desk(h)[]
+    if d.settings_native:
+        d.settings.close()
+        d.settings_native = False
+
+
+@export
+def tk_desktop_prefs_advanced(h: Int) abi("C"):
+    """"Advanced Settings…": hand the open Settings to the grid window,
+    which has every section (languages, servers, spelling, projects)."""
+    if h == 0:
+        return
+    _desk(h)[].settings_native = False
 
 
 # --- macOS-style UI: file tree ------------------------------------------------

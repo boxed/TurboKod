@@ -1891,6 +1891,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     var findBars: [ObjectIdentifier: (accessory: NSTitlebarAccessoryViewController, bar: FindBar)] = [:]
     // macOS-style UI: the native file tree laid over each window's tree cells.
     var trees: [ObjectIdentifier: FileTreeOverlay] = [:]
+    // macOS-style UI: the native Settings window (one per Desktop that opened it).
+    var prefsWindows: [ObjectIdentifier: PrefsController] = [:]
     var treeBuf = [UInt8](repeating: 0, count: 1 << 16)
     // Menu mirror: the snapshot from Mojo's menu_bar, hashed so we only
     // rebuild NSMenu when something actually changed (focus/visibility/
@@ -2289,6 +2291,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if self.pollGit(v) { changed = true }
                 if self.pollFindBar(v) { changed = true }
                 if self.pollTree(v) { changed = true }
+                if self.pollPrefs(v) { changed = true }
             }
             self.drainAttention()
             self.idleTicks = changed ? 0 : self.idleTicks &+ 1
@@ -2411,7 +2414,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     // TK_CAPTURE_WINDOW=1 grabs the whole window — titlebar,
                     // tab strip, and an attached sheet composited on top —
                     // instead of just the cell grid (macOS-style UI shots).
-                    if env["TK_WELCOME"] != nil, let w = self.welcome?.window {
+                    if let title = env["TK_CAPTURE_TITLE"],
+                       let w = NSApp.windows.first(where: { $0.title == title && $0.isVisible }) {
+                        captureWindowPNG(w, to: cap)
+                    } else if env["TK_WELCOME"] != nil, let w = self.welcome?.window {
                         captureWindowPNG(w, to: cap)
                     } else if env["TK_CAPTURE_WINDOW"] != nil, let w = self.windows.first {
                         captureWindowPNG(w, to: cap)
@@ -3469,6 +3475,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         gitSheets[ObjectIdentifier(v)] = nil
         findBars[ObjectIdentifier(v)] = nil
         trees[ObjectIdentifier(v)] = nil
+        if let p = prefsWindows.removeValue(forKey: ObjectIdentifier(v)) { p.dismiss() }
         // Close is instant; the language servers get their goodbye in the
         // background. `begin_close` terminates every child except the LSP
         // transports and sends each server `shutdown`, then we poll off the
@@ -4022,6 +4029,33 @@ extension AppController {
         guard let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_native_dialog(h, $0, $1) })
         else { return nil }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    /// Open, refresh or retire the native Settings window for `v`.
+    func pollPrefs(_ v: CellView) -> Bool {
+        let id = ObjectIdentifier(v)
+        let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_prefs(v.handle, $0, $1) })
+        if let pc = prefsWindows[id] {
+            guard let data = data else {
+                prefsWindows[id] = nil
+                pc.dismiss()
+                return true
+            }
+            pc.update(data)
+            return false
+        }
+        guard let data = data,
+              let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return false }
+        let pc = PrefsController(values: o, view: v) { [weak self, weak v] in
+            // Closed by the user: the core's Settings closes with it.
+            guard let v = v else { return }
+            self?.prefsWindows[ObjectIdentifier(v)] = nil
+            if v.handle != 0 { tk_desktop_prefs_close(v.handle) }
+        }
+        prefsWindows[id] = pc
+        pc.show()
+        return true
     }
 
     /// Lay (or lift) the native source list over the file tree's cells.
@@ -5383,6 +5417,13 @@ func captureWindowPNG(_ win: NSWindow, to path: String) {
     img.addRepresentation(rep)
     let out = NSImage(size: size)
     out.lockFocus()
+    // The titlebar material renders transparent offscreen: back it with the
+    // window color so the PNG isn't see-through (in a dark viewer the tab
+    // titles otherwise read black on black).
+    win.effectiveAppearance.performAsCurrentDrawingAppearance {
+        NSColor.windowBackgroundColor.setFill()
+        NSRect(origin: .zero, size: size).fill()
+    }
     img.draw(in: NSRect(origin: .zero, size: size))
     if let sheet = win.attachedSheet, let sv = sheet.contentView?.superview,
        let srep = sv.bitmapImageRepForCachingDisplay(in: sv.bounds) {
@@ -5422,8 +5463,8 @@ final class WelcomeController: NSObject, NSWindowDelegate {
     private var nativeUI: Bool
     private var finished = false
     private let palette: () -> [UInt32]
-    private let preview = NSTextView()
-    private static let sizes = [0, 11, 12, 13, 14, 15, 16, 18, 20, 24]
+    private let preview = CodePreview()
+    private static let sizes = CodePreview.sizes
 
     init(options o: [String: Any], palette: @escaping () -> [UInt32],
          apply: @escaping (String, Bool) -> Void) {
@@ -5494,11 +5535,6 @@ final class WelcomeController: NSObject, NSWindowDelegate {
             grid.bottomAnchor.constraint(equalTo: gridBox.bottomAnchor),
             grid.leadingAnchor.constraint(greaterThanOrEqualTo: gridBox.leadingAnchor),
         ])
-        preview.isEditable = false
-        preview.isSelectable = false
-        preview.textContainerInset = NSSize(width: 14, height: 12)
-        preview.wantsLayer = true
-        preview.layer?.cornerRadius = 8
         preview.heightAnchor.constraint(equalToConstant: 150).isActive = true
         let stack = NSStackView(views: [heading, sub, cards, gridBox, preview, start])
         stack.orientation = .vertical
@@ -5533,57 +5569,6 @@ final class WelcomeController: NSObject, NSWindowDelegate {
         renderPreview()
     }
 
-    // MARK: live preview
-
-    /// The chosen font at the chosen size, resolved the way the editor
-    /// resolves it: the two built-in rows are the bundled VGA fonts (16pt
-    /// default), anything else a system monospace family (13pt default).
-    private func previewFont() -> NSFont {
-        let name = fontPopup.titleOfSelectedItem ?? ""
-        let size = CGFloat(Self.sizes[max(0, sizePopup.indexOfSelectedItem)])
-        if let i = builtinFonts.firstIndex(of: name) {
-            return loadCellFont(size: size > 0 ? size : 16,
-                                file: i == 1 ? CLASSIC_FONT_FILE : BUNDLED_FONT_FILE)
-        }
-        let s = size > 0 ? size : 13
-        return NSFontManager.shared.font(withFamily: name, traits: [], weight: 5, size: s)
-            ?? .monospacedSystemFont(ofSize: s, weight: .regular)
-    }
-
-    /// A few lines of code painted through the theme's editor and syntax
-    /// slots (EDITOR_BG / EDITOR_FG = 16 / 17, SYN_* = 18…24).
-    private func renderPreview() {
-        let pal = palette()
-        func c(_ slot: Int) -> NSColor {
-            let v = Int(slot < pal.count ? pal[slot] : 0xFFFFFF)
-            return PickerController.rgb(v)
-        }
-        let (fg, kw, str, com, num, ident, deco, op) = (17, 18, 19, 20, 21, 22, 23, 24)
-        let lines: [[(String, Int)]] = [
-            [("# A taste of your editor", com)],
-            [("@", deco), ("dataclass", deco)],
-            [("class", kw), (" ", fg), ("Point", ident), (":", op)],
-            [("    x", fg), (":", op), (" ", fg), ("int", kw), (" = ", op), ("0", num)],
-            [("", fg)],
-            [("def", kw), (" ", fg), ("greet", ident), ("(", op), ("name", fg), (")", op), (":", op)],
-            [("    count", fg), (" = ", op), ("42", num)],
-            [("    return", kw), (" ", fg), ("f\"Hello, {name}!\"", str)],
-        ]
-        let font = previewFont()
-        let out = NSMutableAttributedString()
-        for (i, line) in lines.enumerated() {
-            for (text, slot) in line {
-                out.append(NSAttributedString(string: text, attributes: [
-                    .font: font, .foregroundColor: c(slot)]))
-            }
-            if i + 1 < lines.count {
-                out.append(NSAttributedString(string: "\n", attributes: [.font: font]))
-            }
-        }
-        preview.textStorage?.setAttributedString(out)
-        preview.backgroundColor = c(16)
-    }
-
     private func label(_ s: String) -> NSTextField {
         let l = NSTextField(labelWithString: s)
         l.textColor = .secondaryLabelColor
@@ -5598,6 +5583,15 @@ final class WelcomeController: NSObject, NSWindowDelegate {
     private func refreshCards() {
         modernCard.selected = nativeUI
         retroCard.selected = !nativeUI
+    }
+
+    // MARK: live preview
+
+    private func renderPreview() {
+        let size = Self.sizes[max(0, sizePopup.indexOfSelectedItem)]
+        preview.render(palette: palette(),
+                       font: CodePreview.font(label: fontPopup.titleOfSelectedItem ?? "",
+                                              size: size, builtins: builtinFonts))
     }
 
     /// A look comes with its natural theme and font; the popups stay
@@ -6959,5 +6953,317 @@ extension FileTreeOverlay: NSMenuDelegate {
         guard row >= 0, let v = cellView, let ev = NSApp.currentEvent else { return }
         let p = v.convert(ev.locationInWindow, from: nil)
         DispatchQueue.main.async { [weak self] in self?.act(3, row, p) }
+    }
+}
+
+
+// MARK: - code preview (welcome window, Settings ▸ Appearance)
+
+/// A few lines of code painted through a theme's editor and syntax slots
+/// (EDITOR_BG / EDITOR_FG = 16 / 17, SYN_* = 18…24) in a given font.
+final class CodePreview: NSTextView {
+    static let sizes = [0, 11, 12, 13, 14, 15, 16, 18, 20, 24]
+
+    convenience init() {
+        self.init(frame: NSRect(x: 0, y: 0, width: 400, height: 150))
+        isEditable = false
+        isSelectable = false
+        textContainerInset = NSSize(width: 14, height: 12)
+        wantsLayer = true
+        layer?.cornerRadius = 8
+    }
+
+    /// A Font-list label at a size, resolved the way the editor resolves
+    /// it: the built-in rows are the bundled VGA fonts (16pt default),
+    /// anything else a system monospace family (13pt default).
+    static func font(label: String, size: Int, builtins: [String]) -> NSFont {
+        if let i = builtins.firstIndex(of: label) {
+            return loadCellFont(size: CGFloat(size > 0 ? size : 16),
+                                file: i == 1 ? CLASSIC_FONT_FILE : BUNDLED_FONT_FILE)
+        }
+        let s = CGFloat(size > 0 ? size : 13)
+        return NSFontManager.shared.font(withFamily: label, traits: [], weight: 5, size: s)
+            ?? .monospacedSystemFont(ofSize: s, weight: .regular)
+    }
+
+    func render(palette pal: [UInt32], font: NSFont) {
+        func c(_ slot: Int) -> NSColor {
+            PickerController.rgb(Int(slot < pal.count ? pal[slot] : 0xFFFFFF))
+        }
+        let (fg, kw, str, com, num, ident, deco, op) = (17, 18, 19, 20, 21, 22, 23, 24)
+        let lines: [[(String, Int)]] = [
+            [("# A taste of your editor", com)],
+            [("@", deco), ("dataclass", deco)],
+            [("class", kw), (" ", fg), ("Point", ident), (":", op)],
+            [("    x", fg), (":", op), (" ", fg), ("int", kw), (" = ", op), ("0", num)],
+            [("", fg)],
+            [("def", kw), (" ", fg), ("greet", ident), ("(", op), ("name", fg), (")", op), (":", op)],
+            [("    count", fg), (" = ", op), ("42", num)],
+            [("    return", kw), (" ", fg), ("f\"Hello, {name}!\"", str)],
+        ]
+        let out = NSMutableAttributedString()
+        for (i, line) in lines.enumerated() {
+            for (text, slot) in line {
+                out.append(NSAttributedString(string: text, attributes: [
+                    .font: font, .foregroundColor: c(slot)]))
+            }
+            if i + 1 < lines.count {
+                out.append(NSAttributedString(string: "\n", attributes: [.font: font]))
+            }
+        }
+        textStorage?.setAttributedString(out)
+        backgroundColor = c(16)
+    }
+}
+
+
+// MARK: - macOS-style UI: Settings window
+//
+// The everyday settings as a native window — General, Appearance, Language
+// Features — over the same `Settings` state the grid window edits: each
+// change goes in through `tk_desktop_prefs_set` and the Desktop's per-frame
+// settings sync applies it, side effects and persistence included.
+// "Advanced Settings…" hands the open Settings to the grid window, which has
+// every section (language servers, spelling dictionaries, projects).
+
+final class PrefsController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
+    private let window: NSWindow
+    private weak var view: CellView?
+    private let onClose: () -> Void
+    private var closingForAdvanced = false
+    private var dismissed = false
+    private let preview = CodePreview()
+    private let themePopup = NSPopUpButton()
+    private let fontPopup = NSPopUpButton()
+    private let sizePopup = NSPopUpButton()
+    private var builtins: [String] = []
+    private var lastData = Data()
+
+    private static let lsp: [(String, String)] = [
+        ("ls_format_on_save", "Format on save"),
+        ("ls_signature_help", "Signature help while typing"),
+        ("ls_document_highlight", "Highlight occurrences of the symbol at the caret"),
+        ("ls_document_links", "Clickable links in documents"),
+        ("ls_inlay_hints", "Inlay hints (inline types and parameter names)"),
+        ("ls_code_lens", "Code lens (actionable annotations)"),
+        ("ls_document_colors", "Color swatches"),
+        ("ls_linked_editing", "Linked editing (rename matching tags together)"),
+        ("ls_server_progress", "Show language-server progress"),
+    ]
+
+    init(values o: [String: Any], view: CellView, onClose: @escaping () -> Void) {
+        self.view = view
+        self.onClose = onClose
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 520),
+                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        super.init()
+        window.title = "Settings"
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        build(o)
+    }
+
+    // MARK: building
+
+    private func set(_ key: String, _ value: Any) {
+        guard let h = view?.handle, h != 0,
+              let d = try? JSONSerialization.data(withJSONObject: [key: value]),
+              let json = String(data: d, encoding: .utf8) else { return }
+        withUTF8Arg(json) { p, l in tk_desktop_prefs_set(h, p, l) }
+    }
+
+    private func check(_ title: String, _ key: String, _ o: [String: Any]) -> NSButton {
+        let b = NSButton(checkboxWithTitle: title, target: self, action: #selector(checkChanged(_:)))
+        b.identifier = NSUserInterfaceItemIdentifier(key)
+        b.state = (o[key] as? Bool ?? false) ? .on : .off
+        return b
+    }
+
+    @objc private func checkChanged(_ b: NSButton) {
+        guard let key = b.identifier?.rawValue else { return }
+        set(key, b.state == .on)
+    }
+
+    private func popup(_ items: [String], _ selected: Int, _ key: String) -> NSPopUpButton {
+        let p = NSPopUpButton()
+        p.addItems(withTitles: items)
+        p.selectItem(at: selected)
+        p.identifier = NSUserInterfaceItemIdentifier(key)
+        p.target = self
+        p.action = #selector(popupChanged(_:))
+        return p
+    }
+
+    @objc private func popupChanged(_ p: NSPopUpButton) {
+        switch p.identifier?.rawValue ?? "" {
+        case "auto_save": set("auto_save", p.indexOfSelectedItem == 1)
+        case "wrap_mode": set("wrap_mode", p.indexOfSelectedItem)
+        default: break
+        }
+    }
+
+    private func numberField(_ value: Int, empty: Int, _ key: String) -> NSTextField {
+        let f = NSTextField(string: value == empty || value < 0 ? "" : "\(value)")
+        f.placeholderString = key == "max_open_windows" ? "No limit" : "Off"
+        f.identifier = NSUserInterfaceItemIdentifier(key)
+        f.delegate = self
+        f.widthAnchor.constraint(equalToConstant: 80).isActive = true
+        return f
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) {
+        guard let f = obj.object as? NSTextField, let key = f.identifier?.rawValue else { return }
+        let n = Int(f.stringValue.trimmingCharacters(in: .whitespaces))
+        set(key, n ?? (key == "max_open_windows" ? 0 : -1))
+    }
+
+    private func label(_ s: String) -> NSTextField {
+        let l = NSTextField(labelWithString: s)
+        l.alignment = .right
+        return l
+    }
+
+    private func pane(_ rows: [[NSView]]) -> NSView {
+        let grid = NSGridView(views: rows)
+        grid.rowSpacing = 10
+        grid.columnSpacing = 10
+        grid.column(at: 0).xPlacement = .trailing
+        grid.rowAlignment = .firstBaseline
+        grid.translatesAutoresizingMaskIntoConstraints = false
+        let v = NSView()
+        v.addSubview(grid)
+        NSLayoutConstraint.activate([
+            grid.topAnchor.constraint(equalTo: v.topAnchor, constant: 20),
+            grid.centerXAnchor.constraint(equalTo: v.centerXAnchor),
+            grid.leadingAnchor.constraint(greaterThanOrEqualTo: v.leadingAnchor, constant: 20),
+        ])
+        return v
+    }
+
+    private func build(_ o: [String: Any]) {
+        let empty = NSGridCell.emptyContentView
+        let general = pane([
+            [label("Saving:"), popup(["Manual", "Automatic"], (o["auto_save"] as? Bool ?? false) ? 1 : 0, "auto_save")],
+            [empty, check("Trim trailing whitespace on save", "trim_trailing_whitespace", o)],
+            [empty, check("Ensure a final newline on save", "ensure_final_newline", o)],
+            [label("Line wrapping:"), popup(["None", "Soft", "Smart"], o["wrap_mode"] as? Int ?? 0, "wrap_mode")],
+            [label("Smart wrap at commas:"), numberField(o["comma_threshold"] as? Int ?? -1, empty: -1, "comma_threshold")],
+            [label("Open documents:"), numberField(o["max_open_windows"] as? Int ?? 0, empty: 0, "max_open_windows")],
+            [empty, check("Compress keyword arguments", "compress_kwargs", o)],
+            [empty, check("Blinking caret", "cursor_blink", o)],
+        ])
+
+        builtins = Array((o["fonts"] as? [String] ?? []).prefix(2))
+        themePopup.addItems(withTitles: o["themes"] as? [String] ?? [])
+        themePopup.selectItem(withTitle: o["theme"] as? String ?? "")
+        fontPopup.addItems(withTitles: o["fonts"] as? [String] ?? [])
+        fontPopup.selectItem(withTitle: o["font"] as? String ?? "")
+        sizePopup.addItems(withTitles: CodePreview.sizes.map { $0 == 0 ? "Default" : "\($0) pt" })
+        sizePopup.selectItem(at: CodePreview.sizes.firstIndex(of: o["font_size"] as? Int ?? 0) ?? 0)
+        for p in [themePopup, fontPopup, sizePopup] {
+            p.target = self
+            p.action = #selector(appearanceChanged(_:))
+        }
+        let look = NSButton(checkboxWithTitle: "macOS-style UI (native tabs, sheets and pickers)",
+                            target: self, action: #selector(lookChanged(_:)))
+        look.state = (o["native_ui"] as? Bool ?? false) ? .on : .off
+        preview.heightAnchor.constraint(equalToConstant: 150).isActive = true
+        preview.widthAnchor.constraint(equalToConstant: 460).isActive = true
+        let appearance = pane([
+            [empty, look],
+            [label("Theme:"), themePopup],
+            [label("Font:"), fontPopup],
+            [label("Size:"), sizePopup],
+            [empty, preview],
+        ])
+        themePopup.widthAnchor.constraint(equalToConstant: 260).isActive = true
+        fontPopup.widthAnchor.constraint(equalToConstant: 260).isActive = true
+
+        var lspRows: [[NSView]] = []
+        for (key, title) in Self.lsp { lspRows.append([empty, check(title, key, o)]) }
+        let features = pane(lspRows)
+
+        let tabs = NSTabView()
+        for (title, v) in [("General", general), ("Appearance", appearance), ("Language Features", features)] {
+            let item = NSTabViewItem(identifier: title)
+            item.label = title
+            item.view = v
+            tabs.addTabViewItem(item)
+        }
+        let advanced = NSButton(title: "Advanced Settings…", target: self, action: #selector(advancedClicked))
+        advanced.toolTip = "Language servers, spelling dictionaries, projects and languages"
+        let content = NSView()
+        for v in [tabs, advanced] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(v)
+        }
+        NSLayoutConstraint.activate([
+            tabs.topAnchor.constraint(equalTo: content.topAnchor, constant: 12),
+            tabs.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            tabs.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
+            advanced.topAnchor.constraint(equalTo: tabs.bottomAnchor, constant: 10),
+            advanced.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 18),
+            advanced.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -14),
+        ])
+        window.contentView = content
+        renderPreview()
+    }
+
+    @objc private func appearanceChanged(_ p: NSPopUpButton) {
+        if p === themePopup { set("theme", themePopup.titleOfSelectedItem ?? "") }
+        if p === fontPopup { set("font", fontPopup.titleOfSelectedItem ?? "") }
+        if p === sizePopup { set("font_size", CodePreview.sizes[max(0, sizePopup.indexOfSelectedItem)]) }
+        renderPreview()
+    }
+
+    @objc private func lookChanged(_ b: NSButton) {
+        guard let v = view, v.handle != 0 else { return }
+        _ = withUTF8Arg("view:native_ui") { p, l in
+            tk_desktop_menu_invoke(v.handle, p, l, Int64(v.cols()), Int64(v.rows()))
+        }
+    }
+
+    private func renderPreview() {
+        var pal = [UInt32](repeating: 0, count: 256)
+        if let h = view?.handle, h != 0 {
+            pal.withUnsafeMutableBufferPointer { b in
+                _ = tk_theme_palette(h, Int64(Int(bitPattern: b.baseAddress)), Int64(b.count))
+            }
+        }
+        preview.render(palette: pal,
+                       font: CodePreview.font(label: fontPopup.titleOfSelectedItem ?? "",
+                                              size: CodePreview.sizes[max(0, sizePopup.indexOfSelectedItem)],
+                                              builtins: builtins))
+    }
+
+    /// The core applies a theme on its next frame; re-read the palette when
+    /// its state moves so the preview follows.
+    func update(_ data: Data) {
+        guard data != lastData else { return }
+        lastData = data
+        renderPreview()
+    }
+
+    func show() {
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    func dismiss() {
+        guard !dismissed else { return }
+        dismissed = true
+        closingForAdvanced = true   // the core already closed it
+        window.close()
+    }
+
+    @objc private func advancedClicked() {
+        guard let h = view?.handle, h != 0 else { return }
+        closingForAdvanced = true
+        tk_desktop_prefs_advanced(h)
+        window.close()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        if !closingForAdvanced { onClose() }
     }
 }

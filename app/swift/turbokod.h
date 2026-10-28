@@ -181,6 +181,14 @@ void tk_desktop_picker_close(int64_t h);
 // macOS-style UI file tree: _tree writes {x, y, w, h (cells), root, selected,
 // focused, entries: [[name, depth, is_dir, expanded, modified, path]]} (0 = not
 // shown natively); _tree_act: op 0 select, 1 toggle, 2 open, 3 menu at (x, y).
+// macOS-style UI Settings window over the same Settings state: _prefs writes the
+// values + theme / font lists (0 = not open natively), _prefs_set takes a JSON
+// {key: value}, _prefs_close closes it, _prefs_advanced hands over to the grid
+// Settings window (every section).
+int64_t tk_desktop_prefs(int64_t h, int64_t out_ptr, int64_t cap);
+void tk_desktop_prefs_set(int64_t h, int64_t ptr, int64_t len);
+void tk_desktop_prefs_close(int64_t h);
+void tk_desktop_prefs_advanced(int64_t h);
 int64_t tk_desktop_tree(int64_t h, int64_t cols, int64_t rows, int64_t out_ptr, int64_t cap);
 void tk_desktop_tree_act(int64_t h, int64_t op, int64_t idx, int64_t x, int64_t y);
 int64_t tk_desktop_take_find_request(int64_t h, int64_t out_ptr, int64_t cap);
