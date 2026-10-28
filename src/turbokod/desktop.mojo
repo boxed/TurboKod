@@ -1606,6 +1606,10 @@ struct Desktop(Movable):
     # written only when the encoding differs from this cached value —
     # same cadence and pattern as ``_last_session_json``.
     var _last_drafts_json: String
+    var _drafts_key: String
+    """What ``_last_drafts_json`` was made from, short of the text: when
+    it's the same, encoding every untitled buffer again (22 ms a paint
+    with an 8 MB one open) can't give anything new."""
     # Recently focused file-backed editor paths, most-recent first.
     # Mirrors ``config.recent_files`` (which is the persistent copy);
     # both are kept in sync by ``_track_recent_focus``. Stores canonical
@@ -1891,6 +1895,7 @@ struct Desktop(Movable):
         self._view_states = List[StoredViewState]()
         self._last_view_states_json = String("")
         self._last_drafts_json = String("")
+        self._drafts_key = String("")
         self._recent_files = List[String]()
         self._nav_stack = List[NavPoint]()
         self._nav_pos = -1
@@ -6466,6 +6471,7 @@ struct Desktop(Movable):
         # (below) means ``_save_drafts_if_changed`` bails on its project
         # guard and leaves this project's drafts.json intact for reopen.
         self._last_drafts_json = String("")
+        self._drafts_key = String("")
         # Close any open editor windows last — after self.project has
         # been cleared so _save_session_if_changed bails on its first
         # guard and leaves the on-disk session intact. Reopening the
@@ -7239,12 +7245,39 @@ struct Desktop(Movable):
         exactly that."""
         if not self.project or self._pending_restore:
             return
+        var key = self._drafts_key_now()
+        if key == self._drafts_key:
+            return
         var drafts = self._snapshot_drafts()
         var encoded = encode_drafts(drafts)
         if encoded == self._last_drafts_json:
+            self._drafts_key = key^
             return
         if save_drafts(self.project.value(), drafts):
             self._last_drafts_json = encoded
+            self._drafts_key = key^
+
+    def _drafts_key_now(self) -> String:
+        """Everything ``_snapshot_drafts`` reads, with each buffer's text
+        stood in for by its edit count."""
+        var key = String("")
+        for i in range(len(self.windows.windows)):
+            ref w = self.windows.windows[i]
+            if not w.is_editor or len(w.editor.file_path.as_bytes()) != 0 \
+                    or not w.editor.dirty:
+                continue
+            key += w.title + "\0" + String(w.editor.change_count) + " " \
+                + String(w.editor.buffer.line_count()) + " " \
+                + String(w.rect.a.x) + " " + String(w.rect.a.y) + " " \
+                + String(w.rect.b.x) + " " + String(w.rect.b.y) + " " \
+                + String(w.is_maximized) + " " \
+                + String(w._restore_rect.a.x) + " " + String(w._restore_rect.a.y) + " " \
+                + String(w._restore_rect.b.x) + " " + String(w._restore_rect.b.y) + " " \
+                + String(w.editor.selections[0].row) + " " \
+                + String(w.editor.selections[0].col) + " " \
+                + String(w.editor.scroll_x) + " " + String(w.editor.scroll_y) + " " \
+                + String(w._last_focus_ms) + "\n"
+        return key^
 
     def _restore_drafts(mut self, screen: Rect):
         """Recreate untitled editor windows from the per-user drafts

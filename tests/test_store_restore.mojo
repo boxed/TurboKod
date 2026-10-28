@@ -3,12 +3,13 @@ the on-disk copy is the only one there is until then."""
 
 from std.ffi import external_call
 from std.testing import TestSuite, assert_equal
+from turbokod.canvas import Canvas
 from turbokod.desktop import Desktop, HELP_HOTKEYS
 from turbokod.drafts_store import StoredDraft, load_drafts, save_drafts
-from turbokod.file_io import read_file, write_file
+from turbokod.file_io import read_file, stat_file, write_file
 from turbokod.lsp import capture_command
 from turbokod.string_utils import string_list
-from turbokod.events import Event
+from turbokod.events import Event, KEY_BACKSPACE
 from turbokod.geometry import Rect
 from support import _temp_path, setup_test_env
 
@@ -87,6 +88,35 @@ def test_only_typed_untitled_buffers_are_kept_as_drafts() raises:
     assert_equal(len(drafts), 1)
     assert_equal(drafts[0].content, String("x"))
     assert_equal(drafts[0].seq, 1)
+
+
+def test_drafts_are_written_when_a_buffer_changes_and_only_then() raises:
+    # Encoding every untitled buffer each paint cost 22 ms with an 8 MB one
+    var root = _temp_path(String("_drafts_key"))
+    var cleanup = String("rm -rf '") + root + String("'\0")
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
+    _ = external_call["mkdir", Int32]((root + String("\0")).unsafe_ptr(), Int32(0o755))
+    var screen = Rect(0, 0, 80, 30)
+    var d = Desktop()
+    d.open_project(root)
+    var canvas = Canvas(80, 30)
+    d.paint(canvas, screen)   # restores the project's drafts, if any
+    d.new_file(screen)
+    _ = d.handle_event(Event.key_event(UInt32(ord("a"))), screen)
+    _ = d.handle_event(Event.key_event(UInt32(ord("b"))), screen)
+    d._save_drafts_if_changed()
+    assert_equal(load_drafts(root)[0].content, String("ab"))
+    # nothing changed: not encoded or written again
+    var path = root + String("/.turbokod/per_user")
+    _ = external_call["system", Int32]((String("rm -f '") + path + String("'/*/drafts.json\0")).unsafe_ptr())
+    d._save_drafts_if_changed()
+    assert_equal(len(load_drafts(root)), 0)
+    # the same length, other text
+    _ = d.handle_event(Event.key_event(KEY_BACKSPACE), screen)
+    _ = d.handle_event(Event.key_event(UInt32(ord("c"))), screen)
+    d._save_drafts_if_changed()
+    assert_equal(load_drafts(root)[0].content, String("ac"))
+    _ = external_call["system", Int32](cleanup.unsafe_ptr())
 
 
 def test_per_user_state_stays_out_of_git() raises:

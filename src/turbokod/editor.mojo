@@ -1490,6 +1490,10 @@ struct Editor(Copyable, Movable):
     var test_rows: List[Int]
     var test_nodes: List[String]
     var _tests_dirty: Bool
+    var change_count: Int
+    """Bumped by every buffer edit (they all pass ``_mark_hl_dirty``): a
+    cheap "did the text change" for whoever watches it, without comparing
+    the text."""
     var pending_test_run: Optional[TestRunRequest]
     # pytest ``python_files`` globs for this buffer's project (e.g.
     # ``test_*.py``, ``*__tests.py``, ``helpers.py``). Pushed by the host
@@ -1960,6 +1964,7 @@ struct Editor(Copyable, Movable):
         self.test_rows = List[Int]()
         self.test_nodes = List[String]()
         self._tests_dirty = True
+        self.change_count = 0
         self.pending_test_run = Optional[TestRunRequest]()
         self.test_file_globs = List[String]()
         self.merge_pending = False
@@ -2176,6 +2181,7 @@ struct Editor(Copyable, Movable):
         self.test_rows = copy.test_rows.copy()
         self.test_nodes = copy.test_nodes.copy()
         self._tests_dirty = copy._tests_dirty
+        self.change_count = copy.change_count
         self.pending_test_run = copy.pending_test_run
         self.test_file_globs = copy.test_file_globs.copy()
         self.merge_pending = copy.merge_pending
@@ -2939,6 +2945,7 @@ struct Editor(Copyable, Movable):
         # to every edit handler.
         self._git_changes_dirty = True
         self._tests_dirty = True
+        self.change_count += 1
         self._lsp_dirty = True
         self._lsp_dirty_stamp_ms = monotonic_ms()
         # Speculatively keep per-row diagnostics aligned with the
