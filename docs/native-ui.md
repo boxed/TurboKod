@@ -17,8 +17,9 @@ It is being built in phases:
    below). LSP message requests are a native alert (`choice`).
 4. **Popup menus** as `NSMenu`, a **first-launch** look chooser, and the
    **git view** as a native sheet: all done (see below).
-5. Still in-grid: Find / Replace (in-file), Fill, Breakpoint, the color
-   picker, Settings' content, review mode, merge view, history.
+5. **In-file Find / Replace** is a find bar under the tabs (see below).
+6. Still in-grid: Fill, Breakpoint, the color picker, Settings' content,
+   review mode, merge view, history, the file tree and status bar.
 
 ## How a dialog becomes native
 
@@ -127,6 +128,21 @@ the streaming `rg` runner. The host shows them as one sheet,
 Tab titles size to their text; only when they don't all fit do the widest
 shrink, down to a shared cap. A squeezed title drops its extension first,
 then the end of its stem (`project_api.py` → `project_api` → `project_…`).
+
+## Find bar
+
+With the macOS-style UI on, Find and Replace don't open the modal prompt.
+`_open_find_prompt` / `_open_replace_prompt` leave a one-shot
+`native_find_request` (mode + seed), which the host takes with
+`tk_desktop_take_find_request` to show `FindBar`, a titlebar accessory
+under the tabs.
+
+- The editor stays live while the bar is open, which is the point.
+- Each button is one `tk_desktop_find` op through `Desktop.native_find`:
+  `next` / `prev` / `replace` / `replace_all` / `mark` / `unmark`. It reuses
+  `_find_step`, the Replace dialog's replace-under-caret and
+  `_mark_matching_lines`.
+- It stores `_last_search`, so F3 keeps repeating the needle.
 
 ## Git view
 

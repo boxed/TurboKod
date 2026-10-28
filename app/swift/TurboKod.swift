@@ -1813,6 +1813,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     var popups: [ObjectIdentifier: PopupMenu] = [:]
     // macOS-style UI: the native git sheet per window.
     var gitSheets: [ObjectIdentifier: GitController] = [:]
+    // macOS-style UI: each window's find bar (a titlebar accessory).
+    var findBars: [ObjectIdentifier: (accessory: NSTitlebarAccessoryViewController, bar: FindBar)] = [:]
     // Menu mirror: the snapshot from Mojo's menu_bar, hashed so we only
     // rebuild NSMenu when something actually changed (focus/visibility/
     // checkmark/edit-extras flips). `menuTracking` is set while AppKit is
@@ -2208,6 +2210,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if self.pollPicker(v) { changed = true }
                 if self.pollPopup(v) { changed = true }
                 if self.pollGit(v) { changed = true }
+                if self.pollFindBar(v) { changed = true }
             }
             self.drainAttention()
             self.idleTicks = changed ? 0 : self.idleTicks &+ 1
@@ -3386,6 +3389,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         pickers[ObjectIdentifier(v)] = nil
         popups[ObjectIdentifier(v)] = nil
         gitSheets[ObjectIdentifier(v)] = nil
+        findBars[ObjectIdentifier(v)] = nil
         // Close is instant; the language servers get their goodbye in the
         // background. `begin_close` terminates every child except the LSP
         // transports and sends each server `shutdown`, then we poll off the
@@ -3939,6 +3943,46 @@ extension AppController {
         guard let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_native_dialog(h, $0, $1) })
         else { return nil }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    /// Show the find bar when the core asked for Find / Replace; hide it
+    /// when the macOS-style UI is switched off.
+    func pollFindBar(_ v: CellView) -> Bool {
+        let id = ObjectIdentifier(v)
+        if tk_desktop_native_ui(v.handle) == 0 {
+            if let fb = findBars[id], !fb.accessory.isHidden {
+                fb.accessory.isHidden = true
+                return true
+            }
+            return false
+        }
+        guard let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_take_find_request(v.handle, $0, $1) }),
+              let req = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let win = v.window
+        else { return false }
+        if findBars[id] == nil {
+            let bar = FindBar(frame: NSRect(x: 0, y: 0, width: 600, height: 34))
+            let acc = NSTitlebarAccessoryViewController()
+            acc.layoutAttribute = .bottom
+            acc.view = bar
+            bar.onOp = { [weak v] json in
+                guard let v = v, v.handle != 0 else { return }
+                withUTF8Arg(json) { p, l in tk_desktop_find(v.handle, p, l) }
+                v.invalidateFrame()
+                v.needsDisplay = true
+            }
+            bar.onClose = { [weak v] in
+                guard let v = v else { return }
+                if let fb = self.findBars[ObjectIdentifier(v)] { fb.accessory.isHidden = true }
+                v.window?.makeFirstResponder(v)
+            }
+            win.addTitlebarAccessoryViewController(acc)
+            findBars[id] = (acc, bar)
+        }
+        guard let fb = findBars[id] else { return false }
+        fb.accessory.isHidden = false
+        fb.bar.show(req)
+        return true
     }
 
     /// Show, refresh or retract `v`'s native git sheet.
@@ -6371,4 +6415,122 @@ final class GitRowCell: NSTableCellView {
     }
 
     @objc private func checked() { onCheck?() }
+}
+
+
+// MARK: - macOS-style UI: find bar
+//
+// In-file Find / Replace as a bar under the tabs (Safari / Xcode style)
+// rather than a modal: the editor stays live while stepping through matches.
+// Every button is one `tk_desktop_find` op on the focused editor, through
+// the same find / replace / mark code the in-grid prompt uses.
+
+final class FindBar: NSView, NSSearchFieldDelegate {
+    var onOp: ((String) -> Void)?
+    var onClose: (() -> Void)?
+    private let find = NSSearchField()
+    private let replace = NSTextField()
+    private var toggles: [String: NSButton] = [:]
+    private var replaceViews: [NSView] = []
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        find.placeholderString = "Find"
+        find.delegate = self
+        find.sendsSearchStringImmediately = false
+        replace.placeholderString = "Replace with"
+        replace.delegate = self
+        replace.usesSingleLineMode = true
+        func button(_ title: String, symbol: String? = nil, _ op: String) -> NSButton {
+            let b = NSButton(title: title, target: self, action: #selector(opClicked(_:)))
+            if let s = symbol {
+                b.image = NSImage(systemSymbolName: s, accessibilityDescription: title)
+                b.imagePosition = .imageOnly
+            }
+            b.bezelStyle = .texturedRounded
+            b.identifier = NSUserInterfaceItemIdentifier(op)
+            b.toolTip = title
+            return b
+        }
+        var views: [NSView] = [find]
+        for (key, label, tip) in [("case", "Aa", "Match case"), ("word", "W", "Whole word"),
+                                  ("regex", ".*", "Regular expression")] {
+            let b = NSButton(title: label, target: nil, action: nil)
+            b.setButtonType(.pushOnPushOff)
+            b.bezelStyle = .texturedRounded
+            b.toolTip = tip
+            toggles[key] = b
+            views.append(b)
+        }
+        views.append(button("Previous", symbol: "chevron.left", "prev"))
+        views.append(button("Next", symbol: "chevron.right", "next"))
+        views.append(button("Mark All", "mark"))
+        let rep = button("Replace", "replace")
+        let all = button("Replace All", "replace_all")
+        replaceViews = [replace, rep, all]
+        views += [replace, rep, all]
+        let done = NSButton(title: "Done", target: self, action: #selector(closeClicked))
+        done.bezelStyle = .texturedRounded
+        views.append(done)
+        let stack = NSStackView(views: views)
+        stack.spacing = 6
+        stack.edgeInsets = NSEdgeInsets(top: 4, left: 10, bottom: 4, right: 10)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            find.widthAnchor.constraint(equalToConstant: 260),
+            replace.widthAnchor.constraint(equalToConstant: 200),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    /// Open (or re-focus) for a core request: seed, toggles, and whether
+    /// the Replace half shows.
+    func show(_ req: [String: Any]) {
+        let seed = req["seed"] as? String ?? ""
+        if !seed.isEmpty { find.stringValue = seed }
+        for (k, b) in toggles { b.state = (req[k] as? Bool ?? false) ? .on : .off }
+        let replacing = req["mode"] as? String == "replace"
+        for v in replaceViews { v.isHidden = !replacing }
+        window?.makeFirstResponder(find)
+        find.currentEditor()?.selectAll(nil)
+    }
+
+    private func send(_ op: String) {
+        let o: [String: Any] = [
+            "op": op, "find": find.stringValue, "replace": replace.stringValue,
+            "case": toggles["case"]?.state == .on, "word": toggles["word"]?.state == .on,
+            "regex": toggles["regex"]?.state == .on,
+        ]
+        guard let d = try? JSONSerialization.data(withJSONObject: o),
+              let json = String(data: d, encoding: .utf8) else { return }
+        onOp?(json)
+    }
+
+    @objc private func opClicked(_ b: NSButton) {
+        guard let op = b.identifier?.rawValue else { return }
+        send(op)
+    }
+
+    @objc private func closeClicked() { onClose?() }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
+        switch sel {
+        case #selector(NSResponder.insertNewline(_:)):
+            let shift = NSApp.currentEvent?.modifierFlags.contains(.shift) == true
+            send(control === replace ? "replace" : shift ? "prev" : "next")
+            return true
+        case #selector(NSResponder.cancelOperation(_:)):
+            onClose?()
+            return true
+        default:
+            return false
+        }
+    }
 }

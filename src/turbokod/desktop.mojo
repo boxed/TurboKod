@@ -1130,6 +1130,11 @@ struct Desktop(Movable):
     unsaved-changes prompt of an untitled buffer); -1 when none."""
     var _last_search: String         # last Find needle, repeated by Ctrl+G
     var _last_search_opts: SearchOptions   # last Find toggle state (Cc/W/.*)
+    var native_find_request: String
+    """macOS-style UI: ``find`` / ``replace`` when Find or Replace was asked
+    for and the host's find bar should show (one-shot, taken by the
+    host); empty otherwise."""
+    var native_find_seed: String
     var _last_goto_line: String      # last Go-to-line input, prefilled on reopen
     var _open_count: Int             # cascade counter for Desktop.open_file
     var _untitled_count: Int         # bumped per ``new_file`` for unique titles
@@ -1773,6 +1778,8 @@ struct Desktop(Movable):
         self._close_after_save_as_idx = -1
         self._last_search = String("")
         self._last_search_opts = SearchOptions()
+        self.native_find_request = String("")
+        self.native_find_seed = String("")
         self._last_goto_line = String("")
         self._pending_new_window_project = Optional[String]()
         self._open_count = 0
@@ -13058,6 +13065,9 @@ struct Desktop(Movable):
 
         Restores the Cc / W / .* toggles to whatever the user had on
         for the previous Find so the flags persist across opens."""
+        if self.native_ui():
+            self._request_native_find(String("find"))
+            return
         self._pending_action = EDITOR_FIND
         # Prefer the editor's current selection ("find this thing I just
         # highlighted"); when there's nothing selected, fall back to the
@@ -13078,6 +13088,9 @@ struct Desktop(Movable):
         Find and Replace — seeded from the editor's selection the same
         way ``_open_find_prompt`` does. Submitting Enter from either
         row runs the replace in one shot."""
+        if self.native_ui():
+            self._request_native_find(String("replace"))
+            return
         self._pending_action = _PA_REPLACE_DO
         self.prompt.open_replace(
             String("Find: "), String("Replace: "),
@@ -13085,6 +13098,48 @@ struct Desktop(Movable):
             select_prefill=True, show_options=True,
         )
         self.prompt.set_search_options(self._last_search_opts)
+
+    def _request_native_find(mut self, mode: String):
+        """Ask the host to show its find bar, seeded like the in-grid
+        prompt: the selection, else the previous needle."""
+        var seed = self._selection_seed_for_search()
+        if len(seed.as_bytes()) == 0:
+            seed = self._last_search
+        self.native_find_request = mode
+        self.native_find_seed = seed^
+
+    def native_find(
+        mut self, op: String, find: String, replacement: String,
+        opts: SearchOptions,
+    ):
+        """One of the native find bar's buttons on the focused editor:
+        ``next`` / ``prev`` / ``replace`` (the match under the caret, then
+        on) / ``replace_all`` / ``mark`` / ``unmark``. Remembers the needle
+        so F3 repeats it, like the in-grid prompt."""
+        if len(find.as_bytes()) == 0:
+            return
+        self._last_search = find
+        self._last_search_opts = opts
+        var idx = self._focused_editor_idx()
+        if idx < 0:
+            return
+        if op == String("prev"):
+            self._find_step(idx, find, opts, False)
+        elif op == String("replace"):
+            if self.windows.windows[idx].editor.selection_is_search_match(
+                find, opts,
+            ):
+                self.windows.windows[idx].editor.clear_extra_carets()
+                self.windows.windows[idx].editor.paste_text(replacement)
+            self._find_step(idx, find, opts, True)
+        elif op == String("replace_all"):
+            _ = self.windows.windows[idx].editor.replace_all(
+                find, replacement, opts,
+            )
+        elif op == String("mark") or op == String("unmark"):
+            self._mark_matching_lines(idx, find, opts, op == String("mark"))
+        else:
+            self._find_step(idx, find, opts, True)
 
     def _find_step(
         mut self, idx: Int, needle: String, opts: SearchOptions, forward: Bool,

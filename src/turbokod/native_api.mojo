@@ -46,6 +46,7 @@ from turbokod.string_utils import byte_slice
 from turbokod.config import classic_font_label, default_font_label
 from turbokod.json import json_get_bool, json_get_int, json_get_string, parse_json
 from turbokod.theme import theme_names
+from turbokod.search_options import SearchOptions
 from turbokod.git_changes import format_age
 from turbokod.posix import wall_clock_ms
 
@@ -1414,6 +1415,53 @@ def tk_desktop_tab_close(h: Int, idx: Int) abi("C"):
     if h == 0:
         return
     _desk(h)[].close_tab(idx)
+
+
+# --- macOS-style UI: find bar -----------------------------------------------
+
+
+@export
+def tk_desktop_take_find_request(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
+    """One-shot: Find / Replace was asked for, so show the find bar —
+    ``{mode: find|replace, seed, case, word, regex}``. 0 when nothing is
+    pending; the request is kept until it fits the buffer."""
+    if h == 0:
+        return 0
+    ref d = _desk(h)[]
+    if len(d.native_find_request.as_bytes()) == 0:
+        return 0
+    var o = json_object()
+    o.put(String("mode"), json_str(d.native_find_request))
+    o.put(String("seed"), json_str(d.native_find_seed))
+    o.put(String("case"), json_bool(d._last_search_opts.case_sensitive))
+    o.put(String("word"), json_bool(d._last_search_opts.whole_word))
+    o.put(String("regex"), json_bool(d._last_search_opts.regex))
+    var n = _write_out(encode_json(o), out_ptr, cap)
+    if n > 0 and n <= cap:
+        d.native_find_request = String("")
+    return n
+
+
+@export
+def tk_desktop_find(h: Int, ptr: Int, n: Int) abi("C"):
+    """Run a find bar button: ``{op, find, replace, case, word, regex}``."""
+    if h == 0:
+        return
+    try:
+        var o = parse_json(_string_from(ptr, n))
+        var opts = SearchOptions(
+            json_get_bool(o, String("case"), False),
+            json_get_bool(o, String("word"), False),
+            json_get_bool(o, String("regex"), False),
+        )
+        _desk(h)[].native_find(
+            json_get_string(o, String("op")),
+            json_get_string(o, String("find")),
+            json_get_string(o, String("replace")),
+            opts,
+        )
+    except:
+        pass
 
 
 # --- macOS-style UI: popup menus --------------------------------------------

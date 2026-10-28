@@ -8,8 +8,9 @@ from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from turbokod.canvas import Canvas
 from turbokod.colors import default_attr
 from turbokod.desktop import (
-    Desktop, EDITOR_FIND, EDITOR_GOTO, VIEW_NATIVE_UI,
+    Desktop, EDITOR_FIND, EDITOR_GOTO, EDITOR_REPLACE, VIEW_NATIVE_UI,
 )
+from turbokod.search_options import SearchOptions
 from turbokod.events import Event, KEY_ENTER
 from turbokod.geometry import Point, Rect
 from turbokod.window import Window
@@ -84,12 +85,11 @@ def test_native_confirm_ignores_grid_keys_and_takes_the_host_answer() raises:
     assert_false(d.install_runner.is_active())
 
 
-def test_find_stays_in_grid_but_go_to_line_is_native() raises:
+def test_find_goes_to_the_bar_and_go_to_line_is_a_native_prompt() raises:
     var d = _native_desktop(String("a\nb\nc\nd\n"))
     _ = d.dispatch_action(EDITOR_FIND, _SCREEN)
-    assert_true(d.prompt.active)
-    assert_false(d.native_dialog_active())
-    d.prompt.close()
+    assert_false(d.prompt.active)
+    assert_equal(d.native_find_request, String("find"))
     _ = d.dispatch_action(EDITOR_GOTO, _SCREEN)
     assert_true(d.native_dialog_active())
     assert_equal(d.native_prompt_action(), String("Go"))
@@ -320,6 +320,27 @@ def test_native_git_overlay_cancel_and_status_dismiss() raises:
     assert_equal(d.local_changes.native_overlay_kind(), String(""))
     assert_equal(len(d.local_changes.files), 1)
     d.local_changes.release()
+
+
+def test_native_find_asks_for_the_bar_instead_of_the_prompt() raises:
+    var d = _native_desktop(String("foo\nbar\nfoo\n"))
+    _ = d.dispatch_action(EDITOR_REPLACE, _SCREEN)
+    assert_false(d.prompt.active)
+    assert_equal(d.native_find_request, String("replace"))
+
+
+def test_native_find_bar_steps_replaces_and_remembers_the_needle() raises:
+    var d = _native_desktop(String("foo\nbar\nfoo\n"))
+    var opts = SearchOptions()
+    d.native_find(String("next"), String("foo"), String(""), opts)
+    assert_equal(d._last_search, String("foo"))   # F3 repeats it
+    var first = d.windows.windows[0].editor.primary_caret().row
+    d.native_find(String("next"), String("foo"), String(""), opts)
+    assert_true(d.windows.windows[0].editor.primary_caret().row != first)
+    d.native_find(String("replace_all"), String("foo"), String("baz"), opts)
+    var text = d.windows.windows[0].editor.text_snapshot()
+    assert_false(String("foo") in text)
+    assert_true(String("baz") in text)
 
 
 def main() raises:

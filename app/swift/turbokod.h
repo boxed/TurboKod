@@ -173,6 +173,11 @@ void tk_desktop_picker_close(int64_t h);
 // macOS-style UI popups as NSMenu: _popup writes {kind, x, y, items: [{label,
 // code, enabled}]} (anchor in cells; 0 = none up), _popup_choose answers it
 // (code 0 = dismissed) and returns a host action code.
+// macOS-style UI find bar: _take_find_request is a one-shot {mode, seed, case,
+// word, regex} when Find / Replace was asked for; tk_desktop_find runs a bar
+// button {op: next|prev|replace|replace_all|mark|unmark, find, replace, …}.
+int64_t tk_desktop_take_find_request(int64_t h, int64_t out_ptr, int64_t cap);
+void tk_desktop_find(int64_t h, int64_t ptr, int64_t len);
 int64_t tk_desktop_popup(int64_t h, int64_t out_ptr, int64_t cap);
 int32_t tk_desktop_popup_choose(int64_t h, int64_t code);
 // macOS-style UI git view (a native sheet over LocalChanges). _git writes the
