@@ -5039,11 +5039,9 @@ struct Desktop(Movable):
                 cr = 0
             if line_count > 0 and cr >= line_count:
                 cr = line_count - 1
-            var cc = self._view_states[vs_idx].cursor_col
-            w.editor.selections[0].row = cr
-            w.editor.selections[0].anchor_row = cr
-            w.editor.selections[0].col = cc
-            w.editor.selections[0].anchor_col = cc
+            # ``move_to`` also keeps the column inside the line and off
+            # the middle of a character: the file may have changed since.
+            w.editor.move_to(cr, self._view_states[vs_idx].cursor_col)
             w.editor.scroll_x = self._view_states[vs_idx].scroll_x
             w.editor.scroll_y = self._view_states[vs_idx].scroll_y
             # Opening the file is the "use" that makes this entry recent:
@@ -7201,10 +7199,7 @@ struct Desktop(Movable):
                 cr = 0
             if line_count > 0 and cr >= line_count:
                 cr = line_count - 1
-            w.editor.selections[0].row = cr
-            w.editor.selections[0].anchor_row = cr
-            w.editor.selections[0].col = d.cursor_col
-            w.editor.selections[0].anchor_col = d.cursor_col
+            w.editor.move_to(cr, d.cursor_col)
             w.editor.scroll_x = d.scroll_x
             w.editor.scroll_y = d.scroll_y
             self.windows.add(w^)
@@ -16455,10 +16450,8 @@ def _apply_session_view(mut editor: Editor, sw: SessionWindow):
     var cr = max(0, sw.cursor_row)
     if line_count > 0 and cr >= line_count:
         cr = line_count - 1
-    editor.selections[0].row = cr
-    editor.selections[0].anchor_row = cr
-    editor.selections[0].col = sw.cursor_col
-    editor.selections[0].anchor_col = sw.cursor_col
+    # ``move_to`` keeps the column on a character of the line as it is now.
+    editor.move_to(cr, sw.cursor_col)
     editor.scroll_x = sw.scroll_x
     editor.scroll_y = sw.scroll_y
 

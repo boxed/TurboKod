@@ -2852,7 +2852,8 @@ def test_desktop_restores_multiple_windows_at_distinct_positions() raises:
     assert_equal(d.windows.windows[bar_idx].rect.b.x, 75)
     assert_equal(d.windows.windows[bar_idx].rect.b.y, 25)
     assert_equal(d.windows.windows[bar_idx].editor.selections[0].row, 1)
-    assert_equal(d.windows.windows[bar_idx].editor.selections[0].col, 2)
+    # column 2 is past the end of "y": kept to the line
+    assert_equal(d.windows.windows[bar_idx].editor.selections[0].col, 1)
     assert_equal(d.windows.focused, bar_idx)
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
 
