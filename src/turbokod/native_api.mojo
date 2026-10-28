@@ -1510,6 +1510,79 @@ def tk_desktop_tab_close(h: Int, idx: Int) abi("C"):
     _desk(h)[].close_tab(idx)
 
 
+# --- macOS-style UI: Spelling ------------------------------------------------
+
+
+@export
+def tk_desktop_spelling(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
+    """Project ▸ Spelling for the native sheet: ``{scanning, progress,
+    status, has_project, version, count}``. 0 when it isn't up natively.
+    ``version`` moves whenever the rows (or their order) change."""
+    if h == 0:
+        return 0
+    ref d = _desk(h)[]
+    if not d.native_spelling_active():
+        return 0
+    ref sd = d.spelling_dialog
+    var o = json_object()
+    o.put(String("scanning"), json_bool(sd.scan.active))
+    o.put(String("progress"), json_int(Int(sd.scan.progress() * 1000)))
+    var status: String
+    if sd.scan.active:
+        status = String("Scanning ") + String(sd.scan.files_done) \
+            + String(" of ") + String(len(sd.scan.files)) + String(" files…")
+    else:
+        status = String(sd.scan.files_checked) + String(" files checked, ") \
+            + String(len(sd.scan.words)) + String(" unknown words")
+    o.put(String("status"), json_str(status))
+    o.put(String("has_project"), json_bool(sd.has_project))
+    o.put(String("version"), json_int(sd.scan.version))
+    o.put(String("count"), json_int(len(sd.order)))
+    return _write_out(encode_json(o), out_ptr, cap)
+
+
+@export
+def tk_desktop_spelling_rows(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
+    """Every row in display order: ``[[word, count, path, line]]``."""
+    if h == 0:
+        return 0
+    ref d = _desk(h)[]
+    if not d.native_spelling_active():
+        return 0
+    ref sd = d.spelling_dialog
+    var root = d.project.value() if d.project else String("")
+    var rows = json_array()
+    for i in range(len(sd.order)):
+        var w = sd.native_row(i)
+        var r = json_array()
+        r.append(json_str(w.word))
+        r.append(json_int(w.count))
+        r.append(json_str(project_relative(root, w.path)))
+        r.append(json_int(w.line))
+        rows.append(r)
+    return _write_out(encode_json(rows), out_ptr, cap)
+
+
+@export
+def tk_desktop_spelling_act(h: Int, action: Int, ptr: Int, n: Int) abi("C"):
+    """``action`` 1 adds the rows in the JSON index array to the project
+    dictionary, 2 to the user's; 0 closes the sheet."""
+    if h == 0:
+        return
+    ref d = _desk(h)[]
+    if action == 0:
+        d.spelling_dialog.close()
+        return
+    var rows = List[Int]()
+    try:
+        var a = parse_json(_string_from(ptr, n))
+        for i in range(a.array_len()):
+            rows.append(a.array_at(i).as_int())
+    except:
+        return
+    d.native_spelling_add(action, rows)
+
+
 # --- macOS-style UI: Settings window -----------------------------------------
 
 

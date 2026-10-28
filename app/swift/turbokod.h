@@ -185,6 +185,12 @@ void tk_desktop_picker_close(int64_t h);
 // values + theme / font lists (0 = not open natively), _prefs_set takes a JSON
 // {key: value}, _prefs_close closes it, _prefs_advanced hands over to the grid
 // Settings window (every section).
+// macOS-style UI Project ▸ Spelling sheet: _spelling state (0 = not up), _rows
+// [[word, count, path, line]] in display order, _act 1 = add rows (JSON index
+// array) to the project dictionary, 2 = to the user's, 0 = close.
+int64_t tk_desktop_spelling(int64_t h, int64_t out_ptr, int64_t cap);
+int64_t tk_desktop_spelling_rows(int64_t h, int64_t out_ptr, int64_t cap);
+void tk_desktop_spelling_act(int64_t h, int64_t action, int64_t ptr, int64_t len);
 int64_t tk_desktop_prefs(int64_t h, int64_t out_ptr, int64_t cap);
 void tk_desktop_prefs_set(int64_t h, int64_t ptr, int64_t len);
 void tk_desktop_prefs_close(int64_t h);

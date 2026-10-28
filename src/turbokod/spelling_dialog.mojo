@@ -311,6 +311,25 @@ struct SpellingDialog(Movable):
 
     # --- events -----------------------------------------------------------
 
+    # --- native host (macOS-style UI) ------------------------------------
+
+    def native_row(self, i: Int) -> SpellScanWord:
+        """Row ``i`` in display order (count descending, then word)."""
+        return self.scan.words[self.order[i]].copy()
+
+    def native_add(mut self, action: Int, rows: List[Int]):
+        """Select ``rows`` (the native table's selection) and press Add
+        to project / user — the same ``_submit`` the buttons use."""
+        var n = len(self.order)
+        var keep = List[Int]()
+        for i in range(len(rows)):
+            if rows[i] >= 0 and rows[i] < n:
+                keep.append(rows[i])
+        if len(keep) == 0:
+            return
+        self.list.set_selection(keep, keep[0], keep[0], n)
+        self._submit(action)
+
     def _submit(mut self, action: Int):
         if self.list.selected_count() == 0:
             return

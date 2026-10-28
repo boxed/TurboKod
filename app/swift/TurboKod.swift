@@ -1893,6 +1893,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     var trees: [ObjectIdentifier: FileTreeOverlay] = [:]
     // macOS-style UI: the native Settings window (one per Desktop that opened it).
     var prefsWindows: [ObjectIdentifier: PrefsController] = [:]
+    // macOS-style UI: Project ▸ Spelling as a sheet, per window.
+    var spellingSheets: [ObjectIdentifier: SpellingController] = [:]
     var treeBuf = [UInt8](repeating: 0, count: 1 << 16)
     // Menu mirror: the snapshot from Mojo's menu_bar, hashed so we only
     // rebuild NSMenu when something actually changed (focus/visibility/
@@ -2292,6 +2294,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if self.pollFindBar(v) { changed = true }
                 if self.pollTree(v) { changed = true }
                 if self.pollPrefs(v) { changed = true }
+                if self.pollSpelling(v) { changed = true }
             }
             self.drainAttention()
             self.idleTicks = changed ? 0 : self.idleTicks &+ 1
@@ -3476,6 +3479,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         findBars[ObjectIdentifier(v)] = nil
         trees[ObjectIdentifier(v)] = nil
         if let p = prefsWindows.removeValue(forKey: ObjectIdentifier(v)) { p.dismiss() }
+        spellingSheets[ObjectIdentifier(v)] = nil
         // Close is instant; the language servers get their goodbye in the
         // background. `begin_close` terminates every child except the LSP
         // transports and sends each server `shutdown`, then we poll off the
@@ -4029,6 +4033,27 @@ extension AppController {
         guard let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_native_dialog(h, $0, $1) })
         else { return nil }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    /// Show, refresh or retract `v`'s Spelling sheet.
+    func pollSpelling(_ v: CellView) -> Bool {
+        let id = ObjectIdentifier(v)
+        let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_spelling(v.handle, $0, $1) })
+        if let sc = spellingSheets[id] {
+            guard let data = data else {
+                spellingSheets[id] = nil
+                sc.dismiss()
+                return true
+            }
+            return sc.update(data)
+        }
+        guard let data = data, let win = v.window, win.isVisible, win.attachedSheet == nil
+        else { return false }
+        let sc = SpellingController(view: v)
+        spellingSheets[id] = sc
+        _ = sc.update(data)
+        sc.present(in: win)
+        return true
     }
 
     /// Open, refresh or retire the native Settings window for `v`.
@@ -7266,4 +7291,180 @@ final class PrefsController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     func windowWillClose(_ notification: Notification) {
         if !closingForAdvanced { onClose() }
     }
+}
+
+
+// MARK: - macOS-style UI: Spelling sheet
+//
+// Project ▸ Spelling: the core runs the incremental project scan and keeps
+// the sorted word list; this shows it as a table (refetched whenever the
+// scan's `version` moves, with the selection carried by word) and sends the
+// selected rows to `tk_desktop_spelling_act`, which runs the dialog's own
+// Add path.
+
+final class SpellingController: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+    private weak var view: CellView?
+    private let panel: NSPanel
+    private let status = NSTextField(labelWithString: "")
+    private let progress = NSProgressIndicator()
+    private let table = NSTableView()
+    private let addProject = NSButton(title: "Add to Project Dictionary", target: nil, action: nil)
+    private let addUser = NSButton(title: "Add to My Dictionary", target: nil, action: nil)
+    private var rows: [[Any]] = []
+    private var version = -1
+    private var lastData = Data()
+    private var dismissed = false
+    private var buf = [UInt8](repeating: 0, count: 1 << 16)
+
+    init(view: CellView) {
+        self.view = view
+        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 620, height: 520),
+                        styleMask: [.titled, .resizable], backing: .buffered, defer: true)
+        super.init()
+        let title = NSTextField(labelWithString: "Spelling")
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
+        status.textColor = .secondaryLabelColor
+        progress.isIndeterminate = false
+        progress.minValue = 0
+        progress.maxValue = 1000
+        progress.style = .bar
+        for (id, label, w) in [("count", "Count", 60.0), ("word", "Word", 200.0), ("where", "First seen", 300.0)] {
+            let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
+            c.title = label
+            c.width = CGFloat(w)
+            table.addTableColumn(c)
+        }
+        table.allowsMultipleSelection = true
+        table.usesAlternatingRowBackgroundColors = true
+        table.dataSource = self
+        table.delegate = self
+        let scroll = NSScrollView()
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        addProject.target = self
+        addProject.action = #selector(addProjectClicked)
+        addUser.target = self
+        addUser.action = #selector(addUserClicked)
+        let close = NSButton(title: "Close", target: self, action: #selector(closeClicked))
+        close.keyEquivalent = "\u{1b}"
+        let hint = NSTextField(labelWithString: "Select words that are spelled right to teach the checker.")
+        hint.textColor = .secondaryLabelColor
+        hint.font = .systemFont(ofSize: 11)
+        let bar = NSStackView(views: [addProject, addUser, NSView(), close])
+        let content = NSView()
+        for v in [title, status, progress, scroll, hint, bar] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(v)
+            NSLayoutConstraint.activate([
+                v.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+                v.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
+            ])
+        }
+        NSLayoutConstraint.activate([
+            title.topAnchor.constraint(equalTo: content.topAnchor, constant: 14),
+            status.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 6),
+            progress.topAnchor.constraint(equalTo: status.bottomAnchor, constant: 4),
+            scroll.topAnchor.constraint(equalTo: progress.bottomAnchor, constant: 8),
+            hint.topAnchor.constraint(equalTo: scroll.bottomAnchor, constant: 6),
+            bar.topAnchor.constraint(equalTo: hint.bottomAnchor, constant: 10),
+            bar.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -14),
+        ])
+        panel.contentView = content
+    }
+
+    func present(in win: NSWindow) {
+        let room = win.contentLayoutRect.size
+        panel.setContentSize(NSSize(width: min(620, room.width - 40), height: min(520, room.height - 20)))
+        win.beginSheet(panel, completionHandler: nil)
+        panel.makeFirstResponder(table)
+    }
+
+    func dismiss() {
+        guard !dismissed else { return }
+        dismissed = true
+        panel.sheetParent?.endSheet(panel)
+    }
+
+    func update(_ data: Data) -> Bool {
+        guard data != lastData,
+              let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return false }
+        lastData = data
+        status.stringValue = o["status"] as? String ?? ""
+        let scanning = o["scanning"] as? Bool ?? false
+        progress.isHidden = !scanning
+        progress.doubleValue = Double(o["progress"] as? Int ?? 0)
+        addProject.isEnabled = o["has_project"] as? Bool ?? false
+        let v = o["version"] as? Int ?? 0
+        if v != version || (o["count"] as? Int ?? 0) != rows.count {
+            version = v
+            reloadRows()
+        }
+        updateButtons()
+        return true
+    }
+
+    /// Refetch the rows, keeping the selected words selected across the
+    /// re-sort.
+    private func reloadRows() {
+        guard let h = view?.handle, h != 0 else { return }
+        let keep = Set(table.selectedRowIndexes.compactMap { $0 < rows.count ? rows[$0][0] as? String : nil })
+        var n = 0
+        while true {
+            n = buf.withUnsafeMutableBufferPointer { b -> Int in
+                Int(tk_desktop_spelling_rows(h, Int64(Int(bitPattern: b.baseAddress)), Int64(b.count)))
+            }
+            if n <= buf.count { break }
+            buf = [UInt8](repeating: 0, count: n)
+        }
+        rows = n > 0 ? ((try? JSONSerialization.jsonObject(with: Data(buf[0..<n]))) as? [[Any]] ?? []) : []
+        table.reloadData()
+        var sel = IndexSet()
+        for (i, r) in rows.enumerated() where keep.contains(r[0] as? String ?? "") { sel.insert(i) }
+        table.selectRowIndexes(sel, byExtendingSelection: false)
+    }
+
+    private func updateButtons() {
+        let any = !table.selectedRowIndexes.isEmpty
+        addUser.isEnabled = any
+        addProject.isEnabled = any && (try? JSONSerialization.jsonObject(with: lastData) as? [String: Any])?["has_project"] as? Bool == true
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) { updateButtons() }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row i: Int) -> NSView? {
+        let r = rows[i]
+        let text: String
+        switch tableColumn?.identifier.rawValue ?? "" {
+        case "count": text = "\(r.count > 1 ? (r[1] as? Int ?? 0) : 0)"
+        case "word": text = r.first as? String ?? ""
+        default: text = r.count > 3 ? "\(r[2] as? String ?? ""):\(r[3] as? Int ?? 0)" : ""
+        }
+        let l = NSTextField(labelWithString: text)
+        l.lineBreakMode = .byTruncatingMiddle
+        if tableColumn?.identifier.rawValue == "count" {
+            l.alignment = .right
+            l.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        }
+        if tableColumn?.identifier.rawValue == "where" { l.textColor = .secondaryLabelColor }
+        return l
+    }
+
+    private func act(_ action: Int) {
+        guard let h = view?.handle, h != 0 else { return }
+        let sel = Array(table.selectedRowIndexes)
+        let json = (try? JSONSerialization.data(withJSONObject: sel))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+        withUTF8Arg(json) { p, l in tk_desktop_spelling_act(h, Int64(action), p, l) }
+        table.deselectAll(nil)
+        lastData = Data()
+        version = -1
+    }
+
+    @objc private func addProjectClicked() { act(1) }
+    @objc private func addUserClicked() { act(2) }
+    @objc private func closeClicked() { act(0) }
 }

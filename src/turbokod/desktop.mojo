@@ -4817,7 +4817,8 @@ struct Desktop(Movable):
             # Mode / format dropdown popups overlay the rest of the Fill
             # dialog. Same z-order pattern as ``breakpoint_menu``.
             self.fill_dialog.paint_popup(canvas, screen)
-        self.spelling_dialog.paint(canvas, screen)
+        if not (native and self.spelling_dialog.active):
+            self.spelling_dialog.paint(canvas, screen)
         # Settings overlay — paints over the workspace but below the
         # modal dialogs so an in-flight prompt is still visible. Drains
         # ``settings.dirty`` into the persisted config so user changes
@@ -7729,6 +7730,7 @@ struct Desktop(Movable):
             _ = self.windows.handle_mod_key(event)
             return Optional[String]()
         if self.native_dialog_active() or self.native_git_active() \
+                or self.native_spelling_active() \
                 or len(self.native_popup_kind().as_bytes()) > 0:
             # The host is showing this dialog as a native sheet (or the
             # popup as an NSMenu), which is modal — anything that still
@@ -8991,6 +8993,17 @@ struct Desktop(Movable):
     # ``LocalChanges`` keeps every git operation; the host drives it with
     # these (selection, a key, an overlay answer) and then the same
     # ``_after_local_changes`` the in-grid path runs.
+
+    def native_spelling_active(self) -> Bool:
+        return self.native_ui() and self.spelling_dialog.active
+
+    def native_spelling_add(mut self, action: Int, rows: List[Int]):
+        """The native Spelling sheet's Add to Project / Add to User."""
+        if not self.spelling_dialog.active:
+            return
+        self.spelling_dialog.native_add(action, rows)
+        if self.spelling_dialog.submitted:
+            self._on_spelling_dialog_submit()
 
     def native_git_active(self) -> Bool:
         return self.native_ui() and self.local_changes.active

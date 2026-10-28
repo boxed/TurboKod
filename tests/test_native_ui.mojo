@@ -423,6 +423,19 @@ def test_settings_stay_in_grid_without_native_ui() raises:
     assert_false(d.settings_native)
 
 
+def test_native_spelling_sheet_takes_over_the_grid_dialog() raises:
+    var d = _native_desktop(String("x\n"))
+    d.spelling_dialog.open(List[String](), False)
+    assert_true(d.native_spelling_active())
+    # Grid input can't reach it behind the sheet.
+    _ = d.handle_event(Event.key_event(KEY_ENTER), _SCREEN)
+    assert_true(d.spelling_dialog.active)
+    d.native_spelling_add(2, List[Int]())   # nothing selected: no-op
+    assert_true(d.spelling_dialog.active)
+    d.spelling_dialog.close()
+    assert_false(d.native_spelling_active())
+
+
 def main() raises:
     setup_test_env()
     TestSuite.discover_tests[__functions_in_module()]().run()
