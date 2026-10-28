@@ -4211,6 +4211,10 @@ struct Desktop(Movable):
         tree on its docked side when that's shown."""
         var top_y = 0 if self.host_owns_menu else 1
         var r = self.review.body_rect(screen, top_y)
+        # The native review bar (macOS-style UI) needs two rows' height
+        # for real controls: keep the editor off the row above the toolbar.
+        if self.native_ui() and r.b.y - 1 > r.a.y:
+            r.b.y -= 1
         if self.review_tree.visible:
             if self.review_tree.dock_left:
                 r.a.x = min(r.b.x, r.a.x + self.review_tree.width)
@@ -4327,12 +4331,18 @@ struct Desktop(Movable):
         )
         for i in range(self.review.file_count()):
             if self.review.file_paths[i] == rel:
-                self._review_flush_edits()
-                self._review_pending_chunk_edge = 1
-                if not self.review.goto_file(i):
-                    # Same file: no re-host to pick up the pending edge.
-                    self._review_apply_chunk_edge()
+                self._review_jump_to_file(i)
                 return
+
+    def _review_jump_to_file(mut self, i: Int):
+        """Make changeset file ``i`` the one under review, landing on its
+        first change — also when it already is (the tree and the native
+        file list both land here)."""
+        self._review_flush_edits()
+        self._review_pending_chunk_edge = 1
+        if not self.review.goto_file(i):
+            # Same file: no re-host to pick up the pending edge.
+            self._review_apply_chunk_edge()
 
     def _review_arm_editor(
         mut self, idx: Int, var abs: String, var before: String,
@@ -4862,7 +4872,9 @@ struct Desktop(Movable):
                     True, ridx + 1, False,
                 )
             self.review_tree.paint(canvas, screen)
-        self.review.paint(canvas, screen, review_top_y)
+        if not (self.native_ui() and self.review.active
+                and not self.review.is_reviewing()):
+            self.review.paint(canvas, screen, review_top_y)
         if self.review.active and not native:
             self.confirm_dialog.paint(canvas, screen)
         # Git history for selection — a paned modal over the whole
@@ -7732,7 +7744,7 @@ struct Desktop(Movable):
             return Optional[String]()
         if self.native_dialog_active() or self.native_git_active() \
                 or self.native_spelling_active() or self.native_history_active() \
-                or self.native_merge_active() \
+                or self.native_merge_active() or self.native_review_picker() \
                 or len(self.native_popup_kind().as_bytes()) > 0:
             # The host is showing this dialog as a native sheet (or the
             # popup as an NSMenu), which is modal — anything that still
@@ -8995,6 +9007,63 @@ struct Desktop(Movable):
     # ``LocalChanges`` keeps every git operation; the host drives it with
     # these (selection, a key, an overlay answer) and then the same
     # ``_after_local_changes`` the in-grid path runs.
+
+    # --- macOS-style UI: review mode -----------------------------------
+    #
+    # The picker is a native sheet; while reviewing, the hosted editor
+    # stays a grid editor and the host overlays native chrome on the
+    # toolbar row (and the review file list rides the native tree).
+
+    def native_review_picker(self) -> Bool:
+        return self.native_ui() and self.review.active \
+            and not self.review.is_reviewing()
+
+    def native_review_reviewing(self) -> Bool:
+        return self.native_ui() and self.review.is_reviewing()
+
+    def native_review_tab(mut self, tab: Int):
+        if self.native_review_picker():
+            self.review._show_tab(tab)
+
+    def native_review_pick(mut self, i: Int):
+        """Start reviewing picker row ``i`` — the same path as Enter,
+        including the "check out this branch?" question it may raise."""
+        if not self.native_review_picker():
+            return
+        if i < 0 or i >= len(self.review.picker_labels):
+            return
+        self.review.picker_cursor = i
+        self.review._start_review()
+        self._review_answer_checkout_request()
+
+    def native_review_close(mut self):
+        """Cancel the picker or end the review (Esc)."""
+        if not self.review.active:
+            return
+        self.review.close()
+        self._review_teardown()
+
+    def native_review_nav(mut self, direction: Int):
+        if self.native_review_reviewing():
+            self._review_goto_change(direction)
+
+    def native_review_file(mut self, i: Int):
+        if self.native_review_reviewing() and i >= 0 \
+                and i < self.review.file_count():
+            self._review_jump_to_file(i)
+
+    def native_review_progress(self) -> Tuple[Int, Int]:
+        """``(num, den)`` of the toolbar's line-weighted progress: changed
+        lines through the current change, over all changed lines (what the
+        in-grid bar fills by)."""
+        var num = self.review.cur_file_cum_lines
+        for i in range(self.review.cur_file):
+            if i < len(self.review.file_changed_lines):
+                num += self.review.file_changed_lines[i]
+        var den = 0
+        for i in range(len(self.review.file_changed_lines)):
+            den += self.review.file_changed_lines[i]
+        return (min(num, den), den)
 
     def native_merge_active(self) -> Bool:
         return self.native_ui() and self.merge_view.active

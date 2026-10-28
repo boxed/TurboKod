@@ -40,6 +40,7 @@ from turbokod.desktop import (
     PROJECT_OPEN, WINDOW_FOCUS_PREFIX,
 )
 from turbokod.window import compute_display_titles
+from turbokod.file_tree import FileTree
 from turbokod.file_io import basename, parent_path, project_relative
 from turbokod.colors import EDITOR_BG, EDITOR_FG, FG_TRUECOLOR
 from turbokod.string_utils import byte_slice
@@ -1472,6 +1473,10 @@ def tk_desktop_tabs(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     if h == 0:
         return 0
     ref d = _desk(h)[]
+    # Review hosts its changeset in a transient window that mustn't be a
+    # tab (focusing another tab would suspend the review): no strip.
+    if d.review.active:
+        return 0
     var titles = compute_display_titles(d.windows.windows)
     var tabs = json_array()
     for i in range(len(d.windows.windows)):
@@ -1812,22 +1817,8 @@ def tk_desktop_prefs_advanced(h: Int) abi("C"):
 # --- macOS-style UI: file tree ------------------------------------------------
 
 
-@export
-def tk_desktop_tree(
-    h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
-) abi("C") -> Int:
-    """The file tree for the native source list laid over its cells:
-    ``{x, y, w, h}`` (the listing's cell rect, separator excluded),
-    ``root``, ``selected``, ``focused`` and ``entries: [[name, depth,
-    is_dir, expanded, modified]]``. 0 when the tree isn't shown natively.
-    Same buffer contract as ``tk_desktop_native_dialog``."""
-    if h == 0:
-        return 0
-    ref d = _desk(h)[]
-    if not d.native_tree_shown():
-        return 0
-    ref t = d.file_tree
-    var r = t.content_rect(Rect(0, 0, cols, rows))
+def _tree_json(ref t: FileTree, screen: Rect) -> String:
+    var r = t.content_rect(screen)
     var o = json_object()
     o.put(String("x"), json_int(r.a.x))
     o.put(String("y"), json_int(r.a.y))
@@ -1853,17 +1844,52 @@ def tk_desktop_tree(
         row.append(json_str(e.path))
         es.append(row)
     o.put(String("entries"), es)
-    return _write_out(encode_json(o), out_ptr, cap)
+    return encode_json(o)
+
+
+def _review_tree_shown(ref d: Desktop) -> Bool:
+    return d.native_review_reviewing() and d.review_tree.visible
+
+
+@export
+def tk_desktop_tree(
+    h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
+) abi("C") -> Int:
+    """The file tree for the native source list laid over its cells —
+    the project tree, or while reviewing the changeset's file list:
+    ``{x, y, w, h}`` (the listing's cell rect, separator excluded),
+    ``root``, ``selected``, ``focused`` and ``entries: [[name, depth,
+    is_dir, expanded, modified, path]]``. 0 when no tree is shown
+    natively. Same buffer contract as ``tk_desktop_native_dialog``."""
+    if h == 0:
+        return 0
+    ref d = _desk(h)[]
+    var screen = Rect(0, 0, cols, rows)
+    if _review_tree_shown(d):
+        return _write_out(_tree_json(d.review_tree, screen), out_ptr, cap)
+    if not d.native_tree_shown():
+        return 0
+    return _write_out(_tree_json(d.file_tree, screen), out_ptr, cap)
 
 
 @export
 def tk_desktop_tree_act(h: Int, op: Int, idx: Int, x: Int, y: Int) abi("C"):
     """A native tree row was acted on: ``op`` 0 select, 1 expand / collapse,
     2 open (file) or toggle (directory), 3 context menu anchored at cell
-    ``x``, ``y``."""
+    ``x``, ``y``. While reviewing it acts on the changeset's file list
+    (opening a file reviews it; there is no context menu)."""
     if h == 0:
         return
     ref d = _desk(h)[]
+    if _review_tree_shown(d):
+        if op == 0:
+            d.review_tree.native_select(idx)
+        elif op == 1:
+            d.review_tree.native_toggle(idx)
+        elif op == 2:
+            d.review_tree.native_open(idx)
+            d._review_tree_drain()
+        return
     if op == 0:
         d.file_tree.native_select(idx)
         d.native_tree_focus()
@@ -1873,6 +1899,81 @@ def tk_desktop_tree_act(h: Int, op: Int, idx: Int, x: Int, y: Int) abi("C"):
         d.file_tree.native_open(idx)
     elif op == 3:
         d.native_tree_menu(idx, Point(x, y))
+
+
+# --- macOS-style UI: review mode ----------------------------------------------
+
+
+@export
+def tk_desktop_review(
+    h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
+) abi("C") -> Int:
+    """Review mode for the native host. Picking: ``{mode: "picker", tab,
+    labels, cursor}``. Reviewing: ``{mode: "reviewing", title, files:
+    [[path, added, deleted]], cur_file, change_index, change_total, num,
+    den, editable, bar: {x, y, w, h}}`` with ``bar`` the toolbar row's
+    cells to overlay. 0 when review isn't up natively."""
+    if h == 0:
+        return 0
+    ref d = _desk(h)[]
+    ref rv = d.review
+    var o = json_object()
+    if d.native_review_picker():
+        o.put(String("mode"), json_str(String("picker")))
+        o.put(String("tab"), json_int(rv.picker_tab))
+        o.put(String("labels"), _strings(rv.picker_labels))
+        o.put(String("cursor"), json_int(rv.picker_cursor))
+        return _write_out(encode_json(o), out_ptr, cap)
+    if not d.native_review_reviewing():
+        return 0
+    o.put(String("mode"), json_str(String("reviewing")))
+    o.put(String("title"), json_str(rv.title))
+    var files = json_array()
+    for i in range(rv.file_count()):
+        var f = json_array()
+        f.append(json_str(rv.file_paths[i]))
+        f.append(json_bool(i < len(rv.file_added) and rv.file_added[i]))
+        f.append(json_bool(i < len(rv.file_deleted) and rv.file_deleted[i]))
+        files.append(f)
+    o.put(String("files"), files)
+    o.put(String("cur_file"), json_int(rv.cur_file))
+    o.put(String("change_index"), json_int(rv.change_index))
+    o.put(String("change_total"), json_int(rv.change_total))
+    var p = d.native_review_progress()
+    o.put(String("num"), json_int(p[0]))
+    o.put(String("den"), json_int(p[1]))
+    o.put(String("editable"), json_bool(rv.is_editable()))
+    var bar = json_object()
+    bar.put(String("x"), json_int(0))
+    # Two rows: the toolbar row plus the one ``_review_body_rect`` keeps
+    # free above it for the native bar's controls.
+    bar.put(String("y"), json_int(rows - 2))
+    bar.put(String("w"), json_int(cols))
+    bar.put(String("h"), json_int(2))
+    o.put(String("bar"), bar)
+    return _write_out(encode_json(o), out_ptr, cap)
+
+
+@export
+def tk_desktop_review_act(h: Int, op: Int, arg: Int) abi("C"):
+    """Review actions: ``op`` 0 show picker tab ``arg``, 1 review picker
+    row ``arg``, 2 cancel / end the review, 3 next change, 4 previous
+    change, 5 review changeset file ``arg``."""
+    if h == 0:
+        return
+    ref d = _desk(h)[]
+    if op == 0:
+        d.native_review_tab(arg)
+    elif op == 1:
+        d.native_review_pick(arg)
+    elif op == 2:
+        d.native_review_close()
+    elif op == 3:
+        d.native_review_nav(1)
+    elif op == 4:
+        d.native_review_nav(-1)
+    elif op == 5:
+        d.native_review_file(arg)
 
 
 # --- macOS-style UI: find bar -----------------------------------------------

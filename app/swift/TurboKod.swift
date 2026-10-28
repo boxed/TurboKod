@@ -1899,6 +1899,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     var historySheets: [ObjectIdentifier: HistoryController] = [:]
     // macOS-style UI: the on-disk-change merge as a sheet, per window.
     var mergeSheets: [ObjectIdentifier: MergeController] = [:]
+    // macOS-style UI review mode: the picker sheet, and the native bar laid
+    // over the toolbar row while reviewing.
+    var reviewPickers: [ObjectIdentifier: ReviewPickerController] = [:]
+    var reviewBars: [ObjectIdentifier: ReviewBar] = [:]
     var treeBuf = [UInt8](repeating: 0, count: 1 << 16)
     // Menu mirror: the snapshot from Mojo's menu_bar, hashed so we only
     // rebuild NSMenu when something actually changed (focus/visibility/
@@ -2301,6 +2305,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if self.pollSpelling(v) { changed = true }
                 if self.pollHistory(v) { changed = true }
                 if self.pollMerge(v) { changed = true }
+                if self.pollReview(v) { changed = true }
             }
             self.drainAttention()
             self.idleTicks = changed ? 0 : self.idleTicks &+ 1
@@ -3488,6 +3493,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         spellingSheets[ObjectIdentifier(v)] = nil
         historySheets[ObjectIdentifier(v)] = nil
         mergeSheets[ObjectIdentifier(v)] = nil
+        reviewPickers[ObjectIdentifier(v)] = nil
+        reviewBars[ObjectIdentifier(v)] = nil
         // Close is instant; the language servers get their goodbye in the
         // background. `begin_close` terminates every child except the LSP
         // transports and sends each server `shutdown`, then we poll off the
@@ -4043,6 +4050,54 @@ extension AppController {
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 
+    /// Review mode: the picker sheet while choosing, the native bar while
+    /// reviewing, neither otherwise.
+    func pollReview(_ v: CellView) -> Bool {
+        let id = ObjectIdentifier(v)
+        let cols = Int64(v.cols()), rows = Int64(v.rows())
+        let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_review(v.handle, cols, rows, $0, $1) })
+        let o = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
+        let mode = o?["mode"] as? String ?? ""
+        var changed = false
+        // Picker sheet. It steps aside while the core asks a question of
+        // its own (check out the branch?) — a window shows one sheet.
+        let asking = readCoreJSON(&nativeDialogBuf, { tk_desktop_native_dialog(v.handle, $0, $1) }) != nil
+        if let pc = reviewPickers[id], mode != "picker" || asking {
+            reviewPickers[id] = nil
+            pc.dismiss()
+            changed = true
+        }
+        if mode == "picker", !asking, let o = o {
+            if let pc = reviewPickers[id] {
+                pc.update(o)
+            } else if let win = v.window, win.isVisible, win.attachedSheet == nil {
+                let pc = ReviewPickerController(view: v)
+                reviewPickers[id] = pc
+                pc.update(o)
+                pc.present(in: win)
+                changed = true
+                // Scripted screenshots: pick a row to show the review bar.
+                if isCapturing, let n = Int(ProcessInfo.processInfo.environment["TK_CAPTURE_REVIEW_PICK"] ?? "") {
+                    tk_desktop_review_act(v.handle, 1, Int64(n))
+                }
+            }
+        }
+        // Reviewing bar.
+        if mode == "reviewing", let o = o {
+            let bar = reviewBars[id] ?? {
+                let b = ReviewBar(view: v)
+                v.addSubview(b)
+                reviewBars[id] = b
+                return b
+            }()
+            if bar.update(o) { changed = true }
+        } else if let bar = reviewBars.removeValue(forKey: id) {
+            bar.removeFromSuperview()
+            changed = true
+        }
+        return changed
+    }
+
     /// Show, refresh or retract `v`'s merge sheet.
     func pollMerge(_ v: CellView) -> Bool {
         let id = ObjectIdentifier(v)
@@ -4316,7 +4371,8 @@ extension AppController {
         var changed = false
         let data = on ? readCoreJSON(&tabsBuf, { tk_desktop_tabs(v.handle, $0, $1) }) : nil
         if let data = data { changed = entry.strip.update(from: data) }
-        let hidden = !on || entry.strip.tabs.isEmpty
+        // No payload means "no strip" (e.g. during review), not "unchanged".
+        let hidden = !on || data == nil || entry.strip.tabs.isEmpty
         if entry.accessory.isHidden != hidden {
             entry.accessory.isHidden = hidden
             changed = true
@@ -7933,4 +7989,240 @@ final class MergeController: NSObject, NSTextViewDelegate {
 
     @objc private func applyClicked() { finish(true) }
     @objc private func postponeClicked() { finish(false) }
+}
+
+
+// MARK: - macOS-style UI: review mode
+//
+// Git ▸ Review. The picker (commits / branches) is a sheet; picking runs the
+// core's own start path, including its "check out the branch?" question.
+// While reviewing, the body stays the core's grid editor — it is the review
+// surface, with phantom diff rows and the git gutter — and `ReviewBar` is
+// laid over the toolbar row it reserves: previous / next change, the
+// line-weighted progress, the file and change counters, a file menu, Done.
+
+final class ReviewPickerController: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+    private weak var view: CellView?
+    private let panel: NSPanel
+    private let tabs = NSSegmentedControl(labels: ["Commits", "Branches"], trackingMode: .selectOne,
+                                          target: nil, action: nil)
+    private let table = GitTable()
+    private var labels: [String] = []
+    private var dismissed = false
+
+    init(view: CellView) {
+        self.view = view
+        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 620, height: 460),
+                        styleMask: [.titled, .resizable], backing: .buffered, defer: true)
+        super.init()
+        let title = NSTextField(labelWithString: "Review Changes")
+        title.font = .systemFont(ofSize: 14, weight: .semibold)
+        tabs.target = self
+        tabs.action = #selector(tabChanged)
+        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("c"))
+        table.addTableColumn(col)
+        table.headerView = nil
+        table.rowHeight = 26
+        table.style = .inset
+        table.dataSource = self
+        table.delegate = self
+        table.target = self
+        table.doubleAction = #selector(reviewClicked)
+        table.onKey = { [weak self] k in
+            switch k {
+            case "enter": self?.reviewClicked(); return true
+            case "esc": self?.cancelClicked(); return true
+            default: return false
+            }
+        }
+        let scroll = NSScrollView()
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelClicked))
+        cancel.keyEquivalent = "\u{1b}"
+        let review = NSButton(title: "Review", target: self, action: #selector(reviewClicked))
+        review.keyEquivalent = "\r"
+        let top = NSStackView(views: [title, NSView(), tabs])
+        let bar = NSStackView(views: [NSView(), cancel, review])
+        let content = NSView()
+        for v in [top, scroll, bar] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(v)
+            NSLayoutConstraint.activate([
+                v.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+                v.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
+            ])
+        }
+        NSLayoutConstraint.activate([
+            top.topAnchor.constraint(equalTo: content.topAnchor, constant: 14),
+            scroll.topAnchor.constraint(equalTo: top.bottomAnchor, constant: 10),
+            bar.topAnchor.constraint(equalTo: scroll.bottomAnchor, constant: 10),
+            bar.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -14),
+        ])
+        panel.contentView = content
+    }
+
+    func present(in win: NSWindow) {
+        win.beginSheet(panel, completionHandler: nil)
+        panel.makeFirstResponder(table)
+    }
+
+    func dismiss() {
+        guard !dismissed else { return }
+        dismissed = true
+        panel.sheetParent?.endSheet(panel)
+    }
+
+    func update(_ o: [String: Any]) {
+        tabs.selectedSegment = o["tab"] as? Int ?? 0
+        let l = o["labels"] as? [String] ?? []
+        if l != labels { labels = l; table.reloadData() }
+        let cur = o["cursor"] as? Int ?? 0
+        if cur >= 0 && cur < labels.count && table.selectedRow < 0 {
+            table.selectRowIndexes(IndexSet(integer: cur), byExtendingSelection: false)
+            table.scrollRowToVisible(cur)
+        }
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { labels.count }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row i: Int) -> NSView? {
+        let text = labels[i]
+        // "sha  subject" / "name  subject": the key in monospace, the rest plain.
+        let parts = text.components(separatedBy: "  ")
+        let s = NSMutableAttributedString(string: parts.first ?? "", attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .medium)])
+        if parts.count > 1 {
+            s.append(NSAttributedString(string: "  " + parts.dropFirst().joined(separator: "  ")
+                .trimmingCharacters(in: .whitespaces), attributes: [
+                .font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.secondaryLabelColor]))
+        }
+        let l = NSTextField(labelWithAttributedString: s)
+        l.lineBreakMode = .byTruncatingTail
+        return l
+    }
+
+    private func act(_ op: Int, _ arg: Int) {
+        guard let h = view?.handle, h != 0 else { return }
+        tk_desktop_review_act(h, Int64(op), Int64(arg))
+        view?.invalidateFrame()
+        view?.needsDisplay = true
+    }
+
+    @objc private func tabChanged() {
+        table.deselectAll(nil)
+        act(0, tabs.selectedSegment)
+    }
+
+    @objc private func reviewClicked() {
+        let row = table.clickedRow >= 0 ? table.clickedRow : table.selectedRow
+        guard row >= 0 else { return }
+        act(1, row)
+    }
+
+    @objc private func cancelClicked() { act(2, 0) }
+}
+
+final class ReviewBar: NSVisualEffectView {
+    private weak var cellView: CellView?
+    private let prev = NSButton(title: "Previous Change", target: nil, action: nil)
+    private let next = NSButton(title: "Next Change", target: nil, action: nil)
+    private let files = NSPopUpButton()
+    private let counter = NSTextField(labelWithString: "")
+    private let progress = NSProgressIndicator()
+    private var lastData = Data()
+
+    init(view: CellView) {
+        cellView = view
+        super.init(frame: .zero)
+        material = .titlebar
+        blendingMode = .withinWindow
+        prev.image = NSImage(systemSymbolName: "chevron.left", accessibilityDescription: nil)
+        prev.imagePosition = .imageLeading
+        next.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil)
+        next.imagePosition = .imageTrailing
+        for b in [prev, next] {
+            b.bezelStyle = .texturedRounded
+            b.controlSize = .small
+            b.target = self
+        }
+        prev.action = #selector(prevClicked)
+        next.action = #selector(nextClicked)
+        prev.toolTip = "Previous change (⇧⌘←)"
+        next.toolTip = "Next change (⇧⌘→)"
+        files.controlSize = .small
+        files.target = self
+        files.action = #selector(fileChosen)
+        counter.font = .systemFont(ofSize: 11)
+        counter.textColor = .secondaryLabelColor
+        progress.style = .bar
+        progress.isIndeterminate = false
+        progress.controlSize = .small
+        let done = NSButton(title: "Done Reviewing", target: self, action: #selector(doneClicked))
+        done.bezelStyle = .texturedRounded
+        done.controlSize = .small
+        let stack = NSStackView(views: [prev, progress, counter, files, NSView(), next, done])
+        stack.spacing = 8
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 8)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            progress.widthAnchor.constraint(equalToConstant: 140),
+            files.widthAnchor.constraint(lessThanOrEqualToConstant: 280),
+        ])
+        files.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        counter.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    func update(_ o: [String: Any]) -> Bool {
+        guard let data = try? JSONSerialization.data(withJSONObject: o), data != lastData else { return false }
+        lastData = data
+        if let bar = o["bar"] as? [String: Any] {
+            // Two rows the core keeps clear: the toolbar row and the one
+            // above it, so real controls fit without covering the editor.
+            let f = NSRect(x: 0, y: CGFloat(bar["y"] as? Int ?? 0) * CELL_H,
+                           width: CGFloat(bar["w"] as? Int ?? 0) * CELL_W,
+                           height: CGFloat(bar["h"] as? Int ?? 1) * CELL_H)
+            if frame != f { frame = f }
+        }
+        let fl = o["files"] as? [[Any]] ?? []
+        let titles = fl.map { f -> String in
+            let path = f.first as? String ?? ""
+            let added = f.count > 1 && (f[1] as? Bool ?? false)
+            let deleted = f.count > 2 && (f[2] as? Bool ?? false)
+            return path + (added ? "  (new)" : deleted ? "  (deleted)" : "")
+        }
+        if titles != files.itemTitles {
+            files.removeAllItems()
+            files.addItems(withTitles: titles)
+        }
+        let cur = o["cur_file"] as? Int ?? 0
+        if cur >= 0 && cur < titles.count { files.selectItem(at: cur) }
+        let ci = o["change_index"] as? Int ?? 0, ct = o["change_total"] as? Int ?? 0
+        // ``change_index`` is already 1-based (0 = before the first).
+        counter.stringValue = "File \(min(cur + 1, fl.count)) of \(fl.count) · change \(min(ci, ct)) of \(ct)"
+        let num = o["num"] as? Int ?? 0, den = o["den"] as? Int ?? 0
+        progress.maxValue = Double(max(den, 1))
+        progress.doubleValue = Double(num)
+        return true
+    }
+
+    private func act(_ op: Int, _ arg: Int = 0) {
+        guard let v = cellView, v.handle != 0 else { return }
+        tk_desktop_review_act(v.handle, Int64(op), Int64(arg))
+        lastData = Data()
+        v.window?.makeFirstResponder(v)
+        v.invalidateFrame()
+        v.needsDisplay = true
+    }
+
+    @objc private func prevClicked() { act(4) }
+    @objc private func nextClicked() { act(3) }
+    @objc private func doneClicked() { act(2) }
+    @objc private func fileChosen() { act(5, files.indexOfSelectedItem) }
 }

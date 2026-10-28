@@ -28,8 +28,10 @@ It is being built in phases:
    dialog open and the sheet comes back.
 9. **Settings** opens as a native window (see below). "Advanced Settings…"
    hands over to the grid Settings window for the specialist sections.
-10. Still in-grid: the Spelling list, review mode, merge view, history and
-    the tool panels.
+10. **Spelling, Git history, the on-disk-change merge and review mode** are
+    native too (see "Full-screen tools").
+11. Deliberately still the grid: the editor body, the terminal / debug /
+    test panels, and the "Advanced Settings…" window.
 
 ## How a dialog becomes native
 
@@ -138,6 +140,44 @@ the streaming `rg` runner. The host shows them as one sheet,
 Tab titles size to their text; only when they don't all fit do the widest
 shrink, down to a shared cap. A squeezed title drops its extension first,
 then the end of its stem (`project_api.py` → `project_api` → `project_…`).
+
+## Full-screen tools
+
+All four follow the same rule: the core keeps the state and the logic, and
+the host shows a sheet or an overlay and calls the same methods the grid
+path calls.
+
+- **Spelling** (`tk_desktop_spelling*`). A sheet with a count / word /
+  first-seen table. The rows are refetched whenever the scan's `version`
+  moves, and the selection is carried across the re-sort by word. Add goes
+  through `SpellingDialog.native_add` → its own `_submit` →
+  `_on_spelling_dialog_submit`.
+- **Git history** (`tk_desktop_history*`). A sheet with commits on the left
+  and the selected commit's patch on the right, colored by line prefix on
+  the theme's editor background. Everything was fetched when it opened.
+- **Merge** (`tk_desktop_merge*`), for a file that changed on disk under
+  unsaved edits:
+  - One card per conflict (yours / on disk, with context), offering Keep
+    Mine / Use Disk / Keep Both / Edit.
+  - `MergeView.native_choose` sets the choice directly. Going through
+    `_set_choice(EDIT)` would open the grid's line editor.
+  - Apply goes through `_on_merge_done` and is refused while a change has
+    no choice. Postpone goes through `_on_merge_cancel`.
+- **Review** (`tk_desktop_review*`):
+  - The picker is a sheet. It steps aside while the core's own "check out
+    the branch?" question is up, because a window shows one sheet.
+  - While reviewing, the body stays the core's grid editor, since it *is*
+    the review surface (phantom diff rows, git gutter).
+  - `ReviewBar` is overlaid on the two bottom rows: the toolbar row plus
+    the row `_review_body_rect` keeps free in native mode so real controls
+    fit. It has previous / next change, the line-weighted progress, file /
+    change counters, a file menu and Done.
+  - The review's file list rides the same native tree overlay (the tree
+    ABI routes to `review_tree` while reviewing).
+  - The tab strip hides while a review is up, because the transient review
+    window mustn't be a tab: focusing another tab suspends the review.
+- `native_tree_shown()` is false under history, merge and review, so the
+  project tree's overlay never floats over them.
 
 ## Settings window
 

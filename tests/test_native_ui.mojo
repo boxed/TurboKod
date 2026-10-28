@@ -490,6 +490,24 @@ def test_native_merge_applies_only_once_every_change_has_a_choice() raises:
     assert_true(String("disk") in d.windows.windows[0].editor.text_snapshot())
 
 
+def test_native_review_picks_navigates_and_ends() raises:
+    var root = _repo_with_a_change()
+    var d = _native_desktop(String("x\n"))
+    d.project = Optional[String](root)
+    d.review.open(root)
+    assert_true(d.native_review_picker())
+    # The picker is a modal sheet: grid input can't pick behind it.
+    _ = d.handle_event(Event.key_event(KEY_ENTER), _SCREEN)
+    assert_true(d.native_review_picker())
+    d.native_review_pick(0)          # "Unstaged changes"
+    assert_true(d.native_review_reviewing())
+    assert_equal(d.review.file_count(), 1)
+    var p = d.native_review_progress()
+    assert_true(p[0] <= p[1])
+    d.native_review_close()
+    assert_false(d.review.active)
+
+
 def main() raises:
     setup_test_env()
     TestSuite.discover_tests[__functions_in_module()]().run()
