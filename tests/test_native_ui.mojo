@@ -15,6 +15,8 @@ from turbokod.search_options import SearchOptions
 from turbokod.color_picker import ColorPickerDialog, MODE_RGB
 from turbokod.fill_dialog import FillDialog
 from turbokod.git_changes import LineHistoryEntry
+from turbokod.diff import MergeRegion, REGION_CONFLICT, REGION_STABLE
+from turbokod.merge_view import CHOICE_DISK
 from turbokod.events import Event, KEY_ENTER
 from turbokod.geometry import Point, Rect
 from turbokod.window import Window
@@ -458,6 +460,34 @@ def test_native_history_selects_and_hides_the_tree_overlay() raises:
     assert_equal(d.history.list.selected, 1)
     d.history.close()
     assert_true(d.native_tree_shown())
+
+
+def test_native_merge_applies_only_once_every_change_has_a_choice() raises:
+    # Staged the way conflict detection leaves it: the buffer holds local
+    # edits, the disk holds the other change, and the editor remembers
+    # that disk text as the merge's other side.
+    var path = _temp_path(String("_native_merge.txt"))
+    _ = write_file(path, String("top\ndisk\n"))
+    var d = _native_desktop(String("top\nmine\n"))
+    d.windows.windows[0].editor.file_path = path
+    d.windows.windows[0].editor._conflict_disk_text = String("top\ndisk\n")
+    var regions = List[MergeRegion]()
+    regions.append(MergeRegion(
+        REGION_STABLE, [String("top")], List[String](), List[String](),
+        List[String](),
+    ))
+    regions.append(MergeRegion(
+        REGION_CONFLICT, List[String](), [String("mine")], [String("disk")],
+        [String("base")],
+    ))
+    d.merge_view.open(regions^, 0, path)
+    assert_true(d.native_merge_active())
+    assert_false(d.native_merge_finish(True, _SCREEN))   # nothing chosen yet
+    assert_true(d.merge_view.active)
+    d.merge_view.native_choose(0, CHOICE_DISK, List[String]())
+    assert_true(d.native_merge_finish(True, _SCREEN))
+    assert_false(d.merge_view.active)
+    assert_true(String("disk") in d.windows.windows[0].editor.text_snapshot())
 
 
 def main() raises:

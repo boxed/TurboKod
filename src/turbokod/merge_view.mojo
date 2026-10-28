@@ -222,6 +222,24 @@ struct MergeView(Movable):
                 return i
         return -1
 
+    # --- native host (macOS-style UI) ------------------------------------
+
+    def native_choose(mut self, ci: Int, choice: Int, var edited: List[String]):
+        """Resolve conflict ``ci``: ``CHOICE_LOCAL`` / ``_DISK`` / ``_BOTH``,
+        or ``CHOICE_EDIT`` with the edited lines (set directly — the grid's
+        ``_set_choice`` would open its in-grid line editor)."""
+        if ci < 0 or ci >= len(self.states):
+            return
+        self.states[ci].choice = choice
+        if choice == CHOICE_EDIT:
+            self.states[ci].edited_lines = edited^
+        self.current = ci
+        self._rows_dirty = True
+
+    def native_unresolved(self) -> Int:
+        """The first conflict without a choice, or -1 when all have one."""
+        return self._first_unresolved()
+
     def _try_apply(mut self):
         """Finish when every conflict is resolved; otherwise move to the
         first one that isn't."""

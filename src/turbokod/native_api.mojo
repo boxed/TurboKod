@@ -49,6 +49,7 @@ from turbokod.theme import theme_names
 from turbokod.search_options import SearchOptions
 from turbokod.breakpoint_dialog import BP_ERR_CANCEL, BP_ERR_DISABLE, BP_ERR_TRY
 from turbokod.git_changes import format_age
+from turbokod.diff import REGION_STABLE
 from turbokod.posix import wall_clock_ms
 
 from turbokod.host_abi import (
@@ -1508,6 +1509,87 @@ def tk_desktop_tab_close(h: Int, idx: Int) abi("C"):
     if h == 0:
         return
     _desk(h)[].close_tab(idx)
+
+
+# --- macOS-style UI: merge (file changed on disk under unsaved edits) --------
+
+
+@export
+def tk_desktop_merge(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
+    """The merge view for the native sheet: ``{file, current, conflicts:
+    [{ours, theirs, before, after, choice, edited}]}`` — line lists, with
+    up to three agreed lines of context either side. 0 when it isn't up
+    natively."""
+    if h == 0:
+        return 0
+    ref d = _desk(h)[]
+    if not d.native_merge_active():
+        return 0
+    ref m = d.merge_view
+    var o = json_object()
+    o.put(String("file"), json_str(m.file_path))
+    o.put(String("current"), json_int(m.current))
+    var cs = json_array()
+    var ci = 0
+    for ri in range(len(m.regions)):
+        if m.regions[ri].kind == REGION_STABLE:
+            continue
+        var c = json_object()
+        c.put(String("ours"), _strings(m.regions[ri].ours_lines))
+        c.put(String("theirs"), _strings(m.regions[ri].theirs_lines))
+        var before = List[String]()
+        if ri > 0 and m.regions[ri - 1].kind == REGION_STABLE:
+            ref ls = m.regions[ri - 1].lines
+            for k in range(max(0, len(ls) - 3), len(ls)):
+                before.append(ls[k])
+        var after = List[String]()
+        if ri + 1 < len(m.regions) and m.regions[ri + 1].kind == REGION_STABLE:
+            ref ls = m.regions[ri + 1].lines
+            for k in range(min(3, len(ls))):
+                after.append(ls[k])
+        c.put(String("before"), _strings(before))
+        c.put(String("after"), _strings(after))
+        c.put(String("choice"), json_int(m.states[ci].choice))
+        c.put(String("edited"), _strings(m.states[ci].edited_lines))
+        cs.append(c)
+        ci += 1
+    o.put(String("conflicts"), cs)
+    return _write_out(encode_json(o), out_ptr, cap)
+
+
+@export
+def tk_desktop_merge_choose(
+    h: Int, ci: Int, choice: Int, ptr: Int, n: Int,
+) abi("C"):
+    """Resolve conflict ``ci``: 1 yours, 2 on disk, 3 both, 4 edited (the
+    JSON string array carries the edited lines)."""
+    if h == 0:
+        return
+    var edited = List[String]()
+    if choice == 4:
+        try:
+            var a = parse_json(_string_from(ptr, n))
+            for i in range(a.array_len()):
+                edited.append(a.array_at(i).as_str())
+        except:
+            return
+    _desk(h)[].merge_view.native_choose(ci, choice, edited^)
+
+
+@export
+def tk_desktop_merge_finish(
+    h: Int, apply: Int, cols: Int, rows: Int,
+) abi("C") -> Int32:
+    """Apply (1) or postpone (0). Returns 0 when Apply was refused because
+    a conflict has no choice yet."""
+    if h == 0:
+        return 0
+    try:
+        return 1 if _desk(h)[].native_merge_finish(
+            apply != 0, Rect(0, 0, cols, rows),
+        ) else 0
+    except:
+        return 0
 
 
 # --- macOS-style UI: Git history ----------------------------------------------

@@ -4772,7 +4772,8 @@ struct Desktop(Movable):
             self.message_request_dialog.paint(canvas, screen)
         if not native:
             self.color_picker.paint(canvas, screen)
-        self.merge_view.paint(canvas, screen)
+        if not (native and self.merge_view.active):
+            self.merge_view.paint(canvas, screen)
         if not (native and self.quick_open.active):
             self.quick_open.paint(canvas, screen)
         if not native:
@@ -7731,6 +7732,7 @@ struct Desktop(Movable):
             return Optional[String]()
         if self.native_dialog_active() or self.native_git_active() \
                 or self.native_spelling_active() or self.native_history_active() \
+                or self.native_merge_active() \
                 or len(self.native_popup_kind().as_bytes()) > 0:
             # The host is showing this dialog as a native sheet (or the
             # popup as an NSMenu), which is modal — anything that still
@@ -8993,6 +8995,25 @@ struct Desktop(Movable):
     # ``LocalChanges`` keeps every git operation; the host drives it with
     # these (selection, a key, an overlay answer) and then the same
     # ``_after_local_changes`` the in-grid path runs.
+
+    def native_merge_active(self) -> Bool:
+        return self.native_ui() and self.merge_view.active
+
+    def native_merge_finish(mut self, apply: Bool, screen: Rect) raises -> Bool:
+        """Apply (every conflict needs a choice — otherwise the first
+        unresolved one is made current and nothing happens) or postpone
+        ("offered again on save"), through the grid's own handlers."""
+        if not self.merge_view.active:
+            return False
+        if not apply:
+            self._on_merge_cancel(screen)
+            return True
+        var first = self.merge_view.native_unresolved()
+        if first >= 0:
+            self.merge_view.current = first
+            return False
+        self._on_merge_done(screen)
+        return True
 
     def native_history_active(self) -> Bool:
         return self.native_ui() and self.history.active

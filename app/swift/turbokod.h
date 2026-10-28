@@ -191,6 +191,14 @@ void tk_desktop_picker_close(int64_t h);
 // macOS-style UI Git history sheet: _history {title, selected, entries: [[sha,
 // author, date, subject, pushed]]} (0 = not up), _history_patch one entry's
 // patch, _history_act op 0 = select idx, 1 = close.
+// macOS-style UI merge sheet (file changed on disk under unsaved edits):
+// _merge {file, current, conflicts: [{ours, theirs, before, after, choice,
+// edited}]} (0 = not up); _merge_choose conflict ci with 1 yours / 2 disk /
+// 3 both / 4 edited (+ JSON lines); _merge_finish apply 1 / postpone 0
+// (returns 0 when apply is refused: a conflict has no choice).
+int64_t tk_desktop_merge(int64_t h, int64_t out_ptr, int64_t cap);
+void tk_desktop_merge_choose(int64_t h, int64_t ci, int64_t choice, int64_t ptr, int64_t len);
+int32_t tk_desktop_merge_finish(int64_t h, int64_t apply, int64_t cols, int64_t rows);
 int64_t tk_desktop_history(int64_t h, int64_t out_ptr, int64_t cap);
 int64_t tk_desktop_history_patch(int64_t h, int64_t idx, int64_t out_ptr, int64_t cap);
 void tk_desktop_history_act(int64_t h, int64_t op, int64_t idx);

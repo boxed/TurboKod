@@ -1897,6 +1897,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     var spellingSheets: [ObjectIdentifier: SpellingController] = [:]
     // macOS-style UI: Git history as a sheet, per window.
     var historySheets: [ObjectIdentifier: HistoryController] = [:]
+    // macOS-style UI: the on-disk-change merge as a sheet, per window.
+    var mergeSheets: [ObjectIdentifier: MergeController] = [:]
     var treeBuf = [UInt8](repeating: 0, count: 1 << 16)
     // Menu mirror: the snapshot from Mojo's menu_bar, hashed so we only
     // rebuild NSMenu when something actually changed (focus/visibility/
@@ -2298,6 +2300,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if self.pollPrefs(v) { changed = true }
                 if self.pollSpelling(v) { changed = true }
                 if self.pollHistory(v) { changed = true }
+                if self.pollMerge(v) { changed = true }
             }
             self.drainAttention()
             self.idleTicks = changed ? 0 : self.idleTicks &+ 1
@@ -3484,6 +3487,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if let p = prefsWindows.removeValue(forKey: ObjectIdentifier(v)) { p.dismiss() }
         spellingSheets[ObjectIdentifier(v)] = nil
         historySheets[ObjectIdentifier(v)] = nil
+        mergeSheets[ObjectIdentifier(v)] = nil
         // Close is instant; the language servers get their goodbye in the
         // background. `begin_close` terminates every child except the LSP
         // transports and sends each server `shutdown`, then we poll off the
@@ -4037,6 +4041,28 @@ extension AppController {
         guard let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_native_dialog(h, $0, $1) })
         else { return nil }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    /// Show, refresh or retract `v`'s merge sheet.
+    func pollMerge(_ v: CellView) -> Bool {
+        let id = ObjectIdentifier(v)
+        let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_merge(v.handle, $0, $1) })
+        if let mc = mergeSheets[id] {
+            guard let data = data else {
+                mergeSheets[id] = nil
+                mc.dismiss()
+                return true
+            }
+            return mc.update(data)
+        }
+        guard let data = data, let win = v.window, win.isVisible, win.attachedSheet == nil
+        else { return false }
+        let mc = MergeController(view: v)
+        mc.onAfterAction = { [weak v] in v?.invalidateFrame(); v?.needsDisplay = true }
+        mergeSheets[id] = mc
+        _ = mc.update(data)
+        mc.present(in: win)
+        return true
     }
 
     /// Show, refresh or retract `v`'s Git history sheet.
@@ -7678,4 +7704,233 @@ final class HistoryController: NSObject, NSTableViewDataSource, NSTableViewDeleg
         view?.invalidateFrame()
         view?.needsDisplay = true
     }
+}
+
+
+// MARK: - macOS-style UI: merge sheet
+//
+// A file changed on disk while its buffer had unsaved edits and the two
+// don't merge cleanly. One card per conflict: your edits beside the disk's
+// version with a little agreed context, and Keep Mine / Use Disk / Keep Both
+// / Edit. Choices go to `tk_desktop_merge_choose`; Apply / Postpone run the
+// core's own merge-done / merge-cancel handlers.
+
+final class FlippedStack: NSView { override var isFlipped: Bool { true } }
+
+final class MergeController: NSObject, NSTextViewDelegate {
+    weak var view: CellView?
+    var onAfterAction: (() -> Void)?
+    private let panel: NSPanel
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let note = NSTextField(labelWithString: "")
+    private let cards = NSStackView()
+    private var segments: [NSSegmentedControl] = []
+    private var editors: [NSScrollView] = []
+    private var editViews: [NSTextView] = []
+    private var conflicts: [[String: Any]] = []
+    private var lastData = Data()
+    private var dismissed = false
+
+    init(view: CellView) {
+        self.view = view
+        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 960, height: 680),
+                        styleMask: [.titled, .resizable], backing: .buffered, defer: true)
+        super.init()
+        titleLabel.font = .systemFont(ofSize: 14, weight: .semibold)
+        titleLabel.lineBreakMode = .byTruncatingMiddle
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        note.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let sub = NSTextField(wrappingLabelWithString:
+            "This file changed on disk while you had unsaved edits, and the two overlap. Choose what to keep for each change.")
+        sub.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        sub.textColor = .secondaryLabelColor
+        note.textColor = .systemOrange
+        cards.orientation = .vertical
+        cards.alignment = .leading
+        cards.spacing = 18
+        cards.edgeInsets = NSEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
+        let doc = FlippedStack()
+        cards.translatesAutoresizingMaskIntoConstraints = false
+        doc.addSubview(cards)
+        let scroll = NSScrollView()
+        scroll.documentView = doc
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        doc.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            cards.topAnchor.constraint(equalTo: doc.topAnchor),
+            cards.leadingAnchor.constraint(equalTo: doc.leadingAnchor),
+            cards.trailingAnchor.constraint(equalTo: doc.trailingAnchor),
+            cards.bottomAnchor.constraint(equalTo: doc.bottomAnchor),
+            doc.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+        ])
+        let postpone = NSButton(title: "Postpone", target: self, action: #selector(postponeClicked))
+        postpone.keyEquivalent = "\u{1b}"
+        postpone.toolTip = "Keep your edits for now; the merge is offered again on save"
+        let apply = NSButton(title: "Apply", target: self, action: #selector(applyClicked))
+        apply.keyEquivalent = "\r"
+        let bar = NSStackView(views: [note, NSView(), postpone, apply])
+        let content = NSView()
+        for v in [titleLabel, sub, scroll, bar] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(v)
+            NSLayoutConstraint.activate([
+                v.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+                v.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
+            ])
+        }
+        NSLayoutConstraint.activate([
+            titleLabel.topAnchor.constraint(equalTo: content.topAnchor, constant: 14),
+            sub.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
+            scroll.topAnchor.constraint(equalTo: sub.bottomAnchor, constant: 10),
+            bar.topAnchor.constraint(equalTo: scroll.bottomAnchor, constant: 10),
+            bar.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -14),
+        ])
+        panel.contentView = content
+    }
+
+    func present(in win: NSWindow) {
+        let room = win.contentLayoutRect.size
+        panel.setContentSize(NSSize(width: max(640, min(1000, room.width - 40)), height: max(420, room.height - 30)))
+        win.beginSheet(panel, completionHandler: nil)
+    }
+
+    func dismiss() {
+        guard !dismissed else { return }
+        dismissed = true
+        panel.sheetParent?.endSheet(panel)
+    }
+
+    func update(_ data: Data) -> Bool {
+        guard data != lastData,
+              let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return false }
+        lastData = data
+        let name = ((o["file"] as? String ?? "") as NSString).lastPathComponent
+        titleLabel.stringValue = "“\(name)” changed on disk"
+        let cs = o["conflicts"] as? [[String: Any]] ?? []
+        if cs.count != conflicts.count { conflicts = cs; buildCards() } else { conflicts = cs }
+        for (i, c) in conflicts.enumerated() where i < segments.count {
+            let choice = c["choice"] as? Int ?? 0
+            segments[i].selectedSegment = choice == 0 ? -1 : choice - 1
+            editors[i].isHidden = choice != 4
+        }
+        return true
+    }
+
+    private func block(_ title: String, _ lines: [String], tint: NSColor) -> NSView {
+        let label = NSTextField(labelWithString: title)
+        label.font = .systemFont(ofSize: 11, weight: .semibold)
+        label.textColor = .secondaryLabelColor
+        let tv = NSTextField(wrappingLabelWithString: lines.isEmpty ? "(nothing)" : lines.joined(separator: "\n"))
+        tv.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        tv.isSelectable = true
+        tv.wantsLayer = true
+        tv.drawsBackground = true
+        tv.backgroundColor = tint.withAlphaComponent(0.14)
+        let s = NSStackView(views: [label, tv])
+        s.orientation = .vertical
+        s.alignment = .leading
+        s.spacing = 3
+        tv.widthAnchor.constraint(equalTo: s.widthAnchor).isActive = true
+        return s
+    }
+
+    private func context(_ lines: [String]) -> NSTextField {
+        let t = NSTextField(wrappingLabelWithString: lines.joined(separator: "\n"))
+        t.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        t.textColor = .tertiaryLabelColor
+        return t
+    }
+
+    private func buildCards() {
+        for v in cards.arrangedSubviews { cards.removeArrangedSubview(v); v.removeFromSuperview() }
+        segments = []; editors = []; editViews = []
+        for (i, c) in conflicts.enumerated() {
+            let head = NSTextField(labelWithString: "Change \(i + 1) of \(conflicts.count)")
+            head.font = .systemFont(ofSize: 12, weight: .semibold)
+            let seg = NSSegmentedControl(labels: ["Keep Mine", "Use Disk", "Keep Both", "Edit…"],
+                                         trackingMode: .selectOne, target: self, action: #selector(choiceChanged(_:)))
+            seg.tag = i
+            segments.append(seg)
+            let sides = NSStackView(views: [
+                block("YOUR EDITS", c["ours"] as? [String] ?? [], tint: .systemBlue),
+                block("ON DISK", c["theirs"] as? [String] ?? [], tint: .systemOrange),
+            ])
+            sides.distribution = .fillEqually
+            sides.alignment = .top
+            sides.spacing = 12
+            let ev = NSTextView()
+            ev.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+            ev.isRichText = false
+            ev.delegate = self
+            let edited = c["edited"] as? [String] ?? []
+            ev.string = (edited.isEmpty ? (c["ours"] as? [String] ?? []) : edited).joined(separator: "\n")
+            let es = NSScrollView()
+            es.documentView = ev
+            es.hasVerticalScroller = true
+            es.borderType = .bezelBorder
+            es.heightAnchor.constraint(equalToConstant: 110).isActive = true
+            es.isHidden = true
+            editors.append(es)
+            editViews.append(ev)
+            var parts: [NSView] = [NSStackView(views: [head, NSView(), seg])]
+            let before = c["before"] as? [String] ?? []
+            let after = c["after"] as? [String] ?? []
+            if !before.isEmpty { parts.append(context(before)) }
+            parts.append(sides)
+            parts.append(es)
+            if !after.isEmpty { parts.append(context(after)) }
+            let card = NSStackView(views: parts)
+            card.orientation = .vertical
+            card.alignment = .leading
+            card.spacing = 6
+            for p in parts { p.widthAnchor.constraint(equalTo: card.widthAnchor).isActive = true }
+            cards.addArrangedSubview(card)
+            card.widthAnchor.constraint(equalTo: cards.widthAnchor, constant: -16).isActive = true
+            if i + 1 < conflicts.count {
+                let sep = NSBox()
+                sep.boxType = .separator
+                cards.addArrangedSubview(sep)
+                sep.widthAnchor.constraint(equalTo: cards.widthAnchor, constant: -16).isActive = true
+            }
+        }
+    }
+
+    private func choose(_ i: Int, _ choice: Int) {
+        guard let h = view?.handle, h != 0 else { return }
+        let lines = choice == 4 ? editViews[i].string.components(separatedBy: "\n") : []
+        let json = (try? JSONSerialization.data(withJSONObject: lines))
+            .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+        withUTF8Arg(json) { p, l in tk_desktop_merge_choose(h, Int64(i), Int64(choice), p, l) }
+        note.stringValue = ""
+        lastData = Data()
+    }
+
+    @objc private func choiceChanged(_ seg: NSSegmentedControl) {
+        let i = seg.tag
+        let choice = seg.selectedSegment + 1
+        editors[i].isHidden = choice != 4
+        if choice == 4 { panel.makeFirstResponder(editViews[i]) }
+        choose(i, choice)
+    }
+
+    func textDidChange(_ notification: Notification) {
+        guard let tv = notification.object as? NSTextView,
+              let i = editViews.firstIndex(where: { $0 === tv }) else { return }
+        choose(i, 4)
+    }
+
+    private func finish(_ apply: Bool) {
+        guard let v = view, v.handle != 0 else { return }
+        if tk_desktop_merge_finish(v.handle, apply ? 1 : 0, Int64(v.cols()), Int64(v.rows())) == 0 && apply {
+            note.stringValue = "Choose what to keep for every change first."
+            NSSound.beep()
+        }
+        lastData = Data()
+        onAfterAction?()
+    }
+
+    @objc private func applyClicked() { finish(true) }
+    @objc private func postponeClicked() { finish(false) }
 }
