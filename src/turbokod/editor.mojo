@@ -80,7 +80,7 @@ from .string_utils import (
     is_printable_text_key, is_space_cp, is_word_codepoint,
     leading_indent_bytes, past_empty_match, prev_codepoint_start, split_lines_no_trailing,
     TAB_WIDTH, trailing_ws_start, truncate_to_columns, utf8_byte_of_cell, utf8_cell_of_byte,
-    utf8_codepoint_size, utf8_step_forward, word_char_step, word_range_at,
+    utf8_codepoint_size, utf8_floor, utf8_step_forward, word_char_step, word_range_at,
 )
 from .text_view import (
     Selection, VisualLine, paint_selection_overlay,
@@ -3360,6 +3360,10 @@ struct Editor(Copyable, Movable):
         var e_ln = len(e_line.as_bytes())
         if ec2 < 0: ec2 = 0
         if ec2 > e_ln: ec2 = e_ln
+        # A column inside a character (stale, or from a server counting
+        # in other units) would split it into invalid UTF-8.
+        sc2 = utf8_floor(s_line, sc2)
+        ec2 = utf8_floor(e_line, ec2)
         if el2 == sl and ec2 < sc2:
             ec2 = sc2
 

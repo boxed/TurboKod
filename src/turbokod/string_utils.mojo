@@ -49,6 +49,16 @@ def utf8_prefix(s: String, max_bytes: Int) -> String:
     return byte_slice(s, 0, end)
 
 
+def utf8_floor(s: String, col: Int) -> Int:
+    """``col`` moved back to the start of the codepoint it falls inside
+    (clamped to ``[0, len(s)]``), so a slice there can't split one."""
+    var b = s.as_bytes()
+    var c = min(max(col, 0), len(b))
+    while c > 0 and c < len(b) and (b[c] & 0xC0) == 0x80:
+        c -= 1
+    return c
+
+
 def utf8_suffix(s: String, max_bytes: Int) -> String:
     """The longest suffix of ``s`` of at most ``max_bytes`` bytes that
     starts on a codepoint boundary."""

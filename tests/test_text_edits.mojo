@@ -225,6 +225,21 @@ def test_a_formatters_many_edits_to_a_long_file() raises:
     assert_equal(ed.text_snapshot(), String(want[byte=0:want.byte_length() - 1]))
 
 
+def test_an_edit_inside_a_character_starts_at_its_start() raises:
+    # a stale or wrong column must not split "é" into invalid UTF-8
+    var ed = Editor(String("aéb\ncd"))
+    var edits = List[TextEditEntry]()
+    edits.append(_edit(0, 2, 0, 2, "X"))
+    assert_true(ed.apply_text_edits(edits^))
+    assert_equal(ed.text_snapshot(), String("aXéb\ncd"))
+    var ed2 = Editor(String("aéb\ncd"))
+    var edits2 = List[TextEditEntry]()
+    edits2.append(_edit(0, 0, 0, 2, ""))
+    edits2.append(_edit(1, 0, 1, 1, "é"))
+    assert_true(ed2.apply_text_edits(edits2^))
+    assert_equal(ed2.text_snapshot(), String("éb\néd"))
+
+
 def main() raises:
     setup_test_env()
     TestSuite.discover_tests[__functions_in_module()]().run()
