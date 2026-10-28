@@ -1011,6 +1011,9 @@ struct Editor(Copyable, Movable):
     var _vis_w: Int
     var _vis_mode: Int
     var _vis_dirty: Bool
+    # ``longest_line_width``, -1 until measured or after an edit: it
+    # measures every line, and the scroll bar wants it every frame.
+    var _longest_w: Int
     # When True, the main ``paint`` skips the editor-body overlay popups
     # (minimap tooltip / LSP hover / completion). Set by the host's
     # smooth-scroll overdraw render (``paint_editor_region``) so a popup
@@ -1636,6 +1639,7 @@ struct Editor(Copyable, Movable):
         self._vis_w = -1
         self._vis_mode = -1
         self._vis_dirty = True
+        self._longest_w = -1
         self._suppress_overlays = False
         self.host_owns_shadows = False
         self.file_path = String("")
@@ -1849,6 +1853,7 @@ struct Editor(Copyable, Movable):
         self._vis_w = copy._vis_w
         self._vis_mode = copy._vis_mode
         self._vis_dirty = copy._vis_dirty
+        self._longest_w = copy._longest_w
         self._suppress_overlays = copy._suppress_overlays
         self.host_owns_shadows = copy.host_owns_shadows
         self.file_path = copy.file_path
@@ -2646,6 +2651,7 @@ struct Editor(Copyable, Movable):
         # A buffer edit can change wrap counts, so the smooth-scroll
         # visual-row metrics cache must rebuild on next access.
         self._vis_dirty = True
+        self._longest_w = -1
         # Every code path that mutates the buffer eventually flows
         # through here — same hook drives the change-bar gutter so
         # we don't need to thread a separate "buffer changed" signal
@@ -9587,7 +9593,11 @@ struct Editor(Copyable, Movable):
         ``visible`` extent are both in cells, so measuring the line in bytes
         inflated the range on multi-byte lines and let the editor scroll past
         the content into blank space. ``utf8_codepoint_count`` rather than
-        ``display_columns`` so tabs count at their expanded width, as painted."""
+        ``display_columns`` so tabs count at their expanded width, as painted.
+
+        Cached by ``clamp_scroll`` (every frame) until the next edit."""
+        if self._longest_w >= 0:
+            return self._longest_w
         var m = 0
         for i in range(self.buffer.line_count()):
             var n = utf8_codepoint_count(self.buffer.line(i))
@@ -10671,6 +10681,8 @@ struct Editor(Copyable, Movable):
         stay positive and hide leading characters that the user can no
         longer scroll back to. Vertical axis is clamped symmetrically.
         """
+        if self._longest_w < 0 and not self._is_wrapping():
+            self._longest_w = self.longest_line_width()
         if self._is_wrapping():
             self.scroll_x = 0
         elif self.scroll_x != 0:

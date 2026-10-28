@@ -16,7 +16,7 @@ from turbokod.text_view import Selection, VisualLine, wrap_lines
 from turbokod.posix import monotonic_ms
 from turbokod.config import WRAP_NONE, WRAP_SOFT
 from turbokod.events import (
-    Event, KEY_DOWN, KEY_LEFT, KEY_UP, MOD_META, MOD_SHIFT, MOUSE_WHEEL_DOWN,
+    Event, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_UP, MOD_META, MOD_SHIFT, MOUSE_WHEEL_DOWN,
     MOUSE_WHEEL_UP
 )
 from turbokod.geometry import Point, Rect
@@ -229,6 +229,28 @@ def test_hscrollbar_reaches_last_column() raises:
     # Drag the thumb's leading cell to the far right end of the track.
     w.h_drag_thumb_to(bar.right, 0)
     assert_equal(w.editor.scroll_x, max_x)
+
+
+def test_the_widest_line_is_measured_again_after_each_kind_of_edit() raises:
+    # measured once per frame and kept until the buffer changes
+    var view = Rect(0, 0, 40, 10)
+    var ed = Editor(String("ab\nc"))
+    ed.clamp_scroll(view)
+    assert_equal(ed.longest_line_width(), 2)
+    _ = ed.handle_key(Event.key_event(UInt32(ord("x"))), view)
+    assert_equal(ed.longest_line_width(), 3)
+    ed.clamp_scroll(view)
+    _ = ed.handle_key(Event.key_event(KEY_ENTER), view)
+    ed.clamp_scroll(view)
+    assert_equal(ed.longest_line_width(), 2)
+    ed.paste_text(String("0123456789"))  # in front of "ab"
+    assert_equal(ed.longest_line_width(), 12)
+    ed.clamp_scroll(view)
+    _ = ed.undo()
+    assert_equal(ed.longest_line_width(), 2)
+    ed.clamp_scroll(view)
+    _ = ed.redo()
+    assert_equal(ed.longest_line_width(), 12)
 
 
 def test_hscrollbar_shift_wheel_scrolls_horizontally() raises:
