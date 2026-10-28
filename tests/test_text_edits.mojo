@@ -3,7 +3,7 @@ actions, auto-imports) must land exactly where and in the order the server
 says."""
 
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
-from turbokod.editor import Editor
+from turbokod.editor import Caret, Editor
 from turbokod.events import Event
 from turbokod.geometry import Rect
 from turbokod.lsp_dispatch import TextEditEntry
@@ -309,6 +309,25 @@ def test_a_whole_file_format_keeps_bookmarks_and_the_caret_line() raises:
     assert_equal(ed.primary_caret().col, 3)
     assert_true(ed.undo())
     assert_equal(ed.text_snapshot(), String("a = 1\nb  = 2\nc = 3\nd = 4\ne  = 5"))
+
+
+def test_every_caret_moves_with_the_text() raises:
+    var ed = Editor(String("a\nb\nc\nd\ne\nf"))
+    ed.selections = List[Caret]()
+    # (row, col, desired col, anchor row, anchor col)
+    ed.selections.append(Caret(1, 1, 1, 1, 1))
+    ed.selections.append(Caret(3, 0, 0, 3, 0))
+    ed.selections.append(Caret(5, 1, 1, 5, 1))
+    var edits = List[TextEditEntry]()
+    edits.append(_edit(2, 0, 5, 0, ""))
+    assert_true(ed.apply_text_edits(edits^))
+    assert_equal(ed.text_snapshot(), String("a\nb\nf"))
+    # the one in the removed lines lands on the buffer's text
+    assert_equal(len(ed.selections), 3)
+    assert_equal(ed.selections[2].row, 2)
+    assert_equal(ed.selections[2].col, 1)
+    for c in ed.selections:
+        assert_true(c.row < ed.buffer.line_count())
 
 
 def main() raises:

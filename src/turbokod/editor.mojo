@@ -3962,7 +3962,7 @@ struct Editor(Copyable, Movable):
     ):
         """Apply ``edits`` (buffer coordinates) without touching undo.
         They're sorted descending by start first, so applying one never
-        shifts the coordinates of those still to come; the primary caret
+        shifts the coordinates of those still to come; every caret
         and its anchor are relocated past each edit (by the line delta when
         it ended above them, tracking the relocated tail when it ended on
         their row). ``hl_low`` / ``hl_high`` are widened to the rows
@@ -3992,18 +3992,19 @@ struct Editor(Copyable, Movable):
                 ed.start_line, ed.start_char,
                 ed.end_line, ed.end_char, ed.new_text,
             )
-            var cur = self._shift_pos_after_edit(
-                self.selections[0].row, self.selections[0].col,
-                res[1], res[2], res[0], res[3],
-            )
-            var anc = self._shift_pos_after_edit(
-                self.selections[0].anchor_row, self.selections[0].anchor_col,
-                res[1], res[2], res[0], res[3],
-            )
-            self.selections[0].row = cur[0]
-            self.selections[0].col = cur[1]
-            self.selections[0].anchor_row = anc[0]
-            self.selections[0].anchor_col = anc[1]
+            for c in range(len(self.selections)):
+                var cur = self._shift_pos_after_edit(
+                    self.selections[c].row, self.selections[c].col,
+                    res[1], res[2], res[0], res[3],
+                )
+                var anc = self._shift_pos_after_edit(
+                    self.selections[c].anchor_row, self.selections[c].anchor_col,
+                    res[1], res[2], res[0], res[3],
+                )
+                self.selections[c].row = cur[0]
+                self.selections[c].col = cur[1]
+                self.selections[c].anchor_row = anc[0]
+                self.selections[c].anchor_col = anc[1]
             if ed.start_line < hl_low:
                 hl_low = ed.start_line
             if ed.end_line > hl_high:
@@ -4037,6 +4038,9 @@ struct Editor(Copyable, Movable):
             for f in self._finer_edits(e):
                 finer.append(f)
         self._apply_edits_desc(finer^, hl_low, hl_high)
+        # A caret inside a range taken out stays where it was: back into
+        # the buffer with it, merged with any it now sits on
+        self._install_carets(self.selections.copy())
         self.dirty = True
         self._mark_hl_dirty(hl_low, hl_high)
         return True
