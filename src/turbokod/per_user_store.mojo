@@ -9,7 +9,7 @@ each carry their own copy.
 """
 
 
-from .file_io import join_path, make_dir, write_file
+from .file_io import join_path, make_dir, stat_file, write_file
 from .posix import getenv_value
 
 
@@ -60,6 +60,11 @@ def ensure_per_user_dir(project_root: String):
     var per_user = join_path(top, _DIR_PER_USER)
     make_dir(per_user)
     make_dir(join_path(per_user, current_username()))
+    # Keep it out of git, or every project opened shows an untracked
+    # ``.turbokod``. Only when missing, so an edited one stays as it is.
+    var ignore = join_path(per_user, String(".gitignore"))
+    if not stat_file(ignore).ok:
+        _ = write_file(ignore, String("*\n"))
 
 
 def write_per_user_file(

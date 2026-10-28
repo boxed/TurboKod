@@ -5,6 +5,9 @@ from std.ffi import external_call
 from std.testing import TestSuite, assert_equal
 from turbokod.desktop import Desktop, HELP_HOTKEYS
 from turbokod.drafts_store import StoredDraft, load_drafts, save_drafts
+from turbokod.file_io import read_file, write_file
+from turbokod.lsp import capture_command
+from turbokod.string_utils import string_list
 from turbokod.events import Event
 from turbokod.geometry import Rect
 from support import _temp_path, setup_test_env
@@ -84,6 +87,24 @@ def test_only_typed_untitled_buffers_are_kept_as_drafts() raises:
     assert_equal(len(drafts), 1)
     assert_equal(drafts[0].content, String("x"))
     assert_equal(drafts[0].seq, 1)
+
+
+def test_per_user_state_stays_out_of_git() raises:
+    var root = _temp_path(String("_per_user_git"))
+    _ = capture_command(string_list("rm", "-rf", root))
+    _ = capture_command(string_list("git", "init", "-q", root))
+    var drafts = List[StoredDraft]()
+    var draft = StoredDraft()
+    draft.content = String("x")
+    drafts.append(draft^)
+    assert_equal(save_drafts(root, drafts), True)
+    var status = capture_command(string_list("git", "-C", root, "status", "--porcelain", "-uall"))
+    assert_equal(status.stdout, String(""))
+    # an edited one is left alone
+    assert_equal(write_file(root + "/.turbokod/per_user/.gitignore", String("drafts.json\n")), True)
+    assert_equal(save_drafts(root, drafts), True)
+    assert_equal(read_file(root + "/.turbokod/per_user/.gitignore"), String("drafts.json\n"))
+    _ = capture_command(string_list("rm", "-rf", root))
 
 
 def main() raises:
