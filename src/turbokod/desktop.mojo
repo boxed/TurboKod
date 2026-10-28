@@ -4766,7 +4766,8 @@ struct Desktop(Movable):
             self.confirm_dialog.paint(canvas, screen)
         if not native:
             self.message_request_dialog.paint(canvas, screen)
-        self.color_picker.paint(canvas, screen)
+        if not native:
+            self.color_picker.paint(canvas, screen)
         self.merge_view.paint(canvas, screen)
         if not (native and self.quick_open.active):
             self.quick_open.paint(canvas, screen)
@@ -8668,7 +8669,8 @@ struct Desktop(Movable):
         if not self.native_ui():
             return False
         return self.confirm_dialog.active or self.native_prompt_active() \
-            or self.save_as_dialog.active or self.message_request_dialog.active
+            or self.save_as_dialog.active or self.message_request_dialog.active \
+            or self.color_picker.active
 
     def _after_message_request(mut self):
         """The message-request list was answered: it either picked a color
@@ -8677,6 +8679,17 @@ struct Desktop(Movable):
             self._on_colorpres_submit()
         else:
             self._on_message_request_submit()
+
+    def native_color_answer(mut self, rgb_packed: Int, mode: Int, ok: Bool):
+        """The native color sheet closed: ``ok`` writes the color in
+        ``mode``'s notation, exactly like the in-grid Apply."""
+        if not self.color_picker.active:
+            return
+        if ok:
+            self.color_picker.native_apply(rgb_packed, mode)
+        else:
+            self.color_picker.native_cancel()
+        self._on_color_picker_submit()
 
     def native_choice_answer(mut self, index: Int):
         """Answer the message-request list from a native alert (-1 =

@@ -1314,6 +1314,10 @@ def _native_dialog_json(ref d: Desktop) -> String:
             String("destructive"),
             json_int(d.confirm_dialog.destructive_index()),
         )
+    elif d.color_picker.active:
+        o.put(String("kind"), json_str(String("color")))
+        o.put(String("rgb"), json_int(d.color_picker.current_rgb_packed()))
+        o.put(String("mode"), json_int(d.color_picker.mode))
     elif d.message_request_dialog.active:
         o.put(String("kind"), json_str(String("choice")))
         o.put(String("message"), json_str(d.message_request_dialog.message))
@@ -2097,6 +2101,17 @@ def tk_desktop_native_confirm_answer(h: Int, choice: Int) abi("C") -> Int32:
     if h == 0:
         return ACT_NONE
     return _action_code(_desk(h)[].native_confirm_answer(choice))
+
+
+@export
+def tk_desktop_native_color_answer(
+    h: Int, rgb: Int, mode: Int, ok: Int,
+) abi("C"):
+    """Answer the ``color`` sheet: ``0xRRGGBB``, the notation (0 OkLab, 1
+    RGB, 2 HSL), and ``ok`` = 0 when cancelled."""
+    if h == 0:
+        return
+    _desk(h)[].native_color_answer(rgb, mode, ok != 0)
 
 
 @export

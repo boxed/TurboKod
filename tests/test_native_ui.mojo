@@ -11,6 +11,7 @@ from turbokod.desktop import (
     Desktop, EDITOR_FIND, EDITOR_GOTO, EDITOR_REPLACE, VIEW_NATIVE_UI,
 )
 from turbokod.search_options import SearchOptions
+from turbokod.color_picker import ColorPickerDialog, MODE_RGB
 from turbokod.events import Event, KEY_ENTER
 from turbokod.geometry import Point, Rect
 from turbokod.window import Window
@@ -341,6 +342,17 @@ def test_native_find_bar_steps_replaces_and_remembers_the_needle() raises:
     var text = d.windows.windows[0].editor.text_snapshot()
     assert_false(String("foo") in text)
     assert_true(String("baz") in text)
+
+
+def test_native_color_pick_is_written_in_the_chosen_notation() raises:
+    var cp = ColorPickerDialog()
+    cp.open(UInt32(0xFF0000))
+    assert_equal(cp.current_rgb_packed(), 0xFF0000)
+    cp.native_apply(0x00FF00, MODE_RGB)
+    assert_true(cp.accepted)
+    assert_true(cp.submitted)
+    assert_true(String("rgb") in cp.result_text)
+    assert_true(String("255") in cp.result_text)
 
 
 def main() raises:

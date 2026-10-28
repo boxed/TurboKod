@@ -360,6 +360,29 @@ struct ColorPickerDialog(Movable):
 
     # --- key handling -----------------------------------------------------
 
+    # --- native host (macOS-style UI) ------------------------------------
+
+    def current_rgb_packed(self) -> Int:
+        """The picked color as ``0xRRGGBB`` — what the native color well
+        starts on."""
+        var s = self._current_srgb()
+        var c = srgb_to_rgb255(s[0], s[1], s[2])
+        return (c[0] << 16) | (c[1] << 8) | c[2]
+
+    def native_apply(mut self, rgb_packed: Int, mode: Int):
+        """Accept a color chosen in the system color panel, written in
+        ``mode`` (``MODE_OKLAB`` / ``_RGB`` / ``_HSL``) — the same literal
+        the in-grid Apply would produce."""
+        if mode >= MODE_OKLAB and mode <= MODE_HSL:
+            self.mode = mode
+        var rgb = unpack_rgb(UInt32(rgb_packed))
+        var srgb = rgb255_to_srgb(rgb[0], rgb[1], rgb[2])
+        self._set_chan_from_srgb(srgb[0], srgb[1], srgb[2])
+        self._apply()
+
+    def native_cancel(mut self):
+        self._cancel()
+
     def _apply(mut self):
         self.result_text = self._format_current()
         self.accepted = True

@@ -4170,6 +4170,7 @@ extension AppController {
         case "prompt": showPromptSheet(dialog, for: v, in: win)
         case "save_as": showSavePanel(dialog, for: v, in: win)
         case "choice": showChoiceSheet(dialog, for: v, in: win)
+        case "color": showColorSheet(dialog, for: v, in: win)
         default: return false
         }
         return true
@@ -4262,6 +4263,42 @@ extension AppController {
             let i = resp.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
             let index = i >= 0 && i < actions.count ? i : -1
             self.finishNativeSheet(v) { tk_desktop_native_choice_answer(v.handle, Int64(index)); return 0 }
+        }
+    }
+
+    /// The color under the swatch: a system color well (it opens the macOS
+    /// color panel) and the notation to write it back in.
+    private func showColorSheet(_ d: [String: Any], for v: CellView, in win: NSWindow) {
+        let rgb = d["rgb"] as? Int ?? 0
+        let well = NSColorWell(frame: NSRect(x: 0, y: 34, width: 280, height: 44))
+        if #available(macOS 13.0, *) { well.colorWellStyle = .expanded }
+        well.color = PickerController.rgb(rgb)
+        let format = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 280, height: 26))
+        format.addItems(withTitles: ["OkLab", "RGB", "HSL"])
+        format.selectItem(at: d["mode"] as? Int ?? 0)
+        let box = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 80))
+        box.addSubview(well)
+        box.addSubview(format)
+        let alert = NSAlert()
+        alert.messageText = "Color"
+        alert.informativeText = "Pick a color; it's written back in the notation below."
+        alert.accessoryView = box
+        alert.addButton(withTitle: "Apply")
+        alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
+        nativeSheets[ObjectIdentifier(v)] = alert.window
+        alert.beginSheetModal(for: win) { [weak self, weak v] resp in
+            guard let self = self, let v = v, resp != .abort else { return }
+            NSColorPanel.shared.orderOut(nil)
+            let c = well.color.usingColorSpace(.sRGB) ?? well.color
+            let packed = (Int((c.redComponent * 255).rounded()) << 16)
+                | (Int((c.greenComponent * 255).rounded()) << 8)
+                | Int((c.blueComponent * 255).rounded())
+            let ok = resp == .alertFirstButtonReturn
+            let mode = format.indexOfSelectedItem
+            self.finishNativeSheet(v) {
+                tk_desktop_native_color_answer(v.handle, Int64(packed), Int64(mode), ok ? 1 : 0)
+                return 0
+            }
         }
     }
 
