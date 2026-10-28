@@ -585,6 +585,47 @@ def test_review_teardown_saves_and_closes_editable_window() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
+def _review_with_edit(mut d: Desktop, path: String) raises -> Int:
+    d.windows.add(Window.from_file(String("edit"), Rect(0, 1, 40, 12), path))
+    var ridx = len(d.windows.windows) - 1
+    d.windows.windows[ridx]._transient = True
+    d.windows.windows[ridx].editor.review_mode = True
+    d.windows.windows[ridx].editor.read_only = False
+    d._review_win_idx = ridx
+    d._review_host_path = path
+    d.windows.focus_by_index(ridx)
+    _ = d.windows.windows[ridx].editor.handle_key(_key(KEY_END), _VIEW)
+    _ = d.windows.windows[ridx].editor.handle_key(_key(UInt32(ord("!"))), _VIEW)
+    return ridx
+
+
+def test_review_edits_merge_with_a_change_written_meanwhile() raises:
+    # e.g. saved from the file's own window while reviewing
+    var path = _temp_path(String("_review_merge.txt"))
+    assert_true(write_file(path, String("a\nm\nz\n")))
+    var d = Desktop()
+    _ = _review_with_edit(d, path)
+    assert_true(write_file(path, String("a\nm\nz\nadded\n")))
+    d._review_teardown()
+    assert_equal(read_file(path), String("a!\nm\nz\nadded\n"))
+
+
+def test_review_edits_that_conflict_stay_open() raises:
+    var path = _temp_path(String("_review_conflict.txt"))
+    assert_true(write_file(path, String("a\n")))
+    var d = Desktop()
+    var ridx = _review_with_edit(d, path)
+    assert_true(write_file(path, String("b\n")))
+    d._review_teardown()
+    assert_equal(read_file(path), String("b\n"))
+    # still there, as an ordinary window, with the edit and the merge to do
+    assert_equal(len(d.windows.windows), ridx + 1)
+    assert_false(d.windows.windows[ridx]._transient)
+    assert_false(d.windows.windows[ridx].editor.review_mode)
+    assert_true(d.windows.windows[ridx].editor.dirty)
+    assert_equal(d.windows.windows[ridx].editor.buffer.line(0), String("a!"))
+
+
 def test_review_goto_change_saves_edits() raises:
     """Navigating to the next change in an editable (unstaged) review flushes
     the current file's edits to disk — editing in review behaves like an

@@ -4347,8 +4347,8 @@ struct Desktop(Movable):
         self.windows.windows[idx].editor.diff_emph_by_row = emph_by_row^
 
     def _review_teardown(mut self):
-        """Always close the transient, review-owned window — review never
-        leaves a window behind. The review window is fully isolated (a separate
+        """Close the transient, review-owned window — review never leaves a
+        window behind but one holding edits it couldn't save. The review window is fully isolated (a separate
         buffer, excluded from view-state / recents / nav / session — see the
         ``_transient`` guards in those per-frame passes), so closing it leaves
         the rest of the workspace, including every open window's scroll
@@ -4356,11 +4356,21 @@ struct Desktop(Movable):
 
         For an editable (unstaged) review the buffer is the live worktree file;
         flush any unsaved edits to disk before closing so editing-in-review
-        persists without leaving a window open. Idempotent."""
+        persists without leaving a window open — unless they can't be saved
+        (they conflict with a change made meanwhile), when the window stays
+        as an ordinary one. Idempotent."""
         var idx = self._review_win_idx
         if idx >= 0 and idx < len(self.windows.windows):
             self._review_flush_edits()
-            _ = self.windows.close_by_index(idx)
+            if self.windows.windows[idx].editor.dirty:
+                # Not saved (it conflicts with a change made meanwhile):
+                # closing would lose the edits, so it stays, as an ordinary
+                # window, where the merge view picks it up.
+                self.windows.windows[idx]._transient = False
+                self.windows.windows[idx].editor.review_mode = False
+                self.windows.windows[idx].editor.diff_active = False
+            else:
+                _ = self.windows.close_by_index(idx)
         self._review_win_idx = -1
         self._review_host_path = String("")
 

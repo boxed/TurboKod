@@ -4388,9 +4388,11 @@ struct Editor(Copyable, Movable):
             # Regions already stashed for the host; resolving them is the
             # only way forward.
             return False
-        # Review-hosted editors don't track the file's stat (see
-        # ``check_for_external_change``), so there's nothing to compare.
-        if not self.review_mode:
+        # Read-only review buffers don't track the file's stat (see
+        # ``check_for_external_change``), so there's nothing to compare. An
+        # editable one is the file itself, loaded with its stat: written
+        # unchecked, it went over whatever was saved to it meanwhile.
+        if not (self.review_mode and self.read_only):
             var info = stat_file(self.file_path)
             if info.ok and (
                 self.disk_conflict
