@@ -3425,12 +3425,11 @@ struct Editor(Copyable, Movable):
         self.buffer.delete_rows(sl + 1, el2 - sl)
 
         # Split ``new_text`` on '\n': the first piece joins the start row,
-        # each further one becomes a row of its own below it. ``insert``
-        # moves the rows below in one go; shifting them down a row at a
-        # time, copying each, made a formatter's edits to a big file slow.
+        # each further one becomes a row of its own below it, all put in
+        # at once (``insert_rows``).
         var bytes = new_text.as_bytes()
         var line_start = 0
-        var added = 0
+        var rows = List[String]()
         var first = True
         for i in range(len(bytes) + 1):
             if i < len(bytes) and bytes[i] != 0x0A:
@@ -3440,9 +3439,10 @@ struct Editor(Copyable, Movable):
                 self.buffer.lines[sl] = self.buffer.lines[sl] + piece
                 first = False
             else:
-                added += 1
-                self.buffer.lines.insert(sl + added, piece^)
+                rows.append(piece^)
             line_start = i + 1
+        var added = len(rows)
+        self.buffer.insert_rows(sl + 1, rows^)
         var current_row = sl + added
         # Suffix lands on whatever row the last newline left us on. Its
         # byte column there (before appending) is where any cursor that
