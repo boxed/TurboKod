@@ -1809,6 +1809,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // macOS-style UI: the native picker sheet up on each window, if any.
     var pickers: [ObjectIdentifier: PickerController] = [:]
     var welcome: WelcomeController?
+    // macOS-style UI: the NSMenu standing in for a core popup, per window.
+    var popups: [ObjectIdentifier: PopupMenu] = [:]
     // Menu mirror: the snapshot from Mojo's menu_bar, hashed so we only
     // rebuild NSMenu when something actually changed (focus/visibility/
     // checkmark/edit-extras flips). `menuTracking` is set while AppKit is
@@ -2202,6 +2204,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if self.pollNativeDialog(v) { changed = true }
                 if self.pollTabStrip(v) { changed = true }
                 if self.pollPicker(v) { changed = true }
+                if self.pollPopup(v) { changed = true }
             }
             self.drainAttention()
             self.idleTicks = changed ? 0 : self.idleTicks &+ 1
@@ -3370,6 +3373,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         tabStrips[ObjectIdentifier(v)] = nil
         nativeSheets[ObjectIdentifier(v)] = nil
         pickers[ObjectIdentifier(v)] = nil
+        popups[ObjectIdentifier(v)] = nil
         // Close is instant; the language servers get their goodbye in the
         // background. `begin_close` terminates every child except the LSP
         // transports and sends each server `shutdown`, then we poll off the
@@ -3923,6 +3927,35 @@ extension AppController {
         guard let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_native_dialog(h, $0, $1) })
         else { return nil }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    /// Pop the core's anchored popup up as an NSMenu, or refresh the one
+    /// that's open (quick fixes land while it's tracking).
+    func pollPopup(_ v: CellView) -> Bool {
+        let id = ObjectIdentifier(v)
+        let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_popup(v.handle, $0, $1) })
+        if let open = popups[id] {
+            if let data = data { open.refresh(data) }
+            return false
+        }
+        guard let data = data, let win = v.window, win.isVisible, win.attachedSheet == nil
+        else { return false }
+        let pm = PopupMenu(view: v)
+        popups[id] = pm
+        pm.refresh(data)
+        // Pop up outside the timer callback: NSMenu tracking is a nested
+        // run loop, and the tick has to keep running (common modes) under it.
+        DispatchQueue.main.async { [weak self, weak v] in
+            guard let self = self, let v = v else { return }
+            let code = pm.track()
+            self.popups[id] = nil
+            guard v.handle != 0 else { return }
+            let act = tk_desktop_popup_choose(v.handle, Int64(code))
+            self.handleHostAction(act, sourceHandle: v.handle, view: v)
+            v.invalidateFrame()
+            v.needsDisplay = true
+        }
+        return true
     }
 
     /// Show, refresh or retract `v`'s native picker sheet. True on change.
@@ -5339,4 +5372,54 @@ final class LookCard: NSView {
         fill(.black, NSRect(x: r.minX, y: r.maxY - 10, width: r.width, height: 10))
         fill(gray, NSRect(x: r.minX, y: r.maxY - 10, width: r.width, height: 10))
     }
+}
+
+
+// MARK: - macOS-style UI: popup menus
+//
+// The core's anchored popups (context menus, spelling, test gutter,
+// diagnostics, LSP status) as a real NSMenu at the anchor cell. The answer
+// is the picked item's code, 0 when dismissed; the core runs the menu's own
+// submit handler either way.
+
+final class PopupMenu: NSObject {
+    private weak var view: CellView?
+    private let menu = NSMenu()
+    private var last = Data()
+    private var anchor = NSPoint.zero
+    private var chosen = 0
+
+    init(view: CellView) {
+        self.view = view
+        super.init()
+        menu.autoenablesItems = false
+    }
+
+    func refresh(_ data: Data) {
+        guard data != last,
+              let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return }
+        last = data
+        anchor = NSPoint(x: CGFloat(o["x"] as? Int ?? 0) * CELL_W,
+                         y: CGFloat((o["y"] as? Int ?? 0) + 1) * CELL_H)
+        menu.removeAllItems()
+        for it in o["items"] as? [[String: Any]] ?? [] {
+            let mi = NSMenuItem(title: it["label"] as? String ?? "",
+                                action: #selector(pick(_:)), keyEquivalent: "")
+            mi.target = self
+            mi.tag = it["code"] as? Int ?? 0
+            mi.isEnabled = it["enabled"] as? Bool ?? true
+            menu.addItem(mi)
+        }
+    }
+
+    /// Runs the menu (blocking, nested run loop); the picked code or 0.
+    func track() -> Int {
+        guard let v = view else { return 0 }
+        chosen = 0
+        menu.popUp(positioning: nil, at: anchor, in: v)
+        return chosen
+    }
+
+    @objc private func pick(_ sender: NSMenuItem) { chosen = sender.tag }
 }

@@ -23,6 +23,7 @@ from .events import (
 from .geometry import Point, Rect
 from .string_utils import display_columns
 from .anchored_menu import (
+    NativeMenuItem,
     anchored_menu_mouse, anchored_menu_rect, paint_anchored_chrome,
 )
 
@@ -128,6 +129,16 @@ struct TestGutterMenu(Movable):
             _ = painter.put_text(
                 canvas, Point(rect.a.x + 2, y0), label, row_attr,
             )
+
+    def native_items(self) -> List[NativeMenuItem]:
+        var out = List[NativeMenuItem]()
+        out.append(NativeMenuItem(_LABEL_RUN, TEST_ACTION_RUN, True))
+        out.append(NativeMenuItem(_LABEL_DEBUG, TEST_ACTION_DEBUG, True))
+        return out^
+
+    def choose(mut self, action: Int):
+        """Answer the menu from the native host (0 = dismissed)."""
+        self._resolve(action)
 
     def _action_for_row(self, row: Int) -> Int:
         return TEST_ACTION_RUN if row == 0 else TEST_ACTION_DEBUG

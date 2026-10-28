@@ -1406,6 +1406,51 @@ def tk_desktop_tab_close(h: Int, idx: Int) abi("C"):
     _desk(h)[].close_tab(idx)
 
 
+# --- macOS-style UI: popup menus --------------------------------------------
+
+
+@export
+def tk_desktop_popup(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
+    """The anchored popup (editor / tab context menu, spelling, test
+    gutter, diagnostic, LSP status) the host shows as an ``NSMenu``:
+    ``{kind, x, y, items: [{label, code, enabled}]}`` with ``x`` / ``y``
+    the anchor cell. 0 when none is up. Same buffer contract as
+    ``tk_desktop_native_dialog``."""
+    if h == 0:
+        return 0
+    ref d = _desk(h)[]
+    var kind = d.native_popup_kind()
+    if len(kind.as_bytes()) == 0:
+        return 0
+    var o = json_object()
+    o.put(String("kind"), json_str(kind))
+    var at = d.native_popup_anchor()
+    o.put(String("x"), json_int(at.x))
+    o.put(String("y"), json_int(at.y))
+    var items = json_array()
+    var rows = d.native_popup_items()
+    for i in range(len(rows)):
+        var it = json_object()
+        it.put(String("label"), json_str(rows[i].label))
+        it.put(String("code"), json_int(rows[i].code))
+        it.put(String("enabled"), json_bool(rows[i].enabled))
+        items.append(it)
+    o.put(String("items"), items)
+    return _write_out(encode_json(o), out_ptr, cap)
+
+
+@export
+def tk_desktop_popup_choose(h: Int, code: Int) abi("C") -> Int32:
+    """The native popup closed with item ``code`` picked (0 = dismissed).
+    Returns a host action code."""
+    if h == 0:
+        return ACT_NONE
+    try:
+        return _action_code(_desk(h)[].native_popup_choose(code))
+    except:
+        return ACT_NONE
+
+
 # --- first-launch welcome window ---------------------------------------------
 
 

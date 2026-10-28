@@ -119,6 +119,7 @@ from .spell import Speller
 from .spell_menu import (
     SPELL_ACTION_ADD_PROJECT, SPELL_ACTION_ADD_USER, SpellMenu,
 )
+from .anchored_menu import NativeMenuItem
 from .install_runner import InstallResult, InstallRunner
 from .local_changes import LocalChanges
 from .review_mode import ReviewMode
@@ -4774,14 +4775,20 @@ struct Desktop(Movable):
         # Spell-action popup. Painted last among modals so it overlays
         # everything else (it's contextual to the editor cursor and
         # routinely opens above already-rendered widgets).
-        self.spell_menu.paint(canvas, screen)
+        if not (native and self.spell_menu.active):
+            self.spell_menu.paint(canvas, screen)
         self.git_gutter_menu.paint(canvas, screen)
-        self.test_gutter_menu.paint(canvas, screen)
+        if not (native and self.test_gutter_menu.active):
+            self.test_gutter_menu.paint(canvas, screen)
         self.blame_popup.paint(canvas, screen)
-        self.diagnostic_menu.paint(canvas, screen)
-        self.editor_context_menu.paint(canvas, screen)
-        self.tab_context_menu.paint(canvas, screen)
-        self.lsp_status_menu.paint(canvas, screen)
+        if not (native and self.diagnostic_menu.active):
+            self.diagnostic_menu.paint(canvas, screen)
+        if not (native and self.editor_context_menu.active):
+            self.editor_context_menu.paint(canvas, screen)
+        if not (native and self.tab_context_menu.active):
+            self.tab_context_menu.paint(canvas, screen)
+        if not (native and self.lsp_status_menu.active):
+            self.lsp_status_menu.paint(canvas, screen)
         self.breakpoint_menu.paint(canvas, screen)
         # Wait-for dropdown popup overlays the rest of the breakpoint
         # dialog. Paint after the dialog body so the popup z-orders on
@@ -7703,10 +7710,12 @@ struct Desktop(Movable):
         if event.kind == EVENT_MOD_KEY:
             _ = self.windows.handle_mod_key(event)
             return Optional[String]()
-        if self.native_dialog_active():
-            # The host is showing this dialog as a native sheet, which is
-            # modal to the window — anything that still reaches us (a
-            # replayed menu chord) must not answer it behind the sheet's back.
+        if self.native_dialog_active() \
+                or len(self.native_popup_kind().as_bytes()) > 0:
+            # The host is showing this dialog as a native sheet (or the
+            # popup as an NSMenu), which is modal — anything that still
+            # reaches us (a replayed menu chord) must not answer it behind
+            # its back.
             return Optional[String]()
         if self.spell_menu.active:
             # Spell-action popup is the topmost modal: it opens
@@ -8830,6 +8839,93 @@ struct Desktop(Movable):
     # them as a native panel, pushes the search field's text in and reads
     # rows back (``tk_desktop_picker*``). Activating a row runs the same
     # ``_after_*`` handler the in-grid Enter does.
+
+    # --- macOS-style UI: popup menus as NSMenu ---------------------------
+
+    def native_popup_kind(self) -> String:
+        """The anchored popup the host shows as a native ``NSMenu``, or
+        empty. (The git gutter's hunk peek stays in-grid: it's a diff
+        preview with a button, not a menu.)"""
+        if not self.native_ui():
+            return String("")
+        if self.spell_menu.active:
+            return String("spell")
+        if self.test_gutter_menu.active:
+            return String("test")
+        if self.diagnostic_menu.active:
+            return String("diagnostic")
+        if self.editor_context_menu.active:
+            return String("context")
+        if self.tab_context_menu.active:
+            return String("tab_context")
+        if self.lsp_status_menu.active:
+            return String("lsp_status")
+        return String("")
+
+    def native_popup_items(self) -> List[NativeMenuItem]:
+        var kind = self.native_popup_kind()
+        if kind == String("spell"):
+            return self.spell_menu.native_items()
+        if kind == String("test"):
+            return self.test_gutter_menu.native_items()
+        if kind == String("diagnostic"):
+            return self.diagnostic_menu.native_items()
+        if kind == String("context"):
+            return self.editor_context_menu.native_items()
+        if kind == String("tab_context"):
+            return self.tab_context_menu.native_items()
+        if kind == String("lsp_status"):
+            return self.lsp_status_menu.native_items()
+        return List[NativeMenuItem]()
+
+    def native_popup_anchor(self) -> Point:
+        var kind = self.native_popup_kind()
+        if kind == String("spell"):
+            return Point(self.spell_menu.anchor_x, self.spell_menu.anchor_y)
+        if kind == String("test"):
+            return Point(
+                self.test_gutter_menu.anchor_x, self.test_gutter_menu.anchor_y,
+            )
+        if kind == String("diagnostic"):
+            return Point(
+                self.diagnostic_menu.anchor_x, self.diagnostic_menu.anchor_y,
+            )
+        if kind == String("context"):
+            return Point(
+                self.editor_context_menu.anchor_x,
+                self.editor_context_menu.anchor_y,
+            )
+        if kind == String("tab_context"):
+            return Point(
+                self.tab_context_menu.anchor_x, self.tab_context_menu.anchor_y,
+            )
+        return Point(self.lsp_status_menu.anchor_x, self.lsp_status_menu.anchor_y)
+
+    def native_popup_choose(mut self, code: Int) raises -> Optional[String]:
+        """The native menu closed: ``code`` is the picked item's, 0 when it
+        was dismissed — either way the menu's own submit handler runs, as
+        for an in-grid pick or Esc."""
+        var kind = self.native_popup_kind()
+        if kind == String("spell"):
+            self.spell_menu.choose(code)
+            self._on_spell_menu_submit()
+        elif kind == String("test"):
+            self.test_gutter_menu.choose(code)
+            self._on_test_gutter_menu_submit()
+        elif kind == String("diagnostic"):
+            self.diagnostic_menu.choose(code)
+            if self.diagnostic_menu.submitted:
+                self._on_diagnostic_menu_submit()
+        elif kind == String("context"):
+            self.editor_context_menu.choose(code)
+            self._on_context_menu_submit()
+        elif kind == String("tab_context"):
+            self.tab_context_menu.choose(code)
+            return self._on_tab_context_menu_submit()
+        elif kind == String("lsp_status"):
+            self.lsp_status_menu.choose(code)
+            self._on_lsp_status_menu_submit()
+        return Optional[String]()
 
     def native_picker_kind(self) -> String:
         if not self.native_ui():

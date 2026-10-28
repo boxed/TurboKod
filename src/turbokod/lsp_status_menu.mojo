@@ -22,6 +22,7 @@ from .events import (
 from .geometry import Point, Rect
 from .string_utils import display_columns
 from .anchored_menu import (
+    NativeMenuItem,
     anchored_menu_mouse, anchored_menu_rect, menu_row_y, paint_anchored_chrome,
 )
 
@@ -75,6 +76,15 @@ struct LspStatusMenu(Movable):
         self.submitted = False
         self.action = LSP_MENU_ACTION_NONE
         self.tracking = False
+
+    def native_items(self) -> List[NativeMenuItem]:
+        var out = List[NativeMenuItem]()
+        out.append(NativeMenuItem(_LABEL_RESTART, LSP_MENU_ACTION_RESTART, True))
+        return out^
+
+    def choose(mut self, action: Int):
+        """Answer the menu from the native host (0 = dismissed)."""
+        self._resolve(action)
 
     def _row_count(self) -> Int:
         return 1

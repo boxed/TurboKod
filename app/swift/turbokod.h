@@ -169,6 +169,11 @@ void tk_desktop_picker_close(int64_t h);
 // First-launch welcome window: _needed is 1 until answered; _options writes
 // {themes, builtin_fonts, native_ui, theme, font, font_size}; _apply takes
 // {native_ui, theme, font, font_size} JSON (done = 1 marks it answered).
+// macOS-style UI popups as NSMenu: _popup writes {kind, x, y, items: [{label,
+// code, enabled}]} (anchor in cells; 0 = none up), _popup_choose answers it
+// (code 0 = dismissed) and returns a host action code.
+int64_t tk_desktop_popup(int64_t h, int64_t out_ptr, int64_t cap);
+int32_t tk_desktop_popup_choose(int64_t h, int64_t code);
 int32_t tk_desktop_welcome_needed(int64_t h);
 int64_t tk_desktop_welcome_options(int64_t h, int64_t out_ptr, int64_t cap);
 void tk_desktop_welcome_apply(int64_t h, int64_t ptr, int64_t len, int64_t done);

@@ -11,7 +11,7 @@ from turbokod.desktop import (
     Desktop, EDITOR_FIND, EDITOR_GOTO, VIEW_NATIVE_UI,
 )
 from turbokod.events import Event, KEY_ENTER
-from turbokod.geometry import Rect
+from turbokod.geometry import Point, Rect
 from turbokod.window import Window
 from turbokod.file_io import write_file
 from support import _SCREEN, _temp_path, setup_test_env
@@ -238,6 +238,25 @@ def test_welcome_choices_apply_live_and_finish_once() raises:
     d.apply_welcome(False, String("Turbo C++ 3.0"), d.font_label(), 0, True)
     assert_false(d.config.native_ui)
     assert_true(d.config.welcome_done)
+
+
+def test_native_popup_lists_rows_and_dismisses_through_its_handler() raises:
+    var d = _native_desktop(String("x\n"))
+    d.spell_menu.open(String("wrod"), Point(4, 6), False)
+    assert_equal(d.native_popup_kind(), String("spell"))
+    var items = d.native_popup_items()
+    assert_equal(len(items), 2)
+    assert_true(items[0].enabled)
+    assert_false(items[1].enabled)   # no project: project dictionary greyed
+    var at = d.native_popup_anchor()
+    assert_equal(at.x, 4)
+    assert_equal(at.y, 6)
+    # Grid input can't answer it behind the NSMenu's back.
+    _ = d.handle_event(Event.key_event(KEY_ENTER), _SCREEN)
+    assert_true(d.spell_menu.active)
+    _ = d.native_popup_choose(0)
+    assert_false(d.spell_menu.active)
+    assert_equal(d.native_popup_kind(), String(""))
 
 
 def main() raises:

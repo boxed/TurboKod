@@ -125,6 +125,23 @@ Tab titles size to their text; only when they don't all fit do the widest
 shrink, down to a shared cap. A squeezed title drops its extension first,
 then the end of its stem (`project_api.py` → `project_api` → `project_…`).
 
+## Popup menus
+
+The anchored popups become a real `NSMenu` at their anchor cell: the
+editor and tab context menus, spelling, the test gutter, diagnostics and
+LSP status. Each menu struct has `native_items()`, the same rows its
+`paint` draws, as `NativeMenuItem(label, code, enabled)`, and `choose(code)`.
+
+- `tk_desktop_popup` exports the open popup.
+- `tk_desktop_popup_choose` answers it: the picked code, or 0 when it was
+  dismissed. Either way it goes through the menu's own `_on_*_submit`
+  handler, exactly like an in-grid pick or Esc.
+- Diagnostic quick fixes answer `NATIVE_FIX_BASE + i`. They can arrive
+  while the menu is open, and the host rebuilds the open `NSMenu` in place
+  when the export changes.
+- The git gutter's hunk peek stays in-grid: it's an inline diff with a
+  Revert bar, not a menu.
+
 ## First-launch welcome window
 
 On the native app's first launch (`config.welcome_done` false), the host

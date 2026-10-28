@@ -30,7 +30,7 @@ from .geometry import Point, Rect
 from .string_utils import display_columns
 from .view import RowCursor
 from .anchored_menu import (
-    anchored_menu_mouse, anchored_menu_rect, menu_step_wrap,
+    NativeMenuItem, anchored_menu_mouse, anchored_menu_rect, menu_step_wrap,
     paint_anchored_chrome,
 )
 
@@ -150,6 +150,18 @@ struct SpellMenu(Movable):
     def _resolve(mut self, action: Int):
         self.action = action
         self.submitted = True
+
+    def native_items(self) -> List[NativeMenuItem]:
+        var out = List[NativeMenuItem]()
+        out.append(NativeMenuItem(_LABEL_USER, SPELL_ACTION_ADD_USER, True))
+        out.append(NativeMenuItem(
+            _LABEL_PROJECT, SPELL_ACTION_ADD_PROJECT, self.has_project,
+        ))
+        return out^
+
+    def choose(mut self, action: Int):
+        """Answer the menu from the native host (0 = dismissed)."""
+        self._resolve(action)
 
     # --- layout / paint ---------------------------------------------------
 

@@ -136,3 +136,14 @@ def menu_step_wrap(selected: Int, delta: Int, n: Int) -> Int:
     if i >= n:
         return 0
     return i
+
+
+@fieldwise_init
+struct NativeMenuItem(Copyable, Movable):
+    """One row of an anchored popup as the native host shows it (an
+    ``NSMenu`` item, macOS-style UI): its label, the action code
+    answering it, and whether it can be picked. Each menu's
+    ``native_items`` lists the same rows its ``paint`` draws."""
+    var label: String
+    var code: Int
+    var enabled: Bool

@@ -32,6 +32,7 @@ from .geometry import Point, Rect
 from .lsp_dispatch import Diagnostic
 from .string_utils import display_columns
 from .anchored_menu import (
+    NativeMenuItem,
     anchored_menu_rect, menu_row_y, paint_anchored_chrome,
 )
 
@@ -46,6 +47,11 @@ comptime DIAG_MENU_ACTION_APPLY_FIX = 2
 """User picked one of the LSP code-action quickfix rows. The host reads
 ``selected_fix_index`` to find which one (0-based into the list passed
 to ``set_actions``)."""
+
+
+comptime NATIVE_FIX_BASE = 100
+"""``native_items`` codes for the quick-fix rows: ``NATIVE_FIX_BASE + i``
+picks ``fix_titles[i]``."""
 
 
 comptime _LABEL_COPY    = String("Copy message")
@@ -177,6 +183,29 @@ struct DiagnosticMenu(Movable):
             self.selected = 0
         else:
             self.selected = self._copy_row()
+
+    def native_items(self) -> List[NativeMenuItem]:
+        """The quick-fix rows answer ``NATIVE_FIX_BASE + index``."""
+        var out = List[NativeMenuItem]()
+        for i in range(len(self.fix_titles)):
+            out.append(NativeMenuItem(
+                self.fix_titles[i], NATIVE_FIX_BASE + i, True,
+            ))
+        if self.loading_fixes:
+            out.append(NativeMenuItem(_LABEL_LOADING, DIAG_MENU_ACTION_NONE, False))
+        out.append(NativeMenuItem(_LABEL_COPY, DIAG_MENU_ACTION_COPY, True))
+        return out^
+
+    def choose(mut self, code: Int):
+        """Answer the menu from the native host (0 = dismissed)."""
+        if code >= NATIVE_FIX_BASE:
+            var i = code - NATIVE_FIX_BASE
+            if i >= len(self.fix_titles):
+                return
+            self.selected_fix_index = i
+            self._resolve(DIAG_MENU_ACTION_APPLY_FIX)
+        else:
+            self._resolve(code)
 
     def _row_count(self) -> Int:
         # Layout (top → bottom): [fix rows…] [loading row if loading]

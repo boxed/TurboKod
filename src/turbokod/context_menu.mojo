@@ -25,7 +25,7 @@ from .events import (
 from .geometry import Point, Rect
 from .string_utils import display_columns
 from .anchored_menu import (
-    anchored_menu_mouse, anchored_menu_rect, menu_row_y, menu_step_wrap,
+    NativeMenuItem, anchored_menu_mouse, anchored_menu_rect, menu_row_y, menu_step_wrap,
     paint_anchored_chrome,
 )
 
@@ -103,6 +103,16 @@ struct EditorContextMenu(Movable):
 
     def _row_count(self) -> Int:
         return len(self.labels)
+
+    def native_items(self) -> List[NativeMenuItem]:
+        var out = List[NativeMenuItem]()
+        for i in range(len(self.labels)):
+            out.append(NativeMenuItem(self.labels[i], self.actions[i], True))
+        return out^
+
+    def choose(mut self, action: Int):
+        """Answer the menu from the native host (0 = dismissed)."""
+        self._resolve(action)
 
     def _step(mut self, delta: Int):
         self.selected = menu_step_wrap(self.selected, delta, self._row_count())
