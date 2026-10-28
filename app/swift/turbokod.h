@@ -166,6 +166,12 @@ int32_t tk_desktop_picker_activate(int64_t h, int64_t idx, int64_t anchor,
 void tk_desktop_picker_action(int64_t h, int64_t nptr, int64_t nlen,
                               int64_t cols, int64_t rows);
 void tk_desktop_picker_close(int64_t h);
+// First-launch welcome window: _needed is 1 until answered; _options writes
+// {themes, builtin_fonts, native_ui, theme, font, font_size}; _apply takes
+// {native_ui, theme, font, font_size} JSON (done = 1 marks it answered).
+int32_t tk_desktop_welcome_needed(int64_t h);
+int64_t tk_desktop_welcome_options(int64_t h, int64_t out_ptr, int64_t cap);
+void tk_desktop_welcome_apply(int64_t h, int64_t ptr, int64_t len, int64_t done);
 // 1 while a DAP session is paused at a breakpoint. Polled by the scripted
 // screenshot path (TK_CAPTURE_WHEN=debug-stopped) — see scripts/screenshots.sh.
 int32_t tk_desktop_debug_stopped(int64_t h);

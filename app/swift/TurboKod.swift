@@ -1808,6 +1808,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     var tabsBuf = [UInt8](repeating: 0, count: 4096)
     // macOS-style UI: the native picker sheet up on each window, if any.
     var pickers: [ObjectIdentifier: PickerController] = [:]
+    var welcome: WelcomeController?
     // Menu mirror: the snapshot from Mojo's menu_bar, hashed so we only
     // rebuild NSMenu when something actually changed (focus/visibility/
     // checkmark/edit-extras flips). `menuTracking` is set while AppKit is
@@ -2323,7 +2324,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     // TK_CAPTURE_WINDOW=1 grabs the whole window — titlebar,
                     // tab strip, and an attached sheet composited on top —
                     // instead of just the cell grid (macOS-style UI shots).
-                    if env["TK_CAPTURE_WINDOW"] != nil, let w = self.windows.first {
+                    if env["TK_WELCOME"] != nil, let w = self.welcome?.window {
+                        captureWindowPNG(w, to: cap)
+                    } else if env["TK_CAPTURE_WINDOW"] != nil, let w = self.windows.first {
                         captureWindowPNG(w, to: cap)
                     } else {
                         self.views.first?.capturePNG(to: cap)
@@ -3162,6 +3165,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         fontOptionsReady = true
         for v in views where v.handle != 0 { applyFontOptions(to: v.handle) }
         if chromeDesktop != 0 { applyFontOptions(to: chromeDesktop) }
+        showWelcomeIfNeeded()
         // The first frame ran session restore, so the focused editor now
         // exists — refresh the menu to pick up its editor-dependent items
         // (Edit / View). Doing it here, off the first paint, means the menu
@@ -3993,6 +3997,28 @@ extension AppController {
             changed = true
         }
         return changed
+    }
+
+    /// First launch: ask for the look (macOS-style or retro), theme and font.
+    /// Scripted captures skip it unless TK_WELCOME asks for it.
+    func showWelcomeIfNeeded() {
+        let env = ProcessInfo.processInfo.environment
+        guard welcome == nil, !isCapturing || env["TK_WELCOME"] != nil else { return }
+        let h = views.first?.handle ?? chromeDesktop
+        guard h != 0, tk_desktop_welcome_needed(h) != 0 || env["TK_WELCOME"] != nil,
+              let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_welcome_options(h, $0, $1) }),
+              let opts = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return }
+        let w = WelcomeController(options: opts) { [weak self] json, done in
+            guard let self = self else { return }
+            let h = self.views.first?.handle ?? self.chromeDesktop
+            guard h != 0 else { return }
+            withUTF8Arg(json) { p, l in tk_desktop_welcome_apply(h, p, l, done ? 1 : 0) }
+            for v in self.views { v.invalidateFrame(); v.needsDisplay = true }
+            if done { self.welcome = nil }
+        }
+        welcome = w
+        w.show()
     }
 
     /// Show, or retract, `v`'s native dialog. True when anything changed.
@@ -5012,4 +5038,305 @@ func captureWindowPNG(_ win: NSWindow, to path: String) {
     guard let tiff = out.tiffRepresentation, let bmp = NSBitmapImageRep(data: tiff),
           let png = bmp.representation(using: .png, properties: [:]) else { return }
     try? png.write(to: URL(fileURLWithPath: path))
+}
+
+
+// MARK: - first-launch welcome window
+//
+// Picks the look — the macOS-style UI or the classic Turbo Vision one — plus
+// theme, font and size, applying each choice live to the window behind it
+// (`tk_desktop_welcome_apply`). Choosing a look also picks sensible defaults
+// for the other three, which the user can then override.
+
+final class WelcomeController: NSObject, NSWindowDelegate {
+    let window: NSWindow
+    private let apply: (String, Bool) -> Void
+    private let modernCard: LookCard
+    private let retroCard: LookCard
+    private let themePopup = NSPopUpButton()
+    private let fontPopup = NSPopUpButton()
+    private let sizePopup = NSPopUpButton()
+    private let builtinFonts: [String]
+    private var nativeUI: Bool
+    private var finished = false
+    private static let sizes = [0, 11, 12, 13, 14, 15, 16, 18, 20, 24]
+
+    init(options o: [String: Any], apply: @escaping (String, Bool) -> Void) {
+        self.apply = apply
+        builtinFonts = o["builtin_fonts"] as? [String] ?? []
+        nativeUI = o["native_ui"] as? Bool ?? false
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 600),
+                          styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        modernCard = LookCard(title: "Modern macOS",
+                              detail: "Native tabs, sheets and pickers.\nSystem fonts around your code.",
+                              retro: false)
+        retroCard = LookCard(title: "Retro",
+                             detail: "The full Turbo Vision experience:\nDOS windows, menus and dialogs.",
+                             retro: true)
+        super.init()
+        window.title = "Welcome to TurboKod"
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+
+        let heading = NSTextField(labelWithString: "Welcome to TurboKod")
+        heading.font = .systemFont(ofSize: 26, weight: .bold)
+        let sub = NSTextField(wrappingLabelWithString:
+            "Choose how it should look. You can change all of this later in Settings and the View menu.")
+        sub.textColor = .secondaryLabelColor
+        sub.font = .systemFont(ofSize: 13)
+
+        modernCard.onPick = { [weak self] in self?.pickLook(native: true) }
+        retroCard.onPick = { [weak self] in self?.pickLook(native: false) }
+        let cards = NSStackView(views: [modernCard, retroCard])
+        cards.distribution = .fillEqually
+        cards.spacing = 16
+
+        themePopup.addItems(withTitles: o["themes"] as? [String] ?? [])
+        fontPopup.addItems(withTitles: builtinFonts + FontCatalog.monospaceFamilies)
+        sizePopup.addItems(withTitles: Self.sizes.map { $0 == 0 ? "Default" : "\($0) pt" })
+        themePopup.selectItem(withTitle: o["theme"] as? String ?? "")
+        fontPopup.selectItem(withTitle: o["font"] as? String ?? "")
+        sizePopup.selectItem(at: Self.sizes.firstIndex(of: o["font_size"] as? Int ?? 0) ?? 0)
+        for p in [themePopup, fontPopup, sizePopup] {
+            p.target = self
+            p.action = #selector(controlChanged)
+        }
+        let grid = NSGridView(views: [
+            [label("Theme:"), themePopup],
+            [label("Font:"), fontPopup],
+            [label("Size:"), sizePopup],
+        ])
+        grid.rowSpacing = 10
+        grid.columnSpacing = 10
+        grid.column(at: 0).xPlacement = .trailing
+        themePopup.widthAnchor.constraint(equalToConstant: 280).isActive = true
+        fontPopup.widthAnchor.constraint(equalToConstant: 280).isActive = true
+
+        let start = NSButton(title: "Get Started", target: self, action: #selector(getStarted))
+        start.keyEquivalent = "\r"
+        start.bezelColor = .controlAccentColor
+        start.controlSize = .large
+
+        let stack = NSStackView(views: [heading, sub, cards, grid, start])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 18
+        stack.edgeInsets = NSEdgeInsets(top: 28, left: 32, bottom: 26, right: 32)
+        stack.setCustomSpacing(6, after: heading)
+        stack.setCustomSpacing(24, after: cards)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        cards.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -64).isActive = true
+        cards.heightAnchor.constraint(equalToConstant: 260).isActive = true
+        sub.widthAnchor.constraint(equalTo: cards.widthAnchor).isActive = true
+        sub.alignment = .center
+        let content = NSView()
+        content.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: content.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+        ])
+        window.contentView = content
+        // Size the window to its content rather than stretching the rows.
+        grid.setContentHuggingPriority(.required, for: .vertical)
+        grid.setContentHuggingPriority(.required, for: .horizontal)
+        stack.setHuggingPriority(.required, for: .vertical)
+        content.layoutSubtreeIfNeeded()
+        window.setContentSize(NSSize(width: 760, height: stack.fittingSize.height))
+        refreshCards()
+    }
+
+    private func label(_ s: String) -> NSTextField {
+        let l = NSTextField(labelWithString: s)
+        l.textColor = .secondaryLabelColor
+        return l
+    }
+
+    func show() {
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    private func refreshCards() {
+        modernCard.selected = nativeUI
+        retroCard.selected = !nativeUI
+    }
+
+    /// A look comes with its natural theme and font; the popups stay
+    /// editable afterwards.
+    private func pickLook(native: Bool) {
+        nativeUI = native
+        refreshCards()
+        if native {
+            let dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            themePopup.selectItem(withTitle: dark ? "One Dark" : "GitHub Light")
+            let fonts = FontCatalog.monospaceFamilies
+            if let f = ["SF Mono", "Menlo", "Monaco"].first(where: fonts.contains) {
+                fontPopup.selectItem(withTitle: f)
+            }
+            sizePopup.selectItem(at: Self.sizes.firstIndex(of: 13) ?? 0)
+        } else {
+            themePopup.selectItem(withTitle: "Turbo C++ 3.0")
+            if let f = builtinFonts.first { fontPopup.selectItem(withTitle: f) }
+            sizePopup.selectItem(at: 0)
+        }
+        push(done: false)
+    }
+
+    @objc private func controlChanged() { push(done: false) }
+
+    private func push(done: Bool) {
+        let size = Self.sizes[max(0, sizePopup.indexOfSelectedItem)]
+        let o: [String: Any] = [
+            "native_ui": nativeUI,
+            "theme": themePopup.titleOfSelectedItem ?? "",
+            "font": fontPopup.titleOfSelectedItem ?? "",
+            "font_size": size,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: o),
+              let json = String(data: data, encoding: .utf8) else { return }
+        apply(json, done)
+    }
+
+    @objc private func getStarted() { window.close() }
+
+    func windowWillClose(_ notification: Notification) {
+        guard !finished else { return }
+        finished = true
+        push(done: true)
+    }
+}
+
+/// One clickable look in the welcome window: a drawn miniature of the UI
+/// over a title and a line of description.
+final class LookCard: NSView {
+    var onPick: (() -> Void)?
+    var selected = false { didSet { needsDisplay = true } }
+    private let retro: Bool
+    private let title: String
+    private let detail: String
+
+    init(title: String, detail: String, retro: Bool) {
+        self.title = title
+        self.detail = detail
+        self.retro = retro
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override var isFlipped: Bool { true }
+
+    override func mouseDown(with event: NSEvent) { onPick?() }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let card = bounds.insetBy(dx: 2, dy: 2)
+        let path = NSBezierPath(roundedRect: card, xRadius: 12, yRadius: 12)
+        NSColor.controlBackgroundColor.setFill()
+        path.fill()
+        (selected ? NSColor.controlAccentColor : NSColor.separatorColor).setStroke()
+        path.lineWidth = selected ? 3 : 1
+        path.stroke()
+        let shot = NSRect(x: card.minX + 16, y: card.minY + 16,
+                          width: card.width - 32, height: card.height - 100)
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(roundedRect: shot, xRadius: 6, yRadius: 6).addClip()
+        if retro { drawRetro(shot) } else { drawModern(shot) }
+        NSGraphicsContext.restoreGraphicsState()
+        NSColor.separatorColor.setStroke()
+        NSBezierPath(roundedRect: shot, xRadius: 6, yRadius: 6).stroke()
+        let t = NSAttributedString(string: title, attributes: [
+            .font: NSFont.systemFont(ofSize: 15, weight: .semibold),
+            .foregroundColor: NSColor.labelColor])
+        t.draw(at: NSPoint(x: shot.minX, y: shot.maxY + 12))
+        let d = NSAttributedString(string: detail, attributes: [
+            .font: NSFont.systemFont(ofSize: 12),
+            .foregroundColor: NSColor.secondaryLabelColor])
+        d.draw(in: NSRect(x: shot.minX, y: shot.maxY + 34, width: shot.width, height: 40))
+    }
+
+    private func fill(_ c: NSColor, _ r: NSRect, radius: CGFloat = 0) {
+        c.setFill()
+        radius > 0 ? NSBezierPath(roundedRect: r, xRadius: radius, yRadius: radius).fill() : r.fill()
+    }
+
+    private func codeLines(_ r: NSRect, colors: [NSColor], step: CGFloat, height: CGFloat) {
+        let widths: [CGFloat] = [0.55, 0.7, 0.4, 0.8, 0.3, 0.65, 0.5, 0.75, 0.45, 0.6]
+        var y = r.minY + 8
+        var i = 0
+        while y + height < r.maxY - 4 {
+            let indent: CGFloat = (i % 4 == 1 || i % 4 == 2) ? 14 : 0
+            fill(colors[i % colors.count],
+                 NSRect(x: r.minX + 10 + indent, y: y, width: (r.width - 30) * widths[i % widths.count], height: height),
+                 radius: height / 2)
+            y += step
+            i += 1
+        }
+    }
+
+    private func drawModern(_ r: NSRect) {
+        fill(NSColor(white: 0.93, alpha: 1), r)
+        // Title bar + traffic lights, tab strip, editor, sheet.
+        for (k, c) in [NSColor.systemRed, .systemYellow, .systemGreen].enumerated() {
+            fill(c, NSRect(x: r.minX + 8 + CGFloat(k) * 11, y: r.minY + 7, width: 7, height: 7), radius: 3.5)
+        }
+        let tabs = NSRect(x: r.minX, y: r.minY + 20, width: r.width, height: 16)
+        for k in 0..<3 {
+            let tr = NSRect(x: tabs.minX + 6 + CGFloat(k) * 54, y: tabs.minY + 2, width: 50, height: 12)
+            fill(k == 0 ? .white : NSColor(white: 0.87, alpha: 1), tr, radius: 3)
+        }
+        let editor = NSRect(x: r.minX, y: tabs.maxY, width: r.width, height: r.maxY - tabs.maxY)
+        fill(.white, editor)
+        codeLines(editor, colors: [.systemPurple.withAlphaComponent(0.6), .systemBlue.withAlphaComponent(0.5),
+                                   .systemGreen.withAlphaComponent(0.55), NSColor(white: 0.75, alpha: 1)],
+                  step: 11, height: 5)
+        let sheet = NSRect(x: r.midX - r.width * 0.3, y: tabs.maxY, width: r.width * 0.6, height: r.height * 0.42)
+        NSShadow().set()
+        let sh = NSShadow()
+        sh.shadowBlurRadius = 8
+        sh.shadowColor = NSColor.black.withAlphaComponent(0.25)
+        NSGraphicsContext.saveGraphicsState()
+        sh.set()
+        fill(NSColor(white: 0.97, alpha: 1), sheet, radius: 6)
+        NSGraphicsContext.restoreGraphicsState()
+        fill(.white, NSRect(x: sheet.minX + 8, y: sheet.minY + 10, width: sheet.width - 16, height: 12), radius: 4)
+        for k in 0..<3 {
+            fill(k == 0 ? NSColor.controlAccentColor.withAlphaComponent(0.25) : NSColor(white: 0.9, alpha: 1),
+                 NSRect(x: sheet.minX + 8, y: sheet.minY + 28 + CGFloat(k) * 12, width: sheet.width - 16, height: 10),
+                 radius: 3)
+        }
+    }
+
+    private func drawRetro(_ r: NSRect) {
+        let blue = NSColor(srgbRed: 0, green: 0, blue: 0.67, alpha: 1)
+        let gray = NSColor(srgbRed: 0.67, green: 0.67, blue: 0.67, alpha: 1)
+        let cyan = NSColor(srgbRed: 0.33, green: 1, blue: 1, alpha: 1)
+        let yellow = NSColor(srgbRed: 1, green: 1, blue: 0.33, alpha: 1)
+        fill(blue, r)
+        fill(gray, NSRect(x: r.minX, y: r.minY, width: r.width, height: 12))
+        for k in 0..<5 {
+            fill(.black, NSRect(x: r.minX + 10 + CGFloat(k) * 34, y: r.minY + 4, width: 22, height: 4))
+        }
+        // Editor window: double-line frame, code in VGA colors.
+        let win = NSRect(x: r.minX + 6, y: r.minY + 18, width: r.width - 12, height: r.height - 36)
+        NSColor.white.setStroke()
+        for inset in [CGFloat(0), 3] {
+            let p = NSBezierPath(rect: win.insetBy(dx: inset + 0.5, dy: inset + 0.5))
+            p.lineWidth = 1
+            p.stroke()
+        }
+        codeLines(win.insetBy(dx: 6, dy: 6), colors: [yellow, cyan, .white, cyan], step: 11, height: 4)
+        // A gray dialog with its black drop shadow.
+        let dlg = NSRect(x: r.midX - r.width * 0.28, y: r.midY - 18, width: r.width * 0.56, height: 46)
+        fill(.black, dlg.offsetBy(dx: 6, dy: 5))
+        fill(gray, dlg)
+        NSColor.white.setStroke()
+        NSBezierPath(rect: dlg.insetBy(dx: 3.5, dy: 3.5)).stroke()
+        fill(.black, NSRect(x: dlg.minX + 12, y: dlg.minY + 12, width: dlg.width * 0.6, height: 4))
+        fill(NSColor(srgbRed: 0, green: 0.67, blue: 0, alpha: 1),
+             NSRect(x: dlg.midX - 20, y: dlg.maxY - 17, width: 40, height: 9))
+        fill(.black, NSRect(x: r.minX, y: r.maxY - 10, width: r.width, height: 10))
+        fill(gray, NSRect(x: r.minX, y: r.maxY - 10, width: r.width, height: 10))
+    }
 }

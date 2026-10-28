@@ -125,6 +125,26 @@ Tab titles size to their text; only when they don't all fit do the widest
 shrink, down to a shared cap. A squeezed title drops its extension first,
 then the end of its stem (`project_api.py` → `project_api` → `project_…`).
 
+## First-launch welcome window
+
+On the native app's first launch (`config.welcome_done` false), the host
+shows `WelcomeController` after the first frame. It offers two look cards,
+Modern macOS (`native_ui`) and Retro, plus theme, font and size popups.
+
+- Each choice applies live to the window behind it through
+  `tk_desktop_welcome_apply` → `Desktop.apply_welcome`, which persists, so
+  every other window follows via the config poll.
+- Picking a look also picks its natural theme, font and size: One Dark /
+  GitHub Light (by system appearance) with SF Mono 13, or Turbo C++ 3.0 with
+  the VGA font. The popups stay editable afterwards.
+- Closing the window, by Get Started or the close button, sends the final
+  apply with `done`, which sets `welcome_done`.
+- The options come from `tk_desktop_welcome_options`: the theme names and
+  the built-in font labels. The host appends the system's monospace
+  families.
+- Scripted captures skip the window unless `TK_WELCOME=1`, which also makes
+  `TK_CAPTURE` grab it.
+
 ## Scripted captures
 
 `TK_CAPTURE_WINDOW=1` renders the whole window offscreen (titlebar, tab

@@ -8637,6 +8637,25 @@ struct Desktop(Movable):
         windows switch to the tabbed layout under the host's tab strip."""
         return self.host_owns_menu and self.config.native_ui
 
+    def apply_welcome(
+        mut self, native_ui: Bool, theme: String, font_label: String,
+        font_size: Int, done: Bool,
+    ):
+        """The first-launch welcome window's choices — applied live as the
+        user clicks through it (``done`` False) and once more, final, when
+        they close it. Persisted each time, so every other window adopts
+        the look through the config poll."""
+        self.config.native_ui = native_ui
+        if theme != self.config.theme:
+            self.set_theme(theme)
+        if font_label != self.font_label():
+            self.set_font(font_label)
+        self.set_font_size(font_size)
+        if done:
+            self.config.welcome_done = True
+        self._apply_view_config()
+        self._persist_config()
+
     def close_tab(mut self, idx: Int):
         """The host tab strip's close button: close window ``idx`` the way
         Cmd+W would, asking first when it holds unsaved work."""

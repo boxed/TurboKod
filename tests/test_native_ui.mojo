@@ -225,6 +225,21 @@ def test_native_project_find_fields_and_toggles_rerun_the_search() raises:
     assert_false(d.project_find.active)
 
 
+def test_welcome_choices_apply_live_and_finish_once() raises:
+    var d = Desktop()
+    d.host_owns_menu = True
+    assert_false(d.config.welcome_done)
+    d.apply_welcome(True, String("Dracula"), d.font_label(), 13, False)
+    assert_true(d.config.native_ui)
+    assert_equal(d.config.theme, String("Dracula"))
+    assert_equal(d.active_theme.name, String("Dracula"))
+    assert_equal(d.config.font_size, 13)
+    assert_false(d.config.welcome_done)   # still choosing
+    d.apply_welcome(False, String("Turbo C++ 3.0"), d.font_label(), 0, True)
+    assert_false(d.config.native_ui)
+    assert_true(d.config.welcome_done)
+
+
 def main() raises:
     setup_test_env()
     TestSuite.discover_tests[__functions_in_module()]().run()
