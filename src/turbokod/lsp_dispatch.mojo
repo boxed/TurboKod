@@ -882,6 +882,9 @@ struct LspManager(Copyable, Movable):
     # applied without saving (distinct from the on-save formatting slot).
     var _inflight_ontype_id: String
     var _ontype_path: String
+    # The text the edits are for, as ``_formatting_text``: the next
+    # keystroke usually lands before they do.
+    var _ontype_text: String
     var _resolved_ontype_edits: List[TextEditEntry]
     var _has_resolved_ontype: Bool
     # ``textDocument/moniker`` — cross-repo symbol identity (scheme +
@@ -1194,6 +1197,7 @@ struct LspManager(Copyable, Movable):
         self._has_resolved_formatting = False
         self._inflight_ontype_id = String("")
         self._ontype_path = String("")
+        self._ontype_text = String("")
         self._resolved_ontype_edits = List[TextEditEntry]()
         self._has_resolved_ontype = False
         self._inflight_moniker_id = String("")
@@ -1389,6 +1393,7 @@ struct LspManager(Copyable, Movable):
         self._has_resolved_formatting = False
         self._inflight_ontype_id = String("")
         self._ontype_path = String("")
+        self._ontype_text = String("")
         self._resolved_ontype_edits = List[TextEditEntry]()
         self._has_resolved_ontype = False
         self._inflight_moniker_id = String("")
@@ -3258,6 +3263,7 @@ struct LspManager(Copyable, Movable):
         saving."""
         if self.state != _STATE_READY:
             return False
+        self._ontype_text = text.copy()
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
         params.put(String("ch"), json_str(ch))
@@ -3279,6 +3285,9 @@ struct LspManager(Copyable, Movable):
 
     def pending_ontype_path(self) -> String:
         return self._ontype_path
+
+    def pending_ontype_text(self) -> String:
+        return self._ontype_text
 
     def take_ontype_edits(mut self) -> List[TextEditEntry]:
         var out = self._resolved_ontype_edits^

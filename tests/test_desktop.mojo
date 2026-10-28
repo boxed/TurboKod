@@ -979,6 +979,28 @@ def test_a_rename_answered_after_more_typing_is_dropped() raises:
     assert_equal(d.windows.windows[0].editor.buffer.line(0), String("#def bar(): pass"))
 
 
+def test_on_type_formatting_answered_after_more_typing_is_dropped() raises:
+    var path = _temp_path(String("_ontype_stale.c"))
+    assert_true(write_file(path, String("x\n")))
+    var d = Desktop()
+    d.open_file(path, _SCREEN)
+    var mgr = LspManager()
+    mgr._ontype_path = path
+    mgr._ontype_text = d.windows.windows[0].editor.text_snapshot()
+    mgr._resolved_ontype_edits.append(TextEditEntry(0, 0, 0, 0, String("  ")))
+    mgr._has_resolved_ontype = True
+    d.lsp_managers.append(mgr^)
+    _ = d.handle_event(Event.key_event(UInt32(ord("y"))), _SCREEN)
+    d._drain_ontype()
+    assert_equal(d.windows.windows[0].editor.buffer.line(0), String("yx"))
+    var mi = len(d.lsp_managers) - 1  # opening a .c file may have added one
+    d.lsp_managers[mi]._ontype_text = d.windows.windows[0].editor.text_snapshot()
+    d.lsp_managers[mi]._resolved_ontype_edits.append(TextEditEntry(0, 0, 0, 0, String("  ")))
+    d.lsp_managers[mi]._has_resolved_ontype = True
+    d._drain_ontype()
+    assert_equal(d.windows.windows[0].editor.buffer.line(0), String("  yx"))
+
+
 def test_desktop_window_menu_lists_open_windows() raises:
     var d = Desktop()
     d.windows.add(Window(String("alpha"), Rect(0, 1, 20, 5), List[String]()))

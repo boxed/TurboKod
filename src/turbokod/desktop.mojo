@@ -9964,11 +9964,15 @@ struct Desktop(Movable):
             if not self.lsp_managers[i].has_pending_ontype():
                 continue
             var op = self.lsp_managers[i].pending_ontype_path()
+            var otext = self.lsp_managers[i].pending_ontype_text()
             var oe = self.lsp_managers[i].take_ontype_edits()
             var ow = self._find_window_for_path(op)
             if ow < 0 or not self.windows.windows[ow].is_editor:
                 continue
-            if len(oe) > 0:
+            # Stale-range guard — see ``_drain_formatting``. Typing goes
+            # on after the trigger character, so this is the usual case.
+            if len(oe) > 0 and self.windows.windows[ow] \
+                    .editor.text_snapshot() == otext:
                 _ = self.windows.windows[ow].editor.apply_text_edits(oe^)
 
     def _maybe_request_doc_highlight(mut self, win_idx: Int):
