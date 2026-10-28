@@ -1,7 +1,7 @@
 """Run an LSP install command in the background, with a non-modal popup.
 
-The user is prompted "Install <lang> LSP? '<hint>' (y/N)" when they open
-a file in a language whose server isn't on ``$PATH``. Saying yes used to
+The user is asked "Install <lang> LSP? '<hint>'" (Cancel / Install) when they open
+a file in a language whose server isn't on ``$PATH``. Installing used to
 just copy the hint to the clipboard — useful, but friction. This module
 runs the hint as ``sh -c <hint>`` directly: stdout + stderr are captured,
 a small bottom-right window shows a spinner and the last 5 lines of

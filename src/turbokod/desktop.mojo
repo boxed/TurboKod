@@ -267,6 +267,9 @@ comptime _PA_LSP_INSTALL      = String("lsp:install")
 # review read-only instead?" (``_PA_REVIEW_READONLY``).
 comptime _PA_REVIEW_CHECKOUT  = String("review:checkout")
 comptime _PA_REVIEW_READONLY  = String("review:readonly")
+# ``_PA_REVIEW_CHECKOUT``'s buttons: Cancel / Read-only / Edit (check out).
+comptime _REVIEW_CHOICE_READONLY = 1
+comptime _REVIEW_CHOICE_CHECKOUT = 2
 # "Look up in docs" — Ctrl+K opens the picker for the focused editor's
 # language, prompting to install the offline DevDocs database the first
 # time it's used per language.
@@ -350,6 +353,9 @@ comptime _PA_DELETE_FILE      = String("file:delete")
 comptime _PA_DUPLICATE_FILE   = String("file:duplicate:do")
 comptime _PA_SAVE_AS_REPLACE  = String("file:save_as:replace")
 comptime _PA_CLOSE_UNSAVED    = String("window:close:unsaved")
+# ``_PA_CLOSE_UNSAVED``'s buttons: Cancel / Delete / Save.
+comptime _CLOSE_CHOICE_DELETE = 1
+comptime _CLOSE_CHOICE_SAVE   = 2
 comptime EDITOR_TOGGLE_COMMENT = String("edit:comment")
 comptime EDITOR_TOGGLE_CASE   = String("edit:case")
 comptime EDITOR_SORT_LINES    = String("edit:sort_lines")
@@ -1114,6 +1120,9 @@ struct Desktop(Movable):
     # make sure it's still the same window when the answer comes.
     var _close_unsaved_idx: Int
     var _close_unsaved_title: String
+    var _close_after_save_as_idx: Int
+    """Window to close once the Save As it opened succeeds (Save in the
+    unsaved-changes prompt of an untitled buffer); -1 when none."""
     var _last_search: String         # last Find needle, repeated by Ctrl+G
     var _last_search_opts: SearchOptions   # last Find toggle state (Cc/W/.*)
     var _last_goto_line: String      # last Go-to-line input, prefilled on reopen
@@ -1752,6 +1761,7 @@ struct Desktop(Movable):
         self._pending_arg = String("")
         self._close_unsaved_idx = -1
         self._close_unsaved_title = String("")
+        self._close_after_save_as_idx = -1
         self._last_search = String("")
         self._last_search_opts = SearchOptions()
         self._last_goto_line = String("")
@@ -4236,20 +4246,26 @@ struct Desktop(Movable):
             self.confirm_dialog.open(
                 String("Can't check out ") + branch
                 + String(" to edit it: there are local changes. Commit or")
-                + String(" stash them first. Review it read-only instead?"),
-                default_yes=True,
+                + String(" stash them first, or review it read-only."),
+                String("Review read-only"),
+                default_action=True,
             )
         else:
             self._pending_action = _PA_REVIEW_CHECKOUT
-            self.confirm_dialog.open(
+            var labels = List[String]()
+            labels.append(String("Cancel"))
+            labels.append(String("Read-only"))
+            labels.append(String("Edit (check out)"))
+            self.confirm_dialog.open_choices(
                 String("Check out ") + branch
-                + String(" so you can edit it while reviewing?")
-                + String(" (No reviews it read-only.)"),
-                default_yes=True,
+                + String(" so you can edit it while reviewing, or review")
+                + String(" it read-only?"),
+                labels, _REVIEW_CHOICE_CHECKOUT,
             )
 
-    def _review_resolve_checkout(mut self, pa: String, yes: Bool):
-        """Act on the answer to ``_review_answer_checkout_request``."""
+    def _review_resolve_checkout(mut self, pa: String, yes: Bool, choice: Int):
+        """Act on the answer to ``_review_answer_checkout_request``.
+        Cancel goes back to the picker."""
         var branch = self._pending_arg
         self._pending_arg = String("")
         if not self.review.active or not self.project:
@@ -4257,9 +4273,11 @@ struct Desktop(Movable):
         if pa == _PA_REVIEW_READONLY:
             if yes:
                 self.review.start_branch_review(False)
-            return   # No: back to the picker
-        if not yes:
+            return
+        if choice == _REVIEW_CHOICE_READONLY:
             self.review.start_branch_review(False)
+            return
+        if choice != _REVIEW_CHOICE_CHECKOUT:
             return
         if checkout_branch(self.project.value(), branch):
             self.status_bar.set_message(
@@ -5341,7 +5359,8 @@ struct Desktop(Movable):
         self._pending_arg = spec.language_id
         self.confirm_dialog.open(
             String("Install ") + spec.language_id + String(" LSP? '")
-            + spec.install_hint + String("'")
+            + spec.install_hint + String("'"),
+            String("Install"),
         )
 
     def _maybe_prompt_grammar_install(mut self, ext: String):
@@ -5387,7 +5406,8 @@ struct Desktop(Movable):
         self._pending_arg = spec.language_id
         self.confirm_dialog.open(
             String("Download ") + spec.display
-                + String(" syntax grammar?")
+                + String(" syntax grammar?"),
+            String("Download"),
         )
 
     def _start_grammar_install(mut self, lang: String):
@@ -6676,10 +6696,14 @@ struct Desktop(Movable):
             self._pending_action = _PA_CLOSE_UNSAVED
             self._close_unsaved_idx = idx
             self._close_unsaved_title = self.windows.windows[idx].title
-            self.confirm_dialog.open(
+            var labels = List[String]()
+            labels.append(String("Cancel"))
+            labels.append(String("Delete"))
+            labels.append(String("Save"))
+            self.confirm_dialog.open_choices(
                 String("'") + self.windows.windows[idx].title
-                    + String("' has unsaved changes. Close it anyway?"),
-                default_yes=False,
+                    + String("' has unsaved changes."),
+                labels, _CLOSE_CHOICE_SAVE, destructive_index=_CLOSE_CHOICE_DELETE,
             )
             return
         self._close_editor_window_at(idx)
@@ -6690,6 +6714,28 @@ struct Desktop(Movable):
         rather than just dropping it from the manager. Used by
         ``_enforce_window_cap`` to evict least-recently-used documents."""
         if idx < 0 or idx >= len(self.windows.windows):
+    def _save_then_close(mut self, idx: Int):
+        """Save in the unsaved-changes prompt: write the buffer and close
+        the window. An untitled buffer goes through Save As first and
+        closes once that succeeds; a refused save leaves it open."""
+        if len(self.windows.windows[idx].editor.file_path.as_bytes()) == 0:
+            self.windows.focus_by_index(idx)
+            self._close_after_save_as_idx = idx
+            self._open_save_as_dialog()
+            return
+        self._save_editor(idx, String("_save_then_close"))
+        if not self._holds_unsaved_work(idx):
+            self._close_editor_window_at(idx)
+
+    def _close_if_saved_as(mut self):
+        """After a Save As: close the window if Save in the
+        unsaved-changes prompt asked for it and the write happened."""
+        var idx = self._close_after_save_as_idx
+        self._close_after_save_as_idx = -1
+        if idx >= 0 and idx == self._focused_editor_idx() \
+                and not self._holds_unsaved_work(idx):
+            self._close_editor_window_at(idx)
+
             return
         self._capture_view_state_for_window(idx)
         var closing_path = String("")
@@ -7789,7 +7835,7 @@ struct Desktop(Movable):
                         self.confirm_dialog.open(
                             String("'") + basename(path)
                                 + String("' already exists. Replace it?"),
-                            default_yes=False,
+                            String("Replace"), destructive=True,
                         )
                     else:
                         self._save_focused_as(path)
@@ -7799,6 +7845,9 @@ struct Desktop(Movable):
                 _ = self.quick_open.handle_key(event)
             else:
                 _ = self.quick_open.handle_mouse(event, screen)
+                        self._close_if_saved_as()
+            elif not self.save_as_dialog.active:
+                self._close_after_save_as_idx = -1   # cancelled
             if self.quick_open.submitted:
                 var primary = self.quick_open.selected_path
                 var paths = self.quick_open.selected_paths.copy()
@@ -13758,7 +13807,8 @@ struct Desktop(Movable):
         self._pending_arg = spec.language_id
         self.confirm_dialog.open(
             String("Download ") + spec.display
-                + String(" docs (~few MB)?")
+                + String(" docs (~few MB)?"),
+            String("Download"),
         )
 
     def _maybe_prompt_debugpy_install(
@@ -13802,7 +13852,8 @@ struct Desktop(Movable):
         self._pending_dap_env = env^
         self.confirm_dialog.open(
             String("debugpy not installed in ") + venv_dir
-                + String(" — install it now?")
+                + String(" — install it now?"),
+            String("Install"),
         )
         return True
 
@@ -14855,7 +14906,7 @@ struct Desktop(Movable):
             self.confirm_dialog.open(
                 String("Delete ") + kind + String(" '") + basename(path)
                     + String("'? This cannot be undone."),
-                default_yes=False,
+                String("Delete"), destructive=True,
             )
             return Optional[String]()
         # Dismissed (Esc / click-away) — drop the pinned target.
@@ -16054,10 +16105,11 @@ struct Desktop(Movable):
         var pa = self._pending_action
         self._pending_action = String("")
         if pa == _PA_REVIEW_CHECKOUT or pa == _PA_REVIEW_READONLY:
-            self._review_resolve_checkout(pa, yes)
+            self._review_resolve_checkout(pa, yes, choice)
             return Optional[String]()
         if pa == _PA_DOC_INSTALL:
             var lang = self._pending_arg
+        var choice = self.confirm_dialog.choice
             self._pending_arg = String("")
             if yes:
                 self._start_doc_install(lang)
@@ -16157,9 +16209,12 @@ struct Desktop(Movable):
         if pa == _PA_CLOSE_UNSAVED:
             var idx = self._close_unsaved_idx
             self._close_unsaved_idx = -1
-            if yes and 0 <= idx and idx < len(self.windows.windows) \
+            if 0 <= idx and idx < len(self.windows.windows) \
                     and self.windows.windows[idx].title == self._close_unsaved_title:
-                self._close_editor_window_at(idx)
+                if choice == _CLOSE_CHOICE_DELETE:
+                    self._close_editor_window_at(idx)
+                elif choice == _CLOSE_CHOICE_SAVE:
+                    self._save_then_close(idx)
             return Optional[String]()
         if pa == _PA_SAVE_AS_REPLACE:
             var path = self._pending_arg
@@ -16179,6 +16234,7 @@ struct Desktop(Movable):
     def _on_prompt_submit(mut self) -> Optional[String]:
         var text = self.prompt.input.text
         var second_text = self.prompt.second_input.text
+            self._close_if_saved_as()
         var submit_kind = self.prompt.submit_kind
         var opts = self.prompt.search_options()
         var pa = self._pending_action

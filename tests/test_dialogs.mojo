@@ -14,7 +14,8 @@ from turbokod.git_blame import BlameLine
 from turbokod.painter import Painter
 from turbokod.cell import Cell
 from turbokod.colors import (
-    Attr, BLACK, BLUE, CYAN, EDITOR_BG, LIGHT_GRAY, RED, WHITE, YELLOW,
+    Attr, BLACK, BLUE, CYAN, EDITOR_BG, LIGHT_GRAY, RED, STYLE_UNDERLINE, WHITE,
+    YELLOW,
     default_attr
 )
 from turbokod.theme import Theme
@@ -59,13 +60,13 @@ from turbokod.settings import (
     Settings, _FOCUS_LS_INLAY_HINTS, _FOCUS_MAX_WINDOWS
 )
 from turbokod.events import (
-    Event, KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_HOME, KEY_TAB,
+    Event, KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_HOME, KEY_LEFT, KEY_TAB,
     KEY_UP, MOD_ALT, MOD_CTRL, MOD_META, MOD_NONE, MOD_SHIFT,
     MENU_HIT_OUTSIDE, MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN,
     MOUSE_WHEEL_UP
 )
 from turbokod.geometry import Point, Rect
-from turbokod.confirm_dialog import ConfirmDialog
+from turbokod.confirm_dialog import CONFIRM_DISMISSED, ConfirmDialog
 from turbokod.prompt import Prompt
 from turbokod.view import centered
 
@@ -2278,55 +2279,106 @@ def test_prompt_paint_clamps_long_label_inside_dialog() raises:
             assert_equal(c.attr.bg, BLUE)
 
 
-def test_confirm_dialog_y_key_resolves_yes() raises:
+def _underlined_glyphs(canvas: Canvas) -> String:
+    var out = String("")
+    for y in range(canvas.height):
+        for x in range(canvas.width):
+            if (canvas.get(x, y).attr.style & STYLE_UNDERLINE) != 0:
+                out += canvas.get(x, y).glyph
+    return out^
+
+
+def test_confirm_dialog_action_key_confirms() raises:
+    """Buttons answer to the first letter of their label — the action's
+    name, never Y/N."""
     var d = ConfirmDialog()
-    d.open(String("Install rust LSP?"))
+    d.open(String("Install rust LSP?"), String("Install"))
     assert_true(d.active)
-    assert_false(d.submitted)
     _ = d.handle_key(Event.key_event(UInt32(ord("y"))))
+    assert_false(d.submitted)
+    _ = d.handle_key(Event.key_event(UInt32(ord("I"))))
     assert_true(d.submitted)
     assert_true(d.confirmed)
+    assert_equal(d.choice, 1)
 
 
-def test_confirm_dialog_n_key_resolves_no() raises:
+def test_confirm_dialog_cancel_key_and_esc_cancel() raises:
     var d = ConfirmDialog()
-    d.open(String("Install rust LSP?"))
-    _ = d.handle_key(Event.key_event(UInt32(ord("n"))))
+    d.open(String("Install rust LSP?"), String("Install"))
+    _ = d.handle_key(Event.key_event(UInt32(ord("c"))))
     assert_true(d.submitted)
     assert_false(d.confirmed)
-
-
-def test_confirm_dialog_esc_cancels() raises:
-    var d = ConfirmDialog()
-    d.open(String("Install rust LSP?"))
+    assert_equal(d.choice, 0)
+    d.open(String("Install rust LSP?"), String("Install"))
     _ = d.handle_key(Event.key_event(KEY_ESC))
     assert_true(d.submitted)
     assert_false(d.confirmed)
+    assert_equal(d.choice, CONFIRM_DISMISSED)
 
 
 def test_confirm_dialog_enter_uses_focused_button() raises:
-    """Default focus is No (safer for installs); Tab toggles to Yes;
-    Enter resolves whichever side is focused."""
+    """Default focus is Cancel (safer for installs); Tab moves to the
+    action; Enter resolves whichever is focused."""
     var d = ConfirmDialog()
-    d.open(String("Download docs?"))
+    d.open(String("Download docs?"), String("Download"))
     _ = d.handle_key(Event.key_event(KEY_ENTER))
     assert_true(d.submitted)
-    assert_false(d.confirmed)   # default focus is No
+    assert_false(d.confirmed)
     var d2 = ConfirmDialog()
-    d2.open(String("Download docs?"))
+    d2.open(String("Download docs?"), String("Download"))
     _ = d2.handle_key(Event.key_event(KEY_TAB))
     _ = d2.handle_key(Event.key_event(KEY_ENTER))
     assert_true(d2.submitted)
     assert_true(d2.confirmed)
 
 
-def test_confirm_dialog_default_yes_focuses_yes() raises:
-    """Callers that want Enter to mean Yes pass ``default_yes=True``."""
+def test_confirm_dialog_default_action_focuses_action() raises:
     var d = ConfirmDialog()
-    d.open(String("Save changes?"), default_yes=True)
+    d.open(String("Review read-only?"), String("Review"), default_action=True)
     _ = d.handle_key(Event.key_event(KEY_ENTER))
     assert_true(d.submitted)
     assert_true(d.confirmed)
+
+
+def test_confirm_dialog_marks_keys_and_destructive_button() raises:
+    """Each button's key letter is underlined, and a destructive action
+    is painted red."""
+    var d = ConfirmDialog()
+    d.open(String("Delete 'a.txt'?"), String("Delete"), destructive=True)
+    var canvas = Canvas(80, 24)
+    d.paint(canvas, Rect(0, 0, 80, 24))
+    assert_equal(_underlined_glyphs(canvas), String("CD"))
+    var found_red = False
+    for y in range(24):
+        for x in range(80):
+            if canvas.get(x, y).glyph == String("D") \
+                    and canvas.get(x, y).attr.bg == RED:
+                found_red = True
+    assert_true(found_red)
+
+
+def test_confirm_dialog_choices() raises:
+    """Cancel / Delete / Save: ``choice`` is the pressed button's index;
+    Left walks focus back from the default."""
+    var labels = List[String]()
+    labels.append(String("Cancel"))
+    labels.append(String("Delete"))
+    labels.append(String("Save"))
+    var d = ConfirmDialog()
+    d.open_choices(String("'a.txt' has unsaved changes."), labels, 2, 1)
+    var canvas = Canvas(80, 24)
+    d.paint(canvas, Rect(0, 0, 80, 24))
+    assert_equal(_underlined_glyphs(canvas), String("CDS"))
+    _ = d.handle_key(Event.key_event(KEY_ENTER))
+    assert_equal(d.choice, 2)
+    assert_false(d.confirmed)
+    d.open_choices(String("'a.txt' has unsaved changes."), labels, 2, 1)
+    _ = d.handle_key(Event.key_event(KEY_LEFT))
+    _ = d.handle_key(Event.key_event(KEY_ENTER))
+    assert_equal(d.choice, 1)
+    d.open_choices(String("'a.txt' has unsaved changes."), labels, 2, 1)
+    _ = d.handle_key(Event.key_event(UInt32(ord("d"))))
+    assert_equal(d.choice, 1)
 
 
 def test_confirm_dialog_paints_inside_dialog_rect() raises:
@@ -2338,6 +2390,7 @@ def test_confirm_dialog_paints_inside_dialog_rect() raises:
     var dialog = ConfirmDialog()
     dialog.open(
         String("Install rust LSP? 'rustup component add rust-analyzer'"),
+        String("Install"),
     )
     dialog.paint(canvas, screen)
     var dialog_w = 60

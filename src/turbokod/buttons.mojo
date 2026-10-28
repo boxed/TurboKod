@@ -30,7 +30,9 @@ font issue.
 
 from .canvas import Canvas
 from .cell import Cell
-from .colors import Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, PANE_BG, WHITE
+from .colors import (
+    Attr, BLACK, BLUE, GREEN, LIGHT_GRAY, PANE_BG, STYLE_UNDERLINE, WHITE,
+)
 from .events import Event, EVENT_MOUSE, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE
 from .geometry import Point, Rect
 from .string_utils import display_columns
@@ -134,6 +136,10 @@ struct ShadowButton(ImplicitlyCopyable, Movable):
     var pressed: Bool
     """True between a captured press and the matching release.
     While set, ``handle_mouse`` consumes every mouse event."""
+    var hotkey_col: Int
+    """Cell offset into ``label`` of the letter that answers this
+    button from the keyboard; ``paint_shadow_button`` underlines it.
+    -1 (the default) for a button with no key of its own."""
     var pressed_inside: Bool
     """Last seen cursor position relative to the hit rect, while
     pressed. Drives the paint flag — the shadow returns the moment
@@ -147,10 +153,13 @@ struct ShadowButton(ImplicitlyCopyable, Movable):
         self.pressed = False
         self.pressed_inside = False
 
-    def __init__(out self, var label: String, x: Int, y: Int):
+    def __init__(
+        out self, var label: String, x: Int, y: Int, hotkey_col: Int = -1,
+    ):
         self.label = label^
         self.x = x
         self.y = y
+        self.hotkey_col = hotkey_col
         self.pressed = False
         self.pressed_inside = False
 
@@ -238,8 +247,14 @@ def paint_shadow_button(
     # than ``BLACK`` — under a dark theme ``BLACK`` is a light chrome-text
     # color, which would turn the "lifted" shadow into a light smear.
     var shadow = Attr(PANE_BG, shadow_bg)
-    # Face row.
+    # Face row, with the button's key letter (if it has one) underlined.
     _ = canvas.put_text(Point(button.x, button.y), button.label, face, max_x)
+    if button.hotkey_col >= 0 and button.hotkey_col < button.face_width():
+        var hx = button.x + button.hotkey_col
+        if max_x < 0 or hx < max_x:
+            var cell = canvas.get(hx, button.y)
+            cell.attr.style |= STYLE_UNDERLINE
+            canvas.set(hx, button.y, cell^)
     var face_w = button.face_width()
     var right_x = button.x + face_w
     var sx_end = button.x + face_w + 1

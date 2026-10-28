@@ -13,7 +13,7 @@ The left sidebar stacks three panels:
   remote-tracking branches (``origin/feature``) painted dimmed. On a
   remote row Space checks out a local branch tracking it (or the
   existing local one), ``o`` compares it, and ``d`` deletes it *on the
-  remote* (``git push <remote> --delete``): a y/n confirm when its work
+  remote* (``git push <remote> --delete``): a confirm when its work
   is already on the main line, otherwise the first three characters of
   its name have to be typed. ``M`` / ``r`` don't apply to remote rows. Space checks out the
   selected branch (``git checkout``); ``M`` integrates it into the
@@ -25,7 +25,7 @@ The left sidebar stacks three panels:
   line from a topic branch replays *your* branch onto it (``git rebase
   main``), while selecting a topic branch from the main line replays the
   topic and fast-forwards. ``d`` deletes it, straight away
-  when its work is already on ``main`` / ``master`` and behind a y/n
+  when its work is already on ``main`` / ``master`` and behind a
   confirm when it isn't (which is also what an unrecognized main line,
   or the main branch itself, gets). "Already on main" is decided by
   ``git_changes.branch_is_merged``, which compares *content* — a
@@ -187,11 +187,11 @@ comptime _PANEL_MIN_BODY:   Int = 1
 # and intercepts key events.
 comptime _OVERLAY_NONE:           Int = 0
 comptime _OVERLAY_COMMIT:         Int = 1   # type a commit message
-comptime _OVERLAY_AMEND_CONFIRM:  Int = 2   # y/n: amend HEAD with --no-edit
-comptime _OVERLAY_REVERT_CONFIRM: Int = 3   # y/n: discard changes for file
+comptime _OVERLAY_AMEND_CONFIRM:  Int = 2   # Enter: amend HEAD with --no-edit
+comptime _OVERLAY_REVERT_CONFIRM: Int = 3   # Enter: discard changes for file
 comptime _OVERLAY_STATUS:         Int = 4   # transient git pull/push/etc result
-comptime _OVERLAY_DISCARD_LINE_CONFIRM: Int = 5  # y/n: discard one worktree line
-comptime _OVERLAY_DELETE_BRANCH_CONFIRM: Int = 6  # y/n: force-delete an unmerged branch
+comptime _OVERLAY_DISCARD_LINE_CONFIRM: Int = 5  # Enter: discard one worktree line
+comptime _OVERLAY_DELETE_BRANCH_CONFIRM: Int = 6  # Enter: force-delete an unmerged branch
 comptime _OVERLAY_OUTPUT: Int = 7   # full-screen scrollback of a git op's output
 comptime _OVERLAY_MERGE_CHOICE: Int = 8  # m/r: merge commit or rebase
 comptime _OVERLAY_EDIT_MSG: Int = 9  # multi-line edit of a commit message
@@ -222,11 +222,6 @@ comptime _OUTPUT_PAGE: Int = 15
 # and that it has to be *this* branch.
 comptime _REMOTE_DELETE_TYPED_PREFIX: Int = 3
 
-# Y/N answer keys (upper- and lowercase ASCII) for confirmation overlays.
-comptime _KEY_Y_UPPER = UInt32(0x59)
-comptime _KEY_Y_LOWER = UInt32(0x79)
-comptime _KEY_N_UPPER = UInt32(0x4E)
-comptime _KEY_N_LOWER = UInt32(0x6E)
 # Answer keys for the merge-style choice: M(erge commit) / R(ebase).
 comptime _KEY_M_UPPER = UInt32(0x4D)
 comptime _KEY_M_LOWER = UInt32(0x6D)
@@ -1541,6 +1536,9 @@ struct LocalChanges(Movable):
     var overlay: Int
     var overlay_input: TextField
     var overlay_message: String
+    var overlay_action: String
+    """What Enter does in a confirmation overlay ("discard", "delete",
+    …) — named on its hint row, never a bare "confirm"."""
     # ``_OVERLAY_EDIT_MSG`` state: the multi-line editor holding the
     # message being rewritten, plus which commit it belongs to.
     # ``_reword_sha`` is the short SHA as shown in the list;
@@ -1720,6 +1718,7 @@ struct LocalChanges(Movable):
         self.overlay = _OVERLAY_NONE
         self.overlay_input = TextField()
         self.overlay_message = String("")
+        self.overlay_action = String("")
         self.overlay_editor = Editor(String(""))
         self._reword_sha = String("")
         self._reword_is_head = False
@@ -1992,6 +1991,7 @@ struct LocalChanges(Movable):
         self.overlay = _OVERLAY_NONE
         self.overlay_input = TextField()
         self.overlay_message = String("")
+        self.overlay_action = String("")
         # Hand back the commit-message editor's Find regex before the
         # value is overwritten — an ``Editor`` going out of scope
         # reclaims nothing (see ``Window.release``).
@@ -2864,7 +2864,8 @@ struct LocalChanges(Movable):
         _ = body_p.put_text(
             canvas, Point(bx + 2, by + 1), self.overlay_message, body,
         )
-        var hint = String("[y] confirm   [n] / ESC: cancel")
+        var hint = String("Enter: ") + self.overlay_action \
+            + String("   ESC: cancel")
         _ = body_p.put_text(
             canvas, Point(bx + 2, by + box_h - 2), hint, body,
         )
@@ -4586,6 +4587,7 @@ struct LocalChanges(Movable):
         self.overlay_input = TextField()
         self.overlay_message = \
             String("Amend HEAD with --no-edit? Folds staged changes into the last commit.")
+        self.overlay_action = String("amend")
 
     def _open_revert_confirm(mut self):
         if self._refuse_if_git_busy():
@@ -4598,15 +4600,17 @@ struct LocalChanges(Movable):
         self.overlay_input = TextField()
         var untracked = fe.is_untracked()
         if untracked:
+            self.overlay_action = String("delete")
             self.overlay_message = \
                 String("Delete untracked file ") + fe.path + String("?")
         else:
+            self.overlay_action = String("discard")
             self.overlay_message = \
                 String("Discard ALL local changes for ") + fe.path \
                 + String(" (staged + worktree)?")
 
     def _open_discard_line_confirm(mut self):
-        """Pop the y/n confirm for discarding the single worktree line under
+        """Pop the confirm for discarding the single worktree line under
         the Unstaged panel's cursor. No-op (with a hint flash) when the
         cursor isn't on a ``+``/``-`` body line — only added/removed lines
         have a change to throw away."""
@@ -4630,6 +4634,7 @@ struct LocalChanges(Movable):
         self._discard_diff_idx = diff_idx
         self.overlay = _OVERLAY_DISCARD_LINE_CONFIRM
         self.overlay_input = TextField()
+        self.overlay_action = String("discard")
         self.overlay_message = \
             String("Discard this line from the working tree?")
 
@@ -4689,6 +4694,7 @@ struct LocalChanges(Movable):
         self.overlay = _OVERLAY_OUTPUT
         self.overlay_input = TextField()
         self.overlay_message = String("")
+        self.overlay_action = String("")
         self.overlay_output = text^
         # Clamped against the real viewport on the first paint; a large
         # number just means "as far down as it goes".
@@ -4757,6 +4763,7 @@ struct LocalChanges(Movable):
         self.overlay = _OVERLAY_NONE
         self.overlay_input = TextField()
         self.overlay_message = String("")
+        self.overlay_action = String("")
         self.overlay_output = String("")
         self.overlay_output_scroll = 0
         self._output_links = List[OutputLink]()
@@ -5208,7 +5215,7 @@ struct LocalChanges(Movable):
         """``d`` on the Branches panel.
 
         Deletes the selected branch outright when its work is already on
-        the repo's main line, and pops a y/n confirm when it isn't —
+        the repo's main line, and pops a confirm when it isn't —
         that's the only case where the keystroke would destroy commits.
         ``branch_is_merged`` decides that by content rather than
         ancestry, so a branch that was rebased or squash-merged into main
@@ -5241,6 +5248,7 @@ struct LocalChanges(Movable):
         self._git_delete_branch = br.name.copy()
         self.overlay = _OVERLAY_DELETE_BRANCH_CONFIRM
         self.overlay_input = TextField()
+        self.overlay_action = String("delete")
         var main = main_line_branch(self.root)
         if len(main.as_bytes()) == 0:
             self.overlay_message = String("Delete ") + br.name \
@@ -5259,9 +5267,9 @@ struct LocalChanges(Movable):
         Never without asking — this reaches past the local repo, and
         unlike a local ``branch -D`` there's no reflog on our side of the
         wire to recover it from. When the work is already on the main
-        line a y/n is enough; otherwise the first
+        line a confirm is enough; otherwise the first
         ``_REMOTE_DELETE_TYPED_PREFIX`` characters of the name have to be
-        typed, so it can't happen on a reflexive ``y``.
+        typed, so it can't happen on a reflexive Enter.
 
         ``branch_is_merged`` compares against the local main line by
         name, so ``origin/main`` would look merged into ``main``; the
@@ -5275,6 +5283,7 @@ struct LocalChanges(Movable):
             or short == main
         if not is_main and branch_is_merged(self.root, br.name):
             self.overlay = _OVERLAY_DELETE_BRANCH_CONFIRM
+            self.overlay_action = String("delete")
             self.overlay_message = String("Delete ") + short \
                 + String(" on ") + br.remote + String("? Merged into ") \
                 + main + String(".")
@@ -5792,8 +5801,10 @@ struct LocalChanges(Movable):
         if self.overlay == _OVERLAY_REMOTE_PICK:
             self._remote_picker_key(event)
             return True
-        # Confirmation overlays.
-        if k == _KEY_Y_LOWER or k == _KEY_Y_UPPER:
+        # Confirmation overlays: Enter does the named action. Not the
+        # action's letter — 'd' is what opens three of them, so a double
+        # tap would discard / delete.
+        if k == KEY_ENTER:
             if self.overlay == _OVERLAY_AMEND_CONFIRM:
                 self._confirm_amend()
             elif self.overlay == _OVERLAY_REVERT_CONFIRM:
@@ -5802,9 +5813,6 @@ struct LocalChanges(Movable):
                 self._confirm_discard_line()
             elif self.overlay == _OVERLAY_DELETE_BRANCH_CONFIRM:
                 self._confirm_delete_branch()
-            return True
-        if k == _KEY_N_LOWER or k == _KEY_N_UPPER:
-            self._close_overlay()
             return True
         return True
 

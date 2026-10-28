@@ -863,14 +863,14 @@ def test_save_as_asks_before_replacing_a_file() raises:
     d.save_as_dialog.open(path)
     _ = d.handle_event(Event.key_event(KEY_ENTER), _SCREEN)
     assert_true(d.confirm_dialog.active)
-    # Enter takes the default, which is to keep the file
+    # Enter takes the default, Cancel, which keeps the file
     _ = d.handle_event(Event.key_event(KEY_ENTER), _SCREEN)
     assert_false(d.confirm_dialog.active)
     assert_equal(read_file(path), String("keep\n"))
     assert_equal(d.windows.windows[0].editor.file_path, String(""))
     d.save_as_dialog.open(path)
     _ = d.handle_event(Event.key_event(KEY_ENTER), _SCREEN)
-    _ = d.handle_event(Event.key_event(UInt32(ord("y"))), _SCREEN)
+    _ = d.handle_event(Event.key_event(UInt32(ord("r"))), _SCREEN)  # Replace
     assert_equal(read_file(path), String("x"))
     assert_equal(d.windows.windows[0].editor.file_path, path)
     assert_equal(d.windows.windows[0].title, basename(path))
@@ -906,7 +906,7 @@ def test_closing_a_window_with_unsaved_edits_asks_first() raises:
     var path = _dirty_file_desktop(d, String("_close_ask.txt"), False)
     _ = d.handle_event(Event.key_event(UInt32(ord("w")), MOD_META), _SCREEN)
     assert_true(d.confirm_dialog.active)
-    _ = d.handle_event(Event.key_event(KEY_ENTER), _SCREEN)  # the default: keep it
+    _ = d.handle_event(Event.key_event(KEY_ESC), _SCREEN)  # Cancel: keep it
     assert_equal(len(d.windows.windows), 1)
     assert_true(d.windows.windows[0].editor.dirty)
     # the close button asks the same
@@ -916,12 +916,45 @@ def test_closing_a_window_with_unsaved_edits_asks_first() raises:
     ), _SCREEN)
     assert_true(d.confirm_dialog.active)
     assert_equal(len(d.windows.windows), 1)
-    _ = d.handle_event(Event.key_event(UInt32(ord("y"))), _SCREEN)
+    _ = d.handle_event(Event.key_event(UInt32(ord("d"))), _SCREEN)  # Delete
     assert_equal(len(d.windows.windows), 0)
     assert_equal(read_file(path), String("old\n"))
 
 
 def test_closing_a_typed_untitled_buffer_asks_first() raises:
+def test_closing_a_window_with_unsaved_edits_can_save_them() raises:
+    var d = Desktop()
+    var path = _dirty_file_desktop(d, String("_close_save.txt"), False)
+    _ = d.handle_event(Event.key_event(UInt32(ord("w")), MOD_META), _SCREEN)
+    assert_true(d.confirm_dialog.active)
+    _ = d.handle_event(Event.key_event(KEY_ENTER), _SCREEN)  # the default: Save
+    assert_false(d.confirm_dialog.active)
+    assert_equal(len(d.windows.windows), 0)
+    assert_equal(read_file(path), String("xold\n"))
+
+
+def test_saving_an_untitled_buffer_on_close_goes_through_save_as() raises:
+    var path = _temp_path(String("_close_untitled.txt"))
+    var d = Desktop()
+    d.new_file(_SCREEN)
+    _ = d.handle_event(Event.key_event(UInt32(ord("x"))), _SCREEN)
+    _ = d.handle_event(Event.key_event(UInt32(ord("w")), MOD_META), _SCREEN)
+    _ = d.handle_event(Event.key_event(UInt32(ord("s"))), _SCREEN)
+    assert_true(d.save_as_dialog.active)
+    assert_equal(len(d.windows.windows), 1)
+    # cancelling the Save As keeps the window, and a later Save As doesn't close it
+    _ = d.handle_event(Event.key_event(KEY_ESC), _SCREEN)
+    assert_false(d.save_as_dialog.active)
+    assert_equal(len(d.windows.windows), 1)
+    _ = d.handle_event(Event.key_event(UInt32(ord("w")), MOD_META), _SCREEN)
+    _ = d.handle_event(Event.key_event(UInt32(ord("s"))), _SCREEN)
+    d.save_as_dialog.open(path)
+    _ = d.handle_event(Event.key_event(KEY_ENTER), _SCREEN)
+    assert_equal(len(d.windows.windows), 0)
+    assert_equal(read_file(path), String("x"))
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
     var d = Desktop()
     d.new_file(_SCREEN)
     _ = d.handle_event(Event.key_event(UInt32(ord("w")), MOD_META), _SCREEN)
@@ -3066,7 +3099,7 @@ def test_desktop_snapshot_skips_untitled_windows() raises:
     assert_equal(path, String("examples/hello.mojo"))
 
 
-def test_desktop_confirm_dialog_yes_starts_grammar_install() raises:
+def test_desktop_confirm_dialog_download_starts_grammar_install() raises:
     """Smoke-test the wiring: typing a confirm dialog into the
     grammar-install pending action and pressing 'y' must clear the
     dialog and leave a grammar-install language recorded on the
@@ -3078,10 +3111,10 @@ def test_desktop_confirm_dialog_yes_starts_grammar_install() raises:
     var d = Desktop()
     d._pending_action = String("grammar:install")
     d._pending_arg = String("elm")
-    d.confirm_dialog.open(String("Download Elm syntax grammar?"))
+    d.confirm_dialog.open(String("Download Elm syntax grammar?"), String("Download"))
     assert_true(d.confirm_dialog.active)
     _ = d.handle_event(
-        Event.key_event(UInt32(ord("y"))), Rect(0, 0, 80, 24),
+        Event.key_event(UInt32(ord("d"))), Rect(0, 0, 80, 24),
     )
     # Dialog closed and pending action cleared regardless of whether
     # the install spawn succeeded in this test environment.
@@ -3590,18 +3623,18 @@ def test_shutdown_stops_the_search_subprocesses() raises:
     assert_true(Int(kill_pid(sym_pid, Int32(0))) != 0)
 
 
-def test_desktop_confirm_dialog_no_clears_pending_action() raises:
+def test_desktop_confirm_dialog_cancel_clears_pending_action() raises:
     var d = Desktop()
     d._pending_action = String("lsp:install")
     d._pending_arg = String("rust")
-    d.confirm_dialog.open(String("Install rust LSP?"))
+    d.confirm_dialog.open(String("Install rust LSP?"), String("Install"))
     _ = d.handle_event(
-        Event.key_event(UInt32(ord("n"))), Rect(0, 0, 80, 24),
+        Event.key_event(UInt32(ord("c"))), Rect(0, 0, 80, 24),
     )
     assert_false(d.confirm_dialog.active)
     assert_equal(d._pending_action, String(""))
     assert_equal(d._pending_arg, String(""))
-    # Install runner stays idle — user said no.
+    # Install runner stays idle — user cancelled.
     assert_false(d.install_runner.is_active())
 
 

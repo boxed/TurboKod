@@ -437,6 +437,19 @@ merge, revert) use `replace_lines`, which keeps the marks of the unchanged
 prefix/suffix and takes the rest from the undo snapshot. Tests:
 `tests/test_bookmarks.mojo`.
 
+## Confirmations name their actions — never Yes / No
+
+A confirm button says what it does: `Cancel` / `Install`, `Cancel` /
+`Replace`, `Cancel` / `Delete` / `Save`. Never `Yes` / `No`, never a bare
+"confirm" — the user should be able to answer without re-reading the
+question. `ConfirmDialog.open(message, action, destructive=…)` covers the
+two-button case and `open_choices` the rest; each button answers to its
+label's first letter (underlined via `ShadowButton.hotkey_col`), and a
+destructive one is painted red. Keyboard-only overlays (the git view's)
+name the action on the hint row (`Enter: discard   ESC: cancel`) — and
+don't make the confirm key the same letter that opened the prompt, or a
+double tap destroys work.
+
 ## Jump-to commands center at the golden ratio
 
 **Every deliberate "jump to a location" parks the target at the golden-ratio line (~38% down the viewport), not at the top or a screen edge.** Use `Editor.reveal_cursor(view, golden=True)` after a `move_to`. This applies to *all* of them — go-to-definition / references / type-def / implementation / declaration, go-to-line, go-to-symbol, find-symbol, nav-history back/forward, output-pane / `turbokod://` link opens, next/previous git-change (`goto_change_chunk`) including the review-mode changeset reviewer, and clicking a stack frame in the debug pane (`consume_frame_click`). When you add a new navigation command, golden-reveal it too. (Debugger *single-stepping* is the one navigation that deliberately stays edge-scroll — the stop-event jump in `dap_tick` uses `golden=False` so stepping line-by-line doesn't yank the view.)

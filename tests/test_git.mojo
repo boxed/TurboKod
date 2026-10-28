@@ -848,8 +848,8 @@ def test_review_branches_tab_and_review_file_tree() raises:
     assert_false(d.review.is_reviewing())
     assert_true(d.confirm_dialog.active)
     assert_true(starts_with(d.confirm_dialog.message, String("Check out feature")))
-    # No → review it read-only, without switching branches.
-    _ = d.handle_event(Event.key_event(UInt32(ord("n"))), screen)
+    # Read-only → review it without switching branches.
+    _ = d.handle_event(Event.key_event(UInt32(ord("r"))), screen)
     assert_true(d.review.is_reviewing())
     assert_false(d.review.is_editable())
     assert_equal(current_branch_name(dir), String("main"))
@@ -924,7 +924,7 @@ def test_review_branches_tab_and_review_file_tree() raises:
     d.review.close()
     d._review_teardown()
 
-    # Local changes block the checkout: say so, offer read-only; No goes
+    # Local changes block the checkout: say so, offer read-only; Cancel goes
     # back to the picker.
     assert_true(write_file(join_path(dir, String("keep.txt")), String("dirty\n")))
     d.review.open(dir)
@@ -932,17 +932,17 @@ def test_review_branches_tab_and_review_file_tree() raises:
     _ = d.handle_event(Event.key_event(KEY_ENTER), screen)
     assert_true(d.confirm_dialog.active)
     assert_true(starts_with(d.confirm_dialog.message, String("Can't check out feature")))
-    _ = d.handle_event(Event.key_event(UInt32(ord("n"))), screen)
+    _ = d.handle_event(Event.key_event(UInt32(ord("c"))), screen)
     assert_true(d.review.active)
     assert_false(d.review.is_reviewing())
     assert_equal(current_branch_name(dir), String("main"))
     _ = _run_git(dir, string_list(String("checkout"), String("--"), String("keep.txt")))
 
-    # Clean worktree: Yes checks the branch out and the review is editable,
+    # Clean worktree: Edit checks the branch out and the review is editable,
     # saving straight to the worktree.
     _ = d.handle_event(Event.key_event(KEY_ENTER), screen)
     assert_true(starts_with(d.confirm_dialog.message, String("Check out feature")))
-    _ = d.handle_event(Event.key_event(UInt32(ord("y"))), screen)
+    _ = d.handle_event(Event.key_event(UInt32(ord("e"))), screen)
     assert_equal(current_branch_name(dir), String("feature"))
     assert_true(d.review.is_reviewing())
     assert_true(d.review.is_editable())
@@ -3657,8 +3657,11 @@ def test_local_changes_d_on_unmerged_branch_confirms_first() raises:
     assert_equal(lc._git_op, _GITOP_NONE)
     assert_true(String("unmerged-x") in lc.overlay_message)
     assert_true(String("NOT merged") in lc.overlay_message)
-    # 'n' cancels and leaves the branch alone.
-    _ = lc.handle_key(_key(UInt32(0x6E)), screen, registry)
+    # Neither Y nor N answers it; ESC cancels and leaves the branch alone.
+    _ = lc.handle_key(_key(UInt32(0x79)), screen, registry)
+    assert_equal(lc.overlay, _OVERLAY_DELETE_BRANCH_CONFIRM)
+    assert_equal(lc._git_op, _GITOP_NONE)
+    _ = lc.handle_key(_key(KEY_ESC), screen, registry)
     assert_equal(lc.overlay, _OVERLAY_NONE)
     assert_equal(lc._git_op, _GITOP_NONE)
     var still = fetch_git_branches(dir)
@@ -3667,10 +3670,13 @@ def test_local_changes_d_on_unmerged_branch_confirms_first() raises:
         if still[i].name == String("unmerged-x"):
             found = True
     assert_true(found)
-    # Re-open the confirm and answer 'y' this time.
+    # Re-open the confirm; a second 'd' doesn't confirm, Enter does.
     _ = lc.handle_key(_key(UInt32(0x64)), screen, registry)
     assert_equal(lc.overlay, _OVERLAY_DELETE_BRANCH_CONFIRM)
-    _ = lc.handle_key(_key(UInt32(0x79)), screen, registry)
+    assert_equal(lc.overlay_action, String("delete"))
+    _ = lc.handle_key(_key(UInt32(0x64)), screen, registry)
+    assert_equal(lc._git_op, _GITOP_NONE)
+    _ = lc.handle_key(_key(KEY_ENTER), screen, registry)
     assert_equal(lc._git_op, _GITOP_BRANCH_DELETE)
     _drain_git_op(lc)
     var after = fetch_git_branches(dir)
@@ -3817,7 +3823,7 @@ def test_local_changes_d_on_merged_remote_branch_asks_y_n() raises:
     _ = lc.handle_key(_key(UInt32(0x64)), screen, registry)
     assert_equal(lc.overlay, _OVERLAY_DELETE_BRANCH_CONFIRM)
     assert_equal(lc._git_op, _GITOP_NONE)
-    _ = lc.handle_key(_key(UInt32(0x79)), screen, registry)
+    _ = lc.handle_key(_key(KEY_ENTER), screen, registry)
     assert_equal(lc._git_op, _GITOP_REMOTE_BRANCH_DELETE)
     _drain_git_op(lc)
     assert_false(_has_remote_branch(dir, String("origin/merged-x")))

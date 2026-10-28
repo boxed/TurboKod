@@ -1,23 +1,24 @@
-"""Modal yes/no confirm dialog.
+"""Modal confirm dialog: a wrapped message and a row of buttons, each
+named for what it does.
 
-Replaces the y/N text-input prompt for binary install decisions
-("Install rust LSP?", "Download Elm syntax grammar?", ...). The
-dialog has two ``ShadowButton``s — Yes and No — and accepts either a
-mouse click or one of the keyboard shortcuts ``Y``/``N``/``Enter``/
-``Esc``. ``Tab`` (and Left/Right) toggles which button Enter
-activates.
+There is deliberately no Yes / No. A button says what happens —
+``Install``, ``Replace``, ``Delete`` — so the user can answer without
+re-reading the question, and can't answer the wrong question by
+reflex. ``open`` is the common two-button case (Cancel + one action);
+``open_choices`` takes any list of labels (e.g. Cancel / Delete / Save
+when closing a buffer with unsaved changes).
 
-Default focus is No on opening: every caller today is asking "should
-we go install something?", and a misclick of Enter shouldn't kick off
-a network download. Callers that want Yes pre-focused pass
-``default_yes=True``.
+Each button answers to the first letter of its label (underlined on its
+face); ``Esc`` and the ``[■]`` close glyph cancel; ``Enter`` presses the
+focused button; ``Tab`` / Left / Right move focus. A destructive button
+is painted red.
 """
 
 from .buttons import (
     button_face, BUTTON_FIRED, BUTTON_NONE, paint_shadow_button, ShadowButton,
 )
 from .canvas import Canvas, wrap_to_width
-from .colors import Attr, BLACK, LIGHT_GRAY
+from .colors import Attr, BLACK, LIGHT_GRAY, RED, WHITE, YELLOW
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE, KEY_ENTER, KEY_ESC, KEY_LEFT, KEY_RIGHT,
     KEY_TAB,
@@ -27,26 +28,23 @@ from .view import centered_row_start, FocusGroup
 from .window import close_button_clicked, paint_modal_frame
 
 
-comptime _SLOT_YES = 0
-comptime _SLOT_NO  = 1
+comptime CONFIRM_DISMISSED = -1
+"""``choice`` after Esc / the close glyph: no button was pressed."""
 
 
 comptime _DEFAULT_WIDTH = 60
 comptime _MIN_HEIGHT    = 5
 comptime _MIN_WIDTH     = 24
 
-comptime _YES_LABEL = String(" Yes ")
-comptime _NO_LABEL  = String(" No ")
 
-# Y/N answer keys (upper- and lowercase ASCII).
-comptime _KEY_Y_UPPER = UInt32(0x59)
-comptime _KEY_Y_LOWER = UInt32(0x79)
-comptime _KEY_N_UPPER = UInt32(0x4E)
-comptime _KEY_N_LOWER = UInt32(0x6E)
+def _lower_ascii(k: UInt32) -> UInt32:
+    if k >= 0x41 and k <= 0x5A:
+        return k + 0x20
+    return k
 
 
 struct ConfirmDialog(Movable):
-    """Modal dialog with a wrapped message and Yes / No buttons.
+    """Modal dialog with a wrapped message and named buttons.
 
     Persistent ``ShadowButton``s — the press latch (see
     ``ShadowButton.handle_mouse``) survives across paint cycles, so
@@ -56,43 +54,92 @@ struct ConfirmDialog(Movable):
     var active: Bool
     var submitted: Bool
     """True after the user closes the dialog with a verdict. The
-    host reads ``confirmed`` then calls ``close()``."""
+    host reads ``confirmed`` / ``choice`` then calls ``close()``."""
     var confirmed: Bool
-    """True if the user picked Yes; False on No / Esc."""
+    """``open``: True if the user pressed the action button; False on
+    Cancel / Esc. ``open_choices`` callers read ``choice`` instead."""
+    var choice: Int
+    """Index of the pressed button, or ``CONFIRM_DISMISSED``."""
     var message: String
-    var _yes_button: ShadowButton
-    var _no_button: ShadowButton
+    var _buttons: List[ShadowButton]
+    var _keys: List[UInt32]
+    """``_keys[i]``: lowercase answer key of ``_buttons[i]`` (0 = none)."""
+    var _destructive: Int
+    """Index of the button painted red, or -1."""
+    var _confirm_index: Int
+    """The button that sets ``confirmed`` (``open``'s action), or -1."""
     var _focus: FocusGroup
-    """Focus state for the Yes / No buttons (slots 0 and 1). Default
-    seeded by ``open(default_yes=…)`` — No is safer for install /
-    download prompts so it's the typical default."""
 
     def __init__(out self):
         self.active = False
         self.submitted = False
         self.confirmed = False
+        self.choice = CONFIRM_DISMISSED
         self.message = String("")
-        self._yes_button = ShadowButton(_YES_LABEL, 0, 0)
-        self._no_button = ShadowButton(_NO_LABEL, 0, 0)
-        self._focus = FocusGroup(2)
+        self._buttons = List[ShadowButton]()
+        self._keys = List[UInt32]()
+        self._destructive = -1
+        self._confirm_index = -1
+        self._focus = FocusGroup(0)
 
-    def open(mut self, var message: String, default_yes: Bool = False):
+    def open(
+        mut self, var message: String, action: String,
+        default_action: Bool = False, destructive: Bool = False,
+        cancel: String = String("Cancel"),
+    ):
+        """Ask ``message`` with a ``cancel`` button and an ``action``
+        button. Focus starts on Cancel unless ``default_action`` — keep
+        it there for anything that downloads, overwrites or deletes, so
+        a stray Enter does nothing. ``destructive`` paints the action
+        red."""
+        var labels = List[String]()
+        labels.append(cancel)
+        labels.append(action)
+        self.open_choices(
+            message^, labels, 1 if default_action else 0,
+            1 if destructive else -1,
+        )
+        self._confirm_index = 1
+
+    def open_choices(
+        mut self, var message: String, labels: List[String],
+        default_index: Int, destructive_index: Int = -1,
+    ):
+        """Ask ``message`` with one button per label, left to right;
+        ``choice`` reports which was pressed. Labels must start with
+        distinct letters — those are the answer keys."""
+        self._buttons = List[ShadowButton]()
+        self._keys = List[UInt32]()
+        for i in range(len(labels)):
+            self._buttons.append(ShadowButton(
+                String(" ") + labels[i] + String(" "), 0, 0, hotkey_col=1,
+            ))
+            var key = UInt32(0)
+            var b = labels[i].as_bytes()
+            if len(b) > 0:
+                key = _lower_ascii(UInt32(b[0]))
+            self._keys.append(key)
+        self._focus = FocusGroup(len(labels))
+        self._focus.focus_force(default_index)
+        self._destructive = destructive_index
+        self._confirm_index = -1
         self.message = message^
         self.active = True
         self.submitted = False
         self.confirmed = False
-        self._focus.focus_force(_SLOT_YES if default_yes else _SLOT_NO)
-        self._yes_button.reset_press()
-        self._no_button.reset_press()
+        self.choice = CONFIRM_DISMISSED
 
     def close(mut self):
         self.active = False
         self.submitted = False
         self.confirmed = False
+        self.choice = CONFIRM_DISMISSED
         self.message = String("")
-        self._focus.focus_force(_SLOT_NO)
-        self._yes_button.reset_press()
-        self._no_button.reset_press()
+        self._buttons = List[ShadowButton]()
+        self._keys = List[UInt32]()
+        self._destructive = -1
+        self._confirm_index = -1
+        self._focus = FocusGroup(0)
 
     def _layout(self, container_bounds: Rect) -> Rect:
         var width = _DEFAULT_WIDTH
@@ -128,31 +175,33 @@ struct ConfirmDialog(Movable):
             clip_x, rect.b.y - 3,
         )
         _ = canvas.put_wrapped_text(msg_rect, self.message, attr)
-        # Center the Yes / No pair on the row two from the bottom border.
+        # Center the button row two rows up from the bottom border.
         var by = rect.b.y - 3
-        var yes_w = self._yes_button.total_width()
-        var no_w = self._no_button.total_width()
         var gap = 2
-        var total = yes_w + gap + no_w
+        var total = 0
+        for i in range(len(self._buttons)):
+            if i > 0:
+                total += gap
+            total += self._buttons[i].total_width()
         var bx = centered_row_start(rect, total)
-        self._yes_button.move_to(bx, by)
-        self._no_button.move_to(bx + yes_w + gap, by)
-        # Refresh focus slot rects to match the buttons' current positions.
-        # Use hit_rect (face + shadow) so the focusable area matches exactly
-        # where the button's own handle_mouse fires — otherwise a click on a
-        # button's shadow cell fires the action without moving focus there.
-        self._focus.update(_SLOT_YES, self._yes_button.hit_rect())
-        self._focus.update(_SLOT_NO, self._no_button.hit_rect())
-        var yes_focused = self._focus.is_focused(_SLOT_YES)
-        paint_shadow_button(
-            canvas, self._yes_button, button_face(yes_focused), LIGHT_GRAY,
-        )
-        paint_shadow_button(
-            canvas, self._no_button, button_face(not yes_focused), LIGHT_GRAY,
-        )
+        for i in range(len(self._buttons)):
+            self._buttons[i].move_to(bx, by)
+            bx += self._buttons[i].total_width() + gap
+            # Use hit_rect (face + shadow) so the focusable area matches
+            # exactly where the button's own handle_mouse fires — otherwise
+            # a click on a button's shadow cell fires the action without
+            # moving focus there.
+            self._focus.update(i, self._buttons[i].hit_rect())
+        for i in range(len(self._buttons)):
+            var focused = self._focus.is_focused(i)
+            var face = button_face(focused)
+            if i == self._destructive:
+                face = Attr(YELLOW if focused else WHITE, RED)
+            paint_shadow_button(canvas, self._buttons[i], face, LIGHT_GRAY)
 
-    def _resolve(mut self, yes: Bool):
-        self.confirmed = yes
+    def _resolve(mut self, choice: Int):
+        self.choice = choice
+        self.confirmed = choice >= 0 and choice == self._confirm_index
         self.submitted = True
 
     def handle_key(mut self, event: Event) -> Bool:
@@ -163,24 +212,22 @@ struct ConfirmDialog(Movable):
             return True
         var k = event.key
         if k == KEY_ESC:
-            self._resolve(False)
+            self._resolve(CONFIRM_DISMISSED)
             return True
         if k == KEY_ENTER:
-            self._resolve(self._focus.is_focused(_SLOT_YES))
+            self._resolve(self._focus.focused)
             return True
-        if k == KEY_TAB or k == KEY_LEFT or k == KEY_RIGHT:
-            # All three keys cycle between the two buttons. The focus
-            # group walks in registration order; with only two slots
-            # that's equivalent to "flip", and Shift-Tab / Left don't
-            # need their own special case.
+        if k == KEY_TAB or k == KEY_RIGHT:
             self._focus.cycle()
             return True
-        if k == _KEY_Y_UPPER or k == _KEY_Y_LOWER:
-            self._resolve(True)
+        if k == KEY_LEFT:
+            self._focus.cycle(backward=True)
             return True
-        if k == _KEY_N_UPPER or k == _KEY_N_LOWER:
-            self._resolve(False)
-            return True
+        var lk = _lower_ascii(k)
+        for i in range(len(self._keys)):
+            if self._keys[i] != 0 and self._keys[i] == lk:
+                self._resolve(i)
+                return True
         return True
 
     def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Bool:
@@ -188,26 +235,22 @@ struct ConfirmDialog(Movable):
             return False
         if event.kind != EVENT_MOUSE:
             return True
-        # Standard ``[■]`` close button — equivalent to ESC / Cancel.
+        # Standard ``[■]`` close button — equivalent to ESC.
         # Checked before button routing so a click on the chrome glyph
-        # always resolves the dialog as not-confirmed.
+        # always resolves the dialog as dismissed.
         var rect = self._layout(container_bounds)
         if close_button_clicked(rect, event):
-            self._resolve(False)
+            self._resolve(CONFIRM_DISMISSED)
             return True
         # Click on a button face moves focus there (used when the user
         # picks one button with the mouse but might then tab away).
         # Hovering does NOT shift focus — the FocusGroup's hit-test
         # only fires on press-and-not-motion.
         _ = self._focus.handle_click(event)
-        var s = self._yes_button.handle_mouse(event)
-        if s != BUTTON_NONE:
-            if s == BUTTON_FIRED:
-                self._resolve(True)
-            return True
-        s = self._no_button.handle_mouse(event)
-        if s != BUTTON_NONE:
-            if s == BUTTON_FIRED:
-                self._resolve(False)
-            return True
+        for i in range(len(self._buttons)):
+            var s = self._buttons[i].handle_mouse(event)
+            if s != BUTTON_NONE:
+                if s == BUTTON_FIRED:
+                    self._resolve(i)
+                return True
         return True   # swallow stray events while modal
