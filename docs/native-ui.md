@@ -180,6 +180,23 @@ path calls.
 - `native_tree_shown()` is false under history, merge and review, so the
   project tree's overlay never floats over them.
 
+## Project Settings window
+
+Project ▸ Settings in the macOS-style UI is `ProjectPrefsController`, a
+native window with On Save / Targets / Grammars tabs over the same
+`ProjectSettings` state:
+
+- `project_settings_native` keeps the grid window shut, the same way
+  `settings_native` does for Settings.
+- Every edit is a `tk_desktop_project_prefs_act` op that runs the
+  section's own load / commit methods: `_tg_load_fields` +
+  `_tg_commit_fields` / `_tg_commit_lang`, `_gr_commit_lang`, and
+  `_os_apply_entry`. The last is shared with the in-grid action editor's
+  Save. The dirty flags and `_sync_project_settings` persist them exactly
+  as for an in-grid edit.
+- Form fields commit when editing ends (Return, Tab or focus leaving),
+  like the grid's per-field commit.
+
 ## Tool-pane headers
 
 The docked panes (terminal, run / debug, tests, find results) keep their

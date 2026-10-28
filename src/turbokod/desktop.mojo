@@ -1139,6 +1139,8 @@ struct Desktop(Movable):
     var settings_native: Bool
     """The open Settings is shown as the host's native Settings window
     (macOS-style UI) rather than the grid one."""
+    var project_settings_native: Bool
+    """Project Settings shows as the host's native window."""
     var _last_goto_line: String      # last Go-to-line input, prefilled on reopen
     var _open_count: Int             # cascade counter for Desktop.open_file
     var _untitled_count: Int         # bumped per ``new_file`` for unique titles
@@ -1785,6 +1787,7 @@ struct Desktop(Movable):
         self.native_find_request = String("")
         self.native_find_seed = String("")
         self.settings_native = False
+        self.project_settings_native = False
         self._last_goto_line = String("")
         self._pending_new_window_project = Optional[String]()
         self._open_count = 0
@@ -12350,6 +12353,7 @@ struct Desktop(Movable):
             self.project_on_save.copy(),
             cur_ext,
         )
+        self.project_settings_native = self.native_ui()
 
     def _sync_project_settings(mut self):
         """Per-frame persistence hook for Project Settings, mirroring the

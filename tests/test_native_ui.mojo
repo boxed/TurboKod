@@ -8,7 +8,7 @@ from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from turbokod.canvas import Canvas
 from turbokod.colors import default_attr
 from turbokod.desktop import (
-    APP_SETTINGS, DOCK_DEBUG_PANE, Desktop, EDITOR_FIND, EDITOR_GOTO,
+    APP_SETTINGS, DOCK_DEBUG_PANE, Desktop, PROJECT_SETTINGS, EDITOR_FIND, EDITOR_GOTO,
     EDITOR_REPLACE, VIEW_NATIVE_UI,
 )
 from turbokod.search_options import SearchOptions
@@ -545,6 +545,40 @@ def test_native_pane_headers_take_over_the_header_row() raises:
     d.config.native_ui = False
     d.paint(canvas, _SCREEN)
     assert_false(d.debug_pane.dock.host_chrome)
+
+
+def test_native_project_settings_edit_through_the_sections_and_sync() raises:
+    var root = _repo_with_a_change()
+    var d = _native_desktop(String("x\n"))
+    d.open_project(root)
+    _ = d.dispatch_action(PROJECT_SETTINGS, _SCREEN)
+    assert_true(d.project_settings.active)
+    assert_true(d.project_settings_native)
+    ref ps = d.project_settings
+    ps.native_tg_add()
+    var i = len(ps.targets.targets) - 1
+    ps.native_tg_set(
+        i, String("app"), String("python3"), String("main.py --fast"),
+        String(""), String("A=1"), String(""),
+    )
+    ps.native_gr_add()
+    ps.native_gr_set(len(ps.grammars) - 1, String("tmpl"), String("html"))
+    ps.native_os_save(-1, String("python"), String("/bin/echo"), String("hi"), String(""))
+    var canvas = Canvas(_SCREEN.b.x, _SCREEN.b.y)
+    canvas.clear(default_attr())
+    d.paint(canvas, _SCREEN)   # the per-frame project-settings sync
+    var found = False
+    for k in range(len(d.targets.targets)):
+        if d.targets.targets[k].name == String("app"):
+            found = True
+            assert_equal(len(d.targets.targets[k].args), 2)
+    assert_true(found)
+    var mapped = False
+    for k in range(len(d.grammar_registry.overrides)):
+        if d.grammar_registry.overrides[k].ext == String("tmpl"):
+            mapped = True
+    assert_true(mapped)
+    assert_true(len(d.project_on_save) >= 1)
 
 
 def main() raises:

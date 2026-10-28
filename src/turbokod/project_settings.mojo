@@ -486,6 +486,12 @@ struct ProjectSettings(Movable):
             return
         var entry = self.editor.value()
         self.editor.close()
+        self._os_apply_entry(entry)
+
+    def _os_apply_entry(mut self, entry: OnSaveAction):
+        """Store an added / edited On-save action (``_os_edit_is_add`` /
+        ``_os_edit_orig`` say which) — the in-grid editor's Save and the
+        native one's both land here."""
         if self._os_edit_is_add:
             self.library.append(entry.copy())
             self.project_actions.append(entry.copy())
@@ -510,6 +516,94 @@ struct ProjectSettings(Movable):
                 self.selected_os = i
                 break
         self.focus = _FOCUS_OS_LIST
+
+    # --- native host (macOS-style UI) ------------------------------------
+    #
+    # The native Project Settings window edits these same fields through
+    # each section's own load / commit methods, so the dirty flags and the
+    # Desktop's ``_sync_project_settings`` work exactly as in-grid.
+
+    def native_os_rows(self) -> List[OnSaveAction]:
+        return self._os_union()
+
+    def native_os_enabled(self, act: OnSaveAction) -> Bool:
+        return self._os_is_enabled(act)
+
+    def native_os_toggle(mut self, row: Int):
+        self._os_toggle(row)
+
+    def native_os_save(
+        mut self, row: Int, var language_id: String, var program: String,
+        args: String, var cwd: String,
+    ):
+        """Add (``row`` < 0) or replace On-save action ``row``."""
+        var rows = self._os_union()
+        if row >= len(rows):
+            return
+        self._os_edit_is_add = row < 0
+        self._os_edit_orig = rows[row].copy() if row >= 0 else OnSaveAction()
+        var entry = OnSaveAction()
+        entry.language_id = language_id^
+        entry.program = program^
+        entry.args = split_whitespace(args)
+        entry.cwd = cwd^
+        self._os_apply_entry(entry)
+
+    def native_os_remove(mut self, row: Int):
+        self.selected_os = row
+        self._os_remove()
+
+    def native_tg_set(
+        mut self, i: Int, var name: String, var program: String,
+        var args: String, var cwd: String, var env: String,
+        var debug_language: String,
+    ):
+        if i < 0 or i >= len(self.targets.targets):
+            return
+        self.selected_tg = i
+        self._tg_load_fields()
+        self.name_tf.set_text(name^)
+        self.program_tf.set_text(program^)
+        self.args_tf.set_text(args^)
+        self.cwd_tf.set_text(cwd^)
+        self.env_tf.set_text(env^)
+        self._tg_commit_fields()
+        self.tg_lang_dropdown = _build_lang_dropdown(debug_language^)
+        self._tg_commit_lang()
+
+    def native_tg_add(mut self):
+        self._tg_add()
+
+    def native_tg_remove(mut self, i: Int):
+        if i < 0 or i >= len(self.targets.targets):
+            return
+        self.selected_tg = i
+        self._tg_remove()
+
+    def native_gr_set(mut self, i: Int, var ext: String, var language_id: String):
+        if i < 0 or i >= len(self.grammars):
+            return
+        self.selected_gr = i
+        self.ext_tf = TextField()
+        self.ext_tf.set_text(ext^)
+        self.gr_lang_dropdown = _build_grammar_dropdown(language_id^)
+        self._gr_commit_lang()
+
+    def native_gr_add(mut self):
+        self._gr_add()
+
+    def native_gr_remove(mut self, i: Int):
+        if i < 0 or i >= len(self.grammars):
+            return
+        self.selected_gr = i
+        self._gr_remove()
+
+    def native_language_options(self) -> List[String]:
+        """Debug / On-save languages: ``""`` then every LSP-known id."""
+        return _build_lang_dropdown(String("")).options.copy()
+
+    def native_grammar_options(self) -> List[String]:
+        return _build_grammar_dropdown(String("")).options.copy()
 
     # --- targets model ----------------------------------------------
 

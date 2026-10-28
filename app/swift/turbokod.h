@@ -206,6 +206,11 @@ int64_t tk_desktop_spelling(int64_t h, int64_t out_ptr, int64_t cap);
 int64_t tk_desktop_spelling_rows(int64_t h, int64_t out_ptr, int64_t cap);
 void tk_desktop_spelling_act(int64_t h, int64_t action, int64_t ptr, int64_t len);
 int64_t tk_desktop_prefs(int64_t h, int64_t out_ptr, int64_t cap);
+// macOS-style UI Project Settings window over the same ProjectSettings state:
+// _project_prefs {root, on_save, targets, grammars, languages,
+// grammar_languages} (0 = not open natively); _project_prefs_act edits / closes.
+int64_t tk_desktop_project_prefs(int64_t h, int64_t out_ptr, int64_t cap);
+void tk_desktop_project_prefs_act(int64_t h, int64_t op, int64_t idx, int64_t ptr, int64_t len);
 void tk_desktop_prefs_set(int64_t h, int64_t ptr, int64_t len);
 // The list sections (languages, dictionaries, projects) and their buttons.
 int64_t tk_desktop_prefs_lists(int64_t h, int64_t out_ptr, int64_t cap);

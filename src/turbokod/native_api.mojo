@@ -49,6 +49,7 @@ from turbokod.string_utils import byte_slice
 from turbokod.config import classic_font_label, default_font_label
 from turbokod.json import json_get_bool, json_get_int, json_get_string, parse_json
 from turbokod.theme import theme_names
+from turbokod.project_targets import join_env_field
 from turbokod.dictionary_install import user_dictionary_installed
 from turbokod.search_options import SearchOptions
 from turbokod.breakpoint_dialog import BP_ERR_CANCEL, BP_ERR_DISABLE, BP_ERR_TRY
@@ -935,7 +936,9 @@ def tk_desktop_project_settings_active(h: Int) abi("C") -> Int32:
     and shows/hides its window on transitions."""
     if h == 0:
         return Int32(0)
-    if _desk(h)[].project_settings.active:
+    # The native Project Settings window (macOS-style UI) stands in.
+    if _desk(h)[].project_settings.active \
+            and not _desk(h)[].project_settings_native:
         return Int32(1)
     return Int32(0)
 
@@ -1888,6 +1891,106 @@ def tk_desktop_prefs_advanced(h: Int) abi("C"):
     if h == 0:
         return
     _desk(h)[].settings_native = False
+
+
+# --- macOS-style UI: Project Settings window ----------------------------------
+
+
+@export
+def tk_desktop_project_prefs(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
+    """The open Project Settings for the native window: ``{root,
+    on_save: [[enabled, language, program, args, cwd]], targets: [[name,
+    program, args, cwd, env, debug_language]], grammars: [[ext,
+    language]], languages, grammar_languages}``. 0 when it isn't open
+    natively."""
+    if h == 0:
+        return 0
+    ref d = _desk(h)[]
+    if not d.project_settings.active or not d.project_settings_native:
+        return 0
+    ref ps = d.project_settings
+    var o = json_object()
+    o.put(String("root"), json_str(ps.project_root))
+    var os = json_array()
+    var rows = ps.native_os_rows()
+    for i in range(len(rows)):
+        var r = json_array()
+        r.append(json_bool(ps.native_os_enabled(rows[i])))
+        r.append(json_str(rows[i].language_id))
+        r.append(json_str(rows[i].program))
+        r.append(json_str(String(" ").join(rows[i].args)))
+        r.append(json_str(rows[i].cwd))
+        os.append(r)
+    o.put(String("on_save"), os)
+    var tg = json_array()
+    for i in range(len(ps.targets.targets)):
+        ref t = ps.targets.targets[i]
+        var r = json_array()
+        r.append(json_str(t.name))
+        r.append(json_str(t.program))
+        r.append(json_str(String(" ").join(t.args)))
+        r.append(json_str(t.cwd))
+        r.append(json_str(join_env_field(t.env)))
+        r.append(json_str(t.debug_language))
+        tg.append(r)
+    o.put(String("targets"), tg)
+    var gr = json_array()
+    for i in range(len(ps.grammars)):
+        var r = json_array()
+        r.append(json_str(ps.grammars[i].ext))
+        r.append(json_str(ps.grammars[i].language_id))
+        gr.append(r)
+    o.put(String("grammars"), gr)
+    o.put(String("languages"), _strings(ps.native_language_options()))
+    o.put(String("grammar_languages"), _strings(ps.native_grammar_options()))
+    return _write_out(encode_json(o), out_ptr, cap)
+
+
+@export
+def tk_desktop_project_prefs_act(
+    h: Int, op: Int, idx: Int, ptr: Int, n: Int,
+) abi("C"):
+    """Project Settings edits: ``op`` 0 toggle On-save ``idx``, 1 save
+    On-save ``idx`` (-1 adds; JSON ``[language, program, args, cwd]``), 2
+    remove On-save ``idx``, 3 set target ``idx`` (JSON ``[name, program,
+    args, cwd, env, debug_language]``), 4 add a target, 5 remove target
+    ``idx``, 6 set grammar ``idx`` (JSON ``[ext, language]``), 7 add a
+    grammar mapping, 8 remove grammar ``idx``, 9 close the window."""
+    if h == 0:
+        return
+    ref d = _desk(h)[]
+    ref ps = d.project_settings
+    if not ps.active:
+        return
+    try:
+        var v = List[String]()
+        if n > 0:
+            var a = parse_json(_string_from(ptr, n))
+            for i in range(a.array_len()):
+                v.append(a.array_at(i).as_str())
+        if op == 0:
+            ps.native_os_toggle(idx)
+        elif op == 1 and len(v) == 4:
+            ps.native_os_save(idx, v[0], v[1], v[2], v[3])
+        elif op == 2:
+            ps.native_os_remove(idx)
+        elif op == 3 and len(v) == 6:
+            ps.native_tg_set(idx, v[0], v[1], v[2], v[3], v[4], v[5])
+        elif op == 4:
+            ps.native_tg_add()
+        elif op == 5:
+            ps.native_tg_remove(idx)
+        elif op == 6 and len(v) == 2:
+            ps.native_gr_set(idx, v[0], v[1])
+        elif op == 7:
+            ps.native_gr_add()
+        elif op == 8:
+            ps.native_gr_remove(idx)
+        elif op == 9:
+            ps.close()
+            d.project_settings_native = False
+    except:
+        pass
 
 
 # --- macOS-style UI: file tree ------------------------------------------------

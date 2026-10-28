@@ -65,8 +65,9 @@ in Project run as one native picker sheet over the core's own search
 machinery (`tk_desktop_picker*`); popups are `NSMenu`s; the git view,
 Spelling, history, merge and review are native sheets / overlays driving the
 core through the same methods the grid path calls; the file tree and status
-bar are native overlays over their cells; Settings is a native window over
-the same `Settings` state.
+bar are native overlays over their cells; Settings and Project Settings are
+native windows over the same state structs; tool panes get native headers
+and editors a native overlay scroller.
 Swift trap: constants below `app.run()` in `TurboKod.swift` (the main file)
 read 0 — use `static let`s in an enum. Full details in [docs/native-ui.md](docs/native-ui.md).
 

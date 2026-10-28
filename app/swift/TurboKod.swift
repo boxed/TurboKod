@@ -1893,6 +1893,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     var trees: [ObjectIdentifier: FileTreeOverlay] = [:]
     // macOS-style UI: the native Settings window (one per Desktop that opened it).
     var prefsWindows: [ObjectIdentifier: PrefsController] = [:]
+    var projectPrefsWindows: [ObjectIdentifier: ProjectPrefsController] = [:]
     // macOS-style UI: Project ▸ Spelling as a sheet, per window.
     var spellingSheets: [ObjectIdentifier: SpellingController] = [:]
     // macOS-style UI: Git history as a sheet, per window.
@@ -2307,6 +2308,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if self.pollFindBar(v) { changed = true }
                 if self.pollTree(v) { changed = true }
                 if self.pollPrefs(v) { changed = true }
+                if self.pollProjectPrefs(v) { changed = true }
                 if self.pollSpelling(v) { changed = true }
                 if self.pollHistory(v) { changed = true }
                 if self.pollMerge(v) { changed = true }
@@ -3497,6 +3499,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         findBars[ObjectIdentifier(v)] = nil
         trees[ObjectIdentifier(v)] = nil
         if let p = prefsWindows.removeValue(forKey: ObjectIdentifier(v)) { p.dismiss() }
+        if let p = projectPrefsWindows.removeValue(forKey: ObjectIdentifier(v)) { p.dismiss() }
         spellingSheets[ObjectIdentifier(v)] = nil
         historySheets[ObjectIdentifier(v)] = nil
         mergeSheets[ObjectIdentifier(v)] = nil
@@ -4216,6 +4219,31 @@ extension AppController {
         spellingSheets[id] = sc
         _ = sc.update(data)
         sc.present(in: win)
+        return true
+    }
+
+    /// Open, refresh or retire the native Project Settings window for `v`.
+    func pollProjectPrefs(_ v: CellView) -> Bool {
+        let id = ObjectIdentifier(v)
+        let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_project_prefs(v.handle, $0, $1) })
+        if let pc = projectPrefsWindows[id] {
+            guard let data = data else {
+                projectPrefsWindows[id] = nil
+                pc.dismiss()
+                return true
+            }
+            pc.update(data)
+            return false
+        }
+        guard let data = data else { return false }
+        let pc = ProjectPrefsController(view: v) { [weak self, weak v] in
+            guard let v = v else { return }
+            self?.projectPrefsWindows[ObjectIdentifier(v)] = nil
+            if v.handle != 0 { tk_desktop_project_prefs_act(v.handle, 9, 0, 0, 0) }
+        }
+        projectPrefsWindows[id] = pc
+        pc.update(data)
+        pc.show()
         return true
     }
 
@@ -8781,5 +8809,397 @@ final class EditorScroller: NSView {
     override func mouseUp(with e: NSEvent) {
         dragOffset = nil
         needsDisplay = true
+    }
+}
+
+
+// MARK: - macOS-style UI: Project Settings window
+//
+// On Save / Targets / Grammars over the same `ProjectSettings` state the grid
+// window edits: every change is a `tk_desktop_project_prefs_act` op that runs
+// that section's own load / commit methods, so its dirty flag and the
+// Desktop's per-frame `_sync_project_settings` persist it exactly as in-grid.
+
+final class ProjectPrefsController: NSObject, NSWindowDelegate, NSTableViewDataSource,
+                                    NSTableViewDelegate, NSTextFieldDelegate {
+    private weak var view: CellView?
+    private let onClose: () -> Void
+    private let window: NSWindow
+    private var dismissed = false
+    private var lastData = Data()
+    private var onSave: [[Any]] = []
+    private var targets: [[String]] = []
+    private var grammars: [[String]] = []
+    private var languages: [String] = []
+    private var grammarLanguages: [String] = []
+    private let osTable = NSTableView()
+    private let tgTable = NSTableView()
+    private let grTable = NSTableView()
+    // Target form.
+    private let tgName = NSTextField(), tgProgram = NSTextField(), tgArgs = NSTextField()
+    private let tgCwd = NSTextField(), tgEnv = NSTextField()
+    private let tgLang = NSPopUpButton()
+    // Grammar form.
+    private let grExt = NSTextField()
+    private let grLang = NSPopUpButton()
+    private let tabView = NSTabView()
+
+    init(view: CellView, onClose: @escaping () -> Void) {
+        self.view = view
+        self.onClose = onClose
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 520),
+                          styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        super.init()
+        window.title = "Project Settings"
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        let tabs = tabView
+        for (title, v) in [("On Save", onSavePane()), ("Targets", targetsPane()), ("Grammars", grammarsPane())] {
+            let item = NSTabViewItem(identifier: title)
+            item.label = title
+            item.view = v
+            tabs.addTabViewItem(item)
+        }
+        let content = NSView()
+        tabs.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(tabs)
+        NSLayoutConstraint.activate([
+            tabs.topAnchor.constraint(equalTo: content.topAnchor, constant: 12),
+            tabs.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            tabs.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
+            tabs.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -16),
+        ])
+        window.contentView = content
+    }
+
+    func show() {
+        if isCapturing, let t = Int(ProcessInfo.processInfo.environment["TK_CAPTURE_PREFS_TAB"] ?? "") {
+            tabView.selectTabViewItem(at: t)   // scripted screenshots
+        }
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    func dismiss() {
+        guard !dismissed else { return }
+        dismissed = true
+        window.close()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        if !dismissed { dismissed = true; onClose() }
+    }
+
+    // MARK: data
+
+    func update(_ data: Data) {
+        guard data != lastData,
+              let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
+        lastData = data
+        let root = o["root"] as? String ?? ""
+        window.title = "Project Settings — \((root as NSString).lastPathComponent)"
+        onSave = o["on_save"] as? [[Any]] ?? []
+        targets = o["targets"] as? [[String]] ?? []
+        grammars = o["grammars"] as? [[String]] ?? []
+        let langs = o["languages"] as? [String] ?? []
+        if langs != languages {
+            languages = langs
+            tgLang.removeAllItems()
+            tgLang.addItems(withTitles: langs.map { $0.isEmpty ? "(none)" : $0 })
+        }
+        let glangs = o["grammar_languages"] as? [String] ?? []
+        if glangs != grammarLanguages {
+            grammarLanguages = glangs
+            grLang.removeAllItems()
+            grLang.addItems(withTitles: glangs.map { $0.isEmpty ? "(none)" : $0 })
+        }
+        for t in [osTable, tgTable, grTable] {
+            let sel = t.selectedRowIndexes
+            t.reloadData()
+            t.selectRowIndexes(sel.filteredIndexSet { $0 < t.numberOfRows }, byExtendingSelection: false)
+        }
+        loadTargetForm()
+        loadGrammarForm()
+    }
+
+    private func act(_ op: Int, _ idx: Int, _ values: [String]? = nil) {
+        guard let h = view?.handle, h != 0 else { return }
+        let json = values.flatMap { try? JSONSerialization.data(withJSONObject: $0) }
+            .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        withUTF8Arg(json) { p, l in tk_desktop_project_prefs_act(h, Int64(op), Int64(idx), p, l) }
+        lastData = Data()
+    }
+
+    // MARK: panes
+
+    private func makeTable(_ t: NSTableView, _ cols: [(String, String, CGFloat)]) -> NSScrollView {
+        for (id, title, w) in cols {
+            let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
+            c.title = title
+            c.width = w
+            t.addTableColumn(c)
+        }
+        t.usesAlternatingRowBackgroundColors = true
+        t.dataSource = self
+        t.delegate = self
+        let s = NSScrollView()
+        s.documentView = t
+        s.hasVerticalScroller = true
+        s.borderType = .bezelBorder
+        return s
+    }
+
+    private func pane(_ intro: String, _ middle: NSView, _ buttons: [NSButton]) -> NSView {
+        let note = NSTextField(wrappingLabelWithString: intro)
+        note.textColor = .secondaryLabelColor
+        note.font = .systemFont(ofSize: 12)
+        let bar = NSStackView(views: buttons + [NSView()])
+        let v = NSView()
+        for x in [note, middle, bar] as [NSView] {
+            x.translatesAutoresizingMaskIntoConstraints = false
+            v.addSubview(x)
+            NSLayoutConstraint.activate([
+                x.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
+                x.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -16),
+            ])
+        }
+        NSLayoutConstraint.activate([
+            note.topAnchor.constraint(equalTo: v.topAnchor, constant: 14),
+            middle.topAnchor.constraint(equalTo: note.bottomAnchor, constant: 8),
+            bar.topAnchor.constraint(equalTo: middle.bottomAnchor, constant: 8),
+            bar.bottomAnchor.constraint(equalTo: v.bottomAnchor, constant: -14),
+        ])
+        return v
+    }
+
+    private func button(_ title: String, _ sel: Selector) -> NSButton {
+        NSButton(title: title, target: self, action: sel)
+    }
+
+    private func formGrid(_ rows: [(String, NSView)]) -> NSGridView {
+        let grid = NSGridView(views: rows.map { r -> [NSView] in
+            let l = NSTextField(labelWithString: r.0 + ":")
+            l.alignment = .right
+            return [l, r.1]
+        })
+        grid.rowSpacing = 8
+        grid.columnSpacing = 8
+        grid.rowAlignment = .firstBaseline
+        grid.column(at: 0).xPlacement = .trailing
+        return grid
+    }
+
+    private func onSavePane() -> NSView {
+        osTable.target = self
+        osTable.doubleAction = #selector(editOnSave)
+        return pane("Commands that run on a file after it's saved, for its language (formatters, linters). The checkbox turns one on for this project.",
+                    makeTable(osTable, [("on", "On", 32), ("lang", "Language", 120), ("cmd", "Command", 480)]),
+                    [button("Add…", #selector(addOnSave)), button("Edit…", #selector(editOnSave)),
+                     button("Remove", #selector(removeOnSave))])
+    }
+
+    private func targetsPane() -> NSView {
+        for f in [tgName, tgProgram, tgArgs, tgCwd, tgEnv] {
+            f.delegate = self
+            f.widthAnchor.constraint(greaterThanOrEqualToConstant: 300).isActive = true
+        }
+        tgEnv.placeholderString = "KEY=value KEY2=value"
+        tgCwd.placeholderString = "project root"
+        tgLang.target = self
+        tgLang.action = #selector(targetFieldChanged)
+        let form = formGrid([("Name", tgName), ("Program", tgProgram), ("Arguments", tgArgs),
+                             ("Working directory", tgCwd), ("Environment", tgEnv), ("Debug language", tgLang)])
+        let list = makeTable(tgTable, [("name", "Target", 160)])
+        list.widthAnchor.constraint(equalToConstant: 180).isActive = true
+        // The form keeps its natural height; a spacer under it takes the rest.
+        form.setContentHuggingPriority(.required, for: .vertical)
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .vertical)
+        let formColumn = NSStackView(views: [form, spacer])
+        formColumn.orientation = .vertical
+        formColumn.alignment = .leading
+        formColumn.distribution = .fill
+        let split = NSStackView(views: [list, formColumn])
+        split.alignment = .top
+        split.spacing = 16
+        list.heightAnchor.constraint(equalTo: split.heightAnchor).isActive = true
+        formColumn.heightAnchor.constraint(equalTo: split.heightAnchor).isActive = true
+        return pane("What Run, Debug and Test start in this project.", split,
+                    [button("Add", #selector(addTarget)), button("Remove", #selector(removeTarget))])
+    }
+
+    private func grammarsPane() -> NSView {
+        grExt.delegate = self
+        grExt.placeholderString = "e.g. tmpl"
+        grExt.widthAnchor.constraint(equalToConstant: 140).isActive = true
+        grLang.target = self
+        grLang.action = #selector(grammarFieldChanged)
+        let form = formGrid([("Extension", grExt), ("Highlight as", grLang)])
+        let list = makeTable(grTable, [("ext", "Extension", 140), ("lang", "Language", 200)])
+        let stack = NSStackView(views: [list, form])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 10
+        list.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        return pane("Syntax highlighting for file extensions this project uses differently.", stack,
+                    [button("Add", #selector(addGrammar)), button("Remove", #selector(removeGrammar))])
+    }
+
+    // MARK: tables
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        tableView === osTable ? onSave.count : tableView === tgTable ? targets.count : grammars.count
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row i: Int) -> NSView? {
+        let id = tableColumn?.identifier.rawValue ?? ""
+        if tableView === osTable {
+            let r = onSave[i]
+            if id == "on" {
+                let cb = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggleOnSave(_:)))
+                cb.state = (r.first as? Bool ?? false) ? .on : .off
+                cb.tag = i
+                return cb
+            }
+            let text = id == "lang" ? (r[1] as? String ?? "") :
+                [r[2] as? String ?? "", r[3] as? String ?? ""].filter { !$0.isEmpty }.joined(separator: " ")
+            return label(text)
+        }
+        if tableView === tgTable { return label(targets[i].first ?? "") }
+        let g = grammars[i]
+        return label(id == "ext" ? (g.first ?? "") : (g.count > 1 ? (g[1].isEmpty ? "(none)" : g[1]) : ""))
+    }
+
+    private func label(_ s: String) -> NSTextField {
+        let l = NSTextField(labelWithString: s)
+        l.lineBreakMode = .byTruncatingMiddle
+        return l
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        if notification.object as? NSTableView === tgTable { loadTargetForm(force: true) }
+        if notification.object as? NSTableView === grTable { loadGrammarForm(force: true) }
+    }
+
+    // MARK: On Save
+
+    @objc private func toggleOnSave(_ b: NSButton) { act(0, b.tag) }
+    @objc private func addOnSave() { onSaveSheet(row: -1) }
+    @objc private func editOnSave() {
+        let r = osTable.clickedRow >= 0 ? osTable.clickedRow : osTable.selectedRow
+        if r >= 0 { onSaveSheet(row: r) }
+    }
+    @objc private func removeOnSave() { if osTable.selectedRow >= 0 { act(2, osTable.selectedRow) } }
+
+    private func onSaveSheet(row: Int) {
+        let r: [Any] = row >= 0 && row < onSave.count ? onSave[row] : [true, "", "", "", ""]
+        let alert = NSAlert()
+        alert.messageText = row < 0 ? "Add On-Save Command" : "Edit On-Save Command"
+        let lang = NSPopUpButton()
+        lang.addItems(withTitles: languages.map { $0.isEmpty ? "(any)" : $0 })
+        lang.selectItem(at: max(0, languages.firstIndex(of: r[1] as? String ?? "") ?? 0))
+        let program = NSTextField(string: r[2] as? String ?? "")
+        program.placeholderString = "/path/to/formatter"
+        let choose = NSButton(title: "Choose…", target: nil, action: nil)
+        let args = NSTextField(string: r[3] as? String ?? "")
+        args.placeholderString = "--write {file}"
+        let cwd = NSTextField(string: r[4] as? String ?? "")
+        cwd.placeholderString = "project root"
+        for f in [program, args, cwd] { f.widthAnchor.constraint(equalToConstant: 300).isActive = true }
+        let programRow = NSStackView(views: [program, choose])
+        let grid = formGrid([("Language", lang), ("Program", programRow), ("Arguments", args), ("Working directory", cwd)])
+        grid.layoutSubtreeIfNeeded()
+        grid.frame = NSRect(origin: .zero, size: grid.fittingSize)
+        alert.accessoryView = grid
+        alert.addButton(withTitle: row < 0 ? "Add" : "Save")
+        alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
+        let chooser = ChooseFile(field: program)
+        choose.target = chooser
+        choose.action = #selector(ChooseFile.choose)
+        alert.beginSheetModal(for: window) { [weak self] resp in
+            _ = chooser   // keep the target alive while the sheet is up
+            guard let self = self, resp == .alertFirstButtonReturn else { return }
+            let li = lang.indexOfSelectedItem
+            self.act(1, row, [li >= 0 && li < self.languages.count ? self.languages[li] : "",
+                              program.stringValue, args.stringValue, cwd.stringValue])
+        }
+    }
+
+    // MARK: Targets
+
+    private func loadTargetForm(force: Bool = false) {
+        let i = tgTable.selectedRow
+        let editing = [tgName, tgProgram, tgArgs, tgCwd, tgEnv].contains { $0.currentEditor() != nil }
+        guard force || !editing else { return }
+        let t = i >= 0 && i < targets.count ? targets[i] : ["", "", "", "", "", ""]
+        for (f, v) in zip([tgName, tgProgram, tgArgs, tgCwd, tgEnv], t) { f.stringValue = v; f.isEnabled = i >= 0 }
+        tgLang.selectItem(at: max(0, languages.firstIndex(of: t.count > 5 ? t[5] : "") ?? 0))
+        tgLang.isEnabled = i >= 0
+    }
+
+    @objc private func targetFieldChanged() {
+        let i = tgTable.selectedRow
+        guard i >= 0 else { return }
+        let li = tgLang.indexOfSelectedItem
+        act(3, i, [tgName.stringValue, tgProgram.stringValue, tgArgs.stringValue, tgCwd.stringValue,
+                   tgEnv.stringValue, li >= 0 && li < languages.count ? languages[li] : ""])
+    }
+
+    @objc private func addTarget() {
+        act(4, -1)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self = self, self.tgTable.numberOfRows > 0 else { return }
+            self.tgTable.selectRowIndexes(IndexSet(integer: self.tgTable.numberOfRows - 1), byExtendingSelection: false)
+            self.window.makeFirstResponder(self.tgName)
+        }
+    }
+    @objc private func removeTarget() { if tgTable.selectedRow >= 0 { act(5, tgTable.selectedRow) } }
+
+    // MARK: Grammars
+
+    private func loadGrammarForm(force: Bool = false) {
+        let i = grTable.selectedRow
+        guard force || grExt.currentEditor() == nil else { return }
+        let g = i >= 0 && i < grammars.count ? grammars[i] : ["", ""]
+        grExt.stringValue = g.first ?? ""
+        grLang.selectItem(at: max(0, grammarLanguages.firstIndex(of: g.count > 1 ? g[1] : "") ?? 0))
+        grExt.isEnabled = i >= 0
+        grLang.isEnabled = i >= 0
+    }
+
+    @objc private func grammarFieldChanged() {
+        let i = grTable.selectedRow
+        guard i >= 0 else { return }
+        let li = grLang.indexOfSelectedItem
+        act(6, i, [grExt.stringValue, li >= 0 && li < grammarLanguages.count ? grammarLanguages[li] : ""])
+    }
+
+    @objc private func addGrammar() {
+        act(7, -1)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self = self, self.grTable.numberOfRows > 0 else { return }
+            self.grTable.selectRowIndexes(IndexSet(integer: self.grTable.numberOfRows - 1), byExtendingSelection: false)
+            self.window.makeFirstResponder(self.grExt)
+        }
+    }
+    @objc private func removeGrammar() { if grTable.selectedRow >= 0 { act(8, grTable.selectedRow) } }
+
+    /// A form field's edit is committed when it ends (Return / Tab / focus
+    /// leaving), like the grid's per-field commit.
+    func controlTextDidEndEditing(_ obj: Notification) {
+        guard let f = obj.object as? NSTextField else { return }
+        if f === grExt { grammarFieldChanged() } else { targetFieldChanged() }
+    }
+}
+
+/// "Choose…" next to a program field: an open panel filling the field.
+final class ChooseFile: NSObject {
+    private weak var field: NSTextField?
+    init(field: NSTextField) { self.field = field }
+    @objc func choose() {
+        let p = NSOpenPanel()
+        p.canChooseFiles = true
+        p.canChooseDirectories = false
+        if p.runModal() == .OK, let url = p.url { field?.stringValue = url.path }
     }
 }
