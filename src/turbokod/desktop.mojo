@@ -14955,7 +14955,9 @@ struct Desktop(Movable):
             new_path = join_path(parent_path(old_path), trimmed)
         if new_path == old_path:
             return
-        if stat_file(new_path).ok:
+        # Changing only the case of a name finds the file itself there on a
+        # case-insensitive disk, which ``realpath`` names as it is on disk
+        if stat_file(new_path).ok and realpath(new_path) != realpath(old_path):
             self.status_bar.set_message(
                 String("Rename: '") + basename(new_path)
                     + String("' already exists"),
