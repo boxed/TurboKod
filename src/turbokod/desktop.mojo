@@ -6714,12 +6714,6 @@ struct Desktop(Movable):
             return
         self._close_editor_window_at(idx)
 
-    def _close_editor_window_at(mut self, idx: Int):
-        """Close the editor window at ``idx`` with the same side effects
-        as the user closing it (view-state capture + LSP didClose),
-        rather than just dropping it from the manager. Used by
-        ``_enforce_window_cap`` to evict least-recently-used documents."""
-        if idx < 0 or idx >= len(self.windows.windows):
     def _save_then_close(mut self, idx: Int):
         """Save in the unsaved-changes prompt: write the buffer and close
         the window. An untitled buffer goes through Save As first and
@@ -6742,6 +6736,12 @@ struct Desktop(Movable):
                 and not self._holds_unsaved_work(idx):
             self._close_editor_window_at(idx)
 
+    def _close_editor_window_at(mut self, idx: Int):
+        """Close the editor window at ``idx`` with the same side effects
+        as the user closing it (view-state capture + LSP didClose),
+        rather than just dropping it from the manager. Used by
+        ``_enforce_window_cap`` to evict least-recently-used documents."""
+        if idx < 0 or idx >= len(self.windows.windows):
             return
         self._capture_view_state_for_window(idx)
         var closing_path = String("")
@@ -7845,15 +7845,15 @@ struct Desktop(Movable):
                         )
                     else:
                         self._save_focused_as(path)
+                        self._close_if_saved_as()
+            elif not self.save_as_dialog.active:
+                self._close_after_save_as_idx = -1   # cancelled
             return Optional[String]()
         if self.quick_open.active:
             if event.kind == EVENT_KEY:
                 _ = self.quick_open.handle_key(event)
             else:
                 _ = self.quick_open.handle_mouse(event, screen)
-                        self._close_if_saved_as()
-            elif not self.save_as_dialog.active:
-                self._close_after_save_as_idx = -1   # cancelled
             if self.quick_open.submitted:
                 var primary = self.quick_open.selected_path
                 var paths = self.quick_open.selected_paths.copy()
@@ -16109,6 +16109,7 @@ struct Desktop(Movable):
         side effects run so install spawns can surface follow-up
         modals without colliding with the closing dialog."""
         var yes = self.confirm_dialog.confirmed
+        var choice = self.confirm_dialog.choice
         self.confirm_dialog.close()
         var pa = self._pending_action
         self._pending_action = String("")
@@ -16117,7 +16118,6 @@ struct Desktop(Movable):
             return Optional[String]()
         if pa == _PA_DOC_INSTALL:
             var lang = self._pending_arg
-        var choice = self.confirm_dialog.choice
             self._pending_arg = String("")
             if yes:
                 self._start_doc_install(lang)
@@ -16234,6 +16234,7 @@ struct Desktop(Movable):
                     self.status_bar.set_message(
                         String("Save failed"), Attr(RED, LIGHT_GRAY),
                     )
+            self._close_if_saved_as()
             return Optional[String]()
         # Unknown / no pending action — nothing to do.
         self._pending_arg = String("")
@@ -16242,7 +16243,6 @@ struct Desktop(Movable):
     def _on_prompt_submit(mut self) -> Optional[String]:
         var text = self.prompt.input.text
         var second_text = self.prompt.second_input.text
-            self._close_if_saved_as()
         var submit_kind = self.prompt.submit_kind
         var opts = self.prompt.search_options()
         var pa = self._pending_action

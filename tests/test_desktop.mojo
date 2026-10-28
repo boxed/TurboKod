@@ -922,7 +922,6 @@ def test_closing_a_window_with_unsaved_edits_asks_first() raises:
     assert_equal(read_file(path), String("old\n"))
 
 
-def test_closing_a_typed_untitled_buffer_asks_first() raises:
 def test_closing_a_window_with_unsaved_edits_can_save_them() raises:
     var d = Desktop()
     var path = _dirty_file_desktop(d, String("_close_save.txt"), False)
@@ -956,6 +955,7 @@ def test_saving_an_untitled_buffer_on_close_goes_through_save_as() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
+def test_closing_a_typed_untitled_buffer_asks_first() raises:
     var d = Desktop()
     d.new_file(_SCREEN)
     _ = d.handle_event(Event.key_event(UInt32(ord("w")), MOD_META), _SCREEN)
