@@ -347,6 +347,7 @@ comptime _TAB_FILE_ACTION_DELETE = 102
 comptime _PA_RENAME_FILE      = String("file:rename")
 comptime _PA_DELETE_FILE      = String("file:delete")
 comptime _PA_DUPLICATE_FILE   = String("file:duplicate:do")
+comptime _PA_SAVE_AS_REPLACE  = String("file:save_as:replace")
 comptime EDITOR_TOGGLE_COMMENT = String("edit:comment")
 comptime EDITOR_TOGGLE_CASE   = String("edit:case")
 comptime EDITOR_SORT_LINES    = String("edit:sort_lines")
@@ -7677,21 +7678,22 @@ struct Desktop(Movable):
                 self.save_as_dialog.close()
                 var idx = self._focused_editor_idx()
                 if idx >= 0:
-                    if self.windows.windows[idx].editor.save_as(path):
-                        # Adopt the new filename as the window's title so the
-                        # title bar / tab strip reflect the just-written
-                        # path instead of the stale ``Untitled`` (or the
-                        # previous backing file's basename).
-                        self.windows.windows[idx].title = basename(
-                            self.windows.windows[idx].editor.file_path,
+                    var current = self.windows.windows[idx].editor.file_path
+                    if stat_file(path).ok and path != current and (
+                        len(current.as_bytes()) == 0
+                        or realpath(path) != realpath(current)
+                    ):
+                        # The dialog lists only folders, so nothing showed
+                        # the name was taken: ask before replacing a file.
+                        self._pending_action = _PA_SAVE_AS_REPLACE
+                        self._pending_arg = path
+                        self.confirm_dialog.open(
+                            String("'") + basename(path)
+                                + String("' already exists. Replace it?"),
+                            default_yes=False,
                         )
-                        # Tell servers a file was created so they can index
-                        # it / fix up imports (no-op unless one registered).
-                        var spath = self.windows.windows[idx].editor.file_path
-                        for ci in range(len(self.lsp_managers)):
-                            self.lsp_managers[ci].notify_did_create_files(
-                                spath,
-                            )
+                    else:
+                        self._save_focused_as(path)
             return Optional[String]()
         if self.quick_open.active:
             if event.kind == EVENT_KEY:
@@ -12336,6 +12338,24 @@ struct Desktop(Movable):
 
     # --- editor-action helpers --------------------------------------------
 
+    def _save_focused_as(mut self, path: String) raises:
+        var idx = self._focused_editor_idx()
+        if idx < 0:
+            return
+        if self.windows.windows[idx].editor.save_as(path):
+            # Adopt the new filename as the window's title so the
+            # title bar / tab strip reflect the just-written
+            # path instead of the stale ``Untitled`` (or the
+            # previous backing file's basename).
+            self.windows.windows[idx].title = basename(
+                self.windows.windows[idx].editor.file_path,
+            )
+            # Tell servers a file was created so they can index
+            # it / fix up imports (no-op unless one registered).
+            var spath = self.windows.windows[idx].editor.file_path
+            for ci in range(len(self.lsp_managers)):
+                self.lsp_managers[ci].notify_did_create_files(spath)
+
     def _focused_editor_idx(self) -> Int:
         if self.windows.focused < 0 or self.windows.focused >= len(self.windows.windows):
             return -1
@@ -15954,6 +15974,17 @@ struct Desktop(Movable):
                 self._do_delete_file()
             else:
                 self._file_op_path = String("")
+            return Optional[String]()
+        if pa == _PA_SAVE_AS_REPLACE:
+            var path = self._pending_arg
+            self._pending_arg = String("")
+            if yes:
+                try:
+                    self._save_focused_as(path)
+                except:
+                    self.status_bar.set_message(
+                        String("Save failed"), Attr(RED, LIGHT_GRAY),
+                    )
             return Optional[String]()
         # Unknown / no pending action — nothing to do.
         self._pending_arg = String("")

@@ -852,6 +852,36 @@ def test_desktop_save_as_updates_window_title() raises:
     _ = external_call["unlink", Int32]((path_b + String("\0")).unsafe_ptr())
 
 
+def test_save_as_asks_before_replacing_a_file() raises:
+    # the dialog lists only folders: nothing showed the name was taken
+    var path = _temp_path(String("_saveas_taken.txt"))
+    assert_true(write_file(path, String("keep\n")))
+    var d = Desktop()
+    d.new_file(_SCREEN)
+    _ = d.handle_event(Event.key_event(UInt32(ord("x"))), _SCREEN)
+    d.save_as_dialog.open(path)
+    _ = d.handle_event(Event.key_event(KEY_ENTER), _SCREEN)
+    assert_true(d.confirm_dialog.active)
+    # Enter takes the default, which is to keep the file
+    _ = d.handle_event(Event.key_event(KEY_ENTER), _SCREEN)
+    assert_false(d.confirm_dialog.active)
+    assert_equal(read_file(path), String("keep\n"))
+    assert_equal(d.windows.windows[0].editor.file_path, String(""))
+    d.save_as_dialog.open(path)
+    _ = d.handle_event(Event.key_event(KEY_ENTER), _SCREEN)
+    _ = d.handle_event(Event.key_event(UInt32(ord("y"))), _SCREEN)
+    assert_equal(read_file(path), String("x"))
+    assert_equal(d.windows.windows[0].editor.file_path, path)
+    assert_equal(d.windows.windows[0].title, basename(path))
+    # saving as the file it already is doesn't ask
+    _ = d.handle_event(Event.key_event(UInt32(ord("y"))), _SCREEN)
+    d.save_as_dialog.open(path)
+    _ = d.handle_event(Event.key_event(KEY_ENTER), _SCREEN)
+    assert_false(d.confirm_dialog.active)
+    assert_equal(read_file(path), String("xy"))
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
 def test_desktop_window_menu_lists_open_windows() raises:
     var d = Desktop()
     d.windows.add(Window(String("alpha"), Rect(0, 1, 20, 5), List[String]()))
