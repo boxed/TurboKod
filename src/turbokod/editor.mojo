@@ -29,7 +29,9 @@ from .colors import (
     STYLE_UNDERLINE_CURLY, SYN_COMMENT, SYN_IDENT, SYN_STRING, WHITE, YELLOW,
 )
 from .diagnostic_menu import DiagnosticMenuRequest
-from .diff import MergeRegion, REGION_CONFLICT, diff3_regions
+from .diff import (
+    MergeRegion, OP_EQUAL, REGION_CONFLICT, diff3_regions, diff_lines,
+)
 from .events import (
     Event, EVENT_KEY, EVENT_MOD_KEY, EVENT_MOUSE,
     KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME,
@@ -4030,10 +4032,99 @@ struct Editor(Copyable, Movable):
         # the line count, which forces a full retokenize where the mark is
         # ignored, so tracking start_line here is safe.
         var hl_high = -1
-        self._apply_edits_desc(edits^, hl_low, hl_high)
+        var finer = List[TextEditEntry]()
+        for e in edits:
+            for f in self._finer_edits(e):
+                finer.append(f)
+        self._apply_edits_desc(finer^, hl_low, hl_high)
         self.dirty = True
         self._mark_hl_dirty(hl_low, hl_high)
         return True
+
+    def _finer_edits(self, e: TextEditEntry) -> List[TextEditEntry]:
+        """``e`` as one edit per run of lines it changes, leaving out the
+        lines it puts back as they were. Formatters send the whole file to
+        change a few lines: applied as is, that takes every bookmark along,
+        and the caret off its line."""
+        var out = List[TextEditEntry]()
+        var n = self.buffer.line_count()
+        var sl = e.start_line
+        var sc = e.start_char
+        var el = e.end_line
+        var ec = e.end_char
+        if el >= n:
+            el = n - 1
+            ec = self.buffer.line_length(el)
+        if sl < 0 or sl > el or sc < 0 or ec < 0 \
+                or sc > self.buffer.line_length(sl) \
+                or ec > self.buffer.line_length(el) \
+                or (sl == el and sc > ec) \
+                or (sl == el and not "\n" in e.new_text):
+            out.append(e)
+            return out^
+        # Both sides as the pieces between their newlines
+        var old = List[String]()
+        for r in range(sl, el + 1):
+            var line = self.buffer.line(r)
+            var a = sc if r == sl else 0
+            var b = ec if r == el else len(line.as_bytes())
+            old.append(byte_slice(line, a, b))
+        var new = List[String]()
+        var nb = e.new_text.as_bytes()
+        var start = 0
+        for i in range(len(nb) + 1):
+            if i == len(nb) or nb[i] == 0x0A:
+                new.append(byte_slice(e.new_text, start, i))
+                start = i + 1
+        var ops = diff_lines(old, new)
+        var i = 0
+        var j = 0
+        var i0 = -1
+        var j0 = -1
+        for k in range(len(ops) + 1):
+            if k < len(ops) and ops[k].kind != OP_EQUAL:
+                if i0 < 0:
+                    i0 = i
+                    j0 = j
+                if ops[k].a_index >= 0:
+                    i += 1
+                else:
+                    j += 1
+                continue
+            if i0 >= 0:
+                out.append(self._piece_edit(old, new, sl, sc, el, ec, i0, i, j0, j))
+                i0 = -1
+            i += 1
+            j += 1
+        return out^
+
+    def _piece_edit(
+        self, old: List[String], new: List[String], sl: Int, sc: Int,
+        el: Int, ec: Int, i0: Int, i1: Int, j0: Int, j1: Int,
+    ) -> TextEditEntry:
+        """The edit putting ``new[j0:j1]`` in place of ``old[i0:i1]``, the
+        pieces of ``_finer_edits``: each piece but the last ends in a
+        newline, so a run reaching the end trades its newline in front."""
+        var text = String("")
+        if i1 < len(old):
+            for j in range(j0, j1):
+                text += new[j] + "\n"
+            return TextEditEntry(
+                sl + i0, sc if i0 == 0 else 0, sl + i1, sc if i1 == 0 else 0, text^,
+            )
+        for j in range(j0, j1):
+            if j > j0:
+                text += "\n"
+            text += new[j]
+        if i0 == len(old):
+            # only added after the last piece
+            return TextEditEntry(el, ec, el, ec, "\n" + text)
+        if j0 == j1:
+            # only removed up to the end: with the newline before
+            var r = sl + i0 - 1
+            var c = len(old[i0 - 1].as_bytes()) + (sc if i0 == 1 else 0)
+            return TextEditEntry(r, c, el, ec, String(""))
+        return TextEditEntry(sl + i0, sc if i0 == 0 else 0, el, ec, text^)
 
     def consume_breakpoint_toggle(mut self) -> Optional[Int]:
         """Return any pending gutter-click row and clear the slot."""

@@ -240,6 +240,77 @@ def test_an_edit_inside_a_character_starts_at_its_start() raises:
     assert_equal(ed2.text_snapshot(), String("éb\néd"))
 
 
+def _rand(mut seed: Int, n: Int) -> Int:
+    seed = (seed * 1103515245 + 12345) % 2147483648
+    return seed % n
+
+
+def _random_text(mut seed: Int) -> String:
+    """A few short lines from a small alphabet, so lines repeat."""
+    var out = String("")
+    var n = _rand(seed, 6)
+    for k in range(n + 1):
+        if k:
+            out += "\n"
+        for _ in range(_rand(seed, 3)):
+            out += String(chr(97 + _rand(seed, 3)))
+    return out^
+
+
+def _offset(text: String, row: Int, col: Int) -> Int:
+    var b = text.as_bytes()
+    var r = 0
+    var i = 0
+    while r < row:
+        if b[i] == 0x0A:
+            r += 1
+        i += 1
+    return i + col
+
+
+def test_a_big_edit_lands_as_the_same_text_however_it_is_split() raises:
+    # Applied as one edit per changed run of lines; the text has to come
+    # out exactly as the whole edit says
+    var seed = 4242
+    for _ in range(500):
+        var before = _random_text(seed)
+        var ed = Editor(before)
+        var n = ed.buffer.line_count()
+        var sl = _rand(seed, n)
+        var el = sl + _rand(seed, n - sl)
+        var sc = _rand(seed, ed.buffer.line_length(sl) + 1)
+        var ec = _rand(seed, ed.buffer.line_length(el) + 1)
+        if sl == el and ec < sc:
+            ec = sc
+        var text = _random_text(seed)
+        var want = String(before[byte=0:_offset(before, sl, sc)]) + text \
+            + String(before[byte=_offset(before, el, ec):])
+        var edits = List[TextEditEntry]()
+        if el == n - 1 and ec == ed.buffer.line_length(el) and _rand(seed, 2) == 0:
+            # how servers say "to the end": the line past the last
+            edits.append(_edit(sl, sc, n, 0, text))
+        else:
+            edits.append(_edit(sl, sc, el, ec, text))
+        _ = ed.apply_text_edits(edits^)
+        assert_equal(ed.text_snapshot(), want)
+
+
+def test_a_whole_file_format_keeps_bookmarks_and_the_caret_line() raises:
+    var ed = Editor(String("a = 1\nb  = 2\nc = 3\nd = 4\ne  = 5"))
+    ed.buffer.set_mark(2, True)
+    ed.move_to(3, 3, False)
+    var edits = List[TextEditEntry]()
+    edits.append(_edit(0, 0, 5, 0, "a = 1\nb = 2\nc = 3\nd = 4\ne = 5\n"))
+    assert_true(ed.apply_text_edits(edits^))
+    assert_equal(ed.text_snapshot(), String("a = 1\nb = 2\nc = 3\nd = 4\ne = 5\n"))
+    assert_true(ed.buffer.is_marked(2))
+    assert_equal(ed.buffer.mark_count, 1)
+    assert_equal(ed.primary_caret().row, 3)
+    assert_equal(ed.primary_caret().col, 3)
+    assert_true(ed.undo())
+    assert_equal(ed.text_snapshot(), String("a = 1\nb  = 2\nc = 3\nd = 4\ne  = 5"))
+
+
 def main() raises:
     setup_test_env()
     TestSuite.discover_tests[__functions_in_module()]().run()
