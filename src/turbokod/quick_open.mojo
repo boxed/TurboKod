@@ -569,10 +569,7 @@ struct QuickOpen(Movable):
             self.close()
             return True
         if k == KEY_ENTER:
-            if self.selected < 0 or self.selected >= len(self.matched):
-                return True
-            self._collect_selected_paths()
-            self.submitted = True
+            self.submit()
             return True
         if picker_nav_key(k, len(self.matched), self.selected):
             # Any deliberate navigation ends the "restore" phase — the
@@ -595,6 +592,33 @@ struct QuickOpen(Movable):
                 self._refilter()
             return True
         return True
+
+    def submit(mut self):
+        """Open the selected rows (Enter): the host reads
+        ``selected_path`` / ``selected_paths``."""
+        if self.selected < 0 or self.selected >= len(self.matched):
+            return
+        self._collect_selected_paths()
+        self.submitted = True
+
+    # --- native host (macOS-style UI) ------------------------------------
+
+    def set_query(mut self, var text: String):
+        if text == self.query.text:
+            return
+        self.query.set_text(text^)
+        self._pending_restore = False
+        self._refilter()
+
+    def select(mut self, idx: Int, anchor: Int):
+        """Select row ``idx``; rows ``anchor``..``idx`` are the multi-
+        selection that opens together (``anchor == idx`` for one row)."""
+        if idx < 0 or idx >= len(self.matched):
+            return
+        self._pending_restore = False
+        self.selected = idx
+        self.anchor = anchor if anchor >= 0 and anchor < len(self.matched) \
+            else idx
 
     def _collect_selected_paths(mut self):
         """Populate ``selected_paths`` from the multi-select range

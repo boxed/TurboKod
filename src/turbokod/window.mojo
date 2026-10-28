@@ -1114,6 +1114,13 @@ struct Window(Copyable, Movable):
     var is_editor: Bool
     var is_maximized: Bool
     var _restore_rect: Rect
+    var frameless: Bool
+    """Tabbed layout (macOS-style UI): no border, title, shadow or
+    scroll bars — the content fills ``rect`` and the host's tab strip
+    carries the title and dirty state. Set by ``WindowManager.tabbed``."""
+    var _tab_maximized: Bool
+    """Entering the tabbed layout maximized this window, so leaving it
+    restores the window's previous rect."""
     # Proportional-resize baselines. ``_baseline_rect`` is the rect we
     # want to preserve as the workspace changes, expressed in
     # ``_baseline_ws``; on each terminal resize we scale from this pair
@@ -1158,6 +1165,8 @@ struct Window(Copyable, Movable):
         self.is_editor = False
         self.is_maximized = False
         self._restore_rect = sized
+        self.frameless = False
+        self._tab_maximized = False
         self._baseline_rect = sized
         self._baseline_ws = Rect.empty()
         self._has_baseline = False
@@ -1208,6 +1217,8 @@ struct Window(Copyable, Movable):
         self.is_editor = copy.is_editor
         self.is_maximized = copy.is_maximized
         self._restore_rect = copy._restore_rect
+        self.frameless = copy.frameless
+        self._tab_maximized = copy._tab_maximized
         self._baseline_rect = copy._baseline_rect
         self._baseline_ws = copy._baseline_ws
         self._has_baseline = copy._has_baseline
@@ -1220,6 +1231,8 @@ struct Window(Copyable, Movable):
         """Region inside the border where content / editor paints. Public
         so hosts can compute view-relative things — e.g. ``reveal_cursor``
         after a goto-definition jump."""
+        if self.frameless:
+            return self.rect
         return Rect(self.rect.a.x + 1, self.rect.a.y + 1,
                     self.rect.b.x - 1, self.rect.b.y - 1)
 
@@ -1268,6 +1281,9 @@ struct Window(Copyable, Movable):
             border = Attr(EDITOR_FG, EDITOR_BG)
         var content_attr = Attr(YELLOW, EDITOR_BG)
         var body_bg = Attr(LIGHT_GRAY, EDITOR_BG)
+        if self.frameless:
+            self._paint_frameless(canvas, focused, content_attr, body_bg)
+            return
         # Bind every write to the window's own rect — chrome (border,
         # title, indicators, scrollbars) sits ON the rect's perimeter,
         # body content fills the interior; either way nothing should
@@ -1358,6 +1374,23 @@ struct Window(Copyable, Movable):
                 Cell(String("*"), Attr(GREEN, EDITOR_BG), 1),
             )
 
+    def _paint_frameless(
+        self, mut canvas: Canvas, focused: Bool, content_attr: Attr,
+        body_bg: Attr,
+    ):
+        var painter = Painter(self.rect)
+        painter.fill(canvas, self.rect, String(" "), body_bg)
+        if self.is_editor:
+            self.editor.paint(canvas, self.rect, focused)
+            return
+        for i in range(len(self.content)):
+            if i >= self.rect.height():
+                break
+            _ = painter.put_text(
+                canvas, Point(self.rect.a.x + 1, self.rect.a.y + i),
+                self.content[i], content_attr,
+            )
+
     # --- scroll bar geometry ----------------------------------------------
     # Both axes delegate to the reusable ``scrollbar`` primitive.
     # ``_v_scrollbar`` / ``_h_scrollbar`` are the single source of truth
@@ -1379,7 +1412,8 @@ struct Window(Copyable, Movable):
         is too small and wheel/drag get stuck before the wrapped tail
         scrolls into view.
         """
-        if not self.is_editor or self.rect.width() < 2 or self.rect.height() < 5:
+        if not self.is_editor or self.frameless or self.rect.width() < 2 \
+                or self.rect.height() < 5:
             return VScrollbar(0, 0, -1, 0, 0, 0)
         var total = self.editor.buffer.line_count()
         var max_y = self.editor.max_scroll_y(self.interior())
@@ -1394,7 +1428,7 @@ struct Window(Copyable, Movable):
     def _h_scrollbar(self) -> HScrollbar:
         """Horizontal scrollbar value. Any wrap mode and too-narrow
         windows produce a degenerate bar (``right < left``)."""
-        if not self.is_editor or self.editor._is_wrapping() \
+        if not self.is_editor or self.frameless or self.editor._is_wrapping() \
                 or self.rect.width() < 14 or self.rect.height() < 2:
             return HScrollbar(0, 0, -1, 0, 0, 0)
         var pos_text = String(self.editor.selections[0].row + 1) \
@@ -1523,13 +1557,19 @@ struct Window(Copyable, Movable):
         self.editor.scroll_x = bar.drag_to(mouse_x, drag_offset)
 
     def close_button_hit(self, p: Point) -> Bool:
+        if self.frameless:
+            return False
         return hit_close_button(Point(self.rect.a.x, self.rect.a.y), p)
 
     def maximize_button_hit(self, p: Point) -> Bool:
         # The `[↑]` / `[↓]` triplet sits one cell in from the right corner.
+        if self.frameless:
+            return False
         return p.y == self.rect.a.y and self.rect.b.x - 4 <= p.x and p.x <= self.rect.b.x - 2
 
     def title_bar_hit(self, p: Point) -> Bool:
+        if self.frameless:
+            return False
         return p.y == self.rect.a.y \
             and not self.close_button_hit(p) \
             and not self.maximize_button_hit(p)
@@ -1542,7 +1582,7 @@ struct Window(Copyable, Movable):
         gated by ``rect.width() >= padded_len + 6``) and excludes the one
         cell of padding on each side, so the full-path tooltip arms only
         over the name the user is pointing at."""
-        if p.y != self.rect.a.y:
+        if self.frameless or p.y != self.rect.a.y:
             return False
         if len(display_title.as_bytes()) == 0:
             return False
@@ -1560,7 +1600,7 @@ struct Window(Copyable, Movable):
         The top row is reserved for the title bar (drag-to-move), so it never
         counts as a resize edge — even at the top corners.
         """
-        if p.y == self.rect.a.y:
+        if self.frameless or p.y == self.rect.a.y:
             return (False, False, False)
         var left = (p.x == self.rect.a.x)
         var right = (p.x == self.rect.b.x - 1)
@@ -1670,6 +1710,10 @@ struct WindowManager(Movable):
     # A click on the close button of a window holding unsaved edits: the
     # window's index, left for the host to save or ask about (``-1``: none).
     var close_requested: Int
+    var tabbed: Bool
+    """Tabbed layout (macOS-style UI): every window is frameless and
+    fills the workspace; only the focused one paints. ``fit_into``
+    applies it, and undoes it when it's switched off."""
 
     def __init__(out self):
         self.windows = List[Window]()
@@ -1691,6 +1735,7 @@ struct WindowManager(Movable):
         self._last_workspace = Rect.empty()
         self._has_last_workspace = False
         self.close_requested = -1
+        self.tabbed = False
 
     def add(mut self, var window: Window):
         self.windows.append(window^)
@@ -1737,6 +1782,7 @@ struct WindowManager(Movable):
         scrolled right while narrow must not leave leading text wedged
         off-container_bounds once it's wide enough that the scrollbar disappears.
         """
+        self._apply_tabbed(workspace)
         if not self._has_last_workspace:
             self._clip_into(workspace)
             for i in range(len(self.windows)):
@@ -1756,6 +1802,22 @@ struct WindowManager(Movable):
                 self.windows[i].editor.clamp_scroll(self.windows[i].interior())
         self._last_workspace = workspace
         self._has_last_workspace = True
+
+    def _apply_tabbed(mut self, workspace: Rect):
+        for i in range(len(self.windows)):
+            ref w = self.windows[i]
+            if self.tabbed:
+                if not w.frameless:
+                    w.frameless = True
+                    w._tab_maximized = not w.is_maximized
+                    if not w.is_maximized:
+                        w.toggle_maximize(workspace)
+                w.rect = workspace
+            elif w.frameless:
+                w.frameless = False
+                if w._tab_maximized and w.is_maximized:
+                    w.toggle_maximize(workspace)
+                w._tab_maximized = False
 
     def note_workspace(mut self, workspace: Rect):
         """Reset the workspace + every window's baseline without touching
@@ -2005,7 +2067,12 @@ struct WindowManager(Movable):
         keyboard-live widget, so the editor border / scrollbar tint
         matches actual focus."""
         var titles = compute_display_titles(self.windows)
-        for k in range(len(self.z_order)):
+        # Tabbed: every window covers the workspace, so only the top one
+        # is visible.
+        var first = len(self.z_order) - 1 if self.tabbed else 0
+        if first < 0:
+            first = 0
+        for k in range(first, len(self.z_order)):
             var i = self.z_order[k]
             var sub = subdued[i] if i < len(subdued) else False
             var fwin = windows_active and (i == self.focused)

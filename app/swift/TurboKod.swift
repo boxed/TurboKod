@@ -1803,6 +1803,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // dialog (see the "native dialogs" extension at the bottom of the file).
     var nativeSheets: [ObjectIdentifier: NSWindow] = [:]
     var nativeDialogBuf = [UInt8](repeating: 0, count: 4096)
+    // macOS-style UI: each window's native tab strip (a titlebar accessory).
+    var tabStrips: [ObjectIdentifier: (accessory: NSTitlebarAccessoryViewController, strip: TabStripView)] = [:]
+    var tabsBuf = [UInt8](repeating: 0, count: 4096)
+    // macOS-style UI: the native picker sheet up on each window, if any.
+    var pickers: [ObjectIdentifier: PickerController] = [:]
     // Menu mirror: the snapshot from Mojo's menu_bar, hashed so we only
     // rebuild NSMenu when something actually changed (focus/visibility/
     // checkmark/edit-extras flips). `menuTracking` is set while AppKit is
@@ -2194,6 +2199,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             for v in self.views where v.handle != 0 {
                 if self.pollNativeDialog(v) { changed = true }
+                if self.pollTabStrip(v) { changed = true }
+                if self.pollPicker(v) { changed = true }
             }
             self.drainAttention()
             self.idleTicks = changed ? 0 : self.idleTicks &+ 1
@@ -2290,7 +2297,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     //                              NSApp.terminate.
     private func runCaptureScene(to cap: String) {
         let env = ProcessInfo.processInfo.environment
-        if let spec = env["TK_OPEN"], let v = views.first {
+        // TK_OPEN takes a comma-separated list; the last one ends up focused.
+        for spec in (env["TK_OPEN"] ?? "").split(separator: ",").map(String.init) {
+            guard let v = views.first else { break }
             // "path[:line]" — only treat the suffix as a line number when
             // it parses, so plain paths containing ':' still open.
             var path = spec
@@ -2311,7 +2320,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             self.awaitCaptureCondition(env["TK_CAPTURE_WHEN"], timeout: timeout) {
                 let extra = env["TK_CAPTURE_DELAY"].flatMap(Double.init) ?? 0.0
                 DispatchQueue.main.asyncAfter(deadline: .now() + extra) {
-                    self.views.first?.capturePNG(to: cap)
+                    // TK_CAPTURE_WINDOW=1 grabs the whole window — titlebar,
+                    // tab strip, and an attached sheet composited on top —
+                    // instead of just the cell grid (macOS-style UI shots).
+                    if env["TK_CAPTURE_WINDOW"] != nil, let w = self.windows.first {
+                        captureWindowPNG(w, to: cap)
+                    } else {
+                        self.views.first?.capturePNG(to: cap)
+                    }
                     print("captured to \(cap)")
                     // TK_QUIT_VIA=close simulates the red-button close on the
                     // last window (exercises the session-save-before-remove
@@ -3347,6 +3363,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         v.handle = 0
         windows.remove(at: idx)
         views.remove(at: idx)
+        tabStrips[ObjectIdentifier(v)] = nil
+        nativeSheets[ObjectIdentifier(v)] = nil
+        pickers[ObjectIdentifier(v)] = nil
         // Close is instant; the language servers get their goodbye in the
         // background. `begin_close` terminates every child except the LSP
         // transports and sends each server `shutdown`, then we poll off the
@@ -3881,19 +3900,99 @@ extension AppController {
         "edit:redo": Selector(("redo:")),
     ]
 
-    private func nativeDialogJSON(_ h: Int64) -> [String: Any]? {
+    /// Read a core JSON export into `buf` (growing it when the core reports
+    /// a longer payload than fits). Nil when the core had nothing to say.
+    private func readCoreJSON(_ buf: inout [UInt8],
+                              _ fill: (Int64, Int64) -> Int64) -> Data? {
         var n = 0
         while true {
-            n = nativeDialogBuf.withUnsafeMutableBufferPointer { buf -> Int in
-                Int(tk_desktop_native_dialog(h,
-                    Int64(Int(bitPattern: buf.baseAddress)), Int64(buf.count)))
+            n = buf.withUnsafeMutableBufferPointer { b -> Int in
+                Int(fill(Int64(Int(bitPattern: b.baseAddress)), Int64(b.count)))
             }
-            if n <= nativeDialogBuf.count { break }
-            nativeDialogBuf = [UInt8](repeating: 0, count: n)
+            if n <= buf.count { break }
+            buf = [UInt8](repeating: 0, count: n)
         }
-        guard n > 0 else { return nil }
-        return (try? JSONSerialization.jsonObject(
-            with: Data(nativeDialogBuf[0..<n]))) as? [String: Any]
+        return n > 0 ? Data(buf[0..<n]) : nil
+    }
+
+    private func nativeDialogJSON(_ h: Int64) -> [String: Any]? {
+        guard let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_native_dialog(h, $0, $1) })
+        else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    /// Show, refresh or retract `v`'s native picker sheet. True on change.
+    func pollPicker(_ v: CellView) -> Bool {
+        let id = ObjectIdentifier(v)
+        let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_picker(v.handle, $0, $1) })
+        let state = data.flatMap {
+            (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any]
+        }
+        if let pc = pickers[id] {
+            guard let state = state, state["kind"] as? String == pc.kind else {
+                pickers[id] = nil
+                pc.dismiss()
+                return true
+            }
+            return pc.update(state, raw: data!)
+        }
+        guard let state = state, let kind = state["kind"] as? String,
+              let win = v.window, win.isVisible, win.attachedSheet == nil
+        else { return false }
+        let pc = PickerController(kind: kind, view: v)
+        pc.onActivate = { [weak self, weak v] code in
+            guard let self = self, let v = v else { return }
+            self.handleHostAction(code, sourceHandle: v.handle, view: v)
+            v.invalidateFrame()
+            v.needsDisplay = true
+        }
+        pickers[id] = pc
+        _ = pc.update(state, raw: data!)
+        pc.present(in: win)
+        if isCapturing, let q = ProcessInfo.processInfo.environment["TK_CAPTURE_PICKER_QUERY"] {
+            pc.typeQuery(q)   // scripted screenshots: show real results
+        }
+        return true
+    }
+
+    /// Show / hide / refresh `v`'s native tab strip. True when it changed.
+    func pollTabStrip(_ v: CellView) -> Bool {
+        guard let win = v.window else { return false }
+        let id = ObjectIdentifier(v)
+        let on = tk_desktop_native_ui(v.handle) != 0
+        if tabStrips[id] == nil {
+            guard on else { return false }
+            let strip = TabStripView(frame: NSRect(x: 0, y: 0, width: 400, height: TabStripView.height))
+            let acc = NSTitlebarAccessoryViewController()
+            acc.layoutAttribute = .bottom
+            acc.view = strip
+            strip.onSelect = { [weak self, weak v] i in
+                guard let self = self, let v = v, v.handle != 0 else { return }
+                let code = tk_desktop_tab_select(v.handle, Int64(i), Int64(v.cols()), Int64(v.rows()))
+                self.handleHostAction(code, sourceHandle: v.handle, view: v)
+                v.window?.makeFirstResponder(v)
+                v.invalidateFrame()
+                v.needsDisplay = true
+            }
+            strip.onClose = { [weak v] i in
+                guard let v = v, v.handle != 0 else { return }
+                tk_desktop_tab_close(v.handle, Int64(i))
+                v.invalidateFrame()
+                v.needsDisplay = true
+            }
+            win.addTitlebarAccessoryViewController(acc)
+            tabStrips[id] = (acc, strip)
+        }
+        guard let entry = tabStrips[id] else { return false }
+        var changed = false
+        let data = on ? readCoreJSON(&tabsBuf, { tk_desktop_tabs(v.handle, $0, $1) }) : nil
+        if let data = data { changed = entry.strip.update(from: data) }
+        let hidden = !on || entry.strip.tabs.isEmpty
+        if entry.accessory.isHidden != hidden {
+            entry.accessory.isHidden = hidden
+            changed = true
+        }
+        return changed
     }
 
     /// Show, or retract, `v`'s native dialog. True when anything changed.
@@ -4013,4 +4112,904 @@ extension AppController {
             }
         }
     }
+}
+
+
+// MARK: - macOS-style UI: tab strip
+//
+// One tab per core window (index order, so an index goes straight back to
+// `tk_desktop_tab_select` / `_tab_close`), drawn with system colors so it
+// follows light / dark appearance. Close button on the left, Safari-style;
+// an unsaved tab shows a dot there until hovered.
+
+struct TabInfo: Equatable {
+    var title: String
+    var path: String
+    var dirty: Bool
+}
+
+final class TabStripView: NSView {
+    static let height: CGFloat = 30
+    private static let maxTabW: CGFloat = 260
+    private static let minTabW: CGFloat = 64
+    private static let closeSize: CGFloat = 16
+    // A roomy tab: close button 5pt in, the title right after it, 8pt of
+    // air on the right. A squeezed tab gives the close slot to the title
+    // (the button then overlays the name's start, on hover only).
+    private static let pad: CGFloat = 8
+    private static let closeSlot: CGFloat = 5 + closeSize
+
+    private(set) var tabs: [TabInfo] = []
+    private(set) var focused = -1
+    private var lastData = Data()
+    private var hover = -1
+    private var hoverClose = false
+    private var frames: [NSRect] = []
+    private var layoutWidth: CGFloat = -1
+    var onSelect: ((Int) -> Void)?
+    var onClose: ((Int) -> Void)?
+
+    override var isFlipped: Bool { true }
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    /// Adopt a `tk_desktop_tabs` payload; true when it changed anything.
+    func update(from data: Data) -> Bool {
+        if data == lastData { return false }
+        lastData = data
+        guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return false }
+        focused = obj["focused"] as? Int ?? -1
+        tabs = (obj["tabs"] as? [[String: Any]] ?? []).map {
+            TabInfo(title: $0["title"] as? String ?? "",
+                    path: $0["path"] as? String ?? "",
+                    dirty: $0["dirty"] as? Bool ?? false)
+        }
+        if hover >= tabs.count { hover = -1 }
+        layoutWidth = -1
+        needsDisplay = true
+        return true
+    }
+
+    private static func font(selected: Bool) -> NSFont {
+        .systemFont(ofSize: 12, weight: selected ? .medium : .regular)
+    }
+
+    private func titleWidth(_ s: String, selected: Bool) -> CGFloat {
+        ceil((s as NSString).size(withAttributes: [.font: Self.font(selected: selected)]).width)
+    }
+
+    /// Tabs take their title's width. Only when they don't all fit do the
+    /// widest shrink — down to a shared cap, so short names never pay for
+    /// long ones.
+    private func layoutTabs() {
+        guard layoutWidth != bounds.width else { return }
+        layoutWidth = bounds.width
+        let natural = tabs.indices.map { naturalWidth($0) }
+        let avail = bounds.width - 16
+        var widths = natural
+        if natural.reduce(0, +) > avail && !natural.isEmpty {
+            // Largest cap c with sum(min(w, c)) <= avail.
+            let sorted = natural.sorted()
+            var rest = avail
+            var cap = Self.minTabW
+            for (k, w) in sorted.enumerated() {
+                let share = rest / CGFloat(sorted.count - k)
+                if w <= share { rest -= w } else { cap = max(Self.minTabW, share); break }
+            }
+            widths = natural.map { min($0, cap) }
+        }
+        var x: CGFloat = 8
+        frames = widths.map { w in
+            defer { x += w }
+            return NSRect(x: x, y: 3, width: w, height: bounds.height - 6)
+        }
+    }
+
+    private func naturalWidth(_ i: Int) -> CGFloat {
+        min(Self.maxTabW, max(Self.minTabW,
+            titleWidth(tabs[i].title, selected: true) + Self.closeSlot + 2 * Self.pad))
+    }
+
+    private func squeezed(_ i: Int) -> Bool { tabRect(i).width < naturalWidth(i) - 0.5 }
+
+    private func tabRect(_ i: Int) -> NSRect {
+        layoutTabs()
+        return i < frames.count ? frames[i] : .zero
+    }
+
+    private func closeRect(_ i: Int) -> NSRect {
+        let r = tabRect(i)
+        return NSRect(x: r.minX + 5, y: r.midY - Self.closeSize / 2,
+                      width: Self.closeSize, height: Self.closeSize)
+    }
+
+    private func index(at p: NSPoint) -> Int {
+        for i in tabs.indices where tabRect(i).contains(p) { return i }
+        return -1
+    }
+
+    /// `title` cut to `width`: the extension goes first (it's the least
+    /// telling part of a file name), then the end of the stem.
+    private func fitted(_ title: String, _ width: CGFloat, selected: Bool) -> String {
+        if titleWidth(title, selected: selected) <= width { return title }
+        var stem = title
+        if let dot = title.lastIndex(of: "."), dot != title.startIndex {
+            stem = String(title[..<dot])
+            if titleWidth(stem, selected: selected) <= width { return stem }
+        }
+        var chars = Array(stem)
+        while chars.count > 1 {
+            chars.removeLast()
+            let s = String(chars) + "…"
+            if titleWidth(s, selected: selected) <= width { return s }
+        }
+        return String(chars) + "…"
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        layoutWidth = -1
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.separatorColor.setFill()
+        NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
+        for i in tabs.indices {
+            let r = tabRect(i)
+            let selected = i == focused
+            if selected {
+                let path = NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6)
+                NSColor.controlBackgroundColor.setFill()
+                path.fill()
+                NSColor.separatorColor.setStroke()
+                path.lineWidth = 0.5
+                path.stroke()
+            } else {
+                if i == hover {
+                    NSColor.labelColor.withAlphaComponent(0.06).setFill()
+                    NSBezierPath(roundedRect: r, xRadius: 6, yRadius: 6).fill()
+                }
+                // Hairline divider, skipped next to the selected tab.
+                if i + 1 < tabs.count && i + 1 != focused && i + 1 != hover && i != hover {
+                    NSColor.separatorColor.setFill()
+                    NSRect(x: r.maxX - 0.5, y: r.minY + 6, width: 1, height: r.height - 12).fill()
+                }
+            }
+            let font = Self.font(selected: selected)
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: selected ? NSColor.labelColor : NSColor.secondaryLabelColor,
+            ]
+            // Squeezed: the title takes the close slot (minus room for an
+            // unsaved dot); the close button overlays it on hover.
+            let left: CGFloat = squeezed(i) ? (tabs[i].dirty ? 19 : Self.pad)
+                                            : Self.pad + Self.closeSlot - 4
+            let room = max(0, r.width - left - Self.pad)
+            let text = fitted(tabs[i].title, room, selected: selected)
+            let textH = font.ascender - font.descender + font.leading
+            (text as NSString).draw(at: NSPoint(x: r.minX + left, y: r.midY - textH / 2),
+                                    withAttributes: attrs)
+            drawCloseOrDot(i, selected: selected)
+        }
+    }
+
+    private func drawCloseOrDot(_ i: Int, selected: Bool) {
+        let c = closeRect(i)
+        if i == hover {
+            if squeezed(i) {
+                // Overlays the title's first letters: give it a backing.
+                (selected ? NSColor.controlBackgroundColor : NSColor.windowBackgroundColor).setFill()
+                NSBezierPath(roundedRect: c.insetBy(dx: -2, dy: -1), xRadius: 4, yRadius: 4).fill()
+            }
+            if hoverClose {
+                NSColor.labelColor.withAlphaComponent(0.1).setFill()
+                NSBezierPath(roundedRect: c, xRadius: 4, yRadius: 4).fill()
+            }
+            let cfg = NSImage.SymbolConfiguration(pointSize: 9, weight: .semibold)
+            if let img = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tab")?
+                .withSymbolConfiguration(cfg) {
+                let tinted = img.copy() as! NSImage
+                tinted.lockFocus()
+                NSColor.secondaryLabelColor.set()
+                NSRect(origin: .zero, size: tinted.size).fill(using: .sourceAtop)
+                tinted.unlockFocus()
+                let s = tinted.size
+                tinted.draw(in: NSRect(x: c.midX - s.width / 2, y: c.midY - s.height / 2,
+                                       width: s.width, height: s.height),
+                            from: .zero, operation: .sourceOver, fraction: 1,
+                            respectFlipped: true, hints: nil)
+            }
+        } else if tabs[i].dirty {
+            (selected ? NSColor.labelColor : NSColor.secondaryLabelColor).setFill()
+            NSBezierPath(ovalIn: NSRect(x: c.midX - 3.5, y: c.midY - 3.5, width: 7, height: 7)).fill()
+        }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for t in trackingAreas { removeTrackingArea(t) }
+        addTrackingArea(NSTrackingArea(rect: .zero,
+            options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self, userInfo: nil))
+    }
+
+    private func setHover(_ p: NSPoint?) {
+        let i = p.map { index(at: $0) } ?? -1
+        let onClose = i >= 0 && p.map { closeRect(i).contains($0) } == true
+        if i != hover || onClose != hoverClose {
+            hover = i
+            hoverClose = onClose
+            needsDisplay = true
+        }
+    }
+
+    override func mouseMoved(with e: NSEvent) { setHover(convert(e.locationInWindow, from: nil)) }
+    override func mouseExited(with e: NSEvent) { setHover(nil) }
+
+    override func mouseDown(with e: NSEvent) {
+        let p = convert(e.locationInWindow, from: nil)
+        let i = index(at: p)
+        guard i >= 0 else { return }
+        if closeRect(i).contains(p) { onClose?(i) } else { onSelect?(i) }
+    }
+
+    override func otherMouseDown(with e: NSEvent) {
+        // Middle click closes, as in every browser.
+        let i = index(at: convert(e.locationInWindow, from: nil))
+        if i >= 0 && e.buttonNumber == 2 { onClose?(i) }
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let i = index(at: convert(event.locationInWindow, from: nil))
+        guard i >= 0 else { return nil }
+        let menu = NSMenu()
+        menu.addItem(TabMenuItem("Close Tab") { [weak self] in self?.onClose?(i) })
+        let path = tabs[i].path
+        if !path.isEmpty {
+            menu.addItem(.separator())
+            menu.addItem(TabMenuItem("Copy Path") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(path, forType: .string)
+            })
+            menu.addItem(TabMenuItem("Reveal in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+            })
+        }
+        return menu
+    }
+}
+
+/// An NSMenuItem that runs a closure — the tab strip's context menu.
+final class TabMenuItem: NSMenuItem {
+    private let run: () -> Void
+    init(_ title: String, _ run: @escaping () -> Void) {
+        self.run = run
+        super.init(title: title, action: #selector(fire), keyEquivalent: "")
+        target = self
+    }
+    required init(coder: NSCoder) { fatalError("init(coder:) is not used") }
+    @objc private func fire() { run() }
+}
+
+
+// MARK: - macOS-style UI: picker sheet
+//
+// Quick Open, Find Symbol and Find in Project as one native sheet. The core
+// keeps the search machinery (file indexer, symbol index, rg runners); this
+// pushes the fields' text in (`tk_desktop_picker_set`), mirrors `count` /
+// `selected` / `status` from the polled state, and fetches only the rows the
+// table actually shows (`tk_desktop_picker_rows`). Return / double-click
+// runs the core's own submit path (`tk_desktop_picker_activate`).
+
+final class PickerController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
+                              NSSearchFieldDelegate {
+    let kind: String
+    weak var view: CellView?
+    var onActivate: ((Int32) -> Void)?
+
+    private let panel: NSPanel
+    private let search = NSSearchField()
+    private var replaceField: NSTextField?
+    private var scopeField: NSTextField?
+    private var globField: NSTextField?
+    private var toggles: [String: NSButton] = [:]
+    private let table = NSTableView()
+    private let status = NSTextField(labelWithString: "")
+    private let titleLabel = NSTextField(labelWithString: "")
+    private var actionButton: NSButton?
+    private var previewView: NSTextView?
+    private var splitView: NSSplitView?
+
+    private var count = 0
+    private var selected = -1
+    private var multi = false
+    private var lastRaw = Data()
+    private var rows: [Int: [String: Any]] = [:]
+    private var rowBuf = [UInt8](repeating: 0, count: 16384)
+    private var previewKey = ""
+    private var syncingSelection = false
+    private var dismissed = false
+
+    private var isFind: Bool { kind == "project_find" }
+
+    init(kind: String, view: CellView) {
+        self.kind = kind
+        self.view = view
+        let size = kind == "project_find" ? NSSize(width: 920, height: 660)
+                                          : NSSize(width: 640, height: 440)
+        panel = NSPanel(contentRect: NSRect(origin: .zero, size: size),
+                        styleMask: [.titled, .resizable], backing: .buffered, defer: true)
+        super.init()
+        panel.minSize = NSSize(width: 420, height: 260)
+        build()
+    }
+
+    // MARK: layout
+
+    private func build() {
+        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        search.placeholderString = kind == "quick_open" ? "File name"
+            : kind == "find_symbol" ? "Symbol name" : "Search"
+        search.delegate = self
+        search.sendsSearchStringImmediately = true
+        search.font = .systemFont(ofSize: 15)
+
+        var topRows: [NSView] = [titleLabel, search]
+        if isFind {
+            let rf = field("Replace with")
+            replaceField = rf
+            topRows.append(rf)
+            let sf = field("In folder (relative to project)")
+            let gf = field("Files, e.g. *.py, !tests/**")
+            scopeField = sf
+            globField = gf
+            var row: [NSView] = [sf, gf]
+            for (key, label, tip) in [("case", "Aa", "Match case"),
+                                      ("word", "W", "Whole word"),
+                                      ("regex", ".*", "Regular expression")] {
+                let b = NSButton(title: label, target: self, action: #selector(toggleChanged(_:)))
+                b.setButtonType(.pushOnPushOff)
+                b.bezelStyle = .recessed
+                b.toolTip = tip
+                b.identifier = NSUserInterfaceItemIdentifier(key)
+                toggles[key] = b
+                row.append(b)
+            }
+            let h = NSStackView(views: row)
+            h.distribution = .fill
+            h.spacing = 6
+            sf.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            gf.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            sf.widthAnchor.constraint(equalTo: gf.widthAnchor).isActive = true
+            topRows.append(h)
+        }
+
+        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("c"))
+        table.addTableColumn(col)
+        table.headerView = nil
+        table.rowHeight = 40
+        table.style = .inset
+        table.allowsMultipleSelection = false
+        table.dataSource = self
+        table.delegate = self
+        table.target = self
+        table.doubleAction = #selector(activateClicked)
+        let scroll = NSScrollView()
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+
+        var middle: NSView = scroll
+        if isFind {
+            let tv = NSTextView()
+            tv.isEditable = false
+            tv.isRichText = true
+            tv.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+            tv.textContainerInset = NSSize(width: 6, height: 6)
+            tv.isHorizontallyResizable = true
+            tv.textContainer?.widthTracksTextView = false
+            tv.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                                     height: CGFloat.greatestFiniteMagnitude)
+            let ps = NSScrollView()
+            ps.documentView = tv
+            ps.hasVerticalScroller = true
+            ps.hasHorizontalScroller = true
+            previewView = tv
+            let split = NSSplitView()
+            split.isVertical = false
+            split.dividerStyle = .thin
+            split.addArrangedSubview(scroll)
+            split.addArrangedSubview(ps)
+            split.setHoldingPriority(.defaultLow, forSubviewAt: 1)
+            middle = split
+            splitView = split
+        }
+
+        status.textColor = .secondaryLabelColor
+        status.lineBreakMode = .byTruncatingTail
+        status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelClicked))
+        cancel.keyEquivalent = "\u{1b}"
+        let open = NSButton(title: kind == "find_symbol" ? "Go to Symbol" : "Open",
+                            target: self, action: #selector(activateClicked))
+        open.keyEquivalent = "\r"
+        var bottom: [NSView] = [status, NSView(), cancel]
+        if isFind {
+            let b = NSButton(title: "Show in Panel", target: self, action: #selector(actionClicked))
+            actionButton = b
+            bottom.append(b)
+        }
+        bottom.append(open)
+        let bar = NSStackView(views: bottom)
+        bar.spacing = 8
+
+        // Fields on top, the button bar at the bottom, and the list (plus
+        // preview) taking every point in between.
+        let top = NSStackView(views: topRows)
+        top.orientation = .vertical
+        top.distribution = .fill
+        top.alignment = .leading
+        top.spacing = 8
+        for v in topRows {
+            v.widthAnchor.constraint(equalTo: top.widthAnchor).isActive = true
+        }
+        for v in [top, bar] {
+            v.setHuggingPriority(.required, for: .vertical)
+            v.setContentHuggingPriority(.defaultHigh, for: .vertical)
+        }
+        middle.setContentHuggingPriority(.defaultLow, for: .vertical)
+        let content = NSView()
+        for v in [top, middle, bar] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(v)
+            NSLayoutConstraint.activate([
+                v.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+                v.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
+            ])
+        }
+        NSLayoutConstraint.activate([
+            top.topAnchor.constraint(equalTo: content.topAnchor, constant: 14),
+            middle.topAnchor.constraint(equalTo: top.bottomAnchor, constant: 10),
+            bar.topAnchor.constraint(equalTo: middle.bottomAnchor, constant: 10),
+            bar.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -14),
+            middle.heightAnchor.constraint(greaterThanOrEqualToConstant: 120),
+        ])
+        // The list wants all the height there is; the field rows and the
+        // button bar keep their natural size.
+        let grow = middle.heightAnchor.constraint(equalTo: content.heightAnchor)
+        grow.priority = NSLayoutConstraint.Priority(500)
+        grow.isActive = true
+        panel.contentView = content
+        panel.initialFirstResponder = search
+    }
+
+    private func field(_ placeholder: String) -> NSTextField {
+        let f = NSTextField()
+        f.placeholderString = placeholder
+        f.delegate = self
+        f.usesSingleLineMode = true
+        f.cell?.isScrollable = true
+        return f
+    }
+
+    func present(in win: NSWindow) {
+        // Never taller or wider than the window it hangs from.
+        let room = win.contentLayoutRect.size
+        let want = panel.frame.size
+        panel.setContentSize(NSSize(width: min(want.width, room.width - 40),
+                                    height: min(want.height, room.height - 20)))
+        panel.contentView?.layoutSubtreeIfNeeded()
+        if let split = splitView {
+            split.setPosition(split.bounds.height * 0.55, ofDividerAt: 0)
+        }
+        win.beginSheet(panel, completionHandler: nil)
+        panel.makeFirstResponder(search)
+    }
+
+    func typeQuery(_ q: String) {
+        search.stringValue = q
+        controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: search))
+    }
+
+    func dismiss() {
+        guard !dismissed else { return }
+        dismissed = true
+        panel.sheetParent?.endSheet(panel)
+    }
+
+    // MARK: state from the core
+
+    /// Adopt a polled state; true when anything changed.
+    func update(_ st: [String: Any], raw: Data) -> Bool {
+        if raw == lastRaw { return refreshVisibleRows() }
+        let first = lastRaw.isEmpty
+        lastRaw = raw
+        titleLabel.stringValue = st["title"] as? String ?? ""
+        status.stringValue = st["status"] as? String ?? ""
+        multi = st["multi"] as? Bool ?? false
+        table.allowsMultipleSelection = multi
+        if first {
+            // The core seeds the fields (a resumed search, the editor's
+            // selection); after that the fields are the user's.
+            search.stringValue = st["query"] as? String ?? ""
+            replaceField?.stringValue = st["replace"] as? String ?? ""
+            scopeField?.stringValue = st["scope"] as? String ?? ""
+            globField?.stringValue = st["glob"] as? String ?? ""
+            for (k, b) in toggles { b.state = (st[k] as? Bool ?? false) ? .on : .off }
+            if isFind {
+                let rm = st["replace_mode"] as? Bool ?? false
+                replaceField?.isHidden = !rm
+                actionButton?.title = rm ? "Replace All" : "Show in Panel"
+            }
+            DispatchQueue.main.async { self.search.currentEditor()?.selectAll(nil) }
+        }
+        actionButton?.isEnabled = (st["count"] as? Int ?? 0) > 0
+        count = st["count"] as? Int ?? 0
+        let sel = st["selected"] as? Int ?? -1
+        rows.removeAll(keepingCapacity: true)
+        table.reloadData()
+        syncingSelection = true
+        if sel >= 0 && sel < count {
+            if !table.selectedRowIndexes.contains(sel) || !multi {
+                table.selectRowIndexes(IndexSet(integer: sel), byExtendingSelection: false)
+            }
+            if sel != selected { table.scrollRowToVisible(sel) }
+        } else {
+            table.deselectAll(nil)
+        }
+        syncingSelection = false
+        selected = sel
+        refreshPreview()
+        return true
+    }
+
+    /// Rows can change under an unchanged state (Find Symbol re-ranks as
+    /// sources land): re-fetch what's visible and redraw on a difference.
+    private func refreshVisibleRows() -> Bool {
+        let vis = table.rows(in: table.visibleRect)
+        guard vis.length > 0, let fresh = fetch(vis.location, vis.length) else { return false }
+        var changed = false
+        for (i, r) in fresh.enumerated() {
+            let idx = vis.location + i
+            if !NSDictionary(dictionary: r).isEqual(to: rows[idx] ?? [:]) {
+                rows[idx] = r
+                changed = true
+            }
+        }
+        if changed {
+            table.reloadData(forRowIndexes: IndexSet(integersIn: vis.location..<(vis.location + vis.length)),
+                             columnIndexes: IndexSet(integer: 0))
+        }
+        return changed
+    }
+
+    private func fetch(_ start: Int, _ n: Int) -> [[String: Any]]? {
+        guard let h = view?.handle, h != 0 else { return nil }
+        var buf = rowBuf
+        var len = 0
+        while true {
+            len = buf.withUnsafeMutableBufferPointer { b -> Int in
+                Int(tk_desktop_picker_rows(h, Int64(start), Int64(n),
+                    Int64(Int(bitPattern: b.baseAddress)), Int64(b.count)))
+            }
+            if len <= buf.count { break }
+            buf = [UInt8](repeating: 0, count: len)
+        }
+        rowBuf = buf
+        guard len > 0 else { return nil }
+        return (try? JSONSerialization.jsonObject(with: Data(buf[0..<len]))) as? [[String: Any]]
+    }
+
+    private func row(_ i: Int) -> [String: Any] {
+        if let r = rows[i] { return r }
+        let page = 64
+        let start = (i / page) * page
+        if let got = fetch(start, page) {
+            for (k, r) in got.enumerated() { rows[start + k] = r }
+        }
+        return rows[i] ?? [:]
+    }
+
+    // MARK: table
+
+    func numberOfRows(in tableView: NSTableView) -> Int { count }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row i: Int) -> NSView? {
+        let id = NSUserInterfaceItemIdentifier("pickerCell")
+        let cell = (tableView.makeView(withIdentifier: id, owner: self) as? PickerCell) ?? {
+            let c = PickerCell(); c.identifier = id; return c
+        }()
+        let r = row(i)
+        if isFind {
+            let mono = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+            let s = NSMutableAttributedString(string: r["pre"] as? String ?? "",
+                                              attributes: [.font: mono])
+            if let hit = r["hit"] as? String {
+                s.append(NSAttributedString(string: hit, attributes: [
+                    .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .bold),
+                    .backgroundColor: NSColor.findHighlightColor.withAlphaComponent(0.6),
+                    .foregroundColor: NSColor.black,
+                ]))
+            }
+            s.append(NSAttributedString(string: r["post"] as? String ?? "", attributes: [.font: mono]))
+            cell.title.attributedStringValue = s
+        } else {
+            cell.title.font = .systemFont(ofSize: 13, weight: .medium)
+            cell.title.stringValue = r["title"] as? String ?? ""
+        }
+        cell.detail.stringValue = r["detail"] as? String ?? ""
+        return cell
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        guard !syncingSelection, let h = view?.handle, h != 0 else { return }
+        let (idx, anchor) = selectionEnds()
+        guard idx >= 0 else { return }
+        selected = idx
+        tk_desktop_picker_select(h, Int64(idx), Int64(anchor))
+        refreshPreview()
+    }
+
+    /// The cursor row and the far end of a contiguous multi-selection.
+    private func selectionEnds() -> (Int, Int) {
+        let rowsSel = table.selectedRowIndexes
+        guard let first = rowsSel.first, let last = rowsSel.last else { return (-1, -1) }
+        if rowsSel.count == 1 { return (first, first) }
+        // The cursor is whichever end the user moved last; AppKit doesn't
+        // say, so take the end that isn't the core's previous cursor.
+        return selected == first ? (last, first) : (first, last)
+    }
+
+    // MARK: preview (Find in Project)
+
+    private func refreshPreview() {
+        guard isFind, let tv = previewView, let h = view?.handle, h != 0 else { return }
+        var buf = [UInt8](repeating: 0, count: 1 << 16)
+        var len = 0
+        while true {
+            len = buf.withUnsafeMutableBufferPointer { b -> Int in
+                Int(tk_desktop_picker_preview(h, Int64(Int(bitPattern: b.baseAddress)), Int64(b.count)))
+            }
+            if len <= buf.count { break }
+            buf = [UInt8](repeating: 0, count: len)
+        }
+        guard len > 0, let pv = (try? JSONSerialization.jsonObject(with: Data(buf[0..<len]))) as? [String: Any]
+        else {
+            if !previewKey.isEmpty { tv.string = ""; previewKey = "" }
+            return
+        }
+        let path = pv["path"] as? String ?? ""
+        let line = pv["line"] as? Int ?? 1
+        let lines = pv["lines"] as? [String] ?? []
+        let key = "\(path)#\(lines.count)"
+        if key != previewKey {
+            previewKey = key
+            tv.textStorage?.setAttributedString(PickerController.colored(pv))
+            let bg = PickerController.rgb(pv["bg"] as? Int ?? 0)
+            tv.backgroundColor = bg
+            tv.enclosingScrollView?.backgroundColor = bg
+        }
+        PickerController.markLine(tv, lines: lines, line: line)
+    }
+
+    static func rgb(_ v: Int) -> NSColor {
+        NSColor(srgbRed: CGFloat((v >> 16) & 0xFF) / 255, green: CGFloat((v >> 8) & 0xFF) / 255,
+                blue: CGFloat(v & 0xFF) / 255, alpha: 1)
+    }
+
+    /// The file's lines with the core's syntax spans (byte ranges per row)
+    /// mapped onto UTF-16 offsets.
+    static func colored(_ pv: [String: Any]) -> NSAttributedString {
+        let lines = pv["lines"] as? [String] ?? []
+        let fg = rgb(pv["fg"] as? Int ?? 0xFFFFFF)
+        let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        let s = NSMutableAttributedString(string: lines.joined(separator: "\n"),
+                                          attributes: [.font: font, .foregroundColor: fg])
+        var starts: [Int] = []
+        var off = 0
+        for l in lines { starts.append(off); off += l.utf16.count + 1 }
+        var maps: [Int: [Int]] = [:]
+        func utf16Offset(_ row: Int, _ byte: Int) -> Int {
+            if maps[row] == nil {
+                var m: [Int] = []
+                var u = 0
+                for scalar in lines[row].unicodeScalars {
+                    let n = String(scalar).utf8.count
+                    for _ in 0..<n { m.append(u) }
+                    u += scalar.utf16.count
+                }
+                m.append(u)
+                maps[row] = m
+            }
+            let m = maps[row]!
+            return m[min(max(byte, 0), m.count - 1)]
+        }
+        for sp in pv["spans"] as? [[Int]] ?? [] where sp.count == 4 {
+            let row = sp[0]
+            guard row >= 0 && row < lines.count else { continue }
+            let a = utf16Offset(row, sp[1]), b = utf16Offset(row, sp[2])
+            guard b > a else { continue }
+            s.addAttribute(.foregroundColor, value: rgb(sp[3]),
+                           range: NSRange(location: starts[row] + a, length: b - a))
+        }
+        return s
+    }
+
+    /// Tint the match's line and park it at the golden-ratio line, like
+    /// every jump in the editor.
+    static func markLine(_ tv: NSTextView, lines: [String], line: Int) {
+        guard let ts = tv.textStorage, let lm = tv.layoutManager, let tc = tv.textContainer else { return }
+        ts.removeAttribute(.backgroundColor, range: NSRange(location: 0, length: ts.length))
+        let row = min(max(line - 1, 0), max(lines.count - 1, 0))
+        guard row < lines.count else { return }
+        var start = 0
+        for i in 0..<row { start += lines[i].utf16.count + 1 }
+        let range = NSRange(location: start, length: lines[row].utf16.count)
+        ts.addAttribute(.backgroundColor,
+                        value: NSColor.findHighlightColor.withAlphaComponent(0.35), range: range)
+        lm.ensureLayout(for: tc)
+        let glyphs = lm.glyphRange(forCharacterRange: NSRange(location: start, length: 0),
+                                   actualCharacterRange: nil)
+        let rect = lm.boundingRect(forGlyphRange: glyphs, in: tc)
+        guard let clip = tv.enclosingScrollView?.contentView else { return }
+        let y = max(0, rect.minY - clip.bounds.height * 0.38)
+        clip.scroll(to: NSPoint(x: 0, y: y))
+        tv.enclosingScrollView?.reflectScrolledClipView(clip)
+    }
+
+    // MARK: input
+
+    func controlTextDidChange(_ obj: Notification) {
+        guard let f = obj.object as? NSTextField, let h = view?.handle, h != 0 else { return }
+        let name = f === search ? "query" : f === replaceField ? "replace"
+                 : f === scopeField ? "scope" : f === globField ? "glob" : ""
+        guard !name.isEmpty else { return }
+        withUTF8Arg(name) { np, nl in
+            withUTF8Arg(f.stringValue) { tp, tl in tk_desktop_picker_set(h, np, nl, tp, tl) }
+        }
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
+        switch sel {
+        case #selector(NSResponder.moveUp(_:)): move(-1, extend: false); return true
+        case #selector(NSResponder.moveDown(_:)): move(1, extend: false); return true
+        case #selector(NSResponder.moveUpAndModifySelection(_:)): move(-1, extend: true); return true
+        case #selector(NSResponder.moveDownAndModifySelection(_:)): move(1, extend: true); return true
+        case #selector(NSResponder.scrollPageUp(_:)), #selector(NSResponder.pageUp(_:)):
+            move(-pageRows(), extend: false); return true
+        case #selector(NSResponder.scrollPageDown(_:)), #selector(NSResponder.pageDown(_:)):
+            move(pageRows(), extend: false); return true
+        case #selector(NSResponder.insertNewline(_:)):
+            if NSApp.currentEvent?.modifierFlags.contains(.command) == true { actionClicked() }
+            else { activateClicked() }
+            return true
+        case #selector(NSResponder.cancelOperation(_:)): cancelClicked(); return true
+        default: return false
+        }
+    }
+
+    private func pageRows() -> Int {
+        max(1, Int(table.enclosingScrollView?.contentView.bounds.height ?? 300 / table.rowHeight) / Int(table.rowHeight) - 1)
+    }
+
+    private func move(_ delta: Int, extend: Bool) {
+        guard count > 0 else { return }
+        let cur = selected < 0 ? (delta > 0 ? -1 : count) : selected
+        let next = min(max(cur + delta, 0), count - 1)
+        if extend && multi {
+            let (_, anchor) = selectionEnds()
+            let lo = min(anchor, next), hi = max(anchor, next)
+            syncingSelection = true
+            table.selectRowIndexes(IndexSet(integersIn: lo...hi), byExtendingSelection: false)
+            syncingSelection = false
+            selected = next
+            if let h = view?.handle { tk_desktop_picker_select(h, Int64(next), Int64(anchor)) }
+        } else {
+            table.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
+        }
+        table.scrollRowToVisible(next)
+    }
+
+    @objc private func toggleChanged(_ b: NSButton) {
+        guard let key = b.identifier?.rawValue, let h = view?.handle, h != 0 else { return }
+        withUTF8Arg(key) { p, l in tk_desktop_picker_option(h, p, l, b.state == .on ? 1 : 0) }
+    }
+
+    @objc private func activateClicked() {
+        guard let v = view, v.handle != 0 else { return }
+        var (idx, anchor) = selectionEnds()
+        // A double-click opens the row under the pointer. (Only read mouse
+        // state off a mouse event: `clickCount` on the key event Return
+        // produces raises, which is what used to make Return do nothing.)
+        if let ev = NSApp.currentEvent,
+           ev.type == .leftMouseDown || ev.type == .leftMouseUp,
+           table.clickedRow >= 0 {
+            idx = table.clickedRow
+            if !table.selectedRowIndexes.contains(idx) { anchor = idx }
+        }
+        // Return opens the selected row — the first one when the results
+        // landed after the last poll and nothing is selected here yet. The
+        // core clamps to what it actually has, so never refuse on a stale
+        // `count`.
+        if idx < 0 { idx = max(selected, 0); anchor = idx }
+        let code = tk_desktop_picker_activate(v.handle, Int64(idx), Int64(anchor),
+                                              Int64(v.cols()), Int64(v.rows()))
+        onActivate?(code)
+    }
+
+    @objc private func actionClicked() {
+        guard isFind, let v = view, v.handle != 0, count > 0 else { return }
+        let name = replaceField?.isHidden == false ? "replace_all" : "send_to_panel"
+        withUTF8Arg(name) { p, l in
+            tk_desktop_picker_action(v.handle, p, l, Int64(v.cols()), Int64(v.rows()))
+        }
+        onActivate?(0)
+    }
+
+    @objc private func cancelClicked() {
+        if let h = view?.handle, h != 0 { tk_desktop_picker_close(h) }
+        onActivate?(0)
+    }
+}
+
+/// Two-line picker row: the name / matched line over its location.
+final class PickerCell: NSTableCellView {
+    let title = NSTextField(labelWithString: "")
+    let detail = NSTextField(labelWithString: "")
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        title.lineBreakMode = .byTruncatingTail
+        detail.lineBreakMode = .byTruncatingMiddle
+        detail.font = .systemFont(ofSize: 11)
+        detail.textColor = .secondaryLabelColor
+        let stack = NSStackView(views: [title, detail])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 1
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+}
+
+
+/// Render `win` (frame view: titlebar + accessories + content) and its
+/// attached sheet into one PNG, entirely offscreen — works with the display
+/// asleep, unlike `screencapture`.
+func captureWindowPNG(_ win: NSWindow, to path: String) {
+    guard let frameView = win.contentView?.superview,
+          let rep = frameView.bitmapImageRepForCachingDisplay(in: frameView.bounds)
+    else { return }
+    frameView.cacheDisplay(in: frameView.bounds, to: rep)
+    let size = frameView.bounds.size
+    let img = NSImage(size: size)
+    img.addRepresentation(rep)
+    let out = NSImage(size: size)
+    out.lockFocus()
+    img.draw(in: NSRect(origin: .zero, size: size))
+    if let sheet = win.attachedSheet, let sv = sheet.contentView?.superview,
+       let srep = sv.bitmapImageRepForCachingDisplay(in: sv.bounds) {
+        sv.cacheDisplay(in: sv.bounds, to: srep)
+        let sz = sv.bounds.size
+        // Sheets hang from the bottom of the titlebar, centered.
+        let top = size.height - (win.frame.height - win.contentLayoutRect.height)
+        let r = NSRect(x: (size.width - sz.width) / 2, y: top - sz.height,
+                       width: sz.width, height: sz.height)
+        NSColor.black.withAlphaComponent(0.25).setFill()
+        NSBezierPath(rect: r.insetBy(dx: -1, dy: -1)).fill()
+        srep.draw(in: r)
+    }
+    out.unlockFocus()
+    guard let tiff = out.tiffRepresentation, let bmp = NSBitmapImageRep(data: tiff),
+          let png = bmp.representation(using: .png, properties: [:]) else { return }
+    try? png.write(to: URL(fileURLWithPath: path))
 }

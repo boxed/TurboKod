@@ -778,16 +778,7 @@ struct FindSymbol(Movable):
         if self.state == _STATE_PENDING:
             return True
         if k == KEY_ENTER:
-            if self.selected < 0 or self.selected >= len(self.entries):
-                return True
-            var entry = self.entries[self.selected]
-            self.selected_path = entry.path
-            self.selected_line = entry.line
-            self.selected_column = entry.column
-            self.selected_name = entry.name
-            self.selected_qualifier = _query_qualifier(self.query.text)
-            self.selected_container = entry.container
-            self.submitted = True
+            self.submit()
             return True
         if picker_nav_key(k, len(self.entries), self.selected):
             self._user_navigated = True
@@ -804,20 +795,62 @@ struct FindSymbol(Movable):
         if not r.consumed:
             return True
         if r.changed:
-            # Filter the new value down to identifier bytes only — the
-            # query is interpolated into rg's regex, so leaving
-            # punctuation (or worse, a leading ``-``) in place would let
-            # the user accidentally write a regex / flag. This applies
-            # to typed printables and pasted text alike.
-            var sanitized = sanitize_symbol_query(self.query.text)
-            if sanitized != self.query.text:
-                self.query.set_text(sanitized)
-            if self.query.text != prev_query:
-                if self.state == _STATE_ERROR:
-                    self.state = _STATE_IDLE
-                    self.status_message = String("")
-                self.query_dirty = True
+            self._query_changed(prev_query)
         return True
+
+    def _query_changed(mut self, prev_query: String):
+        # Filter the new value down to identifier bytes only — the
+        # query is interpolated into rg's regex, so leaving
+        # punctuation (or worse, a leading ``-``) in place would let
+        # the user accidentally write a regex / flag. This applies
+        # to typed printables and pasted text alike.
+        var sanitized = sanitize_symbol_query(self.query.text)
+        if sanitized != self.query.text:
+            self.query.set_text(sanitized)
+        if self.query.text != prev_query:
+            if self.state == _STATE_ERROR:
+                self.state = _STATE_IDLE
+                self.status_message = String("")
+            self.query_dirty = True
+
+    def submit(mut self):
+        """Jump to the selected row (Enter): the host reads the
+        ``selected_*`` fields via ``take_submitted``."""
+        if self.state == _STATE_PENDING:
+            return
+        if self.selected < 0 or self.selected >= len(self.entries):
+            return
+        var entry = self.entries[self.selected]
+        self.selected_path = entry.path
+        self.selected_line = entry.line
+        self.selected_column = entry.column
+        self.selected_name = entry.name
+        self.selected_qualifier = _query_qualifier(self.query.text)
+        self.selected_container = entry.container
+        self.submitted = True
+
+    # --- native host (macOS-style UI) ------------------------------------
+
+    def set_query(mut self, var text: String):
+        """The native search field's text, with the same sanitizing and
+        re-search a typed key gets. Ignored while choosing or mid-submit,
+        like typing is."""
+        if self._chooser_mode or self.state == _STATE_PENDING:
+            return
+        var prev = self.query.text
+        if text == prev:
+            return
+        self.query.set_text(text^)
+        self._query_changed(prev)
+
+    def select(mut self, idx: Int):
+        if idx < 0 or idx >= len(self.entries):
+            return
+        self.selected = idx
+        self._user_navigated = True
+
+    def is_pending(self) -> Bool:
+        return self.state == _STATE_PENDING
 
     def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Bool:
         if not self.active:

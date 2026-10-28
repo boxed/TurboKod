@@ -13,7 +13,8 @@ from turbokod.desktop import (
 from turbokod.events import Event, KEY_ENTER
 from turbokod.geometry import Rect
 from turbokod.window import Window
-from support import _SCREEN, setup_test_env
+from turbokod.file_io import write_file
+from support import _SCREEN, _temp_path, setup_test_env
 
 
 def _native_desktop(text: String) -> Desktop:
@@ -50,9 +51,9 @@ def test_confirm_paints_in_grid_with_native_ui_off() raises:
 def test_native_ui_needs_a_host_that_owns_the_menu() raises:
     var d = Desktop()
     d.config.native_ui = True
-    assert_false(d.native_dialogs())   # terminal frontend: always in-grid
+    assert_false(d.native_ui())   # terminal frontend: always in-grid
     d.host_owns_menu = True
-    assert_true(d.native_dialogs())
+    assert_true(d.native_ui())
 
 
 def test_view_menu_toggles_native_ui() raises:
@@ -109,6 +110,119 @@ def test_native_prompt_cancel_closes_without_submitting() raises:
     # Enter now goes to the editor, not a lingering prompt.
     _ = d.handle_event(Event.key_event(KEY_ENTER), _SCREEN)
     assert_false(d.native_dialog_active())
+
+
+def test_native_ui_tabs_fill_the_workspace_frameless() raises:
+    var d = _native_desktop(String("a\nb\n"))
+    var canvas = Canvas(_SCREEN.b.x, _SCREEN.b.y)
+    canvas.clear(default_attr())
+    d.config.native_ui = False
+    d.paint(canvas, _SCREEN)
+    var before = d.windows.windows[0].rect
+    d.config.native_ui = True
+    d.paint(canvas, _SCREEN)
+    ref w = d.windows.windows[0]
+    assert_true(w.frameless)
+    assert_true(w.rect == d.workspace_rect(_SCREEN))
+    assert_true(w.interior() == w.rect)
+    # The border's hit zones are gone: the top row is editor text.
+    assert_false(w.title_bar_hit(w.rect.a))
+    assert_false(w.close_button_hit(w.rect.a))
+    # The host's tab strip replaces the in-grid one.
+    assert_true(d.tab_bar_rect(_SCREEN).is_empty())
+    # Switching back restores the framed window where it was.
+    d.config.native_ui = False
+    d.paint(canvas, _SCREEN)
+    assert_false(d.windows.windows[0].frameless)
+    assert_true(d.windows.windows[0].rect == before)
+
+
+def test_tabbed_session_saves_the_framed_layout() raises:
+    var d = _native_desktop(String("a\n"))
+    # Keep the workspace fixed across the switch (the in-grid tab bar's
+    # row would otherwise rescale the layout proportionally).
+    d.config.tab_bar = False
+    var canvas = Canvas(_SCREEN.b.x, _SCREEN.b.y)
+    canvas.clear(default_attr())
+    d.config.native_ui = False
+    d.paint(canvas, _SCREEN)
+    var framed = d.windows.windows[0].rect
+    d.config.native_ui = True
+    d.paint(canvas, _SCREEN)
+    d.project = Optional[String](String("/x"))
+    d.windows.windows[0].editor.file_path = String("/x/a.txt")
+    var snap = d._snapshot_session()
+    assert_equal(len(snap.windows), 1)
+    assert_false(snap.windows[0].is_maximized)
+    assert_true(snap.windows[0].rect() == framed)
+
+
+def test_close_tab_asks_before_dropping_unsaved_work() raises:
+    var d = _native_desktop(String("a\n"))
+    d.windows.windows[0].editor.dirty = True
+    d.close_tab(0)
+    assert_equal(len(d.windows.windows), 1)
+    assert_true(d.native_dialog_active())
+    var labels = d.confirm_dialog.labels.copy()
+    assert_equal(labels[1], String("Delete"))
+
+
+def _quick_open_with(mut d: Desktop, paths: List[String]):
+    """Quick Open up with ``paths`` already indexed (no async indexer)."""
+    d.quick_open.active = True
+    for i in range(len(paths)):
+        d.quick_open.entries.append(paths[i])
+        d.quick_open.entries_abs.append(paths[i])
+    d.quick_open.set_query(String("x"))
+    d.quick_open.set_query(String(""))
+
+
+def test_native_picker_is_reported_only_with_native_ui() raises:
+    var d = Desktop()
+    _quick_open_with(d, [String("/a/one.txt")])
+    assert_equal(d.native_picker_kind(), String(""))
+    d.host_owns_menu = True
+    d.config.native_ui = True
+    assert_equal(d.native_picker_kind(), String("quick_open"))
+    d.native_picker_close()
+    assert_false(d.quick_open.active)
+    assert_equal(d.native_picker_kind(), String(""))
+
+
+def test_native_quick_open_filters_and_opens_the_picked_row() raises:
+    var a = _temp_path(String("_nqo_alpha.txt"))
+    var b = _temp_path(String("_nqo_beta.txt"))
+    _ = write_file(a, String("alpha\n"))
+    _ = write_file(b, String("beta\n"))
+    var d = _native_desktop(String("x\n"))
+    _quick_open_with(d, [a, b])
+    assert_equal(len(d.quick_open.matched), 2)
+    d.native_picker_set(String("query"), String("beta"))
+    assert_equal(len(d.quick_open.matched), 1)
+    _ = d.native_picker_activate(0, 0, _SCREEN)
+    assert_false(d.quick_open.active)
+    var f = d.windows.focused
+    assert_equal(d.windows.windows[f].editor.file_path, b)
+
+
+def test_native_project_find_fields_and_toggles_rerun_the_search() raises:
+    var d = _native_desktop(String("x\n"))
+    d.project_find.open(String("/nonexistent-root"))
+    assert_equal(d.native_picker_kind(), String("project_find"))
+    d.native_picker_set(String("query"), String("needle"))
+    assert_equal(d.project_find.query.text, String("needle"))
+    assert_true(d.project_find.searching())   # debounce pending
+    d.native_picker_set(String("replace"), String("pin"))
+    assert_equal(d.project_find.replace.text, String("pin"))
+    var was_on = d.project_find.toggle_regex.on
+    d.native_picker_option(String("regex"), not was_on)
+    assert_true(d.project_find.toggle_regex.on != was_on)
+    d.native_picker_option(String("regex"), was_on)   # leave it as found
+    # Buttons need results to act on.
+    d.native_picker_action(String("send_to_panel"), _SCREEN)
+    assert_true(d.project_find.active)
+    d.native_picker_close()
+    assert_false(d.project_find.active)
 
 
 def main() raises:

@@ -142,6 +142,30 @@ int32_t tk_desktop_native_confirm_answer(int64_t h, int64_t choice);
 int32_t tk_desktop_native_prompt_answer(int64_t h, int64_t ptr, int64_t len,
                                         int64_t ok);
 void tk_desktop_native_save_as_answer(int64_t h, int64_t ptr, int64_t len);
+// macOS-style UI tab strip: _native_ui is 1 while the mode is on; _tabs writes
+// {"focused": i, "tabs": [{"title", "path", "dirty"}]} (same buffer contract
+// as _native_dialog); _tab_select / _tab_close act on a window index.
+int32_t tk_desktop_native_ui(int64_t h);
+int64_t tk_desktop_tabs(int64_t h, int64_t out_ptr, int64_t cap);
+int32_t tk_desktop_tab_select(int64_t h, int64_t idx, int64_t cols, int64_t rows);
+void tk_desktop_tab_close(int64_t h, int64_t idx);
+// macOS-style UI pickers (Quick Open / Find Symbol / Find in Project) as a
+// native panel. _picker writes the JSON state (0 = none up), _picker_rows a
+// page of rows, _picker_preview Find in Project's file preview. The setters
+// behave as if the field had been typed / the row clicked.
+int64_t tk_desktop_picker(int64_t h, int64_t out_ptr, int64_t cap);
+int64_t tk_desktop_picker_rows(int64_t h, int64_t start, int64_t n,
+                               int64_t out_ptr, int64_t cap);
+int64_t tk_desktop_picker_preview(int64_t h, int64_t out_ptr, int64_t cap);
+void tk_desktop_picker_set(int64_t h, int64_t fptr, int64_t flen,
+                           int64_t tptr, int64_t tlen);
+void tk_desktop_picker_option(int64_t h, int64_t nptr, int64_t nlen, int64_t on);
+void tk_desktop_picker_select(int64_t h, int64_t idx, int64_t anchor);
+int32_t tk_desktop_picker_activate(int64_t h, int64_t idx, int64_t anchor,
+                                   int64_t cols, int64_t rows);
+void tk_desktop_picker_action(int64_t h, int64_t nptr, int64_t nlen,
+                              int64_t cols, int64_t rows);
+void tk_desktop_picker_close(int64_t h);
 // 1 while a DAP session is paused at a breakpoint. Polled by the scripted
 // screenshot path (TK_CAPTURE_WHEN=debug-stopped) — see scripts/screenshots.sh.
 int32_t tk_desktop_debug_stopped(int64_t h);

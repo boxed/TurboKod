@@ -382,7 +382,7 @@ comptime EDITOR_TOGGLE_COMPRESS_KWARGS = String("view:compress_kwargs")
 comptime EDITOR_TOGGLE_TAB_BAR      = String("view:tab_bar")
 # View-menu toggle for the macOS-style UI (native app only): dialogs are
 # handed to the host as real AppKit sheets / panels. See
-# ``Desktop.native_dialogs`` and docs/native-ui.md.
+# ``Desktop.native_ui`` and docs/native-ui.md.
 comptime VIEW_NATIVE_UI            = String("view:native_ui")
 # View-menu toggle for the per-line "+/~" change-bar gutter. The flag
 # lives on ``TurbokodConfig`` so it survives across sessions; the
@@ -2560,7 +2560,8 @@ struct Desktop(Movable):
         tab bar adds another when the View toggle is on, but only
         if the screen is tall enough to host both rows above the
         menu bar."""
-        if self.config.tab_bar and screen.b.y - 2 >= 1:
+        if self.config.tab_bar and not self.native_ui() \
+                and screen.b.y - 2 >= 1:
             return 2
         return 1
 
@@ -2671,7 +2672,7 @@ struct Desktop(Movable):
         # Keep window rects current before reading interiors. Idempotent —
         # `paint` already fit this frame; this just makes the query safe to
         # call standalone.
-        self.windows.fit_into(self.workspace_rect(screen))
+        self._fit_windows(screen)
         var idx = self.windows.focused
         if idx < 0 or idx >= len(self.windows.windows):
             return out^
@@ -2747,7 +2748,7 @@ struct Desktop(Movable):
         interior."""
         if not self.windows.focused_is_editor():
             return None
-        self.windows.fit_into(self.workspace_rect(screen))
+        self._fit_windows(screen)
         var idx = self.windows.focused
         if idx < 0 or idx >= len(self.windows.windows):
             return None
@@ -2771,7 +2772,7 @@ struct Desktop(Movable):
         the pointer — so a trackpad horizontal swipe / Shift+wheel works
         regardless of where the cursor happens to sit. Returns True when an
         editor's ``scroll_x`` actually moved (the host repaints on True)."""
-        self.windows.fit_into(self.workspace_rect(screen))
+        self._fit_windows(screen)
         var idx = self.windows.focused
         if idx < 0 or idx >= len(self.windows.windows):
             return False
@@ -3197,7 +3198,7 @@ struct Desktop(Movable):
     def tab_bar_rect(self, screen: Rect) -> Rect:
         """Single-row strip directly above the status bar holding one
         tab per open window. Empty when the View toggle is off."""
-        if not self.config.tab_bar:
+        if not self.config.tab_bar or self.native_ui():
             return Rect.empty()
         var y = screen.b.y - 2
         if y < 1:
@@ -3755,7 +3756,7 @@ struct Desktop(Movable):
                 ref win = self.windows.windows[i]
                 if win.rect.contains(pos):
                     if win.is_editor:
-                        var inner = Rect(
+                        var inner = win.rect if win.frameless else Rect(
                             win.rect.a.x + 1, win.rect.a.y + 1,
                             win.rect.b.x - 1, win.rect.b.y - 1,
                         )
@@ -4673,7 +4674,7 @@ struct Desktop(Movable):
         # Refit windows to the current workspace before painting. Cheap
         # (idempotent for already-fitting windows) and covers both file
         # tree toggles and terminal resizes uniformly.
-        self.windows.fit_into(self.workspace_rect(screen))
+        self._fit_windows(screen)
         # Rebuild the Window menu from current state so it always reflects
         # what's actually open. (Cheap; one short item list.)
         self._rebuild_window_menu()
@@ -4748,7 +4749,7 @@ struct Desktop(Movable):
         # at a time (open_quick_open won't fire while a prompt is up, etc.),
         # so paint order doesn't matter for correctness.
         # A dialog the host shows natively (macOS-style UI) isn't painted.
-        var native = self.native_dialogs()
+        var native = self.native_ui()
         if not (native and self.native_prompt_active()):
             self.prompt.paint(canvas, screen)
         # Review paints over every modal (below), so a confirm it raised
@@ -4758,14 +4759,17 @@ struct Desktop(Movable):
         self.message_request_dialog.paint(canvas, screen)
         self.color_picker.paint(canvas, screen)
         self.merge_view.paint(canvas, screen)
-        self.quick_open.paint(canvas, screen)
+        if not (native and self.quick_open.active):
+            self.quick_open.paint(canvas, screen)
         if not native:
             self.save_as_dialog.paint(canvas, screen)
         self.symbol_pick.paint(canvas, screen)
         self.reference_pick.paint(canvas, screen)
-        self.find_symbol.paint(canvas, screen)
+        if not (native and self.find_symbol.active):
+            self.find_symbol.paint(canvas, screen)
         self.doc_pick.paint(canvas, screen)
-        self.project_find.paint(canvas, screen, self.grammar_registry)
+        if not (native and self.project_find.active):
+            self.project_find.paint(canvas, screen, self.grammar_registry)
         self.local_changes.paint(canvas, screen, self.grammar_registry)
         # Spell-action popup. Painted last among modals so it overlays
         # everything else (it's contextual to the editor cursor and
@@ -6962,11 +6966,18 @@ struct Desktop(Movable):
                 continue
             var sw = SessionWindow()
             sw.path = project_relative(root, fp)
-            sw.rect_a_x = self.windows.windows[i].rect.a.x
-            sw.rect_a_y = self.windows.windows[i].rect.a.y
-            sw.rect_b_x = self.windows.windows[i].rect.b.x
-            sw.rect_b_y = self.windows.windows[i].rect.b.y
-            sw.is_maximized = self.windows.windows[i].is_maximized
+            # A window the tabbed layout maximized is saved as the framed
+            # window it goes back to, so the layout survives a restart
+            # with the macOS-style UI switched off.
+            var r = self.windows.windows[i].rect
+            if self.windows.windows[i]._tab_maximized:
+                r = self.windows.windows[i]._restore_rect
+            sw.rect_a_x = r.a.x
+            sw.rect_a_y = r.a.y
+            sw.rect_b_x = r.b.x
+            sw.rect_b_y = r.b.y
+            sw.is_maximized = self.windows.windows[i].is_maximized \
+                and not self.windows.windows[i]._tab_maximized
             sw.restore_a_x = self.windows.windows[i]._restore_rect.a.x
             sw.restore_a_y = self.windows.windows[i]._restore_rect.a.y
             sw.restore_b_x = self.windows.windows[i]._restore_rect.b.x
@@ -7901,37 +7912,7 @@ struct Desktop(Movable):
             else:
                 _ = self.quick_open.handle_mouse(event, screen)
             if self.quick_open.submitted:
-                var primary = self.quick_open.selected_path
-                var paths = self.quick_open.selected_paths.copy()
-                var to_project = self.quick_open.picks_project
-                var to_history = self.quick_open.picks_history
-                self.quick_open.close()
-                if to_history:
-                    self._open_file_history(primary)
-                elif to_project:
-                    # Multi-select isn't meaningful here — a project pick
-                    # always submits a single row — so use the primary.
-                    return self._switch_to_project(primary)
-                else:
-                    # Open every file in the multi-select range. We
-                    # leave the primary (cursor) path for last so it
-                    # ends up focused; ``open_file`` activates whichever
-                    # window it just opened.
-                    for i in range(len(paths)):
-                        if paths[i] == primary:
-                            continue
-                        # Best-effort across the batch — one bad path
-                        # (e.g. file deleted between indexing and
-                        # submission) shouldn't abort the others. Log
-                        # so the failure is visible.
-                        try:
-                            self.open_file(paths[i], screen)
-                        except e:
-                            print(
-                                "desktop: quick-open batch open_file",
-                                paths[i], ":", String(e),
-                            )
-                    self.open_file(primary, screen)
+                return self._after_quick_open(screen)
             return Optional[String]()
         if self.symbol_pick.active:
             if event.kind == EVENT_KEY:
@@ -7967,13 +7948,7 @@ struct Desktop(Movable):
             else:
                 _ = self.find_symbol.handle_mouse(event, screen)
             if not self.find_symbol.active:
-                # ESC inside handle_key — drop any in-flight LSP
-                # bookkeeping and cached rg hit so a late response
-                # doesn't surprise-jump after close.
-                self._find_symbol_pending_lsps = List[Int]()
-                self._find_symbol_collected = List[WorkspaceSymbolItem]()
-                self._find_symbol_hit_path = String("")
-                self._find_symbol_qualifier = String("")
+                self._find_symbol_closed()
                 return Optional[String]()
             if self.find_symbol.take_submitted():
                 self._submit_find_symbol(screen)
@@ -7994,57 +7969,7 @@ struct Desktop(Movable):
                 _ = self.project_find.handle_key(event, monotonic_ms())
             else:
                 _ = self.project_find.handle_mouse(event, screen)
-            if self.project_find.submitted:
-                var path = self.project_find.selected_path
-                var line_no = self.project_find.selected_line
-                self.project_find.close()
-                # Open (or focus) the file, then move the cursor to the
-                # 1-based line number reported by ``find_in_project``.
-                self._jump_to(
-                    DefinitionResolved(path, line_no - 1, 0), screen,
-                )
-            elif self.project_find.send_to_panel:
-                # Dock the current result set into the persistent pane,
-                # close the modal, and hand the pane keyboard focus.
-                self.find_results_pane.load(
-                    self.project_find.matches.copy(),
-                    self.project_find.query.text,
-                    self.project_find.root,
-                    self.project_find._last_searched_opts.whole_word,
-                )
-                self.project_find.close()
-                self._focus_dock(DOCK_FIND_RESULTS_PANE)
-                # When the panels float on the host's own window, the
-                # auto-show poll only ``orderFront``s the (now non-empty)
-                # panel window — this one-shot makes it key so the docked
-                # results are immediately navigable. See ``panel_focus_request``.
-                self.panel_focus_request = True
-            elif self.project_find.do_replace:
-                # Replace All: swap ``query`` → ``replace`` across the
-                # project (the streamed result list was the live preview),
-                # surface the summary window, and close. ``replace_in_project``
-                # re-scans via ``walk_project_files`` honoring the same
-                # toggles, so the on-disk edit matches what the user saw.
-                var find = self.project_find.query.text
-                var replacement = self.project_find.replace.text
-                var opts = SearchOptions(
-                    self.project_find.toggle_case.on,
-                    self.project_find.toggle_word.on,
-                    self.project_find.toggle_regex.on,
-                )
-                self._last_search = find
-                self._last_search_opts = opts
-                self.project_find.close()
-                if self.project:
-                    try:
-                        var summary = replace_in_project(
-                            self.project.value(), find, replacement, opts,
-                        )
-                        self.windows.add(_summary_window(
-                            find, replacement, summary[0], summary[1],
-                        ))
-                    except e:
-                        print("desktop: replace_in_project:", String(e))
+            self._after_project_find(screen)
             return Optional[String]()
         if self.history.active:
             # Fully modal: it swallows every event, like the review picker.
@@ -8707,8 +8632,19 @@ struct Desktop(Movable):
     # answer through ``native_*_answer``, which runs the same submit path
     # a click on the in-grid button would.
 
-    def native_dialogs(self) -> Bool:
+    def native_ui(self) -> Bool:
+        """macOS-style UI is on: dialogs go to the host as sheets and the
+        windows switch to the tabbed layout under the host's tab strip."""
         return self.host_owns_menu and self.config.native_ui
+
+    def close_tab(mut self, idx: Int):
+        """The host tab strip's close button: close window ``idx`` the way
+        Cmd+W would, asking first when it holds unsaved work."""
+        self._close_window_keeping_work(idx)
+
+    def _fit_windows(mut self, screen: Rect):
+        self.windows.tabbed = self.native_ui()
+        self.windows.fit_into(self.workspace_rect(screen))
 
     def native_prompt_active(self) -> Bool:
         """A single-field prompt (rename, go to line, …) is up. Find and
@@ -8734,7 +8670,7 @@ struct Desktop(Movable):
         return String("OK")
 
     def native_dialog_active(self) -> Bool:
-        if not self.native_dialogs():
+        if not self.native_ui():
             return False
         return self.confirm_dialog.active or self.native_prompt_active() \
             or self.save_as_dialog.active
@@ -8775,6 +8711,190 @@ struct Desktop(Movable):
             )
             return
         self._close_if_saved_as()
+
+    def _after_quick_open(mut self, screen: Rect) raises -> Optional[String]:
+        """Act on a submitted Quick Open (in-grid Enter or the native
+        panel): open the picks, switch project, or open a file history."""
+        var primary = self.quick_open.selected_path
+        var paths = self.quick_open.selected_paths.copy()
+        var to_project = self.quick_open.picks_project
+        var to_history = self.quick_open.picks_history
+        self.quick_open.close()
+        if to_history:
+            self._open_file_history(primary)
+        elif to_project:
+            # Multi-select isn't meaningful here — a project pick
+            # always submits a single row — so use the primary.
+            return self._switch_to_project(primary)
+        else:
+            # Open every file in the multi-select range. We
+            # leave the primary (cursor) path for last so it
+            # ends up focused; ``open_file`` activates whichever
+            # window it just opened.
+            for i in range(len(paths)):
+                if paths[i] == primary:
+                    continue
+                # Best-effort across the batch — one bad path
+                # (e.g. file deleted between indexing and
+                # submission) shouldn't abort the others. Log
+                # so the failure is visible.
+                try:
+                    self.open_file(paths[i], screen)
+                except e:
+                    print(
+                        "desktop: quick-open batch open_file",
+                        paths[i], ":", String(e),
+                    )
+            self.open_file(primary, screen)
+        return Optional[String]()
+
+    def _after_project_find(mut self, screen: Rect) raises:
+        """Act on a Find in Project outcome — open a match, dock the
+        results, or Replace All — whichever the in-grid keys or the native
+        panel set."""
+        if self.project_find.submitted:
+            var path = self.project_find.selected_path
+            var line_no = self.project_find.selected_line
+            self.project_find.close()
+            # Open (or focus) the file, then move the cursor to the
+            # 1-based line number reported by ``find_in_project``.
+            self._jump_to(
+                DefinitionResolved(path, line_no - 1, 0), screen,
+            )
+        elif self.project_find.send_to_panel:
+            # Dock the current result set into the persistent pane,
+            # close the modal, and hand the pane keyboard focus.
+            self.find_results_pane.load(
+                self.project_find.matches.copy(),
+                self.project_find.query.text,
+                self.project_find.root,
+                self.project_find._last_searched_opts.whole_word,
+            )
+            self.project_find.close()
+            self._focus_dock(DOCK_FIND_RESULTS_PANE)
+            # When the panels float on the host's own window, the
+            # auto-show poll only ``orderFront``s the (now non-empty)
+            # panel window — this one-shot makes it key so the docked
+            # results are immediately navigable. See ``panel_focus_request``.
+            self.panel_focus_request = True
+        elif self.project_find.do_replace:
+            # Replace All: swap ``query`` → ``replace`` across the
+            # project (the streamed result list was the live preview),
+            # surface the summary window, and close. ``replace_in_project``
+            # re-scans via ``walk_project_files`` honoring the same
+            # toggles, so the on-disk edit matches what the user saw.
+            var find = self.project_find.query.text
+            var replacement = self.project_find.replace.text
+            var opts = SearchOptions(
+                self.project_find.toggle_case.on,
+                self.project_find.toggle_word.on,
+                self.project_find.toggle_regex.on,
+            )
+            self._last_search = find
+            self._last_search_opts = opts
+            self.project_find.close()
+            if self.project:
+                try:
+                    var summary = replace_in_project(
+                        self.project.value(), find, replacement, opts,
+                    )
+                    self.windows.add(_summary_window(
+                        find, replacement, summary[0], summary[1],
+                    ))
+                except e:
+                    print("desktop: replace_in_project:", String(e))
+
+    # --- macOS-style UI: native pickers ---------------------------------
+    #
+    # Quick Open, Find Symbol and Find in Project keep their state machines
+    # (indexers, rg runners, the symbol index) in the core; the host shows
+    # them as a native panel, pushes the search field's text in and reads
+    # rows back (``tk_desktop_picker*``). Activating a row runs the same
+    # ``_after_*`` handler the in-grid Enter does.
+
+    def native_picker_kind(self) -> String:
+        if not self.native_ui():
+            return String("")
+        if self.quick_open.active:
+            return String("quick_open")
+        if self.find_symbol.active:
+            return String("find_symbol")
+        if self.project_find.active:
+            return String("project_find")
+        return String("")
+
+    def native_picker_set(mut self, field: String, var text: String):
+        var kind = self.native_picker_kind()
+        if kind == String("quick_open") and field == String("query"):
+            self.quick_open.set_query(text^)
+        elif kind == String("find_symbol") and field == String("query"):
+            self.find_symbol.set_query(text^)
+        elif kind == String("project_find"):
+            self.project_find.set_field(field, text^, monotonic_ms())
+
+    def native_picker_option(mut self, name: String, on: Bool):
+        if self.native_picker_kind() == String("project_find"):
+            self.project_find.set_option(name, on)
+
+    def native_picker_select(mut self, idx: Int, anchor: Int):
+        var kind = self.native_picker_kind()
+        if kind == String("quick_open"):
+            self.quick_open.select(idx, anchor)
+        elif kind == String("find_symbol"):
+            self.find_symbol.select(idx)
+        elif kind == String("project_find"):
+            self.project_find.select(idx)
+
+    def native_picker_activate(
+        mut self, idx: Int, anchor: Int, screen: Rect,
+    ) raises -> Optional[String]:
+        """Open row ``idx`` (double-click / Return in the native list)."""
+        self.native_picker_select(idx, anchor)
+        var kind = self.native_picker_kind()
+        if kind == String("quick_open"):
+            self.quick_open.submit()
+            if self.quick_open.submitted:
+                return self._after_quick_open(screen)
+        elif kind == String("find_symbol"):
+            self.find_symbol.submit()
+            if self.find_symbol.take_submitted():
+                self._submit_find_symbol(screen)
+        elif kind == String("project_find"):
+            self.project_find.submit()
+            self._after_project_find(screen)
+        return Optional[String]()
+
+    def native_picker_action(mut self, name: String, screen: Rect) raises:
+        """Find in Project's buttons: ``replace_all`` / ``send_to_panel``."""
+        if self.native_picker_kind() != String("project_find") \
+                or len(self.project_find.matches) == 0:
+            return
+        if name == String("replace_all") and self.project_find.replace_mode:
+            self.project_find.do_replace = True
+        elif name == String("send_to_panel"):
+            self.project_find.send_to_panel = True
+        else:
+            return
+        self._after_project_find(screen)
+
+    def native_picker_close(mut self):
+        var kind = self.native_picker_kind()
+        if kind == String("quick_open"):
+            self.quick_open.close()
+        elif kind == String("find_symbol"):
+            self.find_symbol.close()
+            self._find_symbol_closed()
+        elif kind == String("project_find"):
+            self.project_find.close()
+
+    def _find_symbol_closed(mut self):
+        """Find Symbol was dismissed: drop any in-flight LSP bookkeeping
+        and cached rg hit so a late response doesn't surprise-jump after
+        close."""
+        self._find_symbol_pending_lsps = List[Int]()
+        self._find_symbol_collected = List[WorkspaceSymbolItem]()
+        self._find_symbol_hit_path = String("")
+        self._find_symbol_qualifier = String("")
 
     def _replay_through_modal(mut self, ev: Event, screen: Rect):
         """Feed a replayed chord into whichever modal currently owns input.

@@ -1026,12 +1026,7 @@ struct ProjectFind(Movable):
                     self.send_to_panel = True
             return True
         if k == KEY_ENTER:
-            if self.selected < 0 or self.selected >= len(self.matches):
-                return True
-            var m = self.matches[self.selected]
-            self.selected_path = m.path
-            self.selected_line = m.line_no
-            self.submitted = True
+            self.submit()
             return True
         if picker_nav_key(k, len(self.matches), self.selected):
             self._scroll_to_selection()
@@ -1056,6 +1051,92 @@ struct ProjectFind(Movable):
                 self._mark_query_dirty(now_ms)
             return True
         return True
+
+    def submit(mut self):
+        """Open the selected match (Enter): the host reads
+        ``selected_path`` / ``selected_line``."""
+        if self.selected < 0 or self.selected >= len(self.matches):
+            return
+        var m = self.matches[self.selected]
+        self.selected_path = m.path
+        self.selected_line = m.line_no
+        self.submitted = True
+
+    # --- native host (macOS-style UI) ------------------------------------
+    #
+    # The native panel owns the text fields and toggles; it pushes their
+    # values here and the search runs exactly as if they'd been typed.
+
+    def set_field(mut self, field: String, var text: String, now_ms: Int):
+        """Set ``query`` / ``replace`` / ``scope`` / ``glob``. Every field
+        but ``replace`` re-runs the (debounced) search when it changes."""
+        if field == String("replace"):
+            self.replace.set_text(text^)
+            return
+        if field == String("query"):
+            if text == self.query.text:
+                return
+            self.query.set_text(text^)
+        elif field == String("scope"):
+            if text == self.scope.text:
+                return
+            self.scope.set_text(text^)
+        elif field == String("glob"):
+            if text == self.glob.text:
+                return
+            self.glob.set_text(text^)
+        else:
+            return
+        self._mark_query_dirty(now_ms)
+
+    def set_option(mut self, name: String, on: Bool):
+        """Set the ``case`` / ``word`` / ``regex`` toggle."""
+        if name == String("case"):
+            if self.toggle_case.on == on:
+                return
+            self.toggle_case.on = on
+        elif name == String("word"):
+            if self.toggle_word.on == on:
+                return
+            self.toggle_word.on = on
+        elif name == String("regex"):
+            if self.toggle_regex.on == on:
+                return
+            self.toggle_regex.on = on
+        else:
+            return
+        self._mark_toggle_changed()
+
+    def select(mut self, idx: Int):
+        if idx < 0 or idx >= len(self.matches):
+            return
+        self.selected = idx
+        self._refresh_context_for_selection()
+
+    def searching(self) -> Bool:
+        return self._runner.is_active() or self._query_dirty_at_ms != 0
+
+    def truncated(self) -> Bool:
+        return self._truncated
+
+    def row_hit(self, idx: Int) -> Tuple[String, Int]:
+        """Row ``idx``'s displayed text (leading whitespace stripped) and
+        the byte offset of the highlighted hit in it, or -1."""
+        var text = _lstrip_tabs(self.matches[idx].line_text)
+        var q = self.query.text
+        var hit = find_hit(
+            text.as_bytes(), q.as_bytes(), self.toggle_word.on,
+        ) if len(q.as_bytes()) > 0 else -1
+        return (text^, hit)
+
+    def preview(
+        mut self, mut registry: GrammarRegistry,
+    ) -> Tuple[List[String], List[Highlight]]:
+        """The whole file of the selected match, syntax-highlighted (when
+        it's small enough to tokenize) — the native preview scrolls it to
+        the match itself."""
+        self._ensure_context_highlights(registry)
+        return (self._context_lines.copy(), self._context_highlights.copy())
 
     def _cycle_focus(mut self, backward: Bool):
         """Advance (or reverse) keyboard focus across the editable strips.
