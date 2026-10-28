@@ -4802,16 +4802,17 @@ struct Desktop(Movable):
             self.tab_context_menu.paint(canvas, screen)
         if not (native and self.lsp_status_menu.active):
             self.lsp_status_menu.paint(canvas, screen)
-        self.breakpoint_menu.paint(canvas, screen)
-        # Wait-for dropdown popup overlays the rest of the breakpoint
-        # dialog. Paint after the dialog body so the popup z-orders on
-        # top — same pattern as ``Settings`` / ``ActionEditor``.
-        self.breakpoint_menu.paint_popup(canvas, screen)
-        self.breakpoint_error.paint(canvas, screen)
-        self.fill_dialog.paint(canvas, screen)
-        # Mode / format dropdown popups overlay the rest of the Fill
-        # dialog. Same z-order pattern as ``breakpoint_menu``.
-        self.fill_dialog.paint_popup(canvas, screen)
+        if not native:
+            self.breakpoint_menu.paint(canvas, screen)
+            # Wait-for dropdown popup overlays the rest of the breakpoint
+            # dialog. Paint after the dialog body so the popup z-orders on
+            # top — same pattern as ``Settings`` / ``ActionEditor``.
+            self.breakpoint_menu.paint_popup(canvas, screen)
+            self.breakpoint_error.paint(canvas, screen)
+            self.fill_dialog.paint(canvas, screen)
+            # Mode / format dropdown popups overlay the rest of the Fill
+            # dialog. Same z-order pattern as ``breakpoint_menu``.
+            self.fill_dialog.paint_popup(canvas, screen)
         self.spelling_dialog.paint(canvas, screen)
         # Settings overlay — paints over the workspace but below the
         # modal dialogs so an in-flight prompt is still visible. Drains
@@ -8670,7 +8671,8 @@ struct Desktop(Movable):
             return False
         return self.confirm_dialog.active or self.native_prompt_active() \
             or self.save_as_dialog.active or self.message_request_dialog.active \
-            or self.color_picker.active
+            or self.color_picker.active or self.fill_dialog.active \
+            or self.breakpoint_menu.active or self.breakpoint_error.active
 
     def _after_message_request(mut self):
         """The message-request list was answered: it either picked a color
@@ -8690,6 +8692,34 @@ struct Desktop(Movable):
         else:
             self.color_picker.native_cancel()
         self._on_color_picker_submit()
+
+    def native_fill_answer(
+        mut self, ok: Bool, mode: Int, var text: String, var initial: String,
+        var increment: String, pad: Bool, format_: Int,
+    ):
+        if not self.fill_dialog.active:
+            return
+        self.fill_dialog.native_answer(
+            ok, mode, text^, initial^, increment^, pad, format_,
+        )
+        if self.fill_dialog.submitted:
+            self._on_fill_dialog_submit()
+
+    def native_breakpoint_answer(
+        mut self, ok: Bool, enabled: Bool, wait_for: Int, var condition: String,
+    ):
+        if not self.breakpoint_menu.active:
+            return
+        self.breakpoint_menu.native_answer(ok, enabled, wait_for, condition^)
+        self._on_breakpoint_menu_submit()
+
+    def native_breakpoint_error_answer(
+        mut self, action: UInt8, var condition: String,
+    ):
+        if not self.breakpoint_error.active:
+            return
+        self.breakpoint_error.native_answer(action, condition^)
+        self._on_breakpoint_error_submit()
 
     def native_choice_answer(mut self, index: Int):
         """Answer the message-request list from a native alert (-1 =

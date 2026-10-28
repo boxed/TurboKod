@@ -12,6 +12,7 @@ from turbokod.desktop import (
 )
 from turbokod.search_options import SearchOptions
 from turbokod.color_picker import ColorPickerDialog, MODE_RGB
+from turbokod.fill_dialog import FillDialog
 from turbokod.events import Event, KEY_ENTER
 from turbokod.geometry import Point, Rect
 from turbokod.window import Window
@@ -377,6 +378,24 @@ def test_native_tree_rows_open_toggle_and_arm_the_menu() raises:
     assert_true(opened.value().endswith(String("/b.txt")))
     d.native_tree_menu(idx, Point(2, 3))
     assert_equal(d.native_popup_kind(), String("tab_context"))
+
+
+def test_native_fill_answer_generates_like_the_grid_dialog() raises:
+    var f = FillDialog()
+    f.open(3)
+    f.native_answer(True, 1, String(""), String("5"), String("2"), False, 0)
+    assert_true(f.submitted)
+    assert_true(f.confirmed())
+    var out = f.generate(3)
+    assert_equal(out[0], String("5"))
+    assert_equal(out[2], String("9"))
+
+
+def test_native_fill_answer_with_a_bad_number_stays_open() raises:
+    var f = FillDialog()
+    f.open(2)
+    f.native_answer(True, 1, String(""), String("x"), String("1"), False, 0)
+    assert_false(f.submitted)   # the sheet comes back for a fix
 
 
 def main() raises:

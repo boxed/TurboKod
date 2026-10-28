@@ -21,7 +21,12 @@ It is being built in phases:
 6. **The color picker** is a sheet with the system color well; **the file
    tree** is a native source list (see below).
 7. **The status bar** is re-typeset natively by the host (see below).
-8. Still in-grid: Fill, Breakpoint, Settings' content, review mode, merge
+8. **Fill, Breakpoint and the failed-condition dialog** are native form
+   sheets (`kind: form`): the core lists the fields (text / check / choice /
+   info) and buttons, and the answer sets the struct's fields before its
+   own resolve, so validation (an unparsable Fill number) still keeps the
+   dialog open and the sheet comes back.
+9. Still in-grid: Settings' content, the Spelling list, review mode, merge
    view, history and the tool panels.
 
 ## How a dialog becomes native

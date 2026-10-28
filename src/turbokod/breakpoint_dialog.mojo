@@ -338,6 +338,16 @@ struct BreakpointMenu(Movable):
         var layout = _build_menu_layout(rect)
         self.wait_for.paint_popup(canvas, layout.wait_for_rect, container_bounds)
 
+    def native_answer(
+        mut self, ok: Bool, enabled: Bool, wait_for: Int, var condition: String,
+    ):
+        """The native form's values, then OK / Cancel."""
+        self.enabled.on = enabled
+        if wait_for >= 0 and wait_for < len(self.wait_for.options):
+            self.wait_for.index = wait_for
+        self.condition.set_text(condition^)
+        self._resolve(ok)
+
     def _resolve(mut self, confirmed: Bool):
         self.submitted = True
         self._confirmed = confirmed
@@ -747,6 +757,13 @@ struct BreakpointConditionErrorDialog(Movable):
     def _focus_next(mut self, backward: Bool = False):
         # Slot order = tab order: Condition → Try → Disable → Cancel.
         self._focus.cycle(backward)
+
+    def native_answer(mut self, action: UInt8, var condition: String):
+        """The native form's Try again / Disable / Cancel with the edited
+        condition."""
+        self.condition.set_text(condition^)
+        self.action = action
+        self.submitted = True
 
     def handle_key(mut self, event: Event) -> Bool:
         if not self.active:

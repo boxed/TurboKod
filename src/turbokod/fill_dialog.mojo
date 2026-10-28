@@ -513,6 +513,23 @@ struct FillDialog(Movable):
         if self.format_.is_open and self.is_numbers_mode():
             self.format_.paint_popup(canvas, layout.format_rect, container_bounds)
 
+    def native_answer(
+        mut self, ok: Bool, mode: Int, var text: String, var initial: String,
+        var increment: String, pad: Bool, format_: Int,
+    ):
+        """The native form's values, then OK / Cancel through the same
+        validation the in-grid buttons get (an unparsable number leaves
+        the dialog open)."""
+        if mode >= 0 and mode < len(self.mode.options):
+            self.mode.index = mode
+        if format_ >= 0 and format_ < len(self.format_.options):
+            self.format_.index = format_
+        self.text.set_text(text^)
+        self.initial.set_text(initial^)
+        self.increment.set_text(increment^)
+        self.pad.on = pad
+        self._resolve(ok)
+
     def _resolve(mut self, confirmed: Bool):
         if confirmed and not self._can_submit():
             # Refocus a problematic field rather than silently failing.

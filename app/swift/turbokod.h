@@ -143,6 +143,7 @@ int32_t tk_desktop_native_prompt_answer(int64_t h, int64_t ptr, int64_t len,
                                         int64_t ok);
 void tk_desktop_native_save_as_answer(int64_t h, int64_t ptr, int64_t len);
 void tk_desktop_native_choice_answer(int64_t h, int64_t index);
+void tk_desktop_native_form_answer(int64_t h, int64_t button, int64_t ptr, int64_t len);
 void tk_desktop_native_color_answer(int64_t h, int64_t rgb, int64_t mode, int64_t ok);
 // macOS-style UI tab strip: _native_ui is 1 while the mode is on; _tabs writes
 // {"focused": i, "tabs": [{"title", "path", "dirty"}]} (same buffer contract

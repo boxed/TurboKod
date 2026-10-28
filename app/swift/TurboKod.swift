@@ -4271,6 +4271,7 @@ extension AppController {
         case "save_as": showSavePanel(dialog, for: v, in: win)
         case "choice": showChoiceSheet(dialog, for: v, in: win)
         case "color": showColorSheet(dialog, for: v, in: win)
+        case "form": showFormSheet(dialog, for: v, in: win)
         default: return false
         }
         return true
@@ -4397,6 +4398,80 @@ extension AppController {
             let mode = format.indexOfSelectedItem
             self.finishNativeSheet(v) {
                 tk_desktop_native_color_answer(v.handle, Int64(packed), Int64(mode), ok ? 1 : 0)
+                return 0
+            }
+        }
+    }
+
+    /// A small form (Fill, Breakpoint, a failed breakpoint condition): one
+    /// native control per field in a grid, the dialog's own buttons (the
+    /// first is the default, the last is Cancel).
+    private func showFormSheet(_ d: [String: Any], for v: CellView, in win: NSWindow) {
+        let alert = NSAlert()
+        alert.messageText = d["title"] as? String ?? ""
+        alert.informativeText = d["message"] as? String ?? ""
+        var rows: [[NSView]] = []
+        var read: [String: () -> Any] = [:]
+        for f in d["fields"] as? [[String: Any]] ?? [] {
+            let id = f["id"] as? String ?? ""
+            let label = NSTextField(labelWithString: (f["label"] as? String ?? "") + ":")
+            label.alignment = .right
+            switch f["type"] as? String ?? "" {
+            case "check":
+                let cb = NSButton(checkboxWithTitle: f["label"] as? String ?? "", target: nil, action: nil)
+                cb.state = (f["value"] as? Bool ?? false) ? .on : .off
+                rows.append([NSGridCell.emptyContentView, cb])
+                read[id] = { cb.state == .on }
+            case "choice":
+                let pop = NSPopUpButton()
+                pop.addItems(withTitles: f["options"] as? [String] ?? [])
+                pop.selectItem(at: f["value"] as? Int ?? 0)
+                rows.append([label, pop])
+                read[id] = { pop.indexOfSelectedItem }
+            case "info":
+                let sv = NSScrollView(frame: NSRect(x: 0, y: 0, width: 300, height: 90))
+                let tv = NSTextView(frame: sv.bounds)
+                tv.isEditable = false
+                tv.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+                tv.string = f["value"] as? String ?? ""
+                tv.autoresizingMask = [.width]
+                sv.documentView = tv
+                sv.hasVerticalScroller = true
+                sv.borderType = .bezelBorder
+                sv.heightAnchor.constraint(equalToConstant: 90).isActive = true
+                rows.append([label, sv])
+            default:
+                let tf = NSTextField(string: f["value"] as? String ?? "")
+                tf.usesSingleLineMode = true
+                rows.append([label, tf])
+                read[id] = { tf.stringValue }
+            }
+        }
+        let grid = NSGridView(views: rows)
+        grid.rowSpacing = 8
+        grid.columnSpacing = 8
+        grid.column(at: 0).xPlacement = .trailing
+        grid.column(at: 1).width = 300
+        grid.layoutSubtreeIfNeeded()
+        grid.frame = NSRect(origin: .zero, size: grid.fittingSize)
+        alert.accessoryView = grid
+        let buttons = d["buttons"] as? [String] ?? ["OK", "Cancel"]
+        for (i, b) in buttons.enumerated() {
+            let btn = alert.addButton(withTitle: b)
+            if i == buttons.count - 1 { btn.keyEquivalent = "\u{1b}" }
+        }
+        nativeSheets[ObjectIdentifier(v)] = alert.window
+        alert.beginSheetModal(for: win) { [weak self, weak v] resp in
+            guard let self = self, let v = v, resp != .abort else { return }
+            let button = resp.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+            var values: [String: Any] = [:]
+            for (k, r) in read { values[k] = r() }
+            let json = (try? JSONSerialization.data(withJSONObject: values))
+                .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+            self.finishNativeSheet(v) {
+                withUTF8Arg(json) { p, l in
+                    tk_desktop_native_form_answer(v.handle, Int64(button), p, l)
+                }
                 return 0
             }
         }
