@@ -62,8 +62,10 @@ host polls `tk_desktop_native_dialog` (JSON) and answers via
 button. Windows become frameless tabs (`WindowManager.tabbed`) under a
 native tab strip fed by `tk_desktop_tabs`. Quick Open / Find Symbol / Find
 in Project run as one native picker sheet over the core's own search
-machinery (`tk_desktop_picker*`). In progress: the git view and popup menus
-are still in-grid. Full details in [docs/native-ui.md](docs/native-ui.md).
+machinery (`tk_desktop_picker*`); popups are `NSMenu`s; the git view is a
+native sheet driving `LocalChanges` through its own keys and overlay answers.
+Swift trap: constants below `app.run()` in `TurboKod.swift` (the main file)
+read 0 — use `static let`s in an enum. Full details in [docs/native-ui.md](docs/native-ui.md).
 
 ### Floating panels (native macOS)
 

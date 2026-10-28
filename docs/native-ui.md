@@ -14,8 +14,10 @@ It is being built in phases:
    instead of overlapping in-grid windows (see below).
 3. **Pickers** — done for Quick Open, Find Symbol and Find / Replace in
    Project: one native sheet (see below).
-4. The git view, popup menus as `NSMenu`, the remaining dialogs, a
-   first-launch look chooser.
+4. **Popup menus** as `NSMenu`, a **first-launch** look chooser, and the
+   **git view** as a native sheet: all done (see below).
+5. Still in-grid: Find / Replace (in-file), Fill, Breakpoint, the color
+   picker, Settings' content, review mode, merge view, history.
 
 ## How a dialog becomes native
 
@@ -124,6 +126,42 @@ the streaming `rg` runner. The host shows them as one sheet,
 Tab titles size to their text; only when they don't all fit do the widest
 shrink, down to a shared cap. A squeezed title drops its extension first,
 then the end of its stem (`project_api.py` → `project_api` → `project_…`).
+
+## Git view
+
+`LocalChanges` (the lazygit-style view) keeps every git operation. The
+native sheet, `GitController`, follows the Mac source-control layout:
+
+- Changes / Branches / History lists, with a stage checkbox per file and a
+  commit box under Changes.
+- A themed, syntax-colored diff on the right.
+- Pull / Push / Push To… in the top bar, next to the busy spinner and the
+  flash line.
+
+It never re-implements an operation:
+
+- **Selection and focus** go in with `tk_desktop_git_select` and
+  `tk_desktop_git_cursor`. The cursor is the diff line clicked.
+- **An operation is the view's own key** (`tk_desktop_git_key`): Space
+  stages / unstages / checks out, `d` discards / deletes, `M` / `r` merge /
+  rebase, `o` compare, `e` reword, `A` amend, `p` / `P` / Ctrl+P pull, push,
+  push to.
+- **Commit** is `native_commit`: the `c` prompt answered in one call.
+- **Overlays become alerts on the sheet.** Every in-grid overlay (confirm,
+  merge-or-rebase, reword editor, remote chooser, typed remote delete,
+  status, output) is answered through `tk_desktop_git_answer` →
+  `LocalChanges.native_answer`, which calls the method its Enter calls.
+- **State** is `tk_desktop_git`. The right side is `tk_desktop_git_panels`,
+  which builds the panels itself (in-grid, `paint` does it) and sends rows
+  as `[kind, text]` with `LocalChanges`' `_LINE_*` kinds plus syntax spans.
+- **Opening a file** (double-click, Return) runs `_after_local_changes`,
+  the same post-input step the in-grid path takes.
+
+**Swift gotcha found here:** `TurboKod.swift` is the app's main file, and
+in a main file a top-level `let` is initialized only when execution reaches
+its declaration. Constants declared below `app.run()` read 0 forever. Put
+them in an `enum` as `static let`s (lazily initialized), as `GitPane` /
+`GitLine` do.
 
 ## Popup menus
 

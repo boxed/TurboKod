@@ -26,8 +26,9 @@ from turbokod.canvas import Canvas
 from turbokod.colors import default_attr
 from turbokod.events import Event, MOD_CTRL, MOD_META
 from turbokod.geometry import Point, Rect
+from turbokod.local_changes import RightPanel
 from turbokod.json import (
-    encode_json, json_array, json_bool, json_int, json_object, json_str,
+    JsonValue, encode_json, json_array, json_bool, json_int, json_object, json_str,
 )
 from turbokod.posix import (
     getenv_value, prepend_user_bin_dirs_to_path, recover_path_deferred_once,
@@ -45,6 +46,8 @@ from turbokod.string_utils import byte_slice
 from turbokod.config import classic_font_label, default_font_label
 from turbokod.json import json_get_bool, json_get_int, json_get_string, parse_json
 from turbokod.theme import theme_names
+from turbokod.git_changes import format_age
+from turbokod.posix import wall_clock_ms
 
 from turbokod.host_abi import (
     ACT_CLOSE_WINDOW, ACT_NEW_WINDOW, ACT_NONE, ACT_OPEN_FILE,
@@ -1449,6 +1452,229 @@ def tk_desktop_popup_choose(h: Int, code: Int) abi("C") -> Int32:
         return _action_code(_desk(h)[].native_popup_choose(code))
     except:
         return ACT_NONE
+
+
+# --- macOS-style UI: the git view ---------------------------------------------
+
+
+def _git_state_json(mut d: Desktop) -> String:
+    if not d.native_git_active():
+        return String("")
+    ref g = d.local_changes
+    var o = json_object()
+    o.put(String("root"), json_str(g.root))
+    var files = json_array()
+    for i in range(len(g.files)):
+        var f = json_object()
+        f.put(String("path"), json_str(g.files[i].path))
+        f.put(String("x"), json_str(String(chr(Int(g.files[i].staged)))))
+        f.put(String("y"), json_str(String(chr(Int(g.files[i].worktree)))))
+        files.append(f)
+    o.put(String("files"), files)
+    var now = wall_clock_ms() // 1000
+    var current = String("")
+    var branches = json_array()
+    for i in range(len(g.branches)):
+        ref b = g.branches[i]
+        if b.is_current:
+            current = b.name
+        var r = json_object()
+        r.put(String("name"), json_str(b.name))
+        r.put(String("current"), json_bool(b.is_current))
+        r.put(String("remote"), json_bool(b.is_remote()))
+        r.put(String("subject"), json_str(b.subject))
+        r.put(String("age"), json_str(
+            format_age(now - b.committer_unix) if now > 0 else String("")
+        ))
+        branches.append(r)
+    o.put(String("branches"), branches)
+    o.put(String("branch"), json_str(current))
+    var commits = json_array()
+    for i in range(len(g.commits)):
+        ref c = g.commits[i]
+        var r = json_object()
+        r.put(String("sha"), json_str(c.short_sha))
+        r.put(String("subject"), json_str(c.subject))
+        r.put(String("author"), json_str(c.author))
+        r.put(String("date"), json_str(c.date))
+        r.put(String("pushed"), json_bool(c.is_pushed))
+        r.put(String("tags"), json_str(c.tags))
+        commits.append(r)
+    o.put(String("commits"), commits)
+    o.put(String("sel_file"), json_int(g.sel_file))
+    o.put(String("sel_branch"), json_int(g.sel_branch))
+    o.put(String("sel_commit"), json_int(g.sel_commit))
+    o.put(String("focus"), json_int(g.focus))
+    o.put(String("busy"), json_bool(g.native_busy()))
+    o.put(String("busy_label"), json_str(
+        g.git_runner.label if g.native_busy() else String("")
+    ))
+    o.put(String("flash"), json_str(g.flash_message))
+    o.put(String("status"), json_str(g.status_message))
+    var ov = json_object()
+    ov.put(String("kind"), json_str(g.native_overlay_kind()))
+    ov.put(String("message"), json_str(g.overlay_message))
+    ov.put(String("action"), json_str(g.overlay_action))
+    ov.put(String("text"), json_str(g.native_overlay_text()))
+    ov.put(String("output"), json_str(g.overlay_output))
+    var remotes = json_array()
+    for i in range(len(g._remotes)):
+        remotes.append(json_str(g._remotes[i]))
+    ov.put(String("remotes"), remotes)
+    ov.put(String("remote_sel"), json_int(g._remote_sel))
+    ov.put(String("prefix"), json_str(g.native_typed_prefix()))
+    ov.put(String("into_main"), json_bool(g.native_merge_into_main()))
+    o.put(String("overlay"), ov)
+    return encode_json(o)
+
+
+def _panel_json(ref d: Desktop, ref p: RightPanel, pane: Int) -> JsonValue:
+    var o = json_object()
+    o.put(String("pane"), json_int(pane))
+    o.put(String("cursor"), json_int(p.cursor))
+    var rows = json_array()
+    for i in range(len(p.lines)):
+        var r = json_array()
+        r.append(json_int(p.kind[i]))
+        r.append(json_str(p.lines[i]))
+        rows.append(r)
+    o.put(String("rows"), rows)
+    var spans = json_array()
+    for i in range(len(p.highlights)):
+        ref h = p.highlights[i]
+        var sp = json_array()
+        sp.append(json_int(h.row))
+        sp.append(json_int(h.col_start))
+        sp.append(json_int(h.col_end))
+        sp.append(json_int(_attr_fg_rgb(
+            d, h.attr.fg, h.attr.color_mode, h.attr.fg_rgb,
+        )))
+        spans.append(sp)
+    o.put(String("spans"), spans)
+    return o^
+
+
+@export
+def tk_desktop_git(
+    h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
+) abi("C") -> Int:
+    """The git view as JSON for the native sheet: files (``x`` / ``y``
+    porcelain columns), branches, commits, selections, focus, busy /
+    flash / status lines and the open overlay. 0 when the view isn't up
+    natively. Same buffer contract as ``tk_desktop_native_dialog``."""
+    if h == 0:
+        return 0
+    _ = cols
+    _ = rows
+    return _write_out(_git_state_json(_desk(h)[]), out_ptr, cap)
+
+
+@export
+def tk_desktop_git_panels(
+    h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
+) abi("C") -> Int:
+    """The right side for the current selection: ``{panels: [{pane,
+    cursor, rows: [[kind, text]], spans: [[row, byte_start, byte_end,
+    rgb]]}], bg, fg}`` — Unstaged + Staged for a file, one info panel for
+    a branch or commit. Row kinds are ``LocalChanges``' ``_LINE_*``."""
+    if h == 0:
+        return 0
+    ref d = _desk(h)[]
+    if not d.native_git_active():
+        return 0
+    d.local_changes.native_panels(d.grammar_registry, Rect(0, 0, cols, rows))
+    var panels = json_array()
+    if d.local_changes.native_shows_file():
+        panels.append(_panel_json(d, d.local_changes.unstaged, 3))
+        panels.append(_panel_json(d, d.local_changes.staged, 4))
+    else:
+        panels.append(_panel_json(d, d.local_changes.info, 5))
+    var o = json_object()
+    o.put(String("panels"), panels)
+    o.put(String("bg"), json_int(Int(d.active_theme.palette[Int(EDITOR_BG)])))
+    o.put(String("fg"), json_int(Int(d.active_theme.palette[Int(EDITOR_FG)])))
+    return _write_out(encode_json(o), out_ptr, cap)
+
+
+@export
+def tk_desktop_git_select(
+    h: Int, pane: Int, idx: Int, cols: Int, rows: Int,
+) abi("C"):
+    """Select row ``idx`` of a sidebar list (0 files, 1 branches, 2
+    commits)."""
+    if h == 0:
+        return
+    _desk(h)[].native_git_select(pane, idx, Rect(0, 0, cols, rows))
+
+
+@export
+def tk_desktop_git_cursor(h: Int, pane: Int, row: Int) abi("C"):
+    """Put a right-panel cursor (3 unstaged, 4 staged, 5 info) on ``row``."""
+    if h == 0:
+        return
+    _desk(h)[].native_git_cursor(pane, row)
+
+
+@export
+def tk_desktop_git_key(
+    h: Int, pane: Int, key: Int, mods: Int, cols: Int, rows: Int,
+) abi("C") -> Int32:
+    """Run the git view's operation for ``key`` with ``pane`` focused (-1
+    keeps it): Space stage / unstage / checkout, ``d`` discard / delete,
+    ``M`` merge, ``r`` rebase, ``o`` compare, ``e`` reword, ``A`` amend,
+    ``p`` pull, ``P`` push, Ctrl+P push to a remote. Returns a host action
+    code."""
+    if h == 0:
+        return ACT_NONE
+    try:
+        _desk(h)[].native_git_key(
+            pane, UInt32(key), UInt8(mods), Rect(0, 0, cols, rows),
+        )
+    except:
+        pass
+    return ACT_NONE
+
+
+@export
+def tk_desktop_git_commit(h: Int, ptr: Int, n: Int) abi("C"):
+    """Commit what's staged with this message."""
+    if h == 0:
+        return
+    _desk(h)[].native_git_commit(_string_from(ptr, n))
+
+
+@export
+def tk_desktop_git_open(
+    h: Int, pane: Int, row: Int, cols: Int, rows: Int,
+) abi("C"):
+    """Open a file row (pane 0) or a diff / info row's jump target."""
+    if h == 0:
+        return
+    try:
+        _desk(h)[].native_git_open(pane, row, Rect(0, 0, cols, rows))
+    except:
+        pass
+
+
+@export
+def tk_desktop_git_answer(
+    h: Int, cptr: Int, clen: Int, tptr: Int, tlen: Int,
+) abi("C"):
+    """Answer the git view's overlay: ``ok`` / ``cancel`` / ``merge`` /
+    ``rebase``, with the message, remote index or typed prefix as text."""
+    if h == 0:
+        return
+    _desk(h)[].native_git_answer(
+        _string_from(cptr, clen), _string_from(tptr, tlen),
+    )
+
+
+@export
+def tk_desktop_git_close(h: Int) abi("C") -> Int32:
+    """Close the git view; 0 when refused because a git op is running."""
+    if h == 0:
+        return 0
+    return 1 if _desk(h)[].native_git_close() else 0
 
 
 # --- first-launch welcome window ---------------------------------------------

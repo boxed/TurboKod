@@ -14,7 +14,9 @@ from turbokod.events import Event, KEY_ENTER
 from turbokod.geometry import Point, Rect
 from turbokod.window import Window
 from turbokod.file_io import write_file
-from support import _SCREEN, _temp_path, setup_test_env
+from turbokod.posix import sleep_ms
+from turbokod.string_utils import string_list
+from support import _SCREEN, _git_capture, _run_git, _temp_path, setup_test_env
 
 
 def _native_desktop(text: String) -> Desktop:
@@ -257,6 +259,67 @@ def test_native_popup_lists_rows_and_dismisses_through_its_handler() raises:
     _ = d.native_popup_choose(0)
     assert_false(d.spell_menu.active)
     assert_equal(d.native_popup_kind(), String(""))
+
+
+def _repo_with_a_change() raises -> String:
+    """A repo with one committed file, modified in the worktree."""
+    var root = _temp_path(String("_native_git"))
+    _ = _run_git(String("/"), string_list(String("init"), String("-q"), root))
+    # The test $HOME has no git identity; the view's own commit needs one.
+    _ = _run_git(root, string_list(String("config"), String("user.email"), String("t@t")))
+    _ = _run_git(root, string_list(String("config"), String("user.name"), String("t")))
+    _ = write_file(root + String("/a.txt"), String("one\n"))
+    _ = _run_git(root, string_list(String("add"), String("a.txt")))
+    _ = _run_git(root, string_list(String("commit"), String("-qm"), String("first")))
+    _ = write_file(root + String("/a.txt"), String("one\ntwo\n"))
+    return root^
+
+
+def _wait_git(mut d: Desktop):
+    for _ in range(500):
+        d.local_changes.tick()
+        if not d.local_changes.native_busy():
+            return
+        sleep_ms(10)
+
+
+def test_native_git_stages_and_commits_through_the_views_own_paths() raises:
+    var root = _repo_with_a_change()
+    var d = _native_desktop(String("x\n"))
+    d.local_changes.open(root)
+    assert_true(d.native_git_active())
+    assert_equal(len(d.local_changes.files), 1)
+    d.native_git_select(0, 0, _SCREEN)
+    assert_true(d.local_changes.native_shows_file())
+    d.native_git_key(0, UInt32(0x20), UInt8(0), _SCREEN)   # Space: stage
+    assert_equal(Int(d.local_changes.files[0].staged), Int(ord("M")))
+    d.native_git_commit(String("second"))
+    _wait_git(d)
+    var log = _git_capture(root, string_list(
+        String("log"), String("--format=%s"),
+    ))
+    assert_true(String("second") in log)
+    assert_true(d.native_git_close())
+    assert_false(d.native_git_active())
+
+
+def test_native_git_overlay_cancel_and_status_dismiss() raises:
+    var root = _repo_with_a_change()
+    var d = _native_desktop(String("x\n"))
+    d.local_changes.open(root)
+    d.native_git_select(0, 0, _SCREEN)
+    # Nothing staged: committing reports instead of opening the prompt.
+    d.native_git_commit(String("nope"))
+    assert_equal(d.local_changes.native_overlay_kind(), String("status"))
+    d.native_git_answer(String("ok"), String(""))
+    assert_equal(d.local_changes.native_overlay_kind(), String(""))
+    # ``d`` on a file asks first; Cancel leaves the change alone.
+    d.native_git_key(0, UInt32(ord("d")), UInt8(0), _SCREEN)
+    assert_equal(d.local_changes.native_overlay_kind(), String("revert"))
+    d.native_git_answer(String("cancel"), String(""))
+    assert_equal(d.local_changes.native_overlay_kind(), String(""))
+    assert_equal(len(d.local_changes.files), 1)
+    d.local_changes.release()
 
 
 def main() raises:

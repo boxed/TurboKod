@@ -2026,7 +2026,12 @@ struct LocalChanges(Movable):
         self._output_promoted = False
         self.sidebar_dock.reset()
         self._type_ahead.reset()
-        self._git_op = _GITOP_NONE
+        # An op still running keeps ``_git_op``, so ``tick`` reaches its
+        # "closed mid-op" branch and reaps the child. Resetting it here
+        # made ``tick`` return early forever and stranded the process
+        # (closing on a file open while a push ran).
+        if not self.git_runner.is_active():
+            self._git_op = _GITOP_NONE
         self._git_op_label = String("")
         self._git_revert_path = String("")
         self._git_revert_untracked = False
@@ -6049,6 +6054,160 @@ struct LocalChanges(Movable):
         var cell = pos.x - body_x \
             + _cells_skipped(self.info.lines[row], self.info.scroll_x)
         return self.info.link_at(row, cell)
+
+    # --- native host (macOS-style UI) ------------------------------------
+    #
+    # The host shows this view as a native sheet. It never re-implements
+    # an operation: it moves focus / selection here and then sends the
+    # same key the grid would (``native_key``), or answers an overlay
+    # (``native_answer``) through the method its Enter calls.
+
+    def native_select(mut self, pane: Int, idx: Int, bounds: Rect):
+        """Select row ``idx`` of a sidebar list (``_PANE_FILES`` /
+        ``_BRANCHES`` / ``_COMMITS``); the right side follows."""
+        if pane < _PANE_FILES or pane > _PANE_COMMITS:
+            return
+        self.focus = pane
+        self.last_sidebar_focus = pane
+        self._set_focused_selection(idx, bounds)
+
+    def native_cursor(mut self, pane: Int, row: Int):
+        """Put a right-panel cursor on ``row`` and focus that panel."""
+        if pane == _PANE_RIGHT_UNSTAGED:
+            self.unstaged.cursor = max(0, min(row, len(self.unstaged.lines) - 1))
+        elif pane == _PANE_RIGHT_STAGED:
+            self.staged.cursor = max(0, min(row, len(self.staged.lines) - 1))
+        elif pane == _PANE_RIGHT_INFO:
+            self.info.cursor = max(0, min(row, len(self.info.lines) - 1))
+        else:
+            return
+        self.focus = pane
+
+    def native_key(
+        mut self, pane: Int, key: UInt32, mods: UInt8, bounds: Rect,
+        mut registry: GrammarRegistry,
+    ):
+        """Run the operation bound to ``key`` with ``pane`` focused (-1
+        keeps the focus) — Space stages, ``d`` discards / deletes, ``M``
+        merges, ``p`` pulls, …"""
+        if pane >= _PANE_FILES and pane <= _PANE_RIGHT_INFO:
+            self.focus = pane
+            if pane <= _PANE_COMMITS:
+                self.last_sidebar_focus = pane
+        _ = self.handle_key(Event.key_event(key, mods), bounds, registry)
+
+    def native_commit(mut self, var message: String):
+        """Commit the staged changes with ``message`` — the in-grid ``c``
+        prompt answered in one go (it refuses the same way when nothing
+        is staged)."""
+        self._open_commit_prompt()
+        if self.overlay != _OVERLAY_COMMIT:
+            return
+        self.overlay_input.set_text(message^)
+        self._submit_commit()
+
+    def native_open(mut self, pane: Int, row: Int):
+        """Open what a double-click opens: a file row's first change, or a
+        diff / info row's jump target."""
+        if pane == _PANE_FILES:
+            self._submit_selected_file()
+        elif pane == _PANE_RIGHT_UNSTAGED:
+            self._submit_jump_target(self.unstaged.jump_target(row))
+        elif pane == _PANE_RIGHT_STAGED:
+            self._submit_jump_target(self.staged.jump_target(row))
+        elif pane == _PANE_RIGHT_INFO:
+            self._submit_jump_target(self.info.jump_target(row))
+
+    def native_answer(mut self, choice: String, var text: String):
+        """Answer the open overlay. ``choice`` is ``cancel`` or ``ok``
+        (``merge`` / ``rebase`` for the merge question); ``text`` carries
+        the commit message, the reworded message, the chosen remote's
+        index, or the typed branch prefix."""
+        var ov = self.overlay
+        if ov == _OVERLAY_NONE:
+            return
+        if choice == String("cancel") or ov == _OVERLAY_STATUS \
+                or ov == _OVERLAY_OUTPUT:
+            self._close_overlay()
+            return
+        if ov == _OVERLAY_COMMIT:
+            self.overlay_input.set_text(text^)
+            self._submit_commit()
+        elif ov == _OVERLAY_AMEND_CONFIRM:
+            self._confirm_amend()
+        elif ov == _OVERLAY_REVERT_CONFIRM:
+            self._confirm_revert()
+        elif ov == _OVERLAY_DISCARD_LINE_CONFIRM:
+            self._confirm_discard_line()
+        elif ov == _OVERLAY_DELETE_BRANCH_CONFIRM:
+            self._confirm_delete_branch()
+        elif ov == _OVERLAY_MERGE_CHOICE:
+            if choice == String("rebase"):
+                self._confirm_merge_rebase()
+            else:
+                self._confirm_merge_commit()
+        elif ov == _OVERLAY_EDIT_MSG:
+            self.overlay_editor.release_search_cache()
+            self.overlay_editor = self._message_editor_for(text)
+            self._submit_reword()
+        elif ov == _OVERLAY_REMOTE_PICK:
+            try:
+                var i = Int(text)
+                if i >= 0 and i < len(self._remotes):
+                    self._remote_sel = i
+                    self._push_to_selected_remote()
+            except:
+                pass
+        elif ov == _OVERLAY_DELETE_REMOTE_TYPED:
+            if text == self._remote_delete_prefix():
+                self._confirm_delete_branch()
+
+    def native_overlay_kind(self) -> String:
+        var ov = self.overlay
+        if ov == _OVERLAY_COMMIT: return String("commit")
+        if ov == _OVERLAY_AMEND_CONFIRM: return String("amend")
+        if ov == _OVERLAY_REVERT_CONFIRM: return String("revert")
+        if ov == _OVERLAY_STATUS: return String("status")
+        if ov == _OVERLAY_DISCARD_LINE_CONFIRM: return String("discard_line")
+        if ov == _OVERLAY_DELETE_BRANCH_CONFIRM: return String("delete_branch")
+        if ov == _OVERLAY_OUTPUT: return String("output")
+        if ov == _OVERLAY_MERGE_CHOICE: return String("merge_choice")
+        if ov == _OVERLAY_EDIT_MSG: return String("edit_message")
+        if ov == _OVERLAY_REMOTE_PICK: return String("remote_pick")
+        if ov == _OVERLAY_DELETE_REMOTE_TYPED: return String("delete_remote_typed")
+        return String("")
+
+    def native_overlay_text(self) -> String:
+        """The overlay's prefilled text: the commit message draft, or the
+        message being reworded."""
+        if self.overlay == _OVERLAY_COMMIT:
+            return self.overlay_input.text
+        if self.overlay == _OVERLAY_EDIT_MSG:
+            return self.overlay_editor.text_snapshot()
+        return String("")
+
+    def native_shows_file(self) -> Bool:
+        """The right side is a file's Unstaged / Staged pair (rather than
+        a branch's or commit's info panel)."""
+        return self._driving_pane() == _PANE_FILES
+
+    def native_busy(self) -> Bool:
+        return self._is_git_busy()
+
+    def native_typed_prefix(self) -> String:
+        if self.overlay != _OVERLAY_DELETE_REMOTE_TYPED:
+            return String("")
+        return self._remote_delete_prefix()
+
+    def native_merge_into_main(self) -> Bool:
+        return self._merge_target_is_main
+
+    def native_panels(
+        mut self, mut registry: GrammarRegistry, bounds: Rect,
+    ):
+        """Build the right-side panels for the current selection (paint
+        does this in-grid; the native host has no paint)."""
+        self._ensure_right_panels(registry, bounds)
 
     def consume_open_url(mut self) -> String:
         """Take the URL queued by a click on a commit-message link (empty

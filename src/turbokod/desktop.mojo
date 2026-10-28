@@ -4771,7 +4771,8 @@ struct Desktop(Movable):
         self.doc_pick.paint(canvas, screen)
         if not (native and self.project_find.active):
             self.project_find.paint(canvas, screen, self.grammar_registry)
-        self.local_changes.paint(canvas, screen, self.grammar_registry)
+        if not (native and self.local_changes.active):
+            self.local_changes.paint(canvas, screen, self.grammar_registry)
         # Spell-action popup. Painted last among modals so it overlays
         # everything else (it's contextual to the editor cursor and
         # routinely opens above already-rendered widgets).
@@ -7710,7 +7711,7 @@ struct Desktop(Movable):
         if event.kind == EVENT_MOD_KEY:
             _ = self.windows.handle_mod_key(event)
             return Optional[String]()
-        if self.native_dialog_active() \
+        if self.native_dialog_active() or self.native_git_active() \
                 or len(self.native_popup_kind().as_bytes()) > 0:
             # The host is showing this dialog as a native sheet (or the
             # popup as an NSMenu), which is modal — anything that still
@@ -8032,31 +8033,7 @@ struct Desktop(Movable):
                 _ = self.local_changes.handle_mouse(
                     event, screen, self.grammar_registry,
                 )
-            # A URL queued by the modal opens here, so the launch stays
-            # out of its key/mouse dispatch: a click on a link in a
-            # commit message / branch log or the full-screen git output
-            # log, or ``o`` on the Branches pane (the GitHub compare
-            # page). The modal stays open behind the browser.
-            var lc_url = self.local_changes.consume_open_url()
-            if len(lc_url.as_bytes()) > 0:
-                open_url(lc_url)
-            if self.local_changes.submitted:
-                # ``selected_path`` is project-relative; resolve against
-                # the project root before opening so ``open_file`` can
-                # find it on disk regardless of the host's cwd.
-                # ``selected_line`` is 1-based (0 = "no jump") — a
-                # double-click on a diff body row sets it so the editor
-                # lands on the corresponding line.
-                var rel = self.local_changes.selected_path
-                var jump_line = self.local_changes.selected_line
-                self.local_changes.close()
-                var abs = rel
-                if not starts_with(rel, String("/")) and self.project:
-                    abs = join_path(self.project.value(), rel)
-                if jump_line > 0:
-                    self.open_file_at(abs, jump_line - 1, 0, screen)
-                else:
-                    self.open_file(abs, screen)
+            self._after_local_changes(screen)
             return Optional[String]()
         if self.project_settings.active and not self.project_settings_detached:
             # In-grid Project Settings is modal over the workspace; the
@@ -8926,6 +8903,76 @@ struct Desktop(Movable):
             self.lsp_status_menu.choose(code)
             self._on_lsp_status_menu_submit()
         return Optional[String]()
+
+    def _after_local_changes(mut self, screen: Rect) raises:
+        """After the git view handled input (in-grid or native): open a
+        URL it queued, or the file it submitted."""
+        # A URL queued by the modal opens here, so the launch stays
+        # out of its key/mouse dispatch: a click on a link in a
+        # commit message / branch log or the full-screen git output
+        # log, or ``o`` on the Branches pane (the GitHub compare
+        # page). The modal stays open behind the browser.
+        var lc_url = self.local_changes.consume_open_url()
+        if len(lc_url.as_bytes()) > 0:
+            open_url(lc_url)
+        if self.local_changes.submitted:
+            # ``selected_path`` is project-relative; resolve against
+            # the project root before opening so ``open_file`` can
+            # find it on disk regardless of the host's cwd.
+            # ``selected_line`` is 1-based (0 = "no jump") — a
+            # double-click on a diff body row sets it so the editor
+            # lands on the corresponding line.
+            var rel = self.local_changes.selected_path
+            var jump_line = self.local_changes.selected_line
+            self.local_changes.close()
+            var abs = rel
+            if not starts_with(rel, String("/")) and self.project:
+                abs = join_path(self.project.value(), rel)
+            if jump_line > 0:
+                self.open_file_at(abs, jump_line - 1, 0, screen)
+            else:
+                self.open_file(abs, screen)
+
+    # --- macOS-style UI: the git view as a native sheet ------------------
+    #
+    # ``LocalChanges`` keeps every git operation; the host drives it with
+    # these (selection, a key, an overlay answer) and then the same
+    # ``_after_local_changes`` the in-grid path runs.
+
+    def native_git_active(self) -> Bool:
+        return self.native_ui() and self.local_changes.active
+
+    def native_git_select(mut self, pane: Int, idx: Int, screen: Rect):
+        self.local_changes.native_select(pane, idx, screen)
+
+    def native_git_cursor(mut self, pane: Int, row: Int):
+        self.local_changes.native_cursor(pane, row)
+
+    def native_git_key(
+        mut self, pane: Int, key: UInt32, mods: UInt8, screen: Rect,
+    ) raises:
+        self.local_changes.native_key(
+            pane, key, mods, screen, self.grammar_registry,
+        )
+        self._after_local_changes(screen)
+
+    def native_git_commit(mut self, var message: String):
+        self.local_changes.native_commit(message^)
+
+    def native_git_open(mut self, pane: Int, row: Int, screen: Rect) raises:
+        self.local_changes.native_open(pane, row)
+        self._after_local_changes(screen)
+
+    def native_git_answer(mut self, choice: String, var text: String):
+        self.local_changes.native_answer(choice, text^)
+
+    def native_git_close(mut self) -> Bool:
+        """Close the git view (Esc), refused while a git op is running —
+        same rule as in-grid. True when it closed."""
+        if self.local_changes.native_busy():
+            return False
+        self.local_changes.close()
+        return True
 
     def native_picker_kind(self) -> String:
         if not self.native_ui():

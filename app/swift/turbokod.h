@@ -174,6 +174,21 @@ void tk_desktop_picker_close(int64_t h);
 // (code 0 = dismissed) and returns a host action code.
 int64_t tk_desktop_popup(int64_t h, int64_t out_ptr, int64_t cap);
 int32_t tk_desktop_popup_choose(int64_t h, int64_t code);
+// macOS-style UI git view (a native sheet over LocalChanges). _git writes the
+// state JSON (0 = not up), _git_panels the right side. Panes: 0 files,
+// 1 branches, 2 commits, 3 unstaged, 4 staged, 5 info. Operations reuse the
+// view's keys (_git_key); overlays are answered with _git_answer.
+int64_t tk_desktop_git(int64_t h, int64_t cols, int64_t rows, int64_t out_ptr, int64_t cap);
+int64_t tk_desktop_git_panels(int64_t h, int64_t cols, int64_t rows,
+                              int64_t out_ptr, int64_t cap);
+void tk_desktop_git_select(int64_t h, int64_t pane, int64_t idx, int64_t cols, int64_t rows);
+void tk_desktop_git_cursor(int64_t h, int64_t pane, int64_t row);
+int32_t tk_desktop_git_key(int64_t h, int64_t pane, int64_t key, int64_t mods,
+                           int64_t cols, int64_t rows);
+void tk_desktop_git_commit(int64_t h, int64_t ptr, int64_t len);
+void tk_desktop_git_open(int64_t h, int64_t pane, int64_t row, int64_t cols, int64_t rows);
+void tk_desktop_git_answer(int64_t h, int64_t cptr, int64_t clen, int64_t tptr, int64_t tlen);
+int32_t tk_desktop_git_close(int64_t h);
 int32_t tk_desktop_welcome_needed(int64_t h);
 int64_t tk_desktop_welcome_options(int64_t h, int64_t out_ptr, int64_t cap);
 void tk_desktop_welcome_apply(int64_t h, int64_t ptr, int64_t len, int64_t done);
