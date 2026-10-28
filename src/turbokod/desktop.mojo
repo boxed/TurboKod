@@ -348,6 +348,7 @@ comptime _PA_RENAME_FILE      = String("file:rename")
 comptime _PA_DELETE_FILE      = String("file:delete")
 comptime _PA_DUPLICATE_FILE   = String("file:duplicate:do")
 comptime _PA_SAVE_AS_REPLACE  = String("file:save_as:replace")
+comptime _PA_CLOSE_UNSAVED    = String("window:close:unsaved")
 comptime EDITOR_TOGGLE_COMMENT = String("edit:comment")
 comptime EDITOR_TOGGLE_CASE   = String("edit:case")
 comptime EDITOR_SORT_LINES    = String("edit:sort_lines")
@@ -1092,6 +1093,10 @@ struct Desktop(Movable):
     var _pending_new_window_project: Optional[String]
     var _pending_action: String      # what to do on next prompt submit
     var _pending_arg: String         # accumulator for two-step prompts
+    # The window "close it anyway?" is asked about, and its title, to
+    # make sure it's still the same window when the answer comes.
+    var _close_unsaved_idx: Int
+    var _close_unsaved_title: String
     var _last_search: String         # last Find needle, repeated by Ctrl+G
     var _last_search_opts: SearchOptions   # last Find toggle state (Cc/W/.*)
     var _last_goto_line: String      # last Go-to-line input, prefilled on reopen
@@ -1728,6 +1733,8 @@ struct Desktop(Movable):
         self._shortcut_snapshot = List[String]()
         self._pending_action = String("")
         self._pending_arg = String("")
+        self._close_unsaved_idx = -1
+        self._close_unsaved_title = String("")
         self._last_search = String("")
         self._last_search_opts = SearchOptions()
         self._last_goto_line = String("")
@@ -5806,6 +5813,11 @@ struct Desktop(Movable):
         paints. The only thing still live afterwards is the LSP transports,
         which don't tokenize.
         """
+        # Quitting or closing the window doesn't take focus away first, so
+        # nothing else saves the last edits: do it as focus-out would.
+        if self.config.auto_save:
+            self._autosave_all_dirty()
+        self._save_drafts_if_changed()
         for i in range(len(self.lsp_managers)):
             self.lsp_managers[i].begin_shutdown()
         for i in range(len(self._closing_lsp)):
@@ -6325,6 +6337,11 @@ struct Desktop(Movable):
         # dropped), the save path bails — and the open windows' final
         # scroll positions would never make it to disk.
         self._save_view_states_if_changed()
+        # The windows close below: save their edits as switching away
+        # would, and the untitled ones to the drafts.
+        if self.config.auto_save:
+            self._autosave_all_dirty()
+        self._save_drafts_if_changed()
         self.project = Optional[String]()
         self._pytest_file_globs = List[String]()
         self.speller.set_project(String(""))
@@ -6581,6 +6598,46 @@ struct Desktop(Movable):
         if self.windows.windows[idx]._transient:
             return False
         return len(self.windows.windows[idx].editor.file_path.as_bytes()) > 0
+
+    def _holds_unsaved_work(self, idx: Int) -> Bool:
+        """Whether closing window ``idx`` now would lose edits."""
+        if idx < 0 or idx >= len(self.windows.windows):
+            return False
+        if not self.windows.windows[idx].is_editor:
+            return False
+        ref ed = self.windows.windows[idx].editor
+        if not ed.dirty or ed.read_only:
+            return False
+        # An untitled buffer typed into and emptied again has nothing to lose.
+        return len(ed.file_path.as_bytes()) > 0 \
+            or len(ed.text_snapshot().as_bytes()) > 0
+
+    def _close_window_keeping_work(mut self, idx: Int):
+        """Close window ``idx`` (Cmd+W, its close button) without losing
+        unsaved edits: with auto-save they're saved first, as switching
+        away from it would; otherwise, or when saving fails, the user is
+        asked whether to close it anyway."""
+        if idx < 0 or idx >= len(self.windows.windows):
+            return
+        if self._holds_unsaved_work(idx) and self.config.auto_save \
+                and len(self.windows.windows[idx].editor.file_path.as_bytes()) > 0:
+            var path = self.windows.windows[idx].editor.file_path
+            try:
+                if self.windows.windows[idx].editor.save():
+                    self._after_save(idx, path)
+            except:
+                pass
+        if self._holds_unsaved_work(idx):
+            self._pending_action = _PA_CLOSE_UNSAVED
+            self._close_unsaved_idx = idx
+            self._close_unsaved_title = self.windows.windows[idx].title
+            self.confirm_dialog.open(
+                String("'") + self.windows.windows[idx].title
+                    + String("' has unsaved changes. Close it anyway?"),
+                default_yes=False,
+            )
+            return
+        self._close_editor_window_at(idx)
 
     def _close_editor_window_at(mut self, idx: Int):
         """Close the editor window at ``idx`` with the same side effects
@@ -8140,6 +8197,10 @@ struct Desktop(Movable):
         var clicked_window = self.windows.handle_mouse(
             event, self.workspace_rect(screen)
         )
+        if self.windows.close_requested >= 0:
+            var idx = self.windows.close_requested
+            self.windows.close_requested = -1
+            self._close_window_keeping_work(idx)
         if clicked_window and event.button == MOUSE_BUTTON_LEFT \
                 and event.pressed and not event.motion:
             self._focus_dock(DOCK_NONE)
@@ -9009,19 +9070,26 @@ struct Desktop(Movable):
             # [■] button; otherwise the focused editor window closes.
             if self._request_focused_pane_close():
                 return Optional[String]()
-            self._capture_view_state_for_window(self.windows.focused)
-            # Capture the closing editor's path before the window is
-            # dropped so we can notify the language server afterward.
-            var closing_path = String("")
-            var fw = self.windows.focused
-            if 0 <= fw and fw < len(self.windows.windows) \
-                    and self.windows.windows[fw].is_editor:
-                closing_path = self.windows.windows[fw].editor.file_path
-            _ = self.windows.close_focused()
-            self._lsp_notify_closed_if_last(closing_path)
+            self._close_window_keeping_work(self.windows.focused)
             return Optional[String]()
         if action == WINDOW_CLOSE_ALL:
-            self._close_all_editor_windows()
+            # Like closing each one: with auto-save, edits are saved first;
+            # whatever still isn't stays open rather than being lost.
+            if self.config.auto_save:
+                self._autosave_all_dirty()
+            var kept = 0
+            for i in range(len(self.windows.windows) - 1, -1, -1):
+                if not self.windows.windows[i].is_editor:
+                    continue
+                if self._holds_unsaved_work(i):
+                    kept += 1
+                else:
+                    self._close_editor_window_at(i)
+            if kept > 0:
+                self.status_bar.set_message(
+                    String(kept) + String(" with unsaved changes left open"),
+                    Attr(RED, LIGHT_GRAY),
+                )
             return Optional[String]()
         if starts_with(action, WINDOW_FOCUS_PREFIX):
             var idx = parse_int_prefix(action, len(WINDOW_FOCUS_PREFIX.as_bytes()), len(action.as_bytes()))
@@ -15974,6 +16042,13 @@ struct Desktop(Movable):
                 self._do_delete_file()
             else:
                 self._file_op_path = String("")
+            return Optional[String]()
+        if pa == _PA_CLOSE_UNSAVED:
+            var idx = self._close_unsaved_idx
+            self._close_unsaved_idx = -1
+            if yes and 0 <= idx and idx < len(self.windows.windows) \
+                    and self.windows.windows[idx].title == self._close_unsaved_title:
+                self._close_editor_window_at(idx)
             return Optional[String]()
         if pa == _PA_SAVE_AS_REPLACE:
             var path = self._pending_arg

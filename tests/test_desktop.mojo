@@ -882,6 +882,73 @@ def test_save_as_asks_before_replacing_a_file() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
+def _dirty_file_desktop(mut d: Desktop, name: String, auto_save: Bool) raises -> String:
+    var path = _temp_path(name)
+    assert_true(write_file(path, String("old\n")))
+    d.config.auto_save = auto_save
+    d.open_file(path, _SCREEN)
+    _ = d.handle_event(Event.key_event(UInt32(ord("x"))), _SCREEN)
+    assert_true(d.windows.windows[0].editor.dirty)
+    return path^
+
+
+def test_closing_a_window_saves_its_edits_with_auto_save() raises:
+    var d = Desktop()
+    var path = _dirty_file_desktop(d, String("_close_autosave.txt"), True)
+    _ = d.handle_event(Event.key_event(UInt32(ord("w")), MOD_META), _SCREEN)
+    assert_equal(len(d.windows.windows), 0)
+    assert_equal(read_file(path), String("xold\n"))
+
+
+def test_closing_a_window_with_unsaved_edits_asks_first() raises:
+    var d = Desktop()
+    var path = _dirty_file_desktop(d, String("_close_ask.txt"), False)
+    _ = d.handle_event(Event.key_event(UInt32(ord("w")), MOD_META), _SCREEN)
+    assert_true(d.confirm_dialog.active)
+    _ = d.handle_event(Event.key_event(KEY_ENTER), _SCREEN)  # the default: keep it
+    assert_equal(len(d.windows.windows), 1)
+    assert_true(d.windows.windows[0].editor.dirty)
+    # the close button asks the same
+    var corner = d.windows.windows[0].rect.a
+    _ = d.handle_event(Event.mouse_event(
+        Point(corner.x + 2, corner.y), MOUSE_BUTTON_LEFT, pressed=True, motion=False,
+    ), _SCREEN)
+    assert_true(d.confirm_dialog.active)
+    assert_equal(len(d.windows.windows), 1)
+    _ = d.handle_event(Event.key_event(UInt32(ord("y"))), _SCREEN)
+    assert_equal(len(d.windows.windows), 0)
+    assert_equal(read_file(path), String("old\n"))
+
+
+def test_closing_a_typed_untitled_buffer_asks_first() raises:
+    var d = Desktop()
+    d.new_file(_SCREEN)
+    _ = d.handle_event(Event.key_event(UInt32(ord("w")), MOD_META), _SCREEN)
+    assert_equal(len(d.windows.windows), 0)  # nothing typed: just closes
+    d.new_file(_SCREEN)
+    _ = d.handle_event(Event.key_event(UInt32(ord("x"))), _SCREEN)
+    _ = d.handle_event(Event.key_event(UInt32(ord("w")), MOD_META), _SCREEN)
+    assert_true(d.confirm_dialog.active)
+
+
+def test_close_all_leaves_unsaved_work_open() raises:
+    var d = Desktop()
+    var path = _dirty_file_desktop(d, String("_close_all.txt"), True)
+    d.new_file(_SCREEN)
+    _ = d.handle_event(Event.key_event(UInt32(ord("y"))), _SCREEN)
+    _ = d.dispatch_action(WINDOW_CLOSE_ALL, _SCREEN)
+    assert_equal(len(d.windows.windows), 1)
+    assert_equal(d.windows.windows[0].editor.file_path, String(""))
+    assert_equal(read_file(path), String("xold\n"))
+
+
+def test_quitting_saves_edits_with_auto_save() raises:
+    var d = Desktop()
+    var path = _dirty_file_desktop(d, String("_close_quit.txt"), True)
+    d.shutdown()
+    assert_equal(read_file(path), String("xold\n"))
+
+
 def test_desktop_window_menu_lists_open_windows() raises:
     var d = Desktop()
     d.windows.add(Window(String("alpha"), Rect(0, 1, 20, 5), List[String]()))

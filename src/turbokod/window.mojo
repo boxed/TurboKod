@@ -1667,6 +1667,9 @@ struct WindowManager(Movable):
     # assignment (session restore) so the next scale doesn't act on it.
     var _last_workspace: Rect
     var _has_last_workspace: Bool
+    # A click on the close button of a window holding unsaved edits: the
+    # window's index, left for the host to save or ask about (``-1``: none).
+    var close_requested: Int
 
     def __init__(out self):
         self.windows = List[Window]()
@@ -1687,6 +1690,7 @@ struct WindowManager(Movable):
         self._title_hover_idx = -1
         self._last_workspace = Rect.empty()
         self._has_last_workspace = False
+        self.close_requested = -1
 
     def add(mut self, var window: Window):
         self.windows.append(window^)
@@ -2144,7 +2148,11 @@ struct WindowManager(Movable):
         self.focused = clicked
         self._raise_in_z(clicked)
         if self.windows[self.focused].close_button_hit(event.pos):
-            _ = self.close_focused()
+            if self.windows[self.focused].is_editor \
+                    and self.windows[self.focused].editor.dirty:
+                self.close_requested = self.focused
+            else:
+                _ = self.close_focused()
             return True
         if self.windows[self.focused].maximize_button_hit(event.pos):
             self.windows[self.focused].toggle_maximize(workspace)
