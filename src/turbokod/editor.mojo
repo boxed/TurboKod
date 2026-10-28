@@ -4627,8 +4627,11 @@ struct Editor(Copyable, Movable):
         # target row is hidden (click, word-move, go-to-line, …), snap up
         # to the fold's start line and clamp the column. Skipped entirely
         # when nothing is folded, so normal editing is unchanged.
-        var trow = row
-        var tcol = col
+        # And none outside the buffer or inside a character: a location
+        # from a server or the nav history can be stale, and typing there
+        # would split the character into invalid UTF-8.
+        var trow = min(max(row, 0), self.buffer.line_count() - 1)
+        var tcol = utf8_floor(self.buffer.lines[trow], col)
         if len(self.folded_starts) > 0 and self._is_row_hidden(trow):
             trow = self._next_visible_row(trow, False)
             var tl = self.buffer.line_length(trow)

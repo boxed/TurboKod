@@ -2484,6 +2484,16 @@ def test_undo_back_to_saved_content_clears_dirty() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
+def test_the_caret_never_lands_inside_a_character_or_outside_the_buffer() raises:
+    var ed = Editor(String("aé\nb"))
+    ed.move_to(0, 2)  # inside "é"
+    _ = ed.handle_key(Event.key_event(UInt32(ord("x"))), Rect(0, 0, 40, 10))
+    assert_equal(ed.text_snapshot(), String("axé\nb"))
+    ed.move_to(9, 9)
+    _ = ed.handle_key(Event.key_event(UInt32(ord("y"))), Rect(0, 0, 40, 10))
+    assert_equal(ed.text_snapshot(), String("axé\nby"))
+
+
 def main() raises:
     setup_test_env()
     TestSuite.discover_tests[__functions_in_module()]().run()
