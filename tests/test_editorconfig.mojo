@@ -161,6 +161,53 @@ def test_a_closer_section_unsets_what_a_wider_one_set() raises:
     _rm_rf(root)
 
 
+def test_sections_are_matched_against_the_path_from_the_files_folder() raises:
+    var root = _temp_path("_ec_anchored")
+    _rm_rf(root)
+    _ensure_dir(root + "/src/deep")
+    _ensure_dir(root + "/sub")
+    assert_true(write_file(
+        root + "/.editorconfig",
+        "root = true\n"
+        "[*.py]\nindent_size = 3\n"        # doesn't match: skipped, not the end
+        "[src/*.c]\nindent_size = 5\n"
+        "[/Makefile]\nindent_style = tab\n"
+        "[*.c]\ntab_width = 7\n"
+        "[src/deep/*]\ntab_width = 9\n",  # a later section wins
+    ))
+    var c = load_editorconfig_for_path(root + "/src/a.c")
+    assert_equal(c.indent_size, 5)
+    assert_equal(c.tab_width, 7)
+    # a file that isn't there yet (Save As) is matched the same way
+    var new = load_editorconfig_for_path(root + "/src/new.c")
+    assert_equal(new.indent_size, 5)
+    var deep = load_editorconfig_for_path(root + "/src/deep/b.c")
+    assert_equal(deep.indent_size, -1)
+    assert_equal(deep.tab_width, 9)
+    assert_equal(load_editorconfig_for_path(root + "/Makefile").indent_style, "tab")
+    assert_equal(load_editorconfig_for_path(root + "/sub/Makefile").indent_style, "")
+    # a relative path
+    assert_equal(load_editorconfig_for_path(root + "/sub/../src/a.c").indent_size, 5)
+    _rm_rf(root)
+
+
+def test_a_root_file_stops_the_walk_up() raises:
+    var root = _temp_path("_ec_root_stop")
+    _rm_rf(root)
+    _ensure_dir(root + "/inner")
+    assert_true(write_file(root + "/.editorconfig", "[*]\nindent_size = 2\ntab_width = 3\n"))
+    assert_true(write_file(root + "/inner/.editorconfig", "root = true\n[*]\ntab_width = 8\n"))
+    var c = load_editorconfig_for_path(root + "/inner/x.txt")
+    assert_equal(c.indent_size, -1)
+    assert_equal(c.tab_width, 8)
+    # without it the outer file applies too, the inner one winning
+    assert_true(write_file(root + "/inner/.editorconfig", "[*]\ntab_width = 8\n"))
+    c = load_editorconfig_for_path(root + "/inner/x.txt")
+    assert_equal(c.indent_size, 2)
+    assert_equal(c.tab_width, 8)
+    _rm_rf(root)
+
+
 def main() raises:
     setup_test_env()
     TestSuite.discover_tests[__functions_in_module()]().run()
