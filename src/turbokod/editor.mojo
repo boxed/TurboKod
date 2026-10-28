@@ -3366,35 +3366,26 @@ struct Editor(Copyable, Movable):
         for _ in range(to_remove):
             _ = self.buffer.lines.pop(sl + 1)
 
-        # Walk ``new_text``, splitting on '\n'. Each newline pushes a
-        # fresh row after the current one (using the same append+shift
-        # dance as ``Buffer.split`` — ``List.insert`` is avoided per
-        # that helper's note about Mojo version compat).
+        # Split ``new_text`` on '\n': the first piece joins the start row,
+        # each further one becomes a row of its own below it. ``insert``
+        # moves the rows below in one go; shifting them down a row at a
+        # time, copying each, made a formatter's edits to a big file slow.
         var bytes = new_text.as_bytes()
         var line_start = 0
-        var current_row = sl
-        var i = 0
-        while i < len(bytes):
-            if bytes[i] == 0x0A:
-                if i > line_start:
-                    self.buffer.lines[current_row] = (
-                        self.buffer.lines[current_row]
-                        + byte_slice(new_text, line_start, i)
-                    )
-                self.buffer.lines.append(String(""))
-                var k = len(self.buffer.lines) - 1
-                while k > current_row + 1:
-                    self.buffer.lines[k] = self.buffer.lines[k - 1]
-                    k -= 1
-                self.buffer.lines[current_row + 1] = String("")
-                current_row += 1
-                line_start = i + 1
-            i += 1
-        if line_start < len(bytes):
-            self.buffer.lines[current_row] = (
-                self.buffer.lines[current_row]
-                + byte_slice(new_text, line_start, len(bytes))
-            )
+        var added = 0
+        var first = True
+        for i in range(len(bytes) + 1):
+            if i < len(bytes) and bytes[i] != 0x0A:
+                continue
+            var piece = byte_slice(new_text, line_start, i)
+            if first:
+                self.buffer.lines[sl] = self.buffer.lines[sl] + piece
+                first = False
+            else:
+                added += 1
+                self.buffer.lines.insert(sl + added, piece^)
+            line_start = i + 1
+        var current_row = sl + added
         # Suffix lands on whatever row the last newline left us on. Its
         # byte column there (before appending) is where any cursor that
         # sat at/after the original ``(el2, ec2)`` should be relocated to.

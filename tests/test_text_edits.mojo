@@ -199,6 +199,32 @@ def test_typing_after_edits_is_its_own_undo_step() raises:
     assert_equal(ed.text_snapshot(), String("abcx"))
 
 
+def test_a_formatters_many_edits_to_a_long_file() raises:
+    # every 10th line split after 4 bytes, the line after it dropped, and
+    # two lines put in front of every 10th + 5
+    var text = String("")
+    var want = String("")
+    var edits = List[TextEditEntry]()
+    for i in range(2000):
+        var line = String("line ") + String(i)
+        if i > 0:
+            text += "\n"
+        text += line
+        if i % 10 == 0:
+            want += "line\n" + String(i) + "\n"
+            edits.append(_edit(i, 4, i, 5, "\n"))
+        elif i % 10 == 1:
+            edits.append(_edit(i, 0, i + 1, 0, ""))
+        elif i % 10 == 5:
+            want += "a\nb\n" + line + "\n"
+            edits.append(_edit(i, 0, i, 0, "a\nb\n"))
+        else:
+            want += line + "\n"
+    var ed = Editor(text)
+    assert_true(ed.apply_text_edits(edits^))
+    assert_equal(ed.text_snapshot(), String(want[byte=0:want.byte_length() - 1]))
+
+
 def main() raises:
     setup_test_env()
     TestSuite.discover_tests[__functions_in_module()]().run()
