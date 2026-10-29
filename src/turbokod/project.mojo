@@ -97,6 +97,10 @@ struct GitignoreMatcher(Copyable, Movable):
             if end <= start:
                 continue
             var glob = String(StringSpan(unsafe_from_utf8=lb[start:end]))
+            # A slash anywhere but at the end ties the pattern to the
+            # .gitignore's folder, as git reads it
+            if "/" in glob:
+                anchored = True
             m.patterns.append(GitignorePattern(glob, dir_only, anchored, negate))
         return m^
 
@@ -178,25 +182,34 @@ def _glob_match_at(pattern: String, pi: Int, text: String, ti: Int) -> Bool:
 
 def _gitignore_path_match(p: GitignorePattern, rel: String) -> Bool:
     if p.anchored:
-        return _glob_match(p.glob, rel)
-    var glob_has_slash = "/" in p.glob
-    if not glob_has_slash:
-        # Match any single path component.
-        var comps = _split_path_components(rel)
-        for i in range(len(comps)):
-            if _glob_match(p.glob, comps[i]):
-                return True
-        return False
-    # Pattern with internal slash, not anchored: match any suffix that
-    # starts at a path-component boundary.
-    var comps2 = _split_path_components(rel)
-    for s in range(len(comps2)):
-        var suffix = comps2[s]
-        for j in range(s + 1, len(comps2)):
-            suffix = suffix + String("/") + comps2[j]
-        if _glob_match(p.glob, suffix):
+        return _components_match(
+            _split_path_components(p.glob), 0, _split_path_components(rel), 0,
+        )
+    # No slash: any single path component.
+    var comps = _split_path_components(rel)
+    for i in range(len(comps)):
+        if _glob_match(p.glob, comps[i]):
             return True
     return False
+
+
+def _components_match(
+    pat: List[String], pi: Int, path: List[String], ti: Int,
+) -> Bool:
+    """``path[ti:]`` against the glob components ``pat[pi:]``, where a
+    ``**`` component spans any number of path components — at least one
+    when it ends the pattern (``logs/**`` is what's inside ``logs``)."""
+    if pi == len(pat):
+        return ti == len(path)
+    if pat[pi] == String("**"):
+        var least = 1 if pi + 1 == len(pat) else 0
+        for k in range(ti + least, len(path) + 1):
+            if _components_match(pat, pi + 1, path, k):
+                return True
+        return False
+    if ti == len(path) or not _glob_match(pat[pi], path[ti]):
+        return False
+    return _components_match(pat, pi + 1, path, ti + 1)
 
 
 def load_project_gitignore(root: String) -> GitignoreMatcher:

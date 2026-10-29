@@ -1008,6 +1008,23 @@ def test_gitignore_matches_glob_and_negate() raises:
     assert_false(m.ignored(String("hello.mojo"), False))
 
 
+def test_gitignore_slashes_and_double_stars_mean_what_git_means() raises:
+    # "docs/build" hid src/docs/build from the file tree too, and "**"
+    # only reached one folder deep
+    var m = GitignoreMatcher.from_text(
+        String("docs/build\n**/node_modules\nlogs/**\na/**/b\n")
+    )
+    assert_true(m.ignored(String("docs/build"), True))
+    assert_false(m.ignored(String("src/docs/build"), True))
+    assert_true(m.ignored(String("node_modules"), True))
+    assert_true(m.ignored(String("x/y/node_modules"), True))
+    assert_true(m.ignored(String("logs/deep/x.txt"), False))
+    assert_false(m.ignored(String("logs"), True))
+    assert_true(m.ignored(String("a/b"), True))
+    assert_true(m.ignored(String("a/x/y/b"), True))
+    assert_false(m.ignored(String("a/x/y/c"), True))
+
+
 def test_diff_grammar_paints_inserted_deleted_and_hunk_header() raises:
     """The bundled diff TextMate grammar maps ``-`` lines to the string
     color (red), ``+`` lines to the ident color (green), and the
