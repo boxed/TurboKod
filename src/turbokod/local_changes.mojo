@@ -1439,6 +1439,25 @@ def _populate_diff_panel(
     )
 
 
+@fieldwise_init
+struct GitHint(Copyable, Movable):
+    """One entry of the git view's hint bar: the key as shown, what it
+    does, and the key event it is (for a host that shows the entry as a
+    button). ``button`` False for navigation keys a pointer doesn't need."""
+    var keys: String
+    var label: String
+    var key: UInt32
+    var mods: UInt8
+    var button: Bool
+
+
+def _hint(
+    var keys: String, var label: String, key: UInt32, mods: UInt8 = 0,
+    button: Bool = True,
+) -> GitHint:
+    return GitHint(keys^, label^, key, mods, button)
+
+
 struct LocalChanges(Movable):
     var active: Bool
     var submitted: Bool
@@ -2674,27 +2693,13 @@ struct LocalChanges(Movable):
             ctx_attr, add_attr, rem_attr, hunk_attr, header_attr,
         )
         # Bottom hint.
-        var hint: String
-        if self.focus == _PANE_RIGHT_UNSTAGED:
-            hint = String(
-                " Up/Down: line  Space: stage  d: discard line  p:pull P:push  ⌘C: copy  Left: back  ESC: close ",
-            )
-        elif self._is_right_focus():
-            hint = String(
-                " Up/Down: line  Tab: panel  Space: stage/unstage  p:pull P:push  ⌘C: copy  Left: back  ESC: close ",
-            )
-        elif self.focus == _PANE_FILES:
-            hint = String(
-                " c:commit A:amend d:revert p:pull P:push ^P:push to…  Space:stage  ⌘C:copy  Enter:open  ESC:close ",
-            )
-        elif self.focus == _PANE_BRANCHES:
-            hint = String(
-                " Space:switch  M:merge  r:rebase  d:delete  o:compare  p:pull P:push ^P:push to…  Right:log  ⌘C:copy  ESC:close ",
-            )
-        else:
-            hint = String(
-                " e:reword  p:pull P:push ^P:push to…  Tab:pane  Up/Down:select  Right:diff  ⌘C:copy  Enter:open  ESC:close ",
-            )
+        var hint = String(" ")
+        var hints = self.hints()
+        for i in range(len(hints)):
+            if i > 0:
+                hint += String("  ")
+            hint += hints[i].keys + String(":") + hints[i].label
+        hint += String(" ")
         var hx = bounds.b.x - display_columns(hint) - 1
         if hx < bounds.a.x + 1:
             hx = bounds.a.x + 1
@@ -6161,6 +6166,65 @@ struct LocalChanges(Movable):
         elif ov == _OVERLAY_DELETE_REMOTE_TYPED:
             if text == self._remote_delete_prefix():
                 self._confirm_delete_branch()
+
+    def hints(self) -> List[GitHint]:
+        """The hint bar for the focused pane — painted as text in the grid,
+        shown as buttons by the native host."""
+        var pull = _hint(String("p"), String("pull"), UInt32(ord("p")))
+        var push = _hint(String("P"), String("push"), UInt32(ord("P")), MOD_SHIFT)
+        var push_to = _hint(String("^P"), String("push to…"), UInt32(ord("p")), MOD_CTRL)
+        var copy = _hint(String("⌘C"), String("copy"), UInt32(ord("c")), MOD_META, False)
+        var close = _hint(String("ESC"), String("close"), KEY_ESC)
+        var out = List[GitHint]()
+        if self.focus == _PANE_RIGHT_UNSTAGED:
+            out.append(_hint(String("Up/Down"), String("line"), KEY_DOWN, 0, False))
+            out.append(_hint(String("Space"), String("stage"), KEY_SPACE))
+            out.append(_hint(String("d"), String("discard line"), UInt32(ord("d"))))
+            out.append(pull^)
+            out.append(push^)
+            out.append(copy^)
+            out.append(_hint(String("Left"), String("back"), KEY_LEFT, 0, False))
+        elif self._is_right_focus():
+            out.append(_hint(String("Up/Down"), String("line"), KEY_DOWN, 0, False))
+            out.append(_hint(String("Tab"), String("panel"), KEY_TAB, 0, False))
+            out.append(_hint(String("Space"), String("unstage"), KEY_SPACE))
+            out.append(pull^)
+            out.append(push^)
+            out.append(copy^)
+            out.append(_hint(String("Left"), String("back"), KEY_LEFT, 0, False))
+        elif self.focus == _PANE_FILES:
+            out.append(_hint(String("c"), String("commit"), UInt32(ord("c"))))
+            out.append(_hint(String("A"), String("amend"), UInt32(ord("A")), MOD_SHIFT))
+            out.append(_hint(String("d"), String("revert"), UInt32(ord("d"))))
+            out.append(pull^)
+            out.append(push^)
+            out.append(push_to^)
+            out.append(_hint(String("Space"), String("stage"), KEY_SPACE))
+            out.append(copy^)
+            out.append(_hint(String("Enter"), String("open"), KEY_ENTER))
+        elif self.focus == _PANE_BRANCHES:
+            out.append(_hint(String("Space"), String("switch"), KEY_SPACE))
+            out.append(_hint(String("M"), String("merge"), UInt32(ord("M")), MOD_SHIFT))
+            out.append(_hint(String("r"), String("rebase"), UInt32(ord("r"))))
+            out.append(_hint(String("d"), String("delete"), UInt32(ord("d"))))
+            out.append(_hint(String("o"), String("compare"), UInt32(ord("o"))))
+            out.append(pull^)
+            out.append(push^)
+            out.append(push_to^)
+            out.append(_hint(String("Right"), String("log"), KEY_RIGHT, 0, False))
+            out.append(copy^)
+        else:
+            out.append(_hint(String("e"), String("reword"), UInt32(ord("e"))))
+            out.append(pull^)
+            out.append(push^)
+            out.append(push_to^)
+            out.append(_hint(String("Tab"), String("pane"), KEY_TAB, 0, False))
+            out.append(_hint(String("Up/Down"), String("select"), KEY_DOWN, 0, False))
+            out.append(_hint(String("Right"), String("diff"), KEY_RIGHT, 0, False))
+            out.append(copy^)
+            out.append(_hint(String("Enter"), String("open"), KEY_ENTER))
+        out.append(close^)
+        return out^
 
     def native_overlay_kind(self) -> String:
         var ov = self.overlay

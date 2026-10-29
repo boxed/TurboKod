@@ -6034,39 +6034,97 @@ final class GitDiffView: NSTextView {
     }
 }
 
+/// One diff / info pane of the git sheet: its text view plus the map from
+/// each displayed line back to the core panel row it shows.
+final class GitDiffPane {
+    let pane: Int
+    let view = GitDiffView()
+    let scroll = NSScrollView()
+    var lineMap: [Int?] = []
+    var lineStarts: [Int] = []
+    var cursorLine = -1
+
+    init(pane: Int) {
+        self.pane = pane
+        view.isEditable = false
+        view.isSelectable = true
+        view.isRichText = true
+        view.textContainerInset = NSSize(width: 4, height: 4)
+        view.isHorizontallyResizable = true
+        view.textContainer?.widthTracksTextView = false
+        view.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                                   height: CGFloat.greatestFiniteMagnitude)
+        view.menu = NSMenu()
+        scroll.documentView = view
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = true
+    }
+
+    func lineIndex(at loc: Int) -> Int {
+        var lo = 0, hi = lineStarts.count - 1, ans = -1
+        while lo <= hi {
+            let mid = (lo + hi) / 2
+            if lineStarts[mid] <= loc { ans = mid; lo = mid + 1 } else { hi = mid - 1 }
+        }
+        return ans
+    }
+
+    /// The core row under the cursor.
+    var cursorRow: Int? {
+        guard cursorLine >= 0, cursorLine < lineMap.count else { return nil }
+        return lineMap[cursorLine]
+    }
+
+    func markCursor() {
+        guard let lm = view.layoutManager else { return }
+        lm.removeTemporaryAttribute(.underlineStyle,
+                                    forCharacterRange: NSRange(location: 0, length: view.textStorage?.length ?? 0))
+        guard cursorLine >= 0, cursorLine < lineStarts.count else { return }
+        let end = cursorLine + 1 < lineStarts.count ? lineStarts[cursorLine + 1] - 1 : (view.textStorage?.length ?? 0)
+        lm.addTemporaryAttribute(.underlineStyle, value: NSUnderlineStyle.thick.rawValue,
+                                 forCharacterRange: NSRange(location: lineStarts[cursorLine],
+                                                            length: max(0, end - lineStarts[cursorLine])))
+    }
+}
+
+/// The git view as a native sheet, laid out like the grid one: Modified
+/// files (as a tree), Branches and Commits stacked on the left; the
+/// selected file's Unstaged and Staged diffs stacked on the right (or the
+/// branch's log / the commit's details); the focused pane's operations
+/// along the bottom, from the same hint list the grid paints as text.
 final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSTextViewDelegate {
     weak var view: CellView?
     var onAfterAction: (() -> Void)?
 
     private let panel: NSPanel
     private let branchLabel = NSTextField(labelWithString: "")
+    private let rootLabel = NSTextField(labelWithString: "")
     private let flashLabel = NSTextField(labelWithString: "")
     private let spinner = NSProgressIndicator()
-    private let segment = NSSegmentedControl(labels: ["Changes", "Branches", "History"],
-                                             trackingMode: .selectOne, target: nil, action: nil)
-    private let table = GitTable()
-    private let commitBox = NSView()
-    private let messageView = NSTextView()
-    private let commitButton = NSButton(title: "Commit", target: nil, action: nil)
-    private let amendButton = NSButton(title: "Amend Last Commit", target: nil, action: nil)
-    private let diff = GitDiffView()
-    private var actionButtons: [NSButton] = []
+    private let filesTable = GitTable()
+    private let branchesTable = GitTable()
+    private let commitsTable = GitTable()
+    private var headers: [Int: NSTextField] = [:]
+    private let unstaged = GitDiffPane(pane: GitPane.unstaged)
+    private let staged = GitDiffPane(pane: GitPane.staged)
+    private var unstagedHeader = NSTextField(labelWithString: "")
+    private var stagedSection = NSView()
+    private let actionBar = NSStackView()
 
     private var state: [String: Any] = [:]
     private var lastData = Data()
     private var lastPanels = Data()
+    private var lastHints: [[Any]] = []
     private var files: [[String: Any]] = []
+    /// The files list as a tree: a directory row (file index nil) or a file.
+    private var fileRows: [(depth: Int, name: String, file: Int?)] = []
     private var branches: [[String: Any]] = []
     private var commits: [[String: Any]] = []
-    /// Per line of the diff view: (pane, row) of the core panel row, or nil.
-    private var lineMap: [(Int, Int)?] = []
-    private var lineStarts: [Int] = []
-    private var cursorLine = -1
+    private var focus = GitPane.files
+    private var infoTitle = "Log"
     private var syncing = false
     private var overlayShown = ""
     private var dismissed = false
-
-    private var list: Int { segment.selectedSegment }
 
     init(view: CellView) {
         self.view = view
@@ -6078,8 +6136,60 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
 
     // MARK: layout
 
+    private func table(_ t: GitTable, pane: Int) -> NSScrollView {
+        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("c"))
+        t.addTableColumn(col)
+        t.headerView = nil
+        t.rowHeight = 20
+        t.intercellSpacing = NSSize(width: 0, height: 0)
+        t.style = .plain
+        t.tag = pane
+        t.dataSource = self
+        t.delegate = self
+        t.target = self
+        t.doubleAction = #selector(tableDoubleClicked(_:))
+        t.menu = NSMenu()
+        t.menu?.delegate = self
+        t.onKey = { [weak self, weak t] k in
+            guard let self = self, let t = t else { return false }
+            return self.tableKey(k, t)
+        }
+        let sv = NSScrollView()
+        sv.documentView = t
+        sv.hasVerticalScroller = true
+        return sv
+    }
+
+    /// A titled section: a header row over `body`, like the grid's pane
+    /// headers.
+    private func section(_ title: String, _ body: NSView, pane: Int) -> (NSView, NSTextField) {
+        let header = NSTextField(labelWithString: title)
+        header.font = .systemFont(ofSize: 11, weight: .semibold)
+        header.textColor = .secondaryLabelColor
+        let box = NSView()
+        for v in [header, body] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            box.addSubview(v)
+        }
+        NSLayoutConstraint.activate([
+            header.topAnchor.constraint(equalTo: box.topAnchor, constant: 4),
+            header.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 6),
+            header.trailingAnchor.constraint(lessThanOrEqualTo: box.trailingAnchor, constant: -6),
+            body.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 4),
+            body.leadingAnchor.constraint(equalTo: box.leadingAnchor),
+            body.trailingAnchor.constraint(equalTo: box.trailingAnchor),
+            body.bottomAnchor.constraint(equalTo: box.bottomAnchor),
+            box.heightAnchor.constraint(greaterThanOrEqualToConstant: 80),
+        ])
+        headers[pane] = header
+        return (box, header)
+    }
+
     private func build() {
         branchLabel.font = .systemFont(ofSize: 14, weight: .semibold)
+        rootLabel.textColor = .secondaryLabelColor
+        rootLabel.lineBreakMode = .byTruncatingHead
+        rootLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         flashLabel.textColor = .secondaryLabelColor
         flashLabel.lineBreakMode = .byTruncatingTail
         flashLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -6088,117 +6198,64 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         spinner.isDisplayedWhenStopped = false
         let branchIcon = NSImageView(image: NSImage(systemSymbolName: "arrow.triangle.branch",
                                                     accessibilityDescription: "Branch") ?? NSImage())
-        func button(_ title: String, _ symbol: String, _ sel: Selector) -> NSButton {
-            let b = NSButton(title: title, target: self, action: sel)
-            b.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
-            b.imagePosition = .imageLeading
-            b.bezelStyle = .rounded
-            return b
-        }
-        let pull = button("Pull", "arrow.down", #selector(pullClicked))
-        let push = button("Push", "arrow.up", #selector(pushClicked))
-        let pushTo = button("Push To…", "arrow.up.forward", #selector(pushToClicked))
-        let close = NSButton(title: "Close", target: self, action: #selector(closeClicked))
-        close.keyEquivalent = "\u{1b}"
-        actionButtons = [pull, push, pushTo]
-        let top = NSStackView(views: [branchIcon, branchLabel, spinner, flashLabel, NSView(),
-                                      pull, push, pushTo, close])
+        let top = NSStackView(views: [branchIcon, branchLabel, rootLabel, NSView(), spinner, flashLabel])
         top.spacing = 8
 
-        segment.target = self
-        segment.action = #selector(segmentChanged)
-        segment.selectedSegment = 0
-        segment.segmentDistribution = .fillEqually
+        // Left: the three lists, stacked.
+        let left = NSSplitView()
+        left.isVertical = false
+        left.dividerStyle = .thin
+        left.addArrangedSubview(section("Modified files", table(filesTable, pane: GitPane.files),
+                                        pane: GitPane.files).0)
+        left.addArrangedSubview(section("Branches", table(branchesTable, pane: GitPane.branches),
+                                        pane: GitPane.branches).0)
+        left.addArrangedSubview(section("Commits", table(commitsTable, pane: GitPane.commits),
+                                        pane: GitPane.commits).0)
 
-        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("c"))
-        table.addTableColumn(col)
-        table.headerView = nil
-        table.rowHeight = 38
-        table.style = .inset
-        table.dataSource = self
-        table.delegate = self
-        table.target = self
-        table.doubleAction = #selector(tableDoubleClicked)
-        table.menu = NSMenu()
-        table.menu?.delegate = self
-        table.onKey = { [weak self] k in self?.tableKey(k) ?? false }
-        let tableScroll = NSScrollView()
-        tableScroll.documentView = table
-        tableScroll.hasVerticalScroller = true
-
-        // Commit box (Changes only): message over the two commit buttons.
-        messageView.isRichText = false
-        messageView.font = .systemFont(ofSize: 13)
-        messageView.textContainerInset = NSSize(width: 4, height: 6)
-        let msgScroll = NSScrollView()
-        msgScroll.documentView = messageView
-        msgScroll.hasVerticalScroller = true
-        msgScroll.borderType = .bezelBorder
-        commitButton.target = self
-        commitButton.action = #selector(commitClicked)
-        commitButton.bezelColor = .controlAccentColor
-        commitButton.keyEquivalent = "\r"
-        commitButton.keyEquivalentModifierMask = .command
-        amendButton.target = self
-        amendButton.action = #selector(amendClicked)
-        let commitRow = NSStackView(views: [amendButton, NSView(), commitButton])
-        let placeholder = NSTextField(labelWithString: "Commit message")
-        placeholder.textColor = .secondaryLabelColor
-        placeholder.font = .systemFont(ofSize: 11)
-        let commitStack = NSStackView(views: [placeholder, msgScroll, commitRow])
-        commitStack.orientation = .vertical
-        commitStack.alignment = .leading
-        commitStack.spacing = 6
-        for v in [msgScroll, commitRow] {
-            v.widthAnchor.constraint(equalTo: commitStack.widthAnchor).isActive = true
+        // Right: Unstaged over Staged.
+        for p in [unstaged, staged] {
+            p.view.delegate = self
+            p.view.menu?.delegate = self
+            p.view.onKey = { [weak self, weak p] k in
+                guard let self = self, let p = p else { return false }
+                return self.diffKey(k, p)
+            }
         }
-        msgScroll.heightAnchor.constraint(equalToConstant: 72).isActive = true
-        commitStack.translatesAutoresizingMaskIntoConstraints = false
-        commitBox.addSubview(commitStack)
-        NSLayoutConstraint.activate([
-            commitStack.leadingAnchor.constraint(equalTo: commitBox.leadingAnchor),
-            commitStack.trailingAnchor.constraint(equalTo: commitBox.trailingAnchor),
-            commitStack.topAnchor.constraint(equalTo: commitBox.topAnchor),
-            commitStack.bottomAnchor.constraint(equalTo: commitBox.bottomAnchor),
-        ])
-
-        let left = NSStackView(views: [segment, tableScroll, commitBox])
-        left.orientation = .vertical
-        left.spacing = 8
-        left.distribution = .fill
-        for v in [segment, tableScroll, commitBox] as [NSView] {
-            v.widthAnchor.constraint(equalTo: left.widthAnchor).isActive = true
-        }
-        tableScroll.setContentHuggingPriority(.defaultLow, for: .vertical)
-        commitBox.setContentHuggingPriority(.required, for: .vertical)
-
-        diff.isEditable = false
-        diff.isSelectable = true
-        diff.isRichText = true
-        diff.delegate = self
-        diff.textContainerInset = NSSize(width: 4, height: 6)
-        diff.isHorizontallyResizable = true
-        diff.textContainer?.widthTracksTextView = false
-        diff.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
-                                                   height: CGFloat.greatestFiniteMagnitude)
-        diff.onKey = { [weak self] k in self?.diffKey(k) ?? false }
-        diff.menu = NSMenu()
-        diff.menu?.delegate = self
-        let diffScroll = NSScrollView()
-        diffScroll.documentView = diff
-        diffScroll.hasVerticalScroller = true
-        diffScroll.hasHorizontalScroller = true
+        let right = NSSplitView()
+        right.isVertical = false
+        right.dividerStyle = .thin
+        let (u, uh) = section("Unstaged", unstaged.scroll, pane: GitPane.unstaged)
+        unstagedHeader = uh
+        let (s, _) = section("Staged", staged.scroll, pane: GitPane.staged)
+        stagedSection = s
+        right.addArrangedSubview(u)
+        right.addArrangedSubview(s)
 
         let split = NSSplitView()
         split.isVertical = true
         split.dividerStyle = .thin
         split.addArrangedSubview(left)
-        split.addArrangedSubview(diffScroll)
-        left.widthAnchor.constraint(greaterThanOrEqualToConstant: 260).isActive = true
+        split.addArrangedSubview(right)
+        left.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
         split.setHoldingPriority(NSLayoutConstraint.Priority(260), forSubviewAt: 0)
+        splitView = split
+        leftSplit = left
+        rightSplit = right
+
+        actionBar.spacing = 6
+        let bar = NSStackView(views: [NSView(), actionBar])
+        // The lists and diffs take the height; the bar keeps its own.
+        bar.heightAnchor.constraint(equalToConstant: 28).isActive = true
+        top.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        // NSSplitView's arranged subviews hold their size at this priority;
+        // stay under it so the split, not the chrome, takes the height.
+        for sv in [split, left, right] {
+            sv.setContentHuggingPriority(.defaultLow, for: .vertical)
+            sv.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+        }
 
         let content = NSView()
-        for v in [top, split] as [NSView] {
+        for v in [top, split, bar] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(v)
             NSLayoutConstraint.activate([
@@ -6208,22 +6265,31 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         }
         NSLayoutConstraint.activate([
             top.topAnchor.constraint(equalTo: content.topAnchor, constant: 12),
-            split.topAnchor.constraint(equalTo: top.bottomAnchor, constant: 10),
-            split.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12),
+            split.topAnchor.constraint(equalTo: top.bottomAnchor, constant: 8),
+            bar.topAnchor.constraint(equalTo: split.bottomAnchor, constant: 10),
+            bar.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12),
         ])
         panel.contentView = content
-        splitView = split
     }
 
     private var splitView: NSSplitView?
+    private var leftSplit: NSSplitView?
+    private var rightSplit: NSSplitView?
 
     func present(in win: NSWindow) {
         let room = win.contentLayoutRect.size
-        panel.setContentSize(NSSize(width: max(700, room.width - 40), height: max(460, room.height - 30)))
+        panel.setContentSize(NSSize(width: max(760, room.width - 40), height: max(480, room.height - 30)))
         panel.contentView?.layoutSubtreeIfNeeded()
-        splitView?.setPosition(min(360, panel.frame.width * 0.34), ofDividerAt: 0)
+        splitView?.setPosition(min(380, panel.frame.width * 0.34), ofDividerAt: 0)
+        if let l = leftSplit {
+            // Files get the most room, then the commits, like the grid.
+            let h = l.frame.height
+            l.setPosition(h * 0.42, ofDividerAt: 0)
+            l.setPosition(h * 0.66, ofDividerAt: 1)
+        }
+        if let r = rightSplit { r.setPosition(r.frame.height * 0.55, ofDividerAt: 0) }
         win.beginSheet(panel, completionHandler: nil)
-        panel.makeFirstResponder(table)
+        panel.makeFirstResponder(filesTable)
     }
 
     func dismiss() {
@@ -6241,116 +6307,193 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         guard let st = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return false }
         state = st
         files = st["files"] as? [[String: Any]] ?? []
+        fileRows = Self.tree(files)
         branches = st["branches"] as? [[String: Any]] ?? []
         commits = st["commits"] as? [[String: Any]] ?? []
         let branch = st["branch"] as? String ?? ""
         branchLabel.stringValue = branch.isEmpty ? "(detached)" : branch
-        commitButton.title = branch.isEmpty ? "Commit" : "Commit to \(branch)"
+        rootLabel.stringValue = st["root"] as? String ?? ""
         let busy = st["busy"] as? Bool ?? false
         if busy { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
         let status = st["status"] as? String ?? ""
         let flash = st["flash"] as? String ?? ""
         flashLabel.stringValue = busy ? (st["busy_label"] as? String ?? "Working…")
                                : !status.isEmpty ? status : flash
-        for b in actionButtons + [commitButton, amendButton] { b.isEnabled = !busy }
-        // Follow the core's focus to the list it's driving.
-        let focus = st["focus"] as? Int ?? 0
-        if focus <= GitPane.commits && focus != list {
-            segment.selectedSegment = focus
+        focus = st["focus"] as? Int ?? GitPane.files
+        for (pane, h) in headers {
+            let on = pane == focus
+            h.textColor = on ? .labelColor : .secondaryLabelColor
+            h.font = .systemFont(ofSize: 11, weight: on ? .bold : .semibold)
         }
-        commitBox.isHidden = list != GitPane.files
         syncing = true
-        table.reloadData()
-        let sel = selectedIndex(for: list)
-        if sel >= 0 && sel < table.numberOfRows {
-            table.selectRowIndexes(IndexSet(integer: sel), byExtendingSelection: false)
-            table.scrollRowToVisible(sel)
-        } else {
-            table.deselectAll(nil)
+        for t in [filesTable, branchesTable, commitsTable] {
+            t.reloadData()
+            let sel = selectedRow(t)
+            if sel >= 0 && sel < t.numberOfRows {
+                t.selectRowIndexes(IndexSet(integer: sel), byExtendingSelection: false)
+                t.scrollRowToVisible(sel)
+            } else {
+                t.deselectAll(nil)
+            }
         }
         syncing = false
+        rebuildActions(st["hints"] as? [[Any]] ?? [], busy: busy)
         refreshPanels()
         showOverlayIfNeeded(st["overlay"] as? [String: Any] ?? [:])
         return true
     }
 
-    private func selectedIndex(for l: Int) -> Int {
-        state[l == GitPane.files ? "sel_file" : l == GitPane.branches ? "sel_branch" : "sel_commit"] as? Int ?? -1
+    /// The files as a tree, in the core's order: a directory row each time
+    /// the path enters a new directory, files indented under it.
+    private static func tree(_ files: [[String: Any]]) -> [(depth: Int, name: String, file: Int?)] {
+        var out: [(depth: Int, name: String, file: Int?)] = []
+        var open: [String] = []
+        for (i, f) in files.enumerated() {
+            let parts = (f["path"] as? String ?? "").split(separator: "/").map(String.init)
+            let dirs = Array(parts.dropLast())
+            var common = 0
+            while common < open.count, common < dirs.count, open[common] == dirs[common] { common += 1 }
+            open = Array(open.prefix(common))
+            for d in dirs[common...] {
+                out.append((open.count, d + "/", nil))
+                open.append(d)
+            }
+            out.append((dirs.count, parts.last ?? "", i))
+        }
+        return out
+    }
+
+    private func selectedRow(_ t: NSTableView) -> Int {
+        switch t.tag {
+        case GitPane.files:
+            let sel = state["sel_file"] as? Int ?? -1
+            return fileRows.firstIndex { $0.file == sel } ?? -1
+        case GitPane.branches: return state["sel_branch"] as? Int ?? -1
+        default: return state["sel_commit"] as? Int ?? -1
+        }
+    }
+
+    /// The core's index for table row `row`.
+    private func index(_ t: NSTableView, _ row: Int) -> Int? {
+        guard row >= 0 else { return nil }
+        if t.tag == GitPane.files { return row < fileRows.count ? fileRows[row].file : nil }
+        return row
+    }
+
+    // MARK: action bar
+
+    private func rebuildActions(_ hints: [[Any]], busy: Bool) {
+        let shown = hints.filter { ($0.count > 4 ? $0[4] as? Bool : false) ?? false }
+        if NSArray(array: shown).isEqual(to: lastHints) {
+            for case let b as NSButton in actionBar.arrangedSubviews { b.isEnabled = !busy || b.tag == -1 }
+            return
+        }
+        lastHints = shown
+        for v in actionBar.arrangedSubviews { v.removeFromSuperview() }
+        for (i, h) in shown.enumerated() {
+            let keys = h[0] as? String ?? ""
+            let label = h[1] as? String ?? ""
+            let title = label.prefix(1).uppercased() + label.dropFirst()
+            let b = NSButton(title: title, target: self, action: #selector(actionClicked(_:)))
+            b.toolTip = keys
+            b.tag = keys == "ESC" ? -1 : i
+            if keys == "ESC" { b.keyEquivalent = "\u{1b}" }
+            b.isEnabled = !busy || keys == "ESC"
+            actionBar.addArrangedSubview(b)
+        }
+    }
+
+    @objc private func actionClicked(_ b: NSButton) {
+        if b.tag == -1 { closeClicked(); return }
+        guard b.tag < lastHints.count else { return }
+        let h = lastHints[b.tag]
+        key(-1, UInt32(h[2] as? Int ?? 0), mods: UInt8(h[3] as? Int ?? 0))
     }
 
     // MARK: lists
 
     func numberOfRows(in tableView: NSTableView) -> Int {
-        list == GitPane.files ? files.count : list == GitPane.branches ? branches.count : commits.count
+        switch tableView.tag {
+        case GitPane.files: return fileRows.count
+        case GitPane.branches: return branches.count
+        default: return commits.count
+        }
+    }
+
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+        tableView.tag != GitPane.files || (row < fileRows.count && fileRows[row].file != nil)
+    }
+
+    private func cell(_ parts: [(String, NSColor, NSFont)], indent: CGFloat = 0) -> NSView {
+        let out = NSMutableAttributedString()
+        for (text, color, font) in parts {
+            out.append(NSAttributedString(string: text, attributes: [.foregroundColor: color, .font: font]))
+        }
+        let l = NSTextField(labelWithAttributedString: out)
+        l.lineBreakMode = .byTruncatingTail
+        let v = NSTableCellView()
+        l.translatesAutoresizingMaskIntoConstraints = false
+        v.addSubview(l)
+        NSLayoutConstraint.activate([
+            l.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 6 + indent),
+            l.trailingAnchor.constraint(lessThanOrEqualTo: v.trailingAnchor, constant: -4),
+            l.centerYAnchor.constraint(equalTo: v.centerYAnchor),
+        ])
+        return v
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row i: Int) -> NSView? {
-        let cell = GitRowCell()
-        switch list {
+        let body = NSFont.systemFont(ofSize: 13)
+        let mono = NSFont.monospacedSystemFont(ofSize: 11, weight: .semibold)
+        switch tableView.tag {
         case GitPane.files:
-            let f = files[i]
-            let x = f["x"] as? String ?? " ", y = f["y"] as? String ?? " "
-            let path = f["path"] as? String ?? ""
-            let name = (path as NSString).lastPathComponent
-            let dir = (path as NSString).deletingLastPathComponent
-            cell.set(title: name, detail: dir.isEmpty ? statusWord(x, y) : "\(dir) · \(statusWord(x, y))",
-                     badge: (x + y).trimmingCharacters(in: .whitespaces),
-                     badgeColor: x == "?" ? .systemGray : y != " " ? .systemOrange : .systemGreen)
-            let staged = x != " " && x != "?"
-            let partial = staged && y != " "
-            cell.addCheckbox(state: partial ? .mixed : staged ? .on : .off) { [weak self] in
-                self?.stageToggle(row: i)
+            let r = fileRows[i]
+            let indent = CGFloat(r.depth) * 14
+            guard let fi = r.file else {
+                return cell([("   ", .labelColor, mono), (r.name, .secondaryLabelColor, body)], indent: indent)
             }
+            let f = files[fi]
+            let x = f["x"] as? String ?? " ", y = f["y"] as? String ?? " "
+            let code = x == "?" ? "??" : (x + y)
+            let color: NSColor = x == "?" ? .systemGray : y != " " ? .systemRed : .systemGreen
+            return cell([(code.padding(toLength: 2, withPad: " ", startingAt: 0) + " ", color, mono),
+                         (r.name, .labelColor, body)], indent: indent)
         case GitPane.branches:
             let b = branches[i]
             let current = b["current"] as? Bool ?? false
             let remote = b["remote"] as? Bool ?? false
-            cell.set(title: (current ? "✓ " : "") + (b["name"] as? String ?? ""),
-                     detail: [b["age"] as? String ?? "", b["subject"] as? String ?? ""]
-                        .filter { !$0.isEmpty }.joined(separator: " · "),
-                     badge: remote ? "remote" : "", badgeColor: .systemGray,
-                     bold: current, dim: remote)
+            let name = b["name"] as? String ?? ""
+            let lead = current ? "*" : (b["age"] as? String ?? "")
+            return cell([(lead.padding(toLength: 4, withPad: " ", startingAt: 0), .secondaryLabelColor, mono),
+                         (name, remote ? .secondaryLabelColor : .labelColor,
+                          current ? .boldSystemFont(ofSize: 13) : body)])
         default:
             let c = commits[i]
             let pushed = c["pushed"] as? Bool ?? true
             let tags = c["tags"] as? String ?? ""
-            cell.set(title: c["subject"] as? String ?? "",
-                     detail: "\(c["sha"] as? String ?? "") · \(c["author"] as? String ?? "") · \(c["date"] as? String ?? "")",
-                     badge: !pushed ? "↑ unpushed" : tags, badgeColor: !pushed ? .systemRed : .systemPurple)
-        }
-        return cell
-    }
-
-    private func statusWord(_ x: String, _ y: String) -> String {
-        if x == "?" { return "untracked" }
-        let c = y != " " ? y : x
-        switch c {
-        case "M": return "modified"
-        case "A": return "added"
-        case "D": return "deleted"
-        case "R": return "renamed"
-        case "U": return "conflicted"
-        default: return "changed"
+            var parts: [(String, NSColor, NSFont)] = [
+                ((pushed ? " " : "↑") + (c["sha"] as? String ?? "") + " ",
+                 pushed ? .secondaryLabelColor : .systemRed, mono),
+            ]
+            if !tags.isEmpty { parts.append((tags + " ", .systemPurple, mono)) }
+            parts.append((c["subject"] as? String ?? "", .labelColor, body))
+            return cell(parts)
         }
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
-        guard !syncing, let v = view, v.handle != 0, table.selectedRow >= 0 else { return }
-        tk_desktop_git_select(v.handle, Int64(list), Int64(table.selectedRow),
-                              Int64(v.cols()), Int64(v.rows()))
-        lastData = Data()   // force the next poll to re-render
-        cursorLine = -1
+        guard !syncing, let t = notification.object as? NSTableView,
+              let idx = index(t, t.selectedRow) else { return }
+        select(t.tag, idx)
     }
 
-    @objc private func segmentChanged() {
+    private func select(_ pane: Int, _ idx: Int) {
         guard let v = view, v.handle != 0 else { return }
-        commitBox.isHidden = list != GitPane.files
-        let sel = max(0, selectedIndex(for: list))
-        tk_desktop_git_select(v.handle, Int64(list), Int64(sel), Int64(v.cols()), Int64(v.rows()))
-        lastData = Data()
-        syncing = true
-        table.reloadData()
-        syncing = false
+        tk_desktop_git_select(v.handle, Int64(pane), Int64(idx), Int64(v.cols()), Int64(v.rows()))
+        lastData = Data()   // force the next poll to re-render
+        unstaged.cursorLine = -1
+        staged.cursorLine = -1
+        onAfterAction?()
     }
 
     // MARK: operations (the view's own keys)
@@ -6365,56 +6508,32 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
 
     private func ch(_ c: Character) -> UInt32 { c.unicodeScalars.first!.value }
 
-    private func stageToggle(row: Int) {
-        guard let v = view, v.handle != 0 else { return }
-        tk_desktop_git_select(v.handle, Int64(GitPane.files), Int64(row), Int64(v.cols()), Int64(v.rows()))
-        key(GitPane.files, 0x20)
-    }
-
-    private func tableKey(_ k: String) -> Bool {
-        let row = table.selectedRow
-        switch (k, list) {
-        case ("esc", _): closeClicked(); return true
-        case ("space", GitPane.files) where row >= 0: key(GitPane.files, 0x20); return true
-        case ("space", GitPane.branches) where row >= 0: key(GitPane.branches, 0x20); return true
-        case ("enter", _) where row >= 0: tableDoubleClicked(); return true
-        case ("delete", GitPane.files) where row >= 0, ("delete", GitPane.branches) where row >= 0:
-            key(list, ch("d")); return true
+    private func tableKey(_ k: String, _ t: GitTable) -> Bool {
+        let row = t.selectedRow
+        switch k {
+        case "esc": closeClicked(); return true
+        case "space" where row >= 0 && t.tag != GitPane.commits: key(t.tag, 0x20); return true
+        case "enter" where row >= 0: tableDoubleClicked(t); return true
+        case "delete" where row >= 0 && t.tag != GitPane.commits: key(t.tag, ch("d")); return true
         default: return false
         }
     }
 
-    @objc private func tableDoubleClicked() {
-        guard let v = view, v.handle != 0 else { return }
-        let row = table.clickedRow >= 0 ? table.clickedRow : table.selectedRow
-        guard row >= 0 else { return }
-        switch list {
+    @objc private func tableDoubleClicked(_ sender: Any?) {
+        guard let t = sender as? NSTableView, let v = view, v.handle != 0 else { return }
+        let row = t.clickedRow >= 0 ? t.clickedRow : t.selectedRow
+        guard let idx = index(t, row) else { return }
+        switch t.tag {
         case GitPane.files:
-            tk_desktop_git_select(v.handle, Int64(GitPane.files), Int64(row), Int64(v.cols()), Int64(v.rows()))
-            tk_desktop_git_open(v.handle, Int64(GitPane.files), Int64(row), Int64(v.cols()), Int64(v.rows()))
+            tk_desktop_git_select(v.handle, Int64(GitPane.files), Int64(idx), Int64(v.cols()), Int64(v.rows()))
+            tk_desktop_git_open(v.handle, Int64(GitPane.files), Int64(idx), Int64(v.cols()), Int64(v.rows()))
             onAfterAction?()
         case GitPane.branches:
             key(GitPane.branches, 0x20)   // check it out
         default:
-            break
+            key(GitPane.commits, 0x0D)    // open
         }
     }
-
-    @objc private func pullClicked() { key(-1, ch("p")) }
-    @objc private func pushClicked() { key(-1, ch("P")) }
-    @objc private func pushToClicked() { key(-1, ch("p"), mods: 1 << 2) }   // Ctrl+P
-
-    @objc private func commitClicked() {
-        guard let v = view, v.handle != 0 else { return }
-        let msg = messageView.string.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !msg.isEmpty else { NSSound.beep(); panel.makeFirstResponder(messageView); return }
-        withUTF8Arg(msg) { p, l in tk_desktop_git_commit(v.handle, p, l) }
-        messageView.string = ""
-        lastData = Data()
-        onAfterAction?()
-    }
-
-    @objc private func amendClicked() { key(GitPane.files, ch("A")) }
 
     @objc private func closeClicked() {
         guard let v = view, v.handle != 0 else { return }
@@ -6442,139 +6561,131 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         let data = n > 0 ? Data(buf[0..<n]) : Data()
         guard data != lastPanels else { return }
         lastPanels = data
-        guard let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
-            diff.string = ""
-            lineMap = []
-            return
-        }
-        render(o)
-    }
-
-    private func render(_ o: [String: Any]) {
+        let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        let panels = o["panels"] as? [[String: Any]] ?? []
         let bg = PickerController.rgb(o["bg"] as? Int ?? 0)
         let fg = PickerController.rgb(o["fg"] as? Int ?? 0xFFFFFF)
-        diff.backgroundColor = bg
-        diff.enclosingScrollView?.backgroundColor = bg
+        if let info = panels.first(where: { ($0["pane"] as? Int) == GitPane.info }) {
+            // A branch's log or a commit's details: one pane.
+            // Named for the list driving it (kept while the cursor is in it).
+            if focus == GitPane.branches { infoTitle = "Log" }
+            if focus == GitPane.commits { infoTitle = "Commit" }
+            unstagedHeader.stringValue = infoTitle
+            stagedSection.isHidden = true
+            render(info, into: unstaged, bg: bg, fg: fg)
+        } else {
+            unstagedHeader.stringValue = "Unstaged"
+            stagedSection.isHidden = false
+            render(panels.first { ($0["pane"] as? Int) == GitPane.unstaged } ?? [:],
+                   into: unstaged, bg: bg, fg: fg)
+            render(panels.first { ($0["pane"] as? Int) == GitPane.staged } ?? [:],
+                   into: staged, bg: bg, fg: fg)
+        }
+    }
+
+    private func render(_ p: [String: Any], into dp: GitDiffPane, bg: NSColor, fg: NSColor) {
+        dp.view.backgroundColor = bg
+        dp.scroll.backgroundColor = bg
         let mono = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         let out = NSMutableAttributedString()
-        lineMap = []
-        lineStarts = []
+        dp.lineMap = []
+        dp.lineStarts = []
         let addBg = NSColor.systemGreen.withAlphaComponent(0.22)
         let remBg = NSColor.systemRed.withAlphaComponent(0.22)
-        func line(_ text: String, _ attrs: [NSAttributedString.Key: Any], _ map: (Int, Int)?) -> Int {
-            lineStarts.append(out.length)
-            lineMap.append(map)
+        func line(_ text: String, _ attrs: [NSAttributedString.Key: Any], _ row: Int?) -> Int {
+            dp.lineStarts.append(out.length)
+            dp.lineMap.append(row)
             let start = out.length
             out.append(NSAttributedString(string: text + "\n", attributes: attrs))
             return start
         }
-        let panels = o["panels"] as? [[String: Any]] ?? []
-        for p in panels {
-            let pane = p["pane"] as? Int ?? GitPane.info
-            let rows = p["rows"] as? [[Any]] ?? []
-            if pane != GitPane.info {
-                let title = pane == GitPane.unstaged ? "Unstaged changes" : "Staged changes"
-                _ = line(title, [.font: NSFont.systemFont(ofSize: 12, weight: .bold),
-                                 .foregroundColor: fg.withAlphaComponent(0.8)], nil)
-                if rows.isEmpty {
-                    _ = line("  None", [.font: mono, .foregroundColor: fg.withAlphaComponent(0.45)], nil)
-                }
-            }
-            var rowStart: [Int] = []
-            for (r, row) in rows.enumerated() {
-                let kind = row.first as? Int ?? 0
-                let text = row.count > 1 ? (row[1] as? String ?? "") : ""
-                var attrs: [NSAttributedString.Key: Any] = [.font: mono, .foregroundColor: fg]
-                var shown = text
-                switch kind {
-                case GitLine.add: attrs[.backgroundColor] = addBg; shown = "+ " + text
-                case GitLine.rem: attrs[.backgroundColor] = remBg; shown = "- " + text
-                case GitLine.ctx: shown = "  " + text
-                case GitLine.fileHdr:
-                    attrs[.font] = NSFont.monospacedSystemFont(ofSize: 12, weight: .bold)
-                case GitLine.sep:
-                    shown = "  ⋯"
-                    attrs[.foregroundColor] = fg.withAlphaComponent(0.4)
-                default: break
-                }
-                rowStart.append(line(shown, attrs, (pane, r)) + (kind == GitLine.add || kind == GitLine.rem || kind == GitLine.ctx ? 2 : 0))
-            }
-            // Syntax spans: byte ranges in the stripped row text.
-            for sp in p["spans"] as? [[Int]] ?? [] where sp.count == 4 && sp[0] < rows.count {
-                let text = rows[sp[0]].count > 1 ? (rows[sp[0]][1] as? String ?? "") : ""
-                let u = Array(text.utf8)
-                let a = min(max(sp[1], 0), u.count), b = min(max(sp[2], a), u.count)
-                let pre = String(decoding: u[0..<a], as: UTF8.self).utf16.count
-                let len = String(decoding: u[a..<b], as: UTF8.self).utf16.count
-                guard len > 0 else { continue }
-                out.addAttribute(.foregroundColor, value: PickerController.rgb(sp[3]),
-                                 range: NSRange(location: rowStart[sp[0]] + pre, length: len))
-            }
-            _ = line("", [.font: mono], nil)
+        let rows = p["rows"] as? [[Any]] ?? []
+        if rows.isEmpty && dp.pane != GitPane.info {
+            _ = line(dp.pane == GitPane.unstaged ? "(no unstaged changes)" : "(no staged changes)",
+                     [.font: mono, .foregroundColor: fg.withAlphaComponent(0.45)], nil)
         }
-        let clip = diff.enclosingScrollView?.contentView
-        let keep = clip?.bounds.origin ?? .zero
-        diff.textStorage?.setAttributedString(out)
-        // Same selection, same scroll: re-render after staging a line must
-        // not yank the view.
-        if let clip = clip {
-            clip.scroll(to: keep)
-            diff.enclosingScrollView?.reflectScrolledClipView(clip)
+        var rowStart: [Int] = []
+        for (r, row) in rows.enumerated() {
+            let kind = row.first as? Int ?? 0
+            let text = row.count > 1 ? (row[1] as? String ?? "") : ""
+            var attrs: [NSAttributedString.Key: Any] = [.font: mono, .foregroundColor: fg]
+            var shown = text
+            switch kind {
+            case GitLine.add: attrs[.backgroundColor] = addBg; shown = "+ " + text
+            case GitLine.rem: attrs[.backgroundColor] = remBg; shown = "- " + text
+            case GitLine.ctx: shown = "  " + text
+            case GitLine.fileHdr:
+                attrs[.font] = NSFont.monospacedSystemFont(ofSize: 12, weight: .bold)
+            case GitLine.sep:
+                shown = "  ⋯"
+                attrs[.foregroundColor] = fg.withAlphaComponent(0.4)
+            default: break
+            }
+            rowStart.append(line(shown, attrs, r)
+                            + (kind == GitLine.add || kind == GitLine.rem || kind == GitLine.ctx ? 2 : 0))
         }
-        markCursor()
+        // Syntax spans: byte ranges in the stripped row text.
+        for sp in p["spans"] as? [[Int]] ?? [] where sp.count == 4 && sp[0] < rows.count {
+            let text = rows[sp[0]].count > 1 ? (rows[sp[0]][1] as? String ?? "") : ""
+            let u = Array(text.utf8)
+            let a = min(max(sp[1], 0), u.count), b = min(max(sp[2], a), u.count)
+            let pre = String(decoding: u[0..<a], as: UTF8.self).utf16.count
+            let len = String(decoding: u[a..<b], as: UTF8.self).utf16.count
+            guard len > 0 else { continue }
+            out.addAttribute(.foregroundColor, value: PickerController.rgb(sp[3]),
+                             range: NSRange(location: rowStart[sp[0]] + pre, length: len))
+        }
+        let clip = dp.scroll.contentView
+        let keep = clip.bounds.origin
+        syncing = true
+        dp.view.textStorage?.setAttributedString(out)
+        syncing = false
+        // Same scroll: re-rendering after staging a line must not yank it.
+        clip.scroll(to: keep)
+        dp.scroll.reflectScrolledClipView(clip)
+        dp.markCursor()
     }
 
-    private func lineIndex(at loc: Int) -> Int {
-        var lo = 0, hi = lineStarts.count - 1, ans = -1
-        while lo <= hi {
-            let mid = (lo + hi) / 2
-            if lineStarts[mid] <= loc { ans = mid; lo = mid + 1 } else { hi = mid - 1 }
-        }
-        return ans
+    private func diffPane(_ tv: NSTextView) -> GitDiffPane? {
+        tv === unstaged.view ? unstaged : tv === staged.view ? staged : nil
+    }
+
+    /// The core pane a diff view shows (the top one doubles as the info pane).
+    private func corePane(_ dp: GitDiffPane) -> Int {
+        dp === unstaged && stagedSection.isHidden ? GitPane.info : dp.pane
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
-        guard let v = view, v.handle != 0 else { return }
-        let li = lineIndex(at: diff.selectedRange().location)
-        guard li >= 0, li < lineMap.count, let (pane, row) = lineMap[li] else { return }
-        cursorLine = li
-        tk_desktop_git_cursor(v.handle, Int64(pane), Int64(row))
-        markCursor()
+        // Only the user's clicks move the cursor — not a re-render.
+        guard !syncing, let tv = notification.object as? NSTextView, let dp = diffPane(tv),
+              let v = view, v.handle != 0 else { return }
+        let li = dp.lineIndex(at: tv.selectedRange().location)
+        guard li >= 0, li < dp.lineMap.count, let row = dp.lineMap[li] else { return }
+        dp.cursorLine = li
+        tk_desktop_git_cursor(v.handle, Int64(corePane(dp)), Int64(row))
+        dp.markCursor()
+        lastData = Data()
+        onAfterAction?()
     }
 
-    private func markCursor() {
-        guard let lm = diff.layoutManager else { return }
-        lm.removeTemporaryAttribute(.underlineStyle,
-                                    forCharacterRange: NSRange(location: 0, length: diff.textStorage?.length ?? 0))
-        guard cursorLine >= 0, cursorLine < lineStarts.count else { return }
-        let end = cursorLine + 1 < lineStarts.count ? lineStarts[cursorLine + 1] - 1 : (diff.textStorage?.length ?? 0)
-        lm.addTemporaryAttribute(.underlineStyle, value: NSUnderlineStyle.thick.rawValue,
-                                 forCharacterRange: NSRange(location: lineStarts[cursorLine],
-                                                            length: max(0, end - lineStarts[cursorLine])))
-    }
-
-    private func cursorTarget() -> (Int, Int)? {
-        guard cursorLine >= 0, cursorLine < lineMap.count else { return nil }
-        return lineMap[cursorLine]
-    }
-
-    private func diffKey(_ k: String) -> Bool {
+    private func diffKey(_ k: String, _ dp: GitDiffPane) -> Bool {
         switch k {
         case "esc": closeClicked(); return true
         case "space":
-            guard let (pane, _) = cursorTarget(), pane != GitPane.info else { return false }
-            key(pane, 0x20); return true
+            guard dp.cursorRow != nil, corePane(dp) != GitPane.info else { return false }
+            key(corePane(dp), 0x20); return true
         case "enter":
-            openCursor(); return true
+            openCursor(dp); return true
         default: return false
         }
     }
 
-    private func openCursor() {
-        guard let v = view, v.handle != 0, let (pane, row) = cursorTarget() else { return }
-        tk_desktop_git_open(v.handle, Int64(pane), Int64(row), Int64(v.cols()), Int64(v.rows()))
+    private func openCursor(_ dp: GitDiffPane) {
+        guard let v = view, v.handle != 0, let row = dp.cursorRow else { return }
+        tk_desktop_git_open(v.handle, Int64(corePane(dp)), Int64(row), Int64(v.cols()), Int64(v.rows()))
         onAfterAction?()
     }
+
 
     // MARK: overlays → alerts
 
@@ -6674,53 +6785,55 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
 }
 
 extension GitController: NSMenuDelegate {
-    /// Context menus for the list and the diff, built for what's under the
-    /// pointer — each item is one of the view's keys.
+    /// Context menus for the lists and the diffs, built for what's under
+    /// the pointer — each item is one of the view's keys.
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         func add(_ title: String, _ run: @escaping () -> Void) { menu.addItem(TabMenuItem(title, run)) }
-        if menu === table.menu {
-            let row = table.clickedRow
-            guard row >= 0, let v = view, v.handle != 0 else { return }
-            tk_desktop_git_select(v.handle, Int64(list), Int64(row), Int64(v.cols()), Int64(v.rows()))
-            switch list {
+        if let t = [filesTable, branchesTable, commitsTable].first(where: { $0.menu === menu }) {
+            guard let idx = index(t, t.clickedRow) else { return }
+            select(t.tag, idx)
+            switch t.tag {
             case GitPane.files:
-                let f = files[row]
+                let f = files[idx]
                 let staged = (f["x"] as? String ?? " ") != " " && (f["x"] as? String) != "?"
                 add(staged ? "Unstage" : "Stage") { [weak self] in self?.key(GitPane.files, 0x20) }
-                add("Open in Editor") { [weak self] in self?.tableDoubleClicked() }
+                add("Open in Editor") { [weak self, weak t] in self?.tableDoubleClicked(t) }
                 menu.addItem(.separator())
                 add((f["x"] as? String) == "?" ? "Delete File…" : "Discard Changes…") { [weak self] in
                     self?.key(GitPane.files, self?.ch("d") ?? 0) }
             case GitPane.branches:
-                let b = branches[row]
+                let b = branches[idx]
                 let name = b["name"] as? String ?? ""
                 let current = state["branch"] as? String ?? ""
                 add("Check Out") { [weak self] in self?.key(GitPane.branches, 0x20) }
                 if !(b["current"] as? Bool ?? false) {
-                    add("Bring “\(name)” into “\(current)”…") { [weak self] in self?.key(GitPane.branches, self?.ch("M") ?? 0) }
+                    add("Bring “\(name)” into “\(current)”…") { [weak self] in
+                        self?.key(GitPane.branches, self?.ch("M") ?? 0) }
                     add("Rebase") { [weak self] in self?.key(GitPane.branches, self?.ch("r") ?? 0) }
                 }
                 add("Compare on GitHub") { [weak self] in self?.key(GitPane.branches, self?.ch("o") ?? 0) }
                 menu.addItem(.separator())
                 add("Delete Branch…") { [weak self] in self?.key(GitPane.branches, self?.ch("d") ?? 0) }
             default:
-                let c = commits[row]
+                let c = commits[idx]
                 add("Reword…") { [weak self] in self?.key(GitPane.commits, self?.ch("e") ?? 0) }
                 add("Copy SHA") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(c["sha"] as? String ?? "", forType: .string)
                 }
             }
-        } else if menu === diff.menu {
-            guard let (pane, _) = cursorTarget() else { return }
-            if pane == GitPane.unstaged {
+        } else if let dp = [unstaged, staged].first(where: { $0.view.menu === menu }) {
+            guard dp.cursorRow != nil else { return }
+            switch corePane(dp) {
+            case GitPane.unstaged:
                 add("Stage Line") { [weak self] in self?.key(GitPane.unstaged, 0x20) }
                 add("Discard Line…") { [weak self] in self?.key(GitPane.unstaged, self?.ch("d") ?? 0) }
-            } else if pane == GitPane.staged {
+            case GitPane.staged:
                 add("Unstage Line") { [weak self] in self?.key(GitPane.staged, 0x20) }
+            default: break
             }
-            add("Open in Editor") { [weak self] in self?.openCursor() }
+            add("Open in Editor") { [weak self] in self?.openCursor(dp) }
         }
     }
 }

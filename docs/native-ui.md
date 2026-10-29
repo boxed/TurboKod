@@ -287,13 +287,18 @@ under the tabs.
 ## Git view
 
 `LocalChanges` (the lazygit-style view) keeps every git operation. The
-native sheet, `GitController`, follows the Mac source-control layout:
+native sheet, `GitController`, has the grid view's layout, in native
+controls:
 
-- Changes / Branches / History lists, with a stage checkbox per file and a
-  commit box under Changes.
-- A themed, syntax-colored diff on the right.
-- Pull / Push / Push To… in the top bar, next to the busy spinner and the
-  flash line.
+- Modified files (as a directory tree), Branches and Commits stacked on the
+  left, the focused one's title in bold.
+- The selected file's Unstaged and Staged diffs stacked on the right —
+  themed and syntax-colored — or, for a branch or a commit, its log /
+  details in one pane.
+- The focused pane's operations along the bottom. They are the grid's hint
+  bar: `LocalChanges.hints()` is one list, painted as text in the grid and
+  sent as `hints` for the sheet's buttons, so both offer the same commands
+  per pane.
 
 It never re-implements an operation:
 
@@ -303,7 +308,8 @@ It never re-implements an operation:
   stages / unstages / checks out, `d` discards / deletes, `M` / `r` merge /
   rebase, `o` compare, `e` reword, `A` amend, `p` / `P` / Ctrl+P pull, push,
   push to.
-- **Commit** is `native_commit`: the `c` prompt answered in one call.
+- **Commit** is the `c` key: the core opens its commit prompt, which comes
+  back as an alert like every other overlay.
 - **Overlays become alerts on the sheet.** Every in-grid overlay (confirm,
   merge-or-rebase, reword editor, remote chooser, typed remote delete,
   status, output) is answered through `tk_desktop_git_answer` →
