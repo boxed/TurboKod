@@ -3,7 +3,8 @@
 **View ▸ Mac OS 9-style UI** (native app only; global, persisted as
 `config.platinum_ui`) is the third look, next to the classic Turbo Vision
 grid and the macOS-style UI. Settings ▸ Appearance shows the three as one
-**Look** choice; turning one on in the View menu turns the other off.
+**Look** choice, and the welcome window as three cards; turning one on in
+the View menu turns the other off.
 
 It is a third *projector*, not a skin. The macOS-style UI hands the
 declarative dialogs to AppKit; this one hands the same data to the Swift

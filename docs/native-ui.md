@@ -374,15 +374,16 @@ LSP status. Each menu struct has `native_items()`, the same rows its
 ## First-launch welcome window
 
 On the native app's first launch (`config.welcome_done` false), the host
-shows `WelcomeController` after the first frame. It offers two look cards,
-Modern macOS (`native_ui`) and Retro, plus theme, font and size popups.
+shows `WelcomeController` after the first frame. It offers three look
+cards, Modern macOS (`native_ui`), Retro and Mac OS 9 (`platinum_ui`, see
+[platinum-ui.md](platinum-ui.md)), plus theme, font and size popups.
 
 - Each choice applies live to the window behind it through
   `tk_desktop_welcome_apply` → `Desktop.apply_welcome`, which persists, so
   every other window follows via the config poll.
 - Picking a look also picks its natural theme, font and size: One Dark /
-  GitHub Light (by system appearance) with SF Mono 13, or Turbo C++ 3.0 with
-  the VGA font. The popups stay editable afterwards.
+  GitHub Light (by system appearance) with SF Mono 13, Turbo C++ 3.0 with
+  the VGA font, or GitHub Light with Monaco 12. The popups stay editable afterwards.
 - Closing the window, by Get Started or the close button, sends the final
   apply with `done`, which sets `welcome_done`.
 - The options come from `tk_desktop_welcome_options`: the theme names and

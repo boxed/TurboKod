@@ -5811,7 +5811,8 @@ func captureWindowPNG(_ win: NSWindow, to path: String) {
 
 // MARK: - first-launch welcome window
 //
-// Picks the look — the macOS-style UI or the classic Turbo Vision one — plus
+// Picks the look — the macOS-style UI, the classic Turbo Vision one or the
+// Mac OS 9 one — plus
 // theme, font and size, applying each choice live to the window behind it
 // (`tk_desktop_welcome_apply`). Choosing a look also picks sensible defaults
 // for the other three, which the user can then override.
@@ -5821,11 +5822,12 @@ final class WelcomeController: NSObject, NSWindowDelegate {
     private let apply: (String, Bool) -> Void
     private let modernCard: LookCard
     private let retroCard: LookCard
+    private let platinumCard: LookCard
     private let themePopup = NSPopUpButton()
     private let fontPopup = NSPopUpButton()
     private let sizePopup = NSPopUpButton()
     private let builtinFonts: [String]
-    private var nativeUI: Bool
+    private var look: LookCard.Kind
     private var finished = false
     private let palette: () -> [UInt32]
     private let preview = CodePreview()
@@ -5836,15 +5838,19 @@ final class WelcomeController: NSObject, NSWindowDelegate {
         self.apply = apply
         self.palette = palette
         builtinFonts = o["builtin_fonts"] as? [String] ?? []
-        nativeUI = o["native_ui"] as? Bool ?? false
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 600),
+        look = o["native_ui"] as? Bool ?? false ? .modern
+            : o["platinum_ui"] as? Bool ?? false ? .platinum : .retro
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: Self.width, height: 600),
                           styleMask: [.titled, .closable], backing: .buffered, defer: false)
         modernCard = LookCard(title: "Modern macOS",
                               detail: "Native tabs, sheets and pickers.\nSystem fonts around your code.",
-                              retro: false)
+                              kind: .modern)
         retroCard = LookCard(title: "Retro",
                              detail: "The full Turbo Vision experience:\nDOS windows, menus and dialogs.",
-                             retro: true)
+                             kind: .retro)
+        platinumCard = LookCard(title: "Mac OS 9",
+                                detail: "Platinum windows, tabs and dialogs\naround the classic editor.",
+                                kind: .platinum)
         super.init()
         window.title = "Welcome to TurboKod"
         window.isReleasedWhenClosed = false
@@ -5857,9 +5863,10 @@ final class WelcomeController: NSObject, NSWindowDelegate {
         sub.textColor = .secondaryLabelColor
         sub.font = .systemFont(ofSize: 13)
 
-        modernCard.onPick = { [weak self] in self?.pickLook(native: true) }
-        retroCard.onPick = { [weak self] in self?.pickLook(native: false) }
-        let cards = NSStackView(views: [modernCard, retroCard])
+        for card in [modernCard, retroCard, platinumCard] {
+            card.onPick = { [weak self, unowned card] in self?.pickLook(card.kind) }
+        }
+        let cards = NSStackView(views: [modernCard, retroCard, platinumCard])
         cards.distribution = .fillEqually
         cards.spacing = 16
 
@@ -5889,7 +5896,7 @@ final class WelcomeController: NSObject, NSWindowDelegate {
         start.bezelColor = .controlAccentColor
         start.controlSize = .large
 
-        // The pickers apply to either look: center them under both cards,
+        // The pickers apply to every look: center them under all the cards,
         // not wherever the grid's own width would push them.
         let gridBox = NSView()
         grid.translatesAutoresizingMaskIntoConstraints = false
@@ -5929,10 +5936,12 @@ final class WelcomeController: NSObject, NSWindowDelegate {
         grid.setContentHuggingPriority(.required, for: .horizontal)
         stack.setHuggingPriority(.required, for: .vertical)
         content.layoutSubtreeIfNeeded()
-        window.setContentSize(NSSize(width: 760, height: stack.fittingSize.height))
+        window.setContentSize(NSSize(width: Self.width, height: stack.fittingSize.height))
         refreshCards()
         renderPreview()
     }
+
+    private static let width: CGFloat = 900
 
     private func label(_ s: String) -> NSTextField {
         let l = NSTextField(labelWithString: s)
@@ -5946,8 +5955,7 @@ final class WelcomeController: NSObject, NSWindowDelegate {
     }
 
     private func refreshCards() {
-        modernCard.selected = nativeUI
-        retroCard.selected = !nativeUI
+        for card in [modernCard, retroCard, platinumCard] { card.selected = card.kind == look }
     }
 
     // MARK: live preview
@@ -5961,21 +5969,27 @@ final class WelcomeController: NSObject, NSWindowDelegate {
 
     /// A look comes with its natural theme and font; the popups stay
     /// editable afterwards.
-    private func pickLook(native: Bool) {
-        nativeUI = native
+    private func pickLook(_ kind: LookCard.Kind) {
+        look = kind
         refreshCards()
-        if native {
+        let fonts = FontCatalog.monospaceFamilies
+        switch kind {
+        case .modern:
             let dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
             themePopup.selectItem(withTitle: dark ? "One Dark" : "GitHub Light")
-            let fonts = FontCatalog.monospaceFamilies
             if let f = ["SF Mono", "Menlo", "Monaco"].first(where: fonts.contains) {
                 fontPopup.selectItem(withTitle: f)
             }
             sizePopup.selectItem(at: Self.sizes.firstIndex(of: 13) ?? 0)
-        } else {
+        case .retro:
             themePopup.selectItem(withTitle: "Turbo C++ 3.0")
             if let f = builtinFonts.first { fontPopup.selectItem(withTitle: f) }
             sizePopup.selectItem(at: 0)
+        case .platinum:
+            // Black on white in Monaco, as a Mac OS 9 editor would have it.
+            themePopup.selectItem(withTitle: "GitHub Light")
+            if fonts.contains("Monaco") { fontPopup.selectItem(withTitle: "Monaco") }
+            sizePopup.selectItem(at: Self.sizes.firstIndex(of: 12) ?? 0)
         }
         push(done: false)
     }
@@ -5985,7 +5999,8 @@ final class WelcomeController: NSObject, NSWindowDelegate {
     private func push(done: Bool) {
         let size = Self.sizes[max(0, sizePopup.indexOfSelectedItem)]
         let o: [String: Any] = [
-            "native_ui": nativeUI,
+            "native_ui": look == .modern,
+            "platinum_ui": look == .platinum,
             "theme": themePopup.titleOfSelectedItem ?? "",
             "font": fontPopup.titleOfSelectedItem ?? "",
             "font_size": size,
@@ -6008,16 +6023,17 @@ final class WelcomeController: NSObject, NSWindowDelegate {
 /// One clickable look in the welcome window: a drawn miniature of the UI
 /// over a title and a line of description.
 final class LookCard: NSView {
+    enum Kind { case modern, retro, platinum }
     var onPick: (() -> Void)?
     var selected = false { didSet { needsDisplay = true } }
-    private let retro: Bool
+    let kind: Kind
     private let title: String
     private let detail: String
 
-    init(title: String, detail: String, retro: Bool) {
+    init(title: String, detail: String, kind: Kind) {
         self.title = title
         self.detail = detail
-        self.retro = retro
+        self.kind = kind
         super.init(frame: .zero)
     }
 
@@ -6039,7 +6055,11 @@ final class LookCard: NSView {
                           width: card.width - 32, height: card.height - 100)
         NSGraphicsContext.saveGraphicsState()
         NSBezierPath(roundedRect: shot, xRadius: 6, yRadius: 6).addClip()
-        if retro { drawRetro(shot) } else { drawModern(shot) }
+        switch kind {
+        case .modern: drawModern(shot)
+        case .retro: drawRetro(shot)
+        case .platinum: drawPlatinum(shot)
+        }
         NSGraphicsContext.restoreGraphicsState()
         NSColor.separatorColor.setStroke()
         NSBezierPath(roundedRect: shot, xRadius: 6, yRadius: 6).stroke()
@@ -6103,6 +6123,72 @@ final class LookCard: NSView {
                  NSRect(x: sheet.minX + 8, y: sheet.minY + 28 + CGFloat(k) * 12, width: sheet.width - 16, height: 10),
                  radius: 3)
         }
+    }
+
+    private func drawPlatinum(_ r: NSRect) {
+        let P = Platinum.self
+        P.fill(r, NSColor(srgbRed: 0.40, green: 0.40, blue: 0.60, alpha: 1))   // the desktop
+        // The window: frame, pinstriped title bar with its boxes, tabs, a
+        // white editor and its scroll bar.
+        let win = NSRect(x: r.minX + 8, y: r.minY + 8, width: r.width - 16, height: r.height - 12)
+        P.fill(win, P.face)
+        P.outline(win, .black)
+        P.bevel(win.insetBy(dx: 1, dy: 1), P.light, P.shadow)
+        var y = win.minY + 4
+        while y + 1 < win.minY + 14 {
+            P.fill(NSRect(x: win.minX + 18, y: y, width: win.width - 50, height: 1), P.shadow)
+            P.fill(NSRect(x: win.minX + 19, y: y + 1, width: win.width - 50, height: 1), P.light)
+            y += 2
+        }
+        for x in [win.minX + 6, win.maxX - 28, win.maxX - 15] {
+            let b = NSRect(x: x, y: win.minY + 4, width: 9, height: 9)
+            P.fill(b.insetBy(dx: -2, dy: -2), P.face)
+            P.outline(b, P.dark)
+            P.bevel(b.insetBy(dx: 1, dy: 1), P.light, P.shadow)
+        }
+        let content = NSRect(x: win.minX + 5, y: win.minY + 18, width: win.width - 10, height: win.height - 23)
+        let tabH: CGFloat = 13
+        P.fill(NSRect(x: content.minX, y: content.minY + tabH - 1, width: content.width, height: 1), P.dark)
+        for (k, w) in [CGFloat(48), 56, 40].enumerated().reversed() {
+            let x = content.minX + 4 + [0, 47, 102][k]
+            let sel = k == 0
+            NSGraphicsContext.saveGraphicsState()
+            NSBezierPath(rect: NSRect(x: x, y: content.minY, width: w, height: tabH)).addClip()
+            P.fill(NSRect(x: x, y: content.minY + (sel ? 0 : 2), width: w, height: tabH), P.dark)
+            P.fill(NSRect(x: x + 1, y: content.minY + (sel ? 1 : 3), width: w - 2, height: tabH),
+                   sel ? P.face : P.mid)
+            P.fill(NSRect(x: x + 8, y: content.minY + (sel ? 5 : 7), width: w - 16, height: 3),
+                   sel ? .black : P.dark)
+            NSGraphicsContext.restoreGraphicsState()
+        }
+        let editor = NSRect(x: content.minX, y: content.minY + tabH, width: content.width - 10,
+                            height: content.height - tabH)
+        P.fill(editor, .white)
+        codeLines(editor, colors: [NSColor(srgbRed: 0.6, green: 0.1, blue: 0.4, alpha: 0.7),
+                                   NSColor(white: 0.25, alpha: 1),
+                                   NSColor(srgbRed: 0.1, green: 0.3, blue: 0.7, alpha: 0.7),
+                                   NSColor(white: 0.55, alpha: 1)],
+                  step: 11, height: 4)
+        let sb = NSRect(x: editor.maxX, y: editor.minY, width: 10, height: editor.height)
+        P.fill(sb, P.mid)
+        P.fill(NSRect(x: sb.minX, y: sb.minY, width: 1, height: sb.height), .black)
+        P.fill(NSRect(x: sb.minX, y: sb.minY + 22, width: 10, height: 10), P.lavender)
+        P.outline(NSRect(x: sb.minX, y: sb.minY + 22, width: 10, height: 10), .black)
+        // A movable modal dialog with its default button.
+        let dlg = NSRect(x: r.midX - r.width * 0.28, y: r.midY - 10, width: r.width * 0.56, height: 50)
+        P.fill(dlg, P.face)
+        P.outline(dlg, .black)
+        P.bevel(dlg.insetBy(dx: 1, dy: 1), P.light, P.shadow)
+        P.fill(NSRect(x: dlg.minX + 12, y: dlg.minY + 12, width: dlg.width * 0.6, height: 3), .black)
+        let ok = NSRect(x: dlg.maxX - 46, y: dlg.maxY - 20, width: 36, height: 12)
+        NSGraphicsContext.current?.shouldAntialias = false
+        NSColor.black.setStroke()
+        let ring = NSBezierPath(roundedRect: ok.insetBy(dx: -2.5, dy: -2.5), xRadius: 4, yRadius: 4)
+        ring.lineWidth = 2
+        ring.stroke()
+        P.fill(ok, P.face)
+        P.outline(ok, .black)
+        P.bevel(ok.insetBy(dx: 1, dy: 1), P.light, P.shadow)
     }
 
     private func drawRetro(_ r: NSRect) {

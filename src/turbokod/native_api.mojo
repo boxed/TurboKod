@@ -2380,8 +2380,8 @@ def tk_desktop_welcome_needed(h: Int) abi("C") -> Int32:
 @export
 def tk_desktop_welcome_options(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     """What the welcome window offers, and what's set now:
-    ``{themes, builtin_fonts: [bitmap, classic], native_ui, theme, font,
-    font_size}``. The host adds the system's monospace families to the
+    ``{themes, builtin_fonts: [bitmap, classic], native_ui, platinum_ui,
+    theme, font, font_size}``. The host adds the system's monospace families to the
     built-in fonts. Same buffer contract as ``tk_desktop_native_dialog``."""
     if h == 0:
         return 0
@@ -2397,6 +2397,7 @@ def tk_desktop_welcome_options(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     fonts.append(json_str(classic_font_label()))
     o.put(String("builtin_fonts"), fonts)
     o.put(String("native_ui"), json_bool(d.config.native_ui))
+    o.put(String("platinum_ui"), json_bool(d.config.platinum_ui))
     o.put(String("theme"), json_str(d.config.theme))
     o.put(String("font"), json_str(d.font_label()))
     o.put(String("font_size"), json_int(d.config.font_size))
@@ -2405,14 +2406,16 @@ def tk_desktop_welcome_options(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
 
 @export
 def tk_desktop_welcome_apply(h: Int, ptr: Int, n: Int, done: Int) abi("C"):
-    """Apply the welcome window's ``{native_ui, theme, font, font_size}``
-    (live while it's open; ``done`` = 1 when it's closed for good)."""
+    """Apply the welcome window's ``{native_ui, platinum_ui, theme, font,
+    font_size}`` (live while it's open; ``done`` = 1 when it's closed for
+    good)."""
     if h == 0:
         return
     try:
         var o = parse_json(_string_from(ptr, n))
         _desk(h)[].apply_welcome(
             json_get_bool(o, String("native_ui"), False),
+            json_get_bool(o, String("platinum_ui"), False),
             json_get_string(o, String("theme")),
             json_get_string(o, String("font")),
             json_get_int(o, String("font_size"), 0),

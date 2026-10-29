@@ -8450,14 +8450,15 @@ struct Desktop(Movable):
         return self.native_ui() or self.platinum_ui()
 
     def apply_welcome(
-        mut self, native_ui: Bool, theme: String, font_label: String,
-        font_size: Int, done: Bool,
+        mut self, native_ui: Bool, platinum_ui: Bool, theme: String,
+        font_label: String, font_size: Int, done: Bool,
     ):
         """The first-launch welcome window's choices — applied live as the
         user clicks through it (``done`` False) and once more, final, when
         they close it. Persisted each time, so every other window adopts
         the look through the config poll."""
         self.config.native_ui = native_ui
+        self.config.platinum_ui = platinum_ui and not native_ui
         if theme != self.config.theme:
             self.set_theme(theme)
         if font_label != self.font_label():
