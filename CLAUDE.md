@@ -82,6 +82,21 @@ buttons) and the Swift `DeclarativeController` natively. Register a dialog in
 or hand-build a Swift twin. Full details in
 [docs/declarative-ui.md](docs/declarative-ui.md).
 
+### Mac OS 9 look (native macOS)
+
+View ▸ Mac OS 9-style UI (`config.platinum_ui`) is a third projector:
+the host lays out and draws the declarative dialogs and the confirm alert
+itself, in pixels, Platinum-style (`PlatinumDialog` / `PNode` in
+`TurboKod.swift`), and the project window's chrome: borderless, in a
+`PlatinumMainFrame` with Platinum tabs over the tabbed layout and a
+scroll bar in a 2-column `Window.gutter`. The menus stay the system menu
+bar and everything else the classic grid. Gate on `host_draws_dialogs()`
+(dialogs) or `host_tabs()` (tabbed layout), not `native_ui()`, for
+anything those do. Find a window's grid with `NSWindow.cellView`, not
+`contentView as? CellView`. Text goes through `Platinum.text`
+(no kerning, whole-point advances) — `NSString` drawing smears the bitmap
+look. Full details in [docs/platinum-ui.md](docs/platinum-ui.md).
+
 ### Floating panels (native macOS)
 
 A per-project toggle (View ▸ Floating panels) floats the tool panels (terminal /

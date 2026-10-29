@@ -1152,6 +1152,9 @@ struct Window(Copyable, Movable):
     var _tab_maximized: Bool
     """Entering the tabbed layout maximized this window, so leaving it
     restores the window's previous rect."""
+    var gutter: Int
+    """Columns at the right of a frameless window kept out of its
+    content, for the host's scroll bar (the Mac OS 9 look)."""
     # Proportional-resize baselines. ``_baseline_rect`` is the rect we
     # want to preserve as the workspace changes, expressed in
     # ``_baseline_ws``; on each terminal resize we scale from this pair
@@ -1198,6 +1201,7 @@ struct Window(Copyable, Movable):
         self._restore_rect = sized
         self.frameless = False
         self._tab_maximized = False
+        self.gutter = 0
         self._baseline_rect = sized
         self._baseline_ws = Rect.empty()
         self._has_baseline = False
@@ -1250,6 +1254,7 @@ struct Window(Copyable, Movable):
         self._restore_rect = copy._restore_rect
         self.frameless = copy.frameless
         self._tab_maximized = copy._tab_maximized
+        self.gutter = copy.gutter
         self._baseline_rect = copy._baseline_rect
         self._baseline_ws = copy._baseline_ws
         self._has_baseline = copy._has_baseline
@@ -1263,7 +1268,9 @@ struct Window(Copyable, Movable):
         so hosts can compute view-relative things — e.g. ``reveal_cursor``
         after a goto-definition jump."""
         if self.frameless:
-            return self.rect
+            return Rect(self.rect.a.x, self.rect.a.y,
+                        max(self.rect.a.x, self.rect.b.x - self.gutter),
+                        self.rect.b.y)
         return Rect(self.rect.a.x + 1, self.rect.a.y + 1,
                     self.rect.b.x - 1, self.rect.b.y - 1)
 
@@ -1412,7 +1419,7 @@ struct Window(Copyable, Movable):
         var painter = Painter(self.rect)
         painter.fill(canvas, self.rect, String(" "), body_bg)
         if self.is_editor:
-            self.editor.paint(canvas, self.rect, focused)
+            self.editor.paint(canvas, self.interior(), focused)
             return
         for i in range(len(self.content)):
             if i >= self.rect.height():
@@ -1742,9 +1749,12 @@ struct WindowManager(Movable):
     # window's index, left for the host to save or ask about (``-1``: none).
     var close_requested: Int
     var tabbed: Bool
-    """Tabbed layout (macOS-style UI): every window is frameless and
-    fills the workspace; only the focused one paints. ``fit_into``
-    applies it, and undoes it when it's switched off."""
+    """Tabbed layout (macOS-style UI, Mac OS 9 look): every window is
+    frameless and fills the workspace; only the focused one paints.
+    ``fit_into`` applies it, and undoes it when it's switched off."""
+    var gutter: Int
+    """Columns each tabbed window keeps clear at its right for the host's
+    scroll bar."""
 
     def __init__(out self):
         self.windows = List[Window]()
@@ -1767,6 +1777,7 @@ struct WindowManager(Movable):
         self._has_last_workspace = False
         self.close_requested = -1
         self.tabbed = False
+        self.gutter = 0
 
     def add(mut self, var window: Window):
         self.windows.append(window^)
@@ -1837,6 +1848,7 @@ struct WindowManager(Movable):
     def _apply_tabbed(mut self, workspace: Rect):
         for i in range(len(self.windows)):
             ref w = self.windows[i]
+            w.gutter = self.gutter if self.tabbed else 0
             if self.tabbed:
                 if not w.frameless:
                     w.frameless = True

@@ -388,6 +388,7 @@ comptime EDITOR_TOGGLE_TAB_BAR      = String("view:tab_bar")
 # handed to the host as real AppKit sheets / panels. See
 # ``Desktop.native_ui`` and docs/native-ui.md.
 comptime VIEW_NATIVE_UI            = String("view:native_ui")
+comptime VIEW_PLATINUM_UI          = String("view:platinum_ui")
 # View-menu toggle for the per-line "+/~" change-bar gutter. The flag
 # lives on ``TurbokodConfig`` so it survives across sessions; the
 # column itself only paints when a ``.git`` is reachable from the
@@ -2583,7 +2584,7 @@ struct Desktop(Movable):
         tab bar adds another when the View toggle is on, but only
         if the screen is tall enough to host both rows above the
         menu bar."""
-        if self.config.tab_bar and not self.native_ui() \
+        if self.config.tab_bar and not self.host_tabs() \
                 and screen.b.y - 2 >= 1:
             return 2
         return 1
@@ -3221,7 +3222,7 @@ struct Desktop(Movable):
     def tab_bar_rect(self, screen: Rect) -> Rect:
         """Single-row strip directly above the status bar holding one
         tab per open window. Empty when the View toggle is off."""
-        if not self.config.tab_bar or self.native_ui():
+        if not self.config.tab_bar or self.host_tabs():
             return Rect.empty()
         var y = screen.b.y - 2
         if y < 1:
@@ -3753,7 +3754,10 @@ struct Desktop(Movable):
                 ref win = self.windows.windows[i]
                 if win.rect.contains(pos):
                     if win.is_editor:
-                        var inner = win.rect if win.frameless else Rect(
+                        var inner = Rect(
+                            win.rect.a.x, win.rect.a.y,
+                            win.rect.b.x - win.gutter, win.rect.b.y,
+                        ) if win.frameless else Rect(
                             win.rect.a.x + 1, win.rect.a.y + 1,
                             win.rect.b.x - 1, win.rect.b.y - 1,
                         )
@@ -3798,6 +3802,10 @@ struct Desktop(Movable):
             EDITOR_TOGGLE_TAB_BAR, self.config.tab_bar,
         )
         self.menu_bar.set_item_checked(VIEW_NATIVE_UI, self.config.native_ui)
+        self.menu_bar.set_item_checked(
+            VIEW_PLATINUM_UI,
+            self.config.platinum_ui and not self.config.native_ui,
+        )
         self.menu_bar.set_item_checked(
             EDITOR_TOGGLE_MINIMAP, self.config.minimap,
         )
@@ -4758,7 +4766,7 @@ struct Desktop(Movable):
         # so paint order doesn't matter for correctness.
         # A dialog the host shows natively (macOS-style UI) isn't painted.
         var native = self.native_ui()
-        if not native:
+        if not self.host_draws_dialogs():
             # Open declarative dialogs through the grid projector, the top
             # one live (natively the host draws them from ``ui_tree``). Below
             # the prompts and confirms, which can open over them.
@@ -4772,7 +4780,8 @@ struct Desktop(Movable):
             self.prompt.paint(canvas, screen)
         # Review paints over every modal (below), so a confirm it raised
         # (checkout a branch?) is painted again after it.
-        if not self.review.active and not native:
+        var host_confirm = self.host_draws_confirm()
+        if not self.review.active and not host_confirm:
             self.confirm_dialog.paint(canvas, screen)
         if not native:
             self.message_request_dialog.paint(canvas, screen)
@@ -4847,7 +4856,7 @@ struct Desktop(Movable):
         if not (self.native_ui() and self.review.active
                 and not self.review.is_reviewing()):
             self.review.paint(canvas, screen, review_top_y)
-        if self.review.active and not native:
+        if self.review.active and not host_confirm:
             self.confirm_dialog.paint(canvas, screen)
         # Git history for selection — a paned modal over the whole
         # surface, same top_y convention as review (below the in-grid
@@ -8422,6 +8431,24 @@ struct Desktop(Movable):
         windows switch to the tabbed layout under the host's tab strip."""
         return self.host_owns_menu and self.config.native_ui
 
+    def platinum_ui(self) -> Bool:
+        """The Mac OS 9 look is on: the host draws the declarative dialogs,
+        the confirms and the window chrome itself, Platinum-style, with the
+        windows as tabs. The menus stay the system menu bar and everything
+        else the classic grid."""
+        return self.host_owns_menu and self.config.platinum_ui \
+            and not self.config.native_ui
+
+    def host_tabs(self) -> Bool:
+        """The windows are tabs under the host's tab strip (the tabbed
+        layout) rather than overlapping grid windows."""
+        return self.native_ui() or self.platinum_ui()
+
+    def host_draws_dialogs(self) -> Bool:
+        """The declarative dialogs go to the host (``tk_desktop_ui``)
+        rather than through the grid projector."""
+        return self.native_ui() or self.platinum_ui()
+
     def apply_welcome(
         mut self, native_ui: Bool, theme: String, font_label: String,
         font_size: Int, done: Bool,
@@ -8439,6 +8466,7 @@ struct Desktop(Movable):
         if done:
             self.config.welcome_done = True
         self.settings.native_ui = self.config.native_ui
+        self.settings.platinum_ui = self.config.platinum_ui
         self.settings.theme_choice = self.config.theme
         if len(self.settings._font_names) > 0:
             self.settings.font_choice = self.font_label()
@@ -8452,7 +8480,9 @@ struct Desktop(Movable):
         self._close_window_keeping_work(idx)
 
     def _fit_windows(mut self, screen: Rect):
-        self.windows.tabbed = self.native_ui()
+        self.windows.tabbed = self.host_tabs()
+        # The Mac OS 9 look's scroll bar is 16 points: two cells.
+        self.windows.gutter = 2 if self.platinum_ui() else 0
         self.windows.fit_into(self.workspace_rect(screen))
 
     def native_prompt_active(self) -> Bool:
@@ -8478,7 +8508,16 @@ struct Desktop(Movable):
             return String("Add Watch")
         return String("OK")
 
+    def host_draws_confirm(self) -> Bool:
+        """The host shows the confirm dialog: an ``NSAlert`` in the
+        macOS-style UI, a Platinum alert in the Mac OS 9 look — which has to
+        be the host's, as it can be raised over a dialog the host is
+        drawing."""
+        return self.host_draws_dialogs()
+
     def native_dialog_active(self) -> Bool:
+        if self.platinum_ui():
+            return self.confirm_dialog.active
         if not self.native_ui():
             return False
         return self.confirm_dialog.active or self.native_prompt_active() \
@@ -8512,7 +8551,8 @@ struct Desktop(Movable):
     # through ``ui_apply``.
 
     def native_ui_surface_active(self) -> Bool:
-        return self.native_ui() and len(self.ui_surface().as_bytes()) > 0
+        return self.host_draws_dialogs() \
+            and len(self.ui_surface().as_bytes()) > 0
 
     def ui_surfaces(self) -> List[String]:
         """The open declarative dialogs by name, bottom first — more than
@@ -9424,9 +9464,10 @@ struct Desktop(Movable):
             )
             self.settings.offer_native_ui = self.host_owns_menu
             self.settings.native_ui = self.config.native_ui
+            self.settings.platinum_ui = self.config.platinum_ui
             # The macOS-style UI shows Settings as a native window; the
             # classic look as the grid one, in the host's cell window.
-            self.settings_native = self.native_ui()
+            self.settings_native = self.host_draws_dialogs()
             return Optional[String]()
         if action == HELP_HOTKEYS:
             self._open_hotkeys_help(screen)
@@ -9610,10 +9651,21 @@ struct Desktop(Movable):
             self._apply_view_config()
             self._persist_config()
             return Optional[String]()
-        if action == VIEW_NATIVE_UI:
-            self.config.native_ui = not self.config.native_ui
+        if action == VIEW_NATIVE_UI or action == VIEW_PLATINUM_UI:
+            # The three looks are one choice: turning one on turns the
+            # other off.
+            if action == VIEW_NATIVE_UI:
+                self.config.native_ui = not self.config.native_ui
+                if self.config.native_ui:
+                    self.config.platinum_ui = False
+            else:
+                var on = not self.platinum_ui()
+                self.config.platinum_ui = on
+                if on:
+                    self.config.native_ui = False
             # An open Settings shows it, and writes it back with its edits
             self.settings.native_ui = self.config.native_ui
+            self.settings.platinum_ui = self.config.platinum_ui
             self._apply_view_config()
             self._persist_config()
             return Optional[String]()
@@ -12298,6 +12350,7 @@ struct Desktop(Movable):
             # they change has to be what the dialog shows, or its next
             # edit writes back the one it opened with.
             self.settings.native_ui = self.config.native_ui
+            self.settings.platinum_ui = self.config.platinum_ui
             self.settings.theme_choice = self.config.theme
             if len(self.settings._font_names) > 0:
                 self.settings.font_choice = self.font_label()
@@ -12320,8 +12373,10 @@ struct Desktop(Movable):
             self.config.cursor_blink = self.settings.cursor_blink
             # The look (macOS-style UI or classic), the same as View ▸
             # macOS-style UI.
-            if self.settings.native_ui != self.config.native_ui:
+            if self.settings.native_ui != self.config.native_ui \
+                    or self.settings.platinum_ui != self.config.platinum_ui:
                 self.config.native_ui = self.settings.native_ui
+                self.config.platinum_ui = self.settings.platinum_ui
                 self._apply_view_config()
             # Language Server per-feature gates — plain bool copies; the
             # feature code reads ``self.config.lsp_*`` at request/paint time.

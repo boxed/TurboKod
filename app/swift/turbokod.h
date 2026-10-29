@@ -153,6 +153,7 @@ void tk_desktop_native_color_answer(int64_t h, int64_t rgb, int64_t mode, int64_
 // {"focused": i, "tabs": [{"title", "path", "dirty"}]} (same buffer contract
 // as _native_dialog); _tab_select / _tab_close act on a window index.
 int32_t tk_desktop_native_ui(int64_t h);
+int32_t tk_desktop_platinum_ui(int64_t h);
 int64_t tk_desktop_tabs(int64_t h, int64_t out_ptr, int64_t cap);
 int32_t tk_desktop_tab_select(int64_t h, int64_t idx, int64_t cols, int64_t rows);
 void tk_desktop_tab_close(int64_t h, int64_t idx);

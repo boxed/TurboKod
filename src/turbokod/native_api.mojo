@@ -1312,6 +1312,16 @@ def tk_desktop_native_ui(h: Int) abi("C") -> Int32:
 
 
 @export
+def tk_desktop_platinum_ui(h: Int) abi("C") -> Int32:
+    """1 while the Mac OS 9 look is on for this window's Desktop — the host
+    then draws the declarative dialogs, the confirms, the window chrome,
+    the tab strip and the editor's scroll bar Platinum-style."""
+    if h == 0:
+        return 0
+    return 1 if _desk(h)[].platinum_ui() else 0
+
+
+@export
 def tk_desktop_tabs(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     """The windows as tabs for the host's native tab strip, as JSON:
     ``{"focused": i, "tabs": [{"title", "path", "dirty"}, …]}`` in window
@@ -1678,7 +1688,7 @@ def tk_desktop_editor_scroller(
     if h == 0:
         return 0
     ref d = _desk(h)[]
-    if not d.native_ui() or not d.windows.tabbed \
+    if not d.host_tabs() or not d.windows.tabbed \
             or not d.windows.focused_is_editor() \
             or d._fullscreen_modal_active() or d.history.active \
             or d.merge_view.active or d.review.active:
@@ -2736,11 +2746,13 @@ def tk_desktop_native_color_answer(
 @export
 def tk_desktop_ui(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     """The open declarative dialogs for the native projector, bottom first:
-    ``{stack: [{name, tree}], window: [{name, tree}]}`` with ``tree`` the
+    ``{stack: [{name, tree}], window: [{name, tree}], look}`` with ``tree`` the
     ``ui_to_json`` of each one's ``ui()``. ``stack`` holds the modal
     dialogs (sheets on the window), ``window`` Settings and what it opened
-    (its own window, the workspace staying usable). 0 when neither is up
-    natively. Same buffer contract as ``tk_desktop_native_dialog``."""
+    (its own window, the workspace staying usable). ``look`` is
+    ``"macos"`` (AppKit views) or ``"platinum"`` (the Mac OS 9 projector).
+    0 when neither is up natively. Same buffer contract as
+    ``tk_desktop_native_dialog``."""
     if h == 0:
         return 0
     ref d = _desk(h)[]
@@ -2751,6 +2763,9 @@ def tk_desktop_ui(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     var out = json_object()
     out.put(String("stack"), _ui_stack_json(d, modal))
     out.put(String("window"), _ui_stack_json(d, window))
+    out.put(String("look"), json_str(
+        String("platinum") if d.platinum_ui() else String("macos"),
+    ))
     return _write_out(encode_json(out), out_ptr, cap)
 
 

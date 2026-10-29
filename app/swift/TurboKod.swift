@@ -1870,6 +1870,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // macOS-style UI: each window's native tab strip (a titlebar accessory).
     var tabStrips: [ObjectIdentifier: (accessory: NSTitlebarAccessoryViewController, strip: TabStripView)] = [:]
     var tabsBuf = [UInt8](repeating: 0, count: 4096)
+    // Mac OS 9 look: each window's Platinum frame (with its tab strip) and
+    // its editor's scroll bar.
+    var platinumFrames: [ObjectIdentifier: PlatinumMainFrame] = [:]
+    var platinumScrollers: [ObjectIdentifier: PlatinumScroller] = [:]
     // macOS-style UI: the native picker sheet up on each window, if any.
     var pickers: [ObjectIdentifier: PickerController] = [:]
     var welcome: WelcomeController?
@@ -1883,9 +1887,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     var trees: [ObjectIdentifier: FileTreeOverlay] = [:]
     // macOS-style UI: the native Settings window (one per Desktop that opened it).
     // Declarative dialogs (ui_tree.mojo) projected natively, per window.
-    var declarative: [ObjectIdentifier: [DeclarativeController]] = [:]
+    var declarative: [ObjectIdentifier: [DeclarativeSurface]] = [:]
     // …and Settings in its own window, with what it opened as sheets on it.
-    var declarativeWindows: [ObjectIdentifier: [DeclarativeController]] = [:]
+    var declarativeWindows: [ObjectIdentifier: [DeclarativeSurface]] = [:]
+    // Mac OS 9 look: the confirm shown as a Platinum alert, per window.
+    var platinumAlerts: [ObjectIdentifier: PlatinumDialog] = [:]
     // macOS-style UI: Project ▸ Spelling as a sheet, per window.
     var spellingSheets: [ObjectIdentifier: SpellingController] = [:]
     // macOS-style UI: Git history as a sheet, per window.
@@ -2300,6 +2306,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             for v in self.views where v.handle != 0 {
                 if self.pollNativeDialog(v) { changed = true }
                 if self.pollDeclarative(v) { changed = true }
+                if self.pollPlatinumChrome(v) { changed = true }
                 if self.pollTabStrip(v) { changed = true }
                 if self.pollPicker(v) { changed = true }
                 if self.pollPopup(v) { changed = true }
@@ -2360,7 +2367,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             guard let self,
                   let w = note.object as? NSWindow,
                   w.occlusionState.contains(.visible),
-                  let v = w.contentView as? CellView else { return }
+                  let v = w.cellView else { return }
             self.idleTicks = 0
             v.invalidateFrame()
             v.needsDisplay = true
@@ -2547,7 +2554,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // no windows exist. Returns 0 only if even the chrome Desktop failed
     // to allocate.
     private func menuHandle() -> Int64 {
-        if let v = NSApp.keyWindow?.contentView as? CellView, v.handle != 0 {
+        if let v = NSApp.keyWindow?.cellView, v.handle != 0 {
             return v.handle
         }
         if let v = views.first, v.handle != 0 { return v.handle }
@@ -3070,7 +3077,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     private func keyView() -> CellView? {
-        NSApp.keyWindow?.contentView as? CellView
+        NSApp.keyWindow?.cellView
     }
 
     @objc func newWindowAction() { _ = newWindow() }
@@ -3346,9 +3353,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let view = CellView()
         view.handle = h
         let initial = frame ?? NSRect(x: 0, y: 0, width: 1000, height: 640)
-        let win = NSWindow(contentRect: initial,
-                           styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                           backing: .buffered, defer: false)
+        let win = MainWindow(contentRect: initial,
+                             styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                             backing: .buffered, defer: false)
         // We own session persistence; opt out of macOS window restoration so
         // no per-window state is saved and no post-crash "reopen windows?"
         // dialog appears. See NSQuitAlwaysKeepsWindows in didFinishLaunching.
@@ -3507,6 +3514,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         windows.remove(at: idx)
         views.remove(at: idx)
         tabStrips[ObjectIdentifier(v)] = nil
+        platinumFrames[ObjectIdentifier(v)] = nil
+        platinumScrollers[ObjectIdentifier(v)] = nil
         nativeSheets[ObjectIdentifier(v)] = nil
         pickers[ObjectIdentifier(v)] = nil
         popups[ObjectIdentifier(v)] = nil
@@ -3516,7 +3525,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         for dc in (declarativeWindows.removeValue(forKey: ObjectIdentifier(v)) ?? []).reversed() {
             dc.dismiss()
         }
-        declarative[ObjectIdentifier(v)] = nil
+        for dc in (declarative.removeValue(forKey: ObjectIdentifier(v)) ?? []).reversed() {
+            dc.dismiss()
+        }
+        platinumAlerts.removeValue(forKey: ObjectIdentifier(v))?.dismiss()
         spellingSheets[ObjectIdentifier(v)] = nil
         historySheets[ObjectIdentifier(v)] = nil
         mergeSheets[ObjectIdentifier(v)] = nil
@@ -4088,6 +4100,25 @@ extension AppController {
         let cols = Int64(v.cols()), rows = Int64(v.rows())
         let o = readCoreJSON(&nativeDialogBuf, { tk_desktop_editor_scroller(v.handle, cols, rows, $0, $1) })
             .flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
+        // The Mac OS 9 look: a Platinum scroll bar in the editor's gutter,
+        // there (disabled) even when there's nothing to scroll.
+        if tk_desktop_platinum_ui(v.handle) != 0, let o = o {
+            if let sc = scrollers.removeValue(forKey: id) { sc.removeFromSuperview() }
+            let sc = platinumScrollers[id] ?? {
+                let s = PlatinumScroller(view: v)
+                v.addSubview(s)
+                platinumScrollers[id] = s
+                return s
+            }()
+            let changed = sc.update(o)
+            platinumFrames[id]?.growUnder = sc.frame
+            return changed
+        }
+        platinumFrames[id]?.growUnder = nil
+        if let sc = platinumScrollers.removeValue(forKey: id) {
+            sc.removeFromSuperview()
+            return true
+        }
         guard let o = o, (o["max"] as? Int ?? 0) > 0 else {
             if let sc = scrollers.removeValue(forKey: id) { sc.removeFromSuperview(); return true }
             return false
@@ -4420,6 +4451,71 @@ extension AppController {
         return true
     }
 
+    /// A click on one of `v`'s tabs (native or Platinum).
+    func selectTab(_ v: CellView, _ i: Int) {
+        guard v.handle != 0 else { return }
+        let code = tk_desktop_tab_select(v.handle, Int64(i), Int64(v.cols()), Int64(v.rows()))
+        handleHostAction(code, sourceHandle: v.handle, view: v)
+        v.window?.makeFirstResponder(v)
+        v.invalidateFrame()
+        v.needsDisplay = true
+    }
+
+    /// A tab's close button.
+    func closeTab(_ v: CellView, _ i: Int) {
+        guard v.handle != 0 else { return }
+        tk_desktop_tab_close(v.handle, Int64(i))
+        v.invalidateFrame()
+        v.needsDisplay = true
+    }
+
+    /// Put `v`'s window into the Mac OS 9 look's frame or back into the
+    /// system's as the look changes, and keep its title and tabs current.
+    /// True when anything changed.
+    func pollPlatinumChrome(_ v: CellView) -> Bool {
+        guard let win = v.window as? MainWindow else { return false }
+        let id = ObjectIdentifier(v)
+        let on = tk_desktop_platinum_ui(v.handle) != 0
+        if let pf = platinumFrames[id] {
+            if !on {
+                platinumFrames[id] = nil
+                let f = win.frame
+                v.removeFromSuperview()
+                win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+                win.hasShadow = true
+                win.contentView = v
+                win.setFrame(f, display: true)
+                win.makeFirstResponder(v)
+                return true
+            }
+            pf.title = win.title
+            let data = readCoreJSON(&tabsBuf, { tk_desktop_tabs(v.handle, $0, $1) })
+            var changed = data.map { pf.tabs.update(from: $0) } ?? false
+            // No payload means "no strip" (e.g. during review).
+            if pf.showTabs(data != nil && !pf.tabs.tabs.isEmpty) { changed = true }
+            return changed
+        }
+        guard on else { return false }
+        let f = win.frame
+        let pf = PlatinumMainFrame(cell: v)
+        pf.title = win.title
+        pf.onClose = { [weak win] in win?.performClose(nil) }
+        pf.onZoom = { [weak win] in win?.performZoom(nil) }
+        pf.onCollapse = { [weak win] in win?.performMiniaturize(nil) }
+        pf.tabs.onSelect = { [weak self, weak v] i in if let v = v { self?.selectTab(v, i) } }
+        pf.tabs.onClose = { [weak self, weak v] i in if let v = v { self?.closeTab(v, i) } }
+        win.styleMask = [.borderless, .miniaturizable, .resizable]
+        win.hasShadow = false
+        win.backgroundColor = Platinum.face
+        win.contentView = pf
+        win.setFrame(f, display: false)
+        pf.layoutChrome()
+        win.makeFirstResponder(v)
+        platinumFrames[id] = pf
+        _ = pollPlatinumChrome(v)
+        return true
+    }
+
     /// Show / hide / refresh `v`'s native tab strip. True when it changed.
     func pollTabStrip(_ v: CellView) -> Bool {
         guard let win = v.window else { return false }
@@ -4431,20 +4527,8 @@ extension AppController {
             let acc = NSTitlebarAccessoryViewController()
             acc.layoutAttribute = .bottom
             acc.view = strip
-            strip.onSelect = { [weak self, weak v] i in
-                guard let self = self, let v = v, v.handle != 0 else { return }
-                let code = tk_desktop_tab_select(v.handle, Int64(i), Int64(v.cols()), Int64(v.rows()))
-                self.handleHostAction(code, sourceHandle: v.handle, view: v)
-                v.window?.makeFirstResponder(v)
-                v.invalidateFrame()
-                v.needsDisplay = true
-            }
-            strip.onClose = { [weak v] i in
-                guard let v = v, v.handle != 0 else { return }
-                tk_desktop_tab_close(v.handle, Int64(i))
-                v.invalidateFrame()
-                v.needsDisplay = true
-            }
+            strip.onSelect = { [weak self, weak v] i in if let v = v { self?.selectTab(v, i) } }
+            strip.onClose = { [weak self, weak v] i in if let v = v { self?.closeTab(v, i) } }
             win.addTitlebarAccessoryViewController(acc)
             tabStrips[id] = (acc, strip)
         }
@@ -4504,23 +4588,28 @@ extension AppController {
             .flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
         var live = declarative[id] ?? []
         var windowed = declarativeWindows[id] ?? []
-        let a = reconcile(&live, o?["stack"] as? [[String: Any]] ?? [], for: v, asWindow: false)
-        let b = reconcile(&windowed, o?["window"] as? [[String: Any]] ?? [], for: v, asWindow: true)
+        let look = o?["look"] as? String ?? "macos"
+        let a = reconcile(&live, o?["stack"] as? [[String: Any]] ?? [], for: v, asWindow: false, look: look)
+        let b = reconcile(&windowed, o?["window"] as? [[String: Any]] ?? [], for: v, asWindow: true, look: look)
         declarative[id] = live.isEmpty ? nil : live
         declarativeWindows[id] = windowed.isEmpty ? nil : windowed
+        // A Platinum dialog is a child window, not a sheet: a click on the
+        // workspace behind it mustn't keep the keyboard.
+        (live.last as? PlatinumDialog)?.reclaimKey()
         return a || b
     }
 
     /// Bring `live` in line with the core's `stack` of dialogs (bottom
     /// first). Level 0 is a sheet on `v`'s window — or, `asWindow`, a window
     /// of its own; every level above is a sheet on the one below it.
-    private func reconcile(_ live: inout [DeclarativeController], _ stack: [[String: Any]],
-                           for v: CellView, asWindow: Bool) -> Bool {
+    private func reconcile(_ live: inout [DeclarativeSurface], _ stack: [[String: Any]],
+                           for v: CellView, asWindow: Bool, look: String) -> Bool {
         var changed = false
         // Retire every level from the first whose dialog changed, top down.
         var keep = 0
         while keep < live.count, keep < stack.count,
-              live[keep].name == stack[keep]["name"] as? String { keep += 1 }
+              live[keep].name == stack[keep]["name"] as? String,
+              live[keep].look == look { keep += 1 }
         if keep < live.count {
             for dc in live[keep...].reversed() { dc.dismiss() }
             live.removeSubrange(keep...)
@@ -4533,7 +4622,9 @@ extension AppController {
                 if live[i].update(tree) { changed = true }
                 continue
             }
-            let dc = DeclarativeController(name: name, view: v, asWindow: asWindow && i == 0)
+            let dc: DeclarativeSurface = look == "platinum"
+                ? PlatinumDialog(name: name, view: v, asWindow: asWindow && i == 0)
+                : DeclarativeController(name: name, view: v, asWindow: asWindow && i == 0)
             if asWindow && i == 0 {
                 _ = dc.update(tree)
                 dc.show()
@@ -4560,6 +4651,14 @@ extension AppController {
     func pollNativeDialog(_ v: CellView) -> Bool {
         let id = ObjectIdentifier(v)
         let dialog = nativeDialogJSON(v.handle)
+        if let alert = platinumAlerts[id] {
+            if dialog == nil {
+                platinumAlerts[id] = nil
+                alert.dismiss()
+                return true
+            }
+            return false
+        }
         if let sheet = nativeSheets[id] {
             if dialog == nil {
                 nativeSheets[id] = nil
@@ -4571,6 +4670,10 @@ extension AppController {
         guard let dialog = dialog, let kind = dialog["kind"] as? String,
               let win = sheetHost(v), win.isVisible, win.attachedSheet == nil
         else { return false }
+        if kind == "confirm" && tk_desktop_platinum_ui(v.handle) != 0 {
+            showPlatinumConfirm(dialog, for: v, in: win)
+            return true
+        }
         switch kind {
         case "confirm": showConfirmSheet(dialog, for: v, in: win)
         case "prompt": showPromptSheet(dialog, for: v, in: win)
@@ -4591,6 +4694,44 @@ extension AppController {
         handleHostAction(code, sourceHandle: v.handle, view: v)
         v.invalidateFrame()
         v.needsDisplay = true
+    }
+
+    /// The Mac OS 9 look's confirm: a Platinum alert, the core's buttons
+    /// right-aligned in its own order, each answering to its first letter.
+    private func showPlatinumConfirm(_ d: [String: Any], for v: CellView, in win: NSWindow) {
+        let labels = d["buttons"] as? [String] ?? []
+        guard !labels.isEmpty else { return }
+        let def = min(max(d["default"] as? Int ?? 0, 0), labels.count - 1)
+        let destructive = d["destructive"] as? Int ?? -1
+        let buttons: [[String: Any]] = labels.enumerated().map { i, l in
+            var f = Platinum.HOTKEY
+            if i == def { f |= Platinum.DEFAULT }
+            if l == "Cancel" { f |= Platinum.CANCEL }
+            if i == destructive { f |= Platinum.DESTRUCTIVE }
+            return ["k": "button", "key": "\(i)", "text": l, "f": f]
+        }
+        let body: [String: Any] = ["k": "hstack", "n": 1, "kids": [
+            ["k": "icon", "text": destructive >= 0 ? "caution" : "note"],
+            ["k": "vstack", "n": 1, "kids": [
+                ["k": "label", "text": d["message"] as? String ?? ""],
+                ["k": "hstack", "n": 1, "f": Platinum.RIGHT, "kids": buttons],
+            ]],
+        ]]
+        let id = ObjectIdentifier(v)
+        let alert = PlatinumDialog(name: "confirm", view: v, titled: false) { [weak self, weak v] events in
+            guard let self = self, let v = v, let e = events.first, e.first as? Bool == true,
+                  let i = Int(e.count > 1 ? e[1] as? String ?? "" : "") else { return }
+            self.platinumAlerts.removeValue(forKey: id)?.dismiss()
+            guard v.handle != 0 else { return }
+            let code = tk_desktop_native_confirm_answer(v.handle, Int64(i))
+            self.handleHostAction(code, sourceHandle: v.handle, view: v)
+            v.invalidateFrame()
+            v.needsDisplay = true
+        }
+        let cancel = labels.firstIndex(of: "Cancel").map { "\($0)" } ?? ""
+        _ = alert.update(["k": "dialog", "text": "", "key": cancel, "kids": [body]])
+        platinumAlerts[id] = alert
+        alert.present(in: win)
     }
 
     private func showConfirmSheet(_ d: [String: Any], for v: CellView, in win: NSWindow) {
@@ -5601,6 +5742,14 @@ final class PickerCell: NSTableCellView {
 }
 
 
+extension NSWindow {
+    /// A project window's grid: its content view, or inside the Mac OS 9
+    /// look's frame.
+    var cellView: CellView? {
+        contentView as? CellView ?? (contentView as? PlatinumMainFrame)?.cell
+    }
+}
+
 /// Render `win` (frame view: titlebar + accessories + content) and its
 /// attached sheet into one PNG, entirely offscreen — works with the display
 /// asleep, unlike `screencapture`.
@@ -5640,6 +5789,19 @@ func captureWindowPNG(_ win: NSWindow, to path: String) {
         midX = r.midX
         top = r.maxY
     }
+    // Child windows (the Mac OS 9 look's dialogs and alerts) where they sit
+    // over the window, and theirs over them.
+    func children(of w: NSWindow) {
+        for c in w.childWindows ?? [] where c.isVisible {
+            guard let cv = c.contentView,
+                  let crep = cv.bitmapImageRepForCachingDisplay(in: cv.bounds) else { continue }
+            cv.cacheDisplay(in: cv.bounds, to: crep)
+            crep.draw(in: NSRect(x: c.frame.minX - win.frame.minX, y: c.frame.minY - win.frame.minY,
+                                 width: c.frame.width, height: c.frame.height))
+            children(of: c)
+        }
+    }
+    children(of: win)
     out.unlockFocus()
     guard let tiff = out.tiffRepresentation, let bmp = NSBitmapImageRep(data: tiff),
           let png = bmp.representation(using: .png, properties: [:]) else { return }
@@ -9241,4 +9403,2141 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
     }
 
     @objc private func rowToggled(_ b: NSButton) { act("toggle:\(b.tag)") }
+}
+
+
+// MARK: - Mac OS 9 ("Platinum") look
+//
+// View ▸ Mac OS 9-style UI. The host draws the declarative dialogs and the
+// confirm alerts itself, in pixels, from the same data the AppKit projector
+// uses (`tk_desktop_ui`, `tk_desktop_native_dialog`). No AppKit control is
+// involved but the text fields' editors. The menus stay the system menu bar,
+// and the workspace stays the classic grid.
+// Full details in docs/platinum-ui.md.
+
+/// A projected declarative dialog: the AppKit sheet (`DeclarativeController`)
+/// or the Platinum window (`PlatinumDialog`).
+protocol DeclarativeSurface: AnyObject {
+    var name: String { get }
+    var look: String { get }
+    var window: NSWindow { get }
+    func update(_ tree: [String: Any]) -> Bool
+    func present(in win: NSWindow)
+    func show()
+    func dismiss()
+}
+
+extension DeclarativeController: DeclarativeSurface {
+    var look: String { "macos" }
+}
+
+enum Platinum {
+    static func gray(_ v: Int) -> NSColor { NSColor(srgbRed: CGFloat(v) / 255, green: CGFloat(v) / 255,
+                                                    blue: CGFloat(v) / 255, alpha: 1) }
+    /// The dialog and window background; E3, as in Apple's own figures.
+    static let face = gray(0xE3)
+    static let light = NSColor.white
+    static let mid = gray(0xBB)
+    static let shadow = gray(0x88)
+    static let dark = gray(0x55)
+    static let black = NSColor.black
+    static let disabled = gray(0x99)
+    /// Menu highlight, and the selected tab's / focused field's ring.
+    static let accent = NSColor(srgbRed: 0x33 / 255.0, green: 0x33 / 255.0, blue: 0x99 / 255.0, alpha: 1)
+    static let lavender = NSColor(srgbRed: 0xCC / 255.0, green: 0xCC / 255.0, blue: 1, alpha: 1)
+    static let lavenderDark = NSColor(srgbRed: 0x88 / 255.0, green: 0x88 / 255.0, blue: 0xCC / 255.0, alpha: 1)
+
+    /// The system font. Silom's Latin glyphs are Chicago's, drawn on a
+    /// 12-pixels-per-em grid, so at 12pt every stem lands on a whole point.
+    static let system = NSFont(name: "Silom", size: 12) ?? .boldSystemFont(ofSize: 12)
+    /// The application font: text fields, list rows, hints. Geneva only at
+    /// 12: its outlines aren't hinted for smaller sizes, and at 10 or 9 the
+    /// spacing is uneven unantialiased however the advances are rounded.
+    static let app = NSFont(name: "Geneva", size: 12) ?? .systemFont(ofSize: 12)
+
+    // Mirrors the UI_* flag bits in ui_tree.mojo; RIGHT is host-only (the
+    // alert's right-aligned button row).
+    static let DISABLED = 1 << 0, DEFAULT = 1 << 1, CANCEL = 1 << 2, DESTRUCTIVE = 1 << 3
+    static let CENTER = 1 << 4, SECONDARY = 1 << 5, HEADING = 1 << 6, HOTKEY = 1 << 7
+    static let CHECKABLE = 1 << 8, BROWSE = 1 << 9, RIGHT = 1 << 30
+
+    static func fill(_ r: NSRect, _ c: NSColor) { c.setFill(); NSBezierPath.fill(r) }
+
+    /// A one-point bevel just inside `r`: `tl` along the top and left, `br`
+    /// along the bottom and right (views are flipped: minY is the top).
+    static func bevel(_ r: NSRect, _ tl: NSColor, _ br: NSColor) {
+        fill(NSRect(x: r.minX, y: r.minY, width: r.width - 1, height: 1), tl)
+        fill(NSRect(x: r.minX, y: r.minY, width: 1, height: r.height - 1), tl)
+        fill(NSRect(x: r.minX + 1, y: r.maxY - 1, width: r.width - 1, height: 1), br)
+        fill(NSRect(x: r.maxX - 1, y: r.minY + 1, width: 1, height: r.height - 1), br)
+    }
+
+    static func outline(_ r: NSRect, _ c: NSColor) { bevel(r, c, c) }
+
+    /// A sunken well: the Platinum frame of a text field or a list.
+    static func well(_ r: NSRect) {
+        bevel(r, shadow, light)
+        outline(r.insetBy(dx: 1, dy: 1), dark)
+    }
+
+    /// Kerning off: Silom's kerning pairs aren't whole pixels and throw the
+    /// Chicago spacing off; without them every advance is a whole point.
+    static func attrs(_ font: NSFont, _ color: NSColor) -> [NSAttributedString.Key: Any] {
+        [.font: font, .foregroundColor: color, .kern: 0]
+    }
+
+    static func lineHeight(_ font: NSFont) -> CGFloat { ceil(font.ascender - font.descender) }
+
+    /// One line laid out the way a bitmap font sets it: CoreText picks the
+    /// glyphs (and fallback fonts for ✓, ⌘ …), then every advance is
+    /// rounded to a whole point. Geneva's outlines have fractional advances
+    /// that, unantialiased, smear the spacing; whole points keep it even.
+    private struct Run { let font: CTFont; let glyphs: [CGGlyph]; let xs: [CGFloat] }
+
+    private static func layout(_ s: String, _ font: NSFont) -> (runs: [Run], width: CGFloat) {
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: s, attributes: attrs(font, black)))
+        var x: CGFloat = 0
+        var out: [Run] = []
+        for case let run as CTRun in CTLineGetGlyphRuns(line) as NSArray {
+            let n = CTRunGetGlyphCount(run)
+            var glyphs = [CGGlyph](repeating: 0, count: n)
+            var adv = [CGSize](repeating: .zero, count: n)
+            CTRunGetGlyphs(run, CFRange(location: 0, length: n), &glyphs)
+            CTRunGetAdvances(run, CFRange(location: 0, length: n), &adv)
+            let rf = (CTRunGetAttributes(run) as NSDictionary)[kCTFontAttributeName] as! CTFont
+            var xs: [CGFloat] = []
+            for a in adv { xs.append(x); x += max(0, a.width.rounded()) }
+            out.append(Run(font: rf, glyphs: glyphs, xs: xs))
+        }
+        return (out, x)
+    }
+
+    static func width(_ s: String, _ font: NSFont = system) -> CGFloat { layout(s, font).width }
+
+    /// `s` cut down with "…" to fit `w`.
+    static func fitting(_ s: String, _ w: CGFloat, _ font: NSFont) -> String {
+        if width(s, font) <= w { return s }
+        let chars = Array(s)
+        var lo = 0, hi = chars.count
+        while lo < hi {
+            let mid = (lo + hi + 1) / 2
+            if width(String(chars[..<mid]) + "…", font) <= w { lo = mid } else { hi = mid - 1 }
+        }
+        return lo == 0 ? "" : String(chars[..<lo]) + "…"
+    }
+
+    /// Draw one line of text, unantialiased, from a whole-point origin;
+    /// vertically centered in `r`, cut off with "…" past its right edge.
+    /// Every Platinum view is flipped, which the text matrix undoes.
+    static func text(_ s: String, in r: NSRect, font: NSFont = system, color: NSColor = .black,
+                     center: Bool = false) {
+        guard let cg = NSGraphicsContext.current?.cgContext, r.width > 0 else { return }
+        let t = fitting(s, r.width, font)
+        let (runs, w) = layout(t, font)
+        let x = center ? floor(r.minX + (r.width - w) / 2) : floor(r.minX)
+        let base = floor(r.minY + (r.height - lineHeight(font)) / 2) + ceil(font.ascender)
+        cg.saveGState()
+        cg.setShouldAntialias(false)
+        // The text matrix maps the glyph positions too, so the baseline goes
+        // in negated to come out at `base`.
+        cg.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
+        cg.setFillColor(color.cgColor)
+        for run in runs {
+            CTFontDrawGlyphs(run.font, run.glyphs, run.xs.map { CGPoint(x: x + $0, y: -base) },
+                             run.glyphs.count, cg)
+        }
+        cg.restoreGState()
+    }
+
+    /// `s` broken into lines no wider than `w`, at spaces and newlines.
+    static func wrap(_ s: String, _ w: CGFloat, _ font: NSFont) -> [String] {
+        var out: [String] = []
+        for para in s.components(separatedBy: "\n") {
+            var line = ""
+            for word in para.split(separator: " ", omittingEmptySubsequences: false) {
+                let cand = line.isEmpty ? String(word) : line + " " + word
+                if !line.isEmpty && width(cand, font) > w { out.append(line); line = String(word) } else { line = cand }
+            }
+            out.append(line)
+        }
+        return out
+    }
+
+    /// A small raised square (arrow boxes, the close box).
+    static func raisedBox(_ r: NSRect, pressed: Bool = false) {
+        fill(r, pressed ? gray(0x99) : face)
+        outline(r, black)
+        if pressed { bevel(r.insetBy(dx: 1, dy: 1), dark, mid) } else { bevel(r.insetBy(dx: 1, dy: 1), light, shadow) }
+    }
+
+    static func triangle(in r: NSRect, down: Bool, color: NSColor = .black) {
+        let ctx = NSGraphicsContext.current
+        let was = ctx?.shouldAntialias ?? true
+        ctx?.shouldAntialias = false
+        let cx = floor(r.midX), cy = floor(r.midY)
+        let p = NSBezierPath()
+        if down {
+            p.move(to: NSPoint(x: cx - 4, y: cy - 2)); p.line(to: NSPoint(x: cx + 4, y: cy - 2))
+            p.line(to: NSPoint(x: cx, y: cy + 2))
+        } else {
+            p.move(to: NSPoint(x: cx - 4, y: cy + 2)); p.line(to: NSPoint(x: cx + 4, y: cy + 2))
+            p.line(to: NSPoint(x: cx, y: cy - 2))
+        }
+        p.close()
+        color.setFill(); p.fill()
+        ctx?.shouldAntialias = was
+    }
+
+    /// One tab in a row `tabH` tall, over a pane whose top edge is at
+    /// `tabH - 1`: an unselected tab sits 2 lower and stops above that
+    /// edge, the selected one runs a point on over it to join the pane.
+    /// Returns the rect for its label.
+    static func tab(_ t: NSRect, selected sel: Bool, tabH: CGFloat) -> NSRect {
+        let r = NSRect(x: t.minX, y: t.minY, width: t.width, height: tabH - t.minY + (sel ? 1 : -1))
+        // The shape runs on past the tab's bottom to square off its lower
+        // corners; clip it there so a tab's fill stays in the tab row (the
+        // selected one a point further, over the pane's top edge it joins).
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        NSBezierPath(rect: r).addClip()
+        NSGraphicsContext.current?.shouldAntialias = false
+        dark.setFill()
+        NSBezierPath(roundedRect: NSRect(x: r.minX, y: r.minY, width: r.width, height: r.height + 6),
+                     xRadius: 4, yRadius: 4).fill()
+        (sel ? face : mid).setFill()
+        NSBezierPath(roundedRect: NSRect(x: r.minX + 1, y: r.minY + 1, width: r.width - 2, height: r.height + 6),
+                     xRadius: 3, yRadius: 3).fill()
+        fill(NSRect(x: r.minX + 2, y: r.minY + 1, width: r.width - 5, height: 1), light)
+        fill(NSRect(x: r.minX + 1, y: r.minY + 2, width: 1, height: r.height - 2), light)
+        fill(NSRect(x: r.maxX - 2, y: r.minY + 2, width: 1, height: r.height - 2), shadow)
+        return NSRect(x: r.minX, y: r.minY + 1, width: r.width, height: tabH - 3)
+    }
+
+    /// A vertical Platinum scroll bar in `sb`: arrows at both ends, a fixed
+    /// lavender thumb at `thumb` (none when there's nothing to scroll).
+    /// `pressed`: 1 the up arrow, 2 the down one.
+    static func scrollBar(_ sb: NSRect, thumb: NSRect?, pressed: Int) {
+        let w = sb.width
+        let live = thumb != nil
+        fill(sb, live ? mid : face)
+        fill(NSRect(x: sb.minX, y: sb.minY, width: 1, height: sb.height), .black)
+        if live {
+            fill(NSRect(x: sb.minX + 1, y: sb.minY + w, width: 1, height: sb.height - 2 * w), shadow)
+        }
+        let up = NSRect(x: sb.minX, y: sb.minY, width: w, height: w)
+        let down = NSRect(x: sb.minX, y: sb.maxY - w, width: w, height: w)
+        for (r, isDown) in [(up, false), (down, true)] {
+            raisedBox(r, pressed: pressed == (isDown ? 2 : 1))
+            triangle(in: r, down: isDown, color: live ? .black : disabled)
+        }
+        if let t = thumb {
+            fill(t, lavender)
+            outline(t, .black)
+            bevel(t.insetBy(dx: 1, dy: 1), light, lavenderDark)
+            for k in 0..<4 {
+                let y = t.minY + 4 + CGFloat(k) * 2
+                fill(NSRect(x: t.minX + 4, y: y, width: t.width - 8, height: 1), lavenderDark)
+            }
+        }
+    }
+
+    /// Follow a press until the button is released: `inside` reports
+    /// whether the pointer is over the control; true when it was released
+    /// there.
+    static func track(_ view: NSView, _ inside: @escaping (Bool) -> Void) -> Bool {
+        guard let win = view.window else { return false }
+        inside(true)
+        var over = true
+        while let e = win.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            over = view.bounds.contains(view.convert(e.locationInWindow, from: nil))
+            if e.type == .leftMouseUp { break }
+            inside(over)
+        }
+        inside(false)
+        return over
+    }
+}
+
+// MARK: Platinum dialog nodes
+
+/// One node of a projected `UINode` tree, laid out in points by its parent:
+/// `fit` is the size it asks for, `place` gives it its rect.
+class PNode: NSView {
+    weak var dlg: PlatinumDialog?
+    var node: [String: Any] = [:]
+    var kids: [PNode] = []
+    override var isFlipped: Bool { true }
+
+    var key: String { node["key"] as? String ?? "" }
+    var flags: Int { node["f"] as? Int ?? 0 }
+    var enabled: Bool { flags & Platinum.DISABLED == 0 }
+    func has(_ bit: Int) -> Bool { flags & bit != 0 }
+
+    func fit() -> NSSize { .zero }
+    var stretchX: Bool { false }
+    var stretchY: Bool { false }
+    func place(_ r: NSRect) { frame = r }
+
+    /// Adopt the node's current values (the tree's shape is unchanged).
+    func apply(_ n: [String: Any]) {
+        node = n
+        needsDisplay = true
+        let ks = n["kids"] as? [[String: Any]] ?? []
+        for (i, k) in kids.enumerated() where i < ks.count { k.apply(ks[i]) }
+    }
+
+    static func build(_ n: [String: Any], _ dlg: PlatinumDialog) -> PNode {
+        let out: PNode
+        switch n["k"] as? String ?? "" {
+        case "vstack": out = PStack(vertical: true)
+        case "hstack": out = PStack(vertical: false)
+        case "form", "row": out = PForm()
+        case "tabs": out = PTabs()
+        case "label": out = PLabel()
+        case "text": out = PText()
+        case "check": out = PCheck()
+        case "choice": out = PPopup()
+        case "table": out = PList()
+        case "button": out = PButton()
+        case "separator": out = PSeparator()
+        case "preview": out = PPreview()
+        case "icon": out = PIcon()
+        default: out = PSpacer()
+        }
+        out.dlg = dlg
+        out.node = n
+        let kidNodes: [[String: Any]]
+        if (n["k"] as? String) == "row" {
+            kidNodes = [n]   // a lone row is a one-row form
+        } else {
+            kidNodes = n["kids"] as? [[String: Any]] ?? []
+        }
+        if let f = out as? PForm {
+            for r in kidNodes {
+                let c = build((r["kids"] as? [[String: Any]])?.first ?? [:], dlg)
+                f.kids.append(c)
+                f.addSubview(c)
+            }
+        } else {
+            for k in kidNodes {
+                let c = build(k, dlg)
+                out.kids.append(c)
+                out.addSubview(c)
+            }
+        }
+        out.built()
+        return out
+    }
+
+    /// Hook for a node to finish setting up once its children exist.
+    func built() {}
+}
+
+final class PSpacer: PNode {
+    override var stretchY: Bool { true }
+}
+
+final class PStack: PNode {
+    let vertical: Bool
+    init(vertical: Bool) { self.vertical = vertical; super.init(frame: .zero) }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    private var gap: CGFloat {
+        let n = node["n"] as? Int ?? 0
+        return vertical ? (n > 0 ? 12 : 4) : (n > 0 ? 12 : 8)
+    }
+    private var align: Int { flags & (Platinum.CENTER | Platinum.RIGHT) }
+
+    override var stretchX: Bool { vertical || align != 0 || kids.contains { $0.stretchX } }
+    override var stretchY: Bool { kids.contains { $0.stretchY } }
+
+    override func fit() -> NSSize {
+        let fs = kids.map { $0.fit() }
+        let g = gap * CGFloat(max(0, fs.count - 1))
+        if vertical {
+            return NSSize(width: fs.map(\.width).max() ?? 0, height: fs.map(\.height).reduce(0, +) + g)
+        }
+        return NSSize(width: fs.map(\.width).reduce(0, +) + g, height: fs.map(\.height).max() ?? 0)
+    }
+
+    override func place(_ r: NSRect) {
+        frame = r
+        let fs = kids.map { $0.fit() }
+        let want = fit()
+        if vertical {
+            // Spare height goes to the spacers, else to the last stretchy kid.
+            var spare = max(0, r.height - want.height)
+            let spacers = kids.indices.filter { kids[$0] is PSpacer }
+            let takers = spacers.isEmpty ? (kids.lastIndex { $0.stretchY }.map { [$0] } ?? []) : spacers
+            var y: CGFloat = 0
+            for (i, k) in kids.enumerated() {
+                var h = fs[i].height
+                if takers.contains(i) {
+                    let share = floor(spare / CGFloat(takers.count))
+                    h += share
+                    spare -= share
+                }
+                let w = k.stretchX ? r.width : min(fs[i].width, r.width)
+                k.place(NSRect(x: 0, y: y, width: w, height: h))
+                y += h + gap
+            }
+        } else {
+            let stretchy = kids.indices.filter { kids[$0].stretchX }
+            let spare = max(0, r.width - want.width)
+            var x: CGFloat = 0
+            if stretchy.isEmpty {
+                if align & Platinum.CENTER != 0 { x = floor(spare / 2) }
+                if align & Platinum.RIGHT != 0 { x = spare }
+            }
+            for (i, k) in kids.enumerated() {
+                var w = fs[i].width
+                if stretchy.contains(i) { w += floor(spare / CGFloat(stretchy.count)) }
+                let h = k.stretchY ? r.height : fs[i].height
+                k.place(NSRect(x: x, y: floor((r.height - h) / 2), width: w, height: h))
+                x += w + gap
+            }
+        }
+    }
+}
+
+/// Labels in one right-aligned column, their controls in the next.
+final class PForm: PNode {
+    private var rows: [[String: Any]] {
+        (node["k"] as? String) == "row" ? [node] : node["kids"] as? [[String: Any]] ?? []
+    }
+    private func label(_ i: Int) -> String {
+        guard i < rows.count else { return "" }
+        let t = rows[i]["text"] as? String ?? ""
+        return t.isEmpty ? "" : t + ":"
+    }
+    private var labelW: CGFloat { kids.indices.map { Platinum.width(label($0)) }.max() ?? 0 }
+    private var gap: CGFloat { (node["n"] as? Int ?? 0) > 0 ? 10 : 4 }
+    private static let row: CGFloat = 20
+
+    override var stretchX: Bool { true }
+    override var stretchY: Bool { kids.contains { $0.stretchY } }
+
+    override func fit() -> NSSize {
+        let fs = kids.map { $0.fit() }
+        let lw = labelW
+        let h = fs.map { max($0.height, Self.row) }.reduce(0, +) + gap * CGFloat(max(0, fs.count - 1))
+        return NSSize(width: (lw > 0 ? lw + 8 : 0) + (fs.map(\.width).max() ?? 0), height: h)
+    }
+
+    override func place(_ r: NSRect) {
+        frame = r
+        let lw = labelW
+        let x0: CGFloat = lw > 0 ? lw + 8 : 0
+        var y: CGFloat = 0
+        for k in kids {
+            let f = k.fit()
+            let h = max(f.height, Self.row)
+            let w = k.stretchX ? r.width - x0 : min(f.width, r.width - x0)
+            k.place(NSRect(x: x0, y: y + floor((h - f.height) / 2) * (f.height < Self.row ? 1 : 0),
+                           width: w, height: f.height))
+            y += h + gap
+        }
+    }
+
+    override func apply(_ n: [String: Any]) {
+        node = n
+        needsDisplay = true
+        for (i, k) in kids.enumerated() where i < rows.count {
+            k.apply((rows[i]["kids"] as? [[String: Any]])?.first ?? [:])
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let lw = labelW
+        for (i, k) in kids.enumerated() {
+            let l = label(i)
+            if l.isEmpty { continue }
+            // Centered on the control's first line.
+            let line = NSRect(x: 0, y: k.frame.minY, width: lw, height: min(k.frame.height, 20))
+            let w = Platinum.width(l)
+            Platinum.text(l, in: NSRect(x: lw - w, y: line.minY, width: w + 1, height: line.height),
+                          color: k.enabled ? .black : Platinum.disabled)
+        }
+    }
+}
+
+final class PLabel: PNode {
+    private static let wrap: CGFloat = 440
+    private var text: String { node["text"] as? String ?? "" }
+    private var font: NSFont { has(Platinum.SECONDARY) ? Platinum.app : Platinum.system }
+    private var color: NSColor { has(Platinum.SECONDARY) ? Platinum.dark : .black }
+
+    override var stretchX: Bool { has(Platinum.HEADING) }
+
+    private func measure(_ w: CGFloat) -> NSSize {
+        let lines = Platinum.wrap(text, w, font)
+        return NSSize(width: (lines.map { Platinum.width($0, font) }.max() ?? 0) + 1,
+                      height: CGFloat(max(1, lines.count)) * Platinum.lineHeight(font))
+    }
+
+    override func fit() -> NSSize { measure(Self.wrap) }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if has(Platinum.HEADING) {
+            // A heading carries an etched rule to its right, the way a
+            // Platinum group box's title sits on its frame.
+            let w = Platinum.width(text)
+            Platinum.text(text, in: NSRect(x: 0, y: 0, width: w + 1, height: bounds.height))
+            let y = floor(bounds.midY)
+            if bounds.width > w + 8 {
+                Platinum.fill(NSRect(x: w + 6, y: y, width: bounds.width - w - 6, height: 1), Platinum.shadow)
+                Platinum.fill(NSRect(x: w + 6, y: y + 1, width: bounds.width - w - 6, height: 1), Platinum.light)
+            }
+            return
+        }
+        let lh = Platinum.lineHeight(font)
+        for (i, l) in Platinum.wrap(text, bounds.width, font).enumerated() {
+            Platinum.text(l, in: NSRect(x: 0, y: CGFloat(i) * lh, width: bounds.width, height: lh),
+                          font: font, color: color)
+        }
+    }
+}
+
+final class PButton: PNode {
+    var pressed = false { didSet { needsDisplay = true } }
+    /// Overrides the dialog action (the text field's Browse… button).
+    var onPress: (() -> Void)?
+    var label: String { node["text"] as? String ?? "" }
+    private var ring: CGFloat { has(Platinum.DEFAULT) ? CGFloat(PlatinumButtonArt.ring) : 0 }
+
+    override func fit() -> NSSize {
+        NSSize(width: max(58, Platinum.width(label) + 24) + ring * 2,
+               height: CGFloat(PlatinumButtonArt.height) + ring * 2)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let w = Int(bounds.width - ring * 2)
+        let art = has(Platinum.DEFAULT)
+            ? PlatinumButtonArt.defaultButton(w: w, pressed: pressed, disabled: !enabled)
+            : PlatinumButtonArt.standard(w: w, pressed: pressed, disabled: !enabled)
+        PlatinumButtonArt.paint(art, at: .zero)
+        let r = bounds.insetBy(dx: ring, dy: ring)
+        Platinum.text(label, in: r, color: enabled ? (pressed ? .white : .black) : Platinum.disabled,
+                      center: true)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard enabled else { return }
+        if Platinum.track(self, { [weak self] on in self?.pressed = on }) { press() }
+    }
+
+    func press() {
+        if let f = onPress { f() } else { dlg?.act(key) }
+    }
+
+    /// Return / Esc / a hotkey: show the press, then run it.
+    func flash() {
+        pressed = true
+        display()
+        Thread.sleep(forTimeInterval: 0.08)
+        pressed = false
+        press()
+    }
+}
+
+final class PCheck: PNode {
+    private var pressed = false { didSet { needsDisplay = true } }
+    private var on: Bool { (node["n"] as? Int ?? 0) != 0 }
+    private var label: String { node["text"] as? String ?? "" }
+
+    override func fit() -> NSSize { NSSize(width: 12 + 6 + Platinum.width(label), height: 16) }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let box = NSRect(x: 0, y: floor((bounds.height - 12) / 2), width: 12, height: 12)
+        Platinum.fill(box, pressed ? Platinum.disabled : Platinum.face)
+        Platinum.outline(box, enabled ? .black : Platinum.disabled)
+        Platinum.bevel(box.insetBy(dx: 1, dy: 1), pressed ? Platinum.shadow : Platinum.light,
+                       pressed ? Platinum.mid : Platinum.shadow)
+        if on {
+            let ctx = NSGraphicsContext.current
+            ctx?.shouldAntialias = false
+            let p = NSBezierPath()
+            p.move(to: NSPoint(x: box.minX + 2.5, y: box.minY + 5.5))
+            p.line(to: NSPoint(x: box.minX + 5, y: box.minY + 9))
+            p.line(to: NSPoint(x: box.minX + 11, y: box.minY - 1))
+            p.lineWidth = 2
+            (enabled ? NSColor.black : Platinum.disabled).setStroke()
+            p.stroke()
+        }
+        Platinum.text(label, in: NSRect(x: 18, y: 0, width: bounds.width - 18, height: bounds.height),
+                      color: enabled ? .black : Platinum.disabled)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard enabled else { return }
+        if Platinum.track(self, { [weak self] o in self?.pressed = o }) {
+            var n = node
+            n["n"] = on ? 0 : 1
+            node = n
+            dlg?.set(key, on ? "1" : "0")
+        }
+    }
+}
+
+final class PPopup: PNode {
+    private var options: [String] { node["opts"] as? [String] ?? [] }
+    private var selected: Int { node["n"] as? Int ?? 0 }
+    private var pressed = false { didSet { needsDisplay = true } }
+
+    override func fit() -> NSSize {
+        NSSize(width: (options.map { Platinum.width($0) }.max() ?? 40) + 12 + 22, height: 20)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let r = bounds
+        Platinum.fill(r, pressed ? Platinum.disabled : Platinum.face)
+        Platinum.outline(r, enabled ? .black : Platinum.disabled)
+        Platinum.bevel(r.insetBy(dx: 1, dy: 1), Platinum.light, Platinum.shadow)
+        let arrow = NSRect(x: r.maxX - 20, y: r.minY, width: 20, height: r.height)
+        Platinum.fill(NSRect(x: arrow.minX, y: r.minY + 3, width: 1, height: r.height - 6), Platinum.shadow)
+        Platinum.fill(NSRect(x: arrow.minX + 1, y: r.minY + 3, width: 1, height: r.height - 6), Platinum.light)
+        Platinum.triangle(in: arrow.offsetBy(dx: 1, dy: 0), down: true,
+                          color: enabled ? .black : Platinum.disabled)
+        let t = selected >= 0 && selected < options.count ? options[selected] : ""
+        Platinum.text(t, in: NSRect(x: 8, y: 0, width: arrow.minX - 10, height: r.height),
+                      color: enabled ? .black : Platinum.disabled)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard enabled, let win = window, !options.isEmpty else { return }
+        pressed = true
+        let screen = win.convertToScreen(convert(bounds, to: nil))
+        let items = options.enumerated().map { PMItem(title: $1, mark: $0 == selected ? "✓" : "") }
+        let pick = PlatinumMenuSession.popUp(items, selected: selected, over: screen)
+        pressed = false
+        if let i = pick, i != selected {
+            var n = node
+            n["n"] = i
+            node = n
+            dlg?.set(key, "\(i)")
+        }
+    }
+}
+
+/// A text field: an AppKit field editor inside a Platinum well, with a
+/// Browse… button when it holds a path.
+final class PText: PNode {
+    let field = NSTextField(string: "")
+    private var browse: PButton?
+    private var focused = false
+
+    override var stretchX: Bool { (node["n"] as? Int ?? 0) == 0 }
+
+    override func built() {
+        field.isBordered = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.font = Platinum.app
+        field.usesSingleLineMode = true
+        field.cell?.isScrollable = true
+        field.cell?.wraps = false
+        field.identifier = NSUserInterfaceItemIdentifier(key)
+        field.delegate = dlg
+        addSubview(field)
+        if has(Platinum.BROWSE) {
+            let b = PButton()
+            b.node = ["k": "button", "text": "Browse…"]
+            b.dlg = dlg
+            b.onPress = { [weak self] in self?.pickFile() }
+            addSubview(b)
+            browse = b
+        }
+    }
+
+    private var browseW: CGFloat { browse.map { $0.fit().width + 8 } ?? 0 }
+
+    override func fit() -> NSSize {
+        let chars = node["n"] as? Int ?? 0
+        return NSSize(width: (chars > 0 ? CGFloat(chars) * 7 + 12 : 240) + browseW, height: 22)
+    }
+
+    override func place(_ r: NSRect) {
+        frame = r
+        let well = wellRect
+        field.frame = NSRect(x: well.minX + 4, y: well.minY + 3, width: well.width - 8, height: well.height - 5)
+        if let b = browse {
+            let w = b.fit().width
+            b.place(NSRect(x: r.width - w, y: 1, width: w, height: 20))
+        }
+    }
+
+    private var wellRect: NSRect { NSRect(x: 0, y: 0, width: bounds.width - browseW, height: 22) }
+
+    override func apply(_ n: [String: Any]) {
+        node = n
+        needsDisplay = true
+        // Never overwrite the field being typed in.
+        if field.currentEditor() == nil { field.stringValue = n["value"] as? String ?? "" }
+        field.placeholderString = n["ph"] as? String
+        field.isEnabled = enabled
+        field.textColor = enabled ? .black : Platinum.disabled
+        var b = browse?.node ?? [:]
+        b["f"] = enabled ? 0 : Platinum.DISABLED
+        browse?.node = b
+        browse?.needsDisplay = true
+    }
+
+    func setFocused(_ on: Bool) { focused = on; needsDisplay = true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let r = wellRect
+        Platinum.fill(r.insetBy(dx: 2, dy: 2), enabled ? .white : Platinum.face)
+        if focused {
+            // Platinum's focus ring: two points of lavender around the well.
+            Platinum.outline(r, Platinum.lavenderDark)
+            Platinum.outline(r.insetBy(dx: 1, dy: 1), Platinum.lavenderDark)
+        } else {
+            Platinum.well(r)
+        }
+    }
+
+    private func pickFile() {
+        guard let win = window else { return }
+        let p = NSOpenPanel()
+        p.canChooseFiles = true
+        p.canChooseDirectories = false
+        let k = key
+        p.beginSheetModal(for: win) { [weak self] r in
+            if r == .OK, let url = p.url {
+                self?.field.stringValue = url.path
+                self?.dlg?.set(k, url.path)
+            }
+        }
+    }
+}
+
+final class PSeparator: PNode {
+    override var stretchX: Bool { true }
+    override func fit() -> NSSize { NSSize(width: 1, height: 2) }
+    override func draw(_ dirtyRect: NSRect) {
+        Platinum.fill(NSRect(x: 0, y: 0, width: bounds.width, height: 1), Platinum.shadow)
+        Platinum.fill(NSRect(x: 0, y: 1, width: bounds.width, height: 1), Platinum.light)
+    }
+}
+
+/// An alert's icon (host-only node): Caution for a destructive question,
+/// Note otherwise.
+final class PIcon: PNode {
+    override func fit() -> NSSize { NSSize(width: 32, height: 32) }
+    override func draw(_ dirtyRect: NSRect) {
+        let ctx = NSGraphicsContext.current
+        ctx?.shouldAntialias = false
+        let caution = (node["text"] as? String) == "caution"
+        let p = NSBezierPath()
+        if caution {
+            p.move(to: NSPoint(x: 16, y: 1)); p.line(to: NSPoint(x: 31, y: 29))
+            p.line(to: NSPoint(x: 1, y: 29)); p.close()
+            NSColor(srgbRed: 1, green: 0.8, blue: 0, alpha: 1).setFill()
+        } else {
+            p.appendRoundedRect(NSRect(x: 1, y: 2, width: 30, height: 22), xRadius: 8, yRadius: 8)
+            p.move(to: NSPoint(x: 8, y: 22)); p.line(to: NSPoint(x: 6, y: 30)); p.line(to: NSPoint(x: 15, y: 23))
+            NSColor.white.setFill()
+        }
+        p.fill()
+        p.lineWidth = 1
+        NSColor.black.setStroke()
+        p.stroke()
+        Platinum.fill(NSRect(x: 15, y: caution ? 10 : 6, width: 2, height: 9), .black)
+        Platinum.fill(NSRect(x: 15, y: caution ? 22 : 18, width: 2, height: 2), .black)
+    }
+}
+
+final class PPreview: PNode {
+    private let preview = CodePreview()
+    override var stretchX: Bool { true }
+    override func built() {
+        preview.wantsLayer = false
+        addSubview(preview)
+    }
+    override func fit() -> NSSize { NSSize(width: 420, height: 150) }
+    override func place(_ r: NSRect) {
+        frame = r
+        preview.frame = bounds.insetBy(dx: 2, dy: 2)
+    }
+    override func apply(_ n: [String: Any]) {
+        node = n
+        var pal = [UInt32](repeating: 0, count: 256)
+        if let h = dlg?.handle, h != 0 {
+            pal.withUnsafeMutableBufferPointer { b in
+                _ = tk_theme_palette(h, Int64(Int(bitPattern: b.baseAddress)), Int64(b.count))
+            }
+        }
+        preview.render(palette: pal, font: CodePreview.font(
+            label: n["text"] as? String ?? "", size: n["n"] as? Int ?? 0,
+            builtins: n["opts"] as? [String] ?? []))
+        needsDisplay = true
+    }
+    override func draw(_ dirtyRect: NSRect) { Platinum.well(bounds) }
+}
+
+/// Tab folders: the selected tab joins the raised pane below the row.
+final class PTabs: PNode {
+    private static let tabH: CGFloat = 22
+    private static let pad = NSEdgeInsets(top: 14, left: 14, bottom: 14, right: 14)
+    private var selected: Int { node["n"] as? Int ?? 0 }
+    private var labels: [String] {
+        (node["kids"] as? [[String: Any]] ?? []).map { $0["text"] as? String ?? "" }
+    }
+    private var tabRects: [NSRect] {
+        var x: CGFloat = 8
+        return labels.map { l in
+            let w = Platinum.width(l) + 24
+            defer { x += w - 1 }
+            return NSRect(x: x, y: 0, width: w, height: Self.tabH)
+        }
+    }
+
+    override var stretchX: Bool { true }
+
+    override func fit() -> NSSize {
+        let fs = kids.map { $0.fit() }
+        let tabsW = (tabRects.last?.maxX ?? 0) + 8
+        let w = max((fs.map(\.width).max() ?? 0) + Self.pad.left + Self.pad.right, tabsW)
+        return NSSize(width: w, height: Self.tabH + (fs.map(\.height).max() ?? 0) + Self.pad.top + Self.pad.bottom)
+    }
+
+    override func place(_ r: NSRect) {
+        frame = r
+        let inner = NSRect(x: Self.pad.left, y: Self.tabH + Self.pad.top,
+                           width: r.width - Self.pad.left - Self.pad.right,
+                           height: r.height - Self.tabH - Self.pad.top - Self.pad.bottom)
+        for (i, k) in kids.enumerated() {
+            k.place(inner)
+            k.isHidden = i != selected
+        }
+    }
+
+    override func apply(_ n: [String: Any]) {
+        super.apply(n)
+        for (i, k) in kids.enumerated() { k.isHidden = i != selected }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let pane = NSRect(x: 0, y: Self.tabH - 1, width: bounds.width, height: bounds.height - Self.tabH + 1)
+        Platinum.outline(pane, Platinum.dark)
+        Platinum.bevel(pane.insetBy(dx: 1, dy: 1), Platinum.light, Platinum.shadow)
+        for (i, t) in tabRects.enumerated() where i != selected {
+            Platinum.text(labels[i], in: Platinum.tab(t.offsetBy(dx: 0, dy: 2), selected: false, tabH: Self.tabH),
+                          center: true)
+        }
+        if selected < tabRects.count {
+            Platinum.text(labels[selected], in: Platinum.tab(tabRects[selected], selected: true, tabH: Self.tabH),
+                          center: true)
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        guard let i = tabRects.firstIndex(where: { $0.contains(p) }), i != selected else { return }
+        var n = node
+        n["n"] = i
+        apply(n)
+        place(frame)
+        dlg?.set(key, "\(i)")
+    }
+}
+
+/// A list: rows under optional column headers in a well, with a Platinum
+/// scroll bar.
+final class PList: PNode {
+    private static let rowH: CGFloat = 18, headH: CGFloat = 18, sbW: CGFloat = 16
+    private var top = 0
+    private var rows: [[String]] { node["rows"] as? [[String]] ?? [] }
+    private var columns: [String] { node["opts"] as? [String] ?? [] }
+    private var selected: Int { node["n"] as? Int ?? 0 }
+    private var activate: String { node["value"] as? String ?? "" }
+    private var checkable: Bool { has(Platinum.CHECKABLE) }
+    private var showsHeader: Bool { columns.contains { !$0.isEmpty } }
+
+    override var stretchX: Bool { true }
+    override var stretchY: Bool { true }
+    override var acceptsFirstResponder: Bool { true }
+    override func becomeFirstResponder() -> Bool { needsDisplay = true; return true }
+    override func resignFirstResponder() -> Bool { needsDisplay = true; return true }
+
+    override func fit() -> NSSize {
+        let h = CGFloat(max(node["h"] as? Int ?? 6, 3))
+        return NSSize(width: 360, height: (showsHeader ? Self.headH : 0) + h * Self.rowH + 4)
+    }
+
+    private var inner: NSRect { bounds.insetBy(dx: 2, dy: 2) }
+    private var rowsTop: CGFloat { inner.minY + (showsHeader ? Self.headH : 0) }
+    /// From the height, not `inner`: before the first `place` the bounds
+    /// are empty, and insetting an empty rect gives the infinite null rect.
+    private var visible: Int {
+        let h = bounds.height - 4 - (showsHeader ? Self.headH : 0)
+        return max(1, Int(max(0, h) / Self.rowH))
+    }
+    private var maxTop: Int { max(0, rows.count - visible) }
+    private var sbRect: NSRect { NSRect(x: inner.maxX - Self.sbW, y: inner.minY, width: Self.sbW, height: inner.height) }
+
+    private var colWidths: [CGFloat] {
+        let n = max(1, columns.count)
+        let avail = inner.width - Self.sbW
+        var natural = (0..<n).map { c -> CGFloat in
+            if c == 0 && checkable { return 22 }
+            var w = Platinum.width(c < columns.count ? columns[c] : "", Platinum.app) + 12
+            for r in rows.prefix(200) where c < r.count { w = max(w, Platinum.width(r[c], Platinum.app) + 12) }
+            // One very long cell mustn't squeeze every other column to nothing.
+            return min(w, floor(avail / 2))
+        }
+        let total = natural.reduce(0, +)
+        if total < avail { natural[n - 1] += avail - total } else {
+            let flexible = natural.indices.filter { !($0 == 0 && checkable) }
+            let fixed = total - flexible.map { natural[$0] }.reduce(0, +)
+            let scale = max(0.1, (avail - fixed) / max(1, total - fixed))
+            for i in flexible { natural[i] = floor(natural[i] * scale) }
+        }
+        return natural
+    }
+
+    override func apply(_ n: [String: Any]) {
+        let oldSel = selected
+        node = n
+        top = min(top, maxTop)
+        if selected != oldSel { reveal(selected) }
+        needsDisplay = true
+    }
+
+    private func reveal(_ r: Int) {
+        guard r >= 0 else { return }
+        if r < top { top = r }
+        if r >= top + visible { top = r - visible + 1 }
+        top = max(0, min(top, maxTop))
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        Platinum.fill(inner, .white)
+        Platinum.well(bounds)
+        let widths = colWidths
+        if showsHeader {
+            var x = inner.minX
+            for (c, w) in widths.enumerated() {
+                let h = NSRect(x: x, y: inner.minY, width: w, height: Self.headH)
+                Platinum.fill(h, Platinum.face)
+                Platinum.bevel(h, Platinum.light, Platinum.shadow)
+                Platinum.fill(NSRect(x: h.minX, y: h.maxY - 1, width: h.width, height: 1), Platinum.dark)
+                if c < columns.count {
+                    Platinum.text(columns[c], in: h.insetBy(dx: 6, dy: 0), font: Platinum.app)
+                }
+                x += w
+            }
+        }
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: NSRect(x: inner.minX, y: rowsTop, width: inner.width - Self.sbW,
+                                  height: inner.maxY - rowsTop)).addClip()
+        let focused = window?.firstResponder === self
+        for i in 0...(visible) {
+            let r = top + i
+            guard r < rows.count else { break }
+            let y = rowsTop + CGFloat(i) * Self.rowH
+            let rowRect = NSRect(x: inner.minX, y: y, width: inner.width - Self.sbW, height: Self.rowH)
+            if r == selected { Platinum.fill(rowRect, focused ? Platinum.lavender : Platinum.face) }
+            var x = inner.minX
+            for (c, w) in widths.enumerated() {
+                let cell = c < rows[r].count ? rows[r][c] : ""
+                let cr = NSRect(x: x, y: y, width: w, height: Self.rowH)
+                if c == 0 && checkable {
+                    let box = NSRect(x: cr.minX + 5, y: cr.minY + 3, width: 12, height: 12)
+                    Platinum.fill(box, Platinum.face)
+                    Platinum.outline(box, .black)
+                    if cell == "1" { Platinum.text("✓", in: box.offsetBy(dx: 1, dy: 0), center: true) }
+                } else {
+                    Platinum.text(cell, in: cr.insetBy(dx: 6, dy: 0), font: Platinum.app,
+                                  color: enabled ? .black : Platinum.disabled)
+                }
+                x += w
+            }
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        drawScrollBar()
+    }
+
+    private func drawScrollBar() {
+        Platinum.scrollBar(sbRect, thumb: maxTop > 0 ? thumbRect : nil, pressed: pressedPart)
+    }
+
+    private var pressedPart = 0 { didSet { needsDisplay = true } }
+
+    private var thumbRect: NSRect {
+        let sb = sbRect
+        let track = sb.height - 3 * Self.sbW
+        let y = sb.minY + Self.sbW + (maxTop > 0 ? floor(track * CGFloat(top) / CGFloat(maxTop)) : 0)
+        return NSRect(x: sb.minX, y: y, width: Self.sbW, height: Self.sbW)
+    }
+
+    private func scroll(to t: Int) {
+        let n = max(0, min(t, maxTop))
+        if n != top { top = n; needsDisplay = true }
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        let d = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY / Self.rowH : event.scrollingDeltaY
+        if abs(d) >= 0.5 { scroll(to: top - Int(d.rounded())) }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        let p = convert(event.locationInWindow, from: nil)
+        if sbRect.contains(p) { trackScrollBar(p); return }
+        guard enabled, p.y >= rowsTop else { return }
+        let r = top + Int((p.y - rowsTop) / Self.rowH)
+        guard r < rows.count else { return }
+        if checkable && p.x < inner.minX + 22 { dlg?.act("toggle:\(r)"); return }
+        choose(r)
+        if event.clickCount == 2 && !activate.isEmpty { dlg?.act(activate) }
+    }
+
+    private func choose(_ r: Int) {
+        guard r >= 0, r < rows.count else { return }
+        if r != selected {
+            var n = node
+            n["n"] = r
+            node = n
+            dlg?.set(key, "\(r)")
+        }
+        reveal(r)
+        needsDisplay = true
+    }
+
+    private func trackScrollBar(_ start: NSPoint) {
+        guard maxTop > 0, let win = window else { return }
+        let sb = sbRect
+        let thumb = thumbRect
+        if thumb.contains(start) {
+            let grab = start.y - thumb.minY
+            let track = sb.height - 3 * Self.sbW
+            while let e = win.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+                if e.type == .leftMouseUp { break }
+                let y = convert(e.locationInWindow, from: nil).y - grab - sb.minY - Self.sbW
+                scroll(to: Int((y / track * CGFloat(maxTop)).rounded()))
+                display()
+            }
+            return
+        }
+        // Arrows and the track repeat while held.
+        let part = start.y < sb.minY + Self.sbW ? 1 : start.y > sb.maxY - Self.sbW ? 2 : start.y < thumb.minY ? 3 : 4
+        func step() {
+            switch part {
+            case 1: scroll(to: top - 1)
+            case 2: scroll(to: top + 1)
+            case 3: scroll(to: top - visible)
+            default: scroll(to: top + visible)
+            }
+            display()
+        }
+        if part <= 2 { pressedPart = part }
+        step()
+        NSEvent.startPeriodicEvents(afterDelay: 0.3, withPeriod: 0.05)
+        while let e = win.nextEvent(matching: [.leftMouseUp, .periodic, .leftMouseDragged]) {
+            if e.type == .leftMouseUp { break }
+            if e.type == .periodic { step() }
+        }
+        NSEvent.stopPeriodicEvents()
+        pressedPart = 0
+    }
+
+    override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case 125: choose(min(rows.count - 1, selected + 1))
+        case 126: choose(max(0, selected - 1))
+        case 115: choose(0)
+        case 119: choose(rows.count - 1)
+        case 116: choose(max(0, selected - visible))
+        case 121: choose(min(rows.count - 1, selected + visible))
+        case 36 where !activate.isEmpty, 76 where !activate.isEmpty: dlg?.act(activate)
+        case 49 where checkable && selected >= 0: dlg?.act("toggle:\(selected)")
+        default:
+            // Typing a letter jumps to the first row whose first text column
+            // starts with it, as in the grid.
+            if let ch = event.charactersIgnoringModifiers?.lowercased().first, ch.isLetter || ch.isNumber,
+               event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
+                let col = checkable ? 1 : 0
+                if let r = rows.firstIndex(where: { col < $0.count && $0[col].lowercased().first == ch }) {
+                    choose(r)
+                }
+                return
+            }
+            super.keyDown(with: event)
+        }
+    }
+}
+
+// MARK: Platinum dialog window
+
+final class PlatinumWindow: NSWindow {
+    weak var dialog: PlatinumDialog?
+    var document = false
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { document }
+
+    override func keyDown(with event: NSEvent) {
+        if dialog?.handleKey(event) != true { super.keyDown(with: event) }
+    }
+
+    override func cancelOperation(_ sender: Any?) { dialog?.cancel() }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.contains(.command), dialog?.handleCommandKey(event) == true { return true }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
+/// The window's frame and title bar, and the dialog body inside them.
+class PlatinumFrameView: NSView {
+    static let side: CGFloat = 6
+    static let titleH: CGFloat = 22
+    var title = "" { didSet { if title != oldValue { needsDisplay = true } } }
+    /// A title bar (a movable modal dialog or a window); without one this
+    /// is a plain modal frame (an alert).
+    var titled = true
+    var closable = false
+    /// A document window's zoom and collapse boxes, at the right.
+    var zoomable = false
+    var onClose: (() -> Void)?
+    var onZoom: (() -> Void)?
+    var onCollapse: (() -> Void)?
+    /// The title-bar box held down: 0 close, 1 zoom, 2 collapse.
+    private var pressedBox = -1 { didSet { needsDisplay = true } }
+
+    override var isFlipped: Bool { true }
+    var topInset: CGFloat { titled ? Self.titleH : Self.side }
+    var content: NSRect {
+        NSRect(x: Self.side, y: topInset, width: bounds.width - 2 * Self.side,
+               height: bounds.height - topInset - Self.side)
+    }
+    private var closeBox: NSRect { NSRect(x: 9, y: 5, width: 12, height: 12) }
+    private var collapseBox: NSRect { NSRect(x: bounds.width - 21, y: 5, width: 12, height: 12) }
+    private var zoomBox: NSRect { NSRect(x: bounds.width - 39, y: 5, width: 12, height: 12) }
+    /// The boxes this frame has, by the `pressedBox` index.
+    private var boxes: [(Int, NSRect)] {
+        (closable ? [(0, closeBox)] : []) + (zoomable ? [(1, zoomBox), (2, collapseBox)] : [])
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let b = bounds
+        Platinum.fill(b, Platinum.face)
+        Platinum.outline(b, .black)
+        Platinum.bevel(b.insetBy(dx: 1, dy: 1), Platinum.light, Platinum.shadow)
+        // The content sits sunken in the frame.
+        Platinum.bevel(content.insetBy(dx: -1, dy: -1), Platinum.shadow, Platinum.light)
+        guard titled else {
+            Platinum.outline(b.insetBy(dx: 3, dy: 3), Platinum.mid)
+            return
+        }
+        let active = window?.isKeyWindow ?? false
+        let tw = min(Platinum.width(title), max(0, b.width - 120))
+        let tx = floor((b.width - tw) / 2)
+        if active {
+            // The pinstripes, broken for the title and the boxes.
+            let left: CGFloat = closable ? closeBox.maxX + 4 : 6
+            let right = zoomable ? zoomBox.minX - 4 : b.width - 6
+            var y: CGFloat = 5
+            while y + 1 < Self.titleH - 4 {
+                for (a, z) in [(left, tx - 6), (tx + tw + 6, right)] where z > a {
+                    Platinum.fill(NSRect(x: a, y: y, width: z - a, height: 1), Platinum.shadow)
+                    Platinum.fill(NSRect(x: a + 1, y: y + 1, width: z - a, height: 1), Platinum.light)
+                }
+                y += 2
+            }
+            for (i, c) in boxes {
+                let pressed = pressedBox == i
+                Platinum.fill(c.insetBy(dx: -2, dy: -2), Platinum.face)
+                Platinum.fill(c, pressed ? Platinum.shadow : Platinum.face)
+                Platinum.outline(c, Platinum.dark)
+                Platinum.bevel(c.insetBy(dx: 1, dy: 1), pressed ? Platinum.dark : Platinum.light,
+                               pressed ? Platinum.mid : Platinum.shadow)
+                if i == 1 {
+                    // Zoom: a small box in the big one's top-left corner.
+                    Platinum.outline(NSRect(x: c.minX, y: c.minY, width: 7, height: 7), Platinum.dark)
+                } else if i == 2 {
+                    // Collapse: a bar across the middle.
+                    Platinum.fill(NSRect(x: c.minX, y: c.minY + 5, width: c.width, height: 1), Platinum.dark)
+                    Platinum.fill(NSRect(x: c.minX, y: c.minY + 7, width: c.width, height: 1), Platinum.dark)
+                }
+            }
+        }
+        Platinum.text(title, in: NSRect(x: tx, y: 1, width: tw + 1, height: Self.titleH - 2),
+                      color: active ? .black : Platinum.disabled)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        guard titled, p.y < Self.titleH else { return }
+        if let (i, box) = boxes.first(where: { $0.1.insetBy(dx: -2, dy: -2).contains(p) }) {
+            guard let win = window else { return }
+            pressedBox = i
+            var inside = true
+            while let e = win.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+                inside = box.insetBy(dx: -2, dy: -2).contains(convert(e.locationInWindow, from: nil))
+                if e.type == .leftMouseUp { break }
+                pressedBox = inside ? i : -1
+            }
+            pressedBox = -1
+            if inside { [onClose, onZoom, onCollapse][i]?() }
+            return
+        }
+        if event.clickCount == 2 && zoomable { onCollapse?(); return }
+        window?.performDrag(with: event)
+    }
+}
+
+/// A project window's class. In the Mac OS 9 look it's borderless (its
+/// frame is a `PlatinumMainFrame`), and a borderless window neither becomes
+/// key on its own nor closes, zooms or minimizes from the Window menu.
+final class MainWindow: NSWindow {
+    private var unzoomed: NSRect?
+    var platinum: Bool { !styleMask.contains(.titled) }
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+
+    override func performClose(_ sender: Any?) {
+        guard platinum else { return super.performClose(sender) }
+        if delegate?.windowShouldClose?(self) ?? true { close() }
+    }
+
+    override func performMiniaturize(_ sender: Any?) {
+        if platinum { miniaturize(sender) } else { super.performMiniaturize(sender) }
+    }
+
+    override func performZoom(_ sender: Any?) {
+        guard platinum else { return super.performZoom(sender) }
+        guard let vf = screen?.visibleFrame else { return }
+        if let u = unzoomed, frame.size == vf.size {
+            unzoomed = nil
+            setFrame(u, display: true)
+        } else {
+            unzoomed = frame
+            setFrame(vf, display: true)
+        }
+    }
+}
+
+/// The Mac OS 9 look's project window: the Settings window's frame and
+/// title bar around a tab strip and the cell grid, a grow box in the
+/// bottom-right corner.
+final class PlatinumMainFrame: PlatinumFrameView {
+    let cell: CellView
+    let tabs = PlatinumTabStrip()
+    private let grow = PlatinumGrowBox()
+    private var observers: [NSObjectProtocol] = []
+
+    init(cell: CellView) {
+        self.cell = cell
+        super.init(frame: .zero)
+        closable = true
+        zoomable = true
+        tabs.isHidden = true
+        addSubview(tabs)
+        addSubview(cell)
+        addSubview(grow)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers = [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification].map {
+            NotificationCenter.default.addObserver(forName: $0, object: window, queue: .main) { [weak self] _ in
+                self?.needsDisplay = true
+                self?.tabs.needsDisplay = true
+            }
+        }
+    }
+
+    /// Show or hide the tab strip; true when that changed.
+    func showTabs(_ on: Bool) -> Bool {
+        if tabs.isHidden != on { return false }
+        tabs.isHidden = !on
+        layoutChrome()
+        return true
+    }
+
+    /// The window frame and the grid's size differ by this.
+    var chrome: NSSize {
+        NSSize(width: 2 * Self.side, height: topInset + Self.side + (tabs.isHidden ? 0 : PlatinumTabStrip.height))
+    }
+
+    override func resizeSubviews(withOldSize oldSize: NSSize) { layoutChrome() }
+
+    func layoutChrome() {
+        let c = content
+        let th = tabs.isHidden ? 0 : PlatinumTabStrip.height
+        tabs.frame = NSRect(x: c.minX, y: c.minY, width: c.width, height: th)
+        // Whole cells only; a leftover strip stays the frame's gray.
+        let w = max(CELL_W, floor(c.width / CELL_W) * CELL_W)
+        let h = max(CELL_H, floor((c.height - th) / CELL_H) * CELL_H)
+        let f = NSRect(x: c.minX, y: c.minY + th, width: w, height: h)
+        if cell.frame != f { cell.frame = f }
+        let g = PlatinumGrowBox.size
+        grow.frame = growUnder.map {
+            let r = convert($0, from: cell)
+            return NSRect(x: r.minX, y: r.maxY, width: g, height: g)
+        } ?? NSRect(x: c.maxX - g, y: c.maxY - g, width: g, height: g)
+        needsDisplay = true
+    }
+
+    /// The editor's scroll bar, in the grid's coordinates: the grow box
+    /// goes at its foot, as on a Mac OS 9 document window, rather than over
+    /// the status bar's end in the corner.
+    var growUnder: NSRect? {
+        didSet { if growUnder != oldValue { layoutChrome() } }
+    }
+}
+
+/// The grow box: drag to resize the window, its top-left corner staying put.
+final class PlatinumGrowBox: NSView {
+    static let size: CGFloat = 2 * CELL_W
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let b = bounds
+        Platinum.fill(b, Platinum.face)
+        Platinum.fill(NSRect(x: 0, y: 0, width: b.width, height: 1), .black)
+        Platinum.fill(NSRect(x: 0, y: 0, width: 1, height: b.height), .black)
+        // Two overlapping windows, the classic glyph.
+        for r in [NSRect(x: 7, y: 7, width: 6, height: 6), NSRect(x: 4, y: 4, width: 6, height: 6)] {
+            Platinum.fill(r, Platinum.face)
+            Platinum.outline(r, Platinum.dark)
+            Platinum.fill(NSRect(x: r.minX + 1, y: r.minY + 1, width: r.width - 2, height: 1), Platinum.light)
+            Platinum.fill(NSRect(x: r.minX + 1, y: r.minY + 1, width: 1, height: r.height - 2), Platinum.light)
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let win = window, let pf = superview as? PlatinumMainFrame else { return }
+        let start = NSEvent.mouseLocation
+        let f0 = win.frame
+        let chrome = pf.chrome
+        while let e = win.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            let p = NSEvent.mouseLocation
+            // Whole cells, so the grid fills the window.
+            let cw = max(40 * CELL_W, ((f0.width + p.x - start.x - chrome.width) / CELL_W).rounded(.down) * CELL_W)
+            let ch = max(12 * CELL_H, ((f0.height - (p.y - start.y) - chrome.height) / CELL_H).rounded(.down) * CELL_H)
+            let size = NSSize(width: cw + chrome.width, height: ch + chrome.height)
+            win.setFrame(NSRect(x: f0.minX, y: f0.maxY - size.height, width: size.width, height: size.height),
+                         display: true)
+            if e.type == .leftMouseUp { break }
+        }
+    }
+}
+
+/// The Mac OS 9 look's tab strip, one tab per window: the Settings
+/// dialog's tabs over the editor. The selected tab carries a close box,
+/// and an unsaved tab a dot where that box goes.
+final class PlatinumTabStrip: NSView {
+    private static let tabH: CGFloat = 22
+    static let height: CGFloat = tabH + 1
+    private static let maxTabW: CGFloat = 220
+    private static let minTabW: CGFloat = 60
+    /// The close box / unsaved dot, left of the title.
+    private static let slot: CGFloat = 16
+
+    private(set) var tabs: [TabInfo] = []
+    private(set) var focused = -1
+    private var lastData = Data()
+    private var frames: [NSRect] = []
+    private var layoutWidth: CGFloat = -1
+    private var closePressed = false { didSet { needsDisplay = true } }
+    var onSelect: ((Int) -> Void)?
+    var onClose: ((Int) -> Void)?
+
+    override var isFlipped: Bool { true }
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    /// Adopt a `tk_desktop_tabs` payload; true when it changed anything.
+    func update(from data: Data) -> Bool {
+        if data == lastData { return false }
+        lastData = data
+        guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return false }
+        focused = obj["focused"] as? Int ?? -1
+        tabs = (obj["tabs"] as? [[String: Any]] ?? []).map {
+            TabInfo(title: $0["title"] as? String ?? "",
+                    path: $0["path"] as? String ?? "",
+                    dirty: $0["dirty"] as? Bool ?? false)
+        }
+        layoutWidth = -1
+        needsDisplay = true
+        return true
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        layoutWidth = -1
+    }
+
+    /// Tabs take their title's width; when they don't all fit, the widest
+    /// shrink to a shared cap.
+    private func layoutTabs() {
+        guard layoutWidth != bounds.width else { return }
+        layoutWidth = bounds.width
+        let natural = tabs.map { min(Self.maxTabW, max(Self.minTabW, Platinum.width($0.title) + Self.slot + 24)) }
+        let avail = bounds.width - 16 + CGFloat(max(0, tabs.count - 1))
+        var widths = natural
+        if natural.reduce(0, +) > avail && !natural.isEmpty {
+            let sorted = natural.sorted()
+            var rest = avail
+            var cap = Self.minTabW
+            for (k, w) in sorted.enumerated() {
+                let share = floor(rest / CGFloat(sorted.count - k))
+                if w <= share { rest -= w } else { cap = max(Self.minTabW, share); break }
+            }
+            widths = natural.map { min($0, cap) }
+        }
+        var x: CGFloat = 8
+        frames = widths.map { w in
+            defer { x += w - 1 }
+            return NSRect(x: x, y: 0, width: w, height: Self.tabH)
+        }
+    }
+
+    private func tabRect(_ i: Int) -> NSRect {
+        layoutTabs()
+        return i < frames.count ? frames[i] : .zero
+    }
+
+    private func closeBox(_ i: Int) -> NSRect {
+        let r = tabRect(i)
+        return NSRect(x: r.minX + 9, y: 6, width: 10, height: 10)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        Platinum.fill(bounds, Platinum.face)
+        // The top edge of the pane the editor sits in.
+        Platinum.fill(NSRect(x: 0, y: Self.tabH - 1, width: bounds.width, height: 1), Platinum.dark)
+        Platinum.fill(NSRect(x: 0, y: Self.tabH, width: bounds.width, height: 1), Platinum.light)
+        let active = window?.isKeyWindow ?? false
+        for i in tabs.indices where i != focused { drawTab(i, active) }
+        if focused >= 0 && focused < tabs.count { drawTab(focused, active) }
+    }
+
+    private func drawTab(_ i: Int, _ active: Bool) {
+        let sel = i == focused
+        let t = tabRect(i)
+        let label = Platinum.tab(sel ? t : t.offsetBy(dx: 0, dy: 2), selected: sel, tabH: Self.tabH)
+        let c = closeBox(i).offsetBy(dx: 0, dy: sel ? 0 : 1)
+        if sel && active {
+            Platinum.fill(c, closePressed ? Platinum.shadow : Platinum.face)
+            Platinum.outline(c, Platinum.dark)
+            Platinum.bevel(c.insetBy(dx: 1, dy: 1), closePressed ? Platinum.dark : Platinum.light,
+                           closePressed ? Platinum.mid : Platinum.shadow)
+        }
+        if tabs[i].dirty {
+            Platinum.fill(NSRect(x: c.midX - 2, y: c.midY - 2, width: 4, height: 4), .black)
+        }
+        let text = NSRect(x: c.maxX + 4, y: label.minY, width: label.maxX - c.maxX - 12, height: label.height)
+        Platinum.text(tabs[i].title, in: text, color: active || sel ? .black : Platinum.dark)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        layoutTabs()
+        // The selected tab is drawn on top: it wins where tabs overlap.
+        let order = [focused] + tabs.indices.filter { $0 != focused }
+        guard let i = order.first(where: { $0 >= 0 && $0 < tabs.count && tabRect($0).contains(p) })
+        else { return }
+        if i == focused, closeBox(i).insetBy(dx: -2, dy: -2).contains(p) {
+            let box = closeBox(i).insetBy(dx: -2, dy: -2)
+            guard let win = window else { return }
+            closePressed = true
+            var inside = true
+            while let e = win.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+                inside = box.contains(convert(e.locationInWindow, from: nil))
+                if e.type == .leftMouseUp { break }
+                closePressed = inside
+            }
+            closePressed = false
+            if inside { onClose?(i) }
+            return
+        }
+        if i != focused { onSelect?(i) }
+    }
+}
+
+/// The Mac OS 9 look's scroll bar for the focused editor, in the two cells
+/// the core leaves clear at the editor's right (`Window.gutter`).
+final class PlatinumScroller: NSView {
+    private weak var cellView: CellView?
+    private var win = 0
+    /// Position and maximum in visual rows; `page` rows on screen.
+    private var cur = 0.0, maxv = 0.0, page = 1.0
+    private var lastData = Data()
+    private var pressedPart = 0 { didSet { needsDisplay = true } }
+
+    init(view: CellView) {
+        cellView = view
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override var isFlipped: Bool { true }
+
+    func update(_ o: [String: Any]) -> Bool {
+        guard let data = try? JSONSerialization.data(withJSONObject: o), data != lastData else { return false }
+        lastData = data
+        win = o["win"] as? Int ?? 0
+        cur = Double(o["cur"] as? Int ?? 0) / 1000
+        maxv = Double(o["max"] as? Int ?? 0) / 1000
+        page = Double(max(o["h"] as? Int ?? 1, 1))
+        // The grow box takes the gutter's last square.
+        let f = NSRect(x: CGFloat((o["x"] as? Int ?? 0) + (o["w"] as? Int ?? 0)) * CELL_W,
+                       y: CGFloat(o["y"] as? Int ?? 0) * CELL_H, width: 2 * CELL_W,
+                       height: max(0, CGFloat(o["h"] as? Int ?? 0) * CELL_H - PlatinumGrowBox.size))
+        if frame != f { frame = f }
+        needsDisplay = true
+        return true
+    }
+
+    private var w: CGFloat { bounds.width }
+
+    private var thumb: NSRect? {
+        guard maxv > 0 else { return nil }
+        let travel = bounds.height - 3 * w
+        return NSRect(x: 0, y: w + floor(travel * CGFloat(min(cur / maxv, 1))), width: w, height: w)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        Platinum.scrollBar(bounds, thumb: thumb, pressed: pressedPart)
+    }
+
+    private func go(to v: Double) {
+        guard let cv = cellView, cv.handle != 0, maxv > 0 else { return }
+        let n = min(max(v, 0), maxv)
+        tk_editor_minimap_to(cv.handle, Int64(win), Int64(n / maxv * 1_000_000))
+        cur = n
+        display()
+        cv.invalidateFrame()
+        cv.display()
+    }
+
+    override func scrollWheel(with event: NSEvent) { cellView?.scrollWheel(with: event) }
+
+    override func mouseDown(with event: NSEvent) {
+        guard maxv > 0, let window = window, let t = thumb else { return }
+        let start = convert(event.locationInWindow, from: nil)
+        if t.contains(start) {
+            let grab = start.y - t.minY
+            let travel = bounds.height - 3 * w
+            while let e = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+                if e.type == .leftMouseUp { break }
+                let y = convert(e.locationInWindow, from: nil).y - grab - w
+                go(to: Double(y / travel) * maxv)
+            }
+            return
+        }
+        // Arrows and the track repeat while held; the track stops paging
+        // once the thumb reaches the pointer.
+        let part = start.y < w ? 1 : start.y > bounds.height - w ? 2 : start.y < t.minY ? 3 : 4
+        func step() {
+            switch part {
+            case 1: go(to: cur - 1)
+            case 2: go(to: cur + 1)
+            case 3: if let t = thumb, start.y < t.minY { go(to: cur - page + 1) }
+            default: if let t = thumb, start.y > t.maxY { go(to: cur + page - 1) }
+            }
+        }
+        if part <= 2 { pressedPart = part }
+        step()
+        NSEvent.startPeriodicEvents(afterDelay: 0.3, withPeriod: 0.05)
+        while let e = window.nextEvent(matching: [.leftMouseUp, .periodic, .leftMouseDragged]) {
+            if e.type == .leftMouseUp { break }
+            if e.type == .periodic { step() }
+        }
+        NSEvent.stopPeriodicEvents()
+        pressedPart = 0
+    }
+}
+
+/// The Platinum projection of a declarative dialog: a movable modal window
+/// over its parent (or, for Settings, a window of its own), drawn and laid
+/// out by the `PNode`s above.
+final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
+    let name: String
+    var look: String { "platinum" }
+    private weak var view: CellView?
+    private let asWindow: Bool
+    private let win: PlatinumWindow
+    private let frameView = PlatinumFrameView()
+    private var root: PNode?
+    private var shape = ""
+    private var lastTree: NSDictionary?
+    private var cancelKey = ""
+    private var dismissed = false
+    /// Where the answers go instead of `tk_desktop_ui_event` (the confirm
+    /// alert answers `tk_desktop_native_confirm_answer`).
+    private let onEvents: (([[Any]]) -> Void)?
+    private static let margin = NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
+
+    var window: NSWindow { win }
+    var handle: Int64 { view?.handle ?? 0 }
+
+    init(name: String, view: CellView, asWindow: Bool = false, titled: Bool = true,
+         onEvents: (([[Any]]) -> Void)? = nil) {
+        self.name = name
+        self.view = view
+        self.asWindow = asWindow
+        self.onEvents = onEvents
+        win = PlatinumWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 200),
+                             styleMask: [.borderless], backing: .buffered, defer: true)
+        super.init()
+        win.dialog = self
+        win.document = asWindow
+        win.isReleasedWhenClosed = false
+        win.hasShadow = false
+        win.isOpaque = true
+        win.backgroundColor = Platinum.face
+        frameView.titled = titled
+        frameView.closable = asWindow
+        frameView.onClose = { [weak self] in self?.cancel() }
+        win.contentView = frameView
+        let nc = NotificationCenter.default
+        for n in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
+            nc.addObserver(forName: n, object: win, queue: .main) { [weak self] _ in
+                self?.frameView.needsDisplay = true
+            }
+        }
+    }
+
+    // MARK: presentation
+
+    func present(in parent: NSWindow) {
+        relayout()
+        let pf = parent.frame
+        let size = win.frame.size
+        // Alerts and dialogs sit in the upper third, the classic placement.
+        win.setFrameOrigin(NSPoint(x: floor(pf.midX - size.width / 2),
+                                   y: floor(pf.maxY - (pf.height - size.height) / 3 - size.height)))
+        parent.addChildWindow(win, ordered: .above)
+        win.makeKeyAndOrderFront(nil)
+        focusFirst()
+    }
+
+    func show() {
+        relayout()
+        win.center()
+        win.makeKeyAndOrderFront(nil)
+        focusFirst()
+    }
+
+    func dismiss() {
+        guard !dismissed else { return }
+        dismissed = true
+        win.parent?.removeChildWindow(win)
+        win.orderOut(nil)
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    /// The dialog over a window that just took the key back (a click on the
+    /// workspace behind it) keeps the keyboard, as a modal should.
+    func reclaimKey() {
+        if !dismissed, !asWindow, let p = win.parent, p.isKeyWindow { win.makeKey() }
+    }
+
+    private func focusFirst() {
+        guard let r = root else { return }
+        let fields = Self.focusables(r)
+        for (i, f) in fields.enumerated() { f.nextKeyView = fields[(i + 1) % fields.count] }
+        if let f = fields.first { win.makeFirstResponder(f) } else { win.makeFirstResponder(nil) }
+    }
+
+    private static func focusables(_ n: PNode) -> [NSView] {
+        if n.isHidden { return [] }
+        if let t = n as? PText, t.enabled { return [t.field] }
+        if n is PList { return [n] }
+        return n.kids.flatMap { focusables($0) }
+    }
+
+    // MARK: tree
+
+    private static func shapeOf(_ n: [String: Any]) -> String {
+        var s = "\(n["k"] as? String ?? "")|\(n["key"] as? String ?? "")"
+        if let o = n["opts"] as? [String] { s += "[" + o.joined(separator: ",") + "]" }
+        for c in n["kids"] as? [[String: Any]] ?? [] { s += "(" + shapeOf(c) + ")" }
+        return s
+    }
+
+    func update(_ tree: [String: Any]) -> Bool {
+        let nd = NSDictionary(dictionary: tree)
+        if let last = lastTree, nd.isEqual(to: last) { return false }
+        lastTree = nd
+        frameView.title = tree["text"] as? String ?? ""
+        win.title = frameView.title   // drawn by the frame; kept for the Window list
+        cancelKey = tree["key"] as? String ?? ""
+        let body = (tree["kids"] as? [[String: Any]])?.first ?? [:]
+        let sh = Self.shapeOf(body)
+        if sh != shape || root == nil {
+            shape = sh
+            root?.removeFromSuperview()
+            let r = PNode.build(body, self)
+            frameView.addSubview(r)
+            root = r
+            r.apply(body)
+            relayout()
+            if win.isVisible { focusFirst() }
+        } else {
+            root?.apply(body)
+            relayout()
+        }
+        return true
+    }
+
+    /// Size the window to the body and place everything; a dialog keeps
+    /// its top edge where it is.
+    private func relayout() {
+        guard let r = root else { return }
+        let m = Self.margin
+        let fit = r.fit()
+        let cw = max(fit.width, asWindow ? 360 : 260) + m.left + m.right
+        let ch = fit.height + m.top + m.bottom
+        let size = NSSize(width: cw + 2 * PlatinumFrameView.side,
+                          height: ch + frameView.topInset + PlatinumFrameView.side)
+        if win.frame.size != size {
+            let top = win.frame.maxY
+            var f = win.frame
+            f.size = size
+            if win.isVisible { f.origin.y = top - size.height }
+            win.setFrame(f, display: false)
+        }
+        let c = frameView.content
+        r.place(NSRect(x: c.minX + m.left, y: c.minY + m.top,
+                       width: c.width - m.left - m.right, height: c.height - m.top - m.bottom))
+        frameView.needsDisplay = true
+    }
+
+    // MARK: events
+
+    private func send(_ events: [[Any]]) {
+        if let f = onEvents { f(events); return }
+        guard let v = view, v.handle != 0,
+              let d = try? JSONSerialization.data(withJSONObject: ["name": name, "events": events]),
+              let json = String(data: d, encoding: .utf8) else { return }
+        withUTF8Arg(json) { p, l in tk_desktop_ui_event(v.handle, p, l) }
+        v.invalidateFrame()
+        v.needsDisplay = true
+    }
+
+    func set(_ key: String, _ value: String) { send([[false, key, value]]) }
+    func act(_ key: String) { send([[true, key, ""]]) }
+
+    func cancel() {
+        if let b = buttons().first(where: { $0.has(Platinum.CANCEL) && $0.enabled }) { b.flash(); return }
+        if !cancelKey.isEmpty { act(cancelKey) }
+    }
+
+    private func buttons() -> [PButton] {
+        func walk(_ n: PNode) -> [PButton] {
+            if n.isHidden { return [] }
+            return (n as? PButton).map { [$0] } ?? n.kids.flatMap(walk)
+        }
+        return root.map(walk) ?? []
+    }
+
+    private func pressDefault() -> Bool {
+        guard let b = buttons().first(where: { $0.has(Platinum.DEFAULT) && $0.enabled }) else { return false }
+        b.flash()
+        return true
+    }
+
+    /// Return, Esc, Tab and the one-letter answers, for keys no field or
+    /// list took.
+    func handleKey(_ e: NSEvent) -> Bool {
+        switch e.keyCode {
+        case 36, 76: return pressDefault()
+        case 53: cancel(); return true
+        case 48:
+            if e.modifierFlags.contains(.shift) { win.selectPreviousKeyView(nil) } else { win.selectNextKeyView(nil) }
+            return true
+        default: break
+        }
+        guard e.modifierFlags.intersection([.command, .control, .option]).isEmpty,
+              let ch = e.charactersIgnoringModifiers?.lowercased().first else { return false }
+        return pressHotkey(ch)
+    }
+
+    /// ⌘. cancels; ⌘-letter presses a one-letter answer, as NSAlert's do.
+    func handleCommandKey(_ e: NSEvent) -> Bool {
+        guard let ch = e.charactersIgnoringModifiers?.lowercased().first else { return false }
+        if ch == "." { cancel(); return true }
+        if win.firstResponder is NSText { return false }
+        return pressHotkey(ch)
+    }
+
+    private func pressHotkey(_ ch: Character) -> Bool {
+        guard let b = buttons().first(where: {
+            $0.has(Platinum.HOTKEY) && $0.enabled && $0.label.lowercased().first == ch
+        }) else { return false }
+        b.flash()
+        return true
+    }
+
+    // MARK: NSTextFieldDelegate
+
+    func controlTextDidChange(_ obj: Notification) {
+        guard let f = obj.object as? NSTextField, let key = f.identifier?.rawValue else { return }
+        set(key, f.stringValue)
+    }
+
+    func controlTextDidBeginEditing(_ obj: Notification) {
+        ((obj.object as? NSView)?.superview as? PText)?.setFocused(true)
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) {
+        ((obj.object as? NSView)?.superview as? PText)?.setFocused(false)
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
+        switch sel {
+        case #selector(NSResponder.insertNewline(_:)): return pressDefault()
+        case #selector(NSResponder.cancelOperation(_:)): cancel(); return true
+        default: return false
+        }
+    }
+}
+
+// MARK: Platinum menus
+
+struct PMItem {
+    var title: String
+    var shortcut = ""
+    var enabled = true
+    var separator = false
+    /// The check column: "✓", "◆" (open elsewhere) or empty.
+    var mark = ""
+}
+
+final class PlatinumMenuView: NSView {
+    static let itemH: CGFloat = 18, sepH: CGFloat = 8, shadow: CGFloat = 2
+    var items: [PMItem] = []
+    var selected: Int? { didSet { if selected != oldValue { needsDisplay = true } } }
+    override var isFlipped: Bool { true }
+
+    static func size(_ items: [PMItem]) -> NSSize {
+        let tw = items.map { Platinum.width($0.title) }.max() ?? 40
+        let sw = items.map { Platinum.width($0.shortcut) }.max() ?? 0
+        let h = items.map { $0.separator ? sepH : itemH }.reduce(0, +)
+        return NSSize(width: 22 + tw + (sw > 0 ? 24 + sw : 0) + 16 + shadow, height: h + 4 + shadow)
+    }
+
+    func rowRect(_ i: Int) -> NSRect {
+        var y: CGFloat = 2
+        for j in 0..<i { y += items[j].separator ? Self.sepH : Self.itemH }
+        return NSRect(x: 1, y: y, width: bounds.width - Self.shadow - 2,
+                      height: items[i].separator ? Self.sepH : Self.itemH)
+    }
+
+    func item(at p: NSPoint) -> Int? {
+        for i in items.indices where rowRect(i).contains(p) {
+            return items[i].separator || !items[i].enabled ? nil : i
+        }
+        return nil
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.clear.setFill()
+        bounds.fill()
+        let body = NSRect(x: 0, y: 0, width: bounds.width - Self.shadow, height: bounds.height - Self.shadow)
+        let sh = NSColor(white: 0, alpha: 0.45)
+        Platinum.fill(NSRect(x: body.maxX, y: Self.shadow, width: Self.shadow, height: body.height), sh)
+        Platinum.fill(NSRect(x: Self.shadow, y: body.maxY, width: body.width - Self.shadow, height: Self.shadow), sh)
+        Platinum.fill(body, Platinum.face)
+        Platinum.outline(body, Platinum.dark)
+        Platinum.bevel(body.insetBy(dx: 1, dy: 1), Platinum.light, Platinum.shadow)
+        let sw = items.map { Platinum.width($0.shortcut) }.max() ?? 0
+        for (i, it) in items.enumerated() {
+            let r = rowRect(i)
+            if it.separator {
+                Platinum.fill(NSRect(x: r.minX + 1, y: floor(r.midY) - 1, width: r.width - 2, height: 1), Platinum.shadow)
+                Platinum.fill(NSRect(x: r.minX + 1, y: floor(r.midY), width: r.width - 2, height: 1), Platinum.light)
+                continue
+            }
+            let sel = i == selected
+            if sel { Platinum.fill(r, Platinum.accent) }
+            let color: NSColor = !it.enabled ? Platinum.disabled : sel ? .white : .black
+            if !it.mark.isEmpty {
+                Platinum.text(it.mark, in: NSRect(x: r.minX + 4, y: r.minY, width: 14, height: r.height), color: color)
+            }
+            Platinum.text(it.title, in: NSRect(x: r.minX + 21, y: r.minY, width: r.width - 21, height: r.height),
+                          color: color)
+            if !it.shortcut.isEmpty {
+                Platinum.text(it.shortcut, in: NSRect(x: r.maxX - 10 - sw, y: r.minY, width: sw + 1, height: r.height),
+                              color: color)
+            }
+        }
+    }
+}
+
+final class PlatinumMenuPanel: NSPanel {
+    let menuView = PlatinumMenuView()
+
+    init(items: [PMItem]) {
+        super.init(contentRect: NSRect(origin: .zero, size: PlatinumMenuView.size(items)),
+                   styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = false
+        level = .popUpMenu
+        menuView.items = items
+        contentView = menuView
+    }
+
+    /// Show with its top-left at `p` (screen coordinates), kept on screen.
+    func show(topLeft p: NSPoint) {
+        var o = NSPoint(x: p.x, y: p.y - frame.height)
+        if let vf = NSScreen.screens.first(where: { $0.frame.contains(p) })?.visibleFrame ?? NSScreen.main?.visibleFrame {
+            o.x = min(max(o.x, vf.minX), vf.maxX - frame.width)
+            o.y = min(max(o.y, vf.minY), vf.maxY - frame.height)
+        }
+        setFrameOrigin(o)
+        orderFront(nil)
+    }
+
+    func item(atScreen p: NSPoint) -> Int? {
+        guard frame.contains(p) else { return nil }
+        return menuView.item(at: menuView.convert(convertPoint(fromScreen: p), from: nil))
+    }
+}
+
+/// One press-drag-release (or click-to-open, "sticky") pass through a set
+/// of menus, the way Mac OS 8 tracked them: drag across `titles` to switch
+/// menus, release on an item to pick it, click and release a title to keep
+/// its menu open, arrows and Return from the keyboard.
+enum PlatinumMenuSession {
+    static func run(menus: [[PMItem]], titles: [NSRect], start: Int, item: Int? = nil,
+                    origin: (Int, NSSize) -> NSPoint, highlight: (Int?) -> Void) -> (Int, Int)? {
+        var cur = start
+        var panel: PlatinumMenuPanel? = nil
+        var sticky = false
+        func open(_ i: Int) {
+            panel?.orderOut(nil)
+            let p = PlatinumMenuPanel(items: menus[i])
+            p.show(topLeft: origin(i, p.frame.size))
+            panel = p
+            cur = i
+            highlight(i)
+        }
+        func title(at p: NSPoint) -> Int? { titles.firstIndex { $0.contains(p) } }
+        func move(_ d: Int) {
+            guard let pv = panel?.menuView else { return }
+            let n = pv.items.count
+            var i = pv.selected ?? (d > 0 ? -1 : n)
+            for _ in 0..<n {
+                i = (i + d + n) % n
+                if !pv.items[i].separator && pv.items[i].enabled { pv.selected = i; return }
+            }
+        }
+        open(start)
+        panel?.menuView.selected = item
+        defer {
+            NSEvent.stopPeriodicEvents()
+            panel?.orderOut(nil)
+            highlight(nil)
+        }
+        NSEvent.startPeriodicEvents(afterDelay: 0, withPeriod: 0.03)
+        while let e = NSApp.nextEvent(matching: [.leftMouseDown, .leftMouseUp, .leftMouseDragged, .periodic,
+                                                 .keyDown, .rightMouseDown],
+                                      until: .distantFuture, inMode: .eventTracking, dequeue: true) {
+            let p = NSEvent.mouseLocation
+            switch e.type {
+            case .periodic, .leftMouseDragged:
+                if e.type == .periodic && sticky && panel?.frame.contains(p) != true { continue }
+                if let t = title(at: p), t != cur, titles.count > 1 { open(t) }
+                if let pn = panel {
+                    let over = pn.item(atScreen: p)
+                    if over != nil || pn.frame.contains(p) || !sticky { pn.menuView.selected = over }
+                }
+            case .leftMouseUp:
+                if let pn = panel, let i = pn.item(atScreen: p) { return (cur, i) }
+                if title(at: p) != nil { sticky = true; continue }
+                if !sticky { return nil }
+            case .leftMouseDown:
+                if let pn = panel, pn.frame.contains(p) { sticky = false; continue }
+                if let t = title(at: p) {
+                    if t == cur { return nil }
+                    open(t)
+                    sticky = false
+                    continue
+                }
+                return nil
+            case .rightMouseDown:
+                return nil
+            case .keyDown:
+                sticky = true
+                switch e.keyCode {
+                case 53: return nil
+                case 36, 76:
+                    if let s = panel?.menuView.selected { return (cur, s) }
+                    return nil
+                case 125: move(1)
+                case 126: move(-1)
+                case 123 where titles.count > 1: open((cur - 1 + menus.count) % menus.count)
+                case 124 where titles.count > 1: open((cur + 1) % menus.count)
+                default: break
+                }
+            default: break
+            }
+        }
+        return nil
+    }
+
+    /// A pop-up menu over the control at `over` (screen rect), the selected
+    /// item laid on the control. The picked index, or nil.
+    static func popUp(_ items: [PMItem], selected: Int, over: NSRect) -> Int? {
+        let probe = PlatinumMenuView()
+        probe.items = items
+        probe.frame = NSRect(origin: .zero, size: PlatinumMenuView.size(items))
+        let sel = max(0, min(selected, items.count - 1))
+        let row = probe.rowRect(sel)
+        let pick = run(menus: [items], titles: [over], start: 0, item: sel, origin: { _, _ in
+            NSPoint(x: over.minX - 1, y: over.maxY + row.minY - floor((over.height - row.height) / 2))
+        }, highlight: { _ in })
+        return pick?.1
+    }
+}
+
+
+/// Platinum push buttons pixel for pixel. The grays, the bevels and every
+/// corner step are read off Apple's own figures in the Mac OS 8 Human
+/// Interface Guidelines (Push Buttons, Default Buttons), where a button is
+/// 20 points tall and the default ring 3 more on each side. A vector
+/// approximation never looked right: the bevel is asymmetric (a face-colored
+/// gap before the top-left highlight, the dark shadow right against the
+/// outline at the bottom-right) and the corners are blended pixel by pixel.
+/// A grid is rows of gray levels; -1 is transparent.
+enum PlatinumButtonArt {
+    static let height = 20
+    static let ring = 3
+    private static let T = -1
+
+    private struct Style {
+        let face: Int
+        let top: [Int]      // rows 0...3, between the corners
+        let left: [Int]     // columns 0...3
+        let right: [Int]    // columns w-4...w-1
+        let bottom: [Int]   // rows h-4...h-1
+        let tl: [[Int]], tr: [[Int]], bl: [[Int]], br: [[Int]]   // 4×4, row by row
+    }
+
+    private static let normal = Style(
+        face: 0xE3,
+        top: [0x00, 0xE3, 0xFF, 0xE3], left: [0x00, 0xE3, 0xFF, 0xE3],
+        right: [0xE3, 0xB8, 0x89, 0x00], bottom: [0xE3, 0xB8, 0x89, 0x00],
+        tl: [[T, T, 0x2D, 0x00], [T, 0x00, 0xC7, 0xE3], [0x2D, 0xC7, 0xFF, 0xFF], [0x00, 0xE3, 0xFF, 0xFF]],
+        tr: [[0x00, 0x2D, T, T], [0xE3, 0xC7, 0x00, T], [0xFF, 0xE3, 0xC7, 0x2D], [0xE3, 0xB8, 0x89, 0x00]],
+        bl: [[0x00, 0xE3, 0xFF, 0xE3], [0x2D, 0xC7, 0xE3, 0xB8], [T, 0x00, 0xC7, 0x89], [T, T, 0x2D, 0x00]],
+        br: [[0xB8, 0xB8, 0x89, 0x00], [0xB8, 0x89, 0x89, 0x2D], [0x89, 0x89, 0x00, T], [0x00, 0x2D, T, T]])
+
+    private static let pressed = Style(
+        face: 0x79,
+        top: [0x00, 0x55, 0x67, 0x79], left: [0x00, 0x55, 0x67, 0x79],
+        right: [0x79, 0x89, 0x99, 0x00], bottom: [0x79, 0x89, 0x99, 0x00],
+        tl: [[T, T, 0x2D, 0x00], [T, 0x00, 0x55, 0x55], [0x2D, 0x55, 0x55, 0x67], [0x00, 0x55, 0x67, 0x67]],
+        tr: [[0x00, 0x2D, T, T], [0x55, 0x55, 0x00, T], [0x67, 0x79, 0x89, 0x2D], [0x79, 0x89, 0x99, 0x00]],
+        bl: [[0x00, 0x55, 0x67, 0x79], [0x2D, 0x55, 0x79, 0x89], [T, 0x00, 0x89, 0x99], [T, T, 0x2D, 0x00]],
+        br: [[0x89, 0x89, 0x99, 0x00], [0x89, 0x99, 0x99, 0x2D], [0x99, 0x99, 0x00, T], [0x00, 0x2D, T, T]])
+
+    private static let disabled = Style(
+        face: 0xE3,
+        top: [0x99, 0xE3, 0xE3, 0xE3], left: [0x99, 0xE3, 0xE3, 0xE3],
+        right: [0xE3, 0xE3, 0xE3, 0x99], bottom: [0xE3, 0xE3, 0xE3, 0x99],
+        tl: [[T, T, 0x99, 0x99], [T, 0x99, 0xE3, 0xE3], [0x99, 0xE3, 0xE3, 0xE3], [0x99, 0xE3, 0xE3, 0xE3]],
+        tr: [[0x99, 0x99, T, T], [0xE3, 0xE3, 0x99, T], [0xE3, 0xE3, 0xE3, 0x99], [0xE3, 0xE3, 0xE3, 0x99]],
+        bl: [[0x99, 0xE3, 0xE3, 0xE3], [0x99, 0xE3, 0xE3, 0xE3], [T, 0x99, 0xE3, 0xE3], [T, T, 0x99, 0x99]],
+        br: [[0xE3, 0xE3, 0xE3, 0x99], [0xE3, 0xE3, 0xE3, 0x99], [0xE3, 0xE3, 0x99, T], [0x99, 0x99, T, T]])
+
+    /// A push button `w` points wide.
+    static func standard(w: Int, pressed p: Bool, disabled d: Bool) -> [[Int]] {
+        let st = d ? disabled : p ? pressed : normal
+        let w = max(w, 8), h = height
+        var g = Array(repeating: Array(repeating: st.face, count: w), count: h)
+        for x in 0..<w {
+            for k in 0..<4 { g[k][x] = st.top[k]; g[h - 4 + k][x] = st.bottom[k] }
+        }
+        for y in 0..<h {
+            for k in 0..<4 { g[y][k] = st.left[k]; g[y][w - 4 + k] = st.right[k] }
+        }
+        for r in 0..<4 {
+            for c in 0..<4 {
+                g[r][c] = st.tl[r][c]
+                g[r][w - 4 + c] = st.tr[r][c]
+                g[h - 4 + r][c] = st.bl[r][c]
+                g[h - 4 + r][w - 4 + c] = st.br[r][c]
+            }
+        }
+        return g
+    }
+
+    /// The default button: a standard one inside its 3-point ring, a trough
+    /// (face then B8 on the top-left, B8 then 89 on the bottom-right). The
+    /// button's transparent corners show the trough's shading.
+    static func defaultButton(w: Int, pressed p: Bool, disabled d: Bool) -> [[Int]] {
+        let inner = standard(w: w, pressed: p, disabled: d)
+        let iw = inner[0].count, ih = inner.count
+        let rw = iw + 2 * ring, rh = ih + 2 * ring
+        var g = Array(repeating: Array(repeating: T, count: rw), count: rh)
+        func set(_ x: Int, _ y: Int, _ v: Int) { g[y][x] = v }
+        for x in 4..<(rw - 4) { set(x, 0, 0x00); set(x, rh - 1, 0x00); set(x, rh - 2, 0x89) }
+        for x in 3..<(rw - 4) { set(x, 1, 0xE3); set(x, rh - 3, 0xB8) }
+        for x in 4..<(rw - 4) { set(x, 2, 0xB8) }
+        for y in 4..<(rh - 4) { set(0, y, 0x00); set(rw - 1, y, 0x00); set(rw - 2, y, 0x89) }
+        for y in 3..<(rh - 4) { set(1, y, 0xE3); set(rw - 3, y, 0xB8) }
+        for y in 4..<(rh - 4) { set(2, y, 0xB8) }
+        // Corners: the outline steps in four, the trough blends into it.
+        set(3, 0, 0x2D); set(2, 1, 0x00); set(1, 2, 0x00); set(0, 3, 0x2D)
+        set(3, 1, 0xE3); set(2, 2, 0xE3); set(3, 2, 0xE3); set(2, 3, 0xE3)
+        set(rw - 4, 0, 0x2D); set(rw - 3, 1, 0x00); set(rw - 2, 2, 0x00); set(rw - 1, 3, 0x2D)
+        set(rw - 4, 1, 0xD5); set(rw - 4, 2, 0xB8); set(rw - 3, 2, 0xC7); set(rw - 2, 3, 0x99)
+        set(0, rh - 4, 0x2D); set(1, rh - 3, 0x00); set(2, rh - 2, 0x00); set(3, rh - 1, 0x2D)
+        set(1, rh - 4, 0xD5); set(2, rh - 4, 0xB8); set(2, rh - 3, 0xC7); set(3, rh - 2, 0x99)
+        set(rw - 1, rh - 4, 0x2D); set(rw - 2, rh - 3, 0x00); set(rw - 3, rh - 2, 0x00); set(rw - 4, rh - 1, 0x2D)
+        set(rw - 2, rh - 4, 0x89); set(rw - 3, rh - 4, 0x99); set(rw - 4, rh - 3, 0x99)
+        set(rw - 3, rh - 3, 0x89); set(rw - 4, rh - 2, 0x89)
+        // The button, its corners filled from the trough.
+        let outer: Set<[Int]> = [[0, 0], [iw - 1, 0], [0, ih - 1], [iw - 1, ih - 1]]
+        for y in 0..<ih {
+            for x in 0..<iw {
+                var v = inner[y][x]
+                if v == T { v = outer.contains([x, y]) ? 0xB8 : 0x89 }
+                // The one blend pixel that blends with the trough instead.
+                if x == iw - 2 && y == 2 && v == 0xC7 { v = 0xB8 }
+                g[y + ring][x + ring] = v
+            }
+        }
+        if d {
+            // Disabled: the ring is a gray outline round a flat trough.
+            for y in 0..<rh {
+                for x in 0..<rw where (x < ring || x >= rw - ring || y < ring || y >= rh - ring) && g[y][x] != T {
+                    g[y][x] = (g[y][x] == 0x00 || g[y][x] == 0x2D) ? 0x99 : 0xE3
+                }
+            }
+        }
+        return g
+    }
+
+    /// Paint a grid with its top-left at `p` (a flipped view), one fill per
+    /// run of equal pixels.
+    static func paint(_ g: [[Int]], at p: NSPoint) {
+        for (y, row) in g.enumerated() {
+            var x = 0
+            while x < row.count {
+                let v = row[x]
+                var e = x + 1
+                while e < row.count && row[e] == v { e += 1 }
+                if v != T {
+                    Platinum.fill(NSRect(x: p.x + CGFloat(x), y: p.y + CGFloat(y), width: CGFloat(e - x), height: 1),
+                                  Platinum.gray(v))
+                }
+                x = e
+            }
+        }
+    }
 }

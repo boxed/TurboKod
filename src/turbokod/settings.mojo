@@ -154,6 +154,7 @@ struct Settings(Movable):
     var offer_native_ui: Bool
     """The host can show the macOS-style UI (the native macOS frontend)."""
     var native_ui: Bool
+    var platinum_ui: Bool
     var palette_version: Int
     """Bumped by the host when the palette changes, so the preview repaints."""
 
@@ -209,6 +210,7 @@ struct Settings(Movable):
         self._font_ideal_size = 0
         self.offer_native_ui = False
         self.native_ui = False
+        self.platinum_ui = False
         self.palette_version = 0
         self.language_overrides = List[LanguageServerOverride]()
         self.languages_view = List[LanguageSpec]()
@@ -382,13 +384,23 @@ struct Settings(Movable):
             return self._font_effective_size
         return 16
 
+    def _look_index(self) -> Int:
+        """The Look choice: Turbo Vision, macOS or Mac OS 9."""
+        if self.native_ui:
+            return 1
+        if self.platinum_ui:
+            return 2
+        return 0
+
     def _appearance_ui(self) -> UINode:
         var rows = List[UINode]()
         if self.offer_native_ui:
-            rows.append(ui_row(String(""), ui_check(
-                String("native_ui"),
-                String("macOS-style UI (native tabs, sheets and pickers)"),
-                self.native_ui,
+            var looks = List[String]()
+            looks.append(String("Turbo Vision"))
+            looks.append(String("macOS"))
+            looks.append(String("Mac OS 9"))
+            rows.append(ui_row(String("Look"), ui_choice(
+                String("look"), looks^, self._look_index(),
             )))
         var theme = 0
         for i in range(len(self._theme_names)):
@@ -587,8 +599,12 @@ struct Settings(Movable):
             self.compress_kwargs = ui_bool(value)
         elif key == String("cursor_blink"):
             self.cursor_blink = ui_bool(value)
-        elif key == String("native_ui"):
-            self.native_ui = ui_bool(value)
+        elif key == String("look"):
+            var i = ui_int(value)
+            if i < 0 or i > 2:
+                return
+            self.native_ui = i == 1
+            self.platinum_ui = i == 2
         elif key == String("theme"):
             var i = ui_int(value)
             if i < 0 or i >= len(self._theme_names):

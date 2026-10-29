@@ -9,7 +9,7 @@ from turbokod.canvas import Canvas
 from turbokod.colors import default_attr
 from turbokod.desktop import (
     APP_SETTINGS, DOCK_DEBUG_PANE, Desktop, PROJECT_SETTINGS, EDITOR_FIND, EDITOR_GOTO,
-    EDITOR_REPLACE, VIEW_NATIVE_UI,
+    EDITOR_REPLACE, VIEW_NATIVE_UI, VIEW_PLATINUM_UI,
 )
 from turbokod.search_options import SearchOptions
 from turbokod.color_picker import ColorPickerDialog, MODE_RGB
@@ -464,6 +464,97 @@ def test_a_lower_window_limit_closes_documents_when_settings_closes() raises:
     assert_false(d.settings.active)
     assert_equal(len(d.windows.windows), 2)
     assert_equal(d.config.max_open_windows, 2)
+
+
+def _platinum_desktop(text: String) -> Desktop:
+    var d = _native_desktop(text)
+    d.config.native_ui = False
+    d.config.platinum_ui = True
+    return d^
+
+
+def test_platinum_ui_needs_a_host_and_yields_to_native_ui() raises:
+    var d = Desktop()
+    d.config.platinum_ui = True
+    assert_false(d.platinum_ui())   # terminal frontend: always the grid
+    d.host_owns_menu = True
+    assert_true(d.platinum_ui())
+    assert_false(d.native_ui())
+    d.config.native_ui = True
+    assert_false(d.platinum_ui())
+
+
+def test_view_menu_looks_are_one_choice() raises:
+    var d = Desktop()
+    d.host_owns_menu = True
+    _ = d.dispatch_action(VIEW_PLATINUM_UI, _SCREEN)
+    assert_true(d.platinum_ui())
+    _ = d.dispatch_action(VIEW_NATIVE_UI, _SCREEN)
+    assert_true(d.native_ui())
+    assert_false(d.config.platinum_ui)
+    _ = d.dispatch_action(VIEW_PLATINUM_UI, _SCREEN)
+    assert_true(d.platinum_ui())
+    assert_false(d.config.native_ui)
+    _ = d.dispatch_action(VIEW_PLATINUM_UI, _SCREEN)
+    assert_false(d.platinum_ui())
+    assert_false(d.native_ui())
+
+
+def test_settings_look_choice_sets_the_look() raises:
+    var d = _native_desktop(String("x\n"))
+    _ = d.dispatch_action(APP_SETTINGS, _SCREEN)
+    d.ui_apply(String("settings"), [ui_set(String("look"), String("2"))])
+    assert_true(d.config.platinum_ui)
+    assert_false(d.config.native_ui)
+    assert_equal(d.settings._look_index(), 2)
+    d.ui_apply(String("settings"), [ui_set(String("look"), String("1"))])
+    assert_true(d.config.native_ui)
+    assert_false(d.config.platinum_ui)
+    d.ui_apply(String("settings"), [ui_set(String("look"), String("0"))])
+    assert_false(d.config.native_ui)
+    assert_false(d.config.platinum_ui)
+
+
+def test_platinum_dialogs_go_to_the_host_and_ignore_grid_keys() raises:
+    var d = _platinum_desktop(String("x\n"))
+    d.fill_dialog.open(2)
+    assert_true(d.native_ui_surface_active())
+    assert_false(_screen_has(d, String("Fill 2 cursors")))
+    _ = d.handle_event(Event.key_event(KEY_ENTER), _SCREEN)
+    assert_true(d.fill_dialog.active)
+    # Settings opens in the host's window, Platinum-drawn.
+    _ = d.dispatch_action(APP_SETTINGS, _SCREEN)
+    assert_true(d.settings_native)
+
+
+def test_platinum_takes_the_confirm_but_leaves_prompts_in_the_grid() raises:
+    var d = _platinum_desktop(String("a\nb\n"))
+    d.confirm_dialog.open(String("Install rust LSP?"), String("Install"))
+    assert_true(d.native_dialog_active())
+    assert_false(_screen_has(d, String("Install rust LSP?")))
+    _ = d.native_confirm_answer(-1)
+    assert_false(d.confirm_dialog.active)
+    _ = d.dispatch_action(EDITOR_GOTO, _SCREEN)
+    assert_true(d.prompt.active)
+    assert_false(d.native_dialog_active())
+
+
+def test_platinum_tabs_keep_a_gutter_for_the_scroll_bar() raises:
+    var d = _platinum_desktop(String("a\nb\n"))
+    var canvas = Canvas(_SCREEN.b.x, _SCREEN.b.y)
+    canvas.clear(default_attr())
+    d.paint(canvas, _SCREEN)
+    ref w = d.windows.windows[0]
+    assert_true(w.frameless)
+    assert_true(w.rect == d.workspace_rect(_SCREEN))
+    # Two columns at the right are the host's 16-point scroll bar's.
+    assert_equal(w.interior().b.x, w.rect.b.x - 2)
+    assert_true(d.tab_bar_rect(_SCREEN).is_empty())
+    # The macOS-style UI's overlay scroller needs no gutter.
+    d.config.platinum_ui = False
+    d.config.native_ui = True
+    d.paint(canvas, _SCREEN)
+    assert_true(d.windows.windows[0].interior() == d.windows.windows[0].rect)
 
 
 def test_settings_stay_in_grid_without_native_ui() raises:
