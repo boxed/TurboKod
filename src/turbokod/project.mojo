@@ -665,8 +665,10 @@ def find_in_project(
 def replace_in_project(
     root: String, needle: String, replacement: String,
     opts: SearchOptions = default_search_options(),
+    only: Optional[List[String]] = None,
 ) raises -> Tuple[Int, Int]:
-    """Replace ``needle`` with ``replacement`` across all project files.
+    """Replace ``needle`` with ``replacement`` across all project files, or
+    the ``only`` ones (absolute paths) when given.
 
     Returns ``(files_changed, total_replacements)``. Files that look binary
     or where the write fails are silently skipped.
@@ -693,7 +695,7 @@ def replace_in_project(
     # Last point the searcher is reachable, and a ``finally`` for the
     # same reason ``find_in_project`` uses one — see its note.
     try:
-        var paths = walk_project_files(root)
+        var paths = only.value().copy() if only else walk_project_files(root)
         for p in range(len(paths)):
             var full = paths[p]
             # Writing goes through a link to its target: one inside the

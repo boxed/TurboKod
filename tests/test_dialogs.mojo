@@ -35,7 +35,7 @@ from turbokod.color_picker import (
 from turbokod.desktop import (
     Desktop, EDITOR_SAVE, PROJECT_FIND, _find_doc_entry_for_word
 )
-from turbokod.file_io import find_git_project, join_path, stat_file, write_file
+from turbokod.file_io import find_git_project, join_path, read_file, stat_file, write_file
 from turbokod.menu import Menu, MenuBar, MenuItem
 from turbokod.project import ProjectMatch, find_in_project, walk_project_files
 from turbokod.find_results_pane import FindResultsPane
@@ -2519,6 +2519,31 @@ def test_a_match_in_a_file_with_a_colon_in_its_name_is_found() raises:
             paths.append(m.value()[0] + ":" + String(m.value()[1]))
     sort(paths)
     assert_equal(paths, [dir + "/meeting: notes.md:2", dir + "/v2:10/a.md:1"])
+    _ = capture_command([String("rm"), String("-rf"), dir])
+
+
+def test_replace_all_in_project_keeps_to_the_scope_and_globs() raises:
+    # It walked the whole project: a replace narrowed to docs/*.md also
+    # changed every source file
+    if not which(String("rg")):
+        return
+    var dir = _temp_path(String("_replace_scope"))
+    _ = capture_command([String("rm"), String("-rf"), dir])
+    _ = capture_command([String("mkdir"), String("-p"), dir + "/docs", dir + "/src"])
+    assert_true(write_file(dir + "/docs/a.md", String("foo\n")))
+    assert_true(write_file(dir + "/docs/b.txt", String("foo\n")))
+    assert_true(write_file(dir + "/src/c.md", String("foo\n")))
+    var d = Desktop()
+    d.open_project(dir)
+    d.project_find.open_replace(dir, String("foo"))
+    d.project_find.set_field(String("scope"), String("docs"), 0)
+    d.project_find.set_field(String("glob"), String("*.md"), 0)
+    d.project_find.set_field(String("replace"), String("bar"), 0)
+    d.project_find.do_replace = True
+    d._after_project_find(Rect(0, 0, 100, 40))
+    assert_equal(read_file(dir + "/docs/a.md"), String("bar\n"))
+    assert_equal(read_file(dir + "/docs/b.txt"), String("foo\n"))
+    assert_equal(read_file(dir + "/src/c.md"), String("foo\n"))
     _ = capture_command([String("rm"), String("-rf"), dir])
 
 

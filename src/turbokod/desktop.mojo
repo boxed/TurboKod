@@ -167,7 +167,7 @@ from .menu import MENU_MARK_NONE, MENU_MARK_OPEN, Menu, MenuBar, MenuItem
 from .posix import monotonic_ms, sleep_ms, wall_clock_ms, which
 from .project import replace_in_project, walk_project_files
 from .search_options import SearchOptions
-from .project_find import ProjectFind
+from .project_find import ProjectFind, project_find_files
 from .git_status_poll import GitStatusPoller
 from .find_results_pane import FindResultsPane
 from .project_targets import (
@@ -8809,13 +8809,15 @@ struct Desktop(Movable):
             # results are immediately navigable. See ``panel_focus_request``.
             self.panel_focus_request = True
         elif self.project_find.do_replace:
-            # Replace All: swap ``query`` → ``replace`` across the
-            # project (the streamed result list was the live preview),
-            # surface the summary window, and close. ``replace_in_project``
-            # re-scans via ``walk_project_files`` honoring the same
-            # toggles, so the on-disk edit matches what the user saw.
+            # Replace All: swap ``query`` → ``replace`` in the files the
+            # search finds (the streamed result list was the live
+            # preview), surface the summary window, and close. Those files
+            # come from rg with the same scope and globs: walking the whole
+            # project replaced in files the preview had left out.
             var find = self.project_find.query.text
             var replacement = self.project_find.replace.text
+            var scope = self.project_find.scope.text
+            var glob = self.project_find.glob.text
             var opts = SearchOptions(
                 self.project_find.toggle_case.on,
                 self.project_find.toggle_word.on,
@@ -8826,8 +8828,12 @@ struct Desktop(Movable):
             self.project_find.close()
             if self.project:
                 try:
+                    var files = project_find_files(
+                        self.project.value(), find, scope, glob, opts,
+                    )
                     var summary = replace_in_project(
                         self.project.value(), find, replacement, opts,
+                        Optional[List[String]](files^),
                     )
                     self.windows.add(_summary_window(
                         find, replacement, summary[0], summary[1],

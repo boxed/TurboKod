@@ -41,6 +41,7 @@ from .highlight import (
 )
 from .picker_input import picker_nav_key, picker_wheel_scroll
 from .posix import monotonic_ms
+from .lsp import capture_command
 from .project import ProjectMatch
 from .clipboard import clipboard_chord, CLIP_COPY
 from .search_options import SearchOptions
@@ -1646,6 +1647,28 @@ def _project_find_argv(
     argv.append(query)
     argv.append(search_dir)
     return argv^
+
+
+def project_find_files(
+    root: String, query: String, scope: String, glob: String,
+    opts: SearchOptions,
+) raises -> List[String]:
+    """The files the Find in Project search for these fields has a match
+    in — with its own command line, so the scope, the globs and what rg
+    leaves out are the same: what Replace All may change."""
+    var argv = _project_find_argv(root, query, scope, glob, opts)
+    var listed = List[String]()
+    var options = True
+    for a in argv:
+        if options and a == String("--"):
+            listed.append(String("--files-with-matches"))
+            options = False
+        listed.append(a)
+    var out = List[String]()
+    for path in capture_command(listed).stdout.split("\0"):
+        if path.byte_length() > 0:
+            out.append(String(path))
+    return out^
 
 
 struct _RgRunner(Movable):
