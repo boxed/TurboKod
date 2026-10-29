@@ -37,6 +37,7 @@ from .language_config import (
 )
 from .language_editor import LanguageEditor
 from .theme import theme_names
+from .string_utils import join_args
 from .ui_tree import (
     UI_DEFAULT, UI_DISABLED, UI_SECONDARY, UINode, ui_bool, ui_button,
     ui_buttons, ui_check, ui_choice, ui_dialog, ui_form, ui_hstack, ui_int,
@@ -446,7 +447,7 @@ struct Settings(Movable):
             for j in range(len(spec.candidates)):
                 if j > 0:
                     servers += String(", ")
-                servers += _join_argv(spec.candidates[j].argv)
+                servers += join_args(spec.candidates[j].argv)
             rows.append([
                 spec.language_id
                     + (String(" *") if _has_override(self.language_overrides, spec.language_id)
@@ -673,7 +674,7 @@ struct Settings(Movable):
         ref spec = self.languages_view[self.selected_language]
         var argvs = List[String]()
         for i in range(len(spec.candidates)):
-            argvs.append(_join_argv(spec.candidates[i].argv))
+            argvs.append(join_args(spec.candidates[i].argv))
         var is_existing = find_language_by_id(
             built_in_servers(), spec.language_id,
         ) >= 0
@@ -780,51 +781,5 @@ def _has_override(
         if overrides[i].language_id == language_id:
             return True
     return False
-
-
-def _join_argv(argv: List[String]) -> String:
-    """Round-trip-safe join: wrap tokens with shell-significant
-    characters (spaces, tabs, or pre-existing quotes) in double quotes
-    so the re-parser in ``language_editor._split_space`` reconstructs
-    the same argv. Without the re-quoting, editing a saved
-    ``--ty-command "/path/to/ty server"`` would silently lose the
-    grouping the next time the dialog opened.
-    """
-    var out = String("")
-    for i in range(len(argv)):
-        if i > 0:
-            out = out + String(" ")
-        out = out + _shell_quote(argv[i])
-    return out^
-
-
-def _shell_quote(s: String) -> String:
-    """Return ``s`` unchanged when it contains no shell-significant
-    bytes; otherwise wrap it in double quotes with embedded ``"`` and
-    ``\\`` escaped. Single quotes are passed through inside ``"…"``
-    so they don't need their own handling. Empty input is rendered as
-    ``""`` so it survives a re-split as a real (empty) token rather
-    than getting dropped."""
-    var b = s.as_bytes()
-    if len(b) == 0:
-        return String("\"\"")
-    var needs_quote = False
-    for i in range(len(b)):
-        var c = b[i]
-        if c == 0x20 or c == 0x09 or c == 0x22 or c == 0x27 \
-                or c == 0x5C:
-            needs_quote = True
-            break
-    if not needs_quote:
-        return s
-    var buf = List[UInt8]()
-    buf.append(0x22)  # opening "
-    for i in range(len(b)):
-        var c = b[i]
-        if c == 0x22 or c == 0x5C:
-            buf.append(0x5C)
-        buf.append(c)
-    buf.append(0x22)  # closing "
-    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=len(buf))))
 
 

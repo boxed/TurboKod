@@ -12,6 +12,7 @@ Plain state plus a declarative UI (``ui`` / ``ui_set`` / ``ui_act``, see
 from std.collections.list import List
 
 from .config import LanguageServerOverride
+from .string_utils import split_args
 from .ui_tree import (
     UI_CANCEL, UI_DEFAULT, UI_DISABLED, UI_SECONDARY, UINode, ui_button,
     ui_buttons, ui_dialog, ui_form, ui_hstack, ui_int, ui_label, ui_row,
@@ -66,9 +67,9 @@ struct LanguageEditor(Movable):
         would (quotes keep a token together)."""
         var ov = LanguageServerOverride()
         ov.language_id = String(self.language_id.strip())
-        ov.file_types = _split_space(self.file_types)
+        ov.file_types = split_args(self.file_types)
         for i in range(len(self.candidates)):
-            var argv = _split_space(self.candidates[i])
+            var argv = split_args(self.candidates[i])
             if len(argv) > 0:
                 ov.argvs.append(argv^)
         return ov^
@@ -165,63 +166,3 @@ struct LanguageEditor(Movable):
             return
         self.candidates.swap_elements(self.selected, to)
         self.selected = to
-
-
-def _split_space(text: String) -> List[String]:
-    """Shell-style argv tokenizer: split on whitespace, but treat
-    ``"..."`` and ``'...'`` as a single token whose interior whitespace
-    is preserved (the quote characters themselves are stripped). Adjacent
-    quoted/unquoted runs concatenate, mirroring POSIX shell — so
-    ``foo"a b"`` becomes one token ``fooa b``. Crucial for LSP commands
-    like ``iommi-lsp --ty-command "/path/to/ty server"`` where the
-    second flag's value must reach the child as one argv entry.
-    """
-    var out = List[String]()
-    var b = text.as_bytes()
-    var n = len(b)
-    var i = 0
-    while i < n:
-        # Skip leading whitespace between tokens.
-        while i < n and (b[i] == 0x20 or b[i] == 0x09):
-            i += 1
-        if i >= n:
-            break
-        # Accumulate one token, honoring quotes.
-        var token = List[UInt8]()
-        var has_content = False
-        while i < n:
-            var c = b[i]
-            if c == 0x20 or c == 0x09:
-                break
-            if c == 0x22:  # double quote
-                i += 1
-                has_content = True
-                while i < n and b[i] != 0x22:
-                    # Inside ``"…"`` only ``\"`` and ``\\`` are escapes;
-                    # leave other backslashes literal so a Windows path
-                    # like ``"C:\\Users\\…"`` isn't mangled.
-                    if b[i] == 0x5C and i + 1 < n \
-                            and (b[i + 1] == 0x22 or b[i + 1] == 0x5C):
-                        token.append(b[i + 1])
-                        i += 2
-                        continue
-                    token.append(b[i])
-                    i += 1
-                if i < n:  # consume closing quote
-                    i += 1
-                continue
-            if c == 0x27:  # single quote
-                i += 1
-                has_content = True
-                while i < n and b[i] != 0x27:
-                    token.append(b[i])
-                    i += 1
-                if i < n:
-                    i += 1
-                continue
-            token.append(c)
-            has_content = True
-            i += 1
-        if has_content:
-            out.append(String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=token.unsafe_ptr(), length=len(token)))))
-    return out^

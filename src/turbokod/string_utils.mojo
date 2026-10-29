@@ -177,74 +177,110 @@ def split_whitespace(s: String) -> List[String]:
     return out^
 
 
-def split_args(s: String) -> List[String]:
-    """An argument line as a shell splits it, without expanding anything:
-    whitespace separates arguments, ``'...'`` is literal, ``"..."`` keeps
-    spaces with ``\\"`` and ``\\\\`` escaped, and a backslash outside quotes
-    takes the next character as is. ``join_args`` writes what this reads,
-    so an argument holding a space (or nothing) survives being shown in a
-    text field and read back."""
-    var b = s.as_bytes()
+def split_args(text: String) -> List[String]:
+    """Shell-style argv tokenizer: split on whitespace, but treat
+    ``"..."`` and ``'...'`` as a single token whose interior whitespace
+    is preserved (the quote characters themselves are stripped). Adjacent
+    quoted/unquoted runs concatenate, mirroring POSIX shell — so
+    ``foo"a b"`` becomes one token ``fooa b``. Crucial for LSP commands
+    like ``iommi-lsp --ty-command "/path/to/ty server"`` where the
+    second flag's value must reach the child as one argv entry.
+    """
     var out = List[String]()
-    var cur = List[UInt8]()
-    var in_arg = False
-    var i = 0
+    var b = text.as_bytes()
     var n = len(b)
+    var i = 0
     while i < n:
-        var c = b[i]
-        if c == 0x20 or c == 0x09 or c == 0x0A or c == 0x0D:
-            if in_arg:
-                out.append(String(StringSpan(unsafe_from_utf8=Span(cur))))
-                cur = List[UInt8]()
-                in_arg = False
+        # Skip leading whitespace between tokens.
+        while i < n and (b[i] == 0x20 or b[i] == 0x09):
             i += 1
-            continue
-        in_arg = True
-        if c == 0x27:    # '
-            i += 1
-            while i < n and b[i] != 0x27:
-                cur.append(b[i])
-                i += 1
-            i += 1
-        elif c == 0x22:    # "
-            i += 1
-            while i < n and b[i] != 0x22:
-                if b[i] == 0x5C and i + 1 < n and (b[i + 1] == 0x22 or b[i + 1] == 0x5C):
-                    i += 1
-                cur.append(b[i])
-                i += 1
-            i += 1
-        elif c == 0x5C and i + 1 < n:    # \
-            cur.append(b[i + 1])
-            i += 2
-        else:
-            cur.append(c)
-            i += 1
-    if in_arg:
-        out.append(String(StringSpan(unsafe_from_utf8=Span(cur))))
-    return out^
-
-
-def join_args(args: List[String]) -> String:
-    """``args`` as one line ``split_args`` reads back as them: an argument
-    that is empty or holds whitespace, a quote or a backslash is put in
-    single quotes (a ``'`` in it as ``'\\''``)."""
-    var out = String("")
-    for k in range(len(args)):
-        if k:
-            out += " "
-        var a = args[k]
-        var plain = len(a.as_bytes()) > 0
-        for c in a.as_bytes():
-            if c == 0x20 or c == 0x09 or c == 0x0A or c == 0x0D \
-                    or c == 0x27 or c == 0x22 or c == 0x5C:
-                plain = False
+        if i >= n:
+            break
+        # Accumulate one token, honoring quotes.
+        var token = List[UInt8]()
+        var has_content = False
+        while i < n:
+            var c = b[i]
+            if c == 0x20 or c == 0x09:
                 break
-        if plain:
-            out += a
-        else:
-            out += "'" + a.replace("'", "'\\''") + "'"
+            if c == 0x22:  # double quote
+                i += 1
+                has_content = True
+                while i < n and b[i] != 0x22:
+                    # Inside ``"…"`` only ``\"`` and ``\\`` are escapes;
+                    # leave other backslashes literal so a Windows path
+                    # like ``"C:\\Users\\…"`` isn't mangled.
+                    if b[i] == 0x5C and i + 1 < n \
+                            and (b[i + 1] == 0x22 or b[i + 1] == 0x5C):
+                        token.append(b[i + 1])
+                        i += 2
+                        continue
+                    token.append(b[i])
+                    i += 1
+                if i < n:  # consume closing quote
+                    i += 1
+                continue
+            if c == 0x27:  # single quote
+                i += 1
+                has_content = True
+                while i < n and b[i] != 0x27:
+                    token.append(b[i])
+                    i += 1
+                if i < n:
+                    i += 1
+                continue
+            token.append(c)
+            has_content = True
+            i += 1
+        if has_content:
+            out.append(String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=token.unsafe_ptr(), length=len(token)))))
     return out^
+
+
+def join_args(argv: List[String]) -> String:
+    """Round-trip-safe join: wrap tokens with shell-significant
+    characters (spaces, tabs, or pre-existing quotes) in double quotes
+    so the re-parser in ``split_args`` reconstructs
+    the same argv. Without the re-quoting, editing a saved
+    ``--ty-command "/path/to/ty server"`` would silently lose the
+    grouping the next time the dialog opened.
+    """
+    var out = String("")
+    for i in range(len(argv)):
+        if i > 0:
+            out = out + String(" ")
+        out = out + _shell_quote(argv[i])
+    return out^
+
+
+def _shell_quote(s: String) -> String:
+    """Return ``s`` unchanged when it contains no shell-significant
+    bytes; otherwise wrap it in double quotes with embedded ``"`` and
+    ``\\`` escaped. Single quotes are passed through inside ``"…"``
+    so they don't need their own handling. Empty input is rendered as
+    ``""`` so it survives a re-split as a real (empty) token rather
+    than getting dropped."""
+    var b = s.as_bytes()
+    if len(b) == 0:
+        return String("\"\"")
+    var needs_quote = False
+    for i in range(len(b)):
+        var c = b[i]
+        if c == 0x20 or c == 0x09 or c == 0x22 or c == 0x27 \
+                or c == 0x5C:
+            needs_quote = True
+            break
+    if not needs_quote:
+        return s
+    var buf = List[UInt8]()
+    buf.append(0x22)  # opening "
+    for i in range(len(b)):
+        var c = b[i]
+        if c == 0x22 or c == 0x5C:
+            buf.append(0x5C)
+        buf.append(c)
+    buf.append(0x22)  # closing "
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=len(buf))))
 
 
 def shell_escape_path(path: String) -> String:

@@ -1217,8 +1217,8 @@ def test_an_argument_line_reads_back_as_the_arguments_written() raises:
     assert_equal(split_args(join_args(tricky)), tricky)
     assert_equal(join_args(["python", "-m", "foo"]), String("python -m foo"))
     assert_equal(
-        split_args(String("a 'b c' \"d \\\" e\" f\\ g  ")),
-        ["a", "b c", "d \" e", "f g"],
+        split_args(String("a 'b c' \"d \\\" e\"  C:\\x")),
+        ["a", "b c", "d \" e", "C:\\x"],
     )
 
 
