@@ -14935,7 +14935,8 @@ struct Desktop(Movable):
                     hint, len(prefix.as_bytes()), len(hint.as_bytes()),
                 )
         self._venv_lsp_installed.append(venv_dir)
-        var cmd = py + String(" -m pip install ") + package
+        # Quoted: a project folder named like "My Projects" split the path
+        var cmd = shell_single_quote(py) + String(" -m pip install ") + package
         try:
             self.install_runner.start(
                 String("python LSP into venv"), cmd,
@@ -17061,7 +17062,7 @@ struct Desktop(Movable):
                 return Optional[String]()
             var venv_dir = self._pending_dap_venv_dir
             var py = join_path(venv_dir, String("bin/python"))
-            var cmd = py + String(" -m pip install debugpy")
+            var cmd = shell_single_quote(py) + String(" -m pip install debugpy")
             if self.install_runner.is_active():
                 # Race: another install fired between the prompt opening
                 # and the user clicking yes. Drop the deferred start so
