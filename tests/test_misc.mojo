@@ -1060,6 +1060,25 @@ def test_merge_config_keeps_every_writers_change() raises:
     assert_equal(len(merged2.recent_files), 2)
     assert_equal(merged2.recent_files[0], String("/tmp/ours.txt"))
     assert_equal(merged2.recent_files[1], String("/tmp/theirs.txt"))
+    # A path both lists hold appears once, and the list keeps its cap
+    var mine3 = base.copy()
+    var disk3 = base.copy()
+    for i in range(30):
+        mine3.recent_projects.append(String("/p/ours") + String(i))
+    disk3.recent_projects.append(String("/p/ours0"))
+    disk3.recent_projects.append(String("/p/theirs"))
+    var merged3 = merge_config(disk3, mine3, base)
+    assert_equal(len(merged3.recent_projects), 20)
+    assert_equal(merged3.recent_projects[0], String("/p/ours0"))
+    assert_equal(merged3.recent_projects[19], String("/p/ours19"))
+    var mine4 = base.copy()
+    mine4.recent_projects.append(String("/p/a"))
+    var disk4 = base.copy()
+    disk4.recent_projects.append(String("/p/b"))
+    disk4.recent_projects.append(String("/p/a"))
+    disk4.recent_projects.append(String("/p/c"))
+    var merged4 = merge_config(disk4, mine4, base)
+    assert_equal(merged4.recent_projects, ["/p/a", "/p/b", "/p/c"])
 
 
 def _flip_json(v: JsonValue) -> JsonValue:
