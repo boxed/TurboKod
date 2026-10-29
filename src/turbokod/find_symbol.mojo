@@ -169,7 +169,7 @@ struct _FindSymbolRunner(Movable):
 
 
 def _rg_argv(pattern: String, root: String, smart_case: Bool) -> List[String]:
-    """``rg`` argv for the Find Symbol runner: ``path:line:col:text``
+    """``rg`` argv for the Find Symbol runner: ``path\\0line:col:text``
     rows for every match of ``pattern`` under ``root``."""
     var argv = List[String]()
     argv.append(String("rg"))
@@ -177,6 +177,8 @@ def _rg_argv(pattern: String, root: String, smart_case: Bool) -> List[String]:
     argv.append(String("--line-number"))
     argv.append(String("--column"))
     argv.append(String("--color=never"))
+    # The path ends in a NUL rather than a ``:``, which a file name can hold
+    argv.append(String("--null"))
     if smart_case:
         argv.append(String("--smart-case"))
     # Include dot-prefixed files/dirs, minus ``.git`` — same reason
@@ -1054,42 +1056,34 @@ def _extract_identifier(line: String, col_1based: Int) -> String:
 def _parse_rg_match_line(
     line: String,
 ) -> Optional[Tuple[String, Int, Int, String]]:
-    """Decode one rg ``--no-heading --line-number --column`` row
-    (``path:line:col:matched-line-text``) into
+    """Decode one rg ``--no-heading --line-number --column --null`` row
+    (``path\\0line:col:matched-line-text``) into
     ``(path, line, column, text)``. Returns ``None`` for any row
-    that doesn't have three colons followed by integers.
-
-    Path parsing tolerates colons inside the path itself (Windows
-    drive letters etc.) by anchoring on the *last three* colons
-    whose right-hand sides parse as ``digits:digits:``.
+    that isn't a path, a NUL and ``digits:digits:``.
     """
     var b = line.as_bytes()
     if len(b) == 0:
         return Optional[Tuple[String, Int, Int, String]]()
     var i = 0
-    while i < len(b):
-        if b[i] == 0x3A:
-            var j = i + 1
-            while j < len(b) and Int(b[j]) >= 0x30 and Int(b[j]) <= 0x39:
-                j += 1
-            if j > i + 1 and j < len(b) and b[j] == 0x3A:
-                var k = j + 1
-                while k < len(b) and Int(b[k]) >= 0x30 and Int(b[k]) <= 0x39:
-                    k += 1
-                if k > j + 1 and k < len(b) and b[k] == 0x3A:
-                    var path = String(StringSpan(unsafe_from_utf8=b[0:i]))
-                    var line_no = parse_uint_range(b, i + 1, j)
-                    var col_no = parse_uint_range(b, j + 1, k)
-                    if line_no <= 0 or col_no <= 0:
-                        return Optional[Tuple[String, Int, Int, String]]()
-                    var text = String(StringSpan(
-                        unsafe_from_utf8=b[k + 1:len(b)],
-                    ))
-                    return Optional[Tuple[String, Int, Int, String]](
-                        (path, line_no, col_no, text),
-                    )
+    while i < len(b) and b[i] != 0x00:
         i += 1
-    return Optional[Tuple[String, Int, Int, String]]()
+    var j = i + 1
+    while j < len(b) and Int(b[j]) >= 0x30 and Int(b[j]) <= 0x39:
+        j += 1
+    if j == i + 1 or j >= len(b) or b[j] != 0x3A:
+        return Optional[Tuple[String, Int, Int, String]]()
+    var k = j + 1
+    while k < len(b) and Int(b[k]) >= 0x30 and Int(b[k]) <= 0x39:
+        k += 1
+    if k == j + 1 or k >= len(b) or b[k] != 0x3A:
+        return Optional[Tuple[String, Int, Int, String]]()
+    var path = String(StringSpan(unsafe_from_utf8=b[0:i]))
+    var line_no = parse_uint_range(b, i + 1, j)
+    var col_no = parse_uint_range(b, j + 1, k)
+    if line_no <= 0 or col_no <= 0:
+        return Optional[Tuple[String, Int, Int, String]]()
+    var text = String(StringSpan(unsafe_from_utf8=b[k + 1:len(b)]))
+    return Optional[Tuple[String, Int, Int, String]]((path, line_no, col_no, text))
 
 
 def _is_query_byte(b: UInt8) -> Bool:

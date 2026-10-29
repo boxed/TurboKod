@@ -23,7 +23,7 @@ from turbokod.editor import Editor
 from turbokod.file_dialog import FileDialog
 from turbokod.find_symbol import (
     container_matches_qualifier, enclosing_container, sanitize_symbol_query,
-    _query_member, _query_qualifier
+    _parse_rg_match_line, _query_member, _query_qualifier, _rg_argv,
 )
 from turbokod.color_convert import (
     srgb_to_rgb255, rgb255_to_srgb, srgb_to_oklab, oklab_to_srgb, srgb_to_hsl,
@@ -40,7 +40,7 @@ from turbokod.menu import Menu, MenuBar, MenuItem
 from turbokod.project import ProjectMatch, find_in_project, walk_project_files
 from turbokod.find_results_pane import FindResultsPane
 from turbokod.highlight import GrammarRegistry, Highlight
-from turbokod.project_find import _project_find_argv, find_hit, paint_match_row
+from turbokod.project_find import _parse_rg_line, _project_find_argv, find_hit, paint_match_row
 from turbokod.text_select import PaneTextSelect
 from turbokod.search_options import SearchOptions
 from turbokod.text_field import TextField
@@ -2489,6 +2489,37 @@ def test_project_find_argv_searches_dotfiles_but_not_dot_git() raises:
     assert_equal(argv[len(argv) - 1], String("/proj"))
     assert_equal(argv[len(argv) - 2], String("prod_deploy"))
     assert_equal(argv[len(argv) - 3], String("--"))
+
+
+def test_a_match_in_a_file_with_a_colon_in_its_name_is_found() raises:
+    # rg's ``path:line:col:`` was split at the first colon: matches in
+    # ``meeting: notes.md`` were dropped, or put on the wrong file and line
+    if not which(String("rg")):
+        return
+    var dir = _temp_path(String("_rg_colon"))
+    _ = capture_command([String("rm"), String("-rf"), dir])
+    _ = capture_command([String("mkdir"), String("-p"), dir + "/v2:10"])
+    assert_true(write_file(dir + "/meeting: notes.md", String("x\nhello there\n")))
+    assert_true(write_file(dir + "/v2:10/a.md", String("hello\n")))
+    var out = capture_command(_project_find_argv(
+        dir, String("hello"), String(""), String(""), SearchOptions(False, False, False),
+    )).stdout
+    var found = List[String]()
+    for line in out.split("\n"):
+        var m = _parse_rg_line(String(line), dir)
+        if m:
+            found.append(m.value().rel + ":" + String(m.value().line_no))
+    sort(found)
+    assert_equal(found, ["meeting: notes.md:2", "v2:10/a.md:1"])
+    var sym = capture_command(_rg_argv(String("hello"), dir, False)).stdout
+    var paths = List[String]()
+    for line in sym.split("\n"):
+        var m = _parse_rg_match_line(String(line))
+        if m:
+            paths.append(m.value()[0] + ":" + String(m.value()[1]))
+    sort(paths)
+    assert_equal(paths, [dir + "/meeting: notes.md:2", dir + "/v2:10/a.md:1"])
+    _ = capture_command([String("rm"), String("-rf"), dir])
 
 
 def test_project_find_argv_maps_options_scope_and_globs() raises:

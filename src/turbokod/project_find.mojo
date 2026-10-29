@@ -1590,6 +1590,9 @@ def _project_find_argv(
     argv.append(String("--line-number"))
     argv.append(String("--column"))
     argv.append(String("--color=never"))
+    # The path ends in a NUL rather than a ``:``, which a file name can
+    # hold (``meeting: notes.md``)
+    argv.append(String("--null"))
     # Search dot-prefixed files and directories. rg skips them by
     # default, which silently hid every hit under ``.github/``,
     # ``.gitlab-ci.yml``, ``.env``, ``.claude/`` and the rest of a
@@ -1749,17 +1752,16 @@ struct _RgRunner(Movable):
 
 
 def _parse_rg_line(line: String, root: String) -> Optional[ProjectMatch]:
-    """Decode one ``--no-heading --line-number --column`` output line
-    (``path:line:col:text``) into a ``ProjectMatch``. Returns None when
-    the prefix doesn't have three colons (rg sometimes emits other
-    informational lines)."""
-    var p1 = _scan_to(line, 0, len(line.as_bytes()), 0x3A)       # first ':'
+    """Decode one ``--no-heading --line-number --column --null`` output
+    line (``path\\0line:col:text``) into a ``ProjectMatch``. Returns None
+    for anything else (rg sometimes emits other informational lines)."""
+    var p1 = _scan_to(line, 0, len(line.as_bytes()), 0x00)       # end of path
     if p1 < 0:
         return Optional[ProjectMatch]()
-    var p2 = _scan_to(line, p1 + 1, len(line.as_bytes()), 0x3A)  # second ':'
+    var p2 = _scan_to(line, p1 + 1, len(line.as_bytes()), 0x3A)  # after the line
     if p2 < 0:
         return Optional[ProjectMatch]()
-    var p3 = _scan_to(line, p2 + 1, len(line.as_bytes()), 0x3A)  # third ':'
+    var p3 = _scan_to(line, p2 + 1, len(line.as_bytes()), 0x3A)  # after the column
     if p3 < 0:
         return Optional[ProjectMatch]()
     var path = byte_slice(line, 0, p1)
