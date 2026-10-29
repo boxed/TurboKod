@@ -275,7 +275,7 @@ struct FindResultsPane(Movable):
         # keep a clean list-geometry record so a stray click can't hit a
         # stale row mapping.
         if body.is_empty():
-            self._list_top = panel.a.y + 1
+            self._list_top = panel.a.y + self.dock.header_rows()
             self._list_height = 0
             return
         self._list_top = body.a.y

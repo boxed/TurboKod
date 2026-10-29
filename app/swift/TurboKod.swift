@@ -8162,8 +8162,9 @@ final class ReviewBar: NSVisualEffectView {
 
 // MARK: - macOS-style UI: tool-pane headers
 //
-// One bar over each docked pane's header row: title, the pane's commands
-// (Clear / Restart, Continue / Step…, Re-run…) as borderless buttons, and
+// One bar over each docked pane's header rows (two cells, so the buttons
+// are a usable size): title, the pane's commands (Clear / Restart,
+// Continue / Step…, Re-run…) as toolbar icon buttons, and
 // minimize / maximize / close. The pane's content stays the core's grid.
 // The core paints that row blank with no hit zones and keeps it as the
 // resize handle, so this view lets every click that isn't on a button fall
@@ -8183,15 +8184,17 @@ final class PaneHeader: NSView {
     init(view: CellView) {
         cellView = view
         super.init(frame: .zero)
-        title.font = .systemFont(ofSize: 11, weight: .semibold)
+        title.font = .systemFont(ofSize: 12, weight: .semibold)
         title.lineBreakMode = .byTruncatingTail
         title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        commands.spacing = 2
+        commands.spacing = 4
         for (b, sym, tip, op) in [(minimize, "minus", "Minimize", 2), (maximize, "arrow.up.left.and.arrow.down.right", "Maximize", 3),
                                   (close, "xmark", "Close", 1)] {
-            b.image = NSImage(systemSymbolName: sym, accessibilityDescription: tip)?
-                .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
-            b.isBordered = false
+            b.image = PaneHeader.symbol(sym, tip)
+            b.bezelStyle = .recessed
+            b.showsBorderOnlyWhileMouseInside = true
+            b.imagePosition = .imageOnly
+            b.widthAnchor.constraint(equalToConstant: 24).isActive = true
             b.toolTip = tip
             b.tag = op
             b.target = self
@@ -8199,8 +8202,8 @@ final class PaneHeader: NSView {
             b.contentTintColor = .secondaryLabelColor
         }
         let stack = NSStackView(views: [title, commands, NSView(), minimize, maximize, close])
-        stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 6)
+        stack.spacing = 12
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 10, bottom: 0, right: 6)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
@@ -8239,26 +8242,32 @@ final class PaneHeader: NSView {
         kind = p["kind"] as? Int ?? 0
         idx = p["idx"] as? Int ?? 0
         let f = NSRect(x: CGFloat(p["x"] as? Int ?? 0) * CELL_W, y: CGFloat(p["y"] as? Int ?? 0) * CELL_H,
-                       width: CGFloat(p["w"] as? Int ?? 0) * CELL_W, height: CELL_H)
+                       width: CGFloat(p["w"] as? Int ?? 0) * CELL_W, height: CGFloat(p["h"] as? Int ?? 1) * CELL_H)
         if frame != f { frame = f }
         focused = p["focused"] as? Bool ?? false
         title.stringValue = p["title"] as? String ?? ""
         title.textColor = focused ? .labelColor : .secondaryLabelColor
         let state = p["state"] as? Int ?? 0
-        minimize.image = NSImage(systemSymbolName: state == 1 ? "chevron.up" : "minus",
-                                 accessibilityDescription: state == 1 ? "Restore" : "Minimize")?
-            .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
-        maximize.image = NSImage(systemSymbolName: state == 2 ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
-                                 accessibilityDescription: state == 2 ? "Restore" : "Maximize")?
-            .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
+        minimize.image = PaneHeader.symbol(state == 1 ? "chevron.up" : "minus", state == 1 ? "Restore" : "Minimize")
+        minimize.toolTip = state == 1 ? "Restore" : "Minimize"
+        maximize.image = PaneHeader.symbol(state == 2 ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
+                                           state == 2 ? "Restore" : "Maximize")
+        maximize.toolTip = state == 2 ? "Restore" : "Maximize"
         close.isHidden = !(p["close"] as? Bool ?? false)
         for v in commands.arrangedSubviews { commands.removeArrangedSubview(v); v.removeFromSuperview() }
         for c in p["commands"] as? [[String]] ?? [] where c.count == 2 {
-            let b = NSButton(title: c[0], target: self, action: #selector(commandClicked(_:)))
-            b.isBordered = false
-            b.font = .systemFont(ofSize: 11)
-            b.contentTintColor = .controlAccentColor
+            let b = NSButton(title: "", target: self, action: #selector(commandClicked(_:)))
+            b.bezelStyle = .texturedRounded
             b.identifier = NSUserInterfaceItemIdentifier(c[1])
+            if let (sym, name) = PaneHeader.command(c[1], c[0]), let img = PaneHeader.symbol(sym, name, size: 13) {
+                b.image = img
+                b.imagePosition = .imageOnly
+                b.toolTip = name
+                b.widthAnchor.constraint(greaterThanOrEqualToConstant: 32).isActive = true
+                if sym == "stop.fill" { b.contentTintColor = .systemRed }
+            } else {
+                b.title = c[0]
+            }
             commands.addArrangedSubview(b)
         }
         needsDisplay = true
@@ -8276,6 +8285,30 @@ final class PaneHeader: NSView {
 
     @objc private func controlClicked(_ b: NSButton) { act(b.tag) }
     @objc private func commandClicked(_ b: NSButton) { act(4, b.identifier?.rawValue ?? "") }
+
+    static func symbol(_ name: String, _ description: String, size: CGFloat = 11) -> NSImage? {
+        NSImage(systemSymbolName: name, accessibilityDescription: description)?
+            .withSymbolConfiguration(.init(pointSize: size, weight: .medium))
+    }
+
+    /// A pane command's icon and its spelled-out name (the tooltip), by
+    /// the command id; nil leaves the core's label as the button title.
+    static func command(_ id: String, _ label: String) -> (String, String)? {
+        let restart = label.contains("Restart")
+        switch id {
+        case "debug:start_or_continue": return restart ? ("arrow.clockwise", "Restart") : ("play.fill", "Continue")
+        case "debug:pause": return ("pause.fill", "Pause")
+        case "debug:step_over": return ("arrowshape.turn.up.right", "Step Over")
+        case "debug:step_in": return ("arrow.down.to.line", "Step Into")
+        case "debug:step_out": return ("arrow.up.to.line", "Step Out")
+        case "debug:stop", "test:stop": return ("stop.fill", "Stop")
+        case "debug:add_watch": return ("eye", "Add Watch…")
+        case "debug:clear_output", "test:clear_output", "terminal:clear": return ("trash", "Clear")
+        case "target:run", "terminal:restart": return ("arrow.clockwise", "Restart")
+        case "test:rerun": return ("arrow.clockwise", "Re-run")
+        default: return nil
+        }
+    }
 }
 
 

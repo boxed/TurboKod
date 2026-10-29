@@ -1712,6 +1712,7 @@ def _pane_json(
     o.put(String("x"), json_int(r.a.x))
     o.put(String("y"), json_int(r.a.y))
     o.put(String("w"), json_int(r.width()))
+    o.put(String("h"), json_int(min(dock.header_rows(), r.height())))
     o.put(String("title"), json_str(title))
     o.put(String("focused"), json_bool(focused))
     o.put(String("state"), json_int(Int(dock.state)))
@@ -1737,8 +1738,8 @@ def tk_desktop_panes(
     h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
 ) abi("C") -> Int:
     """The docked tool panes' headers for the native overlay: an array of
-    ``{kind, idx, x, y, w, title, focused, state, hint, close, commands:
-    [[label, id]]}`` (the header is the one row at ``y``). 0 when panes
+    ``{kind, idx, x, y, w, h, title, focused, state, hint, close, commands:
+    [[label, id]]}`` (the header is the ``h`` rows from ``y``). 0 when panes
     don't get native headers."""
     if h == 0:
         return 0

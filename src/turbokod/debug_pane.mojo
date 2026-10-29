@@ -1070,8 +1070,8 @@ struct DebugPane(Copyable, Movable):
         # status-bar / window-tab strip until they restore.
         self.native_rect = Rect.empty()
         if body.is_empty():
-            self._last_inspect_y0 = top + 1
-            self.output.last_y0 = top + 1
+            self._last_inspect_y0 = top + self.dock.header_rows()
+            self.output.last_y0 = top + self.dock.header_rows()
             self._last_divider_x = panel.a.x
             self._left_indices = List[Int]()
             self._right_indices = List[Int]()
@@ -1080,7 +1080,7 @@ struct DebugPane(Copyable, Movable):
         # status text (e.g. RUN mode while the target is alive — the
         # target name lives in the title) so the row goes back to the
         # content area instead of sitting blank under the title.
-        var row_y = top + 1
+        var row_y = body.a.y
         var content_top = row_y
         if len(self.status_text.as_bytes()) > 0:
             var host_status = self.host_inspect \

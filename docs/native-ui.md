@@ -189,17 +189,22 @@ Targets / Grammars tabs, and the action editor a sheet on top of it.
 
 The docked panes (terminal, run / debug, tests, find results) keep their
 content on the grid. A terminal emulator and the run log *are* cell grids.
-Each pane's one-row header is native:
+Each pane's header is native, and two rows tall
+(`BottomDockedPanel.header_rows()`): one 16pt cell is too short for buttons
+you can hit with a mouse.
 
 - `BottomDockedPanel.host_chrome`, synced every frame from
-  `native_panes_shown()`, makes `paint_bottom_dock_chrome` paint the row
-  blank and arm no button or command hit zones. The whole row is then just
-  the core's resize handle and focus target.
+  `native_panes_shown()`, makes `paint_bottom_dock_chrome` paint the rows
+  blank and arm no button or command hit zones. The whole header is then
+  just the core's resize handle and focus target; `resize_grab` keeps a
+  drag from the second row from jumping.
 - `tk_desktop_panes` lists each visible pane's header: rect, `header_title()`
   (factored out of each pane's paint), state, and commands (the grid's
   `[Label]`s, minus the brackets).
-- `PaneHeader` overlays the row. Its `hitTest` claims only its buttons, so
-  dragging anywhere else on the row still resizes the pane.
+- `PaneHeader` overlays the rows. Commands with a known id are toolbar
+  icon buttons (`PaneHeader.command`: SF Symbol plus a spelled-out tooltip);
+  any other keeps its label. Its `hitTest` claims only its buttons, so
+  dragging anywhere else on the header still resizes the pane.
 - Each control is `tk_desktop_pane_act`, which makes the same state change
   the grid buttons do. Close is `request_close` and a command latches
   `pending_command_id`; the tick drains both.

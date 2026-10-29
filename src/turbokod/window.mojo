@@ -523,7 +523,12 @@ struct BottomDockedPanel(Copyable, Movable):
     """The host draws this panel's header natively (macOS-style UI): the
     core paints the header row blank and arms no button / command hit
     zones on it, so the whole row is the resize handle and the host's
-    overlay owns the controls."""
+    overlay owns the controls. That header is ``header_rows()`` tall, so
+    its buttons are a usable size."""
+
+    var resize_grab: Int
+    """Rows between the panel's top and where the resize drag was
+    grabbed, so a drag from the second header row doesn't jump."""
 
     def __init__(out self, preferred_height: Int = 14):
         self.state = PANEL_STATE_NORMAL
@@ -535,6 +540,7 @@ struct BottomDockedPanel(Copyable, Movable):
         self.resizing = False
         self.close_button_id = String("")
         self.host_chrome = False
+        self.resize_grab = 0
 
     def __copyinit__(mut self, copy: Self):
         self.state = copy.state
@@ -546,6 +552,12 @@ struct BottomDockedPanel(Copyable, Movable):
         self.resizing = copy.resizing
         self.close_button_id = copy.close_button_id
         self.host_chrome = copy.host_chrome
+        self.resize_grab = copy.resize_grab
+
+    def header_rows(self) -> Int:
+        """Rows the header takes: one in the grid, two under the host's
+        native header (a cell is too short for a clickable toolbar)."""
+        return 2 if self.host_chrome else 1
 
     def is_minimized(self) -> Bool:
         return self.state == PANEL_STATE_MINIMIZED
@@ -584,7 +596,7 @@ struct BottomDockedPanel(Copyable, Movable):
         NORMAL → ``preferred_height``. MINIMIZED → 1 (header only).
         MAXIMIZED → fill the workspace above the bottom chrome."""
         if self.state == PANEL_STATE_MINIMIZED:
-            return 1
+            return self.header_rows()
         if self.state == PANEL_STATE_MAXIMIZED:
             var avail = container_bounds.b.y - bottom_chrome_h - 1
             if avail < DOCK_MIN_HEIGHT:
@@ -612,7 +624,7 @@ struct BottomDockedPanel(Copyable, Movable):
             return False
         if self.state != PANEL_STATE_NORMAL:
             return False
-        if pos.y != panel.a.y:
+        if pos.y < panel.a.y or pos.y >= panel.a.y + self.header_rows():
             return False
         if pos.x < panel.a.x or pos.x >= panel.b.x:
             return False
@@ -646,13 +658,15 @@ def paint_bottom_dock_chrome(
     var body_bg = Attr(WHITE, PANE_BG)
     var top = panel.a.y
     if dock.host_chrome:
-        for x in range(panel.a.x, panel.b.x):
-            painter.set(canvas, x, top, Cell(String(" "), body_bg, 1))
+        var header_bottom = min(top + dock.header_rows(), panel.b.y)
+        for y in range(top, header_bottom):
+            for x in range(panel.a.x, panel.b.x):
+                painter.set(canvas, x, y, Cell(String(" "), body_bg, 1))
         dock.chrome_hits = PanelChromeHits()
         dock.last_cmd_hits = List[TitleCommandHit]()
         if dock.state == PANEL_STATE_MINIMIZED:
             return Rect.empty()
-        return Rect(panel.a.x, top + 1, panel.b.x, panel.b.y)
+        return Rect(panel.a.x, header_bottom, panel.b.x, panel.b.y)
     var top_glyph = String("═") if focused else String("─")
     for x in range(panel.a.x, panel.b.x):
         painter.set(canvas, x, top, Cell(top_glyph, border, 1))
@@ -766,7 +780,7 @@ def handle_bottom_dock_chrome_mouse(
             dock.resizing = False
             return DockChromeMouseResult(True, False)
         dock.preferred_height = dock.clamp_height(
-            panel.b.y - event.pos.y, panel,
+            panel.b.y - event.pos.y + dock.resize_grab, panel,
         )
         return DockChromeMouseResult(True, False)
     if event.button == MOUSE_BUTTON_LEFT and event.pressed and not event.motion:
@@ -796,13 +810,14 @@ def handle_bottom_dock_chrome_mouse(
         # self-resize); in min/max — or in the floating window, where the
         # host drives splitter resize — the top border is just a chrome
         # strip and clicks there focus the pane.
-        if allow_resize and dock.state == PANEL_STATE_NORMAL \
-                and event.pos.y == panel.a.y \
-                and event.pos.x >= panel.a.x and event.pos.x < panel.b.x:
+        var on_header = event.pos.y >= panel.a.y \
+            and event.pos.y < panel.a.y + dock.header_rows() \
+            and event.pos.x >= panel.a.x and event.pos.x < panel.b.x
+        if allow_resize and dock.state == PANEL_STATE_NORMAL and on_header:
             dock.resizing = True
+            dock.resize_grab = event.pos.y - panel.a.y
             return DockChromeMouseResult(True, False)
-        if event.pos.y == panel.a.y \
-                and event.pos.x >= panel.a.x and event.pos.x < panel.b.x:
+        if on_header:
             return DockChromeMouseResult(True, True)
     return DockChromeMouseResult(False, False)
 
