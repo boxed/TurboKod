@@ -288,14 +288,19 @@ The status row is presentation-only. `CellView.drawNativeStatusBar` redraws
 the bottom row's cells, already in the layout buffer, as a window-colored
 bar in system type:
 
-- Each run of same-colored cells is drawn at its own cell column, so every
-  click target the core hit-tests stays where it is. There's no ABI and no
-  core change.
-- A run on a non-bar background becomes an accent pill.
-- A run in a non-default color keeps its color (the green uncommitted dot,
-  a red LSP error).
+- Every part is drawn inside its own cell columns, so every click target the
+  core hit-tests stays where it is. `tk_desktop_status_layout` reports where
+  the last paint put the parts (`{git, message, targets: [[a, b, active]]}`,
+  read straight off `StatusBar`'s hit spans); there's no other core change.
+- The run targets become a row of rounded buttons, the chosen one in the
+  accent color. The message is set flush right in its span.
+- Any other run in a non-default color keeps its color (the green
+  uncommitted dot, a red LSP error).
 - The cell pass turns anti-aliasing off for the pixel font, so this pass
   turns it back on.
+
+The Mac OS 9 look draws the same parts Platinum-style
+(`drawPlatinumStatusBar`): see [platinum-ui.md](platinum-ui.md).
 
 ## Find bar
 

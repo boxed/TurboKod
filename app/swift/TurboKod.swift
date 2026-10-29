@@ -723,9 +723,13 @@ final class CellView: NSView {
         // shadow torn off the un-shifted frame. Runs at rest too (the composite
         // early-returns when not scrolling).
         if surface == .main { drawPopupShadow(ctx) }
-        // macOS-style UI: the bottom (status) row re-typeset as a native bar.
-        if surface == .main && r > 1 && tk_desktop_native_ui(handle) != 0 {
-            drawNativeStatusBar(buf, n, c, r)
+        // The macOS-style and Mac OS 9 looks re-typeset the bottom (status) row.
+        if surface == .main && r > 1 {
+            if tk_desktop_native_ui(handle) != 0 {
+                drawNativeStatusBar(buf, n, c, r)
+            } else if tk_desktop_platinum_ui(handle) != 0 {
+                drawPlatinumStatusBar(buf, n, c, r)
+            }
         }
         // First main-surface frame is now on screen. Kick the deferred
         // startup work (PATH recovery, font-family scan) on the next runloop
@@ -738,16 +742,49 @@ final class CellView: NSView {
     }
     static var didFirstMainPaint = false
 
-    /// The status row in system type on a window-colored bar. Each run of
-    /// same-colored cells is redrawn at its own cell column, so every click
-    /// target (git area, run targets, LSP status) stays exactly where the
-    /// core hit-tests it — this is presentation only. Runs whose background
-    /// differs from the bar's become pills; runs in a non-default color keep
-    /// it (the green "uncommitted" dot, a red LSP error).
-    private func drawNativeStatusBar(_ p: UnsafeMutablePointer<UInt32>, _ n: Int, _ c: Int, _ r: Int) {
-        let row = r - 1
-        let start = row * c
-        guard start + c <= n else { return }
+    /// The status bar's parts, from `tk_desktop_status_layout`: cell
+    /// column spans on the bottom row.
+    private struct StatusLayout {
+        var git = 0..<0, message = 0..<0
+        var targets: [(cols: Range<Int>, active: Bool)] = []
+    }
+    private var statusLayoutBuf = [UInt8](repeating: 0, count: 1024)
+
+    private func statusLayout() -> StatusLayout {
+        var out = StatusLayout()
+        var n = 0
+        while true {
+            n = statusLayoutBuf.withUnsafeMutableBufferPointer { b -> Int in
+                Int(tk_desktop_status_layout(handle, Int64(Int(bitPattern: b.baseAddress)), Int64(b.count)))
+            }
+            if n <= statusLayoutBuf.count { break }
+            statusLayoutBuf = [UInt8](repeating: 0, count: n)
+        }
+        guard n > 0, let o = try? JSONSerialization.jsonObject(with: Data(statusLayoutBuf[0..<n])) as? [String: Any]
+        else { return out }
+        func span(_ v: Any?) -> Range<Int> {
+            guard let a = v as? [Any], a.count >= 2, let lo = a[0] as? Int, let hi = a[1] as? Int, hi > lo
+            else { return 0..<0 }
+            return lo..<hi
+        }
+        out.git = span(o["git"])
+        out.message = span(o["message"])
+        for t in o["targets"] as? [[Any]] ?? [] {
+            let r = span(t)
+            if !r.isEmpty { out.targets.append((r, t.count > 2 && (t[2] as? Bool ?? false))) }
+        }
+        return out
+    }
+
+    /// One run of same-colored cells on the status row: its columns, its
+    /// text trimmed (`lead` blank cells cut from the front), its colors.
+    private struct StatusRun { let cols: Range<Int>; let text: String; let lead: Int; let fg: UInt32; let bg: UInt32 }
+
+    /// The status row (`start`, `c` cells) as runs, leaving out blank ones
+    /// and the cells in `skip`. Also the bar's own colors: the most common
+    /// background, and the most common color of a non-blank cell.
+    private func statusRuns(_ p: UnsafeMutablePointer<UInt32>, _ start: Int, _ c: Int,
+                            skip: [Range<Int>]) -> (runs: [StatusRun], barFg: UInt32, barBg: UInt32) {
         var bgCount: [UInt32: Int] = [:], fgCount: [UInt32: Int] = [:]
         for i in start..<(start + c) {
             let (fg, bg, _) = cellColors(p, i)
@@ -756,6 +793,54 @@ final class CellView: NSView {
         }
         let barBg = bgCount.max { $0.value < $1.value }?.key ?? 0
         let barFg = fgCount.max { $0.value < $1.value }?.key ?? 0
+        let skipped = { (i: Int) in skip.contains { $0.contains(i) } }
+        var runs: [StatusRun] = []
+        var i = 0
+        while i < c {
+            if skipped(i) { i += 1; continue }
+            let (fg, bg, _) = cellColors(p, start + i)
+            var j = i
+            var text = ""
+            while j < c && !skipped(j) {
+                let (f2, b2, _) = cellColors(p, start + j)
+                if f2 != fg || b2 != bg { break }
+                let cp = p[(start + j) * CELL_WORDS] & 0x1FFFFF
+                text.unicodeScalars.append(Unicode.Scalar(cp > 0 ? cp : 0x20) ?? " ")
+                j += 1
+            }
+            let trimmed = text.trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty {
+                runs.append(StatusRun(cols: i..<j, text: trimmed, lead: text.prefix { $0 == " " }.count,
+                                      fg: fg, bg: bg))
+            }
+            i = j
+        }
+        return (runs, barFg, barBg)
+    }
+
+    /// The text of the status row's cells in `cols`, trimmed.
+    private func statusText(_ p: UnsafeMutablePointer<UInt32>, _ start: Int, _ cols: Range<Int>) -> String {
+        var text = ""
+        for j in cols {
+            let cp = p[(start + j) * CELL_WORDS] & 0x1FFFFF
+            text.unicodeScalars.append(Unicode.Scalar(cp > 0 ? cp : 0x20) ?? " ")
+        }
+        return text.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// The status row in system type on a window-colored bar. Every part is
+    /// redrawn inside its own cell columns, so each click target (git area,
+    /// run targets, LSP status) stays exactly where the core hit-tests it —
+    /// this is presentation only. The run targets become a row of rounded
+    /// buttons, the chosen one in the accent color; the message is set
+    /// flush right; other runs in a non-default color keep it (the green
+    /// "uncommitted" dot, a red LSP error).
+    private func drawNativeStatusBar(_ p: UnsafeMutablePointer<UInt32>, _ n: Int, _ c: Int, _ r: Int) {
+        let row = r - 1
+        let start = row * c
+        guard start + c <= n else { return }
+        let lay = statusLayout()
+        let (runs, barFg, _) = statusRuns(p, start, c, skip: lay.targets.map { $0.cols } + [lay.message])
         let y = CGFloat(row) * CELL_H
         // The cell pass turned anti-aliasing off for the pixel font; system
         // type needs it back on.
@@ -772,39 +857,87 @@ final class CellView: NSView {
         NSColor.separatorColor.setFill()
         NSRect(x: 0, y: y, width: bounds.width, height: 1).fill()
         let font = NSFont.systemFont(ofSize: min(12, max(10, CELL_H * 0.68)))
-        var i = 0
-        while i < c {
-            let (fg, bg, _) = cellColors(p, start + i)
-            var j = i
-            var text = ""
-            while j < c {
-                let (f2, b2, _) = cellColors(p, start + j)
-                if f2 != fg || b2 != bg { break }
-                let cp = p[(start + j) * CELL_WORDS] & 0x1FFFFF
-                text.unicodeScalars.append(Unicode.Scalar(cp > 0 ? cp : 0x20) ?? " ")
-                j += 1
+        func draw(_ s: String, x: CGFloat, _ attrs: [NSAttributedString.Key: Any]) {
+            let size = (s as NSString).size(withAttributes: attrs)
+            (s as NSString).draw(at: NSPoint(x: x, y: y + (CELL_H - size.height) / 2 + 0.5), withAttributes: attrs)
+        }
+        for run in runs {
+            let color: NSColor = run.fg == barFg ? .secondaryLabelColor : nscolor(run.fg)
+            draw(run.text, x: CGFloat(run.cols.lowerBound + run.lead) * CELL_W,
+                 [.font: font, .foregroundColor: color])
+        }
+        for t in lay.targets {
+            let pr = NSRect(x: CGFloat(t.cols.lowerBound) * CELL_W + 1, y: y + 2,
+                            width: CGFloat(t.cols.count) * CELL_W - 2, height: CELL_H - 3)
+            let path = NSBezierPath(roundedRect: pr, xRadius: 4, yRadius: 4)
+            if t.active {
+                NSColor.controlAccentColor.setFill()
+                path.fill()
+            } else {
+                NSColor.labelColor.withAlphaComponent(0.06).setFill()
+                path.fill()
+                NSColor.separatorColor.setStroke()
+                path.lineWidth = 1
+                NSBezierPath(roundedRect: pr.insetBy(dx: 0.5, dy: 0.5), xRadius: 3.5, yRadius: 3.5).stroke()
             }
-            let trimmed = text.trimmingCharacters(in: .whitespaces)
-            if !trimmed.isEmpty {
-                let lead = CGFloat(text.prefix { $0 == " " }.count)
-                let x = CGFloat(i) * CELL_W + lead * CELL_W
-                let color: NSColor = fg == barFg ? .secondaryLabelColor : nscolor(fg)
-                let pill = bg != barBg
-                let attrs: [NSAttributedString.Key: Any] = [
-                    .font: pill ? NSFont.systemFont(ofSize: font.pointSize, weight: .medium) : font,
-                    .foregroundColor: pill ? NSColor.labelColor : color,
-                ]
-                let size = (trimmed as NSString).size(withAttributes: attrs)
-                if pill {
-                    let pr = NSRect(x: CGFloat(i) * CELL_W + 1, y: y + 2,
-                                    width: CGFloat(j - i) * CELL_W - 2, height: CELL_H - 3)
-                    NSColor.controlAccentColor.withAlphaComponent(0.22).setFill()
-                    NSBezierPath(roundedRect: pr, xRadius: 4, yRadius: 4).fill()
-                }
-                (trimmed as NSString).draw(at: NSPoint(x: x, y: y + (CELL_H - size.height) / 2 + 0.5),
-                                           withAttributes: attrs)
-            }
-            i = j
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: font.pointSize, weight: .medium),
+                .foregroundColor: t.active ? NSColor.white : NSColor.labelColor,
+            ]
+            let s = statusText(p, start, t.cols)
+            let w = (s as NSString).size(withAttributes: attrs).width
+            draw(s, x: pr.midX - w / 2, attrs)
+        }
+        if !lay.message.isEmpty {
+            let (fg, _, _) = cellColors(p, start + lay.message.lowerBound)
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: font, .foregroundColor: fg == barFg ? NSColor.secondaryLabelColor : nscolor(fg),
+            ]
+            let s = statusText(p, start, lay.message)
+            let w = (s as NSString).size(withAttributes: attrs).width
+            draw(s, x: CGFloat(lay.message.upperBound) * CELL_W - w, attrs)
+        }
+    }
+
+    /// The status row as a Mac OS 9 window's information bar: Platinum
+    /// face under a black rule, Geneva, the run targets as bevel buttons
+    /// (the chosen one pushed in), the message flush right. Like the
+    /// macOS-style bar, every part stays inside its own cell columns.
+    private func drawPlatinumStatusBar(_ p: UnsafeMutablePointer<UInt32>, _ n: Int, _ c: Int, _ r: Int) {
+        let row = r - 1
+        let start = row * c
+        guard start + c <= n else { return }
+        let lay = statusLayout()
+        let (runs, barFg, _) = statusRuns(p, start, c, skip: lay.targets.map { $0.cols } + [lay.message])
+        let y = CGFloat(row) * CELL_H
+        let bar = NSRect(x: 0, y: y, width: bounds.width, height: bounds.height - y)
+        Platinum.fill(bar, Platinum.face)
+        Platinum.fill(NSRect(x: 0, y: y, width: bar.width, height: 1), Platinum.black)
+        Platinum.fill(NSRect(x: 0, y: y + 1, width: bar.width, height: 1), Platinum.light)
+        let line = NSRect(x: 0, y: y + 1, width: 0, height: CELL_H - 1)
+        func color(_ fg: UInt32) -> NSColor { fg == barFg ? Platinum.black : nscolor(fg) }
+        for run in runs {
+            var tr = line
+            tr.origin.x = CGFloat(run.cols.lowerBound + run.lead) * CELL_W
+            tr.size.width = CGFloat(run.cols.upperBound) * CELL_W - tr.minX
+            Platinum.text(run.text, in: tr, font: Platinum.app, color: color(run.fg))
+        }
+        for t in lay.targets {
+            let br = NSRect(x: CGFloat(t.cols.lowerBound) * CELL_W, y: y + 2,
+                            width: CGFloat(t.cols.count) * CELL_W, height: CELL_H - 2)
+            Platinum.raisedBox(br, pressed: t.active)
+            Platinum.text(statusText(p, start, t.cols), in: br.insetBy(dx: 3, dy: 0), font: Platinum.app,
+                          color: Platinum.black, center: true)
+        }
+        if !lay.message.isEmpty {
+            let (fg, _, _) = cellColors(p, start + lay.message.lowerBound)
+            let s = statusText(p, start, lay.message)
+            let right = CGFloat(lay.message.upperBound) * CELL_W
+            let w = min(Platinum.width(s, Platinum.app), right)
+            var tr = line
+            tr.origin.x = right - w
+            tr.size.width = w
+            Platinum.text(s, in: tr, font: Platinum.app, color: color(fg))
         }
     }
 

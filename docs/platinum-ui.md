@@ -37,9 +37,15 @@ come in 8×16 steps.
   the core keeps clear at its right (`Window.gutter`), and the grow box sits
   at its foot. Switching the look off puts the window back in the system
   frame.
+- **The status bar**, as a window information bar: Platinum face under a
+  black rule, Geneva, the run targets as bevel buttons (the chosen one
+  pushed in) and the message flush right. Like the macOS-style bar it is
+  presentation only, each part kept in the cell columns
+  `tk_desktop_status_layout` reports, so clicks land where the core
+  expects them.
 - **Not covered:** the menus, which stay the system menu bar. Everything
-  else (prompts, pickers, the editor text, the panes, the status bar) stays
-  the classic grid.
+  else (prompts, pickers, the editor text, the panes) stays the classic
+  grid.
 
 ## Core side
 

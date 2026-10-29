@@ -1354,6 +1354,40 @@ def tk_desktop_tabs(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
 
 
 @export
+def tk_desktop_status_layout(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
+    """Where the last paint put the status bar's parts, in cell columns
+    on the bottom row, so the host can redraw them as controls without
+    moving a click target: ``{"git": [a, b], "message": [a, b],
+    "targets": [[a, b, active], …]}``, each span ``[a, b)``, empty when
+    nothing was painted. 0 while a full-screen modal covers the bar."""
+    if h == 0:
+        return 0
+    ref d = _desk(h)[]
+    if d._fullscreen_modal_active():
+        return 0
+    ref sb = d.status_bar
+    var targets = json_array()
+    for i in range(len(sb._tab_hits)):
+        ref t = sb._tab_hits[i]
+        var r = json_array()
+        r.append(json_int(t.a_x))
+        r.append(json_int(t.b_x))
+        r.append(json_bool(t.index == sb.active_tab))
+        targets.append(r)
+    var git = json_array()
+    git.append(json_int(sb._git_a_x))
+    git.append(json_int(sb._git_b_x))
+    var msg = json_array()
+    msg.append(json_int(sb._msg_a_x))
+    msg.append(json_int(sb._msg_b_x))
+    var o = json_object()
+    o.put(String("git"), git)
+    o.put(String("message"), msg)
+    o.put(String("targets"), targets)
+    return _write_out(encode_json(o), out_ptr, cap)
+
+
+@export
 def tk_desktop_tab_select(
     h: Int, idx: Int, cols: Int, rows: Int,
 ) abi("C") -> Int32:

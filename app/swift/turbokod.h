@@ -157,6 +157,9 @@ int32_t tk_desktop_platinum_ui(int64_t h);
 int64_t tk_desktop_tabs(int64_t h, int64_t out_ptr, int64_t cap);
 int32_t tk_desktop_tab_select(int64_t h, int64_t idx, int64_t cols, int64_t rows);
 void tk_desktop_tab_close(int64_t h, int64_t idx);
+// The status bar's parts in bottom-row cell columns, for the host's redraw:
+// {"git": [a, b], "message": [a, b], "targets": [[a, b, active]]}.
+int64_t tk_desktop_status_layout(int64_t h, int64_t out_ptr, int64_t cap);
 // macOS-style UI pickers (Quick Open / Find Symbol / Find in Project) as a
 // native panel. _picker writes the JSON state (0 = none up), _picker_rows a
 // page of rows, _picker_preview Find in Project's file preview. The setters
