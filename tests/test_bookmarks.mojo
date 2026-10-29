@@ -244,6 +244,51 @@ def test_sorting_lines_takes_their_bookmarks_along() raises:
     assert_equal(_text(ed.buffer), "Apple|banana")
 
 
+def test_deleting_bookmarked_lines_keeps_the_caret_on_its_text() raises:
+    # one bookmark is enough
+    var ed = _editor(String("a\nb\nc\nd\ne"), 1)
+    ed.move_to(3, 1, False)
+    assert_equal(ed.delete_bookmarked_lines(), 1)
+    assert_equal(_text(ed.buffer), "a|c|d|e")
+    assert_equal(ed.primary_caret().row, 2)
+    assert_equal(ed.primary_caret().col, 0)
+    assert_false(ed.has_selection())
+    # a change to save
+    assert_true(ed.dirty)
+    var two = _editor(String("a\nb\nc\nd\ne\nf"), 1, 2)
+    two.move_to(4, 0, False)
+    assert_equal(two.delete_bookmarked_lines(), 2)
+    assert_equal(two.buffer.line(two.primary_caret().row), String("e"))
+    var top = _editor(String("a\nb\nc"), 0)
+    top.move_to(1, 0, False)
+    _ = top.delete_bookmarked_lines()
+    assert_equal(top.primary_caret().row, 0)
+    # its own line gone: the line after it
+    var on = _editor(String("a\nb\nc"), 1)
+    on.move_to(1, 0, False)
+    assert_equal(on.delete_bookmarked_lines(), 1)
+    assert_equal(on.primary_caret().row, 1)
+    assert_equal(on.buffer.line(1), String("c"))
+
+
+def test_undo_with_bookmarks_after_a_line_added_or_taken_at_either_end() raises:
+    var ed = _editor(String("a\nb\nc"), 0, 2)
+    ed.move_to(2, 1, False)
+    _press(ed, KEY_ENTER)
+    assert_equal(_text(ed.buffer), "a|b|c|")
+    assert_true(ed.undo())
+    assert_equal(_text(ed.buffer), "a|b|c")
+    assert_equal(_marked(ed.buffer), "0,2")
+    ed.move_to(0, 0, False)
+    _press(ed, KEY_ENTER)
+    assert_equal(_marked(ed.buffer), "1,3")
+    assert_true(ed.undo())
+    assert_equal(_marked(ed.buffer), "0,2")
+    assert_true(ed.redo())
+    assert_equal(_text(ed.buffer), "|a|b|c")
+    assert_equal(_marked(ed.buffer), "1,3")
+
+
 def test_deleting_every_line_leaves_one_empty_line() raises:
     var ed = _editor(String("a\nb"), 0, 1)
     assert_equal(ed.cut_bookmarked_lines(), 2)
