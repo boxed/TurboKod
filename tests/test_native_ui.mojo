@@ -23,6 +23,7 @@ from turbokod.merge_view import CHOICE_DISK
 from turbokod.events import Event, KEY_ENTER
 from turbokod.geometry import Point, Rect
 from turbokod.window import Window
+from turbokod.dap_dispatch import DapStackFrame, DapVariable
 from turbokod.file_io import write_file
 from turbokod.posix import sleep_ms
 from turbokod.string_utils import string_list
@@ -595,6 +596,87 @@ def test_native_pane_headers_take_over_the_header_row() raises:
     d.config.native_ui = False
     d.paint(canvas, _SCREEN)
     assert_false(d.debug_pane.dock.host_chrome)
+
+
+def _row_text(c: Canvas, y: Int) -> String:
+    var s = String("")
+    for x in range(c.width):
+        s += c.get(x, y).glyph
+    return s^
+
+
+def test_native_debug_inspect_hands_the_columns_to_the_host() raises:
+    """Under the macOS-style UI the Stack / Locals / Watches cells are
+    left blank for the host's tables (``native_rect``), the output log
+    starts under them, and a table action stages what a grid click does."""
+    var d = _native_desktop(String("x\n"))
+    d.debug_pane.visible = True
+    d.debug_pane.set_status(String("DAP[x]: stopped"))
+    var frames = List[DapStackFrame]()
+    frames.append(DapStackFrame(
+        7, String("a_rather_long_function_name"), String("/p/a.py"), 3, 0, False,
+    ))
+    frames.append(DapStackFrame(8, String("main"), String("/p/a.py"), 9, 0, True))
+    var locals = List[DapVariable]()
+    locals.append(DapVariable(String("obj"), String("<Obj>"), String("Obj"), 42))
+    d.debug_pane.rebuild_inspect(
+        frames^, String("Locals"), locals^, String("Watches"),
+        [String("len(x) = 3")], 0,
+    )
+    d.debug_pane.append_output(String("hello from the log"))
+    var canvas = Canvas(_SCREEN.b.x, _SCREEN.b.y)
+    canvas.clear(default_attr())
+    d.paint(canvas, _SCREEN)
+    assert_true(d.debug_pane.host_inspect)
+    var r = d.debug_pane.native_rect
+    assert_false(r.is_empty())
+    # Nothing of the columns or the status is painted under the host's view.
+    for y in range(r.a.y, r.b.y):
+        var row = _row_text(canvas, y)
+        assert_equal(row.find(String("main")), -1)
+        assert_equal(row.find(String("obj")), -1)
+        assert_equal(row.find(String("stopped")), -1)
+    # The log follows right under it.
+    assert_true(_row_text(canvas, r.b.y).find(String("hello from the log")) >= 0)
+    # Frames keep their whole name for the native table.
+    assert_equal(d.debug_pane.rows[1].type_name, String("a_rather_long_function_name"))
+    # Select the second frame, expand obj, remove the watch, add one.
+    d.native_debug_act(0, 2, String(""))
+    assert_equal(d.debug_pane.pending_frame_id, 8)
+    assert_true(d.debug_pane.focused)
+    var obj_row = -1
+    var watch_row = -1
+    for i in range(len(d.debug_pane.rows)):
+        if d.debug_pane.rows[i].text.startswith(String("obj")):
+            obj_row = i
+        if d.debug_pane.rows[i].text.startswith(String("len(x)")):
+            watch_row = i
+    d.native_debug_act(0, obj_row, String(""))     # op 0 only selects frames
+    assert_equal(d.debug_pane.pending_expand_ref, -1)
+    d.native_debug_act(1, obj_row, String(""))
+    assert_equal(d.debug_pane.pending_expand_ref, 42)
+    d.native_debug_act(2, watch_row, String(""))
+    assert_equal(d.debug_pane.pending_remove_watch, 0)
+    d.native_debug_act(3, -1, String("y + 1"))
+    assert_equal(d._dap_watch_exprs[len(d._dap_watch_exprs) - 1], String("y + 1"))
+    # Floating panels: the panel window's paint hands them over too.
+    d.panels_detached = True
+    canvas.clear(default_attr())
+    d.paint_panels(canvas, _SCREEN)
+    assert_true(d.debug_pane.dock.host_chrome)
+    assert_true(d.debug_pane.host_inspect)
+    assert_false(d.debug_pane.native_rect.is_empty())
+    d.panels_detached = False
+    # Retro: the grid paints the columns again.
+    d.config.native_ui = False
+    canvas.clear(default_attr())
+    d.paint(canvas, _SCREEN)
+    assert_true(d.debug_pane.native_rect.is_empty())
+    var seen = False
+    for y in range(canvas.height):
+        if _row_text(canvas, y).find(String("y + 1 =")) >= 0:
+            seen = True
+    assert_true(seen)
 
 
 def test_native_project_settings_edit_through_the_sections_and_sync() raises:

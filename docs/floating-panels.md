@@ -180,6 +180,13 @@ underline]` 3-word-per-cell buffer as `tk_desktop_layout` — the panel window's
 key/mouse functions return the same `ACT_*` codes (so e.g. a link click in the
 debug output can still bubble an open-file action to the host).
 
+With the macOS-style UI on, the panel window gets the same native pane
+headers and debug-pane tables as the docked panes (see
+[native-ui.md](native-ui.md)). `tk_desktop_panels_panes` lists the headers at
+the panes' rows in this window, and `tk_desktop_debug_inspect` takes a
+`panels` flag. The host polls both for the panel view before its occlusion
+check, so they stay in step while the window is covered.
+
 New action code: `ACT_TOGGLE_FLOATING_PANELS = 7`.
 
 `tk_desktop_tick` already runs all the per-frame housekeeping (LSP/DAP/terminal

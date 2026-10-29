@@ -215,10 +215,20 @@ int64_t tk_desktop_review(int64_t h, int64_t cols, int64_t rows, int64_t out_ptr
 // state, hint, close, commands: [[label, id]]}] (0 = none native); _pane_act
 // op 0 focus, 1 close, 2 minimize, 3 maximize, 4 run command id (string).
 int64_t tk_desktop_panes(int64_t h, int64_t cols, int64_t rows, int64_t out_ptr, int64_t cap);
+// The same headers for the floating-panels window, in its cells.
+int64_t tk_desktop_panels_panes(int64_t h, int64_t cols, int64_t rows, int64_t out_ptr, int64_t cap);
 // macOS-style UI editor scroller: {win, x, y, w, h, cur, max} for the focused
 // frameless editor (visual rows x 1000); drive it with tk_editor_minimap_to.
 int64_t tk_desktop_editor_scroller(int64_t h, int64_t cols, int64_t rows, int64_t out_ptr, int64_t cap);
 void tk_desktop_pane_act(int64_t h, int64_t kind, int64_t idx, int64_t op, int64_t ptr, int64_t len);
+// macOS-style UI debug pane Stack / Locals / Watches tables: {x, y, w, h,
+// output, focused, frames: [[row, name, location, subtle, current]], vars:
+// [[row, kind, name, value, type, depth, expandable, expanded]]} (0 = grid or
+// the other surface; panels 1 = the floating-panels window);
+// _act op 0 select frame, 1 expand/collapse, 2 remove watch (at row), 3 add
+// watch (string), 4 focus the pane.
+int64_t tk_desktop_debug_inspect(int64_t h, int64_t panels, int64_t cols, int64_t rows, int64_t out_ptr, int64_t cap);
+void tk_desktop_debug_inspect_act(int64_t h, int64_t op, int64_t row, int64_t ptr, int64_t len);
 void tk_desktop_review_act(int64_t h, int64_t op, int64_t arg);
 void tk_desktop_tree_act(int64_t h, int64_t op, int64_t idx, int64_t x, int64_t y);
 int64_t tk_desktop_take_find_request(int64_t h, int64_t out_ptr, int64_t cap);

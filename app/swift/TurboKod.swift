@@ -1902,6 +1902,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // macOS-style UI: an overlay scroller on the focused editor, per window.
     var scrollers: [ObjectIdentifier: EditorScroller] = [:]
     var treeBuf = [UInt8](repeating: 0, count: 1 << 16)
+    var debugInspectors: [ObjectIdentifier: DebugInspectOverlay] = [:]
+    var debugInspectBuf = [UInt8](repeating: 0, count: 1 << 16)
     // Menu mirror: the snapshot from Mojo's menu_bar, hashed so we only
     // rebuild NSMenu when something actually changed (focus/visibility/
     // checkmark/edit-extras flips). `menuTracking` is set while AppKit is
@@ -2265,6 +2267,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 } else if pair.window.isVisible {
                     pair.window.orderOut(nil); changed = true; continue
                 }
+                // The native header and debug tables track the core even
+                // while the window is covered.
+                if self.pollPaneHeaders(pv, panels: true) { changed = true }
+                if self.pollDebugInspect(pv, panels: true) { changed = true }
                 guard let w = pv.window, w.isVisible,
                       w.occlusionState.contains(.visible) else { continue }
                 if pv.pollFrame() { pv.needsDisplay = true; changed = true }
@@ -2305,6 +2311,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if self.pollMerge(v) { changed = true }
                 if self.pollReview(v) { changed = true }
                 if self.pollPaneHeaders(v) { changed = true }
+                if self.pollDebugInspect(v) { changed = true }
                 if self.pollScroller(v) { changed = true }
             }
             self.drainAttention()
@@ -2472,8 +2479,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // debug:toggle_bp just registered.
     private func invokeCaptureActions(_ actions: [String], then done: @escaping () -> Void) {
         guard let action = actions.first, let v = views.first else { done(); return }
-        _ = withUTF8Arg(action) { ptr, len in
-            tk_desktop_menu_invoke(v.handle, ptr, len, Int64(v.cols()), Int64(v.rows()))
+        if action == "app.toggle_floating_panels" {
+            toggleFloatingPanels(v)   // a host action: the core only reports it
+        } else {
+            _ = withUTF8Arg(action) { ptr, len in
+                tk_desktop_menu_invoke(v.handle, ptr, len, Int64(v.cols()), Int64(v.rows()))
+            }
         }
         v.needsDisplay = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
@@ -3512,6 +3523,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         reviewPickers[ObjectIdentifier(v)] = nil
         reviewBars[ObjectIdentifier(v)] = nil
         paneHeaders[ObjectIdentifier(v)] = nil
+        debugInspectors[ObjectIdentifier(v)] = nil
         scrollers[ObjectIdentifier(v)] = nil
         // Close is instant; the language servers get their goodbye in the
         // background. `begin_close` terminates every child except the LSP
@@ -3917,6 +3929,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return
         }
         panels.removeValue(forKey: id)
+        paneHeaders[ObjectIdentifier(pair.view)] = nil
+        debugInspectors[ObjectIdentifier(pair.view)] = nil
         pair.view.handle = 0          // shared handle is owned by the main view
         tk_desktop_set_panels_detached(mainView.handle, 0)
         pair.window.orderOut(nil)     // see windowShouldClose (Sequoia teardown)
@@ -4088,10 +4102,14 @@ extension AppController {
     }
 
     /// Lay native headers over the docked tool panes' header rows.
-    func pollPaneHeaders(_ v: CellView) -> Bool {
+    /// `panels`: `v` is a floating-panels window's view.
+    func pollPaneHeaders(_ v: CellView, panels: Bool = false) -> Bool {
         let id = ObjectIdentifier(v)
         let cols = Int64(v.cols()), rows = Int64(v.rows())
-        let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_panes(v.handle, cols, rows, $0, $1) })
+        let data = readCoreJSON(&nativeDialogBuf, {
+            panels ? tk_desktop_panels_panes(v.handle, cols, rows, $0, $1)
+                   : tk_desktop_panes(v.handle, cols, rows, $0, $1)
+        })
         let list = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [[String: Any]] } ?? []
         var current = paneHeaders[id] ?? [:]
         var changed = false
@@ -4114,6 +4132,30 @@ extension AppController {
         }
         paneHeaders[id] = current
         return changed
+    }
+
+    /// Lay (or lift) the native Stack / Locals / Watches tables over the
+    /// debug pane's inspect cells.
+    func pollDebugInspect(_ v: CellView, panels: Bool = false) -> Bool {
+        let id = ObjectIdentifier(v)
+        let cols = Int64(v.cols()), rows = Int64(v.rows())
+        guard let data = readCoreJSON(&debugInspectBuf, {
+            tk_desktop_debug_inspect(v.handle, panels ? 1 : 0, cols, rows, $0, $1)
+        }) else {
+            if let d = debugInspectors[id] {
+                d.removeFromSuperview()
+                debugInspectors[id] = nil
+                return true
+            }
+            return false
+        }
+        let d = debugInspectors[id] ?? {
+            let d = DebugInspectOverlay(view: v)
+            v.addSubview(d)
+            debugInspectors[id] = d
+            return d
+        }()
+        return d.update(data)
     }
 
     /// Review mode: the picker sheet while choosing, the native bar while
@@ -8234,6 +8276,340 @@ final class PaneHeader: NSView {
 
     @objc private func controlClicked(_ b: NSButton) { act(b.tag) }
     @objc private func commandClicked(_ b: NSButton) { act(4, b.identifier?.rawValue ?? "") }
+}
+
+
+// MARK: - macOS-style UI: debug pane inspect tables
+
+/// The debug pane's Stack and Locals / Watches as native tables laid over
+/// their cells (`tk_desktop_debug_inspect`). The core keeps the rows,
+/// the current frame and the expansion; selecting a frame, a disclosure
+/// click and the watch menu go back through `tk_desktop_debug_inspect_act`,
+/// which stages what a grid click does. The output log under it stays the
+/// core's.
+final class DebugInspectOverlay: NSView, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate, NSSplitViewDelegate {
+    private weak var cellView: CellView?
+    private let split = NSSplitView()
+    private let stackTable = NSTableView()
+    private let varsTable = NSTableView()
+    private let outputBar = NSTextField(labelWithString: "Output")
+    private let status = NSTextField(labelWithString: "")
+    private var frames: [[Any]] = []
+    private var vars: [[Any]] = []
+    private var lastData = Data()
+    private var syncing = false
+    private var showOutput = false
+    private var showStatus = false
+    /// The stack column's share of the width, kept across relayouts.
+    private var stackShare: CGFloat = 0.4
+    private var positioning = false
+
+    init(view: CellView) {
+        cellView = view
+        super.init(frame: .zero)
+        // The flexible column (the name, the value) takes the width the
+        // fixed ones leave.
+        for (t, cols) in [(stackTable, [("name", "Call Stack", 180.0, true), ("loc", "Location", 120.0, false)]),
+                          (varsTable, [("name", "Name", 140.0, false), ("value", "Value", 260.0, true),
+                                       ("type", "Type", 90.0, false)])] {
+            for (id, title, w, flexible) in cols {
+                let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
+                c.title = title
+                c.width = CGFloat(w)
+                c.minWidth = 40
+                c.resizingMask = flexible ? [.autoresizingMask, .userResizingMask] : .userResizingMask
+                t.addTableColumn(c)
+            }
+            t.style = .fullWidth
+            t.rowHeight = 20
+            t.usesAlternatingRowBackgroundColors = true
+            t.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+            t.allowsColumnReordering = false
+            t.floatsGroupRows = false
+            t.dataSource = self
+            t.delegate = self
+            t.target = self
+            let sc = NSScrollView()
+            sc.documentView = t
+            sc.hasVerticalScroller = true
+            sc.autohidesScrollers = true
+            sc.borderType = .noBorder
+            split.addSubview(sc)
+        }
+        stackTable.action = #selector(stackClicked)
+        varsTable.action = #selector(varsClicked)
+        varsTable.doubleAction = #selector(varsDoubleClicked)
+        varsTable.menu = NSMenu()
+        varsTable.menu?.delegate = self
+        split.isVertical = true
+        split.dividerStyle = .thin
+        split.setHoldingPriority(.defaultLow + 1, forSubviewAt: 0)
+        split.delegate = self
+        outputBar.font = .systemFont(ofSize: 11, weight: .semibold)
+        outputBar.textColor = .secondaryLabelColor
+        status.font = .systemFont(ofSize: 11)
+        status.textColor = .secondaryLabelColor
+        status.lineBreakMode = .byTruncatingTail
+        addSubview(status)
+        addSubview(split)
+        addSubview(outputBar)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override var isFlipped: Bool { true }
+
+    override func layout() {
+        super.layout()
+        let barH = showOutput ? CELL_H : 0
+        let top = showStatus ? CELL_H : 0
+        status.isHidden = !showStatus
+        status.frame = NSRect(x: 8, y: (top - 14) / 2, width: bounds.width - 16, height: 14)
+        split.frame = NSRect(x: 0, y: top, width: bounds.width, height: max(0, bounds.height - barH - top))
+        outputBar.isHidden = !showOutput
+        outputBar.frame = NSRect(x: 8, y: bounds.height - barH + (barH - 14) / 2, width: bounds.width - 16, height: 14)
+        split.adjustSubviews()
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.controlBackgroundColor.setFill()
+        bounds.fill()
+        if showOutput {
+            NSColor.windowBackgroundColor.setFill()
+            NSRect(x: 0, y: bounds.height - CELL_H, width: bounds.width, height: CELL_H).fill()
+            NSColor.separatorColor.setFill()
+            NSRect(x: 0, y: bounds.height - CELL_H, width: bounds.width, height: 1).fill()
+        }
+    }
+
+    /// Adopt a `tk_desktop_debug_inspect` payload; true when it changed anything.
+    func update(_ data: Data) -> Bool {
+        guard data != lastData,
+              let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return false }
+        lastData = data
+        let f = NSRect(x: CGFloat(o["x"] as? Int ?? 0) * CELL_W, y: CGFloat(o["y"] as? Int ?? 0) * CELL_H,
+                       width: CGFloat(o["w"] as? Int ?? 0) * CELL_W, height: CGFloat(o["h"] as? Int ?? 0) * CELL_H)
+        if frame != f { frame = f }
+        let out = o["output"] as? Bool ?? false
+        if out != showOutput { showOutput = out; needsLayout = true; needsDisplay = true }
+        let st = o["status"] as? String ?? ""
+        status.stringValue = st
+        if st.isEmpty == showStatus { showStatus = !st.isEmpty; needsLayout = true; needsDisplay = true }
+        let newFrames = o["frames"] as? [[Any]] ?? []
+        let newVars = o["vars"] as? [[Any]] ?? []
+        syncing = true
+        if !Self.same(newFrames, frames) {
+            frames = newFrames
+            stackTable.reloadData()
+        }
+        if !Self.same(newVars, vars) {
+            let keep = varsTable.selectedRow
+            vars = newVars
+            varsTable.reloadData()
+            if keep >= 0 && keep < vars.count {
+                varsTable.selectRowIndexes(IndexSet(integer: keep), byExtendingSelection: false)
+            }
+        }
+        if let cur = frames.firstIndex(where: { $0[4] as? Bool ?? false }) {
+            if stackTable.selectedRow != cur {
+                stackTable.selectRowIndexes(IndexSet(integer: cur), byExtendingSelection: false)
+                stackTable.scrollRowToVisible(cur)
+            }
+        } else {
+            stackTable.deselectAll(nil)
+        }
+        syncing = false
+        return true
+    }
+
+    private static func same(_ a: [[Any]], _ b: [[Any]]) -> Bool {
+        a.count == b.count && zip(a, b).allSatisfy { NSArray(array: $0).isEqual(to: $1) }
+    }
+
+    private func act(_ op: Int, _ row: Int, _ text: String = "") {
+        guard let v = cellView, v.handle != 0 else { return }
+        withUTF8Arg(text) { p, l in tk_desktop_debug_inspect_act(v.handle, Int64(op), Int64(row), p, l) }
+        lastData = Data()
+        v.invalidateFrame()
+        v.needsDisplay = true
+    }
+
+    // MARK: table data
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        tableView === stackTable ? frames.count : vars.count
+    }
+
+    func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
+        tableView === varsTable && (vars[row][1] as? Int ?? 0) == 0
+    }
+
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+        !self.tableView(tableView, isGroupRow: row)
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row i: Int) -> NSView? {
+        let cell = NSTableCellView()
+        let label = NSTextField(labelWithString: "")
+        label.lineBreakMode = .byTruncatingTail
+        label.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(label)
+        var leading: CGFloat = 4
+        let id = tableColumn?.identifier.rawValue ?? ""
+        if tableView === stackTable {
+            let f = frames[i]
+            let subtle = f[3] as? Bool ?? false
+            label.stringValue = (id == "loc" ? f[2] : f[1]) as? String ?? ""
+            label.font = .systemFont(ofSize: 12)
+            label.textColor = subtle || id == "loc" ? .secondaryLabelColor : .labelColor
+            if id == "loc" { label.lineBreakMode = .byTruncatingHead }
+        } else {
+            let v = vars[i]
+            let kind = v[1] as? Int ?? 0
+            if kind == 0 {
+                label.stringValue = v[2] as? String ?? ""
+                label.font = .systemFont(ofSize: 11, weight: .semibold)
+                label.textColor = .secondaryLabelColor
+            } else if id == "name" {
+                let depth = v[5] as? Int ?? 0
+                leading = 4 + CGFloat(depth) * 14
+                if v[6] as? Bool ?? false {
+                    let open = v[7] as? Bool ?? false
+                    let chevron = NSButton(image: NSImage(systemSymbolName: open ? "chevron.down" : "chevron.right",
+                                                          accessibilityDescription: open ? "Collapse" : "Expand")!,
+                                           target: self, action: #selector(chevronClicked(_:)))
+                    chevron.isBordered = false
+                    chevron.tag = i
+                    chevron.imageScaling = .scaleProportionallyDown
+                    chevron.contentTintColor = .secondaryLabelColor
+                    chevron.frame = NSRect(x: leading, y: 2, width: 14, height: 16)
+                    cell.addSubview(chevron)
+                }
+                leading += 16
+                if kind == 3 {
+                    let eye = NSImageView(image: NSImage(systemSymbolName: "eye", accessibilityDescription: "Watch")!)
+                    eye.contentTintColor = .secondaryLabelColor
+                    eye.frame = NSRect(x: leading - 16, y: 3, width: 14, height: 14)
+                    cell.addSubview(eye)
+                }
+                label.stringValue = v[2] as? String ?? ""
+                label.font = .systemFont(ofSize: 12)
+            } else if id == "value" {
+                label.stringValue = v[3] as? String ?? ""
+                label.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+            } else {
+                label.stringValue = v[4] as? String ?? ""
+                label.font = .systemFont(ofSize: 11)
+                label.textColor = .secondaryLabelColor
+            }
+        }
+        label.toolTip = label.stringValue
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: leading),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: -4),
+            label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+        ])
+        return cell
+    }
+
+    /// Resizing keeps the stack's share of the width; dragging the
+    /// divider changes it.
+    func splitView(_ splitView: NSSplitView, resizeSubviewsWithOldSize oldSize: NSSize) {
+        let sv = splitView.subviews
+        guard sv.count == 2 else { return }
+        let w = splitView.bounds.width, h = splitView.bounds.height, d = splitView.dividerThickness
+        let left = min(max(120, (w * stackShare).rounded()), max(0, w - d - 120))
+        positioning = true
+        sv[0].frame = NSRect(x: 0, y: 0, width: left, height: h)
+        sv[1].frame = NSRect(x: left + d, y: 0, width: max(0, w - left - d), height: h)
+        positioning = false
+    }
+
+    func splitViewDidResizeSubviews(_ notification: Notification) {
+        guard !positioning, split.bounds.width > 0, let first = split.subviews.first else { return }
+        stackShare = first.frame.width / split.bounds.width
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        guard !syncing, (notification.object as? NSTableView) === stackTable else { return }
+        let r = stackTable.selectedRow
+        guard r >= 0, r < frames.count else { return }
+        act(0, frames[r][0] as? Int ?? -1)
+    }
+
+    // MARK: actions
+
+    @objc private func stackClicked() { act(4, -1) }
+    @objc private func varsClicked() { act(4, -1) }
+
+    @objc private func chevronClicked(_ b: NSButton) {
+        guard b.tag < vars.count else { return }
+        act(1, vars[b.tag][0] as? Int ?? -1)
+    }
+
+    @objc private func varsDoubleClicked() {
+        let r = varsTable.clickedRow
+        guard r >= 0, r < vars.count, vars[r][6] as? Bool ?? false else { return }
+        act(1, vars[r][0] as? Int ?? -1)
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let r = varsTable.clickedRow
+        if r >= 0, r < vars.count, (vars[r][1] as? Int ?? 0) != 0 {
+            let v = vars[r]
+            let name = v[2] as? String ?? "", value = v[3] as? String ?? ""
+            menu.addItem(item("Copy Value") { Self.copy(value) })
+            menu.addItem(item("Copy Name") { Self.copy(name) })
+            menu.addItem(.separator())
+            if (v[1] as? Int ?? 0) == 3 {
+                let row = v[0] as? Int ?? -1
+                menu.addItem(item("Remove Watch") { [weak self] in self?.act(2, row) })
+            } else if (v[5] as? Int ?? 0) == 0 {
+                menu.addItem(item("Watch “\(name)”") { [weak self] in self?.act(3, -1, name) })
+            }
+        }
+        menu.addItem(item("Add Watch…") { [weak self] in self?.promptWatch() })
+    }
+
+    private func item(_ title: String, _ run: @escaping () -> Void) -> NSMenuItem {
+        let i = NSMenuItem(title: title, action: #selector(MenuClosure.fire(_:)), keyEquivalent: "")
+        let c = MenuClosure(run)
+        i.target = c
+        i.representedObject = c
+        return i
+    }
+
+    private static func copy(_ s: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(s, forType: .string)
+    }
+
+    private func promptWatch() {
+        guard let win = window else { return }
+        let a = NSAlert()
+        a.messageText = "Add Watch"
+        a.informativeText = "Expression to evaluate whenever the debugger stops:"
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 22))
+        a.accessoryView = field
+        a.addButton(withTitle: "Add")
+        a.addButton(withTitle: "Cancel")
+        a.window.initialFirstResponder = field
+        a.beginSheetModal(for: win) { [weak self] resp in
+            guard resp == .alertFirstButtonReturn else { return }
+            let e = field.stringValue.trimmingCharacters(in: .whitespaces)
+            if !e.isEmpty { self?.act(3, -1, e) }
+        }
+    }
+}
+
+/// Holds a menu item's closure; the item keeps it alive through
+/// `representedObject`.
+final class MenuClosure: NSObject {
+    private let run: () -> Void
+    init(_ run: @escaping () -> Void) { self.run = run }
+    @objc func fire(_ sender: Any?) { run() }
 }
 
 

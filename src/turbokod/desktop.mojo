@@ -3335,6 +3335,7 @@ struct Desktop(Movable):
         The companion to the main-surface `paint` when `panels_detached` is
         set. Lays the visible panels out via `_panel_window_slots`; when none
         are open it paints the background plus a one-line hint."""
+        self._sync_host_chrome()
         Painter(screen).fill(canvas, screen, self.bg_pattern, self.bg_attr)
         var slots = self._panel_window_slots(screen)
         if len(slots) == 0:
@@ -8991,11 +8992,18 @@ struct Desktop(Movable):
             and not self.history.active and not self.merge_view.active \
             and not self.review.active
 
+    def native_panels_shown(self) -> Bool:
+        """The floating-panels window's panes get native headers and the
+        debug pane's native tables. Nothing on the main surface covers that
+        window, so no modal or full-screen tool switches them off."""
+        return self.native_ui() and self.panels_detached
+
     def _sync_host_chrome(mut self):
-        var on = self.native_panes_shown()
+        var on = self.native_panes_shown() or self.native_panels_shown()
         for i in range(len(self.terminal_panes)):
             self.terminal_panes[i].dock.host_chrome = on
         self.debug_pane.dock.host_chrome = on
+        self.debug_pane.host_inspect = on
         self.test_pane.dock.host_chrome = on
         self.find_results_pane.dock.host_chrome = on
 
@@ -9019,6 +9027,18 @@ struct Desktop(Movable):
             return
         if op != 1:
             self._focus_dock(kind, idx)
+
+    def native_debug_act(mut self, op: Int, row: Int, var text: String):
+        """The native Stack / Locals / Watches tables: ``op`` 0–2 act on
+        ``debug_pane.rows[row]`` (select frame, expand / collapse, remove
+        watch — see ``DebugPane.native_act``), 3 adds ``text`` as a
+        watch. Every op focuses the pane."""
+        if op == 3:
+            if len(text.as_bytes()) > 0:
+                self.add_watch(text^)
+        else:
+            self.debug_pane.native_act(op, row)
+        self._focus_dock(DOCK_DEBUG_PANE, 0)
 
     def native_merge_active(self) -> Bool:
         return self.native_ui() and self.merge_view.active

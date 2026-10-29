@@ -203,7 +203,30 @@ Each pane's one-row header is native:
 - Each control is `tk_desktop_pane_act`, which makes the same state change
   the grid buttons do. Close is `request_close` and a command latches
   `pending_command_id`; the tick drains both.
-- The floating-panels window keeps the grid headers.
+- The floating-panels window gets them too (`native_panels_shown()`), from
+  `tk_desktop_panels_panes` at the panes' rows in that window. No modal
+  or full-screen tool in the main window covers it.
+
+## Debug pane
+
+The run / debug pane's output log and `>>>` console stay on the grid, like
+the terminal. The Stack and Locals / Watches columns above them, the status
+row, and the Output divider are native:
+
+- `DebugPane.host_inspect` is synced with `host_chrome`, docked or
+  floating. While it's on and an
+  inspect section shows, paint leaves those rows blank and stamps
+  `native_rect` over them. The output log starts under it.
+- `tk_desktop_debug_inspect` sends the rows: frames as name and location,
+  variables and watches as name, value and type, plus depth and expansion.
+  A frame's `type_name` carries its whole name, because the grid text is
+  padded or cut to a column.
+- `DebugInspectOverlay` is a split view with a Call Stack table and a
+  Name / Value / Type table, with section titles as group rows.
+- Selecting a frame, a disclosure click and the watch menu (Copy Value,
+  Watch, Remove Watch, Add Watch…) go through `tk_desktop_debug_inspect_act`
+  → `Desktop.native_debug_act`. That stages the same `pending_*` fields a
+  grid click does, so the tick's DAP round trips are unchanged.
 
 ## Editor scroller
 

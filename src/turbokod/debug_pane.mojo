@@ -143,7 +143,9 @@ struct PaneRow(ImplicitlyCopyable, Movable):
 
     ``kind`` selects which fields actually mean something:
     * ``PANE_ROW_HEADER``: ``text`` is the title.
-    * ``PANE_ROW_FRAME``: ``text`` is ``"name  file:line"``,
+    * ``PANE_ROW_FRAME``: ``text`` is ``"name  file:line"`` (the
+      name padded or cut to a column) and ``type_name`` the whole
+      name (the native table's),
       ``ref`` is the DAP frame id, ``depth`` is the frame index
       (used to highlight the current frame), ``expanded`` carries
       the adapter's "subtle" hint (library / external code) — True
@@ -318,6 +320,13 @@ struct DebugPane(Copyable, Movable):
     """Cell offset within the thumb at the moment the user pressed
     on it — preserves the click point relative to the thumb so the
     drag doesn't snap the thumb to mouse-y."""
+    var host_inspect: Bool
+    """The host draws Stack / Locals / Watches natively over
+    ``native_rect`` (the macOS-style UI): paint leaves those cells
+    blank."""
+    var native_rect: Rect
+    """The inspect section plus the Output divider row as last painted;
+    empty when no inspect section shows."""
 
     def __init__(out self):
         self.visible = False
@@ -358,6 +367,8 @@ struct DebugPane(Copyable, Movable):
         self._last_output_sb_bottom = -1
         self._output_scrolling = False
         self._output_drag_offset = 0
+        self.host_inspect = False
+        self.native_rect = Rect.empty()
         self.repl_enabled = False
         self.repl_input = TextField()
         self.repl_history = List[String]()
@@ -409,6 +420,8 @@ struct DebugPane(Copyable, Movable):
         self._last_output_sb_bottom = copy._last_output_sb_bottom
         self._output_scrolling = copy._output_scrolling
         self._output_drag_offset = copy._output_drag_offset
+        self.host_inspect = copy.host_inspect
+        self.native_rect = copy.native_rect
         self.repl_enabled = copy.repl_enabled
         self.repl_input = copy.repl_input
         self.repl_history = copy.repl_history.copy()
@@ -484,7 +497,7 @@ struct DebugPane(Copyable, Movable):
             out.append(PaneRow(
                 PANE_ROW_FRAME,
                 name_pad + String("  ") + loc,
-                f.id, i, f.subtle, String(""),
+                f.id, i, f.subtle, f.name,
             ))
         out.append(PaneRow(PANE_ROW_BLANK, String(""), 0, 0, False, String("")))
         out.append(PaneRow(
@@ -1055,6 +1068,7 @@ struct DebugPane(Copyable, Movable):
         # In MINIMIZED state we stop after the title bar — the rest of
         # the pane is hidden, the user reads the status in the
         # status-bar / window-tab strip until they restore.
+        self.native_rect = Rect.empty()
         if body.is_empty():
             self._last_inspect_y0 = top + 1
             self.output.last_y0 = top + 1
@@ -1069,7 +1083,9 @@ struct DebugPane(Copyable, Movable):
         var row_y = top + 1
         var content_top = row_y
         if len(self.status_text.as_bytes()) > 0:
-            if row_y < panel.b.y:
+            var host_status = self.host_inspect \
+                and self.mode == PANE_MODE_DEBUG and len(self.rows) > 0
+            if row_y < panel.b.y and not host_status:
                 _ = painter.put_text(
                     canvas, Point(panel.a.x + 2, row_y), self.status_text, dim,
                 )
@@ -1120,6 +1136,21 @@ struct DebugPane(Copyable, Movable):
         var div_x = panel.a.x + left_w
         self._last_divider_x = div_x
         self._last_inspect_y0 = content_top
+        if show_inspect and self.host_inspect:
+            # The host's tables cover these rows and the divider under
+            # them; the grid keeps only the output log.
+            var native_bottom = content_top + inspect_h
+            if output_h > 0:
+                native_bottom += 1
+            # The status row above them too: the host shows it as a
+            # caption.
+            self.native_rect = Rect(
+                panel.a.x, row_y, panel.b.x,
+                min(native_bottom, panel.b.y),
+            )
+            self._left_indices = List[Int]()
+            self._right_indices = List[Int]()
+            inspect_h = 0
         # Vertical divider glyph for the inspect rows only (output
         # uses the full width).
         for y in range(content_top, content_top + inspect_h):
@@ -1237,7 +1268,9 @@ struct DebugPane(Copyable, Movable):
         # while the program is running (rows empty), so we drop the
         # divider and output starts immediately under the status row.
         var out_top: Int
-        if not show_inspect:
+        if not self.native_rect.is_empty():
+            out_top = self.native_rect.b.y
+        elif not show_inspect:
             out_top = content_top
         else:
             var div_y = content_top + inspect_h
@@ -1641,6 +1674,18 @@ struct DebugPane(Copyable, Movable):
             self.output.autoscroll = True
             return True
         return False
+
+    def native_act(mut self, op: Int, row_idx: Int):
+        """A native inspect table's action on ``rows[row_idx]``: ``op`` 0
+        selects a frame, 1 expands / collapses a variable, 2 removes a
+        watch. Stages the same ``pending_*`` a grid click does."""
+        if row_idx < 0 or row_idx >= len(self.rows):
+            return
+        var kind = self.rows[row_idx].kind
+        if (op == 0 and kind == PANE_ROW_FRAME) \
+                or (op == 1 and kind == PANE_ROW_VARIABLE) \
+                or (op == 2 and kind == PANE_ROW_WATCH):
+            self._on_row_click(row_idx)
 
     def _on_row_click(mut self, row_idx: Int):
         var r = self.rows[row_idx]

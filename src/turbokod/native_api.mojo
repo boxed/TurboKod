@@ -39,9 +39,13 @@ from turbokod.theme import theme_by_name
 from turbokod.desktop import (
     Desktop, APP_QUIT_ACTION, EDITOR_OPEN, EDITOR_PASTE, EDITOR_QUICK_OPEN,
     PROJECT_OPEN, WINDOW_FOCUS_PREFIX, DOCK_DEBUG_PANE, DOCK_FIND_RESULTS_PANE,
-    DOCK_TERMINAL, DOCK_TEST_PANE,
+    DOCK_TERMINAL, DOCK_TEST_PANE, PANEL_KIND_DEBUG, PANEL_KIND_FIND_RESULTS,
+    PANEL_KIND_TERMINAL,
 )
 from turbokod.window import BottomDockedPanel, compute_display_titles
+from turbokod.debug_pane import (
+    PANE_ROW_BLANK, PANE_ROW_FRAME, PANE_ROW_HEADER, PANE_ROW_VARIABLE,
+)
 from turbokod.file_tree import FileTree
 from turbokod.file_io import basename, parent_path, project_relative
 from turbokod.colors import EDITOR_BG, EDITOR_FG, FG_TRUECOLOR
@@ -1780,6 +1784,50 @@ def tk_desktop_panes(
 
 
 @export
+def tk_desktop_panels_panes(
+    h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
+) abi("C") -> Int:
+    """``tk_desktop_panes`` for the floating-panels window: the same
+    headers, at the panes' rows in that window's ``cols`` × ``rows``."""
+    if h == 0:
+        return 0
+    ref d = _desk(h)[]
+    if not d.native_panels_shown():
+        return 0
+    var a = json_array()
+    var slots = d._panel_window_slots(Rect(0, 0, cols, rows))
+    for ref s in slots:
+        if s.rect.is_empty():
+            continue
+        if s.kind == PANEL_KIND_TERMINAL:
+            ref t = d.terminal_panes[s.idx]
+            a.append(_pane_json(
+                Int(DOCK_TERMINAL), s.idx, s.rect, t.header_title(),
+                t.focused, t.dock, String("T"),
+            ))
+        elif s.kind == PANEL_KIND_DEBUG:
+            a.append(_pane_json(
+                Int(DOCK_DEBUG_PANE), 0, s.rect, d.debug_pane.header_title(),
+                d.debug_pane.focused, d.debug_pane.dock, String("9"),
+            ))
+        elif s.kind == PANEL_KIND_FIND_RESULTS:
+            a.append(_pane_json(
+                Int(DOCK_FIND_RESULTS_PANE), 0, s.rect,
+                d.find_results_pane.header_title(),
+                d.find_results_pane.focused, d.find_results_pane.dock,
+                String(""),
+            ))
+        else:
+            a.append(_pane_json(
+                Int(DOCK_TEST_PANE), 0, s.rect, d.test_pane.header_title(),
+                d.test_pane.focused, d.test_pane.dock, String(""),
+            ))
+    if a.array_len() == 0:
+        return 0
+    return _write_out(encode_json(a), out_ptr, cap)
+
+
+@export
 def tk_desktop_pane_act(
     h: Int, kind: Int, idx: Int, op: Int, ptr: Int, n: Int,
 ) abi("C"):
@@ -1789,6 +1837,120 @@ def tk_desktop_pane_act(
     if h == 0:
         return
     _desk(h)[].native_pane_act(UInt8(kind), idx, op, _string_from(ptr, n))
+
+
+# --- macOS-style UI: debug pane inspect tables ---------------------------------
+
+
+def _split_at(text: String, sep: String) -> Tuple[String, String]:
+    """``text`` cut at the first ``sep``: (before, after), or (text, "")."""
+    var at = text.find(sep)
+    if at < 0:
+        return (text, String(""))
+    var n = len(text.as_bytes())
+    return (
+        byte_slice(text, 0, at),
+        byte_slice(text, at + len(sep.as_bytes()), n),
+    )
+
+
+@export
+def tk_desktop_debug_inspect(
+    h: Int, panels: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
+) abi("C") -> Int:
+    """The debug pane's Stack / Locals / Watches for native tables laid
+    over their cells: ``{x, y, w, h, output, focused, status, frames: [[row, name,
+    location, subtle, current]], vars: [[row, kind, name, value, type,
+    depth, expandable, expanded]]}``. ``row`` indexes the pane's rows (for
+    ``tk_desktop_debug_inspect_act``); ``kind`` is 0 a section title, 2 a
+    variable, 3 a watch; ``output`` says the rect's last row is the
+    Output divider; the first row is the status caption when ``status``
+    isn't empty. ``panels`` 1 asks for the floating-panels window, 0 for
+    the main one; ``cols`` × ``rows`` is that surface. 0 when the grid
+    draws them, or the pane is on the other surface."""
+    if h == 0:
+        return 0
+    ref d = _desk(h)[]
+    ref p = d.debug_pane
+    var r = p.native_rect
+    if not p.visible or not p.host_inspect or r.is_empty() \
+            or d.panels_detached != (panels != 0):
+        return 0
+    var pane_bottom = d.debug_pane_rect(Rect(0, 0, cols, rows)).b.y
+    if panels != 0:
+        var slots = d._panel_window_slots(Rect(0, 0, cols, rows))
+        for ref s in slots:
+            if s.kind == PANEL_KIND_DEBUG:
+                pane_bottom = s.rect.b.y
+    var o = json_object()
+    o.put(String("x"), json_int(r.a.x))
+    o.put(String("y"), json_int(r.a.y))
+    o.put(String("w"), json_int(r.width()))
+    o.put(String("h"), json_int(r.height()))
+    o.put(String("output"), json_bool(r.b.y < pane_bottom))
+    o.put(String("focused"), json_bool(p.focused))
+    o.put(String("status"), json_str(p.status_text))
+    var frames = json_array()
+    var vars = json_array()
+    var stack_section = True
+    var seen_header = False
+    for i in range(len(p.rows)):
+        ref row = p.rows[i]
+        if row.kind == PANE_ROW_BLANK:
+            continue
+        if row.kind == PANE_ROW_HEADER:
+            if not seen_header:
+                seen_header = True     # "Stack" — the table's own header
+                continue
+            stack_section = False
+        if row.kind == PANE_ROW_FRAME and stack_section:
+            # ``text`` is the padded name, two spaces, then the location.
+            var loc = String("")
+            var at = row.text.rfind(String("  "))
+            if at >= 0:
+                loc = String(byte_slice(
+                    row.text, at + 2, len(row.text.as_bytes()),
+                ).strip())
+            var f = json_array()
+            f.append(json_int(i))
+            f.append(json_str(row.type_name))
+            f.append(json_str(loc))
+            f.append(json_bool(row.expanded))
+            f.append(json_bool(row.depth == p.current_frame_index))
+            frames.append(f)
+            continue
+        stack_section = False
+        var v = json_array()
+        v.append(json_int(i))
+        v.append(json_int(Int(row.kind)))
+        if row.kind == PANE_ROW_HEADER:
+            v.append(json_str(row.text))
+            v.append(json_str(String("")))
+        else:
+            var parts = _split_at(row.text, String(" = "))
+            v.append(json_str(parts[0]))
+            v.append(json_str(parts[1]))
+        v.append(json_str(row.type_name))
+        v.append(json_int(row.depth))
+        v.append(json_bool(row.kind == PANE_ROW_VARIABLE and row.ref_id != 0))
+        v.append(json_bool(row.expanded))
+        vars.append(v)
+    o.put(String("frames"), frames)
+    o.put(String("vars"), vars)
+    return _write_out(encode_json(o), out_ptr, cap)
+
+
+@export
+def tk_desktop_debug_inspect_act(
+    h: Int, op: Int, row: Int, ptr: Int, n: Int,
+) abi("C"):
+    """A native inspect table's action: ``op`` 0 select the frame at
+    ``row``, 1 expand / collapse the variable at ``row``, 2 remove the
+    watch at ``row``, 3 add the string as a watch, 4 just focus the
+    pane."""
+    if h == 0:
+        return
+    _desk(h)[].native_debug_act(op, row, _string_from(ptr, n))
 
 
 # --- macOS-style UI: review mode ----------------------------------------------
