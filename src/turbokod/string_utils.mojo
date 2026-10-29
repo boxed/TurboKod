@@ -177,6 +177,76 @@ def split_whitespace(s: String) -> List[String]:
     return out^
 
 
+def split_args(s: String) -> List[String]:
+    """An argument line as a shell splits it, without expanding anything:
+    whitespace separates arguments, ``'...'`` is literal, ``"..."`` keeps
+    spaces with ``\\"`` and ``\\\\`` escaped, and a backslash outside quotes
+    takes the next character as is. ``join_args`` writes what this reads,
+    so an argument holding a space (or nothing) survives being shown in a
+    text field and read back."""
+    var b = s.as_bytes()
+    var out = List[String]()
+    var cur = List[UInt8]()
+    var in_arg = False
+    var i = 0
+    var n = len(b)
+    while i < n:
+        var c = b[i]
+        if c == 0x20 or c == 0x09 or c == 0x0A or c == 0x0D:
+            if in_arg:
+                out.append(String(StringSpan(unsafe_from_utf8=Span(cur))))
+                cur = List[UInt8]()
+                in_arg = False
+            i += 1
+            continue
+        in_arg = True
+        if c == 0x27:    # '
+            i += 1
+            while i < n and b[i] != 0x27:
+                cur.append(b[i])
+                i += 1
+            i += 1
+        elif c == 0x22:    # "
+            i += 1
+            while i < n and b[i] != 0x22:
+                if b[i] == 0x5C and i + 1 < n and (b[i + 1] == 0x22 or b[i + 1] == 0x5C):
+                    i += 1
+                cur.append(b[i])
+                i += 1
+            i += 1
+        elif c == 0x5C and i + 1 < n:    # \
+            cur.append(b[i + 1])
+            i += 2
+        else:
+            cur.append(c)
+            i += 1
+    if in_arg:
+        out.append(String(StringSpan(unsafe_from_utf8=Span(cur))))
+    return out^
+
+
+def join_args(args: List[String]) -> String:
+    """``args`` as one line ``split_args`` reads back as them: an argument
+    that is empty or holds whitespace, a quote or a backslash is put in
+    single quotes (a ``'`` in it as ``'\\''``)."""
+    var out = String("")
+    for k in range(len(args)):
+        if k:
+            out += " "
+        var a = args[k]
+        var plain = len(a.as_bytes()) > 0
+        for c in a.as_bytes():
+            if c == 0x20 or c == 0x09 or c == 0x0A or c == 0x0D \
+                    or c == 0x27 or c == 0x22 or c == 0x5C:
+                plain = False
+                break
+        if plain:
+            out += a
+        else:
+            out += "'" + a.replace("'", "'\\''") + "'"
+    return out^
+
+
 def shell_escape_path(path: String) -> String:
     """Backslash-escape the shell-significant ASCII characters in ``path`` so a
     file path dragged onto a terminal pane reaches the program running there

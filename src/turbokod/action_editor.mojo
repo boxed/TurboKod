@@ -14,7 +14,7 @@ from std.collections.list import List
 
 from .config import OnSaveAction
 from .language_config import built_in_servers
-from .string_utils import split_whitespace
+from .string_utils import join_args, split_args
 from .ui_tree import (
     UI_CANCEL, UI_DEFAULT, UI_SECONDARY, UINode, ui_button, ui_buttons,
     ui_choice, ui_dialog, ui_form, ui_int, ui_label, ui_path, ui_row, ui_text,
@@ -49,7 +49,7 @@ struct ActionEditor(Movable):
         self.edit_index = edit_index
         self.language_id = entry.language_id
         self.program = entry.program
-        self.args = String(" ").join(entry.args)
+        self.args = join_args(entry.args)
         self.cwd = entry.cwd
 
     def close(mut self):
@@ -57,7 +57,7 @@ struct ActionEditor(Movable):
 
     def value(self) -> OnSaveAction:
         return OnSaveAction(
-            self.language_id, self.program, split_whitespace(self.args),
+            self.language_id, self.program, split_args(self.args),
             self.cwd,
         )
 

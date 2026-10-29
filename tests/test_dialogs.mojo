@@ -52,6 +52,10 @@ from turbokod.lsp import capture_command
 from turbokod.posix import monotonic_ms, which
 from turbokod.spell import find_misspelled_runs
 from turbokod.action_editor import ActionEditor
+from turbokod.project_settings import ProjectSettings
+from turbokod.project_grammars import GrammarOverride
+from turbokod.project_targets import ProjectTargets, RunTarget
+from turbokod.string_utils import join_args, split_args
 from turbokod.ui_grid import GridForm
 from turbokod.config import (
     LanguageServerOverride, MIN_FONT_SIZE, OnSaveAction, TurbokodConfig
@@ -1204,6 +1208,45 @@ def test_action_editor_language_choice_has_options() raises:
         msg=String("the language choice only has the empty sentinel"))
     ed.ui_set(String("language"), String("1"))
     assert_equal(ed.language_id, ed.language_options()[1])
+
+
+def test_an_argument_line_reads_back_as_the_arguments_written() raises:
+    var tricky: List[String] = [
+        "-k", "test one", "", "it's", "say \"hi\"", "back\\slash", "tab\there",
+    ]
+    assert_equal(split_args(join_args(tricky)), tricky)
+    assert_equal(join_args(["python", "-m", "foo"]), String("python -m foo"))
+    assert_equal(
+        split_args(String("a 'b c' \"d \\\" e\" f\\ g  ")),
+        ["a", "b c", "d \" e", "f g"],
+    )
+
+
+def test_editing_a_target_keeps_its_arguments() raises:
+    # They went through the text field split on whitespace: renaming the
+    # target turned "test one" into two arguments and dropped the empty one
+    var t = RunTarget()
+    t.name = String("tests")
+    t.program = String("pytest")
+    t.args = ["-k", "test one", ""]
+    var targets = ProjectTargets()
+    targets.targets.append(t^)
+    var ps = ProjectSettings()
+    ps.open(
+        String("/tmp"), targets^, List[GrammarOverride](),
+        List[OnSaveAction](), List[OnSaveAction](),
+    )
+    ps.ui_set(String("tg_name"), String("unit tests"))
+    assert_equal(ps.targets_value().targets[0].args, ["-k", "test one", ""])
+
+
+def test_editing_an_on_save_action_keeps_its_arguments() raises:
+    var ed = ActionEditor()
+    var act = OnSaveAction()
+    act.program = String("sh")
+    act.args = ["-c", "black \"$FILE\""]
+    ed.open(act, 0)
+    assert_equal(ed.value().args, act.args)
 
 
 def test_dropdown_type_to_search_jumps_to_prefix() raises:

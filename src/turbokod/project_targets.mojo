@@ -58,7 +58,7 @@ from .json import (
     json_get_string, json_get_string_array, parse_json,
 )
 from .posix import getenv_value
-from .string_utils import leading_indent_bytes, split_whitespace
+from .string_utils import leading_indent_bytes, split_args, split_whitespace
 
 
 comptime TURBOKOD_DIR    = String(".turbokod")
@@ -174,14 +174,13 @@ def _parse_target(node: JsonValue) -> RunTarget:
     t.args = json_get_string_array(node, String("args"))
     t.env = json_get_string_array(node, String("env"))
     t.debug_language = json_get_string(node, String("language"))
-    # Legacy fallback. ``run`` was a shell command string; we drop
-    # any space-separated args into ``args`` for backward compat —
-    # not perfect for shell-quoted strings but covers the common
-    # case (``"run": "python -m foo --verbose"``).
+    # Legacy fallback. ``run`` was a shell command string, split into
+    # ``program`` and ``args`` the way a shell would (quotes and all, but
+    # nothing expanded): ``"run": "python -m foo --verbose"``.
     if len(t.program.as_bytes()) == 0:
         var run_v = node.object_get(String("run"))
         if run_v and run_v.value().is_string():
-            var parts = split_whitespace(run_v.value().as_str())
+            var parts = split_args(run_v.value().as_str())
             if len(parts) > 0:
                 t.program = parts[0]
                 if len(t.args) == 0:

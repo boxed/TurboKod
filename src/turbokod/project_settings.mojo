@@ -30,7 +30,7 @@ from .project_on_save import on_save_equal
 from .project_targets import (
     ProjectTargets, RunTarget, join_env_field, split_env_field,
 )
-from .string_utils import split_whitespace
+from .string_utils import join_args, split_args
 from .ui_tree import (
     UI_DEFAULT, UI_DISABLED, UI_SECONDARY, UINode, ui_button, ui_buttons, ui_choice,
     ui_dialog, ui_form, ui_hstack, ui_int, ui_label, ui_page, ui_path, ui_row,
@@ -555,7 +555,7 @@ struct ProjectSettings(Movable):
         ref t = self.targets.targets[self.selected_tg]
         self.tg_name = t.name
         self.tg_program = t.program
-        self.tg_args = String(" ").join(t.args)
+        self.tg_args = join_args(t.args)
         self.tg_cwd = t.cwd
         self.tg_env = join_env_field(t.env)
 
@@ -565,7 +565,7 @@ struct ProjectSettings(Movable):
         ref t = self.targets.targets[self.selected_tg]
         t.name = self.tg_name
         t.program = self.tg_program
-        t.args = split_whitespace(self.tg_args)
+        t.args = split_args(self.tg_args)
         t.cwd = self.tg_cwd
         t.env = split_env_field(self.tg_env)
         self.targets_dirty = True
