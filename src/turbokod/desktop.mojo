@@ -8437,6 +8437,11 @@ struct Desktop(Movable):
         self.set_font_size(font_size)
         if done:
             self.config.welcome_done = True
+        self.settings.native_ui = self.config.native_ui
+        self.settings.theme_choice = self.config.theme
+        if len(self.settings._font_names) > 0:
+            self.settings.font_choice = self.font_label()
+            self.settings.font_size_choice = self.config.font_size
         self._apply_view_config()
         self._persist_config()
 
@@ -9586,6 +9591,8 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == VIEW_NATIVE_UI:
             self.config.native_ui = not self.config.native_ui
+            # An open Settings shows it, and writes it back with its edits
+            self.settings.native_ui = self.config.native_ui
             self._apply_view_config()
             self._persist_config()
             return Optional[String]()
@@ -12265,6 +12272,15 @@ struct Desktop(Movable):
             self.host_font_effective_size, self.host_font_ideal_size,
         )
         self.settings.palette_version = self.theme_version
+        if not self.settings.dirty:
+            # Its own window leaves the menus usable meanwhile: the look
+            # they change has to be what the dialog shows, or its next
+            # edit writes back the one it opened with.
+            self.settings.native_ui = self.config.native_ui
+            self.settings.theme_choice = self.config.theme
+            if len(self.settings._font_names) > 0:
+                self.settings.font_choice = self.font_label()
+                self.settings.font_size_choice = self.config.font_size
         if self.settings.dirty:
             self.config.auto_save = self.settings.auto_save
             self.config.trim_trailing_whitespace = (

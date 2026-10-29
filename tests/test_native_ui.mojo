@@ -431,6 +431,20 @@ def test_native_settings_edit_the_same_state_and_sync_into_config() raises:
     assert_equal(d.config.max_open_windows, 7)
 
 
+def test_a_look_changed_from_the_menu_survives_an_edit_in_settings() raises:
+    # Settings has its own window, so the View menu stays usable while it's
+    # open; its next edit wrote back the look it had when it opened
+    var d = _native_desktop(String("x\n"))
+    _ = d.dispatch_action(APP_SETTINGS, _SCREEN)
+    var was = d.config.native_ui
+    _ = d.dispatch_action(VIEW_NATIVE_UI, _SCREEN)
+    assert_equal(d.config.native_ui, not was)
+    d.ui_apply(String("settings"), [
+        ui_set(String("cursor_blink"), String("0") if d.config.cursor_blink else String("1")),
+    ])
+    assert_equal(d.config.native_ui, not was)
+
+
 def test_settings_stay_in_grid_without_native_ui() raises:
     var d = Desktop()
     _ = d.dispatch_action(APP_SETTINGS, _SCREEN)
