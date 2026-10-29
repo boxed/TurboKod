@@ -3576,6 +3576,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     func openProjectPanel(_ v: CellView?) {
         guard let url = runOpenPanel(directories: true)?.first else { return }
+        // Already open: bring that window forward, as Project ▸ <recent>
+        // does. Two windows on one project write over each other's
+        // per-project state — the untitled drafts among it.
+        let want = canonicalPath(url.path)
+        if let existing = views.first(where: {
+            ($0.project).map { canonicalPath($0) == want } ?? false
+        }) {
+            existing.window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
         // A window already showing a project can't swap its root in
         // place — the Mojo Desktop is one-project-per-window and
         // open_project no-ops once a project is set (so the pick
