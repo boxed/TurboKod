@@ -2592,7 +2592,8 @@ def _ui_stack_json(ref d: Desktop, names: List[String]) -> JsonValue:
 
 @export
 def tk_desktop_ui_event(h: Int, ptr: Int, n: Int) abi("C"):
-    """What the user did in the native projection of dialog ``name``:
+    """What the user did in the native projection of dialog ``name`` (or,
+    for scripted screenshots, what to do in either projection):
     ``{name, events: [[is_action, key, value]]}`` — applied exactly as the
     grid projector's events are (``Desktop.ui_apply``)."""
     if h == 0:
@@ -2603,8 +2604,7 @@ def tk_desktop_ui_event(h: Int, ptr: Int, n: Int) abi("C"):
         var name = json_get_string(o, String("name"))
         var window = d.settings_surfaces()
         if name != d.ui_surface() and not (
-            d.settings_native and len(window) > 0
-            and name == window[len(window) - 1]
+            len(window) > 0 and name == window[len(window) - 1]
         ):
             return   # it closed (or another took over) meanwhile
         var evs = List[UIEvent]()

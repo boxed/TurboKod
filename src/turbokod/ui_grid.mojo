@@ -260,6 +260,9 @@ def _form_gap(n: UINode, i: Int) -> Int:
     if len(a.text.as_bytes()) == 0 and len(b.text.as_bytes()) == 0 \
             and a.children[0].kind == UI_CHECK and b.children[0].kind == UI_CHECK:
         return 0
+    # A Browse button's shadow row already separates it from the next row.
+    if a.children[0].kind == UI_TEXT and a.children[0].has(UI_BROWSE):
+        return max(0, n.number - 1)
     return n.number
 
 
@@ -592,7 +595,9 @@ struct GridForm(Movable):
                     attr = Attr(DARK_GRAY, LIGHT_GRAY)
                 elif p.node.has(UI_HEADING):
                     attr = Attr(BLUE, LIGHT_GRAY)
-                _ = painter.put_text(canvas, p.rect.a, p.node.text, attr)
+                _ = painter.put_text(
+                    canvas, p.rect.a, _fit(p.node.text, p.rect.width()), attr,
+                )
             elif k == UI_TEXT:
                 var fi = self._field(p.node)
                 if p.node.enabled():
@@ -674,9 +679,10 @@ struct GridForm(Movable):
             x += (widths[c] if c < len(widths) else 0) + 2
         var body = Rect(r.a.x, r.a.y + 1, r.b.x, r.b.y)
         var li = self._list(n)
-        _ = self._lists[li].prepare(body, len(n.rows))
+        # Labels for the visible rows only, from the scroll offset.
+        var first = self._lists[li].prepare(body, len(n.rows))
         var labels = List[String]()
-        for i in range(len(n.rows)):
+        for i in range(first, min(first + body.height(), len(n.rows))):
             var line = String("")
             for c in range(len(n.rows[i])):
                 var cell = n.rows[i][c]

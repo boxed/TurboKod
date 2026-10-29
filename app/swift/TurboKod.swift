@@ -2421,6 +2421,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             .filter { !$0.isEmpty }
         if env["TK_QUICK_OPEN"] != nil { actions.insert("file:quick_open", at: 0) }
         invokeCaptureActions(actions, then: {
+            // TK_CAPTURE_UI='{"<dialog>": [[is_action, key, value], …]}' drives
+            // the declarative dialogs the actions opened — grid or native
+            // alike — base dialogs before the ones they open on top.
+            if let js = env["TK_CAPTURE_UI"], let h = self.views.first?.handle, h != 0,
+               let o = (try? JSONSerialization.jsonObject(with: Data(js.utf8))) as? [String: Any] {
+                let order = ["settings", "project_settings", "fill", "breakpoint",
+                             "breakpoint_error", "language_editor", "action_editor"]
+                for name in order {
+                    guard let evs = o[name] as? [[Any]],
+                          let d = try? JSONSerialization.data(withJSONObject: ["name": name, "events": evs]),
+                          let json = String(data: d, encoding: .utf8) else { continue }
+                    withUTF8Arg(json) { p, l in tk_desktop_ui_event(h, p, l) }
+                }
+                self.views.first?.invalidateFrame()
+            }
             let timeout = env["TK_CAPTURE_TIMEOUT"].flatMap(Double.init) ?? 30.0
             self.awaitCaptureCondition(env["TK_CAPTURE_WHEN"], timeout: timeout) {
                 let extra = env["TK_CAPTURE_DELAY"].flatMap(Double.init) ?? 0.0
@@ -4489,13 +4504,6 @@ extension AppController {
             }
             live.append(dc)
             changed = true
-            // Scripted screenshots: TK_CAPTURE_UI='{"<name>": [[is_action,
-            // key, value], …]}' drives a dialog once it's up.
-            if isCapturing, let js = ProcessInfo.processInfo.environment["TK_CAPTURE_UI"],
-               let o = (try? JSONSerialization.jsonObject(with: Data(js.utf8))) as? [String: Any],
-               let evs = o[name] as? [[Any]] {
-                dc.send(evs)
-            }
         }
         return changed
     }
@@ -8325,7 +8333,7 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
 
     // MARK: events
 
-    func send(_ events: [[Any]]) {
+    private func send(_ events: [[Any]]) {
         guard let h = view?.handle, h != 0,
               let d = try? JSONSerialization.data(withJSONObject: ["name": name, "events": events]),
               let json = String(data: d, encoding: .utf8) else { return }
@@ -8423,13 +8431,19 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
             }
             out = grid
         case "tabs":
-            // NSTabView doesn't size itself to its pages: pin each page into
-            // its item's view and make the tab view fit the largest one.
+            // The pages sit in a borderless-tabs NSTabView under a segmented
+            // control: NSTabView's own tab bar is drawn with the sheet's
+            // vibrancy material and came out black on black in a sheet.
+            // NSTabView doesn't size itself to its pages either: pin each
+            // page into its item's view and fit the tab view to the largest.
             let tv = NSTabView()
+            tv.tabViewType = .noTabsBezelBorder
+            var labels: [String] = []
             var fit = NSSize.zero
             for (i, page) in kids.enumerated() {
                 let item = NSTabViewItem(identifier: "\(i)")
                 item.label = page["text"] as? String ?? ""
+                labels.append(item.label)
                 let pv = build(page, path: "\(path).\(i)")
                 pv.translatesAutoresizingMaskIntoConstraints = false
                 let holder = NSView()
@@ -8437,7 +8451,7 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
                 NSLayoutConstraint.activate([
                     pv.leadingAnchor.constraint(equalTo: holder.leadingAnchor, constant: 16),
                     pv.trailingAnchor.constraint(equalTo: holder.trailingAnchor, constant: -16),
-                    pv.topAnchor.constraint(equalTo: holder.topAnchor, constant: 12),
+                    pv.topAnchor.constraint(equalTo: holder.topAnchor, constant: 22),
                 ])
                 let size = pv.fittingSize
                 fit = NSSize(width: max(fit.width, size.width), height: max(fit.height, size.height))
@@ -8445,10 +8459,29 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
                 tv.addTabViewItem(item)
             }
             tv.widthAnchor.constraint(greaterThanOrEqualToConstant: fit.width + 32 + 16).isActive = true
-            tv.heightAnchor.constraint(greaterThanOrEqualToConstant: fit.height + 24 + 44).isActive = true
+            tv.heightAnchor.constraint(greaterThanOrEqualToConstant: fit.height + 22 + 20).isActive = true
             tv.delegate = self
             tv.identifier = NSUserInterfaceItemIdentifier(key)
-            out = tv
+            let seg = NSSegmentedControl(labels: labels, trackingMode: .selectOne,
+                                         target: self, action: #selector(segmentChanged(_:)))
+            seg.identifier = NSUserInterfaceItemIdentifier(key)
+            seg.selectedSegment = 0
+            let box = NSView()
+            for v in [tv, seg] as [NSView] {
+                v.translatesAutoresizingMaskIntoConstraints = false
+                box.addSubview(v)
+            }
+            NSLayoutConstraint.activate([
+                seg.topAnchor.constraint(equalTo: box.topAnchor),
+                seg.centerXAnchor.constraint(equalTo: box.centerXAnchor),
+                tv.topAnchor.constraint(equalTo: seg.centerYAnchor),
+                tv.leadingAnchor.constraint(equalTo: box.leadingAnchor),
+                tv.trailingAnchor.constraint(equalTo: box.trailingAnchor),
+                tv.bottomAnchor.constraint(equalTo: box.bottomAnchor),
+            ])
+            views[path + ".seg"] = seg
+            bound = tv
+            out = box
         case "label":
             out = NSTextField(wrappingLabelWithString: n["text"] as? String ?? "")
         case "text":
@@ -8489,6 +8522,11 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
             for (i, title) in (n["opts"] as? [String] ?? []).enumerated() {
                 let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("\(i)"))
                 c.title = title
+                if i == 0 && has(n, Self.CHECKABLE) {
+                    c.width = 24
+                    c.minWidth = 24
+                    c.maxWidth = 24
+                }
                 t.addTableColumn(c)
             }
             t.usesAlternatingRowBackgroundColors = true
@@ -8575,12 +8613,13 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
                 if sel < tv.numberOfTabViewItems && tv.indexOfTabViewItem(cur) != sel {
                     tv.selectTabViewItem(at: sel)
                 }
+                (views[path + ".seg"] as? NSSegmentedControl)?.selectedSegment = sel
             }
         case "table":
             if let t = views[path + ".table"] as? NSTableView {
                 tables[ObjectIdentifier(t)] = (n["key"] as? String ?? "", n)
                 t.reloadData()
-                let sel = n["n"] as? Int ?? -1
+                let sel = n["n"] as? Int ?? 0   // the tree leaves out a 0
                 if sel >= 0 && sel < t.numberOfRows {
                     t.selectRowIndexes(IndexSet(integer: sel), byExtendingSelection: false)
                 }
@@ -8635,6 +8674,11 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
         }
     }
 
+    @objc private func segmentChanged(_ seg: NSSegmentedControl) {
+        guard let key = seg.identifier?.rawValue else { return }
+        set(key, "\(seg.selectedSegment)")
+    }
+
     func tabView(_ tabView: NSTabView, didSelect item: NSTabViewItem?) {
         guard let key = tabView.identifier?.rawValue, let item = item else { return }
         set(key, "\(tabView.indexOfTabViewItem(item))")
@@ -8664,7 +8708,7 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
 
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard let t = notification.object as? NSTableView, let entry = tables[ObjectIdentifier(t)],
-              t.selectedRow >= 0, t.selectedRow != (entry.node["n"] as? Int ?? -1) else { return }
+              t.selectedRow >= 0, t.selectedRow != (entry.node["n"] as? Int ?? 0) else { return }
         set(entry.key, "\(t.selectedRow)")
     }
 

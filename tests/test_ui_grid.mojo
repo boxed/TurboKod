@@ -13,7 +13,7 @@ from turbokod.geometry import Rect
 from turbokod.ui_grid import GridForm, UIEvent
 from turbokod.ui_tree import (
     UI_CANCEL, UI_DEFAULT, UINode, ui_button, ui_buttons, ui_check,
-    ui_dialog, ui_form, ui_row, ui_text, ui_vstack,
+    ui_dialog, ui_form, ui_label, ui_row, ui_table, ui_text, ui_vstack,
 )
 from turbokod.window import Window
 from support import _SCREEN, setup_test_env
@@ -158,6 +158,34 @@ def test_breakpoint_dialog_end_to_end_through_the_grid() raises:
     assert_equal(d.breakpoint_menu.condition, String("x"))
     assert_equal(d.breakpoint_menu.result().condition, String("x"))
 
+
+
+def test_scrolled_table_paints_the_rows_in_view() raises:
+    """A table scrolled to a selection far down paints the rows around it
+    — not the first rows with the highlight moved onto one of them."""
+    var rows = List[List[String]]()
+    for i in range(40):
+        rows.append([String("row") + String(i)])
+    var body = List[UINode]()
+    body.append(ui_table(String("t"), [String("Name")], rows^, 30, String(""), 5))
+    var root = ui_dialog(String("T"), String("cancel"), ui_vstack(body^))
+    var form = GridForm()
+    var c = _paint(form, root)
+    assert_true(_find(c, String("row30"))[1] >= 0)
+    assert_equal(_find(c, String("row0 "))[1], -1)
+
+
+def test_long_label_stays_inside_the_dialog() raises:
+    """A label wider than the screen is cut with an ellipsis rather than
+    painting over the dialog's border."""
+    var body = List[UINode]()
+    body.append(ui_label(String("x") * 300))
+    var root = ui_dialog(String("T"), String("cancel"), ui_vstack(body^))
+    var form = GridForm()
+    var c = _paint(form, root)
+    var at = _find(c, String("…"))
+    assert_true(at[1] >= 0)
+    assert_true(at[0] < form.frame().b.x - 1)
 
 def main() raises:
     setup_test_env()
