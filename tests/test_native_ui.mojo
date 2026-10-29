@@ -445,6 +445,26 @@ def test_a_look_changed_from_the_menu_survives_an_edit_in_settings() raises:
     assert_equal(d.config.native_ui, not was)
 
 
+def test_a_lower_window_limit_closes_documents_when_settings_closes() raises:
+    # Applied as typed, "12" over "20" was 1 first: every clean document
+    # but one closed
+    var d = Desktop()
+    for name in ["_cap_a.txt", "_cap_b.txt", "_cap_c.txt"]:
+        var path = _temp_path(String(name))
+        _ = write_file(path, String("x\n"))
+        d.open_file(path, _SCREEN)
+    _ = d.dispatch_action(APP_SETTINGS, _SCREEN)
+    d.ui_apply(String("settings"), [ui_set(String("max_open_windows"), String("1"))])
+    d.ui_apply(String("settings"), [ui_set(String("max_open_windows"), String("12"))])
+    assert_equal(len(d.windows.windows), 3)
+    d.ui_apply(String("settings"), [ui_set(String("max_open_windows"), String("2"))])
+    assert_equal(len(d.windows.windows), 3)
+    d.ui_apply(String("settings"), [ui_act(String("close"))])
+    assert_false(d.settings.active)
+    assert_equal(len(d.windows.windows), 2)
+    assert_equal(d.config.max_open_windows, 2)
+
+
 def test_settings_stay_in_grid_without_native_ui() raises:
     var d = Desktop()
     _ = d.dispatch_action(APP_SETTINGS, _SCREEN)

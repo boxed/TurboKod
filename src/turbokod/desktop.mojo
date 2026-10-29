@@ -8612,6 +8612,7 @@ struct Desktop(Movable):
             self._sync_settings()
             if self.settings.close_requested:
                 self.settings.close()
+                self._enforce_window_cap()
         elif name == String("project_settings") or name == String("action_editor"):
             self.project_settings.consume_editor()
             # Persist before a Close resets the working state.
@@ -12396,13 +12397,10 @@ struct Desktop(Movable):
                 self.config.smart_wrap_comma_threshold = new_comma
                 self._apply_view_config()
                 self._reveal_all_cursors()
-            # Max open windows. Lowering the cap takes effect immediately:
-            # close the least-recently-used clean documents down to the
-            # new limit.
-            var new_max = self.settings.max_open_windows_value()
-            if new_max != self.config.max_open_windows:
-                self.config.max_open_windows = new_max
-                self._enforce_window_cap()
+            # Max open windows. The documents over a lower cap close when
+            # Settings does: applied as typed, "12" over "20" was 1 first,
+            # and every clean document but one closed.
+            self.config.max_open_windows = self.settings.max_open_windows_value()
             self._persist_config()
             self._rebuild_lsp_specs()
             # Kick every running server to re-read its configuration — a
