@@ -18,7 +18,7 @@ from std.collections.list import List
 
 from .file_io import stat_file
 from .posix import user_config_path
-from .string_utils import shell_single_quote, string_list
+from .string_utils import shell_fetch, shell_move_into_place, shell_single_quote, string_list
 
 
 struct DownloadableGrammar(Copyable, Movable):
@@ -162,12 +162,12 @@ def user_grammar_path_for_ext(ext: String) -> String:
 def grammar_install_command(lang: String, url: String) -> String:
     """Shell command that mkdirs the per-language dir and curls the
     grammar JSON into it. Single ``sh -c`` line so ``InstallRunner``
-    runs it unchanged. ``set -e`` aborts on the first failure so a
-    half-fetched grammar is never left on disk masquerading as
-    installed; ``curl -f`` makes 4xx/5xx responses non-zero so we
+    runs it unchanged. The grammar goes in place only once it's all
+    there (see ``shell_fetch``), and ``set -e`` stops before that on a
+    failure, so a half-fetched one never masquerades as installed;
+    ``curl -f`` makes 4xx/5xx responses non-zero so we
     don't save a 404 HTML page as the grammar JSON."""
     var dir = user_grammar_dir(lang)
     var dest = user_grammar_path(lang)
     return String("set -e; mkdir -p ") + shell_single_quote(dir) + String("; ") \
-        + String("curl -fsSL -o ") + shell_single_quote(dest) + String(" ") \
-        + shell_single_quote(url)
+        + shell_fetch(dest, url) + String("; ") + shell_move_into_place(dest)

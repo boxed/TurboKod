@@ -22,7 +22,7 @@ Why DevDocs:
 
 from std.collections.list import List
 
-from .string_utils import shell_single_quote, string_list
+from .string_utils import shell_fetch, shell_move_into_place, shell_single_quote, string_list
 
 
 comptime DEVDOCS_BASE = String("https://documents.devdocs.io/")
@@ -152,9 +152,10 @@ def docs_install_command(slug: String, dest_dir: String) -> String:
     JSON files into it.
 
     Single ``sh -c`` line so the existing ``InstallRunner`` (which spawns
-    ``sh -c <cmd>``) can run it unchanged. ``set -e`` aborts on the first
-    failure so a half-fetched docset is never left on disk masquerading
-    as installed — the install runner sees a non-zero exit and surfaces
+    ``sh -c <cmd>``) can run it unchanged. Both files go in place only
+    once both are all there (see ``shell_fetch``), and ``set -e`` stops
+    before that on a failure, so a half-fetched docset is never left on
+    disk masquerading as installed — the install runner sees a non-zero exit and surfaces
     the captured curl output to the user instead of silently "succeeding".
     The two ``-f`` flags make curl exit non-zero on HTTP 4xx/5xx
     (otherwise it'd happily save a 404 HTML page as ``db.json``).
@@ -164,7 +165,7 @@ def docs_install_command(slug: String, dest_dir: String) -> String:
     var index_out = dest_dir + String("/index.json")
     var db_out    = dest_dir + String("/db.json")
     return String("set -e; mkdir -p ") + shell_single_quote(dest_dir) + String("; ") \
-        + String("curl -fsSL -o ") + shell_single_quote(index_out) + String(" ") \
-        + shell_single_quote(index_url) + String("; ") \
-        + String("curl -fsSL -o ") + shell_single_quote(db_out) + String(" ") \
-        + shell_single_quote(db_url)
+        + shell_fetch(index_out, index_url) + String("; ") \
+        + shell_fetch(db_out, db_url) + String("; ") \
+        + shell_move_into_place(index_out) + String("; ") \
+        + shell_move_into_place(db_out)

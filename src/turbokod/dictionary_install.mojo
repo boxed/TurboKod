@@ -27,7 +27,7 @@ from std.collections.list import List
 
 from .file_io import delete_path, list_directory, stat_file
 from .posix import user_config_path
-from .string_utils import shell_single_quote
+from .string_utils import shell_fetch, shell_move_into_place, shell_single_quote
 
 
 struct DownloadableDictionary(ImplicitlyCopyable, Movable):
@@ -156,15 +156,15 @@ def installed_dictionary_languages() -> List[String]:
 def dictionary_install_command(language_id: String, url: String) -> String:
     """Shell command that mkdirs the dictionaries dir and curls the
     wordlist into it. Single ``sh -c`` line so ``InstallRunner`` runs
-    it unchanged. ``set -e`` aborts on the first failure so a half-
-    fetched list is never left on disk; ``curl -f`` makes 4xx/5xx
+    it unchanged. The list goes in place only once it's all there (see
+    ``shell_fetch``), and ``set -e`` stops before that on a failure;
+    ``curl -f`` makes 4xx/5xx
     responses non-zero so we don't save a 404 HTML page as the
     wordlist."""
     var root = user_dictionaries_root()
     var dest = user_dictionary_path(language_id)
     return String("set -e; mkdir -p ") + shell_single_quote(root) + String("; ") \
-        + String("curl -fsSL -o ") + shell_single_quote(dest) + String(" ") \
-        + shell_single_quote(url)
+        + shell_fetch(dest, url) + String("; ") + shell_move_into_place(dest)
 
 
 def remove_user_dictionary(language_id: String) -> Bool:

@@ -304,6 +304,21 @@ def shell_escape_path(path: String) -> String:
     return String(StringSpan(unsafe_from_utf8=Span(out)))
 
 
+def shell_fetch(dest: String, url: String) -> String:
+    """``curl`` of ``url`` to ``dest.part``, for an ``sh -c`` line under
+    ``set -e``; ``shell_move_into_place(dest)`` finishes it. ``curl -o``
+    writes as the bytes arrive, so a download cut off halfway, written to
+    ``dest`` itself, was left there looking installed."""
+    return String("curl -fsSL -o ") + shell_single_quote(dest + String(".part")) \
+        + String(" ") + shell_single_quote(url)
+
+
+def shell_move_into_place(dest: String) -> String:
+    """The ``mv`` that puts ``shell_fetch``'s whole download at ``dest``."""
+    return String("mv -f ") + shell_single_quote(dest + String(".part")) \
+        + String(" ") + shell_single_quote(dest)
+
+
 def shell_single_quote(s: String) -> String:
     """Wrap ``s`` in single quotes for ``/bin/sh``, turning each embedded
     ``'`` into the standard ``'\\''`` close/escape/reopen sequence. Works on

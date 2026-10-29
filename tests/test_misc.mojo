@@ -28,8 +28,9 @@ from turbokod.text_select import PaneTextSelect
 from turbokod.project_targets import resolve_python_interpreter
 from turbokod.string_utils import (
     char_width, display_columns, escape_drop_paths, prev_codepoint_start,
-    string_list, tail_to_columns
+    shell_fetch, shell_move_into_place, string_list, tail_to_columns
 )
+from turbokod.lsp import capture_command
 from turbokod.type_ahead import is_printable_ascii, is_type_ahead_key
 from turbokod.lsp_dispatch import CompletionItem, TextEditEntry
 from turbokod.git_changes import (
@@ -1026,6 +1027,29 @@ def test_corrupt_config_is_not_clobbered_with_defaults() raises:
     assert_false(stat_file(path).ok)
 
     _ = delete_path(corrupt_glob)
+
+
+def test_a_download_is_in_place_only_once_it_is_whole() raises:
+    # ``curl -o`` writes as the bytes arrive: cut off, the grammar,
+    # wordlist or docset was left behind truncated, and counted installed
+    var dir = _temp_path(String("_fetch"))
+    _ = capture_command([String("rm"), String("-rf"), dir])
+    _ = capture_command([String("mkdir"), String("-p"), dir])
+    var src = dir + String("/src.txt")
+    assert_true(write_file(src, String("words\n")))
+    var dest = dir + String("/it's.txt")
+    var bad = capture_command([String("sh"), String("-c"),
+        String("set -e; ") + shell_fetch(dest, String("file://") + dir + String("/missing"))
+        + String("; ") + shell_move_into_place(dest)])
+    assert_true(Int(bad.status) != 0)
+    assert_false(stat_file(dest).ok)
+    var good = capture_command([String("sh"), String("-c"),
+        String("set -e; ") + shell_fetch(dest, String("file://") + src)
+        + String("; ") + shell_move_into_place(dest)])
+    assert_equal(Int(good.status), 0)
+    assert_equal(read_file(dest), String("words\n"))
+    assert_false(stat_file(dest + String(".part")).ok)
+    _ = capture_command([String("rm"), String("-rf"), dir])
 
 
 def test_merge_config_keeps_every_writers_change() raises:
