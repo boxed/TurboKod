@@ -15,10 +15,10 @@ from turbokod.colors import (
 from turbokod.editor import Editor
 from turbokod.lsp import LspProcess
 from turbokod.breakpoint_store import (
-    StoredBreakpoint, load_breakpoints, save_breakpoints
+    StoredBreakpoint, _bp_path, load_breakpoints, save_breakpoints
 )
 from turbokod.desktop import Desktop
-from turbokod.file_io import join_path, stat_file, write_file
+from turbokod.file_io import join_path, make_parent_dirs, stat_file, write_file
 from turbokod.project_targets import (
     ProjectTargets, RunTarget, pytest_python_files
 )
@@ -1873,6 +1873,25 @@ def test_breakpoint_store_round_trip() raises:
     assert_equal(loaded[2].line, 0)
     assert_false(loaded[2].enabled)
     assert_equal(loaded[2].wait_for, String("/etc/hosts:1"))
+    _ = external_call["system", Int32](
+        (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
+    )
+
+
+def test_a_bad_breakpoint_entry_is_skipped_not_the_rest() raises:
+    var root = String("/tmp/turbokod_bp_bad_entry")
+    var path = _bp_path(root)
+    make_parent_dirs(path)
+    assert_true(write_file(path, String(
+        '{"breakpoints": [3, {"path": ""}, {"path": "a.py"}, '
+        + '{"path": "a.py", "line": -1}, {"path": "b.py", "line": 4}]}'
+    )))
+    var loaded = load_breakpoints(root)
+    assert_equal(len(loaded), 1)
+    assert_equal(loaded[0].path, root + String("/b.py"))
+    assert_equal(loaded[0].line, 4)
+    # written before ``enabled`` existed: on
+    assert_true(loaded[0].enabled)
     _ = external_call["system", Int32](
         (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
     )

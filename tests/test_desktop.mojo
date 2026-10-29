@@ -15,7 +15,7 @@ from turbokod.session_store import (
     encode_session, load_session, save_session
 )
 from turbokod.view_state_store import (
-    StoredViewState, load_view_states, save_view_states
+    StoredViewState, _vs_path, load_view_states, save_view_states
 )
 from turbokod.drafts_store import StoredDraft, save_drafts
 from turbokod.desktop import (
@@ -27,8 +27,8 @@ from turbokod.desktop import (
     PROJECT_REPLACE, WINDOW_CLOSE_ALL, WINDOW_FOCUS_PREFIX
 )
 from turbokod.file_io import (
-    basename, delete_path, find_git_project, join_path, project_absolute,
-    project_relative, read_file, stat_file, write_file
+    basename, delete_path, find_git_project, join_path, make_parent_dirs,
+    project_absolute, project_relative, read_file, stat_file, write_file
 )
 from turbokod.editor import Editor, TextBuffer
 from turbokod.file_tree import FILE_TREE_WIDTH
@@ -2443,6 +2443,23 @@ def test_view_state_store_round_trip() raises:
     assert_equal(loaded[1].path, String("/etc/hosts"))
     assert_equal(loaded[1].cursor_row, 0)
     assert_equal(loaded[1].scroll_y, 0)
+    _ = external_call["system", Int32](
+        (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
+    )
+
+
+def test_a_bad_view_state_entry_is_skipped_not_the_rest() raises:
+    var root = _temp_path(String("_vs_bad_entry"))
+    var path = _vs_path(root)
+    make_parent_dirs(path)
+    assert_true(write_file(path, String(
+        '{"views": [3, {"path": ""}, {"path": "b.py", "cursor": [4, 2]}]}'
+    )))
+    var loaded = load_view_states(root)
+    assert_equal(len(loaded), 1)
+    assert_equal(loaded[0].path, root + String("/b.py"))
+    assert_equal(loaded[0].cursor_row, 4)
+    assert_equal(loaded[0].cursor_col, 2)
     _ = external_call["system", Int32](
         (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
     )
