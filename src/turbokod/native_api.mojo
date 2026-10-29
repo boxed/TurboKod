@@ -870,7 +870,7 @@ def tk_desktop_settings_close(h: Int) abi("C"):
     of ``tk_desktop_settings_active``)."""
     if h == 0:
         return
-    _desk(h)[].settings.close()
+    _desk(h)[].close_settings()
 
 
 @export

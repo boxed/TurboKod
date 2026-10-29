@@ -466,6 +466,13 @@ def test_a_lower_window_limit_closes_documents_when_settings_closes() raises:
     assert_false(d.settings.active)
     assert_equal(len(d.windows.windows), 2)
     assert_equal(d.config.max_open_windows, 2)
+    # the same through the window's own close button
+    _ = d.dispatch_action(APP_SETTINGS, _SCREEN)
+    d.ui_apply(String("settings"), [ui_set(String("max_open_windows"), String("1"))])
+    assert_equal(len(d.windows.windows), 2)
+    d.close_settings()
+    assert_false(d.settings.active)
+    assert_equal(len(d.windows.windows), 1)
 
 
 def _platinum_desktop(text: String) -> Desktop:

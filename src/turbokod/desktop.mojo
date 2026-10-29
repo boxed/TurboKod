@@ -8653,8 +8653,7 @@ struct Desktop(Movable):
             # Apply before a Close resets the working state.
             self._sync_settings()
             if self.settings.close_requested:
-                self.settings.close()
-                self._enforce_window_cap()
+                self.close_settings()
         elif name == String("project_settings") or name == String("action_editor"):
             self.project_settings.consume_editor()
             # Persist before a Close resets the working state.
@@ -12337,6 +12336,14 @@ struct Desktop(Movable):
             self.config.on_save_actions.copy(),
             self.project_on_save.copy(),
         )
+
+    def close_settings(mut self):
+        """Close Settings, by its Close button or its window's: what was
+        edited is applied first, and documents over a lowered window
+        limit close now (not while the number was being typed)."""
+        self._sync_settings()
+        self.settings.close()
+        self._enforce_window_cap()
 
     def _sync_settings(mut self):
         """Apply and persist Settings edits while it's open (each frame,
