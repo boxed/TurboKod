@@ -1583,6 +1583,33 @@ def test_on_save_action_reloads_buffer_when_action_rewrites_file() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
+def test_an_on_save_action_gets_a_file_name_with_quotes_intact() raises:
+    # The command was put together in bare single quotes: a ' in the
+    # saved file's name ended the quote, and the rest of the name ran
+    var dir = _temp_path(String("_onsave_quote"))
+    _ = external_call["system", Int32]((String("rm -rf '") + dir + String("'; mkdir -p '") + dir + String("'\0")).unsafe_ptr())
+    var path = dir + String("/x'; touch INJECTED; '.txt")
+    assert_true(write_file(path, String("hello\n")))
+    var d = Desktop()
+    d.windows.add(Window.from_file(String("x.txt"), Rect(0, 1, 40, 12), path))
+    _ = d.windows.windows[0].editor.handle_key(
+        Event.key_event(UInt32(ord("!"))), Rect(0, 1, 40, 12),
+    )
+    var args = List[String]()
+    args.append(String("-c"))
+    args.append(String("printf %s ok > \"$1\""))
+    args.append(String("sh"))
+    args.append(String("$FilePath$"))
+    d.project_on_save.append(OnSaveAction(String(""), String("/bin/sh"), args^, dir))
+    _ = d.dispatch_action(EDITOR_SAVE, _SCREEN)
+    var deadline = monotonic_ms() + 3000
+    while len(d.pending_save_actions) > 0 and monotonic_ms() < deadline:
+        d.save_actions_tick()
+    assert_equal(read_file(path), String("ok"))
+    assert_false(stat_file(dir + String("/INJECTED")).ok)
+    _ = external_call["system", Int32]((String("rm -rf '") + dir + String("'\0")).unsafe_ptr())
+
+
 def test_word_at_helper() raises:
     assert_equal(word_at(String("foo bar"), 0), String("foo"))
     assert_equal(word_at(String("foo bar"), 2), String("foo"))

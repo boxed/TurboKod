@@ -203,7 +203,7 @@ from .run_manager import RunSession, drain_run_output, poll_run_exit
 from .save_as_dialog import SaveAsDialog
 from .string_utils import (
     byte_slice, display_columns, parse_int_prefix, split_lines_no_trailing,
-    starts_with, utf8_cell_of_byte,
+    shell_single_quote, starts_with, utf8_cell_of_byte,
 )
 from .session_store import (
     Session, SessionWindow,
@@ -13889,11 +13889,14 @@ struct Desktop(Movable):
                 cwd = self.project.value()
             else:
                 cwd = parent_path(saved_path)
-        var cmd = String("cd '") + cwd + String("' && '") + act.program \
-            + String("'")
+        # Quoted properly: the saved file's name ends up in here, and a
+        # ``'`` in it ended the quote (``Dan's notes.md`` broke the command;
+        # a name made for it ran whatever followed)
+        var cmd = String("cd ") + shell_single_quote(cwd) + String(" && ") \
+            + shell_single_quote(act.program)
         for k in range(len(act.args)):
             var expanded = _expand_save_placeholders(act.args[k], saved_path)
-            cmd = cmd + String(" '") + expanded + String("'")
+            cmd = cmd + String(" ") + shell_single_quote(expanded)
         var argv = List[String]()
         argv.append(String("sh"))
         argv.append(String("-c"))
