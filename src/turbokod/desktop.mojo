@@ -164,7 +164,7 @@ from .debugger_config import (
     python_debugger_spec_for_venv, python_venv_has_debugpy,
 )
 from .menu import MENU_MARK_NONE, MENU_MARK_OPEN, Menu, MenuBar, MenuItem
-from .posix import monotonic_ms, sleep_ms, wall_clock_ms, which
+from .posix import debug_log_path, monotonic_ms, sleep_ms, wall_clock_ms, which
 from .project import replace_in_project, walk_project_files
 from .search_options import SearchOptions
 from .project_find import ProjectFind, project_find_files
@@ -11151,7 +11151,7 @@ struct Desktop(Movable):
         # Surfacing it here turns "click for details" into the gateway
         # to the full handshake transcript when the captured-stderr
         # snapshot below isn't enough.
-        lines.append(String("trace:    /tmp/turbokod-dap.log"))
+        lines.append(String("trace:    ") + debug_log_path(String("turbokod-dap.log")))
         # Captured stderr — the user-visible smoking gun when an
         # adapter dies mid-handshake. ``drain_stderr`` is destructive
         # at the OS level but ``DapManager`` keeps a 16 KB rolling

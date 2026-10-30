@@ -343,7 +343,7 @@ def main() raises:
             except e:
                 # Any uncaught raise lands here. Stamp the trace log
                 # AND the error_log so something is visible after exit
-                # whether the user looks at /tmp/turbokod-dap.log or
+                # whether the user looks at $TMPDIR/turbokod-dap.log or
                 # the post-stop print. We continue rather than break so
                 # a transient terminal hiccup (e.g. one bad cursor-size
                 # response) doesn't kill the whole session.

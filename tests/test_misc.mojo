@@ -31,6 +31,7 @@ from turbokod.string_utils import (
     shell_fetch, shell_move_into_place, string_list, tail_to_columns
 )
 from turbokod.lsp import capture_command
+from turbokod.posix import debug_log_path, getenv_value
 from turbokod.type_ahead import is_printable_ascii, is_type_ahead_key
 from turbokod.lsp_dispatch import CompletionItem, TextEditEntry
 from turbokod.git_changes import (
@@ -1050,6 +1051,17 @@ def test_a_download_is_in_place_only_once_it_is_whole() raises:
     assert_equal(read_file(dest), String("words\n"))
     assert_false(stat_file(dest + String(".part")).ok)
     _ = capture_command([String("rm"), String("-rf"), dir])
+
+
+def test_debug_logs_go_to_the_users_own_temp_folder() raises:
+    # A fixed name in the shared /tmp: another user's link there made the
+    # trace write over a file of ours
+    var path = debug_log_path(String("turbokod-dap.log"))
+    var tmp = getenv_value(String("TMPDIR"))
+    if tmp.byte_length() > 0:
+        assert_true(path.startswith(tmp.rstrip("/") + "/"))
+        assert_false("//" in path)
+    assert_true(path.endswith(String("/turbokod-dap.log")))
 
 
 def test_merge_config_keeps_every_writers_change() raises:

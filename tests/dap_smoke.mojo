@@ -15,7 +15,7 @@ editor uses, and ticks the manager until either:
 * the manager latches FAILED.
 
 Output is plain ``print()``s plus the streaming trace at
-``/tmp/turbokod-dap.log`` (DapManager's existing instrument). With
+``$TMPDIR/turbokod-dap.log`` (DapManager's existing instrument). With
 the UI removed there's no rendering or input loop to mask issues —
 anything we observe is purely the protocol layer's behavior.
 """
@@ -33,7 +33,7 @@ from turbokod.debugger_config import (
 from turbokod.desktop import Desktop, DEBUG_START_OR_CONTINUE
 from turbokod.file_io import write_file
 from turbokod.geometry import Rect
-from turbokod.posix import monotonic_ms
+from turbokod.posix import debug_log_path, monotonic_ms
 
 
 def _sleep_ms(ms: Int):
@@ -235,7 +235,7 @@ def main() raises:
         )
 
     mgr.shutdown()
-    print("done — see /tmp/turbokod-dap.log for the wire trace")
+    print("done — see", debug_log_path(String("turbokod-dap.log")), "for the wire trace")
     print("")
     print("=" * 60)
     print("Phase 2: drive Desktop.dap_tick end-to-end (UI path)")

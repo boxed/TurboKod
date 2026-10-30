@@ -38,7 +38,7 @@ from .json import (
 from std.ffi import external_call
 
 from .lsp import LspProcess
-from .posix import monotonic_ms, realpath, tcp_connect, which
+from .posix import debug_log_path, monotonic_ms, realpath, tcp_connect, which
 from .string_utils import starts_with, strip_trailing_newlines, utf8_suffix
 
 
@@ -863,7 +863,7 @@ struct DapManager(Copyable, Movable):
         # Open the streaming trace log right after spawn. ``creat``
         # truncates so the file is fresh per session. Errors yield -1,
         # which keeps tracing disabled — never load-bearing.
-        var trace_path = String("/tmp/turbokod-dap.log\0")
+        var trace_path = debug_log_path(String("turbokod-dap.log")) + String("\0")
         var tfd = external_call["creat", Int32](
             trace_path.unsafe_ptr(), Int32(0o644),
         )

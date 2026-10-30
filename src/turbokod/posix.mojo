@@ -319,8 +319,24 @@ def write_buffer(fd: Int32, mut buf: List[UInt8]):
     f.write_bytes(Span(buf))
 
 
+def debug_log_path(name: String) -> String:
+    """Where the debug and trace logs called ``name`` go: the user's own
+    temp folder (``$TMPDIR``, private to the user on macOS), ``/tmp``
+    without one. At a fixed name in the shared ``/tmp`` another user
+    could put a link there first, and the log would write over whatever
+    file of ours it pointed at."""
+    var tmp = getenv_value(String("TMPDIR"))
+    var n = tmp.byte_length()
+    while n > 0 and tmp.as_bytes()[n - 1] == 0x2F:
+        n -= 1
+    if n == 0:
+        return String("/tmp/") + name
+    return String(tmp[byte = 0 : n]) + String("/") + name
+
+
 def debug_log(msg: String):
-    """Append ``msg`` plus a newline to ``/tmp/turbokod_debug.log``.
+    """Append ``msg`` plus a newline to ``turbokod_debug.log`` in
+    ``debug_log_path``.
 
     Diagnostics-only and OFF by default: gated behind ``TURBOKOD_DEBUG``
     so the per-frame ``debug_log`` calls in the paint path don't fire an
@@ -340,7 +356,7 @@ def debug_log(msg: String):
     the two-arg form."""
     if len(getenv_value(String("TURBOKOD_DEBUG")).as_bytes()) == 0:
         return
-    var path = String("/tmp/turbokod_debug.log\0")
+    var path = debug_log_path(String("turbokod_debug.log")) + String("\0")
     var fd = external_call["tk_debug_log_open", Int32](
         path.unsafe_ptr(),
     )

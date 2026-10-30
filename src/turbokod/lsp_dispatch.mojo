@@ -38,7 +38,7 @@ from .lsp import (
     LspProcess, lsp_initialize_params,
 )
 from .posix import (
-    getcwd_path, getenv_value, monotonic_ms, realpath, sleep_ms, which,
+    debug_log_path, getcwd_path, getenv_value, monotonic_ms, realpath, sleep_ms, which,
 )
 from .string_utils import (
     hex_digit_value, percent_encode_uri_path, string_list, strip_trailing_newlines, utf8_prefix,
@@ -48,10 +48,10 @@ from .colors import Attr, BLACK, EDITOR_BG, WHITE
 
 
 def _lsp_debug_log(line: String):
-    """Append ``line`` (plus a trailing newline) to ``/tmp/turbokod-lsp.log``
-    when that file already exists, or when ``TURBOKOD_LSP_LOG`` is set.
-    No-op otherwise — ``touch /tmp/turbokod-lsp.log`` to enable, delete
-    the file to disable.
+    """Append ``line`` (plus a trailing newline) to ``turbokod-lsp.log`` in
+    ``debug_log_path`` (``$TMPDIR``) when that file already exists, or
+    when ``TURBOKOD_LSP_LOG`` is set. No-op otherwise — ``touch
+    "$TMPDIR/turbokod-lsp.log"`` to enable, delete the file to disable.
 
     Opens with ``O_APPEND`` and writes one line per call so cost stays
     O(line) regardless of how large the log has grown. The previous
@@ -59,7 +59,7 @@ def _lsp_debug_log(line: String):
     enabling debug logging on a busy LSP session would itself add
     multi-second latency to completion responses.
     """
-    var path = String("/tmp/turbokod-lsp.log")
+    var path = debug_log_path(String("turbokod-lsp.log"))
     var info = stat_file(path)
     if not info.ok \
             and len(getenv_value(String("TURBOKOD_LSP_LOG")).as_bytes()) == 0:
@@ -1691,10 +1691,11 @@ struct LspManager(Copyable, Movable):
             self.state = _STATE_FAILED
             self.failure_reason = String("spawn failed: ") + String(e)
             return
-        # Enable wire trace if /tmp/turbokod-lsp.log already exists (debug aid).
-        var trace_path_str = String("/tmp/turbokod-lsp-wire-") \
-            + language_id + String(".log")
-        var trace_info = stat_file(String("/tmp/turbokod-lsp.log"))
+        # Enable wire trace if turbokod-lsp.log already exists (debug aid).
+        var trace_path_str = debug_log_path(
+            String("turbokod-lsp-wire-") + language_id + String(".log"),
+        )
+        var trace_info = stat_file(debug_log_path(String("turbokod-lsp.log")))
         if trace_info.ok:
             var trace_path = trace_path_str + String("\0")
             var tfd = external_call["creat", Int32](
@@ -4630,11 +4631,12 @@ struct LspManager(Copyable, Movable):
         build_arr.append(json_str(String("-M")))
         build_arr.append(json_str(String("dirhtml")))
         build_arr.append(json_str(src_dir))
-        # Output dir under /tmp so we don't pollute the project tree
-        # with build artefacts. esbonio uses this for diagnostics, not
-        # for actually serving HTML.
-        var out_dir = String("/tmp/turbokod-esbonio-")
-        out_dir = out_dir + basename(src_dir) + String("-build")
+        # Output dir in the user's temp folder so we don't pollute the
+        # project tree with build artefacts. esbonio uses this for
+        # diagnostics, not for actually serving HTML.
+        var out_dir = debug_log_path(
+            String("turbokod-esbonio-") + basename(src_dir) + String("-build"),
+        )
         build_arr.append(json_str(out_dir))
         sphinx.put(String("buildCommand"), build_arr)
         var cfg = json_object()
