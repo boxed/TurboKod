@@ -32,8 +32,10 @@ from .vt import Vt
 
 
 struct GridSelection(Copyable, Movable):
-    """Mouse selection state over a ``Vt`` grid, in grid (row, col)
-    coordinates. Drives the inverted overlay during paint and the
+    """Mouse selection state over a ``Vt`` grid, in (row, col)
+    coordinates whose row is *absolute* — counted from the top of the
+    scrollback (``_view_top``), not from the viewport — so a selection
+    stays on its text while the view scrolls or new output pushes it up. Drives the inverted overlay during paint and the
     extracted text on copy. Cell / word / line drag modes mirror the
     editor's selection gestures. ``_last_body`` is the body rect from
     the last paint, used to map screen positions back to grid coords."""
@@ -146,25 +148,43 @@ struct GridSelection(Copyable, Movable):
         if sr1 < sr0 or (sr1 == sr0 and sc1 < sc0):
             var tmpr = sr0; sr0 = sr1; sr1 = tmpr
             var tmpc = sc0; sc0 = sc1; sc1 = tmpc
+        # Rows scrolled out of the view are only readable through the
+        # viewport, so scroll a (handle-aliasing) copy over them and put
+        # the view back where the user left it.
+        var v = vt
+        var orig_offset = v.view_offset()
+        var rows = v.rows()
         var out = String("")
         for r in range(sr0, sr1 + 1):
             var c_start = sc0 if r == sr0 else 0
-            var c_end   = sc1 if r == sr1 else vt.cols()
-            if c_end > vt.cols(): c_end = vt.cols()
+            var c_end   = sc1 if r == sr1 else v.cols()
+            if c_end > v.cols(): c_end = v.cols()
             if c_start < 0: c_start = 0
-            # View-aware so a selection made while scrolled back captures
-            # the historical text, not the live tail.
-            out += vt.row_text(r, c_start, c_end)
+            var vr = r - _view_top(v)
+            if vr < 0:
+                v.scroll_view_by(-vr)
+                vr = r - _view_top(v)
+            elif vr >= rows:
+                v.scroll_view_by(-(vr - rows + 1))
+                vr = r - _view_top(v)
+            if 0 <= vr and vr < rows:
+                out += v.row_text(vr, c_start, c_end)
             if r < sr1:
                 out = out + String("\n")
+        if v.view_offset() != orig_offset:
+            if orig_offset == 0:
+                v.reset_view()
+            else:
+                v.scroll_view_by(orig_offset - v.view_offset())
         return out^
 
     # --- screen→grid mapping -------------------------------------------
 
     def grid_xy_for_pos(self, vt: Vt, pos: Point) -> Tuple[Int, Int]:
-        """Convert a screen position to ``(row, col)`` in the VT grid.
-        Out-of-body positions clamp to the nearest edge — that's what
-        you want for a drag that left the body."""
+        """Convert a screen position to ``(row, col)`` in the VT grid,
+        the row absolute (see the struct docstring). Out-of-body positions
+        clamp to the nearest edge — that's what you want for a drag that
+        left the body."""
         if self._last_body.is_empty():
             return (0, 0)
         var r = pos.y - self._last_body.a.y
@@ -175,7 +195,7 @@ struct GridSelection(Copyable, Movable):
         if r >= rows: r = rows - 1
         if c < 0: c = 0
         if c > cols: c = cols
-        return (r, c)
+        return (r + _view_top(vt), c)
 
     # --- drag ----------------------------------------------------------
 
@@ -243,11 +263,17 @@ struct GridSelection(Copyable, Movable):
             return
         self.sel_active = True
 
-    def _word_bounds_at(self, vt: Vt, r: Int, c_in: Int) -> Tuple[Int, Int]:
+    def _word_bounds_at(
+        self, vt: Vt, r_abs: Int, c_in: Int,
+    ) -> Tuple[Int, Int]:
         """``(lo, hi)`` of the word-class run around column ``c_in`` on
         row ``r`` — ``lo`` inclusive, ``hi`` exclusive. A separator cell
-        returns just that single cell."""
+        returns just that single cell. ``r_abs`` is absolute and must be
+        in the view (it's the row under the pointer)."""
         var grid = vt.grid()
+        var r = r_abs - _view_top(vt)
+        if r < 0 or r >= grid.rows:
+            return (c_in, c_in + 1)
         var c = c_in
         if c >= grid.cols: c = grid.cols - 1
         if c < 0: c = 0
@@ -374,12 +400,13 @@ def paint_grid(
     Reads the viewport — scrollback included when the user has scrolled
     up — from one snapshot, so a frame costs one pass over the cells."""
     var grid = vt.grid()
+    var top = _view_top(vt)
     for r in range(grid.rows):
         for c in range(grid.cols):
             var cell = grid.cell(r, c)
             # Selection overlay: invert the selected cells — the same
             # affordance every terminal uses (xterm, iTerm, alacritty).
-            if sel.cell_in_selection(r, c):
+            if sel.cell_in_selection(top + r, c):
                 cell.attr = _invert_attr(cell.attr)
             painter.set(canvas, body.a.x + c, body.a.y + r, cell)
     # Cursor caret: reverse-video block over the cursor cell when the
@@ -399,6 +426,12 @@ def paint_grid(
 
 
 # --- visual helpers -------------------------------------------------------
+
+
+def _view_top(vt: Vt) -> Int:
+    """Absolute row (counted from the top of the scrollback) of the
+    viewport's first row — what ``GridSelection`` adds to a view row."""
+    return vt.scrollback_rows() - vt.view_offset()
 
 
 def _is_word_glyph(glyph: String) -> Bool:

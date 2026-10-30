@@ -163,6 +163,41 @@ def test_terminal_triple_click_drag_extends_by_line() raises:
     assert_equal(pane.selected_text(), String("row zero\nrow one\nrow two"))
 
 
+def test_terminal_selection_follows_text_when_scrolled() raises:
+    """The selection is anchored to its text, not to screen rows: after
+    the view scrolls, the same text is highlighted (now lower down) and
+    copied — even once it has scrolled out of the view entirely, and
+    copying leaves the view where the user put it."""
+    var text = String("")
+    for i in range(60):
+        text += String("line ") + String(i) + String("\r\n")
+    var pane = _terminal_pane_with_text(text)
+    var panel = Rect(Point(0, 0), Point(80, 25))
+    # Triple-click the top visible row.
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(2, 1), MOUSE_BUTTON_LEFT, True, False,
+                          MOD_NONE, 3), panel,
+    )
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(2, 1), MOUSE_BUTTON_LEFT, False, False),
+        panel,
+    )
+    var before = pane.selected_text()
+    assert_equal(before, pane.vt.row_text(0))
+    pane.vt.scroll_view_by(5)
+    var top = pane.vt.scrollback_rows() - pane.vt.view_offset()
+    assert_true(pane.sel.cell_in_selection(top + 5, 0))
+    assert_false(pane.sel.cell_in_selection(top, 0))
+    assert_equal(pane.vt.row_text(5), before)
+    assert_equal(pane.selected_text(), before)
+    # Back to the live tail and past: the selected row is above the view.
+    pane.vt.reset_view()
+    pane.vt.feed_string(String("more\r\n") * 30)
+    pane.vt.scroll_view_by(2)
+    assert_equal(pane.selected_text(), before)
+    assert_equal(pane.vt.view_offset(), 2)
+
+
 def test_terminal_parses_modified_arrows() raises:
     """The CSI ``ESC[1;<mod><letter>`` form gives us shift/ctrl on arrows."""
     var shift_right = parse_input(String("\x1b[1;2C"))
