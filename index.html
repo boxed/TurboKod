@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-look="retro">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -38,6 +38,7 @@
 
   body {
     /* the "desk" the magazine lies on */
+    margin: 0;
     background-color: #15110c;
     background-image:
       radial-gradient(120% 80% at 50% -10%, #3a3024 0%, #211a12 45%, #110d09 100%);
@@ -328,21 +329,269 @@
   }
   .service a { color: var(--accent); text-decoration: none; }
   .service a:hover { text-decoration: underline; }
+
+  /* ─────────────────────────────────────────────────────────────────
+     Three looks, one page each, switched by the tabs at the top (and
+     the URL hash: #retro, #macos, #macos9). <html data-look> picks
+     the page and restyles the body and the tab strip to match.
+     ───────────────────────────────────────────────────────────────── */
+  [data-look-page] { display: none; }
+  html[data-look="retro"]  [data-look-page="retro"],
+  html[data-look="macos"]  [data-look-page="macos"],
+  html[data-look="macos9"] [data-look-page="macos9"] { display: block; }
+
+  html[data-look="macos"] body {
+    background: #fbfbfd; color: #1d1d1f;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    padding: 28px 0 0;
+  }
+  html[data-look="macos9"] body {
+    /* the Mac OS 9 desktop: a blue-violet dither */
+    background-color: #6b6bb3;
+    background-image:
+      repeating-linear-gradient(45deg, rgba(255,255,255,.07) 0 1px, transparent 1px 3px),
+      repeating-linear-gradient(-45deg, rgba(0,0,40,.10) 0 1px, transparent 1px 3px);
+    color: #000;
+    font-family: Geneva, "Lucida Grande", Verdana, sans-serif;
+    padding: 24px 16px 56px;
+  }
+
+  /* ── the look tabs ─────────────────────────────────────────────── */
+  .looks {
+    display: flex; justify-content: center; gap: 10px;
+    max-width: 820px; margin: 0 auto 26px;
+  }
+  .looks a { text-decoration: none; white-space: nowrap; }
+  .looks a:focus-visible { outline: 2px solid #f0c040; outline-offset: 3px; }
+
+  /* retro: Turbo Vision buttons on the desk, green with a hard shadow */
+  html[data-look="retro"] .looks a {
+    font: 16px/24px "Turbokod VGA", "Courier New", monospace;
+    -webkit-font-smoothing: none;
+    padding: 0 12px;
+    background: #00a800; color: #000;
+    box-shadow: 8px 8px 0 #000;
+  }
+  html[data-look="retro"] .looks a[aria-selected="true"] {
+    background: #55ffff; color: #000;
+  }
+  html[data-look="retro"] .looks a:hover { color: #fff; }
+
+  /* macOS: a segmented control */
+  html[data-look="macos"] .looks {
+    width: max-content; gap: 0; padding: 2px; border-radius: 9px;
+    background: rgba(118,118,128,.12);
+  }
+  html[data-look="macos"] .looks a {
+    font: 500 13px/1 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    color: #1d1d1f; padding: 7px 16px; border-radius: 7px;
+  }
+  html[data-look="macos"] .looks a[aria-selected="true"] {
+    background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.14), 0 0 0 .5px rgba(0,0,0,.06);
+  }
+
+  /* Mac OS 9: Platinum tabs */
+  html[data-look="macos9"] .looks { gap: 2px; margin-bottom: 18px; }
+  html[data-look="macos9"] .looks a {
+    font: bold 12px/1 Charcoal, Silom, Chicago, Geneva, Verdana, sans-serif;
+    color: #000; padding: 6px 14px 5px;
+    background: #bbb;
+    border: 1px solid #555; border-bottom-color: #000;
+    border-radius: 5px 5px 0 0;
+    box-shadow: inset 1px 1px 0 #fff, inset -1px 0 0 #888;
+  }
+  html[data-look="macos9"] .looks a[aria-selected="true"] { background: #e3e3e3; }
+
+  /* ── macOS page ───────────────────────────────────────────────── */
+  .m { --m-ink: #1d1d1f; --m-ink2: #6e6e73; --m-blue: #0071e3; --m-card: #fff; }
+  .m-hero { text-align: center; padding: 34px 22px 0; }
+  .m-eyebrow { font-size: 21px; font-weight: 600; color: var(--m-ink2); margin: 0 0 6px; }
+  .m h1 {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
+    font-size: 64px; line-height: 1.05; font-weight: 700; letter-spacing: -.02em;
+    margin: 0 0 18px; color: var(--m-ink);
+  }
+  @media (max-width: 640px) { .m h1 { font-size: 40px; } }
+  .m h1 .grad {
+    background: linear-gradient(90deg, #0a84ff, #5e5ce6 45%, #bf5af2);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .m-sub { font-size: 21px; line-height: 1.38; color: var(--m-ink2); max-width: 30em; margin: 0 auto 26px; }
+  @media (max-width: 640px) { .m-sub { font-size: 18px; } }
+  .m-cta { display: flex; justify-content: center; align-items: center; gap: 26px; flex-wrap: wrap; }
+  .m-pill {
+    background: var(--m-blue); color: #fff; text-decoration: none;
+    font-size: 17px; padding: 11px 22px; border-radius: 980px;
+  }
+  .m-pill:hover { background: #0077ed; }
+  .m-link { color: #0066cc; text-decoration: none; font-size: 17px; }
+  .m-link:hover { text-decoration: underline; }
+  .m-req { font-size: 13px; color: var(--m-ink2); margin: 16px 0 40px; }
+  .m-shot { max-width: 1100px; margin: 0 auto; padding: 0 22px; }
+  .m-shot a, .m-pair a { display: block; line-height: 0; }
+  .m-shot img {
+    width: 100%; height: auto; border-radius: 12px;
+    box-shadow: 0 40px 80px -24px rgba(0,0,0,.35), 0 0 0 .5px rgba(0,0,0,.12);
+  }
+  .m-cap { text-align: center; font-size: 14px; color: var(--m-ink2); margin: 22px 22px 0; }
+
+  .m-section { max-width: 1020px; margin: 0 auto; padding: 96px 22px 0; }
+  .m-section > h2 {
+    font-size: 48px; line-height: 1.08; font-weight: 700; letter-spacing: -.015em;
+    text-align: center; margin: 0 0 14px;
+  }
+  @media (max-width: 640px) { .m-section > h2 { font-size: 32px; } }
+  .m-section > p.m-lede { text-align: center; font-size: 19px; color: var(--m-ink2); max-width: 34em; margin: 0 auto 40px; }
+  .m-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+  @media (max-width: 860px) { .m-grid { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 560px) { .m-grid { grid-template-columns: 1fr; } }
+  .m-card {
+    background: var(--m-card); border-radius: 18px; padding: 28px 26px 26px;
+    box-shadow: 0 2px 12px rgba(0,0,0,.06);
+  }
+  .m-card .m-icon {
+    width: 40px; height: 40px; border-radius: 10px; margin-bottom: 16px;
+    display: grid; place-items: center; color: #fff; font-size: 20px; line-height: 1;
+  }
+  .m-card h3 { font-size: 21px; line-height: 1.2; margin: 0 0 8px; font-weight: 600; }
+  .m-card p { font-size: 15px; line-height: 1.47; color: var(--m-ink2); margin: 0; }
+  .m-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; align-items: start; }
+  @media (max-width: 640px) { .m-pair { grid-template-columns: 1fr; } }
+  .m-pair figure { margin: 0; }
+  .m-pair img {
+    width: 100%; height: auto; border-radius: 10px;
+    box-shadow: 0 20px 40px -18px rgba(0,0,0,.3), 0 0 0 .5px rgba(0,0,0,.1);
+  }
+  .m-pair figcaption { font-size: 14px; color: var(--m-ink2); text-align: center; margin-top: 14px; }
+  .m-get { text-align: center; }
+  .m-get .m-cta { margin-top: 8px; }
+  .m-term {
+    max-width: 560px; margin: 34px auto 0; text-align: left;
+    background: #1d1d1f; color: #f5f5f7; border-radius: 12px; padding: 16px 20px;
+    font: 13px/1.6 ui-monospace, "SF Mono", Menlo, monospace; overflow-x: auto;
+  }
+  .m-term .cm { color: #8e8e93; }
+  .m-term .pr { color: #30d158; }
+  .m-foot {
+    max-width: 1020px; margin: 96px auto 0; padding: 18px 22px 40px;
+    border-top: 1px solid #d2d2d7; font-size: 12px; line-height: 1.5; color: #6e6e73;
+  }
+  .m-foot a { color: #424245; }
+
+  /* ── Mac OS 9 page: the whole page is a Platinum window ───────── */
+  .p { max-width: 880px; margin: 0 auto; }
+  .p-win {
+    background: #e3e3e3;
+    border: 1px solid #000;
+    box-shadow: inset 1px 1px 0 #fff, inset -1px -1px 0 #888, 2px 2px 0 rgba(0,0,0,.45);
+    padding: 0 6px 6px;
+  }
+  .p-title {
+    position: relative; height: 22px; display: flex; align-items: center;
+    /* pinstripes */
+    background: repeating-linear-gradient(180deg, #e3e3e3 0 1px, #bbb 1px 2px);
+    background-clip: content-box; padding: 5px 0 4px; box-sizing: border-box;
+  }
+  .p-title .p-name {
+    margin: 0 auto; background: #e3e3e3; padding: 0 8px;
+    font: bold 12px/13px Charcoal, Silom, Chicago, Geneva, Verdana, sans-serif;
+  }
+  .p-box {
+    position: absolute; top: 5px; width: 11px; height: 11px; box-sizing: border-box;
+    background: #e3e3e3; border: 1px solid #000;
+    box-shadow: inset 1px 1px 0 #fff, inset -1px -1px 0 #888, 0 0 0 1px #e3e3e3;
+  }
+  .p-box.close { left: 6px; }
+  .p-box.zoom { right: 24px; }
+  .p-box.zoom::after { content: ""; position: absolute; left: 1px; top: 1px; width: 5px; height: 5px; border: 1px solid #000; border-width: 0 1px 1px 0; }
+  .p-box.collapse { right: 6px; }
+  .p-box.collapse::after { content: ""; position: absolute; left: 1px; right: 1px; top: 4px; height: 2px; border-top: 1px solid #000; border-bottom: 1px solid #000; box-sizing: border-box; }
+  .p-pane {
+    background: #fff; border: 1px solid #000;
+    box-shadow: -1px -1px 0 #888, 1px 1px 0 #fff;
+    padding: 30px 34px 26px;
+  }
+  @media (max-width: 640px) { .p-pane { padding: 20px 16px 18px; } }
+  .p-chicago { font-family: Charcoal, Silom, Chicago, Geneva, Verdana, sans-serif; font-weight: bold; }
+  .p-head { display: flex; align-items: center; gap: 18px; margin-bottom: 6px; }
+  .p-head img { width: 64px; height: 64px; image-rendering: pixelated; }
+  .p h1 { font: bold 40px/1.05 Charcoal, Silom, Chicago, Geneva, Verdana, sans-serif; margin: 0; letter-spacing: -.01em; }
+  @media (max-width: 640px) { .p h1 { font-size: 28px; } }
+  .p h1 small { display: block; font-size: 15px; font-weight: normal; font-family: Geneva, Verdana, sans-serif; color: #444; margin-top: 6px; letter-spacing: 0; }
+  .p-tagline { font-size: 15px; line-height: 1.5; margin: 18px 0 22px; max-width: 46em; }
+  .p-well {
+    border: 1px solid; border-color: #888 #fff #fff #888;
+    box-shadow: inset 1px 1px 0 #555; padding: 1px; background: #fff;
+  }
+  .p-well a { display: block; line-height: 0; }
+  .p-well img { width: 100%; height: auto; display: block; }
+  .p-cap { font-size: 11px; color: #444; margin: 8px 2px 0; text-align: center; }
+  .p-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 26px; margin-top: 30px; }
+  @media (max-width: 640px) { .p-cols { grid-template-columns: 1fr; } }
+  .p-group {
+    position: relative; border: 1px solid #888; box-shadow: 1px 1px 0 #fff, inset 1px 1px 0 #fff;
+    padding: 18px 16px 12px; margin-top: 8px;
+  }
+  .p-group > .p-legend {
+    position: absolute; top: -9px; left: 10px; background: #fff; padding: 0 5px;
+    font: bold 12px/16px Charcoal, Silom, Chicago, Geneva, Verdana, sans-serif;
+  }
+  .p-group p, .p-group li { font-size: 13px; line-height: 1.5; }
+  .p-group p { margin: 0 0 .7em; }
+  .p-group ul { margin: 0; padding: 0; list-style: none; }
+  .p-group li { padding-left: 18px; position: relative; margin-bottom: .45em; }
+  .p-group li::before {
+    content: ""; position: absolute; left: 2px; top: .45em; width: 7px; height: 7px;
+    background: #6666cc; border: 1px solid #000; transform: rotate(45deg);
+  }
+  .p-plates { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; margin-top: 30px; align-items: start; }
+  @media (max-width: 640px) { .p-plates { grid-template-columns: 1fr; } }
+  .p-plates figure { margin: 0; }
+  .p-btns { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin: 6px 0 10px; }
+  .p-btn {
+    display: inline-block; text-decoration: none; color: #000;
+    font: bold 12px/18px Charcoal, Silom, Chicago, Geneva, Verdana, sans-serif;
+    padding: 0 16px; min-width: 70px; text-align: center;
+    background: #ddd; border: 1px solid #000; border-radius: 4px;
+    box-shadow: inset 1px 1px 0 #fff, inset -1px -1px 0 #888;
+  }
+  .p-btn:active { background: #999; box-shadow: inset 1px 1px 0 #555, inset -1px -1px 0 #bbb; }
+  .p-btn.default { box-shadow: inset 1px 1px 0 #fff, inset -1px -1px 0 #888, 0 0 0 1px #e3e3e3, 0 0 0 3px #555, 0 0 0 4px #000; border-radius: 4px; margin: 4px; }
+  .p-mono {
+    margin-top: 12px; padding: 8px 10px; background: #fff; border: 1px solid #888;
+    font: 12px/1.5 Monaco, Menlo, monospace; overflow-x: auto; white-space: pre;
+  }
+  .p-status {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    font-size: 11px; padding: 5px 4px 0; color: #000;
+  }
+  .p-grow { width: 13px; height: 13px; position: relative; flex-shrink: 0; }
+  .p-grow::before, .p-grow::after { content: ""; position: absolute; border: 1px solid #000; background: #e3e3e3; }
+  .p-grow::before { left: 0; top: 0; width: 7px; height: 7px; }
+  .p-grow::after { right: 0; bottom: 0; width: 7px; height: 7px; }
+  .p-fine { font-size: 10px; line-height: 1.5; color: #333; margin: 24px 0 0; text-align: center; }
+  .p-fine a, .p-group a { color: #00c; }
 </style>
 </head>
 <body>
 
-<article class="page">
+<nav class="looks" role="tablist" aria-label="Look">
+  <a role="tab" href="#retro" data-look="retro" aria-selected="true">Retro</a>
+  <a role="tab" href="#macos" data-look="macos" aria-selected="false">Modern macOS</a>
+  <a role="tab" href="#macos9" data-look="macos9" aria-selected="false">Mac OS 9</a>
+</nav>
+
+<article class="page" data-look-page="retro">
 
   <p class="slug">Advertisement &nbsp;&middot;&nbsp; The Programmer's Magazine &nbsp;&middot;&nbsp; Vol. I No. 1</p>
 
   <!-- ─────────────── HERO PRODUCT PHOTO ─────────────── -->
   <figure class="hero">
     <a href="screenshot.png" target="_blank" rel="noopener" title="View full-size screenshot">
-      <img class="photo" src="screenshot.png" width="2532" height="2102"
-           alt="Turbokod editing its own Mojo source in two cascaded windows, file tree docked on the right, a debug session paused at a breakpoint in the test suite, with output and stack panes below.">
+      <img class="photo" src="screenshot.png" width="2000" height="1280"
+           alt="Turbokod paused at a breakpoint in a Python project, with the file tree docked on the right and the stack, locals and output panes below.">
     </a>
-    <figcaption>The Turbokod workspace &mdash; two cascaded editors, a docked file tree, and a live debug session paused at a breakpoint. <em>Actual screen.</em></figcaption>
+    <figcaption>The Turbokod workspace &mdash; an editor, a docked file tree, and a live debug session paused at a breakpoint. <em>Actual screen.</em></figcaption>
   </figure>
 
   <!-- ─────────────── HEADLINE ─────────────── -->
@@ -370,6 +619,11 @@
     <span class="sc">DAP</span>, spell checking, project-wide find and replace,
     a file tree, git blame and gutter, soft wrap, a tab bar, undo and
     redo, and <span class="sc">editorconfig</span> support.</p>
+
+    <p>Not a 1992 fan? On the Mac it also comes dressed as a
+    <a href="#macos">modern macOS application</a>, or in the
+    <a href="#macos9">Mac&nbsp;OS&nbsp;9</a> Platinum of 1999. The tabs at the
+    top of this page show all three.</p>
 
     <p class="runhead">It runs anywhere you do.</p>
 
@@ -408,13 +662,13 @@
   <div class="plates">
     <figure>
       <a href="docs/screenshots/theme-dracula.png" target="_blank" rel="noopener" title="View full-size screenshot">
-        <img src="docs/screenshots/theme-dracula.png" width="2532" height="2102" alt="Turbokod in the Dracula theme">
+        <img src="docs/screenshots/theme-dracula.png" width="3424" height="1856" alt="Turbokod in the Dracula theme">
       </a>
       <figcaption>Fig. 1 &mdash; the <b>Dracula</b> theme.</figcaption>
     </figure>
     <figure>
       <a href="docs/screenshots/theme-solarized-light.png" target="_blank" rel="noopener" title="View full-size screenshot">
-        <img src="docs/screenshots/theme-solarized-light.png" width="2532" height="2102" alt="Turbokod in the Solarized Light theme">
+        <img src="docs/screenshots/theme-solarized-light.png" width="3424" height="1856" alt="Turbokod in the Solarized Light theme">
       </a>
       <figcaption>Fig. 2 &mdash; <b>Solarized Light</b>, for daytime work.</figcaption>
     </figure>
@@ -464,6 +718,254 @@
   </p>
 
 </article>
+
+<!-- ═════════════════════════ MODERN macOS ═════════════════════════ -->
+<main class="m" data-look-page="macos">
+  <section class="m-hero">
+    <p class="m-eyebrow">Turbokod for Mac</p>
+    <h1>A serious IDE.<br><span class="grad">Right at home on your Mac.</span></h1>
+    <p class="m-sub">Native tabs, real sheets and the menu bar you already know,
+    over a fast core that edits, navigates, debugs and commits.
+    Free and open source.</p>
+    <div class="m-cta">
+      <a class="m-pill" href="https://github.com/boxed/TurboKod/releases/latest/download/TurboKod-macos-arm64.zip">Download</a>
+      <a class="m-link" href="https://github.com/boxed/TurboKod">View on GitHub &rsaquo;</a>
+    </div>
+    <p class="m-req">Apple silicon. macOS&nbsp;11 or later.</p>
+  </section>
+  <figure class="m-shot">
+    <a href="docs/screenshots/look-macos.png" target="_blank" rel="noopener" title="View full-size screenshot">
+      <img src="docs/screenshots/look-macos.png" width="2000" height="1336"
+           alt="Turbokod in the modern macOS look: a Python file in a native tab, paused at a breakpoint, with the call stack and variables in native tables below and the file tree on the right.">
+    </a>
+    <figcaption class="m-cap">Paused at a breakpoint, with the stack and variables in native tables. One Dark theme.</figcaption>
+  </figure>
+
+  <section class="m-section">
+    <h2>Everything you reach for.<br>Nothing in the way.</h2>
+    <p class="m-lede">No plug-ins to keep current, no sign-in, no splash screen.
+    Open a folder and start working.</p>
+    <div class="m-grid">
+      <div class="m-card">
+        <div class="m-icon" style="background:#0a84ff">&#9636;</div>
+        <h3>Native where it counts</h3>
+        <p>Dialogs are real sheets, files open in a native tab strip, and every
+        command lives in the menu bar. Quick Open, Find Symbol and Find in
+        Project share one fast picker.</p>
+      </div>
+      <div class="m-card">
+        <div class="m-icon" style="background:#5e5ce6">{}</div>
+        <h3>Knows your code</h3>
+        <p>Completion, go to definition, references, rename and diagnostics
+        from your language servers. Find Symbol answers from a project-wide
+        index in about a millisecond per keystroke.</p>
+      </div>
+      <div class="m-card">
+        <div class="m-icon" style="background:#ff375f">&#9679;</div>
+        <h3>Debug in place</h3>
+        <p>Run and debug targets per project. Click the gutter for a
+        breakpoint, then step through with the stack and variables beside
+        your code.</p>
+      </div>
+      <div class="m-card">
+        <div class="m-icon" style="background:#30d158">&#8593;</div>
+        <h3>Git, built in</h3>
+        <p>Branch and uncommitted changes in the status bar, a full view for
+        staging, committing and pushing, plus blame and change markers in the
+        gutter.</p>
+      </div>
+      <div class="m-card">
+        <div class="m-icon" style="background:#1d1d1f">&gt;_</div>
+        <h3>A real terminal</h3>
+        <p>The terminal pane runs a real shell on Ghostty's terminal engine.
+        Tests run there too, and a click on a traceback line takes you to
+        it.</p>
+      </div>
+      <div class="m-card">
+        <div class="m-icon" style="background:#ff9f0a">&#9707;</div>
+        <h3>Two screens, one setup</h3>
+        <p>Float the tool panels into a window of their own on a second
+        display. Turbokod remembers the layout for each display setup, and
+        docks them again when you unplug.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="m-section">
+    <h2>Light, dark, and a dozen more.</h2>
+    <p class="m-lede">A theme retints the code and the chrome together, live,
+    from Settings.</p>
+    <div class="m-pair">
+      <figure>
+        <a href="docs/screenshots/look-macos-light.png" target="_blank" rel="noopener" title="View full-size screenshot">
+          <img src="docs/screenshots/look-macos-light.png" width="2000" height="1336" alt="The same project in the GitHub Light theme.">
+        </a>
+        <figcaption>GitHub Light.</figcaption>
+      </figure>
+      <figure>
+        <a href="docs/screenshots/look-macos-settings.png" target="_blank" rel="noopener" title="View full-size screenshot">
+          <img src="docs/screenshots/look-macos-settings.png" width="1124" height="892" alt="The Settings window with native tabs and controls.">
+        </a>
+        <figcaption>Settings, in a window of its own.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="m-section m-get">
+    <h2>Get Turbokod.</h2>
+    <p class="m-lede">Free, open source, MIT licensed. Prefer it in your
+    terminal, or over SSH? The same editor runs there too.</p>
+    <div class="m-cta">
+      <a class="m-pill" href="https://github.com/boxed/TurboKod/releases/latest/download/TurboKod-macos-arm64.zip">Download for Mac</a>
+      <a class="m-link" href="https://github.com/boxed/TurboKod#quickstart">Read the Quickstart &rsaquo;</a>
+      <a class="m-link" href="https://github.com/boxed/TurboKod/releases/latest">Release notes &rsaquo;</a>
+    </div>
+    <div class="m-term">
+<span class="cm"># in your terminal</span><br>
+<span class="pr">$</span> ./run.sh examples/desktop.mojo path/to/project<br>
+<span class="cm"># or build the Mac app and open a project</span><br>
+<span class="pr">$</span> ./run_swift.sh /path/to/project
+    </div>
+  </section>
+
+  <footer class="m-foot">
+    Turbokod is a Mojo port of Turbo&nbsp;Vision, based on
+    <a href="https://github.com/magiblot/tvision">magiblot/tvision</a>, and is
+    MIT licensed. An independent project, not affiliated with Apple. Mac and
+    macOS are trademarks of Apple&nbsp;Inc. Prefer it retro? See the
+    <a href="#retro">1992 edition</a> or <a href="#macos9">Mac&nbsp;OS&nbsp;9</a>.
+  </footer>
+</main>
+
+<!-- ═════════════════════════ MAC OS 9 ═════════════════════════ -->
+<div class="p" data-look-page="macos9">
+  <div class="p-win">
+    <div class="p-title">
+      <span class="p-box close" aria-hidden="true"></span>
+      <span class="p-name">Turbokod</span>
+      <span class="p-box zoom" aria-hidden="true"></span>
+      <span class="p-box collapse" aria-hidden="true"></span>
+    </div>
+    <div class="p-pane">
+      <div class="p-head">
+        <img src="icon_base.png" alt="">
+        <h1>It&rsquo;s Platinum.<small>Turbokod, in the Mac OS 9 look.</small></h1>
+      </div>
+      <p class="p-tagline">Remember when a window had a collapse box, a scroll
+      bar had a lavender thumb, and the default button wore a ring? Choose
+      <b>View &#9656; Mac OS 9-style UI</b> and Turbokod does too:
+      Platinum windows, tabs, scroll bar, status bar and dialogs, with
+      <span class="p-chicago">Chicago</span> in the editor. Underneath it is the
+      same modern IDE.</p>
+
+      <div class="p-well">
+        <a href="docs/screenshots/look-macos9.png" target="_blank" rel="noopener" title="View full-size screenshot">
+          <img src="docs/screenshots/look-macos9.png" width="2000" height="1336"
+               alt="Turbokod in the Mac OS 9 look: a Platinum window with tabs, a Python file in Chicago paused at a breakpoint, a Platinum scroll bar and grow box, and the debugger below.">
+        </a>
+      </div>
+      <p class="p-cap">Fig. 1: paused at a breakpoint. Chicago 12 on GitHub Light.</p>
+
+      <div class="p-cols">
+        <div class="p-group">
+          <span class="p-legend">Drawn, not skinned</span>
+          <p>Mac OS 9 controls can&rsquo;t be had from today&rsquo;s
+          macOS, so Turbokod draws them itself, in pixels. The push buttons are
+          copied from the figures in Apple&rsquo;s Mac OS 8 Human
+          Interface Guidelines, corner by corner.</p>
+          <p>Chicago is set the way the classic Mac set it: no kerning, every
+          advance on a whole pixel, no smoothing. In the editor it sits on an
+          8×16 grid.</p>
+        </div>
+        <div class="p-group">
+          <span class="p-legend">What&rsquo;s inside</span>
+          <ul>
+            <li>Syntax coloring from TextMate grammars, and a dozen themes</li>
+            <li>Completion, definitions, rename and diagnostics from language servers</li>
+            <li>Run and debug targets, breakpoints, stack and variables</li>
+            <li>Git: status, staging, commits, blame and change markers</li>
+            <li>A real terminal, a test runner, project-wide find and replace</li>
+            <li>Multiple cursors, spell checking, editorconfig</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="p-plates">
+        <figure>
+          <div class="p-well">
+            <a href="docs/screenshots/look-macos9-settings.png" target="_blank" rel="noopener" title="View full-size screenshot">
+              <img src="docs/screenshots/look-macos9-settings.png" width="1172" height="828" alt="The Settings window drawn Platinum-style, with tabs, pop-up menus and checkboxes.">
+            </a>
+          </div>
+          <figcaption class="p-cap">Fig. 2: Settings, with Platinum tabs and pop-up menus.</figcaption>
+        </figure>
+        <figure>
+          <div class="p-well">
+            <a href="docs/screenshots/look-macos9-project.png" target="_blank" rel="noopener" title="View full-size screenshot">
+              <img src="docs/screenshots/look-macos9-project.png" width="2000" height="1336" alt="Project Settings as a movable modal dialog over the editor.">
+            </a>
+          </div>
+          <figcaption class="p-cap">Fig. 3: a movable modal dialog over the editor.</figcaption>
+        </figure>
+      </div>
+
+      <div class="p-cols">
+        <div class="p-group">
+          <span class="p-legend">Get Turbokod</span>
+          <p>Free and open source, under the MIT license.</p>
+          <div class="p-btns">
+            <a class="p-btn default" href="https://github.com/boxed/TurboKod/releases/latest/download/TurboKod-macos-arm64.zip">Download</a>
+            <a class="p-btn" href="https://github.com/boxed/TurboKod">GitHub</a>
+            <a class="p-btn" href="https://github.com/boxed/TurboKod#quickstart">Read Me</a>
+          </div>
+          <div class="p-mono">$ ./run_swift.sh /path/to/project</div>
+        </div>
+        <div class="p-group">
+          <span class="p-legend">System requirements</span>
+          <ul>
+            <li>A Mac with Apple silicon</li>
+            <li>macOS 11 or later</li>
+            <li>Or any terminal, over SSH too</li>
+            <li>0 KB of extensions</li>
+          </ul>
+          <p style="margin-top:.8em">Not your era? Try the
+          <a href="#retro">1992 edition</a> or the
+          <a href="#macos">modern Mac look</a>.</p>
+        </div>
+      </div>
+
+      <p class="p-fine">Turbokod is a Mojo port of Turbo Vision, based on
+      <a href="https://github.com/magiblot/tvision">magiblot/tvision</a>, and is
+      MIT licensed. An independent project, not affiliated with Apple. Mac and
+      Mac OS are trademarks of Apple Inc., used here only to name the
+      look this homage is to.</p>
+    </div>
+    <div class="p-status">
+      <span>3 looks, 1 editor</span>
+      <span class="p-grow" aria-hidden="true"></span>
+    </div>
+  </div>
+</div>
+
+<script>
+  // The look tabs: the hash picks the page (#retro, #macos, #macos9).
+  (function () {
+    var looks = ["retro", "macos", "macos9"];
+    var tabs = document.querySelectorAll(".looks a");
+    function show(look) {
+      if (looks.indexOf(look) < 0) look = "retro";
+      document.documentElement.setAttribute("data-look", look);
+      for (var i = 0; i < tabs.length; i++) {
+        tabs[i].setAttribute("aria-selected", tabs[i].getAttribute("data-look") === look ? "true" : "false");
+      }
+    }
+    window.addEventListener("hashchange", function () {
+      show(location.hash.slice(1));
+      window.scrollTo(0, 0);
+    });
+    show(location.hash.slice(1));
+  })();
+</script>
 
 </body>
 </html>

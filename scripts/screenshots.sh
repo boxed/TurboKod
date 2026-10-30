@@ -7,6 +7,9 @@
 #                                       breakpoint in a small Python project
 #                                       (boxed/scientist), file tree docked
 #                                       right (default theme)
+#   docs/screenshots/look-<look>.png    the same hero scene in the macOS-style
+#                                       and Mac OS 9 looks, plus a dialog
+#   docs/screenshots/look-<look>-*.png  or two in each, for the homepage tabs
 #
 # Everything is driven through env knobs the app honors when TK_CAPTURE is
 # set (see "scripted screenshot capture" in app/swift/TurboKod.swift):
@@ -201,6 +204,9 @@ cat > "$psession" <<EOF
 }
 EOF
 
+# Kept for the other looks' runs: quitting saves over the session.
+cp "$psession" "$psession.scene"
+
 echo "[screenshots] debugger paused at $src_file:$bp_line -> $root/screenshot.png"
 # The tree toggle fires first (one step of the hidden→right→left cycle
 # docks it on the right) so the workspace refits the two windows before
@@ -211,5 +217,56 @@ TK_CAPTURE_ACTIONS="project:tree:toggle,debug:toggle_bp,debug:start_or_continue"
 TK_CAPTURE_WHEN="debug-stopped" \
 TK_CAPTURE="$root/screenshot.png" \
   ./run_swift.sh "$proj"
+
+# ------------------------------------------------------- the other looks --
+# The look, its font and its theme are global settings, so each look gets a
+# scratch HOME with a fresh config holding just those (and the welcome
+# window dismissed). Fresh, not a copy of yours: Project Settings shows the
+# global on-save actions, and your paths don't belong in a public shot.
+# (The per-project session, targets and window frame live in the scientist
+# clone, so every look shows the same scene at the same size as the hero.)
+look_home() {  # <dir> <native_ui> <platinum_ui> <theme> <font> <font_size>
+  local home="$1"
+  rm -rf "$home"; mkdir -p "$home/.config/turbokod"
+  python3 - "$home/.config/turbokod/config.json" "$2" "$3" "$4" "$5" "$6" <<'PY'
+import json, sys
+dst, native, platinum, theme, font, size = sys.argv[1:]
+cfg = dict(native_ui=native == "1", platinum_ui=platinum == "1", theme=theme,
+           font=font, font_size=int(size), welcome_done=True)
+json.dump(cfg, open(dst, "w"))
+PY
+}
+
+capture_look() {  # <home> <out-png> [extra env...]
+  local home="$1" png="$2"; shift 2
+  echo "[screenshots] $(basename "$home") -> $png"
+  # Each run re-stages the scientist session: the previous run saved over it.
+  cat > "$psession" < "$psession.scene"
+  env HOME="$home" TK_CAPTURE_WINDOW=1 TK_CAPTURE="$png" "$@" \
+    ./run_swift.sh "$proj"
+}
+macos_home="$root/.build/screenshot-home-macos"
+look_home "$macos_home" 1 0 "One Dark" "SF Mono" 13
+printf '{"breakpoints":[]}' > "$pbps"
+capture_look "$macos_home" "$out/look-macos.png" \
+  TK_CAPTURE_ACTIONS="project:tree:toggle,debug:toggle_bp,debug:start_or_continue" \
+  TK_CAPTURE_WHEN="debug-stopped"
+capture_look "$macos_home" "$out/look-macos-settings.png" \
+  TK_CAPTURE_ACTIONS="app:settings" TK_CAPTURE_TITLE="Settings"
+look_home "$macos_home" 1 0 "GitHub Light" "SF Mono" 13
+capture_look "$macos_home" "$out/look-macos-light.png" \
+  TK_CAPTURE_ACTIONS="project:tree:toggle"
+
+macos9_home="$root/.build/screenshot-home-macos9"
+look_home "$macos9_home" 0 1 "GitHub Light" "Chicago" 0
+printf '{"breakpoints":[]}' > "$pbps"
+capture_look "$macos9_home" "$out/look-macos9.png" \
+  TK_CAPTURE_ACTIONS="project:tree:toggle,debug:toggle_bp,debug:start_or_continue" \
+  TK_CAPTURE_WHEN="debug-stopped"
+capture_look "$macos9_home" "$out/look-macos9-settings.png" \
+  TK_CAPTURE_ACTIONS="app:settings" TK_CAPTURE_TITLE="Settings"
+capture_look "$macos9_home" "$out/look-macos9-project.png" \
+  TK_CAPTURE_ACTIONS="project:settings"
+rm -f "$psession.scene"
 
 echo "[screenshots] done -> $out/ + screenshot.png"
