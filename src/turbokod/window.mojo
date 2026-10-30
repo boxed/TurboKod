@@ -1155,6 +1155,10 @@ struct Window(Copyable, Movable):
     var gutter: Int
     """Columns at the right of a frameless window kept out of its
     content, for the host's scroll bar (the Mac OS 9 look)."""
+    var grid_bar: Bool
+    """A frameless editor paints its own vertical scroll bar in the
+    gutter's last column (the native app's Turbo Vision look), rather
+    than leaving the gutter to the host."""
     # Proportional-resize baselines. ``_baseline_rect`` is the rect we
     # want to preserve as the workspace changes, expressed in
     # ``_baseline_ws``; on each terminal resize we scale from this pair
@@ -1202,6 +1206,7 @@ struct Window(Copyable, Movable):
         self.frameless = False
         self._tab_maximized = False
         self.gutter = 0
+        self.grid_bar = False
         self._baseline_rect = sized
         self._baseline_ws = Rect.empty()
         self._has_baseline = False
@@ -1255,6 +1260,7 @@ struct Window(Copyable, Movable):
         self.frameless = copy.frameless
         self._tab_maximized = copy._tab_maximized
         self.gutter = copy.gutter
+        self.grid_bar = copy.grid_bar
         self._baseline_rect = copy._baseline_rect
         self._baseline_ws = copy._baseline_ws
         self._has_baseline = copy._has_baseline
@@ -1420,6 +1426,9 @@ struct Window(Copyable, Movable):
         painter.fill(canvas, self.rect, String(" "), body_bg)
         if self.is_editor:
             self.editor.paint(canvas, self.interior(), focused)
+            var bar_attr = Attr(BORDER_FOCUS, EDITOR_BG) if focused \
+                else Attr(EDITOR_FG, EDITOR_BG)
+            self._paint_v_scrollbar(canvas, painter, bar_attr)
             return
         for i in range(len(self.content)):
             if i >= self.rect.height():
@@ -1450,16 +1459,20 @@ struct Window(Copyable, Movable):
         is too small and wheel/drag get stuck before the wrapped tail
         scrolls into view.
         """
-        if not self.is_editor or self.frameless or self.rect.width() < 2 \
-                or self.rect.height() < 5:
+        var in_gutter = self.frameless and self.grid_bar and self.gutter > 0
+        if not self.is_editor or (self.frameless and not in_gutter) \
+                or self.rect.width() < 2 or self.rect.height() < 5:
             return VScrollbar(0, 0, -1, 0, 0, 0)
         var total = self.editor.buffer.line_count()
         var max_y = self.editor.max_scroll_y(self.interior())
         var visible = total - max_y
         if visible < 1:
             visible = 1
+        # Framed: over the right border, between the corners. In the gutter:
+        # the window's full height.
+        var inset = 0 if in_gutter else 1
         return VScrollbar(
-            self.rect.b.x - 1, self.rect.a.y + 1, self.rect.b.y - 2,
+            self.rect.b.x - 1, self.rect.a.y + inset, self.rect.b.y - 1 - inset,
             total, visible, self.editor.scroll_y,
         )
 
@@ -1755,6 +1768,9 @@ struct WindowManager(Movable):
     var gutter: Int
     """Columns each tabbed window keeps clear at its right for the host's
     scroll bar."""
+    var grid_bar: Bool
+    """Tabbed windows paint their own scroll bar in the gutter (see
+    ``Window.grid_bar``)."""
 
     def __init__(out self):
         self.windows = List[Window]()
@@ -1778,6 +1794,7 @@ struct WindowManager(Movable):
         self.close_requested = -1
         self.tabbed = False
         self.gutter = 0
+        self.grid_bar = False
 
     def add(mut self, var window: Window):
         self.windows.append(window^)
@@ -1849,6 +1866,7 @@ struct WindowManager(Movable):
         for i in range(len(self.windows)):
             ref w = self.windows[i]
             w.gutter = self.gutter if self.tabbed else 0
+            w.grid_bar = self.grid_bar and self.tabbed
             if self.tabbed:
                 if not w.frameless:
                     w.frameless = True

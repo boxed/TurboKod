@@ -129,10 +129,12 @@ def test_native_ui_tabs_fill_the_workspace_frameless() raises:
     var d = _native_desktop(String("a\nb\n"))
     var canvas = Canvas(_SCREEN.b.x, _SCREEN.b.y)
     canvas.clear(default_attr())
-    d.config.native_ui = False
+    # Framed, overlapping windows are the terminal frontend's: every look
+    # in the app is tabbed.
+    d.host_owns_menu = False
     d.paint(canvas, _SCREEN)
     var before = d.windows.windows[0].rect
-    d.config.native_ui = True
+    d.host_owns_menu = True
     d.paint(canvas, _SCREEN)
     ref w = d.windows.windows[0]
     assert_true(w.frameless)
@@ -143,11 +145,95 @@ def test_native_ui_tabs_fill_the_workspace_frameless() raises:
     assert_false(w.close_button_hit(w.rect.a))
     # The host's tab strip replaces the in-grid one.
     assert_true(d.tab_bar_rect(_SCREEN).is_empty())
-    # Switching back restores the framed window where it was.
-    d.config.native_ui = False
+    # Leaving the tabbed layout restores the framed window where it was.
+    d.host_owns_menu = False
     d.paint(canvas, _SCREEN)
     assert_false(d.windows.windows[0].frameless)
     assert_true(d.windows.windows[0].rect == before)
+
+
+def _row(canvas: Canvas, y: Int) -> String:
+    var row = String("")
+    for x in range(canvas.width):
+        row += canvas.get(x, y).glyph
+    return row^
+
+
+def test_tv_look_in_the_app_is_tabbed_inside_the_hosts_frame() raises:
+    var text = String("")
+    for i in range(100):
+        text += String(i) + String("\n")
+    var d = _native_desktop(text)
+    d.config.native_ui = False
+    var canvas = Canvas(_SCREEN.b.x, _SCREEN.b.y)
+    canvas.clear(default_attr())
+    d.paint(canvas, _SCREEN)
+    assert_true(d.tv_frame())
+    ref w = d.windows.windows[0]
+    assert_true(w.frameless)
+    assert_true(w.rect == d.workspace_rect(_SCREEN))
+    # The last column is the window's own scroll bar, not editor text.
+    assert_equal(w.interior().b.x, w.rect.b.x - 1)
+    assert_equal(canvas.get(w.rect.b.x - 1, w.rect.a.y).glyph, String("▲"))
+    assert_equal(w.v_scrollbar_hit(Point(w.rect.b.x - 1, w.rect.b.y - 1))[0], 5)
+    # Bottom up: the status bar, the frame's bottom border, the tab bar
+    # (the only way to switch windows), then the workspace.
+    var y = _SCREEN.b.y
+    assert_true(d.tab_bar_rect(_SCREEN) == Rect(0, y - 3, _SCREEN.b.x, y - 2))
+    assert_equal(d.workspace_rect(_SCREEN).b.y, y - 3)
+    # Double lines while the window is key, single otherwise.
+    assert_true(String("════") in _row(canvas, y - 2))
+    d.host_focused = False
+    d.paint(canvas, _SCREEN)
+    assert_true(String("────") in _row(canvas, y - 2))
+    d.file_tree.visible = True
+    d.paint(canvas, _SCREEN)
+    assert_equal(d.file_tree.rect(_SCREEN).b.y, y - 2)
+
+
+def test_tv_look_keeps_overlapping_windows_in_the_terminal() raises:
+    var d = _native_desktop(String("a\n"))
+    d.config.native_ui = False
+    d.host_owns_menu = False
+    var canvas = Canvas(_SCREEN.b.x, _SCREEN.b.y)
+    canvas.clear(default_attr())
+    d.paint(canvas, _SCREEN)
+    assert_false(d.tv_frame())
+    assert_false(d.windows.windows[0].frameless)
+    assert_equal(d.workspace_rect(_SCREEN).b.y, _SCREEN.b.y - 2)
+
+
+def test_tv_frame_title_and_proxy_follow_the_focused_file() raises:
+    var d = _native_desktop(String("a\n"))
+    d.config.native_ui = False
+    d.project = Optional[String](String("/x/proj"))
+    d.windows.windows[0].editor.file_path = String("/x/proj/a.txt")
+    assert_equal(d.frame_title(), String("buf — proj"))
+    assert_equal(d.frame_path(), String("/x/proj/a.txt"))
+    var span = d.frame_title_span(80)
+    assert_true(span[0] >= 0)
+    assert_equal(span[1], span[0] + 3)
+    assert_equal(span[2] - span[1], 10)
+    var canvas = Canvas(80, 30)
+    canvas.clear(default_attr())
+    d.host_focused = True
+    d.paint_frame(canvas, Rect(0, 0, 80, 30), False)
+    assert_equal(canvas.get(0, 0).glyph, String("╔"))
+    assert_equal(canvas.get(2, 0).glyph, String("■"))
+    assert_equal(canvas.get(77, 0).glyph, String("▲"))
+    assert_equal(canvas.get(span[1], 0).glyph, String("b"))
+    assert_equal(canvas.get(0, 15).glyph, String("║"))
+    # The frame's bottom corners sit on the row above the status bar.
+    assert_equal(canvas.get(79, 28).glyph, String("╝"))
+    d.paint_frame(canvas, Rect(0, 0, 80, 30), True)
+    assert_equal(canvas.get(77, 0).glyph, String("▼"))
+    # No file: the project; nothing at all: no icon.
+    d.windows.windows[0].editor.file_path = String("")
+    assert_equal(d.frame_path(), String("/x/proj"))
+    d.project = Optional[String]()
+    assert_true(d.frame_title_span(80)[0] < 0)
+    # Too narrow for the title between the boxes.
+    assert_equal(d.frame_title_span(12)[1], -1)
 
 
 def test_tabbed_session_saves_the_framed_layout() raises:
@@ -157,17 +243,22 @@ def test_tabbed_session_saves_the_framed_layout() raises:
     d.config.tab_bar = False
     var canvas = Canvas(_SCREEN.b.x, _SCREEN.b.y)
     canvas.clear(default_attr())
-    d.config.native_ui = False
+    d.host_owns_menu = False
     d.paint(canvas, _SCREEN)
     var framed = d.windows.windows[0].rect
-    d.config.native_ui = True
+    d.host_owns_menu = True
     d.paint(canvas, _SCREEN)
     d.project = Optional[String](String("/x"))
     d.windows.windows[0].editor.file_path = String("/x/a.txt")
     var snap = d._snapshot_session()
     assert_equal(len(snap.windows), 1)
     assert_false(snap.windows[0].is_maximized)
-    assert_true(snap.windows[0].rect() == framed)
+    # The framed rect, scaled to the app's workspace (no menu row), not the
+    # tab's whole workspace.
+    var saved = snap.windows[0].rect()
+    assert_false(saved == d.workspace_rect(_SCREEN))
+    assert_equal(saved.a.x, framed.a.x)
+    assert_equal(saved.b.x, framed.b.x)
 
 
 def test_close_tab_asks_before_dropping_unsaved_work() raises:

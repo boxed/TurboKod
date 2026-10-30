@@ -393,7 +393,10 @@ func cgcolor(_ rgb: UInt32) -> CGColor {
 // `.settings` is the standalone Settings window — like `.panels` it shares the
 // main view's Desktop handle and never ticks; it renders via the `_settings`
 // C ABI and is opened/closed by polling tk_desktop_settings_active.
-enum CellSurface { case main, panels, settings }
+/// `.frame` is the Turbo Vision look's project frame (`TVMainFrame`): the
+/// ring of cells around a window's grid. It only draws; its clicks go to
+/// `onFrameMouse`.
+enum CellSurface { case main, panels, settings, frame }
 
 final class CellView: NSView {
     var handle: Int64 = 0
@@ -404,6 +407,8 @@ final class CellView: NSView {
     // window. nil for `.main` views.
     weak var mainPeer: CellView?
     var project: String?      // set when a project is opened; drives session save
+    /// A `.frame` view's clicks: the window chrome's business, not the core's.
+    var onFrameMouse: ((NSEvent) -> Void)?
     private var buf = UnsafeMutablePointer<UInt32>.allocate(capacity: CELL_WORDS)
     private var bufCells = 1
     // Last cell a passive (no-button) mouse move was dispatched for. macOS
@@ -552,7 +557,7 @@ final class CellView: NSView {
     }
 
     override var isFlipped: Bool { true }            // y increases downward (row index)
-    override var acceptsFirstResponder: Bool { true }
+    override var acceptsFirstResponder: Bool { surface != .frame }
     override var wantsDefaultClipping: Bool { false }
     // The floating panels window is a companion to the project window, which
     // normally holds key focus (e.g. after a breakpoint stop jumps the editor).
@@ -574,6 +579,10 @@ final class CellView: NSView {
         case .main:     return Int(tk_desktop_layout(handle, Int64(c), Int64(r), p, Int64(cap)))
         case .panels:   return Int(tk_desktop_layout_panels(handle, Int64(c), Int64(r), p, Int64(cap)))
         case .settings: return Int(tk_desktop_layout_settings(handle, Int64(c), Int64(r), p, Int64(cap)))
+        case .frame:
+            let w = window
+            let zoomed = (w?.styleMask.contains(.fullScreen) ?? false) || ((w as? MainWindow)?.filled ?? false)
+            return Int(tk_desktop_layout_frame(handle, Int64(c), Int64(r), zoomed ? 1 : 0, p, Int64(cap)))
         }
     }
     private func tickSurface(_ c: Int, _ r: Int) {
@@ -584,6 +593,7 @@ final class CellView: NSView {
         case .main:     return tk_desktop_key(handle, key, m, Int64(c), Int64(r))
         case .panels:   return tk_desktop_panels_key(handle, key, m, Int64(c), Int64(r))
         case .settings: return tk_desktop_settings_key(handle, key, m, Int64(c), Int64(r))
+        case .frame:    return 0
         }
     }
     private func modKeySurface(_ modId: UInt32, _ pressed: UInt8) -> Int32 {
@@ -602,6 +612,7 @@ final class CellView: NSView {
         case .main:     return tk_desktop_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r), cc)
         case .panels:   return tk_desktop_panels_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r), cc)
         case .settings: return tk_desktop_settings_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r), cc)
+        case .frame:    return 0
         }
     }
     /// Show the cursor for a ``host_abi.SHAPE_*`` code.
@@ -619,7 +630,7 @@ final class CellView: NSView {
         switch surface {
         case .main:     return tk_desktop_pointer_shape(handle, col, row, Int64(c), Int64(r))
         case .panels:   return tk_desktop_panels_pointer_shape(handle, col, row, Int64(c), Int64(r))
-        case .settings: return 0   // default arrow everywhere in Settings
+        case .settings, .frame: return 0   // default arrow everywhere
         }
     }
 
@@ -1412,7 +1423,7 @@ final class CellView: NSView {
     private func sendMouse(_ e: NSEvent, button: UInt8, pressed: UInt8, motion: UInt8,
                            passive: Bool = false, quiet: Bool = false) {
         // See keyDown — scripted capture runs ignore live input.
-        if isCapturing { return }
+        if isCapturing || surface == .frame { return }
         let p = convert(e.locationInWindow, from: nil)
         // Window-border vertical scrollbar thumb drag: while one is in flight
         // (started by the press hit-test in the core), route motion through
@@ -1536,7 +1547,10 @@ final class CellView: NSView {
         }
     }
 
-    override func mouseDown(with e: NSEvent) { sendMouse(e, button: 1, pressed: 1, motion: 0) }
+    override func mouseDown(with e: NSEvent) {
+        if let f = onFrameMouse { f(e); return }
+        sendMouse(e, button: 1, pressed: 1, motion: 0)
+    }
     override func mouseDragged(with e: NSEvent) { sendMouse(e, button: 1, pressed: 1, motion: 1) }
     override func mouseUp(with e: NSEvent) { sendMouse(e, button: 1, pressed: 0, motion: 0) }
     override func rightMouseDown(with e: NSEvent) { sendMouse(e, button: 3, pressed: 1, motion: 0) }
@@ -1544,7 +1558,7 @@ final class CellView: NSView {
     override func mouseMoved(with e: NSEvent) { sendMouse(e, button: 0, pressed: 0, motion: 1, passive: true) }
     override func scrollWheel(with e: NSEvent) {
         // Scripted capture runs ignore live input (matches sendMouse).
-        if isCapturing { return }
+        if isCapturing || surface == .frame { return }
         let dx = e.scrollingDeltaX
         let dy = e.scrollingDeltaY
         let shift = shiftDown || e.modifierFlags.contains(.shift)
@@ -2086,6 +2100,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // Mac OS 9 look: each window's Platinum frame (with its tab strip) and
     // its editor's scroll bar.
     var platinumFrames: [ObjectIdentifier: PlatinumMainFrame] = [:]
+    var tvFrames: [ObjectIdentifier: TVMainFrame] = [:]
+    var frameInfoBuf = [UInt8](repeating: 0, count: 1024)
     var platinumScrollers: [ObjectIdentifier: PlatinumScroller] = [:]
     // macOS-style UI: the native picker sheet up on each window, if any.
     var welcome: WelcomeController?
@@ -2518,6 +2534,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             for v in self.views where v.handle != 0 {
                 if self.pollNativeDialog(v) { changed = true }
                 if self.pollDeclarative(v) { changed = true }
+                if self.pollTVChrome(v) { changed = true }
                 if self.pollPlatinumChrome(v) { changed = true }
                 if self.pollTabStrip(v) { changed = true }
                 if self.pollPopup(v) { changed = true }
@@ -3583,6 +3600,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // Fresh: cascade so multiple New Window clicks don't stack.
             win.cascadeTopLeft(from: NSPoint(x: 40, y: 40))
         }
+        // Put on the look's own frame before the window first shows, so it
+        // doesn't open with a title bar and swap on the first tick.
+        _ = pollTVChrome(view)
+        _ = pollPlatinumChrome(view)
         win.makeKeyAndOrderFront(nil)
         windows.append(win)
         views.append(view)
@@ -3737,6 +3758,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         views.remove(at: idx)
         tabStrips[ObjectIdentifier(v)] = nil
         platinumFrames[ObjectIdentifier(v)] = nil
+        tvFrames[ObjectIdentifier(v)] = nil
         platinumScrollers[ObjectIdentifier(v)] = nil
         nativeSheets[ObjectIdentifier(v)] = nil
         popups[ObjectIdentifier(v)] = nil
@@ -4691,7 +4713,8 @@ extension AppController {
             if pf.showTabs(data != nil && !pf.tabs.tabs.isEmpty) { changed = true }
             return changed
         }
-        guard on else { return false }
+        // Wait for the Turbo Vision frame to come off first.
+        guard on, tvFrames[id] == nil else { return false }
         let f = win.frame
         let pf = PlatinumMainFrame(cell: v)
         pf.title = win.title
@@ -4709,6 +4732,50 @@ extension AppController {
         win.makeFirstResponder(v)
         platinumFrames[id] = pf
         _ = pollPlatinumChrome(v)
+        return true
+    }
+
+    /// Put `v`'s window into the Turbo Vision look's frame (`TVMainFrame`)
+    /// or back into the system's as the look changes, and keep the ring
+    /// and its proxy icon current. True when anything changed.
+    func pollTVChrome(_ v: CellView) -> Bool {
+        guard let win = v.window as? MainWindow else { return false }
+        let id = ObjectIdentifier(v)
+        let on = tk_desktop_tv_frame(v.handle) != 0
+        if let tf = tvFrames[id] {
+            if on {
+                let info = readCoreJSON(&frameInfoBuf, { tk_desktop_frame_info(v.handle, Int64(tf.cols), $0, $1) })
+                return tf.poll(info: info)
+            }
+            tvFrames[id] = nil
+            let f = win.frame
+            v.removeFromSuperview()
+            win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+            win.contentView = v
+            win.setFrame(f, display: true)
+            win.makeFirstResponder(v)
+            return true
+        }
+        // Wait for the Mac OS 9 frame to come off first.
+        guard on, platinumFrames[id] == nil else { return false }
+        // Whole cells, top-left staying put, so the ring meets the edges.
+        var f = win.frame
+        if !win.styleMask.contains(.fullScreen) {
+            let w = (f.width / CELL_W).rounded(.down) * CELL_W
+            let h = (f.height / CELL_H).rounded(.down) * CELL_H
+            f = NSRect(x: f.minX, y: f.maxY - h, width: w, height: h)
+        }
+        let tf = TVMainFrame(cell: v)
+        win.styleMask = [.borderless, .miniaturizable, .resizable]
+        win.collectionBehavior.insert(.fullScreenPrimary)
+        win.hasShadow = true
+        win.backgroundColor = .black
+        win.contentView = tf
+        win.setFrame(f, display: false)
+        tf.layoutChrome()
+        win.makeFirstResponder(v)
+        tvFrames[id] = tf
+        _ = pollTVChrome(v)
         return true
     }
 
@@ -5384,6 +5451,7 @@ extension NSWindow {
     /// look's frame.
     var cellView: CellView? {
         contentView as? CellView ?? (contentView as? PlatinumMainFrame)?.cell
+            ?? (contentView as? TVMainFrame)?.cell
     }
 }
 
@@ -9017,6 +9085,8 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
         case "label":
             if let l = v as? NSTextField {
                 l.stringValue = n["text"] as? String ?? ""
+                // Empty, it takes no room (a stack detaches hidden views).
+                l.isHidden = l.stringValue.isEmpty
                 l.textColor = has(n, Self.SECONDARY) ? .secondaryLabelColor
                     : has(n, Self.HEADING) ? .systemRed : .labelColor
                 l.font = .systemFont(ofSize: 13, weight: has(n, Self.HEADING) ? .semibold : .regular)
@@ -9847,6 +9917,8 @@ class PNode: NSView {
     func has(_ bit: Int) -> Bool { flags & bit != 0 }
 
     func fit() -> NSSize { .zero }
+    /// Takes no room and no gap in a stack (an empty label).
+    var collapsed: Bool { false }
     var stretchX: Bool { false }
     var stretchY: Bool { false }
     func place(_ r: NSRect) { frame = r }
@@ -9926,8 +9998,11 @@ final class PStack: PNode {
     override var stretchX: Bool { vertical || align != 0 || kids.contains { $0.stretchX } }
     override var stretchY: Bool { kids.contains { $0.stretchY } }
 
+    /// The kids that take room; a collapsed one is placed empty.
+    private var shown: [PNode] { kids.filter { !$0.collapsed } }
+
     override func fit() -> NSSize {
-        let fs = kids.map { $0.fit() }
+        let fs = shown.map { $0.fit() }
         let g = gap * CGFloat(max(0, fs.count - 1))
         if vertical {
             return NSSize(width: fs.map(\.width).max() ?? 0, height: fs.map(\.height).reduce(0, +) + g)
@@ -9937,6 +10012,8 @@ final class PStack: PNode {
 
     override func place(_ r: NSRect) {
         frame = r
+        for k in kids where k.collapsed { k.place(.zero) }
+        let kids = shown
         let fs = kids.map { $0.fit() }
         let want = fit()
         if vertical {
@@ -10043,6 +10120,7 @@ final class PLabel: PNode {
     private var color: NSColor { has(Platinum.SECONDARY) ? Platinum.dark : .black }
 
     override var stretchX: Bool { has(Platinum.HEADING) }
+    override var collapsed: Bool { text.isEmpty }
 
     private func measure(_ w: CGFloat) -> NSSize {
         let lines = Platinum.wrap(text, w, font)
@@ -10884,11 +10962,14 @@ class PlatinumFrameView: NSView {
 }
 
 /// A project window's class. In the Mac OS 9 look it's borderless (its
-/// frame is a `PlatinumMainFrame`), and a borderless window neither becomes
-/// key on its own nor closes, zooms or minimizes from the Window menu.
+/// frame is a `PlatinumMainFrame`), and in the Turbo Vision look too (a
+/// `TVMainFrame`); a borderless window neither becomes key on its own nor
+/// closes, zooms or minimizes from the Window menu.
 final class MainWindow: NSWindow {
     private var unzoomed: NSRect?
     var platinum: Bool { !styleMask.contains(.titled) }
+    /// Borderless and zoomed to fill the screen.
+    var filled: Bool { unzoomed != nil && frame.size == screen?.visibleFrame.size }
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
 
@@ -10912,6 +10993,237 @@ final class MainWindow: NSWindow {
             setFrame(vf, display: true)
         }
     }
+}
+
+/// The Turbo Vision look's project window: borderless, with the grid one
+/// cell in from the sides and below a title row, inside a ring of cells the
+/// core paints (`tk_desktop_layout_frame`): the close box, the proxy icon's
+/// cells, the title and the zoom box. The grid's last row is the status
+/// bar, outside the frame; the core draws the frame's bottom border on the
+/// row above its tab bar.
+///
+/// The ring is window chrome: the title row drags the window (a double
+/// click zooms it, per the system setting), the close box closes the
+/// project, the zoom box enters full screen (Option-click: fills the
+/// screen instead, as the green button does), and the sides and bottom
+/// corners resize. The proxy icon is the focused file's: drag it, or
+/// ⌘-click it or the title for the path menu.
+final class TVMainFrame: NSView, NSDraggingSource {
+    let cell: CellView
+    let chrome = CellView()
+    private let icon = TVProxyIcon()
+    private var info: [String: Any] = [:]
+    private var infoData = Data()
+
+    init(cell: CellView) {
+        self.cell = cell
+        super.init(frame: .zero)
+        chrome.surface = .frame
+        chrome.handle = cell.handle
+        chrome.onFrameMouse = { [weak self] e in self?.frameMouse(e) }
+        icon.imageScaling = .scaleProportionallyDown
+        addSubview(chrome)
+        addSubview(cell)
+        addSubview(icon)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override var isFlipped: Bool { true }
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    /// The window's grid, ring included.
+    var cols: Int { max(12, Int(bounds.width / CELL_W)) }
+    var rows: Int { max(6, Int(bounds.height / CELL_H)) }
+
+    override func resizeSubviews(withOldSize oldSize: NSSize) { layoutChrome() }
+
+    /// Whole cells: the ring on the window's grid, the core's grid inside it.
+    /// Rerun every poll, since a font change moves the cell size.
+    func layoutChrome() {
+        let c = CGFloat(cols), r = CGFloat(rows)
+        let ring = NSRect(x: 0, y: 0, width: c * CELL_W, height: r * CELL_H)
+        if chrome.frame != ring {
+            chrome.frame = ring
+            chrome.invalidateFrame()
+            chrome.needsDisplay = true
+            window?.invalidateCursorRects(for: self)
+        }
+        let inner = NSRect(x: CELL_W, y: CELL_H, width: (c - 2) * CELL_W, height: (r - 1) * CELL_H)
+        if cell.frame != inner { cell.frame = inner }
+        placeIcon()
+    }
+
+    /// Adopt a `tk_desktop_frame_info` payload and repaint the ring if it
+    /// changed. True when anything did.
+    func poll(info data: Data?) -> Bool {
+        layoutChrome()
+        var changed = false
+        if let data = data, data != infoData {
+            infoData = data
+            info = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+            placeIcon()
+            changed = true
+        }
+        if chrome.pollFrame() { chrome.needsDisplay = true; changed = true }
+        return changed
+    }
+
+    private var path: String { info["path"] as? String ?? "" }
+    private var iconCol: Int { path.isEmpty ? -1 : info["icon"] as? Int ?? -1 }
+
+    private func placeIcon() {
+        let x = iconCol
+        icon.isHidden = x < 0
+        guard x >= 0 else { return }
+        let side = min(2 * CELL_W, CELL_H)
+        icon.frame = NSRect(x: CGFloat(x) * CELL_W + (2 * CELL_W - side) / 2,
+                            y: (CELL_H - side) / 2, width: side, height: side)
+        if icon.path != path {
+            icon.path = path
+            icon.image = NSWorkspace.shared.icon(forFile: path)
+        }
+    }
+
+    override func resetCursorRects() {
+        let c = CGFloat(cols), r = CGFloat(rows)
+        let side = (r - 2) * CELL_H
+        addCursorRect(NSRect(x: 0, y: CELL_H, width: CELL_W, height: side), cursor: .resizeLeftRight)
+        addCursorRect(NSRect(x: (c - 1) * CELL_W, y: CELL_H, width: CELL_W, height: side),
+                      cursor: .resizeLeftRight)
+    }
+
+    private func frameMouse(_ e: NSEvent) {
+        guard let win = window else { return }
+        let p = chrome.convert(e.locationInWindow, from: nil)
+        let x = Int(p.x / CELL_W), y = Int(p.y / CELL_H)
+        let c = cols, r = rows
+        guard y == 0 else {
+            // The sides resize; the bottom corners resize down as well.
+            if x == 0 || x >= c - 1 { resize(left: x == 0, down: y >= r - 2) }
+            return
+        }
+        if (1...3).contains(x) {
+            if pressed(cellsFrom: 1, to: 3) { win.performClose(nil) }
+            return
+        }
+        if (c - 4...c - 2).contains(x) {
+            if pressed(cellsFrom: c - 4, to: c - 2) { zoom(fill: e.modifierFlags.contains(.option)) }
+            return
+        }
+        let t = info["title"] as? [Int] ?? []
+        let onIcon = iconCol >= 0 && (x == iconCol || x == iconCol + 1)
+        let onTitle = t.count == 2 && t[0] >= 0 && x >= t[0] && x < t[1]
+        if (onIcon || onTitle) && !path.isEmpty && e.modifierFlags.contains(.command) {
+            pathMenu()
+            return
+        }
+        if onIcon {
+            dragIcon(e)
+            return
+        }
+        if e.clickCount == 2 {
+            switch UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") {
+            case "Minimize": win.performMiniaturize(nil)
+            case "None": break
+            default: win.performZoom(nil)
+            }
+            return
+        }
+        win.performDrag(with: e)
+    }
+
+    /// Track a press on title-row cells `a...b`: true when it's released
+    /// over them.
+    private func pressed(cellsFrom a: Int, to b: Int) -> Bool {
+        guard let win = window else { return false }
+        let box = NSRect(x: CGFloat(a) * CELL_W, y: 0, width: CGFloat(b - a + 1) * CELL_W, height: CELL_H)
+        while let ev = win.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            if ev.type == .leftMouseUp { return box.contains(chrome.convert(ev.locationInWindow, from: nil)) }
+        }
+        return false
+    }
+
+    private func zoom(fill: Bool) {
+        guard let win = window else { return }
+        if fill && !win.styleMask.contains(.fullScreen) {
+            win.performZoom(nil)
+        } else {
+            win.toggleFullScreen(nil)
+        }
+    }
+
+    /// Drag a side (or a bottom corner, `down`) in whole cells, the opposite
+    /// side and the top staying put.
+    private func resize(left: Bool, down: Bool) {
+        guard let win = window else { return }
+        let start = NSEvent.mouseLocation
+        let f0 = win.frame
+        while let ev = win.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            let p = NSEvent.mouseLocation
+            let w = f0.width + (left ? start.x - p.x : p.x - start.x)
+            let h = down ? f0.height + start.y - p.y : f0.height
+            let cw = max(40 * CELL_W, (w / CELL_W).rounded(.down) * CELL_W)
+            let ch = max(12 * CELL_H, (h / CELL_H).rounded(.down) * CELL_H)
+            win.setFrame(NSRect(x: left ? f0.maxX - cw : f0.minX, y: f0.maxY - ch, width: cw, height: ch),
+                         display: true)
+            if ev.type == .leftMouseUp { break }
+        }
+    }
+
+    /// A press on the proxy icon: past a few points of motion, drag the file.
+    private func dragIcon(_ down: NSEvent) {
+        guard let win = window else { return }
+        let start = down.locationInWindow
+        while let ev = win.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            if ev.type == .leftMouseUp { return }
+            let q = ev.locationInWindow
+            if hypot(q.x - start.x, q.y - start.y) > 3 {
+                let item = NSDraggingItem(pasteboardWriter: URL(fileURLWithPath: path) as NSURL)
+                item.setDraggingFrame(icon.frame, contents: icon.image)
+                beginDraggingSession(with: [item], event: down, source: self)
+                return
+            }
+        }
+    }
+
+    func draggingSession(_ session: NSDraggingSession,
+                         sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        [.copy, .link, .generic]
+    }
+
+    /// The path menu a ⌘-click on a title bar's proxy icon shows: the file,
+    /// then each folder up to the volume. Picking one shows it in Finder.
+    private func pathMenu() {
+        let menu = NSMenu()
+        var url = URL(fileURLWithPath: path).standardizedFileURL
+        while true {
+            let item = NSMenuItem(title: FileManager.default.displayName(atPath: url.path),
+                                  action: #selector(revealPath(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = url
+            let img = NSWorkspace.shared.icon(forFile: url.path)
+            img.size = NSSize(width: 16, height: 16)
+            item.image = img
+            menu.addItem(item)
+            if url.path == "/" { break }
+            url = url.deletingLastPathComponent()
+        }
+        let x = CGFloat(max(iconCol, 0)) * CELL_W
+        menu.popUp(positioning: menu.items.first, at: NSPoint(x: x, y: CELL_H), in: self)
+    }
+
+    @objc private func revealPath(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+}
+
+/// The proxy icon over its two cells of the frame's title row. Clicks go
+/// through to the ring, which owns the gestures.
+final class TVProxyIcon: NSImageView {
+    var path = ""
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 /// The Mac OS 9 look's project window: the Settings window's frame and

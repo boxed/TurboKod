@@ -79,6 +79,9 @@ struct FileTree(Movable):
     owns the menu (Swift/AppKit) the workspace starts at row 0 and the
     Desktop syncs this to 0 so the panel doesn't show a blank row above
     its title."""
+    var bottom: Int
+    """Rows kept clear below the panel: the status bar, and in the native
+    app's Turbo Vision look the project frame's bottom border too."""
     var dock_left: Bool
     """False → docked on the right edge (default), True → left edge.
     Cycled by the View-menu file-tree item: hidden → right → left."""
@@ -146,6 +149,7 @@ struct FileTree(Movable):
         self.root = String("")
         self.width = FILE_TREE_WIDTH
         self.top = 1
+        self.bottom = 1
         self.dock_left = False
         self.entries = List[FileTreeEntry]()
         self.selected = -1
@@ -391,9 +395,10 @@ struct FileTree(Movable):
 
     def rect(self, container_bounds: Rect) -> Rect:
         if self.dock_left:
-            return Rect(0, self.top, self.width, container_bounds.b.y - 1)
+            return Rect(0, self.top, self.width, container_bounds.b.y - self.bottom)
         return Rect(
-            container_bounds.b.x - self.width, self.top, container_bounds.b.x, container_bounds.b.y - 1,
+            container_bounds.b.x - self.width, self.top, container_bounds.b.x,
+            container_bounds.b.y - self.bottom,
         )
 
     def _sep_x(self, area: Rect) -> Int:

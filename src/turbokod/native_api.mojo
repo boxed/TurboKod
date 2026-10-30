@@ -1324,6 +1324,50 @@ def tk_desktop_platinum_ui(h: Int) abi("C") -> Int32:
 
 
 @export
+def tk_desktop_tv_frame(h: Int) abi("C") -> Int32:
+    """1 while this window's Desktop wants the Turbo Vision project frame
+    (``Desktop.tv_frame``): the host makes the window borderless and lays
+    the grid inside a ``tk_desktop_layout_frame`` ring."""
+    if h == 0:
+        return 0
+    return 1 if _desk(h)[].tv_frame() else 0
+
+
+@export
+def tk_desktop_layout_frame(
+    h: Int, cols: Int, rows: Int, zoomed: Int, out_ptr: Int, cap: Int,
+) abi("C") -> Int:
+    """Paint the project frame on the window's whole ``cols``x``rows`` grid
+    (``Desktop.paint_frame``) and pack it like ``tk_desktop_layout``. Only
+    the ring is meant to show; the Desktop's grid covers the rest."""
+    if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
+        return 0
+    var canvas = _blank_canvas(cols, rows)
+    _desk(h)[].paint_frame(canvas, Rect(0, 0, cols, rows), zoomed != 0)
+    return pack_canvas(canvas, cols, rows, out_ptr, cap)
+
+
+@export
+def tk_desktop_frame_info(h: Int, cols: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
+    """The project frame's title row for a ``cols``-wide window, as JSON:
+    ``{"path", "icon", "title": [a, b]}`` — the proxy icon's file (empty:
+    none), the first of its two cells (-1: not painted) and the title's
+    cell span. Same buffer contract as ``tk_desktop_native_dialog``."""
+    if h == 0:
+        return 0
+    ref d = _desk(h)[]
+    var span = d.frame_title_span(cols)
+    var title = json_array()
+    title.append(json_int(span[1]))
+    title.append(json_int(span[2]))
+    var o = json_object()
+    o.put(String("path"), json_str(d.frame_path()))
+    o.put(String("icon"), json_int(span[0]))
+    o.put(String("title"), title)
+    return _write_out(encode_json(o), out_ptr, cap)
+
+
+@export
 def tk_desktop_tabs(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     """The windows as tabs for the host's native tab strip, as JSON:
     ``{"focused": i, "tabs": [{"title", "path", "dirty"}, …]}`` in window

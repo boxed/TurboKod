@@ -100,6 +100,17 @@ anything those do. Find a window's grid with `NSWindow.cellView`, not
 (no kerning, whole-point advances) — `NSString` drawing smears the bitmap
 look. Full details in [docs/platinum-ui.md](docs/platinum-ui.md).
 
+### Turbo Vision look (native macOS)
+
+In the native app the Turbo Vision look is tabbed too (`Desktop.tv_frame()`):
+one window per project, the in-grid tab bar, and the window borderless inside
+a Turbo Vision frame of cells (`TVMainFrame` in `TurboKod.swift`; the ring
+from `Desktop.paint_frame`) whose close box closes the project, zoom box goes
+full screen (Option: fills the screen), and title row carries the focused
+file's proxy icon. The terminal frontends keep overlapping windows — don't
+make the overlapping layout depend on anything but `host_owns_menu`. Full
+details in [docs/tv-frame.md](docs/tv-frame.md).
+
 ### Floating panels (native macOS)
 
 A per-project toggle (View ▸ Floating panels) floats the tool panels (terminal /

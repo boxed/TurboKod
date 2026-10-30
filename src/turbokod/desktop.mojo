@@ -29,9 +29,11 @@ from std.collections.optional import Optional
 
 from .case_fold import eq_ci, fold_byte
 from .canvas import Canvas, utf8_codepoint_count
+from .cell import Cell
 from .painter import Painter
 from .colors import (
-    Attr, BLACK, EDITOR_BG, EDITOR_FG, FG_TRUECOLOR, LIGHT_GRAY, LIGHT_RED, RED,
+    Attr, BLACK, BORDER_FOCUS, EDITOR_BG, EDITOR_FG, FG_TRUECOLOR, LIGHT_GRAY,
+    LIGHT_RED, RED,
 )
 from .theme import Theme, theme_by_name
 from .events import (
@@ -249,7 +251,7 @@ from .window import (
     BottomDockedPanel, DOCK_MIN_HEIGHT, MIN_WIN_H, MIN_WIN_W,
     PANEL_STATE_MAXIMIZED, PANEL_STATE_MINIMIZED, PANEL_STATE_NORMAL,
     TitleCommand, Window, WindowManager,
-    compute_display_titles, hit_title_command,
+    compute_display_titles, hit_title_command, paint_close_button,
 )
 
 
@@ -2604,6 +2606,8 @@ struct Desktop(Movable):
         tab bar adds another when the View toggle is on, but only
         if the screen is tall enough to host both rows above the
         menu bar."""
+        if self._frame_rows(screen):
+            return 3
         if self.config.tab_bar and not self.host_tabs() \
                 and screen.b.y - 2 >= 1:
             return 2
@@ -3244,6 +3248,10 @@ struct Desktop(Movable):
     def tab_bar_rect(self, screen: Rect) -> Rect:
         """Single-row strip directly above the status bar holding one
         tab per open window. Empty when the View toggle is off."""
+        # The tabbed Turbo Vision look switches windows only here, so the
+        # bar is always on; it sits above the frame's bottom border.
+        if self._frame_rows(screen):
+            return Rect(0, screen.b.y - 3, screen.b.x, screen.b.y - 2)
         if not self.config.tab_bar or self.host_tabs():
             return Rect.empty()
         var y = screen.b.y - 2
@@ -4727,6 +4735,7 @@ struct Desktop(Movable):
         # under a host-owned menu the panel starts at the top edge so it
         # doesn't show a blank row above its title.
         self.file_tree.top = 0 if self.host_owns_menu else 1
+        self.file_tree.bottom = 2 if self._frame_rows(screen) else 1
         # Sync which files carry uncommitted changes so the tree can
         # tint their rows with the tab bar's dirty colors.
         self.file_tree.modified_paths = List[String]()
@@ -4759,6 +4768,8 @@ struct Desktop(Movable):
             if not self.host_owns_menu:
                 self.menu_bar.paint(canvas, screen)
             self._paint_tab_bar(canvas, screen)
+            if self._frame_rows(screen):
+                self._paint_frame_bottom(canvas, screen)
             self.status_bar.paint(canvas, screen)
             # Non-modal install-progress popup. Sits between the workspace
             # and the modal dialogs — visible while the user keeps editing,
@@ -8446,6 +8457,108 @@ struct Desktop(Movable):
         layout) rather than overlapping grid windows."""
         return self.native_ui() or self.platinum_ui()
 
+    def tv_frame(self) -> Bool:
+        """The Turbo Vision look in the native app. The windows are tabs
+        (the tabbed layout, switched with the in-grid tab bar), and the
+        project window gets a Turbo Vision frame in place of the macOS
+        title bar: the host lays the grid inside it and draws its top and
+        sides from ``paint_frame``, and ``paint`` draws its bottom border
+        on a row kept clear above the status bar, which stays outside the
+        frame. The terminal frontends keep overlapping windows."""
+        return self.host_owns_menu and not self.native_ui() \
+            and not self.platinum_ui()
+
+    def _frame_rows(self, screen: Rect) -> Bool:
+        """``tv_frame`` on a screen with room for the frame's bottom border
+        and the tab bar over the status bar."""
+        return self.tv_frame() and screen.b.y >= 6
+
+    def _frame_attr(self) -> Attr:
+        """The project frame's lines: double while its window is key, as a
+        focused window's are."""
+        if self.host_focused:
+            return Attr(BORDER_FOCUS, EDITOR_BG)
+        return Attr(EDITOR_FG, EDITOR_BG)
+
+    def frame_path(self) -> String:
+        """What the frame's proxy icon stands for: the focused file, else
+        the project. Empty for neither."""
+        var fe = self._focused_editor_idx()
+        if fe >= 0:
+            var path = self.windows.windows[fe].editor.file_path
+            if len(path.as_bytes()) > 0:
+                return path^
+        if self.project:
+            return self.project.value()
+        return String("")
+
+    def frame_title(self) -> String:
+        """``file — project``, or whichever of them there is."""
+        var project = basename(self.project.value()) if self.project else String("")
+        var fe = self._focused_editor_idx()
+        var name = self.windows.windows[fe].title if fe >= 0 else String("")
+        if len(name.as_bytes()) > 0 and len(project.as_bytes()) > 0:
+            return name + String(" — ") + project
+        if len(name.as_bytes()) > 0:
+            return name^
+        if len(project.as_bytes()) > 0:
+            return project^
+        return String("TurboKod")
+
+    def frame_title_span(self, cols: Int) -> Tuple[Int, Int, Int]:
+        """Where the frame's title row puts ``(icon, text, end)``: the proxy
+        icon's two cells start at ``icon`` (-1 without a path), the title
+        runs ``[text, end)``. Centered, clear of the close and zoom boxes;
+        ``(-1, -1, -1)`` when it doesn't fit."""
+        var w = display_columns(self.frame_title())
+        var icon = len(self.frame_path().as_bytes()) > 0
+        var label = w + (3 if icon else 0)
+        # [■] on the left and [▲] on the right take five cells each, and the
+        # label keeps a space either side.
+        if cols - 10 < label + 2:
+            return (-1, -1, -1)
+        var x = (cols - label) // 2
+        if icon:
+            return (x, x + 3, x + label)
+        return (-1, x, x + label)
+
+    def paint_frame(mut self, mut canvas: Canvas, outer: Rect, zoomed: Bool):
+        """The ``tv_frame`` project frame, on the window's whole grid
+        (``outer``): its top row (close box, proxy icon cells, title, zoom
+        box), its sides, and the cells beside the status bar. The host
+        lays the Desktop's own grid over the inside — one cell in at the
+        sides and below the title, down to the window's bottom — so only
+        the ring shows. ``zoomed`` picks the zoom box's glyph."""
+        var cols = outer.b.x
+        var rows = outer.b.y
+        if cols < 12 or rows < 4:
+            return
+        var border = self._frame_attr()
+        var painter = Painter(outer)
+        painter.draw_box(canvas, Rect(0, 0, cols, rows - 1), border, self.host_focused)
+        var span = self.frame_title_span(cols)
+        if span[1] >= 0:
+            var a = (span[0] if span[0] >= 0 else span[1]) - 1
+            painter.fill(canvas, Rect(a, 0, span[2] + 1, 1), String(" "), border)
+            _ = painter.put_text(canvas, Point(span[1], 0), self.frame_title(), border)
+        paint_close_button(canvas, Point(0, 0), border)
+        var glyph = String("▼") if zoomed else String("▲")
+        _ = painter.put_text(
+            canvas, Point(cols - 4, 0), String("[") + glyph + String("]"), border,
+        )
+        var status = Attr(BLACK, LIGHT_GRAY)
+        painter.set(canvas, 0, rows - 1, Cell(String(" "), status, 1))
+        painter.set(canvas, cols - 1, rows - 1, Cell(String(" "), status, 1))
+
+    def _paint_frame_bottom(self, mut canvas: Canvas, screen: Rect):
+        """The ``tv_frame`` frame's bottom border, between the tab bar and
+        the status bar. Its corners are the host's (``paint_frame``)."""
+        var y = screen.b.y - 2
+        var glyph = String("═") if self.host_focused else String("─")
+        var attr = self._frame_attr()
+        for x in range(screen.b.x):
+            canvas.set(x, y, Cell(glyph, attr, 1))
+
     def host_draws_dialogs(self) -> Bool:
         """The declarative dialogs go to the host (``tk_desktop_ui``)
         rather than through the grid projector."""
@@ -8483,9 +8596,11 @@ struct Desktop(Movable):
         self._close_window_keeping_work(idx)
 
     def _fit_windows(mut self, screen: Rect):
-        self.windows.tabbed = self.host_tabs()
-        # The Mac OS 9 look's scroll bar is 16 points: two cells.
-        self.windows.gutter = 2 if self.platinum_ui() else 0
+        self.windows.tabbed = self.host_tabs() or self.tv_frame()
+        # The Mac OS 9 look's scroll bar is 16 points: two cells. The Turbo
+        # Vision look paints its own, one cell wide.
+        self.windows.gutter = 2 if self.platinum_ui() else (1 if self.tv_frame() else 0)
+        self.windows.grid_bar = self.tv_frame()
         self.windows.fit_into(self.workspace_rect(screen))
 
     def native_prompt_active(self) -> Bool:

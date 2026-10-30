@@ -75,8 +75,10 @@ instead of to the editor behind the sheet.
 
 ## Tabs
 
-`WindowManager.tabbed` (set from `native_ui()` by `Desktop._fit_windows`, the
-one path to `fit_into`) turns every window into a **frameless** one:
+`WindowManager.tabbed` (set by `Desktop._fit_windows`, the one path to
+`fit_into`, in every look of the native app: this one, the Mac OS 9 look and
+the Turbo Vision look, see [tv-frame.md](tv-frame.md)) turns every window into
+a **frameless** one:
 
 - `Window.frameless` makes `interior()` the whole rect.
 - Paint skips the border, title, shadow and scroll bars.
