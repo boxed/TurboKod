@@ -232,8 +232,33 @@ def _measure(n: UINode) -> Tuple[Int, Int]:
     if k == UI_DIALOG:
         var c = _measure(n.children[0])
         var w = max(c[0], display_columns(n.text) + 8)
-        return (w + 2 * (_MARGIN_X + 1), c[1] + 2 * (_MARGIN_Y + 1))
+        return (w + 2 * (_MARGIN_X + 1), c[1] + 2 + _MARGIN_Y + _bottom_margin(n))
     return (0, 0)
+
+
+def _ends_with_buttons(n: UINode) -> Bool:
+    """True when the bottom row of ``n`` is a row of buttons."""
+    if n.kind == UI_BUTTON:
+        return True
+    if n.kind == UI_HSTACK:
+        for i in range(len(n.children)):
+            if _ends_with_buttons(n.children[i]):
+                return True
+        return False
+    if n.kind == UI_VSTACK or n.kind == UI_DIALOG:
+        for i in range(len(n.children) - 1, -1, -1):
+            if n.children[i].kind != UI_SPACER:
+                return _ends_with_buttons(n.children[i])
+    return False
+
+
+def _bottom_margin(dialog: UINode) -> Int:
+    """Rows between the content and the bottom border. A closing button
+    row's shadow is margin enough — Turbo Vision puts the shadow right on
+    the row above the frame."""
+    if _ends_with_buttons(dialog):
+        return max(_MARGIN_Y - 1, 0)
+    return _MARGIN_Y
 
 
 def _browse_button(n: UINode) -> UINode:
@@ -580,7 +605,7 @@ struct GridForm(Movable):
         self._frame = screen if self.fill else center_in(screen, max(w, 10), max(h, 5))
         var body = Rect(
             self._frame.a.x + 1 + _MARGIN_X, self._frame.a.y + 1 + _MARGIN_Y,
-            self._frame.b.x - 1 - _MARGIN_X, self._frame.b.y - 1 - _MARGIN_Y,
+            self._frame.b.x - 1 - _MARGIN_X, self._frame.b.y - 1 - _bottom_margin(root),
         )
         self._placed = List[_Placed]()
         _arrange(root, body, self._placed)

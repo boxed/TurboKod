@@ -38,7 +38,7 @@ def picker_dialog(
 ) -> UINode:
     """Search field(s) (``query``: a form, or a spacer for a picker that
     doesn't search), the results list, an optional code view, the status
-    line, and Cancel / ``actions`` / Open."""
+    line (left out while empty), and Cancel / ``actions`` / Open."""
     var body = List[UINode]()
     body.append(query^)
     for i in range(len(extra)):
@@ -46,7 +46,9 @@ def picker_dialog(
     body.append(results^)
     for i in range(len(code)):
         body.append(code[i].copy())
-    body.append(ui_label(status^, UI_SECONDARY))
+    # An empty status would still take a row (and a gap) in every look.
+    if len(status.as_bytes()) > 0:
+        body.append(ui_label(status^, UI_SECONDARY))
     var buttons = List[UINode]()
     buttons.append(ui_button(String("cancel"), String("Cancel"), UI_CANCEL))
     for i in range(len(actions)):
