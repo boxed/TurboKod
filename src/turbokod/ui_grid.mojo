@@ -202,7 +202,7 @@ def _measure(n: UINode) -> Tuple[Int, Int]:
         for i in range(len(n.children)):
             var c = _measure(n.children[i])
             w = max(w, c[0])
-            if n.children[i].kind == UI_SPACER:
+            if _takes_no_room(n.children[i]):
                 continue
             if shown > 0:
                 h += n.number
@@ -234,6 +234,15 @@ def _measure(n: UINode) -> Tuple[Int, Int]:
         var w = max(c[0], display_columns(n.text) + 8)
         return (w + 2 * (_MARGIN_X + 1), c[1] + 2 + _MARGIN_Y + _bottom_margin(n))
     return (0, 0)
+
+
+def _takes_no_room(n: UINode) -> Bool:
+    """A stack child with no height and no gap around it: a spacer (it gets
+    spare height instead), or a label with nothing to say right now — a
+    status line, say, which is always in the tree so the native projectors
+    see the same shape (and keep their views and focus) as it comes and
+    goes."""
+    return n.kind == UI_SPACER or (n.kind == UI_LABEL and len(n.text.as_bytes()) == 0)
 
 
 def _ends_with_buttons(n: UINode) -> Bool:
@@ -321,6 +330,8 @@ def _arrange(n: UINode, r: Rect, mut out: List[_Placed]):
             if n.children[i].kind == UI_SPACER:
                 spacers += 1
                 continue
+            if _takes_no_room(n.children[i]):
+                continue
             if shown > 0:
                 used += n.number
             used += c[1]
@@ -350,9 +361,11 @@ def _arrange(n: UINode, r: Rect, mut out: List[_Placed]):
             var h = heights[i]
             if n.children[i].kind == UI_SPACER:
                 h = spare // spacers if spacers > 0 else 0
+            elif _takes_no_room(n.children[i]):
+                h = 0
             elif shown > 0:
                 y += gap
-            if n.children[i].kind != UI_SPACER:
+            if not _takes_no_room(n.children[i]):
                 shown += 1
             _arrange(n.children[i], Rect(r.a.x, y, r.b.x, min(y + h, r.b.y)), out)
             y += h

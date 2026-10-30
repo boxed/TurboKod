@@ -187,6 +187,32 @@ def test_long_label_stays_inside_the_dialog() raises:
     assert_true(at[1] >= 0)
     assert_true(at[0] < form.frame().b.x - 1)
 
+def _status_dialog(status: String) -> UINode:
+    var body = List[UINode]()
+    body.append(ui_text(String("query"), String("x")))
+    body.append(ui_label(status))
+    var buttons = List[UINode]()
+    buttons.append(ui_button(String("cancel"), String("Cancel"), UI_CANCEL))
+    body.append(ui_buttons(buttons^))
+    return ui_dialog(String("Find"), String("cancel"), ui_vstack(body^))
+
+
+def test_an_empty_label_takes_no_room_in_a_stack() raises:
+    """A status line stays in the tree while it has nothing to say (so the
+    native projectors keep their views, and the field its focus), but
+    takes no row and no gap until it does."""
+    var empty = GridForm()
+    _ = _paint(empty, _status_dialog(String("")))
+    var with_status = GridForm()
+    _ = _paint(with_status, _status_dialog(String("Searching…")))
+    # The label's row and one gap.
+    assert_equal(with_status.frame().height() - empty.frame().height(), 2)
+    var canvas = _paint(empty, _status_dialog(String("")))
+    var field = _find(canvas, String("x"))
+    var button = _find(canvas, String("Cancel"))
+    assert_equal(button[1] - field[1], 2)
+
+
 def main() raises:
     setup_test_env()
     TestSuite.discover_tests[__functions_in_module()]().run()

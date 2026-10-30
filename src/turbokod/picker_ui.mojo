@@ -38,7 +38,7 @@ def picker_dialog(
 ) -> UINode:
     """Search field(s) (``query``: a form, or a spacer for a picker that
     doesn't search), the results list, an optional code view, the status
-    line (left out while empty), and Cancel / ``actions`` / Open."""
+    line (no room while empty), and Cancel / ``actions`` / Open."""
     var body = List[UINode]()
     body.append(query^)
     for i in range(len(extra)):
@@ -46,9 +46,10 @@ def picker_dialog(
     body.append(results^)
     for i in range(len(code)):
         body.append(code[i].copy())
-    # An empty status would still take a row (and a gap) in every look.
-    if len(status.as_bytes()) > 0:
-        body.append(ui_label(status^, UI_SECONDARY))
+    # Always there, so the tree keeps its shape as the status comes and goes
+    # (the native projectors rebuild their views, and lose the field's
+    # focus, on a new shape); empty, it takes no room in any look.
+    body.append(ui_label(status^, UI_SECONDARY))
     var buttons = List[UINode]()
     buttons.append(ui_button(String("cancel"), String("Cancel"), UI_CANCEL))
     for i in range(len(actions)):
