@@ -14,6 +14,12 @@ then carries a ``file_path`` and drops out of this store on the next write
 (picked up by ``session_store`` instead). Closing an untitled window discards
 its draft the same way — the next snapshot no longer includes it.
 
+At quit (and Close Project) a file-backed buffer that is still unsaved —
+its save failed, or auto-save is off and quitting can't ask — is kept
+here too, with its ``path`` and the on-disk text it was edited against
+(``base``). The next restore puts the edits back into the file's window
+and merges in whatever changed on disk since.
+
 Format on disk::
 
     {
