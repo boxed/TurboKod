@@ -74,6 +74,13 @@ struct StoredDraft(ImplicitlyCopyable, Movable):
     var scroll_x: Int
     var scroll_y: Int
     var last_focus_ms: Int
+    var path: String
+    """Empty for an untitled buffer. Otherwise the file whose unsaved
+    edits these are, kept at quit because they couldn't be saved (or
+    auto-save is off, and quitting can't ask)."""
+    var base: String
+    """For a file's draft: the file as it was on disk when it was edited,
+    so a change made on disk since can be merged with the draft."""
 
     def __init__(out self):
         self.seq = 0
@@ -92,6 +99,8 @@ struct StoredDraft(ImplicitlyCopyable, Movable):
         self.scroll_x = 0
         self.scroll_y = 0
         self.last_focus_ms = 0
+        self.path = String("")
+        self.base = String("")
 
 
 def _drafts_path(project_root: String) -> String:
@@ -125,6 +134,8 @@ def _parse_draft(node: JsonValue) -> StoredDraft:
     d.scroll_x = scroll[0]
     d.scroll_y = scroll[1]
     d.last_focus_ms = json_get_int(node, String("last_focus_ms"), 0)
+    d.path = json_get_string(node, String("path"))
+    d.base = json_get_string(node, String("base"))
     return d^
 
 
@@ -166,6 +177,9 @@ def _encode_draft(d: StoredDraft) -> JsonValue:
     obj.put(String("cursor"), encode_int_pair(d.cursor_row, d.cursor_col))
     obj.put(String("scroll"), encode_int_pair(d.scroll_x, d.scroll_y))
     obj.put(String("last_focus_ms"), json_int(d.last_focus_ms))
+    if len(d.path.as_bytes()) > 0:
+        obj.put(String("path"), json_str(d.path))
+        obj.put(String("base"), json_str(d.base))
     return obj^
 
 

@@ -4511,6 +4511,26 @@ struct Editor(Copyable, Movable):
             return EXT_CHANGE_NONE
         return self._reconcile_with_disk(info)
 
+    def restore_unsaved(mut self, text: String, base: String) raises:
+        """Put back edits that couldn't be saved before the last quit (a
+        draft): ``text``, made against ``base``, over the file as just
+        loaded, as an undo step. When the file changed on disk since
+        ``base``, the two merge as any change made on disk under unsaved
+        edits does — a conflict goes to the merge view."""
+        var lines = _split_buffer_lines(text)
+        if lines == self.buffer.lines:
+            return
+        var on_disk = self.disk_baseline
+        self._push_undo()
+        self._swap_in_lines(lines^)
+        self._after_buffer_swap()
+        self.dirty = True
+        if base != on_disk and len(self.file_path.as_bytes()) > 0:
+            var info = stat_file(self.file_path)
+            if info.ok:
+                self.disk_baseline = base
+                _ = self._reconcile_with_disk(info)
+
     def _reconcile_with_disk(mut self, info: FileInfo) raises -> Int:
         """Bring the buffer up to date with the on-disk file whose stat is
         ``info``: reload when clean, 3-way merge when dirty. Returns the

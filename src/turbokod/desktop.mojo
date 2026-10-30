@@ -5768,7 +5768,9 @@ struct Desktop(Movable):
         # nothing else saves the last edits: do it as focus-out would.
         if self.config.auto_save:
             self._autosave_all_dirty()
-        self._save_drafts_if_changed()
+        # What's still unsaved (a save failed, or auto-save is off and
+        # quitting can't ask) goes with the drafts, back next time
+        self._save_drafts_if_changed(True)
         for i in range(len(self.lsp_managers)):
             self.lsp_managers[i].begin_shutdown()
         for i in range(len(self._closing_lsp)):
@@ -6298,7 +6300,7 @@ struct Desktop(Movable):
         # would, and the untitled ones to the drafts.
         if self.config.auto_save:
             self._autosave_all_dirty()
-        self._save_drafts_if_changed()
+        self._save_drafts_if_changed(True)
         self.project = Optional[String]()
         self._pytest_file_globs = List[String]()
         self.speller.set_project(String(""))
@@ -7061,7 +7063,7 @@ struct Desktop(Movable):
             return 0
         return n
 
-    def _snapshot_drafts(self) -> List[StoredDraft]:
+    def _snapshot_drafts(self, with_files: Bool = False) -> List[StoredDraft]:
         """Build the list of untitled (file-less) editor buffers to
         persist. An untitled window qualifies when it's an editor, has
         no ``file_path``, and holds unsaved, non-empty content — a
@@ -7076,9 +7078,34 @@ struct Desktop(Movable):
         for i in range(len(self.windows.windows)):
             if not self.windows.windows[i].is_editor:
                 continue
-            if len(self.windows.windows[i].editor.file_path.as_bytes()) != 0:
-                continue
             if not self.windows.windows[i].editor.dirty:
+                continue
+            if len(self.windows.windows[i].editor.file_path.as_bytes()) != 0:
+                # With ``with_files`` (quitting, closing the project): a
+                # file's edits still unsaved, kept to put back next time
+                ref ed = self.windows.windows[i].editor
+                if with_files and not ed.read_only and not ed.review_mode:
+                    var fd = StoredDraft()
+                    fd.path = ed.file_path
+                    fd.base = ed.disk_baseline
+                    fd.content = ed.text_snapshot()
+                    fd.cursor_row = ed.selections[0].row
+                    fd.cursor_col = ed.selections[0].col
+                    fd.scroll_x = ed.scroll_x
+                    fd.scroll_y = ed.scroll_y
+                    # where an untitled stand-in goes if the file is gone
+                    ref w = self.windows.windows[i]
+                    fd.rect_a_x = w.rect.a.x
+                    fd.rect_a_y = w.rect.a.y
+                    fd.rect_b_x = w.rect.b.x
+                    fd.rect_b_y = w.rect.b.y
+                    fd.restore_a_x = w._restore_rect.a.x
+                    fd.restore_a_y = w._restore_rect.a.y
+                    fd.restore_b_x = w._restore_rect.b.x
+                    fd.restore_b_y = w._restore_rect.b.y
+                    fd.is_maximized = w.is_maximized
+                    fd.last_focus_ms = w._last_focus_ms
+                    out.append(fd^)
                 continue
             var content = self.windows.windows[i].editor.text_snapshot()
             if len(content.as_bytes()) == 0:
@@ -7108,7 +7135,7 @@ struct Desktop(Movable):
             out.append(d^)
         return out^
 
-    def _save_drafts_if_changed(mut self):
+    def _save_drafts_if_changed(mut self, with_files: Bool = False):
         """Re-encode the untitled-drafts snapshot and write it only when
         the encoding differs from the previously-written one. Same
         cadence and project guard as ``_save_session_if_changed`` — runs
@@ -7126,9 +7153,9 @@ struct Desktop(Movable):
         if not self.project or self._pending_restore:
             return
         var key = self._drafts_key_now()
-        if key == self._drafts_key:
+        if key == self._drafts_key and not with_files:
             return
-        var drafts = self._snapshot_drafts()
+        var drafts = self._snapshot_drafts(with_files)
         var encoded = encode_drafts(drafts)
         if encoded == self._last_drafts_json:
             self._drafts_key = key^
@@ -7190,7 +7217,13 @@ struct Desktop(Movable):
             winner_ms = self.windows.windows[winner]._last_focus_ms
         for i in range(len(drafts)):
             var d = drafts[i]
+            # A file's edits go back into its window; if it can't be
+            # opened, they come back as an untitled buffer rather than not
+            if len(d.path.as_bytes()) > 0 and self._restore_file_draft(d, screen):
+                continue
             var seq = d.seq
+            if len(d.path.as_bytes()) > 0:
+                seq = self._untitled_count + 1
             if seq < 1:
                 seq = 1
             var title = String("Untitled")
@@ -7243,6 +7276,28 @@ struct Desktop(Movable):
         # the immediate post-restore paint doesn't rewrite identical
         # bytes (the snapshot reflects exactly these windows now).
         self._last_drafts_json = encode_drafts(self._snapshot_drafts())
+
+    def _restore_file_draft(mut self, d: StoredDraft, screen: Rect) -> Bool:
+        """Put a file's unsaved edits from the last quit back into its
+        window, opening it when the session didn't. False when the file
+        can't be opened."""
+        if not stat_file(d.path).ok:
+            return False
+        try:
+            self.open_file(d.path, screen)
+        except:
+            return False
+        var idx = self._find_window_for_path(d.path)
+        if idx < 0:
+            return False
+        try:
+            self.windows.windows[idx].editor.restore_unsaved(d.content, d.base)
+        except:
+            return False
+        self.windows.windows[idx].editor.move_to(d.cursor_row, d.cursor_col)
+        self.windows.windows[idx].editor.scroll_x = d.scroll_x
+        self.windows.windows[idx].editor.scroll_y = d.scroll_y
+        return True
 
     def _restore_session(mut self, screen: Rect):
         """Recreate windows from

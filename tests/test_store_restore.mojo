@@ -119,6 +119,80 @@ def test_drafts_are_written_when_a_buffer_changes_and_only_then() raises:
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
 
 
+def _quit_with_unsaved(root: String, path: String) raises:
+    var screen = Rect(0, 0, 80, 30)
+    var d = Desktop()
+    d.config.auto_save = False
+    d.open_project(root)
+    var canvas = Canvas(80, 30)
+    d.paint(canvas, screen)
+    d.open_file(path, screen)
+    _ = d.handle_event(Event.key_event(UInt32(ord("X"))), screen)
+    d.begin_shutdown()
+
+
+def _reopen(root: String) raises -> Desktop:
+    var screen = Rect(0, 0, 80, 30)
+    var d = Desktop()
+    d.open_project(root)
+    var canvas = Canvas(80, 30)
+    d.paint(canvas, screen)
+    return d^
+
+
+def _fresh(name: String) -> String:
+    var root = _temp_path(name)
+    _ = external_call["system", Int32]((String("rm -rf '") + root + String("'; mkdir -p '") + root + String("'\0")).unsafe_ptr())
+    return root^
+
+
+def test_edits_that_couldnt_be_saved_come_back_after_a_quit() raises:
+    # Quitting with auto-save off (or a save failing) can't ask: the
+    # edits were gone
+    var root = _fresh(String("_file_draft"))
+    var path = root + String("/a.txt")
+    assert_equal(write_file(path, String("one\n")), True)
+    _quit_with_unsaved(root, path)
+    assert_equal(read_file(path), String("one\n"))
+    var d = _reopen(root)
+    var idx = d._find_window_for_path(path)
+    assert_equal(idx >= 0, True)
+    assert_equal(d.windows.windows[idx].editor.text_snapshot(), String("Xone\n"))
+    assert_equal(d.windows.windows[idx].editor.dirty, True)
+    _ = external_call["system", Int32]((String("rm -rf '") + root + String("'\0")).unsafe_ptr())
+
+
+def test_a_change_on_disk_since_merges_with_the_kept_edits() raises:
+    var root = _fresh(String("_file_draft_merge"))
+    var path = root + String("/a.txt")
+    assert_equal(write_file(path, String("one\ntwo\nthree\n")), True)
+    _quit_with_unsaved(root, path)
+    assert_equal(write_file(path, String("one\ntwo\nthree\nfour\n")), True)
+    var d = _reopen(root)
+    var idx = d._find_window_for_path(path)
+    assert_equal(
+        d.windows.windows[idx].editor.text_snapshot(),
+        String("Xone\ntwo\nthree\nfour\n"),
+    )
+    _ = external_call["system", Int32]((String("rm -rf '") + root + String("'\0")).unsafe_ptr())
+
+
+def test_kept_edits_of_a_file_since_deleted_come_back_untitled() raises:
+    var root = _fresh(String("_file_draft_gone"))
+    var path = root + String("/a.txt")
+    assert_equal(write_file(path, String("one\n")), True)
+    _quit_with_unsaved(root, path)
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+    var d = _reopen(root)
+    var found = False
+    for w in d.windows.windows:
+        if w.is_editor and w.editor.text_snapshot() == String("Xone\n"):
+            found = True
+            assert_equal(len(w.editor.file_path.as_bytes()), 0)
+    assert_equal(found, True)
+    _ = external_call["system", Int32]((String("rm -rf '") + root + String("'\0")).unsafe_ptr())
+
+
 def test_per_user_state_stays_out_of_git() raises:
     var root = _temp_path(String("_per_user_git"))
     _ = capture_command(string_list("rm", "-rf", root))
