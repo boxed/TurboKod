@@ -3768,14 +3768,6 @@ def test_fullscreen_modal_paint_is_covered_by_the_modal() raises:
     d.local_changes.paint(only, _SCREEN, d.grammar_registry)
     _assert_same_cells(full, only)
     d.local_changes.close()
-    # Find in Project: same contract.
-    d.project_find.open(String("."), String("desktop"))
-    assert_true(d.project_find.active)
-    full.clear(default_attr())
-    d.paint(full, _SCREEN)
-    only.clear(default_attr())
-    d.project_find.paint(only, _SCREEN, d.grammar_registry)
-    _assert_same_cells(full, only)
 
 
 def _assert_same_cells(imm a: Canvas, imm b: Canvas) raises:

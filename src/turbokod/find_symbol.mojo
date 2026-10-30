@@ -36,6 +36,7 @@ from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, RED, YELLOW
 from .events import Event, EVENT_KEY, EVENT_MOUSE, KEY_ENTER, KEY_ESC
 from .file_io import ci_less, project_relative, read_file
 from .geometry import center_in, Point, Rect
+from .scrollbar import ScrollBarArea
 from .picker_input import (
     build_picker_layout, picker_nav_key, picker_row_at, picker_wheel_scroll,
     scroll_to_reveal,
@@ -233,6 +234,7 @@ struct FindSymbol(Movable):
     var seen_priority: List[Int]
     var selected: Int
     var scroll: Int
+    var _bar: ScrollBarArea
     var submitted: Bool
     # Output: the entry the user just submitted. The host reads these
     # after ``take_submitted()`` returns True.
@@ -292,6 +294,7 @@ struct FindSymbol(Movable):
         self.seen_priority = List[Int]()
         self.selected = 0
         self.scroll = 0
+        self._bar = ScrollBarArea()
         self.submitted = False
         self.selected_path = String("")
         self.selected_line = 0
@@ -756,6 +759,10 @@ struct FindSymbol(Movable):
             _ = painter.put_text(
                 canvas, Point(name_x, top + i), display, row_attr,
             )
+        self._bar.paint(
+            canvas, Rect(rect.a.x + 1, top, rect.b.x - 1, top + h),
+            len(self.entries), self.scroll, bg,
+        )
         # Bottom hint.
         _ = painter.put_text(
             canvas, Point(rect.a.x + 2, layout.hint_y),
@@ -861,6 +868,10 @@ struct FindSymbol(Movable):
             return True
         var rect = self._rect(container_bounds)
         var layout = build_picker_layout(rect, _LABEL_W)
+        var sb = self._bar.handle_mouse(event)
+        if sb >= 0:
+            self.scroll = sb
+            return True
         # Skip text-field mouse routing in chooser mode — the input is
         # frozen and the field isn't visibly painted, so capturing
         # clicks there would just move an invisible cursor.

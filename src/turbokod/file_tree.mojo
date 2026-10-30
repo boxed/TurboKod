@@ -36,6 +36,7 @@ from .file_io import (
     stat_file,
 )
 from .geometry import Point, Rect
+from .scrollbar import ScrollBarArea
 from .project import GitignoreMatcher, load_project_gitignore
 from .string_utils import starts_with
 from .type_ahead import TypeAhead, is_type_ahead_key, type_ahead_pick
@@ -84,6 +85,7 @@ struct FileTree(Movable):
     var entries: List[FileTreeEntry]
     var selected: Int
     var scroll: Int
+    var _bar: ScrollBarArea
     var opened_path: String
     var submitted: Bool
     var focused: Bool
@@ -148,6 +150,7 @@ struct FileTree(Movable):
         self.entries = List[FileTreeEntry]()
         self.selected = -1
         self.scroll = 0
+        self._bar = ScrollBarArea()
         self.opened_path = String("")
         self.submitted = False
         self.focused = False
@@ -482,6 +485,10 @@ struct FileTree(Movable):
             _ = painter.put_text(
                 canvas, Point(content_x + e.depth * 2, list_top + i), label, attr,
             )
+        self._bar.paint(
+            canvas, Rect(content_x, list_top, content_end, list_top + list_h),
+            len(self.entries), self.scroll, bg,
+        )
 
     # --- mouse ------------------------------------------------------------
 
@@ -602,6 +609,10 @@ struct FileTree(Movable):
                     and event.pos.y >= area.a.y and event.pos.y < area.b.y:
                 self._resizing = True
                 return True
+        var sb = self._bar.handle_mouse(event)
+        if sb >= 0:
+            self.scroll = sb
+            return True
         if not area.contains(event.pos):
             # Only an actual click outside loses focus; bare hover (button
             # NONE) under mouse-mode 1003 must not steal it on every move.

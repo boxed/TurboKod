@@ -9,7 +9,7 @@ from turbokod.canvas import Canvas
 from turbokod.colors import default_attr
 from turbokod.desktop import (
     APP_SETTINGS, DOCK_DEBUG_PANE, Desktop, PROJECT_SETTINGS, EDITOR_FIND, EDITOR_GOTO,
-    EDITOR_REPLACE, VIEW_NATIVE_UI, VIEW_PLATINUM_UI,
+    EDITOR_REPLACE, VIEW_CLASSIC_UI, VIEW_NATIVE_UI, VIEW_PLATINUM_UI,
 )
 from turbokod.search_options import SearchOptions
 from turbokod.color_picker import ColorPickerDialog, MODE_RGB
@@ -70,13 +70,13 @@ def test_native_ui_needs_a_host_that_owns_the_menu() raises:
     assert_true(d.native_ui())
 
 
-def test_view_menu_toggles_native_ui() raises:
+def test_view_menu_picks_native_ui() raises:
     var d = Desktop()
     d.host_owns_menu = True
     assert_false(d.config.native_ui)
     _ = d.dispatch_action(VIEW_NATIVE_UI, _SCREEN)
     assert_true(d.config.native_ui)
-    _ = d.dispatch_action(VIEW_NATIVE_UI, _SCREEN)
+    _ = d.dispatch_action(VIEW_CLASSIC_UI, _SCREEN)
     assert_false(d.config.native_ui)
 
 
@@ -190,16 +190,27 @@ def _quick_open_with(mut d: Desktop, paths: List[String]):
     d.quick_open.set_query(String(""))
 
 
-def test_native_picker_is_reported_only_with_native_ui() raises:
+def test_an_open_picker_is_a_declarative_surface_in_every_look() raises:
+    """One description of the picker, drawn by whichever projector the
+    look uses: the grid included."""
     var d = Desktop()
-    _quick_open_with(d, [String("/a/one.txt")])
-    assert_equal(d.native_picker_kind(), String(""))
+    _quick_open_with(d, [String("/a/one.txt"), String("/a/two.txt")])
+    assert_equal(d.picker_kind(), String("quick_open"))
+    assert_equal(d.ui_surface(), String("picker"))
+    var tree = d.ui_tree(String("picker"))
+    var list = tree.children[0].children[1].copy()
+    assert_equal(list.key, String("results"))
+    assert_equal(list.count, 2)
+    assert_equal(len(list.rows), 2)
+    # Typing in the field and opening go through the same paths.
+    _ = d.ui_apply(String("picker"), [ui_set(String("query"), String("two"))])
+    assert_equal(len(d.quick_open.matched), 1)
     d.host_owns_menu = True
     d.config.native_ui = True
-    assert_equal(d.native_picker_kind(), String("quick_open"))
-    d.native_picker_close()
+    assert_equal(d.picker_kind(), String("quick_open"))
+    d.picker_close()
     assert_false(d.quick_open.active)
-    assert_equal(d.native_picker_kind(), String(""))
+    assert_equal(d.picker_kind(), String(""))
 
 
 def test_native_quick_open_filters_and_opens_the_picked_row() raises:
@@ -210,9 +221,9 @@ def test_native_quick_open_filters_and_opens_the_picked_row() raises:
     var d = _native_desktop(String("x\n"))
     _quick_open_with(d, [a, b])
     assert_equal(len(d.quick_open.matched), 2)
-    d.native_picker_set(String("query"), String("beta"))
+    d.picker_set(String("query"), String("beta"))
     assert_equal(len(d.quick_open.matched), 1)
-    _ = d.native_picker_activate(0, 0, _SCREEN)
+    _ = d.picker_activate(0, 0, _SCREEN)
     assert_false(d.quick_open.active)
     var f = d.windows.focused
     assert_equal(d.windows.windows[f].editor.file_path, b)
@@ -221,20 +232,20 @@ def test_native_quick_open_filters_and_opens_the_picked_row() raises:
 def test_native_project_find_fields_and_toggles_rerun_the_search() raises:
     var d = _native_desktop(String("x\n"))
     d.project_find.open(String("/nonexistent-root"))
-    assert_equal(d.native_picker_kind(), String("project_find"))
-    d.native_picker_set(String("query"), String("needle"))
+    assert_equal(d.picker_kind(), String("project_find"))
+    d.picker_set(String("query"), String("needle"))
     assert_equal(d.project_find.query.text, String("needle"))
     assert_true(d.project_find.searching())   # debounce pending
-    d.native_picker_set(String("replace"), String("pin"))
+    d.picker_set(String("replace"), String("pin"))
     assert_equal(d.project_find.replace.text, String("pin"))
     var was_on = d.project_find.toggle_regex.on
-    d.native_picker_option(String("regex"), not was_on)
+    d.picker_option(String("regex"), not was_on)
     assert_true(d.project_find.toggle_regex.on != was_on)
-    d.native_picker_option(String("regex"), was_on)   # leave it as found
+    d.picker_option(String("regex"), was_on)   # leave it as found
     # Buttons need results to act on.
-    d.native_picker_action(String("send_to_panel"), _SCREEN)
+    d.picker_action(String("send_to_panel"), _SCREEN)
     assert_true(d.project_find.active)
-    d.native_picker_close()
+    d.picker_close()
     assert_false(d.project_find.active)
 
 
@@ -335,6 +346,24 @@ def test_native_git_overlay_cancel_and_status_dismiss() raises:
     d.local_changes.release()
 
 
+def test_platinum_git_view_is_the_hosts_too() raises:
+    """The Mac OS 9 look draws the git view as a Platinum window from the
+    same state, so the grid neither paints it nor takes its input."""
+    var root = _repo_with_a_change()
+    var d = _native_desktop(String("x\n"))
+    d.config.native_ui = False
+    d.config.platinum_ui = True
+    d.local_changes.open(root)
+    assert_true(d.native_git_active())
+    d.native_git_select(0, 0, _SCREEN)
+    d.native_git_key(0, UInt32(0x20), UInt8(0), _SCREEN)   # Space: stage
+    assert_equal(Int(d.local_changes.files[0].staged), Int(ord("M")))
+    _ = d.dispatch_action(VIEW_CLASSIC_UI, _SCREEN)
+    assert_false(d.native_git_active())   # back in the grid
+    assert_true(d.local_changes.active)
+    d.local_changes.release()
+
+
 def test_native_find_asks_for_the_bar_instead_of_the_prompt() raises:
     var d = _native_desktop(String("foo\nbar\nfoo\n"))
     _ = d.dispatch_action(EDITOR_REPLACE, _SCREEN)
@@ -424,7 +453,7 @@ def test_native_settings_edit_the_same_state_and_sync_into_config() raises:
     for i in range(len(themes)):
         if themes[i] == String("Dracula"):
             dracula = i
-    d.ui_apply(String("settings"), [
+    _ = d.ui_apply(String("settings"), [
         ui_set(String("trim_trailing_whitespace"), String("0") if was else String("1")),
         ui_set(String("theme"), String(dracula)),
         ui_set(String("max_open_windows"), String("7")),
@@ -440,9 +469,9 @@ def test_a_look_changed_from_the_menu_survives_an_edit_in_settings() raises:
     var d = _native_desktop(String("x\n"))
     _ = d.dispatch_action(APP_SETTINGS, _SCREEN)
     var was = d.config.native_ui
-    _ = d.dispatch_action(VIEW_NATIVE_UI, _SCREEN)
+    _ = d.dispatch_action(VIEW_CLASSIC_UI if was else VIEW_NATIVE_UI, _SCREEN)
     assert_equal(d.config.native_ui, not was)
-    d.ui_apply(String("settings"), [
+    _ = d.ui_apply(String("settings"), [
         ui_set(String("cursor_blink"), String("0") if d.config.cursor_blink else String("1")),
     ])
     assert_equal(d.config.native_ui, not was)
@@ -457,18 +486,18 @@ def test_a_lower_window_limit_closes_documents_when_settings_closes() raises:
         _ = write_file(path, String("x\n"))
         d.open_file(path, _SCREEN)
     _ = d.dispatch_action(APP_SETTINGS, _SCREEN)
-    d.ui_apply(String("settings"), [ui_set(String("max_open_windows"), String("1"))])
-    d.ui_apply(String("settings"), [ui_set(String("max_open_windows"), String("12"))])
+    _ = d.ui_apply(String("settings"), [ui_set(String("max_open_windows"), String("1"))])
+    _ = d.ui_apply(String("settings"), [ui_set(String("max_open_windows"), String("12"))])
     assert_equal(len(d.windows.windows), 3)
-    d.ui_apply(String("settings"), [ui_set(String("max_open_windows"), String("2"))])
+    _ = d.ui_apply(String("settings"), [ui_set(String("max_open_windows"), String("2"))])
     assert_equal(len(d.windows.windows), 3)
-    d.ui_apply(String("settings"), [ui_act(String("close"))])
+    _ = d.ui_apply(String("settings"), [ui_act(String("close"))])
     assert_false(d.settings.active)
     assert_equal(len(d.windows.windows), 2)
     assert_equal(d.config.max_open_windows, 2)
     # the same through the window's own close button
     _ = d.dispatch_action(APP_SETTINGS, _SCREEN)
-    d.ui_apply(String("settings"), [ui_set(String("max_open_windows"), String("1"))])
+    _ = d.ui_apply(String("settings"), [ui_set(String("max_open_windows"), String("1"))])
     assert_equal(len(d.windows.windows), 2)
     d.close_settings()
     assert_false(d.settings.active)
@@ -504,7 +533,10 @@ def test_view_menu_looks_are_one_choice() raises:
     _ = d.dispatch_action(VIEW_PLATINUM_UI, _SCREEN)
     assert_true(d.platinum_ui())
     assert_false(d.config.native_ui)
+    # Picking the current look again keeps it, like a radio group.
     _ = d.dispatch_action(VIEW_PLATINUM_UI, _SCREEN)
+    assert_true(d.platinum_ui())
+    _ = d.dispatch_action(VIEW_CLASSIC_UI, _SCREEN)
     assert_false(d.platinum_ui())
     assert_false(d.native_ui())
 
@@ -512,14 +544,14 @@ def test_view_menu_looks_are_one_choice() raises:
 def test_settings_look_choice_sets_the_look() raises:
     var d = _native_desktop(String("x\n"))
     _ = d.dispatch_action(APP_SETTINGS, _SCREEN)
-    d.ui_apply(String("settings"), [ui_set(String("look"), String("2"))])
+    _ = d.ui_apply(String("settings"), [ui_set(String("look"), String("2"))])
     assert_true(d.config.platinum_ui)
     assert_false(d.config.native_ui)
     assert_equal(d.settings._look_index(), 2)
-    d.ui_apply(String("settings"), [ui_set(String("look"), String("1"))])
+    _ = d.ui_apply(String("settings"), [ui_set(String("look"), String("1"))])
     assert_true(d.config.native_ui)
     assert_false(d.config.platinum_ui)
-    d.ui_apply(String("settings"), [ui_set(String("look"), String("0"))])
+    _ = d.ui_apply(String("settings"), [ui_set(String("look"), String("0"))])
     assert_false(d.config.native_ui)
     assert_false(d.config.platinum_ui)
 
@@ -660,10 +692,10 @@ def test_native_settings_language_editor_stacks_on_the_settings_window() raises:
     Settings window (its window stack), and its Save lands an override."""
     var d = _native_desktop(String("x\n"))
     _ = d.dispatch_action(APP_SETTINGS, _SCREEN)
-    d.ui_apply(String("settings"), [ui_act(String("lang_add"))])
+    _ = d.ui_apply(String("settings"), [ui_act(String("lang_add"))])
     assert_equal(len(d.settings_surfaces()), 2)
     assert_false(d.native_ui_surface_active())
-    d.ui_apply(String("language_editor"), [
+    _ = d.ui_apply(String("language_editor"), [
         ui_set(String("language_id"), String("zzlang")),
         ui_set(String("file_types"), String("zz zzz")),
         ui_set(String("command"), String("zz-ls --stdio")),
@@ -677,7 +709,7 @@ def test_native_settings_language_editor_stacks_on_the_settings_window() raises:
             found = True
             assert_equal(len(d.config.language_servers[i].file_types), 2)
     assert_true(found)
-    d.ui_apply(String("settings"), [ui_act(String("close"))])
+    _ = d.ui_apply(String("settings"), [ui_act(String("close"))])
     assert_false(d.settings.active)
 
 
@@ -788,31 +820,31 @@ def test_native_project_settings_edit_through_the_sections_and_sync() raises:
     assert_true(d.native_ui_surface_active())
     assert_equal(d.ui_surface(), String("project_settings"))
     var name = String("project_settings")
-    d.ui_apply(name, [ui_act(String("tg_add"))])
-    d.ui_apply(name, [
+    _ = d.ui_apply(name, [ui_act(String("tg_add"))])
+    _ = d.ui_apply(name, [
         ui_set(String("tg_name"), String("app")),
         ui_set(String("tg_program"), String("python3")),
         ui_set(String("tg_args"), String("main.py --fast")),
         ui_set(String("tg_env"), String("A=1")),
     ])
-    d.ui_apply(name, [ui_act(String("gr_add")), ui_set(String("gr_ext"), String("tmpl"))])
+    _ = d.ui_apply(name, [ui_act(String("gr_add")), ui_set(String("gr_ext"), String("tmpl"))])
     var opts = grammar_options()
     var html = 0
     for k in range(len(opts)):
         if opts[k] == String("html"):
             html = k
-    d.ui_apply(name, [ui_set(String("gr_lang"), String(html))])
+    _ = d.ui_apply(name, [ui_set(String("gr_lang"), String(html))])
     # Add opens the action editor on top; its Save lands in the library.
-    d.ui_apply(name, [ui_act(String("os_add"))])
+    _ = d.ui_apply(name, [ui_act(String("os_add"))])
     assert_equal(len(d.ui_surfaces()), 2)
     assert_equal(d.ui_surface(), String("action_editor"))
-    d.ui_apply(String("action_editor"), [
+    _ = d.ui_apply(String("action_editor"), [
         ui_set(String("program"), String("/bin/echo")),
         ui_set(String("args"), String("hi")),
         ui_act(String("save")),
     ])
     assert_equal(d.ui_surface(), String("project_settings"))
-    d.ui_apply(name, [ui_act(String("close"))])   # syncs, then closes
+    _ = d.ui_apply(name, [ui_act(String("close"))])   # syncs, then closes
     assert_false(d.project_settings.active)
     var found = False
     for k in range(len(d.targets.targets)):

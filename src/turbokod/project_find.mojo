@@ -35,6 +35,7 @@ from .events import (
 )
 from .file_io import join_path, project_relative, read_file, stat_file
 from .geometry import Point, Rect
+from .scrollbar import ScrollBarArea
 from .highlight import (
     GrammarRegistry, Highlight, HighlightCache, extension_of,
     highlight_for_extension_cached,
@@ -134,6 +135,7 @@ struct ProjectFind(Movable):
     var matches: List[ProjectMatch]
     var selected: Int
     var scroll: Int
+    var _bar: ScrollBarArea
     # Output, set when the user hits Enter.
     var selected_path: String
     var selected_line: Int
@@ -216,6 +218,7 @@ struct ProjectFind(Movable):
         self.matches = List[ProjectMatch]()
         self.selected = 0
         self.scroll = 0
+        self._bar = ScrollBarArea()
         self.selected_path = String("")
         self.selected_line = 0
         self.toggle_case = OptionToggle(
@@ -844,6 +847,11 @@ struct ProjectFind(Movable):
                 line_attr, sel_line, hl_attr, sel_hl_attr, path_attr, sel_path,
                 registry, idx, hl_deadline,
             )
+        self._bar.paint(
+            canvas,
+            Rect(container_bounds.a.x + 1, top, container_bounds.b.x - 1, top + h),
+            len(self.matches), self.scroll, bg,
+        )
         # Separator above the context panel.
         var ctx_top = self._list_bottom(container_bounds)
         for x in range(container_bounds.a.x + 1, container_bounds.b.x - 1):
@@ -1139,6 +1147,24 @@ struct ProjectFind(Movable):
         self._ensure_context_highlights(registry)
         return (self._context_lines.copy(), self._context_highlights.copy())
 
+    def preview_window(
+        mut self, mut registry: GrammarRegistry, first: Int, end: Int,
+    ) -> Tuple[Int, List[String], List[Highlight]]:
+        """Lines ``[first, end)`` of the selected match's file and their
+        syntax spans, plus its line count — the window of it a list view
+        shows."""
+        self._ensure_context_highlights(registry)
+        var n = len(self._context_lines)
+        var lines = List[String]()
+        for i in range(max(first, 0), min(end, n)):
+            lines.append(self._context_lines[i])
+        var hls = List[Highlight]()
+        for i in range(len(self._context_highlights)):
+            var r = self._context_highlights[i].row
+            if r >= first and r < end:
+                hls.append(self._context_highlights[i])
+        return (n, lines^, hls^)
+
     def _cycle_focus(mut self, backward: Bool):
         """Advance (or reverse) keyboard focus across the editable strips.
         The order is query → replace → scope → glob, with the replace strip
@@ -1176,6 +1202,10 @@ struct ProjectFind(Movable):
         # glyph always dismisses the dialog.
         if close_button_clicked(container_bounds, event):
             self.close()
+            return True
+        var sb = self._bar.handle_mouse(event)
+        if sb >= 0:
+            self.scroll = sb
             return True
         # Title-bar action button — Replace All in replace mode, dock the
         # current results to the panel in find mode.

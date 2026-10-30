@@ -157,6 +157,7 @@ from .buttons import BUTTON_FIRED, ShadowButton, paint_shadow_button
 from .editor import Editor
 from .config import WRAP_SOFT
 from .list_box import clamp_list_scroll, paint_list_rows
+from .scrollbar import ScrollBarArea
 from .picker_input import picker_nav_key
 
 
@@ -1531,6 +1532,8 @@ struct LocalChanges(Movable):
     # Which splitter (if any) the mouse is currently dragging. Cleared
     # on release. Drives the mouse-motion path in ``handle_mouse``.
     var _drag_kind: Int
+    # One scroll bar per pane, by ``_PANE_*`` (files .. right info).
+    var _bars: List[ScrollBarArea]
     # Submission contract — same shape as the previous file-only
     # version: ``selected_path`` carries the project-relative file path
     # when a file row was Enter'd, ``selected_line`` is 0 ("no jump").
@@ -1736,6 +1739,9 @@ struct LocalChanges(Movable):
         self.branches_height_user = -1
         self.unstaged_height_user = -1
         self._drag_kind = _DRAG_NONE
+        self._bars = List[ScrollBarArea]()
+        for _ in range(_PANE_RIGHT_INFO + 1):
+            self._bars.append(ScrollBarArea())
         self.selected_path = String("")
         self.selected_line = 0
         self.pending_open_url = String("")
@@ -2692,6 +2698,13 @@ struct LocalChanges(Movable):
             section_attr, splitter_attr,
             ctx_attr, add_attr, rem_attr, hunk_attr, header_attr,
         )
+        for pane in range(len(self._bars)):
+            var body = self._pane_body(pane, bounds)
+            if body.is_empty():
+                self._bars[pane].hide()
+                continue
+            var st = self._pane_scroll_state(pane)
+            self._bars[pane].paint(canvas, body, st[0], st[1], border)
         # Bottom hint.
         var hint = String(" ")
         var hints = self.hints()
@@ -5981,6 +5994,67 @@ struct LocalChanges(Movable):
             h = 0
         return 0 if h < 0 else h
 
+    def _pane_body(self, pane: Int, bounds: Rect) -> Rect:
+        """A pane's scrolling body (its heading row excluded) in the
+        modal's ``bounds``; empty when the pane isn't on screen (a
+        collapsed section, the right panes the selection doesn't show).
+        Its right column is where the pane's scroll bar goes."""
+        var top: Int
+        var h: Int
+        var left: Int
+        var right_excl: Int
+        if pane <= _PANE_COMMITS:
+            var rows = self._pane_rows(bounds)
+            top = rows[2 * pane]
+            h = self._pane_view_height(pane, bounds)
+            left = bounds.a.x + 1
+            right_excl = bounds.a.x + self._sidebar_width(bounds)
+        else:
+            var shows_file = self._driving_pane() == _PANE_FILES
+            if (pane == _PANE_RIGHT_INFO) == shows_file:
+                return Rect(0, 0, 0, 0)
+            if pane == _PANE_RIGHT_INFO:
+                top = self._list_top(bounds)
+            else:
+                var rp = self._right_panes(bounds)
+                top = rp[0] if pane == _PANE_RIGHT_UNSTAGED else rp[2]
+            h = self._right_panel_height(pane, bounds)
+            left = self._diff_left(bounds)
+            right_excl = self._diff_right(bounds)
+        if h <= 0 or right_excl <= left:
+            return Rect(0, 0, 0, 0)
+        return Rect(left, top + 1, right_excl, top + 1 + h)
+
+    def _pane_scroll_state(self, pane: Int) -> Tuple[Int, Int]:
+        """``(row count, first visible row)`` of a pane."""
+        if pane == _PANE_FILES:
+            return (len(self.file_rows), self.scroll_files)
+        if pane == _PANE_BRANCHES:
+            return (len(self.branches), self.scroll_branches)
+        if pane == _PANE_COMMITS:
+            return (len(self.commits), self.scroll_commits)
+        if pane == _PANE_RIGHT_UNSTAGED:
+            return (len(self.unstaged.lines), self.unstaged.scroll)
+        if pane == _PANE_RIGHT_STAGED:
+            return (len(self.staged.lines), self.staged.scroll)
+        return (len(self.info.lines), self.info.scroll)
+
+    def _set_pane_scroll(mut self, pane: Int, scroll: Int, bounds: Rect):
+        """Scroll a pane to ``scroll`` (its scroll bar's answer): the
+        view moves, the selection / cursor stay where they are unless
+        they'd leave the view (a right panel's line cursor follows)."""
+        if pane <= _PANE_COMMITS:
+            var cur = self._pane_scroll_state(pane)[1]
+            self._scroll_pane_view(pane, scroll - cur, bounds)
+            return
+        var h = self._right_panel_height(pane, bounds)
+        if pane == _PANE_RIGHT_UNSTAGED:
+            _scroll_panel(self.unstaged, scroll - self.unstaged.scroll, h)
+        elif pane == _PANE_RIGHT_STAGED:
+            _scroll_panel(self.staged, scroll - self.staged.scroll, h)
+        else:
+            _scroll_panel(self.info, scroll - self.info.scroll, h)
+
     def _scroll_pane_view(
         mut self, pane: Int, delta: Int, container_bounds: Rect,
     ):
@@ -6341,6 +6415,12 @@ struct LocalChanges(Movable):
             return True
         var pos = event.pos
         var bounds = self._panel_rect(container_bounds)
+        # Each pane's scroll bar: arrows, track and a thumb drag.
+        for pane in range(len(self._bars)):
+            var s = self._bars[pane].handle_mouse(event)
+            if s >= 0:
+                self._set_pane_scroll(pane, s, bounds)
+                return True
         # --- in-progress splitter drag -----------------------------------
         # Resolved before any other handling so a click that *starts* on
         # a splitter never also triggers list-row behaviour even if the

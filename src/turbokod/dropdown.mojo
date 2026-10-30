@@ -37,6 +37,7 @@ from .events import (
     MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
+from .scrollbar import ScrollBarArea
 from .picker_input import scroll_to_reveal
 from .string_utils import display_columns
 from .type_ahead import TypeAhead, is_type_ahead_key, type_ahead_pick
@@ -74,6 +75,7 @@ struct Dropdown(Copyable, Movable):
     var is_open: Bool
     var highlight: Int
     var _scroll: Int
+    var _bar: ScrollBarArea
     var _type_ahead: TypeAhead
     """Type-to-search buffer (shared with file lists). Reset on
     ``open`` / ``close``."""
@@ -88,6 +90,7 @@ struct Dropdown(Copyable, Movable):
         self.index = index
         self.is_open = False
         self.highlight = 0
+        self._bar = ScrollBarArea()
         self._scroll = 0
         self._type_ahead = TypeAhead()
         self._tracking = False
@@ -163,6 +166,7 @@ struct Dropdown(Copyable, Movable):
         self.is_open = False
         self._type_ahead.reset()
         self._tracking = False
+        self._bar.hide()
 
     def type_to_search(mut self, ch: String) -> Bool:
         """Extend the prefix buffer with ``ch`` and jump the highlight
@@ -260,7 +264,7 @@ struct Dropdown(Copyable, Movable):
         var caret = String("▲") if self.is_open else String("▼")
         painter.set(canvas, rect.b.x - 1, rect.a.y, Cell(caret, fill_attr, 1))
 
-    def paint_popup(self, mut canvas: Canvas, anchor: Rect, container_bounds: Rect):
+    def paint_popup(mut self, mut canvas: Canvas, anchor: Rect, container_bounds: Rect):
         """Render the popup list. Caller invokes this last (after the
         rest of the dialog) so the popup overlays whatever's
         underneath. No-op when the dropdown is collapsed."""
@@ -299,6 +303,11 @@ struct Dropdown(Copyable, Movable):
             _ = painter.put_text(
                 canvas, Point(rect.a.x + 1, y), marker + label, row_attr,
             )
+        # The bar sits on the frame's right edge, as in Turbo Vision.
+        self._bar.paint(
+            canvas, Rect(rect.a.x + 1, rect.a.y + 1, rect.b.x, rect.b.y - 1),
+            len(self.options), self._scroll, attr,
+        )
 
     # --- input --------------------------------------------------------
 
@@ -385,6 +394,11 @@ struct Dropdown(Copyable, Movable):
         body-toggle's own release can't accidentally commit a row."""
         if event.kind != EVENT_MOUSE:
             return DROPDOWN_HIT_NONE
+        if self.is_open:
+            var sb = self._bar.handle_mouse(event)
+            if sb >= 0:
+                self._scroll = sb
+                return DROPDOWN_HIT_POPUP
         # Wheel inside an open popup scrolls the highlight.
         if self.is_open:
             var pr = self.popup_rect(anchor, container_bounds)

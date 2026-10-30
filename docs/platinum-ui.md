@@ -3,8 +3,9 @@
 **View ▸ Mac OS 9-style UI** (native app only; global, persisted as
 `config.platinum_ui`) is the third look, next to the classic Turbo Vision
 grid and the macOS-style UI. Settings ▸ Appearance shows the three as one
-**Look** choice, and the welcome window as three cards; turning one on in
-the View menu turns the other off.
+**Look** choice, the welcome window as three cards, and the View menu as
+three checked items in a section of their own (Turbo Vision-style UI,
+`VIEW_CLASSIC_UI`, is the grid); picking one turns the others off.
 
 It is a third *projector*, not a skin. The macOS-style UI hands the
 declarative dialogs to AppKit; this one hands the same data to the Swift
@@ -43,6 +44,22 @@ come in 8×16 steps.
   presentation only, each part kept in the cell columns
   `tk_desktop_status_layout` reports, so clicks land where the core
   expects them.
+- **The git view** (`PlatinumGitView`): the macOS sheet's layout in a
+  Platinum window over the project window. The lists and diffs are
+  `PGitRows` (rows of colored runs in a well, a Platinum scroll bar; a list
+  selects in lavender, a diff frames the core's cursor so its add/remove
+  color shows), headings are Chicago with an etched rule (black for the
+  focused pane), the focused pane's operations are push buttons, right-click
+  pops a Platinum contextual menu, and the overlays (commit, reword, merge
+  or rebase, remote choice, typed delete, confirms, output) are Platinum
+  alerts. The commit message and the output use `PTextArea`, a host-only
+  multi-line node. It drives the core through the same `tk_desktop_git*`
+  calls as `GitController`; `tk_desktop_git` carries `look`, and `pollGit`
+  rebuilds the view in the other projector when the look changes under it.
+  The focused pane's letters work as in the grid (`c` commits, `p` pulls).
+- **The pickers** (Quick Open, Find in Project, …), being declarative:
+  `PListView` draws a `ui_list` with the git window's rows view, and a
+  search field's arrows move it.
 - **Not covered:** the menus, which stay the system menu bar. Everything
   else (prompts, pickers, the editor text, the panes) stays the classic
   grid.
@@ -55,7 +72,7 @@ come in 8×16 steps.
   hides the in-grid tab bar and turns on `tk_desktop_editor_scroller`;
   `_fit_windows` sets the 2-column gutter in this look only.
 - `host_draws_dialogs()` (`native_ui() or platinum_ui()`) is what gates the
-  declarative dialogs: it decides whether they leave the grid, whether
+  git view (`native_git_active`) and the declarative dialogs: it decides whether they leave the grid, whether
   `native_ui_surface_active` swallows grid input, and whether Settings
   opens in the host's window (`settings_native`).
 - `native_dialog_active()` covers only the confirm in this look, and
@@ -99,6 +116,23 @@ pixel for pixel against the 1× figure. The other states come from a
 1.5×-scaled figure, read with its doubled rows and columns undone. The
 dialog background is `E3`, as in those figures.
 
+## Scroll bars
+
+Every Platinum scroll bar sizes its thumb by `Platinum.thumb`: as long as
+the visible share of the content (at least Mac OS 9's own 17-point thumb),
+the grid's rule (`scrollbar.mojo`). Mac OS 8's fixed thumb told you nothing
+about how much there was.
+
+`Platinum.scrollBar` draws it pixel for pixel from a Mac OS 9 screenshot,
+not with the generic bevels: arrow boxes whose white highlight stops short
+of the top-right and bottom-left corners (face gray there) over a light
+`C7` shadow; a `B8` track sunk by two steps along its top and left (`89`,
+`99`) and lit on the right (`C7`, `D5`), the steps starting again under the
+thumb as if it cast them; and the thumb's lavenders (`D6D4FE` / `ADA5FE` /
+`7D73D7`, an `F1` corner, a `4A38AB` grip centered on any length). The
+arrows are drawn as rows of points (2, 4, 6, 8 wide), never a path, which
+antialiased into gray edges.
+
 ## Text
 
 Chicago comes from **Silom**, which ships with macOS: its Latin glyphs are
@@ -110,8 +144,15 @@ Two things are needed for the bitmap look, both in `Platinum.text`:
 
 - **No kerning.** Silom's kerning pairs aren't whole pixels and visibly
   break the even Chicago spacing.
-- **Whole-point advances.** Geneva's outlines have fractional advances,
-  which smear unantialiased. Text is laid out in CoreText (for glyphs and
+- **Spacing by ink, not advances.** Geneva's outlines have fractional
+  advances and side bearings, and unantialiased a glyph covers fewer whole
+  points than its advance suggests: rounding each advance left three blank
+  points between K and I but one between I and L. So `Platinum.layout`
+  measures each glyph's rasterized ink once and starts the next glyph's ink
+  the font's own gap (its side bearings, rounded down, at least a point)
+  after it, the way the bitmap fonts were set. Monospace fonts keep their
+  columns. Before that, advances were rounded to whole points; Geneva's
+  are fractional, which smears unantialiased. Text is laid out in CoreText (for glyphs and
   fallback fonts), then each advance is rounded and the glyphs are drawn at
   those positions, antialiasing off. Truncation ("…") and wrapping are done
   on the same measurements. `NSString` drawing squeezes glyphs together

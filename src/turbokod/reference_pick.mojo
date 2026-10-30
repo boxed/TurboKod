@@ -19,6 +19,7 @@ from .events import (
     MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect, center_in
+from .scrollbar import ScrollBarArea
 from .lsp_dispatch import DefinitionResolved
 from .picker_input import (
     picker_nav_key, picker_wheel_scroll, scroll_to_reveal,
@@ -35,6 +36,7 @@ struct ReferencePick(Movable):
     var project_root: String     # for displaying paths relative to the project
     var selected: Int
     var scroll: Int
+    var _bar: ScrollBarArea
     # Submission output — read after ``submitted`` flips True.
     var selected_path: String
     var selected_line: Int
@@ -51,6 +53,7 @@ struct ReferencePick(Movable):
         self.project_root = String("")
         self.selected = 0
         self.scroll = 0
+        self._bar = ScrollBarArea()
         self.selected_path = String("")
         self.selected_line = 0
         self.selected_character = 0
@@ -161,6 +164,10 @@ struct ReferencePick(Movable):
                 _ = painter.put_text(
                     canvas, Point(stamp_x, top + i), stamp, m_attr,
                 )
+        self._bar.paint(
+            canvas, Rect(rect.a.x + 1, top, rect.b.x - 1, top + h),
+            len(self.entries), self.scroll, bg,
+        )
         # Bottom hint.
         _ = painter.put_text(
             canvas, Point(rect.a.x + 2, rect.b.y - 1),
@@ -207,6 +214,10 @@ struct ReferencePick(Movable):
         # dismisses the dialog.
         if close_button_clicked(rect, event):
             self.close()
+            return True
+        var sb = self._bar.handle_mouse(event)
+        if sb >= 0:
+            self.scroll = sb
             return True
         if event.pressed and not event.motion:
             if picker_wheel_scroll(event.button, self.scroll, len(self.entries), h):

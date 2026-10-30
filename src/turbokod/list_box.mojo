@@ -81,6 +81,7 @@ from .events import (
 from .geometry import Point, Rect
 from .painter import Painter
 from .picker_input import scroll_to_reveal
+from .scrollbar import ScrollBarArea
 
 
 def clamp_list_scroll(
@@ -186,6 +187,9 @@ struct ListBox(Copyable, Movable):
     back to the selected row."""
     var _dragging: Bool
     var _drag_keeps_base: Bool
+    var _count: Int
+    """Item count at the last ``prepare``: whether the bar is drawn."""
+    var _bar: ScrollBarArea
 
     def __init__(out self, multi: Bool = False):
         self.selected = -1
@@ -198,6 +202,8 @@ struct ListBox(Copyable, Movable):
         self._last_scroll_sel = -2
         self._dragging = False
         self._drag_keeps_base = False
+        self._count = 0
+        self._bar = ScrollBarArea()
 
     def reset(mut self):
         """Forget selection and scroll state; call when the host
@@ -210,6 +216,7 @@ struct ListBox(Copyable, Movable):
         self._scroll = 0
         self._last_scroll_sel = -2
         self._dragging = False
+        self._bar.hide()
 
     # --- selection state --------------------------------------------------
 
@@ -377,6 +384,23 @@ struct ListBox(Copyable, Movable):
         self._go(s, MOD_NONE, item_count)
         return True
 
+    # --- scroll -----------------------------------------------------------
+
+    def scroll(self) -> Int:
+        """The first visible row as of the last paint or scroll."""
+        return self._scroll
+
+    def scroll_to(mut self, row: Int):
+        """Put ``row`` at the top of the view (clamped at the next paint),
+        without the next paint snapping back to the selection."""
+        self._scroll = max(row, 0)
+        self._last_scroll_sel = self.selected
+
+    def scrolling(self) -> Bool:
+        """A scroll-bar thumb drag is in progress: every mouse event is
+        the list's until the release."""
+        return self._bar.dragging
+
     # --- paint ------------------------------------------------------------
 
     def prepare(mut self, bounds: Rect, item_count: Int) -> Int:
@@ -385,6 +409,7 @@ struct ListBox(Copyable, Movable):
         builds labels for just ``bounds.height()`` rows from there, and
         hands them to ``paint_rows``."""
         var visible = bounds.height()
+        self._count = item_count
         if visible <= 0:
             return 0
         self._scroll = clamp_list_scroll(
@@ -395,7 +420,7 @@ struct ListBox(Copyable, Movable):
         return self._scroll
 
     def paint_rows(
-        self,
+        mut self,
         mut canvas: Canvas,
         bounds: Rect,
         rows: List[String],
@@ -404,11 +429,16 @@ struct ListBox(Copyable, Movable):
     ):
         """Paint the labels of rows ``scroll``, ``scroll + 1``, … (what
         ``prepare`` returned as first). All drawing is clipped to
-        ``bounds``."""
+        ``bounds``. When the items don't fit, a scroll bar takes the
+        right column and the rows the rest."""
         var painter = Painter(bounds)
         painter.fill(canvas, bounds, String(" "), body_attr)
         if bounds.height() <= 0:
+            self._bar.hide()
             return
+        var rows_rect = bounds
+        if ScrollBarArea.overflows(bounds, self._count):
+            rows_rect = Rect(bounds.a.x, bounds.a.y, bounds.b.x - 1, bounds.b.y)
         var marks = List[Bool]()
         for r in range(len(rows)):
             marks.append(self.is_selected(self._scroll + r))
@@ -420,9 +450,10 @@ struct ListBox(Copyable, Movable):
             if self._anchor >= 0:
                 anchor_row = self._anchor - self._scroll
         paint_list_rows_marked(
-            canvas, painter, bounds, rows, marks, caret_row, anchor_row,
-            focused, body_attr,
+            canvas, Painter(rows_rect), rows_rect, rows, marks, caret_row,
+            anchor_row, focused, body_attr,
         )
+        self._bar.paint(canvas, bounds, self._count, self._scroll, body_attr)
 
     def paint(
         mut self,
@@ -470,9 +501,14 @@ struct ListBox(Copyable, Movable):
     ) -> Bool:
         """Consume mouse presses that target the list. Wheel scrolls
         when the cursor is over ``bounds``; left-press inside picks
-        the row under the cursor. Returns True iff consumed."""
+        the row under the cursor, or works the scroll bar. Returns True
+        iff consumed."""
         if event.kind != EVENT_MOUSE:
             return False
+        var s = self._bar.handle_mouse(event)
+        if s >= 0:
+            self._scroll = s
+            return True
         if event.button == MOUSE_WHEEL_UP:
             if bounds.contains(event.pos):
                 self._scroll = max(self._scroll - _WHEEL_ROWS, 0)
@@ -514,8 +550,14 @@ struct ListBox(Copyable, Movable):
         """Follow a press-and-drag started by ``handle_mouse_press``:
         the selection tracks the row under the pointer (anchor..row in
         multi mode), and dragging above or below ``bounds`` scrolls a
-        row per event. The release ends the drag. Returns True iff the
-        event belonged to a drag in progress."""
+        row per event. The release ends the drag (and a scroll-bar
+        thumb drag the same way). Returns True iff the event belonged to
+        a drag in progress."""
+        if self._bar.dragging:
+            var s = self._bar.handle_mouse(event)
+            if s >= 0:
+                self._scroll = s
+            return True
         if event.kind != EVENT_MOUSE or event.button != MOUSE_BUTTON_LEFT \
                 or not self._dragging:
             return False

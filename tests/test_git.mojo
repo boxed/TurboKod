@@ -279,6 +279,39 @@ def _local_changes_with_branches() -> LocalChanges:
     return lc^
 
 
+def test_git_view_panes_that_overflow_get_scroll_bars() raises:
+    """A pane whose rows don't fit gets the framework scroll bar down its
+    right column, and the bar scrolls it; one that fits gets none."""
+    var lc = _local_changes_with_branches()
+    for i in range(40):
+        lc.branches.append(
+            GitBranch(
+                String("b") + String(i), String("ccc3333"), String("x"),
+                False, 0, String(""),
+            ),
+        )
+    var screen = Rect(0, 0, 100, 30)
+    var c = Canvas(100, 30)
+    var registry = GrammarRegistry()
+    lc.paint(c, screen, registry)
+    var bounds = lc._panel_rect(screen)
+    var body = lc._pane_body(_PANE_BRANCHES, bounds)
+    assert_false(body.is_empty())
+    var x = body.b.x - 1
+    assert_equal(c.get(x, body.a.y).glyph, String("▲"))
+    assert_equal(c.get(x, body.b.y - 1).glyph, String("▼"))
+    # Commits (none) fits: no bar.
+    var cb = lc._pane_body(_PANE_COMMITS, bounds)
+    for y in range(cb.a.y, cb.b.y):
+        assert_false(c.get(cb.b.x - 1, y).glyph == String("▲"))
+    _ = lc.handle_mouse(
+        Event.mouse_event(Point(x, body.b.y - 1), MOUSE_BUTTON_LEFT),
+        screen, registry,
+    )
+    assert_equal(lc.scroll_branches, 1)
+    lc.release()
+
+
 def _local_changes_with_commit_url() -> LocalChanges:
     """A LocalChanges showing a synthetic ``git show`` whose message body
     carries a URL. ``_right_key`` is pinned to the commit-pane key so the

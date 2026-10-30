@@ -147,7 +147,7 @@ void tk_desktop_native_choice_answer(int64_t h, int64_t index);
 // [{name, tree}]} for the open ones, bottom first — stack the modal sheets, window
 // Settings in its own window (0 = none natively); _ui_event sends {name, events: [[is_action, key, value]]}.
 int64_t tk_desktop_ui(int64_t h, int64_t out_ptr, int64_t cap);
-void tk_desktop_ui_event(int64_t h, int64_t ptr, int64_t len);
+int32_t tk_desktop_ui_event(int64_t h, int64_t ptr, int64_t len);
 void tk_desktop_native_color_answer(int64_t h, int64_t rgb, int64_t mode, int64_t ok);
 // macOS-style UI tab strip: _native_ui is 1 while the mode is on; _tabs writes
 // {"focused": i, "tabs": [{"title", "path", "dirty"}]} (same buffer contract
@@ -160,23 +160,6 @@ void tk_desktop_tab_close(int64_t h, int64_t idx);
 // The status bar's parts in bottom-row cell columns, for the host's redraw:
 // {"git": [a, b], "message": [a, b], "targets": [[a, b, active]]}.
 int64_t tk_desktop_status_layout(int64_t h, int64_t out_ptr, int64_t cap);
-// macOS-style UI pickers (Quick Open / Find Symbol / Find in Project) as a
-// native panel. _picker writes the JSON state (0 = none up), _picker_rows a
-// page of rows, _picker_preview Find in Project's file preview. The setters
-// behave as if the field had been typed / the row clicked.
-int64_t tk_desktop_picker(int64_t h, int64_t out_ptr, int64_t cap);
-int64_t tk_desktop_picker_rows(int64_t h, int64_t start, int64_t n,
-                               int64_t out_ptr, int64_t cap);
-int64_t tk_desktop_picker_preview(int64_t h, int64_t out_ptr, int64_t cap);
-void tk_desktop_picker_set(int64_t h, int64_t fptr, int64_t flen,
-                           int64_t tptr, int64_t tlen);
-void tk_desktop_picker_option(int64_t h, int64_t nptr, int64_t nlen, int64_t on);
-void tk_desktop_picker_select(int64_t h, int64_t idx, int64_t anchor);
-int32_t tk_desktop_picker_activate(int64_t h, int64_t idx, int64_t anchor,
-                                   int64_t cols, int64_t rows);
-void tk_desktop_picker_action(int64_t h, int64_t nptr, int64_t nlen,
-                              int64_t cols, int64_t rows);
-void tk_desktop_picker_close(int64_t h);
 // First-launch welcome window: _needed is 1 until answered; _options writes
 // {themes, builtin_fonts, native_ui, theme, font, font_size}; _apply takes
 // {native_ui, theme, font, font_size} JSON (done = 1 marks it answered).

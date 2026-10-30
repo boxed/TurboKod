@@ -35,7 +35,7 @@ from .desktop import (
     EDITOR_TOGGLE_GIT_CHANGES,
     EDITOR_TOGGLE_LINE_NUMBERS, EDITOR_TOGGLE_MINIMAP,
     EDITOR_TOGGLE_STICKY_SCROLL,
-    EDITOR_TOGGLE_TAB_BAR, EDITOR_UNDO, VIEW_NATIVE_UI, VIEW_PLATINUM_UI,
+    EDITOR_TOGGLE_TAB_BAR, EDITOR_UNDO, VIEW_CLASSIC_UI, VIEW_NATIVE_UI, VIEW_PLATINUM_UI,
     FILE_TREE_FOCUS, FILE_TREE_REVEAL,
     GIT_HISTORY_FILE, GIT_HISTORY_SELECTION, GIT_LOCAL_CHANGES,
     GIT_OPEN_ALL_CHANGED, GIT_REVIEW,
@@ -172,6 +172,11 @@ def build_menus(mut d: Desktop, native: Bool):
         # window — needs a host that owns windows.
         v.append(MenuItem(
             String("Floating panels"), TOGGLE_FLOATING_PANELS, checkable=True,
+        ))
+        # The three looks are one choice, so they get a section of their own.
+        v.append(MenuItem.separator())
+        v.append(MenuItem(
+            String("Turbo Vision-style UI"), VIEW_CLASSIC_UI, checkable=True,
         ))
         v.append(MenuItem(
             String("macOS-style UI"), VIEW_NATIVE_UI, checkable=True,

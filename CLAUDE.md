@@ -89,9 +89,11 @@ the host lays out and draws the declarative dialogs and the confirm alert
 itself, in pixels, Platinum-style (`PlatinumDialog` / `PNode` in
 `TurboKod.swift`), and the project window's chrome: borderless, in a
 `PlatinumMainFrame` with Platinum tabs over the tabbed layout and a
-scroll bar in a 2-column `Window.gutter`, and the status bar (redrawn
-over its cells from `tk_desktop_status_layout`). The menus stay the
-system menu bar and everything else the classic grid. Gate on `host_draws_dialogs()`
+scroll bar in a 2-column `Window.gutter`, the status bar (redrawn
+over its cells from `tk_desktop_status_layout`), and the git view
+(`PlatinumGitView`, over the same `tk_desktop_git*` calls as the macOS
+sheet). The menus stay the system menu bar and everything else the
+classic grid. Gate on `host_draws_dialogs()`
 (dialogs) or `host_tabs()` (tabbed layout), not `native_ui()`, for
 anything those do. Find a window's grid with `NSWindow.cellView`, not
 `contentView as? CellView`. Text goes through `Platinum.text`
@@ -445,6 +447,16 @@ These are deliberate departures from C++ Turbo Vision. Don't "fix" them by rever
 5. **Python interop is allowed in `terminal.mojo`** (and only there). `termios`, `select`, `tty`, `os.read`, `os.get_terminal_size` — all via the Python stdlib. Pure-Mojo FFI replacement is a future optimization, not a requirement.
 6. **No `Uses_XXXX` macro mechanism.** Each `.mojo` file does normal `from .module import Name` imports.
 7. **Snake_case methods, no T-prefix on types.** `put_text`, `next_event`, `Point`, `Frame` — not `putText`, `getEvent`, `TPoint`, `TFrame`.
+
+## Scrolling areas get a scroll bar from the framework
+
+A view that scrolls rows owns a `ScrollBarArea` (`scrollbar.mojo`) per
+scrolling area: `paint(canvas, area, total, scroll, attr)` after the
+content draws the bar down the area's right column when the rows overflow,
+and `handle_mouse(event)` before the view's own mouse code returns the new
+scroll offset (arrows, track paging, thumb drag) or -1. `ListBox` has one
+built in, so a list built on it needs nothing. Don't hand-roll a bar with
+`VScrollbar` and drag bookkeeping again.
 
 ## Text width is codepoints, not bytes
 

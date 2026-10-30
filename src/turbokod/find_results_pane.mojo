@@ -31,6 +31,7 @@ from .events import (
     MOD_META, MOD_SHIFT, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE,
 )
 from .geometry import Point, Rect
+from .scrollbar import ScrollBarArea
 from .highlight import GrammarRegistry, Highlight
 from .painter import Painter
 from .picker_input import picker_nav_key, picker_wheel_scroll, scroll_to_reveal
@@ -64,6 +65,7 @@ struct FindResultsPane(Movable):
     var selected: Int                  # cursor row (keyboard nav + range end)
     var anchor: Int                    # Shift-range origin
     var scroll: Int
+    var _bar: ScrollBarArea
     var marked: List[Bool]             # multi-select set, parallel to matches
     # Output queue: matches the user asked to open this frame. The host
     # drains it via ``take_pending_opens`` and opens each in its own editor.
@@ -90,6 +92,7 @@ struct FindResultsPane(Movable):
         self.selected = 0
         self.anchor = 0
         self.scroll = 0
+        self._bar = ScrollBarArea()
         self.marked = List[Bool]()
         self.pending_opens = List[ProjectMatch]()
         self._row_hl_cache = List[List[Highlight]]()
@@ -249,6 +252,8 @@ struct FindResultsPane(Movable):
     def paint(
         mut self, mut canvas: Canvas, panel: Rect, mut registry: GrammarRegistry,
     ):
+        # Shown again below when the rows overflow.
+        self._bar.hide()
         if not self.visible or panel.is_empty():
             return
         # Body uses the editor/document background so the pane matches the
@@ -330,6 +335,10 @@ struct FindResultsPane(Movable):
                 idx, geom.text, body.a.y + i, geom.text_x,
                 geom.byte_start, geom.byte_end, geom.clip_x,
             )
+        self._bar.paint(
+            canvas, Rect(body.a.x, body.a.y, body.b.x, body.a.y + self._list_height),
+            len(self.matches), self.scroll, bg,
+        )
         # Drag-selection overlay on top of the rows (cyan block, the same
         # read-only-selection color ``TextLog`` uses).
         self.textsel.paint_overlay(canvas, panel, Attr(BLACK, CYAN))
@@ -376,6 +385,11 @@ struct FindResultsPane(Movable):
         if cr.consumed:
             if cr.focus_request:
                 self.focused = True
+            return True
+        var sb = self._bar.handle_mouse(event)
+        if sb >= 0:
+            self.scroll = sb
+            self.focused = True
             return True
         if not panel.contains(event.pos):
             # A bare press outside the pane drops focus (mouse-mode 1003

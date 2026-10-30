@@ -31,7 +31,7 @@ from .case_fold import eq_ci, fold_byte
 from .canvas import Canvas, utf8_codepoint_count
 from .painter import Painter
 from .colors import (
-    Attr, BLACK, EDITOR_BG, EDITOR_FG, LIGHT_GRAY, LIGHT_RED, RED,
+    Attr, BLACK, EDITOR_BG, EDITOR_FG, FG_TRUECOLOR, LIGHT_GRAY, LIGHT_RED, RED,
 )
 from .theme import Theme, theme_by_name
 from .events import (
@@ -122,7 +122,16 @@ from .spell_menu import (
 )
 from .anchored_menu import NativeMenuItem
 from .ui_grid import GridForm, UIEvent
-from .ui_tree import UINode
+from .ui_tree import (
+    ListWindow, UI_CODE, UI_DISABLED, UI_RGB, UINode, UISpan, ui_bool,
+    ui_button, ui_int, ui_list, ui_list_anchor, ui_list_row, ui_spacer,
+)
+from .picker_ui import (
+    doc_pick_rows, find_symbol_rows, picker_dialog, picker_list, picker_query,
+    project_find_fields, project_find_rows, project_find_toggles,
+    quick_open_rows,
+    reference_pick_rows, symbol_pick_rows,
+)
 from .install_runner import InstallResult, InstallRunner
 from .local_changes import LocalChanges
 from .review_mode import ReviewMode
@@ -388,6 +397,7 @@ comptime EDITOR_TOGGLE_TAB_BAR      = String("view:tab_bar")
 # View-menu toggle for the macOS-style UI (native app only): dialogs are
 # handed to the host as real AppKit sheets / panels. See
 # ``Desktop.native_ui`` and docs/native-ui.md.
+comptime VIEW_CLASSIC_UI           = String("view:classic_ui")
 comptime VIEW_NATIVE_UI            = String("view:native_ui")
 comptime VIEW_PLATINUM_UI          = String("view:platinum_ui")
 # View-menu toggle for the per-line "+/~" change-bar gutter. The flag
@@ -1582,6 +1592,12 @@ struct Desktop(Movable):
     # for pytest so its output wraps to the actual pane width instead
     # of the 80-column default. ``Rect.empty()`` until the first paint.
     var _last_screen: Rect
+    var _picker_window: ListWindow
+    """Which rows of the open picker's list the projectors are sent."""
+    var _picker_code_window: ListWindow
+    """Which lines of Find in Project's code view they're sent."""
+    var _picker_open: String
+    """The picker kind the windows are for; another one resets them."""
     # Per-user window session, persisted in
     # ``<project>/.turbokod/per_user/<username>/session.json``.
     # ``_pending_restore`` is
@@ -1905,6 +1921,9 @@ struct Desktop(Movable):
         self._last_config_poll_ms = 0
         self.targets = ProjectTargets()
         self._last_screen = Rect.empty()
+        self._picker_window = ListWindow()
+        self._picker_code_window = ListWindow()
+        self._picker_open = String("")
         self.run_session = RunSession()
         self._run_output_held = False
         self.test_pane = TestPane()
@@ -2664,9 +2683,9 @@ struct Desktop(Movable):
         """True when a modal that fills the whole screen rect is up, so
         painting the workspace beneath it is dead work.
 
-        Both of these fill ``container_bounds`` — which ``paint`` hands
-        them as the full ``screen`` — before drawing anything of their
-        own, so every cell underneath is overwritten. Painting it anyway
+        The git view fills ``container_bounds`` — which ``paint`` hands
+        it as the full ``screen`` — before drawing anything of its own,
+        so every cell underneath is overwritten. Painting it anyway
         cost ~10 ms a frame with an editor open (a 200x50 grid, measured
         by ``bench/git_frame_bench.mojo``): the editor body with its
         highlights, the file tree, the panes, the chrome, all of it
@@ -2677,8 +2696,10 @@ struct Desktop(Movable):
         Only modals verified to cover the full rect belong here. A
         centered dialog, the movable in-grid Settings, and review mode
         (which paints a hosted window *over* the workspace rather than
-        instead of it) all still need what's behind them."""
-        return self.local_changes.active or self.project_find.active
+        instead of it) all still need what's behind them — and so do
+        the pickers, Find in Project included, now that they're a
+        declarative dialog over the workspace."""
+        return self.local_changes.active
 
     def scroll_regions(mut self, screen: Rect) -> List[EditorScrollRegion]:
         """The editor windows the host may smooth-scroll this frame. Phase
@@ -3605,9 +3626,9 @@ struct Desktop(Movable):
             )
             return
         for i in range(len(surfaces)):
+            var tree = self.ui_tree(surfaces[i])
             self.settings_grids[i].paint(
-                self.ui_tree(surfaces[i]), canvas, screen,
-                i == len(surfaces) - 1,
+                tree, canvas, screen, i == len(surfaces) - 1,
             )
 
     def handle_settings_event(mut self, event: Event, screen: Rect):
@@ -3618,10 +3639,9 @@ struct Desktop(Movable):
         if len(surfaces) == 0:
             return
         var top = len(surfaces) - 1
-        var evs = self.settings_grids[top].handle_event(
-            self.ui_tree(surfaces[top]), event, screen,
-        )
-        self.ui_apply(surfaces[top], evs)
+        var tree = self.ui_tree(surfaces[top])
+        var evs = self.settings_grids[top].handle_event(tree, event, screen)
+        _ = self.ui_apply(surfaces[top], evs)
 
     def pointer_shape_panels(self, pos: Point, screen: Rect) -> String:
         """Pointer hint for the panel window. The terminal body and pane
@@ -3672,28 +3692,6 @@ struct Desktop(Movable):
             return String("default")
         if self.save_as_dialog.active:
             if self.save_as_dialog.is_input_at(pos, screen):
-                return String("text")
-            return String("default")
-        if self.quick_open.active:
-            if self.quick_open.is_input_at(pos, screen):
-                return String("text")
-            return String("default")
-        if self.symbol_pick.active:
-            if self.symbol_pick.is_input_at(pos, screen):
-                return String("text")
-            return String("default")
-        if self.reference_pick.active:
-            return String("default")
-        if self.find_symbol.active:
-            if self.find_symbol.is_input_at(pos, screen):
-                return String("text")
-            return String("default")
-        if self.doc_pick.active:
-            if self.doc_pick.is_input_at(pos, screen):
-                return String("text")
-            return String("default")
-        if self.project_find.active:
-            if self.project_find.is_input_at(pos, screen):
                 return String("text")
             return String("default")
         if self.local_changes.active:
@@ -3801,6 +3799,10 @@ struct Desktop(Movable):
         )
         self.menu_bar.set_item_checked(
             EDITOR_TOGGLE_TAB_BAR, self.config.tab_bar,
+        )
+        self.menu_bar.set_item_checked(
+            VIEW_CLASSIC_UI,
+            not self.config.native_ui and not self.config.platinum_ui,
         )
         self.menu_bar.set_item_checked(VIEW_NATIVE_UI, self.config.native_ui)
         self.menu_bar.set_item_checked(
@@ -4773,8 +4775,9 @@ struct Desktop(Movable):
             # the prompts and confirms, which can open over them.
             var surfaces = self._sync_ui_grids()
             for i in range(len(surfaces)):
+                var tree = self.ui_tree(surfaces[i])
                 self.ui_grids[i].paint(
-                    self.ui_tree(surfaces[i]), canvas, screen,
+                    tree, canvas, screen,
                     i == len(surfaces) - 1,
                 )
         if not (native and self.native_prompt_active()):
@@ -4790,21 +4793,9 @@ struct Desktop(Movable):
             self.color_picker.paint(canvas, screen)
         if not (native and self.merge_view.active):
             self.merge_view.paint(canvas, screen)
-        if not (native and self.quick_open.active):
-            self.quick_open.paint(canvas, screen)
         if not native:
             self.save_as_dialog.paint(canvas, screen)
-        if not (native and self.symbol_pick.active):
-            self.symbol_pick.paint(canvas, screen)
-        if not (native and self.reference_pick.active):
-            self.reference_pick.paint(canvas, screen)
-        if not (native and self.find_symbol.active):
-            self.find_symbol.paint(canvas, screen)
-        if not (native and self.doc_pick.active):
-            self.doc_pick.paint(canvas, screen)
-        if not (native and self.project_find.active):
-            self.project_find.paint(canvas, screen, self.grammar_registry)
-        if not (native and self.local_changes.active):
+        if not self.native_git_active():
             self.local_changes.paint(canvas, screen, self.grammar_registry)
         # Spell-action popup. Painted last among modals so it overlays
         # everything else (it's contextual to the editor cursor and
@@ -7816,58 +7807,9 @@ struct Desktop(Movable):
             # turns the event into edits / actions, the dialog applies
             # them. Fully modal.
             var top = len(self._sync_ui_grids()) - 1
-            var evs = self.ui_grids[top].handle_event(
-                self.ui_tree(surface), event, screen,
-            )
-            self.ui_apply(surface, evs)
-            return Optional[String]()
-        if self.quick_open.active:
-            if event.kind == EVENT_KEY:
-                _ = self.quick_open.handle_key(event)
-            else:
-                _ = self.quick_open.handle_mouse(event, screen)
-            if self.quick_open.submitted:
-                return self._after_quick_open(screen)
-            return Optional[String]()
-        if self.symbol_pick.active:
-            if event.kind == EVENT_KEY:
-                _ = self.symbol_pick.handle_key(event)
-            else:
-                _ = self.symbol_pick.handle_mouse(event, screen)
-            self._after_symbol_pick(screen)
-            return Optional[String]()
-        if self.reference_pick.active:
-            if event.kind == EVENT_KEY:
-                _ = self.reference_pick.handle_key(event)
-            else:
-                _ = self.reference_pick.handle_mouse(event, screen)
-            self._after_reference_pick(screen)
-            return Optional[String]()
-        if self.find_symbol.active:
-            if event.kind == EVENT_KEY:
-                _ = self.find_symbol.handle_key(event)
-            else:
-                _ = self.find_symbol.handle_mouse(event, screen)
-            if not self.find_symbol.active:
-                self._find_symbol_closed()
-                return Optional[String]()
-            if self.find_symbol.take_submitted():
-                self._submit_find_symbol(screen)
-            return Optional[String]()
-        if self.doc_pick.active:
-            if event.kind == EVENT_KEY:
-                _ = self.doc_pick.handle_key(event)
-            else:
-                _ = self.doc_pick.handle_mouse(event, screen)
-            self._after_doc_pick(screen)
-            return Optional[String]()
-        if self.project_find.active:
-            if event.kind == EVENT_KEY:
-                _ = self.project_find.handle_key(event, monotonic_ms())
-            else:
-                _ = self.project_find.handle_mouse(event, screen)
-            self._after_project_find(screen)
-            return Optional[String]()
+            var tree = self.ui_tree(surface)
+            var evs = self.ui_grids[top].handle_event(tree, event, screen)
+            return self.ui_apply(surface, evs)
         if self.history.active:
             # Fully modal: it swallows every event, like the review picker.
             var hist_top_y = 0 if self.host_owns_menu else 1
@@ -8632,6 +8574,8 @@ struct Desktop(Movable):
             out.append(String("breakpoint"))
         elif self.fill_dialog.active:
             out.append(String("fill"))
+        if len(self.picker_kind().as_bytes()) > 0:
+            out.append(String("picker"))
         return out^
 
     def settings_surfaces(self) -> List[String]:
@@ -8653,7 +8597,9 @@ struct Desktop(Movable):
             return String("")
         return all[len(all) - 1]
 
-    def ui_tree(self, name: String) -> UINode:
+    def ui_tree(mut self, name: String) -> UINode:
+        if name == String("picker"):
+            return self.picker_ui()
         if name == String("settings"):
             return self.settings.ui()
         if name == String("language_editor"):
@@ -8668,9 +8614,14 @@ struct Desktop(Movable):
             return self.breakpoint_menu.ui()
         return self.fill_dialog.ui()
 
-    def ui_apply(mut self, name: String, events: List[UIEvent]):
+    def ui_apply(
+        mut self, name: String, events: List[UIEvent],
+    ) -> Optional[String]:
         """Apply the user's edits / actions to dialog ``name``, then run its
-        submit handler when one of them finished it."""
+        submit handler when one of them finished it. Returns the host
+        action that handler asked for (a picker opening a project)."""
+        if name == String("picker"):
+            return self.picker_apply(events)
         for i in range(len(events)):
             ref e = events[i]
             if name == String("settings"):
@@ -8726,6 +8677,7 @@ struct Desktop(Movable):
             self._on_breakpoint_menu_submit()
         elif name == String("fill") and self.fill_dialog.submitted:
             self._on_fill_dialog_submit()
+        return Optional[String]()
 
     def _sync_settings_grids(mut self) -> List[String]:
         """``_sync_ui_grids`` for the separate Settings window; the dialog
@@ -9186,7 +9138,9 @@ struct Desktop(Movable):
             self._on_spelling_dialog_submit()
 
     def native_git_active(self) -> Bool:
-        return self.native_ui() and self.local_changes.active
+        """The git view is the host's: a sheet in the macOS look, a
+        Platinum window in the Mac OS 9 one."""
+        return self.host_draws_dialogs() and self.local_changes.active
 
     def native_git_select(mut self, pane: Int, idx: Int, screen: Rect):
         self.local_changes.native_select(pane, idx, screen)
@@ -9264,9 +9218,14 @@ struct Desktop(Movable):
     def native_tree_focus(mut self):
         self._focus_dock(DOCK_FILE_TREE)
 
-    def native_picker_kind(self) -> String:
-        if not self.native_ui():
-            return String("")
+    # --- the pickers, as one declarative surface ("picker") -------------
+    #
+    # Quick Open, Go to Symbol, references, Find Symbol, docs and Find in
+    # Project keep their search machinery; ``picker_ui`` describes whichever
+    # is open, and every projector (grid, AppKit, Platinum) draws it from
+    # that. Edits come back through ``picker_apply``.
+
+    def picker_kind(self) -> String:
         if self.quick_open.active:
             return String("quick_open")
         if self.find_symbol.active:
@@ -9281,8 +9240,8 @@ struct Desktop(Movable):
             return String("doc_pick")
         return String("")
 
-    def native_picker_set(mut self, field: String, var text: String):
-        var kind = self.native_picker_kind()
+    def picker_set(mut self, field: String, var text: String):
+        var kind = self.picker_kind()
         if kind == String("quick_open") and field == String("query"):
             self.quick_open.set_query(text^)
         elif kind == String("find_symbol") and field == String("query"):
@@ -9294,12 +9253,12 @@ struct Desktop(Movable):
         elif kind == String("doc_pick") and field == String("query"):
             self.doc_pick.set_query(text^)
 
-    def native_picker_option(mut self, name: String, on: Bool):
-        if self.native_picker_kind() == String("project_find"):
+    def picker_option(mut self, name: String, on: Bool):
+        if self.picker_kind() == String("project_find"):
             self.project_find.set_option(name, on)
 
-    def native_picker_select(mut self, idx: Int, anchor: Int):
-        var kind = self.native_picker_kind()
+    def picker_select(mut self, idx: Int, anchor: Int):
+        var kind = self.picker_kind()
         if kind == String("quick_open"):
             self.quick_open.select(idx, anchor)
         elif kind == String("find_symbol"):
@@ -9316,12 +9275,12 @@ struct Desktop(Movable):
             if idx >= 0 and idx < len(self.doc_pick.matched):
                 self.doc_pick.selected = idx
 
-    def native_picker_activate(
+    def picker_activate(
         mut self, idx: Int, anchor: Int, screen: Rect,
     ) raises -> Optional[String]:
         """Open row ``idx`` (double-click / Return in the native list)."""
-        self.native_picker_select(idx, anchor)
-        var kind = self.native_picker_kind()
+        self.picker_select(idx, anchor)
+        var kind = self.picker_kind()
         if kind == String("quick_open"):
             self.quick_open.submit()
             if self.quick_open.submitted:
@@ -9344,9 +9303,9 @@ struct Desktop(Movable):
             self._after_doc_pick(screen)
         return Optional[String]()
 
-    def native_picker_action(mut self, name: String, screen: Rect) raises:
+    def picker_action(mut self, name: String, screen: Rect) raises:
         """Find in Project's buttons: ``replace_all`` / ``send_to_panel``."""
-        if self.native_picker_kind() != String("project_find") \
+        if self.picker_kind() != String("project_find") \
                 or len(self.project_find.matches) == 0:
             return
         if name == String("replace_all") and self.project_find.replace_mode:
@@ -9357,8 +9316,8 @@ struct Desktop(Movable):
             return
         self._after_project_find(screen)
 
-    def native_picker_close(mut self):
-        var kind = self.native_picker_kind()
+    def picker_close(mut self):
+        var kind = self.picker_kind()
         if kind == String("quick_open"):
             self.quick_open.close()
         elif kind == String("find_symbol"):
@@ -9372,6 +9331,179 @@ struct Desktop(Movable):
             self.reference_pick.close()
         elif kind == String("doc_pick"):
             self.doc_pick.close()
+
+    def _picker_selection(self) -> Tuple[Int, Int]:
+        """``(row, anchor)`` of the open picker's selection."""
+        var kind = self.picker_kind()
+        if kind == String("quick_open"):
+            return (self.quick_open.selected, self.quick_open.anchor)
+        if kind == String("find_symbol"):
+            return (self.find_symbol.selected, self.find_symbol.selected)
+        if kind == String("project_find"):
+            return (self.project_find.selected, self.project_find.selected)
+        if kind == String("symbol_pick"):
+            return (self.symbol_pick.selected, self.symbol_pick.selected)
+        if kind == String("reference_pick"):
+            return (self.reference_pick.selected, self.reference_pick.selected)
+        return (self.doc_pick.selected, self.doc_pick.selected)
+
+    def _picker_count(self) -> Int:
+        var kind = self.picker_kind()
+        if kind == String("quick_open"):
+            return len(self.quick_open.matched)
+        if kind == String("find_symbol"):
+            return len(self.find_symbol.entries)
+        if kind == String("project_find"):
+            return len(self.project_find.matches)
+        if kind == String("symbol_pick"):
+            return len(self.symbol_pick.matched)
+        if kind == String("reference_pick"):
+            return len(self.reference_pick.entries)
+        return len(self.doc_pick.matched)
+
+    def picker_ui(mut self) -> UINode:
+        """The open picker as a ``picker_dialog``."""
+        var kind = self.picker_kind()
+        if kind != self._picker_open:
+            self._picker_open = kind
+            self._picker_window.reset()
+            self._picker_code_window.reset()
+        var count = self._picker_count()
+        var sel = self._picker_selection()
+        var span = self._picker_window.range(count, sel[0])
+        var first = span[0]
+        var end = span[1]
+        var selected = String(sel[0])
+        if sel[1] >= 0 and sel[1] != sel[0]:
+            selected = String(sel[1]) + String(":") + String(sel[0])
+        if kind == String("quick_open"):
+            ref q = self.quick_open
+            var status = String("")
+            if q.indexing:
+                status = String("Indexing… ") + String(len(q.entries)) + String(" files")
+            elif q.truncated:
+                status = String("Showing the first files only")
+            return picker_dialog(
+                String(q.title.strip()), picker_query(String("Find"), q.query.text, String("File name")),
+                picker_list(
+                    count, first, quick_open_rows(q, first, end), selected,
+                    multi=not q.picks_project and not q.picks_history,
+                ),
+                status^,
+            )
+        if kind == String("find_symbol"):
+            ref f = self.find_symbol
+            return picker_dialog(
+                String("Find Symbol"),
+                picker_query(String("Symbol"), f.query.text, String("Symbol name")),
+                picker_list(count, first, find_symbol_rows(f, first, end), selected),
+                f.status_message,
+            )
+        if kind == String("symbol_pick"):
+            ref sp = self.symbol_pick
+            return picker_dialog(
+                String("Go to Symbol in ") + basename(sp.path),
+                picker_query(String("Symbol"), sp.query.text, String("Symbol name")),
+                picker_list(count, first, symbol_pick_rows(sp, first, end), selected),
+                String("Asking the language server…") if sp.loading else String(""),
+            )
+        if kind == String("reference_pick"):
+            ref rp = self.reference_pick
+            return picker_dialog(
+                String("References to ") + rp.word, ui_spacer(),
+                picker_list(count, first, reference_pick_rows(rp, first, end), selected),
+                String(count) + String(" references"),
+            )
+        if kind == String("doc_pick"):
+            ref dp = self.doc_pick
+            return picker_dialog(
+                dp.display + String(" documentation"),
+                picker_query(String("Find"), dp.query.text, String("Name")),
+                picker_list(count, first, doc_pick_rows(dp, first, end), selected),
+                String(""),
+            )
+        # Find in Project: the fields and toggles, and the selected match's
+        # file in a code view under the results.
+        var found = project_find_rows(self.project_find, first, end)
+        var status = String("")
+        if self.project_find.searching():
+            status = String("Searching…")
+        elif self.project_find.truncated():
+            status = String("Showing the first ") + String(count) + String(" matches")
+        var code = List[UINode]()
+        code.append(self._picker_code_view())
+        var actions = List[UINode]()
+        var replace = self.project_find.replace_mode
+        actions.append(ui_button(
+            String("replace_all") if replace else String("send_to_panel"),
+            String("Replace All") if replace else String("Send to Panel"),
+            0 if count > 0 else UI_DISABLED,
+        ))
+        return picker_dialog(
+            String("Replace in Project") if replace else String("Find in Project"),
+            picker_query(
+                String("Find"), self.project_find.query.text, String("Search"),
+                project_find_fields(self.project_find),
+            ),
+            picker_list(count, first, found[0].copy(), selected, height=10, spans=found[1].copy()),
+            status^, project_find_toggles(self.project_find), code^, actions^,
+        )
+
+    def _picker_code_view(mut self) -> UINode:
+        """Find in Project's view of the selected match's file, marking
+        the match's line."""
+        ref p = self.project_find
+        var mark = -1
+        if p.selected >= 0 and p.selected < len(p.matches):
+            mark = p.matches[p.selected].line_no - 1
+        var probe = p.preview_window(self.grammar_registry, 0, 0)
+        var span = self._picker_code_window.range(probe[0], mark)
+        var pv = p.preview_window(self.grammar_registry, span[0], span[1])
+        var rows = List[List[String]]()
+        for i in range(len(pv[1])):
+            rows.append([pv[1][i]])
+        var spans = List[UISpan]()
+        for i in range(len(pv[2])):
+            ref h = pv[2][i]
+            var fg = Int(h.attr.fg)
+            if (h.attr.color_mode & FG_TRUECOLOR) != 0:
+                fg = UI_RGB | Int(h.attr.fg_rgb)
+            spans.append(UISpan(h.row, 0, h.col_start, h.col_end, fg, -1))
+        return ui_list(
+            String("context"), pv[0], span[0], rows^, String(mark), String(""),
+            10, UI_CODE, spans^,
+        )
+
+    def picker_apply(mut self, events: List[UIEvent]) -> Optional[String]:
+        """The picker dialog's edits and actions, through the same methods
+        each picker's own keys used."""
+        var screen = self._last_screen
+        for i in range(len(events)):
+            ref e = events[i]
+            if not e.is_action:
+                if e.key == String("results"):
+                    self.picker_select(ui_list_row(e.value), ui_list_anchor(e.value))
+                elif e.key == String("results@top"):
+                    self._picker_window.view_at(ui_int(e.value, 0))
+                elif e.key == String("context@top"):
+                    self._picker_code_window.view_at(ui_int(e.value, 0))
+                elif e.key == String("case") or e.key == String("word") \
+                        or e.key == String("regex"):
+                    self.picker_option(e.key, ui_bool(e.value))
+                else:
+                    self.picker_set(e.key, e.value)
+                continue
+            if e.key == String("cancel"):
+                self.picker_close()
+                return Optional[String]()
+            try:
+                if e.key == String("open"):
+                    var sel = self._picker_selection()
+                    return self.picker_activate(sel[0], sel[1], screen)
+                self.picker_action(e.key, screen)
+            except:
+                pass
+        return Optional[String]()
 
     def _find_symbol_closed(mut self):
         """Find Symbol was dismissed: drop any in-flight LSP bookkeeping
@@ -9718,18 +9850,14 @@ struct Desktop(Movable):
             self._apply_view_config()
             self._persist_config()
             return Optional[String]()
-        if action == VIEW_NATIVE_UI or action == VIEW_PLATINUM_UI:
-            # The three looks are one choice: turning one on turns the
-            # other off.
-            if action == VIEW_NATIVE_UI:
-                self.config.native_ui = not self.config.native_ui
-                if self.config.native_ui:
-                    self.config.platinum_ui = False
-            else:
-                var on = not self.platinum_ui()
-                self.config.platinum_ui = on
-                if on:
-                    self.config.native_ui = False
+        if (
+            action == VIEW_CLASSIC_UI or action == VIEW_NATIVE_UI
+            or action == VIEW_PLATINUM_UI
+        ):
+            # The three looks are one choice: picking one turns the others
+            # off.
+            self.config.native_ui = action == VIEW_NATIVE_UI
+            self.config.platinum_ui = action == VIEW_PLATINUM_UI
             # An open Settings shows it, and writes it back with its edits
             self.settings.native_ui = self.config.native_ui
             self.settings.platinum_ui = self.config.platinum_ui

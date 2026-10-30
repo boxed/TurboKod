@@ -27,6 +27,7 @@ from .events import (
     Event, EVENT_KEY, EVENT_MOUSE, KEY_ENTER, KEY_ESC, MOD_SHIFT,
 )
 from .geometry import center_in, Point, Rect
+from .scrollbar import ScrollBarArea
 from .picker_input import (
     build_picker_layout, picker_nav_key, picker_row_at, picker_wheel_scroll,
     scroll_to_reveal,
@@ -68,6 +69,7 @@ struct QuickOpen(Movable):
     # whole range highlighted and submitting all of it on Enter.
     var anchor: Int
     var scroll: Int
+    var _bar: ScrollBarArea
     # Dialog title — "Quick Open" by default, "Open Recent" for the
     # recents-mode entry point.
     var title: String
@@ -149,6 +151,7 @@ struct QuickOpen(Movable):
         self.selected = 0
         self.anchor = 0
         self.scroll = 0
+        self._bar = ScrollBarArea()
         self.title = String(" Quick Open ")
         self.picks_project = False
         self.picks_history = False
@@ -549,6 +552,10 @@ struct QuickOpen(Movable):
             _ = painter.put_text(
                 canvas, Point(rect.a.x + 2, top + i), entry, attr,
             )
+        self._bar.paint(
+            canvas, Rect(rect.a.x + 1, top, rect.b.x - 1, top + h),
+            len(self.matched), self.scroll, bg,
+        )
         # Bottom hint.
         _ = painter.put_text(
             canvas, Point(rect.a.x + 2, layout.hint_y),
@@ -647,6 +654,12 @@ struct QuickOpen(Movable):
         # always dismisses the dialog.
         if close_button_clicked(rect, event):
             self.close()
+            return True
+        var sb = self._bar.handle_mouse(event)
+        if sb >= 0:
+            # Like the wheel, ends restore mode.
+            self.scroll = sb
+            self._pending_restore = False
             return True
         if self._input_rect.width() > 0 \
                 and self.query.handle_mouse(event, self._input_rect):

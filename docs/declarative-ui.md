@@ -1,7 +1,8 @@
-# Declarative UI: one description, two projections
+# Declarative UI: one description, three projections
 
 A dialog describes its UI **once**, as a tree of `UINode`s built from its
-state each frame. Two projectors turn that same tree into a UI:
+state each frame. Three projectors turn that same tree into a UI (the
+third, Platinum, is in [platinum-ui.md](platinum-ui.md)):
 
 - **Grid** (`ui_grid.mojo`, `GridForm`): lays it out in cells and paints it
   with the existing widgets (`TextField`, `Dropdown`, `Checkbox`,
@@ -71,6 +72,28 @@ A confirm raised while a dialog is up goes on top of its sheet
 | `ui_button(id, label, flags)` | `UI_DEFAULT` answers Return, `UI_CANCEL` Esc; also `UI_DESTRUCTIVE`, `UI_HOTKEY`. |
 | `ui_separator` / `ui_spacer` | Spacing. |
 | `ui_preview(font, size, builtins, version)` | Sample code in the live theme's editor colors. |
+| `ui_list(key, count, first, rows, selected, activate, height, flags, spans)` | A list too long to send whole; see below. |
+
+Flags beyond the obvious: `UI_NAV` on a text field makes it the search
+field of the dialog's list (the arrows move the list, typing stays in the
+field), `UI_MULTI` lets a list's selection be a range (`"<anchor>:<row>"`),
+`UI_CODE` makes a list a code view, and `UI_LARGE` gives a dialog most of
+the window.
+
+### Long lists (`ui_list`)
+
+Quick Open's files or a whole source file can't be sent every frame, so a
+list carries `count` and only the rows from `first` on, the window around
+what's on screen. Each projector reports where its view starts with
+`set("<key>@top", row)`, and the dialog's `ListWindow` sends the rows
+around that (and around the selection) next frame. A row is a primary text
+and an optional detail, drawn de-emphasized in a second column, the same in
+every look: the primary column as wide as the widest primary text in the
+rows sent, at most half the list (`_paint_list` in cells, `ListColumns` in
+the Swift projectors); `UISpan`s color byte ranges of
+a cell with a palette index (so they follow the theme) or `UI_RGB | rgb`.
+With `UI_CODE` it's a code view: monospace on the editor colors, no
+selection, its `number` the line to mark and reveal at the golden ratio.
 
 Keys are unique per dialog. The grid projector keeps the widget state that
 isn't the dialog's business (a field's cursor, a pop-up being open, a
@@ -112,6 +135,15 @@ For scripted screenshots, `TK_CAPTURE_UI='{"<name>": [[is_action, key,
 value], …]}'` sends events to a dialog as soon as its sheet is up.
 
 ## Converted so far
+
+The pickers: Quick Open, Go to Symbol, references, Find Symbol, docs and
+Find in Project are one surface, `picker` (`picker_ui.mojo` lays it out,
+`Desktop.picker_ui` / `picker_apply` connect it to whichever picker is
+open), replacing three per-look implementations: the hand-painted grid
+pickers, the AppKit `PickerController` and its `tk_desktop_picker*` C ABI.
+An action that hands the host something to do (a project opening in a new
+window) comes back from `ui_apply` / `tk_desktop_ui_event` as a host action
+code.
 
 Fill (Edit ▸ Fill…), the breakpoint dialog, the failed-condition dialog,
 Project Settings and its on-save action editor, Settings and its language

@@ -39,9 +39,10 @@ from .colors import (
 )
 from .dropdown import DROPDOWN_HIT_BODY, DROPDOWN_HIT_POPUP, Dropdown
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_LEFT,
-    KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP, MOD_ALT, MOD_CTRL, MOD_META,
-    MOD_SHIFT, MOUSE_BUTTON_LEFT,
+    Event, EVENT_KEY, EVENT_MOUSE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC,
+    KEY_HOME, KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_SPACE,
+    KEY_TAB, KEY_UP, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT,
+    MOUSE_BUTTON_LEFT,
 )
 from .file_dialog import FileDialog
 from .geometry import Point, Rect, center_in
@@ -55,8 +56,10 @@ from .ui_tree import (
     UI_DEFAULT, UI_DESTRUCTIVE, UI_DIALOG, UI_FORM, UI_HEADING, UI_HOTKEY,
     UI_HSTACK, UI_LABEL, UI_ROW, UI_SECONDARY, UI_SEPARATOR, UI_SPACER,
     UI_DISABLED, UI_PREVIEW, UI_TABLE, UI_TABS, UI_TEXT, UI_VSTACK, UINode,
-    ui_button,
+    UI_CODE, UI_LARGE, UI_LIST, UI_MULTI, UI_NAV, UI_RGB, UISpan,
+    ui_button, ui_list_anchor, ui_list_row,
 )
+from .scrollbar import ScrollBarArea
 from .window import close_button_clicked, paint_modal_frame, paint_window_title
 
 
@@ -101,6 +104,8 @@ struct _Placed(Copyable, Movable):
 def _is_focusable(n: UINode) -> Bool:
     if not n.enabled():
         return False
+    if n.kind == UI_LIST:
+        return not n.has(UI_CODE)
     return n.kind == UI_TEXT or n.kind == UI_CHECK or n.kind == UI_CHOICE \
         or n.kind == UI_TABLE or n.kind == UI_BUTTON or n.kind == UI_TABS
 
@@ -169,6 +174,8 @@ def _measure(n: UINode) -> Tuple[Int, Int]:
         return (0, 0)
     if k == UI_PREVIEW:
         return (40, len(_preview_lines()))
+    if k == UI_LIST:
+        return (60, max(n.height, 3))
     if k == UI_TABLE:
         var widths = _column_widths(n)
         var w = 2
@@ -270,6 +277,7 @@ def _stretches(n: UINode) -> Bool:
     """Takes spare width in a row (fields and tables), versus keeping its
     natural width (labels, checkboxes, choices, buttons)."""
     return (n.kind == UI_TEXT and n.number == 0) or n.kind == UI_TABLE \
+        or n.kind == UI_LIST \
         or n.kind == UI_SEPARATOR \
         or n.kind == UI_FORM or n.kind == UI_VSTACK or n.kind == UI_TABS \
         or n.kind == UI_PREVIEW
@@ -300,7 +308,7 @@ def _arrange(n: UINode, r: Rect, mut out: List[_Placed]):
             for i in range(len(n.children) - 1, -1, -1):
                 if n.children[i].kind == UI_TABLE or (
                     n.children[i].kind == UI_TABS
-                ):
+                ) or n.children[i].kind == UI_LIST:
                     var h = max(heights[i] + spare, 2)
                     spare -= h - heights[i]
                     heights[i] = h
@@ -404,7 +412,8 @@ def _arrange(n: UINode, r: Rect, mut out: List[_Placed]):
     # Leaves keep their natural size unless they stretch.
     var m = _measure(n)
     var w = r.width() if _stretches(n) else min(m[0], r.width())
-    var h = r.height() if n.kind == UI_TABLE else min(m[1], r.height())
+    var h = r.height() if n.kind == UI_TABLE or n.kind == UI_LIST \
+        else min(m[1], r.height())
     out.append(_Placed(n.copy(), Rect(r.a.x, r.a.y, r.a.x + w, r.a.y + h)))
 
 
@@ -422,6 +431,8 @@ struct GridForm(Movable):
     var _drops: List[Dropdown]
     var _list_keys: List[String]
     var _lists: List[ListBox]
+    var _list_marks: List[Int]
+    """A code view's marked line as last revealed, parallel to ``_lists``."""
     var _button_keys: List[String]
     var _buttons: List[ShadowButton]
     var _open_drop: String
@@ -446,6 +457,7 @@ struct GridForm(Movable):
         self._drops = List[Dropdown]()
         self._list_keys = List[String]()
         self._lists = List[ListBox]()
+        self._list_marks = List[Int]()
         self._button_keys = List[String]()
         self._buttons = List[ShadowButton]()
         self._open_drop = String("")
@@ -464,6 +476,7 @@ struct GridForm(Movable):
         self._drops = List[Dropdown]()
         self._list_keys = List[String]()
         self._lists = List[ListBox]()
+        self._list_marks = List[Int]()
         self._button_keys = List[String]()
         self._buttons = List[ShadowButton]()
         self._open_drop = String("")
@@ -511,6 +524,35 @@ struct GridForm(Movable):
         self._lists.append(lb^)
         return len(self._lists) - 1
 
+    def _vlist(mut self, n: UINode) -> Int:
+        """A ``UI_LIST``'s ``ListBox``: its scroll and its selection,
+        synced from the dialog's (a code view has none)."""
+        var row = -1 if n.has(UI_CODE) else n.number
+        var anchor = -1 if n.has(UI_CODE) else ui_list_anchor(n.text)
+        for i in range(len(self._list_keys)):
+            if self._list_keys[i] == n.key:
+                if self._lists[i].selected != row or (
+                    n.has(UI_MULTI) and self._lists[i].anchor() != anchor
+                ):
+                    self._select(i, row, anchor, n.count)
+                return i
+        var lb = ListBox(n.has(UI_MULTI))
+        self._list_keys.append(n.key)
+        self._lists.append(lb^)
+        self._list_marks.append(-1)
+        var i = len(self._lists) - 1
+        self._select(i, row, anchor, n.count)
+        return i
+
+    def _select(mut self, i: Int, row: Int, anchor: Int, count: Int):
+        if not self._lists[i].multi or anchor < 0 or anchor == row:
+            self._lists[i].set_selected(row)
+            return
+        var rows = List[Int]()
+        for r in range(min(anchor, row), max(anchor, row) + 1):
+            rows.append(r)
+        self._lists[i].set_selection(rows, row, anchor, count)
+
     def _button(mut self, n: UINode, r: Rect) -> Int:
         for i in range(len(self._button_keys)):
             if self._button_keys[i] == n.key:
@@ -532,6 +574,9 @@ struct GridForm(Movable):
         var m = _measure(root)
         var w = min(m[0], screen.width() - 2)
         var h = min(m[1], screen.height() - 2)
+        if root.has(UI_LARGE):
+            w = max(w, min(screen.width() - 4, screen.width() * 4 // 5))
+            h = max(h, screen.height() - 4)
         self._frame = screen if self.fill else center_in(screen, max(w, 10), max(h, 5))
         var body = Rect(
             self._frame.a.x + 1 + _MARGIN_X, self._frame.a.y + 1 + _MARGIN_Y,
@@ -548,6 +593,8 @@ struct GridForm(Movable):
                 _ = self._drop(p.node)
             elif p.node.kind == UI_TABLE:
                 _ = self._list(p.node)
+            elif p.node.kind == UI_LIST:
+                _ = self._vlist(p.node)
             elif p.node.kind == UI_BUTTON:
                 _ = self._button(p.node, p.rect)
         # Keep focus on something focusable that still exists.
@@ -654,6 +701,8 @@ struct GridForm(Movable):
                     painter.set(canvas, x, p.rect.a.y, _sep_cell())
             elif k == UI_TABLE:
                 self._paint_table(canvas, p.node, p.rect, focused)
+            elif k == UI_LIST:
+                self._paint_list(canvas, p.node, p.rect, focused)
             elif k == UI_PREVIEW:
                 _paint_preview(canvas, painter, p.rect)
             elif k == UI_TABS:
@@ -696,6 +745,120 @@ struct GridForm(Movable):
                     line += String(" ") * (max(0, w - display_columns(cell)) + 2)
             labels.append(line^)
         self._lists[li].paint_rows(canvas, body, labels, focused, Attr(BLACK, CYAN))
+
+    def _paint_list(mut self, mut canvas: Canvas, n: UINode, r: Rect, focused: Bool):
+        var li = self._vlist(n)
+        var code = n.has(UI_CODE)
+        var body_attr = Attr(SYN_IDENT, EDITOR_BG) if code else Attr(BLACK, CYAN)
+        if code and n.number != self._list_marks[li]:
+            # A new line to show: put it at the golden-ratio line.
+            self._list_marks[li] = n.number
+            self._lists[li].scroll_to(n.number - r.height() * 38 // 100)
+        var first = self._lists[li].prepare(r, n.count)
+        # The primary text's column: as wide as the widest in the window,
+        # but leaving room for the detail.
+        var w0 = 0
+        if not code:
+            for i in range(len(n.rows)):
+                if len(n.rows[i]) > 0:
+                    w0 = max(w0, display_columns(n.rows[i][0]))
+            w0 = min(w0, max(r.width() // 2, 20))
+        var labels = List[String]()
+        var end = min(first + r.height(), n.count)
+        for i in range(first, end):
+            var j = i - n.first
+            if j < 0 or j >= len(n.rows):
+                labels.append(String(""))
+                continue
+            labels.append(_list_label(n.rows[j], w0, code))
+        self._lists[li].paint_rows(canvas, r, labels, focused, body_attr)
+        # Recolor on top: the marked line, the details, the spans.
+        var clip = r
+        if ScrollBarArea.overflows(r, n.count):
+            clip = Rect(r.a.x, r.a.y, r.b.x - 1, r.b.y)
+        var painter = Painter(clip)
+        for i in range(first, end):
+            var j = i - n.first
+            if j < 0 or j >= len(n.rows):
+                continue
+            var y = r.a.y + (i - first)
+            var sel = not code and self._lists[li].is_selected(i)
+            var row_attr = body_attr
+            if sel:
+                row_attr = Attr(WHITE, BLUE) if focused else Attr(BLACK, GREEN)
+            elif code and i == n.number:
+                row_attr = Attr(BLACK, CYAN)
+                painter.fill(canvas, Rect(r.a.x, y, r.b.x, y + 1), String(" "), row_attr)
+                _ = painter.put_text(canvas, Point(r.a.x + 1, y), labels[i - first], row_attr)
+            ref cells = n.rows[j]
+            if not code and len(cells) > 1 and not sel:
+                _ = painter.put_text(
+                    canvas, Point(r.a.x + 1 + w0 + 2, y), cells[1],
+                    Attr(DARK_GRAY, CYAN),
+                )
+            for s in range(len(n.spans)):
+                ref sp = n.spans[s]
+                if sp.row != i or sp.col >= len(cells) or sp.col > 1:
+                    continue
+                var text = cells[sp.col]
+                var b = text.as_bytes()
+                var a = max(0, min(sp.start, len(b)))
+                var e = max(a, min(sp.end, len(b)))
+                if e <= a:
+                    continue
+                var cell_x = r.a.x + 1 + (0 if sp.col == 0 else w0 + 2)
+                var x = cell_x + _code_columns(String(StringSpan(unsafe_from_utf8=b[:a])))
+                if sp.col == 0 and not code and x >= cell_x + w0:
+                    continue
+                var attr = row_attr
+                if sp.fg >= UI_RGB:
+                    attr = attr.with_fg_rgb(UInt32(sp.fg & 0xFFFFFF))
+                elif sp.fg >= 0 and not sel:
+                    attr = attr.with_fg(UInt8(sp.fg))
+                if sp.bg >= UI_RGB:
+                    attr = attr.with_bg_rgb(UInt32(sp.bg & 0xFFFFFF))
+                elif sp.bg >= 0:
+                    attr = attr.with_bg(UInt8(sp.bg))
+                var piece = String(StringSpan(unsafe_from_utf8=b[a:e])).replace(
+                    String("\t"), String("    "),
+                )
+                if sp.col == 0 and not code:
+                    piece = truncate_to_columns(piece, max(0, cell_x + w0 - x))
+                _ = painter.put_text(canvas, Point(x, y), piece, attr)
+
+    def _list_nav(mut self, n: UINode, event: Event, page: Int, mut out: List[UIEvent]):
+        """Up / Down / Page / Home / End on list ``n``: report the new
+        selection (with Shift on a ``UI_MULTI`` list, the range)."""
+        var li = self._vlist(n)
+        var before_sel = self._lists[li].selected
+        var before_anchor = self._lists[li].anchor()
+        var ev = event
+        if not n.has(UI_MULTI):
+            ev.mods = ev.mods & ~MOD_SHIFT
+        _ = self._lists[li].handle_nav_key(ev, n.count, page)
+        self._report_selection(n, li, before_sel, before_anchor, out)
+
+    def _report_selection(
+        self, n: UINode, li: Int, before_sel: Int, before_anchor: Int,
+        mut out: List[UIEvent],
+    ):
+        var sel = self._lists[li].selected
+        var anchor = self._lists[li].anchor()
+        if sel == before_sel and (not n.has(UI_MULTI) or anchor == before_anchor):
+            return
+        if n.has(UI_MULTI) and anchor >= 0 and anchor != sel:
+            out.append(ui_set(n.key, String(anchor) + String(":") + String(sel)))
+        else:
+            out.append(ui_set(n.key, String(sel)))
+
+    def _nav_list(self) -> Int:
+        """The placed list a ``UI_NAV`` field drives: the first one that
+        isn't a code view."""
+        for i in range(len(self._placed)):
+            ref n = self._placed[i].node
+            if n.kind == UI_LIST and not n.has(UI_CODE):
+                return i
+        return -1
 
     def _tab_spans(self, n: UINode, r: Rect) -> List[Tuple[Int, Int]]:
         var out = List[Tuple[Int, Int]]()
@@ -775,10 +938,19 @@ struct GridForm(Movable):
                 self.focus_key = self._browse_key
                 self._file_dialog.close()
             return out^
+        # Where each list's view starts, to report the ones that move.
+        var tops = List[Int]()
+        for i in range(len(self._lists)):
+            tops.append(self._lists[i].scroll())
         if event.kind == EVENT_KEY:
             self._key(event, out)
         elif event.kind == EVENT_MOUSE:
             self._mouse(event, out)
+        for i in range(min(len(tops), len(self._lists))):
+            if self._lists[i].scroll() != tops[i]:
+                out.append(ui_set(
+                    self._list_keys[i] + String("@top"), String(self._lists[i].scroll()),
+                ))
         # A Browse button is the grid's own business: open the file dialog
         # at the field's directory.
         var kept = List[UIEvent]()
@@ -840,6 +1012,18 @@ struct GridForm(Movable):
                         if first == ch:
                             out.append(ui_act(b.key))
                             return
+        if kind == UI_TEXT and n.has(UI_NAV):
+            var target = self._nav_list()
+            if target >= 0:
+                var ln = self._placed[target].node.copy()
+                if k == KEY_UP or k == KEY_DOWN or k == KEY_PAGEUP \
+                        or k == KEY_PAGEDOWN:
+                    var page = max(self._placed[target].rect.height() - 1, 1)
+                    self._list_nav(ln, event, page, out)
+                    return
+                if k == KEY_ENTER and len(ln.value.as_bytes()) > 0:
+                    out.append(ui_act(ln.value))
+                    return
         if kind == UI_TEXT:
             if k == KEY_ENTER:
                 var d = self._default_action()
@@ -877,6 +1061,14 @@ struct GridForm(Movable):
                 out.append(ui_set(n.key, String(n.number - 1)))
             elif k == KEY_RIGHT and n.number + 1 < len(n.children):
                 out.append(ui_set(n.key, String(n.number + 1)))
+            return
+        if kind == UI_LIST:
+            if k == KEY_ENTER:
+                if len(n.value.as_bytes()) > 0:
+                    out.append(ui_act(n.value))
+                return
+            var page = max(self._placed[fi].rect.height() - 1, 1)
+            self._list_nav(n, event, page, out)
             return
         if kind == UI_TABLE:
             if k == KEY_ENTER:
@@ -938,6 +1130,15 @@ struct GridForm(Movable):
                 out.append(ui_set(p.node.key, String(self._drops[di].index)))
             if hit == DROPDOWN_HIT_POPUP or hit == DROPDOWN_HIT_BODY:
                 return
+        # A scroll-bar drag takes every event up to the release.
+        for i in range(len(self._placed)):
+            var p = self._placed[i].copy()
+            if p.node.kind != UI_LIST:
+                continue
+            var li = self._vlist(p.node)
+            if self._lists[li].scrolling():
+                _ = self._lists[li].handle_mouse_drag(event, p.rect, p.node.count)
+                return
         # A drag continues in the field it started in.
         var fi = self._focused()
         if event.motion and fi >= 0 and self._placed[fi].node.kind == UI_TEXT:
@@ -951,6 +1152,23 @@ struct GridForm(Movable):
             if not p.rect.contains(event.pos) or not p.node.enabled():
                 continue
             var kind = p.node.kind
+            if kind == UI_LIST:
+                var li = self._vlist(p.node)
+                var code = p.node.has(UI_CODE)
+                if press and not code:
+                    self.focus_key = p.node.key
+                var before_sel = self._lists[li].selected
+                var before_anchor = self._lists[li].anchor()
+                if self._lists[li].handle_mouse_press(event, p.rect, p.node.count):
+                    if code:
+                        # A code view only scrolls.
+                        self._lists[li].set_selected(-1)
+                        return
+                    self._report_selection(p.node, li, before_sel, before_anchor, out)
+                    if press and event.click_count >= 2 \
+                            and len(p.node.value.as_bytes()) > 0:
+                        out.append(ui_act(p.node.value))
+                return
             if kind == UI_TABLE:
                 # Wheel or click: the list scrolls / selects itself.
                 var body = Rect(p.rect.a.x, p.rect.a.y + 1, p.rect.b.x, p.rect.b.y)
@@ -993,6 +1211,23 @@ struct GridForm(Movable):
                             out.append(ui_set(p.node.key, String(t)))
                 return
             return
+
+
+def _code_columns(text: String) -> Int:
+    """Cells ``text`` takes in a list row, tabs drawn as four spaces."""
+    return display_columns(text.replace(String("\t"), String("    ")))
+
+
+def _list_label(cells: List[String], w0: Int, code: Bool) -> String:
+    """A list row as plain text: the primary cell (cut to ``w0`` columns)
+    and the detail two columns after it; a code line as is."""
+    if len(cells) == 0:
+        return String("")
+    var primary = cells[0].replace(String("\t"), String("    "))
+    if code or len(cells) < 2:
+        return primary^
+    var p = _fit(primary, w0)
+    return p + String(" ") * (max(0, w0 - display_columns(p)) + 2) + cells[1]
 
 
 def _preview_lines() -> List[List[Tuple[String, UInt8]]]:

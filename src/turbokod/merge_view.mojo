@@ -41,6 +41,7 @@ from .events import (
 )
 from .file_io import basename
 from .geometry import Point, Rect, center_in
+from .scrollbar import ScrollBarArea
 from .string_utils import (
     display_columns, is_printable_text_key, prev_codepoint_start,
     utf8_codepoint_size,
@@ -140,6 +141,7 @@ struct MergeView(Movable):
     var current: Int
     """Which conflict (0-based ordinal) the keyboard actions target."""
     var scroll: Int
+    var _bar: ScrollBarArea
     var edit_mode: Bool
     var edit_row: Int
     var edit_col: Int
@@ -162,6 +164,7 @@ struct MergeView(Movable):
         self.conflict_count = 0
         self.current = 0
         self.scroll = 0
+        self._bar = ScrollBarArea()
         self.edit_mode = False
         self.edit_row = 0
         self.edit_col = 0
@@ -438,6 +441,11 @@ struct MergeView(Movable):
             elif row.kind == _ROW_ACTIONBAR:
                 self._paint_action_bar(canvas, cp, content_x, y, row.ordinal)
 
+        # The bar sits on the frame's right edge, as in Turbo Vision.
+        self._bar.paint(
+            canvas, Rect(rect.a.x + 1, content.a.y, rect.b.x, content.b.y),
+            len(self._rows_cache), self.scroll, body,
+        )
         self._paint_footer(canvas, painter, rect)
 
     def _paint_action_bar(
@@ -703,6 +711,10 @@ struct MergeView(Movable):
         var rect = self._layout(container_bounds)
         if close_button_clicked(rect, event):
             self.cancelled = True
+            return True
+        var sb = self._bar.handle_mouse(event)
+        if sb >= 0:
+            self.scroll = sb
             return True
         # Mouse wheel scrolls the merged document.
         if event.button == MOUSE_WHEEL_UP:

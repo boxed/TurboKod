@@ -64,6 +64,17 @@ comptime UI_PREVIEW   = 15
 is the font label, ``number`` the font size (0 = its default), ``options``
 the built-in font labels, ``value`` a token that changes whenever the
 palette does (so a projector knows to repaint)."""
+comptime UI_LIST      = 16
+"""A list too long to send whole (Quick Open's files, a file's lines):
+``count`` rows in all, of which ``rows`` holds the ones from ``first`` on —
+the window around what's on screen. Each projector reports where its view
+is with ``set("<key>@top", row)``, and the dialog sends the rows around it
+next frame (``ListWindow``). Row cells are a primary text and an optional
+detail (drawn de-emphasized); ``spans`` color byte ranges of a cell. ``key``
+binds the selected row (``number``; ``"<anchor>:<row>"`` for a range with
+``UI_MULTI``); ``value`` is the action double-click / Return runs.
+With ``UI_CODE`` it's a code view: monospace on the editor colors, no
+selection, ``number`` the line to mark and reveal."""
 
 
 # --- flags --------------------------------------------------------------------
@@ -90,6 +101,34 @@ Space or a click on it runs ``toggle:<row>``."""
 comptime UI_BROWSE      = 1 << 9
 """Text: a file path, with a Browse button beside it that picks one (the
 grid's file dialog, natively an open panel) and sets the field."""
+comptime UI_NAV         = 1 << 10
+"""Text: the search field of the dialog's list — Up / Down / Page Up /
+Page Down move the list's selection and Return runs its action, while the
+typing stays in the field (a picker)."""
+comptime UI_MULTI       = 1 << 11
+"""List: Shift extends the selection into a range."""
+comptime UI_CODE        = 1 << 12
+"""List: a code view (see ``UI_LIST``)."""
+comptime UI_LARGE       = 1 << 13
+"""Dialog: takes most of the window instead of its natural size (a
+picker, whose list should show as many rows as fit)."""
+
+
+@fieldwise_init
+struct UISpan(ImplicitlyCopyable, Movable):
+    """A colored byte range ``[start, end)`` of cell ``col`` of list row
+    ``row`` (absolute). ``fg`` / ``bg``: -1 for none, a palette index
+    (0..255, so it follows the theme), or ``UI_RGB | 0xRRGGBB``."""
+    var row: Int
+    var col: Int
+    var start: Int
+    var end: Int
+    var fg: Int
+    var bg: Int
+
+
+comptime UI_RGB = 1 << 24
+"""``UISpan`` color tag: the low 24 bits are an RGB value."""
 
 
 struct UINode(Copyable, Movable, Deinitable):
@@ -104,6 +143,9 @@ struct UINode(Copyable, Movable, Deinitable):
     var height: Int
     var flags: Int
     var children: List[UINode]
+    var count: Int
+    var first: Int
+    var spans: List[UISpan]
 
     def __init__(out self, kind: Int):
         self.kind = kind
@@ -117,6 +159,9 @@ struct UINode(Copyable, Movable, Deinitable):
         self.height = 0
         self.flags = 0
         self.children = List[UINode]()
+        self.count = 0
+        self.first = 0
+        self.spans = List[UISpan]()
 
     def __deinit__(deinit self):
         # Deliberately empty — the recursive ``List[UINode]`` field needs an
@@ -136,6 +181,9 @@ struct UINode(Copyable, Movable, Deinitable):
         self.height = copy.height
         self.flags = copy.flags
         self.children = copy.children.copy()
+        self.count = copy.count
+        self.first = copy.first
+        self.spans = copy.spans.copy()
 
     def has(self, flag: Int) -> Bool:
         return (self.flags & flag) != 0
@@ -282,6 +330,74 @@ def ui_table(
     return n^
 
 
+def ui_list(
+    var key: String, count: Int, first: Int, var rows: List[List[String]],
+    var selected: String, var activate: String = String(""), height: Int = 8,
+    flags: Int = 0, var spans: List[UISpan] = List[UISpan](),
+) -> UINode:
+    """See ``UI_LIST``. ``selected`` is the row index as text, or
+    ``"<anchor>:<row>"`` for a ``UI_MULTI`` range."""
+    var n = UINode(UI_LIST)
+    n.key = key^
+    n.count = count
+    n.first = first
+    n.rows = rows^
+    n.text = selected^
+    n.number = ui_list_row(n.text)
+    n.value = activate^
+    n.height = height
+    n.flags = flags
+    n.spans = spans^
+    return n^
+
+
+def ui_list_row(selected: String) -> Int:
+    """The row a list's selection value names (its moving end)."""
+    var b = selected.as_bytes()
+    for i in range(len(b)):
+        if b[i] == 0x3A:
+            return ui_int(String(StringSpan(unsafe_from_utf8=b[i + 1:])))
+    return ui_int(selected)
+
+
+def ui_list_anchor(selected: String) -> Int:
+    """The fixed end of a list's selection range (its row when single)."""
+    var b = selected.as_bytes()
+    for i in range(len(b)):
+        if b[i] == 0x3A:
+            return ui_int(String(StringSpan(unsafe_from_utf8=b[:i])))
+    return ui_int(selected)
+
+
+struct ListWindow(Copyable, Movable):
+    """The dialog's half of a ``UI_LIST``: which rows to send. It follows
+    the projector's view (``<key>@top``) and the selection, keeping
+    ``size`` rows around them so a scroll within that needs no round
+    trip."""
+    var top: Int
+    var size: Int
+
+    def __init__(out self, size: Int = 200):
+        self.top = 0
+        self.size = size
+
+    def reset(mut self):
+        self.top = 0
+
+    def view_at(mut self, row: Int):
+        """The projector's view now starts at ``row``."""
+        self.top = max(row, 0)
+
+    def range(self, count: Int, selected: Int) -> Tuple[Int, Int]:
+        """``[first, end)`` to send: centered on the view, moved to cover
+        the selection when it's out of it (the view is about to follow)."""
+        var at = self.top
+        if selected >= 0 and (selected < at or selected >= at + self.size // 2):
+            at = selected
+        var first = max(0, min(at - self.size // 4, count - self.size))
+        return (first, min(count, first + self.size))
+
+
 def ui_button(var key: String, var label: String, flags: Int = 0) -> UINode:
     var n = UINode(UI_BUTTON)
     n.key = key^
@@ -340,11 +456,13 @@ def _kind_name(kind: Int) -> String:
     if kind == UI_BUTTON: return String("button")
     if kind == UI_SEPARATOR: return String("separator")
     if kind == UI_PREVIEW: return String("preview")
+    if kind == UI_LIST: return String("list")
     return String("spacer")
 
 
 def ui_to_json(node: UINode) -> JsonValue:
-    """``{k, key, text, value, ph, opts, rows, n, h, f, kids}`` — empty
+    """``{k, key, text, value, ph, opts, rows, n, h, f, kids}`` (a list
+    adds ``count``, ``first`` and ``spans``) — empty
     fields are left out to keep the per-frame payload small."""
     var o = json_object()
     o.put(String("k"), json_str(_kind_name(node.kind)))
@@ -375,6 +493,22 @@ def ui_to_json(node: UINode) -> JsonValue:
         o.put(String("h"), json_int(node.height))
     if node.flags != 0:
         o.put(String("f"), json_int(node.flags))
+    if node.kind == UI_LIST:
+        o.put(String("count"), json_int(node.count))
+        o.put(String("first"), json_int(node.first))
+        if len(node.spans) > 0:
+            var sp = json_array()
+            for i in range(len(node.spans)):
+                ref s = node.spans[i]
+                var a = json_array()
+                a.append(json_int(s.row))
+                a.append(json_int(s.col))
+                a.append(json_int(s.start))
+                a.append(json_int(s.end))
+                a.append(json_int(s.fg))
+                a.append(json_int(s.bg))
+                sp.append(a)
+            o.put(String("spans"), sp)
     if len(node.children) > 0:
         var kids = json_array()
         for i in range(len(node.children)):

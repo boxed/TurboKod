@@ -108,34 +108,19 @@ the bottom of `TurboKod.swift`):
 
 ## Pickers
 
-Quick Open, Find Symbol and Find in Project keep all their search machinery
-in the core: the file indexer, the symbol index with its `rg` fallback, and
-the streaming `rg` runner. The host shows them as one sheet,
-`PickerController` in `TurboKod.swift`:
+Quick Open, Find Symbol, Find in Project and the other pickers are a
+declarative dialog now (`picker`, see [declarative-ui.md](declarative-ui.md)):
+`DeclarativeController` draws them like any other, with `DeclarativeList`
+for the long lists — a table over the window of rows the core sends, the
+primary text and its detail in two columns (`ListColumns`), Find in Project's code view in
+the editor colors. The search machinery stays in the core.
 
-- **State:** `tk_desktop_picker` reports `{kind, title, query, count,
-  selected, status, …}`, plus Find in Project's fields and toggles. It's
-  empty when no picker is up or `native_ui()` is off.
-- **Rows** are fetched lazily, a page at a time, with
-  `tk_desktop_picker_rows`. Only what the table shows ever crosses the
-  boundary. The visible rows are re-fetched every tick so a re-ranked list
-  (Find Symbol) redraws.
-- **Typing** goes through `tk_desktop_picker_set` into each picker's
-  `set_query` / `set_field`. Those methods share code with the in-grid
-  key path (debounce, sanitizing, refilter).
-- **Return and double-click** call `tk_desktop_picker_activate`, which runs
-  the same `_after_quick_open` / `_submit_find_symbol` /
-  `_after_project_find` the in-grid Enter does.
-- **Return with nothing selected yet** opens the first row: results that
-  landed after the last poll are still openable, and the core clamps the
-  index.
 - **Never call `clickCount` on `NSApp.currentEvent` without checking it's a
   mouse event.** It raises on the key event Return produces, which once
   made Return do nothing.
-- **Find in Project's preview** (`tk_desktop_picker_preview`) is the whole
-  file with the core's syntax spans, as `[row, byte_start, byte_end, rgb]`
-  in the active theme. It's scrolled so the match sits at the golden-ratio
-  line.
+- A focused text field is never overwritten from the core, so a query set
+  from outside (`TK_CAPTURE_PICKER_QUERY`) filters the list but doesn't
+  show in the field.
 
 Tab titles size to their text; only when they don't all fit do the widest
 shrink, down to a shared cap. A squeezed title drops its extension first,
@@ -352,6 +337,10 @@ It never re-implements an operation:
   as `[kind, text]` with `LocalChanges`' `_LINE_*` kinds plus syntax spans.
 - **Opening a file** (double-click, Return) runs `_after_local_changes`,
   the same post-input step the in-grid path takes.
+
+The Mac OS 9 look shows the same view as a Platinum window
+(`PlatinumGitView`, see [platinum-ui.md](platinum-ui.md)); both implement
+`GitSurface`.
 
 **Swift gotcha found here:** `TurboKod.swift` is the app's main file, and
 in a main file a top-level `let` is initialized only when execution reaches

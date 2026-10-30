@@ -2088,12 +2088,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     var platinumFrames: [ObjectIdentifier: PlatinumMainFrame] = [:]
     var platinumScrollers: [ObjectIdentifier: PlatinumScroller] = [:]
     // macOS-style UI: the native picker sheet up on each window, if any.
-    var pickers: [ObjectIdentifier: PickerController] = [:]
     var welcome: WelcomeController?
     // macOS-style UI: the NSMenu standing in for a core popup, per window.
     var popups: [ObjectIdentifier: PopupMenu] = [:]
     // macOS-style UI: the native git sheet per window.
-    var gitSheets: [ObjectIdentifier: GitController] = [:]
+    var gitSheets: [ObjectIdentifier: GitSurface] = [:]
     // macOS-style UI: each window's find bar (a titlebar accessory).
     var findBars: [ObjectIdentifier: (accessory: NSTitlebarAccessoryViewController, bar: FindBar)] = [:]
     // macOS-style UI: the native file tree laid over each window's tree cells.
@@ -2521,7 +2520,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if self.pollDeclarative(v) { changed = true }
                 if self.pollPlatinumChrome(v) { changed = true }
                 if self.pollTabStrip(v) { changed = true }
-                if self.pollPicker(v) { changed = true }
                 if self.pollPopup(v) { changed = true }
                 if self.pollGit(v) { changed = true }
                 if self.pollFindBar(v) { changed = true }
@@ -2659,7 +2657,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     guard let evs = o[name] as? [[Any]],
                           let d = try? JSONSerialization.data(withJSONObject: ["name": name, "events": evs]),
                           let json = String(data: d, encoding: .utf8) else { continue }
-                    withUTF8Arg(json) { p, l in tk_desktop_ui_event(h, p, l) }
+                    _ = withUTF8Arg(json) { p, l in tk_desktop_ui_event(h, p, l) }
                 }
                 self.views.first?.invalidateFrame()
             }
@@ -3741,9 +3739,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         platinumFrames[ObjectIdentifier(v)] = nil
         platinumScrollers[ObjectIdentifier(v)] = nil
         nativeSheets[ObjectIdentifier(v)] = nil
-        pickers[ObjectIdentifier(v)] = nil
         popups[ObjectIdentifier(v)] = nil
-        gitSheets[ObjectIdentifier(v)] = nil
+        gitSheets.removeValue(forKey: ObjectIdentifier(v))?.dismiss()
         findBars[ObjectIdentifier(v)] = nil
         trees[ObjectIdentifier(v)] = nil
         for dc in (declarativeWindows.removeValue(forKey: ObjectIdentifier(v)) ?? []).reversed() {
@@ -4586,22 +4583,31 @@ extension AppController {
         return true
     }
 
-    /// Show, refresh or retract `v`'s native git sheet.
+    /// Show, refresh or retract `v`'s git view: the native sheet, or the
+    /// Platinum window in the Mac OS 9 look.
     func pollGit(_ v: CellView) -> Bool {
         let id = ObjectIdentifier(v)
         let cols = Int64(v.cols()), rows = Int64(v.rows())
         let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_git(v.handle, cols, rows, $0, $1) })
+        let look = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }?["look"]
+            as? String ?? "macos"
         if let gc = gitSheets[id] {
             guard let data = data else {
                 gitSheets[id] = nil
                 gc.dismiss()
                 return true
             }
-            return gc.update(data)
+            if gc.look == look {
+                (gc as? PlatinumGitView)?.reclaimKey()
+                return gc.update(data)
+            }
+            // The look changed under it: show it in the other projector.
+            gitSheets[id] = nil
+            gc.dismiss()
         }
         guard let data = data, let win = v.window, win.isVisible, win.attachedSheet == nil
         else { return false }
-        let gc = GitController(view: v)
+        let gc: GitSurface = look == "platinum" ? PlatinumGitView(view: v) : GitController(view: v)
         gc.onAfterAction = { [weak v] in
             v?.invalidateFrame()
             v?.needsDisplay = true
@@ -4637,40 +4643,6 @@ extension AppController {
             self.handleHostAction(act, sourceHandle: v.handle, view: v)
             v.invalidateFrame()
             v.needsDisplay = true
-        }
-        return true
-    }
-
-    /// Show, refresh or retract `v`'s native picker sheet. True on change.
-    func pollPicker(_ v: CellView) -> Bool {
-        let id = ObjectIdentifier(v)
-        let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_picker(v.handle, $0, $1) })
-        let state = data.flatMap {
-            (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any]
-        }
-        if let pc = pickers[id] {
-            guard let state = state, state["kind"] as? String == pc.kind else {
-                pickers[id] = nil
-                pc.dismiss()
-                return true
-            }
-            return pc.update(state, raw: data!)
-        }
-        guard let state = state, let kind = state["kind"] as? String,
-              let win = v.window, win.isVisible, win.attachedSheet == nil
-        else { return false }
-        let pc = PickerController(kind: kind, view: v)
-        pc.onActivate = { [weak self, weak v] code in
-            guard let self = self, let v = v else { return }
-            self.handleHostAction(code, sourceHandle: v.handle, view: v)
-            v.invalidateFrame()
-            v.needsDisplay = true
-        }
-        pickers[id] = pc
-        _ = pc.update(state, raw: data!)
-        pc.present(in: win)
-        if isCapturing, let q = ProcessInfo.processInfo.environment["TK_CAPTURE_PICKER_QUERY"] {
-            pc.typeQuery(q)   // scripted screenshots: show real results
         }
         return true
     }
@@ -4849,6 +4821,17 @@ extension AppController {
             let dc: DeclarativeSurface = look == "platinum"
                 ? PlatinumDialog(name: name, view: v, asWindow: asWindow && i == 0)
                 : DeclarativeController(name: name, view: v, asWindow: asWindow && i == 0)
+            dc.onAction = { [weak self, weak v] code in
+                guard let self = self, let v = v, v.handle != 0 else { return }
+                self.handleHostAction(code, sourceHandle: v.handle, view: v)
+            }
+            if name == "picker", isCapturing,
+               let q = ProcessInfo.processInfo.environment["TK_CAPTURE_PICKER_QUERY"],
+               let d = try? JSONSerialization.data(withJSONObject: ["name": name, "events": [[false, "query", q]]]),
+               let json = String(data: d, encoding: .utf8) {
+                // Scripted screenshots: show real results.
+                _ = withUTF8Arg(json) { p, l in tk_desktop_ui_event(v.handle, p, l) }
+            }
             if asWindow && i == 0 {
                 _ = dc.update(tree)
                 dc.show()
@@ -5043,7 +5026,7 @@ extension AppController {
         let rgb = d["rgb"] as? Int ?? 0
         let well = NSColorWell(frame: NSRect(x: 0, y: 34, width: 280, height: 44))
         if #available(macOS 13.0, *) { well.colorWellStyle = .expanded }
-        well.color = PickerController.rgb(rgb)
+        well.color = NSColor.rgb(rgb)
         let format = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 280, height: 26))
         format.addItems(withTitles: ["OkLab", "RGB", "HSL"])
         format.selectItem(at: d["mode"] as? Int ?? 0)
@@ -5373,596 +5356,26 @@ final class TabMenuItem: NSMenuItem {
 }
 
 
-// MARK: - macOS-style UI: picker sheet
-//
-// Quick Open, Find Symbol and Find in Project as one native sheet. The core
-// keeps the search machinery (file indexer, symbol index, rg runners); this
-// pushes the fields' text in (`tk_desktop_picker_set`), mirrors `count` /
-// `selected` / `status` from the polled state, and fetches only the rows the
-// table actually shows (`tk_desktop_picker_rows`). Return / double-click
-// runs the core's own submit path (`tk_desktop_picker_activate`).
+// MARK: - list rows
 
-final class PickerController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
-                              NSSearchFieldDelegate {
-    let kind: String
-    weak var view: CellView?
-    var onActivate: ((Int32) -> Void)?
-
-    private let panel: NSPanel
-    private let search = NSSearchField()
-    private var replaceField: NSTextField?
-    private var scopeField: NSTextField?
-    private var globField: NSTextField?
-    private var toggles: [String: NSButton] = [:]
-    private let table = NSTableView()
-    private let status = NSTextField(labelWithString: "")
-    private let titleLabel = NSTextField(labelWithString: "")
-    private var actionButton: NSButton?
-    private var previewView: NSTextView?
-    private var splitView: NSSplitView?
-
-    private var count = 0
-    private var selected = -1
-    private var multi = false
-    private var lastRaw = Data()
-    private var rows: [Int: [String: Any]] = [:]
-    private var rowBuf = [UInt8](repeating: 0, count: 16384)
-    private var previewKey = ""
-    private var syncingSelection = false
-    private var dismissed = false
-
-    private var isFind: Bool { kind == "project_find" }
-
-    init(kind: String, view: CellView) {
-        self.kind = kind
-        self.view = view
-        let size = kind == "project_find" ? NSSize(width: 920, height: 660)
-                                          : NSSize(width: 640, height: 440)
-        panel = NSPanel(contentRect: NSRect(origin: .zero, size: size),
-                        styleMask: [.titled, .resizable], backing: .buffered, defer: true)
-        super.init()
-        panel.minSize = NSSize(width: 420, height: 260)
-        build()
-    }
-
-    // MARK: layout
-
-    private func build() {
-        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        search.placeholderString = kind == "quick_open" ? "File name"
-            : kind == "find_symbol" || kind == "symbol_pick" ? "Symbol name" : "Search"
-        search.delegate = self
-        search.sendsSearchStringImmediately = true
-        search.font = .systemFont(ofSize: 15)
-
-        var topRows: [NSView] = [titleLabel, search]
-        if isFind {
-            let rf = field("Replace with")
-            replaceField = rf
-            topRows.append(rf)
-            let sf = field("In folder (relative to project)")
-            let gf = field("Files, e.g. *.py, !tests/**")
-            scopeField = sf
-            globField = gf
-            var row: [NSView] = [sf, gf]
-            for (key, label, tip) in [("case", "Aa", "Match case"),
-                                      ("word", "W", "Whole word"),
-                                      ("regex", ".*", "Regular expression")] {
-                let b = NSButton(title: label, target: self, action: #selector(toggleChanged(_:)))
-                b.setButtonType(.pushOnPushOff)
-                b.bezelStyle = .recessed
-                b.toolTip = tip
-                b.identifier = NSUserInterfaceItemIdentifier(key)
-                toggles[key] = b
-                row.append(b)
-            }
-            let h = NSStackView(views: row)
-            h.distribution = .fill
-            h.spacing = 6
-            sf.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            gf.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            sf.widthAnchor.constraint(equalTo: gf.widthAnchor).isActive = true
-            topRows.append(h)
-        }
-
-        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("c"))
-        table.addTableColumn(col)
-        table.headerView = nil
-        table.rowHeight = 40
-        table.style = .inset
-        table.allowsMultipleSelection = false
-        table.dataSource = self
-        table.delegate = self
-        table.target = self
-        table.doubleAction = #selector(activateClicked)
-        let scroll = NSScrollView()
-        scroll.documentView = table
-        scroll.hasVerticalScroller = true
-        scroll.drawsBackground = false
-
-        var middle: NSView = scroll
-        if isFind {
-            let tv = NSTextView()
-            tv.isEditable = false
-            tv.isRichText = true
-            tv.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-            tv.textContainerInset = NSSize(width: 6, height: 6)
-            tv.isHorizontallyResizable = true
-            tv.textContainer?.widthTracksTextView = false
-            tv.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
-                                                     height: CGFloat.greatestFiniteMagnitude)
-            let ps = NSScrollView()
-            ps.documentView = tv
-            ps.hasVerticalScroller = true
-            ps.hasHorizontalScroller = true
-            previewView = tv
-            let split = NSSplitView()
-            split.isVertical = false
-            split.dividerStyle = .thin
-            split.addArrangedSubview(scroll)
-            split.addArrangedSubview(ps)
-            split.setHoldingPriority(.defaultLow, forSubviewAt: 1)
-            middle = split
-            splitView = split
-        }
-
-        status.textColor = .secondaryLabelColor
-        status.lineBreakMode = .byTruncatingTail
-        status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelClicked))
-        cancel.keyEquivalent = "\u{1b}"
-        let open = NSButton(title: kind == "find_symbol" || kind == "symbol_pick" ? "Go to Symbol"
-                                 : kind == "reference_pick" ? "Go to Reference" : "Open",
-                            target: self, action: #selector(activateClicked))
-        open.keyEquivalent = "\r"
-        var bottom: [NSView] = [status, NSView(), cancel]
-        if isFind {
-            let b = NSButton(title: "Show in Panel", target: self, action: #selector(actionClicked))
-            actionButton = b
-            bottom.append(b)
-        }
-        bottom.append(open)
-        let bar = NSStackView(views: bottom)
-        bar.spacing = 8
-
-        // Fields on top, the button bar at the bottom, and the list (plus
-        // preview) taking every point in between.
-        let top = NSStackView(views: topRows)
-        top.orientation = .vertical
-        top.distribution = .fill
-        top.alignment = .leading
-        top.spacing = 8
-        for v in topRows {
-            v.widthAnchor.constraint(equalTo: top.widthAnchor).isActive = true
-        }
-        for v in [top, bar] {
-            v.setHuggingPriority(.required, for: .vertical)
-            v.setContentHuggingPriority(.defaultHigh, for: .vertical)
-        }
-        middle.setContentHuggingPriority(.defaultLow, for: .vertical)
-        let content = NSView()
-        for v in [top, middle, bar] {
-            v.translatesAutoresizingMaskIntoConstraints = false
-            content.addSubview(v)
-            NSLayoutConstraint.activate([
-                v.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
-                v.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
-            ])
-        }
-        NSLayoutConstraint.activate([
-            top.topAnchor.constraint(equalTo: content.topAnchor, constant: 14),
-            middle.topAnchor.constraint(equalTo: top.bottomAnchor, constant: 10),
-            bar.topAnchor.constraint(equalTo: middle.bottomAnchor, constant: 10),
-            bar.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -14),
-            middle.heightAnchor.constraint(greaterThanOrEqualToConstant: 120),
-        ])
-        // The list wants all the height there is; the field rows and the
-        // button bar keep their natural size.
-        let grow = middle.heightAnchor.constraint(equalTo: content.heightAnchor)
-        grow.priority = NSLayoutConstraint.Priority(500)
-        grow.isActive = true
-        panel.contentView = content
-        panel.initialFirstResponder = search
-    }
-
-    private func field(_ placeholder: String) -> NSTextField {
-        let f = NSTextField()
-        f.placeholderString = placeholder
-        f.delegate = self
-        f.usesSingleLineMode = true
-        f.cell?.isScrollable = true
-        return f
-    }
-
-    func present(in win: NSWindow) {
-        // Never taller or wider than the window it hangs from.
-        let room = win.contentLayoutRect.size
-        let want = panel.frame.size
-        panel.setContentSize(NSSize(width: min(want.width, room.width - 40),
-                                    height: min(want.height, room.height - 20)))
-        panel.contentView?.layoutSubtreeIfNeeded()
-        if let split = splitView {
-            split.setPosition(split.bounds.height * 0.55, ofDividerAt: 0)
-        }
-        win.beginSheet(panel, completionHandler: nil)
-        panel.makeFirstResponder(search)
-    }
-
-    func typeQuery(_ q: String) {
-        search.stringValue = q
-        controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: search))
-    }
-
-    func dismiss() {
-        guard !dismissed else { return }
-        dismissed = true
-        panel.sheetParent?.endSheet(panel)
-    }
-
-    // MARK: state from the core
-
-    /// Adopt a polled state; true when anything changed.
-    func update(_ st: [String: Any], raw: Data) -> Bool {
-        if raw == lastRaw { return refreshVisibleRows() }
-        let first = lastRaw.isEmpty
-        lastRaw = raw
-        titleLabel.stringValue = st["title"] as? String ?? ""
-        status.stringValue = st["status"] as? String ?? ""
-        multi = st["multi"] as? Bool ?? false
-        table.allowsMultipleSelection = multi
-        if first {
-            // The core seeds the fields (a resumed search, the editor's
-            // selection); after that the fields are the user's.
-            search.stringValue = st["query"] as? String ?? ""
-            replaceField?.stringValue = st["replace"] as? String ?? ""
-            scopeField?.stringValue = st["scope"] as? String ?? ""
-            globField?.stringValue = st["glob"] as? String ?? ""
-            for (k, b) in toggles { b.state = (st[k] as? Bool ?? false) ? .on : .off }
-            if isFind {
-                let rm = st["replace_mode"] as? Bool ?? false
-                replaceField?.isHidden = !rm
-                actionButton?.title = rm ? "Replace All" : "Show in Panel"
-            }
-            DispatchQueue.main.async { self.search.currentEditor()?.selectAll(nil) }
-            // A list with nothing to type into (References) drops the field.
-            search.isHidden = !(st["searchable"] as? Bool ?? true)
-        }
-        actionButton?.isEnabled = (st["count"] as? Int ?? 0) > 0
-        count = st["count"] as? Int ?? 0
-        let sel = st["selected"] as? Int ?? -1
-        rows.removeAll(keepingCapacity: true)
-        table.reloadData()
-        syncingSelection = true
-        if sel >= 0 && sel < count {
-            if !table.selectedRowIndexes.contains(sel) || !multi {
-                table.selectRowIndexes(IndexSet(integer: sel), byExtendingSelection: false)
-            }
-            if sel != selected { table.scrollRowToVisible(sel) }
-        } else {
-            table.deselectAll(nil)
-        }
-        syncingSelection = false
-        selected = sel
-        refreshPreview()
-        return true
-    }
-
-    /// Rows can change under an unchanged state (Find Symbol re-ranks as
-    /// sources land): re-fetch what's visible and redraw on a difference.
-    private func refreshVisibleRows() -> Bool {
-        let vis = table.rows(in: table.visibleRect)
-        guard vis.length > 0, let fresh = fetch(vis.location, vis.length) else { return false }
-        var changed = false
-        for (i, r) in fresh.enumerated() {
-            let idx = vis.location + i
-            if !NSDictionary(dictionary: r).isEqual(to: rows[idx] ?? [:]) {
-                rows[idx] = r
-                changed = true
-            }
-        }
-        if changed {
-            table.reloadData(forRowIndexes: IndexSet(integersIn: vis.location..<(vis.location + vis.length)),
-                             columnIndexes: IndexSet(integer: 0))
-        }
-        return changed
-    }
-
-    private func fetch(_ start: Int, _ n: Int) -> [[String: Any]]? {
-        guard let h = view?.handle, h != 0 else { return nil }
-        var buf = rowBuf
-        var len = 0
-        while true {
-            len = buf.withUnsafeMutableBufferPointer { b -> Int in
-                Int(tk_desktop_picker_rows(h, Int64(start), Int64(n),
-                    Int64(Int(bitPattern: b.baseAddress)), Int64(b.count)))
-            }
-            if len <= buf.count { break }
-            buf = [UInt8](repeating: 0, count: len)
-        }
-        rowBuf = buf
-        guard len > 0 else { return nil }
-        return (try? JSONSerialization.jsonObject(with: Data(buf[0..<len]))) as? [[String: Any]]
-    }
-
-    private func row(_ i: Int) -> [String: Any] {
-        if let r = rows[i] { return r }
-        let page = 64
-        let start = (i / page) * page
-        if let got = fetch(start, page) {
-            for (k, r) in got.enumerated() { rows[start + k] = r }
-        }
-        return rows[i] ?? [:]
-    }
-
-    // MARK: table
-
-    func numberOfRows(in tableView: NSTableView) -> Int { count }
-
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row i: Int) -> NSView? {
-        let id = NSUserInterfaceItemIdentifier("pickerCell")
-        let cell = (tableView.makeView(withIdentifier: id, owner: self) as? PickerCell) ?? {
-            let c = PickerCell(); c.identifier = id; return c
-        }()
-        let r = row(i)
-        if isFind {
-            let mono = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-            let s = NSMutableAttributedString(string: r["pre"] as? String ?? "",
-                                              attributes: [.font: mono])
-            if let hit = r["hit"] as? String {
-                s.append(NSAttributedString(string: hit, attributes: [
-                    .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .bold),
-                    .backgroundColor: NSColor.findHighlightColor.withAlphaComponent(0.6),
-                    .foregroundColor: NSColor.black,
-                ]))
-            }
-            s.append(NSAttributedString(string: r["post"] as? String ?? "", attributes: [.font: mono]))
-            cell.title.attributedStringValue = s
-        } else {
-            cell.title.font = .systemFont(ofSize: 13, weight: .medium)
-            cell.title.stringValue = r["title"] as? String ?? ""
-        }
-        cell.detail.stringValue = r["detail"] as? String ?? ""
-        return cell
-    }
-
-    func tableViewSelectionDidChange(_ notification: Notification) {
-        guard !syncingSelection, let h = view?.handle, h != 0 else { return }
-        let (idx, anchor) = selectionEnds()
-        guard idx >= 0 else { return }
-        selected = idx
-        tk_desktop_picker_select(h, Int64(idx), Int64(anchor))
-        refreshPreview()
-    }
-
-    /// The cursor row and the far end of a contiguous multi-selection.
-    private func selectionEnds() -> (Int, Int) {
-        let rowsSel = table.selectedRowIndexes
-        guard let first = rowsSel.first, let last = rowsSel.last else { return (-1, -1) }
-        if rowsSel.count == 1 { return (first, first) }
-        // The cursor is whichever end the user moved last; AppKit doesn't
-        // say, so take the end that isn't the core's previous cursor.
-        return selected == first ? (last, first) : (first, last)
-    }
-
-    // MARK: preview (Find in Project)
-
-    private func refreshPreview() {
-        guard isFind, let tv = previewView, let h = view?.handle, h != 0 else { return }
-        var buf = [UInt8](repeating: 0, count: 1 << 16)
-        var len = 0
-        while true {
-            len = buf.withUnsafeMutableBufferPointer { b -> Int in
-                Int(tk_desktop_picker_preview(h, Int64(Int(bitPattern: b.baseAddress)), Int64(b.count)))
-            }
-            if len <= buf.count { break }
-            buf = [UInt8](repeating: 0, count: len)
-        }
-        guard len > 0, let pv = (try? JSONSerialization.jsonObject(with: Data(buf[0..<len]))) as? [String: Any]
-        else {
-            if !previewKey.isEmpty { tv.string = ""; previewKey = "" }
-            return
-        }
-        let path = pv["path"] as? String ?? ""
-        let line = pv["line"] as? Int ?? 1
-        let lines = pv["lines"] as? [String] ?? []
-        let key = "\(path)#\(lines.count)"
-        if key != previewKey {
-            previewKey = key
-            tv.textStorage?.setAttributedString(PickerController.colored(pv))
-            let bg = PickerController.rgb(pv["bg"] as? Int ?? 0)
-            tv.backgroundColor = bg
-            tv.enclosingScrollView?.backgroundColor = bg
-        }
-        PickerController.markLine(tv, lines: lines, line: line)
-    }
-
+extension NSColor {
+    /// A 0xRRGGBB value from the core.
     static func rgb(_ v: Int) -> NSColor {
         NSColor(srgbRed: CGFloat((v >> 16) & 0xFF) / 255, green: CGFloat((v >> 8) & 0xFF) / 255,
                 blue: CGFloat(v & 0xFF) / 255, alpha: 1)
     }
-
-    /// The file's lines with the core's syntax spans (byte ranges per row)
-    /// mapped onto UTF-16 offsets.
-    static func colored(_ pv: [String: Any]) -> NSAttributedString {
-        let lines = pv["lines"] as? [String] ?? []
-        let fg = rgb(pv["fg"] as? Int ?? 0xFFFFFF)
-        let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-        let s = NSMutableAttributedString(string: lines.joined(separator: "\n"),
-                                          attributes: [.font: font, .foregroundColor: fg])
-        var starts: [Int] = []
-        var off = 0
-        for l in lines { starts.append(off); off += l.utf16.count + 1 }
-        var maps: [Int: [Int]] = [:]
-        func utf16Offset(_ row: Int, _ byte: Int) -> Int {
-            if maps[row] == nil {
-                var m: [Int] = []
-                var u = 0
-                for scalar in lines[row].unicodeScalars {
-                    let n = String(scalar).utf8.count
-                    for _ in 0..<n { m.append(u) }
-                    u += scalar.utf16.count
-                }
-                m.append(u)
-                maps[row] = m
-            }
-            let m = maps[row]!
-            return m[min(max(byte, 0), m.count - 1)]
-        }
-        for sp in pv["spans"] as? [[Int]] ?? [] where sp.count == 4 {
-            let row = sp[0]
-            guard row >= 0 && row < lines.count else { continue }
-            let a = utf16Offset(row, sp[1]), b = utf16Offset(row, sp[2])
-            guard b > a else { continue }
-            s.addAttribute(.foregroundColor, value: rgb(sp[3]),
-                           range: NSRange(location: starts[row] + a, length: b - a))
-        }
-        return s
-    }
-
-    /// Tint the match's line and park it at the golden-ratio line, like
-    /// every jump in the editor.
-    static func markLine(_ tv: NSTextView, lines: [String], line: Int) {
-        guard let ts = tv.textStorage, let lm = tv.layoutManager, let tc = tv.textContainer else { return }
-        ts.removeAttribute(.backgroundColor, range: NSRange(location: 0, length: ts.length))
-        let row = min(max(line - 1, 0), max(lines.count - 1, 0))
-        guard row < lines.count else { return }
-        var start = 0
-        for i in 0..<row { start += lines[i].utf16.count + 1 }
-        let range = NSRange(location: start, length: lines[row].utf16.count)
-        ts.addAttribute(.backgroundColor,
-                        value: NSColor.findHighlightColor.withAlphaComponent(0.35), range: range)
-        lm.ensureLayout(for: tc)
-        let glyphs = lm.glyphRange(forCharacterRange: NSRange(location: start, length: 0),
-                                   actualCharacterRange: nil)
-        let rect = lm.boundingRect(forGlyphRange: glyphs, in: tc)
-        guard let clip = tv.enclosingScrollView?.contentView else { return }
-        let y = max(0, rect.minY - clip.bounds.height * 0.38)
-        clip.scroll(to: NSPoint(x: 0, y: y))
-        tv.enclosingScrollView?.reflectScrolledClipView(clip)
-    }
-
-    // MARK: input
-
-    func controlTextDidChange(_ obj: Notification) {
-        guard let f = obj.object as? NSTextField, let h = view?.handle, h != 0 else { return }
-        let name = f === search ? "query" : f === replaceField ? "replace"
-                 : f === scopeField ? "scope" : f === globField ? "glob" : ""
-        guard !name.isEmpty else { return }
-        withUTF8Arg(name) { np, nl in
-            withUTF8Arg(f.stringValue) { tp, tl in tk_desktop_picker_set(h, np, nl, tp, tl) }
-        }
-    }
-
-    func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
-        switch sel {
-        case #selector(NSResponder.moveUp(_:)): move(-1, extend: false); return true
-        case #selector(NSResponder.moveDown(_:)): move(1, extend: false); return true
-        case #selector(NSResponder.moveUpAndModifySelection(_:)): move(-1, extend: true); return true
-        case #selector(NSResponder.moveDownAndModifySelection(_:)): move(1, extend: true); return true
-        case #selector(NSResponder.scrollPageUp(_:)), #selector(NSResponder.pageUp(_:)):
-            move(-pageRows(), extend: false); return true
-        case #selector(NSResponder.scrollPageDown(_:)), #selector(NSResponder.pageDown(_:)):
-            move(pageRows(), extend: false); return true
-        case #selector(NSResponder.insertNewline(_:)):
-            if NSApp.currentEvent?.modifierFlags.contains(.command) == true { actionClicked() }
-            else { activateClicked() }
-            return true
-        case #selector(NSResponder.cancelOperation(_:)): cancelClicked(); return true
-        default: return false
-        }
-    }
-
-    private func pageRows() -> Int {
-        max(1, Int(table.enclosingScrollView?.contentView.bounds.height ?? 300 / table.rowHeight) / Int(table.rowHeight) - 1)
-    }
-
-    private func move(_ delta: Int, extend: Bool) {
-        guard count > 0 else { return }
-        let cur = selected < 0 ? (delta > 0 ? -1 : count) : selected
-        let next = min(max(cur + delta, 0), count - 1)
-        if extend && multi {
-            let (_, anchor) = selectionEnds()
-            let lo = min(anchor, next), hi = max(anchor, next)
-            syncingSelection = true
-            table.selectRowIndexes(IndexSet(integersIn: lo...hi), byExtendingSelection: false)
-            syncingSelection = false
-            selected = next
-            if let h = view?.handle { tk_desktop_picker_select(h, Int64(next), Int64(anchor)) }
-        } else {
-            table.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
-        }
-        table.scrollRowToVisible(next)
-    }
-
-    @objc private func toggleChanged(_ b: NSButton) {
-        guard let key = b.identifier?.rawValue, let h = view?.handle, h != 0 else { return }
-        withUTF8Arg(key) { p, l in tk_desktop_picker_option(h, p, l, b.state == .on ? 1 : 0) }
-    }
-
-    @objc private func activateClicked() {
-        guard let v = view, v.handle != 0 else { return }
-        var (idx, anchor) = selectionEnds()
-        // A double-click opens the row under the pointer. (Only read mouse
-        // state off a mouse event: `clickCount` on the key event Return
-        // produces raises, which is what used to make Return do nothing.)
-        if let ev = NSApp.currentEvent,
-           ev.type == .leftMouseDown || ev.type == .leftMouseUp,
-           table.clickedRow >= 0 {
-            idx = table.clickedRow
-            if !table.selectedRowIndexes.contains(idx) { anchor = idx }
-        }
-        // Return opens the selected row — the first one when the results
-        // landed after the last poll and nothing is selected here yet. The
-        // core clamps to what it actually has, so never refuse on a stale
-        // `count`.
-        if idx < 0 { idx = max(selected, 0); anchor = idx }
-        let code = tk_desktop_picker_activate(v.handle, Int64(idx), Int64(anchor),
-                                              Int64(v.cols()), Int64(v.rows()))
-        onActivate?(code)
-    }
-
-    @objc private func actionClicked() {
-        guard isFind, let v = view, v.handle != 0, count > 0 else { return }
-        let name = replaceField?.isHidden == false ? "replace_all" : "send_to_panel"
-        withUTF8Arg(name) { p, l in
-            tk_desktop_picker_action(v.handle, p, l, Int64(v.cols()), Int64(v.rows()))
-        }
-        onActivate?(0)
-    }
-
-    @objc private func cancelClicked() {
-        if let h = view?.handle, h != 0 { tk_desktop_picker_close(h) }
-        onActivate?(0)
-    }
 }
 
-/// Two-line picker row: the name / matched line over its location.
-final class PickerCell: NSTableCellView {
-    let title = NSTextField(labelWithString: "")
-    let detail = NSTextField(labelWithString: "")
-
-    override init(frame: NSRect) {
-        super.init(frame: frame)
-        title.lineBreakMode = .byTruncatingTail
-        detail.lineBreakMode = .byTruncatingMiddle
-        detail.font = .systemFont(ofSize: 11)
-        detail.textColor = .secondaryLabelColor
-        let stack = NSStackView(views: [title, detail])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 1
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
-            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
-        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+/// How a `UI_LIST` row's two cells sit, in every look: the primary text
+/// in a column as wide as the widest one in the rows sent, but at most
+/// half the list, then the detail. The grid does the same in cells
+/// (`_paint_list` in ui_grid.mojo).
+enum ListColumns {
+    /// Where the detail column starts, from the list's left: past the
+    /// `inset`, the primary column and a `gap`.
+    static func detailX(primary: CGFloat, body: CGFloat, inset: CGFloat, gap: CGFloat) -> CGFloat {
+        inset + max(0, min(primary, body / 2 - inset - gap)) + gap
     }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 }
 
 
@@ -6860,7 +6273,7 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
 
     /// The files as a tree, in the core's order: a directory row each time
     /// the path enters a new directory, files indented under it.
-    private static func tree(_ files: [[String: Any]]) -> [(depth: Int, name: String, file: Int?)] {
+    static func tree(_ files: [[String: Any]]) -> [(depth: Int, name: String, file: Int?)] {
         var out: [(depth: Int, name: String, file: Int?)] = []
         var open: [String] = []
         for (i, f) in files.enumerated() {
@@ -7078,8 +6491,8 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         lastPanels = data
         let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
         let panels = o["panels"] as? [[String: Any]] ?? []
-        let bg = PickerController.rgb(o["bg"] as? Int ?? 0)
-        let fg = PickerController.rgb(o["fg"] as? Int ?? 0xFFFFFF)
+        let bg = NSColor.rgb(o["bg"] as? Int ?? 0)
+        let fg = NSColor.rgb(o["fg"] as? Int ?? 0xFFFFFF)
         if let info = panels.first(where: { ($0["pane"] as? Int) == GitPane.info }) {
             // A branch's log or a commit's details: one pane.
             // Named for the list driving it (kept while the cursor is in it).
@@ -7147,7 +6560,7 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
             let pre = String(decoding: u[0..<a], as: UTF8.self).utf16.count
             let len = String(decoding: u[a..<b], as: UTF8.self).utf16.count
             guard len > 0 else { continue }
-            out.addAttribute(.foregroundColor, value: PickerController.rgb(sp[3]),
+            out.addAttribute(.foregroundColor, value: NSColor.rgb(sp[3]),
                              range: NSRange(location: rowStart[sp[0]] + pre, length: len))
         }
         let clip = dp.scroll.contentView
@@ -7778,7 +7191,7 @@ final class CodePreview: NSTextView {
 
     func render(palette pal: [UInt32], font: NSFont) {
         func c(_ slot: Int) -> NSColor {
-            PickerController.rgb(Int(slot < pal.count ? pal[slot] : 0xFFFFFF))
+            NSColor.rgb(Int(slot < pal.count ? pal[slot] : 0xFFFFFF))
         }
         let (fg, kw, str, com, num, ident, deco, op) = (17, 18, 19, 20, 21, 22, 23, 24)
         let lines: [[(String, Int)]] = [
@@ -8134,7 +7547,7 @@ final class HistoryController: NSObject, NSTableViewDataSource, NSTableViewDeleg
         pal.withUnsafeMutableBufferPointer { b in
             _ = tk_theme_palette(h, Int64(Int(bitPattern: b.baseAddress)), Int64(b.count))
         }
-        let bg = PickerController.rgb(Int(pal[16])), fg = PickerController.rgb(Int(pal[17]))
+        let bg = NSColor.rgb(Int(pal[16])), fg = NSColor.rgb(Int(pal[17]))
         let mono = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         let out = NSMutableAttributedString()
         for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
@@ -9253,13 +8666,20 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
     private var shape = ""
     private var views: [String: NSView] = [:]
     private var tables: [ObjectIdentifier: (key: String, node: [String: Any])] = [:]
+    private var lists: [String: DeclarativeList] = [:]
+    /// The list a search field (`NAV`) drives: the first that isn't code.
+    private var navList: DeclarativeList?
+    private var navKeys: Set<String> = []
+    private var large = false
+    private var parentSize: NSSize?
     private var dismissed = false
     private var lastTree: [String: Any] = [:]
+    var onAction: ((Int32) -> Void)?
 
     // Mirrors the UI_* flag bits in ui_tree.mojo.
     private static let DISABLED = 1 << 0, DEFAULT = 1 << 1, CANCEL = 1 << 2, DESTRUCTIVE = 1 << 3
     private static let CENTER = 1 << 4, SECONDARY = 1 << 5, HEADING = 1 << 6, CHECKABLE = 1 << 8
-    private static let BROWSE = 1 << 9
+    private static let BROWSE = 1 << 9, NAV = 1 << 10, MULTI = 1 << 11, CODE = 1 << 12, LARGE = 1 << 13
 
     var window: NSWindow { panel }
 
@@ -9298,6 +8718,7 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
     }
 
     func present(in win: NSWindow) {
+        parentSize = win.contentLayoutRect.size
         fitPanel()
         win.beginSheet(panel, completionHandler: nil)
     }
@@ -9318,6 +8739,12 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
     private func fitPanel() {
         panel.contentView?.layoutSubtreeIfNeeded()
         let fit = panel.contentView?.fittingSize ?? NSSize(width: 480, height: 240)
+        if large, let room = parentSize {
+            // A picker: most of the window, its list taking the height.
+            panel.setContentSize(NSSize(width: max(fit.width, floor(room.width * 0.8)),
+                                        height: max(fit.height, floor(room.height * 0.85))))
+            return
+        }
         panel.setContentSize(NSSize(width: max(420, fit.width), height: fit.height))
     }
 
@@ -9333,7 +8760,8 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
         guard let h = view?.handle, h != 0,
               let d = try? JSONSerialization.data(withJSONObject: ["name": name, "events": events]),
               let json = String(data: d, encoding: .utf8) else { return }
-        withUTF8Arg(json) { p, l in tk_desktop_ui_event(h, p, l) }
+        let code = withUTF8Arg(json) { p, l in tk_desktop_ui_event(h, p, l) }
+        onAction?(code)
         view?.invalidateFrame()
         view?.needsDisplay = true
     }
@@ -9357,12 +8785,16 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
         titleLabel.stringValue = tree["text"] as? String ?? ""
         panel.title = titleLabel.stringValue
         cancelKey = tree["key"] as? String ?? ""
+        large = has(tree, Self.LARGE)
         let body = (tree["kids"] as? [[String: Any]])?.first ?? [:]
         let sh = Self.shapeOf(body)
         if sh != shape {
             shape = sh
             views = [:]
             tables = [:]
+            lists = [:]
+            navList = nil
+            navKeys = []
             for sub in host.subviews { sub.removeFromSuperview() }
             let v = build(body, path: "0")
             v.translatesAutoresizingMaskIntoConstraints = false
@@ -9480,11 +8912,22 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
             out = box
         case "label":
             out = NSTextField(wrappingLabelWithString: n["text"] as? String ?? "")
+        case "list":
+            let l = DeclarativeList(n, code: has(n, Self.CODE), multi: has(n, Self.MULTI))
+            l.set = { [weak self] k, v in self?.set(k, v) }
+            l.act = { [weak self] k in self?.act(k) }
+            lists[path] = l
+            if navList == nil && !l.code { navList = l }
+            out = l.scroll
         case "text":
             let f = NSTextField(string: n["value"] as? String ?? "")
             f.placeholderString = n["ph"] as? String
             f.delegate = self
             f.identifier = NSUserInterfaceItemIdentifier(key)
+            if has(n, Self.NAV) {
+                navKeys.insert(key)
+                f.font = .systemFont(ofSize: 15)
+            }
             if let chars = n["n"] as? Int, chars > 0 {
                 f.widthAnchor.constraint(equalToConstant: CGFloat(chars) * 9 + 24).isActive = true
             } else {
@@ -9611,6 +9054,16 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
                 }
                 (views[path + ".seg"] as? NSSegmentedControl)?.selectedSegment = sel
             }
+        case "list":
+            if let l = lists[path] {
+                var pal = [UInt32](repeating: 0, count: 256)
+                if let h = view?.handle, h != 0 {
+                    pal.withUnsafeMutableBufferPointer { b in
+                        _ = tk_theme_palette(h, Int64(Int(bitPattern: b.baseAddress)), Int64(b.count))
+                    }
+                }
+                l.apply(n, palette: pal)
+            }
         case "table":
             if let t = views[path + ".table"] as? NSTableView {
                 tables[ObjectIdentifier(t)] = (n["key"] as? String ?? "", n)
@@ -9641,6 +9094,21 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
     func controlTextDidChange(_ obj: Notification) {
         guard let f = obj.object as? NSTextField, let key = f.identifier?.rawValue else { return }
         set(key, f.stringValue)
+    }
+
+    /// A search field's arrows move its list (typing stays in the field).
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
+        guard let key = control.identifier?.rawValue, navKeys.contains(key), let l = navList else { return false }
+        switch sel {
+        case #selector(NSResponder.moveUp(_:)): l.move(-1, extend: false)
+        case #selector(NSResponder.moveDown(_:)): l.move(1, extend: false)
+        case #selector(NSResponder.moveUpAndModifySelection(_:)): l.move(-1, extend: true)
+        case #selector(NSResponder.moveDownAndModifySelection(_:)): l.move(1, extend: true)
+        case #selector(NSResponder.pageUp(_:)), #selector(NSResponder.scrollPageUp(_:)): l.move(-l.page, extend: false)
+        case #selector(NSResponder.pageDown(_:)), #selector(NSResponder.scrollPageDown(_:)): l.move(l.page, extend: false)
+        default: return false
+        }
+        return true
     }
 
     @objc private func checkChanged(_ b: NSButton) {
@@ -9718,6 +9186,236 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
 }
 
 
+/// A `UI_LIST` in the macOS look: a table over the window of rows the core
+/// sends (`first` …), reporting where its view is (`<key>@top`) so the next
+/// window covers it. Cells are a primary text (with the core's colored
+/// spans) over a detail; a code view is monospace on the editor colors,
+/// with its marked line revealed at the golden ratio.
+final class DeclarativeList: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+    let code: Bool
+    let multi: Bool
+    let table = NSTableView()
+    let scroll = NSScrollView()
+    var set: ((String, String) -> Void)?
+    var act: ((String) -> Void)?
+    private var key = ""
+    private var count = 0, first = 0
+    private var rows: [[String]] = []
+    private var spans: [Int: [[Int]]] = [:]
+    private var activate = ""
+    private var selection = ""
+    private var mark = Int.min
+    private var reportedTop = -1
+    private var syncing = false
+    private var palette: [UInt32] = []
+    private static let mono = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+
+    init(_ n: [String: Any], code: Bool, multi: Bool) {
+        self.code = code
+        self.multi = multi
+        super.init()
+        table.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("0")))
+        if !code { table.addTableColumn(NSTableColumn(identifier: NSUserInterfaceItemIdentifier("1"))) }
+        table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        table.headerView = nil
+        table.style = .plain
+        table.rowHeight = code ? 16 : 20
+        if code {
+            table.selectionHighlightStyle = .none
+            table.intercellSpacing = .zero
+        }
+        table.allowsMultipleSelection = multi
+        table.dataSource = self
+        table.delegate = self
+        table.target = self
+        table.doubleAction = #selector(activated)
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        let h = CGFloat(max(n["h"] as? Int ?? 8, 3)) * table.rowHeight + 4
+        scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: h).isActive = true
+        scroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 520).isActive = true
+        scroll.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)
+        scroll.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(scrolled),
+                                               name: NSView.boundsDidChangeNotification,
+                                               object: scroll.contentView)
+        scroll.contentView.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(layoutColumns),
+                                               name: NSView.frameDidChangeNotification,
+                                               object: scroll.contentView)
+    }
+
+    private static let font = NSFont.systemFont(ofSize: 13)
+    /// The widest primary text in the rows sent.
+    private var primaryW: CGFloat = 0
+
+    /// Two columns, as in every look (`ListColumns`).
+    @objc private func layoutColumns() {
+        guard !code, table.tableColumns.count == 2 else { return }
+        let body = scroll.contentView.bounds.width
+        let gap = table.intercellSpacing.width
+        let w0 = ListColumns.detailX(primary: primaryW + 6, body: body, inset: 0, gap: gap) - gap
+        table.tableColumns[0].width = w0
+        table.tableColumns[1].width = max(40, body - w0 - gap)
+    }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
+
+    var page: Int { max(1, Int(scroll.contentView.bounds.height / table.rowHeight) - 1) }
+
+    private func ends(_ sel: String) -> (anchor: Int, row: Int) {
+        let parts = sel.split(separator: ":").compactMap { Int($0) }
+        if parts.count == 2 { return (parts[0], parts[1]) }
+        let r = parts.first ?? -1
+        return (r, r)
+    }
+
+    func apply(_ n: [String: Any], palette pal: [UInt32]) {
+        key = n["key"] as? String ?? ""
+        palette = pal
+        count = n["count"] as? Int ?? 0
+        first = n["first"] as? Int ?? 0
+        rows = n["rows"] as? [[String]] ?? []
+        spans = [:]
+        for sp in n["spans"] as? [[Int]] ?? [] where sp.count == 6 { spans[sp[0], default: []].append(sp) }
+        activate = n["value"] as? String ?? ""
+        if !code {
+            primaryW = rows.map { NSString(string: $0.first ?? "").size(withAttributes: [.font: Self.font]).width }
+                .max() ?? 0
+            layoutColumns()
+        }
+        syncing = true
+        defer { syncing = false }
+        table.reloadData()
+        if code {
+            if pal.count > 17 { table.backgroundColor = .rgb(Int(pal[16])) }
+            let m = n["n"] as? Int ?? 0
+            if m != mark {
+                mark = m
+                let y = max(0, CGFloat(m) * table.rowHeight - scroll.contentView.bounds.height * 0.38)
+                scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
+                scroll.reflectScrolledClipView(scroll.contentView)
+            }
+            return
+        }
+        let sel = n["text"] as? String ?? ""
+        let (anchor, row) = ends(sel)
+        if sel != selection || table.selectedRow != row {
+            selection = sel
+            if row >= 0 && row < count {
+                let lo = min(anchor, row), hi = max(anchor, row)
+                table.selectRowIndexes(IndexSet(integersIn: max(lo, 0)...min(hi, count - 1)),
+                                       byExtendingSelection: false)
+                table.scrollRowToVisible(row)
+            } else {
+                table.deselectAll(nil)
+            }
+        }
+    }
+
+    /// Move the selection by `delta` (a search field's arrows).
+    func move(_ delta: Int, extend: Bool) {
+        guard count > 0 else { return }
+        let (anchor, row) = ends(selection)
+        let next = max(0, min(count - 1, (row < 0 ? (delta > 0 ? -1 : count) : row) + delta))
+        let a = extend && multi ? (anchor < 0 ? next : anchor) : next
+        selection = a == next ? "\(next)" : "\(a):\(next)"
+        syncing = true
+        table.selectRowIndexes(IndexSet(integersIn: min(a, next)...max(a, next)), byExtendingSelection: false)
+        table.scrollRowToVisible(next)
+        syncing = false
+        set?(key, selection)
+    }
+
+    @objc private func scrolled() {
+        let top = table.rows(in: scroll.contentView.bounds).location
+        guard top != reportedTop else { return }
+        reportedTop = top
+        set?(key + "@top", "\(top)")
+    }
+
+    @objc private func activated() {
+        guard table.clickedRow >= 0, !activate.isEmpty else { return }
+        act?(activate)
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { count }
+
+    private func color(_ v: Int) -> NSColor? {
+        if v >= 1 << 24 { return .rgb(v & 0xFFFFFF) }
+        if v >= 0 && v < palette.count { return .rgb(Int(palette[v])) }
+        return nil
+    }
+
+    /// `text` with the core's spans for (`row`, `col`): byte ranges.
+    private func styled(_ text: String, row: Int, col: Int, font: NSFont, color fg: NSColor) -> NSAttributedString {
+        let out = NSMutableAttributedString(string: text, attributes: [.font: font, .foregroundColor: fg])
+        let u = Array(text.utf8)
+        for sp in spans[row] ?? [] where sp[1] == col {
+            let a = min(max(sp[2], 0), u.count), b = min(max(sp[3], a), u.count)
+            let pre = String(decoding: u[0..<a], as: UTF8.self).utf16.count
+            let len = String(decoding: u[a..<b], as: UTF8.self).utf16.count
+            guard len > 0 else { continue }
+            let r = NSRange(location: pre, length: len)
+            if let c = color(sp[4]) { out.addAttribute(.foregroundColor, value: c, range: r) }
+            if let c = color(sp[5]) { out.addAttribute(.backgroundColor, value: c, range: r) }
+        }
+        return out
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let j = row - first
+        let cells = j >= 0 && j < rows.count ? rows[j] : []
+        let text = cells.first ?? ""
+        if code {
+            let id = NSUserInterfaceItemIdentifier("code")
+            let l = (tableView.makeView(withIdentifier: id, owner: self) as? NSTextField) ?? {
+                let f = NSTextField(labelWithString: "")
+                f.identifier = id
+                f.lineBreakMode = .byClipping
+                return f
+            }()
+            let fg = palette.count > 17 ? NSColor.rgb(Int(palette[17])) : .labelColor
+            // Tabs as four spaces: the spans are byte offsets of the raw
+            // line, so the tabs are widened by a tab stop instead.
+            let para = NSMutableParagraphStyle()
+            para.defaultTabInterval = 4 * NSString(" ").size(withAttributes: [.font: Self.mono]).width
+            para.tabStops = []
+            let s = NSMutableAttributedString(attributedString: styled(text, row: row, col: 0,
+                                                                       font: Self.mono, color: fg))
+            s.addAttribute(.paragraphStyle, value: para, range: NSRange(location: 0, length: s.length))
+            l.attributedStringValue = s
+            l.drawsBackground = row == mark
+            l.backgroundColor = NSColor.findHighlightColor.withAlphaComponent(0.35)
+            return l
+        }
+        let col = tableColumn?.identifier.rawValue == "1" ? 1 : 0
+        let id = NSUserInterfaceItemIdentifier("cell\(col)")
+        let l = (tableView.makeView(withIdentifier: id, owner: self) as? NSTextField) ?? {
+            let f = NSTextField(labelWithString: "")
+            f.identifier = id
+            f.lineBreakMode = col == 0 ? .byTruncatingTail : .byTruncatingMiddle
+            return f
+        }()
+        let value = col < cells.count ? cells[col] : ""
+        l.attributedStringValue = styled(value, row: row, col: col, font: Self.font,
+                                         color: col == 0 ? .labelColor : .secondaryLabelColor)
+        return l
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        guard !syncing, !code else { return }
+        let idx = table.selectedRowIndexes
+        guard let lo = idx.first, let hi = idx.last else { return }
+        let row = table.selectedRow
+        let anchor = row == lo ? hi : lo
+        selection = multi && anchor != row ? "\(anchor):\(row)" : "\(row)"
+        set?(key, selection)
+    }
+}
+
+
 // MARK: - Mac OS 9 ("Platinum") look
 //
 // View ▸ Mac OS 9-style UI. The host draws the declarative dialogs and the
@@ -9733,6 +9431,9 @@ protocol DeclarativeSurface: AnyObject {
     var name: String { get }
     var look: String { get }
     var window: NSWindow { get }
+    /// Runs the host action an event answered with (a picker opening a
+    /// project in a new window).
+    var onAction: ((Int32) -> Void)? { get set }
     func update(_ tree: [String: Any]) -> Bool
     func present(in win: NSWindow)
     func show()
@@ -9771,7 +9472,8 @@ enum Platinum {
     // alert's right-aligned button row).
     static let DISABLED = 1 << 0, DEFAULT = 1 << 1, CANCEL = 1 << 2, DESTRUCTIVE = 1 << 3
     static let CENTER = 1 << 4, SECONDARY = 1 << 5, HEADING = 1 << 6, HOTKEY = 1 << 7
-    static let CHECKABLE = 1 << 8, BROWSE = 1 << 9, RIGHT = 1 << 30
+    static let CHECKABLE = 1 << 8, BROWSE = 1 << 9, NAV = 1 << 10, MULTI = 1 << 11
+    static let CODE = 1 << 12, LARGE = 1 << 13, RIGHT = 1 << 30
 
     static func fill(_ r: NSRect, _ c: NSColor) { c.setFill(); NSBezierPath.fill(r) }
 
@@ -9784,7 +9486,16 @@ enum Platinum {
         fill(NSRect(x: r.maxX - 1, y: r.minY + 1, width: 1, height: r.height - 1), br)
     }
 
-    static func outline(_ r: NSRect, _ c: NSColor) { bevel(r, c, c) }
+    /// A closed one-point frame just inside `r`. Not `bevel(r, c, c)`: a
+    /// bevel leaves its top-right and bottom-left corner points to whatever
+    /// is beneath (where its light and dark edges meet), which shows as a
+    /// bright notch in a dark frame — a list well's corners.
+    static func outline(_ r: NSRect, _ c: NSColor) {
+        fill(NSRect(x: r.minX, y: r.minY, width: r.width, height: 1), c)
+        fill(NSRect(x: r.minX, y: r.maxY - 1, width: r.width, height: 1), c)
+        fill(NSRect(x: r.minX, y: r.minY, width: 1, height: r.height), c)
+        fill(NSRect(x: r.maxX - 1, y: r.minY, width: 1, height: r.height), c)
+    }
 
     /// A sunken well: the Platinum frame of a text field or a list.
     static func well(_ r: NSRect) {
@@ -9806,10 +9517,20 @@ enum Platinum {
     /// that, unantialiased, smear the spacing; whole points keep it even.
     private struct Run { let font: CTFont; let glyphs: [CGGlyph]; let xs: [CGFloat] }
 
+    ///
+    /// Rounding the advances alone isn't enough for Geneva: its outlines
+    /// sit at fractional offsets, and unantialiased a glyph covers fewer
+    /// whole points than its advance suggests (K's arms lose their tips,
+    /// leaving three blank points before an I but one after it). So a
+    /// proportional font is spaced by its rasterized ink instead: each
+    /// glyph's ink starts the font's own gap (its side bearings, rounded
+    /// down, at least a point) after the last one's, the way the bitmap
+    /// fonts were set. Monospace fonts keep their columns.
     private static func layout(_ s: String, _ font: NSFont) -> (runs: [Run], width: CGFloat) {
         let line = CTLineCreateWithAttributedString(NSAttributedString(string: s, attributes: attrs(font, black)))
         var x: CGFloat = 0
         var out: [Run] = []
+        var prev: (end: CGFloat, rsb: CGFloat)? = nil
         for case let run as CTRun in CTLineGetGlyphRuns(line) as NSArray {
             let n = CTRunGetGlyphCount(run)
             var glyphs = [CGGlyph](repeating: 0, count: n)
@@ -9817,11 +9538,62 @@ enum Platinum {
             CTRunGetGlyphs(run, CFRange(location: 0, length: n), &glyphs)
             CTRunGetAdvances(run, CFRange(location: 0, length: n), &adv)
             let rf = (CTRunGetAttributes(run) as NSDictionary)[kCTFontAttributeName] as! CTFont
+            let fixed = CTFontGetSymbolicTraits(rf).contains(.traitMonoSpace)
+            var bounds = [CGRect](repeating: .zero, count: n)
+            CTFontGetBoundingRectsForGlyphs(rf, .horizontal, glyphs, &bounds, n)
             var xs: [CGFloat] = []
-            for a in adv { xs.append(x); x += max(0, a.width.rounded()) }
+            for i in 0..<n {
+                let a = max(0, adv[i].width.rounded())
+                guard !fixed, let k = ink(rf, glyphs[i]) else {
+                    xs.append(x)
+                    x += a
+                    prev = nil
+                    continue
+                }
+                var origin = x
+                if let p = prev {
+                    origin = p.end + 1 + max(1, floor(p.rsb + bounds[i].minX)) - CGFloat(k.lo)
+                }
+                xs.append(origin)
+                prev = (origin + CGFloat(k.hi), adv[i].width - bounds[i].maxX)
+                x = origin + a
+            }
             out.append(Run(font: rf, glyphs: glyphs, xs: xs))
         }
         return (out, x)
+    }
+
+    private static var inkCache: [String: (lo: Int, hi: Int)?] = [:]
+
+    /// The point columns a glyph's ink covers when drawn unantialiased at a
+    /// whole point (relative to it), or nil for a blank one. Measured once.
+    private static func ink(_ f: CTFont, _ g: CGGlyph) -> (lo: Int, hi: Int)? {
+        let key = "\(CTFontCopyPostScriptName(f))|\(CTFontGetSize(f))|\(g)"
+        if let c = inkCache[key] { return c }
+        let size = Int(ceil(CTFontGetSize(f))) * 4 + 16
+        let pad = size / 4
+        var result: (lo: Int, hi: Int)? = nil
+        if let ctx = CGContext(data: nil, width: size, height: size, bitsPerComponent: 8, bytesPerRow: size,
+                               space: CGColorSpaceCreateDeviceGray(),
+                               bitmapInfo: CGImageAlphaInfo.none.rawValue) {
+            ctx.setFillColor(gray: 1, alpha: 1)
+            ctx.fill(CGRect(x: 0, y: 0, width: size, height: size))
+            ctx.setShouldAntialias(false)
+            ctx.setFillColor(gray: 0, alpha: 1)
+            var gg = g
+            var p = CGPoint(x: pad, y: pad)
+            CTFontDrawGlyphs(f, &gg, &p, 1, ctx)
+            if let d = ctx.data?.assumingMemoryBound(to: UInt8.self) {
+                var lo = Int.max, hi = Int.min
+                for i in 0..<(size * size) where d[i] < 128 {
+                    lo = min(lo, i % size)
+                    hi = max(hi, i % size)
+                }
+                if lo != Int.max { result = (lo - pad, hi - pad) }
+            }
+        }
+        inkCache[key] = result
+        return result
     }
 
     static func width(_ s: String, _ font: NSFont = system) -> CGFloat { layout(s, font).width }
@@ -9925,33 +9697,122 @@ enum Platinum {
         return NSRect(x: r.minX, y: r.minY + 1, width: r.width, height: tabH - 3)
     }
 
-    /// A vertical Platinum scroll bar in `sb`: arrows at both ends, a fixed
+    /// The thumb of the scroll bar `sb` over content scrolled to `pos` of
+    /// `maxPos`, `visible` of it on screen: as long as the share of the
+    /// content that's visible (at least Mac OS 9's thumb) — the grid's rule
+    /// (`scrollbar.mojo`). Nil when there's nothing to scroll.
+    static func thumb(in sb: NSRect, pos: Double, max maxPos: Double, visible: Double) -> NSRect? {
+        guard maxPos > 0 else { return nil }
+        let w = sb.width
+        let track = sb.height - 2 * w
+        // At least Mac OS 9's own thumb: 15 points between its black lines.
+        let len = min(track, max(w + 1, floor(track * CGFloat(visible / (maxPos + visible)))))
+        let y = sb.minY + w + floor((track - len) * CGFloat(min(max(pos / maxPos, 0), 1)))
+        return NSRect(x: sb.minX, y: y, width: w, height: len)
+    }
+
+    /// Where a thumb dragged to put its top at `y` scrolls to.
+    static func thumbPos(in sb: NSRect, thumb: NSRect, top y: CGFloat, max maxPos: Double) -> Double {
+        let travel = sb.height - 2 * sb.width - thumb.height
+        guard travel > 0 else { return 0 }
+        return Double((y - sb.minY - sb.width) / travel) * maxPos
+    }
+
+    /// A vertical Platinum scroll bar in `sb`: arrows at both ends, a
     /// lavender thumb at `thumb` (none when there's nothing to scroll).
     /// `pressed`: 1 the up arrow, 2 the down one.
     static func scrollBar(_ sb: NSRect, thumb: NSRect?, pressed: Int) {
+        // Pixel for pixel from a Mac OS 9 screenshot: black sides, 16-point
+        // arrow boxes, a sunken track and a lavender thumb. `x(i)` is the
+        // i-th column inside the black sides (0...13).
         let w = sb.width
+        let x0 = sb.minX + 1
+        func row(_ y: CGFloat, _ from: Int, _ to: Int, _ c: NSColor) {
+            if to >= from { fill(NSRect(x: x0 + CGFloat(from), y: y, width: CGFloat(to - from + 1), height: 1), c) }
+        }
+        func col(_ i: Int, _ y: CGFloat, _ h: CGFloat, _ c: NSColor) {
+            if h > 0 { fill(NSRect(x: x0 + CGFloat(i), y: y, width: 1, height: h), c) }
+        }
+        fill(sb, .black)
+        let inner = Int(w) - 2   // 14
         let live = thumb != nil
-        fill(sb, live ? mid : face)
-        fill(NSRect(x: sb.minX, y: sb.minY, width: 1, height: sb.height), .black)
-        if live {
-            fill(NSRect(x: sb.minX + 1, y: sb.minY + w, width: 1, height: sb.height - 2 * w), shadow)
-        }
-        let up = NSRect(x: sb.minX, y: sb.minY, width: w, height: w)
-        let down = NSRect(x: sb.minX, y: sb.maxY - w, width: w, height: w)
-        for (r, isDown) in [(up, false), (down, true)] {
-            raisedBox(r, pressed: pressed == (isDown ? 2 : 1))
-            triangle(in: r, down: isDown, color: live ? .black : disabled)
-        }
-        if let t = thumb {
-            fill(t, lavender)
-            outline(t, .black)
-            bevel(t.insetBy(dx: 1, dy: 1), light, lavenderDark)
+        // Arrow boxes: rows 1...14 inside a box's black top and bottom.
+        for isDown in [false, true] {
+            let top = isDown ? sb.maxY - w + 1 : sb.minY + 1
+            let down = pressed == (isDown ? 2 : 1)
+            fill(NSRect(x: x0, y: top, width: CGFloat(inner), height: w - 2), down ? sbPressed : face)
+            if down {
+                row(top, 0, inner - 1, sbTrackDark)
+                col(0, top, w - 2, sbTrackDark)
+            } else {
+                row(top, 0, inner - 2, light)              // top highlight, not the last column
+                col(0, top, w - 3, light)                  // left highlight, not the last row
+                col(inner - 1, top + 1, w - 3, sbShadow)   // right shadow
+                row(top + w - 3, 1, inner - 1, sbShadow)   // bottom shadow
+            }
+            // The arrow: 2, 4, 6, 8 points wide.
+            let color = live ? NSColor.black : disabled
             for k in 0..<4 {
-                let y = t.minY + 4 + CGFloat(k) * 2
-                fill(NSRect(x: t.minX + 4, y: y, width: t.width - 8, height: 1), lavenderDark)
+                let width = isDown ? 8 - 2 * k : 2 + 2 * k
+                let y = top + 5 + CGFloat(k)
+                row(y, (inner - width) / 2, (inner + width) / 2 - 1, color)
+            }
+        }
+        // The track, between the boxes' black edges.
+        let trackTop = sb.minY + w, trackBottom = sb.maxY - w   // exclusive
+        guard trackBottom > trackTop else { return }
+        guard let t = thumb else {
+            fill(NSRect(x: x0, y: trackTop, width: CGFloat(inner), height: trackBottom - trackTop), face)
+            return
+        }
+        /// A sunken stretch of track from `y0` to `y1`: two dark steps along
+        /// the top and the left, two light ones on the right.
+        func sunken(_ y0: CGFloat, _ y1: CGFloat) {
+            guard y1 > y0 else { return }
+            fill(NSRect(x: x0, y: y0, width: CGFloat(inner), height: y1 - y0), sbTrack)
+            col(0, y0, y1 - y0, sbTrackDark)
+            col(1, y0 + 1, y1 - y0 - 1, sbTrackMid)
+            col(inner - 2, y0 + 1, y1 - y0 - 1, sbShadow)
+            col(inner - 1, y0, y1 - y0, sbTrackLight)
+            row(y0, 0, inner - 2, sbTrackDark)
+            if y1 - y0 > 1 { row(y0 + 1, 1, inner - 3, sbTrackMid) }
+        }
+        sunken(trackTop, t.minY)
+        sunken(t.maxY, trackBottom)
+        // The thumb: black above and below, lavender bevel inside.
+        row(t.minY, -1, inner, .black)
+        row(t.maxY - 1, -1, inner, .black)
+        let y0 = t.minY + 1, h = t.height - 2
+        guard h > 0 else { return }
+        fill(NSRect(x: x0, y: y0, width: CGFloat(inner), height: h), sbThumb)
+        row(y0, 0, inner - 2, sbThumbLight)
+        col(0, y0, h - 1, sbThumbLight)
+        col(inner - 1, y0 + 1, h - 1, sbThumbDark)
+        row(y0 + h - 1, 1, inner - 1, sbThumbDark)
+        row(y0, 0, 0, sbThumbCorner)
+        row(y0 + h - 1, 0, 0, sbThumb)
+        row(y0, inner - 1, inner - 1, sbThumb)
+        // The grip, centered: four light / dark pairs.
+        if h >= 10 {
+            let g = y0 + floor((h - 8) / 2)
+            for k in 0..<4 {
+                let y = g + CGFloat(2 * k)
+                row(y, 3, 3, sbThumbCorner)
+                row(y, 4, 9, sbThumbLight)
+                row(y + 1, 4, 10, sbGrip)
             }
         }
     }
+
+    private static func rgb(_ v: Int) -> NSColor {
+        NSColor(srgbRed: CGFloat(v >> 16) / 255, green: CGFloat((v >> 8) & 0xFF) / 255,
+                blue: CGFloat(v & 0xFF) / 255, alpha: 1)
+    }
+    // The scroll bar's own grays and lavenders, read off Mac OS 9.
+    private static let sbShadow = gray(0xC7), sbTrack = gray(0xB8), sbTrackDark = gray(0x89)
+    private static let sbTrackMid = gray(0x99), sbTrackLight = gray(0xD5), sbPressed = gray(0xA8)
+    private static let sbThumb = rgb(0xADA5FE), sbThumbLight = rgb(0xD6D4FE)
+    private static let sbThumbDark = rgb(0x7D73D7), sbThumbCorner = gray(0xF1), sbGrip = rgb(0x4A38AB)
 
     /// Follow a press until the button is released: `inside` reports
     /// whether the pointer is over the control; true when it was released
@@ -10014,6 +9875,8 @@ class PNode: NSView {
         case "separator": out = PSeparator()
         case "preview": out = PPreview()
         case "icon": out = PIcon()
+        case "textarea": out = PTextArea()
+        case "list": out = PListView()
         default: out = PSpacer()
         }
         out.dlg = dlg
@@ -10677,10 +10540,8 @@ final class PList: PNode {
     private var pressedPart = 0 { didSet { needsDisplay = true } }
 
     private var thumbRect: NSRect {
-        let sb = sbRect
-        let track = sb.height - 3 * Self.sbW
-        let y = sb.minY + Self.sbW + (maxTop > 0 ? floor(track * CGFloat(top) / CGFloat(maxTop)) : 0)
-        return NSRect(x: sb.minX, y: y, width: Self.sbW, height: Self.sbW)
+        Platinum.thumb(in: sbRect, pos: Double(top), max: Double(maxTop), visible: Double(visible))
+            ?? NSRect(x: sbRect.minX, y: sbRect.minY + Self.sbW, width: Self.sbW, height: Self.sbW)
     }
 
     private func scroll(to t: Int) {
@@ -10723,11 +10584,10 @@ final class PList: PNode {
         let thumb = thumbRect
         if thumb.contains(start) {
             let grab = start.y - thumb.minY
-            let track = sb.height - 3 * Self.sbW
             while let e = win.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
                 if e.type == .leftMouseUp { break }
-                let y = convert(e.locationInWindow, from: nil).y - grab - sb.minY - Self.sbW
-                scroll(to: Int((y / track * CGFloat(maxTop)).rounded()))
+                let y = convert(e.locationInWindow, from: nil).y - grab
+                scroll(to: Int(Platinum.thumbPos(in: sb, thumb: thumb, top: y, max: Double(maxTop)).rounded()))
                 display()
             }
             return
@@ -10779,6 +10639,130 @@ final class PList: PNode {
         }
     }
 }
+
+/// A `UI_LIST` in the Mac OS 9 look: the git window's rows view over the
+/// window of rows the core sends, reporting where its view is
+/// (`<key>@top`). A row is its primary text (with the core's spans) and
+/// its detail in gray; a code view is Monaco on the editor colors, its
+/// marked line framed and revealed at the golden ratio.
+final class PListView: PNode {
+    let rows = PGitRows()
+    private var mark = Int.min
+    var code: Bool { has(Platinum.CODE) }
+
+    override var stretchX: Bool { true }
+    override var stretchY: Bool { true }
+
+    override func built() {
+        addSubview(rows)
+        if code {
+            rows.font = PlatinumGitView.mono
+            rows.rowH = 16
+            rows.outlineCursor = true
+        }
+        rows.onChoose = { [weak self] r in
+            guard let self = self, !self.code else { return }
+            self.dlg?.set(self.key, "\(r)")
+        }
+        rows.onActivate = { [weak self] _ in
+            guard let self = self, let a = self.node["value"] as? String, !a.isEmpty else { return }
+            self.dlg?.act(a)
+        }
+        rows.onScroll = { [weak self] t in
+            guard let self = self else { return }
+            self.dlg?.set(self.key + "@top", "\(t)")
+        }
+    }
+
+    override func fit() -> NSSize {
+        NSSize(width: 520, height: CGFloat(max(node["h"] as? Int ?? 8, 3)) * rows.rowH + 4)
+    }
+
+    override func place(_ r: NSRect) {
+        frame = r
+        rows.frame = bounds
+        layoutColumns()
+        revealMark()
+    }
+
+    /// The widest primary text in the rows sent.
+    private var primaryW: CGFloat = 0
+
+    /// Two columns, as in every look (`ListColumns`): the primary as wide
+    /// as its widest text, at most half the list, then the detail.
+    private func layoutColumns() {
+        let body = bounds.width - 4 - PGitRows.sbW
+        rows.detailX = ListColumns.detailX(primary: primaryW, body: body, inset: 6, gap: 12)
+        rows.needsDisplay = true
+    }
+
+    override func apply(_ n: [String: Any]) {
+        node = n
+        var pal = [UInt32](repeating: 0, count: 256)
+        if let h = dlg?.handle, h != 0 {
+            pal.withUnsafeMutableBufferPointer { b in
+                _ = tk_theme_palette(h, Int64(Int(bitPattern: b.baseAddress)), Int64(b.count))
+            }
+        }
+        func color(_ v: Int) -> NSColor? {
+            if v >= 1 << 24 { return .rgb(v & 0xFFFFFF) }
+            return v >= 0 && v < pal.count ? .rgb(Int(pal[v])) : nil
+        }
+        let fg: NSColor = code ? .rgb(Int(pal[17])) : .black
+        let count = n["count"] as? Int ?? 0
+        let first = n["first"] as? Int ?? 0
+        let cells = n["rows"] as? [[String]] ?? []
+        var spans: [Int: [[Int]]] = [:]
+        for sp in n["spans"] as? [[Int]] ?? [] where sp.count == 6 { spans[sp[0], default: []].append(sp) }
+        var out = [PGitRows.Row](repeating: PGitRows.Row(runs: [], selectable: !code), count: count)
+        for (j, row) in cells.enumerated() where first + j < count {
+            let i = first + j
+            let text = row.first ?? ""
+            let u = Array(text.utf8)
+            var runs: [(String, NSColor)] = []
+            var bgs: [NSColor?] = []
+            func piece(_ a: Int, _ b: Int) -> String {
+                String(decoding: u[a..<b], as: UTF8.self).replacingOccurrences(of: "\t", with: "    ")
+            }
+            var pos = 0
+            for sp in (spans[i] ?? []).filter({ $0[1] == 0 }).sorted(by: { $0[2] < $1[2] }) {
+                let a = min(max(sp[2], pos), u.count), b = min(max(sp[3], a), u.count)
+                if a > pos { runs.append((piece(pos, a), fg)); bgs.append(nil) }
+                if b > a { runs.append((piece(a, b), color(sp[4]) ?? fg)); bgs.append(color(sp[5])) }
+                pos = max(pos, b)
+            }
+            if pos < u.count { runs.append((piece(pos, u.count), fg)); bgs.append(nil) }
+            var r = PGitRows.Row(runs: runs, selectable: !code)
+            r.runBgs = bgs
+            if !code && row.count > 1 { r.detail = (row[1], Platinum.dark) }
+            out[i] = r
+        }
+        rows.fill = code ? .rgb(Int(pal[16])) : .white
+        primaryW = code ? 0 : cells.map { Platinum.width(($0.first ?? "").replacingOccurrences(of: "\t", with: "    "), rows.font) }.max() ?? 0
+        rows.rows = out
+        layoutColumns()
+        if code {
+            mark = n["n"] as? Int ?? 0
+            rows.selected = mark
+            revealMark()
+        } else {
+            let sel = (n["text"] as? String ?? "").split(separator: ":").last.flatMap { Int($0) } ?? -1
+            if rows.selected != sel {
+                rows.selected = sel
+                rows.reveal(sel)
+            }
+        }
+    }
+
+    /// A code view's new marked line goes to the golden-ratio line.
+    private var revealed = Int.min
+    private func revealMark() {
+        guard code, mark != revealed, rows.bounds.height > 0 else { return }
+        revealed = mark
+        rows.scrollTo(mark - rows.page * 38 / 100)
+    }
+}
+
 
 // MARK: Platinum dialog window
 
@@ -11213,9 +11197,7 @@ final class PlatinumScroller: NSView {
     private var w: CGFloat { bounds.width }
 
     private var thumb: NSRect? {
-        guard maxv > 0 else { return nil }
-        let travel = bounds.height - 3 * w
-        return NSRect(x: 0, y: w + floor(travel * CGFloat(min(cur / maxv, 1))), width: w, height: w)
+        Platinum.thumb(in: bounds, pos: cur, max: maxv, visible: page)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -11239,11 +11221,10 @@ final class PlatinumScroller: NSView {
         let start = convert(event.locationInWindow, from: nil)
         if t.contains(start) {
             let grab = start.y - t.minY
-            let travel = bounds.height - 3 * w
             while let e = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
                 if e.type == .leftMouseUp { break }
-                let y = convert(e.locationInWindow, from: nil).y - grab - w
-                go(to: Double(y / travel) * maxv)
+                let y = convert(e.locationInWindow, from: nil).y - grab
+                go(to: Platinum.thumbPos(in: bounds, thumb: t, top: y, max: maxv))
             }
             return
         }
@@ -11289,6 +11270,10 @@ final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
     /// alert answers `tk_desktop_native_confirm_answer`).
     private let onEvents: (([[Any]]) -> Void)?
     private static let margin = NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
+    var onAction: ((Int32) -> Void)?
+    /// A picker (`LARGE`): most of its window rather than its natural size.
+    private var large = false
+    private var parentFrame: NSRect?
 
     var window: NSWindow { win }
     var handle: Int64 { view?.handle ?? 0 }
@@ -11323,6 +11308,7 @@ final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
     // MARK: presentation
 
     func present(in parent: NSWindow) {
+        parentFrame = parent.frame
         relayout()
         let pf = parent.frame
         let size = win.frame.size
@@ -11366,6 +11352,8 @@ final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
         if n.isHidden { return [] }
         if let t = n as? PText, t.enabled { return [t.field] }
         if n is PList { return [n] }
+        if let t = n as? PTextArea, t.enabled { return [t.text] }
+        if let l = n as? PListView, !l.code { return [l.rows] }
         return n.kids.flatMap { focusables($0) }
     }
 
@@ -11385,6 +11373,7 @@ final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
         frameView.title = tree["text"] as? String ?? ""
         win.title = frameView.title   // drawn by the frame; kept for the Window list
         cancelKey = tree["key"] as? String ?? ""
+        large = ((tree["f"] as? Int ?? 0) & Platinum.LARGE) != 0
         let body = (tree["kids"] as? [[String: Any]])?.first ?? [:]
         let sh = Self.shapeOf(body)
         if sh != shape || root == nil {
@@ -11409,8 +11398,12 @@ final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
         guard let r = root else { return }
         let m = Self.margin
         let fit = r.fit()
-        let cw = max(fit.width, asWindow ? 360 : 260) + m.left + m.right
-        let ch = fit.height + m.top + m.bottom
+        var cw = max(fit.width, asWindow ? 360 : 260) + m.left + m.right
+        var ch = fit.height + m.top + m.bottom
+        if large, let pf = parentFrame {
+            cw = max(cw, floor(pf.width * 0.8))
+            ch = max(ch, floor(pf.height * 0.8))
+        }
         let size = NSSize(width: cw + 2 * PlatinumFrameView.side,
                           height: ch + frameView.topInset + PlatinumFrameView.side)
         if win.frame.size != size {
@@ -11433,7 +11426,8 @@ final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
         guard let v = view, v.handle != 0,
               let d = try? JSONSerialization.data(withJSONObject: ["name": name, "events": events]),
               let json = String(data: d, encoding: .utf8) else { return }
-        withUTF8Arg(json) { p, l in tk_desktop_ui_event(v.handle, p, l) }
+        let code = withUTF8Arg(json) { p, l in tk_desktop_ui_event(v.handle, p, l) }
+        onAction?(code)
         v.invalidateFrame()
         v.needsDisplay = true
     }
@@ -11511,7 +11505,1061 @@ final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
         switch sel {
         case #selector(NSResponder.insertNewline(_:)): return pressDefault()
         case #selector(NSResponder.cancelOperation(_:)): cancel(); return true
+        default: break
+        }
+        // A search field's arrows move its list; the typing stays here.
+        guard (control.superview as? PText)?.has(Platinum.NAV) == true,
+              let l = root.flatMap(Self.navList)?.rows else { return false }
+        switch sel {
+        case #selector(NSResponder.moveUp(_:)): l.move(-1)
+        case #selector(NSResponder.moveDown(_:)): l.move(1)
+        case #selector(NSResponder.pageUp(_:)), #selector(NSResponder.scrollPageUp(_:)): l.move(-l.page)
+        case #selector(NSResponder.pageDown(_:)), #selector(NSResponder.scrollPageDown(_:)): l.move(l.page)
         default: return false
+        }
+        return true
+    }
+
+    /// The list a search field drives: the first that isn't a code view.
+    private static func navList(_ n: PNode) -> PListView? {
+        if let l = n as? PListView, !l.code { return l }
+        for k in n.kids { if let l = navList(k) { return l } }
+        return nil
+    }
+}
+
+/// A multi-line text box in a Platinum well (the git view's commit message
+/// and its output): an AppKit text view, like `PText`'s field. Host-only:
+/// the core's trees never use it, the alerts built in Swift do.
+final class PTextArea: PNode, NSTextViewDelegate {
+    let scroll = NSScrollView()
+    let text = NSTextView()
+
+    override var stretchX: Bool { true }
+
+    override func built() {
+        text.isRichText = false
+        text.font = has(Platinum.SECONDARY) ? PlatinumGitView.mono : Platinum.app
+        text.textColor = .black
+        text.drawsBackground = false
+        text.isEditable = enabled
+        text.isSelectable = true
+        text.textContainerInset = .zero
+        text.isVerticallyResizable = true
+        text.autoresizingMask = [.width]
+        text.string = node["value"] as? String ?? ""
+        text.delegate = self
+        scroll.documentView = text
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.borderType = .noBorder
+        addSubview(scroll)
+    }
+
+    override func fit() -> NSSize {
+        NSSize(width: 440, height: CGFloat(max(node["h"] as? Int ?? 6, 2)) * 16 + 8)
+    }
+
+    override func place(_ r: NSRect) {
+        frame = r
+        scroll.frame = bounds.insetBy(dx: 5, dy: 4)
+        text.frame.size.width = scroll.contentSize.width
+        if !enabled { text.scrollToEndOfDocument(nil) }
+    }
+
+    /// Never overwrite what's being typed.
+    override func apply(_ n: [String: Any]) { node = n; needsDisplay = true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        Platinum.fill(bounds.insetBy(dx: 2, dy: 2), .white)
+        Platinum.well(bounds)
+    }
+
+    func textDidChange(_ notification: Notification) { dlg?.set(key, text.string) }
+
+    /// Esc cancels the alert (a text view would offer completions).
+    func textView(_ textView: NSTextView, doCommandBy sel: Selector) -> Bool {
+        if sel == #selector(NSResponder.cancelOperation(_:)) || sel == #selector(NSResponder.complete(_:)) {
+            dlg?.cancel()
+            return true
+        }
+        return false
+    }
+}
+
+// MARK: Platinum git window
+
+/// The git view's two projectors: the macOS sheet (`GitController`) and
+/// the Platinum window (`PlatinumGitView`).
+protocol GitSurface: AnyObject {
+    var look: String { get }
+    var onAfterAction: (() -> Void)? { get set }
+    func update(_ data: Data) -> Bool
+    func present(in win: NSWindow)
+    func dismiss()
+}
+
+extension GitController: GitSurface {
+    var look: String { "macos" }
+}
+
+/// A list or a diff in the Platinum git window: rows of colored runs in a
+/// well, a selection (lavender, a list) or a cursor (a frame, a diff, so
+/// the line's own color shows), and a Platinum scroll bar.
+final class PGitRows: NSView {
+    struct Row {
+        var runs: [(String, NSColor)]
+        /// Drawn in a column `leadW` wide before the runs (a status code,
+        /// a SHA), so the runs line up in a proportional font.
+        var lead: (String, NSColor)? = nil
+        var indent: CGFloat = 0
+        var bg: NSColor? = nil
+        var font: NSFont? = nil
+        var selectable = true
+        /// A background behind run `i` (a search hit), parallel to `runs`.
+        var runBgs: [NSColor?] = []
+        /// The second column, at `detailX`; the runs are cut short of it.
+        var detail: (String, NSColor)? = nil
+    }
+
+    static let sbW: CGFloat = 16
+    var rows: [Row] = [] { didSet { top = min(top, maxTop); needsDisplay = true } }
+    var font = Platinum.app
+    var rowH: CGFloat = 18
+    var leadW: CGFloat = 0
+    /// Where a row's `detail` column starts, from the row's left.
+    var detailX: CGFloat = 0
+    var fill: NSColor = .white { didSet { needsDisplay = true } }
+    var selected = -1 { didSet { if selected != oldValue { needsDisplay = true } } }
+    var outlineCursor = false
+    var placeholder = ""
+    /// The user moved the selection to a row.
+    var onChoose: ((Int) -> Void)?
+    /// Double-click or Return.
+    var onActivate: ((Int) -> Void)?
+    /// Keys before the list's own (arrows, Return); true when taken.
+    var onKey: ((NSEvent) -> Bool)?
+    var onMenu: ((Int, NSEvent) -> Void)?
+    var onFocus: (() -> Void)?
+    /// The view now starts at this row (a windowed list asks for it).
+    var onScroll: ((Int) -> Void)?
+    private(set) var top = 0 { didSet { if top != oldValue { onScroll?(top) } } }
+    private var pressedPart = 0 { didSet { needsDisplay = true } }
+
+    override var isFlipped: Bool { true }
+    override var acceptsFirstResponder: Bool { true }
+    override func becomeFirstResponder() -> Bool { needsDisplay = true; onFocus?(); return true }
+    override func resignFirstResponder() -> Bool { needsDisplay = true; return true }
+    var focused: Bool { window?.firstResponder === self }
+
+    private var inner: NSRect { bounds.insetBy(dx: 2, dy: 2) }
+    /// From the height, not `inner`: insetting an empty rect gives the null rect.
+    private var visible: Int { max(1, Int(max(0, bounds.height - 4) / rowH)) }
+    private var maxTop: Int { max(0, rows.count - visible) }
+    private var sbRect: NSRect {
+        NSRect(x: inner.maxX - Self.sbW, y: inner.minY, width: Self.sbW, height: inner.height)
+    }
+    private var thumbRect: NSRect {
+        Platinum.thumb(in: sbRect, pos: Double(top), max: Double(maxTop), visible: Double(visible))
+            ?? NSRect(x: sbRect.minX, y: sbRect.minY + Self.sbW, width: Self.sbW, height: Self.sbW)
+    }
+
+    func reveal(_ r: Int) {
+        guard r >= 0 else { return }
+        if r < top { top = r }
+        if r >= top + visible { top = r - visible + 1 }
+        top = max(0, min(top, maxTop))
+        needsDisplay = true
+    }
+
+    private func scroll(to t: Int) {
+        let n = max(0, min(t, maxTop))
+        if n != top { top = n; needsDisplay = true }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        Platinum.fill(inner, fill)
+        Platinum.well(bounds)
+        let body = NSRect(x: inner.minX, y: inner.minY, width: inner.width - Self.sbW, height: inner.height)
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: body).addClip()
+        if rows.isEmpty && !placeholder.isEmpty {
+            Platinum.text(placeholder, in: NSRect(x: body.minX + 6, y: body.minY, width: body.width - 12,
+                                                  height: rowH), font: font, color: Platinum.disabled)
+        }
+        let focused = self.focused
+        for i in 0...visible {
+            let r = top + i
+            guard r < rows.count else { break }
+            let row = rows[r]
+            let rr = NSRect(x: body.minX, y: body.minY + CGFloat(i) * rowH, width: body.width, height: rowH)
+            if let bg = row.bg { Platinum.fill(rr, bg) }
+            if r == selected && !outlineCursor {
+                Platinum.fill(rr, focused ? Platinum.lavender : Platinum.face)
+            }
+            let f = row.font ?? font
+            var x = rr.minX + 6 + row.indent
+            if let lead = row.lead {
+                Platinum.text(lead.0, in: NSRect(x: x, y: rr.minY, width: leadW - 4, height: rowH), font: font,
+                              color: lead.1)
+                x += leadW
+            }
+            let end = row.detail == nil ? rr.maxX - 2 : rr.minX + detailX - 12
+            for (i, (t, c)) in row.runs.enumerated() where !t.isEmpty {
+                guard x < end else { break }
+                let w = Platinum.width(t, f)
+                if i < row.runBgs.count, let b = row.runBgs[i] {
+                    Platinum.fill(NSRect(x: x, y: rr.minY + 1, width: min(w, end - x), height: rowH - 2), b)
+                }
+                Platinum.text(t, in: NSRect(x: x, y: rr.minY, width: end - x, height: rowH),
+                              font: f, color: c)
+                x += w
+            }
+            if let (t, c) = row.detail {
+                let dx = rr.minX + detailX
+                Platinum.text(t, in: NSRect(x: dx, y: rr.minY, width: rr.maxX - 2 - dx, height: rowH),
+                              font: f, color: c)
+            }
+            if r == selected && outlineCursor {
+                Platinum.outline(rr, focused ? Platinum.accent : Platinum.shadow)
+            }
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        Platinum.scrollBar(sbRect, thumb: maxTop > 0 ? thumbRect : nil, pressed: pressedPart)
+    }
+
+    private func row(at p: NSPoint) -> Int? {
+        guard p.y >= inner.minY, p.x < sbRect.minX else { return nil }
+        let r = top + Int((p.y - inner.minY) / rowH)
+        return r < rows.count ? r : nil
+    }
+
+    /// Select row `r` as the user did; `onChoose` only when it moved.
+    func choose(_ r: Int) {
+        guard r >= 0, r < rows.count, rows[r].selectable else { return }
+        if r != selected {
+            selected = r
+            onChoose?(r)
+        }
+        reveal(r)
+    }
+
+    /// Put row `r` at the top of the view.
+    func scrollTo(_ r: Int) { scroll(to: r) }
+
+    /// Rows that fit.
+    var page: Int { visible }
+
+    /// Move the selection by `d` rows (a search field's arrows).
+    func move(_ d: Int) { step(d) }
+
+    /// Move by `d` rows, onto the nearest selectable one.
+    private func step(_ d: Int) {
+        guard !rows.isEmpty else { return }
+        var r = max(0, min(rows.count - 1, (selected < 0 ? (d > 0 ? -1 : rows.count) : selected) + d))
+        let dir = d >= 0 ? 1 : -1
+        while r >= 0, r < rows.count, !rows[r].selectable { r += dir }
+        if r < 0 || r >= rows.count {
+            r = max(0, min(rows.count - 1, r))
+            while r >= 0, r < rows.count, !rows[r].selectable { r -= dir }
+        }
+        if r >= 0 && r < rows.count { choose(r) }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        let p = convert(event.locationInWindow, from: nil)
+        if sbRect.contains(p) { trackScrollBar(p); return }
+        guard let r = row(at: p) else { return }
+        choose(r)
+        if event.modifierFlags.contains(.control) { onMenu?(r, event); return }
+        if event.clickCount == 2 && r == selected { onActivate?(r) }
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        guard let r = row(at: convert(event.locationInWindow, from: nil)) else { return }
+        choose(r)
+        onMenu?(r, event)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        let d = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY / rowH : event.scrollingDeltaY
+        if abs(d) >= 0.5 { scroll(to: top - Int(d.rounded())) }
+    }
+
+    override func keyDown(with event: NSEvent) {
+        if onKey?(event) == true { return }
+        switch event.keyCode {
+        case 125: step(1)
+        case 126: step(-1)
+        case 116: step(-visible)
+        case 121: step(visible)
+        case 115: selected = -1; step(1)
+        case 119: selected = -1; step(-1)
+        case 36, 76: if selected >= 0 { onActivate?(selected) }
+        default: super.keyDown(with: event)
+        }
+    }
+
+    private func trackScrollBar(_ start: NSPoint) {
+        guard maxTop > 0, let win = window else { return }
+        let sb = sbRect
+        let thumb = thumbRect
+        if thumb.contains(start) {
+            let grab = start.y - thumb.minY
+            while let e = win.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+                if e.type == .leftMouseUp { break }
+                let y = convert(e.locationInWindow, from: nil).y - grab
+                scroll(to: Int(Platinum.thumbPos(in: sb, thumb: thumb, top: y, max: Double(maxTop)).rounded()))
+                display()
+            }
+            return
+        }
+        // Arrows and the track repeat while held.
+        let part = start.y < sb.minY + Self.sbW ? 1 : start.y > sb.maxY - Self.sbW ? 2 : start.y < thumb.minY ? 3 : 4
+        func step() {
+            switch part {
+            case 1: scroll(to: top - 1)
+            case 2: scroll(to: top + 1)
+            case 3: scroll(to: top - visible)
+            default: scroll(to: top + visible)
+            }
+            display()
+        }
+        if part <= 2 { pressedPart = part }
+        step()
+        NSEvent.startPeriodicEvents(afterDelay: 0.3, withPeriod: 0.05)
+        while let e = win.nextEvent(matching: [.leftMouseUp, .periodic, .leftMouseDragged]) {
+            if e.type == .leftMouseUp { break }
+            if e.type == .periodic { step() }
+        }
+        NSEvent.stopPeriodicEvents()
+        pressedPart = 0
+    }
+}
+
+final class PlatinumGitWindow: NSWindow {
+    weak var git: PlatinumGitView?
+    override var canBecomeKey: Bool { true }
+    override func keyDown(with event: NSEvent) {
+        if git?.handleKey(event) != true { super.keyDown(with: event) }
+    }
+    override func cancelOperation(_ sender: Any?) { git?.closeClicked() }
+}
+
+/// The window's body: draws the branch line and the section headings
+/// around the lists, which are its subviews.
+final class PlatinumGitBody: NSView {
+    weak var git: PlatinumGitView?
+    override var isFlipped: Bool { true }
+    override func draw(_ dirtyRect: NSRect) { git?.drawBody() }
+    override func resizeSubviews(withOldSize oldSize: NSSize) { git?.layoutBody() }
+}
+
+/// The git view in the Mac OS 9 look: a Platinum window over the project
+/// window with the macOS sheet's layout — Modified files (as a tree),
+/// Branches and Commits stacked on the left, the selected file's Unstaged
+/// and Staged diffs (or the branch's log / the commit's details) on the
+/// right, the focused pane's operations as push buttons along the bottom.
+/// Like `GitController` it drives the core only through `tk_desktop_git*`:
+/// selection, cursor, the view's own keys, and the overlays' answers.
+final class PlatinumGitView: NSObject, GitSurface {
+    var look: String { "platinum" }
+    weak var view: CellView?
+    var onAfterAction: (() -> Void)?
+
+    static let mono = NSFont(name: "Monaco", size: 12) ?? .monospacedSystemFont(ofSize: 12, weight: .regular)
+    private static let red = NSColor(srgbRed: 0.8, green: 0, blue: 0, alpha: 1)
+    private static let green = NSColor(srgbRed: 0, green: 0.5, blue: 0, alpha: 1)
+    private static let purple = NSColor(srgbRed: 0.45, green: 0, blue: 0.6, alpha: 1)
+    private static let margin: CGFloat = 12, headH: CGFloat = 20, barH: CGFloat = 26
+
+    private let win: PlatinumGitWindow
+    private let frameView = PlatinumFrameView()
+    private let body = PlatinumGitBody()
+    private let filesList = PGitRows()
+    private let branchesList = PGitRows()
+    private let commitsList = PGitRows()
+    private let unstaged = PGitRows()
+    private let staged = PGitRows()
+    private var unstagedMap: [Int?] = []
+    private var stagedMap: [Int?] = []
+    private var buttons: [PButton] = []
+    private var headings: [(String, NSRect, Int)] = []
+
+    private var state: [String: Any] = [:]
+    private var lastData = Data()
+    private var lastPanels = Data()
+    private var lastHints: [[Any]] = []
+    private var files: [[String: Any]] = []
+    private var fileRows: [(depth: Int, name: String, file: Int?)] = []
+    private var branches: [[String: Any]] = []
+    private var commits: [[String: Any]] = []
+    private var focus = GitPane.files
+    private var showsFile = true
+    private var infoTitle = "Log"
+    private var busy = false
+    private var note = ""
+    private var alert: PlatinumDialog?
+    private var alertValues: [String: String] = [:]
+    private var overlayShown = ""
+    private var dismissed = false
+
+    init(view: CellView) {
+        self.view = view
+        win = PlatinumGitWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 640),
+                                styleMask: [.borderless], backing: .buffered, defer: true)
+        super.init()
+        win.git = self
+        win.isReleasedWhenClosed = false
+        win.hasShadow = false
+        win.isOpaque = true
+        win.backgroundColor = Platinum.face
+        win.title = "Git"
+        frameView.title = "Git"
+        frameView.closable = true
+        frameView.onClose = { [weak self] in self?.closeClicked() }
+        win.contentView = frameView
+        body.git = self
+        frameView.addSubview(body)
+        for n in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
+            NotificationCenter.default.addObserver(forName: n, object: win, queue: .main) { [weak self] _ in
+                self?.frameView.needsDisplay = true
+            }
+        }
+        setUpLists()
+    }
+
+    private func setUpLists() {
+        let lists = [(filesList, GitPane.files), (branchesList, GitPane.branches), (commitsList, GitPane.commits)]
+        for (l, pane) in lists {
+            body.addSubview(l)
+            l.onChoose = { [weak self] r in
+                guard let self = self, let idx = self.index(pane, r) else { return }
+                self.select(pane, idx)
+            }
+            l.onActivate = { [weak self] r in self?.activate(pane, r) }
+            l.onKey = { [weak self] e in self?.listKey(pane, e) ?? false }
+            l.onMenu = { [weak self] r, e in self?.listMenu(pane, r, e) }
+            l.onFocus = { [weak self, weak l] in
+                guard let self = self, let l = l, self.focus != pane, let idx = self.index(pane, l.selected)
+                else { return }
+                self.select(pane, idx)
+            }
+        }
+        filesList.leadW = 26
+        branchesList.leadW = 40
+        commitsList.leadW = 72
+        filesList.placeholder = "No changes"
+        for d in [unstaged, staged] {
+            body.addSubview(d)
+            d.font = Self.mono
+            d.rowH = 16
+            d.leadW = Platinum.width("+ ", Self.mono)
+            d.outlineCursor = true
+            d.onChoose = { [weak self, weak d] line in
+                guard let self = self, let d = d, let row = self.coreRow(d, line) else { return }
+                self.cursor(d, row)
+            }
+            d.onActivate = { [weak self, weak d] line in
+                guard let self = self, let d = d, let row = self.coreRow(d, line) else { return }
+                self.open(self.corePane(d), row)
+            }
+            d.onKey = { [weak self, weak d] e in
+                guard let self = self, let d = d else { return false }
+                return self.diffKey(d, e)
+            }
+            d.onMenu = { [weak self, weak d] line, e in
+                guard let self = self, let d = d else { return }
+                self.diffMenu(d, line, e)
+            }
+            d.onFocus = { [weak self, weak d] in
+                guard let self = self, let d = d, self.focus != self.corePane(d) else { return }
+                let line = d.selected >= 0 ? d.selected : (d.rows.firstIndex { $0.selectable } ?? -1)
+                if let row = self.coreRow(d, line) { self.cursor(d, row) }
+            }
+        }
+    }
+
+    // MARK: presentation
+
+    func present(in parent: NSWindow) {
+        let pf = parent.frame
+        let size = NSSize(width: max(760, pf.width - 40), height: max(480, pf.height - 50))
+        win.setFrame(NSRect(x: floor(pf.midX - size.width / 2), y: pf.maxY - 30 - size.height,
+                            width: size.width, height: size.height), display: false)
+        body.frame = frameView.content
+        layoutBody()
+        parent.addChildWindow(win, ordered: .above)
+        win.makeKeyAndOrderFront(nil)
+        win.makeFirstResponder(filesList)
+    }
+
+    func dismiss() {
+        guard !dismissed else { return }
+        dismissed = true
+        alert?.dismiss()
+        alert = nil
+        win.parent?.removeChildWindow(win)
+        win.orderOut(nil)
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    /// The view over a window that took the key back (a click on the
+    /// workspace behind it) keeps the keyboard, as a modal should.
+    func reclaimKey() {
+        guard !dismissed, let p = win.parent, p.isKeyWindow else { return }
+        if let a = alert { a.window.makeKey() } else { win.makeKey() }
+    }
+
+    func layoutBody() {
+        let b = body.bounds
+        let m = Self.margin, hh = Self.headH
+        let top = m + 22
+        let bottom = b.height - m - Self.barH - 8
+        let leftW = floor(min(380, b.width * 0.34))
+        let colH = max(0, bottom - top)
+        headings = []
+        var y = top
+        let left = [("Modified files", filesList, GitPane.files, 0.42),
+                    ("Branches", branchesList, GitPane.branches, 0.24),
+                    ("Commits", commitsList, GitPane.commits, 0.34)]
+        for (title, l, pane, frac) in left {
+            let h = floor(colH * CGFloat(frac))
+            headings.append((title, NSRect(x: m, y: y, width: leftW, height: hh), pane))
+            l.frame = NSRect(x: m, y: y + hh, width: leftW, height: max(0, h - hh - 8))
+            y += h
+        }
+        let rx = m + leftW + 12
+        let rw = max(0, b.width - rx - m)
+        if showsFile {
+            let uh = floor(colH * 0.55)
+            headings.append(("Unstaged", NSRect(x: rx, y: top, width: rw, height: hh), GitPane.unstaged))
+            unstaged.frame = NSRect(x: rx, y: top + hh, width: rw, height: max(0, uh - hh - 8))
+            headings.append(("Staged", NSRect(x: rx, y: top + uh, width: rw, height: hh), GitPane.staged))
+            staged.frame = NSRect(x: rx, y: top + uh + hh, width: rw, height: max(0, colH - uh - hh - 8))
+            staged.isHidden = false
+        } else {
+            headings.append((infoTitle, NSRect(x: rx, y: top, width: rw, height: hh), GitPane.info))
+            unstaged.frame = NSRect(x: rx, y: top + hh, width: rw, height: max(0, colH - hh - 8))
+            staged.isHidden = true
+        }
+        // The operations, right-aligned along the bottom.
+        var x = b.width - m
+        for btn in buttons.reversed() {
+            let w = btn.fit().width
+            x -= w
+            btn.place(NSRect(x: x, y: b.height - m - 20, width: w, height: 20))
+            x -= 8
+        }
+        body.needsDisplay = true
+    }
+
+    func drawBody() {
+        let b = body.bounds
+        let m = Self.margin
+        let branch = state["branch"] as? String ?? ""
+        let name = branch.isEmpty ? "(detached)" : branch
+        let bw = Platinum.width(name)
+        Platinum.text(name, in: NSRect(x: m, y: m - 2, width: bw + 1, height: 18))
+        let noteW = min(Platinum.width(note, Platinum.app) + 1, b.width * 0.45)
+        Platinum.text(note, in: NSRect(x: b.width - m - noteW, y: m - 2, width: noteW, height: 18),
+                      font: Platinum.app, color: busy ? .black : Platinum.dark)
+        let rootX = m + bw + 12
+        Platinum.text(state["root"] as? String ?? "",
+                      in: NSRect(x: rootX, y: m - 2, width: max(0, b.width - m - noteW - 12 - rootX), height: 18),
+                      font: Platinum.app, color: Platinum.dark)
+        // Headings carry an etched rule, like a group box's title; the
+        // focused pane's reads black, the rest gray.
+        for (title, r, pane) in headings {
+            let on = pane == focus || (pane == GitPane.info && (focus == GitPane.info))
+            let w = Platinum.width(title)
+            Platinum.text(title, in: NSRect(x: r.minX, y: r.minY, width: w + 1, height: r.height - 2),
+                          color: on ? .black : Platinum.disabled)
+            let ry = floor(r.minY + (r.height - 2) / 2)
+            if r.width > w + 8 {
+                Platinum.fill(NSRect(x: r.minX + w + 6, y: ry, width: r.width - w - 6, height: 1), Platinum.shadow)
+                Platinum.fill(NSRect(x: r.minX + w + 6, y: ry + 1, width: r.width - w - 6, height: 1), Platinum.light)
+            }
+        }
+    }
+
+    // MARK: state
+
+    func update(_ data: Data) -> Bool {
+        if data == lastData { return false }
+        lastData = data
+        guard let st = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return false }
+        state = st
+        files = st["files"] as? [[String: Any]] ?? []
+        fileRows = GitController.tree(files)
+        branches = st["branches"] as? [[String: Any]] ?? []
+        commits = st["commits"] as? [[String: Any]] ?? []
+        busy = st["busy"] as? Bool ?? false
+        let status = st["status"] as? String ?? ""
+        let flash = st["flash"] as? String ?? ""
+        note = busy ? (st["busy_label"] as? String ?? "Working…") : !status.isEmpty ? status : flash
+        focus = st["focus"] as? Int ?? GitPane.files
+
+        filesList.rows = fileRows.map { r in
+            guard let fi = r.file else {
+                return PGitRows.Row(runs: [(r.name, Platinum.dark)], indent: CGFloat(r.depth) * 14, selectable: false)
+            }
+            let f = files[fi]
+            let x = f["x"] as? String ?? " ", y = f["y"] as? String ?? " "
+            let color = x == "?" ? Platinum.shadow : y != " " ? Self.red : Self.green
+            return PGitRows.Row(runs: [(r.name, .black)], lead: (x == "?" ? "??" : x + y, color),
+                                indent: CGFloat(r.depth) * 14)
+        }
+        branchesList.rows = branches.map { b in
+            let current = b["current"] as? Bool ?? false
+            let remote = b["remote"] as? Bool ?? false
+            return PGitRows.Row(runs: [(b["name"] as? String ?? "", remote ? Platinum.dark : .black)],
+                                lead: (current ? "✓" : (b["age"] as? String ?? ""), Platinum.dark),
+                                font: current ? Platinum.system : nil)
+        }
+        commitsList.rows = commits.map { c in
+            let pushed = c["pushed"] as? Bool ?? true
+            let tags = c["tags"] as? String ?? ""
+            var runs: [(String, NSColor)] = []
+            if !tags.isEmpty { runs.append((tags + " ", Self.purple)) }
+            runs.append((c["subject"] as? String ?? "", .black))
+            return PGitRows.Row(runs: runs, lead: ((pushed ? "" : "↑") + (c["sha"] as? String ?? ""),
+                                                   pushed ? Platinum.dark : Self.red))
+        }
+        let sel = st["sel_file"] as? Int ?? -1
+        for (l, s) in [(filesList, fileRows.firstIndex { $0.file == sel } ?? -1),
+                       (branchesList, st["sel_branch"] as? Int ?? -1),
+                       (commitsList, st["sel_commit"] as? Int ?? -1)] {
+            l.selected = s < l.rows.count ? s : -1
+            l.reveal(l.selected)
+        }
+        rebuildActions(st["hints"] as? [[Any]] ?? [])
+        refreshPanels()
+        layoutBody()
+        showOverlayIfNeeded(st["overlay"] as? [String: Any] ?? [:])
+        return true
+    }
+
+    /// The core's index for row `r` of a list.
+    private func index(_ pane: Int, _ r: Int) -> Int? {
+        guard r >= 0 else { return nil }
+        if pane == GitPane.files { return r < fileRows.count ? fileRows[r].file : nil }
+        return r
+    }
+
+    // MARK: operations
+
+    private func select(_ pane: Int, _ idx: Int) {
+        guard let v = view, v.handle != 0 else { return }
+        tk_desktop_git_select(v.handle, Int64(pane), Int64(idx), Int64(v.cols()), Int64(v.rows()))
+        lastData = Data()
+        onAfterAction?()
+    }
+
+    /// One of the view's own keys; pane -1 is the focused one.
+    private func key(_ pane: Int, _ k: UInt32, mods: UInt8 = 0) {
+        guard let v = view, v.handle != 0 else { return }
+        _ = tk_desktop_git_key(v.handle, Int64(pane), Int64(k), Int64(mods), Int64(v.cols()), Int64(v.rows()))
+        lastData = Data()
+        onAfterAction?()
+    }
+
+    private func ch(_ c: Character) -> UInt32 { c.unicodeScalars.first!.value }
+
+    private func open(_ pane: Int, _ row: Int) {
+        guard let v = view, v.handle != 0 else { return }
+        tk_desktop_git_open(v.handle, Int64(pane), Int64(row), Int64(v.cols()), Int64(v.rows()))
+        onAfterAction?()
+    }
+
+    /// Double-click / Return: open the file, check out the branch, open
+    /// the commit.
+    private func activate(_ pane: Int, _ r: Int) {
+        guard let idx = index(pane, r), let v = view, v.handle != 0 else { return }
+        switch pane {
+        case GitPane.files:
+            tk_desktop_git_select(v.handle, Int64(GitPane.files), Int64(idx), Int64(v.cols()), Int64(v.rows()))
+            open(GitPane.files, idx)
+        case GitPane.branches: key(GitPane.branches, 0x20)
+        default: key(GitPane.commits, 0x0D)
+        }
+    }
+
+    func closeClicked() {
+        guard let v = view, v.handle != 0 else { return }
+        if tk_desktop_git_close(v.handle) == 0 {
+            NSSound.beep()
+            note = "Wait for the running git operation to finish."
+            body.needsDisplay = true
+        }
+        onAfterAction?()
+    }
+
+    private func listKey(_ pane: Int, _ e: NSEvent) -> Bool {
+        guard e.modifierFlags.intersection([.command, .control, .option]).isEmpty else { return false }
+        switch e.keyCode {
+        case 49 where pane != GitPane.commits: key(pane, 0x20); return true
+        case 51 where pane != GitPane.commits, 117 where pane != GitPane.commits:
+            key(pane, ch("d")); return true
+        default: return false
+        }
+    }
+
+    /// Keys no list or diff took: Esc, Tab, and the focused pane's
+    /// operations by the letters the grid answers to.
+    func handleKey(_ e: NSEvent) -> Bool {
+        switch e.keyCode {
+        case 53: closeClicked(); return true
+        case 48:
+            cycleFocus(back: e.modifierFlags.contains(.shift))
+            return true
+        default: break
+        }
+        guard !busy, e.modifierFlags.intersection([.command, .control, .option]).isEmpty,
+              let c = e.characters?.unicodeScalars.first?.value else { return false }
+        guard (state["hints"] as? [[Any]] ?? []).contains(where: {
+            $0.count > 3 && ($0[2] as? Int) == Int(c) && ($0[3] as? Int ?? 0) == 0
+        }) else { return false }
+        key(-1, c)
+        return true
+    }
+
+    private func cycleFocus(back: Bool) {
+        let ring: [PGitRows] = [filesList, branchesList, commitsList, unstaged] + (showsFile ? [staged] : [])
+        let cur = ring.firstIndex { $0 === win.firstResponder } ?? -1
+        let n = ring.count
+        win.makeFirstResponder(ring[((cur < 0 ? 0 : cur) + (back ? n - 1 : 1)) % n])
+    }
+
+    // MARK: action bar
+
+    private func rebuildActions(_ hints: [[Any]]) {
+        let shown = hints.filter { ($0.count > 4 ? $0[4] as? Bool : false) ?? false }
+        if !NSArray(array: shown).isEqual(to: lastHints) {
+            lastHints = shown
+            buttons.forEach { $0.removeFromSuperview() }
+            buttons = shown.map { h in
+                let keys = h[0] as? String ?? ""
+                let label = h[1] as? String ?? ""
+                let b = PButton()
+                b.node = ["k": "button", "text": label.prefix(1).uppercased() + label.dropFirst()]
+                b.toolTip = keys
+                b.onPress = { [weak self] in
+                    if keys == "ESC" { self?.closeClicked(); return }
+                    self?.key(-1, UInt32(h[2] as? Int ?? 0), mods: UInt8(h[3] as? Int ?? 0))
+                }
+                body.addSubview(b)
+                return b
+            }
+        }
+        for (b, h) in zip(buttons, lastHints) {
+            var n = b.node
+            n["f"] = busy && (h[0] as? String) != "ESC" ? Platinum.DISABLED : 0
+            b.node = n
+            b.needsDisplay = true
+        }
+    }
+
+    // MARK: diffs
+
+    private func corePane(_ d: PGitRows) -> Int {
+        d === unstaged ? (showsFile ? GitPane.unstaged : GitPane.info) : GitPane.staged
+    }
+
+    private func coreRow(_ d: PGitRows, _ line: Int) -> Int? {
+        let map = d === unstaged ? unstagedMap : stagedMap
+        return line >= 0 && line < map.count ? map[line] : nil
+    }
+
+    private func cursor(_ d: PGitRows, _ row: Int) {
+        guard let v = view, v.handle != 0 else { return }
+        tk_desktop_git_cursor(v.handle, Int64(corePane(d)), Int64(row))
+        lastData = Data()
+        onAfterAction?()
+    }
+
+    private func diffKey(_ d: PGitRows, _ e: NSEvent) -> Bool {
+        guard e.keyCode == 49, e.modifierFlags.intersection([.command, .control, .option]).isEmpty,
+              coreRow(d, d.selected) != nil, corePane(d) != GitPane.info else { return false }
+        key(corePane(d), 0x20)
+        return true
+    }
+
+    private func refreshPanels() {
+        guard let v = view, v.handle != 0 else { return }
+        var buf = [UInt8](repeating: 0, count: 1 << 16)
+        var n = 0
+        while true {
+            n = buf.withUnsafeMutableBufferPointer { b -> Int in
+                Int(tk_desktop_git_panels(v.handle, Int64(v.cols()), Int64(v.rows()),
+                                          Int64(Int(bitPattern: b.baseAddress)), Int64(b.count)))
+            }
+            if n <= buf.count { break }
+            buf = [UInt8](repeating: 0, count: n)
+        }
+        let data = n > 0 ? Data(buf[0..<n]) : Data()
+        guard data != lastPanels else { return }
+        lastPanels = data
+        let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        let panels = o["panels"] as? [[String: Any]] ?? []
+        let bg = NSColor.rgb(o["bg"] as? Int ?? 0xFFFFFF)
+        let fg = NSColor.rgb(o["fg"] as? Int ?? 0)
+        if let info = panels.first(where: { ($0["pane"] as? Int) == GitPane.info }) {
+            // Named for the list driving it (kept while the cursor is in it).
+            if focus == GitPane.branches { infoTitle = "Log" }
+            if focus == GitPane.commits { infoTitle = "Commit" }
+            showsFile = false
+            unstagedMap = render(info, into: unstaged, pane: GitPane.info, bg: bg, fg: fg)
+        } else {
+            showsFile = true
+            unstagedMap = render(panels.first { ($0["pane"] as? Int) == GitPane.unstaged } ?? [:],
+                                 into: unstaged, pane: GitPane.unstaged, bg: bg, fg: fg)
+            stagedMap = render(panels.first { ($0["pane"] as? Int) == GitPane.staged } ?? [:],
+                               into: staged, pane: GitPane.staged, bg: bg, fg: fg)
+        }
+    }
+
+    /// Fill `d` from a panel; returns each line's core row. The cursor is
+    /// the core's, shown while that pane has the focus.
+    private func render(_ p: [String: Any], into d: PGitRows, pane: Int, bg: NSColor, fg: NSColor) -> [Int?] {
+        d.fill = bg
+        d.placeholder = pane == GitPane.unstaged ? "(no unstaged changes)"
+                      : pane == GitPane.staged ? "(no staged changes)" : ""
+        let rows = p["rows"] as? [[Any]] ?? []
+        var spans: [Int: [[Int]]] = [:]
+        for sp in p["spans"] as? [[Int]] ?? [] where sp.count == 4 { spans[sp[0], default: []].append(sp) }
+        let addBg = NSColor(srgbRed: 0.2, green: 0.75, blue: 0.2, alpha: 0.22)
+        let remBg = NSColor(srgbRed: 0.9, green: 0.15, blue: 0.15, alpha: 0.22)
+        func runs(_ text: String, _ r: Int) -> [(String, NSColor)] {
+            let u = Array(text.utf8)
+            func piece(_ a: Int, _ b: Int) -> String {
+                String(decoding: u[a..<b], as: UTF8.self).replacingOccurrences(of: "\t", with: "    ")
+            }
+            var out: [(String, NSColor)] = []
+            var pos = 0
+            for sp in (spans[r] ?? []).sorted(by: { $0[1] < $1[1] }) {
+                let a = min(max(sp[1], pos), u.count), b = min(max(sp[2], a), u.count)
+                if a > pos { out.append((piece(pos, a), fg)) }
+                if b > a { out.append((piece(a, b), NSColor.rgb(sp[3]))) }
+                pos = max(pos, b)
+            }
+            if pos < u.count { out.append((piece(pos, u.count), fg)) }
+            return out
+        }
+        var out: [PGitRows.Row] = []
+        var map: [Int?] = []
+        for (r, row) in rows.enumerated() {
+            let kind = row.first as? Int ?? 0
+            let text = row.count > 1 ? (row[1] as? String ?? "") : ""
+            var line = PGitRows.Row(runs: runs(text, r))
+            switch kind {
+            case GitLine.add: line.bg = addBg; line.lead = ("+", fg)
+            case GitLine.rem: line.bg = remBg; line.lead = ("-", fg)
+            case GitLine.ctx: line.lead = ("", fg)
+            case GitLine.fileHdr: line.runs = [(text, fg)]; line.font = Platinum.system
+            case GitLine.sep: line.runs = [("  ⋯", fg.withAlphaComponent(0.4))]
+            default: break
+            }
+            out.append(line)
+            map.append(r)
+        }
+        d.rows = out
+        let cur = p["cursor"] as? Int ?? -1
+        d.selected = focus == pane ? (map.firstIndex { $0 == cur } ?? -1) : -1
+        if d.selected >= 0 { d.reveal(d.selected) }
+        return map
+    }
+
+    // MARK: contextual menus
+
+    private func popUp(_ items: [(String, () -> Void)], at e: NSEvent) {
+        guard !items.isEmpty, let w = e.window else { return }
+        let p = w.convertPoint(toScreen: e.locationInWindow)
+        let pm = items.map { PMItem(title: $0.0, separator: $0.0.isEmpty) }
+        if let i = PlatinumMenuSession.popUp(pm, selected: 0, over: NSRect(x: p.x, y: p.y - 18, width: 1, height: 18)),
+           i >= 0, i < items.count {
+            items[i].1()
+        }
+    }
+
+    private func listMenu(_ pane: Int, _ r: Int, _ e: NSEvent) {
+        guard let idx = index(pane, r) else { return }
+        var items: [(String, () -> Void)] = []
+        func add(_ t: String, _ run: @escaping () -> Void) { items.append((t, run)) }
+        func sep() { items.append(("", {})) }
+        switch pane {
+        case GitPane.files:
+            let f = files[idx]
+            let x = f["x"] as? String ?? " "
+            add(x != " " && x != "?" ? "Unstage" : "Stage") { [weak self] in self?.key(GitPane.files, 0x20) }
+            add("Open in Editor") { [weak self] in self?.activate(GitPane.files, r) }
+            sep()
+            add(x == "?" ? "Delete File…" : "Discard Changes…") { [weak self] in
+                guard let self = self else { return }
+                self.key(GitPane.files, self.ch("d"))
+            }
+        case GitPane.branches:
+            let b = branches[idx]
+            let name = b["name"] as? String ?? ""
+            let current = state["branch"] as? String ?? ""
+            add("Check Out") { [weak self] in self?.key(GitPane.branches, 0x20) }
+            if !(b["current"] as? Bool ?? false) {
+                add("Bring “\(name)” into “\(current)”…") { [weak self] in
+                    guard let self = self else { return }
+                    self.key(GitPane.branches, self.ch("M"))
+                }
+                add("Rebase") { [weak self] in
+                    guard let self = self else { return }
+                    self.key(GitPane.branches, self.ch("r"))
+                }
+            }
+            add("Compare on GitHub") { [weak self] in
+                guard let self = self else { return }
+                self.key(GitPane.branches, self.ch("o"))
+            }
+            sep()
+            add("Delete Branch…") { [weak self] in
+                guard let self = self else { return }
+                self.key(GitPane.branches, self.ch("d"))
+            }
+        default:
+            let sha = commits[idx]["sha"] as? String ?? ""
+            add("Reword…") { [weak self] in
+                guard let self = self else { return }
+                self.key(GitPane.commits, self.ch("e"))
+            }
+            add("Copy SHA") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(sha, forType: .string)
+            }
+        }
+        popUp(items, at: e)
+    }
+
+    private func diffMenu(_ d: PGitRows, _ line: Int, _ e: NSEvent) {
+        guard let row = coreRow(d, line) else { return }
+        let pane = corePane(d)
+        var items: [(String, () -> Void)] = []
+        switch pane {
+        case GitPane.unstaged:
+            items.append(("Stage Line", { [weak self] in self?.key(GitPane.unstaged, 0x20) }))
+            items.append(("Discard Line…", { [weak self] in
+                guard let self = self else { return }
+                self.key(GitPane.unstaged, self.ch("d"))
+            }))
+        case GitPane.staged:
+            items.append(("Unstage Line", { [weak self] in self?.key(GitPane.staged, 0x20) }))
+        default: break
+        }
+        items.append(("Open in Editor", { [weak self] in self?.open(pane, row) }))
+        popUp(items, at: e)
+    }
+
+    // MARK: overlays → Platinum alerts
+
+    private func showOverlayIfNeeded(_ ov: [String: Any]) {
+        let kind = ov["kind"] as? String ?? ""
+        if kind.isEmpty {
+            // The core closed it on its own.
+            overlayShown = ""
+            alert?.dismiss()
+            alert = nil
+            return
+        }
+        guard kind != overlayShown, alert == nil, let v = view else { return }
+        overlayShown = kind
+        let message = (ov["message"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let action = (ov["action"] as? String ?? "").capitalized
+        func label(_ t: String, _ f: Int = 0) -> [String: Any] { ["k": "label", "text": t, "f": f] }
+        func button(_ key: String, _ t: String, _ f: Int = 0) -> [String: Any] {
+            ["k": "button", "key": key, "text": t, "f": f]
+        }
+        let cancel = button("cancel", "Cancel", Platinum.CANCEL)
+        var icon: String? = "note"
+        var kids: [[String: Any]] = []
+        var buttons: [[String: Any]] = [cancel]
+        var cancelKey = "cancel"
+        alertValues = [:]
+        switch kind {
+        case "status":
+            icon = "caution"
+            kids = [label(message)]
+            buttons = [button("ok", "Close", Platinum.DEFAULT | Platinum.CANCEL)]
+            cancelKey = "ok"
+        case "output":
+            icon = nil
+            kids = [label("Git output"),
+                    ["k": "textarea", "key": "output", "value": ov["output"] as? String ?? "", "h": 16,
+                     "f": Platinum.DISABLED | Platinum.SECONDARY]]
+            buttons = [button("ok", "Close", Platinum.DEFAULT | Platinum.CANCEL)]
+            cancelKey = "ok"
+        case "merge_choice":
+            kids = [label(message.isEmpty ? "Bring the branch in" : message),
+                    label("A merge commit keeps both histories; a rebase replays the branch's commits for straight history.",
+                          Platinum.SECONDARY)]
+            buttons = [cancel, button("rebase", "Rebase"), button("merge", "Merge Commit", Platinum.DEFAULT)]
+        case "edit_message", "commit":
+            icon = nil
+            alertValues["text"] = ov["text"] as? String ?? ""
+            kids = [label(kind == "commit" ? "Commit" : "Reword commit"),
+                    ["k": "textarea", "key": "text", "value": alertValues["text"] ?? "", "h": 7]]
+            buttons = [cancel, button("ok", kind == "commit" ? "Commit" : "Reword", Platinum.DEFAULT)]
+        case "remote_pick":
+            alertValues["text"] = "\(ov["remote_sel"] as? Int ?? 0)"
+            kids = [label("Push to which remote?"),
+                    ["k": "choice", "key": "text", "opts": ov["remotes"] as? [String] ?? [],
+                     "n": ov["remote_sel"] as? Int ?? 0]]
+            buttons = [cancel, button("ok", "Push", Platinum.DEFAULT)]
+        case "delete_remote_typed":
+            icon = "caution"
+            let prefix = ov["prefix"] as? String ?? ""
+            kids = [label(message),
+                    label("Its work isn't on the main line. Type “\(prefix)” to delete it on the remote.",
+                          Platinum.SECONDARY),
+                    ["k": "text", "key": "text", "value": ""]]
+            buttons = [cancel, button("ok", "Delete", Platinum.DEFAULT | Platinum.DESTRUCTIVE)]
+        default:   // amend / revert / discard_line / delete_branch
+            icon = kind == "amend" ? "note" : "caution"
+            kids = [label(message.isEmpty ? "Are you sure?" : message)]
+            buttons = [cancel, button("ok", action.isEmpty ? "Continue" : action,
+                                      Platinum.DEFAULT | (kind == "amend" ? 0 : Platinum.DESTRUCTIVE))]
+        }
+        kids.append(["k": "hstack", "n": 1, "f": Platinum.RIGHT, "kids": buttons])
+        let column: [String: Any] = ["k": "vstack", "n": 1, "kids": kids]
+        let body: [String: Any] = icon.map {
+            ["k": "hstack", "n": 1, "kids": [["k": "icon", "text": $0], column]]
+        } ?? column
+        let a = PlatinumDialog(name: "git", view: v, titled: false) { [weak self] events in
+            self?.alertEvents(events)
+        }
+        _ = a.update(["k": "dialog", "text": "", "key": cancelKey, "kids": [body]])
+        alert = a
+        a.present(in: win)
+    }
+
+    private func alertEvents(_ events: [[Any]]) {
+        for e in events where e.count > 2 {
+            let key = e[1] as? String ?? ""
+            guard e[0] as? Bool == true else {
+                alertValues[key] = e[2] as? String ?? ""
+                continue
+            }
+            alert?.dismiss()
+            alert = nil
+            guard let v = view, v.handle != 0 else { return }
+            let choice = ["ok", "merge", "rebase"].contains(key) ? key : "cancel"
+            let text = alertValues["text"] ?? ""
+            withUTF8Arg(choice) { cp, cl in
+                withUTF8Arg(text) { tp, tl in tk_desktop_git_answer(v.handle, cp, cl, tp, tl) }
+            }
+            overlayShown = ""
+            lastData = Data()
+            win.makeKey()
+            onAfterAction?()
+            return
         }
     }
 }

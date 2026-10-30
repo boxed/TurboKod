@@ -18,7 +18,7 @@ from turbokod.file_dialog import FileDialog
 from turbokod.desktop import (
     APP_QUIT_ACTION, Desktop, EDITOR_FIND, EDITOR_OPEN, EDITOR_QUICK_OPEN,
     EDITOR_FIND_SYMBOL, GIT_REVIEW, TARGET_TEST,
-    EDITOR_SAVE, VIEW_NATIVE_UI, VIEW_PLATINUM_UI, WINDOW_CLOSE, ctrl_key
+    EDITOR_SAVE, VIEW_CLASSIC_UI, VIEW_NATIVE_UI, VIEW_PLATINUM_UI, WINDOW_CLOSE, ctrl_key
 )
 from turbokod.file_io import read_file, write_file
 from turbokod.file_tree import FILE_TREE_WIDTH
@@ -1327,7 +1327,10 @@ def test_both_frontends_share_one_menu_definition() raises:
     assert_true(VIEW_NATIVE_UI in native_actions)
     assert_false(VIEW_PLATINUM_UI in tui_actions)
     assert_true(VIEW_PLATINUM_UI in native_actions)
-    assert_equal(len(native_actions), len(tui_actions) + 4)
+    assert_false(VIEW_CLASSIC_UI in tui_actions)
+    assert_true(VIEW_CLASSIC_UI in native_actions)
+    # The four items plus the separator before the looks.
+    assert_equal(len(native_actions), len(tui_actions) + 6)
 
 
 def test_opening_a_picker_over_another_hands_it_the_keyboard() raises:

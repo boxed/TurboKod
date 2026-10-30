@@ -2175,6 +2175,9 @@ def _git_state_json(mut d: Desktop) -> String:
         return String("")
     ref g = d.local_changes
     var o = json_object()
+    o.put(String("look"), json_str(
+        String("platinum") if d.platinum_ui() else String("macos"),
+    ))
     o.put(String("root"), json_str(g.root))
     var files = json_array()
     for i in range(len(g.files)):
@@ -2282,8 +2285,8 @@ def _panel_json(ref d: Desktop, ref p: RightPanel, pane: Int) -> JsonValue:
 def tk_desktop_git(
     h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
 ) abi("C") -> Int:
-    """The git view as JSON for the native sheet: files (``x`` / ``y``
-    porcelain columns), branches, commits, selections, focus, busy /
+    """The git view as JSON for the host (``look``: the macOS sheet or the
+    Platinum window): files (``x`` / ``y`` porcelain columns), branches, commits, selections, focus, busy /
     flash / status lines and the open overlay. 0 when the view isn't up
     natively. Same buffer contract as ``tk_desktop_native_dialog``."""
     if h == 0:
@@ -2465,302 +2468,10 @@ def tk_desktop_welcome_apply(h: Int, ptr: Int, n: Int, done: Int) abi("C"):
 # --- macOS-style UI: native pickers ----------------------------------------
 
 
-def _picker_state_json(ref d: Desktop) -> String:
-    var kind = d.native_picker_kind()
-    if len(kind.as_bytes()) == 0:
-        return String("")
-    var o = json_object()
-    o.put(String("kind"), json_str(kind))
-    if kind == String("quick_open"):
-        ref q = d.quick_open
-        o.put(String("title"), json_str(q.title))
-        o.put(String("query"), json_str(q.query.text))
-        o.put(String("count"), json_int(len(q.matched)))
-        o.put(String("selected"), json_int(q.selected))
-        o.put(String("multi"), json_bool(
-            not q.picks_project and not q.picks_history
-        ))
-        var status = String("")
-        if q.indexing:
-            status = String("Indexing…")
-        elif q.truncated:
-            status = String("Showing the first files only")
-        o.put(String("status"), json_str(status))
-    elif kind == String("symbol_pick"):
-        ref sp = d.symbol_pick
-        o.put(String("title"), json_str(String("Go to Symbol in ") + basename(sp.path)))
-        o.put(String("query"), json_str(sp.query.text))
-        o.put(String("count"), json_int(len(sp.matched)))
-        o.put(String("selected"), json_int(sp.selected))
-        o.put(String("status"), json_str(
-            String("Asking the language server…") if sp.loading else String("")
-        ))
-    elif kind == String("reference_pick"):
-        ref rp = d.reference_pick
-        o.put(String("title"), json_str(String("References to ") + rp.word))
-        o.put(String("query"), json_str(String("")))
-        o.put(String("searchable"), json_bool(False))
-        o.put(String("count"), json_int(len(rp.entries)))
-        o.put(String("selected"), json_int(rp.selected))
-        o.put(String("status"), json_str(String(len(rp.entries)) + String(" references")))
-    elif kind == String("doc_pick"):
-        ref dp = d.doc_pick
-        o.put(String("title"), json_str(dp.display + String(" documentation")))
-        o.put(String("query"), json_str(dp.query.text))
-        o.put(String("count"), json_int(len(dp.matched)))
-        o.put(String("selected"), json_int(dp.selected))
-        o.put(String("status"), json_str(String("")))
-    elif kind == String("find_symbol"):
-        ref f = d.find_symbol
-        o.put(String("title"), json_str(String("Find Symbol")))
-        o.put(String("query"), json_str(f.query.text))
-        o.put(String("count"), json_int(len(f.entries)))
-        o.put(String("selected"), json_int(f.selected))
-        o.put(String("status"), json_str(f.status_message))
-        o.put(String("pending"), json_bool(f.is_pending()))
-    else:
-        ref p = d.project_find
-        o.put(String("title"), json_str(String(
-            "Replace in Project" if p.replace_mode else "Find in Project"
-        )))
-        o.put(String("query"), json_str(p.query.text))
-        o.put(String("replace_mode"), json_bool(p.replace_mode))
-        o.put(String("replace"), json_str(p.replace.text))
-        o.put(String("scope"), json_str(p.scope.text))
-        o.put(String("glob"), json_str(p.glob.text))
-        o.put(String("case"), json_bool(p.toggle_case.on))
-        o.put(String("word"), json_bool(p.toggle_word.on))
-        o.put(String("regex"), json_bool(p.toggle_regex.on))
-        o.put(String("count"), json_int(len(p.matches)))
-        o.put(String("selected"), json_int(p.selected))
-        var status = String("")
-        if p.searching():
-            status = String("Searching…")
-        elif p.truncated():
-            status = String("Showing the first ") + String(len(p.matches)) \
-                + String(" matches")
-        o.put(String("status"), json_str(status))
-    return encode_json(o)
-
-
-def _picker_rows_json(ref d: Desktop, start: Int, n: Int) -> String:
-    var kind = d.native_picker_kind()
-    var rows = json_array()
-    if kind == String("quick_open"):
-        ref q = d.quick_open
-        var end = min(start + n, len(q.matched))
-        for i in range(max(start, 0), end):
-            var rel = q.entries[q.matched[i]]
-            var r = json_object()
-            r.put(String("title"), json_str(basename(rel)))
-            var dir = parent_path(rel)
-            if dir == String("."):
-                dir = String("")
-            r.put(String("detail"), json_str(dir))
-            rows.append(r)
-    elif kind == String("find_symbol"):
-        ref f = d.find_symbol
-        var end = min(start + n, len(f.entries))
-        for i in range(max(start, 0), end):
-            ref e = f.entries[i]
-            var r = json_object()
-            r.put(String("title"), json_str(e.name))
-            var detail = project_relative(f.root, e.path) + String(":") \
-                + String(e.line)
-            if len(e.container.as_bytes()) > 0:
-                detail = e.container + String(" — ") + detail
-            r.put(String("detail"), json_str(detail))
-            rows.append(r)
-    elif kind == String("symbol_pick"):
-        ref sp = d.symbol_pick
-        var end = min(start + n, len(sp.matched))
-        for i in range(max(start, 0), end):
-            ref e = sp.entries[sp.matched[i]]
-            var r = json_object()
-            r.put(String("title"), json_str(e.name))
-            var detail = String("line ") + String(e.line + 1)
-            if len(e.container.as_bytes()) > 0:
-                detail = e.container + String(" · ") + detail
-            r.put(String("detail"), json_str(detail))
-            rows.append(r)
-    elif kind == String("reference_pick"):
-        ref rp = d.reference_pick
-        var end = min(start + n, len(rp.entries))
-        for i in range(max(start, 0), end):
-            ref e = rp.entries[i]
-            var rel = project_relative(rp.project_root, e.path)
-            var r = json_object()
-            r.put(String("title"), json_str(basename(rel) + String(":") + String(e.line + 1)))
-            r.put(String("detail"), json_str(parent_path(rel)))
-            rows.append(r)
-    elif kind == String("doc_pick"):
-        ref dp = d.doc_pick
-        var end = min(start + n, len(dp.matched))
-        for i in range(max(start, 0), end):
-            ref e = dp.entries[dp.matched[i]]
-            var r = json_object()
-            r.put(String("title"), json_str(e.name))
-            r.put(String("detail"), json_str(e.type_name))
-            rows.append(r)
-    elif kind == String("project_find"):
-        ref p = d.project_find
-        var end = min(start + n, len(p.matches))
-        for i in range(max(start, 0), end):
-            var r = json_object()
-            var hit = p.row_hit(i)
-            var text = hit[0]
-            var at = hit[1]
-            var qn = len(p.query.text.as_bytes())
-            if at >= 0:
-                r.put(String("pre"), json_str(byte_slice(text, 0, at)))
-                r.put(String("hit"), json_str(byte_slice(text, at, at + qn)))
-                r.put(String("post"), json_str(
-                    byte_slice(text, at + qn, len(text.as_bytes()))
-                ))
-            else:
-                r.put(String("pre"), json_str(text))
-            r.put(String("detail"), json_str(
-                p.matches[i].rel + String(":") + String(p.matches[i].line_no)
-            ))
-            rows.append(r)
-    return encode_json(rows)
-
-
 def _attr_fg_rgb(ref d: Desktop, fg: UInt8, mode: UInt8, rgb: UInt32) -> Int:
     if (mode & FG_TRUECOLOR) != 0:
         return Int(rgb)
     return Int(d.active_theme.palette[Int(fg)])
-
-
-def _picker_preview_json(mut d: Desktop) -> String:
-    if d.native_picker_kind() != String("project_find"):
-        return String("")
-    ref p = d.project_find
-    if p.selected < 0 or p.selected >= len(p.matches):
-        return String("")
-    var pv = p.preview(d.grammar_registry)
-    var o = json_object()
-    o.put(String("path"), json_str(p.matches[p.selected].path))
-    o.put(String("line"), json_int(p.matches[p.selected].line_no))
-    var lines = json_array()
-    for i in range(len(pv[0])):
-        lines.append(json_str(pv[0][i]))
-    o.put(String("lines"), lines)
-    # ``[row, byte_start, byte_end, 0xRRGGBB]`` per syntax span.
-    var spans = json_array()
-    for i in range(len(pv[1])):
-        ref h = pv[1][i]
-        var sp = json_array()
-        sp.append(json_int(h.row))
-        sp.append(json_int(h.col_start))
-        sp.append(json_int(h.col_end))
-        sp.append(json_int(_attr_fg_rgb(
-            d, h.attr.fg, h.attr.color_mode, h.attr.fg_rgb,
-        )))
-        spans.append(sp)
-    o.put(String("spans"), spans)
-    o.put(String("bg"), json_int(Int(d.active_theme.palette[Int(EDITOR_BG)])))
-    o.put(String("fg"), json_int(Int(d.active_theme.palette[Int(EDITOR_FG)])))
-    return encode_json(o)
-
-
-@export
-def tk_desktop_picker(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
-    """The picker (Quick Open / Find Symbol / Find in Project) the host
-    shows as a native panel, as JSON state: ``kind``, ``title``,
-    ``query``, ``count``, ``selected``, ``status`` plus the Find in Project
-    fields and toggles. 0 when none is up. Same buffer contract as
-    ``tk_desktop_native_dialog``."""
-    if h == 0:
-        return 0
-    return _write_out(_picker_state_json(_desk(h)[]), out_ptr, cap)
-
-
-@export
-def tk_desktop_picker_rows(
-    h: Int, start: Int, n: Int, out_ptr: Int, cap: Int,
-) abi("C") -> Int:
-    """Rows ``start ..< start + n`` of the native picker's list, as a JSON
-    array of ``{title, detail}`` (Find in Project: ``{pre, hit, post,
-    detail}``, the hit split out for highlighting)."""
-    if h == 0:
-        return 0
-    return _write_out(_picker_rows_json(_desk(h)[], start, n), out_ptr, cap)
-
-
-@export
-def tk_desktop_picker_preview(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
-    """Find in Project's preview of the selected match's file: ``{path,
-    line, lines, spans: [[row, byte_start, byte_end, rgb]], bg, fg}``."""
-    if h == 0:
-        return 0
-    return _write_out(_picker_preview_json(_desk(h)[]), out_ptr, cap)
-
-
-@export
-def tk_desktop_picker_set(
-    h: Int, fptr: Int, flen: Int, tptr: Int, tlen: Int,
-) abi("C"):
-    """Set a picker text field (``query``; Find in Project also
-    ``replace`` / ``scope`` / ``glob``) as if it had been typed."""
-    if h == 0:
-        return
-    _desk(h)[].native_picker_set(
-        _string_from(fptr, flen), _string_from(tptr, tlen),
-    )
-
-
-@export
-def tk_desktop_picker_option(h: Int, nptr: Int, nlen: Int, on: Int) abi("C"):
-    """Set a Find in Project toggle: ``case`` / ``word`` / ``regex``."""
-    if h == 0:
-        return
-    _desk(h)[].native_picker_option(_string_from(nptr, nlen), on != 0)
-
-
-@export
-def tk_desktop_picker_select(h: Int, idx: Int, anchor: Int) abi("C"):
-    if h == 0:
-        return
-    _desk(h)[].native_picker_select(idx, anchor)
-
-
-@export
-def tk_desktop_picker_activate(
-    h: Int, idx: Int, anchor: Int, cols: Int, rows: Int,
-) abi("C") -> Int32:
-    """Open row ``idx`` (Quick Open: rows ``anchor``..``idx``). Returns a
-    host action code."""
-    if h == 0:
-        return ACT_NONE
-    try:
-        return _action_code(_desk(h)[].native_picker_activate(
-            idx, anchor, Rect(0, 0, cols, rows),
-        ))
-    except:
-        return ACT_NONE
-
-
-@export
-def tk_desktop_picker_action(
-    h: Int, nptr: Int, nlen: Int, cols: Int, rows: Int,
-) abi("C"):
-    """Find in Project's buttons: ``replace_all`` / ``send_to_panel``."""
-    if h == 0:
-        return
-    try:
-        _desk(h)[].native_picker_action(
-            _string_from(nptr, nlen), Rect(0, 0, cols, rows),
-        )
-    except:
-        pass
-
-
-@export
-def tk_desktop_picker_close(h: Int) abi("C"):
-    if h == 0:
-        return
-    _desk(h)[].native_picker_close()
 
 
 @export
@@ -2809,7 +2520,7 @@ def tk_desktop_ui(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     return _write_out(encode_json(out), out_ptr, cap)
 
 
-def _ui_stack_json(ref d: Desktop, names: List[String]) -> JsonValue:
+def _ui_stack_json(mut d: Desktop, names: List[String]) -> JsonValue:
     var stack = json_array()
     for i in range(len(names)):
         var o = json_object()
@@ -2820,13 +2531,14 @@ def _ui_stack_json(ref d: Desktop, names: List[String]) -> JsonValue:
 
 
 @export
-def tk_desktop_ui_event(h: Int, ptr: Int, n: Int) abi("C"):
+def tk_desktop_ui_event(h: Int, ptr: Int, n: Int) abi("C") -> Int32:
     """What the user did in the native projection of dialog ``name`` (or,
     for scripted screenshots, what to do in either projection):
     ``{name, events: [[is_action, key, value]]}`` — applied exactly as the
-    grid projector's events are (``Desktop.ui_apply``)."""
+    grid projector's events are (``Desktop.ui_apply``). Returns a host
+    action code (a picker opening a project in a new window)."""
     if h == 0:
-        return
+        return ACT_NONE
     ref d = _desk(h)[]
     try:
         var o = parse_json(_string_from(ptr, n))
@@ -2835,7 +2547,7 @@ def tk_desktop_ui_event(h: Int, ptr: Int, n: Int) abi("C"):
         if name != d.ui_surface() and not (
             len(window) > 0 and name == window[len(window) - 1]
         ):
-            return   # it closed (or another took over) meanwhile
+            return ACT_NONE   # it closed (or another took over) meanwhile
         var evs = List[UIEvent]()
         var a = o.object_get(String("events"))
         if a:
@@ -2846,9 +2558,9 @@ def tk_desktop_ui_event(h: Int, ptr: Int, n: Int) abi("C"):
                     e.array_at(0).as_bool(), e.array_at(1).as_str(),
                     e.array_at(2).as_str(),
                 ))
-        d.ui_apply(name, evs)
+        return _action_code(d.ui_apply(name, evs))
     except:
-        pass
+        return ACT_NONE
 
 
 @export

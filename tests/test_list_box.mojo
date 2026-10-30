@@ -259,3 +259,52 @@ def test_set_selection_remaps_after_rows_move() raises:
 
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
+
+
+def _items(n: Int) -> List[String]:
+    var out = List[String]()
+    for i in range(n):
+        out.append(String("item ") + String(i))
+    return out^
+
+
+def test_an_overflowing_list_draws_a_scroll_bar_that_scrolls() raises:
+    """The framework's lists get a scroll bar with no code in the host:
+    drawn on the right column when the items don't fit, and its arrows
+    and thumb move the view."""
+    var c = Canvas(20, 5)
+    var lb = ListBox()
+    var items = _items(_N)
+    lb.paint(c, _BOUNDS, items, True, Attr(BLACK, CYAN))
+    assert_equal(c.get(19, 0).glyph, String("▲"))
+    assert_equal(c.get(19, 4).glyph, String("▼"))
+    assert_equal(c.get(19, 1).glyph, String("█"))
+    # The down arrow scrolls a row; the selection doesn't move.
+    _ = lb.handle_mouse_press(
+        Event.mouse_event(Point(19, 4), MOUSE_BUTTON_LEFT), _BOUNDS, _N,
+    )
+    assert_equal(lb.prepare(_BOUNDS, _N), 1)
+    assert_equal(lb.selected, -1)
+    # Dragging the thumb to the bottom shows the last rows.
+    _ = lb.handle_mouse_press(
+        Event.mouse_event(Point(19, 1), MOUSE_BUTTON_LEFT), _BOUNDS, _N,
+    )
+    _ = lb.handle_mouse_drag(
+        Event.mouse_event(Point(19, 3), MOUSE_BUTTON_LEFT, True, True),
+        _BOUNDS, _N,
+    )
+    _ = lb.handle_mouse_drag(
+        Event.mouse_event(Point(19, 3), MOUSE_BUTTON_LEFT, False),
+        _BOUNDS, _N,
+    )
+    assert_equal(lb.prepare(_BOUNDS, _N), _N - 5)
+
+
+def test_a_list_that_fits_has_no_scroll_bar() raises:
+    var c = Canvas(20, 5)
+    var lb = ListBox()
+    var items = _items(3)
+    lb.paint(c, _BOUNDS, items, True, Attr(BLACK, CYAN))
+    for y in range(5):
+        assert_false(c.get(19, y).glyph == String("▲"))
+        assert_false(c.get(19, y).glyph == String("█"))

@@ -26,6 +26,13 @@ Hit codes returned by ``hit``:
 * ``4`` — page-down zone (below the thumb). Same as ``2`` but below.
 * ``5`` — trailing arrow (▼ for V, ► for H). Caller scrolls by +1.
 
+For a scrollable area, use ``ScrollBarArea`` rather than the bare
+``VScrollbar``: it keeps the bar it last painted plus the thumb drag, so
+a view gets the bar, its hit-testing and the drag from two calls —
+``paint`` after the content and ``handle_mouse`` before the view's own
+mouse handling. ``ListBox`` has one built in, so every framework list
+scrolls with a bar for free.
+
 Geometry conventions: ``top``/``bottom`` (V) and ``left``/``right``
 (H) are *inclusive* — the arrow glyphs sit on those exact cells and
 the track fills the cells in between.
@@ -34,7 +41,8 @@ the track fills the cells in between.
 from .canvas import Canvas
 from .cell import Cell
 from .colors import Attr
-from .geometry import Point
+from .events import Event, EVENT_MOUSE, MOUSE_BUTTON_LEFT
+from .geometry import Point, Rect
 from .painter import Painter
 
 
@@ -257,3 +265,86 @@ struct HScrollbar(ImplicitlyCopyable, Movable):
 
     def track_jump(self, track_pos: Int) -> Int:
         return _track_jump_axis(track_pos, self.visible, self.metrics())
+
+
+struct ScrollBarArea(Copyable, Movable):
+    """The vertical scroll bar of one scrollable area, owned by the view
+    that scrolls. ``paint`` draws it down the area's right column when
+    the content overflows (nothing otherwise) and remembers it;
+    ``handle_mouse`` turns a press on an arrow, the track or the thumb,
+    and the drag that follows, into the area's new scroll offset."""
+    var bar: VScrollbar
+    """The bar as last painted; ``metrics().present`` is False when it
+    wasn't drawn."""
+    var dragging: Bool
+    var drag_offset: Int
+
+    def __init__(out self):
+        self.bar = VScrollbar(0, 0, -1, 0, 0, 0)
+        self.dragging = False
+        self.drag_offset = 0
+
+    @staticmethod
+    def overflows(area: Rect, total: Int) -> Bool:
+        """Whether ``paint`` will draw a bar over ``area`` — so the view
+        can lay its rows out one column narrower."""
+        return area.height() >= 3 and total > area.height()
+
+    def paint(
+        mut self, mut canvas: Canvas, area: Rect, total: Int, scroll: Int,
+        attr: Attr,
+    ):
+        """Draw the bar on ``area``'s right column (rows top to bottom)
+        if ``total`` rows don't fit its height. Paint it after the
+        content: it takes that column over."""
+        if area.width() < 1 or area.height() < 1:
+            self.bar = VScrollbar(0, 0, -1, 0, 0, 0)
+            return
+        self.bar = VScrollbar(
+            area.b.x - 1, area.a.y, area.b.y - 1, total, area.height(),
+            scroll,
+        )
+        self.bar.paint(canvas, Painter(area), attr)
+
+    def hide(mut self):
+        """The area isn't on screen: no bar to hit."""
+        self.bar = VScrollbar(0, 0, -1, 0, 0, 0)
+        self.dragging = False
+
+    def handle_mouse(mut self, event: Event) -> Int:
+        """The scroll offset ``event`` asks for, or -1 when it isn't the
+        bar's. A press on an arrow scrolls a row, one on the track pages
+        (centering the clicked spot), one on the thumb starts a drag
+        that takes every event up to the release."""
+        var s = self._answer(event)
+        if s >= 0:
+            # Until the next paint, the bar is where it just sent the
+            # view: a release (or a second click) answers from there.
+            self.bar.scroll = s
+        return s
+
+    def _answer(mut self, event: Event) -> Int:
+        if event.kind != EVENT_MOUSE:
+            return -1
+        if self.dragging:
+            if not event.pressed:
+                self.dragging = False
+            elif event.motion:
+                return self.bar.drag_to(event.pos.y, self.drag_offset)
+            return self.bar.scroll
+        if event.button != MOUSE_BUTTON_LEFT or not event.pressed \
+                or event.motion:
+            return -1
+        var hit = self.bar.hit(event.pos)
+        var m = self.bar.metrics()
+        if hit[0] == 0:
+            return -1
+        if hit[0] == 1:
+            return max(0, self.bar.scroll - 1)
+        if hit[0] == 5:
+            return min(m.max_scroll, self.bar.scroll + 1)
+        if hit[0] == 3:
+            self.dragging = True
+            self.drag_offset = hit[1]
+            return self.bar.scroll
+        return self.bar.track_jump(hit[1])

@@ -32,6 +32,7 @@ from .file_io import (
     join_path, list_directory_typed, parent_path, sort_directory_listing,
 )
 from .geometry import Point, Rect
+from .scrollbar import ScrollBarArea
 from .painter import Painter
 from .posix import getenv_value, realpath
 from .string_utils import display_columns
@@ -122,6 +123,7 @@ struct DirBrowser(Movable):
     var entry_is_dir: List[Bool]
     var selected: Int
     var scroll: Int
+    var _bar: ScrollBarArea
     var dirs_only: Bool
     var project: Optional[String]
     """Active project root, when one is open. Drives the optional
@@ -146,6 +148,7 @@ struct DirBrowser(Movable):
         self.entry_is_dir = List[Bool]()
         self.selected = 0
         self.scroll = 0
+        self._bar = ScrollBarArea()
         self.dirs_only = dirs_only
         self.project = Optional[String]()
         self._type_ahead = TypeAhead()
@@ -398,7 +401,7 @@ struct DirBrowser(Movable):
 
     # --- painting ---------------------------------------------------------
 
-    def paint(self, mut canvas: Canvas, list_rect: Rect, focused: Bool = True):
+    def paint(mut self, mut canvas: Canvas, list_rect: Rect, focused: Bool = True):
         """Paint the entry list inside ``list_rect``. The host paints the
         dialog frame, title, and the "current directory" line above; this
         method only touches the rectangle it was given.
@@ -452,6 +455,9 @@ struct DirBrowser(Movable):
             _ = painter.put_text(
                 canvas, Point(list_rect.a.x, row_y), label, attr,
             )
+        self._bar.paint(
+            canvas, list_rect, len(self.entries), self.scroll, bg,
+        )
 
     # --- mouse ------------------------------------------------------------
 
@@ -461,7 +467,7 @@ struct DirBrowser(Movable):
         """Process a mouse event scoped to the listing area. Returns:
 
         ``-1``  — event ignored / outside list
-        ``-2``  — wheel scroll consumed (no row activated)
+        ``-2``  — wheel or scroll bar consumed (no row activated)
         ``>=0`` — row index that was clicked. Caller decides whether to
                   treat that as "select only" (first click) or "activate"
                   (click-on-already-selected, i.e. open / descend).
@@ -471,6 +477,10 @@ struct DirBrowser(Movable):
         parent shortcut once" behavior most users expect."""
         if event.kind != EVENT_MOUSE:
             return -1
+        var sb = self._bar.handle_mouse(event)
+        if sb >= 0:
+            self.scroll = sb
+            return -2
         if event.pressed and not event.motion:
             if picker_wheel_scroll(
                 event.button, self.scroll, len(self.entries),

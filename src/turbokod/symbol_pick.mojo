@@ -17,6 +17,7 @@ from .canvas import Canvas
 from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, YELLOW
 from .events import Event, EVENT_KEY, EVENT_MOUSE, KEY_ENTER, KEY_ESC
 from .geometry import Point, Rect, center_in
+from .scrollbar import ScrollBarArea
 from .lsp_dispatch import SymbolItem
 from .picker_input import (
     build_picker_layout, picker_nav_key, picker_row_at, picker_wheel_scroll,
@@ -47,6 +48,7 @@ struct SymbolPick(Movable):
     var matched: List[Int]
     var selected: Int
     var scroll: Int
+    var _bar: ScrollBarArea
     # Submission output — read after ``submitted`` flips True.
     var selected_line: Int
     var selected_character: Int
@@ -67,6 +69,7 @@ struct SymbolPick(Movable):
         self.matched = List[Int]()
         self.selected = 0
         self.scroll = 0
+        self._bar = ScrollBarArea()
         self.selected_line = 0
         self.selected_character = 0
         self._input_rect = Rect(0, 0, 0, 0)
@@ -218,6 +221,10 @@ struct SymbolPick(Movable):
                         String("(") + sym.container + String(")"),
                         hint_attr,
                     )
+        self._bar.paint(
+            canvas, Rect(rect.a.x + 1, top, rect.b.x - 1, top + h),
+            len(self.matched), self.scroll, bg,
+        )
         # Bottom hint.
         _ = painter.put_text(
             canvas, Point(rect.a.x + 2, layout.hint_y),
@@ -267,6 +274,10 @@ struct SymbolPick(Movable):
         # always dismisses the dialog.
         if close_button_clicked(rect, event):
             self.close()
+            return True
+        var sb = self._bar.handle_mouse(event)
+        if sb >= 0:
+            self.scroll = sb
             return True
         if self._input_rect.width() > 0 \
                 and self.query.handle_mouse(event, self._input_rect):

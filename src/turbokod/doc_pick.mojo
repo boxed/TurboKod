@@ -17,6 +17,7 @@ from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, YELLOW
 from .doc_store import DocEntry
 from .events import Event, EVENT_KEY, EVENT_MOUSE, KEY_ENTER, KEY_ESC
 from .geometry import Point, Rect, center_in
+from .scrollbar import ScrollBarArea
 from .picker_input import (
     build_picker_layout, picker_nav_key, picker_row_at, picker_wheel_scroll,
     scroll_to_reveal,
@@ -45,6 +46,7 @@ struct DocPick(Movable):
     var matched: List[Int]
     var selected: Int
     var scroll: Int
+    var _bar: ScrollBarArea
     # Submission output — index into ``entries`` (not ``matched``), set
     # before ``submitted`` flips True so the host doesn't have to keep
     # the picker alive after consuming.
@@ -65,6 +67,7 @@ struct DocPick(Movable):
         self.matched = List[Int]()
         self.selected = 0
         self.scroll = 0
+        self._bar = ScrollBarArea()
         self.selected_index = -1
         self._input_rect = Rect(0, 0, 0, 0)
         self._revealed_height = 16
@@ -198,6 +201,10 @@ struct DocPick(Movable):
                         String("(") + ent.type_name + String(")"),
                         t_attr,
                     )
+        self._bar.paint(
+            canvas, Rect(rect.a.x + 1, top, rect.b.x - 1, top + h),
+            len(self.matched), self.scroll, bg,
+        )
         # Bottom hint.
         _ = painter.put_text(
             canvas, Point(rect.a.x + 2, layout.hint_y),
@@ -244,6 +251,10 @@ struct DocPick(Movable):
         # always dismisses the dialog.
         if close_button_clicked(rect, event):
             self.close()
+            return True
+        var sb = self._bar.handle_mouse(event)
+        if sb >= 0:
+            self.scroll = sb
             return True
         if self._input_rect.width() > 0 \
                 and self.query.handle_mouse(event, self._input_rect):
