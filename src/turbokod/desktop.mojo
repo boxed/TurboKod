@@ -123,9 +123,9 @@ from .spell_menu import (
     SPELL_ACTION_ADD_PROJECT, SPELL_ACTION_ADD_USER, SpellMenu,
 )
 from .anchored_menu import NativeMenuItem
-from .ui_grid import GridForm, UIEvent
+from .ui_grid import GridForm, UIEvent, grid_dialog_size
 from .ui_tree import (
-    ListWindow, UI_CODE, UI_DISABLED, UI_RGB, UINode, UISpan, ui_bool,
+    ListWindow, UI_CODE, UI_DISABLED, UI_LARGE, UI_RGB, UINode, UISpan, ui_bool,
     ui_button, ui_int, ui_list, ui_list_anchor, ui_list_row, ui_spacer,
 )
 from .picker_ui import (
@@ -251,7 +251,8 @@ from .window import (
     BottomDockedPanel, DOCK_MIN_HEIGHT, MIN_WIN_H, MIN_WIN_W,
     PANEL_STATE_MAXIMIZED, PANEL_STATE_MINIMIZED, PANEL_STATE_NORMAL,
     TitleCommand, Window, WindowManager,
-    compute_display_titles, hit_title_command, paint_close_button,
+    close_button_clicked, compute_display_titles, hit_title_command,
+    paint_close_button,
 )
 
 
@@ -1158,6 +1159,12 @@ struct Desktop(Movable):
     """The grid projections of the open declarative dialogs
     (``ui_surfaces``), bottom first."""
     var _ui_grid_owners: List[String]
+    var _dialog_screen: Rect
+    """The host's dialog window as last painted (``dialog_window``), for
+    a chord replayed into it from the menu bar."""
+    var _in_dialog_window: Bool
+    """``handle_event`` is running for the dialog window, not the project
+    window, which a dialog window otherwise keeps it out of."""
     var settings_native: Bool
     """The open Settings is shown as the host's native Settings window
     (macOS-style UI) rather than the grid one."""
@@ -1814,6 +1821,8 @@ struct Desktop(Movable):
         self.settings_grids = List[GridForm]()
         self.ui_grids = List[GridForm]()
         self._ui_grid_owners = List[String]()
+        self._dialog_screen = Rect(0, 0, 0, 0)
+        self._in_dialog_window = False
         self.settings_native = False
         self._last_goto_line = String("")
         self._pending_new_window_project = Optional[String]()
@@ -3677,6 +3686,9 @@ struct Desktop(Movable):
         # Menu bar — both the bar itself and any open dropdown sit on
         # top of every other layer, so resolve them first. Skipped when
         # the host owns the menu: row 0 is part of the workspace there.
+        if len(self.dialog_window().as_bytes()) > 0:
+            # Modal in a window of its own; nothing here takes a click.
+            return String("default")
         if not self.host_owns_menu:
             if pos.y == 0:
                 return String("default")
@@ -4780,7 +4792,10 @@ struct Desktop(Movable):
         # so paint order doesn't matter for correctness.
         # A dialog the host shows natively (macOS-style UI) isn't painted.
         var native = self.native_ui()
-        if not self.host_draws_dialogs():
+        # The Turbo Vision look's dialog window paints the dialog and what
+        # opens over it (``paint_dialog_window``).
+        var windowed = len(self.dialog_window().as_bytes()) > 0
+        if not self.host_draws_dialogs() and not windowed:
             # Open declarative dialogs through the grid projector, the top
             # one live (natively the host draws them from ``ui_tree``). Below
             # the prompts and confirms, which can open over them.
@@ -4791,22 +4806,24 @@ struct Desktop(Movable):
                     tree, canvas, screen,
                     i == len(surfaces) - 1,
                 )
-        if not (native and self.native_prompt_active()):
+        if windowed:
+            pass
+        elif not (native and self.native_prompt_active()):
             self.prompt.paint(canvas, screen)
         # Review paints over every modal (below), so a confirm it raised
         # (checkout a branch?) is painted again after it.
         var host_confirm = self.host_draws_confirm()
-        if not self.review.active and not host_confirm:
+        if not self.review.active and not host_confirm and not windowed:
             self.confirm_dialog.paint(canvas, screen)
-        if not native:
+        if not native and not windowed:
             self.message_request_dialog.paint(canvas, screen)
-        if not native:
+        if not native and not windowed:
             self.color_picker.paint(canvas, screen)
         if not (native and self.merge_view.active):
             self.merge_view.paint(canvas, screen)
-        if not native:
+        if not native and not windowed:
             self.save_as_dialog.paint(canvas, screen)
-        if not self.native_git_active():
+        if not self.native_git_active() and not windowed:
             self.local_changes.paint(canvas, screen, self.grammar_registry)
         # Spell-action popup. Painted last among modals so it overlays
         # everything else (it's contextual to the editor cursor and
@@ -7624,7 +7641,8 @@ struct Desktop(Movable):
         # In review the bottom row is the review toolbar, not the status bar,
         # so don't arm the status-bar message dwell there (hovering the
         # "Next file" button must not pop the LSP-status tooltip).
-        if event.kind == EVENT_MOUSE and not self.review.is_reviewing():
+        if event.kind == EVENT_MOUSE and not self.review.is_reviewing() \
+                and not self._in_dialog_window:
             self.status_bar.update_hover(event.pos, screen)
         # Bare modifier-key transitions go directly to the focused editor
         # — modals don't care about them, and routing them through the
@@ -7638,7 +7656,9 @@ struct Desktop(Movable):
                 or self.native_spelling_active() or self.native_history_active() \
                 or self.native_merge_active() or self.native_review_picker() \
                 or self.native_ui_surface_active() \
-                or len(self.native_popup_kind().as_bytes()) > 0:
+                or len(self.native_popup_kind().as_bytes()) > 0 \
+                or (len(self.dialog_window().as_bytes()) > 0
+                    and not self._in_dialog_window):
             # The host is showing this dialog as a native sheet (or the
             # popup as an NSMenu), which is modal — anything that still
             # reaches us (a replayed menu chord) must not answer it behind
@@ -7873,7 +7893,9 @@ struct Desktop(Movable):
                 _ = self.local_changes.handle_mouse(
                     event, screen, self.grammar_registry,
                 )
-            self._after_local_changes(screen)
+            # A file it opens opens in the project window.
+            var main_screen = self._last_screen if self._in_dialog_window else screen
+            self._after_local_changes(main_screen)
             return Optional[String]()
         if event.kind == EVENT_KEY:
             # Side panels absorb arrow / Enter / Esc when focused;
@@ -8564,6 +8586,111 @@ struct Desktop(Movable):
         rather than through the grid projector."""
         return self.native_ui() or self.platinum_ui()
 
+    # --- the Turbo Vision look's dialog window ------------------------------
+    #
+    # As in the other looks, the git view and the declarative dialogs leave
+    # the project window for a window of their own — here a borderless one
+    # whose cells, frame included, the core paints (``paint_dialog_window``)
+    # and whose input it takes (``handle_dialog_window_event``). Whatever
+    # opens over the dialog (a prompt, a confirm) opens in that window too.
+
+    def dialogs_windowed(self) -> Bool:
+        return self.tv_frame()
+
+    def dialog_window(self) -> String:
+        """What the dialog window shows: ``git`` for the git view, else the
+        bottom open declarative dialog's name. Empty while there's none, or
+        outside the Turbo Vision look in the native app."""
+        if not self.dialogs_windowed():
+            return String("")
+        if self.local_changes.active:
+            return String("git")
+        var surfaces = self.ui_surfaces()
+        if len(surfaces) == 0:
+            return String("")
+        return surfaces[0]
+
+    def dialog_window_title(mut self) -> String:
+        var kind = self.dialog_window()
+        if kind == String("git"):
+            return String("Local changes")
+        if len(kind.as_bytes()) == 0:
+            return String("")
+        return self.ui_tree(kind).text
+
+    def dialog_window_size(mut self, main: Rect) -> Tuple[Int, Int, Bool]:
+        """``(cols, rows, resizable)`` for the dialog window over a project
+        window of ``main``: the size the dialog takes in the grid there.
+        The git view and the large dialogs can be resized; the rest keep
+        their natural size, which the host follows."""
+        var kind = self.dialog_window()
+        if kind == String("git"):
+            return (
+                max(60, main.width() * 9 // 10), max(16, main.height() - 4), True,
+            )
+        if len(kind.as_bytes()) == 0:
+            return (0, 0, False)
+        var tree = self.ui_tree(kind)
+        var size = grid_dialog_size(tree, main)
+        return (size[0], size[1], tree.has(UI_LARGE))
+
+    def paint_dialog_window(mut self, mut canvas: Canvas, screen: Rect):
+        """Paint the dialog window: the dialog filling it, and anything
+        that opened over it."""
+        self._dialog_screen = screen
+        var kind = self.dialog_window()
+        if len(kind.as_bytes()) == 0:
+            # Just closed, and the host hasn't hidden the window yet.
+            Painter(screen).fill(
+                canvas, screen, String(" "), Attr(BLACK, LIGHT_GRAY),
+            )
+            return
+        if kind == String("git"):
+            self.local_changes.paint(canvas, screen, self.grammar_registry)
+            paint_close_button(
+                canvas, screen.a, Attr(BORDER_FOCUS, EDITOR_BG),
+            )
+        else:
+            var surfaces = self._sync_ui_grids()
+            for i in range(len(surfaces)):
+                var tree = self.ui_tree(surfaces[i])
+                self.ui_grids[i].paint(
+                    tree, canvas, screen, i == len(surfaces) - 1,
+                )
+        self.prompt.paint(canvas, screen)
+        self.confirm_dialog.paint(canvas, screen)
+        self.message_request_dialog.paint(canvas, screen)
+        self.color_picker.paint(canvas, screen)
+        self.save_as_dialog.paint(canvas, screen)
+
+    def handle_dialog_window_event(
+        mut self, event: Event, screen: Rect,
+    ) raises -> Optional[String]:
+        """Route an event from the dialog window through the same modal
+        chain the grid uses, in the window's coordinates."""
+        if len(self.dialog_window().as_bytes()) == 0:
+            return Optional[String]()
+        self._dialog_screen = screen
+        # The git view's close box: the window's, as Esc closes it.
+        if self.local_changes.active and not self._dialog_overlay_active() \
+                and close_button_clicked(screen, event):
+            _ = self.native_git_close()
+            return Optional[String]()
+        self._in_dialog_window = True
+        var result: Optional[String]
+        try:
+            result = self.handle_event(event, screen)
+        except e:
+            self._in_dialog_window = False
+            raise e^
+        self._in_dialog_window = False
+        return result^
+
+    def _dialog_overlay_active(self) -> Bool:
+        return self.prompt.active or self.confirm_dialog.active \
+            or self.message_request_dialog.active \
+            or self.color_picker.active or self.save_as_dialog.active
+
     def apply_welcome(
         mut self, native_ui: Bool, platinum_ui: Bool, theme: String,
         font_label: String, font_size: Int, done: Bool,
@@ -8822,6 +8949,11 @@ struct Desktop(Movable):
             elif self._ui_grid_owners[i] != surfaces[i]:
                 self.ui_grids[i].reset()
                 self._ui_grid_owners[i] = surfaces[i]
+        # In a dialog window of its own, the bottom dialog is the window.
+        var windowed = self.dialogs_windowed()
+        for i in range(len(self.ui_grids)):
+            self.ui_grids[i].fill = windowed and i == 0
+            self.ui_grids[i].own_title = windowed and i == 0
         return surfaces^
 
     def native_choice_answer(mut self, index: Int):
@@ -9644,6 +9776,12 @@ struct Desktop(Movable):
         """
         if self.settings.active and self.settings_detached:
             self.handle_settings_event(ev, screen)
+        elif len(self.dialog_window().as_bytes()) > 0:
+            try:
+                var dialog_screen = self._dialog_screen
+                _ = self.handle_dialog_window_event(ev, dialog_screen)
+            except:
+                pass
         else:
             try:
                 _ = self.handle_event(ev, screen)

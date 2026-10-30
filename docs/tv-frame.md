@@ -67,3 +67,42 @@ never set `host_owns_menu`, which `Desktop.tv_frame()` requires.
     menu (picking an entry shows it in Finder).
 - A borderless window doesn't close, zoom or minimize from the Window menu on
   its own; `MainWindow` covers that for both borderless looks.
+
+## Dialog windows
+
+As in the other two looks, the git view and the declarative dialogs (the
+pickers — Quick Open, Find Symbol, Find in Project, … — Project Settings,
+Fill, the breakpoint dialogs) don't cover the project window: each opens in
+a window of its own, a borderless child window whose cells the core paints,
+Turbo Vision frame included. Settings already had its own window
+(`.settings`) and keeps it.
+
+- `Desktop.dialog_window()` names what's up: `git`, or the bottom open
+  declarative dialog; empty outside `tv_frame()`. While it's non-empty the
+  project window's `paint` skips the dialog and everything that can open
+  over it (prompt, confirm, message request, color picker, Save As), and
+  `handle_event` swallows the project window's input — the dialog is modal,
+  as it was in the grid.
+- `paint_dialog_window` / `handle_dialog_window_event` are the window's
+  surface. The event handler runs the ordinary `handle_event` chain with
+  `_in_dialog_window` set, in the window's coordinates, so a prompt or
+  confirm raised over the dialog opens (and answers) in that window. A file
+  the git view opens still opens with the project window's screen.
+- The bottom declarative dialog's `GridForm` fills the window (`fill`)
+  but keeps its title on its frame (`own_title`); dialogs stacked on it
+  stay centered inside. The git view gets a close box on its frame.
+- A chord the menu bar replays (⌘V into a picker's field) goes through
+  `_replay_through_modal` to the dialog window at its last painted size.
+- C ABI: `tk_desktop_dialog_window` (JSON `{kind, title, cols, rows,
+  resizable}`: the size the dialog takes in the grid of a project window
+  that size), `tk_desktop_layout_dialog`, `tk_desktop_dialog_key`,
+  `tk_desktop_dialog_mouse` (both return host actions like
+  `tk_desktop_key`).
+
+Host side, `TVDialogWindow` (polled by `pollTVDialog`): a `.dialog`
+`CellView` in a borderless `TVDialogNSWindow`, a child of the project
+window, centered in its upper third. The title row drags it; the close box
+is the core's. The git view and the large (`UI_LARGE`) dialogs resize from
+their sides and bottom corners; the rest follow the size the core asks for.
+A click on the project window hands the keyboard straight back. `keyView`
+maps the dialog window to its project window's view for menu actions.

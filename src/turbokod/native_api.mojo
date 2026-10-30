@@ -1334,6 +1334,81 @@ def tk_desktop_tv_frame(h: Int) abi("C") -> Int32:
 
 
 @export
+def tk_desktop_dialog_window(
+    h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
+) abi("C") -> Int:
+    """The Turbo Vision look's dialog window (``Desktop.dialog_window``):
+    the git view or a declarative dialog in a borderless window of its own,
+    as JSON ``{"kind", "title", "cols", "rows", "resizable"}`` — its size
+    in cells for a ``cols`` × ``rows`` project window. Nothing (0) while
+    there's none. Same buffer contract as ``tk_desktop_native_dialog``."""
+    if h == 0:
+        return 0
+    ref d = _desk(h)[]
+    var kind = d.dialog_window()
+    if len(kind.as_bytes()) == 0:
+        return 0
+    var size = d.dialog_window_size(Rect(0, 0, cols, rows))
+    var o = json_object()
+    o.put(String("kind"), json_str(kind))
+    o.put(String("title"), json_str(d.dialog_window_title()))
+    o.put(String("cols"), json_int(size[0]))
+    o.put(String("rows"), json_int(size[1]))
+    o.put(String("resizable"), json_bool(size[2]))
+    return _write_out(encode_json(o), out_ptr, cap)
+
+
+@export
+def tk_desktop_layout_dialog(
+    h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
+) abi("C") -> Int:
+    """Paint the dialog window and pack it like ``tk_desktop_layout``."""
+    if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
+        return 0
+    var canvas = _blank_canvas(cols, rows)
+    _desk(h)[].paint_dialog_window(canvas, Rect(0, 0, cols, rows))
+    return pack_canvas(canvas, cols, rows, out_ptr, cap)
+
+
+@export
+def tk_desktop_dialog_key(
+    h: Int, key: UInt32, mods: UInt8, cols: Int, rows: Int,
+) abi("C") -> Int32:
+    """A keystroke in the dialog window; returns a host action like
+    ``tk_desktop_key`` (a picker opening a project)."""
+    if h == 0:
+        return ACT_NONE
+    var k = _canon_ctrl_key(key, mods)
+    var action: Optional[String]
+    try:
+        action = _desk(h)[].handle_dialog_window_event(
+            Event.key_event(k, mods), Rect(0, 0, cols, rows),
+        )
+    except e:
+        print("turbokod: tk_desktop_dialog_key:", String(e))
+        action = Optional[String]()
+    return _action_code(action)
+
+
+@export
+def tk_desktop_dialog_mouse(
+    h: Int, x: Int, y: Int, button: UInt8, pressed: UInt8, motion: UInt8,
+    mods: UInt8, cols: Int, rows: Int, click_count: UInt8,
+) abi("C") -> Int32:
+    """A mouse event in the dialog window."""
+    if h == 0:
+        return ACT_NONE
+    var ev = _mouse_event(x, y, button, pressed, motion, mods, click_count)
+    var action: Optional[String]
+    try:
+        action = _desk(h)[].handle_dialog_window_event(ev, Rect(0, 0, cols, rows))
+    except e:
+        print("turbokod: tk_desktop_dialog_mouse:", String(e))
+        action = Optional[String]()
+    return _action_code(action)
+
+
+@export
 def tk_desktop_layout_frame(
     h: Int, cols: Int, rows: Int, zoomed: Int, out_ptr: Int, cap: Int,
 ) abi("C") -> Int:

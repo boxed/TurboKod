@@ -396,7 +396,9 @@ func cgcolor(_ rgb: UInt32) -> CGColor {
 /// `.frame` is the Turbo Vision look's project frame (`TVMainFrame`): the
 /// ring of cells around a window's grid. It only draws; its clicks go to
 /// `onFrameMouse`.
-enum CellSurface { case main, panels, settings, frame }
+/// `.dialog` is the Turbo Vision look's dialog window (`TVDialogWindow`): the
+/// git view or a declarative dialog, frame and all, in a window of its own.
+enum CellSurface { case main, panels, settings, frame, dialog }
 
 final class CellView: NSView {
     var handle: Int64 = 0
@@ -409,6 +411,8 @@ final class CellView: NSView {
     var project: String?      // set when a project is opened; drives session save
     /// A `.frame` view's clicks: the window chrome's business, not the core's.
     var onFrameMouse: ((NSEvent) -> Void)?
+    /// A press the window chrome takes before the core sees it (true: taken).
+    var onChromeMouse: ((NSEvent) -> Bool)?
     private var buf = UnsafeMutablePointer<UInt32>.allocate(capacity: CELL_WORDS)
     private var bufCells = 1
     // Last cell a passive (no-button) mouse move was dispatched for. macOS
@@ -579,6 +583,7 @@ final class CellView: NSView {
         case .main:     return Int(tk_desktop_layout(handle, Int64(c), Int64(r), p, Int64(cap)))
         case .panels:   return Int(tk_desktop_layout_panels(handle, Int64(c), Int64(r), p, Int64(cap)))
         case .settings: return Int(tk_desktop_layout_settings(handle, Int64(c), Int64(r), p, Int64(cap)))
+        case .dialog:   return Int(tk_desktop_layout_dialog(handle, Int64(c), Int64(r), p, Int64(cap)))
         case .frame:
             let w = window
             let zoomed = (w?.styleMask.contains(.fullScreen) ?? false) || ((w as? MainWindow)?.filled ?? false)
@@ -593,6 +598,7 @@ final class CellView: NSView {
         case .main:     return tk_desktop_key(handle, key, m, Int64(c), Int64(r))
         case .panels:   return tk_desktop_panels_key(handle, key, m, Int64(c), Int64(r))
         case .settings: return tk_desktop_settings_key(handle, key, m, Int64(c), Int64(r))
+        case .dialog:   return tk_desktop_dialog_key(handle, key, m, Int64(c), Int64(r))
         case .frame:    return 0
         }
     }
@@ -612,6 +618,7 @@ final class CellView: NSView {
         case .main:     return tk_desktop_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r), cc)
         case .panels:   return tk_desktop_panels_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r), cc)
         case .settings: return tk_desktop_settings_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r), cc)
+        case .dialog:   return tk_desktop_dialog_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r), cc)
         case .frame:    return 0
         }
     }
@@ -630,7 +637,7 @@ final class CellView: NSView {
         switch surface {
         case .main:     return tk_desktop_pointer_shape(handle, col, row, Int64(c), Int64(r))
         case .panels:   return tk_desktop_panels_pointer_shape(handle, col, row, Int64(c), Int64(r))
-        case .settings, .frame: return 0   // default arrow everywhere
+        case .settings, .frame, .dialog: return 0   // default arrow everywhere
         }
     }
 
@@ -1549,6 +1556,7 @@ final class CellView: NSView {
 
     override func mouseDown(with e: NSEvent) {
         if let f = onFrameMouse { f(e); return }
+        if let f = onChromeMouse, f(e) { return }
         sendMouse(e, button: 1, pressed: 1, motion: 0)
     }
     override func mouseDragged(with e: NSEvent) { sendMouse(e, button: 1, pressed: 1, motion: 1) }
@@ -2101,6 +2109,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // its editor's scroll bar.
     var platinumFrames: [ObjectIdentifier: PlatinumMainFrame] = [:]
     var tvFrames: [ObjectIdentifier: TVMainFrame] = [:]
+    // Turbo Vision look: the dialog window (git view, pickers, …) per window.
+    var tvDialogs: [ObjectIdentifier: TVDialogWindow] = [:]
+    var tvDialogBuf = [UInt8](repeating: 0, count: 1024)
     var frameInfoBuf = [UInt8](repeating: 0, count: 1024)
     var platinumScrollers: [ObjectIdentifier: PlatinumScroller] = [:]
     // macOS-style UI: the native picker sheet up on each window, if any.
@@ -2535,6 +2546,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if self.pollNativeDialog(v) { changed = true }
                 if self.pollDeclarative(v) { changed = true }
                 if self.pollTVChrome(v) { changed = true }
+                if self.pollTVDialog(v) { changed = true }
                 if self.pollPlatinumChrome(v) { changed = true }
                 if self.pollTabStrip(v) { changed = true }
                 if self.pollPopup(v) { changed = true }
@@ -3305,7 +3317,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     private func keyView() -> CellView? {
-        NSApp.keyWindow?.cellView
+        // The Turbo Vision look's dialog window acts for its project window
+        // (a chord the menu replays lands in the dialog through the core).
+        guard let v = NSApp.keyWindow?.cellView else { return nil }
+        return v.surface == .dialog ? (v.mainPeer ?? v) : v
     }
 
     @objc func newWindowAction() { _ = newWindow() }
@@ -3759,6 +3774,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         tabStrips[ObjectIdentifier(v)] = nil
         platinumFrames[ObjectIdentifier(v)] = nil
         tvFrames[ObjectIdentifier(v)] = nil
+        tvDialogs.removeValue(forKey: ObjectIdentifier(v))?.dismiss()
         platinumScrollers[ObjectIdentifier(v)] = nil
         nativeSheets[ObjectIdentifier(v)] = nil
         popups[ObjectIdentifier(v)] = nil
@@ -4776,6 +4792,29 @@ extension AppController {
         win.makeFirstResponder(v)
         tvFrames[id] = tf
         _ = pollTVChrome(v)
+        return true
+    }
+
+    /// Show / hide / refresh the Turbo Vision look's dialog window over `v`
+    /// (`tk_desktop_dialog_window`). True when anything changed.
+    func pollTVDialog(_ v: CellView) -> Bool {
+        let id = ObjectIdentifier(v)
+        let data = readCoreJSON(&tvDialogBuf, {
+            tk_desktop_dialog_window(v.handle, Int64(v.cols()), Int64(v.rows()), $0, $1)
+        })
+        let spec = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
+        guard let spec = spec else {
+            guard let dw = tvDialogs.removeValue(forKey: id) else { return false }
+            dw.dismiss()
+            v.window?.makeKeyAndOrderFront(nil)
+            return true
+        }
+        if let dw = tvDialogs[id] { return dw.update(spec) }
+        guard let win = v.window, win.isVisible else { return false }
+        let dw = TVDialogWindow(mainView: v, view: makeSurfaceView(for: v, surface: .dialog))
+        tvDialogs[id] = dw
+        _ = dw.update(spec)
+        dw.present(in: win)
         return true
     }
 
@@ -11217,6 +11256,135 @@ final class TVMainFrame: NSView, NSDraggingSource {
         guard let url = sender.representedObject as? URL else { return }
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
+}
+
+/// The Turbo Vision look's dialog window: the git view or a declarative
+/// dialog (a picker, Project Settings, …) out of the project window, as the
+/// other looks show them. Borderless; the core paints all of it, frame
+/// included (`tk_desktop_layout_dialog`). The title row drags it, the close
+/// box is the core's, and the sides and bottom corners resize the ones that
+/// can be (the git view, the large dialogs); the rest follow the size the
+/// core asks for. Modal like the in-grid dialog: a click on the project
+/// window hands the keyboard straight back.
+final class TVDialogWindow: NSObject {
+    let view: CellView
+    weak var mainView: CellView?
+    private let win: TVDialogNSWindow
+    private var kind = ""
+    private var size = (cols: 0, rows: 0)
+    private var resizable = false
+    private var userSized = false
+    private var cellSize = NSSize.zero
+
+    init(mainView: CellView, view: CellView) {
+        self.view = view
+        self.mainView = mainView
+        win = TVDialogNSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
+                               styleMask: [.borderless], backing: .buffered, defer: true)
+        super.init()
+        win.isReleasedWhenClosed = false
+        win.hasShadow = true
+        win.backgroundColor = .black
+        win.acceptsMouseMovedEvents = true
+        win.contentView = view
+        view.onChromeMouse = { [weak self] e in self?.chromeMouse(e) ?? false }
+    }
+
+    func present(in parent: NSWindow) {
+        place(over: parent)
+        parent.addChildWindow(win, ordered: .above)
+        win.makeKeyAndOrderFront(nil)
+        win.makeFirstResponder(view)
+    }
+
+    func dismiss() {
+        view.onChromeMouse = nil
+        view.handle = 0          // the project window's view owns the handle
+        win.parent?.removeChildWindow(win)
+        win.orderOut(nil)
+    }
+
+    /// Adopt the core's `{kind, title, cols, rows, resizable}` and repaint.
+    func update(_ spec: [String: Any]) -> Bool {
+        var changed = false
+        let k = spec["kind"] as? String ?? ""
+        let c = spec["cols"] as? Int ?? 40, r = spec["rows"] as? Int ?? 10
+        win.title = spec["title"] as? String ?? ""
+        if k != kind {
+            // Another dialog in the same window: its own size again.
+            kind = k
+            userSized = false
+        }
+        resizable = spec["resizable"] as? Bool ?? false
+        let cell = NSSize(width: CELL_W, height: CELL_H)
+        if (c, r) != size || cell != cellSize {
+            size = (c, r)
+            cellSize = cell
+            if !userSized, let p = win.parent { place(over: p); changed = true }
+        }
+        // Modal: the project window taking the key (a click on it) hands
+        // the keyboard straight back.
+        if let p = win.parent, p.isKeyWindow { win.makeKey() }
+        if win.isVisible && win.occlusionState.contains(.visible) && view.pollFrame() {
+            view.needsDisplay = true
+            changed = true
+        }
+        return changed
+    }
+
+    /// The core's size, centered over `parent` in its upper third.
+    private func place(over parent: NSWindow) {
+        let w = CGFloat(size.cols) * CELL_W, h = CGFloat(size.rows) * CELL_H
+        let pf = parent.frame
+        let top = pf.maxY - max(CELL_H, (pf.height - h) / 3)
+        win.setFrame(NSRect(x: floor(pf.midX - w / 2), y: floor(top - h), width: w, height: h),
+                     display: true)
+        view.invalidateFrame()
+        view.needsDisplay = true
+    }
+
+    /// The title row drags the window (the close box is the core's); the
+    /// sides and bottom corners resize a resizable one.
+    private func chromeMouse(_ e: NSEvent) -> Bool {
+        let p = view.convert(e.locationInWindow, from: nil)
+        let x = Int(p.x / CELL_W), y = Int(p.y / CELL_H)
+        let c = view.cols(), r = view.rows()
+        if y == 0 {
+            if (1...3).contains(x) { return false }
+            win.performDrag(with: e)
+            return true
+        }
+        if resizable && (x == 0 || x >= c - 1) {
+            resize(left: x == 0, down: y >= r - 1)
+            return true
+        }
+        return false
+    }
+
+    /// Drag a side (or a bottom corner, `down`) in whole cells, the top and
+    /// the opposite side staying put.
+    private func resize(left: Bool, down: Bool) {
+        let start = NSEvent.mouseLocation
+        let f0 = win.frame
+        while let ev = win.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            let p = NSEvent.mouseLocation
+            let w = f0.width + (left ? start.x - p.x : p.x - start.x)
+            let h = down ? f0.height + start.y - p.y : f0.height
+            let cw = max(40 * CELL_W, (w / CELL_W).rounded(.down) * CELL_W)
+            let ch = max(10 * CELL_H, (h / CELL_H).rounded(.down) * CELL_H)
+            win.setFrame(NSRect(x: left ? f0.maxX - cw : f0.minX, y: f0.maxY - ch, width: cw, height: ch),
+                         display: true)
+            userSized = true
+            view.invalidateFrame()
+            view.needsDisplay = true
+            if ev.type == .leftMouseUp { break }
+        }
+    }
+}
+
+/// A borderless window doesn't become key on its own.
+final class TVDialogNSWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
 }
 
 /// The proxy icon over its two cells of the frame's title row. Clicks go

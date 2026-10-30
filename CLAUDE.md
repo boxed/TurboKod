@@ -107,7 +107,9 @@ one window per project, the in-grid tab bar, and the window borderless inside
 a Turbo Vision frame of cells (`TVMainFrame` in `TurboKod.swift`; the ring
 from `Desktop.paint_frame`) whose close box closes the project, zoom box goes
 full screen (Option: fills the screen), and title row carries the focused
-file's proxy icon. The terminal frontends keep overlapping windows — don't
+file's proxy icon. The git view and the declarative dialogs (pickers, Find in
+Project, Project Settings, …) open in a Turbo Vision-framed window of their own
+(`Desktop.dialog_window`, `TVDialogWindow`), as in the other looks. The terminal frontends keep overlapping windows — don't
 make the overlapping layout depend on anything but `host_owns_menu`. Full
 details in [docs/tv-frame.md](docs/tv-frame.md).
 

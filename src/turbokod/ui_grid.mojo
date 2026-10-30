@@ -236,6 +236,18 @@ def _measure(n: UINode) -> Tuple[Int, Int]:
     return (0, 0)
 
 
+def grid_dialog_size(root: UINode, screen: Rect) -> Tuple[Int, Int]:
+    """The frame a dialog takes centered on ``screen``, frame included: its
+    natural size, or most of the screen for a ``UI_LARGE`` one."""
+    var m = _measure(root)
+    var w = min(m[0], screen.width() - 2)
+    var h = min(m[1], screen.height() - 2)
+    if root.has(UI_LARGE):
+        w = max(w, min(screen.width() - 4, screen.width() * 4 // 5))
+        h = max(h, screen.height() - 4)
+    return (max(w, 10), max(h, 5))
+
+
 def _takes_no_room(n: UINode) -> Bool:
     """A stack child with no height and no gap around it: a spacer (it gets
     spare height instead), or a label with nothing to say right now — a
@@ -483,6 +495,9 @@ struct GridForm(Movable):
     """Lay the dialog out over the whole screen rather than centered at its
     natural size — for a host window that is the dialog (classic macOS
     Settings)."""
+    var own_title: Bool
+    """Filling a host window that has no title bar of its own (the Turbo
+    Vision look's dialog window): the frame keeps the title."""
 
     def __init__(out self):
         self.focus_key = String("")
@@ -504,6 +519,7 @@ struct GridForm(Movable):
         self._browse_key = String("")
         self._type_ahead = TypeAhead()
         self.fill = False
+        self.own_title = False
 
     def reset(mut self):
         self.focus_key = String("")
@@ -609,13 +625,8 @@ struct GridForm(Movable):
     def _layout(mut self, root: UINode, screen: Rect):
         self._screen = screen
         self._cancel = root.key
-        var m = _measure(root)
-        var w = min(m[0], screen.width() - 2)
-        var h = min(m[1], screen.height() - 2)
-        if root.has(UI_LARGE):
-            w = max(w, min(screen.width() - 4, screen.width() * 4 // 5))
-            h = max(h, screen.height() - 4)
-        self._frame = screen if self.fill else center_in(screen, max(w, 10), max(h, 5))
+        var size = grid_dialog_size(root, screen)
+        self._frame = screen if self.fill else center_in(screen, size[0], size[1])
         var body = Rect(
             self._frame.a.x + 1 + _MARGIN_X, self._frame.a.y + 1 + _MARGIN_Y,
             self._frame.b.x - 1 - _MARGIN_X, self._frame.b.y - 1 - _bottom_margin(root),
@@ -662,7 +673,7 @@ struct GridForm(Movable):
         var bg = Attr(BLACK, LIGHT_GRAY)
         _ = paint_modal_frame(canvas, self._frame, bg)
         # Filling a host window, the window's own title bar has the title.
-        if len(root.text.as_bytes()) > 0 and not self.fill:
+        if len(root.text.as_bytes()) > 0 and (self.own_title or not self.fill):
             paint_window_title(
                 canvas, self._frame, String(" ") + root.text + String(" "), bg, bg,
             )

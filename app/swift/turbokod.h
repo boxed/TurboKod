@@ -161,6 +161,18 @@ int32_t tk_desktop_tv_frame(int64_t h);
 int64_t tk_desktop_layout_frame(int64_t h, int64_t cols, int64_t rows,
                                 int64_t zoomed, int64_t out_ptr, int64_t cap);
 int64_t tk_desktop_frame_info(int64_t h, int64_t cols, int64_t out_ptr, int64_t cap);
+// The Turbo Vision look's dialog window (Desktop.dialog_window): the git view
+// or a declarative dialog in a borderless window of its own. _dialog_window is
+// its JSON {kind, title, cols, rows, resizable}; the rest drive its surface.
+int64_t tk_desktop_dialog_window(int64_t h, int64_t cols, int64_t rows,
+                                 int64_t out_ptr, int64_t cap);
+int64_t tk_desktop_layout_dialog(int64_t h, int64_t cols, int64_t rows,
+                                 int64_t out_ptr, int64_t cap);
+int32_t tk_desktop_dialog_key(int64_t h, uint32_t key, uint8_t mods,
+                              int64_t cols, int64_t rows);
+int32_t tk_desktop_dialog_mouse(int64_t h, int64_t x, int64_t y, uint8_t button,
+                                uint8_t pressed, uint8_t motion, uint8_t mods,
+                                int64_t cols, int64_t rows, uint8_t click_count);
 int64_t tk_desktop_tabs(int64_t h, int64_t out_ptr, int64_t cap);
 int32_t tk_desktop_tab_select(int64_t h, int64_t idx, int64_t cols, int64_t rows);
 void tk_desktop_tab_close(int64_t h, int64_t idx);
