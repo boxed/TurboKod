@@ -117,6 +117,20 @@ Two things are needed for the bitmap look, both in `Platinum.text`:
   on the same measurements. `NSString` drawing squeezes glyphs together
   before it truncates.
 
+## Chicago in the editor
+
+Settings ▸ Font has **Chicago (built-in)** next to the VGA fonts, for any
+look (`config.font` = `CHICAGO_FONT`; the Mac OS 9 card in the welcome
+window picks it). The host draws it with the same Silom, at 12 pt by
+default: digits and most letters there are 8 points wide and a line fits
+16, so the cell is the VGA font's 8×16. It is crisp (no anti-aliasing) at
+multiples of 12 pt.
+
+Chicago is proportional, and the grid isn't, so `drawFitted` puts each
+glyph in its cell: a narrow one (`i`, `l`, `.`) centered on whole points,
+a wider one (`m`, `w`, `M`, `W`, `@`, `%`, `#`, `&`, `K`, `N`) squeezed
+to the cell's width, so they don't run into their neighbors.
+
 ## Screenshots
 
 `captureWindowPNG` composites child windows, so `TK_CAPTURE_WINDOW=1` shows

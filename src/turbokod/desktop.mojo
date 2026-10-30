@@ -49,7 +49,8 @@ from .clipboard import clipboard_copy, clipboard_paste
 from .open_url import open_url
 from .config import (
     MAX_FONT_SIZE, MIN_FONT_SIZE, OnSaveAction,
-    CLASSIC_FONT, TurbokodConfig, WRAP_NONE, classic_font_label,
+    CHICAGO_FONT, CLASSIC_FONT, TurbokodConfig, WRAP_NONE, chicago_font_label,
+    classic_font_label,
     config_file_stamp, default_font_label,
     load_config, lsp_overrides_equal, merge_config, record_recent_file,
     record_recent_project, save_config_merged, try_read_config,
@@ -6195,6 +6196,8 @@ struct Desktop(Movable):
             self.config.font = String("")
         elif label == classic_font_label():
             self.config.font = String(CLASSIC_FONT)
+        elif label == chicago_font_label():
+            self.config.font = String(CHICAGO_FONT)
         else:
             self.config.font = label
         self.font_version += 1
@@ -6222,6 +6225,8 @@ struct Desktop(Movable):
             return default_font_label()
         if self.config.font == CLASSIC_FONT:
             return classic_font_label()
+        if self.config.font == CHICAGO_FONT:
+            return chicago_font_label()
         return self.config.font
 
     def _rebuild_lsp_specs(mut self):
@@ -9486,13 +9491,14 @@ struct Desktop(Movable):
                     self.windows.windows[fidx_settings].editor.file_path,
                 )
             # Font list for the Settings Font section: the built-in VGA
-            # fonts first, then the host-registered monospace families.
+            # and Chicago fonts first, then the host-registered monospace families.
             # Left empty when the host registered none (terminal
             # frontend), which hides the section.
             var font_names = List[String]()
             if len(self.host_font_names) > 0:
                 font_names.append(default_font_label())
                 font_names.append(classic_font_label())
+                font_names.append(chicago_font_label())
                 for i in range(len(self.host_font_names)):
                     font_names.append(self.host_font_names[i])
             self.settings.open(

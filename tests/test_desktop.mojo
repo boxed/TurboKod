@@ -1542,6 +1542,15 @@ def test_desktop_set_font_maps_classic_label() raises:
     assert_equal(d.font_label(), String("IBM VGA 8x16 classic (built-in)"))
 
 
+def test_desktop_set_font_maps_chicago_label() raises:
+    """The Chicago built-in row stores ``Chicago``, which the Swift host
+    draws with Silom, and reads back as its label."""
+    var d = Desktop()
+    d.set_font(String("Chicago (built-in)"))
+    assert_equal(d.config.font, String("Chicago"))
+    assert_equal(d.font_label(), String("Chicago (built-in)"))
+
+
 def test_desktop_set_font_size_clamps_and_bumps_version() raises:
     """``set_font_size`` clamps explicit sizes into the sane range, keeps
     0 as "the font's default", and bumps ``font_version`` only on real

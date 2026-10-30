@@ -388,7 +388,7 @@ cards, Modern macOS (`native_ui`), Retro and Mac OS 9 (`platinum_ui`, see
   every other window follows via the config poll.
 - Picking a look also picks its natural theme, font and size: One Dark /
   GitHub Light (by system appearance) with SF Mono 13, Turbo C++ 3.0 with
-  the VGA font, or GitHub Light with Monaco 12. The popups stay editable afterwards.
+  the VGA font, or GitHub Light with Chicago. The popups stay editable afterwards.
 - Closing the window, by Get Started or the close button, sends the final
   apply with `done`, which sets `welcome_done`.
 - The options come from `tk_desktop_welcome_options`: the theme names and

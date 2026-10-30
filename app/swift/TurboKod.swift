@@ -42,6 +42,20 @@ let CLASSIC_FONT_NAME = "Px437 IBM VGA 8x16"
 // they're registered in-process, so FontCatalog would otherwise list them
 // alongside the built-in rows.
 let BUNDLED_FONT_FAMILIES: Set<String> = ["TurboKod VGA 16x32", CLASSIC_FONT_NAME]
+// config.font value for the classic Mac system font — CHICAGO_FONT in
+// config.mojo. Drawn with Silom, which ships with macOS: its Latin glyphs
+// are Chicago's on a 12-pixels-per-em grid, so at 12pt (its default here)
+// digits and most letters are 8 points wide and a line is 16 tall — the
+// VGA font's cell. Proportional, so `cellFontIsProportional` fits each
+// glyph to its cell.
+let CHICAGO_FONT_NAME = "Chicago"
+let CHICAGO_FONT_DEFAULT_SIZE = 12
+
+/// Silom, standing in for Chicago, at `size` points (0 = 12). nil when the
+/// system doesn't have it.
+func chicagoFont(size: CGFloat) -> NSFont? {
+    NSFont(name: "Silom", size: size > 0 ? size : CGFloat(CHICAGO_FONT_DEFAULT_SIZE))
+}
 
 // Falls back to Menlo if the bundled TTF is missing.
 func loadCellFont(size: CGFloat = 16, file: String = BUNDLED_FONT_FILE) -> NSFont {
@@ -76,6 +90,14 @@ let VECTOR_FONT_DEFAULT_SIZE = 13
 var cellFont = loadCellFont()
 var cellFontIsBitmap = true
 var cellFontIsAdaptive = true
+// A proportional cell font (Chicago): each glyph is centered in its cell,
+// and one wider than the cell is squeezed to fit rather than run into its
+// neighbors.
+var cellFontIsProportional = false
+// Points to move a proportional cell font's glyphs down (negative: up) so
+// its baseline sits at its ascender. AppKit sets Silom's baseline 15 into
+// a 19-point line, which would hang its descenders into the next row.
+var cellFontBaselineShift: CGFloat = 0
 
 /// Whether cells should render without antialiasing on a screen with
 /// `backingScale`. The default bundled font is pixel-exact when a cell is
@@ -111,6 +133,20 @@ func cellFontHasGlyph(_ cp: UInt32) -> Bool {
     }
     cellFontGlyphCache[cp] = present
     return present
+}
+
+// Per-codepoint advance of the cell font, for `cellFontIsProportional`.
+// Cleared with `cellFontGlyphCache`.
+var cellFontAdvanceCache: [UInt32: CGFloat] = [:]
+
+func cellFontAdvance(_ cp: UInt32) -> CGFloat {
+    if let v = cellFontAdvanceCache[cp] { return v }
+    var w: CGFloat = 0
+    if let scalar = Unicode.Scalar(cp) {
+        w = (String(scalar) as NSString).size(withAttributes: [.font: cellFont]).width
+    }
+    cellFontAdvanceCache[cp] = w
+    return w
 }
 var currentCellFontName = ""             // "" = the bundled default
 var currentCellFontSize: CGFloat = -1    // 0 = font default; -1 forces the first apply through
@@ -213,10 +249,12 @@ private func applyBundledCellFont(_ size: CGFloat, classic: Bool = false) {
     let eff = size > 0 ? size : CGFloat(BITMAP_FONT_DEFAULT_SIZE)
     cellFont = loadCellFont(size: eff, file: classic ? CLASSIC_FONT_FILE : BUNDLED_FONT_FILE)
     cellFontGlyphCache.removeAll()
+    cellFontAdvanceCache.removeAll()
     cellFontEffectiveSize = Int(eff.rounded())
     cellFontIdealSize = BITMAP_FONT_DEFAULT_SIZE
     cellFontIsBitmap = cellFontEffectiveSize % BITMAP_FONT_DEFAULT_SIZE == 0
     cellFontIsAdaptive = !classic
+    cellFontIsProportional = false
     CELL_W = max(1, (eff / 2).rounded())
     CELL_H = max(1, eff.rounded())
 }
@@ -235,6 +273,24 @@ func applyCellFont(_ name: String, size: CGFloat = 0) {
         applyBundledCellFont(size, classic: !name.isEmpty)
         return
     }
+    if name == CHICAGO_FONT_NAME, let f = chicagoFont(size: size) {
+        let eff = f.pointSize
+        cellFont = f
+        cellFontGlyphCache.removeAll()
+        cellFontAdvanceCache.removeAll()
+        cellFontIsAdaptive = false
+        cellFontIsProportional = true
+        cellFontEffectiveSize = Int(eff.rounded())
+        cellFontIdealSize = CHICAGO_FONT_DEFAULT_SIZE
+        // Silom's outlines sit on whole pixels at multiples of 12pt.
+        cellFontIsBitmap = cellFontEffectiveSize % CHICAGO_FONT_DEFAULT_SIZE == 0
+        // The width of its digits and most letters (8 at 12pt); the line
+        // rounded up to a whole point (16 at 12pt).
+        CELL_W = max(1, ceil(("0" as NSString).size(withAttributes: [.font: f]).width))
+        CELL_H = max(1, ceil(eff * 4 / 3))
+        cellFontBaselineShift = ceil(f.ascender) - NSLayoutManager().defaultBaselineOffset(for: f)
+        return
+    }
     let eff = size > 0 ? size : CGFloat(VECTOR_FONT_DEFAULT_SIZE)
     guard let f = NSFontManager.shared.font(withFamily: name, traits: [],
                                             weight: 5, size: eff)
@@ -246,7 +302,9 @@ func applyCellFont(_ name: String, size: CGFloat = 0) {
     }
     cellFont = f
     cellFontGlyphCache.removeAll()
+    cellFontAdvanceCache.removeAll()
     cellFontIsAdaptive = false
+    cellFontIsProportional = false
     cellFontEffectiveSize = Int(eff.rounded())
     cellFontIdealSize = bitmapStrikePPEM(f)
     // A font with embedded bitmap strikes renders crisp (no AA) at exactly
@@ -941,6 +999,24 @@ final class CellView: NSView {
         }
     }
 
+    /// One glyph of a proportional cell font in its cell: centered on whole
+    /// points when it fits, squeezed to the cell's width when it doesn't
+    /// (Chicago's m, w, M, W, @ …), so it never runs into its neighbors.
+    private func drawFitted(_ ctx: CGContext, _ s: NSString, _ cp: UInt32,
+                            _ a: [NSAttributedString.Key: Any], cellX x: CGFloat, cellY y: CGFloat) {
+        let adv = cellFontAdvance(cp)
+        if adv <= CELL_W {
+            s.draw(at: NSPoint(x: x + floor((CELL_W - adv) / 2), y: y + cellFontBaselineShift),
+                   withAttributes: a)
+            return
+        }
+        ctx.saveGState()
+        ctx.translateBy(x: x, y: 0)
+        ctx.scaleBy(x: CELL_W / adv, y: 1)
+        s.draw(at: NSPoint(x: 0, y: y + cellFontBaselineShift), withAttributes: a)
+        ctx.restoreGState()
+    }
+
     /// Paint `n` packed cells from buffer `p` (`c` columns) at pixel origin
     /// (`originX`, `originY`). Two passes — all backgrounds, then glyphs +
     /// underlines — so a wide emoji painted across two cells isn't clipped
@@ -979,7 +1055,11 @@ final class CellView: NSView {
                 } else if cellFontHasGlyph(cp) {
                     var a = attrs
                     a[.foregroundColor] = nscolor(fg)
-                    s.draw(at: NSPoint(x: x, y: y), withAttributes: a)
+                    if cellFontIsProportional {
+                        drawFitted(ctx, s, cp, a, cellX: x, cellY: y)
+                    } else {
+                        s.draw(at: NSPoint(x: x, y: y), withAttributes: a)
+                    }
                 } else {
                     drawFallbackGlyph(ctx, s, fg: fg, cellX: x, cellY: y)
                 }
@@ -6130,10 +6210,11 @@ final class WelcomeController: NSObject, NSWindowDelegate {
             if let f = builtinFonts.first { fontPopup.selectItem(withTitle: f) }
             sizePopup.selectItem(at: 0)
         case .platinum:
-            // Black on white in Monaco, as a Mac OS 9 editor would have it.
+            // Black on white in Chicago, the system font of the dialogs
+            // around it.
             themePopup.selectItem(withTitle: "GitHub Light")
-            if fonts.contains("Monaco") { fontPopup.selectItem(withTitle: "Monaco") }
-            sizePopup.selectItem(at: Self.sizes.firstIndex(of: 12) ?? 0)
+            if builtinFonts.count > 2 { fontPopup.selectItem(withTitle: builtinFonts[2]) }
+            sizePopup.selectItem(at: 0)
         }
         push(done: false)
     }
@@ -7682,10 +7763,11 @@ final class CodePreview: NSTextView {
     }
 
     /// A Font-list label at a size, resolved the way the editor resolves
-    /// it: the built-in rows are the bundled VGA fonts (16pt default),
-    /// anything else a system monospace family (13pt default).
+    /// it: the built-in rows are the bundled VGA fonts (16pt default) and
+    /// Chicago (12pt), anything else a system monospace family (13pt).
     static func font(label: String, size: Int, builtins: [String]) -> NSFont {
         if let i = builtins.firstIndex(of: label) {
+            if i == 2 { return chicagoFont(size: CGFloat(size)) ?? .systemFont(ofSize: 12) }
             return loadCellFont(size: CGFloat(size > 0 ? size : 16),
                                 file: i == 1 ? CLASSIC_FONT_FILE : BUNDLED_FONT_FILE)
         }

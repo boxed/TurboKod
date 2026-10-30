@@ -93,6 +93,19 @@ def classic_font_label() -> String:
     return String("IBM VGA 8x16 classic (built-in)")
 
 
+# ``font`` config value for the classic Mac system font. The Swift host
+# draws it with Silom, whose Latin glyphs are Chicago's on a 12-pixel
+# grid: at 12pt its digits and most letters are 8 points wide and its
+# line 16 tall, the same cell as the VGA font.
+comptime CHICAGO_FONT = "Chicago"
+
+
+def chicago_font_label() -> String:
+    """Display label for ``CHICAGO_FONT`` — the third row of the Font
+    list. ``Desktop.set_font`` maps it to ``CHICAGO_FONT``."""
+    return String("Chicago (built-in)")
+
+
 struct LanguageServerOverride(Copyable, Movable):
     """User override for one language's LSP routing.
 

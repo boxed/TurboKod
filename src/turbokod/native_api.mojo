@@ -50,7 +50,9 @@ from turbokod.file_tree import FileTree
 from turbokod.file_io import basename, parent_path, project_relative
 from turbokod.colors import EDITOR_BG, EDITOR_FG, FG_TRUECOLOR
 from turbokod.string_utils import byte_slice
-from turbokod.config import classic_font_label, default_font_label
+from turbokod.config import (
+    chicago_font_label, classic_font_label, default_font_label,
+)
 from turbokod.json import json_get_bool, json_get_int, json_get_string, parse_json
 from turbokod.theme import theme_names
 from turbokod.ui_grid import UIEvent
@@ -2414,7 +2416,7 @@ def tk_desktop_welcome_needed(h: Int) abi("C") -> Int32:
 @export
 def tk_desktop_welcome_options(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     """What the welcome window offers, and what's set now:
-    ``{themes, builtin_fonts: [bitmap, classic], native_ui, platinum_ui,
+    ``{themes, builtin_fonts: [bitmap, classic, chicago], native_ui, platinum_ui,
     theme, font, font_size}``. The host adds the system's monospace families to the
     built-in fonts. Same buffer contract as ``tk_desktop_native_dialog``."""
     if h == 0:
@@ -2429,6 +2431,7 @@ def tk_desktop_welcome_options(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     var fonts = json_array()
     fonts.append(json_str(default_font_label()))
     fonts.append(json_str(classic_font_label()))
+    fonts.append(json_str(chicago_font_label()))
     o.put(String("builtin_fonts"), fonts)
     o.put(String("native_ui"), json_bool(d.config.native_ui))
     o.put(String("platinum_ui"), json_bool(d.config.platinum_ui))
