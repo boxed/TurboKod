@@ -1409,28 +1409,32 @@ def test_editor_minimap_hint_loses_to_spell() raises:
     assert_equal(ed._minimap_kind_in_slice(0, 1), 2)
 
 
-def test_editor_right_click_on_breakpoint_emits_menu_request() raises:
-    """Right-click in the gutter over a row that has a breakpoint
-    surfaces a ``BreakpointMenuRequest``. A right-click on a gutter
-    row *without* a breakpoint is a no-op."""
+def test_editor_right_click_in_gutter_emits_gutter_menu_request() raises:
+    """Right-click anywhere in the gutter surfaces a gutter-menu request
+    for the clicked row, breakpoint or not. A right-click in the text
+    area doesn't."""
     var ed = Editor(String("a\nb\nc\nd\n"))
     ed.gutter_width = 2
     var lines = List[Int]()
     lines.append(2)
     ed.breakpoint_lines = lines^
     var view = Rect(0, 0, 40, 6)
-    var ev_hit = Event.mouse_event(
-        Point(0, 2), MOUSE_BUTTON_RIGHT, True, False,
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(0, 2), MOUSE_BUTTON_RIGHT, True, False), view,
     )
-    _ = ed.handle_mouse(ev_hit, view)
-    var req = ed.consume_breakpoint_menu()
+    var req = ed.consume_gutter_menu()
     assert_true(Bool(req))
     assert_equal(req.value().row, 2)
-    var ev_miss = Event.mouse_event(
-        Point(0, 1), MOUSE_BUTTON_RIGHT, True, False,
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(1, 1), MOUSE_BUTTON_RIGHT, True, False), view,
     )
-    _ = ed.handle_mouse(ev_miss, view)
-    assert_false(Bool(ed.consume_breakpoint_menu()))
+    req = ed.consume_gutter_menu()
+    assert_true(Bool(req))
+    assert_equal(req.value().row, 1)
+    _ = ed.handle_mouse(
+        Event.mouse_event(Point(20, 1), MOUSE_BUTTON_RIGHT, True, False), view,
+    )
+    assert_false(Bool(ed.consume_gutter_menu()))
 
 
 def test_editor_right_gutter_paints_gray_square_for_changes() raises:

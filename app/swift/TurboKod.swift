@@ -2129,8 +2129,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     var declarative: [ObjectIdentifier: [DeclarativeSurface]] = [:]
     // …and Settings in its own window, with what it opened as sheets on it.
     var declarativeWindows: [ObjectIdentifier: [DeclarativeSurface]] = [:]
-    // Mac OS 9 look: the confirm shown as a Platinum alert, per window.
+    // Mac OS 9 look: the confirm, prompts and choices shown as a Platinum
+    // alert, per window.
     var platinumAlerts: [ObjectIdentifier: PlatinumDialog] = [:]
+    // Mac OS 9 look: Find / Replace as a Platinum window, per window, and
+    // what's in its fields and checkboxes (kept across reopenings).
+    var platinumFinds: [ObjectIdentifier: PlatinumDialog] = [:]
+    var platinumFindValues: [ObjectIdentifier: [String: String]] = [:]
     // macOS-style UI: Project ▸ Spelling as a sheet, per window.
     var spellingSheets: [ObjectIdentifier: SpellingController] = [:]
     // macOS-style UI: Git history as a sheet, per window.
@@ -3788,6 +3793,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             dc.dismiss()
         }
         platinumAlerts.removeValue(forKey: ObjectIdentifier(v))?.dismiss()
+        platinumFinds.removeValue(forKey: ObjectIdentifier(v))?.dismiss()
+        platinumFindValues[ObjectIdentifier(v)] = nil
         spellingSheets[ObjectIdentifier(v)] = nil
         historySheets[ObjectIdentifier(v)] = nil
         mergeSheets[ObjectIdentifier(v)] = nil
@@ -4581,21 +4588,31 @@ extension AppController {
         return t.update(data)
     }
 
-    /// Show the find bar when the core asked for Find / Replace; hide it
-    /// when the macOS-style UI is switched off.
+    /// Show the find bar (the Platinum find window in the Mac OS 9 look)
+    /// when the core asked for Find / Replace; hide it when its look is
+    /// switched off.
     func pollFindBar(_ v: CellView) -> Bool {
         let id = ObjectIdentifier(v)
-        if tk_desktop_native_ui(v.handle) == 0 {
-            if let fb = findBars[id], !fb.accessory.isHidden {
-                fb.accessory.isHidden = true
-                return true
-            }
-            return false
+        let native = tk_desktop_native_ui(v.handle) != 0
+        let platinum = tk_desktop_platinum_ui(v.handle) != 0
+        var changed = false
+        if !platinum, let f = platinumFinds.removeValue(forKey: id) {
+            f.dismiss()
+            changed = true
         }
-        guard let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_take_find_request(v.handle, $0, $1) }),
+        if !native, let fb = findBars[id], !fb.accessory.isHidden {
+            fb.accessory.isHidden = true
+            changed = true
+        }
+        guard native || platinum,
+              let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_take_find_request(v.handle, $0, $1) }),
               let req = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let win = v.window
-        else { return false }
+        else { return changed }
+        if platinum {
+            showPlatinumFind(req, for: v, in: win)
+            return true
+        }
         if findBars[id] == nil {
             let bar = FindBar(frame: NSRect(x: 0, y: 0, width: 600, height: 34))
             let acc = NSTitlebarAccessoryViewController()
@@ -4619,6 +4636,73 @@ extension AppController {
         fb.accessory.isHidden = false
         fb.bar.show(req)
         return true
+    }
+
+    /// Find / Replace in the Mac OS 9 look: a Platinum window over the
+    /// project window that stays open while stepping through matches, its
+    /// buttons the find bar's `tk_desktop_find` ops. A new request reopens
+    /// it seeded afresh, as the find bar re-seeds.
+    private func showPlatinumFind(_ req: [String: Any], for v: CellView, in win: NSWindow) {
+        let id = ObjectIdentifier(v)
+        var values = platinumFindValues[id] ?? [:]
+        let seed = req["seed"] as? String ?? ""
+        if !seed.isEmpty { values["find"] = seed }
+        for k in ["case", "word", "regex"] { values[k] = (req[k] as? Bool ?? false) ? "1" : "0" }
+        platinumFindValues[id] = values
+        platinumFinds.removeValue(forKey: id)?.dismiss()
+        let replacing = req["mode"] as? String == "replace"
+        func field(_ label: String, _ key: String) -> [String: Any] {
+            ["k": "row", "text": label, "kids": [["k": "text", "key": key, "value": values[key] ?? "", "n": 36]]]
+        }
+        func check(_ key: String, _ label: String) -> [String: Any] {
+            ["k": "check", "key": key, "text": label, "n": values[key] == "1" ? 1 : 0]
+        }
+        func button(_ key: String, _ label: String, _ f: Int = 0) -> [String: Any] {
+            ["k": "button", "key": key, "text": label, "f": f]
+        }
+        var rows = [field("Find", "find")]
+        var buttons = [button("done", "Done", Platinum.CANCEL), button("mark", "Mark All"),
+                       button("prev", "Previous")]
+        if replacing {
+            rows.append(field("Replace", "replace"))
+            buttons += [button("replace", "Replace"), button("replace_all", "Replace All")]
+        }
+        buttons.append(button("next", "Next", Platinum.DEFAULT))
+        let body: [String: Any] = ["k": "vstack", "n": 1, "kids": [
+            ["k": "form", "n": 1, "kids": rows],
+            ["k": "hstack", "n": 1, "kids": [check("case", "Match case"), check("word", "Whole word"),
+                                             check("regex", "Regular expression")]],
+            ["k": "hstack", "n": 1, "f": Platinum.RIGHT, "kids": buttons],
+        ]]
+        let dlg = PlatinumDialog(name: "find", view: v, asWindow: true) { [weak self, weak v] events in
+            guard let self = self, let v = v else { return }
+            for e in events {
+                let key = e.count > 1 ? e[1] as? String ?? "" : ""
+                guard e.first as? Bool == true else {
+                    self.platinumFindValues[id]?[key] = e.count > 2 ? e[2] as? String ?? "" : ""
+                    continue
+                }
+                if key == "done" {
+                    self.platinumFinds.removeValue(forKey: id)?.dismiss()
+                    v.window?.makeKeyAndOrderFront(nil)
+                    v.window?.makeFirstResponder(v)
+                    return
+                }
+                let vals = self.platinumFindValues[id] ?? [:]
+                let o: [String: Any] = [
+                    "op": key, "find": vals["find"] ?? "", "replace": vals["replace"] ?? "",
+                    "case": vals["case"] == "1", "word": vals["word"] == "1", "regex": vals["regex"] == "1",
+                ]
+                guard v.handle != 0, let d = try? JSONSerialization.data(withJSONObject: o),
+                      let json = String(data: d, encoding: .utf8) else { return }
+                withUTF8Arg(json) { p, l in tk_desktop_find(v.handle, p, l) }
+                v.invalidateFrame()
+                v.needsDisplay = true
+            }
+        }
+        _ = dlg.update(["k": "dialog", "text": replacing ? "Replace" : "Find", "key": "done", "kids": [body]])
+        platinumFinds[id] = dlg
+        dlg.present(in: win)
     }
 
     /// Show, refresh or retract `v`'s git view: the native sheet, or the
@@ -4983,8 +5067,13 @@ extension AppController {
         guard let dialog = dialog, let kind = dialog["kind"] as? String,
               let win = sheetHost(v), win.isVisible, win.attachedSheet == nil
         else { return false }
-        if kind == "confirm" && tk_desktop_platinum_ui(v.handle) != 0 {
-            showPlatinumConfirm(dialog, for: v, in: win)
+        if tk_desktop_platinum_ui(v.handle) != 0 {
+            switch kind {
+            case "confirm": showPlatinumConfirm(dialog, for: v, in: win)
+            case "prompt": showPlatinumPrompt(dialog, for: v, in: win)
+            case "choice": showPlatinumChoice(dialog, for: v, in: win)
+            default: return false
+            }
             return true
         }
         switch kind {
@@ -5045,6 +5134,83 @@ extension AppController {
         _ = alert.update(["k": "dialog", "text": "", "key": cancel, "kids": [body]])
         platinumAlerts[id] = alert
         alert.present(in: win)
+    }
+
+    /// Show a host-built Platinum alert for `v`. `answer` gets the pressed
+    /// button's key and the fields' values by key, runs the core's answer
+    /// and returns its host action.
+    private func showPlatinumAlert(_ tree: [String: Any], for v: CellView, in win: NSWindow,
+                                   titled: Bool = false,
+                                   answer: @escaping (String, [String: String]) -> Int32) {
+        let id = ObjectIdentifier(v)
+        var values: [String: String] = [:]
+        let alert = PlatinumDialog(name: "alert", view: v, titled: titled) { [weak self, weak v] events in
+            for e in events {
+                let isAction = e.first as? Bool ?? false
+                let key = e.count > 1 ? e[1] as? String ?? "" : ""
+                if !isAction {
+                    values[key] = e.count > 2 ? e[2] as? String ?? "" : ""
+                    continue
+                }
+                guard let self = self, let v = v else { return }
+                self.platinumAlerts.removeValue(forKey: id)?.dismiss()
+                guard v.handle != 0 else { return }
+                let code = answer(key, values)
+                self.handleHostAction(code, sourceHandle: v.handle, view: v)
+                v.invalidateFrame()
+                v.needsDisplay = true
+                return
+            }
+        }
+        _ = alert.update(tree)
+        platinumAlerts[id] = alert
+        alert.present(in: win)
+    }
+
+    /// A one-field prompt (Go to Line, Rename, …) as a Platinum dialog: the
+    /// field under its label, Cancel and the action named for what it does.
+    private func showPlatinumPrompt(_ d: [String: Any], for v: CellView, in win: NSWindow) {
+        var label = (d["label"] as? String ?? "").trimmingCharacters(in: .whitespaces)
+        if label.hasSuffix(":") { label.removeLast() }
+        let text = d["text"] as? String ?? ""
+        let body: [String: Any] = ["k": "vstack", "n": 1, "kids": [
+            ["k": "label", "text": label],
+            ["k": "text", "key": "text", "value": text, "n": 40],
+            ["k": "hstack", "n": 1, "f": Platinum.RIGHT, "kids": [
+                ["k": "button", "key": "cancel", "text": "Cancel", "f": Platinum.CANCEL],
+                ["k": "button", "key": "ok", "text": d["action"] as? String ?? "OK", "f": Platinum.DEFAULT],
+            ]],
+        ]]
+        showPlatinumAlert(["k": "dialog", "text": "", "key": "cancel", "kids": [body]], for: v, in: win) {
+            key, values in
+            withUTF8Arg(values["text"] ?? text) { p, l in
+                tk_desktop_native_prompt_answer(v.handle, p, l, key == "ok" ? 1 : 0)
+            }
+        }
+    }
+
+    /// A language server's list of actions (or a color's presentations) as
+    /// a Platinum alert: one button per action, plus Dismiss.
+    private func showPlatinumChoice(_ d: [String: Any], for v: CellView, in win: NSWindow) {
+        let actions = d["actions"] as? [String] ?? []
+        var buttons: [[String: Any]] = [["k": "button", "key": "-1", "text": actions.isEmpty ? "OK" : "Dismiss",
+                                         "f": actions.isEmpty ? Platinum.DEFAULT : Platinum.CANCEL]]
+        for (i, a) in actions.enumerated() {
+            buttons.append(["k": "button", "key": "\(i)", "text": a,
+                            "f": i == actions.count - 1 ? Platinum.DEFAULT : 0])
+        }
+        let body: [String: Any] = ["k": "hstack", "n": 1, "kids": [
+            ["k": "icon", "text": "note"],
+            ["k": "vstack", "n": 1, "kids": [
+                ["k": "label", "text": d["message"] as? String ?? ""],
+                ["k": "hstack", "n": 1, "f": Platinum.RIGHT, "kids": buttons],
+            ]],
+        ]]
+        showPlatinumAlert(["k": "dialog", "text": "", "key": "-1", "kids": [body]], for: v, in: win) {
+            key, _ in
+            tk_desktop_native_choice_answer(v.handle, Int64(Int(key) ?? -1))
+            return 0
+        }
     }
 
     private func showConfirmSheet(_ d: [String: Any], for v: CellView, in win: NSWindow) {
@@ -5498,7 +5664,10 @@ extension NSWindow {
 /// attached sheet into one PNG, entirely offscreen — works with the display
 /// asleep, unlike `screencapture`.
 func captureWindowPNG(_ win: NSWindow, to path: String) {
-    guard let frameView = win.contentView?.superview,
+    // A borderless window (the Turbo Vision and Mac OS 9 frames) can keep a
+    // frame view sized for its old title bar; its content view is the window.
+    let borderless = !win.styleMask.contains(.titled)
+    guard let frameView = borderless ? win.contentView : win.contentView?.superview,
           let rep = frameView.bitmapImageRepForCachingDisplay(in: frameView.bounds)
     else { return }
     frameView.cacheDisplay(in: frameView.bounds, to: rep)
@@ -5983,6 +6152,8 @@ final class PopupMenu: NSObject {
     private var last = Data()
     private var anchor = NSPoint.zero
     private var chosen = 0
+    /// The items as `(label, code, enabled)`, for the Platinum menu.
+    private var items: [(String, Int, Bool)] = []
 
     init(view: CellView) {
         self.view = view
@@ -5998,6 +6169,9 @@ final class PopupMenu: NSObject {
         anchor = NSPoint(x: CGFloat(o["x"] as? Int ?? 0) * CELL_W,
                          y: CGFloat((o["y"] as? Int ?? 0) + 1) * CELL_H)
         menu.removeAllItems()
+        items = (o["items"] as? [[String: Any]] ?? []).map {
+            ($0["label"] as? String ?? "", $0["code"] as? Int ?? 0, $0["enabled"] as? Bool ?? true)
+        }
         for it in o["items"] as? [[String: Any]] ?? [] {
             let mi = NSMenuItem(title: it["label"] as? String ?? "",
                                 action: #selector(pick(_:)), keyEquivalent: "")
@@ -6009,9 +6183,19 @@ final class PopupMenu: NSObject {
     }
 
     /// Runs the menu (blocking, nested run loop); the picked code or 0.
+    /// A Platinum menu in the Mac OS 9 look, an `NSMenu` otherwise.
     func track() -> Int {
         guard let v = view else { return 0 }
         chosen = 0
+        if v.handle != 0, tk_desktop_platinum_ui(v.handle) != 0, let w = v.window, !items.isEmpty {
+            let p = w.convertPoint(toScreen: v.convert(anchor, to: nil))
+            let pm = items.map { PMItem(title: $0.0, enabled: $0.2) }
+            let first = items.firstIndex { $0.2 } ?? 0
+            guard let i = PlatinumMenuSession.popUp(pm, selected: first,
+                                                   over: NSRect(x: p.x, y: p.y - 18, width: 1, height: 18)),
+                  i >= 0, i < items.count, items[i].2 else { return 0 }
+            return items[i].1
+        }
         menu.popUp(positioning: nil, at: anchor, in: v)
         return chosen
     }

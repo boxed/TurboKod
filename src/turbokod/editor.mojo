@@ -1462,6 +1462,10 @@ struct Editor(Copyable, Movable):
     # clicked cell so the dialog opens near the click; ``row`` is the
     # buffer row the BP sits on.
     var pending_breakpoint_menu: Optional[BreakpointMenuRequest]
+    # Right-click anywhere in the gutter sets this — the host opens the
+    # gutter menu (Toggle Blame / Copy Location / Toggle Bookmark /
+    # Toggle Breakpoint) for ``row``, anchored at the clicked cell.
+    var pending_gutter_menu: Optional[BreakpointMenuRequest]
     # Set by ``handle_mouse`` when the user left-clicks the per-line
     # change-bar in the git-changes gutter. The host polls
     # ``consume_git_revert_request``, opens its revert popup anchored at
@@ -1958,6 +1962,7 @@ struct Editor(Copyable, Movable):
         self.exec_line = -1
         self.pending_breakpoint_toggle = Optional[Int]()
         self.pending_breakpoint_menu = Optional[BreakpointMenuRequest]()
+        self.pending_gutter_menu = Optional[BreakpointMenuRequest]()
         self.pending_git_revert = Optional[GitRevertRequest]()
         self.pending_blame_info = Optional[BlameInfoRequest]()
         self.pending_diagnostic_menu = Optional[DiagnosticMenuRequest]()
@@ -2175,6 +2180,7 @@ struct Editor(Copyable, Movable):
         self.exec_line = copy.exec_line
         self.pending_breakpoint_toggle = copy.pending_breakpoint_toggle
         self.pending_breakpoint_menu = copy.pending_breakpoint_menu
+        self.pending_gutter_menu = copy.pending_gutter_menu
         self.pending_git_revert = copy.pending_git_revert.copy()
         self.pending_blame_info = copy.pending_blame_info.copy()
         self.pending_diagnostic_menu = copy.pending_diagnostic_menu
@@ -4166,11 +4172,18 @@ struct Editor(Copyable, Movable):
     def consume_breakpoint_menu(
         mut self,
     ) -> Optional[BreakpointMenuRequest]:
-        """Return any pending right-click on a BP dot and clear the
-        slot. The host opens the breakpoint-context dialog anchored at
-        the request's screen cell."""
+        """Return any pending breakpoint-dialog request (the gutter
+        menu's Edit Breakpoint row) and clear the slot. The host opens
+        the breakpoint-context dialog anchored at the request's screen
+        cell."""
         var req = self.pending_breakpoint_menu
         self.pending_breakpoint_menu = Optional[BreakpointMenuRequest]()
+        return req
+
+    def consume_gutter_menu(mut self) -> Optional[BreakpointMenuRequest]:
+        """Return any pending gutter right-click and clear the slot."""
+        var req = self.pending_gutter_menu
+        self.pending_gutter_menu = Optional[BreakpointMenuRequest]()
         return req
 
     def consume_git_revert_request(mut self) -> Optional[GitRevertRequest]:
@@ -9770,6 +9783,12 @@ struct Editor(Copyable, Movable):
         for i in range(len(rows)):
             self.buffer.set_mark(rows[i], not self.buffer.is_marked(rows[i]))
 
+    def toggle_bookmark_at(mut self, row: Int):
+        """Toggle the bookmark on ``row`` (the gutter menu's row, not the
+        carets')."""
+        if row >= 0 and row < self.buffer.line_count():
+            self.buffer.set_mark(row, not self.buffer.is_marked(row))
+
     def clear_bookmarks(mut self):
         self.buffer.clear_marks()
 
@@ -10292,13 +10311,13 @@ struct Editor(Copyable, Movable):
                 self.scroll_y += 3
                 if self.scroll_y > max_y: self.scroll_y = max_y
             return True
-        # Right-click in the debugger gutter on a row that has a
-        # breakpoint opens the BP context dialog. We resolve which row
-        # the click landed on by replaying the same layout the paint
-        # path uses, then check ``breakpoint_lines`` for that row. In
-        # the text area, a right-click that lands on a diagnostic
-        # squiggle opens a "Copy message" context menu. Other
-        # right-clicks are ignored.
+        # Right-click anywhere in the gutter opens the gutter menu (blame,
+        # copy location, bookmark, breakpoint) for the clicked row. We
+        # resolve the row by replaying the same layout the paint path
+        # uses; inline-diff phantom rows map to no line and are ignored.
+        # In the text area, a right-click that lands on a diagnostic
+        # squiggle opens a "Copy message" context menu, one on a word the
+        # symbol-actions menu. Other right-clicks are ignored.
         if event.button == MOUSE_BUTTON_RIGHT:
             if event.pressed and not event.motion:
                 var total_g = self._total_gutter()
@@ -10311,18 +10330,15 @@ struct Editor(Copyable, Movable):
                         content_w = 1
                     var layout = self._layout_lines(content_h, content_w)
                     var screen_row = event.pos.y - view.a.y
-                    if screen_row >= 0 and screen_row < len(layout):
-                        var buf_row = layout[screen_row].line_idx
-                        for k in range(len(self.breakpoint_lines)):
-                            if self.breakpoint_lines[k] == buf_row:
-                                self.pending_breakpoint_menu = \
-                                    Optional[BreakpointMenuRequest](
-                                        BreakpointMenuRequest(
-                                            buf_row,
-                                            event.pos.x, event.pos.y,
-                                        ),
-                                    )
-                                break
+                    if screen_row >= 0 and screen_row < len(layout) \
+                            and layout[screen_row].line_idx >= 0:
+                        self.pending_gutter_menu = \
+                            Optional[BreakpointMenuRequest](
+                                BreakpointMenuRequest(
+                                    layout[screen_row].line_idx,
+                                    event.pos.x, event.pos.y,
+                                ),
+                            )
                 else:
                     if not self._maybe_request_diagnostic_menu(
                         event.pos, view,

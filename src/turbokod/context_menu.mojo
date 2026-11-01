@@ -9,6 +9,9 @@ decides *which* rows to show — it builds the label/action lists at open
 time, filtered by what the language server actually advertises, so a
 server without an ``implementationProvider`` simply doesn't get that row.
 
+The same popup serves right-clicks in the gutter, with a fixed row set
+(Toggle Blame / Copy Location / Toggle Bookmark / Toggle Breakpoint).
+
 Modeled on ``DiagnosticMenu`` so the look and the press/release event
 protocol match exactly. Unlike the diagnostic menu its rows are dynamic,
 supplied per-open rather than hardcoded.
@@ -47,6 +50,12 @@ comptime CTX_MENU_ACTION_INLINE_COMPLETION = 13
 comptime CTX_MENU_ACTION_LINKED_EDIT = 14
 comptime CTX_MENU_ACTION_TOGGLE_FOLD = 15
 comptime CTX_MENU_ACTION_COLOR_PICKER = 16
+# Gutter menu rows (right-click in the line-number / gutter strip).
+comptime CTX_MENU_ACTION_TOGGLE_BLAME = 17
+comptime CTX_MENU_ACTION_COPY_LOCATION = 18
+comptime CTX_MENU_ACTION_TOGGLE_BOOKMARK = 19
+comptime CTX_MENU_ACTION_TOGGLE_BREAKPOINT = 20
+comptime CTX_MENU_ACTION_EDIT_BREAKPOINT = 21
 
 
 struct EditorContextMenu(Movable):

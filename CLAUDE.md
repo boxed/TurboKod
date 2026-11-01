@@ -85,7 +85,8 @@ or hand-build a Swift twin. Full details in
 ### Mac OS 9 look (native macOS)
 
 View ▸ Mac OS 9-style UI (`config.platinum_ui`) is a third projector:
-the host lays out and draws the declarative dialogs and the confirm alert
+the host lays out and draws the declarative dialogs, the confirm, prompt
+and message-request alerts, the Find / Replace window and the popup menus
 itself, in pixels, Platinum-style (`PlatinumDialog` / `PNode` in
 `TurboKod.swift`), and the project window's chrome: borderless, in a
 `PlatinumMainFrame` with Platinum tabs over the tabbed layout and a

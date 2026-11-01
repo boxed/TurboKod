@@ -89,6 +89,9 @@ from .diagnostic_menu import (
 )
 from .context_menu import (
     CTX_MENU_ACTION_CALLEES, CTX_MENU_ACTION_CALLERS,
+    CTX_MENU_ACTION_COPY_LOCATION, CTX_MENU_ACTION_EDIT_BREAKPOINT,
+    CTX_MENU_ACTION_TOGGLE_BLAME, CTX_MENU_ACTION_TOGGLE_BOOKMARK,
+    CTX_MENU_ACTION_TOGGLE_BREAKPOINT,
     CTX_MENU_ACTION_COLOR_PICKER,
     CTX_MENU_ACTION_COLOR_PRESENTATION,
     CTX_MENU_ACTION_DECLARATION, CTX_MENU_ACTION_INLINE_COMPLETION,
@@ -246,7 +249,7 @@ from .terminal_pane import TERMINAL_PANE_CLOSE, TerminalPane
 from .test_pane import (
     TEST_CLEAR_OUTPUT, TEST_PANE_CLOSE, TEST_RERUN, TEST_STOP, TestPane,
 )
-from .editor import Editor
+from .editor import BreakpointMenuRequest, Editor
 from .window import (
     BottomDockedPanel, DOCK_MIN_HEIGHT, MIN_WIN_H, MIN_WIN_W,
     PANEL_STATE_MAXIMIZED, PANEL_STATE_MINIMIZED, PANEL_STATE_NORMAL,
@@ -2711,8 +2714,9 @@ struct Desktop(Movable):
         (which paints a hosted window *over* the workspace rather than
         instead of it) all still need what's behind them — and so do
         the pickers, Find in Project included, now that they're a
-        declarative dialog over the workspace."""
-        return self.local_changes.active
+        declarative dialog over the workspace. In a window of its own
+        (``dialogs_windowed``) the git view covers none of it."""
+        return self.local_changes.active and not self.dialogs_windowed()
 
     def scroll_regions(mut self, screen: Rect) -> List[EditorScrollRegion]:
         """The editor windows the host may smooth-scroll this frame. Phase
@@ -4808,14 +4812,14 @@ struct Desktop(Movable):
                 )
         if windowed:
             pass
-        elif not (native and self.native_prompt_active()):
+        elif not (self.host_draws_dialogs() and self.native_prompt_active()):
             self.prompt.paint(canvas, screen)
         # Review paints over every modal (below), so a confirm it raised
         # (checkout a branch?) is painted again after it.
         var host_confirm = self.host_draws_confirm()
         if not self.review.active and not host_confirm and not windowed:
             self.confirm_dialog.paint(canvas, screen)
-        if not native and not windowed:
+        if not self.host_draws_dialogs() and not windowed:
             self.message_request_dialog.paint(canvas, screen)
         if not native and not windowed:
             self.color_picker.paint(canvas, screen)
@@ -4828,19 +4832,20 @@ struct Desktop(Movable):
         # Spell-action popup. Painted last among modals so it overlays
         # everything else (it's contextual to the editor cursor and
         # routinely opens above already-rendered widgets).
-        if not (native and self.spell_menu.active):
+        var host_popups = self.host_draws_dialogs()
+        if not (host_popups and self.spell_menu.active):
             self.spell_menu.paint(canvas, screen)
         self.git_gutter_menu.paint(canvas, screen)
-        if not (native and self.test_gutter_menu.active):
+        if not (host_popups and self.test_gutter_menu.active):
             self.test_gutter_menu.paint(canvas, screen)
         self.blame_popup.paint(canvas, screen)
-        if not (native and self.diagnostic_menu.active):
+        if not (host_popups and self.diagnostic_menu.active):
             self.diagnostic_menu.paint(canvas, screen)
-        if not (native and self.editor_context_menu.active):
+        if not (host_popups and self.editor_context_menu.active):
             self.editor_context_menu.paint(canvas, screen)
-        if not (native and self.tab_context_menu.active):
+        if not (host_popups and self.tab_context_menu.active):
             self.tab_context_menu.paint(canvas, screen)
-        if not (native and self.lsp_status_menu.active):
+        if not (host_popups and self.lsp_status_menu.active):
             self.lsp_status_menu.paint(canvas, screen)
         if not (native and self.spelling_dialog.active):
             self.spelling_dialog.paint(canvas, screen)
@@ -8120,10 +8125,9 @@ struct Desktop(Movable):
         # pending context-menu request — surface the symbol-actions popup
         # on this same frame.
         self._maybe_open_context_menu()
-        # Right-click on a BP dot stamps a pending menu request on the
-        # editor — surface the dialog before the next paint so the
-        # user-visible delay is one frame max.
-        self._maybe_open_breakpoint_menu()
+        # Right-click in the gutter stamps a pending gutter-menu request —
+        # surface the popup on this same frame.
+        self._maybe_open_gutter_menu()
         # A click that reaches the window manager could have started a
         # drag/resize — drop the pending refit so the next resize event
         # doesn't trample the user's intended move. (This is coarse:
@@ -8732,8 +8736,9 @@ struct Desktop(Movable):
 
     def native_prompt_active(self) -> Bool:
         """A single-field prompt (rename, go to line, …) is up. Find and
-        Replace keep their in-grid dialog: they stay open across matches
-        and carry option toggles."""
+        Replace aren't: where the host draws dialogs they're its find bar
+        (``_request_native_find``), and the in-grid ones carry option
+        toggles and a second row."""
         return self.prompt.active and not self.prompt.has_second \
             and not self.prompt.show_options
 
@@ -8762,7 +8767,8 @@ struct Desktop(Movable):
 
     def native_dialog_active(self) -> Bool:
         if self.platinum_ui():
-            return self.confirm_dialog.active
+            return self.confirm_dialog.active or self.native_prompt_active() \
+                or self.message_request_dialog.active
         if not self.native_ui():
             return False
         return self.confirm_dialog.active or self.native_prompt_active() \
@@ -9110,10 +9116,11 @@ struct Desktop(Movable):
     # --- macOS-style UI: popup menus as NSMenu ---------------------------
 
     def native_popup_kind(self) -> String:
-        """The anchored popup the host shows as a native ``NSMenu``, or
-        empty. (The git gutter's hunk peek stays in-grid: it's a diff
-        preview with a button, not a menu.)"""
-        if not self.native_ui():
+        """The anchored popup the host shows as a native ``NSMenu`` (a
+        Platinum menu in the Mac OS 9 look), or empty. (The git gutter's
+        hunk peek stays in-grid: it's a diff preview with a button, not a
+        menu.)"""
+        if not self.host_draws_dialogs():
             return String("")
         if self.spell_menu.active:
             return String("spell")
@@ -10183,29 +10190,7 @@ struct Desktop(Movable):
         if action == EDITOR_TOGGLE_BLAME:
             var idx = self._focused_editor_idx()
             if idx >= 0:
-                # Lazy-load: only spawn ``git blame`` the first time
-                # the gutter is enabled per editor. Subsequent toggles
-                # flip visibility without re-spawning.
-                if self.windows.windows[idx].editor.blame_visible:
-                    self.windows.windows[idx].editor.blame_visible = False
-                else:
-                    var path = self.windows.windows[idx].editor.file_path
-                    if len(path.as_bytes()) > 0 \
-                            and len(self.windows.windows[idx].editor
-                                    .blame_lines) == 0:
-                        try:
-                            var lines = compute_blame(path)
-                            self.windows.windows[idx].editor.set_blame(
-                                lines^,
-                            )
-                        except e:
-                            # Git missing or file not in a repo: leave
-                            # the toggle off rather than blowing up.
-                            # Logged so the silent-toggle-noop is
-                            # diagnosable.
-                            print("desktop: compute_blame", path, ":", String(e))
-                    else:
-                        self.windows.windows[idx].editor.blame_visible = True
+                self._toggle_blame(idx)
             return Optional[String]()
         if action == EDITOR_CUT:
             var fe = self._focused_editor_idx()
@@ -13898,7 +13883,7 @@ struct Desktop(Movable):
 
         Restores the Cc / W / .* toggles to whatever the user had on
         for the previous Find so the flags persist across opens."""
-        if self.native_ui():
+        if self.host_draws_dialogs():
             self._request_native_find(String("find"))
             return
         self._pending_action = EDITOR_FIND
@@ -13921,7 +13906,7 @@ struct Desktop(Movable):
         Find and Replace — seeded from the editor's selection the same
         way ``_open_find_prompt`` does. Submitting Enter from either
         row runs the replace in one shot."""
-        if self.native_ui():
+        if self.host_draws_dialogs():
             self._request_native_find(String("replace"))
             return
         self._pending_action = _PA_REPLACE_DO
@@ -13933,8 +13918,9 @@ struct Desktop(Movable):
         self.prompt.set_search_options(self._last_search_opts)
 
     def _request_native_find(mut self, mode: String):
-        """Ask the host to show its find bar, seeded like the in-grid
-        prompt: the selection, else the previous needle."""
+        """Ask the host to show its find bar (a Platinum find window in the
+        Mac OS 9 look), seeded like the in-grid prompt: the selection, else
+        the previous needle."""
         var seed = self._selection_seed_for_search()
         if len(seed.as_bytes()) == 0:
             seed = self._last_search
@@ -16559,6 +16545,99 @@ struct Desktop(Movable):
             String("Deleted ") + basename(path), Attr(BLACK, LIGHT_GRAY),
         )
 
+    def _toggle_blame(mut self, idx: Int):
+        """Show / hide the blame gutter on editor ``idx``. Lazy-load: only
+        spawn ``git blame`` the first time the gutter is enabled per
+        editor. Subsequent toggles flip visibility without re-spawning."""
+        if self.windows.windows[idx].editor.blame_visible:
+            self.windows.windows[idx].editor.blame_visible = False
+            return
+        var path = self.windows.windows[idx].editor.file_path
+        if len(path.as_bytes()) > 0 \
+                and len(self.windows.windows[idx].editor.blame_lines) == 0:
+            try:
+                var lines = compute_blame(path)
+                self.windows.windows[idx].editor.set_blame(lines^)
+            except e:
+                # Git missing or file not in a repo: leave the toggle off
+                # rather than blowing up. Logged so the silent-toggle-noop
+                # is diagnosable.
+                print("desktop: compute_blame", path, ":", String(e))
+        else:
+            self.windows.windows[idx].editor.blame_visible = True
+
+    def _maybe_open_gutter_menu(mut self):
+        """Drain ``Editor.consume_gutter_menu`` on the focused editor and
+        open the gutter popup for the right-clicked row: Toggle Blame,
+        Copy Location (``path:line``), Toggle Bookmark, Toggle Breakpoint,
+        plus Edit Breakpoint… when that row has one. It's the
+        symbol-actions popup with a fixed row set, so the native and
+        Platinum menus come for free."""
+        if not self.windows.focused_is_editor():
+            return
+        var idx = self.windows.focused
+        var req_opt = self.windows.windows[idx].editor.consume_gutter_menu()
+        if not req_opt:
+            return
+        var req = req_opt.value()
+        self._ctx_menu_editor_idx = idx
+        self._ctx_menu_row = req.row
+        self._ctx_menu_col = 0
+        self._ctx_menu_word = String("")
+        ref ed = self.windows.windows[idx].editor
+        var has_path = len(ed.file_path.as_bytes()) > 0
+        var labels = List[String]()
+        var actions = List[Int]()
+        labels.append(
+            String("Hide Blame") if ed.blame_visible else String("Show Blame")
+        )
+        actions.append(CTX_MENU_ACTION_TOGGLE_BLAME)
+        if has_path:
+            labels.append(String("Copy Location"))
+            actions.append(CTX_MENU_ACTION_COPY_LOCATION)
+        labels.append(String("Toggle Bookmark"))
+        actions.append(CTX_MENU_ACTION_TOGGLE_BOOKMARK)
+        if has_path:
+            labels.append(String("Toggle Breakpoint"))
+            actions.append(CTX_MENU_ACTION_TOGGLE_BREAKPOINT)
+            if self.dap.has_breakpoint(ed.file_path, req.row):
+                labels.append(String("Edit Breakpoint…"))
+                actions.append(CTX_MENU_ACTION_EDIT_BREAKPOINT)
+        self.editor_context_menu.open(
+            Point(req.anchor_x, req.anchor_y), labels^, actions^,
+        )
+
+    def _on_gutter_menu_action(
+        mut self, act: Int, idx: Int, row: Int, anchor: Point,
+    ):
+        """Run a gutter-menu row on editor ``idx`` / buffer ``row``."""
+        if act == CTX_MENU_ACTION_TOGGLE_BLAME:
+            self._toggle_blame(idx)
+            return
+        if act == CTX_MENU_ACTION_TOGGLE_BOOKMARK:
+            self.windows.windows[idx].editor.toggle_bookmark_at(row)
+            return
+        var path = self.windows.windows[idx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            return
+        if act == CTX_MENU_ACTION_COPY_LOCATION:
+            var shown = path
+            if self.project:
+                shown = project_relative(self.project.value(), path)
+            var loc = shown + String(":") + String(row + 1)
+            clipboard_copy(loc)
+            self.status_bar.set_message(
+                String("Copied ") + loc, Attr(BLACK, LIGHT_GRAY),
+            )
+        elif act == CTX_MENU_ACTION_TOGGLE_BREAKPOINT:
+            self.dap.toggle_breakpoint(path, row)
+        elif act == CTX_MENU_ACTION_EDIT_BREAKPOINT:
+            self.windows.windows[idx].editor.pending_breakpoint_menu = \
+                Optional[BreakpointMenuRequest](
+                    BreakpointMenuRequest(row, anchor.x, anchor.y),
+                )
+            self._maybe_open_breakpoint_menu()
+
     def _maybe_open_context_menu(mut self):
         """Drain ``Editor.consume_context_menu_request`` on the focused
         editor and open the symbol-actions popup anchored at the click,
@@ -16660,10 +16739,17 @@ struct Desktop(Movable):
         var row = self._ctx_menu_row
         var col = self._ctx_menu_col
         var word = self._ctx_menu_word
+        var anchor = Point(
+            self.editor_context_menu.anchor_x, self.editor_context_menu.anchor_y,
+        )
         self.editor_context_menu.close()
         self._ctx_menu_editor_idx = -1
         self._ctx_menu_word = String("")
         if not self._is_editor_at(idx):
+            return
+        if act >= CTX_MENU_ACTION_TOGGLE_BLAME \
+                and act <= CTX_MENU_ACTION_EDIT_BREAKPOINT:
+            self._on_gutter_menu_action(act, idx, row, anchor)
             return
         if act == CTX_MENU_ACTION_RENAME:
             self._begin_rename_at(idx, row, col, word^)

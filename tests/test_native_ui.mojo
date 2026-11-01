@@ -20,7 +20,7 @@ from turbokod.ui_grid import ui_act, ui_set
 from turbokod.git_changes import LineHistoryEntry
 from turbokod.diff import MergeRegion, REGION_CONFLICT, REGION_STABLE
 from turbokod.merge_view import CHOICE_DISK
-from turbokod.events import Event, KEY_ENTER
+from turbokod.events import Event, KEY_ENTER, MOUSE_BUTTON_RIGHT
 from turbokod.geometry import Point, Rect
 from turbokod.window import Window
 from turbokod.dap_dispatch import DapStackFrame, DapVariable
@@ -659,7 +659,7 @@ def test_platinum_dialogs_go_to_the_host_and_ignore_grid_keys() raises:
     assert_true(d.settings_native)
 
 
-def test_platinum_takes_the_confirm_but_leaves_prompts_in_the_grid() raises:
+def test_platinum_takes_the_confirm_prompts_find_and_popups() raises:
     var d = _platinum_desktop(String("a\nb\n"))
     d.confirm_dialog.open(String("Install rust LSP?"), String("Install"))
     assert_true(d.native_dialog_active())
@@ -667,8 +667,17 @@ def test_platinum_takes_the_confirm_but_leaves_prompts_in_the_grid() raises:
     _ = d.native_confirm_answer(-1)
     assert_false(d.confirm_dialog.active)
     _ = d.dispatch_action(EDITOR_GOTO, _SCREEN)
-    assert_true(d.prompt.active)
-    assert_false(d.native_dialog_active())
+    assert_true(d.native_dialog_active())
+    assert_false(_screen_has(d, String("Go to line")))
+    _ = d.native_prompt_answer(String(""), False)
+    assert_false(d.prompt.active)
+    # Find is the host's Platinum find window, not the grid prompt.
+    _ = d.dispatch_action(EDITOR_FIND, _SCREEN)
+    assert_false(d.prompt.active)
+    assert_equal(d.native_find_request, String("find"))
+    # A popup is the host's Platinum menu.
+    d.spell_menu.open(String("wrod"), Point(4, 6), False)
+    assert_equal(d.native_popup_kind(), String("spell"))
 
 
 def test_platinum_tabs_keep_a_gutter_for_the_scroll_bar() raises:
@@ -954,3 +963,25 @@ def test_native_project_settings_edit_through_the_sections_and_sync() raises:
 def main() raises:
     setup_test_env()
     TestSuite.discover_tests[__functions_in_module()]().run()
+
+
+def test_gutter_right_click_opens_the_gutter_menu() raises:
+    var d = _native_desktop(String("one\ntwo\nthree\n"))
+    d.windows.windows[0].editor.line_numbers = True
+    var view = d.windows.windows[0].interior()
+    _ = d.handle_event(
+        Event.mouse_event(
+            Point(view.a.x, view.a.y + 1), MOUSE_BUTTON_RIGHT, True, False,
+        ),
+        _SCREEN,
+    )
+    assert_equal(d.native_popup_kind(), String("context"))
+    var items = d.native_popup_items()
+    # No file path: nothing to copy or set a breakpoint in.
+    assert_equal(len(items), 2)
+    assert_equal(items[0].label, String("Show Blame"))
+    assert_equal(items[1].label, String("Toggle Bookmark"))
+    _ = d.native_popup_choose(items[1].code)
+    assert_false(d.editor_context_menu.active)
+    assert_true(d.windows.windows[0].editor.buffer.is_marked(1))
+    assert_false(d.windows.windows[0].editor.buffer.is_marked(0))

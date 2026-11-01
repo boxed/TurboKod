@@ -65,8 +65,8 @@ Button naming follows the project rule (confirmations name their action):
   "Rename", …), never a bare OK.
 - The in-grid first-letter hotkeys become ⌘-letter equivalents. `Cancel`
   answers Esc and the default button answers Return.
-- Find and Replace deliberately stay in-grid for now. They remain open across
-  matches and carry option toggles, so they need a non-modal panel, not an
+- Find and Replace aren't prompts here. They stay open across matches and
+  carry option toggles, so they're the non-modal find bar (below), not an
   alert.
 
 While a native text field is first responder, the Edit menu's key equivalents

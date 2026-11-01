@@ -27,6 +27,19 @@ come in 8×16 steps.
   Note icon. It has to be the host's: a confirm can be raised over a dialog
   the host is drawing, and in the grid it would paint (and take its input)
   underneath that dialog's window.
+- **The one-field prompts** (Go to Line, Rename, Add Watch, …) and a
+  language server's **message requests**, as Platinum alerts built in Swift
+  (`showPlatinumPrompt` / `showPlatinumChoice`) from the same
+  `tk_desktop_native_dialog` JSON the macOS sheets use, answered through
+  `tk_desktop_native_prompt_answer` / `_choice_answer`.
+- **Find and Replace**, as a Platinum window (`showPlatinumFind`) that stays
+  open while you step through matches: the macOS find bar's request
+  (`tk_desktop_take_find_request`) and its ops (`tk_desktop_find`), so the
+  searching is the same code. Fields and checkboxes are kept across
+  reopenings.
+- **The popup menus** (editor and tab context menus, spelling suggestions,
+  diagnostics, the test gutter, LSP status), as Platinum menus
+  (`PlatinumMenuSession.popUp`) in place of the macOS look's `NSMenu`s.
 - **The project window's chrome.** The windows become tabs, as in the
   macOS-style UI (`WindowManager.tabbed`), and the `NSWindow` goes
   borderless (`MainWindow`) inside a `PlatinumMainFrame`: the Settings
@@ -60,9 +73,11 @@ come in 8×16 steps.
 - **The pickers** (Quick Open, Find in Project, …), being declarative:
   `PListView` draws a `ui_list` with the git window's rows view, and a
   search field's arrows move it.
-- **Not covered:** the menus, which stay the system menu bar. Everything
-  else (prompts, pickers, the editor text, the panes) stays the classic
-  grid.
+- **Not covered:** the menu bar, which stays the system's. Still drawn as
+  Turbo Vision grid dialogs, with no Platinum projector yet: Save As, the
+  color picker, Project ▸ Spelling, git history, the merge view, review
+  mode and the git gutter's hunk peek. The editor text and the panes are
+  the grid by design.
 
 ## Core side
 
@@ -75,8 +90,11 @@ come in 8×16 steps.
   git view (`native_git_active`) and the declarative dialogs: it decides whether they leave the grid, whether
   `native_ui_surface_active` swallows grid input, and whether Settings
   opens in the host's window (`settings_native`).
-- `native_dialog_active()` covers only the confirm in this look, and
-  `host_draws_confirm()` keeps the grid from painting it.
+- `native_dialog_active()` covers the confirm, the one-field prompts and
+  the message requests in this look, and `host_draws_confirm()` keeps the
+  grid from painting the confirm. Find and Replace go to the host
+  (`_request_native_find`) whenever `host_draws_dialogs()`, and so do the
+  popups (`native_popup_kind`).
 - `tk_desktop_ui` carries `look: "platinum" | "macos"`, and
   `tk_desktop_platinum_ui` reports the look per window.
 
