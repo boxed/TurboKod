@@ -3,13 +3,15 @@
 # Build the README / docs screenshots of the native macOS app:
 #
 #   docs/screenshots/theme-<slug>.png   one per built-in theme
-#   screenshot.png                      hero: debug session paused at a
-#                                       breakpoint in a small Python project
+#   screenshot.png                      hero: the Turbo Vision look's window,
+#                                       debug session paused at a breakpoint
+#                                       in a small Python project
 #                                       (boxed/scientist), file tree docked
 #                                       right (default theme)
 #   docs/screenshots/look-<look>.png    the same hero scene in the macOS-style
-#                                       and Mac OS 9 looks, plus a dialog
-#   docs/screenshots/look-<look>-*.png  or two in each, for the homepage tabs
+#                                       and Mac OS 9 looks
+#   docs/screenshots/look-<look>-*.png  a dialog or two in each look, for the
+#                                       homepage tabs
 #
 # Everything is driven through env knobs the app honors when TK_CAPTURE is
 # set (see "scripted screenshot capture" in app/swift/TurboKod.swift):
@@ -63,9 +65,12 @@ TURBOKOD_BUILD_ONLY=1 ./run_swift.sh
 targets="$root/.turbokod/targets.json"
 bps="$root/.turbokod/per_user/$(id -un)/breakpoints.json"
 session="$root/.turbokod/per_user/$(id -un)/session.json"
+# The repo's remembered window frame too: the theme shots open this repo, and
+# would otherwise come out at whatever size your own window happens to be.
+geometry="$root/.turbokod/per_user/$(id -un)/native_window.json"
 mkdir -p "$(dirname "$bps")"
 restore() {
-  for f in "$targets" "$bps" "$session"; do
+  for f in "$targets" "$bps" "$session" "$geometry"; do
     if [ -f "$f.screenshots-bak" ]; then mv "$f.screenshots-bak" "$f"
     else rm -f "$f"; fi
   done
@@ -74,6 +79,8 @@ trap restore EXIT
 if [ -f "$targets" ]; then cp "$targets" "$targets.screenshots-bak"; fi
 if [ -f "$bps" ];     then cp "$bps"     "$bps.screenshots-bak"; fi
 if [ -f "$session" ]; then cp "$session" "$session.screenshots-bak"; fi
+if [ -f "$geometry" ]; then cp "$geometry" "$geometry.screenshots-bak"; fi
+printf '{"last":[0,84,1712,928]}' > "$geometry"
 
 # ---------------------------------------------------------------- themes --
 # Same scene for every theme: the project open with the editor on a meaty
@@ -207,18 +214,13 @@ EOF
 # Kept for the other looks' runs: quitting saves over the session.
 cp "$psession" "$psession.scene"
 
-echo "[screenshots] debugger paused at $src_file:$bp_line -> $root/screenshot.png"
-# The tree toggle fires first (one step of the hidden→right→left cycle
-# docks it on the right) so the workspace refits the two windows before
-# the breakpoint + launch actions run.
-TK_THEME="Turbo C++ 3.0" \
-TK_MENU_INGRID=1 \
-TK_CAPTURE_ACTIONS="project:tree:toggle,debug:toggle_bp,debug:start_or_continue" \
-TK_CAPTURE_WHEN="debug-stopped" \
-TK_CAPTURE="$root/screenshot.png" \
-  ./run_swift.sh "$proj"
+echo "[screenshots] debugger paused at $src_file:$bp_line"
+# The hero (screenshot.png) is the Turbo Vision look's run below. In every
+# look's debugger run the tree toggle fires first (one step of the
+# hidden→right→left cycle docks it on the right) so the workspace refits
+# before the breakpoint + launch actions run.
 
-# ------------------------------------------------------- the other looks --
+# ------------------------------------------------------------- the looks --
 # The look, its font and its theme are global settings, so each look gets a
 # scratch HOME with a fresh config holding just those (and the welcome
 # window dismissed). Fresh, not a copy of yours: Project Settings shows the
@@ -266,6 +268,19 @@ capture_look "$macos9_home" "$out/look-macos9.png" \
 capture_look "$macos9_home" "$out/look-macos9-settings.png" \
   TK_CAPTURE_ACTIONS="app:settings" TK_CAPTURE_TITLE="Settings"
 capture_look "$macos9_home" "$out/look-macos9-project.png" \
+  TK_CAPTURE_ACTIONS="project:settings"
+
+# The Turbo Vision look in the app: the whole window, so the Turbo Vision
+# frame shows, and dialogs in Turbo Vision-framed windows of their own.
+tv_home="$root/.build/screenshot-home-tv"
+look_home "$tv_home" 0 0 "Turbo C++ 3.0" "" 0
+printf '{"breakpoints":[]}' > "$pbps"
+capture_look "$tv_home" "$root/screenshot.png" \
+  TK_CAPTURE_ACTIONS="project:tree:toggle,debug:toggle_bp,debug:start_or_continue" \
+  TK_CAPTURE_WHEN="debug-stopped"
+capture_look "$tv_home" "$out/look-tv-git.png" \
+  TK_CAPTURE_ACTIONS="git:local_changes"
+capture_look "$tv_home" "$out/look-tv-project.png" \
   TK_CAPTURE_ACTIONS="project:settings"
 rm -f "$psession.scene"
 
