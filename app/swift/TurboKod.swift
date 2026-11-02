@@ -3778,7 +3778,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         views.remove(at: idx)
         tabStrips[ObjectIdentifier(v)] = nil
         platinumFrames[ObjectIdentifier(v)] = nil
-        tvFrames[ObjectIdentifier(v)] = nil
+        tvFrames.removeValue(forKey: ObjectIdentifier(v))?.retroShadow?.detach()
         tvDialogs.removeValue(forKey: ObjectIdentifier(v))?.dismiss()
         platinumScrollers[ObjectIdentifier(v)] = nil
         nativeSheets[ObjectIdentifier(v)] = nil
@@ -4848,6 +4848,7 @@ extension AppController {
                 return tf.poll(info: info)
             }
             tvFrames[id] = nil
+            tf.retroShadow?.detach(restoreSystemShadow: true)
             let f = win.frame
             v.removeFromSuperview()
             win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
@@ -4868,10 +4869,10 @@ extension AppController {
         let tf = TVMainFrame(cell: v)
         win.styleMask = [.borderless, .miniaturizable, .resizable]
         win.collectionBehavior.insert(.fullScreenPrimary)
-        win.hasShadow = true
         win.backgroundColor = .black
         win.contentView = tf
         win.setFrame(f, display: false)
+        tf.retroShadow = RetroShadow(under: win)
         tf.layoutChrome()
         win.makeFirstResponder(v)
         tvFrames[id] = tf
@@ -11273,6 +11274,7 @@ final class MainWindow: NSWindow {
 final class TVMainFrame: NSView, NSDraggingSource {
     let cell: CellView
     let chrome = CellView()
+    var retroShadow: RetroShadow?
     private let icon = TVProxyIcon()
     private var info: [String: Any] = [:]
     private var infoData = Data()
@@ -11494,6 +11496,7 @@ final class TVDialogWindow: NSObject {
     let view: CellView
     weak var mainView: CellView?
     private let win: TVDialogNSWindow
+    private var shadow: RetroShadow?
     private var kind = ""
     private var size = (cols: 0, rows: 0)
     private var resizable = false
@@ -11507,7 +11510,6 @@ final class TVDialogWindow: NSObject {
                                styleMask: [.borderless], backing: .buffered, defer: true)
         super.init()
         win.isReleasedWhenClosed = false
-        win.hasShadow = true
         win.backgroundColor = .black
         win.acceptsMouseMovedEvents = true
         win.contentView = view
@@ -11518,12 +11520,15 @@ final class TVDialogWindow: NSObject {
         place(over: parent)
         parent.addChildWindow(win, ordered: .above)
         win.makeKeyAndOrderFront(nil)
+        shadow = RetroShadow(under: win)
         win.makeFirstResponder(view)
     }
 
     func dismiss() {
         view.onChromeMouse = nil
         view.handle = 0          // the project window's view owns the handle
+        shadow?.detach()
+        shadow = nil
         win.parent?.removeChildWindow(win)
         win.orderOut(nil)
     }
@@ -11609,6 +11614,82 @@ final class TVDialogWindow: NSObject {
 /// A borderless window doesn't become key on its own.
 final class TVDialogNSWindow: NSWindow {
     override var canBecomeKey: Bool { true }
+}
+
+/// The Turbo Vision drop shadow under a window, in place of the system's
+/// soft one: two cells wide down the right from the second row, one row
+/// tall along the bottom from the third column, a hard-edged translucent
+/// black that dims whatever it falls on (as `paint_drop_shadow` does in
+/// the grid). A click-through child window ordered below its owner, so
+/// it moves with it; resizes and full screen are followed by notification.
+final class RetroShadow {
+    private weak var owner: NSWindow?
+    private let win: NSWindow
+    private var observers: [NSObjectProtocol] = []
+    private var fullScreen = false
+
+    init(under owner: NSWindow) {
+        self.owner = owner
+        win = NSWindow(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: true)
+        win.isReleasedWhenClosed = false
+        win.isOpaque = false
+        win.backgroundColor = .clear
+        win.hasShadow = false
+        win.ignoresMouseEvents = true
+        win.contentView = RetroShadowView()
+        owner.hasShadow = false
+        let nc = NotificationCenter.default
+        let names: [(NSNotification.Name, Bool?)] = [
+            (NSWindow.didResizeNotification, nil), (NSWindow.didMoveNotification, nil),
+            (NSWindow.didDeminiaturizeNotification, nil),
+            (NSWindow.willEnterFullScreenNotification, true), (NSWindow.didExitFullScreenNotification, false),
+        ]
+        for (name, full) in names {
+            observers.append(nc.addObserver(forName: name, object: owner, queue: .main) { [weak self] _ in
+                if let full = full { self?.fullScreen = full }
+                self?.sync()
+            })
+        }
+        fullScreen = owner.styleMask.contains(.fullScreen)
+        sync()
+    }
+
+    /// Take the shadow off for good, handing the owner back the system's.
+    func detach(restoreSystemShadow: Bool = false) {
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers = []
+        if let o = owner {
+            o.removeChildWindow(win)
+            if restoreSystemShadow { o.hasShadow = true }
+        }
+        win.orderOut(nil)
+    }
+
+    /// Follow the owner's frame; hidden in (or entering) full screen.
+    func sync() {
+        guard let o = owner else { return }
+        if fullScreen || !o.isVisible {
+            if win.parent != nil { o.removeChildWindow(win) }
+            win.orderOut(nil)
+            return
+        }
+        let f = o.frame
+        win.setFrame(NSRect(x: f.minX + 2 * CELL_W, y: f.minY - CELL_H, width: f.width, height: f.height),
+                     display: false)
+        win.contentView?.needsDisplay = true
+        if win.parent == nil { o.addChildWindow(win, ordered: .below) }
+    }
+}
+
+private final class RetroShadowView: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor(white: 0, alpha: 0.6).setFill()
+        let b = bounds
+        // Only the L that shows past the owner, so nothing doubles up
+        // where the two strips meet.
+        NSRect(x: 0, y: 0, width: b.width, height: CELL_H).fill()
+        NSRect(x: b.width - 2 * CELL_W, y: CELL_H, width: 2 * CELL_W, height: b.height - CELL_H).fill()
+    }
 }
 
 /// The proxy icon over its two cells of the frame's title row. Clicks go

@@ -65,6 +65,10 @@ never set `host_owns_menu`, which `Desktop.tv_frame()` requires.
   - the proxy icon (`TVProxyIcon`, the file's Finder icon over its two
     cells) drags the file, and ⌘-click on it or the title shows the path
     menu (picking an entry shows it in Finder).
+- The window casts a Turbo Vision drop shadow instead of the system's soft
+  one (`RetroShadow`): a click-through child window ordered below it, two
+  cells right and one row down, translucent black in the L that shows past
+  the window. Off in full screen. The dialog windows below get one too.
 - A borderless window doesn't close, zoom or minimize from the Window menu on
   its own; `MainWindow` covers that for both borderless looks.
 
