@@ -337,8 +337,25 @@ It never re-implements an operation:
   the same post-input step the in-grid path takes.
 
 The Mac OS 9 look shows the same view as a Platinum window
-(`PlatinumGitView`, see [platinum-ui.md](platinum-ui.md)); both implement
-`GitSurface`.
+(`PlatinumGitView`, see [platinum-ui.md](platinum-ui.md)) and the Turbo
+Vision look as a cell window the core paints (`TVGitWindow`, see
+[tv-frame.md](tv-frame.md)); all three implement `GitSurface`.
+
+**It isn't modal.** In the native app (`Desktop.git_windowed()`, i.e.
+`host_owns_menu`) the git view is a window of its own beside the project
+window, which keeps its input: `_git_modal()` — the view as the terminal
+frontends' in-grid modal — is what the modal checks ask, not
+`local_changes.active`. The view notices edits saved meanwhile through its
+external-change poll. Opening a file from it leaves it open and brings the
+project window forward (`main_focus_request`); Git ▸ Local changes while
+it's up raises its window (`tk_desktop_take_git_front_request`); closing
+the project closes it. Its title is `Local changes — <project>`
+(`LocalChanges.title`, sent as `title`). Its frame is remembered per
+project and per display configuration (`GitWindowPlacement`, a `git` rect
+next to the floating panels' in the project's geometry file). While it is
+key, `tk_desktop_set_git_window_key` makes a chord the menu replays (⌘C)
+land in it rather than the editor behind, `keyView` maps it to its
+project window for menu actions, and ⌘W closes it.
 
 **Swift gotcha found here:** `TurboKod.swift` is the app's main file, and
 in a main file a top-level `let` is initialized only when execution reaches

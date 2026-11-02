@@ -1408,6 +1408,90 @@ def tk_desktop_dialog_mouse(
     return _action_code(action)
 
 
+# --- the git view's window -----------------------------------------------------
+#
+# In the native app the git view is a non-modal window of its own. The macOS
+# and Mac OS 9 looks draw it from ``tk_desktop_git``; the Turbo Vision look's
+# is a borderless cell window the core paints, frame and all.
+
+
+@export
+def tk_desktop_git_window(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
+    """The Turbo Vision look's git window (``Desktop.git_window``) as JSON
+    ``{"title"}``; nothing (0) while it isn't up. Same buffer contract as
+    ``tk_desktop_native_dialog``."""
+    if h == 0:
+        return 0
+    ref d = _desk(h)[]
+    if not d.git_window():
+        return 0
+    var o = json_object()
+    o.put(String("title"), json_str(d.git_window_title()))
+    return _write_out(encode_json(o), out_ptr, cap)
+
+
+@export
+def tk_desktop_layout_git(
+    h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
+) abi("C") -> Int:
+    """Paint the git window and pack it like ``tk_desktop_layout``."""
+    if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
+        return 0
+    var canvas = _blank_canvas(cols, rows)
+    _desk(h)[].paint_git_window(canvas, Rect(0, 0, cols, rows))
+    return pack_canvas(canvas, cols, rows, out_ptr, cap)
+
+
+@export
+def tk_desktop_git_window_key(
+    h: Int, key: UInt32, mods: UInt8, cols: Int, rows: Int,
+) abi("C") -> Int32:
+    """A keystroke in the git window."""
+    if h == 0:
+        return ACT_NONE
+    var k = _canon_ctrl_key(key, mods)
+    try:
+        _desk(h)[].handle_git_window_event(
+            Event.key_event(k, mods), Rect(0, 0, cols, rows),
+        )
+    except e:
+        print("turbokod: tk_desktop_git_window_key:", String(e))
+    return ACT_NONE
+
+
+@export
+def tk_desktop_git_window_mouse(
+    h: Int, x: Int, y: Int, button: UInt8, pressed: UInt8, motion: UInt8,
+    mods: UInt8, cols: Int, rows: Int, click_count: UInt8,
+) abi("C") -> Int32:
+    """A mouse event in the git window."""
+    if h == 0:
+        return ACT_NONE
+    var ev = _mouse_event(x, y, button, pressed, motion, mods, click_count)
+    try:
+        _desk(h)[].handle_git_window_event(ev, Rect(0, 0, cols, rows))
+    except e:
+        print("turbokod: tk_desktop_git_window_mouse:", String(e))
+    return ACT_NONE
+
+
+@export
+def tk_desktop_set_git_window_key(h: Int, on: Int) abi("C"):
+    """Whether the git window (any look) is the key window."""
+    if h == 0:
+        return
+    _desk(h)[].set_git_window_key(on != 0)
+
+
+@export
+def tk_desktop_take_git_front_request(h: Int) abi("C") -> Int32:
+    """Drain the one-shot "bring the git window to the front" request
+    (Git ▸ Local changes while it's already up)."""
+    if h == 0:
+        return Int32(0)
+    return Int32(1) if _desk(h)[].consume_git_front_request() else Int32(0)
+
+
 @export
 def tk_desktop_layout_frame(
     h: Int, cols: Int, rows: Int, zoomed: Int, out_ptr: Int, cap: Int,
@@ -2225,6 +2309,7 @@ def _git_state_json(mut d: Desktop) -> String:
         String("platinum") if d.platinum_ui() else String("macos"),
     ))
     o.put(String("root"), json_str(g.root))
+    o.put(String("title"), json_str(d.git_window_title()))
     var files = json_array()
     for i in range(len(g.files)):
         var f = json_object()

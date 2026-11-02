@@ -256,6 +256,16 @@ void tk_desktop_git_commit(int64_t h, int64_t ptr, int64_t len);
 void tk_desktop_git_open(int64_t h, int64_t pane, int64_t row, int64_t cols, int64_t rows);
 void tk_desktop_git_answer(int64_t h, int64_t cptr, int64_t clen, int64_t tptr, int64_t tlen);
 int32_t tk_desktop_git_close(int64_t h);
+int64_t tk_desktop_git_window(int64_t h, int64_t out_ptr, int64_t cap);
+int64_t tk_desktop_layout_git(int64_t h, int64_t cols, int64_t rows,
+                              int64_t out_ptr, int64_t cap);
+int32_t tk_desktop_git_window_key(int64_t h, uint32_t key, uint8_t mods,
+                                  int64_t cols, int64_t rows);
+int32_t tk_desktop_git_window_mouse(int64_t h, int64_t x, int64_t y, uint8_t button,
+                                    uint8_t pressed, uint8_t motion, uint8_t mods,
+                                    int64_t cols, int64_t rows, uint8_t click_count);
+void tk_desktop_set_git_window_key(int64_t h, int64_t on);
+int32_t tk_desktop_take_git_front_request(int64_t h);
 int32_t tk_desktop_welcome_needed(int64_t h);
 int64_t tk_desktop_welcome_options(int64_t h, int64_t out_ptr, int64_t cap);
 void tk_desktop_welcome_apply(int64_t h, int64_t ptr, int64_t len, int64_t done);

@@ -396,9 +396,10 @@ func cgcolor(_ rgb: UInt32) -> CGColor {
 /// `.frame` is the Turbo Vision look's project frame (`TVMainFrame`): the
 /// ring of cells around a window's grid. It only draws; its clicks go to
 /// `onFrameMouse`.
-/// `.dialog` is the Turbo Vision look's dialog window (`TVDialogWindow`): the
-/// git view or a declarative dialog, frame and all, in a window of its own.
-enum CellSurface { case main, panels, settings, frame, dialog }
+/// `.dialog` is the Turbo Vision look's dialog window (`TVDialogWindow`): a
+/// declarative dialog, frame and all, in a window of its own.
+/// `.git` is the Turbo Vision look's git window (`TVDialogWindow` too).
+enum CellSurface { case main, panels, settings, frame, dialog, git }
 
 final class CellView: NSView {
     var handle: Int64 = 0
@@ -584,6 +585,7 @@ final class CellView: NSView {
         case .panels:   return Int(tk_desktop_layout_panels(handle, Int64(c), Int64(r), p, Int64(cap)))
         case .settings: return Int(tk_desktop_layout_settings(handle, Int64(c), Int64(r), p, Int64(cap)))
         case .dialog:   return Int(tk_desktop_layout_dialog(handle, Int64(c), Int64(r), p, Int64(cap)))
+        case .git:      return Int(tk_desktop_layout_git(handle, Int64(c), Int64(r), p, Int64(cap)))
         case .frame:
             let w = window
             let zoomed = (w?.styleMask.contains(.fullScreen) ?? false) || ((w as? MainWindow)?.filled ?? false)
@@ -599,6 +601,7 @@ final class CellView: NSView {
         case .panels:   return tk_desktop_panels_key(handle, key, m, Int64(c), Int64(r))
         case .settings: return tk_desktop_settings_key(handle, key, m, Int64(c), Int64(r))
         case .dialog:   return tk_desktop_dialog_key(handle, key, m, Int64(c), Int64(r))
+        case .git:      return tk_desktop_git_window_key(handle, key, m, Int64(c), Int64(r))
         case .frame:    return 0
         }
     }
@@ -619,6 +622,7 @@ final class CellView: NSView {
         case .panels:   return tk_desktop_panels_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r), cc)
         case .settings: return tk_desktop_settings_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r), cc)
         case .dialog:   return tk_desktop_dialog_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r), cc)
+        case .git:      return tk_desktop_git_window_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r), cc)
         case .frame:    return 0
         }
     }
@@ -637,7 +641,7 @@ final class CellView: NSView {
         switch surface {
         case .main:     return tk_desktop_pointer_shape(handle, col, row, Int64(c), Int64(r))
         case .panels:   return tk_desktop_panels_pointer_shape(handle, col, row, Int64(c), Int64(r))
-        case .settings, .frame, .dialog: return 0   // default arrow everywhere
+        case .settings, .frame, .dialog, .git: return 0   // default arrow everywhere
         }
     }
 
@@ -2120,7 +2124,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // its editor's scroll bar.
     var platinumFrames: [ObjectIdentifier: PlatinumMainFrame] = [:]
     var tvFrames: [ObjectIdentifier: TVMainFrame] = [:]
-    // Turbo Vision look: the dialog window (git view, pickers, …) per window.
+    // Turbo Vision look: the dialog window (pickers, …) per window.
     var tvDialogs: [ObjectIdentifier: TVDialogWindow] = [:]
     var tvDialogBuf = [UInt8](repeating: 0, count: 1024)
     var frameInfoBuf = [UInt8](repeating: 0, count: 1024)
@@ -2129,7 +2133,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     var welcome: WelcomeController?
     // macOS-style UI: the NSMenu standing in for a core popup, per window.
     var popups: [ObjectIdentifier: PopupMenu] = [:]
-    // macOS-style UI: the native git sheet per window.
+    // The git view's window per project window, in each look.
     var gitSheets: [ObjectIdentifier: GitSurface] = [:]
     // macOS-style UI: each window's find bar (a titlebar accessory).
     var findBars: [ObjectIdentifier: (accessory: NSTitlebarAccessoryViewController, bar: FindBar)] = [:]
@@ -3116,6 +3120,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // filename / relative menu as a drop, inserting the chosen form at the
         // caret. Only kicks in for an editor with a file on the clipboard;
         // otherwise falls through to the normal text paste below.
+        // ⌘W in the git window closes the git window, not an editor of
+        // the project behind it.
+        if action == "window:close", let w = NSApp.keyWindow, let v = gitWindowOwner(w) {
+            gitSheets[ObjectIdentifier(v)]?.closeClicked()
+            return
+        }
         let view = keyView() ?? views.first
         if action == "edit:paste", let v = view {
             // File(s) on the clipboard → the path-format menu.
@@ -3323,10 +3333,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     private func keyView() -> CellView? {
+        // The git window acts for its project window (a chord the menu
+        // replays lands in it through the core: `git_window_key`).
+        if let w = NSApp.keyWindow, let v = gitWindowOwner(w) { return v }
         // The Turbo Vision look's dialog window acts for its project window
         // (a chord the menu replays lands in the dialog through the core).
         guard let v = NSApp.keyWindow?.cellView else { return nil }
         return v.surface == .dialog ? (v.mainPeer ?? v) : v
+    }
+
+    /// The project window's view whose git window `w` is.
+    func gitWindowOwner(_ w: NSWindow) -> CellView? {
+        guard let id = gitSheets.first(where: { $0.value.gitWindow === w })?.key else { return nil }
+        return views.first { ObjectIdentifier($0) == id }
     }
 
     @objc func newWindowAction() { _ = newWindow() }
@@ -3959,6 +3978,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         var main: NSRect?       // project window frame for this config
         var floating: Bool      // were panels floated under this config?
         var panel: NSRect?      // panel window frame (when floating)
+        var git: NSRect? = nil  // the git window's frame
     }
     struct ProjectGeometry {
         var last: NSRect?                       // fallback size for a new config
@@ -4015,7 +4035,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 geom.configs[k] = PanelConfigEntry(
                     main: rectFromJSON(d["main"]),
                     floating: (d["floating"] as? Bool) ?? false,
-                    panel: rectFromJSON(d["panel"]))
+                    panel: rectFromJSON(d["panel"]),
+                    git: rectFromJSON(d["git"]))
             }
         }
         return geom
@@ -4031,6 +4052,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             var d: [String: Any] = ["floating": e.floating]
             if let m = e.main { d["main"] = jsonFromRect(m) }
             if let p = e.panel { d["panel"] = jsonFromRect(p) }
+            if let g = e.git { d["git"] = jsonFromRect(g) }
             cfgs[k] = d
         }
         obj["configs"] = cfgs
@@ -4057,7 +4079,23 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         geom.last = main
         let key = displayConfigKey()
         let keepPanel = floating ? panel : geom.configs[key]?.panel
-        geom.configs[key] = PanelConfigEntry(main: main, floating: floating, panel: keepPanel)
+        geom.configs[key] = PanelConfigEntry(main: main, floating: floating, panel: keepPanel,
+                                             git: geom.configs[key]?.git)
+        saveProjectGeometry(project, geom)
+    }
+
+    /// The project's git window frame under the current display
+    /// configuration, if one was saved.
+    func savedGitFrame(_ project: String) -> NSRect? {
+        loadProjectGeometry(project).configs[displayConfigKey()]?.git
+    }
+
+    func recordGitFrame(_ project: String, _ frame: NSRect) {
+        var geom = loadProjectGeometry(project)
+        let key = displayConfigKey()
+        var e = geom.configs[key] ?? PanelConfigEntry(main: nil, floating: false, panel: nil)
+        e.git = frame
+        geom.configs[key] = e
         saveProjectGeometry(project, geom)
     }
 
@@ -4729,26 +4767,38 @@ extension AppController {
     func pollGit(_ v: CellView) -> Bool {
         let id = ObjectIdentifier(v)
         let cols = Int64(v.cols()), rows = Int64(v.rows())
-        let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_git(v.handle, cols, rows, $0, $1) })
-        let look = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }?["look"]
+        var data = readCoreJSON(&nativeDialogBuf, { tk_desktop_git(v.handle, cols, rows, $0, $1) })
+        var look = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }?["look"]
             as? String ?? "macos"
+        if data == nil {
+            // The Turbo Vision look's: the core paints it in cells.
+            data = readCoreJSON(&tvDialogBuf, { tk_desktop_git_window(v.handle, $0, $1) })
+            look = "tv"
+        }
+        // Git ▸ Local changes while it's up: bring its window forward.
+        let raise = tk_desktop_take_git_front_request(v.handle) != 0
         if let gc = gitSheets[id] {
             guard let data = data else {
                 gitSheets[id] = nil
+                let wasKey = gc.gitWindow.isKeyWindow
                 gc.dismiss()
+                tk_desktop_set_git_window_key(v.handle, 0)
+                if wasKey { v.window?.makeKeyAndOrderFront(nil) }
                 return true
             }
             if gc.look == look {
-                (gc as? PlatinumGitView)?.reclaimKey()
+                if raise { gc.gitWindow.makeKeyAndOrderFront(nil) }
+                tk_desktop_set_git_window_key(v.handle, gc.gitWindow.isKeyWindow ? 1 : 0)
                 return gc.update(data)
             }
             // The look changed under it: show it in the other projector.
             gitSheets[id] = nil
             gc.dismiss()
         }
-        guard let data = data, let win = v.window, win.isVisible, win.attachedSheet == nil
-        else { return false }
-        let gc: GitSurface = look == "platinum" ? PlatinumGitView(view: v) : GitController(view: v)
+        guard let data = data, let win = v.window, win.isVisible else { return false }
+        let gc: GitSurface = look == "platinum" ? PlatinumGitView(view: v)
+            : look == "tv" ? TVGitWindow(mainView: v, view: makeSurfaceView(for: v, surface: .git))
+            : GitController(view: v)
         gc.onAfterAction = { [weak v] in
             v?.invalidateFrame()
             v?.needsDisplay = true
@@ -6349,11 +6399,13 @@ final class GitDiffPane {
 /// selected file's Unstaged and Staged diffs stacked on the right (or the
 /// branch's log / the commit's details); the focused pane's operations
 /// along the bottom, from the same hint list the grid paints as text.
-final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSTextViewDelegate {
+final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSTextViewDelegate,
+                           NSWindowDelegate {
     weak var view: CellView?
     var onAfterAction: (() -> Void)?
 
-    private let panel: NSPanel
+    private let panel: NSWindow
+    private var placement: GitWindowPlacement?
     private let branchLabel = NSTextField(labelWithString: "")
     private let rootLabel = NSTextField(labelWithString: "")
     private let flashLabel = NSTextField(labelWithString: "")
@@ -6385,9 +6437,13 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
 
     init(view: CellView) {
         self.view = view
-        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
-                        styleMask: [.titled, .resizable], backing: .buffered, defer: true)
+        panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
+                         styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                         backing: .buffered, defer: true)
         super.init()
+        panel.isReleasedWhenClosed = false
+        panel.title = "Local changes"
+        panel.delegate = self
         build()
     }
 
@@ -6534,8 +6590,14 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     private var rightSplit: NSSplitView?
 
     func present(in win: NSWindow) {
-        let room = win.contentLayoutRect.size
-        panel.setContentSize(NSSize(width: max(760, room.width - 40), height: max(480, room.height - 30)))
+        let p = GitWindowPlacement(window: panel, project: view?.project)
+        placement = p
+        if !p.restore() {
+            let room = win.contentLayoutRect.size
+            panel.setContentSize(NSSize(width: max(760, room.width - 40), height: max(480, room.height - 30)))
+            let pf = win.frame, f = panel.frame
+            panel.setFrameTopLeftPoint(NSPoint(x: floor(pf.midX - f.width / 2), y: pf.maxY - 30))
+        }
         panel.contentView?.layoutSubtreeIfNeeded()
         splitView?.setPosition(min(380, panel.frame.width * 0.34), ofDividerAt: 0)
         if let l = leftSplit {
@@ -6545,14 +6607,18 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
             l.setPosition(h * 0.66, ofDividerAt: 1)
         }
         if let r = rightSplit { r.setPosition(r.frame.height * 0.55, ofDividerAt: 0) }
-        win.beginSheet(panel, completionHandler: nil)
+        panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(filesTable)
+        p.track()
     }
 
     func dismiss() {
         guard !dismissed else { return }
         dismissed = true
-        panel.sheetParent?.endSheet(panel)
+        placement?.stop()
+        placement = nil
+        panel.attachedSheet.map { panel.endSheet($0) }
+        panel.orderOut(nil)    // not close(): see AppController.windowShouldClose
     }
 
     // MARK: state
@@ -6570,6 +6636,7 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         let branch = st["branch"] as? String ?? ""
         branchLabel.stringValue = branch.isEmpty ? "(detached)" : branch
         rootLabel.stringValue = st["root"] as? String ?? ""
+        panel.title = st["title"] as? String ?? "Local changes"
         let busy = st["busy"] as? Bool ?? false
         if busy { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
         let status = st["status"] as? String ?? ""
@@ -6682,12 +6749,23 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     private func cell(_ parts: [(String, NSColor, NSFont)], indent: CGFloat = 0) -> NSView {
+        // One line, cut at the tail: a label made from an attributed string
+        // wraps, so a long commit subject squeezed by the column broke over
+        // several lines drawn across the neighboring rows.
+        let para = NSMutableParagraphStyle()
+        para.lineBreakMode = .byTruncatingTail
         let out = NSMutableAttributedString()
         for (text, color, font) in parts {
-            out.append(NSAttributedString(string: text, attributes: [.foregroundColor: color, .font: font]))
+            out.append(NSAttributedString(string: text, attributes: [.foregroundColor: color, .font: font,
+                                                                     .paragraphStyle: para]))
         }
         let l = NSTextField(labelWithAttributedString: out)
         l.lineBreakMode = .byTruncatingTail
+        l.usesSingleLineMode = true
+        l.maximumNumberOfLines = 1
+        l.cell?.wraps = false
+        l.cell?.truncatesLastVisibleLine = true
+        l.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let v = NSTableCellView()
         l.translatesAutoresizingMaskIntoConstraints = false
         v.addSubview(l)
@@ -6721,7 +6799,7 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
             let remote = b["remote"] as? Bool ?? false
             let name = b["name"] as? String ?? ""
             let lead = current ? "*" : (b["age"] as? String ?? "")
-            return cell([(lead.padding(toLength: 4, withPad: " ", startingAt: 0), .secondaryLabelColor, mono),
+            return cell([(lead.padding(toLength: 5, withPad: " ", startingAt: 0), .secondaryLabelColor, mono),
                          (name, remote ? .secondaryLabelColor : .labelColor,
                           current ? .boldSystemFont(ofSize: 13) : body)])
         default:
@@ -6792,7 +6870,13 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         }
     }
 
-    @objc private func closeClicked() {
+    /// The close box closes the view; `pollGit` hides the window.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        closeClicked()
+        return false
+    }
+
+    @objc func closeClicked() {
         guard let v = view, v.handle != 0 else { return }
         if tk_desktop_git_close(v.handle) == 0 {
             NSSound.beep()
@@ -8071,6 +8155,9 @@ final class ReviewPickerController: NSObject, NSTableViewDataSource, NSTableView
         }
         let l = NSTextField(labelWithAttributedString: s)
         l.lineBreakMode = .byTruncatingTail
+        l.usesSingleLineMode = true
+        l.maximumNumberOfLines = 1
+        l.cell?.wraps = false
         return l
     }
 
@@ -11429,13 +11516,13 @@ final class TVMainFrame: NSView, NSDraggingSource {
     }
 }
 
-/// The Turbo Vision look's dialog window: the git view or a declarative
-/// dialog (a picker, Project Settings, …) out of the project window, as the
-/// other looks show them. Borderless; the core paints all of it, frame
-/// included (`tk_desktop_layout_dialog`). The title row drags it, the close
-/// box is the core's, and the sides and bottom corners resize the ones that
-/// can be (the git view, the large dialogs); the rest follow the size the
-/// core asks for. Modal like the in-grid dialog: a click on the project
+/// The Turbo Vision look's dialog window: a declarative dialog (a picker,
+/// Project Settings, …) out of the project window, as the other looks show
+/// them. Borderless; the core paints all of it, frame included
+/// (`tk_desktop_layout_dialog`). The title row drags it, the close box is
+/// the core's, and the sides and bottom corners resize the ones that can be
+/// (the large dialogs); the rest follow the size the core asks for. (The
+/// git view has a window of its own, `TVGitWindow`.) Modal like the in-grid dialog: a click on the project
 /// window hands the keyboard straight back.
 final class TVDialogWindow: NSObject {
     let view: CellView
@@ -11560,6 +11647,158 @@ final class TVDialogWindow: NSObject {
 /// A borderless window doesn't become key on its own.
 final class TVDialogNSWindow: NSWindow {
     override var canBecomeKey: Bool { true }
+}
+
+/// Where a project's git window sits, remembered per display configuration
+/// (`displayConfigKey`) like the project window and the floating panels, so
+/// it comes back on the screen it was left on — and at a default when that
+/// screen isn't attached.
+final class GitWindowPlacement {
+    private weak var win: NSWindow?
+    private let project: String?
+    private var observers: [NSObjectProtocol] = []
+    private var timer: Timer?
+    /// Snap a restored frame (the Turbo Vision look's whole cells).
+    var snap: (NSRect) -> NSRect = { $0 }
+
+    init(window: NSWindow, project: String?) {
+        win = window
+        self.project = project
+    }
+
+    /// Put the window at its remembered frame; false when there's none
+    /// (or it no longer lands on a screen).
+    func restore() -> Bool {
+        guard let project = project, let win = win,
+              let f = AppController.shared?.savedGitFrame(project),
+              NSScreen.screens.contains(where: { $0.visibleFrame.intersects(f) })
+        else { return false }
+        win.setFrame(snap(f), display: false)
+        return true
+    }
+
+    /// Record moves and resizes from here on (after the initial placement,
+    /// so that isn't saved as the user's choice).
+    func track() {
+        guard let win = win, project != nil, observers.isEmpty else { return }
+        for name in [NSWindow.didMoveNotification, NSWindow.didResizeNotification] {
+            observers.append(NotificationCenter.default.addObserver(
+                forName: name, object: win, queue: .main) { [weak self] _ in self?.schedule() })
+        }
+    }
+
+    func stop() {
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers = []
+        if timer != nil { save() }
+        timer?.invalidate()
+        timer = nil
+    }
+
+    /// Debounced, like the project window's: one write per gesture.
+    private func schedule() {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
+            self?.timer = nil
+            self?.save()
+        }
+    }
+
+    private func save() {
+        guard let project = project, let win = win, win.isVisible else { return }
+        AppController.shared?.recordGitFrame(project, win.frame)
+    }
+}
+
+/// The git view in the Turbo Vision look: a borderless window of its own
+/// whose cells the core paints, frame and close box included
+/// (`tk_desktop_layout_git`). Not modal — the project window stays live
+/// beside it. The title row drags it and the sides and bottom corners
+/// resize it, as on a dialog window.
+final class TVGitWindow: NSObject, GitSurface {
+    var look: String { "tv" }
+    var onAfterAction: (() -> Void)?
+    let view: CellView
+    weak var mainView: CellView?
+    private let win: TVDialogNSWindow
+    private var shadow: RetroShadow?
+    private var placement: GitWindowPlacement?
+    private var lastData = Data()
+    var gitWindow: NSWindow { win }
+
+    init(mainView: CellView, view: CellView) {
+        self.view = view
+        self.mainView = mainView
+        win = TVDialogNSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
+                               styleMask: [.borderless, .miniaturizable, .resizable],
+                               backing: .buffered, defer: true)
+        super.init()
+        win.isReleasedWhenClosed = false
+        win.backgroundColor = .black
+        win.acceptsMouseMovedEvents = true
+        win.title = "Local changes"
+        win.contentView = view
+        view.onChromeMouse = { [weak self] e in
+            guard let self = self else { return false }
+            return TVDialogWindow.chromeMouse(e, view: self.view, resizable: true)
+        }
+    }
+
+    func present(in parent: NSWindow) {
+        let p = GitWindowPlacement(window: win, project: mainView?.project)
+        p.snap = { f in
+            let w = max(40 * CELL_W, (f.width / CELL_W).rounded(.down) * CELL_W)
+            let h = max(10 * CELL_H, (f.height / CELL_H).rounded(.down) * CELL_H)
+            return NSRect(x: f.minX, y: f.maxY - h, width: w, height: h)
+        }
+        placement = p
+        if !p.restore() {
+            // The grid's size for it: most of the project window, near its top.
+            let pf = parent.frame
+            let w = max(60 * CELL_W, (pf.width * 0.9 / CELL_W).rounded(.down) * CELL_W)
+            let h = max(16 * CELL_H, ((pf.height - 4 * CELL_H) / CELL_H).rounded(.down) * CELL_H)
+            win.setFrame(NSRect(x: floor(pf.midX - w / 2), y: floor(pf.maxY - 2 * CELL_H - h),
+                                width: w, height: h), display: false)
+        }
+        view.invalidateFrame()
+        win.makeKeyAndOrderFront(nil)
+        shadow = RetroShadow(under: win)
+        win.makeFirstResponder(view)
+        p.track()
+    }
+
+    func dismiss() {
+        placement?.stop()
+        placement = nil
+        view.onChromeMouse = nil
+        view.handle = 0          // the project window's view owns the handle
+        shadow?.detach()
+        shadow = nil
+        win.orderOut(nil)
+    }
+
+    /// Adopt the core's `{title}` and repaint.
+    func update(_ data: Data) -> Bool {
+        var changed = false
+        if data != lastData {
+            lastData = data
+            let spec = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            win.title = spec?["title"] as? String ?? "Local changes"
+            changed = true
+        }
+        shadow?.ensureAttached()
+        if win.isVisible && win.occlusionState.contains(.visible) && view.pollFrame() {
+            view.needsDisplay = true
+            changed = true
+        }
+        return changed
+    }
+
+    func closeClicked() {
+        guard let v = mainView, v.handle != 0 else { return }
+        if tk_desktop_git_close(v.handle) == 0 { NSSound.beep() }
+        onAfterAction?()
+    }
 }
 
 /// A hard-edged retro drop shadow under a window, in place of the system's
@@ -12357,16 +12596,23 @@ final class PTextArea: PNode, NSTextViewDelegate {
 
 /// The git view's two projectors: the macOS sheet (`GitController`) and
 /// the Platinum window (`PlatinumGitView`).
+/// The git view's window in one of the looks. Not modal: the project
+/// window stays live beside it.
 protocol GitSurface: AnyObject {
     var look: String { get }
     var onAfterAction: (() -> Void)? { get set }
+    /// The window it's shown in.
+    var gitWindow: NSWindow { get }
     func update(_ data: Data) -> Bool
     func present(in win: NSWindow)
     func dismiss()
+    /// The close box / ⌘W: close the view (refused while a git op runs).
+    func closeClicked()
 }
 
 extension GitController: GitSurface {
     var look: String { "macos" }
+    var gitWindow: NSWindow { panel }
 }
 
 /// A list or a diff in the Platinum git window: rows of colored runs in a
@@ -12712,6 +12958,8 @@ final class PlatinumGitView: NSObject, GitSurface {
     private var alertValues: [String: String] = [:]
     private var overlayShown = ""
     private var dismissed = false
+    private var placement: GitWindowPlacement?
+    var gitWindow: NSWindow { win }
 
     init(view: CellView) {
         self.view = view
@@ -12723,8 +12971,8 @@ final class PlatinumGitView: NSObject, GitSurface {
         win.hasShadow = false
         win.isOpaque = true
         win.backgroundColor = Platinum.face
-        win.title = "Git"
-        frameView.title = "Git"
+        win.title = "Local changes"
+        frameView.title = "Local changes"
         frameView.closable = true
         frameView.onClose = { [weak self] in self?.closeClicked() }
         win.contentView = frameView
@@ -12792,35 +13040,33 @@ final class PlatinumGitView: NSObject, GitSurface {
     // MARK: presentation
 
     func present(in parent: NSWindow) {
-        let pf = parent.frame
-        let size = NSSize(width: max(760, pf.width - 40), height: max(480, pf.height - 50))
-        win.setFrame(NSRect(x: floor(pf.midX - size.width / 2), y: pf.maxY - 30 - size.height,
-                            width: size.width, height: size.height), display: false)
+        let p = GitWindowPlacement(window: win, project: view?.project)
+        placement = p
+        if !p.restore() {
+            let pf = parent.frame
+            let size = NSSize(width: max(760, pf.width - 40), height: max(480, pf.height - 50))
+            win.setFrame(NSRect(x: floor(pf.midX - size.width / 2), y: pf.maxY - 30 - size.height,
+                                width: size.width, height: size.height), display: false)
+        }
         body.frame = frameView.content
         layoutBody()
-        parent.addChildWindow(win, ordered: .above)
         win.makeKeyAndOrderFront(nil)
         if retroShadow == nil { retroShadow = Platinum.castShadow(under: win) }
         win.makeFirstResponder(filesList)
+        p.track()
     }
 
     func dismiss() {
         guard !dismissed else { return }
         dismissed = true
+        placement?.stop()
+        placement = nil
         retroShadow?.detach()
         retroShadow = nil
         alert?.dismiss()
         alert = nil
-        win.parent?.removeChildWindow(win)
         win.orderOut(nil)
         NotificationCenter.default.removeObserver(self)
-    }
-
-    /// The view over a window that took the key back (a click on the
-    /// workspace behind it) keeps the keyboard, as a modal should.
-    func reclaimKey() {
-        guard !dismissed, let p = win.parent, p.isKeyWindow else { return }
-        if let a = alert { a.window.makeKey() } else { win.makeKey() }
     }
 
     func layoutBody() {
@@ -12909,6 +13155,12 @@ final class PlatinumGitView: NSObject, GitSurface {
         branches = st["branches"] as? [[String: Any]] ?? []
         commits = st["commits"] as? [[String: Any]] ?? []
         busy = st["busy"] as? Bool ?? false
+        let title = st["title"] as? String ?? "Local changes"
+        if frameView.title != title {
+            frameView.title = title
+            win.title = title
+            frameView.needsDisplay = true
+        }
         let status = st["status"] as? String ?? ""
         let flash = st["flash"] as? String ?? ""
         note = busy ? (st["busy_label"] as? String ?? "Working…") : !status.isEmpty ? status : flash

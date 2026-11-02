@@ -117,7 +117,7 @@ from .highlight import (
 )
 from .output_links import OutputLink, extract_url_links
 from .painter import Painter
-from .file_io import ci_less, join_path, read_file
+from .file_io import basename, ci_less, join_path, read_file
 from .window import DockedPanelStack, paint_window_title, paint_window_title_at
 from .git_changes import (
     apply_patch_to_index, apply_patch_to_worktree, branch_is_merged,
@@ -1796,6 +1796,14 @@ struct LocalChanges(Movable):
         self._last_poll_ms = 0
         self._poll_git = OutputStream()
 
+    def title(self) -> String:
+        """``Local changes — <project>``: with several projects open, the
+        title says whose they are."""
+        var name = basename(self.root)
+        if len(name.as_bytes()) == 0:
+            return String("Local changes")
+        return String("Local changes — ") + name
+
     def open(mut self, var root: String):
         """Populate all three panels synchronously. Diff/branches/log
         for a real project are sub-millisecond `git` invocations each,
@@ -2628,7 +2636,7 @@ struct LocalChanges(Movable):
         canvas.draw_box(bounds, border, True)
         # Title row — framework helper enforces title bg = body bg.
         paint_window_title(
-            canvas, bounds, String(" Local changes "), title_attr, bg,
+            canvas, bounds, String(" ") + self.title() + String(" "), title_attr, bg,
         )
         # Sub-title: the last successful op's one-liner while its flash is
         # live, else the git-unavailable banner, else the project root.

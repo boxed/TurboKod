@@ -9,7 +9,7 @@ from turbokod.canvas import Canvas
 from turbokod.colors import default_attr
 from turbokod.desktop import (
     APP_SETTINGS, DOCK_DEBUG_PANE, Desktop, PROJECT_SETTINGS, EDITOR_FIND, EDITOR_GOTO,
-    EDITOR_REPLACE, VIEW_CLASSIC_UI, VIEW_NATIVE_UI, VIEW_PLATINUM_UI,
+    EDITOR_REPLACE, GIT_LOCAL_CHANGES, VIEW_CLASSIC_UI, VIEW_NATIVE_UI, VIEW_PLATINUM_UI,
 )
 from turbokod.search_options import SearchOptions
 from turbokod.color_picker import ColorPickerDialog, MODE_RGB
@@ -20,7 +20,7 @@ from turbokod.ui_grid import ui_act, ui_set
 from turbokod.git_changes import LineHistoryEntry
 from turbokod.diff import MergeRegion, REGION_CONFLICT, REGION_STABLE
 from turbokod.merge_view import CHOICE_DISK
-from turbokod.events import Event, KEY_ENTER, MOUSE_BUTTON_RIGHT
+from turbokod.events import Event, KEY_ENTER, KEY_ESC, MOUSE_BUTTON_RIGHT
 from turbokod.geometry import Point, Rect
 from turbokod.window import Window
 from turbokod.dap_dispatch import DapStackFrame, DapVariable
@@ -456,6 +456,63 @@ def test_platinum_git_view_is_the_hosts_too() raises:
     _ = d.dispatch_action(VIEW_CLASSIC_UI, _SCREEN)
     assert_false(d.native_git_active())   # back in the grid
     assert_true(d.local_changes.active)
+    d.local_changes.release()
+
+
+def test_git_view_is_a_window_beside_a_live_project_window() raises:
+    """In the native app the git view is a window of its own, not a
+    modal: the project window keeps its input, a file the view opens
+    opens there with the view staying up, and the title names the
+    project so several open windows can be told apart."""
+    var root = _repo_with_a_change()
+    var d = _native_desktop(String("x\n"))
+    d.project = root
+    _ = d.dispatch_action(GIT_LOCAL_CHANGES, _SCREEN)
+    assert_true(d.native_git_active())
+    var title = d.git_window_title()
+    assert_true(title.startswith(String("Local changes — turbokod_test_")))
+    assert_true(title.endswith(String("_native_git")))
+    _ = d.handle_event(Event.key_event(UInt32(ord("z"))), _SCREEN)
+    assert_equal(d.windows.windows[0].editor.buffer.lines[0], String("zx"))
+    # Git ▸ Local changes again raises the window rather than reopening.
+    assert_false(d.consume_git_front_request())
+    _ = d.dispatch_action(GIT_LOCAL_CHANGES, _SCREEN)
+    assert_true(d.consume_git_front_request())
+    d.native_git_select(0, 0, _SCREEN)
+    d.native_git_open(0, 0, _SCREEN)
+    assert_true(d.local_changes.active)
+    assert_true(d.consume_main_focus_request())
+    d.close_project()
+    assert_false(d.local_changes.active)
+    d.local_changes.release()
+
+
+def test_git_view_is_its_own_cell_window_in_the_turbo_vision_look() raises:
+    var root = _repo_with_a_change()
+    var d = _native_desktop(String("x\n"))
+    d.config.native_ui = False
+    d.local_changes.open(root)
+    assert_true(d.git_window())
+    assert_false(d.native_git_active())
+    assert_equal(d.dialog_window(), String(""))
+    # The workspace is live behind it.
+    _ = d.handle_event(Event.key_event(UInt32(ord("z"))), _SCREEN)
+    assert_equal(d.windows.windows[0].editor.buffer.lines[0], String("zx"))
+    var canvas = Canvas(_SCREEN.b.x, _SCREEN.b.y)
+    canvas.clear(default_attr())
+    d.paint_git_window(canvas, _SCREEN)
+    d.handle_git_window_event(Event.key_event(KEY_ESC), _SCREEN)
+    assert_false(d.git_window())
+    d.local_changes.release()
+
+
+def test_git_view_stays_modal_in_the_terminal() raises:
+    var root = _repo_with_a_change()
+    var d = _native_desktop(String("x\n"))
+    d.host_owns_menu = False
+    d.local_changes.open(root)
+    _ = d.handle_event(Event.key_event(UInt32(ord("z"))), _SCREEN)
+    assert_equal(d.windows.windows[0].editor.buffer.lines[0], String("x"))
     d.local_changes.release()
 
 

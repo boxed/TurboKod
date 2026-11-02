@@ -1177,6 +1177,14 @@ struct Desktop(Movable):
     var _in_dialog_window: Bool
     """``handle_event`` is running for the dialog window, not the project
     window, which a dialog window otherwise keeps it out of."""
+    var _git_screen: Rect
+    """The Turbo Vision look's git window as last handled, for a chord
+    replayed into it from the menu bar."""
+    var git_window_key: Bool
+    """The host's git window (any look) is the key window."""
+    var git_front_request: Bool
+    """One-shot: Git ▸ Local changes while the view is already up in its
+    window — the host brings that window to the front."""
     var _last_goto_line: String      # last Go-to-line input, prefilled on reopen
     var _open_count: Int             # cascade counter for Desktop.open_file
     var _untitled_count: Int         # bumped per ``new_file`` for unique titles
@@ -1836,6 +1844,9 @@ struct Desktop(Movable):
         self._ui_grid_owners = List[String]()
         self._dialog_screen = Rect(0, 0, 0, 0)
         self._in_dialog_window = False
+        self._git_screen = Rect(0, 0, 0, 0)
+        self.git_window_key = False
+        self.git_front_request = False
         self._last_goto_line = String("")
         self._pending_new_window_project = Optional[String]()
         self._open_count = 0
@@ -2687,7 +2698,7 @@ struct Desktop(Movable):
                 or self.save_as_dialog.active or self.quick_open.active \
                 or self.symbol_pick.active or self.reference_pick.active \
                 or self.find_symbol.active or self.doc_pick.active \
-                or self.project_find.active or self.local_changes.active \
+                or self.project_find.active or self._git_modal() \
                 or self.review.active or self.history.active:
             return True
         if self.settings.active or self.project_settings.active:
@@ -2727,8 +2738,8 @@ struct Desktop(Movable):
         instead of it) all still need what's behind them — and so do
         the pickers, Find in Project included, now that they're a
         declarative dialog over the workspace. In a window of its own
-        (``dialogs_windowed``) the git view covers none of it."""
-        return self.local_changes.active and not self.dialogs_windowed()
+        (``git_windowed``) the git view covers none of it."""
+        return self._git_modal()
 
     def scroll_regions(mut self, screen: Rect) -> List[EditorScrollRegion]:
         """The editor windows the host may smooth-scroll this frame. Phase
@@ -3737,7 +3748,7 @@ struct Desktop(Movable):
             if self.save_as_dialog.is_input_at(pos, screen):
                 return String("text")
             return String("default")
-        if self.local_changes.active:
+        if self._git_modal():
             return String("default")
         if self.review.active:
             if self.review.is_reviewing() and (
@@ -4864,7 +4875,7 @@ struct Desktop(Movable):
             self.merge_view.paint(canvas, screen)
         if not native and not windowed:
             self.save_as_dialog.paint(canvas, screen)
-        if not self.native_git_active() and not windowed:
+        if self._git_modal():
             self.local_changes.paint(canvas, screen, self.grammar_registry)
         # Spell-action popup. Painted last among modals so it overlays
         # everything else (it's contextual to the editor cursor and
@@ -5259,7 +5270,7 @@ struct Desktop(Movable):
             or self.symbol_pick.active or self.reference_pick.active \
             or self.find_symbol.active \
             or self.project_find.active \
-            or self.local_changes.active or self.review.active \
+            or self._git_modal() or self.review.active \
             or self.history.active \
             or self.save_as_dialog.active or self.doc_pick.active
 
@@ -6369,6 +6380,9 @@ struct Desktop(Movable):
         self._pytest_file_globs = List[String]()
         self.speller.set_project(String(""))
         self.file_tree.close()
+        # The git view is the project's: a non-modal one (``git_windowed``)
+        # can still be up when the project closes.
+        self.local_changes.close()
         # Rebuild the project menu for the no-project state: no settings
         # or close entry, and the project we just closed now shows up as
         # a plain (unchecked, unmarked) recent so it's one click to come
@@ -7751,7 +7765,7 @@ struct Desktop(Movable):
         if event.kind == EVENT_MOD_KEY:
             _ = self.windows.handle_mod_key(event)
             return Optional[String]()
-        if self.native_dialog_active() or self.native_git_active() \
+        if self.native_dialog_active() \
                 or self.native_history_active() \
                 or self.native_merge_active() or self.native_review_picker() \
                 or self.native_ui_surface_active() \
@@ -7975,7 +7989,7 @@ struct Desktop(Movable):
                 return self._handle_key(event, screen)
             self._review_handle_body_mouse(event)
             return Optional[String]()
-        if self.local_changes.active:
+        if self._git_modal():
             if event.kind == EVENT_KEY:
                 _ = self.local_changes.handle_key(
                     event, screen, self.grammar_registry,
@@ -7984,9 +7998,7 @@ struct Desktop(Movable):
                 _ = self.local_changes.handle_mouse(
                     event, screen, self.grammar_registry,
                 )
-            # A file it opens opens in the project window.
-            var main_screen = self._last_screen if self._in_dialog_window else screen
-            self._after_local_changes(main_screen)
+            self._after_local_changes(screen)
             return Optional[String]()
         if event.kind == EVENT_KEY:
             # Side panels absorb arrow / Enter / Esc when focused;
@@ -8490,7 +8502,7 @@ struct Desktop(Movable):
             or self.quick_open.active or self.symbol_pick.active \
             or self.reference_pick.active or self.find_symbol.active \
             or self.doc_pick.active or self.project_find.active \
-            or self.local_changes.active \
+            or self._git_modal() or self._git_window_owns_input() \
             or (self.review.active and not self.review.is_reviewing()) \
             or self.history.active \
             or self.project_settings.active \
@@ -8701,13 +8713,12 @@ struct Desktop(Movable):
         return self.tv_frame()
 
     def dialog_window(self) -> String:
-        """What the dialog window shows: ``git`` for the git view, else the
-        bottom open declarative dialog's name. Empty while there's none, or
-        outside the Turbo Vision look in the native app."""
+        """What the dialog window shows: the bottom open declarative
+        dialog's name. Empty while there's none, or outside the Turbo Vision
+        look in the native app. (The git view has a window of its own,
+        ``git_window``.)"""
         if not self.dialogs_windowed():
             return String("")
-        if self.local_changes.active:
-            return String("git")
         var surfaces = self.ui_surfaces()
         if len(surfaces) == 0:
             return String("")
@@ -8715,8 +8726,6 @@ struct Desktop(Movable):
 
     def dialog_window_title(mut self) -> String:
         var kind = self.dialog_window()
-        if kind == String("git"):
-            return String("Local changes")
         if len(kind.as_bytes()) == 0:
             return String("")
         return self.ui_tree(kind).text
@@ -8724,13 +8733,9 @@ struct Desktop(Movable):
     def dialog_window_size(mut self, main: Rect) -> Tuple[Int, Int, Bool]:
         """``(cols, rows, resizable)`` for the dialog window over a project
         window of ``main``: the size the dialog takes in the grid there.
-        The git view and the large dialogs can be resized; the rest keep
-        their natural size, which the host follows."""
+        The large dialogs can be resized; the rest keep their natural
+        size, which the host follows."""
         var kind = self.dialog_window()
-        if kind == String("git"):
-            return (
-                max(60, main.width() * 9 // 10), max(16, main.height() - 4), True,
-            )
         if len(kind.as_bytes()) == 0:
             return (0, 0, False)
         var tree = self.ui_tree(kind)
@@ -8748,18 +8753,12 @@ struct Desktop(Movable):
                 canvas, screen, String(" "), Attr(BLACK, LIGHT_GRAY),
             )
             return
-        if kind == String("git"):
-            self.local_changes.paint(canvas, screen, self.grammar_registry)
-            paint_close_button(
-                canvas, screen.a, Attr(BORDER_FOCUS, EDITOR_BG),
+        var surfaces = self._sync_ui_grids()
+        for i in range(len(surfaces)):
+            var tree = self.ui_tree(surfaces[i])
+            self.ui_grids[i].paint(
+                tree, canvas, screen, i == len(surfaces) - 1,
             )
-        else:
-            var surfaces = self._sync_ui_grids()
-            for i in range(len(surfaces)):
-                var tree = self.ui_tree(surfaces[i])
-                self.ui_grids[i].paint(
-                    tree, canvas, screen, i == len(surfaces) - 1,
-                )
         self.prompt.paint(canvas, screen)
         self.confirm_dialog.paint(canvas, screen)
         self.message_request_dialog.paint(canvas, screen)
@@ -8774,11 +8773,6 @@ struct Desktop(Movable):
         if len(self.dialog_window().as_bytes()) == 0:
             return Optional[String]()
         self._dialog_screen = screen
-        # The git view's close box: the window's, as Esc closes it.
-        if self.local_changes.active and not self._dialog_overlay_active() \
-                and close_button_clicked(screen, event):
-            _ = self.native_git_close()
-            return Optional[String]()
         self._in_dialog_window = True
         var result: Optional[String]
         try:
@@ -8788,6 +8782,76 @@ struct Desktop(Movable):
             raise e^
         self._in_dialog_window = False
         return result^
+
+    # --- the git view's window ------------------------------------------------
+    #
+    # In the native app the git view isn't modal: it's a window of its own
+    # beside the project window, which stays live (edit, save, and the view
+    # picks the change up through its external-change poll). The macOS and
+    # Mac OS 9 looks draw it natively (``tk_desktop_git``); the Turbo Vision
+    # look has the core paint it in a borderless cell window
+    # (``paint_git_window`` / ``handle_git_window_event``). The terminal
+    # frontends keep the in-grid modal.
+
+    def git_windowed(self) -> Bool:
+        return self.host_owns_menu
+
+    def _git_modal(self) -> Bool:
+        """The git view is up as an in-grid modal (the terminal
+        frontends), so it owns the screen and the input."""
+        return self.local_changes.active and not self.git_windowed()
+
+    def git_window(self) -> Bool:
+        """The Turbo Vision look's git window is up."""
+        return self.local_changes.active and self.dialogs_windowed()
+
+    def git_window_title(self) -> String:
+        return self.local_changes.title()
+
+    def consume_git_front_request(mut self) -> Bool:
+        var req = self.git_front_request
+        self.git_front_request = False
+        return req
+
+    def set_git_window_key(mut self, on: Bool):
+        """The host reports whether the git window is the key window, so
+        a chord the menu replays (⌘C) lands in it rather than in the
+        editor of the project window behind."""
+        self.git_window_key = on
+
+    def _git_window_owns_input(self) -> Bool:
+        return self.local_changes.active and self.git_windowed() \
+            and self.git_window_key
+
+    def paint_git_window(mut self, mut canvas: Canvas, screen: Rect):
+        if not self.local_changes.active:
+            # Just closed, and the host hasn't hidden the window yet.
+            Painter(screen).fill(
+                canvas, screen, String(" "), Attr(BLACK, LIGHT_GRAY),
+            )
+            return
+        self.local_changes.paint(canvas, screen, self.grammar_registry)
+        paint_close_button(canvas, screen.a, Attr(BORDER_FOCUS, EDITOR_BG))
+
+    def handle_git_window_event(mut self, event: Event, screen: Rect) raises:
+        if not self.local_changes.active:
+            return
+        self._git_screen = screen
+        # The close box: the window's, as Esc closes it.
+        if close_button_clicked(screen, event):
+            _ = self.native_git_close()
+            return
+        if event.kind == EVENT_KEY:
+            _ = self.local_changes.handle_key(
+                event, screen, self.grammar_registry,
+            )
+        elif event.kind == EVENT_MOUSE:
+            _ = self.local_changes.handle_mouse(
+                event, screen, self.grammar_registry,
+            )
+        # A file it opens opens in the project window.
+        var main_screen = self._last_screen
+        self._after_local_changes(main_screen)
 
     def _dialog_overlay_active(self) -> Bool:
         return self.prompt.active or self.confirm_dialog.active \
@@ -9368,7 +9432,13 @@ struct Desktop(Movable):
             # lands on the corresponding line.
             var rel = self.local_changes.selected_path
             var jump_line = self.local_changes.selected_line
-            self.local_changes.close()
+            if self.git_windowed():
+                # A window of its own stays open beside the file, which
+                # comes up in the project window, brought to the front.
+                self.local_changes.submitted = False
+                self.main_focus_request = True
+            else:
+                self.local_changes.close()
             var abs = rel
             if not starts_with(rel, String("/")) and self.project:
                 abs = join_path(self.project.value(), rel)
@@ -9919,6 +9989,14 @@ struct Desktop(Movable):
         """
         if self.settings.active and self.settings_detached:
             self.handle_settings_event(ev, screen)
+        elif self._git_window_owns_input():
+            # The native looks' git windows take their chords themselves.
+            if self.git_window():
+                try:
+                    var git_screen = self._git_screen
+                    self.handle_git_window_event(ev, git_screen)
+                except:
+                    pass
         elif len(self.dialog_window().as_bytes()) > 0:
             try:
                 var dialog_screen = self._dialog_screen
@@ -10277,7 +10355,10 @@ struct Desktop(Movable):
             self._persist_config()
             return Optional[String]()
         if action == GIT_LOCAL_CHANGES:
-            if self.project:
+            if self.local_changes.active and self.git_windowed():
+                # Already in its window: bring that to the front.
+                self.git_front_request = True
+            elif self.project:
                 self.local_changes.open(self.project.value())
             return Optional[String]()
         if action == GIT_REVIEW:
@@ -12378,7 +12459,7 @@ struct Desktop(Movable):
                 or self.quick_open.active or self.symbol_pick.active \
                 or self.reference_pick.active or self.find_symbol.active \
                 or self.doc_pick.active or self.project_find.active \
-                or self.local_changes.active or self.review.active \
+                or self._git_modal() or self.review.active \
                 or self.history.active:
             return False
         if self.project_settings.active:

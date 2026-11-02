@@ -57,8 +57,8 @@ come in 8×16 steps.
   presentation only, each part kept in the cell columns
   `tk_desktop_status_layout` reports, so clicks land where the core
   expects them.
-- **The git view** (`PlatinumGitView`): the macOS sheet's layout in a
-  Platinum window over the project window. The lists and diffs are
+- **The git view** (`PlatinumGitView`): the macOS window's layout in a
+  non-modal Platinum window of its own. The lists and diffs are
   `PGitRows` (rows of colored runs in a well, a Platinum scroll bar; a list
   selects in lavender, a diff frames the core's cursor so its add/remove
   color shows), headings are Chicago with an etched rule (black for the
