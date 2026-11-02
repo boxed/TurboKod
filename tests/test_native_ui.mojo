@@ -176,19 +176,20 @@ def test_tv_look_in_the_app_is_tabbed_inside_the_hosts_frame() raises:
     assert_equal(w.interior().b.x, w.rect.b.x - 1)
     assert_equal(canvas.get(w.rect.b.x - 1, w.rect.a.y).glyph, String("▲"))
     assert_equal(w.v_scrollbar_hit(Point(w.rect.b.x - 1, w.rect.b.y - 1))[0], 5)
-    # Bottom up: the status bar, the frame's bottom border, the tab bar
-    # (the only way to switch windows), then the workspace.
+    # Bottom up: the status bar and the tab bar (the only way to switch
+    # windows), both outside the frame, then the frame's bottom border,
+    # then the workspace.
     var y = _SCREEN.b.y
-    assert_true(d.tab_bar_rect(_SCREEN) == Rect(0, y - 3, _SCREEN.b.x, y - 2))
+    assert_true(d.tab_bar_rect(_SCREEN) == Rect(0, y - 2, _SCREEN.b.x, y - 1))
     assert_equal(d.workspace_rect(_SCREEN).b.y, y - 3)
     # Double lines while the window is key, single otherwise.
-    assert_true(String("════") in _row(canvas, y - 2))
+    assert_true(String("════") in _row(canvas, y - 3))
     d.host_focused = False
     d.paint(canvas, _SCREEN)
-    assert_true(String("────") in _row(canvas, y - 2))
+    assert_true(String("────") in _row(canvas, y - 3))
     d.file_tree.visible = True
     d.paint(canvas, _SCREEN)
-    assert_equal(d.file_tree.rect(_SCREEN).b.y, y - 2)
+    assert_equal(d.file_tree.rect(_SCREEN).b.y, y - 3)
 
 
 def test_tv_look_keeps_overlapping_windows_in_the_terminal() raises:
@@ -223,8 +224,11 @@ def test_tv_frame_title_and_proxy_follow_the_focused_file() raises:
     assert_equal(canvas.get(77, 0).glyph, String("▲"))
     assert_equal(canvas.get(span[1], 0).glyph, String("b"))
     assert_equal(canvas.get(0, 15).glyph, String("║"))
-    # The frame's bottom corners sit on the row above the status bar.
-    assert_equal(canvas.get(79, 28).glyph, String("╝"))
+    # The frame's bottom corners sit above the tab bar and the status bar,
+    # whose rows get gray side cells.
+    assert_equal(canvas.get(79, 27).glyph, String("╝"))
+    assert_equal(canvas.get(79, 28).glyph, String(" "))
+    assert_equal(canvas.get(0, 29).glyph, String(" "))
     d.paint_frame(canvas, Rect(0, 0, 80, 30), True)
     assert_equal(canvas.get(77, 0).glyph, String("▼"))
     # No file: the project; nothing at all: no icon.

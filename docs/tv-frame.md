@@ -12,8 +12,8 @@ of cells around the grid.
 │ 1 """Color and text…             ▲ ▸ app            │
 │ 2                                ░ ▸ docs           │   editor's own scroll bar
 │ 3 We model an Attr…              ▼ ▸ src            │   in its gutter column
-│ cell.mojo  colors.mojo  theme.mojo                  │   in-grid tab bar
 └─────────────────────────────────────────────────────┘   bottom border: the core's row
+ cell.mojo  colors.mojo  theme.mojo                        in-grid tab bar, outside the frame
  main  ● uncommitted                         LSP: ready    status bar, outside the frame
 ```
 
@@ -29,13 +29,13 @@ never set `host_owns_menu`, which `Desktop.tv_frame()` requires.
   scroll bar in that gutter (`Window._v_scrollbar` covers the window's full
   height there), with the usual hit-testing and drag.
 - The in-grid tab bar is always on (it's the only way to switch windows),
-  three rows up. The row between it and the status bar is the frame's bottom
-  border, painted by `_paint_frame_bottom`; the file tree stops above it
-  (`FileTree.bottom`). `_frame_rows` gates all of it on a screen tall enough.
+  directly over the status bar, and like it outside the frame. The row above
+  it is the frame's bottom border, painted by `_paint_frame_bottom`; the file
+  tree stops above that (`FileTree.bottom`). `_frame_rows` gates all of it on a screen tall enough.
 - `paint_frame` paints the rest of the frame on the window's **whole** grid:
   the top row (close box, the proxy icon's two blank cells, the title, the
-  zoom box), the sides, the bottom corners, and the two cells beside the
-  status bar. The host lays the Desktop's own grid over the inside, so only
+  zoom box), the sides, the bottom corners, and the gray cells beside the
+  tab bar and the status bar. The host lays the Desktop's own grid over the inside, so only
   that ring shows.
 - The frame is the key window's: double lines while `host_focused`, single
   otherwise, like a focused window.

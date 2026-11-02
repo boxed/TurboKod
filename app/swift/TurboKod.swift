@@ -11361,8 +11361,9 @@ final class TVMainFrame: NSView, NSDraggingSource {
         let x = Int(p.x / CELL_W), y = Int(p.y / CELL_H)
         let c = cols, r = rows
         guard y == 0 else {
-            // The sides resize; the bottom corners resize down as well.
-            if x == 0 || x >= c - 1 { resize(left: x == 0, down: y >= r - 2) }
+            // The sides resize; the bottom corners (above the tab bar and
+            // the status bar) and the cells below them resize down as well.
+            if x == 0 || x >= c - 1 { resize(left: x == 0, down: y >= r - 3) }
             return
         }
         if (1...3).contains(x) {

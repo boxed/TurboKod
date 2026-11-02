@@ -187,7 +187,7 @@ from .project_find import ProjectFind, project_find_files
 from .git_status_poll import GitStatusPoller
 from .find_results_pane import FindResultsPane
 from .project_targets import (
-    ProjectTargets, load_project_targets, detect_project_language,
+    ProjectTargets, RunTarget, load_project_targets, detect_project_language,
     pytest_python_files, python_venv_dir, resolve_python_interpreter,
     resolved_cwd, resolved_program, save_project_targets, write_all_targets,
 )
@@ -247,6 +247,10 @@ from .find_symbol import (
 from .symbol_index import SymbolIndex
 from .terminal import beep
 from .terminal_pane import TERMINAL_PANE_CLOSE, TerminalPane
+from .tmux_session import (
+    new_tmux_session_name, tmux_available, tmux_kind, tmux_project_sessions,
+    tmux_session_names,
+)
 from .test_pane import (
     TEST_CLEAR_OUTPUT, TEST_PANE_CLOSE, TEST_RERUN, TEST_STOP, TestPane,
 )
@@ -3268,9 +3272,9 @@ struct Desktop(Movable):
         """Single-row strip directly above the status bar holding one
         tab per open window. Empty when the View toggle is off."""
         # The tabbed Turbo Vision look switches windows only here, so the
-        # bar is always on; it sits above the frame's bottom border.
+        # bar is always on; it sits below the frame, over the status bar.
         if self._frame_rows(screen):
-            return Rect(0, screen.b.y - 3, screen.b.x, screen.b.y - 2)
+            return Rect(0, screen.b.y - 2, screen.b.x, screen.b.y - 1)
         if not self.config.tab_bar or self.host_tabs():
             return Rect.empty()
         var y = screen.b.y - 2
@@ -4775,7 +4779,7 @@ struct Desktop(Movable):
         # under a host-owned menu the panel starts at the top edge so it
         # doesn't show a blank row above its title.
         self.file_tree.top = 0 if self.host_owns_menu else 1
-        self.file_tree.bottom = 2 if self._frame_rows(screen) else 1
+        self.file_tree.bottom = 3 if self._frame_rows(screen) else 1
         # Sync which files carry uncommitted changes so the tree can
         # tint their rows with the tab bar's dirty colors.
         self.file_tree.modified_paths = List[String]()
@@ -6367,6 +6371,9 @@ struct Desktop(Movable):
         # next project's targets get loaded fresh on ``_set_project``.
         self.run_session.terminate()
         self._run_output_held = False
+        # The project's terminals belong to its tmux sessions: detach, and
+        # the next project re-attaches its own.
+        self._detach_tmux_panes()
         self.test_pane.close()
         self._test_output_held = False
         self._last_test_node_id = String("")
@@ -6852,6 +6859,61 @@ struct Desktop(Movable):
         # already on screen — they're not file-backed and so aren't
         # in the session.
         self._pending_restore = True
+        self._attach_tmux_panes()
+
+    def _new_tmux_session_name(self, kind: String) -> String:
+        """A free name for a new session of this project. Steers clear of
+        the server's names plus this window's panes: a pane's client may
+        not have created its session yet."""
+        var taken = tmux_session_names()
+        for i in range(len(self.terminal_panes)):
+            taken.append(self.terminal_panes[i].tmux_session)
+        return new_tmux_session_name(self.project.value(), kind, taken)
+
+    def _attach_tmux_panes(mut self):
+        """Re-attach a pane to each of the project's tmux sessions — the
+        terminals and Claude sessions that outlived the last run of the
+        app (see ``tmux_session.mojo``). In creation order, unfocused so
+        the editor keeps the keyboard, and skipping sessions a pane here
+        is already attached to. Regardless of ``config.terminal_tmux``:
+        that governs new panes, and a session nobody re-attaches would run
+        unseen forever."""
+        if not self.project:
+            return
+        var root = self.project.value()
+        var sessions = tmux_project_sessions(root)
+        for i in range(len(sessions)):
+            var attached = False
+            for k in range(len(self.terminal_panes)):
+                if self.terminal_panes[k].tmux_session == sessions[i].name:
+                    attached = True
+                    break
+            if attached:
+                continue
+            var pane = TerminalPane()
+            pane.cwd = root
+            pane.startup_command = sessions[i].startup_command
+            pane.run_target = sessions[i].run_target
+            pane.tmux_session = sessions[i].name
+            pane.tmux_project = root
+            pane.tmux_create = False
+            pane.open()
+            pane.focused = False
+            self.terminal_panes.append(pane^)
+
+    def _detach_tmux_panes(mut self):
+        """Drop the panes attached to tmux sessions, leaving the sessions
+        running for the next time the project opens. Plain-shell panes
+        aren't the project's, so they stay."""
+        var i = 0
+        while i < len(self.terminal_panes):
+            if self.terminal_panes[i].is_tmux():
+                self.terminal_panes[i].close()
+                self.terminal_panes[i].release()
+                var removed = self.terminal_panes.pop(i)
+                _ = removed
+                continue
+            i += 1
 
     # --- session restore / save -------------------------------------------
 
@@ -8514,14 +8576,15 @@ struct Desktop(Movable):
         project window gets a Turbo Vision frame in place of the macOS
         title bar: the host lays the grid inside it and draws its top and
         sides from ``paint_frame``, and ``paint`` draws its bottom border
-        on a row kept clear above the status bar, which stays outside the
-        frame. The terminal frontends keep overlapping windows."""
+        on a row kept clear above the tab bar and the status bar, which
+        both stay outside the frame. The terminal frontends keep
+        overlapping windows."""
         return self.host_owns_menu and not self.native_ui() \
             and not self.platinum_ui()
 
     def _frame_rows(self, screen: Rect) -> Bool:
         """``tv_frame`` on a screen with room for the frame's bottom border
-        and the tab bar over the status bar."""
+        over the tab bar and the status bar."""
         return self.tv_frame() and screen.b.y >= 6
 
     def _frame_attr(self) -> Attr:
@@ -8579,14 +8642,23 @@ struct Desktop(Movable):
         box), its sides, and the cells beside the status bar. The host
         lays the Desktop's own grid over the inside — one cell in at the
         sides and below the title, down to the window's bottom — so only
-        the ring shows. ``zoomed`` picks the zoom box's glyph."""
+        the ring shows. ``zoomed`` picks the zoom box's glyph.
+
+        The box closes above the tab bar and the status bar (the rows
+        ``_paint_frame_bottom`` and ``tab_bar_rect`` use); the cells beside
+        those two rows are theirs, in their gray."""
         var cols = outer.b.x
         var rows = outer.b.y
         if cols < 12 or rows < 4:
             return
+        # The Desktop's grid: one cell in at the sides, below the title.
+        var tabs = self._frame_rows(Rect(0, 0, cols - 2, rows - 1))
+        var below = 2 if tabs else 1
         var border = self._frame_attr()
         var painter = Painter(outer)
-        painter.draw_box(canvas, Rect(0, 0, cols, rows - 1), border, self.host_focused)
+        painter.draw_box(
+            canvas, Rect(0, 0, cols, rows - below), border, self.host_focused,
+        )
         var span = self.frame_title_span(cols)
         if span[1] >= 0:
             var a = (span[0] if span[0] >= 0 else span[1]) - 1
@@ -8598,13 +8670,14 @@ struct Desktop(Movable):
             canvas, Point(cols - 4, 0), String("[") + glyph + String("]"), border,
         )
         var status = Attr(BLACK, LIGHT_GRAY)
-        painter.set(canvas, 0, rows - 1, Cell(String(" "), status, 1))
-        painter.set(canvas, cols - 1, rows - 1, Cell(String(" "), status, 1))
+        for y in range(rows - below, rows):
+            painter.set(canvas, 0, y, Cell(String(" "), status, 1))
+            painter.set(canvas, cols - 1, y, Cell(String(" "), status, 1))
 
     def _paint_frame_bottom(self, mut canvas: Canvas, screen: Rect):
-        """The ``tv_frame`` frame's bottom border, between the tab bar and
+        """The ``tv_frame`` frame's bottom border, above the tab bar and
         the status bar. Its corners are the host's (``paint_frame``)."""
-        var y = screen.b.y - 2
+        var y = screen.b.y - 3
         var glyph = String("═") if self.host_focused else String("─")
         var attr = self._frame_attr()
         for x in range(screen.b.x):
@@ -9842,6 +9915,13 @@ struct Desktop(Movable):
         self._dap_exec_path = String("")
         self._dap_exec_line = -1
         self.run_session.terminate()
+        self._stop_run_panes()
+
+    def _stop_run_panes(mut self):
+        """Stop the target running in a tmux run pane, if any — the pane
+        keeps its output, as the pipe-backed run pane does."""
+        for i in range(len(self.terminal_panes)):
+            self.terminal_panes[i].stop()
 
     def dispatch_action(
         mut self, action: String, screen: Rect,
@@ -9963,6 +10043,7 @@ struct Desktop(Movable):
             self.settings.offer_native_ui = self.host_owns_menu
             self.settings.native_ui = self.config.native_ui
             self.settings.platinum_ui = self.config.platinum_ui
+            self.settings.terminal_tmux = self.config.terminal_tmux
             # The macOS-style UI shows Settings as a native window; the
             # classic look as the grid one, in the host's cell window.
             self.settings_native = self.host_draws_dialogs()
@@ -12123,13 +12204,25 @@ struct Desktop(Movable):
                     # Tear down the shell before dropping the value —
                     # ``close`` is idempotent and the only place that
                     # SIGTERMs the child + closes the pipe fds — and free
-                    # the emulator, which nothing else would.
+                    # the emulator, which nothing else would. Closing the
+                    # pane is the one exit that ends a tmux session too;
+                    # quitting or switching project only detaches.
+                    self.terminal_panes[i].kill_session()
                     self.terminal_panes[i].close()
                     self.terminal_panes[i].release()
                     var removed = self.terminal_panes.pop(i)
                     _ = removed
                     continue
                 _ = self.terminal_panes[i].handle_command(cmd)
+            if self.terminal_panes[i].take_run_exit():
+                var status = self.terminal_panes[i].run_exit_status
+                var attr = Attr(BLACK, LIGHT_GRAY) if status == String("0") \
+                    else Attr(LIGHT_RED, LIGHT_GRAY)
+                self.status_bar.set_message(
+                    self.terminal_panes[i].run_target + String(" exited (")
+                        + status + String(")"),
+                    attr,
+                )
             i += 1
 
     def take_attention_events(mut self) -> Int:
@@ -12288,6 +12381,16 @@ struct Desktop(Movable):
         var pane = TerminalPane()
         if self.project:
             pane.cwd = self.project.value()
+            # Inside tmux the shell survives a restart of the app and is
+            # re-attached when the project opens again
+            # (``_attach_tmux_panes``). Only with a project: that's what
+            # the session is filed under, and one without would never be
+            # found again.
+            if self.config.terminal_tmux and tmux_available():
+                pane.tmux_session = self._new_tmux_session_name(
+                    tmux_kind(startup_command, String("")),
+                )
+                pane.tmux_project = self.project.value()
         pane.startup_command = startup_command
         pane.open()
         self.terminal_panes.append(pane^)
@@ -12856,6 +12959,8 @@ struct Desktop(Movable):
             # Caret blink: a pure paint toggle — the next frame's
             # ``_apply_view_config`` reads the new value, no extra apply.
             self.config.cursor_blink = self.settings.cursor_blink
+            # Only new panes see it; running ones keep their transport.
+            self.config.terminal_tmux = self.settings.terminal_tmux
             # The look (macOS-style UI or classic), the same as View ▸
             # macOS-style UI.
             if self.settings.native_ui != self.config.native_ui \
@@ -13058,6 +13163,9 @@ struct Desktop(Movable):
             self.dap.shutdown()
             self._dap_exec_path = String("")
             self._dap_exec_line = -1
+        if self.config.terminal_tmux and tmux_available():
+            self._target_run_in_tmux(target)
+            return
         # Stop any prior run, regardless of which target it was for.
         self.run_session.terminate()
         self._run_output_held = False
@@ -13104,6 +13212,55 @@ struct Desktop(Movable):
                 String("run: spawn failed — ") + String(e),
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
+
+    def _target_run_in_tmux(mut self, target: RunTarget):
+        """Cmd+R with tmux: the target runs as the process of its own
+        session (``<project>-run-<target>``), in a terminal pane, so it
+        outlives the app like the terminals do — a dev server keeps
+        serving through a restart, and the pane re-attaches. One run at a
+        time, as without tmux: another target's run is stopped (its pane
+        stays, showing how it ended). Re-running a target replaces its
+        session, so an edited ``targets.json`` takes effect."""
+        var root = self.project.value()
+        self.run_session.terminate()
+        self._run_output_held = False
+        var cwd = resolved_cwd(root, target.cwd)
+        var program = resolved_program(
+            root, target.cwd, resolve_python_interpreter(root, target.program),
+        )
+        var command = shell_single_quote(program)
+        for k in range(len(target.args)):
+            command = command + String(" ") + shell_single_quote(target.args[k])
+        var idx = -1
+        for i in range(len(self.terminal_panes)):
+            if self.terminal_panes[i].run_target == target.name:
+                idx = i
+            else:
+                self.terminal_panes[i].stop()
+        if idx < 0:
+            var pane = TerminalPane()
+            pane.run_target = target.name
+            pane.tmux_session = self._new_tmux_session_name(
+                tmux_kind(String(""), target.name),
+            )
+            pane.tmux_project = root
+            self.terminal_panes.append(pane^)
+            idx = len(self.terminal_panes) - 1
+        self.terminal_panes[idx].cwd = cwd
+        self.terminal_panes[idx].startup_command = command
+        self.terminal_panes[idx].run_env = target.env.copy()
+        if self.terminal_panes[idx].visible:
+            self.terminal_panes[idx].restart()
+        else:
+            self.terminal_panes[idx].open()
+            # Like the pipe-backed run: shown, but the editor keeps the
+            # keyboard.
+            self.terminal_panes[idx].focused = False
+        self.panel_front_request = True
+        self.status_bar.set_message(
+            String("running ") + target.name + String("…"),
+            Attr(BLACK, LIGHT_GRAY),
+        )
 
     def _target_debug(mut self):
         """Cmd+D: launch the active target under the DAP adapter for
@@ -13417,6 +13574,10 @@ struct Desktop(Movable):
         for i in range(len(self.targets.targets)):
             var t = self.targets.targets[i].copy()
             var running = self.run_session.matches(t.name)
+            for k in range(len(self.terminal_panes)):
+                if self.terminal_panes[k].run_target == t.name \
+                        and self.terminal_panes[k].is_running():
+                    running = True
             var debugging = (
                 self.dap.is_active()
                 and self.dap.language_id == t.debug_language
@@ -15337,6 +15498,7 @@ struct Desktop(Movable):
         replacing ``self.dap`` would drop."""
         self.run_session.terminate()
         self._run_output_held = False
+        self._stop_run_panes()
         if self.dap.is_active():
             self.dap.shutdown()
         if self.dap.is_failed() or self.dap.is_terminated():

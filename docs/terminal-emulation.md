@@ -125,3 +125,102 @@ two cells.
 The packed layout (`host_abi.pack_canvas`) carries each cell's width in the
 top byte of word 0, so the Swift renderer and `tk-tui` never recompute it.
 The Swift copy of the emoji table (`charWidth`) is gone.
+
+## Panes in tmux (surviving a restart)
+
+With Settings ▸ General ▸ Terminal panes ("Keep running in tmux across
+restarts", `config.terminal_tmux`, on by default) a terminal or Claude pane
+opened *in a project* runs a tmux client on its pty instead of `$SHELL`
+(`tmux_session.mojo`). The shell lives in the tmux server, so quitting or
+rebuilding the app only detaches: `PtyProcess.terminate` SIGTERMs the client,
+which tmux treats as a detach. Without tmux on `$PATH`, or without a project,
+the pane is a plain shell as before.
+
+- **The default server** — the one a bare `tmux` (or an SSH app like
+  ShellFish) talks to, so `tmux attach -t turbokod-claude` works from
+  anywhere. The socket is still passed with `-S`, resolved as tmux does
+  (`${TMUX_TMPDIR:-/tmp}/tmux-<uid>/default`, directory made `0700`), because
+  `capture_command` hands children an allowlisted environment. Sharing the
+  server splits the options (`tmux_session.mojo`):
+  - *per turbokod session*, re-applied on every attach: no status line, no
+    prefix key, mouse on (for programs that ask for mouse reports — see
+    below), `allow-passthrough`, `window-size latest`. The user's own sessions keep theirs.
+  - *server-wide*, because tmux has no other scope for them, and harmless to
+    other sessions: `escape-time 0` (ESC reaches Claude at once),
+    `focus-events`, `extended-keys`, `set-clipboard`, and truecolor/CSI-u in
+    `terminal-features[247]` — a fixed slot, so re-applying replaces rather
+    than appends.
+  - nothing `-g`, no `-f`: `~/.tmux.conf` loads as usual if turbokod is what
+    starts the server. `COLORTERM=truecolor` goes in the session's own
+    environment (`new-session -e`).
+
+  Every tmux command gets `-u` (UTF-8 whatever the locale): an app launched
+  from the Dock has no `LANG`, and tmux then prints the tabs in
+  `list-sessions -F` output as `_` (so no session was ever found to
+  re-attach) and draws non-ASCII as `_` in the pane. Sessions created without
+  a locale get `LANG=en_US.UTF-8` for their shells.
+  The client runs under `env -u TMUX`, so `tk-tui` inside the user's tmux
+  doesn't trip the nesting guard.
+- **Scrolling and selection stay turbokod's, not tmux's copy mode** (which
+  copies on mouse release and draws a `[0/123]` indicator instead of a bar).
+  tmux tracks the mouse itself, so `vt.tracks_mouse()` is always true in a
+  tmux pane; the pane asks tmux whether the *program* wants the mouse
+  (`tmux_pane_modes`: `#{mouse_any_flag}` / `#{alternate_on}`, on a press or
+  wheel step, cached 300 ms) and forwards only then. Otherwise a drag is the
+  pane's own `GridSelection`, and since tmux draws on the alternate screen
+  the `Vt` has no scrollback: the first wheel step (or Shift+PgUp) captures
+  tmux's history plus screen (`tmux_history`, `capture-pane -e`) into a
+  second `Vt`, `TerminalPane.history`, whose bottom rows are the screen. The
+  pane paints, selects in and scrolls that, with a `ScrollBarArea` while
+  scrolled back (in plain panes too); back at the bottom, a key, a paste or a
+  resize drops it and the live grid returns. The capture is a snapshot —
+  output arriving meanwhile shows on return, as in a terminal's scrollback.
+- **tmux is the record of which pane belongs to which project.** A session is
+  tagged with `@tk_project` (canonical root) and `@tk_cmd` (startup command —
+  `claude` for a Claude pane, which Restart reuses). `Desktop._set_project` →
+  `_attach_tmux_panes` lists the project's sessions and re-attaches a pane to
+  each, unfocused, in creation order; `close_project` → `_detach_tmux_panes`
+  detaches them. No file to drift: a session that died is simply not found,
+  and one whose window crashed is.
+- **Names are for people** (`new_tmux_session_name`): `<project dir>-<kind>`,
+  numbered from `-2` on a clash — `turbokod-claude`, `turbokod-shell`,
+  `turbokod-claude-2`. The kind is `shell` or the startup command's first
+  word; anything outside `[A-Za-z0-9_-]` becomes `-`. Matching never goes by
+  name (that's `@tk_project`), so same-named project directories can't swap
+  panes. Over SSH it's just `tmux attach -t turbokod-claude`; with no prefix
+  key in these sessions, detach by closing the connection. With
+  `window-size latest` the session takes the size of whichever client typed
+  last.
+- **Only the pane's close button (or Cmd+W on it) ends a session**
+  (`TerminalPane.kill_session`). Restart kills and recreates it under the same
+  name. Typing `exit` ends it the usual way.
+- The test suites never touch the user's server: `setup_test_env` points
+  `TMUX_TMPDIR` at the scratch `$HOME`, and `tmux_project_sessions` spawns
+  nothing unless that socket exists. `test_tmux_panes_reattach`
+  and the rest of `tests/test_tmux.mojo` drive a real server end to end.
+
+### Run panes
+
+With tmux, Cmd+R doesn't use the pipe-backed `RunSession` / `DebugPane`: it
+runs the target in a `TerminalPane` with `run_target` set
+(`Desktop._target_run_in_tmux`), in a session named `<project>-run-<target>`
+and tagged `@tk_run`. A dev server keeps serving through an app restart, and
+the pane re-attaches with the others. Debugging (Cmd+D) still goes through
+DAP and the debug pane — the adapter launches the debuggee.
+
+- The session's process is `/bin/sh -c` around the target's command line
+  (`_run_wrapper`; program and args shell-quoted, env as `new-session -e`).
+  It prints `[<target> exited with N]` when the command ends and then idles,
+  so the output stays. Not `remain-on-exit`: tmux paints its dead-pane line
+  after a linefeed on the bottom row, scrolling the top row of the output
+  away — all of it, for a one-line run.
+- The pane reads that line off its grid (`_scan_run_exit`, on new output) for
+  the header (`Run - <target> (exited: N)`), the status bar message and the
+  status-bar tab's running flag. A re-attached pane reads it back the same
+  way. For `_RUN_EXIT_GRACE_MS` after a (re)start the old line doesn't count.
+- **Stop** (the pane's button, Shift+F5) is a Ctrl-C (`send-keys C-c`); the
+  wrapper's `trap : INT` lets it print the exit line (130). **Restart** is
+  `respawn-pane -k` — same command and env, even after a re-attach. **Cmd+R**
+  replaces the session, so an edited `targets.json` applies, and stops any
+  other target's run (one at a time, as without tmux). Closing the pane kills
+  the session.

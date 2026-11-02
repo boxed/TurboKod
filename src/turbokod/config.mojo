@@ -250,6 +250,11 @@ struct TurbokodConfig(Copyable, Movable):
     # right when you start typing. On by default — matches the classic
     # text-mode cursor and keeps the caret easy to spot.
     var cursor_blink: Bool
+    # Settings ▸ General ▸ Terminal panes. Run each terminal / Claude pane
+    # inside a tmux session (private socket, see ``tmux_session.mojo``) so
+    # the shell outlives the app: a restart re-attaches every pane of the
+    # project. Falls back to a plain shell when tmux isn't installed.
+    var terminal_tmux: Bool
     # Settings ▸ Language Server. Per-feature gates for the optional,
     # non-user-initiated LSP capabilities. Each only takes effect when the
     # active server also advertises the matching provider. Mixed defaults:
@@ -329,6 +334,7 @@ struct TurbokodConfig(Copyable, Movable):
         self.ensure_final_newline = True
         self.compress_kwargs = False
         self.cursor_blink = True
+        self.terminal_tmux = True
         self.lsp_format_on_save = False
         self.lsp_signature_help = True
         self.lsp_document_highlight = True
@@ -366,6 +372,7 @@ struct TurbokodConfig(Copyable, Movable):
         self.ensure_final_newline = copy.ensure_final_newline
         self.compress_kwargs = copy.compress_kwargs
         self.cursor_blink = copy.cursor_blink
+        self.terminal_tmux = copy.terminal_tmux
         self.lsp_format_on_save = copy.lsp_format_on_save
         self.lsp_signature_help = copy.lsp_signature_help
         self.lsp_document_highlight = copy.lsp_document_highlight
@@ -512,6 +519,9 @@ def _config_from_json(root: JsonValue) raises -> TurbokodConfig:
     )
     cfg.cursor_blink = json_get_bool(
         root, String("cursor_blink"), cfg.cursor_blink,
+    )
+    cfg.terminal_tmux = json_get_bool(
+        root, String("terminal_tmux"), cfg.terminal_tmux,
     )
     cfg.lsp_format_on_save = json_get_bool(
         root, String("lsp_format_on_save"), cfg.lsp_format_on_save,
@@ -698,6 +708,7 @@ def _config_to_json(config: TurbokodConfig) -> JsonValue:
     )
     root.put(String("compress_kwargs"), json_bool(config.compress_kwargs))
     root.put(String("cursor_blink"), json_bool(config.cursor_blink))
+    root.put(String("terminal_tmux"), json_bool(config.terminal_tmux))
     root.put(
         String("lsp_format_on_save"), json_bool(config.lsp_format_on_save),
     )

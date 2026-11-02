@@ -271,6 +271,13 @@ def setup_test_env():
     _ = external_call["setenv", Int32](
         c_name.unsafe_ptr(), c_value.unsafe_ptr(), Int32(1),
     )
+    # Terminal panes use the default tmux server, which lives under
+    # $TMUX_TMPDIR — not $HOME. Without this a test's panes would land on
+    # the user's own server (and a test's ``kill-server`` would end it).
+    var c_tmux = String("TMUX_TMPDIR\0")
+    _ = external_call["setenv", Int32](
+        c_tmux.unsafe_ptr(), c_value.unsafe_ptr(), Int32(1),
+    )
     var c_fake = String("TURBOKOD_FAKE_CLIPBOARD\0")
     var c_one = String("1\0")
     _ = external_call["setenv", Int32](

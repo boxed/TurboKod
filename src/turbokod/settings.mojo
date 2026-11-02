@@ -121,6 +121,7 @@ struct Settings(Movable):
     var ensure_final_newline: Bool
     var compress_kwargs: Bool
     var cursor_blink: Bool
+    var terminal_tmux: Bool
     var comma_text: String
     """Smart wrap's comma trigger as typed: digits, empty = off."""
     var max_windows_text: String
@@ -190,6 +191,7 @@ struct Settings(Movable):
         self.ensure_final_newline = False
         self.compress_kwargs = False
         self.cursor_blink = False
+        self.terminal_tmux = False
         self.comma_text = String("")
         self.max_windows_text = String("")
         self.ls_format_on_save = False
@@ -374,6 +376,10 @@ struct Settings(Movable):
         )))
         rows.append(ui_row(String(""), ui_check(
             String("cursor_blink"), String("Blinking caret"), self.cursor_blink,
+        )))
+        rows.append(ui_row(String("Terminal panes"), ui_check(
+            String("terminal_tmux"), String("Keep running in tmux across restarts"),
+            self.terminal_tmux,
         )))
         return ui_form(rows^)
 
@@ -599,6 +605,8 @@ struct Settings(Movable):
             self.compress_kwargs = ui_bool(value)
         elif key == String("cursor_blink"):
             self.cursor_blink = ui_bool(value)
+        elif key == String("terminal_tmux"):
+            self.terminal_tmux = ui_bool(value)
         elif key == String("look"):
             var i = ui_int(value)
             if i < 0 or i > 2:

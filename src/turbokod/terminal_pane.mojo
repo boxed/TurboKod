@@ -34,13 +34,15 @@ and cleared by the host each tick.
 from std.collections.list import List
 
 from .canvas import Canvas
+from .cell import Cell
 from .claude_detect import (
     CLAUDE_CLEAN, CLAUDE_NONE, CLAUDE_WAITING, CLAUDE_WORKING,
     ClaudeStateTracker, claude_state_label,
 )
-from .colors import Attr, PANE_BG, WHITE
+from .colors import Attr, PANE_BG, PANE_FG, WHITE
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE, EVENT_PASTE, KEY_ESC, MOD_META, MOD_NONE,
+    Event, EVENT_KEY, EVENT_MOUSE, EVENT_PASTE, KEY_ESC, KEY_PAGEDOWN,
+    KEY_PAGEUP, MOD_META, MOD_NONE,
     MOD_SHIFT, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_DOWN,
     MOUSE_WHEEL_UP,
 )
@@ -50,11 +52,17 @@ from .posix import (
     alloc_zero_buffer, getenv_value, monotonic_ms, poll_stdin, read_into,
 )
 from .pty import PtyProcess
+from .scrollbar import ScrollBarArea
+from .tmux_session import (
+    prepare_tmux_socket_dir, run_exit_line, tmux_attach_argv, tmux_binary,
+    tmux_history, tmux_kill_session, tmux_pane_state, tmux_respawn,
+    tmux_socket_path, tmux_stop,
+)
 from .terminal_view import (
     flush_vt_side_effects, forward_key_to_grid, GridSelection, paint_grid,
     paste_to_pty,
 )
-from .vt import MOUSE_MOTION, MOUSE_PRESS, MOUSE_RELEASE, Vt
+from .vt import MOUSE_MOTION, MOUSE_PRESS, MOUSE_RELEASE, SCROLLBACK_LINES, Vt
 from .window import (
     BottomDockedPanel, TitleCommand,
     handle_bottom_dock_chrome_mouse, handle_bottom_dock_esc,
@@ -64,6 +72,17 @@ from .window import (
 
 comptime _TERMINAL_CLEAR = String("terminal:clear")
 comptime _TERMINAL_RESTART = String("terminal:restart")
+comptime _TERMINAL_STOP = String("terminal:stop")
+
+comptime _MODES_TTL_MS = 300
+"""How long a tmux pane trusts its last ``tmux_pane_state`` answer on a
+press or a wheel step, so a burst of wheel events spawns one tmux."""
+comptime _HISTORY_POLL_MS = 1000
+"""After output, how soon a tmux pane asks again how much history tmux
+holds — the scroll bar's size while the pane shows the live screen."""
+comptime _RUN_EXIT_GRACE_MS = 300
+"""After a run pane (re)starts, how long its grid may still show the
+previous run's exit line before tmux redraws — not read as this run's."""
 comptime TERMINAL_PANE_CLOSE = String("terminal:close")
 """Pending-command id dispatched when the pane's window-style ``[■]``
 close button (top-LEFT, painted by the shared bottom-dock chrome) is
@@ -107,6 +126,28 @@ struct TerminalPane(Copyable, Movable):
     plus the last-painted body rect for screen→grid mapping. The shared
     ``GridSelection`` machinery is reused by the test pane."""
 
+    var scroll_bar: ScrollBarArea
+    """Shown while the view is scrolled back into history."""
+    var history: Vt
+    """A tmux pane's scrollback, while it is scrolled back (``_history_on``;
+    released otherwise). tmux draws on the alternate screen, so ``vt`` has
+    no history of its own: the first step back captures tmux's
+    (``tmux_history``) into this emulator, whose bottom rows are then the
+    screen, and the pane shows, selects in and scrolls it like any other
+    scrollback. Back at the bottom it is dropped and ``vt`` is live again.
+    This keeps tmux's copy mode — its own selection that copies on release
+    and its ``[0/123]`` position indicator — out of the pane."""
+    var _history_on: Bool
+    var _modes_ms: Int
+    var _child_mouse: Bool
+    var _child_alt: Bool
+    var _tmux_history_rows: Int
+    """What tmux says about a tmux pane (``tmux_pane_state``), as of
+    ``_modes_ms``. ``vt`` can't say: tmux itself always tracks the mouse,
+    and keeps the history."""
+    var _state_stale: Bool
+    """Output arrived since ``_modes_ms``: ``tick`` asks again."""
+
     # --- spawn config --------------------------------------------------
     var cwd: String
     """Working directory the shell starts in. Set by the host
@@ -124,6 +165,31 @@ struct TerminalPane(Copyable, Movable):
     user's full interactive environment — PATH, rc files, shell
     functions — is in place before it runs, and so the prompt returns
     when the command exits instead of the pane dying."""
+
+    var tmux_session: String
+    """Name of the tmux session this pane is a client of, or "" for a
+    plain shell. Set by the host before ``open`` — see
+    ``tmux_session.mojo``. The shell then lives in the tmux server, so
+    ``close`` (and an app quit) only detach; ``kill_session`` ends it."""
+    var tmux_project: String
+    """Project root recorded on the session when it is created, which is
+    how a restart finds the pane again."""
+    var tmux_create: Bool
+    """Create ``tmux_session`` on the next ``ensure_started`` rather than
+    attach to it. True for a new pane and after Restart; False for a pane
+    re-attached to a session that survived a restart."""
+    var run_target: String
+    """The project target this pane runs (Cmd+R with tmux), "" for a
+    terminal. ``startup_command`` is then the session's process, not
+    something typed into a shell, and the pane outlives its exit."""
+    var run_env: List[String]
+    """The target's ``K=V`` environment, for creating the session."""
+    var run_exited: Bool
+    var run_exit_status: String
+    """The exit status the run printed (``128+n`` for a signal)."""
+    var _run_exit_event: Bool
+    var _run_scan_after_ms: Int
+    var _run_rescan: Bool
 
     # --- paint-time hit-test bookkeeping -------------------------------
     var _last_panel_top: Int
@@ -176,8 +242,27 @@ struct TerminalPane(Copyable, Movable):
         # children get a SIGWINCH.
         self.vt = Vt(80, 24)
         self.sel = GridSelection()
+        self.scroll_bar = ScrollBarArea()
+        self.history = Vt(1, 1)
+        self.history.release()
+        self._history_on = False
+        self._modes_ms = -_MODES_TTL_MS
+        self._child_mouse = False
+        self._child_alt = False
+        self._tmux_history_rows = 0
+        self._state_stale = True
         self.cwd = String("")
         self.startup_command = String("")
+        self.tmux_session = String("")
+        self.tmux_project = String("")
+        self.tmux_create = True
+        self.run_target = String("")
+        self.run_env = List[String]()
+        self.run_exited = False
+        self.run_exit_status = String("")
+        self._run_exit_event = False
+        self._run_scan_after_ms = 0
+        self._run_rescan = True
         self._last_panel_top = 0
         self._claude_tracker = ClaudeStateTracker()
         self._claude_title_state = CLAUDE_NONE
@@ -201,8 +286,26 @@ struct TerminalPane(Copyable, Movable):
         # pane owns it and is the one that releases it.
         self.vt = copy.vt
         self.sel = copy.sel
+        self.scroll_bar = copy.scroll_bar.copy()
+        self.history = copy.history
+        self._history_on = copy._history_on
+        self._modes_ms = copy._modes_ms
+        self._child_mouse = copy._child_mouse
+        self._child_alt = copy._child_alt
+        self._tmux_history_rows = copy._tmux_history_rows
+        self._state_stale = copy._state_stale
         self.cwd = copy.cwd
         self.startup_command = copy.startup_command
+        self.tmux_session = copy.tmux_session
+        self.tmux_project = copy.tmux_project
+        self.tmux_create = copy.tmux_create
+        self.run_target = copy.run_target
+        self.run_env = copy.run_env.copy()
+        self.run_exited = copy.run_exited
+        self.run_exit_status = copy.run_exit_status
+        self._run_exit_event = copy._run_exit_event
+        self._run_scan_after_ms = copy._run_scan_after_ms
+        self._run_rescan = copy._run_rescan
         self._last_panel_top = copy._last_panel_top
         self._claude_tracker = copy._claude_tracker
         self._claude_title_state = copy._claude_title_state
@@ -250,17 +353,29 @@ struct TerminalPane(Copyable, Movable):
             )
 
     def close(mut self):
-        """Hide the pane and terminate the shell. The grid content is
+        """Hide the pane and terminate the shell — or, for a tmux pane,
+        detach from its session, which keeps running. The grid content is
         preserved (Vt state is intact) so re-opening shows what was on
         screen."""
         self.visible = False
         self.focused = False
+        self._leave_history()
         self.pty.terminate()
+
+    def is_tmux(self) -> Bool:
+        return len(self.tmux_session.as_bytes()) > 0
+
+    def kill_session(mut self):
+        """End the tmux session behind the pane — the user closed the pane,
+        as opposed to the app detaching on quit. No-op for a plain shell."""
+        if self.is_tmux():
+            tmux_kill_session(self.tmux_session)
 
     def release(mut self):
         """Free the emulator. ``close`` keeps it so a re-open shows the old
         screen; this is for when the pane itself goes away (its close
         button, or ``Desktop.shutdown``). Call ``close`` first."""
+        self._leave_history()
         self.vt.release()
 
     def ensure_started(mut self) raises:
@@ -273,6 +388,24 @@ struct TerminalPane(Copyable, Movable):
         worrying about shell-specific flags."""
         if self.pty.alive and self.pty.pid > 0:
             return
+        if self.is_tmux():
+            var tmux = tmux_binary()
+            var socket = tmux_socket_path()
+            if len(tmux.as_bytes()) > 0 and len(socket.as_bytes()) > 0:
+                prepare_tmux_socket_dir(socket)
+                self.pty = PtyProcess.spawn(
+                    tmux_attach_argv(
+                        tmux, socket, self.tmux_session, self.tmux_create,
+                        self.cwd, self.tmux_project, self.startup_command,
+                        self.vt.cols(), self.vt.rows(),
+                        self.run_target, self.run_env,
+                    ),
+                    cwd=self.cwd, cols=self.vt.cols(), rows=self.vt.rows(),
+                )
+                self.tmux_create = False
+                return
+            # tmux went away (uninstalled, $HOME unset): a plain shell.
+            self.tmux_session = String("")
         var shell = getenv_value(String("SHELL"))
         if len(shell.as_bytes()) == 0:
             shell = String("/bin/sh")
@@ -294,10 +427,50 @@ struct TerminalPane(Copyable, Movable):
             # a real terminal; the pty's cooked mode maps it to newline.
             self.pty.write_all(self.startup_command + String("\r"))
 
+    def is_run(self) -> Bool:
+        return len(self.run_target.as_bytes()) > 0
+
+    def is_running(self) -> Bool:
+        """A run pane whose process hasn't exited."""
+        return self.is_run() and not self.run_exited
+
+    def take_run_exit(mut self) -> Bool:
+        """True once per exit of the run pane's process."""
+        var fired = self._run_exit_event
+        self._run_exit_event = False
+        return fired
+
+    def _note_run_start(mut self):
+        self.run_exited = False
+        self.run_exit_status = String("")
+        self._run_exit_event = False
+        self._run_scan_after_ms = monotonic_ms() + _RUN_EXIT_GRACE_MS
+        self._run_rescan = True
+
+    def respawn(mut self):
+        """A run pane's Restart: the same command again, in the same
+        session (``respawn-pane -k``), with the environment it was created
+        with — which also holds after a re-attach, when ``run_env`` is
+        empty."""
+        tmux_respawn(self.tmux_session)
+        self._note_run_start()
+
+    def stop(mut self):
+        """Ctrl-C a run pane's process. The pane stays, showing the
+        output and the exit line."""
+        if self.is_running():
+            tmux_stop(self.tmux_session)
+
     def restart(mut self):
         """Kill the current shell and spawn a fresh one. Useful when
-        the shell ends up in a wedged state."""
+        the shell ends up in a wedged state. A tmux pane gets a fresh
+        session under the same name."""
+        self._note_run_start()
+        self._leave_history()
         self.pty.terminate()
+        if self.is_tmux():
+            tmux_kill_session(self.tmux_session)
+            self.tmux_create = True
         # Wipe the grid, scrollback and modes so the new session starts
         # clean (a full reset, as ``ESC c`` would do).
         self.vt.reset()
@@ -308,6 +481,85 @@ struct TerminalPane(Copyable, Movable):
                 String("[terminal] failed to restart shell: ") + String(e)
                 + String("\r\n"),
             )
+
+    # --- scrollback ----------------------------------------------------
+
+    def _view(self) -> Vt:
+        """The emulator on screen: ``history`` while a tmux pane is
+        scrolled back, else ``vt``. A handle, so scrolling the result
+        scrolls the pane."""
+        if self._history_on:
+            return self.history
+        return self.vt
+
+    def _refresh_modes(mut self, ttl_ms: Int = _MODES_TTL_MS):
+        var now = monotonic_ms()
+        if now - self._modes_ms < ttl_ms:
+            return
+        self._modes_ms = now
+        self._state_stale = False
+        var m = tmux_pane_state(self.tmux_session)
+        self._child_mouse = m.wants_mouse
+        self._child_alt = m.alternate
+        self._tmux_history_rows = 0 if m.alternate else m.history_rows
+
+    def _scrollback(self) -> Int:
+        """Rows above the screen, for the scroll bar: tmux's count while a
+        tmux pane is live (its own ``vt`` has none)."""
+        if self.is_tmux() and not self._history_on:
+            return self._tmux_history_rows
+        return self._view().scrollback_rows()
+
+    def _child_tracks_mouse(mut self, refresh: Bool) -> Bool:
+        """Whether mouse events go to the program rather than to selection
+        and scrolling. ``refresh`` asks tmux again (a press or a wheel
+        step — not every hover)."""
+        if not self.is_tmux():
+            return self.vt.tracks_mouse()
+        if self._history_on:
+            return False
+        if refresh:
+            self._refresh_modes()
+        return self._child_mouse
+
+    def scroll_view_by(mut self, delta: Int):
+        """Scroll ``delta`` rows into history (negative: toward the live
+        screen). A full-screen program's alternate screen has none."""
+        if self.is_tmux() and not self._history_on:
+            if delta <= 0:
+                return
+            self._refresh_modes()
+            if self._child_alt:
+                return
+            self._enter_history()
+            if not self._history_on:
+                return
+        var v = self._view()
+        v.scroll_view_by(delta)
+        self._settle_history()
+
+    def _enter_history(mut self):
+        var h = Vt(self.vt.cols(), self.vt.rows())
+        h.feed_string(tmux_history(self.tmux_session, SCROLLBACK_LINES))
+        if h.scrollback_rows() == 0:
+            h.release()
+            return
+        self.history = h
+        self._history_on = True
+        self.sel.clear()
+
+    def _settle_history(mut self):
+        """Back at the bottom (and not mid-drag on the bar): live again."""
+        if self._history_on and self.history.view_offset() == 0 \
+                and not self.scroll_bar.dragging:
+            self._leave_history()
+
+    def _leave_history(mut self):
+        if not self._history_on:
+            return
+        self.history.release()
+        self._history_on = False
+        self.sel.clear()
 
     def clear(mut self):
         """Wipe the visible grid. Doesn't kill the shell — equivalent
@@ -356,6 +608,13 @@ struct TerminalPane(Copyable, Movable):
         # Without this, prompts that probe (oh-my-zsh / starship) stall,
         # and ``vim`` / ``tmux`` yank to clipboard silently drops.
         flush_vt_side_effects(self.pty, self.vt)
+        if self.is_running() and (total > 0 or self._run_rescan):
+            self._scan_run_exit()
+        if self.is_tmux():
+            if total > 0:
+                self._state_stale = True
+            if self._state_stale and self.visible:
+                self._refresh_modes(_HISTORY_POLL_MS)
         # Attention detection lives here (not in ``paint``) so it keeps
         # running while the pane is minimized or the window is occluded —
         # the whole point is alerting a user who is looking elsewhere.
@@ -372,6 +631,30 @@ struct TerminalPane(Copyable, Movable):
             # previously-cached state is still current.
             self._claude_title_state = state
             self._note_claude_state(state, now)
+
+    def _scan_run_exit(mut self):
+        """Look for the ``[<target> exited with …]`` line (see
+        ``run_exit_line``). Runs on new output, and once more after the
+        grace window — a run that exits before then may print nothing
+        afterwards."""
+        var now = monotonic_ms()
+        if now < self._run_scan_after_ms:
+            return
+        self._run_rescan = False
+        var prefix = run_exit_line(self.run_target)
+        var rows = self.vt.tail_rows(self.vt.rows())
+        for i in range(len(rows) - 1, -1, -1):
+            var row = String(rows[i].strip())
+            if not row.startswith(prefix) or not row.endswith("]"):
+                continue
+            var rb = row.as_bytes()
+            var pb = len(prefix.as_bytes())
+            self.run_exit_status = String(
+                StringSpan(unsafe_from_utf8=rb[pb:len(rb) - 1])
+            )
+            self.run_exited = True
+            self._run_exit_event = True
+            return
 
     def _note_claude_state(mut self, state: UInt8, now_ms: Int):
         """Arm on ``working``; fire one attention event when an armed
@@ -425,6 +708,10 @@ struct TerminalPane(Copyable, Movable):
         ``BottomDockedPanel.close_button_id``); both routes dispatch
         through the host on ``TERMINAL_PANE_CLOSE``."""
         var out = List[TitleCommand]()
+        if self.is_run():
+            out.append(TitleCommand(String("[■ Stop]"), _TERMINAL_STOP))
+            out.append(TitleCommand(String("[↻ Restart]"), _TERMINAL_RESTART))
+            return out^
         out.append(TitleCommand(String("[Clear]"), _TERMINAL_CLEAR))
         out.append(TitleCommand(String("[Restart]"), _TERMINAL_RESTART))
         return out^
@@ -436,7 +723,13 @@ struct TerminalPane(Copyable, Movable):
             self.clear()
             return True
         if id == _TERMINAL_RESTART:
-            self.restart()
+            if self.is_run():
+                self.respawn()
+            else:
+                self.restart()
+            return True
+        if id == _TERMINAL_STOP:
+            self.stop()
             return True
         return False
 
@@ -444,7 +737,13 @@ struct TerminalPane(Copyable, Movable):
 
     def header_title(self) -> String:
         """The header's title: Claude's state, else the OSC title the child
-        set, else "Terminal"."""
+        set, else "Terminal". A run pane says which target, and whether it
+        exited."""
+        if self.is_run():
+            var t = String("Run - ") + self.run_target
+            if self.run_exited:
+                t = t + String(" (exited: ") + self.run_exit_status + String(")")
+            return t^
         var displayed_title = String("Terminal")
         var osc_title = self.vt.title()
         if len(osc_title.as_bytes()) > 0:
@@ -485,19 +784,36 @@ struct TerminalPane(Copyable, Movable):
         # child via TIOCSWINSZ so ``claude`` / ``vim`` / ``less``
         # redraw at the new size — without that they'd keep writing
         # at the old dimensions and the layout falls apart.
+        # The right column is the scroll bar's, so it never covers output.
+        var bar_area = body
+        body = Rect(body.a.x, body.a.y, body.b.x - 1, body.b.y)
         var bw = body.width()
         var bh = body.height()
         if bw <= 0 or bh <= 0:
             self.sel._last_body = Rect.empty()
             return
         if bw != self.vt.cols() or bh != self.vt.rows():
+            # The captured history is laid out for the old width.
+            self._leave_history()
             self.vt.resize(bw, bh)
             if self.pty.alive:
                 _ = self.pty.set_winsize(bw, bh)
         self.sel._last_body = body
         # Grid + selection overlay + cursor caret — shared with the test
         # pane via ``paint_grid``.
-        paint_grid(canvas, painter, self.vt, self.sel, body, self.focused)
+        var v = self._view()
+        paint_grid(canvas, painter, v, self.sel, body, self.focused)
+        var sb = self._scrollback()
+        var attr = Attr(PANE_FG, PANE_BG)
+        var col = Rect(bar_area.b.x - 1, bar_area.a.y, bar_area.b.x, bar_area.b.y)
+        for y in range(col.a.y, col.b.y):
+            painter.set(canvas, col.a.x, y, Cell(String(" "), attr, 1))
+        if sb > 0:
+            self.scroll_bar.paint(
+                canvas, bar_area, sb + v.rows(), sb - v.view_offset(), attr,
+            )
+        else:
+            self.scroll_bar.hide()
 
     # --- copy / selection delegates ------------------------------------
 
@@ -505,10 +821,10 @@ struct TerminalPane(Copyable, Movable):
         return self.sel.has_selection()
 
     def selected_text(self) -> String:
-        return self.sel.selected_text(self.vt)
+        return self.sel.selected_text(self._view())
 
     def copy_selection_to_clipboard(self) -> Bool:
-        return self.sel.copy_to_clipboard(self.vt)
+        return self.sel.copy_to_clipboard(self._view())
 
     # --- mouse ---------------------------------------------------------
 
@@ -528,7 +844,13 @@ struct TerminalPane(Copyable, Movable):
         # In-flight drag selection keeps consuming events even past
         # the body edge so the user can drag-select fast without the
         # selection cutting off when they overshoot.
-        if self.sel.continue_drag(self.vt, event):
+        var bar = self.scroll_bar.handle_mouse(event)
+        if bar >= 0:
+            self.focused = True
+            var v = self._view()
+            self.scroll_view_by(self._scrollback() - bar - v.view_offset())
+            return True
+        if self.sel.continue_drag(self._view(), event):
             return True
         if not panel.contains(event.pos):
             if event.button != MOUSE_BUTTON_NONE \
@@ -543,12 +865,12 @@ struct TerminalPane(Copyable, Movable):
             if not event.pressed:
                 return True
             self.focused = True
-            if self.vt.tracks_mouse() \
-                    and (event.mods & MOD_SHIFT) == 0:
+            if (event.mods & MOD_SHIFT) == 0 \
+                    and self._child_tracks_mouse(True):
                 self._forward_mouse_to_pty(event, MOUSE_PRESS)
                 return True
             var dir = 3 if event.button == MOUSE_WHEEL_UP else -3
-            self.vt.scroll_view_by(dir)
+            self.scroll_view_by(dir)
             return True
         # Press / release / motion. With tracking on and Shift not
         # held, route the event to the child instead of selection —
@@ -556,14 +878,17 @@ struct TerminalPane(Copyable, Movable):
         # universal "I want to select, ignore the child's tracking"
         # override.
         var shift_held = (event.mods & MOD_SHIFT) != 0
-        var routes_to_child = self.vt.tracks_mouse() and not shift_held
+        var is_press = event.button != MOUSE_BUTTON_NONE and event.pressed \
+            and not event.motion
+        var routes_to_child = not shift_held \
+            and self._child_tracks_mouse(is_press)
         if event.button == MOUSE_BUTTON_LEFT and event.pressed \
                 and not event.motion:
             self.focused = True
             if routes_to_child:
                 self._forward_mouse_to_pty(event, MOUSE_PRESS)
                 return True
-            self.sel.click(self.vt, event)
+            self.sel.click(self._view(), event)
             return True
         if routes_to_child:
             # Release / motion / non-left presses. The encoder drops what
@@ -596,6 +921,7 @@ struct TerminalPane(Copyable, Movable):
             # multi-line paste into shells / vim doesn't run each line
             # as a command. Without it the child sees the raw text and
             # treats embedded newlines as Enter.
+            self._leave_history()
             paste_to_pty(self.pty, self.vt, event.text)
             return True
         if event.kind != EVENT_KEY:
@@ -621,6 +947,19 @@ struct TerminalPane(Copyable, Movable):
                 return True
             self.pty.write_all(String("\x1b"))
             return True
+        if (event.key == KEY_PAGEUP or event.key == KEY_PAGEDOWN) \
+                and (event.mods & MOD_SHIFT) != 0:
+            var page = self.vt.rows() - 2
+            self.scroll_view_by(page if event.key == KEY_PAGEUP else -page)
+            return True
+        if self._history_on:
+            if event.key == UInt32(ord("c")) and event.mods == MOD_META \
+                    and self.sel.sel_active:
+                _ = self.sel.copy_to_clipboard(self.history)
+                self.sel.clear()
+                return True
+            # Typing is for the live screen.
+            self._leave_history()
         return forward_key_to_grid(self.pty, self.vt, self.sel, event)
 
 

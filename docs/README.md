@@ -4,7 +4,7 @@ Project notes that go deeper than `CLAUDE.md`'s overview. Each file is a focused
 
 | Topic | What it covers |
 |---|---|
-| [terminal-emulation.md](terminal-emulation.md) | The shell / test panes' emulator is libghostty-vt behind a flat C ABI (`tk_vt.c`) — how it is built and pinned, handle ownership (`release`, no destructor), cell snapshots, why program colors 16..255 become RGB, and the shared Ghostty width table behind `char_width`. |
+| [terminal-emulation.md](terminal-emulation.md) | The shell / test panes' emulator is libghostty-vt behind a flat C ABI (`tk_vt.c`) — how it is built and pinned, handle ownership (`release`, no destructor), cell snapshots, why program colors 16..255 become RGB, the shared Ghostty width table behind `char_width`, and how terminal / Claude panes run in sessions on the default tmux server so they survive a restart and re-attach per project. |
 | [themes.md](themes.md) | Color themes (Settings ▸ Theme) that retint syntax + chrome together; a theme is a 256-entry RGB palette resolved at the frontend boundary (Swift palette / terminal truecolor SGR), so swapping it needs no change to the paint sites. |
 | [native-menu.md](native-menu.md) | How the Swift frontend's `NSMenu` mirrors Mojo's `Desktop.menu_bar` via the snapshot/invoke C ABI, with the terminal in-grid menu unchanged. |
 | [declarative-ui.md](declarative-ui.md) | Declarative UI: a dialog describes itself once as a `UINode` tree; a grid projector (consistent cell layout, focus, keys) and a native AppKit projector both render it, and both report edits / actions back the same way. |
