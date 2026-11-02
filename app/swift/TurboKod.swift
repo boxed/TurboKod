@@ -1962,6 +1962,12 @@ final class CellView: NSView {
         // Actions from the panel surface route to the project window's view so
         // an open-file (etc.) lands there, not in the panel window.
         AppController.shared?.handleAction(code, view: mainPeer ?? self)
+        // The input may have closed the dialog this window shows: hide the
+        // window now, before it draws the core's just-closed blank surface
+        // (a flash of light gray) for a frame.
+        if surface == .dialog || surface == .settings, let mv = mainPeer {
+            AppController.shared?.syncDialogWindows(mv)
+        }
     }
 
     func capturePNG(to path: String) {
@@ -2532,17 +2538,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             // Dialog-window lifecycle (Settings, Project Settings): poll each
             // surface's active flag and open/close the NSWindow on transitions.
+            for v in self.views where v.handle != 0 {
+                if self.syncSurfaceWindows(v) { changed = true }
+            }
             for d in self.dialogSurfaces {
-                for v in self.views where v.handle != 0 {
-                    let id = ObjectIdentifier(v)
-                    let open = self.dialogWins[d.surface]?[id] != nil
-                    let active = d.isActive(v.handle) != 0
-                    if active && !open {
-                        self.showDialogWindow(d, for: v); changed = true
-                    } else if !active && open {
-                        self.closeDialogWindow(d.surface, for: v); changed = true
-                    }
-                }
                 // Like the panel views, dialog views share the main Desktop and
                 // don't tick — just detect whether the surface needs a repaint.
                 for pair in (self.dialogWins[d.surface] ?? [:]).values {
@@ -4238,6 +4237,31 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     // MARK: standalone dialog windows (Settings, Project Settings)
+
+    /// Open or close `v`'s dialog-surface windows (Settings) to match the
+    /// core. True when one changed.
+    private func syncSurfaceWindows(_ v: CellView) -> Bool {
+        var changed = false
+        let id = ObjectIdentifier(v)
+        for d in dialogSurfaces {
+            let open = dialogWins[d.surface]?[id] != nil
+            let active = d.isActive(v.handle) != 0
+            if active && !open {
+                showDialogWindow(d, for: v); changed = true
+            } else if !active && open {
+                closeDialogWindow(d.surface, for: v); changed = true
+            }
+        }
+        return changed
+    }
+
+    /// Right after input to one of `v`'s dialog windows: close whichever
+    /// the input closed in the core, without waiting for the next tick.
+    func syncDialogWindows(_ v: CellView) {
+        guard v.handle != 0 else { return }
+        _ = syncSurfaceWindows(v)
+        _ = pollTVDialog(v)
+    }
 
     private func showDialogWindow(_ d: DialogSurface, for mainView: CellView) {
         guard let mainWin = mainView.window else { return }

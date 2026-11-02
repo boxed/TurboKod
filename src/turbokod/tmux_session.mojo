@@ -53,6 +53,12 @@ from .string_utils import shell_single_quote
 comptime _OPT_PROJECT = String("@tk_project")
 comptime _OPT_CMD = String("@tk_cmd")
 comptime _OPT_RUN = String("@tk_run")
+comptime _OPT_TESTS = String("@tk_tests")
+
+comptime TESTS_RUN_TARGET = String("tests")
+"""A test run's ``run_target``: its title, kind and exit line say
+"tests". Which panes run tests is ``@tk_tests``, not this name, so a
+project target called ``tests`` stays a target."""
 
 
 @fieldwise_init
@@ -64,6 +70,8 @@ struct TmuxSessionInfo(Copyable, Movable):
     var run_target: String
     """The project target this session runs (``@tk_run``), "" for a
     terminal."""
+    var tests: Bool
+    """The session runs the project's tests (``@tk_tests``)."""
 
 
 def tmux_binary() -> String:
@@ -87,10 +95,14 @@ def tmux_available() -> Bool:
         and len(tmux_socket_path().as_bytes()) > 0
 
 
-def tmux_kind(startup_command: String, run_target: String) -> String:
-    """The ``<kind>`` half of a session name: ``run-<target>`` for a run
-    pane, ``shell`` for a bare prompt, else the startup command's first
-    word."""
+def tmux_kind(
+    startup_command: String, run_target: String, tests: Bool = False,
+) -> String:
+    """The ``<kind>`` half of a session name: ``tests`` for a test run,
+    ``run-<target>`` for a run pane, ``shell`` for a bare prompt, else the
+    startup command's first word."""
+    if tests:
+        return String("tests")
     if len(run_target.as_bytes()) > 0:
         return String("run-") + run_target
     if len(startup_command.as_bytes()) > 0:
@@ -220,6 +232,7 @@ def tmux_attach_argv(
     cwd: String, project: String, startup_command: String,
     cols: Int, rows: Int,
     run_target: String = String(""), env: List[String] = List[String](),
+    tests: Bool = False,
 ) -> List[String]:
     """The client command line a pane runs on its pty.
 
@@ -265,6 +278,10 @@ def tmux_attach_argv(
         if is_run:
             _cmd(argv, [
                 String("set-option"), String("-t"), name, _OPT_RUN, run_target,
+            ])
+        if tests:
+            _cmd(argv, [
+                String("set-option"), String("-t"), name, _OPT_TESTS, String("1"),
             ])
         _cmd(argv, [
             String("set-option"), String("-t"), name, _OPT_PROJECT, project,
@@ -504,7 +521,8 @@ def _list_sessions() -> List[_SessionRow]:
     _cmd(argv, [
         String("list-sessions"), String("-F"),
         String("#{session_name}\t#{session_created}\t#{") + _OPT_PROJECT
-        + String("}\t#{") + _OPT_CMD + String("}\t#{") + _OPT_RUN + String("}"),
+        + String("}\t#{") + _OPT_CMD + String("}\t#{") + _OPT_RUN
+        + String("}\t#{") + _OPT_TESTS + String("}"),
     ])
     var res: String
     try:
@@ -518,7 +536,7 @@ def _list_sessions() -> List[_SessionRow]:
     var lines = res.split("\n")
     for i in range(len(lines)):
         var fields = String(lines[i]).split("\t")
-        if len(fields) < 5:
+        if len(fields) < 6:
             continue
         var name = String(fields[0])
         var created = 0
@@ -530,6 +548,7 @@ def _list_sessions() -> List[_SessionRow]:
             name, created,
             TmuxSessionInfo(
                 name, String(fields[2]), String(fields[3]), String(fields[4]),
+                String(fields[5]) == String("1"),
             ),
         ))
     # Insertion sort — a handful of sessions.

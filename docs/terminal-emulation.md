@@ -224,3 +224,25 @@ DAP and the debug pane — the adapter launches the debuggee.
   replaces the session, so an edited `targets.json` applies, and stops any
   other target's run (one at a time, as without tmux). Closing the pane kills
   the session.
+
+### Test runs
+
+Cmd+T (and a gutter Run) works the same way with tmux: pytest runs as the
+process of a session named `<project>-tests` in a run pane, so a long test
+run keeps going through an app restart and the pane comes back with the
+others (`Desktop._target_test_in_tmux`). Without tmux, or without a project,
+the pty-backed `TestPane` runs them as before; debugging tests stays on DAP.
+
+- The session is tagged `@tk_tests` and the pane's `tests` flag set. Its
+  `run_target` is `tests` (`TESTS_RUN_TARGET`) for the title, the exit line
+  and the session name, but which pane runs tests goes by the flag: a target
+  named `tests` stays a target.
+- Tests run *alongside* a target's run, as with the test pane: Cmd+R doesn't
+  stop them, and Stop (Shift+F5) is the target's. Their own pane's Stop
+  button is.
+- The header reads as the test pane's: `Tests — running`, `Tests — passed`,
+  `Tests — failed (N)`.
+- A new run replaces the session, so a single test from the gutter gets its
+  own command line; the pane's Restart re-runs the same one.
+- Run panes underline `File "...", line N`, `path:N` and URLs like the test
+  and debug panes (`output_links.mojo`), and a click opens them.

@@ -39,7 +39,7 @@ from .claude_detect import (
     CLAUDE_CLEAN, CLAUDE_NONE, CLAUDE_WAITING, CLAUDE_WORKING,
     ClaudeStateTracker, claude_state_label,
 )
-from .colors import Attr, PANE_BG, PANE_FG, WHITE
+from .colors import Attr, LIGHT_BLUE, PANE_BG, PANE_FG, STYLE_UNDERLINE, WHITE
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE, EVENT_PASTE, KEY_ESC, KEY_PAGEDOWN,
     KEY_PAGEUP, MOD_META, MOD_NONE,
@@ -47,6 +47,7 @@ from .events import (
     MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
+from .output_links import extract_all_links, link_at, OutputLink
 from .painter import Painter
 from .posix import (
     alloc_zero_buffer, getenv_value, monotonic_ms, poll_stdin, read_into,
@@ -184,6 +185,9 @@ struct TerminalPane(Copyable, Movable):
     something typed into a shell, and the pane outlives its exit."""
     var run_env: List[String]
     """The target's ``K=V`` environment, for creating the session."""
+    var tests: Bool
+    """A run pane running the project's tests (Cmd+T with tmux), not a
+    target: titled as the test pane is, and left alone by Cmd+R."""
     var run_exited: Bool
     var run_exit_status: String
     """The exit status the run printed (``128+n`` for a signal)."""
@@ -193,6 +197,12 @@ struct TerminalPane(Copyable, Movable):
 
     # --- paint-time hit-test bookkeeping -------------------------------
     var _last_panel_top: Int
+    var _last_links: List[OutputLink]
+    """A run pane's ``File "...", line N`` / ``path:N`` / URL spans on
+    screen, rebuilt each paint (``output_links``)."""
+    var pending_open_path: String
+    var pending_open_line: Int    # 1-based; 0 with empty path = none
+    var pending_open_url: String
     var _claude_tracker: ClaudeStateTracker
     """Smooths the Claude-state classification across paints so that a
     single unrecognized spinner-glyph frame doesn't flip the title bar
@@ -258,12 +268,17 @@ struct TerminalPane(Copyable, Movable):
         self.tmux_create = True
         self.run_target = String("")
         self.run_env = List[String]()
+        self.tests = False
         self.run_exited = False
         self.run_exit_status = String("")
         self._run_exit_event = False
         self._run_scan_after_ms = 0
         self._run_rescan = True
         self._last_panel_top = 0
+        self._last_links = List[OutputLink]()
+        self.pending_open_path = String("")
+        self.pending_open_line = 0
+        self.pending_open_url = String("")
         self._claude_tracker = ClaudeStateTracker()
         self._claude_title_state = CLAUDE_NONE
         self._attn_armed = False
@@ -301,12 +316,17 @@ struct TerminalPane(Copyable, Movable):
         self.tmux_create = copy.tmux_create
         self.run_target = copy.run_target
         self.run_env = copy.run_env.copy()
+        self.tests = copy.tests
         self.run_exited = copy.run_exited
         self.run_exit_status = copy.run_exit_status
         self._run_exit_event = copy._run_exit_event
         self._run_scan_after_ms = copy._run_scan_after_ms
         self._run_rescan = copy._run_rescan
         self._last_panel_top = copy._last_panel_top
+        self._last_links = copy._last_links.copy()
+        self.pending_open_path = copy.pending_open_path
+        self.pending_open_line = copy.pending_open_line
+        self.pending_open_url = copy.pending_open_url
         self._claude_tracker = copy._claude_tracker
         self._claude_title_state = copy._claude_title_state
         self._attn_armed = copy._attn_armed
@@ -332,6 +352,21 @@ struct TerminalPane(Copyable, Movable):
 
     def consume_command_id(mut self) -> String:
         return self.dock.consume_command_id()
+
+    def consume_open_request(mut self) -> Tuple[String, Int]:
+        """``(path, line)`` (1-based) of a freshly clicked traceback link
+        in a run pane, or ``("", 0)``; clears it."""
+        var path = self.pending_open_path
+        var line = self.pending_open_line
+        self.pending_open_path = String("")
+        self.pending_open_line = 0
+        return (path^, line)
+
+    def consume_open_url(mut self) -> String:
+        """A freshly clicked URL in a run pane, or ""; clears it."""
+        var u = self.pending_open_url
+        self.pending_open_url = String("")
+        return u^
 
     # --- lifecycle -----------------------------------------------------
 
@@ -398,7 +433,7 @@ struct TerminalPane(Copyable, Movable):
                         tmux, socket, self.tmux_session, self.tmux_create,
                         self.cwd, self.tmux_project, self.startup_command,
                         self.vt.cols(), self.vt.rows(),
-                        self.run_target, self.run_env,
+                        self.run_target, self.run_env, self.tests,
                     ),
                     cwd=self.cwd, cols=self.vt.cols(), rows=self.vt.rows(),
                 )
@@ -739,6 +774,12 @@ struct TerminalPane(Copyable, Movable):
         """The header's title: Claude's state, else the OSC title the child
         set, else "Terminal". A run pane says which target, and whether it
         exited."""
+        if self.tests:
+            if not self.run_exited:
+                return String("Tests — running")
+            if self.run_exit_status == String("0"):
+                return String("Tests — passed")
+            return String("Tests — failed (") + self.run_exit_status + String(")")
         if self.is_run():
             var t = String("Run - ") + self.run_target
             if self.run_exited:
@@ -803,6 +844,9 @@ struct TerminalPane(Copyable, Movable):
         # pane via ``paint_grid``.
         var v = self._view()
         paint_grid(canvas, painter, v, self.sel, body, self.focused)
+        self._last_links = List[OutputLink]()
+        if self.is_run():
+            self._paint_links(canvas, painter, v, body)
         var sb = self._scrollback()
         var attr = Attr(PANE_FG, PANE_BG)
         var col = Rect(bar_area.b.x - 1, bar_area.a.y, bar_area.b.x, bar_area.b.y)
@@ -814,6 +858,32 @@ struct TerminalPane(Copyable, Movable):
             )
         else:
             self.scroll_bar.hide()
+
+    def _paint_links(
+        mut self, mut canvas: Canvas, painter: Painter, v: Vt, body: Rect,
+    ):
+        """Underline a run's traceback / ``path:N`` / URL spans on screen
+        and record them for clicks, as the test pane does — a test run
+        or a server's traceback jumps to the source."""
+        var link_attr = Attr(LIGHT_BLUE, PANE_BG, STYLE_UNDERLINE)
+        var grid = v.grid()
+        for r in range(grid.rows):
+            var line = grid.row_text(r)
+            if len(line.as_bytes()) == 0:
+                continue
+            var hits = extract_all_links(line)
+            for h in range(len(hits)):
+                var hit = hits[h]
+                var x0 = max(body.a.x + hit.cell_start, body.a.x)
+                var x1 = min(body.a.x + hit.cell_end, body.b.x)
+                if x1 <= x0:
+                    continue
+                var line_y = body.a.y + r
+                for x in range(x0, x1):
+                    painter.set_attr(canvas, x, line_y, link_attr)
+                self._last_links.append(OutputLink(
+                    line_y, x0, x1, hit.path, hit.line, hit.is_url,
+                ))
 
     # --- copy / selection delegates ------------------------------------
 
@@ -887,6 +957,17 @@ struct TerminalPane(Copyable, Movable):
             self.focused = True
             if routes_to_child:
                 self._forward_mouse_to_pty(event, MOUSE_PRESS)
+                return True
+            # A run's traceback link opens its file (a URL the browser)
+            # rather than starting a selection.
+            var li = link_at(self._last_links, event.pos)
+            if li >= 0:
+                ref link = self._last_links[li]
+                if link.is_url:
+                    self.pending_open_url = link.path
+                else:
+                    self.pending_open_path = link.path
+                    self.pending_open_line = link.line
                 return True
             self.sel.click(self._view(), event)
             return True

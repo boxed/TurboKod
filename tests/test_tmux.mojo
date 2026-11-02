@@ -292,6 +292,61 @@ def test_tmux_run_stop_and_restart() raises:
     _rm_rf(root)
 
 
+def test_tmux_test_run() raises:
+    """Cmd+T with tmux runs the tests as their own session's process: a
+    restart of the app (a project close/reopen) re-attaches the pane as a
+    test run, and a target's run and Stop leave the tests alone."""
+    if not tmux_available():
+        return
+    var root = _temp_path(String("_tmux_tests"))
+    _rm_rf(root)
+    _ensure_dir(root)
+    var d = Desktop()
+    d.config.terminal_tmux = True
+    d.open_project(root)
+    var canonical = d.project.value()
+    var args = List[String]()
+    args.append(String("-c"))
+    args.append(String("sleep 1; echo 'File \"x.py\", line 3'; exit 1"))
+    d._target_test_in_tmux(String("/bin/sh"), args, canonical)
+    assert_equal(len(d.terminal_panes), 1)
+    assert_true(d.terminal_panes[0].tests)
+    assert_false(d.terminal_panes[0].focused)
+    assert_true(d.terminal_panes[0].tmux_session.endswith("_tmux_tests-tests"))
+    assert_equal(d.terminal_panes[0].header_title(), String("Tests — running"))
+    # A target's run, and Stop, are the target's business.
+    var t = RunTarget()
+    t.name = String("tests")
+    t.program = String("/bin/sleep")
+    t.args.append(String("30"))
+    d._target_run_in_tmux(t)
+    assert_equal(len(d.terminal_panes), 2)
+    assert_false(d.terminal_panes[1].tests)
+    d._stop_debug_and_run()
+    assert_true(_run_pane_settles(d, 0))
+    assert_equal(d.terminal_panes[0].run_exit_status, String("1"))
+    assert_equal(d.terminal_panes[0].header_title(), String("Tests — failed (1)"))
+
+    d.close_project()
+    assert_equal(len(d.terminal_panes), 0)
+    d.open_project(root)
+    assert_equal(len(d.terminal_panes), 2)
+    var ti = 0 if d.terminal_panes[0].tests else 1
+    assert_true(d.terminal_panes[ti].tests)
+    assert_false(d.terminal_panes[1 - ti].tests)
+    assert_true(_run_pane_settles(d, ti))
+    assert_equal(d.terminal_panes[ti].header_title(), String("Tests — failed (1)"))
+
+    var kill = List[String]()
+    kill.append(tmux_binary())
+    kill.append(String("-S"))
+    kill.append(tmux_socket_path())
+    kill.append(String("kill-server"))
+    _ = capture_command(kill)
+    d.shutdown()
+    _rm_rf(root)
+
+
 def test_tmux_pane_scrolls_and_selects_itself() raises:
     """Wheel and drag in a tmux pane stay turbokod's: scrolling shows a
     capture of tmux's history with the pane's own scroll bar, and a drag

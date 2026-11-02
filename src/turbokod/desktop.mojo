@@ -248,8 +248,8 @@ from .symbol_index import SymbolIndex
 from .terminal import beep
 from .terminal_pane import TERMINAL_PANE_CLOSE, TerminalPane
 from .tmux_session import (
-    new_tmux_session_name, tmux_available, tmux_kind, tmux_project_sessions,
-    tmux_session_names,
+    new_tmux_session_name, TESTS_RUN_TARGET, tmux_available, tmux_kind,
+    tmux_project_sessions, tmux_session_names,
 )
 from .test_pane import (
     TEST_CLEAR_OUTPUT, TEST_PANE_CLOSE, TEST_RERUN, TEST_STOP, TestPane,
@@ -6897,6 +6897,7 @@ struct Desktop(Movable):
             pane.cwd = root
             pane.startup_command = sessions[i].startup_command
             pane.run_target = sessions[i].run_target
+            pane.tests = sessions[i].tests
             pane.tmux_session = sessions[i].name
             pane.tmux_project = root
             pane.tmux_create = False
@@ -9928,7 +9929,8 @@ struct Desktop(Movable):
         """Stop the target running in a tmux run pane, if any — the pane
         keeps its output, as the pipe-backed run pane does."""
         for i in range(len(self.terminal_panes)):
-            self.terminal_panes[i].stop()
+            if not self.terminal_panes[i].tests:
+                self.terminal_panes[i].stop()
 
     def dispatch_action(
         mut self, action: String, screen: Rect,
@@ -12218,6 +12220,11 @@ struct Desktop(Movable):
                     _ = removed
                     continue
                 _ = self.terminal_panes[i].handle_command(cmd)
+            var req = self.terminal_panes[i].consume_open_request()
+            var url = self.terminal_panes[i].consume_open_url()
+            if len(req[0].as_bytes()) > 0 or len(url.as_bytes()) > 0:
+                var screen = self._last_screen
+                self._open_pane_link(req, url, screen)
             if self.terminal_panes[i].take_run_exit():
                 var status = self.terminal_panes[i].run_exit_status
                 var attr = Attr(BLACK, LIGHT_GRAY) if status == String("0") \
@@ -13237,6 +13244,8 @@ struct Desktop(Movable):
             command = command + String(" ") + shell_single_quote(target.args[k])
         var idx = -1
         for i in range(len(self.terminal_panes)):
+            if self.terminal_panes[i].tests:
+                continue   # tests run alongside a target, as without tmux
             if self.terminal_panes[i].run_target == target.name:
                 idx = i
             else:
@@ -13420,6 +13429,9 @@ struct Desktop(Movable):
         # Remember what we ran so the pane's "Re-run" replays this exact
         # command (single test vs. whole suite) rather than the suite.
         self._last_test_node_id = node_id
+        if self.config.terminal_tmux and tmux_available():
+            self._target_test_in_tmux(program, args, project_root)
+            return
         # ``run`` terminates only the *previous test child* (the run/debug
         # session is a separate slot, untouched — a dev server keeps
         # serving), resets the grid, and echoes the ``$ <cmd>`` banner.
@@ -13439,6 +13451,50 @@ struct Desktop(Movable):
                 String("test: spawn failed — ") + String(e),
                 Attr(LIGHT_RED, LIGHT_GRAY),
             )
+
+    def _target_test_in_tmux(
+        mut self, program: String, args: List[String], root: String,
+    ):
+        """Cmd+T with tmux: the tests run as the process of their own
+        session (``<project>-tests``), in a run pane, so a long run
+        outlives a restart of the app and the pane re-attaches with the
+        others (``_attach_tmux_panes``). Like the test pane they run
+        alongside a target's run, which Cmd+R and Stop leave alone in
+        turn. A new run replaces the session, so a different test (a
+        gutter Run) gets its own command line."""
+        var command = shell_single_quote(program)
+        for k in range(len(args)):
+            command = command + String(" ") + shell_single_quote(args[k])
+        # A run of the pty-backed pane from before tmux was on.
+        self.test_pane.close()
+        self._test_output_held = False
+        var idx = -1
+        for i in range(len(self.terminal_panes)):
+            if self.terminal_panes[i].tests:
+                idx = i
+        if idx < 0:
+            var pane = TerminalPane()
+            pane.run_target = TESTS_RUN_TARGET
+            pane.tests = True
+            pane.tmux_session = self._new_tmux_session_name(
+                tmux_kind(String(""), TESTS_RUN_TARGET, True),
+            )
+            pane.tmux_project = root
+            self.terminal_panes.append(pane^)
+            idx = len(self.terminal_panes) - 1
+        self.terminal_panes[idx].cwd = root
+        self.terminal_panes[idx].startup_command = command
+        if self.terminal_panes[idx].visible:
+            self.terminal_panes[idx].restart()
+        else:
+            self.terminal_panes[idx].open()
+            # Shown, but the editor keeps the keyboard, as with the test
+            # pane.
+            self.terminal_panes[idx].focused = False
+        self.panel_front_request = True
+        self.status_bar.set_message(
+            String("running tests…"), Attr(BLACK, LIGHT_GRAY),
+        )
 
     def _target_test_debug(mut self, node_id: String = String("")):
         """Cmd+Shift+D: run the project's test suite under the DAP
@@ -13580,6 +13636,7 @@ struct Desktop(Movable):
             var running = self.run_session.matches(t.name)
             for k in range(len(self.terminal_panes)):
                 if self.terminal_panes[k].run_target == t.name \
+                        and not self.terminal_panes[k].tests \
                         and self.terminal_panes[k].is_running():
                     running = True
             var debugging = (
