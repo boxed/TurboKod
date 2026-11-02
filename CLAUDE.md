@@ -62,9 +62,10 @@ host polls `tk_desktop_native_dialog` (JSON) and answers via
 button. Windows become frameless tabs (`WindowManager.tabbed`) under a
 native tab strip fed by `tk_desktop_tabs`. Quick Open / Find Symbol / Find
 in Project run as one native picker sheet over the core's own search
-machinery (`tk_desktop_picker*`); popups are `NSMenu`s; the git view,
-history, merge and review are native sheets / overlays driving the
-core through the same methods the grid path calls; the file tree and status
+machinery (`tk_desktop_picker*`); popups are `NSMenu`s; history, merge
+and review are native sheets / overlays driving the core through the same
+methods the grid path calls; the git view is a non-modal window of its own
+in every native look (below); the file tree and status
 bar are native overlays over their cells; Settings and Project Settings are
 declarative dialogs (below), Settings in a window of its own; tool panes get native headers
 (the debug pane's stack and variables native tables too) and editors a
@@ -93,7 +94,7 @@ itself, in pixels, Platinum-style (`PlatinumDialog` / `PNode` in
 scroll bar in a 2-column `Window.gutter`, the status bar (redrawn
 over its cells from `tk_desktop_status_layout`), and the git view
 (`PlatinumGitView`, over the same `tk_desktop_git*` calls as the macOS
-sheet). The menus stay the system menu bar and everything else the
+`GitController`). The menus stay the system menu bar and everything else the
 classic grid. Gate on `host_draws_dialogs()`
 (dialogs) or `host_tabs()` (tabbed layout), not `native_ui()`, for
 anything those do. Find a window's grid with `NSWindow.cellView`, not
@@ -108,11 +109,24 @@ one window per project, the in-grid tab bar, and the window borderless inside
 a Turbo Vision frame of cells (`TVMainFrame` in `TurboKod.swift`; the ring
 from `Desktop.paint_frame`) whose close box closes the project, zoom box goes
 full screen (Option: fills the screen), and title row carries the focused
-file's proxy icon. The git view and the declarative dialogs (pickers, Find in
-Project, Project Settings, …) open in a Turbo Vision-framed window of their own
-(`Desktop.dialog_window`, `TVDialogWindow`), as in the other looks. The terminal frontends keep overlapping windows — don't
+file's proxy icon. The declarative dialogs (pickers, Find in Project, Project
+Settings, …) open in a Turbo Vision-framed window of their own
+(`Desktop.dialog_window`, `TVDialogWindow`), as in the other looks; the git view
+gets its own cell window (`Desktop.git_window`, `TVGitWindow`). The terminal frontends keep overlapping windows — don't
 make the overlapping layout depend on anything but `host_owns_menu`. Full
 details in [docs/tv-frame.md](docs/tv-frame.md).
+
+### Git view window (native macOS)
+
+In the native app the git view is **not modal**: it opens in a window of its
+own in every look (`GitController`, `PlatinumGitView`, `TVGitWindow`) titled
+"Local changes — <project>" (`LocalChanges.title()`), while the project window
+stays live. Opening a file from it keeps it open; Git ▸ Local changes again
+raises it. Its frame is remembered per project and per display configuration
+next to the floating panels' (`GitWindowPlacement`). The core gates the modal
+on `_git_modal()` (`local_changes.active and not git_windowed()`) — don't test
+`local_changes.active` for "blocks input"; the terminal frontends keep the
+in-grid modal. Full details in [docs/native-ui.md](docs/native-ui.md).
 
 ### Floating panels (native macOS)
 
