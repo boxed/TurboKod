@@ -148,6 +148,35 @@ def test_tmux_panes_reattach() raises:
     d.shutdown()
     _rm_rf(root)
 
+def test_tmux_keeps_a_trailing_semicolon() raises:
+    # tmux took a ";" ending an argument as the end of the command: a
+    # startup command "echo x;" was kept, and typed, as "echo x"
+    if not tmux_available():
+        return
+    assert_true(tmux_socket_path().startswith(_test_home()))
+    var root = _temp_path(String("_tmux_semi"))
+    _rm_rf(root)
+    _ensure_dir(root)
+    var d = Desktop()
+    d.config.terminal_tmux = True
+    d.open_project(root)
+    var canonical = d.project.value()
+    d._open_terminal_pane(String("echo tk-semi;"))
+    assert_equal(_tmux_sessions_settle(d, canonical, 1), 1)
+    assert_true(_pane_shows(d, String("tk-semi")))
+    var sessions = tmux_project_sessions(canonical)
+    assert_equal(sessions[0].startup_command, String("echo tk-semi;"))
+    d.close_project()
+    var kill = List[String]()
+    kill.append(tmux_binary())
+    kill.append(String("-S"))
+    kill.append(tmux_socket_path())
+    kill.append(String("kill-server"))
+    _ = capture_command(kill)
+    d.shutdown()
+    _rm_rf(root)
+
+
 def _run_pane_settles(mut d: Desktop, idx: Int) -> Bool:
     """Tick until run pane ``idx`` has seen its process exit, up to ~5 s."""
     var waited = 0

@@ -169,7 +169,16 @@ def _cmd(mut argv: List[String], var words: List[String]):
     if len(argv) > _BASE_ARGC:
         argv.append(String(";"))
     for i in range(len(words)):
-        argv.append(words[i])
+        argv.append(_literal(words[i]))
+
+
+def _literal(word: String) -> String:
+    """``word`` as one argument of a tmux command: tmux takes a ``;`` at
+    the end of an argument as the end of the command (``make;`` was set
+    as ``make``), and reads ``\\;`` there as a plain ``;``."""
+    if word.endswith(String(";")):
+        return String(word[byte = 0 : word.byte_length() - 1]) + String("\\;")
+    return word
 
 
 def _server_options(mut argv: List[String]):
