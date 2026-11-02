@@ -40,7 +40,7 @@ from turbokod.project_targets import (
     split_env_field, write_all_targets,
 )
 from turbokod.project_settings import ProjectSettings
-from turbokod.ui_grid import GridForm
+from turbokod.ui_grid import GridForm, ui_act, ui_set
 from turbokod.project_on_save import (
     load_project_on_save, write_project_on_save
 )
@@ -3624,10 +3624,12 @@ def test_project_spelling_dialog_adds_to_project_dictionary() raises:
             row = i
             assert_equal(w.count, 2)
     assert_true(row >= 0)
-    d.spelling_dialog.list.set_selected(row)
-    # Tab to "Add to Project", Enter — through the Desktop's routing.
-    _ = d.handle_event(Event.key_event(KEY_TAB), _SCREEN)
-    _ = d.handle_event(Event.key_event(KEY_ENTER), _SCREEN)
+    # Select it and press "Add to Project" — through the Desktop's
+    # declarative routing, as any projector reports them.
+    assert_equal(d.ui_surface(), String("spelling"))
+    _ = d.ui_apply(String("spelling"), [
+        ui_set(String("words"), String(row)), ui_act(String("project")),
+    ])
     assert_true(d.speller.check_word(String("zorblyfrax")))
     var dict_text = read_file(root + String("/.turbokod/dictionary.txt"))
     assert_true(String("zorblyfrax") in dict_text)

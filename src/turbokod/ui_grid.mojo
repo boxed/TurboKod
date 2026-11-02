@@ -57,7 +57,8 @@ from .ui_tree import (
     UI_HSTACK, UI_LABEL, UI_ROW, UI_SECONDARY, UI_SEPARATOR, UI_SPACER,
     UI_DISABLED, UI_PREVIEW, UI_TABLE, UI_TABS, UI_TEXT, UI_VSTACK, UINode,
     UI_CODE, UI_LARGE, UI_LIST, UI_MULTI, UI_NAV, UI_RGB, UISpan,
-    ui_button, ui_list_anchor, ui_list_row,
+    ui_button, ui_list_anchor, ui_list_row, ui_list_selected,
+    ui_list_selection,
 )
 from .scrollbar import ScrollBarArea
 from .window import close_button_clicked, paint_modal_frame, paint_window_title
@@ -584,31 +585,37 @@ struct GridForm(Movable):
     def _vlist(mut self, n: UINode) -> Int:
         """A ``UI_LIST``'s ``ListBox``: its scroll and its selection,
         synced from the dialog's (a code view has none)."""
-        var row = -1 if n.has(UI_CODE) else n.number
-        var anchor = -1 if n.has(UI_CODE) else ui_list_anchor(n.text)
+        var code = n.has(UI_CODE)
         for i in range(len(self._list_keys)):
             if self._list_keys[i] == n.key:
-                if self._lists[i].selected != row or (
-                    n.has(UI_MULTI) and self._lists[i].anchor() != anchor
-                ):
-                    self._select(i, row, anchor, n.count)
+                if not code and self._selection_of(n, i) != n.text:
+                    self._select(i, n)
                 return i
         var lb = ListBox(n.has(UI_MULTI))
         self._list_keys.append(n.key)
         self._lists.append(lb^)
         self._list_marks.append(-1)
         var i = len(self._lists) - 1
-        self._select(i, row, anchor, n.count)
+        if code:
+            self._lists[i].set_selected(-1)
+        else:
+            self._select(i, n)
         return i
 
-    def _select(mut self, i: Int, row: Int, anchor: Int, count: Int):
-        if not self._lists[i].multi or anchor < 0 or anchor == row:
+    def _selection_of(self, n: UINode, i: Int) -> String:
+        """List ``i``'s selection as its value (``ui_list_selection``)."""
+        ref lb = self._lists[i]
+        if not n.has(UI_MULTI):
+            return String(lb.selected)
+        return ui_list_selection(lb.anchor(), lb.selected, lb.selected_indices())
+
+    def _select(mut self, i: Int, n: UINode):
+        var row = n.number
+        var anchor = ui_list_anchor(n.text)
+        if not self._lists[i].multi:
             self._lists[i].set_selected(row)
             return
-        var rows = List[Int]()
-        for r in range(min(anchor, row), max(anchor, row) + 1):
-            rows.append(r)
-        self._lists[i].set_selection(rows, row, anchor, count)
+        self._lists[i].set_selection(ui_list_selected(n.text), row, anchor, n.count)
 
     def _button(mut self, n: UINode, r: Rect) -> Int:
         for i in range(len(self._button_keys)):
@@ -882,26 +889,19 @@ struct GridForm(Movable):
         """Up / Down / Page / Home / End on list ``n``: report the new
         selection (with Shift on a ``UI_MULTI`` list, the range)."""
         var li = self._vlist(n)
-        var before_sel = self._lists[li].selected
-        var before_anchor = self._lists[li].anchor()
+        var before = self._selection_of(n, li)
         var ev = event
         if not n.has(UI_MULTI):
             ev.mods = ev.mods & ~MOD_SHIFT
         _ = self._lists[li].handle_nav_key(ev, n.count, page)
-        self._report_selection(n, li, before_sel, before_anchor, out)
+        self._report_selection(n, li, before, out)
 
     def _report_selection(
-        self, n: UINode, li: Int, before_sel: Int, before_anchor: Int,
-        mut out: List[UIEvent],
+        self, n: UINode, li: Int, before: String, mut out: List[UIEvent],
     ):
-        var sel = self._lists[li].selected
-        var anchor = self._lists[li].anchor()
-        if sel == before_sel and (not n.has(UI_MULTI) or anchor == before_anchor):
-            return
-        if n.has(UI_MULTI) and anchor >= 0 and anchor != sel:
-            out.append(ui_set(n.key, String(anchor) + String(":") + String(sel)))
-        else:
-            out.append(ui_set(n.key, String(sel)))
+        var now = self._selection_of(n, li)
+        if now != before:
+            out.append(ui_set(n.key, now))
 
     def _nav_list(self) -> Int:
         """The placed list a ``UI_NAV`` field drives: the first one that
@@ -1209,14 +1209,13 @@ struct GridForm(Movable):
                 var code = p.node.has(UI_CODE)
                 if press and not code:
                     self.focus_key = p.node.key
-                var before_sel = self._lists[li].selected
-                var before_anchor = self._lists[li].anchor()
+                var before = self._selection_of(p.node, li)
                 if self._lists[li].handle_mouse_press(event, p.rect, p.node.count):
                     if code:
                         # A code view only scrolls.
                         self._lists[li].set_selected(-1)
                         return
-                    self._report_selection(p.node, li, before_sel, before_anchor, out)
+                    self._report_selection(p.node, li, before, out)
                     if press and event.click_count >= 2 \
                             and len(p.node.value.as_bytes()) > 0:
                         out.append(ui_act(p.node.value))

@@ -205,6 +205,7 @@ from .message_request_dialog import MessageRequestDialog
 from .color_picker import ColorPickerDialog
 from .merge_view import MergeView
 from .fill_dialog import FillDialog
+from .find_dialog import FindDialog
 from .spell_scan import spell_scan_files
 from .spelling_dialog import (
     SPELLING_ADD_PROJECT, SPELLING_ADD_USER, SpellingDialog,
@@ -1343,6 +1344,9 @@ struct Desktop(Movable):
     # generates one string per caret (a fixed text, or a numeric
     # sequence) and routes it through ``Editor.apply_fill_strings``.
     var fill_dialog: FillDialog
+    var find_dialog: FindDialog
+    """Find / Replace where dialogs get windows of their own (the Turbo
+    Vision look in the native app); the in-grid prompt elsewhere."""
     # Project ▸ Spelling: the project-wide misspelling list. Owns its
     # scan, which ``paint`` advances a frame's budget at a time.
     var spelling_dialog: SpellingDialog
@@ -1883,6 +1887,7 @@ struct Desktop(Movable):
         self.breakpoint_menu = BreakpointMenu()
         self.breakpoint_error = BreakpointConditionErrorDialog()
         self.fill_dialog = FillDialog()
+        self.find_dialog = FindDialog()
         self.spelling_dialog = SpellingDialog()
         self._lsp_install_prompted = List[String]()
         self._venv_lsp_installed = List[String]()
@@ -2696,6 +2701,7 @@ struct Desktop(Movable):
                 or self.lsp_status_menu.active \
                 or self.breakpoint_menu.active \
                 or self.breakpoint_error.active or self.fill_dialog.active \
+                or self.find_dialog.active \
                 or self.names_review.active \
                 or self.spelling_dialog.active:
             return True
@@ -4878,8 +4884,6 @@ struct Desktop(Movable):
             self.tab_context_menu.paint(canvas, screen)
         if not (host_popups and self.lsp_status_menu.active):
             self.lsp_status_menu.paint(canvas, screen)
-        if not (native and self.spelling_dialog.active):
-            self.spelling_dialog.paint(canvas, screen)
         # Project Settings persists its edits as they're made.
         self._sync_project_settings()
         # Review mode — a full-screen changeset reader. Painted above the
@@ -7748,7 +7752,7 @@ struct Desktop(Movable):
             _ = self.windows.handle_mod_key(event)
             return Optional[String]()
         if self.native_dialog_active() or self.native_git_active() \
-                or self.native_spelling_active() or self.native_history_active() \
+                or self.native_history_active() \
                 or self.native_merge_active() or self.native_review_picker() \
                 or self.native_ui_surface_active() \
                 or len(self.native_popup_kind().as_bytes()) > 0 \
@@ -7771,14 +7775,6 @@ struct Desktop(Movable):
                 _ = self.spell_menu.handle_mouse(event, screen)
             if self.spell_menu.submitted:
                 self._on_spell_menu_submit()
-            return Optional[String]()
-        if self.spelling_dialog.active:
-            if event.kind == EVENT_KEY:
-                _ = self.spelling_dialog.handle_key(event)
-            elif event.kind == EVENT_MOUSE:
-                _ = self.spelling_dialog.handle_mouse(event, screen)
-            if self.spelling_dialog.submitted:
-                self._on_spelling_dialog_submit()
             return Optional[String]()
         if self.git_gutter_menu.active:
             # Same modality story as ``spell_menu`` — opens contextually
@@ -8479,6 +8475,7 @@ struct Desktop(Movable):
         """
         return self.spell_menu.active or self.breakpoint_error.active \
             or self.breakpoint_menu.active or self.fill_dialog.active \
+            or self.find_dialog.active \
             or self.names_review.active \
             or self.spelling_dialog.active \
             or self.git_gutter_menu.active or self.test_gutter_menu.active \
@@ -8924,6 +8921,10 @@ struct Desktop(Movable):
             out.append(String("breakpoint"))
         elif self.fill_dialog.active:
             out.append(String("fill"))
+        if self.find_dialog.active:
+            out.append(String("find"))
+        if self.spelling_dialog.active:
+            out.append(String("spelling"))
         if len(self.picker_kind().as_bytes()) > 0:
             out.append(String("picker"))
         if self.names_review.active:
@@ -8954,6 +8955,10 @@ struct Desktop(Movable):
             return self.picker_ui()
         if name == String("names_review"):
             return self.names_review.ui(self.grammar_registry)
+        if name == String("find"):
+            return self.find_dialog.ui()
+        if name == String("spelling"):
+            return self.spelling_dialog.ui()
         if name == String("settings"):
             return self.settings.ui()
         if name == String("language_editor"):
@@ -9018,6 +9023,16 @@ struct Desktop(Movable):
                     self.names_review.ui_act(e.key)
                 else:
                     self.names_review.ui_set(e.key, e.value)
+            elif name == String("find"):
+                if e.is_action:
+                    self.find_dialog.ui_act(e.key)
+                else:
+                    self.find_dialog.ui_set(e.key, e.value)
+            elif name == String("spelling"):
+                if e.is_action:
+                    self.spelling_dialog.ui_act(e.key)
+                else:
+                    self.spelling_dialog.ui_set(e.key, e.value)
         if name == String("settings") or name == String("language_editor"):
             self.settings.consume_language_editor()
             # Apply before a Close resets the working state.
@@ -9036,6 +9051,18 @@ struct Desktop(Movable):
             self._on_breakpoint_menu_submit()
         elif name == String("fill") and self.fill_dialog.submitted:
             self._on_fill_dialog_submit()
+        elif name == String("spelling") and self.spelling_dialog.submitted:
+            self._on_spelling_dialog_submit()
+        elif name == String("find"):
+            # The options stick for the next Find even before a search.
+            self._last_search_opts = self.find_dialog.opts
+            if len(self.find_dialog.op.as_bytes()) > 0:
+                var op = self.find_dialog.op
+                self.find_dialog.op = String("")
+                var needle = self.find_dialog.find
+                var replacement = self.find_dialog.replacement
+                var opts = self.find_dialog.opts
+                self.native_find(op, needle, replacement, opts)
         elif name == String("names_review"):
             if self.names_review.open_requested:
                 self._names_review_open_selected()
@@ -9499,17 +9526,6 @@ struct Desktop(Movable):
             return
         self.history.list.set_selected(idx)
         self.history.patch_scroll = 0
-
-    def native_spelling_active(self) -> Bool:
-        return self.native_ui() and self.spelling_dialog.active
-
-    def native_spelling_add(mut self, action: Int, rows: List[Int]):
-        """The native Spelling sheet's Add to Project / Add to User."""
-        if not self.spelling_dialog.active:
-            return
-        self.spelling_dialog.native_add(action, rows)
-        if self.spelling_dialog.submitted:
-            self._on_spelling_dialog_submit()
 
     def native_git_active(self) -> Bool:
         """The git view is the host's: a sheet in the macOS look, a
@@ -12346,6 +12362,7 @@ struct Desktop(Movable):
             return False
         if self.spell_menu.active or self.breakpoint_error.active \
                 or self.breakpoint_menu.active or self.fill_dialog.active \
+                or self.find_dialog.active \
                 or self.names_review.active \
                 or self.spelling_dialog.active \
                 or self.git_gutter_menu.active or self.test_gutter_menu.active \
@@ -14152,6 +14169,9 @@ struct Desktop(Movable):
         if self.host_draws_dialogs():
             self._request_native_find(String("find"))
             return
+        if self.dialogs_windowed():
+            self._open_find_dialog(False)
+            return
         self._pending_action = EDITOR_FIND
         # Prefer the editor's current selection ("find this thing I just
         # highlighted"); when there's nothing selected, fall back to the
@@ -14175,6 +14195,9 @@ struct Desktop(Movable):
         if self.host_draws_dialogs():
             self._request_native_find(String("replace"))
             return
+        if self.dialogs_windowed():
+            self._open_find_dialog(True)
+            return
         self._pending_action = _PA_REPLACE_DO
         self.prompt.open_replace(
             String("Find: "), String("Replace: "),
@@ -14182,6 +14205,14 @@ struct Desktop(Movable):
             select_prefill=True, show_options=True,
         )
         self.prompt.set_search_options(self._last_search_opts)
+
+    def _open_find_dialog(mut self, replacing: Bool):
+        """Find / Replace in a window of its own (``find_dialog``), seeded
+        like the prompt: the selection, else the previous needle."""
+        var seed = self._selection_seed_for_search()
+        if len(seed.as_bytes()) == 0:
+            seed = self._last_search
+        self.find_dialog.open(replacing, seed^, self._last_search_opts)
 
     def _request_native_find(mut self, mode: String):
         """Ask the host to show its find bar (a Platinum find window in the
@@ -17735,7 +17766,7 @@ struct Desktop(Movable):
             return
         self.speller.load_default()
         self.spelling_dialog.open(
-            spell_scan_files(self.project.value()), True,
+            spell_scan_files(self.project.value()), True, self.project.value(),
         )
 
     def _on_spelling_dialog_submit(mut self):

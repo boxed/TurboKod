@@ -63,7 +63,7 @@ button. Windows become frameless tabs (`WindowManager.tabbed`) under a
 native tab strip fed by `tk_desktop_tabs`. Quick Open / Find Symbol / Find
 in Project run as one native picker sheet over the core's own search
 machinery (`tk_desktop_picker*`); popups are `NSMenu`s; the git view,
-Spelling, history, merge and review are native sheets / overlays driving the
+history, merge and review are native sheets / overlays driving the
 core through the same methods the grid path calls; the file tree and status
 bar are native overlays over their cells; Settings and Project Settings are
 declarative dialogs (below), Settings in a window of its own; tool panes get native headers

@@ -70,12 +70,14 @@ come in 8×16 steps.
   calls as `GitController`; `tk_desktop_git` carries `look`, and `pollGit`
   rebuilds the view in the other projector when the look changes under it.
   The focused pane's letters work as in the grid (`c` commits, `p` pulls).
-- **The pickers** (Quick Open, Find in Project, …), being declarative:
-  `PListView` draws a `ui_list` with the git window's rows view, and a
-  search field's arrows move it.
+- **The pickers** (Quick Open, Find in Project, …) and Project ▸ Spelling,
+  being declarative: `PListView` draws a `ui_list` with the git window's
+  rows view, and a search field's arrows move it. On a `UI_MULTI` list
+  Shift-click and Shift-arrows extend from the anchor and Cmd-click picks
+  rows one by one (`PGitRows.multi`).
 - **Not covered:** the menu bar, which stays the system's. Still drawn as
   Turbo Vision grid dialogs, with no Platinum projector yet: Save As, the
-  color picker, Project ▸ Spelling, git history, the merge view, review
+  color picker, git history, the merge view, review
   mode and the git gutter's hunk peek. The editor text and the panes are
   the grid by design.
 

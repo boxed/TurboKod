@@ -76,9 +76,13 @@ A confirm raised while a dialog is up goes on top of its sheet
 
 Flags beyond the obvious: `UI_NAV` on a text field makes it the search
 field of the dialog's list (the arrows move the list, typing stays in the
-field), `UI_MULTI` lets a list's selection be a range (`"<anchor>:<row>"`),
-`UI_CODE` makes a list a code view, and `UI_LARGE` gives a dialog most of
-the window.
+field), `UI_MULTI` lets a list's selection be several rows — a range
+(`"<anchor>:<row>"`) or, after a Cmd-click, the rows listed
+(`"<anchor>:<row>:<r>,<r>,…"`; `ui_list_selection` writes it, the Swift
+`ListSelection` reads and writes it, and every projector reports a
+selection that way), `UI_CODE` makes a list a code view, and `UI_LARGE`
+gives a dialog most of the window (resizable: a macOS sheet down to its
+fitting size, the Turbo Vision look's dialog window by its sides).
 
 ### Long lists (`ui_list`)
 
@@ -158,6 +162,19 @@ the model), the selected one's new names (`new_names.mojo`; name, kind,
 file:line) and a code view of the selected name's definition. Changesets
 load once per opening, so stepping through commits back and forth is
 instant after the first visit.
+
+Project ▸ Spelling (`spelling_dialog.mojo`): a `UI_MULTI` list of the
+flagged words with their counts and where each was first seen, kept by
+word across the re-sorts while the scan runs. Its hand-placed grid dialog
+and the macOS look's own `SpellingController` sheet (and its
+`tk_desktop_spelling*` C ABI) are gone.
+
+Find / Replace (`find_dialog.mojo`), only where dialogs get windows of
+their own (`dialogs_windowed`, the Turbo Vision look in the native app):
+it stays open while its buttons step through the matches via
+`native_find`, the code the macOS find bar and the Mac OS 9 Find window
+drive. The terminal frontends keep the in-grid prompt, since a modal
+dialog over the workspace would cover the matches it steps to.
 
 Fill (Edit ▸ Fill…), the breakpoint dialog, the failed-condition dialog,
 Project Settings and its on-save action editor, Settings and its language

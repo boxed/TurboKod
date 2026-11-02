@@ -27,8 +27,9 @@ It is being built in phases:
    own resolve, so validation (an unparsable Fill number) still keeps the
    dialog open and the sheet comes back.
 9. **Settings** opens as a native window (see below).
-10. **Spelling, Git history, the on-disk-change merge and review mode** are
-    native too (see "Full-screen tools").
+10. **Git history, the on-disk-change merge and review mode** are native
+    too (see "Full-screen tools"). Spelling is a declarative dialog, so it
+    comes as one of those sheets.
 11. Deliberately still the grid: the editor body and the panels' contents
     (a terminal emulator). Both are built on the cell grid, and native
     chrome goes around them instead.
@@ -130,15 +131,10 @@ then the end of its stem (`project_api.py` → `project_api` → `project_…`).
 
 ## Full-screen tools
 
-All four follow the same rule: the core keeps the state and the logic, and
+All three follow the same rule: the core keeps the state and the logic, and
 the host shows a sheet or an overlay and calls the same methods the grid
 path calls.
 
-- **Spelling** (`tk_desktop_spelling*`). A sheet with a count / word /
-  first-seen table. The rows are refetched whenever the scan's `version`
-  moves, and the selection is carried across the re-sort by word. Add goes
-  through `SpellingDialog.native_add` → its own `_submit` →
-  `_on_spelling_dialog_submit`.
 - **Git history** (`tk_desktop_history*`). A sheet with commits on the left
   and the selected commit's patch on the right, colored by line prefix on
   the theme's editor background. Everything was fetched when it opened.

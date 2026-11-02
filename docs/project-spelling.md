@@ -34,9 +34,14 @@ file that's 0.3 ms for a one-line edit against 21 ms for a full pass.
 ## Project ▸ Spelling
 
 A dialog listing every flagged word across the project, grouped
-case-insensitively and sorted by how often it occurs, with multi-select and
-buttons to add the selection to the project (`.turbokod/dictionary.txt`) or
-user dictionary.
+case-insensitively and sorted by how often it occurs, with multi-select (Shift
+for a range, Cmd-click for words one by one) and buttons to add the selection
+to the project (`.turbokod/dictionary.txt`) or user dictionary. It is a
+declarative dialog (`spelling_dialog.mojo`, see
+[declarative-ui.md](declarative-ui.md)), so each look draws it its own way —
+a movable window of its own in the Turbo Vision look, a Platinum dialog, a
+macOS sheet — and its rows move as the list re-sorts, so the selection is
+kept as words.
 
 Occurrences group by `spell_key` (the speller's case-folded lookup key) with a
 trailing possessive `'s` dropped, since the speller strips that on lookup:

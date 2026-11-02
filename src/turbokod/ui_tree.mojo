@@ -71,8 +71,10 @@ the window around what's on screen. Each projector reports where its view
 is with ``set("<key>@top", row)``, and the dialog sends the rows around it
 next frame (``ListWindow``). Row cells are a primary text and an optional
 detail (drawn de-emphasized); ``spans`` color byte ranges of a cell. ``key``
-binds the selected row (``number``; ``"<anchor>:<row>"`` for a range with
-``UI_MULTI``); ``value`` is the action double-click / Return runs.
+binds the selected row (``number``; with ``UI_MULTI`` ``"<anchor>:<row>"``
+for a range, and ``"<anchor>:<row>:<r>,<r>,…"`` listing the rows when the
+selection isn't one range — a Cmd-click; see ``ui_list_selection``);
+``value`` is the action double-click / Return runs.
 With ``UI_CODE`` it's a code view: monospace on the editor colors, no
 selection, ``number`` the line to mark and reveal."""
 
@@ -106,7 +108,8 @@ comptime UI_NAV         = 1 << 10
 Page Down move the list's selection and Return runs its action, while the
 typing stays in the field (a picker)."""
 comptime UI_MULTI       = 1 << 11
-"""List: Shift extends the selection into a range."""
+"""List: the selection can be several rows — a Shift range, or rows picked
+one by one with Cmd-click (``ui_list_selection``)."""
 comptime UI_CODE        = 1 << 12
 """List: a code view (see ``UI_LIST``)."""
 comptime UI_LARGE       = 1 << 13
@@ -351,22 +354,72 @@ def ui_list(
     return n^
 
 
+def _selection_parts(selected: String) -> List[String]:
+    var out = List[String]()
+    var parts = selected.split(":")
+    for i in range(len(parts)):
+        out.append(String(parts[i]))
+    return out^
+
+
 def ui_list_row(selected: String) -> Int:
     """The row a list's selection value names (its moving end)."""
-    var b = selected.as_bytes()
-    for i in range(len(b)):
-        if b[i] == 0x3A:
-            return ui_int(String(StringSpan(unsafe_from_utf8=b[i + 1:])))
-    return ui_int(selected)
+    var parts = _selection_parts(selected)
+    return ui_int(parts[1] if len(parts) > 1 else parts[0])
 
 
 def ui_list_anchor(selected: String) -> Int:
     """The fixed end of a list's selection range (its row when single)."""
-    var b = selected.as_bytes()
-    for i in range(len(b)):
-        if b[i] == 0x3A:
-            return ui_int(String(StringSpan(unsafe_from_utf8=b[:i])))
-    return ui_int(selected)
+    return ui_int(_selection_parts(selected)[0])
+
+
+def ui_list_selected(selected: String) -> List[Int]:
+    """Every selected row, ascending: the listed ones, else the range."""
+    var out = List[Int]()
+    var parts = _selection_parts(selected)
+    if len(parts) > 2:
+        var rows = parts[2].split(",")
+        for i in range(len(rows)):
+            var r = ui_int(String(rows[i]))
+            if r >= 0:
+                out.append(r)
+        sort(out)
+        return out^
+    var row = ui_list_row(selected)
+    var anchor = ui_list_anchor(selected)
+    if row < 0:
+        return out^
+    if anchor < 0:
+        anchor = row
+    for r in range(min(anchor, row), max(anchor, row) + 1):
+        out.append(r)
+    return out^
+
+
+def ui_list_selection(anchor: Int, row: Int, rows: List[Int]) -> String:
+    """A ``UI_MULTI`` list's selection value: ``row`` alone, the range
+    ``anchor:row``, or — when ``rows`` isn't that range — the rows listed
+    after it. Every projector reports a selection this way."""
+    var lo = min(anchor, row) if anchor >= 0 else row
+    var hi = max(anchor, row) if anchor >= 0 else row
+    var is_range = len(rows) == hi - lo + 1 and row >= 0
+    if is_range:
+        var sorted_rows = rows.copy()
+        sort(sorted_rows)
+        for i in range(len(sorted_rows)):
+            if sorted_rows[i] != lo + i:
+                is_range = False
+                break
+    if is_range:
+        if anchor < 0 or anchor == row:
+            return String(row)
+        return String(anchor) + String(":") + String(row)
+    var out = String(anchor) + String(":") + String(row) + String(":")
+    for i in range(len(rows)):
+        if i > 0:
+            out += String(",")
+        out += String(rows[i])
+    return out^
 
 
 struct ListWindow(Copyable, Movable):

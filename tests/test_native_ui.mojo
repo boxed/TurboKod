@@ -724,17 +724,50 @@ def test_settings_stay_in_grid_without_native_ui() raises:
     assert_false(d.settings_native())
 
 
-def test_native_spelling_sheet_takes_over_the_grid_dialog() raises:
+def test_find_is_a_dialog_window_in_the_turbo_vision_look() raises:
+    """In the native app's Turbo Vision look Find and Replace are a
+    declarative dialog — so a window of their own — that stays open while
+    its buttons step through the matches, through ``native_find``."""
+    var d = _native_desktop(String("one\ntwo\none\n"))
+    d.config.native_ui = False
+    assert_true(d.tv_frame())
+    _ = d.dispatch_action(EDITOR_FIND, _SCREEN)
+    assert_true(d.find_dialog.active)
+    assert_false(d.prompt.active)
+    assert_equal(d.dialog_window(), String("find"))
+    _ = d.ui_apply(String("find"), [
+        ui_set(String("find"), String("one")), ui_act(String("next")),
+    ])
+    assert_true(d.find_dialog.active)
+    assert_equal(d.windows.windows[0].editor.primary_caret().row, 2)
+    _ = d.ui_apply(String("find"), [ui_act(String("prev"))])
+    assert_equal(d.windows.windows[0].editor.primary_caret().row, 0)
+    _ = d.ui_apply(String("find"), [ui_act(String("done"))])
+    assert_false(d.find_dialog.active)
+    # Replace: the same dialog with the second field.
+    _ = d.dispatch_action(EDITOR_REPLACE, _SCREEN)
+    assert_true(d.find_dialog.replacing)
+    _ = d.ui_apply(String("find"), [
+        ui_set(String("replace"), String("1")), ui_act(String("replace_all")),
+    ])
+    assert_equal(d.windows.windows[0].editor.buffer.lines[2], String("1"))
+
+
+def test_spelling_is_a_declarative_dialog() raises:
+    """Project ▸ Spelling is a declarative surface: natively it comes over
+    ``tk_desktop_ui`` like the other dialogs, and grid input can't reach
+    it behind the sheet."""
     var d = _native_desktop(String("x\n"))
     d.spelling_dialog.open(List[String](), False)
-    assert_true(d.native_spelling_active())
-    # Grid input can't reach it behind the sheet.
+    assert_equal(d.ui_surface(), String("spelling"))
+    assert_true(d.native_ui_surface_active())
     _ = d.handle_event(Event.key_event(KEY_ENTER), _SCREEN)
     assert_true(d.spelling_dialog.active)
-    d.native_spelling_add(2, List[Int]())   # nothing selected: no-op
+    # Nothing selected: Add is a no-op.
+    _ = d.ui_apply(String("spelling"), [ui_act(String("user"))])
     assert_true(d.spelling_dialog.active)
-    d.spelling_dialog.close()
-    assert_false(d.native_spelling_active())
+    _ = d.ui_apply(String("spelling"), [ui_act(String("close"))])
+    assert_false(d.spelling_dialog.active)
 
 
 def test_native_history_selects_and_hides_the_tree_overlay() raises:

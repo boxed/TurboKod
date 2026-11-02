@@ -28,9 +28,14 @@ from turbokod.spell_scan import ProjectSpellScan, spell_scan_files
 from turbokod.spelling_dialog import (
     SPELLING_ADD_PROJECT, SPELLING_ADD_USER, SpellingDialog,
 )
-from turbokod.events import MOD_CTRL, MOD_META, MOD_SHIFT, KEY_SPACE
+from turbokod.events import MOD_META, MOD_SHIFT
+from turbokod.ui_grid import GridForm
+from turbokod.ui_tree import (
+    ui_list_anchor, ui_list_row, ui_list_selected, ui_list_selection,
+)
 from support import (
-    _ensure_dir, _rm_rf, _spell_with_dict, _temp_path, setup_test_env,
+    _canvas_row, _ensure_dir, _rm_rf, _spell_with_dict, _temp_path,
+    setup_test_env,
 )
 
 
@@ -669,15 +674,33 @@ def test_spell_scan_files_skips_binaries_by_extension() raises:
     _rm_rf(root)
 
 
+def _drive(mut d: SpellingDialog, mut g: GridForm, ev: Event, screen: Rect):
+    """One event through the grid projector, applied as the host does."""
+    var evs = g.handle_event(d.ui(), ev, screen)
+    for i in range(len(evs)):
+        if evs[i].is_action:
+            d.ui_act(evs[i].key)
+        else:
+            d.ui_set(evs[i].key, evs[i].value)
+
+
+def _row_of(c: Canvas, word: String) -> Int:
+    for y in range(c.height):
+        if word in _canvas_row(c, y, 0, c.width):
+            return y
+    return -1
+
+
 def test_spelling_dialog_multi_select_and_submit() raises:
-    """Rows sort by count; click, Shift-click, Cmd-click and Ctrl+Space build
-    the selection; an Add button submits the selected keys and
-    ``acknowledge`` removes them."""
+    """Rows sort by count; in the grid projection click, Shift-click and
+    Cmd-click build the selection (a Cmd-click one the list reports row by
+    row); an Add button submits the selected keys and ``acknowledge``
+    removes them."""
     var root = _temp_path(String("_spell_dialog"))
     var files = _scan_fixture(root)
     var speller = _fixture_speller()
     var d = SpellingDialog()
-    d.open(files^, True)
+    d.open(files^, True, root)
     var spins = 0
     while d.scan.active and spins < 1000:
         d.tick(speller)
@@ -685,49 +708,69 @@ def test_spelling_dialog_multi_select_and_submit() raises:
     d.tick(speller)
     var screen = Rect(0, 0, 100, 40)
     var canvas = Canvas(100, 40)
-    d.paint(canvas, screen)
+    var g = GridForm()
+    g.paint(d.ui(), canvas, screen)
     assert_equal(len(d.order), 3)
     assert_equal(d.scan.words[d.order[0]].key, String("zorbly"))
     assert_equal(d.scan.words[d.order[1]].key, String("frobnix"))
     assert_equal(d.scan.words[d.order[2]].key, String("quux"))
+    var top = _row_of(canvas, String("zorbly"))
+    assert_true(top > 0)
+    assert_equal(_row_of(canvas, String("quux")), top + 2)
+    var x = -1
+    for cx in range(canvas.width - 6):
+        if _canvas_row(canvas, top, cx, cx + 6) == String("zorbly"):
+            x = cx
+            break
+    assert_true(x > 0)
     # Click row 0, Shift-click row 2: all three.
-    var top = d._list_rect.a.y
-    var x = d._list_rect.a.x + 4
-    _ = d.handle_mouse(Event.mouse_event(Point(x, top), MOUSE_BUTTON_LEFT), screen)
-    _ = d.handle_mouse(
-        Event.mouse_event(Point(x, top + 2), MOUSE_BUTTON_LEFT, mods=MOD_SHIFT),
-        screen,
-    )
+    _drive(d, g, Event.mouse_event(Point(x, top), MOUSE_BUTTON_LEFT), screen)
+    _drive(d, g, Event.mouse_event(
+        Point(x, top + 2), MOUSE_BUTTON_LEFT, mods=MOD_SHIFT,
+    ), screen)
     assert_equal(len(d.selected_keys()), 3)
-    # Cmd-click row 1 drops it.
-    _ = d.handle_mouse(
-        Event.mouse_event(Point(x, top + 1), MOUSE_BUTTON_LEFT, mods=MOD_META),
-        screen,
-    )
+    # Cmd-click row 1 drops it: no longer one range.
+    _drive(d, g, Event.mouse_event(
+        Point(x, top + 1), MOUSE_BUTTON_LEFT, mods=MOD_META,
+    ), screen)
     var keys = d.selected_keys()
     assert_equal(len(keys), 2)
     assert_equal(keys[0], String("zorbly"))
     assert_equal(keys[1], String("quux"))
-    # Ctrl+Space toggles the caret row (row 1) back in.
-    _ = d.handle_key(Event.key_event(KEY_SPACE, MOD_CTRL))
-    assert_equal(len(d.selected_keys()), 3)
+    # The selection follows its words through a repaint (a re-sort).
+    d._resort()
+    g.paint(d.ui(), canvas, screen)
+    assert_equal(len(d.selected_keys()), 2)
     # Down moves the cursor and selects just that row.
-    _ = d.handle_key(Event.key_event(KEY_DOWN))
+    _drive(d, g, Event.key_event(KEY_DOWN), screen)
     keys = d.selected_keys()
     assert_equal(len(keys), 1)
     assert_equal(keys[0], String("quux"))
-    # Tab to "Add to User" and press Enter.
-    _ = d.handle_key(Event.key_event(KEY_TAB))
-    _ = d.handle_key(Event.key_event(KEY_TAB))
-    _ = d.handle_key(Event.key_event(KEY_ENTER))
+    d.ui_act(String("user"))
     assert_true(d.submitted)
     assert_equal(d.action, SPELLING_ADD_USER)
     d.acknowledge(d.selected_keys())
     assert_false(d.submitted)
     assert_equal(len(d.order), 2)
-    _ = d.handle_key(Event.key_event(KEY_ESC))
+    assert_equal(len(d.selected_keys()), 0)
+    _drive(d, g, Event.key_event(KEY_ESC), screen)
     assert_false(d.active)
     _rm_rf(root)
+
+
+def test_list_selection_values() raises:
+    """A ``UI_MULTI`` list's value: a row, a range, or rows listed."""
+    assert_equal(ui_list_selection(-1, 3, [3]), String("3"))
+    assert_equal(ui_list_selection(1, 3, [1, 2, 3]), String("1:3"))
+    var v = ui_list_selection(1, 3, [1, 3])
+    assert_equal(v, String("1:3:1,3"))
+    assert_equal(ui_list_row(v), 3)
+    assert_equal(ui_list_anchor(v), 1)
+    var rows = ui_list_selected(v)
+    assert_equal(len(rows), 2)
+    assert_equal(rows[1], 3)
+    assert_equal(len(ui_list_selected(String("4:2"))), 3)
+    assert_equal(len(ui_list_selected(String(""))), 0)
 
 
 def main() raises:
