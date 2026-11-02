@@ -119,6 +119,25 @@ come in 8×16 steps.
   the fields and lists. A one-letter hotkey works without ⌘ outside a text
   field, and with ⌘ inside one.
 
+## Active and inactive windows
+
+As on Mac OS 9, only the key window draws live (`Platinum.active`). An
+inactive window's frame goes flat in a gray outline (no bevels, pinstripes or
+boxes, gray title), and its surface dims: labels, buttons, checkboxes,
+pop-ups, tabs, field text and frames, the status bar, list headers and the
+git view's headings draw gray, scroll bars become empty boxes, the grow box
+loses its glyph, and a list's selection becomes an outline. A dialog over a
+project window makes the project window inactive, as a movable modal did.
+Draw code asks `PNode.live` (enabled *and* active) rather than `enabled`;
+input still goes by `enabled`. A key change runs `Platinum.activeChanged`
+over the window's views, which also restyles the AppKit text (`activeChanged`
+on a `PNode`).
+
+Every Platinum window (the project window, dialogs, alerts, Find, Settings,
+the git view) casts the Mac OS 9 one-point drop shadow
+(`Platinum.castShadow`, a `RetroShadow` like the Turbo Vision look's) in place
+of the system's soft one. `captureWindowPNG` draws it under its owner.
+
 ## Push buttons are pixel tables
 
 `PlatinumButtonArt` draws push buttons from gray-level tables read off

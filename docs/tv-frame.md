@@ -79,7 +79,11 @@ pickers — Quick Open, Find Symbol, Find in Project, … — Project Settings,
 Fill, the breakpoint dialogs) don't cover the project window: each opens in
 a window of its own, a borderless child window whose cells the core paints,
 Turbo Vision frame included. Settings already had its own window
-(`.settings`) and keeps it.
+(`.settings`) and keeps it, borderless the same way: its grid keeps the title
+on its frame (`own_title`), and `TVDialogWindow.chromeMouse` gives it the
+same title-row drag and side resizing. Which window Settings is in follows
+the look live (`Desktop.settings_native()`), so picking another look in
+Settings moves it into that look's window.
 
 - `Desktop.dialog_window()` names what's up: `git`, or the bottom open
   declarative dialog; empty outside `tv_frame()`. While it's non-empty the

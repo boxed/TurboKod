@@ -537,7 +537,7 @@ def test_native_settings_edit_the_same_state_and_sync_into_config() raises:
     var d = _native_desktop(String("x\n"))
     _ = d.dispatch_action(APP_SETTINGS, _SCREEN)
     assert_true(d.settings.active)
-    assert_true(d.settings_native)
+    assert_true(d.settings_native())
     # Its own window, not a modal: the workspace stays usable.
     assert_equal(len(d.ui_surfaces()), 0)
     assert_false(d.native_ui_surface_active())
@@ -660,7 +660,7 @@ def test_platinum_dialogs_go_to_the_host_and_ignore_grid_keys() raises:
     assert_true(d.fill_dialog.active)
     # Settings opens in the host's window, Platinum-drawn.
     _ = d.dispatch_action(APP_SETTINGS, _SCREEN)
-    assert_true(d.settings_native)
+    assert_true(d.settings_native())
 
 
 def test_platinum_takes_the_confirm_prompts_find_and_popups() raises:
@@ -702,11 +702,26 @@ def test_platinum_tabs_keep_a_gutter_for_the_scroll_bar() raises:
     assert_true(d.windows.windows[0].interior() == d.windows.windows[0].rect)
 
 
+def test_settings_follow_a_look_changed_from_inside_them() raises:
+    # Settings is where the look changes: the open Settings has to move
+    # into the new look's window, not stay in the one it opened in.
+    var d = _native_desktop(String("x\n"))
+    _ = d.dispatch_action(APP_SETTINGS, _SCREEN)
+    assert_true(d.settings_native())
+    _ = d.ui_apply(String("settings"), [ui_set(String("look"), String("0"))])
+    assert_false(d.config.native_ui)
+    assert_true(d.settings.active)
+    assert_false(d.settings_native())
+    _ = d.ui_apply(String("settings"), [ui_set(String("look"), String("2"))])
+    assert_true(d.config.platinum_ui)
+    assert_true(d.settings_native())
+
+
 def test_settings_stay_in_grid_without_native_ui() raises:
     var d = Desktop()
     _ = d.dispatch_action(APP_SETTINGS, _SCREEN)
     assert_true(d.settings.active)
-    assert_false(d.settings_native)
+    assert_false(d.settings_native())
 
 
 def test_native_spelling_sheet_takes_over_the_grid_dialog() raises:

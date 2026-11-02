@@ -1176,9 +1176,6 @@ struct Desktop(Movable):
     var _in_dialog_window: Bool
     """``handle_event`` is running for the dialog window, not the project
     window, which a dialog window otherwise keeps it out of."""
-    var settings_native: Bool
-    """The open Settings is shown as the host's native Settings window
-    (macOS-style UI) rather than the grid one."""
     var _last_goto_line: String      # last Go-to-line input, prefilled on reopen
     var _open_count: Int             # cascade counter for Desktop.open_file
     var _untitled_count: Int         # bumped per ``new_file`` for unique titles
@@ -1835,7 +1832,6 @@ struct Desktop(Movable):
         self._ui_grid_owners = List[String]()
         self._dialog_screen = Rect(0, 0, 0, 0)
         self._in_dialog_window = False
-        self.settings_native = False
         self._last_goto_line = String("")
         self._pending_new_window_project = Optional[String]()
         self._open_count = 0
@@ -3635,6 +3631,13 @@ struct Desktop(Movable):
             if self._panel_slot_handle_mouse(s.kind, s.idx, event, s.rect):
                 return Optional[String]()
         return Optional[String]()
+
+    def settings_native(self) -> Bool:
+        """The open Settings is shown as the host's own Settings window
+        (macOS-style UI, Mac OS 9 look) rather than the grid one. Follows
+        the look live: switching it from inside Settings moves Settings
+        into the new look's window."""
+        return self.host_draws_dialogs()
 
     def set_settings_detached(mut self, on: Bool):
         """Tell the Desktop the Settings view renders in a separate host
@@ -9050,6 +9053,10 @@ struct Desktop(Movable):
                 var g = GridForm()
                 g.fill = i == 0
                 self.settings_grids.append(g^)
+        # The Turbo Vision look's Settings window has no title bar: the
+        # frame keeps the title, as in its dialog windows.
+        if len(self.settings_grids) > 0:
+            self.settings_grids[0].own_title = self.tv_frame()
         return surfaces^
 
     def _sync_ui_grids(mut self) -> List[String]:
@@ -10044,9 +10051,6 @@ struct Desktop(Movable):
             self.settings.native_ui = self.config.native_ui
             self.settings.platinum_ui = self.config.platinum_ui
             self.settings.terminal_tmux = self.config.terminal_tmux
-            # The macOS-style UI shows Settings as a native window; the
-            # classic look as the grid one, in the host's cell window.
-            self.settings_native = self.host_draws_dialogs()
             return Optional[String]()
         if action == HELP_HOTKEYS:
             self._open_hotkeys_help(screen)

@@ -792,7 +792,7 @@ def tk_desktop_settings_active(h: Int) abi("C") -> Int32:
     if h == 0:
         return Int32(0)
     # The native Settings window (macOS-style UI) stands in for this one.
-    if _desk(h)[].settings.active and not _desk(h)[].settings_native:
+    if _desk(h)[].settings.active and not _desk(h)[].settings_native():
         return Int32(1)
     return Int32(0)
 
@@ -2627,7 +2627,7 @@ def tk_desktop_ui(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
         return 0
     ref d = _desk(h)[]
     var modal = d.ui_surfaces() if d.native_ui_surface_active() else List[String]()
-    var window = d.settings_surfaces() if d.settings_native else List[String]()
+    var window = d.settings_surfaces() if d.settings_native() else List[String]()
     if len(modal) == 0 and len(window) == 0:
         return 0
     var out = json_object()

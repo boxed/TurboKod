@@ -985,13 +985,16 @@ final class CellView: NSView {
         guard start + c <= n else { return }
         let lay = statusLayout()
         let (runs, barFg, _) = statusRuns(p, start, c, skip: lay.targets.map { $0.cols } + [lay.message])
+        let active = Platinum.active(self)
         let y = CGFloat(row) * CELL_H
         let bar = NSRect(x: 0, y: y, width: bounds.width, height: bounds.height - y)
         Platinum.fill(bar, Platinum.face)
         Platinum.fill(NSRect(x: 0, y: y, width: bar.width, height: 1), Platinum.black)
         Platinum.fill(NSRect(x: 0, y: y + 1, width: bar.width, height: 1), Platinum.light)
         let line = NSRect(x: 0, y: y + 1, width: 0, height: CELL_H - 1)
-        func color(_ fg: UInt32) -> NSColor { fg == barFg ? Platinum.black : nscolor(fg) }
+        func color(_ fg: UInt32) -> NSColor {
+            !active ? Platinum.disabled : fg == barFg ? Platinum.black : nscolor(fg)
+        }
         for run in runs {
             var tr = line
             tr.origin.x = CGFloat(run.cols.lowerBound + run.lead) * CELL_W
@@ -1001,9 +1004,9 @@ final class CellView: NSView {
         for t in lay.targets {
             let br = NSRect(x: CGFloat(t.cols.lowerBound) * CELL_W, y: y + 2,
                             width: CGFloat(t.cols.count) * CELL_W, height: CELL_H - 2)
-            Platinum.raisedBox(br, pressed: t.active)
+            Platinum.raisedBox(br, pressed: t.active, active: active)
             Platinum.text(statusText(p, start, t.cols), in: br.insetBy(dx: 3, dy: 0), font: Platinum.app,
-                          color: Platinum.black, center: true)
+                          color: active ? Platinum.black : Platinum.disabled, center: true)
         }
         if !lay.message.isEmpty {
             let (fg, _, _) = cellColors(p, start + lay.message.lowerBound)
@@ -2098,6 +2101,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                       close: tk_desktop_settings_close),
     ]
     private var dialogWins: [CellSurface: [ObjectIdentifier: (window: NSWindow, view: CellView)]] = [:]
+    /// The Turbo Vision look's drop shadow under a Settings window, by window.
+    private var tvSettingsShadows: [ObjectIdentifier: RetroShadow] = [:]
     // macOS-style UI: the native sheet currently showing each view's core
     // dialog (see the "native dialogs" extension at the bottom of the file).
     var nativeSheets: [ObjectIdentifier: NSWindow] = [:]
@@ -3777,7 +3782,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         windows.remove(at: idx)
         views.remove(at: idx)
         tabStrips[ObjectIdentifier(v)] = nil
-        platinumFrames[ObjectIdentifier(v)] = nil
+        platinumFrames.removeValue(forKey: ObjectIdentifier(v))?.retroShadow?.detach()
         tvFrames.removeValue(forKey: ObjectIdentifier(v))?.retroShadow?.detach()
         tvDialogs.removeValue(forKey: ObjectIdentifier(v))?.dismiss()
         platinumScrollers[ObjectIdentifier(v)] = nil
@@ -4246,11 +4251,24 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // Centered over the project window.
             let w = d.cols * CELL_W, h = d.rows * CELL_H
             let mf = mainWin.frame
-            win = UnconstrainedWindow(
-                contentRect: NSRect(x: mf.midX - w / 2, y: mf.midY - h / 2,
-                                    width: w, height: h),
-                styleMask: [.titled, .closable, .resizable],
-                backing: .buffered, defer: false)
+            let rect = NSRect(x: mf.midX - w / 2, y: mf.midY - h / 2, width: w, height: h)
+            if tk_desktop_tv_frame(mainView.handle) != 0 {
+                // The Turbo Vision look: no macOS title bar. The core paints
+                // the frame, title and close box in the cells, like the
+                // look's dialog windows (`TVDialogWindow`).
+                win = TVDialogNSWindow(contentRect: rect, styleMask: [.borderless, .resizable],
+                                       backing: .buffered, defer: false)
+                win.backgroundColor = .black
+                sv.onChromeMouse = { [weak sv] e in
+                    guard let sv = sv else { return false }
+                    return TVDialogWindow.chromeMouse(e, view: sv, resizable: true)
+                }
+                tvSettingsShadows[ObjectIdentifier(win)] = RetroShadow(under: win)
+            } else {
+                win = UnconstrainedWindow(
+                    contentRect: rect, styleMask: [.titled, .closable, .resizable],
+                    backing: .buffered, defer: false)
+            }
             win.delegate = self
             win.contentView = sv
             win.makeFirstResponder(sv)
@@ -4267,6 +4285,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let id = ObjectIdentifier(mainView)
         guard let pair = dialogWins[surface]?[id] else { return }
         dialogWins[surface]?.removeValue(forKey: id)
+        tvSettingsShadows.removeValue(forKey: ObjectIdentifier(pair.window))?.detach()
+        pair.view.onChromeMouse = nil
         pair.view.handle = 0          // shared handle is owned by the main view
         pair.window.orderOut(nil)     // Sequoia-safe (see windowShouldClose)
         // Hand focus back to the project window so Esc-closing the dialog
@@ -4797,6 +4817,7 @@ extension AppController {
         if let pf = platinumFrames[id] {
             if !on {
                 platinumFrames[id] = nil
+                pf.retroShadow?.detach()
                 let f = win.frame
                 v.removeFromSuperview()
                 win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
@@ -4828,6 +4849,7 @@ extension AppController {
         win.backgroundColor = Platinum.face
         win.contentView = pf
         win.setFrame(f, display: false)
+        pf.retroShadow = Platinum.castShadow(under: win)
         pf.layoutChrome()
         win.makeFirstResponder(v)
         platinumFrames[id] = pf
@@ -5705,10 +5727,24 @@ func captureWindowPNG(_ win: NSWindow, to path: String) {
     }
     // Child windows (the Mac OS 9 look's dialogs and alerts) where they sit
     // over the window, and theirs over them.
-    func children(of w: NSWindow) {
+    func shadows(of w: NSWindow) {
+        // A retro drop shadow goes under its owner, and drawn, not cached:
+        // its cached bitmap comes out opaque.
         for c in w.childWindows ?? [] where c.isVisible {
+            guard let sv = c.contentView as? RetroShadowView else { continue }
+            NSGraphicsContext.saveGraphicsState()
+            let t = NSAffineTransform()
+            t.translateX(by: c.frame.minX - win.frame.minX, yBy: c.frame.minY - win.frame.minY)
+            t.concat()
+            sv.draw(sv.bounds)
+            NSGraphicsContext.restoreGraphicsState()
+        }
+    }
+    func children(of w: NSWindow) {
+        for c in w.childWindows ?? [] where c.isVisible && !(c.contentView is RetroShadowView) {
             guard let cv = c.contentView,
                   let crep = cv.bitmapImageRepForCachingDisplay(in: cv.bounds) else { continue }
+            shadows(of: c)
             cv.cacheDisplay(in: cv.bounds, to: crep)
             crep.draw(in: NSRect(x: c.frame.minX - win.frame.minX, y: c.frame.minY - win.frame.minY,
                                  width: c.frame.width, height: c.frame.height))
@@ -9810,6 +9846,23 @@ enum Platinum {
 
     static func fill(_ r: NSRect, _ c: NSColor) { c.setFill(); NSBezierPath.fill(r) }
 
+    /// Whether `v`'s window is the active one. As on Mac OS 9, an inactive
+    /// window's frame goes flat and its controls draw dimmed.
+    static func active(_ v: NSView) -> Bool { v.window?.isKeyWindow ?? false }
+
+    /// A window's key state changed: redraw everything in it in the new
+    /// state (a `PNode` also restyles its AppKit fields).
+    static func activeChanged(_ v: NSView) {
+        v.needsDisplay = true
+        (v as? PNode)?.activeChanged()
+        for s in v.subviews { activeChanged(s) }
+    }
+
+    /// The 1-point Mac OS 9 drop shadow under a Platinum window.
+    static func castShadow(under win: NSWindow) -> RetroShadow {
+        RetroShadow(under: win, offset: { NSSize(width: 1, height: 1) }, color: NSColor(white: 0, alpha: 0.5))
+    }
+
     /// A one-point bevel just inside `r`: `tl` along the top and left, `br`
     /// along the bottom and right (views are flipped: minY is the top).
     static func bevel(_ r: NSRect, _ tl: NSColor, _ br: NSColor) {
@@ -9831,9 +9884,9 @@ enum Platinum {
     }
 
     /// A sunken well: the Platinum frame of a text field or a list.
-    static func well(_ r: NSRect) {
-        bevel(r, shadow, light)
-        outline(r.insetBy(dx: 1, dy: 1), dark)
+    static func well(_ r: NSRect, active: Bool = true) {
+        bevel(r, active ? shadow : face, active ? light : face)
+        outline(r.insetBy(dx: 1, dy: 1), active ? dark : disabled)
     }
 
     /// Kerning off: Silom's kerning pairs aren't whole pixels and throw the
@@ -9981,9 +10034,10 @@ enum Platinum {
     }
 
     /// A small raised square (arrow boxes, the close box).
-    static func raisedBox(_ r: NSRect, pressed: Bool = false) {
-        fill(r, pressed ? gray(0x99) : face)
-        outline(r, black)
+    static func raisedBox(_ r: NSRect, pressed: Bool = false, active: Bool = true) {
+        fill(r, pressed ? (active ? gray(0x99) : mid) : face)
+        outline(r, active ? black : disabled)
+        if !active { return }
         if pressed { bevel(r.insetBy(dx: 1, dy: 1), dark, mid) } else { bevel(r.insetBy(dx: 1, dy: 1), light, shadow) }
     }
 
@@ -10054,7 +10108,14 @@ enum Platinum {
     /// A vertical Platinum scroll bar in `sb`: arrows at both ends, a
     /// lavender thumb at `thumb` (none when there's nothing to scroll).
     /// `pressed`: 1 the up arrow, 2 the down one.
-    static func scrollBar(_ sb: NSRect, thumb: NSRect?, pressed: Int) {
+    static func scrollBar(_ sb: NSRect, thumb: NSRect?, pressed: Int, active: Bool = true) {
+        guard active else {
+            // An inactive window's scroll bar is an empty box: no arrows,
+            // no thumb.
+            fill(sb, face)
+            outline(sb, dark)
+            return
+        }
         // Pixel for pixel from a Mac OS 9 screenshot: black sides, 16-point
         // arrow boxes, a sunken track and a lavender thumb. `x(i)` is the
         // i-th column inside the black sides (0...13).
@@ -10177,7 +10238,13 @@ class PNode: NSView {
     var key: String { node["key"] as? String ?? "" }
     var flags: Int { node["f"] as? Int ?? 0 }
     var enabled: Bool { flags & Platinum.DISABLED == 0 }
+    /// Drawn live: enabled, in the active window. Input still goes by
+    /// `enabled`.
+    var live: Bool { enabled && Platinum.active(self) }
     func has(_ bit: Int) -> Bool { flags & bit != 0 }
+
+    /// The window's key state changed (`Platinum.activeChanged`).
+    func activeChanged() {}
 
     func fit() -> NSSize { .zero }
     /// Takes no room and no gap in a stack (an empty label).
@@ -10371,7 +10438,7 @@ final class PForm: PNode {
             let line = NSRect(x: 0, y: k.frame.minY, width: lw, height: min(k.frame.height, 20))
             let w = Platinum.width(l)
             Platinum.text(l, in: NSRect(x: lw - w, y: line.minY, width: w + 1, height: line.height),
-                          color: k.enabled ? .black : Platinum.disabled)
+                          color: k.live ? .black : Platinum.disabled)
         }
     }
 }
@@ -10380,7 +10447,9 @@ final class PLabel: PNode {
     private static let wrap: CGFloat = 440
     private var text: String { node["text"] as? String ?? "" }
     private var font: NSFont { has(Platinum.SECONDARY) ? Platinum.app : Platinum.system }
-    private var color: NSColor { has(Platinum.SECONDARY) ? Platinum.dark : .black }
+    private var color: NSColor {
+        !Platinum.active(self) ? Platinum.disabled : has(Platinum.SECONDARY) ? Platinum.dark : .black
+    }
 
     override var stretchX: Bool { has(Platinum.HEADING) }
     override var collapsed: Bool { text.isEmpty }
@@ -10398,7 +10467,7 @@ final class PLabel: PNode {
             // A heading carries an etched rule to its right, the way a
             // Platinum group box's title sits on its frame.
             let w = Platinum.width(text)
-            Platinum.text(text, in: NSRect(x: 0, y: 0, width: w + 1, height: bounds.height))
+            Platinum.text(text, in: NSRect(x: 0, y: 0, width: w + 1, height: bounds.height), color: color)
             let y = floor(bounds.midY)
             if bounds.width > w + 8 {
                 Platinum.fill(NSRect(x: w + 6, y: y, width: bounds.width - w - 6, height: 1), Platinum.shadow)
@@ -10429,11 +10498,11 @@ final class PButton: PNode {
     override func draw(_ dirtyRect: NSRect) {
         let w = Int(bounds.width - ring * 2)
         let art = has(Platinum.DEFAULT)
-            ? PlatinumButtonArt.defaultButton(w: w, pressed: pressed, disabled: !enabled)
-            : PlatinumButtonArt.standard(w: w, pressed: pressed, disabled: !enabled)
+            ? PlatinumButtonArt.defaultButton(w: w, pressed: pressed, disabled: !live)
+            : PlatinumButtonArt.standard(w: w, pressed: pressed, disabled: !live)
         PlatinumButtonArt.paint(art, at: .zero)
         let r = bounds.insetBy(dx: ring, dy: ring)
-        Platinum.text(label, in: r, color: enabled ? (pressed ? .white : .black) : Platinum.disabled,
+        Platinum.text(label, in: r, color: live ? (pressed ? .white : .black) : Platinum.disabled,
                       center: true)
     }
 
@@ -10466,9 +10535,11 @@ final class PCheck: PNode {
     override func draw(_ dirtyRect: NSRect) {
         let box = NSRect(x: 0, y: floor((bounds.height - 12) / 2), width: 12, height: 12)
         Platinum.fill(box, pressed ? Platinum.disabled : Platinum.face)
-        Platinum.outline(box, enabled ? .black : Platinum.disabled)
-        Platinum.bevel(box.insetBy(dx: 1, dy: 1), pressed ? Platinum.shadow : Platinum.light,
-                       pressed ? Platinum.mid : Platinum.shadow)
+        Platinum.outline(box, live ? .black : Platinum.disabled)
+        if live {
+            Platinum.bevel(box.insetBy(dx: 1, dy: 1), pressed ? Platinum.shadow : Platinum.light,
+                           pressed ? Platinum.mid : Platinum.shadow)
+        }
         if on {
             let ctx = NSGraphicsContext.current
             ctx?.shouldAntialias = false
@@ -10477,11 +10548,11 @@ final class PCheck: PNode {
             p.line(to: NSPoint(x: box.minX + 5, y: box.minY + 9))
             p.line(to: NSPoint(x: box.minX + 11, y: box.minY - 1))
             p.lineWidth = 2
-            (enabled ? NSColor.black : Platinum.disabled).setStroke()
+            (live ? NSColor.black : Platinum.disabled).setStroke()
             p.stroke()
         }
         Platinum.text(label, in: NSRect(x: 18, y: 0, width: bounds.width - 18, height: bounds.height),
-                      color: enabled ? .black : Platinum.disabled)
+                      color: live ? .black : Platinum.disabled)
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -10507,16 +10578,16 @@ final class PPopup: PNode {
     override func draw(_ dirtyRect: NSRect) {
         let r = bounds
         Platinum.fill(r, pressed ? Platinum.disabled : Platinum.face)
-        Platinum.outline(r, enabled ? .black : Platinum.disabled)
-        Platinum.bevel(r.insetBy(dx: 1, dy: 1), Platinum.light, Platinum.shadow)
+        Platinum.outline(r, live ? .black : Platinum.disabled)
+        if live { Platinum.bevel(r.insetBy(dx: 1, dy: 1), Platinum.light, Platinum.shadow) }
         let arrow = NSRect(x: r.maxX - 20, y: r.minY, width: 20, height: r.height)
         Platinum.fill(NSRect(x: arrow.minX, y: r.minY + 3, width: 1, height: r.height - 6), Platinum.shadow)
         Platinum.fill(NSRect(x: arrow.minX + 1, y: r.minY + 3, width: 1, height: r.height - 6), Platinum.light)
         Platinum.triangle(in: arrow.offsetBy(dx: 1, dy: 0), down: true,
-                          color: enabled ? .black : Platinum.disabled)
+                          color: live ? .black : Platinum.disabled)
         let t = selected >= 0 && selected < options.count ? options[selected] : ""
         Platinum.text(t, in: NSRect(x: 8, y: 0, width: arrow.minX - 10, height: r.height),
-                      color: enabled ? .black : Platinum.disabled)
+                      color: live ? .black : Platinum.disabled)
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -10591,7 +10662,7 @@ final class PText: PNode {
         if field.currentEditor() == nil { field.stringValue = n["value"] as? String ?? "" }
         field.placeholderString = n["ph"] as? String
         field.isEnabled = enabled
-        field.textColor = enabled ? .black : Platinum.disabled
+        field.textColor = live ? .black : Platinum.disabled
         var b = browse?.node ?? [:]
         b["f"] = enabled ? 0 : Platinum.DISABLED
         browse?.node = b
@@ -10600,10 +10671,14 @@ final class PText: PNode {
 
     func setFocused(_ on: Bool) { focused = on; needsDisplay = true }
 
+    override func activeChanged() { field.textColor = live ? .black : Platinum.disabled }
+
     override func draw(_ dirtyRect: NSRect) {
         let r = wellRect
         Platinum.fill(r.insetBy(dx: 2, dy: 2), enabled ? .white : Platinum.face)
-        if focused {
+        if !Platinum.active(self) {
+            Platinum.well(r, active: false)
+        } else if focused {
             // Platinum's focus ring: two points of lavender around the well.
             Platinum.outline(r, Platinum.lavenderDark)
             Platinum.outline(r.insetBy(dx: 1, dy: 1), Platinum.lavenderDark)
@@ -10688,7 +10763,7 @@ final class PPreview: PNode {
             builtins: n["opts"] as? [String] ?? []))
         needsDisplay = true
     }
-    override func draw(_ dirtyRect: NSRect) { Platinum.well(bounds) }
+    override func draw(_ dirtyRect: NSRect) { Platinum.well(bounds, active: Platinum.active(self)) }
 }
 
 /// Tab folders: the selected tab joins the raised pane below the row.
@@ -10735,15 +10810,17 @@ final class PTabs: PNode {
 
     override func draw(_ dirtyRect: NSRect) {
         let pane = NSRect(x: 0, y: Self.tabH - 1, width: bounds.width, height: bounds.height - Self.tabH + 1)
+        let active = Platinum.active(self)
+        let ink: NSColor = active ? .black : Platinum.disabled
         Platinum.outline(pane, Platinum.dark)
         Platinum.bevel(pane.insetBy(dx: 1, dy: 1), Platinum.light, Platinum.shadow)
         for (i, t) in tabRects.enumerated() where i != selected {
             Platinum.text(labels[i], in: Platinum.tab(t.offsetBy(dx: 0, dy: 2), selected: false, tabH: Self.tabH),
-                          center: true)
+                          color: ink, center: true)
         }
         if selected < tabRects.count {
             Platinum.text(labels[selected], in: Platinum.tab(tabRects[selected], selected: true, tabH: Self.tabH),
-                          center: true)
+                          color: ink, center: true)
         }
     }
 
@@ -10828,8 +10905,9 @@ final class PList: PNode {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        let active = Platinum.active(self)
         Platinum.fill(inner, .white)
-        Platinum.well(bounds)
+        Platinum.well(bounds, active: active)
         let widths = colWidths
         if showsHeader {
             var x = inner.minX
@@ -10839,7 +10917,8 @@ final class PList: PNode {
                 Platinum.bevel(h, Platinum.light, Platinum.shadow)
                 Platinum.fill(NSRect(x: h.minX, y: h.maxY - 1, width: h.width, height: 1), Platinum.dark)
                 if c < columns.count {
-                    Platinum.text(columns[c], in: h.insetBy(dx: 6, dy: 0), font: Platinum.app)
+                    Platinum.text(columns[c], in: h.insetBy(dx: 6, dy: 0), font: Platinum.app,
+                                  color: active ? .black : Platinum.disabled)
                 }
                 x += w
             }
@@ -10853,7 +10932,8 @@ final class PList: PNode {
             guard r < rows.count else { break }
             let y = rowsTop + CGFloat(i) * Self.rowH
             let rowRect = NSRect(x: inner.minX, y: y, width: inner.width - Self.sbW, height: Self.rowH)
-            if r == selected { Platinum.fill(rowRect, focused ? Platinum.lavender : Platinum.face) }
+            // An inactive window's selection is an outline.
+            if r == selected && active { Platinum.fill(rowRect, focused ? Platinum.lavender : Platinum.face) }
             var x = inner.minX
             for (c, w) in widths.enumerated() {
                 let cell = c < rows[r].count ? rows[r][c] : ""
@@ -10869,13 +10949,10 @@ final class PList: PNode {
                 }
                 x += w
             }
+            if r == selected && !active { Platinum.outline(rowRect, Platinum.shadow) }
         }
         NSGraphicsContext.restoreGraphicsState()
-        drawScrollBar()
-    }
-
-    private func drawScrollBar() {
-        Platinum.scrollBar(sbRect, thumb: maxTop > 0 ? thumbRect : nil, pressed: pressedPart)
+        Platinum.scrollBar(sbRect, thumb: maxTop > 0 ? thumbRect : nil, pressed: pressedPart, active: active)
     }
 
     private var pressedPart = 0 { didSet { needsDisplay = true } }
@@ -11158,16 +11235,19 @@ class PlatinumFrameView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         let b = bounds
+        let active = Platinum.active(self)
         Platinum.fill(b, Platinum.face)
-        Platinum.outline(b, .black)
-        Platinum.bevel(b.insetBy(dx: 1, dy: 1), Platinum.light, Platinum.shadow)
-        // The content sits sunken in the frame.
-        Platinum.bevel(content.insetBy(dx: -1, dy: -1), Platinum.shadow, Platinum.light)
+        // An inactive window's frame is flat, in a gray outline.
+        Platinum.outline(b, active ? .black : Platinum.shadow)
+        if active {
+            Platinum.bevel(b.insetBy(dx: 1, dy: 1), Platinum.light, Platinum.shadow)
+            // The content sits sunken in the frame.
+            Platinum.bevel(content.insetBy(dx: -1, dy: -1), Platinum.shadow, Platinum.light)
+        }
         guard titled else {
-            Platinum.outline(b.insetBy(dx: 3, dy: 3), Platinum.mid)
+            if active { Platinum.outline(b.insetBy(dx: 3, dy: 3), Platinum.mid) }
             return
         }
-        let active = window?.isKeyWindow ?? false
         let tw = min(Platinum.width(title), max(0, b.width - 120))
         let tx = floor((b.width - tw) / 2)
         if active {
@@ -11572,9 +11652,17 @@ final class TVDialogWindow: NSObject {
         view.needsDisplay = true
     }
 
-    /// The title row drags the window (the close box is the core's); the
-    /// sides and bottom corners resize a resizable one.
     private func chromeMouse(_ e: NSEvent) -> Bool {
+        Self.chromeMouse(e, view: view, resizable: resizable) { [weak self] in self?.userSized = true }
+    }
+
+    /// A Turbo Vision-framed window's chrome, which the core paints in
+    /// `view`'s cells: the title row drags the window (the close box is the
+    /// core's); the sides and bottom corners resize a resizable one, in
+    /// whole cells, the top and the opposite side staying put.
+    static func chromeMouse(_ e: NSEvent, view: CellView, resizable: Bool,
+                            resized: () -> Void = {}) -> Bool {
+        guard let win = view.window else { return false }
         let p = view.convert(e.locationInWindow, from: nil)
         let x = Int(p.x / CELL_W), y = Int(p.y / CELL_H)
         let c = view.cols(), r = view.rows()
@@ -11583,16 +11671,8 @@ final class TVDialogWindow: NSObject {
             win.performDrag(with: e)
             return true
         }
-        if resizable && (x == 0 || x >= c - 1) {
-            resize(left: x == 0, down: y >= r - 1)
-            return true
-        }
-        return false
-    }
-
-    /// Drag a side (or a bottom corner, `down`) in whole cells, the top and
-    /// the opposite side staying put.
-    private func resize(left: Bool, down: Bool) {
+        guard resizable && (x == 0 || x >= c - 1) else { return false }
+        let left = x == 0, down = y >= r - 1
         let start = NSEvent.mouseLocation
         let f0 = win.frame
         while let ev = win.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
@@ -11603,11 +11683,12 @@ final class TVDialogWindow: NSObject {
             let ch = max(10 * CELL_H, (h / CELL_H).rounded(.down) * CELL_H)
             win.setFrame(NSRect(x: left ? f0.maxX - cw : f0.minX, y: f0.maxY - ch, width: cw, height: ch),
                          display: true)
-            userSized = true
+            resized()
             view.invalidateFrame()
             view.needsDisplay = true
             if ev.type == .leftMouseUp { break }
         }
+        return true
     }
 }
 
@@ -11616,27 +11697,36 @@ final class TVDialogNSWindow: NSWindow {
     override var canBecomeKey: Bool { true }
 }
 
-/// The Turbo Vision drop shadow under a window, in place of the system's
-/// soft one: two cells wide down the right from the second row, one row
-/// tall along the bottom from the third column, a hard-edged translucent
-/// black that dims whatever it falls on (as `paint_drop_shadow` does in
-/// the grid). A click-through child window ordered below its owner, so
-/// it moves with it; resizes and full screen are followed by notification.
+/// A hard-edged retro drop shadow under a window, in place of the system's
+/// soft one: `offset` right and down, a translucent `color` that dims
+/// whatever it falls on. The Turbo Vision look's is two cells wide down the
+/// right from the second row and one row tall along the bottom from the
+/// third column (as `paint_drop_shadow` does in the grid); the Mac OS 9
+/// look's is a point (`Platinum.castShadow`). A click-through child window
+/// ordered below its owner, so it moves with it; resizes and full screen
+/// are followed by notification.
 final class RetroShadow {
     private weak var owner: NSWindow?
     private let win: NSWindow
+    private let offset: () -> NSSize
     private var observers: [NSObjectProtocol] = []
     private var fullScreen = false
 
-    init(under owner: NSWindow) {
+    init(under owner: NSWindow,
+         offset: @escaping () -> NSSize = { NSSize(width: 2 * CELL_W, height: CELL_H) },
+         color: NSColor = NSColor(white: 0, alpha: 0.6)) {
         self.owner = owner
+        self.offset = offset
         win = NSWindow(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: true)
         win.isReleasedWhenClosed = false
         win.isOpaque = false
         win.backgroundColor = .clear
         win.hasShadow = false
         win.ignoresMouseEvents = true
-        win.contentView = RetroShadowView()
+        let view = RetroShadowView()
+        view.offset = offset
+        view.color = color
+        win.contentView = view
         owner.hasShadow = false
         let nc = NotificationCenter.default
         let names: [(NSNotification.Name, Bool?)] = [
@@ -11674,7 +11764,8 @@ final class RetroShadow {
             return
         }
         let f = o.frame
-        win.setFrame(NSRect(x: f.minX + 2 * CELL_W, y: f.minY - CELL_H, width: f.width, height: f.height),
+        let d = offset()
+        win.setFrame(NSRect(x: f.minX + d.width, y: f.minY - d.height, width: f.width, height: f.height),
                      display: false)
         win.contentView?.needsDisplay = true
         if win.parent == nil { o.addChildWindow(win, ordered: .below) }
@@ -11682,13 +11773,16 @@ final class RetroShadow {
 }
 
 private final class RetroShadowView: NSView {
+    var offset: () -> NSSize = { .zero }
+    var color = NSColor.black
+
     override func draw(_ dirtyRect: NSRect) {
-        NSColor(white: 0, alpha: 0.6).setFill()
-        let b = bounds
+        color.setFill()
+        let b = bounds, d = offset()
         // Only the L that shows past the owner, so nothing doubles up
         // where the two strips meet.
-        NSRect(x: 0, y: 0, width: b.width, height: CELL_H).fill()
-        NSRect(x: b.width - 2 * CELL_W, y: CELL_H, width: 2 * CELL_W, height: b.height - CELL_H).fill()
+        NSRect(x: 0, y: 0, width: b.width, height: d.height).fill()
+        NSRect(x: b.width - d.width, y: d.height, width: d.width, height: b.height - d.height).fill()
     }
 }
 
@@ -11705,6 +11799,7 @@ final class TVProxyIcon: NSImageView {
 final class PlatinumMainFrame: PlatinumFrameView {
     let cell: CellView
     let tabs = PlatinumTabStrip()
+    var retroShadow: RetroShadow?
     private let grow = PlatinumGrowBox()
     private var observers: [NSObjectProtocol] = []
 
@@ -11728,8 +11823,7 @@ final class PlatinumMainFrame: PlatinumFrameView {
         observers.forEach(NotificationCenter.default.removeObserver)
         observers = [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification].map {
             NotificationCenter.default.addObserver(forName: $0, object: window, queue: .main) { [weak self] _ in
-                self?.needsDisplay = true
-                self?.tabs.needsDisplay = true
+                if let self = self { Platinum.activeChanged(self) }
             }
         }
     }
@@ -11784,6 +11878,7 @@ final class PlatinumGrowBox: NSView {
         Platinum.fill(b, Platinum.face)
         Platinum.fill(NSRect(x: 0, y: 0, width: b.width, height: 1), .black)
         Platinum.fill(NSRect(x: 0, y: 0, width: 1, height: b.height), .black)
+        guard Platinum.active(self) else { return }
         // Two overlapping windows, the classic glyph.
         for r in [NSRect(x: 7, y: 7, width: 6, height: 6), NSRect(x: 4, y: 4, width: 6, height: 6)] {
             Platinum.fill(r, Platinum.face)
@@ -11916,7 +12011,7 @@ final class PlatinumTabStrip: NSView {
             Platinum.fill(NSRect(x: c.midX - 2, y: c.midY - 2, width: 4, height: 4), .black)
         }
         let text = NSRect(x: c.maxX + 4, y: label.minY, width: label.maxX - c.maxX - 12, height: label.height)
-        Platinum.text(tabs[i].title, in: text, color: active || sel ? .black : Platinum.dark)
+        Platinum.text(tabs[i].title, in: text, color: active ? .black : Platinum.disabled)
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -11986,7 +12081,7 @@ final class PlatinumScroller: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        Platinum.scrollBar(bounds, thumb: thumb, pressed: pressedPart)
+        Platinum.scrollBar(bounds, thumb: thumb, pressed: pressedPart, active: Platinum.active(self))
     }
 
     private func go(to v: Double) {
@@ -12046,6 +12141,7 @@ final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
     private let asWindow: Bool
     private let win: PlatinumWindow
     private let frameView = PlatinumFrameView()
+    private var retroShadow: RetroShadow?
     private var root: PNode?
     private var shape = ""
     private var lastTree: NSDictionary?
@@ -12085,7 +12181,7 @@ final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
         let nc = NotificationCenter.default
         for n in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
             nc.addObserver(forName: n, object: win, queue: .main) { [weak self] _ in
-                self?.frameView.needsDisplay = true
+                if let f = self?.frameView { Platinum.activeChanged(f) }
             }
         }
     }
@@ -12102,6 +12198,7 @@ final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
                                    y: floor(pf.maxY - (pf.height - size.height) / 3 - size.height)))
         parent.addChildWindow(win, ordered: .above)
         win.makeKeyAndOrderFront(nil)
+        if retroShadow == nil { retroShadow = Platinum.castShadow(under: win) }
         focusFirst()
     }
 
@@ -12109,12 +12206,15 @@ final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
         relayout()
         win.center()
         win.makeKeyAndOrderFront(nil)
+        if retroShadow == nil { retroShadow = Platinum.castShadow(under: win) }
         focusFirst()
     }
 
     func dismiss() {
         guard !dismissed else { return }
         dismissed = true
+        retroShadow?.detach()
+        retroShadow = nil
         win.parent?.removeChildWindow(win)
         win.orderOut(nil)
         NotificationCenter.default.removeObserver(self)
@@ -12358,8 +12458,10 @@ final class PTextArea: PNode, NSTextViewDelegate {
 
     override func draw(_ dirtyRect: NSRect) {
         Platinum.fill(bounds.insetBy(dx: 2, dy: 2), .white)
-        Platinum.well(bounds)
+        Platinum.well(bounds, active: Platinum.active(self))
     }
+
+    override func activeChanged() { text.textColor = live ? .black : Platinum.disabled }
 
     func textDidChange(_ notification: Notification) { dlg?.set(key, text.string) }
 
@@ -12464,8 +12566,9 @@ final class PGitRows: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        let active = Platinum.active(self)
         Platinum.fill(inner, fill)
-        Platinum.well(bounds)
+        Platinum.well(bounds, active: active)
         let body = NSRect(x: inner.minX, y: inner.minY, width: inner.width - Self.sbW, height: inner.height)
         NSGraphicsContext.saveGraphicsState()
         NSBezierPath(rect: body).addClip()
@@ -12480,7 +12583,7 @@ final class PGitRows: NSView {
             let row = rows[r]
             let rr = NSRect(x: body.minX, y: body.minY + CGFloat(i) * rowH, width: body.width, height: rowH)
             if let bg = row.bg { Platinum.fill(rr, bg) }
-            if r == selected && !outlineCursor {
+            if r == selected && !outlineCursor && active {
                 Platinum.fill(rr, focused ? Platinum.lavender : Platinum.face)
             }
             let f = row.font ?? font
@@ -12506,12 +12609,13 @@ final class PGitRows: NSView {
                 Platinum.text(t, in: NSRect(x: dx, y: rr.minY, width: rr.maxX - 2 - dx, height: rowH),
                               font: f, color: c)
             }
-            if r == selected && outlineCursor {
-                Platinum.outline(rr, focused ? Platinum.accent : Platinum.shadow)
+            // An inactive window's selection is an outline.
+            if r == selected && (outlineCursor || !active) {
+                Platinum.outline(rr, focused && active ? Platinum.accent : Platinum.shadow)
             }
         }
         NSGraphicsContext.restoreGraphicsState()
-        Platinum.scrollBar(sbRect, thumb: maxTop > 0 ? thumbRect : nil, pressed: pressedPart)
+        Platinum.scrollBar(sbRect, thumb: maxTop > 0 ? thumbRect : nil, pressed: pressedPart, active: active)
     }
 
     private func row(at p: NSPoint) -> Int? {
@@ -12663,6 +12767,7 @@ final class PlatinumGitView: NSObject, GitSurface {
 
     private let win: PlatinumGitWindow
     private let frameView = PlatinumFrameView()
+    private var retroShadow: RetroShadow?
     private let body = PlatinumGitBody()
     private let filesList = PGitRows()
     private let branchesList = PGitRows()
@@ -12711,7 +12816,7 @@ final class PlatinumGitView: NSObject, GitSurface {
         frameView.addSubview(body)
         for n in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
             NotificationCenter.default.addObserver(forName: n, object: win, queue: .main) { [weak self] _ in
-                self?.frameView.needsDisplay = true
+                if let f = self?.frameView { Platinum.activeChanged(f) }
             }
         }
         setUpLists()
@@ -12779,12 +12884,15 @@ final class PlatinumGitView: NSObject, GitSurface {
         layoutBody()
         parent.addChildWindow(win, ordered: .above)
         win.makeKeyAndOrderFront(nil)
+        if retroShadow == nil { retroShadow = Platinum.castShadow(under: win) }
         win.makeFirstResponder(filesList)
     }
 
     func dismiss() {
         guard !dismissed else { return }
         dismissed = true
+        retroShadow?.detach()
+        retroShadow = nil
         alert?.dismiss()
         alert = nil
         win.parent?.removeChildWindow(win)
@@ -12848,7 +12956,9 @@ final class PlatinumGitView: NSObject, GitSurface {
         let branch = state["branch"] as? String ?? ""
         let name = branch.isEmpty ? "(detached)" : branch
         let bw = Platinum.width(name)
-        Platinum.text(name, in: NSRect(x: m, y: m - 2, width: bw + 1, height: 18))
+        let active = Platinum.active(body)
+        Platinum.text(name, in: NSRect(x: m, y: m - 2, width: bw + 1, height: 18),
+                      color: active ? .black : Platinum.disabled)
         let noteW = min(Platinum.width(note, Platinum.app) + 1, b.width * 0.45)
         Platinum.text(note, in: NSRect(x: b.width - m - noteW, y: m - 2, width: noteW, height: 18),
                       font: Platinum.app, color: busy ? .black : Platinum.dark)
@@ -12862,7 +12972,7 @@ final class PlatinumGitView: NSObject, GitSurface {
             let on = pane == focus || (pane == GitPane.info && (focus == GitPane.info))
             let w = Platinum.width(title)
             Platinum.text(title, in: NSRect(x: r.minX, y: r.minY, width: w + 1, height: r.height - 2),
-                          color: on ? .black : Platinum.disabled)
+                          color: on && active ? .black : Platinum.disabled)
             let ry = floor(r.minY + (r.height - 2) / 2)
             if r.width > w + 8 {
                 Platinum.fill(NSRect(x: r.minX + w + 6, y: ry, width: r.width - w - 6, height: 1), Platinum.shadow)
