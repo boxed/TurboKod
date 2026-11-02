@@ -38,7 +38,7 @@ from .desktop import (
     EDITOR_TOGGLE_TAB_BAR, EDITOR_UNDO, VIEW_CLASSIC_UI, VIEW_NATIVE_UI, VIEW_PLATINUM_UI,
     FILE_TREE_FOCUS, FILE_TREE_REVEAL,
     GIT_HISTORY_FILE, GIT_HISTORY_SELECTION, GIT_LOCAL_CHANGES,
-    GIT_OPEN_ALL_CHANGED, GIT_REVIEW,
+    GIT_OPEN_ALL_CHANGED, GIT_REVIEW, GIT_REVIEW_NAMES,
     HELP_HOTKEYS,
     PROJECT_FIND, PROJECT_OPEN, PROJECT_REPLACE, PROJECT_TREE_ACTION,
     TARGET_RUN, TARGET_TEST, TERMINAL_CLAUDE, TERMINAL_NEW,
@@ -245,6 +245,7 @@ def build_menus(mut d: Desktop, native: Bool):
     var g = List[MenuItem]()
     g.append(MenuItem(String("Show diff viewer"), GIT_LOCAL_CHANGES, icon=String("plus.forwardslash.minus")))
     g.append(MenuItem(String("Review changes…"), GIT_REVIEW))
+    g.append(MenuItem(String("Review new names…"), GIT_REVIEW_NAMES))
     g.append(MenuItem(String("Open all with changes"), GIT_OPEN_ALL_CHANGED))
     g.append(MenuItem.separator())
     g.append(MenuItem(String("Show History for Selection"), GIT_HISTORY_SELECTION, icon=String("clock.arrow.circlepath")))

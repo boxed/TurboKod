@@ -576,6 +576,9 @@ struct GridForm(Movable):
         lb.set_selected(n.number)
         self._list_keys.append(n.key)
         self._lists.append(lb^)
+        # Parallel to ``_lists`` (a table has no mark, but a code view
+        # after it indexes by the same slot).
+        self._list_marks.append(-1)
         return len(self._lists) - 1
 
     def _vlist(mut self, n: UINode) -> Int:

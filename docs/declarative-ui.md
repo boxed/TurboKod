@@ -127,6 +127,13 @@ in, so focus and the cursor survive every frame. Keep a dialog's shape
 stable: disable a control rather than leaving it out, so the views aren't
 rebuilt under the user.
 
+Spare height follows the grid's rule (spacers, else the last table / tabs /
+list): the other panes of a vertical stack are held at their minimum height
+by a weak (490) constraint. A scroll view has no intrinsic height, so
+hugging priorities can't express it, and without the hold Auto Layout gave
+the extra to whichever pane it liked. Platinum's `PStack.place` applies the
+same rule in its own layout.
+
 An `NSTabView` doesn't size itself to its pages, so each page is pinned
 into its item's view and the tab view is given the largest page's fitting
 size.
@@ -144,6 +151,13 @@ pickers, the AppKit `PickerController` and its `tk_desktop_picker*` C ABI.
 An action that hands the host something to do (a project opening in a new
 window) comes back from `ui_apply` / `tk_desktop_ui_event` as a host action
 code.
+
+Git ▸ Review new names… (`names_review.mojo`): one dialog of three panes —
+the changesets (review's picker entries, from a `ReviewMode` used only as
+the model), the selected one's new names (`new_names.mojo`; name, kind,
+file:line) and a code view of the selected name's definition. Changesets
+load once per opening, so stepping through commits back and forth is
+instant after the first visit.
 
 Fill (Edit ▸ Fill…), the breakpoint dialog, the failed-condition dialog,
 Project Settings and its on-save action editor, Settings and its language

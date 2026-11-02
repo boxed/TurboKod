@@ -140,6 +140,7 @@ from .picker_ui import (
 from .install_runner import InstallResult, InstallRunner
 from .local_changes import LocalChanges
 from .review_mode import ReviewMode
+from .names_review import NamesReview
 from .selection_history import SelectionHistory
 from .grammar_install import (
     built_in_downloadable_grammars, find_downloadable_grammar_by_language,
@@ -430,6 +431,7 @@ comptime EDITOR_TOGGLE_BLAME        = String("git:blame")
 # included — only modifications against the last commit.
 comptime GIT_LOCAL_CHANGES          = String("git:local_changes")
 comptime GIT_REVIEW                 = String("git:review")
+comptime GIT_REVIEW_NAMES           = String("git:review-names")
 # "Show History for Selection" — ``git log -L<start>,<end>:<file>`` for the
 # selected line range (or the cursor's line with no selection), shown in a
 # paned modal: commit list left, range-scoped patch right.
@@ -1034,6 +1036,8 @@ struct Desktop(Movable):
     var project_find: ProjectFind
     var local_changes: LocalChanges
     var review: ReviewMode
+    # Git ▸ Review new names…: the names list, after review's picker.
+    var names_review: NamesReview
     var history: SelectionHistory
     # Review hosting: the window-list index of the editor ReviewMode is
     # currently showing in its body (``-1`` when none). The review window is
@@ -1783,6 +1787,7 @@ struct Desktop(Movable):
         self.project_find = ProjectFind()
         self.local_changes = LocalChanges()
         self.review = ReviewMode()
+        self.names_review = NamesReview()
         self.history = SelectionHistory()
         self._review_win_idx = -1
         self._review_host_path = String("")
@@ -2691,6 +2696,7 @@ struct Desktop(Movable):
                 or self.lsp_status_menu.active \
                 or self.breakpoint_menu.active \
                 or self.breakpoint_error.active or self.fill_dialog.active \
+                or self.names_review.active \
                 or self.spelling_dialog.active:
             return True
         return False
@@ -4578,6 +4584,24 @@ struct Desktop(Movable):
         # No further change in this file — cross into the adjacent file.
         if self.review.goto_file_rel(direction):
             self._review_pending_chunk_edge = direction
+
+    def _names_review_open_selected(mut self):
+        """Open the selected new name's definition in a normal editor."""
+        var n = self.names_review.selected_name()
+        var rel = self.names_review.selected_path()
+        var root = self.names_review.root
+        self.names_review.close()
+        if not n or len(rel.as_bytes()) == 0:
+            return
+        var nm = n.value()
+        var screen = self._last_screen
+        try:
+            self.open_file_at(join_path(root, rel), nm.row, nm.col, screen)
+        except e:
+            self.status_bar.set_message(
+                String("Can't open ") + rel + String(": ") + String(e),
+                Attr(BLACK, LIGHT_GRAY),
+            )
 
     def _review_apply_chunk_edge(mut self):
         """Land on the first (edge>0) / last (edge<0) change of the freshly
@@ -8389,6 +8413,7 @@ struct Desktop(Movable):
         """
         return self.spell_menu.active or self.breakpoint_error.active \
             or self.breakpoint_menu.active or self.fill_dialog.active \
+            or self.names_review.active \
             or self.spelling_dialog.active \
             or self.git_gutter_menu.active or self.test_gutter_menu.active \
             or self.blame_popup.active \
@@ -8824,6 +8849,8 @@ struct Desktop(Movable):
             out.append(String("fill"))
         if len(self.picker_kind().as_bytes()) > 0:
             out.append(String("picker"))
+        if self.names_review.active:
+            out.append(String("names_review"))
         return out^
 
     def settings_surfaces(self) -> List[String]:
@@ -8848,6 +8875,8 @@ struct Desktop(Movable):
     def ui_tree(mut self, name: String) -> UINode:
         if name == String("picker"):
             return self.picker_ui()
+        if name == String("names_review"):
+            return self.names_review.ui(self.grammar_registry)
         if name == String("settings"):
             return self.settings.ui()
         if name == String("language_editor"):
@@ -8907,6 +8936,11 @@ struct Desktop(Movable):
                     self.fill_dialog.ui_act(e.key)
                 else:
                     self.fill_dialog.ui_set(e.key, e.value)
+            elif name == String("names_review"):
+                if e.is_action:
+                    self.names_review.ui_act(e.key)
+                else:
+                    self.names_review.ui_set(e.key, e.value)
         if name == String("settings") or name == String("language_editor"):
             self.settings.consume_language_editor()
             # Apply before a Close resets the working state.
@@ -8925,6 +8959,11 @@ struct Desktop(Movable):
             self._on_breakpoint_menu_submit()
         elif name == String("fill") and self.fill_dialog.submitted:
             self._on_fill_dialog_submit()
+        elif name == String("names_review"):
+            if self.names_review.open_requested:
+                self._names_review_open_selected()
+            elif self.names_review.close_requested:
+                self.names_review.close()
         return Optional[String]()
 
     def _sync_settings_grids(mut self) -> List[String]:
@@ -10141,6 +10180,10 @@ struct Desktop(Movable):
         if action == GIT_REVIEW:
             if self.project:
                 self.review.open(self.project.value())
+            return Optional[String]()
+        if action == GIT_REVIEW_NAMES:
+            if self.project:
+                self.names_review.open(self.project.value())
             return Optional[String]()
         if action == GIT_HISTORY_SELECTION:
             self._open_selection_history()
@@ -12199,6 +12242,7 @@ struct Desktop(Movable):
             return False
         if self.spell_menu.active or self.breakpoint_error.active \
                 or self.breakpoint_menu.active or self.fill_dialog.active \
+                or self.names_review.active \
                 or self.spelling_dialog.active \
                 or self.git_gutter_menu.active or self.test_gutter_menu.active \
                 or self.blame_popup.active \

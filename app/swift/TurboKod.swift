@@ -9118,6 +9118,21 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
             for v in st.arrangedSubviews {
                 v.widthAnchor.constraint(equalTo: st.widthAnchor).isActive = true
             }
+            // The grid's rule for spare height: the spacers take it, else
+            // the last table / tabs / list. Without priorities to break the
+            // tie, Auto Layout hands it to whichever pane it likes. A scroll
+            // view has no intrinsic height, so hugging can't say it: the
+            // others are held at their minimum height instead, weakly
+            // (below the window's own size priorities).
+            let kinds = kids.map { $0["k"] as? String ?? "" }
+            let taker = kinds.contains("spacer") ? nil
+                : kinds.lastIndex { ["table", "tabs", "list"].contains($0) }
+            for (i, v) in st.arrangedSubviews.enumerated()
+            where i != taker && ["table", "tabs", "list"].contains(kinds[i]) {
+                let hold = v.heightAnchor.constraint(equalToConstant: v.fittingSize.height)
+                hold.priority = NSLayoutConstraint.Priority(490)
+                hold.isActive = true
+            }
             out = st
         case "hstack":
             var subs = kids.enumerated().map { build($1, path: "\(path).\($0)") }
@@ -9260,6 +9275,9 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
                 t.addTableColumn(c)
             }
             t.usesAlternatingRowBackgroundColors = true
+            // Leading columns fit their text (``fitColumns``); the last
+            // takes what's left, like the grid projector.
+            t.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
             t.dataSource = self
             t.delegate = self
             t.target = self
@@ -9273,6 +9291,7 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
             sv.widthAnchor.constraint(greaterThanOrEqualToConstant: 360).isActive = true
             tables[ObjectIdentifier(t)] = (key, n)
             views[path + ".table"] = t
+            fitColumns(t, n)
             out = sv
         case "button":
             let b = NSButton(title: n["text"] as? String ?? "", target: self, action: #selector(buttonPressed(_:)))
@@ -9361,6 +9380,7 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
             if let t = views[path + ".table"] as? NSTableView {
                 tables[ObjectIdentifier(t)] = (n["key"] as? String ?? "", n)
                 t.reloadData()
+                fitColumns(t, n)
                 let sel = n["n"] as? Int ?? 0   // the tree leaves out a 0
                 if sel >= 0 && sel < t.numberOfRows {
                     t.selectRowIndexes(IndexSet(integer: sel), byExtendingSelection: false)
@@ -9467,6 +9487,25 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
         guard let t = notification.object as? NSTableView, let entry = tables[ObjectIdentifier(t)],
               t.selectedRow >= 0, t.selectedRow != (entry.node["n"] as? Int ?? 0) else { return }
         set(entry.key, "\(t.selectedRow)")
+    }
+
+    /// Size every column but the last to its widest cell (title included),
+    /// so short columns like a name or a kind aren't elided while a long
+    /// last column has room to spare.
+    private func fitColumns(_ t: NSTableView, _ n: [String: Any]) {
+        let cols = t.tableColumns
+        guard cols.count > 1 else { return }
+        let rows = n["rows"] as? [[String]] ?? []
+        let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        let header = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        for i in 0..<(cols.count - 1) where cols[i].maxWidth != cols[i].minWidth {
+            var w = (cols[i].title as NSString).size(withAttributes: [.font: header]).width
+            for r in rows where i < r.count {
+                w = max(w, (r[i] as NSString).size(withAttributes: [.font: font]).width)
+            }
+            let fit = min(ceil(w) + 16, 360)
+            if abs(cols[i].width - fit) > 0.5 { cols[i].width = fit }
+        }
     }
 
     @objc private func tableActivated(_ t: NSTableView) {

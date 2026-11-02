@@ -30,6 +30,11 @@ Cross-file jumps (a cmd+click resolving into another file) open a normal
 editor and *suspend* review; re-entering review restores the remembered
 changeset + file via the in-session position memory below.
 
+Git ▸ Review new names… (``NamesReview``) uses a ReviewMode of its own
+purely as the changeset model: ``changeset_count`` / ``changeset_label``
+list the picker's entries, ``load_changeset`` loads one read-only with
+every file's text, and ``new_names`` finds the distinct names it introduces (``new_names.mojo``).
+
 This is a frontend-agnostic, in-grid surface (``Canvas`` out, ``Event``
 in) like every other modal, so it works in both the terminal and native
 macOS frontends with no host-specific code.
@@ -58,6 +63,7 @@ from .git_changes import (
     fetch_git_status, main_line_branch, merge_base,
     parse_unified_diff_files, split_show_output,
 )
+from .new_names import NewName, new_names_in
 from .painter import Painter
 from .string_utils import display_columns, split_lines_no_trailing
 
@@ -509,13 +515,14 @@ struct ReviewMode(Movable):
             return
         self.src = self.picker_kind[self.picker_cursor]
         self.sha = self.picker_sha[self.picker_cursor]
-        self.title = self.picker_labels[self.picker_cursor]
         self.branch_checked_out = self.src == _SRC_BRANCH \
             and self.sha == self.current_branch
-        if self.src == _SRC_BRANCH:
-            self.title = self.sha + String(" vs ") + self.main_branch
         self.last_key = self._mem_key()
         self._build_model()
+        # After the build: it resets the model, title included.
+        self.title = self.picker_labels[self.picker_cursor]
+        if self.src == _SRC_BRANCH:
+            self.title = self.sha + String(" vs ") + self.main_branch
         # Restore the file we were last on for this changeset (if any).
         self.cur_file = self._recall_file()
         if self.cur_file < 0 or self.cur_file >= self.file_count():
@@ -569,6 +576,57 @@ struct ReviewMode(Movable):
             self.file_changed_lines.append(
                 0 if summary.binary else summary.changed
             )
+
+    # --- changeset model for the names review -----------------------------
+
+    def changeset_count(self, tab: Int) -> Int:
+        return len(self._tab_labels[tab]) if 0 <= tab \
+            and tab < len(self._tab_labels) else 0
+
+    def changeset_label(self, tab: Int, i: Int) -> String:
+        return self._tab_labels[tab][i]
+
+    def changeset_key(self, tab: Int, i: Int) -> String:
+        return self._key_for(self._tab_kind[tab][i], self._tab_sha[tab][i])
+
+    def load_changeset(mut self, tab: Int, i: Int):
+        """Load entry ``i`` of picker tab ``tab`` read-only (a branch is
+        never checked out for it) with every file's text — the names review
+        needs them all up front, as a name is only new if no file's before
+        side mentions it. ``title`` names it; ``last_key`` remembers it, so
+        the next ``open`` pre-selects it."""
+        self._show_tab(tab)
+        if i < 0 or i >= len(self.picker_labels):
+            self._reset_review()
+            return
+        self.picker_cursor = i
+        self.src = self.picker_kind[i]
+        self.sha = self.picker_sha[i]
+        self.branch_checked_out = self.src == _SRC_BRANCH \
+            and self.sha == self.current_branch
+        self.last_key = self._mem_key()
+        self._build_model()
+        self.title = self.picker_labels[i]
+        if self.src == _SRC_BRANCH:
+            self.title = self.sha + String(" vs ") + self.main_branch
+        for f in range(self.file_count()):
+            self.load_file(f)
+
+    def new_names(self) -> List[NewName]:
+        """The loaded changeset's distinct new names."""
+        var paths = List[String]()
+        var befores = List[String]()
+        var afters = List[String]()
+        for i in range(self.file_count()):
+            paths.append(self.file_paths[i])
+            # A binary file has no names; a deleted one defines none.
+            var text_ok = not self.file_binary[i]
+            befores.append(self.file_before[i] if text_ok else String(""))
+            afters.append(
+                self.file_after[i] if text_ok and not self.file_deleted[i]
+                else String("")
+            )
+        return new_names_in(paths, befores, afters)
 
     def load_file(mut self, idx: Int):
         """Fetch file ``idx``'s before/after text if not yet loaded, and
@@ -950,6 +1008,7 @@ struct ReviewMode(Movable):
             (total > 0 and self.cur_file < total - 1)
             or self.change_index < self.change_total
         )
+
         var enabled = Attr(BLACK, CYAN)
         var disabled = Attr(DARK_GRAY, LIGHT_GRAY)
         # Buttons advertise their keyboard shortcut (⇧⌘← / ⇧⌘→).
