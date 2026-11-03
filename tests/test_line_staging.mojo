@@ -99,10 +99,17 @@ def test_no_newline_markers_and_blank_lines_stay_in_the_hunk() raises:
         "-b\n\\ No newline at end of file\n+B\n+C\n\\ No newline at end of file\n"
     )
     var patch = build_minimal_patch(diff, 8, False)  # +B
+    # `b` stays, but is no longer the last line on the new side: it gets its
+    # newline there, or git joins it with `B`
     assert_equal(
         patch,
-        "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,2 +1,3 @@\n a\n\n b\n\\ No newline at end of file\n+B\n"
-        "\\ No newline at end of file\n",
+        "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,2 +1,3 @@\n a\n\n-b\n\\ No newline at end of file\n"
+        "+b\n+B\n",
+    )
+    # staging `-b`: the dropped `+C` takes its marker with it
+    assert_equal(
+        build_minimal_patch(diff, 6, False),
+        "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,2 +1,3 @@\n a\n\n-b\n\\ No newline at end of file\n",
     )
 
 
@@ -192,6 +199,26 @@ def test_staging_the_last_line_of_a_file_without_a_final_newline() raises:
     assert_equal(_index(dir), "a\n")
     assert_true(apply_patch_to_index(dir, _patch(_file_diff(compute_unstaged_diff(dir)), "+B")))
     assert_equal(_index(dir), "a\nB")
+    _rm_rf(dir)
+
+
+def test_one_line_next_to_a_last_line_without_a_newline() raises:
+    # staging the new line alone kept `b` as context without its newline,
+    # and git staged `bB`
+    var dir = _repo("_stage_nonl_next", "a\nb", "a\nB")
+    assert_true(apply_patch_to_index(dir, _patch(_file_diff(compute_unstaged_diff(dir)), "+B")))
+    assert_equal(_index(dir), "a\nb\nB")
+    # unstaging the removal the other way round
+    assert_true(apply_patch_to_index(dir, _patch(_file_diff(compute_unstaged_diff(dir)), "-b")))
+    assert_equal(_index(dir), "a\nB")
+    var staged = _file_diff(compute_staged_diff(dir))
+    assert_true(apply_patch_to_index(dir, _patch(staged, "-b", True), True))
+    assert_equal(_index(dir), "a\nb\nB")
+    # discarding the removal puts `b` back in the file, on a line of its own
+    _ = _run_git(dir, string_list("reset", "-q"))
+    assert_true(apply_patch_to_worktree(dir, _patch(_file_diff(compute_unstaged_diff(dir)), "-b", True), True))
+    assert_equal(read_file(dir + "/f"), "a\nb\nB")
+    assert_equal(_index(dir), "a\nb")
     _rm_rf(dir)
 
 

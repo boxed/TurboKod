@@ -589,31 +589,73 @@ def build_minimal_patch(
             j += 1
     if hunk_start < 0:
         return String("")
+    # The kept body lines, and whether each ends without a newline (a
+    # `\ No newline` marker followed it).
+    var body = List[String]()
+    var no_newline = List[Bool]()
+    var dropped = False
+    for k in range(hunk_start + 1, hunk_end):
+        var lk = lines[k]
+        var lb = lk.as_bytes()
+        if len(lb) > 0 and Int(lb[0]) == 0x5C:
+            # the marker belongs to the line before it, kept or not
+            if not dropped and len(body) > 0:
+                no_newline[len(body) - 1] = True
+            continue
+        dropped = False
+        var fc = Int(lb[0]) if len(lb) > 0 else 0x20
+        if k != target_line_idx and (fc == 0x2B or fc == 0x2D):
+            if (fc == 0x2B) == reverse:
+                lk = _convert_to_context(lk)
+            else:
+                dropped = True
+                continue
+        body.append(lk)
+        no_newline.append(False)
+    # Only the last line of a side can end without a newline. A line that
+    # did can stop being last once other lines are dropped or turned into
+    # context: `-b\` `+B\` staging `+B` turns `b\` into context ahead of
+    # `+B`, which git applied as the one line `bB`.
+    var last_old = -1
+    var last_new = -1
+    for k in range(len(body)):
+        var kb = body[k].as_bytes()
+        var fc = Int(kb[0]) if len(kb) > 0 else 0x20
+        if fc != 0x2B:
+            last_old = k
+        if fc != 0x2D:
+            last_new = k
     var out = List[UInt8]()
     for k in range(header_end):
         _append_line(out, lines[k])
     _append_line(out, lines[hunk_start])
-    for k in range(hunk_start + 1, hunk_end):
-        var lk = lines[k]
-        var lb = lk.as_bytes()
-        if len(lb) == 0:
+    var marker = String("\\ No newline at end of file")
+    var tail = List[String]()
+    for k in range(len(body)):
+        var lk = body[k]
+        var kb = lk.as_bytes()
+        var fc = Int(kb[0]) if len(kb) > 0 else 0x20
+        var ends_old = no_newline[k] and k == last_old and fc != 0x2B
+        var ends_new = no_newline[k] and k == last_new and fc != 0x2D
+        if fc == 0x2B or fc == 0x2D or ends_old == ends_new:
             _append_line(out, lk)
+            if ends_old or ends_new:
+                _append_line(out, marker)
             continue
-        var fc = Int(lb[0])
-        if k == target_line_idx:
-            _append_line(out, lk)
-            continue
-        if fc == 0x2B:
-            if reverse:
-                _append_line(out, _convert_to_context(lk))
-            # else: drop entirely
-            continue
-        if fc == 0x2D:
-            if not reverse:
-                _append_line(out, _convert_to_context(lk))
-            # else: drop entirely
-            continue
-        _append_line(out, lk)
+        # context that ends one side only: removed and added back, with
+        # the marker on the side it ends
+        var text = byte_slice(lk, 1, len(kb)) if len(kb) > 0 else String("")
+        _append_line(out, String("-") + text)
+        if ends_old:
+            _append_line(out, marker)
+            _append_line(out, String("+") + text)
+        else:
+            # what follows on the old side are removed lines: the added
+            # copy goes after them, last on the new side
+            tail.append(String("+") + text)
+            tail.append(marker)
+    for k in range(len(tail)):
+        _append_line(out, tail[k])
     return String(StringSpan(unsafe_from_utf8=Span(out)))
 
 
