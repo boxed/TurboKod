@@ -5502,6 +5502,43 @@ def test_commit_info_file_summary_rows_point_at_their_diff() raises:
     assert_true(starts[0] < starts[1])
 
 
+def test_commit_info_leaves_out_huge_diffs_until_asked() raises:
+    """A diff past the per-file cap gets a placeholder row instead of its
+    lines — laying out a vendoring commit's hundreds of thousands of rows
+    hung the view for seconds — and activating the row lays it out."""
+    var lc = LocalChanges()
+    lc.open(String("/tmp"))
+    var registry = GrammarRegistry()
+    var show = String(
+        "commit abc1234\nAuthor: A <a@b.c>\n\n    msg\n\n"
+        "diff --git a/big.txt b/big.txt\nnew file mode 100644\n"
+        "--- /dev/null\n+++ b/big.txt\n@@ -0,0 +1,5000 @@\n"
+    )
+    for i in range(5000):
+        show += String("+line ") + String(i) + String("\n")
+    show += String(
+        "diff --git a/x.txt b/x.txt\nindex 1..2 100644\n"
+        "--- a/x.txt\n+++ b/x.txt\n@@ -1 +1 @@\n-a\n+b\n"
+    )
+    lc._populate_commit_info(show, String(""), registry)
+    assert_equal(len(lc._collapsed_rows), 1)
+    assert_equal(lc._collapsed_paths[0], String("big.txt"))
+    assert_true(len(lc.info.lines) < 100)
+    var small_laid_out = False
+    for i in range(len(lc.info.lines)):
+        if Int(lc.info.kind[i]) == 4 and lc.info.lines[i] == String("b"):
+            small_laid_out = True
+    assert_true(small_laid_out)
+    assert_false(lc._expand_commit_diff(lc._collapsed_rows[0] + 1))
+    assert_true(lc._expand_commit_diff(lc._collapsed_rows[0]))
+    lc.info.reset()
+    lc._collapsed_rows = List[Int]()
+    lc._collapsed_paths = List[String]()
+    lc._populate_commit_info(show, String(""), registry)
+    assert_equal(len(lc._collapsed_rows), 0)
+    assert_true(len(lc.info.lines) > 5000)
+
+
 def main() raises:
     setup_test_env()
     TestSuite.discover_tests[__functions_in_module()]().run()

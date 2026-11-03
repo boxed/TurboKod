@@ -268,6 +268,15 @@ comptime _LC_INPUT_QUIET_MS:   Int = 250
 # a held arrow key crawled. The real window is derived from the
 # observed cadence instead — see ``_ensure_frame_settle_ms``.
 comptime _SETTLE_MS:      Int = 70
+# How much of a commit's diff the info panel lays out up front. Every row
+# costs a tokenize plus its share of the native host's JSON (~25 us), so a
+# vendoring commit — thousands of files, hundreds of thousands of lines —
+# froze the view for a quarter of a minute on one click. A file whose diff
+# is longer than the per-file cap, or that comes after the budget ran out,
+# gets its banner and a one-row placeholder instead; activating that row
+# lays the file out in full (``_expand_commit_diff``).
+comptime _COMMIT_FILE_DIFF_CAP: Int = 1500
+comptime _COMMIT_DIFF_BUDGET:   Int = 12000
 # A move landing within this of the previous one counts as part of a
 # burst (held arrow key, wheel spin) rather than a deliberate step.
 # Covers every OS repeat rate fast enough to feel like scrolling;
@@ -1563,6 +1572,20 @@ struct LocalChanges(Movable):
     var _pending_cursor_path: String
     var _pending_cursor_line: Int
     var _pending_cursor_pane: Int
+    # The commit info panel's placeholder rows for diffs left out (see
+    # ``_COMMIT_DIFF_BUDGET``): row index -> path, parallel lists.
+    var _collapsed_rows: List[Int]
+    var _collapsed_paths: List[String]
+    # Paths the user asked to see in full, for the commit ``_expanded_sha``
+    # (a different commit starts over), and its ``git show`` output so
+    # the rebuild an expansion triggers doesn't re-run git.
+    var _expanded_paths: List[String]
+    var _expanded_sha: String
+    var _show_text: String
+    # Set by ``_expand_commit_diff``: the rebuild keeps the info panel's
+    # scroll and cursor, since everything above the expanded file lays
+    # out exactly as before.
+    var _keep_info_view: Bool
     # Splitter overrides. ``-1`` means "use the auto-computed default";
     # any positive value is the user's dragged setpoint and gets
     # clamped to the available space on each frame so resizing the
@@ -1776,6 +1799,12 @@ struct LocalChanges(Movable):
         self._pending_cursor_path = String("")
         self._pending_cursor_line = 0
         self._pending_cursor_pane = _PANE_RIGHT_UNSTAGED
+        self._collapsed_rows = List[Int]()
+        self._collapsed_paths = List[String]()
+        self._expanded_paths = List[String]()
+        self._expanded_sha = String("")
+        self._show_text = String("")
+        self._keep_info_view = False
         self.sidebar_width_user = -1
         self.files_height_user = -1
         self.branches_height_user = -1
@@ -2352,9 +2381,16 @@ struct LocalChanges(Movable):
                     < self._settle_window_ms():
             return
         self._right_key = key
+        var keep_view = self._keep_info_view
+        self._keep_info_view = False
+        var info_scroll = self.info.scroll
+        var info_scroll_x = self.info.scroll_x
+        var info_cursor = self.info.cursor
         self.unstaged.reset()
         self.staged.reset()
         self.info.reset()
+        self._collapsed_rows = List[Int]()
+        self._collapsed_paths = List[String]()
         var driving = self._driving_pane()
         if driving == _PANE_FILES:
             if 0 <= self.sel_file and self.sel_file < len(self.files):
@@ -2373,13 +2409,41 @@ struct LocalChanges(Movable):
         # commits
         if 0 <= self.sel_commit and self.sel_commit < len(self.commits):
             var co = self.commits[self.sel_commit]
-            var show_text = fetch_commit_show(self.root, co.short_sha)
+            if not keep_view or co.short_sha != self._expanded_sha:
+                self._expanded_paths = List[String]()
+                self._expanded_sha = co.short_sha
+                self._show_text = fetch_commit_show(self.root, co.short_sha)
             # Only a merge has commits hiding behind it; for everything
             # else this stays empty and the section isn't painted.
             var merged = String("")
             if co.is_merge():
                 merged = fetch_merged_commits(self.root, co.short_sha)
+            var show_text = self._show_text
             self._populate_commit_info(show_text, merged, registry)
+            if keep_view:
+                var last = len(self.info.lines) - 1
+                self.info.scroll = max(0, min(info_scroll, last))
+                self.info.scroll_x = info_scroll_x
+                self.info.cursor = max(0, min(info_cursor, last))
+
+    def _collapsed_path_at(self, li: Int) -> String:
+        """The path whose diff placeholder is info row ``li``, or ``""``."""
+        for i in range(len(self._collapsed_rows)):
+            if self._collapsed_rows[i] == li:
+                return self._collapsed_paths[i]
+        return String("")
+
+    def _expand_commit_diff(mut self, li: Int) -> Bool:
+        """Lay out in full the diff whose placeholder is info row ``li``.
+        False when ``li`` isn't a placeholder. The panel rebuilds on the
+        next ``_ensure_right_panels``, keeping its scroll and cursor."""
+        var path = self._collapsed_path_at(li)
+        if len(path.as_bytes()) == 0:
+            return False
+        self._expanded_paths.append(path^)
+        self._keep_info_view = True
+        self._right_key = String("")
+        return True
 
     def _populate_commit_info(
         mut self, show_text: String, merged_log: String,
@@ -2408,7 +2472,9 @@ struct LocalChanges(Movable):
         # Walk per-file diff chunks and feed each one to the same
         # transform the unstaged/staged panels use.
         var changed = parse_unified_diff_files(diff_part)
-        var summary_rows = self._emit_commit_file_summary(changed)
+        var diff_rows = List[Int]()
+        var summary_rows = self._emit_commit_file_summary(changed, diff_rows)
+        var budget = _COMMIT_DIFF_BUDGET
         var banner_w = 200
         # Highlight from the diff's own lines, not the full blobs: a
         # single click in the log can land on a commit that touched
@@ -2420,21 +2486,52 @@ struct LocalChanges(Movable):
             # can scroll there.
             if summary_rows[k] >= 0:
                 self.info.file_line[summary_rows[k]] = len(self.info.lines)
+            var expanded = False
+            for e in range(len(self._expanded_paths)):
+                if self._expanded_paths[e] == changed[k].path:
+                    expanded = True
+                    break
+            if not expanded:
+                if diff_rows[k] > _COMMIT_FILE_DIFF_CAP \
+                        or diff_rows[k] > budget:
+                    self._emit_collapsed_diff(changed[k].path, banner_w)
+                    continue
+                budget -= diff_rows[k]
             _populate_diff_panel(
                 self.info, changed[k].diff, changed[k].path,
                 String(""), String(""), banner_w, registry,
                 sides_from_diff=True,
             )
 
+    def _emit_collapsed_diff(mut self, path: String, banner_width: Int):
+        """A diff left out of the layout: its banner, so the summary row
+        still has somewhere to scroll to, and one row saying how to get
+        it. The banner opens the file like a laid-out diff's does."""
+        var banner_idx = len(self.info.lines)
+        _emit_filename_banner(self.info, path, banner_width)
+        self.info.file_path[banner_idx] = path
+        self.info.file_line[banner_idx] = 1
+        _emit_blank(self.info)
+        self._collapsed_rows.append(len(self.info.lines))
+        self._collapsed_paths.append(path)
+        _emit_body_row(
+            self.info,
+            String("  Large diff not shown. Double-click or Enter to show it."),
+            _LINE_INFO, -1, String(""), 0,
+        )
+        _emit_blank(self.info)
+        _emit_blank(self.info)
+
     def _emit_commit_file_summary(
-        mut self, changed: List[ChangedFile],
+        mut self, changed: List[ChangedFile], mut diff_rows: List[Int],
     ) -> List[Int]:
         """Emit a per-file overview (status letter, path, +added/-removed)
         ahead of a commit's diffs. Returns each file's summary row index;
         the caller fills in ``file_line`` with the row where that file's
         diff starts, and a click scrolls the panel there. These are the
         only ``_LINE_INFO`` rows with a path, which is how the click
-        handler spots them."""
+        handler spots them. ``diff_rows`` gets each file's diff length in
+        lines, which is what laying it out costs."""
         var out = List[Int]()
         if len(changed) == 0:
             return out^
@@ -2453,6 +2550,7 @@ struct LocalChanges(Movable):
             var removed = 0
             var seen_hunk = False
             var lines = split_lines_no_trailing(changed[k].diff)
+            diff_rows.append(len(lines))
             for li in range(len(lines)):
                 var b = lines[li].as_bytes()
                 if len(b) == 0:
@@ -4249,6 +4347,10 @@ struct LocalChanges(Movable):
             if self.focus == _PANE_RIGHT_UNSTAGED and k == UInt32(0x64):
                 # 'd' → discard the worktree change on the cursor's line.
                 self._open_discard_line_confirm()
+                return True
+            if self.focus == _PANE_RIGHT_INFO and k == KEY_ENTER:
+                if self._expand_commit_diff(self.info.cursor):
+                    self._ensure_right_panels(registry, container_bounds)
                 return True
             if k == KEY_UP:
                 self._move_focused_right_cursor(-1, bounds)
@@ -6250,7 +6352,8 @@ struct LocalChanges(Movable):
         elif pane == _PANE_RIGHT_STAGED:
             self._submit_jump_target(self.staged.jump_target(row))
         elif pane == _PANE_RIGHT_INFO:
-            self._submit_jump_target(self.info.jump_target(row))
+            if not self._expand_commit_diff(row):
+                self._submit_jump_target(self.info.jump_target(row))
 
     def native_answer(mut self, choice: String, var text: String):
         """Answer the open overlay. ``choice`` is ``cancel`` or ``ok``
@@ -6569,6 +6672,9 @@ struct LocalChanges(Movable):
                             self.info.cursor = target
                             return True
                         if Int(event.click_count) >= 2:
+                            if self._expand_commit_diff(li):
+                                self._ensure_right_panels(registry, bounds)
+                                return True
                             self._submit_jump_target(self.info.jump_target(li))
                     return True
                 var rp = self._right_panes(bounds)
