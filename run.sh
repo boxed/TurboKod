@@ -55,8 +55,8 @@ prog_args=("${args[@]:1}")
 # get their own ``_g`` cache slot so a debug build doesn't evict the
 # fast one (and vice versa).
 mkdir -p .build
-hash="$(printf '%s' "$src" | shasum -a 256 | cut -c1-8)"
-bin=".build/$(basename -- "$src" .mojo)_${hash}"
+. scripts/lib.sh
+bin="$(entry_bin "$src")"
 debug_flags=()
 if [ -n "${TURBOKOD_DEBUG_INFO:-}" ]; then
   bin="${bin}_g"
@@ -92,7 +92,6 @@ trap restore_term EXIT INT TERM
 #     symbols (used by the TextMate-grammar highlighter via FFI).
 #   * ``DYLD/LD_LIBRARY_PATH=env/lib`` at exec time so the resulting
 #     dylib reference resolves when the binary actually runs.
-. scripts/lib.sh
 env_prefix="$(resolve_env_prefix)"
 
 # Native shim: the Rust staticlib in ``app/turbokod-shim`` (see

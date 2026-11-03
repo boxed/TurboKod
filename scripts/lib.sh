@@ -56,6 +56,15 @@ ensure_shim() {
   fi
 }
 
+# The cached binary ``run.sh`` builds for entry point ``$1`` (an absolute
+# path): basename + short hash of the path, so two files with the same
+# basename in different dirs don't clobber each other's binary.
+entry_bin() {
+  local hash
+  hash="$(printf '%s' "$1" | shasum -a 256 | cut -c1-8)"
+  printf '.build/%s_%s\n' "$(basename -- "$1" .mojo)" "$hash"
+}
+
 # Build one Mojo entry point with ``run.sh``, logging to ``$2/<name>$3``;
 # on failure print the log tail and return non-zero. Used by the parallel
 # builders in check_all.sh and run_tests.sh.
@@ -64,9 +73,12 @@ build_entry_logged() {
   local log
   log="$logdir/$(basename "$f" .mojo)$suffix"
   mkdir -p "$logdir"
+  local start=$SECONDS
   if ! TURBOKOD_BUILD_ONLY=1 ./run.sh "$f" > "$log" 2>&1; then
     echo "BUILD FAILED: $f" >&2
     tail -30 "$log" >&2
     return 1
   fi
+  # Wall seconds, for spotting the entry points that dominate a build.
+  echo "$(( SECONDS - start ))" > "$log.secs"
 }

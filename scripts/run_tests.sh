@@ -10,10 +10,12 @@
 # Two phases, deliberately:
 #   1. BUILD all suites concurrently. Separate ``mojo build`` invocations with
 #      separate outputs, so they only contend for CPU.
-#   2. RUN them one at a time, which keeps the output readable. Concurrent
-#      runs are safe (each process gets its own scratch $HOME and temp dirs —
-#      see ``setup_test_env`` in support.mojo), but running is fast; only the
-#      build needed parallelising.
+#   2. RUN the binaries phase 1 built — directly, not through ``run.sh``,
+#      which would rebuild (one suite at a time) any suite whose sources
+#      changed since, and run code the warning gate never saw. Concurrently
+#      too: each process gets its own scratch $HOME and temp dirs (see
+#      ``setup_test_env`` in support.mojo). Each suite's output goes to its
+#      own log and the summary prints in suite order, so it stays readable.
 #
 # Usage:
 #   scripts/run_tests.sh              # all suites
@@ -30,6 +32,8 @@ cd "$(dirname "$0")/.."
 # Build concurrency. Mojo is itself multi-threaded, so oversubscribing hurts;
 # a quarter of the cores per job is about right.
 JOBS="${JOBS:-4}"
+# Run concurrency. Suites are mostly single-threaded and seconds long.
+RUN_JOBS="${RUN_JOBS:-4}"
 
 # Internal: build a single suite. Re-invoking ourselves is what keeps the
 # xargs command line short — an inline ``sh -c`` body long enough to do the
@@ -39,6 +43,14 @@ JOBS="${JOBS:-4}"
 if [ "${1:-}" = "--build-one" ]; then
   build_entry_logged "$2" .build/test-logs .build.log
   exit $?
+fi
+# Internal: run one built suite, its output to ``<name>.run.log`` and its
+# exit status to ``<name>.rc``.
+if [ "${1:-}" = "--run-one" ]; then
+  name=$(basename "$2" .mojo)
+  "$(entry_bin "$PWD/$2")" > ".build/test-logs/$name.run.log" 2>&1
+  echo $? > ".build/test-logs/$name.rc"
+  exit 0
 fi
 
 suites=()
@@ -82,12 +94,32 @@ if grep -l "warning:" "$log_dir"/*.build.log 2>/dev/null | grep -q .; then
   exit 1
 fi
 
+# The slowest builds, for knowing where build time goes.
+echo "==> slowest builds:"
+for f in "${suites[@]}"; do
+  name=$(basename "$f" .mojo)
+  printf '%s %s\n' "$(cat "$log_dir/$name.build.log.secs" 2>/dev/null || echo 0)" "$name"
+done | sort -rn | head -5 | while read -r secs name; do
+  printf '      %-22s %ss\n' "$name" "$secs"
+done
+
+# The suites link libonig from the pixi env, as ``run.sh`` arranges.
+env_prefix="$(resolve_env_prefix)"
+export DYLD_LIBRARY_PATH="${env_prefix}/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="${env_prefix}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+run_start=$(date +%s)
+for f in "${suites[@]}"; do
+  rm -f "$log_dir/$(basename "$f" .mojo).rc"
+done
+printf '%s\n' "${suites[@]}" | xargs -P "$RUN_JOBS" -n1 "$self" --run-one
+echo "==> ran in $(( $(date +%s) - run_start ))s"
+
 failed=()
 total=0
 for f in "${suites[@]}"; do
   name=$(basename "$f" .mojo)
-  out=$(./run.sh "$f" 2>&1)
-  rc=$?
+  out=$(cat "$log_dir/$name.run.log" 2>/dev/null)
+  rc=$(cat "$log_dir/$name.rc" 2>/dev/null || echo 1)
   # Suites run under std.testing.TestSuite, which ends with a line like
   # ``Summary [ 25355.780 ] 144 tests run: 144 passed , 0 failed , 0 skipped``.
   summary=$(printf '%s\n' "$out" | grep '^Summary' | tail -1)
