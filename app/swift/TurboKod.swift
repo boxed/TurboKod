@@ -578,6 +578,15 @@ final class CellView: NSView {
     private var smoothActive = false
     private var springTarget: CGFloat = 0
     private var springTimer: Timer?
+    // The vsync-driven stepper (a `CADisplayLink`, macOS 14+) and the
+    // previous frame's target time; `springTimer` is the older-OS fallback.
+    private var springLink: AnyObject?
+    // Rendered glyphs by (codepoint, font slot, wide, fg); see `drawCells`.
+    // Dropped when the font or the screen's scale changes.
+    private var glyphCache: [UInt64: CachedGlyph] = [:]
+    private var glyphCacheGen = -1
+    private var glyphCacheScale: CGFloat = 0
+    private var springLastTime: CFTimeInterval = 0
     // Per-run easing factor for the spring timer (fraction of the remaining
     // distance closed each 120 Hz tick). The post-gesture rubber-band release
     // wants a brisker snap than the mouse-wheel glide.
@@ -1194,25 +1203,45 @@ final class CellView: NSView {
     /// by the next cell's background fill. Shared by the full-frame draw
     /// (origin 0,0) and the smooth-scroll region composite (origin offset by
     /// the sub-line pixel fraction).
+    ///
+    /// Glyphs come out of `glyphCache`: typesetting one character per call
+    /// through `NSString.draw` cost 2-3 µs a cell, so a full redraw of a big
+    /// window took tens of ms and a smooth scroll ran at 15-50 fps. Each
+    /// distinct glyph is drawn once (by `drawGlyph`, the same code as
+    /// before) and blitted from then on.
     private func drawCells(_ ctx: CGContext,
                            _ p: UnsafeMutablePointer<UInt32>,
                            _ n: Int, _ c: Int,
                            originX: CGFloat, originY: CGFloat) {
-        for i in 0..<n {
-            let (_, bg, _) = cellColors(p, i)
-            if bg != palette[0] {
-                let col = i % c, row = i / c
-                let x = originX + CGFloat(col) * CELL_W
-                let y = originY + CGFloat(row) * CELL_H
+        // Backgrounds, one fill per run of equal color along a row.
+        let base = palette[0]
+        var i = 0
+        while i < n {
+            let bg = cellColors(p, i).bg
+            let rowEnd = (i / c + 1) * c
+            var j = i + 1
+            while j < min(n, rowEnd) && cellColors(p, j).bg == bg { j += 1 }
+            if bg != base {
                 ctx.setFillColor(cgcolor(bg))
-                ctx.fill(CGRect(x: x, y: y, width: CELL_W, height: CELL_H))
+                ctx.fill(CGRect(x: originX + CGFloat(i % c) * CELL_W,
+                                y: originY + CGFloat(i / c) * CELL_H,
+                                width: CGFloat(j - i) * CELL_W, height: CELL_H))
             }
+            i = j
         }
-        let attrs: [NSAttributedString.Key: Any] = [.font: cellFont]
-        // A slot face drawn unlike the cell font (smoothed or not) flips the
-        // context's antialiasing around its glyph.
         let scale = window?.backingScaleFactor ?? 1
         let aa = !cellFontRendersCrisp(backingScale: scale)
+        if glyphCacheGen != fontGeneration || glyphCacheScale != scale
+            || glyphCache.count > 16384 {
+            glyphCache.removeAll(keepingCapacity: true)
+            glyphCacheGen = fontGeneration
+            glyphCacheScale = scale
+        }
+        // Blit in an unflipped space (y' = -y), where a CGImage draws upright.
+        ctx.saveGState()
+        ctx.scaleBy(x: 1, y: -1)
+        var crispBlit = false
+        ctx.interpolationQuality = .default
         for i in 0..<n {
             // Word 0 is the codepoint, with the core's cell width (0 / 1 / 2)
             // in the top byte — we never recompute it from the codepoint.
@@ -1220,41 +1249,111 @@ final class CellView: NSView {
             let cp = w0 & 0x1FFFFF
             let wide = (w0 >> 24) == 2
             let (fg, _, style) = cellColors(p, i)
-            let col = i % c, row = i / c
-            let x = originX + CGFloat(col) * CELL_W
-            let y = originY + CGFloat(row) * CELL_H
-            if cp != 0x20 && cp != 0, let scalar = Unicode.Scalar(cp) {
-                let s = String(scalar) as NSString
+            let x = originX + CGFloat(i % c) * CELL_W
+            let y = originY + CGFloat(i / c) * CELL_H
+            if cp != 0x20 && cp != 0 {
                 let slot = Int((w0 >> 21) & 0x7)
-                if wide {
-                    drawWide(s, fg: fg, cellX: x, cellY: y, cellW: CELL_W * 2)
-                } else if slot < slotFaces.count, let face = slotFaces[slot] {
-                    if face.hasGlyph(cp) {
-                        let crisp = face.crisp(backingScale: scale)
-                        if crisp == aa { setAntialias(ctx, !crisp) }
-                        face.draw(ctx, s, cp, color: nscolor(fg), cellX: x, cellY: y)
-                        if crisp == aa { setAntialias(ctx, aa) }
-                    } else {
-                        drawFallbackGlyph(ctx, s, fg: fg, cellX: x, cellY: y)
-                    }
-                } else if cellFontHasGlyph(cp) {
-                    var a = attrs
-                    a[.foregroundColor] = nscolor(fg)
-                    if cellFontIsProportional {
-                        drawFitted(ctx, s, cp, a, cellX: x, cellY: y)
-                    } else {
-                        s.draw(at: NSPoint(x: x, y: y), withAttributes: a)
-                    }
+                let key = UInt64(cp) | UInt64(slot) << 21 | (wide ? 1 << 24 : 0) | UInt64(fg) << 32
+                let g: CachedGlyph
+                if let hit = glyphCache[key] {
+                    g = hit
                 } else {
-                    drawFallbackGlyph(ctx, s, fg: fg, cellX: x, cellY: y)
+                    g = renderGlyph(cp, slot: slot, wide: wide, fg: fg, scale: scale, aa: aa)
+                    glyphCache[key] = g
+                }
+                if let img = g.image {
+                    // A crisp (bitmap) face snaps to whole pixels, as its
+                    // unsmoothed text drawing did, even mid smooth-scroll.
+                    if g.crisp != crispBlit {
+                        crispBlit = g.crisp
+                        ctx.interpolationQuality = crispBlit ? .none : .default
+                    }
+                    ctx.draw(img, in: CGRect(x: x - g.pad.width, y: -(y - g.pad.height + g.size.height),
+                                             width: g.size.width, height: g.size.height))
                 }
             }
             if style & STYLE_UNDERLINE != 0 {
                 let uw = p[i * CELL_WORDS + 2]
                 let uc = uw == 0xFFFFFFFF ? fg : palette[Int(uw & 0xFF)]
                 ctx.setFillColor(cgcolor(uc))
-                ctx.fill(CGRect(x: x, y: y + CELL_H - 2, width: CELL_W, height: 1))
+                ctx.fill(CGRect(x: x, y: -(y + CELL_H - 1), width: CELL_W, height: 1))
             }
+        }
+        ctx.restoreGState()
+    }
+
+    /// One rendered glyph: its image (nil when it draws nothing), the image's
+    /// size in points, the margin around the cell it carries (room for a
+    /// glyph's overhang), and whether it's a crisp bitmap rendering.
+    private struct CachedGlyph {
+        var image: CGImage?
+        var size: CGSize
+        var pad: CGSize
+        var crisp: Bool
+    }
+
+    /// Draw one glyph into a transparent image at the screen's scale, through
+    /// the same `drawGlyph` path as an uncached draw, in a flipped context
+    /// like the view's.
+    private func renderGlyph(_ cp: UInt32, slot: Int, wide: Bool, fg: UInt32,
+                             scale: CGFloat, aa: Bool) -> CachedGlyph {
+        // Margins in whole pixels, so a pixel-aligned cell stays aligned.
+        let padX = ceil(CELL_W * scale / 2) / scale
+        let padY = ceil(CELL_H * scale / 4) / scale
+        let wPx = Int(ceil(((wide ? 2 : 1) * CELL_W + 2 * padX) * scale))
+        let hPx = Int(ceil((CELL_H + 2 * padY) * scale))
+        let size = CGSize(width: CGFloat(wPx) / scale, height: CGFloat(hPx) / scale)
+        let pad = CGSize(width: padX, height: padY)
+        var crisp = !aa
+        if slot < slotFaces.count, let face = slotFaces[slot], face.hasGlyph(cp) {
+            crisp = face.crisp(backingScale: scale)
+        }
+        guard let bctx = CGContext(
+            data: nil, width: wPx, height: hPx, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                | CGBitmapInfo.byteOrder32Little.rawValue)
+        else { return CachedGlyph(image: nil, size: size, pad: pad, crisp: crisp) }
+        bctx.scaleBy(x: scale, y: scale)
+        bctx.translateBy(x: 0, y: size.height)
+        bctx.scaleBy(x: 1, y: -1)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: bctx, flipped: true)
+        setAntialias(bctx, aa)
+        drawGlyph(bctx, cp, slot: slot, wide: wide, fg: fg, x: padX, y: padY,
+                  scale: scale, aa: aa)
+        NSGraphicsContext.restoreGraphicsState()
+        return CachedGlyph(image: bctx.makeImage(), size: size, pad: pad, crisp: crisp)
+    }
+
+    /// Draw one glyph with its cell's top-left at (`x`, `y`).
+    private func drawGlyph(_ ctx: CGContext, _ cp: UInt32, slot: Int, wide: Bool,
+                           fg: UInt32, x: CGFloat, y: CGFloat,
+                           scale: CGFloat, aa: Bool) {
+        guard let scalar = Unicode.Scalar(cp) else { return }
+        let s = String(scalar) as NSString
+        if wide {
+            drawWide(s, fg: fg, cellX: x, cellY: y, cellW: CELL_W * 2)
+        } else if slot < slotFaces.count, let face = slotFaces[slot] {
+            if face.hasGlyph(cp) {
+                // A slot face drawn unlike the cell font (smoothed or not)
+                // flips the context's antialiasing around its glyph.
+                let crisp = face.crisp(backingScale: scale)
+                if crisp == aa { setAntialias(ctx, !crisp) }
+                face.draw(ctx, s, cp, color: nscolor(fg), cellX: x, cellY: y)
+                if crisp == aa { setAntialias(ctx, aa) }
+            } else {
+                drawFallbackGlyph(ctx, s, fg: fg, cellX: x, cellY: y)
+            }
+        } else if cellFontHasGlyph(cp) {
+            let a: [NSAttributedString.Key: Any] = [.font: cellFont, .foregroundColor: nscolor(fg)]
+            if cellFontIsProportional {
+                drawFitted(ctx, s, cp, a, cellX: x, cellY: y)
+            } else {
+                s.draw(at: NSPoint(x: x, y: y), withAttributes: a)
+            }
+        } else {
+            drawFallbackGlyph(ctx, s, fg: fg, cellX: x, cellY: y)
         }
     }
 
@@ -1418,33 +1517,64 @@ final class CellView: NSView {
         needsDisplay = true
     }
 
+    private var springRunning: Bool { springTimer != nil || springLink != nil }
+
     private func cancelSpring() {
         springTimer?.invalidate(); springTimer = nil
+        if #available(macOS 14.0, *) { (springLink as? CADisplayLink)?.invalidate() }
+        springLink = nil
     }
 
     /// Ease `smoothLines` toward `target` over a few frames (exponential),
     /// applying each step to the core. Drives both the post-gesture
     /// rubber-band release and discrete mouse-wheel notches (which retarget
     /// mid-flight — calling this again just updates `springTarget`, the
-    /// running timer keeps converging). Runs in `.common` mode so it keeps
+    /// running animation keeps converging). Stepped by the display's vsync
+    /// (macOS 14+): a free-running 120 Hz timer beats against the refresh
+    /// rate, so frames land on one step, then two, then none — a judder
+    /// that reads as "not smooth". Runs in `.common` mode so it keeps
     /// ticking during tracking.
     private func easeTo(_ target: CGFloat, speed: CGFloat = 0.30) {
         springTarget = target
         springSpeed = speed
-        if springTimer != nil { return }
+        if springRunning { return }
+        if #available(macOS 14.0, *) {
+            let link = displayLink(target: self, selector: #selector(springFrame(_:)))
+            link.add(to: .main, forMode: .common)
+            springLink = link
+            springLastTime = 0
+            return
+        }
         let t = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] tm in
             guard let self = self else { tm.invalidate(); return }
-            self.smoothLines += (self.springTarget - self.smoothLines) * self.springSpeed
-            if abs(self.smoothLines - self.springTarget) < 0.01 {
-                self.smoothLines = self.springTarget
-                self.applySmooth()
-                tm.invalidate(); self.springTimer = nil
-            } else {
-                self.applySmooth()
-            }
+            self.springStep(1.0 / 120.0)
         }
         RunLoop.main.add(t, forMode: .common)
         springTimer = t
+    }
+
+    @available(macOS 14.0, *)
+    @objc private func springFrame(_ link: CADisplayLink) {
+        // Step to where the view should be when this frame hits the screen.
+        let now = link.targetTimestamp
+        let dt = springLastTime == 0 ? link.duration : now - springLastTime
+        springLastTime = now
+        springStep(min(max(dt, 0), 0.1))
+    }
+
+    /// Advance the ease by `dt` seconds. `springSpeed` is tuned as the
+    /// fraction of the remaining distance closed per 1/120 s, so the feel is
+    /// the same at any refresh rate.
+    private func springStep(_ dt: CFTimeInterval) {
+        let a = 1 - pow(1 - springSpeed, CGFloat(dt * 120))
+        smoothLines += (springTarget - smoothLines) * a
+        if abs(smoothLines - springTarget) < 0.01 {
+            smoothLines = springTarget
+            applySmooth()
+            cancelSpring()
+        } else {
+            applySmooth()
+        }
     }
 
     /// Draw a wide (two-cell) glyph — an emoji or a CJK character — shrunk to
@@ -1803,7 +1933,7 @@ final class CellView: NSView {
         if e.scrollingDeltaY == 0 { return }
         // Seed from the core when starting fresh (no precise gesture or ease
         // already in flight), so the target tracks the real current position.
-        if springTimer == nil && !smoothActive {
+        if !springRunning && !smoothActive {
             seedSmooth(r)
             springTarget = smoothLines
         }
@@ -2131,6 +2261,8 @@ final class CellView: NSView {
         // (a flash of light gray) for a frame.
         if surface == .dialog || surface == .settings, let mv = mainPeer {
             AppController.shared?.syncDialogWindows(mv)
+        } else if surface == .git, let mv = mainPeer, mv.handle != 0 {
+            _ = AppController.shared?.pollGit(mv)
         }
     }
 
@@ -7061,6 +7193,8 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
             flashLabel.stringValue = "Wait for the running git operation to finish."
         }
         onAfterAction?()
+        // Hide the window now, before it draws the core's closed (empty) view.
+        _ = AppController.shared?.pollGit(v)
     }
 
     // MARK: diff
@@ -11975,6 +12109,8 @@ final class TVGitWindow: NSObject, GitSurface {
         guard let v = mainView, v.handle != 0 else { return }
         if tk_desktop_git_close(v.handle) == 0 { NSSound.beep() }
         onAfterAction?()
+        // Hide the window now, before it draws the core's closed (blank) view.
+        _ = AppController.shared?.pollGit(v)
     }
 }
 
@@ -13436,6 +13572,8 @@ final class PlatinumGitView: NSObject, GitSurface {
             body.needsDisplay = true
         }
         onAfterAction?()
+        // Hide the window now, before it draws the core's closed (empty) view.
+        _ = AppController.shared?.pollGit(v)
     }
 
     private func listKey(_ pane: Int, _ e: NSEvent) -> Bool {
