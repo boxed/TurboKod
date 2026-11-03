@@ -25,7 +25,7 @@ from turbokod.diff import (
 from turbokod.editor import Editor, TextBuffer
 from turbokod.view_state_store import StoredViewState
 from turbokod.desktop import Desktop
-from turbokod.file_io import join_path, read_file, write_file
+from turbokod.file_io import delete_path, join_path, read_file, write_file
 from turbokod.git_blame import (
     BlameLine, format_commit_time, parse_blame_porcelain, tz_offset_seconds,
 )
@@ -3235,6 +3235,20 @@ def test_branch_is_merged_sees_through_rebase_and_squash() raises:
     assert_true(branch_is_merged(dir, String("squashed-x")))
     # A branch that really isn't in main stays False — the tiers must not
     # be so eager that the confirmation never fires.
+    assert_false(branch_is_merged(dir, String("unmerged-x")))
+    _rm_rf(dir)
+
+
+def test_branch_is_merged_says_no_when_git_cant_diff_the_branch() raises:
+    # a failed diff of the branch read as an empty one, "nothing to lose",
+    # and the branch was deleted without asking
+    var dir = _init_repo_with_branches()
+    if len(dir.as_bytes()) == 0:
+        return
+    var tree = _git_out(dir, string_list(String("rev-parse"), String("unmerged-x^{tree}")))
+    var obj = dir + String("/.git/objects/") + String(tree[byte=0:2]) + String("/") \
+        + String(tree[byte=2:tree.byte_length()])
+    assert_true(delete_path(obj), obj)
     assert_false(branch_is_merged(dir, String("unmerged-x")))
     _rm_rf(dir)
 

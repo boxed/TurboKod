@@ -1726,8 +1726,14 @@ def _change_already_landed(
     name_args.append(String("-z"))  # paths as they are, not quoted
     name_args.append(base)
     name_args.append(branch)
+    # A failed diff isn't an empty one: taken as "", it read as nothing to
+    # lose, and the branch went without asking (a tree git couldn't read,
+    # as in a partial clone offline).
+    var names = _git_capture(project_root, name_args^)
+    if not names:
+        return False
     var files = List[String]()
-    for f in _git_stdout(project_root, name_args^).split("\0"):
+    for f in names.value().split("\0"):
         if f.byte_length() > 0:
             files.append(String(f))
     if len(files) == 0:
