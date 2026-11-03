@@ -614,9 +614,14 @@ def _git_argv(project_root: String, var args: List[String]) -> List[String]:
     that route through here (``add`` / ``reset`` / ``apply`` / ``stash``)
     still take the locks they actually need. It's the same mechanism as
     ``GIT_OPTIONAL_LOCKS=0`` and exists precisely for editors and shell
-    prompts that poll a repo they don't own."""
+    prompts that poll a repo they don't own.
+
+    ``--literal-pathspecs``: the paths passed are file names, never
+    patterns. Read as pathspecs, discarding ``a[1].txt`` also reverted
+    ``a1.txt``, and deleting the untracked ``u?`` deleted ``ux`` too."""
     var argv = List[String]()
     argv.append(String("git"))
+    argv.append(String("--literal-pathspecs"))
     argv.append(String("--no-optional-locks"))
     argv.append(String("-C"))
     argv.append(project_root)

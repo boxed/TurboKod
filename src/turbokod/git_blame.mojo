@@ -273,6 +273,7 @@ def compute_blame(file_path: String) raises -> List[BlameLine]:
     var root = maybe_root.value()
     var argv = List[String]()
     argv.append(String("git"))
+    argv.append(String("--literal-pathspecs"))  # a file name, not a pattern
     # Read-only query: never take ``.git/index.lock`` to refresh the index
     # behind another git process's back (see ``_git_argv`` in
     # ``git_changes.mojo`` for why).

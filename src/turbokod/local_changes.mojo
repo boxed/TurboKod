@@ -4876,9 +4876,11 @@ struct LocalChanges(Movable):
         return self._git_op != _GITOP_NONE or self.git_runner.is_active()
 
     def _git_base_argv(self) -> List[String]:
-        """``git -C <root>`` — the prefix of every async git op."""
+        """``git -C <root>`` — the prefix of every async git op. Paths are
+        file names, not patterns (see ``_git_argv``)."""
         var argv = List[String]()
         argv.append(String("git"))
+        argv.append(String("--literal-pathspecs"))
         argv.append(String("-C"))
         argv.append(self.root)
         return argv^

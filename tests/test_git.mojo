@@ -25,7 +25,7 @@ from turbokod.diff import (
 from turbokod.editor import Editor, TextBuffer
 from turbokod.view_state_store import StoredViewState
 from turbokod.desktop import Desktop
-from turbokod.file_io import delete_path, join_path, read_file, write_file
+from turbokod.file_io import delete_path, join_path, read_file, stat_file, write_file
 from turbokod.git_blame import (
     BlameLine, format_commit_time, parse_blame_porcelain, tz_offset_seconds,
 )
@@ -3062,6 +3062,49 @@ def test_local_changes_reword_older_commit_keeps_its_children() raises:
     for i in range(3):
         var f = join_path(dir, String("f") + String(i) + String(".txt"))
         assert_true(len(read_file(f).as_bytes()) > 0)
+    _rm_rf(dir)
+
+
+def _select_file(mut lc: LocalChanges, path: String) raises:
+    for i in range(len(lc.files)):
+        if lc.files[i].path == path:
+            lc.sel_file = i
+            return
+    raise Error(String("not listed: ") + path)
+
+
+def test_file_names_are_names_not_patterns() raises:
+    # git read them as pathspecs: discarding a[1].txt also reverted
+    # a1.txt, staging b* staged bx, deleting the untracked u? deleted ux
+    var dir = _reword_repo(String("_literal_paths"))
+    if len(dir.as_bytes()) == 0:
+        return
+    for name in [String("a[1].txt"), String("a1.txt"), String("b*"), String("bx")]:
+        assert_true(write_file(join_path(dir, name), String("old\n")))
+    _ = _run_git(dir, string_list(String("add"), String(".")))
+    _ = _run_git(dir, string_list(String("commit"), String("-q"), String("-m"), String("names")))
+    for name in [String("a[1].txt"), String("a1.txt"), String("b*"), String("bx")]:
+        assert_true(write_file(join_path(dir, name), String("new\n")))
+    for name in [String("u?"), String("ux")]:
+        assert_true(write_file(join_path(dir, name), String("mine\n")))
+    assert_true(stage_file(dir, String("b*")))
+    assert_equal(
+        _git_out(dir, string_list(String("diff"), String("--cached"), String("--name-only"))),
+        String("b*"),
+    )
+    var lc = LocalChanges()
+    lc.open(dir)
+    _select_file(lc, String("a[1].txt"))
+    lc._confirm_revert()
+    _drain_git_op(lc)
+    assert_equal(read_file(join_path(dir, String("a[1].txt"))), String("old\n"))
+    assert_equal(read_file(join_path(dir, String("a1.txt"))), String("new\n"))
+    lc.open(dir)
+    _select_file(lc, String("u?"))
+    lc._confirm_revert()
+    _drain_git_op(lc)
+    assert_false(stat_file(join_path(dir, String("u?"))).ok)
+    assert_equal(read_file(join_path(dir, String("ux"))), String("mine\n"))
     _rm_rf(dir)
 
 
