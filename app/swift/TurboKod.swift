@@ -3886,9 +3886,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             saveSession()
             isTerminating = true
         }
+        // AppKit doesn't ask the windows to close on terminate (no
+        // `windowShouldClose`), so each Desktop's quit work is started
+        // here: auto-save, and the drafts that keep what's still unsaved.
+        // Skipped, the edits since the last save were gone. The handle is
+        // zeroed first, as for a close: no tick may follow.
+        for v in views where v.handle != 0 {
+            let h = v.handle
+            v.handle = 0
+            tk_desktop_begin_close(h)
+        }
         // Free the chrome Desktop so a clean leaks(1) run reports zero
-        // hangers. The real per-window Desktops are freed in
-        // windowShouldClose; this is the one allocation outside that path.
+        // hangers. The per-window Desktops are started on their close above
+        // and go with the process; this is the one freed outright.
         if chromeDesktop != 0 {
             tk_desktop_free(chromeDesktop)
             chromeDesktop = 0
