@@ -2986,6 +2986,9 @@ def test_local_changes_reword_head_amends_the_message() raises:
     var dir = _reword_repo(String("_reword_amend"))
     if len(dir.as_bytes()) == 0:
         return
+    # Staged work stays staged: a plain --amend took it into the commit.
+    assert_true(write_file(join_path(dir, String("staged.txt")), String("s\n")))
+    _ = _run_git(dir, string_list(String("add"), String("staged.txt")))
     var lc = LocalChanges()
     lc.open(dir)
     lc.focus = _PANE_COMMITS
@@ -3007,6 +3010,14 @@ def test_local_changes_reword_head_amends_the_message() raises:
     assert_equal(
         fetch_commit_message(dir, commits[0].short_sha),
         String("amended subject\n\nwith a body"),
+    )
+    assert_equal(
+        _git_out(dir, string_list(String("show"), String("--name-only"), String("--format="), String("HEAD"))),
+        String("f2.txt"),
+    )
+    assert_equal(
+        _git_out(dir, string_list(String("diff"), String("--cached"), String("--name-only"))),
+        String("staged.txt"),
     )
     _rm_rf(dir)
 
@@ -3051,6 +3062,39 @@ def test_local_changes_reword_older_commit_keeps_its_children() raises:
     for i in range(3):
         var f = join_path(dir, String("f") + String(i) + String(".txt"))
         assert_true(len(read_file(f).as_bytes()) > 0)
+    _rm_rf(dir)
+
+
+def test_local_changes_reword_older_commit_keeps_author_and_branch() raises:
+    # the copy was made by commit-tree, so it had the user running it as
+    # author, dated now; and rebasing "HEAD" left HEAD detached, with the
+    # branch still on the old commits
+    var dir = _reword_repo(String("_reword_author"))
+    if len(dir.as_bytes()) == 0:
+        return
+    _ = _run_git(dir, string_list(
+        String("commit"), String("-q"), String("--allow-empty"), String("-m"), String("by orig"),
+        String("--author"), String("Orig <orig@example.com>"),
+        String("--date"), String("2020-01-02T03:04:05+00:00"),
+    ))
+    _ = _run_git(dir, string_list(String("commit"), String("-q"), String("--allow-empty"), String("-m"), String("top")))
+    var lc = LocalChanges()
+    lc.open(dir)
+    lc.focus = _PANE_COMMITS
+    lc.sel_commit = 1                 # "by orig"
+    var screen = Rect(0, 0, 100, 30)
+    var registry = GrammarRegistry()
+    _ = lc.handle_key(_key(UInt32(0x65)), screen, registry)
+    assert_false(lc._reword_is_head)
+    lc.overlay_editor = lc._message_editor_for(String("by orig, reworded"))
+    _ = lc.handle_key(_key(KEY_ENTER, MOD_META), screen, registry)
+    _drain_git_op(lc)
+    assert_equal(current_branch_name(dir), String("main"))
+    assert_equal(
+        _git_out(dir, string_list(String("log"), String("-1"), String("--format=%s|%an <%ae>|%aI"), String("main~1"))),
+        String("by orig, reworded|Orig <orig@example.com>|2020-01-02T03:04:05Z"),
+    )
+    assert_equal(_git_out(dir, string_list(String("log"), String("-1"), String("--format=%s"), String("main"))), String("top"))
     _rm_rf(dir)
 
 

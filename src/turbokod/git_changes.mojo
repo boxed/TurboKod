@@ -24,7 +24,7 @@ from .file_io import find_git_project, join_path, project_relative, stat_file
 from .lsp import capture_command
 from .string_utils import (
     byte_slice, parse_int_all, percent_encode_uri_path, split_lines,
-    split_lines_no_trailing, split_whitespace, starts_with,
+    split_lines_no_trailing, starts_with,
 )
 from .case_fold import find_exact
 
@@ -2005,35 +2005,54 @@ def create_reworded_commit(
     """Build a copy of ``sha`` carrying ``message``, returning its full
     SHA (or ``""`` on failure).
 
-    ``git commit-tree`` writes a new commit object with the *same tree*
-    and the same parents as ``sha`` but a new message. Nothing is moved:
-    the new object is unreferenced until a caller points a branch at it
-    (via ``rebase --onto``), which is what makes this safe to do
-    synchronously — it's a pure object-store write with no worktree,
-    index, or ref side effects, and an abandoned object is collected by
-    ``git gc``.
+    The commit object itself is copied with only the message replaced:
+    the *same tree*, parents, author and dates. (``git commit-tree`` made
+    the user running it the author, dated now.) A signature can't hold
+    for the new message, and an ``encoding`` header would mislabel it,
+    so both are dropped. Nothing is moved: the new object is unreferenced
+    until a caller points a branch at it (via ``rebase --onto``), which
+    is what makes this safe to do synchronously — it's a pure
+    object-store write with no worktree, index, or ref side effects, and
+    an abandoned object is collected by ``git gc``.
 
-    The message goes in through stdin rather than ``-m`` so a message
-    containing anything shell- or flag-like can't be misread.
+    The object goes in through stdin, so a message containing anything
+    shell- or flag-like can't be misread.
     """
     if len(project_root.as_bytes()) == 0 or len(sha.as_bytes()) == 0:
         return String("")
-    # Parents, in order. A root commit has none, and ``rev-parse`` exits
-    # non-zero for its nonexistent ``^1`` — an empty list is correct there.
-    var pargs = List[String]()
-    pargs.append(String("rev-list"))
-    pargs.append(String("--parents"))
-    pargs.append(String("-1"))
-    pargs.append(sha)
-    var fields = split_whitespace(_git_stdout(project_root, pargs^))
+    var cat = List[String]()
+    cat.append(String("cat-file"))
+    cat.append(String("commit"))
+    cat.append(sha)
+    var raw = _git_stdout(project_root, cat^)
+    if len(raw.as_bytes()) == 0:
+        return String("")
+    var header = String("")
+    var dropping = False
+    for line in raw.split("\n"):
+        var l = String(line)
+        if len(l.as_bytes()) == 0:
+            break
+        if l.startswith(" "):
+            # a continuation of the header line before it
+            if not dropping:
+                header += l + String("\n")
+            continue
+        dropping = l.startswith("gpgsig") or l.startswith("encoding ")
+        if not dropping:
+            header += l + String("\n")
+    var body = message
+    if not body.endswith("\n"):
+        body += String("\n")
     var args = List[String]()
-    args.append(String("commit-tree"))
-    args.append(sha + String("^{tree}"))
-    # fields[0] is the commit itself; the rest are its parents.
-    for i in range(1, len(fields)):
-        args.append(String("-p"))
-        args.append(fields[i])
-    return String(_git_stdout(project_root, args^, message).strip())
+    args.append(String("hash-object"))
+    args.append(String("-t"))
+    args.append(String("commit"))
+    args.append(String("-w"))
+    args.append(String("--stdin"))
+    return String(
+        _git_stdout(project_root, args^, header + String("\n") + body).strip()
+    )
 
 
 comptime _SHORT_LOG_PRETTY = "--pretty=format:%h  %ad  %an%n    %s%n"

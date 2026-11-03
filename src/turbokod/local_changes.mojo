@@ -5524,12 +5524,15 @@ struct LocalChanges(Movable):
 
         Two strategies, because only one of them is cheap:
 
-        * **The tip** — ``git commit --amend -m <msg>``. Touches nothing
-          but HEAD's message, and leaves the index and worktree alone.
+        * **The tip** — ``git commit --amend --only -m <msg>``. Touches
+          nothing but HEAD's message, and leaves the index and worktree
+          alone: without ``--only`` the amend took in whatever was staged.
         * **An older commit** — write a copy of it carrying the new
           message (``create_reworded_commit``, a pure object-store write),
-          then ``git rebase --onto <new> <old> HEAD`` to replay its
-          children onto the copy. Those children keep their trees, so the
+          then ``git rebase --onto <new> <old>`` to replay its children
+          onto the copy, on the current branch (naming ``HEAD`` as the
+          branch to rebase left HEAD detached, and the branch where it
+          was). Those children keep their trees, so the
           replay is content-identical and can't raise a conflict; only the
           message differs. ``--autostash`` covers a dirty worktree, which
           rebase would otherwise refuse outright.
@@ -5549,6 +5552,7 @@ struct LocalChanges(Movable):
         if self._reword_is_head:
             argv.append(String("commit"))
             argv.append(String("--amend"))
+            argv.append(String("--only"))
             argv.append(String("-m"))
             argv.append(msg)
         else:
@@ -5566,7 +5570,6 @@ struct LocalChanges(Movable):
             argv.append(String("--onto"))
             argv.append(new_sha)
             argv.append(sha)
-            argv.append(String("HEAD"))
         self._close_overlay()
         self._start_git_op(
             _GITOP_REWORD, String("git reword"), argv^,
