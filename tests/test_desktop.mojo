@@ -490,6 +490,28 @@ def test_desktop_dispatch_editor_save_writes_focused_editor() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
+def test_a_save_that_cant_write_says_so() raises:
+    # only the dirty mark showed it
+    var dir = _temp_path(String("_dsave_gone"))
+    var path = dir + String("/f.txt")
+    make_parent_dirs(path)
+    assert_true(write_file(path, String("hello\n")))
+    var d = Desktop()
+    d.open_file(path, _SCREEN)
+    _ = d.handle_event(Event.key_event(UInt32(ord("x"))), _SCREEN)
+    assert_true(delete_path(path))
+    _ = external_call["rmdir", Int32]((dir + String("\0")).unsafe_ptr())
+    _ = d.dispatch_action(EDITOR_SAVE, _SCREEN)
+    assert_true(d.windows.windows[0].editor.dirty)
+    assert_equal(d.status_bar.message, String("Can't save f.txt"))
+    # nor did Save As
+    d.status_bar.set_message(String(""), default_attr())
+    d.save_as_dialog.open(dir + String("/g.txt"))
+    _ = d.handle_event(Event.key_event(KEY_ENTER), _SCREEN)
+    assert_equal(d.status_bar.message, String("Can't save g.txt"))
+    assert_equal(d.windows.windows[0].editor.file_path, path)
+
+
 def test_window_focus_change_saves_prior_window() raises:
     """Switching focus from window A to window B saves A's dirty
     buffer — the per-window counterpart of ``EVENT_FOCUS_OUT``'s

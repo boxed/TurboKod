@@ -14186,6 +14186,10 @@ struct Desktop(Movable):
             var spath = self.windows.windows[idx].editor.file_path
             for ci in range(len(self.lsp_managers)):
                 self.lsp_managers[ci].notify_did_create_files(spath)
+        else:
+            self.status_bar.set_message(
+                String("Can't save ") + basename(path), Attr(RED, LIGHT_GRAY),
+            )
 
     def _focused_editor_idx(self) -> Int:
         if self.windows.focused < 0 or self.windows.focused >= len(self.windows.windows):
@@ -14594,6 +14598,15 @@ struct Desktop(Movable):
                     String("Not saved: the file changed on disk — ")
                     + String("resolve the merge first"),
                     Attr(LIGHT_RED, LIGHT_GRAY),
+                )
+            elif len(self.windows.windows[idx].editor.file_path.as_bytes()) > 0 \
+                    and not self.windows.windows[idx].editor.merge_pending:
+                # The write failed (a read-only file, a full disk): only the
+                # dirty mark showed it
+                self.status_bar.set_message(
+                    String("Can't save ")
+                        + basename(self.windows.windows[idx].editor.file_path),
+                    Attr(RED, LIGHT_GRAY),
                 )
         except e:
             print(
