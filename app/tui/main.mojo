@@ -249,6 +249,9 @@ def main() raises:
     # Best-effort: recover the user's login-shell PATH so spawned LSP/DAP tools
     # resolve even when launched from a minimal environment.
     _tk_recover_user_shell_path()
+    # The terminal closing (SIGHUP) or a SIGTERM quits as Quit does,
+    # instead of ending the process before anything is saved.
+    external_call["tk_defer_quit_signals", NoneType]()
 
     var file_dialog = FileDialog()
     var last_project = Optional[String]()
@@ -263,6 +266,8 @@ def main() raises:
     var buf_cells = -1
 
     while app.running:
+        if external_call["tk_quit_signal", Int32]() != 0:
+            break
         var cols = app.back.width
         var rows = app.back.height
         var n = cols * rows
@@ -377,6 +382,7 @@ def main() raises:
 
     _shutdown_with_notice(h, app)
     app.stop()
+    external_call["tk_reraise_quit_signal", NoneType]()
 
 
 def _paint_shutdown_notice(mut app: Application) raises:

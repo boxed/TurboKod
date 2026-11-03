@@ -155,6 +155,50 @@ extern "C" fn on_signal(sig: c_int) {
     }
 }
 
+static QUIT_SIGNAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+extern "C" fn on_quit_signal(sig: c_int) {
+    QUIT_SIGNAL.store(sig, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// For the terminal frontend: SIGHUP (its terminal closed) and SIGTERM
+/// only record the signal, for the main loop to quit as Quit does —
+/// saving, and keeping what's unsaved with the drafts. Dying on the spot,
+/// they lost every edit since the last focus change. Called after the
+/// Mojo runtime's start, so it replaces that handler too.
+#[no_mangle]
+pub extern "C" fn tk_defer_quit_signals() {
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = on_quit_signal as usize;
+        libc::sigemptyset(&mut sa.sa_mask);
+        libc::sigaction(libc::SIGHUP, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+    }
+}
+
+/// The signal ``tk_defer_quit_signals`` caught, 0 if none.
+#[no_mangle]
+pub extern "C" fn tk_quit_signal() -> c_int {
+    QUIT_SIGNAL.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Once the quit is done: die of the caught signal, as without the
+/// deferral, so the parent sees the same status.
+#[no_mangle]
+pub extern "C" fn tk_reraise_quit_signal() {
+    let sig = tk_quit_signal();
+    if sig != 0 {
+        unsafe {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = libc::SIG_DFL;
+            libc::sigemptyset(&mut sa.sa_mask);
+            libc::sigaction(sig, &sa, std::ptr::null_mut());
+            libc::raise(sig);
+        }
+    }
+}
+
 /// Constructor — runs at library load time. Installs SIGHUP / SIGTERM
 /// handlers so the macOS .app teardown (which delivers SIGHUP via the
 /// PTY hangup) reaps our children.
