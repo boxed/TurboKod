@@ -32,16 +32,11 @@ func fnv1a<S: Sequence>(_ words: S) -> UInt64 where S.Element: BinaryInteger {
 //   outlines, plus the original 8×16 pixels as an embedded 16px bitmap
 //   strike. Core Text picks the strike when a cell is 16 device pixels tall
 //   (16pt on a 1x screen) and the 16×32 outlines otherwise (Retina, 32px+).
-// - Px437_IBM_VGA_8x16.ttf (Settings ▸ Font ▸ classic): the original 8×16
-//   font at every size.
 let BUNDLED_FONT_FILE = "TurboKodVGA16x32.ttf"
-let CLASSIC_FONT_FILE = "Px437_IBM_VGA_8x16.ttf"
-// config.font value that selects the classic font — CLASSIC_FONT in config.mojo.
-let CLASSIC_FONT_NAME = "Px437 IBM VGA 8x16"
 // Family names of the bundled fonts, kept out of the system font list:
 // they're registered in-process, so FontCatalog would otherwise list them
 // alongside the built-in rows.
-let BUNDLED_FONT_FAMILIES: Set<String> = ["TurboKod VGA 16x32", CLASSIC_FONT_NAME]
+let BUNDLED_FONT_FAMILIES: Set<String> = ["TurboKod VGA 16x32"]
 // config.font value for the classic Mac system font — CHICAGO_FONT in
 // config.mojo. Drawn with Silom, which ships with macOS: its Latin glyphs
 // are Chicago's on a 12-pixels-per-em grid, so at 12pt (its default here)
@@ -148,6 +143,136 @@ func cellFontAdvance(_ cp: UInt32) -> CGFloat {
     cellFontAdvanceCache[cp] = w
     return w
 }
+// MARK: - Per-area fonts
+
+/// The face of one font slot (bits 21..23 of a cell's word 0: 0 UI, 1 code,
+/// 2 terminal, 3 debugger) that isn't the cell font. The cell size stays
+/// the cell font's, so a face is fitted to that cell: the bundled VGA fonts
+/// stretched to fill it exactly (their box drawing joins cell to cell),
+/// any other font sized so its line fits the cell's height and its advance
+/// its width, and centered.
+final class SlotFace {
+    let font: NSFont
+    let bundled: Bool        // the VGA font: fill the cell exactly
+    let proportional: Bool   // Chicago: each glyph fitted to its cell
+    let scaleX: CGFloat      // horizontal stretch (bundled) at draw time
+    let offset: NSPoint      // where the glyph's line box sits in its cell
+    let baselineShift: CGFloat
+    private var glyphs: [UInt32: Bool] = [:]
+    private var advances: [UInt32: CGFloat] = [:]
+
+    init(name: String) {
+        bundled = name.isEmpty
+        var shift: CGFloat = 0
+        if bundled {
+            // The glyph grid is size/2 × size: draw at the cell's height and
+            // stretch the width onto the cell's.
+            font = loadCellFont(size: CELL_H)
+            proportional = false
+            scaleX = CELL_W / (CELL_H / 2)
+            offset = .zero
+        } else if name == CHICAGO_FONT_NAME, let f = chicagoFont(size: CELL_H * 3 / 4) {
+            font = f
+            proportional = true
+            scaleX = 1
+            offset = .zero
+            shift = ceil(f.ascender) - NSLayoutManager().defaultBaselineOffset(for: f)
+        } else {
+            let probe = NSFontManager.shared.font(withFamily: name, traits: [], weight: 5, size: 100)
+                ?? NSFont(name: name, size: 100)
+                ?? NSFont.monospacedSystemFont(ofSize: 100, weight: .regular)
+            let line = probe.ascender - probe.descender + probe.leading
+            let adv = ("0" as NSString).size(withAttributes: [.font: probe]).width
+            var size = 100 * CELL_H / max(1, line)
+            if adv * size / 100 > CELL_W { size = 100 * CELL_W / max(1, adv) }
+            let f = NSFontManager.shared.font(withFamily: probe.familyName ?? name,
+                                              traits: [], weight: 5, size: size)
+                ?? NSFont(name: probe.fontName, size: size) ?? probe
+            font = f
+            proportional = !f.isFixedPitch
+            scaleX = 1
+            let w = ("0" as NSString).size(withAttributes: [.font: f]).width
+            let h = f.ascender - f.descender + f.leading
+            offset = NSPoint(x: floor((CELL_W - w) / 2), y: floor((CELL_H - h) / 2))
+        }
+        baselineShift = shift
+    }
+
+    /// Whether the face lands on whole device pixels (draw it unsmoothed).
+    func crisp(backingScale: CGFloat) -> Bool {
+        guard bundled, scaleX == 1 else { return false }
+        let px = Int((CELL_H * backingScale).rounded())
+        return px == 16 || px % 32 == 0
+    }
+
+    func hasGlyph(_ cp: UInt32) -> Bool {
+        if let v = glyphs[cp] { return v }
+        var present = false
+        if let scalar = Unicode.Scalar(cp) {
+            var utf16 = Array(String(scalar).utf16)
+            var gs = [CGGlyph](repeating: 0, count: utf16.count)
+            present = CTFontGetGlyphsForCharacters(font as CTFont, &utf16, &gs, utf16.count)
+                && gs[0] != 0
+        }
+        glyphs[cp] = present
+        return present
+    }
+
+    func advance(_ cp: UInt32) -> CGFloat {
+        if let v = advances[cp] { return v }
+        var w: CGFloat = 0
+        if let scalar = Unicode.Scalar(cp) {
+            w = (String(scalar) as NSString).size(withAttributes: [.font: font]).width
+        }
+        advances[cp] = w
+        return w
+    }
+
+    /// One glyph in the cell at (`x`, `y`).
+    func draw(_ ctx: CGContext, _ s: NSString, _ cp: UInt32, color: NSColor,
+              cellX x: CGFloat, cellY y: CGFloat) {
+        let a: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
+        var sx = scaleX
+        var dx = offset.x
+        if proportional {
+            let adv = advance(cp)
+            if adv <= CELL_W { dx = floor((CELL_W - adv) / 2) } else { dx = 0; sx = CELL_W / adv }
+        }
+        if sx == 1 {
+            s.draw(at: NSPoint(x: x + dx, y: y + offset.y + baselineShift), withAttributes: a)
+            return
+        }
+        ctx.saveGState()
+        ctx.translateBy(x: x + dx, y: 0)
+        ctx.scaleBy(x: sx, y: 1)
+        s.draw(at: NSPoint(x: 0, y: y + offset.y + baselineShift), withAttributes: a)
+        ctx.restoreGState()
+    }
+}
+
+// The faces by slot; nil draws the slot with the cell font. Rebuilt by
+// `applySlotFonts` when a name or the cell size changes.
+var slotFaces: [SlotFace?] = [nil, nil, nil, nil]
+private var slotFaceKeys: [String] = ["", "", "", ""]
+// Bumped whenever the cell font or a slot face changes. They're global, so
+// every view — every window, the floating panels, the dialog windows —
+// redraws when it moves, not only the one whose Desktop asked.
+var fontGeneration = 0
+
+/// Fit each slot's font (`names`, encoded like config.font, resolved by
+/// the core — `tk_font_area_name`) to the current cell. A slot whose font
+/// is the cell font draws with it.
+func applySlotFonts(_ names: [String]) {
+    for slot in 0..<slotFaces.count {
+        let name = slot < names.count ? names[slot] : currentCellFontName
+        let key = name == currentCellFontName ? "" : "\(name)\u{0}\(CELL_W)x\(CELL_H)"
+        if key == slotFaceKeys[slot] { continue }
+        slotFaceKeys[slot] = key
+        slotFaces[slot] = key.isEmpty ? nil : SlotFace(name: name)
+        fontGeneration += 1
+    }
+}
+
 var currentCellFontName = ""             // "" = the bundled default
 var currentCellFontSize: CGFloat = -1    // 0 = font default; -1 forces the first apply through
 // Resolved size info the host reports back to the Mojo core after every
@@ -156,25 +281,16 @@ var currentCellFontSize: CGFloat = -1    // 0 = font default; -1 forces the firs
 var cellFontEffectiveSize = BITMAP_FONT_DEFAULT_SIZE
 var cellFontIdealSize = BITMAP_FONT_DEFAULT_SIZE
 
-// Monospace families the user may pick from (Settings ▸ Font). A lazy
-// static (not a top-level let — those initialize eagerly in main-file
-// mode) enumerated once: NSFontManager probes every installed family,
-// which is too slow to run per window. Hidden system families (leading
-// ".") are skipped.
+// The font families the user may pick from (Settings ▸ Font and the area
+// fonts): every installed one, monospace or not — a proportional one is
+// fitted to the cell glyph by glyph. A lazy static (not a top-level let —
+// those initialize eagerly in main-file mode) enumerated once. Hidden
+// system families (leading ".") are skipped.
 enum FontCatalog {
-    static let monospaceFamilies: [String] = {
-        let fm = NSFontManager.shared
-        var out: [String] = []
-        for family in fm.availableFontFamilies {
-            if family.hasPrefix(".") || BUNDLED_FONT_FAMILIES.contains(family) { continue }
-            guard let members = fm.availableMembers(ofFontFamily: family),
-                  let first = members.first,
-                  let name = first[0] as? String,
-                  let f = NSFont(name: name, size: 13),
-                  f.isFixedPitch else { continue }
-            out.append(family)
-        }
-        return out.sorted()
+    static let families: [String] = {
+        NSFontManager.shared.availableFontFamilies
+            .filter { !$0.hasPrefix(".") && !BUNDLED_FONT_FAMILIES.contains($0) }
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }()
 }
 
@@ -184,6 +300,16 @@ func fetchFontName(_ h: Int64) -> String {
     var buf = [UInt8](repeating: 0, count: 256)
     let n = buf.withUnsafeMutableBufferPointer { b -> Int in
         Int(tk_font_name(h, Int64(Int(bitPattern: b.baseAddress)), Int64(b.count)))
+    }
+    return n > 0 ? (String(bytes: buf[0..<n], encoding: .utf8) ?? "") : ""
+}
+
+/// Read the font of area `slot` out of a Mojo Desktop, encoded like
+/// `fetchFontName`.
+func fetchAreaFontName(_ h: Int64, _ slot: Int) -> String {
+    var buf = [UInt8](repeating: 0, count: 256)
+    let n = buf.withUnsafeMutableBufferPointer { b -> Int in
+        Int(tk_font_area_name(h, Int64(slot), Int64(Int(bitPattern: b.baseAddress)), Int64(b.count)))
     }
     return n > 0 ? (String(bytes: buf[0..<n], encoding: .utf8) ?? "") : ""
 }
@@ -239,29 +365,28 @@ func bitmapStrikePPEM(_ font: NSFont) -> Int {
     } ?? 0
 }
 
-/// A bundled VGA font at `size` points (0 = its 16pt design size): the
-/// default 16×32 font, or the original Px437 8×16 when `classic`. Either
+/// The bundled VGA font at `size` points (0 = its 16pt design size). Its
 /// glyph grid is exactly 8×16pt at 16pt, so the cell scales as a strict
 /// 1:2 box. Crisp (no-AA) rendering only where the pixels land exactly on
 /// device pixels (`cellFontRendersCrisp`) — fractional scales look better
-/// antialiased. For the classic font that's integer multiples of 16pt.
-private func applyBundledCellFont(_ size: CGFloat, classic: Bool = false) {
+/// antialiased.
+private func applyBundledCellFont(_ size: CGFloat) {
     let eff = size > 0 ? size : CGFloat(BITMAP_FONT_DEFAULT_SIZE)
-    cellFont = loadCellFont(size: eff, file: classic ? CLASSIC_FONT_FILE : BUNDLED_FONT_FILE)
+    cellFont = loadCellFont(size: eff)
     cellFontGlyphCache.removeAll()
     cellFontAdvanceCache.removeAll()
     cellFontEffectiveSize = Int(eff.rounded())
     cellFontIdealSize = BITMAP_FONT_DEFAULT_SIZE
     cellFontIsBitmap = cellFontEffectiveSize % BITMAP_FONT_DEFAULT_SIZE == 0
-    cellFontIsAdaptive = !classic
+    cellFontIsAdaptive = true
     cellFontIsProportional = false
+    cellFontBaselineShift = 0
     CELL_W = max(1, (eff / 2).rounded())
     CELL_H = max(1, eff.rounded())
 }
 
-/// Switch the cell font to `name` (a family from `monospaceFontFamilies`;
-/// empty = the bundled VGA font, CLASSIC_FONT_NAME = the original 8×16
-/// one) at `size` points (0 = the font's
+/// Switch the cell font to `name` (a family from `FontCatalog.families`;
+/// empty = the bundled VGA font) at `size` points (0 = the font's
 /// default) and recompute CELL_W/CELL_H from its metrics. No-op when both
 /// are already active. Derives `cellFontEffectiveSize` / `cellFontIdealSize`
 /// for the caller to report back to the Mojo core.
@@ -269,8 +394,9 @@ func applyCellFont(_ name: String, size: CGFloat = 0) {
     if name == currentCellFontName && size == currentCellFontSize { return }
     currentCellFontName = name
     currentCellFontSize = size
-    if name.isEmpty || name == CLASSIC_FONT_NAME {
-        applyBundledCellFont(size, classic: !name.isEmpty)
+    fontGeneration += 1
+    if name.isEmpty {
+        applyBundledCellFont(size)
         return
     }
     if name == CHICAGO_FONT_NAME, let f = chicagoFont(size: size) {
@@ -304,7 +430,9 @@ func applyCellFont(_ name: String, size: CGFloat = 0) {
     cellFontGlyphCache.removeAll()
     cellFontAdvanceCache.removeAll()
     cellFontIsAdaptive = false
-    cellFontIsProportional = false
+    // Any family can be picked; a proportional one is fitted per glyph.
+    cellFontIsProportional = !f.isFixedPitch
+    cellFontBaselineShift = 0
     cellFontEffectiveSize = Int(eff.rounded())
     cellFontIdealSize = bitmapStrikePPEM(f)
     // A font with embedded bitmap strikes renders crisp (no AA) at exactly
@@ -504,27 +632,37 @@ final class CellView: NSView {
     // swap the global `cellFont` + cell metrics. -1 forces the first
     // check through (a no-op while the config holds the default).
     private var fontVersion: Int64 = -1
+    // The look the fonts were fetched for: the core resolves the cell font
+    // and the UI face from it (the Turbo Vision look draws its UI in the VGA
+    // font at its ideal size), so a look switch refetches.
+    private var fontTVLook: Bool? = nil
+    // The `fontGeneration` this view last drew with.
+    private var drawnFontGeneration = -1
 
-    /// Refetch the configured cell font + size if the Mojo core's font
-    /// version has moved. Returns true when the font actually changed (the
-    /// grid metrics are different, so everything must re-lay-out + redraw).
+    /// Refetch the cell font + size and the area faces if the Mojo core's
+    /// font version or the look has moved. Returns true when anything this
+    /// view draws with changed — its own refetch or another view's (the
+    /// fonts are global) — so it must re-lay-out and redraw every cell.
     @discardableResult
     private func refreshFontIfNeeded() -> Bool {
         guard handle != 0 else { return false }
         let v = tk_font_version(handle)
-        if v == fontVersion { return false }
-        fontVersion = v
-        let prevName = currentCellFontName
-        let prevSize = currentCellFontSize
-        applyCellFont(fetchFontName(handle),
-                      size: CGFloat(tk_font_size(handle)))
-        // Report the resolved effective + ideal sizes back to the core —
-        // the Settings size stepper and "Restore ideal" button read these.
-        tk_desktop_set_font_size_info(handle,
-                                      Int64(cellFontEffectiveSize),
-                                      Int64(cellFontIdealSize))
-        return prevName != currentCellFontName
-            || prevSize != currentCellFontSize
+        let tvLook = tk_desktop_native_ui(handle) == 0 && tk_desktop_platinum_ui(handle) == 0
+        if v != fontVersion || tvLook != fontTVLook {
+            fontVersion = v
+            fontTVLook = tvLook
+            applyCellFont(fetchFontName(handle),
+                          size: CGFloat(tk_font_size(handle)))
+            applySlotFonts((0..<slotFaces.count).map { fetchAreaFontName(handle, $0) })
+            // Report the resolved effective + ideal sizes back to the core —
+            // the Settings size stepper and "Restore ideal" button read these.
+            tk_desktop_set_font_size_info(handle,
+                                          Int64(cellFontEffectiveSize),
+                                          Int64(cellFontIdealSize))
+        }
+        if drawnFontGeneration == fontGeneration { return false }
+        drawnFontGeneration = fontGeneration
+        return true
     }
 
     /// Refetch the active theme's palette if the Mojo core's theme version has
@@ -1024,6 +1162,14 @@ final class CellView: NSView {
         }
     }
 
+    private func setAntialias(_ ctx: CGContext, _ on: Bool) {
+        ctx.setShouldAntialias(on)
+        ctx.setShouldSmoothFonts(on)
+        ctx.setAllowsAntialiasing(on)
+        ctx.setAllowsFontSmoothing(on)
+        NSGraphicsContext.current?.shouldAntialias = on
+    }
+
     /// One glyph of a proportional cell font in its cell: centered on whole
     /// points when it fits, squeezed to the cell's width when it doesn't
     /// (Chicago's m, w, M, W, @ …), so it never runs into its neighbors.
@@ -1063,6 +1209,10 @@ final class CellView: NSView {
             }
         }
         let attrs: [NSAttributedString.Key: Any] = [.font: cellFont]
+        // A slot face drawn unlike the cell font (smoothed or not) flips the
+        // context's antialiasing around its glyph.
+        let scale = window?.backingScaleFactor ?? 1
+        let aa = !cellFontRendersCrisp(backingScale: scale)
         for i in 0..<n {
             // Word 0 is the codepoint, with the core's cell width (0 / 1 / 2)
             // in the top byte — we never recompute it from the codepoint.
@@ -1075,8 +1225,18 @@ final class CellView: NSView {
             let y = originY + CGFloat(row) * CELL_H
             if cp != 0x20 && cp != 0, let scalar = Unicode.Scalar(cp) {
                 let s = String(scalar) as NSString
+                let slot = Int((w0 >> 21) & 0x7)
                 if wide {
                     drawWide(s, fg: fg, cellX: x, cellY: y, cellW: CELL_W * 2)
+                } else if slot < slotFaces.count, let face = slotFaces[slot] {
+                    if face.hasGlyph(cp) {
+                        let crisp = face.crisp(backingScale: scale)
+                        if crisp == aa { setAntialias(ctx, !crisp) }
+                        face.draw(ctx, s, cp, color: nscolor(fg), cellX: x, cellY: y)
+                        if crisp == aa { setAntialias(ctx, aa) }
+                    } else {
+                        drawFallbackGlyph(ctx, s, fg: fg, cellX: x, cellY: y)
+                    }
                 } else if cellFontHasGlyph(cp) {
                     var a = attrs
                     a[.foregroundColor] = nscolor(fg)
@@ -2274,7 +2434,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private var openProjectsRaw: [String] = []
     private var openProjectsPayload = ""
 
-    // The monospace-family scan (FontCatalog) is ~140 ms and only feeds the
+    // The font-family scan (FontCatalog) only feeds the
     // Settings ▸ Font picker, so newWindow defers it past the first frame
     // (see afterFirstFrame). This flips true once the scan has run; windows
     // opened after that apply the (now-cached) list inline.
@@ -3127,6 +3287,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return
         }
         let view = keyView() ?? views.first
+        // Find / Replace and Settings stay open in windows of their own while
+        // the project window is used: tell the core which has the keyboard,
+        // or an Edit-menu action (Paste, Undo, …) typed in the project window
+        // lands in that dialog's field instead of the editor or terminal.
+        if let v = view, v.handle != 0 {
+            let s = NSApp.keyWindow?.cellView?.surface
+            tk_desktop_set_project_window_key(v.handle, s == .main || s == .panels ? 1 : 0)
+        }
         if action == "edit:paste", let v = view {
             // File(s) on the clipboard → the path-format menu.
             if v.pasteFilesWithMenu() { return }
@@ -3563,11 +3731,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     // MARK: windows + desktops
 
-    /// Push the system monospace-family list onto a Desktop so its Settings ▸
-    /// Font picker is populated. First call pays the ~140 ms FontCatalog scan;
+    /// Push the system font-family list onto a Desktop so its Settings ▸
+    /// Font pickers are populated. First call pays the FontCatalog scan;
     /// the result is a cached static, so later calls are cheap.
     func applyFontOptions(to h: Int64) {
-        let families = FontCatalog.monospaceFamilies.joined(separator: "\n")
+        let families = FontCatalog.families.joined(separator: "\n")
         withUTF8Arg(families) { ptr, len in tk_desktop_set_font_options(h, ptr, len) }
     }
 
@@ -5882,7 +6050,7 @@ final class WelcomeController: NSObject, NSWindowDelegate {
         cards.spacing = 16
 
         themePopup.addItems(withTitles: o["themes"] as? [String] ?? [])
-        fontPopup.addItems(withTitles: builtinFonts + FontCatalog.monospaceFamilies)
+        fontPopup.addItems(withTitles: builtinFonts + FontCatalog.families)
         sizePopup.addItems(withTitles: Self.sizes.map { $0 == 0 ? "Default" : "\($0) pt" })
         themePopup.selectItem(withTitle: o["theme"] as? String ?? "")
         fontPopup.selectItem(withTitle: o["font"] as? String ?? "")
@@ -5983,7 +6151,7 @@ final class WelcomeController: NSObject, NSWindowDelegate {
     private func pickLook(_ kind: LookCard.Kind) {
         look = kind
         refreshCards()
-        let fonts = FontCatalog.monospaceFamilies
+        let fonts = FontCatalog.families
         switch kind {
         case .modern:
             let dark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
@@ -7603,9 +7771,8 @@ final class CodePreview: NSTextView {
     /// Chicago (12pt), anything else a system monospace family (13pt).
     static func font(label: String, size: Int, builtins: [String]) -> NSFont {
         if let i = builtins.firstIndex(of: label) {
-            if i == 2 { return chicagoFont(size: CGFloat(size)) ?? .systemFont(ofSize: 12) }
-            return loadCellFont(size: CGFloat(size > 0 ? size : 16),
-                                file: i == 1 ? CLASSIC_FONT_FILE : BUNDLED_FONT_FILE)
+            if i == 1 { return chicagoFont(size: CGFloat(size)) ?? .systemFont(ofSize: 12) }
+            return loadCellFont(size: CGFloat(size > 0 ? size : 16))
         }
         let s = CGFloat(size > 0 ? size : 13)
         return NSFontManager.shared.font(withFamily: label, traits: [], weight: 5, size: s)

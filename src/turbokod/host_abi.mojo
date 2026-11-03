@@ -34,10 +34,11 @@ comptime SHAPE_NS_RESIZE = Int32(3)   # over a pane's top edge / dragging it
 comptime SHAPE_EW_RESIZE = Int32(4)   # over the file tree's edge
 
 # ``UInt32`` words per cell in the layout buffer:
-# ``[codepoint|width<<24, fg|bg<<8|style<<16|color_mode<<24, underline_color,
-# fg_rgb, bg_rgb]``. ``app/swift/TurboKod.swift`` reads the same layout.
-# ``width`` is the cell's (0, 1 or 2) so a host never recomputes it from the
-# codepoint and can't drift from ``char_width``.
+# ``[codepoint|font<<21|width<<24, fg|bg<<8|style<<16|color_mode<<24,
+# underline_color, fg_rgb, bg_rgb]``. ``app/swift/TurboKod.swift`` reads the
+# same layout. ``width`` is the cell's (0, 1 or 2) so a host never recomputes
+# it from the codepoint and can't drift from ``char_width``; ``font`` is its
+# font slot (``FONT_*`` in ``cell``).
 comptime CELL_WORDS = 5
 
 
@@ -93,7 +94,8 @@ def pack_canvas(
             w2 = UInt32(0xFFFFFFFF)
         else:
             w2 = UInt32(Int(attr.underline_color))
-        op[unsafe_offset=base] = UInt32(cp) | (UInt32(cell.width & 0x3) << 24)
+        op[unsafe_offset=base] = UInt32(cp) | (UInt32(Int(cell.font) & 0x7) << 21) \
+            | (UInt32(cell.width & 0x3) << 24)
         op[unsafe_offset=base + 1] = w1
         op[unsafe_offset=base + 2] = w2
         op[unsafe_offset=base + 3] = attr.fg_rgb

@@ -45,6 +45,7 @@ from .posix import monotonic_ms
 from .lsp import capture_command
 from .project import ProjectMatch
 from .clipboard import clipboard_chord, CLIP_COPY
+from .query_memory import QueryMemory
 from .search_options import SearchOptions
 from .string_utils import (
     byte_slice, char_width, codepoint_at, display_columns, parse_uint_range,
@@ -195,8 +196,12 @@ struct ProjectFind(Movable):
     # Mouse-drag text selection over the bottom context panel — lets the
     # user highlight and Cmd+C source lines straight out of the preview.
     var ctxsel: PaneTextSelect
+    # The last query per project root, for an open that can't resume
+    # (another project's state is up): ``close`` stores it.
+    var _queries: QueryMemory
 
     def __init__(out self):
+        self._queries = QueryMemory()
         self.active = False
         self.submitted = False
         self.replace_mode = False
@@ -269,7 +274,8 @@ struct ProjectFind(Movable):
         current selection) overrides the saved query and kicks off a
         fresh search; an empty prefill against the same project root
         restores prior state and leaves the saved query fully selected
-        so the next typed key replaces it.
+        so the next typed key replaces it. Opening in another project
+        starts over from that project's previous query, fully selected.
 
         ``select_prefill=True`` leaves the seeded text fully selected
         so the next typed key replaces it — mirrors the basic Find
@@ -304,7 +310,13 @@ struct ProjectFind(Movable):
         self.root = root^
         self.query = TextField()
         self.replace = TextField()
-        if has_prefill:
+        if not has_prefill:
+            prefill = self._queries.get(self.root)
+            has_prefill = len(prefill.as_bytes()) > 0
+            if has_prefill:
+                self.query.set_text(prefill^)
+                self.query.select_all()
+        else:
             self.query.set_text(prefill^)
             if select_prefill:
                 self.query.select_all()
@@ -350,6 +362,8 @@ struct ProjectFind(Movable):
         """Hide the dialog and stop any in-flight ``rg`` child, but
         keep query / results / selection / scroll so the next ``open()``
         can resume where the user left off."""
+        if self.active:
+            self._queries.put(self.root, self.query.text)
         self._runner.cancel()
         self.active = False
         self.submitted = False

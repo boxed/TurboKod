@@ -18,25 +18,43 @@ from .colors import Attr, default_attr
 from .string_utils import char_width, codepoint_at
 
 
+# Font slots: which of the user's fonts a cell is drawn with (the native
+# macOS frontend; the terminal frontends leave the font to the terminal).
+# ``Canvas.font`` stamps the slot on every cell it writes, so a view paints
+# in a slot by switching it around its content. Three bits on the wire
+# (``pack_canvas``).
+comptime FONT_UI: UInt8 = 0
+comptime FONT_CODE: UInt8 = 1
+comptime FONT_TERMINAL: UInt8 = 2
+comptime FONT_DEBUGGER: UInt8 = 3
+comptime FONT_SLOTS = 4
+
+
 struct Cell(ImplicitlyCopyable, Movable):
     var glyph: String
     var attr: Attr
     var width: Int
+    var font: UInt8
+    """The font slot (``FONT_*``). Not part of ``==``: the terminal
+    frontend's diff ignores it, as the terminal does."""
 
     def __init__(out self):
         self.glyph = String(" ")
         self.attr = default_attr()
         self.width = 1
+        self.font = FONT_UI
 
     def __init__(out self, glyph: String, attr: Attr):
         self.glyph = glyph
         self.attr = attr
         self.width = cell_width(glyph)
+        self.font = FONT_UI
 
-    def __init__(out self, glyph: String, attr: Attr, width: Int):
+    def __init__(out self, glyph: String, attr: Attr, width: Int, font: UInt8 = FONT_UI):
         self.glyph = glyph
         self.attr = attr
         self.width = width
+        self.font = font
 
     def is_blank(self) -> Bool:
         return self.glyph == String(" ")

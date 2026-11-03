@@ -1069,6 +1069,29 @@ def test_native_project_settings_edit_through_the_sections_and_sync() raises:
     assert_true(len(d.project_on_save) >= 1)
 
 
+def test_dialogs_in_their_own_windows_leave_the_project_windows_paste_alone() raises:
+    """Turbo Vision look: Find / Replace and Settings stay open in windows
+    of their own. Paste in the project window goes to its editor; only
+    with the dialog's window key does the dialog own it."""
+    var d = _native_desktop(String("x"))
+    d.config.native_ui = False          # the Turbo Vision look
+    assert_true(d.dialogs_windowed())
+    var f = d.windows.focused
+    d.find_dialog.open(False, String("needle"), SearchOptions())
+    d.project_window_key = True
+    assert_true(d.paste_text_into_focus(String("ab")))
+    assert_true(String("ab") in d.windows.windows[f].editor.text_snapshot())
+    d.project_window_key = False        # the Find window has the keyboard
+    assert_false(d.paste_text_into_focus(String("cd")))
+    d.find_dialog.close()
+    d.settings.active = True
+    d.project_window_key = True
+    assert_true(d.paste_text_into_focus(String("ef")))
+    d.project_window_key = False
+    assert_false(d.paste_text_into_focus(String("gh")))
+    d.shutdown()
+
+
 def main() raises:
     setup_test_env()
     TestSuite.discover_tests[__functions_in_module()]().run()

@@ -16,8 +16,7 @@ The macOS .app needs the Mojo shared library reachable from any launch CWD. Dock
 │   │   └── libturbokod.dylib        # Mojo shared lib
 │   └── Resources/
 │       ├── icon.icns
-│       ├── Px437_IBM_VGA_8x16.ttf   # classic cell font (Settings ▸ Font)
-│       ├── TurboKodVGA16x32.ttf     # default cell font (16×32 + 8×16 strike)
+│       ├── TurboKodVGA16x32.ttf     # VGA cell font (16×32 + 8×16 strike)
 │       └── src/turbokod/
 │           ├── grammars/            # TextMate grammars
 │           └── data/                # dictionaries etc.

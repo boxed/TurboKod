@@ -48,6 +48,7 @@ from .string_utils import (
 from .symbol_seed import (
     is_definition_keyword, is_definition_site, seed_priority,
 )
+from .query_memory import QueryMemory
 from .text_field import TextField
 from .case_fold import contains_ci, eq_ci, starts_with_ci
 from .window import paint_window_title
@@ -284,6 +285,9 @@ struct FindSymbol(Movable):
     # The name the user picked in the first step. Shown in the input
     # row so they can see what they're disambiguating; empty otherwise.
     var _chooser_name: String
+    # The last query per project root: ``close`` stores it, ``open``
+    # restores it (fully selected) when there's no prefill.
+    var _queries: QueryMemory
 
     def __init__(out self):
         self.active = False
@@ -309,6 +313,7 @@ struct FindSymbol(Movable):
         self._user_navigated = False
         self._chooser_mode = False
         self._chooser_name = String("")
+        self._queries = QueryMemory()
         self.query_dirty = False
         self._class_mode = False
         self._class_matched = False
@@ -326,7 +331,8 @@ struct FindSymbol(Movable):
         ``sanitize_symbol_query`` first so the same identifier-only
         constraint as typed input applies. ``select_prefill=True``
         leaves the seeded text fully selected so the next typed key
-        replaces it — mirrors the Find-in-Project prompt.
+        replaces it — mirrors the Find-in-Project prompt. Without a
+        prefill the project's previous query comes back, fully selected.
         """
         self.active = True
         self.query = TextField()
@@ -335,6 +341,11 @@ struct FindSymbol(Movable):
         if len(sanitized.as_bytes()) > 0:
             self.query.set_text(sanitized)
             if select_prefill:
+                self.query.select_all()
+        else:
+            var saved = self._queries.get(self.root)
+            if len(saved.as_bytes()) > 0:
+                self.query.set_text(saved^)
                 self.query.select_all()
         self.entries = List[FindSymbolMatch]()
         self.seen_names = List[String]()
@@ -361,6 +372,8 @@ struct FindSymbol(Movable):
         self.query_dirty = True
 
     def close(mut self):
+        if self.active:
+            self._queries.put(self.root, self.query.text)
         self.active = False
         self.query = TextField()
         self.root = String("")

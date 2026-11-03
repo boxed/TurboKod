@@ -141,6 +141,17 @@ the external display the panels lived on falls back to docked automatically.
 
 Full details in [docs/floating-panels.md](docs/floating-panels.md).
 
+### Per-area fonts (native macOS)
+
+The Font is the code's; terminal-like panes, the debugger and (outside the
+Turbo Vision look) the UI can each have a face of their own at the one
+shared cell size. A cell carries a font slot (`Cell.font`) stamped by
+`Canvas` from `canvas.font`. A view switches the slot around its *content*
+(not its chrome) and restores it after. The Turbo Vision look's cell is
+always the built-in VGA font at its ideal size, and its UI is drawn in it,
+because box drawing only joins up in that font. Full details in
+[docs/area-fonts.md](docs/area-fonts.md).
+
 ## Running the Mojo code
 
 **Always run `make` after making a change** (build-only, no launch) so the user can test immediately. Don't leave a change unbuilt.

@@ -25,7 +25,7 @@ from std.collections.list import List
 
 from .config import (
     DEFAULT_MAX_OPEN_WINDOWS, LanguageServerOverride,
-    MAX_FONT_SIZE, MIN_FONT_SIZE, WRAP_NONE,
+    MAX_FONT_SIZE, MIN_FONT_SIZE, WRAP_NONE, same_as_font_label,
 )
 from .dictionary_install import (
     DownloadableDictionary, built_in_downloadable_dictionaries,
@@ -35,6 +35,7 @@ from .language_config import (
     LanguageSpec, apply_language_overrides, built_in_servers,
     find_language_by_id, find_language_for_extension,
 )
+from .font_chooser import FontChooser
 from .language_editor import LanguageEditor
 from .theme import theme_names
 from .string_utils import join_args
@@ -148,6 +149,10 @@ struct Settings(Movable):
     the terminal owns the font."""
     var font_size_choice: Int
     """0 means the font's default size."""
+    var area_font_choices: List[String]
+    """Each area's font label, indexed by font slot (``FONT_*`` in
+    ``cell``); ``same_as_font_label`` when it has none of its own. The
+    host sets them after ``open``."""
     var _font_effective_size: Int
     """The size actually rendering (resolves 0); reported by the host."""
     var _font_ideal_size: Int
@@ -166,6 +171,7 @@ struct Settings(Movable):
     """Built-in languages with the overrides applied — what the list shows."""
     var selected_language: Int
     var language_editor: LanguageEditor
+    var font_chooser: FontChooser
 
     # Spelling.
     var dict_specs: List[DownloadableDictionary]
@@ -208,6 +214,7 @@ struct Settings(Movable):
         self.font_choice = String("")
         self._font_names = List[String]()
         self.font_size_choice = 0
+        self.area_font_choices = _same_as_font_for_all()
         self._font_effective_size = 0
         self._font_ideal_size = 0
         self.offer_native_ui = False
@@ -218,6 +225,7 @@ struct Settings(Movable):
         self.languages_view = List[LanguageSpec]()
         self.selected_language = -1
         self.language_editor = LanguageEditor()
+        self.font_chooser = FontChooser()
         self.dict_specs = List[DownloadableDictionary]()
         self.selected_dict = -1
         self.pending_dict_install_lang = String("")
@@ -417,30 +425,43 @@ struct Settings(Movable):
         )))
         var builtins = List[String]()
         if len(self._font_names) > 0:
-            var font = 0
-            for i in range(len(self._font_names)):
-                if self._font_names[i] == self.font_choice:
-                    font = i
-            rows.append(ui_row(String("Font"), ui_choice(
-                String("font"), self._font_names.copy(), font,
+            # The Font is the code's, and every other area's unless it has
+            # one of its own. In the Turbo Vision look the UI is the VGA
+            # font at its ideal size, which fixes the cell, so there's no
+            # size to pick and no UI font.
+            var tv_look = not self.native_ui and not self.platinum_ui
+            rows.append(ui_row(String("Font"), _font_pick(
+                String("pick_font"), self.font_choice,
             )))
-            var size = self._font_size_shown()
-            var ideal = self._font_ideal_size
-            var steps = List[UINode]()
-            steps.append(ui_label(String(size) + String(" pt")))
-            steps.append(ui_button(
-                String("font_smaller"), String("Smaller"),
-                0 if size > MIN_FONT_SIZE else UI_DISABLED,
-            ))
-            steps.append(ui_button(
-                String("font_larger"), String("Larger"),
-                0 if size < MAX_FONT_SIZE else UI_DISABLED,
-            ))
-            steps.append(ui_button(
-                String("font_ideal"), String("Ideal Size"),
-                0 if ideal > 0 and ideal != size else UI_DISABLED,
-            ))
-            rows.append(ui_row(String("Size"), ui_hstack(steps^)))
+            if not tv_look or not self.offer_native_ui:
+                var size = self._font_size_shown()
+                var ideal = self._font_ideal_size
+                var steps = List[UINode]()
+                steps.append(ui_label(String(size) + String(" pt")))
+                steps.append(ui_button(
+                    String("font_smaller"), String("Smaller"),
+                    0 if size > MIN_FONT_SIZE else UI_DISABLED,
+                ))
+                steps.append(ui_button(
+                    String("font_larger"), String("Larger"),
+                    0 if size < MAX_FONT_SIZE else UI_DISABLED,
+                ))
+                steps.append(ui_button(
+                    String("font_ideal"), String("Ideal Size"),
+                    0 if ideal > 0 and ideal != size else UI_DISABLED,
+                ))
+                rows.append(ui_row(String("Size"), ui_hstack(steps^)))
+            var areas = List[Int]()
+            areas.append(2)
+            areas.append(3)
+            if not tv_look:
+                areas.append(0)
+            for k in range(len(areas)):
+                var slot = areas[k]
+                rows.append(ui_row(_area_font_title(slot), _font_pick(
+                    String("pick_font_") + String(slot),
+                    self.area_font_choices[slot],
+                )))
             for i in range(min(2, len(self._font_names))):
                 builtins.append(self._font_names[i])
         rows.append(ui_row(String(""), ui_preview(
@@ -630,6 +651,21 @@ struct Settings(Movable):
     def ui_act(mut self, id: String):
         if id == String("close"):
             self.close_requested = True
+        elif id == String("pick_font"):
+            self.font_chooser.open(
+                id, String("Font"), self._font_names.copy(), self.font_choice,
+            )
+        elif id.startswith(String("pick_font_")):
+            var slot = ui_int(String(id.removeprefix(String("pick_font_"))))
+            if slot >= 0 and slot < len(self.area_font_choices):
+                var names = List[String]()
+                names.append(same_as_font_label())
+                for i in range(len(self._font_names)):
+                    names.append(self._font_names[i])
+                self.font_chooser.open(
+                    id, _area_font_title(slot), names^,
+                    self.area_font_choices[slot],
+                )
         elif id == String("font_smaller"):
             self._set_font_size(self._font_size_shown() - 1)
         elif id == String("font_larger"):
@@ -723,6 +759,23 @@ struct Settings(Movable):
         if self.selected_language >= len(self.languages_view):
             self.selected_language = len(self.languages_view) - 1
 
+    def consume_font_chooser(mut self):
+        """Take the font the chooser was submitted with into the setting
+        it was opened for."""
+        if not self.font_chooser.submitted:
+            return
+        var target = self.font_chooser.target
+        var choice = self.font_chooser.choice
+        self.font_chooser.close()
+        if target == String("pick_font"):
+            self.font_choice = choice
+        else:
+            var slot = ui_int(String(target.removeprefix(String("pick_font_"))))
+            if slot < 0 or slot >= len(self.area_font_choices):
+                return
+            self.area_font_choices[slot] = choice
+        self.dirty = True
+
     def consume_language_editor(mut self):
         """Store the language editor's result once it was saved."""
         if not self.language_editor.submitted:
@@ -807,3 +860,28 @@ def _has_override(
     return False
 
 
+
+
+def _same_as_font_for_all() -> List[String]:
+    var out = List[String]()
+    for _ in range(4):
+        out.append(same_as_font_label())
+    return out^
+
+
+def _font_pick(var key: String, var current: String) -> UINode:
+    """A font setting's row: what it is, and Choose… to search for another
+    (``FontChooser``)."""
+    var row = List[UINode]()
+    row.append(ui_label(current^))
+    row.append(ui_button(key^, String("Choose…")))
+    return ui_hstack(row^)
+
+
+def _area_font_title(slot: Int) -> String:
+    """The Settings row label for area ``slot``'s font."""
+    if slot == 2:
+        return String("Terminal font")
+    if slot == 3:
+        return String("Debugger font")
+    return String("UI font")

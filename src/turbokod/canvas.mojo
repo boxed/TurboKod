@@ -9,7 +9,7 @@ simple List-of-Cells rather than a packed 16-bit attribute buffer.
 
 from std.collections import List
 
-from .cell import Cell, blank_cell
+from .cell import Cell, FONT_UI, blank_cell
 from .colors import Attr, DARK_GRAY, PANE_BG, default_attr
 from .geometry import Point, Rect
 from .string_utils import char_width, codepoint_at, utf8_codepoint_size, TAB_WIDTH
@@ -44,10 +44,15 @@ struct Canvas(Copyable, Movable):
     var width: Int
     var height: Int
     var cells: List[Cell]  # row-major, length == width * height
+    var font: UInt8
+    """Font slot stamped on every cell written (``FONT_*`` in ``cell``);
+    a view switches it around the content it paints in another slot and
+    restores it after."""
 
     def __init__(out self, width: Int, height: Int):
         self.width = width
         self.height = height
+        self.font = FONT_UI
         self.cells = List[Cell]()
         var n = width * height
         for _ in range(n):
@@ -74,15 +79,17 @@ struct Canvas(Copyable, Movable):
 
     def set(mut self, x: Int, y: Int, var cell: Cell):
         if self.in_bounds(x, y):
+            cell.font = self.font
             self.cells[self._index(x, y)] = cell^
 
     def clear(mut self, attr: Attr = default_attr()):
-        var blank = Cell(String(" "), attr, 1)
+        var blank = Cell(String(" "), attr, 1, self.font)
         for i in range(len(self.cells)):
             self.cells[i] = blank
 
     def fill(mut self, rect: Rect, glyph: String, attr: Attr):
         var cell = Cell(glyph, attr)
+        cell.font = self.font
         var w = cell.width
         if w < 1:
             w = 1
@@ -97,7 +104,9 @@ struct Canvas(Copyable, Movable):
                     # Empty continuation cell over the glyph's right half, so
                     # a leftover normal cell can't render a spurious glyph
                     # (mirrors put_text).
-                    self.cells[self._index(x + 1, y)] = Cell(String(""), attr, 0)
+                    self.cells[self._index(x + 1, y)] = Cell(
+                        String(""), attr, 0, self.font,
+                    )
                 x += w
 
     def put_text(mut self, p: Point, text: String, attr: Attr, max_x: Int = -1,
@@ -156,7 +165,7 @@ struct Canvas(Copyable, Movable):
                 while x < stop:
                     if x >= 0:
                         self.cells[self._index(x, y)] = Cell(
-                            String(" "), attr, 1,
+                            String(" "), attr, 1, self.font,
                         )
                     x += 1
                     advanced += 1
@@ -197,15 +206,15 @@ struct Canvas(Copyable, Movable):
                 # an orphaned blank where the glyph's right half belongs —
                 # skip the whole glyph instead.
                 if x >= 0:
-                    self.cells[self._index(x, y)] = Cell(glyph, attr, 2)
+                    self.cells[self._index(x, y)] = Cell(glyph, attr, 2, self.font)
                     self.cells[self._index(x + 1, y)] = Cell(
-                        String(""), attr, 0,
+                        String(""), attr, 0, self.font,
                     )
                 x += 2
                 advanced += 2
             else:
                 if x >= 0:
-                    self.cells[self._index(x, y)] = Cell(glyph, attr, 1)
+                    self.cells[self._index(x, y)] = Cell(glyph, attr, 1, self.font)
                 x += 1
                 advanced += 1
             i += seq_len
@@ -223,7 +232,7 @@ struct Canvas(Copyable, Movable):
             return
         var idx = self._index(x, y)
         var current = self.cells[idx]
-        self.cells[idx] = Cell(current.glyph, attr, current.width)
+        self.cells[idx] = Cell(current.glyph, attr, current.width, current.font)
 
     def darken_rect(mut self, rect: Rect):
         """Recolor every cell inside ``rect`` to a "shadow" attr,
@@ -243,7 +252,7 @@ struct Canvas(Copyable, Movable):
             for x in range(clipped.a.x, clipped.b.x):
                 var idx = self._index(x, y)
                 var current = self.cells[idx]
-                self.cells[idx] = Cell(current.glyph, shadow, current.width)
+                self.cells[idx] = Cell(current.glyph, shadow, current.width, current.font)
 
     def draw_box(mut self, rect: Rect, attr: Attr, double_line: Bool = False):
         if rect.width() < 2 or rect.height() < 2:

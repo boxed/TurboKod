@@ -29,7 +29,7 @@ from std.collections.optional import Optional
 
 from .case_fold import eq_ci, fold_byte
 from .canvas import Canvas, utf8_codepoint_count
-from .cell import Cell
+from .cell import Cell, FONT_CODE, FONT_UI
 from .painter import Painter
 from .colors import (
     Attr, BLACK, BORDER_FOCUS, EDITOR_BG, EDITOR_FG, FG_TRUECOLOR, LIGHT_GRAY,
@@ -51,8 +51,8 @@ from .clipboard import clipboard_copy, clipboard_paste
 from .open_url import open_url
 from .config import (
     MAX_FONT_SIZE, MIN_FONT_SIZE, OnSaveAction,
-    CHICAGO_FONT, CLASSIC_FONT, TurbokodConfig, WRAP_NONE, chicago_font_label,
-    classic_font_label,
+    AREA_BUNDLED_FONT, CHICAGO_FONT, TurbokodConfig, WRAP_NONE,
+    chicago_font_label, same_as_font_label,
     config_file_stamp, default_font_label,
     load_config, lsp_overrides_equal, merge_config, record_recent_file,
     record_recent_project, save_config_merged, try_read_config,
@@ -206,6 +206,7 @@ from .color_picker import ColorPickerDialog
 from .merge_view import MergeView
 from .fill_dialog import FillDialog
 from .find_dialog import FindDialog
+from .query_memory import QueryMemory
 from .spell_scan import spell_scan_files
 from .spelling_dialog import (
     SPELLING_ADD_PROJECT, SPELLING_ADD_USER, SpellingDialog,
@@ -1158,6 +1159,7 @@ struct Desktop(Movable):
     """Window to close once the Save As it opened succeeds (Save in the
     unsaved-changes prompt of an untitled buffer); -1 when none."""
     var _last_search: String         # last Find needle, repeated by Ctrl+G
+    var _search_memory: QueryMemory  # ``_last_search`` of the other projects
     var _last_search_opts: SearchOptions   # last Find toggle state (Cc/W/.*)
     var native_find_request: String
     """macOS-style UI: ``find`` / ``replace`` when Find or Replace was asked
@@ -1182,6 +1184,11 @@ struct Desktop(Movable):
     replayed into it from the menu bar."""
     var git_window_key: Bool
     """The host's git window (any look) is the key window."""
+    var project_window_key: Bool
+    """The native host's key window is the project window (or its floating
+    panels), not a dialog window of its own: Find / Replace and Settings,
+    open in windows of their own, then don't own the Edit-menu actions.
+    False in the terminal frontends, where both are in-grid."""
     var git_front_request: Bool
     """One-shot: Git ▸ Local changes while the view is already up in its
     window — the host brings that window to the front."""
@@ -1836,6 +1843,7 @@ struct Desktop(Movable):
         self._close_unsaved_title = String("")
         self._close_after_save_as_idx = -1
         self._last_search = String("")
+        self._search_memory = QueryMemory()
         self._last_search_opts = SearchOptions()
         self.native_find_request = String("")
         self.native_find_seed = String("")
@@ -1846,6 +1854,7 @@ struct Desktop(Movable):
         self._in_dialog_window = False
         self._git_screen = Rect(0, 0, 0, 0)
         self.git_window_key = False
+        self.project_window_key = False
         self.git_front_request = False
         self._last_goto_line = String("")
         self._pending_new_window_project = Optional[String]()
@@ -6165,6 +6174,7 @@ struct Desktop(Movable):
         refetch the palette) or rebuild the language-server specs.
         """
         var theme_changed = merged.theme != self.config.theme
+        var fonts_changed = merged.area_fonts != self.config.area_fonts
         var lsp_changed = not lsp_overrides_equal(
             merged.language_servers, self.config.language_servers,
         )
@@ -6175,6 +6185,8 @@ struct Desktop(Movable):
         if theme_changed:
             self.active_theme = theme_by_name(self.config.theme)
             self.theme_version += 1
+        if fonts_changed:
+            self.font_version += 1
         if lsp_changed:
             self._rebuild_lsp_specs()
 
@@ -6257,15 +6269,14 @@ struct Desktop(Movable):
         self.theme_version += 1
 
     def set_font(mut self, label: String):
-        """Switch the cell font (native macOS frontend). ``label`` is a row
-        from the Settings Font list; the built-in rows map back to the
-        empty string / ``CLASSIC_FONT`` so the config file doesn't bake in
-        a display label. Bumps ``font_version`` so the Swift host refetches
-        the name and rebuilds its cell font + metrics."""
+        """Switch the font (native macOS frontend): the code's, and the
+        default for the other areas. ``label`` is a row from the Settings
+        Font list; the built-in rows map back to the empty string /
+        ``CHICAGO_FONT`` so the config file doesn't bake in a display label.
+        Bumps ``font_version`` so the Swift host refetches the name and
+        rebuilds its cell font + metrics."""
         if label == default_font_label():
             self.config.font = String("")
-        elif label == classic_font_label():
-            self.config.font = String(CLASSIC_FONT)
         elif label == chicago_font_label():
             self.config.font = String(CHICAGO_FONT)
         else:
@@ -6293,11 +6304,83 @@ struct Desktop(Movable):
         the built-in rows' config values render as their labels."""
         if len(self.config.font.as_bytes()) == 0:
             return default_font_label()
-        if self.config.font == CLASSIC_FONT:
-            return classic_font_label()
         if self.config.font == CHICAGO_FONT:
             return chicago_font_label()
         return self.config.font
+
+    def cell_font(self) -> String:
+        """The font the grid's cell size comes from, spelled as
+        ``config.font`` is. In the Turbo Vision look it's the built-in VGA
+        font: the UI there is drawn in it, at its ideal size, because its
+        frames are box drawing that only joins up in a font made for the
+        cell. Elsewhere it's ``config.font``."""
+        if self.tv_frame():
+            return String("")
+        return self.config.font
+
+    def cell_font_size(self) -> Int:
+        """``cell_font``'s point size; 0 is the font's default (the VGA
+        font's ideal 16pt, always, in the Turbo Vision look)."""
+        if self.tv_frame():
+            return 0
+        return self.config.font_size
+
+    def area_font(self, slot: Int) -> String:
+        """The font for area ``slot`` (``FONT_*`` in ``cell``), spelled as
+        ``config.font`` is. Code is ``config.font``; the UI in the Turbo
+        Vision look the cell font; any other area its own, else
+        ``config.font``."""
+        if slot == Int(FONT_CODE):
+            return self.config.font
+        if slot == Int(FONT_UI) and self.tv_frame():
+            return self.cell_font()
+        if slot < 0 or slot >= len(self.config.area_fonts):
+            return self.config.font
+        var own = self.config.area_fonts[slot]
+        if len(own.as_bytes()) == 0:
+            return self.config.font
+        if own == AREA_BUNDLED_FONT:
+            return String("")
+        return own
+
+    def area_font_label(self, slot: Int) -> String:
+        """The Settings-facing label for area ``slot``'s font setting."""
+        if slot < 0 or slot >= len(self.config.area_fonts):
+            return same_as_font_label()
+        var own = self.config.area_fonts[slot]
+        if len(own.as_bytes()) == 0:
+            return same_as_font_label()
+        if own == AREA_BUNDLED_FONT:
+            return default_font_label()
+        if own == CHICAGO_FONT:
+            return chicago_font_label()
+        return own
+
+    def _area_font_labels(self) -> List[String]:
+        var out = List[String]()
+        for slot in range(len(self.config.area_fonts)):
+            out.append(self.area_font_label(slot))
+        return out^
+
+    def set_area_font(mut self, slot: Int, label: String):
+        """Set area ``slot``'s font from a row of its Settings list
+        (``same_as_font_label`` clears it). Bumps ``font_version`` for the
+        host, like ``set_font``."""
+        if slot < 0 or slot >= len(self.config.area_fonts):
+            return
+        var v: String
+        if label == same_as_font_label():
+            v = String("")
+        elif label == default_font_label():
+            v = String(AREA_BUNDLED_FONT)
+        elif label == chicago_font_label():
+            v = String(CHICAGO_FONT)
+        else:
+            v = label
+        if v == self.config.area_fonts[slot]:
+            return
+        self.config.area_fonts[slot] = v
+        self.font_version += 1
 
     def _rebuild_lsp_specs(mut self):
         """Refresh ``lsp_specs`` from the bundled catalog plus user
@@ -6376,6 +6459,7 @@ struct Desktop(Movable):
         if self.config.auto_save:
             self._autosave_all_dirty()
         self._save_drafts_if_changed(True)
+        self._swap_search_memory(String(""))
         self.project = Optional[String]()
         self._pytest_file_globs = List[String]()
         self.speller.set_project(String(""))
@@ -6768,6 +6852,7 @@ struct Desktop(Movable):
         debug_log(String("[_set_project] realpath=") + resolved)
         var canonical = resolved if len(resolved.as_bytes()) > 0 else path
         debug_log(String("[_set_project] canonical=") + canonical)
+        self._swap_search_memory(canonical)
         self.project = Optional[String](canonical)
         # Parse the project's pytest ``python_files`` config once here so
         # the test-gutter run-icons match this project's test-file naming
@@ -8487,7 +8572,9 @@ struct Desktop(Movable):
         """
         return self.spell_menu.active or self.breakpoint_error.active \
             or self.breakpoint_menu.active or self.fill_dialog.active \
-            or self.find_dialog.active \
+            or (self.find_dialog.active and not self._typed_beside(
+                self.dialogs_windowed(),
+            )) \
             or self.names_review.active \
             or self.spelling_dialog.active \
             or self.git_gutter_menu.active or self.test_gutter_menu.active \
@@ -8506,7 +8593,16 @@ struct Desktop(Movable):
             or (self.review.active and not self.review.is_reviewing()) \
             or self.history.active \
             or self.project_settings.active \
-            or self.settings.active
+            or (self.settings.active and not self._typed_beside(
+                self.settings_detached or self.settings_native(),
+            ))
+
+    def _typed_beside(self, windowed: Bool) -> Bool:
+        """An action arrived from the project window while a dialog that's
+        ``windowed`` (open in a window of its own, which the user can leave
+        open while working — Find / Replace, Settings) is up: it's the
+        project window's, not the dialog's."""
+        return windowed and self.project_window_key
 
     def _action_replay_event(self, action: String) -> Optional[Event]:
         """If ``action`` is *keystroke-equivalent* — its whole meaning is
@@ -8881,6 +8977,7 @@ struct Desktop(Movable):
         if len(self.settings._font_names) > 0:
             self.settings.font_choice = self.font_label()
             self.settings.font_size_choice = self.config.font_size
+            self.settings.area_font_choices = self._area_font_labels()
         self._apply_view_config()
         self._persist_config()
 
@@ -9005,6 +9102,8 @@ struct Desktop(Movable):
             out.append(String("settings"))
             if self.settings.language_editor.active:
                 out.append(String("language_editor"))
+            if self.settings.font_chooser.active:
+                out.append(String("font_chooser"))
         return out^
 
     def ui_surface(self) -> String:
@@ -9027,6 +9126,8 @@ struct Desktop(Movable):
             return self.settings.ui()
         if name == String("language_editor"):
             return self.settings.language_editor.ui()
+        if name == String("font_chooser"):
+            return self.settings.font_chooser.ui()
         if name == String("project_settings"):
             return self.project_settings.ui()
         if name == String("action_editor"):
@@ -9057,6 +9158,11 @@ struct Desktop(Movable):
                     self.settings.language_editor.ui_act(e.key)
                 else:
                     self.settings.language_editor.ui_set(e.key, e.value)
+            elif name == String("font_chooser"):
+                if e.is_action:
+                    self.settings.font_chooser.ui_act(e.key)
+                else:
+                    self.settings.font_chooser.ui_set(e.key, e.value)
             elif name == String("project_settings"):
                 if e.is_action:
                     self.project_settings.ui_act(e.key)
@@ -9097,8 +9203,10 @@ struct Desktop(Movable):
                     self.spelling_dialog.ui_act(e.key)
                 else:
                     self.spelling_dialog.ui_set(e.key, e.value)
-        if name == String("settings") or name == String("language_editor"):
+        if name == String("settings") or name == String("language_editor") \
+                or name == String("font_chooser"):
             self.settings.consume_language_editor()
+            self.settings.consume_font_chooser()
             # Apply before a Close resets the working state.
             self._sync_settings()
             if self.settings.close_requested:
@@ -10111,7 +10219,6 @@ struct Desktop(Movable):
             var font_names = List[String]()
             if len(self.host_font_names) > 0:
                 font_names.append(default_font_label())
-                font_names.append(classic_font_label())
                 font_names.append(chicago_font_label())
                 for i in range(len(self.host_font_names)):
                     font_names.append(self.host_font_names[i])
@@ -10147,6 +10254,7 @@ struct Desktop(Movable):
             self.settings.native_ui = self.config.native_ui
             self.settings.platinum_ui = self.config.platinum_ui
             self.settings.terminal_tmux = self.config.terminal_tmux
+            self.settings.area_font_choices = self._area_font_labels()
             return Optional[String]()
         if action == HELP_HOTKEYS:
             self._open_hotkeys_help(screen)
@@ -13052,6 +13160,7 @@ struct Desktop(Movable):
             if len(self.settings._font_names) > 0:
                 self.settings.font_choice = self.font_label()
                 self.settings.font_size_choice = self.config.font_size
+                self.settings.area_font_choices = self._area_font_labels()
         if self.settings.dirty:
             self.config.auto_save = self.settings.auto_save
             self.config.trim_trailing_whitespace = (
@@ -13157,6 +13266,12 @@ struct Desktop(Movable):
                     and self.settings.font_size_choice \
                         != self.config.font_size:
                 self.set_font_size(self.settings.font_size_choice)
+            if len(self.settings._font_names) > 0:
+                for slot in range(len(self.settings.area_font_choices)):
+                    if self.settings.area_font_choices[slot] \
+                            != self.area_font_label(slot):
+                        var label = self.settings.area_font_choices[slot].copy()
+                        self.set_area_font(slot, label)
             # Wrap mode (Settings ▸ Editor). Applying it re-pushes the value
             # into every editor and re-reveals each cursor, since the
             # buffer-row ↔ screen-row relationship changes with the mode.
@@ -14284,9 +14399,11 @@ struct Desktop(Movable):
             self._open_find_dialog(True)
             return
         self._pending_action = _PA_REPLACE_DO
+        var seed = self._selection_seed_for_search()
+        if len(seed.as_bytes()) == 0:
+            seed = self._last_search
         self.prompt.open_replace(
-            String("Find: "), String("Replace: "),
-            self._selection_seed_for_search(),
+            String("Find: "), String("Replace: "), seed^,
             select_prefill=True, show_options=True,
         )
         self.prompt.set_search_options(self._last_search_opts)
@@ -14428,6 +14545,15 @@ struct Desktop(Movable):
             self.doc_pick.close()
         if self.project_find.active:
             self.project_find.close()
+
+    def _swap_search_memory(mut self, new_root: String):
+        """The Find needle is per project: park the current project's and
+        take up ``new_root``'s. Call before ``self.project`` changes."""
+        var old_root = self.project.value() if self.project else String("")
+        if old_root == new_root:
+            return
+        self._search_memory.put(old_root, self._last_search)
+        self._last_search = self._search_memory.get(new_root)
 
     def _selection_seed_for_search(self) -> String:
         """Return the focused editor's current selection if it's

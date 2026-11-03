@@ -125,7 +125,7 @@ struct TestPane(Copyable, Movable):
     def __copyinit__(mut self, copy: Self):
         self.visible = copy.visible
         self.focused = copy.focused
-        self.dock = copy.dock
+        self.dock = copy.dock.copy()
         # ``PtyProcess`` isn't safely copyable (the master fd is a kernel
         # handle). Production keeps the pane singleton on ``Desktop``;
         # copies are only Mojo value-semantics in tests. Reset to a fresh
@@ -133,13 +133,13 @@ struct TestPane(Copyable, Movable):
         self.pty = PtyProcess()
         # Shared, not copied: ``Vt`` is a handle the original pane owns.
         self.vt = copy.vt
-        self.sel = copy.sel
+        self.sel = copy.sel.copy()
         self.started = copy.started
         self.exited = copy.exited
         self.exit_code = copy.exit_code
         self._eof = copy._eof
         self.last_command = copy.last_command
-        self._last_links = copy._last_links
+        self._last_links = copy._last_links.copy()
         self.pending_open_path = copy.pending_open_path
         self.pending_open_line = copy.pending_open_line
         self.pending_open_url = copy.pending_open_url

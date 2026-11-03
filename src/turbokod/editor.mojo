@@ -2125,7 +2125,7 @@ struct Editor(Copyable, Movable):
         return ed^
 
     def __copyinit__(mut self, copy: Self):
-        self.buffer = copy.buffer
+        self.buffer = copy.buffer.copy()
         self.selections = copy.selections.copy()
         self.scroll_y = copy.scroll_y
         self.scroll_x = copy.scroll_x

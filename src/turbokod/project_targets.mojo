@@ -124,7 +124,7 @@ struct ProjectTargets(Movable):
     def current(self) -> Optional[RunTarget]:
         if not self.has_active():
             return Optional[RunTarget]()
-        return Optional[RunTarget](self.targets[self.active])
+        return Optional[RunTarget](self.targets[self.active].copy())
 
     def set_active_by_name(mut self, name: String) -> Bool:
         for i in range(len(self.targets)):

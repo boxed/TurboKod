@@ -667,6 +667,11 @@ struct GridForm(Movable):
                     keep = True
         if not keep:
             self.focus_key = first
+            # A field that takes the focus this way (the dialog opening)
+            # starts fully selected, so typing replaces the seeded text.
+            for i in range(len(self._field_keys)):
+                if self._field_keys[i] == first:
+                    self._fields[i].select_all()
 
     def frame(self) -> Rect:
         return self._frame

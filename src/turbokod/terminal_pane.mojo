@@ -288,7 +288,7 @@ struct TerminalPane(Copyable, Movable):
 
     def __copyinit__(mut self, copy: Self):
         self.visible = copy.visible
-        self.dock = copy.dock
+        self.dock = copy.dock.copy()
         self.focused = copy.focused
         # ``PtyProcess`` isn't safely copyable: the master fd is a
         # kernel handle; if both copies' destructors closed it the
@@ -300,7 +300,7 @@ struct TerminalPane(Copyable, Movable):
         # The copy shares the emulator (``Vt`` is a handle); the original
         # pane owns it and is the one that releases it.
         self.vt = copy.vt
-        self.sel = copy.sel
+        self.sel = copy.sel.copy()
         self.scroll_bar = copy.scroll_bar.copy()
         self.history = copy.history
         self._history_on = copy._history_on

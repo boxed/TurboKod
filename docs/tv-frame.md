@@ -106,6 +106,13 @@ Settings moves it into that look's window.
   stay centered inside.
 - A chord the menu bar replays (⌘V into a picker's field) goes through
   `_replay_through_modal` to the dialog window at its last painted size.
+- Settings, though, is *not* modal: the project window stays usable
+  beside it. So before dispatching a menu action the host reports whether
+  the key window is the project window (or its floating panels):
+  `tk_desktop_set_project_window_key` → `Desktop.project_window_key`. With
+  it set, `_modal_owns_input` doesn't count Settings (or a windowed Find /
+  Replace) as owning input, and ⌘V / ⌘Z typed in the project window reach
+  its editor or terminal instead of being replayed into Settings' field.
 - C ABI: `tk_desktop_dialog_window` (JSON `{kind, title, cols, rows,
   resizable}`: the size the dialog takes in the grid of a project window
   that size), `tk_desktop_layout_dialog`, `tk_desktop_dialog_key`,

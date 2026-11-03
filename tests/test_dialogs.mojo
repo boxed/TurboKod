@@ -1520,7 +1520,7 @@ def test_quick_open_preserves_selection_and_scroll_across_close_and_reopen() rai
 def test_quick_open_resets_saved_state_when_project_root_changes() raises:
     """Saved indices belong to the previous tree; carrying them into a
     different project would land the cursor on an unrelated file. The
-    saved query is dropped too — it was about the previous tree."""
+    query is remembered per project, so it comes back with its project."""
     var root_a = find_git_project(String("examples/hello.mojo"))
     assert_true(root_a)
     var qo = QuickOpen()
@@ -1530,11 +1530,19 @@ def test_quick_open_resets_saved_state_when_project_root_changes() raises:
     qo.selected = 12
     qo.scroll = 4
     qo.close()
-    # A different root invalidates the saved query / sel / scroll.
+    # A different root invalidates the saved sel / scroll, and has a
+    # query of its own (none yet).
     qo.open(String("/tmp"))
     assert_equal(qo.query.text, String(""))
     assert_equal(qo.selected, 0)
     assert_equal(qo.scroll, 0)
+    qo.close()
+    # Back in the first project: its query, fully selected.
+    qo.open(root_a.value())
+    assert_equal(qo.query.text, String("editor"))
+    assert_equal(qo.query.anchor, 0)
+    assert_equal(qo.query.cursor, len(qo.query.text.as_bytes()))
+    qo.close()
 
 
 def test_quick_open_shift_down_extends_multi_selection() raises:

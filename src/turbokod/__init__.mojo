@@ -76,7 +76,7 @@ from .desktop import (
     GIT_LOCAL_CHANGES, GIT_OPEN_ALL_CHANGED,
     HELP_HOTKEYS,
     Hotkey, PROJECT_CLOSE_ACTION, PROJECT_SETTINGS,
-    PROJECT_FIND, PROJECT_OPEN, PROJECT_OPEN_RECENT,
+    PROJECT_FIND, PROJECT_OPEN,
     PROJECT_REPLACE, PROJECT_TREE_ACTION,
     TARGET_DEBUG, TARGET_RUN, TARGET_SELECT_PREFIX, TARGET_TEST,
     TARGET_TEST_DEBUG,
@@ -145,10 +145,7 @@ from .debugger_config import (
     built_in_debuggers, find_debugger_for_language, launch_arguments_for,
 )
 from .dir_browser import DirBrowser
-from .dropdown import (
-    DROPDOWN_HIT_BODY, DROPDOWN_HIT_LEFT, DROPDOWN_HIT_NONE,
-    DROPDOWN_HIT_RIGHT, Dropdown,
-)
+from .dropdown import DROPDOWN_HIT_BODY, DROPDOWN_HIT_NONE, Dropdown
 from .file_dialog import FileDialog
 from .save_as_dialog import SaveAsDialog
 from .scrollbar import HScrollbar, ScrollbarMetrics, VScrollbar

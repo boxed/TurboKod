@@ -75,11 +75,14 @@ def test_tab_walks_focus_and_typing_reports_edits() raises:
     var root = _demo()
     _ = _paint(form, root)
     assert_equal(form.focus_key, String("name"))   # first focusable
+    # It opens fully selected, so typing replaces the text.
     var evs = form.handle_event(root, Event.key_event(UInt32(ord("x"))), _SCREEN)
     assert_equal(len(evs), 1)
     assert_false(evs[0].is_action)
     assert_equal(evs[0].key, String("name"))
-    assert_equal(evs[0].value, String("adax"))
+    assert_equal(evs[0].value, String("x"))
+    evs = form.handle_event(root, Event.key_event(UInt32(ord("y"))), _SCREEN)
+    assert_equal(evs[0].value, String("xy"))
     _ = form.handle_event(root, Event.key_event(KEY_TAB), _SCREEN)
     assert_equal(form.focus_key, String("cwd"))
     _ = form.handle_event(root, Event.key_event(KEY_TAB), _SCREEN)

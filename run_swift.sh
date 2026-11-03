@@ -116,7 +116,6 @@ cp "$tk_tui" "$contents/MacOS/tk-tui"
 cp "$dylib" "$fwk/libturbokod.dylib"
 cp -R src/turbokod/grammars "$res/src/turbokod/grammars"
 cp -R src/turbokod/data     "$res/src/turbokod/data"
-cp app/assets/Px437_IBM_VGA_8x16.ttf "$res/Px437_IBM_VGA_8x16.ttf"
 cp app/assets/TurboKodVGA16x32.ttf "$res/TurboKodVGA16x32.ttf"
 
 # Ad-hoc re-sign the assembled bundle, innermost first. The executable and

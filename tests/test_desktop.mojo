@@ -1554,16 +1554,6 @@ def test_desktop_set_font_maps_default_label_to_empty() raises:
     assert_equal(d.font_version, v0 + 2)
 
 
-def test_desktop_set_font_maps_classic_label() raises:
-    """The classic built-in row stores the original font's family name,
-    which the Swift host matches to pin Px437 8x16 at every size, and
-    reads back as its label."""
-    var d = Desktop()
-    d.set_font(String("IBM VGA 8x16 classic (built-in)"))
-    assert_equal(d.config.font, String("Px437 IBM VGA 8x16"))
-    assert_equal(d.font_label(), String("IBM VGA 8x16 classic (built-in)"))
-
-
 def test_desktop_set_font_maps_chicago_label() raises:
     """The Chicago built-in row stores ``Chicago``, which the Swift host
     draws with Silom, and reads back as its label."""

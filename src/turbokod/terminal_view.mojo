@@ -19,7 +19,7 @@ them, so the pane stays the single writer to its child.
 from std.collections.list import List
 
 from .canvas import Canvas
-from .cell import Cell
+from .cell import Cell, FONT_TERMINAL
 from .clipboard import clipboard_copy
 from .colors import Attr, BG_TRUECOLOR, FG_TRUECOLOR
 from .events import (
@@ -395,10 +395,20 @@ def paint_grid(
 ):
     """Paint the ``Vt`` grid into ``body`` through ``painter`` (whose
     clip rect protects neighbouring panes). Overlays the selection and,
-    when ``focused``, a reverse-video cursor caret.
+    when ``focused``, a reverse-video cursor caret. In the terminal font.
 
     Reads the viewport — scrollback included when the user has scrolled
     up — from one snapshot, so a frame costs one pass over the cells."""
+    var prev = canvas.font
+    canvas.font = FONT_TERMINAL
+    _paint_grid_cells(canvas, painter, vt, sel, body, focused)
+    canvas.font = prev
+
+
+def _paint_grid_cells(
+    mut canvas: Canvas, painter: Painter, vt: Vt,
+    sel: GridSelection, body: Rect, focused: Bool,
+):
     var grid = vt.grid()
     var top = _view_top(vt)
     for r in range(grid.rows):

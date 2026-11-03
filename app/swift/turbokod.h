@@ -264,6 +264,10 @@ int32_t tk_desktop_git_window_key(int64_t h, uint32_t key, uint8_t mods,
 int32_t tk_desktop_git_window_mouse(int64_t h, int64_t x, int64_t y, uint8_t button,
                                     uint8_t pressed, uint8_t motion, uint8_t mods,
                                     int64_t cols, int64_t rows, uint8_t click_count);
+// Whether the key window is the project window (or its floating panels)
+// rather than one of its dialog windows — see tk_desktop_set_project_window_key
+// in native_api.mojo.
+void tk_desktop_set_project_window_key(int64_t h, int64_t on);
 void tk_desktop_set_git_window_key(int64_t h, int64_t on);
 int32_t tk_desktop_take_git_front_request(int64_t h);
 int32_t tk_desktop_welcome_needed(int64_t h);
@@ -356,6 +360,9 @@ void    tk_desktop_set_open_projects(int64_t h, int64_t ptr, int64_t n);
 void    tk_desktop_set_font_options(int64_t h, int64_t ptr, int64_t n);
 int64_t tk_font_version(int64_t h);
 int64_t tk_font_name(int64_t h, int64_t out_ptr, int64_t cap);
+// The font of one area (slot 0 UI, 1 code, 2 terminal, 3 debugger — the
+// slot in bits 21..23 of a cell's word 0), same encoding as tk_font_name.
+int64_t tk_font_area_name(int64_t h, int64_t slot, int64_t out_ptr, int64_t cap);
 // Configured point size (0 = the font's default: 16 bitmap / 13 vector).
 // Fetched alongside tk_font_name on a version bump.
 int64_t tk_font_size(int64_t h);

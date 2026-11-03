@@ -52,7 +52,7 @@ from std.collections.list import List
 from .canvas import Canvas
 from .string_utils import display_columns, truncate_to_columns
 from .painter import Painter
-from .cell import Cell
+from .cell import Cell, FONT_DEBUGGER, FONT_TERMINAL
 from .colors import (
     Attr, BLACK, DARK_GRAY, LIGHT_BLUE, LIGHT_GRAY, LIGHT_GREEN, LIGHT_MAGENTA,
     LIGHT_RED,
@@ -390,13 +390,13 @@ struct DebugPane(Copyable, Movable):
 
     def __copyinit__(mut self, copy: Self):
         self.visible = copy.visible
-        self.dock = copy.dock
+        self.dock = copy.dock.copy()
         self.status_text = copy.status_text
         self.mode = copy.mode
         self.title = copy.title
         self.rows = copy.rows.copy()
         self.current_frame_index = copy.current_frame_index
-        self.output = copy.output
+        self.output = copy.output.copy()
         self.stack_scroll = copy.stack_scroll
         self.right_scroll = copy.right_scroll
         self.focused = copy.focused
@@ -423,7 +423,7 @@ struct DebugPane(Copyable, Movable):
         self.host_inspect = copy.host_inspect
         self.native_rect = copy.native_rect
         self.repl_enabled = copy.repl_enabled
-        self.repl_input = copy.repl_input
+        self.repl_input = copy.repl_input.copy()
         self.repl_history = copy.repl_history.copy()
         self.repl_hist_idx = copy.repl_hist_idx
         self.pending_repl_expr = copy.pending_repl_expr
@@ -1170,6 +1170,10 @@ struct DebugPane(Copyable, Movable):
         var left_p = painter.sub(
             Rect(panel.a.x, content_top, left_x_max, content_top + inspect_h),
         )
+        # Stack and variables in the debugger font, the log in the
+        # terminal one; the chrome between them stays UI.
+        var prev_font = canvas.font
+        canvas.font = FONT_DEBUGGER
         for k in range(left_visible):
             var ridx = self._left_indices[self.stack_scroll + k]
             var r = self.rows[ridx]
@@ -1262,6 +1266,7 @@ struct DebugPane(Copyable, Movable):
                 )
             elif r.kind == PANE_ROW_BLANK:
                 pass
+        canvas.font = prev_font
         # Inspect / output divider — only meaningful when an inspect
         # section is actually being shown. In RUN mode there's no
         # inspect section to divide off, and likewise in DEBUG mode
@@ -1302,7 +1307,9 @@ struct DebugPane(Copyable, Movable):
         var out_rect = Rect(
             panel.a.x + 2, out_top, panel.b.x - 1, out_bottom,
         )
+        canvas.font = FONT_TERMINAL
         self.output.paint(canvas, out_rect)
+        canvas.font = prev_font
         # Vertical scrollbar in the right margin of the output rect.
         # Driven by the layout the log just stamped — present only when
         # content overflows the visible area.

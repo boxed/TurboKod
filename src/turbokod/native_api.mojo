@@ -51,7 +51,7 @@ from turbokod.file_io import basename, parent_path, project_relative
 from turbokod.colors import EDITOR_BG, EDITOR_FG, FG_TRUECOLOR
 from turbokod.string_utils import byte_slice
 from turbokod.config import (
-    chicago_font_label, classic_font_label, default_font_label,
+    chicago_font_label, default_font_label,
 )
 from turbokod.json import json_get_bool, json_get_int, json_get_string, parse_json
 from turbokod.theme import theme_names
@@ -597,12 +597,32 @@ def tk_font_version(h: Int) abi("C") -> Int:
 
 @export
 def tk_font_name(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
-    """Write the configured font family name (UTF-8) into the caller's
-    buffer and return the byte count. 0 means "use the built-in bitmap
-    font" — the config's empty-string default."""
+    """Write the cell font's family name (UTF-8; ``Desktop.cell_font``)
+    into the caller's buffer and return the byte count. 0 means "use the
+    built-in bitmap font" — the config's empty-string default, and always
+    the Turbo Vision look's."""
     if h == 0 or out_ptr == 0 or cap <= 0:
         return 0
-    var bytes = _desk(h)[].config.font.as_bytes()
+    var name = _desk(h)[].cell_font()
+    var bytes = name.as_bytes()
+    var n = len(bytes)
+    if n > cap:
+        n = cap
+    var op = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=out_ptr)
+    for i in range(n):
+        op[unsafe_offset=i] = bytes[i]
+    return n
+
+
+@export
+def tk_font_area_name(h: Int, slot: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
+    """``tk_font_name`` for the font of area ``slot`` (``FONT_*`` in
+    ``cell``, the slot ``pack_canvas`` puts in each cell), resolved by
+    ``Desktop.area_font``. Polled with ``tk_font_name``."""
+    if h == 0 or out_ptr == 0 or cap <= 0:
+        return 0
+    var name = _desk(h)[].area_font(slot)
+    var bytes = name.as_bytes()
     var n = len(bytes)
     if n > cap:
         n = cap
@@ -614,13 +634,13 @@ def tk_font_name(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
 
 @export
 def tk_font_size(h: Int) abi("C") -> Int:
-    """The configured cell-font point size. 0 means "the font's default
-    size" — the host picks 16 for the bundled bitmap font, 13 for system
-    monospace families. Polled together with ``tk_font_name`` whenever
-    ``tk_font_version`` moves."""
+    """The cell font's point size (``Desktop.cell_font_size``). 0 means
+    "the font's default size" — the host picks 16 for the bundled bitmap
+    font, 13 for other families. Polled together with ``tk_font_name``
+    whenever ``tk_font_version`` moves."""
     if h == 0:
         return 0
-    return _desk(h)[].config.font_size
+    return _desk(h)[].cell_font_size()
 
 
 @export
@@ -1473,6 +1493,18 @@ def tk_desktop_git_window_mouse(
     except e:
         print("turbokod: tk_desktop_git_window_mouse:", String(e))
     return ACT_NONE
+
+
+@export
+def tk_desktop_set_project_window_key(h: Int, on: Int) abi("C"):
+    """Whether the key window is the project window (or its floating
+    panels) rather than one of its dialog windows. The host reports it
+    before dispatching an Edit-menu action, so a dialog open in a window of
+    its own (Find / Replace, Settings) only takes Paste / Undo / … typed
+    there."""
+    if h == 0:
+        return
+    _desk(h)[].project_window_key = on != 0
 
 
 @export
@@ -2564,7 +2596,6 @@ def tk_desktop_welcome_options(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     o.put(String("themes"), themes)
     var fonts = json_array()
     fonts.append(json_str(default_font_label()))
-    fonts.append(json_str(classic_font_label()))
     fonts.append(json_str(chicago_font_label()))
     o.put(String("builtin_fonts"), fonts)
     o.put(String("native_ui"), json_bool(d.config.native_ui))

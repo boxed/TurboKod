@@ -81,16 +81,10 @@ def default_font_label() -> String:
     return String("IBM VGA (built-in)")
 
 
-# ``font`` config value that pins the original Px437 IBM VGA 8x16 font at
-# every size — the family name of the bundled TTF. The Swift host matches
-# it to load that file rather than looking the family up.
-comptime CLASSIC_FONT = "Px437 IBM VGA 8x16"
-
-
-def classic_font_label() -> String:
-    """Display label for ``CLASSIC_FONT`` — the second row of the Font
-    list. ``Desktop.set_font`` maps it to ``CLASSIC_FONT``."""
-    return String("IBM VGA 8x16 classic (built-in)")
+# The ``font`` value of the original Px437 IBM VGA 8x16 font, which is no
+# longer bundled: a config naming it reads as the built-in VGA font, which
+# draws the same 8x16 pixels at its ideal size.
+comptime _RETIRED_CLASSIC_FONT = "Px437 IBM VGA 8x16"
 
 
 # ``font`` config value for the classic Mac system font. The Swift host
@@ -101,9 +95,31 @@ comptime CHICAGO_FONT = "Chicago"
 
 
 def chicago_font_label() -> String:
-    """Display label for ``CHICAGO_FONT`` — the third row of the Font
+    """Display label for ``CHICAGO_FONT`` — the second row of the Font
     list. ``Desktop.set_font`` maps it to ``CHICAGO_FONT``."""
     return String("Chicago (built-in)")
+
+
+# An area font's config value for the bundled VGA font, which ``font``
+# spells as the empty string — there, an area font means "same as Font".
+comptime AREA_BUNDLED_FONT = "IBM VGA"
+
+
+def same_as_font_label() -> String:
+    """The first row of an area's font list: no font of its own."""
+    return String("Same as Font")
+
+
+def area_font_key(slot: Int) -> String:
+    """Config key of the font for area ``slot`` (``FONT_*`` in ``cell``).
+    The code's (slot 1) is ``font`` itself, so it has none."""
+    if slot == 1:
+        return String("")
+    if slot == 2:
+        return String("font_terminal")
+    if slot == 3:
+        return String("font_debugger")
+    return String("font_ui")
 
 
 struct LanguageServerOverride(Copyable, Movable):
@@ -288,6 +304,13 @@ struct TurbokodConfig(Copyable, Movable):
     # never touched the size keeps each font's natural default when the
     # family changes.
     var font_size: Int
+    # Settings ▸ Terminal / Debugger / UI font (native macOS only), indexed
+    # by font slot (``FONT_*`` in ``cell``): the face for that area at the
+    # shared cell size. Empty means "same as ``font``"; ``AREA_BUNDLED_FONT``
+    # the bundled VGA font, otherwise spelled as ``font`` is. The code slot's
+    # is ``font`` itself, so its entry is unused; the UI one is ignored in
+    # the Turbo Vision look, which draws its UI in the VGA font.
+    var area_fonts: List[String]
     # Per-project cap on simultaneously-open file-backed editor windows.
     # Once a project hits this, opening another document closes the
     # least-recently-focused clean (saved) document; session restore
@@ -347,6 +370,7 @@ struct TurbokodConfig(Copyable, Movable):
         self.theme = String("Turbo C++ 3.0")
         self.font = String("")
         self.font_size = 0
+        self.area_fonts = [String(""), String(""), String(""), String("")]
         self.max_open_windows = DEFAULT_MAX_OPEN_WINDOWS
         self.recent_projects = List[String]()
         self.project_dirs = List[String]()
@@ -385,6 +409,7 @@ struct TurbokodConfig(Copyable, Movable):
         self.theme = copy.theme
         self.font = copy.font
         self.font_size = copy.font_size
+        self.area_fonts = copy.area_fonts.copy()
         self.max_open_windows = copy.max_open_windows
         self.recent_projects = copy.recent_projects.copy()
         self.project_dirs = copy.project_dirs.copy()
@@ -555,6 +580,8 @@ def _config_from_json(root: JsonValue) raises -> TurbokodConfig:
     if len(theme_v.as_bytes()) > 0:
         cfg.theme = theme_v
     cfg.font = json_get_string(root, String("font"))
+    if cfg.font == _RETIRED_CLASSIC_FONT:
+        cfg.font = String("")
     cfg.font_size = json_get_int(
         root, String("font_size"), cfg.font_size,
     )
@@ -567,6 +594,14 @@ def _config_from_json(root: JsonValue) raises -> TurbokodConfig:
             cfg.font_size = MIN_FONT_SIZE
         elif cfg.font_size > MAX_FONT_SIZE:
             cfg.font_size = MAX_FONT_SIZE
+    for slot in range(len(cfg.area_fonts)):
+        var key = area_font_key(slot)
+        if len(key.as_bytes()) == 0:
+            continue
+        var v = json_get_string(root, key)
+        if v == _RETIRED_CLASSIC_FONT:
+            v = String(AREA_BUNDLED_FONT)
+        cfg.area_fonts[slot] = v
     cfg.max_open_windows = json_get_int(
         root, String("max_open_windows"), cfg.max_open_windows,
     )
@@ -738,6 +773,10 @@ def _config_to_json(config: TurbokodConfig) -> JsonValue:
     root.put(String("theme"), json_str(config.theme))
     root.put(String("font"), json_str(config.font))
     root.put(String("font_size"), json_int(config.font_size))
+    for slot in range(len(config.area_fonts)):
+        var key = area_font_key(slot)
+        if len(key.as_bytes()) > 0:
+            root.put(key, json_str(config.area_fonts[slot]))
     root.put(
         String("max_open_windows"), json_int(config.max_open_windows),
     )

@@ -466,8 +466,8 @@ struct CodeAction(Copyable, Movable):
         self.is_preferred = copy.is_preferred
         self.file_edits = copy.file_edits.copy()
         self.command = copy.command
-        self.command_args = copy.command_args
-        self.unresolved = copy.unresolved
+        self.command_args = copy.command_args.copy()
+        self.unresolved = copy.unresolved.copy()
 
 
 struct _PositionRemapper(Copyable, Movable):

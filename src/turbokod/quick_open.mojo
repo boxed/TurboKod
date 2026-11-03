@@ -33,6 +33,7 @@ from .picker_input import (
     scroll_to_reveal,
 )
 from .project import FileIndexer, QUICK_OPEN_FILE_CAP, walk_project_files
+from .query_memory import QueryMemory
 from .text_field import TextField
 from .window import close_button_clicked, paint_modal_frame, paint_window_title
 
@@ -100,13 +101,13 @@ struct QuickOpen(Movable):
     var _ignored_indexer: Optional[FileIndexer]
     var indexing: Bool
     var truncated: Bool
-    # Query text remembered across close/reopen, scoped to the project-
-    # files ``open()`` path. ``close()`` captures the current query before
-    # tearing the field down, and ``open()`` restores it (select-all'd
-    # so the user's first keystroke replaces it). The "Open Recent"
-    # variants do not restore — they always start empty since they
-    # filter a different list.
-    var _saved_query: String
+    # Query text remembered across close/reopen, per project root and
+    # scoped to the project-files ``open()`` path. ``close()`` captures
+    # the current query before tearing the field down, and ``open()``
+    # restores it (select-all'd so the user's first keystroke replaces
+    # it). The "Open Recent" variants do not restore — they always start
+    # empty since they filter a different list.
+    var _queries: QueryMemory
     # Saved selection + scroll, also scoped to ``open()``. Stored as
     # raw indices (not paths) so the restore survives a partially-loaded
     # async indexer: ``_refilter`` clamps these into the current
@@ -161,7 +162,7 @@ struct QuickOpen(Movable):
         self._ignored_indexer = Optional[FileIndexer]()
         self.indexing = False
         self.truncated = False
-        self._saved_query = String("")
+        self._queries = QueryMemory()
         self._saved_selected = 0
         self._saved_scroll = 0
         self._saved_root = String("")
@@ -170,12 +171,12 @@ struct QuickOpen(Movable):
         self._filtered_count = 0
 
     def open(mut self, var root: String, var prefill: String = String("")):
-        # A different project root invalidates everything we'd saved —
-        # the file list won't share indices, and the saved query was
-        # likely about the previous tree. Reset before the move so
-        # ``self.root`` reflects the new value when we compare next time.
+        # A different project root invalidates the saved row / scroll —
+        # the file list won't share indices. (The query is kept per root
+        # in ``_queries``.) Reset before the move so ``self.root``
+        # reflects the new value when we compare next time.
+        var saved_query = self._queries.get(root)
         if self._saved_root != root:
-            self._saved_query = String("")
             self._saved_selected = 0
             self._saved_scroll = 0
         self._saved_root = root
@@ -193,8 +194,8 @@ struct QuickOpen(Movable):
         if has_prefill:
             self.query.set_text(prefill^)
             self.query.select_all()
-        elif len(self._saved_query.as_bytes()) > 0:
-            self.query.set_text(self._saved_query)
+        elif len(saved_query.as_bytes()) > 0:
+            self.query.set_text(saved_query^)
             self.query.select_all()
         self.active = True
         self.submitted = False
@@ -399,7 +400,7 @@ struct QuickOpen(Movable):
         # 5 files, opened them, and reopened the picker" should land
         # back on a single cursor, not on a 5-row highlight.
         if self._in_main_open:
-            self._saved_query = self.query.text
+            self._queries.put(self.root, self.query.text)
             self._saved_selected = self.selected
             self._saved_scroll = self.scroll
             # ``_saved_root`` was already set in ``open()``; leave it.

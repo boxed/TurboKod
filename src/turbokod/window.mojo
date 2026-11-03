@@ -14,7 +14,7 @@ from std.collections.list import List
 
 from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
-from .cell import Cell
+from .cell import Cell, FONT_CODE
 from .colors import (
     Attr, BORDER_FOCUS, DARK_GRAY, EDITOR_BG, EDITOR_FG, GREEN, LIGHT_GRAY,
     LIGHT_YELLOW, PANE_BG, PANE_FG, WHITE, YELLOW,
@@ -1253,7 +1253,7 @@ struct Window(Copyable, Movable):
         self.title = copy.title
         self.rect = copy.rect
         self.content = copy.content.copy()
-        self.editor = copy.editor
+        self.editor = copy.editor.copy()
         self.is_editor = copy.is_editor
         self.is_maximized = copy.is_maximized
         self._restore_rect = copy._restore_rect
@@ -1390,7 +1390,7 @@ struct Window(Copyable, Movable):
                 border,
             )
         if self.is_editor:
-            self.editor.paint(canvas, self.interior(), focused)
+            self._paint_editor(canvas, focused)
         else:
             # Content, left-aligned. The painter clips to ``self.rect``
             # on both axes; ``inner_h`` keeps us off the bottom border.
@@ -1418,6 +1418,13 @@ struct Window(Copyable, Movable):
                 Cell(String("*"), Attr(GREEN, EDITOR_BG), 1),
             )
 
+    def _paint_editor(self, mut canvas: Canvas, focused: Bool):
+        """The editor in the code font; the frame around it stays UI."""
+        var prev = canvas.font
+        canvas.font = FONT_CODE
+        self.editor.paint(canvas, self.interior(), focused)
+        canvas.font = prev
+
     def _paint_frameless(
         self, mut canvas: Canvas, focused: Bool, content_attr: Attr,
         body_bg: Attr,
@@ -1425,7 +1432,7 @@ struct Window(Copyable, Movable):
         var painter = Painter(self.rect)
         painter.fill(canvas, self.rect, String(" "), body_bg)
         if self.is_editor:
-            self.editor.paint(canvas, self.interior(), focused)
+            self._paint_editor(canvas, focused)
             var bar_attr = Attr(BORDER_FOCUS, EDITOR_BG) if focused \
                 else Attr(EDITOR_FG, EDITOR_BG)
             self._paint_v_scrollbar(canvas, painter, bar_attr)
