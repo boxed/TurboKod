@@ -156,6 +156,15 @@ def _name_part(s: String) -> String:
     return String(StringSpan(unsafe_from_utf8=Span(out)))
 
 
+def _target(name: String) -> String:
+    """``-t`` for session ``name`` and only it. A bare name falls back to
+    the first session it starts, so with ``proj-shell`` gone, closing its
+    pane killed ``proj-shell-2`` (or a ``proj-shell-dev`` of the user's)
+    and re-attaching it attached that one. ``=`` asks for the exact name,
+    and the ``:`` makes it a session for the commands that take a pane."""
+    return String("=") + name + String(":")
+
+
 def _base_argv(tmux: String, socket: String) -> List[String]:
     var argv = List[String]()
     argv.append(String("env"))
@@ -213,16 +222,16 @@ def _server_options(mut argv: List[String]):
 def _session_options(mut argv: List[String], name: String):
     """What makes tmux invisible inside a pane — set on ``name`` only, so
     the user's own sessions keep their status line and prefix key."""
-    _cmd(argv, [String("set"), String("-t"), name, String("status"), String("off")])
-    _cmd(argv, [String("set"), String("-t"), name, String("prefix"), String("None")])
-    _cmd(argv, [String("set"), String("-t"), name, String("prefix2"), String("None")])
-    _cmd(argv, [String("set"), String("-t"), name, String("mouse"), String("on")])
+    _cmd(argv, [String("set"), String("-t"), _target(name), String("status"), String("off")])
+    _cmd(argv, [String("set"), String("-t"), _target(name), String("prefix"), String("None")])
+    _cmd(argv, [String("set"), String("-t"), _target(name), String("prefix2"), String("None")])
+    _cmd(argv, [String("set"), String("-t"), _target(name), String("mouse"), String("on")])
     _cmd(argv, [
-        String("set"), String("-w"), String("-t"), name,
+        String("set"), String("-w"), String("-t"), _target(name),
         String("allow-passthrough"), String("on"),
     ])
     _cmd(argv, [
-        String("set"), String("-w"), String("-t"), name,
+        String("set"), String("-w"), String("-t"), _target(name),
         String("window-size"), String("latest"),
     ])
 
@@ -277,32 +286,32 @@ def tmux_attach_argv(
         _cmd(argv, nw^)
         if is_run:
             _cmd(argv, [
-                String("set-option"), String("-t"), name, _OPT_RUN, run_target,
+                String("set-option"), String("-t"), _target(name), _OPT_RUN, run_target,
             ])
         if tests:
             _cmd(argv, [
-                String("set-option"), String("-t"), name, _OPT_TESTS, String("1"),
+                String("set-option"), String("-t"), _target(name), _OPT_TESTS, String("1"),
             ])
         _cmd(argv, [
-            String("set-option"), String("-t"), name, _OPT_PROJECT, project,
+            String("set-option"), String("-t"), _target(name), _OPT_PROJECT, project,
         ])
         _cmd(argv, [
-            String("set-option"), String("-t"), name, _OPT_CMD, startup_command,
+            String("set-option"), String("-t"), _target(name), _OPT_CMD, startup_command,
         ])
         if not is_run and len(startup_command.as_bytes()) > 0:
             # Typed, not exec'd: the user's rc files run first, and the
             # prompt comes back when the command exits.
             _cmd(argv, [
-                String("send-keys"), String("-t"), name, String("-l"),
+                String("send-keys"), String("-t"), _target(name), String("-l"),
                 startup_command,
             ])
             _cmd(argv, [
-                String("send-keys"), String("-t"), name, String("Enter"),
+                String("send-keys"), String("-t"), _target(name), String("Enter"),
             ])
     # A session that's gone fails here, which ends the sequence: the
     # client exits and the pane sees EOF.
     _session_options(argv, name)
-    _cmd(argv, [String("attach-session"), String("-t"), name])
+    _cmd(argv, [String("attach-session"), String("-t"), _target(name)])
     return argv^
 
 
@@ -369,7 +378,7 @@ def _simple(
     for i in range(len(flags)):
         words.append(flags[i])
     words.append(String("-t"))
-    words.append(name)
+    words.append(_target(name))
     for i in range(len(trailing)):
         words.append(trailing[i])
     _cmd(argv, words^)
@@ -388,7 +397,7 @@ def _query(name: String, var words: List[String]) -> String:
     if len(tmux.as_bytes()) == 0 or len(name.as_bytes()) == 0:
         return String("")
     var argv = _base_argv(tmux, socket)
-    words.insert(1, name)
+    words.insert(1, _target(name))
     words.insert(1, String("-t"))
     _cmd(argv, words^)
     try:

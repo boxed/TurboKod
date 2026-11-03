@@ -17,8 +17,9 @@ from turbokod.lsp import capture_command
 from turbokod.posix import getenv_value, setenv_value, sleep_ms
 from turbokod.project_targets import RunTarget
 from turbokod.tmux_session import (
-    new_tmux_session_name, tmux_pane_state, tmux_available, tmux_binary, tmux_kind,
-    tmux_project_sessions, tmux_socket_path,
+    new_tmux_session_name, prepare_tmux_socket_dir, tmux_pane_state, tmux_available,
+    tmux_binary, tmux_history, tmux_kill_session, tmux_kind, tmux_project_sessions,
+    tmux_respawn, tmux_session_names, tmux_socket_path, tmux_stop,
 )
 
 from support import _ensure_dir, _rm_rf, _temp_path, _test_home, setup_test_env
@@ -175,6 +176,34 @@ def test_tmux_keeps_a_trailing_semicolon() raises:
     _ = capture_command(kill)
     d.shutdown()
     _rm_rf(root)
+
+
+def _tmux(var words: List[String]) raises -> String:
+    var argv = List[String]()
+    argv.append(tmux_binary())
+    argv.append(String("-S"))
+    argv.append(tmux_socket_path())
+    for i in range(len(words)):
+        argv.append(words[i])
+    return capture_command(argv).stdout
+
+
+def test_tmux_commands_reach_only_their_own_session() raises:
+    # a bare -t name falls back to the first session it starts: with
+    # tk-gone gone, closing its pane killed tk-gone-2
+    if not tmux_available():
+        return
+    assert_true(tmux_socket_path().startswith(_test_home()))
+    prepare_tmux_socket_dir(tmux_socket_path())
+    _ = _tmux([String("-f"), String("/dev/null"), String("new-session"), String("-d"), String("-s"), String("tk-gone-2")])
+    tmux_kill_session(String("tk-gone"))
+    tmux_stop(String("tk-gone"))
+    tmux_respawn(String("tk-gone"))
+    assert_equal(tmux_history(String("tk-gone"), 10), String("\x1b[0m"))
+    assert_equal(tmux_session_names(), [String("tk-gone-2")])
+    tmux_kill_session(String("tk-gone-2"))
+    assert_equal(len(tmux_session_names()), 0)
+    _ = _tmux([String("kill-server")])
 
 
 def _run_pane_settles(mut d: Desktop, idx: Int) -> Bool:
