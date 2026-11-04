@@ -259,6 +259,7 @@ from .test_pane import (
 from .editor import BreakpointMenuRequest, Editor
 from .window import (
     BottomDockedPanel, DOCK_MIN_HEIGHT, MIN_WIN_H, MIN_WIN_W,
+    coalesce_dock_states,
     PANEL_STATE_MAXIMIZED, PANEL_STATE_MINIMIZED, PANEL_STATE_NORMAL,
     TitleCommand, Window, WindowManager,
     close_button_clicked, compute_display_titles, hit_title_command,
@@ -2984,14 +2985,65 @@ struct Desktop(Movable):
         return Rect(self._panel_left(screen), top,
                     self._panel_right(screen), bottom)
 
+    def _coalesce_dock_states(mut self):
+        """At most one maximized pane in the bottom dock, the others
+        minimized beside it (see ``coalesce_dock_states``). Runs each
+        frame before layout, over the visible panes, top to bottom."""
+        var docks = List[BottomDockedPanel]()
+        for i in range(len(self.terminal_panes)):
+            docks.append(self.terminal_panes[i].dock.copy())
+        if self.debug_pane.visible:
+            docks.append(self.debug_pane.dock.copy())
+        if self.find_results_pane.visible:
+            docks.append(self.find_results_pane.dock.copy())
+        if self.test_pane.visible:
+            docks.append(self.test_pane.dock.copy())
+        coalesce_dock_states(docks)
+        var k = 0
+        for i in range(len(self.terminal_panes)):
+            self.terminal_panes[i].dock = docks[k].copy()
+            k += 1
+        if self.debug_pane.visible:
+            self.debug_pane.dock = docks[k].copy()
+            k += 1
+        if self.find_results_pane.visible:
+            self.find_results_pane.dock = docks[k].copy()
+            k += 1
+        if self.test_pane.visible:
+            self.test_pane.dock = docks[k].copy()
+
+    def _dock_height(
+        self, dock: BottomDockedPanel, screen: Rect, chrome: Int,
+    ) -> Int:
+        """``dock``'s rendered height in the stack: its own
+        ``effective_height``, except that a maximized pane leaves room
+        for the other visible panes (minimized beside it) so they stay
+        on screen."""
+        var h = dock.effective_height(screen, chrome)
+        if not dock.is_maximized():
+            return h
+        for i in range(len(self.terminal_panes)):
+            if not self.terminal_panes[i].dock.is_maximized():
+                h -= self.terminal_panes[i].dock.effective_height(
+                    screen, chrome,
+                )
+        if self.debug_pane.visible and not self.debug_pane.dock.is_maximized():
+            h -= self.debug_pane.dock.effective_height(screen, chrome)
+        if self.find_results_pane.visible \
+                and not self.find_results_pane.dock.is_maximized():
+            h -= self.find_results_pane.dock.effective_height(screen, chrome)
+        if self.test_pane.visible and not self.test_pane.dock.is_maximized():
+            h -= self.test_pane.dock.effective_height(screen, chrome)
+        return max(h, DOCK_MIN_HEIGHT)
+
     def _debug_pane_height(self, screen: Rect) -> Int:
         """Effective rendered height for the debug pane, considering
         its window state. NORMAL → ``preferred_height`` (user's drag
         target). MINIMIZED → 1 (header row only). MAXIMIZED → fill the
         whole bottom area, leaving just the menu bar above and the
         status / tab strip below."""
-        return self.debug_pane.dock.effective_height(
-            screen, self._bottom_chrome_height(screen),
+        return self._dock_height(
+            self.debug_pane.dock, screen, self._bottom_chrome_height(screen),
         )
 
     def test_pane_rect(self, screen: Rect) -> Rect:
@@ -3011,8 +3063,8 @@ struct Desktop(Movable):
     def _test_pane_height(self, screen: Rect) -> Int:
         """Effective rendered height for the test pane — same
         state-machine logic as ``_debug_pane_height``."""
-        return self.test_pane.dock.effective_height(
-            screen, self._bottom_chrome_height(screen),
+        return self._dock_height(
+            self.test_pane.dock, screen, self._bottom_chrome_height(screen),
         )
 
     def _bottom_pane_term_size(self) -> Tuple[Int, Int]:
@@ -3057,8 +3109,9 @@ struct Desktop(Movable):
     def _find_results_pane_height(self, screen: Rect) -> Int:
         """Effective rendered height for the Find Results pane — same
         state-machine logic as ``_debug_pane_height``."""
-        return self.find_results_pane.dock.effective_height(
-            screen, self._bottom_chrome_height(screen),
+        return self._dock_height(
+            self.find_results_pane.dock, screen,
+            self._bottom_chrome_height(screen),
         )
 
     def terminal_pane_rect(self, screen: Rect, idx: Int) -> Rect:
@@ -3085,12 +3138,8 @@ struct Desktop(Movable):
         # Walk from the top down to idx, accumulating heights.
         var y = stack_top
         for i in range(idx):
-            y += self.terminal_panes[i].dock.effective_height(
-                screen, chrome,
-            )
-        var h = self.terminal_panes[idx].dock.effective_height(
-            screen, chrome,
-        )
+            y += self._dock_height(self.terminal_panes[i].dock, screen, chrome)
+        var h = self._dock_height(self.terminal_panes[idx].dock, screen, chrome)
         var top = y
         var bottom = y + h
         if bottom > stack_bottom:
@@ -3110,8 +3159,8 @@ struct Desktop(Movable):
         var chrome = self._bottom_chrome_height(screen)
         var total = 0
         for i in range(n):
-            total += self.terminal_panes[i].dock.effective_height(
-                screen, chrome,
+            total += self._dock_height(
+                self.terminal_panes[i].dock, screen, chrome,
             )
         return total
 
@@ -3406,25 +3455,25 @@ struct Desktop(Movable):
             kinds.append(PANEL_KIND_TERMINAL)
             idxs.append(i)
             heights.append(
-                self.terminal_panes[i].dock.effective_height(screen, 0),
+                self._dock_height(self.terminal_panes[i].dock, screen, 0),
             )
             minimized.append(self.terminal_panes[i].dock.is_minimized())
         if self.debug_pane.visible:
             kinds.append(PANEL_KIND_DEBUG)
             idxs.append(0)
-            heights.append(self.debug_pane.dock.effective_height(screen, 0))
+            heights.append(self._dock_height(self.debug_pane.dock, screen, 0))
             minimized.append(self.debug_pane.dock.is_minimized())
         if self.find_results_pane.visible:
             kinds.append(PANEL_KIND_FIND_RESULTS)
             idxs.append(0)
             heights.append(
-                self.find_results_pane.dock.effective_height(screen, 0),
+                self._dock_height(self.find_results_pane.dock, screen, 0),
             )
             minimized.append(self.find_results_pane.dock.is_minimized())
         if self.test_pane.visible:
             kinds.append(PANEL_KIND_TEST)
             idxs.append(0)
-            heights.append(self.test_pane.dock.effective_height(screen, 0))
+            heights.append(self._dock_height(self.test_pane.dock, screen, 0))
             minimized.append(self.test_pane.dock.is_minimized())
         var n = len(kinds)
         if n > 0:
@@ -3467,6 +3516,7 @@ struct Desktop(Movable):
         set. Lays the visible panels out via `_panel_window_slots`; when none
         are open it paints the background plus a one-line hint."""
         self._sync_host_chrome()
+        self._coalesce_dock_states()
         Painter(screen).fill(canvas, screen, self.bg_pattern, self.bg_attr)
         var slots = self._panel_window_slots(screen)
         if len(slots) == 0:
@@ -4770,6 +4820,7 @@ struct Desktop(Movable):
         # to the actual pane width — see ``_bottom_pane_term_size``.
         self._last_screen = screen
         self._sync_host_chrome()
+        self._coalesce_dock_states()
         # Drive any per-frame timers before drawing — the project-find
         # widget runs its 200 ms debounce off this clock.
         self.project_find.tick(monotonic_ms())

@@ -34,6 +34,7 @@ from turbokod.string_utils import utf8_cell_of_byte, utf8_byte_of_cell
 from turbokod.posix import which
 from turbokod.settings import Settings
 from turbokod.canvas import paint_drop_shadow
+from turbokod.terminal_pane import TerminalPane
 from turbokod.window import (
     DockedPanelStack, PANEL_STATE_MAXIMIZED, PANEL_STATE_MINIMIZED,
     PANEL_STATE_NORMAL, TitleCommand, WindowManager, paint_title_commands
@@ -1044,6 +1045,56 @@ def test_docked_panel_stack_layout_normal_split() raises:
     assert_equal(lay[3], 7)
     assert_equal(lay[4], 16)
     assert_equal(lay[5], 7)
+
+
+def test_maximized_bottom_pane_keeps_the_others_as_headers() raises:
+    """Three terminal panes, the middle one maximized: the other two
+    minimize in place — still on screen, above and below it — and come
+    back at their own state once it's restored. A pane restored while
+    another is maximized ends the maximize."""
+    var d = Desktop()
+    var screen = Rect(0, 0, 100, 40)
+    d.terminal_panes.append(TerminalPane())
+    d.terminal_panes.append(TerminalPane())
+    d.terminal_panes.append(TerminalPane())
+    d.terminal_panes[2].dock.set_state(PANEL_STATE_MINIMIZED)
+    d.terminal_panes[1].dock.set_state(PANEL_STATE_MAXIMIZED)
+    var canvas = Canvas(100, 40)
+    d.paint(canvas, screen)
+    assert_equal(Int(d.terminal_panes[0].dock.state), Int(PANEL_STATE_MINIMIZED))
+    assert_equal(Int(d.terminal_panes[2].dock.state), Int(PANEL_STATE_MINIMIZED))
+    var top = d.terminal_pane_rect(screen, 0)
+    var mid = d.terminal_pane_rect(screen, 1)
+    var bot = d.terminal_pane_rect(screen, 2)
+    assert_equal(top.height(), 1)
+    assert_equal(bot.height(), 1)
+    assert_equal(top.a.y, 1)
+    assert_equal(mid.a.y, top.b.y)
+    assert_equal(bot.a.y, mid.b.y)
+    assert_true(mid.height() > 20)
+    # Restore the maximized one: pane 0 was normal, pane 2 minimized.
+    d.terminal_panes[1].dock.set_state(PANEL_STATE_NORMAL)
+    d.paint(canvas, screen)
+    assert_equal(Int(d.terminal_panes[0].dock.state), Int(PANEL_STATE_NORMAL))
+    assert_equal(Int(d.terminal_panes[2].dock.state), Int(PANEL_STATE_MINIMIZED))
+    # Maximize again, then restore pane 0 instead: the maximize ends.
+    d.terminal_panes[1].dock.set_state(PANEL_STATE_MAXIMIZED)
+    d.paint(canvas, screen)
+    d.terminal_panes[0].dock.set_state(PANEL_STATE_NORMAL)
+    d.paint(canvas, screen)
+    assert_equal(Int(d.terminal_panes[0].dock.state), Int(PANEL_STATE_NORMAL))
+    assert_equal(Int(d.terminal_panes[1].dock.state), Int(PANEL_STATE_NORMAL))
+    # Maximizing a second pane while one is maximized hands it over.
+    d.terminal_panes[1].dock.set_state(PANEL_STATE_MAXIMIZED)
+    d.paint(canvas, screen)
+    d.terminal_panes[0].dock.set_state(PANEL_STATE_MAXIMIZED)
+    d.paint(canvas, screen)
+    assert_equal(Int(d.terminal_panes[0].dock.state), Int(PANEL_STATE_MAXIMIZED))
+    assert_equal(Int(d.terminal_panes[1].dock.state), Int(PANEL_STATE_MINIMIZED))
+    d.terminal_panes[0].dock.set_state(PANEL_STATE_NORMAL)
+    d.paint(canvas, screen)
+    assert_equal(Int(d.terminal_panes[1].dock.state), Int(PANEL_STATE_NORMAL))
+    d.shutdown()
 
 
 def test_docked_panel_stack_max_collapses_others() raises:

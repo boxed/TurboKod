@@ -342,6 +342,8 @@ def hit_title_command(
 comptime PANEL_STATE_NORMAL    = UInt8(0)
 comptime PANEL_STATE_MINIMIZED = UInt8(1)
 comptime PANEL_STATE_MAXIMIZED = UInt8(2)
+comptime PANEL_STATE_NONE      = UInt8(255)
+"""``BottomDockedPanel.yielded`` when the panel isn't yielding."""
 
 
 def paint_panel_button(
@@ -530,6 +532,15 @@ struct BottomDockedPanel(Copyable, Movable):
     """Rows between the panel's top and where the resize drag was
     grabbed, so a drag from the second header row doesn't jump."""
 
+    var yielded: UInt8
+    """The state to go back to once no other pane in the dock is
+    maximized, while this one sits minimized to make room for it —
+    ``PANEL_STATE_NONE`` otherwise. See ``coalesce_dock_states``."""
+
+    var max_acked: Bool
+    """True once ``coalesce_dock_states`` has seen this panel maximized,
+    so a pane maximized after it wins over it."""
+
     def __init__(out self, preferred_height: Int = 14):
         self.state = PANEL_STATE_NORMAL
         self.preferred_height = preferred_height
@@ -541,6 +552,8 @@ struct BottomDockedPanel(Copyable, Movable):
         self.close_button_id = String("")
         self.host_chrome = False
         self.resize_grab = 0
+        self.yielded = PANEL_STATE_NONE
+        self.max_acked = False
 
     def header_rows(self) -> Int:
         """Rows the header takes: one in the grid, two under the host's
@@ -619,6 +632,59 @@ struct BottomDockedPanel(Copyable, Movable):
         if self.chrome_hits.on_any(pos):
             return False
         return True
+
+
+def coalesce_dock_states(mut docks: List[BottomDockedPanel]):
+    """Keep the bottom dock to at most one maximized pane, with every
+    other pane minimized beside it, still in its place in the stack, so
+    it stays visible and one click away.
+
+    Run once a frame over the visible panes, after whatever changed
+    their states. A pane maximized since the last run wins over one
+    maximized before it. The others yield: they minimize and remember
+    the state they had, which they get back when nothing is maximized
+    any more. Restoring a yielded pane ends the maximize, since the user
+    asked to see it."""
+    var n = len(docks)
+    var winner = -1
+    for i in range(n):
+        if docks[i].state == PANEL_STATE_MAXIMIZED and not docks[i].max_acked:
+            winner = i
+    if winner < 0:
+        for i in range(n):
+            if docks[i].state == PANEL_STATE_MAXIMIZED:
+                winner = i
+                break
+    var restored = False
+    if winner >= 0:
+        for i in range(n):
+            if i != winner and docks[i].yielded != PANEL_STATE_NONE \
+                    and docks[i].state == PANEL_STATE_NORMAL:
+                restored = True
+                docks[i].yielded = PANEL_STATE_NONE
+        if restored:
+            docks[winner].set_state(PANEL_STATE_NORMAL)
+            winner = -1
+    if winner < 0:
+        for i in range(n):
+            if docks[i].yielded != PANEL_STATE_NONE:
+                docks[i].set_state(docks[i].yielded)
+                docks[i].yielded = PANEL_STATE_NONE
+            docks[i].max_acked = False
+        return
+    for i in range(n):
+        if i == winner:
+            continue
+        docks[i].max_acked = False
+        if docks[i].state == PANEL_STATE_MAXIMIZED:
+            docks[i].yielded = PANEL_STATE_NORMAL
+        elif docks[i].state == PANEL_STATE_NORMAL:
+            docks[i].yielded = PANEL_STATE_NORMAL
+        else:
+            continue
+        docks[i].set_state(PANEL_STATE_MINIMIZED)
+    docks[winner].max_acked = True
+    docks[winner].yielded = PANEL_STATE_NONE
 
 
 def paint_bottom_dock_chrome(
