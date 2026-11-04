@@ -373,4 +373,22 @@ int64_t tk_font_size(int64_t h);
 void    tk_desktop_set_font_size_info(int64_t h, int64_t effective,
                                       int64_t ideal);
 
+// Area font sizes: an area (2 terminal, 3 debugger) may have a point size
+// of its own (0 = the cell's). The host measures that font's cell and
+// reports it in thousandths of the screen cell; panes in the area then lay
+// out a grid of those cells, which the frame carries as sub-grids. A cell
+// whose word 0 has sub (bits 26..31) = k + 1 shows sub-grid k of that
+// surface (0 the main window, 1 the floating panels); info is
+// [slot, x, y, w, h, cols, rows] as int32s, the rect in screen cells.
+int64_t tk_font_area_size(int64_t h, int64_t slot);
+void    tk_desktop_set_area_scale(int64_t h, int64_t slot, int64_t w_milli,
+                                  int64_t h_milli);
+// The pointer for the next mouse call, in thousandths of a cell.
+void    tk_desktop_set_mouse_fine(int64_t h, int64_t x_milli, int64_t y_milli);
+int64_t tk_desktop_sub_grid_count(int64_t h, int64_t surface);
+int64_t tk_desktop_sub_grid_info(int64_t h, int64_t surface, int64_t i,
+                                 int64_t out_ptr);
+int64_t tk_desktop_sub_grid_layout(int64_t h, int64_t surface, int64_t i,
+                                   int64_t out_ptr, int64_t cap);
+
 #endif

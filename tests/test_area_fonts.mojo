@@ -6,18 +6,22 @@ Shared fixtures live in ``tests/support.mojo`` and
 """
 
 from std.testing import TestSuite, assert_equal, assert_true
-from turbokod.canvas import Canvas
+from turbokod.canvas import Canvas, SCALE_ONE
 from turbokod.cell import Cell, FONT_CODE, FONT_DEBUGGER, FONT_TERMINAL, FONT_UI
 from turbokod.colors import default_attr
 from turbokod.config import (
     AREA_BUNDLED_FONT, CHICAGO_FONT, TurbokodConfig, _config_from_json,
     _config_to_json, chicago_font_label, default_font_label, same_as_font_label,
 )
+from turbokod.debug_pane import DebugPane
 from turbokod.desktop import Desktop
+from turbokod.grid_frame import GridFrame
+from turbokod.events import Event, MOUSE_BUTTON_LEFT
 from turbokod.geometry import Point, Rect
 from turbokod.json import parse_json
 from turbokod.host_abi import CELL_WORDS, pack_canvas
 from turbokod.settings import Settings
+from turbokod.terminal_pane import TerminalPane
 from turbokod.ui_tree import UINode
 from turbokod.window import Window
 
@@ -151,6 +155,156 @@ def test_settings_chooses_fonts_by_searching() raises:
     s.font_chooser.ui_act(String("choose"))
     s.consume_font_chooser()
     assert_equal(s.font_choice, String("Helvetica"))
+
+
+def _half_size_terminal(mut c: Canvas):
+    """A terminal font whose cells are half the screen's each way."""
+    c.area_scale[2 * Int(FONT_TERMINAL)] = 500
+    c.area_scale[2 * Int(FONT_TERMINAL) + 1] = 500
+
+
+def test_a_grid_at_the_screens_cell_size_is_copied_in() raises:
+    var c = Canvas(10, 4)
+    var g = Canvas(3, 2)
+    g.font = FONT_TERMINAL
+    _ = g.put_text(Point(0, 1), String("abc"), default_attr())
+    assert_equal(c.sub_grid_size(FONT_TERMINAL, Rect(2, 1, 5, 3))[0], 3)
+    c.place_sub_grid(FONT_TERMINAL, Rect(2, 1, 5, 3), g^)
+    assert_equal(len(c.sub_grids), 0)
+    assert_equal(c.get(2, 2).glyph, String("a"))
+    assert_equal(c.get(4, 2).glyph, String("c"))
+    assert_equal(Int(c.get(2, 2).font), Int(FONT_TERMINAL))
+    assert_equal(Int(c.get(2, 2).sub), 0)
+
+
+def test_an_area_with_a_size_of_its_own_gets_a_sub_grid() raises:
+    var c = Canvas(10, 4)
+    _half_size_terminal(c)
+    var r = Rect(1, 1, 6, 3)
+    var dims = c.sub_grid_size(FONT_TERMINAL, r)
+    assert_equal(dims[0], 10)    # twice as many, half the size
+    assert_equal(dims[1], 4)
+    assert_equal(c.sub_grid_size(FONT_CODE, r)[0], 5)
+    var g = Canvas(dims[0], dims[1])
+    _ = g.put_text(Point(9, 3), String("z"), default_attr())
+    c.place_sub_grid(FONT_TERMINAL, r, g^)
+    assert_equal(len(c.sub_grids), 1)
+    assert_equal(c.sub_grids[0].cols, 10)
+    assert_equal(c.sub_grids[0].cells[3 * 10 + 9].glyph, String("z"))
+    assert_equal(Int(c.get(1, 1).sub), 1)
+    assert_equal(Int(c.get(5, 2).sub), 1)
+    assert_equal(Int(c.get(6, 2).sub), 0)
+    # Whatever is painted over it later (a popup) stays on top.
+    c.set(2, 1, Cell(String("x"), default_attr(), 1))
+    assert_equal(Int(c.get(2, 1).sub), 0)
+    var buf = List[UInt32](length=10 * 4 * CELL_WORDS, fill=UInt32(0))
+    _ = pack_canvas(c, 10, 4, Int(buf.unsafe_ptr()), 40)
+    var w0 = buf[(1 * 10 + 1) * CELL_WORDS]
+    assert_equal(Int((w0 >> 26) & 0x3F), 1)
+    assert_equal(Int((w0 >> 24) & 0x3), 1)
+    c.clear()
+    assert_equal(len(c.sub_grids), 0)
+
+
+def test_a_terminal_pane_lays_out_its_grid_in_the_terminal_fonts_cells() raises:
+    var pane = TerminalPane()
+    pane.visible = True
+    var panel = Rect(0, 0, 40, 12)
+    var c = Canvas(40, 12)
+    _half_size_terminal(c)
+    pane.paint(c, panel)
+    assert_equal(len(c.sub_grids), 1)
+    var g = c.sub_grids[0].copy()
+    assert_equal(pane.vt.cols(), g.cols)
+    assert_equal(pane.vt.rows(), g.rows)
+    assert_equal(g.cols, 2 * g.rect.width())
+    assert_equal(g.rows, 2 * g.rect.height())
+    # A click two-thirds into a screen cell is in that cell's second grid
+    # column; the selection starts there.
+    var at = Point(g.rect.a.x + 1, g.rect.a.y + 1)
+    var e = Event.mouse_event(at, MOUSE_BUTTON_LEFT, True, False, 0, 1)
+    e.fine = Point(at.x * 1000 + 700, at.y * 1000 + 200)
+    assert_true(pane.handle_mouse(e, panel))
+    assert_equal(pane.sel.sel_anchor_c, 3)
+    var ge = pane.sel.grid_event(e)
+    assert_equal(ge.pos.x, g.rect.a.x + 3)
+    assert_equal(ge.pos.y, g.rect.a.y + 2)
+    # A pos rewritten without its fine position maps from the cell's middle.
+    var moved = e
+    moved.pos = Point(at.x + 1, at.y)
+    assert_equal(pane.sel.grid_event(moved).pos.x, g.rect.a.x + 5)
+
+
+def test_a_grid_frame_paints_and_maps_in_its_own_coordinates() raises:
+    var c = Canvas(20, 10)
+    _half_size_terminal(c)
+    var f = GridFrame.empty(FONT_TERMINAL)
+    var g = f.begin(c, Rect(4, 2, 8, 5), default_attr())
+    assert_true(f.grid == Rect(4, 2, 12, 8))    # 8 x 6 cells from (4, 2)
+    _ = g.put_text(Point(11, 7), String("q"), default_attr())
+    f.end(c, g^)
+    assert_equal(c.sub_grids[0].cells[5 * 8 + 7].glyph, String("q"))
+    var e = Event.mouse_event(Point(5, 3), MOUSE_BUTTON_LEFT)
+    e.fine = Point(5900, 3100)
+    assert_true(f.map(e).pos == Point(4 + 3, 2 + 2))
+    assert_true(f.contains(e))
+
+
+def test_the_debug_panes_log_wraps_to_the_terminal_fonts_grid() raises:
+    var pane = DebugPane()
+    pane.visible = True
+    var line = String("")
+    for i in range(110):
+        line += String(i % 10)
+    pane.append_output(line + String("\n"))
+    var c = Canvas(80, 20)
+    pane.paint(c, Rect(0, 0, 80, 20))
+    var narrow = len(pane.output.last_visual)
+    var h = Canvas(80, 20)
+    _half_size_terminal(h)
+    pane.paint(h, Rect(0, 0, 80, 20))
+    assert_equal(len(h.sub_grids), 1)
+    assert_equal(Int(h.sub_grids[0].slot), Int(FONT_TERMINAL))
+    assert_equal(narrow, 2)
+    assert_equal(len(pane.output.last_visual), 1)
+
+
+def test_area_font_sizes_round_trip_clamped() raises:
+    var cfg = TurbokodConfig()
+    cfg.area_font_sizes[Int(FONT_TERMINAL)] = 12
+    cfg.area_font_sizes[Int(FONT_DEBUGGER)] = 2
+    var back = _config_from_json(_config_to_json(cfg))
+    assert_equal(back.area_font_sizes[Int(FONT_TERMINAL)], 12)
+    assert_equal(back.area_font_sizes[Int(FONT_DEBUGGER)], 6)
+    assert_equal(back.area_font_sizes[Int(FONT_UI)], 0)
+    var d = Desktop()
+    d.config = back.copy()
+    assert_equal(d.area_font_size(Int(FONT_TERMINAL)), 12)
+    assert_equal(d.area_font_size(Int(FONT_CODE)), 0)
+    var v = d.font_version
+    d.set_area_font_size(Int(FONT_TERMINAL), 0)
+    assert_equal(d.config.area_font_sizes[Int(FONT_TERMINAL)], 0)
+    assert_true(d.font_version > v)
+    d.shutdown()
+
+
+def test_settings_steps_an_areas_font_size_from_the_fonts() raises:
+    var s = Settings()
+    s.offer_native_ui = True
+    var names = List[String]()
+    names.append(default_font_label())
+    s._font_names = names^
+    assert_true(_has_key(s._appearance_ui(), String("area_larger_2")))
+    assert_true(_has_key(s._appearance_ui(), String("area_larger_3")))
+    s._font_effective_size = 16
+    s.ui_act(String("area_smaller_2"))
+    assert_equal(s.area_font_sizes[2], 15)
+    assert_true(s.dirty)
+    s.ui_act(String("area_larger_2"))
+    s.ui_act(String("area_larger_2"))
+    assert_equal(s.area_font_sizes[2], 17)
+    s.ui_act(String("area_same_2"))
+    assert_equal(s.area_font_sizes[2], 0)
 
 
 def _has_key(n: UINode, key: String) -> Bool:

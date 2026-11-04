@@ -153,6 +153,9 @@ struct Settings(Movable):
     """Each area's font label, indexed by font slot (``FONT_*`` in
     ``cell``); ``same_as_font_label`` when it has none of its own. The
     host sets them after ``open``."""
+    var area_font_sizes: List[Int]
+    """Each area's own font size in points, indexed like
+    ``area_font_choices``; 0 is the Font's size (no grid of its own)."""
     var _font_effective_size: Int
     """The size actually rendering (resolves 0); reported by the host."""
     var _font_ideal_size: Int
@@ -215,6 +218,7 @@ struct Settings(Movable):
         self._font_names = List[String]()
         self.font_size_choice = 0
         self.area_font_choices = _same_as_font_for_all()
+        self.area_font_sizes = [0, 0, 0, 0]
         self._font_effective_size = 0
         self._font_ideal_size = 0
         self.offer_native_ui = False
@@ -398,6 +402,45 @@ struct Settings(Movable):
             return self._font_effective_size
         return 16
 
+    def _area_size_steps(self, slot: Int) -> UINode:
+        """Area ``slot``'s size row: its own size, or the Font's, with
+        Smaller / Larger and Same as Font. An area with a size of its own
+        lays out its own grid of that font's cells."""
+        var own = self.area_font_sizes[slot]
+        var size = own if own > 0 else self._font_size_shown()
+        var steps = List[UINode]()
+        steps.append(ui_label(
+            String(size) + String(" pt") if own > 0 else String("Same as Font"),
+        ))
+        steps.append(ui_button(
+            String("area_smaller_") + String(slot), String("Smaller"),
+            0 if size > MIN_FONT_SIZE else UI_DISABLED,
+        ))
+        steps.append(ui_button(
+            String("area_larger_") + String(slot), String("Larger"),
+            0 if size < MAX_FONT_SIZE else UI_DISABLED,
+        ))
+        steps.append(ui_button(
+            String("area_same_") + String(slot), String("Same as Font"),
+            0 if own > 0 else UI_DISABLED,
+        ))
+        return ui_hstack(steps^)
+
+    def _set_area_size(mut self, id: String, prefix: String, delta: Int):
+        """A size button of an area row: step its size by ``delta`` from
+        what it shows, or clear it when ``delta`` is 0."""
+        var slot = ui_int(String(id.removeprefix(prefix)))
+        if slot < 0 or slot >= len(self.area_font_sizes):
+            return
+        var v = 0
+        if delta != 0:
+            var own = self.area_font_sizes[slot]
+            var size = own if own > 0 else self._font_size_shown()
+            v = max(MIN_FONT_SIZE, min(size + delta, MAX_FONT_SIZE))
+        if v != self.area_font_sizes[slot]:
+            self.area_font_sizes[slot] = v
+            self.dirty = True
+
     def _look_index(self) -> Int:
         """The Look choice: Turbo Vision, macOS or Mac OS 9."""
         if self.native_ui:
@@ -462,6 +505,10 @@ struct Settings(Movable):
                     String("pick_font_") + String(slot),
                     self.area_font_choices[slot],
                 )))
+                if slot != 0:
+                    rows.append(ui_row(
+                        String("Size"), self._area_size_steps(slot),
+                    ))
             for i in range(min(2, len(self._font_names))):
                 builtins.append(self._font_names[i])
         rows.append(ui_row(String(""), ui_preview(
@@ -666,6 +713,12 @@ struct Settings(Movable):
                     id, _area_font_title(slot), names^,
                     self.area_font_choices[slot],
                 )
+        elif id.startswith(String("area_smaller_")):
+            self._set_area_size(id, String("area_smaller_"), -1)
+        elif id.startswith(String("area_larger_")):
+            self._set_area_size(id, String("area_larger_"), 1)
+        elif id.startswith(String("area_same_")):
+            self._set_area_size(id, String("area_same_"), 0)
         elif id == String("font_smaller"):
             self._set_font_size(self._font_size_shown() - 1)
         elif id == String("font_larger"):

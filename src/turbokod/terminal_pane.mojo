@@ -60,8 +60,8 @@ from .tmux_session import (
     tmux_socket_path, tmux_stop,
 )
 from .terminal_view import (
-    flush_vt_side_effects, forward_key_to_grid, GridSelection, paint_grid,
-    paste_to_pty,
+    flush_vt_side_effects, forward_key_to_grid, grid_size, GridSelection,
+    new_grid, paint_grid, paste_to_pty, place_grid,
 )
 from .vt import MOUSE_MOTION, MOUSE_PRESS, MOUSE_RELEASE, SCROLLBACK_LINES, Vt
 from .window import (
@@ -828,8 +828,11 @@ struct TerminalPane(Copyable, Movable):
         # The right column is the scroll bar's, so it never covers output.
         var bar_area = body
         body = Rect(body.a.x, body.a.y, body.b.x - 1, body.b.y)
-        var bw = body.width()
-        var bh = body.height()
+        # The grid is the body's size in the terminal font's cells, which
+        # may be another size than the screen's.
+        var dims = grid_size(canvas, body)
+        var bw = dims[0]
+        var bh = dims[1]
         if bw <= 0 or bh <= 0:
             self.sel._last_body = Rect.empty()
             return
@@ -839,14 +842,16 @@ struct TerminalPane(Copyable, Movable):
             self.vt.resize(bw, bh)
             if self.pty.alive:
                 _ = self.pty.set_winsize(bw, bh)
-        self.sel._last_body = body
+        self.sel.set_frame(canvas, body, bw, bh)
         # Grid + selection overlay + cursor caret — shared with the test
         # pane via ``paint_grid``.
         var v = self._view()
-        paint_grid(canvas, painter, v, self.sel, body, self.focused)
+        var grid = new_grid(bw, bh, bg)
+        paint_grid(grid, v, self.sel, self.focused)
         self._last_links = List[OutputLink]()
         if self.is_run():
-            self._paint_links(canvas, painter, v, body)
+            self._paint_links(grid, v)
+        place_grid(canvas, body, grid^)
         var sb = self._scrollback()
         var attr = Attr(PANE_FG, PANE_BG)
         var col = Rect(bar_area.b.x - 1, bar_area.a.y, bar_area.b.x, bar_area.b.y)
@@ -859,30 +864,31 @@ struct TerminalPane(Copyable, Movable):
         else:
             self.scroll_bar.hide()
 
-    def _paint_links(
-        mut self, mut canvas: Canvas, painter: Painter, v: Vt, body: Rect,
-    ):
-        """Underline a run's traceback / ``path:N`` / URL spans on screen
-        and record them for clicks, as the test pane does — a test run
-        or a server's traceback jumps to the source."""
+    def _paint_links(mut self, mut grid: Canvas, v: Vt):
+        """Underline a run's traceback / ``path:N`` / URL spans in the
+        grid and record them for clicks, as the test pane does — a test
+        run or a server's traceback jumps to the source. Recorded in
+        ``sel._last_body``'s coordinates, which ``grid_event`` maps
+        clicks into."""
         var link_attr = Attr(LIGHT_BLUE, PANE_BG, STYLE_UNDERLINE)
-        var grid = v.grid()
-        for r in range(grid.rows):
-            var line = grid.row_text(r)
+        var origin = self.sel._last_body.a
+        var cells = v.grid()
+        for r in range(cells.rows):
+            var line = cells.row_text(r)
             if len(line.as_bytes()) == 0:
                 continue
             var hits = extract_all_links(line)
             for h in range(len(hits)):
                 var hit = hits[h]
-                var x0 = max(body.a.x + hit.cell_start, body.a.x)
-                var x1 = min(body.a.x + hit.cell_end, body.b.x)
+                var x0 = max(hit.cell_start, 0)
+                var x1 = min(hit.cell_end, grid.width)
                 if x1 <= x0:
                     continue
-                var line_y = body.a.y + r
                 for x in range(x0, x1):
-                    painter.set_attr(canvas, x, line_y, link_attr)
+                    grid.set_attr(x, r, link_attr)
                 self._last_links.append(OutputLink(
-                    line_y, x0, x1, hit.path, hit.line, hit.is_url,
+                    origin.y + r, origin.x + x0, origin.x + x1,
+                    hit.path, hit.line, hit.is_url,
                 ))
 
     # --- copy / selection delegates ------------------------------------
@@ -899,8 +905,9 @@ struct TerminalPane(Copyable, Movable):
     # --- mouse ---------------------------------------------------------
 
     def handle_mouse(
-        mut self, event: Event, panel: Rect, allow_resize: Bool = True,
+        mut self, screen_event: Event, panel: Rect, allow_resize: Bool = True,
     ) -> Bool:
+        var event = screen_event
         if event.kind != EVENT_MOUSE:
             return False
         # Chrome wins first — close button, resize edge, etc.
@@ -920,9 +927,13 @@ struct TerminalPane(Copyable, Movable):
             var v = self._view()
             self.scroll_view_by(self._scrollback() - bar - v.view_offset())
             return True
+        # From here on positions are the grid's (``grid_event``); the
+        # panel test below still uses the screen's.
+        var screen_pos = event.pos
+        event = self.sel.grid_event(event)
         if self.sel.continue_drag(self._view(), event):
             return True
-        if not panel.contains(event.pos):
+        if not panel.contains(screen_pos):
             if event.button != MOUSE_BUTTON_NONE \
                     and event.pressed and not event.motion:
                 self.focused = False

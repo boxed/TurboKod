@@ -149,7 +149,15 @@ shared cell size. A cell carries a font slot (`Cell.font`) stamped by
 `Canvas` from `canvas.font`. A view switches the slot around its *content*
 (not its chrome) and restores it after. The Turbo Vision look's cell is
 always the built-in VGA font at its ideal size, and its UI is drawn in it,
-because box drawing only joins up in that font. Full details in
+because box drawing only joins up in that font.
+
+The Terminal and Debugger fonts can also have a size of their own. Their
+content is then a *sub-grid*: a canvas of that font's cells placed over
+the pane's rect (`Canvas.place_sub_grid`, `GridFrame`), drawn by the host
+after the frame. At the screen's cell size (always, in the terminal
+frontends) placing just copies the cells in. A view painting an area's
+content goes through a `GridFrame` (or `GridSelection.set_frame`) and maps
+mouse events with it before hit-testing. Full details in
 [docs/area-fonts.md](docs/area-fonts.md).
 
 ## Running the Mojo code

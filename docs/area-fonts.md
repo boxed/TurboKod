@@ -14,8 +14,9 @@ in `TurboKod.swift`), matched case-insensitively as you type.
 
 ## One cell size, several faces
 
-Every pane is a region of one cell grid, so the areas share the cell size,
-and only the face differs. The cell comes from `Desktop.cell_font()` /
+Every pane is a region of one cell grid, so by default the areas share the
+cell size, and only the face differs (an area can opt out with a **Size** of
+its own; see the next section). The cell comes from `Desktop.cell_font()` /
 `cell_font_size()`:
 
 - **Turbo Vision look:** always the built-in VGA font at its ideal 16pt,
@@ -33,6 +34,48 @@ The host fits each area's face to the cell (`SlotFace` in `TurboKod.swift`):
   advance fits the width, then centered.
 - A proportional one (Chicago, or any non-monospace family) is fitted
   glyph by glyph.
+
+## An area's own size: sub-grids
+
+The Terminal and Debugger fonts each have a **Size** row (Smaller / Larger /
+Same as Font) under their font. `config.area_font_sizes` holds them by slot
+(serialized `font_terminal_size` / `font_debugger_size`, 0 = the cell's).
+An area with a size of its own gets a *grid of its own*: a smaller terminal
+font really gives the shell more columns and rows, and the pty is told so.
+
+- **Measuring.** The host works out the area's cell from its font at that
+  size, with the same arithmetic as the cell font (`naturalCell`), and builds
+  a face fitted to it (`AreaGrid`). It reports the cell to the core in
+  thousandths of the screen cell (`tk_desktop_set_area_scale`, rounded up so a
+  grid never overruns its rect). `Desktop.frame_canvas` copies those onto
+  every frame's `Canvas.area_scale`.
+- **Laying out.** A view that paints an area's content asks the canvas how
+  many of the area's cells fit in its rect (`sub_grid_size`), paints a
+  canvas of that size, and places it (`place_sub_grid`). At scale 1, which
+  is always the case in the terminal frontends, placing just copies the cells
+  in, so nothing below the frontend boundary needs to know. Otherwise the
+  canvas keeps the grid as a `SubGrid`, and the rect's cells are tagged
+  `Cell.sub` = its index + 1.
+- **`GridFrame`** (`grid_frame.mojo`) is a region's bookkeeping. Its grid's
+  coordinates are anchored at the rect's top-left, and the grid canvas has
+  that `origin`. So a view paints the grid, and hit-tests what it painted,
+  in the coordinates it would use on the screen. `map` turns a mouse event
+  into those coordinates. The debug pane uses three frames (Stack, Locals /
+  Watches, output log); the shell and test panes use `GridSelection`'s
+  equivalent (`set_frame` / `grid_event`, `terminal_view.mojo`).
+- **Mouse.** A cell position isn't fine enough to say which of a smaller
+  grid's cells the pointer is over, so the host sends the pointer in
+  thousandths of a cell before each mouse call (`tk_desktop_set_mouse_fine`
+  → `Event.fine`). `Event.fine_pos` falls back to the middle of `pos`'s cell
+  when something rewrote `pos` without it.
+- **Drawing.** `pack_canvas` puts `sub` in bits 26..31 of word 0 (the width
+  is bits 24..25: mask it). After the frame, the host draws each sub-grid
+  (`tk_desktop_sub_grid_info` / `_layout`) over its rect, in the area's
+  cell size and face (`withCellMetrics`). It then redraws on top the rect's
+  cells whose tag isn't that grid's: any write clears a cell's tag, so a
+  popup or a menu painted over the pane stays in front. The sub-grids are
+  part of the host's change detection (`subGridsHash`); the frame's own
+  cells under them are blank and don't change.
 
 ## Font slots
 

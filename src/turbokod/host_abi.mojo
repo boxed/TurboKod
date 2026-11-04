@@ -34,11 +34,12 @@ comptime SHAPE_NS_RESIZE = Int32(3)   # over a pane's top edge / dragging it
 comptime SHAPE_EW_RESIZE = Int32(4)   # over the file tree's edge
 
 # ``UInt32`` words per cell in the layout buffer:
-# ``[codepoint|font<<21|width<<24, fg|bg<<8|style<<16|color_mode<<24,
+# ``[codepoint|font<<21|width<<24|sub<<26, fg|bg<<8|style<<16|color_mode<<24,
 # underline_color, fg_rgb, bg_rgb]``. ``app/swift/TurboKod.swift`` reads the
 # same layout. ``width`` is the cell's (0, 1 or 2) so a host never recomputes
 # it from the codepoint and can't drift from ``char_width``; ``font`` is its
-# font slot (``FONT_*`` in ``cell``).
+# font slot (``FONT_*`` in ``cell``); ``sub`` is ``Cell.sub``, the sub-grid
+# (1-based) the host draws through it.
 comptime CELL_WORDS = 5
 
 
@@ -74,13 +75,19 @@ def pack_canvas(
     """Pack a laid-out canvas into the caller's ``UInt32`` buffer,
     ``CELL_WORDS`` per cell. Returns the number of cells written (clamped
     to ``cap``). The inverse of ``unpack_into``."""
+    return pack_cells(canvas.cells, cols * rows, out_ptr, cap)
+
+
+def pack_cells(imm cells: List[Cell], count: Int, out_ptr: Int, cap: Int) -> Int:
+    """``pack_canvas`` for the first ``count`` of ``cells`` (a sub-grid's,
+    say)."""
     var op = Pointer[UInt32, MutUntrackedOrigin](unsafe_from_address=out_ptr)
-    var n = cols * rows
+    var n = min(count, len(cells))
     if n > cap:
         n = cap
     for i in range(n):
         var base = i * CELL_WORDS
-        var cell = canvas.cells[i]
+        var cell = cells[i]
         var cp = codepoint_at(cell.glyph, 0)[0]
         if cp <= 0:
             cp = 0x20
@@ -95,7 +102,7 @@ def pack_canvas(
         else:
             w2 = UInt32(Int(attr.underline_color))
         op[unsafe_offset=base] = UInt32(cp) | (UInt32(Int(cell.font) & 0x7) << 21) \
-            | (UInt32(cell.width & 0x3) << 24)
+            | (UInt32(cell.width & 0x3) << 24) | (UInt32(Int(cell.sub) & 0x3F) << 26)
         op[unsafe_offset=base + 1] = w1
         op[unsafe_offset=base + 2] = w2
         op[unsafe_offset=base + 3] = attr.fg_rgb
@@ -114,7 +121,7 @@ def unpack_into(buf: List[UInt32], n: Int, mut canvas: Canvas):
     for ci in range(n):
         var base = ci * CELL_WORDS
         var cp = Int(buf[base] & 0x1FFFFF)
-        var width = Int(buf[base] >> 24)
+        var width = Int((buf[base] >> 24) & 0x3)
         if cp <= 0:
             cp = 0x20
         var w1 = buf[base + 1]

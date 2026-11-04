@@ -37,24 +37,32 @@ struct Cell(ImplicitlyCopyable, Movable):
     var font: UInt8
     """The font slot (``FONT_*``). Not part of ``==``: the terminal
     frontend's diff ignores it, as the terminal does."""
+    var sub: UInt8
+    """1 + the index of the ``Canvas`` sub-grid that shows through this
+    cell, 0 for none (``Canvas.place_sub_grid``). Any write clears it, so
+    whatever is painted over a sub-grid later stays on top of it. Not part
+    of ``==`` either."""
 
     def __init__(out self):
         self.glyph = String(" ")
         self.attr = default_attr()
         self.width = 1
         self.font = FONT_UI
+        self.sub = 0
 
     def __init__(out self, glyph: String, attr: Attr):
         self.glyph = glyph
         self.attr = attr
         self.width = cell_width(glyph)
         self.font = FONT_UI
+        self.sub = 0
 
     def __init__(out self, glyph: String, attr: Attr, width: Int, font: UInt8 = FONT_UI):
         self.glyph = glyph
         self.attr = attr
         self.width = width
         self.font = font
+        self.sub = 0
 
     def is_blank(self) -> Bool:
         return self.glyph == String(" ")

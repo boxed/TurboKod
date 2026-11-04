@@ -18,7 +18,7 @@ them, so the pane stays the single writer to its child.
 
 from std.collections.list import List
 
-from .canvas import Canvas
+from .canvas import Canvas, SCALE_ONE
 from .cell import Cell, FONT_TERMINAL
 from .clipboard import clipboard_copy
 from .colors import Attr, BG_TRUECOLOR, FG_TRUECOLOR
@@ -26,6 +26,7 @@ from .events import (
     Event, KEY_PAGEDOWN, KEY_PAGEUP, MOD_META, MOD_SHIFT, MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
+from .grid_frame import floor_div
 from .painter import Painter
 from .pty import PtyProcess
 from .vt import Vt
@@ -61,8 +62,14 @@ struct GridSelection(Copyable, Movable):
     var _tc_anchor_r: Int
     """Row the triple-click landed on — the fixed end of a line drag."""
     var _last_body: Rect
-    """Body rect from the last paint. ``Rect.empty`` means the body
-    wasn't laid out (minimized / first frame)."""
+    """Body rect from the last paint, in grid cells from the body's
+    top-left corner: the body itself unless the terminal font has a
+    size of its own. ``Rect.empty`` means the body wasn't laid out
+    (minimized / first frame)."""
+    var _scale_x: Int
+    var _scale_y: Int
+    """The grid's cell size in thousandths of a screen cell
+    (``Canvas.scale_of``), for ``grid_event``."""
 
     def __init__(out self):
         self.sel_active = False
@@ -78,6 +85,8 @@ struct GridSelection(Copyable, Movable):
         self._dc_anchor_hi = 0
         self._tc_anchor_r = 0
         self._last_body = Rect.empty()
+        self._scale_x = SCALE_ONE
+        self._scale_y = SCALE_ONE
 
     def __copyinit__(mut self, copy: Self):
         self.sel_active = copy.sel_active
@@ -93,6 +102,38 @@ struct GridSelection(Copyable, Movable):
         self._dc_anchor_hi = copy._dc_anchor_hi
         self._tc_anchor_r = copy._tc_anchor_r
         self._last_body = copy._last_body
+        self._scale_x = copy._scale_x
+        self._scale_y = copy._scale_y
+
+    # --- frame ---------------------------------------------------------
+
+    def set_frame(mut self, canvas: Canvas, body: Rect, cols: Int, rows: Int):
+        """Record this paint's grid: ``cols`` x ``rows`` cells in the
+        terminal font's cell size, shown from ``body``'s top-left."""
+        var sc = canvas.scale_of(FONT_TERMINAL)
+        self._scale_x = sc[0]
+        self._scale_y = sc[1]
+        self._last_body = Rect(
+            body.a.x, body.a.y, body.a.x + cols, body.a.y + rows,
+        )
+
+    def grid_event(self, event: Event) -> Event:
+        """``event`` with ``pos`` in grid cells (offset from the body's
+        corner, like ``_last_body``), from its fine position when the grid
+        has a cell size of its own. Unchanged otherwise."""
+        if self._scale_x == SCALE_ONE and self._scale_y == SCALE_ONE:
+            return event
+        if self._last_body.is_empty():
+            return event
+        var f = event.fine_pos()
+        var dx = f.x - self._last_body.a.x * 1000
+        var dy = f.y - self._last_body.a.y * 1000
+        var e = event
+        e.pos = Point(
+            self._last_body.a.x + floor_div(dx, self._scale_x),
+            self._last_body.a.y + floor_div(dy, self._scale_y),
+        )
+        return e
 
     # --- query ---------------------------------------------------------
 
@@ -389,20 +430,37 @@ struct GridSelection(Copyable, Movable):
 # --- grid paint -----------------------------------------------------------
 
 
+def grid_size(canvas: Canvas, body: Rect) -> Tuple[Int, Int]:
+    """Columns and rows of the terminal grid ``body`` shows: its own size,
+    or more or fewer when the terminal font has a size of its own."""
+    return canvas.sub_grid_size(FONT_TERMINAL, body)
+
+
+def new_grid(cols: Int, rows: Int, bg: Attr) -> Canvas:
+    """A ``cols`` x ``rows`` canvas in the terminal font, cleared to
+    ``bg``, for ``paint_grid`` and then ``place_grid``."""
+    var grid = Canvas(cols, rows)
+    grid.font = FONT_TERMINAL
+    grid.clear(bg)
+    return grid^
+
+
+def place_grid(mut canvas: Canvas, body: Rect, var grid: Canvas):
+    """Show a grid from ``new_grid`` in ``body``."""
+    canvas.place_sub_grid(FONT_TERMINAL, body, grid^)
+
+
 def paint_grid(
-    mut canvas: Canvas, painter: Painter, vt: Vt,
-    sel: GridSelection, body: Rect, focused: Bool,
+    mut grid: Canvas, vt: Vt, sel: GridSelection, focused: Bool,
 ):
-    """Paint the ``Vt`` grid into ``body`` through ``painter`` (whose
-    clip rect protects neighbouring panes). Overlays the selection and,
-    when ``focused``, a reverse-video cursor caret. In the terminal font.
+    """Paint the ``Vt`` grid into ``grid`` (from ``new_grid``) at its
+    top-left. Overlays the selection and, when ``focused``, a
+    reverse-video cursor caret.
 
     Reads the viewport — scrollback included when the user has scrolled
     up — from one snapshot, so a frame costs one pass over the cells."""
-    var prev = canvas.font
-    canvas.font = FONT_TERMINAL
-    _paint_grid_cells(canvas, painter, vt, sel, body, focused)
-    canvas.font = prev
+    var body = Rect(0, 0, grid.width, grid.height)
+    _paint_grid_cells(grid, Painter(body), vt, sel, body, focused)
 
 
 def _paint_grid_cells(

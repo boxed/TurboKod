@@ -53,6 +53,7 @@ from .canvas import Canvas
 from .string_utils import display_columns, truncate_to_columns
 from .painter import Painter
 from .cell import Cell, FONT_DEBUGGER, FONT_TERMINAL
+from .grid_frame import GridFrame
 from .colors import (
     Attr, BLACK, DARK_GRAY, LIGHT_BLUE, LIGHT_GRAY, LIGHT_GREEN, LIGHT_MAGENTA,
     LIGHT_RED,
@@ -290,6 +291,12 @@ struct DebugPane(Copyable, Movable):
 
     # --- mouse-mapping bookkeeping ------------------------------------
     var _last_inspect_y0: Int   # screen y of the first inspect row
+    var _left_frame: GridFrame
+    var _right_frame: GridFrame
+    var _out_frame: GridFrame
+    """The Stack / Locals columns and the output log as last painted,
+    each a grid of its font's cells: map a mouse event into one before
+    hit-testing what it painted (``GridFrame.map``)."""
     var _last_divider_x: Int    # screen x of the column divider
     var _left_indices: List[Int]
     """Absolute ``rows`` indices that belong to the left (Stack)
@@ -358,6 +365,9 @@ struct DebugPane(Copyable, Movable):
         self.pending_open_line = 0
         self.pending_open_url = String("")
         self._last_inspect_y0 = 0
+        self._left_frame = GridFrame.empty(FONT_DEBUGGER)
+        self._right_frame = GridFrame.empty(FONT_DEBUGGER)
+        self._out_frame = GridFrame.empty(FONT_TERMINAL)
         self._last_divider_x = 0
         self._left_indices = List[Int]()
         self._right_indices = List[Int]()
@@ -411,6 +421,9 @@ struct DebugPane(Copyable, Movable):
         self.pending_open_line = copy.pending_open_line
         self.pending_open_url = copy.pending_open_url
         self._last_inspect_y0 = copy._last_inspect_y0
+        self._left_frame = copy._left_frame
+        self._right_frame = copy._right_frame
+        self._out_frame = copy._out_frame
         self._last_divider_x = copy._last_divider_x
         self._left_indices = copy._left_indices.copy()
         self._right_indices = copy._right_indices.copy()
@@ -1159,114 +1172,17 @@ struct DebugPane(Copyable, Movable):
         var left_x_max = div_x
         var right_x0 = div_x + 1
         var right_x_max = panel.b.x
-        # Left column (Stack).
-        var left_visible = inspect_h
-        if left_visible > len(self._left_indices) - self.stack_scroll:
-            left_visible = len(self._left_indices) - self.stack_scroll
-        if left_visible < 0:
-            left_visible = 0
-        # Sub-painter for the left column so a long frame label can't
-        # spill across the divider into the right column.
-        var left_p = painter.sub(
-            Rect(panel.a.x, content_top, left_x_max, content_top + inspect_h),
-        )
         # Stack and variables in the debugger font, the log in the
-        # terminal one; the chrome between them stays UI.
-        var prev_font = canvas.font
-        canvas.font = FONT_DEBUGGER
-        for k in range(left_visible):
-            var ridx = self._left_indices[self.stack_scroll + k]
-            var r = self.rows[ridx]
-            var y = content_top + k
-            if r.kind == PANE_ROW_HEADER:
-                _ = left_p.put_text(
-                    canvas, Point(panel.a.x + 2, y), r.text + String(":"),
-                    section,
-                )
-            elif r.kind == PANE_ROW_FRAME:
-                var marker = String(" ")
-                var attr = bg
-                # ``r.expanded`` carries the subtle hint for FRAME rows
-                # (see PaneRow docstring) — adapter said this is library
-                # / external code, so dim it. The ``current`` highlight
-                # still wins when the user is inspecting this frame so
-                # the marker stays readable.
-                if r.expanded:
-                    attr = subtle_frame
-                if r.depth == self.current_frame_index:
-                    marker = String("▶")
-                    attr = current
-                _ = left_p.put_text(
-                    canvas, Point(panel.a.x + 2, y),
-                    String("  ") + marker + String(" ") + r.text,
-                    attr,
-                )
-        # Right column (Locals + Watches).
-        var right_visible = inspect_h
-        if right_visible > len(self._right_indices) - self.right_scroll:
-            right_visible = len(self._right_indices) - self.right_scroll
-        if right_visible < 0:
-            right_visible = 0
-        # Sub-painter for the right column. Same rationale as the left
-        # one — a long variable name on a deep tree can't bleed past
-        # the right edge of the panel.
-        var right_p = painter.sub(
-            Rect(right_x0, content_top, right_x_max, content_top + inspect_h),
-        )
-        for k in range(right_visible):
-            var ridx = self._right_indices[self.right_scroll + k]
-            var r = self.rows[ridx]
-            var y = content_top + k
-            if r.kind == PANE_ROW_HEADER:
-                _ = right_p.put_text(
-                    canvas, Point(right_x0 + 1, y), r.text + String(":"),
-                    section,
-                )
-            elif r.kind == PANE_ROW_VARIABLE:
-                var indent = String("")
-                for _ in range(r.depth):
-                    indent = indent + String("  ")
-                var chev = String("  ")
-                if r.ref_id != 0:
-                    chev = String("▼ ") if r.expanded else String("▶ ")
-                # Paint name=value first, then layer the colored
-                # ``(type)`` suffix on top: gray parens, syntax-colored
-                # type word. ``put_text`` returns the cells advanced so
-                # we can chain segments without remeasuring.
-                var x = right_x0 + 1
-                var adv = right_p.put_text(
-                    canvas, Point(x, y),
-                    indent + chev + r.text,
-                    bg,
-                )
-                if len(r.type_name.as_bytes()) > 0:
-                    x += adv
-                    adv = right_p.put_text(
-                        canvas, Point(x, y), String(" ("), dim,
-                    )
-                    x += adv
-                    adv = right_p.put_text(
-                        canvas, Point(x, y), r.type_name,
-                        _type_attr(r.type_name),
-                    )
-                    x += adv
-                    _ = right_p.put_text(
-                        canvas, Point(x, y), String(")"), dim,
-                    )
-            elif r.kind == PANE_ROW_WATCH:
-                # Leading ``✕`` marks the row as click-to-remove (the
-                # whole row is the hit target — see ``_on_row_click``).
-                var wx = right_x0 + 1
-                var wadv = right_p.put_text(
-                    canvas, Point(wx, y), String("✕ "),
-                    Attr(LIGHT_RED, PANE_BG),
-                )
-                _ = right_p.put_text(
-                    canvas, Point(wx + wadv, y), r.text, bg,
-                )
-            elif r.kind == PANE_ROW_BLANK:
-                pass
-        canvas.font = prev_font
+        # terminal one, each in a grid of that font's cells (a size of its
+        # own makes more or fewer of them; ``GridFrame``); the chrome
+        # between them stays UI.
+        self._left_frame = GridFrame.empty(FONT_DEBUGGER)
+        self._right_frame = GridFrame.empty(FONT_DEBUGGER)
+        if inspect_h > 0:
+            self._paint_columns(
+                canvas, panel, content_top, inspect_h, left_x_max, right_x0,
+                right_x_max, bg, section, current, subtle_frame, dim,
+            )
         # Inspect / output divider — only meaningful when an inspect
         # section is actually being shown. In RUN mode there's no
         # inspect section to divide off, and likewise in DEBUG mode
@@ -1307,9 +1223,8 @@ struct DebugPane(Copyable, Movable):
         var out_rect = Rect(
             panel.a.x + 2, out_top, panel.b.x - 1, out_bottom,
         )
-        canvas.font = FONT_TERMINAL
-        self.output.paint(canvas, out_rect)
-        canvas.font = prev_font
+        var og = self._out_frame.begin(canvas, out_rect, bg)
+        self.output.paint(og, self._out_frame.grid)
         # Vertical scrollbar in the right margin of the output rect.
         # Driven by the layout the log just stamped — present only when
         # content overflows the visible area.
@@ -1356,10 +1271,11 @@ struct DebugPane(Copyable, Movable):
                 if x1 > self.output.last_x_max:
                     x1 = self.output.last_x_max
                 for x in range(x0, x1):
-                    painter.set_attr(canvas, x, line_y, link_attr)
+                    og.set_attr(x, line_y, link_attr)
                 self._last_links.append(OutputLink(
                     line_y, x0, x1, hit.path, hit.line, hit.is_url,
                 ))
+        self._out_frame.end(canvas, og^)
         # Console input line across the bottom row. The ``>>>`` prompt is
         # painted in the pane colors; the editable strip after it reuses
         # ``TextField.paint`` (cyan input idiom) so caret / scroll /
@@ -1383,6 +1299,118 @@ struct DebugPane(Copyable, Movable):
         self._cmp_rect = Rect.empty()
         if repl_y >= 0 and self._cmp_open:
             self._paint_completions(canvas, painter, panel, repl_y)
+
+    def _paint_columns(
+        mut self, mut canvas: Canvas, panel: Rect, content_top: Int,
+        inspect_h: Int, left_x_max: Int, right_x0: Int, right_x_max: Int,
+        bg: Attr, section: Attr, current: Attr, subtle_frame: Attr, dim: Attr,
+    ):
+        """The Stack column (left of the divider) and the Locals / Watches
+        one (right of it), each in its own grid of debugger-font cells
+        (``_left_frame`` / ``_right_frame``), which also clips a long
+        label to its column."""
+        var g = self._left_frame.begin(
+            canvas, Rect(panel.a.x, content_top, left_x_max, content_top + inspect_h),
+            bg,
+        )
+        var left_p = Painter(self._left_frame.grid)
+        var left_visible = self._left_frame.grid.height()
+        if left_visible > len(self._left_indices) - self.stack_scroll:
+            left_visible = len(self._left_indices) - self.stack_scroll
+        if left_visible < 0:
+            left_visible = 0
+        for k in range(left_visible):
+            var ridx = self._left_indices[self.stack_scroll + k]
+            var r = self.rows[ridx]
+            var y = content_top + k
+            if r.kind == PANE_ROW_HEADER:
+                _ = left_p.put_text(
+                    g, Point(panel.a.x + 2, y), r.text + String(":"),
+                    section,
+                )
+            elif r.kind == PANE_ROW_FRAME:
+                var marker = String(" ")
+                var attr = bg
+                # ``r.expanded`` carries the subtle hint for FRAME rows
+                # (see PaneRow docstring) — adapter said this is library
+                # / external code, so dim it. The ``current`` highlight
+                # still wins when the user is inspecting this frame so
+                # the marker stays readable.
+                if r.expanded:
+                    attr = subtle_frame
+                if r.depth == self.current_frame_index:
+                    marker = String("▶")
+                    attr = current
+                _ = left_p.put_text(
+                    g, Point(panel.a.x + 2, y),
+                    String("  ") + marker + String(" ") + r.text,
+                    attr,
+                )
+        self._left_frame.end(canvas, g^)
+        var rg = self._right_frame.begin(
+            canvas, Rect(right_x0, content_top, right_x_max, content_top + inspect_h),
+            bg,
+        )
+        var right_p = Painter(self._right_frame.grid)
+        var right_visible = self._right_frame.grid.height()
+        if right_visible > len(self._right_indices) - self.right_scroll:
+            right_visible = len(self._right_indices) - self.right_scroll
+        if right_visible < 0:
+            right_visible = 0
+        for k in range(right_visible):
+            var ridx = self._right_indices[self.right_scroll + k]
+            var r = self.rows[ridx]
+            var y = content_top + k
+            if r.kind == PANE_ROW_HEADER:
+                _ = right_p.put_text(
+                    rg, Point(right_x0 + 1, y), r.text + String(":"),
+                    section,
+                )
+            elif r.kind == PANE_ROW_VARIABLE:
+                var indent = String("")
+                for _ in range(r.depth):
+                    indent = indent + String("  ")
+                var chev = String("  ")
+                if r.ref_id != 0:
+                    chev = String("▼ ") if r.expanded else String("▶ ")
+                # Paint name=value first, then layer the colored
+                # ``(type)`` suffix on top: gray parens, syntax-colored
+                # type word. ``put_text`` returns the cells advanced so
+                # we can chain segments without remeasuring.
+                var x = right_x0 + 1
+                var adv = right_p.put_text(
+                    rg, Point(x, y),
+                    indent + chev + r.text,
+                    bg,
+                )
+                if len(r.type_name.as_bytes()) > 0:
+                    x += adv
+                    adv = right_p.put_text(
+                        rg, Point(x, y), String(" ("), dim,
+                    )
+                    x += adv
+                    adv = right_p.put_text(
+                        rg, Point(x, y), r.type_name,
+                        _type_attr(r.type_name),
+                    )
+                    x += adv
+                    _ = right_p.put_text(
+                        rg, Point(x, y), String(")"), dim,
+                    )
+            elif r.kind == PANE_ROW_WATCH:
+                # Leading ``✕`` marks the row as click-to-remove (the
+                # whole row is the hit target — see ``_on_row_click``).
+                var wx = right_x0 + 1
+                var wadv = right_p.put_text(
+                    rg, Point(wx, y), String("✕ "),
+                    Attr(LIGHT_RED, PANE_BG),
+                )
+                _ = right_p.put_text(
+                    rg, Point(wx + wadv, y), r.text, bg,
+                )
+            elif r.kind == PANE_ROW_BLANK:
+                pass
+        self._right_frame.end(canvas, rg^)
 
     def _paint_completions(
         mut self, mut canvas: Canvas, painter: Painter, panel: Rect,
@@ -1499,7 +1527,7 @@ struct DebugPane(Copyable, Movable):
         # pane still extends the selection. Same pattern as resize-
         # drag above — drag-state owners get first dibs.
         if self.output.selection.dragging:
-            return self.output.handle_mouse(event)
+            return self.output.handle_mouse(self._out_frame.map(event))
         if self._cmp_open and self._cmp_rect.contains(event.pos):
             if event.button == MOUSE_BUTTON_LEFT and event.pressed \
                     and not event.motion:
@@ -1526,7 +1554,7 @@ struct DebugPane(Copyable, Movable):
         if event.button == MOUSE_WHEEL_UP or event.button == MOUSE_WHEEL_DOWN:
             if event.pressed:
                 if event.pos.y >= self.output.last_y0:
-                    return self.output.handle_mouse(event)
+                    return self.output.handle_mouse(self._out_frame.map(event))
                 var delta = -3 if event.button == MOUSE_WHEEL_UP else 3
                 if event.pos.x <= self._last_divider_x:
                     self._scroll_stack(delta)
@@ -1556,13 +1584,14 @@ struct DebugPane(Copyable, Movable):
         # click landed in.
         if event.pos.y >= self._last_inspect_y0 \
                 and event.pos.y < self.output.last_y0 - 1:
-            var col_offset = event.pos.y - self._last_inspect_y0
             if event.pos.x <= self._last_divider_x:
-                var i = self.stack_scroll + col_offset
+                var m = self._left_frame.map(event)
+                var i = self.stack_scroll + (m.pos.y - self._last_inspect_y0)
                 if i >= 0 and i < len(self._left_indices):
                     self._on_row_click(self._left_indices[i])
             else:
-                var i = self.right_scroll + col_offset
+                var m = self._right_frame.map(event)
+                var i = self.right_scroll + (m.pos.y - self._last_inspect_y0)
                 if i >= 0 and i < len(self._right_indices):
                     self._on_row_click(self._right_indices[i])
         elif event.pos.y >= self.output.last_y0:
@@ -1585,7 +1614,8 @@ struct DebugPane(Copyable, Movable):
             # File:line / URL link hit-test runs second — clicking on a
             # ``File "x", line N`` span opens the file, a ``http(s)://``
             # span opens the browser, rather than starting a selection drag.
-            var li = link_at(self._last_links, event.pos)
+            var m = self._out_frame.map(event)
+            var li = link_at(self._last_links, m.pos)
             if li >= 0:
                 ref link = self._last_links[li]
                 if link.is_url:
@@ -1595,7 +1625,7 @@ struct DebugPane(Copyable, Movable):
                     self.pending_open_line = link.line
                 return True
             # Forward to the log: starts the selection drag.
-            return self.output.handle_mouse(event)
+            return self.output.handle_mouse(m)
         return True
 
     def handle_key(mut self, event: Event) -> Bool:

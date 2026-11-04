@@ -157,6 +157,13 @@ struct Event(ImplicitlyCopyable, Movable):
     # events. Stamped by ``Terminal.poll_event`` at parse time so the
     # gap measured is the user's, not the consumer's processing rate.
     var click_count: UInt8
+    # The pointer in thousandths of a cell, where the host knows it more
+    # finely than ``pos`` (the native app: points). A pane drawn on a
+    # sub-grid of another cell size maps it onto its own cells
+    # (``GridSelection.grid_event``). ``mouse_event`` sets the middle of
+    # ``pos``'s cell; ``fine_pos`` falls back to that when something
+    # moved ``pos`` without it.
+    var fine: Point
 
     # Resize payload (also stored in pos: width=x, height=y)
 
@@ -172,6 +179,7 @@ struct Event(ImplicitlyCopyable, Movable):
         self.pressed = False
         self.motion = False
         self.click_count = 0
+        self.fine = Point(500, 500)
         self.text = String("")
 
     @staticmethod
@@ -199,7 +207,15 @@ struct Event(ImplicitlyCopyable, Movable):
         e.motion = motion
         e.mods = mods
         e.click_count = click_count
+        e.fine = Point(pos.x * 1000 + 500, pos.y * 1000 + 500)
         return e
+
+    def fine_pos(self) -> Point:
+        """``fine``, or the middle of ``pos``'s cell when the two disagree
+        (an event whose ``pos`` was rewritten)."""
+        if self.fine.x // 1000 == self.pos.x and self.fine.y // 1000 == self.pos.y:
+            return self.fine
+        return Point(self.pos.x * 1000 + 500, self.pos.y * 1000 + 500)
 
     @staticmethod
     def resize_event(width: Int, height: Int) -> Event:

@@ -28,8 +28,8 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .case_fold import eq_ci, fold_byte
-from .canvas import Canvas, utf8_codepoint_count
-from .cell import Cell, FONT_CODE, FONT_UI
+from .canvas import Canvas, SCALE_ONE, SubGrid, utf8_codepoint_count
+from .cell import Cell, FONT_CODE, FONT_SLOTS, FONT_UI
 from .painter import Painter
 from .colors import (
     Attr, BLACK, BORDER_FOCUS, EDITOR_BG, EDITOR_FG, FG_TRUECOLOR, LIGHT_GRAY,
@@ -1105,6 +1105,20 @@ struct Desktop(Movable):
     # same cheap version-poll pattern as ``theme_version``.
     var host_font_names: List[String]
     var font_version: Int
+    # Each font slot's cell size in thousandths of the screen's
+    # (``Canvas.area_scale``), reported by the native host
+    # (``tk_desktop_set_area_scale``) from the area's font at its own
+    # size; copied onto every frame's canvas (``frame_canvas``).
+    var area_scale: List[Int]
+    # The sub-grids the last main / floating-panels frame placed, for the
+    # host to draw over it (``tk_desktop_sub_grid*``).
+    var sub_grids: List[SubGrid]
+    var panel_sub_grids: List[SubGrid]
+    # The pointer's position in thousandths of a cell for the next mouse
+    # event, from ``tk_desktop_set_mouse_fine``; ``take_mouse_fine``
+    # consumes it.
+    var _mouse_fine: Point
+    var _mouse_fine_set: Bool
     # Host-reported cell-font size info (native macOS frontend). The Swift
     # host calls ``tk_desktop_set_font_size_info`` after every font apply:
     # ``host_font_effective_size`` is the point size actually rendering
@@ -1826,6 +1840,13 @@ struct Desktop(Movable):
         self.theme_version = 0
         self.host_font_names = List[String]()
         self.font_version = 0
+        self.area_scale = List[Int]()
+        for _ in range(2 * FONT_SLOTS):
+            self.area_scale.append(SCALE_ONE)
+        self.sub_grids = List[SubGrid]()
+        self.panel_sub_grids = List[SubGrid]()
+        self._mouse_fine = Point(0, 0)
+        self._mouse_fine_set = False
         self.host_font_effective_size = 0
         self.host_font_ideal_size = 0
         self.project = Optional[String]()
@@ -6174,7 +6195,8 @@ struct Desktop(Movable):
         refetch the palette) or rebuild the language-server specs.
         """
         var theme_changed = merged.theme != self.config.theme
-        var fonts_changed = merged.area_fonts != self.config.area_fonts
+        var fonts_changed = merged.area_fonts != self.config.area_fonts \
+            or merged.area_font_sizes != self.config.area_font_sizes
         var lsp_changed = not lsp_overrides_equal(
             merged.language_servers, self.config.language_servers,
         )
@@ -6381,6 +6403,56 @@ struct Desktop(Movable):
             return
         self.config.area_fonts[slot] = v
         self.font_version += 1
+
+    def area_font_size(self, slot: Int) -> Int:
+        """Area ``slot``'s own font size in points, 0 for the cell's. The
+        code's is the cell's; so is the UI's in the Turbo Vision look,
+        which draws its UI in the cell font."""
+        if slot == Int(FONT_CODE):
+            return 0
+        if slot == Int(FONT_UI) and self.tv_frame():
+            return 0
+        if slot < 0 or slot >= len(self.config.area_font_sizes):
+            return 0
+        return self.config.area_font_sizes[slot]
+
+    def set_area_font_size(mut self, slot: Int, size: Int):
+        """Set area ``slot``'s own font size (0 clears it), clamped like
+        ``set_font_size``. Bumps ``font_version`` for the host."""
+        if slot < 0 or slot >= len(self.config.area_font_sizes):
+            return
+        var v = size
+        if v != 0:
+            v = max(MIN_FONT_SIZE, min(v, MAX_FONT_SIZE))
+        if v == self.config.area_font_sizes[slot]:
+            return
+        self.config.area_font_sizes[slot] = v
+        self.font_version += 1
+
+    def set_area_scale(mut self, slot: Int, w_milli: Int, h_milli: Int):
+        """The host's measure of area ``slot``'s cell, in thousandths of
+        the screen's cell (``SCALE_ONE`` for the same size)."""
+        if slot < 0 or slot >= FONT_SLOTS:
+            return
+        self.area_scale[2 * slot] = max(1, w_milli)
+        self.area_scale[2 * slot + 1] = max(1, h_milli)
+
+    def frame_canvas(self, cols: Int, rows: Int) -> Canvas:
+        """A blank ``cols`` x ``rows`` canvas for one frame, carrying the
+        areas' cell sizes so panes lay out their own grids."""
+        var canvas = Canvas(cols, rows)
+        canvas.area_scale = self.area_scale.copy()
+        return canvas^
+
+    def set_mouse_fine(mut self, x_milli: Int, y_milli: Int):
+        self._mouse_fine = Point(x_milli, y_milli)
+        self._mouse_fine_set = True
+
+    def take_mouse_fine(mut self, mut event: Event):
+        """Stamp the host's fine pointer position on ``event``, once."""
+        if self._mouse_fine_set:
+            event.fine = self._mouse_fine
+            self._mouse_fine_set = False
 
     def _rebuild_lsp_specs(mut self):
         """Refresh ``lsp_specs`` from the bundled catalog plus user
@@ -8978,6 +9050,7 @@ struct Desktop(Movable):
             self.settings.font_choice = self.font_label()
             self.settings.font_size_choice = self.config.font_size
             self.settings.area_font_choices = self._area_font_labels()
+            self.settings.area_font_sizes = self.config.area_font_sizes.copy()
         self._apply_view_config()
         self._persist_config()
 
@@ -10255,6 +10328,7 @@ struct Desktop(Movable):
             self.settings.platinum_ui = self.config.platinum_ui
             self.settings.terminal_tmux = self.config.terminal_tmux
             self.settings.area_font_choices = self._area_font_labels()
+            self.settings.area_font_sizes = self.config.area_font_sizes.copy()
             return Optional[String]()
         if action == HELP_HOTKEYS:
             self._open_hotkeys_help(screen)
@@ -13161,6 +13235,7 @@ struct Desktop(Movable):
                 self.settings.font_choice = self.font_label()
                 self.settings.font_size_choice = self.config.font_size
                 self.settings.area_font_choices = self._area_font_labels()
+                self.settings.area_font_sizes = self.config.area_font_sizes.copy()
         if self.settings.dirty:
             self.config.auto_save = self.settings.auto_save
             self.config.trim_trailing_whitespace = (
@@ -13272,6 +13347,12 @@ struct Desktop(Movable):
                             != self.area_font_label(slot):
                         var label = self.settings.area_font_choices[slot].copy()
                         self.set_area_font(slot, label)
+                for slot in range(len(self.settings.area_font_sizes)):
+                    if self.settings.area_font_sizes[slot] \
+                            != self.config.area_font_sizes[slot]:
+                        self.set_area_font_size(
+                            slot, self.settings.area_font_sizes[slot],
+                        )
             # Wrap mode (Settings ▸ Editor). Applying it re-pushes the value
             # into every editor and re-reveals each cursor, since the
             # buffer-row ↔ screen-row relationship changes with the mode.

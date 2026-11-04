@@ -105,6 +105,12 @@ def chicago_font_label() -> String:
 comptime AREA_BUNDLED_FONT = "IBM VGA"
 
 
+def area_font_size_key(slot: Int) -> String:
+    """Config key of area ``slot``'s font size (``area_font_key`` +
+    ``_size``)."""
+    return area_font_key(slot) + String("_size")
+
+
 def same_as_font_label() -> String:
     """The first row of an area's font list: no font of its own."""
     return String("Same as Font")
@@ -311,6 +317,12 @@ struct TurbokodConfig(Copyable, Movable):
     # is ``font`` itself, so its entry is unused; the UI one is ignored in
     # the Turbo Vision look, which draws its UI in the VGA font.
     var area_fonts: List[String]
+    # Each area's font size in points, indexed like ``area_fonts`` and
+    # serialized as ``<area_font_key>_size``. 0 means the shared cell's
+    # size; anything else gives the area a grid of its own in cells of
+    # that font at that size (``Canvas.place_sub_grid``). Only the terminal
+    # and debugger areas offer it in Settings.
+    var area_font_sizes: List[Int]
     # Per-project cap on simultaneously-open file-backed editor windows.
     # Once a project hits this, opening another document closes the
     # least-recently-focused clean (saved) document; session restore
@@ -371,6 +383,7 @@ struct TurbokodConfig(Copyable, Movable):
         self.font = String("")
         self.font_size = 0
         self.area_fonts = [String(""), String(""), String(""), String("")]
+        self.area_font_sizes = [0, 0, 0, 0]
         self.max_open_windows = DEFAULT_MAX_OPEN_WINDOWS
         self.recent_projects = List[String]()
         self.project_dirs = List[String]()
@@ -410,6 +423,7 @@ struct TurbokodConfig(Copyable, Movable):
         self.font = copy.font
         self.font_size = copy.font_size
         self.area_fonts = copy.area_fonts.copy()
+        self.area_font_sizes = copy.area_font_sizes.copy()
         self.max_open_windows = copy.max_open_windows
         self.recent_projects = copy.recent_projects.copy()
         self.project_dirs = copy.project_dirs.copy()
@@ -602,6 +616,10 @@ def _config_from_json(root: JsonValue) raises -> TurbokodConfig:
         if v == _RETIRED_CLASSIC_FONT:
             v = String(AREA_BUNDLED_FONT)
         cfg.area_fonts[slot] = v
+        var size = json_get_int(root, area_font_size_key(slot), 0)
+        if size != 0:
+            size = max(MIN_FONT_SIZE, min(size, MAX_FONT_SIZE))
+        cfg.area_font_sizes[slot] = size
     cfg.max_open_windows = json_get_int(
         root, String("max_open_windows"), cfg.max_open_windows,
     )
@@ -777,6 +795,9 @@ def _config_to_json(config: TurbokodConfig) -> JsonValue:
         var key = area_font_key(slot)
         if len(key.as_bytes()) > 0:
             root.put(key, json_str(config.area_fonts[slot]))
+            root.put(
+                area_font_size_key(slot), json_int(config.area_font_sizes[slot]),
+            )
     root.put(
         String("max_open_windows"), json_int(config.max_open_windows),
     )

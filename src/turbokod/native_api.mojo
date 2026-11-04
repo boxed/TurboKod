@@ -22,7 +22,7 @@ reads ``fg_rgb`` / ``bg_rgb`` (``0xRRGGBB``) instead of the palette index.
 from std.ffi import external_call
 from std.sys import size_of
 
-from turbokod.canvas import Canvas
+from turbokod.canvas import Canvas, SubGrid
 from turbokod.colors import default_attr
 from turbokod.events import Event, MOD_CTRL, MOD_META
 from turbokod.geometry import Point, Rect
@@ -66,7 +66,7 @@ from turbokod.posix import wall_clock_ms
 from turbokod.host_abi import (
     ACT_CLOSE_WINDOW, ACT_NEW_WINDOW, ACT_NONE, ACT_OPEN_FILE,
     ACT_OPEN_PROJECT, ACT_QUICK_OPEN, ACT_QUIT, ACT_TOGGLE_FLOATING_PANELS,
-    pack_canvas, shape_code,
+    pack_canvas, pack_cells, shape_code,
 )
 from turbokod.app_menus import (
     build_menus, NEW_WINDOW, refresh_menu_visibility, TOGGLE_FLOATING_PANELS,
@@ -90,6 +90,14 @@ def _mouse_event(
     return Event.mouse_event(
         Point(x, y), button, pressed != 0, motion != 0, mods, click_count,
     )
+
+
+def _frame_canvas(h: Int, cols: Int, rows: Int) -> Canvas:
+    """``_blank_canvas`` for a surface that can hold panes with a cell
+    size of their own (``Desktop.frame_canvas``)."""
+    var canvas = _desk(h)[].frame_canvas(cols, rows)
+    canvas.clear(default_attr())
+    return canvas^
 
 
 def _blank_canvas(cols: Int, rows: Int) -> Canvas:
@@ -341,9 +349,11 @@ def tk_desktop_layout(h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int) abi(
     caller's buffer (5 u32 per cell). Returns the number of cells written."""
     if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
         return 0
-    var canvas = _blank_canvas(cols, rows)
+    var canvas = _frame_canvas(h, cols, rows)
     _desk(h)[].paint(canvas, Rect(0, 0, cols, rows))
-    return pack_canvas(canvas, cols, rows, out_ptr, cap)
+    var n = pack_canvas(canvas, cols, rows, out_ptr, cap)
+    swap(_desk(h)[].sub_grids, canvas.sub_grids)
+    return n
 
 
 @export
@@ -633,6 +643,96 @@ def tk_font_area_name(h: Int, slot: Int, out_ptr: Int, cap: Int) abi("C") -> Int
 
 
 @export
+def tk_font_area_size(h: Int, slot: Int) abi("C") -> Int:
+    """Area ``slot``'s own font size in points (``Desktop.area_font_size``),
+    0 when it uses the cell's. Polled with ``tk_font_name``."""
+    if h == 0:
+        return 0
+    return _desk(h)[].area_font_size(slot)
+
+
+@export
+def tk_desktop_set_area_scale(h: Int, slot: Int, w_milli: Int, h_milli: Int) abi("C"):
+    """Area ``slot``'s cell in thousandths of the screen's cell, measured by
+    the host from the area's font at ``tk_font_area_size`` (1000 x 1000
+    when it has no size of its own). Panes in that area lay out a grid of
+    those cells (``Canvas.place_sub_grid``)."""
+    if h == 0:
+        return
+    _desk(h)[].set_area_scale(slot, w_milli, h_milli)
+
+
+@export
+def tk_desktop_set_mouse_fine(h: Int, x_milli: Int, y_milli: Int) abi("C"):
+    """The pointer for the next mouse call, in thousandths of a cell, so a
+    pane on a grid of another cell size can tell which of its cells it's
+    over (``Event.fine``)."""
+    if h == 0:
+        return
+    _desk(h)[].set_mouse_fine(x_milli, y_milli)
+
+
+@export
+def tk_desktop_sub_grid_count(h: Int, surface: Int) abi("C") -> Int:
+    """How many sub-grids the last frame of ``surface`` (0 the main
+    window, 1 the floating panels) placed. Cells of that frame whose word
+    0 carries ``sub`` (bits 26..31) = k + 1 show sub-grid k."""
+    if h == 0:
+        return 0
+    if surface == 1:
+        return len(_desk(h)[].panel_sub_grids)
+    return len(_desk(h)[].sub_grids)
+
+
+@export
+def tk_desktop_sub_grid_info(h: Int, surface: Int, i: Int, out_ptr: Int) abi("C") -> Int:
+    """Sub-grid ``i``'s ``[slot, x, y, w, h, cols, rows]`` (Int32 words):
+    its font slot, the rect it shows through in screen cells, and its own
+    size in the area's cells, drawn from the rect's top-left. 1 on
+    success."""
+    if h == 0 or out_ptr == 0:
+        return 0
+    if surface == 1:
+        return _sub_grid_info(_desk(h)[].panel_sub_grids, i, out_ptr)
+    return _sub_grid_info(_desk(h)[].sub_grids, i, out_ptr)
+
+
+def _sub_grid_info(imm grids: List[SubGrid], i: Int, out_ptr: Int) -> Int:
+    if i < 0 or i >= len(grids):
+        return 0
+    ref g = grids[i]
+    var op = Pointer[Int32, MutUntrackedOrigin](unsafe_from_address=out_ptr)
+    op[unsafe_offset=0] = Int32(Int(g.slot))
+    op[unsafe_offset=1] = Int32(g.rect.a.x)
+    op[unsafe_offset=2] = Int32(g.rect.a.y)
+    op[unsafe_offset=3] = Int32(g.rect.width())
+    op[unsafe_offset=4] = Int32(g.rect.height())
+    op[unsafe_offset=5] = Int32(g.cols)
+    op[unsafe_offset=6] = Int32(g.rows)
+    return 1
+
+
+@export
+def tk_desktop_sub_grid_layout(
+    h: Int, surface: Int, i: Int, out_ptr: Int, cap: Int,
+) abi("C") -> Int:
+    """Pack sub-grid ``i``'s cells like ``tk_desktop_layout`` does a
+    frame's. Returns the number of cells written."""
+    if h == 0 or out_ptr == 0:
+        return 0
+    if surface == 1:
+        return _pack_sub_grid(_desk(h)[].panel_sub_grids, i, out_ptr, cap)
+    return _pack_sub_grid(_desk(h)[].sub_grids, i, out_ptr, cap)
+
+
+def _pack_sub_grid(imm grids: List[SubGrid], i: Int, out_ptr: Int, cap: Int) -> Int:
+    if i < 0 or i >= len(grids):
+        return 0
+    ref g = grids[i]
+    return pack_cells(g.cells, g.cols * g.rows, out_ptr, cap)
+
+
+@export
 def tk_font_size(h: Int) abi("C") -> Int:
     """The cell font's point size (``Desktop.cell_font_size``). 0 means
     "the font's default size" — the host picks 16 for the bundled bitmap
@@ -695,9 +795,11 @@ def tk_desktop_layout_panels(
     drives the whole Desktop's per-frame work for both surfaces."""
     if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
         return 0
-    var canvas = _blank_canvas(cols, rows)
+    var canvas = _frame_canvas(h, cols, rows)
     _desk(h)[].paint_panels(canvas, Rect(0, 0, cols, rows))
-    return pack_canvas(canvas, cols, rows, out_ptr, cap)
+    var n = pack_canvas(canvas, cols, rows, out_ptr, cap)
+    swap(_desk(h)[].panel_sub_grids, canvas.sub_grids)
+    return n
 
 
 @export
@@ -732,6 +834,7 @@ def tk_desktop_panels_mouse(
     if h == 0:
         return ACT_NONE
     var ev = _mouse_event(x, y, button, pressed, motion, mods, click_count)
+    _desk(h)[].take_mouse_fine(ev)
     var action: Optional[String]
     try:
         action = _desk(h)[].handle_panels_event(ev, Rect(0, 0, cols, rows))
@@ -985,6 +1088,7 @@ def tk_desktop_mouse(
     if h == 0:
         return ACT_NONE
     var ev = _mouse_event(x, y, button, pressed, motion, mods, click_count)
+    _desk(h)[].take_mouse_fine(ev)
     var action: Optional[String]
     try:
         action = _desk(h)[].handle_event(ev, Rect(0, 0, cols, rows))

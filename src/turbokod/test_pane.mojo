@@ -42,7 +42,8 @@ from .posix import (
 )
 from .pty import PtyProcess
 from .terminal_view import (
-    flush_vt_side_effects, forward_key_to_grid, GridSelection, paint_grid,
+    flush_vt_side_effects, forward_key_to_grid, grid_size, GridSelection,
+    new_grid, paint_grid, place_grid,
     paste_to_pty,
 )
 from .vt import Vt
@@ -341,8 +342,11 @@ struct TestPane(Copyable, Movable):
         if body.is_empty():
             self.sel._last_body = Rect.empty()
             return
-        var bw = body.width()
-        var bh = body.height()
+        # The grid is the body's size in the terminal font's cells, which
+        # may be another size than the screen's.
+        var dims = grid_size(canvas, body)
+        var bw = dims[0]
+        var bh = dims[1]
         if bw <= 0 or bh <= 0:
             self.sel._last_body = Rect.empty()
             return
@@ -353,42 +357,39 @@ struct TestPane(Copyable, Movable):
             self.vt.resize(bw, bh)
             if self.pty.alive:
                 _ = self.pty.set_winsize(bw, bh)
-        self.sel._last_body = body
+        self.sel.set_frame(canvas, body, bw, bh)
         # Grid + selection overlay + cursor caret (shared with the shell
         # terminal). The caret only shows while running so an exited
         # pane reads as static output.
-        paint_grid(
-            canvas, painter, self.vt, self.sel, body,
-            self.focused and self.running(),
-        )
+        var grid = new_grid(bw, bh, bg)
+        paint_grid(grid, self.vt, self.sel, self.focused and self.running())
         # Traceback-link overlay: scan each on-screen row's text for
         # ``File "...", line N`` / ``path:N`` spans, underline them, and
-        # record the screen rects for click hit-testing. Cell offsets
-        # from the scanners are codepoint columns, matching the grid's
-        # one-cell-per-column layout (link text is ASCII).
+        # record them for click hit-testing in ``sel._last_body``'s
+        # coordinates (``grid_event``). Cell offsets from the scanners are
+        # codepoint columns, matching the grid's one-cell-per-column
+        # layout (link text is ASCII).
         var link_attr = Attr(LIGHT_BLUE, PANE_BG, STYLE_UNDERLINE)
-        var grid = self.vt.grid()
-        for r in range(grid.rows):
-            var line = grid.row_text(r)
+        var origin = self.sel._last_body.a
+        var cells = self.vt.grid()
+        for r in range(cells.rows):
+            var line = cells.row_text(r)
             if len(line.as_bytes()) == 0:
                 continue
             var hits = extract_all_links(line)
             for h in range(len(hits)):
                 var hit = hits[h]
-                var x0 = body.a.x + hit.cell_start
-                var x1 = body.a.x + hit.cell_end
-                if x0 < body.a.x:
-                    x0 = body.a.x
-                if x1 > body.b.x:
-                    x1 = body.b.x
+                var x0 = max(hit.cell_start, 0)
+                var x1 = min(hit.cell_end, bw)
                 if x1 <= x0:
                     continue
-                var line_y = body.a.y + r
                 for x in range(x0, x1):
-                    painter.set_attr(canvas, x, line_y, link_attr)
+                    grid.set_attr(x, r, link_attr)
                 self._last_links.append(OutputLink(
-                    line_y, x0, x1, hit.path, hit.line, hit.is_url,
+                    origin.y + r, origin.x + x0, origin.x + x1,
+                    hit.path, hit.line, hit.is_url,
                 ))
+        place_grid(canvas, body, grid^)
 
     # --- copy / selection delegates ------------------------------------
 
@@ -404,8 +405,9 @@ struct TestPane(Copyable, Movable):
     # --- mouse ---------------------------------------------------------
 
     def handle_mouse(
-        mut self, event: Event, panel: Rect, allow_resize: Bool = True,
+        mut self, screen_event: Event, panel: Rect, allow_resize: Bool = True,
     ) -> Bool:
+        var event = screen_event
         if event.kind != EVENT_MOUSE:
             return False
         # Chrome wins first — close button, resize edge, title commands.
@@ -416,10 +418,14 @@ struct TestPane(Copyable, Movable):
             if cr.focus_request:
                 self.focused = True
             return True
+        # From here on positions are the grid's (``grid_event``); the
+        # panel test below still uses the screen's.
+        var screen_pos = event.pos
+        event = self.sel.grid_event(event)
         # In-flight drag selection keeps consuming past the body edge.
         if self.sel.continue_drag(self.vt, event):
             return True
-        if not panel.contains(event.pos):
+        if not panel.contains(screen_pos):
             if event.button != MOUSE_BUTTON_NONE \
                     and event.pressed and not event.motion:
                 self.focused = False

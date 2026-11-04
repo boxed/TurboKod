@@ -273,6 +273,63 @@ func applySlotFonts(_ names: [String]) {
     }
 }
 
+/// An area's own grid (Settings ▸ Terminal / Debugger font size): its cell,
+/// measured from the area's font at that size as the cell font's would be,
+/// and the face drawn in it. The core lays out the area's panes in these
+/// cells and sends them as sub-grids (`CellView.drawSubGrids`).
+struct AreaGrid {
+    let cw: CGFloat
+    let ch: CGFloat
+    let face: SlotFace
+    let key: String
+}
+
+// The areas' grids by slot; nil for an area at the cell's size.
+var areaGrids: [AreaGrid?] = [nil, nil, nil, nil]
+private var areaGridKeys: [String] = ["", "", "", ""]
+
+/// Run `body` with CELL_W/CELL_H set to another cell's, so a face or glyph
+/// for an area's grid is fitted and drawn the way the cell font's are.
+func withCellMetrics<T>(_ w: CGFloat, _ h: CGFloat, _ body: () -> T) -> T {
+    let sw = CELL_W, sh = CELL_H
+    CELL_W = w; CELL_H = h
+    defer { CELL_W = sw; CELL_H = sh }
+    return body()
+}
+
+/// The cell `name` at `size` points would have as the cell font — the same
+/// arithmetic as `applyCellFont`.
+func naturalCell(_ name: String, size: CGFloat) -> CGSize {
+    if name == CHICAGO_FONT_NAME, let f = chicagoFont(size: size) {
+        return CGSize(width: max(1, ceil(("0" as NSString).size(withAttributes: [.font: f]).width)),
+                      height: max(1, ceil(f.pointSize * 4 / 3)))
+    }
+    if !name.isEmpty, let f = NSFontManager.shared.font(withFamily: name, traits: [],
+                                                         weight: 5, size: size)
+        ?? NSFont(name: name, size: size) {
+        let adv = ("0" as NSString).size(withAttributes: [.font: f]).width
+        return CGSize(width: max(1, ceil(adv)),
+                      height: max(1, ceil(f.ascender - f.descender + f.leading)))
+    }
+    return CGSize(width: max(1, (size / 2).rounded()), height: max(1, size.rounded()))
+}
+
+/// Rebuild the areas' grids from each slot's (font, own size); size 0 means
+/// the area draws at the cell's size, in the shared grid.
+func applyAreaGrids(_ specs: [(String, CGFloat)]) {
+    for slot in 0..<areaGrids.count {
+        let (name, size) = slot < specs.count ? specs[slot] : ("", 0)
+        let key = size > 0 ? "\(name)\u{0}\(size)" : ""
+        if key == areaGridKeys[slot] { continue }
+        areaGridKeys[slot] = key
+        fontGeneration += 1
+        guard size > 0 else { areaGrids[slot] = nil; continue }
+        let c = naturalCell(name, size: size)
+        let face = withCellMetrics(c.width, c.height) { SlotFace(name: name) }
+        areaGrids[slot] = AreaGrid(cw: c.width, ch: c.height, face: face, key: key)
+    }
+}
+
 var currentCellFontName = ""             // "" = the bundled default
 var currentCellFontSize: CGFloat = -1    // 0 = font default; -1 forces the first apply through
 // Resolved size info the host reports back to the Mojo core after every
@@ -585,6 +642,8 @@ final class CellView: NSView {
     // Dropped when the font or the screen's scale changes.
     private var glyphCache: [UInt64: CachedGlyph] = [:]
     private var glyphCacheGen = -1
+    // The area grids' glyphs, one cache per `AreaGrid.key`.
+    private var subGlyphCaches: [String: [UInt64: CachedGlyph]] = [:]
     private var glyphCacheScale: CGFloat = 0
     private var springLastTime: CFTimeInterval = 0
     // Per-run easing factor for the spring timer (fraction of the remaining
@@ -611,6 +670,9 @@ final class CellView: NSView {
     // grid taller than the viewport), packed by tk_editor_region_layout.
     private var regionBuf = UnsafeMutablePointer<UInt32>.allocate(capacity: CELL_WORDS)
     private var regionBufCells = 1
+    // One sub-grid's cells at a time (`drawSubGrids`).
+    private var subBuf = UnsafeMutablePointer<UInt32>.allocate(capacity: CELL_WORDS)
+    private var subBufCells = 1
     // True while a left-drag that began on the minimap gutter is in flight.
     // The minimap doubles as a scrollbar; we scroll it from the raw sub-cell
     // pointer Y (proportional) instead of the cell-quantized core hit-test,
@@ -663,6 +725,9 @@ final class CellView: NSView {
             applyCellFont(fetchFontName(handle),
                           size: CGFloat(tk_font_size(handle)))
             applySlotFonts((0..<slotFaces.count).map { fetchAreaFontName(handle, $0) })
+            applyAreaGrids((0..<areaGrids.count).map {
+                (fetchAreaFontName(handle, $0), CGFloat(tk_font_area_size(handle, Int64($0))))
+            })
             // Report the resolved effective + ideal sizes back to the core —
             // the Settings size stepper and "Restore ideal" button read these.
             tk_desktop_set_font_size_info(handle,
@@ -671,7 +736,22 @@ final class CellView: NSView {
         }
         if drawnFontGeneration == fontGeneration { return false }
         drawnFontGeneration = fontGeneration
+        reportAreaScales()
         return true
+    }
+
+    /// Tell the core each area's cell relative to the screen's, so its
+    /// panes lay out grids of that size. Rounded up, so a grid never
+    /// reaches past the rect it's drawn in.
+    private func reportAreaScales() {
+        for slot in 0..<areaGrids.count {
+            var w: Int64 = 1000, h: Int64 = 1000
+            if let g = areaGrids[slot] {
+                w = Int64(ceil(g.cw / CELL_W * 1000))
+                h = Int64(ceil(g.ch / CELL_H * 1000))
+            }
+            tk_desktop_set_area_scale(handle, Int64(slot), w, h)
+        }
     }
 
     /// Refetch the active theme's palette if the Mojo core's theme version has
@@ -706,6 +786,31 @@ final class CellView: NSView {
 
     private func hashBuf(_ words: Int) -> UInt64 {
         fnv1a(UnsafeBufferPointer(start: buf, count: words))
+    }
+
+    /// The last layout's sub-grids, hashed: a pane on one leaves only blank
+    /// cells in the frame itself, so its output alone wouldn't read as a
+    /// change.
+    private func subGridsHash() -> UInt64 {
+        guard surface == .main || surface == .panels else { return 0 }
+        let surf: Int64 = surface == .panels ? 1 : 0
+        let count = Int(tk_desktop_sub_grid_count(handle, surf))
+        var h: UInt64 = UInt64(count)
+        var info = [Int32](repeating: 0, count: 7)
+        for k in 0..<count {
+            let ok = info.withUnsafeMutableBufferPointer { b in
+                tk_desktop_sub_grid_info(handle, surf, Int64(k), Int64(Int(bitPattern: b.baseAddress)))
+            }
+            guard ok == 1 else { continue }
+            let cells = Int(info[5]) * Int(info[6])
+            guard cells > 0 else { continue }
+            Self.growCells(&subBuf, &subBufCells, cells)
+            let n = Int(tk_desktop_sub_grid_layout(handle, surf, Int64(k),
+                Int64(Int(bitPattern: subBuf)), Int64(cells)))
+            h = (h &* 0x100000001b3) ^ fnv1a(info)
+                ^ fnv1a(UnsafeBufferPointer(start: subBuf, count: n * CELL_WORDS))
+        }
+        return h
     }
 
     override var isFlipped: Bool { true }            // y increases downward (row index)
@@ -792,14 +897,15 @@ final class CellView: NSView {
         }
     }
 
-    // `buf` and `regionBuf` are manual allocations, so ARC releasing the
-    // view reclaims the object but not them. They're grown to the window's
-    // cell count and never shrink, so a closed window stranded both at its
-    // final size (~1.6 MB for a large grid) for the life of the app — and
-    // the app deliberately outlives its windows.
+    // `buf`, `regionBuf` and `subBuf` are manual allocations, so ARC
+    // releasing the view reclaims the object but not them. They're grown to
+    // the window's cell count and never shrink, so a closed window stranded
+    // them at their final size (~1.6 MB for a large grid) for the life of
+    // the app — and the app deliberately outlives its windows.
     deinit {
         buf.deallocate()
         regionBuf.deallocate()
+        subBuf.deallocate()
     }
 
     // Grow-only cell buffer: reallocate when `cells` exceeds `capacity`.
@@ -852,7 +958,7 @@ final class CellView: NSView {
         ensureBuf(c * r)
         let n = layoutSurface(c, r, c * r)
         frameCols = c; frameRows = r; frameN = n
-        let hash = hashBuf(n * CELL_WORDS)
+        let hash = hashBuf(n * CELL_WORDS) ^ subGridsHash()
         // A theme swap changes only the palette, not the laid-out indices, so
         // force a frame through even when the buffer hash is unchanged.
         let themeChanged = refreshPaletteIfNeeded()
@@ -932,7 +1038,7 @@ final class CellView: NSView {
             // Keep the change detector in sync with what we actually present so
             // the next pollFrame compares against this frame.
             frameCols = c; frameRows = r; frameN = n
-            lastFrameHash = hashBuf(n * CELL_WORDS)
+            lastFrameHash = hashBuf(n * CELL_WORDS) ^ subGridsHash()
         }
         framePending = false
 
@@ -944,6 +1050,8 @@ final class CellView: NSView {
         // Smooth scroll: when the focused editor rests (or is being dragged)
         // at a sub-line offset, overdraw its body translated by the fraction.
         if surface == .main { compositeSmoothScroll(ctx, mainN: n, mainCols: c) }
+        // Panes whose font has a size of its own, in grids of their own.
+        if surface == .main || surface == .panels { drawSubGrids(ctx, mainN: n, mainCols: c) }
         // Editor body popups (minimap tooltip / LSP hover) carry a translucent
         // drop shadow drawn here, after the main draw + smooth composite, so it
         // lands on the final (smooth-scrolled) body instead of a baked cell
@@ -1209,18 +1317,27 @@ final class CellView: NSView {
     /// window took tens of ms and a smooth scroll ran at 15-50 fps. Each
     /// distinct glyph is drawn once (by `drawGlyph`, the same code as
     /// before) and blitted from then on.
+    ///
+    /// A sub-grid passes its area's `face` (every glyph is drawn in it, at
+    /// the CELL_W/CELL_H `withCellMetrics` set) and a `cacheKey` of its
+    /// own. `only` limits the draw to the cells it accepts — the cells
+    /// painted over a sub-grid, redrawn on top of it.
     private func drawCells(_ ctx: CGContext,
                            _ p: UnsafeMutablePointer<UInt32>,
                            _ n: Int, _ c: Int,
-                           originX: CGFloat, originY: CGFloat) {
+                           originX: CGFloat, originY: CGFloat,
+                           face: SlotFace? = nil, cacheKey: String = "",
+                           only: ((Int) -> Bool)? = nil) {
         // Backgrounds, one fill per run of equal color along a row.
         let base = palette[0]
         var i = 0
         while i < n {
+            if let only = only, !only(i) { i += 1; continue }
             let bg = cellColors(p, i).bg
             let rowEnd = (i / c + 1) * c
             var j = i + 1
-            while j < min(n, rowEnd) && cellColors(p, j).bg == bg { j += 1 }
+            while j < min(n, rowEnd) && cellColors(p, j).bg == bg
+                && (only.map { $0(j) } ?? true) { j += 1 }
             if bg != base {
                 ctx.setFillColor(cgcolor(bg))
                 ctx.fill(CGRect(x: originX + CGFloat(i % c) * CELL_W,
@@ -1230,12 +1347,25 @@ final class CellView: NSView {
             i = j
         }
         let scale = window?.backingScaleFactor ?? 1
-        let aa = !cellFontRendersCrisp(backingScale: scale)
+        let aa = face.map { !$0.crisp(backingScale: scale) }
+            ?? !cellFontRendersCrisp(backingScale: scale)
         if glyphCacheGen != fontGeneration || glyphCacheScale != scale
             || glyphCache.count > 16384 {
             glyphCache.removeAll(keepingCapacity: true)
+            subGlyphCaches.removeAll()
             glyphCacheGen = fontGeneration
             glyphCacheScale = scale
+        }
+        // Take the cache out while drawing, so adding to it doesn't copy it.
+        var cache: [UInt64: CachedGlyph]
+        if cacheKey.isEmpty {
+            cache = glyphCache; glyphCache = [:]
+        } else {
+            cache = subGlyphCaches.removeValue(forKey: cacheKey) ?? [:]
+            if cache.count > 16384 { cache.removeAll() }
+        }
+        defer {
+            if cacheKey.isEmpty { glyphCache = cache } else { subGlyphCaches[cacheKey] = cache }
         }
         // Blit in an unflipped space (y' = -y), where a CGImage draws upright.
         ctx.saveGState()
@@ -1243,11 +1373,12 @@ final class CellView: NSView {
         var crispBlit = false
         ctx.interpolationQuality = .default
         for i in 0..<n {
+            if let only = only, !only(i) { continue }
             // Word 0 is the codepoint, with the core's cell width (0 / 1 / 2)
-            // in the top byte — we never recompute it from the codepoint.
+            // in bits 24..25 — we never recompute it from the codepoint.
             let w0 = p[i * CELL_WORDS]
             let cp = w0 & 0x1FFFFF
-            let wide = (w0 >> 24) == 2
+            let wide = ((w0 >> 24) & 0x3) == 2
             let (fg, _, style) = cellColors(p, i)
             let x = originX + CGFloat(i % c) * CELL_W
             let y = originY + CGFloat(i / c) * CELL_H
@@ -1255,11 +1386,12 @@ final class CellView: NSView {
                 let slot = Int((w0 >> 21) & 0x7)
                 let key = UInt64(cp) | UInt64(slot) << 21 | (wide ? 1 << 24 : 0) | UInt64(fg) << 32
                 let g: CachedGlyph
-                if let hit = glyphCache[key] {
+                if let hit = cache[key] {
                     g = hit
                 } else {
-                    g = renderGlyph(cp, slot: slot, wide: wide, fg: fg, scale: scale, aa: aa)
-                    glyphCache[key] = g
+                    g = renderGlyph(cp, slot: slot, wide: wide, fg: fg, scale: scale, aa: aa,
+                                    face: face)
+                    cache[key] = g
                 }
                 if let img = g.image {
                     // A crisp (bitmap) face snaps to whole pixels, as its
@@ -1296,7 +1428,7 @@ final class CellView: NSView {
     /// the same `drawGlyph` path as an uncached draw, in a flipped context
     /// like the view's.
     private func renderGlyph(_ cp: UInt32, slot: Int, wide: Bool, fg: UInt32,
-                             scale: CGFloat, aa: Bool) -> CachedGlyph {
+                             scale: CGFloat, aa: Bool, face forced: SlotFace? = nil) -> CachedGlyph {
         // Margins in whole pixels, so a pixel-aligned cell stays aligned.
         let padX = ceil(CELL_W * scale / 2) / scale
         let padY = ceil(CELL_H * scale / 4) / scale
@@ -1305,7 +1437,7 @@ final class CellView: NSView {
         let size = CGSize(width: CGFloat(wPx) / scale, height: CGFloat(hPx) / scale)
         let pad = CGSize(width: padX, height: padY)
         var crisp = !aa
-        if slot < slotFaces.count, let face = slotFaces[slot], face.hasGlyph(cp) {
+        if let face = forced ?? (slot < slotFaces.count ? slotFaces[slot] : nil), face.hasGlyph(cp) {
             crisp = face.crisp(backingScale: scale)
         }
         guard let bctx = CGContext(
@@ -1321,7 +1453,7 @@ final class CellView: NSView {
         NSGraphicsContext.current = NSGraphicsContext(cgContext: bctx, flipped: true)
         setAntialias(bctx, aa)
         drawGlyph(bctx, cp, slot: slot, wide: wide, fg: fg, x: padX, y: padY,
-                  scale: scale, aa: aa)
+                  scale: scale, aa: aa, face: forced)
         NSGraphicsContext.restoreGraphicsState()
         return CachedGlyph(image: bctx.makeImage(), size: size, pad: pad, crisp: crisp)
     }
@@ -1329,12 +1461,12 @@ final class CellView: NSView {
     /// Draw one glyph with its cell's top-left at (`x`, `y`).
     private func drawGlyph(_ ctx: CGContext, _ cp: UInt32, slot: Int, wide: Bool,
                            fg: UInt32, x: CGFloat, y: CGFloat,
-                           scale: CGFloat, aa: Bool) {
+                           scale: CGFloat, aa: Bool, face forced: SlotFace? = nil) {
         guard let scalar = Unicode.Scalar(cp) else { return }
         let s = String(scalar) as NSString
         if wide {
             drawWide(s, fg: fg, cellX: x, cellY: y, cellW: CELL_W * 2)
-        } else if slot < slotFaces.count, let face = slotFaces[slot] {
+        } else if let face = forced ?? (slot < slotFaces.count ? slotFaces[slot] : nil) {
             if face.hasGlyph(cp) {
                 // A slot face drawn unlike the cell font (smoothed or not)
                 // flips the context's antialiasing around its glyph.
@@ -1442,6 +1574,47 @@ final class CellView: NSView {
             ctx.saveGState()
             ctx.clip(to: oclip)
             drawCells(ctx, buf, mainN, mainCols, originX: 0, originY: 0)
+            ctx.restoreGState()
+        }
+    }
+
+    /// Draw the frame's sub-grids — panes laid out in an area's own cells
+    /// (`AreaGrid`) — each over the rect of screen cells it shows through,
+    /// then put back on top whatever was painted over those cells after
+    /// it (a popup or a menu clears a cell's `sub` tag).
+    private func drawSubGrids(_ ctx: CGContext, mainN: Int, mainCols: Int) {
+        let surf: Int64 = surface == .panels ? 1 : 0
+        let count = Int(tk_desktop_sub_grid_count(handle, surf))
+        guard count > 0, mainCols > 0 else { return }
+        var info = [Int32](repeating: 0, count: 7)
+        for k in 0..<count {
+            let ok = info.withUnsafeMutableBufferPointer { b in
+                tk_desktop_sub_grid_info(handle, surf, Int64(k), Int64(Int(bitPattern: b.baseAddress)))
+            }
+            guard ok == 1 else { continue }
+            let slot = Int(info[0])
+            guard slot >= 0, slot < areaGrids.count, let g = areaGrids[slot] else { continue }
+            let rx = Int(info[1]), ry = Int(info[2]), rw = Int(info[3]), rh = Int(info[4])
+            let cols = Int(info[5]), rows = Int(info[6])
+            guard cols > 0, rows > 0 else { continue }
+            Self.growCells(&subBuf, &subBufCells, cols * rows)
+            let n = Int(tk_desktop_sub_grid_layout(handle, surf, Int64(k),
+                Int64(Int(bitPattern: subBuf)), Int64(cols * rows)))
+            let rect = CGRect(x: CGFloat(rx) * CELL_W, y: CGFloat(ry) * CELL_H,
+                              width: CGFloat(rw) * CELL_W, height: CGFloat(rh) * CELL_H)
+            ctx.saveGState()
+            ctx.clip(to: rect)
+            withCellMetrics(g.cw, g.ch) {
+                drawCells(ctx, subBuf, n, cols, originX: rect.minX, originY: rect.minY,
+                          face: g.face, cacheKey: g.key)
+            }
+            let tag = UInt32(k + 1)
+            let p = buf
+            drawCells(ctx, buf, mainN, mainCols, originX: 0, originY: 0, only: { i in
+                let col = i % mainCols, row = i / mainCols
+                return col >= rx && col < rx + rw && row >= ry && row < ry + rh
+                    && ((p[i * CELL_WORDS] >> 26) & 0x3F) != tag
+            })
             ctx.restoreGState()
         }
     }
@@ -1818,6 +1991,12 @@ final class CellView: NSView {
         // it's read on a scroll-wheel event (which reaches here as button 4/5).
         let cc: UInt8 = (pressed == 1 && motion == 0 && button >= 1 && button <= 3)
             ? UInt8(min(255, max(0, e.clickCount))) : 0
+        // Where in its cell the pointer is, for a pane on a grid of another
+        // cell size (an area font with a size of its own).
+        if surface == .main || surface == .panels {
+            tk_desktop_set_mouse_fine(handle, Int64(max(0, p.x) / CELL_W * 1000),
+                                      Int64(py / CELL_H * 1000))
+        }
         let action = mouseSurface(col, row, button, pressed, motion,
                                   mods(e), cols(), rows(), cc)
         handleAction(action)

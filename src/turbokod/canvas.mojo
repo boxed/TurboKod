@@ -9,7 +9,7 @@ simple List-of-Cells rather than a packed 16-bit attribute buffer.
 
 from std.collections import List
 
-from .cell import Cell, FONT_UI, blank_cell
+from .cell import Cell, FONT_SLOTS, FONT_UI, blank_cell
 from .colors import Attr, DARK_GRAY, PANE_BG, default_attr
 from .geometry import Point, Rect
 from .string_utils import char_width, codepoint_at, utf8_codepoint_size, TAB_WIDTH
@@ -39,6 +39,29 @@ def _control_picture_glyph(b: Int) -> String:
     return chr(cp)
 
 
+comptime SCALE_ONE = 1000
+"""An area cell the size of the canvas's own: ``Canvas.area_scale`` in
+thousandths."""
+
+comptime MAX_SUB_GRIDS = 63
+"""How many sub-grids a frame can carry: ``Cell.sub`` travels in 6 bits."""
+
+
+@fieldwise_init
+struct SubGrid(Copyable, Movable):
+    """A pane's content laid out in cells of another size, shown through
+    ``rect`` of the canvas it was placed on (``Canvas.place_sub_grid``).
+    The host draws ``cols`` x ``rows`` cells of the area's own size from
+    ``rect``'s top-left corner; ``cells`` is row-major like
+    ``Canvas.cells``."""
+
+    var slot: UInt8
+    var rect: Rect
+    var cols: Int
+    var rows: Int
+    var cells: List[Cell]
+
+
 @fieldwise_init
 struct Canvas(Copyable, Movable):
     var width: Int
@@ -48,6 +71,18 @@ struct Canvas(Copyable, Movable):
     """Font slot stamped on every cell written (``FONT_*`` in ``cell``);
     a view switches it around the content it paints in another slot and
     restores it after."""
+    var area_scale: List[Int]
+    """Each font slot's cell size in thousandths of this canvas's cell:
+    ``[w0, h0, w1, h1, …]``, indexed by slot. ``SCALE_ONE`` everywhere
+    unless the host gave an area a font size of its own (the native app;
+    the terminal frontends never do)."""
+    var sub_grids: List[SubGrid]
+    """Content laid out at another cell size, for the host to draw over
+    this canvas (``place_sub_grid``)."""
+    var origin: Point
+    """The coordinates of the top-left cell: (0, 0) for a frame. A
+    sub-grid's canvas (``GridFrame.begin``) starts at its rect's corner,
+    so a view paints it in the coordinates it would paint the screen in."""
 
     def __init__(out self, width: Int, height: Int):
         self.width = width
@@ -57,6 +92,59 @@ struct Canvas(Copyable, Movable):
         var n = width * height
         for _ in range(n):
             self.cells.append(blank_cell())
+        self.area_scale = List[Int]()
+        for _ in range(2 * FONT_SLOTS):
+            self.area_scale.append(SCALE_ONE)
+        self.sub_grids = List[SubGrid]()
+        self.origin = Point(0, 0)
+
+    def scale_of(self, slot: UInt8) -> Tuple[Int, Int]:
+        """Area ``slot``'s cell size, in thousandths of this canvas's."""
+        var i = 2 * Int(slot)
+        if i < 0 or i + 1 >= len(self.area_scale):
+            return (SCALE_ONE, SCALE_ONE)
+        return (self.area_scale[i], self.area_scale[i + 1])
+
+    def sub_grid_size(self, slot: UInt8, rect: Rect) -> Tuple[Int, Int]:
+        """How many of area ``slot``'s cells fit in ``rect``: its own
+        size, unless the area has a cell size of its own."""
+        var sc = self.scale_of(slot)
+        if sc[0] == SCALE_ONE and sc[1] == SCALE_ONE:
+            return (max(0, rect.width()), max(0, rect.height()))
+        var cols = max(0, rect.width()) * SCALE_ONE // max(1, sc[0])
+        var rows = max(0, rect.height()) * SCALE_ONE // max(1, sc[1])
+        return (cols, rows)
+
+    def place_sub_grid(mut self, slot: UInt8, rect: Rect, var grid: Canvas):
+        """Show ``grid`` (painted at ``sub_grid_size(slot, rect)``) in
+        ``rect``. At this canvas's own cell size it's copied in, so a
+        frontend without area sizes never sees a sub-grid. Otherwise it's
+        kept for the host, and ``rect``'s cells are marked as showing it
+        until something paints over them."""
+        var sc = self.scale_of(slot)
+        if (sc[0] == SCALE_ONE and sc[1] == SCALE_ONE) \
+                or len(self.sub_grids) >= MAX_SUB_GRIDS:
+            var clip = rect.intersect(self.bounds())
+            for y in range(clip.a.y, clip.b.y):
+                var gy = y - rect.a.y
+                if gy >= grid.height:
+                    break
+                for x in range(clip.a.x, clip.b.x):
+                    var gx = x - rect.a.x
+                    if gx >= grid.width:
+                        break
+                    self.cells[self._index(x, y)] = grid.cells[gy * grid.width + gx]
+            return
+        var cells = List[Cell]()
+        swap(cells, grid.cells)
+        self.sub_grids.append(SubGrid(
+            slot, rect, grid.width, grid.height, cells^,
+        ))
+        var tag = UInt8(len(self.sub_grids))
+        var clip = rect.intersect(self.bounds())
+        for y in range(clip.a.y, clip.b.y):
+            for x in range(clip.a.x, clip.b.x):
+                self.cells[self._index(x, y)].sub = tag
 
     def resize(mut self, width: Int, height: Int):
         self.width = width
@@ -65,12 +153,21 @@ struct Canvas(Copyable, Movable):
         var n = width * height
         for _ in range(n):
             self.cells.append(blank_cell())
+        self.sub_grids = List[SubGrid]()
 
     def _index(self, x: Int, y: Int) -> Int:
-        return y * self.width + x
+        return (y - self.origin.y) * self.width + (x - self.origin.x)
+
+    def bounds(self) -> Rect:
+        """The cells this canvas holds, in its own coordinates."""
+        return Rect(
+            self.origin.x, self.origin.y,
+            self.origin.x + self.width, self.origin.y + self.height,
+        )
 
     def in_bounds(self, x: Int, y: Int) -> Bool:
-        return 0 <= x and x < self.width and 0 <= y and y < self.height
+        return self.origin.x <= x and x < self.origin.x + self.width \
+            and self.origin.y <= y and y < self.origin.y + self.height
 
     def get(self, x: Int, y: Int) -> Cell:
         if not self.in_bounds(x, y):
@@ -80,12 +177,14 @@ struct Canvas(Copyable, Movable):
     def set(mut self, x: Int, y: Int, var cell: Cell):
         if self.in_bounds(x, y):
             cell.font = self.font
+            cell.sub = 0
             self.cells[self._index(x, y)] = cell^
 
     def clear(mut self, attr: Attr = default_attr()):
         var blank = Cell(String(" "), attr, 1, self.font)
         for i in range(len(self.cells)):
             self.cells[i] = blank
+        self.sub_grids = List[SubGrid]()
 
     def fill(mut self, rect: Rect, glyph: String, attr: Attr):
         var cell = Cell(glyph, attr)
@@ -93,7 +192,7 @@ struct Canvas(Copyable, Movable):
         var w = cell.width
         if w < 1:
             w = 1
-        var clipped = rect.intersect(Rect(0, 0, self.width, self.height))
+        var clipped = rect.intersect(self.bounds())
         for y in range(clipped.a.y, clipped.b.y):
             var x = clipped.a.x
             while x < clipped.b.x:
@@ -149,9 +248,10 @@ struct Canvas(Copyable, Movable):
         var x = p.x
         var y = p.y
         var advanced = 0
-        if y < 0 or y >= self.height:
+        if y < self.origin.y or y >= self.origin.y + self.height:
             return 0
-        var limit = self.width
+        var left = self.origin.x
+        var limit = left + self.width
         if max_x >= 0 and max_x < limit:
             limit = max_x
         var bytes = text.as_bytes()
@@ -163,7 +263,7 @@ struct Canvas(Copyable, Movable):
                 var stop = x + TAB_WIDTH - ((x - tab_base) % TAB_WIDTH)
                 if stop > limit: stop = limit
                 while x < stop:
-                    if x >= 0:
+                    if x >= left:
                         self.cells[self._index(x, y)] = Cell(
                             String(" "), attr, 1, self.font,
                         )
@@ -205,7 +305,7 @@ struct Canvas(Copyable, Movable):
                 # writing just the empty continuation at column 0 would leave
                 # an orphaned blank where the glyph's right half belongs —
                 # skip the whole glyph instead.
-                if x >= 0:
+                if x >= left:
                     self.cells[self._index(x, y)] = Cell(glyph, attr, 2, self.font)
                     self.cells[self._index(x + 1, y)] = Cell(
                         String(""), attr, 0, self.font,
@@ -213,7 +313,7 @@ struct Canvas(Copyable, Movable):
                 x += 2
                 advanced += 2
             else:
-                if x >= 0:
+                if x >= left:
                     self.cells[self._index(x, y)] = Cell(glyph, attr, 1, self.font)
                 x += 1
                 advanced += 1
@@ -228,7 +328,7 @@ struct Canvas(Copyable, Movable):
         otherwise force every overlay path to repeat the UTF-8 decoding
         ``put_text`` already did.
         """
-        if x < 0 or x >= self.width or y < 0 or y >= self.height:
+        if not self.in_bounds(x, y):
             return
         var idx = self._index(x, y)
         var current = self.cells[idx]
@@ -247,7 +347,7 @@ struct Canvas(Copyable, Movable):
         as a black square — the classic Turbo Vision look.
         """
         var shadow = Attr(DARK_GRAY, PANE_BG)
-        var clipped = rect.intersect(Rect(0, 0, self.width, self.height))
+        var clipped = rect.intersect(self.bounds())
         for y in range(clipped.a.y, clipped.b.y):
             for x in range(clipped.a.x, clipped.b.x):
                 var idx = self._index(x, y)
@@ -302,7 +402,7 @@ struct Canvas(Copyable, Movable):
         prompts, hover tips, info notices) should pipe it through this
         so the text never bleeds across the workspace.
         """
-        var inner = rect.intersect(Rect(0, 0, self.width, self.height))
+        var inner = rect.intersect(self.bounds())
         if inner.width() <= 0 or inner.height() <= 0:
             return 0
         var lines = wrap_to_width(text, inner.width())
