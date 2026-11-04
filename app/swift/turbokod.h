@@ -268,6 +268,9 @@ int32_t tk_desktop_git_window_mouse(int64_t h, int64_t x, int64_t y, uint8_t but
 // rather than one of its dialog windows — see tk_desktop_set_project_window_key
 // in native_api.mojo.
 void tk_desktop_set_project_window_key(int64_t h, int64_t on);
+// The key window is the floating panels' one (a replayed menu chord goes to
+// the focused tool pane).
+void tk_desktop_set_panels_window_key(int64_t h, int64_t on);
 void tk_desktop_set_git_window_key(int64_t h, int64_t on);
 int32_t tk_desktop_take_git_front_request(int64_t h);
 int32_t tk_desktop_welcome_needed(int64_t h);

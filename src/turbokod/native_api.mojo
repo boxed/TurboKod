@@ -1612,6 +1612,16 @@ def tk_desktop_set_project_window_key(h: Int, on: Int) abi("C"):
 
 
 @export
+def tk_desktop_set_panels_window_key(h: Int, on: Int) abi("C"):
+    """Whether the key window is the floating panels' one. Reported with
+    ``tk_desktop_set_project_window_key``, so a menu-bar chord replayed
+    into the core reaches the focused tool pane there."""
+    if h == 0:
+        return
+    _desk(h)[].panels_window_key = on != 0
+
+
+@export
 def tk_desktop_set_git_window_key(h: Int, on: Int) abi("C"):
     """Whether the git window (any look) is the key window."""
     if h == 0:

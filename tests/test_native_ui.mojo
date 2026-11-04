@@ -9,7 +9,9 @@ from turbokod.canvas import Canvas
 from turbokod.colors import default_attr
 from turbokod.desktop import (
     APP_SETTINGS, DOCK_DEBUG_PANE, Desktop, PROJECT_SETTINGS, EDITOR_FIND, EDITOR_GOTO,
+    EDITOR_UNDO,
     EDITOR_REPLACE, GIT_LOCAL_CHANGES, VIEW_CLASSIC_UI, VIEW_NATIVE_UI, VIEW_PLATINUM_UI,
+    synth_key_action,
 )
 from turbokod.search_options import SearchOptions
 from turbokod.color_picker import ColorPickerDialog, MODE_RGB
@@ -21,8 +23,10 @@ from turbokod.git_changes import LineHistoryEntry
 from turbokod.diff import MergeRegion, REGION_CONFLICT, REGION_STABLE
 from turbokod.merge_view import CHOICE_DISK
 from turbokod.events import (
-    Event, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_UP, MOD_ALT, MOUSE_BUTTON_RIGHT,
+    Event, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_LEFT, KEY_UP, MOD_ALT,
+    MOUSE_BUTTON_RIGHT,
 )
+from turbokod.terminal_pane import TerminalPane
 from turbokod.context_menu import (
     CTX_MENU_ACTION_COPY_LOCATION, CTX_MENU_ACTION_DEFINITION,
     CTX_MENU_ACTION_REFERENCES, CTX_MENU_SEPARATOR, EditorContextMenu,
@@ -1208,4 +1212,78 @@ def test_claude_location_is_project_relative_with_the_selected_lines() raises:
     assert_equal(d._claude_location(0, 0), String("@src/a.py#L1"))
     d.project = Optional[String]()
     assert_equal(d._claude_location(0, 0), String("@/proj/src/a.py#L1"))
+    d.shutdown()
+
+
+def test_menu_replayed_word_left_goes_to_a_focused_terminal() raises:
+    """Option+Left reaches the core as Edit ▸ Word Left from the native
+    menu; with a terminal pane focused it's the shell's word left, and
+    the editor's caret stays put."""
+    var d = _native_desktop(String("alpha beta"))
+    d.windows.windows[0].editor.move_to(0, 10, False)
+    var pane = TerminalPane()
+    pane.visible = True
+    d.terminal_panes.append(pane^)
+    d.terminal_panes[0].focused = True
+    _ = d.dispatch_action(synth_key_action(KEY_LEFT, MOD_ALT), _SCREEN)
+    assert_equal(d.windows.windows[0].editor.selections[0].col, 10)
+    # Unfocused, the same action is the editor's.
+    d.terminal_panes[0].focused = False
+    _ = d.dispatch_action(synth_key_action(KEY_LEFT, MOD_ALT), _SCREEN)
+    assert_equal(d.windows.windows[0].editor.selections[0].col, 6)
+    d.shutdown()
+
+
+def test_a_floating_terminal_has_the_keyboard_only_in_its_own_window() raises:
+    """With the panels floating, a terminal stays the focused pane while
+    the user works in the project window. Typed keys, menu chords and
+    Paste there are the editor's; in the panels' window they're the
+    terminal's, and nothing reaches the editor behind it."""
+    var d = _native_desktop(String("alpha beta"))
+    d.windows.windows[0].editor.move_to(0, 10, False)
+    var pane = TerminalPane()
+    pane.visible = True
+    d.terminal_panes.append(pane^)
+    d.terminal_panes[0].focused = True
+    d.panels_detached = True
+    # A key typed in the project window.
+    _ = d.handle_event(Event.key_event(UInt32(ord("!"))), _SCREEN)
+    assert_equal(d.windows.windows[0].editor.text_snapshot(), String("alpha beta!"))
+    # A menu chord and Paste with the project window key.
+    d.panels_window_key = False
+    _ = d.dispatch_action(synth_key_action(KEY_LEFT, MOD_ALT), _SCREEN)
+    assert_equal(d.windows.windows[0].editor.selections[0].col, 10)
+    assert_true(d.paste_text_into_focus(String("x")))
+    assert_equal(d.windows.windows[0].editor.text_snapshot(), String("alpha betax!"))
+    # The same with the panels' window key: the editor is left alone.
+    d.panels_window_key = True
+    _ = d.dispatch_action(synth_key_action(KEY_LEFT, MOD_ALT), _SCREEN)
+    _ = d.paste_text_into_focus(String("y"))
+    _ = d.dispatch_action(EDITOR_UNDO, _SCREEN)
+    assert_equal(d.windows.windows[0].editor.text_snapshot(), String("alpha betax!"))
+    assert_equal(d.windows.windows[0].editor.selections[0].col, 11)
+    # A key typed in the panels' window with no pane focused there goes
+    # nowhere, not to the editor.
+    d.terminal_panes[0].focused = False
+    _ = d.handle_panels_event(Event.key_event(UInt32(ord("z"))), _SCREEN)
+    assert_equal(d.windows.windows[0].editor.text_snapshot(), String("alpha betax!"))
+    d.shutdown()
+
+
+def test_a_key_a_focused_pane_declines_never_reaches_the_editor() raises:
+    """A docked pane that has the keyboard and doesn't use a key (Find
+    Results and a letter) drops it: it isn't typed into the editor
+    behind. Undo there leaves the editor alone too."""
+    var d = _native_desktop(String("abc"))
+    d.windows.windows[0].editor.move_to(0, 3, False)
+    _ = d.paste_text_into_focus(String("d"))
+    d.find_results_pane.visible = True
+    d.find_results_pane.focused = True
+    _ = d.handle_event(Event.key_event(UInt32(ord("x"))), _SCREEN)
+    _ = d.dispatch_action(EDITOR_UNDO, _SCREEN)
+    assert_equal(d.windows.windows[0].editor.text_snapshot(), String("abcd"))
+    # Hidden, its stale focus flag no longer holds the keyboard.
+    d.find_results_pane.visible = False
+    _ = d.handle_event(Event.key_event(UInt32(ord("x"))), _SCREEN)
+    assert_equal(d.windows.windows[0].editor.text_snapshot(), String("abcdx"))
     d.shutdown()

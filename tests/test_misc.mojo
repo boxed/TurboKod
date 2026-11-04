@@ -391,6 +391,7 @@ def test_dispatch_paste_targets_focused_terminal_pane() raises:
     # A focused terminal pane (no pty child needed — routing is what's
     # under test; the pty write is a no-op when the child isn't alive).
     var pane = TerminalPane()
+    pane.visible = True
     pane.focused = True
     d.terminal_panes.append(pane^)
     var maybe = d.dispatch_action(EDITOR_PASTE, _SCREEN)

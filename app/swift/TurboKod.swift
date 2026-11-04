@@ -3605,6 +3605,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if let v = view, v.handle != 0 {
             let s = NSApp.keyWindow?.cellView?.surface
             tk_desktop_set_project_window_key(v.handle, s == .main || s == .panels ? 1 : 0)
+            tk_desktop_set_panels_window_key(v.handle, s == .panels ? 1 : 0)
         }
         if action == "edit:paste", let v = view {
             // File(s) on the clipboard → the path-format menu.

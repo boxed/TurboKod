@@ -455,7 +455,7 @@ comptime EDITOR_COPY          = String("edit:copy")
 comptime EDITOR_PASTE         = String("edit:paste")
 # Select everything in whatever owns keyboard focus — the focused editor's
 # buffer, or the focused input field. Framework-level rather than per-widget:
-# ``select_all_in_focus`` resolves the target the same way
+# ``select_all_in_focus`` resolves the target through ``key_target``, as
 # ``paste_text_into_focus`` does, so a surface gains the behavior by being
 # reachable through that resolution rather than by re-implementing the chord.
 comptime EDITOR_SELECT_ALL    = String("edit:select-all")
@@ -641,6 +641,28 @@ comptime DOCK_DEBUG_PANE  = UInt8(2)
 comptime DOCK_TERMINAL    = UInt8(3)
 comptime DOCK_TEST_PANE   = UInt8(4)
 comptime DOCK_FIND_RESULTS_PANE = UInt8(5)
+
+
+@fieldwise_init
+struct KeyTarget(Copyable, Movable):
+    """Who the keyboard belongs to once no modal owns input
+    (``Desktop.key_target``): a ``DOCK_*`` kind, with ``idx`` naming the
+    terminal pane for ``DOCK_TERMINAL``. ``DOCK_NONE`` is the focused
+    editor window; ``KEYS_DROPPED`` is nobody (the floating panels'
+    window is key with no pane focused in it)."""
+    var kind: UInt8
+    var idx: Int
+
+    def is_editor(self) -> Bool:
+        return self.kind == DOCK_NONE
+
+    def is_tool_pane(self) -> Bool:
+        return self.kind == DOCK_TERMINAL or self.kind == DOCK_DEBUG_PANE \
+            or self.kind == DOCK_TEST_PANE \
+            or self.kind == DOCK_FIND_RESULTS_PANE
+
+
+comptime KEYS_DROPPED = UInt8(0xFF)
 
 # Throttle for the external-git polling in ``_apply_view_config``. One
 # second is fast enough that ``git commit`` / ``git checkout`` outside
@@ -1203,6 +1225,12 @@ struct Desktop(Movable):
     panels), not a dialog window of its own: Find / Replace and Settings,
     open in windows of their own, then don't own the Edit-menu actions.
     False in the terminal frontends, where both are in-grid."""
+    var panels_window_key: Bool
+    """The keyboard is in the floating panels' window rather than the
+    project window. Set by where the last key arrived (``handle_event`` /
+    ``handle_panels_event``) and by the host before it dispatches a menu
+    action, which arrives with no window of its own. ``key_target`` reads
+    it; nothing else should."""
     var git_front_request: Bool
     """One-shot: Git ▸ Local changes while the view is already up in its
     window — the host brings that window to the front."""
@@ -1876,6 +1904,7 @@ struct Desktop(Movable):
         self._git_screen = Rect(0, 0, 0, 0)
         self.git_window_key = False
         self.project_window_key = False
+        self.panels_window_key = False
         self.git_front_request = False
         self._last_goto_line = String("")
         self._pending_new_window_project = Optional[String]()
@@ -3230,6 +3259,13 @@ struct Desktop(Movable):
         )
         return True
 
+    def _keyboard_editor_idx(self) -> Int:
+        """The focused editor window when it has the keyboard
+        (``key_target``), else -1."""
+        if not self.key_target().is_editor():
+            return -1
+        return self._focused_editor_idx()
+
     def paste_text_into_focus(mut self, text: String) -> Bool:
         """Route ``text`` to whatever owns keyboard focus, exactly like a
         Ctrl/Cmd+V paste. Shared by the in-core ``EDITOR_PASTE`` action (which
@@ -3237,10 +3273,11 @@ struct Desktop(Movable):
         (which passes Unicode-normalized text it read itself) so both behave
         identically. Returns True when something consumed the paste.
 
-        A focused terminal pane takes the text as a paste event —
-        ``handle_key`` applies bracketed-paste wrapping for the child — instead
-        of letting it land in the editor window behind it. Otherwise a focused
-        editor receives it. Paste can land the cursor anywhere in the buffer,
+        The text goes where a typed key would (``key_target``): a focused
+        terminal pane takes it as a paste event — ``handle_key`` applies
+        bracketed-paste wrapping for the child — and a dock that can't take
+        text drops it rather than letting it land in the editor behind.
+        Otherwise the focused editor receives it. Paste can land the cursor anywhere in the buffer,
         so ``reveal_cursor`` brings it back into view (the per-keystroke
         ``_scroll_to_cursor`` is bypassed when the paste arrives via a hotkey
         or menu click rather than ``editor.handle_key``).
@@ -3258,13 +3295,13 @@ struct Desktop(Movable):
         """
         if self._modal_owns_input():
             return False
-        for i in range(len(self.terminal_panes)):
-            if self.terminal_panes[i].focused:
-                if len(text.as_bytes()) > 0:
-                    _ = self.terminal_panes[i].handle_key(
-                        Event.paste_event(text),
-                    )
-                return True
+        var t = self.key_target()
+        if not t.is_editor():
+            # A dock has the keyboard: it takes the paste if it can (a
+            # terminal), and nothing else does.
+            if len(text.as_bytes()) > 0:
+                _ = self._target_handle_key(t, Event.paste_event(text))
+            return True
         var idx = self._focused_editor_idx()
         if idx >= 0:
             self.windows.windows[idx].editor.paste_clipboard_text(text)
@@ -3279,10 +3316,9 @@ struct Desktop(Movable):
         Ctrl/Cmd+A. Backs the ``EDITOR_SELECT_ALL`` action; returns True when
         something claimed it.
 
-        Focus resolution mirrors ``paste_text_into_focus`` — that symmetry is
-        the point, since both answer the same question ("who is the text
-        surface right now?") and a new surface should only have to become
-        reachable once.
+        The target is ``key_target``, as for paste and a typed key — one
+        answer to "who has the keyboard?", so a new surface only has to
+        become reachable once.
 
         A modal text dialog owns input ahead of any editor: its ``TextField``
         select-alls itself on the ``CLIP_SELECT_ALL`` chord, and
@@ -3298,12 +3334,10 @@ struct Desktop(Movable):
         """
         if self._modal_owns_input():
             return False
-        for i in range(len(self.terminal_panes)):
-            if self.terminal_panes[i].focused:
-                return False
-        if self.debug_pane.focused:
+        var t = self.key_target()
+        if t.kind == DOCK_DEBUG_PANE:
             return self.debug_pane.select_all_input()
-        if self.test_pane.focused or self.find_results_pane.focused:
+        if not t.is_editor():
             return False
         var fe = self._focused_editor_idx()
         if fe >= 0:
@@ -3644,15 +3678,74 @@ struct Desktop(Movable):
                 return True
         return False
 
-    def _tool_panes_key(mut self, event: Event) -> Bool:
-        """Offer a key to the bottom tool panes (terminals, run/debug,
-        Find Results, tests); True when one — the focused one — took it."""
-        for i in range(len(self.terminal_panes)):
-            if self.terminal_panes[i].handle_key(event):
-                return True
-        return self.debug_pane.handle_key(event) \
-            or self.find_results_pane.handle_key(event) \
-            or self.test_pane.handle_key(event)
+    def key_target(self) -> KeyTarget:
+        """The one answer to "where does the keyboard go?" once no modal
+        owns input (``_modal_owns_input`` comes first, always).
+
+        Every keyboard path asks this: a typed key in either window
+        (``route_key``), a chord the menu bar replays (Option+Left is
+        Edit ▸ Word Left, matched by AppKit before the window sees it),
+        and the Edit-menu actions (Paste, Copy, Undo, …). Asking it in one
+        place is what keeps a key from reaching a window it wasn't typed
+        in: each path used to work the target out for itself, and each
+        new path got it wrong in a new way.
+
+        A pane's ``focused`` flag only says it's the focused one *in its
+        window*: with the panels floating, a terminal keeps it while the
+        user works in the project window. So the panes count only while
+        their window has the keyboard, and in the panels' window nothing
+        else does."""
+        var in_panels = self.panels_detached and self.panels_window_key
+        if in_panels or not self.panels_detached:
+            for i in range(len(self.terminal_panes)):
+                if self.terminal_panes[i].focused \
+                        and self.terminal_panes[i].visible:
+                    return KeyTarget(DOCK_TERMINAL, i)
+            if self.debug_pane.focused and self.debug_pane.visible:
+                return KeyTarget(DOCK_DEBUG_PANE, 0)
+            if self.test_pane.focused and self.test_pane.visible:
+                return KeyTarget(DOCK_TEST_PANE, 0)
+            if self.find_results_pane.focused \
+                    and self.find_results_pane.visible:
+                return KeyTarget(DOCK_FIND_RESULTS_PANE, 0)
+        if in_panels:
+            return KeyTarget(KEYS_DROPPED, 0)
+        if self.file_tree.focused and self.file_tree.visible:
+            return KeyTarget(DOCK_FILE_TREE, 0)
+        return KeyTarget(DOCK_NONE, 0)
+
+    def _target_handle_key(mut self, t: KeyTarget, event: Event) -> Bool:
+        """Offer ``event`` (a key or a paste) to the dock ``t`` names;
+        True when it took it."""
+        if t.kind == DOCK_TERMINAL:
+            return self.terminal_panes[t.idx].handle_key(event)
+        if t.kind == DOCK_DEBUG_PANE:
+            return self.debug_pane.handle_key(event)
+        if t.kind == DOCK_TEST_PANE:
+            return self.test_pane.handle_key(event)
+        if t.kind == DOCK_FIND_RESULTS_PANE:
+            return self.find_results_pane.handle_key(event)
+        if t.kind == DOCK_FILE_TREE:
+            return self.file_tree.handle_key(event)
+        return False
+
+    def route_key(mut self, event: Event, screen: Rect) -> Optional[String]:
+        """Deliver a key, typed or replayed from the menu bar, to
+        ``key_target``: the one path every key takes once no modal owns
+        input.
+
+        A dock gets first refusal. What it declines still runs the
+        hotkeys (⌘S saves from a terminal) but never reaches the editor
+        behind it; a key in the panels' window that its pane declines is
+        dropped, since everything else there lives in the other window."""
+        var t = self.key_target()
+        if t.kind == KEYS_DROPPED:
+            return Optional[String]()
+        if not t.is_editor() and self._target_handle_key(t, event):
+            return Optional[String]()
+        if self.panels_detached and self.panels_window_key:
+            return Optional[String]()
+        return self._handle_key(event, screen, to_editor=t.is_editor())
 
     def handle_panels_event(
         mut self, event: Event, screen: Rect,
@@ -3662,8 +3755,8 @@ struct Desktop(Movable):
         returns an unhandled action string for the host the same way (e.g. a
         link click in the debug output that opens a file)."""
         if event.kind == EVENT_KEY:
-            _ = self._tool_panes_key(event)
-            return Optional[String]()
+            self.panels_window_key = True
+            return self.route_key(event, screen)
         if event.kind != EVENT_MOUSE:
             return Optional[String]()
         var slots = self._panel_window_slots(screen)
@@ -8158,19 +8251,10 @@ struct Desktop(Movable):
             self._after_local_changes(screen)
             return Optional[String]()
         if event.kind == EVENT_KEY:
-            # Side panels absorb arrow / Enter / Esc when focused;
-            # if neither claims the key, fall through to the regular
-            # dispatch (menu mnemonics, hotkeys, focused window). At
-            # most one terminal pane carries focus at a time so a
-            # plain iteration is fine.
-            # When floating, the panels live on the host's separate window and
-            # take their keys through `handle_panels_event` — the main surface
-            # routes only to the file tree and the focused editor.
-            if not self.panels_detached and self._tool_panes_key(event):
-                return Optional[String]()
-            if self.file_tree.handle_key(event):
-                return Optional[String]()
-            return self._handle_key(event, screen)
+            # The project window has the keyboard (the floating panels'
+            # keys come in through ``handle_panels_event``).
+            self.panels_window_key = False
+            return self.route_key(event, screen)
         # Click-outside dismisses the LSP completion popup. ESC takes
         # the same role in ``_handle_key``. We check at the desktop
         # level so clicks that land on the menu bar / file tree / a
@@ -8394,7 +8478,12 @@ struct Desktop(Movable):
             self._pending_restore_refit = Optional[Session]()
         return Optional[String]()
 
-    def _handle_key(mut self, event: Event, screen: Rect) -> Optional[String]:
+    def _handle_key(
+        mut self, event: Event, screen: Rect, to_editor: Bool = True,
+    ) -> Optional[String]:
+        """Esc, the in-grid menu, the hotkeys and then the focused editor.
+        ``to_editor=False`` (a dock has the keyboard, ``route_key``) stops
+        short of the editor."""
         # Capture and reset the one-shot ESC-prefix flag so this keystroke
         # gets at most one chance to act as a mnemonic via that path.
         var was_armed = self._esc_armed
@@ -8507,6 +8596,8 @@ struct Desktop(Movable):
         if self._is_gated_combo(event) \
                 and not self._combo_registered(event.key, event.mods):
             beep()
+            return Optional[String]()
+        if not to_editor:
             return Optional[String]()
         var consumed = self.windows.handle_key(event)
         # A registered chord the focused editor still declined to claim
@@ -10247,15 +10338,16 @@ struct Desktop(Movable):
                 self._replay_through_modal(replay.value(), screen)
                 return Optional[String]()
         # Synthetic-key actions with no modal in the way: replay the chord
-        # through ``_handle_key`` exactly as if the user had pressed it — so the
-        # editor's own handlers do the work and the post-key drains (e.g. the
-        # git-gutter popup for Ctrl+Shift+Up/Down) still run. The matching
-        # ``doc_only`` registry row means ``_handle_key`` skips dispatch and
-        # forwards the keystroke to the editor rather than re-dispatching here.
+        # through ``route_key`` exactly as if the user had pressed it, so it
+        # reaches the same target a typed key would (Option+Left in a
+        # terminal is the shell's word left) and the post-key drains (e.g.
+        # the git-gutter popup for Ctrl+Shift+Up/Down) still run. The
+        # matching ``doc_only`` registry row means ``_handle_key`` skips
+        # dispatch rather than re-dispatching here.
         if starts_with(action, SYNTH_KEY_PREFIX):
             var synth_ev = self._action_replay_event(action)
             if synth_ev:
-                return self._handle_key(synth_ev.value(), screen)
+                return self.route_key(synth_ev.value(), screen)
             return Optional[String]()
         if action == PROJECT_CLOSE_ACTION:
             # On a host frontend (Swift/macOS) the window *is* the project,
@@ -10601,35 +10693,29 @@ struct Desktop(Movable):
             if idx >= 0:
                 self._toggle_blame(idx)
             return Optional[String]()
+        # The Edit menu acts on ``key_target``, like a typed key: with a
+        # tool pane or the file tree on the keyboard, Cut / Undo / Redo
+        # have nothing there to act on and must not reach the editor
+        # behind it.
         if action == EDITOR_CUT:
-            var fe = self._focused_editor_idx()
+            var fe = self._keyboard_editor_idx()
             if fe >= 0:
                 self.windows.windows[fe].editor.cut_to_clipboard()
             return Optional[String]()
         if action == EDITOR_COPY:
-            # Docked output panes win when one is focused with an active
-            # selection — the user is plainly trying to copy from there
-            # rather than from a window in the background. Terminal
-            # panes come first because they sit above the debug pane
-            # visually and there can be more than one of them.
-            for i in range(len(self.terminal_panes)):
-                if self.terminal_panes[i].focused \
-                        and self.terminal_panes[i].has_selection():
-                    _ = self.terminal_panes[i].copy_selection_to_clipboard()
-                    return Optional[String]()
-            if self.debug_pane.focused and self.debug_pane.has_selection():
+            var t = self.key_target()
+            if t.kind == DOCK_TERMINAL:
+                _ = self.terminal_panes[t.idx].copy_selection_to_clipboard()
+            elif t.kind == DOCK_DEBUG_PANE:
                 _ = self.debug_pane.copy_selection_to_clipboard()
-                return Optional[String]()
-            if self.test_pane.focused and self.test_pane.has_selection():
+            elif t.kind == DOCK_TEST_PANE:
                 _ = self.test_pane.copy_selection_to_clipboard()
-                return Optional[String]()
-            if self.find_results_pane.focused \
-                    and self.find_results_pane.has_selection():
+            elif t.kind == DOCK_FIND_RESULTS_PANE:
                 _ = self.find_results_pane.copy_selection_to_clipboard()
-                return Optional[String]()
-            var fe = self._focused_editor_idx()
-            if fe >= 0:
-                self.windows.windows[fe].editor.copy_to_clipboard()
+            elif t.is_editor():
+                var fe = self._focused_editor_idx()
+                if fe >= 0:
+                    self.windows.windows[fe].editor.copy_to_clipboard()
             return Optional[String]()
         if action == EDITOR_PASTE:
             _ = self.paste_text_into_focus(clipboard_paste())
@@ -10648,7 +10734,7 @@ struct Desktop(Movable):
                     self.fill_dialog.open(n)
             return Optional[String]()
         if action == EDITOR_UNDO:
-            var idx = self._focused_editor_idx()
+            var idx = self._keyboard_editor_idx()
             if idx >= 0:
                 if self.windows.windows[idx].editor.undo():
                     self.windows.windows[idx].editor.reveal_cursor(
@@ -10656,7 +10742,7 @@ struct Desktop(Movable):
                     )
             return Optional[String]()
         if action == EDITOR_REDO:
-            var idx = self._focused_editor_idx()
+            var idx = self._keyboard_editor_idx()
             if idx >= 0:
                 if self.windows.windows[idx].editor.redo():
                     self.windows.windows[idx].editor.reveal_cursor(
@@ -10697,7 +10783,10 @@ struct Desktop(Movable):
             # window:close targets whatever has focus. A focused tool pane
             # (terminal / debug / test) closes itself — same exit as its
             # [■] button; otherwise the focused editor window closes.
-            if self._request_focused_pane_close():
+            if self.key_target().is_tool_pane():
+                _ = self._request_focused_pane_close()
+                return Optional[String]()
+            if self.panels_detached and self.panels_window_key:
                 return Optional[String]()
             self._close_window_keeping_work(self.windows.focused)
             return Optional[String]()
