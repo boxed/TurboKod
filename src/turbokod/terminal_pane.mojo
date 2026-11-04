@@ -42,7 +42,7 @@ from .claude_detect import (
 from .colors import Attr, LIGHT_BLUE, PANE_BG, PANE_FG, STYLE_UNDERLINE, WHITE
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE, EVENT_PASTE, KEY_ESC, KEY_PAGEDOWN,
-    KEY_PAGEUP, MOD_META, MOD_NONE,
+    KEY_PAGEUP, MOD_ALT, MOD_META, MOD_NONE,
     MOD_SHIFT, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_DOWN,
     MOUSE_WHEEL_UP,
 )
@@ -61,7 +61,7 @@ from .tmux_session import (
 )
 from .terminal_view import (
     flush_vt_side_effects, forward_key_to_grid, grid_size, GridSelection,
-    new_grid, paint_grid, paste_to_pty, place_grid,
+    cursor_keys_to_click, new_grid, paint_grid, paste_to_pty, place_grid,
 )
 from .vt import MOUSE_MOTION, MOUSE_PRESS, MOUSE_RELEASE, SCROLLBACK_LINES, Vt
 from .window import (
@@ -1024,6 +1024,13 @@ struct TerminalPane(Copyable, Movable):
             self.focused = True
             if routes_to_child:
                 self._forward_mouse_to_pty(event, MOUSE_PRESS)
+                return True
+            # Option-click moves the cursor there, as in Terminal.app.
+            if event.mods == MOD_ALT and not self._history_on:
+                var keys = cursor_keys_to_click(self.vt, self.sel, event.pos)
+                if len(keys.as_bytes()) > 0:
+                    self.sel.clear()
+                    self.pty.write_all(keys)
                 return True
             # A run's traceback link opens its file (a URL the browser)
             # rather than starting a selection.

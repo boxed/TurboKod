@@ -23,6 +23,12 @@ from turbokod.events import (
     MOD_META, MOD_NONE, MOD_SHIFT, MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN,
     MOUSE_WHEEL_UP,
 )
+from turbokod.canvas import Canvas
+from turbokod.events import Event
+from turbokod.geometry import Point, Rect
+from turbokod.terminal_view import (
+    GridSelection, _word_motion, cursor_keys_to_click,
+)
 from turbokod.vt import (
     MOUSE_MOTION, MOUSE_PRESS, MOUSE_RELEASE, Vt, vt_live_count, xterm_256_rgb,
 )
@@ -583,3 +589,45 @@ def test_vt_release_frees_once_through_any_copy() raises:
 def main() raises:
     setup_test_env()
     TestSuite.discover_tests[__functions_in_module()]().run()
+
+
+def _clicked(vt: Vt, x: Int, y: Int) -> String:
+    """``cursor_keys_to_click`` for a click at grid cell ``(x, y)``, the
+    body at the screen's origin."""
+    var sel = GridSelection()
+    sel.set_frame(Canvas(vt.cols(), vt.rows()), Rect(0, 0, vt.cols(), vt.rows()), vt.cols(), vt.rows())
+    return cursor_keys_to_click(vt, sel, Point(x, y))
+
+
+def test_option_click_walks_the_cursor_with_arrow_keys() raises:
+    var vt = Vt(10, 4)
+    vt.feed_string(String("$ ab漢cdefgh"))   # wraps after column 9
+    # Cursor at row 1, col 2 (after "gh"). Back to the "a" at (2, 0):
+    # 10 cells, but the wide glyph is one press.
+    var left = vt.encode_key(KEY_LEFT, MOD_NONE)
+    var keys = _clicked(vt, 2, 0)
+    var want = String("")
+    for _ in range(9):
+        want += left
+    assert_equal(keys, want)
+    # On the cursor: nothing. Past the end of the text: stops at its end.
+    assert_equal(_clicked(vt, 2, 1), String(""))
+    assert_equal(_clicked(vt, 8, 1), String(""))
+    # Forward follows DECCKM.
+    vt.feed_string(String("\x1b[?1h\r"))
+    var right = vt.encode_key(KEY_RIGHT, MOD_NONE)
+    assert_equal(right, String("\x1bOC"))
+    assert_equal(_clicked(vt, 2, 1), right + right)
+    vt.release()
+
+
+def test_option_and_ctrl_arrows_move_by_word_like_terminal_app() raises:
+    var vt = Vt(20, 4)
+    assert_equal(_word_motion(vt, Event.key_event(KEY_LEFT, MOD_ALT)), String("\x1bb"))
+    assert_equal(_word_motion(vt, Event.key_event(KEY_RIGHT, MOD_CTRL)), String("\x1bf"))
+    assert_equal(_word_motion(vt, Event.key_event(KEY_LEFT, MOD_ALT | MOD_SHIFT)), String(""))
+    assert_equal(_word_motion(vt, Event.key_event(KEY_UP, MOD_ALT)), String(""))
+    # The alternate screen gets the real chord.
+    vt.feed_string(String("\x1b[?1049h"))
+    assert_equal(_word_motion(vt, Event.key_event(KEY_LEFT, MOD_ALT)), String(""))
+    vt.release()

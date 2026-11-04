@@ -23,12 +23,14 @@ from .cell import Cell, FONT_TERMINAL
 from .clipboard import clipboard_copy
 from .colors import Attr, BG_TRUECOLOR, FG_TRUECOLOR
 from .events import (
-    Event, KEY_PAGEDOWN, KEY_PAGEUP, MOD_META, MOD_SHIFT, MOUSE_BUTTON_LEFT,
+    Event, KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, MOD_ALT, MOD_CTRL,
+    MOD_META, MOD_SHIFT, MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
 from .grid_frame import floor_div
 from .painter import Painter
 from .pty import PtyProcess
+from .string_utils import display_columns
 from .vt import Vt
 
 
@@ -579,8 +581,66 @@ def forward_key_to_grid(
     sel.sel_active = False
     if vt.view_offset() != 0:
         vt.reset_view()
+    var word = _word_motion(vt, event)
+    if len(word.as_bytes()) > 0:
+        pty.write_all(word)
+        return True
     var encoded = vt.encode_key(event.key, event.mods)
     if len(encoded.as_bytes()) > 0:
         pty.write_all(encoded)
         return True
     return False
+
+
+def _word_motion(vt: Vt, event: Event) -> String:
+    """Option/Ctrl+Left/Right as Terminal.app sends them: ``ESC b`` /
+    ``ESC f``, which shells and line editors read as word back / forward
+    (the xterm ``CSI 1;3D`` form needs an inputrc / zle binding to mean
+    anything). On the alternate screen the program gets the real chord —
+    vim and the like bind it, and ``ESC`` would leave insert mode."""
+    if vt.using_alt():
+        return String("")
+    if event.mods != MOD_ALT and event.mods != MOD_CTRL:
+        return String("")
+    if event.key == KEY_LEFT:
+        return String("\x1bb")
+    if event.key == KEY_RIGHT:
+        return String("\x1bf")
+    return String("")
+
+
+def cursor_keys_to_click(vt: Vt, sel: GridSelection, pos: Point) -> String:
+    """The arrow presses that walk the cursor to the cell at ``pos``, as
+    Terminal.app sends for an Option-click: the cells between the two are
+    read as one line (a long command wraps), one press per glyph, so a
+    wide glyph is one press. A click past the end of a row's text stops
+    at its end, where the line being edited does. Empty in the
+    scrollback, or when the cursor is already there."""
+    if vt.view_offset() != 0:
+        return String("")
+    var rc = sel.grid_xy_for_pos(vt, pos)
+    var cols = vt.cols()
+    var tr = rc[0] - _view_top(vt)
+    var tc = min(rc[1], cols - 1)
+    var cr = vt.cursor_row()
+    var cc = vt.cursor_col()
+    var cells = vt.grid()
+    var end = display_columns(cells.row_text(tr))
+    if tr == cr:
+        end = max(end, cc)
+    tc = min(tc, end)
+    var cur = cr * cols + cc
+    var target = tr * cols + tc
+    var lo = min(cur, target)
+    var hi = max(cur, target)
+    var presses = 0
+    for p in range(lo, hi):
+        if cells.cell(p // cols, p % cols).width != 0:
+            presses += 1
+    if presses == 0:
+        return String("")
+    var key = vt.encode_key(KEY_RIGHT if target > cur else KEY_LEFT, 0)
+    var out = String("")
+    for _ in range(presses):
+        out += key
+    return out^
