@@ -6729,8 +6729,8 @@ final class PopupMenu: NSObject {
     private var last = Data()
     private var anchor = NSPoint.zero
     private var chosen = 0
-    /// The items as `(label, code, enabled)`, for the Platinum menu.
-    private var items: [(String, Int, Bool)] = []
+    /// The items as `(label, code, enabled, separator)`, for the Platinum menu.
+    private var items: [(String, Int, Bool, Bool)] = []
 
     init(view: CellView) {
         self.view = view
@@ -6747,9 +6747,14 @@ final class PopupMenu: NSObject {
                          y: CGFloat((o["y"] as? Int ?? 0) + 1) * CELL_H)
         menu.removeAllItems()
         items = (o["items"] as? [[String: Any]] ?? []).map {
-            ($0["label"] as? String ?? "", $0["code"] as? Int ?? 0, $0["enabled"] as? Bool ?? true)
+            ($0["label"] as? String ?? "", $0["code"] as? Int ?? 0, $0["enabled"] as? Bool ?? true,
+             $0["separator"] as? Bool ?? false)
         }
         for it in o["items"] as? [[String: Any]] ?? [] {
+            if it["separator"] as? Bool ?? false {
+                menu.addItem(.separator())
+                continue
+            }
             let mi = NSMenuItem(title: it["label"] as? String ?? "",
                                 action: #selector(pick(_:)), keyEquivalent: "")
             mi.target = self
@@ -6766,7 +6771,7 @@ final class PopupMenu: NSObject {
         chosen = 0
         if v.handle != 0, tk_desktop_platinum_ui(v.handle) != 0, let w = v.window, !items.isEmpty {
             let p = w.convertPoint(toScreen: v.convert(anchor, to: nil))
-            let pm = items.map { PMItem(title: $0.0, enabled: $0.2) }
+            let pm = items.map { PMItem(title: $0.0, enabled: $0.2, separator: $0.3) }
             let first = items.firstIndex { $0.2 } ?? 0
             guard let i = PlatinumMenuSession.popUp(pm, selected: first,
                                                    over: NSRect(x: p.x, y: p.y - 18, width: 1, height: 18)),

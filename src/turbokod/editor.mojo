@@ -5673,10 +5673,11 @@ struct Editor(Copyable, Movable):
     def _maybe_request_context_menu(
         mut self, pos: Point, view: Rect,
     ):
-        """Hit-test ``pos`` against identifier text and, if it lands on a
-        word, stash an ``EditorContextMenuRequest`` so the host opens the
-        symbol-actions popup. Called only when no diagnostic was hit.
-        Right-clicks on blank space / past EOL set nothing."""
+        """Hit-test ``pos`` against the text area and stash an
+        ``EditorContextMenuRequest`` so the host opens the context popup.
+        Called only when no diagnostic was hit. The word under the click
+        (empty on blank space) decides whether the symbol actions show;
+        the location actions always do."""
         var resolved = self._resolve_text_area_buf_pos(pos, view)
         if not resolved:
             return
@@ -5684,8 +5685,6 @@ struct Editor(Copyable, Movable):
         var row = rc[0]
         var byte_col = rc[1]
         var word = word_at(self.buffer.line(row), byte_col)
-        if len(word.as_bytes()) == 0:
-            return
         self.pending_context_menu = Optional[EditorContextMenuRequest](
             EditorContextMenuRequest(row, byte_col, word, pos.x, pos.y),
         )
@@ -5741,15 +5740,12 @@ struct Editor(Copyable, Movable):
 
     def request_context_menu_at_cursor(mut self, view: Rect) -> Bool:
         """Stash an ``EditorContextMenuRequest`` anchored at the primary
-        caret — the keyboard (Alt+Enter) counterpart to a right-click on
-        an identifier. Returns False (nothing stashed) when the caret
-        isn't on a word or is scrolled out of view, mirroring the
-        right-click path's word gate."""
+        caret — the keyboard (Alt+Enter) counterpart to a right-click.
+        Returns False (nothing stashed) when the caret is scrolled out of
+        view."""
         var row = self.selections[0].row
         var col = self.selections[0].col
         var word = word_at(self.buffer.line(row), col)
-        if len(word.as_bytes()) == 0:
-            return False
         var pt_opt = self._cursor_screen_point(view)
         if not pt_opt:
             return False
@@ -9183,13 +9179,13 @@ struct Editor(Copyable, Movable):
                         DiagnosticMenuRequest
                     ](DiagnosticMenuRequest(label^, ax, ay, diag))
                     return True
-                # Alt+Enter on a plain identifier: open the symbol-actions
-                # context menu at the caret — the keyboard counterpart to a
-                # right-click. The host drains ``pending_context_menu``.
+                # Anywhere else: open the context menu at the caret — the
+                # keyboard counterpart to a right-click. The host drains
+                # ``pending_context_menu``.
                 if self.request_context_menu_at_cursor(view):
                     return True
-                # Outside any misspelling / diagnostic / identifier: leave
-                # the event for the caller to bind to a hotkey of its own.
+                # Caret scrolled out of view: leave the event for the
+                # caller to bind to a hotkey of its own.
                 return False
             if self.read_only:
                 return True

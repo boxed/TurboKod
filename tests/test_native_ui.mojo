@@ -20,7 +20,14 @@ from turbokod.ui_grid import ui_act, ui_set
 from turbokod.git_changes import LineHistoryEntry
 from turbokod.diff import MergeRegion, REGION_CONFLICT, REGION_STABLE
 from turbokod.merge_view import CHOICE_DISK
-from turbokod.events import Event, KEY_ENTER, KEY_ESC, MOUSE_BUTTON_RIGHT
+from turbokod.events import (
+    Event, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_UP, MOD_ALT, MOUSE_BUTTON_RIGHT,
+)
+from turbokod.context_menu import (
+    CTX_MENU_ACTION_COPY_LOCATION, CTX_MENU_ACTION_DEFINITION,
+    CTX_MENU_ACTION_REFERENCES, CTX_MENU_SEPARATOR, EditorContextMenu,
+    ctx_menu_separator,
+)
 from turbokod.geometry import Point, Rect
 from turbokod.window import Window
 from turbokod.dap_dispatch import DapStackFrame, DapVariable
@@ -1110,10 +1117,95 @@ def test_gutter_right_click_opens_the_gutter_menu() raises:
     assert_equal(d.native_popup_kind(), String("context"))
     var items = d.native_popup_items()
     # No file path: nothing to copy or set a breakpoint in.
-    assert_equal(len(items), 2)
+    assert_equal(len(items), 3)
     assert_equal(items[0].label, String("Show Blame"))
-    assert_equal(items[1].label, String("Toggle Bookmark"))
-    _ = d.native_popup_choose(items[1].code)
+    assert_true(items[1].is_separator())
+    assert_equal(items[2].label, String("Toggle Bookmark"))
+    _ = d.native_popup_choose(items[2].code)
     assert_false(d.editor_context_menu.active)
     assert_true(d.windows.windows[0].editor.buffer.is_marked(1))
     assert_false(d.windows.windows[0].editor.buffer.is_marked(0))
+
+
+def test_context_menu_separators_divide_groups_and_are_skipped() raises:
+    """A separator per group is dropped where it would lead, trail or
+    double up; the arrows step over the ones left, and Enter can't pick
+    one."""
+    var labels = List[String]()
+    var actions = List[Int]()
+    ctx_menu_separator(labels, actions)
+    labels.append(String("Go to Definition"))
+    actions.append(CTX_MENU_ACTION_DEFINITION)
+    ctx_menu_separator(labels, actions)
+    ctx_menu_separator(labels, actions)
+    labels.append(String("Find References"))
+    actions.append(CTX_MENU_ACTION_REFERENCES)
+    ctx_menu_separator(labels, actions)
+    var m = EditorContextMenu()
+    m.open(Point(0, 0), labels^, actions^)
+    assert_equal(len(m.actions), 3)
+    assert_equal(m.actions[0], CTX_MENU_ACTION_DEFINITION)
+    assert_equal(m.actions[1], CTX_MENU_SEPARATOR)
+    assert_equal(m.actions[2], CTX_MENU_ACTION_REFERENCES)
+    assert_true(m.native_items()[1].is_separator())
+    _ = m.handle_key(Event.key_event(KEY_DOWN))
+    assert_equal(m.selected, 2)
+    _ = m.handle_key(Event.key_event(KEY_UP))
+    assert_equal(m.selected, 0)
+    _ = m.handle_key(Event.key_event(KEY_UP))     # wraps past the end
+    assert_equal(m.selected, 2)
+    m.selected = 1
+    _ = m.handle_key(Event.key_event(KEY_ENTER))
+    assert_false(m.submitted)
+
+
+def test_alt_enter_menu_has_line_and_location_groups() raises:
+    """Alt+Enter opens the context menu on a word and off one alike; off
+    a word only the line and location groups are there."""
+    var d = _native_desktop(String("value = 1\n\n"))
+    d.windows.windows[0].editor.file_path = String("/proj/src/a.py")
+    d.project = Optional[String](String("/proj"))
+    d.windows.windows[0].editor.move_to(1, 0, False)
+    _ = d.handle_event(Event.key_event(KEY_ENTER, MOD_ALT), _SCREEN)
+    assert_equal(d.native_popup_kind(), String("context"))
+    var items = d.native_popup_items()
+    var labels = List[String]()
+    for i in range(len(items)):
+        labels.append(
+            String("-") if items[i].is_separator() else items[i].label
+        )
+    assert_equal(len(labels), 5)
+    assert_equal(labels[0], String("Toggle Bookmark"))
+    assert_equal(labels[1], String("Toggle Breakpoint"))
+    assert_equal(labels[2], String("-"))
+    assert_equal(labels[3], String("Copy Location"))
+    assert_equal(labels[4], String("Send Location to Claude"))
+    _ = d.native_popup_choose(0)
+    d.windows.windows[0].editor.move_to(0, 2, False)
+    _ = d.handle_event(Event.key_event(KEY_ENTER, MOD_ALT), _SCREEN)
+    items = d.native_popup_items()
+    assert_equal(items[0].code, CTX_MENU_ACTION_DEFINITION)
+    var has_copy = False
+    for i in range(len(items)):
+        if items[i].code == CTX_MENU_ACTION_COPY_LOCATION:
+            has_copy = True
+    assert_true(has_copy)
+    _ = d.native_popup_choose(0)
+    d.shutdown()
+
+
+def test_claude_location_is_project_relative_with_the_selected_lines() raises:
+    var d = _native_desktop(String("a\nb\nc\nd\n"))
+    d.windows.windows[0].editor.file_path = String("/proj/src/a.py")
+    d.project = Optional[String](String("/proj"))
+    assert_equal(d._claude_location(0, 1), String("@src/a.py#L2"))
+    # A selection over rows 1-2 (ending at the start of row 3) that
+    # takes in the menu's row names the range.
+    d.windows.windows[0].editor.move_to(1, 0, False)
+    d.windows.windows[0].editor.move_to(3, 0, True)
+    assert_equal(d._claude_location(0, 2), String("@src/a.py#L2-3"))
+    # A row outside the selection is named alone.
+    assert_equal(d._claude_location(0, 0), String("@src/a.py#L1"))
+    d.project = Optional[String]()
+    assert_equal(d._claude_location(0, 0), String("@/proj/src/a.py#L1"))
+    d.shutdown()

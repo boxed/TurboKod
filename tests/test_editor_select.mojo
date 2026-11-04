@@ -686,9 +686,9 @@ def test_editor_alt_enter_on_diagnostic_stamps_menu_request() raises:
     the spell-action path when both apply — spell is checked first
     because it's the more specific signal.
 
-    A buffer that has *no* diagnostic and *no* misspelled word at the
-    cursor must leave the request slot empty and let Alt+Enter pass
-    through as an unbound hotkey (return value False)."""
+    A caret with *no* diagnostic and *no* misspelled word under it
+    leaves the diagnostic slot empty and opens the context menu
+    instead."""
     var ed = Editor(String("x = timedelta()"))
     ed.selections[0].row = 0
     ed.selections[0].col = 5  # inside "timedelta"
@@ -716,12 +716,16 @@ def test_editor_alt_enter_on_diagnostic_stamps_menu_request() raises:
     assert_equal(req.diag.severity, DIAG_SEVERITY_ERROR)
     assert_equal(req.diag.start_col, 4)
     # No diagnostic, no spell run, caret on blank space (not an
-    # identifier) → Alt+Enter falls through as an unbound hotkey.
+    # identifier) → the context menu, with no word for symbol actions.
     var ed2 = Editor(String("   "))
     ed2.selections[0].row = 0
     ed2.selections[0].col = 1
     var consumed2 = ed2.handle_key(ev, view)
-    assert_false(consumed2)
+    assert_true(consumed2)
+    assert_false(Bool(ed2.consume_diagnostic_menu_request()))
+    var ctx_opt = ed2.consume_context_menu_request()
+    assert_true(Bool(ctx_opt))
+    assert_equal(ctx_opt.value().word, String(""))
 
 
 def test_editor_alt_enter_on_identifier_stamps_context_menu_request() raises:
@@ -1097,10 +1101,9 @@ def test_editor_alt_enter_on_misspelling_emits_pending_action() raises:
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
-def test_editor_alt_enter_outside_misspelling_does_not_consume() raises:
-    """Alt+Enter on a row without any misspelling must fall through —
-    the editor returns False so the host's hotkey table can bind it
-    to something else. No buffer mutation either way."""
+def test_editor_alt_enter_outside_misspelling_opens_context_menu() raises:
+    """Alt+Enter on a row without any misspelling stashes no spell action
+    and opens the context menu instead. No buffer mutation either way."""
     var words = List[String]()
     words.append(String("hello"))
     words.append(String("world"))
@@ -1114,9 +1117,10 @@ def test_editor_alt_enter_outside_misspelling_does_not_consume() raises:
     var line_count_before = ed.buffer.line_count()
     var alt_enter = Event.key_event(KEY_ENTER, MOD_ALT)
     var consumed = ed.handle_key(alt_enter, Rect(0, 0, 40, 5))
-    assert_false(consumed)
+    assert_true(consumed)
     assert_equal(ed.buffer.line_count(), line_count_before)
     assert_false(Bool(ed.consume_spell_action_request()))
+    assert_true(Bool(ed.consume_context_menu_request()))
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 

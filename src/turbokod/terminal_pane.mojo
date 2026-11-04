@@ -91,6 +91,13 @@ clicked. Public so the host (``Desktop.terminal_tick``) can recognize
 the click and remove the pane from its list — the pane can't pop
 itself off a container it doesn't know about."""
 
+comptime _CLAUDE_PASTE_TIMEOUT_MS = 30000
+"""How long ``send_to_claude`` waits for Claude to start in the pane."""
+
+comptime _CLAUDE_READY_GRACE_MS = 1500
+"""How long Claude has to be on screen before a paste goes in without
+its prompt having turned bracketed paste on."""
+
 comptime _DONE_DEBOUNCE_MS = 1000
 """Debounce window for the attention ("done") event. A done-worthy
 state (``waiting`` / ``clean`` / ``none``) must persist for this long
@@ -231,6 +238,13 @@ struct TerminalPane(Copyable, Movable):
     attention event fires once ``now_ms`` is at least
     ``_DONE_DEBOUNCE_MS`` past this. Meaningless when
     ``_done_pending`` is False."""
+    var _claude_paste: String
+    """Text queued by ``send_to_claude`` until Claude is reading input."""
+    var _claude_paste_deadline_ms: Int
+    """When an undelivered ``_claude_paste`` is given up on."""
+    var _claude_seen_ms: Int
+    """When ``tick`` first saw Claude on screen since it last wasn't, 0
+    while it isn't."""
     var attention_events: Int
     """Count of attention-worthy Claude transitions since the host
     last drained via ``take_attention``. The macOS host turns these
@@ -284,6 +298,9 @@ struct TerminalPane(Copyable, Movable):
         self._attn_armed = False
         self._done_pending = False
         self._done_candidate_ms = 0
+        self._claude_paste = String("")
+        self._claude_paste_deadline_ms = 0
+        self._claude_seen_ms = 0
         self.attention_events = 0
 
     def __copyinit__(mut self, copy: Self):
@@ -332,6 +349,9 @@ struct TerminalPane(Copyable, Movable):
         self._attn_armed = copy._attn_armed
         self._done_pending = copy._done_pending
         self._done_candidate_ms = copy._done_candidate_ms
+        self._claude_paste = copy._claude_paste
+        self._claude_paste_deadline_ms = copy._claude_paste_deadline_ms
+        self._claude_seen_ms = copy._claude_seen_ms
         self.attention_events = copy.attention_events
 
     # --- chrome forwarders ---------------------------------------------
@@ -666,6 +686,42 @@ struct TerminalPane(Copyable, Movable):
             # previously-cached state is still current.
             self._claude_title_state = state
             self._note_claude_state(state, now)
+        self._deliver_claude_paste()
+
+    def claude_running(self) -> Bool:
+        """Claude Code is on screen in this pane (per the last ``tick``)."""
+        return self._claude_title_state != CLAUDE_NONE
+
+    def send_to_claude(mut self, text: String):
+        """Paste ``text`` into Claude's prompt — now if it's reading input,
+        otherwise as soon as it is (a pane just started with ``claude``
+        is still a shell for the first second or two). Given up on after
+        ``_CLAUDE_PASTE_TIMEOUT_MS``."""
+        self._claude_paste = text
+        self._claude_paste_deadline_ms = (
+            monotonic_ms() + _CLAUDE_PASTE_TIMEOUT_MS
+        )
+        self._deliver_claude_paste()
+
+    def _deliver_claude_paste(mut self):
+        if len(self._claude_paste.as_bytes()) == 0:
+            return
+        var now = monotonic_ms()
+        if not self.claude_running():
+            self._claude_seen_ms = 0
+            if now > self._claude_paste_deadline_ms:
+                self._claude_paste = String("")
+            return
+        if self._claude_seen_ms == 0:
+            self._claude_seen_ms = now
+        # Claude's prompt turns bracketed paste on once it reads input;
+        # the delay covers a build (or a tmux client) that never says so.
+        if not self.vt.bracketed_paste() \
+                and now - self._claude_seen_ms < _CLAUDE_READY_GRACE_MS:
+            return
+        self._leave_history()
+        paste_to_pty(self.pty, self.vt, self._claude_paste)
+        self._claude_paste = String("")
 
     def _scan_run_exit(mut self):
         """Look for the ``[<target> exited with …]`` line (see

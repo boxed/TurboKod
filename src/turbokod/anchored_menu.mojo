@@ -147,3 +147,11 @@ struct NativeMenuItem(Copyable, Movable):
     var label: String
     var code: Int
     var enabled: Bool
+
+    @staticmethod
+    def separator() -> Self:
+        """A divider between groups of rows: no label, never picked."""
+        return Self(String(""), 0, False)
+
+    def is_separator(self) -> Bool:
+        return len(self.label.as_bytes()) == 0

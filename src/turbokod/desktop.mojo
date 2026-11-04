@@ -101,8 +101,8 @@ from .context_menu import (
     CTX_MENU_ACTION_REFERENCES,
     CTX_MENU_ACTION_RENAME, CTX_MENU_ACTION_SUBTYPES,
     CTX_MENU_ACTION_SUPERTYPES,
-    CTX_MENU_ACTION_TYPE_DEFINITION,
-    EditorContextMenu,
+    CTX_MENU_ACTION_TYPE_DEFINITION, CTX_MENU_ACTION_SEND_TO_CLAUDE,
+    EditorContextMenu, ctx_menu_separator,
 )
 from .lsp import LspProcess
 from .lsp_status_menu import (
@@ -17168,9 +17168,8 @@ struct Desktop(Movable):
     def _maybe_open_gutter_menu(mut self):
         """Drain ``Editor.consume_gutter_menu`` on the focused editor and
         open the gutter popup for the right-clicked row: Toggle Blame,
-        Copy Location (``path:line``), Toggle Bookmark, Toggle Breakpoint,
-        plus Edit Breakpoint… when that row has one. It's the
-        symbol-actions popup with a fixed row set, so the native and
+        then the location and line groups (``_append_line_actions``). It's
+        the symbol-actions popup with a fixed row set, so the native and
         Platinum menus come for free."""
         if not self.windows.focused_is_editor():
             return
@@ -17183,28 +17182,99 @@ struct Desktop(Movable):
         self._ctx_menu_row = req.row
         self._ctx_menu_col = 0
         self._ctx_menu_word = String("")
-        ref ed = self.windows.windows[idx].editor
-        var has_path = len(ed.file_path.as_bytes()) > 0
         var labels = List[String]()
         var actions = List[Int]()
         labels.append(
-            String("Hide Blame") if ed.blame_visible else String("Show Blame")
+            String("Hide Blame")
+            if self.windows.windows[idx].editor.blame_visible
+            else String("Show Blame")
         )
         actions.append(CTX_MENU_ACTION_TOGGLE_BLAME)
-        if has_path:
-            labels.append(String("Copy Location"))
-            actions.append(CTX_MENU_ACTION_COPY_LOCATION)
+        ctx_menu_separator(labels, actions)
+        self._append_line_actions(idx, req.row, labels, actions)
+        self.editor_context_menu.open(
+            Point(req.anchor_x, req.anchor_y), labels^, actions^,
+        )
+
+    def _append_line_actions(
+        self, idx: Int, row: Int,
+        mut labels: List[String], mut actions: List[Int],
+    ):
+        """The rows about editor ``idx``'s buffer ``row`` rather than a
+        symbol, shared by the gutter and context menus: the line group
+        (Toggle Fold when one starts there, Toggle Bookmark, Toggle
+        Breakpoint and Edit Breakpoint… when it has one) and the location
+        group (Copy Location, Send Location to Claude), which need a
+        saved file."""
+        ref ed = self.windows.windows[idx].editor
+        var has_path = len(ed.file_path.as_bytes()) > 0
+        if ed.has_foldable_at(row):
+            labels.append(String("Toggle Fold"))
+            actions.append(CTX_MENU_ACTION_TOGGLE_FOLD)
         labels.append(String("Toggle Bookmark"))
         actions.append(CTX_MENU_ACTION_TOGGLE_BOOKMARK)
         if has_path:
             labels.append(String("Toggle Breakpoint"))
             actions.append(CTX_MENU_ACTION_TOGGLE_BREAKPOINT)
-            if self.dap.has_breakpoint(ed.file_path, req.row):
+            if self.dap.has_breakpoint(ed.file_path, row):
                 labels.append(String("Edit Breakpoint…"))
                 actions.append(CTX_MENU_ACTION_EDIT_BREAKPOINT)
-        self.editor_context_menu.open(
-            Point(req.anchor_x, req.anchor_y), labels^, actions^,
-        )
+            ctx_menu_separator(labels, actions)
+            labels.append(String("Copy Location"))
+            actions.append(CTX_MENU_ACTION_COPY_LOCATION)
+            labels.append(String("Send Location to Claude"))
+            actions.append(CTX_MENU_ACTION_SEND_TO_CLAUDE)
+
+    def _location_label(self, path: String) -> String:
+        """``path`` as Copy Location / Send Location show it: relative to
+        the project root when inside it, absolute otherwise."""
+        if self.project:
+            return project_relative(self.project.value(), path)
+        return path
+
+    def _claude_location(self, idx: Int, row: Int) -> String:
+        """``@path#L<n>`` for buffer ``row`` of editor ``idx`` — Claude
+        Code's file-reference syntax — or ``@path#L<a>-<b>`` when the
+        selection spans several lines including ``row``."""
+        ref ed = self.windows.windows[idx].editor
+        var first = row
+        var last = row
+        if ed.has_selection():
+            var sel = ed.selection()
+            var sr = sel[0]
+            var er = sel[2]
+            # A selection ending at column 0 doesn't take in that line.
+            if er > sr and sel[3] == 0:
+                er -= 1
+            if sr <= row and row <= er:
+                first = sr
+                last = er
+        var loc = String("@") + self._location_label(ed.file_path) \
+            + String("#L") + String(first + 1)
+        if last > first:
+            loc += String("-") + String(last + 1)
+        return loc^
+
+    def _send_to_claude(mut self, text: String):
+        """Paste ``text`` into the prompt of the Claude pane — the first
+        visible terminal pane Claude is running in, or a new one (as
+        Terminal ▸ New Claude pane opens) when there's none — and focus
+        it. The pane holds the text until Claude reads input."""
+        var target = -1
+        for i in range(len(self.terminal_panes)):
+            if self.terminal_panes[i].visible \
+                    and self.terminal_panes[i].claude_running():
+                target = i
+                break
+        if target < 0:
+            self._open_terminal_pane(String("claude"))
+            target = len(self.terminal_panes) - 1
+        else:
+            if self.terminal_panes[target].is_minimized():
+                self.terminal_panes[target].dock.set_state(PANEL_STATE_NORMAL)
+            self._focus_dock(DOCK_TERMINAL, target)
+            self.panel_focus_request = True
+        self.terminal_panes[target].send_to_claude(text + String(" "))
 
     def _on_gutter_menu_action(
         mut self, act: Int, idx: Int, row: Int, anchor: Point,
@@ -17220,13 +17290,18 @@ struct Desktop(Movable):
         if len(path.as_bytes()) == 0:
             return
         if act == CTX_MENU_ACTION_COPY_LOCATION:
-            var shown = path
-            if self.project:
-                shown = project_relative(self.project.value(), path)
-            var loc = shown + String(":") + String(row + 1)
+            var loc = self._location_label(path) + String(":") \
+                + String(row + 1)
             clipboard_copy(loc)
             self.status_bar.set_message(
                 String("Copied ") + loc, Attr(BLACK, LIGHT_GRAY),
+            )
+        elif act == CTX_MENU_ACTION_SEND_TO_CLAUDE:
+            var loc = self._claude_location(idx, row)
+            self._send_to_claude(loc)
+            self.status_bar.set_message(
+                String("Sent ") + loc + String(" to Claude"),
+                Attr(BLACK, LIGHT_GRAY),
             )
         elif act == CTX_MENU_ACTION_TOGGLE_BREAKPOINT:
             self.dap.toggle_breakpoint(path, row)
@@ -17253,54 +17328,70 @@ struct Desktop(Movable):
         self._ctx_menu_row = req.row
         self._ctx_menu_col = req.col
         self._ctx_menu_word = req.word
-        # Build the row set, gating the go-to family on what the server
-        # advertises. Rename / Definition / References always show (the
-        # server may still answer null — better a no-op than a missing
-        # row); the rarer providers only appear when supported.
+        # Build the row set in groups — navigate, find, edit, then the
+        # line and location rows — gating the providers on what the
+        # server advertises. Definition / References / Rename always show
+        # on a word (the server may still answer null — better a no-op
+        # than a missing row); the rarer providers only when supported.
+        # Off a word only the rows that don't need a symbol remain.
         var path = self.windows.windows[idx].editor.file_path
         var li = self._lsp_for_path(path)
+        var on_word = len(req.word.as_bytes()) > 0
         var labels = List[String]()
         var actions = List[Int]()
-        labels.append(String("Rename Symbol…"))
-        actions.append(CTX_MENU_ACTION_RENAME)
-        labels.append(String("Go to Definition"))
-        actions.append(CTX_MENU_ACTION_DEFINITION)
+        if on_word:
+            labels.append(String("Go to Definition"))
+            actions.append(CTX_MENU_ACTION_DEFINITION)
+            if li >= 0 and self.lsp_managers[li].server_supports(
+                String("typeDefinitionProvider"),
+            ):
+                labels.append(String("Go to Type Definition"))
+                actions.append(CTX_MENU_ACTION_TYPE_DEFINITION)
+            if li >= 0 and self.lsp_managers[li].server_supports(
+                String("implementationProvider"),
+            ):
+                labels.append(String("Go to Implementation"))
+                actions.append(CTX_MENU_ACTION_IMPLEMENTATION)
+            if li >= 0 and self.lsp_managers[li].server_supports(
+                String("declarationProvider"),
+            ):
+                labels.append(String("Go to Declaration"))
+                actions.append(CTX_MENU_ACTION_DECLARATION)
+            ctx_menu_separator(labels, actions)
+            labels.append(String("Find References"))
+            actions.append(CTX_MENU_ACTION_REFERENCES)
+            if li >= 0 and self.lsp_managers[li].server_supports(
+                String("callHierarchyProvider"),
+            ):
+                labels.append(String("Find Callers"))
+                actions.append(CTX_MENU_ACTION_CALLERS)
+                labels.append(String("Find Callees"))
+                actions.append(CTX_MENU_ACTION_CALLEES)
+            if li >= 0 and self.lsp_managers[li].server_supports(
+                String("typeHierarchyProvider"),
+            ):
+                labels.append(String("Find Supertypes"))
+                actions.append(CTX_MENU_ACTION_SUPERTYPES)
+                labels.append(String("Find Subtypes"))
+                actions.append(CTX_MENU_ACTION_SUBTYPES)
+            if li >= 0 and self.lsp_managers[li].server_supports(
+                String("monikerProvider"),
+            ):
+                labels.append(String("Show Moniker"))
+                actions.append(CTX_MENU_ACTION_MONIKER)
+            ctx_menu_separator(labels, actions)
+            labels.append(String("Rename Symbol…"))
+            actions.append(CTX_MENU_ACTION_RENAME)
+            if li >= 0 and self.lsp_managers[li].server_supports(
+                String("linkedEditingRangeProvider"),
+            ):
+                labels.append(String("Linked Edit"))
+                actions.append(CTX_MENU_ACTION_LINKED_EDIT)
         if li >= 0 and self.lsp_managers[li].server_supports(
-            String("typeDefinitionProvider"),
+            String("inlineCompletionProvider"),
         ):
-            labels.append(String("Go to Type Definition"))
-            actions.append(CTX_MENU_ACTION_TYPE_DEFINITION)
-        if li >= 0 and self.lsp_managers[li].server_supports(
-            String("implementationProvider"),
-        ):
-            labels.append(String("Go to Implementation"))
-            actions.append(CTX_MENU_ACTION_IMPLEMENTATION)
-        if li >= 0 and self.lsp_managers[li].server_supports(
-            String("declarationProvider"),
-        ):
-            labels.append(String("Go to Declaration"))
-            actions.append(CTX_MENU_ACTION_DECLARATION)
-        labels.append(String("Find References"))
-        actions.append(CTX_MENU_ACTION_REFERENCES)
-        if li >= 0 and self.lsp_managers[li].server_supports(
-            String("callHierarchyProvider"),
-        ):
-            labels.append(String("Find Callers"))
-            actions.append(CTX_MENU_ACTION_CALLERS)
-            labels.append(String("Find Callees"))
-            actions.append(CTX_MENU_ACTION_CALLEES)
-        if li >= 0 and self.lsp_managers[li].server_supports(
-            String("typeHierarchyProvider"),
-        ):
-            labels.append(String("Find Supertypes"))
-            actions.append(CTX_MENU_ACTION_SUPERTYPES)
-            labels.append(String("Find Subtypes"))
-            actions.append(CTX_MENU_ACTION_SUBTYPES)
-        if li >= 0 and self.lsp_managers[li].server_supports(
-            String("monikerProvider"),
-        ):
-            labels.append(String("Show Moniker"))
-            actions.append(CTX_MENU_ACTION_MONIKER)
+            labels.append(String("Inline Suggestion"))
+            actions.append(CTX_MENU_ACTION_INLINE_COMPLETION)
         # Color-format conversion: only when the cursor sits on a
         # documentColor swatch and the server provides colors.
         if li >= 0 and self.lsp_managers[li].server_supports(
@@ -17312,19 +17403,8 @@ struct Desktop(Movable):
             actions.append(CTX_MENU_ACTION_COLOR_PRESENTATION)
             labels.append(String("Color Picker…"))
             actions.append(CTX_MENU_ACTION_COLOR_PICKER)
-        if li >= 0 and self.lsp_managers[li].server_supports(
-            String("inlineCompletionProvider"),
-        ):
-            labels.append(String("Inline Suggestion"))
-            actions.append(CTX_MENU_ACTION_INLINE_COMPLETION)
-        if li >= 0 and self.lsp_managers[li].server_supports(
-            String("linkedEditingRangeProvider"),
-        ):
-            labels.append(String("Linked Edit"))
-            actions.append(CTX_MENU_ACTION_LINKED_EDIT)
-        if self.windows.windows[idx].editor.has_foldable_at(req.row):
-            labels.append(String("Toggle Fold"))
-            actions.append(CTX_MENU_ACTION_TOGGLE_FOLD)
+        ctx_menu_separator(labels, actions)
+        self._append_line_actions(idx, req.row, labels, actions)
         self.editor_context_menu.open(
             Point(req.anchor_x, req.anchor_y), labels^, actions^,
         )
@@ -17347,7 +17427,7 @@ struct Desktop(Movable):
         if not self._is_editor_at(idx):
             return
         if act >= CTX_MENU_ACTION_TOGGLE_BLAME \
-                and act <= CTX_MENU_ACTION_EDIT_BREAKPOINT:
+                and act <= CTX_MENU_ACTION_SEND_TO_CLAUDE:
             self._on_gutter_menu_action(act, idx, row, anchor)
             return
         if act == CTX_MENU_ACTION_RENAME:

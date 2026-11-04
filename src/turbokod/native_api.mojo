@@ -2395,7 +2395,7 @@ def tk_desktop_find(h: Int, ptr: Int, n: Int) abi("C"):
 def tk_desktop_popup(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     """The anchored popup (editor / tab context menu, spelling, test
     gutter, diagnostic, LSP status) the host shows as an ``NSMenu``:
-    ``{kind, x, y, items: [{label, code, enabled}]}`` with ``x`` / ``y``
+    ``{kind, x, y, items: [{label, code, enabled, separator?}]}`` with ``x`` / ``y``
     the anchor cell. 0 when none is up. Same buffer contract as
     ``tk_desktop_native_dialog``."""
     if h == 0:
@@ -2416,6 +2416,8 @@ def tk_desktop_popup(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
         it.put(String("label"), json_str(rows[i].label))
         it.put(String("code"), json_int(rows[i].code))
         it.put(String("enabled"), json_bool(rows[i].enabled))
+        if rows[i].is_separator():
+            it.put(String("separator"), json_bool(True))
         items.append(it)
     o.put(String("items"), items)
     return _write_out(encode_json(o), out_ptr, cap)
