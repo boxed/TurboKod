@@ -66,7 +66,7 @@ from .terminal_view import (
 from .vt import MOUSE_MOTION, MOUSE_PRESS, MOUSE_RELEASE, SCROLLBACK_LINES, Vt
 from .window import (
     BottomDockedPanel, TitleCommand,
-    handle_bottom_dock_chrome_mouse, handle_bottom_dock_esc,
+    handle_bottom_dock_chrome_mouse,
     paint_bottom_dock_chrome,
 )
 
@@ -1086,20 +1086,10 @@ struct TerminalPane(Copyable, Movable):
         # focused pane (see Desktop's WINDOW_CLOSE handler).
         if event.key == UInt32(ord("w")) and event.mods == MOD_META:
             return False
-        # ESC routes through the chrome ladder first (collapses any
-        # in-flight resize / focus state); only if the chrome doesn't
-        # consume it do we forward to the child. Exception: when a
-        # Claude Code session is detected in the pane, ESC goes
-        # straight to the child — it's a vital key there (interrupt
-        # the agent, clear the input, close menus) and stepping the
-        # pane down the max → normal → min ladder instead would be
-        # hostile. The chrome remains reachable via mouse and the
-        # pane hotkey.
+        # ESC is the program's (vi, less, fzf, Claude Code all need it),
+        # as in any terminal: the pane's max → normal → min ladder stays
+        # on the mouse and the pane hotkey.
         if event.key == KEY_ESC and event.mods == MOD_NONE:
-            var tail = self.vt.tail_rows(20)
-            var claude = self._claude_tracker.classify(tail, monotonic_ms())
-            if claude == CLAUDE_NONE and handle_bottom_dock_esc(self.dock):
-                return True
             self.pty.write_all(String("\x1b"))
             return True
         if (event.key == KEY_PAGEUP or event.key == KEY_PAGEDOWN) \

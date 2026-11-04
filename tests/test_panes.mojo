@@ -282,33 +282,14 @@ def test_terminal_parses_alt_letter_as_letter() raises:
     assert_true((alt_b[0].mods & MOD_ALT) != 0)
 
 
-def test_terminal_pane_esc_steps_chrome_ladder_without_claude() raises:
-    """Baseline for the Claude exception below: with plain shell
-    output in the pane, ESC walks the dock chrome ladder
-    (NORMAL → MINIMIZED) instead of reaching the child."""
+def test_terminal_pane_esc_goes_to_the_program() raises:
+    """ESC in a terminal pane is the program's (vi's normal mode, Claude
+    Code's interrupt), never the dock's max → normal → min ladder. The
+    pty write is a no-op without a live child — the dock state is the
+    observable: it must not change."""
     var pane = TerminalPane()
     pane.focused = True
-    pane.vt.feed_string(String("$ ls\nfile.txt\n$ "))
-    assert_equal(Int(pane.dock.state), Int(PANEL_STATE_NORMAL))
-    assert_true(pane.handle_key(Event.key_event(KEY_ESC)))
-    assert_equal(Int(pane.dock.state), Int(PANEL_STATE_MINIMIZED))
-
-
-def test_terminal_pane_esc_bypasses_chrome_ladder_in_claude_mode() raises:
-    """When a Claude Code session is detected in the pane, ESC must go
-    to the child (it interrupts the agent / clears the input) rather
-    than stepping the dock down the max → normal → min ladder. The pty
-    write is a no-op without a live child — the dock state is the
-    observable: it must NOT change."""
-    var pane = TerminalPane()
-    pane.focused = True
-    # Park the marker near the grid bottom — the detector scans only
-    # the bottom rows (``tail_rows``), matching where Claude actually
-    # paints its status line.
-    pane.vt.feed_string(
-        String("\x1b[23;1H✻ Pondering… (12s · esc to interrupt)")
-    )
-    assert_equal(Int(pane.dock.state), Int(PANEL_STATE_NORMAL))
+    pane.vt.feed_string(String("$ vi notes.txt\n"))
     assert_true(pane.handle_key(Event.key_event(KEY_ESC)))
     assert_equal(Int(pane.dock.state), Int(PANEL_STATE_NORMAL))
     pane.dock.set_state(PANEL_STATE_MAXIMIZED)
