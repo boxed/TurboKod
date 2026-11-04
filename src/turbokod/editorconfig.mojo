@@ -79,16 +79,6 @@ struct EditorConfig(ImplicitlyCopyable, Movable):
         self.insert_final_newline = -1
         self.max_line_length = -1
 
-    def __copyinit__(mut self, copy: Self):
-        self.indent_style = copy.indent_style
-        self.indent_size = copy.indent_size
-        self.tab_width = copy.tab_width
-        self.end_of_line = copy.end_of_line
-        self.charset = copy.charset
-        self.trim_trailing_whitespace = copy.trim_trailing_whitespace
-        self.insert_final_newline = copy.insert_final_newline
-        self.max_line_length = copy.max_line_length
-
     def effective_indent_size(self) -> Int:
         """Width of one indentation level in spaces.
 
@@ -201,11 +191,6 @@ struct EditorConfigSection(Copyable, Movable):
         self.keys = List[String]()
         self.values = List[String]()
 
-    def __copyinit__(mut self, copy: Self):
-        self.pattern = copy.pattern
-        self.keys = copy.keys.copy()
-        self.values = copy.values.copy()
-
 
 struct EditorConfigFile(Copyable, Movable):
     """A parsed ``.editorconfig`` file with its source directory."""
@@ -217,11 +202,6 @@ struct EditorConfigFile(Copyable, Movable):
         self.dir = dir^
         self.is_root = False
         self.sections = List[EditorConfigSection]()
-
-    def __copyinit__(mut self, copy: Self):
-        self.dir = copy.dir
-        self.is_root = copy.is_root
-        self.sections = copy.sections.copy()
 
 
 def parse_editorconfig(dir: String, contents: String) -> EditorConfigFile:

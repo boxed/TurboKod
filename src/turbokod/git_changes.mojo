@@ -74,16 +74,6 @@ struct GitRevertRequest(Copyable, Movable):
     the submit path recomputes the block via ``compute_deletion_revert_block``
     (which re-inserts the removed lines) instead of ``compute_revert_block``."""
 
-    def __copyinit__(mut self, copy: Self):
-        self.row = copy.row
-        self.anchor_x = copy.anchor_x
-        self.anchor_y = copy.anchor_y
-        self.text_x = copy.text_x
-        self.block_top_y = copy.block_top_y
-        self.new_count = copy.new_count
-        self.head_lines = copy.head_lines.copy()
-        self.is_deletion = copy.is_deletion
-
 
 @fieldwise_init
 struct GitRevertBlock(Copyable, Movable):
@@ -96,11 +86,6 @@ struct GitRevertBlock(Copyable, Movable):
     var buf_start: Int
     var buf_end_excl: Int
     var head_lines: List[String]
-
-    def __copyinit__(mut self, copy: Self):
-        self.buf_start = copy.buf_start
-        self.buf_end_excl = copy.buf_end_excl
-        self.head_lines = copy.head_lines.copy()
 
 
 def compute_revert_block(
@@ -370,10 +355,6 @@ struct BufferDiffMarks(Copyable, Movable):
     and is intentionally not surfaced."""
     var statuses: List[Int]
     var deleted_below: List[Bool]
-
-    def __copyinit__(mut self, copy: Self):
-        self.statuses = copy.statuses.copy()
-        self.deleted_below = copy.deleted_below.copy()
 
 
 def diff_buffer_against_head(

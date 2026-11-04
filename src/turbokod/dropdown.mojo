@@ -96,15 +96,6 @@ struct Dropdown(Copyable, Movable):
         self._tracking = False
         self._clip_index()
 
-    def __copyinit__(mut self, copy: Self):
-        self.options = copy.options.copy()
-        self.index = copy.index
-        self.is_open = copy.is_open
-        self.highlight = copy.highlight
-        self._scroll = copy._scroll
-        self._type_ahead = copy._type_ahead
-        self._tracking = copy._tracking
-
     def _clip_index(mut self):
         var n = len(self.options)
         if n == 0:

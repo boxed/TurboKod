@@ -49,11 +49,6 @@ struct DownloadableDictionary(ImplicitlyCopyable, Movable):
         self.display = display^
         self.url = url^
 
-    def __copyinit__(mut self, copy: Self):
-        self.language_id = copy.language_id
-        self.display = copy.display
-        self.url = copy.url
-
 
 def built_in_downloadable_dictionaries() -> List[DownloadableDictionary]:
     """The fixed catalog. Each entry points at a permissively-licensed

@@ -54,12 +54,6 @@ struct DocSpec(Copyable, Movable):
         self.slug = slug^
         self.display = display^
 
-    def __copyinit__(mut self, copy: Self):
-        self.language_id = copy.language_id
-        self.file_types = copy.file_types.copy()
-        self.slug = copy.slug
-        self.display = copy.display
-
 
 def built_in_docsets() -> List[DocSpec]:
     """Curated set of DevDocs slugs matching the languages we already

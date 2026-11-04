@@ -80,11 +80,6 @@ struct Capture(Copyable, Movable):
         self.scope = scope^
         self.nested = nested^
 
-    def __copyinit__(mut self, copy: Self):
-        self.group = copy.group
-        self.scope = copy.scope
-        self.nested = copy.nested.copy()
-
 
 def _has_cross_backref(src: String) -> Bool:
     """True if ``src`` contains a ``\\1``..``\\9`` numeric backreference.
@@ -178,19 +173,6 @@ struct Pattern(Copyable, Movable):
         self.end_captures = end_captures^
         self.end_source = end_source^
         self.end_has_backref = end_has_backref
-
-    def __copyinit__(mut self, copy: Self):
-        self.kind = copy.kind
-        self.name = copy.name
-        self.content_name = copy.content_name
-        self.match_idx = copy.match_idx
-        self.end_idx = copy.end_idx
-        self.nested = copy.nested.copy()
-        self.include_target = copy.include_target
-        self.captures = copy.captures.copy()
-        self.end_captures = copy.end_captures.copy()
-        self.end_source = copy.end_source
-        self.end_has_backref = copy.end_has_backref
 
 
 struct Grammar(Copyable, Movable):

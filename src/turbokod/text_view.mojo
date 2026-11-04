@@ -1084,30 +1084,6 @@ struct TextLog(Copyable, Movable):
         self._open = False
         self._layout_w = -1
 
-    def __copyinit__(mut self, copy: Self):
-        self.lines = copy.lines.copy()
-        self.line_attrs = copy.line_attrs.copy()
-        self.line_runs = copy.line_runs.copy()
-        self.default_attr = copy.default_attr
-        self.max_lines = copy.max_lines
-        self.selection = copy.selection
-        self._drag_word = copy._drag_word
-        self._drag_line = copy._drag_line
-        self._dc_anchor_line = copy._dc_anchor_line
-        self._dc_anchor_lo = copy._dc_anchor_lo
-        self._dc_anchor_hi = copy._dc_anchor_hi
-        self._tc_anchor_line = copy._tc_anchor_line
-        self.scroll = copy.scroll
-        self.autoscroll = copy.autoscroll
-        self.last_visual = copy.last_visual.copy()
-        self.last_y0 = copy.last_y0
-        self.last_x0 = copy.last_x0
-        self.last_x_max = copy.last_x_max
-        self.last_first_visual = copy.last_first_visual
-        self.last_visible_count = copy.last_visible_count
-        self._open = copy._open
-        self._layout_w = copy._layout_w
-
     # --- mutation -------------------------------------------------------
 
     def append(

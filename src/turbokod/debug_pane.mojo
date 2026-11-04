@@ -398,62 +398,6 @@ struct DebugPane(Copyable, Movable):
         self._last_repl_x0 = 0
         self._last_repl_x_max = 0
 
-    def __copyinit__(mut self, copy: Self):
-        self.visible = copy.visible
-        self.dock = copy.dock.copy()
-        self.status_text = copy.status_text
-        self.mode = copy.mode
-        self.title = copy.title
-        self.rows = copy.rows.copy()
-        self.current_frame_index = copy.current_frame_index
-        self.output = copy.output.copy()
-        self.stack_scroll = copy.stack_scroll
-        self.right_scroll = copy.right_scroll
-        self.focused = copy.focused
-        self.pending_frame_id = copy.pending_frame_id
-        self.pending_frame_index = copy.pending_frame_index
-        self.pending_expand_ref = copy.pending_expand_ref
-        self.pending_expand_row = copy.pending_expand_row
-        self.pending_expand_depth = copy.pending_expand_depth
-        self.pending_collapse_row = copy.pending_collapse_row
-        self.pending_remove_watch = copy.pending_remove_watch
-        self.pending_open_path = copy.pending_open_path
-        self.pending_open_line = copy.pending_open_line
-        self.pending_open_url = copy.pending_open_url
-        self._last_inspect_y0 = copy._last_inspect_y0
-        self._left_frame = copy._left_frame
-        self._right_frame = copy._right_frame
-        self._out_frame = copy._out_frame
-        self._last_divider_x = copy._last_divider_x
-        self._left_indices = copy._left_indices.copy()
-        self._right_indices = copy._right_indices.copy()
-        self._last_links = copy._last_links.copy()
-        self._last_output_sb_x = copy._last_output_sb_x
-        self._last_output_sb_top = copy._last_output_sb_top
-        self._last_output_sb_bottom = copy._last_output_sb_bottom
-        self._output_scrolling = copy._output_scrolling
-        self._output_drag_offset = copy._output_drag_offset
-        self.host_inspect = copy.host_inspect
-        self.native_rect = copy.native_rect
-        self.repl_enabled = copy.repl_enabled
-        self.repl_input = copy.repl_input.copy()
-        self.repl_history = copy.repl_history.copy()
-        self.repl_hist_idx = copy.repl_hist_idx
-        self.pending_repl_expr = copy.pending_repl_expr
-        self.pending_completion = copy.pending_completion
-        self._cmp_items = copy._cmp_items.copy()
-        self._cmp_open = copy._cmp_open
-        self._cmp_sel = copy._cmp_sel
-        self._cmp_first = copy._cmp_first
-        self._cmp_rect = copy._cmp_rect
-        self._cmp_anchor = copy._cmp_anchor
-        self.pending_keys_expr = copy.pending_keys_expr
-        self._keys_for = copy._keys_for
-        self._key_names = copy._key_names.copy()
-        self._last_repl_y = copy._last_repl_y
-        self._last_repl_x0 = copy._last_repl_x0
-        self._last_repl_x_max = copy._last_repl_x_max
-
     # --- setters (used by Desktop) ---------------------------------------
 
     def set_status(mut self, var text: String):

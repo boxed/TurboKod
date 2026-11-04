@@ -181,10 +181,6 @@ struct RunOutput(ImplicitlyCopyable, Movable):
         self.stdout = String("")
         self.stderr = String("")
 
-    def __copyinit__(mut self, copy: Self):
-        self.stdout = copy.stdout
-        self.stderr = copy.stderr
-
     def empty(self) -> Bool:
         return len(self.stdout.as_bytes()) == 0 \
             and len(self.stderr.as_bytes()) == 0

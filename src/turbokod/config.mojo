@@ -201,12 +201,6 @@ struct OnSaveAction(Copyable, Movable):
         self.args = args^
         self.cwd = cwd^
 
-    def __copyinit__(mut self, copy: Self):
-        self.language_id = copy.language_id
-        self.program = copy.program
-        self.args = copy.args.copy()
-        self.cwd = copy.cwd
-
 
 @fieldwise_init
 struct TurbokodConfig(Copyable, Movable):

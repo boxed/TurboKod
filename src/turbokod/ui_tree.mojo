@@ -172,22 +172,6 @@ struct UINode(Copyable, Movable, Deinitable):
         # note on ``JsonValue``). Fields are still destroyed afterwards.
         pass
 
-    def __copyinit__(mut self, copy: Self):
-        self.kind = copy.kind
-        self.key = copy.key
-        self.text = copy.text
-        self.value = copy.value
-        self.placeholder = copy.placeholder
-        self.options = copy.options.copy()
-        self.rows = copy.rows.copy()
-        self.number = copy.number
-        self.height = copy.height
-        self.flags = copy.flags
-        self.children = copy.children.copy()
-        self.count = copy.count
-        self.first = copy.first
-        self.spans = copy.spans.copy()
-
     def has(self, flag: Int) -> Bool:
         return (self.flags & flag) != 0
 

@@ -272,21 +272,6 @@ struct CompletionItem(Copyable, Movable):
         self.data = data^
         self.resolved = resolved
 
-    def __copyinit__(mut self, copy: Self):
-        self.label = copy.label
-        self.insert_text = copy.insert_text
-        self.kind = copy.kind
-        self.detail = copy.detail
-        self.sort_text = copy.sort_text
-        self.has_range = copy.has_range
-        self.range_start_line = copy.range_start_line
-        self.range_start_char = copy.range_start_char
-        self.range_end_line = copy.range_end_line
-        self.range_end_char = copy.range_end_char
-        self.additional_text_edits = copy.additional_text_edits.copy()
-        self.data = copy.data
-        self.resolved = copy.resolved
-
 
 # LSP DiagnosticSeverity. Spec values; use the ``DIAG_SEVERITY_*`` names
 # at call sites instead of bare ints so the priority order is obvious.
@@ -377,11 +362,6 @@ struct _DiagnosticBucket(Copyable, Movable):
         self.diags = diags^
         self.consumed = consumed
 
-    def __copyinit__(mut self, copy: Self):
-        self.path = copy.path
-        self.diags = copy.diags.copy()
-        self.consumed = copy.consumed
-
 
 struct CodeActionFileEdit(Copyable, Movable):
     """One file's worth of edits inside a ``CodeAction``'s WorkspaceEdit.
@@ -398,10 +378,6 @@ struct CodeActionFileEdit(Copyable, Movable):
     def __init__(out self, var uri: String, var edits: List[TextEditEntry]):
         self.uri = uri^
         self.edits = edits^
-
-    def __copyinit__(mut self, copy: Self):
-        self.uri = copy.uri
-        self.edits = copy.edits.copy()
 
 
 struct CodeAction(Copyable, Movable):
@@ -460,15 +436,6 @@ struct CodeAction(Copyable, Movable):
         self.command_args = command_args^
         self.unresolved = unresolved^
 
-    def __copyinit__(mut self, copy: Self):
-        self.title = copy.title
-        self.kind = copy.kind
-        self.is_preferred = copy.is_preferred
-        self.file_edits = copy.file_edits.copy()
-        self.command = copy.command
-        self.command_args = copy.command_args.copy()
-        self.unresolved = copy.unresolved.copy()
-
 
 struct _PositionRemapper(Copyable, Movable):
     """Rewrites every ``Position.character`` in a JSON payload between the
@@ -511,12 +478,6 @@ struct _PositionRemapper(Copyable, Movable):
         self.paths = List[String]()
         self.tables = List[LineTable]()
         self.missing = List[String]()
-
-    def __copyinit__(mut self, copy: Self):
-        self.enc = copy.enc
-        self.paths = copy.paths.copy()
-        self.tables = copy.tables.copy()
-        self.missing = copy.missing.copy()
 
     def seed(mut self, path: String, var text: String):
         """Pre-load a document's text (an open, possibly dirty buffer)."""
@@ -6110,10 +6071,6 @@ struct WorkspaceEditParse(Copyable, Movable):
     var file_edits: List[CodeActionFileEdit]
     var unsupported_ops: Int
 
-    def __copyinit__(mut self, copy: Self):
-        self.file_edits = copy.file_edits.copy()
-        self.unsupported_ops = copy.unsupported_ops
-
 
 def _parse_workspace_edit(edit: JsonValue) -> WorkspaceEditParse:
     """Normalize an LSP ``WorkspaceEdit`` into per-file edit groups.
@@ -6616,11 +6573,6 @@ struct DocumentLinkParse(Copyable, Movable):
         self.links = List[TextEditEntry]()
         self.unresolved_slots = List[Int]()
         self.unresolved_raw = List[JsonValue]()
-
-    def __copyinit__(mut self, copy: Self):
-        self.links = copy.links.copy()
-        self.unresolved_slots = copy.unresolved_slots.copy()
-        self.unresolved_raw = copy.unresolved_raw.copy()
 
 
 def _parse_document_links_full(v: JsonValue) -> DocumentLinkParse:

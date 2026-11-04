@@ -41,9 +41,6 @@ struct ServerCandidate(Copyable, Movable):
     def __init__(out self, var argv: List[String]):
         self.argv = argv^
 
-    def __copyinit__(mut self, copy: Self):
-        self.argv = copy.argv.copy()
-
 
 struct LanguageSpec(Copyable, Movable):
     """Routing entry: which file extensions belong to this language id,
@@ -77,13 +74,6 @@ struct LanguageSpec(Copyable, Movable):
         self.candidates = candidates^
         self.install_hint = install_hint^
         self.comment_token = comment_token^
-
-    def __copyinit__(mut self, copy: Self):
-        self.language_id = copy.language_id
-        self.file_types = copy.file_types.copy()
-        self.candidates = copy.candidates.copy()
-        self.install_hint = copy.install_hint
-        self.comment_token = copy.comment_token
 
 
 def _candidate_from_json(v: JsonValue) -> ServerCandidate:

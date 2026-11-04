@@ -115,11 +115,6 @@ struct Session(Copyable, Movable):
         self.z_order = List[Int]()
         self.focused = -1
 
-    def __copyinit__(mut self, copy: Self):
-        self.windows = copy.windows.copy()
-        self.z_order = copy.z_order.copy()
-        self.focused = copy.focused
-
 
 def _session_path(project_root: String) -> String:
     return per_user_path(project_root, SESSION_FILE)

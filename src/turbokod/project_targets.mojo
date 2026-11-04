@@ -91,14 +91,6 @@ struct RunTarget(Copyable, Movable):
         self.env = List[String]()
         self.debug_language = String("")
 
-    def __copyinit__(mut self, copy: Self):
-        self.name = copy.name
-        self.program = copy.program
-        self.args = copy.args.copy()
-        self.cwd = copy.cwd
-        self.env = copy.env.copy()
-        self.debug_language = copy.debug_language
-
 
 struct ProjectTargets(Movable):
     """Loaded targets list + the user's currently selected one.
@@ -113,10 +105,6 @@ struct ProjectTargets(Movable):
     def __init__(out self):
         self.targets = List[RunTarget]()
         self.active = -1
-
-    def __copyinit__(mut self, copy: Self):
-        self.targets = copy.targets.copy()
-        self.active = copy.active
 
     def has_active(self) -> Bool:
         return self.active >= 0 and self.active < len(self.targets)

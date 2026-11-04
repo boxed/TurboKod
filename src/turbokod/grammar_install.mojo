@@ -44,12 +44,6 @@ struct DownloadableGrammar(Copyable, Movable):
         self.url = url^
         self.display = display^
 
-    def __copyinit__(mut self, copy: Self):
-        self.language_id = copy.language_id
-        self.file_types = copy.file_types.copy()
-        self.url = copy.url
-        self.display = copy.display
-
 
 def built_in_downloadable_grammars() -> List[DownloadableGrammar]:
     """The fixed catalog. Add an entry per language we want to offer.

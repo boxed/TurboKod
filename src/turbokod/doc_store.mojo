@@ -90,14 +90,6 @@ struct DocStore(Copyable, Movable):
         self._body_paths = List[String]()
         self._body_html = List[String]()
 
-    def __copyinit__(mut self, copy: Self):
-        self.slug = copy.slug
-        self.display = copy.display
-        self.loaded = copy.loaded
-        self.entries = copy.entries.copy()
-        self._body_paths = copy._body_paths.copy()
-        self._body_html = copy._body_html.copy()
-
     def is_installed(self, dest_dir: String) -> Bool:
         """True iff both DevDocs files exist on disk under ``dest_dir``."""
         var idx = join_path(dest_dir, String("index.json"))

@@ -946,13 +946,6 @@ struct LangSpec(Copyable, Movable):
         self.block_close = block_close^
         self.quotes = quotes^
 
-    def __copyinit__(mut self, copy: Self):
-        self.keywords = copy.keywords.copy()
-        self.line_comment = copy.line_comment
-        self.block_open = copy.block_open
-        self.block_close = copy.block_close
-        self.quotes = copy.quotes
-
 
 def _lang_spec_for_ext(ext: String) -> Optional[LangSpec]:
     """Registry: extension → spec, or ``None`` for unknown.

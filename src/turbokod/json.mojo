@@ -71,14 +71,6 @@ struct JsonValue(Copyable, Movable, Deinitable):
         # (verified: nested values inside ``arr_v`` are reclaimed).
         pass
 
-    def __copyinit__(mut self, copy: Self):
-        self.kind = copy.kind
-        self.bool_v = copy.bool_v
-        self.int_v = copy.int_v
-        self.str_v = copy.str_v
-        self.arr_v = copy.arr_v.copy()
-        self.obj_v = copy.obj_v.copy()
-
     # --- predicates / accessors --------------------------------------
 
     def is_null(self) -> Bool:    return self.kind == JSON_NULL

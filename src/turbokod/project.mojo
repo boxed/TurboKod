@@ -66,9 +66,6 @@ struct GitignoreMatcher(Copyable, Movable):
     def __init__(out self):
         self.patterns = List[GitignorePattern]()
 
-    def __copyinit__(mut self, copy: Self):
-        self.patterns = copy.patterns.copy()
-
     @staticmethod
     def from_text(text: String) -> Self:
         var m = GitignoreMatcher()

@@ -83,16 +83,6 @@ struct MenuItem(ImplicitlyCopyable, Movable):
         """Build a non-interactive divider for grouping items in a dropdown."""
         return MenuItem(String(""), String(""), True)
 
-    def __copyinit__(mut self, copy: Self):
-        self.label = copy.label
-        self.action = copy.action
-        self.is_separator = copy.is_separator
-        self.shortcut = copy.shortcut
-        self.checkable = copy.checkable
-        self.checked = copy.checked
-        self.mark = copy.mark
-        self.icon = copy.icon
-
 
 struct Menu(Copyable, Movable):
     var label: String
@@ -116,13 +106,6 @@ struct Menu(Copyable, Movable):
         self.visible = True
         self.right_aligned = right_aligned
         self.is_system = is_system
-
-    def __copyinit__(mut self, copy: Self):
-        self.label = copy.label
-        self.items = copy.items.copy()
-        self.visible = copy.visible
-        self.right_aligned = copy.right_aligned
-        self.is_system = copy.is_system
 
 
 @fieldwise_init

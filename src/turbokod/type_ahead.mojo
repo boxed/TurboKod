@@ -70,10 +70,6 @@ struct TypeAhead(ImplicitlyCopyable, Movable):
         self.buf = String("")
         self.last_ms = 0
 
-    def __copyinit__(mut self, copy: Self):
-        self.buf = copy.buf
-        self.last_ms = copy.last_ms
-
     def reset(mut self):
         """Drop the buffer immediately. Callers invoke this when the
         surrounding context shifts in a way that makes a continued

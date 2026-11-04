@@ -542,18 +542,6 @@ struct BottomDockedPanel(Copyable, Movable):
         self.host_chrome = False
         self.resize_grab = 0
 
-    def __copyinit__(mut self, copy: Self):
-        self.state = copy.state
-        self.preferred_height = copy.preferred_height
-        self.commands = copy.commands.copy()
-        self.pending_command_id = copy.pending_command_id
-        self.chrome_hits = copy.chrome_hits
-        self.last_cmd_hits = copy.last_cmd_hits.copy()
-        self.resizing = copy.resizing
-        self.close_button_id = copy.close_button_id
-        self.host_chrome = copy.host_chrome
-        self.resize_grab = copy.resize_grab
-
     def header_rows(self) -> Int:
         """Rows the header takes: one in the grid, two under the host's
         native header (a cell is too short for a clickable toolbar)."""
@@ -904,9 +892,6 @@ struct DockedPanelStack(Movable):
     def __init__(out self):
         self.sections = List[DockedSection]()
 
-    def __copyinit__(mut self, copy: Self):
-        self.sections = copy.sections.copy()
-
     def add(mut self, var title: String) -> Int:
         """Append a section, return its 0-based index."""
         self.sections.append(DockedSection(title^))
@@ -1248,26 +1233,6 @@ struct Window(Copyable, Movable):
         Idempotent — a later Find would just recompile.
         """
         self.editor.release_search_cache()
-
-    def __copyinit__(mut self, copy: Self):
-        self.title = copy.title
-        self.rect = copy.rect
-        self.content = copy.content.copy()
-        self.editor = copy.editor.copy()
-        self.is_editor = copy.is_editor
-        self.is_maximized = copy.is_maximized
-        self._restore_rect = copy._restore_rect
-        self.frameless = copy.frameless
-        self._tab_maximized = copy._tab_maximized
-        self.gutter = copy.gutter
-        self.grid_bar = copy.grid_bar
-        self._baseline_rect = copy._baseline_rect
-        self._baseline_ws = copy._baseline_ws
-        self._has_baseline = copy._has_baseline
-        self._last_observed_rect = copy._last_observed_rect
-        self._last_focus_ms = copy._last_focus_ms
-        self._lsp_opened = copy._lsp_opened
-        self._transient = copy._transient
 
     def interior(self) -> Rect:
         """Region inside the border where content / editor paints. Public

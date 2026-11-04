@@ -42,11 +42,6 @@ struct SearchOptions(ImplicitlyCopyable, Movable):
         self.whole_word = whole_word
         self.regex = regex
 
-    def __copyinit__(mut self, copy: Self):
-        self.case_sensitive = copy.case_sensitive
-        self.whole_word = copy.whole_word
-        self.regex = copy.regex
-
 
 
 def default_search_options() -> SearchOptions:

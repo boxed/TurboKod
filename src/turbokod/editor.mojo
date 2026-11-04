@@ -580,11 +580,6 @@ struct TextBuffer(Copyable, Movable):
         self.marks = List[Bool]()
         self.mark_count = 0
 
-    def __copyinit__(mut self, copy: Self):
-        self.lines = copy.lines.copy()
-        self.marks = copy.marks.copy()
-        self.mark_count = copy.mark_count
-
     def line_count(self) -> Int:
         return len(self.lines)
 
@@ -1203,12 +1198,6 @@ struct EditorSnapshot(Copyable, Movable):
         self.selections = selections^
         self.marks = marks^
         self.byte_size = total
-
-    def __copyinit__(mut self, copy: Self):
-        self.lines = copy.lines.copy()
-        self.selections = copy.selections.copy()
-        self.marks = copy.marks.copy()
-        self.byte_size = copy.byte_size
 
 
 # --- Editor widget ----------------------------------------------------------

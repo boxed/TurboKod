@@ -167,10 +167,6 @@ struct LineTable(Copyable, Movable):
         self.text = text^
         self.starts = starts^
 
-    def __copyinit__(mut self, copy: Self):
-        self.text = copy.text
-        self.starts = copy.starts.copy()
-
     def row_count(self) -> Int:
         return len(self.starts)
 

@@ -88,23 +88,6 @@ struct GridSelection(Copyable, Movable):
         self._scale_x = SCALE_ONE
         self._scale_y = SCALE_ONE
 
-    def __copyinit__(mut self, copy: Self):
-        self.sel_active = copy.sel_active
-        self.sel_dragging = copy.sel_dragging
-        self.sel_anchor_r = copy.sel_anchor_r
-        self.sel_anchor_c = copy.sel_anchor_c
-        self.sel_focus_r = copy.sel_focus_r
-        self.sel_focus_c = copy.sel_focus_c
-        self._drag_word = copy._drag_word
-        self._drag_line = copy._drag_line
-        self._dc_anchor_r = copy._dc_anchor_r
-        self._dc_anchor_lo = copy._dc_anchor_lo
-        self._dc_anchor_hi = copy._dc_anchor_hi
-        self._tc_anchor_r = copy._tc_anchor_r
-        self._last_body = copy._last_body
-        self._scale_x = copy._scale_x
-        self._scale_y = copy._scale_y
-
     # --- frame ---------------------------------------------------------
 
     def set_frame(mut self, canvas: Canvas, body: Rect, cols: Int, rows: Int):

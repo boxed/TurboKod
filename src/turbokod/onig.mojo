@@ -176,12 +176,6 @@ struct OnigMatch(Copyable, Movable):
         self.group_starts = group_starts^
         self.group_ends = group_ends^
 
-    def __copyinit__(mut self, copy: Self):
-        self.start = copy.start
-        self.end = copy.end
-        self.group_starts = copy.group_starts.copy()
-        self.group_ends = copy.group_ends.copy()
-
     def group_count(self) -> Int:
         return len(self.group_starts)
 
@@ -234,10 +228,6 @@ struct OnigRegex(ImplicitlyCopyable, Movable):
     """
     var _reg: Int       # OnigRegex (regex_t*) value
     var _region: Int    # OnigRegion* scratch, allocated once
-
-    def __copyinit__(mut self, copy: Self):
-        self._reg = copy._reg
-        self._region = copy._region
 
     def __init__(out self, pattern: String) raises:
         var enc = _resolve_enc()
