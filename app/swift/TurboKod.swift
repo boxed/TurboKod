@@ -4607,8 +4607,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         guard let project = mainView.project, let mainWin = mainView.window else { return }
         let id = ObjectIdentifier(mainView)
         let floating = panels[id] != nil
-        recordProjectGeometry(project, main: mainWin.frame,
-                              floating: floating, panel: panels[id]?.window.frame)
+        let panelWin = panels[id]?.window
+        let panelFrame = panelWin.map { (($0.contentView as? PlatinumMainFrame)?.restingFrame) ?? $0.frame }
+        recordProjectGeometry(project, main: platinumFrames[id]?.restingFrame ?? mainWin.frame,
+                              floating: floating, panel: panelFrame)
     }
 
     private func mainViewByObjectId(_ id: ObjectIdentifier) -> CellView? {
@@ -5371,7 +5373,7 @@ extension AppController {
             if !on {
                 platinumFrames[id] = nil
                 pf.retroShadow?.detach()
-                let f = win.frame
+                let f = pf.restingFrame ?? win.frame
                 v.removeFromSuperview()
                 win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
                 win.hasShadow = true
@@ -5395,7 +5397,7 @@ extension AppController {
         pf.title = win.title
         pf.onClose = { [weak win] in win?.performClose(nil) }
         pf.onZoom = { [weak win] in win?.performZoom(nil) }
-        pf.onCollapse = { [weak win] in win?.performMiniaturize(nil) }
+        pf.onCollapse = { [weak pf] in pf?.toggleShade() }
         pf.tabs.onSelect = { [weak self, weak v] i in if let v = v { self?.selectTab(v, i) } }
         pf.tabs.onClose = { [weak self, weak v] i in if let v = v { self?.closeTab(v, i) } }
         win.styleMask = [.borderless, .miniaturizable, .resizable]
@@ -5425,7 +5427,7 @@ extension AppController {
             }
             platinumPanelFrames[id] = nil
             pf.retroShadow?.detach()
-            let f = win.frame
+            let f = pf.restingFrame ?? win.frame
             pv.removeFromSuperview()
             win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
             win.hasShadow = true
@@ -5454,7 +5456,7 @@ extension AppController {
                 win.setFrame(vf, display: true)
             }
         }
-        pf.onCollapse = { [weak win] in win?.miniaturize(nil) }
+        pf.onCollapse = { [weak pf] in pf?.toggleShade() }
         win.styleMask = [.borderless, .miniaturizable, .resizable]
         win.hasShadow = false
         win.backgroundColor = Platinum.face
@@ -11922,6 +11924,9 @@ class PlatinumFrameView: NSView {
     var onClose: (() -> Void)?
     var onZoom: (() -> Void)?
     var onCollapse: (() -> Void)?
+    /// Rolled up to the title bar (`PlatinumMainFrame.toggleShade`): no
+    /// content well to draw.
+    var shaded = false { didSet { needsDisplay = true } }
     /// The title-bar box held down: 0 close, 1 zoom, 2 collapse.
     private var pressedBox = -1 { didSet { needsDisplay = true } }
 
@@ -11948,7 +11953,7 @@ class PlatinumFrameView: NSView {
         if active {
             Platinum.bevel(b.insetBy(dx: 1, dy: 1), Platinum.light, Platinum.shadow)
             // The content sits sunken in the frame.
-            Platinum.bevel(content.insetBy(dx: -1, dy: -1), Platinum.shadow, Platinum.light)
+            if !shaded { Platinum.bevel(content.insetBy(dx: -1, dy: -1), Platinum.shadow, Platinum.light) }
         }
         guard titled else {
             if active { Platinum.outline(b.insetBy(dx: 3, dy: 3), Platinum.mid) }
@@ -12008,7 +12013,9 @@ final class MainWindow: NSWindow {
     }
 
     override func performMiniaturize(_ sender: Any?) {
-        if platinum { miniaturize(sender) } else { super.performMiniaturize(sender) }
+        guard platinum else { return super.performMiniaturize(sender) }
+        // The Mac OS 9 look rolls the window up rather than into the Dock.
+        if let pf = contentView as? PlatinumMainFrame { pf.toggleShade() } else { miniaturize(sender) }
     }
 
     override func performZoom(_ sender: Any?) {
@@ -12694,7 +12701,42 @@ final class PlatinumMainFrame: PlatinumFrameView {
 
     override func resizeSubviews(withOldSize oldSize: NSSize) { layoutChrome() }
 
+    /// The size the window unrolls to while it's rolled up.
+    private var unrolledSize: NSSize?
+
+    /// The window's frame unrolled — its own unless it's rolled up. What
+    /// gets saved and kept across a change of look, so a rolled-up window
+    /// comes back at its size.
+    var restingFrame: NSRect? {
+        guard let w = window else { return nil }
+        guard let s = unrolledSize else { return w.frame }
+        return NSRect(x: w.frame.minX, y: w.frame.maxY - s.height, width: s.width, height: s.height)
+    }
+
+    /// WindowShade, as on Mac OS 8 and 9: the collapse box (or a double
+    /// click on the title bar) rolls the window up to its title bar, its top
+    /// staying put, and again rolls it back down. The grid keeps its size
+    /// meanwhile — the window just clips it away — so nothing relays out.
+    func toggleShade() {
+        guard let win = window else { return }
+        let f = win.frame
+        if let s = unrolledSize {
+            unrolledSize = nil
+            shaded = false
+            win.setFrame(NSRect(x: f.minX, y: f.maxY - s.height, width: s.width, height: s.height), display: true)
+            win.makeFirstResponder(cell)
+        } else {
+            unrolledSize = f.size
+            shaded = true
+            // Typing would go to an editor nobody can see.
+            win.makeFirstResponder(nil)
+            win.setFrame(NSRect(x: f.minX, y: f.maxY - Self.titleH, width: f.width, height: Self.titleH),
+                         display: true)
+        }
+    }
+
     func layoutChrome() {
+        guard unrolledSize == nil else { return }
         let c = content
         let th = tabs.isHidden ? 0 : PlatinumTabStrip.height
         tabs.frame = NSRect(x: c.minX, y: c.minY, width: c.width, height: th)

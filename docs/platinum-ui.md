@@ -44,7 +44,10 @@ come in 8×16 steps.
   macOS-style UI (`WindowManager.tabbed`), and the `NSWindow` goes
   borderless (`MainWindow`) inside a `PlatinumMainFrame`: the Settings
   window's frame and pinstriped title bar, with close, zoom and collapse
-  boxes (collapse minimizes), a tab strip drawn with the Settings tabs'
+  boxes (collapse, a title-bar double click and Window ▸ Minimize roll
+  the window up to its title bar and back, WindowShade-style —
+  `PlatinumMainFrame.toggleShade`; the grid keeps its size, clipped away,
+  and the unrolled frame is what's saved), a tab strip drawn with the Settings tabs'
   shape (`Platinum.tab`), and a grow box, which is the only way to resize
   it, as on Mac OS 9. The focused editor gets a Platinum scroll bar
   (`PlatinumScroller`, fed by `tk_desktop_editor_scroller`) in two columns
