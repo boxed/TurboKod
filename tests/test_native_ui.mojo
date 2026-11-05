@@ -1031,6 +1031,30 @@ def test_native_debug_inspect_hands_the_columns_to_the_host() raises:
     assert_true(seen)
 
 
+def test_platinum_pane_headers_are_the_hosts_but_the_inspect_stays_grid() raises:
+    """The Mac OS 9 look draws the tool panes' headers, docked and
+    floating, but keeps the debug pane's stack and variables on the grid."""
+    var d = _platinum_desktop(String("x\n"))
+    d.debug_pane.visible = True
+    var canvas = Canvas(_SCREEN.b.x, _SCREEN.b.y)
+    canvas.clear(default_attr())
+    d.paint(canvas, _SCREEN)
+    assert_true(d.native_panes_shown())
+    assert_true(d.debug_pane.dock.host_chrome)
+    assert_false(d.debug_pane.host_inspect)
+    d.panels_detached = True
+    canvas.clear(default_attr())
+    d.paint_panels(canvas, _SCREEN)
+    assert_true(d.native_panels_shown())
+    assert_true(d.debug_pane.dock.host_chrome)
+    assert_false(d.debug_pane.host_inspect)
+    # The Turbo Vision look: the grid's own header.
+    d.config.platinum_ui = False
+    canvas.clear(default_attr())
+    d.paint_panels(canvas, _SCREEN)
+    assert_false(d.debug_pane.dock.host_chrome)
+
+
 def test_native_project_settings_edit_through_the_sections_and_sync() raises:
     var root = _repo_with_a_change()
     var d = _native_desktop(String("x\n"))

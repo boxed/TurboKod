@@ -75,11 +75,22 @@ come in 8×16 steps.
   rows view, and a search field's arrows move it. On a `UI_MULTI` list
   Shift-click and Shift-arrows extend from the anchor and Cmd-click picks
   rows one by one (`PGitRows.multi`).
+- **The tool panes' headers** (`PlatinumPaneHeader`), docked and in the
+  floating-panels window: the same two rows and `tk_desktop_panes` /
+  `tk_desktop_panels_panes` data as the macOS look's `PaneHeader`
+  (`host_pane_headers()`), drawn as a small title bar — close box, title,
+  the commands as push buttons with their spelled-out names, zoom
+  (maximize) and collapse (minimize) boxes, pinstripes on the focused
+  pane's bar. The debug pane's stack and variables stay on the grid
+  (`host_inspect` is the macOS look's only).
+- **The floating-panels window**: borderless in a `PlatinumMainFrame`
+  (`pollPlatinumPanelChrome`), its close box docking the panels as the
+  red button does.
 - **Not covered:** the menu bar, which stays the system's. Still drawn as
   Turbo Vision grid dialogs, with no Platinum projector yet: Save As, the
   color picker, git history, the merge view, review
-  mode and the git gutter's hunk peek. The editor text and the panes are
-  the grid by design.
+  mode and the git gutter's hunk peek. The editor text and the panes'
+  contents are the grid by design.
 
 ## Core side
 

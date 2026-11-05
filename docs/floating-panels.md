@@ -182,7 +182,8 @@ debug output can still bubble an open-file action to the host).
 
 With the macOS-style UI on, the panel window gets the same native pane
 headers and debug-pane tables as the docked panes (see
-[native-ui.md](native-ui.md)). `tk_desktop_panels_panes` lists the headers at
+[native-ui.md](native-ui.md)); in the Mac OS 9 look, Platinum pane
+headers and a Platinum window frame (see [platinum-ui.md](platinum-ui.md)). `tk_desktop_panels_panes` lists the headers at
 the panes' rows in this window, and `tk_desktop_debug_inspect` takes a
 `panels` flag. The host polls both for the panel view before its occlusion
 check, so they stay in step while the window is covered.

@@ -2530,6 +2530,10 @@ final class UnconstrainedWindow: NSWindow {
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
         return frameRect
     }
+    // Borderless in the Mac OS 9 look (its frame is a `PlatinumMainFrame`),
+    // where a window neither becomes key nor main on its own.
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
 }
 
 // MARK: - App controller: windows + Mojo desktops + render timer
@@ -2598,6 +2602,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // Mac OS 9 look: each window's Platinum frame (with its tab strip) and
     // its editor's scroll bar.
     var platinumFrames: [ObjectIdentifier: PlatinumMainFrame] = [:]
+    /// The Mac OS 9 look's floating-panels windows' frames, by panel view.
+    var platinumPanelFrames: [ObjectIdentifier: PlatinumMainFrame] = [:]
     var tvFrames: [ObjectIdentifier: TVMainFrame] = [:]
     // Turbo Vision look: the dialog window (pickers, …) per window.
     var tvDialogs: [ObjectIdentifier: TVDialogWindow] = [:]
@@ -2636,7 +2642,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     var reviewBars: [ObjectIdentifier: ReviewBar] = [:]
     // macOS-style UI: native headers over the docked tool panes, per window
     // and keyed "kind:idx".
-    var paneHeaders: [ObjectIdentifier: [String: PaneHeader]] = [:]
+    var paneHeaders: [ObjectIdentifier: [String: PaneHeaderView]] = [:]
     // macOS-style UI: an overlay scroller on the focused editor, per window.
     var scrollers: [ObjectIdentifier: EditorScroller] = [:]
     var treeBuf = [UInt8](repeating: 0, count: 1 << 16)
@@ -3005,6 +3011,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 } else if pair.window.isVisible {
                     pair.window.orderOut(nil); changed = true; continue
                 }
+                if self.pollPlatinumPanelChrome(pair.window, pv) { changed = true }
                 // The native header and debug tables track the core even
                 // while the window is covered.
                 if self.pollPaneHeaders(pv, panels: true) { changed = true }
@@ -4739,6 +4746,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return
         }
         panels.removeValue(forKey: id)
+        platinumPanelFrames.removeValue(forKey: ObjectIdentifier(pair.view))?.retroShadow?.detach()
         paneHeaders[ObjectIdentifier(pair.view)] = nil
         debugInspectors[ObjectIdentifier(pair.view)] = nil
         pair.view.handle = 0          // shared handle is owned by the main view
@@ -4983,11 +4991,13 @@ extension AppController {
         var current = paneHeaders[id] ?? [:]
         var changed = false
         var seen = Set<String>()
+        // Keyed by look too, so switching looks swaps every header.
+        let platinum = tk_desktop_platinum_ui(v.handle) != 0
         for p in list {
-            let key = "\(p["kind"] as? Int ?? 0):\(p["idx"] as? Int ?? 0)"
+            let key = "\(platinum ? "p" : "n"):\(p["kind"] as? Int ?? 0):\(p["idx"] as? Int ?? 0)"
             seen.insert(key)
             let hv = current[key] ?? {
-                let h = PaneHeader(view: v)
+                let h: PaneHeaderView = platinum ? PlatinumPaneHeader(view: v) : PaneHeader(view: v)
                 v.addSubview(h)
                 current[key] = h
                 return h
@@ -5398,6 +5408,62 @@ extension AppController {
         win.makeFirstResponder(v)
         platinumFrames[id] = pf
         _ = pollPlatinumChrome(v)
+        return true
+    }
+
+    /// The floating-panels window in the Mac OS 9 look: borderless in a
+    /// Platinum frame, as the project window is; back in the system's when
+    /// the look changes. True when anything changed.
+    func pollPlatinumPanelChrome(_ win: NSWindow, _ pv: CellView) -> Bool {
+        let id = ObjectIdentifier(pv)
+        let on = pv.handle != 0 && tk_desktop_platinum_ui(pv.handle) != 0
+        if let pf = platinumPanelFrames[id] {
+            if on {
+                pf.retroShadow?.ensureAttached()
+                pf.title = win.title
+                return false
+            }
+            platinumPanelFrames[id] = nil
+            pf.retroShadow?.detach()
+            let f = win.frame
+            pv.removeFromSuperview()
+            win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+            win.hasShadow = true
+            win.contentView = pv
+            win.setFrame(f, display: true)
+            win.makeFirstResponder(pv)
+            return true
+        }
+        guard on else { return false }
+        let f = win.frame
+        let pf = PlatinumMainFrame(cell: pv)
+        pf.title = win.title
+        // The close box docks the panels, as the red button does.
+        pf.onClose = { [weak self, weak win] in
+            if let self = self, let win = win { _ = self.windowShouldClose(win) }
+        }
+        // Zoom fills the screen and back, as `MainWindow.performZoom` does.
+        var unzoomed: NSRect?
+        pf.onZoom = { [weak win] in
+            guard let win = win, let vf = win.screen?.visibleFrame else { return }
+            if let u = unzoomed, win.frame.size == vf.size {
+                unzoomed = nil
+                win.setFrame(u, display: true)
+            } else {
+                unzoomed = win.frame
+                win.setFrame(vf, display: true)
+            }
+        }
+        pf.onCollapse = { [weak win] in win?.miniaturize(nil) }
+        win.styleMask = [.borderless, .miniaturizable, .resizable]
+        win.hasShadow = false
+        win.backgroundColor = Platinum.face
+        win.contentView = pf
+        win.setFrame(f, display: false)
+        pf.retroShadow = Platinum.castShadow(under: win)
+        pf.layoutChrome()
+        win.makeFirstResponder(pv)
+        platinumPanelFrames[id] = pf
         return true
     }
 
@@ -8797,7 +8863,13 @@ final class ReviewBar: NSVisualEffectView {
 // resize handle, so this view lets every click that isn't on a button fall
 // through to the cell view (`hitTest`).
 
-final class PaneHeader: NSView {
+/// A tool pane's host-drawn header: `PaneHeader` in the macOS look,
+/// `PlatinumPaneHeader` in the Mac OS 9 look.
+protocol PaneHeaderView: NSView {
+    func update(_ p: [String: Any]) -> Bool
+}
+
+final class PaneHeader: NSView, PaneHeaderView {
     private weak var cellView: CellView?
     private var kind = 0, idx = 0
     private let title = NSTextField(labelWithString: "")
@@ -8938,6 +9010,159 @@ final class PaneHeader: NSView {
     }
 }
 
+
+// MARK: - Mac OS 9 look: tool-pane headers
+
+/// A tool pane's header in the Mac OS 9 look, over the same two rows as
+/// `PaneHeader`: a title bar in miniature. The close box at the left, the
+/// title, the pane's commands as push buttons, the zoom (maximize) and
+/// collapse (minimize) boxes at the right; the focused pane's bar is
+/// pinstriped, like the active window's. As with `PaneHeader`, clicks off
+/// the controls fall through to the cell view (resize and focus).
+final class PlatinumPaneHeader: NSView, PaneHeaderView {
+    private weak var cellView: CellView?
+    private var kind = 0, idx = 0
+    private var title = ""
+    private var focused = false
+    private var closable = false
+    /// (label, command id) per push button.
+    private var commands: [(String, String)] = []
+    private var lastData = Data()
+    /// The control held down: -1 none, 0…2 a box (op 1 close, 3 zoom,
+    /// 2 collapse, by `boxes`), 10 + i the i-th command.
+    private var pressed = -1 { didSet { if pressed != oldValue { needsDisplay = true } } }
+    private var observers: [NSObjectProtocol] = []
+
+    private static let buttonH = CGFloat(PlatinumButtonArt.height)
+
+    init(view: CellView) {
+        cellView = view
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+
+    override var isFlipped: Bool { true }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers = [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification].map {
+            NotificationCenter.default.addObserver(forName: $0, object: window, queue: .main) { [weak self] _ in
+                self?.needsDisplay = true
+            }
+        }
+    }
+
+    private var boxY: CGFloat { floor((bounds.height - 12) / 2) }
+    private var closeBox: NSRect { NSRect(x: 9, y: boxY, width: 12, height: 12) }
+    private var collapseBox: NSRect { NSRect(x: bounds.width - 21, y: boxY, width: 12, height: 12) }
+    private var zoomBox: NSRect { NSRect(x: bounds.width - 39, y: boxY, width: 12, height: 12) }
+    /// (box kind for `Platinum.titleBox`, rect, `tk_desktop_pane_act` op).
+    private var boxes: [(Int, NSRect, Int)] {
+        (closable ? [(0, closeBox, 1)] : []) + [(1, zoomBox, 3), (2, collapseBox, 2)]
+    }
+    private var titleX: CGFloat { closable ? closeBox.maxX + 8 : 10 }
+    private var titleW: CGFloat { min(Platinum.width(title), max(0, bounds.width / 3)) }
+
+    private var buttonRects: [NSRect] {
+        var x = titleX + titleW + 12
+        let y = floor((bounds.height - Self.buttonH) / 2)
+        return commands.map { c in
+            let w = max(48, Platinum.width(c.0) + 20)
+            defer { x += w + 6 }
+            return NSRect(x: x, y: y, width: w, height: Self.buttonH)
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let b = bounds
+        let lit = focused && Platinum.active(self)
+        Platinum.fill(b, Platinum.face)
+        Platinum.fill(NSRect(x: 0, y: 0, width: b.width, height: 1), .black)
+        Platinum.bevel(NSRect(x: 0, y: 1, width: b.width, height: b.height - 1), Platinum.light, Platinum.shadow)
+        let buttons = buttonRects
+        if lit {
+            let left = (buttons.last?.maxX ?? titleX + titleW) + 6
+            Platinum.pinstripes(from: left, to: zoomBox.minX - 6, top: boxY, bottom: boxY + 13)
+        }
+        Platinum.text(title, in: NSRect(x: titleX, y: 1, width: titleW + 1, height: b.height - 2),
+                      color: focused ? .black : Platinum.disabled)
+        for (i, r) in buttons.enumerated() where r.maxX < zoomBox.minX - 6 {
+            let down = pressed == 10 + i
+            PlatinumButtonArt.paint(PlatinumButtonArt.standard(w: Int(r.width), pressed: down, disabled: false),
+                                    at: r.origin)
+            Platinum.text(commands[i].0, in: r, color: down ? .white : .black, center: true)
+        }
+        for (i, (k, r, _)) in boxes.enumerated() { Platinum.titleBox(r, k, pressed: pressed == i) }
+    }
+
+    /// The control under `p`: its `pressed` index and rect.
+    private func control(at p: NSPoint) -> (Int, NSRect)? {
+        for (i, (_, r, _)) in boxes.enumerated() where r.insetBy(dx: -2, dy: -2).contains(p) {
+            return (i, r.insetBy(dx: -2, dy: -2))
+        }
+        for (i, r) in buttonRects.enumerated() where r.maxX < zoomBox.minX - 6 && r.contains(p) {
+            return (10 + i, r)
+        }
+        return nil
+    }
+
+    /// Only the controls are ours; the rest of the row is the core's
+    /// resize handle and focus target.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let sv = superview, control(at: convert(point, from: sv)) != nil else { return nil }
+        return self
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let win = window,
+              let (i, r) = control(at: convert(event.locationInWindow, from: nil)) else { return }
+        pressed = i
+        var inside = true
+        while let e = win.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+            inside = r.contains(convert(e.locationInWindow, from: nil))
+            if e.type == .leftMouseUp { break }
+            pressed = inside ? i : -1
+        }
+        pressed = -1
+        guard inside else { return }
+        if i >= 10 { act(4, commands[i - 10].1) } else { act(boxes[i].2) }
+    }
+
+    func update(_ p: [String: Any]) -> Bool {
+        guard let data = try? JSONSerialization.data(withJSONObject: p), data != lastData else { return false }
+        lastData = data
+        kind = p["kind"] as? Int ?? 0
+        idx = p["idx"] as? Int ?? 0
+        let f = NSRect(x: CGFloat(p["x"] as? Int ?? 0) * CELL_W, y: CGFloat(p["y"] as? Int ?? 0) * CELL_H,
+                       width: CGFloat(p["w"] as? Int ?? 0) * CELL_W, height: CGFloat(p["h"] as? Int ?? 1) * CELL_H)
+        if frame != f { frame = f }
+        focused = p["focused"] as? Bool ?? false
+        title = p["title"] as? String ?? ""
+        closable = p["close"] as? Bool ?? false
+        // The commands' spelled-out names (Continue, Step Over…), as on
+        // the macOS look's tooltips; the core's label otherwise.
+        commands = (p["commands"] as? [[String]] ?? []).filter { $0.count == 2 }.map {
+            (PaneHeader.command($0[1], $0[0])?.1 ?? $0[0], $0[1])
+        }
+        needsDisplay = true
+        return true
+    }
+
+    private func act(_ op: Int, _ cmd: String = "") {
+        guard let v = cellView, v.handle != 0 else { return }
+        withUTF8Arg(cmd) { p, l in tk_desktop_pane_act(v.handle, Int64(kind), Int64(idx), Int64(op), p, l) }
+        lastData = Data()
+        v.window?.makeFirstResponder(v)
+        v.invalidateFrame()
+        v.needsDisplay = true
+    }
+}
 
 // MARK: - macOS-style UI: debug pane inspect tables
 
@@ -10483,6 +10708,35 @@ enum Platinum {
         if pressed { bevel(r.insetBy(dx: 1, dy: 1), dark, mid) } else { bevel(r.insetBy(dx: 1, dy: 1), light, shadow) }
     }
 
+    /// An active title bar's pinstripes between `a` and `z`, rows `top`
+    /// to `bottom`.
+    static func pinstripes(from a: CGFloat, to z: CGFloat, top: CGFloat, bottom: CGFloat) {
+        guard z > a else { return }
+        var y = top
+        while y + 1 < bottom {
+            fill(NSRect(x: a, y: y, width: z - a, height: 1), shadow)
+            fill(NSRect(x: a + 1, y: y + 1, width: z - a, height: 1), light)
+            y += 2
+        }
+    }
+
+    /// A title-bar box (12 points square) in its gap in the pinstripes:
+    /// `kind` 0 close, 1 zoom, 2 collapse.
+    static func titleBox(_ c: NSRect, _ kind: Int, pressed: Bool) {
+        fill(c.insetBy(dx: -2, dy: -2), face)
+        fill(c, pressed ? shadow : face)
+        outline(c, dark)
+        bevel(c.insetBy(dx: 1, dy: 1), pressed ? dark : light, pressed ? mid : shadow)
+        if kind == 1 {
+            // Zoom: a small box in the big one's top-left corner.
+            outline(NSRect(x: c.minX, y: c.minY, width: 7, height: 7), dark)
+        } else if kind == 2 {
+            // Collapse: a bar across the middle.
+            fill(NSRect(x: c.minX, y: c.minY + 5, width: c.width, height: 1), dark)
+            fill(NSRect(x: c.minX, y: c.minY + 7, width: c.width, height: 1), dark)
+        }
+    }
+
     static func triangle(in r: NSRect, down: Bool, color: NSColor = .black) {
         let ctx = NSGraphicsContext.current
         let was = ctx?.shouldAntialias ?? true
@@ -11706,30 +11960,10 @@ class PlatinumFrameView: NSView {
             // The pinstripes, broken for the title and the boxes.
             let left: CGFloat = closable ? closeBox.maxX + 4 : 6
             let right = zoomable ? zoomBox.minX - 4 : b.width - 6
-            var y: CGFloat = 5
-            while y + 1 < Self.titleH - 4 {
-                for (a, z) in [(left, tx - 6), (tx + tw + 6, right)] where z > a {
-                    Platinum.fill(NSRect(x: a, y: y, width: z - a, height: 1), Platinum.shadow)
-                    Platinum.fill(NSRect(x: a + 1, y: y + 1, width: z - a, height: 1), Platinum.light)
-                }
-                y += 2
+            for (a, z) in [(left, tx - 6), (tx + tw + 6, right)] {
+                Platinum.pinstripes(from: a, to: z, top: 5, bottom: Self.titleH - 4)
             }
-            for (i, c) in boxes {
-                let pressed = pressedBox == i
-                Platinum.fill(c.insetBy(dx: -2, dy: -2), Platinum.face)
-                Platinum.fill(c, pressed ? Platinum.shadow : Platinum.face)
-                Platinum.outline(c, Platinum.dark)
-                Platinum.bevel(c.insetBy(dx: 1, dy: 1), pressed ? Platinum.dark : Platinum.light,
-                               pressed ? Platinum.mid : Platinum.shadow)
-                if i == 1 {
-                    // Zoom: a small box in the big one's top-left corner.
-                    Platinum.outline(NSRect(x: c.minX, y: c.minY, width: 7, height: 7), Platinum.dark)
-                } else if i == 2 {
-                    // Collapse: a bar across the middle.
-                    Platinum.fill(NSRect(x: c.minX, y: c.minY + 5, width: c.width, height: 1), Platinum.dark)
-                    Platinum.fill(NSRect(x: c.minX, y: c.minY + 7, width: c.width, height: 1), Platinum.dark)
-                }
-            }
+            for (i, c) in boxes { Platinum.titleBox(c, i, pressed: pressedBox == i) }
         }
         Platinum.text(title, in: NSRect(x: tx, y: 1, width: tw + 1, height: Self.titleH - 2),
                       color: active ? .black : Platinum.disabled)

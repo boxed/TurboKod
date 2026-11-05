@@ -9889,29 +9889,36 @@ struct Desktop(Movable):
             den += self.review.file_changed_lines[i]
         return (min(num, den), den)
 
-    # --- macOS-style UI: tool-pane headers -------------------------------
+    # --- macOS-style and Mac OS 9 UI: tool-pane headers ------------------
+
+    def host_pane_headers(self) -> Bool:
+        """The host draws the tool panes' headers: natively in the macOS
+        look, Platinum-style in the Mac OS 9 look."""
+        return self.native_ui() or self.platinum_ui()
 
     def native_panes_shown(self) -> Bool:
-        """Docked panes get native headers — not while floating (the panel
-        window keeps the grid chrome) or while a full-screen tool covers
-        the docks."""
-        return self.native_ui() and not self.panels_detached \
+        """Docked panes get host headers — not while floating (the panel
+        window has its own, `native_panels_shown`) or while a full-screen
+        tool covers the docks."""
+        return self.host_pane_headers() and not self.panels_detached \
             and not self._fullscreen_modal_active() \
             and not self.history.active and not self.merge_view.active \
             and not self.review.active
 
     def native_panels_shown(self) -> Bool:
-        """The floating-panels window's panes get native headers and the
-        debug pane's native tables. Nothing on the main surface covers that
-        window, so no modal or full-screen tool switches them off."""
-        return self.native_ui() and self.panels_detached
+        """The floating-panels window's panes get host headers (and, in the
+        macOS look, the debug pane's native tables). Nothing on the main
+        surface covers that window, so no modal or full-screen tool
+        switches them off."""
+        return self.host_pane_headers() and self.panels_detached
 
     def _sync_host_chrome(mut self):
         var on = self.native_panes_shown() or self.native_panels_shown()
         for i in range(len(self.terminal_panes)):
             self.terminal_panes[i].dock.host_chrome = on
         self.debug_pane.dock.host_chrome = on
-        self.debug_pane.host_inspect = on
+        # The Mac OS 9 look keeps the stack and variables on the grid.
+        self.debug_pane.host_inspect = on and self.native_ui()
         self.test_pane.dock.host_chrome = on
         self.find_results_pane.dock.host_chrome = on
 
