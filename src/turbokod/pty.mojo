@@ -25,6 +25,11 @@ from .posix import (
 )
 
 
+comptime _MAX_UNSENT = 4 * 1024 * 1024
+"""How much input ``PtyProcess`` queues for a child that isn't reading
+before it drops a write (whole, never a piece of one)."""
+
+
 struct PtyProcess(Copyable, Movable):
     """A spawned pty child plus the parent-side master fd.
 
@@ -41,16 +46,24 @@ struct PtyProcess(Copyable, Movable):
     var pid: Int32
     var master_fd: Int32
     var alive: Bool
+    var unsent: List[UInt8]
+    """Bytes the kernel hasn't taken yet: the pty's input queue is only
+    1 KB on macOS, so a paste fills it and the rest waits here for
+    ``flush`` (the pane's tick) rather than being dropped — dropping it
+    lost a bracketed paste's closing ``ESC[201~`` and left the child
+    swallowing every later key as more paste."""
 
     def __init__(out self):
         self.pid = -1
         self.master_fd = -1
         self.alive = False
+        self.unsent = List[UInt8]()
 
     def __copyinit__(mut self, copy: Self):
         self.pid = -1
         self.master_fd = -1
         self.alive = False
+        self.unsent = List[UInt8]()
 
     @staticmethod
     def spawn(
@@ -122,27 +135,58 @@ struct PtyProcess(Copyable, Movable):
             self.master_fd, Int32(cols), Int32(rows),
         ))
 
-    def write_all(self, payload: String):
-        """Write ``payload`` to the master, retrying partial writes. The
-        master accepts kilobytes at a time normally; a partial write only
-        happens when the kernel's pty buffer is full (a stuck child not
-        draining), so for keystroke-sized payloads this loops once. On
-        EPIPE / EBADF (child gone — the next tick reaps) or EAGAIN the
-        rest is dropped rather than spinning: holding the loop risks
-        locking the UI on a misbehaving child, and the user can re-press.
-        No-op once the child is gone."""
+    def write_all(mut self, payload: String):
+        """Write ``payload`` to the master, in order after anything still
+        ``unsent``. What the kernel won't take now (EAGAIN: its pty input
+        queue is full, which a paste over 1 KB does on macOS) is queued
+        for ``flush`` rather than spun on, which would lock the UI on a
+        child that isn't reading. On EPIPE / EBADF (child gone — the next
+        tick reaps) the rest is dropped. No-op once the child is gone."""
         if not self.alive or self.master_fd < 0:
             return
         var bytes = payload.as_bytes()
+        if len(self.unsent) > 0:
+            if len(self.unsent) + len(bytes) <= _MAX_UNSENT:
+                self.unsent.extend(bytes)
+            self.flush()
+            return
         var n = len(bytes)
         var sent = 0
         while sent < n:
             var rc = self.write_bytes(
                 bytes.unsafe_ptr().unsafe_offset(sent), n - sent,
             )
-            if rc <= 0:
+            if rc < 0:
+                return
+            if rc == 0:
+                if n - sent <= _MAX_UNSENT:
+                    self.unsent.extend(bytes[sent:])
                 return
             sent += rc
+
+    def flush(mut self):
+        """Hand the kernel what it can take of ``unsent``. Called from the
+        owning pane's tick until the queue is empty."""
+        if len(self.unsent) == 0:
+            return
+        if not self.alive or self.master_fd < 0:
+            self.unsent.clear()
+            return
+        var queue = List[UInt8]()
+        swap(queue, self.unsent)
+        var n = len(queue)
+        var sent = 0
+        while sent < n:
+            var rc = self.write_bytes(
+                queue.unsafe_ptr().unsafe_offset(sent), n - sent,
+            )
+            if rc < 0:
+                return
+            if rc == 0:
+                break
+            sent += rc
+        if sent < n:
+            self.unsent = List[UInt8](queue[sent:])
 
     def write_bytes(self, ptr: Pointer[UInt8, _], n: Int) -> Int:
         """Best-effort non-blocking write to the master. Returns the

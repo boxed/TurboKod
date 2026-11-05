@@ -117,6 +117,74 @@ def test_pty_child_runs_in_requested_cwd() raises:
     assert_true(ok)
 
 
+def _wait_for_output(mut pty: PtyProcess, mut vt: Vt, deadline_ms: Int):
+    """Pump the master into ``vt`` (flushing queued input as a pane's tick
+    does) until the child prints something or the deadline passes."""
+    var scratch = alloc_zero_buffer(4096)
+    var waited = 0
+    while waited < deadline_ms:
+        pty.flush()
+        if poll_stdin(pty.master_fd, Int32(20)):
+            var n = read_into(pty.master_fd, scratch, 4096)
+            if n > 0:
+                vt.feed(Span[UInt8, origin_of(scratch)](
+                    unsafe_ptr=scratch.unsafe_ptr(), length=n,
+                ))
+                return
+        waited += 20
+
+
+def test_pty_input_beyond_the_kernel_queue_is_delivered_whole() raises:
+    # macOS's pty input queue holds 1 KB. A bigger paste used to lose
+    # everything past the first EAGAIN — a bracketed paste's closing
+    # ``ESC[201~`` with it, which left IPython swallowing every later key
+    # as more paste. The rest now waits in ``unsent`` for ``flush``.
+    var argv = List[String]()
+    argv.append(String("/bin/sh"))
+    argv.append(String("-c"))
+    argv.append(String(
+        "stty raw -echo; echo R; sleep 0.3; head -c 5000 | wc -c"
+    ))
+    var pty = PtyProcess.spawn(argv, cols=40, rows=4)
+    var vt = Vt(40, 4)
+    _wait_for_output(pty, vt, 2000)     # raw mode is on: no line limit
+    assert_equal(vt.cell_at(0, 0).glyph, String("R"))
+    var payload = String("")
+    for _ in range(5000):
+        payload += String("x")
+    pty.write_all(payload)
+    assert_true(len(pty.unsent) > 0)    # the child isn't reading yet
+    var scratch = alloc_zero_buffer(4096)
+    var waited = 0
+    var done = False
+    while waited < 5000 and not done:
+        pty.flush()
+        if poll_stdin(pty.master_fd, Int32(20)):
+            var n = read_into(pty.master_fd, scratch, 4096)
+            if n > 0:
+                vt.feed(Span[UInt8, origin_of(scratch)](
+                    unsafe_ptr=scratch.unsafe_ptr(), length=n,
+                ))
+        var pair = waitpid_nohang(pty.pid)
+        if Int(pair[0]) == Int(pty.pid):
+            done = True
+        waited += 20
+    while poll_stdin(pty.master_fd, Int32(0)):
+        var n2 = read_into(pty.master_fd, scratch, 4096)
+        if n2 <= 0:
+            break
+        vt.feed(Span[UInt8, origin_of(scratch)](
+            unsafe_ptr=scratch.unsafe_ptr(), length=n2,
+        ))
+    pty.terminate()
+    assert_equal(len(pty.unsent), 0)
+    var row = String("")
+    for r in range(4):
+        for c in range(40):
+            row += vt.cell_at(r, c).glyph
+    assert_true(String("5000") in row)
+
+
 def test_pty_isatty_detected_by_child() raises:
     # The whole point of switching to a pty: ``test -t 0`` (which
     # ``[ -t 0 ]`` in /bin/sh reduces to) must exit 0 when stdin is

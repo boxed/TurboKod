@@ -533,7 +533,7 @@ def _invert_attr(a: Attr) -> Attr:
     return r
 
 
-def flush_vt_side_effects(pty: PtyProcess, mut vt: Vt):
+def flush_vt_side_effects(mut pty: PtyProcess, mut vt: Vt):
     """Deliver what the last ``Vt.feed`` queued: DSR / DA / OSC replies go
     back to the child, OSC 52 clipboard writes to the system clipboard.
     Without the replies, prompts that probe (oh-my-zsh / starship) stall;
@@ -546,7 +546,7 @@ def flush_vt_side_effects(pty: PtyProcess, mut vt: Vt):
         clipboard_copy(clip)
 
 
-def paste_to_pty(pty: PtyProcess, vt: Vt, text: String):
+def paste_to_pty(mut pty: PtyProcess, vt: Vt, text: String):
     """Send pasted ``text`` to the child — wrapped in ``ESC[200~`` /
     ``ESC[201~`` when it enabled bracketed paste (DECSET 2004), so a
     multi-line paste into a shell or vim doesn't run each line as a
@@ -558,7 +558,7 @@ def paste_to_pty(pty: PtyProcess, vt: Vt, text: String):
 
 
 def forward_key_to_grid(
-    pty: PtyProcess, mut vt: Vt, mut sel: GridSelection, event: Event,
+    mut pty: PtyProcess, mut vt: Vt, mut sel: GridSelection, event: Event,
 ) -> Bool:
     """The key handling a pty pane shares once its own chrome keys (Cmd+W,
     ESC) are dealt with: Shift+PgUp/PgDn scroll the scrollback, Cmd+C

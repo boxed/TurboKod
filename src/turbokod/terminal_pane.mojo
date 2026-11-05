@@ -631,6 +631,7 @@ struct TerminalPane(Copyable, Movable):
         any DSR/DA/clipboard side-effects the parse may have queued."""
         if not self.pty.alive or self.pty.master_fd < 0:
             return
+        self.pty.flush()
         var scratch = alloc_zero_buffer(4096)
         var total = 0
         # 64 KB cap per tick so a child flooding output (e.g. ``cat
@@ -1057,7 +1058,7 @@ struct TerminalPane(Copyable, Movable):
             return True
         return True
 
-    def _forward_mouse_to_pty(self, event: Event, action: Int):
+    def _forward_mouse_to_pty(mut self, event: Event, action: Int):
         """Encode a panel-relative mouse ``Event`` (``action`` a
         ``MOUSE_*``) via the shared view and write it to the pty master.
         No-op outside the body or when the child asked for no report."""

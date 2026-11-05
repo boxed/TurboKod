@@ -256,6 +256,7 @@ struct TestPane(Copyable, Movable):
         if not self.started or self.exited:
             return
         if self.pty.master_fd >= 0:
+            self.pty.flush()
             var scratch = alloc_zero_buffer(4096)
             var total = 0
             # 64 KB cap per tick so a flood (a test dumping a huge log)
