@@ -94,14 +94,19 @@ var cellFontIsProportional = false
 // a 19-point line, which would hang its descenders into the next row.
 var cellFontBaselineShift: CGFloat = 0
 
+/// Whether the bundled font is pixel-exact with a cell `px` device pixels
+/// tall: 16 (its embedded 8×16 strike), 24 (its embedded 12×24 strike) or
+/// a multiple of 32 (its 16×32 outlines).
+func bundledFontCrisp(px: Int) -> Bool {
+    px == 16 || px == 24 || px % 32 == 0
+}
+
 /// Whether cells should render without antialiasing on a screen with
-/// `backingScale`. The default bundled font is pixel-exact when a cell is
-/// 16 device pixels tall (its embedded 8×16 strike) or a multiple of 32
-/// (its 16×32 outlines); every other font follows `cellFontIsBitmap`.
+/// `backingScale`. The default bundled font follows `bundledFontCrisp`;
+/// every other font follows `cellFontIsBitmap`.
 func cellFontRendersCrisp(backingScale: CGFloat) -> Bool {
     if cellFontIsAdaptive {
-        let px = Int((CGFloat(cellFontEffectiveSize) * backingScale).rounded())
-        return px == 16 || px % 32 == 0
+        return bundledFontCrisp(px: Int((CGFloat(cellFontEffectiveSize) * backingScale).rounded()))
     }
     return cellFontIsBitmap
 }
@@ -201,8 +206,7 @@ final class SlotFace {
     /// Whether the face lands on whole device pixels (draw it unsmoothed).
     func crisp(backingScale: CGFloat) -> Bool {
         guard bundled, scaleX == 1 else { return false }
-        let px = Int((CELL_H * backingScale).rounded())
-        return px == 16 || px % 32 == 0
+        return bundledFontCrisp(px: Int((CELL_H * backingScale).rounded()))
     }
 
     func hasGlyph(_ cp: UInt32) -> Bool {
@@ -434,7 +438,7 @@ private func applyBundledCellFont(_ size: CGFloat) {
     cellFontAdvanceCache.removeAll()
     cellFontEffectiveSize = Int(eff.rounded())
     cellFontIdealSize = BITMAP_FONT_DEFAULT_SIZE
-    cellFontIsBitmap = cellFontEffectiveSize % BITMAP_FONT_DEFAULT_SIZE == 0
+    cellFontIsBitmap = bundledFontCrisp(px: cellFontEffectiveSize)
     cellFontIsAdaptive = true
     cellFontIsProportional = false
     cellFontBaselineShift = 0
