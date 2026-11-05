@@ -144,6 +144,21 @@ struct DefinitionResolved(ImplicitlyCopyable, Movable):
     var character: Int   # 0-based byte offset on that line
 
 
+comptime _LIBPROBE_TIMEOUT_MS = 10_000
+
+
+@fieldwise_init
+struct LibraryProbe(ImplicitlyCopyable, Movable):
+    """A library-word probe's answer: where ``word`` is defined (None
+    when the server found nothing), and the ``tag`` it was sent with."""
+    var word: String
+    var location: Optional[DefinitionResolved]
+    var tag: Int
+    var answered: Bool
+    """False when the server never answered (``_LIBPROBE_TIMEOUT_MS``),
+    which says nothing about the word."""
+
+
 @fieldwise_init
 struct SymbolItem(ImplicitlyCopyable, Movable):
     """One entry in a ``textDocument/documentSymbol`` response.
@@ -731,6 +746,15 @@ struct LspManager(Copyable, Movable):
     var _nav_word: String
     var _resolved_nav: Optional[DefinitionResolved]
     var _has_resolved_nav: Bool
+    # Background ``textDocument/definition``s asking whether misspelled
+    # words are library symbols (``Desktop._maybe_probe_library_word``,
+    # ``_library_check_step``). Slots of their own so they never disturb
+    # a user's Cmd+click; answers queue in arrival order.
+    var _libprobe_ids: List[String]
+    var _libprobe_words: List[String]
+    var _libprobe_tags: List[Int]
+    var _libprobe_sent_ms: List[Int]
+    var _libprobe_done: List[LibraryProbe]
     # ``textDocument/prepareRename`` round-trip that gates the rename
     # flow. ``_prepare_rename_state``: 0 = unsupported / errored (host
     # falls back to a direct prompt), 1 = renameable (seed prompt with
@@ -1107,6 +1131,11 @@ struct LspManager(Copyable, Movable):
         self._nav_word = String("")
         self._resolved_nav = Optional[DefinitionResolved]()
         self._has_resolved_nav = False
+        self._libprobe_ids = List[String]()
+        self._libprobe_words = List[String]()
+        self._libprobe_tags = List[Int]()
+        self._libprobe_sent_ms = List[Int]()
+        self._libprobe_done = List[LibraryProbe]()
         self._inflight_prepare_rename_id = String("")
         self._has_resolved_prepare_rename = False
         self._prepare_rename_state = 0
@@ -1303,6 +1332,11 @@ struct LspManager(Copyable, Movable):
         self._nav_word = String("")
         self._resolved_nav = Optional[DefinitionResolved]()
         self._has_resolved_nav = False
+        self._libprobe_ids = List[String]()
+        self._libprobe_words = List[String]()
+        self._libprobe_tags = List[Int]()
+        self._libprobe_sent_ms = List[Int]()
+        self._libprobe_done = List[LibraryProbe]()
         self._inflight_prepare_rename_id = String("")
         self._has_resolved_prepare_rename = False
         self._prepare_rename_state = 0
@@ -2441,6 +2475,72 @@ struct LspManager(Copyable, Movable):
         self._resolved_nav = Optional[DefinitionResolved]()
         self._has_resolved_nav = False
         return out
+
+    # --- library-word probe ----------------------------------------------
+
+    def request_library_probe(
+        mut self, path: String, line: Int, character: Int,
+        var word: String, var text: String, tag: Int, limit: Int = 1,
+    ) -> Bool:
+        """Ask for the definition of ``word`` at ``(line, character)``
+        in the background, to learn whether it's a library symbol.
+        ``tag`` comes back with the answer (who asked). False while
+        ``limit`` probes are already in flight or the server isn't
+        ready."""
+        if self.state != _STATE_READY or len(self._libprobe_ids) >= limit:
+            return False
+        self._send_open_or_change(path, text^)
+        var params = _text_document_position_params(path, line, character)
+        var id: String
+        try:
+            id = self._send_request(String("textDocument/definition"), params)
+        except:
+            return False
+        self._libprobe_ids.append(id^)
+        self._libprobe_words.append(word^)
+        self._libprobe_tags.append(tag)
+        self._libprobe_sent_ms.append(monotonic_ms())
+        return True
+
+    def library_probes_inflight(self) -> Int:
+        return len(self._libprobe_ids)
+
+    def library_probes_inflight_tagged(self, tag: Int) -> Int:
+        var n = 0
+        for i in range(len(self._libprobe_tags)):
+            if self._libprobe_tags[i] == tag:
+                n += 1
+        return n
+
+    def has_library_probe(self) -> Bool:
+        """True iff a probe's answer is parked."""
+        return len(self._libprobe_done) > 0
+
+    def take_library_probe(mut self) -> LibraryProbe:
+        """Move out the oldest parked answer."""
+        return self._libprobe_done.pop(0)
+
+    def _expire_library_probes(mut self):
+        """Give up on probes the server hasn't answered in time, so a
+        wedged server can't stall Project ▸ Spelling's library check."""
+        var now = monotonic_ms()
+        var i = 0
+        while i < len(self._libprobe_ids):
+            if now - self._libprobe_sent_ms[i] < _LIBPROBE_TIMEOUT_MS:
+                i += 1
+                continue
+            _ = self._libprobe_ids.pop(i)
+            _ = self._libprobe_sent_ms.pop(i)
+            self._libprobe_done.append(LibraryProbe(
+                self._libprobe_words.pop(i), Optional[DefinitionResolved](),
+                self._libprobe_tags.pop(i), False,
+            ))
+
+    def _libprobe_slot(self, id: String) -> Int:
+        for i in range(len(self._libprobe_ids)):
+            if self._libprobe_ids[i] == id:
+                return i
+        return -1
 
     # --- prepareRename ----------------------------------------------------
 
@@ -3976,6 +4076,7 @@ struct LspManager(Copyable, Movable):
         # far enough in the future that the server has already given
         # up.
         self.client.process.pump_writes()
+        self._expire_library_probes()
         # If the outbound queue overflowed, the server isn't draining
         # its stdin and we've lost framing alignment — there's no
         # recovery short of restarting. Latch FAILED so the host
@@ -4277,6 +4378,18 @@ struct LspManager(Copyable, Movable):
                 self._resolved_nav = nav
                 self._has_resolved_nav = True
                 self._inflight_nav_id = String("")
+                continue
+            var lp_slot = self._libprobe_slot(id)
+            if lp_slot >= 0:
+                var probe = Optional[DefinitionResolved]()
+                if msg.result:
+                    probe = _parse_definition_result(msg.result.value())
+                _ = self._libprobe_ids.pop(lp_slot)
+                _ = self._libprobe_sent_ms.pop(lp_slot)
+                self._libprobe_done.append(LibraryProbe(
+                    self._libprobe_words.pop(lp_slot), probe,
+                    self._libprobe_tags.pop(lp_slot), True,
+                ))
                 continue
             if id == self._inflight_prepare_rename_id:
                 # Success with a range/placeholder → renameable (1);

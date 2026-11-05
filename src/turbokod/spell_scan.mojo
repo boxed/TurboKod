@@ -19,6 +19,7 @@ uninitialized runtime. Without syntax highlighting the scan is cheap
 enough not to need threads.
 """
 
+from std.collections.dict import Dict
 from std.collections.list import List
 
 from .case_fold import fold_ascii
@@ -84,6 +85,19 @@ struct SpellScanWord(ImplicitlyCopyable, Movable):
     var path: String
     """Where the word was first seen (1-based ``line``)."""
     var line: Int
+
+
+comptime SPELL_SCAN_KEPT_OCCURRENCES = 3
+"""Occurrences kept per word — the ones the library check asks the
+language server about (``Desktop._library_check_step``)."""
+
+
+@fieldwise_init
+struct SpellOccurrence(ImplicitlyCopyable, Movable):
+    """Where a flagged word was seen: 0-based ``row``, byte ``col``."""
+    var path: String
+    var row: Int
+    var col: Int
 
 
 def _grouping_word(word: String) -> String:
@@ -209,6 +223,9 @@ struct ProjectSpellScan(Movable):
     """Files actually spell-checked (skipped binaries / big files excluded)."""
     var active: Bool
     var words: List[SpellScanWord]
+    var occurrences: List[List[SpellOccurrence]]
+    """Parallel to ``words``: its first ``SPELL_SCAN_KEPT_OCCURRENCES``
+    occurrences, on different lines."""
     var version: Int
     var _buckets: List[List[Int]]
 
@@ -221,6 +238,7 @@ struct ProjectSpellScan(Movable):
         self.files_checked = 0
         self.active = False
         self.words = List[SpellScanWord]()
+        self.occurrences = List[List[SpellOccurrence]]()
         self.version = 0
         self._buckets = List[List[Int]]()
         for _ in range(Int(_N_BUCKETS)):
@@ -247,6 +265,7 @@ struct ProjectSpellScan(Movable):
         self.files_checked = 0
         self.active = True
         self.words = List[SpellScanWord]()
+        self.occurrences = List[List[SpellOccurrence]]()
         self.version += 1
         for i in range(len(self._buckets)):
             self._buckets[i] = List[Int]()
@@ -287,7 +306,7 @@ struct ProjectSpellScan(Movable):
                     String(StringSpan(
                         unsafe_from_utf8=lb[spans[i][1]:spans[i][2]],
                     )),
-                    path, spans[i][0] + 1,
+                    path, spans[i][0], spans[i][1],
                 )
             self.files_checked += 1
             if monotonic_ms() >= deadline:
@@ -301,23 +320,24 @@ struct ProjectSpellScan(Movable):
         """Drop the rows for ``keys`` — they were just added to a
         dictionary, so they no longer misspell. Later occurrences are
         already filtered by the speller itself."""
+        var gone = Dict[String, Bool]()
+        for k in range(len(keys)):
+            gone[keys[k]] = True
         var kept = List[SpellScanWord]()
+        var kept_occ = List[List[SpellOccurrence]]()
         for i in range(len(self.words)):
-            var drop = False
-            for k in range(len(keys)):
-                if self.words[i].key == keys[k]:
-                    drop = True
-                    break
-            if not drop:
+            if self.words[i].key not in gone:
                 kept.append(self.words[i])
+                kept_occ.append(self.occurrences[i].copy())
         self.words = kept^
+        self.occurrences = kept_occ^
         for i in range(len(self._buckets)):
             self._buckets[i] = List[Int]()
         for i in range(len(self.words)):
             self._buckets[_bucket(self.words[i].key)].append(i)
         self.version += 1
 
-    def _record(mut self, word: String, path: String, line: Int):
+    def _record(mut self, word: String, path: String, row: Int, col: Int):
         var shown = _grouping_word(word)
         var key = spell_key(shown)
         var b = _bucket(key)
@@ -326,9 +346,17 @@ struct ProjectSpellScan(Movable):
             if self.words[idx].key == key:
                 self.words[idx].count += 1
                 self.version += 1
+                ref occ = self.occurrences[idx]
+                if len(occ) < SPELL_SCAN_KEPT_OCCURRENCES:
+                    var last = occ[len(occ) - 1]
+                    if last.path != path or last.row != row:
+                        occ.append(SpellOccurrence(path, row, col))
                 return
         self._buckets[b].append(len(self.words))
-        self.words.append(SpellScanWord(shown, key, 1, path, line))
+        self.words.append(SpellScanWord(shown, key, 1, path, row + 1))
+        var occ = List[SpellOccurrence]()
+        occ.append(SpellOccurrence(path, row, col))
+        self.occurrences.append(occ^)
         self.version += 1
 
 

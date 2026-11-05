@@ -522,6 +522,49 @@ def test_spec_shape_definition_accepts_every_variant() raises:
     m.shutdown()
 
 
+def test_library_probe_parks_word_and_location() raises:
+    """The background library-word probes are definition requests in
+    slots of their own: up to ``limit`` in flight, and each answer comes
+    back with the word and tag it was sent with — without disturbing
+    Cmd+click's slot."""
+    var dir = _scratch_dir(String("libprobe"))
+    var path = dir + String("/emdash.py")
+    var text = _emdash_buffer()
+    assert_true(write_file(path, text))
+    var m = LspManager()
+    if not _start_mock(
+        m, String("shapes_definition_variants.json"), dir, String(""),
+    ):
+        return
+    assert_true(m.request_library_probe(
+        path, 1, 17, String("target"), text, 1, 2,
+    ))
+    assert_true(m.request_library_probe(
+        path, 1, 17, String("second"), text, 0, 2,
+    ))
+    assert_equal(m.library_probes_inflight(), 2)
+    assert_equal(m.library_probes_inflight_tagged(1), 1)
+    assert_false(m.request_library_probe(
+        path, 1, 17, String("third"), text, 1, 2,
+    ))
+    _pump(m)
+    assert_equal(m.library_probes_inflight(), 0)
+    var words = List[String]()
+    while m.has_library_probe():
+        var got = m.take_library_probe()
+        assert_true(got.answered)
+        assert_true(Bool(got.location))
+        assert_equal(got.location.value().path, path)
+        if got.word == String("target"):
+            assert_equal(got.tag, 1)
+        else:
+            assert_equal(got.tag, 0)
+        words.append(got.word)
+    assert_equal(len(words), 2)
+    assert_equal(m.inflight_word(), String(""))
+    m.shutdown()
+
+
 def test_spec_shape_hover_markup_content() raises:
     """``Hover.contents`` as ``MarkupContent`` — the modern form."""
     var dir = _scratch_dir(String("shape_hov"))

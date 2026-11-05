@@ -44,6 +44,40 @@ def user_dict_path() -> String:
     return user_config_path(String("dictionary.txt"))
 
 
+def library_words_path() -> String:
+    """``~/.config/turbokod/library_words.txt``, or ``""`` when ``$HOME``
+    is unset. Identifiers the language server resolved to a definition in
+    a library or the standard library (``shutil``, ``rmtree``), learned
+    automatically so they aren't flagged; see
+    ``Desktop._maybe_probe_library_word``. Same format as the user
+    dictionary, and like it shared by every project."""
+    return user_config_path(String("library_words.txt"))
+
+
+def is_library_location(path: String, project_root: String) -> Bool:
+    """Whether a definition at ``path`` belongs to a library rather than
+    to the project: outside ``project_root``, or inside it under a
+    dependency directory (a virtualenv, ``node_modules``, a pixi
+    environment). False with no project, where there's no telling."""
+    if len(project_root.as_bytes()) == 0 or len(path.as_bytes()) == 0:
+        return False
+    var prefix = project_root
+    if not prefix.endswith("/"):
+        prefix = prefix + String("/")
+    if not path.startswith(prefix):
+        return True
+    var rel = byte_slice(path, len(prefix.as_bytes()), len(path.as_bytes()))
+    var parts = rel.split("/")
+    for i in range(len(parts) - 1):
+        var part = String(parts[i])
+        if part == "site-packages" or part == "dist-packages" \
+                or part == "node_modules" or part == ".venv" \
+                or part == "venv" or part == ".pixi" or part == ".tox" \
+                or part == "typeshed":
+            return True
+    return False
+
+
 def project_dict_path(project_root: String) -> String:
     """``<project>/.turbokod/dictionary.txt``, or ``""`` when no project
     is open. Sits beside ``targets.json`` (and the ``per_user/`` subtree
@@ -151,6 +185,8 @@ struct Speller(Movable):
         3. User-installed extra-language dictionaries under
            ``~/.config/turbokod/dictionaries/`` (German, Swedish, …).
         4. The user dictionary — words the user has explicitly added.
+        5. Library words — identifiers learned from the language
+           servers (``library_words_path``).
 
         Each layer is best-effort; missing files are skipped silently.
         ``loaded`` flips True if *anything* loaded — when nothing did,
@@ -177,18 +213,20 @@ struct Speller(Movable):
                 continue
         self._load_bundled_wordlists()
         self._load_user_language_dictionaries()
-        var udp = user_dict_path()
-        if len(udp.as_bytes()) > 0:
-            try:
-                var content = read_file(udp)
-                if len(content.as_bytes()) > 0:
-                    var lines = split_lines_no_trailing(content)
-                    self._load_words(lines)
-            except e:
-                # User dictionary is optional; a missing/unreadable
-                # file is the common case. Log so a permission flap
-                # is debuggable.
-                print("spell: load user_dict_path", udp, ":", String(e))
+        self._load_user_wordlist(user_dict_path())
+        self._load_user_wordlist(library_words_path())
+
+    def _load_user_wordlist(mut self, path: String):
+        if len(path.as_bytes()) == 0 or not stat_file(path).ok:
+            return
+        try:
+            var content = read_file(path)
+            if len(content.as_bytes()) > 0:
+                var lines = split_lines_no_trailing(content)
+                self._load_words(lines)
+        except e:
+            # Log so a permission flap is debuggable.
+            print("spell: load", path, ":", String(e))
 
     def reload(mut self):
         """Drop the in-memory main bucket set and re-run ``load_default``.
@@ -382,6 +420,14 @@ struct Speller(Movable):
         Returns False when the word can't be persisted (e.g. ``$HOME``
         unset); the in-memory addition still happens so the underline
         goes away for the rest of the session."""
+        return self._add_global_word(word, user_dict_path())
+
+    def add_library_word(mut self, word: String) -> Bool:
+        """Learn ``word`` as a library identifier: in memory and appended
+        to ``library_words_path()``. Same contract as ``add_user_word``."""
+        return self._add_global_word(word, library_words_path())
+
+    def _add_global_word(mut self, word: String, path: String) -> Bool:
         var lw = _normalize(word)
         if len(lw.as_bytes()) == 0:
             return False
@@ -391,7 +437,6 @@ struct Speller(Movable):
         var b = _bucket(lw)
         self.buckets[b].append(lw)
         self.version += 1
-        var path = user_dict_path()
         if len(path.as_bytes()) == 0:
             return False
         return _append_to_file(path, lw)

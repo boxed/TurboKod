@@ -24,6 +24,7 @@ don't re-detect. Closing the project (via the right-aligned project menu)
 clears the state and makes the next file open eligible to set it again.
 """
 
+from std.collections.dict import Dict
 from std.collections.list import List
 from std.collections.optional import Optional
 
@@ -121,7 +122,8 @@ from .highlight import (
     HoverRequest, diff_row_highlights, embedded_language_extensions,
     extension_of, template_include_at, word_at,
 )
-from .spell import Speller
+from .library_words import LibraryNegatives
+from .spell import Speller, is_library_location, spell_key
 from .spell_menu import (
     SPELL_ACTION_ADD_PROJECT, SPELL_ACTION_ADD_USER, SpellMenu,
 )
@@ -164,7 +166,8 @@ from .language_config import (
     find_language_for_extension, LanguageSpec,
 )
 from .lsp_dispatch import (
-    CodeAction, CodeActionFileEdit, DefinitionResolved, LspManager,
+    CodeAction, CodeActionFileEdit, DefinitionResolved, LibraryProbe,
+    LspManager,
     TextEditEntry, WorkspaceSymbolItem, uri_to_path,
 )
 from .dap_dispatch import (
@@ -477,6 +480,17 @@ comptime PROJECT_CLOSE_ACTION = String("project:close")
 comptime PROJECT_TREE_ACTION  = String("project:tree:toggle")
 comptime PROJECT_SETTINGS = String("project:settings")
 comptime PROJECT_SPELLING = String("project:spelling")
+
+comptime _LIBPROBE_EDITOR = 0
+comptime _LIBPROBE_DIALOG = 1
+"""Who sent a library-word probe: the focused editor's sweep or
+Project ▸ Spelling's library check."""
+comptime _LIBPROBE_TRIES = 3
+"""Occurrences of a word the editor asks about before ruling it out."""
+comptime _LIBPROBE_EDITOR_LIMIT = 1
+comptime _LIBPROBE_DIALOG_LIMIT = 8
+"""Probes in flight per server: the editor's sweep trickles, the
+library check pipelines."""
 # Direct-pick recent-project menu entries. ``PROJECT_OPEN_RECENT_PREFIX
 # + <path>`` carries the project root itself, not its slot in
 # ``config.recent_projects``. An index used to be enough — until the
@@ -1408,6 +1422,19 @@ struct Desktop(Movable):
     # Project ▸ Spelling: the project-wide misspelling list. Owns its
     # scan, which ``paint`` advances a frame's budget at a time.
     var spelling_dialog: SpellingDialog
+    # Library-word probing (``_maybe_probe_library_word``): how many
+    # times this session each flagged word (by ``spell_key``) was asked
+    # about, and the focused buffer's state when a sweep last found
+    # nothing left to ask. ``_libprobe_seen`` holds the occurrences
+    # (``path|row|col``) already asked about. ``library_negatives`` is
+    # the project's persisted "not a library name" list;
+    # ``_libprobe_docs`` the file (by language id) Project ▸ Spelling's
+    # library check has open on that server without an editor.
+    var _libprobe_tries: Dict[String, Int]
+    var _libprobe_seen: Dict[String, Bool]
+    var _libprobe_key: String
+    var library_negatives: LibraryNegatives
+    var _libprobe_docs: Dict[String, String]
     # Language ids we've already prompted-to-install for in this session.
     # The prompt is one-shot per language: once the user says yes or no,
     # opening another file of the same language doesn't re-nag.
@@ -1960,6 +1987,11 @@ struct Desktop(Movable):
         self.fill_dialog = FillDialog()
         self.find_dialog = FindDialog()
         self.spelling_dialog = SpellingDialog()
+        self._libprobe_tries = Dict[String, Int]()
+        self._libprobe_seen = Dict[String, Bool]()
+        self._libprobe_key = String("")
+        self.library_negatives = LibraryNegatives()
+        self._libprobe_docs = Dict[String, String]()
         self._lsp_install_prompted = List[String]()
         self._venv_lsp_installed = List[String]()
         self._debugpy_install_prompted = List[String]()
@@ -6022,6 +6054,7 @@ struct Desktop(Movable):
         # What's still unsaved (a save failed, or auto-save is off and
         # quitting can't ask) goes with the drafts, back next time
         self._save_drafts_if_changed(True)
+        self.library_negatives.flush()
         for i in range(len(self.lsp_managers)):
             self.lsp_managers[i].begin_shutdown()
         for i in range(len(self._closing_lsp)):
@@ -6580,6 +6613,14 @@ struct Desktop(Movable):
         self.config.area_font_sizes[slot] = v
         self.font_version += 1
 
+    def _code_anchor(self, idx: Int, p: Point) -> Point:
+        """Where on the screen a popup anchored at ``p`` goes, ``p`` being
+        a point editor ``idx`` reported in its own cells (they're the
+        screen's unless the code font has a size of its own)."""
+        if idx < 0 or idx >= len(self.windows.windows):
+            return p
+        return self.windows.windows[idx].code_to_screen(p)
+
     def set_area_scale(mut self, slot: Int, w_milli: Int, h_milli: Int):
         """The host's measure of area ``slot``'s cell, in thousandths of
         the screen's cell (``SCALE_ONE`` for the same size)."""
@@ -6587,6 +6628,10 @@ struct Desktop(Movable):
             return
         self.area_scale[2 * slot] = max(1, w_milli)
         self.area_scale[2 * slot + 1] = max(1, h_milli)
+        if slot == Int(FONT_CODE):
+            self.windows.set_code_scale(
+                self.area_scale[2 * slot], self.area_scale[2 * slot + 1],
+            )
 
     def frame_canvas(self, cols: Int, rows: Int) -> Canvas:
         """A blank ``cols`` x ``rows`` canvas for one frame, carrying the
@@ -6613,14 +6658,6 @@ struct Desktop(Movable):
         re-ordered the candidate list in the Languages settings),
         shut it down, drop it, and re-attach the editors of that
         language so a fresh manager is spawned with the new binary."""
-    def _code_anchor(self, idx: Int, p: Point) -> Point:
-        """Where on the screen a popup anchored at ``p`` goes, ``p`` being
-        a point editor ``idx`` reported in its own cells (they're the
-        screen's unless the code font has a size of its own)."""
-        if idx < 0 or idx >= len(self.windows.windows):
-            return p
-        return self.windows.windows[idx].code_to_screen(p)
-
         self.lsp_specs = apply_language_overrides(
             built_in_servers(), self.config.language_servers,
         )
@@ -6628,10 +6665,6 @@ struct Desktop(Movable):
         # pops it from the parallel lists and (via _retry_lsp_for_language)
         # appends a new one at the end, so iterating live would either
         # skip entries or recheck the freshly-spawned replacement.
-        if slot == Int(FONT_CODE):
-            self.windows.set_code_scale(
-                self.area_scale[2 * slot], self.area_scale[2 * slot + 1],
-            )
         var langs_snapshot = self.lsp_languages.copy()
         for s in range(len(langs_snapshot)):
             var lang = langs_snapshot[s]
@@ -6698,6 +6731,7 @@ struct Desktop(Movable):
         self.project = Optional[String]()
         self._pytest_file_globs = List[String]()
         self.speller.set_project(String(""))
+        self.library_negatives.set_project(String(""))
         self.file_tree.close()
         # The git view is the project's: a non-modal one (``git_windowed``)
         # can still be up when the project closes.
@@ -7157,6 +7191,7 @@ struct Desktop(Movable):
         # dictionaries (.turbokod/dictionary.txt + .idea/dictionaries/*.xml)
         # so the team's shared vocabulary doesn't trigger spell flags.
         self.speller.set_project(canonical)
+        self.library_negatives.set_project(canonical)
         # Seed the DAP manager from the per-user breakpoints file. We
         # do this here (rather than lazily on first F5) so the gutter
         # already shows red dots before the user starts a session, and
@@ -11107,6 +11142,9 @@ struct Desktop(Movable):
             self._maybe_request_folding(idx)
             self._maybe_request_inlay_codelens(idx)
             self._maybe_request_completion_resolve(idx)
+            self._maybe_probe_library_word(idx)
+        self._library_check_step()
+        self.library_negatives.tick()
         # Drain every spawned manager every frame so responses on any
         # language server make progress regardless of which file is
         # focused.
@@ -11136,6 +11174,8 @@ struct Desktop(Movable):
                         # with the stale "no definition found" one on
                         # the next tick.
                         self.lsp_managers[i].clear_empty()
+            while self.lsp_managers[i].has_library_probe():
+                self._on_library_probe(self.lsp_managers[i].take_library_probe())
             # Server-driven window/showMessageRequest → modal. One at a
             # time across all managers; a second request stays parked in
             # its manager until the first is answered.
@@ -11648,6 +11688,196 @@ struct Desktop(Movable):
         self._selrange_pos = key
         var text = self.windows.windows[win_idx].editor.text_snapshot()
         _ = self.lsp_managers[li].request_selection_range(path, row, col, text^)
+
+    def _maybe_probe_library_word(mut self, win_idx: Int):
+        """Ask the language server where one flagged word of the focused
+        buffer is defined, so ``_on_library_probe`` can learn the
+        library's identifiers (``shutil``, ``rmtree``) and stop flagging
+        them. One probe in flight per server, a word asked about at up to
+        three occurrences a session (the first may be in a comment), and
+        both answers persist — learned words in ``library_words.txt``,
+        ruled-out ones in ``library_negatives`` — so a word costs a
+        request once, not on every check. The word under the caret is
+        skipped: it's probably still being typed."""
+        if not self.project:
+            return
+        var path = self._editor_path_at(win_idx)
+        if len(path.as_bytes()) == 0:
+            return
+        var li = self._ready_lsp_for_path(path, String("definitionProvider"))
+        if li < 0 or self.lsp_managers[li].library_probes_inflight_tagged(
+            _LIBPROBE_EDITOR,
+        ) > 0:
+            return
+        ref ed = self.windows.windows[win_idx].editor
+        var crow = ed.selections[0].row
+        var ccol = ed.selections[0].col
+        var key = path + String("|") + String(ed.change_count) \
+            + String("|") + String(self.speller.version) \
+            + String("|") + String(len(ed.spell_highlights)) \
+            + String("|") + String(crow) \
+            + String("|") + String(ccol)
+        if key == self._libprobe_key:
+            return
+        for k in range(len(ed.spell_highlights)):
+            var h = ed.spell_highlights[k]
+            if h.row == crow and h.col_start <= ccol \
+                    and ccol <= h.col_end:
+                continue
+            if h.row >= ed.buffer.line_count():
+                continue
+            var word = byte_slice(ed.buffer.line(h.row), h.col_start, h.col_end)
+            var wk = spell_key(word)
+            var tries = self._libprobe_tries.get(wk, 0)
+            if tries >= _LIBPROBE_TRIES or self.library_negatives.contains(wk):
+                continue
+            var at = path + String("|") + String(h.row) + String("|") \
+                + String(h.col_start)
+            if at in self._libprobe_seen:
+                continue
+            var text = ed.text_snapshot()
+            if not self.lsp_managers[li].request_library_probe(
+                path, h.row, h.col_start, word^, text^, _LIBPROBE_EDITOR,
+                _LIBPROBE_EDITOR_LIMIT,
+            ):
+                return
+            self._libprobe_seen[at] = True
+            self._libprobe_tries[wk] = tries + 1
+            return
+        self._libprobe_key = key
+
+    def _on_library_probe(mut self, var probe: LibraryProbe):
+        """A probe's answer. Defined in a library: learn the word, drop it
+        from Project ▸ Spelling and re-check every editor. Defined in the
+        project, or found nowhere at ``_LIBPROBE_TRIES`` occurrences (or
+        at every occurrence Project ▸ Spelling has): rule it out for good.
+        No answer at all says nothing."""
+        var key = spell_key(probe.word)
+        var from_dialog = probe.tag == _LIBPROBE_DIALOG \
+            and self.spelling_dialog.active
+        if not self.project:
+            return
+        if not probe.answered:
+            if from_dialog:
+                self.spelling_dialog.library_skip(key)
+            return
+        if probe.location and is_library_location(
+            probe.location.value().path, self.project.value(),
+        ):
+            _ = self.speller.add_library_word(probe.word)
+            self._libprobe_tries[key] = _LIBPROBE_TRIES
+            if from_dialog:
+                _ = self.spelling_dialog.library_result(key, True)
+            for i in range(len(self.windows.windows)):
+                if self.windows.windows[i].is_editor:
+                    self.windows.windows[i].editor.invalidate_spell()
+            return
+        var ruled_out = Bool(probe.location)
+        if probe.tag == _LIBPROBE_EDITOR \
+                and self._libprobe_tries.get(key, 0) >= _LIBPROBE_TRIES:
+            ruled_out = True
+        if from_dialog and self.spelling_dialog.library_result(key, False):
+            ruled_out = True
+        if ruled_out:
+            self._libprobe_tries[key] = _LIBPROBE_TRIES
+            self.library_negatives.add(key)
+
+    def _library_check_step(mut self):
+        """Drive Project ▸ Spelling's library check: once its scan is done,
+        look up its words' occurrences with the language server for each
+        file's language (starting one if needed), several in flight at a
+        time. The jobs come grouped by file; a file without an editor is
+        opened on the server for its lookups and closed when they move on
+        (``_libprobe_docs``) — after its in-flight ones are answered."""
+        if not self.spelling_dialog.active:
+            self._release_libprobe_docs()
+            return
+        if self.spelling_dialog.library_check_due():
+            self.spelling_dialog.start_library_check(self.library_negatives)
+        while True:
+            var job_opt = self.spelling_dialog.peek_library_job()
+            if not job_opt:
+                self._release_libprobe_docs()
+                return
+            var job = job_opt.value()
+            if self.speller.check_word(job.word):
+                # Learned meanwhile (an editor's probe).
+                self.spelling_dialog.pop_library_job()
+                _ = self.spelling_dialog.library_result(job.key, True)
+                continue
+            var li = self._ensure_lsp_for_extension(extension_of(job.at.path))
+            if li >= 0 and self.lsp_managers[li].is_initializing():
+                return
+            if li < 0 or not self.lsp_managers[li].is_ready() \
+                    or not self.lsp_managers[li].server_supports(
+                        String("definitionProvider"),
+                    ):
+                self.spelling_dialog.pop_library_job()
+                self.spelling_dialog.library_skip(job.key)
+                continue
+            var lang = self.lsp_languages[li]
+            var scratch = self._libprobe_docs.get(lang, String(""))
+            if scratch != job.at.path and len(scratch.as_bytes()) > 0:
+                if self.lsp_managers[li].library_probes_inflight_tagged(
+                    _LIBPROBE_DIALOG,
+                ) > 0:
+                    return
+                self._release_libprobe_doc(li, scratch)
+                try:
+                    _ = self._libprobe_docs.pop(lang)
+                except:
+                    pass
+            if self.lsp_managers[li].library_probes_inflight() \
+                    >= _LIBPROBE_DIALOG_LIMIT:
+                return
+            var win = self._find_window_for_path(job.at.path)
+            var text: String
+            if win >= 0:
+                text = self.windows.windows[win].editor.text_snapshot()
+            else:
+                try:
+                    text = read_file(job.at.path)
+                except:
+                    text = String("")
+            var lines = split_lines_no_trailing(text)
+            var end = job.at.col + len(job.word.as_bytes())
+            if job.at.row >= len(lines) or byte_slice(
+                lines[job.at.row], job.at.col, end,
+            ) != job.word:
+                # The file changed since the scan read it.
+                self.spelling_dialog.pop_library_job()
+                self.spelling_dialog.library_skip(job.key)
+                continue
+            if win < 0:
+                self._libprobe_docs[lang] = job.at.path
+            if not self.lsp_managers[li].request_library_probe(
+                job.at.path, job.at.row, job.at.col, job.word, text^,
+                _LIBPROBE_DIALOG, _LIBPROBE_DIALOG_LIMIT,
+            ):
+                return
+            self.spelling_dialog.pop_library_job()
+
+    def _release_libprobe_doc(mut self, li: Int, path: String):
+        """Close ``path`` on server ``li`` unless an editor has it open."""
+        if self._find_window_for_path(path) < 0:
+            self.lsp_managers[li].notify_closed(path)
+
+    def _release_libprobe_docs(mut self):
+        if len(self._libprobe_docs) == 0:
+            return
+        for i in range(len(self.lsp_languages)):
+            var path = self._libprobe_docs.get(
+                self.lsp_languages[i], String(""),
+            )
+            if len(path.as_bytes()) > 0 \
+                    and self.lsp_managers[i].library_probes_inflight_tagged(
+                        _LIBPROBE_DIALOG,
+                    ) == 0:
+                self._release_libprobe_doc(i, path)
+                try:
+                    _ = self._libprobe_docs.pop(self.lsp_languages[i])
+                except:
+                    pass
 
     def _maybe_request_folding(mut self, win_idx: Int):
         """Request ``foldingRange`` for the focused buffer when the debounce
@@ -18248,6 +18478,9 @@ struct Desktop(Movable):
             ax = interior.a.x
         if ay < interior.a.y:
             ay = interior.a.y
+        var spell_at = self._code_anchor(idx, Point(ax, ay))
+        ax = spell_at.x
+        ay = spell_at.y
         # ``self.project`` is an ``Optional[String]`` — its truthiness
         # tells us whether a project root is set. ``Speller.add_project_word``
         # is gated on the same ``project_root``, so this is the right
@@ -18304,10 +18537,14 @@ struct Desktop(Movable):
 
     def has_background_work(self) -> Bool:
         """True while frame-sliced work is running that the user is
-        waiting on (the Project ▸ Spelling scan). The terminal loops
-        poll for input without a timeout while this holds, so the work
-        advances every frame instead of once per 50 ms idle wait."""
-        return self.spelling_dialog.active and self.spelling_dialog.scan.active
+        waiting on (the Project ▸ Spelling scan and its library check).
+        The terminal loops poll for input without a timeout while this
+        holds, so the work advances every frame instead of once per 50 ms
+        idle wait."""
+        return self.spelling_dialog.active and (
+            self.spelling_dialog.scan.active
+            or self.spelling_dialog.library_checking()
+        )
 
     def _open_spelling_dialog(mut self):
         """Project ▸ Spelling: scan every project file for words the
@@ -18478,9 +18715,6 @@ struct Desktop(Movable):
             # can paste from the clipboard into their own terminal.
             # ``_pending_arg`` carries the language id for the spec lookup.
             var lang = self._pending_arg
-        var spell_at = self._code_anchor(idx, Point(ax, ay))
-        ax = spell_at.x
-        ay = spell_at.y
             self._pending_arg = String("")
             if yes:
                 var spec_idx = find_language_by_id(self.lsp_specs, lang)

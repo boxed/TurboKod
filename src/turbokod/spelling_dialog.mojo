@@ -13,6 +13,13 @@ The list is a ``UI_MULTI`` list: a Shift range, or words picked one by
 one with Cmd-click. Rows move whenever the list re-sorts, so the
 selection is kept as word *keys* (and the caret and range anchor as the
 words they're on), turned into row numbers for each frame's tree.
+When the scan is done, a library check runs (the host drives it —
+``Desktop._library_check_step``): each word not already ruled out is
+looked up with the language server at up to three occurrences, and a word
+defined in a library is learned (``Speller.add_library_word``) and drops
+off the list. Both answers are remembered (``library_words.mojo``), so a
+second run only asks about words it hasn't seen.
+
 "Add to Project" / "Add to User" hand the selected words to the host
 (``submitted`` + ``action``), which writes them to the dictionary and
 calls ``acknowledge`` so the rows disappear.
@@ -22,8 +29,11 @@ from std.collections.dict import Dict
 from std.collections.list import List
 
 from .file_io import project_relative
+from std.collections.optional import Optional
+
+from .library_words import LibraryNegatives
 from .spell import Speller
-from .spell_scan import ProjectSpellScan, SpellScanWord
+from .spell_scan import ProjectSpellScan, SpellOccurrence, SpellScanWord
 from .ui_tree import (
     ListWindow, UI_CANCEL, UI_DISABLED, UI_LARGE, UI_MULTI, UI_SECONDARY,
     UINode, ui_button, ui_buttons, ui_dialog, ui_int, ui_label, ui_list,
@@ -41,6 +51,14 @@ comptime _SCAN_BUDGET_MS = 40
 terminal loops stop waiting on input while a scan runs — see
 ``Desktop.has_background_work``), so this leaves room for input and
 paint while giving the scan most of the frame."""
+
+
+@fieldwise_init
+struct LibraryCheckJob(ImplicitlyCopyable, Movable):
+    """One occurrence of a flagged word to look up."""
+    var key: String
+    var word: String
+    var at: SpellOccurrence
 
 
 struct SpellingDialog(Movable):
@@ -66,6 +84,20 @@ struct SpellingDialog(Movable):
     var has_project: Bool
     var root: String
     """The project root, for showing where a word was first seen."""
+    var library_check: Bool
+    """Run the library check after the scan (off in tests that only
+    exercise the scan)."""
+    var _lib_started: Bool
+    var _lib_jobs: List[LibraryCheckJob]
+    """Grouped by file, so consecutive lookups share an opened document."""
+    var _lib_next: Int
+    var _lib_left: Dict[String, Int]
+    """Jobs not yet answered, per word."""
+    var _lib_incomplete: Dict[String, Bool]
+    """Words with an occurrence that couldn't be looked up (no server)."""
+    var _lib_hit: Dict[String, Bool]
+    var _lib_found: List[String]
+    """Words learned as library names, dropped from the list next tick."""
 
     def __init__(out self):
         self.active = False
@@ -82,6 +114,14 @@ struct SpellingDialog(Movable):
         self.window = ListWindow()
         self.has_project = False
         self.root = String("")
+        self.library_check = True
+        self._lib_started = False
+        self._lib_jobs = List[LibraryCheckJob]()
+        self._lib_next = 0
+        self._lib_left = Dict[String, Int]()
+        self._lib_incomplete = Dict[String, Bool]()
+        self._lib_hit = Dict[String, Bool]()
+        self._lib_found = List[String]()
 
     def open(
         mut self, var files: List[String], has_project: Bool,
@@ -94,6 +134,7 @@ struct SpellingDialog(Movable):
         self.has_project = has_project
         self.root = root
         self.scan.start(files^)
+        self._reset_library_check()
         self.order = List[Int]()
         self._sorted_version = -1
         self._clear_selection()
@@ -104,6 +145,7 @@ struct SpellingDialog(Movable):
         self.submitted = False
         self.action = SPELLING_NONE
         self.scan.cancel()
+        self._reset_library_check()
         self.order = List[Int]()
         self._clear_selection()
 
@@ -114,8 +156,103 @@ struct SpellingDialog(Movable):
             return
         if self.scan.active:
             _ = self.scan.step(_SCAN_BUDGET_MS, speller)
+        if len(self._lib_found) > 0:
+            # ``order`` indexes the list ``remove_keys`` shrinks.
+            self.order = List[Int]()
+            self.scan.remove_keys(self._lib_found)
+            self._lib_found = List[String]()
         if self._sorted_version != self.scan.version:
             self._resort()
+
+    # --- library check ----------------------------------------------------
+
+    def _reset_library_check(mut self):
+        self._lib_started = False
+        self._lib_jobs = List[LibraryCheckJob]()
+        self._lib_next = 0
+        self._lib_left = Dict[String, Int]()
+        self._lib_incomplete = Dict[String, Bool]()
+        self._lib_hit = Dict[String, Bool]()
+        self._lib_found = List[String]()
+
+    def library_check_due(self) -> Bool:
+        """The scan just finished and the library check hasn't started."""
+        return self.active and self.library_check and not self.scan.active \
+            and not self._lib_started
+
+    def start_library_check(mut self, negatives: LibraryNegatives):
+        """Queue every occurrence kept for each word ``negatives`` hasn't
+        ruled out, grouped by file."""
+        self._reset_library_check()
+        self._lib_started = True
+        var by_path = Dict[String, List[Int]]()
+        var paths = List[String]()
+        var flat = List[LibraryCheckJob]()
+        for i in range(len(self.scan.words)):
+            ref w = self.scan.words[i]
+            if negatives.contains(w.key):
+                continue
+            ref occ = self.scan.occurrences[i]
+            self._lib_left[w.key] = len(occ)
+            for k in range(len(occ)):
+                var at = occ[k]
+                if at.path not in by_path:
+                    by_path[at.path] = List[Int]()
+                    paths.append(at.path)
+                try:
+                    by_path[at.path].append(len(flat))
+                except:
+                    pass
+                flat.append(LibraryCheckJob(w.key, w.word, at))
+        for p in range(len(paths)):
+            try:
+                ref ids = by_path[paths[p]]
+                for k in range(len(ids)):
+                    self._lib_jobs.append(flat[ids[k]])
+            except:
+                pass
+
+    def library_checking(self) -> Bool:
+        """Lookups remain (the host may still have one in flight too)."""
+        return self.active and self._lib_started \
+            and self._lib_next < len(self._lib_jobs)
+
+    def peek_library_job(mut self) -> Optional[LibraryCheckJob]:
+        """The next lookup, skipping words already found to be library
+        names; None when there are no more."""
+        while self._lib_next < len(self._lib_jobs):
+            var job = self._lib_jobs[self._lib_next]
+            if job.key in self._lib_hit:
+                self._lib_next += 1
+                continue
+            return Optional[LibraryCheckJob](job)
+        return Optional[LibraryCheckJob]()
+
+    def pop_library_job(mut self):
+        if self._lib_next < len(self._lib_jobs):
+            self._lib_next += 1
+
+    def library_result(mut self, key: String, hit: Bool) -> Bool:
+        """Record an answer for ``key``. True when that was the word's
+        last occurrence, every one was looked up, and none was a
+        library's — the host remembers it as ruled out."""
+        if hit:
+            if key not in self._lib_hit:
+                self._lib_hit[key] = True
+                self._lib_found.append(key)
+            return False
+        return self._answered(key)
+
+    def library_skip(mut self, key: String):
+        """An occurrence of ``key`` that couldn't be looked up."""
+        self._lib_incomplete[key] = True
+        _ = self._answered(key)
+
+    def _answered(mut self, key: String) -> Bool:
+        var left = self._lib_left.get(key, 0) - 1
+        self._lib_left[key] = left
+        return left == 0 and key not in self._lib_hit \
+            and key not in self._lib_incomplete
 
     # --- results ----------------------------------------------------------
 
@@ -207,7 +344,11 @@ struct SpellingDialog(Movable):
     def ui(mut self) -> UINode:
         var n = len(self.order)
         var status: String
-        if self.scan.active:
+        if self.library_checking():
+            status = String("Checking for library names ") \
+                + String(self._lib_next) + String(" / ") \
+                + String(len(self._lib_jobs)) + String("…")
+        elif self.scan.active:
             status = String("Scanning ") + String(self.scan.files_done) \
                 + String(" / ") + String(len(self.scan.files)) \
                 + String(" files… ") \

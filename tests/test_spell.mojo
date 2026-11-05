@@ -11,7 +11,8 @@ from turbokod.file_io import read_file, stat_file, write_file
 from turbokod.posix import getenv_value, which
 from turbokod.spell import (
     Speller, find_misspelled_runs, has_spell_noinspection_directive,
-    project_dict_path, user_dict_path
+    is_library_location, library_words_path, project_dict_path,
+    user_dict_path
 )
 from turbokod.spell_menu import (
     SPELL_ACTION_ADD_PROJECT, SPELL_ACTION_ADD_USER, SPELL_ACTION_NONE,
@@ -25,6 +26,7 @@ from turbokod.geometry import Point, Rect
 from turbokod.canvas import Canvas
 
 from turbokod.spell_scan import ProjectSpellScan, spell_scan_files
+from turbokod.library_words import LibraryNegatives, library_negatives_path
 from turbokod.spelling_dialog import (
     SPELLING_ADD_PROJECT, SPELLING_ADD_USER, SpellingDialog,
 )
@@ -220,6 +222,57 @@ def test_speller_add_user_word_persists_and_check_word_passes() raises:
             saw = True
             break
     assert_true(saw)
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+def test_is_library_location_outside_project_or_in_dependency_dirs() raises:
+    """A definition outside the project, or under a virtualenv /
+    ``node_modules`` / pixi env inside it, is a library's; the project's
+    own files aren't, and with no project nothing is."""
+    var root = String("/work/proj")
+    assert_true(is_library_location(
+        String("/usr/lib/python3.12/shutil.py"), root,
+    ))
+    assert_true(is_library_location(
+        String("/work/proj/.venv/lib/python3.12/site-packages/x/y.py"), root,
+    ))
+    assert_true(is_library_location(
+        String("/work/proj/web/node_modules/react/index.d.ts"), root,
+    ))
+    assert_false(is_library_location(String("/work/proj/src/main.py"), root))
+    # A sibling sharing the prefix is outside the project.
+    assert_true(is_library_location(String("/work/project2/a.py"), root))
+    # A file merely *named* like a dependency dir is the project's.
+    assert_false(is_library_location(String("/work/proj/venv"), root))
+    assert_false(is_library_location(
+        String("/usr/lib/python3.12/shutil.py"), String(""),
+    ))
+
+
+def test_speller_library_words_persist_and_reload() raises:
+    """``add_library_word`` writes ``library_words.txt``, not the user
+    dictionary, and a fresh ``load_default`` picks it up."""
+    var path = library_words_path()
+    _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+    var udp = user_dict_path()
+    _ = external_call["unlink", Int32]((udp + String("\0")).unsafe_ptr())
+    var s = Speller()
+    var seed = List[String]()
+    seed.append(String("hello"))
+    s.load_words(seed)
+    assert_false(s.check_word(String("rmtree")))
+    var v = s.version
+    assert_true(s.add_library_word(String("rmtree")))
+    assert_true(s.check_word(String("rmtree")))
+    assert_true(s.version > v)
+    assert_equal(read_file(path), String("rmtree\n"))
+    assert_false(stat_file(udp).ok)
+    # Already known: the file isn't appended to again.
+    assert_true(s.add_library_word(String("rmtree")))
+    assert_equal(read_file(path), String("rmtree\n"))
+    var fresh = Speller()
+    fresh.load_default()
+    assert_true(fresh.check_word(String("rmtree")))
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
 
 
@@ -776,3 +829,128 @@ def test_list_selection_values() raises:
 def main() raises:
     setup_test_env()
     TestSuite.discover_tests[__functions_in_module()]().run()
+
+
+def test_spell_scan_keeps_occurrences_for_the_library_check() raises:
+    """Each word keeps up to three occurrences, on different lines, with
+    0-based row and byte column — what the library check looks up."""
+    var root = _temp_path(String("_spell_occ"))
+    var files = _scan_fixture(root)
+    var speller = _fixture_speller()
+    var scan = ProjectSpellScan()
+    scan.start(files^)
+    while scan.step(5, speller):
+        pass
+    for i in range(len(scan.words)):
+        ref occ = scan.occurrences[i]
+        if scan.words[i].key == String("zorbly"):
+            # Four occurrences, two on the first line: rows 0, 1, 2.
+            assert_equal(len(occ), 3)
+            assert_equal(occ[0].row, 0)
+            assert_equal(occ[0].col, 2)
+            assert_equal(occ[1].row, 1)
+            assert_equal(occ[2].row, 2)
+            assert_equal(occ[2].col, 5)
+        elif scan.words[i].key == String("quux"):
+            assert_equal(len(occ), 1)
+            assert_equal(occ[0].path, root + String("/b.py"))
+            assert_equal(occ[0].col, 12)
+    _rm_rf(root)
+
+
+def test_library_negatives_persist_merge_and_expire() raises:
+    """Ruled-out words survive a reload, two writers' entries merge, and
+    an entry older than the TTL counts as unknown again."""
+    var root = _temp_path(String("_lib_neg"))
+    _rm_rf(root)
+    _ensure_dir(root)
+    var a = LibraryNegatives()
+    a.set_project(root)
+    var b = LibraryNegatives()
+    b.set_project(root)
+    a.add(String("zorbly"))
+    b.add(String("frobnix"))
+    a.flush()
+    b.flush()
+    var c = LibraryNegatives()
+    c.set_project(root)
+    assert_true(c.contains(String("zorbly")))
+    assert_true(c.contains(String("frobnix")))
+    assert_false(c.contains(String("quux")))
+    _ = write_file(library_negatives_path(root), String("stale\t1\n"))
+    var d = LibraryNegatives()
+    d.set_project(root)
+    assert_false(d.contains(String("stale")))
+    # No project: nothing is recorded.
+    var e = LibraryNegatives()
+    e.add(String("zorbly"))
+    assert_false(e.contains(String("zorbly")))
+    _rm_rf(root)
+
+
+def test_spelling_dialog_library_check_jobs() raises:
+    """After the scan, the library check queues each word's kept
+    occurrences grouped by file, minus ruled-out words; a hit drops the
+    word's row and its remaining lookups, and a word missed at every
+    occurrence is reported ruled out — unless one couldn't be looked up."""
+    var root = _temp_path(String("_spell_libcheck"))
+    var files = _scan_fixture(root)
+    var speller = _fixture_speller()
+    var negatives = LibraryNegatives()
+    negatives.set_project(root)
+    negatives.add(String("quux"))
+    var d = SpellingDialog()
+    d.open(files^, True, root)
+    while d.scan.active:
+        d.tick(speller)
+    assert_true(d.library_check_due())
+    d.start_library_check(negatives)
+    assert_false(d.library_check_due())
+    assert_true(d.library_checking())
+    var seen = List[String]()
+    var ruled_out = List[String]()
+    while True:
+        var job = d.peek_library_job()
+        if not job:
+            break
+        var j = job.value()
+        d.pop_library_job()
+        seen.append(j.key + String("@") + String(j.at.row))
+        assert_true(j.key != String("quux"))
+        if j.key == String("zorbly"):
+            _ = d.library_result(j.key, True)
+        elif d.library_result(j.key, False):
+            ruled_out.append(j.key)
+    assert_false(d.library_checking())
+    # zorbly is looked up once: the hit skips its other two occurrences.
+    # a.py's lookups come before b.py's.
+    assert_equal(len(seen), 3)
+    assert_equal(seen[0], String("zorbly@0"))
+    assert_equal(seen[1], String("frobnix@2"))
+    assert_equal(seen[2], String("frobnix@0"))
+    assert_equal(len(ruled_out), 1)
+    assert_equal(ruled_out[0], String("frobnix"))
+    d.tick(speller)
+    assert_equal(len(d.scan.words), 2)
+    for i in range(len(d.order)):
+        assert_true(d.scan.words[d.order[i]].key != String("zorbly"))
+    # A skipped occurrence keeps a word from being ruled out.
+    d.start_library_check(LibraryNegatives())
+    var skipped_once = False
+    var frobnix_out = False
+    while True:
+        var job = d.peek_library_job()
+        if not job:
+            break
+        var j = job.value()
+        d.pop_library_job()
+        if j.key != String("frobnix"):
+            _ = d.library_result(j.key, False)
+        elif not skipped_once:
+            skipped_once = True
+            d.library_skip(j.key)
+        elif d.library_result(j.key, False):
+            frobnix_out = True
+    assert_true(skipped_once)
+    assert_false(frobnix_out)
+    _rm_rf(root)
