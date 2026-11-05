@@ -13,7 +13,7 @@ mouse event into them with ``map``. At the screen's cell size the grid is
 the region itself and ``map`` changes nothing.
 """
 
-from .canvas import Canvas, SCALE_ONE
+from .canvas import Canvas, SCALE_ONE, grid_dims
 from .colors import Attr
 from .events import Event
 from .geometry import Point, Rect
@@ -34,6 +34,20 @@ struct GridFrame(Copyable, ImplicitlyCopyable, Movable):
     @staticmethod
     def empty(slot: UInt8) -> GridFrame:
         return GridFrame(slot, Rect.empty(), Rect.empty(), SCALE_ONE, SCALE_ONE)
+
+    @staticmethod
+    def laid_out(slot: UInt8, rect: Rect, scale_x: Int, scale_y: Int) -> GridFrame:
+        """The frame ``begin`` would lay out for ``rect`` at that scale,
+        for a view that handles events between paints."""
+        var dims = grid_dims(rect, scale_x, scale_y)
+        return GridFrame(
+            slot, rect,
+            Rect(rect.a.x, rect.a.y, rect.a.x + dims[0], rect.a.y + dims[1]),
+            scale_x, scale_y,
+        )
+
+    def scaled(self) -> Bool:
+        return self.scale_x != SCALE_ONE or self.scale_y != SCALE_ONE
 
     def begin(mut self, canvas: Canvas, rect: Rect, bg: Attr) -> Canvas:
         """Lay out the grid for ``rect`` and return its canvas, in this
@@ -71,6 +85,21 @@ struct GridFrame(Copyable, ImplicitlyCopyable, Movable):
             self.rect.a.y + floor_div(f.y - self.rect.a.y * 1000, self.scale_y),
         )
         return e
+
+
+    def to_screen(self, p: Point) -> Point:
+        """The screen cell under the middle of grid cell ``p``: where a
+        popup anchored at something painted in the grid goes."""
+        if not self.scaled():
+            return p
+        return Point(
+            self.rect.a.x + floor_div(
+                (2 * (p.x - self.rect.a.x) + 1) * self.scale_x, 2 * SCALE_ONE,
+            ),
+            self.rect.a.y + floor_div(
+                (2 * (p.y - self.rect.a.y) + 1) * self.scale_y, 2 * SCALE_ONE,
+            ),
+        )
 
 
 def floor_div(a: Int, b: Int) -> Int:

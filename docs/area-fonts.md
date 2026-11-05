@@ -38,8 +38,12 @@ The host fits each area's face to the cell (`SlotFace` in `TurboKod.swift`):
 ## An area's own size: sub-grids
 
 The Terminal and Debugger fonts each have a **Size** row (Smaller / Larger /
-Same as Font) under their font. `config.area_font_sizes` holds them by slot
-(serialized `font_terminal_size` / `font_debugger_size`, 0 = the cell's).
+Same as Font) under their font, and in the Turbo Vision look, whose cell is
+fixed, so does the Font (Smaller / Larger / Default Size): the code's size
+is an area size there. (In the other looks the Font's size sets the cell,
+so `Desktop.area_font_size` ignores the code's.) `config.area_font_sizes`
+holds them by slot (serialized `font_terminal_size` / `font_debugger_size`
+/ `font_code_size`, 0 = the cell's).
 An area with a size of its own gets a *grid of its own*: a smaller terminal
 font really gives the shell more columns and rows, and the pty is told so.
 
@@ -63,6 +67,18 @@ font really gives the shell more columns and rows, and the pty is told so.
   into those coordinates. The debug pane uses three frames (Stack, Locals /
   Watches, output log); the shell and test panes use `GridSelection`'s
   equivalent (`set_frame` / `grid_event`, `terminal_view.mojo`).
+- **Editors.** A window's editor works entirely in its grid: `Window.
+  code_frame()` lays it out from `Window.code_scale_x` / `_y` (pushed to
+  every window by `Desktop.set_area_scale` through `WindowManager.
+  set_code_scale`), and `Window.editor_view()` is the view every editor
+  call gets — never `interior()`, which is in screen cells and is only
+  for screen hit-tests. Clicks go through `code_frame().map`. The popups
+  the editor paints itself (completion, hover) are in the grid, clipped
+  to it; the ones Desktop opens from an editor's request (context, gutter,
+  diagnostic, spell menus, the git-revert preview, the blame popup) map
+  the request's anchor back with `Desktop._code_anchor`. A scaled editor
+  doesn't pixel-scroll: `scroll_regions` leaves it out, since the host
+  draws it as a sub-grid.
 - **Mouse.** A cell position isn't fine enough to say which of a smaller
   grid's cells the pointer is over, so the host sends the pointer in
   thousandths of a cell before each mouse call (`tk_desktop_set_mouse_fine`

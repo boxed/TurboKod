@@ -18,7 +18,7 @@ from turbokod.desktop import Desktop
 from turbokod.grid_frame import GridFrame
 from turbokod.events import Event, MOUSE_BUTTON_LEFT
 from turbokod.geometry import Point, Rect
-from turbokod.json import parse_json
+from turbokod.json import json_get_int, parse_json
 from turbokod.host_abi import CELL_WORDS, pack_canvas
 from turbokod.settings import Settings
 from turbokod.terminal_pane import TerminalPane
@@ -305,6 +305,119 @@ def test_settings_steps_an_areas_font_size_from_the_fonts() raises:
     assert_equal(s.area_font_sizes[2], 17)
     s.ui_act(String("area_same_2"))
     assert_equal(s.area_font_sizes[2], 0)
+
+
+def _half_size_code(mut w: Window):
+    """A code font whose cells are half the screen's each way."""
+    w.code_scale_x = 500
+    w.code_scale_y = 500
+
+
+def test_the_code_font_size_round_trips_under_its_own_key() raises:
+    var cfg = TurbokodConfig()
+    cfg.area_font_sizes[Int(FONT_CODE)] = 12
+    var text = _config_to_json(cfg)
+    assert_equal(json_get_int(text, String("font_code_size"), 0), 12)
+    var back = _config_from_json(text)
+    assert_equal(back.area_font_sizes[Int(FONT_CODE)], 12)
+    assert_equal(back.font, cfg.font)
+
+
+def test_the_code_has_a_size_of_its_own_only_in_the_turbo_vision_look() raises:
+    var d = Desktop()
+    d.config.area_font_sizes[Int(FONT_CODE)] = 12
+    assert_equal(d.area_font_size(Int(FONT_CODE)), 0)    # terminal frontend
+    d.host_owns_menu = True             # the native app, Turbo Vision look
+    assert_equal(d.area_font_size(Int(FONT_CODE)), 12)
+    d.config.native_ui = True           # the macOS look: the Font sets the cell
+    assert_equal(d.area_font_size(Int(FONT_CODE)), 0)
+    d.shutdown()
+
+
+def test_the_host_scale_reaches_every_editor_window() raises:
+    var d = Desktop()
+    d.windows.add(Window.editor_window(
+        String("a"), Rect(0, 0, 20, 6), String("x"),
+    ))
+    d.set_area_scale(Int(FONT_CODE), 500, 750)
+    assert_equal(d.windows.windows[0].code_scale_x, 500)
+    assert_equal(d.windows.windows[0].code_scale_y, 750)
+    d.windows.add(Window.editor_window(
+        String("b"), Rect(0, 0, 20, 6), String("y"),
+    ))
+    assert_equal(d.windows.windows[1].code_scale_x, 500)
+    d.set_area_scale(Int(FONT_TERMINAL), 900, 900)
+    assert_equal(d.windows.windows[1].code_scale_x, 500)
+    d.shutdown()
+
+
+def test_an_editor_lays_out_its_grid_in_the_code_fonts_cells() raises:
+    var w = Window.editor_window(
+        String("t"), Rect(0, 0, 20, 6), String("hello"),
+    )
+    _half_size_code(w)
+    var c = Canvas(20, 6)
+    c.area_scale[2 * Int(FONT_CODE)] = 500
+    c.area_scale[2 * Int(FONT_CODE) + 1] = 500
+    w.paint(c, String("t"), True, 1)
+    var interior = w.interior()
+    var view = w.editor_view()
+    assert_true(view.a == interior.a)
+    assert_equal(view.width(), 2 * interior.width())
+    assert_equal(view.height(), 2 * interior.height())
+    assert_equal(len(c.sub_grids), 1)
+    var g = c.sub_grids[0].copy()
+    assert_equal(Int(g.slot), Int(FONT_CODE))
+    assert_true(g.rect == interior)
+    assert_equal(g.cols, view.width())
+    assert_equal(g.rows, view.height())
+    var found = False
+    for i in range(g.cols):
+        if g.cells[i].glyph == String("h"):
+            found = True
+    assert_true(found)
+    assert_equal(Int(c.get(0, 0).sub), 0)       # the frame stays on screen
+    assert_equal(Int(c.get(interior.a.x, interior.a.y).sub), 1)
+
+
+def test_a_click_lands_on_the_code_grids_cell_under_the_pointer() raises:
+    var text = String("abcdefghijklmnopqrstuvwxyz0123456789abcdefghij")
+    # The same 36 x 8 view at the screen's cell size, for reference.
+    var plain = Window.editor_window(String("p"), Rect(0, 0, 38, 10), text)
+    var w = Window.editor_window(String("t"), Rect(0, 0, 20, 6), text)
+    _half_size_code(w)
+    assert_true(w.editor_view() == plain.editor_view())
+    var target = Point(1 + 25, 1)
+    var pe = Event.mouse_event(target, MOUSE_BUTTON_LEFT, True, False, 0, 1)
+    assert_true(plain.handle_mouse_in_body(pe))
+    # On screen that grid cell is the right half of screen cell 1 + 12.
+    var e = Event.mouse_event(
+        Point(1 + 12, 1), MOUSE_BUTTON_LEFT, True, False, 0, 1,
+    )
+    e.fine = Point(13 * 1000 + 750, 1 * 1000 + 250)
+    assert_true(w.handle_mouse_in_body(e))
+    assert_equal(w.editor.selections[0].col, plain.editor.selections[0].col)
+    assert_equal(w.editor.selections[0].row, 0)
+    # A popup anchored there opens over the same screen cell.
+    assert_true(w.code_to_screen(target) == Point(13, 1))
+
+
+def test_settings_offers_the_code_a_size_in_the_turbo_vision_look() raises:
+    var s = Settings()
+    s.offer_native_ui = True
+    var names = List[String]()
+    names.append(default_font_label())
+    s._font_names = names^
+    s._font_effective_size = 16
+    assert_true(_has_key(s._appearance_ui(), String("area_larger_1")))
+    assert_true(not _has_key(s._appearance_ui(), String("font_larger")))
+    s.ui_act(String("area_larger_1"))
+    assert_equal(s.area_font_sizes[1], 17)
+    s.ui_act(String("area_same_1"))
+    assert_equal(s.area_font_sizes[1], 0)
+    s.native_ui = True                  # the macOS look: the Font sets the cell
+    assert_true(not _has_key(s._appearance_ui(), String("area_larger_1")))
+    assert_true(_has_key(s._appearance_ui(), String("font_larger")))
 
 
 def _has_key(n: UINode, key: String) -> Bool:

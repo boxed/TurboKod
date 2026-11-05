@@ -2824,7 +2824,11 @@ struct Desktop(Movable):
             return out^
         if self.windows.windows[idx].editor.completion_popup_visible:
             return out^
-        var interior = self.windows.windows[idx].interior()
+        # An editor in a grid of its own (the code font's own size) is
+        # drawn by the host as a sub-grid, which it doesn't pixel-scroll.
+        if self.windows.windows[idx].code_frame().scaled():
+            return out^
+        var interior = self.windows.windows[idx].editor_view()
         if interior.is_empty():
             return out^
         out.append(
@@ -2873,7 +2877,7 @@ struct Desktop(Movable):
         visual-row coordinates. Returns ``(0, 0)`` for a bad index."""
         if not self._is_editor_at(win_idx):
             return (0.0, 0.0)
-        var interior = self.windows.windows[win_idx].interior()
+        var interior = self.windows.windows[win_idx].editor_view()
         return self.windows.windows[win_idx].editor.smooth_begin(interior)
 
     def smooth_set(mut self, win_idx: Int, screen: Rect, vis: Float64):
@@ -2881,7 +2885,7 @@ struct Desktop(Movable):
         coordinate) to editor ``win_idx``."""
         if not self._is_editor_at(win_idx):
             return
-        var interior = self.windows.windows[win_idx].interior()
+        var interior = self.windows.windows[win_idx].editor_view()
         self.windows.windows[win_idx].editor.smooth_set(interior, vis)
 
     def focused_overlay_bounds(mut self, screen: Rect) -> Optional[Rect]:
@@ -2898,7 +2902,9 @@ struct Desktop(Movable):
         var idx = self.windows.focused
         if idx < 0 or idx >= len(self.windows.windows):
             return None
-        var interior = self.windows.windows[idx].interior()
+        if self.windows.windows[idx].code_frame().scaled():
+            return None
+        var interior = self.windows.windows[idx].editor_view()
         if interior.is_empty():
             return None
         return self.windows.windows[idx].editor.active_overlay_bounds(interior)
@@ -2908,7 +2914,7 @@ struct Desktop(Movable):
         minimap / scrollbar drag (``frac`` in [0, 1])."""
         if not self._is_editor_at(win_idx):
             return
-        var interior = self.windows.windows[win_idx].interior()
+        var interior = self.windows.windows[win_idx].editor_view()
         self.windows.windows[win_idx].editor.minimap_to(interior, frac)
 
     def hscroll_focused(mut self, cols: Int, screen: Rect) -> Bool:
@@ -3281,7 +3287,7 @@ struct Desktop(Movable):
             return False
         self.windows.windows[idx].editor.paste_text(text)
         self.windows.windows[idx].editor.reveal_cursor(
-            self.windows.windows[idx].interior(),
+            self.windows.windows[idx].editor_view(),
         )
         return True
 
@@ -3304,7 +3310,7 @@ struct Desktop(Movable):
             return False
         self.windows.windows[idx].editor.paste_text(text)
         self.windows.windows[idx].editor.reveal_cursor(
-            self.windows.windows[idx].interior(),
+            self.windows.windows[idx].editor_view(),
         )
         return True
 
@@ -3355,7 +3361,7 @@ struct Desktop(Movable):
         if idx >= 0:
             self.windows.windows[idx].editor.paste_clipboard_text(text)
             self.windows.windows[idx].editor.reveal_cursor(
-                self.windows.windows[idx].interior(),
+                self.windows.windows[idx].editor_view(),
             )
             return True
         return False
@@ -4772,7 +4778,7 @@ struct Desktop(Movable):
         if idx < 0 or idx >= len(self.windows.windows):
             return
         self._review_flush_edits()
-        var view = self.windows.windows[idx].interior()
+        var view = self.windows.windows[idx].editor_view()
         if self.windows.windows[idx].editor.goto_change_chunk(
             direction, view, popup=False,
         ):
@@ -4807,7 +4813,7 @@ struct Desktop(Movable):
         if idx < 0 or idx >= len(self.windows.windows):
             self._review_pending_chunk_edge = 0
             return
-        var view = self.windows.windows[idx].interior()
+        var view = self.windows.windows[idx].editor_view()
         _ = self.windows.windows[idx].editor.goto_change_edge(
             self._review_pending_chunk_edge, view,
         )
@@ -5290,7 +5296,7 @@ struct Desktop(Movable):
             col = 0
         self.windows.windows[existing].editor.move_to(row, col, False, True)
         self.windows.windows[existing].editor.reveal_cursor(
-            self.windows.windows[existing].interior(), golden=True,
+            self.windows.windows[existing].editor_view(), golden=True,
         )
         # A deliberate open-at-line (output-pane link, ``turbokod://``
         # open from the command line, …) should also bring the editor's
@@ -5691,7 +5697,7 @@ struct Desktop(Movable):
         for i in range(len(self.windows.windows)):
             if self.windows.windows[i].is_editor:
                 self.windows.windows[i].editor.reveal_cursor(
-                    self.windows.windows[i].interior(),
+                    self.windows.windows[i].editor_view(),
                 )
 
     def _on_dict_install_complete(
@@ -6550,9 +6556,10 @@ struct Desktop(Movable):
 
     def area_font_size(self, slot: Int) -> Int:
         """Area ``slot``'s own font size in points, 0 for the cell's. The
-        code's is the cell's; so is the UI's in the Turbo Vision look,
-        which draws its UI in the cell font."""
-        if slot == Int(FONT_CODE):
+        code's is the cell's outside the Turbo Vision look, where the
+        Font's size sets the cell; the UI's is the cell's in it, since it
+        draws its UI in the cell font."""
+        if slot == Int(FONT_CODE) and not self.tv_frame():
             return 0
         if slot == Int(FONT_UI) and self.tv_frame():
             return 0
@@ -6606,6 +6613,14 @@ struct Desktop(Movable):
         re-ordered the candidate list in the Languages settings),
         shut it down, drop it, and re-attach the editors of that
         language so a fresh manager is spawned with the new binary."""
+    def _code_anchor(self, idx: Int, p: Point) -> Point:
+        """Where on the screen a popup anchored at ``p`` goes, ``p`` being
+        a point editor ``idx`` reported in its own cells (they're the
+        screen's unless the code font has a size of its own)."""
+        if idx < 0 or idx >= len(self.windows.windows):
+            return p
+        return self.windows.windows[idx].code_to_screen(p)
+
         self.lsp_specs = apply_language_overrides(
             built_in_servers(), self.config.language_servers,
         )
@@ -6613,6 +6628,10 @@ struct Desktop(Movable):
         # pops it from the parallel lists and (via _retry_lsp_for_language)
         # appends a new one at the end, so iterating live would either
         # skip entries or recheck the freshly-spawned replacement.
+        if slot == Int(FONT_CODE):
+            self.windows.set_code_scale(
+                self.area_scale[2 * slot], self.area_scale[2 * slot + 1],
+            )
         var langs_snapshot = self.lsp_languages.copy()
         for s in range(len(langs_snapshot)):
             var lang = langs_snapshot[s]
@@ -8321,12 +8340,14 @@ struct Desktop(Movable):
             if fidx_pop >= 0 \
                     and self.windows.windows[fidx_pop] \
                         .editor.completion_popup_visible:
-                var pop_view = self.windows.windows[fidx_pop].interior()
+                var pop_view = self.windows.windows[fidx_pop].editor_view()
                 var pop_rect = self.windows.windows[fidx_pop] \
                     .editor.completion_popup_screen_rect(pop_view)
                 var close_it = True
                 if pop_rect:
-                    if pop_rect.value().contains(event.pos):
+                    var pop_pos = self.windows.windows[fidx_pop] \
+                        .code_frame().map(event).pos
+                    if pop_rect.value().contains(pop_pos):
                         close_it = False
                 if close_it:
                     self.windows.windows[fidx_pop] \
@@ -10789,7 +10810,7 @@ struct Desktop(Movable):
             if idx >= 0:
                 if self.windows.windows[idx].editor.undo():
                     self.windows.windows[idx].editor.reveal_cursor(
-                        self.windows.windows[idx].interior(),
+                        self.windows.windows[idx].editor_view(),
                     )
             return Optional[String]()
         if action == EDITOR_REDO:
@@ -10797,7 +10818,7 @@ struct Desktop(Movable):
             if idx >= 0:
                 if self.windows.windows[idx].editor.redo():
                     self.windows.windows[idx].editor.reveal_cursor(
-                        self.windows.windows[idx].interior(),
+                        self.windows.windows[idx].editor_view(),
                     )
             return Optional[String]()
         if action == PROJECT_FIND:
@@ -14122,7 +14143,7 @@ struct Desktop(Movable):
         var row = min(max(target.line, 0), max(ed.buffer.line_count() - 1, 0))
         var col = min(max(target.character, 0), ed.buffer.line_length(row))
         ed.move_to(row, col, False, True)
-        ed.reveal_cursor(self.windows.windows[existing].interior(), golden=golden)
+        ed.reveal_cursor(self.windows.windows[existing].editor_view(), golden=golden)
         # A deliberate jump (goto-def, references, Find Symbol, find-results
         # double-click, …) should also bring the editor's OS window to the
         # front + key — the trigger may have come from a floating panel
@@ -14691,7 +14712,7 @@ struct Desktop(Movable):
             else ed.find_prev(needle, opts)
         if found:
             ed.reveal_cursor(
-                self.windows.windows[idx].interior(),
+                self.windows.windows[idx].editor_view(),
                 margin_below=10, margin_above=10,
             )
 
@@ -14708,7 +14729,7 @@ struct Desktop(Movable):
         elif action == EDITOR_BOOKMARK_NEXT or action == EDITOR_BOOKMARK_PREV:
             if not ed.goto_bookmark(
                 action == EDITOR_BOOKMARK_NEXT,
-                self.windows.windows[idx].interior(),
+                self.windows.windows[idx].editor_view(),
             ):
                 msg = String("No bookmarks")
         elif action == EDITOR_BOOKMARK_CLEAR:
@@ -16409,7 +16430,15 @@ struct Desktop(Movable):
             .editor.consume_git_revert_request()
         if not req_opt:
             return
-        self.git_gutter_menu.open(req_opt.value())
+        var req = req_opt.value().copy()
+        var at = self._code_anchor(idx, Point(req.anchor_x, req.anchor_y))
+        req.anchor_x = at.x
+        req.anchor_y = at.y
+        if req.block_top_y >= 0:
+            var top = self._code_anchor(idx, Point(req.text_x, req.block_top_y))
+            req.text_x = top.x
+            req.block_top_y = top.y
+        self.git_gutter_menu.open(req)
 
     def _maybe_open_test_gutter_menu(mut self):
         """Drain ``Editor.consume_test_run_request`` on the focused window
@@ -16425,7 +16454,8 @@ struct Desktop(Movable):
             return
         var req = req_opt.value()
         self.test_gutter_menu.open(
-            req.node_id, Point(req.anchor_x, req.anchor_y),
+            req.node_id,
+            self._code_anchor(idx, Point(req.anchor_x, req.anchor_y)),
         )
 
     def _maybe_open_blame_popup(mut self):
@@ -16450,7 +16480,7 @@ struct Desktop(Movable):
         )
         self.blame_popup.open(
             req.blame, message, wall_clock_ms() // 1000,
-            Point(req.anchor_x, req.anchor_y),
+            self._code_anchor(idx, Point(req.anchor_x, req.anchor_y)),
         )
 
     def _on_test_gutter_menu_submit(mut self):
@@ -16486,7 +16516,7 @@ struct Desktop(Movable):
         # draining it immediately re-opens on the same frame.
         if act == GUTTER_ACTION_PREV or act == GUTTER_ACTION_NEXT:
             var direction = -1 if act == GUTTER_ACTION_PREV else 1
-            var view = self.windows.windows[idx].interior()
+            var view = self.windows.windows[idx].editor_view()
             _ = self.windows.windows[idx].editor.goto_change_chunk(
                 direction, view,
             )
@@ -16545,7 +16575,8 @@ struct Desktop(Movable):
             return
         var req = req_opt.value()
         self.diagnostic_menu.open(
-            req.message, Point(req.anchor_x, req.anchor_y),
+            req.message,
+            self._code_anchor(idx, Point(req.anchor_x, req.anchor_y)),
         )
         # Track which editor opened the menu so the response handler
         # knows where to apply the fix.
@@ -17333,7 +17364,8 @@ struct Desktop(Movable):
         ctx_menu_separator(labels, actions)
         self._append_line_actions(idx, req.row, labels, actions)
         self.editor_context_menu.open(
-            Point(req.anchor_x, req.anchor_y), labels^, actions^,
+            self._code_anchor(idx, Point(req.anchor_x, req.anchor_y)),
+            labels^, actions^,
         )
 
     def _append_line_actions(
@@ -17546,7 +17578,8 @@ struct Desktop(Movable):
         ctx_menu_separator(labels, actions)
         self._append_line_actions(idx, req.row, labels, actions)
         self.editor_context_menu.open(
-            Point(req.anchor_x, req.anchor_y), labels^, actions^,
+            self._code_anchor(idx, Point(req.anchor_x, req.anchor_y)),
+            labels^, actions^,
         )
 
     def _on_context_menu_submit(mut self):
@@ -17712,7 +17745,7 @@ struct Desktop(Movable):
         if act == CTX_MENU_ACTION_TOGGLE_FOLD:
             self.windows.windows[idx].editor.toggle_fold_at(row)
             self.windows.windows[idx].editor.reveal_cursor(
-                self.windows.windows[idx].interior(),
+                self.windows.windows[idx].editor_view(),
             )
 
     def _dispatch_navigation(
@@ -17959,7 +17992,7 @@ struct Desktop(Movable):
             return
         if self.windows.windows[idx].editor.apply_fill_strings(texts):
             self.windows.windows[idx].editor.reveal_cursor(
-                self.windows.windows[idx].interior(),
+                self.windows.windows[idx].editor_view(),
             )
 
     def _on_breakpoint_menu_submit(mut self):
@@ -18199,7 +18232,7 @@ struct Desktop(Movable):
         if not sa_opt:
             return
         var sa = sa_opt.value()
-        var interior = self.windows.windows[idx].interior()
+        var interior = self.windows.windows[idx].editor_view()
         # ``col_start`` / ``scroll_x`` are byte offsets, but ``sx`` is a screen
         # cell column — convert both via the row's byte→cell map so a
         # multi-byte glyph before the word doesn't push the popup sideways.
@@ -18445,6 +18478,9 @@ struct Desktop(Movable):
             # can paste from the clipboard into their own terminal.
             # ``_pending_arg`` carries the language id for the spec lookup.
             var lang = self._pending_arg
+        var spell_at = self._code_anchor(idx, Point(ax, ay))
+        ax = spell_at.x
+        ay = spell_at.y
             self._pending_arg = String("")
             if yes:
                 var spec_idx = find_language_by_id(self.lsp_specs, lang)
@@ -18577,7 +18613,7 @@ struct Desktop(Movable):
                         n = 0
                 self.windows.windows[idx].editor.goto_line(n)
                 self.windows.windows[idx].editor.reveal_cursor(
-                    self.windows.windows[idx].interior(), golden=True,
+                    self.windows.windows[idx].editor_view(), golden=True,
                 )
             return Optional[String]()
         if pa == _PA_REPLACE_DO:

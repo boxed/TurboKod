@@ -107,7 +107,9 @@ comptime AREA_BUNDLED_FONT = "IBM VGA"
 
 def area_font_size_key(slot: Int) -> String:
     """Config key of area ``slot``'s font size (``area_font_key`` +
-    ``_size``)."""
+    ``_size``; the code's is ``font_code_size``)."""
+    if slot == 1:
+        return String("font_code_size")
     return area_font_key(slot) + String("_size")
 
 
@@ -312,10 +314,11 @@ struct TurbokodConfig(Copyable, Movable):
     # the Turbo Vision look, which draws its UI in the VGA font.
     var area_fonts: List[String]
     # Each area's font size in points, indexed like ``area_fonts`` and
-    # serialized as ``<area_font_key>_size``. 0 means the shared cell's
+    # serialized as ``area_font_size_key``. 0 means the shared cell's
     # size; anything else gives the area a grid of its own in cells of
-    # that font at that size (``Canvas.place_sub_grid``). Only the terminal
-    # and debugger areas offer it in Settings.
+    # that font at that size (``Canvas.place_sub_grid``). Settings offers
+    # it for the terminal and debugger areas, and for the code in the
+    # Turbo Vision look, whose cell is fixed.
     var area_font_sizes: List[Int]
     # Per-project cap on simultaneously-open file-backed editor windows.
     # Once a project hits this, opening another document closes the
@@ -604,12 +607,11 @@ def _config_from_json(root: JsonValue) raises -> TurbokodConfig:
             cfg.font_size = MAX_FONT_SIZE
     for slot in range(len(cfg.area_fonts)):
         var key = area_font_key(slot)
-        if len(key.as_bytes()) == 0:
-            continue
-        var v = json_get_string(root, key)
-        if v == _RETIRED_CLASSIC_FONT:
-            v = String(AREA_BUNDLED_FONT)
-        cfg.area_fonts[slot] = v
+        if len(key.as_bytes()) > 0:
+            var v = json_get_string(root, key)
+            if v == _RETIRED_CLASSIC_FONT:
+                v = String(AREA_BUNDLED_FONT)
+            cfg.area_fonts[slot] = v
         var size = json_get_int(root, area_font_size_key(slot), 0)
         if size != 0:
             size = max(MIN_FONT_SIZE, min(size, MAX_FONT_SIZE))
@@ -789,9 +791,9 @@ def _config_to_json(config: TurbokodConfig) -> JsonValue:
         var key = area_font_key(slot)
         if len(key.as_bytes()) > 0:
             root.put(key, json_str(config.area_fonts[slot]))
-            root.put(
-                area_font_size_key(slot), json_int(config.area_font_sizes[slot]),
-            )
+        root.put(
+            area_font_size_key(slot), json_int(config.area_font_sizes[slot]),
+        )
     root.put(
         String("max_open_windows"), json_int(config.max_open_windows),
     )

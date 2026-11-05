@@ -408,9 +408,12 @@ struct Settings(Movable):
         lays out its own grid of that font's cells."""
         var own = self.area_font_sizes[slot]
         var size = own if own > 0 else self._font_size_shown()
+        # The code's own size is the Font's; its default is the cell's.
+        var same = String("Default Size") if slot == 1 \
+            else String("Same as Font")
         var steps = List[UINode]()
         steps.append(ui_label(
-            String(size) + String(" pt") if own > 0 else String("Same as Font"),
+            String(size) + String(" pt") if own > 0 or slot == 1 else same,
         ))
         steps.append(ui_button(
             String("area_smaller_") + String(slot), String("Smaller"),
@@ -421,7 +424,7 @@ struct Settings(Movable):
             0 if size < MAX_FONT_SIZE else UI_DISABLED,
         ))
         steps.append(ui_button(
-            String("area_same_") + String(slot), String("Same as Font"),
+            String("area_same_") + String(slot), same,
             0 if own > 0 else UI_DISABLED,
         ))
         return ui_hstack(steps^)
@@ -471,7 +474,8 @@ struct Settings(Movable):
             # The Font is the code's, and every other area's unless it has
             # one of its own. In the Turbo Vision look the UI is the VGA
             # font at its ideal size, which fixes the cell, so there's no
-            # size to pick and no UI font.
+            # UI font, and the code's size is an area size: a grid of its
+            # own, like the terminal's.
             var tv_look = not self.native_ui and not self.platinum_ui
             rows.append(ui_row(String("Font"), _font_pick(
                 String("pick_font"), self.font_choice,
@@ -494,6 +498,8 @@ struct Settings(Movable):
                     0 if ideal > 0 and ideal != size else UI_DISABLED,
                 ))
                 rows.append(ui_row(String("Size"), ui_hstack(steps^)))
+            else:
+                rows.append(ui_row(String("Size"), self._area_size_steps(1)))
             var areas = List[Int]()
             areas.append(2)
             areas.append(3)

@@ -47,6 +47,16 @@ comptime MAX_SUB_GRIDS = 63
 """How many sub-grids a frame can carry: ``Cell.sub`` travels in 6 bits."""
 
 
+def grid_dims(rect: Rect, scale_x: Int, scale_y: Int) -> Tuple[Int, Int]:
+    """How many cells ``scale_x`` x ``scale_y`` thousandths of a screen
+    cell fit in ``rect``."""
+    if scale_x == SCALE_ONE and scale_y == SCALE_ONE:
+        return (max(0, rect.width()), max(0, rect.height()))
+    var cols = max(0, rect.width()) * SCALE_ONE // max(1, scale_x)
+    var rows = max(0, rect.height()) * SCALE_ONE // max(1, scale_y)
+    return (cols, rows)
+
+
 @fieldwise_init
 struct SubGrid(Copyable, Movable):
     """A pane's content laid out in cells of another size, shown through
@@ -109,11 +119,7 @@ struct Canvas(Copyable, Movable):
         """How many of area ``slot``'s cells fit in ``rect``: its own
         size, unless the area has a cell size of its own."""
         var sc = self.scale_of(slot)
-        if sc[0] == SCALE_ONE and sc[1] == SCALE_ONE:
-            return (max(0, rect.width()), max(0, rect.height()))
-        var cols = max(0, rect.width()) * SCALE_ONE // max(1, sc[0])
-        var rows = max(0, rect.height()) * SCALE_ONE // max(1, sc[1])
-        return (cols, rows)
+        return grid_dims(rect, sc[0], sc[1])
 
     def place_sub_grid(mut self, slot: UInt8, rect: Rect, var grid: Canvas):
         """Show ``grid`` (painted at ``sub_grid_size(slot, rect)``) in

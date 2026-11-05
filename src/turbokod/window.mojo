@@ -12,7 +12,7 @@ content text, ``[■]`` close in the top-left, window number in the top-right,
 
 from std.collections.list import List
 
-from .canvas import Canvas, paint_drop_shadow
+from .canvas import Canvas, SCALE_ONE, paint_drop_shadow
 from .painter import Painter
 from .cell import Cell, FONT_CODE
 from .colors import (
@@ -26,6 +26,7 @@ from .events import (
 )
 from .file_io import basename, parent_path
 from .geometry import Point, Rect
+from .grid_frame import GridFrame
 from .scrollbar import HScrollbar, VScrollbar
 from .string_utils import display_columns, tail_to_columns
 
@@ -1244,6 +1245,12 @@ struct Window(Copyable, Movable):
     # disk). Excluded from the session snapshot so closing the app mid-
     # review doesn't persist a phantom document, and closed on review exit.
     var _transient: Bool
+    var code_scale_x: Int
+    var code_scale_y: Int
+    """The code font's cell in thousandths of the screen's
+    (``Canvas.area_scale``): ``SCALE_ONE`` unless the code font has a size
+    of its own, and then the editor lays out a grid of its cells over
+    ``interior()`` (``code_frame``)."""
 
     def __init__(out self, var title: String, rect: Rect, var content: List[String]):
         self.title = title^
@@ -1265,6 +1272,8 @@ struct Window(Copyable, Movable):
         self._last_focus_ms = 0
         self._lsp_opened = False
         self._transient = False
+        self.code_scale_x = SCALE_ONE
+        self.code_scale_y = SCALE_ONE
 
     @staticmethod
     def editor_window(var title: String, rect: Rect, var text: String) -> Self:
@@ -1311,10 +1320,28 @@ struct Window(Copyable, Movable):
         return Rect(self.rect.a.x + 1, self.rect.a.y + 1,
                     self.rect.b.x - 1, self.rect.b.y - 1)
 
+    def code_frame(self) -> GridFrame:
+        """The editor's grid over ``interior()``: the interior itself
+        unless the code font has a size of its own."""
+        return GridFrame.laid_out(
+            FONT_CODE, self.interior(), self.code_scale_x, self.code_scale_y,
+        )
+
+    def editor_view(self) -> Rect:
+        """The view the editor lays out, scrolls and hit-tests in: its
+        grid's cells (``code_frame``). Every editor call that takes a view
+        gets this, never ``interior()``, which is in screen cells."""
+        return self.code_frame().grid
+
+    def code_to_screen(self, p: Point) -> Point:
+        """A point the editor reported in its own cells (a popup anchor),
+        on the screen."""
+        return self.code_frame().to_screen(p)
+
     def handle_key(mut self, event: Event) -> Bool:
         if not self.is_editor:
             return False
-        return self.editor.handle_key(event, self.interior())
+        return self.editor.handle_key(event, self.editor_view())
 
     def handle_mod_key(mut self, event: Event) -> Bool:
         if not self.is_editor:
@@ -1325,7 +1352,8 @@ struct Window(Copyable, Movable):
         """Editor mouse handling for clicks/drags inside the window body."""
         if not self.is_editor:
             return False
-        return self.editor.handle_mouse(event, self.interior())
+        var frame = self.code_frame()
+        return self.editor.handle_mouse(frame.map(event), frame.grid)
 
     def toggle_maximize(mut self, workspace: Rect):
         if self.is_maximized:
@@ -1453,7 +1481,15 @@ struct Window(Copyable, Movable):
         """The editor in the code font; the frame around it stays UI."""
         var prev = canvas.font
         canvas.font = FONT_CODE
-        self.editor.paint(canvas, self.interior(), focused)
+        var frame = self.code_frame()
+        if frame.scaled():
+            var grid = frame.begin(
+                canvas, self.interior(), Attr(EDITOR_FG, EDITOR_BG),
+            )
+            self.editor.paint(grid, frame.grid, focused)
+            frame.end(canvas, grid^)
+        else:
+            self.editor.paint(canvas, self.interior(), focused)
         canvas.font = prev
 
     def _paint_frameless(
@@ -1502,7 +1538,7 @@ struct Window(Copyable, Movable):
                 or self.rect.width() < 2 or self.rect.height() < 5:
             return VScrollbar(0, 0, -1, 0, 0, 0)
         var total = self.editor.buffer.line_count()
-        var max_y = self.editor.max_scroll_y(self.interior())
+        var max_y = self.editor.max_scroll_y(self.editor_view())
         var visible = total - max_y
         if visible < 1:
             visible = 1
@@ -1532,7 +1568,7 @@ struct Window(Copyable, Movable):
         # sizes to the visible text portion, and a drag/track-jump can reach the
         # last column. Mirrors ``_v_scrollbar``'s ``editor.max_scroll_y`` use.
         var total = self.editor.longest_line_width()
-        var visible = total - self.editor.max_scroll_x(self.interior())
+        var visible = total - self.editor.max_scroll_x(self.editor_view())
         if visible < 1:
             visible = 1
         return HScrollbar(
@@ -1581,7 +1617,7 @@ struct Window(Copyable, Movable):
         """Scroll the editor vertically by ``lines`` (negative = up). Cursor
         does not move; same convention as wheel scrolling."""
         if not self.is_editor: return
-        var max_y = self.editor.max_scroll_y(self.interior())
+        var max_y = self.editor.max_scroll_y(self.editor_view())
         var ny = self.editor.scroll_y + lines
         if ny < 0: ny = 0
         if ny > max_y: ny = max_y
@@ -1589,7 +1625,7 @@ struct Window(Copyable, Movable):
 
     def h_scroll_by(mut self, cols: Int):
         if not self.is_editor: return
-        var max_x = self.editor.max_scroll_x(self.interior())
+        var max_x = self.editor.max_scroll_x(self.editor_view())
         var nx = self.editor.scroll_x + cols
         if nx < 0: nx = 0
         if nx > max_x: nx = max_x
@@ -1637,7 +1673,7 @@ struct Window(Copyable, Movable):
         var f = target / Float64(denom)
         if f < 0.0: f = 0.0
         if f > 1.0: f = 1.0
-        self.editor.minimap_to(self.interior(), f)
+        self.editor.minimap_to(self.editor_view(), f)
 
     def h_drag_thumb_to(mut self, mouse_x: Int, drag_offset: Int):
         if not self.is_editor: return
@@ -1809,6 +1845,9 @@ struct WindowManager(Movable):
     var grid_bar: Bool
     """Tabbed windows paint their own scroll bar in the gutter (see
     ``Window.grid_bar``)."""
+    var code_scale_x: Int
+    var code_scale_y: Int
+    """Every window's ``Window.code_scale_x`` / ``_y``."""
 
     def __init__(out self):
         self.windows = List[Window]()
@@ -1833,8 +1872,20 @@ struct WindowManager(Movable):
         self.tabbed = False
         self.gutter = 0
         self.grid_bar = False
+        self.code_scale_x = SCALE_ONE
+        self.code_scale_y = SCALE_ONE
+
+    def set_code_scale(mut self, scale_x: Int, scale_y: Int):
+        """The code font's cell, in thousandths of the screen's."""
+        self.code_scale_x = scale_x
+        self.code_scale_y = scale_y
+        for i in range(len(self.windows)):
+            self.windows[i].code_scale_x = scale_x
+            self.windows[i].code_scale_y = scale_y
 
     def add(mut self, var window: Window):
+        window.code_scale_x = self.code_scale_x
+        window.code_scale_y = self.code_scale_y
         self.windows.append(window^)
         var idx = len(self.windows) - 1
         self.z_order.append(idx)
@@ -1896,7 +1947,7 @@ struct WindowManager(Movable):
         # could have shrunk underneath us between paints.
         for i in range(len(self.windows)):
             if self.windows[i].is_editor:
-                self.windows[i].editor.clamp_scroll(self.windows[i].interior())
+                self.windows[i].editor.clamp_scroll(self.windows[i].editor_view())
         self._last_workspace = workspace
         self._has_last_workspace = True
 
