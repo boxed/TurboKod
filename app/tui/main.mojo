@@ -38,8 +38,8 @@ from std.sys import argv
 from turbokod.app import Application
 from turbokod.colors import Attr, BLACK, LIGHT_GRAY
 from turbokod.events import (
-    EVENT_KEY, EVENT_MOUSE, EVENT_MOD_KEY, EVENT_OPEN_PATH, EVENT_PASTE,
-    EVENT_RESIZE,
+    EVENT_FOCUS_IN, EVENT_FOCUS_OUT, EVENT_KEY, EVENT_MOUSE, EVENT_MOD_KEY,
+    EVENT_OPEN_PATH, EVENT_PASTE, EVENT_RESIZE,
 )
 from turbokod.file_dialog import FileDialog
 from turbokod.host_abi import (
@@ -124,6 +124,20 @@ def _tk_mouse(
     return external_call["tk_desktop_mouse", Int32](
         h, x, y, button, pressed, motion, mods, cols, rows, click_count,
     )
+
+
+def _tk_focus(h: Int, on: Bool, cols: Int, rows: Int):
+    external_call["tk_desktop_focus", NoneType](
+        h, 1 if on else 0, cols, rows,
+    )
+
+
+def _tk_take_attention(h: Int) -> Int:
+    return Int(external_call["tk_desktop_take_attention", Int32](h))
+
+
+def _tk_attention_seen(h: Int, flash: Bool):
+    external_call["tk_desktop_attention_seen", NoneType](h, 1 if flash else 0)
 
 
 def _tk_paste(h: Int, ptr: Int, n: Int) -> Int32:
@@ -264,6 +278,9 @@ def main() raises:
 
     var layout_buf = List[UInt32]()
     var buf_cells = -1
+    # The terminal's focus, from its focus reports; a terminal that sends
+    # none counts as always focused.
+    var focused = True
 
     while app.running:
         if external_call["tk_quit_signal", Int32]() != 0:
@@ -275,6 +292,16 @@ def main() raises:
         # Core housekeeping: external reload, menu visibility, file-tree opens,
         # LSP/DAP/autosave ticks — all inside the dylib, like the Swift host.
         _tk_tick(h, cols, rows)
+
+        # A ping (a Claude turn finishing, a debugger stop) the user is
+        # looking at is seen at once; one that lands while the terminal
+        # is in the background rings the bell and stays unseen until the
+        # focus-in, which outlines where it came from.
+        if _tk_take_attention(h) > 0:
+            if focused:
+                _tk_attention_seen(h, False)
+            else:
+                app.terminal.bell()
 
         var tv = _tk_theme_version(h)
         if tv != last_theme_version:
@@ -305,6 +332,11 @@ def main() raises:
 
         # next_event already resized app.back; relayout next frame.
         if ev.kind == EVENT_RESIZE:
+            continue
+
+        if ev.kind == EVENT_FOCUS_IN or ev.kind == EVENT_FOCUS_OUT:
+            focused = ev.kind == EVENT_FOCUS_IN
+            _tk_focus(h, focused, cols, rows)
             continue
 
         # Pointer-shape hint. ``set_pointer_shape`` is a no-op unless launched

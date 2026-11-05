@@ -224,6 +224,16 @@ def main() raises:
                 desktop.dap_tick(app.screen())
                 desktop.terminal_tick()
                 desktop.save_actions_tick()
+                # A ping (a Claude turn finishing, a debugger stop) the
+                # user is looking at is seen at once; one landing while the
+                # terminal is in the background rings the bell and stays
+                # unseen until the focus-in (``handle_event``) outlines
+                # where it came from.
+                if desktop.take_attention_events() > 0:
+                    if desktop.host_focused:
+                        desktop.mark_attention_seen(False)
+                    else:
+                        app.terminal.bell()
                 if not maybe_ev:
                     continue
                 var ev = maybe_ev.value()

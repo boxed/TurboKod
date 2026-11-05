@@ -2643,6 +2643,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // macOS-style UI: native headers over the docked tool panes, per window
     // and keyed "kind:idx".
     var paneHeaders: [ObjectIdentifier: [String: PaneHeaderView]] = [:]
+    // The fading outlines around the panes a ping came from, per window and
+    // keyed "look:kind:idx" (`pollAttentionFlashes`).
+    var attentionFlashes: [ObjectIdentifier: [String: AttentionFlashView]] = [:]
     // macOS-style UI: an overlay scroller on the focused editor, per window.
     var scrollers: [ObjectIdentifier: EditorScroller] = [:]
     var treeBuf = [UInt8](repeating: 0, count: 1 << 16)
@@ -2662,23 +2665,90 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // changes). Any visible change resets `idleTicks` to 0 → full rate.
     private var idleTicks = 0
     private var tickSeq = 0
-    // Running Dock-badge count. Attention events (a Claude session in a
-    // terminal pane finishing its turn, the debugger hitting a stop) are
-    // drained from every project Desktop once per tick; while the app is
-    // in the background each batch bounces the Dock icon and adds to this
-    // count. While frontmost the events are discarded — the user is
-    // already looking. Cleared (badge removed) when the app activates.
+    // The Dock badge: pings (a Claude session in a terminal pane finishing
+    // its turn, the debugger hitting a stop) the user hasn't seen yet,
+    // summed over the project Desktops. A ping is seen once its project's
+    // window (main or floating panels) is key in the active app — at once
+    // if it already was, else when the user switches to it, which also
+    // outlines the pane it came from (`attentionWindowBecameKey`). So
+    // activating the app on another project leaves the badge up.
     private var attentionBadge = 0
 
     private func drainAttention() {
-        var n = 0
+        var fresh = 0, unseen = 0
+        let key = NSApp.isActive ? NSApp.keyWindow : nil
         for v in views where v.handle != 0 {
-            n += Int(tk_desktop_take_attention(v.handle))
+            fresh += Int(tk_desktop_take_attention(v.handle))
+            if let key, isProjectWindow(key, of: v) {
+                tk_desktop_attention_seen(v.handle, 0)
+            }
+            unseen += Int(tk_desktop_attention_unseen(v.handle))
         }
-        guard n > 0, !NSApp.isActive else { return }
-        attentionBadge += n
-        NSApp.dockTile.badgeLabel = String(attentionBadge)
-        NSApp.requestUserAttention(.informationalRequest)
+        if fresh > 0 && !NSApp.isActive {
+            NSApp.requestUserAttention(.informationalRequest)
+        }
+        if unseen != attentionBadge {
+            attentionBadge = unseen
+            NSApp.dockTile.badgeLabel = unseen > 0 ? String(unseen) : nil
+        }
+    }
+
+    /// Whether `w` is one of `v`'s project's windows: its own, or its
+    /// floating tool panels'.
+    private func isProjectWindow(_ w: NSWindow, of v: CellView) -> Bool {
+        w === v.window || w === panels[ObjectIdentifier(v)]?.window
+    }
+
+    /// A window became key: if it's a project's, the user is now looking at
+    /// that project, so its unseen pings are seen — each with an outline
+    /// around its pane that fades out over a second.
+    private func attentionWindowBecameKey(_ w: NSWindow) {
+        for v in views where v.handle != 0 && isProjectWindow(w, of: v) {
+            guard tk_desktop_attention_unseen(v.handle) > 0 else { continue }
+            tk_desktop_attention_seen(v.handle, 1)
+            idleTicks = 0   // full rate while the outline fades
+            v.invalidateFrame()
+            v.needsDisplay = true
+            if let pv = panels[ObjectIdentifier(v)]?.view {
+                pv.invalidateFrame()
+                pv.needsDisplay = true
+            }
+        }
+        drainAttention()
+    }
+
+    /// Lay (or lift) the attention outlines the core reports over `v`'s
+    /// panes, in the macOS and Mac OS 9 looks (the Turbo Vision look's are
+    /// in its cells).
+    func pollAttentionFlashes(_ v: CellView, panels: Bool = false) -> Bool {
+        let id = ObjectIdentifier(v)
+        let cols = Int64(v.cols()), rows = Int64(v.rows())
+        let data = readCoreJSON(&nativeDialogBuf, {
+            tk_desktop_attention_flashes(v.handle, panels ? 1 : 0, cols, rows, $0, $1)
+        })
+        let list = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [[String: Any]] } ?? []
+        var current = attentionFlashes[id] ?? [:]
+        if list.isEmpty && current.isEmpty { return false }
+        let platinum = tk_desktop_platinum_ui(v.handle) != 0
+        var seen = Set<String>()
+        for p in list {
+            let key = "\(platinum ? "p" : "n"):\(p["kind"] as? Int ?? 0):\(p["idx"] as? Int ?? 0)"
+            seen.insert(key)
+            let fv = current[key] ?? {
+                let f = AttentionFlashView(platinum: platinum)
+                v.addSubview(f, positioned: .above, relativeTo: nil)
+                current[key] = f
+                return f
+            }()
+            fv.update(p)
+        }
+        for (key, fv) in current where !seen.contains(key) {
+            fv.removeFromSuperview()
+            current[key] = nil
+        }
+        attentionFlashes[id] = current
+        // Keep the timer at full rate until the core retires the outline.
+        return true
     }
 
     /// Nudge the redraw timer out of deep idle on activity that doesn't
@@ -3016,6 +3086,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // while the window is covered.
                 if self.pollPaneHeaders(pv, panels: true) { changed = true }
                 if self.pollDebugInspect(pv, panels: true) { changed = true }
+                if self.pollAttentionFlashes(pv, panels: true) { changed = true }
                 guard let w = pv.window, w.isVisible,
                       w.occlusionState.contains(.visible) else { continue }
                 if pv.pollFrame() { pv.needsDisplay = true; changed = true }
@@ -3052,6 +3123,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if self.pollPaneHeaders(v) { changed = true }
                 if self.pollDebugInspect(v) { changed = true }
                 if self.pollScroller(v) { changed = true }
+                if self.pollAttentionFlashes(v) { changed = true }
             }
             self.drainAttention()
             self.idleTicks = changed ? 0 : self.idleTicks &+ 1
@@ -3064,13 +3136,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // next tick. Without this the menu / cursor briefly show stale
         // state on Cmd+Tab back to TurboKod.
         let nc = NotificationCenter.default
+        nc.addObserver(forName: NSWindow.didBecomeKeyNotification,
+                       object: nil, queue: .main) { [weak self] n in
+            guard let self, let w = n.object as? NSWindow else { return }
+            self.attentionWindowBecameKey(w)
+        }
         nc.addObserver(forName: NSApplication.didBecomeActiveNotification,
                        object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
             self.idleTicks = 0   // run full-rate after refocus
-            // The user is looking again — retire the attention badge.
-            self.attentionBadge = 0
-            NSApp.dockTile.badgeLabel = nil
             // Install/refresh the menu FIRST (app is active now, so it draws
             // with correct colors — no pre-active inverted-color blink).
             self.refreshMenu()
@@ -7745,6 +7819,84 @@ extension GitController: NSMenuDelegate {
             }
             add("Open in Editor") { [weak self] in self?.openCursor(dp) }
         }
+    }
+}
+
+/// The outline around the tool pane a ping (a Claude turn finishing, a
+/// debugger stop) came from, shown when the user switches to its window and
+/// fading out over the core's `ATTENTION_FLASH_MS`: the accent-colored
+/// rounded ring of the macOS look, or, in the Mac OS 9 look, a square
+/// Platinum ring that steps out the way that system's animations did. The
+/// core places it (`tk_desktop_attention_flashes`); the Turbo Vision look
+/// and the terminals draw theirs in cells.
+final class AttentionFlashView: NSView {
+    private let platinum: Bool
+    private var lastAge = Int.max
+
+    init(platinum: Bool) {
+        self.platinum = platinum
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.opacity = 0
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override var isFlipped: Bool { true }
+
+    /// Decoration only: clicks go through to the pane.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if platinum {
+            NSColor.black.setFill()
+            bounds.frame(withWidth: 1)
+            Platinum.accent.setFill()
+            bounds.insetBy(dx: 1, dy: 1).frame(withWidth: 2)
+            Platinum.lavender.setFill()
+            bounds.insetBy(dx: 3, dy: 3).frame(withWidth: 1)
+        } else {
+            let ring = NSBezierPath(roundedRect: bounds.insetBy(dx: 1.5, dy: 1.5), xRadius: 6, yRadius: 6)
+            NSColor.controlAccentColor.withAlphaComponent(0.08).setFill()
+            ring.fill()
+            NSColor.controlAccentColor.setStroke()
+            ring.lineWidth = 3
+            ring.stroke()
+        }
+    }
+
+    func update(_ p: [String: Any]) {
+        let f = NSRect(x: CGFloat(p["x"] as? Int ?? 0) * CELL_W, y: CGFloat(p["y"] as? Int ?? 0) * CELL_H,
+                       width: CGFloat(p["w"] as? Int ?? 0) * CELL_W, height: CGFloat(p["h"] as? Int ?? 0) * CELL_H)
+        if frame != f { frame = f; needsDisplay = true }
+        let age = p["age"] as? Int ?? 0
+        // A younger age than last time is a fresh flash: (re)start the fade.
+        if age < lastAge { fade(from: age) }
+        lastAge = age
+    }
+
+    private func fade(from age: Int) {
+        guard let layer else { return }
+        let remaining = max(0.05, 1.0 - Double(age) / 1000)
+        layer.removeAllAnimations()
+        layer.opacity = 0   // where it ends up
+        let a: CAAnimation
+        if platinum {
+            let k = CAKeyframeAnimation(keyPath: "opacity")
+            k.values = [1, 1, 0.66, 0.33, 0]
+            k.keyTimes = [0, 0.35, 0.6, 0.8, 1]
+            k.calculationMode = .discrete
+            a = k
+        } else {
+            let b = CABasicAnimation(keyPath: "opacity")
+            b.fromValue = 1
+            b.toValue = 0
+            // Ease-in, like the cell-drawn outline: hold, then fall away.
+            b.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            a = b
+        }
+        a.duration = remaining
+        layer.add(a, forKey: "fade")
     }
 }
 

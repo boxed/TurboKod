@@ -16,8 +16,9 @@ from .canvas import Canvas, SCALE_ONE, paint_drop_shadow
 from .painter import Painter
 from .cell import Cell, FONT_CODE
 from .colors import (
-    Attr, BORDER_FOCUS, DARK_GRAY, EDITOR_BG, EDITOR_FG, GREEN, LIGHT_GRAY,
-    LIGHT_YELLOW, PANE_BG, PANE_FG, WHITE, YELLOW,
+    Attr, BG_TRUECOLOR, BLACK, BORDER_FOCUS, DARK_GRAY, EDITOR_BG, EDITOR_FG,
+    FG_TRUECOLOR, GREEN, LIGHT_GRAY, LIGHT_YELLOW, PANE_BG, PANE_FG, WHITE,
+    YELLOW, blend_rgb,
 )
 from .editor import EXT_CHANGE_CONFLICT, Editor
 from .events import (
@@ -346,6 +347,10 @@ comptime PANEL_STATE_MAXIMIZED = UInt8(2)
 comptime PANEL_STATE_NONE      = UInt8(255)
 """``BottomDockedPanel.yielded`` when the panel isn't yielding."""
 
+# How long the outline marking where a ping came from takes to fade out
+# once the user switches to its window.
+comptime ATTENTION_FLASH_MS = 1000
+
 
 def paint_panel_button(
     mut canvas: Canvas, painter: Painter,
@@ -542,6 +547,19 @@ struct BottomDockedPanel(Copyable, Movable):
     """True once ``coalesce_dock_states`` has seen this panel maximized,
     so a pane maximized after it wins over it."""
 
+    var attention_unseen: Int
+    """Attention events (a Claude turn finishing, a debugger stop) this
+    panel raised that the user hasn't seen yet: drained into here by
+    ``Desktop.take_attention_events`` and cleared by
+    ``Desktop.mark_attention_seen`` once the user is looking at the
+    panel's window. The Dock badge counts these."""
+
+    var flash_start_ms: Int
+    """``monotonic_ms`` when the "this is where the ping came from"
+    outline started, -1 when none is showing. Set when unseen pings
+    become seen by the user switching to the window; the outline fades
+    out over ``ATTENTION_FLASH_MS``. See ``Desktop.attention_flashes``."""
+
     def __init__(out self, preferred_height: Int = 14):
         self.state = PANEL_STATE_NORMAL
         self.preferred_height = preferred_height
@@ -555,6 +573,8 @@ struct BottomDockedPanel(Copyable, Movable):
         self.resize_grab = 0
         self.yielded = PANEL_STATE_NONE
         self.max_acked = False
+        self.attention_unseen = 0
+        self.flash_start_ms = -1
 
     def header_rows(self) -> Int:
         """Rows the header takes: one in the grid, two under the host's
@@ -563,6 +583,19 @@ struct BottomDockedPanel(Copyable, Movable):
 
     def is_minimized(self) -> Bool:
         return self.state == PANEL_STATE_MINIMIZED
+
+    def flash_age(mut self, now_ms: Int) -> Int:
+        """Milliseconds into this panel's attention outline, or -1 when
+        none is showing (an expired one is cleared here)."""
+        if self.flash_start_ms < 0:
+            return -1
+        var age = now_ms - self.flash_start_ms
+        if age < 0:
+            age = 0
+        if age >= ATTENTION_FLASH_MS:
+            self.flash_start_ms = -1
+            return -1
+        return age
 
     def is_maximized(self) -> Bool:
         return self.state == PANEL_STATE_MAXIMIZED
@@ -686,6 +719,64 @@ def coalesce_dock_states(mut docks: List[BottomDockedPanel]):
         docks[i].set_state(PANEL_STATE_MINIMIZED)
     docks[winner].max_acked = True
     docks[winner].yielded = PANEL_STATE_NONE
+
+
+def attention_flash_strength(age_ms: Int) -> Int:
+    """How strongly (0-100%) the attention outline shows ``age_ms`` into
+    its ``ATTENTION_FLASH_MS``: an ease-in, so it holds near full for a
+    beat and then falls away — a linear fade reads as already dim."""
+    if age_ms < 0 or age_ms >= ATTENTION_FLASH_MS:
+        return 0
+    return 100 - (age_ms * age_ms * 100) // (
+        ATTENTION_FLASH_MS * ATTENTION_FLASH_MS
+    )
+
+
+def _resolved_rgb(
+    index: UInt8, truecolor: Bool, rgb: UInt32, palette: List[UInt32],
+) -> UInt32:
+    if truecolor:
+        return rgb
+    if Int(index) < len(palette):
+        return palette[Int(index)]
+    return UInt32(0)
+
+
+def paint_attention_outline(
+    mut canvas: Canvas, rect: Rect, age_ms: Int, palette: List[UInt32],
+):
+    """The cell-drawn "this is where the ping came from" outline (the
+    Turbo Vision look and the terminal frontends; the macOS and Mac OS 9
+    looks draw theirs in pixels over the pane): retint the perimeter of
+    ``rect`` toward the theme's bright yellow, fading with ``age_ms``.
+
+    Glyphs are kept. The header row also pulls its text toward black so
+    the title stays legible on the highlight; the body's edge cells only
+    change background. Blends off the resolved palette RGB, so a fade is
+    a smooth truecolor ramp in any theme rather than a palette jump."""
+    var pct = attention_flash_strength(age_ms)
+    if pct <= 0 or rect.is_empty():
+        return
+    var hl = _resolved_rgb(LIGHT_YELLOW, False, 0, palette)
+    var ink = _resolved_rgb(BLACK, False, 0, palette)
+    var r = rect.intersect(canvas.bounds())
+    for y in range(r.a.y, r.b.y):
+        var edge_row = y == rect.a.y or y == rect.b.y - 1
+        for x in range(r.a.x, r.b.x):
+            if not edge_row and x != rect.a.x and x != rect.b.x - 1:
+                continue
+            var a = canvas.get(x, y).attr
+            var bg = _resolved_rgb(
+                a.bg, (a.color_mode & BG_TRUECOLOR) != 0, a.bg_rgb, palette,
+            )
+            var out = a.with_bg_rgb(blend_rgb(bg, hl, pct))
+            if y == rect.a.y:
+                var fg = _resolved_rgb(
+                    a.fg, (a.color_mode & FG_TRUECOLOR) != 0, a.fg_rgb,
+                    palette,
+                )
+                out = out.with_fg_rgb(blend_rgb(fg, ink, pct))
+            canvas.set_attr(x, y, out)
 
 
 def paint_bottom_dock_chrome(

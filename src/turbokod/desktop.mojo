@@ -266,7 +266,7 @@ from .window import (
     PANEL_STATE_MAXIMIZED, PANEL_STATE_MINIMIZED, PANEL_STATE_NORMAL,
     TitleCommand, Window, WindowManager,
     close_button_clicked, compute_display_titles, hit_title_command,
-    paint_close_button,
+    paint_attention_outline, paint_close_button,
 )
 
 
@@ -933,6 +933,18 @@ struct PanelSlot(ImplicitlyCopyable, Movable):
     var kind: Int
     var idx: Int
     var rect: Rect
+
+
+@fieldwise_init
+struct AttentionFlash(ImplicitlyCopyable, Movable):
+    """One pane's "this is where the ping came from" outline: the pane
+    (``kind`` a ``PANEL_KIND_*``, ``idx`` its ``terminal_panes`` index),
+    its rect on the surface, and ``age_ms`` into the fade. See
+    ``Desktop.attention_flashes``."""
+    var kind: Int
+    var idx: Int
+    var rect: Rect
+    var age_ms: Int
 
 
 @fieldwise_init
@@ -3580,6 +3592,7 @@ struct Desktop(Movable):
                 )
             else:
                 self.test_pane.paint(canvas, s.rect)
+        self._paint_attention_flashes(canvas, screen, True)
 
     def _panel_slot_handle_mouse(
         mut self, kind: Int, idx: Int, event: Event, rect: Rect,
@@ -5041,6 +5054,7 @@ struct Desktop(Movable):
                     self.grammar_registry,
                 )
                 self.test_pane.paint(canvas, self.test_pane_rect(screen))
+                self._paint_attention_flashes(canvas, screen, False)
             # Swift/AppKit host owns the menu — see `host_owns_menu`. Skip
             # the in-grid paint so the top row stays clear for other content.
             if not self.host_owns_menu:
@@ -8103,6 +8117,13 @@ struct Desktop(Movable):
             var fwd = event.kind == EVENT_FOCUS_IN
             for i in range(len(self.terminal_panes)):
                 self.terminal_panes[i].notify_focus_change(fwd)
+            # Only the terminal frontends report focus as events (the
+            # native host sets ``host_focused`` per frame), so this is
+            # their window focus — and switching back to it is the user
+            # seeing whatever pinged meanwhile.
+            self.host_focused = fwd
+            if fwd:
+                self.mark_attention_seen(True)
         # Track the cursor on the status bar's message rect so the
         # hover-tooltip dwell timer can fire on a long pause. Done
         # before any modal short-circuits below so a tooltip that
@@ -12919,14 +12940,98 @@ struct Desktop(Movable):
         """Drain and return every pending attention event: Desktop-level
         ones (debugger stops) plus each terminal pane's Claude-state
         transitions (working → waiting/done). The host polls this once
-        per tick; events raised while the app is frontmost are drained
-        all the same and simply discarded by the host, so they never
-        pile up and fire stale."""
+        per tick.
+
+        Each drained event also lands on its origin pane's
+        ``dock.attention_unseen`` (a debugger stop on the debug pane's):
+        a ping stays unseen — and on the Dock badge — until the user is
+        looking at this Desktop's window. The host answers that with
+        ``mark_attention_seen``: right away when the window already has
+        the focus, with ``flash=True`` when the user switches to it."""
         var n = self.attention_events
+        self.debug_pane.dock.attention_unseen += self.attention_events
         self.attention_events = 0
         for i in range(len(self.terminal_panes)):
-            n += self.terminal_panes[i].take_attention()
+            var k = self.terminal_panes[i].take_attention()
+            self.terminal_panes[i].dock.attention_unseen += k
+            n += k
         return n
+
+    def attention_unseen(self) -> Int:
+        """Pings drained by ``take_attention_events`` that the user hasn't
+        seen yet — this Desktop's share of the Dock badge."""
+        var n = self.debug_pane.dock.attention_unseen
+        for i in range(len(self.terminal_panes)):
+            n += self.terminal_panes[i].dock.attention_unseen
+        return n
+
+    def mark_attention_seen(mut self, flash: Bool):
+        """The user is looking at this Desktop's window: every unseen ping
+        is seen. With ``flash`` (they just switched to it) each pane a
+        ping came from gets an outline that fades out over
+        ``ATTENTION_FLASH_MS``, so it's clear which one wanted them."""
+        var now = monotonic_ms()
+        if self.debug_pane.dock.attention_unseen > 0:
+            self.debug_pane.dock.attention_unseen = 0
+            if flash:
+                self.debug_pane.dock.flash_start_ms = now
+        for i in range(len(self.terminal_panes)):
+            if self.terminal_panes[i].dock.attention_unseen > 0:
+                self.terminal_panes[i].dock.attention_unseen = 0
+                if flash:
+                    self.terminal_panes[i].dock.flash_start_ms = now
+
+    def attention_flashes(
+        mut self, screen: Rect, panels: Bool,
+    ) -> List[AttentionFlash]:
+        """The attention outlines showing on one surface: the main window
+        (``panels=False``, only while the panes are docked) or the
+        floating-panels window. Each is the pane's whole rect and how far
+        into its fade it is."""
+        var out = List[AttentionFlash]()
+        if panels != self.panels_detached:
+            return out^
+        var now = monotonic_ms()
+        if panels:
+            var slots = self._panel_window_slots(screen)
+            for ref s in slots:
+                if s.rect.is_empty():
+                    continue
+                var age = -1
+                if s.kind == PANEL_KIND_TERMINAL:
+                    age = self.terminal_panes[s.idx].dock.flash_age(now)
+                elif s.kind == PANEL_KIND_DEBUG:
+                    age = self.debug_pane.dock.flash_age(now)
+                if age >= 0:
+                    out.append(AttentionFlash(s.kind, s.idx, s.rect, age))
+            return out^
+        for i in range(len(self.terminal_panes)):
+            var age = self.terminal_panes[i].dock.flash_age(now)
+            if age >= 0:
+                var r = self.terminal_pane_rect(screen, i)
+                if not r.is_empty():
+                    out.append(AttentionFlash(PANEL_KIND_TERMINAL, i, r, age))
+        if self.debug_pane.visible:
+            var age = self.debug_pane.dock.flash_age(now)
+            if age >= 0:
+                var r = self.debug_pane_rect(screen)
+                if not r.is_empty():
+                    out.append(AttentionFlash(PANEL_KIND_DEBUG, 0, r, age))
+        return out^
+
+    def _paint_attention_flashes(
+        mut self, mut canvas: Canvas, screen: Rect, panels: Bool,
+    ):
+        """Draw the attention outlines in cells — unless the host draws the
+        pane chrome (the macOS and Mac OS 9 looks), in which case it draws
+        them in pixels from ``tk_desktop_attention_flashes``."""
+        if self.host_pane_headers():
+            return
+        var flashes = self.attention_flashes(screen, panels)
+        for ref f in flashes:
+            paint_attention_outline(
+                canvas, f.rect, f.age_ms, self.active_theme.palette,
+            )
 
     def consume_panel_focus_request(mut self) -> Bool:
         """Drain the one-shot ``panel_focus_request`` flag. True exactly

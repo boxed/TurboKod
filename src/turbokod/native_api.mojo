@@ -934,6 +934,75 @@ def tk_desktop_take_attention(h: Int) abi("C") -> Int32:
 
 
 @export
+def tk_desktop_attention_unseen(h: Int) abi("C") -> Int32:
+    """Pings this Desktop raised that the user hasn't seen yet — summed
+    over the project windows, the Dock badge. A ping stays unseen until
+    the host calls ``tk_desktop_attention_seen``."""
+    if h == 0:
+        return Int32(0)
+    return Int32(_desk(h)[].attention_unseen())
+
+
+@export
+def tk_desktop_attention_seen(h: Int, flash: Int) abi("C"):
+    """The user is looking at this Desktop's window (its main or floating-
+    panels window is key in the active app). ``flash=1`` when they just
+    switched to it: each pane a ping came from gets an outline that fades
+    out over a second (``tk_desktop_attention_flashes``)."""
+    if h == 0:
+        return
+    _desk(h)[].mark_attention_seen(flash != 0)
+
+
+@export
+def tk_desktop_attention_flashes(
+    h: Int, panels: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
+) abi("C") -> Int:
+    """The attention outlines the host draws (macOS and Mac OS 9 looks; the
+    core paints them in cells otherwise) on the main window (``panels=0``)
+    or the floating-panels window: an array of ``{kind, idx, x, y, w, h,
+    age}`` in cells, ``age`` ms into the ``ATTENTION_FLASH_MS`` fade (an
+    age lower than last time is a fresh flash of the same pane). 0 when
+    none is showing."""
+    if h == 0:
+        return 0
+    ref d = _desk(h)[]
+    if not d.host_pane_headers():
+        return 0
+    var flashes = d.attention_flashes(Rect(0, 0, cols, rows), panels != 0)
+    if len(flashes) == 0:
+        return 0
+    var a = json_array()
+    for ref f in flashes:
+        var o = json_object()
+        o.put(String("kind"), json_int(f.kind))
+        o.put(String("idx"), json_int(f.idx))
+        o.put(String("x"), json_int(f.rect.a.x))
+        o.put(String("y"), json_int(f.rect.a.y))
+        o.put(String("w"), json_int(f.rect.width()))
+        o.put(String("h"), json_int(f.rect.height()))
+        o.put(String("age"), json_int(f.age_ms))
+        a.append(o^)
+    return _write_out(encode_json(a), out_ptr, cap)
+
+
+@export
+def tk_desktop_focus(h: Int, on: Int, cols: Int, rows: Int) abi("C"):
+    """The terminal's focus-in / focus-out report (``CSI I`` / ``CSI O``),
+    from ``tk-tui``: the same ``EVENT_FOCUS_*`` the standalone terminal
+    build feeds ``handle_event`` (autosave on focus-out, forwarding to
+    the terminal panes, seeing pings on focus-in)."""
+    if h == 0:
+        return
+    try:
+        _ = _desk(h)[].handle_event(
+            Event.focus_event(on != 0), Rect(0, 0, cols, rows),
+        )
+    except e:
+        print("turbokod: tk_desktop_focus:", String(e))
+
+
+@export
 def tk_desktop_take_panel_focus_request(h: Int) abi("C") -> Int32:
     """Drain the one-shot "focus the panel window" request. Returns 1
     exactly once after the user explicitly opens a new terminal pane,

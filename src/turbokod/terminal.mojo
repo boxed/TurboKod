@@ -311,6 +311,14 @@ struct Terminal:
     def _query_size_via_cursor(mut self) -> Tuple[Int, Int]:
         return query_size_via_cursor(STDIN_FD, STDOUT_FD)
 
+    def bell(mut self):
+        """Ring the terminal bell (BEL). Terminals turn it into whatever
+        "something wants you" signal they have — a Dock bounce or badge,
+        a tab marker — so it's how a ping reaches a user who has
+        switched away from the terminal."""
+        if self._started:
+            write_string(STDOUT_FD, String("\x07"))
+
     def set_pointer_shape(mut self, shape: String) raises:
         """Ask the host to display ``shape`` as the mouse-pointer icon.
 

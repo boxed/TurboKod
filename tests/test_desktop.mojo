@@ -69,7 +69,10 @@ from turbokod.prompt import (
 from turbokod.terminal_pane import TerminalPane
 from turbokod.vt import vt_live_count
 from turbokod.view import Fill, Label, centered
-from turbokod.window import Window
+from turbokod.window import (
+    ATTENTION_FLASH_MS, Window, attention_flash_strength,
+    paint_attention_outline,
+)
 
 from support import (
     _canvas_row, _doc_paths, _docs_contains, _ensure_dir, _key, _ps_open,
@@ -98,6 +101,87 @@ def test_desktop_take_attention_drains_panes_and_dap() raises:
     d.terminal_panes[0]._note_claude_state(CLAUDE_WAITING, 2000)
     assert_equal(d.take_attention_events(), 2)
     assert_equal(d.take_attention_events(), 0)   # drained
+
+
+def test_attention_stays_unseen_until_seen_then_flashes_its_pane() raises:
+    """A drained ping counts toward the badge until the user looks at its
+    window; seeing it with ``flash`` outlines the pane it came from, and
+    only that pane."""
+    var d = Desktop()
+    d.terminal_panes.append(TerminalPane())
+    d.terminal_panes.append(TerminalPane())
+    d.terminal_panes[1]._note_claude_state(CLAUDE_WORKING, 0)
+    d.terminal_panes[1]._note_claude_state(CLAUDE_WAITING, 0)
+    d.terminal_panes[1]._note_claude_state(CLAUDE_WAITING, 2000)
+    d.attention_events = 1                       # a debugger stop
+    assert_equal(d.take_attention_events(), 2)
+    assert_equal(d.attention_unseen(), 2)
+    assert_equal(d.take_attention_events(), 0)
+    assert_equal(d.attention_unseen(), 2)        # draining isn't seeing
+    var screen = Rect(0, 0, 120, 40)
+    assert_equal(len(d.attention_flashes(screen, False)), 0)
+    d.mark_attention_seen(True)
+    assert_equal(d.attention_unseen(), 0)
+    var flashes = d.attention_flashes(screen, False)
+    # The debug pane isn't open, so only the terminal pane shows one.
+    assert_equal(len(flashes), 1)
+    assert_equal(flashes[0].idx, 1)
+    assert_true(flashes[0].rect == d.terminal_pane_rect(screen, 1))
+    # The floating-panels surface doesn't show the docked panes' outline.
+    assert_equal(len(d.attention_flashes(screen, True)), 0)
+    # Past the fade it's gone.
+    d.terminal_panes[1].dock.flash_start_ms -= ATTENTION_FLASH_MS
+    assert_equal(len(d.attention_flashes(screen, False)), 0)
+
+
+def test_attention_seen_while_looking_does_not_flash() raises:
+    """A ping the user saw arrive (its window had the focus) is just seen:
+    no outline."""
+    var d = Desktop()
+    d.terminal_panes.append(TerminalPane())
+    d.terminal_panes[0]._note_claude_state(CLAUDE_WORKING, 0)
+    d.terminal_panes[0]._note_claude_state(CLAUDE_WAITING, 0)
+    d.terminal_panes[0]._note_claude_state(CLAUDE_WAITING, 2000)
+    _ = d.take_attention_events()
+    d.mark_attention_seen(False)
+    assert_equal(d.attention_unseen(), 0)
+    d.mark_attention_seen(True)                  # nothing left to flash
+    assert_equal(len(d.attention_flashes(Rect(0, 0, 120, 40), False)), 0)
+
+
+def test_focus_in_sees_pings_with_an_outline() raises:
+    """The terminal frontends' focus-in is the user coming back: unseen
+    pings are seen and outlined; focus-out clears ``host_focused``."""
+    var d = Desktop()
+    var screen = Rect(0, 0, 120, 40)
+    d.terminal_panes.append(TerminalPane())
+    _ = d.handle_event(Event.focus_event(False), screen)
+    assert_false(d.host_focused)
+    d.terminal_panes[0].dock.attention_unseen = 1
+    _ = d.handle_event(Event.focus_event(True), screen)
+    assert_true(d.host_focused)
+    assert_equal(d.attention_unseen(), 0)
+    assert_equal(len(d.attention_flashes(screen, False)), 1)
+
+
+def test_attention_outline_retints_the_perimeter_and_fades() raises:
+    """The cell outline changes the rect's edge cells, not its inside, and
+    is gone at the end of the fade."""
+    var palette = Desktop().active_theme.palette.copy()
+    var c = Canvas(20, 10)
+    c.clear(default_attr())
+    var r = Rect(2, 2, 12, 8)
+    var before = c.get(5, 5).attr
+    paint_attention_outline(c, r, 0, palette)
+    assert_true(c.get(2, 2).attr != before)      # header row
+    assert_true(c.get(2, 5).attr != before)      # left edge
+    assert_true(c.get(11, 5).attr != before)     # right edge
+    assert_true(c.get(5, 7).attr != before)      # bottom row
+    assert_true(c.get(5, 5).attr == before)      # inside untouched
+    assert_true(c.get(1, 5).attr == before)      # outside untouched
+    assert_equal(attention_flash_strength(0), 100)
+    assert_true(attention_flash_strength(500) < 100)
+    assert_equal(attention_flash_strength(ATTENTION_FLASH_MS), 0)
 
 
 def test_open_file_at_golden_when_already_open() raises:

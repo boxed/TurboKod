@@ -283,6 +283,15 @@ int32_t tk_desktop_debug_stopped(int64_t h);
 // stop) accumulated since the last call. Polled per tick; while the app is
 // in the background each batch bounces the Dock icon and bumps the badge.
 int32_t tk_desktop_take_attention(int64_t h);
+// Pings the user hasn't seen yet (the Dock badge's share of this Desktop).
+int32_t tk_desktop_attention_unseen(int64_t h);
+// The user is looking at this project's window; flash=1 when they just
+// switched to it, which outlines the panes the pings came from.
+void tk_desktop_attention_seen(int64_t h, int64_t flash);
+// The outlines the host draws (macOS / Mac OS 9 looks) on the main window
+// (panels=0) or the floating-panels window: [{kind, idx, x, y, w, h, age}].
+int64_t tk_desktop_attention_flashes(int64_t h, int64_t panels, int64_t cols, int64_t rows,
+                                     int64_t out_ptr, int64_t cap);
 
 // One-shot: returns 1 once after the user explicitly opens a new terminal pane,
 // 0 otherwise. With the tool panels floating on their own window, the host uses
