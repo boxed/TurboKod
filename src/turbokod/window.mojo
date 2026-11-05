@@ -868,6 +868,15 @@ def handle_bottom_dock_chrome_mouse(
         var on_header = event.pos.y >= panel.a.y \
             and event.pos.y < panel.a.y + dock.header_rows() \
             and event.pos.x >= panel.a.x and event.pos.x < panel.b.x
+        # A double click on the header rolls the pane up to it and back,
+        # as the minimize button does (the first click's resize drag
+        # ended without moving).
+        if on_header and event.click_count == 2:
+            if dock.state == PANEL_STATE_MINIMIZED:
+                dock.set_state(PANEL_STATE_NORMAL)
+            else:
+                dock.set_state(PANEL_STATE_MINIMIZED)
+            return DockChromeMouseResult(True, True)
         if allow_resize and dock.state == PANEL_STATE_NORMAL and on_header:
             dock.resizing = True
             dock.resize_grab = event.pos.y - panel.a.y

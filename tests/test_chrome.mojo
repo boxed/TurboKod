@@ -1207,6 +1207,41 @@ def test_floating_panel_splitter_drag_resizes_upper_pane() raises:
     assert_false(d.debug_pane.dock.is_resizing())
 
 
+def _double_click_panels(mut d: Desktop, p: Point, screen: Rect) raises:
+    for n in range(1, 3):
+        _ = d.handle_panels_event(
+            Event.mouse_event(
+                p, MOUSE_BUTTON_LEFT, True, False, click_count=UInt8(n),
+            ),
+            screen,
+        )
+        _ = d.handle_panels_event(
+            Event.mouse_event(p, MOUSE_BUTTON_LEFT, False, False), screen,
+        )
+
+
+def test_double_click_on_a_panel_header_toggles_minimized() raises:
+    """A double click on a pane's header rolls it up to the header and
+    back — in the floating window too, where that row is also the
+    splitter with the pane above, which must not resize."""
+    var d = Desktop()
+    d.debug_pane.visible = True
+    d.test_pane.visible = True
+    d.panels_detached = True
+    var screen = Rect(0, 0, 80, 40)
+    _double_click_panels(d, Point(60, 14), screen)
+    assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_MINIMIZED))
+    assert_equal(Int(d.debug_pane.dock.state), Int(PANEL_STATE_NORMAL))
+    assert_equal(d.debug_pane.dock.preferred_height, 14)
+    assert_false(d.debug_pane.dock.is_resizing())
+    # Minimized, its header is the window's last row.
+    _double_click_panels(d, Point(60, 39), screen)
+    assert_equal(Int(d.test_pane.dock.state), Int(PANEL_STATE_NORMAL))
+    # The top pane's header has no splitter.
+    _double_click_panels(d, Point(60, 0), screen)
+    assert_equal(Int(d.debug_pane.dock.state), Int(PANEL_STATE_MINIMIZED))
+
+
 def test_floating_panel_top_border_does_not_self_resize() raises:
     """A press on the *first* panel's top border (the window's top row,
     no splitter above it) must not start a resize — only focus. The

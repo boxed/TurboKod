@@ -3756,8 +3756,10 @@ struct Desktop(Movable):
             self._panel_dock_set_preferred(s.kind, s.idx, want)
             return True
         # A fresh press on a splitter starts resizing the panel above it.
+        # Not a double click: that's the lower panel's header toggling
+        # minimized (``handle_bottom_dock_chrome_mouse``).
         if event.button == MOUSE_BUTTON_LEFT and event.pressed \
-                and not event.motion:
+                and not event.motion and event.click_count < 2:
             var upper = self._panel_splitter_upper(slots, event.pos)
             if upper >= 0:
                 self._panel_dock_set_resizing(
