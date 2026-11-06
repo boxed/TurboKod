@@ -650,6 +650,13 @@ final class CellView: NSView {
     private var subGlyphCaches: [String: [UInt64: CachedGlyph]] = [:]
     private var glyphCacheScale: CGFloat = 0
     private var springLastTime: CFTimeInterval = 0
+    // Wall time (CACurrentMediaTime) the ease last stepped, or was started.
+    // A display link that stops firing (its window went off screen mid-ease)
+    // would otherwise leave `springRunning` true forever, and every later
+    // `easeTo` — the mouse wheel's only path — would just retarget a dead
+    // animation: the wheel goes inert in that window until a trackpad
+    // gesture happens to cancel it.
+    private var springLastStep: CFTimeInterval = 0
     // Per-run easing factor for the spring timer (fraction of the remaining
     // distance closed each 120 Hz tick). The post-gesture rubber-band release
     // wants a brisker snap than the mouse-wheel glide.
@@ -1714,7 +1721,11 @@ final class CellView: NSView {
     private func easeTo(_ target: CGFloat, speed: CGFloat = 0.30) {
         springTarget = target
         springSpeed = speed
-        if springRunning { return }
+        if springRunning {
+            if CACurrentMediaTime() - springLastStep < 0.25 { return }
+            cancelSpring()      // stalled: restart it below
+        }
+        springLastStep = CACurrentMediaTime()
         if #available(macOS 14.0, *) {
             let link = displayLink(target: self, selector: #selector(springFrame(_:)))
             link.add(to: .main, forMode: .common)
@@ -1743,6 +1754,7 @@ final class CellView: NSView {
     /// fraction of the remaining distance closed per 1/120 s, so the feel is
     /// the same at any refresh rate.
     private func springStep(_ dt: CFTimeInterval) {
+        springLastStep = CACurrentMediaTime()
         let a = 1 - pow(1 - springSpeed, CGFloat(dt * 120))
         smoothLines += (springTarget - smoothLines) * a
         if abs(smoothLines - springTarget) < 0.01 {
