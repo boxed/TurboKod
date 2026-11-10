@@ -3413,7 +3413,7 @@ def test_shutdown_reaps_an_in_flight_on_save_child() raises:
     d.pending_save_actions.append(
         PendingSaveAction(
             proc.pid, proc.stdout_fd, proc.stderr_fd,
-            String("sleep"), String(""),
+            String("sleep"), String(""), List[UInt8](), List[UInt8](),
         )
     )
     # Still alive going in, so the assertions below can't pass by accident.

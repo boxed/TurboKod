@@ -21,6 +21,9 @@ from .string_utils import display_columns
 from .anchored_menu import anchored_menu_rect
 
 
+comptime _MESSAGE_HOLD_MS = 5000
+
+
 # Braille spinner frames. ~80 ms per frame ⇒ one full rotation per 800 ms,
 # fast enough to read as "working" without flicker. The status bar paints
 # once per app frame (≈20 fps), so each cycle through this list takes
@@ -115,6 +118,8 @@ struct StatusBar(Movable):
     # also active).
     var message_owner: String
     var message_spinner: Bool    # True ⇒ animated braille spinner prefixed to the message
+    # When ``message`` was set (``monotonic_ms``), for ``holds_message``.
+    var message_set_ms: Int
     # Hover tooltip: longer-form description shown when the cursor
     # rests on the message rect for ``_TOOLTIP_HOVER_MS``. Set
     # alongside ``message`` via ``set_message(tooltip=...)``; empty
@@ -152,6 +157,7 @@ struct StatusBar(Movable):
         self.message_clickable = False
         self.message_owner = String("")
         self.message_spinner = False
+        self.message_set_ms = 0
         self.message_tooltip = String("")
         self._hover_since_ms = -1
         self._hover_x = 0
@@ -198,6 +204,17 @@ struct StatusBar(Movable):
         self.message_spinner = spinner
         self.message_tooltip = tooltip^
         self.message_owner = owner^
+        self.message_set_ms = monotonic_ms()
+
+    def holds_message(self, now_ms: Int) -> Bool:
+        """Whether a one-off message (set without an ``owner``: an
+        on-save result, a find count) is still young enough to keep the
+        slot. The LSP and DAP indicators rewrite it every frame, so
+        without this they'd replace such a message before it was ever
+        seen; they wait ``_MESSAGE_HOLD_MS`` instead."""
+        return len(self.message_owner.as_bytes()) == 0 \
+            and len(self.message.as_bytes()) > 0 \
+            and now_ms - self.message_set_ms < _MESSAGE_HOLD_MS
 
     def set_tabs(
         mut self, var tabs: List[StatusTab], active_tab: Int,

@@ -31,7 +31,7 @@ from turbokod.buttons import (
 )
 from turbokod.status import StatusBar, StatusTab
 from turbokod.string_utils import utf8_cell_of_byte, utf8_byte_of_cell
-from turbokod.posix import which
+from turbokod.posix import monotonic_ms, which
 from turbokod.settings import Settings
 from turbokod.canvas import paint_drop_shadow
 from turbokod.terminal_pane import TerminalPane
@@ -1434,6 +1434,23 @@ def test_opening_a_picker_over_another_hands_it_the_keyboard() raises:
     assert_true(d.find_symbol.active)
     _ = d.handle_event(Event.key_event(UInt32(ord("x"))), _SCREEN)
     assert_equal(d.find_symbol.query.text, String("x"))
+
+
+def test_a_one_off_status_message_holds_the_slot_for_a_while() raises:
+    # The LSP and DAP indicators rewrite the slot every frame; they wait
+    # while this says so, or an on-save result is gone before it's seen.
+    var sb = StatusBar()
+    var now = monotonic_ms()
+    assert_false(sb.holds_message(now))
+    sb.set_message(String("on-save: ruff exit 2"), Attr(BLACK, LIGHT_GRAY))
+    assert_true(sb.holds_message(now))
+    assert_false(sb.holds_message(now + 60_000))
+    # An indicator's own message never holds off the next refresh.
+    sb.set_message(
+        String("LSP[python]: ready"), Attr(BLACK, LIGHT_GRAY),
+        owner=String("lsp"),
+    )
+    assert_false(sb.holds_message(now))
 
 
 def main() raises:

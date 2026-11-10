@@ -12,7 +12,7 @@ from turbokod.events import (
 from turbokod.geometry import Rect
 from turbokod.ui_grid import GridForm, UIEvent
 from turbokod.ui_tree import (
-    UI_CANCEL, UI_DEFAULT, UINode, ui_button, ui_buttons, ui_check,
+    UI_CANCEL, UI_DEFAULT, ListWindow, UINode, ui_button, ui_buttons, ui_check,
     ui_dialog, ui_form, ui_label, ui_row, ui_table, ui_text, ui_vstack,
 )
 from turbokod.window import Window
@@ -215,6 +215,20 @@ def test_an_empty_label_takes_no_room_in_a_stack() raises:
     var button = _find(canvas, String("Cancel"))
     assert_equal(button[1] - field[1], 2)
 
+
+
+def test_list_window_follows_a_scroll_past_the_selection() raises:
+    """Wheeling a long list down leaves the selection at row 0; the rows
+    sent must follow the view, not snap back to the selection."""
+    var w = ListWindow()
+    var span = w.range(5000, 0)
+    assert_equal(span[0], 0)
+    w.view_at(1000)
+    span = w.range(5000, 0)
+    assert_true(span[0] <= 1000 and span[1] > 1000 + 50)
+    # Moving the selection still brings the window to it.
+    span = w.range(5000, 3000)
+    assert_true(span[0] <= 3000 and span[1] > 3000)
 
 def main() raises:
     setup_test_env()

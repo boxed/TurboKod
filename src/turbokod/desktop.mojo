@@ -166,7 +166,8 @@ from .language_config import (
     find_language_for_extension, LanguageSpec,
 )
 from .lsp_dispatch import (
-    CodeAction, CodeActionFileEdit, DefinitionResolved, LibraryProbe,
+    CodeAction, CodeActionFileEdit, DefinitionResolved, DIAG_SEVERITY_ERROR,
+    Diagnostic, LibraryProbe,
     LspManager,
     TextEditEntry, WorkspaceSymbolItem, uri_to_path,
 )
@@ -259,7 +260,8 @@ from .tmux_session import (
 from .test_pane import (
     TEST_CLEAR_OUTPUT, TEST_PANE_CLOSE, TEST_RERUN, TEST_STOP, TestPane,
 )
-from .editor import BreakpointMenuRequest, Editor
+from .editor import BreakpointMenuRequest, Editor, ON_SAVE_DIAGNOSTIC_CODE
+from .on_save_location import locate_on_save_error
 from .window import (
     BottomDockedPanel, DOCK_MIN_HEIGHT, MIN_WIN_H, MIN_WIN_W,
     coalesce_dock_states,
@@ -894,7 +896,7 @@ def format_hotkey(key: UInt32, mods: UInt8) -> String:
 
 
 @fieldwise_init
-struct PendingSaveAction(ImplicitlyCopyable, Movable):
+struct PendingSaveAction(Copyable, Movable):
     """One in-flight on-save action. Reaped non-blocking by
     ``Desktop.save_actions_tick`` so a slow or hung formatter can't
     freeze the UI — the previous implementation called
@@ -911,6 +913,59 @@ struct PendingSaveAction(ImplicitlyCopyable, Movable):
     var stderr_fd: Int32
     var label: String
     var saved_path: String
+    # The head of what the child wrote (up to ``_ON_SAVE_OUTPUT_CAP``
+    # bytes each): a failing formatter says why on its first line, and
+    # that goes on the status bar next to the exit code.
+    var stdout_head: List[UInt8]
+    var stderr_head: List[UInt8]
+
+
+comptime _ON_SAVE_OUTPUT_CAP = 4096
+
+
+def _first_output_line(bytes: List[UInt8]) -> String:
+    """The first line of ``bytes`` with anything but whitespace on it,
+    trimmed; empty when there's none."""
+    var i = 0
+    var n = len(bytes)
+    while i < n:
+        var end = i
+        while end < n and bytes[end] != 0x0A:
+            end += 1
+        var a = i
+        var b = end
+        while a < b and (bytes[a] == 0x20 or bytes[a] == 0x09 or bytes[a] == 0x0D):
+            a += 1
+        while b > a and (bytes[b - 1] == 0x20 or bytes[b - 1] == 0x09 or bytes[b - 1] == 0x0D):
+            b -= 1
+        if b > a:
+            return String(StringSpan(unsafe_from_utf8=Span(
+                unsafe_ptr=bytes.unsafe_ptr().unsafe_offset(a), length=b - a,
+            )))
+        i = end + 1
+    return String("")
+
+
+def _bytes_to_string(bytes: List[UInt8]) -> String:
+    return String(StringSpan(unsafe_from_utf8=Span(
+        unsafe_ptr=bytes.unsafe_ptr(), length=len(bytes),
+    )))
+
+
+def on_save_failure_message(
+    label: String, exit_code: Int,
+    stdout_head: List[UInt8], stderr_head: List[UInt8],
+) -> String:
+    """Status-bar text for an on-save action that exited non-zero: the
+    exit code plus the first line it printed (stderr first, since that's
+    where formatters report a file they can't parse)."""
+    var msg = String("on-save: ") + label + String(" exit ") + String(exit_code)
+    var line = _first_output_line(stderr_head)
+    if len(line.as_bytes()) == 0:
+        line = _first_output_line(stdout_head)
+    if len(line.as_bytes()) > 0:
+        msg = msg + String(": ") + line
+    return msg^
 
 
 # Tool-panel kinds for the floating-panels window layout. See
@@ -12427,8 +12482,11 @@ struct Desktop(Movable):
         the user can tell whether a slow response is from mojo-lsp or
         pyright; flipping focus between a ``.mojo`` and a ``.py`` window
         flips the indicator. Files with no associated server (or no
-        server installed) leave the existing message alone.
+        server installed) leave the existing message alone, and so does
+        a one-off message still in its hold (``StatusBar.holds_message``).
         """
+        if self.status_bar.holds_message(monotonic_ms()):
+            return
         var idx = self._focused_editor_idx()
         if idx < 0:
             return
@@ -13480,6 +13538,8 @@ struct Desktop(Movable):
         opens the DAP info window — invaluable when the status reads
         "DAP: failed — …" and the user wants the adapter argv, full
         failure reason, and captured stderr."""
+        if self.status_bar.holds_message(monotonic_ms()):
+            return
         if self.dap.is_active() or self.dap.is_failed():
             var attr = Attr(BLACK, LIGHT_GRAY)
             if self.dap.is_failed():
@@ -15444,7 +15504,7 @@ struct Desktop(Movable):
             self.pending_save_actions.append(
                 PendingSaveAction(
                     proc.pid, proc.stdout_fd, proc.stderr_fd,
-                    label, saved_path,
+                    label, saved_path, List[UInt8](), List[UInt8](),
                 )
             )
         except:
@@ -15472,9 +15532,9 @@ struct Desktop(Movable):
             return
         var still_pending = List[PendingSaveAction]()
         for i in range(len(self.pending_save_actions)):
-            var pa = self.pending_save_actions[i]
-            self._drain_save_action_fd(pa.stdout_fd)
-            self._drain_save_action_fd(pa.stderr_fd)
+            var pa = self.pending_save_actions[i].copy()
+            self._drain_save_action_fd(pa.stdout_fd, pa.stdout_head)
+            self._drain_save_action_fd(pa.stderr_fd, pa.stderr_head)
             var pair = waitpid_nohang(pa.pid)
             if Int(pair[0]) != Int(pa.pid):
                 still_pending.append(pa^)
@@ -15483,24 +15543,77 @@ struct Desktop(Movable):
             # Drain once more so a final write between the previous
             # drain and EOF doesn't get lost (same shape as
             # ``InstallRunner.tick``).
-            self._drain_save_action_fd(pa.stdout_fd)
-            self._drain_save_action_fd(pa.stderr_fd)
+            self._drain_save_action_fd(pa.stdout_fd, pa.stdout_head)
+            self._drain_save_action_fd(pa.stderr_fd, pa.stderr_head)
             if pa.stdout_fd >= 0: _ = close_fd(pa.stdout_fd)
             if pa.stderr_fd >= 0: _ = close_fd(pa.stderr_fd)
             var exit_code = exit_code_from_status(Int(pair[1]))
-            if exit_code == 0:
+            self._reload_after_on_save(pa.saved_path)
+            self._report_on_save_result(pa, exit_code)
+        self.pending_save_actions = still_pending^
+
+    def _report_on_save_result(mut self, pa: PendingSaveAction, exit_code: Int):
+        """Say how an on-save action went. A failure that names a line of
+        the saved file (a formatter that can't parse it) goes on that
+        line as an error diagnostic, the status bar pointing at it;
+        anything else is the exit code and the first line it printed.
+        Either way the action's previous diagnostic is replaced, so a
+        clean run clears it."""
+        var idx = -1
+        for i in range(len(self.windows.windows)):
+            if self.windows.windows[i].is_editor \
+                    and self.windows.windows[i].editor.file_path == pa.saved_path:
+                idx = i
+                break
+        var diags = List[Diagnostic]()
+        if exit_code == 0:
+            self.status_bar.set_message(
+                String("on-save: ") + pa.label + String(" ok"),
+                Attr(BLACK, LIGHT_GRAY),
+            )
+        else:
+            var loc = locate_on_save_error(_bytes_to_string(pa.stderr_head), pa.saved_path)
+            if loc.line == 0:
+                loc = locate_on_save_error(_bytes_to_string(pa.stdout_head), pa.saved_path)
+            if loc.line > 0 and idx >= 0:
+                ref ed = self.windows.windows[idx].editor
+                # Tools count past the end for an unexpected EOF.
+                var row = min(loc.line - 1, ed.buffer.line_count() - 1)
+                # The whole line's text, not from the tool's column: that's
+                # where the parser gave up, often the line's last character,
+                # which is where the caret sits after the edit that broke it.
+                var text = ed.buffer.line(row)
+                var width = len(text.as_bytes())
+                var col = 0
+                while col < width and (text.as_bytes()[col] == 0x20
+                                       or text.as_bytes()[col] == 0x09):
+                    col += 1
+                if col == width:
+                    col = 0
+                var msg = loc.message
+                if len(msg.as_bytes()) == 0:
+                    msg = String("failed here")
+                diags.append(Diagnostic(
+                    row, col, row, width, DIAG_SEVERITY_ERROR,
+                    msg, pa.label, String(ON_SAVE_DIAGNOSTIC_CODE),
+                ))
+                ed.show_save_notice(row, pa.label + String(": ") + msg)
                 self.status_bar.set_message(
-                    String("on-save: ") + pa.label + String(" ok"),
-                    Attr(BLACK, LIGHT_GRAY),
+                    String("on-save: ") + pa.label + String(" failed at line ")
+                        + String(row + 1) + String(": ") + msg,
+                    Attr(LIGHT_RED, LIGHT_GRAY),
                 )
             else:
                 self.status_bar.set_message(
-                    String("on-save: ") + pa.label + String(" exit ")
-                        + String(exit_code),
+                    on_save_failure_message(
+                        pa.label, exit_code, pa.stdout_head, pa.stderr_head,
+                    ),
                     Attr(LIGHT_RED, LIGHT_GRAY),
                 )
-            self._reload_after_on_save(pa.saved_path)
-        self.pending_save_actions = still_pending^
+        if idx >= 0:
+            self.windows.windows[idx].editor.set_on_save_diagnostics(
+                pa.label, diags^,
+            )
 
     def _terminate_pending_save_actions(mut self):
         """Teardown for in-flight on-save children (``Desktop.shutdown``).
@@ -15523,12 +15636,12 @@ struct Desktop(Movable):
         if len(self.pending_save_actions) == 0:
             return
         for i in range(len(self.pending_save_actions)):
-            var pa = self.pending_save_actions[i]
+            var pa = self.pending_save_actions[i].copy()
             # Drain first — a child blocked writing into a full pipe
             # can't exit, so without this the grace period is wasted on
             # a child we're keeping from finishing.
-            self._drain_save_action_fd(pa.stdout_fd)
-            self._drain_save_action_fd(pa.stderr_fd)
+            self._drain_save_action_fd(pa.stdout_fd, pa.stdout_head)
+            self._drain_save_action_fd(pa.stderr_fd, pa.stderr_head)
             var reaped = reap_child(pa.pid, 100)
             if not reaped[0] and pa.pid > 0:
                 _ = kill_pid(pa.pid, SIGTERM)
@@ -15542,11 +15655,12 @@ struct Desktop(Movable):
             if pa.stderr_fd >= 0: _ = close_fd(pa.stderr_fd)
         self.pending_save_actions = List[PendingSaveAction]()
 
-    def _drain_save_action_fd(mut self, fd: Int32):
-        """Read and discard everything currently available on ``fd``.
-        Keeps a chatty on-save child from filling its pipe and stalling
-        on its own ``write(2)``. Bounded per call so one runaway child
-        can't pin the tick."""
+    def _drain_save_action_fd(mut self, fd: Int32, mut head: List[UInt8]):
+        """Read everything currently available on ``fd``, keeping the
+        first ``_ON_SAVE_OUTPUT_CAP`` bytes in ``head`` and discarding
+        the rest. Keeps a chatty on-save child from filling its pipe and
+        stalling on its own ``write(2)``. Bounded per call so one
+        runaway child can't pin the tick."""
         if fd < 0:
             return
         var scratch = alloc_zero_buffer(4096)
@@ -15555,6 +15669,10 @@ struct Desktop(Movable):
             var n = read_into(fd, scratch, 4096)
             if n <= 0:
                 break
+            var k = 0
+            while k < n and len(head) < _ON_SAVE_OUTPUT_CAP:
+                head.append(scratch[k])
+                k += 1
             total += n
 
     def _maybe_reload_targets(mut self, saved_path: String):
@@ -16928,6 +17046,9 @@ struct Desktop(Movable):
         # Fire the LSP code-action request. Only attempt when a server
         # is actually ready — otherwise we just leave the menu with
         # only the Copy row, no spinner.
+        # The server has no fixes for what a formatter reported.
+        if req.diag.code == ON_SAVE_DIAGNOSTIC_CODE:
+            return
         var path = self.windows.windows[idx].editor.file_path
         var li = self._ready_lsp_for_path(path)
         if li < 0:

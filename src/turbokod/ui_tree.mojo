@@ -413,25 +413,35 @@ struct ListWindow(Copyable, Movable):
     trip."""
     var top: Int
     var size: Int
+    # The selection the last ``range`` saw: only a *moved* selection pulls
+    # the window to it. A wheel or scroll-bar scroll leaves the selection
+    # behind, out of view, and the window has to follow the view then.
+    var sel: Int
 
     def __init__(out self, size: Int = 200):
         self.top = 0
         self.size = size
+        self.sel = -1
 
     def reset(mut self):
         self.top = 0
+        self.sel = -1
 
     def view_at(mut self, row: Int):
         """The projector's view now starts at ``row``."""
         self.top = max(row, 0)
 
-    def range(self, count: Int, selected: Int) -> Tuple[Int, Int]:
+    def range(mut self, count: Int, selected: Int) -> Tuple[Int, Int]:
         """``[first, end)`` to send: centered on the view, moved to cover
-        the selection when it's out of it (the view is about to follow)."""
-        var at = self.top
-        if selected >= 0 and (selected < at or selected >= at + self.size // 2):
-            at = selected
-        var first = max(0, min(at - self.size // 4, count - self.size))
+        the selection when it moved out of it (the view is about to
+        follow)."""
+        if selected != self.sel:
+            self.sel = selected
+            if selected >= 0 and (
+                selected < self.top or selected >= self.top + self.size // 2
+            ):
+                self.top = selected
+        var first = max(0, min(self.top - self.size // 4, count - self.size))
         return (first, min(count, first + self.size))
 
 

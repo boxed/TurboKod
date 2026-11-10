@@ -982,7 +982,7 @@ def tk_desktop_attention_flashes(
         o.put(String("w"), json_int(f.rect.width()))
         o.put(String("h"), json_int(f.rect.height()))
         o.put(String("age"), json_int(f.age_ms))
-        a.append(o^)
+        a.append(o)
     return _write_out(encode_json(a), out_ptr, cap)
 
 

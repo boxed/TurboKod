@@ -28,8 +28,11 @@ from turbokod.editorconfig import (
 )
 from turbokod.drafts_store import StoredDraft, load_drafts, save_drafts
 from turbokod.desktop import (
-    APP_QUIT_ACTION, Desktop, EDITOR_SAVE, PROJECT_FIND
+    APP_QUIT_ACTION, Desktop, EDITOR_SAVE, PROJECT_FIND,
+    on_save_failure_message,
 )
+from turbokod.on_save_location import locate_on_save_error
+from turbokod.lsp_dispatch import Diagnostic
 from turbokod.file_io import (
     delete_path, join_path, list_directory, parent_path, read_file,
     stat_file, write_file
@@ -1608,6 +1611,117 @@ def test_an_on_save_action_gets_a_file_name_with_quotes_intact() raises:
     assert_equal(read_file(path), String("ok"))
     assert_false(stat_file(dir + String("/INJECTED")).ok)
     _ = external_call["system", Int32]((String("rm -rf '") + dir + String("'\0")).unsafe_ptr())
+
+
+def test_on_save_error_locations_in_the_common_conventions() raises:
+    var f = String("/p/dryft/base/menu.py")
+    # ruff: the path mid-line, relative to the action's cwd.
+    var loc = locate_on_save_error(String(
+        "error: Failed to parse dryft/base/menu.py:1303:1: unexpected EOF while parsing\n"
+    ), f)
+    assert_equal(loc.line, 1303)
+    assert_equal(loc.col, 1)
+    assert_equal(loc.message, String("unexpected EOF while parsing"))
+    # gofmt / gcc, absolute path at the start.
+    loc = locate_on_save_error(String("/p/dryft/base/menu.py:7:3: expected ')'"), f)
+    assert_equal(loc.line, 7)
+    assert_equal(loc.message, String("expected ')'"))
+    # tsc / MSVC.
+    loc = locate_on_save_error(String("./menu.py(12,5): error TS1005: ';' expected."), String("/p/menu.py"))
+    assert_equal(loc.line, 12)
+    assert_equal(loc.col, 5)
+    # Python traceback: the message is the last line.
+    loc = locate_on_save_error(String(
+        "Traceback (most recent call last):\n"
+        "  File \"/p/dryft/base/menu.py\", line 40, in <module>\n"
+        "SyntaxError: invalid syntax\n"
+    ), f)
+    assert_equal(loc.line, 40)
+    assert_equal(loc.message, String("SyntaxError: invalid syntax"))
+    # black.
+    loc = locate_on_save_error(String(
+        "error: cannot format /p/dryft/base/menu.py: Cannot parse: 971:0: ),"
+    ), f)
+    assert_equal(loc.line, 971)
+    assert_equal(loc.message, String("),"))
+    # prettier.
+    loc = locate_on_save_error(String(
+        "[error] base/menu.py: SyntaxError: Unexpected token (3:5)"
+    ), f)
+    assert_equal(loc.line, 3)
+    # Another file, or no line: nothing.
+    assert_equal(locate_on_save_error(String("other.py:3:1: bad"), f).line, 0)
+    assert_equal(locate_on_save_error(String("xmenu.py:3:1: bad"), String("/p/menu.py")).line, 0)
+    assert_equal(locate_on_save_error(String("error: menu.py is broken"), f).line, 0)
+
+
+def test_on_save_failure_message_carries_the_first_output_line() raises:
+    var err = List[UInt8]()
+    for b in String("\n  oops: bad thing  \nmore\n").as_bytes():
+        err.append(b)
+    assert_equal(
+        on_save_failure_message(String("fmt"), 2, List[UInt8](), err),
+        String("on-save: fmt exit 2: oops: bad thing"),
+    )
+    assert_equal(
+        on_save_failure_message(String("fmt"), 1, List[UInt8](), List[UInt8]()),
+        String("on-save: fmt exit 1"),
+    )
+
+
+def test_an_on_save_failure_with_a_line_shows_inline_until_a_clean_run() raises:
+    var path = _temp_path(String("_onsave_inline.py"))
+    assert_true(write_file(path, String("a = 1\n    b = (\nc = 3\n")))
+    var d = Desktop()
+    d.windows.add(Window.from_file(String("x.py"), Rect(0, 1, 40, 12), path))
+    var args = List[String]()
+    args.append(String("-c"))
+    # Fails the first time, succeeds once the marker file exists.
+    args.append(String(
+        "if [ -e \"$1.ok\" ]; then exit 0; fi; "
+        "echo \"error: Failed to parse $1:2:9: unclosed paren\" >&2; exit 2"
+    ))
+    args.append(String("sh"))
+    args.append(String("$FilePath$"))
+    d.project_on_save.append(OnSaveAction(String(""), String("/bin/sh"), args^, String("")))
+
+    _ = d.windows.windows[0].editor.handle_key(
+        Event.key_event(UInt32(ord("!"))), Rect(0, 1, 40, 12),
+    )
+    _ = d.dispatch_action(EDITOR_SAVE, _SCREEN)
+    var deadline = monotonic_ms() + 3000
+    while len(d.pending_save_actions) > 0 and monotonic_ms() < deadline:
+        d.save_actions_tick()
+    ref ed = d.windows.windows[0].editor
+    assert_equal(len(ed.diagnostics), 1)
+    assert_equal(ed.diagnostics[0].start_row, 1)
+    # The line's text from its first non-blank, not from the reported
+    # column — that's where the caret is after the breaking edit.
+    assert_equal(ed.diagnostics[0].start_col, 4)
+    assert_equal(ed.diagnostics[0].end_col, 9)
+    assert_equal(ed.diagnostics[0].message, String("unclosed paren"))
+    assert_equal(d.status_bar.message, String("on-save: sh failed at line 2: unclosed paren"))
+    # A popup under the line says why...
+    var lay = ed._save_notice_layout(Rect(0, 1, 40, 12))
+    assert_true(Bool(lay))
+    assert_equal(lay.value()[4], String("sh: unclosed paren"))
+    # A language server's publish doesn't wipe it.
+    ed.set_diagnostics(List[Diagnostic]())
+    assert_equal(len(ed.diagnostics), 1)
+    # ...until the next key; the diagnostic stays.
+    _ = ed.handle_key(Event.key_event(KEY_END), Rect(0, 1, 40, 12))
+    assert_false(Bool(ed._save_notice_layout(Rect(0, 1, 40, 12))))
+    assert_equal(len(ed.diagnostics), 1)
+
+    assert_true(write_file(path + String(".ok"), String("")))
+    _ = ed.handle_key(Event.key_event(UInt32(ord("!"))), Rect(0, 1, 40, 12))
+    _ = d.dispatch_action(EDITOR_SAVE, _SCREEN)
+    deadline = monotonic_ms() + 3000
+    while len(d.pending_save_actions) > 0 and monotonic_ms() < deadline:
+        d.save_actions_tick()
+    assert_equal(len(d.windows.windows[0].editor.diagnostics), 0)
+    _ = delete_path(path)
+    _ = delete_path(path + String(".ok"))
 
 
 def test_word_at_helper() raises:

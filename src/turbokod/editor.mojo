@@ -97,6 +97,12 @@ from .line_sort import sorted_order_ci
 # --- Helpers ----------------------------------------------------------------
 
 
+
+# ``Diagnostic.code`` of the ones an on-save action reported rather than
+# a language server (``Editor.set_on_save_diagnostics``).
+comptime ON_SAVE_DIAGNOSTIC_CODE = "turbokod.on-save"
+
+
 def _completion_kind_name(kind: Int) -> String:
     """Map an LSP ``CompletionItemKind`` integer to its human-readable
     name. Unknown kinds get an empty string so the column stays blank
@@ -1891,6 +1897,10 @@ struct Editor(Copyable, Movable):
     var _hover_result_col: Int
     var _hover_result_anchor_x: Int
     var _hover_result_anchor_y: Int
+    # A popup under the line an on-save action failed on, saying why
+    # (``show_save_notice``). ``_save_notice_row`` is -1 when none is up.
+    var _save_notice_row: Int
+    var _save_notice_text: String
 
     def __init__(out self):
         self = Self(String(""))
@@ -2057,6 +2067,8 @@ struct Editor(Copyable, Movable):
         self._hover_result_col = -1
         self._hover_result_anchor_x = 0
         self._hover_result_anchor_y = 0
+        self._save_notice_row = -1
+        self._save_notice_text = String("")
         self._recompute_big_buffer()
 
     def _recompute_big_buffer(mut self):
@@ -2280,6 +2292,8 @@ struct Editor(Copyable, Movable):
         self._hover_result_col = copy._hover_result_col
         self._hover_result_anchor_x = copy._hover_result_anchor_x
         self._hover_result_anchor_y = copy._hover_result_anchor_y
+        self._save_notice_row = copy._save_notice_row
+        self._save_notice_text = copy._save_notice_text
 
     def release_search_cache(mut self):
         """Give back the compiled regex the Find path is holding.
@@ -2790,8 +2804,10 @@ struct Editor(Copyable, Movable):
         return String("")
 
     def set_diagnostics(mut self, var diags: List[Diagnostic]):
-        """Replace the diagnostic set with ``diags`` and rebuild the
-        per-row severity index used by the minimap.
+        """Replace the LSP diagnostic set with ``diags`` and rebuild the
+        per-row severity index used by the minimap. On-save diagnostics
+        (``set_on_save_diagnostics``) aren't the server's to replace, so
+        they're kept.
 
         The host owns when this fires — typically once per frame from
         ``Desktop.lsp_tick`` after draining ``LspManager.take_diagnostics_for``.
@@ -2799,9 +2815,47 @@ struct Editor(Copyable, Movable):
         hint; ``diagnostic_lines[i]`` carries the winning severity
         (or 0 for "clean") so the right-side minimap can color a row
         without re-scanning the whole list."""
+        for i in range(len(self.diagnostics)):
+            if self.diagnostics[i].code == ON_SAVE_DIAGNOSTIC_CODE:
+                diags.append(self.diagnostics[i])
         var per_row = self._diagnostic_row_index(diags)
         self.diagnostics = diags^
         self.diagnostic_lines = per_row^
+
+    def set_on_save_diagnostics(
+        mut self, source: String, var diags: List[Diagnostic],
+    ):
+        """Replace the diagnostics on-save action ``source`` reported
+        (a formatter that couldn't parse the file) with ``diags``; an
+        empty list clears them, which is what a clean run does. They
+        sit in ``diagnostics`` beside the LSP's, tagged with
+        ``ON_SAVE_DIAGNOSTIC_CODE``, so they paint, hover and shift with
+        edits like any other."""
+        if len(diags) == 0:
+            self.clear_save_notice()
+        var kept = List[Diagnostic]()
+        for i in range(len(self.diagnostics)):
+            var d = self.diagnostics[i]
+            if d.code == ON_SAVE_DIAGNOSTIC_CODE and d.source == source:
+                continue
+            kept.append(d)
+        for i in range(len(diags)):
+            kept.append(diags[i])
+        var per_row = self._diagnostic_row_index(kept)
+        self.diagnostics = kept^
+        self.diagnostic_lines = per_row^
+
+    def show_save_notice(mut self, row: Int, var text: String):
+        """Pop ``text`` up under buffer row ``row``: an on-save action
+        failed there. It stays until the next key or click, so it's seen
+        when it arrives and gone once the user acts on it; the line's
+        diagnostic outlives it."""
+        self._save_notice_row = row
+        self._save_notice_text = text^
+
+    def clear_save_notice(mut self):
+        self._save_notice_row = -1
+        self._save_notice_text = String("")
 
     def clear_diagnostics(mut self):
         """Drop all diagnostics and the per-row severity index. Used
@@ -5691,9 +5745,18 @@ struct Editor(Copyable, Movable):
 
     def _cursor_screen_point(self, view: Rect) -> Optional[Point]:
         """Screen cell of the primary caret, or empty when the caret is
-        scrolled out of the painted area. Mirrors the gutter +
-        cell-offset geometry of ``paint`` / ``_paint_one_caret`` so a
-        keyboard-driven anchor lands exactly on the caret."""
+        scrolled out of the painted area."""
+        return self._screen_point_of(
+            view, self.selections[0].row, self.selections[0].col,
+        )
+
+    def _screen_point_of(
+        self, view: Rect, row: Int, col: Int,
+    ) -> Optional[Point]:
+        """Screen cell of buffer position ``(row, col)``, or empty when
+        it's scrolled out of the painted area. Mirrors the gutter +
+        cell-offset geometry of ``paint`` / ``_paint_one_caret`` so an
+        anchor lands exactly where the caret would."""
         var miss = Optional[Point]()
         if view.is_empty():
             return miss
@@ -5705,8 +5768,6 @@ struct Editor(Copyable, Movable):
         var content_h = view.height()
         var content_w = self._content_width(view)
         var layout = self._layout_lines(content_h, content_w)
-        var row = self.selections[0].row
-        var col = self.selections[0].col
         var sr = self._screen_row_for(layout, row, col)
         if sr < 0:
             return miss
@@ -6281,6 +6342,67 @@ struct Editor(Copyable, Movable):
             shadow=not self.host_owns_shadows,
         )
 
+    def _save_notice_layout(
+        self, view: Rect,
+    ) -> Optional[Tuple[Int, Int, Int, Int, String]]:
+        """Anchor + size + label for the on-save notice, as
+        ``_hover_popup_layout``: under the failing line's first
+        character, above it when there's no room. ``None`` when there's
+        no notice, its line is scrolled away, or a hover / minimap
+        tooltip has the spot."""
+        if self._save_notice_row < 0 \
+                or self._save_notice_row >= self.buffer.line_count():
+            return None
+        if self._minimap_hover_kind != 0 \
+                or len(self._hover_result_text.as_bytes()) > 0:
+            return None
+        var line = self.buffer.line(self._save_notice_row).as_bytes()
+        var col = 0
+        while col < len(line) and (line[col] == 0x20 or line[col] == 0x09):
+            col += 1
+        var pt_opt = self._screen_point_of(view, self._save_notice_row, col)
+        if not pt_opt:
+            return None
+        var pt = pt_opt.value()
+        # Rows under the sticky-scroll band are as good as scrolled away.
+        var top = view.a.y + self.sticky_row_count(view)
+        if pt.y < top:
+            return None
+        var max_box_w = view.width() - 2
+        if max_box_w > _HOVER_POPUP_WIDTH_MAX:
+            max_box_w = _HOVER_POPUP_WIDTH_MAX
+        if max_box_w < 5:
+            max_box_w = view.width()
+        var label = self._save_notice_text
+        var size = popup_size_for_text(label, max_box_w, view.height())
+        var w = size[0]
+        var h = size[1]
+        if w == 0 or h == 0:
+            return None
+        var bx = pt.x
+        var by = pt.y + 1
+        if by + h > view.b.y:
+            by = pt.y - h
+        if by < top:
+            by = top
+        if bx + w > view.b.x:
+            bx = view.b.x - w
+        if bx < view.a.x:
+            bx = view.a.x
+        return (bx, by, w, h, label)
+
+    def paint_save_notice(self, mut canvas: Canvas, view: Rect):
+        """Render the on-save notice (``show_save_notice``), if one is up
+        and its line is on screen."""
+        var lay = self._save_notice_layout(view)
+        if not lay:
+            return
+        var l = lay.value()
+        paint_tooltip_popup(
+            canvas, Rect(l[0], l[1], l[0] + l[2], l[1] + l[3]), l[4],
+            shadow=not self.host_owns_shadows,
+        )
+
     def active_overlay_bounds(self, view: Rect) -> Optional[Rect]:
         """Screen-space bounding rect of whichever screen-anchored body overlay
         is currently shown — the minimap / diagnostic / spell tooltip, else the
@@ -6300,6 +6422,8 @@ struct Editor(Copyable, Movable):
         var lay = self._minimap_tooltip_layout(view)
         if not lay:
             lay = self._hover_popup_layout(view)
+        if not lay:
+            lay = self._save_notice_layout(view)
         if not lay:
             return None
         var l = lay.value()
@@ -7884,6 +8008,9 @@ struct Editor(Copyable, Movable):
             # suppresses itself when a minimap tooltip is up so the two
             # don't stack on top of each other.
             self.paint_hover_popup(canvas, view)
+            # The on-save notice, where a hover or minimap tooltip
+            # doesn't already have the spot.
+            self.paint_save_notice(canvas, view)
             # Completion popup: floats just below (or above) the column
             # where the in-progress identifier starts. Painted last so it
             # overlays both the text and the minimap tooltip. ``focused``
@@ -8821,8 +8948,10 @@ struct Editor(Copyable, Movable):
         self._block_edit_origin = Optional[Caret]()
         # Any keystroke means the user has shifted attention away from
         # the hovered identifier — drop the dwell candidate and any
-        # popup so it doesn't float over edits we're about to make.
+        # popup so it doesn't float over edits we're about to make. The
+        # on-save notice has been seen by now, too.
         self.clear_hover_state()
+        self.clear_save_notice()
         # LSP inline-completion (ghost text) intercept. Tab accepts the
         # suggestion; Esc or any other key dismisses it (other keys then
         # fall through to be handled normally so typing isn't swallowed).
@@ -10258,6 +10387,7 @@ struct Editor(Copyable, Movable):
         # hover popup: the absolute screen anchor would be stale after
         # a scroll, and a click means the user is acting, not dwelling.
         self.clear_hover_state()
+        self.clear_save_notice()
         # A click on the minimap column is a "scroll-to-here" gesture,
         # not a text-area interaction — short-circuit before the gutter /
         # text-area branches below try to interpret it as a caret move.
