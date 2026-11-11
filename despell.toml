@@ -1,0 +1,5 @@
+paths_to_mutate = ["src"]
+include_dirs = ["src"]
+also_copy = ["examples", ".gitignore", "despell.toml"]
+mojo = "/Users/boxed/Projects/turbokod/.pixi/envs/default/bin/mojo"
+build_args = ["-Xlinker", "-L/Users/boxed/Projects/turbokod/.pixi/envs/default/lib", "-Xlinker", "-lonig", "-Xlinker", "/Users/boxed/Projects/turbokod/app/turbokod-shim/target/release/libturbokod_shim.a", "-Xlinker", "-framework", "-Xlinker", "CoreFoundation"]
