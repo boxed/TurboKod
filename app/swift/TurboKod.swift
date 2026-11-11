@@ -698,11 +698,6 @@ final class CellView: NSView {
     // modifier transition) can detect Option's own up/down edges and report
     // them as bare EVENT_MOD_KEY transitions for the Alt-tap gestures.
     private var optionDown = false
-    // Live Shift-key state, tracked from flagsChanged. Used to decide a
-    // Shift+scroll is horizontal — more reliable than a scrollWheel event's
-    // own modifierFlags, which (depending on device/momentum) may not carry
-    // Shift, and macOS doesn't always axis-swap it to deltaX for us.
-    private var shiftDown = false
     // Palette is the active theme's index→RGB table. Seeded with the classic
     // built-in palette and refreshed from the Mojo core whenever the theme
     // version changes (Settings ▸ Theme). `themeVersion = -1` forces the first
@@ -1904,10 +1899,8 @@ final class CellView: NSView {
     override func flagsChanged(with event: NSEvent) {
         // See keyDown — scripted capture runs ignore live input.
         if isCapturing { return }
-        // flagsChanged fires for *every* modifier transition; keep the live
-        // Shift state current (scrollWheel reads it) before isolating Option's
-        // own up/down edges by diffing against the last state.
-        shiftDown = event.modifierFlags.contains(.shift)
+        // flagsChanged fires for *every* modifier transition; isolate
+        // Option's own up/down edges by diffing against the last state.
         let nowDown = event.modifierFlags.contains(.option)
         if nowDown == optionDown { return }   // some other modifier moved
         optionDown = nowDown
@@ -2070,7 +2063,14 @@ final class CellView: NSView {
         if isCapturing || surface == .frame { return }
         let dx = e.scrollingDeltaX
         let dy = e.scrollingDeltaY
-        let shift = shiftDown || e.modifierFlags.contains(.shift)
+        // Shift+scroll is horizontal. A scroll event's own modifierFlags may
+        // not carry Shift (depending on device / momentum), so also ask for
+        // the keyboard's live state. Not a Shift tracked from flagsChanged:
+        // that only reaches the key view, so a Shift released after focus
+        // moved elsewhere stayed "down" forever and turned every wheel turn
+        // in the window into a sideways scroll.
+        let shift = e.modifierFlags.contains(.shift)
+            || NSEvent.modifierFlags.contains(.shift)
         if ProcessInfo.processInfo.environment["TK_SCROLL_DEBUG"] != nil {
             FileHandle.standardError.write("DBGSCROLL dx=\(dx) dy=\(dy) shift=\(shift) precise=\(e.hasPreciseScrollingDeltas) phase=\(e.phase.rawValue) mom=\(e.momentumPhase.rawValue)\n".data(using: .utf8)!)
         }
