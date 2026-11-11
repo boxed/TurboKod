@@ -320,6 +320,8 @@ struct DebugPane(Copyable, Movable):
     var _last_output_sb_bottom: Int
     """Bottom y of the output scrollbar (inclusive) from the last
     paint."""
+    var _last_output_sb_cells: Int
+    """The bar's thickness (``Canvas.scroll_bar_cells``) as last painted."""
     var _output_scrolling: Bool
     """True while the user is dragging the output thumb. Mouse motion
     updates the scroll position; release ends the drag."""
@@ -375,6 +377,7 @@ struct DebugPane(Copyable, Movable):
         self._last_output_sb_x = -1
         self._last_output_sb_top = 0
         self._last_output_sb_bottom = -1
+        self._last_output_sb_cells = 1
         self._output_scrolling = False
         self._output_drag_offset = 0
         self.host_inspect = False
@@ -1174,12 +1177,14 @@ struct DebugPane(Copyable, Movable):
         # content overflows the visible area.
         self._last_output_sb_top = out_rect.a.y
         self._last_output_sb_bottom = out_rect.b.y - 1
-        if out_rect.height() >= 3 and panel.b.x - 1 > out_rect.a.x:
+        var cells = canvas.scroll_bar_cells
+        self._last_output_sb_cells = cells
+        if out_rect.height() >= 3 and panel.b.x - cells > out_rect.a.x:
             var bar = VScrollbar(
-                panel.b.x - 1, out_rect.a.y, out_rect.b.y - 1,
+                panel.b.x - cells, out_rect.a.y, out_rect.b.y - 1,
                 len(self.output.last_visual),
                 self.output.last_visible_count,
-                self.output.last_first_visual,
+                self.output.last_first_visual, cells,
             )
             if bar.metrics().present:
                 bar.paint(canvas, painter, border)
@@ -1431,7 +1436,7 @@ struct DebugPane(Copyable, Movable):
             self._last_output_sb_top, self._last_output_sb_bottom,
             len(self.output.last_visual),
             self.output.last_visible_count,
-            self.output.last_first_visual,
+            self.output.last_first_visual, self._last_output_sb_cells,
         )
 
     def handle_mouse(

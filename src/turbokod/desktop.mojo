@@ -29,7 +29,11 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .case_fold import eq_ci, fold_byte
-from .canvas import Canvas, SCALE_ONE, SubGrid, utf8_codepoint_count
+from .json import JsonValue, json_null
+from .output_links import OutputLink
+from .canvas import (
+    Canvas, HOST_SURFACES, HostItem, SCALE_ONE, SubGrid, utf8_codepoint_count,
+)
 from .cell import Cell, FONT_CODE, FONT_SLOTS, FONT_UI
 from .painter import Painter
 from .colors import (
@@ -260,6 +264,11 @@ from .tmux_session import (
 from .test_pane import (
     TEST_CLEAR_OUTPUT, TEST_PANE_CLOSE, TEST_RERUN, TEST_STOP, TestPane,
 )
+from .test_report import (
+    new_test_report_path, pytest_plugin_dir, reporting_env,
+    session_test_report_path,
+)
+from .test_results import TEST_TOGGLE_VIEW, TestResultsView
 from .editor import BreakpointMenuRequest, Editor, ON_SAVE_DIAGNOSTIC_CODE
 from .on_save_location import locate_on_save_error
 from .window import (
@@ -1218,6 +1227,10 @@ struct Desktop(Movable):
     # host to draw over it (``tk_desktop_sub_grid*``).
     var sub_grids: List[SubGrid]
     var panel_sub_grids: List[SubGrid]
+    var host_items: List[List[HostItem]]
+    """The last frame's host-drawn chrome per ``HOST_SURFACE_*``, for
+    ``tk_desktop_host_items`` (swapped off each surface's canvas like
+    ``sub_grids``)."""
     # The pointer's position in thousandths of a cell for the next mouse
     # event, from ``tk_desktop_set_mouse_fine``; ``take_mouse_fine``
     # consumes it.
@@ -1968,6 +1981,9 @@ struct Desktop(Movable):
             self.area_scale.append(SCALE_ONE)
         self.sub_grids = List[SubGrid]()
         self.panel_sub_grids = List[SubGrid]()
+        self.host_items = List[List[HostItem]]()
+        for _ in range(HOST_SURFACES):
+            self.host_items.append(List[HostItem]())
         self._mouse_fine = Point(0, 0)
         self._mouse_fine_set = False
         self.host_font_effective_size = 0
@@ -3987,7 +4003,22 @@ struct Desktop(Movable):
                 return String("ns-resize")
         if self._panel_splitter_upper(slots, pos) >= 0:
             return String("ns-resize")
+        var split = self._pane_split_shape(pos)
+        if len(split.as_bytes()) > 0:
+            return split
         return String("default")
+
+    def _pane_split_shape(self, pos: Point) -> String:
+        """The resize cursor of a split inside a tool pane, at ``pos``, or
+        empty. The panes check their own visibility and layout."""
+        var s = self.test_pane.pointer_shape(pos)
+        if len(s.as_bytes()) > 0:
+            return s
+        for i in range(len(self.terminal_panes)):
+            s = self.terminal_panes[i].pointer_shape(pos)
+            if len(s.as_bytes()) > 0:
+                return s
+        return String("")
 
     def pointer_shape_at(self, pos: Point, screen: Rect) -> String:
         """Mouse-pointer icon the host should display at ``pos``.
@@ -4069,6 +4100,10 @@ struct Desktop(Movable):
                         pos, self.terminal_pane_rect(screen, i)
                     ):
                 return String("ns-resize")
+        # A split inside a pane (the test results' list / detail).
+        var split = self._pane_split_shape(pos)
+        if len(split.as_bytes()) > 0:
+            return split
         if self.file_tree.is_resizing() \
                 or self.file_tree.is_on_resize_edge(pos, screen):
             return String("ew-resize")
@@ -6706,10 +6741,23 @@ struct Desktop(Movable):
 
     def frame_canvas(self, cols: Int, rows: Int) -> Canvas:
         """A blank ``cols`` x ``rows`` canvas for one frame, carrying the
-        areas' cell sizes so panes lay out their own grids."""
+        areas' cell sizes so panes lay out their own grids, and whether the
+        host draws framework chrome (``Canvas.host_widgets``)."""
         var canvas = Canvas(cols, rows)
         canvas.area_scale = self.area_scale.copy()
+        canvas.host_widgets = self.host_draws_chrome()
+        canvas.scroll_bar_cells = self.scroll_bar_cells()
         return canvas^
+
+    def scroll_bar_cells(self) -> Int:
+        """``Canvas.scroll_bar_cells`` for this look."""
+        return 2 if self.platinum_ui() else 1
+
+    def host_draws_chrome(self) -> Bool:
+        """The host draws framework chrome — scroll bars, split dividers
+        (``HostItem``) — in its look rather than the grid's cells: the
+        macOS-style and Mac OS 9 looks."""
+        return self.host_draws_dialogs()
 
     def set_mouse_fine(mut self, x_milli: Int, y_milli: Int):
         self._mouse_fine = Point(x_milli, y_milli)
@@ -7342,6 +7390,8 @@ struct Desktop(Movable):
             pane.startup_command = sessions[i].startup_command
             pane.run_target = sessions[i].run_target
             pane.tests = sessions[i].tests
+            if pane.tests:
+                pane.results.attach(session_test_report_path(sessions[i].name))
             pane.tmux_session = sessions[i].name
             pane.tmux_project = root
             pane.tmux_create = False
@@ -11104,6 +11154,9 @@ struct Desktop(Movable):
         if action == TEST_CLEAR_OUTPUT:
             self.test_pane.clear()
             return Optional[String]()
+        if action == TEST_TOGGLE_VIEW:
+            self._toggle_test_results_view()
+            return Optional[String]()
         if action == TEST_PANE_CLOSE:
             # Standard [■] close button on the test pane: kill the test
             # child, release the post-run hold, drop focus off the pane,
@@ -12938,6 +12991,9 @@ struct Desktop(Movable):
         # builds its own title + command strip in ``paint``, so the host
         # only drives visibility: shown while the child runs or while its
         # output is held open after exit.
+        self.test_pane.results_view = self.config.test_results_view
+        if _sync_test_splits(self.config, self.test_pane.results):
+            self._persist_config()
         self.test_tick()
         self.test_pane.visible = self.test_pane.running() \
             or self._test_output_held
@@ -12961,9 +13017,17 @@ struct Desktop(Movable):
             return
         var i = 0
         while i < len(self.terminal_panes):
+            self.terminal_panes[i].results_view = self.config.test_results_view
+            self.terminal_panes[i].results.host_tag = i + 1
+            if _sync_test_splits(self.config, self.terminal_panes[i].results):
+                self._persist_config()
             self.terminal_panes[i].tick()
             var cmd = self.terminal_panes[i].consume_command_id()
             if len(cmd.as_bytes()) > 0:
+                if cmd == TEST_TOGGLE_VIEW:
+                    self._toggle_test_results_view()
+                    i += 1
+                    continue
                 if cmd == TERMINAL_PANE_CLOSE:
                     # Tear down the shell before dropping the value —
                     # ``close`` is idempotent and the only place that
@@ -14300,7 +14364,11 @@ struct Desktop(Movable):
         # not focus (the host keeps keyboard focus in the editor).
         self.panel_front_request = True
         try:
-            self.test_pane.run(program, args, project_root)
+            self.test_pane.run(
+                program, args, project_root,
+                report_path=new_test_report_path(),
+                pytest_plugin=pytest_plugin_dir(),
+            )
             self.status_bar.set_message(
                 String("running tests…"),
                 Attr(BLACK, LIGHT_GRAY),
@@ -14343,6 +14411,15 @@ struct Desktop(Movable):
             idx = len(self.terminal_panes) - 1
         self.terminal_panes[idx].cwd = root
         self.terminal_panes[idx].startup_command = command
+        # Live results: the run reports into the session's file (see
+        # ``test_report.mojo``), through the session's environment.
+        var report = session_test_report_path(
+            self.terminal_panes[idx].tmux_session,
+        )
+        self.terminal_panes[idx].run_env = reporting_env(
+            report, pytest_plugin_dir(),
+        )
+        self.terminal_panes[idx].results.start(report)
         if self.terminal_panes[idx].visible:
             self.terminal_panes[idx].restart()
         else:
@@ -14443,6 +14520,57 @@ struct Desktop(Movable):
             # otherwise the exit message and any tail output flash off
             # screen as ``run_session.is_active()`` flips to False.
             self._run_output_held = True
+
+    def native_test_state(self, tag: Int, generation: Int, version: Int) -> JsonValue:
+        """``TestResultsView.native_state`` of the view ``tag`` names (0 the
+        test pane, 1 + i ``terminal_panes[i]``); null for no such view."""
+        if tag == 0:
+            return self.test_pane.results.native_state(generation, version)
+        if tag - 1 < len(self.terminal_panes):
+            return self.terminal_panes[tag - 1].results.native_state(
+                generation, version,
+            )
+        return json_null()
+
+    def native_test_detail(self, tag: Int) -> JsonValue:
+        if tag == 0:
+            return self.test_pane.results.native_detail()
+        if tag - 1 < len(self.terminal_panes):
+            return self.terminal_panes[tag - 1].results.native_detail()
+        return json_null()
+
+    def native_test_act(mut self, tag: Int, op: Int, index: Int, var text: String):
+        """A native results view's action (``TestResultsView.native_act``):
+        the pane takes the keyboard, and a link it asks for opens."""
+        var link: Optional[OutputLink]
+        if tag == 0:
+            self.test_pane.results.native_act(op, index, text)
+            link = self.test_pane.results.take_link()
+            self._focus_dock(DOCK_TEST_PANE)
+        elif tag > 0 and tag - 1 < len(self.terminal_panes):
+            self.terminal_panes[tag - 1].results.native_act(op, index, text)
+            link = self.terminal_panes[tag - 1].results.take_link()
+            self._focus_dock(DOCK_TERMINAL, tag - 1)
+        else:
+            return
+        if not link:
+            return
+        var screen = self._last_screen
+        if link.value().is_url:
+            self._open_pane_link((String(""), 0), link.value().path, screen)
+        else:
+            self._open_pane_link(
+                (link.value().path, link.value().line), String(""), screen,
+            )
+
+    def _toggle_test_results_view(mut self):
+        """The test panes' ``[☰ Results]`` / ``[▤ Output]`` toggle. A
+        setting, so every window (and the next run) follows it."""
+        self.config.test_results_view = not self.config.test_results_view
+        self.test_pane.results_view = self.config.test_results_view
+        for i in range(len(self.terminal_panes)):
+            self.terminal_panes[i].results_view = self.config.test_results_view
+        self._persist_config()
 
     def test_tick(mut self):
         """Pump the test pane's pty each frame and surface the exit
@@ -19779,3 +19907,17 @@ def _pane_dock_act(mut dock: BottomDockedPanel, op: Int, var command_id: String)
         )
     elif op == 4:
         dock.pending_command_id = command_id^
+
+
+def _sync_test_splits(
+    mut config: TurbokodConfig, mut view: TestResultsView,
+) -> Bool:
+    """Take a divider the user just moved in ``view`` into ``config``
+    (True: persist it), then put the view's dividers where ``config``
+    says — so a pane or window that moved one is followed everywhere."""
+    var changed = view.take_split_change()
+    if changed:
+        config.test_split_wide = view.split_wide.fraction
+        config.test_split_tall = view.split_tall.fraction
+    view.set_splits(config.test_split_wide, config.test_split_tall)
+    return changed

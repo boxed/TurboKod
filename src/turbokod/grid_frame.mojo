@@ -61,6 +61,7 @@ struct GridFrame(Copyable, ImplicitlyCopyable, Movable):
         var g = Canvas(dims[0], dims[1])
         g.origin = rect.a
         g.font = self.slot
+        g.inherit_chrome(canvas)
         g.clear(bg)
         return g^
 

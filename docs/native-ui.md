@@ -227,6 +227,28 @@ macOS-style overlay scroller down the focused editor's right edge:
 - Dragging it, or clicking the track, scrolls through
   `tk_editor_minimap_to`, the minimap's proportional path.
 
+## Framework chrome and the test results
+
+In this look and the Mac OS 9 one (`Desktop.host_draws_chrome`) every
+surface's canvas has `host_widgets` on, and framework chrome becomes a
+`HostItem` instead of cells (see CLAUDE.md, "Resizable splits"): every
+`VScrollbar` / `HScrollbar` (`HostScrollBar`, an overlay knob where the
+core's thumb is) and `SplitArea` divider (`SplitDivider`, a separator
+hairline). They only draw; the blank cells under them keep the mouse. All
+of a surface's items come from one `tk_desktop_host_items(h, surface)` and
+are laid out by `pollHostItems`.
+
+The test results view goes further: its header, list and detail are
+`HOST_TEST_*` regions tagged with their pane, and `TestResultsHost` fills
+them with native views — `MacTestHeader` (progress bar, SF Symbol counts,
+status), `MacTestList` (an `NSTableView`), `MacTestDetail` (an `NSTextView`
+whose file / line references are links). Content comes from
+`tk_desktop_test_results` (only the tests whose `stamp` is newer than the
+version the host has, so a 12k-test run stays cheap) and
+`tk_desktop_test_detail`; clicks go back through
+`tk_desktop_test_results_act`. The selection is the core's; the divider is
+still `SplitArea`'s drag.
+
 ## Settings window
 
 Settings is a declarative dialog (see [declarative-ui.md](declarative-ui.md)).

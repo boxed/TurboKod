@@ -38,7 +38,7 @@ Geometry conventions: ``top``/``bottom`` (V) and ``left``/``right``
 the track fills the cells in between.
 """
 
-from .canvas import Canvas
+from .canvas import Canvas, HOST_HSCROLL, HOST_VSCROLL, HostItem, SCALE_ONE
 from .cell import Cell
 from .colors import Attr
 from .events import Event, EVENT_MOUSE, MOUSE_BUTTON_LEFT
@@ -177,12 +177,12 @@ def _track_jump_axis(
     return ns
 
 
-@fieldwise_init
 struct VScrollbar(ImplicitlyCopyable, Movable):
     """Vertical scrollbar at column ``x`` from row ``top`` to ``bottom``
     (both inclusive). ``total`` is the total number of scrollable rows,
     ``visible`` is the number of rows visible in the view at once, and
-    ``scroll`` is the index of the first visible row.
+    ``scroll`` is the index of the first visible row. ``cells`` columns
+    thick from ``x`` (``Canvas.scroll_bar_cells``: 2 in the Mac OS 9 look).
     """
     var x: Int
     var top: Int
@@ -190,6 +190,19 @@ struct VScrollbar(ImplicitlyCopyable, Movable):
     var total: Int
     var visible: Int
     var scroll: Int
+    var cells: Int
+
+    def __init__(
+        out self, x: Int, top: Int, bottom: Int, total: Int, visible: Int,
+        scroll: Int, cells: Int = 1,
+    ):
+        self.x = x
+        self.top = top
+        self.bottom = bottom
+        self.total = total
+        self.visible = visible
+        self.scroll = scroll
+        self.cells = max(1, cells)
 
     def metrics(self) -> ScrollbarMetrics:
         return _metrics(
@@ -197,22 +210,40 @@ struct VScrollbar(ImplicitlyCopyable, Movable):
         )
 
     def paint(self, mut canvas: Canvas, painter: Painter, attr: Attr):
+        """The bar in cells — or, when the host draws framework chrome
+        (``canvas.host_widgets``: the macOS-style and Mac OS 9 looks), a
+        ``HOST_VSCROLL`` item over blank cells, which keep the mouse, so
+        ``hit`` / ``drag_to`` answer as in every other look."""
         var m = self.metrics()
         if not m.present:
             return
-        painter.set(canvas, self.x, self.top, Cell(String("▲"), attr, 1))
-        painter.set(canvas, self.x, self.bottom, Cell(String("▼"), attr, 1))
-        var track_y0 = self.top + 1
-        for i in range(m.track_size):
-            var ch: String
-            if m.knob_off <= i and i < m.knob_off + m.knob_size:
-                ch = String("█")
-            else:
-                ch = String("░")
-            painter.set(canvas, self.x, track_y0 + i, Cell(ch, attr, 1))
+        var bar = Rect(self.x, self.top, self.x + self.cells, self.bottom + 1)
+        if canvas.host_widgets and _host_can_draw(canvas, painter, bar):
+            _blank(canvas, bar, attr)
+            var y0 = (self.top - canvas.origin.y + 1 + m.knob_off) * SCALE_ONE
+            canvas.add_host_item(HostItem(
+                HOST_VSCROLL,
+                (self.x - canvas.origin.x) * SCALE_ONE,
+                (self.top - canvas.origin.y) * SCALE_ONE,
+                bar.width() * SCALE_ONE, bar.height() * SCALE_ONE, False, False,
+                y0, y0 + m.knob_size * SCALE_ONE, attr, 0,
+            ))
+            return
+        for c in range(self.cells):
+            var x = self.x + c
+            painter.set(canvas, x, self.top, Cell(String("▲"), attr, 1))
+            painter.set(canvas, x, self.bottom, Cell(String("▼"), attr, 1))
+            var track_y0 = self.top + 1
+            for i in range(m.track_size):
+                var ch: String
+                if m.knob_off <= i and i < m.knob_off + m.knob_size:
+                    ch = String("█")
+                else:
+                    ch = String("░")
+                painter.set(canvas, x, track_y0 + i, Cell(ch, attr, 1))
 
     def hit(self, p: Point) -> Tuple[Int, Int]:
-        if p.x != self.x:
+        if p.x < self.x or p.x >= self.x + self.cells:
             return (0, 0)
         return _hit_axis(p.y, self.top, self.bottom, self.metrics())
 
@@ -223,17 +254,29 @@ struct VScrollbar(ImplicitlyCopyable, Movable):
         return _track_jump_axis(track_pos, self.visible, self.metrics())
 
 
-@fieldwise_init
 struct HScrollbar(ImplicitlyCopyable, Movable):
     """Horizontal scrollbar at row ``y`` from column ``left`` to
     ``right`` (both inclusive). Same axis convention as ``VScrollbar``,
-    rotated 90°."""
+    rotated 90°; ``cells`` rows thick from ``y``."""
     var y: Int
     var left: Int
     var right: Int
     var total: Int
     var visible: Int
     var scroll: Int
+    var cells: Int
+
+    def __init__(
+        out self, y: Int, left: Int, right: Int, total: Int, visible: Int,
+        scroll: Int, cells: Int = 1,
+    ):
+        self.y = y
+        self.left = left
+        self.right = right
+        self.total = total
+        self.visible = visible
+        self.scroll = scroll
+        self.cells = max(1, cells)
 
     def metrics(self) -> ScrollbarMetrics:
         return _metrics(
@@ -241,22 +284,38 @@ struct HScrollbar(ImplicitlyCopyable, Movable):
         )
 
     def paint(self, mut canvas: Canvas, painter: Painter, attr: Attr):
+        """The bar in cells, or a ``HOST_HSCROLL`` item (see
+        ``VScrollbar.paint``)."""
         var m = self.metrics()
         if not m.present:
             return
-        painter.set(canvas, self.left, self.y, Cell(String("◄"), attr, 1))
-        painter.set(canvas, self.right, self.y, Cell(String("►"), attr, 1))
-        var track_x0 = self.left + 1
-        for i in range(m.track_size):
-            var ch: String
-            if m.knob_off <= i and i < m.knob_off + m.knob_size:
-                ch = String("█")
-            else:
-                ch = String("░")
-            painter.set(canvas, track_x0 + i, self.y, Cell(ch, attr, 1))
+        var bar = Rect(self.left, self.y, self.right + 1, self.y + self.cells)
+        if canvas.host_widgets and _host_can_draw(canvas, painter, bar):
+            _blank(canvas, bar, attr)
+            var x0 = (self.left - canvas.origin.x + 1 + m.knob_off) * SCALE_ONE
+            canvas.add_host_item(HostItem(
+                HOST_HSCROLL,
+                (self.left - canvas.origin.x) * SCALE_ONE,
+                (self.y - canvas.origin.y) * SCALE_ONE,
+                bar.width() * SCALE_ONE, bar.height() * SCALE_ONE, True, False,
+                x0, x0 + m.knob_size * SCALE_ONE, attr, 0,
+            ))
+            return
+        for c in range(self.cells):
+            var y = self.y + c
+            painter.set(canvas, self.left, y, Cell(String("◄"), attr, 1))
+            painter.set(canvas, self.right, y, Cell(String("►"), attr, 1))
+            var track_x0 = self.left + 1
+            for i in range(m.track_size):
+                var ch: String
+                if m.knob_off <= i and i < m.knob_off + m.knob_size:
+                    ch = String("█")
+                else:
+                    ch = String("░")
+                painter.set(canvas, track_x0 + i, y, Cell(ch, attr, 1))
 
     def hit(self, p: Point) -> Tuple[Int, Int]:
-        if p.y != self.y:
+        if p.y < self.y or p.y >= self.y + self.cells:
             return (0, 0)
         return _hit_axis(p.x, self.left, self.right, self.metrics())
 
@@ -265,6 +324,19 @@ struct HScrollbar(ImplicitlyCopyable, Movable):
 
     def track_jump(self, track_pos: Int) -> Int:
         return _track_jump_axis(track_pos, self.visible, self.metrics())
+
+
+def _host_can_draw(canvas: Canvas, painter: Painter, bar: Rect) -> Bool:
+    """A host-drawn bar has to be whole: one the clip or the canvas cuts
+    into (an overlapping window, the screen's edge) stays in cells."""
+    var shown = bar.intersect(painter.clip).intersect(canvas.bounds())
+    return shown.width() == bar.width() and shown.height() == bar.height()
+
+
+def _blank(mut canvas: Canvas, bar: Rect, attr: Attr):
+    for y in range(bar.a.y, bar.b.y):
+        for x in range(bar.a.x, bar.b.x):
+            canvas.set(x, y, Cell(String(" "), attr, 1))
 
 
 struct ScrollBarArea(Copyable, Movable):
@@ -294,15 +366,16 @@ struct ScrollBarArea(Copyable, Movable):
         mut self, mut canvas: Canvas, area: Rect, total: Int, scroll: Int,
         attr: Attr,
     ):
-        """Draw the bar on ``area``'s right column (rows top to bottom)
-        if ``total`` rows don't fit its height. Paint it after the
-        content: it takes that column over."""
+        """Draw the bar down ``area``'s right edge (rows top to bottom) if
+        ``total`` rows don't fit its height — ``canvas.scroll_bar_cells``
+        columns of it. Paint it after the content: it takes them over."""
         if area.width() < 1 or area.height() < 1:
             self.bar = VScrollbar(0, 0, -1, 0, 0, 0)
             return
+        var cells = min(canvas.scroll_bar_cells, area.width())
         self.bar = VScrollbar(
-            area.b.x - 1, area.a.y, area.b.y - 1, total, area.height(),
-            scroll,
+            area.b.x - cells, area.a.y, area.b.y - 1, total, area.height(),
+            scroll, cells,
         )
         self.bar.paint(canvas, Painter(area), attr)
 

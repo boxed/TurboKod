@@ -22,7 +22,12 @@ reads ``fg_rgb`` / ``bg_rgb`` (``0xRRGGBB``) instead of the palette index.
 from std.ffi import external_call
 from std.sys import size_of
 
-from turbokod.canvas import Canvas, SubGrid
+from turbokod.canvas import (
+    Canvas, HOST_HSCROLL, HOST_SPLIT, HOST_SURFACE_DIALOG, HOST_SURFACE_GIT,
+    HOST_TEST_DETAIL, HOST_TEST_HEADER, HOST_TEST_LIST,
+    HOST_SURFACE_MAIN, HOST_SURFACE_PANELS, HOST_SURFACE_SETTINGS,
+    HOST_SURFACES, HOST_VSCROLL, SubGrid,
+)
 from turbokod.colors import default_attr
 from turbokod.events import Event, MOD_CTRL, MOD_META
 from turbokod.geometry import Point, Rect
@@ -48,7 +53,9 @@ from turbokod.debug_pane import (
 )
 from turbokod.file_tree import FileTree
 from turbokod.file_io import basename, parent_path, project_relative
-from turbokod.colors import EDITOR_BG, EDITOR_FG, FG_TRUECOLOR
+from turbokod.colors import (
+    Attr, BG_TRUECOLOR, EDITOR_BG, EDITOR_FG, FG_TRUECOLOR,
+)
 from turbokod.string_utils import byte_slice
 from turbokod.config import (
     chicago_font_label, default_font_label,
@@ -98,6 +105,25 @@ def _frame_canvas(h: Int, cols: Int, rows: Int) -> Canvas:
     var canvas = _desk(h)[].frame_canvas(cols, rows)
     canvas.clear(default_attr())
     return canvas^
+
+
+def _chrome_canvas(h: Int, cols: Int, rows: Int) -> Canvas:
+    """``_blank_canvas`` for a surface of its own (Settings, dialog and git
+    windows) whose framework chrome the host may draw in its look."""
+    var canvas = _blank_canvas(cols, rows)
+    canvas.host_widgets = _desk(h)[].host_draws_chrome()
+    canvas.scroll_bar_cells = _desk(h)[].scroll_bar_cells()
+    return canvas^
+
+
+def _pack_surface(
+    h: Int, surface: Int, mut canvas: Canvas, cols: Int, rows: Int,
+    out_ptr: Int, cap: Int,
+) -> Int:
+    """Pack ``canvas`` and keep its host items for ``tk_desktop_host_items``."""
+    var n = pack_canvas(canvas, cols, rows, out_ptr, cap)
+    swap(_desk(h)[].host_items[surface], canvas.host_items)
+    return n
 
 
 def _blank_canvas(cols: Int, rows: Int) -> Canvas:
@@ -353,6 +379,7 @@ def tk_desktop_layout(h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int) abi(
     _desk(h)[].paint(canvas, Rect(0, 0, cols, rows))
     var n = pack_canvas(canvas, cols, rows, out_ptr, cap)
     swap(_desk(h)[].sub_grids, canvas.sub_grids)
+    swap(_desk(h)[].host_items[HOST_SURFACE_MAIN], canvas.host_items)
     return n
 
 
@@ -799,6 +826,7 @@ def tk_desktop_layout_panels(
     _desk(h)[].paint_panels(canvas, Rect(0, 0, cols, rows))
     var n = pack_canvas(canvas, cols, rows, out_ptr, cap)
     swap(_desk(h)[].panel_sub_grids, canvas.sub_grids)
+    swap(_desk(h)[].host_items[HOST_SURFACE_PANELS], canvas.host_items)
     return n
 
 
@@ -1076,9 +1104,9 @@ def tk_desktop_layout_settings(
     ``tk_desktop_layout``). Returns the number of cells written."""
     if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
         return 0
-    var canvas = _blank_canvas(cols, rows)
+    var canvas = _chrome_canvas(h, cols, rows)
     _desk(h)[].paint_settings(canvas, Rect(0, 0, cols, rows))
-    return pack_canvas(canvas, cols, rows, out_ptr, cap)
+    return _pack_surface(h, HOST_SURFACE_SETTINGS, canvas, cols, rows, out_ptr, cap)
 
 
 @export
@@ -1558,9 +1586,9 @@ def tk_desktop_layout_dialog(
     """Paint the dialog window and pack it like ``tk_desktop_layout``."""
     if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
         return 0
-    var canvas = _blank_canvas(cols, rows)
+    var canvas = _chrome_canvas(h, cols, rows)
     _desk(h)[].paint_dialog_window(canvas, Rect(0, 0, cols, rows))
-    return pack_canvas(canvas, cols, rows, out_ptr, cap)
+    return _pack_surface(h, HOST_SURFACE_DIALOG, canvas, cols, rows, out_ptr, cap)
 
 
 @export
@@ -1630,9 +1658,9 @@ def tk_desktop_layout_git(
     """Paint the git window and pack it like ``tk_desktop_layout``."""
     if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
         return 0
-    var canvas = _blank_canvas(cols, rows)
+    var canvas = _chrome_canvas(h, cols, rows)
     _desk(h)[].paint_git_window(canvas, Rect(0, 0, cols, rows))
-    return pack_canvas(canvas, cols, rows, out_ptr, cap)
+    return _pack_surface(h, HOST_SURFACE_GIT, canvas, cols, rows, out_ptr, cap)
 
 
 @export
@@ -2052,6 +2080,115 @@ def tk_desktop_tree_act(h: Int, op: Int, idx: Int, x: Int, y: Int) abi("C"):
         d.file_tree.native_open(idx)
     elif op == 3:
         d.native_tree_menu(idx, Point(x, y))
+
+
+# --- macOS-style / Mac OS 9 UI: host-drawn framework chrome ---------------------
+
+
+@export
+def tk_desktop_host_items(
+    h: Int, surface: Int, out_ptr: Int, cap: Int,
+) abi("C") -> Int:
+    """The last frame's framework chrome on ``surface`` (``HOST_SURFACE_*``:
+    0 project window, 1 floating panels, 2 Settings, 3 dialog, 4 git) for
+    the host to draw in its look (``canvas.HostItem``): an array of
+    ``{kind, x, y, w, h, side, active, ka, kb, fg, bg}`` — ``kind``
+    ``"split"`` / ``"vscroll"`` / ``"hscroll"``; the rect in thousandths of
+    a cell; a split's orientation (``side``: halves left / right) and
+    whether it's dragged; a scroll bar's thumb span along it (``ka`` ..
+    ``kb``, same units); the colors the core would have used (0xRRGGBB).
+    Draw-only: the cells under an item take the mouse. 0 when none."""
+    if h == 0 or surface < 0 or surface >= HOST_SURFACES:
+        return 0
+    ref d = _desk(h)[]
+    var arr = json_array()
+    for i in range(len(d.host_items[surface])):
+        var it = d.host_items[surface][i].copy()
+        var o = json_object()
+        if it.kind == HOST_SPLIT:
+            o.put(String("kind"), json_str(String("split")))
+        elif it.kind == HOST_TEST_HEADER:
+            o.put(String("kind"), json_str(String("test_header")))
+        elif it.kind == HOST_TEST_LIST:
+            o.put(String("kind"), json_str(String("test_list")))
+        elif it.kind == HOST_TEST_DETAIL:
+            o.put(String("kind"), json_str(String("test_detail")))
+        elif it.kind == HOST_VSCROLL:
+            o.put(String("kind"), json_str(String("vscroll")))
+        elif it.kind == HOST_HSCROLL:
+            o.put(String("kind"), json_str(String("hscroll")))
+        else:
+            continue
+        o.put(String("x"), json_int(it.x))
+        o.put(String("y"), json_int(it.y))
+        o.put(String("w"), json_int(it.w))
+        o.put(String("h"), json_int(it.h))
+        o.put(String("side"), json_bool(it.side_by_side))
+        o.put(String("active"), json_bool(it.active))
+        o.put(String("ka"), json_int(it.knob_a))
+        o.put(String("kb"), json_int(it.knob_b))
+        o.put(String("fg"), json_int(_attr_rgb(d, it.attr, True)))
+        o.put(String("bg"), json_int(_attr_rgb(d, it.attr, False)))
+        o.put(String("tag"), json_int(it.tag))
+        arr.append(o)
+    if arr.array_len() == 0:
+        return 0
+    return _write_out(encode_json(arr), out_ptr, cap)
+
+
+def _attr_rgb(ref d: Desktop, attr: Attr, fg: Bool) -> Int:
+    """``attr``'s foreground or background as 0xRRGGBB, through the theme."""
+    if fg:
+        if (attr.color_mode & FG_TRUECOLOR) != 0:
+            return Int(attr.fg_rgb)
+        return Int(d.active_theme.palette[Int(attr.fg)])
+    if (attr.color_mode & BG_TRUECOLOR) != 0:
+        return Int(attr.bg_rgb)
+    return Int(d.active_theme.palette[Int(attr.bg)])
+
+
+# --- macOS-style / Mac OS 9 UI: the test results view -------------------------
+
+
+@export
+def tk_desktop_test_results(
+    h: Int, tag: Int, generation: Int, version: Int, out_ptr: Int, cap: Int,
+) abi("C") -> Int:
+    """The test results view ``tag`` (from its host items) for the native
+    header and list: ``TestResultsView.native_state`` — the tests changed
+    since ``version`` of run ``generation`` the host already has (pass -1
+    for everything), with the progress and selection. 0 when there's no
+    such view."""
+    if h == 0:
+        return 0
+    var o = _desk(h)[].native_test_state(tag, generation, version)
+    if o.is_null():
+        return 0
+    return _write_out(encode_json(o), out_ptr, cap)
+
+
+@export
+def tk_desktop_test_detail(h: Int, tag: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
+    """The selected test of results view ``tag`` for the native detail
+    (``TestResultsView.native_detail``). 0 when there's no such view."""
+    if h == 0:
+        return 0
+    var o = _desk(h)[].native_test_detail(tag)
+    if o.is_null():
+        return 0
+    return _write_out(encode_json(o), out_ptr, cap)
+
+
+@export
+def tk_desktop_test_results_act(
+    h: Int, tag: Int, op: Int, index: Int, ptr: Int, n: Int,
+) abi("C"):
+    """A native results view's action: ``op`` 0 select test ``index``, 1
+    open test ``index``, 2 open the file (string) at line ``index``, 3 open
+    the URL (string). The pane takes the keyboard either way."""
+    if h == 0:
+        return
+    _desk(h)[].native_test_act(tag, op, index, _string_from(ptr, n))
 
 
 # --- macOS-style UI: editor scroller --------------------------------------------

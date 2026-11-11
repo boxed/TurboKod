@@ -1721,12 +1721,16 @@ final class CellView: NSView {
     private func easeTo(_ target: CGFloat, speed: CGFloat = 0.30) {
         springTarget = target
         springSpeed = speed
+        var stalled = false
         if springRunning {
             if CACurrentMediaTime() - springLastStep < 0.25 { return }
             cancelSpring()      // stalled: restart it below
+            stalled = true
         }
         springLastStep = CACurrentMediaTime()
-        if #available(macOS 14.0, *) {
+        // A display link that stopped firing for this view would likely stall
+        // again, so a restart runs on the run-loop timer, which always fires.
+        if #available(macOS 14.0, *), !stalled {
             let link = displayLink(target: self, selector: #selector(springFrame(_:)))
             link.add(to: .main, forMode: .common)
             springLink = link
@@ -1745,9 +1749,14 @@ final class CellView: NSView {
     @objc private func springFrame(_ link: CADisplayLink) {
         // Step to where the view should be when this frame hits the screen.
         let now = link.targetTimestamp
-        let dt = springLastTime == 0 ? link.duration : now - springLastTime
+        var dt = springLastTime == 0 ? link.duration : now - springLastTime
         springLastTime = now
-        springStep(min(max(dt, 0), 0.1))
+        // A frame always advances: a target time that didn't move (or went
+        // back, the link re-homed to another display) would step by zero —
+        // and a zero step forever is a stuck ease that still looks alive to
+        // `easeTo`'s stall check, so the wheel never moved again.
+        if !(dt > 0) { dt = link.duration > 0 ? link.duration : 1.0 / 120.0 }
+        springStep(min(dt, 0.1))
     }
 
     /// Advance the ease by `dt` seconds. `springSpeed` is tuned as the
@@ -2126,11 +2135,26 @@ final class CellView: NSView {
     /// target accumulates across detents so a fast spin stays responsive.
     private func wheelScroll(_ e: NSEvent, region r: SmoothRegion) {
         if e.scrollingDeltaY == 0 { return }
-        // Seed from the core when starting fresh (no precise gesture or ease
-        // already in flight), so the target tracks the real current position.
-        if !springRunning && !smoothActive {
-            seedSmooth(r)
+        // Re-read the position, range and window from the core on every
+        // detent, not only when nothing is in flight. Seeding only "when
+        // fresh" left the wheel driving stale state whenever that test lied:
+        // a trackpad gesture whose end never reached this view leaves
+        // `smoothActive` set, and an ease in flight across a tab switch keeps
+        // the old window — the wheel then scrolled a hidden editor, clamped
+        // to its range, and the visible one sat still. Mid-ease the core's
+        // position is the one we last applied, so a running ease keeps its
+        // target; anything else (another window, the core scrolled under us)
+        // starts over from where the editor really is.
+        let prevWin = smoothWinIdx, prevLines = smoothLines
+        let wasRunning = springRunning
+        seedSmooth(r)
+        smoothActive = false
+        if !wasRunning || prevWin != r.winIdx || abs(prevLines - smoothLines) > 0.01 {
+            cancelSpring()
             springTarget = smoothLines
+        }
+        if ProcessInfo.processInfo.environment["TK_SCROLL_DEBUG"] != nil {
+            FileHandle.standardError.write("DBGWHEEL win=\(r.winIdx) prevWin=\(prevWin) lines=\(smoothLines) prev=\(prevLines) max=\(smoothMax) target=\(springTarget) running=\(wasRunning) sinceStep=\(CACurrentMediaTime() - springLastStep)\n".data(using: .utf8)!)
         }
         // One line per unit of line-based delta (positive = up). The core's
         // old path forced 3 lines a notch; this honors the OS granularity.
@@ -2660,6 +2684,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     var attentionFlashes: [ObjectIdentifier: [String: AttentionFlashView]] = [:]
     // macOS-style UI: an overlay scroller on the focused editor, per window.
     var scrollers: [ObjectIdentifier: EditorScroller] = [:]
+    // Framework chrome drawn in the look (`tk_desktop_host_items`), per
+    // window and keyed "look:kind:index" (`pollHostItems`).
+    var hostItems: [ObjectIdentifier: [String: HostItemView]] = [:]
+    // Test results views drawn natively, per window and keyed "look:tag".
+    var testHosts: [ObjectIdentifier: [String: TestResultsHost]] = [:]
     var treeBuf = [UInt8](repeating: 0, count: 1 << 16)
     var debugInspectors: [ObjectIdentifier: DebugInspectOverlay] = [:]
     var debugInspectBuf = [UInt8](repeating: 0, count: 1 << 16)
@@ -3097,6 +3126,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // The native header and debug tables track the core even
                 // while the window is covered.
                 if self.pollPaneHeaders(pv, panels: true) { changed = true }
+                if self.pollHostItems(pv, panels: true) { changed = true }
                 if self.pollDebugInspect(pv, panels: true) { changed = true }
                 if self.pollAttentionFlashes(pv, panels: true) { changed = true }
                 guard let w = pv.window, w.isVisible,
@@ -3116,6 +3146,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     guard let w = sv.window, w.isVisible,
                           w.occlusionState.contains(.visible) else { continue }
                     if sv.pollFrame() { sv.needsDisplay = true; changed = true }
+                    if self.pollHostItems(sv) { changed = true }
                 }
             }
             for v in self.views where v.handle != 0 {
@@ -3133,6 +3164,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if self.pollMerge(v) { changed = true }
                 if self.pollReview(v) { changed = true }
                 if self.pollPaneHeaders(v) { changed = true }
+                if self.pollHostItems(v) { changed = true }
                 if self.pollDebugInspect(v) { changed = true }
                 if self.pollScroller(v) { changed = true }
                 if self.pollAttentionFlashes(v) { changed = true }
@@ -5064,6 +5096,95 @@ extension AppController {
             return s
         }()
         return sc.update(o)
+    }
+
+    /// Lay the look's views over the framework chrome the core left to the
+    /// host this frame (a split's divider, …). They only draw; the cells
+    /// under them keep the mouse, so dragging and the cursor are the
+    /// core's in every look.
+    func pollHostItems(_ v: CellView, panels: Bool = false) -> Bool {
+        let id = ObjectIdentifier(v)
+        let surface: Int64
+        switch panels ? .panels : v.surface {
+        case .main: surface = 0
+        case .panels: surface = 1
+        case .settings: surface = 2
+        case .dialog: surface = 3
+        case .git: surface = 4
+        case .frame: return false
+        }
+        let data = readCoreJSON(&nativeDialogBuf, {
+            tk_desktop_host_items(v.handle, surface, $0, $1)
+        })
+        let list = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [[String: Any]] } ?? []
+        var current = hostItems[id] ?? [:]
+        var changed = false
+        var seen = Set<String>()
+        let platinum = tk_desktop_platinum_ui(v.handle) != 0
+        // The test results views' regions, by pane.
+        var tests: [Int: [String: NSRect]] = [:]
+        for o in list {
+            guard let kind = o["kind"] as? String, kind.hasPrefix("test_") else { continue }
+            tests[o["tag"] as? Int ?? 0, default: [:]][kind] = hostItemFrame(o)
+        }
+        if pollTestHosts(v, tests, platinum: platinum) { changed = true }
+        for (i, o) in list.enumerated() {
+            guard let kind = o["kind"] as? String,
+                  ["split", "vscroll", "hscroll"].contains(kind) else { continue }
+            let bar = kind != "split"
+            let key = "\(platinum ? "p" : "n"):\(bar ? "bar" : "split"):\(i)"
+            seen.insert(key)
+            let item = current[key] ?? {
+                let h: HostItemView
+                switch (platinum, bar) {
+                case (true, true): h = PlatinumHostScrollBar()
+                case (true, false): h = PlatinumSplitDivider()
+                case (false, true): h = HostScrollBar()
+                case (false, false): h = SplitDivider()
+                }
+                v.addSubview(h)
+                current[key] = h
+                changed = true
+                return h
+            }()
+            if item.update(o) { changed = true }
+        }
+        for (key, item) in current where !seen.contains(key) {
+            item.removeFromSuperview()
+            current.removeValue(forKey: key)
+            changed = true
+        }
+        hostItems[id] = current
+        return changed
+    }
+
+    /// Keep one native test results view per pane that has regions this
+    /// frame, in the window's look.
+    func pollTestHosts(_ v: CellView, _ regions: [Int: [String: NSRect]], platinum: Bool) -> Bool {
+        let id = ObjectIdentifier(v)
+        var current = testHosts[id] ?? [:]
+        var changed = false
+        var seen = Set<String>()
+        for (tag, r) in regions {
+            let key = "\(platinum ? "p" : "n"):\(tag)"
+            seen.insert(key)
+            let host = current[key] ?? {
+                let h = TestResultsHost(view: v, tag: tag, platinum: platinum)
+                current[key] = h
+                changed = true
+                return h
+            }()
+            if host.update(header: r["test_header"], list: r["test_list"], detail: r["test_detail"]) {
+                changed = true
+            }
+        }
+        for (key, host) in current where !seen.contains(key) {
+            host.remove()
+            current.removeValue(forKey: key)
+            changed = true
+        }
+        testHosts[id] = current
+        return changed
     }
 
     /// Lay native headers over the docked tool panes' header rows.
@@ -9028,6 +9149,873 @@ final class ReviewBar: NSVisualEffectView {
 // The core paints that row blank with no hit zones and keeps it as the
 // resize handle, so this view lets every click that isn't on a button fall
 // through to the cell view (`hitTest`).
+
+/// `readCoreJSON` for the views that ask the core themselves.
+func readCoreData(_ buf: inout [UInt8], _ fill: (Int64, Int64) -> Int64) -> Data? {
+    var n = 0
+    while true {
+        n = buf.withUnsafeMutableBufferPointer { b -> Int in
+            Int(fill(Int64(Int(bitPattern: b.baseAddress)), Int64(b.count)))
+        }
+        if n <= buf.count { break }
+        buf = [UInt8](repeating: 0, count: n)
+    }
+    return n > 0 ? Data(buf[0..<n]) : nil
+}
+
+/// A test's state (`OUTCOME_*` in test_report.mojo; 6 running) as the native
+/// views show it: an SF Symbol and its color for the macOS look, a glyph and
+/// its color for the Mac OS 9 one.
+enum TestOutcome {
+    static func symbol(_ o: Int) -> (String, NSColor) {
+        switch o {
+        case 0: return ("checkmark.circle.fill", .systemGreen)
+        case 1: return ("xmark.circle.fill", .systemRed)
+        case 2: return ("exclamationmark.triangle.fill", .systemOrange)
+        case 3: return ("arrow.uturn.right.circle", .systemYellow)
+        case 4: return ("xmark.circle", .secondaryLabelColor)
+        case 5: return ("exclamationmark.circle", .systemYellow)
+        default: return ("circle.dotted", .systemBlue)
+        }
+    }
+    static func glyph(_ o: Int) -> (String, NSColor) {
+        let green = NSColor(srgbRed: 0, green: 0.5, blue: 0, alpha: 1)
+        let red = NSColor(srgbRed: 0.8, green: 0, blue: 0, alpha: 1)
+        switch o {
+        case 0: return ("✓", green)
+        case 1: return ("✗", red)
+        case 2: return ("⚠", NSColor(srgbRed: 0.45, green: 0, blue: 0.6, alpha: 1))
+        case 3: return ("↷", Platinum.dark)
+        case 4: return ("x", Platinum.shadow)
+        case 5: return ("!", red)
+        default: return ("▸", Platinum.accent)
+        }
+    }
+    static let labels = ["passed", "failed", "errors", "skipped", "xfail", "xpass"]
+}
+
+/// What a native results view's three parts are fed from the core.
+protocol TestHeaderView: NSView { func show(_ state: [String: Any]) }
+protocol TestListView: NSView {
+    func show(rows: [(Int, String)], selected: Int, onAppend: Bool)
+}
+protocol TestDetailView: NSView { func show(_ detail: [String: Any]) }
+
+/// One test results view drawn by the host (the macOS-style and Mac OS 9
+/// looks): its header, list and detail laid over the cells the core left
+/// blank for them (`HOST_TEST_*`), filled from `tk_desktop_test_results`
+/// a changed row at a time. The core keeps the state — the selection
+/// included — and the views hand clicks back through
+/// `tk_desktop_test_results_act`.
+final class TestResultsHost {
+    private weak var cellView: CellView?
+    let tag: Int
+    private let header: TestHeaderView
+    private let list: TestListView
+    private let detail: TestDetailView
+    private var buf = [UInt8](repeating: 0, count: 1 << 16)
+    private var generation = -1, version = -1
+    private var rows: [(Int, String)] = []
+    private var lastState = Data()
+    private var selected = -2
+    private var detailVersion = -1
+
+    init(view: CellView, tag: Int, platinum: Bool) {
+        cellView = view
+        self.tag = tag
+        let act: (Int, Int, String) -> Void = { [weak view] op, index, text in
+            guard let v = view, v.handle != 0 else { return }
+            var t = Array(text.utf8)
+            t.withUnsafeMutableBufferPointer { b in
+                tk_desktop_test_results_act(v.handle, Int64(tag), Int64(op), Int64(index),
+                                            Int64(Int(bitPattern: b.baseAddress)), Int64(b.count))
+            }
+            v.invalidateFrame()
+        }
+        if platinum {
+            header = PlatinumTestHeader()
+            list = PlatinumTestList(act: act)
+            detail = PlatinumTestDetail(act: act)
+        } else {
+            header = MacTestHeader()
+            list = MacTestList(act: act)
+            detail = MacTestDetail(act: act)
+        }
+        for v in [header as NSView, list, detail] { view.addSubview(v) }
+    }
+
+    func remove() {
+        header.removeFromSuperview()
+        list.removeFromSuperview()
+        detail.removeFromSuperview()
+    }
+
+    func update(header h: NSRect?, list l: NSRect?, detail d: NSRect?) -> Bool {
+        guard let v = cellView, v.handle != 0 else { return false }
+        var changed = false
+        for (view, r) in [(header as NSView, h), (list, l), (detail, d)] {
+            let hidden = r == nil
+            if view.isHidden != hidden { view.isHidden = hidden; changed = true }
+            if let r = r, view.frame != r { view.frame = r; changed = true }
+        }
+        let g = Int64(generation), ver = Int64(version)
+        guard let data = readCoreData(&buf, { tk_desktop_test_results(v.handle, Int64(tag), g, ver, $0, $1) }),
+              data != lastState,
+              let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return changed }
+        lastState = data
+        let gen = o["generation"] as? Int ?? 0
+        let count = o["count"] as? Int ?? 0
+        let newRun = gen != generation
+        if newRun { rows = [] }
+        let before = rows.count
+        if rows.count > count { rows.removeLast(rows.count - count) }
+        while rows.count < count { rows.append((6, "")) }
+        var selChanged = false
+        let sel = o["selected"] as? Int ?? -1
+        for r in o["rows"] as? [[Any]] ?? [] {
+            guard r.count >= 3, let i = r[0] as? Int, i >= 0, i < rows.count else { continue }
+            rows[i] = (r[1] as? Int ?? 6, r[2] as? String ?? "")
+            if i == sel { selChanged = true }
+        }
+        generation = gen
+        version = o["version"] as? Int ?? 0
+        header.show(o)
+        // Follow the run while nothing is picked, as the grid does.
+        list.show(rows: rows, selected: sel, onAppend: rows.count > before && sel < 0)
+        if sel != selected || selChanged || newRun {
+            selected = sel
+            if let dd = readCoreData(&buf, { tk_desktop_test_detail(v.handle, Int64(tag), $0, $1) }),
+               let det = (try? JSONSerialization.jsonObject(with: dd)) as? [String: Any] {
+                detail.show(det)
+            }
+        }
+        return true
+    }
+}
+
+/// The links in a detail's text as `NSAttributedString` ranges (the core
+/// gives codepoint columns on 0-based lines).
+private func detailLinks(_ text: String, _ links: [[Any]]) -> [(NSRange, URL)] {
+    let lines = text.components(separatedBy: "\n")
+    var starts: [Int] = []
+    var at = 0
+    for l in lines { starts.append(at); at += (l as NSString).length + 1 }
+    var out: [(NSRange, URL)] = []
+    for l in links {
+        guard l.count >= 6, let ln = l[0] as? Int, ln < lines.count,
+              let a = l[1] as? Int, let b = l[2] as? Int, b > a,
+              let path = l[3] as? String else { continue }
+        let line = lines[ln]
+        let scalars = Array(line.unicodeScalars)
+        guard b <= scalars.count else { continue }
+        let pre = String(String.UnicodeScalarView(scalars[0..<a]))
+        let mid = String(String.UnicodeScalarView(scalars[a..<b]))
+        let loc = starts[ln] + (pre as NSString).length
+        var c = URLComponents()
+        c.scheme = "turbokod-test"
+        c.host = (l[5] as? Bool ?? false) ? "url" : "file"
+        c.queryItems = [URLQueryItem(name: "p", value: path), URLQueryItem(name: "n", value: "\(l[4] as? Int ?? 0)")]
+        if let u = c.url { out.append((NSRange(location: loc, length: (mid as NSString).length), u)) }
+    }
+    return out
+}
+
+/// A detail link back to the core: op 2 (file at line) or 3 (URL).
+private func openDetailLink(_ u: URL, _ act: (Int, Int, String) -> Void) {
+    let q = URLComponents(url: u, resolvingAgainstBaseURL: false)?.queryItems ?? []
+    let p = q.first { $0.name == "p" }?.value ?? ""
+    let n = Int(q.first { $0.name == "n" }?.value ?? "") ?? 0
+    act(u.host == "url" ? 3 : 2, n, p)
+}
+
+// --- macOS look -------------------------------------------------------------
+
+/// The progress and status rows: a progress bar (green, red once something
+/// failed), the counts with their symbols, and the test in progress / how
+/// the run ended.
+final class MacTestHeader: NSView, TestHeaderView {
+    private var state: [String: Any] = [:]
+    override var isFlipped: Bool { true }
+
+    func show(_ state: [String: Any]) { self.state = state; needsDisplay = true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.windowBackgroundColor.setFill()
+        bounds.fill()
+        let font = NSFont.systemFont(ofSize: 11)
+        let row = CELL_H
+        let waiting = state["waiting"] as? String ?? ""
+        if !waiting.isEmpty {
+            (waiting as NSString).draw(at: NSPoint(x: 10, y: (row - 14) / 2 + 1),
+                                       withAttributes: [.font: font, .foregroundColor: NSColor.secondaryLabelColor])
+            return
+        }
+        let done = state["done"] as? Int ?? 0, total = state["total"] as? Int ?? -1
+        let failed = (state["failed"] as? Int ?? 0) > 0
+        let label = total >= 0 ? "\(done) of \(total)" : "\(done)"
+        let la: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold),
+                                                 .foregroundColor: NSColor.labelColor]
+        let lw = (label as NSString).size(withAttributes: la).width
+        (label as NSString).draw(at: NSPoint(x: 10, y: (row - 14) / 2 + 1), withAttributes: la)
+        // The counts, right-aligned, then the bar between.
+        var x = bounds.width - 10
+        let counts = state["counts"] as? [Int] ?? []
+        for o in (0..<counts.count).reversed() where counts[o] > 0 {
+            let s = "\(counts[o])" as NSString
+            let a: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.labelColor]
+            let w = s.size(withAttributes: a).width
+            x -= w
+            s.draw(at: NSPoint(x: x, y: (row - 14) / 2 + 1), withAttributes: a)
+            let (name, color) = TestOutcome.symbol(o)
+            if let img = NSImage(systemSymbolName: name, accessibilityDescription: TestOutcome.labels[o])?
+                .withSymbolConfiguration(.init(paletteColors: [color])) {
+                x -= 15
+                img.draw(in: NSRect(x: x, y: (row - 12) / 2, width: 12, height: 12))
+            }
+            x -= 10
+        }
+        let barX = 10 + lw + 10
+        if total > 0, x - barX > 20 {
+            let track = NSRect(x: barX, y: (row - 6) / 2, width: x - barX - 4, height: 6)
+            NSColor.quaternaryLabelColor.setFill()
+            NSBezierPath(roundedRect: track, xRadius: 3, yRadius: 3).fill()
+            var fill = track
+            fill.size.width = track.width * CGFloat(min(done, total)) / CGFloat(total)
+            (failed ? NSColor.systemRed : NSColor.systemGreen).setFill()
+            NSBezierPath(roundedRect: fill, xRadius: 3, yRadius: 3).fill()
+        }
+        if bounds.height >= 2 * row {
+            let tone = state["tone"] as? Int ?? 0
+            let c: NSColor = tone == 1 ? .systemGreen : tone == 2 ? .systemRed : .secondaryLabelColor
+            ((state["status"] as? String ?? "") as NSString).draw(
+                with: NSRect(x: 10, y: row + (row - 14) / 2, width: bounds.width - 20, height: 15),
+                options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
+                attributes: [.font: font, .foregroundColor: c])
+        }
+    }
+}
+
+/// The list: a table of every test with its state's symbol.
+final class MacTestList: NSView, TestListView, NSTableViewDataSource, NSTableViewDelegate {
+    private let scroll = NSScrollView()
+    private let table = NSTableView()
+    private var rows: [(Int, String)] = []
+    private var syncing = false
+    private let act: (Int, Int, String) -> Void
+
+    init(act: @escaping (Int, Int, String) -> Void) {
+        self.act = act
+        super.init(frame: .zero)
+        let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("test"))
+        c.resizingMask = .autoresizingMask
+        table.addTableColumn(c)
+        table.headerView = nil
+        table.style = .fullWidth
+        table.rowHeight = 20
+        table.usesAlternatingRowBackgroundColors = true
+        table.dataSource = self
+        table.delegate = self
+        table.target = self
+        table.doubleAction = #selector(doubleClicked)
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.borderType = .noBorder
+        addSubview(scroll)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override func layout() {
+        super.layout()
+        scroll.frame = bounds
+        table.sizeLastColumnToFit()
+    }
+
+    func show(rows: [(Int, String)], selected: Int, onAppend: Bool) {
+        let clip = scroll.contentView
+        let atEnd = clip.bounds.maxY >= table.bounds.maxY - table.rowHeight
+        self.rows = rows
+        syncing = true
+        table.reloadData()
+        if selected >= 0, selected < rows.count {
+            if table.selectedRow != selected {
+                table.selectRowIndexes([selected], byExtendingSelection: false)
+                table.scrollRowToVisible(selected)
+            }
+        } else {
+            table.deselectAll(nil)
+            if onAppend && atEnd && !rows.isEmpty { table.scrollRowToVisible(rows.count - 1) }
+        }
+        syncing = false
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let id = NSUserInterfaceItemIdentifier("testCell")
+        let cell = tableView.makeView(withIdentifier: id, owner: nil) as? NSTableCellView ?? {
+            let c = NSTableCellView()
+            c.identifier = id
+            let img = NSImageView()
+            let tf = NSTextField(labelWithString: "")
+            tf.lineBreakMode = .byTruncatingMiddle
+            tf.font = .systemFont(ofSize: 12)
+            for v in [img, tf] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; c.addSubview(v) }
+            c.imageView = img
+            c.textField = tf
+            NSLayoutConstraint.activate([
+                img.leadingAnchor.constraint(equalTo: c.leadingAnchor, constant: 6),
+                img.centerYAnchor.constraint(equalTo: c.centerYAnchor),
+                img.widthAnchor.constraint(equalToConstant: 14), img.heightAnchor.constraint(equalToConstant: 14),
+                tf.leadingAnchor.constraint(equalTo: img.trailingAnchor, constant: 6),
+                tf.trailingAnchor.constraint(equalTo: c.trailingAnchor, constant: -4),
+                tf.centerYAnchor.constraint(equalTo: c.centerYAnchor),
+            ])
+            return c
+        }()
+        let (o, name) = rows[row]
+        let (sym, color) = TestOutcome.symbol(o)
+        cell.imageView?.image = NSImage(systemSymbolName: sym, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(paletteColors: [color]))
+        cell.textField?.stringValue = name
+        return cell
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        guard !syncing, table.selectedRow >= 0 else { return }
+        act(0, table.selectedRow, "")
+    }
+
+    @objc private func doubleClicked() {
+        if table.clickedRow >= 0 { act(1, table.clickedRow, "") }
+    }
+}
+
+/// The detail: the selected test's title (a link to the test), its state,
+/// and its message and output in a monospaced, selectable text view whose
+/// file / line references are links.
+final class MacTestDetail: NSView, TestDetailView, NSTextViewDelegate {
+    private let scroll = NSScrollView()
+    private let text = NSTextView()
+    private let act: (Int, Int, String) -> Void
+    private var testIndex = -1
+
+    init(act: @escaping (Int, Int, String) -> Void) {
+        self.act = act
+        super.init(frame: .zero)
+        text.isEditable = false
+        text.isSelectable = true
+        text.isRichText = true
+        text.drawsBackground = true
+        text.backgroundColor = .textBackgroundColor
+        text.textContainerInset = NSSize(width: 8, height: 6)
+        text.isVerticallyResizable = true
+        text.autoresizingMask = [.width]
+        text.delegate = self
+        text.linkTextAttributes = [.foregroundColor: NSColor.linkColor, .underlineStyle: NSUnderlineStyle.single.rawValue,
+                                   .cursor: NSCursor.pointingHand]
+        scroll.documentView = text
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.borderType = .noBorder
+        addSubview(scroll)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override func layout() {
+        super.layout()
+        scroll.frame = bounds
+        text.frame.size.width = scroll.contentSize.width
+    }
+
+    func show(_ d: [String: Any]) {
+        let index = d["index"] as? Int ?? -1
+        let out = NSMutableAttributedString()
+        if index < 0 {
+            out.append(NSAttributedString(string: d["hint"] as? String ?? "", attributes: [
+                .font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.secondaryLabelColor]))
+        } else {
+            let (sym, color) = TestOutcome.symbol(d["outcome"] as? Int ?? 6)
+            if let img = NSImage(systemSymbolName: sym, accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(pointSize: 13, weight: .semibold).applying(.init(paletteColors: [color]))) {
+                let a = NSTextAttachment()
+                a.image = img
+                out.append(NSAttributedString(attachment: a))
+                out.append(NSAttributedString(string: " "))
+            }
+            var title: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+                                                        .foregroundColor: NSColor.labelColor]
+            if !(d["file"] as? String ?? "").isEmpty, let u = URL(string: "turbokod-test://test") { title[.link] = u }
+            out.append(NSAttributedString(string: (d["id"] as? String ?? "") + "\n", attributes: title))
+            out.append(NSAttributedString(string: (d["state"] as? String ?? "") + "\n\n", attributes: [
+                .font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]))
+            let body = d["text"] as? String ?? ""
+            let start = out.length
+            out.append(NSAttributedString(string: body, attributes: [
+                .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular), .foregroundColor: NSColor.labelColor]))
+            for (r, u) in detailLinks(body, d["links"] as? [[Any]] ?? []) {
+                out.addAttribute(.link, value: u, range: NSRange(location: start + r.location, length: r.length))
+            }
+        }
+        if index != testIndex { text.scroll(.zero) }
+        testIndex = index
+        text.textStorage?.setAttributedString(out)
+    }
+
+    func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+        guard let u = link as? URL else { return false }
+        if u.host == "test" { act(1, testIndex, "") } else { openDetailLink(u, act) }
+        return true
+    }
+}
+
+// --- Mac OS 9 look ----------------------------------------------------------
+
+/// The progress and status rows, Platinum: a Mac OS 9 progress bar in a
+/// well, the counts, and the status line, in the system font.
+final class PlatinumTestHeader: NSView, TestHeaderView {
+    private var state: [String: Any] = [:]
+    override var isFlipped: Bool { true }
+
+    func show(_ state: [String: Any]) { self.state = state; needsDisplay = true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        Platinum.fill(bounds, Platinum.face)
+        let row = CELL_H
+        let waiting = state["waiting"] as? String ?? ""
+        if !waiting.isEmpty {
+            Platinum.text(waiting, in: NSRect(x: 8, y: 0, width: bounds.width - 16, height: row),
+                          font: Platinum.app, color: Platinum.dark)
+            return
+        }
+        let done = state["done"] as? Int ?? 0, total = state["total"] as? Int ?? -1
+        let label = total >= 0 ? "\(done) of \(total)" : "\(done)"
+        let lw = Platinum.width(label, Platinum.app)
+        Platinum.text(label, in: NSRect(x: 8, y: 0, width: lw + 2, height: row), font: Platinum.app)
+        var x = bounds.width - 8
+        let counts = state["counts"] as? [Int] ?? []
+        for o in (0..<counts.count).reversed() where counts[o] > 0 {
+            let (g, c) = TestOutcome.glyph(o)
+            let s = "\(g) \(counts[o])"
+            let w = Platinum.width(s, Platinum.app)
+            x -= w
+            Platinum.text(s, in: NSRect(x: x, y: 0, width: w + 2, height: row), font: Platinum.app, color: c)
+            x -= 10
+        }
+        let barX = 8 + lw + 10
+        if total > 0, x - barX > 24 {
+            let bar = NSRect(x: barX, y: (row - 12) / 2, width: x - barX - 6, height: 12)
+            Platinum.well(bar)
+            let inner = bar.insetBy(dx: 2, dy: 2)
+            Platinum.fill(inner, Platinum.lavender)
+            var f = inner
+            f.size.width = floor(inner.width * CGFloat(min(done, total)) / CGFloat(total))
+            let failed = (state["failed"] as? Int ?? 0) > 0
+            Platinum.fill(f, failed ? NSColor(srgbRed: 0.8, green: 0.1, blue: 0.1, alpha: 1) : Platinum.accent)
+            Platinum.fill(NSRect(x: f.minX, y: f.minY, width: f.width, height: 1), Platinum.lavenderDark)
+        }
+        if bounds.height >= 2 * row {
+            let tone = state["tone"] as? Int ?? 0
+            let c: NSColor = tone == 2 ? NSColor(srgbRed: 0.8, green: 0, blue: 0, alpha: 1)
+                : tone == 1 ? NSColor(srgbRed: 0, green: 0.5, blue: 0, alpha: 1) : Platinum.dark
+            Platinum.text(state["status"] as? String ?? "", in: NSRect(x: 8, y: row, width: bounds.width - 16, height: row),
+                          font: Platinum.app, color: c)
+        }
+    }
+}
+
+/// The list, Platinum: the git view's rows (a white list well with its own
+/// Platinum scroll bar), a state glyph before each test.
+final class PlatinumTestList: NSView, TestListView {
+    private let list = PGitRows()
+    private var count = 0
+    private var syncing = false
+
+    init(act: @escaping (Int, Int, String) -> Void) {
+        super.init(frame: .zero)
+        list.leadW = 16
+        list.onChoose = { [weak self] r in
+            guard let self = self, !self.syncing else { return }
+            act(0, r, "")
+        }
+        list.onActivate = { r in act(1, r, "") }
+        addSubview(list)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+    override var isFlipped: Bool { true }
+
+    override func layout() {
+        super.layout()
+        list.frame = bounds
+    }
+
+    func show(rows: [(Int, String)], selected: Int, onAppend: Bool) {
+        syncing = true
+        defer { syncing = false }
+        list.rows = rows.map { PGitRows.Row(runs: [($0.1, .black)], lead: TestOutcome.glyph($0.0)) }
+        if selected >= 0 {
+            if list.selected != selected { list.selected = selected; list.reveal(selected) }
+        } else {
+            list.selected = -1
+            if onAppend && !rows.isEmpty { list.reveal(rows.count - 1) }
+        }
+        count = rows.count
+    }
+}
+
+/// The detail, Platinum: a list well of the test's lines in Monaco — its
+/// title, state, message and output — where Return or a double click on a
+/// line opens what it points at (the test, from the title).
+final class PlatinumTestDetail: NSView, TestDetailView {
+    private let list = PGitRows()
+    private var testIndex = -1
+    /// Per row, where it opens: (op, n, text) for `tk_desktop_test_results_act`.
+    private var targets: [(Int, Int, String)?] = []
+    private var detail: [String: Any] = [:]
+    private var laidOutWidth: CGFloat = 0
+
+    init(act: @escaping (Int, Int, String) -> Void) {
+        super.init(frame: .zero)
+        list.font = PlatinumGitView.mono
+        list.rowH = 16
+        list.onActivate = { [weak self] r in
+            guard let self = self, r >= 0, r < self.targets.count, let t = self.targets[r] else { return }
+            act(t.0, t.0 == 1 ? self.testIndex : t.1, t.2)
+        }
+        addSubview(list)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+    override var isFlipped: Bool { true }
+
+    override func layout() {
+        super.layout()
+        list.frame = bounds
+        if bounds.width != laidOutWidth { rebuild() }
+    }
+
+    func show(_ d: [String: Any]) {
+        let index = d["index"] as? Int ?? -1
+        if index != testIndex { list.selected = -1 }
+        testIndex = index
+        detail = d
+        rebuild()
+    }
+
+    private func rebuild() {
+        laidOutWidth = bounds.width
+        let d = detail
+        var rows: [PGitRows.Row] = []
+        targets = []
+        guard testIndex >= 0 else {
+            rows.append(PGitRows.Row(runs: [(d["hint"] as? String ?? "", Platinum.dark)], selectable: false))
+            list.rows = rows
+            return
+        }
+        let (g, c) = TestOutcome.glyph(d["outcome"] as? Int ?? 6)
+        rows.append(PGitRows.Row(runs: [(d["id"] as? String ?? "", .black)], lead: (g, c), font: Platinum.system))
+        targets.append((1, 0, ""))
+        rows.append(PGitRows.Row(runs: [(d["state"] as? String ?? "", Platinum.dark)], font: Platinum.app))
+        targets.append(nil)
+        // Hard-wrapped to the well, a line's link going with each piece.
+        let charW = max(1, Platinum.width("M", PlatinumGitView.mono))
+        let cols = max(8, Int((bounds.width - PGitRows.sbW - 12) / charW))
+        var byLine: [Int: (Int, Int, String)] = [:]
+        for l in d["links"] as? [[Any]] ?? [] where l.count >= 6 {
+            guard let ln = l[0] as? Int, byLine[ln] == nil else { continue }
+            let url = l[5] as? Bool ?? false
+            byLine[ln] = (url ? 3 : 2, l[4] as? Int ?? 0, l[3] as? String ?? "")
+        }
+        let lines = (d["text"] as? String ?? "").components(separatedBy: "\n")
+        for (k, line) in lines.enumerated() {
+            let chars = Array(line)
+            var at = 0
+            repeat {
+                let piece = String(chars[at..<min(chars.count, at + cols)])
+                let link = byLine[k]
+                rows.append(PGitRows.Row(runs: [(piece, link != nil ? Platinum.accent : .black)]))
+                targets.append(link)
+                at += cols
+            } while at < chars.count
+        }
+        list.rows = rows
+    }
+}
+
+/// Framework chrome the host draws in its look (`tk_desktop_host_items`):
+/// draw-only, so clicks fall through to the cells, which the core still
+/// hit-tests.
+protocol HostItemView: NSView {
+    func update(_ o: [String: Any]) -> Bool
+}
+
+/// The rect of a host item, from thousandths of a cell.
+func hostItemFrame(_ o: [String: Any]) -> NSRect {
+    func v(_ k: String) -> CGFloat { CGFloat(o[k] as? Int ?? 0) / 1000 }
+    return NSRect(x: v("x") * CELL_W, y: v("y") * CELL_H,
+                  width: v("w") * CELL_W, height: v("h") * CELL_H)
+}
+
+func rgbColor(_ c: Int) -> NSColor {
+    NSColor(srgbRed: CGFloat((c >> 16) & 0xFF) / 255, green: CGFloat((c >> 8) & 0xFF) / 255,
+            blue: CGFloat(c & 0xFF) / 255, alpha: 1)
+}
+
+/// A split's divider in the macOS look: a separator hairline on the window
+/// background, the accent color while it's dragged — `NSSplitView`'s thin
+/// divider.
+final class SplitDivider: NSView, HostItemView {
+    private var side = true, active = false
+    private var bg = NSColor.black
+    private var lastData = Data()
+
+    override var isFlipped: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func update(_ o: [String: Any]) -> Bool {
+        guard let data = try? JSONSerialization.data(withJSONObject: o), data != lastData else { return false }
+        lastData = data
+        side = o["side"] as? Bool ?? true
+        active = o["active"] as? Bool ?? false
+        bg = rgbColor(o["bg"] as? Int ?? 0)
+        let f = hostItemFrame(o)
+        if frame != f { frame = f }
+        needsDisplay = true
+        return true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        // What it divides is native (the test results' table and text), so
+        // the window's background and a separator, as `NSSplitView` draws.
+        NSColor.windowBackgroundColor.setFill()
+        bounds.fill()
+        (active ? NSColor.controlAccentColor : NSColor.separatorColor).setFill()
+        let w: CGFloat = active ? 2 : 1
+        if side {
+            NSRect(x: ((bounds.width - w) / 2).rounded(.down), y: 0, width: w, height: bounds.height).fill()
+        } else {
+            NSRect(x: 0, y: ((bounds.height - w) / 2).rounded(.down), width: bounds.width, height: w).fill()
+        }
+    }
+}
+
+/// The thumb span of a host scroll bar item, in the item view's own
+/// coordinates along its length.
+private func hostKnob(_ o: [String: Any], horizontal: Bool) -> (CGFloat, CGFloat) {
+    let cell = horizontal ? CELL_W : CELL_H
+    let origin = CGFloat(o[horizontal ? "x" : "y"] as? Int ?? 0)
+    let a = (CGFloat(o["ka"] as? Int ?? 0) - origin) / 1000 * cell
+    let b = (CGFloat(o["kb"] as? Int ?? 0) - origin) / 1000 * cell
+    return (a, b)
+}
+
+/// A framework scroll bar in the macOS look: an overlay scroller's knob
+/// over the content's background, where the core hit-tests the thumb (the
+/// arrow cells at the ends still step a row, like a click on the track).
+final class HostScrollBar: NSView, HostItemView {
+    private var horizontal = false
+    private var knob: (CGFloat, CGFloat) = (0, 0)
+    private var bg = NSColor.black
+    private var ink = NSColor.white
+    private var lastData = Data()
+
+    override var isFlipped: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func update(_ o: [String: Any]) -> Bool {
+        guard let data = try? JSONSerialization.data(withJSONObject: o), data != lastData else { return false }
+        lastData = data
+        horizontal = (o["kind"] as? String) == "hscroll"
+        knob = hostKnob(o, horizontal: horizontal)
+        let c = o["bg"] as? Int ?? 0
+        bg = rgbColor(c)
+        let lum = 0.299 * Double((c >> 16) & 0xFF) + 0.587 * Double((c >> 8) & 0xFF) + 0.114 * Double(c & 0xFF)
+        ink = lum < 128 ? .white : .black
+        let f = hostItemFrame(o)
+        if frame != f { frame = f }
+        needsDisplay = true
+        return true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        bg.setFill()
+        bounds.fill()
+        let thick: CGFloat = 5
+        let k: NSRect
+        if horizontal {
+            k = NSRect(x: knob.0 + 1, y: bounds.maxY - thick - 2, width: max(knob.1 - knob.0 - 2, thick),
+                       height: thick)
+        } else {
+            k = NSRect(x: bounds.maxX - thick - 2, y: knob.0 + 1, width: thick,
+                       height: max(knob.1 - knob.0 - 2, thick))
+        }
+        ink.withAlphaComponent(0.45).setFill()
+        NSBezierPath(roundedRect: k, xRadius: thick / 2, yRadius: thick / 2).fill()
+    }
+}
+
+/// A framework scroll bar in the Mac OS 9 look: a Platinum scroll bar a
+/// cell wide — arrow boxes the size of the end cells, a sunken track and a
+/// lavender thumb exactly where the core hit-tests it.
+final class PlatinumHostScrollBar: NSView, HostItemView {
+    private var horizontal = false
+    private var knob: (CGFloat, CGFloat) = (0, 0)
+    private var lastData = Data()
+
+    override var isFlipped: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func update(_ o: [String: Any]) -> Bool {
+        guard let data = try? JSONSerialization.data(withJSONObject: o), data != lastData else { return false }
+        lastData = data
+        horizontal = (o["kind"] as? String) == "hscroll"
+        knob = hostKnob(o, horizontal: horizontal)
+        let f = hostItemFrame(o)
+        if frame != f { frame = f }
+        needsDisplay = true
+        return true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let active = Platinum.active(self)
+        guard horizontal else {
+            Self.vertical(bounds, box: CELL_H, knob: knob, active: active)
+            return
+        }
+        // Drawn as a vertical bar through a transpose, which keeps the
+        // light top-left / dark bottom-right of every bevel.
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        let t = NSAffineTransform()
+        t.transformStruct = NSAffineTransformStruct(m11: 0, m12: 1, m21: 1, m22: 0, tX: 0, tY: 0)
+        t.concat()
+        Self.vertical(NSRect(x: 0, y: 0, width: bounds.height, height: bounds.width),
+                      box: CELL_W * 2, knob: knob, active: active)
+    }
+
+    /// A Mac OS 9 look bar is two cells — 16 points, Platinum's own width —
+    /// so it's the editor's pixel-for-pixel bar, its arrow boxes the end
+    /// cells; anything thinner (a sub-grid of smaller cells) the narrow one.
+    private static func vertical(_ sb: NSRect, box: CGFloat, knob: (CGFloat, CGFloat), active: Bool) {
+        if sb.width >= 16 && box >= sb.width {
+            let t = NSRect(x: sb.minX, y: sb.minY + knob.0, width: sb.width, height: knob.1 - knob.0)
+            Platinum.scrollBar(sb, thumb: t.height > 0 ? t : nil, pressed: 0, active: active)
+        } else {
+            Platinum.narrowScrollBar(sb, box: box, knob: knob, active: active)
+        }
+    }
+}
+
+extension Platinum {
+    /// A vertical Platinum scroll bar narrower than the 16-point original
+    /// (`scrollBar`): black sides, `box`-long arrow boxes at the ends, a
+    /// sunken track and a lavender thumb over `knob` (its span down `sb`).
+    static func narrowScrollBar(_ sb: NSRect, box: CGFloat, knob: (CGFloat, CGFloat), active: Bool) {
+        fill(sb, .black)
+        let inner = sb.insetBy(dx: 1, dy: 0)
+        guard active else {
+            fill(sb.insetBy(dx: 1, dy: 1), face)
+            return
+        }
+        let b = min(box, sb.height / 2)
+        for isDown in [false, true] {
+            let r = NSRect(x: inner.minX, y: isDown ? sb.maxY - b + 1 : sb.minY + 1,
+                           width: inner.width, height: b - 2)
+            fill(r, face)
+            bevel(r, light, sbShadow)
+            // The arrow: 2, 4, 6 points wide (as wide as fits).
+            let steps = min(3, Int(inner.width) / 2)
+            let mid = r.midY - CGFloat(steps) / 2
+            for k in 0..<steps {
+                let width = CGFloat(isDown ? 2 * (steps - k) : 2 + 2 * k)
+                fill(NSRect(x: (r.midX - width / 2).rounded(.down), y: (mid + CGFloat(k)).rounded(.down),
+                            width: width, height: 1), .black)
+            }
+        }
+        let trackTop = sb.minY + b, trackBottom = sb.maxY - b
+        guard trackBottom > trackTop else { return }
+        func sunken(_ y0: CGFloat, _ y1: CGFloat) {
+            guard y1 > y0 else { return }
+            let r = NSRect(x: inner.minX, y: y0, width: inner.width, height: y1 - y0)
+            fill(r, sbTrack)
+            fill(NSRect(x: r.minX, y: y0, width: 1, height: r.height), sbTrackDark)
+            fill(NSRect(x: r.maxX - 1, y: y0, width: 1, height: r.height), sbTrackLight)
+            fill(NSRect(x: r.minX, y: y0, width: r.width, height: 1), sbTrackDark)
+        }
+        let t0 = max(trackTop, sb.minY + knob.0), t1 = min(trackBottom, sb.minY + knob.1)
+        guard t1 - t0 >= 3 else { sunken(trackTop, trackBottom); return }
+        sunken(trackTop, t0)
+        sunken(t1, trackBottom)
+        fill(NSRect(x: inner.minX, y: t0, width: inner.width, height: 1), .black)
+        fill(NSRect(x: inner.minX, y: t1 - 1, width: inner.width, height: 1), .black)
+        let th = NSRect(x: inner.minX, y: t0 + 1, width: inner.width, height: t1 - t0 - 2)
+        fill(th, sbThumb)
+        bevel(th, sbThumbLight, sbThumbDark)
+        if th.height >= 10 && th.width >= 4 {
+            let g = (th.midY - 4).rounded(.down)
+            for k in 0..<4 {
+                let y = g + CGFloat(2 * k)
+                fill(NSRect(x: th.minX + 1, y: y, width: th.width - 2, height: 1), sbThumbLight)
+                fill(NSRect(x: th.minX + 1, y: y + 1, width: th.width - 2, height: 1), sbGrip)
+            }
+        }
+    }
+}
+
+/// A split's divider in the Mac OS 9 look: a bevelled Platinum bar with a
+/// grip of ridges at its middle, darkened while it's dragged.
+final class PlatinumSplitDivider: NSView, HostItemView {
+    private var side = true, active = false
+    private var lastData = Data()
+
+    override var isFlipped: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func update(_ o: [String: Any]) -> Bool {
+        guard let data = try? JSONSerialization.data(withJSONObject: o), data != lastData else { return false }
+        lastData = data
+        side = o["side"] as? Bool ?? true
+        active = o["active"] as? Bool ?? false
+        let f = hostItemFrame(o)
+        if frame != f { frame = f }
+        needsDisplay = true
+        return true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let r = bounds
+        Platinum.fill(r, active ? Platinum.mid : Platinum.face)
+        // Edges against the content on either side, then the bevel.
+        if side {
+            Platinum.fill(NSRect(x: r.minX, y: r.minY, width: 1, height: r.height), Platinum.dark)
+            Platinum.fill(NSRect(x: r.maxX - 1, y: r.minY, width: 1, height: r.height), Platinum.dark)
+            Platinum.bevel(r.insetBy(dx: 1, dy: 0), Platinum.light, Platinum.shadow)
+        } else {
+            Platinum.fill(NSRect(x: r.minX, y: r.minY, width: r.width, height: 1), Platinum.dark)
+            Platinum.fill(NSRect(x: r.minX, y: r.maxY - 1, width: r.width, height: 1), Platinum.dark)
+            Platinum.bevel(r.insetBy(dx: 0, dy: 1), Platinum.light, Platinum.shadow)
+        }
+        // The grip: four ridges (shadow over light) across the bar.
+        let n = 4, gap: CGFloat = 3
+        let span = CGFloat(n - 1) * gap
+        for k in 0..<n {
+            let off = CGFloat(k) * gap - span / 2
+            if side {
+                let y = (r.midY + off).rounded(.down)
+                Platinum.fill(NSRect(x: r.minX + 2, y: y, width: r.width - 4, height: 1), Platinum.shadow)
+                Platinum.fill(NSRect(x: r.minX + 2, y: y + 1, width: r.width - 4, height: 1), Platinum.light)
+            } else {
+                let x = (r.midX + off).rounded(.down)
+                Platinum.fill(NSRect(x: x, y: r.minY + 2, width: 1, height: r.height - 4), Platinum.shadow)
+                Platinum.fill(NSRect(x: x + 1, y: r.minY + 2, width: 1, height: r.height - 4), Platinum.light)
+            }
+        }
+    }
+}
 
 /// A tool pane's host-drawn header: `PaneHeader` in the macOS look,
 /// `PlatinumPaneHeader` in the Mac OS 9 look.

@@ -186,6 +186,16 @@ thumb as if it cast them; and the thumb's lavenders (`D6D4FE` / `ADA5FE` /
 arrows are drawn as rows of points (2, 4, 6, 8 wide), never a path, which
 antialiased into gray edges.
 
+Framework scroll bars (`HOST_VSCROLL` / `HOST_HSCROLL`, see
+docs/native-ui.md, "Framework chrome") are two cells wide in this look
+(`Canvas.scroll_bar_cells`, so views reserve both columns) and drawn by
+`PlatinumHostScrollBar` with this same `Platinum.scrollBar` art, the thumb
+where the core hit-tests it; a horizontal one is the vertical art through
+a transpose. Split dividers are `PlatinumSplitDivider` (a bevelled bar with
+a grip). The test results view is `PlatinumTestHeader` (a Mac OS 9
+progress bar in a well), `PlatinumTestList` and `PlatinumTestDetail` — the
+git view's `PGitRows` list wells.
+
 ## Text
 
 Chicago comes from **Silom**, which ships with macOS: its Latin glyphs are

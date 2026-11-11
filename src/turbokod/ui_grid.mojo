@@ -839,7 +839,7 @@ struct GridForm(Movable):
         # Recolor on top: the marked line, the details, the spans.
         var clip = r
         if ScrollBarArea.overflows(r, n.count):
-            clip = Rect(r.a.x, r.a.y, r.b.x - 1, r.b.y)
+            clip = Rect(r.a.x, r.a.y, r.b.x - canvas.scroll_bar_cells, r.b.y)
         var painter = Painter(clip)
         for i in range(first, end):
             var j = i - n.first

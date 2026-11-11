@@ -72,6 +72,65 @@ struct SubGrid(Copyable, Movable):
     var cells: List[Cell]
 
 
+comptime HOST_SPLIT = UInt8(1)
+"""A ``HostItem`` that is a ``SplitArea``'s divider."""
+comptime HOST_SURFACE_MAIN = 0
+comptime HOST_SURFACE_PANELS = 1
+comptime HOST_SURFACE_SETTINGS = 2
+comptime HOST_SURFACE_DIALOG = 3
+comptime HOST_SURFACE_GIT = 4
+comptime HOST_SURFACES = 5
+"""The host's surfaces, each with its frame's ``HostItem``s
+(``Desktop.host_items``): the project window, the floating-panels window,
+the Settings window, the dialog window and the git window."""
+
+comptime HOST_VSCROLL = UInt8(2)
+comptime HOST_HSCROLL = UInt8(3)
+"""``HostItem``s that are a ``VScrollbar`` / ``HScrollbar`` (and so every
+``ScrollBarArea``): the bar's whole length, arrow cells included."""
+comptime HOST_TEST_HEADER = UInt8(4)
+comptime HOST_TEST_LIST = UInt8(5)
+comptime HOST_TEST_DETAIL = UInt8(6)
+"""The test results view's three regions — its progress / status rows, the
+test list and the selected test's detail — which the host draws as native
+views of its look, filled from ``tk_desktop_test_results``. ``tag`` names
+the pane (``TestResultsView.host_tag``)."""
+
+
+@fieldwise_init
+struct HostItem(Copyable, Movable):
+    """A piece of framework chrome the host draws over the frame in its own
+    look (``Canvas.host_widgets``), instead of the cells. The cells under
+    it are left blank and still take the mouse — the host's view only
+    draws — so behavior is the core's in every look.
+
+    ``x`` / ``y`` / ``w`` / ``h`` are in thousandths of the canvas's cells
+    (a sub-grid's cells needn't be the screen's); ``place_sub_grid``
+    converts a sub-grid's items to its parent's."""
+
+    var kind: UInt8
+    var x: Int
+    var y: Int
+    var w: Int
+    var h: Int
+    var side_by_side: Bool
+    """For ``HOST_SPLIT``: the halves are left / right (the divider a
+    column), else top / bottom."""
+    var active: Bool
+    """Being dragged."""
+    var knob_a: Int
+    var knob_b: Int
+    """For a scroll bar: the thumb's span along the bar (``y`` for a
+    vertical one, ``x`` for a horizontal one), in the same thousandths as
+    ``x`` / ``y`` — exactly where the core hit-tests it."""
+    var attr: Attr
+    """The colors the core would have drawn it in: the host picks a
+    contrasting ink from the background."""
+    var tag: Int
+    """Which instance an item belongs to, where the host needs to ask the
+    core about it (the test results views); 0 otherwise."""
+
+
 @fieldwise_init
 struct Canvas(Copyable, Movable):
     var width: Int
@@ -93,6 +152,18 @@ struct Canvas(Copyable, Movable):
     """The coordinates of the top-left cell: (0, 0) for a frame. A
     sub-grid's canvas (``GridFrame.begin``) starts at its rect's corner,
     so a view paints it in the coordinates it would paint the screen in."""
+    var host_widgets: Bool
+    """The host draws framework chrome (``HostItem``) in its own look —
+    the macOS-style and Mac OS 9 looks. A view whose chrome supports it
+    adds an item instead of painting glyphs. A canvas painted to be placed
+    in this one (a sub-grid) takes the flag from it."""
+    var host_items: List[HostItem]
+    """This frame's host-drawn chrome, for the host to fetch."""
+    var scroll_bar_cells: Int
+    """How many cells thick a framework scroll bar is: 2 in the Mac OS 9
+    look (a Platinum bar is 16 points, two of its 8-point cells), 1
+    everywhere else. Views that keep content out of the bar's way reserve
+    this many columns."""
 
     def __init__(out self, width: Int, height: Int):
         self.width = width
@@ -107,6 +178,18 @@ struct Canvas(Copyable, Movable):
             self.area_scale.append(SCALE_ONE)
         self.sub_grids = List[SubGrid]()
         self.origin = Point(0, 0)
+        self.host_widgets = False
+        self.host_items = List[HostItem]()
+        self.scroll_bar_cells = 1
+
+    def inherit_chrome(mut self, parent: Canvas):
+        """Take ``parent``'s framework-chrome settings, for a canvas painted
+        to be placed in it (a sub-grid)."""
+        self.host_widgets = parent.host_widgets
+        self.scroll_bar_cells = parent.scroll_bar_cells
+
+    def add_host_item(mut self, var item: HostItem):
+        self.host_items.append(item^)
 
     def scale_of(self, slot: UInt8) -> Tuple[Int, Int]:
         """Area ``slot``'s cell size, in thousandths of this canvas's."""
@@ -128,6 +211,20 @@ struct Canvas(Copyable, Movable):
         kept for the host, and ``rect``'s cells are marked as showing it
         until something paints over them."""
         var sc = self.scale_of(slot)
+        # The grid's host chrome, from its cells into this canvas's.
+        for i in range(len(grid.host_items)):
+            var it = grid.host_items[i].copy()
+            it.x = rect.a.x * SCALE_ONE + it.x * sc[0] // SCALE_ONE
+            it.y = rect.a.y * SCALE_ONE + it.y * sc[1] // SCALE_ONE
+            it.w = it.w * sc[0] // SCALE_ONE
+            it.h = it.h * sc[1] // SCALE_ONE
+            if it.kind == HOST_HSCROLL:
+                it.knob_a = rect.a.x * SCALE_ONE + it.knob_a * sc[0] // SCALE_ONE
+                it.knob_b = rect.a.x * SCALE_ONE + it.knob_b * sc[0] // SCALE_ONE
+            else:
+                it.knob_a = rect.a.y * SCALE_ONE + it.knob_a * sc[1] // SCALE_ONE
+                it.knob_b = rect.a.y * SCALE_ONE + it.knob_b * sc[1] // SCALE_ONE
+            self.host_items.append(it^)
         if (sc[0] == SCALE_ONE and sc[1] == SCALE_ONE) \
                 or len(self.sub_grids) >= MAX_SUB_GRIDS:
             var clip = rect.intersect(self.bounds())
@@ -160,6 +257,7 @@ struct Canvas(Copyable, Movable):
         for _ in range(n):
             self.cells.append(blank_cell())
         self.sub_grids = List[SubGrid]()
+        self.host_items = List[HostItem]()
 
     def _index(self, x: Int, y: Int) -> Int:
         return (y - self.origin.y) * self.width + (x - self.origin.x)

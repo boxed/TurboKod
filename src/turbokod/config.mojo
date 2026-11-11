@@ -273,6 +273,15 @@ struct TurbokodConfig(Copyable, Movable):
     # the shell outlives the app: a restart re-attaches every pane of the
     # project. Falls back to a plain shell when tmux isn't installed.
     var terminal_tmux: Bool
+    # The test pane's ``[☰ Results]`` / ``[▤ Output]`` toggle: show a run's
+    # live report (progress bar, failures with their output) instead of its
+    # terminal output. Off by default.
+    var test_results_view: Bool
+    # Where the results view's divider sits, in thousandths of the area:
+    # the list's share, side by side (``test_split_wide``) and stacked
+    # (``test_split_tall``). Dragged in the pane; double click resets.
+    var test_split_wide: Int
+    var test_split_tall: Int
     # Settings ▸ Language Server. Per-feature gates for the optional,
     # non-user-initiated LSP capabilities. Each only takes effect when the
     # active server also advertises the matching provider. Mixed defaults:
@@ -367,6 +376,9 @@ struct TurbokodConfig(Copyable, Movable):
         self.compress_kwargs = False
         self.cursor_blink = True
         self.terminal_tmux = True
+        self.test_results_view = False
+        self.test_split_wide = 400
+        self.test_split_tall = 400
         self.lsp_format_on_save = False
         self.lsp_signature_help = True
         self.lsp_document_highlight = True
@@ -407,6 +419,9 @@ struct TurbokodConfig(Copyable, Movable):
         self.compress_kwargs = copy.compress_kwargs
         self.cursor_blink = copy.cursor_blink
         self.terminal_tmux = copy.terminal_tmux
+        self.test_results_view = copy.test_results_view
+        self.test_split_wide = copy.test_split_wide
+        self.test_split_tall = copy.test_split_tall
         self.lsp_format_on_save = copy.lsp_format_on_save
         self.lsp_signature_help = copy.lsp_signature_help
         self.lsp_document_highlight = copy.lsp_document_highlight
@@ -559,6 +574,15 @@ def _config_from_json(root: JsonValue) raises -> TurbokodConfig:
     cfg.terminal_tmux = json_get_bool(
         root, String("terminal_tmux"), cfg.terminal_tmux,
     )
+    cfg.test_results_view = json_get_bool(
+        root, String("test_results_view"), cfg.test_results_view,
+    )
+    cfg.test_split_wide = _split_fraction(json_get_int(
+        root, String("test_split_wide"), cfg.test_split_wide,
+    ))
+    cfg.test_split_tall = _split_fraction(json_get_int(
+        root, String("test_split_tall"), cfg.test_split_tall,
+    ))
     cfg.lsp_format_on_save = json_get_bool(
         root, String("lsp_format_on_save"), cfg.lsp_format_on_save,
     )
@@ -758,6 +782,9 @@ def _config_to_json(config: TurbokodConfig) -> JsonValue:
     root.put(String("compress_kwargs"), json_bool(config.compress_kwargs))
     root.put(String("cursor_blink"), json_bool(config.cursor_blink))
     root.put(String("terminal_tmux"), json_bool(config.terminal_tmux))
+    root.put(String("test_results_view"), json_bool(config.test_results_view))
+    root.put(String("test_split_wide"), json_int(config.test_split_wide))
+    root.put(String("test_split_tall"), json_int(config.test_split_tall))
     root.put(
         String("lsp_format_on_save"), json_bool(config.lsp_format_on_save),
     )
@@ -1073,3 +1100,8 @@ def save_config_merged(
     var ok = _write_config(merged)
     _release_config_lock(lock)
     return ConfigSave(ok, merged^)
+
+
+def _split_fraction(v: Int) -> Int:
+    """A stored divider position (thousandths), kept inside the area."""
+    return max(1, min(999, v))

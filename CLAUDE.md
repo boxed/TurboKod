@@ -271,6 +271,8 @@ The bottom dock hosts three kinds of output pane, split by how the child process
 - **Pipe-backed (`DebugPane`).** The **run/debug pane** (`run_manager.mojo`'s `RunSession` + `DebugPane`, pipe stdin/stdout/stderr) and the DAP "test under debugger" path. Output is a `TextLog` that decodes SGR color only. Because the child sees `isatty()==false`, the run path exports `COLUMNS`/`LINES` (sized to the pane via `Desktop._bottom_pane_term_size`) so well-behaved tools wrap to the pane width.
 - **pty + `Vt`-backed (`TerminalPane`, `TestPane`).** The **shell terminal** and the **test runner** (`pytest`) run on a real controlling pty (`PtyProcess` → `tk_pty_spawn`), so the child sees `isatty()==true`: it auto-detects color, sizes from the kernel, reflows on a SIGWINCH when the pane is resized, and its `\r`/erase-driven progress line renders correctly (the `Vt` emulator interprets what `TextLog`'s `parse_sgr` would mangle). `Vt` is **libghostty-vt** behind a flat C ABI in the shim (`app/turbokod-shim/src/tk_vt.c`, the only code that sees Ghostty's headers), built at a pinned commit by `scripts/build_ghostty.sh`. It is a *handle*: copies alias, there is no destructor, and the owning pane calls `release()` (removal + `Desktop.shutdown`) — `close()` keeps it so a re-opened pane shows its old screen. With `config.terminal_tmux` a `TerminalPane` in a project is a client of a session on the user's default tmux server (`tmux_session.mojo`), tagged with its project: closing the project or quitting only detaches, `_set_project` re-attaches, and only the pane's close button kills the session. Cmd+R then runs the target in such a pane too (`run_target`) instead of the pipe-backed run pane, and Cmd+T the tests (`tests`, session `<project>-tests`) instead of `TestPane`, so a long test run survives a restart; debugging stays on DAP. Full details in [docs/terminal-emulation.md](docs/terminal-emulation.md). `TestPane` owns its child + grid (no separate session slot); `Desktop.test_tick` just pumps it and mirrors the exit code to the status bar.
 
+Test runs report live through `TURBOKOD_TEST_REPORT` — a JSON-lines file the runner appends to (`test_report.mojo` reads it; the bundled `data/pytest_plugin/turbokod_pytest.py` writes it, loaded via `PYTHONPATH` + `PYTEST_ADDOPTS`). Both test panes (`TestPane` and the tmux tests `TerminalPane`) embed a `TestResultsView` (`test_results.mojo`) shown instead of the grid when `config.test_results_view` is on; in the macOS-style and Mac OS 9 looks its header / list / detail are host items the host fills with native views (`TestResultsHost`, fed incrementally by `tk_desktop_test_results`). Full details in [docs/test-reporting.md](docs/test-reporting.md).
+
 The Vt-grid behavior shared by both pty panes — grid paint, scrollback view, selection (cell/word/line drag) + copy, and the key→pty / mouse→pty wire encodings — lives in **`terminal_view.mojo`** (`GridSelection` + `paint_grid` + `forward_key_to_grid`); the wire encodings themselves are Ghostty's (`Vt.encode_key` / `Vt.encode_mouse`), so they follow whatever modes the program enabled, kitty keyboard protocol included. Each pane keeps its own `Vt` + `PtyProcess` and the chrome/title/command-strip concerns specific to it. Clickable `File "...", line N` / `path:N` traceback links are detected by **`output_links.mojo`** (shared by `DebugPane` and `TestPane`); a pane scans its visible rows each paint, underlines the spans, and turns a click into an `open_file_at`. When you add a tool pane, decide pipe vs pty by whether the child wants a TTY, and reuse `terminal_view` / `output_links` rather than reimplementing.
 
 ## LSP: byte columns are not `Position.character`
@@ -502,11 +504,38 @@ These are deliberate departures from C++ Turbo Vision. Don't "fix" them by rever
 
 A view that scrolls rows owns a `ScrollBarArea` (`scrollbar.mojo`) per
 scrolling area: `paint(canvas, area, total, scroll, attr)` after the
-content draws the bar down the area's right column when the rows overflow,
+content draws the bar down the area's right edge when the rows overflow —
+`canvas.scroll_bar_cells` columns of it (2 in the Mac OS 9 look, where a
+Platinum bar is 16 points; reserve that many, never a literal 1) —
 and `handle_mouse(event)` before the view's own mouse code returns the new
 scroll offset (arrows, track paging, thumb drag) or -1. `ListBox` has one
 built in, so a list built on it needs nothing. Don't hand-roll a bar with
 `VScrollbar` and drag bookkeeping again.
+
+## Resizable splits come from the framework
+
+A view showing two areas side by side or stacked owns a `SplitArea`
+(`split_area.mojo`): `layout(area, side_by_side)` returns the two halves
+around a one-cell divider at `fraction`, `paint` draws the divider (palette
+slots, so themes retint it), `handle_mouse` before the view's own mouse code
+drags it (double click resets), `pointer_shape(pos)` answers
+`Desktop.pointer_shape_at` with `ew-resize` / `ns-resize` — which every
+frontend already turns into its cursor — and `take_changed()` tells the owner
+to remember the new `fraction`. In the macOS-style and Mac OS 9 looks the
+divider — like every `VScrollbar` / `HScrollbar`, so every scroll bar —
+isn't cells (`Desktop.host_draws_chrome`, set on each host surface's canvas
+in `frame_canvas` / `_chrome_canvas`): `Canvas.host_widgets` is on for the docked panes /
+panel window, so `paint` adds a `HostItem` (blank cells under it, which keep
+the mouse) that `place_sub_grid` carries out of a sub-grid into screen
+cells, and the host draws it in its look from `tk_desktop_host_items`
+(`SplitDivider` hairline / `PlatinumSplitDivider` bevel + grip;
+`HostScrollBar` overlay knob / `PlatinumHostScrollBar`, the editor's own
+Platinum bar, thumb exactly where the core hit-tests it). A bar a clip cuts
+into stays cells. Framework
+chrome that should look native goes through that path, not a bespoke C ABI
+call per widget. The test results view is the first user; the
+git view's and debug pane's older hand-rolled splitters predate it. Don't
+hand-roll another.
 
 ## Text width is codepoints, not bytes
 

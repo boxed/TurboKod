@@ -226,6 +226,22 @@ int64_t tk_desktop_panels_panes(int64_t h, int64_t cols, int64_t rows, int64_t o
 // macOS-style UI editor scroller: {win, x, y, w, h, cur, max} for the focused
 // frameless editor (visual rows x 1000); drive it with tk_editor_minimap_to.
 int64_t tk_desktop_editor_scroller(int64_t h, int64_t cols, int64_t rows, int64_t out_ptr, int64_t cap);
+// Framework chrome the host draws in its look over a surface's last frame
+// (0 project window, 1 floating panels, 2 Settings, 3 dialog, 4 git):
+// [{kind "split" / "vscroll" / "hscroll", x, y, w, h (thousandths of a
+// cell), side, active, ka, kb (a scroll bar's thumb span), fg, bg}].
+// Draw-only: the cells under an item take the mouse. 0 = none.
+int64_t tk_desktop_host_items(int64_t h, int64_t surface, int64_t out_ptr, int64_t cap);
+// A test results view (`tag` from its host items) for native views:
+// _results {generation, version, count, rows: [[index, outcome, id]] changed
+// since (generation, version), selected, picked, reporting, total, done,
+// failed, counts, status, tone, waiting}; _detail the selected test {index,
+// outcome, id, file, line, state, text, links: [[line, start, end, path, n,
+// url]]}; _act op 0 select, 1 open test index, 2 open file (string) at line
+// index, 3 open URL (string).
+int64_t tk_desktop_test_results(int64_t h, int64_t tag, int64_t generation, int64_t version, int64_t out_ptr, int64_t cap);
+int64_t tk_desktop_test_detail(int64_t h, int64_t tag, int64_t out_ptr, int64_t cap);
+void tk_desktop_test_results_act(int64_t h, int64_t tag, int64_t op, int64_t index, int64_t ptr, int64_t len);
 void tk_desktop_pane_act(int64_t h, int64_t kind, int64_t idx, int64_t op, int64_t ptr, int64_t len);
 // macOS-style UI debug pane Stack / Locals / Watches tables: {x, y, w, h,
 // output, focused, frames: [[row, name, location, subtle, current]], vars:

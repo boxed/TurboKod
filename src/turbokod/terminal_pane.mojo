@@ -54,6 +54,9 @@ from .posix import (
 )
 from .pty import PtyProcess
 from .scrollbar import ScrollBarArea
+from .test_results import (
+    OUTPUT_LABEL, RESULTS_LABEL, TEST_TOGGLE_VIEW, TestResultsView,
+)
 from .tmux_session import (
     prepare_tmux_socket_dir, run_exit_line, tmux_attach_argv, tmux_binary,
     tmux_history, tmux_kill_session, tmux_pane_state, tmux_respawn,
@@ -195,6 +198,12 @@ struct TerminalPane(Copyable, Movable):
     var tests: Bool
     """A run pane running the project's tests (Cmd+T with tmux), not a
     target: titled as the test pane is, and left alone by Cmd+R."""
+    var results: TestResultsView
+    """A tests pane's live report (see ``test_results.mojo``), read from
+    the session's report file."""
+    var results_view: Bool
+    """Show ``results`` instead of the terminal (tests panes only). The
+    host sets it from ``config.test_results_view`` each frame."""
     var run_exited: Bool
     var run_exit_status: String
     """The exit status the run printed (``128+n`` for a signal)."""
@@ -283,6 +292,8 @@ struct TerminalPane(Copyable, Movable):
         self.run_target = String("")
         self.run_env = List[String]()
         self.tests = False
+        self.results = TestResultsView()
+        self.results_view = False
         self.run_exited = False
         self.run_exit_status = String("")
         self._run_exit_event = False
@@ -334,6 +345,8 @@ struct TerminalPane(Copyable, Movable):
         self.run_target = copy.run_target
         self.run_env = copy.run_env.copy()
         self.tests = copy.tests
+        self.results = copy.results.copy()
+        self.results_view = copy.results_view
         self.run_exited = copy.run_exited
         self.run_exit_status = copy.run_exit_status
         self._run_exit_event = copy._run_exit_event
@@ -425,6 +438,9 @@ struct TerminalPane(Copyable, Movable):
         as opposed to the app detaching on quit. No-op for a plain shell."""
         if self.is_tmux():
             tmux_kill_session(self.tmux_session)
+        # The session's report goes with it; a detach (``release`` alone)
+        # keeps it for the re-attach.
+        self.results.discard()
 
     def release(mut self):
         """Free the emulator. ``close`` keeps it so a re-open shows the old
@@ -507,6 +523,10 @@ struct TerminalPane(Copyable, Movable):
         session (``respawn-pane -k``), with the environment it was created
         with — which also holds after a re-attach, when ``run_env`` is
         empty."""
+        if self.tests:
+            # The same report file, started over.
+            var path = self.results.report.path
+            self.results.start(path)
         tmux_respawn(self.tmux_session)
         self._note_run_start()
 
@@ -629,6 +649,8 @@ struct TerminalPane(Copyable, Movable):
         into the emulator. Called by ``Desktop`` each frame so output
         appears live without the user pressing a key. Also flushes
         any DSR/DA/clipboard side-effects the parse may have queued."""
+        if self.tests:
+            self.results.poll()
         if not self.pty.alive or self.pty.master_fd < 0:
             return
         self.pty.flush()
@@ -800,6 +822,11 @@ struct TerminalPane(Copyable, Movable):
         ``BottomDockedPanel.close_button_id``); both routes dispatch
         through the host on ``TERMINAL_PANE_CLOSE``."""
         var out = List[TitleCommand]()
+        if self.tests:
+            out.append(TitleCommand(
+                OUTPUT_LABEL if self.results_view else RESULTS_LABEL,
+                TEST_TOGGLE_VIEW,
+            ))
         if self.is_run():
             out.append(TitleCommand(String("[■ Stop]"), _TERMINAL_STOP))
             out.append(TitleCommand(String("[↻ Restart]"), _TERMINAL_RESTART))
@@ -832,11 +859,13 @@ struct TerminalPane(Copyable, Movable):
         set, else "Terminal". A run pane says which target, and whether it
         exited."""
         if self.tests:
+            var p = self.results.title_suffix()
             if not self.run_exited:
-                return String("Tests — running")
+                return String("Tests — running") + p
             if self.run_exit_status == String("0"):
-                return String("Tests — passed")
-            return String("Tests — failed (") + self.run_exit_status + String(")")
+                return String("Tests — passed") + p
+            return String("Tests — failed (") + self.run_exit_status \
+                + String(")") + p
         if self.is_run():
             var t = String("Run - ") + self.run_target
             if self.run_exited:
@@ -863,7 +892,8 @@ struct TerminalPane(Copyable, Movable):
         var painter = Painter(panel)
         painter.fill(canvas, panel, String(" "), bg)
         self._last_panel_top = panel.a.y
-        if len(self.dock.commands) == 0:
+        # A tests pane's toggle changes face with the view.
+        if len(self.dock.commands) == 0 or self.tests:
             self.dock.commands = self.build_commands()
         # Title comes from (in order): Claude state when detected,
         # then the OSC title the child has set, then a static default.
@@ -884,7 +914,9 @@ struct TerminalPane(Copyable, Movable):
         # at the old dimensions and the layout falls apart.
         # The right column is the scroll bar's, so it never covers output.
         var bar_area = body
-        body = Rect(body.a.x, body.a.y, body.b.x - 1, body.b.y)
+        body = Rect(
+            body.a.x, body.a.y, body.b.x - canvas.scroll_bar_cells, body.b.y,
+        )
         # The grid is the body's size in the terminal font's cells, which
         # may be another size than the screen's.
         var dims = grid_size(canvas, body)
@@ -900,6 +932,21 @@ struct TerminalPane(Copyable, Movable):
             if self.pty.alive:
                 _ = self.pty.set_winsize(bw, bh)
         self.sel.set_frame(canvas, body, bw, bh)
+        if self.tests and self.results_view:
+            # The results take the whole body, scroll-bar column included:
+            # they bring their own bar.
+            self.scroll_bar.hide()
+            self._last_links = List[OutputLink]()
+            var rdims = grid_size(canvas, bar_area)
+            var rgrid = new_grid(rdims[0], rdims[1], bg)
+            rgrid.inherit_chrome(canvas)
+            self.results.paint(
+                rgrid, self.sel._last_body.a, self.is_running(), True,
+                self.run_exited, _status_code(self.run_exit_status),
+            )
+            place_grid(canvas, bar_area, rgrid^)
+            return
+        self.results.hide()
         # Grid + selection overlay + cursor caret — shared with the test
         # pane via ``paint_grid``.
         var v = self._view()
@@ -911,9 +958,10 @@ struct TerminalPane(Copyable, Movable):
         place_grid(canvas, body, grid^)
         var sb = self._scrollback()
         var attr = Attr(PANE_FG, PANE_BG)
-        var col = Rect(bar_area.b.x - 1, bar_area.a.y, bar_area.b.x, bar_area.b.y)
+        var col = Rect(body.b.x, bar_area.a.y, bar_area.b.x, bar_area.b.y)
         for y in range(col.a.y, col.b.y):
-            painter.set(canvas, col.a.x, y, Cell(String(" "), attr, 1))
+            for x in range(col.a.x, col.b.x):
+                painter.set(canvas, x, y, Cell(String(" "), attr, 1))
         if sb > 0:
             self.scroll_bar.paint(
                 canvas, bar_area, sb + v.rows(), sb - v.view_offset(), attr,
@@ -947,6 +995,16 @@ struct TerminalPane(Copyable, Movable):
                     origin.y + r, origin.x + x0, origin.x + x1,
                     hit.path, hit.line, hit.is_url,
                 ))
+
+    def pointer_shape(self, pos: Point) -> String:
+        """The results view's resize cursor over (or while dragging) its
+        divider; empty elsewhere. ``pos`` is a screen cell."""
+        if not self.visible or not (self.tests and self.results_view):
+            return String("")
+        var e = Event.mouse_event(pos, MOUSE_BUTTON_NONE, False, True)
+        var g = self.sel.grid_event(e)
+        var o = self.sel._last_body.a
+        return self.results.pointer_shape(Point(g.pos.x - o.x, g.pos.y - o.y))
 
     # --- copy / selection delegates ------------------------------------
 
@@ -988,6 +1046,24 @@ struct TerminalPane(Copyable, Movable):
         # panel test below still uses the screen's.
         var screen_pos = event.pos
         event = self.sel.grid_event(event)
+        if self.tests and self.results_view:
+            if not self.results.handle_mouse(
+                event, self.sel._last_body.a, panel.contains(screen_pos),
+            ):
+                if event.button != MOUSE_BUTTON_NONE \
+                        and event.pressed and not event.motion:
+                    self.focused = False
+                return False
+            if event.pressed and not event.motion:
+                self.focused = True
+            var link = self.results.take_link()
+            if link:
+                if link.value().is_url:
+                    self.pending_open_url = link.value().path
+                else:
+                    self.pending_open_path = link.value().path
+                    self.pending_open_line = link.value().line
+            return True
         if self.sel.continue_drag(self._view(), event):
             return True
         if not panel.contains(screen_pos):
@@ -1093,6 +1169,8 @@ struct TerminalPane(Copyable, Movable):
         if event.key == KEY_ESC and event.mods == MOD_NONE:
             self.pty.write_all(String("\x1b"))
             return True
+        if self.tests and self.results_view and self.results.handle_key(event):
+            return True
         if (event.key == KEY_PAGEUP or event.key == KEY_PAGEDOWN) \
                 and (event.mods & MOD_SHIFT) != 0:
             var page = self.vt.rows() - 2
@@ -1109,3 +1187,9 @@ struct TerminalPane(Copyable, Movable):
         return forward_key_to_grid(self.pty, self.vt, self.sel, event)
 
 
+def _status_code(status: String) -> Int:
+    """A run's printed exit status as a number (-1 if it isn't one)."""
+    try:
+        return Int(status)
+    except:
+        return -1

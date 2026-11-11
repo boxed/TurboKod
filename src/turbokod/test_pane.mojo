@@ -17,6 +17,13 @@ spawning a fixed command, surfacing the child's exit code in the title,
 clickable ``File "<path>", line N`` / ``<path>:<N>`` traceback links,
 and a Stop / Re-run / Clear command strip.
 
+A run also reports into a ``TestReport`` (``test_report.mojo``) when its
+runner speaks that protocol — the bundled pytest plugin does. The title then
+shows the progress, and with ``results_view`` (the ``[☰ Results]`` /
+``[▤ Output]`` toggle) the body is a ``TestResultsView`` instead of the
+terminal grid. The child keeps running on the pty either way; the toggle
+only picks what the body shows.
+
 UI intents flow back to ``Desktop`` through the same pattern as the
 other panes: ``consume_command_id`` for chrome clicks and
 ``consume_open_request`` for a clicked traceback link, both polled and
@@ -41,6 +48,10 @@ from .posix import (
     read_into, untrack_child, waitpid_nohang,
 )
 from .pty import PtyProcess
+from .test_report import reporting_env
+from .test_results import (
+    OUTPUT_LABEL, RESULTS_LABEL, TEST_TOGGLE_VIEW, TestResultsView,
+)
 from .terminal_view import (
     flush_vt_side_effects, forward_key_to_grid, grid_size, GridSelection,
     new_grid, paint_grid, place_grid,
@@ -59,7 +70,7 @@ comptime TEST_RERUN         = String("test:rerun")
 comptime TEST_CLEAR_OUTPUT  = String("test:clear_output")
 comptime TEST_PANE_CLOSE    = String("test:pane_close")
 """Pending-command ids dispatched to the host. ``TEST_PANE_CLOSE`` is the
-window-style ``[■]`` close button; the other three are the title strip.
+window-style ``[■]`` close button; the others are the title strip.
 Defined here (the pane owns its command vocabulary) and imported by
 ``Desktop`` for the dispatch side."""
 
@@ -102,6 +113,13 @@ struct TestPane(Copyable, Movable):
     var pending_open_line: Int    # 1-based; 0 with empty path = none
     var pending_open_url: String  # http(s) link to open in the browser; "" = none
 
+    # --- live results ---------------------------------------------------
+    var results: TestResultsView
+    """The run's live report and its view."""
+    var results_view: Bool
+    """Show ``results`` instead of the terminal grid. The host sets it
+    from ``config.test_results_view`` each frame."""
+
     def __init__(out self):
         self.visible = False
         self.focused = False
@@ -122,6 +140,8 @@ struct TestPane(Copyable, Movable):
         self.pending_open_path = String("")
         self.pending_open_line = 0
         self.pending_open_url = String("")
+        self.results = TestResultsView()
+        self.results_view = False
 
     def __copyinit__(mut self, copy: Self):
         self.visible = copy.visible
@@ -144,6 +164,8 @@ struct TestPane(Copyable, Movable):
         self.pending_open_path = copy.pending_open_path
         self.pending_open_line = copy.pending_open_line
         self.pending_open_url = copy.pending_open_url
+        self.results = copy.results.copy()
+        self.results_view = copy.results_view
 
     # --- chrome forwarders ---------------------------------------------
 
@@ -188,11 +210,19 @@ struct TestPane(Copyable, Movable):
 
     def run(
         mut self, program: String, args: List[String], cwd: String,
+        report_path: String = String(""),
+        pytest_plugin: String = String(""),
     ) raises:
         """Spawn ``program`` + ``args`` on a fresh pty in ``cwd``. Kills
         any prior child first and resets the grid. The child sees a real
-        TTY, so no ``--color=yes`` / ``COLUMNS`` plumbing is needed."""
+        TTY, so no ``--color=yes`` / ``COLUMNS`` plumbing is needed.
+
+        With a ``report_path`` the child gets ``TURBOKOD_TEST_REPORT``
+        pointing at it (and, with ``pytest_plugin``, what loads the bundled
+        pytest plugin — see ``reporting_env``), set through ``env`` so the
+        ``$`` banner still shows just the command."""
         self.pty.terminate()
+        self.results.start(report_path)
         # A blank grid at the current size (the last paint sized it to the
         # pane; a never-painted pane keeps 80×24 and reflows on the first
         # frame).
@@ -210,6 +240,11 @@ struct TestPane(Copyable, Movable):
         # argv, and the user wants to see what ran.
         self._emit(String("$ ") + cmd + String("\r\n"))
         var argv = List[String]()
+        var env = reporting_env(report_path, pytest_plugin)
+        if len(env) > 0:
+            argv.append(String("/usr/bin/env"))
+            for k in range(len(env)):
+                argv.append(env[k])
         argv.append(program)
         for k in range(len(args)):
             argv.append(args[k])
@@ -237,10 +272,12 @@ struct TestPane(Copyable, Movable):
         self.exited = False
 
     def release(mut self):
-        """Free the emulator, for ``Desktop.shutdown``. ``close`` keeps it:
-        the pane is a fixture of the window and its output stays readable
-        across a close and re-open."""
+        """Free the emulator and delete the report file, for
+        ``Desktop.shutdown``. ``close`` keeps both: the pane is a fixture
+        of the window and its output stays readable across a close and
+        re-open."""
         self.vt.release()
+        self.results.discard()
 
     def clear(mut self):
         """Wipe the grid (Clear button). Doesn't kill a running child —
@@ -255,6 +292,7 @@ struct TestPane(Copyable, Movable):
         detect child exit. Called by ``Desktop`` each frame."""
         if not self.started or self.exited:
             return
+        self.results.poll()
         if self.pty.master_fd >= 0:
             self.pty.flush()
             var scratch = alloc_zero_buffer(4096)
@@ -282,6 +320,8 @@ struct TestPane(Copyable, Movable):
         if self._eof and self.pty.pid > 0:
             var pair = waitpid_nohang(self.pty.pid)
             if Int(pair[0]) == Int(self.pty.pid):
+                # What the runner wrote just before it exited.
+                self.results.poll()
                 self.exit_code = exit_code_from_status(Int(pair[1]))
                 untrack_child(self.pty.pid)
                 # Reaped: forget the pid so a later ``terminate`` can't
@@ -306,6 +346,10 @@ struct TestPane(Copyable, Movable):
         nothing to stop, so Stop drops off. ``TEST_RERUN`` replays the
         last command; the host terminates any in-flight child first."""
         var out = List[TitleCommand]()
+        if self.results_view:
+            out.append(TitleCommand(OUTPUT_LABEL, TEST_TOGGLE_VIEW))
+        else:
+            out.append(TitleCommand(RESULTS_LABEL, TEST_TOGGLE_VIEW))
         if self.running():
             out.append(TitleCommand(String("[■ Stop]"), TEST_STOP))
         out.append(TitleCommand(String("[↻ Re-run]"), TEST_RERUN))
@@ -316,12 +360,15 @@ struct TestPane(Copyable, Movable):
 
     def header_title(self) -> String:
         if self.exited:
+            var t: String
             if self.exit_code == 0:
-                return String("Tests — passed")
-            return String("Tests — failed (") + String(self.exit_code) \
-                + String(")")
+                t = String("Tests — passed")
+            else:
+                t = String("Tests — failed (") + String(self.exit_code) \
+                    + String(")")
+            return t + self.results.title_suffix()
         if self.started:
-            return String("Tests — running")
+            return String("Tests — running") + self.results.title_suffix()
         return String("Tests")
 
     def paint(mut self, mut canvas: Canvas, panel: Rect):
@@ -359,6 +406,16 @@ struct TestPane(Copyable, Movable):
             if self.pty.alive:
                 _ = self.pty.set_winsize(bw, bh)
         self.sel.set_frame(canvas, body, bw, bh)
+        if self.results_view:
+            var rgrid = new_grid(bw, bh, bg)
+            rgrid.inherit_chrome(canvas)
+            self.results.paint(
+                rgrid, self.sel._last_body.a, self.running(), self.started,
+                self.exited, self.exit_code,
+            )
+            place_grid(canvas, body, rgrid^)
+            return
+        self.results.hide()
         # Grid + selection overlay + cursor caret (shared with the shell
         # terminal). The caret only shows while running so an exited
         # pane reads as static output.
@@ -392,6 +449,18 @@ struct TestPane(Copyable, Movable):
                 ))
         place_grid(canvas, body, grid^)
 
+    # --- results view --------------------------------------------------
+
+    def pointer_shape(self, pos: Point) -> String:
+        """The results view's resize cursor over (or while dragging) its
+        divider; empty elsewhere. ``pos`` is a screen cell."""
+        if not self.visible or not self.results_view:
+            return String("")
+        var e = Event.mouse_event(pos, MOUSE_BUTTON_NONE, False, True)
+        var g = self.sel.grid_event(e)
+        var o = self.sel._last_body.a
+        return self.results.pointer_shape(Point(g.pos.x - o.x, g.pos.y - o.y))
+
     # --- copy / selection delegates ------------------------------------
 
     def has_selection(self) -> Bool:
@@ -423,6 +492,26 @@ struct TestPane(Copyable, Movable):
         # panel test below still uses the screen's.
         var screen_pos = event.pos
         event = self.sel.grid_event(event)
+        if self.results_view:
+            var inside = panel.contains(screen_pos)
+            var used = self.results.handle_mouse(
+                event, self.sel._last_body.a, inside,
+            )
+            if not used:
+                if event.button != MOUSE_BUTTON_NONE \
+                        and event.pressed and not event.motion:
+                    self.focused = False
+                return False
+            if event.pressed and not event.motion:
+                self.focused = True
+            var link = self.results.take_link()
+            if link:
+                if link.value().is_url:
+                    self.pending_open_url = link.value().path
+                else:
+                    self.pending_open_path = link.value().path
+                    self.pending_open_line = link.value().line
+            return True
         # In-flight drag selection keeps consuming past the body edge.
         if self.sel.continue_drag(self.vt, event):
             return True
@@ -481,6 +570,8 @@ struct TestPane(Copyable, Movable):
             if handle_bottom_dock_esc(self.dock):
                 return True
             self.pty.write_all(String("\x1b"))
+            return True
+        if self.results_view and self.results.handle_key(event):
             return True
         # Everything else — scrollback, copy, and the keystroke itself
         # (Ctrl+C, ``q`` to quit a pager pytest spawned, pdb input, …).

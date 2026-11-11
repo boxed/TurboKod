@@ -438,7 +438,10 @@ struct ListBox(Copyable, Movable):
             return
         var rows_rect = bounds
         if ScrollBarArea.overflows(bounds, self._count):
-            rows_rect = Rect(bounds.a.x, bounds.a.y, bounds.b.x - 1, bounds.b.y)
+            rows_rect = Rect(
+                bounds.a.x, bounds.a.y,
+                bounds.b.x - canvas.scroll_bar_cells, bounds.b.y,
+            )
         var marks = List[Bool]()
         for r in range(len(rows)):
             marks.append(self.is_selected(self._scroll + r))
