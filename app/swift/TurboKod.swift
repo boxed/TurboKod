@@ -7372,6 +7372,7 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
             let pf = win.frame, f = panel.frame
             panel.setFrameTopLeftPoint(NSPoint(x: floor(pf.midX - f.width / 2), y: pf.maxY - 30))
         }
+        p.fitToScreen(parent: win)
         panel.contentView?.layoutSubtreeIfNeeded()
         splitView?.setPosition(min(380, panel.frame.width * 0.34), ofDividerAt: 0)
         if let l = leftSplit {
@@ -13570,6 +13571,28 @@ final class GitWindowPlacement {
         return true
     }
 
+    /// Shrink (and, if need be, shift) the window so it lies wholly inside
+    /// the visible frame of the display it will show on: the one holding most
+    /// of it, else `parent`'s. A remembered frame from a larger display, or
+    /// the default sized off a project window bigger than this screen, would
+    /// otherwise hang off the edge.
+    func fitToScreen(parent: NSWindow?) {
+        guard let win = win else { return }
+        let f = win.frame
+        func overlap(_ s: NSScreen) -> CGFloat {
+            let r = s.visibleFrame.intersection(f)
+            return r.isNull ? 0 : r.width * r.height
+        }
+        let best = NSScreen.screens.filter { overlap($0) > 0 }.max { overlap($0) < overlap($1) }
+        guard let screen = best ?? parent?.screen ?? NSScreen.main else { return }
+        let vf = screen.visibleFrame
+        let w = min(f.width, vf.width), h = min(f.height, vf.height)
+        let x = min(max(f.minX, vf.minX), vf.maxX - w)
+        let top = max(min(f.maxY, vf.maxY), vf.minY + h)
+        let fitted = snap(NSRect(x: x, y: top - h, width: w, height: h))
+        if fitted != f { win.setFrame(fitted, display: false) }
+    }
+
     /// Record moves and resizes from here on (after the initial placement,
     /// so that isn't saved as the user's choice).
     func track() {
@@ -13653,6 +13676,7 @@ final class TVGitWindow: NSObject, GitSurface {
             win.setFrame(NSRect(x: floor(pf.midX - w / 2), y: floor(pf.maxY - 2 * CELL_H - h),
                                 width: w, height: h), display: false)
         }
+        p.fitToScreen(parent: parent)
         view.invalidateFrame()
         win.makeKeyAndOrderFront(nil)
         shadow = RetroShadow(under: win)
@@ -14978,6 +15002,7 @@ final class PlatinumGitView: NSObject, GitSurface {
             win.setFrame(NSRect(x: floor(pf.midX - size.width / 2), y: pf.maxY - 30 - size.height,
                                 width: size.width, height: size.height), display: false)
         }
+        p.fitToScreen(parent: parent)
         body.frame = frameView.content
         layoutBody()
         win.makeKeyAndOrderFront(nil)
