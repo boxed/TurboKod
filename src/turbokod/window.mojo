@@ -2210,27 +2210,7 @@ struct WindowManager(Movable):
         next-most-recently focused (the new top of ``z_order``); ``-1`` when
         the last window is closed. Returns True if a window was closed.
         """
-        if self.focused < 0 or self.focused >= len(self.windows):
-            return False
-        var idx = self.focused
-        self.windows[idx].release()
-        _ = self.windows.pop(idx)
-        # Drop ``idx`` from z_order and shift any index above it down by one
-        # to keep the indices in sync with the now-shorter ``windows`` list.
-        var new_z = List[Int]()
-        for k in range(len(self.z_order)):
-            var v = self.z_order[k]
-            if v == idx:
-                continue
-            if v > idx:
-                v = v - 1
-            new_z.append(v)
-        self.z_order = new_z^
-        if len(self.z_order) > 0:
-            self.focused = self.z_order[len(self.z_order) - 1]
-        else:
-            self.focused = -1
-        return True
+        return self.close_by_index(self.focused)
 
     def close_by_index(mut self, idx: Int) -> Bool:
         """Close an arbitrary window by index (not necessarily the focused
