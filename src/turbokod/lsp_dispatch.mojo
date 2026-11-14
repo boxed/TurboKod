@@ -44,6 +44,7 @@ from .posix import (
     debug_log_path, getcwd_path, getenv_value, monotonic_ms, realpath, sleep_ms, which,
 )
 from .string_utils import (
+    fnv_start, fnv_str,
     hex_digit_value, percent_encode_uri_path, string_list, strip_trailing_newlines, utf8_prefix,
 )
 from .highlight import Highlight
@@ -1089,7 +1090,15 @@ struct LspManager(Copyable, Movable):
     # without this, each one bumps the version and fires a no-op didChange
     # even when nothing changed, which restarts the server's analysis and
     # flickers the "analyzing edits…" spinner on every cursor move.
+    #
+    # The comparison is by ``_doc_lens`` + ``_doc_hashes``. The text
+    # itself (``_doc_texts``) is kept only for a server on a non-utf-8
+    # position encoding, where the remapper needs it to convert columns;
+    # for a utf-8 one the entry is empty, rather than a second copy of
+    # every open buffer per server.
     var _doc_texts: List[String]
+    var _doc_lens: List[Int]
+    var _doc_hashes: List[UInt64]
 
     # Queued ``(path, text)`` pairs waiting for ``initialized`` to land.
     var _pending_open_paths: List[String]
@@ -1304,6 +1313,8 @@ struct LspManager(Copyable, Movable):
         self._doc_paths = List[String]()
         self._doc_versions = List[Int]()
         self._doc_texts = List[String]()
+        self._doc_lens = List[Int]()
+        self._doc_hashes = List[UInt64]()
         self._pending_open_paths = List[String]()
         self._pending_open_texts = List[String]()
         self._diagnostic_buckets = List[_DiagnosticBucket]()
@@ -1642,8 +1653,10 @@ struct LspManager(Copyable, Movable):
         if self._remap_cached_epoch == self._remap_epoch:
             return
         var rm = _PositionRemapper(self._position_enc)
-        for i in range(len(self._doc_paths)):
-            rm.seed(self._doc_paths[i], self._doc_texts[i])
+        # Nothing to convert under utf-8 — and no text was kept for it.
+        if self._position_enc != POS_UTF8:
+            for i in range(len(self._doc_paths)):
+                rm.seed(self._doc_paths[i], self._doc_texts[i])
         self._remap_cached = rm^
         self._remap_cached_epoch = self._remap_epoch
 
@@ -2080,6 +2093,8 @@ struct LspManager(Copyable, Movable):
         _ = self._doc_paths.pop(idx)
         _ = self._doc_versions.pop(idx)
         _ = self._doc_texts.pop(idx)
+        _ = self._doc_lens.pop(idx)
+        _ = self._doc_hashes.pop(idx)
         self._bump_remap_epoch()
         # Drop any "analyzing edits…" spinner state — a closed buffer
         # must not keep one spinning.
@@ -5469,21 +5484,31 @@ struct LspManager(Copyable, Movable):
             if self._doc_paths[k] == path:
                 idx = k
                 break
+        var n = len(text.as_bytes())
+        var h = fnv_str(fnv_start(), text)
+        # Only the remapper reads the text back (see ``_doc_texts``).
+        var kept = String("")
+        if self._position_enc != POS_UTF8:
+            kept = text.copy()
         if idx < 0:
             self._doc_paths.append(path)
             self._doc_versions.append(1)
-            self._doc_texts.append(text.copy())
+            self._doc_texts.append(kept^)
+            self._doc_lens.append(n)
+            self._doc_hashes.append(h)
             self._bump_remap_epoch()
             self._send_did_open(path, text^)
         else:
             # Unchanged text → the server already has this exact content.
             # Skip the didChange so cursor-driven requests don't trigger a
             # spurious re-analysis (the "analyzing edits…" flicker).
-            if self._doc_texts[idx] == text:
+            if self._doc_lens[idx] == n and self._doc_hashes[idx] == h:
                 return
             var version = self._doc_versions[idx] + 1
             self._doc_versions[idx] = version
-            self._doc_texts[idx] = text.copy()
+            self._doc_texts[idx] = kept^
+            self._doc_lens[idx] = n
+            self._doc_hashes[idx] = h
             self._bump_remap_epoch()
             self._send_did_change(path, version, text^)
 
