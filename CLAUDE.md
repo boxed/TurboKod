@@ -121,9 +121,12 @@ details in [docs/tv-frame.md](docs/tv-frame.md).
 In the native app the git view is **not modal**: it opens in a window of its
 own in every look (`GitController`, `PlatinumGitView`, `TVGitWindow`) titled
 "Local changes — <project>" (`LocalChanges.title()`), while the project window
-stays live. Opening a file from it keeps it open; Git ▸ Local changes again
-raises it. Its frame is remembered per project and per display configuration
-next to the floating panels' (`GitWindowPlacement`). The core gates the modal
+stays live. By default it's *docked* — a child window over the project window,
+frames synced both ways — and a dock box in its title bar floats it and back
+(`GitWindowPlacement`). Opening a file from it keeps it open (a docked one
+steps aside); Git ▸ Local changes again raises it. The docked choice and the
+floating frame are remembered per project and per display configuration next
+to the floating panels'. The core gates the modal
 on `_git_modal()` (`local_changes.active and not git_windowed()`) — don't test
 `local_changes.active` for "blocks input"; the terminal frontends keep the
 in-grid modal. Full details in [docs/native-ui.md](docs/native-ui.md).
@@ -335,9 +338,6 @@ for both:
   which parks the manager on `_closing_lsp` for `process_external_changes` to
   drain.
 
-## Case-insensitive search
-
-Anything that compares bytes ignoring case goes through **`case_fold.mojo`** — branchless ASCII folding (`(c - 0x41) <u 26`, `c | is_upper << 5`) with explicit 32-byte SIMD. Don't hand-inline `if 0x41 <= c and c <= 0x5A: c += 0x20` again; that idiom used to be copy-pasted in half a dozen places and each copy sat *inside* an innermost compare loop.
 ### One server for every window
 
 In the native app windows share language servers: `Desktop.lsp_pool` (one
@@ -353,6 +353,9 @@ one. A server request every window must apply (`client/registerCapability`,
 Without a pool (terminal frontends, tests) nothing changes. Full details in
 [docs/shared-lsp.md](docs/shared-lsp.md).
 
+## Case-insensitive search
+
+Anything that compares bytes ignoring case goes through **`case_fold.mojo`** — branchless ASCII folding (`(c - 0x41) <u 26`, `c | is_upper << 5`) with explicit 32-byte SIMD. Don't hand-inline `if 0x41 <= c and c <= 0x5A: c += 0x20` again; that idiom used to be copy-pasted in half a dozen places and each copy sat *inside* an innermost compare loop.
 
 Find and Replace (in-file and project-wide) go through **`LineSearcher`** in `search_options.mojo`, which decides **per line** whether the SIMD scan is provably equivalent to libonig's `(?i)` (needle and line both pure ASCII) or whether that line needs the regex for Unicode case pairs. Never bypass it by calling `build_search_regex` for a find/replace loop — that's the slow path with none of the gating. Adding a new search site means constructing a `LineSearcher` and looping on `search` / `rsearch` / `search_span`.
 

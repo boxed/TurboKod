@@ -372,9 +372,21 @@ external-change poll. Opening a file from it leaves it open and brings the
 project window forward (`main_focus_request`); Git ▸ Local changes while
 it's up raises its window (`tk_desktop_take_git_front_request`); closing
 the project closes it. Its title is `Local changes — <project>`
-(`LocalChanges.title`, sent as `title`). Its frame is remembered per
-project and per display configuration (`GitWindowPlacement`, a `git` rect
-next to the floating panels' in the project's geometry file). While it is
+(`LocalChanges.title`, sent as `title`).
+
+**Docked by default.** `GitWindowPlacement` opens it *docked*: a child
+window covering the project window exactly, the two frames synced both
+ways (move or resize either and the other follows). A dock box in its
+title bar floats it into a window of its own and back — a title-bar
+accessory button in the macOS look, the zoom box in the Mac OS 9 look, a
+`[▼]`/`[▲]` box where the zoom box sits in the Turbo Vision look (the core
+paints the glyph from `git_window_docked`, set by
+`tk_desktop_set_git_docked`; the host hit-tests it). Opening a file from a
+docked view steps it aside (hidden, since a child can't go behind its
+parent) until Git ▸ Local changes brings it back. The choice (`gitDocked`)
+and the floating frame (`git`) are remembered per project and per display
+configuration next to the floating panels' in the project's geometry
+file; a floating frame is fitted to its display when shown. While it is
 key, `tk_desktop_set_git_window_key` makes a chord the menu replays (⌘C)
 land in it rather than the editor behind, `keyView` maps it to its
 project window for menu actions, and ⌘W closes it.

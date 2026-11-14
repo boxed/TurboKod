@@ -290,6 +290,9 @@ void tk_desktop_set_project_window_key(int64_t h, int64_t on);
 // the focused tool pane).
 void tk_desktop_set_panels_window_key(int64_t h, int64_t on);
 void tk_desktop_set_git_window_key(int64_t h, int64_t on);
+// The Turbo Vision look's git window is docked over the project window
+// (its dock box shows ▼) rather than floating (▲).
+void tk_desktop_set_git_docked(int64_t h, int64_t on);
 int32_t tk_desktop_take_git_front_request(int64_t h);
 int32_t tk_desktop_welcome_needed(int64_t h);
 int64_t tk_desktop_welcome_options(int64_t h, int64_t out_ptr, int64_t cap);

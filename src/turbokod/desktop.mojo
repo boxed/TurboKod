@@ -1315,6 +1315,9 @@ struct Desktop(Movable):
     replayed into it from the menu bar."""
     var git_window_key: Bool
     """The host's git window (any look) is the key window."""
+    var git_window_docked: Bool
+    """The host's git window covers the project window rather than
+    floating; picks the Turbo Vision look's dock-box glyph."""
     var project_window_key: Bool
     """The native host's key window is the project window (or its floating
     panels), not a dialog window of its own: Find / Replace and Settings,
@@ -1344,9 +1347,6 @@ struct Desktop(Movable):
     # just a registry edit.
     var lsp_specs: List[LanguageSpec]
     var lsp_managers: List[LspManager]
-    var lsp_languages: List[String]
-    # Managers whose session is being closed but whose child hasn't exited
-    # yet. Retiring a server (Restart, or a settings change to its argv) and
     # The host's process-wide ``LspPool`` (``lsp_shared.mojo``), 0 for none.
     # The native app gives every window the same one so windows share a
     # server that supports multi-root instead of each spawning a copy; the
@@ -1355,6 +1355,9 @@ struct Desktop(Movable):
     # Set across LSP ▸ Restart's respawn: start a new server rather than
     # joining the running shared one (which is the one being restarted).
     var _lsp_spawn_fresh: Bool
+    var lsp_languages: List[String]
+    # Managers whose session is being closed but whose child hasn't exited
+    # yet. Retiring a server (Restart, or a settings change to its argv) and
     # closing a window both used to block the UI thread on the LSP
     # ``shutdown`` handshake; the manager moves here instead and
     # ``_drain_closing_lsp`` finishes it off the per-frame tick.
@@ -2022,6 +2025,7 @@ struct Desktop(Movable):
         self._in_dialog_window = False
         self._git_screen = Rect(0, 0, 0, 0)
         self.git_window_key = False
+        self.git_window_docked = True
         self.project_window_key = False
         self.panels_window_key = False
         self.git_front_request = False
@@ -2033,12 +2037,12 @@ struct Desktop(Movable):
         self._esc_armed = False
         self.lsp_specs = built_in_servers()
         self.lsp_managers = List[LspManager]()
+        self.lsp_pool = 0
+        self._lsp_spawn_fresh = False
         self.lsp_languages = List[String]()
         self._closing_lsp = List[LspManager]()
         self.doc_specs = built_in_docsets()
         self.doc_stores = List[DocStore]()
-        self.lsp_pool = 0
-        self._lsp_spawn_fresh = False
         self.doc_languages = List[String]()
         self.doc_pick = DocPick()
         self._doc_install_lang = String("")
@@ -9337,7 +9341,17 @@ struct Desktop(Movable):
             )
             return
         self.local_changes.paint(canvas, screen, self.grammar_registry)
-        paint_close_button(canvas, screen.a, Attr(BORDER_FOCUS, EDITOR_BG))
+        var border = Attr(BORDER_FOCUS, EDITOR_BG)
+        paint_close_button(canvas, screen.a, border)
+        # The dock box, where a window's zoom box sits: docked over the
+        # project window it shows the "restore" glyph, floating "zoom".
+        # The host hit-tests it (``TVGitWindow``) and toggles.
+        if screen.width() >= 12:
+            var glyph = String("▼") if self.git_window_docked else String("▲")
+            _ = Painter(screen).put_text(
+                canvas, Point(screen.b.x - 4, screen.a.y),
+                String("[") + glyph + String("]"), border,
+            )
 
     def handle_git_window_event(mut self, event: Event, screen: Rect) raises:
         if not self.local_changes.active:
@@ -18516,7 +18530,9 @@ struct Desktop(Movable):
         # Retire, don't block — LSP ▸ Restart should feel instant, and the
         # old server's goodbye finishes on later frames.
         self.retire_lsp_manager(lsp_idx)
+        self._lsp_spawn_fresh = True
         self._retry_lsp_for_language(lang)
+        self._lsp_spawn_fresh = False
         self.status_bar.set_message(
             String("LSP[") + lang + String("]: restarting…"),
             Attr(BLACK, LIGHT_GRAY),
@@ -18530,9 +18546,7 @@ struct Desktop(Movable):
         for i in range(len(self.windows.windows)):
             if not self.windows.windows[i].is_editor:
                 continue
-        self._lsp_spawn_fresh = True
             var req_opt = self.windows.windows[i] \
-        self._lsp_spawn_fresh = False
                 .editor.consume_breakpoint_menu()
             if not req_opt:
                 continue

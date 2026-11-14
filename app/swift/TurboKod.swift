@@ -3093,6 +3093,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // window sitting on top of it. Always drain so the one-shot
                 // flag can't fire stale later (no-op when docked + frontmost).
                 if tk_desktop_take_main_focus_request(v.handle) != 0 {
+                    // A docked git window covers the project window: step
+                    // it aside (Git ▸ Local changes brings it back).
+                    self.gitSheets[ObjectIdentifier(v)]?.gitPlacement?.stepAside()
                     NSApp.activate(ignoringOtherApps: true)
                     v.window?.makeKeyAndOrderFront(nil); changed = true
                 }
@@ -4209,15 +4212,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @discardableResult
     func newWindow(frame: NSRect? = nil) -> CellView {
         let h = tk_desktop_new()
-        // Tell the Desktop the host owns the menu surface — it stops painting
-        // the in-grid menu bar and stops routing top-row mouse / Alt-letter
-        // mnemonic events to it. We mirror the menu via tk_desktop_menu_snapshot.
         // Every window shares one language-server pool, so a server that
         // supports multi-root runs once for all open projects instead of
         // once per window. TK_LSP_PRIVATE=1 gives each window its own.
         if ProcessInfo.processInfo.environment["TK_LSP_PRIVATE"] == nil {
             tk_desktop_set_lsp_pool(h, SharedLsp.pool)
         }
+        // Tell the Desktop the host owns the menu surface — it stops painting
+        // the in-grid menu bar and stops routing top-row mouse / Alt-letter
+        // mnemonic events to it. We mirror the menu via tk_desktop_menu_snapshot.
         // TK_MENU_INGRID=1 skips the handoff so the classic in-grid menu bar
         // stays visible — scripts/screenshots.sh uses it for the terminal-style
         // README hero shot.
@@ -4262,6 +4265,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // Fresh: cascade so multiple New Window clicks don't stack.
             win.cascadeTopLeft(from: NSPoint(x: 40, y: 40))
         }
+        fitWindowToScreen(win)
         // Put on the look's own frame before the window first shows, so it
         // doesn't open with a title bar and swap on the first tick.
         _ = pollTVChrome(view)
@@ -4610,7 +4614,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         var main: NSRect?       // project window frame for this config
         var floating: Bool      // were panels floated under this config?
         var panel: NSRect?      // panel window frame (when floating)
-        var git: NSRect? = nil  // the git window's frame
+        var git: NSRect? = nil  // the git window's frame (when floating)
+        var gitDocked: Bool? = nil  // git window over the project window?
     }
     struct ProjectGeometry {
         var last: NSRect?                       // fallback size for a new config
@@ -4668,7 +4673,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                     main: rectFromJSON(d["main"]),
                     floating: (d["floating"] as? Bool) ?? false,
                     panel: rectFromJSON(d["panel"]),
-                    git: rectFromJSON(d["git"]))
+                    git: rectFromJSON(d["git"]),
+                    gitDocked: d["gitDocked"] as? Bool)
             }
         }
         return geom
@@ -4685,6 +4691,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if let m = e.main { d["main"] = jsonFromRect(m) }
             if let p = e.panel { d["panel"] = jsonFromRect(p) }
             if let g = e.git { d["git"] = jsonFromRect(g) }
+            if let g = e.gitDocked { d["gitDocked"] = g }
             cfgs[k] = d
         }
         obj["configs"] = cfgs
@@ -4712,7 +4719,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let key = displayConfigKey()
         let keepPanel = floating ? panel : geom.configs[key]?.panel
         geom.configs[key] = PanelConfigEntry(main: main, floating: floating, panel: keepPanel,
-                                             git: geom.configs[key]?.git)
+                                             git: geom.configs[key]?.git,
+                                             gitDocked: geom.configs[key]?.gitDocked)
         saveProjectGeometry(project, geom)
     }
 
@@ -4720,6 +4728,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// configuration, if one was saved.
     func savedGitFrame(_ project: String) -> NSRect? {
         loadProjectGeometry(project).configs[displayConfigKey()]?.git
+    }
+
+    /// Whether the project's git window is docked over the project window
+    /// (the default) under the current display configuration.
+    func savedGitDocked(_ project: String) -> Bool {
+        loadProjectGeometry(project).configs[displayConfigKey()]?.gitDocked ?? true
+    }
+
+    func recordGitDocked(_ project: String, _ docked: Bool) {
+        var geom = loadProjectGeometry(project)
+        let key = displayConfigKey()
+        var e = geom.configs[key] ?? PanelConfigEntry(main: nil, floating: false, panel: nil)
+        e.gitDocked = docked
+        geom.configs[key] = e
+        saveProjectGeometry(project, geom)
     }
 
     func recordGitFrame(_ project: String, _ frame: NSRect) {
@@ -4828,6 +4851,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         return NSRect(x: x, y: y, width: w, height: h)
     }
 
+    /// Shrink a project or panel window that doesn't fit its display
+    /// (`frameFittedToScreen`), its grid kept to whole cells as a resize
+    /// would (`windowWillResize`), top-left staying put.
+    func fitWindowToScreen(_ win: NSWindow, fallback: NSScreen? = nil) {
+        guard !win.styleMask.contains(.fullScreen) else { return }
+        let f = win.frame
+        var g = frameFittedToScreen(f, fallback: fallback ?? win.screen)
+        if g.size != f.size {
+            let s = windowWillResize(win, to: g.size)
+            g = NSRect(x: g.minX, y: g.maxY - s.height, width: s.width, height: s.height)
+        }
+        if g != f { win.setFrame(g, display: win.isVisible) }
+    }
+
     // True when `frame` is at least partly on some currently-attached screen —
     // the test that makes a vanished display fall back to docked.
     private func frameIsVisible(_ frame: NSRect) -> Bool {
@@ -4858,6 +4895,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             panels[id] = (window: win, view: pv)
         }
         if let f = frame { win.setFrame(f, display: false) }
+        fitWindowToScreen(win, fallback: mainWin.screen)
         tk_desktop_set_panels_detached(mainView.handle, 1)
         // orderFront (not makeKey): toggling panels on shouldn't yank keyboard
         // focus off the editor. The user clicks into the panel window when
@@ -5000,6 +5038,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if let m = entry?.main ?? geom.last, !NSEqualRects(mainWin.frame, m) {
             mainWin.setFrame(m, display: true)
         }
+        fitWindowToScreen(mainWin)
         // Capture runs grab a single window — keep the panels docked so a
         // staged debug/terminal pane is actually in the shot, regardless of
         // the layout saved for this display config. Read-only: the saved
@@ -5513,7 +5552,7 @@ extension AppController {
                 return true
             }
             if gc.look == look {
-                if raise { gc.gitWindow.makeKeyAndOrderFront(nil) }
+                if raise { gc.raise() }
                 tk_desktop_set_git_window_key(v.handle, gc.gitWindow.isKeyWindow ? 1 : 0)
                 return gc.update(data)
             }
@@ -7232,6 +7271,7 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         panel.title = "Local changes"
         panel.delegate = self
         build()
+        addDockButton()
     }
 
     // MARK: layout
@@ -7377,15 +7417,18 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     private var rightSplit: NSSplitView?
 
     func present(in win: NSWindow) {
-        let p = GitWindowPlacement(window: panel, project: view?.project)
-        placement = p
-        if !p.restore() {
-            let room = win.contentLayoutRect.size
-            panel.setContentSize(NSSize(width: max(760, room.width - 40), height: max(480, room.height - 30)))
-            let pf = win.frame, f = panel.frame
-            panel.setFrameTopLeftPoint(NSPoint(x: floor(pf.midX - f.width / 2), y: pf.maxY - 30))
+        let p = GitWindowPlacement(window: panel, parent: win, project: view?.project)
+        p.defaultFrame = { [weak panel] pw in
+            let room = pw.contentLayoutRect.size
+            let content = NSSize(width: max(760, room.width - 40), height: max(480, room.height - 30))
+            let size = panel?.frameRect(forContentRect: NSRect(origin: .zero, size: content)).size ?? content
+            let pf = pw.frame
+            return NSRect(x: floor(pf.midX - size.width / 2), y: pf.maxY - 30 - size.height,
+                          width: size.width, height: size.height)
         }
-        p.fitToScreen(parent: win)
+        p.onDockChange = { [weak self] docked in self?.showDockButton(docked) }
+        placement = p
+        p.start()
         panel.contentView?.layoutSubtreeIfNeeded()
         splitView?.setPosition(min(380, panel.frame.width * 0.34), ofDividerAt: 0)
         if let l = leftSplit {
@@ -7397,8 +7440,35 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         if let r = rightSplit { r.setPosition(r.frame.height * 0.55, ofDividerAt: 0) }
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(filesTable)
-        p.track()
     }
+
+    /// The title bar's dock button: floats the window off the project
+    /// window it covers, or docks it back over it.
+    private let dockButton = NSButton()
+
+    private func addDockButton() {
+        dockButton.isBordered = false
+        dockButton.bezelStyle = .regularSquare
+        dockButton.imagePosition = .imageOnly
+        dockButton.target = self
+        dockButton.action = #selector(dockClicked(_:))
+        dockButton.frame = NSRect(x: 4, y: 3, width: 22, height: 20)
+        let holder = NSView(frame: NSRect(x: 0, y: 0, width: 30, height: 26))
+        holder.addSubview(dockButton)
+        let acc = NSTitlebarAccessoryViewController()
+        acc.view = holder
+        acc.layoutAttribute = .trailing
+        panel.addTitlebarAccessoryViewController(acc)
+    }
+
+    private func showDockButton(_ docked: Bool) {
+        let label = docked ? "Float in a window of its own" : "Dock over the project window"
+        dockButton.image = NSImage(systemSymbolName: docked ? "pip.enter" : "pip.exit",
+                                   accessibilityDescription: label)
+        dockButton.toolTip = label
+    }
+
+    @objc private func dockClicked(_ sender: Any?) { placement?.toggle() }
 
     func dismiss() {
         guard !dismissed else { return }
@@ -13087,6 +13157,8 @@ class PlatinumFrameView: NSView {
     var closable = false
     /// A document window's zoom and collapse boxes, at the right.
     var zoomable = false
+    /// With `zoomable`, the collapse box too (false: the zoom box alone).
+    var collapsible = true
     var onClose: (() -> Void)?
     var onZoom: (() -> Void)?
     var onCollapse: (() -> Void)?
@@ -13107,7 +13179,9 @@ class PlatinumFrameView: NSView {
     private var zoomBox: NSRect { NSRect(x: bounds.width - 39, y: 5, width: 12, height: 12) }
     /// The boxes this frame has, by the `pressedBox` index.
     private var boxes: [(Int, NSRect)] {
-        (closable ? [(0, closeBox)] : []) + (zoomable ? [(1, zoomBox), (2, collapseBox)] : [])
+        (closable ? [(0, closeBox)] : [])
+            + (zoomable ? [(1, collapsible ? zoomBox : collapseBox)] : [])
+            + (zoomable && collapsible ? [(2, collapseBox)] : [])
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -13130,7 +13204,7 @@ class PlatinumFrameView: NSView {
         if active {
             // The pinstripes, broken for the title and the boxes.
             let left: CGFloat = closable ? closeBox.maxX + 4 : 6
-            let right = zoomable ? zoomBox.minX - 4 : b.width - 6
+            let right = zoomable ? (collapsible ? zoomBox : collapseBox).minX - 4 : b.width - 6
             for (a, z) in [(left, tx - 6), (tx + tw + 6, right)] {
                 Platinum.pinstripes(from: a, to: z, top: 5, bottom: Self.titleH - 4)
             }
@@ -13556,72 +13630,144 @@ final class TVDialogNSWindow: NSWindow {
     override var canBecomeKey: Bool { true }
 }
 
-/// Where a project's git window sits, remembered per display configuration
-/// (`displayConfigKey`) like the project window and the floating panels, so
-/// it comes back on the screen it was left on — and at a default when that
-/// screen isn't attached.
+/// `f` shrunk (and, if need be, shifted) to lie wholly inside the visible
+/// frame of the display it will show on: the one holding most of it, else
+/// `fallback`. A frame remembered from a larger display, or a default sized
+/// off something bigger than this screen, would otherwise hang off the edge.
+func frameFittedToScreen(_ f: NSRect, fallback: NSScreen?) -> NSRect {
+    func overlap(_ s: NSScreen) -> CGFloat {
+        let r = s.visibleFrame.intersection(f)
+        return r.isNull ? 0 : r.width * r.height
+    }
+    let best = NSScreen.screens.filter { overlap($0) > 0 }.max { overlap($0) < overlap($1) }
+    guard let screen = best ?? fallback ?? NSScreen.main else { return f }
+    let vf = screen.visibleFrame
+    let w = min(f.width, vf.width), h = min(f.height, vf.height)
+    let x = min(max(f.minX, vf.minX), vf.maxX - w)
+    let top = max(min(f.maxY, vf.maxY), vf.minY + h)
+    return NSRect(x: x, y: top - h, width: w, height: h)
+}
+
+/// Where a project's git window sits. By default it's *docked*: a child
+/// window covering the project window it came from, the two frames kept
+/// in sync both ways, so moving or resizing either moves or resizes both.
+/// The title bar's dock box (each look has one) floats it into a window
+/// of its own, and back. Both the choice and the floating frame are
+/// remembered per display configuration (`displayConfigKey`) like the
+/// project window and the floating panels, so it comes back on the screen
+/// it was left on — and at a default when that screen isn't attached.
 final class GitWindowPlacement {
     private weak var win: NSWindow?
+    private weak var parent: NSWindow?
     private let project: String?
     private var observers: [NSObjectProtocol] = []
     private var timer: Timer?
-    /// Snap a restored frame (the Turbo Vision look's whole cells).
+    private var syncing = false
+    private(set) var docked = true
+    /// Snap a frame to the look's grid (the Turbo Vision look's whole cells).
     var snap: (NSRect) -> NSRect = { $0 }
+    /// Where a floating window goes with no remembered frame, given the
+    /// project window.
+    var defaultFrame: (NSWindow) -> NSRect = { $0.frame }
+    /// The window was docked (true) or floated: update the dock box.
+    var onDockChange: ((Bool) -> Void)?
 
-    init(window: NSWindow, project: String?) {
+    init(window: NSWindow, parent: NSWindow, project: String?) {
         win = window
+        self.parent = parent
         self.project = project
     }
 
-    /// Put the window at its remembered frame; false when there's none
-    /// (or it no longer lands on a screen).
-    func restore() -> Bool {
-        guard let project = project, let win = win,
-              let f = AppController.shared?.savedGitFrame(project),
-              NSScreen.screens.contains(where: { $0.visibleFrame.intersects(f) })
-        else { return false }
-        win.setFrame(snap(f), display: false)
-        return true
-    }
-
-    /// Shrink (and, if need be, shift) the window so it lies wholly inside
-    /// the visible frame of the display it will show on: the one holding most
-    /// of it, else `parent`'s. A remembered frame from a larger display, or
-    /// the default sized off a project window bigger than this screen, would
-    /// otherwise hang off the edge.
-    func fitToScreen(parent: NSWindow?) {
-        guard let win = win else { return }
-        let f = win.frame
-        func overlap(_ s: NSScreen) -> CGFloat {
-            let r = s.visibleFrame.intersection(f)
-            return r.isNull ? 0 : r.width * r.height
-        }
-        let best = NSScreen.screens.filter { overlap($0) > 0 }.max { overlap($0) < overlap($1) }
-        guard let screen = best ?? parent?.screen ?? NSScreen.main else { return }
-        let vf = screen.visibleFrame
-        let w = min(f.width, vf.width), h = min(f.height, vf.height)
-        let x = min(max(f.minX, vf.minX), vf.maxX - w)
-        let top = max(min(f.maxY, vf.maxY), vf.minY + h)
-        let fitted = snap(NSRect(x: x, y: top - h, width: w, height: h))
-        if fitted != f { win.setFrame(fitted, display: false) }
-    }
-
-    /// Record moves and resizes from here on (after the initial placement,
-    /// so that isn't saved as the user's choice).
-    func track() {
-        guard let win = win, project != nil, observers.isEmpty else { return }
+    /// Place the window, docked or floating as it was last left, and
+    /// follow moves and resizes from here on.
+    func start() {
+        if let project = project { docked = AppController.shared?.savedGitDocked(project) ?? true }
+        apply()
+        guard let win = win, let parent = parent, observers.isEmpty else { return }
         for name in [NSWindow.didMoveNotification, NSWindow.didResizeNotification] {
             observers.append(NotificationCenter.default.addObserver(
-                forName: name, object: win, queue: .main) { [weak self] _ in self?.schedule() })
+                forName: name, object: win, queue: .main) { [weak self] _ in self?.windowChanged() })
+            observers.append(NotificationCenter.default.addObserver(
+                forName: name, object: parent, queue: .main) { [weak self] _ in self?.parentChanged() })
         }
+    }
+
+    /// The dock box: float a docked window, dock a floating one.
+    func toggle() {
+        if !docked { flush() }
+        docked.toggle()
+        if let project = project { AppController.shared?.recordGitDocked(project, docked) }
+        apply()
+    }
+
+    /// Docked, get out of the way of the project window it covers (a file
+    /// was just opened from the view): hide until `reveal`.
+    func stepAside() {
+        guard docked, let win = win else { return }
+        win.parent?.removeChildWindow(win)
+        win.orderOut(nil)
+    }
+
+    /// Back over the project window if it stepped aside; the caller orders
+    /// it front.
+    func reveal() {
+        if docked, win?.parent == nil { apply() }
     }
 
     func stop() {
         observers.forEach(NotificationCenter.default.removeObserver)
         observers = []
-        if timer != nil { save() }
-        timer?.invalidate()
-        timer = nil
+        flush()
+        if let win = win, win.parent != nil { win.parent?.removeChildWindow(win) }
+    }
+
+    private func apply() {
+        guard let win = win, let parent = parent else { return }
+        syncing = true
+        defer { syncing = false }
+        if docked {
+            if win.parent !== parent { parent.addChildWindow(win, ordered: .above) }
+            let f = snap(parent.frame)
+            if win.frame != f { win.setFrame(f, display: win.isVisible) }
+        } else {
+            if win.parent != nil { win.parent?.removeChildWindow(win) }
+            if !restore() { win.setFrame(snap(defaultFrame(parent)), display: win.isVisible) }
+            let f = win.frame
+            let fitted = snap(frameFittedToScreen(f, fallback: parent.screen))
+            if fitted != f { win.setFrame(fitted, display: win.isVisible) }
+        }
+        onDockChange?(docked)
+    }
+
+    /// The remembered floating frame, if one lands on a screen.
+    private func restore() -> Bool {
+        guard let project = project, let win = win,
+              let f = AppController.shared?.savedGitFrame(project),
+              NSScreen.screens.contains(where: { $0.visibleFrame.intersects(f) })
+        else { return false }
+        win.setFrame(snap(f), display: win.isVisible)
+        return true
+    }
+
+    /// Docked, the project window follows the git window's moves and
+    /// resizes; floating, they're remembered.
+    private func windowChanged() {
+        guard !syncing, let win = win else { return }
+        guard docked else { return schedule() }
+        guard let parent = parent, parent.frame != win.frame else { return }
+        syncing = true
+        parent.setFrame(win.frame, display: true)
+        syncing = false
+    }
+
+    /// Docked, the git window follows the project window.
+    private func parentChanged() {
+        guard !syncing, docked, let win = win, let parent = parent else { return }
+        let f = snap(parent.frame)
+        guard win.frame != f else { return }
+        syncing = true
+        win.setFrame(f, display: true)
+        syncing = false
     }
 
     /// Debounced, like the project window's: one write per gesture.
@@ -13633,8 +13779,14 @@ final class GitWindowPlacement {
         }
     }
 
+    private func flush() {
+        if timer != nil { save() }
+        timer?.invalidate()
+        timer = nil
+    }
+
     private func save() {
-        guard let project = project, let win = win, win.isVisible else { return }
+        guard !docked, let project = project, let win = win, win.isVisible else { return }
         AppController.shared?.recordGitFrame(project, win.frame)
     }
 }
@@ -13654,6 +13806,7 @@ final class TVGitWindow: NSObject, GitSurface {
     private var placement: GitWindowPlacement?
     private var lastData = Data()
     var gitWindow: NSWindow { win }
+    var gitPlacement: GitWindowPlacement? { placement }
 
     init(mainView: CellView, view: CellView) {
         self.view = view
@@ -13669,32 +13822,43 @@ final class TVGitWindow: NSObject, GitSurface {
         win.contentView = view
         view.onChromeMouse = { [weak self] e in
             guard let self = self else { return false }
+            // The dock box, where a window's zoom box sits (`paint_git_window`).
+            let p = self.view.convert(e.locationInWindow, from: nil)
+            let x = Int(p.x / CELL_W), c = self.view.cols()
+            if Int(p.y / CELL_H) == 0, c >= 12, (c - 4...c - 2).contains(x) {
+                self.placement?.toggle()
+                return true
+            }
             return TVDialogWindow.chromeMouse(e, view: self.view, resizable: true)
         }
     }
 
     func present(in parent: NSWindow) {
-        let p = GitWindowPlacement(window: win, project: mainView?.project)
+        let p = GitWindowPlacement(window: win, parent: parent, project: mainView?.project)
         p.snap = { f in
             let w = max(40 * CELL_W, (f.width / CELL_W).rounded(.down) * CELL_W)
             let h = max(10 * CELL_H, (f.height / CELL_H).rounded(.down) * CELL_H)
             return NSRect(x: f.minX, y: f.maxY - h, width: w, height: h)
         }
-        placement = p
-        if !p.restore() {
+        p.defaultFrame = { pw in
             // The grid's size for it: most of the project window, near its top.
-            let pf = parent.frame
+            let pf = pw.frame
             let w = max(60 * CELL_W, (pf.width * 0.9 / CELL_W).rounded(.down) * CELL_W)
             let h = max(16 * CELL_H, ((pf.height - 4 * CELL_H) / CELL_H).rounded(.down) * CELL_H)
-            win.setFrame(NSRect(x: floor(pf.midX - w / 2), y: floor(pf.maxY - 2 * CELL_H - h),
-                                width: w, height: h), display: false)
+            return NSRect(x: floor(pf.midX - w / 2), y: floor(pf.maxY - 2 * CELL_H - h), width: w, height: h)
         }
-        p.fitToScreen(parent: parent)
+        p.onDockChange = { [weak self] docked in
+            guard let self = self, let h = self.mainView?.handle, h != 0 else { return }
+            tk_desktop_set_git_docked(h, docked ? 1 : 0)
+            self.view.invalidateFrame()
+            self.view.needsDisplay = true
+        }
+        placement = p
+        p.start()
         view.invalidateFrame()
         win.makeKeyAndOrderFront(nil)
         shadow = RetroShadow(under: win)
         win.makeFirstResponder(view)
-        p.track()
     }
 
     func dismiss() {
@@ -14575,11 +14739,22 @@ protocol GitSurface: AnyObject {
     func dismiss()
     /// The close box / ⌘W: close the view (refused while a git op runs).
     func closeClicked()
+    var gitPlacement: GitWindowPlacement? { get }
+}
+
+extension GitSurface {
+    /// Git ▸ Local changes while it's up: bring it forward (back over the
+    /// project window, if docked and it stepped aside).
+    func raise() {
+        gitPlacement?.reveal()
+        gitWindow.makeKeyAndOrderFront(nil)
+    }
 }
 
 extension GitController: GitSurface {
     var look: String { "macos" }
     var gitWindow: NSWindow { panel }
+    var gitPlacement: GitWindowPlacement? { placement }
 }
 
 /// A list or a diff in the Platinum git window: rows of colored runs in a
@@ -14927,6 +15102,7 @@ final class PlatinumGitView: NSObject, GitSurface {
     private var dismissed = false
     private var placement: GitWindowPlacement?
     var gitWindow: NSWindow { win }
+    var gitPlacement: GitWindowPlacement? { placement }
 
     init(view: CellView) {
         self.view = view
@@ -15007,21 +15183,24 @@ final class PlatinumGitView: NSObject, GitSurface {
     // MARK: presentation
 
     func present(in parent: NSWindow) {
-        let p = GitWindowPlacement(window: win, project: view?.project)
-        placement = p
-        if !p.restore() {
-            let pf = parent.frame
+        let p = GitWindowPlacement(window: win, parent: parent, project: view?.project)
+        p.defaultFrame = { pw in
+            let pf = pw.frame
             let size = NSSize(width: max(760, pf.width - 40), height: max(480, pf.height - 50))
-            win.setFrame(NSRect(x: floor(pf.midX - size.width / 2), y: pf.maxY - 30 - size.height,
-                                width: size.width, height: size.height), display: false)
+            return NSRect(x: floor(pf.midX - size.width / 2), y: pf.maxY - 30 - size.height,
+                          width: size.width, height: size.height)
         }
-        p.fitToScreen(parent: parent)
+        // The zoom box docks and floats it; no collapse box.
+        frameView.zoomable = true
+        frameView.collapsible = false
+        frameView.onZoom = { [weak p] in p?.toggle() }
+        placement = p
+        p.start()
         body.frame = frameView.content
         layoutBody()
         win.makeKeyAndOrderFront(nil)
         if retroShadow == nil { retroShadow = Platinum.castShadow(under: win) }
         win.makeFirstResponder(filesList)
-        p.track()
     }
 
     func dismiss() {

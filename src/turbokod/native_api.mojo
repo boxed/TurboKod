@@ -1746,6 +1746,15 @@ def tk_desktop_set_git_window_key(h: Int, on: Int) abi("C"):
 
 
 @export
+def tk_desktop_set_git_docked(h: Int, on: Int) abi("C"):
+    """Whether the git window is docked over the project window rather
+    than floating: the Turbo Vision look's dock box shows it."""
+    if h == 0:
+        return
+    _desk(h)[].git_window_docked = on != 0
+
+
+@export
 def tk_desktop_take_git_front_request(h: Int) abi("C") -> Int32:
     """Drain the one-shot "bring the git window to the front" request
     (Git ▸ Local changes while it's already up)."""
