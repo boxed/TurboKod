@@ -644,8 +644,13 @@ struct GridForm(Movable):
         self._placed = List[_Placed]()
         _arrange(root, body, self._placed)
         # Widgets follow the tree; buttons learn where they are.
-        for i in range(len(self._placed)):
-            var p = self._placed[i].copy()
+        # The widget helpers take ``mut self``, so the placed nodes are
+        # lent out of ``self`` for the walk rather than copied one by one
+        # (a list node carries all its rows) — on every paint and event.
+        var placed = List[_Placed]()
+        swap(placed, self._placed)
+        for i in range(len(placed)):
+            ref p = placed[i]
             if p.node.kind == UI_TEXT:
                 _ = self._field(p.node)
             elif p.node.kind == UI_CHOICE:
@@ -656,6 +661,7 @@ struct GridForm(Movable):
                 _ = self._vlist(p.node)
             elif p.node.kind == UI_BUTTON:
                 _ = self._button(p.node, p.rect)
+        swap(placed, self._placed)
         # Keep focus on something focusable that still exists.
         var keep = False
         var first = String("")
@@ -695,8 +701,11 @@ struct GridForm(Movable):
         var painter = Painter(self._frame)
         var popup = -1
         var popup_rect = Rect(0, 0, 0, 0)
-        for i in range(len(self._placed)):
-            var p = self._placed[i].copy()
+        # Lent out of ``self`` for the walk, as in ``_layout``.
+        var placed = List[_Placed]()
+        swap(placed, self._placed)
+        for i in range(len(placed)):
+            ref p = placed[i]
             var focused = active and p.node.key == self.focus_key \
                 and _is_focusable(p.node)
             var k = p.node.kind
@@ -771,6 +780,7 @@ struct GridForm(Movable):
                 _paint_preview(canvas, painter, p.rect)
             elif k == UI_TABS:
                 self._paint_tabs(canvas, p.node, p.rect, focused)
+        swap(placed, self._placed)
         # Open pop-ups overlay the rest.
         if popup >= 0:
             self._drops[popup].paint_popup(canvas, popup_rect, screen)
