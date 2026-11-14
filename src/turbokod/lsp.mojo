@@ -388,16 +388,9 @@ struct LspProcess(Copyable, Movable):
         self._trace_fd_owned = False
 
     def __copyinit__(mut self, copy: Self):
-        self.pid = -1
-        self.stdin_fd = -1
-        self.stdout_fd = -1
-        self.stderr_fd = -1
-        self.alive = False
-        self._read_buffer = List[UInt8]()
-        self._pending_write = List[UInt8]()
-        self._write_overflowed = False
-        self.trace_fd = -1
-        self._trace_fd_owned = False
+        # A copy is a fresh instance, exactly what ``__init__`` builds:
+        # one list of field defaults, not two to keep in step.
+        self = Self()
 
     def own_trace_fd(mut self, fd: Int32):
         """Attach a trace log this process is responsible for closing.

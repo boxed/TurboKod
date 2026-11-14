@@ -330,31 +330,9 @@ struct SubprocessAttach(Copyable, Movable):
         # double-own the connected socket. We declare ``Copyable`` only
         # so the field can live in a ``DapManager`` (which is itself
         # Copyable for List storage). Hands back an inert sibling.
-        self.client = DapClient(LspProcess())
-        self.sub_process_id = -1
-        self.name = String("")
-        self.state = _STATE_NOT_STARTED
-        self.inflight_initialize = 0
-        self.inflight_attach = 0
-        self.inflight_config_done = 0
-        self.inflight_stack_trace = 0
-        self.inflight_scopes = 0
-        self.inflight_variables = 0
-        self.inflight_evaluate_seqs = List[Int]()
-        self.inflight_evaluate_exprs = List[String]()
-        self.inflight_evaluate_contexts = List[String]()
-        self.inflight_test_eval_seqs = List[Int]()
-        self.inflight_completions = 0
-        self.inflight_keys_eval = 0
-        self.inflight_keys_vars = 0
-        self.inflight_test_eval_exprs = List[String]()
-        self.got_initialized_event = False
-        self.pending_attach_args = JsonValue()
-        self.bp_paths = List[String]()
-        self.bp_lines = List[Int]()
-        self.bp_conditions = List[String]()
-        self.bp_enabled = List[Bool]()
-
+        # A copy is a fresh instance, exactly what ``__init__`` builds:
+        # one list of field defaults, not two to keep in step.
+        self = Self()
 
 # --- DapManager -----------------------------------------------------------
 
@@ -693,91 +671,9 @@ struct DapManager(Copyable, Movable):
         # grown via ``^`` transfer in practice and this branch shouldn't
         # fire for a live session. If it ever does, we hand back an
         # inert NOT_STARTED sibling.
-        self.client = DapClient(LspProcess())
-        self.state = _STATE_NOT_STARTED
-        self.failure_reason = String("")
-        self.adapter_name = String("")
-        self.language_id = String("")
-        self._inflight_initialize = 0
-        self._inflight_launch = 0
-        self._inflight_config_done = 0
-        self._inflight_threads = 0
-        self._inflight_stack_trace = 0
-        self._inflight_scopes = 0
-        self._inflight_variables = 0
-        self._supports_configuration_done = True
-        self._supports_terminate_request = False
-        self._got_initialized_event = False
-        self._launch_request_kind = DAP_REQUEST_LAUNCH
-        self._bp_path = List[String]()
-        self._bp_line = List[Int]()
-        self._bp_condition = List[String]()
-        self._bp_enabled = List[Bool]()
-        self._bp_wait_for = List[String]()
-        self._bp_armed = List[Bool]()
-        self._inflight_set_breakpoints_seqs = List[Int]()
-        self._inflight_set_breakpoints_paths = List[String]()
-        self._inflight_set_breakpoints_lines = List[List[Int]]()
-        self._bp_errors = List[DapBreakpointError]()
-        self._exception_filters = _default_exception_filters()
-        self._inflight_evaluate_seqs = List[Int]()
-        self._inflight_evaluate_exprs = List[String]()
-        self._inflight_evaluate_contexts = List[String]()
-        self._evaluations_expr = List[String]()
-        self._evaluations_value = List[String]()
-        self._evaluations_type = List[String]()
-        self._evaluations_context = List[String]()
-        self._evaluations_is_error = List[Bool]()
-        self._inflight_test_eval_seqs = List[Int]()
-        self._supports_completions = False
-        self._inflight_completions = 0
-        self._completions_req_text = String("")
-        self._completions_req_column = 0
-        self._completions = List[DapCompletion]()
-        self._completions_ready = False
-        self._completions_text = String("")
-        self._completions_column = 0
-        self._inflight_keys_eval = 0
-        self._inflight_keys_vars = 0
-        self._keys_req_expr = String("")
-        self._keys = List[String]()
-        self._keys_ready = False
-        self._keys_expr = String("")
-        self._keys_stage = 0
-        self._keys_via_sub = False
-        self._keys_frame_id = 0
-        self._inflight_test_eval_exprs = List[String]()
-        self._test_eval_expr = List[String]()
-        self._test_eval_value = List[String]()
-        self._test_eval_error = List[Bool]()
-        self._pending_cond_exc_condition = String("")
-        self._pending_cond_exc_error = String("")
-        self._stopped = Optional[DapStopped]()
-        self._is_stopped = False
-        self._continued_pending = False
-        self._output_events = List[DapOutput]()
-        self._terminated_pending = False
-        self._pending_threads = List[DapThread]()
-        self._pending_threads_ready = False
-        self._pending_stack = List[DapStackFrame]()
-        self._pending_stack_ready = False
-        self._pending_scopes = List[DapScope]()
-        self._pending_scopes_ready = False
-        self._pending_vars = List[DapVariable]()
-        self._pending_vars_ready = False
-        self._pending_launch_args = JsonValue()
-        self.spawn_argv = List[String]()
-        self._stderr_log = String("")
-        self._state_entered_ms = 0
-        self._last_heartbeat_ms = 0
-        self._subprocess = SubprocessAttach()
-        self._last_inspect_in_subprocess = False
-        self._stop_in_subprocess = False
-        self._last_stopped_thread_id = 0
-        self._oneshot_bp_path = String("")
-        self._oneshot_bp_line = -1
-
-    # --- state predicates ------------------------------------------------
+        # A copy is a fresh instance, exactly what ``__init__`` builds:
+        # one list of field defaults, not two to keep in step.
+        self = Self()
 
     def is_active(self) -> Bool:
         return self.state != _STATE_NOT_STARTED \
