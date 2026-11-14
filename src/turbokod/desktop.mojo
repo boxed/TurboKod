@@ -229,7 +229,7 @@ from .run_manager import RunSession, drain_run_output, poll_run_exit
 from .save_as_dialog import SaveAsDialog
 from .string_utils import (
     byte_slice, display_columns, parse_int_prefix, split_lines_no_trailing,
-    shell_single_quote, starts_with, utf8_cell_of_byte,
+    shell_single_quote, split_whitespace, starts_with, utf8_cell_of_byte,
 )
 from .session_store import (
     Session, SessionWindow,
@@ -15102,7 +15102,7 @@ struct Desktop(Movable):
             if dup:
                 continue
             seen.append(canon)
-            rel_entries.append(_recent_display_label(canon, root))
+            rel_entries.append(project_relative(root, canon))
             abs_entries.append(canon)
         # Pool 2: persisted ``_recent_files`` not already covered above.
         for i in range(len(self._recent_files)):
@@ -15117,7 +15117,7 @@ struct Desktop(Movable):
             if dup:
                 continue
             seen.append(p)
-            rel_entries.append(_recent_display_label(p, root))
+            rel_entries.append(project_relative(root, p))
             abs_entries.append(p)
         if len(rel_entries) == 0:
             return
@@ -19433,25 +19433,6 @@ def _expand_save_placeholders(arg: String, saved_path: String) -> String:
     return out
 
 
-def _recent_display_label(path: String, project_root: String) -> String:
-    """Return ``path`` formatted for display in the "Open Recent" picker:
-    project-relative when ``path`` lives under ``project_root``, absolute
-    otherwise. An empty ``project_root`` (no project open) returns the
-    input path verbatim."""
-    var pb = path.as_bytes()
-    var rb = project_root.as_bytes()
-    if len(rb) == 0:
-        return path
-    if len(pb) <= len(rb) + 1:
-        return path
-    for k in range(len(rb)):
-        if pb[k] != rb[k]:
-            return path
-    if pb[len(rb)] != 0x2F:
-        return path
-    return String(StringSpan(unsafe_from_utf8=pb[len(rb) + 1:]))
-
-
 def _path_tail(path: String, count: Int) -> String:
     """Return the last ``count`` components of ``path``, e.g.
     ``_path_tail("/a/b/c", 2)`` → ``"b/c"``. Trailing slashes are
@@ -19695,7 +19676,7 @@ def _pyenv_shim_would_fail(root: String) -> Bool:
             pin = read_file(vf)
         except:
             return False
-    var pins = _split_version_pins(pin)
+    var pins = split_whitespace(pin)
     if len(pins) == 0:
         return False
     var home = getenv_value(String("HOME"))
@@ -19703,30 +19684,6 @@ def _pyenv_shim_would_fail(root: String) -> Bool:
         return False
     var installed = list_directory(home + String("/.pyenv/versions"))
     return not _pyenv_pins_satisfied(pins, installed)
-
-
-def _split_version_pins(content: String) -> List[String]:
-    """Whitespace-split ``content`` (a ``.python-version`` body or a
-    ``$PYENV_VERSION`` value) into individual version names. pyenv
-    accepts one version per line; splitting on all whitespace also
-    swallows ``\\r`` and trailing newlines for free."""
-    var pins = List[String]()
-    var b = content.as_bytes()
-    var start = -1
-    for i in range(len(b)):
-        var ws = b[i] == UInt8(ord(" ")) or b[i] == UInt8(ord("\t")) \
-            or b[i] == UInt8(ord("\n")) or b[i] == UInt8(ord("\r"))
-        if ws:
-            if start >= 0:
-                pins.append(String(StringSpan(
-                    unsafe_from_utf8=b[start:i],
-                )))
-                start = -1
-        elif start < 0:
-            start = i
-    if start >= 0:
-        pins.append(String(StringSpan(unsafe_from_utf8=b[start:len(b)])))
-    return pins^
 
 
 def _pyenv_pins_satisfied(

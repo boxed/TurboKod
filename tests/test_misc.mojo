@@ -14,7 +14,7 @@ from turbokod.session_store import Session, SessionWindow, save_session
 from turbokod.desktop import (
     Desktop, EDITOR_CUT, EDITOR_FIND, EDITOR_PASTE, HELP_HOTKEYS,
     PROJECT_CLOSE_ACTION, _expand_save_placeholders, _pyenv_pins_satisfied,
-    _split_version_pins, ctrl_key, format_hotkey
+    ctrl_key, format_hotkey
 )
 from turbokod.file_io import (
     basename, delete_path, delete_tree, join_path, read_file, stat_file,
@@ -28,7 +28,8 @@ from turbokod.text_select import PaneTextSelect
 from turbokod.project_targets import resolve_python_interpreter
 from turbokod.string_utils import (
     char_width, display_columns, escape_drop_paths, prev_codepoint_start,
-    shell_fetch, shell_move_into_place, string_list, tail_to_columns
+    shell_fetch, shell_move_into_place, split_whitespace, string_list,
+    tail_to_columns
 )
 from turbokod.lsp import capture_command
 from turbokod.posix import debug_log_path, getenv_value
@@ -625,31 +626,31 @@ def test_pyenv_pin_satisfaction() raises:
     var installed = List[String]()
     installed.append(String("3.12.6"))
     # uv-style pin that pyenv can't satisfy.
-    var uv_pin = _split_version_pins(String("3.14\n"))
+    var uv_pin = split_whitespace(String("3.14\n"))
     assert_equal(len(uv_pin), 1)
     assert_equal(uv_pin[0], String("3.14"))
     assert_false(_pyenv_pins_satisfied(uv_pin, installed))
     # Exact match works; no prefix resolution in either direction.
     assert_true(_pyenv_pins_satisfied(
-        _split_version_pins(String("3.12.6")), installed,
+        split_whitespace(String("3.12.6")), installed,
     ))
     assert_false(_pyenv_pins_satisfied(
-        _split_version_pins(String("3.12")), installed,
+        split_whitespace(String("3.12")), installed,
     ))
     # ``system`` is always available.
     assert_true(_pyenv_pins_satisfied(
-        _split_version_pins(String("system")), installed,
+        split_whitespace(String("system")), installed,
     ))
     # Multi-version file: every line must be installed.
     assert_false(_pyenv_pins_satisfied(
-        _split_version_pins(String("3.12.6\n3.14\n")), installed,
+        split_whitespace(String("3.12.6\n3.14\n")), installed,
     ))
     # CRLF + surrounding whitespace are stripped by the splitter.
-    var crlf = _split_version_pins(String("  3.12.6\r\n"))
+    var crlf = split_whitespace(String("  3.12.6\r\n"))
     assert_equal(len(crlf), 1)
     assert_equal(crlf[0], String("3.12.6"))
     # Empty file → no pins → caller treats as "global applies".
-    assert_equal(len(_split_version_pins(String("\n"))), 0)
+    assert_equal(len(split_whitespace(String("\n"))), 0)
 
 
 def test_extension_of_helper() raises:
