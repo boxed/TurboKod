@@ -405,7 +405,7 @@ struct LspChannel(Movable):
             var maybe = self.client.poll(Int32(0))
             if not maybe:
                 return
-            self._route(maybe.value().copy())
+            self._route(maybe.take())
 
     def _route(mut self, var msg: LspIncoming) raises:
         if len(self._session_ids) == 0:

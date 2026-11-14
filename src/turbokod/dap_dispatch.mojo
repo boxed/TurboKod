@@ -2053,7 +2053,7 @@ struct DapManager(Copyable, Movable):
                 return
             if not maybe:
                 break
-            var msg = maybe.value().copy()
+            var msg = maybe.take()
             if msg.kind == DAP_EVENT:
                 self._handle_event(msg)
             elif msg.kind == DAP_RESPONSE:
@@ -2104,7 +2104,7 @@ struct DapManager(Copyable, Movable):
                 return
             if not maybe:
                 break
-            var msg = maybe.value().copy()
+            var msg = maybe.take()
             self._handle_subprocess_message(msg)
 
     def _handle_subprocess_message(mut self, msg: DapIncoming):

@@ -2105,7 +2105,7 @@ struct LspManager(Copyable, Movable):
                     return True
                 if not maybe:
                     break
-                var inc = maybe.value().copy()
+                var inc = maybe.take()
                 if inc.kind == LSP_RESPONSE and inc.id \
                         and _id_to_string(inc.id.value()) \
                             == self._close_shutdown_id:
@@ -4399,7 +4399,7 @@ struct LspManager(Copyable, Movable):
                 return resolved
             if not maybe:
                 return resolved
-            var msg = maybe.value().copy()
+            var msg = maybe.take()
             if msg.kind == LSP_NOTIFICATION:
                 if msg.method and msg.params:
                     var method = msg.method.value()
