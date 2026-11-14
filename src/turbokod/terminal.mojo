@@ -474,16 +474,22 @@ struct Terminal:
         bytes survive a follow-up read with no progress (the user actually
         pressed Escape), the leading ESC is flushed as KEY_ESC.
         """
+        # The trace lines below are built only while tracing: this runs on
+        # every input read, and a drag or wheel burst used to build a byte
+        # dump and two strings per event for a closed fd.
+        var tracing = self.trace_fd >= 0
         self._trace(String("    poll_event:enter\n"))
         if self._queue_head < len(self._queue):
             self._trace(String("    poll_event:queue-hit\n"))
             return self._pop_queue()
         self._trace(String("    poll_event:before-poll_stdin\n"))
         var has_input = poll_stdin(STDIN_FD, Int32(timeout_ms))
-        self._trace(
-            String("    poll_event:after-poll_stdin has=")
-            + (String("True") if has_input else String("False")) + String("\n"),
-        )
+        if tracing:
+            self._trace(
+                String("    poll_event:after-poll_stdin has=")
+                + (String("True") if has_input else String("False"))
+                + String("\n"),
+            )
         if not has_input:
             if len(self._pending) > 0:
                 self._flush_pending_as_esc()
@@ -492,9 +498,11 @@ struct Terminal:
             return None
         self._trace(String("    poll_event:before-read_into\n"))
         var n = read_into(STDIN_FD, self._read_buf, 1024)
-        self._trace(
-            String("    poll_event:after-read_into n=") + String(n) + String("\n"),
-        )
+        if tracing:
+            self._trace(
+                String("    poll_event:after-read_into n=") + String(n)
+                + String("\n"),
+            )
         if n <= 0:
             if len(self._pending) > 0:
                 self._flush_pending_as_esc()
@@ -503,12 +511,13 @@ struct Terminal:
             return None
         # Snapshot the freshly-read bytes before any further work, as
         # space-separated decimal byte values (ESC=27, '[' = 91, etc.).
-        var dump = String("    poll_event:read_bytes ")
-        for i in range(n):
-            dump += String(Int(self._read_buf[i]))
-            dump += String(" ")
-        dump += String("\n")
-        self._trace(dump)
+        if tracing:
+            var dump = String("    poll_event:read_bytes ")
+            for i in range(n):
+                dump += String(Int(self._read_buf[i]))
+                dump += String(" ")
+            dump += String("\n")
+            self._trace(dump)
         var combined = List[UInt8]()
         for i in range(len(self._pending)):
             combined.append(self._pending[i])
@@ -516,26 +525,31 @@ struct Terminal:
             combined.append(self._read_buf[i])
         self._pending = List[UInt8]()
         var total = len(combined)
-        self._trace(
-            String("    poll_event:combined ") + String(total) + String("B\n"),
-        )
+        if tracing:
+            self._trace(
+                String("    poll_event:combined ") + String(total)
+                + String("B\n"),
+            )
         var bytes = StringSpan(unsafe_from_utf8=Span(unsafe_ptr=combined.unsafe_ptr(), length=total)).as_bytes()
         var pos = 0
         var iters = 0
         while pos < total:
             iters += 1
-            self._trace(
-                String("    poll_event:parse iter=") + String(iters)
-                + String(" pos=") + String(pos) + String("\n"),
-            )
+            if tracing:
+                self._trace(
+                    String("    poll_event:parse iter=") + String(iters)
+                    + String(" pos=") + String(pos) + String("\n"),
+                )
             var slice = String(StringSpan(unsafe_from_utf8=bytes[pos:]))
             var parsed = parse_input(slice)
             var consumed = parsed[1]
-            self._trace(
-                String("    poll_event:parsed consumed=") + String(consumed)
-                + String(" kind=") + String(Int(parsed[0].kind))
-                + String("\n"),
-            )
+            if tracing:
+                self._trace(
+                    String("    poll_event:parsed consumed=")
+                    + String(consumed)
+                    + String(" kind=") + String(Int(parsed[0].kind))
+                    + String("\n"),
+                )
             if consumed <= 0:
                 for i in range(pos, total):
                     self._pending.append(combined[i])
