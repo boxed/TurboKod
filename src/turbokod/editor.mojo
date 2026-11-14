@@ -3070,9 +3070,13 @@ struct Editor(Copyable, Movable):
             total -= self._undo_stack[0].byte_size
             _ = self._undo_stack.pop(0)
 
-    def _restore(mut self, snap: EditorSnapshot):
-        self.buffer.replace_lines(snap.lines.copy(), snap.marks)
-        self.selections = snap.selections.copy()
+    def _restore(mut self, var snap: EditorSnapshot):
+        # ``undo`` / ``redo`` popped ``snap`` and are done with it: take its
+        # lines rather than copying the whole buffer once more.
+        var lines = List[String]()
+        swap(lines, snap.lines)
+        self.buffer.replace_lines(lines^, snap.marks)
+        swap(self.selections, snap.selections)
         # Reset the primary's ``desired_col`` from the restored cursor
         # position so vertical movement after the undo lands where the
         # user expects. The snapshot already carries each caret's
@@ -3362,7 +3366,7 @@ struct Editor(Copyable, Movable):
             return False
         var snap = self._undo_stack.pop()
         self._redo_stack.append(self._snapshot())
-        self._restore(snap)
+        self._restore(snap^)
         return True
 
     def redo(mut self) -> Bool:
@@ -3378,7 +3382,7 @@ struct Editor(Copyable, Movable):
         # stack itself needs none: it only ever receives what ``undo``
         # pops off the (already capped) undo stack.
         self._trim_undo_stack()
-        self._restore(snap)
+        self._restore(snap^)
         return True
 
     def consume_definition_request(mut self) -> Optional[DefinitionRequest]:
