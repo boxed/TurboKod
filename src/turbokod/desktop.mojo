@@ -3121,6 +3121,16 @@ struct Desktop(Movable):
             bottom -= self._debug_pane_height(screen)
         return bottom
 
+    def _dock_pane_rect(self, screen: Rect, slot: Int, height: Int) -> Rect:
+        """The rect of the bottom-docked pane in ``slot``, ``height`` rows
+        tall above whatever is docked below it."""
+        var bottom = self._dock_slot_bottom(screen, slot)
+        var top = bottom - height
+        if top < 1:
+            top = 1
+        return Rect(self._panel_left(screen), top,
+                    self._panel_right(screen), bottom)
+
     def debug_pane_rect(self, screen: Rect) -> Rect:
         """Where the bottom-docked run/debug pane lives — above the
         status bar (and the tab bar, when visible) and above the test
@@ -3129,12 +3139,9 @@ struct Desktop(Movable):
         above it, and the run/debug pane stacks above the test pane."""
         if not self.debug_pane.visible:
             return Rect.empty()
-        var bottom = self._dock_slot_bottom(screen, _SLOT_DEBUG)
-        var top = bottom - self._debug_pane_height(screen)
-        if top < 1:
-            top = 1
-        return Rect(self._panel_left(screen), top,
-                    self._panel_right(screen), bottom)
+        return self._dock_pane_rect(
+            screen, _SLOT_DEBUG, self._debug_pane_height(screen),
+        )
 
     def _coalesce_dock_states(mut self):
         """At most one maximized pane in the bottom dock, the others
@@ -3219,12 +3226,9 @@ struct Desktop(Movable):
         ``debug_pane_rect`` so the two output panes read as a stack."""
         if not self.test_pane.visible:
             return Rect.empty()
-        var bottom = self._dock_slot_bottom(screen, _SLOT_TEST)
-        var top = bottom - self._test_pane_height(screen)
-        if top < 1:
-            top = 1
-        return Rect(self._panel_left(screen), top,
-                    self._panel_right(screen), bottom)
+        return self._dock_pane_rect(
+            screen, _SLOT_TEST, self._test_pane_height(screen),
+        )
 
     def _test_pane_height(self, screen: Rect) -> Int:
         """Effective rendered height for the test pane — same
@@ -3265,12 +3269,9 @@ struct Desktop(Movable):
         ``test_pane_rect`` so the panes read as one stack."""
         if not self.find_results_pane.visible:
             return Rect.empty()
-        var bottom = self._dock_slot_bottom(screen, _SLOT_FIND)
-        var top = bottom - self._find_results_pane_height(screen)
-        if top < 1:
-            top = 1
-        return Rect(self._panel_left(screen), top,
-                    self._panel_right(screen), bottom)
+        return self._dock_pane_rect(
+            screen, _SLOT_FIND, self._find_results_pane_height(screen),
+        )
 
     def _find_results_pane_height(self, screen: Rect) -> Int:
         """Effective rendered height for the Find Results pane — same
