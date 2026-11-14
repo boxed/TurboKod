@@ -126,6 +126,7 @@ from .git_changes import (
     fetch_blob_text, fetch_branch_log, fetch_commit_message, fetch_commit_show,
     fetch_git_branches, fetch_git_commits, fetch_git_remote_branches,
     fetch_git_remotes, fetch_git_status, fetch_merged_commits, format_age,
+    git_base_argv,
     git_state_mtimes, git_status_argv, GitBranch, GitCommit, GitFileStatus,
     github_compare_url, GitStateMtimes, has_merge_between, head_short_sha,
     main_line_branch, parse_git_status, parse_unified_diff_files,
@@ -5001,12 +5002,7 @@ struct LocalChanges(Movable):
     def _git_base_argv(self) -> List[String]:
         """``git -C <root>`` — the prefix of every async git op. Paths are
         file names, not patterns (see ``_git_argv``)."""
-        var argv = List[String]()
-        argv.append(String("git"))
-        argv.append(String("--literal-pathspecs"))
-        argv.append(String("-C"))
-        argv.append(self.root)
-        return argv^
+        return git_base_argv(self.root)
 
     def _refuse_if_git_busy(mut self) -> Bool:
         """True (after telling the user) while an async git op is running,

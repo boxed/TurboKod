@@ -619,14 +619,22 @@ def _git_argv(project_root: String, var args: List[String]) -> List[String]:
     ``--literal-pathspecs``: the paths passed are file names, never
     patterns. Read as pathspecs, discarding ``a[1].txt`` also reverted
     ``a1.txt``, and deleting the untracked ``u?`` deleted ``ux`` too."""
+    var argv = git_base_argv(project_root)
+    for i in range(len(args)):
+        argv.append(args[i])
+    return argv^
+
+
+def git_base_argv(project_root: String) -> List[String]:
+    """``git --literal-pathspecs --no-optional-locks -C <project_root>``:
+    the one spelling of the prefix every git invocation in the product
+    starts with (see ``_git_argv`` for why each flag is there)."""
     var argv = List[String]()
     argv.append(String("git"))
     argv.append(String("--literal-pathspecs"))
     argv.append(String("--no-optional-locks"))
     argv.append(String("-C"))
     argv.append(project_root)
-    for i in range(len(args)):
-        argv.append(args[i])
     return argv^
 
 

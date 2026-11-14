@@ -26,7 +26,7 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .file_io import find_git_project
-from .git_changes import fetch_commit_message
+from .git_changes import fetch_commit_message, git_base_argv
 from .lsp import capture_command
 from .posix import realpath
 from .string_utils import (
@@ -271,15 +271,7 @@ def compute_blame(file_path: String) raises -> List[BlameLine]:
     if not maybe_root:
         return List[BlameLine]()
     var root = maybe_root.value()
-    var argv = List[String]()
-    argv.append(String("git"))
-    argv.append(String("--literal-pathspecs"))  # a file name, not a pattern
-    # Read-only query: never take ``.git/index.lock`` to refresh the index
-    # behind another git process's back (see ``_git_argv`` in
-    # ``git_changes.mojo`` for why).
-    argv.append(String("--no-optional-locks"))
-    argv.append(String("-C"))
-    argv.append(root)
+    var argv = git_base_argv(root)
     argv.append(String("blame"))
     argv.append(String("--porcelain"))
     argv.append(String("--"))
