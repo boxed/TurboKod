@@ -100,9 +100,19 @@ def compute_revert_block(
     non-equal run (i.e. the line is unchanged from HEAD), or when the
     run is a pure deletion that doesn't actually cover any buffer rows.
     """
+    return compute_revert_block_lines(
+        split_lines(head_text), buffer_lines, target_row,
+    )
+
+
+def compute_revert_block_lines(
+    head_lines: List[String], buffer_lines: List[String], target_row: Int,
+) -> Optional[GitRevertBlock]:
+    """``compute_revert_block`` for a HEAD already split into lines — what
+    the editor keeps, so it doesn't hold the text as well and re-split it
+    on every gutter click."""
     if target_row < 0 or target_row >= len(buffer_lines):
         return Optional[GitRevertBlock]()
-    var head_lines = split_lines(head_text)
     var ops = diff_lines(head_lines, buffer_lines)
     var i = 0
     var n = len(ops)
@@ -517,9 +527,18 @@ def compute_deletion_revert_block(
 
     Empty Optional when ``marker_row`` has no pure deletion below it.
     """
+    return compute_deletion_revert_block_lines(
+        split_lines(head_text), buffer_lines, marker_row,
+    )
+
+
+def compute_deletion_revert_block_lines(
+    head_lines: List[String], buffer_lines: List[String], marker_row: Int,
+) -> Optional[GitRevertBlock]:
+    """``compute_deletion_revert_block`` for a HEAD already split into
+    lines."""
     if marker_row < 0:
         return Optional[GitRevertBlock]()
-    var head_lines = split_lines(head_text)
     var ops = diff_lines(head_lines, buffer_lines)
     var i = 0
     var n = len(ops)

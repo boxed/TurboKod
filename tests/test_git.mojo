@@ -1010,12 +1010,13 @@ def test_git_gutter_no_diff_when_buffer_matches_crlf_head() raises:
     ed.buffer = TextBuffer(String("alpha\nbeta\ngamma\n"))
     ed.set_git_head_text(String("alpha\r\nbeta\r\ngamma\r\n"), True)
     # The cached text must be normalized — no '\r' bytes left.
-    var head_bytes = ed._git_head_text.as_bytes()
+    var head_text = ed.git_head_text().value()
+    var head_bytes = head_text.as_bytes()
     for i in range(len(head_bytes)):
         assert_true(Int(head_bytes[i]) != 0x0D)
     # Every buffer row should diff as NONE.
     var diff = diff_buffer_against_head(
-        ed._git_head_text, ed.buffer.lines.copy(),
+        head_text, ed.buffer.lines.copy(),
     )
     for i in range(len(diff)):
         assert_equal(diff[i], GIT_CHANGE_NONE)

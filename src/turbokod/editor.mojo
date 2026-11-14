@@ -47,8 +47,8 @@ from .file_io import (
 from .git_blame import BlameLine
 from .git_changes import (
     GIT_CHANGE_ADDED, GIT_CHANGE_MODIFIED, GIT_CHANGE_NONE,
-    GitRevertBlock, GitRevertRequest, compute_deletion_revert_block,
-    compute_revert_block,
+    GitRevertBlock, GitRevertRequest, compute_deletion_revert_block_lines,
+    compute_revert_block_lines,
 )
 from .highlight import (
     CompletionRequest, DefinitionRequest, EditorContextMenuRequest,
@@ -1663,7 +1663,7 @@ struct Editor(Copyable, Movable):
     # source data to project — currently the git_change_lines list — so
     # turning this on outside a git repo is a silent no-op.
     var minimap_visible: Bool
-    # ``_git_head_text`` caches the file's content at HEAD so the
+    # ``_git_head_lines`` caches the file's content at HEAD so the
     # gutter can re-diff against the in-memory buffer on every edit
     # without re-spawning git. ``_git_head_loaded`` distinguishes "not
     # fetched yet" from "fetched and confirmed absent" (untracked
@@ -1672,10 +1672,12 @@ struct Editor(Copyable, Movable):
     # baseline; ``_git_changes_dirty`` is set on every buffer edit
     # (piggy-backing on ``_mark_hl_dirty``) so the desktop paint pass
     # re-runs the line-diff.
-    var _git_head_text: String
     var _git_head_lines: List[String]
-    """``_git_head_text`` split as the gutter's diff wants it, once: done
-    on every edit it cost 7 ms per keystroke on a 150k-line file."""
+    """The HEAD text split as the gutter's diff wants it, once: done
+    on every edit it cost 7 ms per keystroke on a 150k-line file. Kept
+    as lines only — ``git_head_text`` joins them for the one caller that
+    wants the text, rather than every tracked editor holding the file at
+    HEAD twice."""
     var _git_head_loaded: Bool
     var _git_head_present: Bool
     var _git_changes_dirty: Bool
@@ -2002,7 +2004,6 @@ struct Editor(Copyable, Movable):
         self.git_deleted_below = List[Bool]()
         self._git_has_changes = False
         self.minimap_visible = True
-        self._git_head_text = String("")
         self._git_head_lines = List[String]()
         self._git_head_loaded = False
         self._git_head_present = False
@@ -2222,7 +2223,6 @@ struct Editor(Copyable, Movable):
         self.git_deleted_below = copy.git_deleted_below.copy()
         self._git_has_changes = copy._git_has_changes
         self.minimap_visible = copy.minimap_visible
-        self._git_head_text = copy._git_head_text
         self._git_head_lines = copy._git_head_lines.copy()
         self._git_head_loaded = copy._git_head_loaded
         self._git_head_present = copy._git_head_present
@@ -4332,8 +4332,8 @@ struct Editor(Copyable, Movable):
         ``target_row`` doesn't fall inside a change block."""
         if not self._git_head_present:
             return Optional[GitRevertRequest]()
-        var block_opt = compute_revert_block(
-            self._git_head_text, self.buffer.lines, target_row,
+        var block_opt = compute_revert_block_lines(
+            self._git_head_lines, self.buffer.lines, target_row,
         )
         if not block_opt:
             return Optional[GitRevertRequest]()
@@ -4366,8 +4366,8 @@ struct Editor(Copyable, Movable):
         below ``marker_row``."""
         if not self._git_head_present:
             return Optional[GitRevertRequest]()
-        var block_opt = compute_deletion_revert_block(
-            self._git_head_text, self.buffer.lines, marker_row,
+        var block_opt = compute_deletion_revert_block_lines(
+            self._git_head_lines, self.buffer.lines, marker_row,
         )
         if not block_opt:
             return Optional[GitRevertRequest]()
@@ -4484,8 +4484,8 @@ struct Editor(Copyable, Movable):
         cursor isn't on a changed line."""
         if self.read_only or not self._git_head_present:
             return False
-        var block_opt = compute_revert_block(
-            self._git_head_text, self.buffer.lines, self.selections[0].row,
+        var block_opt = compute_revert_block_lines(
+            self._git_head_lines, self.buffer.lines, self.selections[0].row,
         )
         if not block_opt:
             return False
@@ -5171,8 +5171,7 @@ struct Editor(Copyable, Movable):
         ``apply_revert_block`` would splice ``\\r``-laden lines back
         into the buffer.
         """
-        self._git_head_text = _normalize_crlf(text)
-        self._git_head_lines = split_lines(self._git_head_text)
+        self._git_head_lines = split_lines(_normalize_crlf(text))
         self._git_head_loaded = True
         self._git_head_present = present
         self._git_changes_dirty = True
@@ -5203,7 +5202,7 @@ struct Editor(Copyable, Movable):
         so it doesn't re-spawn git on every confirmation."""
         if not self._git_head_present:
             return Optional[String]()
-        return Optional[String](self._git_head_text)
+        return Optional[String](String("\n").join(self._git_head_lines))
 
     def invalidate_git_changes(mut self):
         """Drop the cached HEAD baseline and per-line change status.
@@ -5215,7 +5214,6 @@ struct Editor(Copyable, Movable):
         self.git_change_lines = List[Int]()
         self.git_deleted_below = List[Bool]()
         self._git_has_changes = False
-        self._git_head_text = String("")
         self._git_head_lines = List[String]()
         self._git_head_loaded = False
         self._git_head_present = False
