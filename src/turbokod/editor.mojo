@@ -2569,7 +2569,10 @@ struct Editor(Copyable, Movable):
             var directive = List[Bool](capacity=n)
             for r in range(pre):
                 text.append(self._spell_text[r])
-                runs.append(self._spell_runs[r].copy())
+                # Taken from the list being replaced, not copied: one
+                # allocation per unchanged row, on every edit, otherwise.
+                runs.append(List[Tuple[Int, Int]]())
+                swap(runs[len(runs) - 1], self._spell_runs[r])
                 directive.append(self._spell_directive[r])
             for r in range(pre, n - suf):
                 text.append(lines[r])
@@ -2577,7 +2580,10 @@ struct Editor(Copyable, Movable):
                 directive.append(has_spell_noinspection_directive(lines[r]))
             for r in range(old_n - suf, old_n):
                 text.append(self._spell_text[r])
-                runs.append(self._spell_runs[r].copy())
+                # Taken from the list being replaced, not copied: one
+                # allocation per unchanged row, on every edit, otherwise.
+                runs.append(List[Tuple[Int, Int]]())
+                swap(runs[len(runs) - 1], self._spell_runs[r])
                 directive.append(self._spell_directive[r])
             self._spell_text = text^
             self._spell_runs = runs^
