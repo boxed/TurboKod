@@ -1382,8 +1382,16 @@ def tk_desktop_refresh_git(h: Int) abi("C"):
     _desk(h)[].force_git_refresh()
 
 
-def _b(v: Bool) -> String:
-    return String("1") if v else String("0")
+def _snap_field(mut buf: List[UInt8], text: String):
+    """One TAB-led field of a ``tk_desktop_menu_snapshot`` record."""
+    buf.append(UInt8(0x09))
+    buf.extend(text.as_bytes())
+
+
+def _snap_flag(mut buf: List[UInt8], v: Bool):
+    """A boolean field, ``0`` / ``1``."""
+    buf.append(UInt8(0x09))
+    buf.append(UInt8(0x31) if v else UInt8(0x30))
 
 
 @export
@@ -1409,9 +1417,10 @@ def tk_desktop_menu_snapshot(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     if h == 0 or out_ptr == 0 or cap <= 0:
         return 0
     ref bar = _desk(h)[].menu_bar
-    var TAB = String("\t")
-    var NL = String("\n")
-    var text = String("")
+    # Bytes, appended once: the host polls this every tick, and
+    # ``text = text + …`` recopied the whole snapshot per field, on top of
+    # a deep copy of each menu.
+    var buf = List[UInt8]()
     # Emit visible menus in painted left-to-right order — same rank-sorted
     # sequence the terminal frontend's MenuBar uses (system first, then
     # rank-ordered left-aligned, then right-aligned at the end). The host
@@ -1419,24 +1428,31 @@ def tk_desktop_menu_snapshot(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     # to-last (rank 90) and the project menu rightmost (right_aligned).
     var order = bar._display_order_indices()
     for k in range(len(order)):
-        var mi = order[k]
-        var m = bar.menus[mi].copy()
-        text = text + String("M") + TAB + m.label + TAB \
-             + _b(m.visible) + TAB + _b(m.is_system) + TAB \
-             + _b(m.right_aligned) + NL
+        ref m = bar.menus[order[k]]
+        buf.append(UInt8(0x4D))  # 'M'
+        _snap_field(buf, m.label)
+        _snap_flag(buf, m.visible)
+        _snap_flag(buf, m.is_system)
+        _snap_flag(buf, m.right_aligned)
+        buf.append(UInt8(0x0A))
         for ii in range(len(m.items)):
-            var it = m.items[ii]
-            text = text + String("I") + TAB + it.label + TAB + it.action + TAB \
-                 + _b(it.is_separator) + TAB + _b(it.checkable) + TAB \
-                 + _b(it.checked) + TAB + it.shortcut + TAB \
-                 + String(Int(it.mark)) + TAB + it.icon + NL
-    var bytes = text.as_bytes()
-    var n = len(bytes)
+            ref it = m.items[ii]
+            buf.append(UInt8(0x49))  # 'I'
+            _snap_field(buf, it.label)
+            _snap_field(buf, it.action)
+            _snap_flag(buf, it.is_separator)
+            _snap_flag(buf, it.checkable)
+            _snap_flag(buf, it.checked)
+            _snap_field(buf, it.shortcut)
+            _snap_field(buf, String(Int(it.mark)))
+            _snap_field(buf, it.icon)
+            buf.append(UInt8(0x0A))
+    var n = len(buf)
     if n > cap:
         n = cap
     var op = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=out_ptr)
     for i in range(n):
-        op[unsafe_offset=i] = bytes[i]
+        op[unsafe_offset=i] = buf[i]
     return n
 
 
