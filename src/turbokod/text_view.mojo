@@ -1213,37 +1213,28 @@ struct TextLog(Copyable, Movable):
                 self.last_visual.append(new_rows[k])
         if len(self.lines) > self.max_lines:
             var drop = len(self.lines) - self.max_lines
-            var trimmed = List[String]()
-            var tattrs = List[Attr]()
-            var truns = List[List[ColorRun]]()
-            for k in range(drop, len(self.lines)):
-                trimmed.append(self.lines[k])
-                tattrs.append(self.line_attrs[k])
-                truns.append(self.line_runs[k].copy())
-            self.lines = trimmed^
-            self.line_attrs = tattrs^
-            self.line_runs = truns^
+            # In place: rebuilding the three lists (and a renumbered
+            # layout) copied the whole backlog for every line appended
+            # to a full log.
+            for _ in range(drop):
+                _ = self.lines.pop(0)
+                _ = self.line_attrs.pop(0)
+                _ = self.line_runs.pop(0)
             # Trim the layout cache symmetrically: drop visual rows for
-            # the dropped logical lines, renumber the survivors. Track
-            # how many visual rows were dropped so a manually-scrolled
-            # log keeps pointing at the same content (autoscroll users
-            # don't notice — paint recomputes ``first`` from
-            # ``len(last_visual)`` every frame).
+            # the dropped logical lines (they lead the list, which is in
+            # line order), renumber the survivors. Track how many visual
+            # rows were dropped so a manually-scrolled log keeps pointing
+            # at the same content (autoscroll users don't notice — paint
+            # recomputes ``first`` from ``len(last_visual)`` every frame).
             if self._layout_w >= 0:
-                var trimmed_layout = List[VisualLine]()
                 var dropped_rows = 0
+                while dropped_rows < len(self.last_visual) \
+                        and self.last_visual[dropped_rows].line_idx < drop:
+                    dropped_rows += 1
+                for _ in range(dropped_rows):
+                    _ = self.last_visual.pop(0)
                 for k in range(len(self.last_visual)):
-                    var vr = self.last_visual[k]
-                    if vr.line_idx < drop:
-                        dropped_rows += 1
-                        continue
-                    trimmed_layout.append(VisualLine(
-                        vr.line_idx - drop,
-                        vr.byte_start, vr.byte_end,
-                        vr.cell_start, vr.cell_count,
-                        vr.indent_cells,
-                    ))
-                self.last_visual = trimmed_layout^
+                    self.last_visual[k].line_idx -= drop
                 if not self.autoscroll:
                     self.scroll -= dropped_rows
                     if self.scroll < 0:
