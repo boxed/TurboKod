@@ -78,7 +78,8 @@ from .search_options import (
     SearchOptions, SearcherCache, default_search_options,
 )
 from .string_utils import (
-    byte_slice, char_width, codepoint_at, display_columns, is_ascii_ident_byte,
+    byte_slice, cells_between, char_width, codepoint_at, display_columns,
+    is_ascii_ident_byte,
     is_printable_text_key, is_space_cp, is_word_codepoint,
     leading_indent_bytes, past_empty_match, prev_codepoint_start, split_lines,
     split_lines_no_trailing,
@@ -488,17 +489,7 @@ def _seg_cell_offset(
     into a screen column."""
     if target_byte <= seg_start:
         return 0
-    var b = seg_start
-    var cells = 0
-    while b < target_byte and b < seg_end:
-        if Int(line.as_bytes()[b]) == 0x09:
-            cells += TAB_WIDTH - (cells % TAB_WIDTH)
-            b += 1
-            continue
-        var info = codepoint_at(line, b)
-        cells += char_width(info[0])
-        b += info[1]
-    return cells
+    return cells_between(line, seg_start, min(target_byte, seg_end))
 
 
 def _seg_byte_of_cell(

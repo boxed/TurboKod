@@ -661,26 +661,36 @@ def prev_codepoint_start(s: String, col: Int) -> Int:
     return c
 
 
+def cells_between(line: String, lo: Int, hi: Int) -> Int:
+    """Display columns spanned by ``line``'s bytes ``[lo, hi)``, starting
+    from column 0 at ``lo``: codepoints are walked summing ``char_width``
+    (emoji count two) and a tab advances to the next ``TAB_WIDTH``
+    boundary, as ``Canvas.put_text`` paints them. The one loop behind
+    every byte → cell conversion."""
+    var bytes = line.as_bytes()
+    var n = len(bytes)
+    var i = lo
+    var cells = 0
+    while i < hi and i < n:
+        if Int(bytes[i]) == 0x09:
+            cells += TAB_WIDTH - (cells % TAB_WIDTH)
+            i += 1
+            continue
+        var info = codepoint_at(line, i)
+        cells += char_width(info[0])
+        i += info[1]
+    return cells
+
+
 def utf8_cell_of_byte(line: String, byte_col: Int) -> Int:
-    """Cell column for byte offset ``byte_col`` in ``line``. Emoji advance
-    two cells (``char_width``); a tab advances to the next ``TAB_WIDTH``
-    boundary (matching ``Canvas.put_text``); past-EOL bytes consume one
+    """Cell column for byte offset ``byte_col`` in ``line``
+    (``cells_between`` from the start); past-EOL bytes consume one
     virtual cell each so cursors parked to the right of the last character
     stay distinguishable in vertical-movement bookkeeping."""
     if byte_col <= 0:
         return 0
-    var bytes = line.as_bytes()
-    var n = len(bytes)
-    var cell = 0
-    var i = 0
-    while i < n and i < byte_col:
-        if Int(bytes[i]) == 0x09:
-            cell += TAB_WIDTH - (cell % TAB_WIDTH)
-            i += 1
-            continue
-        var info = codepoint_at(line, i)
-        cell += char_width(info[0])
-        i += info[1]
+    var n = len(line.as_bytes())
+    var cell = cells_between(line, 0, byte_col)
     if byte_col > n:
         cell += byte_col - n
     return cell

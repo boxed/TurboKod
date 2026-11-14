@@ -39,7 +39,7 @@ from .events import (
 )
 from .geometry import Point, Rect
 from .string_utils import (
-    byte_slice, char_width, codepoint_at, is_word_codepoint,
+    byte_slice, cells_between, char_width, codepoint_at, is_word_codepoint,
     leading_indent_bytes, word_range_at, TAB_WIDTH,
 )
 
@@ -803,25 +803,6 @@ struct Selection(ImplicitlyCopyable, Movable):
 # --- paint helpers (shared by Editor and TextLog) -------------------------
 
 
-def _cells_for_bytes(line: String, lo: Int, hi: Int) -> Int:
-    """Display columns spanned by ``line``'s bytes ``[lo, hi)`` — walks
-    codepoints summing ``char_width`` so wide glyphs (emoji) count as two.
-    Used to find a color run's starting cell within a painted row."""
-    var bytes = line.as_bytes()
-    var n = len(bytes)
-    var i = lo
-    var cells = 0
-    while i < hi and i < n:
-        if Int(bytes[i]) == 0x09:
-            cells += TAB_WIDTH - (cells % TAB_WIDTH)
-            i += 1
-            continue
-        var dec = codepoint_at(line, i)
-        cells += char_width(dec[0])
-        i += dec[1]
-    return cells
-
-
 def paint_text_segments(
     mut canvas: Canvas,
     view: Rect,
@@ -887,7 +868,7 @@ def paint_text_segments(
                     rs = lo
                 if rce > hi:
                     rce = hi
-                var cellx = vrow.indent_cells + _cells_for_bytes(line, lo, rs)
+                var cellx = vrow.indent_cells + cells_between(line, lo, rs)
                 var sub = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=bytes.unsafe_ptr().unsafe_offset(rs), length=rce - rs)))
                 _ = painter.put_text(
                     canvas,
@@ -1555,16 +1536,8 @@ def _row_cell_offset(
     walk codepoints inside the segment until we reach the target."""
     if target_byte <= vrow.byte_start:
         return 0
-    var b = vrow.byte_start
-    var cells = 0
-    while b < target_byte and b < vrow.byte_end:
-        if Int(line.as_bytes()[b]) == 0x09:
-            cells += TAB_WIDTH - (cells % TAB_WIDTH)
-            b += 1
-            continue
-        var info = codepoint_at(line, b)
-        cells += char_width(info[0])
-        b += info[1]
-    return cells
+    return cells_between(
+        line, vrow.byte_start, min(target_byte, vrow.byte_end),
+    )
 
 
