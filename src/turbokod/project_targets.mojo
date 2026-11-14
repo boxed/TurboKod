@@ -49,6 +49,7 @@ re-saves through the dialog.
 from std.collections.list import List
 from std.collections.optional import Optional
 
+from .per_user_store import project_config_dir, project_config_path
 from .file_io import (
     join_path, list_directory, load_json_object, make_dir, read_file,
     stat_file, write_file,
@@ -128,17 +129,8 @@ struct ProjectTargets(Movable):
         return True
 
 
-def _targets_dir(project_root: String) -> String:
-    if len(project_root.as_bytes()) == 0:
-        return String("")
-    return join_path(project_root, TURBOKOD_DIR)
-
-
 def _targets_path(project_root: String) -> String:
-    var dir = _targets_dir(project_root)
-    if len(dir.as_bytes()) == 0:
-        return String("")
-    return join_path(dir, TARGETS_FILE)
+    return project_config_path(project_root, TARGETS_FILE)
 
 
 def _parse_target(node: JsonValue) -> RunTarget:
@@ -295,7 +287,7 @@ def write_all_targets(
     var path = _targets_path(project_root)
     if len(path.as_bytes()) == 0:
         return False
-    make_dir(_targets_dir(project_root))
+    make_dir(project_config_dir(project_root))
     var active_name = String("")
     if targets.has_active():
         active_name = targets.targets[targets.active].name
@@ -324,7 +316,7 @@ def save_project_targets(
     var path = _targets_path(project_root)
     if len(path.as_bytes()) == 0:
         return False
-    make_dir(_targets_dir(project_root))
+    make_dir(project_config_dir(project_root))
     var active_name = String("")
     if targets.has_active():
         active_name = targets.targets[targets.active].name

@@ -26,6 +26,7 @@ Missing file / malformed JSON / missing keys all degrade to an empty list
 
 from std.collections.list import List
 
+from .per_user_store import project_config_dir, project_config_path
 from .config import OnSaveAction
 from .file_io import join_path, load_json_array, make_dir, write_file
 from .json import (
@@ -35,7 +36,6 @@ from .json import (
 )
 
 
-comptime _TURBOKOD_DIR  = String(".turbokod")
 comptime _ON_SAVE_FILE   = String("on_save.json")
 
 
@@ -54,17 +54,8 @@ def on_save_equal(a: OnSaveAction, b: OnSaveAction) -> Bool:
     )
 
 
-def _on_save_dir(project_root: String) -> String:
-    if len(project_root.as_bytes()) == 0:
-        return String("")
-    return join_path(project_root, _TURBOKOD_DIR)
-
-
 def _on_save_path(project_root: String) -> String:
-    var dir = _on_save_dir(project_root)
-    if len(dir.as_bytes()) == 0:
-        return String("")
-    return join_path(dir, _ON_SAVE_FILE)
+    return project_config_path(project_root, _ON_SAVE_FILE)
 
 
 def load_project_on_save(project_root: String) -> List[OnSaveAction]:
@@ -103,7 +94,7 @@ def write_project_on_save(
     var path = _on_save_path(project_root)
     if len(path.as_bytes()) == 0:
         return False
-    make_dir(_on_save_dir(project_root))
+    make_dir(project_config_dir(project_root))
     var arr = json_array()
     for i in range(len(actions)):
         var act = actions[i].copy()

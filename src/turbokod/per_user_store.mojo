@@ -41,6 +41,23 @@ def per_user_dir(project_root: String) -> String:
     return join_path(d, current_username())
 
 
+def project_config_dir(project_root: String) -> String:
+    """``<project_root>/.turbokod`` — where the project's own (checked-in)
+    settings files live — or ``""`` for an empty root."""
+    if len(project_root.as_bytes()) == 0:
+        return String("")
+    return join_path(project_root, _DIR_PROJECT)
+
+
+def project_config_path(project_root: String, file_name: String) -> String:
+    """Full path to ``file_name`` in ``project_config_dir``, or ``""`` for
+    an empty root."""
+    var dir = project_config_dir(project_root)
+    if len(dir.as_bytes()) == 0:
+        return String("")
+    return join_path(dir, file_name)
+
+
 def per_user_path(project_root: String, file_name: String) -> String:
     """Full path to ``file_name`` inside the per-user dir, or ``""`` for an
     empty root."""
