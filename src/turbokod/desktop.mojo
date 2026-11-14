@@ -5267,8 +5267,14 @@ struct Desktop(Movable):
                     self._review_body_rect(screen)
                 # Hand the editor the live palette so its review paint pass
                 # can dim unchanged context lines in real RGB (theme-aware).
-                self.windows.windows[ridx].editor.review_palette = \
-                    self.active_theme.palette.copy()
+                # Refilled in place: a fresh 256-entry copy per frame
+                # otherwise.
+                ref pal = self.windows.windows[ridx].editor.review_palette
+                if len(pal) != len(self.active_theme.palette):
+                    pal = self.active_theme.palette.copy()
+                else:
+                    for pi in range(len(pal)):
+                        pal[pi] = self.active_theme.palette[pi]
                 self.windows.windows[ridx].paint(
                     canvas,
                     basename(self.windows.windows[ridx].editor.file_path),
