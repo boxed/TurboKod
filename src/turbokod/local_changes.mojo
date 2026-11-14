@@ -2088,6 +2088,9 @@ struct LocalChanges(Movable):
         self.root = String("")
         self.files = List[FileEntry]()
         self.file_rows = List[FileRow]()
+        # The last selected commit's whole ``git show``.
+        self._show_text = String("")
+        self._expanded_paths = List[String]()
         self.branches = List[GitBranch]()
         self.commits = List[GitCommit]()
         self.focus = _PANE_FILES
