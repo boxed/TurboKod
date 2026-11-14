@@ -1832,6 +1832,9 @@ struct Desktop(Movable):
     # as the session.
     var _view_states: List[StoredViewState]
     var _last_view_states_json: String
+    # Set by whatever changes ``_view_states``; the save path only encodes
+    # (a few hundred entries to JSON) when it is.
+    var _view_states_dirty: Bool
     # Change-detection cache for the per-user *untitled drafts* file
     # (``drafts.json``). Untitled buffers carry no path, so the session
     # store skips them; this captures their full content instead so a
@@ -2162,6 +2165,7 @@ struct Desktop(Movable):
         self._last_breakpoints_json = String("")
         self._view_states = List[StoredViewState]()
         self._last_view_states_json = String("")
+        self._view_states_dirty = True
         self._last_drafts_json = String("")
         self._drafts_key = String("")
         self._recent_files = List[String]()
@@ -6923,6 +6927,7 @@ struct Desktop(Movable):
         # reloads its own view_states.json fresh.
         self._view_states = List[StoredViewState]()
         self._last_view_states_json = String("")
+        self._view_states_dirty = True
         # Same for the untitled-drafts cache — the next project restores
         # its own drafts.json. Clearing project before dropping windows
         # (below) means ``_save_drafts_if_changed`` bails on its project
@@ -7371,6 +7376,7 @@ struct Desktop(Movable):
         # encoding changes, so a closed-then-reopened file lands back
         # at the saved scroll position.
         self._view_states = load_view_states(canonical)
+        self._view_states_dirty = True
         self._last_view_states_json = encode_view_states(
             canonical, self._view_states,
         )
@@ -7577,6 +7583,7 @@ struct Desktop(Movable):
             return
         var entry = self._view_states.pop(idx)
         self._view_states.append(entry^)
+        self._view_states_dirty = True
 
     def _trim_view_states(mut self):
         """Drop least-recently-used entries past ``_VIEW_STATES_MAX``.
@@ -7589,6 +7596,7 @@ struct Desktop(Movable):
         """
         while len(self._view_states) > _VIEW_STATES_MAX:
             _ = self._view_states.pop(0)
+            self._view_states_dirty = True
 
     def _capture_view_state_for_window(mut self, idx: Int):
         """Update ``_view_states`` from window ``idx``. Called for every
@@ -7608,24 +7616,24 @@ struct Desktop(Movable):
         var fp = self.windows.windows[idx].editor.file_path
         if len(fp.as_bytes()) == 0:
             return
+        ref ed = self.windows.windows[idx].editor
+        var row = ed.selections[0].row
+        var col = ed.selections[0].col
+        var sx = ed.scroll_x
+        var sy = ed.scroll_y
         var vs_idx = self._find_view_state(fp)
         if vs_idx >= 0:
-            self._view_states[vs_idx].cursor_row = \
-                self.windows.windows[idx].editor.selections[0].row
-            self._view_states[vs_idx].cursor_col = \
-                self.windows.windows[idx].editor.selections[0].col
-            self._view_states[vs_idx].scroll_x = \
-                self.windows.windows[idx].editor.scroll_x
-            self._view_states[vs_idx].scroll_y = \
-                self.windows.windows[idx].editor.scroll_y
+            ref vs = self._view_states[vs_idx]
+            if vs.cursor_row == row and vs.cursor_col == col \
+                    and vs.scroll_x == sx and vs.scroll_y == sy:
+                return
+            vs.cursor_row = row
+            vs.cursor_col = col
+            vs.scroll_x = sx
+            vs.scroll_y = sy
         else:
-            self._view_states.append(StoredViewState(
-                fp,
-                self.windows.windows[idx].editor.selections[0].row,
-                self.windows.windows[idx].editor.selections[0].col,
-                self.windows.windows[idx].editor.scroll_x,
-                self.windows.windows[idx].editor.scroll_y,
-            ))
+            self._view_states.append(StoredViewState(fp, row, col, sx, sy))
+        self._view_states_dirty = True
 
     def _refresh_view_states_from_windows(mut self):
         """Copy scroll + cursor off every file-backed editor window into
@@ -7648,13 +7656,19 @@ struct Desktop(Movable):
             return
         self._refresh_view_states_from_windows()
         self._trim_view_states()
+        # This runs every paint: encoding the whole list just to find it
+        # equal to the last write was most of an idle frame's allocations.
+        if not self._view_states_dirty:
+            return
         var encoded = encode_view_states(
             self.project.value(), self._view_states,
         )
         if encoded == self._last_view_states_json:
+            self._view_states_dirty = False
             return
         if save_view_states(self.project.value(), self._view_states):
             self._last_view_states_json = encoded
+            self._view_states_dirty = False
 
     def _save_session_if_changed(mut self):
         """Re-encode the current session and write it to disk only when
