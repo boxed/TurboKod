@@ -281,28 +281,8 @@ struct SymbolIndex(Movable):
 
     def reset(mut self, var root: String):
         """Drop everything and re-root. Called on project open/switch."""
+        self = Self()
         self.root = root^
-        self.blob = List[UInt8]()
-        self.blob.append(0)
-        self.ent_off = List[Int32]()
-        self.ent_len = List[Int32]()
-        self.ent_line = List[Int32]()
-        self.ent_col = List[Int32]()
-        self.ent_seg = List[Int32]()
-        self.ent_def = List[Bool]()
-        self.files = List[String]()
-        self.file_size = List[Int64]()
-        self.file_mtime_sec = List[Int64]()
-        self.file_mtime_nsec = List[Int64]()
-        self.file_prio_use = List[Int32]()
-        self.file_prio_def = List[Int32]()
-        self.file_seg = List[Int32]()
-        self._path_slots = List[Int32]()
-        self.segments = List[_Segment]()
-        self.dead_bytes = 0
-        self.pending = List[Int32]()
-        self.built = False
-        self.recheck = List[Int32]()
 
     def is_ready(self) -> Bool:
         """True once the initial build has finished and no revalidation
