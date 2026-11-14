@@ -209,6 +209,9 @@ struct MergeView(Movable):
         self.cancelled = False
         self.regions = List[MergeRegion]()
         self.states = List[ConflictState]()
+        # One row per line of the merged file: don't hold it until the
+        # next merge.
+        self._rows_cache = List[RenderRow]()
         self._rows_dirty = True
         self.conflict_count = 0
         self.current = 0
