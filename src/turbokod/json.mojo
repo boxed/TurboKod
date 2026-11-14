@@ -127,6 +127,24 @@ struct JsonValue(Copyable, Movable, Deinitable):
             return
         self.arr_v.append(value.copy())
 
+    def append_owned(mut self, var value: JsonValue):
+        """``append`` for a value the caller is done with: moved in, not
+        copied."""
+        if self.kind != JSON_ARRAY:
+            return
+        self.arr_v.append(value^)
+
+    def put_owned(mut self, var key: String, var value: JsonValue):
+        """``put`` for a value the caller is done with: moved in, not
+        copied."""
+        if self.kind != JSON_OBJECT:
+            return
+        for i in range(len(self.obj_v)):
+            if self.obj_v[i].key == key:
+                self.obj_v[i].value = value^
+                return
+        self.obj_v.append(JsonMember(key^, value^))
+
     def put(mut self, var key: String, value: JsonValue):
         if self.kind != JSON_OBJECT:
             return
@@ -323,7 +341,7 @@ def _encode(value: JsonValue, mut buf: List[UInt8]):
         for i in range(value.array_len()):
             if i > 0:
                 buf.append(UInt8(0x2C))  # ','
-            _encode(value.array_at(i), buf)
+            _encode(value.arr_v[i], buf)
         buf.append(UInt8(0x5D))  # ']'
         return
     if value.is_object():
@@ -388,13 +406,18 @@ def parse_json(s: String) raises -> JsonValue:
     var n = len(s.as_bytes())
     var pos = _skip_ws(s, 0)
     var parsed = _parse_value(s, pos)
-    var end = _skip_ws(s, parsed[1])
-    if end != n:
+    if _skip_ws(s, pos) != n:
         raise Error("trailing data after JSON document")
-    return parsed[0].copy()
+    return parsed^
 
 
-def _parse_value(text: String, pos: Int) raises -> Tuple[JsonValue, Int]:
+# The container parsers advance ``pos`` in place and return the value
+# itself, so a finished child is *moved* into its parent. Returning a
+# ``(value, pos)`` tuple forced a deep copy out of the tuple at every
+# level — a node at depth d was copied d times, and the document once more.
+
+
+def _parse_value(text: String, mut pos: Int) raises -> JsonValue:
     var bytes = text.as_bytes()
     if pos >= len(bytes):
         raise Error("unexpected end of input")
@@ -405,24 +428,31 @@ def _parse_value(text: String, pos: Int) raises -> Tuple[JsonValue, Int]:
         return _parse_array(text, pos)
     if c == 0x22:
         var sp = _parse_string(text, pos)
-        var sp_str = sp[0]
-        return (json_str(sp_str), sp[1])
+        pos = sp[1]
+        return json_str(sp[0])
     if c == 0x74 or c == 0x66:
-        return _parse_bool(text, pos)
+        var r = _parse_bool(text, pos)
+        pos = r[1]
+        return r[0].copy()
     if c == 0x6E:
-        return _parse_null(text, pos)
+        var r = _parse_null(text, pos)
+        pos = r[1]
+        return r[0].copy()
     if c == 0x2D or (0x30 <= c and c <= 0x39):
-        return _parse_number(text, pos)
+        var r = _parse_number(text, pos)
+        pos = r[1]
+        return r[0].copy()
     raise Error("unexpected byte starting JSON value")
 
 
-def _parse_object(text: String, pos: Int) raises -> Tuple[JsonValue, Int]:
+def _parse_object(text: String, mut pos: Int) raises -> JsonValue:
     var bytes = text.as_bytes()
     var p = pos + 1
     var obj = json_object()
     p = _skip_ws(text, p)
     if p < len(bytes) and bytes[p] == 0x7D:
-        return (obj^, p + 1)
+        pos = p + 1
+        return obj^
     while True:
         p = _skip_ws(text, p)
         if p >= len(bytes) or bytes[p] != 0x22:
@@ -434,38 +464,41 @@ def _parse_object(text: String, pos: Int) raises -> Tuple[JsonValue, Int]:
             raise Error("expected ':' after object key")
         p += 1
         p = _skip_ws(text, p)
-        var v_pair = _parse_value(text, p)
-        obj.put(key^, v_pair[0])
-        p = _skip_ws(text, v_pair[1])
+        var v = _parse_value(text, p)
+        obj.put_owned(key^, v^)
+        p = _skip_ws(text, p)
         if p >= len(bytes):
             raise Error("unterminated object")
         if bytes[p] == 0x2C:
             p += 1
             continue
         if bytes[p] == 0x7D:
-            return (obj^, p + 1)
+            pos = p + 1
+            return obj^
         raise Error("expected ',' or '}' in object")
 
 
-def _parse_array(text: String, pos: Int) raises -> Tuple[JsonValue, Int]:
+def _parse_array(text: String, mut pos: Int) raises -> JsonValue:
     var bytes = text.as_bytes()
     var p = pos + 1
     var arr = json_array()
     p = _skip_ws(text, p)
     if p < len(bytes) and bytes[p] == 0x5D:
-        return (arr^, p + 1)
+        pos = p + 1
+        return arr^
     while True:
         p = _skip_ws(text, p)
-        var v_pair = _parse_value(text, p)
-        arr.append(v_pair[0])
-        p = _skip_ws(text, v_pair[1])
+        var v = _parse_value(text, p)
+        arr.append_owned(v^)
+        p = _skip_ws(text, p)
         if p >= len(bytes):
             raise Error("unterminated array")
         if bytes[p] == 0x2C:
             p += 1
             continue
         if bytes[p] == 0x5D:
-            return (arr^, p + 1)
+            pos = p + 1
+            return arr^
         raise Error("expected ',' or ']' in array")
 
 
