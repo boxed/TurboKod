@@ -306,6 +306,8 @@ struct ProjectFind(Movable):
             self.submitted = False
             self.send_to_panel = False
             self.do_replace = False
+            # ``close`` dropped the previewed file; load it again.
+            self._refresh_context_for_selection()
             return
         self.root = root^
         self.query = TextField()
@@ -378,6 +380,11 @@ struct ProjectFind(Movable):
         self.toggle_word.hovered = False
         self.toggle_regex.hovered = False
         self.ctxsel.clear()
+        # The previewed file (up to 4 MB of lines plus its highlights) is
+        # re-read on the next open; the matches are what resuming needs.
+        self._context_path = String("")
+        self._context_lines = List[String]()
+        self._context_highlights = List[Highlight]()
 
     def _current_options(self) -> SearchOptions:
         return SearchOptions(
