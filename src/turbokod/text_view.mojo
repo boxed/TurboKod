@@ -877,7 +877,7 @@ def paint_text_segments(
         )
         # Overlay SGR color runs falling on this row, on top of the base.
         if vrow.line_idx < len(line_runs) and lo < hi:
-            var lr = line_runs[vrow.line_idx].copy()
+            ref lr = line_runs[vrow.line_idx]
             for ri in range(len(lr)):
                 var rs = lr[ri].start
                 var rce = lr[ri].end
@@ -1117,7 +1117,7 @@ struct TextLog(Copyable, Movable):
         # a ``\\x1b[0m`` returns to (say) the stderr red rather than gray.
         var parsed = parse_sgr(text, resolved)
         var clean = parsed[0]
-        var runs = parsed[1].copy()
+        ref runs = parsed[1]
         var b = clean.as_bytes()
         if len(b) == 0:
             # An all-escape chunk (e.g. a lone ``\\x1b[2K``) cleans to
