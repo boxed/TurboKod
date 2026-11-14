@@ -1,0 +1,17 @@
+{
+  "_comment": "Pop-ups from a server shared by two windows (folder 0 opened first, folder 1 joined). On a didOpen it shows one message naming no project and one naming folder 1's path, then asks two questions the same way. Unnamed messages go to every window, unnamed requests to the window the user is working in; anything naming a project goes to that project's window only.",
+  "position_encoding": "utf-8",
+  "capabilities": {
+    "workspace": {
+      "workspaceFolders": {"supported": true, "changeNotifications": true}
+    }
+  },
+  "on_did_open": [
+    {"method": "window/showMessage", "params": {"type": 3, "message": "Indexing finished"}},
+    {"method": "window/showMessage", "params": {"type": 1, "message": "Invalid config in $FOLDERPATH1/pyproject.toml."}}
+  ],
+  "server_requests": [
+    {"method": "window/showMessageRequest", "params": {"type": 2, "message": "Reload $FOLDERPATH1 after the config change?", "actions": [{"title": "Reload"}]}},
+    {"method": "window/showMessageRequest", "params": {"type": 2, "message": "Restart the server?", "actions": [{"title": "Restart"}]}}
+  ]
+}

@@ -338,6 +338,21 @@ for both:
 ## Case-insensitive search
 
 Anything that compares bytes ignoring case goes through **`case_fold.mojo`** — branchless ASCII folding (`(c - 0x41) <u 26`, `c | is_upper << 5`) with explicit 32-byte SIMD. Don't hand-inline `if 0x41 <= c and c <= 0x5A: c += 0x20` again; that idiom used to be copy-pasted in half a dozen places and each copy sat *inside* an innermost compare loop.
+### One server for every window
+
+In the native app windows share language servers: `Desktop.lsp_pool` (one
+`LspPool` per process, from the host) maps language + argv to a live
+`LspChannel` (`lsp_shared.mojo`), and a second window's `LspManager` joins it
+as a workspace folder instead of spawning, if the server supports
+`workspaceFolders.changeNotifications`. Each manager stays a per-window
+*session* reading its own inbox, so **every transport call goes through
+`_send_request` / `_send_notification` / `_poll` / `_reply`** — never
+`self.client` directly, which is the private transport and inert on a shared
+one. A server request every window must apply (`client/registerCapability`,
+`*/refresh`) reaches all of them, and only one answers (`_reply_muted`).
+Without a pool (terminal frontends, tests) nothing changes. Full details in
+[docs/shared-lsp.md](docs/shared-lsp.md).
+
 
 Find and Replace (in-file and project-wide) go through **`LineSearcher`** in `search_options.mojo`, which decides **per line** whether the SIMD scan is provably equivalent to libonig's `(?i)` (needle and line both pure ASCII) or whether that line needs the regex for Unicode case pairs. Never bypass it by calling `build_search_regex` for a find/replace loop — that's the slow path with none of the gating. Adding a new search site means constructing a `LineSearcher` and looping on `search` / `rsearch` / `search_span`.
 

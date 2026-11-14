@@ -33,6 +33,9 @@ from .file_io import basename, join_path, parent_path, read_file, stat_file
 from .lsp_position import (
     LineTable, POS_UTF8, encoding_from_name, encoding_name,
 )
+from .lsp_shared import (
+    channel_at, free_channel, new_channel, pool_at, server_key,
+)
 from .lsp import (
     LSP_NOTIFICATION, LSP_REQUEST, LSP_RESPONSE, LspClient, LspIncoming,
     LspProcess, lsp_initialize_params,
@@ -700,6 +703,17 @@ struct LspManager(Copyable, Movable):
     var _close_stage: UInt8
     var _close_deadline: Int
     var _close_shutdown_id: String
+    # Shared transport (``lsp_shared.mojo``). ``_channel`` is the address of
+    # the ``LspChannel`` this manager is a session on, 0 for the private
+    # ``client`` (no pool, or a server that can't share). ``_join_pending``:
+    # joined a channel whose ``initialize`` result hasn't arrived yet.
+    # ``_reply_muted``: the message being handled is a replay another session
+    # answers, so this one must not reply.
+    var _channel: Int
+    var _session: Int
+    var _pool: Int
+    var _join_pending: Bool
+    var _reply_muted: Bool
 
     # Outstanding request ids — strings so they round-trip verbatim
     # whether they ride as JSON ints or JSON strings on the wire (we
@@ -1115,6 +1129,11 @@ struct LspManager(Copyable, Movable):
         self._refresh_diagnostics = False
         self._close_stage = _CLOSE_IDLE
         self._close_deadline = 0
+        self._channel = 0
+        self._session = 0
+        self._pool = 0
+        self._join_pending = False
+        self._reply_muted = False
         self._close_shutdown_id = String("")
         self._init_id = String("")
         self._inflight_def_id = String("")
@@ -1316,6 +1335,11 @@ struct LspManager(Copyable, Movable):
         self._refresh_diagnostics = False
         self._close_stage = _CLOSE_IDLE
         self._close_deadline = 0
+        self._channel = 0
+        self._session = 0
+        self._pool = 0
+        self._join_pending = False
+        self._reply_muted = False
         self._close_shutdown_id = String("")
         self._init_id = String("")
         self._inflight_def_id = String("")
@@ -1657,6 +1681,7 @@ struct LspManager(Copyable, Movable):
 
     def start_with(
         mut self, language_id: String, argv: List[String], root_path: String,
+        pool: Int = 0, fresh: Bool = False,
     ):
         """Generic spawn: ``argv`` is the server command, ``language_id``
         is what we tag every ``didOpen``'d document with.
@@ -1666,11 +1691,19 @@ struct LspManager(Copyable, Movable):
         that want a multi-binary fallback (e.g. ``start_python``) should
         check ``which()`` themselves before calling and only invoke this
         once they've picked an actually-installed binary.
+
+        ``pool`` (an ``LspPool`` address, 0 = none) makes the server
+        shareable: if another window already runs this exact server, join
+        it as a second workspace folder instead of spawning (see
+        ``lsp_shared.mojo``); otherwise spawn and offer it to the next one.
+        ``fresh`` spawns even when one is running — LSP ▸ Restart, where
+        joining the server being restarted would restart nothing.
         """
         if self.state != _STATE_NOT_STARTED:
             return
         self._language_id = language_id
         self._argv = argv.copy()
+        self._pool = pool
         # Always give the server a workspace root: a project dir if the
         # host has one open, otherwise the editor's own cwd. Pyright and
         # friends key module resolution off ``rootUri``/``workspaceFolders``
@@ -1680,8 +1713,24 @@ struct LspManager(Copyable, Movable):
             if len(root_path.as_bytes()) > 0 else getcwd_path()
         self._root_uri = _path_to_uri(resolved_root) \
             if len(resolved_root.as_bytes()) > 0 else String("")
+        if pool != 0 and not fresh:
+            var shared = pool_at(pool)[].find(server_key(language_id, argv))
+            if shared != 0 and not channel_at(shared)[].dead:
+                self._channel = shared
+                self._session = channel_at(shared)[].join(self._root_uri)
+                self._join_pending = True
+                self.state = _STATE_INITIALIZING
+                return
+        self._spawn_and_initialize(resolved_root)
+
+    def _spawn_and_initialize(mut self, resolved_root: String):
+        """Spawn the server and send ``initialize``: onto a new shared
+        channel when there is a pool, else into the private ``client``."""
+        var argv = self._argv.copy()
+        var language_id = self._language_id
+        var client: LspClient
         try:
-            self.client = LspClient.spawn(argv, resolved_root)
+            client = LspClient.spawn(argv, resolved_root)
         except e:
             self.state = _STATE_FAILED
             self.failure_reason = String("spawn failed: ") + String(e)
@@ -1697,11 +1746,23 @@ struct LspManager(Copyable, Movable):
                 trace_path.unsafe_ptr(), Int32(0o644),
             )
             if Int(tfd) >= 0:
-                self.client.process.own_trace_fd(tfd)
+                client.process.own_trace_fd(tfd)
                 var hdr = String("session start argv:")
                 for k in range(len(argv)):
                     hdr = hdr + String(" ") + argv[k]
-                self.client.process.trace(hdr)
+                client.process.trace(hdr)
+        if self._pool != 0:
+            var key = server_key(language_id, argv)
+            var addr = new_channel(client^, key)
+            if addr == 0:
+                self.state = _STATE_FAILED
+                self.failure_reason = String("out of memory")
+                return
+            self._channel = addr
+            self._session = channel_at(addr)[].join(self._root_uri)
+            pool_at(self._pool)[].add(key, addr)
+        else:
+            self.client = client^
         try:
             var ws_name = basename(resolved_root) \
                 if len(resolved_root.as_bytes()) > 0 else String("")
@@ -1809,7 +1870,14 @@ struct LspManager(Copyable, Movable):
             var u = td.value().object_get(String("uri"))
             if u and u.value().is_string():
                 uri = u.value().as_str()
-        var id = self.client.send_request(method, self._to_wire(params.copy()))
+        var wire = self._to_wire(params.copy())
+        var id: String
+        if self._channel != 0:
+            id = channel_at(self._channel)[].send_request(
+                self._session, method, wire,
+            )
+        else:
+            id = self.client.send_request(method, wire)
         # Only a non-utf-8 encoding remaps responses (see the dispatch's
         # ``_take_req_uri``), so under utf-8 there's nothing to remember.
         if self._position_enc != POS_UTF8 \
@@ -1835,7 +1903,115 @@ struct LspManager(Copyable, Movable):
 
     def _send_notification(mut self, method: String, params: JsonValue) raises:
         """Outbound-notification twin of ``_send_request``."""
-        self.client.send_notification(method, self._to_wire(params.copy()))
+        var wire = self._to_wire(params.copy())
+        if self._channel != 0:
+            channel_at(self._channel)[].send_notification(
+                self._session, method, wire,
+            )
+        else:
+            self.client.send_notification(method, wire)
+
+    # --- transport: the private client, or a session on a shared channel --
+
+    def is_shared(self) -> Bool:
+        """True while this manager is a session on a shared channel."""
+        return self._channel != 0
+
+    def _poll(mut self) raises -> Optional[LspIncoming]:
+        """The next message for this manager. On a shared channel that is
+        this session's inbox, and a replay (``_reply_muted``) is one some
+        other session answers."""
+        if self._channel == 0:
+            self._reply_muted = False
+            return self.client.poll(Int32(0))
+        var got = channel_at(self._channel)[].pop(self._session)
+        self._reply_muted = got[1]
+        return got[0].copy()
+
+    def _reply(mut self, id: JsonValue, result: JsonValue) raises:
+        if self._reply_muted:
+            return
+        if self._channel != 0:
+            channel_at(self._channel)[].client.send_response(id, result)
+        else:
+            self.client.send_response(id, result)
+
+    def _reply_error(mut self, id: JsonValue, code: Int, message: String) raises:
+        if self._reply_muted:
+            return
+        if self._channel != 0:
+            channel_at(self._channel)[].client.send_error(id, code, message)
+        else:
+            self.client.send_error(id, code, message)
+
+    def _transport_alive(self) -> Bool:
+        if self._channel != 0:
+            var ch = channel_at(self._channel)
+            return not ch[].dead and ch[].client.process.alive \
+                and ch[].client.process.pid > 0
+        return self.client.process.alive and self.client.process.pid > 0
+
+    def _pump_writes(mut self):
+        if self._channel != 0:
+            channel_at(self._channel)[].client.process.pump_writes()
+        else:
+            self.client.process.pump_writes()
+
+    def _write_overflowed(self) -> Bool:
+        if self._channel != 0:
+            return channel_at(self._channel)[].client.process.write_overflowed()
+        return self.client.process.write_overflowed()
+
+    def _reaped(mut self) -> Bool:
+        """True once the server process has exited (every session of a
+        shared one sees it, not just whichever reaped it)."""
+        if self._channel != 0:
+            return not channel_at(self._channel)[].check_alive()
+        return self.client.process.try_reap()
+
+    def _complete_join(mut self):
+        """Finish joining a shared channel once its ``initialize`` result
+        is in: add this root as a workspace folder and adopt the result
+        (capabilities, position encoding) as if this session had asked.
+        A server that can't add folders, or one that died, sends this
+        manager off to spawn its own."""
+        var ch = channel_at(self._channel)
+        if not ch[].check_alive():
+            self._fall_back_to_private()
+            return
+        if not ch[].init_result:
+            return
+        if not ch[].supports_folder_changes():
+            self._fall_back_to_private()
+            return
+        var init = ch[].init_result.value().copy()
+        try:
+            ch[].change_folders(self._root_uri, String(""))
+        except e:
+            self.state = _STATE_FAILED
+            self.failure_reason = String("joining shared server failed: ") \
+                + String(e)
+            return
+        self._join_pending = False
+        # Sends ``initialized`` (the channel drops it — the first session
+        # sent it) and the didOpens queued while waiting.
+        self._on_initialize_response(init)
+        # Capabilities registered before we joined.
+        var regs = ch[].registrations()
+        self._reply_muted = True
+        for i in range(len(regs)):
+            self._handle_server_request(regs[i])
+        self._reply_muted = False
+
+    def _fall_back_to_private(mut self):
+        _ = channel_at(self._channel)[].leave(self._session)
+        self._channel = 0
+        self._session = 0
+        self._join_pending = False
+        var pool = self._pool
+        self._pool = 0
+        self._spawn_and_initialize(_uri_to_path(self._root_uri))
+        self._pool = pool
 
     def shutdown(mut self):
         """Close the session, blocking until the handshake finishes.
@@ -1871,7 +2047,19 @@ struct LspManager(Copyable, Movable):
             return
         if self._close_stage != _CLOSE_IDLE:
             return   # already closing
-        if not self.client.process.alive or self.client.process.pid <= 0:
+        if self._channel != 0:
+            var ch = channel_at(self._channel)
+            if ch[].session_count() > 1:
+                # Other windows still use this server: hand back our
+                # folder and documents, and leave it running.
+                self._leave_shared_channel()
+                self._close_stage = _CLOSE_DONE
+                return
+            # The last session closes it for real — but stop offering it
+            # first, so nobody joins a server that is saying goodbye.
+            if self._pool != 0:
+                pool_at(self._pool)[].forget(self._channel)
+        if not self._transport_alive():
             self._close_stage = _CLOSE_DONE
             return
         var shutdown_id: String
@@ -1899,7 +2087,7 @@ struct LspManager(Copyable, Movable):
         often doesn't extend it past the next call."""
         if self._close_stage == _CLOSE_DONE or self._close_stage == _CLOSE_IDLE:
             return True
-        if self.client.process.try_reap():
+        if self._reaped():
             self._close_stage = _CLOSE_DONE
             return True
         var now = monotonic_ms()
@@ -1911,7 +2099,7 @@ struct LspManager(Copyable, Movable):
             for _ in range(64):
                 var maybe: Optional[LspIncoming]
                 try:
-                    maybe = self.client.poll(Int32(0))
+                    maybe = self._poll()
                 except:
                     self._close_stage = _CLOSE_DONE
                     return True
@@ -1951,11 +2139,50 @@ struct LspManager(Copyable, Movable):
         when the child already exited cleanly — a graceful exit clears
         ``alive``, so the kill and reap steps are skipped and only the fd
         cleanup runs. A child that ignored ``exit`` gets its SIGTERM here."""
-        self.client.terminate()
+        if self._channel != 0:
+            var addr = self._channel
+            channel_at(addr)[].client.terminate()
+            _ = channel_at(addr)[].leave(self._session)
+            if self._pool != 0:
+                pool_at(self._pool)[].forget(addr)
+            free_channel(addr)
+            self._channel = 0
+            self._session = 0
+            self._join_pending = False
+        else:
+            self.client.terminate()
         self.state = _STATE_NOT_STARTED
         self._close_stage = _CLOSE_IDLE
         self._close_shutdown_id = String("")
         self._close_deadline = 0
+
+    def _leave_shared_channel(mut self):
+        """Detach from a shared channel others still use: close our
+        documents and remove our folder (when the server got as far as
+        knowing about either), then drop the session."""
+        var ch = channel_at(self._channel)
+        if not self._join_pending and Bool(ch[].init_result) \
+                and ch[].check_alive():
+            for k in range(len(self._doc_paths)):
+                var td = json_object()
+                td.put(String("uri"), json_str(_path_to_uri(self._doc_paths[k])))
+                var params = json_object()
+                params.put(String("textDocument"), td)
+                try:
+                    self._send_notification(
+                        String("textDocument/didClose"), params,
+                    )
+                except:
+                    break
+            try:
+                ch[].change_folders(String(""), self._root_uri)
+            except:
+                pass
+        _ = ch[].leave(self._session)
+        self._channel = 0
+        self._session = 0
+        self._join_pending = False
+        self.state = _STATE_NOT_STARTED
 
     def is_closing(self) -> Bool:
         """True while a close handshake is in progress."""
@@ -2725,7 +2952,33 @@ struct LspManager(Copyable, Movable):
         var out = self._resolved_ws_symbols^
         self._resolved_ws_symbols = List[WorkspaceSymbolItem]()
         self._has_resolved_ws_symbols = False
+        if self._channel != 0:
+            return self._own_workspace_symbols(out^)
         return out^
+
+    def _own_workspace_symbols(
+        self, var items: List[WorkspaceSymbolItem],
+    ) -> List[WorkspaceSymbolItem]:
+        """A shared server searches every window's workspace folder at once,
+        so drop the symbols that belong to *another* window's project: those
+        whose innermost containing root isn't ours. Symbols under no root at
+        all — the stdlib, site-packages outside the project — stay."""
+        var roots = channel_at(self._channel)[].roots()
+        var root_paths = List[String]()
+        for i in range(len(roots)):
+            root_paths.append(_uri_to_path(roots[i]))
+        var own = _uri_to_path(self._root_uri)
+        var kept = List[WorkspaceSymbolItem]()
+        for k in range(len(items)):
+            var owner = String("")
+            for i in range(len(root_paths)):
+                var r = root_paths[i]
+                if (items[k].path == r or items[k].path.startswith(r + String("/"))) \
+                        and len(r.as_bytes()) > len(owner.as_bytes()):
+                    owner = r
+            if len(owner.as_bytes()) == 0 or owner == own:
+                kept.append(items[k])
+        return kept^
 
     def _send_cancel(mut self, var request_id: String, context: String):
         """Best-effort ``$/cancelRequest`` for ``request_id``. The cancel is
@@ -4075,13 +4328,17 @@ struct LspManager(Copyable, Movable):
         # flushes until the next ``write_message`` call, which may be
         # far enough in the future that the server has already given
         # up.
-        self.client.process.pump_writes()
+        if self._join_pending:
+            self._complete_join()
+            if self._join_pending or self.state == _STATE_FAILED:
+                return Optional[DefinitionResolved]()
+        self._pump_writes()
         self._expire_library_probes()
         # If the outbound queue overflowed, the server isn't draining
         # its stdin and we've lost framing alignment — there's no
         # recovery short of restarting. Latch FAILED so the host
         # surfaces the state and stops sending more.
-        if self.client.process.write_overflowed():
+        if self._write_overflowed():
             self.state = _STATE_FAILED
             self.failure_reason = String(
                 "outbound queue overflowed (server not reading stdin)",
@@ -4106,7 +4363,7 @@ struct LspManager(Copyable, Movable):
         # carried. Without this the manager stays in INITIALIZING
         # forever and the user sees an indefinite "starting…" with no
         # explanation. Mirror of the DAP manager's crash-detect.
-        if self.client.process.try_reap():
+        if self._reaped():
             # One last drain — between the previous absorb and the
             # reap the child may have flushed its final stderr line.
             self._absorb_stderr()
@@ -4137,7 +4394,7 @@ struct LspManager(Copyable, Movable):
             i += 1
             var maybe: Optional[LspIncoming]
             try:
-                maybe = self.client.poll(Int32(0))
+                maybe = self._poll()
             except:
                 return resolved
             if not maybe:
@@ -4727,6 +4984,11 @@ struct LspManager(Copyable, Movable):
         append it to the rolling capture. Bounded at 16 KB so a chatty
         server can't blow up our memory; once at the cap, new bytes are
         dropped (the head usually has the actionable diagnostic)."""
+        if self._channel != 0:
+            var ch = channel_at(self._channel)
+            ch[].drain_stderr()
+            self._stderr_log = ch[].stderr_log
+            return
         var chunk = self.client.process.drain_stderr()
         if len(chunk.as_bytes()) == 0:
             return
@@ -4968,7 +5230,7 @@ struct LspManager(Copyable, Movable):
             )
             result = item^
         try:
-            self.client.send_response(id, result)
+            self._reply(id, result)
         except e:
             print("lsp: showMessageRequest response:", String(e))
         self._msgreq_pending = False
@@ -5108,7 +5370,7 @@ struct LspManager(Copyable, Movable):
                     String("← server request workspace/configuration id=")
                     + id_label + String(" items=") + String(n),
                 )
-                self.client.send_response(id, result)
+                self._reply(id, result)
                 return
             if method == String("client/registerCapability"):
                 # Merge each registration into the cached capabilities so
@@ -5144,7 +5406,7 @@ struct LspManager(Copyable, Movable):
                     String("← server request client/registerCapability id=")
                     + id_label + String(" merged=") + String(merged),
                 )
-                self.client.send_response(id, json_null())
+                self._reply(id, json_null())
                 return
             if method == String("client/unregisterCapability"):
                 # Mirror of the register path: write ``false`` for each
@@ -5170,7 +5432,7 @@ struct LspManager(Copyable, Movable):
                     String("← server request client/unregisterCapability id=")
                     + id_label + String(" (removed)"),
                 )
-                self.client.send_response(id, json_null())
+                self._reply(id, json_null())
                 return
             if method == String("window/workDoneProgress/create"):
                 # Acknowledge with success. We don't track the progress
@@ -5180,7 +5442,7 @@ struct LspManager(Copyable, Movable):
                     String("← server request ") + method
                     + String(" id=") + id_label + String(" (acked)"),
                 )
-                self.client.send_response(id, json_null())
+                self._reply(id, json_null())
                 return
             if method == String("workspace/applyEdit"):
                 # Parse the WorkspaceEdit and park it for the host to apply
@@ -5203,7 +5465,7 @@ struct LspManager(Copyable, Movable):
                     String("← server request workspace/applyEdit id=")
                     + id_label + String(" files=") + String(edit_count),
                 )
-                self.client.send_response(id, resp)
+                self._reply(id, resp)
                 return
             if method == String("window/showMessageRequest"):
                 # Park the message + action titles + request id for a modal;
@@ -5233,7 +5495,7 @@ struct LspManager(Copyable, Movable):
                         self._server_message = self._language_id \
                             + String(": ") + rmsg
                         self._has_server_message = True
-                    self.client.send_response(id, json_null())
+                    self._reply(id, json_null())
                     return
                 self._msgreq_id = Optional[JsonValue](id.copy())
                 self._msgreq_message = rmsg^
@@ -5262,7 +5524,7 @@ struct LspManager(Copyable, Movable):
                     String("← server request workspace/workspaceFolders id=")
                     + id_label,
                 )
-                self.client.send_response(id, folders)
+                self._reply(id, folders)
                 return
             if method == String("window/showDocument"):
                 # Park the open request (file → editor, or external URL) for
@@ -5296,7 +5558,7 @@ struct LspManager(Copyable, Movable):
                     String("← server request window/showDocument id=")
                     + id_label + String(" external=") + String(external),
                 )
-                self.client.send_response(id, ok)
+                self._reply(id, ok)
                 return
             if method == String("workspace/codeLens/refresh") \
                     or method == String("workspace/inlayHint/refresh") \
@@ -5316,7 +5578,7 @@ struct LspManager(Copyable, Movable):
                     String("← server request ") + method
                     + String(" id=") + id_label + String(" (queued refresh)"),
                 )
-                self.client.send_response(id, json_null())
+                self._reply(id, json_null())
                 return
             if method == String("workspace/diagnostic/refresh"):
                 # Same, for the pull-diagnostics model. Clearing
@@ -5331,7 +5593,7 @@ struct LspManager(Copyable, Movable):
                     String("← server request ") + method
                     + String(" id=") + id_label + String(" (re-arm pull)"),
                 )
-                self.client.send_response(id, json_null())
+                self._reply(id, json_null())
                 return
             # Unknown method: MethodNotFound (-32601) so the server
             # stops waiting.
@@ -5340,7 +5602,7 @@ struct LspManager(Copyable, Movable):
                 + String(" id=") + id_label
                 + String(" (MethodNotFound)"),
             )
-            self.client.send_error(
+            self._reply_error(
                 id, -32601,
                 String("method not implemented by turbokod: ") + method,
             )

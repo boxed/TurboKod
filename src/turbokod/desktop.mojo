@@ -1347,6 +1347,14 @@ struct Desktop(Movable):
     var lsp_languages: List[String]
     # Managers whose session is being closed but whose child hasn't exited
     # yet. Retiring a server (Restart, or a settings change to its argv) and
+    # The host's process-wide ``LspPool`` (``lsp_shared.mojo``), 0 for none.
+    # The native app gives every window the same one so windows share a
+    # server that supports multi-root instead of each spawning a copy; the
+    # terminal frontends have one window and leave it 0.
+    var lsp_pool: Int
+    # Set across LSP ▸ Restart's respawn: start a new server rather than
+    # joining the running shared one (which is the one being restarted).
+    var _lsp_spawn_fresh: Bool
     # closing a window both used to block the UI thread on the LSP
     # ``shutdown`` handshake; the manager moves here instead and
     # ``_drain_closing_lsp`` finishes it off the per-frame tick.
@@ -2029,6 +2037,8 @@ struct Desktop(Movable):
         self._closing_lsp = List[LspManager]()
         self.doc_specs = built_in_docsets()
         self.doc_stores = List[DocStore]()
+        self.lsp_pool = 0
+        self._lsp_spawn_fresh = False
         self.doc_languages = List[String]()
         self.doc_pick = DocPick()
         self._doc_install_lang = String("")
@@ -5959,7 +5969,9 @@ struct Desktop(Movable):
         if self.project:
             root = self.project.value()
         var manager = LspManager()
-        manager.start_with(lang, argv, root)
+        manager.start_with(
+            lang, argv, root, pool=self.lsp_pool, fresh=self._lsp_spawn_fresh,
+        )
         self.lsp_managers.append(manager^)
         self.lsp_languages.append(lang)
         return len(self.lsp_managers) - 1
@@ -18518,7 +18530,9 @@ struct Desktop(Movable):
         for i in range(len(self.windows.windows)):
             if not self.windows.windows[i].is_editor:
                 continue
+        self._lsp_spawn_fresh = True
             var req_opt = self.windows.windows[i] \
+        self._lsp_spawn_fresh = False
                 .editor.consume_breakpoint_menu()
             if not req_opt:
                 continue

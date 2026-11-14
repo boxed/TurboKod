@@ -62,12 +62,16 @@ implement a capability does.
 
 import json
 import os
+import re
 import sys
 import time
 
 _scenario = {}
 _log_path = None
 _last_uri = None
+# Workspace folder URIs in the order the client named them: ``initialize``'s
+# ``workspaceFolders``, then each ``didChangeWorkspaceFolders`` addition.
+_folders = []
 
 
 def _subst(value):
@@ -77,6 +81,17 @@ def _subst(value):
     the URI it needs to return in a ``Location`` or ``publishDiagnostics``.
     """
     if isinstance(value, str):
+        # ``$FOLDER<n>`` → the n-th workspace folder's URI and
+        # ``$FOLDERPATH<n>`` → its path, anywhere in a string, so a
+        # multi-root fixture can name a file in a given folder — or mention
+        # the folder in a message, the way real servers print paths.
+        def folder(m):
+            n = int(m.group(2))
+            if n >= len(_folders):
+                return m.group(0)
+            uri = _folders[n]
+            return uri[len("file://"):] if m.group(1) == "FOLDERPATH" else uri
+        value = re.sub(r"\$(FOLDERPATH|FOLDER)(\d)", folder, value)
         return _last_uri if value == "$SELF" and _last_uri else value
     if isinstance(value, list):
         return [_subst(v) for v in value]
@@ -251,7 +266,7 @@ def _answer(req_id, method):
 
 
 def main():
-    global _scenario, _log_path, _last_uri
+    global _scenario, _log_path, _last_uri, _folders
     # argv first, env second. The client spawns children with an *allowlist*
     # envp (``_build_envp_from_parent`` in lsp.mojo), so a test-only env var
     # would silently not arrive — argv always does.
@@ -277,7 +292,13 @@ def main():
         method = msg.get("method")
         req_id = msg.get("id")
         if method == "initialize":
+            for f in (msg.get("params") or {}).get("workspaceFolders") or []:
+                _folders.append(f["uri"])
             _send_result(req_id, _initialize_result())
+        elif method == "workspace/didChangeWorkspaceFolders":
+            event = (msg.get("params") or {}).get("event") or {}
+            for f in event.get("added") or []:
+                _folders.append(f["uri"])
         elif method == "initialized":
             _push(_scenario.get("on_initialized"))
         elif method == "shutdown":

@@ -1,0 +1,42 @@
+{
+  "_comment": "A multi-root server (accepts workspace/didChangeWorkspaceFolders), so a second window's LspManager joins it instead of spawning. Each didOpen publishes one diagnostic for the opened file and registers rangeFormatting, so routing (diagnostics to the window that opened the file) and registration replay (a later joiner still learns the capability) are observable.",
+  "position_encoding": "utf-8",
+  "capabilities": {
+    "workspace": {
+      "workspaceFolders": {"supported": true, "changeNotifications": true}
+    }
+  },
+  "responses": {
+    "textDocument/hover": {"contents": "shared hover"},
+    "workspace/symbol": [
+      {"name": "InFolderA", "kind": 5, "location": {"uri": "$FOLDER0/a.py", "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}}},
+      {"name": "InFolderB", "kind": 5, "location": {"uri": "$FOLDER1/b.py", "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}}},
+      {"name": "InLibrary", "kind": 5, "location": {"uri": "file:///usr/lib/python3/site-packages/lib.py", "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}}}
+    ]
+  },
+  "on_did_open": [
+    {
+      "method": "textDocument/publishDiagnostics",
+      "params": {
+        "uri": "$SELF",
+        "diagnostics": [
+          {
+            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
+            "severity": 1,
+            "message": "from the shared server"
+          }
+        ]
+      }
+    }
+  ],
+  "server_requests": [
+    {
+      "method": "client/registerCapability",
+      "params": {
+        "registrations": [
+          {"id": "rf", "method": "textDocument/rangeFormatting", "registerOptions": {}}
+        ]
+      }
+    }
+  ]
+}

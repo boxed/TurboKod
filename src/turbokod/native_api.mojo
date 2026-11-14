@@ -32,6 +32,7 @@ from turbokod.colors import default_attr
 from turbokod.events import Event, MOD_CTRL, MOD_META
 from turbokod.geometry import Point, Rect
 from turbokod.local_changes import RightPanel
+from turbokod.lsp_shared import new_pool
 from turbokod.json import (
     json_get_string_array,
     JsonValue, encode_json, json_array, json_bool, json_int, json_object, json_str,
@@ -218,6 +219,24 @@ def tk_desktop_new() abi("C") -> Int:
         p[].theme_version += 1
     build_menus(p[], native=True)
     return addr
+
+
+@export
+def tk_lsp_pool_new() abi("C") -> Int:
+    """Create the process-wide language-server pool (``LspPool``). The host
+    makes one and hands it to every window with ``tk_desktop_set_lsp_pool``,
+    so windows share a server that supports multi-root rather than each
+    spawning its own. Lives for the process; 0 on allocation failure."""
+    return new_pool()
+
+
+@export
+def tk_desktop_set_lsp_pool(h: Int, pool: Int) abi("C"):
+    """Give a window the shared pool. Call before its first file opens:
+    servers already running stay private."""
+    if h == 0:
+        return
+    _desk(h)[].lsp_pool = pool
 
 
 @export

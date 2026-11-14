@@ -590,6 +590,13 @@ func cgcolor(_ rgb: UInt32) -> CGColor {
 /// `.git` is the Turbo Vision look's git window (`TVDialogWindow` too).
 enum CellSurface { case main, panels, settings, frame, dialog, git }
 
+/// The process-wide language-server pool every window's Desktop shares
+/// (`tk_lsp_pool_new`). A `static let` rather than a top-level constant:
+/// constants below `app.run()` in this file read 0.
+enum SharedLsp {
+    static let pool: Int64 = tk_lsp_pool_new()
+}
+
 final class CellView: NSView {
     var handle: Int64 = 0
     var surface: CellSurface = .main
@@ -4205,6 +4212,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Tell the Desktop the host owns the menu surface — it stops painting
         // the in-grid menu bar and stops routing top-row mouse / Alt-letter
         // mnemonic events to it. We mirror the menu via tk_desktop_menu_snapshot.
+        // Every window shares one language-server pool, so a server that
+        // supports multi-root runs once for all open projects instead of
+        // once per window. TK_LSP_PRIVATE=1 gives each window its own.
+        if ProcessInfo.processInfo.environment["TK_LSP_PRIVATE"] == nil {
+            tk_desktop_set_lsp_pool(h, SharedLsp.pool)
+        }
         // TK_MENU_INGRID=1 skips the handoff so the classic in-grid menu bar
         // stays visible — scripts/screenshots.sh uses it for the terminal-style
         // README hero shot.
