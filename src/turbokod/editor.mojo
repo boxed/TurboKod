@@ -6791,9 +6791,13 @@ struct Editor(Copyable, Movable):
         vis_lo: Int,
         carets: List[Caret],
         bracket_rows: List[Int],
-    ) -> Tuple[List[String], List[List[Int]], List[Int]]:
+        mut display_rows: List[String],
+        mut cell_maps: List[List[Int]],
+        mut cell_counts: List[Int],
+    ):
         """Per visual row: the string to paint, its ``byte → cell`` map, and
-        the display cell count.
+        the display cell count — appended to the three out-lists, since a
+        returned tuple had to be copied apart again, every frame.
 
         When ``compress_kwargs`` is on, rows that don't hold a caret and sit
         outside every selection (and aren't a bracket-match partner) get their
@@ -6803,9 +6807,6 @@ struct Editor(Copyable, Movable):
         raw slice + ``utf8_byte_to_cell``, so the caller can index the arrays
         unconditionally. String/comment spans are read from the row's syntax
         highlights so separators inside literals never trigger a match."""
-        var display_rows = List[String]()
-        var cell_maps = List[List[Int]]()
-        var cell_counts = List[Int]()
         var sep = -1
         # Concealing redundant ``name=name`` args collapses bytes to a single
         # ``≡`` cell, which throws off the intra-line diff column alignment in
@@ -6874,7 +6875,6 @@ struct Editor(Copyable, Movable):
             display_rows.append(seg)
             cell_maps.append(utf8_byte_to_cell(seg))
             cell_counts.append(utf8_codepoint_count(seg))
-        return (display_rows^, cell_maps^, cell_counts^)
 
     def _indent_cols(self, row: Int) -> Int:
         """Leading-whitespace width of ``row`` in columns, or ``-1`` when
@@ -7435,12 +7435,13 @@ struct Editor(Copyable, Movable):
         # keyword-arg-compressed elsewhere when ``compress_kwargs`` is on. The
         # text pass and every overlay below index these so they stay aligned
         # with what's actually drawn.
-        var _disp = self._concealed_display_rows(
+        var display_rows = List[String]()
+        var cell_maps = List[List[Int]]()
+        var cell_counts = List[Int]()
+        self._concealed_display_rows(
             layout, hl_buckets, vis_lo, all_carets_paint, bracket_rows,
+            display_rows, cell_maps, cell_counts,
         )
-        var display_rows = _disp[0].copy()
-        var cell_maps = _disp[1].copy()
-        var cell_counts = _disp[2].copy()
         # Text pass — paint each row's (possibly concealed) display string.
         # ``layout`` already accounts for ``indent_cells``; clip to the text
         # column so the gutters are left untouched.
