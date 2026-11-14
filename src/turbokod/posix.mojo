@@ -94,6 +94,39 @@ def alloc_zero_buffer(n: Int) -> List[UInt8]:
     return buf^
 
 
+comptime DRAIN_MORE = 0   # nothing more ready, or the cap was reached
+comptime DRAIN_EOF = 1    # ``read`` returned 0: the other end closed
+comptime DRAIN_ERROR = -1  # ``read`` failed
+
+
+def drain_fd(
+    fd: Int32, mut out: List[UInt8], cap: Int, chunk: Int = 4096,
+) -> Tuple[Int, Int]:
+    """Append what ``fd`` has ready to ``out`` without blocking, stopping
+    once ``cap`` bytes have been read. Returns ``(bytes appended, how it
+    ended)`` — a ``DRAIN_*`` code.
+
+    The one non-blocking pipe drain: every per-frame reader used to carry
+    its own copy of this loop, each allocating (and zeroing) its scratch
+    buffer on every tick whether or not the fd had anything to read. This
+    polls first, so an idle tick allocates nothing."""
+    if fd < 0 or not poll_stdin(fd, Int32(0)):
+        return (0, DRAIN_MORE)
+    var scratch = alloc_zero_buffer(chunk)
+    var total = 0
+    while total < cap:
+        var n = read_into(fd, scratch, chunk)
+        if n == 0:
+            return (total, DRAIN_EOF)
+        if n < 0:
+            return (total, DRAIN_ERROR)
+        out.extend(Span(scratch)[0:n])
+        total += n
+        if not poll_stdin(fd, Int32(0)):
+            break
+    return (total, DRAIN_MORE)
+
+
 # --- Termios ----------------------------------------------------------------
 
 

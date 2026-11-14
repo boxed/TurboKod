@@ -29,8 +29,8 @@ from .lsp import LspProcess
 from .string_utils import display_columns, split_lines_no_trailing
 from .window import paint_window_title_at
 from .posix import (
-    alloc_zero_buffer, append_string_bytes, close_fd, exit_code_from_status,
-    kill_pid, monotonic_ms, poll_stdin, read_into, reap_child, SIGTERM,
+    close_fd, drain_fd, exit_code_from_status,
+    kill_pid, monotonic_ms, reap_child, SIGTERM,
     untrack_child, waitpid_nohang,
 )
 
@@ -181,18 +181,11 @@ struct InstallRunner(Movable):
         ≤ 0 (EOF / EAGAIN)."""
         if fd < 0:
             return
-        var scratch = alloc_zero_buffer(4096)
-        var total = 0
         # Accumulate this drain's reads into a local buffer and append to
         # self.output once — concatenating per 4 KB chunk re-copied the whole
         # (persisted, up-to-256 KB) output every read.
         var chunk = List[UInt8]()
-        while poll_stdin(fd, Int32(0)) and total < 65536:
-            var n = read_into(fd, scratch, 4096)
-            if n <= 0:
-                break
-            append_string_bytes(chunk, String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=scratch.unsafe_ptr(), length=n))))
-            total += n
+        _ = drain_fd(fd, chunk, 65536)
         if len(chunk) > 0:
             self.output = self.output + String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=chunk.unsafe_ptr(), length=len(chunk))))
         if len(self.output.as_bytes()) > _OUTPUT_CAP:

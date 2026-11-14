@@ -27,7 +27,7 @@ from .string_utils import utf8_prefix
 from .posix import (
     POSIX_SPAWN_FILE_ACTIONS_SIZE, SIGTERM,
     alloc_zero_buffer, append_string_bytes, chdir_path, close_fd,
-    getcwd_path, getenv_value,
+    drain_fd, getcwd_path, getenv_value,
     kill_pid, monotonic_ms, poll_stdin,
     posix_spawn_file_actions_addclose, posix_spawn_file_actions_adddup2,
     posix_spawn_file_actions_destroy, posix_spawn_file_actions_init,
@@ -662,12 +662,7 @@ struct LspProcess(Copyable, Movable):
         # Accumulate bytes and build the String once — ``out = out + chunk``
         # reallocated the whole drain per read.
         var buf = List[UInt8]()
-        var scratch = alloc_zero_buffer(4096)
-        while poll_stdin(self.stderr_fd, Int32(0)) and len(buf) < 65536:
-            var m = read_into(self.stderr_fd, scratch, 4096)
-            if m <= 0:
-                break
-            buf.extend(Span(scratch)[0:m])
+        _ = drain_fd(self.stderr_fd, buf, 65536)
         var out = String(StringSpan(unsafe_from_utf8=Span(buf)))
         return out
 

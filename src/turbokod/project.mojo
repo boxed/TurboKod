@@ -18,7 +18,7 @@ from .file_io import (
 from .lsp import LspProcess, capture_command
 from .onig import OnigRegex
 from .posix import (
-    SIGTERM, alloc_zero_buffer, close_fd, kill_pid, poll_stdin, read_into,
+    DRAIN_MORE, SIGTERM, close_fd, drain_fd, kill_pid,
     reap_child, untrack_child, waitpid_nohang,
 )
 from .search_options import (
@@ -407,38 +407,20 @@ struct FileIndexer(Movable):
         if not self.alive:
             return new_paths^
         # Drain everything currently in the pipe into ``self.buf``.
-        # Non-blocking: ``poll_stdin(.., 0)`` returns immediately, and a
-        # single ``read`` consumes up to 64 KiB. Cap at 1 MiB per tick
-        # so a fast producer can't starve the main loop. We use a
-        # pre-allocated scratch buffer (``alloc_zero_buffer`` gives us a
-        # ``List[UInt8]`` of the requested capacity that ``read(2)`` can
-        # write into directly) and copy the first ``n`` bytes into
-        # ``self.buf`` — ``List.append`` only updates length, not the
-        # backing capacity, so reading into an empty list overwrites
-        # whatever happened to be at offset 0 of its unallocated buffer.
-        var scratch = alloc_zero_buffer(65536)
-        var total = 0
-        var saw_eof = False
-        while total < 1024 * 1024:
-            if not poll_stdin(self.proc.stdout_fd, Int32(0)):
-                break
-            var grew = read_into(self.proc.stdout_fd, scratch, 65536)
-            if grew <= 0:
-                # ``read`` returning 0 is EOF: the child closed its stdout,
-                # which only happens once it has written everything and is
-                # exiting. That — not ``waitpid`` reporting the child gone —
-                # is the real "no more data" signal: a process can write its
-                # final batch into the pipe buffer and exit before we read
-                # it, so keying "done" off the exit would drop whatever is
-                # still buffered (the *tail* of ``git ls-files`` output —
-                # e.g. ``pyproject.toml`` / ``settings.py`` near the end).
-                # A negative ``grew`` is an unrecoverable read error; treat
-                # it as end-of-stream too.
-                saw_eof = True
-                break
-            for i in range(grew):
-                self.buf.append(scratch[i])
-            total += grew
+        # Non-blocking, and capped at 1 MiB per tick so a fast producer
+        # can't starve the main loop.
+        # ``read`` returning 0 is EOF: the child closed its stdout,
+        # which only happens once it has written everything and is
+        # exiting. That — not ``waitpid`` reporting the child gone —
+        # is the real "no more data" signal: a process can write its
+        # final batch into the pipe buffer and exit before we read
+        # it, so keying "done" off the exit would drop whatever is
+        # still buffered (the *tail* of ``git ls-files`` output —
+        # e.g. ``pyproject.toml`` / ``settings.py`` near the end).
+        # An unrecoverable read error is treated as end-of-stream too.
+        var saw_eof = drain_fd(
+            self.proc.stdout_fd, self.buf, 1024 * 1024, 65536,
+        )[1] != DRAIN_MORE
         var start = 0
         for i in range(len(self.buf)):
             if self.buf[i] == 0:

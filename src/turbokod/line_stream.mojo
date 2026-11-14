@@ -13,7 +13,7 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .lsp import LspProcess
-from .posix import alloc_zero_buffer, poll_stdin, read_into
+from .posix import DRAIN_EOF, drain_fd
 
 
 comptime _READ_CAP_PER_TICK = 65536
@@ -69,20 +69,9 @@ struct LineStream(Movable):
         var lines = List[String]()
         if not self.active:
             return (lines^, False)
-        var scratch = alloc_zero_buffer(8192)
-        var total = 0
-        var got_eof = False
-        while total < _READ_CAP_PER_TICK:
-            if not poll_stdin(self.proc.stdout_fd, Int32(0)):
-                break
-            var n = read_into(self.proc.stdout_fd, scratch, 8192)
-            if n < 0:
-                break
-            if n == 0:
-                got_eof = True
-                break
-            self._buf.extend(Span(scratch)[0:n])
-            total += n
+        var got_eof = drain_fd(
+            self.proc.stdout_fd, self._buf, _READ_CAP_PER_TICK, 8192,
+        )[1] == DRAIN_EOF
         var consumed = 0
         var i = self._scan_pos
         while i < len(self._buf):
@@ -144,20 +133,9 @@ struct OutputStream(Movable):
         reached EOF, when it has been reaped and the stream is idle again."""
         if not self.active:
             return None
-        var scratch = alloc_zero_buffer(8192)
-        var total = 0
-        var got_eof = False
-        while total < _READ_CAP_PER_TICK:
-            if not poll_stdin(self.proc.stdout_fd, Int32(0)):
-                break
-            var n = read_into(self.proc.stdout_fd, scratch, 8192)
-            if n < 0:
-                break
-            if n == 0:
-                got_eof = True
-                break
-            self._buf.extend(Span(scratch)[0:n])
-            total += n
+        var got_eof = drain_fd(
+            self.proc.stdout_fd, self._buf, _READ_CAP_PER_TICK, 8192,
+        )[1] == DRAIN_EOF
         if not got_eof:
             return None
         var out = String(StringSpan(unsafe_from_utf8=Span(self._buf)))

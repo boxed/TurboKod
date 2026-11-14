@@ -114,9 +114,9 @@ from .lsp_status_menu import (
     LSP_MENU_ACTION_RESTART, LspStatusMenu,
 )
 from .posix import (
-    SIGTERM, alloc_zero_buffer, close_fd, debug_log, exit_code_from_status,
+    SIGTERM, close_fd, debug_log, drain_fd, exit_code_from_status,
     getenv_value, kill_pid,
-    poll_stdin, read_into, realpath, reap_child, untrack_child,
+    realpath, reap_child, untrack_child,
     waitpid_nohang,
 )
 from .file_tree import FileTree
@@ -15859,17 +15859,12 @@ struct Desktop(Movable):
         runaway child can't pin the tick."""
         if fd < 0:
             return
-        var scratch = alloc_zero_buffer(4096)
-        var total = 0
-        while poll_stdin(fd, Int32(0)) and total < 65536:
-            var n = read_into(fd, scratch, 4096)
-            if n <= 0:
-                break
-            var k = 0
-            while k < n and len(head) < _ON_SAVE_OUTPUT_CAP:
-                head.append(scratch[k])
-                k += 1
-            total += n
+        var got = List[UInt8]()
+        _ = drain_fd(fd, got, 65536)
+        var k = 0
+        while k < len(got) and len(head) < _ON_SAVE_OUTPUT_CAP:
+            head.append(got[k])
+            k += 1
 
     def _maybe_reload_targets(mut self, saved_path: String):
         if not self.project:

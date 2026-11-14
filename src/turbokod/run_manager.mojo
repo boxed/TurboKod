@@ -29,8 +29,8 @@ from std.collections.list import List
 
 from .lsp import LspProcess
 from .posix import (
-    SIGTERM, alloc_zero_buffer, close_fd, exit_code_from_status, kill_pid,
-    monotonic_ms, poll_stdin, read_into, reap_child, untrack_child,
+    SIGTERM, close_fd, drain_fd, exit_code_from_status, kill_pid,
+    monotonic_ms, reap_child, untrack_child,
     waitpid_nohang,
 )
 from .string_utils import shell_single_quote
@@ -226,15 +226,6 @@ def poll_run_exit(mut session: RunSession) -> Bool:
 
 
 def _drain_fd(fd: Int32) -> String:
-    if fd < 0:
-        return String("")
-    var out = String("")
-    var scratch = alloc_zero_buffer(4096)
-    var total = 0
-    while poll_stdin(fd, Int32(0)) and total < 65536:
-        var n = read_into(fd, scratch, 4096)
-        if n <= 0:
-            break
-        out = out + String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=scratch.unsafe_ptr(), length=n)))
-        total += n
-    return out^
+    var buf = List[UInt8]()
+    _ = drain_fd(fd, buf, 65536)
+    return String(StringSpan(unsafe_from_utf8=Span(buf)))
