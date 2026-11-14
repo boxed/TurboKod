@@ -594,18 +594,13 @@ def highlight_incremental(
             if cache.highlights[i].row >= stable_row:
                 out.append(cache.highlights[i])
 
-    # Update cached post_stacks: replace ``[eff_dirty, stable_row)``
-    # with the new ones, keep cached entries below eff_dirty and
-    # at-or-above stable_row.
-    var updated_stacks = List[List[Frame]]()
-    for i in range(eff_dirty):
-        updated_stacks.append(cache.post_stacks[i].copy())
+    # Update cached post_stacks: rows ``[eff_dirty, stable_row)`` take the
+    # new ones, in place. The tokenizer appended exactly one stack per row
+    # it tokenized, and the rows on either side are untouched — rebuilding
+    # the list copied every row's stack (an allocation per buffer line) on
+    # each keystroke.
     for k in range(len(new_post)):
-        updated_stacks.append(new_post[k].copy())
-    if stable_row < len(cache.post_stacks):
-        for i in range(stable_row, len(cache.post_stacks)):
-            updated_stacks.append(cache.post_stacks[i].copy())
-    cache.post_stacks = updated_stacks^
+        swap(cache.post_stacks[eff_dirty + k], new_post[k])
     cache.highlights = out.copy()
 
     if len(out) == 0 and _has_nonempty_line(lines):
