@@ -17,6 +17,7 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .ui_tree import (
+    UIDialog,
     UI_CANCEL, UI_DEFAULT, UI_SECONDARY, UINode, ui_bool, ui_buttons,
     ui_check, ui_choice, ui_dialog, ui_form, ui_int, ui_label, ui_row,
     ui_text, ui_vstack, ui_button,
@@ -111,7 +112,7 @@ def _digit_width(value: Int, base: Int) -> Int:
     return w
 
 
-struct FillDialog(Movable):
+struct FillDialog(Movable, UIDialog):
     """Modal "Fill..." dialog: plain state plus its declarative UI
     (``ui`` / ``ui_set`` / ``ui_act``) — the grid projector and the native
     one both draw it from ``ui()``."""

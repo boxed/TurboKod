@@ -52,6 +52,7 @@ from .string_utils import display_columns, truncate_to_columns
 from .text_field import TextField
 from .type_ahead import TypeAhead, is_type_ahead_key, type_ahead_pick
 from .ui_tree import (
+    UIDialog,
     UI_BROWSE, UI_BUTTON, UI_CANCEL, UI_CENTER, UI_CHECK, UI_CHECKABLE, UI_CHOICE,
     UI_DEFAULT, UI_DESTRUCTIVE, UI_DIALOG, UI_FORM, UI_HEADING, UI_HOTKEY,
     UI_HSTACK, UI_LABEL, UI_ROW, UI_SECONDARY, UI_SEPARATOR, UI_SPACER,
@@ -85,6 +86,15 @@ struct UIEvent(Copyable, Movable):
     var is_action: Bool
     var key: String
     var value: String
+
+
+def apply_ui_events[D: UIDialog](mut dialog: D, events: List[UIEvent]):
+    """Give ``dialog`` the user's edits and actions, in order."""
+    for i in range(len(events)):
+        if events[i].is_action:
+            dialog.ui_act(events[i].key)
+        else:
+            dialog.ui_set(events[i].key, events[i].value)
 
 
 def ui_set(var key: String, var value: String) -> UIEvent:

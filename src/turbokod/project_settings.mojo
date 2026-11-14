@@ -32,6 +32,7 @@ from .project_targets import (
 )
 from .string_utils import join_args, split_args
 from .ui_tree import (
+    UIDialog,
     UI_DEFAULT, UI_DISABLED, UI_SECONDARY, UINode, ui_button, ui_buttons, ui_choice,
     ui_dialog, ui_form, ui_hstack, ui_int, ui_label, ui_page, ui_path, ui_row,
     ui_table, ui_tabs, ui_text, ui_vstack,
@@ -103,7 +104,7 @@ def _pick(var options: List[String], current: String, value: String) -> String:
     return options[i]
 
 
-struct ProjectSettings(Movable):
+struct ProjectSettings(Movable, UIDialog):
     var active: Bool
     var close_requested: Bool
     """Close was pressed; the host syncs the last edits, then closes."""

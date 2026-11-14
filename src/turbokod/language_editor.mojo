@@ -14,13 +14,14 @@ from std.collections.list import List
 from .config import LanguageServerOverride
 from .string_utils import split_args
 from .ui_tree import (
+    UIDialog,
     UI_CANCEL, UI_DEFAULT, UI_DISABLED, UI_SECONDARY, UINode, ui_button,
     ui_buttons, ui_dialog, ui_form, ui_hstack, ui_int, ui_label, ui_row,
     ui_table, ui_text, ui_vstack,
 )
 
 
-struct LanguageEditor(Movable):
+struct LanguageEditor(Movable, UIDialog):
     var active: Bool
     var submitted: Bool
     var is_existing: Bool

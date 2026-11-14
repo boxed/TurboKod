@@ -18,6 +18,7 @@ from std.collections.list import List
 
 from .string_utils import display_columns, tail_to_columns
 from .ui_tree import (
+    UIDialog,
     UI_CANCEL, UI_DEFAULT, UI_HEADING, UI_SECONDARY, UINode, ui_bool,
     ui_button, ui_buttons, ui_check, ui_choice, ui_dialog, ui_form, ui_int,
     ui_label, ui_row, ui_text, ui_vstack,
@@ -58,7 +59,7 @@ def _location(path: String, line: Int) -> String:
     return loc^
 
 
-struct BreakpointMenu(Movable):
+struct BreakpointMenu(Movable, UIDialog):
     var active: Bool
     var submitted: Bool
     var path: String
@@ -177,7 +178,7 @@ comptime BP_ERR_DISABLE = UInt8(2)
 comptime BP_ERR_CANCEL  = UInt8(3)
 
 
-struct BreakpointConditionErrorDialog(Movable):
+struct BreakpointConditionErrorDialog(Movable, UIDialog):
     """Opens when the adapter rejects a BP condition: the error, any
     cached locals as ``name = value`` rows, the editable condition, and
     Try Again (re-submit the edited condition) / Disable & Continue /

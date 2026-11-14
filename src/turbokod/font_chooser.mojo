@@ -11,12 +11,13 @@ from std.collections.list import List
 
 from .case_fold import contains_ci
 from .ui_tree import (
+    UIDialog,
     UI_CANCEL, UI_DEFAULT, UI_DISABLED, UINode, ui_button, ui_buttons,
     ui_dialog, ui_int, ui_table, ui_text, ui_vstack,
 )
 
 
-struct FontChooser(Movable):
+struct FontChooser(Movable, UIDialog):
     var active: Bool
     var submitted: Bool
     var target: String

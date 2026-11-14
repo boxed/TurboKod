@@ -16,13 +16,14 @@ from .config import OnSaveAction
 from .language_config import built_in_servers
 from .string_utils import join_args, split_args
 from .ui_tree import (
+    UIDialog,
     UI_CANCEL, UI_DEFAULT, UI_SECONDARY, UINode, ui_button, ui_buttons,
     ui_choice, ui_dialog, ui_form, ui_int, ui_label, ui_path, ui_row, ui_text,
     ui_vstack,
 )
 
 
-struct ActionEditor(Movable):
+struct ActionEditor(Movable, UIDialog):
     var active: Bool
     var submitted: Bool
     """Set on Save. The host reads ``value()`` then calls ``close()``."""

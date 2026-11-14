@@ -132,7 +132,7 @@ from .spell_menu import (
     SPELL_ACTION_ADD_PROJECT, SPELL_ACTION_ADD_USER, SpellMenu,
 )
 from .anchored_menu import NativeMenuItem
-from .ui_grid import GridForm, UIEvent, grid_dialog_size
+from .ui_grid import GridForm, UIEvent, apply_ui_events, grid_dialog_size
 from .ui_tree import (
     ListWindow, UI_CODE, UI_DISABLED, UI_LARGE, UI_RGB, UINode, UISpan, ui_bool,
     ui_button, ui_int, ui_list, ui_list_anchor, ui_list_row, ui_spacer,
@@ -9674,63 +9674,28 @@ struct Desktop(Movable):
         action that handler asked for (a picker opening a project)."""
         if name == String("picker"):
             return self.picker_apply(events)
-        for i in range(len(events)):
-            ref e = events[i]
-            if name == String("settings"):
-                if e.is_action:
-                    self.settings.ui_act(e.key)
-                else:
-                    self.settings.ui_set(e.key, e.value)
-            elif name == String("language_editor"):
-                if e.is_action:
-                    self.settings.language_editor.ui_act(e.key)
-                else:
-                    self.settings.language_editor.ui_set(e.key, e.value)
-            elif name == String("font_chooser"):
-                if e.is_action:
-                    self.settings.font_chooser.ui_act(e.key)
-                else:
-                    self.settings.font_chooser.ui_set(e.key, e.value)
-            elif name == String("project_settings"):
-                if e.is_action:
-                    self.project_settings.ui_act(e.key)
-                else:
-                    self.project_settings.ui_set(e.key, e.value)
-            elif name == String("action_editor"):
-                if e.is_action:
-                    self.project_settings.editor.ui_act(e.key)
-                else:
-                    self.project_settings.editor.ui_set(e.key, e.value)
-            elif name == String("breakpoint_error"):
-                if e.is_action:
-                    self.breakpoint_error.ui_act(e.key)
-                else:
-                    self.breakpoint_error.ui_set(e.key, e.value)
-            elif name == String("breakpoint"):
-                if e.is_action:
-                    self.breakpoint_menu.ui_act(e.key)
-                else:
-                    self.breakpoint_menu.ui_set(e.key, e.value)
-            elif name == String("fill"):
-                if e.is_action:
-                    self.fill_dialog.ui_act(e.key)
-                else:
-                    self.fill_dialog.ui_set(e.key, e.value)
-            elif name == String("names_review"):
-                if e.is_action:
-                    self.names_review.ui_act(e.key)
-                else:
-                    self.names_review.ui_set(e.key, e.value)
-            elif name == String("find"):
-                if e.is_action:
-                    self.find_dialog.ui_act(e.key)
-                else:
-                    self.find_dialog.ui_set(e.key, e.value)
-            elif name == String("spelling"):
-                if e.is_action:
-                    self.spelling_dialog.ui_act(e.key)
-                else:
-                    self.spelling_dialog.ui_set(e.key, e.value)
+        if name == String("settings"):
+            apply_ui_events(self.settings, events)
+        elif name == String("language_editor"):
+            apply_ui_events(self.settings.language_editor, events)
+        elif name == String("font_chooser"):
+            apply_ui_events(self.settings.font_chooser, events)
+        elif name == String("project_settings"):
+            apply_ui_events(self.project_settings, events)
+        elif name == String("action_editor"):
+            apply_ui_events(self.project_settings.editor, events)
+        elif name == String("breakpoint_error"):
+            apply_ui_events(self.breakpoint_error, events)
+        elif name == String("breakpoint"):
+            apply_ui_events(self.breakpoint_menu, events)
+        elif name == String("fill"):
+            apply_ui_events(self.fill_dialog, events)
+        elif name == String("names_review"):
+            apply_ui_events(self.names_review, events)
+        elif name == String("find"):
+            apply_ui_events(self.find_dialog, events)
+        elif name == String("spelling"):
+            apply_ui_events(self.spelling_dialog, events)
         if name == String("settings") or name == String("language_editor") \
                 or name == String("font_chooser"):
             self.settings.consume_language_editor()

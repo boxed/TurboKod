@@ -117,6 +117,16 @@ comptime UI_LARGE       = 1 << 13
 picker, whose list should show as many rows as fit)."""
 
 
+trait UIDialog:
+    """What a declarative dialog answers its projectors with: an edit to
+    one of its fields, and a button or command. ``apply_ui_events``
+    (``ui_grid.mojo``) feeds a dialog its events through these."""
+
+    def ui_set(mut self, key: String, value: String): ...
+
+    def ui_act(mut self, id: String): ...
+
+
 @fieldwise_init
 struct UISpan(ImplicitlyCopyable, Movable):
     """A colored byte range ``[start, end)`` of cell ``col`` of list row

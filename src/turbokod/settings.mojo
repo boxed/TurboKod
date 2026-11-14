@@ -40,6 +40,7 @@ from .language_editor import LanguageEditor
 from .theme import theme_names
 from .string_utils import join_args
 from .ui_tree import (
+    UIDialog,
     UI_DEFAULT, UI_DISABLED, UI_SECONDARY, UINode, ui_bool, ui_button,
     ui_buttons, ui_check, ui_choice, ui_dialog, ui_form, ui_hstack, ui_int,
     ui_label, ui_page, ui_preview, ui_row, ui_table, ui_tabs, ui_text,
@@ -105,7 +106,7 @@ def _parse_digits(text: String, empty: Int) -> Int:
     return v
 
 
-struct Settings(Movable):
+struct Settings(Movable, UIDialog):
     var active: Bool
     var dirty: Bool
     """Set when a setting has been mutated. The host applies and writes

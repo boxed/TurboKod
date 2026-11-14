@@ -26,6 +26,7 @@ from .new_names import NewName
 from .review_mode import ReviewMode
 from .string_utils import byte_slice, split_lines_no_trailing
 from .ui_tree import (
+    UIDialog,
     ListWindow, UI_CANCEL, UI_CODE, UI_DEFAULT, UI_DISABLED, UI_LARGE,
     UI_RGB, UI_SECONDARY, UINode, UISpan, ui_button, ui_buttons, ui_dialog,
     ui_int, ui_label, ui_list, ui_table, ui_vstack,
@@ -46,7 +47,7 @@ struct _Loaded(Copyable, Movable):
     var names: List[NewName]
 
 
-struct NamesReview(Movable):
+struct NamesReview(Movable, UIDialog):
     var active: Bool
     var title: String
     var root: String

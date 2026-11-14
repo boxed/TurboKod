@@ -16,12 +16,13 @@ from std.collections.list import List
 
 from .search_options import SearchOptions
 from .ui_tree import (
+    UIDialog,
     UI_CANCEL, UI_DEFAULT, UINode, ui_bool, ui_button, ui_buttons, ui_check,
     ui_dialog, ui_form, ui_hstack, ui_row, ui_text, ui_vstack,
 )
 
 
-struct FindDialog(Movable):
+struct FindDialog(Movable, UIDialog):
     var active: Bool
     var replacing: Bool
     var find: String

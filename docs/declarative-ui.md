@@ -29,8 +29,11 @@ def ui_set(mut self, key: String, value: String)
 def ui_act(mut self, id: String)
 ```
 
-Then register it in `Desktop`'s `ui_surfaces` / `ui_tree` / `ui_apply`,
-with the handler that runs when it submits. That is all the wiring there is:
+Declare the struct as conforming to `UIDialog` (`ui_tree.mojo`), the trait
+those two methods make up, then register it in `Desktop`'s `ui_surfaces` /
+`ui_tree` / `ui_apply` — one `apply_ui_events(self.<dialog>, events)` line
+there — with the handler that runs when it submits. That is all the wiring
+there is:
 
 - **Grid:** `paint` draws every open surface through its own `GridForm`
   (`ui_grids`), and `handle_event` routes to the top one.

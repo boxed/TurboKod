@@ -35,6 +35,7 @@ from .library_words import LibraryNegatives
 from .spell import Speller
 from .spell_scan import ProjectSpellScan, SpellOccurrence, SpellScanWord
 from .ui_tree import (
+    UIDialog,
     ListWindow, UI_CANCEL, UI_DISABLED, UI_LARGE, UI_MULTI, UI_SECONDARY,
     UINode, ui_button, ui_buttons, ui_dialog, ui_int, ui_label, ui_list,
     ui_list_anchor, ui_list_row, ui_list_selected, ui_list_selection,
@@ -61,7 +62,7 @@ struct LibraryCheckJob(ImplicitlyCopyable, Movable):
     var at: SpellOccurrence
 
 
-struct SpellingDialog(Movable):
+struct SpellingDialog(Movable, UIDialog):
     var active: Bool
     var submitted: Bool
     """True when the user pressed one of the Add buttons. The host reads
