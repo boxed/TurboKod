@@ -1108,15 +1108,9 @@ final class CellView: NSView {
 
     private func statusLayout() -> StatusLayout {
         var out = StatusLayout()
-        var n = 0
-        while true {
-            n = statusLayoutBuf.withUnsafeMutableBufferPointer { b -> Int in
-                Int(tk_desktop_status_layout(handle, Int64(Int(bitPattern: b.baseAddress)), Int64(b.count)))
-            }
-            if n <= statusLayoutBuf.count { break }
-            statusLayoutBuf = [UInt8](repeating: 0, count: n)
-        }
-        guard n > 0, let o = try? JSONSerialization.jsonObject(with: Data(statusLayoutBuf[0..<n])) as? [String: Any]
+        let h = handle
+        guard let data = readCoreData(&statusLayoutBuf, { tk_desktop_status_layout(h, $0, $1) }),
+              let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return out }
         func span(_ v: Any?) -> Range<Int> {
             guard let a = v as? [Any], a.count >= 2, let lo = a[0] as? Int, let hi = a[1] as? Int, hi > lo
@@ -7262,6 +7256,7 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     private var state: [String: Any] = [:]
     private var lastData = Data()
     private var lastPanels = Data()
+    private var panelsBuf = [UInt8](repeating: 0, count: 1 << 16)
     private var lastHints: [[Any]] = []
     private var files: [[String: Any]] = []
     /// The files list as a tree: a directory row (file index nil) or a file.
@@ -7762,17 +7757,8 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
 
     private func refreshPanels() {
         guard let v = view, v.handle != 0 else { return }
-        var buf = [UInt8](repeating: 0, count: 1 << 16)
-        var n = 0
-        while true {
-            n = buf.withUnsafeMutableBufferPointer { b -> Int in
-                Int(tk_desktop_git_panels(v.handle, Int64(v.cols()), Int64(v.rows()),
-                                          Int64(Int(bitPattern: b.baseAddress)), Int64(b.count)))
-            }
-            if n <= buf.count { break }
-            buf = [UInt8](repeating: 0, count: n)
-        }
-        let data = n > 0 ? Data(buf[0..<n]) : Data()
+        let (h, cols, rows) = (v.handle, Int64(v.cols()), Int64(v.rows()))
+        let data = readCoreData(&panelsBuf, { tk_desktop_git_panels(h, cols, rows, $0, $1) }) ?? Data()
         guard data != lastPanels else { return }
         lastPanels = data
         let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
@@ -8721,15 +8707,8 @@ final class HistoryController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     private func showPatch(_ idx: Int) {
         shown = idx
         guard let h = view?.handle, h != 0, idx >= 0 else { patch.string = ""; return }
-        var n = 0
-        while true {
-            n = buf.withUnsafeMutableBufferPointer { b -> Int in
-                Int(tk_desktop_history_patch(h, Int64(idx), Int64(Int(bitPattern: b.baseAddress)), Int64(b.count)))
-            }
-            if n <= buf.count { break }
-            buf = [UInt8](repeating: 0, count: n)
-        }
-        let text = String(decoding: buf[0..<max(n, 0)], as: UTF8.self)
+        let data = readCoreData(&buf, { tk_desktop_history_patch(h, Int64(idx), $0, $1) }) ?? Data()
+        let text = String(decoding: data, as: UTF8.self)
         var pal = [UInt32](repeating: 0, count: 256)
         pal.withUnsafeMutableBufferPointer { b in
             _ = tk_theme_palette(h, Int64(Int(bitPattern: b.baseAddress)), Int64(b.count))
@@ -15109,6 +15088,7 @@ final class PlatinumGitView: NSObject, GitSurface {
     private var state: [String: Any] = [:]
     private var lastData = Data()
     private var lastPanels = Data()
+    private var panelsBuf = [UInt8](repeating: 0, count: 1 << 16)
     private var lastHints: [[Any]] = []
     private var files: [[String: Any]] = []
     private var fileRows: [(depth: Int, name: String, file: Int?)] = []
@@ -15525,17 +15505,8 @@ final class PlatinumGitView: NSObject, GitSurface {
 
     private func refreshPanels() {
         guard let v = view, v.handle != 0 else { return }
-        var buf = [UInt8](repeating: 0, count: 1 << 16)
-        var n = 0
-        while true {
-            n = buf.withUnsafeMutableBufferPointer { b -> Int in
-                Int(tk_desktop_git_panels(v.handle, Int64(v.cols()), Int64(v.rows()),
-                                          Int64(Int(bitPattern: b.baseAddress)), Int64(b.count)))
-            }
-            if n <= buf.count { break }
-            buf = [UInt8](repeating: 0, count: n)
-        }
-        let data = n > 0 ? Data(buf[0..<n]) : Data()
+        let (h, cols, rows) = (v.handle, Int64(v.cols()), Int64(v.rows()))
+        let data = readCoreData(&panelsBuf, { tk_desktop_git_panels(h, cols, rows, $0, $1) }) ?? Data()
         guard data != lastPanels else { return }
         lastPanels = data
         let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
