@@ -14687,7 +14687,7 @@ struct Desktop(Movable):
         every paint — cheap (one short list)."""
         var tabs = List[StatusTab]()
         for i in range(len(self.targets.targets)):
-            var t = self.targets.targets[i].copy()
+            ref t = self.targets.targets[i]
             var running = self.run_session.matches(t.name)
             for k in range(len(self.terminal_panes)):
                 if self.terminal_panes[k].run_target == t.name \
