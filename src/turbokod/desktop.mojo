@@ -18486,6 +18486,24 @@ struct Desktop(Movable):
             path, sr, sc, er, ec, text^,
         )
 
+    def _apply_parked_edits(
+        mut self, path: String, text: String, var edits: List[TextEditEntry],
+    ) -> Int:
+        """Apply a server's ``TextEdit[]`` for ``path`` to its editor and
+        return that window's index, or -1 when it has none.
+
+        The edits' ranges are against ``text``, what the request carried;
+        on a buffer that has changed since (typing, a merged outside
+        write) they'd land in the wrong places, so they are dropped — a
+        pending save still goes ahead, just without them."""
+        var win = self._find_window_for_path(path)
+        if win < 0 or not self.windows.windows[win].is_editor:
+            return -1
+        if len(edits) > 0 \
+                and self.windows.windows[win].editor.text_snapshot() == text:
+            _ = self.windows.windows[win].editor.apply_text_edits(edits^)
+        return win
+
     def _drain_formatting(mut self):
         """Apply any parked formatting ``TextEdit[]`` to its editor. When
         the edit was triggered by format-on-save (the path matches
@@ -18496,49 +18514,27 @@ struct Desktop(Movable):
             var fpath = self.lsp_managers[i].pending_formatting_path()
             var ftext = self.lsp_managers[i].pending_formatting_text()
             var fedits = self.lsp_managers[i].take_formatting_edits()
-            var win = self._find_window_for_path(fpath)
-            if win < 0 or not self.windows.windows[win].is_editor:
-                if self._format_then_save_path == fpath:
-                    self._format_then_save_path = String("")
-                continue
-            # The edits' ranges are against the text the request carried;
-            # on a buffer that has changed since (typing, a merged outside
-            # write) they'd land in the wrong places. Drop them — a pending
-            # save still goes ahead, just unformatted.
-            if len(fedits) > 0 and self.windows.windows[win] \
-                    .editor.text_snapshot() == ftext:
-                _ = self.windows.windows[win].editor.apply_text_edits(
-                    fedits^,
-                )
+            var win = self._apply_parked_edits(fpath, ftext, fedits^)
             if self._format_then_save_path == fpath:
                 self._format_then_save_path = String("")
-                self._save_editor(win, String("format-on-save"))
+                if win >= 0:
+                    self._save_editor(win, String("format-on-save"))
 
     def _drain_willsave(mut self):
         """Apply any parked textDocument/willSaveWaitUntil ``TextEdit[]`` to
         its editor, then — when the edit was triggered by a save waiting on
-        the latch (``_willsave_then_save_path``) — write the file. Mirror of
-        ``_drain_formatting`` for the pre-save-edit hook."""
+        the latch (``_willsave_then_save_path``) — write the file."""
         for i in range(len(self.lsp_managers)):
             if not self.lsp_managers[i].has_pending_willsave():
                 continue
             var wpath = self.lsp_managers[i].pending_willsave_path()
             var wtext = self.lsp_managers[i].pending_willsave_text()
             var wedits = self.lsp_managers[i].take_willsave_edits()
-            var win = self._find_window_for_path(wpath)
-            if win < 0 or not self.windows.windows[win].is_editor:
-                if self._willsave_then_save_path == wpath:
-                    self._willsave_then_save_path = String("")
-                continue
-            # Stale-range guard — see ``_drain_formatting``.
-            if len(wedits) > 0 and self.windows.windows[win] \
-                    .editor.text_snapshot() == wtext:
-                _ = self.windows.windows[win].editor.apply_text_edits(
-                    wedits^,
-                )
+            var win = self._apply_parked_edits(wpath, wtext, wedits^)
             if self._willsave_then_save_path == wpath:
                 self._willsave_then_save_path = String("")
-                self._save_editor(win, String("willSaveWaitUntil"))
+                if win >= 0:
+                    self._save_editor(win, String("willSaveWaitUntil"))
 
     def _on_lsp_status_menu_submit(mut self):
         """Resolve the LSP status-bar right-click menu. The only action
