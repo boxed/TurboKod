@@ -675,15 +675,7 @@ def tk_font_name(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     the Turbo Vision look's."""
     if h == 0 or out_ptr == 0 or cap <= 0:
         return 0
-    var name = _desk(h)[].cell_font()
-    var bytes = name.as_bytes()
-    var n = len(bytes)
-    if n > cap:
-        n = cap
-    var op = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=out_ptr)
-    for i in range(n):
-        op[unsafe_offset=i] = bytes[i]
-    return n
+    return _write_clamped(_desk(h)[].cell_font(), out_ptr, cap)
 
 
 @export
@@ -693,15 +685,7 @@ def tk_font_area_name(h: Int, slot: Int, out_ptr: Int, cap: Int) abi("C") -> Int
     ``Desktop.area_font``. Polled with ``tk_font_name``."""
     if h == 0 or out_ptr == 0 or cap <= 0:
         return 0
-    var name = _desk(h)[].area_font(slot)
-    var bytes = name.as_bytes()
-    var n = len(bytes)
-    if n > cap:
-        n = cap
-    var op = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=out_ptr)
-    for i in range(n):
-        op[unsafe_offset=i] = bytes[i]
-    return n
+    return _write_clamped(_desk(h)[].area_font(slot), out_ptr, cap)
 
 
 @export
@@ -1560,6 +1544,18 @@ def tk_desktop_native_dialog(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     if h == 0:
         return 0
     return _write_out(_native_dialog_json(_desk(h)[]), out_ptr, cap)
+
+
+def _write_clamped(text: String, out_ptr: Int, cap: Int) -> Int:
+    """Copy as much of ``text`` as fits into the host's ``cap``-byte buffer
+    and return how many bytes that was — for short values (a font name)
+    the host reads into a fixed buffer without a retry."""
+    var bytes = text.as_bytes()
+    var n = min(len(bytes), cap)
+    var op = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=out_ptr)
+    for i in range(n):
+        op[unsafe_offset=i] = bytes[i]
+    return n
 
 
 def _write_out(text: String, out_ptr: Int, cap: Int) -> Int:
