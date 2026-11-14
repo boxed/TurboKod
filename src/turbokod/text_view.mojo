@@ -783,16 +783,21 @@ struct Selection(ImplicitlyCopyable, Movable):
         var e_line = r[2]; var e_col = r[3]
         if s_line == e_line:
             return byte_slice(lines[s_line], s_col, e_col)
-        var first_line = lines[s_line]
-        var first_n = len(first_line.as_bytes())
-        var out = byte_slice(first_line, s_col, first_n)
+        # Into a byte list: ``out = out + line`` recopies everything so
+        # far per line, which is quadratic on a Select All + Copy.
+        var out = List[UInt8]()
+        var first = lines[s_line].as_bytes()
+        for i in range(s_col, len(first)):
+            out.append(first[i])
         for li in range(s_line + 1, e_line):
             if li < 0 or li >= len(lines):
                 continue
-            out = out + String("\n") + lines[li]
+            out.append(UInt8(0x0A))
+            out.extend(lines[li].as_bytes())
         if 0 <= e_line and e_line < len(lines):
-            out = out + String("\n") + byte_slice(lines[e_line], 0, e_col)
-        return out^
+            out.append(UInt8(0x0A))
+            out.extend(byte_slice(lines[e_line], 0, e_col).as_bytes())
+        return String(StringSpan(unsafe_from_utf8=Span(out)))
 
 
 # --- paint helpers (shared by Editor and TextLog) -------------------------
