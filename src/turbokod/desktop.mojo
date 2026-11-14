@@ -5932,9 +5932,7 @@ struct Desktop(Movable):
             # not installed". The replacement prefers the project
             # venv's own binary (it sees the project's packages), then
             # falls back to whichever pyenv version has it installed.
-            var root = String("")
-            if self.project:
-                root = self.project.value()
+            var root = self._project_root()
             var bypass = _lsp_bypass_pyenv_shim(spec.language_id)
             if not bypass and String("/.pyenv/shims/") in resolved:
                 bypass = _pyenv_shim_would_fail(root)
@@ -5965,9 +5963,7 @@ struct Desktop(Movable):
         if not argv_found:
             return List[String]()
         if spec.language_id == String("mojo"):
-            var root = String("")
-            if self.project:
-                root = self.project.value()
+            var root = self._project_root()
             var includes = _mojo_include_dirs(root)
             for i in range(len(includes)):
                 argv.append(String("-I"))
@@ -5998,9 +5994,7 @@ struct Desktop(Movable):
         var argv = self._pick_lsp_argv(spec_idx)
         if len(argv) == 0:
             return -1
-        var root = String("")
-        if self.project:
-            root = self.project.value()
+        var root = self._project_root()
         var manager = LspManager()
         manager.start_with(
             lang, argv, root, pool=self.lsp_pool, fresh=self._lsp_spawn_fresh,
@@ -6878,6 +6872,12 @@ struct Desktop(Movable):
         else:
             debug_log(String("[open_project] no git, using path"))
             self._set_project(path)
+
+    def _project_root(self) -> String:
+        """The open project's root, or ``""`` with none open."""
+        if self.project:
+            return self.project.value()
+        return String("")
 
     def close_project(mut self):
         # Flush any pending view-state changes for the still-open editor
@@ -14884,9 +14884,7 @@ struct Desktop(Movable):
             var only = refs[0]
             self._jump_to(only, screen)
             return
-        var root = String("")
-        if self.project:
-            root = self.project.value()
+        var root = self._project_root()
         self._close_pickers()
         self.reference_pick.open(refs^, word, root^)
 
@@ -14904,9 +14902,7 @@ struct Desktop(Movable):
         no adapter to defer to, so we synthesize the decision here.
         """
         var out = List[Bool]()
-        var root = String("")
-        if self.project:
-            root = self.project.value()
+        var root = self._project_root()
         if len(root.as_bytes()) > 0 and not root.endswith("/"):
             root = root + String("/")
         for i in range(len(self.windows.windows)):
@@ -15122,9 +15118,7 @@ struct Desktop(Movable):
                 focused_canon = realpath(fp)
                 if len(focused_canon.as_bytes()) == 0:
                     focused_canon = fp
-        var root = String("")
-        if self.project:
-            root = self.project.value()
+        var root = self._project_root()
         var rel_entries = List[String]()
         var abs_entries = List[String]()
         # Pool 1: currently-open file-backed editor windows. Walk
