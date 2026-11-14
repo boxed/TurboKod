@@ -54,7 +54,7 @@ from .test_results import (
 )
 from .terminal_view import (
     flush_vt_side_effects, forward_key_to_grid, grid_size, GridSelection,
-    new_grid, paint_grid, place_grid,
+    new_grid, paint_grid, paint_grid_links, place_grid,
     paste_to_pty,
 )
 from .vt import Vt
@@ -421,32 +421,8 @@ struct TestPane(Copyable, Movable):
         # pane reads as static output.
         var grid = new_grid(bw, bh, bg)
         paint_grid(grid, self.vt, self.sel, self.focused and self.running())
-        # Traceback-link overlay: scan each on-screen row's text for
-        # ``File "...", line N`` / ``path:N`` spans, underline them, and
-        # record them for click hit-testing in ``sel._last_body``'s
-        # coordinates (``grid_event``). Cell offsets from the scanners are
-        # codepoint columns, matching the grid's one-cell-per-column
-        # layout (link text is ASCII).
-        var link_attr = Attr(LIGHT_BLUE, PANE_BG, STYLE_UNDERLINE)
-        var origin = self.sel._last_body.a
-        var cells = self.vt.grid()
-        for r in range(cells.rows):
-            var line = cells.row_text(r)
-            if len(line.as_bytes()) == 0:
-                continue
-            var hits = extract_all_links(line)
-            for h in range(len(hits)):
-                var hit = hits[h]
-                var x0 = max(hit.cell_start, 0)
-                var x1 = min(hit.cell_end, bw)
-                if x1 <= x0:
-                    continue
-                for x in range(x0, x1):
-                    grid.set_attr(x, r, link_attr)
-                self._last_links.append(OutputLink(
-                    origin.y + r, origin.x + x0, origin.x + x1,
-                    hit.path, hit.line, hit.is_url,
-                ))
+        # Traceback-link overlay.
+        paint_grid_links(grid, self.vt, self.sel._last_body.a, self._last_links)
         place_grid(canvas, body, grid^)
 
     # --- results view --------------------------------------------------

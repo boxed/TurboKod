@@ -64,7 +64,8 @@ from .tmux_session import (
 )
 from .terminal_view import (
     flush_vt_side_effects, forward_key_to_grid, grid_size, GridSelection,
-    cursor_keys_to_click, new_grid, paint_grid, paste_to_pty, place_grid,
+    cursor_keys_to_click, new_grid, paint_grid, paint_grid_links, paste_to_pty,
+    place_grid,
 )
 from .vt import MOUSE_MOTION, MOUSE_PRESS, MOUSE_RELEASE, SCROLLBACK_LINES, Vt
 from .window import (
@@ -972,29 +973,8 @@ struct TerminalPane(Copyable, Movable):
     def _paint_links(mut self, mut grid: Canvas, v: Vt):
         """Underline a run's traceback / ``path:N`` / URL spans in the
         grid and record them for clicks, as the test pane does — a test
-        run or a server's traceback jumps to the source. Recorded in
-        ``sel._last_body``'s coordinates, which ``grid_event`` maps
-        clicks into."""
-        var link_attr = Attr(LIGHT_BLUE, PANE_BG, STYLE_UNDERLINE)
-        var origin = self.sel._last_body.a
-        var cells = v.grid()
-        for r in range(cells.rows):
-            var line = cells.row_text(r)
-            if len(line.as_bytes()) == 0:
-                continue
-            var hits = extract_all_links(line)
-            for h in range(len(hits)):
-                var hit = hits[h]
-                var x0 = max(hit.cell_start, 0)
-                var x1 = min(hit.cell_end, grid.width)
-                if x1 <= x0:
-                    continue
-                for x in range(x0, x1):
-                    grid.set_attr(x, r, link_attr)
-                self._last_links.append(OutputLink(
-                    origin.y + r, origin.x + x0, origin.x + x1,
-                    hit.path, hit.line, hit.is_url,
-                ))
+        run or a server's traceback jumps to the source."""
+        paint_grid_links(grid, v, self.sel._last_body.a, self._last_links)
 
     def pointer_shape(self, pos: Point) -> String:
         """The results view's resize cursor over (or while dragging) its

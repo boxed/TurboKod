@@ -21,13 +21,16 @@ from std.collections.list import List
 from .canvas import Canvas, SCALE_ONE
 from .cell import Cell, FONT_TERMINAL
 from .clipboard import clipboard_copy
-from .colors import Attr, BG_TRUECOLOR, FG_TRUECOLOR
+from .colors import (
+    Attr, BG_TRUECOLOR, FG_TRUECOLOR, LIGHT_BLUE, PANE_BG, STYLE_UNDERLINE,
+)
 from .events import (
     Event, KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, MOD_ALT, MOD_CTRL,
     MOD_META, MOD_SHIFT, MOUSE_BUTTON_LEFT,
 )
 from .geometry import Point, Rect
 from .grid_frame import floor_div
+from .output_links import extract_all_links, OutputLink
 from .painter import Painter
 from .pty import PtyProcess
 from .string_utils import display_columns
@@ -428,6 +431,36 @@ def new_grid(cols: Int, rows: Int, bg: Attr) -> Canvas:
     grid.font = FONT_TERMINAL
     grid.clear(bg)
     return grid^
+
+
+def paint_grid_links(
+    mut grid: Canvas, v: Vt, origin: Point, mut links: List[OutputLink],
+):
+    """Underline the traceback / ``path:N`` / URL spans of ``v``'s
+    on-screen rows in ``grid`` and append them to ``links`` for click
+    hit-testing, in the coordinates ``grid_event`` maps clicks into
+    (``origin`` is ``GridSelection._last_body.a``). Cell offsets from the
+    scanners are codepoint columns, matching the grid's one cell per
+    column (link text is ASCII). Shared by the pty panes."""
+    var link_attr = Attr(LIGHT_BLUE, PANE_BG, STYLE_UNDERLINE)
+    var cells = v.grid()
+    for r in range(cells.rows):
+        var line = cells.row_text(r)
+        if len(line.as_bytes()) == 0:
+            continue
+        var hits = extract_all_links(line)
+        for h in range(len(hits)):
+            var hit = hits[h]
+            var x0 = max(hit.cell_start, 0)
+            var x1 = min(hit.cell_end, grid.width)
+            if x1 <= x0:
+                continue
+            for x in range(x0, x1):
+                grid.set_attr(x, r, link_attr)
+            links.append(OutputLink(
+                origin.y + r, origin.x + x0, origin.x + x1,
+                hit.path, hit.line, hit.is_url,
+            ))
 
 
 def place_grid(mut canvas: Canvas, body: Rect, var grid: Canvas):
