@@ -3241,14 +3241,7 @@ struct Editor(Copyable, Movable):
         var out = List[Caret]()
         for i in range(len(self.selections)):
             out.append(self.selections[i])
-        var n = len(out)
-        for i in range(1, n):
-            var j = i
-            while j > 0 and _caret_less(out[j], out[j - 1]):
-                var tmp = out[j]
-                out[j] = out[j - 1]
-                out[j - 1] = tmp
-                j -= 1
+        _sort_carets(out, False)
         return out^
 
     def _install_carets(mut self, var carets: List[Caret]):
@@ -3284,14 +3277,7 @@ struct Editor(Copyable, Movable):
                 self.buffer.lines[carets[i].anchor_row], carets[i].anchor_col,
             )
         # Sort ascending by (row, col).
-        var n = len(carets)
-        for i in range(1, n):
-            var j = i
-            while j > 0 and _caret_less(carets[j], carets[j - 1]):
-                var tmp = carets[j]
-                carets[j] = carets[j - 1]
-                carets[j - 1] = tmp
-                j -= 1
+        _sort_carets(carets, False)
         # Dedupe: collapse runs of carets at the same (row, col).
         var deduped = List[Caret]()
         for i in range(len(carets)):
@@ -3313,16 +3299,7 @@ struct Editor(Copyable, Movable):
             var by_range = List[Caret]()
             for i in range(len(deduped)):
                 by_range.append(deduped[i])
-            var nr = len(by_range)
-            for i in range(1, nr):
-                var j = i
-                while j > 0 and _caret_range_less(
-                    by_range[j], by_range[j - 1],
-                ):
-                    var tmp = by_range[j]
-                    by_range[j] = by_range[j - 1]
-                    by_range[j - 1] = tmp
-                    j -= 1
+            _sort_carets(by_range, True)
             var merged = List[Caret]()
             merged.append(by_range[0])
             for i in range(1, len(by_range)):
@@ -3335,14 +3312,7 @@ struct Editor(Copyable, Movable):
                     merged.append(cur)
             # Re-sort by cursor (row, col) so the primary slot is the
             # topmost caret, matching the rest of the editor.
-            var nm = len(merged)
-            for i in range(1, nm):
-                var j = i
-                while j > 0 and _caret_less(merged[j], merged[j - 1]):
-                    var tmp = merged[j]
-                    merged[j] = merged[j - 1]
-                    merged[j - 1] = tmp
-                    j -= 1
+            _sort_carets(merged, False)
             deduped = merged^
         self.selections = deduped^
 
@@ -11634,6 +11604,22 @@ struct Editor(Copyable, Movable):
             if self.scroll_y < 0:
                 self.scroll_y = 0
         self._fit_cursor_in_row(h, w)
+
+
+def _sort_carets(mut carets: List[Caret], by_range: Bool):
+    """Sort ``carets`` in place, ascending: by cursor ``(row, col)``, or
+    with ``by_range`` by where each selection starts. Insertion sort —
+    stable, and a caret list is short and nearly sorted already."""
+    for i in range(1, len(carets)):
+        var j = i
+        while j > 0 and (
+            _caret_range_less(carets[j], carets[j - 1]) if by_range
+            else _caret_less(carets[j], carets[j - 1])
+        ):
+            var tmp = carets[j]
+            carets[j] = carets[j - 1]
+            carets[j - 1] = tmp
+            j -= 1
 
 
 def _caret_less(a: Caret, b: Caret) -> Bool:
