@@ -1262,6 +1262,24 @@ struct DapManager(Copyable, Movable):
                 )
         return (lines^, enabled^, conditional^)
 
+    def fill_breakpoints_info(
+        self, path: String, mut lines: List[Int], mut enabled: List[Bool],
+        mut conditional: List[Bool],
+    ):
+        """``breakpoints_info_for`` into the caller's own lists — the
+        per-frame gutter push, which would otherwise allocate three lists
+        per open editor per frame."""
+        lines.clear()
+        enabled.clear()
+        conditional.clear()
+        for i in range(len(self._bp_path)):
+            if self._bp_path[i] == path:
+                lines.append(self._bp_line[i])
+                enabled.append(self._bp_enabled[i])
+                conditional.append(
+                    len(self._bp_condition[i].as_bytes()) > 0,
+                )
+
     def breakpoint_count(self) -> Int:
         return len(self._bp_path)
 

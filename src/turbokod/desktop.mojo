@@ -12948,36 +12948,30 @@ struct Desktop(Movable):
                 continue
             self.dap.toggle_breakpoint(bp_path, bp_row.value())
         # Push gutter state to every editor window. We do this every
-        # frame (cheap — small lists, simple equality checks) so the
-        # gutter stays in sync after window churn (open / close / focus).
+        # frame so the gutter stays in sync after window churn (open /
+        # close / focus) — into the editor's own lists, so an idle frame
+        # allocates nothing for it.
+        var has_session = self.dap.is_active()
         for i in range(len(self.windows.windows)):
             if not self.windows.windows[i].is_editor:
                 continue
-            var path = self.windows.windows[i].editor.file_path
-            if len(path.as_bytes()) == 0:
-                self.windows.windows[i].editor.gutter_width = 0
-                self.windows.windows[i].editor.exec_line = -1
+            ref ed = self.windows.windows[i].editor
+            if len(ed.file_path.as_bytes()) == 0:
+                ed.gutter_width = 0
+                ed.exec_line = -1
                 continue
-            var info = self.dap.breakpoints_info_for(path)
-            var bps = info[0].copy()
-            var bps_enabled = info[1].copy()
-            var bps_conditional = info[2].copy()
-            var has_session = self.dap.is_active()
-            var has_bps = len(bps) > 0
-            if has_session or has_bps:
-                self.windows.windows[i].editor.gutter_width = 2
+            self.dap.fill_breakpoints_info(
+                ed.file_path, ed.breakpoint_lines, ed.breakpoint_enabled,
+                ed.breakpoint_conditional,
+            )
+            if has_session or len(ed.breakpoint_lines) > 0:
+                ed.gutter_width = 2
             else:
-                self.windows.windows[i].editor.gutter_width = 0
-            self.windows.windows[i].editor.breakpoint_lines = bps^
-            self.windows.windows[i].editor.breakpoint_enabled = \
-                bps_enabled^
-            self.windows.windows[i].editor.breakpoint_conditional = \
-                bps_conditional^
-            if _same_file(path, self._dap_exec_path):
-                self.windows.windows[i].editor.exec_line = \
-                    self._dap_exec_line
+                ed.gutter_width = 0
+            if _same_file(ed.file_path, self._dap_exec_path):
+                ed.exec_line = self._dap_exec_line
             else:
-                self.windows.windows[i].editor.exec_line = -1
+                ed.exec_line = -1
         # Drive the run-target session forward. Sits inside dap_tick
         # rather than its own host call because there's exactly one
         # per-frame integration point and adding a second one would
