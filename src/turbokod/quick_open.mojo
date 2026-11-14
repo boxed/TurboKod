@@ -26,6 +26,7 @@ from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, YELLOW
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE, KEY_ENTER, KEY_ESC, MOD_SHIFT,
 )
+from .file_io import join_path
 from .geometry import center_in, Point, Rect
 from .scrollbar import ScrollBarArea
 from .picker_input import (
@@ -57,8 +58,11 @@ struct QuickOpen(Movable):
     # entry; multi-row (shift+arrow) ⇒ the whole range in row order
     # (low → high). Desktop iterates this and opens each.
     var selected_paths: List[String]
-    # Display labels (project-relative when possible). Each entry has a
-    # parallel absolute path in ``entries_abs`` used as the submit target.
+    # Display labels (project-relative when possible). The submit target
+    # is ``abs_at(i)``: the label under ``root``. Only ``open_recent``,
+    # whose labels aren't derived from the paths, passes the absolute
+    # paths alongside in ``entries_abs`` — the project listing (up to
+    # ``QUICK_OPEN_FILE_CAP`` paths) used to store every one twice.
     var entries: List[String]
     var entries_abs: List[String]
     # Indices into ``entries`` that match the current query.
@@ -274,10 +278,18 @@ struct QuickOpen(Movable):
                 self.entries.append(String(StringSpan(
                     unsafe_from_utf8=fb[len(rb) + 1:],
                 )))
-                self.entries_abs.append(full)
                 return
         self.entries.append(full)
-        self.entries_abs.append(full)
+
+    def abs_at(self, i: Int) -> String:
+        """The absolute path of entry ``i`` — what a submit opens."""
+        if i < len(self.entries_abs):
+            return self.entries_abs[i]
+        # A label is either the path below ``root`` or, for a path outside
+        # it, the absolute path itself (``_append_path``).
+        if len(self.root.as_bytes()) == 0 or self.entries[i].startswith("/"):
+            return self.entries[i]
+        return join_path(self.root, self.entries[i])
 
     def tick(mut self):
         """Drain anything the async indexer has produced since the last
@@ -640,8 +652,8 @@ struct QuickOpen(Movable):
         if lo < 0: lo = 0
         if hi >= len(self.matched): hi = len(self.matched) - 1
         for i in range(lo, hi + 1):
-            self.selected_paths.append(self.entries_abs[self.matched[i]])
-        self.selected_path = self.entries_abs[self.matched[self.selected]]
+            self.selected_paths.append(self.abs_at(self.matched[i]))
+        self.selected_path = self.abs_at(self.matched[self.selected])
 
     def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Bool:
         if not self.active:

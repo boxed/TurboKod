@@ -1570,9 +1570,9 @@ def test_quick_open_shift_down_extends_multi_selection() raises:
     _ = qo.handle_key(Event.key_event(KEY_ENTER))
     assert_true(qo.submitted)
     assert_equal(len(qo.selected_paths), 3)
-    assert_equal(qo.selected_paths[0], qo.entries_abs[qo.matched[0]])
-    assert_equal(qo.selected_paths[2], qo.entries_abs[qo.matched[2]])
-    assert_equal(qo.selected_path, qo.entries_abs[qo.matched[2]])
+    assert_equal(qo.selected_paths[0], qo.abs_at(qo.matched[0]))
+    assert_equal(qo.selected_paths[2], qo.abs_at(qo.matched[2]))
+    assert_equal(qo.selected_path, qo.abs_at(qo.matched[2]))
 
 
 def test_quick_open_plain_down_after_shift_collapses_anchor() raises:
@@ -1601,7 +1601,7 @@ def test_quick_open_plain_down_after_shift_collapses_anchor() raises:
     _ = qo.handle_key(Event.key_event(KEY_ENTER))
     assert_true(qo.submitted)
     assert_equal(len(qo.selected_paths), 1)
-    assert_equal(qo.selected_paths[0], qo.entries_abs[qo.matched[3]])
+    assert_equal(qo.selected_paths[0], qo.abs_at(qo.matched[3]))
 
 
 def test_dir_browser_long_name_does_not_overflow_listing() raises:

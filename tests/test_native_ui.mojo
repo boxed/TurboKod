@@ -291,7 +291,6 @@ def _quick_open_with(mut d: Desktop, paths: List[String]):
     d.quick_open.active = True
     for i in range(len(paths)):
         d.quick_open.entries.append(paths[i])
-        d.quick_open.entries_abs.append(paths[i])
     d.quick_open.set_query(String("x"))
     d.quick_open.set_query(String(""))
 
