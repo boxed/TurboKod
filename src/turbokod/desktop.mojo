@@ -18233,6 +18233,14 @@ struct Desktop(Movable):
             labels^, actions^,
         )
 
+    def _ready_lsp_for_window(self, win_idx: Int) -> Int:
+        """The ready language server for editor window ``win_idx``'s file,
+        or -1 — also when the buffer has no path yet."""
+        var path = self.windows.windows[win_idx].editor.file_path
+        if len(path.as_bytes()) == 0:
+            return -1
+        return self._ready_lsp_for_path(path)
+
     def _on_context_menu_submit(mut self):
         """Resolve the symbol-actions popup: Rename opens the name prompt;
         the go-to family + Find References reuse the same machinery the
@@ -18296,12 +18304,10 @@ struct Desktop(Movable):
         if act == CTX_MENU_ACTION_CALLERS or act == CTX_MENU_ACTION_SUPERTYPES \
                 or act == CTX_MENU_ACTION_CALLEES \
                 or act == CTX_MENU_ACTION_SUBTYPES:
-            var path = self.windows.windows[idx].editor.file_path
-            if len(path.as_bytes()) == 0:
-                return
-            var lsp_idx = self._ready_lsp_for_path(path)
+            var lsp_idx = self._ready_lsp_for_window(idx)
             if lsp_idx < 0:
                 return
+            var path = self.windows.windows[idx].editor.file_path
             var text = self.windows.windows[idx].editor.text_snapshot()
             if act == CTX_MENU_ACTION_CALLERS:
                 _ = self.lsp_managers[lsp_idx].request_call_hierarchy(
@@ -18321,24 +18327,20 @@ struct Desktop(Movable):
                 )
             return
         if act == CTX_MENU_ACTION_MONIKER:
-            var path = self.windows.windows[idx].editor.file_path
-            if len(path.as_bytes()) == 0:
-                return
-            var lsp_idx = self._ready_lsp_for_path(path)
+            var lsp_idx = self._ready_lsp_for_window(idx)
             if lsp_idx < 0:
                 return
+            var path = self.windows.windows[idx].editor.file_path
             var text = self.windows.windows[idx].editor.text_snapshot()
             _ = self.lsp_managers[lsp_idx].request_moniker(
                 path, row, col, text^,
             )
             return
         if act == CTX_MENU_ACTION_COLOR_PRESENTATION:
-            var path = self.windows.windows[idx].editor.file_path
-            if len(path.as_bytes()) == 0:
-                return
-            var lsp_idx = self._ready_lsp_for_path(path)
+            var lsp_idx = self._ready_lsp_for_window(idx)
             if lsp_idx < 0:
                 return
+            var path = self.windows.windows[idx].editor.file_path
             var sw_opt = self.windows.windows[idx].editor.color_at(row, col)
             if not sw_opt:
                 return
@@ -18370,24 +18372,20 @@ struct Desktop(Movable):
             self._color_picker_col_end = sw.col_end
             return
         if act == CTX_MENU_ACTION_INLINE_COMPLETION:
-            var path = self.windows.windows[idx].editor.file_path
-            if len(path.as_bytes()) == 0:
-                return
-            var lsp_idx = self._ready_lsp_for_path(path)
+            var lsp_idx = self._ready_lsp_for_window(idx)
             if lsp_idx < 0:
                 return
+            var path = self.windows.windows[idx].editor.file_path
             var text = self.windows.windows[idx].editor.text_snapshot()
             _ = self.lsp_managers[lsp_idx].request_inline_completion(
                 path, row, col, text^,
             )
             return
         if act == CTX_MENU_ACTION_LINKED_EDIT:
-            var path = self.windows.windows[idx].editor.file_path
-            if len(path.as_bytes()) == 0:
-                return
-            var lsp_idx = self._ready_lsp_for_path(path)
+            var lsp_idx = self._ready_lsp_for_window(idx)
             if lsp_idx < 0:
                 return
+            var path = self.windows.windows[idx].editor.file_path
             var text = self.windows.windows[idx].editor.text_snapshot()
             _ = self.lsp_managers[lsp_idx].request_linked_editing(
                 path, row, col, text^,
