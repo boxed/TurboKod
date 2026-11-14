@@ -222,6 +222,10 @@ struct ReviewMode(Movable):
     # spawns per file, which on a big branch froze the UI for seconds.
     var file_before: List[String]
     var file_after: List[String]
+    # Whether every file's text stays loaded: a names review reads them
+    # all, and explicit pairs can't be fetched again. A review otherwise
+    # holds only the file it shows (``_goto_file``).
+    var _keep_all_text: Bool
     var file_loaded: List[Bool]
     # The ref a branch review's "before" side is read from (its fork point
     # with the main line); empty for the other sources.
@@ -314,6 +318,7 @@ struct ReviewMode(Movable):
         self.file_before = List[String]()
         self.file_after = List[String]()
         self.file_loaded = List[Bool]()
+        self._keep_all_text = False
         self.base_ref = String("")
         self.file_binary = List[Bool]()
         self.file_deleted = List[Bool]()
@@ -419,6 +424,7 @@ struct ReviewMode(Movable):
         self.file_before = List[String]()
         self.file_after = List[String]()
         self.file_loaded = List[Bool]()
+        self._keep_all_text = False
         self.base_ref = String("")
         self.file_binary = List[Bool]()
         self.file_deleted = List[Bool]()
@@ -609,6 +615,7 @@ struct ReviewMode(Movable):
         self.title = self.picker_labels[i]
         if self.src == _SRC_BRANCH:
             self.title = self.sha + String(" vs ") + self.main_branch
+        self._keep_all_text = True
         for f in range(self.file_count()):
             self.load_file(f)
 
@@ -677,6 +684,7 @@ struct ReviewMode(Movable):
         the deterministic, git-free entry point for tests. ``paths`` /
         ``befores`` / ``afters`` are parallel."""
         self._reset_review()
+        self._keep_all_text = True
         for i in range(len(paths)):
             self.file_paths.append(paths[i])
             self.file_before.append(befores[i])
@@ -860,6 +868,18 @@ struct ReviewMode(Movable):
             i = 0
         if i >= self.file_count():
             i = self.file_count() - 1
+        # Let go of the file being left: stepping through a changeset
+        # otherwise ends up holding both sides of every file visited. It
+        # is fetched again if the review comes back to it.
+        var prev = self.cur_file
+        if prev != i and not self._keep_all_text \
+                and 0 <= prev and prev < len(self.file_loaded) \
+                and self.file_loaded[prev]:
+            self.file_before[prev] = String("")
+            self.file_after[prev] = String("")
+            self.file_loaded[prev] = False
+            if self._cum_file == prev:
+                self._cum_file = -1
         self.cur_file = i
         self.load_file(i)
         self.change_index = 0
