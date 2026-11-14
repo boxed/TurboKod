@@ -17,6 +17,8 @@ func withUTF8Arg<T>(_ s: String, _ body: (Int64, Int64) -> T) -> T {
 /// ``ProcessInfo.environment`` builds a fresh dictionary per access, and the
 /// check sits on every mouse-move / key / timer path.
 let isCapturing = ProcessInfo.processInfo.environment["TK_CAPTURE"] != nil
+/// Read once, for the same reason: the check sits in `scrollWheel`.
+let isScrollDebug = ProcessInfo.processInfo.environment["TK_SCROLL_DEBUG"] != nil
 
 /// FNV-1a over ``words`` — a cheap "did this buffer change?" fingerprint
 /// for the laid-out frame and the menu snapshot.
@@ -2078,7 +2080,7 @@ final class CellView: NSView {
         // in the window into a sideways scroll.
         let shift = e.modifierFlags.contains(.shift)
             || NSEvent.modifierFlags.contains(.shift)
-        if ProcessInfo.processInfo.environment["TK_SCROLL_DEBUG"] != nil {
+        if isScrollDebug {
             FileHandle.standardError.write("DBGSCROLL dx=\(dx) dy=\(dy) shift=\(shift) precise=\(e.hasPreciseScrollingDeltas) phase=\(e.phase.rawValue) mom=\(e.momentumPhase.rawValue)\n".data(using: .utf8)!)
         }
         // A zero-delta event still matters at gesture/momentum end — that's
@@ -2160,7 +2162,7 @@ final class CellView: NSView {
             cancelSpring()
             springTarget = smoothLines
         }
-        if ProcessInfo.processInfo.environment["TK_SCROLL_DEBUG"] != nil {
+        if isScrollDebug {
             FileHandle.standardError.write("DBGWHEEL win=\(r.winIdx) prevWin=\(prevWin) lines=\(smoothLines) prev=\(prevLines) max=\(smoothMax) target=\(springTarget) running=\(wasRunning) sinceStep=\(CACurrentMediaTime() - springLastStep)\n".data(using: .utf8)!)
         }
         // One line per unit of line-based delta (positive = up). The core's
