@@ -1458,6 +1458,29 @@ def test_retiring_a_server_leaves_the_list_at_once_and_drains_later() raises:
     d.shutdown()
 
 
+def test_close_project_retires_the_projects_language_servers() raises:
+    """Closing a project retires its language servers.
+
+    They are rooted at the project, and ``_ensure_lsp_for_extension`` reuses
+    a manager by language: left in ``lsp_managers`` they would outlive the
+    project and be handed the next project's files."""
+    var dir = _scratch_dir(String("close_project"))
+    var m = LspManager()
+    if not _start_mock(m, String("shutdown_ignored.json"), dir, String("")):
+        return
+
+    var d = Desktop()
+    d.detect_project_from(String("examples/hello.mojo"))
+    d.lsp_managers.append(m^)
+    d.lsp_languages.append(String("python"))
+
+    d.close_project()
+    assert_equal(len(d.lsp_managers), 0)
+    assert_equal(len(d.lsp_languages), 0)
+    assert_equal(len(d._closing_lsp), 1)
+    d.shutdown()
+
+
 def test_retire_lsp_manager_ignores_an_out_of_range_index() raises:
     """Retiring an index that isn't there is a no-op, not a crash. The
     callers compute the index from a focused-editor lookup that can race a

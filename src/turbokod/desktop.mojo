@@ -6884,6 +6884,19 @@ struct Desktop(Movable):
         # the next project re-attaches its own.
         self._detach_tmux_panes()
         self.test_pane.close()
+        # The language servers and the debug session are rooted at this
+        # project: left running they outlive it, and the next project's
+        # files would be handed to a server still rooted here
+        # (``_ensure_lsp_for_extension`` reuses a manager by language).
+        while len(self.lsp_managers) > 0:
+            self.retire_lsp_manager(len(self.lsp_managers) - 1)
+        self.dap.shutdown()
+        self._dap_exec_path = String("")
+        self._dap_exec_line = -1
+        # ... and so is the identifier index, otherwise only reset when
+        # Find Symbol is next opened under another root.
+        self.symbol_index.reset(String(""))
+        self._symbol_index_root = String("")
         self._test_output_held = False
         self._last_test_node_id = String("")
         self.targets = ProjectTargets()
