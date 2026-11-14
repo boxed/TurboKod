@@ -5736,6 +5736,36 @@ struct Desktop(Movable):
             String("Download"),
         )
 
+    def _start_download(
+        mut self, display: String, noun: String, cmd: String,
+    ) -> Bool:
+        """Start the download ``cmd`` of ``display``'s ``noun`` (grammar /
+        dictionary / docs) on the install runner, reporting on the status
+        bar. The runner is single-slot: if an install is already in flight
+        the conflict is surfaced there rather than queued, since the popup
+        only renders one at a time. True when it started."""
+        if self.install_runner.is_active():
+            self.status_bar.set_message(
+                String("Install busy; try ") + display + String(" ") + noun
+                    + String(" again in a moment"),
+                Attr(BLACK, LIGHT_GRAY),
+            )
+            return False
+        try:
+            self.install_runner.start(display + String(" ") + noun, cmd)
+        except:
+            self.status_bar.set_message(
+                String("Failed to start ") + noun + String(" download"),
+                Attr(LIGHT_RED, LIGHT_GRAY),
+            )
+            return False
+        self.status_bar.set_message(
+            String("Downloading ") + display + String(" ") + noun
+                + String("..."),
+            Attr(BLACK, LIGHT_GRAY),
+        )
+        return True
+
     def _start_grammar_install(mut self, lang: String):
         """Spawn the curl that drops the grammar JSON into the user
         config dir. Single-slot ``InstallRunner`` — if an LSP or docs
@@ -5748,27 +5778,8 @@ struct Desktop(Movable):
             return
         var spec = specs[spec_idx].copy()
         var cmd = grammar_install_command(spec.language_id, spec.url)
-        if self.install_runner.is_active():
-            self.status_bar.set_message(
-                String("Install busy; try ") + spec.display
-                    + String(" grammar again in a moment"),
-                Attr(BLACK, LIGHT_GRAY),
-            )
-            return
-        try:
-            self.install_runner.start(
-                spec.display + String(" grammar"), cmd,
-            )
+        if self._start_download(spec.display, String("grammar"), cmd):
             self._grammar_install_lang = lang
-            self.status_bar.set_message(
-                String("Downloading ") + spec.display + String(" grammar..."),
-                Attr(BLACK, LIGHT_GRAY),
-            )
-        except:
-            self.status_bar.set_message(
-                String("Failed to start grammar download"),
-                Attr(LIGHT_RED, LIGHT_GRAY),
-            )
 
     def _on_grammar_install_complete(
         mut self, result: InstallResult, screen: Rect,
@@ -5826,27 +5837,8 @@ struct Desktop(Movable):
             return
         var spec = specs[spec_idx]
         var cmd = dictionary_install_command(spec.language_id, spec.url)
-        if self.install_runner.is_active():
-            self.status_bar.set_message(
-                String("Install busy; try ") + spec.display
-                    + String(" dictionary again in a moment"),
-                Attr(BLACK, LIGHT_GRAY),
-            )
-            return
-        try:
-            self.install_runner.start(
-                spec.display + String(" dictionary"), cmd,
-            )
+        if self._start_download(spec.display, String("dictionary"), cmd):
             self._dict_install_lang = lang
-            self.status_bar.set_message(
-                String("Downloading ") + spec.display + String(" dictionary..."),
-                Attr(BLACK, LIGHT_GRAY),
-            )
-        except:
-            self.status_bar.set_message(
-                String("Failed to start dictionary download"),
-                Attr(LIGHT_RED, LIGHT_GRAY),
-            )
 
     def _do_dict_remove(mut self, lang: String):
         """Delete the on-disk wordlist for ``lang`` and reload the
@@ -16871,27 +16863,8 @@ struct Desktop(Movable):
         var spec = self.doc_specs[spec_idx].copy()
         var dest = self._doc_dest_dir(spec.slug)
         var cmd = docs_install_command(spec.slug, dest)
-        if self.install_runner.is_active():
-            self.status_bar.set_message(
-                String("Install busy; try ") + spec.display
-                    + String(" docs again in a moment"),
-                Attr(BLACK, LIGHT_GRAY),
-            )
-            return
-        try:
-            self.install_runner.start(
-                spec.display + String(" docs"), cmd,
-            )
+        if self._start_download(spec.display, String("docs"), cmd):
             self._doc_install_lang = lang
-            self.status_bar.set_message(
-                String("Downloading ") + spec.display + String(" docs..."),
-                Attr(BLACK, LIGHT_GRAY),
-            )
-        except:
-            self.status_bar.set_message(
-                String("Failed to start docs download"),
-                Attr(LIGHT_RED, LIGHT_GRAY),
-            )
 
     def _on_doc_install_complete(
         mut self, result: InstallResult, screen: Rect,
