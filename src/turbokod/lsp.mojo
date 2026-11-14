@@ -579,7 +579,9 @@ struct LspProcess(Copyable, Movable):
                     + _trace_preview(msg),
                 )
             return prefab
-        var scratch = alloc_zero_buffer(65536)
+        # Allocated on the first read: this runs every tick per server,
+        # and nearly every tick finds nothing to read.
+        var scratch = List[UInt8]()
         var first = True
         while True:
             var poll_budget: Int32
@@ -590,6 +592,8 @@ struct LspProcess(Copyable, Movable):
                 poll_budget = Int32(0)
             if not poll_stdin(self.stdout_fd, poll_budget):
                 return Optional[String]()
+            if len(scratch) == 0:
+                scratch = alloc_zero_buffer(65536)
             var n = read_into(self.stdout_fd, scratch, 65536)
             if n <= 0:
                 if self.trace_fd >= 0 and n == 0:
