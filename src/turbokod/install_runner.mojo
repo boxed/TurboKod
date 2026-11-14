@@ -26,7 +26,7 @@ from .painter import Painter
 from .colors import Attr, BLACK, LIGHT_GRAY, YELLOW
 from .geometry import Point, Rect
 from .lsp import LspProcess
-from .string_utils import display_columns, split_lines_no_trailing
+from .string_utils import display_columns
 from .window import paint_window_title_at
 from .posix import (
     close_fd, drain_fd, exit_code_from_status,
@@ -326,12 +326,24 @@ def _last_lines(text: String, n: Int) -> List[String]:
     output from a Windows-style installer) doesn't blow up the rightmost
     column with a control char.
     """
-    var lines = List[String]()
-    for line in split_lines_no_trailing(text):
+    # Walked back from the end: this runs every frame while the child
+    # does, and splitting the whole capture (up to 256 KB) to show a
+    # handful of lines was most of that frame.
+    var b = text.as_bytes()
+    var newest_first = List[String]()
+    var end = len(b)
+    while end > 0 and len(newest_first) < n:
+        var start = end
+        while start > 0 and b[start - 1] != 0x0A:
+            start -= 1
         # Strip trailing CR / spaces / tabs.
-        var t = String(line.rstrip())
+        var t = String(
+            String(StringSpan(unsafe_from_utf8=b[start:end])).rstrip(),
+        )
         if len(t.as_bytes()) > 0:
-            lines.append(t^)
-    if len(lines) <= n:
-        return lines^
-    return List[String](lines[len(lines) - n:])
+            newest_first.append(t^)
+        end = start - 1
+    var lines = List[String]()
+    for i in range(len(newest_first)):
+        lines.append(newest_first[len(newest_first) - 1 - i])
+    return lines^
