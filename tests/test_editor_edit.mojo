@@ -2348,10 +2348,9 @@ def test_kwarg_conceal_build_segment_collapses_and_shifts() raises:
 def test_undo_history_is_capped_by_bytes_not_just_entries() raises:
     """A big buffer's undo history is bounded in *bytes*, not entries.
 
-    Every entry is a whole-buffer copy, so the 500-entry cap alone meant
-    the cost of a full stack scaled with the file: 500 edits in a 1 MB
-    file retained ~500 MB per editor, times every open window. Typing is
-    all it took to get there.
+    An edit that rewrites every row leaves a whole-buffer entry, so with
+    the 500-entry cap alone a run of them would cost 500 x the file.
+    Each step here swaps the whole buffer for different text.
     """
     # ~1 MB buffer: 1024 lines of 1 KB. Assigning ``buffer.lines``
     # directly keeps the fixture out of the O(n^2) string-concat that
@@ -2359,17 +2358,23 @@ def test_undo_history_is_capped_by_bytes_not_just_entries() raises:
     var chunk = String("")
     for _ in range(64):
         chunk = chunk + String("0123456789abcdef")
+    var other_chunk = String("")
+    for _ in range(64):
+        other_chunk = other_chunk + String("fedcba9876543210")
     var lines = List[String]()
+    var other = List[String]()
     for _ in range(1024):
         lines.append(chunk)
+        other.append(other_chunk)
     var ed = Editor(String(""))
-    ed.buffer.lines = lines^
+    ed.buffer.lines = lines.copy()
     var per_snapshot = 0
     for i in range(ed.buffer.line_count()):
         per_snapshot += len(ed.buffer.lines[i].as_bytes()) + 1
     assert_true(per_snapshot > 1000000)
-    for _ in range(200):
+    for k in range(200):
         ed._push_undo()
+        ed.buffer.lines = other.copy() if k % 2 == 0 else lines.copy()
     var total = 0
     for i in range(len(ed._undo_stack)):
         total += ed._undo_stack[i].byte_size
@@ -2383,19 +2388,85 @@ def test_undo_history_is_capped_by_bytes_not_just_entries() raises:
     assert_equal(len(ed._undo_stack), _UNDO_STACK_BYTE_BUDGET // per_snapshot)
 
 
+def test_undo_history_costs_the_rows_edited_not_the_file() raises:
+    """History entries are deltas: only the newest holds the whole buffer,
+    the rest the rows their edit changed. Fifty one-row edits in a ~1 MB
+    buffer retain about one buffer, not fifty — and every state still
+    comes back, through undo and through redo, including edits that add
+    and remove rows."""
+    var chunk = String("")
+    for _ in range(64):
+        chunk = chunk + String("0123456789abcdef")
+    var lines = List[String]()
+    for i in range(1024):
+        lines.append(String(i) + chunk)
+    var ed = Editor(String(""))
+    ed.buffer.lines = lines^
+    var per_snapshot = 0
+    for i in range(ed.buffer.line_count()):
+        per_snapshot += len(ed.buffer.lines[i].as_bytes()) + 1
+    var states = List[String]()
+    for k in range(50):
+        states.append(ed.text_snapshot())
+        ed._push_undo()
+        if k % 5 == 3:
+            var added = List[String]()
+            added.append(String("added ") + String(k))
+            added.append(String("and ") + String(k))
+            ed.buffer.insert_rows(k * 7, added^)
+        elif k % 5 == 4:
+            ed.buffer.delete_rows(k * 11, 3)
+        else:
+            ed.buffer.lines[k * 13] = String("edit ") + String(k)
+    states.append(ed.text_snapshot())
+    assert_equal(len(ed._undo_stack), 50)
+    var total = 0
+    for i in range(len(ed._undo_stack)):
+        total += ed._undo_stack[i].byte_size
+    assert_true(total < 2 * per_snapshot)
+    assert_false(ed._undo_stack[49].is_delta)
+    assert_true(ed._undo_stack[48].is_delta)
+    # Back to the start, one state at a time...
+    for k in range(50):
+        assert_true(ed.undo())
+        assert_true(ed.text_snapshot() == states[49 - k])
+    assert_false(ed.undo())
+    # ...and forward again.
+    for k in range(50):
+        assert_true(ed.redo())
+        assert_true(ed.text_snapshot() == states[k + 1])
+    assert_false(ed.redo())
+    # Part way back, then a new edit: the remaining history still holds.
+    for _ in range(20):
+        assert_true(ed.undo())
+    ed._push_undo()
+    ed.buffer.lines[0] = String("branch")
+    assert_true(ed.undo())
+    assert_true(ed.text_snapshot() == states[30])
+    assert_true(ed.undo())
+    assert_true(ed.text_snapshot() == states[29])
+
+
 def test_undo_history_keeps_a_floor_of_entries_for_huge_files() raises:
     """A file so big that fewer than the floor fit the budget still keeps
     the floor's worth of undo steps."""
     var chunk = String("")
     for _ in range(64):
         chunk = chunk + String("0123456789abcdef")
+    var other_chunk = String("")
+    for _ in range(64):
+        other_chunk = other_chunk + String("fedcba9876543210")
     var lines = List[String]()
+    var other = List[String]()
     for _ in range(10 * 1024):  # ~10 MB: 6 fit the budget
         lines.append(chunk)
+        other.append(other_chunk)
     var ed = Editor(String(""))
-    ed.buffer.lines = lines^
-    for _ in range(_UNDO_STACK_MIN_ENTRIES + 3):
+    ed.buffer.lines = lines.copy()
+    # Every step rewrites the whole buffer, so every entry is its size.
+    for k in range(_UNDO_STACK_MIN_ENTRIES + 3):
         ed._push_undo()
+        ed.buffer.lines = other.copy() if k % 2 == 0 else lines.copy()
     assert_equal(len(ed._undo_stack), _UNDO_STACK_MIN_ENTRIES)
 
 

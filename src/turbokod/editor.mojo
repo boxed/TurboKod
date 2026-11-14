@@ -865,24 +865,23 @@ struct TextBuffer(Copyable, Movable):
 
 
 comptime _UNDO_STACK_LIMIT = 500
-"""Cap per-window undo history. Each entry holds a full ``List[String]`` copy
-of the buffer plus four ints, so a few hundred steps is comfortably more than
-any realistic editing session needs."""
+"""Cap per-window undo history. A few hundred steps is comfortably more than
+any realistic editing session needs. Only the newest entry holds the whole
+buffer; the ones below it hold the rows that differ from the entry above
+(``EditorSnapshot.compress``)."""
 
 
 comptime _UNDO_STACK_BYTE_BUDGET = 64 * 1024 * 1024
 """Second cap on undo history, in bytes of buffered text.
 
-The entry count alone doesn't bound memory: an entry is a *whole-buffer*
-copy, so the cost of a full stack scales with the file. 500 edits in a
-1 MB file retained ~500 MB per editor, times every open window — the
-largest single memory exposure in the product, and reached by nothing
-more exotic than typing in a big file.
+The entry count alone doesn't bound memory. Entries are deltas (the rows
+an edit changed), so ordinary editing costs little whatever the file's
+size — but an edit that rewrites every row (Replace All, a reformat, a
+reload) leaves an entry the size of the buffer, and a run of those would
+cost ``entries x file size``.
 
-At 64 MB the common case is unaffected (500 steps of a 50 KB file is
-~25 MB, well under), and a 1 MB file keeps ~64 steps instead of 500.
-The real fix is storing edit deltas rather than snapshots; this bounds
-the damage without that rewrite."""
+Before entries were deltas each one was a whole-buffer copy: 500 edits in
+a 1 MB file retained ~500 MB per editor, times every open window."""
 
 
 comptime _UNDO_STACK_MIN_ENTRIES = 8
@@ -1177,19 +1176,36 @@ struct EditorSnapshot(Copyable, Movable):
     the buffer contents and the full caret list. Scroll position is
     excluded on purpose — undoing shouldn't yank the viewport around if
     the user has scrolled since the edit. ``selections`` mirrors the
-    Editor's field of the same name (non-empty, primary at index 0)."""
+    Editor's field of the same name (non-empty, primary at index 0).
+
+    On a history stack only the top entry holds the whole buffer. Each
+    entry below is a *delta* against the one above it — the rows between
+    their common prefix and suffix — so a stack costs the rows the edits
+    touched rather than ``entries x file size``. ``_history_push`` /
+    ``_history_pop`` keep that shape: pushing compresses the old top
+    against the new one, popping rebuilds the new top from the entry
+    taken off. A delta is never read against anything but the entry it
+    was compressed against, so what the buffer did in between (a typing
+    run, an edit that pushed nothing) can't corrupt it."""
     var lines: List[String]
+    """The whole buffer, or with ``is_delta`` its rows
+    ``[prefix, len - suffix)``."""
     var selections: List[Caret]
     var marks: List[Bool]
     """The buffer's bookmarks (``TextBuffer.marks``), for the rows
     ``TextBuffer.replace_lines`` can't carry across the restore."""
     var byte_size: Int
-    """Bytes of text this snapshot holds, stamped at construction.
+    """Bytes of text this snapshot holds, stamped whenever ``lines`` is.
 
     Cached rather than recomputed because the byte-budget trim runs on
     every push: measuring the stack by walking each entry's lines would
     be O(total bytes) per keystroke, while summing a stored int per entry
     is O(entries) — a few hundred integer adds."""
+    var is_delta: Bool
+    var prefix: Int
+    """With ``is_delta``: how many leading rows are the base's."""
+    var suffix: Int
+    """With ``is_delta``: how many trailing rows are the base's."""
 
     def __init__(
         out self,
@@ -1197,13 +1213,81 @@ struct EditorSnapshot(Copyable, Movable):
         var selections: List[Caret],
         var marks: List[Bool],
     ):
-        var total = 0
-        for i in range(len(lines)):
-            total += len(lines[i].as_bytes()) + 1
         self.lines = lines^
         self.selections = selections^
         self.marks = marks^
+        self.byte_size = 0
+        self.is_delta = False
+        self.prefix = 0
+        self.suffix = 0
+        self._stamp_size()
+
+    def _stamp_size(mut self):
+        var total = 0
+        for i in range(len(self.lines)):
+            total += len(self.lines[i].as_bytes()) + 1
         self.byte_size = total
+
+    def compress(mut self, base: List[String]):
+        """Keep only the rows that differ from ``base`` (the entry pushed
+        on top of this one)."""
+        if self.is_delta:
+            return
+        var n = len(self.lines)
+        var m = len(base)
+        var p = 0
+        while p < n and p < m and self.lines[p] == base[p]:
+            p += 1
+        var sfx = 0
+        while sfx < n - p and sfx < m - p \
+                and self.lines[n - 1 - sfx] == base[m - 1 - sfx]:
+            sfx += 1
+        var middle = List[String](capacity=n - p - sfx)
+        for i in range(p, n - sfx):
+            middle.append(self.lines[i])
+        self.lines = middle^
+        self.prefix = p
+        self.suffix = sfx
+        self.is_delta = True
+        self._stamp_size()
+
+    def materialize(mut self, base: List[String]):
+        """Undo ``compress``: ``base`` must be the lines it was compressed
+        against."""
+        if not self.is_delta:
+            return
+        var m = len(base)
+        var full = List[String](
+            capacity=self.prefix + len(self.lines) + self.suffix,
+        )
+        for i in range(self.prefix):
+            full.append(base[i])
+        for i in range(len(self.lines)):
+            full.append(self.lines[i])
+        for i in range(m - self.suffix, m):
+            full.append(base[i])
+        self.lines = full^
+        self.prefix = 0
+        self.suffix = 0
+        self.is_delta = False
+        self._stamp_size()
+
+
+def _history_push(mut stack: List[EditorSnapshot], var snap: EditorSnapshot):
+    """Put the whole-buffer ``snap`` on ``stack``, compressing the entry
+    it covers against it."""
+    if len(stack) > 0:
+        stack[len(stack) - 1].compress(snap.lines)
+    stack.append(snap^)
+
+
+def _history_pop(mut stack: List[EditorSnapshot]) -> EditorSnapshot:
+    """Take the top (whole-buffer) entry off the non-empty ``stack``,
+    rebuilding the one below it into the new whole-buffer top."""
+    var snap = stack.pop()
+    if len(stack) > 0:
+        stack[len(stack) - 1].materialize(snap.lines)
+    return snap^
 
 
 # --- Editor widget ----------------------------------------------------------
@@ -3039,7 +3123,7 @@ struct Editor(Copyable, Movable):
         the standard linear-history model and matches what users expect
         from a Turbo-Vision-era editor.
         """
-        self._undo_stack.append(self._snapshot())
+        _history_push(self._undo_stack, self._snapshot())
         self._trim_undo_stack()
         self._redo_stack = List[EditorSnapshot]()
         # Pushing a snapshot ends any typing run that was in flight. The
@@ -3051,8 +3135,9 @@ struct Editor(Copyable, Movable):
         """Drop the oldest history until it fits both caps.
 
         Two caps, because the entry count alone doesn't bound memory:
-        every entry is a whole-buffer copy, so a full stack costs
-        ``entries x file size`` (see ``_UNDO_STACK_BYTE_BUDGET``).
+        an edit that rewrites the whole buffer leaves a whole-buffer
+        entry, so a stack of those costs ``entries x file size`` (see
+        ``_UNDO_STACK_BYTE_BUDGET``).
 
         Dropping from the front is ``pop(0)`` — O(n) in *element moves*,
         with n at most a few hundred. The rebuild-a-tail-slice this
@@ -3364,8 +3449,8 @@ struct Editor(Copyable, Movable):
             return False
         if len(self._undo_stack) == 0:
             return False
-        var snap = self._undo_stack.pop()
-        self._redo_stack.append(self._snapshot())
+        var snap = _history_pop(self._undo_stack)
+        _history_push(self._redo_stack, self._snapshot())
         self._restore(snap^)
         return True
 
@@ -3375,8 +3460,8 @@ struct Editor(Copyable, Movable):
             return False
         if len(self._redo_stack) == 0:
             return False
-        var snap = self._redo_stack.pop()
-        self._undo_stack.append(self._snapshot())
+        var snap = _history_pop(self._redo_stack)
+        _history_push(self._undo_stack, self._snapshot())
         # Redo pushes onto the undo stack too, so it needs the same trim —
         # otherwise a long undo/redo walk grows past both caps. The redo
         # stack itself needs none: it only ever receives what ``undo``
@@ -4977,7 +5062,7 @@ struct Editor(Copyable, Movable):
         else:
             # Nothing changed — roll back the speculative snapshot so the
             # undo stack stays in sync and redo isn't clobbered.
-            _ = self._undo_stack.pop()
+            _ = _history_pop(self._undo_stack)
         return count
 
     # --- selection state ---------------------------------------------------
