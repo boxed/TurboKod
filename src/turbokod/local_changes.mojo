@@ -1655,6 +1655,10 @@ struct LocalChanges(Movable):
     # is the first visible line; it starts pinned to the bottom, since the
     # part you want is what the command said last.
     var overlay_output: String
+    # ``overlay_output`` split into lines, for the paint: built once per
+    # text (``_overlay_lines_valid``), not on every frame it is shown.
+    var _overlay_lines: List[String]
+    var _overlay_lines_valid: Bool
     var overlay_output_scroll: Int
     # ``http(s)://`` spans in the *visible* rows of that scrollback, in
     # absolute screen coordinates. A remote that answers a push with a
@@ -1829,6 +1833,8 @@ struct LocalChanges(Movable):
         self.flash_message = String("")
         self._flash_until_ms = 0
         self.overlay_output = String("")
+        self._overlay_lines = List[String]()
+        self._overlay_lines_valid = False
         self.overlay_output_scroll = 0
         self._output_links = List[OutputLink]()
         self._output_kind = GIT_OUT_OTHER
@@ -2127,6 +2133,8 @@ struct LocalChanges(Movable):
         self.flash_message = String("")
         self._flash_until_ms = 0
         self.overlay_output = String("")
+        self._overlay_lines = List[String]()
+        self._overlay_lines_valid = False
         self.overlay_output_scroll = 0
         self._output_links = List[OutputLink]()
         self._output_kind = GIT_OUT_OTHER
@@ -3201,8 +3209,10 @@ struct LocalChanges(Movable):
             container_bounds.b.x - 2, container_bounds.b.y - 1,
         )
 
-    def _output_overlay_lines(self) -> List[String]:
-        return split_lines(self.overlay_output)
+    def _ensure_overlay_lines(mut self):
+        if not self._overlay_lines_valid:
+            self._overlay_lines = split_lines(self.overlay_output)
+            self._overlay_lines_valid = True
 
     def _paint_output_overlay(
         mut self, mut canvas: Canvas, container_bounds: Rect,
@@ -3233,7 +3243,11 @@ struct LocalChanges(Movable):
         paint_window_title_at(
             canvas, Point(rect.a.x + 1, rect.a.y), title, frame, frame,
         )
-        var lines = self._output_overlay_lines()
+        # Lent out of ``self`` for the paint (the loop below writes
+        # ``_output_links``) and handed back at the end.
+        self._ensure_overlay_lines()
+        var lines = List[String]()
+        swap(lines, self._overlay_lines)
         var view_h = rect.height() - 2
         var max_scroll = len(lines) - view_h
         if max_scroll < 0:
@@ -3276,6 +3290,7 @@ struct LocalChanges(Movable):
         _ = painter.put_text(
             canvas, Point(hx, rect.b.y - 1), hint, frame,
         )
+        swap(lines, self._overlay_lines)
 
     def _handle_output_overlay_mouse(mut self, event: Event):
         """Open the URL under a click in the full-screen output log.
@@ -4890,6 +4905,7 @@ struct LocalChanges(Movable):
         self.overlay_message = String("")
         self.overlay_action = String("")
         self.overlay_output = text^
+        self._overlay_lines_valid = False
         # Clamped against the real viewport on the first paint; a large
         # number just means "as far down as it goes".
         self.overlay_output_scroll = 1 << 30
@@ -4959,6 +4975,8 @@ struct LocalChanges(Movable):
         self.overlay_message = String("")
         self.overlay_action = String("")
         self.overlay_output = String("")
+        self._overlay_lines = List[String]()
+        self._overlay_lines_valid = False
         self.overlay_output_scroll = 0
         self._output_links = List[OutputLink]()
         # Queued-but-unconfirmed targets die with the overlay.
