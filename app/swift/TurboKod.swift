@@ -11757,6 +11757,15 @@ enum Platinum {
 
     /// A window's key state changed: redraw everything in it in the new
     /// state (a `PNode` also restyles its AppKit fields).
+    /// Calls `onChange` when `win` gains or loses key. The caller keeps
+    /// the tokens and removes them when the window goes: a block observer
+    /// isn't removed by `removeObserver(self)`.
+    static func observeKeyState(of win: NSWindow, _ onChange: @escaping () -> Void) -> [NSObjectProtocol] {
+        [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification].map {
+            NotificationCenter.default.addObserver(forName: $0, object: win, queue: .main) { _ in onChange() }
+        }
+    }
+
     static func activeChanged(_ v: NSView) {
         v.needsDisplay = true
         (v as? PNode)?.activeChanged()
@@ -14401,6 +14410,8 @@ final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
     /// A picker (`LARGE`): most of its window rather than its natural size.
     private var large = false
     private var parentFrame: NSRect?
+    /// Block observers answer to their tokens, not to `removeObserver(self)`.
+    private var keyObservers: [NSObjectProtocol] = []
 
     var window: NSWindow { win }
     var handle: Int64 { view?.handle ?? 0 }
@@ -14424,11 +14435,8 @@ final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
         frameView.closable = asWindow
         frameView.onClose = { [weak self] in self?.cancel() }
         win.contentView = frameView
-        let nc = NotificationCenter.default
-        for n in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
-            nc.addObserver(forName: n, object: win, queue: .main) { [weak self] _ in
-                if let f = self?.frameView { Platinum.activeChanged(f) }
-            }
+        keyObservers = Platinum.observeKeyState(of: win) { [weak self] in
+            if let f = self?.frameView { Platinum.activeChanged(f) }
         }
     }
 
@@ -14463,7 +14471,8 @@ final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
         retroShadow = nil
         win.parent?.removeChildWindow(win)
         win.orderOut(nil)
-        NotificationCenter.default.removeObserver(self)
+        keyObservers.forEach(NotificationCenter.default.removeObserver)
+        keyObservers = []
     }
 
     /// The dialog over a window that just took the key back (a click on the
@@ -15103,6 +15112,7 @@ final class PlatinumGitView: NSObject, GitSurface {
     private var placement: GitWindowPlacement?
     var gitWindow: NSWindow { win }
     var gitPlacement: GitWindowPlacement? { placement }
+    private var keyObservers: [NSObjectProtocol] = []
 
     init(view: CellView) {
         self.view = view
@@ -15121,10 +15131,8 @@ final class PlatinumGitView: NSObject, GitSurface {
         win.contentView = frameView
         body.git = self
         frameView.addSubview(body)
-        for n in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
-            NotificationCenter.default.addObserver(forName: n, object: win, queue: .main) { [weak self] _ in
-                if let f = self?.frameView { Platinum.activeChanged(f) }
-            }
+        keyObservers = Platinum.observeKeyState(of: win) { [weak self] in
+            if let f = self?.frameView { Platinum.activeChanged(f) }
         }
         setUpLists()
     }
@@ -15213,7 +15221,8 @@ final class PlatinumGitView: NSObject, GitSurface {
         alert?.dismiss()
         alert = nil
         win.orderOut(nil)
-        NotificationCenter.default.removeObserver(self)
+        keyObservers.forEach(NotificationCenter.default.removeObserver)
+        keyObservers = []
     }
 
     func layoutBody() {
