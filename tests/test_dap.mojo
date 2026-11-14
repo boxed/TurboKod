@@ -1931,6 +1931,28 @@ def test_breakpoint_store_per_user_path() raises:
     )
 
 
+def test_dap_reset_for_restart_keeps_the_breakpoints() raises:
+    """A restart drops the session, not what the user set up: the
+    breakpoints (and their gutter state) are still there for the next
+    run, while the manager is otherwise back to not started."""
+    var mgr = DapManager()
+    mgr.toggle_breakpoint(String("/tmp/a.py"), 3)
+    mgr.toggle_breakpoint(String("/tmp/b.py"), 7)
+    mgr.failure_reason = String("stale")
+    mgr.reset_for_restart()
+    assert_equal(mgr.breakpoint_count(), 2)
+    assert_equal(mgr.breakpoint_path_at(0), String("/tmp/a.py"))
+    assert_equal(mgr.breakpoint_line_at(1), 7)
+    assert_true(mgr.breakpoint_enabled_at(0))
+    var info = mgr.breakpoints_info_for(String("/tmp/b.py"))
+    assert_equal(len(info[0]), 1)
+    assert_equal(mgr.failure_reason, String(""))
+    assert_false(mgr.is_active())
+    # A second reset is as good as the first.
+    mgr.reset_for_restart()
+    assert_equal(mgr.breakpoint_count(), 2)
+
+
 def test_dap_reset_for_restart_closes_the_previous_sessions_fds() raises:
     """Restarting after a FAILED / TERMINATED session hands the old
     adapter's descriptors back.

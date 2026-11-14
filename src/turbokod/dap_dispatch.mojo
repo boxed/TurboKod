@@ -920,99 +920,32 @@ struct DapManager(Copyable, Movable):
         whether or not the child is still up, so a caller that *did*
         shutdown first pays nothing.
         """
-        # Discard the dead child + pipes wholesale by giving back a
-        # fresh inert client — but hand the old one's pid + fds back
-        # first, since nothing else can reach them once it's replaced.
+        # Hand the old child's pid + fds back first: nothing else can reach
+        # them once the manager is replaced. Same for a subprocess attach —
+        # it holds a connected TCP socket (``LspProcess.from_socket``), and
+        # because its ``pid`` is the ``-1`` socket-mode sentinel,
+        # ``terminate`` is the only thing that ever closes it. ``shutdown``
+        # tears both down too, but that's the call the restart paths skip.
         self.client.terminate()
-        self.client = DapClient(LspProcess())
-        self.state = _STATE_NOT_STARTED
-        self.failure_reason = String("")
-        self.adapter_name = String("")
-        self.language_id = String("")
-        self._inflight_initialize = 0
-        self._inflight_launch = 0
-        self._inflight_config_done = 0
-        self._inflight_threads = 0
-        self._inflight_stack_trace = 0
-        self._inflight_scopes = 0
-        self._inflight_variables = 0
-        self._supports_configuration_done = True
-        self._supports_terminate_request = False
-        self._got_initialized_event = False
-        self._launch_request_kind = DAP_REQUEST_LAUNCH
+        self._subprocess.client.terminate()
+        # Everything transient goes back to what ``__init__`` builds — one
+        # list of field defaults, where this used to be a third copy of it
+        # that a new field had to be remembered in.
+        var fresh = DapManager()
+        swap(fresh._bp_path, self._bp_path)
+        swap(fresh._bp_line, self._bp_line)
+        swap(fresh._bp_condition, self._bp_condition)
+        swap(fresh._bp_enabled, self._bp_enabled)
+        swap(fresh._bp_wait_for, self._bp_wait_for)
+        swap(fresh._exception_filters, self._exception_filters)
+        swap(fresh._stderr_log, self._stderr_log)
         # Reset the per-session ``armed`` latches: dependent BPs go
         # back to "armed iff no wait-for". Without this a BP that was
         # armed by its trigger in run N would stay live in run N+1
         # before the trigger re-fires.
-        var rearmed = List[Bool]()
-        for k in range(len(self._bp_wait_for)):
-            rearmed.append(len(self._bp_wait_for[k].as_bytes()) == 0)
-        self._bp_armed = rearmed^
-        self._inflight_set_breakpoints_seqs = List[Int]()
-        self._inflight_set_breakpoints_paths = List[String]()
-        self._inflight_set_breakpoints_lines = List[List[Int]]()
-        self._bp_errors = List[DapBreakpointError]()
-        self._inflight_evaluate_seqs = List[Int]()
-        self._inflight_evaluate_exprs = List[String]()
-        self._inflight_evaluate_contexts = List[String]()
-        self._evaluations_expr = List[String]()
-        self._evaluations_value = List[String]()
-        self._evaluations_type = List[String]()
-        self._evaluations_context = List[String]()
-        self._evaluations_is_error = List[Bool]()
-        self._inflight_test_eval_seqs = List[Int]()
-        self._supports_completions = False
-        self._inflight_completions = 0
-        self._completions_req_text = String("")
-        self._completions_req_column = 0
-        self._completions = List[DapCompletion]()
-        self._completions_ready = False
-        self._completions_text = String("")
-        self._completions_column = 0
-        self._inflight_keys_eval = 0
-        self._inflight_keys_vars = 0
-        self._keys_req_expr = String("")
-        self._keys = List[String]()
-        self._keys_ready = False
-        self._keys_expr = String("")
-        self._keys_stage = 0
-        self._keys_via_sub = False
-        self._keys_frame_id = 0
-        self._inflight_test_eval_exprs = List[String]()
-        self._test_eval_expr = List[String]()
-        self._test_eval_value = List[String]()
-        self._test_eval_error = List[Bool]()
-        self._pending_cond_exc_condition = String("")
-        self._pending_cond_exc_error = String("")
-        self._stopped = Optional[DapStopped]()
-        self._is_stopped = False
-        self._continued_pending = False
-        self._output_events = List[DapOutput]()
-        self._terminated_pending = False
-        self._pending_threads = List[DapThread]()
-        self._pending_threads_ready = False
-        self._pending_stack = List[DapStackFrame]()
-        self._pending_stack_ready = False
-        self._pending_scopes = List[DapScope]()
-        self._pending_scopes_ready = False
-        self._pending_vars = List[DapVariable]()
-        self._pending_vars_ready = False
-        self._pending_launch_args = JsonValue()
-        self.spawn_argv = List[String]()
-        self._state_entered_ms = 0
-        self._last_heartbeat_ms = 0
-        # Same reasoning as ``client`` above: a subprocess attach holds a
-        # connected TCP socket (``LspProcess.from_socket``), and because
-        # its ``pid`` is the ``-1`` socket-mode sentinel, ``terminate``
-        # is the only thing that ever closes it. ``shutdown`` tears this
-        # down too — but that's the call the restart paths skip.
-        self._subprocess.client.terminate()
-        self._subprocess = SubprocessAttach()
-        self._last_inspect_in_subprocess = False
-        self._stop_in_subprocess = False
-        self._last_stopped_thread_id = 0
-        self._oneshot_bp_path = String("")
-        self._oneshot_bp_line = -1
+        for k in range(len(fresh._bp_wait_for)):
+            fresh._bp_armed.append(len(fresh._bp_wait_for[k].as_bytes()) == 0)
+        self = fresh^
 
     # --- breakpoints -----------------------------------------------------
 
