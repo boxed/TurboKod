@@ -273,7 +273,7 @@ from .editor import BreakpointMenuRequest, Editor, ON_SAVE_DIAGNOSTIC_CODE
 from .on_save_location import locate_on_save_error
 from .window import (
     BottomDockedPanel, DOCK_MIN_HEIGHT, MIN_WIN_H, MIN_WIN_W,
-    coalesce_dock_states,
+    coalesce_dock_states, dock_coalesces,
     PANEL_STATE_MAXIMIZED, PANEL_STATE_MINIMIZED, PANEL_STATE_NORMAL,
     TitleCommand, Window, WindowManager,
     close_button_clicked, compute_display_titles, hit_title_command,
@@ -3128,6 +3128,21 @@ struct Desktop(Movable):
         """At most one maximized pane in the bottom dock, the others
         minimized beside it (see ``coalesce_dock_states``). Runs each
         frame before layout, over the visible panes, top to bottom."""
+        # Nearly every frame there is nothing to coalesce — no pane
+        # maximized, yielded or acknowledged — and copying each dock out
+        # and back (its command and hit lists with it) is all this did.
+        var pending = self.debug_pane.visible \
+            and dock_coalesces(self.debug_pane.dock)
+        if self.find_results_pane.visible \
+                and dock_coalesces(self.find_results_pane.dock):
+            pending = True
+        if self.test_pane.visible and dock_coalesces(self.test_pane.dock):
+            pending = True
+        for i in range(len(self.terminal_panes)):
+            if dock_coalesces(self.terminal_panes[i].dock):
+                pending = True
+        if not pending:
+            return
         var docks = List[BottomDockedPanel]()
         for i in range(len(self.terminal_panes)):
             docks.append(self.terminal_panes[i].dock.copy())

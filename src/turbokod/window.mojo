@@ -668,6 +668,13 @@ struct BottomDockedPanel(Copyable, Movable):
         return True
 
 
+def dock_coalesces(dock: BottomDockedPanel) -> Bool:
+    """Whether ``coalesce_dock_states`` has anything to do for ``dock``:
+    with no pane maximized, yielded or acknowledged it changes nothing."""
+    return dock.state == PANEL_STATE_MAXIMIZED \
+        or dock.yielded != PANEL_STATE_NONE or dock.max_acked
+
+
 def coalesce_dock_states(mut docks: List[BottomDockedPanel]):
     """Keep the bottom dock to at most one maximized pane, with every
     other pane minimized beside it, still in its place in the stack, so
