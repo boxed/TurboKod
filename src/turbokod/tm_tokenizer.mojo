@@ -445,7 +445,7 @@ def _tokenize_line_scan(
             # frame's outer scope, then overlay any ``endCaptures``
             # on top, then pop.
             var top = stack[len(stack) - 1]
-            var pat = grammar.patterns[top.pattern_idx].copy()
+            ref pat = grammar.patterns[top.pattern_idx]
             var attr = _attr_for_scopes(top.scope_chain, pat.name)
             if match_end > match_start:
                 out.append(Highlight(row, match_start, match_end, attr))
@@ -457,7 +457,7 @@ def _tokenize_line_scan(
             pos = match_end
             continue
 
-        var pat = grammar.patterns[cand.pattern_idx].copy()
+        ref pat = grammar.patterns[cand.pattern_idx]
         if pat.kind == PATTERN_MATCH:
             var chain = _top_chain(stack)
             var attr = _attr_for_scopes(chain, pat.name)
@@ -529,7 +529,7 @@ def _tokenize_line_scan(
     var line_nl = line + String("\n") + next_line
     while len(stack) > 0:
         var top = stack[len(stack) - 1]
-        var top_pat = grammar.patterns[top.pattern_idx].copy()
+        ref top_pat = grammar.patterns[top.pattern_idx]
         if top_pat.kind != PATTERN_BEGIN_END:
             break
         # Mirror the main loop: a back-referencing end uses the frame's
@@ -629,13 +629,13 @@ def _process_while_frames(
     # BEGIN_END frames below it — they aren't gated by line starts.
     var idx = 0
     while idx < len(stack):
-        var pat = grammar.patterns[stack[idx].pattern_idx].copy()
+        ref pat = grammar.patterns[stack[idx].pattern_idx]
         if pat.kind == PATTERN_BEGIN_WHILE:
             break
         idx += 1
     # Walk upward through consecutive while-frames.
     while idx < len(stack):
-        var pat = grammar.patterns[stack[idx].pattern_idx].copy()
+        ref pat = grammar.patterns[stack[idx].pattern_idx]
         if pat.kind != PATTERN_BEGIN_WHILE:
             # Non-while frame between while-frames — leave the rest
             # alone (rare but legal).
@@ -700,7 +700,7 @@ def _emit_captures(
     if len(match_name.as_bytes()) > 0:
         inner_chain = _join_scope(chain, match_name)
     for ci in range(len(caps)):
-        var cap = caps[ci].copy()
+        ref cap = caps[ci]
         if cap.group < 0 or cap.group >= m.group_count():
             continue
         var gs = m.group_starts[cap.group]
@@ -742,7 +742,7 @@ def _emit_capture_subtokens(
         var best_idx = -1
         var best_match = OnigMatch(-1, -1, List[Int](), List[Int]())
         for ci in range(len(pattern_idxs)):
-            var pat = grammar.patterns[pattern_idxs[ci]].copy()
+            ref pat = grammar.patterns[pattern_idxs[ci]]
             if pat.kind != PATTERN_MATCH:
                 # Capture-group ``patterns`` only run a single
                 # tokenization pass; ``begin``/``end`` and INCLUDE
@@ -763,7 +763,7 @@ def _emit_capture_subtokens(
         var me = best_match.end
         if me == ms:
             me = ms + 1
-        var pat = grammar.patterns[pattern_idxs[best_idx]].copy()
+        ref pat = grammar.patterns[pattern_idxs[best_idx]]
         var attr = _attr_for_scopes(chain, pat.name)
         out.append(Highlight(
             row, sub_start + ms, sub_start + me, attr,
@@ -943,7 +943,7 @@ def _active_candidates(
     var out = List[_Cand]()
     if len(stack) > 0:
         var top = stack[len(stack) - 1]
-        var top_pat = grammar.patterns[top.pattern_idx].copy()
+        ref top_pat = grammar.patterns[top.pattern_idx]
         # ``BEGIN_WHILE`` frames don't have an end-regex candidate —
         # their lifetime is gated by the per-line ``while`` check
         # in ``_process_while_frames``, not an inline match.
@@ -975,7 +975,7 @@ def _expand_into(
         if seen[s] == pattern_idx:
             return
     seen.append(pattern_idx)
-    var pat = grammar.patterns[pattern_idx].copy()
+    ref pat = grammar.patterns[pattern_idx]
     if pat.kind == PATTERN_INCLUDE:
         var t = pat.include_target
         if t == String("$self"):
@@ -996,7 +996,7 @@ def _expand_into(
         # the new external table not catching the include).
         var ext_idx = grammar.lookup_external(t)
         if ext_idx >= 0:
-            var ext_roots = grammar.external_roots[ext_idx].copy()
+            ref ext_roots = grammar.external_roots[ext_idx]
             for k in range(len(ext_roots)):
                 _expand_into(grammar, ext_roots[k], out, seen)
         return
