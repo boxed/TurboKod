@@ -144,7 +144,7 @@ struct SpellingDialog(Movable):
         self.active = False
         self.submitted = False
         self.action = SPELLING_NONE
-        self.scan.cancel()
+        self.scan.clear()
         self._reset_library_check()
         self.order = List[Int]()
         self._clear_selection()

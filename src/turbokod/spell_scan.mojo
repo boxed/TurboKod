@@ -274,6 +274,19 @@ struct ProjectSpellScan(Movable):
         """Stop. Idempotent."""
         self.active = False
 
+    def clear(mut self):
+        """Stop and drop the result — every project path, word and
+        occurrence — rather than hold it until the next ``start``. The
+        version moves so a reader's cached order can't match a later scan."""
+        self.active = False
+        self.files = List[String]()
+        self.sizes = List[Int]()
+        self.words = List[SpellScanWord]()
+        self.occurrences = List[List[SpellOccurrence]]()
+        self.version += 1
+        for i in range(len(self._buckets)):
+            self._buckets[i] = List[Int]()
+
     def progress(self) -> Float64:
         """Fraction of the project's bytes finished, 0..1."""
         if self.bytes_total <= 0:
