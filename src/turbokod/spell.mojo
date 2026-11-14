@@ -255,6 +255,11 @@ struct Speller(Movable):
         var dir = user_dictionaries_root()
         if len(dir.as_bytes()) == 0:
             return
+        self._load_wordlist_dir(dir)
+
+    def _load_wordlist_dir(mut self, dir: String):
+        """Load every ``.txt`` wordlist in ``dir``: one word per line. A
+        missing or empty directory, or an unreadable file, is skipped."""
         var entries = list_directory(dir)
         if len(entries) == 0:
             return
@@ -289,29 +294,7 @@ struct Speller(Movable):
         packaging) the load is silently skipped — the OS list and user
         dict still work."""
         var dir = String("src/turbokod/data/wordlists")
-        var entries = list_directory(dir)
-        if len(entries) == 0:
-            return
-        for i in range(len(entries)):
-            var name = entries[i]
-            if not name.endswith(".txt"):
-                continue
-            var path = join_path(dir, name)
-            try:
-                var content = read_file(path)
-                if len(content.as_bytes()) == 0:
-                    continue
-                var lines = split_lines_no_trailing(content)
-                var filtered = List[String]()
-                for j in range(len(lines)):
-                    var w = _strip_word(lines[j])
-                    if len(w.as_bytes()) == 0:
-                        continue
-                    filtered.append(w^)
-                if len(filtered) > 0:
-                    self._load_words(filtered)
-            except:
-                continue
+        self._load_wordlist_dir(dir)
 
     def set_project(mut self, project_root: String):
         """Swap ``project_buckets`` to the dictionary for ``project_root``.
