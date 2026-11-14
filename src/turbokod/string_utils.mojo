@@ -973,3 +973,25 @@ def hex_digit_value(b: Int) -> Int:
 def hex_digit_byte(n: Int) -> Int:
     """Lowercase ASCII hex digit for nibble ``n`` (0..15)."""
     return 0x30 + n if n < 10 else 0x61 + (n - 10)
+
+
+def fnv_start() -> UInt64:
+    """The FNV-1a offset basis: where a ``fnv_int`` / ``fnv_str`` chain
+    starts. For a cheap "did any of this change?" fingerprint of state
+    that would otherwise be serialized just to be compared."""
+    return UInt64(0xCBF29CE484222325)
+
+
+def fnv_int(h: UInt64, v: Int) -> UInt64:
+    """``h`` with the integer ``v`` mixed in."""
+    return (h ^ UInt64(v)) * UInt64(0x100000001B3)
+
+
+def fnv_str(h: UInt64, s: String) -> UInt64:
+    """``h`` with ``s``'s bytes, then its length, mixed in (the length
+    keeps ``"ab", "c"`` apart from ``"a", "bc"``)."""
+    var out = h
+    var b = s.as_bytes()
+    for i in range(len(b)):
+        out = (out ^ UInt64(b[i])) * UInt64(0x100000001B3)
+    return fnv_int(out, len(b))

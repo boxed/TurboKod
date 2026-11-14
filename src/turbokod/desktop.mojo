@@ -230,6 +230,7 @@ from .save_as_dialog import SaveAsDialog
 from .string_utils import (
     byte_slice, display_columns, parse_int_prefix, split_lines_no_trailing,
     shell_single_quote, split_whitespace, starts_with, utf8_cell_of_byte,
+    fnv_int, fnv_start, fnv_str,
 )
 from .session_store import (
     Session, SessionWindow,
@@ -1810,6 +1811,10 @@ struct Desktop(Movable):
     # after the host pushes its real dimensions.
     var _pending_restore: Bool
     var _last_session_json: String
+    # Fingerprint of the session ``_last_session_json`` was last compared
+    # against, so an unchanged frame skips the snapshot and the encode.
+    var _session_fp: UInt64
+    var _session_fp_valid: Bool
     var _pending_restore_refit: Optional[Session]
     # Progressive syntax coloring. True until the first frame that has an
     # editor to show; that frame skips the cold TextMate tokenize so the
@@ -1822,6 +1827,9 @@ struct Desktop(Movable):
     # session so accidentally committing ``.turbokod`` doesn't clobber
     # a teammate's set.
     var _last_breakpoints_json: String
+    # Same for the breakpoint set (``DapManager.breakpoints_fingerprint``).
+    var _breakpoints_fp: UInt64
+    var _breakpoints_fp_valid: Bool
     # Per-user, per-file view-state persistence (scroll + cursor),
     # separate from ``session.json``. Survives window close: a session
     # only carries currently-open windows, so closing then reopening a
@@ -2159,9 +2167,13 @@ struct Desktop(Movable):
         self._test_output_held = False
         self._last_test_node_id = String("")
         self._pending_restore = False
+        self._session_fp_valid = False
+        self._session_fp = UInt64(0)
         self._last_session_json = String("")
         self._pending_restore_refit = Optional[Session]()
         self._defer_first_highlight = True
+        self._breakpoints_fp_valid = False
+        self._breakpoints_fp = UInt64(0)
         self._last_breakpoints_json = String("")
         self._view_states = List[StoredViewState]()
         self._last_view_states_json = String("")
@@ -6935,8 +6947,10 @@ struct Desktop(Movable):
         # later switch back to this project can re-read the on-disk
         # file rather than the stale in-memory value).
         self._pending_restore = False
+        self._session_fp_valid = False
         self._last_session_json = String("")
         self._pending_restore_refit = Optional[Session]()
+        self._breakpoints_fp_valid = False
         self._last_breakpoints_json = String("")
         # Drop any in-memory breakpoints — the next project will seed
         # its own from ``.turbokod/per_user/<username>/breakpoints.json``.
@@ -7389,6 +7403,7 @@ struct Desktop(Movable):
         # Seed the change-detection cache with the encoding of what we
         # just loaded so the immediate post-restore ``dap_tick`` doesn't
         # re-write the file with the same bytes.
+        self._breakpoints_fp_valid = False
         self._last_breakpoints_json = encode_breakpoints(
             canonical, self._snapshot_breakpoints(),
         )
@@ -7572,12 +7587,19 @@ struct Desktop(Movable):
         Skipped when no project is open — nowhere to write."""
         if not self.project:
             return
+        # Runs every paint: don't build and encode the set just to find
+        # it equal to the last write.
+        var fp = self.dap.breakpoints_fingerprint()
+        if self._breakpoints_fp_valid and fp == self._breakpoints_fp:
+            return
         var snapshot = self._snapshot_breakpoints()
         var encoded = encode_breakpoints(self.project.value(), snapshot)
-        if encoded == self._last_breakpoints_json:
-            return
-        if save_breakpoints(self.project.value(), snapshot):
+        if encoded != self._last_breakpoints_json:
+            if not save_breakpoints(self.project.value(), snapshot):
+                return
             self._last_breakpoints_json = encoded
+        self._breakpoints_fp = fp
+        self._breakpoints_fp_valid = True
 
     def _find_view_state(self, path: String) -> Int:
         """Index of the ``_view_states`` entry whose ``path`` equals
@@ -7704,12 +7726,50 @@ struct Desktop(Movable):
         ``_save_drafts_if_changed``."""
         if not self.project or self._pending_restore:
             return
+        # Runs every paint: don't build and encode the session just to
+        # find it equal to the last write.
+        var fp = self._session_fingerprint()
+        if self._session_fp_valid and fp == self._session_fp:
+            return
         var session = self._snapshot_session()
         var encoded = encode_session(session)
-        if encoded == self._last_session_json:
-            return
-        if save_session(self.project.value(), session):
+        if encoded != self._last_session_json:
+            if not save_session(self.project.value(), session):
+                return
             self._last_session_json = encoded
+        self._session_fp = fp
+        self._session_fp_valid = True
+
+    def _session_fingerprint(self) -> UInt64:
+        """A hash of everything ``_snapshot_session`` reads, computed
+        without allocating."""
+        var h = fnv_start()
+        for i in range(len(self.windows.windows)):
+            ref w = self.windows.windows[i]
+            if not w.is_editor or w._transient \
+                    or len(w.editor.file_path.as_bytes()) == 0:
+                continue
+            h = fnv_int(h, i)
+            h = fnv_str(h, w.editor.file_path)
+            h = fnv_int(h, w.rect.a.x)
+            h = fnv_int(h, w.rect.a.y)
+            h = fnv_int(h, w.rect.b.x)
+            h = fnv_int(h, w.rect.b.y)
+            h = fnv_int(h, 1 if w.is_maximized else 0)
+            h = fnv_int(h, 1 if w._tab_maximized else 0)
+            h = fnv_int(h, w._restore_rect.a.x)
+            h = fnv_int(h, w._restore_rect.a.y)
+            h = fnv_int(h, w._restore_rect.b.x)
+            h = fnv_int(h, w._restore_rect.b.y)
+            h = fnv_int(h, w.editor.selections[0].row)
+            h = fnv_int(h, w.editor.selections[0].col)
+            h = fnv_int(h, w.editor.scroll_x)
+            h = fnv_int(h, w.editor.scroll_y)
+            h = fnv_int(h, Int(w._last_focus_ms))
+        for k in range(len(self.windows.z_order)):
+            h = fnv_int(h, self.windows.z_order[k])
+        h = fnv_int(h, self.windows.focused)
+        return h
 
     def _draft_seq_from_title(self, title: String) -> Int:
         """Recover the ``_untitled_count`` value a window was created
@@ -7997,6 +8057,7 @@ struct Desktop(Movable):
             # Nothing to restore. Leave the cached encoding empty so a
             # later ``_save_session_if_changed`` will write the first
             # real session out fresh.
+            self._session_fp_valid = False
             self._last_session_json = String("")
             self._pending_restore_refit = Optional[Session]()
             return
@@ -8133,6 +8194,7 @@ struct Desktop(Movable):
         # Seed the change-detection cache with the encoding of what we
         # just loaded so the immediate post-restore ``paint`` doesn't
         # re-write the file with the same bytes.
+        self._session_fp_valid = False
         self._last_session_json = encode_session(self._snapshot_session())
 
     def _place_session_window(
@@ -8182,6 +8244,7 @@ struct Desktop(Movable):
         self.windows.note_workspace(workspace)
         # Re-seed the change-detection cache so the post-refit paint
         # doesn't re-write the file with the now-correctly-fit bytes.
+        self._session_fp_valid = False
         self._last_session_json = encode_session(self._snapshot_session())
 
     def _cycle_file_tree(mut self):

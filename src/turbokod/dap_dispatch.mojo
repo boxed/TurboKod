@@ -39,7 +39,10 @@ from std.ffi import external_call
 
 from .lsp import LspProcess
 from .posix import debug_log_path, monotonic_ms, realpath, tcp_connect, which
-from .string_utils import starts_with, strip_trailing_newlines, utf8_suffix
+from .string_utils import (
+    fnv_int, fnv_start, fnv_str, starts_with, strip_trailing_newlines,
+    utf8_suffix,
+)
 
 
 # --- state machine --------------------------------------------------------
@@ -1279,6 +1282,19 @@ struct DapManager(Copyable, Movable):
                 conditional.append(
                     len(self._bp_condition[i].as_bytes()) > 0,
                 )
+
+    def breakpoints_fingerprint(self) -> UInt64:
+        """A hash of the whole breakpoint set, computed without
+        allocating — the per-frame "has it changed since the last save?"
+        check."""
+        var h = fnv_start()
+        for i in range(len(self._bp_path)):
+            h = fnv_str(h, self._bp_path[i])
+            h = fnv_int(h, self._bp_line[i])
+            h = fnv_str(h, self._bp_condition[i])
+            h = fnv_int(h, 1 if self._bp_enabled[i] else 0)
+            h = fnv_str(h, self._bp_wait_for[i])
+        return h
 
     def breakpoint_count(self) -> Int:
         return len(self._bp_path)
