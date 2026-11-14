@@ -2784,7 +2784,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     func pollAttentionFlashes(_ v: CellView, panels: Bool = false) -> Bool {
         let id = ObjectIdentifier(v)
         let cols = Int64(v.cols()), rows = Int64(v.rows())
-        let data = readCoreJSON(&nativeDialogBuf, {
+        let data = readCoreData(&nativeDialogBuf, {
             tk_desktop_attention_flashes(v.handle, panels ? 1 : 0, cols, rows, $0, $1)
         })
         let list = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [[String: Any]] } ?? []
@@ -5119,23 +5119,8 @@ extension AppController {
         "edit:redo": Selector(("redo:")),
     ]
 
-    /// Read a core JSON export into `buf` (growing it when the core reports
-    /// a longer payload than fits). Nil when the core had nothing to say.
-    private func readCoreJSON(_ buf: inout [UInt8],
-                              _ fill: (Int64, Int64) -> Int64) -> Data? {
-        var n = 0
-        while true {
-            n = buf.withUnsafeMutableBufferPointer { b -> Int in
-                Int(fill(Int64(Int(bitPattern: b.baseAddress)), Int64(b.count)))
-            }
-            if n <= buf.count { break }
-            buf = [UInt8](repeating: 0, count: n)
-        }
-        return n > 0 ? Data(buf[0..<n]) : nil
-    }
-
     private func nativeDialogJSON(_ h: Int64) -> [String: Any]? {
-        guard let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_native_dialog(h, $0, $1) })
+        guard let data = readCoreData(&nativeDialogBuf, { tk_desktop_native_dialog(h, $0, $1) })
         else { return nil }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
@@ -5144,7 +5129,7 @@ extension AppController {
     func pollScroller(_ v: CellView) -> Bool {
         let id = ObjectIdentifier(v)
         let cols = Int64(v.cols()), rows = Int64(v.rows())
-        let o = readCoreJSON(&nativeDialogBuf, { tk_desktop_editor_scroller(v.handle, cols, rows, $0, $1) })
+        let o = readCoreData(&nativeDialogBuf, { tk_desktop_editor_scroller(v.handle, cols, rows, $0, $1) })
             .flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
         // The Mac OS 9 look: a Platinum scroll bar in the editor's gutter,
         // there (disabled) even when there's nothing to scroll.
@@ -5193,7 +5178,7 @@ extension AppController {
         case .git: surface = 4
         case .frame: return false
         }
-        let data = readCoreJSON(&nativeDialogBuf, {
+        let data = readCoreData(&nativeDialogBuf, {
             tk_desktop_host_items(v.handle, surface, $0, $1)
         })
         let list = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [[String: Any]] } ?? []
@@ -5272,7 +5257,7 @@ extension AppController {
     func pollPaneHeaders(_ v: CellView, panels: Bool = false) -> Bool {
         let id = ObjectIdentifier(v)
         let cols = Int64(v.cols()), rows = Int64(v.rows())
-        let data = readCoreJSON(&nativeDialogBuf, {
+        let data = readCoreData(&nativeDialogBuf, {
             panels ? tk_desktop_panels_panes(v.handle, cols, rows, $0, $1)
                    : tk_desktop_panes(v.handle, cols, rows, $0, $1)
         })
@@ -5307,7 +5292,7 @@ extension AppController {
     func pollDebugInspect(_ v: CellView, panels: Bool = false) -> Bool {
         let id = ObjectIdentifier(v)
         let cols = Int64(v.cols()), rows = Int64(v.rows())
-        guard let data = readCoreJSON(&debugInspectBuf, {
+        guard let data = readCoreData(&debugInspectBuf, {
             tk_desktop_debug_inspect(v.handle, panels ? 1 : 0, cols, rows, $0, $1)
         }) else {
             if let d = debugInspectors[id] {
@@ -5331,13 +5316,13 @@ extension AppController {
     func pollReview(_ v: CellView) -> Bool {
         let id = ObjectIdentifier(v)
         let cols = Int64(v.cols()), rows = Int64(v.rows())
-        let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_review(v.handle, cols, rows, $0, $1) })
+        let data = readCoreData(&nativeDialogBuf, { tk_desktop_review(v.handle, cols, rows, $0, $1) })
         let o = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
         let mode = o?["mode"] as? String ?? ""
         var changed = false
         // Picker sheet. It steps aside while the core asks a question of
         // its own (check out the branch?) — a window shows one sheet.
-        let asking = readCoreJSON(&nativeDialogBuf, { tk_desktop_native_dialog(v.handle, $0, $1) }) != nil
+        let asking = readCoreData(&nativeDialogBuf, { tk_desktop_native_dialog(v.handle, $0, $1) }) != nil
         if let pc = reviewPickers[id], mode != "picker" || asking {
             reviewPickers[id] = nil
             pc.dismiss()
@@ -5377,7 +5362,7 @@ extension AppController {
     /// Show, refresh or retract `v`'s merge sheet.
     func pollMerge(_ v: CellView) -> Bool {
         let id = ObjectIdentifier(v)
-        let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_merge(v.handle, $0, $1) })
+        let data = readCoreData(&nativeDialogBuf, { tk_desktop_merge(v.handle, $0, $1) })
         if let mc = mergeSheets[id] {
             guard let data = data else {
                 mergeSheets[id] = nil
@@ -5399,7 +5384,7 @@ extension AppController {
     /// Show, refresh or retract `v`'s Git history sheet.
     func pollHistory(_ v: CellView) -> Bool {
         let id = ObjectIdentifier(v)
-        let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_history(v.handle, $0, $1) })
+        let data = readCoreData(&nativeDialogBuf, { tk_desktop_history(v.handle, $0, $1) })
         if let hc = historySheets[id] {
             guard let data = data else {
                 historySheets[id] = nil
@@ -5421,7 +5406,7 @@ extension AppController {
     func pollTree(_ v: CellView) -> Bool {
         let id = ObjectIdentifier(v)
         let cols = Int64(v.cols()), rows = Int64(v.rows())
-        guard let data = readCoreJSON(&treeBuf, { tk_desktop_tree(v.handle, cols, rows, $0, $1) }) else {
+        guard let data = readCoreData(&treeBuf, { tk_desktop_tree(v.handle, cols, rows, $0, $1) }) else {
             if let t = trees[id] {
                 t.removeFromSuperview()
                 trees[id] = nil
@@ -5455,7 +5440,7 @@ extension AppController {
             changed = true
         }
         guard native || platinum,
-              let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_take_find_request(v.handle, $0, $1) }),
+              let data = readCoreData(&nativeDialogBuf, { tk_desktop_take_find_request(v.handle, $0, $1) }),
               let req = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let win = v.window
         else { return changed }
@@ -5560,12 +5545,12 @@ extension AppController {
     func pollGit(_ v: CellView) -> Bool {
         let id = ObjectIdentifier(v)
         let cols = Int64(v.cols()), rows = Int64(v.rows())
-        var data = readCoreJSON(&nativeDialogBuf, { tk_desktop_git(v.handle, cols, rows, $0, $1) })
+        var data = readCoreData(&nativeDialogBuf, { tk_desktop_git(v.handle, cols, rows, $0, $1) })
         var look = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }?["look"]
             as? String ?? "macos"
         if data == nil {
             // The Turbo Vision look's: the core paints it in cells.
-            data = readCoreJSON(&tvDialogBuf, { tk_desktop_git_window(v.handle, $0, $1) })
+            data = readCoreData(&tvDialogBuf, { tk_desktop_git_window(v.handle, $0, $1) })
             look = "tv"
         }
         // Git ▸ Local changes while it's up: bring its window forward.
@@ -5606,7 +5591,7 @@ extension AppController {
     /// that's open (quick fixes land while it's tracking).
     func pollPopup(_ v: CellView) -> Bool {
         let id = ObjectIdentifier(v)
-        let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_popup(v.handle, $0, $1) })
+        let data = readCoreData(&nativeDialogBuf, { tk_desktop_popup(v.handle, $0, $1) })
         if let open = popups[id] {
             if let data = data { open.refresh(data) }
             return false
@@ -5671,7 +5656,7 @@ extension AppController {
             }
             pf.retroShadow?.ensureAttached()
             pf.title = win.title
-            let data = readCoreJSON(&tabsBuf, { tk_desktop_tabs(v.handle, $0, $1) })
+            let data = readCoreData(&tabsBuf, { tk_desktop_tabs(v.handle, $0, $1) })
             var changed = data.map { pf.tabs.update(from: $0) } ?? false
             // No payload means "no strip" (e.g. during review).
             if pf.showTabs(data != nil && !pf.tabs.tabs.isEmpty) { changed = true }
@@ -5766,7 +5751,7 @@ extension AppController {
         if let tf = tvFrames[id] {
             if on {
                 tf.retroShadow?.ensureAttached()
-                let info = readCoreJSON(&frameInfoBuf, { tk_desktop_frame_info(v.handle, Int64(tf.cols), $0, $1) })
+                let info = readCoreData(&frameInfoBuf, { tk_desktop_frame_info(v.handle, Int64(tf.cols), $0, $1) })
                 return tf.poll(info: info)
             }
             tvFrames[id] = nil
@@ -5806,7 +5791,7 @@ extension AppController {
     /// (`tk_desktop_dialog_window`). True when anything changed.
     func pollTVDialog(_ v: CellView) -> Bool {
         let id = ObjectIdentifier(v)
-        let data = readCoreJSON(&tvDialogBuf, {
+        let data = readCoreData(&tvDialogBuf, {
             tk_desktop_dialog_window(v.handle, Int64(v.cols()), Int64(v.rows()), $0, $1)
         })
         let spec = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
@@ -5843,7 +5828,7 @@ extension AppController {
         }
         guard let entry = tabStrips[id] else { return false }
         var changed = false
-        let data = on ? readCoreJSON(&tabsBuf, { tk_desktop_tabs(v.handle, $0, $1) }) : nil
+        let data = on ? readCoreData(&tabsBuf, { tk_desktop_tabs(v.handle, $0, $1) }) : nil
         if let data = data { changed = entry.strip.update(from: data) }
         // No payload means "no strip" (e.g. during review), not "unchanged".
         let hidden = !on || data == nil || entry.strip.tabs.isEmpty
@@ -5866,7 +5851,7 @@ extension AppController {
         guard force || !isCapturing || env["TK_WELCOME"] != nil else { return }
         let h = views.first?.handle ?? chromeDesktop
         guard h != 0, force || tk_desktop_welcome_needed(h) != 0 || env["TK_WELCOME"] != nil,
-              let data = readCoreJSON(&nativeDialogBuf, { tk_desktop_welcome_options(h, $0, $1) }),
+              let data = readCoreData(&nativeDialogBuf, { tk_desktop_welcome_options(h, $0, $1) }),
               let opts = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         else { return }
         let w = WelcomeController(options: opts, palette: { [weak self] in
@@ -5893,7 +5878,7 @@ extension AppController {
     /// Project the open declarative dialog (`tk_desktop_ui`) as a sheet.
     func pollDeclarative(_ v: CellView) -> Bool {
         let id = ObjectIdentifier(v)
-        let o = readCoreJSON(&nativeDialogBuf, { tk_desktop_ui(v.handle, $0, $1) })
+        let o = readCoreData(&nativeDialogBuf, { tk_desktop_ui(v.handle, $0, $1) })
             .flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
         var live = declarative[id] ?? []
         var windowed = declarativeWindows[id] ?? []
@@ -9262,7 +9247,8 @@ final class ReviewBar: NSVisualEffectView {
 // resize handle, so this view lets every click that isn't on a button fall
 // through to the cell view (`hitTest`).
 
-/// `readCoreJSON` for the views that ask the core themselves.
+/// Read a core JSON export into `buf` (growing it when the core reports
+/// a longer payload than fits). Nil when the core had nothing to say.
 func readCoreData(_ buf: inout [UInt8], _ fill: (Int64, Int64) -> Int64) -> Data? {
     var n = 0
     while true {
