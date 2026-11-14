@@ -950,21 +950,23 @@ def classify_message(v: JsonValue) -> LspIncoming:
     var result_opt = Optional[JsonValue]()
     var error_opt = Optional[JsonValue]()
     if v.is_object():
-        var maybe_id = v.object_get(String("id"))
-        if maybe_id:
-            id_opt = Optional[JsonValue](maybe_id.value().copy())
-        var maybe_method = v.object_get(String("method"))
-        if maybe_method and maybe_method.value().is_string():
-            method_opt = Optional[String](maybe_method.value().as_str())
-        var maybe_params = v.object_get(String("params"))
-        if maybe_params:
-            params_opt = Optional[JsonValue](maybe_params.value().copy())
-        var maybe_result = v.object_get(String("result"))
-        if maybe_result:
-            result_opt = Optional[JsonValue](maybe_result.value().copy())
-        var maybe_error = v.object_get(String("error"))
-        if maybe_error:
-            error_opt = Optional[JsonValue](maybe_error.value().copy())
+        # Each field is copied once, straight from the envelope's member:
+        # ``object_get`` returns a copy, and copying that into the Optional
+        # and again into the result cloned a whole completion or
+        # diagnostics payload three times per message.
+        for i in range(len(v.obj_v)):
+            ref m = v.obj_v[i]
+            if m.key == String("id"):
+                id_opt = Optional[JsonValue](m.value.copy())
+            elif m.key == String("method"):
+                if m.value.is_string():
+                    method_opt = Optional[String](m.value.as_str())
+            elif m.key == String("params"):
+                params_opt = Optional[JsonValue](m.value.copy())
+            elif m.key == String("result"):
+                result_opt = Optional[JsonValue](m.value.copy())
+            elif m.key == String("error"):
+                error_opt = Optional[JsonValue](m.value.copy())
     var kind: UInt8
     if Bool(method_opt) and Bool(id_opt):
         kind = LSP_REQUEST
@@ -973,8 +975,7 @@ def classify_message(v: JsonValue) -> LspIncoming:
     else:
         kind = LSP_RESPONSE
     return LspIncoming(
-        kind, id_opt.copy(), method_opt,
-        params_opt.copy(), result_opt.copy(), error_opt.copy(),
+        kind, id_opt^, method_opt, params_opt^, result_opt^, error_opt^,
     )
 
 
