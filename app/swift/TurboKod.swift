@@ -1707,6 +1707,11 @@ final class CellView: NSView {
 
     private var springRunning: Bool { springTimer != nil || springLink != nil }
 
+    /// Stop what would keep a closed window's view alive: a display link
+    /// retains its target, and stops firing (so never finishes and lets
+    /// go) once its window is off screen.
+    func stopAnimations() { cancelSpring() }
+
     private func cancelSpring() {
         springTimer?.invalidate(); springTimer = nil
         if #available(macOS 14.0, *) { (springLink as? CADisplayLink)?.invalidate() }
@@ -4450,6 +4455,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         paneHeaders[ObjectIdentifier(v)] = nil
         debugInspectors[ObjectIdentifier(v)] = nil
         scrollers[ObjectIdentifier(v)] = nil
+        dropOverlays(for: v)
         // Close is instant; the language servers get their goodbye in the
         // background. `begin_close` terminates every child except the LSP
         // transports and sends each server `shutdown`, then we poll off the
@@ -4922,6 +4928,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         platinumPanelFrames.removeValue(forKey: ObjectIdentifier(pair.view))?.retroShadow?.detach()
         paneHeaders[ObjectIdentifier(pair.view)] = nil
         debugInspectors[ObjectIdentifier(pair.view)] = nil
+        dropOverlays(for: pair.view)
         pair.view.handle = 0          // shared handle is owned by the main view
         tk_desktop_set_panels_detached(mainView.handle, 0)
         pair.window.orderOut(nil)     // see windowShouldClose (Sequoia teardown)
@@ -5013,6 +5020,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         sv.invalidateFrame(); sv.needsDisplay = true
     }
 
+    /// Forget the overlays kept per view, on any window's close. They are
+    /// keyed by `ObjectIdentifier`, so an entry left behind is inherited by
+    /// the next view allocated at that address.
+    private func dropOverlays(for v: CellView) {
+        hostItems[ObjectIdentifier(v)] = nil
+        testHosts[ObjectIdentifier(v)] = nil
+        attentionFlashes[ObjectIdentifier(v)] = nil
+        v.stopAnimations()
+    }
+
     private func closeDialogWindow(_ surface: CellSurface, for mainView: CellView,
                                    focusMain: Bool = true) {
         let id = ObjectIdentifier(mainView)
@@ -5020,6 +5037,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         dialogWins[surface]?.removeValue(forKey: id)
         tvSettingsShadows.removeValue(forKey: ObjectIdentifier(pair.window))?.detach()
         pair.view.onChromeMouse = nil
+        dropOverlays(for: pair.view)
         pair.view.handle = 0          // shared handle is owned by the main view
         pair.window.orderOut(nil)     // Sequoia-safe (see windowShouldClose)
         // Hand focus back to the project window so Esc-closing the dialog
