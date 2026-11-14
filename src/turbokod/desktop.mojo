@@ -6927,6 +6927,17 @@ struct Desktop(Movable):
         # Find Symbol is next opened under another root.
         self.symbol_index.reset(String(""))
         self._symbol_index_root = String("")
+        # ...and the rest of what is the project's: its search results, the
+        # places visited in it, the words probed for it. Loaded docsets go
+        # too — each holds every page of its language and is read again on
+        # the next Cmd+K.
+        self.find_results_pane.clear()
+        self._nav_stack = List[NavPoint]()
+        self._nav_pos = -1
+        self._libprobe_tries = Dict[String, Int]()
+        self._libprobe_seen = Dict[String, Bool]()
+        self.doc_stores = List[DocStore]()
+        self.doc_languages = List[String]()
         self._test_output_held = False
         self._last_test_node_id = String("")
         self.targets = ProjectTargets()

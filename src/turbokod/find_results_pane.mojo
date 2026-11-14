@@ -128,6 +128,21 @@ struct FindResultsPane(Movable):
         self.visible = False
         self.focused = False
 
+    def clear(mut self):
+        """Close and forget the results (the project they belong to has
+        closed). The dock keeps its height."""
+        self.close()
+        self.matches = List[ProjectMatch]()
+        self.marked = List[Bool]()
+        self.pending_opens = List[ProjectMatch]()
+        self._row_hl_cache = List[List[Highlight]]()
+        self._row_hl_cached = List[Bool]()
+        self.query = String("")
+        self.root = String("")
+        self.selected = 0
+        self.anchor = 0
+        self.scroll = 0
+
     def is_resizing(self) -> Bool:
         return self.dock.is_resizing()
 
