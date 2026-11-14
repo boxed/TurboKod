@@ -17,7 +17,7 @@ from std.sys.info import CompilationTarget
 from .case_fold import fold_byte
 from .posix import alloc_zero_buffer, realpath
 from .string_utils import byte_slice
-from .json import JsonValue, parse_json
+from .json import JsonValue, json_array, parse_json
 
 
 comptime O_RDONLY: Int32 = 0
@@ -213,6 +213,24 @@ def load_json_object(path: String) -> Optional[JsonValue]:
         pass
     _ = move_aside(path)
     return None
+
+
+def load_json_array(path: String, key: String) -> JsonValue:
+    """The array at ``key`` of the JSON object in ``path``, or an empty
+    array when there is none (see ``load_json_object`` for what counts as
+    "no file"). The stores that keep one list per file all start here; the
+    array is moved out of the parsed document, not copied."""
+    var loaded = load_json_object(path)
+    if loaded:
+        var root = loaded.take()
+        for i in range(len(root.obj_v)):
+            if root.obj_v[i].key == key:
+                if root.obj_v[i].value.is_array():
+                    var arr = json_array()
+                    swap(arr, root.obj_v[i].value)
+                    return arr^
+                break
+    return json_array()
 
 
 def write_file(path: String, content: String) -> Bool:

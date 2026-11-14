@@ -46,7 +46,7 @@ restore any drafts.
 
 from std.collections.list import List
 
-from .file_io import load_json_object
+from .file_io import load_json_array
 from .json import (
     JsonValue, encode_json, json_array, json_bool, json_int, json_object,
     json_str, json_get_bool, json_get_int, json_get_string, encode_int_pair,
@@ -152,14 +152,7 @@ def load_drafts(project_root: String) -> List[StoredDraft]:
     var path = _drafts_path(project_root)
     if len(path.as_bytes()) == 0:
         return out^
-    var loaded = load_json_object(path)
-    if not loaded:
-        return out^
-    var root = loaded.value().copy()
-    var arr_v = root.object_get(String("drafts"))
-    if not arr_v or not arr_v.value().is_array():
-        return out^
-    var arr = arr_v.value().copy()
+    var arr = load_json_array(path, String("drafts"))
     for i in range(arr.array_len()):
         out.append(_parse_draft(arr.array_at(i)))
     return out^

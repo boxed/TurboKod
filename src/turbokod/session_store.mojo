@@ -172,7 +172,7 @@ def load_session(project_root: String) -> Session:
     var loaded = load_json_object(path)
     if not loaded:
         return out^
-    var root = loaded.value().copy()
+    ref root = loaded.value()
     var arr_v = root.object_get(String("windows"))
     if not arr_v or not arr_v.value().is_array():
         return out^

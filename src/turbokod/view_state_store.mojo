@@ -31,7 +31,7 @@ malformed or missing file silently yields an empty list.
 from std.collections.list import List
 
 from .file_io import (
-    load_json_object, project_absolute, project_relative,
+    load_json_array, project_absolute, project_relative,
 )
 from .json import (
     encode_json, json_array, json_object, json_str, json_get_string,
@@ -68,14 +68,7 @@ def load_view_states(project_root: String) -> List[StoredViewState]:
     var path = _vs_path(project_root)
     if len(path.as_bytes()) == 0:
         return out^
-    var loaded = load_json_object(path)
-    if not loaded:
-        return out^
-    var root = loaded.value().copy()
-    var arr_v = root.object_get(String("views"))
-    if not arr_v or not arr_v.value().is_array():
-        return out^
-    var arr = arr_v.value().copy()
+    var arr = load_json_array(path, String("views"))
     for i in range(arr.array_len()):
         var node = arr.array_at(i)
         if not node.is_object():

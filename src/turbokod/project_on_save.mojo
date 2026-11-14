@@ -27,7 +27,7 @@ Missing file / malformed JSON / missing keys all degrade to an empty list
 from std.collections.list import List
 
 from .config import OnSaveAction
-from .file_io import join_path, load_json_object, make_dir, write_file
+from .file_io import join_path, load_json_array, make_dir, write_file
 from .json import (
     encode_json, json_array, json_get_string, json_get_string_array,
     json_string_array,
@@ -74,14 +74,7 @@ def load_project_on_save(project_root: String) -> List[OnSaveAction]:
     var path = _on_save_path(project_root)
     if len(path.as_bytes()) == 0:
         return out^
-    var loaded = load_json_object(path)
-    if not loaded:
-        return out^
-    var root = loaded.value().copy()
-    var arr_v = root.object_get(String("actions"))
-    if not arr_v or not arr_v.value().is_array():
-        return out^
-    var arr = arr_v.value().copy()
+    var arr = load_json_array(path, String("actions"))
     for i in range(arr.array_len()):
         var item = arr.array_at(i)
         if not item.is_object():

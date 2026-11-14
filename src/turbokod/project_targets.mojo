@@ -241,7 +241,7 @@ def load_project_targets(project_root: String) -> ProjectTargets:
     var loaded = load_json_object(path)
     if not loaded:
         return out^
-    var root = loaded.value().copy()
+    ref root = loaded.value()
     var arr_v = root.object_get(String("targets"))
     if not arr_v or not arr_v.value().is_array():
         return out^
