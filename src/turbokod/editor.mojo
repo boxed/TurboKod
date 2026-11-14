@@ -2458,7 +2458,7 @@ struct Editor(Copyable, Movable):
         self.spell_lines = List[Bool]()
         for _ in range(self.buffer.line_count()):
             self.spell_lines.append(False)
-        if not speller.loaded:
+        if not speller.is_loaded():
             return
         # The stored attr only carries the squiggle: paint layers its
         # style / underline color onto whatever syntax color the cell
@@ -2473,11 +2473,11 @@ struct Editor(Copyable, Movable):
             # Plain underline takes the fg color, so paint the word red
             # to make the flag visible at all.
             squiggle = Attr(LIGHT_RED, EDITOR_BG, STYLE_UNDERLINE)
-        if self._spell_version != speller.version:
+        if self._spell_version != speller.word_version():
             self._spell_text = List[String]()
             self._spell_runs = List[List[Tuple[Int, Int]]]()
             self._spell_directive = List[Bool]()
-            self._spell_version = speller.version
+            self._spell_version = speller.word_version()
         ref lines = self.buffer.lines
         var n = len(lines)
         var old_n = len(self._spell_text)

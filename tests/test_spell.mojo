@@ -10,7 +10,7 @@ from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from turbokod.file_io import read_file, stat_file, write_file
 from turbokod.posix import getenv_value, which
 from turbokod.spell import (
-    Speller, find_misspelled_runs, has_spell_noinspection_directive,
+    Speller, free_spell_base, new_spell_base, find_misspelled_runs, has_spell_noinspection_directive,
     is_library_location, library_words_path, project_dict_path,
     user_dict_path
 )
@@ -261,10 +261,10 @@ def test_speller_library_words_persist_and_reload() raises:
     seed.append(String("hello"))
     s.load_words(seed)
     assert_false(s.check_word(String("rmtree")))
-    var v = s.version
+    var v = s.word_version()
     assert_true(s.add_library_word(String("rmtree")))
     assert_true(s.check_word(String("rmtree")))
-    assert_true(s.version > v)
+    assert_true(s.word_version() > v)
     assert_equal(read_file(path), String("rmtree\n"))
     assert_false(stat_file(udp).ok)
     # Already known: the file isn't appended to again.
@@ -274,6 +274,38 @@ def test_speller_library_words_persist_and_reload() raises:
     fresh.load_default()
     assert_true(fresh.check_word(String("rmtree")))
     _ = external_call["unlink", Int32]((path + String("\0")).unsafe_ptr())
+
+
+def test_spellers_sharing_a_base_hold_one_word_set() raises:
+    """Windows of one process read one main word set
+    (``Speller.shared``): what one loads the other knows, and a word added
+    through one changes the other's ``word_version`` so its editors
+    re-check. Project words stay per speller."""
+    var udp = user_dict_path()
+    _ = external_call["unlink", Int32]((udp + String("\0")).unsafe_ptr())
+    var base = new_spell_base()
+    assert_true(base != 0)
+    var a = Speller()
+    var b = Speller()
+    a.shared = base
+    b.shared = base
+    assert_false(b.is_loaded())
+    var seed = List[String]()
+    seed.append(String("hello"))
+    a.load_words(seed)
+    # Loaded through ``a``, known to ``b``.
+    assert_true(b.is_loaded())
+    assert_true(b.check_word(String("hello")))
+    assert_false(b.check_word(String("frobnicate")))
+    var v = b.word_version()
+    _ = a.add_user_word(String("frobnicate"))
+    assert_true(b.check_word(String("frobnicate")))
+    assert_true(b.word_version() > v)
+    # A speller without the base is untouched.
+    var alone = Speller()
+    assert_false(alone.is_loaded())
+    _ = external_call["unlink", Int32]((udp + String("\0")).unsafe_ptr())
+    free_spell_base(base)
 
 
 def test_speller_load_default_includes_bundled_programmer_terms() raises:
@@ -289,7 +321,7 @@ def test_speller_load_default_includes_bundled_programmer_terms() raises:
     # True for everything and this test is uninformative — but the
     # bundled list ships with the repo so on any developer machine it
     # should always be present.
-    assert_true(s.loaded)
+    assert_true(s.is_loaded())
     assert_true(s.check_word(String("tokenizer")))
     assert_true(s.check_word(String("bitwise")))
     assert_true(s.check_word(String("regex")))
@@ -398,7 +430,7 @@ def test_speller_load_default_layers_user_language_dictionaries() raises:
     assert_true(write_file(dict_path, String("Schmetterling\nKühlschrank\n")))
     var s = Speller()
     s.load_default()
-    assert_true(s.loaded)
+    assert_true(s.is_loaded())
     assert_true(s.check_word(String("Schmetterling")))
     assert_true(s.check_word(String("Kühlschrank")))
     _ = external_call["unlink", Int32]((dict_path + String("\0")).unsafe_ptr())
@@ -432,7 +464,7 @@ def test_speller_reload_drops_removed_dictionary() raises:
     # everything-passes degraded mode.
     _ = external_call["unlink", Int32]((dict_path + String("\0")).unsafe_ptr())
     s.reload()
-    assert_true(s.loaded)
+    assert_true(s.is_loaded())
     assert_false(s.check_word(String("kanelbullarna")))
 
 

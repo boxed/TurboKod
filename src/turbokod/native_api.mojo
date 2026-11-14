@@ -32,6 +32,7 @@ from turbokod.events import Event, MOD_CTRL, MOD_META
 from turbokod.geometry import Point, Rect
 from turbokod.local_changes import RightPanel
 from turbokod.lsp_shared import new_pool
+from turbokod.spell import new_spell_base
 from turbokod.json import (
     json_get_string_array,
     JsonValue, encode_json, json_array, json_bool, json_int, json_object, json_str,
@@ -234,6 +235,24 @@ def tk_desktop_set_lsp_pool(h: Int, pool: Int) abi("C"):
     if h == 0:
         return
     _desk(h)[].lsp_pool = pool
+
+
+@export
+def tk_spell_base_new() abi("C") -> Int:
+    """Create the process-wide main spelling word set (``SpellBase``). The
+    host makes one and hands it to every window with
+    ``tk_desktop_set_spell_base``, so the dictionary is loaded once rather
+    than once per window. Lives for the process; 0 on allocation failure."""
+    return new_spell_base()
+
+
+@export
+def tk_desktop_set_spell_base(h: Int, base: Int) abi("C"):
+    """Give a window the shared word set. Call before its first file
+    opens: the speller loads its dictionary on first use."""
+    if h == 0:
+        return
+    _desk(h)[].speller.shared = base
 
 
 @export

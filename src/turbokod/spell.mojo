@@ -15,6 +15,8 @@ every file type. See ``find_misspelled_runs`` for the word rules.
 """
 
 from std.collections.list import List
+from std.ffi import external_call
+from std.sys import size_of
 
 from .dictionary_install import user_dictionaries_root
 from .file_io import (
@@ -128,6 +130,65 @@ def _append_to_file(path: String, line: String) -> Bool:
     return write_file(path, content)
 
 
+struct SpellBase(Movable):
+    """The main word set — OS dictionary, bundled wordlists, user and
+    library words — which is the same for every window of a process.
+    A ``Speller`` owns one, or reads a shared one (``Speller.shared``)."""
+    var buckets: List[List[String]]
+    var loaded: Bool
+    var version: Int
+
+    def __init__(out self):
+        self.buckets = List[List[String]]()
+        for _ in range(Int(_N_BUCKETS)):
+            self.buckets.append(List[String]())
+        self.loaded = False
+        self.version = 0
+
+    def add(mut self, var w: String):
+        """Append the already-normalized ``w``."""
+        var b = _bucket(w)
+        self.buckets[b].append(w^)
+
+    def touch(mut self, loaded: Bool):
+        self.loaded = loaded
+        self.version += 1
+
+    def clear(mut self):
+        for i in range(len(self.buckets)):
+            self.buckets[i] = List[String]()
+        self.touch(False)
+
+    def has(self, w: String) -> Bool:
+        var b = _bucket(w)
+        for i in range(len(self.buckets[b])):
+            if self.buckets[b][i] == w:
+                return True
+        return False
+
+
+def spell_base_at(addr: Int) -> Pointer[SpellBase, MutUntrackedOrigin]:
+    return Pointer[SpellBase, MutUntrackedOrigin](unsafe_from_address=addr)
+
+
+def new_spell_base() -> Int:
+    """A heap ``SpellBase`` for the whole process (the host makes one and
+    gives it to every window); 0 on allocation failure. Never freed."""
+    var addr = external_call["malloc", Int](size_of[SpellBase]())
+    if addr == 0:
+        return 0
+    spell_base_at(addr).unsafe_write(SpellBase())
+    return addr
+
+
+def free_spell_base(addr: Int):
+    """Free a ``new_spell_base`` nothing reads any more (tests)."""
+    if addr == 0:
+        return
+    spell_base_at(addr).unsafe_deinit_pointee()
+    _ = external_call["free", Int](addr)
+
+
 struct Speller(Movable):
     """Lazy wordlist with case-insensitive + plural-tolerant lookup.
 
@@ -144,28 +205,68 @@ struct Speller(Movable):
     forgets the previous project's overrides without reloading the
     whole 235k-word OS list.
     """
-    var buckets: List[List[String]]
+    var _own: SpellBase
+    var shared: Int
+    """Address of the process-wide ``SpellBase`` (``new_spell_base``) this
+    speller reads its main word set from, or 0 to use its own. The native
+    host hands one to every window, so the 350k-word dictionary is held
+    once per process rather than once per window; a word added to it in
+    one window is known in all of them."""
     var project_buckets: List[List[String]]
-    var loaded: Bool
-    var version: Int
-    """Bumps whenever the set of known words changes, so a caller that
-    caches per-line results (``Editor._refresh_spell``) knows to drop
-    them."""
+    var _project_version: Int
     # Path of the project dictionary currently in ``project_buckets``;
     # empty means "no project loaded." Tracked so ``set_project`` can
     # short-circuit re-load when the project hasn't actually changed.
     var project_root: String
 
     def __init__(out self):
-        self.buckets = List[List[String]]()
-        for _ in range(Int(_N_BUCKETS)):
-            self.buckets.append(List[String]())
+        self._own = SpellBase()
+        self.shared = 0
         self.project_buckets = List[List[String]]()
         for _ in range(Int(_N_BUCKETS)):
             self.project_buckets.append(List[String]())
-        self.loaded = False
-        self.version = 0
+        self._project_version = 0
         self.project_root = String("")
+
+    # --- the main word set: this speller's own, or the shared one ---------
+
+    def is_loaded(self) -> Bool:
+        if self.shared != 0:
+            return spell_base_at(self.shared)[].loaded
+        return self._own.loaded
+
+    def word_version(self) -> Int:
+        """Changes whenever the set of known words does — here, or in the
+        shared set from another window — so a caller that caches per-line
+        results (``Editor._refresh_spell``) knows to drop them."""
+        if self.shared != 0:
+            return self._project_version + spell_base_at(self.shared)[].version
+        return self._project_version + self._own.version
+
+    def _base_add(mut self, var w: String):
+        if self.shared != 0:
+            spell_base_at(self.shared)[].add(w^)
+        else:
+            self._own.add(w^)
+
+    def _base_touch(mut self, loaded: Bool):
+        """Record a change to the main set: its ``loaded`` flag and a
+        version bump."""
+        if self.shared != 0:
+            spell_base_at(self.shared)[].touch(loaded)
+        else:
+            self._own.touch(loaded)
+
+    def _base_clear(mut self):
+        if self.shared != 0:
+            spell_base_at(self.shared)[].clear()
+        else:
+            self._own.clear()
+
+    def _base_has(self, w: String) -> Bool:
+        if self.shared != 0:
+            return spell_base_at(self.shared)[].has(w)
+        return self._own.has(w)
 
     def load_default(mut self):
         """Layer five word sources, in order, into ``buckets``:
@@ -195,7 +296,7 @@ struct Speller(Movable):
 
         The user dictionary loads last so additions reach ``buckets``
         even when the OS / bundled lists fail."""
-        if self.loaded:
+        if self.is_loaded():
             return
         var candidates = List[String]()
         candidates.append(String("/usr/share/dict/words"))
@@ -237,10 +338,7 @@ struct Speller(Movable):
         ``project_buckets`` is preserved (the project dictionary is
         independent of installed languages); the caller decides whether
         to additionally call ``set_project`` to refresh it."""
-        for i in range(len(self.buckets)):
-            self.buckets[i] = List[String]()
-        self.loaded = False
-        self.version += 1
+        self._base_clear()
         self.load_default()
 
     def _load_user_language_dictionaries(mut self):
@@ -322,7 +420,7 @@ struct Speller(Movable):
         for i in range(len(self.project_buckets)):
             self.project_buckets[i] = List[String]()
         self.project_root = project_root
-        self.version += 1
+        self._project_version += 1
         if len(project_root.as_bytes()) == 0:
             debug_log(String("[speller.set_project] empty root, returning"))
             return
@@ -390,7 +488,7 @@ struct Speller(Movable):
                 continue
             var b = _bucket(w)
             self.project_buckets[b].append(w^)
-        self.version += 1
+        self._project_version += 1
 
     def add_user_word(mut self, word: String) -> Bool:
         """Add ``word`` to the user dictionary in memory and on disk.
@@ -414,12 +512,12 @@ struct Speller(Movable):
         var lw = _normalize(word)
         if len(lw.as_bytes()) == 0:
             return False
-        self.loaded = True
         if self._has(lw):
+            if not self.is_loaded():
+                self._base_touch(True)
             return True  # already known — don't grow the bucket / dup the file
-        var b = _bucket(lw)
-        self.buckets[b].append(lw)
-        self.version += 1
+        self._base_add(lw)
+        self._base_touch(True)
         if len(path.as_bytes()) == 0:
             return False
         return _append_to_file(path, lw)
@@ -441,7 +539,7 @@ struct Speller(Movable):
             return True  # already known — don't grow the bucket / dup the file
         var b = _bucket(lw)
         self.project_buckets[b].append(lw)
-        self.version += 1
+        self._project_version += 1
         var path = project_dict_path(self.project_root)
         if len(path.as_bytes()) == 0:
             return False
@@ -458,10 +556,8 @@ struct Speller(Movable):
             var w = _normalize(words[i])
             if len(w.as_bytes()) == 0:
                 continue
-            var b = _bucket(w)
-            self.buckets[b].append(w^)
-        self.loaded = True
-        self.version += 1
+            self._base_add(w^)
+        self._base_touch(True)
 
     def check_word(self, word: String) -> Bool:
         """``True`` if ``word`` (or a stripped form) is in the dictionary.
@@ -469,7 +565,7 @@ struct Speller(Movable):
         When the dictionary failed to load, returns ``True`` for
         everything — we'd rather show no underlines than mark every
         word as misspelled."""
-        if not self.loaded:
+        if not self.is_loaded():
             return True
         var lw = _normalize(word)
         if self._has(lw):
@@ -530,11 +626,9 @@ struct Speller(Movable):
         return False
 
     def _has(self, w: String) -> Bool:
+        if self._base_has(w):
+            return True
         var b = _bucket(w)
-        var n = len(self.buckets[b])
-        for i in range(n):
-            if self.buckets[b][i] == w:
-                return True
         var pn = len(self.project_buckets[b])
         for i in range(pn):
             if self.project_buckets[b][i] == w:
@@ -558,7 +652,7 @@ def find_misspelled_runs(
     whole. Segments under 4 bytes and all-caps ones (acronyms,
     ``SCREAMING_CASE``) aren't checked."""
     var out = List[Tuple[Int, Int]]()
-    if not self_speller.loaded:
+    if not self_speller.is_loaded():
         return out^
     var b = text.as_bytes()
     var n = len(b)

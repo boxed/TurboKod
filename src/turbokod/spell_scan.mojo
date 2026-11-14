@@ -56,7 +56,7 @@ def misspelled_spans(
     A line carrying a ``noinspection`` directive suppresses itself and
     the next line, mirroring IntelliJ's "applies to the next element"."""
     var out = List[Tuple[Int, Int, Int]]()
-    if not speller.loaded:
+    if not speller.is_loaded():
         return out^
     var suppress_next = False
     for row in range(len(lines)):

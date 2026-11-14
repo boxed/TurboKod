@@ -599,6 +599,12 @@ enum SharedLsp {
     static let pool: Int64 = tk_lsp_pool_new()
 }
 
+/// The process-wide spelling word set every window's Desktop reads
+/// (`tk_spell_base_new`), so the dictionary is loaded once.
+enum SharedSpelling {
+    static let base: Int64 = tk_spell_base_new()
+}
+
 final class CellView: NSView {
     var handle: Int64 = 0
     var surface: CellSurface = .main
@@ -4225,6 +4231,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if ProcessInfo.processInfo.environment["TK_LSP_PRIVATE"] == nil {
             tk_desktop_set_lsp_pool(h, SharedLsp.pool)
         }
+        // ...and one copy of the spelling dictionary.
+        tk_desktop_set_spell_base(h, SharedSpelling.base)
         // Tell the Desktop the host owns the menu surface — it stops painting
         // the in-grid menu bar and stops routing top-row mouse / Alt-letter
         // mnemonic events to it. We mirror the menu via tk_desktop_menu_snapshot.

@@ -11988,7 +11988,7 @@ struct Desktop(Movable):
         var crow = ed.selections[0].row
         var ccol = ed.selections[0].col
         var key = path + String("|") + String(ed.change_count) \
-            + String("|") + String(self.speller.version) \
+            + String("|") + String(self.speller.word_version()) \
             + String("|") + String(len(ed.spell_highlights)) \
             + String("|") + String(crow) \
             + String("|") + String(ccol)
