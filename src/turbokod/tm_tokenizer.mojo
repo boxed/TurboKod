@@ -116,6 +116,34 @@ def copy_stack(s: List[Frame]) -> List[Frame]:
     return out^
 
 
+struct StackTable(Copyable, Movable):
+    """The distinct scope stacks of one buffer, so each line's end-of-line
+    state is an index rather than a stack of its own. Consecutive lines
+    nearly always end in the same state — a 20k-line file has a few dozen
+    distinct stacks, not 20k."""
+    var stacks: List[List[Frame]]
+
+    def __init__(out self):
+        self.stacks = List[List[Frame]]()
+
+    def __copyinit__(mut self, copy: Self):
+        self.stacks = List[List[Frame]]()
+        for i in range(len(copy.stacks)):
+            self.stacks.append(copy_stack(copy.stacks[i]))
+
+    def intern(mut self, stack: List[Frame], hint: Int) -> Int:
+        """The index of ``stack``, added if new. ``hint`` is the previous
+        line's index (or -1), tried first: it is almost always the one."""
+        if hint >= 0 and hint < len(self.stacks) \
+                and stack_eq(stack, self.stacks[hint]):
+            return hint
+        for i in range(len(self.stacks)):
+            if stack_eq(stack, self.stacks[i]):
+                return i
+        self.stacks.append(copy_stack(stack))
+        return len(self.stacks) - 1
+
+
 @fieldwise_init
 struct _Cand(ImplicitlyCopyable, Movable):
     """One pattern under test at the current probe position.
@@ -138,44 +166,49 @@ def tokenize_with_grammar(
     multi-line strings color correctly. Convenience wrapper around
     ``tokenize_with_grammar_full`` for callers that don't need
     the per-line stack snapshots."""
-    var post_stacks = List[List[Frame]]()
-    return tokenize_with_grammar_full(grammar, lines, post_stacks)
+    var table = StackTable()
+    var post_ids = List[Int]()
+    return tokenize_with_grammar_full(grammar, lines, table, post_ids)
 
 
 def tokenize_with_grammar_full(
     grammar: Grammar, lines: List[String],
-    mut post_stacks: List[List[Frame]],
+    mut table: StackTable, mut post_ids: List[Int],
 ) -> List[Highlight]:
-    """As ``tokenize_with_grammar``, but also fills ``post_stacks``
-    with the scope stack at the *end* of each line. After the call,
-    ``post_stacks[i]`` is the state that line ``i+1`` would start
-    in. Used by ``HighlightCache`` to support incremental re-runs
-    that pick up from a known-good row instead of restarting at
-    the top of the buffer."""
-    post_stacks.clear()
+    """As ``tokenize_with_grammar``, but also fills ``post_ids`` with
+    the scope stack at the *end* of each line, as an index into ``table``
+    (which is reset). After the call, ``table.stacks[post_ids[i]]`` is the
+    state that line ``i+1`` would start in. Used by ``HighlightCache`` to
+    support incremental re-runs that pick up from a known-good row
+    instead of restarting at the top of the buffer."""
+    post_ids.clear()
+    table.stacks.clear()
     var out = List[Highlight]()
     var stack = List[Frame]()
+    var last = -1
     for row in range(len(lines)):
         var next_line = String("")
         if row + 1 < len(lines):
             next_line = lines[row + 1]
         _tokenize_line(grammar, lines[row], next_line, row, stack, out)
-        post_stacks.append(copy_stack(stack))
+        last = table.intern(stack, last)
+        post_ids.append(last)
     return out^
 
 
 def tokenize_lines_from(
     grammar: Grammar, lines: List[String],
     start_row: Int, min_row: Int, start_stack: List[Frame],
-    cached_post_stacks: List[List[Frame]],
-    mut post_stacks: List[List[Frame]],
+    cached_post_ids: List[Int],
+    mut table: StackTable,
+    mut post_ids: List[Int],
     mut stable_row: Int,
 ) -> List[Highlight]:
     """Tokenize ``lines[start_row:]`` starting from ``start_stack``.
 
     The early-exit lives inside this loop so we don't burn cycles
     re-tokenizing a long tail that we'll throw away — as soon as
-    the new post-stack at row ``r`` matches ``cached_post_stacks[r]``
+    the new post-stack at row ``r`` matches ``cached_post_ids[r]``
     we know everything from ``r+1`` onward is identical to last
     time and we can stop.
 
@@ -188,31 +221,33 @@ def tokenize_lines_from(
 
     On return:
 
-    * ``post_stacks`` holds the post-stack for each row we *did*
-      tokenize — i.e. ``post_stacks[k]`` is the stack at end of
-      row ``start_row + k``.
+    * ``post_ids`` holds the post-stack for each row we *did*
+      tokenize, as an index into ``table`` — i.e. ``post_ids[k]`` is the
+      stack at end of row ``start_row + k``.
     * ``stable_row`` is the first row whose cached state we trust.
       Highlights for ``[start_row, stable_row)`` came from this
       call; rows ``>= stable_row`` should be spliced in from the
       caller's cached highlights.
 
-    When ``cached_post_stacks`` is empty (cold load) or
+    When ``cached_post_ids`` is empty (cold load) or
     insufficient, we tokenize the whole tail and ``stable_row``
     ends up at ``len(lines)`` — i.e. nothing to splice.
     """
-    post_stacks.clear()
+    post_ids.clear()
     var out = List[Highlight]()
     var stack = copy_stack(start_stack)
     var row = start_row
+    var last = -1
     while row < len(lines):
         var next_line = String("")
         if row + 1 < len(lines):
             next_line = lines[row + 1]
         _tokenize_line(grammar, lines[row], next_line, row, stack, out)
-        post_stacks.append(copy_stack(stack))
+        last = table.intern(stack, last)
+        post_ids.append(last)
         if row >= min_row \
-                and row < len(cached_post_stacks) \
-                and stack_eq(stack, cached_post_stacks[row]):
+                and row < len(cached_post_ids) \
+                and last == cached_post_ids[row]:
             stable_row = row + 1
             return out^
         row += 1

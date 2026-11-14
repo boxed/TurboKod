@@ -37,7 +37,8 @@ from .string_utils import (
 )
 from .tm_grammar import Grammar, load_grammar_from_file
 from .tm_tokenizer import (
-    Frame, tokenize_lines_from, tokenize_with_grammar_full,
+    StackTable, tokenize_lines_from, tokenize_with_grammar,
+    tokenize_with_grammar_full,
 )
 
 
@@ -370,12 +371,15 @@ struct HighlightCache(Copyable, Movable):
     """
     var ext: String
     var highlights: List[Highlight]
-    var post_stacks: List[List[Frame]]
+    var post_stacks: List[Int]
+    """Each line's end-of-line scope stack, as an index into ``stacks``."""
+    var stacks: StackTable
 
     def __init__(out self):
         self.ext = String("")
         self.highlights = List[Highlight]()
-        self.post_stacks = List[List[Frame]]()
+        self.post_stacks = List[Int]()
+        self.stacks = StackTable()
 
     def __copyinit__(mut self, copy: Self):
         # Deep-copy the cached state. Editor's ``Copyable`` declaration
@@ -383,16 +387,19 @@ struct HighlightCache(Copyable, Movable):
         # ``^`` transfer so this branch is rare.
         self.ext = copy.ext
         self.highlights = copy.highlights.copy()
-        self.post_stacks = List[List[Frame]]()
-        for i in range(len(copy.post_stacks)):
-            self.post_stacks.append(copy.post_stacks[i].copy())
+        self.post_stacks = copy.post_stacks.copy()
+        self.stacks = copy.stacks.copy()
 
     def invalidate(mut self):
         """Drop the per-line state — used when the line count or
         extension shifts in a way the incremental path can't
         reconcile."""
         self.highlights = List[Highlight]()
-        self.post_stacks = List[List[Frame]]()
+        self.post_stacks = List[Int]()
+        self.stacks = StackTable()
+
+
+comptime _STACK_TABLE_LIMIT = 4096
 
 
 def highlight_for_extension_cached(
@@ -540,9 +547,12 @@ def highlight_incremental(
     # Costs one extra row of tokenizing; an edit at row 1 collapses to a full
     # retokenize (eff_dirty == 0), which is correct.
     var eff_dirty = dirty_row - 1
+    # The table only ever grows between full passes (a retired stack isn't
+    # removed); one that has collected thousands is rebuilt from scratch.
     var can_incr = (eff_dirty > 0
                     and eff_dirty <= n_lines
-                    and len(cache.post_stacks) == n_lines)
+                    and len(cache.post_stacks) == n_lines
+                    and len(cache.stacks.stacks) < _STACK_TABLE_LIMIT)
     if not can_incr:
         var hls = _full_retokenize(
             registry.grammars[grammar_idx], cache, lines,
@@ -561,8 +571,10 @@ def highlight_incremental(
     # last time. The tokenizer itself stops as soon as state
     # rejoins the cached trajectory and reports back via
     # ``stable_row``.
-    var start_stack = cache.post_stacks[eff_dirty - 1].copy()
-    var new_post = List[List[Frame]]()
+    var start_stack = cache.stacks.stacks[
+        cache.post_stacks[eff_dirty - 1]
+    ].copy()
+    var new_post = List[Int]()
     var stable_row: Int = 0
     # Earliest row the tokenizer may early-exit on: the bottom of the
     # edited range, so every in-place-edited row is re-tokenized before
@@ -573,7 +585,7 @@ def highlight_incremental(
         min_row = dirty_max_row
     var new_hls = tokenize_lines_from(
         registry.grammars[grammar_idx], lines, eff_dirty, min_row,
-        start_stack, cache.post_stacks, new_post, stable_row,
+        start_stack, cache.post_stacks, cache.stacks, new_post, stable_row,
     )
 
     # Splice highlights:
@@ -600,7 +612,7 @@ def highlight_incremental(
     # the list copied every row's stack (an allocation per buffer line) on
     # each keystroke.
     for k in range(len(new_post)):
-        swap(cache.post_stacks[eff_dirty + k], new_post[k])
+        cache.post_stacks[eff_dirty + k] = new_post[k]
     cache.highlights = out.copy()
 
     if len(out) == 0 and _has_nonempty_line(lines):
@@ -620,10 +632,10 @@ def _full_retokenize(
     ``cache.highlights`` and ``cache.post_stacks``. Caller owns
     the decision of whether to call us versus the incremental
     path — we just do the work."""
-    var post = List[List[Frame]]()
-    var hls = tokenize_with_grammar_full(grammar, lines, post)
+    var hls = tokenize_with_grammar_full(
+        grammar, lines, cache.stacks, cache.post_stacks,
+    )
     cache.highlights = hls.copy()
-    cache.post_stacks = post^
     return hls^
 
 
@@ -2227,9 +2239,8 @@ def _inject_grammar(
         return
 
     var sub_lines = _slice_body_lines(lines, body)
-    var sub_post = List[List[Frame]]()
-    var sub_hls = tokenize_with_grammar_full(
-        registry.grammars[grammar_idx], sub_lines, sub_post,
+    var sub_hls = tokenize_with_grammar(
+        registry.grammars[grammar_idx], sub_lines,
     )
 
     _drop_highlights_in_body(hls, body)
