@@ -28,7 +28,6 @@ from turbokod.canvas import (
     HOST_SURFACE_MAIN, HOST_SURFACE_PANELS, HOST_SURFACE_SETTINGS,
     HOST_SURFACES, HOST_VSCROLL, SubGrid,
 )
-from turbokod.colors import default_attr
 from turbokod.events import Event, MOD_CTRL, MOD_META
 from turbokod.geometry import Point, Rect
 from turbokod.local_changes import RightPanel
@@ -103,9 +102,9 @@ def _mouse_event(
 def _frame_canvas(h: Int, cols: Int, rows: Int) -> Canvas:
     """``_blank_canvas`` for a surface that can hold panes with a cell
     size of their own (``Desktop.frame_canvas``)."""
-    var canvas = _desk(h)[].frame_canvas(cols, rows)
-    canvas.clear(default_attr())
-    return canvas^
+    # A new ``Canvas`` is already blank in the default attribute; clearing
+    # it wrote every cell of every frame a second time.
+    return _desk(h)[].frame_canvas(cols, rows)
 
 
 def _chrome_canvas(h: Int, cols: Int, rows: Int) -> Canvas:
@@ -130,9 +129,7 @@ def _pack_surface(
 def _blank_canvas(cols: Int, rows: Int) -> Canvas:
     """A ``cols``x``rows`` canvas cleared to the default attribute, ready
     for one surface's paint."""
-    var canvas = Canvas(cols, rows)
-    canvas.clear(default_attr())
-    return canvas^
+    return Canvas(cols, rows)
 
 
 def _string_from(ptr: Int, n: Int) -> String:

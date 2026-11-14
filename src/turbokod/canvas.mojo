@@ -169,8 +169,8 @@ struct Canvas(Copyable, Movable):
         self.width = width
         self.height = height
         self.font = FONT_UI
-        self.cells = List[Cell]()
         var n = width * height
+        self.cells = List[Cell](capacity=n)
         for _ in range(n):
             self.cells.append(blank_cell())
         self.area_scale = List[Int]()
@@ -252,8 +252,8 @@ struct Canvas(Copyable, Movable):
     def resize(mut self, width: Int, height: Int):
         self.width = width
         self.height = height
-        self.cells = List[Cell]()
         var n = width * height
+        self.cells = List[Cell](capacity=n)
         for _ in range(n):
             self.cells.append(blank_cell())
         self.sub_grids = List[SubGrid]()
