@@ -19,7 +19,7 @@ from .file_io import (
 from .json import (
     JsonValue, encode_json, json_array, json_bool, json_int, json_object,
     json_str, json_get_bool, json_get_int, json_get_string,
-    json_get_string_array, parse_json,
+    json_get_string_array, json_string_array, parse_json,
 )
 from .posix import close_fd, getenv_value, user_config_path
 
@@ -824,28 +824,16 @@ def _config_to_json(config: TurbokodConfig) -> JsonValue:
     root.put(
         String("max_open_windows"), json_int(config.max_open_windows),
     )
-    var rp = json_array()
-    for i in range(len(config.recent_projects)):
-        rp.append(json_str(config.recent_projects[i]))
-    root.put(String("recent_projects"), rp)
-    var rf = json_array()
-    for i in range(len(config.recent_files)):
-        rf.append(json_str(config.recent_files[i]))
-    root.put(String("recent_files"), rf)
-    var pd = json_array()
-    for i in range(len(config.project_dirs)):
-        pd.append(json_str(config.project_dirs[i]))
-    root.put(String("project_dirs"), pd)
+    root.put(String("recent_projects"), json_string_array(config.recent_projects))
+    root.put(String("recent_files"), json_string_array(config.recent_files))
+    root.put(String("project_dirs"), json_string_array(config.project_dirs))
     var osa = json_array()
     for i in range(len(config.on_save_actions)):
         var act = config.on_save_actions[i].copy()
         var obj = json_object()
         obj.put(String("language_id"), json_str(act.language_id))
         obj.put(String("program"), json_str(act.program))
-        var aarr = json_array()
-        for k in range(len(act.args)):
-            aarr.append(json_str(act.args[k]))
-        obj.put(String("args"), aarr)
+        obj.put(String("args"), json_string_array(act.args))
         obj.put(String("cwd"), json_str(act.cwd))
         osa.append(obj)
     root.put(String("on_save_actions"), osa)
@@ -854,16 +842,10 @@ def _config_to_json(config: TurbokodConfig) -> JsonValue:
         var ov = config.language_servers[i].copy()
         var obj = json_object()
         obj.put(String("language_id"), json_str(ov.language_id))
-        var ft = json_array()
-        for k in range(len(ov.file_types)):
-            ft.append(json_str(ov.file_types[k]))
-        obj.put(String("file_types"), ft)
+        obj.put(String("file_types"), json_string_array(ov.file_types))
         var aa = json_array()
         for k in range(len(ov.argvs)):
-            var inner = json_array()
-            for m in range(len(ov.argvs[k])):
-                inner.append(json_str(ov.argvs[k][m]))
-            aa.append(inner)
+            aa.append(json_string_array(ov.argvs[k]))
         obj.put(String("argvs"), aa)
         lsv.append(obj)
     root.put(String("language_servers"), lsv)

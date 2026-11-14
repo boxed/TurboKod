@@ -30,7 +30,10 @@ from std.collections.list import List
 from .file_io import basename, join_path, list_directory, stat_file
 from .project_targets import split_env_entry
 from .string_utils import is_ascii_digit
-from .json import JsonValue, json_array, json_bool, json_object, json_str
+from .json import (
+    JsonValue, json_array, json_bool, json_object, json_str,
+    json_string_array,
+)
 
 
 # --- request kind ---------------------------------------------------------
@@ -368,7 +371,7 @@ def _launch_args_debugpy(
     else:
         o.put(String("program"), json_str(program))
     o.put(String("cwd"), json_str(cwd))
-    o.put(String("args"), _string_list_to_json(args^))
+    o.put(String("args"), json_string_array(args))
     o.put(String("console"), json_str(String("internalConsole")))
     o.put(String("stopOnEntry"), json_bool(stop_on_entry))
     o.put(String("justMyCode"), json_bool(False))
@@ -446,7 +449,7 @@ def _launch_args_generic(
     var o = json_object()
     o.put(String("program"), json_str(program))
     o.put(String("cwd"), json_str(cwd))
-    o.put(String("args"), _string_list_to_json(args^))
+    o.put(String("args"), json_string_array(args))
     o.put(String("stopOnEntry"), json_bool(stop_on_entry))
     return o^
 
@@ -461,10 +464,3 @@ def _env_list_to_json(env: List[String]) -> JsonValue:
             continue
         o.put(kv[0], json_str(kv[1]))
     return o^
-
-
-def _string_list_to_json(var args: List[String]) -> JsonValue:
-    var arr = json_array()
-    for i in range(len(args)):
-        arr.append(json_str(args[i]))
-    return arr^

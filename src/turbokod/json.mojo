@@ -290,12 +290,20 @@ def json_get_string_array(obj: JsonValue, key: String) -> List[String]:
     var v = obj.object_get(key)
     if not v or not v.value().is_array():
         return out^
-    var arr = v.value().copy()
-    for i in range(arr.array_len()):
-        var item = arr.array_at(i)
-        if item.is_string():
-            out.append(item.as_str())
+    ref arr = v.value()
+    for i in range(len(arr.arr_v)):
+        if arr.arr_v[i].is_string():
+            out.append(arr.arr_v[i].as_str())
     return out^
+
+
+def json_string_array(items: List[String]) -> JsonValue:
+    """``items`` as a JSON array of strings — the inverse of
+    ``json_get_string_array``."""
+    var arr = json_array()
+    for i in range(len(items)):
+        arr.append_owned(json_str(items[i]))
+    return arr^
 
 
 # --- encoder ---------------------------------------------------------------

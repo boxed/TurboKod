@@ -55,7 +55,7 @@ from .file_io import (
 )
 from .json import (
     JsonValue, encode_json, json_array, json_object, json_str,
-    json_get_string, json_get_string_array, parse_json,
+    json_get_string, json_get_string_array, json_string_array, parse_json,
 )
 from .posix import getenv_value
 from .string_utils import leading_indent_bytes, split_args, split_whitespace
@@ -271,17 +271,11 @@ def _encode_target(t: RunTarget) -> JsonValue:
     obj.put(String("name"), json_str(t.name))
     obj.put(String("program"), json_str(t.program))
     if len(t.args) > 0:
-        var args_arr = json_array()
-        for k in range(len(t.args)):
-            args_arr.append(json_str(t.args[k]))
-        obj.put(String("args"), args_arr)
+        obj.put(String("args"), json_string_array(t.args))
     if len(t.cwd.as_bytes()) > 0:
         obj.put(String("cwd"), json_str(t.cwd))
     if len(t.env) > 0:
-        var env_arr = json_array()
-        for k in range(len(t.env)):
-            env_arr.append(json_str(t.env[k]))
-        obj.put(String("env"), env_arr)
+        obj.put(String("env"), json_string_array(t.env))
     if len(t.debug_language.as_bytes()) > 0:
         obj.put(String("language"), json_str(t.debug_language))
     return obj^

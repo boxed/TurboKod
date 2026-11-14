@@ -30,6 +30,7 @@ from .config import OnSaveAction
 from .file_io import join_path, load_json_object, make_dir, write_file
 from .json import (
     encode_json, json_array, json_get_string, json_get_string_array,
+    json_string_array,
     json_object, json_str,
 )
 
@@ -118,10 +119,7 @@ def write_project_on_save(
         var obj = json_object()
         obj.put(String("language_id"), json_str(act.language_id))
         obj.put(String("program"), json_str(act.program))
-        var aarr = json_array()
-        for k in range(len(act.args)):
-            aarr.append(json_str(act.args[k]))
-        obj.put(String("args"), aarr)
+        obj.put(String("args"), json_string_array(act.args))
         obj.put(String("cwd"), json_str(act.cwd))
         arr.append(obj)
     var root = json_object()
