@@ -101,8 +101,19 @@ struct JsonValue(Copyable, Movable, Deinitable):
                 return Optional[JsonValue](self.obj_v[i].value.copy())
         return Optional[JsonValue]()
 
+    def object_index(self, key: String) -> Int:
+        """Position of ``key``'s member, or -1: a lookup that reads the
+        value in place (``obj_v[i].value``) where ``object_get`` would
+        copy the whole subtree out."""
+        if not self.is_object():
+            return -1
+        for i in range(len(self.obj_v)):
+            if self.obj_v[i].key == key:
+                return i
+        return -1
+
     def object_has(self, key: String) -> Bool:
-        return Bool(self.object_get(key))
+        return self.object_index(key) >= 0
 
     def object_len(self) -> Int:
         return len(self.obj_v) if self.is_object() else 0
@@ -262,24 +273,24 @@ def read_int_quad(
 
 
 def json_get_bool(obj: JsonValue, key: String, default: Bool) -> Bool:
-    var v = obj.object_get(key)
-    if v and v.value().is_bool():
-        return v.value().as_bool()
+    var i = obj.object_index(key)
+    if i >= 0 and obj.obj_v[i].value.is_bool():
+        return obj.obj_v[i].value.as_bool()
     return default
 
 
 def json_get_int(obj: JsonValue, key: String, default: Int) -> Int:
-    var v = obj.object_get(key)
-    if v and v.value().is_int():
-        return v.value().as_int()
+    var i = obj.object_index(key)
+    if i >= 0 and obj.obj_v[i].value.is_int():
+        return obj.obj_v[i].value.as_int()
     return default
 
 
 def json_get_string(obj: JsonValue, key: String) -> String:
     """Return the string at ``key`` or ``""`` if missing / wrong type."""
-    var v = obj.object_get(key)
-    if v and v.value().is_string():
-        return v.value().as_str()
+    var i = obj.object_index(key)
+    if i >= 0 and obj.obj_v[i].value.is_string():
+        return obj.obj_v[i].value.as_str()
     return String("")
 
 
@@ -287,10 +298,10 @@ def json_get_string_array(obj: JsonValue, key: String) -> List[String]:
     """Return the array-of-strings at ``key`` or an empty list. Non-string
     array entries are silently skipped."""
     var out = List[String]()
-    var v = obj.object_get(key)
-    if not v or not v.value().is_array():
+    var at = obj.object_index(key)
+    if at < 0 or not obj.obj_v[at].value.is_array():
         return out^
-    ref arr = v.value()
+    ref arr = obj.obj_v[at].value
     for i in range(len(arr.arr_v)):
         if arr.arr_v[i].is_string():
             out.append(arr.arr_v[i].as_str())
