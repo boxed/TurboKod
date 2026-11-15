@@ -371,6 +371,9 @@ struct HighlightCache(Copyable, Movable):
     """
     var ext: String
     var highlights: List[Highlight]
+    var lent_len: Int
+    """``sync_highlights``: ``>= 0`` while the caller's list *is* the
+    cached one (``highlights`` is then empty), holding its length."""
     var post_stacks: List[Int]
     """Each line's end-of-line scope stack, as an index into ``stacks``."""
     var stacks: StackTable
@@ -378,6 +381,7 @@ struct HighlightCache(Copyable, Movable):
     def __init__(out self):
         self.ext = String("")
         self.highlights = List[Highlight]()
+        self.lent_len = -1
         self.post_stacks = List[Int]()
         self.stacks = StackTable()
 
@@ -387,6 +391,7 @@ struct HighlightCache(Copyable, Movable):
         # ``^`` transfer so this branch is rare.
         self.ext = copy.ext
         self.highlights = copy.highlights.copy()
+        self.lent_len = copy.lent_len
         self.post_stacks = copy.post_stacks.copy()
         self.stacks = copy.stacks.copy()
 
@@ -395,6 +400,7 @@ struct HighlightCache(Copyable, Movable):
         extension shifts in a way the incremental path can't
         reconcile."""
         self.highlights = List[Highlight]()
+        self.lent_len = -1
         self.post_stacks = List[Int]()
         self.stacks = StackTable()
 
@@ -416,6 +422,54 @@ def highlight_for_extension_cached(
     ``highlight_incremental`` instead.
     """
     return highlight_incremental(ext, lines, 0, registry, cache)
+
+
+def sync_highlights(
+    ext: String, lines: List[String], dirty_row: Int,
+    mut registry: GrammarRegistry, mut cache: HighlightCache,
+    mut hls: List[Highlight], dirty_max_row: Int = -1,
+):
+    """``highlight_incremental`` for a caller that keeps the result in
+    ``hls`` between calls (an ``Editor``), without the buffer's highlights
+    being held twice.
+
+    The cache needs the grammar's own output to splice the next edit
+    into; the caller needs that plus whatever the injection overlays
+    changed. For most buffers the two are the same list, and then the
+    cache's copy is dropped and the caller's stands in for it: the next
+    call takes it back before tokenizing. A caller that replaced its list
+    in between (the length no longer matches) costs a full pass."""
+    var first = dirty_row
+    if cache.lent_len >= 0:
+        if len(hls) == cache.lent_len:
+            swap(cache.highlights, hls)
+            cache.lent_len = -1
+        else:
+            cache.invalidate()
+            first = 0
+    hls = highlight_incremental(
+        ext, lines, first, registry, cache, dirty_max_row,
+    )
+    if _same_highlights(hls, cache.highlights):
+        cache.highlights = List[Highlight]()
+        cache.lent_len = len(hls)
+
+
+def _same_highlights(a: List[Highlight], b: List[Highlight]) -> Bool:
+    if len(a) != len(b):
+        return False
+    for i in range(len(a)):
+        ref x = a[i]
+        ref y = b[i]
+        if x.row != y.row or x.col_start != y.col_start \
+                or x.col_end != y.col_end or x.attr.fg != y.attr.fg \
+                or x.attr.bg != y.attr.bg or x.attr.style != y.attr.style \
+                or x.attr.underline_color != y.attr.underline_color \
+                or x.attr.color_mode != y.attr.color_mode \
+                or x.attr.fg_rgb != y.attr.fg_rgb \
+                or x.attr.bg_rgb != y.attr.bg_rgb:
+            return False
+    return True
 
 
 def _hl_buckets(hls: List[Highlight], n: Int) -> List[List[Highlight]]:

@@ -53,8 +53,8 @@ from .git_changes import (
 from .highlight import (
     CompletionRequest, DefinitionRequest, EditorContextMenuRequest,
     GrammarRegistry, Highlight, HighlightCache, HoverRequest, extension_of,
-    highlight_comment_attr, highlight_incremental, highlight_string_attr,
-    line_comment_for_extension, word_at,
+    highlight_comment_attr, highlight_string_attr,
+    line_comment_for_extension, sync_highlights, word_at,
 )
 from .kwarg_conceal import (
     build_concealed_segment, kwarg_conceal_ranges,
@@ -2419,9 +2419,10 @@ struct Editor(Copyable, Movable):
             self.spell_lines = List[Bool]()
             return
         var ext = extension_of(self.file_path)
-        self.highlights = highlight_incremental(
+        sync_highlights(
             ext, self.buffer.lines, self._hl_dirty_row,
-            registry, self._hl_cache, self._hl_dirty_max_row,
+            registry, self._hl_cache, self.highlights,
+            self._hl_dirty_max_row,
         )
         self._highlights_dirty = False
         # Mark the cache as fully clean by parking the dirty row

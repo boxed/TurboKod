@@ -28,7 +28,8 @@ from turbokod.highlight import (
     _apply_django_template_overlay, embedded_language_extensions,
     highlight_for_extension, highlight_incremental, highlight_comment_attr,
     highlight_ident_attr, highlight_keyword_attr, highlight_number_attr,
-    highlight_operator_attr, highlight_string_attr, template_include_at
+    highlight_operator_attr, highlight_string_attr, sync_highlights,
+    template_include_at
 )
 from turbokod.posix import which
 from turbokod.grammar_install import (
@@ -824,6 +825,42 @@ def test_textmate_brackets_paint_as_operators() raises:
                 found = True
         assert_true(found)
         assert_true(got == str_attr)
+
+
+def test_sync_highlights_keeps_one_copy_of_the_buffers_highlights() raises:
+    """An editor's highlight list doubles as the tokenizer's cached one
+    (no second copy in the cache), and an edit still splices into it: the
+    result matches a full pass. A list the caller replaced in between is
+    rebuilt rather than spliced into."""
+    var lines = List[String]()
+    lines.append(String("fn main() {"))
+    lines.append(String("    let s = \"hello\";"))
+    lines.append(String("    let n = 42;"))
+    lines.append(String("}"))
+    var registry = GrammarRegistry()
+    var cache = HighlightCache()
+    var hls = List[Highlight]()
+    sync_highlights(String("rs"), lines, 0, registry, cache, hls)
+    assert_true(len(hls) > 0)
+    assert_equal(len(cache.highlights), 0)
+    assert_equal(cache.lent_len, len(hls))
+    lines[2] = String("    let n = 42; // note")
+    sync_highlights(String("rs"), lines, 2, registry, cache, hls)
+    assert_equal(len(cache.highlights), 0)
+    var full = _hl_set(highlight_for_extension(String("rs"), lines))
+    var got = _hl_set(hls)
+    assert_equal(len(got), len(full))
+    for i in range(len(got)):
+        assert_equal(got[i].row, full[i].row)
+        assert_equal(got[i].col_start, full[i].col_start)
+        assert_equal(got[i].col_end, full[i].col_end)
+    hls = List[Highlight]()
+    lines[3] = String("} // end")
+    sync_highlights(String("rs"), lines, 3, registry, cache, hls)
+    var got2 = _hl_set(hls)
+    var full2 = _hl_set(highlight_for_extension(String("rs"), lines))
+    assert_equal(len(got2), len(full2))
+    registry.release()
 
 
 def test_textmate_incremental_matches_full_retokenize() raises:
