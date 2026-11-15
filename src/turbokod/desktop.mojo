@@ -767,6 +767,12 @@ def ctrl_key(letter: String) -> UInt32:
     return UInt32(c)
 
 
+def char_key(c: String) -> UInt32:
+    """The key codepoint of the single character ``c`` (``"q"``, ``","``)
+    — how a ``Cmd+``/``Cmd+Shift+`` binding names its key."""
+    return UInt32(ord(c))
+
+
 # Documentation group names for the Keyboard Shortcuts page. Shared by the
 # hotkey registrations and ``_hotkeys_help_text`` so the two can't drift on
 # spelling; the page renders groups in this declaration order (see
@@ -2219,85 +2225,52 @@ struct Desktop(Movable):
         # separately in ``_hotkeys_help_text``.
 
         # --- Application ---
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("q")), MOD_META, APP_QUIT_ACTION,
-            group=HKG_APP, help=String("Quit"),
-        ))
+        self._bind(char_key("q"), MOD_META, APP_QUIT_ACTION, HKG_APP, "Quit")
         # Cmd+, — open Settings (macOS-wide Preferences binding); routed
         # through ``APP_SETTINGS`` so menu, hamburger, and hotkey share
         # one dispatch path.
-        self._hotkeys.append(Hotkey(
-            UInt32(ord(",")), MOD_META, APP_SETTINGS,
-            group=HKG_APP, help=String("Settings"),
-        ))
+        self._bind(char_key(","), MOD_META, APP_SETTINGS, HKG_APP, "Settings")
 
         # --- Files ---
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("w")), MOD_META, WINDOW_CLOSE,
-            group=HKG_FILES, help=String("Close window"),
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("n")), MOD_META, EDITOR_NEW,
-            group=HKG_FILES, help=String("New"),
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("o")), MOD_META, EDITOR_OPEN,
-            group=HKG_FILES, help=String("Open..."),
-        ))
+        self._bind(char_key("w"), MOD_META, WINDOW_CLOSE, HKG_FILES, "Close window")
+        self._bind(char_key("n"), MOD_META, EDITOR_NEW, HKG_FILES, "New")
+        self._bind(char_key("o"), MOD_META, EDITOR_OPEN, HKG_FILES, "Open...")
         # Cmd+Shift+O — Quick Open (type-to-filter file picker). Plain
         # Cmd+O bubbles ``file:open`` up to the host's FileDialog; Quick
         # Open is the project-aware fast picker.
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("o")), MOD_META | MOD_SHIFT, EDITOR_QUICK_OPEN,
-            group=HKG_FILES, help=String("Quick open..."),
-        ))
+        self._bind(
+            char_key("o"), MOD_META | MOD_SHIFT, EDITOR_QUICK_OPEN, HKG_FILES,
+            "Quick open...",
+        )
         # Cmd+P — the same picker over the Settings ▸ Projects folders'
         # subdirectories.
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("p")), MOD_META, PROJECT_QUICK_OPEN,
-            group=HKG_FILES, help=String("Quick open project..."),
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("e")), MOD_META, EDITOR_OPEN_RECENT,
-            group=HKG_FILES, help=String("Open recent..."),
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("s")), MOD_META, EDITOR_SAVE,
-            group=HKG_FILES, help=String("Save"),
-        ))
+        self._bind(
+            char_key("p"), MOD_META, PROJECT_QUICK_OPEN, HKG_FILES,
+            "Quick open project...",
+        )
+        self._bind(
+            char_key("e"), MOD_META, EDITOR_OPEN_RECENT, HKG_FILES, "Open recent...",
+        )
+        self._bind(char_key("s"), MOD_META, EDITOR_SAVE, HKG_FILES, "Save")
 
         # --- Find & navigate ---
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("f")), MOD_META, EDITOR_FIND,
-            group=HKG_FIND, help=String("Find"),
-        ))
+        self._bind(char_key("f"), MOD_META, EDITOR_FIND, HKG_FIND, "Find")
         # Cmd+R for replace. Run-target lives on Ctrl+R below, freeing
         # Cmd+R for the in-buffer replace prompt.
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("r")), MOD_META, EDITOR_REPLACE,
-            group=HKG_FIND, help=String("Replace"),
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("g")), MOD_META, EDITOR_FIND_NEXT,
-            group=HKG_FIND, help=String("Find next"),
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("l")), MOD_META, EDITOR_GOTO,
-            group=HKG_FIND, help=String("Go to line..."),
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("t")), MOD_META, EDITOR_GOTO_SYMBOL,
-            group=HKG_FIND, help=String("Go to symbol..."),
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("k")), MOD_META, EDITOR_LOOKUP_DOCS,
-            group=HKG_FIND, help=String("Look up in docs"),
-        ))
+        self._bind(char_key("r"), MOD_META, EDITOR_REPLACE, HKG_FIND, "Replace")
+        self._bind(char_key("g"), MOD_META, EDITOR_FIND_NEXT, HKG_FIND, "Find next")
+        self._bind(char_key("l"), MOD_META, EDITOR_GOTO, HKG_FIND, "Go to line...")
+        self._bind(
+            char_key("t"), MOD_META, EDITOR_GOTO_SYMBOL, HKG_FIND, "Go to symbol...",
+        )
+        self._bind(
+            char_key("k"), MOD_META, EDITOR_LOOKUP_DOCS, HKG_FIND, "Look up in docs",
+        )
         # Cmd+Option+O — workspace-wide "Find Symbol".
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("o")), MOD_META | MOD_ALT, EDITOR_FIND_SYMBOL,
-            group=HKG_FIND, help=String("Find symbol (project)"),
-        ))
+        self._bind(
+            char_key("o"), MOD_META | MOD_ALT, EDITOR_FIND_SYMBOL, HKG_FIND,
+            "Find symbol (project)",
+        )
 
         # --- Edit ---
         # Registering Cmd+X/C/V at the desktop layer serves two purposes:
@@ -2305,56 +2278,35 @@ struct Desktop(Movable):
         # ``_shortcut_for_action``, and the dispatch path is uniform
         # whether the user clicks a menu or hits the key. Cmd+Z / Cmd+Y
         # use the de-facto-standard binding.
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("x")), MOD_META, EDITOR_CUT,
-            group=HKG_EDIT, help=String("Cut"),
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("c")), MOD_META, EDITOR_COPY,
-            group=HKG_EDIT, help=String("Copy"),
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("v")), MOD_META, EDITOR_PASTE,
-            group=HKG_EDIT, help=String("Paste"),
-        ))
+        self._bind(char_key("x"), MOD_META, EDITOR_CUT, HKG_EDIT, "Cut")
+        self._bind(char_key("c"), MOD_META, EDITOR_COPY, HKG_EDIT, "Copy")
+        self._bind(char_key("v"), MOD_META, EDITOR_PASTE, HKG_EDIT, "Paste")
         # Select all. A real action rather than just a gate-clearing
         # ``doc_only`` row (which is all the Ctrl+A alias below needs) so the
         # Edit menu can carry it and the host's ⌘A key-equivalent lands in
         # ``dispatch_action`` — which is also what routes the chord into a
         # focused modal's text field instead of the editor behind the dialog.
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("a")), MOD_META, EDITOR_SELECT_ALL,
-            group=HKG_EDIT, help=String("Select all"),
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("z")), MOD_META, EDITOR_UNDO,
-            group=HKG_EDIT, help=String("Undo"),
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("y")), MOD_META, EDITOR_REDO,
-            group=HKG_EDIT, help=String("Redo"),
-        ))
+        self._bind(char_key("a"), MOD_META, EDITOR_SELECT_ALL, HKG_EDIT, "Select all")
+        self._bind(char_key("z"), MOD_META, EDITOR_UNDO, HKG_EDIT, "Undo")
+        self._bind(char_key("y"), MOD_META, EDITOR_REDO, HKG_EDIT, "Redo")
         # Cmd+Shift+Z is the macOS-standard redo; register it after Cmd+Y so
         # the newest-wins reverse lookup stamps it as the menu's displayed
         # shortcut (Cmd+Y stays a working alias). Sharing help="Redo" folds
         # both into one "Cmd+Y / Cmd+Shift+Z" row on the shortcuts page.
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("z")), MOD_META | MOD_SHIFT, EDITOR_REDO,
-            group=HKG_EDIT, help=String("Redo"),
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("f")), MOD_META | MOD_SHIFT, PROJECT_FIND,
-            group=HKG_FIND, help=String("Find in project"),
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("r")), MOD_META | MOD_SHIFT, PROJECT_REPLACE,
-            group=HKG_FIND, help=String("Replace in project"),
-        ))
+        self._bind(char_key("z"), MOD_META | MOD_SHIFT, EDITOR_REDO, HKG_EDIT, "Redo")
+        self._bind(
+            char_key("f"), MOD_META | MOD_SHIFT, PROJECT_FIND, HKG_FIND,
+            "Find in project",
+        )
+        self._bind(
+            char_key("r"), MOD_META | MOD_SHIFT, PROJECT_REPLACE, HKG_FIND,
+            "Replace in project",
+        )
         # Find Previous: Cmd+Shift+G — the de-facto editor binding.
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("g")), MOD_META | MOD_SHIFT, EDITOR_FIND_PREV,
-            group=HKG_FIND, help=String("Find previous"),
-        ))
+        self._bind(
+            char_key("g"), MOD_META | MOD_SHIFT, EDITOR_FIND_PREV, HKG_FIND,
+            "Find previous",
+        )
         # Window switching: Ctrl+1 .. Ctrl+9 focus the first nine windows by
         # the same number shown in the top-right of each window's chrome.
         # Each binding's action carries the target index, so the dynamic
@@ -2363,87 +2315,70 @@ struct Desktop(Movable):
         # undocumented individually; one ``doc_only`` row below folds the
         # range into a single line.
         for n in range(9):
-            self._hotkeys.append(Hotkey(
-                UInt32(ord("1") + n),
-                MOD_CTRL,
-                WINDOW_FOCUS_PREFIX + String(n),
-            ))
-        self._hotkeys.append(Hotkey(
-            UInt32(0), MOD_NONE, String(""),
-            group=HKG_WINDOWS, help=String("Focus window 1-9"),
-            doc_shortcut=String("Ctrl+1 .. Ctrl+9"), doc_only=True,
-        ))
+            self._bind(UInt32(ord("1") + n), MOD_CTRL, WINDOW_FOCUS_PREFIX + String(n))
+        self._doc_row(HKG_WINDOWS, "Focus window 1-9", "Ctrl+1 .. Ctrl+9")
         # Side-panel focus: Ctrl+0 → file tree, Ctrl+9 → debug pane.
         # These match the ``0`` / ``9`` glyphs each panel paints in
         # its top-right corner. Registered after the Ctrl+1..9 loop
         # so the Ctrl+9 binding here wins over the (rare) 9th window
         # — the lookup walks newest-first, and a debug pane is far
         # more commonly reached than a 9th open window.
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("0")), MOD_CTRL, FILE_TREE_FOCUS,
-            group=HKG_WINDOWS, help=String("Focus file tree"),
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("9")), MOD_CTRL, DEBUG_FOCUS_PANE,
-            group=HKG_WINDOWS, help=String("Focus debug pane"),
-        ))
+        self._bind(
+            char_key("0"), MOD_CTRL, FILE_TREE_FOCUS, HKG_WINDOWS, "Focus file tree",
+        )
+        self._bind(
+            char_key("9"), MOD_CTRL, DEBUG_FOCUS_PANE, HKG_WINDOWS, "Focus debug pane",
+        )
         # Cmd+Shift+T opens a new docked terminal pane (each carries
         # its own $SHELL + scrollback). Same action the File → "New
         # terminal pane" menu item dispatches, so the menu surfaces
         # this shortcut. The pane paints "T" in the top-right corner
         # to advertise this binding (mirroring the debug pane's "9").
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("t")), MOD_META | MOD_SHIFT, TERMINAL_NEW,
-            group=HKG_FILES, help=String("New terminal pane"),
-        ))
+        self._bind(
+            char_key("t"), MOD_META | MOD_SHIFT, TERMINAL_NEW, HKG_FILES,
+            "New terminal pane",
+        )
         # Cmd+Alt+C opens a new terminal pane already running ``claude``
         # — same pane, but the shell auto-runs a Claude session on
         # spawn. Mirrored by the File → "New Claude pane" menu item.
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("c")), MOD_META | MOD_ALT, TERMINAL_CLAUDE,
-            group=HKG_FILES, help=String("New Claude pane"),
-        ))
+        self._bind(
+            char_key("c"), MOD_META | MOD_ALT, TERMINAL_CLAUDE, HKG_FILES,
+            "New Claude pane",
+        )
         # Ctrl+G — open the diff viewer (project-wide ``git diff HEAD``).
-        self._hotkeys.append(Hotkey(
-            ctrl_key("g"), MOD_CTRL, GIT_LOCAL_CHANGES,
-            group=HKG_GIT, help=String("Show diff viewer"),
-        ))
+        self._bind(
+            ctrl_key("g"), MOD_CTRL, GIT_LOCAL_CHANGES, HKG_GIT, "Show diff viewer",
+        )
         # Ctrl+Shift+R — open the changeset reviewer (R for Review). Ctrl+R
         # is Run and Cmd+R/Cmd+Shift+R are Replace / Replace-in-project, so
         # Ctrl+Shift+R is the free R-chord; it sits in the Git group next to
         # the diff viewer. Registered uppercase-with-shift to match the
         # native menu's key-equivalent derivation (Shift kept as-is).
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("r")), MOD_CTRL | MOD_SHIFT, GIT_REVIEW,
-            group=HKG_GIT, help=String("Review changes"),
-        ))
+        self._bind(
+            char_key("r"), MOD_CTRL | MOD_SHIFT, GIT_REVIEW, HKG_GIT, "Review changes",
+        )
         # Ctrl+Shift+H — git history for the current selection (H for
         # History). Registered uppercase-with-shift like the reviewer above
         # so the native menu's key-equivalent derivation lines up.
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("h")), MOD_CTRL | MOD_SHIFT, GIT_HISTORY_SELECTION,
-            group=HKG_GIT, help=String("Show history for selection"),
-        ))
+        self._bind(
+            char_key("h"), MOD_CTRL | MOD_SHIFT, GIT_HISTORY_SELECTION, HKG_GIT,
+            "Show history for selection",
+        )
         # Bookmarks, on F2 as in TextPad — except that plain F2 is the
         # LSP-standard rename below, so next / previous move to Alt.
         # Ctrl+F2 is TextPad's toggle; Cmd+F2 is the alias for the macOS
         # app, where the system can claim Ctrl+F2 (focus the menu bar).
-        self._hotkeys.append(Hotkey(
-            KEY_F2, MOD_META, EDITOR_BOOKMARK_TOGGLE,
-            group=HKG_EDIT, help=String("Toggle bookmark"),
-        ))
-        self._hotkeys.append(Hotkey(
-            KEY_F2, MOD_CTRL, EDITOR_BOOKMARK_TOGGLE,
-            group=HKG_EDIT, help=String("Toggle bookmark"),
-        ))
-        self._hotkeys.append(Hotkey(
-            KEY_F2, MOD_ALT, EDITOR_BOOKMARK_NEXT,
-            group=HKG_FIND, help=String("Next bookmark"),
-        ))
-        self._hotkeys.append(Hotkey(
-            KEY_F2, MOD_ALT | MOD_SHIFT, EDITOR_BOOKMARK_PREV,
-            group=HKG_FIND, help=String("Previous bookmark"),
-        ))
+        self._bind(
+            KEY_F2, MOD_META, EDITOR_BOOKMARK_TOGGLE, HKG_EDIT, "Toggle bookmark",
+        )
+        self._bind(
+            KEY_F2, MOD_CTRL, EDITOR_BOOKMARK_TOGGLE, HKG_EDIT, "Toggle bookmark",
+        )
+        self._bind(KEY_F2, MOD_ALT, EDITOR_BOOKMARK_NEXT, HKG_FIND, "Next bookmark")
+        self._bind(
+            KEY_F2, MOD_ALT | MOD_SHIFT, EDITOR_BOOKMARK_PREV, HKG_FIND,
+            "Previous bookmark",
+        )
         # LSP completion request. Two default triggers so at least one
         # survives macOS's input-source hijack of Ctrl+Space:
         #   * Ctrl+Space — IDE-conventional, on terminals that pass it
@@ -2451,57 +2386,33 @@ struct Desktop(Movable):
         # Both share the "Code completion" help, so the page merges them
         # into one ``Ctrl+Space / Ctrl+J`` row. (F2 used to be a third
         # fallback here; it's now the LSP-standard rename key below.)
-        self._hotkeys.append(Hotkey(
-            KEY_SPACE, MOD_CTRL, EDITOR_COMPLETE,
-            group=HKG_MOVE, help=String("Code completion"),
-        ))
-        self._hotkeys.append(Hotkey(
-            ctrl_key("j"), MOD_CTRL, EDITOR_COMPLETE,
-            group=HKG_MOVE, help=String("Code completion"),
-        ))
+        self._bind(KEY_SPACE, MOD_CTRL, EDITOR_COMPLETE, HKG_MOVE, "Code completion")
+        self._bind(
+            ctrl_key("j"), MOD_CTRL, EDITOR_COMPLETE, HKG_MOVE, "Code completion",
+        )
         # LSP rename. F2 is the de-facto rename key (VS Code); Shift+F6
         # mirrors JetBrains. Both share one help row.
-        self._hotkeys.append(Hotkey(
-            KEY_F2, MOD_NONE, EDITOR_RENAME_SYMBOL,
-            group=HKG_MOVE, help=String("Rename symbol"),
-        ))
-        self._hotkeys.append(Hotkey(
-            KEY_F6, MOD_SHIFT, EDITOR_RENAME_SYMBOL,
-            group=HKG_MOVE, help=String("Rename symbol"),
-        ))
+        self._bind(KEY_F2, MOD_NONE, EDITOR_RENAME_SYMBOL, HKG_MOVE, "Rename symbol")
+        self._bind(KEY_F6, MOD_SHIFT, EDITOR_RENAME_SYMBOL, HKG_MOVE, "Rename symbol")
         # Debugger bindings: F5 / F9 / F10 / F11 / Shift+F11 / Shift+F5 —
         # the de facto standard set across VS Code, JetBrains, and most
         # other IDEs. Registered after the Ctrl-letter set so any user
         # override registered later still wins (the lookup walks
         # newest-first).
-        self._hotkeys.append(Hotkey(
-            KEY_F5, MOD_NONE, DEBUG_START_OR_CONTINUE,
-            group=HKG_DEBUG, help=String("Start / Continue"),
-        ))
-        self._hotkeys.append(Hotkey(
-            KEY_F5, MOD_SHIFT, DEBUG_STOP,
-            group=HKG_DEBUG, help=String("Stop"),
-        ))
-        self._hotkeys.append(Hotkey(
-            KEY_F9, MOD_NONE, DEBUG_TOGGLE_BREAKPOINT,
-            group=HKG_DEBUG, help=String("Toggle breakpoint"),
-        ))
-        self._hotkeys.append(Hotkey(
-            KEY_F9, MOD_SHIFT, DEBUG_CONDITIONAL_BP,
-            group=HKG_DEBUG, help=String("Conditional breakpoint"),
-        ))
-        self._hotkeys.append(Hotkey(
-            KEY_F10, MOD_NONE, DEBUG_STEP_OVER,
-            group=HKG_DEBUG, help=String("Step over"),
-        ))
-        self._hotkeys.append(Hotkey(
-            KEY_F11, MOD_NONE, DEBUG_STEP_IN,
-            group=HKG_DEBUG, help=String("Step into"),
-        ))
-        self._hotkeys.append(Hotkey(
-            KEY_F11, MOD_SHIFT, DEBUG_STEP_OUT,
-            group=HKG_DEBUG, help=String("Step out"),
-        ))
+        self._bind(
+            KEY_F5, MOD_NONE, DEBUG_START_OR_CONTINUE, HKG_DEBUG, "Start / Continue",
+        )
+        self._bind(KEY_F5, MOD_SHIFT, DEBUG_STOP, HKG_DEBUG, "Stop")
+        self._bind(
+            KEY_F9, MOD_NONE, DEBUG_TOGGLE_BREAKPOINT, HKG_DEBUG, "Toggle breakpoint",
+        )
+        self._bind(
+            KEY_F9, MOD_SHIFT, DEBUG_CONDITIONAL_BP, HKG_DEBUG,
+            "Conditional breakpoint",
+        )
+        self._bind(KEY_F10, MOD_NONE, DEBUG_STEP_OVER, HKG_DEBUG, "Step over")
+        self._bind(KEY_F11, MOD_NONE, DEBUG_STEP_IN, HKG_DEBUG, "Step into")
+        self._bind(KEY_F11, MOD_SHIFT, DEBUG_STEP_OUT, HKG_DEBUG, "Step out")
         # Cmd+digit debug bindings. Bound on MOD_META rather than
         # MOD_CTRL so they stay distinct from the Ctrl+0..9 window /
         # panel-focus bindings above — terminals report Cmd+digit and
@@ -2509,88 +2420,59 @@ struct Desktop(Movable):
         # them distinct. So Cmd+2 → step over, Ctrl+2 → focus window 2.
         # Same help strings as the F-key set, so each folds into the
         # matching ``F-key / Cmd+digit`` row on the page.
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("0")), MOD_META, DEBUG_START_OR_CONTINUE,
-            group=HKG_DEBUG, help=String("Start / Continue"),
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("2")), MOD_META, DEBUG_STEP_OVER,
-            group=HKG_DEBUG, help=String("Step over"),
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("4")), MOD_META, DEBUG_STEP_OUT,
-            group=HKG_DEBUG, help=String("Step out"),
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("5")), MOD_META, DEBUG_RUN_TO_CURSOR,
-            group=HKG_DEBUG, help=String("Run to cursor"),
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("6")), MOD_META, DEBUG_STEP_IN,
-            group=HKG_DEBUG, help=String("Step into"),
-        ))
+        self._bind(
+            char_key("0"), MOD_META, DEBUG_START_OR_CONTINUE, HKG_DEBUG,
+            "Start / Continue",
+        )
+        self._bind(char_key("2"), MOD_META, DEBUG_STEP_OVER, HKG_DEBUG, "Step over")
+        self._bind(char_key("4"), MOD_META, DEBUG_STEP_OUT, HKG_DEBUG, "Step out")
+        self._bind(
+            char_key("5"), MOD_META, DEBUG_RUN_TO_CURSOR, HKG_DEBUG, "Run to cursor",
+        )
+        self._bind(char_key("6"), MOD_META, DEBUG_STEP_IN, HKG_DEBUG, "Step into")
         # F8: toggle debug pane focus. Workaround until pane-mouse
         # works; arrow keys then scroll the stack list while the
         # pane is focused. Folds into the "Focus debug pane" row.
-        self._hotkeys.append(Hotkey(
-            KEY_F8, MOD_NONE, DEBUG_FOCUS_PANE,
-            group=HKG_WINDOWS, help=String("Focus debug pane"),
-        ))
+        self._bind(KEY_F8, MOD_NONE, DEBUG_FOCUS_PANE, HKG_WINDOWS, "Focus debug pane")
         # Ctrl+R / Ctrl+D / Ctrl+T — run / debug / test the active
         # project target.
-        self._hotkeys.append(Hotkey(
-            ctrl_key("r"), MOD_CTRL, TARGET_RUN,
-            group=HKG_DEBUG, help=String("Run target"),
-        ))
-        self._hotkeys.append(Hotkey(
-            ctrl_key("d"), MOD_CTRL, TARGET_DEBUG,
-            group=HKG_DEBUG, help=String("Debug target"),
-        ))
-        self._hotkeys.append(Hotkey(
-            ctrl_key("t"), MOD_CTRL, TARGET_TEST,
-            group=HKG_DEBUG, help=String("Test target"),
-        ))
+        self._bind(ctrl_key("r"), MOD_CTRL, TARGET_RUN, HKG_DEBUG, "Run target")
+        self._bind(ctrl_key("d"), MOD_CTRL, TARGET_DEBUG, HKG_DEBUG, "Debug target")
+        self._bind(ctrl_key("t"), MOD_CTRL, TARGET_TEST, HKG_DEBUG, "Test target")
         # Cmd+Shift+D — run the test suite under the DAP debugger.
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("d")), MOD_META | MOD_SHIFT, TARGET_TEST_DEBUG,
-            group=HKG_DEBUG, help=String("Test under debugger"),
-        ))
+        self._bind(
+            char_key("d"), MOD_META | MOD_SHIFT, TARGET_TEST_DEBUG, HKG_DEBUG,
+            "Test under debugger",
+        )
         # Cmd+` / Cmd+Shift+` — cycle through windows forward / backward
         # in stable insertion order. Shift+` produces ``~`` on US
         # layouts; we bind both glyphs so the reverse rotation works
         # regardless of whether the terminal reports the shifted or
         # unshifted codepoint (the ``~`` binding stays undocumented as a
         # layout-quirk alias of Cmd+Shift+`).
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("`")), MOD_META, WINDOW_ROTATE_NEXT,
-            group=HKG_WINDOWS, help=String("Next window"),
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("`")), MOD_META | MOD_SHIFT, WINDOW_ROTATE_PREV,
-            group=HKG_WINDOWS, help=String("Previous window"),
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("~")), MOD_META | MOD_SHIFT, WINDOW_ROTATE_PREV,
-        ))
+        self._bind(
+            char_key("`"), MOD_META, WINDOW_ROTATE_NEXT, HKG_WINDOWS, "Next window",
+        )
+        self._bind(
+            char_key("`"), MOD_META | MOD_SHIFT, WINDOW_ROTATE_PREV, HKG_WINDOWS,
+            "Previous window",
+        )
+        self._bind(char_key("~"), MOD_META | MOD_SHIFT, WINDOW_ROTATE_PREV)
         # Cmd+Shift+] / Cmd+Shift+[ — cycle tabs right / left, the
         # editor-standard binding. Same forward/back rotation as Cmd+`.
         # Shift turns ``]``/``[`` into ``}``/``{`` on US layouts, so bind
         # both glyphs (the brace forms stay undocumented layout aliases,
         # like the ``~`` alias of Cmd+Shift+` above).
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("]")), MOD_META | MOD_SHIFT, WINDOW_ROTATE_NEXT,
-            group=HKG_WINDOWS, help=String("Next tab"),
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("[")), MOD_META | MOD_SHIFT, WINDOW_ROTATE_PREV,
-            group=HKG_WINDOWS, help=String("Previous tab"),
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("}")), MOD_META | MOD_SHIFT, WINDOW_ROTATE_NEXT,
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("{")), MOD_META | MOD_SHIFT, WINDOW_ROTATE_PREV,
-        ))
+        self._bind(
+            char_key("]"), MOD_META | MOD_SHIFT, WINDOW_ROTATE_NEXT, HKG_WINDOWS,
+            "Next tab",
+        )
+        self._bind(
+            char_key("["), MOD_META | MOD_SHIFT, WINDOW_ROTATE_PREV, HKG_WINDOWS,
+            "Previous tab",
+        )
+        self._bind(char_key("}"), MOD_META | MOD_SHIFT, WINDOW_ROTATE_NEXT)
+        self._bind(char_key("{"), MOD_META | MOD_SHIFT, WINDOW_ROTATE_PREV)
         # Cmd+Shift+Right / Cmd+Shift+Left are NOT tab navigation — they're
         # line-level select-to-end / select-to-start, handled in-editor
         # (the Shift extension of plain Cmd+Right/Left). Tab switching lives
@@ -2600,35 +2482,29 @@ struct Desktop(Movable):
         # touched by the selection. Prefix is derived from the file
         # extension (``# `` for Python, ``// `` for Rust, …) so the same
         # binding works across languages.
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("/")), MOD_META, EDITOR_TOGGLE_COMMENT,
-            group=HKG_EDIT, help=String("Toggle comment"),
-        ))
+        self._bind(
+            char_key("/"), MOD_META, EDITOR_TOGGLE_COMMENT, HKG_EDIT, "Toggle comment",
+        )
         # Cmd+[ / Cmd+] — back / forward through the navigation history;
         # Cmd+Alt+Left / Right mirror them (browser-style) and fold into
         # the same two rows.
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("[")), MOD_META, EDITOR_NAV_BACK,
-            group=HKG_FIND, help=String("Navigate back"),
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("]")), MOD_META, EDITOR_NAV_FORWARD,
-            group=HKG_FIND, help=String("Navigate forward"),
-        ))
-        self._hotkeys.append(Hotkey(
-            KEY_LEFT, MOD_META | MOD_ALT, EDITOR_NAV_BACK,
-            group=HKG_FIND, help=String("Navigate back"),
-        ))
-        self._hotkeys.append(Hotkey(
-            KEY_RIGHT, MOD_META | MOD_ALT, EDITOR_NAV_FORWARD,
-            group=HKG_FIND, help=String("Navigate forward"),
-        ))
+        self._bind(char_key("["), MOD_META, EDITOR_NAV_BACK, HKG_FIND, "Navigate back")
+        self._bind(
+            char_key("]"), MOD_META, EDITOR_NAV_FORWARD, HKG_FIND, "Navigate forward",
+        )
+        self._bind(
+            KEY_LEFT, MOD_META | MOD_ALT, EDITOR_NAV_BACK, HKG_FIND, "Navigate back",
+        )
+        self._bind(
+            KEY_RIGHT, MOD_META | MOD_ALT, EDITOR_NAV_FORWARD, HKG_FIND,
+            "Navigate forward",
+        )
         # Cmd+? (Cmd+Shift+/) — the macOS-standard Help binding. Opens the
         # Keyboard Shortcuts reference; the page documents its own shortcut.
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("/")), MOD_META | MOD_SHIFT, HELP_HOTKEYS,
-            group=HKG_APP, help=String("Keyboard Shortcuts"),
-        ))
+        self._bind(
+            char_key("/"), MOD_META | MOD_SHIFT, HELP_HOTKEYS, HKG_APP,
+            "Keyboard Shortcuts",
+        )
 
         # --- doc_only: editor-handled chords ---
         # These keys are handled directly inside ``Editor.handle_key``
@@ -2651,105 +2527,77 @@ struct Desktop(Movable):
         # the gate will start eating it.
         #
         # Documented + menu-clickable movement chords (synth actions):
-        self._hotkeys.append(Hotkey(
-            KEY_UP, MOD_META, synth_key_action(KEY_UP, MOD_META),
-            group=HKG_MOVE, help=String("Grow selection"), doc_only=True,
-        ))
-        self._hotkeys.append(Hotkey(
-            KEY_DOWN, MOD_META, synth_key_action(KEY_DOWN, MOD_META),
-            group=HKG_MOVE, help=String("Shrink selection"), doc_only=True,
-        ))
-        self._hotkeys.append(Hotkey(
-            KEY_RIGHT, MOD_META, synth_key_action(KEY_RIGHT, MOD_META),
-            group=HKG_MOVE, help=String("Jump to end of line (+Shift selects)"),
-            doc_only=True,
-        ))
-        self._hotkeys.append(Hotkey(
-            KEY_LEFT, MOD_META, synth_key_action(KEY_LEFT, MOD_META),
-            group=HKG_MOVE, help=String("Jump to start of line (+Shift selects)"),
-            doc_only=True,
-        ))
-        self._hotkeys.append(Hotkey(
-            KEY_LEFT, MOD_ALT, synth_key_action(KEY_LEFT, MOD_ALT),
-            group=HKG_MOVE, help=String("Word left"), doc_only=True,
-        ))
-        self._hotkeys.append(Hotkey(
-            KEY_RIGHT, MOD_ALT, synth_key_action(KEY_RIGHT, MOD_ALT),
-            group=HKG_MOVE, help=String("Word right"), doc_only=True,
-        ))
-        self._hotkeys.append(Hotkey(
+        self._bind(
+            KEY_UP, MOD_META, synth_key_action(KEY_UP, MOD_META), HKG_MOVE,
+            "Grow selection", doc_only=True,
+        )
+        self._bind(
+            KEY_DOWN, MOD_META, synth_key_action(KEY_DOWN, MOD_META), HKG_MOVE,
+            "Shrink selection", doc_only=True,
+        )
+        self._bind(
+            KEY_RIGHT, MOD_META, synth_key_action(KEY_RIGHT, MOD_META), HKG_MOVE,
+            "Jump to end of line (+Shift selects)", doc_only=True,
+        )
+        self._bind(
+            KEY_LEFT, MOD_META, synth_key_action(KEY_LEFT, MOD_META), HKG_MOVE,
+            "Jump to start of line (+Shift selects)", doc_only=True,
+        )
+        self._bind(
+            KEY_LEFT, MOD_ALT, synth_key_action(KEY_LEFT, MOD_ALT), HKG_MOVE,
+            "Word left", doc_only=True,
+        )
+        self._bind(
+            KEY_RIGHT, MOD_ALT, synth_key_action(KEY_RIGHT, MOD_ALT), HKG_MOVE,
+            "Word right", doc_only=True,
+        )
+        self._bind(
             KEY_UP, MOD_CTRL | MOD_ALT, synth_key_action(KEY_UP, MOD_CTRL | MOD_ALT),
-            group=HKG_MOVE, help=String("Add caret above"), doc_only=True,
-        ))
-        self._hotkeys.append(Hotkey(
-            KEY_DOWN, MOD_CTRL | MOD_ALT, synth_key_action(KEY_DOWN, MOD_CTRL | MOD_ALT),
-            group=HKG_MOVE, help=String("Add caret below"), doc_only=True,
-        ))
+            HKG_MOVE, "Add caret above", doc_only=True,
+        )
+        self._bind(
+            KEY_DOWN, MOD_CTRL | MOD_ALT,
+            synth_key_action(KEY_DOWN, MOD_CTRL | MOD_ALT), HKG_MOVE,
+            "Add caret below", doc_only=True,
+        )
         # Git-change navigation — Ctrl+Shift+Up/Down jump to the previous /
         # next local-change chunk (editor.mojo ``goto_change_chunk``). These
         # had no registry row before, so they were invisible on the page;
         # now documented + clickable.
-        self._hotkeys.append(Hotkey(
+        self._bind(
             KEY_UP, MOD_CTRL | MOD_SHIFT,
-            synth_key_action(KEY_UP, MOD_CTRL | MOD_SHIFT),
-            group=HKG_GIT, help=String("Previous change"), doc_only=True,
-        ))
-        self._hotkeys.append(Hotkey(
+            synth_key_action(KEY_UP, MOD_CTRL | MOD_SHIFT), HKG_GIT, "Previous change",
+            doc_only=True,
+        )
+        self._bind(
             KEY_DOWN, MOD_CTRL | MOD_SHIFT,
-            synth_key_action(KEY_DOWN, MOD_CTRL | MOD_SHIFT),
-            group=HKG_GIT, help=String("Next change"), doc_only=True,
-        ))
+            synth_key_action(KEY_DOWN, MOD_CTRL | MOD_SHIFT), HKG_GIT, "Next change",
+            doc_only=True,
+        )
         # Cmd+Alt+Z — revert the change chunk under the caret to HEAD
         # (editor.mojo ``revert_chunk_at_cursor``). Was unregistered.
-        self._hotkeys.append(Hotkey(
-            UInt32(ord("z")), MOD_META | MOD_ALT,
-            synth_key_action(UInt32(ord("z")), MOD_META | MOD_ALT),
-            group=HKG_GIT, help=String("Revert change to HEAD"), doc_only=True,
-        ))
+        self._bind(
+            char_key("z"), MOD_META | MOD_ALT,
+            synth_key_action(char_key("z"), MOD_META | MOD_ALT), HKG_GIT,
+            "Revert change to HEAD", doc_only=True,
+        )
         # Documented summary rows (informational; the matchable concrete combos
         # follow below). ``key=0`` never matches a real keystroke, so these are
         # page-only — they don't satisfy the gate by themselves.
-        self._hotkeys.append(Hotkey(
-            UInt32(0), MOD_NONE, String(""),
-            group=HKG_MOVE, help=String("Extend selection"),
-            doc_shortcut=String("Shift + arrow / Home / End / Page"),
-            doc_only=True,
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(0), MOD_NONE, String(""),
-            group=HKG_MOVE, help=String("Word select"),
-            doc_shortcut=String("Ctrl/Alt+Shift+Left / Right"), doc_only=True,
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(0), MOD_NONE, String(""),
-            group=HKG_MOVE, help=String("Column select"),
-            doc_shortcut=String("tap Alt, hold + Up/Down"), doc_only=True,
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(0), MOD_NONE, String(""),
-            group=HKG_MOVE, help=String("Delete word left"),
-            doc_shortcut=String("Ctrl+Backspace / Alt+Backspace"),
-            doc_only=True,
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(0), MOD_NONE, String(""),
-            group=HKG_EDIT, help=String("Unindent"),
-            doc_shortcut=String("Shift+Tab"), doc_only=True,
-        ))
-        self._hotkeys.append(Hotkey(
-            UInt32(0), MOD_NONE, String(""),
-            group=HKG_EDIT, help=String("Code actions (quickfix / symbol)"),
-            doc_shortcut=String("Alt+Enter"), doc_only=True,
-        ))
+        self._doc_row(HKG_MOVE, "Extend selection", "Shift + arrow / Home / End / Page")
+        self._doc_row(HKG_MOVE, "Word select", "Ctrl/Alt+Shift+Left / Right")
+        self._doc_row(HKG_MOVE, "Column select", "tap Alt, hold + Up/Down")
+        self._doc_row(HKG_MOVE, "Delete word left", "Ctrl+Backspace / Alt+Backspace")
+        self._doc_row(HKG_EDIT, "Unindent", "Shift+Tab")
+        self._doc_row(HKG_EDIT, "Code actions (quickfix / symbol)", "Alt+Enter")
         # Ctrl+A — the Linux/Windows select-all alias, folded into the ⌘A
         # row above by the shared ``help`` string. ``doc_only`` because
         # ``Editor.handle_key`` recognizes the chord itself (via
         # ``clipboard_chord``); this row exists to clear the global gate so
         # the keystroke reaches it.
-        self._hotkeys.append(Hotkey(
-            ctrl_key("a"), MOD_CTRL, String(""),
-            group=HKG_EDIT, help=String("Select all"), doc_only=True,
-        ))
+        self._bind(
+            ctrl_key("a"), MOD_CTRL, String(""), HKG_EDIT, "Select all", doc_only=True,
+        )
         # --- matchable-only editor chords (empty help: page-silent) ---
         # Concrete (key, mods) the editor's movement / selection handlers act
         # on. They exist purely so the gate lets the keystroke through; the
@@ -2770,64 +2618,29 @@ struct Desktop(Movable):
         Alt/Cmd movement chords documented above.
         """
         # Shift + navigation key — extend selection in that direction.
-        var nav = List[UInt32]()
-        nav.append(KEY_LEFT)
-        nav.append(KEY_RIGHT)
-        nav.append(KEY_UP)
-        nav.append(KEY_DOWN)
-        nav.append(KEY_HOME)
-        nav.append(KEY_END)
-        nav.append(KEY_PAGEUP)
-        nav.append(KEY_PAGEDOWN)
-        for i in range(len(nav)):
-            self._hotkeys.append(
-                Hotkey(nav[i], MOD_SHIFT, String(""), doc_only=True)
-            )
-        # Left / Right: word-move (Ctrl) and word-select (Ctrl+Shift, Alt+Shift).
-        var lr = List[UInt32]()
-        lr.append(KEY_LEFT)
-        lr.append(KEY_RIGHT)
-        for i in range(len(lr)):
-            self._hotkeys.append(
-                Hotkey(lr[i], MOD_CTRL, String(""), doc_only=True)
-            )
-            self._hotkeys.append(
-                Hotkey(lr[i], MOD_CTRL | MOD_SHIFT, String(""), doc_only=True)
-            )
-            self._hotkeys.append(
-                Hotkey(lr[i], MOD_ALT | MOD_SHIFT, String(""), doc_only=True)
-            )
-            # Cmd+Shift+Left / Right — line-level select-to-start / -to-end
-            # (the Shift extension of plain Cmd+Left/Right). Used to be tab
-            # navigation; now it falls through to the editor.
-            self._hotkeys.append(
-                Hotkey(lr[i], MOD_META | MOD_SHIFT, String(""), doc_only=True)
-            )
+        for k in [
+            KEY_LEFT, KEY_RIGHT, KEY_UP, KEY_DOWN,
+            KEY_HOME, KEY_END, KEY_PAGEUP, KEY_PAGEDOWN,
+        ]:
+            self._bind(k, MOD_SHIFT, String(""), doc_only=True)
+        # Left / Right: word-move (Ctrl), word-select (Ctrl+Shift,
+        # Alt+Shift), and Cmd+Shift line-level select-to-start / -to-end
+        # (the Shift extension of plain Cmd+Left/Right).
+        for k in [KEY_LEFT, KEY_RIGHT]:
+            for m in [
+                MOD_CTRL, MOD_CTRL | MOD_SHIFT, MOD_ALT | MOD_SHIFT,
+                MOD_META | MOD_SHIFT,
+            ]:
+                self._bind(k, m, String(""), doc_only=True)
         # Up / Down: column-draw (Alt) and move-with-extend (Cmd+Shift).
-        var ud = List[UInt32]()
-        ud.append(KEY_UP)
-        ud.append(KEY_DOWN)
-        for i in range(len(ud)):
-            self._hotkeys.append(
-                Hotkey(ud[i], MOD_ALT, String(""), doc_only=True)
-            )
-            self._hotkeys.append(
-                Hotkey(ud[i], MOD_META | MOD_SHIFT, String(""), doc_only=True)
-            )
+        for k in [KEY_UP, KEY_DOWN]:
+            for m in [MOD_ALT, MOD_META | MOD_SHIFT]:
+                self._bind(k, m, String(""), doc_only=True)
         # Home / End / Page with Ctrl — the mover ignores Ctrl but the chord
         # must still clear the gate so it isn't swallowed.
-        var he = List[UInt32]()
-        he.append(KEY_HOME)
-        he.append(KEY_END)
-        he.append(KEY_PAGEUP)
-        he.append(KEY_PAGEDOWN)
-        for i in range(len(he)):
-            self._hotkeys.append(
-                Hotkey(he[i], MOD_CTRL, String(""), doc_only=True)
-            )
-            self._hotkeys.append(
-                Hotkey(he[i], MOD_CTRL | MOD_SHIFT, String(""), doc_only=True)
-            )
+        for k in [KEY_HOME, KEY_END, KEY_PAGEUP, KEY_PAGEDOWN]:
+            for m in [MOD_CTRL, MOD_CTRL | MOD_SHIFT]:
+                self._bind(k, m, String(""), doc_only=True)
 
     def _bottom_chrome_height(self, screen: Rect) -> Int:
         """Rows the bottom chrome (status bar + optional tab bar) eats
@@ -9044,6 +8857,25 @@ struct Desktop(Movable):
                 self.menu_bar.open_menu(mi)
                 return True
         return False
+
+    def _bind(
+        mut self, key: UInt32, mods: UInt8, action: String,
+        group: String = String(""), help: String = String(""),
+        doc_only: Bool = False,
+    ):
+        """Register a default binding with its Keyboard Shortcuts page row
+        (``group`` + ``help``; see ``Hotkey``)."""
+        self._hotkeys.append(Hotkey(
+            key, mods, action, group=group, help=help, doc_only=doc_only,
+        ))
+
+    def _doc_row(mut self, group: String, help: String, shortcut: String):
+        """A page-only row: ``shortcut`` documents chords another layer
+        handles (or a range of them); ``key=0`` never matches a keystroke."""
+        self._hotkeys.append(Hotkey(
+            UInt32(0), MOD_NONE, String(""), group=group, help=help,
+            doc_shortcut=shortcut, doc_only=True,
+        ))
 
     def register_hotkey(
         mut self, key: UInt32, mods: UInt8, action: String,
