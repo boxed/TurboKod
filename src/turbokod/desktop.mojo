@@ -4522,15 +4522,10 @@ struct Desktop(Movable):
         if choice != _REVIEW_CHOICE_CHECKOUT:
             return
         if checkout_branch(self.project.value(), branch):
-            self.status_bar.set_message(
-                String("Checked out ") + branch, Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("Checked out ") + branch)
             self.review.start_branch_review(True)
         else:
-            self.status_bar.set_message(
-                String("git checkout ") + branch + String(" failed"),
-                Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("git checkout ") + branch + String(" failed"))
             self.review.start_branch_review(False)
 
     def _review_tree_drain(mut self):
@@ -4788,10 +4783,7 @@ struct Desktop(Movable):
         try:
             self.open_file_at(join_path(root, rel), nm.row, nm.col, screen)
         except e:
-            self.status_bar.set_message(
-                String("Can't open ") + rel + String(": ") + String(e),
-                Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("Can't open ") + rel + String(": ") + String(e))
 
     def _review_apply_chunk_edge(mut self):
         """Land on the first (edge>0) / last (edge<0) change of the freshly
@@ -5216,9 +5208,7 @@ struct Desktop(Movable):
         try:
             w = Window.from_file(basename(path), rect, path)
         except e:
-            self.status_bar.set_message(
-                String("Can't read ") + basename(path), Attr(RED, LIGHT_GRAY),
-            )
+            self._say(String("Can't read ") + basename(path), Attr(RED, LIGHT_GRAY))
             raise e^
         # Re-apply any saved view state for this file (scroll + cursor).
         # Survives across window close, project close, and process
@@ -5385,10 +5375,7 @@ struct Desktop(Movable):
             String("$ ") + result.command + String("\n\n") + result.output,
             screen,
         )
-        self.status_bar.set_message(
-            kind + exit + String(" — see new window"),
-            Attr(LIGHT_RED, LIGHT_GRAY),
-        )
+        self._say_error(kind + exit + String(" — see new window"))
 
     def _maybe_lsp_open(mut self, idx: Int):
         """If the window at ``idx`` is an editor for a recognized source
@@ -5551,25 +5538,17 @@ struct Desktop(Movable):
         the conflict is surfaced there rather than queued, since the popup
         only renders one at a time. True when it started."""
         if self.install_runner.is_active():
-            self.status_bar.set_message(
+            self._say(
                 String("Install busy; try ") + display + String(" ") + noun
                     + String(" again in a moment"),
-                Attr(BLACK, LIGHT_GRAY),
             )
             return False
         try:
             self.install_runner.start(display + String(" ") + noun, cmd)
         except:
-            self.status_bar.set_message(
-                String("Failed to start ") + noun + String(" download"),
-                Attr(LIGHT_RED, LIGHT_GRAY),
-            )
+            self._say_error(String("Failed to start ") + noun + String(" download"))
             return False
-        self.status_bar.set_message(
-            String("Downloading ") + display + String(" ") + noun
-                + String("..."),
-            Attr(BLACK, LIGHT_GRAY),
-        )
+        self._say(String("Downloading ") + display + String(" ") + noun + String("..."))
         return True
 
     def _start_grammar_install(mut self, lang: String):
@@ -5599,10 +5578,7 @@ struct Desktop(Movable):
         var lang = self._grammar_install_lang
         self._grammar_install_lang = String("")
         if result.ok():
-            self.status_bar.set_message(
-                String("Installed ") + result.label,
-                Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("Installed ") + result.label)
             # Drop the cached compile of any prior in-process state for
             # this language, then mark every editor's per-buffer cache
             # dirty so the next refresh tokenizes from row 0 against the
@@ -5658,16 +5634,10 @@ struct Desktop(Movable):
             label = specs[spec_idx].display
         var ok = remove_user_dictionary(lang)
         if not ok:
-            self.status_bar.set_message(
-                String("Remove failed: ") + label + String(" dictionary"),
-                Attr(LIGHT_RED, LIGHT_GRAY),
-            )
+            self._say_error(String("Remove failed: ") + label + String(" dictionary"))
             return
         self._reload_speller()
-        self.status_bar.set_message(
-            String("Removed ") + label + String(" dictionary"),
-            Attr(BLACK, LIGHT_GRAY),
-        )
+        self._say(String("Removed ") + label + String(" dictionary"))
 
     def _reload_speller(mut self):
         """Reload the dictionaries from disk and drop every editor's spell
@@ -5698,10 +5668,7 @@ struct Desktop(Movable):
         self._dict_install_lang = String("")
         if result.ok():
             self._reload_speller()
-            self.status_bar.set_message(
-                String("Installed ") + result.label,
-                Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("Installed ") + result.label)
         else:
             self._show_install_failure(
                 String("Dictionary install failed"), result, screen,
@@ -6138,10 +6105,7 @@ struct Desktop(Movable):
         var idx = self._relocate_merge_target()
         if idx >= 0:
             self.windows.windows[idx].editor.merge_pending = False
-            self.status_bar.set_message(
-                String("Merge postponed — it will be offered again on save"),
-                Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("Merge postponed — it will be offered again on save"))
         self.merge_view.close()
         self._open_next_merge(screen)
 
@@ -8858,6 +8822,16 @@ struct Desktop(Movable):
                 return True
         return False
 
+    def _say(
+        mut self, var text: String, attr: Attr = Attr(BLACK, LIGHT_GRAY),
+    ):
+        """Show ``text`` on the status bar's message slot."""
+        self.status_bar.set_message(text^, attr)
+
+    def _say_error(mut self, var text: String):
+        """Show ``text`` on the status bar's message slot, as a failure."""
+        self.status_bar.set_message(text^, Attr(LIGHT_RED, LIGHT_GRAY))
+
     def _bind(
         mut self, key: UInt32, mods: UInt8, action: String,
         group: String = String(""), help: String = String(""),
@@ -9634,9 +9608,7 @@ struct Desktop(Movable):
         try:
             self._save_focused_as(path)
         except:
-            self.status_bar.set_message(
-                String("Can't save ") + basename(path), Attr(RED, LIGHT_GRAY),
-            )
+            self._say(String("Can't save ") + basename(path), Attr(RED, LIGHT_GRAY))
             return
         self._close_if_saved_as()
 
@@ -10958,7 +10930,7 @@ struct Desktop(Movable):
                 else:
                     self._close_editor_window_at(i)
             if kept > 0:
-                self.status_bar.set_message(
+                self._say(
                     String(kept) + String(" with unsaved changes left open"),
                     Attr(RED, LIGHT_GRAY),
                 )
@@ -11260,10 +11232,7 @@ struct Desktop(Movable):
                 var sd_char = self.lsp_managers[i].show_document_char()
                 self.lsp_managers[i].clear_show_document()
                 if sd_external or len(sd_path.as_bytes()) == 0:
-                    self.status_bar.set_message(
-                        String("LSP wants to open: ") + sd_uri,
-                        Attr(BLACK, LIGHT_GRAY),
-                    )
+                    self._say(String("LSP wants to open: ") + sd_uri)
                 else:
                     var ln = sd_line if sd_line >= 0 else 0
                     var ch = sd_char if sd_line >= 0 else 0
@@ -11321,7 +11290,7 @@ struct Desktop(Movable):
                     var msg = String("No result")
                     if len(nav_word.as_bytes()) > 0:
                         msg = msg + String(" for '") + nav_word + String("'")
-                    self.status_bar.set_message(msg^, Attr(RED, LIGHT_GRAY))
+                    self._say(msg^, Attr(RED, LIGHT_GRAY))
             # Server-initiated status: work-done progress (gated by the
             # ``lsp_server_progress`` setting) and showMessage (always).
             # Always drain to clear the latch even when not displaying.
@@ -11329,16 +11298,16 @@ struct Desktop(Movable):
                 var pnote = self.lsp_managers[i].take_progress_note()
                 if self.config.lsp_server_progress \
                         and len(pnote.as_bytes()) > 0:
-                    self.status_bar.set_message(pnote^, Attr(BLACK, LIGHT_GRAY))
+                    self._say(pnote^)
             if self.lsp_managers[i].has_pending_server_message():
                 var smsg = self.lsp_managers[i].take_server_message()
                 if len(smsg.as_bytes()) > 0:
-                    self.status_bar.set_message(smsg^, Attr(BLACK, LIGHT_GRAY))
+                    self._say(smsg^)
             # signatureHelp → show the active signature in the status bar.
             if self.lsp_managers[i].has_pending_signature():
                 var sig = self.lsp_managers[i].take_signature()
                 if len(sig.as_bytes()) > 0:
-                    self.status_bar.set_message(sig^, Attr(BLACK, LIGHT_GRAY))
+                    self._say(sig^)
             # documentHighlight occurrences → push into the editor whose
             # file they belong to (only if still open).
             if self.lsp_managers[i].has_pending_doc_highlights():
@@ -11388,14 +11357,9 @@ struct Desktop(Movable):
             if self.lsp_managers[i].has_moniker():
                 var mn = self.lsp_managers[i].take_moniker()
                 if len(mn.as_bytes()) > 0:
-                    self.status_bar.set_message(
-                        String("Moniker: ") + mn, Attr(BLACK, LIGHT_GRAY),
-                    )
+                    self._say(String("Moniker: ") + mn)
                 else:
-                    self.status_bar.set_message(
-                        String("No moniker for symbol"),
-                        Attr(BLACK, LIGHT_GRAY),
-                    )
+                    self._say(String("No moniker for symbol"))
             # inlineCompletion → ghost text on the focused editor (the
             # manual request was issued there; a fast async round-trip).
             if self.lsp_managers[i].has_inline_completion():
@@ -11615,10 +11579,7 @@ struct Desktop(Movable):
         var lang = self._install_lang
         self._install_lang = String("")
         if result.ok():
-            self.status_bar.set_message(
-                String("Installed ") + result.label,
-                Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("Installed ") + result.label)
             self._retry_lsp_for_language(lang)
         else:
             self._show_install_failure(
@@ -12203,10 +12164,7 @@ struct Desktop(Movable):
             return False
         var target = self._resolve_template_include(rel)
         if len(target.as_bytes()) == 0:
-            self.status_bar.set_message(
-                String("Template not found: ") + rel,
-                Attr(RED, LIGHT_GRAY),
-            )
+            self._say(String("Template not found: ") + rel, Attr(RED, LIGHT_GRAY))
             return True
         try:
             self.open_file(target, screen)
@@ -12254,9 +12212,7 @@ struct Desktop(Movable):
             except e:
                 print("desktop: open document link", p, ":", String(e))
         else:
-            self.status_bar.set_message(
-                String("Link: ") + target, Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("Link: ") + target)
 
     def _dispatch_definition_request(
         mut self, win_idx: Int, var req: DefinitionRequest,
@@ -12265,14 +12221,11 @@ struct Desktop(Movable):
         with status-bar messaging for the common failure modes."""
         var path = self.windows.windows[win_idx].editor.file_path
         if len(path.as_bytes()) == 0:
-            self.status_bar.set_message(
-                String("LSP: file has no path"),
-                Attr(LIGHT_RED, LIGHT_GRAY),
-            )
+            self._say_error(String("LSP: file has no path"))
             return
         var lsp_idx = self._lsp_for_path(path)
         if lsp_idx < 0:
-            self.status_bar.set_message(
+            self._say(
                 String("LSP: not started for this file type"),
                 Attr(RED, LIGHT_GRAY),
             )
@@ -12280,7 +12233,7 @@ struct Desktop(Movable):
         if self.lsp_managers[lsp_idx].is_failed():
             return
         if not self.lsp_managers[lsp_idx].is_active():
-            self.status_bar.set_message(
+            self._say(
                 String("LSP: not started for this file type"),
                 Attr(RED, LIGHT_GRAY),
             )
@@ -12297,10 +12250,7 @@ struct Desktop(Movable):
             path, row, col, word^, text^,
         )
         if not ok:
-            self.status_bar.set_message(
-                String("LSP: still starting up — try again"),
-                Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("LSP: still starting up — try again"))
 
     def _open_lsp_info_window(mut self, screen: Rect):
         """Open a window summarizing every spawned LSP — language id,
@@ -12795,10 +12745,7 @@ struct Desktop(Movable):
                 continue
             var bp_path = self.windows.windows[i].editor.file_path
             if len(bp_path.as_bytes()) == 0:
-                self.status_bar.set_message(
-                    String("debug: file has no path — save it first"),
-                    Attr(LIGHT_RED, LIGHT_GRAY),
-                )
+                self._say_error(String("debug: file has no path — save it first"))
                 continue
             self.dap.toggle_breakpoint(bp_path, bp_row.value())
         # Push gutter state to every editor window. We do this every
@@ -13533,10 +13480,7 @@ struct Desktop(Movable):
             return
         var path = self.windows.windows[idx].editor.file_path
         if len(path.as_bytes()) == 0:
-            self.status_bar.set_message(
-                String("debug: file has no path — save it first"),
-                Attr(LIGHT_RED, LIGHT_GRAY),
-            )
+            self._say_error(String("debug: file has no path — save it first"))
             return
         var line = self.windows.windows[idx].editor.selections[0].row
         self._pending_arg = path + String("|") + String(line)
@@ -13576,10 +13520,7 @@ struct Desktop(Movable):
             return
         var path = self.windows.windows[idx].editor.file_path
         if len(path.as_bytes()) == 0:
-            self.status_bar.set_message(
-                String("debug: file has no path — save it first"),
-                Attr(LIGHT_RED, LIGHT_GRAY),
-            )
+            self._say_error(String("debug: file has no path — save it first"))
             return
         var line = self.windows.windows[idx].editor.selections[0].row
         self.dap.toggle_breakpoint(path, line)
@@ -13593,10 +13534,7 @@ struct Desktop(Movable):
             return
         var path = self.windows.windows[idx].editor.file_path
         if len(path.as_bytes()) == 0:
-            self.status_bar.set_message(
-                String("debug: file has no path — save it first"),
-                Attr(LIGHT_RED, LIGHT_GRAY),
-            )
+            self._say_error(String("debug: file has no path — save it first"))
             return
         var line = self.windows.windows[idx].editor.selections[0].row
         _ = self.dap.run_to_cursor(path, line)
@@ -13631,34 +13569,21 @@ struct Desktop(Movable):
         # Fresh start, no target. Use the focused editor's file.
         var idx = self._focused_editor_idx()
         if idx < 0:
-            self.status_bar.set_message(
-                String("debug: focus a source file first"),
-                Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("debug: focus a source file first"))
             return
         var path = self.windows.windows[idx].editor.file_path
         if len(path.as_bytes()) == 0:
-            self.status_bar.set_message(
-                String("debug: save the file first"),
-                Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("debug: save the file first"))
             return
         var ext = extension_of(path)
         var lang_idx = find_language_for_extension(self.lsp_specs, ext)
         if lang_idx < 0:
-            self.status_bar.set_message(
-                String("debug: unknown language for ") + ext,
-                Attr(LIGHT_RED, LIGHT_GRAY),
-            )
+            self._say_error(String("debug: unknown language for ") + ext)
             return
         var lang_id = self.lsp_specs[lang_idx].language_id
         var deb_idx = find_debugger_for_language(self.dap_specs, lang_id)
         if deb_idx < 0:
-            self.status_bar.set_message(
-                String("debug: no adapter registered for ")
-                + lang_id,
-                Attr(LIGHT_RED, LIGHT_GRAY),
-            )
+            self._say_error(String("debug: no adapter registered for ") + lang_id)
             return
         # If the manager is already TERMINATED / FAILED from a prior
         # session, return it to NOT_STARTED so ``start`` will run.
@@ -13707,10 +13632,7 @@ struct Desktop(Movable):
         Snapshots the per-project state into the view; edits persist on
         change via ``_sync_project_settings``."""
         if not self.project:
-            self.status_bar.set_message(
-                String("Project Settings: open a project first"),
-                Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("Project Settings: open a project first"))
             return
         var root = self.project.value()
         # Targets snapshot — ``ProjectTargets`` opts out of
@@ -13966,23 +13888,15 @@ struct Desktop(Movable):
         make Cmd+R + Cmd+D + Cmd+R produce two children for one tab.
         """
         if not self.targets.has_active():
-            self.status_bar.set_message(
-                String("run: no targets defined — author .turbokod/targets.json"),
-                Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("run: no targets defined — author .turbokod/targets.json"))
             return
         if not self.project:
-            self.status_bar.set_message(
-                String("run: open a project first"),
-                Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("run: open a project first"))
             return
         var target = self.targets.targets[self.targets.active].copy()
         if len(target.program.as_bytes()) == 0:
-            self.status_bar.set_message(
-                String("run: target '") + target.name
-                    + String("' has no program"),
-                Attr(LIGHT_RED, LIGHT_GRAY),
+            self._say_error(
+                String("run: target '") + target.name + String("' has no program"),
             )
             return
         # Stop any debug session — running and debugging the same
@@ -14032,15 +13946,9 @@ struct Desktop(Movable):
                 String(target.name), program, args, cwd,
                 term[0], term[1], target.env.copy(),
             )
-            self.status_bar.set_message(
-                String("running ") + target.name + String("…"),
-                Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("running ") + target.name + String("…"))
         except e:
-            self.status_bar.set_message(
-                String("run: spawn failed — ") + String(e),
-                Attr(LIGHT_RED, LIGHT_GRAY),
-            )
+            self._say_error(String("run: spawn failed — ") + String(e))
 
     def _target_run_in_tmux(mut self, target: RunTarget):
         """Cmd+R with tmux: the target runs as the process of its own
@@ -14088,10 +13996,7 @@ struct Desktop(Movable):
             # keyboard.
             self.terminal_panes[idx].focused = False
         self.panel_front_request = True
-        self.status_bar.set_message(
-            String("running ") + target.name + String("…"),
-            Attr(BLACK, LIGHT_GRAY),
-        )
+        self._say(String("running ") + target.name + String("…"))
 
     def _target_debug(mut self):
         """Cmd+D: launch the active target under the DAP adapter for
@@ -14102,40 +14007,32 @@ struct Desktop(Movable):
         a different program / args / cwd seed.
         """
         if not self.targets.has_active():
-            self.status_bar.set_message(
+            self._say(
                 String("debug: no targets defined — author .turbokod/targets.json"),
-                Attr(BLACK, LIGHT_GRAY),
             )
             return
         if not self.project:
-            self.status_bar.set_message(
-                String("debug: open a project first"),
-                Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("debug: open a project first"))
             return
         var target = self.targets.targets[self.targets.active].copy()
         if len(target.debug_language.as_bytes()) == 0:
-            self.status_bar.set_message(
+            self._say_error(
                 String("debug: target '") + target.name
                     + String("' has no debug language set"),
-                Attr(LIGHT_RED, LIGHT_GRAY),
             )
             return
         if len(target.program.as_bytes()) == 0:
-            self.status_bar.set_message(
-                String("debug: target '") + target.name
-                    + String("' has no program"),
-                Attr(LIGHT_RED, LIGHT_GRAY),
+            self._say_error(
+                String("debug: target '") + target.name + String("' has no program"),
             )
             return
         var deb_idx = find_debugger_for_language(
             self.dap_specs, target.debug_language,
         )
         if deb_idx < 0:
-            self.status_bar.set_message(
-                String("debug: no adapter for language '")
-                    + target.debug_language + String("'"),
-                Attr(LIGHT_RED, LIGHT_GRAY),
+            self._say_error(
+                String("debug: no adapter for language '") + target.debug_language
+                    + String("'"),
             )
             return
         # Stop any in-flight run for this target — the user just
@@ -14172,10 +14069,7 @@ struct Desktop(Movable):
         self._maybe_install_python_lsp_in_venv(target.debug_language, venv_dir)
         self.dap.start(spec, program, cwd, args^, env=target.env.copy())
         self._show_dap_spawn()
-        self.status_bar.set_message(
-            String("debugging ") + target.name + String("…"),
-            Attr(BLACK, LIGHT_GRAY),
-        )
+        self._say(String("debugging ") + target.name + String("…"))
 
     def _python_test_root(mut self, label: String) -> String:
         """The project root when its tests can run (a Python project), else
@@ -14183,10 +14077,7 @@ struct Desktop(Movable):
         language wins when set (the user already said what kind of project
         this is); otherwise the project root is probed for markers."""
         if not self.project:
-            self.status_bar.set_message(
-                label + String(": open a project first"),
-                Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(label + String(": open a project first"))
             return String("")
         var project_root = self.project.value()
         var language = String("")
@@ -14205,7 +14096,7 @@ struct Desktop(Movable):
         else:
             hint = label + String(": no test runner configured for '") \
                 + language + String("'")
-        self.status_bar.set_message(hint, Attr(LIGHT_RED, LIGHT_GRAY))
+        self._say_error(hint)
         return String("")
 
     def _target_test(mut self, node_id: String = String("")):
@@ -14264,15 +14155,9 @@ struct Desktop(Movable):
                 report_path=new_test_report_path(),
                 pytest_plugin=pytest_plugin_dir(),
             )
-            self.status_bar.set_message(
-                String("running tests…"),
-                Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("running tests…"))
         except e:
-            self.status_bar.set_message(
-                String("test: spawn failed — ") + String(e),
-                Attr(LIGHT_RED, LIGHT_GRAY),
-            )
+            self._say_error(String("test: spawn failed — ") + String(e))
 
     def _target_test_in_tmux(
         mut self, program: String, args: List[String], root: String,
@@ -14323,9 +14208,7 @@ struct Desktop(Movable):
             # pane.
             self.terminal_panes[idx].focused = False
         self.panel_front_request = True
-        self.status_bar.set_message(
-            String("running tests…"), Attr(BLACK, LIGHT_GRAY),
-        )
+        self._say(String("running tests…"))
 
     def _target_test_debug(mut self, node_id: String = String("")):
         """Cmd+Shift+D: run the project's test suite under the DAP
@@ -14347,10 +14230,9 @@ struct Desktop(Movable):
         var language = String("python")
         var deb_idx = find_debugger_for_language(self.dap_specs, language)
         if deb_idx < 0:
-            self.status_bar.set_message(
-                String("test (debug): no adapter for language '")
-                    + language + String("'"),
-                Attr(LIGHT_RED, LIGHT_GRAY),
+            self._say_error(
+                String("test (debug): no adapter for language '") + language
+                    + String("'"),
             )
             return
         var program = _project_python(project_root)
@@ -14377,10 +14259,7 @@ struct Desktop(Movable):
         self._reset_debug_slot()
         self.dap.start(spec, program, project_root, args^)
         self._show_dap_spawn()
-        self.status_bar.set_message(
-            String("debugging tests…"),
-            Attr(BLACK, LIGHT_GRAY),
-        )
+        self._say(String("debugging tests…"))
 
     def target_tick(mut self):
         """Drain the run session's output into the debug pane and
@@ -14634,10 +14513,7 @@ struct Desktop(Movable):
         _ = self.lsp_managers[lsp_idx].request_references(
             origin_path, origin_line, origin_char, origin_word^, text^,
         )
-        self.status_bar.set_message(
-            String("Finding references…"),
-            Attr(BLACK, LIGHT_GRAY),
-        )
+        self._say(String("Finding references…"))
 
     def _on_references_resolved(
         mut self, var refs: List[DefinitionResolved],
@@ -14650,7 +14526,7 @@ struct Desktop(Movable):
             var msg = String("No references")
             if len(word.as_bytes()) > 0:
                 msg = msg + String(" for '") + word + String("'")
-            self.status_bar.set_message(msg^, Attr(RED, LIGHT_GRAY))
+            self._say(msg^, Attr(RED, LIGHT_GRAY))
             return
         if len(refs) == 1:
             var only = refs[0]
@@ -14963,9 +14839,7 @@ struct Desktop(Movable):
             for ci in range(len(self.lsp_managers)):
                 self.lsp_managers[ci].notify_did_create_files(spath)
         else:
-            self.status_bar.set_message(
-                String("Can't save ") + basename(path), Attr(RED, LIGHT_GRAY),
-            )
+            self._say(String("Can't save ") + basename(path), Attr(RED, LIGHT_GRAY))
 
     def _focused_editor_idx(self) -> Int:
         if self.windows.focused < 0 or self.windows.focused >= len(self.windows.windows):
@@ -15169,7 +15043,7 @@ struct Desktop(Movable):
                 ed.delete_bookmarked_lines(), String("bookmarked line"),
             )
         if len(msg.as_bytes()) > 0:
-            self.status_bar.set_message(msg^, Attr(BLACK, LIGHT_GRAY))
+            self._say(msg^)
 
     def _mark_matching_lines(
         mut self, idx: Int, needle: String, opts: SearchOptions, on: Bool,
@@ -15179,9 +15053,7 @@ struct Desktop(Movable):
             needle, opts, on,
         )
         var msg = String("Bookmarked ") if on else String("Unbookmarked ")
-        self.status_bar.set_message(
-            msg + _count_noun(n, String("line")), Attr(BLACK, LIGHT_GRAY),
-        )
+        self._say(msg + _count_noun(n, String("line")))
 
     def _close_pickers(mut self):
         """Close every list picker (Quick Open, Go to Symbol, references,
@@ -15381,16 +15253,15 @@ struct Desktop(Movable):
                 var saved_path = self.windows.windows[idx].editor.file_path
                 self._after_save(idx, saved_path)
             elif self.windows.windows[idx].editor.disk_conflict:
-                self.status_bar.set_message(
+                self._say_error(
                     String("Not saved: the file changed on disk — ")
-                    + String("resolve the merge first"),
-                    Attr(LIGHT_RED, LIGHT_GRAY),
+                        + String("resolve the merge first"),
                 )
             elif len(self.windows.windows[idx].editor.file_path.as_bytes()) > 0 \
                     and not self.windows.windows[idx].editor.merge_pending:
                 # The write failed (a read-only file, a full disk): only the
                 # dirty mark showed it
-                self.status_bar.set_message(
+                self._say(
                     String("Can't save ")
                         + basename(self.windows.windows[idx].editor.file_path),
                     Attr(RED, LIGHT_GRAY),
@@ -15523,10 +15394,7 @@ struct Desktop(Movable):
                 )
             )
         except:
-            self.status_bar.set_message(
-                String("on-save: failed to spawn ") + label,
-                Attr(LIGHT_RED, LIGHT_GRAY),
-            )
+            self._say_error(String("on-save: failed to spawn ") + label)
 
     def save_actions_tick(mut self):
         """Per-frame reap of ``pending_save_actions``.
@@ -15582,10 +15450,7 @@ struct Desktop(Movable):
                 break
         var diags = List[Diagnostic]()
         if exit_code == 0:
-            self.status_bar.set_message(
-                String("on-save: ") + pa.label + String(" ok"),
-                Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("on-save: ") + pa.label + String(" ok"))
         else:
             var loc = locate_on_save_error(_bytes_to_string(pa.stderr_head), pa.saved_path)
             if loc.line == 0:
@@ -15613,17 +15478,13 @@ struct Desktop(Movable):
                     msg, pa.label, String(ON_SAVE_DIAGNOSTIC_CODE),
                 ))
                 ed.show_save_notice(row, pa.label + String(": ") + msg)
-                self.status_bar.set_message(
+                self._say_error(
                     String("on-save: ") + pa.label + String(" failed at line ")
                         + String(row + 1) + String(": ") + msg,
-                    Attr(LIGHT_RED, LIGHT_GRAY),
                 )
             else:
-                self.status_bar.set_message(
-                    on_save_failure_message(
-                        pa.label, exit_code, pa.stdout_head, pa.stderr_head,
-                    ),
-                    Attr(LIGHT_RED, LIGHT_GRAY),
+                self._say_error(
+                    on_save_failure_message( pa.label, exit_code, pa.stdout_head, pa.stderr_head, ),
                 )
         if idx >= 0:
             self.windows.windows[idx].editor.set_on_save_diagnostics(
@@ -15704,14 +15565,11 @@ struct Desktop(Movable):
             return
         var path = self.windows.windows[idx].editor.file_path
         if len(path.as_bytes()) == 0:
-            self.status_bar.set_message(
-                String("LSP: file has no path"),
-                Attr(LIGHT_RED, LIGHT_GRAY),
-            )
+            self._say_error(String("LSP: file has no path"))
             return
         var lsp_idx = self._lsp_for_path(path)
         if lsp_idx < 0:
-            self.status_bar.set_message(
+            self._say(
                 String("LSP: not started for this file type"),
                 Attr(RED, LIGHT_GRAY),
             )
@@ -15719,10 +15577,7 @@ struct Desktop(Movable):
         if self.lsp_managers[lsp_idx].is_failed():
             return
         if not self.lsp_managers[lsp_idx].is_ready():
-            self.status_bar.set_message(
-                String("LSP: still starting up — try again"),
-                Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("LSP: still starting up — try again"))
             return
         var text = self.windows.windows[idx].editor.text_snapshot()
         var ok = self.lsp_managers[lsp_idx].request_document_symbols(
@@ -15900,13 +15755,10 @@ struct Desktop(Movable):
         availability up front so a misconfigured environment fails
         fast rather than at submit time."""
         if len(which(String("rg")).as_bytes()) == 0:
-            self.status_bar.set_message(
-                String("Find Symbol: rg not on PATH"),
-                Attr(RED, LIGHT_GRAY),
-            )
+            self._say(String("Find Symbol: rg not on PATH"), Attr(RED, LIGHT_GRAY))
             return
         if not self.project:
-            self.status_bar.set_message(
+            self._say(
                 String("Find Symbol: open a project first"),
                 Attr(RED, LIGHT_GRAY),
             )
@@ -16304,9 +16156,8 @@ struct Desktop(Movable):
             var ext_spec = self.doc_specs[ext_spec_idx].copy()
             self._maybe_prompt_doc_install(ext_spec)
             return
-        self.status_bar.set_message(
+        self._say(
             String("Docs: open a recognized source file once to install a docset"),
-            Attr(BLACK, LIGHT_GRAY),
         )
 
     def _open_doc_pick_for_lang(
@@ -16336,10 +16187,7 @@ struct Desktop(Movable):
         try:
             self.doc_stores[store_idx].load(dest)
         except e:
-            self.status_bar.set_message(
-                String("Docs load failed: ") + String(e),
-                Attr(LIGHT_RED, LIGHT_GRAY),
-            )
+            self._say_error(String("Docs load failed: ") + String(e))
             return True
         self._close_pickers()
         self.doc_pick.open(
@@ -16378,10 +16226,9 @@ struct Desktop(Movable):
                 # Already declined / pending — surface a hint so the
                 # user knows why nothing happened on their second
                 # Ctrl+K attempt for this language.
-                self.status_bar.set_message(
+                self._say(
                     String("Docs: ") + spec.display
                         + String(" not installed (asked earlier this session)"),
-                    Attr(BLACK, LIGHT_GRAY),
                 )
                 return
         if self._install_prompt_blocked():
@@ -16466,10 +16313,7 @@ struct Desktop(Movable):
             )
             self._clear_pending_dap_start()
             return
-        self.status_bar.set_message(
-            String("Installed debugpy"),
-            Attr(BLACK, LIGHT_GRAY),
-        )
+        self._say(String("Installed debugpy"))
         # Nothing to retry? The user must have triggered another action
         # mid-install that cleared the stash. Bail cleanly.
         if len(self._pending_dap_program.as_bytes()) == 0:
@@ -16602,16 +16446,10 @@ struct Desktop(Movable):
                 String("python LSP into venv"), cmd,
             )
             self._install_lang = String("python")
-            self.status_bar.set_message(
-                String("Installing ") + package + String(" into ") + venv_dir,
-                Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("Installing ") + package + String(" into ") + venv_dir)
         except e:
             print("desktop: _start_venv_lsp_install", venv_dir, ":", String(e))
-            self.status_bar.set_message(
-                String("Failed to start install of ") + package,
-                Attr(LIGHT_RED, LIGHT_GRAY),
-            )
+            self._say_error(String("Failed to start install of ") + package)
 
     def _start_doc_install(mut self, lang: String):
         """Spawn the ``curl`` install for the docset matching ``lang``,
@@ -16651,15 +16489,9 @@ struct Desktop(Movable):
             try:
                 self.doc_stores[store_idx].load(dest)
             except e:
-                self.status_bar.set_message(
-                    String("Docs load failed: ") + String(e),
-                    Attr(LIGHT_RED, LIGHT_GRAY),
-                )
+                self._say_error(String("Docs load failed: ") + String(e))
                 return
-            self.status_bar.set_message(
-                String("Installed ") + result.label,
-                Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("Installed ") + result.label)
             # Open the picker now — the user just opted in to docs, so
             # taking them straight to the listing is the obvious follow-up.
             self._close_pickers()
@@ -16718,10 +16550,8 @@ struct Desktop(Movable):
         if entry_idx < 0:
             return False
         self._open_doc_entry(entry_idx, spec.display, screen)
-        self.status_bar.set_message(
-            String("Opened docs: ") + word + String(" (")
-                + spec.display + String(")"),
-            Attr(BLACK, LIGHT_GRAY),
+        self._say(
+            String("Opened docs: ") + word + String(" (") + spec.display + String(")"),
         )
         return True
 
@@ -16981,10 +16811,7 @@ struct Desktop(Movable):
         # paint pass); use it directly so we don't re-spawn git.
         var head_opt = self.windows.windows[idx].editor.git_head_text()
         if not head_opt:
-            self.status_bar.set_message(
-                String("Revert: no HEAD baseline for this file"),
-                Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("Revert: no HEAD baseline for this file"))
             return
         var head = head_opt.value()
         var lines = self.windows.windows[idx].editor.buffer.lines.copy()
@@ -16996,10 +16823,7 @@ struct Desktop(Movable):
         else:
             block_opt = compute_revert_block(head, lines, row)
         if not block_opt:
-            self.status_bar.set_message(
-                String("Revert: no change to revert at this line"),
-                Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("Revert: no change to revert at this line"))
             return
         var block = block_opt.value().copy()
         self.windows.windows[idx].editor.apply_revert_block(block^)
@@ -17113,10 +16937,7 @@ struct Desktop(Movable):
             if len(msg.as_bytes()) == 0:
                 return
             clipboard_copy(msg)
-            self.status_bar.set_message(
-                String("Copied diagnostic message"),
-                Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("Copied diagnostic message"))
             return
         if act == DIAG_MENU_ACTION_APPLY_FIX:
             if fix_idx < 0 or fix_idx >= len(actions):
@@ -17129,15 +16950,9 @@ struct Desktop(Movable):
                     editor_idx
                 ].editor.apply_code_action_edits(action.file_edits.copy())
                 if ok:
-                    self.status_bar.set_message(
-                        String("Applied fix: ") + action.title,
-                        Attr(BLACK, LIGHT_GRAY),
-                    )
+                    self._say(String("Applied fix: ") + action.title)
                 else:
-                    self.status_bar.set_message(
-                        String("Fix had no edits for this file"),
-                        Attr(BLACK, LIGHT_GRAY),
-                    )
+                    self._say(String("Fix had no edits for this file"))
                 return
             # Command-only action: run it via workspace/executeCommand. The
             # server applies the effect and pushes back a workspace/applyEdit
@@ -17149,10 +16964,7 @@ struct Desktop(Movable):
                     _ = self.lsp_managers[cli].request_execute_command(
                         action.command, action.command_args.copy(),
                     )
-                    self.status_bar.set_message(
-                        String("Running: ") + action.title,
-                        Attr(BLACK, LIGHT_GRAY),
-                    )
+                    self._say(String("Running: ") + action.title)
             return
 
     def _begin_rename_at_cursor(mut self):
@@ -17179,21 +16991,15 @@ struct Desktop(Movable):
         if not self._is_editor_at(win_idx):
             return
         if len(word.as_bytes()) == 0:
-            self.status_bar.set_message(
-                String("Rename: no symbol under cursor"),
-                Attr(RED, LIGHT_GRAY),
-            )
+            self._say(String("Rename: no symbol under cursor"), Attr(RED, LIGHT_GRAY))
             return
         var path = self.windows.windows[win_idx].editor.file_path
         if len(path.as_bytes()) == 0:
-            self.status_bar.set_message(
-                String("Rename: file has no path"),
-                Attr(LIGHT_RED, LIGHT_GRAY),
-            )
+            self._say_error(String("Rename: file has no path"))
             return
         var lsp_idx = self._ready_lsp_for_path(path)
         if lsp_idx < 0:
-            self.status_bar.set_message(
+            self._say(
                 String("Rename: LSP not ready for this file type"),
                 Attr(RED, LIGHT_GRAY),
             )
@@ -17238,7 +17044,7 @@ struct Desktop(Movable):
             if len(self._rename_path.as_bytes()) == 0:
                 continue
             if state == 2:
-                self.status_bar.set_message(
+                self._say(
                     String("Rename: this symbol can't be renamed"),
                     Attr(RED, LIGHT_GRAY),
                 )
@@ -17258,9 +17064,7 @@ struct Desktop(Movable):
             return
         var lsp_idx = self._ready_lsp_for_path(path)
         if lsp_idx < 0:
-            self.status_bar.set_message(
-                String("Rename: LSP not ready"), Attr(RED, LIGHT_GRAY),
-            )
+            self._say(String("Rename: LSP not ready"), Attr(RED, LIGHT_GRAY))
             return
         var win_idx = self._find_window_for_path(path)
         if win_idx < 0 or not self.windows.windows[win_idx].is_editor:
@@ -17270,10 +17074,7 @@ struct Desktop(Movable):
             path, self._rename_line, self._rename_col, new_name, text^,
         )
         if ok:
-            self.status_bar.set_message(
-                String("Renaming to '") + new_name + String("'…"),
-                Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("Renaming to '") + new_name + String("'…"))
 
     def _drain_rename_edits(mut self, screen: Rect):
         """Each frame, apply any parked rename ``WorkspaceEdit``: open every
@@ -17291,9 +17092,9 @@ struct Desktop(Movable):
             if len(edits) > 0 and win >= 0 and self._is_editor_at(win) \
                     and self.windows.windows[win].editor.text_snapshot() != asked_on:
                 self._rename_path = String("")
-                self.status_bar.set_message(
+                self._say(
                     String("Not renamed: the file changed while waiting for ")
-                    + String("the language server. Rename again."),
+                        + String("the language server. Rename again."),
                     Attr(RED, LIGHT_GRAY),
                 )
                 continue
@@ -17312,10 +17113,7 @@ struct Desktop(Movable):
                 var suffix = String(" file")
                 if n != 1:
                     suffix = String(" files")
-                self.status_bar.set_message(
-                    String("Applied edit across ") + String(n) + suffix,
-                    Attr(BLACK, LIGHT_GRAY),
-                )
+                self._say(String("Applied edit across ") + String(n) + suffix)
 
     def _apply_workspace_edits(
         mut self, var file_edits: List[CodeActionFileEdit], screen: Rect,
@@ -17359,7 +17157,7 @@ struct Desktop(Movable):
         var origin_path = self._rename_path
         self._rename_path = String("")
         if len(file_edits) == 0:
-            self.status_bar.set_message(
+            self._say(
                 String("Rename produced no edits (unsupported here?)"),
                 Attr(RED, LIGHT_GRAY),
             )
@@ -17375,14 +17173,9 @@ struct Desktop(Movable):
             var suffix = String(" file")
             if files_changed != 1:
                 suffix = String(" files")
-            self.status_bar.set_message(
-                String("Renamed across ") + String(files_changed) + suffix,
-                Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("Renamed across ") + String(files_changed) + suffix)
         else:
-            self.status_bar.set_message(
-                String("Rename: no edits applied"), Attr(RED, LIGHT_GRAY),
-            )
+            self._say(String("Rename: no edits applied"), Attr(RED, LIGHT_GRAY))
 
     def _maybe_open_file_tab_menu(mut self, event: Event, screen: Rect) -> Bool:
         """Open the file-actions popup (Rename / Delete) on a right-click
@@ -17530,16 +17323,13 @@ struct Desktop(Movable):
         # Changing only the case of a name finds the file itself there on a
         # case-insensitive disk, which ``realpath`` names as it is on disk
         if stat_file(new_path).ok and realpath(new_path) != realpath(old_path):
-            self.status_bar.set_message(
-                String("Rename: '") + basename(new_path)
-                    + String("' already exists"),
+            self._say(
+                String("Rename: '") + basename(new_path) + String("' already exists"),
                 Attr(RED, LIGHT_GRAY),
             )
             return
         if not rename_path(old_path, new_path):
-            self.status_bar.set_message(
-                String("Rename failed"), Attr(RED, LIGHT_GRAY),
-            )
+            self._say(String("Rename failed"), Attr(RED, LIGHT_GRAY))
             return
         # Tell every server the file moved. pyright and
         # typescript-language-server rewrite the imports referring to it on
@@ -17567,10 +17357,7 @@ struct Desktop(Movable):
                 self.windows.windows[i].editor.file_path = np
                 self.windows.windows[i].title = basename(np)
         self._refresh_file_tree()
-        self.status_bar.set_message(
-            String("Renamed to ") + basename(new_path),
-            Attr(BLACK, LIGHT_GRAY),
-        )
+        self._say(String("Renamed to ") + basename(new_path))
 
     def _switch_to_project(mut self, var path: String) -> Optional[String]:
         """Make ``path`` the active project: the shared tail of a recent-
@@ -17605,7 +17392,7 @@ struct Desktop(Movable):
         Projects folders. Rows show ``~``-abbreviated paths so the filter
         matches the parent folder name too."""
         if len(self.config.project_dirs) == 0:
-            self.status_bar.set_message(
+            self._say(
                 String("No project folders — add some in Settings ▸ Projects"),
                 Attr(RED, LIGHT_GRAY),
             )
@@ -17643,7 +17430,7 @@ struct Desktop(Movable):
                 labels.append(_abbreviate_home(full, home))
                 paths.append(full^)
         if len(paths) == 0:
-            self.status_bar.set_message(
+            self._say(
                 String("No projects found in the Settings ▸ Projects folders"),
                 Attr(RED, LIGHT_GRAY),
             )
@@ -17663,10 +17450,7 @@ struct Desktop(Movable):
             return
         var path = self.windows.windows[idx].editor.file_path
         if len(path.as_bytes()) == 0:
-            self.status_bar.set_message(
-                String("Duplicate: save the file first"),
-                Attr(RED, LIGHT_GRAY),
-            )
+            self._say(String("Duplicate: save the file first"), Attr(RED, LIGHT_GRAY))
             return
         self._file_op_path = path
         self._file_op_is_dir = False
@@ -17695,9 +17479,8 @@ struct Desktop(Movable):
         else:
             new_path = join_path(parent_path(src_path), trimmed)
         if stat_file(new_path).ok:
-            self.status_bar.set_message(
-                String("Duplicate: '") + basename(new_path)
-                    + String("' already exists"),
+            self._say(
+                String("Duplicate: '") + basename(new_path) + String("' already exists"),
                 Attr(RED, LIGHT_GRAY),
             )
             return
@@ -17711,14 +17494,10 @@ struct Desktop(Movable):
             try:
                 content = read_existing_file(src_path)
             except:
-                self.status_bar.set_message(
-                    String("Duplicate failed"), Attr(RED, LIGHT_GRAY),
-                )
+                self._say(String("Duplicate failed"), Attr(RED, LIGHT_GRAY))
                 return
         if not write_file(new_path, content):
-            self.status_bar.set_message(
-                String("Duplicate failed"), Attr(RED, LIGHT_GRAY),
-            )
+            self._say(String("Duplicate failed"), Attr(RED, LIGHT_GRAY))
             return
         for ci in range(len(self.lsp_managers)):
             self.lsp_managers[ci].notify_did_create_files(new_path)
@@ -17728,10 +17507,7 @@ struct Desktop(Movable):
             self.open_file(new_path, screen)
         except:
             pass
-        self.status_bar.set_message(
-            String("Duplicated as ") + basename(new_path),
-            Attr(BLACK, LIGHT_GRAY),
-        )
+        self._say(String("Duplicated as ") + basename(new_path))
 
     def _do_delete_file(mut self):
         """Confirm-handler tail for ``_PA_DELETE_FILE``: delete the pinned
@@ -17743,9 +17519,7 @@ struct Desktop(Movable):
         if len(path.as_bytes()) == 0:
             return
         if not delete_tree(path, is_dir):
-            self.status_bar.set_message(
-                String("Delete failed"), Attr(RED, LIGHT_GRAY),
-            )
+            self._say(String("Delete failed"), Attr(RED, LIGHT_GRAY))
             return
         # Tell every server the path is gone so it drops the file from its
         # index — otherwise its stale symbols keep surfacing in Find Symbol
@@ -17767,9 +17541,7 @@ struct Desktop(Movable):
                     self._lsp_notify_closed_if_last(p)
             i -= 1
         self._refresh_file_tree()
-        self.status_bar.set_message(
-            String("Deleted ") + basename(path), Attr(BLACK, LIGHT_GRAY),
-        )
+        self._say(String("Deleted ") + basename(path))
 
     def _toggle_blame(mut self, idx: Int):
         """Show / hide the blame gutter on editor ``idx``. Lazy-load: only
@@ -17921,16 +17693,11 @@ struct Desktop(Movable):
             var loc = self._location_label(path) + String(":") \
                 + String(row + 1)
             clipboard_copy(loc)
-            self.status_bar.set_message(
-                String("Copied ") + loc, Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("Copied ") + loc)
         elif act == CTX_MENU_ACTION_SEND_TO_CLAUDE:
             var loc = self._claude_location(idx, row)
             self._send_to_claude(loc)
-            self.status_bar.set_message(
-                String("Sent ") + loc + String(" to Claude"),
-                Attr(BLACK, LIGHT_GRAY),
-            )
+            self._say(String("Sent ") + loc + String(" to Claude"))
         elif act == CTX_MENU_ACTION_TOGGLE_BREAKPOINT:
             self.dap.toggle_breakpoint(path, row)
         elif act == CTX_MENU_ACTION_EDIT_BREAKPOINT:
@@ -18096,10 +17863,7 @@ struct Desktop(Movable):
                 return
             var lsp_idx = self._ready_lsp_for_path(path)
             if lsp_idx < 0:
-                self.status_bar.set_message(
-                    String("References: LSP not ready"),
-                    Attr(RED, LIGHT_GRAY),
-                )
+                self._say(String("References: LSP not ready"), Attr(RED, LIGHT_GRAY))
                 return
             var text = self.windows.windows[idx].editor.text_snapshot()
             _ = self.lsp_managers[lsp_idx].request_references(
@@ -18214,10 +17978,7 @@ struct Desktop(Movable):
             return
         var lsp_idx = self._ready_lsp_for_path(path)
         if lsp_idx < 0:
-            self.status_bar.set_message(
-                String("LSP not ready for this file type"),
-                Attr(RED, LIGHT_GRAY),
-            )
+            self._say(String("LSP not ready for this file type"), Attr(RED, LIGHT_GRAY))
             return
         var text = self.windows.windows[win_idx].editor.text_snapshot()
         _ = self.lsp_managers[lsp_idx].request_navigation(
@@ -18248,7 +18009,7 @@ struct Desktop(Movable):
             return
         var li = self._ready_lsp_for_path(path, String("documentFormattingProvider"))
         if li < 0:
-            self.status_bar.set_message(
+            self._say(
                 String("Formatting not available for this file type"),
                 Attr(RED, LIGHT_GRAY),
             )
@@ -18271,10 +18032,7 @@ struct Desktop(Movable):
             return
         var li = self._ready_lsp_for_path(path, String("documentRangeFormattingProvider"))
         if li < 0:
-            self.status_bar.set_message(
-                String("Range formatting not available"),
-                Attr(RED, LIGHT_GRAY),
-            )
+            self._say(String("Range formatting not available"), Attr(RED, LIGHT_GRAY))
             return
         # Normalize the selection so start precedes end.
         var sel = self.windows.windows[idx].editor.selections[0]
@@ -18364,10 +18122,7 @@ struct Desktop(Movable):
         self._lsp_spawn_fresh = True
         self._retry_lsp_for_language(lang)
         self._lsp_spawn_fresh = False
-        self.status_bar.set_message(
-            String("LSP[") + lang + String("]: restarting…"),
-            Attr(BLACK, LIGHT_GRAY),
-        )
+        self._say(String("LSP[") + lang + String("]: restarting…"))
 
     def _maybe_open_breakpoint_menu(mut self):
         """Drain ``Editor.consume_breakpoint_menu`` on every editor
@@ -18730,10 +18485,9 @@ struct Desktop(Movable):
         if act == SPELL_ACTION_ADD_USER:
             var ok = self.speller.add_user_word(word)
             if not ok:
-                self.status_bar.set_message(
+                self._say(
                     String("Spelling: added to session only — couldn't write ")
                         + String("user dictionary"),
-                    Attr(BLACK, LIGHT_GRAY),
                 )
         elif act == SPELL_ACTION_ADD_PROJECT:
             if not self.project:
@@ -18741,10 +18495,7 @@ struct Desktop(Movable):
                 # mouse click on the disabled label could still get
                 # here on a future change. Leave the in-memory state
                 # alone and tell the user.
-                self.status_bar.set_message(
-                    String("Spelling: no project open — open one first"),
-                    Attr(BLACK, LIGHT_GRAY),
-                )
+                self._say(String("Spelling: no project open — open one first"))
                 return
             _ = self.speller.add_project_word(word)
         else:
@@ -18772,10 +18523,7 @@ struct Desktop(Movable):
         """Project ▸ Spelling: scan every project file for words the
         spell checker flags and list them by frequency."""
         if not self.project:
-            self.status_bar.set_message(
-                String("Spelling: open a project first"),
-                Attr(RED, LIGHT_GRAY),
-            )
+            self._say(String("Spelling: open a project first"), Attr(RED, LIGHT_GRAY))
             return
         self.speller.load_default()
         self.spelling_dialog.open(
@@ -18806,7 +18554,7 @@ struct Desktop(Movable):
             + String(" to the ") + where + String(" dictionary")
         if not persisted:
             msg = msg + String(" (session only — couldn't write the file)")
-        self.status_bar.set_message(msg, Attr(BLACK, LIGHT_GRAY))
+        self._say(msg)
 
     def _on_colorpres_submit(mut self):
         """Apply the colorPresentation the user picked (rewriting the color
@@ -18894,10 +18642,7 @@ struct Desktop(Movable):
                 # later (we won't re-prompt this session for this venv
                 # because the prompt-once latch is already set).
                 self._clear_pending_dap_start()
-                self.status_bar.set_message(
-                    String("debugger needs debugpy in the venv"),
-                    Attr(BLACK, LIGHT_GRAY),
-                )
+                self._say(String("debugger needs debugpy in the venv"))
                 return Optional[String]()
             var venv_dir = self._pending_dap_venv_dir
             var py = join_path(venv_dir, String("bin/python"))
@@ -18907,26 +18652,17 @@ struct Desktop(Movable):
                 # and the user clicking yes. Drop the deferred start so
                 # the user can retry F5 once the runner is free.
                 self._clear_pending_dap_start()
-                self.status_bar.set_message(
-                    String("Install busy; retry debug in a moment"),
-                    Attr(BLACK, LIGHT_GRAY),
-                )
+                self._say(String("Install busy; retry debug in a moment"))
                 return Optional[String]()
             try:
                 self.install_runner.start(
                     String("debugpy into venv"), cmd,
                 )
                 self._debugpy_install_active = True
-                self.status_bar.set_message(
-                    String("Installing debugpy into ") + venv_dir,
-                    Attr(BLACK, LIGHT_GRAY),
-                )
+                self._say(String("Installing debugpy into ") + venv_dir)
             except:
                 self._clear_pending_dap_start()
-                self.status_bar.set_message(
-                    String("Failed to start debugpy install"),
-                    Attr(LIGHT_RED, LIGHT_GRAY),
-                )
+                self._say_error(String("Failed to start debugpy install"))
             return Optional[String]()
         if pa == _PA_LSP_INSTALL:
             # Yes → run the install command as ``sh -c <hint>`` and show
@@ -18944,27 +18680,21 @@ struct Desktop(Movable):
                     var hint = self.lsp_specs[spec_idx].install_hint
                     clipboard_copy(hint)
                     if self.install_runner.is_active():
-                        self.status_bar.set_message(
-                            String("Install busy; copied to clipboard: ")
-                                + hint,
-                            Attr(BLACK, LIGHT_GRAY),
-                        )
+                        self._say(String("Install busy; copied to clipboard: ") + hint)
                     else:
                         try:
                             self.install_runner.start(
                                 String(lang), String(hint),
                             )
                             self._install_lang = lang
-                            self.status_bar.set_message(
+                            self._say(
                                 String("Installing ") + lang
                                     + String("…  (also copied to clipboard)"),
-                                Attr(BLACK, LIGHT_GRAY),
                             )
                         except:
-                            self.status_bar.set_message(
+                            self._say(
                                 String("Run: ") + hint
                                     + String("  (copied to clipboard)"),
-                                Attr(BLACK, LIGHT_GRAY),
                             )
             return Optional[String]()
         if pa == _PA_DELETE_FILE:
@@ -18990,9 +18720,7 @@ struct Desktop(Movable):
                 try:
                     self._save_focused_as(path)
                 except:
-                    self.status_bar.set_message(
-                        String("Save failed"), Attr(RED, LIGHT_GRAY),
-                    )
+                    self._say(String("Save failed"), Attr(RED, LIGHT_GRAY))
             self._close_if_saved_as()
             return Optional[String]()
         # Unknown / no pending action — nothing to do.
