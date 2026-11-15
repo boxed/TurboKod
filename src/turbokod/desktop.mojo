@@ -5353,20 +5353,20 @@ struct Desktop(Movable):
         # pass — skips the per-frame O(items*hotkeys) reverse-scan when the
         # menus are stable. Comparing the actual actions each frame means
         # there's no dirty-flag to keep in sync.
-        var actions = List[String]()
+        var seen = 0
+        var changed = False
         for m in range(len(self.menu_bar.menus)):
             for it in range(len(self.menu_bar.menus[m].items)):
                 if self.menu_bar.menus[m].items[it].is_separator:
                     continue
-                actions.append(self.menu_bar.menus[m].items[it].action)
-        var changed = len(actions) != len(self._shortcut_snapshot)
-        if not changed:
-            for i in range(len(actions)):
-                if actions[i] != self._shortcut_snapshot[i]:
+                if seen >= len(self._shortcut_snapshot) \
+                        or self.menu_bar.menus[m].items[it].action \
+                        != self._shortcut_snapshot[seen]:
                     changed = True
-                    break
-        if not changed:
+                seen += 1
+        if not changed and seen == len(self._shortcut_snapshot):
             return
+        var actions = List[String](capacity=seen)
         for m in range(len(self.menu_bar.menus)):
             for it in range(len(self.menu_bar.menus[m].items)):
                 if self.menu_bar.menus[m].items[it].is_separator:
@@ -5374,6 +5374,7 @@ struct Desktop(Movable):
                 var action = self.menu_bar.menus[m].items[it].action
                 self.menu_bar.menus[m].items[it].shortcut = \
                     self._shortcut_for_action(action)
+                actions.append(action^)
         self._shortcut_snapshot = actions^
 
     # --- opening files -----------------------------------------------------
