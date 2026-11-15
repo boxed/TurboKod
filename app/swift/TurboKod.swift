@@ -15176,6 +15176,10 @@ final class PlatinumGitView: GitViewBase, GitSurface {
             if let f = self?.frameView { Platinum.activeChanged(f) }
         }
         setUpLists()
+        // The files list has the keyboard from the start. Left to pick a
+        // key view for itself when first shown, the window lands on a
+        // diff, which tells the core the focus moved there.
+        win.initialFirstResponder = filesList
     }
 
     private func setUpLists() {
