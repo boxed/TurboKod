@@ -1409,9 +1409,9 @@ struct Window(Copyable, Movable):
         that was closed mid-session — so the release has to happen here,
         on the way out.
 
-        Safe against the ``OnigRegex`` aliasing hazard because
-        ``Editor.__copyinit__`` builds a *fresh* ``SearcherCache`` rather
-        than copying this one: no window copy can name the same handle.
+        Safe against the ``OnigRegex`` aliasing hazard because copying a
+        ``SearcherCache`` builds a *fresh* one: no window copy can name the
+        same handle.
         Idempotent — a later Find would just recompile.
         """
         self.editor.release_search_cache()

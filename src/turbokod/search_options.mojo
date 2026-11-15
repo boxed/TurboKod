@@ -320,9 +320,9 @@ struct SearcherCache(ImplicitlyCopyable, Movable):
     only ever fixed the repeat half of this; the eviction was still a
     drip.)
 
-    Not aliasing-hazardous despite being ``ImplicitlyCopyable``:
-    ``Editor.__copyinit__`` builds a fresh cache rather than copying
-    this one, so no two caches can name the same handle. Callers hold a
+    Not aliasing-hazardous despite being ``ImplicitlyCopyable``: a copy
+    is a fresh, empty cache (``__copyinit__``), so no two caches can name
+    the same handle — which is what lets ``Editor`` be copied. Callers hold a
     ``get`` result only for the duration of one search and never re-enter
     ``get`` while holding it, which is the precondition the eviction
     release needs.
@@ -343,6 +343,11 @@ struct SearcherCache(ImplicitlyCopyable, Movable):
         self.opts = SearchOptions(True, False, False)
         self.searcher = LineSearcher(String(""), self.opts)
         self.valid = False
+
+    def __copyinit__(mut self, copy: Self):
+        """A fresh, empty cache: copies never share the cached searcher's
+        regex handles (see the struct doc)."""
+        self = Self()
 
     def get(mut self, needle: String, opts: SearchOptions) -> LineSearcher:
         """The searcher for ``(needle, opts)``, compiling only on a miss.

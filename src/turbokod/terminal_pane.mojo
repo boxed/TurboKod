@@ -315,59 +315,6 @@ struct TerminalPane(Copyable, Movable):
         self._claude_seen_ms = 0
         self.attention_events = 0
 
-    def __copyinit__(mut self, copy: Self):
-        self.visible = copy.visible
-        self.dock = copy.dock.copy()
-        self.focused = copy.focused
-        # ``PtyProcess`` isn't safely copyable: the master fd is a
-        # kernel handle; if both copies' destructors closed it the
-        # original would lose the child. Production keeps the pane
-        # singleton-style on ``Desktop``; copies are only used by
-        # Mojo value semantics in tests. Reset to a fresh process in
-        # the copy so neither destructor double-closes.
-        self.pty = PtyProcess()
-        # The copy shares the emulator (``Vt`` is a handle); the original
-        # pane owns it and is the one that releases it.
-        self.vt = copy.vt
-        self.sel = copy.sel.copy()
-        self.scroll_bar = copy.scroll_bar.copy()
-        self.history = copy.history
-        self._history_on = copy._history_on
-        self._modes_ms = copy._modes_ms
-        self._child_mouse = copy._child_mouse
-        self._child_alt = copy._child_alt
-        self._tmux_history_rows = copy._tmux_history_rows
-        self._state_stale = copy._state_stale
-        self.cwd = copy.cwd
-        self.startup_command = copy.startup_command
-        self.tmux_session = copy.tmux_session
-        self.tmux_project = copy.tmux_project
-        self.tmux_create = copy.tmux_create
-        self.run_target = copy.run_target
-        self.run_env = copy.run_env.copy()
-        self.tests = copy.tests
-        self.results = copy.results.copy()
-        self.results_view = copy.results_view
-        self.run_exited = copy.run_exited
-        self.run_exit_status = copy.run_exit_status
-        self._run_exit_event = copy._run_exit_event
-        self._run_scan_after_ms = copy._run_scan_after_ms
-        self._run_rescan = copy._run_rescan
-        self._last_panel_top = copy._last_panel_top
-        self._last_links = copy._last_links.copy()
-        self.pending_open_path = copy.pending_open_path
-        self.pending_open_line = copy.pending_open_line
-        self.pending_open_url = copy.pending_open_url
-        self._claude_tracker = copy._claude_tracker
-        self._claude_title_state = copy._claude_title_state
-        self._attn_armed = copy._attn_armed
-        self._done_pending = copy._done_pending
-        self._done_candidate_ms = copy._done_candidate_ms
-        self._claude_paste = copy._claude_paste
-        self._claude_paste_deadline_ms = copy._claude_paste_deadline_ms
-        self._claude_seen_ms = copy._claude_seen_ms
-        self.attention_events = copy.attention_events
-
     # --- chrome forwarders ---------------------------------------------
 
     def is_minimized(self) -> Bool:

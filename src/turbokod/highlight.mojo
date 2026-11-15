@@ -466,16 +466,6 @@ struct HighlightCache(Copyable, Movable):
         self.post_stacks = List[Int]()
         self.stacks = StackTable()
 
-    def __copyinit__(mut self, copy: Self):
-        # Deep-copy the cached state. Editor's ``Copyable`` declaration
-        # exists for snapshotting; in the live path editors are grown via
-        # ``^`` transfer so this branch is rare.
-        self.ext = copy.ext
-        self.highlights = copy.highlights.copy()
-        self.lent_len = copy.lent_len
-        self.post_stacks = copy.post_stacks.copy()
-        self.stacks = copy.stacks.copy()
-
     def invalidate(mut self):
         """Drop the per-line state — used when the line count or
         extension shifts in a way the incremental path can't

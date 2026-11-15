@@ -161,13 +161,6 @@ struct LanguageServerOverride(Copyable, Movable):
         self.file_types = file_types^
         self.argvs = argvs^
 
-    def __copyinit__(mut self, copy: Self):
-        self.language_id = copy.language_id
-        self.file_types = copy.file_types.copy()
-        var argvs = List[List[String]]()
-        for i in range(len(copy.argvs)):
-            argvs.append(copy.argvs[i].copy())
-        self.argvs = argvs^
 
 
 struct OnSaveAction(Copyable, Movable):
@@ -399,49 +392,6 @@ struct TurbokodConfig(Copyable, Movable):
         self.recent_files = List[String]()
         self.on_save_actions = List[OnSaveAction]()
         self.language_servers = List[LanguageServerOverride]()
-
-    def __copyinit__(mut self, copy: Self):
-        # ``List[String]`` isn't implicitly copyable, so the synthesized
-        # copy constructor refuses — spell it out using ``List.copy``.
-        self.line_numbers = copy.line_numbers
-        self.wrap_mode = copy.wrap_mode
-        self.smart_wrap_comma_threshold = copy.smart_wrap_comma_threshold
-        self.git_changes = copy.git_changes
-        self.tab_bar = copy.tab_bar
-        self.native_ui = copy.native_ui
-        self.platinum_ui = copy.platinum_ui
-        self.welcome_done = copy.welcome_done
-        self.minimap = copy.minimap
-        self.sticky_scroll = copy.sticky_scroll
-        self.auto_save = copy.auto_save
-        self.trim_trailing_whitespace = copy.trim_trailing_whitespace
-        self.ensure_final_newline = copy.ensure_final_newline
-        self.compress_kwargs = copy.compress_kwargs
-        self.cursor_blink = copy.cursor_blink
-        self.terminal_tmux = copy.terminal_tmux
-        self.test_results_view = copy.test_results_view
-        self.test_split_wide = copy.test_split_wide
-        self.test_split_tall = copy.test_split_tall
-        self.lsp_format_on_save = copy.lsp_format_on_save
-        self.lsp_signature_help = copy.lsp_signature_help
-        self.lsp_document_highlight = copy.lsp_document_highlight
-        self.lsp_document_links = copy.lsp_document_links
-        self.lsp_inlay_hints = copy.lsp_inlay_hints
-        self.lsp_code_lens = copy.lsp_code_lens
-        self.lsp_document_colors = copy.lsp_document_colors
-        self.lsp_linked_editing = copy.lsp_linked_editing
-        self.lsp_server_progress = copy.lsp_server_progress
-        self.theme = copy.theme
-        self.font = copy.font
-        self.font_size = copy.font_size
-        self.area_fonts = copy.area_fonts.copy()
-        self.area_font_sizes = copy.area_font_sizes.copy()
-        self.max_open_windows = copy.max_open_windows
-        self.recent_projects = copy.recent_projects.copy()
-        self.project_dirs = copy.project_dirs.copy()
-        self.recent_files = copy.recent_files.copy()
-        self.on_save_actions = copy.on_save_actions.copy()
-        self.language_servers = copy.language_servers.copy()
 
 
 def _promote_recent(mut entries: List[String], path: String, cap: Int) -> Bool:
