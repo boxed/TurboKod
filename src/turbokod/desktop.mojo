@@ -1266,7 +1266,7 @@ struct Desktop(Movable):
     # Signature (active project + open projects + recents) the Project
     # menu was last built from, so the per-frame rebuild is a string
     # compare in the steady state.
-    var _project_menu_sig: String
+    var _project_menu_sig: UInt64
     var _window_menu_idx: Int        # framework-managed Window menu, or -1
     # Snapshots for skipping per-frame menu rebuilds when nothing changed.
     # ``_window_menu_titles`` is the window titles the Window menu was last
@@ -2015,7 +2015,7 @@ struct Desktop(Movable):
         self._pytest_file_globs = List[String]()
         self.open_projects = List[String]()
         self._project_menu_idx = -1
-        self._project_menu_sig = String("")
+        self._project_menu_sig = 0
         self._window_menu_idx = -1
         self._window_menu_titles = List[String]()
         self._window_menu_built = False
@@ -7023,23 +7023,20 @@ struct Desktop(Movable):
                 out.append(self.open_projects[i])
         return out^
 
-    def _project_menu_signature(self) -> String:
-        """Everything the Project menu's contents depend on, flattened
-        into one string. Compared per frame so the rebuild (which stats
-        every recent path) only runs on a real change."""
-        var sig = String("active\n")
+    def _project_menu_signature(self) -> UInt64:
+        """A fingerprint of everything the Project menu's contents depend
+        on. Compared per frame so the rebuild (which stats every recent
+        path) only runs on a real change."""
+        var sig = fnv_start()
         if self.project:
-            sig += self.project.value()
-            sig += String("\n")
-        sig += String("open\n")
+            sig = fnv_str(sig, self.project.value())
+        sig = fnv_int(sig, len(self.open_projects))
         for i in range(len(self.open_projects)):
-            sig += self.open_projects[i]
-            sig += String("\n")
-        sig += String("recent\n")
+            sig = fnv_str(sig, self.open_projects[i])
+        sig = fnv_int(sig, len(self.config.recent_projects))
         for i in range(len(self.config.recent_projects)):
-            sig += self.config.recent_projects[i]
-            sig += String("\n")
-        return sig^
+            sig = fnv_str(sig, self.config.recent_projects[i])
+        return sig
 
     def _rebuild_project_menu(mut self, force: Bool = False):
         """Rebuild the right-aligned "Project" menu from current state.
@@ -7068,7 +7065,7 @@ struct Desktop(Movable):
         var sig = self._project_menu_signature()
         if not force and sig == self._project_menu_sig:
             return
-        self._project_menu_sig = sig^
+        self._project_menu_sig = sig
         var active = String("")
         if self.project:
             active = self.project.value()
