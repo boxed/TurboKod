@@ -32,6 +32,7 @@ from turbokod.events import Event, MOD_CTRL, MOD_META
 from turbokod.geometry import Point, Rect
 from turbokod.local_changes import RightPanel
 from turbokod.lsp_shared import new_pool
+from turbokod.highlight import new_grammar_store
 from turbokod.spell import new_spell_base
 from turbokod.json import (
     json_get_string_array,
@@ -253,6 +254,24 @@ def tk_desktop_set_spell_base(h: Int, base: Int) abi("C"):
     if h == 0:
         return
     _desk(h)[].speller.shared = base
+
+
+@export
+def tk_grammar_store_new() abi("C") -> Int:
+    """Create the process-wide compiled-grammar store (``GrammarStore``).
+    The host makes one and hands it to every window with
+    ``tk_desktop_set_grammar_store``, so a language's grammar is compiled
+    once rather than once per window. Lives for the process."""
+    return new_grammar_store()
+
+
+@export
+def tk_desktop_set_grammar_store(h: Int, store: Int) abi("C"):
+    """Give a window the shared grammar store. Call before its first
+    file opens."""
+    if h == 0:
+        return
+    _desk(h)[].grammar_registry.share(store)
 
 
 @export

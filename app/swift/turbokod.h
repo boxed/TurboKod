@@ -16,6 +16,8 @@ int64_t tk_lsp_pool_new(void);
 void    tk_desktop_set_lsp_pool(int64_t h, int64_t pool);
 int64_t tk_spell_base_new(void);
 void    tk_desktop_set_spell_base(int64_t h, int64_t base);
+int64_t tk_grammar_store_new(void);
+void    tk_desktop_set_grammar_store(int64_t h, int64_t store);
 void    tk_desktop_begin_close(int64_t h);
 int64_t tk_desktop_close_poll(int64_t h);
 void    tk_desktop_free(int64_t h);

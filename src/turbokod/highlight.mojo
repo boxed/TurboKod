@@ -15,6 +15,8 @@ producer in Phase 3 won't churn any consumers.
 
 from std.collections.list import List
 from std.collections.optional import Optional
+from std.ffi import external_call
+from std.sys import size_of
 
 from .colors import (
     Attr, STYLE_NONE, STYLE_BOLD, STYLE_ITALIC, STYLE_UNDERLINE,
@@ -230,45 +232,19 @@ def _resolve_grammar_path(
     return _ResolvedGrammar(_grammar_path_for_ext(ext), ext)
 
 
-struct GrammarRegistry(Movable):
-    """Process-wide loaded-grammar cache.
-
-    Multiple ``Editor``s share one ``GrammarRegistry``, so opening
-    a second ``.rs`` file after closing the first reuses the
-    already-compiled grammar instead of re-parsing the JSON and
-    re-allocating ~125 KB-12 MB of regex handles. The natural
-    owner is ``Desktop`` (the top-level UI controller); editor
-    methods that need it take it as a ``mut`` parameter.
-
-    Storage is parallel ``keys`` / ``paths`` / ``grammars`` arrays. A
-    linear scan suffices — sessions rarely load more than a handful of
-    distinct languages, so the constant factor beats a hash map
-    plus the bookkeeping it'd require.
-
-    **Entries are never evicted, and that is load-bearing.**
-    ``OnigRegex`` has no destructor — its libonig handles live until
-    process exit (see the ``OnigRegex`` doc comment) — so dropping a
-    ``Grammar`` reclaims nothing and re-loading one costs its whole
-    compiled pattern set again, permanently. ~8 MB for the TypeScript
-    grammar. Anything that used to "invalidate the cache" therefore has
-    to work by keying differently instead; see ``ensure``.
-
-    Not ``ImplicitlyCopyable``: ``Grammar`` isn't copyable (its
-    ``OnigRegex`` list aliases libonig handles). The struct is
-    intended to live in exactly one place per process; owners
-    that copy themselves should construct a fresh registry rather
-    than try to copy this one.
+struct GrammarStore(Movable):
+    """The compiled grammars themselves: parallel ``keys`` / ``paths`` /
+    ``grammars`` arrays. A ``GrammarRegistry`` reads and fills one — its
+    own, or the process-wide one every window shares (``new_grammar_store``).
     """
     var keys: List[String]
     var paths: List[String]
     var grammars: List[Grammar]
-    var overrides: List[GrammarOverride]
 
     def __init__(out self):
         self.keys = List[String]()
         self.paths = List[String]()
         self.grammars = List[Grammar]()
-        self.overrides = List[GrammarOverride]()
 
     def lookup_idx(self, key: String, path: String) -> Int:
         """Index of the cached grammar for ``key``, or -1.
@@ -303,6 +279,111 @@ struct GrammarRegistry(Movable):
         return len(self.keys) - 1
 
     def release(mut self):
+        """Free every compiled grammar and empty the store."""
+        for i in range(len(self.grammars)):
+            self.grammars[i].release()
+        self.keys = List[String]()
+        self.paths = List[String]()
+        self.grammars = List[Grammar]()
+
+
+def grammar_store_at(addr: Int) -> Pointer[GrammarStore, MutUntrackedOrigin]:
+    return Pointer[GrammarStore, MutUntrackedOrigin](unsafe_from_address=addr)
+
+
+def new_grammar_store() -> Int:
+    """A heap ``GrammarStore``. The native host makes one for the whole
+    process and gives it to every window (``GrammarRegistry.share``), so
+    a language's grammar is compiled once however many windows show it;
+    that one is never freed."""
+    var addr = external_call["malloc", Int](size_of[GrammarStore]())
+    grammar_store_at(addr).unsafe_write(GrammarStore())
+    return addr
+
+
+def free_grammar_store(addr: Int):
+    """Free a ``new_grammar_store`` nothing reads any more. Its grammars'
+    libonig handles are a separate matter: ``GrammarStore.release``."""
+    if addr == 0:
+        return
+    grammar_store_at(addr).unsafe_deinit_pointee()
+    _ = external_call["free", Int](addr)
+
+
+struct GrammarRegistry(Movable):
+    """Process-wide loaded-grammar cache.
+
+    Multiple ``Editor``s share one ``GrammarRegistry``, so opening
+    a second ``.rs`` file after closing the first reuses the
+    already-compiled grammar instead of re-parsing the JSON and
+    re-allocating ~125 KB-12 MB of regex handles. The natural
+    owner is ``Desktop`` (the top-level UI controller); editor
+    methods that need it take it as a ``mut`` parameter.
+
+    Storage is a ``GrammarStore``: parallel ``keys`` / ``paths`` /
+    ``grammars`` arrays. A linear scan suffices — sessions rarely load
+    more than a handful of distinct languages, so the constant factor beats a hash map
+    plus the bookkeeping it'd require.
+
+    **Entries are never evicted, and that is load-bearing.**
+    ``OnigRegex`` has no destructor — its libonig handles live until
+    process exit (see the ``OnigRegex`` doc comment) — so dropping a
+    ``Grammar`` reclaims nothing and re-loading one costs its whole
+    compiled pattern set again, permanently. ~8 MB for the TypeScript
+    grammar. Anything that used to "invalidate the cache" therefore has
+    to work by keying differently instead; see ``ensure``.
+
+    Not ``ImplicitlyCopyable``: ``Grammar`` isn't copyable (its
+    ``OnigRegex`` list aliases libonig handles). The struct is
+    intended to live in exactly one place per process; owners
+    that copy themselves should construct a fresh registry rather
+    than try to copy this one.
+
+    The store is this registry's own, or — in the native app, where each
+    window has a ``Desktop`` and so a registry — the one every window
+    shares (``share``). Only ``overrides`` is per project either way; an
+    entry's key already encodes what the overrides resolved to.
+    """
+    var _store: Int
+    """Address of the ``GrammarStore``."""
+    var _owns: Bool
+    var overrides: List[GrammarOverride]
+
+    def __init__(out self):
+        self._store = new_grammar_store()
+        self._owns = True
+        self.overrides = List[GrammarOverride]()
+
+    def __deinit__(deinit self):
+        # The store's memory only; its compiled regexes go in ``release``.
+        if self._owns:
+            free_grammar_store(self._store)
+
+    def share(mut self, store: Int):
+        """Use the process-wide ``store`` instead of a store of this
+        registry's own. Call before anything is highlighted."""
+        if store == 0 or store == self._store:
+            return
+        if self._owns:
+            grammar_store_at(self._store)[].release()
+            free_grammar_store(self._store)
+        self._store = store
+        self._owns = False
+
+    def count(self) -> Int:
+        """How many grammars are loaded."""
+        return len(grammar_store_at(self._store)[].keys)
+
+    def lookup_idx(self, key: String, path: String) -> Int:
+        """Index of the cached grammar for ``(key, path)``, or -1."""
+        return grammar_store_at(self._store)[].lookup_idx(key, path)
+
+    def ensure(mut self, key: String, path: String) raises -> Int:
+        """Index of the compiled grammar for ``(key, path)``, loading it
+        on a miss (see ``GrammarStore.ensure``)."""
+        return grammar_store_at(self._store)[].ensure(key, path)
+
+    def release(mut self):
         """Free every compiled grammar and empty the cache.
 
         The one sanctioned way to shrink this registry. It exists for the
@@ -317,12 +398,12 @@ struct GrammarRegistry(Movable):
         reloadable-on-demand-and-meanwhile-safe. Use it at teardown only;
         for "the mapping changed", see ``set_overrides``, which is
         deliberately non-destructive.
+
+        A no-op on the shared store: other windows are still tokenizing
+        through it, and it lives for the process.
         """
-        for i in range(len(self.grammars)):
-            self.grammars[i].release()
-        self.keys = List[String]()
-        self.paths = List[String]()
-        self.grammars = List[Grammar]()
+        if self._owns:
+            grammar_store_at(self._store)[].release()
 
     def lookup_override(self, ext: String) -> String:
         """Return the configured ``language_id`` for ``ext``, or the
@@ -609,7 +690,7 @@ def highlight_incremental(
                     and len(cache.stacks.stacks) < _STACK_TABLE_LIMIT)
     if not can_incr:
         var hls = _full_retokenize(
-            registry.grammars[grammar_idx], cache, lines,
+            grammar_store_at(registry._store)[].grammars[grammar_idx], cache, lines,
         )
         if len(hls) == 0 and _has_nonempty_line(lines):
             var fb = _fallback_for_extension(ext, lines)
@@ -638,7 +719,7 @@ def highlight_incremental(
     if dirty_max_row > min_row:
         min_row = dirty_max_row
     var new_hls = tokenize_lines_from(
-        registry.grammars[grammar_idx], lines, eff_dirty, min_row,
+        grammar_store_at(registry._store)[].grammars[grammar_idx], lines, eff_dirty, min_row,
         start_stack, cache.post_stacks, cache.stacks, new_post, stable_row,
     )
 
@@ -2294,7 +2375,7 @@ def _inject_grammar(
 
     var sub_lines = _slice_body_lines(lines, body)
     var sub_hls = tokenize_with_grammar(
-        registry.grammars[grammar_idx], sub_lines,
+        grammar_store_at(registry._store)[].grammars[grammar_idx], sub_lines,
     )
 
     _drop_highlights_in_body(hls, body)

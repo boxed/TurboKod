@@ -25,6 +25,7 @@ from turbokod.debugger_config import (
 )
 from turbokod.highlight import (
     GrammarRegistry, Highlight, HighlightCache,
+    free_grammar_store, grammar_store_at, new_grammar_store,
     _apply_django_template_overlay, embedded_language_extensions,
     highlight_for_extension, highlight_incremental, highlight_comment_attr,
     highlight_ident_attr, highlight_keyword_attr, highlight_number_attr,
@@ -201,14 +202,14 @@ def test_grammar_registry_release_frees_and_leaves_the_engine_usable() raises:
         String("py"), lines, 0, registry, cache,
     )
     assert_true(len(before) > 0)
-    assert_true(len(registry.keys) > 0)
+    assert_true(registry.count() > 0)
     # Loading the grammar compiled handles the shim is now tracking.
     assert_true(onig_tracked_count() > live_at_start)
 
     registry.release()
-    assert_equal(len(registry.keys), 0)
-    assert_equal(len(registry.grammars), 0)
-    assert_equal(len(registry.paths), 0)
+    assert_equal(registry.count(), 0)
+    assert_equal(registry.count(), 0)
+    assert_equal(registry.count(), 0)
     # And every one of them came back. This is the assertion that matters:
     # RSS can't see it (a freed block stays resident) and the whole point
     # of ``release`` is that the count returns to its floor.
@@ -276,11 +277,11 @@ def test_grammar_registry_keeps_grammars_across_set_overrides() raises:
     var _ = highlight_incremental(
         String("py"), lines, 0, registry, cache,
     )
-    var loaded = len(registry.keys)
+    var loaded = registry.count()
     assert_true(loaded > 0)
     registry.set_overrides(List[GrammarOverride]())
-    assert_equal(len(registry.keys), loaded)
-    assert_equal(len(registry.grammars), loaded)
+    assert_equal(registry.count(), loaded)
+    assert_equal(registry.count(), loaded)
 
 
 def test_grammar_registry_override_change_reresolves_without_eviction() raises:
@@ -302,7 +303,7 @@ def test_grammar_registry_override_change_reresolves_without_eviction() raises:
     var _ = highlight_incremental(
         String("html"), lines, 0, registry, html_cache,
     )
-    var before = len(registry.keys)
+    var before = registry.count()
     assert_true(before > 0)
 
     # Point ``html`` at the python grammar and re-tokenize the same
@@ -326,7 +327,7 @@ def test_grammar_registry_override_change_reresolves_without_eviction() raises:
         assert_equal(after_hls[i].col_start, py_hls[i].col_start)
         assert_equal(after_hls[i].col_end, py_hls[i].col_end)
     # The html grammar it had already compiled is still cached.
-    assert_true(len(registry.keys) > before)
+    assert_true(registry.count() > before)
 
 
 def test_language_catalog_carries_comment_tokens() raises:
@@ -825,6 +826,35 @@ def test_textmate_brackets_paint_as_operators() raises:
                 found = True
         assert_true(found)
         assert_true(got == str_attr)
+
+
+def test_registries_sharing_a_store_compile_a_grammar_once() raises:
+    """Two windows' registries on the process-wide store: the second
+    finds the grammar the first compiled, and one window closing
+    (``release``) leaves it usable for the other."""
+    var lines = List[String]()
+    lines.append(String("def f(): pass"))
+    var store = new_grammar_store()
+    var a = GrammarRegistry()
+    a.share(store)
+    var b = GrammarRegistry()
+    b.share(store)
+    var cache_a = HighlightCache()
+    var first = highlight_incremental(String("py"), lines, 0, a, cache_a)
+    assert_true(len(first) > 0)
+    var live = onig_tracked_count()
+    var cache_b = HighlightCache()
+    var second = highlight_incremental(String("py"), lines, 0, b, cache_b)
+    assert_equal(len(second), len(first))
+    assert_equal(onig_tracked_count(), live)
+    assert_equal(b.count(), a.count())
+    a.release()
+    assert_equal(onig_tracked_count(), live)
+    var cache_c = HighlightCache()
+    var third = highlight_incremental(String("py"), lines, 0, b, cache_c)
+    assert_equal(len(third), len(first))
+    grammar_store_at(store)[].release()
+    free_grammar_store(store)
 
 
 def test_sync_highlights_keeps_one_copy_of_the_buffers_highlights() raises:

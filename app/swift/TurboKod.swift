@@ -605,6 +605,13 @@ enum SharedSpelling {
     static let base: Int64 = tk_spell_base_new()
 }
 
+/// The process-wide compiled syntax grammars every window's Desktop
+/// tokenizes through (`tk_grammar_store_new`), so a language's grammar
+/// is compiled once however many windows show it.
+enum SharedGrammars {
+    static let store: Int64 = tk_grammar_store_new()
+}
+
 final class CellView: NSView {
     var handle: Int64 = 0
     var surface: CellSurface = .main
@@ -4227,6 +4234,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
         // ...and one copy of the spelling dictionary.
         tk_desktop_set_spell_base(h, SharedSpelling.base)
+        // ...and one compiled copy of each language's grammar.
+        tk_desktop_set_grammar_store(h, SharedGrammars.store)
         // Tell the Desktop the host owns the menu surface — it stops painting
         // the in-grid menu bar and stops routing top-row mouse / Alt-letter
         // mnemonic events to it. We mirror the menu via tk_desktop_menu_snapshot.
