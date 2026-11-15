@@ -1434,7 +1434,6 @@ def test_retiring_a_server_leaves_the_list_at_once_and_drains_later() raises:
 
     var d = Desktop()
     d.lsp_managers.append(m^)
-    d.lsp_languages.append(String("python"))
     assert_equal(len(d.lsp_managers), 1)
 
     var started = monotonic_ms()
@@ -1442,7 +1441,6 @@ def test_retiring_a_server_leaves_the_list_at_once_and_drains_later() raises:
     var retire_ms = monotonic_ms() - started
     # Gone from the live list instantly, and the call itself didn't wait.
     assert_equal(len(d.lsp_managers), 0)
-    assert_equal(len(d.lsp_languages), 0)
     assert_equal(len(d._closing_lsp), 1)
     assert_true(retire_ms < 100)
 
@@ -1472,11 +1470,9 @@ def test_close_project_retires_the_projects_language_servers() raises:
     var d = Desktop()
     d.detect_project_from(String("examples/hello.mojo"))
     d.lsp_managers.append(m^)
-    d.lsp_languages.append(String("python"))
 
     d.close_project()
     assert_equal(len(d.lsp_managers), 0)
-    assert_equal(len(d.lsp_languages), 0)
     assert_equal(len(d._closing_lsp), 1)
     d.shutdown()
 

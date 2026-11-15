@@ -1363,7 +1363,6 @@ struct Desktop(Movable):
     # Set across LSP ▸ Restart's respawn: start a new server rather than
     # joining the running shared one (which is the one being restarted).
     var _lsp_spawn_fresh: Bool
-    var lsp_languages: List[String]
     # Managers whose session is being closed but whose child hasn't exited
     # yet. Retiring a server (Restart, or a settings change to its argv) and
     # closing a window both used to block the UI thread on the LSP
@@ -2048,7 +2047,6 @@ struct Desktop(Movable):
         self.lsp_managers = List[LspManager]()
         self.lsp_pool = 0
         self._lsp_spawn_fresh = False
-        self.lsp_languages = List[String]()
         self._closing_lsp = List[LspManager]()
         self.doc_specs = built_in_docsets()
         self.doc_stores = List[DocStore]()
@@ -5761,9 +5759,9 @@ struct Desktop(Movable):
         if spec_idx < 0:
             return -1
         var lang = self.lsp_specs[spec_idx].language_id
-        for i in range(len(self.lsp_languages)):
-            if self.lsp_languages[i] == lang:
-                return i
+        var have = self._lsp_idx_for_language(lang)
+        if have >= 0:
+            return have
         var argv = self._pick_lsp_argv(spec_idx)
         if len(argv) == 0:
             return -1
@@ -5773,7 +5771,6 @@ struct Desktop(Movable):
             lang, argv, root, pool=self.lsp_pool, fresh=self._lsp_spawn_fresh,
         )
         self.lsp_managers.append(manager^)
-        self.lsp_languages.append(lang)
         return len(self.lsp_managers) - 1
 
     def _lsp_for_path(self, path: String) -> Int:
@@ -5787,9 +5784,12 @@ struct Desktop(Movable):
         )
         if spec_idx < 0:
             return -1
-        var lang = self.lsp_specs[spec_idx].language_id
-        for i in range(len(self.lsp_languages)):
-            if self.lsp_languages[i] == lang:
+        return self._lsp_idx_for_language(self.lsp_specs[spec_idx].language_id)
+
+    def _lsp_idx_for_language(self, lang: String) -> Int:
+        """Index into ``lsp_managers`` of the server for ``lang``, or -1."""
+        for i in range(len(self.lsp_managers)):
+            if self.lsp_managers[i].language_id() == lang:
                 return i
         return -1
 
@@ -5932,8 +5932,6 @@ struct Desktop(Movable):
         if idx < 0 or idx >= len(self.lsp_managers):
             return
         var mgr = self.lsp_managers.pop(idx)
-        if idx < len(self.lsp_languages):
-            _ = self.lsp_languages.pop(idx)
         mgr.begin_shutdown()
         self._closing_lsp.append(mgr^)
 
@@ -6582,11 +6580,13 @@ struct Desktop(Movable):
         self.lsp_specs = apply_language_overrides(
             built_in_servers(), self.config.language_servers,
         )
-        # Walk a snapshot of the language list — restarting a manager
-        # pops it from the parallel lists and (via _retry_lsp_for_language)
-        # appends a new one at the end, so iterating live would either
-        # skip entries or recheck the freshly-spawned replacement.
-        var langs_snapshot = self.lsp_languages.copy()
+        # Walk a snapshot of the languages — restarting a manager pops it
+        # and (via _retry_lsp_for_language) appends a new one at the end,
+        # so iterating live would either skip entries or recheck the
+        # freshly-spawned replacement.
+        var langs_snapshot = List[String]()
+        for i in range(len(self.lsp_managers)):
+            langs_snapshot.append(self.lsp_managers[i].language_id())
         for s in range(len(langs_snapshot)):
             var lang = langs_snapshot[s]
             var spec_idx = find_language_by_id(self.lsp_specs, lang)
@@ -6599,11 +6599,7 @@ struct Desktop(Movable):
                 # working server just because the user added a paper
                 # candidate that isn't actually on PATH.
                 continue
-            var mgr_idx = -1
-            for k in range(len(self.lsp_languages)):
-                if self.lsp_languages[k] == lang:
-                    mgr_idx = k
-                    break
+            var mgr_idx = self._lsp_idx_for_language(lang)
             if mgr_idx < 0:
                 continue
             var current_argv = self.lsp_managers[mgr_idx].argv()
@@ -11189,7 +11185,7 @@ struct Desktop(Movable):
                 # LSP can't see source for them.
                 var unresolved = self.lsp_managers[i].take_empty_word()
                 if len(unresolved.as_bytes()) > 0:
-                    var lang = self.lsp_languages[i]
+                    var lang = self.lsp_managers[i].language_id()
                     if self._try_docs_fallback(lang, unresolved, screen):
                         # Clear the latched flag so ``_refresh_lsp_status``
                         # doesn't overwrite our "opened docs" message
@@ -11826,7 +11822,7 @@ struct Desktop(Movable):
                 self.spelling_dialog.pop_library_job()
                 self.spelling_dialog.library_skip(job.key)
                 continue
-            var lang = self.lsp_languages[li]
+            var lang = self.lsp_managers[li].language_id()
             var scratch = self._libprobe_docs.get(lang, String(""))
             if scratch != job.at.path and len(scratch.as_bytes()) > 0:
                 if self.lsp_managers[li].library_probes_inflight_tagged(
@@ -11876,9 +11872,9 @@ struct Desktop(Movable):
     def _release_libprobe_docs(mut self):
         if len(self._libprobe_docs) == 0:
             return
-        for i in range(len(self.lsp_languages)):
+        for i in range(len(self.lsp_managers)):
             var path = self._libprobe_docs.get(
-                self.lsp_languages[i], String(""),
+                self.lsp_managers[i].language_id(), String(""),
             )
             if len(path.as_bytes()) > 0 \
                     and self.lsp_managers[i].library_probes_inflight_tagged(
@@ -11886,7 +11882,7 @@ struct Desktop(Movable):
                     ) == 0:
                 self._release_libprobe_doc(i, path)
                 try:
-                    _ = self._libprobe_docs.pop(self.lsp_languages[i])
+                    _ = self._libprobe_docs.pop(self.lsp_managers[i].language_id())
                 except:
                     pass
 
@@ -12276,7 +12272,7 @@ struct Desktop(Movable):
                     state = String("not started")
                 else:
                     state = String("unknown")
-                lines.append(self.lsp_languages[i])
+                lines.append(self.lsp_managers[i].language_id())
                 var argv = m.argv()
                 var cmd = String(" ").join(argv)
                 var resolved = String("")
@@ -12404,7 +12400,7 @@ struct Desktop(Movable):
         var lsp_idx = self._lsp_for_path(path)
         if lsp_idx < 0:
             return
-        var prefix = String("LSP[") + self.lsp_languages[lsp_idx] \
+        var prefix = String("LSP[") + self.lsp_managers[lsp_idx].language_id() \
             + String("]: ")
         _refresh_status_for(
             self.status_bar, prefix, self.lsp_managers[lsp_idx], path,
@@ -18115,7 +18111,7 @@ struct Desktop(Movable):
         var lsp_idx = self._lsp_for_path(path)
         if lsp_idx < 0:
             return
-        var lang = self.lsp_languages[lsp_idx]
+        var lang = self.lsp_managers[lsp_idx].language_id()
         # Retire, don't block — LSP ▸ Restart should feel instant, and the
         # old server's goodbye finishes on later frames.
         self.retire_lsp_manager(lsp_idx)
