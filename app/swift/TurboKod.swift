@@ -565,6 +565,18 @@ let MOD_KEY_ALT: UInt32 = 2
 
 var CELL_W: CGFloat = 8, CELL_H: CGFloat = 16
 
+/// The 256-entry theme palette (0xRRGGBB per index) of desktop `h`, all
+/// zeros when there is none.
+func themePalette(_ h: Int64) -> [UInt32] {
+    var p = [UInt32](repeating: 0, count: 256)
+    if h != 0 {
+        p.withUnsafeMutableBufferPointer { b in
+            _ = tk_theme_palette(h, Int64(Int(bitPattern: b.baseAddress)), Int64(b.count))
+        }
+    }
+    return p
+}
+
 func nscolor(_ rgb: UInt32) -> NSColor {
     NSColor(srgbRed: CGFloat((rgb >> 16) & 0xFF) / 255.0,
             green: CGFloat((rgb >> 8) & 0xFF) / 255.0,
@@ -794,13 +806,7 @@ final class CellView: NSView {
         let v = tk_theme_version(handle)
         if v == themeVersion { return false }
         themeVersion = v
-        var p = [UInt32](repeating: 0, count: 256)
-        p.withUnsafeMutableBufferPointer { b in
-            _ = tk_theme_palette(handle,
-                                 Int64(Int(bitPattern: b.baseAddress)),
-                                 Int64(b.count))
-        }
-        palette = p
+        palette = themePalette(handle)
         return true
     }
 
@@ -5852,14 +5858,7 @@ extension AppController {
               let opts = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         else { return }
         let w = WelcomeController(options: opts, palette: { [weak self] in
-            var p = [UInt32](repeating: 0, count: 256)
-            let h = self?.views.first?.handle ?? self?.chromeDesktop ?? 0
-            if h != 0 {
-                p.withUnsafeMutableBufferPointer { b in
-                    _ = tk_theme_palette(h, Int64(Int(bitPattern: b.baseAddress)), Int64(b.count))
-                }
-            }
-            return p
+            themePalette(self?.views.first?.handle ?? self?.chromeDesktop ?? 0)
         }) { [weak self] json, done in
             guard let self = self else { return }
             let h = self.views.first?.handle ?? self.chromeDesktop
@@ -8770,10 +8769,7 @@ final class HistoryController: NSObject, NSTableViewDataSource, NSTableViewDeleg
         guard let h = view?.handle, h != 0, idx >= 0 else { patch.string = ""; return }
         let data = readCoreData(&buf, { tk_desktop_history_patch(h, Int64(idx), $0, $1) }) ?? Data()
         let text = String(decoding: data, as: UTF8.self)
-        var pal = [UInt32](repeating: 0, count: 256)
-        pal.withUnsafeMutableBufferPointer { b in
-            _ = tk_theme_palette(h, Int64(Int(bitPattern: b.baseAddress)), Int64(b.count))
-        }
+        let pal = themePalette(h)
         let bg = NSColor.rgb(Int(pal[16])), fg = NSColor.rgb(Int(pal[17]))
         let mono = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         let out = NSMutableAttributedString()
@@ -11317,12 +11313,7 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
             if let b = v as? NSButton { b.title = n["text"] as? String ?? ""; b.isEnabled = enabled }
         case "preview":
             if let p = v as? CodePreview {
-                var pal = [UInt32](repeating: 0, count: 256)
-                if let h = view?.handle, h != 0 {
-                    pal.withUnsafeMutableBufferPointer { b in
-                        _ = tk_theme_palette(h, Int64(Int(bitPattern: b.baseAddress)), Int64(b.count))
-                    }
-                }
+                let pal = themePalette(view?.handle ?? 0)
                 p.render(palette: pal, font: CodePreview.font(
                     label: n["text"] as? String ?? "", size: n["n"] as? Int ?? 0,
                     builtins: n["opts"] as? [String] ?? []))
@@ -11337,12 +11328,7 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
             }
         case "list":
             if let l = lists[path] {
-                var pal = [UInt32](repeating: 0, count: 256)
-                if let h = view?.handle, h != 0 {
-                    pal.withUnsafeMutableBufferPointer { b in
-                        _ = tk_theme_palette(h, Int64(Int(bitPattern: b.baseAddress)), Int64(b.count))
-                    }
-                }
+                let pal = themePalette(view?.handle ?? 0)
                 l.apply(n, palette: pal)
             }
         case "table":
@@ -12102,6 +12088,50 @@ enum Platinum {
         return Double((y - sb.minY - sb.width) / travel) * maxPos
     }
 
+    /// Track a press on a row view's vertical scroll bar until the mouse
+    /// goes up: drag the thumb, or step by a row (arrows) or a page
+    /// (track), repeating while held. `top` / `scroll` read and set the
+    /// first visible row; `pressed` reports the arrow held (1 up, 2 down,
+    /// 0 none) for drawing.
+    static func trackScrollBar(
+        in view: NSView, from start: NSPoint, bar sb: NSRect, thumb: NSRect,
+        arrow: CGFloat, maxTop: Int, visible: Int,
+        top: () -> Int, scroll: (Int) -> Void, pressed: (Int) -> Void
+    ) {
+        guard maxTop > 0, let win = view.window else { return }
+        if thumb.contains(start) {
+            let grab = start.y - thumb.minY
+            while let e = win.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+                if e.type == .leftMouseUp { break }
+                let y = view.convert(e.locationInWindow, from: nil).y - grab
+                scroll(Int(thumbPos(in: sb, thumb: thumb, top: y, max: Double(maxTop)).rounded()))
+                view.display()
+            }
+            return
+        }
+        // Arrows and the track repeat while held.
+        let part = start.y < sb.minY + arrow ? 1 : start.y > sb.maxY - arrow ? 2
+            : start.y < thumb.minY ? 3 : 4
+        func step() {
+            switch part {
+            case 1: scroll(top() - 1)
+            case 2: scroll(top() + 1)
+            case 3: scroll(top() - visible)
+            default: scroll(top() + visible)
+            }
+            view.display()
+        }
+        if part <= 2 { pressed(part) }
+        step()
+        NSEvent.startPeriodicEvents(afterDelay: 0.3, withPeriod: 0.05)
+        while let e = win.nextEvent(matching: [.leftMouseUp, .periodic, .leftMouseDragged]) {
+            if e.type == .leftMouseUp { break }
+            if e.type == .periodic { step() }
+        }
+        NSEvent.stopPeriodicEvents()
+        pressed(0)
+    }
+
     /// A vertical Platinum scroll bar in `sb`: arrows at both ends, a
     /// lavender thumb at `thumb` (none when there's nothing to scroll).
     /// `pressed`: 1 the up arrow, 2 the down one.
@@ -12749,12 +12779,7 @@ final class PPreview: PNode {
     }
     override func apply(_ n: [String: Any]) {
         node = n
-        var pal = [UInt32](repeating: 0, count: 256)
-        if let h = dlg?.handle, h != 0 {
-            pal.withUnsafeMutableBufferPointer { b in
-                _ = tk_theme_palette(h, Int64(Int(bitPattern: b.baseAddress)), Int64(b.count))
-            }
-        }
+        let pal = themePalette(dlg?.handle ?? 0)
         preview.render(palette: pal, font: CodePreview.font(
             label: n["text"] as? String ?? "", size: n["n"] as? Int ?? 0,
             builtins: n["opts"] as? [String] ?? []))
@@ -12994,39 +13019,12 @@ final class PList: PNode {
     }
 
     private func trackScrollBar(_ start: NSPoint) {
-        guard maxTop > 0, let win = window else { return }
-        let sb = sbRect
-        let thumb = thumbRect
-        if thumb.contains(start) {
-            let grab = start.y - thumb.minY
-            while let e = win.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
-                if e.type == .leftMouseUp { break }
-                let y = convert(e.locationInWindow, from: nil).y - grab
-                scroll(to: Int(Platinum.thumbPos(in: sb, thumb: thumb, top: y, max: Double(maxTop)).rounded()))
-                display()
-            }
-            return
-        }
-        // Arrows and the track repeat while held.
-        let part = start.y < sb.minY + Self.sbW ? 1 : start.y > sb.maxY - Self.sbW ? 2 : start.y < thumb.minY ? 3 : 4
-        func step() {
-            switch part {
-            case 1: scroll(to: top - 1)
-            case 2: scroll(to: top + 1)
-            case 3: scroll(to: top - visible)
-            default: scroll(to: top + visible)
-            }
-            display()
-        }
-        if part <= 2 { pressedPart = part }
-        step()
-        NSEvent.startPeriodicEvents(afterDelay: 0.3, withPeriod: 0.05)
-        while let e = win.nextEvent(matching: [.leftMouseUp, .periodic, .leftMouseDragged]) {
-            if e.type == .leftMouseUp { break }
-            if e.type == .periodic { step() }
-        }
-        NSEvent.stopPeriodicEvents()
-        pressedPart = 0
+        Platinum.trackScrollBar(
+            in: self, from: start, bar: sbRect, thumb: thumbRect,
+            arrow: Self.sbW, maxTop: maxTop, visible: visible,
+            top: { [unowned self] in self.top },
+            scroll: { [unowned self] in self.scroll(to: $0) },
+            pressed: { [unowned self] in self.pressedPart = $0 })
     }
 
     override func keyDown(with event: NSEvent) {
@@ -13118,12 +13116,7 @@ final class PListView: PNode {
 
     override func apply(_ n: [String: Any]) {
         node = n
-        var pal = [UInt32](repeating: 0, count: 256)
-        if let h = dlg?.handle, h != 0 {
-            pal.withUnsafeMutableBufferPointer { b in
-                _ = tk_theme_palette(h, Int64(Int(bitPattern: b.baseAddress)), Int64(b.count))
-            }
-        }
+        let pal = themePalette(dlg?.handle ?? 0)
         func color(_ v: Int) -> NSColor? {
             if v >= 1 << 24 { return .rgb(v & 0xFFFFFF) }
             return v >= 0 && v < pal.count ? .rgb(Int(pal[v])) : nil
@@ -15060,39 +15053,12 @@ final class PGitRows: NSView {
     }
 
     private func trackScrollBar(_ start: NSPoint) {
-        guard maxTop > 0, let win = window else { return }
-        let sb = sbRect
-        let thumb = thumbRect
-        if thumb.contains(start) {
-            let grab = start.y - thumb.minY
-            while let e = win.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
-                if e.type == .leftMouseUp { break }
-                let y = convert(e.locationInWindow, from: nil).y - grab
-                scroll(to: Int(Platinum.thumbPos(in: sb, thumb: thumb, top: y, max: Double(maxTop)).rounded()))
-                display()
-            }
-            return
-        }
-        // Arrows and the track repeat while held.
-        let part = start.y < sb.minY + Self.sbW ? 1 : start.y > sb.maxY - Self.sbW ? 2 : start.y < thumb.minY ? 3 : 4
-        func step() {
-            switch part {
-            case 1: scroll(to: top - 1)
-            case 2: scroll(to: top + 1)
-            case 3: scroll(to: top - visible)
-            default: scroll(to: top + visible)
-            }
-            display()
-        }
-        if part <= 2 { pressedPart = part }
-        step()
-        NSEvent.startPeriodicEvents(afterDelay: 0.3, withPeriod: 0.05)
-        while let e = win.nextEvent(matching: [.leftMouseUp, .periodic, .leftMouseDragged]) {
-            if e.type == .leftMouseUp { break }
-            if e.type == .periodic { step() }
-        }
-        NSEvent.stopPeriodicEvents()
-        pressedPart = 0
+        Platinum.trackScrollBar(
+            in: self, from: start, bar: sbRect, thumb: thumbRect,
+            arrow: Self.sbW, maxTop: maxTop, visible: visible,
+            top: { [unowned self] in self.top },
+            scroll: { [unowned self] in self.scroll(to: $0) },
+            pressed: { [unowned self] in self.pressedPart = $0 })
     }
 }
 
