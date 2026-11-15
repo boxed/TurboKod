@@ -670,6 +670,22 @@ struct MergeView(Movable):
         var tail = String(StringSpan(unsafe_from_utf8=b[self.edit_col:len(b)]))
         self.states[ci].edited_lines[self.edit_row] = head + s + tail
         self.edit_col += len(s.as_bytes())
+        self._patch_edit_row()
+
+    def _patch_edit_row(mut self):
+        """Carry an edit that stayed on one line into ``_rows_cache``:
+        typing changes that one row's text, so the other rows (the whole
+        file's lines) needn't be rebuilt per keystroke."""
+        if self._rows_dirty:
+            return
+        var ci = self.current
+        for i in range(len(self._rows_cache)):
+            if self._rows_cache[i].kind == _ROW_EDIT \
+                    and self._rows_cache[i].ordinal == ci \
+                    and self._rows_cache[i].line_idx == self.edit_row:
+                self._rows_cache[i].text = \
+                    self.states[ci].edited_lines[self.edit_row]
+                return
         self._rows_dirty = True
 
     def _edit_backspace(mut self):
@@ -682,6 +698,8 @@ struct MergeView(Movable):
             var tail = String(StringSpan(unsafe_from_utf8=b[self.edit_col:len(b)]))
             self.states[ci].edited_lines[self.edit_row] = head + tail
             self.edit_col = start
+            self._patch_edit_row()
+            return
         elif self.edit_row > 0:
             # Join with the previous line.
             var prev = self.states[ci].edited_lines[self.edit_row - 1]
