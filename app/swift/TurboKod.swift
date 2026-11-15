@@ -20,12 +20,15 @@ let isCapturing = ProcessInfo.processInfo.environment["TK_CAPTURE"] != nil
 /// Read once, for the same reason: the check sits in `scrollWheel`.
 let isScrollDebug = ProcessInfo.processInfo.environment["TK_SCROLL_DEBUG"] != nil
 
-/// FNV-1a over ``words`` — a cheap "did this buffer change?" fingerprint
-/// for the laid-out frame and the menu snapshot.
-func fnv1a<S: Sequence>(_ words: S) -> UInt64 where S.Element: BinaryInteger {
-    var h: UInt64 = 0xcbf29ce484222325
-    for w in words { h = (h ^ UInt64(w)) &* 0x100000001b3 }
-    return h
+/// A fingerprint of `bytes` — a cheap "did this buffer change?" check for
+/// the laid-out frame and the menu snapshot. Through the standard library's
+/// hasher, which runs at full speed whatever this file is compiled with (a
+/// hand-written loop over a whole frame every tick did not). Seeded per
+/// launch, so only good for comparing within one run.
+func fingerprint(_ bytes: UnsafeRawBufferPointer) -> UInt64 {
+    var h = Hasher()
+    h.combine(bytes: bytes)
+    return UInt64(bitPattern: Int64(h.finalize()))
 }
 
 // The bundled IBM VGA fonts, both with a 1:2 cell and the same vertical
@@ -812,7 +815,7 @@ final class CellView: NSView {
     private var frameCols = 0, frameRows = 0, frameN = 0
 
     private func hashBuf(_ words: Int) -> UInt64 {
-        fnv1a(UnsafeBufferPointer(start: buf, count: words))
+        fingerprint(UnsafeRawBufferPointer(start: buf, count: words * MemoryLayout<UInt32>.stride))
     }
 
     /// The last layout's sub-grids, hashed: a pane on one leaves only blank
@@ -834,8 +837,9 @@ final class CellView: NSView {
             Self.growCells(&subBuf, &subBufCells, cells)
             let n = Int(tk_desktop_sub_grid_layout(handle, surf, Int64(k),
                 Int64(Int(bitPattern: subBuf)), Int64(cells)))
-            h = (h &* 0x100000001b3) ^ fnv1a(info)
-                ^ fnv1a(UnsafeBufferPointer(start: subBuf, count: n * CELL_WORDS))
+            h = (h &* 0x100000001b3) ^ info.withUnsafeBytes { fingerprint($0) }
+                ^ fingerprint(UnsafeRawBufferPointer(
+                    start: subBuf, count: n * CELL_WORDS * MemoryLayout<UInt32>.stride))
         }
         return h
     }
@@ -3478,7 +3482,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             if n < menuBuf.count { break }
             menuBuf = [UInt8](repeating: 0, count: menuBuf.count * 2)
         }
-        let hash = fnv1a(menuBuf[0..<n])
+        let hash = menuBuf.withUnsafeBytes { fingerprint(UnsafeRawBufferPointer(rebasing: $0[0..<n])) }
         if hash == lastMenuHash { return false }
         lastMenuHash = hash
         let text = String(bytes: menuBuf[0..<n], encoding: .utf8) ?? ""
