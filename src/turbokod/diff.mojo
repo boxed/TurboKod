@@ -404,6 +404,15 @@ def diff_row_partner(rows: List[DiffRow]) -> List[Int]:
             var used_rem = List[Bool]()
             for _ in range(len(rem_idx)):
                 used_rem.append(False)
+            # Score every pair once; the greedy picks below only read the
+            # table (each score is a character-level diff of two lines).
+            var n_add = len(add_idx)
+            var sims = List[Float64](capacity=len(rem_idx) * n_add)
+            for ri in range(len(rem_idx)):
+                for ai in range(n_add):
+                    sims.append(_line_similarity(
+                        rows[rem_idx[ri]].text, rows[add_idx[ai]].text
+                    ))
             for _ in range(n_pairs):
                 var best = -1.0
                 var best_r = -1
@@ -411,12 +420,10 @@ def diff_row_partner(rows: List[DiffRow]) -> List[Int]:
                 for ri in range(len(rem_idx)):
                     if used_rem[ri]:
                         continue
-                    for ai in range(len(add_idx)):
+                    for ai in range(n_add):
                         if used_add[ai]:
                             continue
-                        var sim = _line_similarity(
-                            rows[rem_idx[ri]].text, rows[add_idx[ai]].text
-                        )
+                        var sim = sims[ri * n_add + ai]
                         if sim > best:
                             best = sim
                             best_r = ri
@@ -442,10 +449,17 @@ def diff_row_emphasis(rows: List[DiffRow]) -> List[List[Tuple[Int, Int]]]:
     against its matched added row (see ``diff_row_partner``), so a modified
     line shows exactly which characters changed — even when comments or other
     lines were inserted between the old and new version. Parallel to ``rows``."""
+    return diff_row_emphasis_for(rows, diff_row_partner(rows))
+
+
+def diff_row_emphasis_for(
+    rows: List[DiffRow], partner: List[Int],
+) -> List[List[Tuple[Int, Int]]]:
+    """``diff_row_emphasis`` for a caller that already has the rows'
+    ``diff_row_partner`` (pairing is the expensive half)."""
     var out = List[List[Tuple[Int, Int]]]()
     for _ in range(len(rows)):
         out.append(List[Tuple[Int, Int]]())
-    var partner = diff_row_partner(rows)
     for r in range(len(rows)):
         if rows[r].kind != DIFF_ROW_REMOVED:
             continue

@@ -63,7 +63,8 @@ from .config import (
     record_recent_project, save_config_merged, try_read_config,
 )
 from .diff import (
-    DIFF_ROW_REMOVED, build_diff_rows, diff_row_emphasis, diff_row_partner,
+    DIFF_ROW_REMOVED, build_diff_rows, diff_row_emphasis_for,
+    diff_row_partner,
     unified_diff,
 )
 from .file_io import (
@@ -4799,8 +4800,8 @@ struct Desktop(Movable):
         var dhl = diff_row_highlights(
             drows, before_lines, after_lines, abs, self.grammar_registry,
         )
-        var emph = diff_row_emphasis(drows)
         var partner = diff_row_partner(drows)
+        var emph = diff_row_emphasis_for(drows, partner)
         for _ in range(n_after + 1):
             ph_buckets.append(List[Int]())
         for _ in range(n_after):
