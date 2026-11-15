@@ -57,7 +57,9 @@ fi
 if [ ! -f "$swiftbin" ] || [ app/swift/TurboKod.swift -nt "$swiftbin" ] \
    || [ app/swift/turbokod.h -nt "$swiftbin" ] || [ "$dylib" -nt "$swiftbin" ]; then
   echo "[run_swift] building Swift binary -> $swiftbin" >&2
-  if ! swiftc app/swift/TurboKod.swift \
+  # -O: the host hashes and draws whole frames of cells; unoptimized, its
+  # generic and bounds-checked loops are several times slower.
+  if ! swiftc -O app/swift/TurboKod.swift \
       -import-objc-header app/swift/turbokod.h \
       -L .build -lturbokod \
       -framework AppKit -framework CoreText -framework CoreGraphics -framework Foundation \
