@@ -286,12 +286,14 @@ def json_get_int(obj: JsonValue, key: String, default: Int) -> Int:
     return default
 
 
-def json_get_string(obj: JsonValue, key: String) -> String:
-    """Return the string at ``key`` or ``""`` if missing / wrong type."""
+def json_get_string(
+    obj: JsonValue, key: String, default: String = String(""),
+) -> String:
+    """Return the string at ``key`` or ``default`` if missing / wrong type."""
     var i = obj.object_index(key)
     if i >= 0 and obj.obj_v[i].value.is_string():
         return obj.obj_v[i].value.as_str()
-    return String("")
+    return default
 
 
 def json_get_string_array(obj: JsonValue, key: String) -> List[String]:

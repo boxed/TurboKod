@@ -25,7 +25,7 @@ from std.collections.optional import Optional
 from std.ffi import external_call
 
 from .json import (
-    encode_json, json_array, json_bool, json_float, json_get_int,
+    encode_json, json_array, json_bool, json_float, json_get_bool, json_get_int,
     json_get_string, json_int, json_null, json_object, json_str, JsonValue,
     parse_json,
 )
@@ -38,7 +38,7 @@ from .lsp_shared import (
 )
 from .lsp import (
     LSP_NOTIFICATION, LSP_REQUEST, LSP_RESPONSE, LspClient, LspIncoming,
-    LspProcess, lsp_initialize_params,
+    LspProcess, json_rpc_id, lsp_initialize_params,
 )
 from .posix import (
     debug_log_path, getcwd_path, getenv_value, monotonic_ms, realpath, sleep_ms,
@@ -1620,9 +1620,7 @@ struct LspManager(Copyable, Movable):
         var uri = String("")
         var td = params.object_get(String("textDocument"))
         if td and td.value().is_object():
-            var u = td.value().object_get(String("uri"))
-            if u and u.value().is_string():
-                uri = u.value().as_str()
+            uri = json_get_string(td.value(), String("uri"), uri)
         var wire = self._to_wire(params.copy())
         var id: String
         if self._channel != 0:
@@ -1860,7 +1858,7 @@ struct LspManager(Copyable, Movable):
                     break
                 var inc = maybe.take()
                 if inc.kind == LSP_RESPONSE and inc.id \
-                        and _id_to_string(inc.id.value()) \
+                        and json_rpc_id(inc.id.value()) \
                             == self._close_shutdown_id:
                     acked = True
                     break
@@ -4198,7 +4196,7 @@ struct LspManager(Copyable, Movable):
                 continue
             if not msg.id:
                 continue
-            var id = _id_to_string(msg.id.value())
+            var id = json_rpc_id(msg.id.value())
             if len(id.as_bytes()) == 0:
                 continue
             if self.state == _STATE_INITIALIZING and id == self._init_id:
@@ -4298,9 +4296,9 @@ struct LspManager(Copyable, Movable):
                 var r_detail = String("")
                 if msg.result and msg.result.value().is_object():
                     r_aux = _parse_additional_text_edits(msg.result.value())
-                    var d_opt = msg.result.value().object_get(String("detail"))
-                    if d_opt and d_opt.value().is_string():
-                        r_detail = d_opt.value().as_str()
+                    r_detail = json_get_string(
+                        msg.result.value(), String("detail"), r_detail,
+                    )
                 _lsp_debug_log(
                     String("← resolve response id=") + id
                     + String(" lang=") + self._language_id
@@ -5079,7 +5077,7 @@ struct LspManager(Copyable, Movable):
         # ``_id_to_string`` is purely for logging — the response itself
         # carries the original JsonValue id verbatim so JSON-RPC pairing
         # works regardless of integer-vs-string typing.
-        var id_label = _id_to_string(id)
+        var id_label = json_rpc_id(id)
         var method = msg.method.value()
         try:
             if method == String("workspace/configuration"):
@@ -5107,9 +5105,7 @@ struct LspManager(Copyable, Movable):
                         var item = items_arr.array_at(i)
                         var section = String("")
                         if item.is_object():
-                            var sec = item.object_get(String("section"))
-                            if sec and sec.value().is_string():
-                                section = sec.value().as_str()
+                            section = json_get_string(item, String("section"), section)
                         if section == String("esbonio"):
                             var cfg_opt = self._esbonio_config()
                             if cfg_opt:
@@ -5228,9 +5224,7 @@ struct LspManager(Copyable, Movable):
                 var ractions = List[String]()
                 if msg.params and msg.params.value().is_object():
                     var p = msg.params.value().copy()
-                    var m_opt = p.object_get(String("message"))
-                    if m_opt and m_opt.value().is_string():
-                        rmsg = m_opt.value().as_str()
+                    rmsg = json_get_string(p, String("message"), rmsg)
                     var a_opt = p.object_get(String("actions"))
                     if a_opt and a_opt.value().is_array():
                         var arr = a_opt.value().copy()
@@ -5286,12 +5280,8 @@ struct LspManager(Copyable, Movable):
                 var sel_char = 0
                 if msg.params and msg.params.value().is_object():
                     var p = msg.params.value().copy()
-                    var u_opt = p.object_get(String("uri"))
-                    if u_opt and u_opt.value().is_string():
-                        uri = u_opt.value().as_str()
-                    var ext_opt = p.object_get(String("external"))
-                    if ext_opt and ext_opt.value().is_bool():
-                        external = ext_opt.value().as_bool()
+                    uri = json_get_string(p, String("uri"), uri)
+                    external = json_get_bool(p, String("external"), external)
                     var sel_opt = p.object_get(String("selection"))
                     if sel_opt and sel_opt.value().is_object():
                         var pos = _start_pos_of(sel_opt.value())
@@ -5684,25 +5674,6 @@ def _capability_key_for_method(method: String) -> String:
     return String("")
 
 
-def _id_to_string(v: JsonValue) -> String:
-    """Canonicalize a JSON-RPC id (``integer | string``) to a String so
-    callers can compare against ``_inflight_*_id`` (always String).
-
-    Our own outgoing requests already stringify their ids in
-    ``LspClient.send_request``, so any response paired with a request
-    we issued comes back as a string the server echoed verbatim. But a
-    server free to interpret-and-rewrite would still be spec-compliant
-    re-emitting the same digits as a JSON integer — so we accept both
-    shapes. Returns ``""`` for ids of any other JSON type (null,
-    object, array — none are legal, but better to skip than crash).
-    """
-    if v.is_string():
-        return v.as_str()
-    if v.is_int():
-        return String(v.as_int())
-    return String("")
-
-
 def _parse_prepare_rename_placeholder(v: JsonValue) -> String:
     """Extract the placeholder from a ``prepareRename`` object result. The
     response may be a bare ``Range`` (no placeholder — return empty so the
@@ -6025,13 +5996,9 @@ def _parse_completion_items(arr: JsonValue, mut out: List[CompletionItem]):
                         re_char = r.value()[3]
                         has_range = True
             if not got_te:
-                var it_opt = entry.object_get(String("insertText"))
-                if it_opt and it_opt.value().is_string():
-                    insert_text = it_opt.value().as_str()
+                insert_text = json_get_string(entry, String("insertText"), insert_text)
         var sort_text = label
-        var sort_opt = entry.object_get(String("sortText"))
-        if sort_opt and sort_opt.value().is_string():
-            sort_text = sort_opt.value().as_str()
+        sort_text = json_get_string(entry, String("sortText"), sort_text)
         # ``additionalTextEdits``: array of TextEdits applied alongside
         # the primary edit (typically the auto-import line). Often empty
         # on the initial list and only filled in by ``completionItem/
@@ -6125,9 +6092,7 @@ def _code_action_command_of(
             args = Optional[JsonValue](a.value().copy())
     elif c_opt and c_opt.value().is_object():
         var inner = c_opt.value().copy()
-        var c2 = inner.object_get(String("command"))
-        if c2 and c2.value().is_string():
-            cmd = c2.value().as_str()
+        cmd = json_get_string(inner, String("command"), cmd)
         var a2 = inner.object_get(String("arguments"))
         if a2 and a2.value().is_array():
             args = Optional[JsonValue](a2.value().copy())
@@ -6168,9 +6133,7 @@ def _parse_code_action_result(v: JsonValue) -> List[CodeAction]:
         var title = title_opt.value().as_str()
         var kind_str = json_get_string(entry, String("kind"))
         var is_preferred = False
-        var pref_opt = entry.object_get(String("isPreferred"))
-        if pref_opt and pref_opt.value().is_bool():
-            is_preferred = pref_opt.value().as_bool()
+        is_preferred = json_get_bool(entry, String("isPreferred"), is_preferred)
         var file_edits = List[CodeActionFileEdit]()
         var edit_opt = entry.object_get(String("edit"))
         var has_inline_edit = False
@@ -6985,9 +6948,7 @@ def _parse_signature_help(v: JsonValue) -> String:
     var label = label_opt.value().as_str()
     # Resolve the active parameter's string label if present.
     var ap = json_get_int(v, String("activeParameter"), -1)
-    var sap_opt = sig.object_get(String("activeParameter"))
-    if sap_opt and sap_opt.value().is_int():
-        ap = sap_opt.value().as_int()
+    ap = json_get_int(sig, String("activeParameter"), ap)
     var params_opt = sig.object_get(String("parameters"))
     if ap >= 0 and params_opt and params_opt.value().is_array():
         var params = params_opt.value().copy()

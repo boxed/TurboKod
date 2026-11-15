@@ -1160,3 +1160,20 @@ def _trace_preview(msg: String) -> String:
     return utf8_prefix(msg, 400) + String("…")
 
 
+def json_rpc_id(v: JsonValue) -> String:
+    """Canonicalize a JSON-RPC id (``integer | string``) to a String so
+    callers can compare against ``_inflight_*_id`` (always String).
+
+    Our own outgoing requests already stringify their ids in
+    ``LspClient.send_request``, so any response paired with a request
+    we issued comes back as a string the server echoed verbatim. But a
+    server free to interpret-and-rewrite would still be spec-compliant
+    re-emitting the same digits as a JSON integer — so we accept both
+    shapes. Returns ``""`` for ids of any other JSON type (null,
+    object, array — none are legal, but better to skip than crash).
+    """
+    if v.is_string():
+        return v.as_str()
+    if v.is_int():
+        return String(v.as_int())
+    return String("")

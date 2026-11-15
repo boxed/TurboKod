@@ -42,9 +42,12 @@ from std.ffi import external_call
 from std.sys import size_of
 
 from .file_io import basename
-from .json import JsonValue, json_array, json_object, json_str
+from .json import (
+    JsonValue, json_array, json_get_string, json_object, json_str,
+)
 from .lsp import (
     LSP_NOTIFICATION, LSP_REQUEST, LSP_RESPONSE, LspClient, LspIncoming,
+    json_rpc_id,
 )
 
 
@@ -56,23 +59,6 @@ comptime _PUMP_MAX = 256
 # next edit, and a reply that old has long been given up on.
 comptime _INBOX_MAX = 4096
 comptime _STDERR_CAP = 16 * 1024
-
-
-def _json_id_string(v: JsonValue) -> String:
-    if v.is_string():
-        return v.as_str()
-    if v.is_int():
-        return String(v.as_int())
-    return String("")
-
-
-def _str_at(v: JsonValue, key: String) -> String:
-    if not v.is_object():
-        return String("")
-    var x = v.object_get(key)
-    if x and x.value().is_string():
-        return x.value().as_str()
-    return String("")
 
 
 def _uri_under(uri: String, root: String) -> Bool:
@@ -90,12 +76,12 @@ def _first_uri_of(method: String, params: JsonValue) -> String:
     window that owns that document. ``""`` when it names none."""
     if method == String("textDocument/publishDiagnostics") \
             or method == String("window/showDocument"):
-        return _str_at(params, String("uri"))
+        return json_get_string(params, String("uri"))
     if method == String("workspace/configuration"):
         var items = params.object_get(String("items")) \
             if params.is_object() else Optional[JsonValue]()
         if items and items.value().is_array() and items.value().array_len() > 0:
-            return _str_at(items.value().array_at(0), String("scopeUri"))
+            return json_get_string(items.value().array_at(0), String("scopeUri"))
         return String("")
     if method == String("workspace/applyEdit"):
         var edit = params.object_get(String("edit")) \
@@ -110,7 +96,7 @@ def _first_uri_of(method: String, params: JsonValue) -> String:
         if dcs and dcs.value().is_array() and dcs.value().array_len() > 0:
             var td = dcs.value().array_at(0).object_get(String("textDocument"))
             if td:
-                return _str_at(td.value(), String("uri"))
+                return json_get_string(td.value(), String("uri"))
     return String("")
 
 
@@ -325,7 +311,7 @@ struct LspChannel(Movable):
                 return
             self._initialized_sent = True
         elif method == String("textDocument/didOpen"):
-            var uri = _str_at(
+            var uri = json_get_string(
                 params.object_get(String("textDocument")).value(), String("uri"),
             ) if params.is_object() and params.object_has(
                 String("textDocument"),
@@ -338,7 +324,7 @@ struct LspChannel(Movable):
             self._open_counts.append(1)
             self._open_owner.append(sid)
         elif method == String("textDocument/didClose"):
-            var uri = _str_at(
+            var uri = json_get_string(
                 params.object_get(String("textDocument")).value(), String("uri"),
             ) if params.is_object() and params.object_has(
                 String("textDocument"),
@@ -413,7 +399,7 @@ struct LspChannel(Movable):
         if msg.kind == LSP_RESPONSE:
             if not msg.id:
                 return
-            var id = _json_id_string(msg.id.value())
+            var id = json_rpc_id(msg.id.value())
             if id == self._init_id and not self.init_result:
                 # Kept even if the session that asked has since left: the
                 # sessions waiting to join need it either way.
@@ -448,7 +434,7 @@ struct LspChannel(Movable):
                 # Needs exactly one answer: the window it names, else the
                 # one the user is working in.
                 var named = self._session_named_in(
-                    _str_at(params, String("message")),
+                    json_get_string(params, String("message")),
                 )
                 self._deliver(
                     named if named >= 0 else self._active_session(), msg^, False,
@@ -459,7 +445,7 @@ struct LspChannel(Movable):
         if method == String("window/showMessage"):
             # A pop-up: to the window whose project it names, else to every
             # window on this server — a duplicate beats a missed error.
-            var named = self._session_named_in(_str_at(params, String("message")))
+            var named = self._session_named_in(json_get_string(params, String("message")))
             if named >= 0:
                 self._deliver(named, msg^, False)
                 return

@@ -32,7 +32,7 @@ from .debugger_config import (
     DebuggerSpec, launch_arguments_for,
 )
 from .json import (
-    json_array, json_bool, json_get_int, json_get_string, json_int,
+    json_array, json_bool, json_get_bool, json_get_int, json_get_string, json_int,
     json_object, json_str, JsonValue,
 )
 from std.ffi import external_call
@@ -1483,9 +1483,9 @@ struct DapManager(Copyable, Movable):
         children → nothing to offer)."""
         var var_ref = 0
         if msg.ok() and msg.body and msg.body.value().is_object():
-            var r = msg.body.value().object_get(String("variablesReference"))
-            if r and r.value().is_int():
-                var_ref = r.value().as_int()
+            var_ref = json_get_int(
+                msg.body.value(), String("variablesReference"), var_ref,
+            )
         if var_ref <= 0:
             self._finish_keys(List[String]())
             return
@@ -2305,15 +2305,16 @@ struct DapManager(Copyable, Movable):
         # Park capabilities. Only the few we actually use.
         if msg.body and msg.body.value().is_object():
             var b = msg.body.value().copy()
-            var cd = b.object_get(String("supportsConfigurationDoneRequest"))
-            if cd and cd.value().is_bool():
-                self._supports_configuration_done = cd.value().as_bool()
-            var tr = b.object_get(String("supportsTerminateRequest"))
-            if tr and tr.value().is_bool():
-                self._supports_terminate_request = tr.value().as_bool()
-            var cp = b.object_get(String("supportsCompletionsRequest"))
-            if cp and cp.value().is_bool():
-                self._supports_completions = cp.value().as_bool()
+            self._supports_configuration_done = json_get_bool(
+                b, String("supportsConfigurationDoneRequest"),
+                self._supports_configuration_done,
+            )
+            self._supports_terminate_request = json_get_bool(
+                b, String("supportsTerminateRequest"), self._supports_terminate_request,
+            )
+            self._supports_completions = json_get_bool(
+                b, String("supportsCompletionsRequest"), self._supports_completions,
+            )
         # Now send launch / attach.
         var cmd: String
         if self._launch_request_kind == DAP_REQUEST_ATTACH:
@@ -2456,12 +2457,8 @@ struct DapManager(Copyable, Movable):
                 value = String("<error>")
         elif msg.body and msg.body.value().is_object():
             var b = msg.body.value().copy()
-            var r = b.object_get(String("result"))
-            if r and r.value().is_string():
-                value = r.value().as_str()
-            var t = b.object_get(String("type"))
-            if t and t.value().is_string():
-                type_name = t.value().as_str()
+            value = json_get_string(b, String("result"), value)
+            type_name = json_get_string(b, String("type"), type_name)
         self._evaluations_expr.append(expr^)
         self._evaluations_value.append(value^)
         self._evaluations_type.append(type_name^)
@@ -2620,9 +2617,7 @@ struct DapManager(Copyable, Movable):
                 value = String("evaluation failed")
         elif msg.body and msg.body.value().is_object():
             var b = msg.body.value().copy()
-            var r = b.object_get(String("result"))
-            if r and r.value().is_string():
-                value = r.value().as_str()
+            value = json_get_string(b, String("result"), value)
         self._test_eval_expr.append(expr^)
         self._test_eval_value.append(value^)
         self._test_eval_error.append(is_error)
@@ -2714,15 +2709,9 @@ struct DapManager(Copyable, Movable):
         var all = False
         if msg.body and msg.body.value().is_object():
             var b = msg.body.value().copy()
-            var t = b.object_get(String("threadId"))
-            if t and t.value().is_int():
-                tid = t.value().as_int()
-            var r = b.object_get(String("reason"))
-            if r and r.value().is_string():
-                reason = r.value().as_str()
-            var d = b.object_get(String("description"))
-            if d and d.value().is_string():
-                description = d.value().as_str()
+            tid = json_get_int(b, String("threadId"), tid)
+            reason = json_get_string(b, String("reason"), reason)
+            description = json_get_string(b, String("description"), description)
             var a = b.object_get(String("allThreadsStopped"))
             if a and a.value().is_bool():
                 all = a.value().as_bool()
@@ -2759,12 +2748,8 @@ struct DapManager(Copyable, Movable):
         var b = msg.body.value().copy()
         var category = String("console")
         var text = String("")
-        var c = b.object_get(String("category"))
-        if c and c.value().is_string():
-            category = c.value().as_str()
-        var o = b.object_get(String("output"))
-        if o and o.value().is_string():
-            text = o.value().as_str()
+        category = json_get_string(b, String("category"), category)
+        text = json_get_string(b, String("output"), text)
         if len(text.as_bytes()) == 0:
             return
         # Sniff for the runtime-condition-exception marker. We still
@@ -2802,9 +2787,7 @@ struct DapManager(Copyable, Movable):
             return
         var co = c.value().copy()
         var host = String("127.0.0.1")
-        var hv = co.object_get(String("host"))
-        if hv and hv.value().is_string():
-            host = hv.value().as_str()
+        host = json_get_string(co, String("host"), host)
         var port = json_get_int(co, String("port"), 0)
         if port <= 0:
             self.client.process.trace(String(
@@ -2813,9 +2796,7 @@ struct DapManager(Copyable, Movable):
             return
         var spi = json_get_int(b, String("subProcessId"), -1)
         var name = String("Subprocess")
-        var nv = b.object_get(String("name"))
-        if nv and nv.value().is_string():
-            name = nv.value().as_str()
+        name = json_get_string(b, String("name"), name)
         # Bail if a subprocess session is already in flight — current
         # design is single-slot. (When we extend to multi-fork targets,
         # swap this for an append.)
@@ -3017,9 +2998,7 @@ def _parse_stack_trace(body_opt: Optional[JsonValue]) -> List[DapStackFrame]:
         var src_opt = f.object_get(String("source"))
         if src_opt and src_opt.value().is_object():
             var s = src_opt.value().copy()
-            var p = s.object_get(String("path"))
-            if p and p.value().is_string():
-                path = p.value().as_str()
+            path = json_get_string(s, String("path"), path)
             # ``source.presentationHint = deemphasize`` is how lldb-dap /
             # delve mark third-party / stdlib sources. Frame-level
             # ``presentationHint`` (next block) is how debugpy marks them.
@@ -3089,21 +3068,13 @@ def _parse_completions(body_opt: Optional[JsonValue]) -> List[DapCompletion]:
             continue
         var label = label_opt.value().as_str()
         var text = label
-        var text_opt = t.object_get(String("text"))
-        if text_opt and text_opt.value().is_string():
-            text = text_opt.value().as_str()
+        text = json_get_string(t, String("text"), text)
         var type_name = String("")
-        var type_opt = t.object_get(String("type"))
-        if type_opt and type_opt.value().is_string():
-            type_name = type_opt.value().as_str()
+        type_name = json_get_string(t, String("type"), type_name)
         var start = -1
-        var start_opt = t.object_get(String("start"))
-        if start_opt and start_opt.value().is_int():
-            start = start_opt.value().as_int()
+        start = json_get_int(t, String("start"), start)
         var length = 0
-        var len_opt = t.object_get(String("length"))
-        if len_opt and len_opt.value().is_int():
-            length = len_opt.value().as_int()
+        length = json_get_int(t, String("length"), length)
         out.append(DapCompletion(label^, text^, type_name^, start, length))
     return out^
 

@@ -30,8 +30,8 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .json import (
-    JsonValue, encode_json, json_bool, json_int, json_object, json_str,
-    parse_json,
+    JsonValue, encode_json, json_bool, json_get_int, json_get_string,
+    json_int, json_object, json_str, parse_json,
 )
 from .lsp import LspProcess
 
@@ -165,12 +165,8 @@ def classify_dap_message(v: JsonValue) -> DapIncoming:
     var arguments_opt = Optional[JsonValue]()
     var type_str = String("")
     if v.is_object():
-        var maybe_seq = v.object_get(String("seq"))
-        if maybe_seq and maybe_seq.value().is_int():
-            seq = maybe_seq.value().as_int()
-        var maybe_type = v.object_get(String("type"))
-        if maybe_type and maybe_type.value().is_string():
-            type_str = maybe_type.value().as_str()
+        seq = json_get_int(v, String("seq"), seq)
+        type_str = json_get_string(v, String("type"), type_str)
         var maybe_cmd = v.object_get(String("command"))
         if maybe_cmd and maybe_cmd.value().is_string():
             command_opt = Optional[String](maybe_cmd.value().as_str())
