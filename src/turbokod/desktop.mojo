@@ -1688,7 +1688,8 @@ struct Desktop(Movable):
     # of (stack, locals, watches) changes.
     var _dap_stack_cache: List[DapStackFrame]
     var _dap_watch_exprs: List[String]
-    var _dap_watch_values: List[String]   # parallel to exprs (last result)
+    var _dap_watch_values: List[String]   # parallel to exprs (last result);
+                                          # only ever grown / shrunk together
     # Cached locals from the most recent scope load. The condition-error
     # dialog grabs this so the user gets a glimpse of the frame state
     # while editing the bad condition. Falls back to an empty list when
@@ -13264,11 +13265,9 @@ struct Desktop(Movable):
         pane stays consistent."""
         var watch_lines = List[String]()
         for k in range(len(self._dap_watch_exprs)):
-            var v = String("")
-            if k < len(self._dap_watch_values):
-                v = self._dap_watch_values[k]
             watch_lines.append(
-                self._dap_watch_exprs[k] + String(" = ") + v,
+                self._dap_watch_exprs[k] + String(" = ")
+                + self._dap_watch_values[k],
             )
         var stack_copy = self._dap_stack_cache.copy()
         # Highlight the frame the user is currently inspecting (top of
@@ -13343,10 +13342,7 @@ struct Desktop(Movable):
                 continue
             for k in range(len(self._dap_watch_exprs)):
                 if self._dap_watch_exprs[k] == e:
-                    if k < len(self._dap_watch_values):
-                        self._dap_watch_values[k] = batch.values[i]
-                    else:
-                        self._dap_watch_values.append(batch.values[i])
+                    self._dap_watch_values[k] = batch.values[i]
                     break
             # LSP inline values: a matching pending expression becomes an
             # "expr = value" annotation on the stopped file's editor.
@@ -13361,18 +13357,8 @@ struct Desktop(Movable):
                             e + String(" = ") + batch.values[i],
                         )
                     break
-        # Pane rebuild needs current locals — we don't have them cached
-        # so reuse the existing pane row set by extracting locals from
-        # it. Simpler: only rebuild watches' display, which is part of
-        # the inspect rows. The cleanest path is to ask for a fresh
-        # variables dump on the current frame; cheap because the
-        # adapter usually serves these from cache. Skipping that here:
-        # when the pane is next rebuilt (next stop, next frame click),
-        # the new watch values will be picked up.
-        # We can also force an immediate refresh by reusing the last
-        # stack with empty locals — but that flickers. The compromise
-        # below: just rebuild rows with watch-only update by writing
-        # straight into the row text for ``PANE_ROW_WATCH`` rows.
+        # Patch the watch rows' text in place: a full rebuild would
+        # collapse any expanded variable rows.
         self._patch_pane_watches()
 
     def _patch_pane_watches(mut self):
@@ -13384,11 +13370,9 @@ struct Desktop(Movable):
         while i < len(self.debug_pane.rows) \
                 and k < len(self._dap_watch_exprs):
             if self.debug_pane.rows[i].kind == PANE_ROW_WATCH:
-                var v = String("")
-                if k < len(self._dap_watch_values):
-                    v = self._dap_watch_values[k]
                 var row = self.debug_pane.rows[i]
-                row.text = self._dap_watch_exprs[k] + String(" = ") + v
+                row.text = self._dap_watch_exprs[k] + String(" = ") \
+                    + self._dap_watch_values[k]
                 self.debug_pane.rows[i] = row
                 k += 1
             i += 1
@@ -13419,16 +13403,8 @@ struct Desktop(Movable):
         value may itself contain ``=``)."""
         if index < 0 or index >= len(self._dap_watch_exprs):
             return
-        var new_exprs = List[String]()
-        var new_values = List[String]()
-        for k in range(len(self._dap_watch_exprs)):
-            if k == index:
-                continue
-            new_exprs.append(self._dap_watch_exprs[k])
-            if k < len(self._dap_watch_values):
-                new_values.append(self._dap_watch_values[k])
-        self._dap_watch_exprs = new_exprs^
-        self._dap_watch_values = new_values^
+        _ = self._dap_watch_exprs.pop(index)
+        _ = self._dap_watch_values.pop(index)
         self._rebuild_pane_inspect(self._dap_locals_cache.copy())
 
     def _refresh_dap_status(mut self):
