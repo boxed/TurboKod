@@ -2476,6 +2476,33 @@ def test_local_changes_untracked_file_shows_its_whole_contents() raises:
     _rm_rf(dir)
 
 
+def test_local_changes_fetches_only_the_selected_files_diff() raises:
+    """The files list holds the diff of the row that's shown and no
+    other, and a staged rename still reads as a rename: its diff is
+    limited to both of its paths, not just the new one."""
+    var dir = _temp_path(String("_lazy_diff"))
+    if not _init_repo_with_commit(dir):
+        return
+    _ = _run_git(dir, string_list(String("mv"), String("f.txt"), String("a.txt")))
+    assert_true(write_file(join_path(dir, String("z.txt")), String("new\n")))
+    var lc = LocalChanges()
+    lc.open(dir)
+    assert_equal(len(lc.files), 2)
+    assert_equal(lc.files[0].path, String("a.txt"))
+    assert_false(lc.files[0].diffs_loaded)
+    var registry = GrammarRegistry()
+    var screen = Rect(0, 0, 120, 40)
+    var canvas = Canvas(screen.width(), screen.height())
+    lc.paint(canvas, screen, registry)
+    assert_true(lc.files[0].diffs_loaded)
+    assert_true(String("rename from f.txt") in lc.files[0].staged_diff)
+    assert_false(String("new file mode") in lc.files[0].staged_diff)
+    assert_false(lc.files[1].diffs_loaded)
+    assert_equal(len(lc.files[1].unstaged_diff.as_bytes()), 0)
+    lc.close()
+    _rm_rf(dir)
+
+
 def test_local_changes_untracked_empty_file_has_no_body_rows() raises:
     """A zero-byte untracked file has no content to differ, so git emits
     the ``new file mode`` header and stops — no ``---``/``+++`` pair, no

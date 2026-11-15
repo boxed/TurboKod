@@ -322,17 +322,18 @@ comptime _LINE_SEPARATOR: Int = 7
 struct FileEntry(ImplicitlyCopyable, Movable):
     """One row of the Files panel. ``staged`` and ``worktree`` carry the
     porcelain X/Y status bytes (``' '`` for "no change in this column").
-    ``staged_diff`` / ``unstaged_diff`` are the per-file slices of the
-    whole-tree ``git diff --cached`` and ``git diff`` outputs — empty
-    when this file has no change in that column. Untracked files (XY ==
-    ``"??"``) carry empty diffs because git doesn't surface them through
-    ``git diff``; staging them with Space turns them into ``A `` rows
-    with a real staged diff on the next refresh."""
+    ``staged_diff`` / ``unstaged_diff`` are this file's ``git diff
+    --cached`` and ``git diff`` — empty when it has no change in that
+    column, and empty until the row is first selected
+    (``diffs_loaded``; see ``LocalChanges._ensure_file_diffs``).
+    ``orig_path`` is a staged rename's source."""
     var path: String
     var staged: UInt8
     var worktree: UInt8
+    var orig_path: String
     var staged_diff: String
     var unstaged_diff: String
+    var diffs_loaded: Bool
 
     def is_untracked(self) -> Bool:
         """Porcelain ``??`` — a file git doesn't track yet."""
@@ -1511,6 +1512,24 @@ def _hint(
     return GitHint(keys^, label^, key, mods, button)
 
 
+
+def _file_chunk(diff: String, path: String) -> String:
+    """One file's chunk of a ``git diff`` limited to that file, in the
+    shape ``build_minimal_patch`` and the panel renderer take. A lone
+    chunk is ours even when its header path doesn't compare equal — git
+    C-quotes a path containing spaces, and the quoted form is what
+    ``git apply`` wants back anyway."""
+    if len(diff.as_bytes()) == 0:
+        return String("")
+    var chunks = parse_unified_diff_files(diff)
+    if len(chunks) == 1:
+        return chunks[0].diff
+    for i in range(len(chunks)):
+        if chunks[i].path == path:
+            return chunks[i].diff
+    return String("")
+
+
 struct LocalChanges(Movable):
     var active: Bool
     var submitted: Bool
@@ -1902,10 +1921,14 @@ struct LocalChanges(Movable):
                 String("No git data (empty repo or git unavailable).")
 
     def _reload_files(mut self):
-        """Re-fetch ``git status`` plus the staged + unstaged whole-tree
-        diffs and rebuild ``self.files``. Called from ``open`` and after
-        every staging mutation. Keeps ``status_message`` populated when
-        git failed outright; otherwise leaves it empty."""
+        """Re-fetch ``git status`` and rebuild ``self.files``. Called
+        from ``open`` and after every staging mutation. The diffs aren't
+        fetched here: only the selected file's are ever shown, so
+        ``_ensure_file_diffs`` gets them when a row is selected, and a
+        tree with hundreds of dirty files neither holds every diff nor
+        re-runs two whole-tree diffs per Space press. Keeps
+        ``status_message`` populated when git failed outright; otherwise
+        leaves it empty."""
         self.files = List[FileEntry]()
         var statuses = fetch_git_status(self.root)
         # Fingerprint git's raw output order BEFORE the tree sort:
@@ -1914,29 +1937,12 @@ struct LocalChanges(Movable):
         # tick would look like an external change and refresh forever.
         self._poll_status_fp = LocalChanges._status_fingerprint(statuses)
         _sort_statuses_tree_order(statuses)
-        var staged_text = compute_staged_diff(self.root)
-        var unstaged_text = compute_unstaged_diff(self.root)
-        var staged_files = List[ChangedFile]()
-        var unstaged_files = List[ChangedFile]()
-        if len(staged_text.as_bytes()) > 0:
-            staged_files = parse_unified_diff_files(staged_text)
-        if len(unstaged_text.as_bytes()) > 0:
-            unstaged_files = parse_unified_diff_files(unstaged_text)
         for si in range(len(statuses)):
-            var st = statuses[si]
-            var sd = String("")
-            var ud = String("")
-            for k in range(len(staged_files)):
-                if staged_files[k].path == st.path:
-                    sd = staged_files[k].diff
-                    break
-            for k in range(len(unstaged_files)):
-                if unstaged_files[k].path == st.path:
-                    ud = unstaged_files[k].diff
-                    break
-            self.files.append(
-                FileEntry(st.path, st.staged, st.worktree, sd^, ud^),
-            )
+            ref st = statuses[si]
+            self.files.append(FileEntry(
+                st.path, st.staged, st.worktree, st.orig_path,
+                String(""), String(""), False,
+            ))
         self._rebuild_file_rows()
         # The poll baseline fingerprint was re-seeded above (pre-sort),
         # so a reload we initiated never re-triggers the poll.
@@ -2635,68 +2641,58 @@ struct LocalChanges(Movable):
             else:
                 _emit_info(self.info, String("  ") + lines[i])
 
-    def _ensure_untracked_diff(mut self):
-        """Fill in ``unstaged_diff`` for the focused file when it's
-        untracked, so the changes panel shows the whole file as additions
-        instead of just a "not tracked yet" note.
+    def _ensure_file_diffs(mut self):
+        """Fetch the focused file's staged and unstaged diffs, once.
 
-        Neither whole-tree fetch in ``_reload_files`` can see an
-        untracked file (``git diff`` walks the index), so the diff has to
-        come from a per-file ``git diff --no-index`` against
-        ``/dev/null``. That's one git spawn, which is why it happens here
-        — lazily, for the selected row only — rather than in
-        ``_reload_files``, where a tree with hundreds of untracked files
-        would pay hundreds of spawns on every staging mutation.
+        Runs lazily, for the selected row only: one ``git diff`` per
+        changed column, limited to the file. An untracked file is
+        invisible to any ``git diff`` that walks the index, so its diff
+        comes from ``git diff --no-index`` against ``/dev/null`` — the
+        whole file as additions.
 
-        The result is cached back onto the ``FileEntry`` so the
-        line-level staging and discard paths (which read
-        ``fe.unstaged_diff``) work on untracked files too, and so a
-        repaint doesn't respawn git. ``_reload_files`` rebuilds
+        The result is cached on the ``FileEntry`` so the line-level
+        staging and discard paths (which read ``fe.unstaged_diff``) and
+        a repaint don't respawn git. ``_reload_files`` rebuilds
         ``self.files`` from scratch, which drops the cache exactly when
         the file's contents may have changed.
 
-        Stays a no-op for a tracked file, for a file whose diff is
-        already known, and when git returns nothing (an unreadable file,
-        say — ``fetch_git_status`` expands untracked directories with
-        ``-uall``, so a collapsed ``dir/`` row no longer occurs). In
-        that last case the
-        probe re-runs on the next panel rebuild, which is bounded by the
-        hint row ``_build_files_right_panels`` always emits: the panel is
-        never empty, so ``_ensure_right_panels`` won't rebuild until the
-        selection actually moves."""
+        When git returns nothing for an untracked file (an unreadable
+        one, say) the probe re-runs on the next panel rebuild, which is
+        bounded by the hint row ``_build_files_right_panels`` always
+        emits: the panel is never empty, so ``_ensure_right_panels``
+        won't rebuild until the selection actually moves."""
         if self.sel_file < 0 or self.sel_file >= len(self.files):
             return
+        if self.files[self.sel_file].diffs_loaded:
+            return
         var fe = self.files[self.sel_file]
-        if Int(fe.staged) != 0x3F or Int(fe.worktree) != 0x3F:
-            return
-        if len(fe.unstaged_diff.as_bytes()) > 0:
-            return
-        var text = compute_untracked_diff(self.root, fe.path)
-        if len(text.as_bytes()) == 0:
-            return
-        # Normalize through the same splitter the tracked diffs go
-        # through, so the stored text is a single-file chunk with the
-        # path resolved the same way. We asked about one path, so a
-        # lone chunk is ours even when its header path doesn't compare
-        # equal — git C-quotes a path containing spaces, and the quoted
-        # form is what ``git apply`` wants back anyway.
-        var chunks = parse_unified_diff_files(text)
-        if len(chunks) == 1:
-            self.files[self.sel_file].unstaged_diff = chunks[0].diff
-            return
-        for i in range(len(chunks)):
-            if chunks[i].path == fe.path:
-                self.files[self.sel_file].unstaged_diff = chunks[i].diff
+        if fe.is_untracked():
+            var text = compute_untracked_diff(self.root, fe.path)
+            if len(text.as_bytes()) == 0:
                 return
+            self.files[self.sel_file].unstaged_diff = \
+                _file_chunk(text, fe.path)
+            self.files[self.sel_file].diffs_loaded = True
+            return
+        if Int(fe.staged) != 0x20:
+            self.files[self.sel_file].staged_diff = _file_chunk(
+                compute_staged_diff(self.root, fe.path, fe.orig_path),
+                fe.path,
+            )
+        if Int(fe.worktree) != 0x20:
+            self.files[self.sel_file].unstaged_diff = _file_chunk(
+                compute_unstaged_diff(self.root, fe.path, fe.orig_path),
+                fe.path,
+            )
+        self.files[self.sel_file].diffs_loaded = True
 
     def _build_files_right_panels(
         mut self, mut registry: GrammarRegistry,
     ):
         """Populate the unstaged + staged panels from the focused file's
-        diffs. Untracked files (XY == ``"??"``) have no diff in either
-        whole-tree fetch, so ``_ensure_untracked_diff`` synthesizes one
-        showing the whole file as additions; a hint row above it says
-        the file isn't tracked yet.
+        diffs (``_ensure_file_diffs``). An untracked file's is the whole
+        file as additions; a hint row above it says the file isn't
+        tracked yet.
 
         For syntax highlighting we hand ``_populate_diff_panel`` the
         full *after* text of each side: the worktree file for the
@@ -2705,7 +2701,7 @@ struct LocalChanges(Movable):
         full file rather than just the diff body lets the tokenizer
         see scope context that ends or starts outside the visible
         hunks (block comments, triple-quoted strings, …)."""
-        self._ensure_untracked_diff()
+        self._ensure_file_diffs()
         var fe = self.files[self.sel_file]
         # Banner width is a hint only — the painter clips long banners
         # at the panel edge, so a generous fixed width keeps the dashes
@@ -4524,6 +4520,7 @@ struct LocalChanges(Movable):
             return
         if self.sel_file < 0 or self.sel_file >= len(self.files):
             return
+        self._ensure_file_diffs()
         var fe = self.files[self.sel_file]
         var source_diff: String
         if reverse:
@@ -4859,6 +4856,7 @@ struct LocalChanges(Movable):
         if self.sel_file < 0 or self.sel_file >= len(self.files):
             self._close_overlay()
             return
+        self._ensure_file_diffs()
         var path = self.files[self.sel_file].path
         var patch = build_minimal_patch(
             self.files[self.sel_file].unstaged_diff, diff_idx, True,
@@ -6555,6 +6553,7 @@ struct LocalChanges(Movable):
         staged."""
         if not (0 <= self.sel_file and self.sel_file < len(self.files)):
             return
+        self._ensure_file_diffs()
         self.selected_path = self.files[self.sel_file].path
         var diff = self.files[self.sel_file].unstaged_diff
         if len(diff.as_bytes()) == 0:

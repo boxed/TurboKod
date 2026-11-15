@@ -890,15 +890,34 @@ def compute_local_changes(project_root: String) raises -> String:
     return result.stdout
 
 
-def compute_staged_diff(project_root: String) -> String:
-    """``git diff --cached --no-color`` — the index versus HEAD. Empty
-    string on failure (no commits, not a repo, git missing)."""
+def _append_diff_paths(
+    mut args: List[String], rel_path: String, orig_path: String,
+):
+    """Limit a ``git diff`` to one file. A rename's source path goes in
+    too, so git still pairs the two sides instead of reporting the
+    destination as a brand new file."""
+    if len(rel_path.as_bytes()) == 0:
+        return
+    args.append(String("--"))
+    args.append(rel_path)
+    if len(orig_path.as_bytes()) > 0:
+        args.append(orig_path)
+
+
+def compute_staged_diff(
+    project_root: String, rel_path: String = String(""),
+    orig_path: String = String(""),
+) -> String:
+    """``git diff --cached --no-color`` — the index versus HEAD, for the
+    whole tree or just ``rel_path``. Empty string on failure (no commits,
+    not a repo, git missing)."""
     if len(project_root.as_bytes()) == 0:
         return String("")
     var args = List[String]()
     args.append(String("diff"))
     args.append(String("--cached"))
     args.append(String("--no-color"))
+    _append_diff_paths(args, rel_path, orig_path)
     return _git_stdout(project_root, args^)
 
 
@@ -938,13 +957,18 @@ def checkout_branch(project_root: String, branch: String) -> Bool:
     return _git_ok(project_root, args^)
 
 
-def compute_unstaged_diff(project_root: String) -> String:
-    """``git diff --no-color`` — worktree versus index. Empty on failure."""
+def compute_unstaged_diff(
+    project_root: String, rel_path: String = String(""),
+    orig_path: String = String(""),
+) -> String:
+    """``git diff --no-color`` — worktree versus index, for the whole
+    tree or just ``rel_path``. Empty on failure."""
     if len(project_root.as_bytes()) == 0:
         return String("")
     var args = List[String]()
     args.append(String("diff"))
     args.append(String("--no-color"))
+    _append_diff_paths(args, rel_path, orig_path)
     return _git_stdout(project_root, args^)
 
 
