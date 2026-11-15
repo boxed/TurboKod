@@ -469,10 +469,45 @@ struct RightPanel(Movable):
     var file_path: List[String]
     var file_line: List[Int]
     var highlights: List[Highlight]
+    # ``index_highlights``: ``highlights`` ordered by row, and where each
+    # row's run starts in it (one entry per line plus an end sentinel),
+    # so a paint reads just its visible rows' highlights.
+    var hl_row_start: List[Int]
+    var hl_indexed: Int
     var links: List[PanelLink]
     var scroll: Int
     var scroll_x: Int
     var cursor: Int
+
+    def index_highlights(mut self):
+        """Order ``highlights`` by row (keeping each row's own order,
+        since a later span paints over an earlier one) and record where
+        each row's run starts. A no-op while nothing was added since the
+        last call."""
+        var n = len(self.lines)
+        if self.hl_indexed == len(self.highlights) \
+                and len(self.hl_row_start) == n + 1:
+            return
+        var starts = List[Int](length=n + 1, fill=0)
+        for h in range(len(self.highlights)):
+            var r = self.highlights[h].row
+            if 0 <= r and r < n:
+                starts[r + 1] += 1
+        for r in range(n):
+            starts[r + 1] += starts[r]
+        var kept = starts[n]
+        var ordered = List[Highlight](
+            length=kept, fill=Highlight(0, 0, 0, Attr(SYN_IDENT, EDITOR_BG)),
+        )
+        var next = starts.copy()
+        for h in range(len(self.highlights)):
+            var r = self.highlights[h].row
+            if 0 <= r and r < n:
+                ordered[next[r]] = self.highlights[h]
+                next[r] += 1
+        self.highlights = ordered^
+        self.hl_row_start = starts^
+        self.hl_indexed = kept
 
     def jump_target(self, li: Int) -> Tuple[String, Int]:
         """The ``(path, line)`` row ``li`` maps to, or ``("", 0)`` —
@@ -488,6 +523,8 @@ struct RightPanel(Movable):
         self.file_path = List[String]()
         self.file_line = List[Int]()
         self.highlights = List[Highlight]()
+        self.hl_row_start = List[Int]()
+        self.hl_indexed = -1
         self.links = List[PanelLink]()
         self.scroll = 0
         self.scroll_x = 0
@@ -2849,6 +2886,9 @@ struct LocalChanges(Movable):
         self._ensure_right_panels(
             registry, bounds, defer_while_moving=True,
         )
+        self.unstaged.index_highlights()
+        self.staged.index_highlights()
+        self.info.index_highlights()
         self._paint_right_side(
             canvas, bounds,
             section_attr, splitter_attr,
@@ -3767,19 +3807,10 @@ struct LocalChanges(Movable):
         painter.fill(canvas, area, String(" "), body_bg)
         var pane_focused = (self.focus == pane)
         var height = area.height()
-        # Bucket highlights by visible-row offset once, instead of
-        # rescanning the whole ``panel.highlights`` list for every body
-        # row. ``hl_buckets[i]`` holds the indices into ``panel.highlights``
-        # whose ``row`` lands on visible offset ``i`` (absolute line
-        # ``panel.scroll + i``); empty buckets let the row loop skip the
-        # per-row ``utf8_byte_to_cell`` allocation entirely.
-        var hl_buckets = List[List[Int]]()
-        for _i in range(height):
-            hl_buckets.append(List[Int]())
-        for h in range(len(panel.highlights)):
-            var bo = panel.highlights[h].row - panel.scroll
-            if 0 <= bo and bo < height:
-                hl_buckets[bo].append(h)
+        # ``index_highlights`` (run by ``paint`` once the panels are
+        # built) ordered the highlights by row, so each body row reads
+        # its own run instead of the paint scanning the whole list.
+        var hl_ready = len(panel.hl_row_start) == len(panel.lines) + 1
         # Gutter occupies a single column at the panel's left edge for
         # diff body rows; banners / blanks / info rows render with no
         # gutter and start at the panel edge.
@@ -3906,7 +3937,9 @@ struct LocalChanges(Movable):
             # tokenization, ``+`` and context rows pull from the
             # after-file — the populate step already routed them to
             # the right side via ``display_to_*_row``.
-            if has_gutter and len(hl_buckets[i]) > 0:
+            var hl_lo = panel.hl_row_start[idx] if hl_ready else 0
+            var hl_hi = panel.hl_row_start[idx + 1] if hl_ready else 0
+            if has_gutter and hl_hi > hl_lo:
                 # ``byte_to_cell`` is over the whole line, so highlight
                 # bytes stay absolute and the cells scrolled off the left
                 # are subtracted afterwards — converting a scroll-relative
@@ -3916,8 +3949,8 @@ struct LocalChanges(Movable):
                 var byte_count = len(bytes)
                 var cell_count = utf8_codepoint_count(line)
                 var skipped = _cells_skipped(line, panel.scroll_x)
-                for bi in range(len(hl_buckets[i])):
-                    var hl = panel.highlights[hl_buckets[i][bi]]
+                for hi in range(hl_lo, hl_hi):
+                    var hl = panel.highlights[hi]
                     var hl_byte_lo = hl.col_start
                     var hl_byte_hi = hl.col_end
                     if hl_byte_lo < panel.scroll_x:
