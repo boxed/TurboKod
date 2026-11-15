@@ -1,80 +1,53 @@
-"""ProjectFind: fullscreen, debounced full-text project search.
+"""ProjectFind: debounced full-text project search (Find / Replace in
+Project).
 
-Three stacked panels:
+The search state behind the picker: query, replace text, path scope,
+filename glob and the case / word / regex toggles, the streaming match
+list, and the selected match's file for the preview. Every projector
+draws it from ``Desktop.picker_ui``; edits come back through
+``set_field`` / ``set_option`` / ``select`` / ``submit``.
 
-* a top input row (the query string),
-* a middle list of matches — each row is the matching line with the hit
-  span highlighted, and the relative path + line number right-aligned,
-* a bottom context panel showing ±N source lines around the focused
-  match.
-
-Search runs through ``find_in_project`` after a 200 ms debounce so
-typing doesn't thrash the filesystem; the host calls ``tick(now_ms)``
-every frame and ``ProjectFind`` decides when the debounce has elapsed.
-The widget reads files lazily for the context panel and caches the most
-recently opened one — typical navigation stays inside the same file.
+Search runs a streaming ``rg`` after a 300 ms debounce so typing doesn't
+thrash the filesystem; the host calls ``tick(now_ms)`` every frame and
+``ProjectFind`` decides when the debounce has elapsed. The preview file
+is read lazily and cached — typical navigation stays inside one file.
 """
 
 from std.collections.list import List
 from std.collections.optional import Optional
 
-from .buttons import (
-    BUTTON_FIRED, OptionToggle, paint_option_toggle,
-)
+from .buttons import OptionToggle
 from .canvas import Canvas, RunCells
 from .painter import Painter
 from .cell import Cell
-from .colors import (
-    Attr, BLACK, BORDER_FOCUS, CYAN, EDITOR_BG, EDITOR_FG, LIGHT_GRAY, RED,
-    WHITE, YELLOW,
-)
-from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_ENTER, KEY_ESC, KEY_TAB,
-    MOD_META, MOD_SHIFT, MOUSE_BUTTON_LEFT,
-)
+from .colors import Attr
 from .file_io import join_path, project_relative, read_file, stat_file
 from .geometry import Point, Rect
-from .scrollbar import ScrollBarArea
 from .highlight import (
     GrammarRegistry, Highlight, HighlightCache, extension_of,
     highlight_for_extension_cached,
 )
-from .picker_input import picker_nav_key, picker_wheel_scroll
 from .posix import monotonic_ms
 from .lsp import capture_command
 from .project import ProjectMatch
-from .clipboard import clipboard_chord, CLIP_COPY
 from .query_memory import QueryMemory
 from .search_options import SearchOptions
 from .string_utils import (
     byte_slice, char_width, codepoint_at, display_columns, parse_uint_range,
     is_ascii_ident_byte, prev_codepoint_start, split_lines, TAB_WIDTH,
 )
-from .text_field import TextField, TextFieldKeyResult
-from .text_select import PaneTextSelect
-from .window import close_button_clicked, paint_close_button, paint_window_title
+from .text_field import TextField
 from .case_fold import find_exact
 from .line_stream import LineStream
 
 
 comptime _DEBOUNCE_MS: Int = 300
-comptime _CONTEXT_LINES: Int = 5     # lines on each side of the match
 # Hard caps on per-line work. Minified JS / CSS bundles routinely have a
 # single multi-MB line — without these the TextMate tokenizer would burn
 # whole seconds on it per paint frame, pegging the UI thread at 100% CPU
 # while ESC and keystrokes wait their turn behind paint.
 comptime _MATCH_TEXT_CAP: Int = 1024     # truncate rg's matched-line text
 comptime _ROW_HIGHLIGHT_CAP: Int = 2048  # skip syntax overlay above this
-# Per-paint-frame wall-clock budget for *newly* tokenizing match rows.
-# Cached rows (see ``_row_hl_cache``) are free and always painted; only
-# cache-miss tokenizations are gated. Once a frame has spent this long
-# tokenizing fresh rows, the remaining misses render as plain text and
-# get picked up on a later frame. This bounds the worst-case paint cost
-# when a result set lands on a minified bundle (highcharts.js et al.),
-# where a single ~1 KB line can cost tens of ms to walk with the JS/TS
-# grammar — without it, a screenful of such rows froze arrow navigation.
-comptime _ROW_HL_BUDGET_MS: Int = 20
 comptime _CTX_LINE_CAP: Int = 4096       # skip context tokenize above this
 comptime _CTX_FILE_CAP: Int = 4 * 1024 * 1024   # 4 MB total ctx file
 # Hard cap on the result list. A query like ``a`` over a large tree can
@@ -83,16 +56,6 @@ comptime _CTX_FILE_CAP: Int = 4 * 1024 * 1024   # 4 MB total ctx file
 # We accept one extra match as the "there's more" sentinel — when the
 # (cap + 1)th lands we drop it, mark the result truncated, and kill rg.
 comptime _MAX_MATCHES: Int = 1000
-
-# Keyboard-focus targets, cycled by Tab. The dialog has three editable
-# strips stacked under the title: the query, the path scope, and the
-# filename glob.
-comptime _FOCUS_QUERY: Int = 0
-comptime _FOCUS_SCOPE: Int = 1
-comptime _FOCUS_GLOB: Int = 2
-# Replace-mode only: the replacement-text strip, slotted between the
-# query and the scope/glob fields in the Tab cycle.
-comptime _FOCUS_REPLACE: Int = 3
 
 
 struct ProjectFind(Movable):
@@ -121,13 +84,6 @@ struct ProjectFind(Movable):
     # Empty == every file. Edited via Tab like the scope field; a change
     # kicks off a fresh debounced search.
     var glob: TextField
-    # Which editable strip has keyboard focus (_FOCUS_QUERY/SCOPE/GLOB).
-    var focus: Int
-    # Cached input strip rects for mouse routing.
-    var _input_rect: Rect
-    var _replace_rect: Rect   # replace-mode only; empty otherwise
-    var _scope_rect: Rect
-    var _glob_rect: Rect
     var _last_searched_query: String   # what we last ran a search for
     var _last_searched_scope: String   # scope path at last search
     var _last_searched_glob: String    # filename glob at last search
@@ -135,8 +91,6 @@ struct ProjectFind(Movable):
     var _query_dirty_at_ms: Int        # 0 when no debounce pending
     var matches: List[ProjectMatch]
     var selected: Int
-    var scroll: Int
-    var _bar: ScrollBarArea
     # Output, set when the user hits Enter.
     var selected_path: String
     var selected_line: Int
@@ -154,17 +108,6 @@ struct ProjectFind(Movable):
     var _context_path: String
     var _context_lines: List[String]
     var _context_highlights: List[Highlight]
-    # Per-match syntax-highlight cache for the result list, kept aligned
-    # 1:1 with ``matches`` (grown lazily in ``paint``). A match's row
-    # highlights depend only on its line text + extension, both immutable
-    # once parsed, so tokenizing once and reusing across paint frames
-    # turns arrow-key navigation over a result set from per-frame
-    # re-tokenization into a free lookup. ``_row_hl_cached[i]`` flags
-    # whether entry ``i`` has been computed (an empty highlight list is a
-    # valid result, so we can't use length as the sentinel). Both reset
-    # whenever ``matches`` is replaced wholesale.
-    var _row_hl_cache: List[List[Highlight]]
-    var _row_hl_cached: List[Bool]
     # Streaming ripgrep runner. Holds the spawned child for the in-flight
     # search (if any); a fresh keystroke after the debounce kills the old
     # one and starts a new one, so a query that turns out to be too broad
@@ -188,14 +131,6 @@ struct ProjectFind(Movable):
     # dialog. Mutually exclusive with ``send_to_panel`` (that's find-mode
     # only).
     var do_replace: Bool
-    # Cached rect of the title-bar ``[ Panel ]`` button for mouse routing
-    # (empty when no results, so the button isn't painted or clickable).
-    # In replace mode this slot paints ``[ Replace All ]`` instead and the
-    # rect feeds ``do_replace``.
-    var _panel_btn_rect: Rect
-    # Mouse-drag text selection over the bottom context panel — lets the
-    # user highlight and Cmd+C source lines straight out of the preview.
-    var ctxsel: PaneTextSelect
     # The last query per project root, for an open that can't resume
     # (another project's state is up): ``close`` stores it.
     var _queries: QueryMemory
@@ -210,11 +145,6 @@ struct ProjectFind(Movable):
         self.replace = TextField()
         self.scope = TextField()
         self.glob = TextField()
-        self.focus = _FOCUS_QUERY
-        self._input_rect = Rect(0, 0, 0, 0)
-        self._replace_rect = Rect(0, 0, 0, 0)
-        self._scope_rect = Rect(0, 0, 0, 0)
-        self._glob_rect = Rect(0, 0, 0, 0)
         self._last_searched_query = String("")
         self._last_searched_scope = String("")
         self._last_searched_glob = String("")
@@ -222,8 +152,6 @@ struct ProjectFind(Movable):
         self._query_dirty_at_ms = 0
         self.matches = List[ProjectMatch]()
         self.selected = 0
-        self.scroll = 0
-        self._bar = ScrollBarArea()
         self.selected_path = String("")
         self.selected_line = 0
         self.toggle_case = OptionToggle(
@@ -238,14 +166,10 @@ struct ProjectFind(Movable):
         self._context_path = String("")
         self._context_lines = List[String]()
         self._context_highlights = List[Highlight]()
-        self._row_hl_cache = List[List[Highlight]]()
-        self._row_hl_cached = List[Bool]()
         self._runner = _RgRunner()
         self._truncated = False
         self.send_to_panel = False
         self.do_replace = False
-        self._panel_btn_rect = Rect(0, 0, 0, 0)
-        self.ctxsel = PaneTextSelect()
 
     def open_replace(
         mut self,
@@ -297,11 +221,7 @@ struct ProjectFind(Movable):
         if not has_prefill and same_root and have_saved:
             self.root = root^
             self.query.select_all()
-            self.focus = _FOCUS_QUERY
             self._query_dirty_at_ms = 0
-            self.toggle_case.hovered = False
-            self.toggle_word.hovered = False
-            self.toggle_regex.hovered = False
             self.active = True
             self.submitted = False
             self.send_to_panel = False
@@ -328,11 +248,6 @@ struct ProjectFind(Movable):
         # query field.
         self.scope = TextField()
         self.glob = TextField()
-        self.focus = _FOCUS_QUERY
-        self._input_rect = Rect(0, 0, 0, 0)
-        self._replace_rect = Rect(0, 0, 0, 0)
-        self._scope_rect = Rect(0, 0, 0, 0)
-        self._glob_rect = Rect(0, 0, 0, 0)
         self._last_searched_query = String("")
         self._last_searched_scope = String("")
         self._last_searched_glob = String("")
@@ -341,16 +256,11 @@ struct ProjectFind(Movable):
         self._query_dirty_at_ms = 1 if has_prefill else 0
         self.matches = List[ProjectMatch]()
         self.selected = 0
-        self.scroll = 0
         self.selected_path = String("")
         self.selected_line = 0
         # Toggle state persists across opens — leave ``toggle_*.on``
         # untouched so the user keeps the flags they had on for the
-        # previous Find-in-Project. Hover state is a paint-frame
-        # artifact, drop it to avoid stale tooltips.
-        self.toggle_case.hovered = False
-        self.toggle_word.hovered = False
-        self.toggle_regex.hovered = False
+        # previous Find-in-Project.
         self._context_path = String("")
         self._context_lines = List[String]()
         self._context_highlights = List[Highlight]()
@@ -374,12 +284,6 @@ struct ProjectFind(Movable):
         # Any pending debounce belongs to the just-closed session;
         # the next open decides whether to fire a fresh search.
         self._query_dirty_at_ms = 0
-        # Hover state is a paint-frame artifact — drop it so reopening
-        # doesn't paint a stale tooltip.
-        self.toggle_case.hovered = False
-        self.toggle_word.hovered = False
-        self.toggle_regex.hovered = False
-        self.ctxsel.clear()
         # The previewed file (up to 4 MB of lines plus its highlights) is
         # re-read on the next open; the matches are what resuming needs.
         self._context_path = String("")
@@ -454,18 +358,9 @@ struct ProjectFind(Movable):
         if self._runner.is_active():
             self._runner.cancel()
             self.matches = List[ProjectMatch]()
-            self._reset_row_hl_cache()
             self.selected = 0
-            self.scroll = 0
         self._truncated = False
         self._query_dirty_at_ms = 1
-
-    def _reset_row_hl_cache(mut self):
-        """Drop the per-match row-highlight cache. Called whenever
-        ``matches`` is replaced wholesale, since the index→line mapping
-        the cache is keyed on no longer holds."""
-        self._row_hl_cache = List[List[Highlight]]()
-        self._row_hl_cached = List[Bool]()
 
     def _mark_query_dirty(mut self, now_ms: Int):
         # Reset the debounce on every keystroke. ``now_ms == 0`` (clock
@@ -481,9 +376,7 @@ struct ProjectFind(Movable):
         if self._runner.is_active():
             self._runner.cancel()
             self.matches = List[ProjectMatch]()
-            self._reset_row_hl_cache()
             self.selected = 0
-            self.scroll = 0
             self._truncated = False
 
     def _run_search(mut self):
@@ -493,9 +386,7 @@ struct ProjectFind(Movable):
         var opts = self._current_options()
         self._last_searched_opts = opts
         self.matches = List[ProjectMatch]()
-        self._reset_row_hl_cache()
         self.selected = 0
-        self.scroll = 0
         self._truncated = False
         # Cancel any previous in-flight rg before spawning a new one.
         self._runner.cancel()
@@ -512,14 +403,10 @@ struct ProjectFind(Movable):
         )
 
     def _refresh_context_for_selection(mut self):
-        """Reload + retokenize the context panel for the current
-        selection. The retokenize defers to ``paint`` (which has the
-        shared ``GrammarRegistry``) by leaving ``_context_highlights``
-        empty here; the panel falls back to plain text until the next
-        paint frame fills it in via ``_ensure_context_highlights``."""
-        # The previewed lines are about to change — drop any drag selection
-        # so it can't linger over unrelated text.
-        self.ctxsel.clear()
+        """Reload the preview file for the current selection. The
+        retokenize defers to ``preview_window`` (which has the shared
+        ``GrammarRegistry``) by leaving ``_context_highlights`` empty
+        here, via ``_ensure_context_highlights``."""
         if self.selected < 0 or self.selected >= len(self.matches):
             self._context_path = String("")
             self._context_lines = List[String]()
@@ -573,514 +460,6 @@ struct ProjectFind(Movable):
             self._context_lines,
             registry, ctx_cache,
         )
-
-    # --- geometry ---------------------------------------------------------
-
-    def _ro(self) -> Int:
-        """Replace-row offset: replace mode inserts a ``Replace:`` strip
-        under the query, pushing the Path / Glob / separator / list down
-        by one row. 0 in find mode."""
-        return 1 if self.replace_mode else 0
-
-    def _input_y(self, container_bounds: Rect) -> Int:
-        return container_bounds.a.y + 1
-
-    def _replace_y(self, container_bounds: Rect) -> Int:
-        # Only meaningful (and painted) in replace mode — directly under
-        # the query strip.
-        return container_bounds.a.y + 2
-
-    def _path_y(self, container_bounds: Rect) -> Int:
-        return container_bounds.a.y + 2 + self._ro()
-
-    def _glob_y(self, container_bounds: Rect) -> Int:
-        return container_bounds.a.y + 3 + self._ro()
-
-    def _list_top(self, container_bounds: Rect) -> Int:
-        return container_bounds.a.y + 5 + self._ro()
-
-    def _context_height(self, container_bounds: Rect) -> Int:
-        # 1 separator + ``2 * _CONTEXT_LINES + 1`` content rows.
-        return 2 * _CONTEXT_LINES + 2
-
-    def _list_bottom(self, container_bounds: Rect) -> Int:
-        return container_bounds.b.y - 1 - self._context_height(container_bounds)
-
-    def _list_height(self, container_bounds: Rect) -> Int:
-        var h = self._list_bottom(container_bounds) - self._list_top(container_bounds)
-        if h < 0:
-            return 0
-        return h
-
-    def is_input_at(self, pos: Point, container_bounds: Rect) -> Bool:
-        """True iff ``pos`` lies on the ``Search:`` query row, the
-        ``Path:`` scope row, or the ``Glob:`` filter row (all editable
-        text strips)."""
-        if not self.active:
-            return False
-        var qy = self._input_y(container_bounds)
-        var py = self._path_y(container_bounds)
-        var gy = self._glob_y(container_bounds)
-        var left = container_bounds.a.x + 1
-        var right = container_bounds.b.x - 1
-        var on_input = Rect(left, qy, right, qy + 1).contains(pos) \
-            or Rect(left, py, right, py + 1).contains(pos) \
-            or Rect(left, gy, right, gy + 1).contains(pos)
-        if self.replace_mode:
-            var ry = self._replace_y(container_bounds)
-            on_input = on_input or Rect(left, ry, right, ry + 1).contains(pos)
-        return on_input
-
-    # --- paint ------------------------------------------------------------
-
-    def paint(mut self, mut canvas: Canvas, container_bounds: Rect,
-             mut registry: GrammarRegistry):
-        if not self.active:
-            return
-        var bg          = Attr(YELLOW, EDITOR_BG)
-        var border      = Attr(BORDER_FOCUS, EDITOR_BG)
-        var title_attr  = Attr(BORDER_FOCUS, EDITOR_BG)
-        var label_attr  = Attr(BORDER_FOCUS, EDITOR_BG)
-        var line_attr   = Attr(YELLOW, EDITOR_BG)
-        var sel_line    = Attr(BLACK,  YELLOW)
-        var hl_attr     = Attr(WHITE,  RED)            # match highlight
-        var sel_hl_attr = Attr(WHITE,  RED)            # same when row selected
-        var path_attr   = Attr(EDITOR_FG, EDITOR_BG)
-        var sel_path    = Attr(BLACK,  YELLOW)
-        var ctx_attr    = Attr(EDITOR_FG, EDITOR_BG)
-        var ctx_match   = Attr(YELLOW, EDITOR_BG)
-        var hint_attr   = Attr(BLACK,  LIGHT_GRAY)
-        var sep_attr    = Attr(BORDER_FOCUS, EDITOR_BG)
-        # Bind every write to the dialog rect so an over-long match
-        # path or context line can't leak onto the modal's border or
-        # outside ``container_bounds`` entirely.
-        var painter = Painter(container_bounds)
-        painter.fill(canvas, container_bounds, String(" "), bg)
-        painter.draw_box(canvas, container_bounds, border, True)
-        # Title — framework helper enforces title bg = body bg.
-        var title_text = String(" Replace in Project ") if self.replace_mode \
-            else String(" Find in Project ")
-        paint_window_title(
-            canvas, container_bounds, title_text, title_attr, bg,
-        )
-        # Standard ``[■]`` close button at the top-LEFT — equivalent to
-        # ESC / cancel. Same chrome the editor windows and other dialogs
-        # use, painted via the shared ``paint_close_button`` helper.
-        paint_close_button(canvas, Point(container_bounds.a.x, container_bounds.a.y), border)
-        # Title-bar action button. In find mode it's ``[ Panel ]`` (docks
-        # the current result set into the persistent Find Results pane;
-        # Cmd+Enter does the same). In replace mode the same slot is
-        # ``[ Replace All ]`` (Cmd+Enter does the same). Only painted once
-        # there are hits — empty otherwise so the mouse router treats it as
-        # absent.
-        self._panel_btn_rect = Rect(0, 0, 0, 0)
-        if len(self.matches) > 0:
-            var btn_label = String(" [ Replace All ] ") if self.replace_mode \
-                else String(" [ Panel ] ")
-            var btn_w = display_columns(btn_label)
-            var btn_x = container_bounds.b.x - btn_w - 1
-            if btn_x > container_bounds.a.x + 6:
-                _ = painter.put_text(
-                    canvas, Point(btn_x, container_bounds.a.y), btn_label,
-                    Attr(BLACK, CYAN),
-                )
-                self._panel_btn_rect = Rect(
-                    btn_x, container_bounds.a.y,
-                    btn_x + btn_w, container_bounds.a.y + 1,
-                )
-        # Input row: ``Search: <query>_   Cc  W  .*``.
-        var input_y = self._input_y(container_bounds)
-        var label = String(" Search: ")
-        _ = painter.put_text(
-            canvas, Point(container_bounds.a.x + 1, input_y), label, label_attr,
-        )
-        var qx = container_bounds.a.x + 1 + display_columns(label)
-        # Reserve room on the right edge of the input row for the
-        # three search-mode toggles. Lay them out right-aligned with
-        # one cell of gap between each chip — same idiom the Find
-        # prompt uses so the two surfaces feel related.
-        var gap = 1
-        var toggles_w = self.toggle_case.width() \
-            + gap + self.toggle_word.width() \
-            + gap + self.toggle_regex.width()
-        var toggles_right = container_bounds.b.x - 1
-        var tx = toggles_right - toggles_w
-        if tx < qx + 4:
-            # Pathologically narrow window — give the input what little
-            # room is left and shove the toggles right up against the
-            # border.
-            tx = qx + 4
-        self.toggle_case.move_to(tx, input_y)
-        tx += self.toggle_case.width() + gap
-        self.toggle_word.move_to(tx, input_y)
-        tx += self.toggle_word.width() + gap
-        self.toggle_regex.move_to(tx, input_y)
-        var qw_max = self.toggle_case.x - 1 - qx
-        if qw_max < 0:
-            qw_max = 0
-        var input_rect = Rect(qx, input_y, qx + qw_max, input_y + 1)
-        self._input_rect = input_rect
-        self.query.paint(canvas, input_rect, self.focus == _FOCUS_QUERY)
-        # Toggle chips. Off uses a darker on-blue paint so an inactive
-        # chip blends with the dialog body; on inverts to the standard
-        # yellow selection background.
-        var toggle_off = Attr(EDITOR_FG, EDITOR_BG)
-        var toggle_on  = Attr(BLACK, YELLOW)
-        paint_option_toggle(
-            canvas, self.toggle_case, toggle_off, toggle_on, container_bounds.b.x - 1,
-        )
-        paint_option_toggle(
-            canvas, self.toggle_word, toggle_off, toggle_on, container_bounds.b.x - 1,
-        )
-        paint_option_toggle(
-            canvas, self.toggle_regex, toggle_off, toggle_on, container_bounds.b.x - 1,
-        )
-        # Replace row (replace mode only): ``Replace: <text>`` directly under
-        # the query, label width matched to ``Search:`` so the field's left
-        # edge lines up with the others. No toggles ride on it — the search
-        # flags live on the query row.
-        self._replace_rect = Rect(0, 0, 0, 0)
-        if self.replace_mode:
-            var rep_y = self._replace_y(container_bounds)
-            var rep_label = String(" Replace:")
-            _ = painter.put_text(
-                canvas, Point(container_bounds.a.x + 1, rep_y), rep_label, label_attr,
-            )
-            var rx = container_bounds.a.x + 1 + display_columns(rep_label)
-            var rw_max = container_bounds.b.x - 1 - rx
-            if rw_max < 0:
-                rw_max = 0
-            var rep_rect = Rect(rx, rep_y, rx + rw_max, rep_y + 1)
-            self._replace_rect = rep_rect
-            self.replace.paint(canvas, rep_rect, self.focus == _FOCUS_REPLACE)
-        # Path-scope row: ``Path: <relative path>`` — restricts the search
-        # to a subdirectory (or file). Empty means the whole project. The
-        # label is padded to the width of ``Search:`` so the two fields'
-        # left edges line up.
-        var path_y = self._path_y(container_bounds)
-        var path_label = String(" Path:   ")
-        _ = painter.put_text(
-            canvas, Point(container_bounds.a.x + 1, path_y), path_label, label_attr,
-        )
-        var px = container_bounds.a.x + 1 + display_columns(path_label)
-        var pw_max = container_bounds.b.x - 1 - px
-        if pw_max < 0:
-            pw_max = 0
-        var scope_rect = Rect(px, path_y, px + pw_max, path_y + 1)
-        self._scope_rect = scope_rect
-        self.scope.paint(canvas, scope_rect, self.focus == _FOCUS_SCOPE)
-        # When the scope is empty, overlay a dim placeholder so the field
-        # reads as "(whole project)" rather than looking like a blank
-        # required input. Skipped while focused — the caret should sit on
-        # a clean field once the user starts editing.
-        if len(self.scope.text.as_bytes()) == 0 and self.focus != _FOCUS_SCOPE:
-            # Clip to the field rect (not the dialog painter, which would
-            # reach the right border column) so a long placeholder can't
-            # overpaint the frame on a narrow window.
-            var scope_painter = Painter(scope_rect)
-            _ = scope_painter.put_text(
-                canvas, Point(px, path_y),
-                String("(whole project)"), Attr(LIGHT_GRAY, CYAN),
-            )
-        # Glob-filter row: ``Glob: <patterns>`` — restricts the search to
-        # files whose path matches one of these rg globs (comma-separated).
-        # Empty means every file. Label padded to ``Search:`` width so all
-        # three fields' left edges line up.
-        var glob_y = self._glob_y(container_bounds)
-        var glob_label = String(" Glob:   ")
-        _ = painter.put_text(
-            canvas, Point(container_bounds.a.x + 1, glob_y), glob_label, label_attr,
-        )
-        var gx = container_bounds.a.x + 1 + display_columns(glob_label)
-        var gw_max = container_bounds.b.x - 1 - gx
-        if gw_max < 0:
-            gw_max = 0
-        var glob_rect = Rect(gx, glob_y, gx + gw_max, glob_y + 1)
-        self._glob_rect = glob_rect
-        self.glob.paint(canvas, glob_rect, self.focus == _FOCUS_GLOB)
-        if len(self.glob.text.as_bytes()) == 0 and self.focus != _FOCUS_GLOB:
-            var glob_painter = Painter(glob_rect)
-            _ = glob_painter.put_text(
-                canvas, Point(gx, glob_y),
-                String("(all files, e.g. *.mojo)"), Attr(LIGHT_GRAY, CYAN),
-            )
-        # Separator under the inputs. When a toggle is hovered the
-        # separator gives way to the chip's tooltip text so the user
-        # learns what each abbreviation means without leaving the
-        # search flow.
-        var sep1_y = glob_y + 1
-        var hovered_tooltip = String("")
-        if self.toggle_case.hovered:
-            hovered_tooltip = self.toggle_case.tooltip
-        elif self.toggle_word.hovered:
-            hovered_tooltip = self.toggle_word.tooltip
-        elif self.toggle_regex.hovered:
-            hovered_tooltip = self.toggle_regex.tooltip
-        if len(hovered_tooltip.as_bytes()) > 0:
-            painter.fill(
-                canvas,
-                Rect(container_bounds.a.x + 1, sep1_y, container_bounds.b.x - 1, sep1_y + 1),
-                String(" "), bg,
-            )
-            _ = painter.put_text(
-                canvas, Point(container_bounds.a.x + 2, sep1_y),
-                hovered_tooltip, ctx_attr,
-            )
-        else:
-            for x in range(container_bounds.a.x + 1, container_bounds.b.x - 1):
-                painter.set(canvas, x, sep1_y, Cell(String("─"), sep_attr, 1))
-        # Match list.
-        var top = self._list_top(container_bounds)
-        var h = self._list_height(container_bounds)
-        if len(self.matches) == 0:
-            var msg: String
-            if len(self.query.text.as_bytes()) == 0:
-                msg = String("Type to search.")
-            elif self._query_dirty_at_ms != 0 \
-                    or self.query.text != self._last_searched_query \
-                    or self.scope.text != self._last_searched_scope \
-                    or self.glob.text != self._last_searched_glob \
-                    or self._runner.is_active():
-                msg = String("Searching...")
-            else:
-                msg = String("No matches.")
-            _ = painter.put_text(
-                canvas, Point(container_bounds.a.x + 2, top), msg, ctx_attr,
-            )
-        # Keep the row-highlight cache aligned 1:1 with ``matches`` (only
-        # grows; reset wholesale on a new search). Then give this frame a
-        # fixed wall-clock budget for *fresh* tokenization — cached rows
-        # stay free, so steady-state navigation pays nothing.
-        while len(self._row_hl_cache) < len(self.matches):
-            self._row_hl_cache.append(List[Highlight]())
-            self._row_hl_cached.append(False)
-        var hl_deadline = monotonic_ms() + _ROW_HL_BUDGET_MS
-        for i in range(h):
-            var idx = self.scroll + i
-            if idx >= len(self.matches):
-                break
-            # Copy the match out before the call: ``_paint_match_row``
-            # takes ``mut self``, so an aliased ``self.matches[idx]``
-            # reference would fail Mojo's exclusivity check.
-            var m = self.matches[idx]
-            _ = self._paint_match_row(
-                canvas, container_bounds, painter, top + i, m, idx == self.selected,
-                line_attr, sel_line, hl_attr, sel_hl_attr, path_attr, sel_path,
-                registry, idx, hl_deadline,
-            )
-        self._bar.paint(
-            canvas,
-            Rect(container_bounds.a.x + 1, top, container_bounds.b.x - 1, top + h),
-            len(self.matches), self.scroll, bg,
-        )
-        # Separator above the context panel.
-        var ctx_top = self._list_bottom(container_bounds)
-        for x in range(container_bounds.a.x + 1, container_bounds.b.x - 1):
-            painter.set(canvas, x, ctx_top, Cell(String("─"), sep_attr, 1))
-        var ctx_label = String(" Context ")
-        var lx = container_bounds.a.x + (container_bounds.width() - display_columns(ctx_label)) // 2
-        _ = painter.put_text(canvas, Point(lx, ctx_top), ctx_label, title_attr)
-        # Context body. Lazy-tokenize the loaded file using the shared
-        # registry so the grammar's regexes only get compiled once per
-        # session (not per paint frame).
-        self._ensure_context_highlights(registry)
-        self._paint_context(
-            canvas, container_bounds, painter, ctx_top + 1, ctx_attr, ctx_match,
-        )
-        # Drag-selection overlay on top of the context text (cyan block,
-        # the same read-only-selection color ``TextLog`` uses).
-        self.ctxsel.paint_overlay(canvas, container_bounds, Attr(BLACK, CYAN))
-        # Hint at the very bottom (overlays the bottom border).
-        var hint: String
-        if self.replace_mode:
-            hint = String(" Enter: open  Tab: fields  Cmd+Enter: replace all  ESC: cancel  Up/Down: navigate ")
-        else:
-            hint = String(" Enter: open  Tab: query/path/glob  Cmd+Enter: panel  ESC: cancel  Up/Down: navigate ")
-        var hx = container_bounds.b.x - display_columns(hint) - 1
-        if hx < container_bounds.a.x + 1:
-            hx = container_bounds.a.x + 1
-        _ = painter.put_text(canvas, Point(hx, container_bounds.b.y - 1), hint, hint_attr)
-        # Truncation notice — left-aligned on the bottom border so the
-        # user knows the result list is capped and more hits exist
-        # outside it. Painted only when we actually had to drop hits
-        # (``_truncated``); the cap is large enough that most queries
-        # won't trip it.
-        if self._truncated:
-            var warn = String(" More than ") + String(_MAX_MATCHES) \
-                + String(" matches — refine your search ")
-            var warn_attr = Attr(WHITE, RED)
-            var wx = container_bounds.a.x + 2
-            # Clip against the hint so the two strips can't overpaint
-            # each other on narrow windows.
-            if wx + display_columns(warn) >= hx:
-                # No room — drop the leading/trailing spaces and the
-                # explanatory tail to fit. Keep enough that "More: N"
-                # at least signals what happened.
-                warn = String(" >") + String(_MAX_MATCHES) + String(" ")
-            if wx + display_columns(warn) < hx:
-                _ = painter.put_text(
-                    canvas, Point(wx, container_bounds.b.y - 1), warn, warn_attr,
-                )
-
-    def _paint_match_row(
-        mut self, mut canvas: Canvas, container_bounds: Rect, painter: Painter,
-        y: Int, m: ProjectMatch, is_sel: Bool,
-        line_attr: Attr, sel_line: Attr,
-        hl_attr: Attr, sel_hl_attr: Attr,
-        path_attr: Attr, sel_path: Attr,
-        mut registry: GrammarRegistry,
-        idx: Int, hl_deadline: Int,
-    ) -> RowTextGeom:
-        # Thin wrapper over the shared ``paint_match_row`` free function so
-        # the Find Results pane renders identical rows (hit highlight,
-        # right-aligned ``rel:line``, budgeted syntax overlay) without
-        # duplicating the cache + slide logic.
-        return paint_match_row(
-            canvas, container_bounds, painter, y, m, is_sel, self.query.text,
-            line_attr, sel_line, hl_attr, sel_hl_attr, path_attr, sel_path,
-            registry, idx, hl_deadline,
-            self._row_hl_cache, self._row_hl_cached,
-            whole_word=self._last_searched_opts.whole_word,
-        )
-
-    def _paint_context(
-        mut self, mut canvas: Canvas, container_bounds: Rect, painter: Painter,
-        top_y: Int, ctx_attr: Attr, match_attr: Attr,
-    ):
-        var inner_left = container_bounds.a.x + 1
-        var inner_right = container_bounds.b.x - 1
-        var rows = 2 * _CONTEXT_LINES + 1
-        var hit_attr = Attr(WHITE, RED)         # match-substring highlight
-        # Re-stamp the selectable-row geometry for this frame; ``handle_mouse``
-        # / ``paint`` read it back for drag selection + the overlay.
-        self.ctxsel.begin_frame()
-        if self.selected < 0 or self.selected >= len(self.matches):
-            return
-        var m = self.matches[self.selected]
-        var center = m.line_no - 1   # 0-based
-        if len(self._context_lines) == 0 \
-                or self._context_path != m.path:
-            _ = painter.put_text(
-                canvas, Point(inner_left + 1, top_y),
-                String("(loading ") + m.rel + String(")"),
-                ctx_attr,
-            )
-            return
-        var line_count = len(self._context_lines)
-        for k in range(rows):
-            var src = center - _CONTEXT_LINES + k
-            var y = top_y + k
-            if y >= container_bounds.b.y - 1:
-                break
-            if src < 0 or src >= line_count:
-                continue
-            var is_match = (src == center)
-            # Marker + line-number gutter — kept dim; the match marker
-            # is the only color cue for which row is the hit.
-            var marker = String("▶ ") if is_match else String("  ")
-            var marker_attr = match_attr if is_match else ctx_attr
-            var lineno = String(src + 1) + String(": ")
-            var x = inner_left + 1
-            _ = painter.put_text(canvas, Point(x, y), marker, marker_attr)
-            x += display_columns(marker)
-            _ = painter.put_text(canvas, Point(x, y), lineno, ctx_attr)
-            x += display_columns(lineno)
-            # Plain text pass — one cell per *codepoint*, via the same
-            # ``put_text`` everything else paints through, so a
-            # multi-byte glyph is one cell carrying its whole sequence.
-            # This used to emit one cell per byte with anything >= 0x80
-            # replaced by ``?``, which is why an ``ö`` showed up as
-            # ``??`` and pushed the rest of the line a column right.
-            var line = self._context_lines[src]
-            var max_cells = inner_right - x
-            if max_cells < 0: max_cells = 0
-            var end = _clip_to_cells(line, 0, max_cells)
-            var run = RunCells(byte_slice(line, 0, end), x, 0)
-            # Register this row for drag selection (painted from byte 0 at
-            # ``x``, clipped at ``inner_right``).
-            self.ctxsel.add_row(src, line, y, x, 0, end, inner_right)
-            _ = painter.put_text(
-                canvas, Point(x, y), byte_slice(line, 0, end), ctx_attr,
-            )
-            # Syntax-highlight overlay for this row: attr-only, since the
-            # pass above already laid the glyphs down.
-            for h in range(len(self._context_highlights)):
-                var hl = self._context_highlights[h]
-                if hl.row != src:
-                    continue
-                for c in range(
-                    run.cell_of(hl.col_start), run.cell_of(hl.col_end),
-                ):
-                    painter.set_attr(canvas, x + c, y, hl.attr)
-            # Match-substring highlight on the center row only.
-            if is_match and len(self.query.text.as_bytes()) > 0:
-                var hit = find_hit(
-                    line.as_bytes(), self.query.text.as_bytes(),
-                    self._last_searched_opts.whole_word,
-                )
-                if hit >= 0:
-                    var he = hit + len(self.query.text.as_bytes())
-                    for c in range(run.cell_of(hit), run.cell_of(he)):
-                        painter.set_attr(canvas, x + c, y, hit_attr)
-
-    # --- events -----------------------------------------------------------
-
-    def handle_key(mut self, event: Event, now_ms: Int) -> Bool:
-        if not self.active:
-            return False
-        if event.kind != EVENT_KEY:
-            return True
-        var k = event.key
-        # Cmd/Ctrl+C copies a context-panel drag selection when one exists;
-        # otherwise fall through so the focused input field's own copy works.
-        if clipboard_chord(event) == CLIP_COPY and self.ctxsel.has_selection():
-            _ = self.ctxsel.copy()
-            return True
-        if k == KEY_ESC:
-            self.close()
-            return True
-        # Tab / Shift+Tab cycles focus across the editable strips — query →
-        # (replace) → scope → glob. The replace strip is in the cycle only
-        # in replace mode. Shift reverses the direction.
-        if k == KEY_TAB:
-            self._cycle_focus((event.mods & MOD_SHIFT) != 0)
-            return True
-        # Cmd+Enter fires the title-bar action (checked before the
-        # plain-Enter open so the modifier wins): Replace All in replace
-        # mode, dock-to-panel in find mode.
-        if k == KEY_ENTER and (event.mods & MOD_META) != 0:
-            if len(self.matches) > 0:
-                if self.replace_mode:
-                    self.do_replace = True
-                else:
-                    self.send_to_panel = True
-            return True
-        if k == KEY_ENTER:
-            self.submit()
-            return True
-        if picker_nav_key(k, len(self.matches), self.selected):
-            self._scroll_to_selection()
-            self._refresh_context_for_selection()
-            return True
-        # Route typed input to whichever field has focus. The query, the
-        # scope, and the glob all kick off a fresh debounced search on
-        # change; the replace field does not — the replacement text has no
-        # bearing on which lines match.
-        if self.focus == _FOCUS_REPLACE:
-            _ = self.replace.handle_key(event)
-            return True
-        var r: TextFieldKeyResult
-        if self.focus == _FOCUS_SCOPE:
-            r = self.scope.handle_key(event)
-        elif self.focus == _FOCUS_GLOB:
-            r = self.glob.handle_key(event)
-        else:
-            r = self.query.handle_key(event)
-        if r.consumed:
-            if r.changed:
-                self._mark_query_dirty(now_ms)
-            return True
-        return True
 
     def submit(mut self):
         """Open the selected match (Enter): the host reads
@@ -1159,15 +538,6 @@ struct ProjectFind(Movable):
         ) if len(q.as_bytes()) > 0 else -1
         return (text^, hit)
 
-    def preview(
-        mut self, mut registry: GrammarRegistry,
-    ) -> Tuple[List[String], List[Highlight]]:
-        """The whole file of the selected match, syntax-highlighted (when
-        it's small enough to tokenize) — the native preview scrolls it to
-        the match itself."""
-        self._ensure_context_highlights(registry)
-        return (self._context_lines.copy(), self._context_highlights.copy())
-
     def preview_window(
         mut self, mut registry: GrammarRegistry, first: Int, end: Int,
     ) -> Tuple[Int, List[String], List[Highlight]]:
@@ -1185,148 +555,6 @@ struct ProjectFind(Movable):
             if r >= first and r < end:
                 hls.append(self._context_highlights[i])
         return (n, lines^, hls^)
-
-    def _cycle_focus(mut self, backward: Bool):
-        """Advance (or reverse) keyboard focus across the editable strips.
-        The order is query → replace → scope → glob, with the replace strip
-        present only in replace mode."""
-        var order = List[Int]()
-        order.append(_FOCUS_QUERY)
-        if self.replace_mode:
-            order.append(_FOCUS_REPLACE)
-        order.append(_FOCUS_SCOPE)
-        order.append(_FOCUS_GLOB)
-        var n = len(order)
-        var cur = 0
-        for i in range(n):
-            if order[i] == self.focus:
-                cur = i
-                break
-        var nxt = (cur + n - 1) % n if backward else (cur + 1) % n
-        self.focus = order[nxt]
-
-    def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Bool:
-        if not self.active:
-            return False
-        if event.kind != EVENT_MOUSE:
-            return True
-        # A context-panel text drag in flight swallows the motion + the
-        # terminating release (even if the pointer wandered off the context
-        # area — mirrors ``TextLog``'s drag contract); a fresh press starts
-        # a new gesture and falls through to normal routing.
-        if self.ctxsel.dragging and event.button == MOUSE_BUTTON_LEFT \
-                and (event.motion or not event.pressed):
-            _ = self.ctxsel.handle_mouse(event)
-            return True
-        # Standard ``[■]`` close button — equivalent to ESC. Checked
-        # before toggle / input / list routing so a click on the chrome
-        # glyph always dismisses the dialog.
-        if close_button_clicked(container_bounds, event):
-            self.close()
-            return True
-        var sb = self._bar.handle_mouse(event)
-        if sb >= 0:
-            self.scroll = sb
-            return True
-        # Title-bar action button — Replace All in replace mode, dock the
-        # current results to the panel in find mode.
-        if event.pressed and not event.motion \
-                and event.button == MOUSE_BUTTON_LEFT \
-                and self._panel_btn_rect.width() > 0 \
-                and self._panel_btn_rect.contains(event.pos):
-            if len(self.matches) > 0:
-                if self.replace_mode:
-                    self.do_replace = True
-                else:
-                    self.send_to_panel = True
-            return True
-        # Toggles run first so a click on a chip doesn't slip through
-        # to the input field and reposition the cursor; the same call
-        # also updates per-toggle hover state from bare-motion events
-        # so the tooltip strip pops on the next paint.
-        var rc = self.toggle_case.handle_mouse(event)
-        if rc == BUTTON_FIRED:
-            self.toggle_case.on = not self.toggle_case.on
-            self._mark_toggle_changed()
-            return True
-        var rw = self.toggle_word.handle_mouse(event)
-        if rw == BUTTON_FIRED:
-            self.toggle_word.on = not self.toggle_word.on
-            self._mark_toggle_changed()
-            return True
-        var rr = self.toggle_regex.handle_mouse(event)
-        if rr == BUTTON_FIRED:
-            self.toggle_regex.on = not self.toggle_regex.on
-            self._mark_toggle_changed()
-            return True
-        if self.toggle_case.pressed or self.toggle_word.pressed \
-                or self.toggle_regex.pressed:
-            return True
-        if self._input_rect.width() > 0 \
-                and self.query.handle_mouse(event, self._input_rect):
-            # A press inside the query strip moves focus there; motion /
-            # release events keep the existing focus.
-            if event.pressed and not event.motion:
-                self.focus = _FOCUS_QUERY
-            return True
-        if self._replace_rect.width() > 0 \
-                and self.replace.handle_mouse(event, self._replace_rect):
-            if event.pressed and not event.motion:
-                self.focus = _FOCUS_REPLACE
-            return True
-        if self._scope_rect.width() > 0 \
-                and self.scope.handle_mouse(event, self._scope_rect):
-            if event.pressed and not event.motion:
-                self.focus = _FOCUS_SCOPE
-            return True
-        if self._glob_rect.width() > 0 \
-                and self.glob.handle_mouse(event, self._glob_rect):
-            if event.pressed and not event.motion:
-                self.focus = _FOCUS_GLOB
-            return True
-        if event.pressed and not event.motion:
-            if picker_wheel_scroll(
-                event.button, self.scroll, len(self.matches),
-                self._list_height(container_bounds),
-            ):
-                return True
-        if event.button != MOUSE_BUTTON_LEFT:
-            return True
-        if not event.pressed or event.motion:
-            return True
-        var top = self._list_top(container_bounds)
-        var h = self._list_height(container_bounds)
-        if event.pos.y < top or event.pos.y >= top + h:
-            # Below the list: a press in the context panel begins a text
-            # drag selection. (The separator + label row is ``ctx_top``;
-            # content runs from ``ctx_top + 1`` to the bottom border.)
-            var ctx_top = self._list_bottom(container_bounds)
-            if event.pos.y > ctx_top \
-                    and event.pos.y < container_bounds.b.y - 1:
-                _ = self.ctxsel.handle_mouse(event)
-            return True
-        var idx = self.scroll + (event.pos.y - top)
-        if idx < 0 or idx >= len(self.matches):
-            return True
-        if idx == self.selected:
-            var m = self.matches[idx]
-            self.selected_path = m.path
-            self.selected_line = m.line_no
-            self.submitted = True
-            return True
-        self.selected = idx
-        self._refresh_context_for_selection()
-        return True
-
-    def _scroll_to_selection(mut self):
-        # Conservative window: assume ~12 visible rows; the actual list
-        # height depends on the container_bounds so we re-clamp on paint.
-        var visible = 12
-        if self.selected < self.scroll:
-            self.scroll = self.selected
-        elif self.selected >= self.scroll + visible:
-            self.scroll = self.selected - visible + 1
-
 
 # --- internals --------------------------------------------------------------
 

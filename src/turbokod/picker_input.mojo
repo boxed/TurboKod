@@ -1,8 +1,7 @@
 """Shared input handling for list pickers.
 
-The four full-screen pickers (``QuickOpen``, ``DocPick``, ``SymbolPick``,
-``ProjectFind``) plus a couple of inline ones drive their selection /
-scroll the same way: arrow keys + page-up/down step ``selected``, mouse
+The list views (file tree, dropdowns, find results, …) drive their
+selection / scroll the same way: arrow keys + page-up/down step ``selected``, mouse
 wheel scrolls the visible window, and both clamp at the bounds. Without
 this shared helper that block of conditionals lives in 4–5 places and
 silently drifts (one of the page-up cases used to forget the
@@ -16,44 +15,13 @@ input. The caller wraps the call in ``if picker_nav_key(...): self._scroll_to_se
 """
 
 from .events import (
-    Event, KEY_DOWN, KEY_PAGEDOWN, KEY_PAGEUP, KEY_UP, MOUSE_BUTTON_LEFT,
-    MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
+    KEY_DOWN, KEY_PAGEDOWN, KEY_PAGEUP, KEY_UP, MOUSE_WHEEL_DOWN,
+    MOUSE_WHEEL_UP,
 )
-from .geometry import Point, Rect
-from .view import RowCursor
 
 
 comptime _PAGE_STEP: Int = 10
 comptime _WHEEL_STEP: Int = 3
-
-
-@fieldwise_init
-struct PickerLayout(ImplicitlyCopyable, Movable):
-    """Pre-computed rects for a filtered-list picker, shared by ``paint``
-    and ``handle_mouse`` so list hit-testing and rendering agree on the
-    top/height. Built by ``build_picker_layout``; ``label_w`` is the width
-    of the leading input label (``Find:`` etc.) the query field starts
-    after."""
-    var input_rect: Rect
-    var input_label_pt: Point
-    var list_top: Int
-    var list_height: Int
-    var hint_y: Int
-
-
-def build_picker_layout(rect: Rect, label_w: Int) -> PickerLayout:
-    var cursor = RowCursor(rect.a.y + 1)
-    var input_y = cursor.place()
-    var list_y = cursor.place()
-    var hint_y = rect.b.y - 1
-    var list_h = hint_y - list_y
-    if list_h < 0:
-        list_h = 0
-    return PickerLayout(
-        Rect(rect.a.x + 2 + label_w, input_y, rect.b.x - 1, input_y + 1),
-        Point(rect.a.x + 2, input_y),
-        list_y, list_h, hint_y,
-    )
 
 
 def scroll_to_reveal(scroll: Int, target: Int, window: Int) -> Int:
@@ -125,18 +93,3 @@ def picker_wheel_scroll(
         return True
     return False
 
-
-def picker_row_at(
-    event: Event, rect: Rect, layout: PickerLayout, scroll: Int, count: Int,
-) -> Int:
-    """The list row a left press lands on, or -1 — for a press elsewhere,
-    another button, a release or motion, or a click past the last row."""
-    if event.button != MOUSE_BUTTON_LEFT or not event.pressed or event.motion:
-        return -1
-    if not rect.contains(event.pos):
-        return -1
-    var r = event.pos.y - layout.list_top
-    if r < 0 or r >= layout.list_height:
-        return -1
-    var idx = scroll + r
-    return idx if idx < count else -1

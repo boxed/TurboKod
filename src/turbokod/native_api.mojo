@@ -2923,14 +2923,6 @@ def tk_desktop_git_key(
 
 
 @export
-def tk_desktop_git_commit(h: Int, ptr: Int, n: Int) abi("C"):
-    """Commit what's staged with this message."""
-    if h == 0:
-        return
-    _desk(h)[].native_git_commit(_string_from(ptr, n))
-
-
-@export
 def tk_desktop_git_open(
     h: Int, pane: Int, row: Int, cols: Int, rows: Int,
 ) abi("C"):

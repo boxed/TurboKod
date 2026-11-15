@@ -1855,15 +1855,6 @@ struct Desktop(Movable):
     """What ``_last_drafts_json`` was made from, short of the text: when
     it's the same, encoding every untitled buffer again (22 ms a paint
     with an 8 MB one open) can't give anything new."""
-    # Recently focused file-backed editor paths, most-recent first.
-    # Mirrors ``config.recent_files`` (which is the persistent copy);
-    # both are kept in sync by ``_track_recent_focus``. Stores canonical
-    # absolute paths (``realpath``-resolved) so dedup is reliable across
-    # symlinked / relative spellings. The front entry is whichever file
-    # currently has focus, so the "Open Recent" picker skips index 0 to
-    # avoid offering the user the file they're already on. Capped at
-    # ``_RECENT_FILES_MAX``.
-    var _recent_files: List[String]
     # Cross-file navigation history. ``_nav_stack`` is a chronological
     # list of visited (file, row, col) positions; ``_nav_pos`` indexes
     # the *current* entry — Cmd+[ steps back through earlier entries,
@@ -2181,7 +2172,6 @@ struct Desktop(Movable):
         self._view_states_dirty = True
         self._last_drafts_json = String("")
         self._drafts_key = String("")
-        self._recent_files = List[String]()
         self._nav_stack = List[NavPoint]()
         self._nav_pos = -1
         self._git_state_mtimes = GitStateMtimes.zero()
@@ -5026,7 +5016,7 @@ struct Desktop(Movable):
         # dialog opens immediately even on giant projects.
         self.quick_open.tick()
         # Update the recents list from whichever editor is focused this
-        # frame. Cheap (one path compare against ``_recent_files[0]``)
+        # frame. Cheap (one path compare against ``config.recent_files[0]``)
         # on idle frames; promotes a path to the front exactly once
         # whenever focus actually moves.
         self._track_recent_focus()
@@ -6489,12 +6479,6 @@ struct Desktop(Movable):
         # Apply the saved theme (or the default if the name is unknown).
         self.active_theme = theme_by_name(self.config.theme)
         self.theme_version += 1
-        # Seed the in-memory recents from the persisted list so the
-        # File ▸ "Open recent..." picker has entries to show on the
-        # very first invocation of a fresh process — otherwise the
-        # session-only tracking would leave it empty until the user
-        # focus-switched across at least two file-backed windows.
-        self._recent_files = self.config.recent_files.copy()
         self._rebuild_lsp_specs()
         # Refresh the project menu against the recents we just adopted —
         # both the entries ``__init__`` couldn't populate (the empty
@@ -6534,7 +6518,6 @@ struct Desktop(Movable):
         self.config = merged.copy()
         self._config_baseline = merged.copy()
         self._refresh_config_stamp()
-        self._recent_files = self.config.recent_files.copy()
         if theme_changed:
             self.active_theme = theme_by_name(self.config.theme)
             self.theme_version += 1
@@ -9487,11 +9470,6 @@ struct Desktop(Movable):
         var main_screen = self._last_screen
         self._after_local_changes(main_screen)
 
-    def _dialog_overlay_active(self) -> Bool:
-        return self.prompt.active or self.confirm_dialog.active \
-            or self.message_request_dialog.active \
-            or self.color_picker.active or self.save_as_dialog.active
-
     def apply_welcome(
         mut self, native_ui: Bool, platinum_ui: Bool, theme: String,
         font_label: String, font_size: Int, done: Bool,
@@ -10235,9 +10213,6 @@ struct Desktop(Movable):
         )
         self._after_local_changes(screen)
 
-    def native_git_commit(mut self, var message: String):
-        self.local_changes.native_commit(message^)
-
     def native_git_open(mut self, pane: Int, row: Int, screen: Rect) raises:
         self.local_changes.native_open(pane, row)
         self._after_local_changes(screen)
@@ -10372,13 +10347,13 @@ struct Desktop(Movable):
             self.project_find.submit()
             self._after_project_find(screen)
         elif kind == String("symbol_pick"):
-            _ = self.symbol_pick.handle_key(Event.key_event(KEY_ENTER))
+            self.symbol_pick.submit()
             self._after_symbol_pick(screen)
         elif kind == String("reference_pick"):
-            _ = self.reference_pick.handle_key(Event.key_event(KEY_ENTER))
+            self.reference_pick.submit()
             self._after_reference_pick(screen)
         elif kind == String("doc_pick"):
-            _ = self.doc_pick.handle_key(Event.key_event(KEY_ENTER))
+            self.doc_pick.submit()
             self._after_doc_pick(screen)
         return Optional[String]()
 
@@ -12229,14 +12204,9 @@ struct Desktop(Movable):
             var op = self.lsp_managers[i].pending_ontype_path()
             var otext = self.lsp_managers[i].pending_ontype_text()
             var oe = self.lsp_managers[i].take_ontype_edits()
-            var ow = self._find_window_for_path(op)
-            if ow < 0 or not self.windows.windows[ow].is_editor:
-                continue
-            # Stale-range guard — see ``_drain_formatting``. Typing goes
-            # on after the trigger character, so this is the usual case.
-            if len(oe) > 0 and self.windows.windows[ow] \
-                    .editor.text_snapshot() == otext:
-                _ = self.windows.windows[ow].editor.apply_text_edits(oe^)
+            # Stale-range guard inside — typing goes on after the trigger
+            # character, so dropping stale edits is the usual case.
+            _ = self._apply_parked_edits(op, otext, oe^)
 
     def _maybe_request_doc_highlight(mut self, win_idx: Int):
         """Fire a ``textDocument/documentHighlight`` for the cursor word
@@ -13075,10 +13045,6 @@ struct Desktop(Movable):
         elif self._run_output_held:
             self.debug_pane.set_mode(PANE_MODE_RUN)
             self.debug_pane.set_status(String("(exited — Esc to dismiss)"))
-        elif self.dap.is_failed():
-            # Surface the failure once even though we hide the pane —
-            # status-bar message is more discoverable than nothing.
-            pass
         # Title-row command strip — buttons mirror the keyboard
         # shortcuts so a user who's never learned the bindings can
         # drive the debugger from the pane chrome alone. Built fresh
@@ -13707,8 +13673,6 @@ struct Desktop(Movable):
             var attr = Attr(BLACK, LIGHT_GRAY)
             if self.dap.is_failed():
                 attr = Attr(LIGHT_RED, LIGHT_GRAY)
-            elif self.dap.is_stopped():
-                attr = Attr(BLACK, LIGHT_GRAY)
             var tooltip: String
             if self.dap.is_failed():
                 tooltip = String(
@@ -14934,7 +14898,7 @@ struct Desktop(Movable):
 
     def _track_recent_focus(mut self):
         """Promote the focused editor's file path to the front of
-        ``_recent_files`` and persist the change to ``config.recent_files``
+        ``config.recent_files`` and persist the change
         so the "Open Recent" picker keeps the list across sessions.
 
         Paths are canonicalized through ``realpath`` so dedup catches
@@ -14964,14 +14928,12 @@ struct Desktop(Movable):
         if len(canon.as_bytes()) == 0:
             canon = path
         # Already at the front — no change.
-        if len(self._recent_files) > 0 and self._recent_files[0] == canon:
+        if len(self.config.recent_files) > 0 \
+                and self.config.recent_files[0] == canon:
             return
         var changed = record_recent_file(self.config, canon)
         if not changed:
             return
-        # Mirror the persisted list into the in-memory cache so the
-        # picker can read from a single source.
-        self._recent_files = self.config.recent_files.copy()
         self._persist_config()
 
     # --- navigation history ---------------------------------------------
@@ -15078,7 +15040,7 @@ struct Desktop(Movable):
            in-memory recents at a single entry and silently no-op).
            Walked in reverse z-order so the most-recently-focused
            non-current window lands at the top.
-        2. ``self._recent_files`` (persisted to ``config.recent_files``)
+        2. ``config.recent_files`` (most-recently-focused first)
            with already-listed and currently-focused entries filtered
            out. Catches files the user opened in a past session that
            aren't currently open.
@@ -15129,9 +15091,9 @@ struct Desktop(Movable):
             seen.append(canon)
             rel_entries.append(project_relative(root, canon))
             abs_entries.append(canon)
-        # Pool 2: persisted ``_recent_files`` not already covered above.
-        for i in range(len(self._recent_files)):
-            var p = self._recent_files[i]
+        # Pool 2: persisted ``config.recent_files`` not already covered above.
+        for i in range(len(self.config.recent_files)):
+            var p = self.config.recent_files[i]
             if p == focused_canon:
                 continue
             var dup = False

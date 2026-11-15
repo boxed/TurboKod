@@ -11,21 +11,7 @@ picker doesn't have to model a loading state or a "no results" view.
 
 from std.collections.list import List
 
-from .canvas import Canvas
-from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, YELLOW
-from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE,
-    KEY_ENTER, KEY_ESC,
-    MOUSE_BUTTON_LEFT,
-)
-from .geometry import Point, Rect, center_in
-from .scrollbar import ScrollBarArea
 from .lsp_dispatch import DefinitionResolved
-from .picker_input import (
-    picker_nav_key, picker_wheel_scroll, scroll_to_reveal,
-)
-from .string_utils import display_columns, starts_with
-from .window import close_button_clicked, paint_modal_frame, paint_window_title
 
 
 struct ReferencePick(Movable):
@@ -35,15 +21,10 @@ struct ReferencePick(Movable):
     var word: String
     var project_root: String     # for displaying paths relative to the project
     var selected: Int
-    var scroll: Int
-    var _bar: ScrollBarArea
     # Submission output — read after ``submitted`` flips True.
     var selected_path: String
     var selected_line: Int
     var selected_character: Int
-    # Visible list height captured on the most recent ``paint`` so
-    # ``_scroll_to_selection`` reveals against the real (clamped) viewport.
-    var _revealed_height: Int
 
     def __init__(out self):
         self.active = False
@@ -52,12 +33,9 @@ struct ReferencePick(Movable):
         self.word = String("")
         self.project_root = String("")
         self.selected = 0
-        self.scroll = 0
-        self._bar = ScrollBarArea()
         self.selected_path = String("")
         self.selected_line = 0
         self.selected_character = 0
-        self._revealed_height = 14
 
     def open(
         mut self, var entries: List[DefinitionResolved],
@@ -72,11 +50,9 @@ struct ReferencePick(Movable):
         self.active = True
         self.submitted = False
         self.selected = 0
-        self.scroll = 0
         self.selected_path = String("")
         self.selected_line = 0
         self.selected_character = 0
-        self._revealed_height = 14
 
     def close(mut self):
         self.active = False
@@ -85,165 +61,16 @@ struct ReferencePick(Movable):
         self.word = String("")
         self.project_root = String("")
         self.selected = 0
-        self.scroll = 0
-        self._revealed_height = 14
 
-    # --- geometry ---------------------------------------------------------
-
-    def _rect(self, container_bounds: Rect) -> Rect:
-        # center_in caps to a 4-cell margin, so no manual clamp is needed.
-        return center_in(container_bounds, 80, 20)
-
-    def _list_top(self, rect: Rect) -> Int:
-        return rect.a.y + 1
-
-    def _list_height(self, rect: Rect) -> Int:
-        var hint_y = rect.b.y - 1
-        var top = self._list_top(rect)
-        var h = hint_y - top
-        if h < 0:
-            h = 0
-        return h
-
-    # --- paint ------------------------------------------------------------
-
-    def _display_path(self, path: String) -> String:
-        """Render ``path`` relative to the project root when possible,
-        falling back to the absolute path."""
-        if len(self.project_root.as_bytes()) == 0:
-            return path
-        var root = self.project_root
-        if not root.endswith("/"):
-            root = root + String("/")
-        if starts_with(path, root):
-            var pb = path.as_bytes()
-            var rb = root.as_bytes()
-            return String(StringSpan(unsafe_from_utf8=pb[len(rb):]))
-        return path
-
-    def paint(mut self, mut canvas: Canvas, container_bounds: Rect):
-        if not self.active:
+    def submit(mut self):
+        """Jump to the selected entry: sets ``selected_path`` /
+        ``selected_line`` / ``selected_character`` and flips
+        ``submitted``."""
+        if not self.active \
+                or self.selected < 0 or self.selected >= len(self.entries):
             return
-        var bg          = Attr(BLACK,  LIGHT_GRAY)
-        var sel_attr    = Attr(BLACK,  YELLOW)
-        var hint_attr   = Attr(BLUE,   LIGHT_GRAY)
-        var meta_attr   = Attr(BLUE,   LIGHT_GRAY)
-        var sel_meta    = Attr(BLUE,   YELLOW)
-        var rect = self._rect(container_bounds)
-        var painter = paint_modal_frame(canvas, rect, bg)
-        var title = String(" References")
-        if len(self.word.as_bytes()) > 0:
-            title = title + String(": ") + self.word
-        title = title + String(" ")
-        paint_window_title(canvas, rect, title, bg, bg)
-        var top = self._list_top(rect)
-        var h = self._list_height(rect)
-        self._revealed_height = h
-        for i in range(h):
-            var idx = self.scroll + i
-            if idx >= len(self.entries):
-                break
-            var entry = self.entries[idx]
-            var is_sel = (idx == self.selected)
-            var row_attr = sel_attr if is_sel else bg
-            var m_attr = sel_meta if is_sel else meta_attr
-            painter.fill(
-                canvas, Rect(rect.a.x + 1, top + i, rect.b.x - 1, top + i + 1),
-                String(" "), row_attr,
-            )
-            var disp = self._display_path(entry.path)
-            _ = painter.put_text(
-                canvas, Point(rect.a.x + 2, top + i), disp, row_attr,
-            )
-            # Right-aligned line:col stamp.
-            var stamp = String(":") + String(entry.line + 1) \
-                + String(":") + String(entry.character + 1)
-            var stamp_w = display_columns(stamp)
-            var stamp_x = rect.b.x - 2 - stamp_w
-            if stamp_x > rect.a.x + 2 + display_columns(disp):
-                _ = painter.put_text(
-                    canvas, Point(stamp_x, top + i), stamp, m_attr,
-                )
-        self._bar.paint(
-            canvas, Rect(rect.a.x + 1, top, rect.b.x - 1, top + h),
-            len(self.entries), self.scroll, bg,
-        )
-        # Bottom hint.
-        _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, rect.b.y - 1),
-            String(" Enter: jump  ESC: cancel "),
-            hint_attr,
-        )
-
-    # --- events -----------------------------------------------------------
-
-    def handle_key(mut self, event: Event) -> Bool:
-        """Returns True if the event was consumed (always True while active)."""
-        if not self.active:
-            return False
-        if event.kind != EVENT_KEY:
-            return True
-        var k = event.key
-        if k == KEY_ESC:
-            self.close()
-            return True
-        if k == KEY_ENTER:
-            if self.selected < 0 or self.selected >= len(self.entries):
-                return True
-            var entry = self.entries[self.selected]
-            self.selected_path = entry.path
-            self.selected_line = entry.line
-            self.selected_character = entry.character
-            self.submitted = True
-            return True
-        if picker_nav_key(k, len(self.entries), self.selected):
-            self._scroll_to_selection()
-            return True
-        return True
-
-    def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Bool:
-        if not self.active:
-            return False
-        if event.kind != EVENT_MOUSE:
-            return True
-        var rect = self._rect(container_bounds)
-        var top = self._list_top(rect)
-        var h = self._list_height(rect)
-        # Standard ``[■]`` close button — equivalent to ESC. Checked
-        # before list routing so a click on the chrome glyph always
-        # dismisses the dialog.
-        if close_button_clicked(rect, event):
-            self.close()
-            return True
-        var sb = self._bar.handle_mouse(event)
-        if sb >= 0:
-            self.scroll = sb
-            return True
-        if event.pressed and not event.motion:
-            if picker_wheel_scroll(event.button, self.scroll, len(self.entries), h):
-                return True
-        if event.button != MOUSE_BUTTON_LEFT:
-            return True
-        if not event.pressed or event.motion:
-            return True
-        if not rect.contains(event.pos):
-            return True
-        if event.pos.y < top or event.pos.y >= top + h:
-            return True
-        var idx = self.scroll + (event.pos.y - top)
-        if idx < 0 or idx >= len(self.entries):
-            return True
-        if idx == self.selected:
-            var entry = self.entries[idx]
-            self.selected_path = entry.path
-            self.selected_line = entry.line
-            self.selected_character = entry.character
-            self.submitted = True
-            return True
-        self.selected = idx
-        return True
-
-    def _scroll_to_selection(mut self):
-        self.scroll = scroll_to_reveal(self.scroll, self.selected, self._revealed_height)
-
-
+        var entry = self.entries[self.selected]
+        self.selected_path = entry.path
+        self.selected_line = entry.line
+        self.selected_character = entry.character
+        self.submitted = True

@@ -20,28 +20,11 @@ include_ignored_files=True)``.
 from std.collections.list import List
 from std.collections.optional import Optional
 
-from .canvas import Canvas
 from .case_fold import find_folded, fold_ascii
-from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, YELLOW
-from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE, KEY_ENTER, KEY_ESC, MOD_SHIFT,
-)
 from .file_io import join_path
-from .geometry import center_in, Point, Rect
-from .scrollbar import ScrollBarArea
-from .picker_input import (
-    build_picker_layout, picker_nav_key, picker_row_at, picker_wheel_scroll,
-    scroll_to_reveal,
-)
 from .project import FileIndexer, QUICK_OPEN_FILE_CAP, walk_project_files
 from .query_memory import QueryMemory
 from .text_field import TextField
-from .window import close_button_clicked, paint_modal_frame, paint_window_title
-
-
-comptime _LABEL = String(" Find: ")
-comptime _LABEL_W = 7
-"""Columns occupied by the inline search label (``" Find: "``)."""
 
 
 struct QuickOpen(Movable):
@@ -73,8 +56,6 @@ struct QuickOpen(Movable):
     # move ``selected`` while leaving ``anchor`` pinned, painting the
     # whole range highlighted and submitting all of it on Enter.
     var anchor: Int
-    var scroll: Int
-    var _bar: ScrollBarArea
     # Dialog title — "Quick Open" by default, "Open Recent" for the
     # recents-mode entry point.
     var title: String
@@ -86,13 +67,6 @@ struct QuickOpen(Movable):
     # rather than a file to open. Desktop reads this on submit and shows
     # the file's commit history instead of calling ``open_file``.
     var picks_history: Bool
-    # Cached query strip rect (captured on the most recent ``paint``)
-    # so ``handle_mouse`` can route clicks back to the field without
-    # re-running layout. Negative width = "no paint yet".
-    var _input_rect: Rect
-    # Visible list height captured on the most recent ``paint`` so
-    # ``_scroll_to_selection`` reveals against the real (clamped) viewport.
-    var _revealed_height: Int
     # Async file indexers. Owned for the duration of ``open()`` → first
     # ``tick()`` that observes ``indexer.alive==False``. ``_indexer`` is
     # the main ``ls-files -co`` enumeration; ``_ignored_indexer`` runs
@@ -112,23 +86,22 @@ struct QuickOpen(Movable):
     # it). The "Open Recent" variants do not restore — they always start
     # empty since they filter a different list.
     var _queries: QueryMemory
-    # Saved selection + scroll, also scoped to ``open()``. Stored as
+    # Saved selection, also scoped to ``open()``. Stored as
     # raw indices (not paths) so the restore survives a partially-loaded
     # async indexer: ``_refilter`` clamps these into the current
     # ``matched`` length on every pass while ``_pending_restore`` is
     # True, so as the indexer fills entries the cursor settles back to
-    # the saved row. Both reset to 0 the first time ``open()`` sees a
+    # the saved row. Reset to 0 the first time ``open()`` sees a
     # new project root.
     var _saved_selected: Int
-    var _saved_scroll: Int
-    # Project root associated with the saved query/selection/scroll. A
+    # Project root associated with the saved query/selection. A
     # different root on the next ``open()`` clears the saved state —
     # carrying row 47 from project A into project B's file list would
     # land the cursor on an unrelated file.
     var _saved_root: String
-    # While True, ``_refilter`` clamps ``selected`` / ``scroll`` to the
+    # While True, ``_refilter`` clamps ``selected`` to the
     # saved values instead of resetting them to 0. Set in ``open()``,
-    # cleared the moment the user navigates, scrolls, or types — all
+    # cleared the moment the user selects a row or types — all
     # signals they're past the initial restore.
     var _pending_restore: Bool
     # True while we're inside the project-files ``open()`` lifecycle.
@@ -155,35 +128,29 @@ struct QuickOpen(Movable):
         self.matched = List[Int]()
         self.selected = 0
         self.anchor = 0
-        self.scroll = 0
-        self._bar = ScrollBarArea()
         self.title = String(" Quick Open ")
         self.picks_project = False
         self.picks_history = False
-        self._input_rect = Rect(0, 0, 0, 0)
-        self._revealed_height = 14
         self._indexer = Optional[FileIndexer]()
         self._ignored_indexer = Optional[FileIndexer]()
         self.indexing = False
         self.truncated = False
         self._queries = QueryMemory()
         self._saved_selected = 0
-        self._saved_scroll = 0
         self._saved_root = String("")
         self._pending_restore = False
         self._in_main_open = False
         self._filtered_count = 0
 
     def open(mut self, var root: String, var prefill: String = String("")):
-        # A different project root invalidates the saved row / scroll —
+        # A different project root invalidates the saved row —
         # the file list won't share indices. (The query is kept per root
         # in ``_queries``.) Reset before the move so ``self.root``
         # reflects the new value when we compare next time.
         var saved_query = self._queries.get(root)
         if self._saved_root != root:
             self._saved_selected = 0
-            self._saved_scroll = 0
-        self._saved_root = root
+            self._saved_root = root
         self.root = root^
         self._in_main_open = True
         self.query = TextField()
@@ -207,11 +174,9 @@ struct QuickOpen(Movable):
         self.selected_paths = List[String]()
         self.selected = 0
         self.anchor = 0
-        self.scroll = 0
-        # ``_refilter`` will clamp ``_saved_selected`` / ``_saved_scroll``
-        # into ``selected`` / ``scroll`` while this flag is True. The
-        # first user navigation / scroll / keystroke flips it off. With a
-        # prefill the saved row/scroll are meaningless against the new
+        # ``_refilter`` will clamp ``_saved_selected`` into ``selected``
+        # while this flag is True. The first user selection / keystroke
+        # flips it off. With a prefill the saved row is meaningless against the new
         # filter, so skip the restore and let ``_refilter`` start at the
         # top of the prefiltered results.
         self._pending_restore = not has_prefill
@@ -374,7 +339,6 @@ struct QuickOpen(Movable):
         self.selected_paths = List[String]()
         self.selected = 0
         self.anchor = 0
-        self.scroll = 0
         if len(title.as_bytes()) > 0:
             self.title = title^
         else:
@@ -402,7 +366,7 @@ struct QuickOpen(Movable):
     def close(mut self):
         self.active = False
         self.submitted = False
-        # Remember the query / selection / scroll for the next
+        # Remember the query / selection for the next
         # ``open()`` so the user comes back to the same state (cancel-
         # by-ESC and submit-via-Enter both route through here). Only
         # the main project-files variant participates; ``open_recent``
@@ -414,7 +378,6 @@ struct QuickOpen(Movable):
         if self._in_main_open:
             self._queries.put(self.root, self.query.text)
             self._saved_selected = self.selected
-            self._saved_scroll = self.scroll
             # ``_saved_root`` was already set in ``open()``; leave it.
         self._in_main_open = False
         self._pending_restore = False
@@ -427,7 +390,6 @@ struct QuickOpen(Movable):
         self.matched = List[Int]()
         self.selected = 0
         self.anchor = 0
-        self.scroll = 0
         self.title = String(" Quick Open ")
         self.picks_project = False
         self.picks_history = False
@@ -474,7 +436,7 @@ struct QuickOpen(Movable):
         never edits the query), so the matched indices for the existing
         prefix are unchanged. Match only the entries appended since the
         last filter and append their matches, preserving order — then
-        re-run the same selection/scroll clamp ``_refilter`` applies."""
+        re-run the same selection clamp ``_refilter`` applies."""
         self._match_entries_from(self._filtered_count)
         self._filtered_count = len(self.entries)
         self._apply_filter_selection()
@@ -482,136 +444,20 @@ struct QuickOpen(Movable):
     def _apply_filter_selection(mut self):
         if self._pending_restore and len(self.matched) > 0:
             # Initial restore from a prior ``close()``. We always read
-            # from ``_saved_selected`` / ``_saved_scroll`` (untouched
-            # across multiple ``tick`` ⇒ ``_refilter`` cycles during
-            # async indexing) and clamp into the *current* matched
-            # length, so as more entries stream in the cursor settles
-            # onto the saved row.
+            # from ``_saved_selected`` (untouched across multiple
+            # ``tick`` ⇒ ``_refilter`` cycles during async indexing) and
+            # clamp into the *current* matched length, so as more
+            # entries stream in the cursor settles onto the saved row.
             var s = self._saved_selected
             if s >= len(self.matched): s = len(self.matched) - 1
             if s < 0: s = 0
             self.selected = s
             self.anchor = s
-            var sc = self._saved_scroll
-            if sc < 0: sc = 0
-            # Loose clamp — keep ``scroll`` from running past where
-            # there's anything to show. Paint's slice handles the
-            # tight bound against list-height.
-            if sc >= len(self.matched): sc = len(self.matched) - 1
-            if sc < 0: sc = 0
-            self.scroll = sc
         else:
             self.selected = 0
             self.anchor = 0
-            self.scroll = 0
 
-    # --- geometry ---------------------------------------------------------
-
-    def _rect(self, container_bounds: Rect) -> Rect:
-        return center_in(container_bounds, 70, 20)
-
-    def is_input_at(self, pos: Point, container_bounds: Rect) -> Bool:
-        """True iff ``pos`` lies on the ``Find:`` query row."""
-        if not self.active:
-            return False
-        var rect = self._rect(container_bounds)
-        return build_picker_layout(rect, _LABEL_W).input_rect.contains(pos)
-
-    # --- paint ------------------------------------------------------------
-
-    def paint(mut self, mut canvas: Canvas, container_bounds: Rect):
-        if not self.active:
-            return
-        var bg          = Attr(BLACK,  LIGHT_GRAY)
-        var sel_attr    = Attr(BLACK,  YELLOW)
-        var hint_attr   = Attr(BLUE,   LIGHT_GRAY)
-        var rect = self._rect(container_bounds)
-        var layout = build_picker_layout(rect, _LABEL_W)
-        var painter = paint_modal_frame(canvas, rect, bg)
-        # Dynamic title — base label + a parenthetical status while the
-        # async indexer is still running, or a one-shot "truncated"
-        # marker after we hit ``QUICK_OPEN_FILE_CAP`` so the user knows
-        # the visible list isn't the whole project.
-        var painted_title = self.title
-        if self.indexing:
-            painted_title = self.title + String("(indexing… ") \
-                + String(len(self.entries)) + String(") ")
-        elif self.truncated:
-            painted_title = self.title + String("(truncated at ") \
-                + String(QUICK_OPEN_FILE_CAP) + String(" files) ")
-        paint_window_title(canvas, rect, painted_title, bg, bg)
-        # Search line: ``Find: <query>_``
-        _ = painter.put_text(canvas, layout.input_label_pt, _LABEL, bg)
-        self._input_rect = layout.input_rect
-        self.query.paint(canvas, layout.input_rect, True)
-        # Listing. The whole multi-select range gets the highlight
-        # attribute — when ``anchor == selected`` that's just a single
-        # row, when shift+arrow has extended the selection it's a span.
-        var sel_lo = self.anchor if self.anchor < self.selected else self.selected
-        var sel_hi = self.selected if self.anchor < self.selected else self.anchor
-        var top = layout.list_top
-        var h = layout.list_height
-        self._revealed_height = h
-        for i in range(h):
-            var idx = self.scroll + i
-            if idx >= len(self.matched):
-                break
-            var entry = self.entries[self.matched[idx]]
-            var attr = sel_attr if sel_lo <= idx and idx <= sel_hi else bg
-            painter.fill(
-                canvas, Rect(rect.a.x + 1, top + i, rect.b.x - 1, top + i + 1),
-                String(" "), attr,
-            )
-            _ = painter.put_text(
-                canvas, Point(rect.a.x + 2, top + i), entry, attr,
-            )
-        self._bar.paint(
-            canvas, Rect(rect.a.x + 1, top, rect.b.x - 1, top + h),
-            len(self.matched), self.scroll, bg,
-        )
-        # Bottom hint.
-        _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, layout.hint_y),
-            String(" Enter: open  ESC: cancel "),
-            hint_attr,
-        )
-
-    # --- events -----------------------------------------------------------
-
-    def handle_key(mut self, event: Event) -> Bool:
-        """Returns True if the event was consumed (always True while active)."""
-        if not self.active:
-            return False
-        if event.kind != EVENT_KEY:
-            return True
-        var k = event.key
-        if k == KEY_ESC:
-            self.close()
-            return True
-        if k == KEY_ENTER:
-            self.submit()
-            return True
-        if picker_nav_key(k, len(self.matched), self.selected):
-            # Any deliberate navigation ends the "restore" phase — the
-            # next ``_refilter`` (e.g. an in-flight indexer tick) must
-            # respect where the user just moved to, not snap back.
-            self._pending_restore = False
-            # Shift held ⇒ extend the multi-selection (anchor stays
-            # pinned, ``selected`` is now the moving end). No shift ⇒
-            # collapse to the new cursor position.
-            if (event.mods & MOD_SHIFT) == 0:
-                self.anchor = self.selected
-            self._scroll_to_selection()
-            return True
-        var r = self.query.handle_key(event)
-        if r.consumed:
-            if r.changed:
-                # Query changed ⇒ the saved row index is meaningless
-                # against the new filter; let ``_refilter`` reset.
-                self._pending_restore = False
-                self._refilter()
-            return True
-        return True
+    # --- native host (macOS-style UI) ------------------------------------
 
     def submit(mut self):
         """Open the selected rows (Enter): the host reads
@@ -620,8 +466,6 @@ struct QuickOpen(Movable):
             return
         self._collect_selected_paths()
         self.submitted = True
-
-    # --- native host (macOS-style UI) ------------------------------------
 
     def set_query(mut self, var text: String):
         if text == self.query.text:
@@ -654,65 +498,6 @@ struct QuickOpen(Movable):
         for i in range(lo, hi + 1):
             self.selected_paths.append(self.abs_at(self.matched[i]))
         self.selected_path = self.abs_at(self.matched[self.selected])
-
-    def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Bool:
-        if not self.active:
-            return False
-        if event.kind != EVENT_MOUSE:
-            return True
-        var rect = self._rect(container_bounds)
-        var layout = build_picker_layout(rect, _LABEL_W)
-        # Standard ``[■]`` close button — equivalent to ESC. Checked
-        # before the input/list routing so a click on the chrome glyph
-        # always dismisses the dialog.
-        if close_button_clicked(rect, event):
-            self.close()
-            return True
-        var sb = self._bar.handle_mouse(event)
-        if sb >= 0:
-            # Like the wheel, ends restore mode.
-            self.scroll = sb
-            self._pending_restore = False
-            return True
-        if self._input_rect.width() > 0 \
-                and self.query.handle_mouse(event, self._input_rect):
-            return True
-        if event.pressed and not event.motion:
-            if picker_wheel_scroll(
-                event.button, self.scroll, len(self.matched),
-                layout.list_height,
-            ):
-                # Wheel scroll counts as user interaction — end restore
-                # mode so the next ``_refilter`` doesn't snap back.
-                self._pending_restore = False
-                return True
-        var idx = picker_row_at(
-            event, rect, layout, self.scroll, len(self.matched),
-        )
-        if idx < 0:
-            return True
-        # Shift+click extends the multi-select (anchor stays); plain
-        # click collapses to a single-row selection. Click-on-already-
-        # selected (with no shift) is the submit shortcut, matching how
-        # the picker behaved before multi-select existed.
-        self._pending_restore = False
-        var shift = (event.mods & MOD_SHIFT) != 0
-        if shift:
-            self.selected = idx
-            return True
-        if idx == self.selected and self.anchor == self.selected:
-            self.selected = idx
-            self.anchor = idx
-            self._collect_selected_paths()
-            self.submitted = True
-            return True
-        self.selected = idx
-        self.anchor = idx
-        return True
-
-    def _scroll_to_selection(mut self):
-        self.scroll = scroll_to_reveal(self.scroll, self.selected, self._revealed_height)
-
 
 # --- match algorithm ---------------------------------------------------------
 # The query is split on spaces into tokens; each token is then split around

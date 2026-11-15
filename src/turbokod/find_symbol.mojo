@@ -30,20 +30,9 @@ every query change cancel the previous child via ``SIGTERM``.
 from std.collections.list import List
 from std.collections.optional import Optional
 
-from .canvas import Canvas, paint_drop_shadow
-from .painter import Painter
-from .colors import Attr, BLACK, BLUE, LIGHT_GRAY, RED, YELLOW
-from .events import Event, EVENT_KEY, EVENT_MOUSE, KEY_ENTER, KEY_ESC
-from .file_io import ci_less, project_relative, read_file
-from .geometry import center_in, Point, Rect
-from .scrollbar import ScrollBarArea
-from .picker_input import (
-    build_picker_layout, picker_nav_key, picker_row_at, picker_wheel_scroll,
-    scroll_to_reveal,
-)
+from .file_io import ci_less, read_file
 from .string_utils import (
-    display_columns, is_ascii_ident_byte, parse_uint_range, starts_with,
-    tail_to_columns,
+    is_ascii_ident_byte, parse_uint_range, starts_with,
 )
 from .symbol_seed import (
     is_definition_keyword, is_definition_site, seed_priority,
@@ -51,13 +40,7 @@ from .symbol_seed import (
 from .query_memory import QueryMemory
 from .text_field import TextField
 from .case_fold import contains_ci, eq_ci, starts_with_ci
-from .window import paint_window_title
 from .line_stream import LineStream
-
-
-comptime _LABEL = String(" Find: ")
-comptime _LABEL_W = 7
-"""Columns occupied by the inline search label (``" Find: "``)."""
 
 
 comptime _ENTRIES_CAP: Int = 500
@@ -221,8 +204,6 @@ struct FindSymbol(Movable):
     var active: Bool
     var query: TextField
     var root: String                 # project root the runner is rooted at
-    # Cached input strip rect for mouse routing.
-    var _input_rect: Rect
     var entries: List[FindSymbolMatch]
     # Parallel name list — kept in sync with ``entries`` for O(N) dedupe
     # on append. Could swap for a hashed set if dedupe ever becomes hot;
@@ -234,8 +215,6 @@ struct FindSymbol(Movable):
     # name replaces the entry when it is the better seed.
     var seen_priority: List[Int]
     var selected: Int
-    var scroll: Int
-    var _bar: ScrollBarArea
     var submitted: Bool
     # Output: the entry the user just submitted. The host reads these
     # after ``take_submitted()`` returns True.
@@ -297,8 +276,6 @@ struct FindSymbol(Movable):
         self.seen_names = List[String]()
         self.seen_priority = List[Int]()
         self.selected = 0
-        self.scroll = 0
-        self._bar = ScrollBarArea()
         self.submitted = False
         self.selected_path = String("")
         self.selected_line = 0
@@ -309,7 +286,6 @@ struct FindSymbol(Movable):
         self.state = _STATE_IDLE
         self.status_message = String("")
         self.runner = _FindSymbolRunner()
-        self._input_rect = Rect(0, 0, 0, 0)
         self._user_navigated = False
         self._chooser_mode = False
         self._chooser_name = String("")
@@ -351,7 +327,6 @@ struct FindSymbol(Movable):
         self.seen_names = List[String]()
         self.seen_priority = List[Int]()
         self.selected = 0
-        self.scroll = 0
         self.submitted = False
         self.selected_path = String("")
         self.selected_line = 0
@@ -362,7 +337,6 @@ struct FindSymbol(Movable):
         self.state = _STATE_IDLE
         self.status_message = String("")
         self.runner.cancel()
-        self._input_rect = Rect(0, 0, 0, 0)
         self._user_navigated = False
         self._chooser_mode = False
         self._chooser_name = String("")
@@ -381,14 +355,12 @@ struct FindSymbol(Movable):
         self.seen_names = List[String]()
         self.seen_priority = List[Int]()
         self.selected = 0
-        self.scroll = 0
         self.submitted = False
         self.selected_qualifier = String("")
         self.selected_container = String("")
         self.state = _STATE_IDLE
         self.status_message = String("")
         self.runner.cancel()
-        self._input_rect = Rect(0, 0, 0, 0)
         self._user_navigated = False
         self._chooser_mode = False
         self._chooser_name = String("")
@@ -431,7 +403,6 @@ struct FindSymbol(Movable):
         self.seen_names = List[String]()
         self.seen_priority = List[Int]()
         self.selected = 0
-        self.scroll = 0
         self._user_navigated = False
         self._chooser_mode = True
         self._chooser_name = name^
@@ -508,10 +479,8 @@ struct FindSymbol(Movable):
             for i in range(len(self.entries)):
                 if self.entries[i].name == prev_selected_name:
                     self.selected = i
-                    self._scroll_to_selection()
                     return
         self.selected = 0
-        self.scroll = 0
 
     def _tick_class_rows(
         mut self, rows: List[Tuple[String, Int, Int, String]],
@@ -558,7 +527,6 @@ struct FindSymbol(Movable):
             _sort_entries_ranked(self.entries, member)
             if not self._user_navigated:
                 self.selected = 0
-                self.scroll = 0
 
     def take_query_dirty(mut self) -> Bool:
         """Consume the "query changed, re-run the search" flag."""
@@ -607,7 +575,6 @@ struct FindSymbol(Movable):
             self.seen_priority.append(0)
         _sort_entries_ranked(self.entries, _query_member(self.query.text))
         self.selected = 0
-        self.scroll = 0
         self._user_navigated = False
 
     def restart_runner(mut self):
@@ -622,7 +589,6 @@ struct FindSymbol(Movable):
         self.seen_names = List[String]()
         self.seen_priority = List[Int]()
         self.selected = 0
-        self.scroll = 0
         self._user_navigated = False
         self._class_mode = False
         self._class_matched = False
@@ -644,181 +610,6 @@ struct FindSymbol(Movable):
             self._class_mode = True
             return
         _ = self.runner.start(member, self.root)
-
-    # --- geometry ---------------------------------------------------------
-
-    def _rect(self, container_bounds: Rect) -> Rect:
-        return center_in(container_bounds, 80, 22)
-
-    def is_input_at(self, pos: Point, container_bounds: Rect) -> Bool:
-        if not self.active:
-            return False
-        var rect = self._rect(container_bounds)
-        return build_picker_layout(rect, _LABEL_W).input_rect.contains(pos)
-
-    # --- paint ------------------------------------------------------------
-
-    def paint(mut self, mut canvas: Canvas, container_bounds: Rect):
-        if not self.active:
-            return
-        var bg          = Attr(BLACK,  LIGHT_GRAY)
-        var sel_attr    = Attr(BLACK,  YELLOW)
-        var hint_attr   = Attr(BLUE,   LIGHT_GRAY)
-        var error_attr  = Attr(RED,    LIGHT_GRAY)
-        var rect = self._rect(container_bounds)
-        var layout = build_picker_layout(rect, _LABEL_W)
-        paint_drop_shadow(canvas, rect)
-        var painter = Painter(rect)
-        painter.fill(canvas, rect, String(" "), bg)
-        painter.draw_box(canvas, rect, bg, False)
-        # Title switches to the chooser variant once the user has
-        # picked a name and the LSP has handed back >1 location, so
-        # the second-step purpose is obvious without an extra label
-        # row eating from the list height.
-        var title: String
-        if self._chooser_mode:
-            title = String(" Find Symbol — choose location for ") \
-                + self._chooser_name + String(" ")
-        else:
-            title = String(" Find Symbol ")
-        paint_window_title(canvas, rect, title, bg, bg)
-        _ = painter.put_text(canvas, layout.input_label_pt, _LABEL, bg)
-        self._input_rect = layout.input_rect
-        if self._chooser_mode:
-            # Locked label in place of the editable input — the query
-            # is the name they already picked, retyping isn't useful
-            # here, and a non-blinking row reads as "frozen".
-            painter.fill(
-                canvas, layout.input_rect, String(" "), bg,
-            )
-            _ = painter.put_text(
-                canvas, Point(layout.input_rect.a.x, layout.input_rect.a.y),
-                self._chooser_name, bg,
-            )
-        else:
-            self.query.paint(canvas, layout.input_rect, True)
-        var top = layout.list_top
-        var h = layout.list_height
-        # Status / placeholder. Chooser mode skips this whole branch:
-        # entries are pre-populated by the host, so neither the query-
-        # too-short hint nor the "searching…" copy applies.
-        if self._chooser_mode:
-            pass
-        elif self.state == _STATE_PENDING:
-            _ = painter.put_text(
-                canvas, Point(rect.a.x + 2, top),
-                self.status_message, hint_attr,
-            )
-        elif self.state == _STATE_ERROR:
-            _ = painter.put_text(
-                canvas, Point(rect.a.x + 2, top),
-                self.status_message, error_attr,
-            )
-        elif len(_query_member(self.query.text).as_bytes()) < _MIN_QUERY_LEN:
-            _ = painter.put_text(
-                canvas, Point(rect.a.x + 2, top),
-                String("Type at least 2 letters of a symbol name."),
-                hint_attr,
-            )
-        elif len(self.entries) == 0:
-            var msg: String
-            if self.runner.is_active():
-                msg = String("Searching…")
-            else:
-                msg = String("No matches.")
-            _ = painter.put_text(
-                canvas, Point(rect.a.x + 2, top), msg, hint_attr,
-            )
-        # Listing — paints regardless of state so a leftover error
-        # message above the list doesn't hide already-collected hits.
-        # In the initial (picker) mode each row is a unique symbol
-        # name with a single rg-derived ``entry.path`` (the first
-        # textual occurrence); the path adds noise without
-        # disambiguation power, so the row is just the name. In
-        # chooser mode the *name is identical on every row* (that's
-        # the whole point of the chooser), so we drop the name and
-        # render the relative ``path:line`` instead — that's the
-        # only thing that distinguishes candidates.
-        for i in range(h):
-            var idx = self.scroll + i
-            if idx >= len(self.entries):
-                break
-            var entry = self.entries[idx]
-            var is_sel = (idx == self.selected)
-            var row_attr = sel_attr if is_sel else bg
-            painter.fill(
-                canvas, Rect(rect.a.x + 1, top + i, rect.b.x - 1, top + i + 1),
-                String(" "), row_attr,
-            )
-            var name_x = rect.a.x + 2
-            if not self._chooser_mode:
-                var row_label = entry.name
-                if len(entry.container.as_bytes()) > 0:
-                    row_label = entry.container + String(".") + entry.name
-                _ = painter.put_text(
-                    canvas, Point(name_x, top + i), row_label, row_attr,
-                )
-                continue
-            # Chooser row: ``relative-path:line``. Show just the path,
-            # not the symbol name (every row in this list shares the
-            # name we're disambiguating, so repeating it eats space
-            # and reads like noise).
-            var rel = project_relative(self.root, entry.path)
-            var label = rel + String(":") + String(entry.line)
-            var avail = rect.b.x - 1 - name_x
-            if avail < 1:
-                continue
-            var display = _truncate_path_to(label, avail)
-            _ = painter.put_text(
-                canvas, Point(name_x, top + i), display, row_attr,
-            )
-        self._bar.paint(
-            canvas, Rect(rect.a.x + 1, top, rect.b.x - 1, top + h),
-            len(self.entries), self.scroll, bg,
-        )
-        # Bottom hint.
-        _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, layout.hint_y),
-            String(" Enter: jump  ESC: cancel "),
-            hint_attr,
-        )
-
-    # --- events -----------------------------------------------------------
-
-    def handle_key(mut self, event: Event) -> Bool:
-        """Returns True iff consumed (always True while active)."""
-        if not self.active:
-            return False
-        if event.kind != EVENT_KEY:
-            return True
-        var k = event.key
-        if k == KEY_ESC:
-            self.close()
-            return True
-        # While a submit is in flight, swallow everything but ESC so
-        # the in-flight LSP response lands against a stable selection.
-        if self.state == _STATE_PENDING:
-            return True
-        if k == KEY_ENTER:
-            self.submit()
-            return True
-        if picker_nav_key(k, len(self.entries), self.selected):
-            self._user_navigated = True
-            self._scroll_to_selection()
-            return True
-        # In chooser mode the entry list is locked, so any further
-        # typing in the input field is swallowed. Letting the field
-        # capture keys would scramble the visible chosen name without
-        # any effect on the static list — confusing, never useful.
-        if self._chooser_mode:
-            return True
-        var prev_query = self.query.text
-        var r = self.query.handle_key(event)
-        if not r.consumed:
-            return True
-        if r.changed:
-            self._query_changed(prev_query)
-        return True
 
     def _query_changed(mut self, prev_query: String):
         # Filter the new value down to identifier bytes only — the
@@ -870,54 +661,6 @@ struct FindSymbol(Movable):
             return
         self.selected = idx
         self._user_navigated = True
-
-    def is_pending(self) -> Bool:
-        return self.state == _STATE_PENDING
-
-    def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Bool:
-        if not self.active:
-            return False
-        if event.kind != EVENT_MOUSE:
-            return True
-        var rect = self._rect(container_bounds)
-        var layout = build_picker_layout(rect, _LABEL_W)
-        var sb = self._bar.handle_mouse(event)
-        if sb >= 0:
-            self.scroll = sb
-            return True
-        # Skip text-field mouse routing in chooser mode — the input is
-        # frozen and the field isn't visibly painted, so capturing
-        # clicks there would just move an invisible cursor.
-        if not self._chooser_mode and self._input_rect.width() > 0 \
-                and self.query.handle_mouse(event, self._input_rect):
-            return True
-        if event.pressed and not event.motion:
-            if picker_wheel_scroll(
-                event.button, self.scroll, len(self.entries),
-                layout.list_height,
-            ):
-                return True
-        var idx = picker_row_at(
-            event, rect, layout, self.scroll, len(self.entries),
-        )
-        if idx < 0:
-            return True
-        if idx == self.selected:
-            var entry = self.entries[idx]
-            self.selected_path = entry.path
-            self.selected_line = entry.line
-            self.selected_column = entry.column
-            self.selected_name = entry.name
-            self.selected_qualifier = _query_qualifier(self.query.text)
-            self.selected_container = entry.container
-            self.submitted = True
-            return True
-        self.selected = idx
-        self._user_navigated = True
-        return True
-
-    def _scroll_to_selection(mut self):
-        self.scroll = scroll_to_reveal(self.scroll, self.selected, 16)
 
 
 # --- helpers ---------------------------------------------------------------
@@ -1017,24 +760,6 @@ def _sort_entries_ranked(
     for i in range(len(b4)):
         entries[w] = b4[i]
         w += 1
-
-
-def _truncate_path_to(s: String, max_cols: Int) -> String:
-    """Truncate ``s`` to at most ``max_cols`` cells, dropping codepoints
-    from the *front* and marking elision with a leading ``…``. Paths are
-    most informative at their tail (the filename), so a head-elide keeps
-    the meaningful end visible.
-
-    Column- and codepoint-aware (via ``tail_to_columns``): a byte slice
-    would over-truncate a non-ASCII path and could split a codepoint into
-    invalid UTF-8 (rendered as a stray ``?``)."""
-    if max_cols <= 0:
-        return String("")
-    if display_columns(s) <= max_cols:
-        return s
-    if max_cols == 1:
-        return String("…")
-    return String("…") + tail_to_columns(s, max_cols - 1)
 
 
 def _sort_bucket_alpha(mut bucket: List[FindSymbolMatch]):

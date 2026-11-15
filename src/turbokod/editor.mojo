@@ -394,35 +394,6 @@ def _split_buffer_lines(text: String) -> List[String]:
     return out^
 
 
-def _normalize_crlf(text: String) -> String:
-    """Rewrite ``text`` with all ``\\r\\n`` pairs collapsed to ``\\n``.
-
-    Used on external text that's about to be diffed or spliced into the
-    buffer (currently ``git show HEAD:<path>`` output) — the buffer
-    strips trailing ``\\r`` from each line on load, so any caller that
-    passes raw CRLF bytes through ``split_lines`` would line up
-    ``"foo\\r"`` against the buffer's ``"foo"`` and flag every row as
-    changed. Trailing single ``\\r`` (no following ``\\n``) at the very
-    end is also dropped to match ``TextBuffer.__init__``.
-    """
-    var bytes = text.as_bytes()
-    var n = len(bytes)
-    var out = List[UInt8]()
-    var i = 0
-    while i < n:
-        var b = bytes[i]
-        if b == 0x0D and (i + 1 < n and bytes[i + 1] == 0x0A):
-            # CRLF → LF; the loop will append the LF on the next pass.
-            i += 1
-            continue
-        if b == 0x0D and i + 1 == n:
-            # Trailing lone '\r' at EOF — strip.
-            break
-        out.append(b)
-        i += 1
-    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=len(out))))
-
-
 def _mapped_row(row_map: List[Int], row: Int) -> Int:
     """Where ``row`` went, per ``row_map`` (new row of each old one, -1
     for a line that went): a gone line's row is as far below the last
@@ -1965,13 +1936,9 @@ struct Editor(Copyable, Movable):
     var _hover_candidate_anchor_y: Int
     var _hover_candidate_emitted: Bool
     # Parked hover response: ``_hover_result_text`` is the rendered text
-    # (empty when nothing is shown); ``_hover_result_row``/``_col`` is
-    # the position that produced it so we can keep displaying as long as
-    # the mouse remains on the same word. ``_hover_result_anchor_x/y``
-    # is the screen anchor (bottom-left of the popup).
+    # (empty when nothing is shown); ``_hover_result_anchor_x/y`` is the
+    # screen anchor (bottom-left of the popup).
     var _hover_result_text: String
-    var _hover_result_row: Int
-    var _hover_result_col: Int
     var _hover_result_anchor_x: Int
     var _hover_result_anchor_y: Int
     # A popup under the line an on-save action failed on, saying why
@@ -2139,8 +2106,6 @@ struct Editor(Copyable, Movable):
         self._hover_candidate_anchor_y = 0
         self._hover_candidate_emitted = False
         self._hover_result_text = String("")
-        self._hover_result_row = -1
-        self._hover_result_col = -1
         self._hover_result_anchor_x = 0
         self._hover_result_anchor_y = 0
         self._save_notice_row = -1
@@ -2363,8 +2328,6 @@ struct Editor(Copyable, Movable):
         self._hover_candidate_anchor_y = copy._hover_candidate_anchor_y
         self._hover_candidate_emitted = copy._hover_candidate_emitted
         self._hover_result_text = copy._hover_result_text
-        self._hover_result_row = copy._hover_result_row
-        self._hover_result_col = copy._hover_result_col
         self._hover_result_anchor_x = copy._hover_result_anchor_x
         self._hover_result_anchor_y = copy._hover_result_anchor_y
         self._save_notice_row = copy._save_notice_row
@@ -3543,8 +3506,6 @@ struct Editor(Copyable, Movable):
             self._clear_hover_result()
             return
         self._hover_result_text = text^
-        self._hover_result_row = row
-        self._hover_result_col = col
         self._hover_result_anchor_x = self._hover_candidate_anchor_x
         self._hover_result_anchor_y = self._hover_candidate_anchor_y
 
@@ -3561,8 +3522,6 @@ struct Editor(Copyable, Movable):
     def _clear_hover_result(mut self):
         """Drop the displayed hover popup (the dwell candidate stays)."""
         self._hover_result_text = String("")
-        self._hover_result_row = -1
-        self._hover_result_col = -1
 
     def consume_completion_cancel(mut self) -> Bool:
         """Return and clear the cancel-pending latch.
@@ -5224,7 +5183,7 @@ struct Editor(Copyable, Movable):
         ``apply_revert_block`` would splice ``\\r``-laden lines back
         into the buffer.
         """
-        self._git_head_lines = split_lines(_normalize_crlf(text))
+        self._git_head_lines = _split_buffer_lines(text)
         self._git_head_loaded = True
         self._git_head_present = present
         self._git_changes_dirty = True
@@ -9943,9 +9902,6 @@ struct Editor(Copyable, Movable):
 
     def bookmark_count(self) -> Int:
         return self.buffer.mark_count
-
-    def is_bookmarked(self, row: Int) -> Bool:
-        return self.buffer.is_marked(row)
 
     def toggle_bookmark(mut self):
         """Toggle the bookmark on every caret's line."""

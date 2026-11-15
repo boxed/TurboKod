@@ -484,21 +484,6 @@ def button_face(focused: Bool, enabled: Bool = True) -> Attr:
     return Attr(BLACK, GREEN)
 
 
-@fieldwise_init
-struct PlacedButton(ImplicitlyCopyable, Movable):
-    """A dialog's shadow button plus the focus slot it activates and
-    whether it's currently enabled — the shape the settings-style dialogs
-    keep their button row in."""
-    var button: ShadowButton
-    var focus: UInt8
-    var enabled: Bool
-
-    def paint(self, mut canvas: Canvas, focused: Bool):
-        paint_shadow_button(
-            canvas, self.button, button_face(focused, self.enabled), LIGHT_GRAY,
-        )
-
-
 def shadow_button_hit(button: ShadowButton, event: Event) -> Bool:
     """True when ``event`` is a left-button press landing on
     ``button``'s hit rect (face or shadow rows). Drag-motion and

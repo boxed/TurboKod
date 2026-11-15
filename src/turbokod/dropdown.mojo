@@ -114,34 +114,6 @@ struct Dropdown(Copyable, Movable):
             return String("")
         return self.options[self.index]
 
-    def set_value(mut self, value: String):
-        """Move the cursor to ``value``. If the value isn't in the
-        option list and is non-empty, append it so it's preserved
-        through paints (a config loaded from disk shouldn't snap to
-        a different choice just because we don't recognize the
-        value). Empty input maps to the first option.
-
-        ``is_open`` / ``highlight`` are reset because the value being
-        re-seeded from outside almost always means the surrounding
-        context (e.g. selected target) changed; carrying over a
-        stale popup state would surprise the user."""
-        for i in range(len(self.options)):
-            if self.options[i] == value:
-                self.index = i
-                self.is_open = False
-                self.highlight = i
-                return
-        if len(value.as_bytes()) == 0:
-            if len(self.options) > 0:
-                self.index = 0
-            self.is_open = False
-            self.highlight = 0
-            return
-        self.options.append(value)
-        self.index = len(self.options) - 1
-        self.is_open = False
-        self.highlight = self.index
-
     def open(mut self):
         if len(self.options) == 0:
             return

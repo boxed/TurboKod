@@ -214,9 +214,6 @@ int32_t tk_desktop_merge_finish(int64_t h, int64_t apply, int64_t cols, int64_t 
 int64_t tk_desktop_history(int64_t h, int64_t out_ptr, int64_t cap);
 int64_t tk_desktop_history_patch(int64_t h, int64_t idx, int64_t out_ptr, int64_t cap);
 void tk_desktop_history_act(int64_t h, int64_t op, int64_t idx);
-int64_t tk_desktop_spelling(int64_t h, int64_t out_ptr, int64_t cap);
-int64_t tk_desktop_spelling_rows(int64_t h, int64_t out_ptr, int64_t cap);
-void tk_desktop_spelling_act(int64_t h, int64_t action, int64_t ptr, int64_t len);
 int64_t tk_desktop_tree(int64_t h, int64_t cols, int64_t rows, int64_t out_ptr, int64_t cap);
 // macOS-style UI review mode: _review {mode: picker {tab, labels, cursor} |
 // reviewing {title, files, cur_file, change_index, change_total, num, den,
@@ -274,7 +271,6 @@ void tk_desktop_git_select(int64_t h, int64_t pane, int64_t idx, int64_t cols, i
 void tk_desktop_git_cursor(int64_t h, int64_t pane, int64_t row);
 int32_t tk_desktop_git_key(int64_t h, int64_t pane, int64_t key, int64_t mods,
                            int64_t cols, int64_t rows);
-void tk_desktop_git_commit(int64_t h, int64_t ptr, int64_t len);
 void tk_desktop_git_open(int64_t h, int64_t pane, int64_t row, int64_t cols, int64_t rows);
 void tk_desktop_git_answer(int64_t h, int64_t cptr, int64_t clen, int64_t tptr, int64_t tlen);
 int32_t tk_desktop_git_close(int64_t h);

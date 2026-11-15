@@ -38,12 +38,8 @@ from std.collections.optional import Optional
 
 from .canvas import Canvas
 from .painter import Painter
-from .colors import (
-    Attr, BLACK, BLUE, CYAN, default_attr, GREEN, PANE_BG, PANE_FG, WHITE,
-)
-from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE, KEY_TAB, MOD_SHIFT, MOUSE_BUTTON_LEFT,
-)
+from .colors import Attr, BLUE, default_attr, PANE_BG, PANE_FG, WHITE
+from .events import Event, EVENT_MOUSE, MOUSE_BUTTON_LEFT
 from .geometry import Point, Rect, compute_dialog_rect
 from .string_utils import display_columns
 
@@ -215,10 +211,6 @@ struct RowCursor(Copyable, Movable):
         self.y = self.y + height
         return start
 
-    def skip(mut self, rows: Int):
-        self.y = self.y + rows
-
-
 # --- Focus management ------------------------------------------------------
 
 
@@ -304,21 +296,6 @@ struct FocusGroup(Movable):
         if 0 <= idx and idx < len(self.slots):
             self.focused = idx
 
-    def slot_count(self) -> Int:
-        return len(self.slots)
-
-
-    def set_visitable(mut self, idx: Int, visitable: Bool):
-        """Toggle slot ``idx``'s participation in the tab walk without
-        touching its rect. For dialogs that drive focus purely through
-        ``cycle`` / ``is_focused`` (no ``hit_test``) and so never call
-        ``update`` to refresh rects — they just need to mark slots
-        in/out of the walk as runtime state changes (e.g. the language
-        editor hides its Remove/Up/Down slots when nothing is
-        selected)."""
-        if 0 <= idx and idx < len(self.slots):
-            self.slots[idx] = FocusableSlot(self.slots[idx].rect, visitable)
-
     def cycle(mut self, backward: Bool = False):
         """Advance focus to the next/previous visitable slot. Wraps
         around. If no slot is visitable, focus becomes -1."""
@@ -374,16 +351,6 @@ struct FocusGroup(Movable):
             return -1
         self.focused = hit
         return hit
-
-    def reconcile(mut self):
-        """If the currently-focused slot is no longer visitable, advance
-        to the next visitable one. Call after a layout pass that has
-        toggled a slot's ``visitable`` flag (e.g. a button row whose
-        Remove button just became disabled because the list emptied)."""
-        if self.focused < 0 or self.focused >= len(self.slots) \
-                or not self.slots[self.focused].visitable:
-            self.cycle()
-
 
 # --- Title-bar drag + placement --------------------------------------------
 
@@ -478,166 +445,5 @@ struct DraggableDialog(ImplicitlyCopyable, Movable):
             self._drag = Optional[Point](Point(
                 event.pos.x - rect.a.x, event.pos.y - rect.a.y,
             ))
-            return True
-        return False
-
-
-def paint_section_rail(
-    mut canvas: Canvas, painter: Painter, inner: Rect,
-    labels: List[String], selected: Int, focused: Bool,
-):
-    """The left-hand section list of a settings-style dialog: one label per
-    row on cyan, the ``selected`` row highlighted — white-on-blue while the
-    rail has keyboard focus, black-on-green otherwise."""
-    var sub = painter.sub(inner)
-    var body_attr = Attr(BLACK, CYAN)
-    sub.fill(canvas, inner, String(" "), body_attr)
-    for i in range(len(labels)):
-        var y = inner.a.y + i
-        if y >= inner.b.y:
-            break
-        var attr = body_attr
-        if i == selected:
-            attr = Attr(WHITE, BLUE) if focused else Attr(BLACK, GREEN)
-            sub.fill(
-                canvas, Rect(inner.a.x, y, inner.b.x, y + 1), String(" "), attr,
-            )
-        _ = sub.put_text(canvas, Point(inner.a.x + 1, y), labels[i], attr)
-
-
-def dialog_host_workspace(container_bounds: Rect) -> Rect:
-    """The area an in-grid dialog may occupy — ``container_bounds`` minus
-    the menu bar (row 0) and status bar (last row), which the host keeps
-    painting so the user keeps their bearings."""
-    if container_bounds.b.y <= 2:
-        return Rect(
-            container_bounds.a.x, 0, container_bounds.b.x, container_bounds.b.y,
-        )
-    return Rect(
-        container_bounds.a.x, 1, container_bounds.b.x, container_bounds.b.y - 1,
-    )
-
-
-struct ResizableDialog(ImplicitlyCopyable, Movable):
-    """Placement + move/resize chrome for a large in-grid dialog (Settings,
-    Project Settings) — the resizable sibling of ``DraggableDialog``.
-
-    ``bounds`` is centered on first use, then the user can drag the title
-    row to move it and the left / right / bottom border (corners included)
-    to resize, down to ``min_w`` x ``min_h``. It is session-persistent
-    across open/close; ``ensure_bounds`` re-clamps it against the current
-    container. Only meaningful in-grid — a host that gives the dialog its
-    own native window skips all of this."""
-    var bounds: Rect
-    var min_w: Int
-    var min_h: Int
-    var _moving: Bool
-    var _move_dx: Int
-    var _move_dy: Int
-    var _resizing: Bool
-    var _rs_left: Bool
-    var _rs_right: Bool
-    var _rs_bottom: Bool
-
-    def __init__(out self, min_w: Int, min_h: Int):
-        self.bounds = Rect(0, 0, 0, 0)
-        self.min_w = min_w
-        self.min_h = min_h
-        self._moving = False
-        self._move_dx = 0
-        self._move_dy = 0
-        self._resizing = False
-        self._rs_left = False
-        self._rs_right = False
-        self._rs_bottom = False
-
-    def cancel_drag(mut self):
-        self._moving = False
-        self._resizing = False
-
-    def ensure_bounds(mut self, container_bounds: Rect):
-        """Initialize ``bounds`` (centered default) on first use and clamp
-        it back into the workspace after a terminal resize."""
-        var ws = dialog_host_workspace(container_bounds)
-        var w = self.bounds.width()
-        var h = self.bounds.height()
-        if w < self.min_w or h < self.min_h:
-            # First open (or degenerate): centered, big enough to be
-            # comfortable, small enough to leave the workspace visible
-            # around it (Settings' live theme preview needs that).
-            w = min(ws.width() - 8, 104)
-            h = min(max(ws.height() - 4, self.min_h), 30)
-            var x = ws.a.x + (ws.width() - w) // 2
-            var y = ws.a.y + (ws.height() - h) // 2
-            self.bounds = Rect(x, y, x + w, y + h)
-        # Shrink to fit, then slide fully on-screen.
-        var b = self.bounds
-        if b.width() > ws.width():
-            b = Rect(b.a.x, b.a.y, b.a.x + ws.width(), b.b.y)
-        if b.height() > ws.height():
-            b = Rect(b.a.x, b.a.y, b.b.x, b.a.y + ws.height())
-        var dx = 0
-        var dy = 0
-        if b.a.x < ws.a.x:
-            dx = ws.a.x - b.a.x
-        if b.b.x > ws.b.x:
-            dx = ws.b.x - b.b.x
-        if b.a.y < ws.a.y:
-            dy = ws.a.y - b.a.y
-        if b.b.y > ws.b.y:
-            dy = ws.b.y - b.b.y
-        self.bounds = Rect(b.a.x + dx, b.a.y + dy, b.b.x + dx, b.b.y + dy)
-
-    def handle_chrome(
-        mut self, event: Event, rect: Rect, container_bounds: Rect,
-    ) -> Bool:
-        """Drag the title row to move, the left / right / bottom border to
-        resize. An in-flight drag owns every event until the button is
-        released — even when the cursor wanders outside the dialog (mirrors
-        ``WindowStack``'s drag/resize state machine). True when consumed."""
-        var ws = dialog_host_workspace(container_bounds)
-        if self._moving:
-            if event.button == MOUSE_BUTTON_LEFT and not event.pressed:
-                self._moving = False
-                return True
-            var w = self.bounds.width()
-            var h = self.bounds.height()
-            var nx = min(max(event.pos.x - self._move_dx, ws.a.x), ws.b.x - w)
-            var ny = min(max(event.pos.y - self._move_dy, ws.a.y), ws.b.y - h)
-            self.bounds = Rect(nx, ny, nx + w, ny + h)
-            return True
-        if self._resizing:
-            if event.button == MOUSE_BUTTON_LEFT and not event.pressed:
-                self._resizing = False
-                return True
-            var ax = self.bounds.a.x
-            var ay = self.bounds.a.y
-            var bx = self.bounds.b.x
-            var by = self.bounds.b.y
-            if self._rs_left:
-                ax = min(max(event.pos.x, ws.a.x), bx - self.min_w)
-            if self._rs_right:
-                bx = max(min(event.pos.x + 1, ws.b.x), ax + self.min_w)
-            if self._rs_bottom:
-                by = max(min(event.pos.y + 1, ws.b.y), ay + self.min_h)
-            self.bounds = Rect(ax, ay, bx, by)
-            return True
-        if event.button != MOUSE_BUTTON_LEFT or not event.pressed \
-                or event.motion or not rect.contains(event.pos):
-            return False
-        # Title row (top border) moves; the other three borders resize.
-        if event.pos.y == rect.a.y:
-            self._moving = True
-            self._move_dx = event.pos.x - rect.a.x
-            self._move_dy = event.pos.y - rect.a.y
-            return True
-        var on_left = event.pos.x == rect.a.x
-        var on_right = event.pos.x == rect.b.x - 1
-        var on_bottom = event.pos.y == rect.b.y - 1
-        if on_left or on_right or on_bottom:
-            self._resizing = True
-            self._rs_left = on_left
-            self._rs_right = on_right
-            self._rs_bottom = on_bottom
             return True
         return False

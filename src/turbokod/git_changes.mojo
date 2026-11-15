@@ -1,19 +1,10 @@
-"""``git diff HEAD`` driver: spawn git, capture its unified diff of the
-worktree against the last commit, return the raw text.
+"""Git plumbing for the editor: each function spawns ``git`` (or reads its
+output) and parses it — status and diffs for the Local Changes view, the
+gutter's change marks against HEAD, branches / log / merge-base for review
+mode, and the revert blocks behind the gutter's "revert change" action.
 
-Untracked files are *not* included — they would show up in ``git status``
-but ``git diff HEAD`` only walks the index. That's a deliberate choice for
-a single-tier "Show local changes" view: the output is real unified-diff
-content with a single hunk-header convention the editor's diff TextMate
-grammar already paints. Mixing in ``+++ Untitled`` slabs for untracked
-files would muddy that. The Local-changes modal, which lists untracked
-files as their own rows, pulls their contents through
-:func:`compute_untracked_diff` instead — one file at a time, in the same
-unified-diff shape.
-
-A repository with no commits at all (``git init`` but never committed)
-makes ``git diff HEAD`` fail with a non-zero exit; the captured stderr is
-discarded by ``capture_command`` and we return an empty string.
+A git that exits non-zero (no commits yet, not a repository, no upstream)
+reads as empty output; callers treat that as "nothing to show".
 """
 
 from std.collections.list import List
@@ -872,23 +863,6 @@ def changed_paths_between(
     return parse_name_status_z(stdout, repo_root)
 
 
-def compute_local_changes(project_root: String) raises -> String:
-    """Spawn ``git -C <root> diff HEAD --no-color`` and return stdout.
-
-    ``project_root`` should be the directory holding the ``.git`` entry —
-    callers typically pass ``Desktop.project.value()``. Empty string when
-    git exits non-zero (no commits, not a repo, …) or when stdout is
-    empty (worktree clean).
-
-    Raises only on spawn failure (e.g., git missing from PATH).
-    """
-    var args = List[String]()
-    args.append(String("diff"))
-    args.append(String("HEAD"))
-    args.append(String("--no-color"))
-    var result = capture_command(_git_argv(project_root, args^))
-    return result.stdout
-
 
 def _append_diff_paths(
     mut args: List[String], rel_path: String, orig_path: String,
@@ -1122,32 +1096,6 @@ def current_branch_name(project_root: String) -> String:
         return String("")
     return String("(") + sha + String(")")
 
-
-def count_unpushed_commits(project_root: String) -> Int:
-    """Number of commits on the current branch that are ahead of its
-    upstream — i.e. committed locally but not yet pushed. Runs
-    ``git rev-list --count @{upstream}..HEAD``.
-
-    Returns 0 when there's no upstream configured (the branch was never
-    pushed / has no tracking remote), when the branch is up to date, or
-    when git is unavailable — git exits non-zero in the no-upstream case,
-    which ``_git_stdout`` maps to ``""`` → 0. So this is conservatively
-    "commits we know are unpushed", not "commits that might be unpushed".
-    """
-    if len(project_root.as_bytes()) == 0:
-        return 0
-    var args = List[String]()
-    args.append(String("rev-list"))
-    args.append(String("--count"))
-    args.append(String("@{upstream}..HEAD"))
-    var stdout = _git_stdout(project_root, args^)
-    var s = stdout.strip()
-    if len(s.as_bytes()) == 0:
-        return 0
-    try:
-        return Int(s)
-    except:
-        return 0
 
 
 def stage_file(project_root: String, path: String) -> Bool:
@@ -1697,10 +1645,6 @@ def _first_field(line: String) -> String:
 def merge_base(project_root: String, a: String, b: String) -> String:
     """``git merge-base a b`` — the commit a branch forked from; empty when
     git can't find one."""
-    return _merge_base(project_root, a, b)
-
-
-def _merge_base(project_root: String, a: String, b: String) -> String:
     var args = List[String]()
     args.append(String("merge-base"))
     args.append(a)
@@ -1862,7 +1806,7 @@ def branch_is_merged(project_root: String, branch: String) -> Bool:
         return True
     if _every_commit_landed(project_root, main, branch):
         return True
-    var base = _merge_base(project_root, main, branch)
+    var base = merge_base(project_root, main, branch)
     if len(base.as_bytes()) == 0:
         return False
     return _change_already_landed(project_root, main, branch, base)

@@ -156,7 +156,7 @@ from .file_io import (
 from .file_tree import FILE_TREE_WIDTH, FileTree, FileTreeEntry
 from .git_blame import BlameLine, compute_blame, parse_blame_porcelain
 from .git_changes import (
-    ChangedFile, compute_local_changes, parse_unified_diff_files,
+    ChangedFile, parse_unified_diff_files,
 )
 from .local_changes import LocalChanges
 from .install_runner import InstallResult, InstallRunner

@@ -1075,32 +1075,15 @@ struct DapManager(Copyable, Movable):
                 out.append(self._bp_line[i])
         return out^
 
-    def breakpoints_info_for(
-        self, path: String,
-    ) -> Tuple[List[Int], List[Bool], List[Bool]]:
-        """Return parallel ``(lines, enabled, conditional)`` lists for
-        ``path``. ``conditional`` is True when the BP has a non-empty
-        condition expression. The editor uses these to colour the
-        gutter dot (red / yellow / gray) per row."""
-        var lines = List[Int]()
-        var enabled = List[Bool]()
-        var conditional = List[Bool]()
-        for i in range(len(self._bp_path)):
-            if self._bp_path[i] == path:
-                lines.append(self._bp_line[i])
-                enabled.append(self._bp_enabled[i])
-                conditional.append(
-                    len(self._bp_condition[i].as_bytes()) > 0,
-                )
-        return (lines^, enabled^, conditional^)
-
     def fill_breakpoints_info(
         self, path: String, mut lines: List[Int], mut enabled: List[Bool],
         mut conditional: List[Bool],
     ):
-        """``breakpoints_info_for`` into the caller's own lists — the
-        per-frame gutter push, which would otherwise allocate three lists
-        per open editor per frame."""
+        """Parallel ``(lines, enabled, conditional)`` for ``path``, into
+        the caller's own lists. ``conditional`` is True when the BP has a
+        non-empty condition. The editor uses these to color the gutter
+        dot per row; filling the caller's lists keeps the per-frame
+        gutter push from allocating three lists per open editor."""
         lines.clear()
         enabled.clear()
         conditional.clear()

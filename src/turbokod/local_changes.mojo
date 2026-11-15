@@ -2207,12 +2207,6 @@ struct LocalChanges(Movable):
 
     # --- geometry ---------------------------------------------------------
 
-    def _panel_rect(self, container_bounds: Rect) -> Rect:
-        """The modal always paints fullscreen — it intercepts every
-        input event, so a non-fullscreen "windowed" mode wouldn't gain
-        anything visible behind it that the user could interact with."""
-        return container_bounds
-
     def _sidebar_width(self, container_bounds: Rect) -> Int:
         """Sidebar width in cells. The auto-default (no user drag yet)
         targets ~⅓ of the window with the ``_SIDEBAR_MIN``/``MAX``
@@ -2249,13 +2243,6 @@ struct LocalChanges(Movable):
 
     def _diff_right(self, container_bounds: Rect) -> Int:
         return container_bounds.b.x - 1
-
-    def _diff_width(self, container_bounds: Rect) -> Int:
-        var w = self._diff_right(container_bounds) - self._diff_left(container_bounds) - 1
-        return 0 if w < 0 else w
-
-    def _diff_height(self, container_bounds: Rect) -> Int:
-        return self._list_height(container_bounds)
 
     def _pane_rows(self, container_bounds: Rect) -> List[Int]:
         """Return the y-row layout for the three sidebar panels:
@@ -2354,9 +2341,6 @@ struct LocalChanges(Movable):
         out.append(top + u_h + 1)   # +1 for splitter row
         out.append(s_h)
         return out^
-
-    def is_input_at(self, pos: Point, container_bounds: Rect) -> Bool:
-        return False
 
     # --- right-pane refresh ----------------------------------------------
 
@@ -2809,14 +2793,11 @@ struct LocalChanges(Movable):
         var section_attr = Attr(WHITE, DARK_GRAY)
         var splitter_attr = Attr(EDITOR_FG, EDITOR_BG)
         var ctx_attr    = Attr(EDITOR_FG, EDITOR_BG)
-        var add_attr    = Attr(LIGHT_GREEN, EDITOR_BG)
-        var rem_attr    = Attr(LIGHT_RED, EDITOR_BG)
-        var hunk_attr   = Attr(CYAN, EDITOR_BG)
         var header_attr = Attr(BORDER_FOCUS, EDITOR_BG)
         # The modal always covers the full container_bounds — it intercepts every
         # input event, so a windowed mode wouldn't gain any interactive
         # surface area behind it.
-        var bounds = self._panel_rect(container_bounds)
+        var bounds = container_bounds
         canvas.fill(bounds, String(" "), bg)
         canvas.draw_box(bounds, border, True)
         # Title row — framework helper enforces title bg = body bg.
@@ -2892,7 +2873,7 @@ struct LocalChanges(Movable):
         self._paint_right_side(
             canvas, bounds,
             section_attr, splitter_attr,
-            ctx_attr, add_attr, rem_attr, hunk_attr, header_attr,
+            ctx_attr, header_attr,
         )
         for pane in range(len(self._bars)):
             var body = self._pane_body(pane, bounds)
@@ -3682,8 +3663,7 @@ struct LocalChanges(Movable):
     def _paint_right_side(
         mut self, mut canvas: Canvas, container_bounds: Rect,
         section_attr: Attr, splitter_attr: Attr,
-        ctx_attr: Attr, add_attr: Attr, rem_attr: Attr,
-        hunk_attr: Attr, header_attr: Attr,
+        ctx_attr: Attr, header_attr: Attr,
     ):
         var top = self._list_top(container_bounds)
         var bottom = self._list_bottom(container_bounds)
@@ -3707,7 +3687,7 @@ struct LocalChanges(Movable):
                 String("Unstaged"), _PANE_RIGHT_UNSTAGED,
                 self.unstaged,
                 section_attr,
-                ctx_attr, add_attr, rem_attr, hunk_attr, header_attr,
+                ctx_attr, header_attr,
             )
             self._paint_horizontal_splitter(
                 canvas, left, right_excl - 1, rp[0] + rp[1], splitter_attr,
@@ -3718,7 +3698,7 @@ struct LocalChanges(Movable):
                 String("Staged"), _PANE_RIGHT_STAGED,
                 self.staged,
                 section_attr,
-                ctx_attr, add_attr, rem_attr, hunk_attr, header_attr,
+                ctx_attr, header_attr,
             )
             return
         # Branch / commit info — single panel filling the right side.
@@ -3733,7 +3713,7 @@ struct LocalChanges(Movable):
             info_title, _PANE_RIGHT_INFO,
             self.info,
             section_attr,
-            ctx_attr, add_attr, rem_attr, hunk_attr, header_attr,
+            ctx_attr, header_attr,
         )
 
     def _paint_panel_with_header(
@@ -3742,8 +3722,7 @@ struct LocalChanges(Movable):
         title: String, pane: Int,
         panel: RightPanel,
         section_attr: Attr,
-        ctx_attr: Attr, add_attr: Attr, rem_attr: Attr,
-        hunk_attr: Attr, header_attr: Attr,
+        ctx_attr: Attr, header_attr: Attr,
     ):
         # Bind every write to ``area`` via a Painter — a long diff line
         # or an over-wide title can't bleed into the neighbour panel,
@@ -3768,21 +3747,19 @@ struct LocalChanges(Movable):
         )
         self._paint_panel_body(
             canvas, body_rect, pane, panel,
-            ctx_attr, add_attr, rem_attr, hunk_attr, header_attr,
+            ctx_attr, header_attr,
         )
 
     def _paint_panel_body(
         self, mut canvas: Canvas,
         area: Rect,
         pane: Int, panel: RightPanel,
-        ctx_attr: Attr, add_attr: Attr, rem_attr: Attr,
-        hunk_attr: Attr, header_attr: Attr,
+        ctx_attr: Attr, header_attr: Attr,
     ):
         if area.is_empty() or len(panel.lines) == 0:
             return
         var painter = Painter(area)
         var cursor_active = Attr(BLACK, YELLOW)
-        var cursor_inactive = Attr(BLACK, LIGHT_GRAY)
         # Base text colour for diff body rows: ``SYN_IDENT``, the editor's
         # untokenised baseline (``editor.mojo`` paint), so the overlay
         # colours exactly the scopes the editor would and plain text
@@ -3978,10 +3955,6 @@ struct LocalChanges(Movable):
                     canvas, painter, panel, idx, y, body_x, area.b.x,
                     Attr(LIGHT_BLUE, EDITOR_BG, STYLE_UNDERLINE),
                 )
-        _ = cursor_inactive
-        _ = hunk_attr   # retained for the legacy diff colour palette
-        _ = rem_attr
-        _ = add_attr
 
     # --- events -----------------------------------------------------------
 
@@ -4153,7 +4126,7 @@ struct LocalChanges(Movable):
     def _right_panel_height(self, pane: Int, container_bounds: Rect) -> Int:
         """Body height (heading row excluded) of one right-side panel."""
         if pane == _PANE_RIGHT_INFO:
-            return self._diff_height(container_bounds) - 1
+            return self._list_height(container_bounds) - 1
         var rp = self._right_panes(container_bounds)
         if pane == _PANE_RIGHT_UNSTAGED:
             return rp[1] - 1
@@ -4283,7 +4256,7 @@ struct LocalChanges(Movable):
             return False
         if self.overlay != _OVERLAY_NONE:
             return self._handle_overlay_key(event)
-        var bounds = self._panel_rect(container_bounds)
+        var bounds = container_bounds
         var k = event.key
         if k == KEY_ESC:
             # Refuse to close while a git op is in flight — the spinner
@@ -6380,16 +6353,6 @@ struct LocalChanges(Movable):
                 self.last_sidebar_focus = pane
         _ = self.handle_key(Event.key_event(key, mods), bounds, registry)
 
-    def native_commit(mut self, var message: String):
-        """Commit the staged changes with ``message`` — the in-grid ``c``
-        prompt answered in one go (it refuses the same way when nothing
-        is staged)."""
-        self._open_commit_prompt()
-        if self.overlay != _OVERLAY_COMMIT:
-            return
-        self.overlay_input.set_text(message^)
-        self._submit_commit()
-
     def native_open(mut self, pane: Int, row: Int):
         """Open what a double-click opens: a file row's first change, or a
         diff / info row's jump target."""
@@ -6621,7 +6584,7 @@ struct LocalChanges(Movable):
         if self.overlay != _OVERLAY_NONE:
             return True
         var pos = event.pos
-        var bounds = self._panel_rect(container_bounds)
+        var bounds = container_bounds
         # Each pane's scroll bar: arrows, track and a thumb drag.
         for pane in range(len(self._bars)):
             var s = self._bars[pane].handle_mouse(event)

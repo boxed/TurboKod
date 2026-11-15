@@ -422,7 +422,9 @@ def test_native_git_stages_and_commits_through_the_views_own_paths() raises:
     assert_true(d.local_changes.native_shows_file())
     d.native_git_key(0, UInt32(0x20), UInt8(0), _SCREEN)   # Space: stage
     assert_equal(Int(d.local_changes.files[0].staged), Int(ord("M")))
-    d.native_git_commit(String("second"))
+    d.native_git_key(0, UInt32(ord("c")), UInt8(0), _SCREEN)   # c: commit
+    assert_equal(d.local_changes.native_overlay_kind(), String("commit"))
+    d.native_git_answer(String("ok"), String("second"))
     _wait_git(d)
     var log = _git_capture(root, string_list(
         String("log"), String("--format=%s"),
@@ -438,7 +440,7 @@ def test_native_git_overlay_cancel_and_status_dismiss() raises:
     d.local_changes.open(root)
     d.native_git_select(0, 0, _SCREEN)
     # Nothing staged: committing reports instead of opening the prompt.
-    d.native_git_commit(String("nope"))
+    d.native_git_key(0, UInt32(ord("c")), UInt8(0), _SCREEN)
     assert_equal(d.local_changes.native_overlay_kind(), String("status"))
     d.native_git_answer(String("ok"), String(""))
     assert_equal(d.local_changes.native_overlay_kind(), String(""))

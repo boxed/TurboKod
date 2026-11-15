@@ -294,7 +294,7 @@ def test_git_view_panes_that_overflow_get_scroll_bars() raises:
     var c = Canvas(100, 30)
     var registry = GrammarRegistry()
     lc.paint(c, screen, registry)
-    var bounds = lc._panel_rect(screen)
+    var bounds = screen
     var body = lc._pane_body(_PANE_BRANCHES, bounds)
     assert_false(body.is_empty())
     var x = body.b.x - 1
@@ -1821,8 +1821,8 @@ def test_revert_chunk_at_cursor_restores_head() raises:
 
 
 def test_local_changes_open_records_status_when_clean() raises:
-    """Pointing the widget at ``/tmp`` (not a git repo) makes
-    ``compute_local_changes`` return empty; ``open`` should record a
+    """Pointing the widget at ``/tmp`` (not a git repo) makes git
+    report nothing; ``open`` should record a
     user-readable status string and end up with no files."""
     var lc = LocalChanges()
     lc.open(String("/tmp"))
@@ -1914,7 +1914,7 @@ def test_local_changes_commit_message_url_is_underlined() raises:
     var screen = Rect(0, 0, 200, 40)
     var canvas = Canvas(screen.width(), screen.height())
     lc.paint(canvas, screen, registry)
-    var bounds = lc._panel_rect(screen)
+    var bounds = screen
     # Message body is row 3 of the ``git show`` text; the info panel's
     # body starts one row below its header.
     var y = lc._list_top(bounds) + 1 + 3
@@ -1939,7 +1939,7 @@ def test_local_changes_click_on_commit_message_url_opens_browser() raises:
     var lc = _local_changes_with_commit_url()
     var registry = GrammarRegistry()
     var screen = Rect(0, 0, 200, 40)
-    var bounds = lc._panel_rect(screen)
+    var bounds = screen
     var y = lc._list_top(bounds) + 1 + 3
     var x0 = lc._diff_left(bounds) + display_columns(String("    Fix per "))
     _ = lc.handle_mouse(
@@ -4548,7 +4548,7 @@ def test_local_changes_success_flashes_without_a_modal() raises:
     # The flash is painted on the sub-title row, in place of the root.
     var canvas = Canvas(screen.width(), screen.height())
     lc.paint(canvas, screen, registry)
-    var bounds = lc._panel_rect(screen)
+    var bounds = screen
     var row = String("")
     for x in range(bounds.a.x + 1, bounds.b.x - 1):
         row += canvas.get(x, bounds.a.y + 1).glyph
@@ -4610,7 +4610,7 @@ def test_local_changes_output_overlay_url_is_clickable() raises:
     )
     var canvas = Canvas(screen.width(), screen.height())
     lc.paint(canvas, screen, registry)
-    var bounds = lc._panel_rect(screen)
+    var bounds = screen
     var rect = lc._output_overlay_rect(bounds)
     # Three lines in a tall viewport: no scroll, so row N of the text is
     # row N of the body.
@@ -4661,7 +4661,7 @@ def test_local_changes_output_overlay_links_follow_the_scroll() raises:
     var canvas = Canvas(screen.width(), screen.height())
     # Opens pinned to the bottom, so the URL is on the last body row.
     lc.paint(canvas, screen, registry)
-    var bounds = lc._panel_rect(screen)
+    var bounds = screen
     var rect = lc._output_overlay_rect(bounds)
     var x0 = rect.a.x + 2 + display_columns(String("see "))
     # Last body row: the frame's bottom two rows are the hint / border.

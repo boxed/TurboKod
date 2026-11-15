@@ -1481,7 +1481,7 @@ def test_quick_open_preserves_query_across_close_and_reopen() raises:
 
 
 def test_quick_open_preserves_selection_and_scroll_across_close_and_reopen() raises:
-    """The cursor row and scroll offset should both come back on the
+    """The cursor row should come back on the
     next ``open()``, scoped to the same project root. Tracks against
     saved indices clamped into the current matched length, so a project
     where the file list grew slightly still lands close to where the
@@ -1495,24 +1495,20 @@ def test_quick_open_preserves_selection_and_scroll_across_close_and_reopen() rai
         qo.tick()
         _ = external_call["usleep", Int32](Int32(5000))   # 5 ms
     assert_true(len(qo.matched) > 20)
-    # User scrolls / cursors down, then closes.
+    # User cursors down, then closes.
     qo.selected = 17
     qo.anchor = 17
-    qo.scroll = 5
     qo.close()
-    # Reopen the same project — selection and scroll should restore.
+    # Reopen the same project — the selection should restore.
     qo.open(root.value())
     var deadline2 = monotonic_ms() + 5000
     while qo.indexing and monotonic_ms() < deadline2:
         qo.tick()
         _ = external_call["usleep", Int32](Int32(5000))   # 5 ms
     assert_equal(qo.selected, 17)
-    assert_equal(qo.scroll, 5)
-    # First navigation should treat the restored position as the
-    # starting point AND end "restore mode" so the next tick (were
-    # one to fire) wouldn't snap back to the saved row.
-    var ev_down = Event.key_event(KEY_DOWN)
-    _ = qo.handle_key(ev_down)
+    # Selecting a row ends "restore mode" so the next tick (were one to
+    # fire) wouldn't snap back to the saved row.
+    qo.select(18, 18)
     assert_equal(qo.selected, 18)
     assert_false(qo._pending_restore)
 
@@ -1528,14 +1524,12 @@ def test_quick_open_resets_saved_state_when_project_root_changes() raises:
     qo.query.set_text(String("editor"))
     qo._refilter()
     qo.selected = 12
-    qo.scroll = 4
     qo.close()
-    # A different root invalidates the saved sel / scroll, and has a
+    # A different root invalidates the saved selection, and has a
     # query of its own (none yet).
     qo.open(String("/tmp"))
     assert_equal(qo.query.text, String(""))
     assert_equal(qo.selected, 0)
-    assert_equal(qo.scroll, 0)
     qo.close()
     # Back in the first project: its query, fully selected.
     qo.open(root_a.value())
@@ -1545,10 +1539,10 @@ def test_quick_open_resets_saved_state_when_project_root_changes() raises:
     qo.close()
 
 
-def test_quick_open_shift_down_extends_multi_selection() raises:
-    """Holding Shift while pressing DOWN extends the selection without
-    moving the anchor. Enter then submits *all* paths in the range
-    with the cursor row exposed as ``selected_path``."""
+def test_quick_open_range_selection_submits_every_row() raises:
+    """``select(idx, anchor)`` selects rows ``anchor..idx``; submitting
+    opens all of them in row order with the cursor row exposed as
+    ``selected_path``. A single-row select collapses the range."""
     var root = find_git_project(String("examples/hello.mojo"))
     assert_true(root)
     var qo = QuickOpen()
@@ -1558,48 +1552,17 @@ def test_quick_open_shift_down_extends_multi_selection() raises:
         qo.tick()
         _ = external_call["usleep", Int32](Int32(5000))   # 5 ms
     assert_true(len(qo.matched) > 3)
-    # Start at row 0 (anchor=0, selected=0). Two shift+down keystrokes
-    # should extend the range to rows [0..2] without moving the anchor.
-    _ = qo.handle_key(Event.key_event(KEY_DOWN, MOD_SHIFT))
-    _ = qo.handle_key(Event.key_event(KEY_DOWN, MOD_SHIFT))
+    qo.select(2, 0)
     assert_equal(qo.anchor, 0)
     assert_equal(qo.selected, 2)
-    # Enter submits the whole range; ``selected_paths`` has 3 entries
-    # in row order, and ``selected_path`` is the cursor row (the last
-    # one navigated to).
-    _ = qo.handle_key(Event.key_event(KEY_ENTER))
+    qo.submit()
     assert_true(qo.submitted)
     assert_equal(len(qo.selected_paths), 3)
     assert_equal(qo.selected_paths[0], qo.abs_at(qo.matched[0]))
     assert_equal(qo.selected_paths[2], qo.abs_at(qo.matched[2]))
     assert_equal(qo.selected_path, qo.abs_at(qo.matched[2]))
-
-
-def test_quick_open_plain_down_after_shift_collapses_anchor() raises:
-    """A plain (no-shift) arrow key after a shift+arrow run should
-    collapse the multi-selection back to a single row at the cursor
-    position. That keeps "I extended, then changed my mind" usable
-    without ESC + reopen."""
-    var root = find_git_project(String("examples/hello.mojo"))
-    assert_true(root)
-    var qo = QuickOpen()
-    qo.open(root.value())
-    var deadline = monotonic_ms() + 5000
-    while qo.indexing and monotonic_ms() < deadline:
-        qo.tick()
-        _ = external_call["usleep", Int32](Int32(5000))   # 5 ms
-    assert_true(len(qo.matched) > 3)
-    _ = qo.handle_key(Event.key_event(KEY_DOWN, MOD_SHIFT))
-    _ = qo.handle_key(Event.key_event(KEY_DOWN, MOD_SHIFT))
-    assert_equal(qo.anchor, 0)
-    assert_equal(qo.selected, 2)
-    # Plain down: collapse anchor to the new cursor.
-    _ = qo.handle_key(Event.key_event(KEY_DOWN))
-    assert_equal(qo.anchor, 3)
-    assert_equal(qo.selected, 3)
-    # Submit yields a single-entry list now.
-    _ = qo.handle_key(Event.key_event(KEY_ENTER))
-    assert_true(qo.submitted)
+    qo.select(3, 3)
+    qo.submit()
     assert_equal(len(qo.selected_paths), 1)
     assert_equal(qo.selected_paths[0], qo.abs_at(qo.matched[3]))
 

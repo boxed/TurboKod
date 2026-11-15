@@ -41,11 +41,11 @@ from .lsp import (
     LspProcess, lsp_initialize_params,
 )
 from .posix import (
-    debug_log_path, getcwd_path, getenv_value, monotonic_ms, realpath, sleep_ms, which,
+    debug_log_path, getcwd_path, getenv_value, monotonic_ms, realpath, sleep_ms,
 )
 from .string_utils import (
     fnv_start, fnv_str,
-    hex_digit_value, percent_encode_uri_path, string_list, strip_trailing_newlines, utf8_prefix,
+    hex_digit_value, percent_encode_uri_path, strip_trailing_newlines, utf8_prefix,
 )
 from .highlight import Highlight
 from .colors import Attr, BLACK, EDITOR_BG, WHITE
@@ -789,7 +789,6 @@ struct LspManager(Copyable, Movable):
     var _inflight_symbol_id: String
     var _resolved_symbols: List[SymbolItem]  # parked between tick() and take_symbols()
     var _has_resolved_symbols: Bool          # distinguishes "no result yet" from "empty list"
-    var _symbols_empty: Bool                 # latched when the last response was empty
     # ``workspace/symbol`` — parallel to the document-symbol fields but
     # scoped to a workspace-wide query rather than a single document.
     # Used by the Find Symbol picker to disambiguate same-named symbols.
@@ -1175,7 +1174,6 @@ struct LspManager(Copyable, Movable):
         self._inflight_symbol_id = String("")
         self._resolved_symbols = List[SymbolItem]()
         self._has_resolved_symbols = False
-        self._symbols_empty = False
         self._inflight_ws_symbol_id = String("")
         self._resolved_ws_symbols = List[WorkspaceSymbolItem]()
         self._has_resolved_ws_symbols = False
@@ -1381,12 +1379,6 @@ struct LspManager(Copyable, Movable):
         status bar stops claiming "no definition found"."""
         self._last_empty = False
 
-    def inflight_symbols(self) -> Bool:
-        return len(self._inflight_symbol_id.as_bytes()) > 0
-
-    def symbols_empty(self) -> Bool:
-        return self._symbols_empty
-
     def language_id(self) -> String:
         return self._language_id
 
@@ -1419,9 +1411,7 @@ struct LspManager(Copyable, Movable):
         """Return the latest published diagnostic list for ``path`` and
         mark the bucket consumed so the host doesn't re-apply on every
         frame. Returns an empty list when nothing has been published
-        for ``path`` (or it was already consumed). The bucket itself
-        stays around so a re-opened buffer can pull it via
-        ``peek_diagnostics_for`` without waiting for a fresh publish."""
+        for ``path`` (or it was already consumed)."""
         for k in range(len(self._diagnostic_buckets)):
             if self._diagnostic_buckets[k].path == path:
                 if self._diagnostic_buckets[k].consumed:
@@ -1429,16 +1419,6 @@ struct LspManager(Copyable, Movable):
                 var out = self._diagnostic_buckets[k].diags.copy()
                 self._diagnostic_buckets[k].consumed = True
                 return out^
-        return List[Diagnostic]()
-
-    def peek_diagnostics_for(self, path: String) -> List[Diagnostic]:
-        """Return the latest published diagnostic list for ``path``
-        without flipping the consumed flag. Used when a fresh editor
-        opens against an already-published path so it picks up the
-        cached set without round-tripping the server."""
-        for k in range(len(self._diagnostic_buckets)):
-            if self._diagnostic_buckets[k].path == path:
-                return self._diagnostic_buckets[k].diags.copy()
         return List[Diagnostic]()
 
     def supports_pull_diagnostics(self) -> Bool:
@@ -1505,9 +1485,9 @@ struct LspManager(Copyable, Movable):
 
         Idempotent on a second call after a successful start. On failure
         latches to FAILED so we don't keep retrying every frame. Callers
-        that want a multi-binary fallback (e.g. ``start_python``) should
-        check ``which()`` themselves before calling and only invoke this
-        once they've picked an actually-installed binary.
+        that want a multi-binary fallback should check ``which()``
+        themselves before calling and only invoke this once they've
+        picked an actually-installed binary.
 
         ``pool`` (an ``LspPool`` address, 0 = none) makes the server
         shareable: if another window already runs this exact server, join
@@ -1592,52 +1572,6 @@ struct LspManager(Copyable, Movable):
             self.failure_reason = String("initialize failed: ") + String(e)
             return
         self.state = _STATE_INITIALIZING
-
-    def start_mojo(mut self, root_path: String, include_dirs: List[String]):
-        """Spawn ``mojo-lsp-server``. ``include_dirs`` map to ``-I <dir>``
-        CLI flags — without these the server can't resolve project
-        imports and every Cmd+click comes back empty."""
-        var argv = List[String]()
-        argv.append(String("mojo-lsp-server"))
-        for i in range(len(include_dirs)):
-            argv.append(String("-I"))
-            argv.append(include_dirs[i])
-        self.start_with(String("mojo"), argv, root_path)
-
-    def start_python(mut self, root_path: String) -> Bool:
-        """Try the available Python LSP servers in priority order.
-
-        Returns True if a candidate was found and a spawn was attempted
-        (success vs. FAILED is then exposed via ``is_ready``/``is_failed``
-        like any other server). Returns False when no candidate is on
-        ``$PATH`` so callers can keep the manager NOT_STARTED and skip
-        the LSP-related status messages — there's no point spamming
-        "still starting up" if the user never installed a server.
-
-        Order: ``ty server`` → ``pyright-langserver --stdio`` →
-        ``basedpyright-langserver --stdio`` → ``pylsp``. ty (from Astral)
-        is much faster than pyright at the cost of being less
-        full-featured, so we prefer it; pyright/basedpyright/pylsp are
-        the fallbacks for users who haven't installed ty yet.
-        """
-        if self.state != _STATE_NOT_STARTED:
-            return True
-        # ``ty server`` is Astral's fast type-checker LSP — preferred
-        # default. Falls through to pyright et al. if ty isn't on PATH.
-        var candidates = List[List[String]]()
-        candidates.append(string_list(String("ty"), String("server")))
-        candidates.append(
-            string_list(String("pyright-langserver"), String("--stdio"))
-        )
-        candidates.append(
-            string_list(String("basedpyright-langserver"), String("--stdio"))
-        )
-        candidates.append(string_list(String("pylsp")))
-        for argv in candidates:
-            if len(which(argv[0]).as_bytes()) > 0:
-                self.start_with(String("python"), argv, root_path)
-                return True
-        return False
 
     # --- position encoding ------------------------------------------------
 
@@ -2710,7 +2644,6 @@ struct LspManager(Copyable, Movable):
             return False
         self._has_resolved_symbols = False
         self._resolved_symbols = List[SymbolItem]()
-        self._symbols_empty = False
         return True
 
     def has_pending_symbols(self) -> Bool:
@@ -2756,9 +2689,6 @@ struct LspManager(Copyable, Movable):
         self._has_resolved_ws_symbols = False
         self._resolved_ws_symbols = List[WorkspaceSymbolItem]()
         return True
-
-    def inflight_workspace_symbols(self) -> Bool:
-        return len(self._inflight_ws_symbol_id.as_bytes()) > 0
 
     def has_pending_workspace_symbols(self) -> Bool:
         """True iff a parsed workspace-symbol response is parked."""
@@ -4338,7 +4268,6 @@ struct LspManager(Copyable, Movable):
                     items = _parse_symbols_result(msg.result.value())
                 self._resolved_symbols = items^
                 self._has_resolved_symbols = True
-                self._symbols_empty = (len(self._resolved_symbols) == 0)
                 self._inflight_symbol_id = String("")
                 continue
             if id == self._inflight_ws_symbol_id:

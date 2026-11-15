@@ -669,8 +669,8 @@ def test_dap_manager_breakpoint_enabled_default_and_toggle() raises:
     assert_true(mgr.breakpoint_enabled(String("/tmp/x.py"), 7))
 
 
-def test_dap_manager_breakpoints_info_for() raises:
-    """``breakpoints_info_for`` returns parallel lines / enabled /
+def test_dap_manager_fill_breakpoints_info() raises:
+    """``fill_breakpoints_info`` returns parallel lines / enabled /
     conditional lists for one path. The editor uses these to colour
     the gutter dot per-row."""
     var mgr = DapManager()
@@ -679,17 +679,20 @@ def test_dap_manager_breakpoints_info_for() raises:
     mgr.set_breakpoint_condition(String("/tmp/a.py"), 2, String("i > 0"))
     mgr.toggle_breakpoint(String("/tmp/a.py"), 3)
     mgr.set_breakpoint_enabled(String("/tmp/a.py"), 3, False)
-    var info = mgr.breakpoints_info_for(String("/tmp/a.py"))
-    assert_equal(len(info[0]), 3)
-    assert_equal(info[0][0], 1)
-    assert_true(info[1][0])    # enabled
-    assert_false(info[2][0])   # not conditional
-    assert_equal(info[0][1], 2)
-    assert_true(info[1][1])
-    assert_true(info[2][1])    # conditional
-    assert_equal(info[0][2], 3)
-    assert_false(info[1][2])   # disabled
-    assert_false(info[2][2])
+    var lines = List[Int]()
+    var enabled = List[Bool]()
+    var conditional = List[Bool]()
+    mgr.fill_breakpoints_info(String("/tmp/a.py"), lines, enabled, conditional)
+    assert_equal(len(lines), 3)
+    assert_equal(lines[0], 1)
+    assert_true(enabled[0])
+    assert_false(conditional[0])
+    assert_equal(lines[1], 2)
+    assert_true(enabled[1])
+    assert_true(conditional[1])
+    assert_equal(lines[2], 3)
+    assert_false(enabled[2])   # disabled
+    assert_false(conditional[2])
 
 
 def test_dap_manager_breakpoint_wait_for_arms_on_trigger() raises:
@@ -1944,8 +1947,11 @@ def test_dap_reset_for_restart_keeps_the_breakpoints() raises:
     assert_equal(mgr.breakpoint_path_at(0), String("/tmp/a.py"))
     assert_equal(mgr.breakpoint_line_at(1), 7)
     assert_true(mgr.breakpoint_enabled_at(0))
-    var info = mgr.breakpoints_info_for(String("/tmp/b.py"))
-    assert_equal(len(info[0]), 1)
+    var lines = List[Int]()
+    var enabled = List[Bool]()
+    var conditional = List[Bool]()
+    mgr.fill_breakpoints_info(String("/tmp/b.py"), lines, enabled, conditional)
+    assert_equal(len(lines), 1)
     assert_equal(mgr.failure_reason, String(""))
     assert_false(mgr.is_active())
     # A second reset is as good as the first.

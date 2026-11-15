@@ -64,9 +64,6 @@ struct Cell(ImplicitlyCopyable, Movable):
         self.font = font
         self.sub = 0
 
-    def is_blank(self) -> Bool:
-        return self.glyph == String(" ")
-
     def __eq__(self, other: Cell) -> Bool:
         return self.glyph == other.glyph and self.attr == other.attr and self.width == other.width
 

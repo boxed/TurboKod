@@ -290,11 +290,6 @@ struct ListBox(Copyable, Movable):
         self._anchor_on = 0 <= anchor and anchor < item_count \
             and self._mask[anchor]
 
-    def clear_selection(mut self):
-        for i in range(len(self._mask)):
-            self._mask[i] = False
-            self._base[i] = False
-
     def select_all(mut self, item_count: Int):
         if not self.multi:
             return

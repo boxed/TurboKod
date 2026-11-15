@@ -1224,26 +1224,9 @@ def test_desktop_project_replace_opens_find_in_replace_mode() raises:
     _ = d.dispatch_action(PROJECT_REPLACE, _SCREEN)
     assert_true(d.project_find.active)
     assert_true(d.project_find.replace_mode)
-    # Tab cycles query(0) -> replace(3) -> scope(1) -> glob(2) -> query(0).
-    assert_equal(d.project_find.focus, 0)
-    d.project_find._cycle_focus(False)
-    assert_equal(d.project_find.focus, 3)
-    d.project_find._cycle_focus(False)
-    assert_equal(d.project_find.focus, 1)
-    d.project_find._cycle_focus(False)
-    assert_equal(d.project_find.focus, 2)
-    d.project_find._cycle_focus(False)
-    assert_equal(d.project_find.focus, 0)
-    # Plain Find (Cmd+Shift+F) reuses the struct but skips replace mode and
-    # keeps the replace strip out of the Tab cycle (query -> scope -> glob).
+    # Plain Find (Cmd+Shift+F) reuses the struct but skips replace mode.
     _ = d.dispatch_action(PROJECT_FIND, _SCREEN)
     assert_false(d.project_find.replace_mode)
-    d.project_find._cycle_focus(False)
-    assert_equal(d.project_find.focus, 1)
-    d.project_find._cycle_focus(False)
-    assert_equal(d.project_find.focus, 2)
-    d.project_find._cycle_focus(False)
-    assert_equal(d.project_find.focus, 0)
 
 
 def test_nav_history_records_initial_open() raises:
@@ -3628,7 +3611,7 @@ def test_find_symbol_qualified_query_lists_and_jumps_to_class_members() raises:
     assert_equal(e.line, 6)
 
     # No LSP is running; Enter must still land on the field.
-    _ = d.find_symbol.handle_key(Event.key_event(KEY_ENTER))
+    d.find_symbol.submit()
     assert_true(d.find_symbol.take_submitted())
     d._submit_find_symbol(_SCREEN)
     assert_false(d.find_symbol.active)
@@ -3819,22 +3802,6 @@ def test_view_states_are_capped_least_recently_used_first() raises:
     _ = external_call["system", Int32](
         (String("rm -rf '") + root + String("'\0")).unsafe_ptr(),
     )
-
-
-def test_project_find_accepts_non_ascii_in_its_query() raises:
-    """End of the wire for the dialog-input fix: an ``ö`` typed into
-    Find in Project lands in the query.
-
-    The gate was in the shared ``TextField``, but this is where it was
-    reported and where the routing has to hold up — ``handle_key``
-    returns True either way, so an unconsumed key is silently dropped
-    rather than falling through to something visible."""
-    var d = Desktop()
-    d.project_find.open(String("."), String(""))
-    assert_true(d.project_find.active)
-    _ = d.project_find.handle_key(_key(UInt32(0xF6)), 0)     # ö
-    _ = d.project_find.handle_key(_key(UInt32(0x6C)), 0)     # l
-    assert_equal(d.project_find.query.text, String("öl"))
 
 
 def test_fullscreen_modal_paint_is_covered_by_the_modal() raises:
