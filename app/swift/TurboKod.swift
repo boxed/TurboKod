@@ -7230,16 +7230,148 @@ final class GitDiffPane {
     }
 }
 
+/// What the macOS-style and Mac OS 9 git views share: the core's git state
+/// as last decoded, and the calls that drive the core. Each view lays the
+/// state out in its own controls.
+class GitViewBase: NSObject {
+    weak var view: CellView?
+    var onAfterAction: (() -> Void)?
+
+    fileprivate var state: [String: Any] = [:]
+    fileprivate var lastData = Data()
+    fileprivate var lastPanels = Data()
+    fileprivate var panelsBuf = [UInt8](repeating: 0, count: 1 << 16)
+    fileprivate var lastHints: [[Any]] = []
+    fileprivate var files: [[String: Any]] = []
+    /// The files list as a tree: a directory row (file index nil) or a file.
+    fileprivate var fileRows: [(depth: Int, name: String, file: Int?)] = []
+    fileprivate var branches: [[String: Any]] = []
+    fileprivate var commits: [[String: Any]] = []
+    fileprivate var focus = GitPane.files
+    fileprivate var infoTitle = "Log"
+
+    init(view: CellView) {
+        self.view = view
+        super.init()
+    }
+
+    /// Take a `tk_desktop_git` payload: the decoded state, or nil when it's
+    /// the one already shown (or unreadable).
+    fileprivate func decode(_ data: Data) -> [String: Any]? {
+        if data == lastData { return nil }
+        lastData = data
+        guard let st = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
+        state = st
+        files = st["files"] as? [[String: Any]] ?? []
+        fileRows = Self.tree(files)
+        branches = st["branches"] as? [[String: Any]] ?? []
+        commits = st["commits"] as? [[String: Any]] ?? []
+        focus = st["focus"] as? Int ?? GitPane.files
+        return st
+    }
+
+    /// The line under the header: what's running, else the core's status
+    /// or flash message.
+    fileprivate func noteText(_ st: [String: Any]) -> String {
+        let status = st["status"] as? String ?? ""
+        return (st["busy"] as? Bool ?? false) ? (st["busy_label"] as? String ?? "Working…")
+            : !status.isEmpty ? status : (st["flash"] as? String ?? "")
+    }
+
+    /// The files as a tree, in the core's order: a directory row each time
+    /// the path enters a new directory, files indented under it.
+    static func tree(_ files: [[String: Any]]) -> [(depth: Int, name: String, file: Int?)] {
+        var out: [(depth: Int, name: String, file: Int?)] = []
+        var open: [String] = []
+        for (i, f) in files.enumerated() {
+            let parts = (f["path"] as? String ?? "").split(separator: "/").map(String.init)
+            let dirs = Array(parts.dropLast())
+            var common = 0
+            while common < open.count, common < dirs.count, open[common] == dirs[common] { common += 1 }
+            open = Array(open.prefix(common))
+            for d in dirs[common...] {
+                out.append((open.count, d + "/", nil))
+                open.append(d)
+            }
+            out.append((dirs.count, parts.last ?? "", i))
+        }
+        return out
+    }
+
+    // MARK: operations
+
+    fileprivate func select(_ pane: Int, _ idx: Int) {
+        guard let v = view, v.handle != 0 else { return }
+        tk_desktop_git_select(v.handle, Int64(pane), Int64(idx), Int64(v.cols()), Int64(v.rows()))
+        lastData = Data()   // force the next poll to re-render
+        onAfterAction?()
+    }
+
+    /// One of the view's own keys; pane -1 is the focused one.
+    fileprivate func key(_ pane: Int, _ k: UInt32, mods: UInt8 = 0) {
+        guard let v = view, v.handle != 0 else { return }
+        _ = tk_desktop_git_key(v.handle, Int64(pane), Int64(k), Int64(mods),
+                               Int64(v.cols()), Int64(v.rows()))
+        lastData = Data()
+        onAfterAction?()
+    }
+
+    fileprivate func ch(_ c: Character) -> UInt32 { c.unicodeScalars.first!.value }
+
+    /// Open the file at core index `idx` of the files list.
+    fileprivate func openFile(_ idx: Int) {
+        guard let v = view, v.handle != 0 else { return }
+        tk_desktop_git_select(v.handle, Int64(GitPane.files), Int64(idx), Int64(v.cols()), Int64(v.rows()))
+        tk_desktop_git_open(v.handle, Int64(GitPane.files), Int64(idx), Int64(v.cols()), Int64(v.rows()))
+        onAfterAction?()
+    }
+
+    /// Ask the core to close the view; false (with a beep) while a git
+    /// operation is running. `pollGit` then hides the window, before it
+    /// draws the core's closed (empty) view.
+    fileprivate func closeCore() -> Bool {
+        guard let v = view, v.handle != 0 else { return true }
+        let ok = tk_desktop_git_close(v.handle) != 0
+        if !ok { NSSound.beep() }
+        return ok
+    }
+
+    fileprivate func afterClose() {
+        guard let v = view, v.handle != 0 else { return }
+        onAfterAction?()
+        _ = AppController.shared?.pollGit(v)
+    }
+
+    /// The right side's panels when they changed since the last call: the
+    /// info panel (a branch's log, a commit's details) or the file's
+    /// unstaged and staged ones, with the panes' colors.
+    fileprivate func changedPanels()
+        -> (info: [String: Any]?, unstaged: [String: Any], staged: [String: Any], o: [String: Any])? {
+        guard let v = view, v.handle != 0 else { return nil }
+        let (h, cols, rows) = (v.handle, Int64(v.cols()), Int64(v.rows()))
+        let data = readCoreData(&panelsBuf, { tk_desktop_git_panels(h, cols, rows, $0, $1) }) ?? Data()
+        guard data != lastPanels else { return nil }
+        lastPanels = data
+        let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        let panels = o["panels"] as? [[String: Any]] ?? []
+        func pane(_ id: Int) -> [String: Any]? { panels.first { ($0["pane"] as? Int) == id } }
+        let info = pane(GitPane.info)
+        if info != nil {
+            // Named for the list driving it (kept while the cursor is in it).
+            if focus == GitPane.branches { infoTitle = "Log" }
+            if focus == GitPane.commits { infoTitle = "Commit" }
+        }
+        return (info, pane(GitPane.unstaged) ?? [:], pane(GitPane.staged) ?? [:], o)
+    }
+}
+
 /// The git view as a native sheet, laid out like the grid one: Modified
 /// files (as a tree), Branches and Commits stacked on the left; the
 /// selected file's Unstaged and Staged diffs stacked on the right (or the
 /// branch's log / the commit's details); the focused pane's operations
 /// along the bottom, from the same hint list the grid paints as text.
-final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSTextViewDelegate,
+final class GitController: GitViewBase, NSTableViewDataSource, NSTableViewDelegate, NSTextViewDelegate,
                            NSWindowDelegate {
-    weak var view: CellView?
-    var onAfterAction: (() -> Void)?
-
     private let panel: NSWindow
     private var placement: GitWindowPlacement?
     private let branchLabel = NSTextField(labelWithString: "")
@@ -7256,28 +7388,15 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     private var stagedSection = NSView()
     private let actionBar = NSStackView()
 
-    private var state: [String: Any] = [:]
-    private var lastData = Data()
-    private var lastPanels = Data()
-    private var panelsBuf = [UInt8](repeating: 0, count: 1 << 16)
-    private var lastHints: [[Any]] = []
-    private var files: [[String: Any]] = []
-    /// The files list as a tree: a directory row (file index nil) or a file.
-    private var fileRows: [(depth: Int, name: String, file: Int?)] = []
-    private var branches: [[String: Any]] = []
-    private var commits: [[String: Any]] = []
-    private var focus = GitPane.files
-    private var infoTitle = "Log"
     private var syncing = false
     private var overlayShown = ""
     private var dismissed = false
 
-    init(view: CellView) {
-        self.view = view
+    override init(view: CellView) {
         panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
                          styleMask: [.titled, .closable, .miniaturizable, .resizable],
                          backing: .buffered, defer: true)
-        super.init()
+        super.init(view: view)
         panel.isReleasedWhenClosed = false
         panel.title = "Local changes"
         panel.delegate = self
@@ -7494,25 +7613,14 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
 
     /// Adopt a polled state; true when anything changed.
     func update(_ data: Data) -> Bool {
-        if data == lastData { return false }
-        lastData = data
-        guard let st = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return false }
-        state = st
-        files = st["files"] as? [[String: Any]] ?? []
-        fileRows = Self.tree(files)
-        branches = st["branches"] as? [[String: Any]] ?? []
-        commits = st["commits"] as? [[String: Any]] ?? []
+        guard let st = decode(data) else { return false }
         let branch = st["branch"] as? String ?? ""
         branchLabel.stringValue = branch.isEmpty ? "(detached)" : branch
         rootLabel.stringValue = st["root"] as? String ?? ""
         panel.title = st["title"] as? String ?? "Local changes"
         let busy = st["busy"] as? Bool ?? false
         if busy { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
-        let status = st["status"] as? String ?? ""
-        let flash = st["flash"] as? String ?? ""
-        flashLabel.stringValue = busy ? (st["busy_label"] as? String ?? "Working…")
-                               : !status.isEmpty ? status : flash
-        focus = st["focus"] as? Int ?? GitPane.files
+        flashLabel.stringValue = noteText(st)
         for (pane, h) in headers {
             let on = pane == focus
             h.textColor = on ? .labelColor : .secondaryLabelColor
@@ -7534,26 +7642,6 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         refreshPanels()
         showOverlayIfNeeded(st["overlay"] as? [String: Any] ?? [:])
         return true
-    }
-
-    /// The files as a tree, in the core's order: a directory row each time
-    /// the path enters a new directory, files indented under it.
-    static func tree(_ files: [[String: Any]]) -> [(depth: Int, name: String, file: Int?)] {
-        var out: [(depth: Int, name: String, file: Int?)] = []
-        var open: [String] = []
-        for (i, f) in files.enumerated() {
-            let parts = (f["path"] as? String ?? "").split(separator: "/").map(String.init)
-            let dirs = Array(parts.dropLast())
-            var common = 0
-            while common < open.count, common < dirs.count, open[common] == dirs[common] { common += 1 }
-            open = Array(open.prefix(common))
-            for d in dirs[common...] {
-                out.append((open.count, d + "/", nil))
-                open.append(d)
-            }
-            out.append((dirs.count, parts.last ?? "", i))
-        }
-        return out
     }
 
     private func selectedRow(_ t: NSTableView) -> Int {
@@ -7691,26 +7779,13 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         select(t.tag, idx)
     }
 
-    private func select(_ pane: Int, _ idx: Int) {
-        guard let v = view, v.handle != 0 else { return }
-        tk_desktop_git_select(v.handle, Int64(pane), Int64(idx), Int64(v.cols()), Int64(v.rows()))
-        lastData = Data()   // force the next poll to re-render
+    fileprivate override func select(_ pane: Int, _ idx: Int) {
         unstaged.cursorLine = -1
         staged.cursorLine = -1
-        onAfterAction?()
+        super.select(pane, idx)
     }
 
     // MARK: operations (the view's own keys)
-
-    private func key(_ pane: Int, _ k: UInt32, mods: UInt8 = 0) {
-        guard let v = view, v.handle != 0 else { return }
-        _ = tk_desktop_git_key(v.handle, Int64(pane), Int64(k), Int64(mods),
-                               Int64(v.cols()), Int64(v.rows()))
-        lastData = Data()
-        onAfterAction?()
-    }
-
-    private func ch(_ c: Character) -> UInt32 { c.unicodeScalars.first!.value }
 
     private func tableKey(_ k: String, _ t: GitTable) -> Bool {
         let row = t.selectedRow
@@ -7729,9 +7804,7 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
         guard let idx = index(t, row) else { return }
         switch t.tag {
         case GitPane.files:
-            tk_desktop_git_select(v.handle, Int64(GitPane.files), Int64(idx), Int64(v.cols()), Int64(v.rows()))
-            tk_desktop_git_open(v.handle, Int64(GitPane.files), Int64(idx), Int64(v.cols()), Int64(v.rows()))
-            onAfterAction?()
+            openFile(idx)
         case GitPane.branches:
             key(GitPane.branches, 0x20)   // check it out
         default:
@@ -7746,43 +7819,28 @@ final class GitController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     @objc func closeClicked() {
-        guard let v = view, v.handle != 0 else { return }
-        if tk_desktop_git_close(v.handle) == 0 {
-            NSSound.beep()
+        if !closeCore() {
             flashLabel.stringValue = "Wait for the running git operation to finish."
         }
-        onAfterAction?()
-        // Hide the window now, before it draws the core's closed (empty) view.
-        _ = AppController.shared?.pollGit(v)
+        afterClose()
     }
 
     // MARK: diff
 
     private func refreshPanels() {
-        guard let v = view, v.handle != 0 else { return }
-        let (h, cols, rows) = (v.handle, Int64(v.cols()), Int64(v.rows()))
-        let data = readCoreData(&panelsBuf, { tk_desktop_git_panels(h, cols, rows, $0, $1) }) ?? Data()
-        guard data != lastPanels else { return }
-        lastPanels = data
-        let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
-        let panels = o["panels"] as? [[String: Any]] ?? []
-        let bg = NSColor.rgb(o["bg"] as? Int ?? 0)
-        let fg = NSColor.rgb(o["fg"] as? Int ?? 0xFFFFFF)
-        if let info = panels.first(where: { ($0["pane"] as? Int) == GitPane.info }) {
+        guard let p = changedPanels() else { return }
+        let bg = NSColor.rgb(p.o["bg"] as? Int ?? 0)
+        let fg = NSColor.rgb(p.o["fg"] as? Int ?? 0xFFFFFF)
+        if let info = p.info {
             // A branch's log or a commit's details: one pane.
-            // Named for the list driving it (kept while the cursor is in it).
-            if focus == GitPane.branches { infoTitle = "Log" }
-            if focus == GitPane.commits { infoTitle = "Commit" }
             unstagedHeader.stringValue = infoTitle
             stagedSection.isHidden = true
             render(info, into: unstaged, bg: bg, fg: fg)
         } else {
             unstagedHeader.stringValue = "Unstaged"
             stagedSection.isHidden = false
-            render(panels.first { ($0["pane"] as? Int) == GitPane.unstaged } ?? [:],
-                   into: unstaged, bg: bg, fg: fg)
-            render(panels.first { ($0["pane"] as? Int) == GitPane.staged } ?? [:],
-                   into: staged, bg: bg, fg: fg)
+            render(p.unstaged, into: unstaged, bg: bg, fg: fg)
+            render(p.staged, into: staged, bg: bg, fg: fg)
         }
     }
 
@@ -15063,10 +15121,8 @@ final class PlatinumGitBody: NSView {
 /// right, the focused pane's operations as push buttons along the bottom.
 /// Like `GitController` it drives the core only through `tk_desktop_git*`:
 /// selection, cursor, the view's own keys, and the overlays' answers.
-final class PlatinumGitView: NSObject, GitSurface {
+final class PlatinumGitView: GitViewBase, GitSurface {
     var look: String { "platinum" }
-    weak var view: CellView?
-    var onAfterAction: (() -> Void)?
 
     static let mono = NSFont(name: "Monaco", size: 12) ?? .monospacedSystemFont(ofSize: 12, weight: .regular)
     private static let red = NSColor(srgbRed: 0.8, green: 0, blue: 0, alpha: 1)
@@ -15088,18 +15144,7 @@ final class PlatinumGitView: NSObject, GitSurface {
     private var buttons: [PButton] = []
     private var headings: [(String, NSRect, Int)] = []
 
-    private var state: [String: Any] = [:]
-    private var lastData = Data()
-    private var lastPanels = Data()
-    private var panelsBuf = [UInt8](repeating: 0, count: 1 << 16)
-    private var lastHints: [[Any]] = []
-    private var files: [[String: Any]] = []
-    private var fileRows: [(depth: Int, name: String, file: Int?)] = []
-    private var branches: [[String: Any]] = []
-    private var commits: [[String: Any]] = []
-    private var focus = GitPane.files
     private var showsFile = true
-    private var infoTitle = "Log"
     private var busy = false
     private var note = ""
     private var alert: PlatinumDialog?
@@ -15111,11 +15156,10 @@ final class PlatinumGitView: NSObject, GitSurface {
     var gitPlacement: GitWindowPlacement? { placement }
     private var keyObservers: [NSObjectProtocol] = []
 
-    init(view: CellView) {
-        self.view = view
+    override init(view: CellView) {
         win = PlatinumGitWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: 640),
                                 styleMask: [.borderless], backing: .buffered, defer: true)
-        super.init()
+        super.init(view: view)
         win.git = self
         win.isReleasedWhenClosed = false
         win.hasShadow = false
@@ -15299,14 +15343,7 @@ final class PlatinumGitView: NSObject, GitSurface {
     // MARK: state
 
     func update(_ data: Data) -> Bool {
-        if data == lastData { return false }
-        lastData = data
-        guard let st = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return false }
-        state = st
-        files = st["files"] as? [[String: Any]] ?? []
-        fileRows = GitController.tree(files)
-        branches = st["branches"] as? [[String: Any]] ?? []
-        commits = st["commits"] as? [[String: Any]] ?? []
+        guard let st = decode(data) else { return false }
         busy = st["busy"] as? Bool ?? false
         let title = st["title"] as? String ?? "Local changes"
         if frameView.title != title {
@@ -15314,10 +15351,7 @@ final class PlatinumGitView: NSObject, GitSurface {
             win.title = title
             frameView.needsDisplay = true
         }
-        let status = st["status"] as? String ?? ""
-        let flash = st["flash"] as? String ?? ""
-        note = busy ? (st["busy_label"] as? String ?? "Working…") : !status.isEmpty ? status : flash
-        focus = st["focus"] as? Int ?? GitPane.files
+        note = noteText(st)
 
         filesList.rows = fileRows.map { r in
             guard let fi = r.file else {
@@ -15368,23 +15402,6 @@ final class PlatinumGitView: NSObject, GitSurface {
 
     // MARK: operations
 
-    private func select(_ pane: Int, _ idx: Int) {
-        guard let v = view, v.handle != 0 else { return }
-        tk_desktop_git_select(v.handle, Int64(pane), Int64(idx), Int64(v.cols()), Int64(v.rows()))
-        lastData = Data()
-        onAfterAction?()
-    }
-
-    /// One of the view's own keys; pane -1 is the focused one.
-    private func key(_ pane: Int, _ k: UInt32, mods: UInt8 = 0) {
-        guard let v = view, v.handle != 0 else { return }
-        _ = tk_desktop_git_key(v.handle, Int64(pane), Int64(k), Int64(mods), Int64(v.cols()), Int64(v.rows()))
-        lastData = Data()
-        onAfterAction?()
-    }
-
-    private func ch(_ c: Character) -> UInt32 { c.unicodeScalars.first!.value }
-
     private func open(_ pane: Int, _ row: Int) {
         guard let v = view, v.handle != 0 else { return }
         tk_desktop_git_open(v.handle, Int64(pane), Int64(row), Int64(v.cols()), Int64(v.rows()))
@@ -15394,26 +15411,20 @@ final class PlatinumGitView: NSObject, GitSurface {
     /// Double-click / Return: open the file, check out the branch, open
     /// the commit.
     private func activate(_ pane: Int, _ r: Int) {
-        guard let idx = index(pane, r), let v = view, v.handle != 0 else { return }
+        guard let idx = index(pane, r) else { return }
         switch pane {
-        case GitPane.files:
-            tk_desktop_git_select(v.handle, Int64(GitPane.files), Int64(idx), Int64(v.cols()), Int64(v.rows()))
-            open(GitPane.files, idx)
+        case GitPane.files: openFile(idx)
         case GitPane.branches: key(GitPane.branches, 0x20)
         default: key(GitPane.commits, 0x0D)
         }
     }
 
     func closeClicked() {
-        guard let v = view, v.handle != 0 else { return }
-        if tk_desktop_git_close(v.handle) == 0 {
-            NSSound.beep()
+        if !closeCore() {
             note = "Wait for the running git operation to finish."
             body.needsDisplay = true
         }
-        onAfterAction?()
-        // Hide the window now, before it draws the core's closed (empty) view.
-        _ = AppController.shared?.pollGit(v)
+        afterClose()
     }
 
     private func listKey(_ pane: Int, _ e: NSEvent) -> Bool {
@@ -15507,27 +15518,16 @@ final class PlatinumGitView: NSObject, GitSurface {
     }
 
     private func refreshPanels() {
-        guard let v = view, v.handle != 0 else { return }
-        let (h, cols, rows) = (v.handle, Int64(v.cols()), Int64(v.rows()))
-        let data = readCoreData(&panelsBuf, { tk_desktop_git_panels(h, cols, rows, $0, $1) }) ?? Data()
-        guard data != lastPanels else { return }
-        lastPanels = data
-        let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
-        let panels = o["panels"] as? [[String: Any]] ?? []
-        let bg = NSColor.rgb(o["bg"] as? Int ?? 0xFFFFFF)
-        let fg = NSColor.rgb(o["fg"] as? Int ?? 0)
-        if let info = panels.first(where: { ($0["pane"] as? Int) == GitPane.info }) {
-            // Named for the list driving it (kept while the cursor is in it).
-            if focus == GitPane.branches { infoTitle = "Log" }
-            if focus == GitPane.commits { infoTitle = "Commit" }
+        guard let p = changedPanels() else { return }
+        let bg = NSColor.rgb(p.o["bg"] as? Int ?? 0xFFFFFF)
+        let fg = NSColor.rgb(p.o["fg"] as? Int ?? 0)
+        if let info = p.info {
             showsFile = false
             unstagedMap = render(info, into: unstaged, pane: GitPane.info, bg: bg, fg: fg)
         } else {
             showsFile = true
-            unstagedMap = render(panels.first { ($0["pane"] as? Int) == GitPane.unstaged } ?? [:],
-                                 into: unstaged, pane: GitPane.unstaged, bg: bg, fg: fg)
-            stagedMap = render(panels.first { ($0["pane"] as? Int) == GitPane.staged } ?? [:],
-                               into: staged, pane: GitPane.staged, bg: bg, fg: fg)
+            unstagedMap = render(p.unstaged, into: unstaged, pane: GitPane.unstaged, bg: bg, fg: fg)
+            stagedMap = render(p.staged, into: staged, pane: GitPane.staged, bg: bg, fg: fg)
         }
     }
 
