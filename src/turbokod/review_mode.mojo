@@ -418,6 +418,15 @@ struct ReviewMode(Movable):
                 return self.mem_files[i]
         return 0
 
+    def take_after_texts(mut self) -> List[String]:
+        """Hand the loaded changeset's after texts to the caller and drop
+        the rest of its per-file state (the before texts above all), for a
+        caller that keeps its own record of the changeset."""
+        var out = List[String]()
+        swap(out, self.file_after)
+        self._reset_review()
+        return out^
+
     def _reset_review(mut self):
         self.title = String("")
         self.file_paths = List[String]()

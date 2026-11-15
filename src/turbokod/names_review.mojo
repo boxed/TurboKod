@@ -33,6 +33,10 @@ from .ui_tree import (
 )
 
 
+# Changesets whose names and file texts stay loaded while the dialog is
+# open; going back to an older one loads it again.
+comptime _LOADED_CAP: Int = 4
+
 # Files longer than this aren't tokenized for the code view (shown plain).
 comptime _HIGHLIGHT_LINE_CAP: Int = 20000
 
@@ -57,9 +61,10 @@ struct NamesReview(Movable, UIDialog):
     var change_tab: List[Int]
     var change_idx: List[Int]
     var change: Int
+    # The changesets shown most recently, the current one last. Each holds
+    # its files' after texts (for the code view), so only a few are kept.
     var _loaded: List[_Loaded]
     var paths: List[String]     # repo-relative, per changeset file
-    var afters: List[String]    # each file's after text
     var names: List[NewName]
     var selected: Int
     # Set by Open: the host opens ``open_request``'s name and closes.
@@ -81,7 +86,6 @@ struct NamesReview(Movable, UIDialog):
         self.change = -1
         self._loaded = List[_Loaded]()
         self.paths = List[String]()
-        self.afters = List[String]()
         self.names = List[NewName]()
         self.selected = 0
         self.open_requested = False
@@ -127,7 +131,6 @@ struct NamesReview(Movable, UIDialog):
         self.model.close()
         self._loaded = List[_Loaded]()
         self.paths = List[String]()
-        self.afters = List[String]()
         self.names = List[NewName]()
         self._code_file = -1
         self._code_lines = List[String]()
@@ -147,18 +150,23 @@ struct NamesReview(Movable, UIDialog):
                 hit = i
         if hit < 0:
             self.model.load_changeset(tab, idx)
+            var names = self.model.new_names()
+            var title = self.model.title
+            var paths = self.model.file_paths.copy()
+            # The model's copy of the texts isn't needed past this point.
             self._loaded.append(_Loaded(
-                key, self.model.title, self.model.file_paths.copy(),
-                self.model.file_after.copy(), self.model.new_names(),
+                key, title^, paths^, self.model.take_after_texts(), names^,
             ))
-            hit = len(self._loaded) - 1
+            if len(self._loaded) > _LOADED_CAP:
+                _ = self._loaded.pop(0)
         else:
             # Remembered for the next open, as a fresh load would.
             self.model.last_key = key
-        ref l = self._loaded[hit]
+            var again = self._loaded.pop(hit)
+            self._loaded.append(again^)
+        ref l = self._loaded[len(self._loaded) - 1]
         self.title = l.title
         self.paths = l.paths.copy()
-        self.afters = l.afters.copy()
         self.names = l.names.copy()
         self.selected = 0
         self.code_window.reset()
@@ -257,7 +265,9 @@ struct NamesReview(Movable, UIDialog):
         self.code_window.reset()
         if f < 0:
             return
-        self._code_lines = split_lines_no_trailing(self.afters[f])
+        self._code_lines = split_lines_no_trailing(
+            self._loaded[len(self._loaded) - 1].afters[f],
+        )
         for i in range(len(self._code_lines)):
             if len(self._code_lines[i].as_bytes()) > _HIGHLIGHT_LINE_CAP:
                 return
