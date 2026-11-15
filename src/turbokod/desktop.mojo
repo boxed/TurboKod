@@ -11314,7 +11314,7 @@ struct Desktop(Movable):
                 var hl_path = self.lsp_managers[i].pending_doc_highlight_path()
                 var occ = self.lsp_managers[i].take_doc_highlights()
                 var hw = self._find_window_for_path(hl_path)
-                if hw >= 0 and self.windows.windows[hw].is_editor:
+                if hw >= 0:
                     self.windows.windows[hw].editor.set_document_highlights(
                         occ^,
                     )
@@ -11323,35 +11323,35 @@ struct Desktop(Movable):
                 var ip = self.lsp_managers[i].pending_inlay_path()
                 var ihs = self.lsp_managers[i].take_inlay()
                 var iw = self._find_window_for_path(ip)
-                if iw >= 0 and self.windows.windows[iw].is_editor:
+                if iw >= 0:
                     self.windows.windows[iw].editor.set_inlay_hints(ihs^)
             # codeLens → end-of-line annotations on the matching editor.
             if self.lsp_managers[i].has_pending_codelens():
                 var cp = self.lsp_managers[i].pending_codelens_path()
                 var cls = self.lsp_managers[i].take_codelens()
                 var cw = self._find_window_for_path(cp)
-                if cw >= 0 and self.windows.windows[cw].is_editor:
+                if cw >= 0:
                     self.windows.windows[cw].editor.set_code_lens(cls^)
             # documentColor → swatch overlay on the matching editor.
             if self.lsp_managers[i].has_pending_colors():
                 var clp = self.lsp_managers[i].pending_color_path()
                 var cols = self.lsp_managers[i].take_colors()
                 var clw = self._find_window_for_path(clp)
-                if clw >= 0 and self.windows.windows[clw].is_editor:
+                if clw >= 0:
                     self.windows.windows[clw].editor.set_color_swatches(cols^)
             # documentLink → underlined clickable spans on the editor.
             if self.lsp_managers[i].has_pending_doclinks():
                 var dlp = self.lsp_managers[i].pending_doclink_path()
                 var dls = self.lsp_managers[i].take_doclinks()
                 var dlw = self._find_window_for_path(dlp)
-                if dlw >= 0 and self.windows.windows[dlw].is_editor:
+                if dlw >= 0:
                     self.windows.windows[dlw].editor.set_document_links(dls^)
             # foldingRange → mark foldable block starts on the editor.
             if self.lsp_managers[i].has_pending_folding():
                 var fp = self.lsp_managers[i].pending_folding_path()
                 var frs = self.lsp_managers[i].take_folding_ranges()
                 var fw = self._find_window_for_path(fp)
-                if fw >= 0 and self.windows.windows[fw].is_editor:
+                if fw >= 0:
                     self.windows.windows[fw].editor.set_fold_regions(frs^)
             # moniker → status-bar string (cross-repo symbol identity).
             if self.lsp_managers[i].has_moniker():
@@ -11382,7 +11382,7 @@ struct Desktop(Movable):
             if self.lsp_managers[i].has_inline_values():
                 var ivs = self.lsp_managers[i].take_inline_values()
                 var ivw = self._find_window_for_path(self._dap_exec_path)
-                if ivw >= 0 and self.windows.windows[ivw].is_editor:
+                if ivw >= 0:
                     self.windows.windows[ivw].editor.set_inline_values(ivs^)
                 # The variable-lookup / evaluable variants are resolved by
                 # evaluating each expression in the stopped frame; the
@@ -11404,7 +11404,7 @@ struct Desktop(Movable):
                 var rp = self.lsp_managers[i].pending_selrange_path()
                 var rngs = self.lsp_managers[i].take_selrange()
                 var rw = self._find_window_for_path(rp)
-                if rw >= 0 and self.windows.windows[rw].is_editor:
+                if rw >= 0:
                     self.windows.windows[rw].editor.set_selection_ranges(rngs^)
             # Route completion responses back to the focused editor —
             # but only if the request's file matches what's currently
@@ -11979,7 +11979,7 @@ struct Desktop(Movable):
         if li < 0:
             return
         var w = self._find_window_for_path(path)
-        if w < 0 or not self.windows.windows[w].is_editor:
+        if w < 0:
             return
         var lc = self.windows.windows[w].editor.buffer.line_count()
         var text = self.windows.windows[w].editor.text_snapshot()
@@ -13359,7 +13359,7 @@ struct Desktop(Movable):
                     var ivw = self._find_window_for_path(
                         self._inlineval_pending_path,
                     )
-                    if ivw >= 0 and self.windows.windows[ivw].is_editor:
+                    if ivw >= 0:
                         self.windows.windows[ivw].editor.add_inline_value(
                             self._inlineval_pending_rows[k],
                             e + String(" = ") + batch.values[i],
@@ -14506,7 +14506,7 @@ struct Desktop(Movable):
             return
         var win_idx = self._find_window_for_path(origin_path)
         var text: String
-        if win_idx >= 0 and self.windows.windows[win_idx].is_editor:
+        if win_idx >= 0:
             text = self.windows.windows[win_idx].editor.text_snapshot()
         else:
             return
@@ -17067,7 +17067,7 @@ struct Desktop(Movable):
             self._say(String("Rename: LSP not ready"), Attr(RED, LIGHT_GRAY))
             return
         var win_idx = self._find_window_for_path(path)
-        if win_idx < 0 or not self.windows.windows[win_idx].is_editor:
+        if win_idx < 0:
             return
         var text = self.windows.windows[win_idx].editor.text_snapshot()
         var ok = self.lsp_managers[lsp_idx].request_rename(
@@ -17089,7 +17089,7 @@ struct Desktop(Movable):
             # The edits' positions are for the text the rename was asked on:
             # typed into since, they'd land in the wrong places.
             var win = self._find_window_for_path(path)
-            if len(edits) > 0 and win >= 0 and self._is_editor_at(win) \
+            if len(edits) > 0 and win >= 0 \
                     and self.windows.windows[win].editor.text_snapshot() != asked_on:
                 self._rename_path = String("")
                 self._say(
@@ -17134,7 +17134,7 @@ struct Desktop(Movable):
                 except:
                     continue
                 win_idx = self._find_window_for_path(path)
-            if not self._is_editor_at(win_idx):
+            if win_idx < 0:
                 continue
             # ``apply_code_action_edits`` filters by the editor's own URI,
             # so handing it just this file's group applies exactly that.
@@ -18060,7 +18060,7 @@ struct Desktop(Movable):
         write) they'd land in the wrong places, so they are dropped — a
         pending save still goes ahead, just without them."""
         var win = self._find_window_for_path(path)
-        if win < 0 or not self.windows.windows[win].is_editor:
+        if win < 0:
             return -1
         if len(edits) > 0 \
                 and self.windows.windows[win].editor.text_snapshot() == text:
