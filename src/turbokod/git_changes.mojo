@@ -15,7 +15,7 @@ from .file_io import find_git_project, join_path, project_relative, stat_file
 from .lsp import capture_command
 from .string_utils import (
     byte_slice, parse_int_all, percent_encode_uri_path, split_lines,
-    split_lines_no_trailing, starts_with,
+    split_lines_no_trailing, starts_with, string_list,
 )
 from .case_fold import find_exact
 
@@ -582,9 +582,7 @@ def fetch_blob_text(
     """
     if len(project_root.as_bytes()) == 0 or len(rel_path.as_bytes()) == 0:
         return String("")
-    var args = List[String]()
-    args.append(String("show"))
-    args.append(git_ref + String(":") + rel_path)
+    var args = string_list(String("show"), git_ref + String(":") + rel_path)
     return _git_stdout(project_root, args^)
 
 
@@ -620,12 +618,10 @@ def git_base_argv(project_root: String) -> List[String]:
     """``git --literal-pathspecs --no-optional-locks -C <project_root>``:
     the one spelling of the prefix every git invocation in the product
     starts with (see ``_git_argv`` for why each flag is there)."""
-    var argv = List[String]()
-    argv.append(String("git"))
-    argv.append(String("--literal-pathspecs"))
-    argv.append(String("--no-optional-locks"))
-    argv.append(String("-C"))
-    argv.append(project_root)
+    var argv = string_list(
+        String("git"), String("--literal-pathspecs"), String("--no-optional-locks"),
+        String("-C"), project_root,
+    )
     return argv^
 
 
@@ -685,9 +681,7 @@ def fetch_head_text(project_root: String, file_path: String) -> Optional[String]
     )
     if len(rel.as_bytes()) == 0:
         return Optional[String]()
-    var args = List[String]()
-    args.append(String("show"))
-    args.append(String("HEAD:") + rel)
+    var args = string_list(String("show"), String("HEAD:") + rel)
     # Non-zero exit = path not in HEAD; treat as "no baseline".
     return _git_capture(project_root, args^)
 
@@ -789,11 +783,9 @@ def git_head_sha(project_root: String) -> String:
     makes git exit non-zero there instead of echoing ``HEAD`` back."""
     if len(project_root.as_bytes()) == 0:
         return String("")
-    var args = List[String]()
-    args.append(String("rev-parse"))
-    args.append(String("--verify"))
-    args.append(String("-q"))
-    args.append(String("HEAD^{commit}"))
+    var args = string_list(
+        String("rev-parse"), String("--verify"), String("-q"), String("HEAD^{commit}"),
+    )
     var raw = _git_stdout(project_root, args^)
     return String(raw.strip())
 
@@ -852,13 +844,10 @@ def changed_paths_between(
     var found = find_git_project(project_root)
     if found:
         repo_root = found.value()
-    var args = List[String]()
-    args.append(String("diff"))
-    args.append(String("--name-status"))
-    args.append(String("-z"))
-    args.append(String("--no-renames"))
-    args.append(old_sha)
-    args.append(new_sha)
+    var args = string_list(
+        String("diff"), String("--name-status"), String("-z"), String("--no-renames"),
+        old_sha, new_sha,
+    )
     var stdout = _git_stdout(project_root, args^)
     return parse_name_status_z(stdout, repo_root)
 
@@ -887,10 +876,7 @@ def compute_staged_diff(
     not a repo, git missing)."""
     if len(project_root.as_bytes()) == 0:
         return String("")
-    var args = List[String]()
-    args.append(String("diff"))
-    args.append(String("--cached"))
-    args.append(String("--no-color"))
+    var args = string_list(String("diff"), String("--cached"), String("--no-color"))
     _append_diff_paths(args, rel_path, orig_path)
     return _git_stdout(project_root, args^)
 
@@ -902,10 +888,7 @@ def compute_range_diff(project_root: String, base: String, tip: String) -> Strin
     including edits not yet committed). Empty on failure."""
     if len(project_root.as_bytes()) == 0:
         return String("")
-    var args = List[String]()
-    args.append(String("diff"))
-    args.append(String("--no-color"))
-    args.append(base)
+    var args = string_list(String("diff"), String("--no-color"), base)
     if len(tip.as_bytes()) > 0:
         args.append(tip)
     return _git_stdout(project_root, args^)
@@ -924,10 +907,7 @@ def has_tracked_changes(project_root: String) -> Bool:
 
 def checkout_branch(project_root: String, branch: String) -> Bool:
     """``git checkout <branch>``; True on success."""
-    var args = List[String]()
-    args.append(String("checkout"))
-    args.append(String("-q"))
-    args.append(branch)
+    var args = string_list(String("checkout"), String("-q"), branch)
     return _git_ok(project_root, args^)
 
 
@@ -939,9 +919,7 @@ def compute_unstaged_diff(
     tree or just ``rel_path``. Empty on failure."""
     if len(project_root.as_bytes()) == 0:
         return String("")
-    var args = List[String]()
-    args.append(String("diff"))
-    args.append(String("--no-color"))
+    var args = string_list(String("diff"), String("--no-color"))
     _append_diff_paths(args, rel_path, orig_path)
     return _git_stdout(project_root, args^)
 
@@ -980,13 +958,10 @@ def compute_untracked_diff(project_root: String, rel_path: String) -> String:
     var pb = rel_path.as_bytes()
     if pb[len(pb) - 1] == 0x2F:      # collapsed untracked directory
         return String("")
-    var args = List[String]()
-    args.append(String("diff"))
-    args.append(String("--no-color"))
-    args.append(String("--no-index"))
-    args.append(String("--"))
-    args.append(String("/dev/null"))
-    args.append(rel_path)
+    var args = string_list(
+        String("diff"), String("--no-color"), String("--no-index"), String("--"),
+        String("/dev/null"), rel_path,
+    )
     try:
         return capture_command(_git_argv(project_root, args^)).stdout
     except:
@@ -1029,11 +1004,10 @@ def fetch_git_status(project_root: String) -> List[GitFileStatus]:
 
 
 def _git_status_args() -> List[String]:
-    var args = List[String]()
-    args.append(String("status"))
-    args.append(String("--porcelain=v1"))
-    args.append(String("-z"))
-    args.append(String("--untracked-files=all"))
+    var args = string_list(
+        String("status"), String("--porcelain=v1"), String("-z"),
+        String("--untracked-files=all"),
+    )
     return args^
 
 
@@ -1083,10 +1057,7 @@ def current_branch_name(project_root: String) -> String:
     non-zero and ``_git_stdout`` maps that to ``""``)."""
     if len(project_root.as_bytes()) == 0:
         return String("")
-    var args = List[String]()
-    args.append(String("rev-parse"))
-    args.append(String("--abbrev-ref"))
-    args.append(String("HEAD"))
+    var args = string_list(String("rev-parse"), String("--abbrev-ref"), String("HEAD"))
     var raw = _git_stdout(project_root, args^)
     var name = String(raw.strip())
     if name != String("HEAD"):
@@ -1105,10 +1076,7 @@ def stage_file(project_root: String, path: String) -> Bool:
     status`` produces)."""
     if len(project_root.as_bytes()) == 0 or len(path.as_bytes()) == 0:
         return False
-    var args = List[String]()
-    args.append(String("add"))
-    args.append(String("--"))
-    args.append(path)
+    var args = string_list(String("add"), String("--"), path)
     return _git_ok(project_root, args^)
 
 
@@ -1118,11 +1086,7 @@ def unstage_file(project_root: String, path: String) -> Bool:
     touching the worktree. Returns False on failure."""
     if len(project_root.as_bytes()) == 0 or len(path.as_bytes()) == 0:
         return False
-    var args = List[String]()
-    args.append(String("restore"))
-    args.append(String("--staged"))
-    args.append(String("--"))
-    args.append(path)
+    var args = string_list(String("restore"), String("--staged"), String("--"), path)
     return _git_ok(project_root, args^)
 
 
@@ -1335,9 +1299,7 @@ def fetch_git_branches(project_root: String) -> List[GitBranch]:
     var out = List[GitBranch]()
     if len(project_root.as_bytes()) == 0:
         return out^
-    var args = List[String]()
-    args.append(String("for-each-ref"))
-    args.append(String("--sort=-committerdate"))
+    var args = string_list(String("for-each-ref"), String("--sort=-committerdate"))
     args.append(
         String(
             "--format=%(HEAD)%09%(refname:short)%09%(objectname:short)"
@@ -1381,9 +1343,7 @@ def fetch_git_remote_branches(project_root: String) -> List[GitBranch]:
     var remotes = fetch_git_remotes(project_root)
     if len(remotes) == 0:
         return out^
-    var args = List[String]()
-    args.append(String("for-each-ref"))
-    args.append(String("--sort=-committerdate"))
+    var args = string_list(String("for-each-ref"), String("--sort=-committerdate"))
     args.append(
         String(
             "--format=%(symref)%09%(refname:lstrip=2)%09%(objectname:short)"
@@ -1423,11 +1383,10 @@ def main_line_branch(project_root: String) -> String:
     a month is a bad thing to measure "already merged" against."""
     if len(project_root.as_bytes()) == 0:
         return String("")
-    var args = List[String]()
-    args.append(String("for-each-ref"))
-    args.append(String("--format=%(refname:short)"))
-    args.append(String("refs/heads/main"))
-    args.append(String("refs/heads/master"))
+    var args = string_list(
+        String("for-each-ref"), String("--format=%(refname:short)"),
+        String("refs/heads/main"), String("refs/heads/master"),
+    )
     var lines = split_lines_no_trailing(_git_stdout(project_root, args^))
     var found_master = False
     for i in range(len(lines)):
@@ -1471,10 +1430,10 @@ def branch_push_remote(project_root: String, branch: String) -> String:
     belongs to that fork, not to whatever ``origin`` happens to be."""
     if len(project_root.as_bytes()) == 0 or len(branch.as_bytes()) == 0:
         return String("origin")
-    var args = List[String]()
-    args.append(String("config"))
-    args.append(String("--get"))
-    args.append(String("branch.") + branch + String(".remote"))
+    var args = string_list(
+        String("config"), String("--get"),
+        String("branch.") + branch + String(".remote"),
+    )
     var configured = _trim_one_line(_git_stdout(project_root, args^))
     return configured^ if len(configured.as_bytes()) > 0 else String("origin")
 
@@ -1484,10 +1443,7 @@ def fetch_git_remote_url(project_root: String, remote: String) -> String:
     the remote isn't configured."""
     if len(project_root.as_bytes()) == 0 or len(remote.as_bytes()) == 0:
         return String("")
-    var args = List[String]()
-    args.append(String("remote"))
-    args.append(String("get-url"))
-    args.append(remote)
+    var args = string_list(String("remote"), String("get-url"), remote)
     return _trim_one_line(_git_stdout(project_root, args^))
 
 
@@ -1495,12 +1451,10 @@ def _strip_uri_scheme(url: String) -> String:
     """Drop a leading ``https://`` / ``http://`` / ``ssh://`` / ``git://``
     scheme. Returns ``url`` unchanged for the scp-style
     ``git@host:path`` form, which has no scheme."""
-    var schemes = List[String]()
-    schemes.append(String("https://"))
-    schemes.append(String("http://"))
-    schemes.append(String("ssh://"))
-    schemes.append(String("git+ssh://"))
-    schemes.append(String("git://"))
+    var schemes = string_list(
+        String("https://"), String("http://"), String("ssh://"), String("git+ssh://"),
+        String("git://"),
+    )
     for i in range(len(schemes)):
         if starts_with(url, schemes[i]):
             var n = len(schemes[i].as_bytes())
@@ -1645,10 +1599,7 @@ def _first_field(line: String) -> String:
 def merge_base(project_root: String, a: String, b: String) -> String:
     """``git merge-base a b`` — the commit a branch forked from; empty when
     git can't find one."""
-    var args = List[String]()
-    args.append(String("merge-base"))
-    args.append(a)
-    args.append(b)
+    var args = string_list(String("merge-base"), a, b)
     var lines = split_lines_no_trailing(_git_stdout(project_root, args^))
     return lines[0] if len(lines) > 0 else String("")
 
@@ -1667,10 +1618,7 @@ def _every_commit_landed(
 
     Empty output means git told us nothing about any commit; treated as
     "unknown" (False) rather than as a vacuous yes."""
-    var args = List[String]()
-    args.append(String("cherry"))
-    args.append(main)
-    args.append(branch)
+    var args = string_list(String("cherry"), main, branch)
     var lines = split_lines_no_trailing(_git_stdout(project_root, args^))
     var saw_one = False
     for i in range(len(lines)):
@@ -1701,9 +1649,7 @@ def _change_already_landed(
     touch those paths by definition. Both the file count and the search
     depth are capped; overrunning either returns False, i.e. "ask the
     user"."""
-    var name_args = List[String]()
-    name_args.append(String("diff"))
-    name_args.append(String("--name-only"))
+    var name_args = string_list(String("diff"), String("--name-only"))
     name_args.append(String("-z"))  # paths as they are, not quoted
     name_args.append(base)
     name_args.append(branch)
@@ -1723,16 +1669,11 @@ def _change_already_landed(
         return True
     if len(files) > _SQUASH_SCAN_MAX_FILES:
         return False
-    var diff_args = List[String]()
-    diff_args.append(String("diff"))
-    diff_args.append(base)
-    diff_args.append(branch)
+    var diff_args = string_list(String("diff"), base, branch)
     var combined = _git_stdout(project_root, diff_args^)
     if len(combined.as_bytes()) == 0:
         return False
-    var pid_args = List[String]()
-    pid_args.append(String("patch-id"))
-    pid_args.append(String("--stable"))
+    var pid_args = string_list(String("patch-id"), String("--stable"))
     var want_lines = split_lines_no_trailing(
         _git_stdout(project_root, pid_args^, combined),
     )
@@ -1741,22 +1682,16 @@ def _change_already_landed(
     var want = _first_field(want_lines[0])
     if len(want.as_bytes()) == 0:
         return False
-    var log_args = List[String]()
-    log_args.append(String("log"))
-    log_args.append(String("-n"))
-    log_args.append(String(_SQUASH_SCAN_COMMITS))
-    log_args.append(String("--format=%H"))
-    log_args.append(String("-p"))
-    log_args.append(base + String("..") + main)
-    log_args.append(String("--"))
+    var log_args = string_list(
+        String("log"), String("-n"), String(_SQUASH_SCAN_COMMITS),
+        String("--format=%H"), String("-p"), base + String("..") + main, String("--"),
+    )
     for i in range(len(files)):
         log_args.append(files[i])
     var sweep = _git_stdout(project_root, log_args^)
     if len(sweep.as_bytes()) == 0:
         return False
-    var scan_args = List[String]()
-    scan_args.append(String("patch-id"))
-    scan_args.append(String("--stable"))
+    var scan_args = string_list(String("patch-id"), String("--stable"))
     var got = split_lines_no_trailing(
         _git_stdout(project_root, scan_args^, sweep),
     )
@@ -1797,11 +1732,7 @@ def branch_is_merged(project_root: String, branch: String) -> Bool:
     var main = main_line_branch(project_root)
     if len(main.as_bytes()) == 0 or main == branch:
         return False
-    var anc = List[String]()
-    anc.append(String("merge-base"))
-    anc.append(String("--is-ancestor"))
-    anc.append(branch)
-    anc.append(main)
+    var anc = string_list(String("merge-base"), String("--is-ancestor"), branch, main)
     if _git_ok(project_root, anc^):
         return True
     if _every_commit_landed(project_root, main, branch):
@@ -1823,13 +1754,10 @@ def _fetch_unpushed_short_shas(
     var out = List[String]()
     if len(project_root.as_bytes()) == 0:
         return out^
-    var args = List[String]()
-    args.append(String("rev-list"))
-    args.append(String("-") + String(limit))
-    args.append(String("HEAD"))
-    args.append(String("--not"))
-    args.append(String("--remotes"))
-    args.append(String("--abbrev-commit"))
+    var args = string_list(
+        String("rev-list"), String("-") + String(limit), String("HEAD"),
+        String("--not"), String("--remotes"), String("--abbrev-commit"),
+    )
     var stdout = _git_stdout(project_root, args^)
     var lines = split_lines_no_trailing(stdout)
     for li in range(len(lines)):
@@ -1873,11 +1801,10 @@ def fetch_git_commits(
     var out = List[GitCommit]()
     if len(project_root.as_bytes()) == 0:
         return out^
-    var args = List[String]()
-    args.append(String("log"))
-    args.append(String("-") + String(limit))
-    args.append(String("--no-color"))
-    args.append(String("--date=short"))
+    var args = string_list(
+        String("log"), String("-") + String(limit), String("--no-color"),
+        String("--date=short"),
+    )
     # ``%D`` (ref decoration) and ``%p`` (parents) sit before ``%s`` so the
     # subject stays the tab-absorbing last field; neither ever contains a
     # tab itself.
@@ -1916,11 +1843,9 @@ def fetch_commit_show(project_root: String, sha: String) -> String:
     ordinary single-parent commit the flag is a no-op."""
     if len(project_root.as_bytes()) == 0 or len(sha.as_bytes()) == 0:
         return String("")
-    var args = List[String]()
-    args.append(String("show"))
-    args.append(String("--no-color"))
-    args.append(String("--first-parent"))
-    args.append(sha)
+    var args = string_list(
+        String("show"), String("--no-color"), String("--first-parent"), sha,
+    )
     return _git_stdout(project_root, args^)
 
 
@@ -1941,11 +1866,7 @@ def fetch_commit_message(project_root: String, sha: String) -> String:
     """
     if len(project_root.as_bytes()) == 0 or len(sha.as_bytes()) == 0:
         return String("")
-    var args = List[String]()
-    args.append(String("log"))
-    args.append(String("-1"))
-    args.append(String("--format=%B"))
-    args.append(sha)
+    var args = string_list(String("log"), String("-1"), String("--format=%B"), sha)
     var out = _git_stdout(project_root, args^)
     # Trim only trailing newlines; a message's own trailing spaces are
     # the user's business.
@@ -1963,10 +1884,7 @@ def head_short_sha(project_root: String) -> String:
     which needs the replay path."""
     if len(project_root.as_bytes()) == 0:
         return String("")
-    var args = List[String]()
-    args.append(String("rev-parse"))
-    args.append(String("--short"))
-    args.append(String("HEAD"))
+    var args = string_list(String("rev-parse"), String("--short"), String("HEAD"))
     return String(_git_stdout(project_root, args^).strip())
 
 
@@ -1979,10 +1897,9 @@ def has_merge_between(project_root: String, sha: String) -> Bool:
     view refuses instead."""
     if len(project_root.as_bytes()) == 0 or len(sha.as_bytes()) == 0:
         return False
-    var args = List[String]()
-    args.append(String("rev-list"))
-    args.append(String("--merges"))
-    args.append(sha + String("..HEAD"))
+    var args = string_list(
+        String("rev-list"), String("--merges"), sha + String("..HEAD"),
+    )
     return len(_git_stdout(project_root, args^).strip().as_bytes()) > 0
 
 
@@ -2007,10 +1924,7 @@ def create_reworded_commit(
     """
     if len(project_root.as_bytes()) == 0 or len(sha.as_bytes()) == 0:
         return String("")
-    var cat = List[String]()
-    cat.append(String("cat-file"))
-    cat.append(String("commit"))
-    cat.append(sha)
+    var cat = string_list(String("cat-file"), String("commit"), sha)
     var raw = _git_stdout(project_root, cat^)
     if len(raw.as_bytes()) == 0:
         return String("")
@@ -2031,12 +1945,10 @@ def create_reworded_commit(
     var body = message
     if not body.endswith("\n"):
         body += String("\n")
-    var args = List[String]()
-    args.append(String("hash-object"))
-    args.append(String("-t"))
-    args.append(String("commit"))
-    args.append(String("-w"))
-    args.append(String("--stdin"))
+    var args = string_list(
+        String("hash-object"), String("-t"), String("commit"), String("-w"),
+        String("--stdin"),
+    )
     return String(
         _git_stdout(project_root, args^, header + String("\n") + body).strip()
     )
@@ -2063,15 +1975,11 @@ def fetch_merged_commits(
     exits non-zero, and :func:`_git_stdout` maps that to ``""``)."""
     if len(project_root.as_bytes()) == 0 or len(sha.as_bytes()) == 0:
         return String("")
-    var args = List[String]()
-    args.append(String("log"))
-    args.append(String("-") + String(limit))
-    args.append(String("--no-color"))
-    args.append(String("--date=short"))
-    args.append(String(_SHORT_LOG_PRETTY))
-    args.append(sha + String("^@"))
-    args.append(String("--not"))
-    args.append(sha + String("^1"))
+    var args = string_list(
+        String("log"), String("-") + String(limit), String("--no-color"),
+        String("--date=short"), String(_SHORT_LOG_PRETTY), sha + String("^@"),
+        String("--not"), sha + String("^1"),
+    )
     return _git_stdout(project_root, args^)
 
 
@@ -2140,10 +2048,7 @@ def fetch_file_history(
     var out = List[LineHistoryEntry]()
     if len(project_root.as_bytes()) == 0 or len(rel_path.as_bytes()) == 0:
         return out^
-    var args = List[String]()
-    args.append(String("log"))
-    args.append(String("--follow"))
-    args.append(String("-p"))
+    var args = string_list(String("log"), String("--follow"), String("-p"))
     return _run_history_log(project_root, args^, limit, rel_path)
 
 
@@ -2195,13 +2100,10 @@ def fetch_branch_log(
     in one paint, the same shape they'd see at the shell."""
     if len(project_root.as_bytes()) == 0 or len(branch.as_bytes()) == 0:
         return String("")
-    var args = List[String]()
-    args.append(String("log"))
-    args.append(String("-") + String(limit))
-    args.append(String("--no-color"))
-    args.append(String("--date=short"))
-    args.append(String(_SHORT_LOG_PRETTY))
-    args.append(branch)
+    var args = string_list(
+        String("log"), String("-") + String(limit), String("--no-color"),
+        String("--date=short"), String(_SHORT_LOG_PRETTY), branch,
+    )
     return _git_stdout(project_root, args^)
 
 

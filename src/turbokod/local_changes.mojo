@@ -150,6 +150,7 @@ from .string_utils import (
     split_lines,
     split_lines_no_trailing,
     starts_with,
+    string_list,
     tail_to_columns,
 )
 from .text_field import TextField
@@ -5003,11 +5004,6 @@ struct LocalChanges(Movable):
         popup only renders one at a time."""
         return self._git_op != _GITOP_NONE or self.git_runner.is_active()
 
-    def _git_base_argv(self) -> List[String]:
-        """``git -C <root>`` — the prefix of every async git op. Paths are
-        file names, not patterns (see ``_git_argv``)."""
-        return git_base_argv(self.root)
-
     def _refuse_if_git_busy(mut self) -> Bool:
         """True (after telling the user) while an async git op is running,
         so the caller bails instead of starting a second one."""
@@ -5019,10 +5015,11 @@ struct LocalChanges(Movable):
         return True
 
     def _start_git_op(
-        mut self, op: Int, var label: String, var argv: List[String],
+        mut self, op: Int, var label: String, args: List[String],
         var title_prefix: String = String("Running "),
     ):
-        """Spawn an async git child via ``git_runner``. Records the op
+        """Spawn ``git -C <root> <args>`` (``git_base_argv``: paths are file
+        names, not patterns) via ``git_runner``. Records the op
         type so ``tick`` knows which refresh to run when the child
         reaps. Flashes a one-line status on spawn failure rather than
         raising — these are user-visible operations and a hung modal is
@@ -5032,6 +5029,8 @@ struct LocalChanges(Movable):
                 String("Another git operation is still running."), False,
             )
             return
+        var argv = git_base_argv(self.root)
+        argv.extend(args.copy())
         var spawned: Bool
         try:
             self.git_runner.start_argv(label.copy(), argv^, title_prefix^)
@@ -5051,17 +5050,15 @@ struct LocalChanges(Movable):
             )
 
     def _run_pull(mut self):
-        var argv = self._git_base_argv()
-        argv.append(String("pull"))
+        var argv = string_list(String("pull"))
         self._start_git_op(
-            _GITOP_PULL, String("git pull"), argv^,
+            _GITOP_PULL, String("git pull"), argv,
         )
 
     def _run_push(mut self):
-        var argv = self._git_base_argv()
-        argv.append(String("push"))
+        var argv = string_list(String("push"))
         self._start_git_op(
-            _GITOP_PUSH, String("git push"), argv^,
+            _GITOP_PUSH, String("git push"), argv,
         )
 
     def _open_remote_picker(mut self):
@@ -5131,11 +5128,8 @@ struct LocalChanges(Movable):
             return
         var remote = self._remotes[self._remote_sel]
         self._close_overlay()
-        var argv = self._git_base_argv()
-        argv.append(String("push"))
-        argv.append(remote)
-        argv.append(String("HEAD"))
-        self._start_git_op(_GITOP_PUSH, String("git push ") + remote, argv^)
+        var argv = string_list(String("push"), remote, String("HEAD"))
+        self._start_git_op(_GITOP_PUSH, String("git push ") + remote, argv)
 
     def _run_checkout(mut self):
         """``git checkout`` the selected branch. Already-current branch is
@@ -5152,8 +5146,7 @@ struct LocalChanges(Movable):
                 String("Already on ") + br.name, True,
             )
             return
-        var argv = self._git_base_argv()
-        argv.append(String("checkout"))
+        var argv = string_list(String("checkout"))
         if br.is_remote():
             # Checking out ``origin/x`` itself would detach HEAD. Switch to
             # the local branch of that name, creating it to track this
@@ -5169,7 +5162,7 @@ struct LocalChanges(Movable):
             argv.append(br.name)
             self._git_checkout_branch = br.name.copy()
         self._start_git_op(
-            _GITOP_CHECKOUT, String("git checkout"), argv^,
+            _GITOP_CHECKOUT, String("git checkout"), argv,
         )
 
     def _has_local_branch(self, name: String) -> Bool:
@@ -5287,14 +5280,12 @@ struct LocalChanges(Movable):
         self._close_overlay()
         if len(name.as_bytes()) == 0:
             return
-        var argv = self._git_base_argv()
-        argv.append(String("merge"))
-        argv.append(String("--no-ff"))
-        argv.append(String("--no-edit"))
-        argv.append(name)
+        var argv = string_list(
+            String("merge"), String("--no-ff"), String("--no-edit"), name,
+        )
         self._git_merge_branch = name^
         self._start_git_op(
-            _GITOP_MERGE, String("git merge"), argv^,
+            _GITOP_MERGE, String("git merge"), argv,
         )
 
     def _confirm_merge_rebase(mut self):
@@ -5353,8 +5344,7 @@ struct LocalChanges(Movable):
             return
         self._git_merge_branch = name.copy()
         self._rebase_onto = onto.copy()
-        var argv = self._git_base_argv()
-        argv.append(String("rebase"))
+        var argv = string_list(String("rebase"))
         if name == main_line_branch(self.root):
             # Topic branch onto the main line: one command, nothing
             # chained after it, and the main line is untouched.
@@ -5367,7 +5357,7 @@ struct LocalChanges(Movable):
             argv.append(onto^)
             argv.append(name^)
         self._start_git_op(
-            _GITOP_REBASE, String("git rebase"), argv^,
+            _GITOP_REBASE, String("git rebase"), argv,
         )
         if self._git_op == _GITOP_NONE:
             # Spawn refused or failed; don't leave the chain armed.
@@ -5393,7 +5383,7 @@ struct LocalChanges(Movable):
         if len(onto.as_bytes()) == 0 or len(name.as_bytes()) == 0:
             self._rebase_step = 0
             return False
-        var argv = self._git_base_argv()
+        var argv = List[String]()
         var kind: Int
         if self._rebase_step == 1:
             # The rebase left HEAD on the topic branch; go back to the
@@ -5415,7 +5405,7 @@ struct LocalChanges(Movable):
             self._rebase_step = 0
             return False
         self._start_git_op(
-            _GITOP_REBASE, String("git rebase"), argv^,
+            _GITOP_REBASE, String("git rebase"), argv,
         )
         if self._git_op == _GITOP_NONE:
             self._rebase_step = 0
@@ -5590,15 +5580,11 @@ struct LocalChanges(Movable):
         var short = strip_remote_prefix(name, remote)
         if short == name:
             return
-        var argv = self._git_base_argv()
-        argv.append(String("push"))
-        argv.append(remote)
-        argv.append(String("--delete"))
-        argv.append(short^)
+        var argv = string_list(String("push"), remote, String("--delete"), short)
         self._git_delete_branch = name.copy()
         self._git_delete_remote = remote.copy()
         self._start_git_op(
-            _GITOP_REMOTE_BRANCH_DELETE, String("git push --delete"), argv^,
+            _GITOP_REMOTE_BRANCH_DELETE, String("git push --delete"), argv,
         )
 
     def _start_branch_delete(mut self, name: String):
@@ -5614,13 +5600,10 @@ struct LocalChanges(Movable):
         judges against **HEAD**, not the main line, so it would also
         refuse a plainly-merged branch whenever you happen to be standing
         on some other feature branch."""
-        var argv = self._git_base_argv()
-        argv.append(String("branch"))
-        argv.append(String("-D"))
-        argv.append(name)
+        var argv = string_list(String("branch"), String("-D"), name)
         self._git_delete_branch = name.copy()
         self._start_git_op(
-            _GITOP_BRANCH_DELETE, String("git branch -D"), argv^,
+            _GITOP_BRANCH_DELETE, String("git branch -D"), argv,
         )
 
     def _submit_commit(mut self):
@@ -5628,10 +5611,7 @@ struct LocalChanges(Movable):
         if len(msg.as_bytes()) == 0:
             self._show_status(String("Empty commit message."), False)
             return
-        var argv = self._git_base_argv()
-        argv.append(String("commit"))
-        argv.append(String("-m"))
-        argv.append(msg)
+        var argv = string_list(String("commit"), String("-m"), msg)
         # Remember the message so a hook rejection / other failure can
         # repopulate the prompt next time — ``tick`` clears this on a
         # successful reap.
@@ -5641,7 +5621,7 @@ struct LocalChanges(Movable):
         # an inline status overlay on failure.
         self._close_overlay()
         self._start_git_op(
-            _GITOP_COMMIT, String("git commit"), argv^,
+            _GITOP_COMMIT, String("git commit"), argv,
         )
 
     def _submit_reword(mut self):
@@ -5673,7 +5653,7 @@ struct LocalChanges(Movable):
         if len(sha.as_bytes()) == 0:
             self._close_overlay()
             return
-        var argv = self._git_base_argv()
+        var argv = List[String]()
         if self._reword_is_head:
             argv.append(String("commit"))
             argv.append(String("--amend"))
@@ -5697,17 +5677,14 @@ struct LocalChanges(Movable):
             argv.append(sha)
         self._close_overlay()
         self._start_git_op(
-            _GITOP_REWORD, String("git reword"), argv^,
+            _GITOP_REWORD, String("git reword"), argv,
         )
 
     def _confirm_amend(mut self):
-        var argv = self._git_base_argv()
-        argv.append(String("commit"))
-        argv.append(String("--amend"))
-        argv.append(String("--no-edit"))
+        var argv = string_list(String("commit"), String("--amend"), String("--no-edit"))
         self._close_overlay()
         self._start_git_op(
-            _GITOP_AMEND, String("git amend"), argv^,
+            _GITOP_AMEND, String("git amend"), argv,
         )
 
     def _confirm_revert(mut self):
@@ -5716,7 +5693,7 @@ struct LocalChanges(Movable):
             return
         var fe = self.files[self.sel_file]
         var untracked = fe.is_untracked()
-        var argv = self._git_base_argv()
+        var argv = List[String]()
         if untracked:
             argv.append(String("clean"))
             argv.append(String("-f"))
@@ -5731,7 +5708,7 @@ struct LocalChanges(Movable):
         self._git_revert_untracked = untracked
         self._close_overlay()
         self._start_git_op(
-            _GITOP_REVERT, String("git revert"), argv^,
+            _GITOP_REVERT, String("git revert"), argv,
         )
 
     def tick(mut self):

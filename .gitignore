@@ -5,3 +5,4 @@ tvision/
 .claude
 tests/fixtures/editorconfig/test_save_*.txt
 mutants/
+.scratch/
