@@ -47,7 +47,7 @@ from .events import (
     MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
-from .output_links import extract_all_links, link_at, OutputLink
+from .output_links import extract_all_links, link_at, LinkLatch, OutputLink
 from .painter import Painter
 from .posix import (
     alloc_zero_buffer, getenv_value, monotonic_ms, poll_stdin, read_into,
@@ -217,9 +217,7 @@ struct TerminalPane(Copyable, Movable):
     var _last_links: List[OutputLink]
     """A run pane's ``File "...", line N`` / ``path:N`` / URL spans on
     screen, rebuilt each paint (``output_links``)."""
-    var pending_open_path: String
-    var pending_open_line: Int    # 1-based; 0 with empty path = none
-    var pending_open_url: String
+    var link_click: LinkLatch   # a clicked link (file or URL) for the host
     var _claude_tracker: ClaudeStateTracker
     """Smooths the Claude-state classification across paints so that a
     single unrecognized spinner-glyph frame doesn't flip the title bar
@@ -302,9 +300,7 @@ struct TerminalPane(Copyable, Movable):
         self._run_rescan = True
         self._last_panel_top = 0
         self._last_links = List[OutputLink]()
-        self.pending_open_path = String("")
-        self.pending_open_line = 0
-        self.pending_open_url = String("")
+        self.link_click = LinkLatch()
         self._claude_tracker = ClaudeStateTracker()
         self._claude_title_state = CLAUDE_NONE
         self._attn_armed = False
@@ -337,17 +333,11 @@ struct TerminalPane(Copyable, Movable):
     def consume_open_request(mut self) -> Tuple[String, Int]:
         """``(path, line)`` (1-based) of a freshly clicked traceback link
         in a run pane, or ``("", 0)``; clears it."""
-        var path = self.pending_open_path
-        var line = self.pending_open_line
-        self.pending_open_path = String("")
-        self.pending_open_line = 0
-        return (path^, line)
+        return self.link_click.take_file()
 
     def consume_open_url(mut self) -> String:
         """A freshly clicked URL in a run pane, or ""; clears it."""
-        var u = self.pending_open_url
-        self.pending_open_url = String("")
-        return u^
+        return self.link_click.take_url()
 
     # --- lifecycle -----------------------------------------------------
 
@@ -985,11 +975,7 @@ struct TerminalPane(Copyable, Movable):
                 self.focused = True
             var link = self.results.take_link()
             if link:
-                if link.value().is_url:
-                    self.pending_open_url = link.value().path
-                else:
-                    self.pending_open_path = link.value().path
-                    self.pending_open_line = link.value().line
+                self.link_click.set(link.value())
             return True
         if self.sel.continue_drag(self._view(), event):
             return True
@@ -1041,11 +1027,7 @@ struct TerminalPane(Copyable, Movable):
             var li = link_at(self._last_links, event.pos)
             if li >= 0:
                 ref link = self._last_links[li]
-                if link.is_url:
-                    self.pending_open_url = link.path
-                else:
-                    self.pending_open_path = link.path
-                    self.pending_open_line = link.line
+                self.link_click.set(link)
                 return True
             self.sel.click(self._view(), event)
             return True

@@ -40,6 +40,42 @@ struct OutputLink(ImplicitlyCopyable, Movable):
     var is_url: Bool
 
 
+struct LinkLatch(Copyable, Movable):
+    """A clicked output link waiting for the host: a file location for
+    ``open_file_at`` (``take_file``) or a web link for ``open_url``
+    (``take_url``). Empty path / URL = nothing pending."""
+    var path: String
+    var line: Int      # 1-based; 0 with an empty path = none
+    var url: String
+
+    def __init__(out self):
+        self.path = String("")
+        self.line = 0
+        self.url = String("")
+
+    def set(mut self, link: OutputLink):
+        if link.is_url:
+            self.url = link.path
+        else:
+            self.path = link.path
+            self.line = link.line
+
+    def take_file(mut self) -> Tuple[String, Int]:
+        """``(path, line)`` (1-based) of a pending file link, or
+        ``("", 0)``; clears it."""
+        var path = self.path^
+        var line = self.line
+        self.path = String("")
+        self.line = 0
+        return (path^, line)
+
+    def take_url(mut self) -> String:
+        """The pending web link, or ``""``; clears it."""
+        var u = self.url^
+        self.url = String("")
+        return u^
+
+
 @fieldwise_init
 struct LinkHit(ImplicitlyCopyable, Movable):
     """Bytes-resolved match for a single link occurrence. ``cell_start`` /

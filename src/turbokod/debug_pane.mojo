@@ -69,7 +69,7 @@ from .events import (
 from .geometry import Point, Rect
 from .output_links import (
     extract_all_links, extract_path_line_links as _extract_path_line_links,
-    link_at, OutputLink,
+    link_at, LinkLatch, OutputLink,
 )
 from .scrollbar import VScrollbar
 from .text_field import TextField
@@ -283,11 +283,8 @@ struct DebugPane(Copyable, Movable):
     var pending_expand_depth: Int       # children's indent level
     var pending_collapse_row: Int       # row index for a collapse (no DAP traffic needed)
     var pending_remove_watch: Int       # ordinal of a clicked watch row to remove; -1 = none
-    # Output-log link click. Empty string = none.
-    var pending_open_path: String
-    var pending_open_line: Int          # 1-based; 0 with empty path = none
-    # Output-log URL click — opened in the system browser. "" = none.
-    var pending_open_url: String
+    # A clicked output-log link (file or URL) for the host.
+    var link_click: LinkLatch
 
     # --- mouse-mapping bookkeeping ------------------------------------
     var _last_inspect_y0: Int   # screen y of the first inspect row
@@ -363,9 +360,7 @@ struct DebugPane(Copyable, Movable):
         self.pending_expand_depth = 0
         self.pending_collapse_row = -1
         self.pending_remove_watch = -1
-        self.pending_open_path = String("")
-        self.pending_open_line = 0
-        self.pending_open_url = String("")
+        self.link_click = LinkLatch()
         self._last_inspect_y0 = 0
         self._left_frame = GridFrame.empty(FONT_DEBUGGER)
         self._right_frame = GridFrame.empty(FONT_DEBUGGER)
@@ -642,19 +637,13 @@ struct DebugPane(Copyable, Movable):
         host calls ``open_file_at`` with ``line - 1`` since
         ``open_file_at`` works in 0-based rows.
         """
-        var path = self.pending_open_path
-        var line = self.pending_open_line
-        self.pending_open_path = String("")
-        self.pending_open_line = 0
-        return (path^, line)
+        return self.link_click.take_file()
 
     def consume_open_url(mut self) -> String:
         """Return the URL of a freshly clicked output-log web link (and
         clear the latch), or ``""`` when nothing is pending. The host
         hands it to ``open_url`` to launch the default browser."""
-        var u = self.pending_open_url
-        self.pending_open_url = String("")
-        return u^
+        return self.link_click.take_url()
 
     # --- interactive console (REPL) --------------------------------------
 
@@ -1567,11 +1556,7 @@ struct DebugPane(Copyable, Movable):
             var li = link_at(self._last_links, m.pos)
             if li >= 0:
                 ref link = self._last_links[li]
-                if link.is_url:
-                    self.pending_open_url = link.path
-                else:
-                    self.pending_open_path = link.path
-                    self.pending_open_line = link.line
+                self.link_click.set(link)
                 return True
             # Forward to the log: starts the selection drag.
             return self.output.handle_mouse(m)

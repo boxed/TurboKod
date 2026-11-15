@@ -41,7 +41,7 @@ from .events import (
     MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
-from .output_links import extract_all_links, link_at, OutputLink
+from .output_links import extract_all_links, link_at, LinkLatch, OutputLink
 from .painter import Painter
 from .posix import (
     alloc_zero_buffer, close_fd, exit_code_from_status, poll_stdin,
@@ -109,9 +109,7 @@ struct TestPane(Copyable, Movable):
 
     # --- link bookkeeping (rebuilt each paint) -------------------------
     var _last_links: List[OutputLink]
-    var pending_open_path: String
-    var pending_open_line: Int    # 1-based; 0 with empty path = none
-    var pending_open_url: String  # http(s) link to open in the browser; "" = none
+    var link_click: LinkLatch   # a clicked link (file or URL) for the host
 
     # --- live results ---------------------------------------------------
     var results: TestResultsView
@@ -137,9 +135,7 @@ struct TestPane(Copyable, Movable):
         self._eof = False
         self.last_command = String("")
         self._last_links = List[OutputLink]()
-        self.pending_open_path = String("")
-        self.pending_open_line = 0
-        self.pending_open_url = String("")
+        self.link_click = LinkLatch()
         self.results = TestResultsView()
         self.results_view = False
 
@@ -166,18 +162,12 @@ struct TestPane(Copyable, Movable):
         """Returns ``(path, line)`` (1-based) for a freshly clicked
         traceback link, or ``("", 0)`` when nothing is pending. The host
         calls ``open_file_at`` with ``line - 1`` (0-based rows)."""
-        var path = self.pending_open_path
-        var line = self.pending_open_line
-        self.pending_open_path = String("")
-        self.pending_open_line = 0
-        return (path^, line)
+        return self.link_click.take_file()
 
     def consume_open_url(mut self) -> String:
         """Return a freshly clicked output URL (and clear the latch), or
         ``""`` when nothing is pending. The host hands it to ``open_url``."""
-        var u = self.pending_open_url
-        self.pending_open_url = String("")
-        return u^
+        return self.link_click.take_url()
 
     def running(self) -> Bool:
         return self.started and not self.exited
@@ -458,11 +448,7 @@ struct TestPane(Copyable, Movable):
                 self.focused = True
             var link = self.results.take_link()
             if link:
-                if link.value().is_url:
-                    self.pending_open_url = link.value().path
-                else:
-                    self.pending_open_path = link.value().path
-                    self.pending_open_line = link.value().line
+                self.link_click.set(link.value())
             return True
         # In-flight drag selection keeps consuming past the body edge.
         if self.sel.continue_drag(self.vt, event):
@@ -490,11 +476,7 @@ struct TestPane(Copyable, Movable):
             var li = link_at(self._last_links, event.pos)
             if li >= 0:
                 ref link = self._last_links[li]
-                if link.is_url:
-                    self.pending_open_url = link.path
-                else:
-                    self.pending_open_path = link.path
-                    self.pending_open_line = link.line
+                self.link_click.set(link)
                 return True
             self.sel.click(self.vt, event)
             return True

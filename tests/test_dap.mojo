@@ -310,8 +310,8 @@ def test_pytest_link_opens_project_relative_file() raises:
     var c = Canvas(120, 50)
     d.paint(c, screen)        # consume the one-shot session restore
     # Simulate the link click the test pane would have latched.
-    d.test_pane.pending_open_path = rel
-    d.test_pane.pending_open_line = 1289
+    d.test_pane.link_click.path = rel
+    d.test_pane.link_click.line = 1289
     d.dap_tick(screen)
     var idx = d._find_window_for_path(fpath)
     assert_true(idx >= 0)             # opened the real project file
