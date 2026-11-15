@@ -665,12 +665,11 @@ final class CellView: NSView {
     // previous frame's target time; `springTimer` is the older-OS fallback.
     private var springLink: AnyObject?
     // Rendered glyphs by (codepoint, font slot, wide, fg); see `drawCells`.
-    // Dropped when the font or the screen's scale changes.
-    private var glyphCache: [UInt64: CachedGlyph] = [:]
-    private var glyphCacheGen = -1
-    // The area grids' glyphs, one cache per `AreaGrid.key`.
-    private var subGlyphCaches: [String: [UInt64: CachedGlyph]] = [:]
-    private var glyphCacheScale: CGFloat = 0
+    // One set for every view (the fonts and the cell size are the app's,
+    // not a window's), per screen scale and per area grid (`AreaGrid.key`,
+    // empty for the cell grid). Dropped when the font changes.
+    private static var sharedGlyphs: [String: [UInt64: CachedGlyph]] = [:]
+    private static var sharedGlyphGen = -1
     private var springLastTime: CFTimeInterval = 0
     // Wall time (CACurrentMediaTime) the ease last stepped, or was started.
     // A display link that stops firing (its window went off screen mid-ease)
@@ -1334,7 +1333,7 @@ final class CellView: NSView {
     /// (origin 0,0) and the smooth-scroll region composite (origin offset by
     /// the sub-line pixel fraction).
     ///
-    /// Glyphs come out of `glyphCache`: typesetting one character per call
+    /// Glyphs come out of `sharedGlyphs`: typesetting one character per call
     /// through `NSString.draw` cost 2-3 µs a cell, so a full redraw of a big
     /// window took tens of ms and a smooth scroll ran at 15-50 fps. Each
     /// distinct glyph is drawn once (by `drawGlyph`, the same code as
@@ -1371,24 +1370,15 @@ final class CellView: NSView {
         let scale = window?.backingScaleFactor ?? 1
         let aa = face.map { !$0.crisp(backingScale: scale) }
             ?? !cellFontRendersCrisp(backingScale: scale)
-        if glyphCacheGen != fontGeneration || glyphCacheScale != scale
-            || glyphCache.count > 16384 {
-            glyphCache.removeAll(keepingCapacity: true)
-            subGlyphCaches.removeAll()
-            glyphCacheGen = fontGeneration
-            glyphCacheScale = scale
+        if Self.sharedGlyphGen != fontGeneration {
+            Self.sharedGlyphs.removeAll()
+            Self.sharedGlyphGen = fontGeneration
         }
         // Take the cache out while drawing, so adding to it doesn't copy it.
-        var cache: [UInt64: CachedGlyph]
-        if cacheKey.isEmpty {
-            cache = glyphCache; glyphCache = [:]
-        } else {
-            cache = subGlyphCaches.removeValue(forKey: cacheKey) ?? [:]
-            if cache.count > 16384 { cache.removeAll() }
-        }
-        defer {
-            if cacheKey.isEmpty { glyphCache = cache } else { subGlyphCaches[cacheKey] = cache }
-        }
+        let storeKey = "\(cacheKey)@\(scale)"
+        var cache = Self.sharedGlyphs.removeValue(forKey: storeKey) ?? [:]
+        if cache.count > 16384 { cache.removeAll(keepingCapacity: true) }
+        defer { Self.sharedGlyphs[storeKey] = cache }
         // Blit in an unflipped space (y' = -y), where a CGImage draws upright.
         ctx.saveGState()
         ctx.scaleBy(x: 1, y: -1)
