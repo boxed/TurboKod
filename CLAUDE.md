@@ -581,8 +581,9 @@ Zero-width combining marks are **still not modeled**: Ghostty calls them width 0
 Line bookmarks (Edit ▸ Bookmarks, the Find dialog's Mark all / Unmark all)
 are a `List[Bool]` on `TextBuffer` (`marks`, empty while nothing is marked),
 parallel to `lines`. They follow their line's text because the buffer's own
-structural operations — `split`, the joins in `delete_at` / `delete_before`,
-`join_span`, `insert_rows`, `delete_rows`, `replace_lines` — keep them in step.
+structural operations — `replace_range` (every insert / delete / replace,
+`split` and the joins in `delete_at` / `delete_before` included),
+`insert_rows`, `delete_rows`, `replace_lines` — keep them in step.
 So **never reshape `buffer.lines` directly** (`lines.pop`, `lines.insert`,
 `buffer.lines = …`, `self.buffer = TextBuffer(…)` on a live editor): go through
 those methods, or the bookmarks land on the wrong rows. Writing a row's

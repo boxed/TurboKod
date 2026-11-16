@@ -487,8 +487,9 @@ struct TextBuffer(Copyable, Movable):
     var marks: List[Bool]
     """Bookmarked rows (Edit ▸ Bookmarks). Empty while nothing is
     bookmarked, so a buffer without bookmarks pays nothing; otherwise
-    parallel to ``lines``. The structural edits below (``split``, the
-    joins, ``join_span``, ``insert_rows``, ``delete_rows``,
+    parallel to ``lines``. The structural edits below (``replace_range``
+    and its wrappers — ``insert``, ``split``, ``delete_at`` /
+    ``delete_before`` — ``insert_rows``, ``delete_rows``,
     ``replace_lines``) keep it in step, which is what makes a bookmark
     follow its line's text through edits. Reshaping ``lines`` directly
     instead leaves bookmarks on the wrong rows."""
@@ -623,82 +624,118 @@ struct TextBuffer(Copyable, Movable):
 
     # --- edits -------------------------------------------------------------
 
+    def replace_range(
+        mut self, sl: Int, sc: Int, el: Int, ec: Int, text: String,
+    ) -> Tuple[Int, Int]:
+        """Replace ``[(sl, sc), (el, ec))`` with ``text`` (``\n`` starts a
+        new row) and return the position just past the inserted text —
+        the one splice every insert / delete / replace goes through.
+        Columns are clamped to their rows and the end to the start; a
+        start row outside the buffer changes nothing.
+
+        Bookmarks: the rows the range spanned collapse into one, bookmarked
+        per ``_merged_mark`` on what survives of the first and last row;
+        when only the last row's tail survives and ``text`` adds rows, the
+        bookmark goes down with that tail (an insert at column 0 pushes the
+        line's text, and so its bookmark, below the new rows)."""
+        var n_rows = len(self.lines)
+        if sl < 0 or sl >= n_rows:
+            return (sl, sc)
+        var e_row = min(max(el, sl), n_rows - 1)
+        var s_len = len(self.lines[sl].as_bytes())
+        var s_col = min(max(sc, 0), s_len)
+        var e_len = len(self.lines[e_row].as_bytes())
+        var e_col = min(max(ec, 0), e_len)
+        if e_row == sl and e_col < s_col:
+            e_col = s_col
+        var tb = text.as_bytes()
+        var tn = len(tb)
+        var first_nl = -1
+        var last_nl = -1
+        for i in range(tn):
+            if tb[i] == 0x0A:
+                if first_nl < 0:
+                    first_nl = i
+                last_nl = i
+        var head_end = tn if first_nl < 0 else first_nl
+        # The start row becomes head + the text up to its first newline
+        # (+ the tail, with no newline); the tail goes on the last new row.
+        var head = self.lines[sl]
+        var tail = self.lines[e_row]
+        var hb = head.as_bytes()
+        var tlb = tail.as_bytes()
+        var tail_n = e_len - e_col
+        var row0 = String()
+        row0.reserve_bytes(s_col + head_end + (tail_n if first_nl < 0 else 0))
+        row0 += StringSpan(unsafe_from_utf8=hb[0:s_col])
+        row0 += StringSpan(unsafe_from_utf8=tb[0:head_end])
+        var rows = List[String]()
+        var end_row = sl
+        var end_col: Int
+        if first_nl < 0:
+            end_col = len(row0.as_bytes())
+            row0 += StringSpan(unsafe_from_utf8=tlb[e_col:e_len])
+        else:
+            var p = first_nl + 1
+            while p <= last_nl:
+                var q = p
+                while tb[q] != 0x0A:
+                    q += 1
+                rows.append(String(StringSpan(unsafe_from_utf8=tb[p:q])))
+                p = q + 1
+            var last = String()
+            last.reserve_bytes(tn - last_nl - 1 + tail_n)
+            last += StringSpan(unsafe_from_utf8=tb[last_nl + 1:tn])
+            end_col = len(last.as_bytes())
+            last += StringSpan(unsafe_from_utf8=tlb[e_col:e_len])
+            rows.append(last^)
+            end_row = sl + len(rows)
+        if len(self.marks) > 0:
+            var m = _merged_mark(
+                self.is_marked(sl), s_col, self.is_marked(e_row), tail_n,
+            )
+            # Mark ``e_row`` too, so clearing ``sl`` can't drop the last
+            # bookmark (and with it the list) before ``delete_rows``.
+            self.set_mark(e_row, m)
+            self.set_mark(sl, m)
+        self.lines[sl] = row0^
+        self.delete_rows(sl + 1, e_row - sl)
+        if len(rows) > 0:
+            self.insert_rows(sl + 1, rows^)
+            if s_col == 0 and tail_n > 0:
+                self.move_mark(sl, end_row)
+        return (end_row, end_col)
+
     def insert(mut self, row: Int, col: Int, text: String):
-        if row < 0 or row >= len(self.lines):
-            return
-        var line = self.lines[row]
-        var n = len(line.as_bytes())
-        var pos = col
-        if pos < 0: pos = 0
-        if pos > n: pos = n
-        self.lines[row] = byte_slice(line, 0, pos) + text + byte_slice(line, pos, n)
+        _ = self.replace_range(row, col, row, col, text)
 
     def delete_at(mut self, row: Int, col: Int):
         """Delete one codepoint at (row, col). If past EOL, joins next line."""
         if row < 0 or row >= len(self.lines):
             return
-        var line = self.lines[row]
-        var n = len(line.as_bytes())
+        var n = len(self.lines[row].as_bytes())
         if col >= n:
             if row + 1 < len(self.lines):
-                var nxt_line = self.lines[row + 1]
-                self.join_span(row, row + 1, line, nxt_line)
+                _ = self.replace_range(row, n, row + 1, 0, String(""))
             return
-        var nxt = utf8_step_forward(line, col)
-        self.lines[row] = byte_slice(line, 0, col) + byte_slice(line, nxt, n)
+        var nxt = utf8_step_forward(self.lines[row], col)
+        _ = self.replace_range(row, col, row, nxt, String(""))
 
     def delete_before(mut self, row: Int, col: Int) -> Tuple[Int, Int]:
         """Backspace one codepoint. Returns the new cursor (row, col)."""
         if col > 0:
-            var line = self.lines[row]
-            var prev_col = prev_codepoint_start(line, col)
-            self.lines[row] = byte_slice(line, 0, prev_col) + byte_slice(line, col, len(line.as_bytes()))
+            var prev_col = prev_codepoint_start(self.lines[row], col)
+            _ = self.replace_range(row, prev_col, row, col, String(""))
             return (row, prev_col)
         if row > 0:
-            var prev = self.lines[row - 1]
-            var prev_len = len(prev.as_bytes())
-            var cur_line = self.lines[row]
-            self.join_span(row - 1, row, prev, cur_line)
+            var prev_len = len(self.lines[row - 1].as_bytes())
+            _ = self.replace_range(row - 1, prev_len, row, 0, String(""))
             return (row - 1, prev_len)
         return (row, col)
 
-    def join_span(mut self, sr: Int, er: Int, head: String, tail: String):
-        """Make rows ``sr..er`` the one row ``head + tail`` — deleting a
-        range that starts in row ``sr`` and ends in row ``er``, ``head``
-        and ``tail`` being what's left of those two rows. The joined row
-        is bookmarked per ``_merged_mark``."""
-        if len(self.marks) > 0:
-            var m = _merged_mark(
-                self.is_marked(sr), len(head.as_bytes()),
-                self.is_marked(er), len(tail.as_bytes()),
-            )
-            # Mark ``er`` too, so clearing ``sr`` can't drop the last
-            # bookmark (and with it the list) before ``delete_rows``.
-            self.set_mark(er, m)
-            self.set_mark(sr, m)
-        self.lines[sr] = head + tail
-        self.delete_rows(sr + 1, er - sr)
-
     def split(mut self, row: Int, col: Int) -> Tuple[Int, Int]:
         """Split line at col (Enter key). Returns the new cursor (row+1, 0)."""
-        if row < 0 or row >= len(self.lines):
-            return (row, col)
-        var line = self.lines[row]
-        var n = len(line.as_bytes())
-        var pos = col
-        if pos < 0: pos = 0
-        if pos > n: pos = n
-        var head = byte_slice(line, 0, pos)
-        var tail = byte_slice(line, pos, n)
-        self.lines[row] = head
-        # ``insert`` moves the rows below in one go; shifting them a row at
-        # a time copied every one of them.
-        self.lines.insert(row + 1, tail^)
-        self._insert_marks(row + 1, 1)
-        if pos == 0 and n > 0:
-            # Enter at the start of a line pushes its text down a row.
-            self.move_mark(row, row + 1)
-        return (row + 1, 0)
+        return self.replace_range(row, col, row, col, String("\n"))
 
     def delete_rows(mut self, at: Int, k: Int):
         """Remove the ``k`` rows from ``at``, moving the rows below once:
@@ -3730,50 +3767,11 @@ struct Editor(Copyable, Movable):
         if el2 == sl and ec2 < sc2:
             ec2 = sc2
 
-        var prefix = byte_slice(s_line, 0, sc2)
-        var suffix = byte_slice(e_line, ec2, e_ln)
-
-        # Collapse the deleted span into the start row. The bookmark is
-        # decided by the text that survives, ``prefix`` and ``suffix`` —
-        # ``join_span`` only sees the prefix, the suffix comes back below.
-        var mark = _merged_mark(
-            self.buffer.is_marked(sl), len(prefix.as_bytes()),
-            self.buffer.is_marked(el2), len(suffix.as_bytes()),
-        )
-        self.buffer.join_span(sl, el2, prefix, String(""))
-        self.buffer.set_mark(sl, mark)
-
-        # Split ``new_text`` on '\n': the first piece joins the start row,
-        # each further one becomes a row of its own below it, all put in
-        # at once (``insert_rows``).
-        var bytes = new_text.as_bytes()
-        var line_start = 0
-        var rows = List[String]()
-        var first = True
-        for i in range(len(bytes) + 1):
-            if i < len(bytes) and bytes[i] != 0x0A:
-                continue
-            var piece = byte_slice(new_text, line_start, i)
-            if first:
-                self.buffer.lines[sl] = self.buffer.lines[sl] + piece
-                first = False
-            else:
-                rows.append(piece^)
-            line_start = i + 1
-        var added = len(rows)
-        self.buffer.insert_rows(sl + 1, rows^)
-        var current_row = sl + added
-        # Suffix lands on whatever row the last newline left us on. Its
-        # byte column there (before appending) is where any cursor that
-        # sat at/after the original ``(el2, ec2)`` should be relocated to.
-        var suffix_col = len(self.buffer.lines[current_row].as_bytes())
-        self.buffer.lines[current_row] = (
-            self.buffer.lines[current_row] + suffix
-        )
-        if len(prefix.as_bytes()) == 0 and len(suffix.as_bytes()) > 0:
-            # Only the suffix survived, and it ended up on the last row.
-            self.buffer.move_mark(sl, current_row)
-
+        # The replaced span's tail lands where the inserted text ends: any
+        # cursor that sat at/after the original ``(el2, ec2)`` relocates
+        # relative to that column.
+        var end = self.buffer.replace_range(sl, sc2, el2, ec2, new_text)
+        var suffix_col = end[1]
         return (self.buffer.line_count() - n_lines, el2, ec2, suffix_col)
 
     def _shift_pos_after_edit(
@@ -3873,14 +3871,11 @@ struct Editor(Copyable, Movable):
                 self.move_to(p[0], p[1], False)
                 if self.selections[0].col >= before:
                     break  # defensive: col didn't shrink, avoid spinning
-        self.buffer.insert(
+        var ins_end = self.buffer.replace_range(
+            self.selections[0].row, self.selections[0].col,
             self.selections[0].row, self.selections[0].col, item.insert_text,
         )
-        self.move_to(
-            self.selections[0].row,
-            self.selections[0].col + len(item.insert_text.as_bytes()),
-            False,
-        )
+        self.move_to(ins_end[0], ins_end[1], False)
         # Apply ``additionalTextEdits`` (typically the auto-import line
         # that pyright/etc. attach to a name-completion). Sort
         # descending by start position so an edit at a lower row /
@@ -5557,8 +5552,10 @@ struct Editor(Copyable, Movable):
             self._clear_hover_candidate()
             self._update_minimap_hover_from_minimap(pos, view)
             return
-        self._update_minimap_hover_from_text_area(pos, view)
-        self._update_hover_candidate(pos, view)
+        # One layout for both: resolving lays the text area out.
+        var resolved = self._resolve_text_area_buf_pos(pos, view)
+        self._update_minimap_hover_from_text_area(pos, resolved)
+        self._update_hover_candidate(pos, resolved)
 
     def _update_minimap_hover_from_minimap(
         mut self, pos: Point, view: Rect,
@@ -5586,7 +5583,8 @@ struct Editor(Copyable, Movable):
             )
 
     def _update_minimap_hover_from_text_area(
-        mut self, pos: Point, view: Rect,
+        mut self, pos: Point,
+        resolved: Optional[Tuple[Int, Int, Int, Int, Int]],
     ):
         """Text-area branch of ``_update_minimap_hover``: hit-test the
         cursor against per-cell diagnostic ranges and spell highlights,
@@ -5598,9 +5596,9 @@ struct Editor(Copyable, Movable):
         a real warning is more important to surface than a misspelling
         in a comment. Within diagnostics, lower numeric severity wins
         (error > warning > info > hint) so the most actionable popup
-        gets shown when ranges overlap.
+        gets shown when ranges overlap. ``resolved`` is
+        ``_resolve_text_area_buf_pos`` of ``pos``.
         """
-        var resolved = self._resolve_text_area_buf_pos(pos, view)
         if not resolved:
             return
         var rc = resolved.value()
@@ -5646,7 +5644,10 @@ struct Editor(Copyable, Movable):
             )
             return
 
-    def _update_hover_candidate(mut self, pos: Point, view: Rect):
+    def _update_hover_candidate(
+        mut self, pos: Point,
+        resolved: Optional[Tuple[Int, Int, Int, Int, Int]],
+    ):
         """Refresh the LSP-hover dwell candidate from a mouse position.
 
         The candidate is the word the mouse is currently resting on. We
@@ -5661,8 +5662,8 @@ struct Editor(Copyable, Movable):
         of the word's first byte, anchored one row below the word. We
         use the word start (not the live mouse position) so the popup
         doesn't drift sideways as the cursor wanders inside the
-        identifier."""
-        var resolved = self._resolve_text_area_buf_pos(pos, view)
+        identifier. ``resolved`` is ``_resolve_text_area_buf_pos`` of the
+        mouse position."""
         if not resolved:
             self._clear_hover_candidate()
             return
@@ -5896,19 +5897,14 @@ struct Editor(Copyable, Movable):
         var cell_x = rel_x - total_gutter - seg_indent
         if cell_x < 0:
             return miss
-        var line = self.buffer.line(row)
-        var line_n = len(line.as_bytes())
-        var visible: String
-        if seg_start >= line_n:
-            visible = String("")
-        else:
-            visible = byte_slice(line, seg_start, seg_end)
-        var visible_cells = text_cells(visible)
-        if cell_x >= visible_cells:
+        if row < 0:
             return miss
-        var col = seg_start + utf8_byte_of_cell(visible, cell_x)
-        if col > line_n:
-            col = line_n
+        ref line = self.buffer.lines[row]
+        var line_n = len(line.as_bytes())
+        var vis_end = min(seg_end, line_n)
+        if cell_x >= cells_between(line, seg_start, vis_end):
+            return miss
+        var col = byte_of_cell_in(line, seg_start, vis_end, cell_x)
         return Optional[Tuple[Int, Int, Int, Int, Int]](
             (row, col, seg_start, seg_end, seg_x0)
         )
@@ -8138,10 +8134,9 @@ struct Editor(Copyable, Movable):
                 else:
                     actual_sc = actual_cur
                     actual_ec = actual_cur
-            var line = self.buffer.line(c.row)
-            var line_n = len(line.as_bytes())
-            self.buffer.lines[c.row] = byte_slice(line, 0, actual_sc) \
-                + text + byte_slice(line, actual_ec, line_n)
+            _ = self.buffer.replace_range(
+                c.row, actual_sc, c.row, actual_ec, text,
+            )
             var new_col = actual_sc + n_text
             var new_desired = utf8_cell_of_byte(
                 self.buffer.line(c.row), new_col,
@@ -8354,10 +8349,9 @@ struct Editor(Copyable, Movable):
             var n_text = len(text.as_bytes())
             var actual_sc = min(c.col, c.anchor_col) + row_shift
             var actual_ec = max(c.col, c.anchor_col) + row_shift
-            var line = self.buffer.line(c.row)
-            var line_n = len(line.as_bytes())
-            self.buffer.lines[c.row] = byte_slice(line, 0, actual_sc) \
-                + text + byte_slice(line, actual_ec, line_n)
+            _ = self.buffer.replace_range(
+                c.row, actual_sc, c.row, actual_ec, text,
+            )
             var new_col = actual_sc + n_text
             var new_desired = utf8_cell_of_byte(
                 self.buffer.line(c.row), new_col,
@@ -10175,36 +10169,9 @@ struct Editor(Copyable, Movable):
         ``\\n`` — and return the position just past the inserted text.
         Touches no caret, so a multi-caret loop can drive it once per
         caret; ``_insert_text`` is the primary-caret wrapper."""
-        var bytes = text.as_bytes()
-        var n = len(bytes)
-        var pieces = List[String]()
-        var line_start = 0
-        for i in range(n):
-            if bytes[i] == 0x0A:  # '\n'
-                pieces.append(byte_slice(text, line_start, i))
-                line_start = i + 1
-        if len(pieces) == 0:
-            self.buffer.insert(row, col, text)
-            return (row, col + n)
         if row < 0 or row >= self.buffer.line_count():
             return (row, col)
-        # The first piece ends the caret's line, each further one is a new
-        # row, and the last (after the final '\n') goes in front of what
-        # followed the caret: all the new rows go in at once.
-        var line = self.buffer.lines[row]
-        var c = min(max(col, 0), len(line.as_bytes()))
-        var last = byte_slice(text, line_start, n)
-        var end_col = len(last.as_bytes())
-        self.buffer.lines[row] = byte_slice(line, 0, c) + pieces[0]
-        var rows = List[String]()
-        for k in range(1, len(pieces)):
-            rows.append(pieces[k])
-        rows.append(last + byte_slice(line, c, len(line.as_bytes())))
-        self.buffer.insert_rows(row + 1, rows^)
-        if c == 0 and len(line.as_bytes()) > 0:
-            # Inserting at the start of a line pushes its text down.
-            self.buffer.move_mark(row, row + len(pieces))
-        return (row + len(pieces), end_col)
+        return self.buffer.replace_range(row, col, row, col, text)
 
     def _insert_text(mut self, text: String):
         var p = self._insert_text_at(
@@ -10736,15 +10703,7 @@ struct Editor(Copyable, Movable):
         caret-moving wrapper; the multi-caret paste path needs the raw
         splice because it drives every caret's range itself and can't have
         the primary yanked along the way."""
-        if sr == er:
-            var line = self.buffer.line(sr)
-            self.buffer.lines[sr] = byte_slice(line, 0, sc) + byte_slice(line, ec, len(line.as_bytes()))
-        else:
-            var first = self.buffer.line(sr)
-            var last = self.buffer.line(er)
-            var head = byte_slice(first, 0, sc)
-            var tail = byte_slice(last, ec, len(last.as_bytes()))
-            self.buffer.join_span(sr, er, head, tail)
+        _ = self.buffer.replace_range(sr, sc, er, ec, String(""))
 
     def _delete_selection(mut self):
         var sel = self.selection()
