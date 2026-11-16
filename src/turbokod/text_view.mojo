@@ -947,6 +947,18 @@ def paint_selection_overlay(
 # --- text log: append-only, soft-wrapped, selectable, scrollable ----------
 
 
+def _drop_front[T: Copyable & Deinitable](mut items: List[T], k: Int):
+    """Remove the first ``k`` items, moving each survivor once."""
+    var n = len(items)
+    var d = min(k, n)
+    if d <= 0:
+        return
+    for i in range(n - d):
+        items.swap_elements(i, i + d)
+    for _ in range(d):
+        _ = items.pop()
+
+
 struct TextLog(Copyable, Movable):
     """A read-only text view with soft-wrap, mouse-drag selection,
     scroll, and clipboard copy. Composed by views like the DebugPane
@@ -978,7 +990,8 @@ struct TextLog(Copyable, Movable):
     output render colored instead of as raw escape bytes."""
     var default_attr: Attr
     var max_lines: Int
-    """Backlog cap. Trims from the front when exceeded; selection line
+    """Backlog cap. Once the log runs an eighth past it, the front is
+    trimmed back to it in one go; selection line
     indices follow the trim and degrade to "no selection" when an
     endpoint falls into the dropped prefix."""
 
@@ -1062,7 +1075,7 @@ struct TextLog(Copyable, Movable):
     ):
         """Append ``text``, splitting on ``\\n``. Each split line gets
         its own ``Attr`` — when ``attr`` is None we fall back to
-        ``default_attr``. Trims the front when ``max_lines`` is hit.
+        ``default_attr``. Trims the front past ``max_lines``.
 
         ``streaming`` controls how a chunk that *doesn't* end in ``\\n``
         is treated. Discrete callers (the default — IDE console banners
@@ -1127,20 +1140,26 @@ struct TextLog(Copyable, Movable):
             self.line_runs[idx].append(
                 ColorRun(r.start + base_len, r.end + base_len, r.attr)
             )
-        self.lines[idx] = self.lines[idx] + seg
+        # Appended in place: ``lines[idx] + seg`` copied the whole line
+        # per chunk, quadratic in a long streamed line (pytest's dots).
+        self.lines[idx] += seg
         if self._layout_w >= 0:
-            # Drop the mutated line's stale visual rows, then re-append
-            # its freshly-wrapped rows. Rows are grouped by ``line_idx``
-            # and this line is last, so its rows are a trailing run.
-            while len(self.last_visual) > 0 and \
-                    self.last_visual[len(self.last_visual) - 1].line_idx \
-                    == idx:
+            # Re-wrap from the line's last visual row on: the log wraps
+            # hard with no indent, so a row's break depends only on where
+            # the row starts, and the rows before it stand. Re-wrapping
+            # the whole line per chunk was quadratic too.
+            var nv = len(self.last_visual)
+            var lo = 0
+            var cell0 = 0
+            if nv > 0 and self.last_visual[nv - 1].line_idx == idx:
+                lo = self.last_visual[nv - 1].byte_start
+                cell0 = self.last_visual[nv - 1].cell_start
                 _ = self.last_visual.pop()
-            var new_rows = wrap_lines(
-                self.lines, self._layout_w, start_line=idx,
+            _ = _wrap_one_line_into(
+                self.last_visual, idx, self.lines[idx], lo,
+                len(self.lines[idx].as_bytes()), self._layout_w,
+                0, 0, cell0, False, -1,
             )
-            for k in range(len(new_rows)):
-                self.last_visual.append(new_rows[k])
 
     def clear(mut self):
         """Drop all lines and any selection. Scroll resets to top."""
@@ -1176,15 +1195,15 @@ struct TextLog(Copyable, Movable):
             )
             for k in range(len(new_rows)):
                 self.last_visual.append(new_rows[k])
-        if len(self.lines) > self.max_lines:
+        # Trim in batches: let the backlog run an eighth over the cap, then
+        # drop back to it at once. Dropping the one oldest line per append
+        # moved (and renumbered) the whole backlog for every line appended
+        # to a full log.
+        if len(self.lines) > self.max_lines + self.max_lines // 8:
             var drop = len(self.lines) - self.max_lines
-            # In place: rebuilding the three lists (and a renumbered
-            # layout) copied the whole backlog for every line appended
-            # to a full log.
-            for _ in range(drop):
-                _ = self.lines.pop(0)
-                _ = self.line_attrs.pop(0)
-                _ = self.line_runs.pop(0)
+            _drop_front(self.lines, drop)
+            _drop_front(self.line_attrs, drop)
+            _drop_front(self.line_runs, drop)
             # Trim the layout cache symmetrically: drop visual rows for
             # the dropped logical lines (they lead the list, which is in
             # line order), renumber the survivors. Track how many visual
@@ -1196,8 +1215,7 @@ struct TextLog(Copyable, Movable):
                 while dropped_rows < len(self.last_visual) \
                         and self.last_visual[dropped_rows].line_idx < drop:
                     dropped_rows += 1
-                for _ in range(dropped_rows):
-                    _ = self.last_visual.pop(0)
+                _drop_front(self.last_visual, dropped_rows)
                 for k in range(len(self.last_visual)):
                     self.last_visual[k].line_idx -= drop
                 if not self.autoscroll:

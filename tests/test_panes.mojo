@@ -370,6 +370,40 @@ def test_text_log_incremental_layout_handles_trim() raises:
         _assert_visual_eq(log.last_visual[i], fresh[i])
 
 
+def test_text_log_trims_in_batches() raises:
+    """A full log lets the backlog run an eighth over ``max_lines`` and
+    then drops back to the cap at once, rather than moving the whole
+    backlog for every appended line; the layout cache stays in step."""
+    var log = TextLog(default_attr(), max_lines=16)
+    var canvas = Canvas(40, 12)
+    log.paint(canvas, Rect(0, 0, 20, 5))
+    for i in range(18):
+        log.append(String("line ") + String(i))
+    assert_equal(len(log.lines), 18)
+    log.append(String("line 18"))
+    assert_equal(len(log.lines), 16)
+    assert_equal(log.lines[0], String("line 3"))
+    var fresh = wrap_lines(log.lines, 20)
+    assert_equal(len(log.last_visual), len(fresh))
+    for i in range(len(fresh)):
+        _assert_visual_eq(log.last_visual[i], fresh[i])
+
+
+def test_text_log_streamed_long_line_wraps_like_a_full_wrap() raises:
+    """Chunks glued onto an open line re-wrap only from its last row,
+    which must give the rows a whole-line wrap gives (tabs included)."""
+    var log = TextLog(default_attr())
+    var canvas = Canvas(40, 12)
+    log.paint(canvas, Rect(0, 0, 10, 5))
+    for i in range(40):
+        log.append(String("ab\t") if i % 7 == 0 else String("é."), streaming=True)
+    assert_equal(len(log.lines), 1)
+    var fresh = wrap_lines(log.lines, 10)
+    assert_equal(len(log.last_visual), len(fresh))
+    for i in range(len(fresh)):
+        _assert_visual_eq(log.last_visual[i], fresh[i])
+
+
 def test_text_log_full_rewrap_on_width_change() raises:
     """Resizing the view (different ``content_w``) forces a full
     re-wrap. The cached layout is keyed on the width that built it."""
