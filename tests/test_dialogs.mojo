@@ -707,7 +707,7 @@ def test_walk_project_files_git_fast_path_includes_ignored_files() raises:
 def test_settings_open_seeds_state() raises:
     """Settings opens on General, not dirty; close resets it."""
     var s = Settings()
-    s.open(False)
+    s.open(TurbokodConfig())
     assert_true(s.active)
     assert_equal(s.section, 0)
     assert_false(s.dirty)
@@ -720,23 +720,20 @@ def test_settings_language_server_section_seeds_and_toggles() raises:
     toggling one flips the working copy and raises dirty so the host's
     persistence loop writes it back."""
     var s = Settings()
-    s.open(
-        False, List[LanguageServerOverride](),
-        String(""), True, True, False, String("Turbo C++ 3.0"),
-        String(""), List[String](), 0, 0, 0, 0, -1, 20, True,
-        ls_format_on_save=True,
-        ls_signature_help=False,
-        ls_inlay_hints=True,
-    )
-    assert_true(s.ls_format_on_save)
-    assert_false(s.ls_signature_help)
-    assert_true(s.ls_inlay_hints)
+    var c = TurbokodConfig()
+    c.lsp_format_on_save = True
+    c.lsp_signature_help = False
+    c.lsp_inlay_hints = True
+    s.open(c)
+    assert_true(s.cfg.lsp_format_on_save)
+    assert_false(s.cfg.lsp_signature_help)
+    assert_true(s.cfg.lsp_inlay_hints)
     # Defaults for params left unspecified.
-    assert_true(s.ls_document_highlight)
-    assert_false(s.ls_code_lens)
+    assert_true(s.cfg.lsp_document_highlight)
+    assert_false(s.cfg.lsp_code_lens)
     assert_false(s.dirty)
     s.ui_set(String("ls_inlay_hints"), String("0"))
-    assert_false(s.ls_inlay_hints)
+    assert_false(s.cfg.lsp_inlay_hints)
     assert_true(s.dirty)
 
 
@@ -745,11 +742,7 @@ def test_settings_grid_layout_fits_the_screen() raises:
     on a roomy one, an 80x24 terminal, and filling the host's window."""
     var s = Settings()
     var fonts: List[String] = [String("IBM VGA 8x16 (built-in)"), String("Menlo")]
-    s.open(
-        False, List[LanguageServerOverride](),
-        String(""), True, True, False, String("Turbo C++ 3.0"),
-        String("Menlo"), fonts^,
-    )
+    s.open(TurbokodConfig(), String(""), String("Menlo"), fonts^)
     s.offer_native_ui = True
     for size in [(100, 40), (80, 24)]:
         for fill in [False, True]:
@@ -845,30 +838,32 @@ def test_settings_save_behavior_choice() raises:
     """Saving: the choice seeds from ``auto_save`` and picking Automatic
     commits it and raises dirty; re-picking the same one doesn't."""
     var s = Settings()
-    s.open(True)
-    assert_true(s.auto_save)
+    s.open(TurbokodConfig())
+    assert_true(s.cfg.auto_save)
     s.close()
-    s.open(False)
+    var manual = TurbokodConfig()
+    manual.auto_save = False
+    s.open(manual)
     s.ui_set(String("auto_save"), String("1"))
-    assert_true(s.auto_save)
+    assert_true(s.cfg.auto_save)
     assert_true(s.dirty)
     s.ack_dirty()
     s.ui_set(String("auto_save"), String("0"))
-    assert_false(s.auto_save)
+    assert_false(s.cfg.auto_save)
 
 
 def test_settings_editor_toggles() raises:
     """The on-save checkboxes seed from ``open`` and each toggle commits
     the working copy and raises dirty."""
     var s = Settings()
-    s.open(False, List[LanguageServerOverride](), String(""), True, True)
-    assert_true(s.trim_trailing_whitespace)
-    assert_true(s.ensure_final_newline)
+    s.open(TurbokodConfig())
+    assert_true(s.cfg.trim_trailing_whitespace)
+    assert_true(s.cfg.ensure_final_newline)
     s.ui_set(String("trim_trailing_whitespace"), String("0"))
-    assert_false(s.trim_trailing_whitespace)
+    assert_false(s.cfg.trim_trailing_whitespace)
     assert_true(s.dirty)
     s.ui_set(String("ensure_final_newline"), String("0"))
-    assert_false(s.ensure_final_newline)
+    assert_false(s.cfg.ensure_final_newline)
 
 
 def test_settings_max_open_windows_seeds_and_edits() raises:
@@ -876,11 +871,14 @@ def test_settings_max_open_windows_seeds_and_edits() raises:
     typed value keeps only its leading four digits, and the host reads it
     back through ``max_open_windows_value``."""
     var s = Settings()
-    s.open(False, max_open_windows=20)
+    var c = TurbokodConfig()
+    c.max_open_windows = 20
+    s.open(c)
     assert_equal(s.max_windows_text, String("20"))
     assert_equal(s.max_open_windows_value(), 20)
     s.close()
-    s.open(False, max_open_windows=0)
+    c.max_open_windows = 0
+    s.open(c)
     assert_equal(len(s.max_windows_text.as_bytes()), 0)
     assert_equal(s.max_open_windows_value(), 0)
     s.ui_set(String("max_open_windows"), String("5x0"))
@@ -906,8 +904,10 @@ def test_settings_languages_section_seeded() raises:
     )
     var overrides = List[LanguageServerOverride]()
     overrides.append(ov^)
-    s.open(False, overrides^)
-    assert_equal(len(s.language_overrides), 1)
+    var c = TurbokodConfig()
+    c.language_servers = overrides^
+    s.open(c)
+    assert_equal(len(s.cfg.language_servers), 1)
     # ``xyzlang`` should appear in the effective view.
     var found = False
     for i in range(len(s.languages_view)):
@@ -923,8 +923,7 @@ def test_settings_open_selects_current_language() raises:
     lands on the language they're editing — and the scroll-snap in
     ``_paint_languages_list`` brings that row into view."""
     var s = Settings()
-    s.open(False, List[LanguageServerOverride](),
-           String("py"))
+    s.open(TurbokodConfig(), String("py"))
     var selected_id = s.languages_view[s.selected_language].language_id
     assert_equal(selected_id, String("python"))
 
@@ -933,8 +932,7 @@ def test_settings_open_unknown_extension_falls_back_to_first() raises:
     """An unrecognized extension shouldn't strand the selection on
     -1 — the user can still navigate the list. Fall back to row 0."""
     var s = Settings()
-    s.open(False, List[LanguageServerOverride](),
-           String("zzzunknownext"))
+    s.open(TurbokodConfig(), String("zzzunknownext"))
     assert_equal(s.selected_language, 0)
 
 
@@ -942,18 +940,14 @@ def test_settings_font_rows_require_host_fonts() raises:
     """Appearance only has Font and Size when the host registered fonts
     (the native macOS frontend); the terminal owns the font otherwise."""
     var s = Settings()
-    s.open(False)
+    s.open(TurbokodConfig())
     var plain = ui_to_json(s.ui())
     assert_false(String("\"font_larger\"") in encode_json(plain))
     s.close()
     var fonts: List[String] = [
         String("IBM VGA 8x16 (built-in)"), String("Classic"), String("Menlo"),
     ]
-    s.open(
-        False, List[LanguageServerOverride](),
-        String(""), True, True, False, String("Turbo C++ 3.0"),
-        String("Menlo"), fonts^,
-    )
+    s.open(TurbokodConfig(), String(""), String("Menlo"), fonts^)
     assert_true(String("\"font_larger\"") in encode_json(ui_to_json(s.ui())))
     s.ui_set(String("font"), String("0"))
     assert_equal(s.font_choice, String("IBM VGA 8x16 (built-in)"))
@@ -967,35 +961,33 @@ def test_settings_font_size_steps_and_ideal() raises:
     var s = Settings()
     var fonts: List[String] = [String("IBM VGA 8x16 (built-in)")]
     s.open(
-        False, List[LanguageServerOverride](),
-        String(""), True, True, False, String("Turbo C++ 3.0"),
-        String("IBM VGA 8x16 (built-in)"), fonts^,
-        0, 16, 16,
+        TurbokodConfig(), String(""), String("IBM VGA 8x16 (built-in)"),
+        fonts^, 16, 16,
     )
     s.ui_act(String("font_larger"))
-    assert_equal(s.font_size_choice, 17)
+    assert_equal(s.cfg.font_size, 17)
     assert_true(s.dirty)
     s.ack_dirty()
     s.ui_act(String("font_ideal"))
-    assert_equal(s.font_size_choice, 16)
+    assert_equal(s.cfg.font_size, 16)
     assert_true(s.dirty)
     s.ack_dirty()
-    s.font_size_choice = MIN_FONT_SIZE
+    s.cfg.font_size = MIN_FONT_SIZE
     s.ui_act(String("font_smaller"))
-    assert_equal(s.font_size_choice, MIN_FONT_SIZE)
+    assert_equal(s.cfg.font_size, MIN_FONT_SIZE)
     assert_false(s.dirty)
     # No ideal reported (a vector font): Ideal Size does nothing.
     s.update_font_info(13, 0)
-    s.font_size_choice = 20
+    s.cfg.font_size = 20
     s.ui_act(String("font_ideal"))
-    assert_equal(s.font_size_choice, 20)
+    assert_equal(s.cfg.font_size, 20)
 
 
 def test_settings_theme_choice_commits() raises:
     var s = Settings()
-    s.open(False)
+    s.open(TurbokodConfig())
     s.ui_set(String("theme"), String("1"))
-    assert_true(s.theme_choice != String("Turbo C++ 3.0"))
+    assert_true(s.cfg.theme != String("Turbo C++ 3.0"))
     assert_true(s.dirty)
 
 
@@ -1004,7 +996,7 @@ def test_settings_language_editor_round_trip() raises:
     server, moving it to the top and saving stores an override with that
     priority."""
     var s = Settings()
-    s.open(False, List[LanguageServerOverride](), String("py"))
+    s.open(TurbokodConfig(), String("py"))
     s.ui_act(String("lang_edit"))
     assert_true(s.language_editor.active)
     assert_true(s.language_editor.is_existing)
@@ -1021,8 +1013,8 @@ def test_settings_language_editor_round_trip() raises:
     s.consume_language_editor()
     assert_false(s.language_editor.active)
     assert_true(s.dirty)
-    assert_equal(len(s.language_overrides), 1)
-    assert_equal(s.language_overrides[0].argvs[0][0], String("mylsp"))
+    assert_equal(len(s.cfg.language_servers), 1)
+    assert_equal(s.cfg.language_servers[0].argvs[0][0], String("mylsp"))
     assert_equal(s.languages_view[s.selected_language].language_id, String("python"))
 
 
@@ -1040,7 +1032,9 @@ def test_settings_remove_language_override_marks_dirty() raises:
     )
     var overrides = List[LanguageServerOverride]()
     overrides.append(ov^)
-    s.open(False, overrides^)
+    var c = TurbokodConfig()
+    c.language_servers = overrides^
+    s.open(c)
     # Find and select the custom row.
     for i in range(len(s.languages_view)):
         if s.languages_view[i].language_id == String("xyzlang"):
@@ -1048,7 +1042,7 @@ def test_settings_remove_language_override_marks_dirty() raises:
             break
     s._remove_language_override()
     assert_true(s.dirty)
-    assert_equal(len(s.language_overrides), 0)
+    assert_equal(len(s.cfg.language_servers), 0)
     for i in range(len(s.languages_view)):
         assert_true(s.languages_view[i].language_id != String("xyzlang"))
 
@@ -1141,7 +1135,7 @@ def test_settings_languages_list_type_to_jump() raises:
     language starting with it; a ⌘ / Ctrl / Alt chord is a command, not
     typing, and leaves the selection alone; a Shift-ed capital is typing."""
     var s = Settings()
-    s.open(False)
+    s.open(TurbokodConfig())
     s.section = 3
     var expected = -1
     for i in range(len(s.languages_view)):

@@ -1,274 +1,34 @@
-"""Popup menu that opens on Alt+Enter over a misspelled word.
-
-Anchored at the on-container_bounds position of the misspelled word, the menu
-offers the two ways the user can teach the speller about a word that
-isn't really wrong: adding it to the user-wide dictionary or to the
-current project's dictionary. The latter is disabled (still listed,
-but unselectable) when no project is open — making the option
-disappear would be more confusing than greying it out.
-
-Painted in the same light-gray-with-green-selection palette as the
-``MenuBar`` dropdown so the look reads as "this is a menu" without
-having to explain it. The host (Desktop) is responsible for opening
-the menu in response to ``Editor.consume_spell_action_request`` and
-for routing keyboard / mouse events to it before any other widget.
+"""The menu that opens on Alt+Enter over a misspelled word: add it to the
+user-wide dictionary, or to the current project's. The latter is disabled
+(still listed, greyed) when no project is open — making the option
+disappear would be more confusing than greying it out. An
+``AnchoredMenu`` the host opens with ``spell_menu_items``, the word as its
+``subject``.
 """
 
 from std.collections.list import List
 
-from .canvas import Canvas
-from .painter import Painter
-from .colors import (
-    Attr, BLACK, DARK_GRAY, GREEN, LIGHT_GRAY, WHITE,
-)
-from .events import (
-    Event, EVENT_KEY,
-    KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_UP,
-    MENU_HIT_NONE,
-)
-from .geometry import Point, Rect
-from .string_utils import display_columns
-from .view import RowCursor
-from .anchored_menu import (
-    NativeMenuItem, anchored_menu_mouse, anchored_menu_rect, menu_step_wrap,
-    paint_anchored_chrome,
-)
+from .anchored_menu import NativeMenuItem
 
 
-def _rows_top(rect: Rect) -> Int:
-    """Y of the first menu row. Driven by ``RowCursor`` so paint and
-    hit-testing share one source of truth — the original code had
-    ``rect.a.y + 1`` hardcoded in both ``paint`` and ``handle_mouse``."""
-    var cursor = RowCursor(rect.a.y + 1)
-    return cursor.place()
-
-
-# ``SpellMenu.handle_mouse`` returns the shared ``MENU_HIT_*`` codes
-# (``events.mojo``): ``NONE`` = not ours, ``INSIDE`` = click handled
-# within the popup, ``OUTSIDE`` = clicked away (menu auto-closes).
-
-
-# Action codes returned to the host on resolve.
 comptime SPELL_ACTION_NONE        = 0
-"""The menu was dismissed (Esc / click-outside / Enter on a
-disabled row). No persistence work for the host to do."""
+"""The menu was dismissed (Esc / click-outside). No persistence work for
+the host to do."""
 comptime SPELL_ACTION_ADD_USER    = 1
 """Add the word to the user-wide dictionary."""
 comptime SPELL_ACTION_ADD_PROJECT = 2
 """Add the word to the project-local dictionary."""
 
 
-# The two items the menu offers, in display order. Kept as comptime
-# constants rather than a ``List`` field so the labels can be stamped
-# directly into ``paint`` without per-frame string churn.
-comptime _LABEL_USER    = String("Add to user dictionary")
-comptime _LABEL_PROJECT = String("Add to project dictionary")
-
-
-struct SpellMenu(Movable):
-    """Modal-ish popup menu anchored to a misspelled word."""
-
-    var active: Bool
-    """Open / closed flag. ``paint`` and the input handlers are no-ops
-    when False, so the host can call them unconditionally."""
-
-    var submitted: Bool
-    """True after the user resolves the menu (selection or cancel).
-    Host reads ``action`` + ``word`` then calls ``close()``."""
-
-    var action: Int
-    """One of the ``SPELL_ACTION_*`` codes. Set on ``_resolve``."""
-
-    var word: String
-    """The misspelled word the menu was opened over. Forwarded back to
-    the host so it can call the appropriate ``Speller.add_*`` method
-    without re-deriving the word from cursor position."""
-
-    var anchor_x: Int
-    var anchor_y: Int
-    """Screen cell at which to anchor the menu. The menu opens on the
-    row *below* the anchor when there's room, or above when not."""
-
-    var selected: Int
-    """Highlighted row index. 0 = user, 1 = project."""
-
-    var has_project: Bool
-    """When False, the project row is rendered greyed out and Enter on
-    it falls through to ``SPELL_ACTION_NONE``. The label still appears
-    so the user gets a hint about why it's there."""
-
-    var tracking: Bool
-    """True between a captured left-press inside the menu and its
-    matching release. Like a button, the action only fires on
-    release; a release without a prior tracked press is a non-event."""
-
-    def __init__(out self):
-        self.active = False
-        self.submitted = False
-        self.action = SPELL_ACTION_NONE
-        self.word = String("")
-        self.anchor_x = 0
-        self.anchor_y = 0
-        self.selected = 0
-        self.has_project = False
-        self.tracking = False
-
-    def open(
-        mut self, var word: String, anchor: Point, has_project: Bool,
-    ):
-        """Open the menu over ``word`` anchored at ``anchor`` (the
-        container_bounds cell the misspelled word starts at). ``has_project``
-        gates the second row.
-        Default selection is row 0 (user dictionary) — that's the
-        choice that always works, and "stay personal unless I deliberately
-        share" is the safer default for a tool the user might not yet
-        have explained to their teammates."""
-        self.word = word^
-        self.anchor_x = anchor.x
-        self.anchor_y = anchor.y
-        self.has_project = has_project
-        self.active = True
-        self.submitted = False
-        self.action = SPELL_ACTION_NONE
-        self.selected = 0
-        self.tracking = False
-
-    def close(mut self):
-        self.active = False
-        self.submitted = False
-        self.action = SPELL_ACTION_NONE
-        self.word = String("")
-        self.tracking = False
-
-    def _row_count(self) -> Int:
-        # Always show both rows; project is greyed when ``not has_project``.
-        return 2
-
-    def _step(mut self, delta: Int):
-        self.selected = menu_step_wrap(self.selected, delta, self._row_count())
-
-    def _resolve(mut self, action: Int):
-        self.action = action
-        self.submitted = True
-
-    def native_items(self) -> List[NativeMenuItem]:
-        var out = List[NativeMenuItem]()
-        out.append(NativeMenuItem(_LABEL_USER, SPELL_ACTION_ADD_USER, True))
-        out.append(NativeMenuItem(
-            _LABEL_PROJECT, SPELL_ACTION_ADD_PROJECT, self.has_project,
-        ))
-        return out^
-
-    def choose(mut self, action: Int):
-        """Answer the menu from the native host (0 = dismissed)."""
-        self._resolve(action)
-
-    # --- layout / paint ---------------------------------------------------
-
-    def _rect(self, container_bounds: Rect) -> Rect:
-        """Where the popup will render. Width matches the longer
-        label + 4 (left pad + label + right pad + 2 borders); height
-        is ``rows + 2`` (two items + top/bottom borders).
-
-        Sits one row below the anchor when there's room; flips above
-        when the anchor is too close to the bottom edge. Snaps left
-        when the anchor is too close to the right edge."""
-        var width = display_columns(_LABEL_PROJECT) + 4
-        if display_columns(_LABEL_USER) + 4 > width:
-            width = display_columns(_LABEL_USER) + 4
-        return anchored_menu_rect(
-            self.anchor_x, self.anchor_y, width, self._row_count() + 2,
-            container_bounds, False,
-        )
-
-    def paint(self, mut canvas: Canvas, container_bounds: Rect):
-        if not self.active:
-            return
-        var rect = self._rect(container_bounds)
-        var attr = Attr(BLACK, LIGHT_GRAY)
-        var sel_attr = Attr(BLACK, GREEN)
-        var sel_attr_disabled = Attr(WHITE, GREEN)
-        var disabled_attr = Attr(DARK_GRAY, LIGHT_GRAY)
-        paint_anchored_chrome(canvas, rect, attr)
-        var painter = Painter(rect)
-        # Row 0: user dict (always enabled).
-        var y0 = _rows_top(rect)
-        var is_sel0 = (self.selected == 0)
-        var row_attr0 = sel_attr if is_sel0 else attr
-        if is_sel0:
-            painter.fill(
-                canvas, Rect(rect.a.x + 1, y0, rect.b.x - 1, y0 + 1),
-                String(" "), row_attr0,
-            )
-        _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, y0), _LABEL_USER, row_attr0,
-        )
-        # Row 1: project dict — disabled when no project is open.
-        var y1 = y0 + 1
-        var is_sel1 = (self.selected == 1)
-        var enabled1 = self.has_project
-        var row_attr1: Attr
-        if is_sel1:
-            row_attr1 = sel_attr if enabled1 else sel_attr_disabled
-        else:
-            row_attr1 = attr if enabled1 else disabled_attr
-        if is_sel1:
-            painter.fill(
-                canvas, Rect(rect.a.x + 1, y1, rect.b.x - 1, y1 + 1),
-                String(" "), row_attr1,
-            )
-        _ = painter.put_text(
-            canvas, Point(rect.a.x + 2, y1), _LABEL_PROJECT, row_attr1,
-        )
-
-    # --- input ------------------------------------------------------------
-
-    def handle_key(mut self, event: Event) -> Bool:
-        """Returns True if the event was consumed."""
-        if not self.active:
-            return False
-        if event.kind != EVENT_KEY:
-            return True
-        var k = event.key
-        if k == KEY_ESC:
-            self._resolve(SPELL_ACTION_NONE)
-            return True
-        if k == KEY_UP:
-            self._step(-1)
-            return True
-        if k == KEY_DOWN:
-            self._step(1)
-            return True
-        if k == KEY_ENTER:
-            if self.selected == 0:
-                self._resolve(SPELL_ACTION_ADD_USER)
-            elif self.selected == 1:
-                if self.has_project:
-                    self._resolve(SPELL_ACTION_ADD_PROJECT)
-                # Disabled row: keep the menu open so the user can
-                # arrow back up to the user-dict row instead of having
-                # to re-open the menu after a no-op Enter.
-            return True
-        # Swallow everything else while modal — typing into the
-        # underlying editor while the menu is up would be surprising.
-        return True
-
-    def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Int:
-        """Button-like press / release model. Press inside a row arms
-        tracking + highlights; the action only fires when the matching
-        release lands inside (drag off-and-release cancels). Releases
-        without a prior tracked press are non-events."""
-        if not self.active:
-            return MENU_HIT_NONE
-        var rect = self._rect(container_bounds)
-        var r = anchored_menu_mouse(
-            event, rect, _rows_top(rect), self._row_count(),
-            self.selected, self.tracking,
-        )
-        if r.cancel:
-            self._resolve(SPELL_ACTION_NONE)
-        elif r.fired_row == 0:
-            self._resolve(SPELL_ACTION_ADD_USER)
-        elif r.fired_row == 1 and self.has_project:
-            self._resolve(SPELL_ACTION_ADD_PROJECT)
-        return r.hit
+def spell_menu_items(has_project: Bool) -> List[NativeMenuItem]:
+    """The rows, user dictionary first: the default selection, because
+    "stay personal unless I deliberately share" is the safer pick."""
+    var out = List[NativeMenuItem]()
+    out.append(NativeMenuItem(
+        String("Add to user dictionary"), SPELL_ACTION_ADD_USER, True,
+    ))
+    out.append(NativeMenuItem(
+        String("Add to project dictionary"), SPELL_ACTION_ADD_PROJECT,
+        has_project,
+    ))
+    return out^

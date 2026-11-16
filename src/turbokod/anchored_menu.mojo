@@ -1,8 +1,7 @@
-"""Shared building blocks for the small anchored popup menus — the git /
-test gutter menus, the LSP-status menu, the spell menu, and the diagnostic
-menu. Each menu keeps its own state, labels, and action resolution; these
-helpers factor out the three pieces that were copy-pasted across all of
-them:
+"""The small anchored popup menus. ``AnchoredMenu`` is a whole one — a
+list of action rows anchored to a cell (the spell, test-gutter and
+LSP-status menus). The git-gutter and diagnostic menus lay out rows of
+their own, so they compose the shared pieces instead:
 
 * ``anchored_menu_rect`` — the anchor-clamped placement (open below /
   above, flip on overflow, snap left).
@@ -15,13 +14,15 @@ struct (Mojo has no inheritance), so each keeps full control of its rows.
 
 from .canvas import Canvas, paint_drop_shadow
 from .painter import Painter
-from .colors import Attr
+from .colors import Attr, BLACK, DARK_GRAY, GREEN, LIGHT_GRAY, WHITE
 from .events import (
-    Event, EVENT_MOUSE,
+    Event, EVENT_KEY, EVENT_MOUSE,
+    KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_UP,
     MENU_HIT_INSIDE, MENU_HIT_NONE, MENU_HIT_OUTSIDE,
     MOUSE_BUTTON_LEFT,
 )
-from .geometry import Rect
+from .geometry import Point, Rect
+from .string_utils import display_columns
 
 
 def anchored_menu_rect(
@@ -155,3 +156,133 @@ struct NativeMenuItem(Copyable, Movable):
 
     def is_separator(self) -> Bool:
         return len(self.label.as_bytes()) == 0
+
+
+struct AnchoredMenu(Movable):
+    """A modal popup of action rows anchored to a screen cell. The host
+    opens it with its rows (``NativeMenuItem``s: label, action code,
+    enabled), routes keys and mouse to it while ``active``, and once
+    ``submitted`` reads ``action`` (0 = dismissed) and ``subject`` (what
+    it was opened over: the word, the test's node id), then ``close``s it.
+    A disabled row is drawn greyed and can't be picked; Enter on it keeps
+    the menu open so the user can arrow to another."""
+    var active: Bool
+    var submitted: Bool
+    var action: Int
+    var subject: String
+    var items: List[NativeMenuItem]
+    var anchor_x: Int
+    var anchor_y: Int
+    var prefer_above: Bool
+    """Open above the anchor (one on the bottom status bar) rather than
+    below it (one on an editor row)."""
+    var selected: Int
+    var tracking: Bool
+    """True between a captured left-press inside the menu and its
+    matching release. Like a button, a row only fires on release; a
+    release without a prior tracked press (the one of the right-click
+    that opened the menu) is a non-event."""
+
+    def __init__(out self):
+        self.active = False
+        self.submitted = False
+        self.action = 0
+        self.subject = String("")
+        self.items = List[NativeMenuItem]()
+        self.anchor_x = 0
+        self.anchor_y = 0
+        self.prefer_above = False
+        self.selected = 0
+        self.tracking = False
+
+    def open(
+        mut self, anchor: Point, var items: List[NativeMenuItem],
+        var subject: String = String(""), prefer_above: Bool = False,
+    ):
+        """Open over ``anchor`` with the first row selected."""
+        self = AnchoredMenu()
+        self.active = True
+        self.items = items^
+        self.subject = subject^
+        self.anchor_x = anchor.x
+        self.anchor_y = anchor.y
+        self.prefer_above = prefer_above
+
+    def close(mut self):
+        self = AnchoredMenu()
+
+    def native_items(self) -> List[NativeMenuItem]:
+        return self.items.copy()
+
+    def choose(mut self, action: Int):
+        """Answer the menu (0 = dismissed); the native host's path."""
+        self.action = action
+        self.submitted = True
+
+    def _pick(mut self, row: Int):
+        if 0 <= row and row < len(self.items) and self.items[row].enabled:
+            self.choose(self.items[row].code)
+
+    def _rect(self, container_bounds: Rect) -> Rect:
+        var width = 0
+        for ref item in self.items:
+            width = max(width, display_columns(item.label) + 4)
+        return anchored_menu_rect(
+            self.anchor_x, self.anchor_y, width, len(self.items) + 2,
+            container_bounds, self.prefer_above,
+        )
+
+    def paint(self, mut canvas: Canvas, container_bounds: Rect):
+        if not self.active:
+            return
+        var rect = self._rect(container_bounds)
+        var attr = Attr(BLACK, LIGHT_GRAY)
+        paint_anchored_chrome(canvas, rect, attr)
+        var painter = Painter(rect)
+        for i in range(len(self.items)):
+            var y = menu_row_y(rect) + i
+            var on = self.items[i].enabled
+            var row_attr = attr if on else Attr(DARK_GRAY, LIGHT_GRAY)
+            if self.selected == i:
+                row_attr = Attr(BLACK if on else WHITE, GREEN)
+                painter.fill(
+                    canvas, Rect(rect.a.x + 1, y, rect.b.x - 1, y + 1),
+                    String(" "), row_attr,
+                )
+            _ = painter.put_text(
+                canvas, Point(rect.a.x + 2, y), self.items[i].label, row_attr,
+            )
+
+    def handle_key(mut self, event: Event) -> Bool:
+        """Esc dismisses, Up / Down move (wrapping), Enter picks; every
+        other key is swallowed while it's up. False when it isn't."""
+        if not self.active:
+            return False
+        if event.kind != EVENT_KEY:
+            return True
+        var k = event.key
+        if k == KEY_ESC:
+            self.choose(0)
+        elif k == KEY_UP:
+            self.selected = menu_step_wrap(self.selected, -1, len(self.items))
+        elif k == KEY_DOWN:
+            self.selected = menu_step_wrap(self.selected, 1, len(self.items))
+        elif k == KEY_ENTER:
+            self._pick(self.selected)
+        return True
+
+    def handle_mouse(mut self, event: Event, container_bounds: Rect) -> Int:
+        """Button-like press / release (``anchored_menu_mouse``); the
+        ``MENU_HIT_*`` code. A press or release outside dismisses."""
+        if not self.active:
+            return MENU_HIT_NONE
+        var rect = self._rect(container_bounds)
+        var r = anchored_menu_mouse(
+            event, rect, menu_row_y(rect), len(self.items),
+            self.selected, self.tracking,
+        )
+        if r.cancel:
+            self.choose(0)
+        elif r.fired_row >= 0:
+            self._pick(r.fired_row)
+        return r.hit

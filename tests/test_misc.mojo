@@ -536,7 +536,7 @@ def test_detached_settings_clipboard_chord_does_not_recurse() raises:
     """
     var d = Desktop()
     d.set_settings_detached(True)
-    d.settings.open(False)
+    d.settings.open(TurbokodConfig())
     assert_true(d.settings.active)
     d.settings.language_editor.open(
         String("lang"), List[String](), List[String](), False,

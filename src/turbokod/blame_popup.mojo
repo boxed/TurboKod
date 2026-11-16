@@ -3,7 +3,7 @@ details for that line: short SHA, author + mail, authored time, and the
 commit message.
 
 Purely informational, which is what makes it different from its neighbours
-(``GitGutterMenu`` / ``TestGutterMenu``): there is no row to select and no
+(``GitGutterMenu`` / ``AnchoredMenu``): there is no row to select and no
 action to fire, so it has no ``submitted`` / ``action`` protocol. Any key or
 any mouse press dismisses it, and while it's up it swallows input like the
 other anchored popups so a stray keystroke can't land in the editor behind

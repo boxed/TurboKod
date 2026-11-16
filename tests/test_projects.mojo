@@ -47,23 +47,25 @@ def test_settings_projects_add_and_remove() raises:
     var existing = List[String]()
     existing.append(String("/work"))
     var s = Settings()
-    s.open(False, project_dirs=existing^)
+    var c = TurbokodConfig()
+    c.project_dirs = existing^
+    s.open(c)
     assert_equal(s.selected_project_dir, 0)
     s.ui_set(String("project_input"), String("~/Projects/"))
     s.ui_act(String("proj_add"))
     assert_true(s.dirty)
-    assert_equal(len(s.project_dirs), 2)
-    assert_equal(s.project_dirs[1], String("~/Projects"))
+    assert_equal(len(s.cfg.project_dirs), 2)
+    assert_equal(s.cfg.project_dirs[1], String("~/Projects"))
     assert_equal(s.selected_project_dir, 1)
     assert_equal(s.project_input, String(""))
     # Re-adding an existing folder just selects it.
     s.ui_set(String("project_input"), String("/work"))
     s.ui_act(String("proj_add"))
-    assert_equal(len(s.project_dirs), 2)
+    assert_equal(len(s.cfg.project_dirs), 2)
     assert_equal(s.selected_project_dir, 0)
     s.ui_act(String("proj_remove"))
-    assert_equal(len(s.project_dirs), 1)
-    assert_equal(s.project_dirs[0], String("~/Projects"))
+    assert_equal(len(s.cfg.project_dirs), 1)
+    assert_equal(s.cfg.project_dirs[0], String("~/Projects"))
 
 
 def test_quick_open_project_lists_subdirectories() raises:

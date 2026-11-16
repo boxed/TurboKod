@@ -16,7 +16,7 @@ macOS it gets its own window — the grid projection in a cell window, or a
 native window in the macOS-style UI — so the workspace stays visible while
 a theme change retints it.
 
-Edits commit immediately to the working copies (``self.auto_save`` etc).
+Edits commit immediately to the working copies (``self.cfg.auto_save`` etc).
 The host syncs them back into ``TurbokodConfig`` while ``self.dirty`` is
 set (``Desktop._sync_settings``) and writes the config to disk.
 """
@@ -24,8 +24,8 @@ set (``Desktop._sync_settings``) and writes the config to disk.
 from std.collections.list import List
 
 from .config import (
-    DEFAULT_MAX_OPEN_WINDOWS, LanguageServerOverride,
-    MAX_FONT_SIZE, MIN_FONT_SIZE, WRAP_NONE, same_as_font_label,
+    LanguageServerOverride, MAX_FONT_SIZE, MIN_FONT_SIZE, TurbokodConfig,
+    same_as_font_label,
 )
 from .dictionary_install import (
     DownloadableDictionary, built_in_downloadable_dictionaries,
@@ -114,63 +114,40 @@ struct Settings(Movable, UIDialog):
     var close_requested: Bool
     """Close was pressed; the host syncs the last edits, then closes."""
     var section: Int
+    var cfg: TurbokodConfig
+    """The working copy the dialog edits. The host copies its settings
+    back into its own config field by field (``Desktop._sync_settings``):
+    the rest of this copy — recents and the like — is a stale snapshot."""
 
     # General.
-    var auto_save: Bool
-    var wrap_mode: Int
-    """``WRAP_NONE`` / ``WRAP_SOFT`` / ``WRAP_SMART``."""
-    var trim_trailing_whitespace: Bool
-    var ensure_final_newline: Bool
-    var compress_kwargs: Bool
-    var cursor_blink: Bool
-    var terminal_tmux: Bool
     var comma_text: String
     """Smart wrap's comma trigger as typed: digits, empty = off."""
     var max_windows_text: String
     """The open-document cap as typed: digits, empty = no limit."""
 
     # Language Features.
-    var ls_format_on_save: Bool
-    var ls_signature_help: Bool
-    var ls_document_highlight: Bool
-    var ls_document_links: Bool
-    var ls_inlay_hints: Bool
-    var ls_code_lens: Bool
-    var ls_document_colors: Bool
-    var ls_linked_editing: Bool
-    var ls_server_progress: Bool
 
     # Appearance.
-    var theme_choice: String
     var _theme_names: List[String]
     var font_choice: String
     var _font_names: List[String]
     """Host-provided font labels (the two built-in fonts first, then the
     system's monospace families). Empty on the terminal frontend, where
     the terminal owns the font."""
-    var font_size_choice: Int
-    """0 means the font's default size."""
     var area_font_choices: List[String]
     """Each area's font label, indexed by font slot (``FONT_*`` in
     ``cell``); ``same_as_font_label`` when it has none of its own. The
     host sets them after ``open``."""
-    var area_font_sizes: List[Int]
-    """Each area's own font size in points, indexed like
-    ``area_font_choices``; 0 is the Font's size (no grid of its own)."""
     var _font_effective_size: Int
     """The size actually rendering (resolves 0); reported by the host."""
     var _font_ideal_size: Int
     """The active font's design size, 0 when unknown; reported by the host."""
     var offer_native_ui: Bool
     """The host can show the macOS-style UI (the native macOS frontend)."""
-    var native_ui: Bool
-    var platinum_ui: Bool
     var palette_version: Int
     """Bumped by the host when the palette changes, so the preview repaints."""
 
     # Languages.
-    var language_overrides: List[LanguageServerOverride]
-    """Working copy of ``TurbokodConfig.language_servers``."""
     var languages_view: List[LanguageSpec]
     """Built-in languages with the overrides applied — what the list shows."""
     var selected_language: Int
@@ -186,7 +163,6 @@ struct Settings(Movable, UIDialog):
     var pending_dict_remove_lang: String
 
     # Projects.
-    var project_dirs: List[String]
     var selected_project_dir: Int
     var project_input: String
 
@@ -195,38 +171,17 @@ struct Settings(Movable, UIDialog):
         self.dirty = False
         self.close_requested = False
         self.section = SECTION_GENERAL
-        self.auto_save = False
-        self.wrap_mode = WRAP_NONE
-        self.trim_trailing_whitespace = False
-        self.ensure_final_newline = False
-        self.compress_kwargs = False
-        self.cursor_blink = False
-        self.terminal_tmux = False
+        self.cfg = TurbokodConfig()
         self.comma_text = String("")
         self.max_windows_text = String("")
-        self.ls_format_on_save = False
-        self.ls_signature_help = False
-        self.ls_document_highlight = False
-        self.ls_document_links = False
-        self.ls_inlay_hints = False
-        self.ls_code_lens = False
-        self.ls_document_colors = False
-        self.ls_linked_editing = False
-        self.ls_server_progress = False
-        self.theme_choice = String("Turbo C++ 3.0")
         self._theme_names = theme_names()
         self.font_choice = String("")
         self._font_names = List[String]()
-        self.font_size_choice = 0
         self.area_font_choices = _same_as_font_for_all()
-        self.area_font_sizes = [0, 0, 0, 0]
         self._font_effective_size = 0
         self._font_ideal_size = 0
         self.offer_native_ui = False
-        self.native_ui = False
-        self.platinum_ui = False
         self.palette_version = 0
-        self.language_overrides = List[LanguageServerOverride]()
         self.languages_view = List[LanguageSpec]()
         self.selected_language = -1
         self.language_editor = LanguageEditor()
@@ -235,65 +190,30 @@ struct Settings(Movable, UIDialog):
         self.selected_dict = -1
         self.pending_dict_install_lang = String("")
         self.pending_dict_remove_lang = String("")
-        self.project_dirs = List[String]()
         self.selected_project_dir = -1
         self.project_input = String("")
 
     def open(
-        mut self, auto_save: Bool,
-        var language_overrides: List[LanguageServerOverride] = List[LanguageServerOverride](),
+        mut self, cfg: TurbokodConfig,
         current_language_ext: String = String(""),
-        trim_trailing_whitespace: Bool = True,
-        ensure_final_newline: Bool = True,
-        compress_kwargs: Bool = False,
-        theme: String = String("Turbo C++ 3.0"),
         font: String = String(""),
         var font_names: List[String] = List[String](),
-        font_size: Int = 0,
         font_effective_size: Int = 0,
         font_ideal_size: Int = 0,
-        wrap_mode: Int = WRAP_NONE,
-        comma_threshold: Int = -1,
-        max_open_windows: Int = DEFAULT_MAX_OPEN_WINDOWS,
-        cursor_blink: Bool = True,
-        ls_format_on_save: Bool = False,
-        ls_signature_help: Bool = True,
-        ls_document_highlight: Bool = True,
-        ls_document_links: Bool = False,
-        ls_inlay_hints: Bool = False,
-        ls_code_lens: Bool = False,
-        ls_document_colors: Bool = False,
-        ls_linked_editing: Bool = False,
-        ls_server_progress: Bool = True,
-        var project_dirs: List[String] = List[String](),
     ):
+        """Open on a copy of ``cfg``; ``font`` is its font's label, and
+        ``font_names`` the host's font list (empty: no Font section)."""
         self = Settings()
         self.active = True
-        self.auto_save = auto_save
-        self.trim_trailing_whitespace = trim_trailing_whitespace
-        self.ensure_final_newline = ensure_final_newline
-        self.compress_kwargs = compress_kwargs
-        self.cursor_blink = cursor_blink
-        self.wrap_mode = wrap_mode
-        self.comma_text = String("") if comma_threshold < 0 else String(comma_threshold)
-        self.max_windows_text = String("") if max_open_windows <= 0 \
-            else String(max_open_windows)
-        self.ls_format_on_save = ls_format_on_save
-        self.ls_signature_help = ls_signature_help
-        self.ls_document_highlight = ls_document_highlight
-        self.ls_document_links = ls_document_links
-        self.ls_inlay_hints = ls_inlay_hints
-        self.ls_code_lens = ls_code_lens
-        self.ls_document_colors = ls_document_colors
-        self.ls_linked_editing = ls_linked_editing
-        self.ls_server_progress = ls_server_progress
-        self.theme_choice = theme
+        self.cfg = cfg.copy()
+        self.comma_text = String("") if cfg.smart_wrap_comma_threshold < 0 \
+            else String(cfg.smart_wrap_comma_threshold)
+        self.max_windows_text = String("") if cfg.max_open_windows <= 0 \
+            else String(cfg.max_open_windows)
         self.font_choice = font
         self._font_names = font_names^
-        self.font_size_choice = font_size
         self._font_effective_size = font_effective_size
         self._font_ideal_size = font_ideal_size
-        self.language_overrides = language_overrides^
         self._rebuild_languages_view()
         # Open Languages on the focused editor's language: the row the
         # user most likely came to change.
@@ -307,8 +227,7 @@ struct Settings(Movable, UIDialog):
         self.selected_language = lang_idx
         self.dict_specs = built_in_downloadable_dictionaries()
         self.selected_dict = 0 if len(self.dict_specs) > 0 else -1
-        self.project_dirs = project_dirs^
-        self.selected_project_dir = 0 if len(self.project_dirs) > 0 else -1
+        self.selected_project_dir = 0 if len(self.cfg.project_dirs) > 0 else -1
 
     def close(mut self):
         self = Settings()
@@ -361,20 +280,20 @@ struct Settings(Movable, UIDialog):
         var rows = List[UINode]()
         rows.append(ui_row(String("Saving"), ui_choice(
             String("auto_save"), [String("Manual"), String("Automatic")],
-            1 if self.auto_save else 0,
+            1 if self.cfg.auto_save else 0,
         )))
         rows.append(ui_row(String(""), ui_check(
             String("trim_trailing_whitespace"),
             String("Trim trailing whitespace on save"),
-            self.trim_trailing_whitespace,
+            self.cfg.trim_trailing_whitespace,
         )))
         rows.append(ui_row(String(""), ui_check(
             String("ensure_final_newline"),
-            String("Ensure a final newline on save"), self.ensure_final_newline,
+            String("Ensure a final newline on save"), self.cfg.ensure_final_newline,
         )))
         rows.append(ui_row(String("Line wrapping"), ui_choice(
             String("wrap_mode"),
-            [String("None"), String("Soft"), String("Smart")], self.wrap_mode,
+            [String("None"), String("Soft"), String("Smart")], self.cfg.wrap_mode,
         )))
         rows.append(ui_row(String("Smart wrap at commas"), ui_text(
             String("comma_threshold"), self.comma_text, String("Off"), width=8,
@@ -385,20 +304,20 @@ struct Settings(Movable, UIDialog):
         )))
         rows.append(ui_row(String(""), ui_check(
             String("compress_kwargs"), String("Compress keyword arguments"),
-            self.compress_kwargs,
+            self.cfg.compress_kwargs,
         )))
         rows.append(ui_row(String(""), ui_check(
-            String("cursor_blink"), String("Blinking caret"), self.cursor_blink,
+            String("cursor_blink"), String("Blinking caret"), self.cfg.cursor_blink,
         )))
         rows.append(ui_row(String("Terminal panes"), ui_check(
             String("terminal_tmux"), String("Keep running in tmux across restarts"),
-            self.terminal_tmux,
+            self.cfg.terminal_tmux,
         )))
         return ui_form(rows^)
 
     def _font_size_shown(self) -> Int:
-        if self.font_size_choice > 0:
-            return self.font_size_choice
+        if self.cfg.font_size > 0:
+            return self.cfg.font_size
         if self._font_effective_size > 0:
             return self._font_effective_size
         return 16
@@ -407,7 +326,7 @@ struct Settings(Movable, UIDialog):
         """Area ``slot``'s size row: its own size, or the Font's, with
         Smaller / Larger and Same as Font. An area with a size of its own
         lays out its own grid of that font's cells."""
-        var own = self.area_font_sizes[slot]
+        var own = self.cfg.area_font_sizes[slot]
         var size = own if own > 0 else self._font_size_shown()
         # The code's own size is the Font's; its default is the cell's.
         var same = String("Default Size") if slot == 1 \
@@ -434,22 +353,22 @@ struct Settings(Movable, UIDialog):
         """A size button of an area row: step its size by ``delta`` from
         what it shows, or clear it when ``delta`` is 0."""
         var slot = ui_int(String(id.removeprefix(prefix)))
-        if slot < 0 or slot >= len(self.area_font_sizes):
+        if slot < 0 or slot >= len(self.cfg.area_font_sizes):
             return
         var v = 0
         if delta != 0:
-            var own = self.area_font_sizes[slot]
+            var own = self.cfg.area_font_sizes[slot]
             var size = own if own > 0 else self._font_size_shown()
             v = max(MIN_FONT_SIZE, min(size + delta, MAX_FONT_SIZE))
-        if v != self.area_font_sizes[slot]:
-            self.area_font_sizes[slot] = v
+        if v != self.cfg.area_font_sizes[slot]:
+            self.cfg.area_font_sizes[slot] = v
             self.dirty = True
 
     def _look_index(self) -> Int:
         """The Look choice: Turbo Vision, macOS or Mac OS 9."""
-        if self.native_ui:
+        if self.cfg.native_ui:
             return 1
-        if self.platinum_ui:
+        if self.cfg.platinum_ui:
             return 2
         return 0
 
@@ -465,7 +384,7 @@ struct Settings(Movable, UIDialog):
             )))
         var theme = 0
         for i in range(len(self._theme_names)):
-            if self._theme_names[i] == self.theme_choice:
+            if self._theme_names[i] == self.cfg.theme:
                 theme = i
         rows.append(ui_row(String("Theme"), ui_choice(
             String("theme"), self._theme_names.copy(), theme,
@@ -477,7 +396,7 @@ struct Settings(Movable, UIDialog):
             # font at its ideal size, which fixes the cell, so there's no
             # UI font, and the code's size is an area size: a grid of its
             # own, like the terminal's.
-            var tv_look = not self.native_ui and not self.platinum_ui
+            var tv_look = not self.cfg.native_ui and not self.cfg.platinum_ui
             rows.append(ui_row(String("Font"), _font_pick(
                 String("pick_font"), self.font_choice,
             )))
@@ -519,7 +438,7 @@ struct Settings(Movable, UIDialog):
             for i in range(min(2, len(self._font_names))):
                 builtins.append(self._font_names[i])
         rows.append(ui_row(String(""), ui_preview(
-            self.font_choice, self.font_size_choice, builtins^,
+            self.font_choice, self.cfg.font_size, builtins^,
             String(self.palette_version),
         )))
         return ui_form(rows^)
@@ -543,7 +462,7 @@ struct Settings(Movable, UIDialog):
                 servers += join_args(spec.candidates[j].argv)
             rows.append([
                 spec.language_id
-                    + (String(" *") if _has_override(self.language_overrides, spec.language_id)
+                    + (String(" *") if _has_override(self.cfg.language_servers, spec.language_id)
                        else String("")),
                 String(" ").join(spec.file_types),
                 servers,
@@ -551,7 +470,7 @@ struct Settings(Movable, UIDialog):
         var has = self.selected_language >= 0 \
             and self.selected_language < len(self.languages_view)
         var custom = has and _has_override(
-            self.language_overrides, self.languages_view[self.selected_language].language_id,
+            self.cfg.language_servers, self.languages_view[self.selected_language].language_id,
         )
         var buttons = List[UINode]()
         buttons.append(ui_button(String("lang_add"), String("Add…")))
@@ -608,10 +527,10 @@ struct Settings(Movable, UIDialog):
 
     def _projects_ui(self) -> UINode:
         var rows = List[List[String]]()
-        for i in range(len(self.project_dirs)):
-            rows.append([self.project_dirs[i]])
+        for i in range(len(self.cfg.project_dirs)):
+            rows.append([self.cfg.project_dirs[i]])
         var has = self.selected_project_dir >= 0 \
-            and self.selected_project_dir < len(self.project_dirs)
+            and self.selected_project_dir < len(self.cfg.project_dirs)
         var add = List[UINode]()
         add.append(ui_row(String("Folder"), ui_text(
             String("project_input"), self.project_input, String("~/Projects"),
@@ -655,7 +574,7 @@ struct Settings(Movable, UIDialog):
             return
         if key == String("projects"):
             var s = ui_int(value, self.selected_project_dir)
-            if s >= 0 and s < len(self.project_dirs):
+            if s >= 0 and s < len(self.cfg.project_dirs):
                 self.selected_project_dir = s
             return
         if key == String("project_input"):
@@ -663,36 +582,36 @@ struct Settings(Movable, UIDialog):
             return
         # Everything below is a setting.
         if key == String("auto_save"):
-            self.auto_save = ui_int(value) == 1
+            self.cfg.auto_save = ui_int(value) == 1
         elif key == String("wrap_mode"):
-            var w = ui_int(value, self.wrap_mode)
+            var w = ui_int(value, self.cfg.wrap_mode)
             if w >= 0 and w <= 2:
-                self.wrap_mode = w
+                self.cfg.wrap_mode = w
         elif key == String("comma_threshold"):
             self.comma_text = _digits(value, 3)
         elif key == String("max_open_windows"):
             self.max_windows_text = _digits(value, 4)
         elif key == String("trim_trailing_whitespace"):
-            self.trim_trailing_whitespace = ui_bool(value)
+            self.cfg.trim_trailing_whitespace = ui_bool(value)
         elif key == String("ensure_final_newline"):
-            self.ensure_final_newline = ui_bool(value)
+            self.cfg.ensure_final_newline = ui_bool(value)
         elif key == String("compress_kwargs"):
-            self.compress_kwargs = ui_bool(value)
+            self.cfg.compress_kwargs = ui_bool(value)
         elif key == String("cursor_blink"):
-            self.cursor_blink = ui_bool(value)
+            self.cfg.cursor_blink = ui_bool(value)
         elif key == String("terminal_tmux"):
-            self.terminal_tmux = ui_bool(value)
+            self.cfg.terminal_tmux = ui_bool(value)
         elif key == String("look"):
             var i = ui_int(value)
             if i < 0 or i > 2:
                 return
-            self.native_ui = i == 1
-            self.platinum_ui = i == 2
+            self.cfg.native_ui = i == 1
+            self.cfg.platinum_ui = i == 2
         elif key == String("theme"):
             var i = ui_int(value)
             if i < 0 or i >= len(self._theme_names):
                 return
-            self.theme_choice = self._theme_names[i]
+            self.cfg.theme = self._theme_names[i]
         elif key == String("font"):
             var i = ui_int(value)
             if i < 0 or i >= len(self._font_names):
@@ -749,42 +668,42 @@ struct Settings(Movable, UIDialog):
             self._remove_project_dir()
 
     def _ls_get(self, key: String) -> Bool:
-        if key == String("ls_format_on_save"): return self.ls_format_on_save
-        if key == String("ls_signature_help"): return self.ls_signature_help
-        if key == String("ls_document_highlight"): return self.ls_document_highlight
-        if key == String("ls_document_links"): return self.ls_document_links
-        if key == String("ls_inlay_hints"): return self.ls_inlay_hints
-        if key == String("ls_code_lens"): return self.ls_code_lens
-        if key == String("ls_document_colors"): return self.ls_document_colors
-        if key == String("ls_linked_editing"): return self.ls_linked_editing
-        return self.ls_server_progress
+        if key == String("ls_format_on_save"): return self.cfg.lsp_format_on_save
+        if key == String("ls_signature_help"): return self.cfg.lsp_signature_help
+        if key == String("ls_document_highlight"): return self.cfg.lsp_document_highlight
+        if key == String("ls_document_links"): return self.cfg.lsp_document_links
+        if key == String("ls_inlay_hints"): return self.cfg.lsp_inlay_hints
+        if key == String("ls_code_lens"): return self.cfg.lsp_code_lens
+        if key == String("ls_document_colors"): return self.cfg.lsp_document_colors
+        if key == String("ls_linked_editing"): return self.cfg.lsp_linked_editing
+        return self.cfg.lsp_server_progress
 
     def _ls_set(mut self, key: String, on: Bool) -> Bool:
         """Set language-feature gate ``key``; False when it isn't one."""
-        if key == String("ls_format_on_save"): self.ls_format_on_save = on
-        elif key == String("ls_signature_help"): self.ls_signature_help = on
-        elif key == String("ls_document_highlight"): self.ls_document_highlight = on
-        elif key == String("ls_document_links"): self.ls_document_links = on
-        elif key == String("ls_inlay_hints"): self.ls_inlay_hints = on
-        elif key == String("ls_code_lens"): self.ls_code_lens = on
-        elif key == String("ls_document_colors"): self.ls_document_colors = on
-        elif key == String("ls_linked_editing"): self.ls_linked_editing = on
-        elif key == String("ls_server_progress"): self.ls_server_progress = on
+        if key == String("ls_format_on_save"): self.cfg.lsp_format_on_save = on
+        elif key == String("ls_signature_help"): self.cfg.lsp_signature_help = on
+        elif key == String("ls_document_highlight"): self.cfg.lsp_document_highlight = on
+        elif key == String("ls_document_links"): self.cfg.lsp_document_links = on
+        elif key == String("ls_inlay_hints"): self.cfg.lsp_inlay_hints = on
+        elif key == String("ls_code_lens"): self.cfg.lsp_code_lens = on
+        elif key == String("ls_document_colors"): self.cfg.lsp_document_colors = on
+        elif key == String("ls_linked_editing"): self.cfg.lsp_linked_editing = on
+        elif key == String("ls_server_progress"): self.cfg.lsp_server_progress = on
         else:
             return False
         return True
 
     def _set_font_size(mut self, size: Int):
         var s = max(MIN_FONT_SIZE, min(size, MAX_FONT_SIZE))
-        if s != self.font_size_choice:
-            self.font_size_choice = s
+        if s != self.cfg.font_size:
+            self.cfg.font_size = s
             self.dirty = True
 
     # --- languages -------------------------------------------------------
 
     def _rebuild_languages_view(mut self):
         self.languages_view = apply_language_overrides(
-            built_in_servers(), self.language_overrides,
+            built_in_servers(), self.cfg.language_servers,
         )
 
     def _edit_language(mut self):
@@ -810,10 +729,10 @@ struct Settings(Movable, UIDialog):
             return
         var id = self.languages_view[self.selected_language].language_id
         var rebuilt = List[LanguageServerOverride]()
-        for i in range(len(self.language_overrides)):
-            if self.language_overrides[i].language_id != id:
-                rebuilt.append(self.language_overrides[i].copy())
-        self.language_overrides = rebuilt^
+        for i in range(len(self.cfg.language_servers)):
+            if self.cfg.language_servers[i].language_id != id:
+                rebuilt.append(self.cfg.language_servers[i].copy())
+        self.cfg.language_servers = rebuilt^
         self.dirty = True
         self._rebuild_languages_view()
         if self.selected_language >= len(self.languages_view):
@@ -846,15 +765,15 @@ struct Settings(Movable, UIDialog):
             return
         var rebuilt = List[LanguageServerOverride]()
         var replaced = False
-        for i in range(len(self.language_overrides)):
-            if self.language_overrides[i].language_id == entry.language_id:
+        for i in range(len(self.cfg.language_servers)):
+            if self.cfg.language_servers[i].language_id == entry.language_id:
                 rebuilt.append(entry.copy())
                 replaced = True
             else:
-                rebuilt.append(self.language_overrides[i].copy())
+                rebuilt.append(self.cfg.language_servers[i].copy())
         if not replaced:
             rebuilt.append(entry.copy())
-        self.language_overrides = rebuilt^
+        self.cfg.language_servers = rebuilt^
         self.dirty = True
         self._rebuild_languages_view()
         for i in range(len(self.languages_view)):
@@ -890,21 +809,21 @@ struct Settings(Movable, UIDialog):
             return
         var path = String(StringSpan(unsafe_from_utf8=b[:n]))
         self.project_input = String("")
-        for i in range(len(self.project_dirs)):
-            if self.project_dirs[i] == path:
+        for i in range(len(self.cfg.project_dirs)):
+            if self.cfg.project_dirs[i] == path:
                 self.selected_project_dir = i
                 return
-        self.project_dirs.append(path^)
-        self.selected_project_dir = len(self.project_dirs) - 1
+        self.cfg.project_dirs.append(path^)
+        self.selected_project_dir = len(self.cfg.project_dirs) - 1
         self.dirty = True
 
     def _remove_project_dir(mut self):
         if self.selected_project_dir < 0 \
-                or self.selected_project_dir >= len(self.project_dirs):
+                or self.selected_project_dir >= len(self.cfg.project_dirs):
             return
-        _ = self.project_dirs.pop(self.selected_project_dir)
-        if self.selected_project_dir >= len(self.project_dirs):
-            self.selected_project_dir = len(self.project_dirs) - 1
+        _ = self.cfg.project_dirs.pop(self.selected_project_dir)
+        if self.selected_project_dir >= len(self.cfg.project_dirs):
+            self.selected_project_dir = len(self.cfg.project_dirs) - 1
         self.dirty = True
 
 

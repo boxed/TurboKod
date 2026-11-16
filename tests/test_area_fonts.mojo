@@ -137,7 +137,7 @@ def test_settings_chooses_fonts_by_searching() raises:
     assert_true(_has_key(s._appearance_ui(), String("pick_font_2")))
     assert_true(not _has_key(s._appearance_ui(), String("pick_font_0")))
     assert_true(not _has_key(s._appearance_ui(), String("font_larger")))
-    s.native_ui = True
+    s.cfg.native_ui = True
     assert_true(_has_key(s._appearance_ui(), String("pick_font_0")))
     assert_true(_has_key(s._appearance_ui(), String("font_larger")))
     s.ui_act(String("pick_font_2"))
@@ -298,13 +298,13 @@ def test_settings_steps_an_areas_font_size_from_the_fonts() raises:
     assert_true(_has_key(s._appearance_ui(), String("area_larger_3")))
     s._font_effective_size = 16
     s.ui_act(String("area_smaller_2"))
-    assert_equal(s.area_font_sizes[2], 15)
+    assert_equal(s.cfg.area_font_sizes[2], 15)
     assert_true(s.dirty)
     s.ui_act(String("area_larger_2"))
     s.ui_act(String("area_larger_2"))
-    assert_equal(s.area_font_sizes[2], 17)
+    assert_equal(s.cfg.area_font_sizes[2], 17)
     s.ui_act(String("area_same_2"))
-    assert_equal(s.area_font_sizes[2], 0)
+    assert_equal(s.cfg.area_font_sizes[2], 0)
 
 
 def _half_size_code(mut w: Window):
@@ -412,10 +412,10 @@ def test_settings_offers_the_code_a_size_in_the_turbo_vision_look() raises:
     assert_true(_has_key(s._appearance_ui(), String("area_larger_1")))
     assert_true(not _has_key(s._appearance_ui(), String("font_larger")))
     s.ui_act(String("area_larger_1"))
-    assert_equal(s.area_font_sizes[1], 17)
+    assert_equal(s.cfg.area_font_sizes[1], 17)
     s.ui_act(String("area_same_1"))
-    assert_equal(s.area_font_sizes[1], 0)
-    s.native_ui = True                  # the macOS look: the Font sets the cell
+    assert_equal(s.cfg.area_font_sizes[1], 0)
+    s.cfg.native_ui = True                  # the macOS look: the Font sets the cell
     assert_true(not _has_key(s._appearance_ui(), String("area_larger_1")))
     assert_true(_has_key(s._appearance_ui(), String("font_larger")))
 

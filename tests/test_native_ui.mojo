@@ -6,6 +6,7 @@ handler a click on the in-grid button would."""
 
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from turbokod.canvas import Canvas
+from turbokod.spell_menu import spell_menu_items
 from turbokod.colors import default_attr
 from turbokod.desktop import (
     APP_SETTINGS, DOCK_DEBUG_PANE, Desktop, PROJECT_SETTINGS, EDITOR_FIND, EDITOR_GOTO,
@@ -367,13 +368,13 @@ def test_welcome_choices_apply_live_and_finish_once() raises:
     d.apply_welcome(False, True, String("Turbo C++ 3.0"), d.font_label(), 0, True)
     assert_false(d.config.native_ui)
     assert_true(d.platinum_ui())
-    assert_true(d.settings.platinum_ui)
+    assert_true(d.settings.cfg.platinum_ui)
     assert_true(d.config.welcome_done)
 
 
 def test_native_popup_lists_rows_and_dismisses_through_its_handler() raises:
     var d = _native_desktop(String("x\n"))
-    d.spell_menu.open(String("wrod"), Point(4, 6), False)
+    d.spell_menu.open(Point(4, 6), spell_menu_items(False), String("wrod"))
     assert_equal(d.native_popup_kind(), String("spell"))
     var items = d.native_popup_items()
     assert_equal(len(items), 2)
@@ -749,7 +750,7 @@ def test_platinum_takes_the_confirm_prompts_find_and_popups() raises:
     assert_false(d.prompt.active)
     assert_equal(d.native_find_request, String("find"))
     # A popup is the host's Platinum menu.
-    d.spell_menu.open(String("wrod"), Point(4, 6), False)
+    d.spell_menu.open(Point(4, 6), spell_menu_items(False), String("wrod"))
     assert_equal(d.native_popup_kind(), String("spell"))
 
 

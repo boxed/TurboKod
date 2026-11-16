@@ -88,7 +88,7 @@ from .git_gutter_menu import (
     GitGutterMenu,
 )
 from .test_gutter_menu import (
-    TEST_ACTION_DEBUG, TEST_ACTION_RUN, TestGutterMenu,
+    TEST_ACTION_DEBUG, TEST_ACTION_RUN, test_menu_items,
 )
 from .diagnostic_menu import (
     DIAG_MENU_ACTION_APPLY_FIX, DIAG_MENU_ACTION_COPY, DiagnosticMenu,
@@ -112,7 +112,7 @@ from .context_menu import (
 )
 from .lsp import LspProcess
 from .lsp_status_menu import (
-    LSP_MENU_ACTION_RESTART, LspStatusMenu,
+    LSP_MENU_ACTION_RESTART, lsp_menu_items,
 )
 from .posix import (
     SIGTERM, close_fd, debug_log, drain_fd, exit_code_from_status,
@@ -130,9 +130,9 @@ from .highlight import (
 from .library_words import LibraryNegatives
 from .spell import Speller, is_library_location, spell_key
 from .spell_menu import (
-    SPELL_ACTION_ADD_PROJECT, SPELL_ACTION_ADD_USER, SpellMenu,
+    SPELL_ACTION_ADD_PROJECT, SPELL_ACTION_ADD_USER, spell_menu_items,
 )
-from .anchored_menu import NativeMenuItem
+from .anchored_menu import AnchoredMenu, NativeMenuItem
 from .ui_grid import GridForm, UIEvent, apply_ui_events, grid_dialog_size
 from .ui_tree import (
     ListWindow, UI_CODE, UI_DISABLED, UI_LARGE, UI_RGB, UINode, UISpan, ui_bool,
@@ -1407,7 +1407,7 @@ struct Desktop(Movable):
     # ``Editor.consume_spell_action_request``; resolution feeds back
     # through ``speller.add_user_word`` / ``add_project_word`` and
     # forces a spell-only re-render across every open editor.
-    var spell_menu: SpellMenu
+    var spell_menu: AnchoredMenu
     # Popup that opens when the user clicks the per-line bar in the
     # git-changes gutter. Currently offers a single ``Revert this line``
     # action; surfaced from ``Editor.consume_git_revert_request`` after
@@ -1417,7 +1417,7 @@ struct Desktop(Movable):
     # detected test — Run / Debug the single test. Surfaced from
     # ``Editor.consume_test_run_request`` and routed input-first like
     # ``git_gutter_menu``.
-    var test_gutter_menu: TestGutterMenu
+    var test_gutter_menu: AnchoredMenu
     # Read-only popup that opens when the user clicks the blame gutter —
     # the clicked line's commit: SHA, author, authored time, message.
     # Surfaced from ``Editor.consume_blame_info_request``; routed
@@ -1498,7 +1498,7 @@ struct Desktop(Movable):
     # Right-click on the LSP indicator on the right of the status bar →
     # contextual menu with a single ``Restart LSP`` action. Same
     # input-first routing pattern as ``git_gutter_menu``.
-    var lsp_status_menu: LspStatusMenu
+    var lsp_status_menu: AnchoredMenu
     # Right-click on a breakpoint dot → contextual edit dialog. Carries
     # path + line back through to the DAP manager when the user
     # confirms with OK. Same modality story as ``git_gutter_menu``: it
@@ -2058,9 +2058,9 @@ struct Desktop(Movable):
         self._last_doc_lang = String("")
         self.grammar_registry = GrammarRegistry()
         self.speller = Speller()
-        self.spell_menu = SpellMenu()
+        self.spell_menu = AnchoredMenu()
         self.git_gutter_menu = GitGutterMenu()
-        self.test_gutter_menu = TestGutterMenu()
+        self.test_gutter_menu = AnchoredMenu()
         self.blame_popup = BlamePopup()
         self.diagnostic_menu = DiagnosticMenu()
         self._diag_menu_editor_idx = -1
@@ -2086,7 +2086,7 @@ struct Desktop(Movable):
         self._inlay_key = String("")
         self._selrange_pos = String("")
         self._fold_key = String("")
-        self.lsp_status_menu = LspStatusMenu()
+        self.lsp_status_menu = AnchoredMenu()
         self.breakpoint_menu = BreakpointMenu()
         self.breakpoint_error = BreakpointConditionErrorDialog()
         self.fill_dialog = FillDialog()
@@ -8412,7 +8412,9 @@ struct Desktop(Movable):
                     # the "what happened" use case.
                     self._open_dap_info_window(screen)
                 else:
-                    self.lsp_status_menu.open(event.pos)
+                    self.lsp_status_menu.open(
+                        event.pos, lsp_menu_items(), prefer_above=True,
+                    )
                 return Optional[String]()
         # Right-click on a tab or a window title-bar filename opens the
         # file-actions popup (Rename / Delete). Checked before the tab
@@ -9205,14 +9207,14 @@ struct Desktop(Movable):
         self.set_font_size(font_size)
         if done:
             self.config.welcome_done = True
-        self.settings.native_ui = self.config.native_ui
-        self.settings.platinum_ui = self.config.platinum_ui
-        self.settings.theme_choice = self.config.theme
+        self.settings.cfg.native_ui = self.config.native_ui
+        self.settings.cfg.platinum_ui = self.config.platinum_ui
+        self.settings.cfg.theme = self.config.theme
         if len(self.settings._font_names) > 0:
             self.settings.font_choice = self.font_label()
-            self.settings.font_size_choice = self.config.font_size
+            self.settings.cfg.font_size = self.config.font_size
             self.settings.area_font_choices = self._area_font_labels()
-            self.settings.area_font_sizes = self.config.area_font_sizes.copy()
+            self.settings.cfg.area_font_sizes = self.config.area_font_sizes.copy()
         self._apply_view_config()
         self._persist_config()
 
@@ -10426,39 +10428,11 @@ struct Desktop(Movable):
                 for i in range(len(self.host_font_names)):
                     font_names.append(self.host_font_names[i])
             self.settings.open(
-                self.config.auto_save,
-                self.config.language_servers.copy(),
-                cur_ext,
-                self.config.trim_trailing_whitespace,
-                self.config.ensure_final_newline,
-                self.config.compress_kwargs,
-                self.config.theme,
-                self.font_label(),
-                font_names^,
-                self.config.font_size,
-                self.host_font_effective_size,
-                self.host_font_ideal_size,
-                self.config.wrap_mode,
-                self.config.smart_wrap_comma_threshold,
-                self.config.max_open_windows,
-                self.config.cursor_blink,
-                self.config.lsp_format_on_save,
-                self.config.lsp_signature_help,
-                self.config.lsp_document_highlight,
-                self.config.lsp_document_links,
-                self.config.lsp_inlay_hints,
-                self.config.lsp_code_lens,
-                self.config.lsp_document_colors,
-                self.config.lsp_linked_editing,
-                self.config.lsp_server_progress,
-                self.config.project_dirs.copy(),
+                self.config, cur_ext, self.font_label(), font_names^,
+                self.host_font_effective_size, self.host_font_ideal_size,
             )
             self.settings.offer_native_ui = self.host_owns_menu
-            self.settings.native_ui = self.config.native_ui
-            self.settings.platinum_ui = self.config.platinum_ui
-            self.settings.terminal_tmux = self.config.terminal_tmux
             self.settings.area_font_choices = self._area_font_labels()
-            self.settings.area_font_sizes = self.config.area_font_sizes.copy()
             return Optional[String]()
         if action == HELP_HOTKEYS:
             self._open_hotkeys_help(screen)
@@ -10651,8 +10625,8 @@ struct Desktop(Movable):
             self.config.native_ui = action == VIEW_NATIVE_UI
             self.config.platinum_ui = action == VIEW_PLATINUM_UI
             # An open Settings shows it, and writes it back with its edits
-            self.settings.native_ui = self.config.native_ui
-            self.settings.platinum_ui = self.config.platinum_ui
+            self.settings.cfg.native_ui = self.config.native_ui
+            self.settings.cfg.platinum_ui = self.config.platinum_ui
             self._apply_view_config()
             self._persist_config()
             return Optional[String]()
@@ -13557,45 +13531,45 @@ struct Desktop(Movable):
             # Its own window leaves the menus usable meanwhile: the look
             # they change has to be what the dialog shows, or its next
             # edit writes back the one it opened with.
-            self.settings.native_ui = self.config.native_ui
-            self.settings.platinum_ui = self.config.platinum_ui
-            self.settings.theme_choice = self.config.theme
+            self.settings.cfg.native_ui = self.config.native_ui
+            self.settings.cfg.platinum_ui = self.config.platinum_ui
+            self.settings.cfg.theme = self.config.theme
             if len(self.settings._font_names) > 0:
                 self.settings.font_choice = self.font_label()
-                self.settings.font_size_choice = self.config.font_size
+                self.settings.cfg.font_size = self.config.font_size
                 self.settings.area_font_choices = self._area_font_labels()
-                self.settings.area_font_sizes = self.config.area_font_sizes.copy()
+                self.settings.cfg.area_font_sizes = self.config.area_font_sizes.copy()
         if self.settings.dirty:
-            self.config.auto_save = self.settings.auto_save
+            self.config.auto_save = self.settings.cfg.auto_save
             self.config.trim_trailing_whitespace = (
-                self.settings.trim_trailing_whitespace
+                self.settings.cfg.trim_trailing_whitespace
             )
             self.config.ensure_final_newline = (
-                self.settings.ensure_final_newline
+                self.settings.cfg.ensure_final_newline
             )
             # Keyword-arg compression is a pure display toggle — push it into
             # every editor on change so the next paint reflects it.
-            if self.settings.compress_kwargs != self.config.compress_kwargs:
-                self.config.compress_kwargs = self.settings.compress_kwargs
+            if self.settings.cfg.compress_kwargs != self.config.compress_kwargs:
+                self.config.compress_kwargs = self.settings.cfg.compress_kwargs
                 self._apply_view_config()
             # Caret blink: a pure paint toggle — the next frame's
             # ``_apply_view_config`` reads the new value, no extra apply.
-            self.config.cursor_blink = self.settings.cursor_blink
+            self.config.cursor_blink = self.settings.cfg.cursor_blink
             # Only new panes see it; running ones keep their transport.
-            self.config.terminal_tmux = self.settings.terminal_tmux
+            self.config.terminal_tmux = self.settings.cfg.terminal_tmux
             # The look (macOS-style UI or classic), the same as View ▸
             # macOS-style UI.
-            if self.settings.native_ui != self.config.native_ui \
-                    or self.settings.platinum_ui != self.config.platinum_ui:
-                self.config.native_ui = self.settings.native_ui
-                self.config.platinum_ui = self.settings.platinum_ui
+            if self.settings.cfg.native_ui != self.config.native_ui \
+                    or self.settings.cfg.platinum_ui != self.config.platinum_ui:
+                self.config.native_ui = self.settings.cfg.native_ui
+                self.config.platinum_ui = self.settings.cfg.platinum_ui
                 self._apply_view_config()
             # Language Server per-feature gates — plain bool copies; the
             # feature code reads ``self.config.lsp_*`` at request/paint time.
-            self.config.lsp_format_on_save = self.settings.ls_format_on_save
-            self.config.lsp_signature_help = self.settings.ls_signature_help
+            self.config.lsp_format_on_save = self.settings.cfg.lsp_format_on_save
+            self.config.lsp_signature_help = self.settings.cfg.lsp_signature_help
             self.config.lsp_document_highlight = (
-                self.settings.ls_document_highlight
+                self.settings.cfg.lsp_document_highlight
             )
             # The annotation features below share the ``_inlay_key``
             # debounce and push results into per-editor overlays. Toggling
@@ -13606,23 +13580,23 @@ struct Desktop(Movable):
             #    ``_maybe_request_inlay_codelens`` actually re-requests
             #    instead of short-circuiting on the unchanged buffer.
             var inlay_changed = (
-                self.settings.ls_inlay_hints != self.config.lsp_inlay_hints
+                self.settings.cfg.lsp_inlay_hints != self.config.lsp_inlay_hints
             )
             var codelens_changed = (
-                self.settings.ls_code_lens != self.config.lsp_code_lens
+                self.settings.cfg.lsp_code_lens != self.config.lsp_code_lens
             )
             var colors_changed = (
-                self.settings.ls_document_colors
+                self.settings.cfg.lsp_document_colors
                 != self.config.lsp_document_colors
             )
             var links_changed = (
-                self.settings.ls_document_links
+                self.settings.cfg.lsp_document_links
                 != self.config.lsp_document_links
             )
-            self.config.lsp_inlay_hints = self.settings.ls_inlay_hints
-            self.config.lsp_code_lens = self.settings.ls_code_lens
-            self.config.lsp_document_colors = self.settings.ls_document_colors
-            self.config.lsp_document_links = self.settings.ls_document_links
+            self.config.lsp_inlay_hints = self.settings.cfg.lsp_inlay_hints
+            self.config.lsp_code_lens = self.settings.cfg.lsp_code_lens
+            self.config.lsp_document_colors = self.settings.cfg.lsp_document_colors
+            self.config.lsp_document_links = self.settings.cfg.lsp_document_links
             if inlay_changed or codelens_changed \
                     or colors_changed or links_changed:
                 # Force a re-request next frame (covers every turn-on).
@@ -13646,17 +13620,17 @@ struct Desktop(Movable):
                         self.windows.windows[wi].editor.set_document_links(
                             List[TextEditEntry]()
                         )
-            self.config.lsp_linked_editing = self.settings.ls_linked_editing
-            self.config.lsp_server_progress = self.settings.ls_server_progress
+            self.config.lsp_linked_editing = self.settings.cfg.lsp_linked_editing
+            self.config.lsp_server_progress = self.settings.cfg.lsp_server_progress
             self.config.language_servers = (
-                self.settings.language_overrides.copy()
+                self.settings.cfg.language_servers.copy()
             )
-            self.config.project_dirs = self.settings.project_dirs.copy()
+            self.config.project_dirs = self.settings.cfg.project_dirs.copy()
             # Apply a theme change live (retints chrome + syntax) before
             # persisting. ``set_theme`` updates ``config.theme`` too, so the
             # ``save_config`` below writes the new name.
-            if self.settings.theme_choice != self.config.theme:
-                var new_theme = self.settings.theme_choice.copy()
+            if self.settings.cfg.theme != self.config.theme:
+                var new_theme = self.settings.cfg.theme.copy()
                 self.set_theme(new_theme)
             # Same live-apply for a font change — ``set_font`` updates
             # ``config.font`` and bumps ``font_version`` for the host.
@@ -13667,26 +13641,26 @@ struct Desktop(Movable):
             # And for a size change — ``set_font_size`` clamps, updates
             # ``config.font_size``, and bumps ``font_version``.
             if len(self.settings._font_names) > 0 \
-                    and self.settings.font_size_choice \
+                    and self.settings.cfg.font_size \
                         != self.config.font_size:
-                self.set_font_size(self.settings.font_size_choice)
+                self.set_font_size(self.settings.cfg.font_size)
             if len(self.settings._font_names) > 0:
                 for slot in range(len(self.settings.area_font_choices)):
                     if self.settings.area_font_choices[slot] \
                             != self.area_font_label(slot):
                         var label = self.settings.area_font_choices[slot].copy()
                         self.set_area_font(slot, label)
-                for slot in range(len(self.settings.area_font_sizes)):
-                    if self.settings.area_font_sizes[slot] \
+                for slot in range(len(self.settings.cfg.area_font_sizes)):
+                    if self.settings.cfg.area_font_sizes[slot] \
                             != self.config.area_font_sizes[slot]:
                         self.set_area_font_size(
-                            slot, self.settings.area_font_sizes[slot],
+                            slot, self.settings.cfg.area_font_sizes[slot],
                         )
             # Wrap mode (Settings ▸ Editor). Applying it re-pushes the value
             # into every editor and re-reveals each cursor, since the
             # buffer-row ↔ screen-row relationship changes with the mode.
-            if self.settings.wrap_mode != self.config.wrap_mode:
-                self.config.wrap_mode = self.settings.wrap_mode
+            if self.settings.cfg.wrap_mode != self.config.wrap_mode:
+                self.config.wrap_mode = self.settings.cfg.wrap_mode
                 self._apply_view_config()
                 self._reveal_all_cursors()
             # Smart-wrap comma trigger. Re-layout (and re-reveal cursors,
@@ -16620,8 +16594,8 @@ struct Desktop(Movable):
             return
         var req = req_opt.value()
         self.test_gutter_menu.open(
-            req.node_id,
             self._code_anchor(idx, Point(req.anchor_x, req.anchor_y)),
+            test_menu_items(), req.node_id,
         )
 
     def _maybe_open_blame_popup(mut self):
@@ -16653,7 +16627,7 @@ struct Desktop(Movable):
         """Resolve the Run/Debug pick: spawn the single test (or run it
         under the debugger) for the node id captured at open time."""
         var act = self.test_gutter_menu.action
-        var node = self.test_gutter_menu.node_id
+        var node = self.test_gutter_menu.subject
         self.test_gutter_menu.close()
         if act == TEST_ACTION_RUN:
             self._target_test(node)
@@ -18311,7 +18285,7 @@ struct Desktop(Movable):
         anchored at the misspelled word's screen position.
 
         The anchor is approximate: we don't account for tabs, wide
-        characters, or the gutter widths — ``SpellMenu._rect`` clamps
+        characters, or the gutter widths — ``AnchoredMenu._rect`` clamps
         to the screen bounds and flips above the cursor row when
         there isn't enough space below, so a few cells of slop is
         cosmetic, not a correctness issue."""
@@ -18349,7 +18323,9 @@ struct Desktop(Movable):
         var has_project = False
         if self.project:
             has_project = True
-        self.spell_menu.open(sa.word, Point(ax, ay), has_project)
+        self.spell_menu.open(
+            Point(ax, ay), spell_menu_items(has_project), sa.word,
+        )
 
     def _on_spell_menu_submit(mut self):
         """Resolve the spell-menu pick: append the word to the chosen
@@ -18362,7 +18338,7 @@ struct Desktop(Movable):
         update, just not across restarts. We surface that via the
         status bar so the user knows their training was ephemeral."""
         var act = self.spell_menu.action
-        var word = self.spell_menu.word
+        var word = self.spell_menu.subject
         self.spell_menu.close()
         if len(word.as_bytes()) == 0:
             return

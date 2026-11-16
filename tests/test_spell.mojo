@@ -14,9 +14,10 @@ from turbokod.spell import (
     is_library_location, library_words_path, project_dict_path,
     user_dict_path
 )
+from turbokod.anchored_menu import AnchoredMenu
 from turbokod.spell_menu import (
     SPELL_ACTION_ADD_PROJECT, SPELL_ACTION_ADD_USER, SPELL_ACTION_NONE,
-    SpellMenu
+    spell_menu_items,
 )
 from turbokod.settings import Settings
 from turbokod.events import (
@@ -531,23 +532,23 @@ def test_spell_menu_open_close_default_selection() raises:
     whether the project row is enabled — that's the safe default
     every time, easier to undo than accidentally training the team
     dict with a personal word."""
-    var m = SpellMenu()
-    m.open(String("helo"), Point(10, 5), True)
+    var m = AnchoredMenu()
+    m.open(Point(10, 5), spell_menu_items(True), String("helo"))
     assert_true(m.active)
     assert_equal(m.selected, 0)
-    assert_equal(m.word, String("helo"))
-    assert_true(m.has_project)
+    assert_equal(m.subject, String("helo"))
+    assert_true(m.items[1].enabled)
     m.close()
     assert_false(m.active)
     # Open without a project: user-dict still selectable, project row
     # rendered but ``has_project=False`` so Enter on it is a no-op.
-    m.open(String("helo"), Point(0, 0), False)
-    assert_false(m.has_project)
+    m.open(Point(0, 0), spell_menu_items(False), String("helo"))
+    assert_false(m.items[1].enabled)
 
 
 def test_spell_menu_enter_on_user_resolves_with_add_user() raises:
-    var m = SpellMenu()
-    m.open(String("helo"), Point(0, 0), True)
+    var m = AnchoredMenu()
+    m.open(Point(0, 0), spell_menu_items(True), String("helo"))
     var ev = Event.key_event(KEY_ENTER)
     _ = m.handle_key(ev)
     assert_true(m.submitted)
@@ -558,8 +559,8 @@ def test_spell_menu_enter_on_project_disabled_stays_open() raises:
     """When ``has_project=False``, pressing Enter on the project row
     must NOT submit — the menu stays open so the user can arrow back
     up to the user-dict row."""
-    var m = SpellMenu()
-    m.open(String("helo"), Point(0, 0), False)
+    var m = AnchoredMenu()
+    m.open(Point(0, 0), spell_menu_items(False), String("helo"))
     _ = m.handle_key(Event.key_event(KEY_DOWN))
     assert_equal(m.selected, 1)
     _ = m.handle_key(Event.key_event(KEY_ENTER))
@@ -574,8 +575,8 @@ def test_spell_menu_enter_on_project_disabled_stays_open() raises:
 
 
 def test_spell_menu_enter_on_project_enabled_resolves_with_add_project() raises:
-    var m = SpellMenu()
-    m.open(String("helo"), Point(0, 0), True)
+    var m = AnchoredMenu()
+    m.open(Point(0, 0), spell_menu_items(True), String("helo"))
     _ = m.handle_key(Event.key_event(KEY_DOWN))
     _ = m.handle_key(Event.key_event(KEY_ENTER))
     assert_true(m.submitted)
@@ -583,8 +584,8 @@ def test_spell_menu_enter_on_project_enabled_resolves_with_add_project() raises:
 
 
 def test_spell_menu_esc_dismisses() raises:
-    var m = SpellMenu()
-    m.open(String("helo"), Point(0, 0), True)
+    var m = AnchoredMenu()
+    m.open(Point(0, 0), spell_menu_items(True), String("helo"))
     _ = m.handle_key(Event.key_event(KEY_ESC))
     assert_true(m.submitted)
     assert_equal(m.action, SPELL_ACTION_NONE)

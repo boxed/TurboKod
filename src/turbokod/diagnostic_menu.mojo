@@ -11,7 +11,7 @@ can call ``set_loading_fixes(True)`` to show a single disabled
 ``Loading fixes…`` row beneath ``Copy message`` so the user has a
 visible signal that more options are on the way.
 
-Modeled on ``GitGutterMenu`` and ``SpellMenu`` so the look and event
+Modeled on ``GitGutterMenu`` and ``AnchoredMenu`` so the look and event
 protocol match: the host (Desktop) is responsible for opening the menu
 in response to ``Editor.consume_diagnostic_menu_request`` and for
 routing keyboard / mouse events to it before any other widget.
