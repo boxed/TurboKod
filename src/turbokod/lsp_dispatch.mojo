@@ -611,6 +611,58 @@ struct _PositionRemapper(Copyable, Movable):
         return out^
 
 
+struct _EditSlot(Copyable, Movable):
+    """One request whose answer is a flat ``TextEditEntry`` list (edits,
+    or range / row carriers) for one file: the in-flight id, the path and
+    text it was asked against, and the answer parked until the host takes
+    it. ``ready`` distinguishes "no answer yet" from "an empty one"."""
+    var id: String
+    var path: String
+    # The buffer text the request was made against, for slots whose edits
+    # only mean anything against exactly that text (formatting, on-type):
+    # the host drops them if the buffer has moved on by the time they land.
+    var text: String
+    var edits: List[TextEditEntry]
+    var ready: Bool
+
+    def __init__(out self):
+        self.id = String("")
+        self.path = String("")
+        self.text = String("")
+        self.edits = List[TextEditEntry]()
+        self.ready = False
+
+    def start(mut self, id: String, path: String = String("")) -> Bool:
+        """Record a request just sent (``id`` empty: the send failed, so
+        nothing is in flight and the parked answer stays)."""
+        self.id = id
+        if len(id.as_bytes()) == 0:
+            return False
+        self.path = path
+        self.edits = List[TextEditEntry]()
+        self.ready = False
+        return True
+
+    def owns(self, id: String) -> Bool:
+        return len(self.id.as_bytes()) > 0 and id == self.id
+
+    def publish(mut self, var edits: List[TextEditEntry]):
+        """Park ``edits`` for the host, leaving any in-flight id alone (a
+        resolve round-trip re-publishing a grown list)."""
+        self.edits = edits^
+        self.ready = True
+
+    def finish(mut self, var edits: List[TextEditEntry]):
+        self.publish(edits^)
+        self.id = String("")
+
+    def take(mut self) -> List[TextEditEntry]:
+        var out = self.edits^
+        self.edits = List[TextEditEntry]()
+        self.ready = False
+        return out^
+
+
 struct _ResolveFanout(Copyable, Movable):
     """In-flight ``*/resolve`` requests of one fan-out: each request id
     and the result slot its response fills. Used for code actions and
@@ -859,33 +911,24 @@ struct LspManager(Copyable, Movable):
     # ``CodeActionFileEdit`` grouping since rename returns the same shape).
     var _inflight_rename_id: String
     var _rename_path: String
-    # The text the rename was asked for against, as ``_formatting_text``.
+    # The text the rename was asked for against, as ``_formatting.text``.
     var _rename_text: String
     var _resolved_rename_edits: List[CodeActionFileEdit]
     var _has_resolved_rename: Bool
     # ``textDocument/formatting`` + ``rangeFormatting`` — both return a flat
     # ``TextEdit[]`` for one file, parked here for the host to apply via
     # the same edit-application path rename/code-actions use.
-    var _inflight_formatting_id: String
-    var _formatting_path: String
-    # The buffer text the request was made against. The edits' ranges
-    # only mean anything against exactly this text, so the host drops
-    # them if the buffer has moved on (typing, a merged outside write)
-    # by the time they arrive. Same for ``_willsave_text``.
-    var _formatting_text: String
-    var _resolved_formatting_edits: List[TextEditEntry]
-    var _has_resolved_formatting: Bool
+    # ``.text`` is the buffer the edits are for; the host drops them if
+    # the buffer has moved on (typing, a merged outside write) by the time
+    # they arrive. Same for ``_willsave_text``.
+    var _formatting: _EditSlot
     # ``textDocument/onTypeFormatting`` — format-as-you-type. Fired when a
     # server-declared trigger char (``}``/``;``/newline/…) is typed; the
     # returned ``TextEdit[]`` (typically a reindent) is parked here and
     # applied without saving (distinct from the on-save formatting slot).
-    var _inflight_ontype_id: String
-    var _ontype_path: String
-    # The text the edits are for, as ``_formatting_text``: the next
-    # keystroke usually lands before they do.
-    var _ontype_text: String
-    var _resolved_ontype_edits: List[TextEditEntry]
-    var _has_resolved_ontype: Bool
+    # ``.text`` matters even more here: the next keystroke usually lands
+    # before the edits do.
+    var _ontype: _EditSlot
     # ``textDocument/moniker`` — cross-repo symbol identity (scheme +
     # identifier). Rendered as a one-line status string; parked here.
     var _inflight_moniker_id: String
@@ -915,34 +958,24 @@ struct LspManager(Copyable, Movable):
     # ``textDocument/linkedEditingRange`` — the set of ranges that should be
     # edited together (e.g. an HTML open/close tag pair). Parked as range
     # carriers; the host places synchronized carets at them for co-editing.
-    var _inflight_linked_id: String
-    var _linked_ranges: List[TextEditEntry]
-    var _has_linked: Bool
+    var _linked: _EditSlot
     # ``textDocument/inlineValue`` — values to show inline at the stopped
     # debug frame. We render the ``InlineValueText`` variant (server gives
     # the text directly) as end-of-line annotations, parked here as (row,
     # text) carriers. (The variable-lookup / evaluable-expression variants
     # would need a DAP ``evaluate`` round-trip — not wired yet.)
-    var _inflight_inlineval_id: String
-    var _inlinevals: List[TextEditEntry]
-    var _has_inlinevals: Bool
+    var _inlineval: _EditSlot
     # The variable-lookup / evaluable-expression inline values: (row, expr)
     # carriers the host evaluates via DAP, then renders as ``expr = value``.
     var _inlineval_exprs: List[TextEditEntry]
     # ``textDocument/foldingRange`` — collapsible regions. Parked as range
     # carriers (start_line..end_line). The editor marks region starts; full
     # collapse (which needs fold-aware cursor/scroll/layout) is deferred.
-    var _inflight_folding_id: String
-    var _folding_path: String
-    var _folding_ranges: List[TextEditEntry]
-    var _has_folding: Bool
+    var _folding: _EditSlot
     # ``textDocument/documentHighlight`` — occurrences of the symbol at the
     # cursor, parked as range carriers (``TextEditEntry`` with empty
     # ``new_text``) for the host to push into the editor overlay.
-    var _inflight_doc_highlight_id: String
-    var _doc_highlight_path: String
-    var _resolved_doc_highlights: List[TextEditEntry]
-    var _has_resolved_doc_highlight: Bool
+    var _doc_highlight: _EditSlot
     # ``textDocument/signatureHelp`` — the active signature's rendered label
     # (with the active parameter marked), parked for the status bar.
     var _inflight_signature_id: String
@@ -951,14 +984,8 @@ struct LspManager(Copyable, Movable):
     # ``textDocument/inlayHint`` + ``codeLens`` — rendered as end-of-line
     # annotations. Parked as (row, text) carriers (``TextEditEntry`` with
     # ``start_line`` = row, ``new_text`` = the label).
-    var _inflight_inlay_id: String
-    var _inlay_path: String
-    var _resolved_inlay: List[TextEditEntry]
-    var _has_resolved_inlay: Bool
-    var _inflight_codelens_id: String
-    var _codelens_path: String
-    var _resolved_codelens: List[TextEditEntry]
-    var _has_resolved_codelens: Bool
+    var _inlay: _EditSlot
+    var _codelens: _EditSlot
     # ``codeLens/resolve`` round-trip. Servers (rust-analyzer) ship lenses
     # without a ``command`` — just ``range`` + ``data`` — and fill the
     # title only on resolve. We'd otherwise drop those, so we queue the raw
@@ -974,10 +1001,7 @@ struct LspManager(Copyable, Movable):
     # parked as range carriers with ``new_text`` = the target. Only links
     # the server returned with an inline ``target`` are kept (we don't
     # round-trip ``documentLink/resolve`` for deferred targets).
-    var _inflight_doclink_id: String
-    var _doclink_path: String
-    var _resolved_doclinks: List[TextEditEntry]
-    var _has_resolved_doclinks: Bool
+    var _doclinks: _EditSlot
     # ``documentLink/resolve`` fan-out. Unlike the code-action one this does
     # *not* gate publication: links are decorative, so the list is published
     # immediately and re-published as each target arrives. The accumulator is
@@ -995,10 +1019,7 @@ struct LspManager(Copyable, Movable):
     var _has_server_message: Bool
     # ``textDocument/selectionRange`` — the cursor's range hierarchy
     # (innermost→outermost), parked for the editor's smart-select grow.
-    var _inflight_selrange_id: String
-    var _selrange_path: String
-    var _resolved_selrange: List[TextEditEntry]
-    var _has_resolved_selrange: Bool
+    var _selrange: _EditSlot
     # Call / type hierarchy: a two-step flow (prepare → incomingCalls /
     # supertypes) auto-chained in ``tick``. ``_hierarchy_followup`` is the
     # method to fire on the prepared item; the final locations are parked
@@ -1206,16 +1227,8 @@ struct LspManager(Copyable, Movable):
         self._rename_text = String("")
         self._resolved_rename_edits = List[CodeActionFileEdit]()
         self._has_resolved_rename = False
-        self._inflight_formatting_id = String("")
-        self._formatting_path = String("")
-        self._formatting_text = String("")
-        self._resolved_formatting_edits = List[TextEditEntry]()
-        self._has_resolved_formatting = False
-        self._inflight_ontype_id = String("")
-        self._ontype_path = String("")
-        self._ontype_text = String("")
-        self._resolved_ontype_edits = List[TextEditEntry]()
-        self._has_resolved_ontype = False
+        self._formatting = _EditSlot()
+        self._ontype = _EditSlot()
         self._inflight_moniker_id = String("")
         self._moniker_note = String("")
         self._has_moniker = False
@@ -1232,50 +1245,28 @@ struct LspManager(Copyable, Movable):
         self._inlinecomp_row = 0
         self._inlinecomp_col = 0
         self._has_inlinecomp = False
-        self._inflight_linked_id = String("")
-        self._linked_ranges = List[TextEditEntry]()
-        self._has_linked = False
-        self._inflight_inlineval_id = String("")
-        self._inlinevals = List[TextEditEntry]()
-        self._has_inlinevals = False
+        self._linked = _EditSlot()
+        self._inlineval = _EditSlot()
         self._inlineval_exprs = List[TextEditEntry]()
-        self._inflight_folding_id = String("")
-        self._folding_path = String("")
-        self._folding_ranges = List[TextEditEntry]()
-        self._has_folding = False
-        self._inflight_doc_highlight_id = String("")
-        self._doc_highlight_path = String("")
-        self._resolved_doc_highlights = List[TextEditEntry]()
-        self._has_resolved_doc_highlight = False
+        self._folding = _EditSlot()
+        self._doc_highlight = _EditSlot()
         self._inflight_signature_id = String("")
         self._resolved_signature = String("")
         self._has_resolved_signature = False
-        self._inflight_inlay_id = String("")
-        self._inlay_path = String("")
-        self._resolved_inlay = List[TextEditEntry]()
-        self._has_resolved_inlay = False
-        self._inflight_codelens_id = String("")
-        self._codelens_path = String("")
-        self._resolved_codelens = List[TextEditEntry]()
-        self._has_resolved_codelens = False
+        self._inlay = _EditSlot()
+        self._codelens = _EditSlot()
         self._inflight_codelens_resolve_id = String("")
         self._codelens_resolve_queue = List[JsonValue]()
         self._codelens_resolve_row = 0
         self._codelens_accum = List[TextEditEntry]()
-        self._inflight_doclink_id = String("")
-        self._doclink_path = String("")
+        self._doclinks = _EditSlot()
         self._dl_resolve = _ResolveFanout()
         self._dl_accum = List[TextEditEntry]()
-        self._resolved_doclinks = List[TextEditEntry]()
-        self._has_resolved_doclinks = False
         self._progress_note = String("")
         self._has_progress_note = False
         self._server_message = String("")
         self._has_server_message = False
-        self._inflight_selrange_id = String("")
-        self._selrange_path = String("")
-        self._resolved_selrange = List[TextEditEntry]()
-        self._has_resolved_selrange = False
+        self._selrange = _EditSlot()
         self._inflight_hier_prepare_id = String("")
         self._inflight_hier_followup_id = String("")
         self._hierarchy_followup = String("")
@@ -1610,6 +1601,14 @@ struct LspManager(Copyable, Movable):
             return v.copy()
         self._ensure_remapper()
         return self._remap_cached.walk(v, uri, True)
+
+    def _request(mut self, method: String, params: JsonValue) -> String:
+        """``_send_request`` for a caller that only needs to know whether it
+        went out: the request id, or empty when the send failed."""
+        try:
+            return self._send_request(method, params)
+        except:
+            return String("")
 
     def _send_request(
         mut self, method: String, params: JsonValue,
@@ -2230,12 +2229,10 @@ struct LspManager(Copyable, Movable):
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
         params.put(String("reason"), json_int(reason))
-        try:
-            self._inflight_willsave_id = self._send_request(
-                String("textDocument/willSaveWaitUntil"), params,
-            )
-        except:
-            self._inflight_willsave_id = String("")
+        self._inflight_willsave_id = self._request(
+            String("textDocument/willSaveWaitUntil"), params,
+        )
+        if len(self._inflight_willsave_id.as_bytes()) == 0:
             return False
         self._willsave_path = path
         self._resolved_willsave_edits = List[TextEditEntry]()
@@ -2285,12 +2282,8 @@ struct LspManager(Copyable, Movable):
         )
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
-        try:
-            self._inflight_def_id = self._send_request(
-                String("textDocument/definition"), params,
-            )
-        except:
-            self._inflight_def_id = String("")
+        self._inflight_def_id = self._request(String("textDocument/definition"), params)
+        if len(self._inflight_def_id.as_bytes()) == 0:
             return False
         self._def_origin_path = path
         self._def_origin_line = line
@@ -2534,12 +2527,10 @@ struct LspManager(Copyable, Movable):
             return False
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
-        try:
-            self._inflight_prepare_rename_id = self._send_request(
-                String("textDocument/prepareRename"), params,
-            )
-        except:
-            self._inflight_prepare_rename_id = String("")
+        self._inflight_prepare_rename_id = self._request(
+            String("textDocument/prepareRename"), params,
+        )
+        if len(self._inflight_prepare_rename_id.as_bytes()) == 0:
             return False
         self._has_resolved_prepare_rename = False
         self._prepare_rename_state = 0
@@ -2587,12 +2578,8 @@ struct LspManager(Copyable, Movable):
         var ctx = json_object()
         ctx.put(String("includeDeclaration"), json_bool(True))
         params.put(String("context"), ctx)
-        try:
-            self._inflight_ref_id = self._send_request(
-                String("textDocument/references"), params,
-            )
-        except:
-            self._inflight_ref_id = String("")
+        self._inflight_ref_id = self._request(String("textDocument/references"), params)
+        if len(self._inflight_ref_id.as_bytes()) == 0:
             return False
         self._ref_word = word^
         self._has_resolved_references = False
@@ -2633,12 +2620,10 @@ struct LspManager(Copyable, Movable):
         self._send_open_or_change(path, text^)
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
-        try:
-            self._inflight_symbol_id = self._send_request(
-                String("textDocument/documentSymbol"), params,
-            )
-        except:
-            self._inflight_symbol_id = String("")
+        self._inflight_symbol_id = self._request(
+            String("textDocument/documentSymbol"), params,
+        )
+        if len(self._inflight_symbol_id.as_bytes()) == 0:
             return False
         self._has_resolved_symbols = False
         self._resolved_symbols = List[SymbolItem]()
@@ -2677,12 +2662,8 @@ struct LspManager(Copyable, Movable):
             return False
         var params = json_object()
         params.put(String("query"), json_str(query))
-        try:
-            self._inflight_ws_symbol_id = self._send_request(
-                String("workspace/symbol"), params,
-            )
-        except:
-            self._inflight_ws_symbol_id = String("")
+        self._inflight_ws_symbol_id = self._request(String("workspace/symbol"), params)
+        if len(self._inflight_ws_symbol_id.as_bytes()) == 0:
             return False
         self._has_resolved_ws_symbols = False
         self._resolved_ws_symbols = List[WorkspaceSymbolItem]()
@@ -2793,12 +2774,10 @@ struct LspManager(Copyable, Movable):
             self._send_cancel(
                 self._inflight_completion_id, String("completion"),
             )
-        try:
-            self._inflight_completion_id = self._send_request(
-                String("textDocument/completion"), params,
-            )
-        except:
-            self._inflight_completion_id = String("")
+        self._inflight_completion_id = self._request(
+            String("textDocument/completion"), params,
+        )
+        if len(self._inflight_completion_id.as_bytes()) == 0:
             return False
         self._completion_path = path
         self._completion_row = line
@@ -2893,12 +2872,8 @@ struct LspManager(Copyable, Movable):
                 ci.put(String("data"), parse_json(item.data))
             except:
                 pass
-        try:
-            self._inflight_resolve_id = self._send_request(
-                String("completionItem/resolve"), ci,
-            )
-        except:
-            self._inflight_resolve_id = String("")
+        self._inflight_resolve_id = self._request(String("completionItem/resolve"), ci)
+        if len(self._inflight_resolve_id.as_bytes()) == 0:
             return False
         self._has_resolve_result = False
         return True
@@ -2946,12 +2921,8 @@ struct LspManager(Copyable, Movable):
         # working on a stale position. Mirrors ``request_completion``.
         if len(self._inflight_hover_id.as_bytes()) > 0:
             self._send_cancel(self._inflight_hover_id, String("hover"))
-        try:
-            self._inflight_hover_id = self._send_request(
-                String("textDocument/hover"), params,
-            )
-        except:
-            self._inflight_hover_id = String("")
+        self._inflight_hover_id = self._request(String("textDocument/hover"), params)
+        if len(self._inflight_hover_id.as_bytes()) == 0:
             return False
         self._hover_path = path
         self._hover_row = line
@@ -3034,12 +3005,10 @@ struct LspManager(Copyable, Movable):
         diags_arr.append(diag_obj)
         ctx.put(String("diagnostics"), diags_arr)
         params.put(String("context"), ctx)
-        try:
-            self._inflight_code_action_id = self._send_request(
-                String("textDocument/codeAction"), params,
-            )
-        except:
-            self._inflight_code_action_id = String("")
+        self._inflight_code_action_id = self._request(
+            String("textDocument/codeAction"), params,
+        )
+        if len(self._inflight_code_action_id.as_bytes()) == 0:
             return False
         self._code_action_path = path
         self._resolved_code_actions = List[CodeAction]()
@@ -3188,12 +3157,8 @@ struct LspManager(Copyable, Movable):
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
         params.put(String("newName"), json_str(new_name))
-        try:
-            self._inflight_rename_id = self._send_request(
-                String("textDocument/rename"), params,
-            )
-        except:
-            self._inflight_rename_id = String("")
+        self._inflight_rename_id = self._request(String("textDocument/rename"), params)
+        if len(self._inflight_rename_id.as_bytes()) == 0:
             return False
         self._rename_path = path
         self._resolved_rename_edits = List[CodeActionFileEdit]()
@@ -3232,22 +3197,14 @@ struct LspManager(Copyable, Movable):
         resulting ``TextEdit[]`` is parked for the host to apply."""
         if self.state != _STATE_READY:
             return False
-        self._formatting_text = text.copy()
+        self._formatting.text = text.copy()
         self._send_open_or_change(path, text^)
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
         params.put(String("options"), _formatting_options(tab_size, insert_spaces))
-        try:
-            self._inflight_formatting_id = self._send_request(
-                String("textDocument/formatting"), params,
-            )
-        except:
-            self._inflight_formatting_id = String("")
-            return False
-        self._formatting_path = path
-        self._resolved_formatting_edits = List[TextEditEntry]()
-        self._has_resolved_formatting = False
-        return True
+        return self._formatting.start(
+            self._request(String("textDocument/formatting"), params), path,
+        )
 
     def request_range_formatting(
         mut self, path: String, start_line: Int, start_char: Int,
@@ -3257,41 +3214,30 @@ struct LspManager(Copyable, Movable):
         """Send ``textDocument/rangeFormatting`` for the given range."""
         if self.state != _STATE_READY:
             return False
-        self._formatting_text = text.copy()
+        self._formatting.text = text.copy()
         self._send_open_or_change(path, text^)
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
         var rng = _lsp_range(start_line, start_char, end_line, end_char)
         params.put(String("range"), rng)
         params.put(String("options"), _formatting_options(tab_size, insert_spaces))
-        try:
-            self._inflight_formatting_id = self._send_request(
-                String("textDocument/rangeFormatting"), params,
-            )
-        except:
-            self._inflight_formatting_id = String("")
-            return False
-        self._formatting_path = path
-        self._resolved_formatting_edits = List[TextEditEntry]()
-        self._has_resolved_formatting = False
-        return True
+        return self._formatting.start(
+            self._request(String("textDocument/rangeFormatting"), params), path,
+        )
 
     def has_pending_formatting(self) -> Bool:
-        return self._has_resolved_formatting
+        return self._formatting.ready
 
     def pending_formatting_path(self) -> String:
-        return self._formatting_path
+        return self._formatting.path
 
     def pending_formatting_text(self) -> String:
         """The buffer text the pending formatting request was made against."""
-        return self._formatting_text
+        return self._formatting.text
 
     def take_formatting_edits(mut self) -> List[TextEditEntry]:
         """Move out the parked formatting ``TextEdit[]``. Clears the flag."""
-        var out = self._resolved_formatting_edits^
-        self._resolved_formatting_edits = List[TextEditEntry]()
-        self._has_resolved_formatting = False
-        return out^
+        return self._formatting.take()
 
     def on_type_trigger_chars(self) -> String:
         """The concatenated set of characters that trigger
@@ -3327,37 +3273,26 @@ struct LspManager(Copyable, Movable):
         saving."""
         if self.state != _STATE_READY:
             return False
-        self._ontype_text = text.copy()
+        self._ontype.text = text.copy()
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
         params.put(String("ch"), json_str(ch))
         params.put(String("options"), _formatting_options(tab_size, insert_spaces))
-        try:
-            self._inflight_ontype_id = self._send_request(
-                String("textDocument/onTypeFormatting"), params,
-            )
-        except:
-            self._inflight_ontype_id = String("")
-            return False
-        self._ontype_path = path
-        self._resolved_ontype_edits = List[TextEditEntry]()
-        self._has_resolved_ontype = False
-        return True
+        return self._ontype.start(
+            self._request(String("textDocument/onTypeFormatting"), params), path,
+        )
 
     def has_pending_ontype(self) -> Bool:
-        return self._has_resolved_ontype
+        return self._ontype.ready
 
     def pending_ontype_path(self) -> String:
-        return self._ontype_path
+        return self._ontype.path
 
     def pending_ontype_text(self) -> String:
-        return self._ontype_text
+        return self._ontype.text
 
     def take_ontype_edits(mut self) -> List[TextEditEntry]:
-        var out = self._resolved_ontype_edits^
-        self._resolved_ontype_edits = List[TextEditEntry]()
-        self._has_resolved_ontype = False
-        return out^
+        return self._ontype.take()
 
     def request_moniker(
         mut self, path: String, line: Int, character: Int, var text: String,
@@ -3369,12 +3304,10 @@ struct LspManager(Copyable, Movable):
             return False
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
-        try:
-            self._inflight_moniker_id = self._send_request(
-                String("textDocument/moniker"), params,
-            )
-        except:
-            self._inflight_moniker_id = String("")
+        self._inflight_moniker_id = self._request(
+            String("textDocument/moniker"), params,
+        )
+        if len(self._inflight_moniker_id.as_bytes()) == 0:
             return False
         self._moniker_note = String("")
         self._has_moniker = False
@@ -3411,12 +3344,10 @@ struct LspManager(Copyable, Movable):
         params.put(String("textDocument"), _text_document(path))
         params.put(String("color"), color)
         params.put(String("range"), rng)
-        try:
-            self._inflight_colorpres_id = self._send_request(
-                String("textDocument/colorPresentation"), params,
-            )
-        except:
-            self._inflight_colorpres_id = String("")
+        self._inflight_colorpres_id = self._request(
+            String("textDocument/colorPresentation"), params,
+        )
+        if len(self._inflight_colorpres_id.as_bytes()) == 0:
             return False
         self._colorpres_sl = start_line
         self._colorpres_sc = start_char
@@ -3460,12 +3391,10 @@ struct LspManager(Copyable, Movable):
         var ctx = json_object()
         ctx.put(String("triggerKind"), json_int(1))  # Invoked
         params.put(String("context"), ctx)
-        try:
-            self._inflight_inlinecomp_id = self._send_request(
-                String("textDocument/inlineCompletion"), params,
-            )
-        except:
-            self._inflight_inlinecomp_id = String("")
+        self._inflight_inlinecomp_id = self._request(
+            String("textDocument/inlineCompletion"), params,
+        )
+        if len(self._inflight_inlinecomp_id.as_bytes()) == 0:
             return False
         self._inlinecomp_row = line
         self._inlinecomp_col = character
@@ -3499,25 +3428,17 @@ struct LspManager(Copyable, Movable):
             return False
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
-        try:
-            self._inflight_linked_id = self._send_request(
-                String("textDocument/linkedEditingRange"), params,
-            )
-        except:
-            self._inflight_linked_id = String("")
+        if not self._linked.start(
+            self._request(String("textDocument/linkedEditingRange"), params),
+        ):
             return False
-        self._linked_ranges = List[TextEditEntry]()
-        self._has_linked = False
         return True
 
     def has_linked_editing(self) -> Bool:
-        return self._has_linked
+        return self._linked.ready
 
     def take_linked_ranges(mut self) -> List[TextEditEntry]:
-        var out = self._linked_ranges^
-        self._linked_ranges = List[TextEditEntry]()
-        self._has_linked = False
-        return out^
+        return self._linked.take()
 
     def request_inline_values(
         mut self, path: String, start_line: Int, end_line: Int,
@@ -3539,26 +3460,18 @@ struct LspManager(Copyable, Movable):
         var stopped = _lsp_range(stopped_line, 0, stopped_line, 0)
         ctx.put(String("stoppedLocation"), stopped)
         params.put(String("context"), ctx)
-        try:
-            self._inflight_inlineval_id = self._send_request(
-                String("textDocument/inlineValue"), params,
-            )
-        except:
-            self._inflight_inlineval_id = String("")
+        if not self._inlineval.start(
+            self._request(String("textDocument/inlineValue"), params),
+        ):
             return False
-        self._inlinevals = List[TextEditEntry]()
-        self._has_inlinevals = False
         self._inlineval_exprs = List[TextEditEntry]()
         return True
 
     def has_inline_values(self) -> Bool:
-        return self._has_inlinevals
+        return self._inlineval.ready
 
     def take_inline_values(mut self) -> List[TextEditEntry]:
-        var out = self._inlinevals^
-        self._inlinevals = List[TextEditEntry]()
-        self._has_inlinevals = False
-        return out^
+        return self._inlineval.take()
 
     def take_inline_value_exprs(mut self) -> List[TextEditEntry]:
         """The variable-lookup / evaluable inline values as (row, expr)
@@ -3577,29 +3490,18 @@ struct LspManager(Copyable, Movable):
         self._send_open_or_change(path, text^)
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
-        try:
-            self._inflight_folding_id = self._send_request(
-                String("textDocument/foldingRange"), params,
-            )
-        except:
-            self._inflight_folding_id = String("")
-            return False
-        self._folding_path = path
-        self._folding_ranges = List[TextEditEntry]()
-        self._has_folding = False
-        return True
+        return self._folding.start(
+            self._request(String("textDocument/foldingRange"), params), path,
+        )
 
     def has_pending_folding(self) -> Bool:
-        return self._has_folding
+        return self._folding.ready
 
     def pending_folding_path(self) -> String:
-        return self._folding_path
+        return self._folding.path
 
     def take_folding_ranges(mut self) -> List[TextEditEntry]:
-        var out = self._folding_ranges^
-        self._folding_ranges = List[TextEditEntry]()
-        self._has_folding = False
-        return out^
+        return self._folding.take()
 
     # --- document highlight ----------------------------------------------
 
@@ -3612,29 +3514,18 @@ struct LspManager(Copyable, Movable):
             return False
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
-        try:
-            self._inflight_doc_highlight_id = self._send_request(
-                String("textDocument/documentHighlight"), params,
-            )
-        except:
-            self._inflight_doc_highlight_id = String("")
-            return False
-        self._doc_highlight_path = path
-        self._resolved_doc_highlights = List[TextEditEntry]()
-        self._has_resolved_doc_highlight = False
-        return True
+        return self._doc_highlight.start(
+            self._request(String("textDocument/documentHighlight"), params), path,
+        )
 
     def has_pending_doc_highlights(self) -> Bool:
-        return self._has_resolved_doc_highlight
+        return self._doc_highlight.ready
 
     def pending_doc_highlight_path(self) -> String:
-        return self._doc_highlight_path
+        return self._doc_highlight.path
 
     def take_doc_highlights(mut self) -> List[TextEditEntry]:
-        var out = self._resolved_doc_highlights^
-        self._resolved_doc_highlights = List[TextEditEntry]()
-        self._has_resolved_doc_highlight = False
-        return out^
+        return self._doc_highlight.take()
 
     # --- signature help ---------------------------------------------------
 
@@ -3647,12 +3538,10 @@ struct LspManager(Copyable, Movable):
             return False
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
-        try:
-            self._inflight_signature_id = self._send_request(
-                String("textDocument/signatureHelp"), params,
-            )
-        except:
-            self._inflight_signature_id = String("")
+        self._inflight_signature_id = self._request(
+            String("textDocument/signatureHelp"), params,
+        )
+        if len(self._inflight_signature_id.as_bytes()) == 0:
             return False
         self._resolved_signature = String("")
         self._has_resolved_signature = False
@@ -3684,29 +3573,18 @@ struct LspManager(Copyable, Movable):
         params.put(String("textDocument"), _text_document(path))
         var rng = _lsp_range(start_line, 0, end_line, 0)
         params.put(String("range"), rng)
-        try:
-            self._inflight_inlay_id = self._send_request(
-                String("textDocument/inlayHint"), params,
-            )
-        except:
-            self._inflight_inlay_id = String("")
-            return False
-        self._inlay_path = path
-        self._resolved_inlay = List[TextEditEntry]()
-        self._has_resolved_inlay = False
-        return True
+        return self._inlay.start(
+            self._request(String("textDocument/inlayHint"), params), path,
+        )
 
     def has_pending_inlay(self) -> Bool:
-        return self._has_resolved_inlay
+        return self._inlay.ready
 
     def pending_inlay_path(self) -> String:
-        return self._inlay_path
+        return self._inlay.path
 
     def take_inlay(mut self) -> List[TextEditEntry]:
-        var out = self._resolved_inlay^
-        self._resolved_inlay = List[TextEditEntry]()
-        self._has_resolved_inlay = False
-        return out^
+        return self._inlay.take()
 
     def request_code_lens(
         mut self, path: String, var text: String,
@@ -3718,16 +3596,10 @@ struct LspManager(Copyable, Movable):
         self._send_open_or_change(path, text^)
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
-        try:
-            self._inflight_codelens_id = self._send_request(
-                String("textDocument/codeLens"), params,
-            )
-        except:
-            self._inflight_codelens_id = String("")
+        if not self._codelens.start(
+            self._request(String("textDocument/codeLens"), params), path,
+        ):
             return False
-        self._codelens_path = path
-        self._resolved_codelens = List[TextEditEntry]()
-        self._has_resolved_codelens = False
         self._inflight_codelens_resolve_id = String("")
         self._codelens_resolve_queue = List[JsonValue]()
         self._codelens_accum = List[TextEditEntry]()
@@ -3761,16 +3633,13 @@ struct LspManager(Copyable, Movable):
             self._inflight_codelens_resolve_id = String("")
 
     def has_pending_codelens(self) -> Bool:
-        return self._has_resolved_codelens
+        return self._codelens.ready
 
     def pending_codelens_path(self) -> String:
-        return self._codelens_path
+        return self._codelens.path
 
     def take_codelens(mut self) -> List[TextEditEntry]:
-        var out = self._resolved_codelens^
-        self._resolved_codelens = List[TextEditEntry]()
-        self._has_resolved_codelens = False
-        return out^
+        return self._codelens.take()
 
     # --- document links ---------------------------------------------------
 
@@ -3783,17 +3652,9 @@ struct LspManager(Copyable, Movable):
         self._send_open_or_change(path, text^)
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
-        try:
-            self._inflight_doclink_id = self._send_request(
-                String("textDocument/documentLink"), params,
-            )
-        except:
-            self._inflight_doclink_id = String("")
-            return False
-        self._doclink_path = path
-        self._resolved_doclinks = List[TextEditEntry]()
-        self._has_resolved_doclinks = False
-        return True
+        return self._doclinks.start(
+            self._request(String("textDocument/documentLink"), params), path,
+        )
 
     def server_supports_document_link_resolve(self) -> Bool:
         """True iff ``documentLinkProvider.resolveProvider`` — the server
@@ -3852,20 +3713,16 @@ struct LspManager(Copyable, Movable):
         for i in range(len(self._dl_accum)):
             if len(self._dl_accum[i].new_text.as_bytes()) > 0:
                 out.append(self._dl_accum[i])
-        self._resolved_doclinks = out^
-        self._has_resolved_doclinks = True
+        self._doclinks.publish(out^)
 
     def has_pending_doclinks(self) -> Bool:
-        return self._has_resolved_doclinks
+        return self._doclinks.ready
 
     def pending_doclink_path(self) -> String:
-        return self._doclink_path
+        return self._doclinks.path
 
     def take_doclinks(mut self) -> List[TextEditEntry]:
-        var out = self._resolved_doclinks^
-        self._resolved_doclinks = List[TextEditEntry]()
-        self._has_resolved_doclinks = False
-        return out^
+        return self._doclinks.take()
 
     # --- selection range --------------------------------------------------
 
@@ -3882,29 +3739,18 @@ struct LspManager(Copyable, Movable):
         var positions = json_array()
         positions.append(_lsp_position(line, character))
         params.put(String("positions"), positions)
-        try:
-            self._inflight_selrange_id = self._send_request(
-                String("textDocument/selectionRange"), params,
-            )
-        except:
-            self._inflight_selrange_id = String("")
-            return False
-        self._selrange_path = path
-        self._resolved_selrange = List[TextEditEntry]()
-        self._has_resolved_selrange = False
-        return True
+        return self._selrange.start(
+            self._request(String("textDocument/selectionRange"), params), path,
+        )
 
     def has_pending_selrange(self) -> Bool:
-        return self._has_resolved_selrange
+        return self._selrange.ready
 
     def pending_selrange_path(self) -> String:
-        return self._selrange_path
+        return self._selrange.path
 
     def take_selrange(mut self) -> List[TextEditEntry]:
-        var out = self._resolved_selrange^
-        self._resolved_selrange = List[TextEditEntry]()
-        self._has_resolved_selrange = False
-        return out^
+        return self._selrange.take()
 
     # --- call / type hierarchy -------------------------------------------
 
@@ -3968,12 +3814,8 @@ struct LspManager(Copyable, Movable):
             return False
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
-        try:
-            self._inflight_hier_prepare_id = self._send_request(
-                prepare_method, params,
-            )
-        except:
-            self._inflight_hier_prepare_id = String("")
+        self._inflight_hier_prepare_id = self._request(prepare_method, params)
+        if len(self._inflight_hier_prepare_id.as_bytes()) == 0:
             return False
         self._hierarchy_followup = followup_method
         self._hierarchy_word = word^
@@ -4005,12 +3847,10 @@ struct LspManager(Copyable, Movable):
         self._send_open_or_change(path, text^)
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
-        try:
-            self._inflight_color_id = self._send_request(
-                String("textDocument/documentColor"), params,
-            )
-        except:
-            self._inflight_color_id = String("")
+        self._inflight_color_id = self._request(
+            String("textDocument/documentColor"), params,
+        )
+        if len(self._inflight_color_id.as_bytes()) == 0:
             return False
         self._color_path = path
         self._resolved_colors = List[Highlight]()
@@ -4414,7 +4254,7 @@ struct LspManager(Copyable, Movable):
                 self._has_resolved_prepare_rename = True
                 self._inflight_prepare_rename_id = String("")
                 continue
-            if id == self._inflight_formatting_id:
+            if self._formatting.owns(id):
                 var fmt_edits = List[TextEditEntry]()
                 if msg.result:
                     fmt_edits = _parse_text_edits(msg.result.value())
@@ -4422,17 +4262,13 @@ struct LspManager(Copyable, Movable):
                     String("← formatting response id=") + id
                     + String(" edits=") + String(len(fmt_edits)),
                 )
-                self._resolved_formatting_edits = fmt_edits^
-                self._has_resolved_formatting = True
-                self._inflight_formatting_id = String("")
+                self._formatting.finish(fmt_edits^)
                 continue
-            if id == self._inflight_ontype_id:
+            if self._ontype.owns(id):
                 var ot_edits = List[TextEditEntry]()
                 if msg.result:
                     ot_edits = _parse_text_edits(msg.result.value())
-                self._resolved_ontype_edits = ot_edits^
-                self._has_resolved_ontype = True
-                self._inflight_ontype_id = String("")
+                self._ontype.finish(ot_edits^)
                 continue
             if id == self._inflight_moniker_id:
                 var mnote = String("")
@@ -4477,40 +4313,32 @@ struct LspManager(Copyable, Movable):
                 self._has_inlinecomp = True
                 self._inflight_inlinecomp_id = String("")
                 continue
-            if id == self._inflight_linked_id:
+            if self._linked.owns(id):
                 var lr = List[TextEditEntry]()
                 if msg.result:
                     lr = _parse_linked_ranges(msg.result.value())
-                self._linked_ranges = lr^
-                self._has_linked = True
-                self._inflight_linked_id = String("")
+                self._linked.finish(lr^)
                 continue
-            if id == self._inflight_inlineval_id:
+            if self._inlineval.owns(id):
                 var iv = List[TextEditEntry]()
                 var ive = List[TextEditEntry]()
                 if msg.result:
                     iv = _parse_inline_values(msg.result.value())
                     ive = _parse_inline_value_exprs(msg.result.value())
-                self._inlinevals = iv^
                 self._inlineval_exprs = ive^
-                self._has_inlinevals = True
-                self._inflight_inlineval_id = String("")
+                self._inlineval.finish(iv^)
                 continue
-            if id == self._inflight_folding_id:
+            if self._folding.owns(id):
                 var fr = List[TextEditEntry]()
                 if msg.result:
                     fr = _parse_folding_ranges(msg.result.value())
-                self._folding_ranges = fr^
-                self._has_folding = True
-                self._inflight_folding_id = String("")
+                self._folding.finish(fr^)
                 continue
-            if id == self._inflight_doc_highlight_id:
+            if self._doc_highlight.owns(id):
                 var occ = List[TextEditEntry]()
                 if msg.result:
                     occ = _parse_document_highlights(msg.result.value())
-                self._resolved_doc_highlights = occ^
-                self._has_resolved_doc_highlight = True
-                self._inflight_doc_highlight_id = String("")
+                self._doc_highlight.finish(occ^)
                 continue
             if id == self._inflight_signature_id:
                 var sig = String("")
@@ -4520,15 +4348,13 @@ struct LspManager(Copyable, Movable):
                 self._has_resolved_signature = True
                 self._inflight_signature_id = String("")
                 continue
-            if id == self._inflight_inlay_id:
+            if self._inlay.owns(id):
                 var ih = List[TextEditEntry]()
                 if msg.result:
                     ih = _parse_inlay_hints(msg.result.value())
-                self._resolved_inlay = ih^
-                self._has_resolved_inlay = True
-                self._inflight_inlay_id = String("")
+                self._inlay.finish(ih^)
                 continue
-            if id == self._inflight_codelens_id:
+            if self._codelens.owns(id):
                 self._codelens_accum = List[TextEditEntry]()
                 self._codelens_resolve_queue = List[JsonValue]()
                 if msg.result:
@@ -4536,9 +4362,7 @@ struct LspManager(Copyable, Movable):
                     if self.server_supports_codelens_resolve():
                         self._codelens_resolve_queue = \
                             _collect_unresolved_lenses(msg.result.value())
-                self._resolved_codelens = self._codelens_accum.copy()
-                self._has_resolved_codelens = True
-                self._inflight_codelens_id = String("")
+                self._codelens.finish(self._codelens_accum.copy())
                 # Kick off resolving lenses that shipped without a title.
                 self._send_next_codelens_resolve()
                 continue
@@ -4552,16 +4376,15 @@ struct LspManager(Copyable, Movable):
                             self._codelens_resolve_row, 0,
                             String("‹") + title + String("›"),
                         ))
-                        self._resolved_codelens = self._codelens_accum.copy()
-                        self._has_resolved_codelens = True
+                        self._codelens.publish(self._codelens_accum.copy())
                 # Chain the next queued lens, if any.
                 self._send_next_codelens_resolve()
                 continue
-            if id == self._inflight_doclink_id:
+            if self._doclinks.owns(id):
                 var parsed = DocumentLinkParse()
                 if msg.result:
                     parsed = _parse_document_links_full(msg.result.value())
-                self._inflight_doclink_id = String("")
+                self._doclinks.id = String("")
                 self._start_document_link_resolves(parsed)
                 continue
             var dl_slot = self._dl_resolve.slot(id)
@@ -4574,13 +4397,11 @@ struct LspManager(Copyable, Movable):
                 # Re-publish the whole list, not just this link.
                 self._publish_document_links()
                 continue
-            if id == self._inflight_selrange_id:
+            if self._selrange.owns(id):
                 var sr = List[TextEditEntry]()
                 if msg.result:
                     sr = _parse_selection_ranges(msg.result.value())
-                self._resolved_selrange = sr^
-                self._has_resolved_selrange = True
-                self._inflight_selrange_id = String("")
+                self._selrange.finish(sr^)
                 continue
             if id == self._inflight_hier_prepare_id:
                 # Prepare done → fire the follow-up (incomingCalls /

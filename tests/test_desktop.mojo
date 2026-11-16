@@ -1126,18 +1126,18 @@ def test_on_type_formatting_answered_after_more_typing_is_dropped() raises:
     var d = Desktop()
     d.open_file(path, _SCREEN)
     var mgr = LspManager()
-    mgr._ontype_path = path
-    mgr._ontype_text = d.windows.windows[0].editor.text_snapshot()
-    mgr._resolved_ontype_edits.append(TextEditEntry(0, 0, 0, 0, String("  ")))
-    mgr._has_resolved_ontype = True
+    mgr._ontype.path = path
+    mgr._ontype.text = d.windows.windows[0].editor.text_snapshot()
+    mgr._ontype.edits.append(TextEditEntry(0, 0, 0, 0, String("  ")))
+    mgr._ontype.ready = True
     d.lsp_managers.append(mgr^)
     _ = d.handle_event(Event.key_event(UInt32(ord("y"))), _SCREEN)
     d._drain_ontype()
     assert_equal(d.windows.windows[0].editor.buffer.line(0), String("yx"))
     var mi = len(d.lsp_managers) - 1  # opening a .c file may have added one
-    d.lsp_managers[mi]._ontype_text = d.windows.windows[0].editor.text_snapshot()
-    d.lsp_managers[mi]._resolved_ontype_edits.append(TextEditEntry(0, 0, 0, 0, String("  ")))
-    d.lsp_managers[mi]._has_resolved_ontype = True
+    d.lsp_managers[mi]._ontype.text = d.windows.windows[0].editor.text_snapshot()
+    d.lsp_managers[mi]._ontype.edits.append(TextEditEntry(0, 0, 0, 0, String("  ")))
+    d.lsp_managers[mi]._ontype.ready = True
     d._drain_ontype()
     assert_equal(d.windows.windows[0].editor.buffer.line(0), String("  yx"))
 
