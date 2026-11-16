@@ -72,7 +72,7 @@ from .output_links import (
     extract_all_links, extract_path_line_links as _extract_path_line_links,
     link_at, LinkLatch, OutputLink,
 )
-from .scrollbar import VScrollbar
+from .scrollbar import ScrollBarArea
 from .text_field import TextField
 from .text_view import TextLog
 from .window import (
@@ -308,25 +308,8 @@ struct DebugPane(Copyable, Movable):
     in absolute screen coordinates. Rebuilt on every paint so the
     set always reflects what the user can currently see — scrolled-off
     lines drop out automatically."""
-    var _last_output_sb_x: Int
-    """Screen x of the output scrollbar painted by the last ``paint``,
-    or ``-1`` when the bar wasn't drawn (content fits, or pane too
-    short). Drives mouse hit-testing without re-running the paint
-    geometry."""
-    var _last_output_sb_top: Int
-    """Top y of the output scrollbar from the last paint."""
-    var _last_output_sb_bottom: Int
-    """Bottom y of the output scrollbar (inclusive) from the last
-    paint."""
-    var _last_output_sb_cells: Int
-    """The bar's thickness (``Canvas.scroll_bar_cells``) as last painted."""
-    var _output_scrolling: Bool
-    """True while the user is dragging the output thumb. Mouse motion
-    updates the scroll position; release ends the drag."""
-    var _output_drag_offset: Int
-    """Cell offset within the thumb at the moment the user pressed
-    on it — preserves the click point relative to the thumb so the
-    drag doesn't snap the thumb to mouse-y."""
+    var _output_bar: ScrollBarArea
+    """The output log's scroll bar, down the pane's right margin."""
     var host_inspect: Bool
     """The host draws Stack / Locals / Watches natively over
     ``native_rect`` (the macOS-style UI): paint leaves those cells
@@ -370,12 +353,7 @@ struct DebugPane(Copyable, Movable):
         self._left_indices = List[Int]()
         self._right_indices = List[Int]()
         self._last_links = List[OutputLink]()
-        self._last_output_sb_x = -1
-        self._last_output_sb_top = 0
-        self._last_output_sb_bottom = -1
-        self._last_output_sb_cells = 1
-        self._output_scrolling = False
-        self._output_drag_offset = 0
+        self._output_bar = ScrollBarArea()
         self.host_inspect = False
         self.native_rect = Rect.empty()
         self.repl_enabled = False
@@ -1001,13 +979,12 @@ struct DebugPane(Copyable, Movable):
         var subtle_frame = Attr(DARK_GRAY, PANE_BG)
         var link_attr = Attr(LIGHT_BLUE, PANE_BG, STYLE_UNDERLINE)
         var painter = Painter(panel)
-        # Reset visible-link rects + scrollbar bookkeeping each paint —
-        # only what's currently on screen counts for click hit-testing.
-        # ``_last_output_sb_x = -1`` is the sentinel for "no bar
-        # painted this frame" so the early-returns below (minimized,
-        # zero output) leave a clean state.
+        # Reset visible-link rects + the scroll bar each paint — only
+        # what's currently on screen counts for click hit-testing, so the
+        # early-returns below (minimized, zero output) leave a clean state.
         self._last_links = List[OutputLink]()
-        self._last_output_sb_x = -1
+        if not self._output_bar.dragging:
+            self._output_bar.hide()
         self._last_repl_y = -1
         painter.fill(canvas, panel, String(" "), bg)
         var top = panel.a.y
@@ -1162,23 +1139,15 @@ struct DebugPane(Copyable, Movable):
         )
         var og = self._out_frame.begin(canvas, out_rect, bg)
         self.output.paint(og, self._out_frame.grid)
-        # Vertical scrollbar in the right margin of the output rect.
-        # Driven by the layout the log just stamped — present only when
-        # content overflows the visible area.
-        self._last_output_sb_top = out_rect.a.y
-        self._last_output_sb_bottom = out_rect.b.y - 1
-        var cells = canvas.scroll_bar_cells
-        self._last_output_sb_cells = cells
-        if out_rect.height() >= 3 and panel.b.x - cells > out_rect.a.x:
-            var bar = VScrollbar(
-                panel.b.x - cells, out_rect.a.y, out_rect.b.y - 1,
+        # Scroll bar down the right margin of the output rect, from the
+        # layout the log just stamped — present only when it overflows.
+        if out_rect.height() >= 3:
+            self._output_bar.paint(
+                canvas,
+                Rect(out_rect.a.x, out_rect.a.y, panel.b.x, out_rect.b.y),
                 len(self.output.last_visual),
-                self.output.last_visible_count,
-                self.output.last_first_visual, cells,
+                self.output.last_first_visual, border,
             )
-            if bar.metrics().present:
-                bar.paint(canvas, painter, border)
-                self._last_output_sb_x = bar.x
         # Layer Python ``File "<path>", line N`` traceback links on
         # top — ``TextLog`` is content-agnostic so this domain-specific
         # overlay lives here. We iterate the layout the log just
@@ -1416,19 +1385,6 @@ struct DebugPane(Copyable, Movable):
     def is_resizing(self) -> Bool:
         return self.dock.is_resizing()
 
-    def _output_scrollbar(self) -> VScrollbar:
-        """Reconstruct the output scrollbar value from the last paint's
-        bookkeeping. ``present()`` is False when the bar wasn't drawn."""
-        if self._last_output_sb_x < 0:
-            return VScrollbar(0, 0, -1, 0, 0, 0)
-        return VScrollbar(
-            self._last_output_sb_x,
-            self._last_output_sb_top, self._last_output_sb_bottom,
-            len(self.output.last_visual),
-            self.output.last_visible_count,
-            self.output.last_first_visual, self._last_output_sb_cells,
-        )
-
     def handle_mouse(
         mut self, event: Event, panel: Rect, allow_resize: Bool = True,
     ) -> Bool:
@@ -1448,18 +1404,11 @@ struct DebugPane(Copyable, Movable):
                 self.focused = True
             return True
         # Output-thumb drag in flight — same drag-state-owners-first
-        # convention as the resize handle. Motion updates scroll;
-        # release ends the drag.
-        if self._output_scrolling:
-            if event.button == MOUSE_BUTTON_LEFT and not event.pressed:
-                self._output_scrolling = False
-                return True
-            if event.motion:
-                var bar = self._output_scrollbar()
-                if bar.metrics().present:
-                    self.output.scroll_to_top_row(
-                        bar.drag_to(event.pos.y, self._output_drag_offset),
-                    )
+        # convention as the resize handle.
+        if self._output_bar.dragging:
+            var s = self._output_bar.handle_mouse(event)
+            if s >= 0:
+                self.output.scroll_to_top_row(s)
             return True
         # Selection drag in flight: forward every event to the output
         # ``TextLog`` until release, so a drag that wanders off the
@@ -1537,18 +1486,9 @@ struct DebugPane(Copyable, Movable):
             # Scrollbar hit-test runs first — a click in the right
             # margin should drive scroll instead of starting a
             # selection drag.
-            var bar = self._output_scrollbar()
-            var hit = bar.hit(event.pos)
-            if hit[0] != 0:
-                if hit[0] == 1:
-                    self.output.scroll_by(-3)
-                elif hit[0] == 5:
-                    self.output.scroll_by(3)
-                elif hit[0] == 2 or hit[0] == 4:
-                    self.output.scroll_to_top_row(bar.track_jump(hit[1]))
-                else:  # 3 — on thumb
-                    self._output_scrolling = True
-                    self._output_drag_offset = hit[1]
+            var s = self._output_bar.handle_mouse(event)
+            if s >= 0:
+                self.output.scroll_to_top_row(s)
                 return True
             # File:line / URL link hit-test runs second — clicking on a
             # ``File "x", line N`` span opens the file, a ``http(s)://``
