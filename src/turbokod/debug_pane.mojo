@@ -56,9 +56,9 @@ from .painter import Painter
 from .cell import Cell, FONT_DEBUGGER, FONT_TERMINAL
 from .grid_frame import GridFrame
 from .colors import (
-    Attr, BLACK, DARK_GRAY, LIGHT_BLUE, LIGHT_GRAY, LIGHT_GREEN, LIGHT_MAGENTA,
+    Attr, BLACK, DARK_GRAY, LIGHT_GRAY, LIGHT_GREEN, LIGHT_MAGENTA,
     LIGHT_RED,
-    LIGHT_YELLOW, PANE_BG, PANE_FG, RED, STYLE_UNDERLINE, WHITE, YELLOW,
+    LIGHT_YELLOW, PANE_BG, PANE_FG, RED, WHITE, YELLOW,
 )
 from .dap_dispatch import DapCompletion, DapStackFrame, DapVariable
 from .events import (
@@ -69,7 +69,7 @@ from .events import (
 )
 from .geometry import Point, Rect
 from .output_links import (
-    extract_all_links, extract_path_line_links as _extract_path_line_links,
+    extract_path_line_links as _extract_path_line_links, paint_row_links,
     link_at, LinkLatch, OutputLink,
 )
 from .scrollbar import ScrollBarArea
@@ -977,7 +977,6 @@ struct DebugPane(Copyable, Movable):
         # (ANSI 8) is consistently dimmer across xterm-256 palettes, which
         # is what we want for "you can see it, but it's not your code."
         var subtle_frame = Attr(DARK_GRAY, PANE_BG)
-        var link_attr = Attr(LIGHT_BLUE, PANE_BG, STYLE_UNDERLINE)
         var painter = Painter(panel)
         # Reset visible-link rects + the scroll bar each paint — only
         # what's currently on screen counts for click hit-testing, so the
@@ -1156,33 +1155,15 @@ struct DebugPane(Copyable, Movable):
             var vidx = self.output.last_first_visual + k
             if vidx < 0 or vidx >= len(self.output.last_visual):
                 continue
-            var vrow = self.output.last_visual[vidx]
-            var line = self.output.lines[vrow.line_idx]
-            var line_y = self.output.last_y0 + k
-            var hits = extract_all_links(line)
-            for h in range(len(hits)):
-                var hit = hits[h]
-                var seg_lo = vrow.cell_start
-                var seg_hi = vrow.cell_start + vrow.cell_count
-                var lo = hit.cell_start
-                if lo < seg_lo:
-                    lo = seg_lo
-                var hi = hit.cell_end
-                if hi > seg_hi:
-                    hi = seg_hi
-                if hi <= lo:
-                    continue
-                var x0 = self.output.last_x0 + (lo - seg_lo)
-                var x1 = self.output.last_x0 + (hi - seg_lo)
-                if x0 >= self.output.last_x_max:
-                    continue
-                if x1 > self.output.last_x_max:
-                    x1 = self.output.last_x_max
-                for x in range(x0, x1):
-                    og.set_attr(x, line_y, link_attr)
-                self._last_links.append(OutputLink(
-                    line_y, x0, x1, hit.path, hit.line, hit.is_url,
-                ))
+            ref vrow = self.output.last_visual[vidx]
+            paint_row_links(
+                og, self.output.lines[vrow.line_idx],
+                self.output.last_y0 + k, self.output.last_x0,
+                self.output.last_x_max, Point(0, 0), self._last_links,
+                seg_lo=vrow.cell_start,
+                seg_hi=vrow.cell_start + vrow.cell_count,
+            )
+
         self._out_frame.end(canvas, og^)
         # Console input line across the bottom row. The ``>>>`` prompt is
         # painted in the pane colors; the editable strip after it reuses

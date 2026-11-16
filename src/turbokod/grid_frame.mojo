@@ -13,7 +13,8 @@ mouse event into them with ``map``. At the screen's cell size the grid is
 the region itself and ``map`` changes nothing.
 """
 
-from .canvas import Canvas, SCALE_ONE, grid_dims
+from .canvas import Canvas, HostItem, SCALE_ONE, SubGrid, grid_dims
+from .cell import Cell, FONT_SLOTS
 from .colors import Attr
 from .events import Event
 from .geometry import Point, Rect
@@ -58,12 +59,22 @@ struct GridFrame(Copyable, ImplicitlyCopyable, Movable):
         self.grid = Rect(rect.a.x, rect.a.y, rect.a.x + dims[0], rect.a.y + dims[1])
         self.scale_x = sc[0]
         self.scale_y = sc[1]
-        var g = Canvas(dims[0], dims[1])
-        g.origin = rect.a
-        g.font = self.slot
-        g.inherit_chrome(canvas)
-        g.clear(bg)
-        return g^
+        # Built already cleared to ``bg`` in the slot's font (the plain
+        # constructor and then ``clear`` wrote every cell twice).
+        return Canvas(
+            width=dims[0], height=dims[1],
+            cells=List[Cell](
+                length=max(0, dims[0] * dims[1]),
+                fill=Cell(String(" "), bg, 1, self.slot),
+            ),
+            font=self.slot,
+            area_scale=List[Int](length=2 * FONT_SLOTS, fill=SCALE_ONE),
+            sub_grids=List[SubGrid](),
+            origin=rect.a,
+            host_widgets=canvas.host_widgets,
+            host_items=List[HostItem](),
+            scroll_bar_cells=canvas.scroll_bar_cells,
+        )
 
     def end(self, mut canvas: Canvas, var grid: Canvas):
         canvas.place_sub_grid(self.slot, self.rect, grid^)

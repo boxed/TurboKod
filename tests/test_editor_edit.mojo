@@ -2597,6 +2597,114 @@ def test_pasting_and_deleting_many_lines_in_the_middle() raises:
     assert_equal(ed.buffer.line(52), String("c0"))
 
 
+def _spell_rows(ed: Editor) -> String:
+    """``spell_lines`` plus every squiggle's span, as one comparable string."""
+    var out = String("")
+    for r in range(len(ed.spell_lines)):
+        out += String("1") if ed.spell_lines[r] else String("0")
+    for k in range(len(ed.spell_highlights)):
+        ref h = ed.spell_highlights[k]
+        out += String(" ") + String(h.row) + String(":") + String(h.col_start) \
+            + String("-") + String(h.col_end)
+    return out^
+
+
+def _assert_spell_matches_fresh(mut ed: Editor, mut speller: Speller) raises:
+    var registry = GrammarRegistry()
+    ed.flush_highlights(registry, speller)
+    var fresh = Editor(ed.text_snapshot())
+    var fresh_registry = GrammarRegistry()
+    fresh.flush_highlights(fresh_registry, speller)
+    assert_equal(_spell_rows(ed), _spell_rows(fresh))
+
+
+def test_spell_refresh_matches_a_fresh_check_after_every_kind_of_edit() raises:
+    """The per-row spell cache is reused across edits; after typing in a
+    row, splitting and joining rows, pasting several and cutting them,
+    the squiggles are exactly what a fresh editor on the same text finds."""
+    var words = List[String]()
+    words.append(String("hello"))
+    words.append(String("world"))
+    var speller = _spell_with_dict(words)
+    var ed = Editor(String("hello helo\nworld\nwrld hello\nhello"))
+    _assert_spell_matches_fresh(ed, speller)
+    assert_true(ed.spell_lines[0])
+    assert_false(ed.spell_lines[1])
+    assert_true(ed.spell_lines[2])
+    # In place: fix the typo on row 0.
+    ed.move_to(0, 8, False)
+    _ = ed.handle_key(_key(UInt32(ord("l"))), _VIEW)
+    _assert_spell_matches_fresh(ed, speller)
+    assert_false(ed.spell_lines[0])
+    # Split a row: everything below shifts down one.
+    ed.move_to(1, 2, False)
+    _ = ed.handle_key(_key(KEY_ENTER), _VIEW)
+    _assert_spell_matches_fresh(ed, speller)
+    # Join it back.
+    _ = ed.handle_key(_key(KEY_BACKSPACE), _VIEW)
+    _assert_spell_matches_fresh(ed, speller)
+    # Several rows at once, then remove them again.
+    ed.move_to(0, 0, False)
+    ed.paste_text(String("wrld\nhello\nhelo\n"))
+    _assert_spell_matches_fresh(ed, speller)
+    assert_true(ed.spell_lines[0])
+    assert_true(ed.spell_lines[2])
+    ed.move_to(0, 0, False)
+    ed.move_to(3, 0, True)
+    _ = ed.cut_selection()
+    _assert_spell_matches_fresh(ed, speller)
+    # The same text on a different row count: rows swap places.
+    ed.move_to(3, 0, False)
+    ed.move_to(3, 5, True)
+    _ = ed.cut_selection()
+    _assert_spell_matches_fresh(ed, speller)
+
+
+def test_a_run_of_backspaces_is_one_undo_step() raises:
+    """Consecutive plain Backspaces group into one undo step, like typing
+    — but not with the typing before them, and Delete runs separately."""
+    var ed = Editor(String("abc"))
+    ed.move_to(0, 3, False)
+    _ = ed.handle_key(_key(UInt32(ord("d"))), _VIEW)
+    _ = ed.handle_key(_key(UInt32(ord("e"))), _VIEW)
+    _ = ed.handle_key(_key(KEY_BACKSPACE), _VIEW)
+    _ = ed.handle_key(_key(KEY_BACKSPACE), _VIEW)
+    _ = ed.handle_key(_key(KEY_BACKSPACE), _VIEW)
+    assert_equal(ed.buffer.line(0), String("ab"))
+    assert_true(ed.undo())
+    assert_equal(ed.buffer.line(0), String("abcde"))
+    assert_true(ed.undo())
+    assert_equal(ed.buffer.line(0), String("abc"))
+    # Delete: its own run, and a Backspace after it starts another.
+    ed.move_to(0, 0, False)
+    _ = ed.handle_key(_key(KEY_DELETE), _VIEW)
+    _ = ed.handle_key(_key(KEY_DELETE), _VIEW)
+    assert_equal(ed.buffer.line(0), String("c"))
+    ed.move_to(0, 1, False)
+    _ = ed.handle_key(_key(KEY_BACKSPACE), _VIEW)
+    assert_equal(ed.buffer.line(0), String(""))
+    assert_true(ed.undo())
+    assert_equal(ed.buffer.line(0), String("c"))
+    assert_true(ed.undo())
+    assert_equal(ed.buffer.line(0), String("abc"))
+
+
+def test_backspace_over_a_selection_is_its_own_undo_step() raises:
+    """A Backspace that deletes a selection doesn't join the run of plain
+    backspaces before it."""
+    var ed = Editor(String("hello world"))
+    ed.move_to(0, 11, False)
+    _ = ed.handle_key(_key(KEY_BACKSPACE), _VIEW)
+    ed.move_to(0, 0, False)
+    ed.move_to(0, 5, True)
+    _ = ed.handle_key(_key(KEY_BACKSPACE), _VIEW)
+    assert_equal(ed.buffer.line(0), String(" worl"))
+    assert_true(ed.undo())
+    assert_equal(ed.buffer.line(0), String("hello worl"))
+    assert_true(ed.undo())
+    assert_equal(ed.buffer.line(0), String("hello world"))
+
+
 def main() raises:
     setup_test_env()
     TestSuite.discover_tests[__functions_in_module()]().run()

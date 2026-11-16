@@ -63,10 +63,13 @@ from .tmux_session import (
     tmux_socket_path, tmux_stop,
 )
 from .terminal_view import (
-    flush_vt_side_effects, forward_key_to_grid, grid_size, GridSelection,
-    cursor_keys_to_click, new_grid, paint_grid, paint_grid_links, paste_to_pty,
-    place_grid,
+    body_without_bar, flush_vt_side_effects, forward_key_to_grid, grid_size,
+    GridSelection, cursor_keys_to_click, is_click_press, new_grid, paint_grid,
+    paint_grid_links, paint_results_grid, paint_scrollback_bar, paste_to_pty,
+    place_grid, results_handle_mouse, results_pointer_shape,
+    scrollback_bar_delta, wheel_rows,
 )
+
 from .vt import MOUSE_MOTION, MOUSE_PRESS, MOUSE_RELEASE, SCROLLBACK_LINES, Vt
 from .window import (
     BottomDockedPanel, TitleCommand,
@@ -852,9 +855,7 @@ struct TerminalPane(Copyable, Movable):
         # at the old dimensions and the layout falls apart.
         # The right column is the scroll bar's, so it never covers output.
         var bar_area = body
-        body = Rect(
-            body.a.x, body.a.y, body.b.x - canvas.scroll_bar_cells, body.b.y,
-        )
+        body = body_without_bar(canvas, body)
         # The grid is the body's size in the terminal font's cells, which
         # may be another size than the screen's.
         var dims = grid_size(canvas, body)
@@ -875,14 +876,11 @@ struct TerminalPane(Copyable, Movable):
             # they bring their own bar.
             self.scroll_bar.hide()
             self._last_links = List[OutputLink]()
-            var rdims = grid_size(canvas, bar_area)
-            var rgrid = new_grid(rdims[0], rdims[1], bg)
-            rgrid.inherit_chrome(canvas)
-            self.results.paint(
-                rgrid, self.sel._last_body.a, self.is_running(), True,
-                self.run_exited, _status_code(self.run_exit_status),
+            paint_results_grid(
+                canvas, bar_area, bg, self.results, self.sel._last_body.a,
+                self.is_running(), True, self.run_exited,
+                _status_code(self.run_exit_status),
             )
-            place_grid(canvas, bar_area, rgrid^)
             return
         self.results.hide()
         # Grid + selection overlay + cursor caret — shared with the test
@@ -894,18 +892,10 @@ struct TerminalPane(Copyable, Movable):
         if self.is_run():
             self._paint_links(grid, v)
         place_grid(canvas, body, grid^)
-        var sb = self._scrollback()
-        var attr = Attr(PANE_FG, PANE_BG)
-        var col = Rect(body.b.x, bar_area.a.y, bar_area.b.x, bar_area.b.y)
-        for y in range(col.a.y, col.b.y):
-            for x in range(col.a.x, col.b.x):
-                painter.set(canvas, x, y, Cell(String(" "), attr, 1))
-        if sb > 0:
-            self.scroll_bar.paint(
-                canvas, bar_area, sb + v.rows(), sb - v.view_offset(), attr,
-            )
-        else:
-            self.scroll_bar.hide()
+        paint_scrollback_bar(
+            canvas, painter, self.scroll_bar, bar_area, body, v,
+            self._scrollback(),
+        )
 
     def _paint_links(mut self, mut grid: Canvas, v: Vt):
         """Underline a run's traceback / ``path:N`` / URL spans in the
@@ -918,10 +908,7 @@ struct TerminalPane(Copyable, Movable):
         divider; empty elsewhere. ``pos`` is a screen cell."""
         if not self.visible or not (self.tests and self.results_view):
             return String("")
-        var e = Event.mouse_event(pos, MOUSE_BUTTON_NONE, False, True)
-        var g = self.sel.grid_event(e)
-        var o = self.sel._last_body.a
-        return self.results.pointer_shape(Point(g.pos.x - o.x, g.pos.y - o.y))
+        return results_pointer_shape(self.sel, self.results, pos)
 
     # --- copy / selection delegates ------------------------------------
 
@@ -953,35 +940,26 @@ struct TerminalPane(Copyable, Movable):
         # In-flight drag selection keeps consuming events even past
         # the body edge so the user can drag-select fast without the
         # selection cutting off when they overshoot.
-        var bar = self.scroll_bar.handle_mouse(event)
-        if bar >= 0:
+        var delta = scrollback_bar_delta(
+            self.scroll_bar, event, self._view(), self._scrollback(),
+        )
+        if delta:
             self.focused = True
-            var v = self._view()
-            self.scroll_view_by(self._scrollback() - bar - v.view_offset())
+            self.scroll_view_by(delta.value())
             return True
         # From here on positions are the grid's (``grid_event``); the
         # panel test below still uses the screen's.
         var screen_pos = event.pos
         event = self.sel.grid_event(event)
         if self.tests and self.results_view:
-            if not self.results.handle_mouse(
-                event, self.sel._last_body.a, panel.contains(screen_pos),
-            ):
-                if event.button != MOUSE_BUTTON_NONE \
-                        and event.pressed and not event.motion:
-                    self.focused = False
-                return False
-            if event.pressed and not event.motion:
-                self.focused = True
-            var link = self.results.take_link()
-            if link:
-                self.link_click.set(link.value())
-            return True
+            return results_handle_mouse(
+                self.results, event, self.sel._last_body.a,
+                panel.contains(screen_pos), self.focused, self.link_click,
+            )
         if self.sel.continue_drag(self._view(), event):
             return True
         if not panel.contains(screen_pos):
-            if event.button != MOUSE_BUTTON_NONE \
-                    and event.pressed and not event.motion:
+            if is_click_press(event):
                 self.focused = False
             return False
         # Wheel inside the body: if the child has enabled mouse
@@ -996,8 +974,7 @@ struct TerminalPane(Copyable, Movable):
                     and self._child_tracks_mouse(True):
                 self._forward_mouse_to_pty(event, MOUSE_PRESS)
                 return True
-            var dir = 3 if event.button == MOUSE_WHEEL_UP else -3
-            self.scroll_view_by(dir)
+            self.scroll_view_by(wheel_rows(event))
             return True
         # Press / release / motion. With tracking on and Shift not
         # held, route the event to the child instead of selection —
@@ -1005,8 +982,7 @@ struct TerminalPane(Copyable, Movable):
         # universal "I want to select, ignore the child's tracking"
         # override.
         var shift_held = (event.mods & MOD_SHIFT) != 0
-        var is_press = event.button != MOUSE_BUTTON_NONE and event.pressed \
-            and not event.motion
+        var is_press = is_click_press(event)
         var routes_to_child = not shift_held \
             and self._child_tracks_mouse(is_press)
         if event.button == MOUSE_BUTTON_LEFT and event.pressed \

@@ -30,7 +30,7 @@ from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from turbokod.desktop import Desktop
 from turbokod.file_io import delete_path, read_file, stat_file, write_file
-from turbokod.json import JsonValue, parse_json
+from turbokod.json import JsonValue, json_get_string, parse_json
 from turbokod.lsp_dispatch import (
     CompletionItem, Diagnostic, LspManager, uri_to_path,
 )
@@ -1292,6 +1292,74 @@ def test_code_action_resolve_that_never_answers_still_settles() raises:
     assert_equal(len(actions[0].file_edits), 0)
     assert_equal(len(actions[1].file_edits), 1)
     assert_true(m.is_ready())
+    m.shutdown()
+
+
+def _sent_ids(msgs: List[JsonValue], method: String) -> List[String]:
+    """The ids of every logged request for ``method``, in send order."""
+    var out = List[String]()
+    for i in range(len(msgs)):
+        if json_get_string(msgs[i], String("method")) == method:
+            out.append(json_get_string(msgs[i], String("id")))
+    return out^
+
+
+def _cancelled_ids(msgs: List[JsonValue]) -> List[String]:
+    """The ids every logged ``$/cancelRequest`` named."""
+    var out = List[String]()
+    for i in range(len(msgs)):
+        if json_get_string(msgs[i], String("method")) != "$/cancelRequest":
+            continue
+        var p = msgs[i].object_index(String("params"))
+        if p >= 0:
+            out.append(json_get_string(msgs[i].obj_v[p].value, String("id")))
+    return out^
+
+
+def test_a_superseded_request_is_cancelled() raises:
+    """A second request of a one-at-a-time kind (rename, a navigation jump,
+    a hierarchy prepare) cancels the one it replaces while that one is
+    still in flight, and only that one — otherwise the server keeps a
+    worker computing an answer the client drops on arrival. The mock
+    never answers these, so every first request is still outstanding when
+    its successor goes out; what crossed the wire is read from the
+    request log."""
+    var dir = _scratch_dir(String("superseded"))
+    var path = dir + String("/emdash.py")
+    var text = _emdash_buffer()
+    assert_true(write_file(path, text))
+    var log = dir + String("/requests.jsonl")
+    var m = LspManager()
+    if not _start_mock(m, String("superseded_requests.json"), dir, log):
+        return
+    for _ in range(2):
+        assert_true(m.request_rename(path, 0, 0, String("b"), text))
+        assert_true(m.request_navigation(
+            String("textDocument/typeDefinition"), path, 0, 0,
+            String("a"), text,
+        ))
+        assert_true(m.request_call_hierarchy(
+            path, 0, 0, String("a"), text,
+        ))
+    _pump(m, 20)
+    var msgs = _log_messages(log)
+    var cancelled = _cancelled_ids(msgs)
+    assert_equal(len(cancelled), 3)
+    for method in [
+        "textDocument/rename", "textDocument/typeDefinition",
+        "textDocument/prepareCallHierarchy",
+    ]:
+        var ids = _sent_ids(msgs, method)
+        assert_equal(len(ids), 2, method)
+        var first_cancelled = False
+        var second_cancelled = False
+        for i in range(len(cancelled)):
+            if cancelled[i] == ids[0]:
+                first_cancelled = True
+            if cancelled[i] == ids[1]:
+                second_cancelled = True
+        assert_true(first_cancelled, method)
+        assert_false(second_cancelled, method)
     m.shutdown()
 
 

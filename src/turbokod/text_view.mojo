@@ -39,8 +39,9 @@ from .events import (
 )
 from .geometry import Point, Rect
 from .string_utils import (
-    byte_slice, cells_between, char_width, codepoint_at, is_word_codepoint,
-    leading_indent_bytes, word_range_at, TAB_WIDTH,
+    byte_of_cell_in, byte_slice, cells_between, char_width, codepoint_at,
+    is_word_codepoint, leading_indent_bytes, seg_cell_offset, word_range_at,
+    TAB_WIDTH,
 )
 
 
@@ -229,16 +230,7 @@ def _wrap_one_line_into(
         if e == e_hard:
             seg_cells = cells
         else:
-            seg_cells = 0
-            var k = c
-            while k < e:
-                if Int(bytes[k]) == 0x09:
-                    seg_cells += TAB_WIDTH - (seg_cells % TAB_WIDTH)
-                    k += 1
-                    continue
-                var info = codepoint_at(line, k)
-                seg_cells += char_width(info[0])
-                k += info[1]
+            seg_cells = cells_between(line, c, e)
         out.append(VisualLine(
             line_idx, c, e, cell_offset, seg_cells, indent_cells,
         ))
@@ -255,6 +247,7 @@ def wrap_lines(
     word_aware: Bool = False,
     start_line: Int = 0,
     max_rows: Int = -1,
+    end_line: Int = -1,
 ) -> List[VisualLine]:
     """Soft-wrap a slice of ``lines`` to ``content_w`` cells per row.
 
@@ -274,6 +267,8 @@ def wrap_lines(
       passes ``-1`` for "every visual row" (it doesn't crop until paint
       time); the Editor passes ``content_h`` for "exactly the painted
       window" so soft-wrap doesn't allocate rows it won't draw.
+    * ``end_line`` — when ``>= 0``, stop before that line (measuring one
+      line is ``start_line=i, end_line=i + 1``, no one-line list to build).
 
     Empty lines still produce one zero-width visual row so they occupy
     a screen line. Multibyte glyphs are never split.
@@ -285,6 +280,8 @@ def wrap_lines(
     if br < 0:
         br = 0
     var n_lines = len(lines)
+    if end_line >= 0 and end_line < n_lines:
+        n_lines = end_line
     while br < n_lines:
         if max_rows >= 0 and len(out) >= max_rows:
             break
@@ -463,6 +460,7 @@ def smart_wrap_lines(
     max_rows: Int = -1,
     comma_threshold: Int = -1,
     html_attr: Bool = False,
+    end_line: Int = -1,
 ) -> List[VisualLine]:
     """Smart-wrap a slice of ``lines``: a logical line that overflows
     ``content_w`` *and* has bracketed, comma-separated call structure is
@@ -527,6 +525,8 @@ def smart_wrap_lines(
     if br < 0:
         br = 0
     var n_lines = len(lines)
+    if end_line >= 0 and end_line < n_lines:
+        n_lines = end_line
     var lc_bytes = line_comment.as_bytes()
     var lc_n = len(lc_bytes)
     while br < n_lines:
@@ -541,16 +541,7 @@ def smart_wrap_lines(
             continue
         # Display width in cells: emoji count two, everything else one
         # (no East-Asian fullwidth modeling).
-        var cols = 0
-        var kk = 0
-        while kk < line_n:
-            if Int(bytes[kk]) == 0x09:
-                cols += TAB_WIDTH - (cols % TAB_WIDTH)
-                kk += 1
-                continue
-            var info = codepoint_at(line, kk)
-            cols += char_width(info[0])
-            kk += info[1]
+        var cols = cells_between(line, 0, line_n)
         var overflow = cols > content_w
         # Fast path: line fits and the comma trigger is off — emit one row
         # without scanning. When the trigger is on (>= 0) we must scan even a
@@ -759,16 +750,9 @@ struct Selection(ImplicitlyCopyable, Movable):
 
     def normalized(self) -> Tuple[Int, Int, Int, Int]:
         """``(s_line, s_col, e_line, e_col)`` sorted in document order."""
-        if self.anchor_line < self.cursor_line \
-                or (self.anchor_line == self.cursor_line
-                    and self.anchor_col <= self.cursor_col):
-            return (
-                self.anchor_line, self.anchor_col,
-                self.cursor_line, self.cursor_col,
-            )
-        return (
-            self.cursor_line, self.cursor_col,
+        return ordered_span(
             self.anchor_line, self.anchor_col,
+            self.cursor_line, self.cursor_col,
         )
 
     def extracted_text(self, lines: List[String]) -> String:
@@ -1319,27 +1303,12 @@ struct TextLog(Copyable, Movable):
             cell_in_seg = 0
         if cell_in_seg > vrow.cell_count:
             cell_in_seg = vrow.cell_count
-        var line = self.lines[vrow.line_idx]
-        var b = vrow.byte_start
-        var consumed = 0
-        while consumed < cell_in_seg and b < vrow.byte_end:
-            var cw: Int
-            var step: Int
-            if Int(line.as_bytes()[b]) == 0x09:
-                cw = TAB_WIDTH - (consumed % TAB_WIDTH)
-                step = 1
-            else:
-                var info = codepoint_at(line, b)
-                cw = char_width(info[0])
-                step = info[1]
-            # A click on the right half of a wide glyph (or inside a tab's
-            # expansion) snaps to its start.
-            if consumed + cw > cell_in_seg:
-                break
-            consumed += cw
-            b += step
-        if b > vrow.byte_end:
-            b = vrow.byte_end
+        # A click on the right half of a wide glyph (or inside a tab's
+        # expansion) snaps to its start.
+        var b = byte_of_cell_in(
+            self.lines[vrow.line_idx], vrow.byte_start, vrow.byte_end,
+            cell_in_seg,
+        )
         return (vrow.line_idx, b)
 
     def handle_mouse(mut self, event: Event) -> Bool:
@@ -1524,20 +1493,25 @@ struct TextLog(Copyable, Movable):
         self.scroll = ns
 
 
+def ordered_span(
+    a_line: Int, a_col: Int, b_line: Int, b_col: Int,
+) -> Tuple[Int, Int, Int, Int]:
+    """Two positions as ``(start_line, start_col, end_line, end_col)`` in
+    document order — the one normalization behind every selection
+    (``Selection``, ``TextSelect``, the editor's carets)."""
+    if a_line < b_line or (a_line == b_line and a_col <= b_col):
+        return (a_line, a_col, b_line, b_col)
+    return (b_line, b_col, a_line, a_col)
+
+
 # --- internal helpers -----------------------------------------------------
 
 
 def _row_cell_offset(
     vrow: VisualLine, line: String, target_byte: Int,
 ) -> Int:
-    """Cells from the row's painted left edge to byte ``target_byte``.
-    ``target_byte`` should fall in ``[vrow.byte_start, vrow.byte_end]``;
-    callers above clamp via the per-row byte intersection so we just
-    walk codepoints inside the segment until we reach the target."""
-    if target_byte <= vrow.byte_start:
-        return 0
-    return cells_between(
-        line, vrow.byte_start, min(target_byte, vrow.byte_end),
-    )
+    """Cells from the row's painted left edge to byte ``target_byte``,
+    clamped into the row's segment."""
+    return seg_cell_offset(line, vrow.byte_start, vrow.byte_end, target_byte)
 
 

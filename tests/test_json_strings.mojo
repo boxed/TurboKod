@@ -136,5 +136,25 @@ def test_literals() raises:
             _ = parse_json(bad)
 
 
+def test_a_repeated_key_keeps_its_place_and_the_last_value() raises:
+    """Last wins, at the first occurrence's position — in a small object
+    (key scan) and a large one (past the parser's key index threshold)."""
+    var small = parse_json("{\"a\": 1, \"b\": 2, \"a\": 3}")
+    assert_equal(encode_json(small), "{\"a\":3,\"b\":2}")
+    var text = String("{")
+    for i in range(40):
+        text += String("\"k") + String(i) + String("\": ") + String(i) + String(", ")
+    text += String("\"k3\": 100, \"k39\": 200, \"new\": 7, \"k0\": -1, \"new\": 8}")
+    var big = parse_json(text)
+    assert_equal(big.object_len(), 41)
+    assert_equal(big.object_key_at(0), "k0")
+    assert_equal(big.object_value_at(0).as_int(), -1)
+    assert_equal(big.object_value_at(3).as_int(), 100)
+    assert_equal(big.object_value_at(39).as_int(), 200)
+    assert_equal(big.object_key_at(40), "new")
+    assert_equal(big.object_value_at(40).as_int(), 8)
+    assert_equal(big.object_value_at(17).as_int(), 17)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

@@ -46,9 +46,9 @@ from .canvas import (
 from .json import JsonValue, json_array, json_bool, json_int, json_object, json_str
 from .cell import Cell
 from .colors import (
-    Attr, BLACK, DARK_GRAY, LIGHT_BLUE, LIGHT_CYAN, LIGHT_GRAY, LIGHT_GREEN,
+    Attr, BLACK, DARK_GRAY, LIGHT_CYAN, LIGHT_GRAY, LIGHT_GREEN,
     LIGHT_MAGENTA, LIGHT_RED, LIGHT_YELLOW, PANE_BG, PANE_FG, STYLE_BOLD,
-    STYLE_UNDERLINE, WHITE,
+    WHITE,
 )
 from .events import (
     Event, EVENT_KEY, KEY_DOWN, KEY_END, KEY_ENTER, KEY_HOME, KEY_PAGEDOWN,
@@ -56,7 +56,7 @@ from .events import (
     MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
-from .output_links import extract_all_links, link_at, OutputLink
+from .output_links import extract_all_links, link_at, OutputLink, paint_row_links
 from .scrollbar import ScrollBarArea
 from .split_area import SplitArea
 from .string_utils import char_width, display_columns
@@ -546,7 +546,6 @@ struct TestResultsView(Copyable, Movable):
         self._layout_detail(right - x0)
         var total = len(self._rows)
         self._detail_scroll = max(0, min(self._detail_scroll, total - rows))
-        var link_attr = Attr(LIGHT_BLUE, PANE_BG, STYLE_UNDERLINE)
         for i in range(rows):
             var ri = self._detail_scroll + i
             if ri >= total:
@@ -560,19 +559,10 @@ struct TestResultsView(Copyable, Movable):
                     row.path, max(row.line, 1), False,
                 ))
                 continue
-            var hits = extract_all_links(row.text)
-            for k in range(len(hits)):
-                var hit = hits[k]
-                var a = x0 + max(hit.cell_start, 0)
-                var b = min(x0 + hit.cell_end, right)
-                if b <= a:
-                    continue
-                for x in range(a, b):
-                    grid.set_attr(x, y, link_attr)
-                self._last_links.append(OutputLink(
-                    origin.y + y, origin.x + a, origin.x + b,
-                    hit.path, hit.line, hit.is_url,
-                ))
+            paint_row_links(
+                grid, row.text, y, x0, right, origin, self._last_links,
+            )
+
         self._detail_bar.paint(
             grid, area, total, self._detail_scroll, Attr(PANE_FG, PANE_BG),
         )

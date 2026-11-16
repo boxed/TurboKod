@@ -17,22 +17,26 @@ them, so the pane stays the single writer to its child.
 """
 
 from std.collections.list import List
+from std.collections.optional import Optional
 
 from .canvas import Canvas, SCALE_ONE
 from .cell import Cell, FONT_TERMINAL
 from .clipboard import clipboard_copy
 from .colors import (
-    Attr, BG_TRUECOLOR, FG_TRUECOLOR, LIGHT_BLUE, PANE_BG, STYLE_UNDERLINE,
+    Attr, BG_TRUECOLOR, FG_TRUECOLOR, PANE_BG, PANE_FG,
 )
 from .events import (
     Event, KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, MOD_ALT, MOD_CTRL,
-    MOD_META, MOD_SHIFT, MOUSE_BUTTON_LEFT,
+    MOD_META, MOD_SHIFT, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
 from .grid_frame import floor_div
-from .output_links import extract_all_links, OutputLink
+from .output_links import LinkLatch, OutputLink, paint_row_links
 from .painter import Painter
 from .pty import PtyProcess
+from .scrollbar import ScrollBarArea
+from .test_results import TestResultsView
+
 from .string_utils import display_columns
 from .vt import Vt
 
@@ -442,25 +446,13 @@ def paint_grid_links(
     (``origin`` is ``GridSelection._last_body.a``). Cell offsets from the
     scanners are codepoint columns, matching the grid's one cell per
     column (link text is ASCII). Shared by the pty panes."""
-    var link_attr = Attr(LIGHT_BLUE, PANE_BG, STYLE_UNDERLINE)
     var cells = v.grid()
     for r in range(cells.rows):
         var line = cells.row_text(r)
         if len(line.as_bytes()) == 0:
             continue
-        var hits = extract_all_links(line)
-        for h in range(len(hits)):
-            var hit = hits[h]
-            var x0 = max(hit.cell_start, 0)
-            var x1 = min(hit.cell_end, grid.width)
-            if x1 <= x0:
-                continue
-            for x in range(x0, x1):
-                grid.set_attr(x, r, link_attr)
-            links.append(OutputLink(
-                origin.y + r, origin.x + x0, origin.x + x1,
-                hit.path, hit.line, hit.is_url,
-            ))
+        paint_row_links(grid, line, r, 0, grid.width, origin, links)
+
 
 
 def place_grid(mut canvas: Canvas, body: Rect, var grid: Canvas):
@@ -677,3 +669,101 @@ def cursor_keys_to_click(vt: Vt, sel: GridSelection, pos: Point) -> String:
     for _ in range(presses):
         out += key
     return out^
+
+
+# --- shared by the pty panes (TerminalPane, TestPane) ----------------------
+
+
+def is_click_press(event: Event) -> Bool:
+    """A button going down — not a drag, a hover or a release. What
+    focuses a pane inside it and unfocuses it outside."""
+    return event.button != MOUSE_BUTTON_NONE and event.pressed \
+        and not event.motion
+
+
+def wheel_rows(event: Event) -> Int:
+    """Scrollback rows one wheel step moves: 3 into history going up."""
+    return 3 if event.button == MOUSE_WHEEL_UP else -3
+
+
+def body_without_bar(canvas: Canvas, body: Rect) -> Rect:
+    """``body`` less the right-hand column(s) its scroll bar takes, so
+    the bar never covers output."""
+    return Rect(
+        body.a.x, body.a.y, body.b.x - canvas.scroll_bar_cells, body.b.y,
+    )
+
+
+def paint_scrollback_bar(
+    mut canvas: Canvas, painter: Painter, mut bar: ScrollBarArea,
+    bar_area: Rect, body: Rect, v: Vt, scrollback: Int,
+):
+    """Clear the bar column(s) right of ``body`` inside ``bar_area`` and
+    draw ``v``'s scrollback bar there when it has ``scrollback`` rows of
+    history; hide it when it has none."""
+    var attr = Attr(PANE_FG, PANE_BG)
+    for y in range(bar_area.a.y, bar_area.b.y):
+        for x in range(body.b.x, bar_area.b.x):
+            painter.set(canvas, x, y, Cell(String(" "), attr, 1))
+    if scrollback > 0:
+        bar.paint(
+            canvas, bar_area, scrollback + v.rows(),
+            scrollback - v.view_offset(), attr,
+        )
+    else:
+        bar.hide()
+
+
+def scrollback_bar_delta(
+    mut bar: ScrollBarArea, event: Event, v: Vt, scrollback: Int,
+) -> Optional[Int]:
+    """The scroll (``scroll_view_by`` rows) a mouse event on the bar
+    asks for; None when the bar didn't take it."""
+    var top = bar.handle_mouse(event)
+    if top < 0:
+        return None
+    return Optional[Int](scrollback - top - v.view_offset())
+
+
+def paint_results_grid(
+    mut canvas: Canvas, area: Rect, bg: Attr, mut results: TestResultsView,
+    origin: Point, running: Bool, started: Bool, exited: Bool,
+    exit_code: Int,
+):
+    """Paint the test results view over ``area`` (in the terminal font's
+    cells, like the grid it replaces)."""
+    var dims = grid_size(canvas, area)
+    var rgrid = new_grid(dims[0], dims[1], bg)
+    rgrid.inherit_chrome(canvas)
+    results.paint(rgrid, origin, running, started, exited, exit_code)
+    place_grid(canvas, area, rgrid^)
+
+
+def results_handle_mouse(
+    mut results: TestResultsView, event: Event, origin: Point, inside: Bool,
+    mut focused: Bool, mut link_click: LinkLatch,
+) -> Bool:
+    """Route a grid-cell mouse event to the results view: a press focuses
+    the pane (or, unused, unfocuses it), and a clicked link goes to
+    ``link_click``. False when the view didn't use it."""
+    if not results.handle_mouse(event, origin, inside):
+        if is_click_press(event):
+            focused = False
+        return False
+    if event.pressed and not event.motion:
+        focused = True
+    var link = results.take_link()
+    if link:
+        link_click.set(link.value())
+    return True
+
+
+def results_pointer_shape(
+    sel: GridSelection, results: TestResultsView, pos: Point,
+) -> String:
+    """The results view's cursor at screen cell ``pos`` (its divider's
+    resize shape)."""
+    var e = Event.mouse_event(pos, MOUSE_BUTTON_NONE, False, True)
+    var g = sel.grid_event(e)
+    var o = sel._last_body.a
+    return results.pointer_shape(Point(g.pos.x - o.x, g.pos.y - o.y))

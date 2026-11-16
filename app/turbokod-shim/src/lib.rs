@@ -19,7 +19,8 @@
 //! take a `try_lock` so they never deadlock.
 
 use std::ffi::{c_char, c_int, c_long, c_uint, c_void, CStr};
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 
 // --- Non-blocking write ---------------------------------------------------
 
@@ -648,15 +649,19 @@ struct OnigHandle {
 // just informs the compiler of the invariant we already enforce.
 unsafe impl Send for OnigHandle {}
 
-static ONIG_HANDLES: Mutex<Vec<OnigHandle>> = Mutex::new(Vec::new());
+/// Keyed by the pair's addresses, so ``tk_onig_free_one`` is a lookup
+/// rather than a walk over every live regex (thousands with a few
+/// grammars loaded).
+static ONIG_HANDLES: LazyLock<Mutex<HashMap<(usize, usize), OnigHandle>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Track a freshly-allocated ``(regex_t*, OnigRegion*)`` pair. The
-/// list lives until ``tk_onig_free_all`` or the process-exit hook
-/// claims them.
+/// registry holds it until ``tk_onig_free_one`` or the process-exit hook
+/// claims it.
 #[no_mangle]
 pub extern "C" fn tk_onig_track(reg: *mut c_void, region: *mut c_void) {
     if let Ok(mut v) = ONIG_HANDLES.lock() {
-        v.push(OnigHandle { reg, region });
+        v.insert((reg as usize, region as usize), OnigHandle { reg, region });
     }
 }
 
@@ -688,11 +693,7 @@ pub extern "C" fn tk_onig_tracked_count() -> c_int {
 #[no_mangle]
 pub extern "C" fn tk_onig_free_one(reg: *mut c_void, region: *mut c_void) -> c_int {
     let found = if let Ok(mut v) = ONIG_HANDLES.lock() {
-        match v.iter().position(|h| h.reg == reg && h.region == region) {
-            // Swap-remove for O(1) — order is irrelevant.
-            Some(idx) => Some(v.swap_remove(idx)),
-            None => None,
-        }
+        v.remove(&(reg as usize, region as usize))
     } else {
         return 0;
     };
@@ -713,16 +714,14 @@ fn free_handle(h: &OnigHandle) {
 }
 
 /// Free every tracked handle and clear the registry. Idempotent — a
-/// second call is a no-op. Exposed so a host that wants deterministic
-/// teardown before exit can call it directly.
-#[no_mangle]
-pub extern "C" fn tk_onig_free_all() {
+/// second call is a no-op.
+fn onig_free_all() {
     let handles = if let Ok(mut v) = ONIG_HANDLES.lock() {
         std::mem::take(&mut *v)
     } else {
         return;
     };
-    for h in &handles {
+    for h in handles.values() {
         free_handle(h);
     }
 }
@@ -733,7 +732,8 @@ pub extern "C" fn tk_onig_free_all() {
 #[used]
 static ONIG_AUTO_CLEANUP: extern "C" fn() = {
     extern "C" fn cleanup() {
-        tk_onig_free_all();
+        onig_free_all();
+
     }
     cleanup
 };

@@ -669,17 +669,69 @@ def cells_between(line: String, lo: Int, hi: Int) -> Int:
     every byte → cell conversion."""
     var bytes = line.as_bytes()
     var n = len(bytes)
-    var i = lo
+    var i = max(lo, 0)
     var cells = 0
     while i < hi and i < n:
-        if Int(bytes[i]) == 0x09:
+        var b = Int(bytes[i])
+        if b == 0x09:
             cells += TAB_WIDTH - (cells % TAB_WIDTH)
+            i += 1
+            continue
+        if b < 0x80:  # ASCII is one cell: skip decoding (long lines)
+            cells += 1
             i += 1
             continue
         var info = codepoint_at(line, i)
         cells += char_width(info[0])
         i += info[1]
     return cells
+
+
+def seg_cell_offset(
+    line: String, seg_start: Int, seg_end: Int, target_byte: Int,
+) -> Int:
+    """Cells from the left edge of ``line``'s segment ``[seg_start,
+    seg_end)`` to ``target_byte``, clamped into the segment — what a wrap
+    row or a horizontally scrolled row needs to place a caret or a span."""
+    if target_byte <= seg_start:
+        return 0
+    return cells_between(line, seg_start, min(target_byte, seg_end))
+
+
+def byte_of_cell_in(
+    line: String, seg_start: Int, seg_end: Int, cell_col: Int,
+) -> Int:
+    """Byte offset inside ``[seg_start, seg_end]`` at cell column
+    ``cell_col`` counted from ``seg_start`` — the inverse of
+    ``seg_cell_offset``, clamped to ``seg_end`` (and the line's end).
+    A column inside a wide glyph — the right half of an emoji, or
+    within a tab's expansion — has no codepoint of its own, so it snaps
+    to the start of that glyph."""
+    if cell_col <= 0:
+        return seg_start
+    var bytes = line.as_bytes()
+    var end = min(seg_end, len(bytes))
+    var cell = 0
+    var i = seg_start
+    while i < end and cell < cell_col:
+        var b = Int(bytes[i])
+        var w: Int
+        var step: Int
+        if b == 0x09:
+            w = TAB_WIDTH - (cell % TAB_WIDTH)
+            step = 1
+        elif b < 0x80:
+            w = 1
+            step = 1
+        else:
+            var info = codepoint_at(line, i)
+            w = char_width(info[0])
+            step = info[1]
+        if cell + w > cell_col:
+            break
+        cell += w
+        i += step
+    return i
 
 
 def utf8_cell_of_byte(line: String, byte_col: Int) -> Int:
@@ -703,28 +755,7 @@ def utf8_byte_of_cell(line: String, cell_col: Int) -> Int:
     cell column to a byte. When ``cell_col`` lands inside a wide glyph — the
     right half of an emoji or anywhere within a tab's expansion — there is no
     codepoint to point at, so we snap to the start of that glyph."""
-    if cell_col <= 0:
-        return 0
-    var bytes = line.as_bytes()
-    var n = len(bytes)
-    var cell = 0
-    var i = 0
-    while i < n and cell < cell_col:
-        var w: Int
-        var step: Int
-        if Int(bytes[i]) == 0x09:
-            w = TAB_WIDTH - (cell % TAB_WIDTH)
-            step = 1
-        else:
-            var info = codepoint_at(line, i)
-            w = char_width(info[0])
-            step = info[1]
-        if cell + w > cell_col:
-            # ``cell_col`` falls inside this wide glyph — snap to its start.
-            break
-        cell += w
-        i += step
-    return i
+    return byte_of_cell_in(line, 0, len(line.as_bytes()), cell_col)
 
 
 def char_class(cp: Int) -> Int:
@@ -831,50 +862,6 @@ def trailing_ws_start(line: String, end: Int) -> Int:
     while p > 0 and (bytes[p - 1] == 0x20 or bytes[p - 1] == 0x09):
         p -= 1
     return p
-
-
-def slice_codepoints(s: String, lo_cell: Int, hi_cell: Int) -> String:
-    """Substring of ``s`` covering codepoints ``[lo_cell, hi_cell)``.
-
-    Cells correspond to codepoints under ``Canvas.put_text``'s layout —
-    one cell per codepoint, no East-Asian width handling. Tolerates
-    out-of-range bounds by clamping (``hi_cell`` past the last
-    codepoint truncates to the end; negative ``lo_cell`` starts at 0).
-    Returns an empty string when ``hi_cell <= lo_cell`` or ``s`` is
-    empty.
-    """
-    if hi_cell <= lo_cell:
-        return String("")
-    var bytes = s.as_bytes()
-    var n = len(bytes)
-    if n == 0:
-        return String("")
-    var lo = lo_cell
-    if lo < 0:
-        lo = 0
-    var cell = 0
-    var byte_lo = 0
-    var byte_hi = n
-    var found_lo = (lo == 0)
-    var i = 0
-    while i < n:
-        var b = Int(bytes[i])
-        var seq_len = utf8_codepoint_size(b)
-        if i + seq_len > n:
-            seq_len = 1
-        if not found_lo and cell == lo:
-            byte_lo = i
-            found_lo = True
-        if cell == hi_cell:
-            byte_hi = i
-            break
-        cell += 1
-        i += seq_len
-    if not found_lo:
-        return String("")
-    if byte_hi <= byte_lo:
-        return String("")
-    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=bytes.unsafe_ptr().unsafe_offset(byte_lo), length=byte_hi - byte_lo)))
 
 
 def parse_int_prefix(s: String, start: Int, stop: Int) -> Int:

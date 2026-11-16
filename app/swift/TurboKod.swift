@@ -695,7 +695,7 @@ final class CellView: NSView {
     // One set for every view (the fonts and the cell size are the app's,
     // not a window's), per screen scale and per area grid (`AreaGrid.key`,
     // empty for the cell grid). Dropped when the font changes.
-    private static var sharedGlyphs: [String: [UInt64: CachedGlyph]] = [:]
+    private static var sharedGlyphs: [String: GlyphStore] = [:]
     private static var sharedGlyphGen = -1
     private var springLastTime: CFTimeInterval = 0
     // Wall time (CACurrentMediaTime) the ease last stepped, or was started.
@@ -729,9 +729,10 @@ final class CellView: NSView {
     // grid taller than the viewport), packed by tk_editor_region_layout.
     private var regionBuf = UnsafeMutablePointer<UInt32>.allocate(capacity: CELL_WORDS)
     private var regionBufCells = 1
-    // One sub-grid's cells at a time (`drawSubGrids`).
-    private var subBuf = UnsafeMutablePointer<UInt32>.allocate(capacity: CELL_WORDS)
-    private var subBufCells = 1
+    // The last layout's sub-grids (`subGridsHash` lays them out, and
+    // `drawSubGrids` draws those same buffers rather than a second layout).
+    private var subGrids: [SubGridFrame] = []
+    private var subGridCount = 0
     // True while a left-drag that began on the minimap gutter is in flight.
     // The minimap doubles as a scrollbar; we scroll it from the raw sub-cell
     // pointer Y (proportional) instead of the cell-quantized core hit-test,
@@ -836,28 +837,33 @@ final class CellView: NSView {
         fingerprint(UnsafeRawBufferPointer(start: buf, count: words * MemoryLayout<UInt32>.stride))
     }
 
-    /// The last layout's sub-grids, hashed: a pane on one leaves only blank
-    /// cells in the frame itself, so its output alone wouldn't read as a
-    /// change.
+    /// Lay out the frame's sub-grids into `subGrids` and hash them: a pane
+    /// on one leaves only blank cells in the frame itself, so its output
+    /// alone wouldn't read as a change. Called right after every layout of
+    /// the frame, so `drawSubGrids` draws what this laid out.
     private func subGridsHash() -> UInt64 {
+        subGridCount = 0
         guard surface == .main || surface == .panels else { return 0 }
         let surf: Int64 = surface == .panels ? 1 : 0
         let count = Int(tk_desktop_sub_grid_count(handle, surf))
+        while subGrids.count < count { subGrids.append(SubGridFrame()) }
+        subGridCount = count
         var h: UInt64 = UInt64(count)
-        var info = [Int32](repeating: 0, count: 7)
         for k in 0..<count {
-            let ok = info.withUnsafeMutableBufferPointer { b in
+            let g = subGrids[k]
+            g.n = 0
+            let ok = g.info.withUnsafeMutableBufferPointer { b in
                 tk_desktop_sub_grid_info(handle, surf, Int64(k), Int64(Int(bitPattern: b.baseAddress)))
             }
             guard ok == 1 else { continue }
-            let cells = Int(info[5]) * Int(info[6])
+            let cells = Int(g.info[5]) * Int(g.info[6])
             guard cells > 0 else { continue }
-            Self.growCells(&subBuf, &subBufCells, cells)
-            let n = Int(tk_desktop_sub_grid_layout(handle, surf, Int64(k),
-                Int64(Int(bitPattern: subBuf)), Int64(cells)))
-            h = (h &* 0x100000001b3) ^ info.withUnsafeBytes { fingerprint($0) }
+            Self.growCells(&g.buf, &g.cells, cells)
+            g.n = Int(tk_desktop_sub_grid_layout(handle, surf, Int64(k),
+                Int64(Int(bitPattern: g.buf)), Int64(cells)))
+            h = (h &* 0x100000001b3) ^ g.info.withUnsafeBytes { fingerprint($0) }
                 ^ fingerprint(UnsafeRawBufferPointer(
-                    start: subBuf, count: n * CELL_WORDS * MemoryLayout<UInt32>.stride))
+                    start: g.buf, count: g.n * CELL_WORDS * MemoryLayout<UInt32>.stride))
         }
         return h
     }
@@ -940,7 +946,7 @@ final class CellView: NSView {
         }
     }
 
-    // `buf`, `regionBuf` and `subBuf` are manual allocations, so ARC
+    // `buf`, `regionBuf` and the sub-grid buffers are manual allocations, so ARC
     // releasing the view reclaims the object but not them. They're grown to
     // the window's cell count and never shrink, so a closed window stranded
     // them at their final size (~1.6 MB for a large grid) for the life of
@@ -948,11 +954,10 @@ final class CellView: NSView {
     deinit {
         buf.deallocate()
         regionBuf.deallocate()
-        subBuf.deallocate()
     }
 
     // Grow-only cell buffer: reallocate when `cells` exceeds `capacity`.
-    private static func growCells(_ p: inout UnsafeMutablePointer<UInt32>,
+    static func growCells(_ p: inout UnsafeMutablePointer<UInt32>,
                                   _ capacity: inout Int, _ cells: Int) {
         if cells > capacity {
             p.deallocate()
@@ -1392,8 +1397,7 @@ final class CellView: NSView {
         }
         // Take the cache out while drawing, so adding to it doesn't copy it.
         let storeKey = "\(cacheKey)@\(scale)"
-        var cache = Self.sharedGlyphs.removeValue(forKey: storeKey) ?? [:]
-        if cache.count > 16384 { cache.removeAll(keepingCapacity: true) }
+        var cache = Self.sharedGlyphs.removeValue(forKey: storeKey) ?? GlyphStore()
         defer { Self.sharedGlyphs[storeKey] = cache }
         // Blit in an unflipped space (y' = -y), where a CGImage draws upright.
         ctx.saveGState()
@@ -1414,12 +1418,12 @@ final class CellView: NSView {
                 let slot = Int((w0 >> 21) & 0x7)
                 let key = UInt64(cp) | UInt64(slot) << 21 | (wide ? 1 << 24 : 0) | UInt64(fg) << 32
                 let g: CachedGlyph
-                if let hit = cache[key] {
+                if let hit = cache.get(key) {
                     g = hit
                 } else {
                     g = renderGlyph(cp, slot: slot, wide: wide, fg: fg, scale: scale, aa: aa,
                                     face: face)
-                    cache[key] = g
+                    cache.put(key, g)
                 }
                 if let img = g.image {
                     // A crisp (bitmap) face snaps to whole pixels, as its
@@ -1450,7 +1454,41 @@ final class CellView: NSView {
         var size: CGSize
         var pad: CGSize
         var crisp: Bool
+        /// The image's pixel bytes, for `GlyphStore`'s budget.
+        var bytes: Int { image.map { $0.bytesPerRow * $0.height } ?? 0 }
     }
+
+    /// One store of rendered glyphs, bounded by bytes rather than entries
+    /// (a glyph at 2x is ~6 KB, and a count cap let a store reach ~100 MB).
+    /// Two generations make it an approximate LRU with no per-hit
+    /// bookkeeping: new glyphs go into `cur`; when `cur` reaches the budget
+    /// it becomes `old` (the previous `old` is dropped), and a hit in `old`
+    /// moves back into `cur`. So whatever is on screen survives a turnover,
+    /// instead of every glyph re-rendering at once as a full flush did.
+    private struct GlyphStore {
+        static let budget = 24 << 20
+        var cur: [UInt64: CachedGlyph] = [:]
+        var old: [UInt64: CachedGlyph] = [:]
+        var curBytes = 0
+
+        mutating func get(_ key: UInt64) -> CachedGlyph? {
+            if let g = cur[key] { return g }
+            guard let g = old.removeValue(forKey: key) else { return nil }
+            put(key, g)
+            return g
+        }
+
+        mutating func put(_ key: UInt64, _ g: CachedGlyph) {
+            if curBytes >= Self.budget {
+                old = cur
+                cur = [:]
+                curBytes = 0
+            }
+            cur[key] = g
+            curBytes += g.bytes
+        }
+    }
+
 
     /// Draw one glyph into a transparent image at the screen's scale, through
     /// the same `drawGlyph` path as an uncached draw, in a flipped context
@@ -1611,24 +1649,18 @@ final class CellView: NSView {
     /// then put back on top whatever was painted over those cells after
     /// it (a popup or a menu clears a cell's `sub` tag).
     private func drawSubGrids(_ ctx: CGContext, mainN: Int, mainCols: Int) {
-        let surf: Int64 = surface == .panels ? 1 : 0
-        let count = Int(tk_desktop_sub_grid_count(handle, surf))
-        guard count > 0, mainCols > 0 else { return }
-        var info = [Int32](repeating: 0, count: 7)
-        for k in 0..<count {
-            let ok = info.withUnsafeMutableBufferPointer { b in
-                tk_desktop_sub_grid_info(handle, surf, Int64(k), Int64(Int(bitPattern: b.baseAddress)))
-            }
-            guard ok == 1 else { continue }
+        guard subGridCount > 0, mainCols > 0 else { return }
+        for k in 0..<subGridCount {
+            let sg = subGrids[k]
+            guard sg.n > 0 else { continue }
+            let info = sg.info
             let slot = Int(info[0])
             guard slot >= 0, slot < areaGrids.count, let g = areaGrids[slot] else { continue }
             let rx = Int(info[1]), ry = Int(info[2]), rw = Int(info[3]), rh = Int(info[4])
-            let cols = Int(info[5]), rows = Int(info[6])
-            guard cols > 0, rows > 0 else { continue }
-            Self.growCells(&subBuf, &subBufCells, cols * rows)
-            let n = Int(tk_desktop_sub_grid_layout(handle, surf, Int64(k),
-                Int64(Int(bitPattern: subBuf)), Int64(cols * rows)))
-            let rect = CGRect(x: CGFloat(rx) * CELL_W, y: CGFloat(ry) * CELL_H,
+            let cols = Int(info[5])
+            let n = sg.n, subBuf = sg.buf
+            let rect
+ = CGRect(x: CGFloat(rx) * CELL_W, y: CGFloat(ry) * CELL_H,
                               width: CGFloat(rw) * CELL_W, height: CGFloat(rh) * CELL_H)
             ctx.saveGState()
             ctx.clip(to: rect)
@@ -2605,7 +2637,18 @@ final class UnconstrainedWindow: NSWindow {
 /// frames, bars, overlays — kept together so the view's window closing
 /// drops it in one go (`AppController.dropOverlays`). Fields are per look;
 /// most are nil at any time.
+/// One sub-grid of a frame as laid out: `tk_desktop_sub_grid_info`'s
+/// `[slot, x, y, w, h, cols, rows]` and its `n` packed cells.
+final class SubGridFrame {
+    var info = [Int32](repeating: 0, count: 7)
+    var buf = UnsafeMutablePointer<UInt32>.allocate(capacity: CELL_WORDS)
+    var cells = 1
+    var n = 0
+    deinit { buf.deallocate() }
+}
+
 final class ViewChrome {
+
     /// macOS-style UI: the native sheet showing the view's core dialog (see
     /// the "native dialogs" extension at the bottom of the file).
     var nativeSheet: NSWindow?
@@ -2658,6 +2701,14 @@ final class ViewChrome {
     var hostItems: [String: HostItemView]?
     /// Test results views drawn natively, keyed "look:tag".
     var testHosts: [String: TestResultsHost]?
+    /// The last `tk_desktop_ui` payload, and whether reconciling it left
+    /// every dialog it lists up (else a level waits on a busy window and
+    /// the next poll has to retry even when the payload is the same).
+    var uiData: Data?
+    var uiSettled = false
+    /// The last `tk_desktop_review` payload, decoded.
+    var reviewData: Data?
+    var reviewState: [String: Any]?
 
     /// The field's value, cleared.
     func take<T>(_ field: ReferenceWritableKeyPath<ViewChrome, T?>) -> T? {
@@ -3513,22 +3564,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // before snapshotting so the snapshot reflects "no editor
         // focused" state.
         if h == chromeDesktop { tk_desktop_tick(h, 80, 24) }
-        // Snapshot into the existing buffer; grow and retry until it fits.
-        // A single grow could still truncate a menu more than 2x the buffer,
-        // so loop (n == count signals the snapshot filled the whole buffer).
-        var n = 0
-        while true {
-            n = menuBuf.withUnsafeMutableBufferPointer { buf -> Int in
-                Int(tk_desktop_menu_snapshot(h,
-                    Int64(Int(bitPattern: buf.baseAddress)), Int64(buf.count)))
-            }
-            if n < menuBuf.count { break }
-            menuBuf = [UInt8](repeating: 0, count: menuBuf.count * 2)
-        }
-        let hash = menuBuf.withUnsafeBytes { fingerprint(UnsafeRawBufferPointer(rebasing: $0[0..<n])) }
+        let data = readCoreData(&menuBuf, { tk_desktop_menu_snapshot(h, $0, $1) }) ?? Data()
+        let hash = data.withUnsafeBytes { fingerprint($0) }
         if hash == lastMenuHash { return false }
         lastMenuHash = hash
-        let text = String(bytes: menuBuf[0..<n], encoding: .utf8) ?? ""
+        let text = String(decoding: data, as: UTF8.self)
+
         installMenu(from: text)
         return true
     }
@@ -4816,8 +4857,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let chromeH = sender.frame.height - cr.height
         let contentW = frameSize.width - chromeW
         let contentH = frameSize.height - chromeH
-        let snapW = max(CELL_W, (contentW / CELL_W).rounded(.down) * CELL_W)
-        let snapH = max(CELL_H, (contentH / CELL_H).rounded(.down) * CELL_H)
+        let snapW = snapCells(contentW, CELL_W, min: 1)
+        let snapH = snapCells(contentH, CELL_H, min: 1)
+
         return NSSize(width: snapW + chromeW, height: snapH + chromeH)
     }
 
@@ -5015,9 +5057,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // The Turbo Vision look: no macOS title bar. The core paints
                 // the frame, title and close box in the cells, like the
                 // look's dialog windows (`TVDialogWindow`).
-                win = TVDialogNSWindow(contentRect: rect, styleMask: [.borderless, .resizable],
-                                       backing: .buffered, defer: false)
-                win.backgroundColor = .black
+                win = TVDialogNSWindow.make(rect, .resizable, view: sv, deferred: false)
                 sv.onChromeMouse = { [weak sv] e in
                     guard let sv = sv else { return false }
                     return TVDialogWindow.chromeMouse(e, view: sv, resizable: true)
@@ -5326,12 +5366,21 @@ extension AppController {
         let id = ObjectIdentifier(v)
         let cols = Int64(v.cols()), rows = Int64(v.rows())
         let data = readCoreData(&nativeDialogBuf, { tk_desktop_review(v.handle, cols, rows, $0, $1) })
-        let o = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
+        let c = chromes[id]
+        if data == nil, c?.reviewPicker == nil, c?.reviewBar == nil { return false }
+        let o: [String: Any]?
+        if let c = c, data != nil, data == c.reviewData {
+            o = c.reviewState
+        } else {
+            o = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
+            chrome(id).reviewData = data
+            chrome(id).reviewState = o
+        }
         let mode = o?["mode"] as? String ?? ""
         var changed = false
         // Picker sheet. It steps aside while the core asks a question of
         // its own (check out the branch?) — a window shows one sheet.
-        let asking = readCoreData(&nativeDialogBuf, { tk_desktop_native_dialog(v.handle, $0, $1) }) != nil
+        let asking = tk_desktop_native_dialog_up(v.handle) != 0
         if let pc = chromes[id]?.reviewPicker, mode != "picker" || asking {
             chromes[id]?.reviewPicker = nil
             pc.dismiss()
@@ -5415,7 +5464,12 @@ extension AppController {
     func pollTree(_ v: CellView) -> Bool {
         let id = ObjectIdentifier(v)
         let cols = Int64(v.cols()), rows = Int64(v.rows())
-        guard let data = readCoreData(&treeBuf, { tk_desktop_tree(v.handle, cols, rows, $0, $1) }) else {
+        // The stamp changes whenever the payload would: skip the fetch (and
+        // the core's JSON build) on the frames where nothing did.
+        let stamp = tk_desktop_tree_stamp(v.handle, cols, rows)
+        if stamp != 0, let t = chromes[id]?.tree, t.stamp == stamp { return false }
+        guard stamp != 0,
+              let data = readCoreData(&treeBuf, { tk_desktop_tree(v.handle, cols, rows, $0, $1) }) else {
             if let t = chromes[id]?.tree {
                 t.removeFromSuperview()
                 chromes[id]?.tree = nil
@@ -5429,6 +5483,7 @@ extension AppController {
             chrome(id).tree = t
             return t
         }()
+        t.stamp = stamp
         return t.update(data)
     }
 
@@ -5553,10 +5608,10 @@ extension AppController {
     /// Platinum window in the Mac OS 9 look.
     func pollGit(_ v: CellView) -> Bool {
         let id = ObjectIdentifier(v)
-        let cols = Int64(v.cols()), rows = Int64(v.rows())
-        var data = readCoreData(&nativeDialogBuf, { tk_desktop_git(v.handle, cols, rows, $0, $1) })
-        var look = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }?["look"]
-            as? String ?? "macos"
+        var data = readCoreData(&nativeDialogBuf, { tk_desktop_git(v.handle, $0, $1) })
+        // The payload's `look`, without decoding it: the view decodes it
+        // itself, and only when it changed.
+        var look = tk_desktop_platinum_ui(v.handle) != 0 ? "platinum" : "macos"
         if data == nil {
             // The Turbo Vision look's: the core paints it in cells.
             data = readCoreData(&tvDialogBuf, { tk_desktop_git_window(v.handle, $0, $1) })
@@ -5880,15 +5935,28 @@ extension AppController {
     /// Project the open declarative dialog (`tk_desktop_ui`) as a sheet.
     func pollDeclarative(_ v: CellView) -> Bool {
         let id = ObjectIdentifier(v)
-        let o = readCoreData(&nativeDialogBuf, { tk_desktop_ui(v.handle, $0, $1) })
-            .flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
+        let data = readCoreData(&nativeDialogBuf, { tk_desktop_ui(v.handle, $0, $1) })
+        // Unchanged payload, every dialog in it up: nothing to reconcile
+        // (skips the decode and the per-level tree compares).
+        if let c = chromes[id], c.uiSettled, data == c.uiData {
+            (c.declarative?.last as? PlatinumDialog)?.reclaimKey()
+            return false
+        }
+        if data == nil, chromes[id] == nil { return false }
+        let o = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
         var live = chromes[id]?.declarative ?? []
         var windowed = chromes[id]?.declarativeWindows ?? []
         let look = o?["look"] as? String ?? "macos"
-        let a = reconcile(&live, o?["stack"] as? [[String: Any]] ?? [], for: v, asWindow: false, look: look)
-        let b = reconcile(&windowed, o?["window"] as? [[String: Any]] ?? [], for: v, asWindow: true, look: look)
-        chrome(id).declarative = live.isEmpty ? nil : live
-        chrome(id).declarativeWindows = windowed.isEmpty ? nil : windowed
+        let stack = o?["stack"] as? [[String: Any]] ?? []
+        let window = o?["window"] as? [[String: Any]] ?? []
+        let a = reconcile(&live, stack, for: v, asWindow: false, look: look)
+        let b = reconcile(&windowed, window, for: v, asWindow: true, look: look)
+        let c = chrome(id)
+        c.declarative = live.isEmpty ? nil : live
+        c.declarativeWindows = windowed.isEmpty ? nil : windowed
+        c.uiData = data
+        c.uiSettled = live.count == stack.count && windowed.count == window.count
+
         // A Platinum dialog is a child window, not a sheet: a click on the
         // workspace behind it mustn't keep the keyboard.
         (live.last as? PlatinumDialog)?.reclaimKey()
@@ -6022,56 +6090,31 @@ extension AppController {
             if i == destructive { f |= Platinum.DESTRUCTIVE }
             return ["k": "button", "key": "\(i)", "text": l, "f": f]
         }
-        let body: [String: Any] = ["k": "hstack", "n": 1, "kids": [
-            ["k": "icon", "text": destructive >= 0 ? "caution" : "note"],
-            ["k": "vstack", "n": 1, "kids": [
-                ["k": "label", "text": d["message"] as? String ?? ""],
-                ["k": "hstack", "n": 1, "f": Platinum.RIGHT, "kids": buttons],
-            ]],
-        ]]
-        let id = ObjectIdentifier(v)
-        let alert = PlatinumDialog(name: "confirm", view: v, titled: false) { [weak self, weak v] events in
-            guard let self = self, let v = v, let e = events.first, e.first as? Bool == true,
-                  let i = Int(e.count > 1 ? e[1] as? String ?? "" : "") else { return }
-            self.chromes[id]?.take(\.platinumAlert)?.dismiss()
-            guard v.handle != 0 else { return }
-            let code = tk_desktop_native_confirm_answer(v.handle, Int64(i))
-            self.handleHostAction(code, sourceHandle: v.handle, view: v)
-            v.invalidateFrame()
-            v.needsDisplay = true
+        let tree = Platinum.alertTree(icon: destructive >= 0 ? "caution" : "note",
+                                      message: d["message"] as? String ?? "", buttons: buttons,
+                                      cancelKey: labels.firstIndex(of: "Cancel").map { "\($0)" } ?? "")
+        showPlatinumAlert(tree, for: v, in: win, name: "confirm") { key, _ in
+            tk_desktop_native_confirm_answer(v.handle, Int64(Int(key) ?? -1))
         }
-        let cancel = labels.firstIndex(of: "Cancel").map { "\($0)" } ?? ""
-        _ = alert.update(["k": "dialog", "text": "", "key": cancel, "kids": [body]])
-        chrome(id).platinumAlert = alert
-        alert.present(in: win)
     }
 
     /// Show a host-built Platinum alert for `v`. `answer` gets the pressed
     /// button's key and the fields' values by key, runs the core's answer
     /// and returns its host action.
     private func showPlatinumAlert(_ tree: [String: Any], for v: CellView, in win: NSWindow,
-                                   titled: Bool = false,
+                                   titled: Bool = false, name: String = "alert",
                                    answer: @escaping (String, [String: String]) -> Int32) {
         let id = ObjectIdentifier(v)
-        var values: [String: String] = [:]
-        let alert = PlatinumDialog(name: "alert", view: v, titled: titled) { [weak self, weak v] events in
-            for e in events {
-                let isAction = e.first as? Bool ?? false
-                let key = e.count > 1 ? e[1] as? String ?? "" : ""
-                if !isAction {
-                    values[key] = e.count > 2 ? e[2] as? String ?? "" : ""
-                    continue
-                }
-                guard let self = self, let v = v else { return }
-                self.chromes[id]?.take(\.platinumAlert)?.dismiss()
-                guard v.handle != 0 else { return }
-                let code = answer(key, values)
-                self.handleHostAction(code, sourceHandle: v.handle, view: v)
-                v.invalidateFrame()
-                v.needsDisplay = true
-                return
-            }
-        }
+        let alert = PlatinumDialog(name: name, view: v, titled: titled,
+                                   onEvents: Platinum.alertEvents { [weak self, weak v] key, values in
+            guard let self = self, let v = v else { return }
+            self.chromes[id]?.take(\.platinumAlert)?.dismiss()
+            guard v.handle != 0 else { return }
+            let code = answer(key, values)
+            self.handleHostAction(code, sourceHandle: v.handle, view: v)
+            v.invalidateFrame()
+            v.needsDisplay = true
+        })
         _ = alert.update(tree)
         chrome(id).platinumAlert = alert
         alert.present(in: win)
@@ -6083,15 +6126,12 @@ extension AppController {
         var label = (d["label"] as? String ?? "").trimmingCharacters(in: .whitespaces)
         if label.hasSuffix(":") { label.removeLast() }
         let text = d["text"] as? String ?? ""
-        let body: [String: Any] = ["k": "vstack", "n": 1, "kids": [
-            ["k": "label", "text": label],
-            ["k": "text", "key": "text", "value": text, "n": 40],
-            ["k": "hstack", "n": 1, "f": Platinum.RIGHT, "kids": [
-                ["k": "button", "key": "cancel", "text": "Cancel", "f": Platinum.CANCEL],
-                ["k": "button", "key": "ok", "text": d["action"] as? String ?? "OK", "f": Platinum.DEFAULT],
-            ]],
-        ]]
-        showPlatinumAlert(["k": "dialog", "text": "", "key": "cancel", "kids": [body]], for: v, in: win) {
+        let tree = Platinum.alertTree(
+            icon: nil, message: label, extra: [["k": "text", "key": "text", "value": text, "n": 40]],
+            buttons: [["k": "button", "key": "cancel", "text": "Cancel", "f": Platinum.CANCEL],
+                      ["k": "button", "key": "ok", "text": d["action"] as? String ?? "OK", "f": Platinum.DEFAULT]],
+            cancelKey: "cancel")
+        showPlatinumAlert(tree, for: v, in: win) {
             key, values in
             withUTF8Arg(values["text"] ?? text) { p, l in
                 tk_desktop_native_prompt_answer(v.handle, p, l, key == "ok" ? 1 : 0)
@@ -6109,14 +6149,9 @@ extension AppController {
             buttons.append(["k": "button", "key": "\(i)", "text": a,
                             "f": i == actions.count - 1 ? Platinum.DEFAULT : 0])
         }
-        let body: [String: Any] = ["k": "hstack", "n": 1, "kids": [
-            ["k": "icon", "text": "note"],
-            ["k": "vstack", "n": 1, "kids": [
-                ["k": "label", "text": d["message"] as? String ?? ""],
-                ["k": "hstack", "n": 1, "f": Platinum.RIGHT, "kids": buttons],
-            ]],
-        ]]
-        showPlatinumAlert(["k": "dialog", "text": "", "key": "-1", "kids": [body]], for: v, in: win) {
+        let tree = Platinum.alertTree(icon: "note", message: d["message"] as? String ?? "",
+                                      buttons: buttons, cancelKey: "-1")
+        showPlatinumAlert(tree, for: v, in: win) {
             key, _ in
             tk_desktop_native_choice_answer(v.handle, Int64(Int(key) ?? -1))
             return 0
@@ -6272,6 +6307,35 @@ struct TabInfo: Equatable {
     var title: String
     var path: String
     var dirty: Bool
+
+    /// A `tk_desktop_tabs` payload: the focused index and the tabs.
+    static func decode(_ data: Data) -> (focused: Int, tabs: [TabInfo])? {
+        guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return nil }
+        let tabs = (obj["tabs"] as? [[String: Any]] ?? []).map {
+            TabInfo(title: $0["title"] as? String ?? "",
+                    path: $0["path"] as? String ?? "",
+                    dirty: $0["dirty"] as? Bool ?? false)
+        }
+        return (obj["focused"] as? Int ?? -1, tabs)
+    }
+}
+
+/// Tab widths for a strip: each tab its `natural` width, unless they don't
+/// all fit in `avail` — then the widest shrink to the largest shared cap
+/// `c` with sum(min(w, c)) <= avail (never below `minW`), so short names
+/// never pay for long ones. `whole` rounds the cap down to a whole point.
+func fitTabWidths(_ natural: [CGFloat], avail: CGFloat, minW: CGFloat, whole: Bool = false) -> [CGFloat] {
+    guard natural.reduce(0, +) > avail, !natural.isEmpty else { return natural }
+    let sorted = natural.sorted()
+    var rest = avail
+    var cap = minW
+    for (k, w) in sorted.enumerated() {
+        var share = rest / CGFloat(sorted.count - k)
+        if whole { share = floor(share) }
+        if w <= share { rest -= w } else { cap = max(minW, share); break }
+    }
+    return natural.map { min($0, cap) }
 }
 
 final class TabStripView: NSView {
@@ -6302,14 +6366,9 @@ final class TabStripView: NSView {
     func update(from data: Data) -> Bool {
         if data == lastData { return false }
         lastData = data
-        guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        else { return false }
-        focused = obj["focused"] as? Int ?? -1
-        tabs = (obj["tabs"] as? [[String: Any]] ?? []).map {
-            TabInfo(title: $0["title"] as? String ?? "",
-                    path: $0["path"] as? String ?? "",
-                    dirty: $0["dirty"] as? Bool ?? false)
-        }
+        guard let d = TabInfo.decode(data) else { return false }
+        focused = d.focused
+        tabs = d.tabs
         if hover >= tabs.count { hover = -1 }
         layoutWidth = -1
         needsDisplay = true
@@ -6331,19 +6390,7 @@ final class TabStripView: NSView {
         guard layoutWidth != bounds.width else { return }
         layoutWidth = bounds.width
         let natural = tabs.indices.map { naturalWidth($0) }
-        let avail = bounds.width - 16
-        var widths = natural
-        if natural.reduce(0, +) > avail && !natural.isEmpty {
-            // Largest cap c with sum(min(w, c)) <= avail.
-            let sorted = natural.sorted()
-            var rest = avail
-            var cap = Self.minTabW
-            for (k, w) in sorted.enumerated() {
-                let share = rest / CGFloat(sorted.count - k)
-                if w <= share { rest -= w } else { cap = max(Self.minTabW, share); break }
-            }
-            widths = natural.map { min($0, cap) }
-        }
+        let widths = fitTabWidths(natural, avail: bounds.width - 16, minW: Self.minTabW)
         var x: CGFloat = 8
         frames = widths.map { w in
             defer { x += w }
@@ -7323,6 +7370,163 @@ class GitViewBase: NSObject {
 
     fileprivate func ch(_ c: Character) -> UInt32 { c.unicodeScalars.first!.value }
 
+    // MARK: overlays (each view shows them as an alert in its look)
+
+    /// The core's open overlay (a confirm, the commit message, the
+    /// remote picker, …) as an alert, whatever the look.
+    struct AlertSpec {
+        enum Icon { case none, note, caution }
+        enum Field {
+            case none
+            /// Read-only output, scrolled to its end.
+            case output(String)
+            /// An editable message, answered as the text.
+            case message(String)
+            /// A pick among `opts`, answered as the index.
+            case choice([String], Int)
+            /// A one-line field the user types into, answered as the text.
+            case typed
+        }
+        struct Button {
+            var key: String
+            var title: String
+            var destructive = false
+        }
+        /// A heading over `message` (the NSAlert's message text); nil
+        /// when the message is the heading.
+        var title: String?
+        var message = ""
+        var detail = ""
+        var icon = Icon.note
+        /// The red stop of an irreversible, typed confirmation.
+        var critical = false
+        var field = Field.none
+        /// Default first; the answer is the clicked one's key. The last is
+        /// what Esc picks.
+        var buttons: [Button] = []
+        var cancelKey: String { buttons.last?.key ?? "cancel" }
+    }
+
+    /// The alert for overlay `ov`, or nil when none is open.
+    fileprivate static func alertSpec(_ ov: [String: Any]) -> (kind: String, spec: AlertSpec)? {
+        let kind = ov["kind"] as? String ?? ""
+        if kind.isEmpty { return nil }
+        let message = (ov["message"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let action = (ov["action"] as? String ?? "").capitalized
+        let cancel = AlertSpec.Button(key: "cancel", title: "Cancel")
+        var s = AlertSpec()
+        switch kind {
+        case "status":
+            s.title = "Git"
+            s.message = message
+            s.icon = .caution
+            s.buttons = [.init(key: "ok", title: "Close")]
+        case "output":
+            s.title = "Git output"
+            s.icon = .none
+            s.field = .output(ov["output"] as? String ?? "")
+            s.buttons = [.init(key: "ok", title: "Close")]
+        case "merge_choice":
+            s.message = message.isEmpty ? "Bring the branch in" : message
+            s.detail = "A merge commit keeps both histories; a rebase replays the branch's commits for straight history."
+            s.buttons = [.init(key: "merge", title: "Merge Commit"), .init(key: "rebase", title: "Rebase"), cancel]
+        case "edit_message", "commit":
+            s.title = kind == "commit" ? "Commit" : "Reword commit"
+            s.icon = .none
+            s.field = .message(ov["text"] as? String ?? "")
+            s.buttons = [.init(key: "ok", title: kind == "commit" ? "Commit" : "Reword"), cancel]
+        case "remote_pick":
+            s.title = "Push to which remote?"
+            s.field = .choice(ov["remotes"] as? [String] ?? [], ov["remote_sel"] as? Int ?? 0)
+            s.buttons = [.init(key: "ok", title: "Push"), cancel]
+        case "delete_remote_typed":
+            let prefix = ov["prefix"] as? String ?? ""
+            s.message = message
+            s.detail = "Its work isn't on the main line. Type “\(prefix)” to delete it on the remote."
+            s.icon = .caution
+            s.critical = true
+            s.field = .typed
+            s.buttons = [.init(key: "ok", title: "Delete", destructive: true), cancel]
+        default:   // amend / revert / discard_line / delete_branch
+            s.message = message.isEmpty ? "Are you sure?" : message
+            s.icon = kind == "amend" ? .note : .caution
+            s.buttons = [.init(key: "ok", title: action.isEmpty ? "Continue" : action,
+                               destructive: kind != "amend"), cancel]
+        }
+        return (kind, s)
+    }
+
+    /// Answer the overlay with button `key` and the field's `text`.
+    fileprivate func answerOverlay(_ key: String, _ text: String) {
+        guard let v = view, v.handle != 0 else { return }
+        let choice = ["ok", "merge", "rebase"].contains(key) ? key : "cancel"
+        withUTF8Arg(choice) { cp, cl in
+            withUTF8Arg(text) { tp, tl in tk_desktop_git_answer(v.handle, cp, cl, tp, tl) }
+        }
+        lastData = Data()
+    }
+
+
+    // MARK: context menus (each view renders them in its look)
+
+    /// One context-menu entry: its title and what it does. An empty title
+    /// is a separator.
+    typealias MenuItem = (title: String, run: () -> Void)
+
+    /// A key of the view's own, as a menu action.
+    private func keyAction(_ pane: Int, _ c: Character) -> () -> Void {
+        { [weak self] in
+            guard let self = self else { return }
+            self.key(pane, c == " " ? 0x20 : self.ch(c))
+        }
+    }
+
+    /// The menu for core index `idx` of list `pane`; `open` opens the
+    /// row in the editor, the view's way.
+    fileprivate func listMenuItems(_ pane: Int, _ idx: Int, open: @escaping () -> Void) -> [MenuItem] {
+        switch pane {
+        case GitPane.files:
+            let x = files[idx]["x"] as? String ?? " "
+            return [(x != " " && x != "?" ? "Unstage" : "Stage", keyAction(GitPane.files, " ")),
+                    ("Open in Editor", open),
+                    ("", {}),
+                    (x == "?" ? "Delete File…" : "Discard Changes…", keyAction(GitPane.files, "d"))]
+        case GitPane.branches:
+            let b = branches[idx]
+            let name = b["name"] as? String ?? ""
+            let current = state["branch"] as? String ?? ""
+            var items: [MenuItem] = [("Check Out", keyAction(GitPane.branches, " "))]
+            if !(b["current"] as? Bool ?? false) {
+                items.append(("Bring “\(name)” into “\(current)”…", keyAction(GitPane.branches, "M")))
+                items.append(("Rebase", keyAction(GitPane.branches, "r")))
+            }
+            return items + [("Compare on GitHub", keyAction(GitPane.branches, "o")),
+                            ("", {}),
+                            ("Delete Branch…", keyAction(GitPane.branches, "d"))]
+        default:
+            let sha = commits[idx]["sha"] as? String ?? ""
+            return [("Reword…", keyAction(GitPane.commits, "e")),
+                    ("Copy SHA", {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(sha, forType: .string)
+                    })]
+        }
+    }
+
+    /// The menu for the cursor line of diff `pane`.
+    fileprivate func diffMenuItems(_ pane: Int, open: @escaping () -> Void) -> [MenuItem] {
+        var items: [MenuItem] = []
+        switch pane {
+        case GitPane.unstaged:
+            items = [("Stage Line", keyAction(GitPane.unstaged, " ")),
+                     ("Discard Line…", keyAction(GitPane.unstaged, "d"))]
+        case GitPane.staged:
+            items = [("Unstage Line", keyAction(GitPane.staged, " "))]
+        default: break
+        }
+        return items + [("Open in Editor", open)]
+    }
+
     /// Open the file at core index `idx` of the files list.
     fileprivate func openFile(_ idx: Int) {
         guard let v = view, v.handle != 0 else { return }
@@ -7956,80 +8160,46 @@ final class GitController: GitViewBase, NSTableViewDataSource, NSTableViewDelega
     // MARK: overlays → alerts
 
     private func showOverlayIfNeeded(_ ov: [String: Any]) {
-        let kind = ov["kind"] as? String ?? ""
-        if kind.isEmpty { overlayShown = ""; return }
+        guard let spec = Self.alertSpec(ov) else { overlayShown = ""; return }
+        let kind = spec.kind, s = spec.spec
         guard kind != overlayShown, panel.attachedSheet == nil else { return }
         overlayShown = kind
-        let message = (ov["message"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let action = (ov["action"] as? String ?? "").capitalized
         let alert = NSAlert()
-        var answer: (NSApplication.ModalResponse) -> (String, String) = { r in
-            (r == .alertFirstButtonReturn ? "ok" : "cancel", "")
-        }
-        switch kind {
-        case "status":
-            alert.messageText = "Git"
-            alert.informativeText = message
-            alert.alertStyle = .warning
-            alert.addButton(withTitle: "Close")
-        case "output":
-            alert.messageText = "Git output"
-            alert.addButton(withTitle: "Close")
-            alert.accessoryView = scrollingText(ov["output"] as? String ?? "", height: 260, editable: false).0
-        case "merge_choice":
-            alert.messageText = message.isEmpty ? "Bring the branch in" : message
-            alert.informativeText = "A merge commit keeps both histories; a rebase replays the branch's commits for straight history."
-            alert.addButton(withTitle: "Merge Commit")
-            alert.addButton(withTitle: "Rebase")
-            alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
-            answer = { r in
-                r == .alertFirstButtonReturn ? ("merge", "") :
-                r == .alertSecondButtonReturn ? ("rebase", "") : ("cancel", "")
-            }
-        case "edit_message", "commit":
-            alert.messageText = kind == "commit" ? "Commit" : "Reword commit"
-            let (sv, tv) = scrollingText(ov["text"] as? String ?? "", height: 120, editable: true)
+        alert.messageText = s.title ?? s.message
+        alert.informativeText = s.title != nil ? s.message : s.detail
+        alert.alertStyle = s.critical ? .critical : s.icon == .caution ? .warning : .informational
+        var text: () -> String = { "" }
+        switch s.field {
+        case .none: break
+        case .output(let out):
+            alert.accessoryView = scrollingText(out, height: 260, editable: false).0
+        case .message(let msg):
+            let (sv, tv) = scrollingText(msg, height: 120, editable: true)
             alert.accessoryView = sv
-            alert.addButton(withTitle: kind == "commit" ? "Commit" : "Reword")
-            alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
             alert.window.initialFirstResponder = tv
-            answer = { r in (r == .alertFirstButtonReturn ? "ok" : "cancel", tv.string) }
-        case "remote_pick":
-            alert.messageText = "Push to which remote?"
+            text = { tv.string }
+        case .choice(let opts, let sel):
             let pop = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 260, height: 26))
-            pop.addItems(withTitles: ov["remotes"] as? [String] ?? [])
-            pop.selectItem(at: ov["remote_sel"] as? Int ?? 0)
+            pop.addItems(withTitles: opts)
+            pop.selectItem(at: sel)
             alert.accessoryView = pop
-            alert.addButton(withTitle: "Push")
-            alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
-            answer = { r in (r == .alertFirstButtonReturn ? "ok" : "cancel", "\(pop.indexOfSelectedItem)") }
-        case "delete_remote_typed":
-            let prefix = ov["prefix"] as? String ?? ""
-            alert.messageText = message
-            alert.informativeText = "Its work isn't on the main line. Type “\(prefix)” to delete it on the remote."
-            alert.alertStyle = .critical
+            text = { "\(pop.indexOfSelectedItem)" }
+        case .typed:
             let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 22))
             alert.accessoryView = field
             alert.window.initialFirstResponder = field
-            let del = alert.addButton(withTitle: "Delete")
-            del.hasDestructiveAction = true
-            alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
-            answer = { r in (r == .alertFirstButtonReturn ? "ok" : "cancel", field.stringValue) }
-        default:   // amend / revert / discard_line / delete_branch
-            alert.messageText = message.isEmpty ? "Are you sure?" : message
-            alert.alertStyle = kind == "amend" ? .informational : .warning
-            let b = alert.addButton(withTitle: action.isEmpty ? "Continue" : action)
-            b.hasDestructiveAction = kind != "amend"
-            alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
+            text = { field.stringValue }
+        }
+        for b in s.buttons {
+            let button = alert.addButton(withTitle: b.title)
+            button.hasDestructiveAction = b.destructive
+            if b.key == "cancel" { button.keyEquivalent = "\u{1b}" }
         }
         alert.beginSheetModal(for: panel) { [weak self] r in
-            guard let self = self, let v = self.view, v.handle != 0 else { return }
-            let (choice, text) = answer(r)
-            withUTF8Arg(choice) { cp, cl in
-                withUTF8Arg(text) { tp, tl in tk_desktop_git_answer(v.handle, cp, cl, tp, tl) }
-            }
+            guard let self = self else { return }
+            let i = r.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+            self.answerOverlay(i >= 0 && i < s.buttons.count ? s.buttons[i].key : "cancel", text())
             self.overlayShown = ""
-            self.lastData = Data()
             self.onAfterAction?()
         }
     }
@@ -8055,51 +8225,19 @@ extension GitController: NSMenuDelegate {
     /// the pointer — each item is one of the view's keys.
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        func add(_ title: String, _ run: @escaping () -> Void) { menu.addItem(TabMenuItem(title, run)) }
+        var items: [MenuItem] = []
         if let t = [filesTable, branchesTable, commitsTable].first(where: { $0.menu === menu }) {
             guard let idx = index(t, t.clickedRow) else { return }
             select(t.tag, idx)
-            switch t.tag {
-            case GitPane.files:
-                let f = files[idx]
-                let staged = (f["x"] as? String ?? " ") != " " && (f["x"] as? String) != "?"
-                add(staged ? "Unstage" : "Stage") { [weak self] in self?.key(GitPane.files, 0x20) }
-                add("Open in Editor") { [weak self, weak t] in self?.tableDoubleClicked(t) }
-                menu.addItem(.separator())
-                add((f["x"] as? String) == "?" ? "Delete File…" : "Discard Changes…") { [weak self] in
-                    self?.key(GitPane.files, self?.ch("d") ?? 0) }
-            case GitPane.branches:
-                let b = branches[idx]
-                let name = b["name"] as? String ?? ""
-                let current = state["branch"] as? String ?? ""
-                add("Check Out") { [weak self] in self?.key(GitPane.branches, 0x20) }
-                if !(b["current"] as? Bool ?? false) {
-                    add("Bring “\(name)” into “\(current)”…") { [weak self] in
-                        self?.key(GitPane.branches, self?.ch("M") ?? 0) }
-                    add("Rebase") { [weak self] in self?.key(GitPane.branches, self?.ch("r") ?? 0) }
-                }
-                add("Compare on GitHub") { [weak self] in self?.key(GitPane.branches, self?.ch("o") ?? 0) }
-                menu.addItem(.separator())
-                add("Delete Branch…") { [weak self] in self?.key(GitPane.branches, self?.ch("d") ?? 0) }
-            default:
-                let c = commits[idx]
-                add("Reword…") { [weak self] in self?.key(GitPane.commits, self?.ch("e") ?? 0) }
-                add("Copy SHA") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(c["sha"] as? String ?? "", forType: .string)
-                }
-            }
+            items = listMenuItems(t.tag, idx) { [weak self, weak t] in self?.tableDoubleClicked(t) }
         } else if let dp = [unstaged, staged].first(where: { $0.view.menu === menu }) {
             guard dp.cursorRow != nil else { return }
-            switch corePane(dp) {
-            case GitPane.unstaged:
-                add("Stage Line") { [weak self] in self?.key(GitPane.unstaged, 0x20) }
-                add("Discard Line…") { [weak self] in self?.key(GitPane.unstaged, self?.ch("d") ?? 0) }
-            case GitPane.staged:
-                add("Unstage Line") { [weak self] in self?.key(GitPane.staged, 0x20) }
-            default: break
+            items = diffMenuItems(corePane(dp)) { [weak self, weak dp] in
+                if let dp = dp { self?.openCursor(dp) }
             }
-            add("Open in Editor") { [weak self] in self?.openCursor(dp) }
+        }
+        for item in items {
+            menu.addItem(item.title.isEmpty ? .separator() : TabMenuItem(item.title, item.run))
         }
     }
 }
@@ -8377,6 +8515,9 @@ final class FileTreeOverlay: NSVisualEffectView, NSTableViewDataSource, NSTableV
     private let scroll = NSScrollView()
     private var entries: [[Any]] = []
     private var lastData = Data()
+    /// `tk_desktop_tree_stamp` of the payload last applied.
+    var stamp: Int64 = 0
+
     private var syncing = false
     private var iconCache: [String: NSImage] = [:]
 
@@ -10330,11 +10471,10 @@ final class PlatinumPaneHeader: NSView, PaneHeaderView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         observers.forEach(NotificationCenter.default.removeObserver)
-        observers = [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification].map {
-            NotificationCenter.default.addObserver(forName: $0, object: window, queue: .main) { [weak self] _ in
-                self?.needsDisplay = true
-            }
-        }
+        observers = []
+        // object: nil would observe every window's key changes.
+        guard let win = window else { return }
+        observers = Platinum.observeKeyState(of: win) { [weak self] in self?.needsDisplay = true }
     }
 
     private var boxY: CGFloat { floor((bounds.height - 12) / 2) }
@@ -11752,6 +11892,40 @@ extension DeclarativeController: DeclarativeSurface {
 }
 
 enum Platinum {
+    /// A Platinum alert's tree: the `icon` (none when nil) beside a column
+    /// of `message`, the `extra` controls under it and the right-aligned
+    /// `buttons`; Esc answers `cancelKey`.
+    static func alertTree(icon: String?, message: String, extra: [[String: Any]] = [],
+                          buttons: [[String: Any]], cancelKey: String) -> [String: Any] {
+        let kids: [[String: Any]] = [["k": "label", "text": message]] + extra
+            + [["k": "hstack", "n": 1, "f": RIGHT, "kids": buttons]]
+        let column: [String: Any] = ["k": "vstack", "n": 1, "kids": kids]
+        let body: [String: Any] = icon.map {
+            ["k": "hstack", "n": 1, "kids": [["k": "icon", "text": $0], column]]
+        } ?? column
+        return ["k": "dialog", "text": "", "key": cancelKey, "kids": [body]]
+    }
+
+    /// A `PlatinumDialog` event handler for an alert: field edits collect
+    /// in a map of values by key (starting from `initial`), and the first
+    /// button press hands its key and the values to `answer`.
+    static func alertEvents(_ initial: [String: String] = [:],
+                            _ answer: @escaping (String, [String: String]) -> Void) -> ([[Any]]) -> Void {
+        var values = initial
+        return { events in
+            for e in events {
+                let key = e.count > 1 ? e[1] as? String ?? "" : ""
+                guard e.first as? Bool ?? false else {
+                    values[key] = e.count > 2 ? e[2] as? String ?? "" : ""
+                    continue
+                }
+                answer(key, values)
+                return
+            }
+        }
+    }
+
+
     static func gray(_ v: Int) -> NSColor { NSColor(srgbRed: CGFloat(v) / 255, green: CGFloat(v) / 255,
                                                     blue: CGFloat(v) / 255, alpha: 1) }
     /// The dialog and window background; E3, as in Apple's own figures.
@@ -13484,18 +13658,7 @@ final class TVMainFrame: NSView, NSDraggingSource {
     /// side and the top staying put.
     private func resize(left: Bool, down: Bool) {
         guard let win = window else { return }
-        let start = NSEvent.mouseLocation
-        let f0 = win.frame
-        while let ev = win.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
-            let p = NSEvent.mouseLocation
-            let w = f0.width + (left ? start.x - p.x : p.x - start.x)
-            let h = down ? f0.height + start.y - p.y : f0.height
-            let cw = max(40 * CELL_W, (w / CELL_W).rounded(.down) * CELL_W)
-            let ch = max(12 * CELL_H, (h / CELL_H).rounded(.down) * CELL_H)
-            win.setFrame(NSRect(x: left ? f0.maxX - cw : f0.minX, y: f0.maxY - ch, width: cw, height: ch),
-                         display: true)
-            if ev.type == .leftMouseUp { break }
-        }
+        trackCellResize(win, left: left, down: down, minCols: 40, minRows: 12)
     }
 
     /// A press on the proxy icon: past a few points of motion, drag the file.
@@ -13568,13 +13731,9 @@ final class TVDialogWindow: NSObject {
     init(mainView: CellView, view: CellView) {
         self.view = view
         self.mainView = mainView
-        win = TVDialogNSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
-                               styleMask: [.borderless], backing: .buffered, defer: true)
+        win = TVDialogNSWindow.make(NSRect(x: 0, y: 0, width: 400, height: 200), view: view)
         super.init()
         win.isReleasedWhenClosed = false
-        win.backgroundColor = .black
-        win.acceptsMouseMovedEvents = true
-        win.contentView = view
         view.onChromeMouse = { [weak self] e in self?.chromeMouse(e) ?? false }
     }
 
@@ -13654,21 +13813,10 @@ final class TVDialogWindow: NSObject {
             return true
         }
         guard resizable && (x == 0 || x >= c - 1) else { return false }
-        let left = x == 0, down = y >= r - 1
-        let start = NSEvent.mouseLocation
-        let f0 = win.frame
-        while let ev = win.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
-            let p = NSEvent.mouseLocation
-            let w = f0.width + (left ? start.x - p.x : p.x - start.x)
-            let h = down ? f0.height + start.y - p.y : f0.height
-            let cw = max(40 * CELL_W, (w / CELL_W).rounded(.down) * CELL_W)
-            let ch = max(10 * CELL_H, (h / CELL_H).rounded(.down) * CELL_H)
-            win.setFrame(NSRect(x: left ? f0.maxX - cw : f0.minX, y: f0.maxY - ch, width: cw, height: ch),
-                         display: true)
+        trackCellResize(win, left: x == 0, down: y >= r - 1, minCols: 40, minRows: 10) {
             resized()
             view.invalidateFrame()
             view.needsDisplay = true
-            if ev.type == .leftMouseUp { break }
         }
         return true
     }
@@ -13677,6 +13825,45 @@ final class TVDialogWindow: NSObject {
 /// A borderless window doesn't become key on its own.
 final class TVDialogNSWindow: NSWindow {
     override var canBecomeKey: Bool { true }
+
+    /// A Turbo Vision cell window: borderless (the core paints the frame
+    /// in `view`'s cells, which fill it), black under the grid.
+    static func make(_ rect: NSRect, _ style: NSWindow.StyleMask = [], view: NSView,
+                     deferred: Bool = true) -> TVDialogNSWindow {
+        let w = TVDialogNSWindow(contentRect: rect, styleMask: style.union(.borderless),
+                                 backing: .buffered, defer: deferred)
+        w.backgroundColor = .black
+        w.acceptsMouseMovedEvents = true
+        w.contentView = view
+        return w
+    }
+}
+
+/// `x` cut down to a whole number of `cell`s, and at least `minCells`.
+func snapCells(_ x: CGFloat, _ cell: CGFloat, min minCells: CGFloat = 0) -> CGFloat {
+    max(minCells * cell, (x / cell).rounded(.down) * cell)
+}
+
+/// Follow a resize drag of `win` from the mouse-down until the button
+/// comes up, keeping the grid inside its `chrome` a whole number of cells
+/// (at least `minCols` × `minRows`): `left` drags the left side (else the
+/// right) and `down` the bottom too; the top and the opposite side stay
+/// put. `step` runs after each change of frame.
+func trackCellResize(_ win: NSWindow, left: Bool, down: Bool, chrome: NSSize = .zero,
+                     minCols: CGFloat, minRows: CGFloat, step: () -> Void = {}) {
+    let start = NSEvent.mouseLocation
+    let f0 = win.frame
+    while let ev = win.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
+        let p = NSEvent.mouseLocation
+        let w = f0.width - chrome.width + (left ? start.x - p.x : p.x - start.x)
+        let h = f0.height - chrome.height + (down ? start.y - p.y : 0)
+        let cw = snapCells(w, CELL_W, min: minCols) + chrome.width
+        let ch = snapCells(h, CELL_H, min: minRows) + chrome.height
+        win.setFrame(NSRect(x: left ? f0.maxX - cw : f0.minX, y: f0.maxY - ch, width: cw, height: ch),
+                     display: true)
+        step()
+        if ev.type == .leftMouseUp { break }
+    }
 }
 
 /// `f` shrunk (and, if need be, shifted) to lie wholly inside the visible
@@ -13860,15 +14047,11 @@ final class TVGitWindow: NSObject, GitSurface {
     init(mainView: CellView, view: CellView) {
         self.view = view
         self.mainView = mainView
-        win = TVDialogNSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 200),
-                               styleMask: [.borderless, .miniaturizable, .resizable],
-                               backing: .buffered, defer: true)
+        win = TVDialogNSWindow.make(NSRect(x: 0, y: 0, width: 400, height: 200),
+                                    [.miniaturizable, .resizable], view: view)
         super.init()
         win.isReleasedWhenClosed = false
-        win.backgroundColor = .black
-        win.acceptsMouseMovedEvents = true
         win.title = "Local changes"
-        win.contentView = view
         view.onChromeMouse = { [weak self] e in
             guard let self = self else { return false }
             // The dock box, where a window's zoom box sits (`paint_git_window`).
@@ -13885,15 +14068,14 @@ final class TVGitWindow: NSObject, GitSurface {
     func present(in parent: NSWindow) {
         let p = GitWindowPlacement(window: win, parent: parent, project: mainView?.project)
         p.snap = { f in
-            let w = max(40 * CELL_W, (f.width / CELL_W).rounded(.down) * CELL_W)
-            let h = max(10 * CELL_H, (f.height / CELL_H).rounded(.down) * CELL_H)
+            let w = snapCells(f.width, CELL_W, min: 40), h = snapCells(f.height, CELL_H, min: 10)
             return NSRect(x: f.minX, y: f.maxY - h, width: w, height: h)
         }
         p.defaultFrame = { pw in
             // The grid's size for it: most of the project window, near its top.
             let pf = pw.frame
-            let w = max(60 * CELL_W, (pf.width * 0.9 / CELL_W).rounded(.down) * CELL_W)
-            let h = max(16 * CELL_H, ((pf.height - 4 * CELL_H) / CELL_H).rounded(.down) * CELL_H)
+            let w = snapCells(pf.width * 0.9, CELL_W, min: 60)
+            let h = snapCells(pf.height - 4 * CELL_H, CELL_H, min: 16)
             return NSRect(x: floor(pf.midX - w / 2), y: floor(pf.maxY - 2 * CELL_H - h), width: w, height: h)
         }
         p.onDockChange = { [weak self] docked in
@@ -14081,10 +14263,11 @@ final class PlatinumMainFrame: PlatinumFrameView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         observers.forEach(NotificationCenter.default.removeObserver)
-        observers = [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification].map {
-            NotificationCenter.default.addObserver(forName: $0, object: window, queue: .main) { [weak self] _ in
-                if let self = self { Platinum.activeChanged(self) }
-            }
+        observers = []
+        // object: nil would observe every window's key changes.
+        guard let win = window else { return }
+        observers = Platinum.observeKeyState(of: win) { [weak self] in
+            if let self = self { Platinum.activeChanged(self) }
         }
     }
 
@@ -14185,19 +14368,8 @@ final class PlatinumGrowBox: NSView {
 
     override func mouseDown(with event: NSEvent) {
         guard let win = window, let pf = superview as? PlatinumMainFrame else { return }
-        let start = NSEvent.mouseLocation
-        let f0 = win.frame
-        let chrome = pf.chrome
-        while let e = win.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) {
-            let p = NSEvent.mouseLocation
-            // Whole cells, so the grid fills the window.
-            let cw = max(40 * CELL_W, ((f0.width + p.x - start.x - chrome.width) / CELL_W).rounded(.down) * CELL_W)
-            let ch = max(12 * CELL_H, ((f0.height - (p.y - start.y) - chrome.height) / CELL_H).rounded(.down) * CELL_H)
-            let size = NSSize(width: cw + chrome.width, height: ch + chrome.height)
-            win.setFrame(NSRect(x: f0.minX, y: f0.maxY - size.height, width: size.width, height: size.height),
-                         display: true)
-            if e.type == .leftMouseUp { break }
-        }
+        // Whole cells, so the grid fills the window.
+        trackCellResize(win, left: false, down: true, chrome: pf.chrome, minCols: 40, minRows: 12)
     }
 }
 
@@ -14228,14 +14400,9 @@ final class PlatinumTabStrip: NSView {
     func update(from data: Data) -> Bool {
         if data == lastData { return false }
         lastData = data
-        guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        else { return false }
-        focused = obj["focused"] as? Int ?? -1
-        tabs = (obj["tabs"] as? [[String: Any]] ?? []).map {
-            TabInfo(title: $0["title"] as? String ?? "",
-                    path: $0["path"] as? String ?? "",
-                    dirty: $0["dirty"] as? Bool ?? false)
-        }
+        guard let d = TabInfo.decode(data) else { return false }
+        focused = d.focused
+        tabs = d.tabs
         layoutWidth = -1
         needsDisplay = true
         return true
@@ -14253,18 +14420,9 @@ final class PlatinumTabStrip: NSView {
         layoutWidth = bounds.width
         let natural = tabs.map { min(Self.maxTabW, max(Self.minTabW, Platinum.width($0.title) + Self.slot + 24)) }
         let avail = bounds.width - 16 + CGFloat(max(0, tabs.count - 1))
-        var widths = natural
-        if natural.reduce(0, +) > avail && !natural.isEmpty {
-            let sorted = natural.sorted()
-            var rest = avail
-            var cap = Self.minTabW
-            for (k, w) in sorted.enumerated() {
-                let share = floor(rest / CGFloat(sorted.count - k))
-                if w <= share { rest -= w } else { cap = max(Self.minTabW, share); break }
-            }
-            widths = natural.map { min($0, cap) }
-        }
+        let widths = fitTabWidths(natural, avail: avail, minW: Self.minTabW, whole: true)
         var x: CGFloat = 8
+
         frames = widths.map { w in
             defer { x += w - 1 }
             return NSRect(x: x, y: 0, width: w, height: Self.tabH)
@@ -15107,7 +15265,6 @@ final class PlatinumGitView: GitViewBase, GitSurface {
     private var busy = false
     private var note = ""
     private var alert: PlatinumDialog?
-    private var alertValues: [String: String] = [:]
     private var overlayShown = ""
     private var dismissed = false
     private var placement: GitWindowPlacement?
@@ -15547,7 +15704,7 @@ final class PlatinumGitView: GitViewBase, GitSurface {
 
     // MARK: contextual menus
 
-    private func popUp(_ items: [(String, () -> Void)], at e: NSEvent) {
+    private func popUp(_ items: [MenuItem], at e: NSEvent) {
         guard !items.isEmpty, let w = e.window else { return }
         let p = w.convertPoint(toScreen: e.locationInWindow)
         let pm = items.map { PMItem(title: $0.0, separator: $0.0.isEmpty) }
@@ -15559,180 +15716,69 @@ final class PlatinumGitView: GitViewBase, GitSurface {
 
     private func listMenu(_ pane: Int, _ r: Int, _ e: NSEvent) {
         guard let idx = index(pane, r) else { return }
-        var items: [(String, () -> Void)] = []
-        func add(_ t: String, _ run: @escaping () -> Void) { items.append((t, run)) }
-        func sep() { items.append(("", {})) }
-        switch pane {
-        case GitPane.files:
-            let f = files[idx]
-            let x = f["x"] as? String ?? " "
-            add(x != " " && x != "?" ? "Unstage" : "Stage") { [weak self] in self?.key(GitPane.files, 0x20) }
-            add("Open in Editor") { [weak self] in self?.activate(GitPane.files, r) }
-            sep()
-            add(x == "?" ? "Delete File…" : "Discard Changes…") { [weak self] in
-                guard let self = self else { return }
-                self.key(GitPane.files, self.ch("d"))
-            }
-        case GitPane.branches:
-            let b = branches[idx]
-            let name = b["name"] as? String ?? ""
-            let current = state["branch"] as? String ?? ""
-            add("Check Out") { [weak self] in self?.key(GitPane.branches, 0x20) }
-            if !(b["current"] as? Bool ?? false) {
-                add("Bring “\(name)” into “\(current)”…") { [weak self] in
-                    guard let self = self else { return }
-                    self.key(GitPane.branches, self.ch("M"))
-                }
-                add("Rebase") { [weak self] in
-                    guard let self = self else { return }
-                    self.key(GitPane.branches, self.ch("r"))
-                }
-            }
-            add("Compare on GitHub") { [weak self] in
-                guard let self = self else { return }
-                self.key(GitPane.branches, self.ch("o"))
-            }
-            sep()
-            add("Delete Branch…") { [weak self] in
-                guard let self = self else { return }
-                self.key(GitPane.branches, self.ch("d"))
-            }
-        default:
-            let sha = commits[idx]["sha"] as? String ?? ""
-            add("Reword…") { [weak self] in
-                guard let self = self else { return }
-                self.key(GitPane.commits, self.ch("e"))
-            }
-            add("Copy SHA") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(sha, forType: .string)
-            }
-        }
-        popUp(items, at: e)
+        popUp(listMenuItems(pane, idx) { [weak self] in self?.activate(pane, r) }, at: e)
     }
 
     private func diffMenu(_ d: PGitRows, _ line: Int, _ e: NSEvent) {
         guard let row = coreRow(d, line) else { return }
         let pane = corePane(d)
-        var items: [(String, () -> Void)] = []
-        switch pane {
-        case GitPane.unstaged:
-            items.append(("Stage Line", { [weak self] in self?.key(GitPane.unstaged, 0x20) }))
-            items.append(("Discard Line…", { [weak self] in
-                guard let self = self else { return }
-                self.key(GitPane.unstaged, self.ch("d"))
-            }))
-        case GitPane.staged:
-            items.append(("Unstage Line", { [weak self] in self?.key(GitPane.staged, 0x20) }))
-        default: break
-        }
-        items.append(("Open in Editor", { [weak self] in self?.open(pane, row) }))
-        popUp(items, at: e)
+        popUp(diffMenuItems(pane) { [weak self] in self?.open(pane, row) }, at: e)
     }
+
 
     // MARK: overlays → Platinum alerts
 
     private func showOverlayIfNeeded(_ ov: [String: Any]) {
-        let kind = ov["kind"] as? String ?? ""
-        if kind.isEmpty {
+        guard let spec = Self.alertSpec(ov) else {
             // The core closed it on its own.
             overlayShown = ""
             alert?.dismiss()
             alert = nil
             return
         }
+        let kind = spec.kind, s = spec.spec
         guard kind != overlayShown, alert == nil, let v = view else { return }
         overlayShown = kind
-        let message = (ov["message"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let action = (ov["action"] as? String ?? "").capitalized
-        func label(_ t: String, _ f: Int = 0) -> [String: Any] { ["k": "label", "text": t, "f": f] }
-        func button(_ key: String, _ t: String, _ f: Int = 0) -> [String: Any] {
-            ["k": "button", "key": key, "text": t, "f": f]
+        var extra: [[String: Any]] = []
+        if !s.detail.isEmpty { extra.append(["k": "label", "text": s.detail, "f": Platinum.SECONDARY]) }
+        var values: [String: String] = [:]
+        switch s.field {
+        case .none: break
+        case .output(let out):
+            extra.append(["k": "textarea", "key": "output", "value": out, "h": 16,
+                          "f": Platinum.DISABLED | Platinum.SECONDARY])
+        case .message(let msg):
+            values["text"] = msg
+            extra.append(["k": "textarea", "key": "text", "value": msg, "h": 7])
+        case .choice(let opts, let sel):
+            values["text"] = "\(sel)"
+            extra.append(["k": "choice", "key": "text", "opts": opts, "n": sel])
+        case .typed:
+            extra.append(["k": "text", "key": "text", "value": ""])
         }
-        let cancel = button("cancel", "Cancel", Platinum.CANCEL)
-        var icon: String? = "note"
-        var kids: [[String: Any]] = []
-        var buttons: [[String: Any]] = [cancel]
-        var cancelKey = "cancel"
-        alertValues = [:]
-        switch kind {
-        case "status":
-            icon = "caution"
-            kids = [label(message)]
-            buttons = [button("ok", "Close", Platinum.DEFAULT | Platinum.CANCEL)]
-            cancelKey = "ok"
-        case "output":
-            icon = nil
-            kids = [label("Git output"),
-                    ["k": "textarea", "key": "output", "value": ov["output"] as? String ?? "", "h": 16,
-                     "f": Platinum.DISABLED | Platinum.SECONDARY]]
-            buttons = [button("ok", "Close", Platinum.DEFAULT | Platinum.CANCEL)]
-            cancelKey = "ok"
-        case "merge_choice":
-            kids = [label(message.isEmpty ? "Bring the branch in" : message),
-                    label("A merge commit keeps both histories; a rebase replays the branch's commits for straight history.",
-                          Platinum.SECONDARY)]
-            buttons = [cancel, button("rebase", "Rebase"), button("merge", "Merge Commit", Platinum.DEFAULT)]
-        case "edit_message", "commit":
-            icon = nil
-            alertValues["text"] = ov["text"] as? String ?? ""
-            kids = [label(kind == "commit" ? "Commit" : "Reword commit"),
-                    ["k": "textarea", "key": "text", "value": alertValues["text"] ?? "", "h": 7]]
-            buttons = [cancel, button("ok", kind == "commit" ? "Commit" : "Reword", Platinum.DEFAULT)]
-        case "remote_pick":
-            alertValues["text"] = "\(ov["remote_sel"] as? Int ?? 0)"
-            kids = [label("Push to which remote?"),
-                    ["k": "choice", "key": "text", "opts": ov["remotes"] as? [String] ?? [],
-                     "n": ov["remote_sel"] as? Int ?? 0]]
-            buttons = [cancel, button("ok", "Push", Platinum.DEFAULT)]
-        case "delete_remote_typed":
-            icon = "caution"
-            let prefix = ov["prefix"] as? String ?? ""
-            kids = [label(message),
-                    label("Its work isn't on the main line. Type “\(prefix)” to delete it on the remote.",
-                          Platinum.SECONDARY),
-                    ["k": "text", "key": "text", "value": ""]]
-            buttons = [cancel, button("ok", "Delete", Platinum.DEFAULT | Platinum.DESTRUCTIVE)]
-        default:   // amend / revert / discard_line / delete_branch
-            icon = kind == "amend" ? "note" : "caution"
-            kids = [label(message.isEmpty ? "Are you sure?" : message)]
-            buttons = [cancel, button("ok", action.isEmpty ? "Continue" : action,
-                                      Platinum.DEFAULT | (kind == "amend" ? 0 : Platinum.DESTRUCTIVE))]
+        // Platinum lays the buttons out left to right, the default last;
+        // a lone button is the default and the cancel both.
+        let buttons: [[String: Any]] = s.buttons.enumerated().reversed().map { i, b in
+            var f = i == 0 ? Platinum.DEFAULT : 0
+            if b.key == s.cancelKey { f |= Platinum.CANCEL }
+            if b.destructive { f |= Platinum.DESTRUCTIVE }
+            return ["k": "button", "key": b.key, "text": b.title, "f": f]
         }
-        kids.append(["k": "hstack", "n": 1, "f": Platinum.RIGHT, "kids": buttons])
-        let column: [String: Any] = ["k": "vstack", "n": 1, "kids": kids]
-        let body: [String: Any] = icon.map {
-            ["k": "hstack", "n": 1, "kids": [["k": "icon", "text": $0], column]]
-        } ?? column
-        let a = PlatinumDialog(name: "git", view: v, titled: false) { [weak self] events in
-            self?.alertEvents(events)
-        }
-        _ = a.update(["k": "dialog", "text": "", "key": cancelKey, "kids": [body]])
+        let icon: String? = s.icon == .none ? nil : s.icon == .caution ? "caution" : "note"
+        let a = PlatinumDialog(name: "git", view: v, titled: false,
+                               onEvents: Platinum.alertEvents(values) { [weak self] key, values in
+            guard let self = self else { return }
+            self.alert?.dismiss()
+            self.alert = nil
+            self.answerOverlay(key, values["text"] ?? "")
+            self.overlayShown = ""
+            self.win.makeKey()
+            self.onAfterAction?()
+        })
+        _ = a.update(Platinum.alertTree(icon: icon, message: s.message.isEmpty ? s.title ?? "" : s.message,
+                                        extra: extra, buttons: buttons, cancelKey: s.cancelKey))
         alert = a
         a.present(in: win)
-    }
-
-    private func alertEvents(_ events: [[Any]]) {
-        for e in events where e.count > 2 {
-            let key = e[1] as? String ?? ""
-            guard e[0] as? Bool == true else {
-                alertValues[key] = e[2] as? String ?? ""
-                continue
-            }
-            alert?.dismiss()
-            alert = nil
-            guard let v = view, v.handle != 0 else { return }
-            let choice = ["ok", "merge", "rebase"].contains(key) ? key : "cancel"
-            let text = alertValues["text"] ?? ""
-            withUTF8Arg(choice) { cp, cl in
-                withUTF8Arg(text) { tp, tl in tk_desktop_git_answer(v.handle, cp, cl, tp, tl) }
-            }
-            overlayShown = ""
-            lastData = Data()
-            win.makeKey()
-            onAfterAction?()
-            return
-        }
     }
 }
 

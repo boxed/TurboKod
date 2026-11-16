@@ -46,6 +46,7 @@ from turbokod.search_options import SearchOptions
 from turbokod.text_field import TextField
 from turbokod.quick_open import QuickOpen, quick_open_match
 from turbokod.doc_store import DocEntry
+from turbokod.doc_pick import DocPick
 from turbokod.language_config import built_in_servers
 from turbokod.list_box import ListBox
 from turbokod.lsp import capture_command
@@ -1921,6 +1922,46 @@ def test_find_doc_entry_case_insensitive_when_no_exact() raises:
     ))
     var idx = _find_doc_entry_for_word(entries, String("display"))
     assert_equal(idx, 0)
+
+
+def _doc_entries(*names: String) -> List[DocEntry]:
+    var out = List[DocEntry]()
+    for n in names:
+        out.append(DocEntry(
+            String(n), String("lib/") + String(n), String(""), String("Fns"),
+        ))
+    return out^
+
+
+def test_doc_pick_reopen_reuses_its_entries_and_follows_a_new_docset() raises:
+    """``DocPick`` keeps a docset's entries and haystacks across ``close``
+    so a reopen doesn't copy thousands of them again — but a different
+    docset (or a changed one) must still be what it lists."""
+    var dp = DocPick()
+    var py = _doc_entries(String("abs"), String("print"), String("len"))
+    dp.open(String("Python"), py)
+    assert_equal(len(dp.matched), 3)
+    dp.set_query(String("pri"))
+    assert_equal(len(dp.matched), 1)
+    assert_equal(dp.entries[dp.matched[0]].name, String("print"))
+    dp.close()
+    assert_false(dp.active)
+    # Reopen: a fresh query over the same entries.
+    dp.open(String("Python"), py)
+    assert_true(dp.active)
+    assert_equal(dp.query.text, String(""))
+    assert_equal(len(dp.matched), 3)
+    dp.close()
+    # Another docset with as many entries: its own names.
+    dp.open(String("Rust"), _doc_entries(String("Vec"), String("Box"), String("Rc")))
+    dp.set_query(String("Box"))
+    assert_equal(len(dp.matched), 1)
+    assert_equal(dp.entries[dp.matched[0]].name, String("Box"))
+    dp.close()
+    # Same docset, reinstalled with a changed list.
+    dp.open(String("Rust"), _doc_entries(String("Vec"), String("Box"), String("Arc")))
+    dp.set_query(String("Arc"))
+    assert_equal(len(dp.matched), 1)
 
 
 def test_prompt_wrap_short_text_stays_on_one_line() raises:

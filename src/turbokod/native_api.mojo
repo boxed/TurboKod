@@ -20,6 +20,7 @@ reads ``fg_rgb`` / ``bg_rgb`` (``0xRRGGBB``) instead of the palette index.
 """
 
 from std.ffi import external_call
+from std.memory import unsafe_memcpy
 from std.sys import size_of
 
 from turbokod.canvas import (
@@ -101,30 +102,29 @@ def _mouse_event(
     )
 
 
-def _frame_canvas(h: Int, cols: Int, rows: Int) -> Canvas:
-    """``_blank_canvas`` for a surface that can hold panes with a cell
-    size of their own (``Desktop.frame_canvas``)."""
-    # A new ``Canvas`` is already blank in the default attribute; clearing
-    # it wrote every cell of every frame a second time.
-    return _desk(h)[].frame_canvas(cols, rows)
+def _frame_canvas(h: Int, surface: Int, cols: Int, rows: Int) -> Canvas:
+    """The blank canvas for one frame of ``surface``, a surface that can
+    hold panes with a cell size of their own: the surface's canvas from
+    the last frame, cleared (``Desktop.take_frame_canvas``). Hand it back
+    with ``_pack_surface``."""
+    return _desk(h)[].take_frame_canvas(surface, cols, rows, True)
 
 
-def _chrome_canvas(h: Int, cols: Int, rows: Int) -> Canvas:
-    """``_blank_canvas`` for a surface of its own (Settings, dialog and git
+def _chrome_canvas(h: Int, surface: Int, cols: Int, rows: Int) -> Canvas:
+    """``_frame_canvas`` for a surface of its own (Settings, dialog and git
     windows) whose framework chrome the host may draw in its look."""
-    var canvas = _blank_canvas(cols, rows)
-    canvas.host_widgets = _desk(h)[].host_draws_chrome()
-    canvas.scroll_bar_cells = _desk(h)[].scroll_bar_cells()
-    return canvas^
+    return _desk(h)[].take_frame_canvas(surface, cols, rows, False)
 
 
 def _pack_surface(
-    h: Int, surface: Int, mut canvas: Canvas, cols: Int, rows: Int,
+    h: Int, surface: Int, var canvas: Canvas, cols: Int, rows: Int,
     out_ptr: Int, cap: Int,
 ) -> Int:
-    """Pack ``canvas`` and keep its host items for ``tk_desktop_host_items``."""
+    """Pack ``canvas``, keep its host items for ``tk_desktop_host_items``
+    and the canvas itself for the surface's next frame."""
     var n = pack_canvas(canvas, cols, rows, out_ptr, cap)
     swap(_desk(h)[].host_items[surface], canvas.host_items)
+    _desk(h)[].return_frame_canvas(surface, canvas^)
     return n
 
 
@@ -429,12 +429,12 @@ def tk_desktop_layout(h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int) abi(
     caller's buffer (5 u32 per cell). Returns the number of cells written."""
     if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
         return 0
-    var canvas = _frame_canvas(h, cols, rows)
+    var canvas = _frame_canvas(h, HOST_SURFACE_MAIN, cols, rows)
     _desk(h)[].paint(canvas, Rect(0, 0, cols, rows))
-    var n = pack_canvas(canvas, cols, rows, out_ptr, cap)
     swap(_desk(h)[].sub_grids, canvas.sub_grids)
-    swap(_desk(h)[].host_items[HOST_SURFACE_MAIN], canvas.host_items)
-    return n
+    return _pack_surface(
+        h, HOST_SURFACE_MAIN, canvas^, cols, rows, out_ptr, cap,
+    )
 
 
 @export
@@ -863,22 +863,23 @@ def tk_desktop_surface_layout(
         return 0
     var screen = Rect(0, 0, cols, rows)
     if surface == HOST_SURFACE_PANELS:
-        var canvas = _frame_canvas(h, cols, rows)
+        var canvas = _frame_canvas(h, HOST_SURFACE_PANELS, cols, rows)
         _desk(h)[].paint_panels(canvas, screen)
-        var n = pack_canvas(canvas, cols, rows, out_ptr, cap)
         swap(_desk(h)[].panel_sub_grids, canvas.sub_grids)
-        swap(_desk(h)[].host_items[HOST_SURFACE_PANELS], canvas.host_items)
-        return n
-    var canvas = _chrome_canvas(h, cols, rows)
+        return _pack_surface(
+            h, HOST_SURFACE_PANELS, canvas^, cols, rows, out_ptr, cap,
+        )
+    if surface != HOST_SURFACE_SETTINGS and surface != HOST_SURFACE_DIALOG \
+            and surface != HOST_SURFACE_GIT:
+        return 0
+    var canvas = _chrome_canvas(h, surface, cols, rows)
     if surface == HOST_SURFACE_SETTINGS:
         _desk(h)[].paint_settings(canvas, screen)
     elif surface == HOST_SURFACE_DIALOG:
         _desk(h)[].paint_dialog_window(canvas, screen)
-    elif surface == HOST_SURFACE_GIT:
-        _desk(h)[].paint_git_window(canvas, screen)
     else:
-        return 0
-    return _pack_surface(h, surface, canvas, cols, rows, out_ptr, cap)
+        _desk(h)[].paint_git_window(canvas, screen)
+    return _pack_surface(h, surface, canvas^, cols, rows, out_ptr, cap)
 
 
 def _surface_event(h: Int, surface: Int, var ev: Event, cols: Int, rows: Int) -> Int32:
@@ -1409,11 +1410,10 @@ def tk_desktop_menu_snapshot(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     column; ``icon`` is an SF Symbol name or empty; missing strings render
     as empty fields. Items belong to the
     most-recently-emitted M record. Returns
-    the number of bytes written; if it would exceed ``cap`` the buffer
-    is truncated to ``cap`` and the host should grow its allocation
-    and retry.
+    the length; one larger than ``cap`` means nothing was written and
+    the host should grow its buffer and retry (``_write_bytes``).
     """
-    if h == 0 or out_ptr == 0 or cap <= 0:
+    if h == 0:
         return 0
     ref bar = _desk(h)[].menu_bar
     # Bytes, appended once: the host polls this every tick, and
@@ -1446,13 +1446,7 @@ def tk_desktop_menu_snapshot(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
             _snap_field(buf, String(Int(it.mark)))
             _snap_field(buf, it.icon)
             buf.append(UInt8(0x0A))
-    var n = len(buf)
-    if n > cap:
-        n = cap
-    var op = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=out_ptr)
-    for i in range(n):
-        op[unsafe_offset=i] = buf[i]
-    return n
+    return _write_bytes(Span(buf), out_ptr, cap)
 
 
 @export
@@ -1542,30 +1536,59 @@ def tk_desktop_native_dialog(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     return _write_out(_native_dialog_json(_desk(h)[]), out_ptr, cap)
 
 
+@export
+def tk_desktop_native_dialog_up(h: Int) abi("C") -> Int32:
+    """1 when ``tk_desktop_native_dialog`` has a dialog to describe — the
+    question without building its JSON."""
+    if h == 0:
+        return 0
+    return 1 if _desk(h)[].native_dialog_active() else 0
+
+
+def _copy_out(bytes: Span[UInt8, _], n: Int, out_ptr: Int):
+    """The first ``n`` of ``bytes`` into the host's buffer at ``out_ptr``."""
+    if n <= 0 or out_ptr == 0:
+        return
+    unsafe_memcpy(
+        dest=Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=out_ptr),
+        src=bytes.unsafe_ptr(),
+        count=n,
+    )
+
+
 def _write_clamped(text: String, out_ptr: Int, cap: Int) -> Int:
     """Copy as much of ``text`` as fits into the host's ``cap``-byte buffer
     and return how many bytes that was — for short values (a font name)
     the host reads into a fixed buffer without a retry."""
     var bytes = text.as_bytes()
     var n = min(len(bytes), cap)
-    var op = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=out_ptr)
-    for i in range(n):
-        op[unsafe_offset=i] = bytes[i]
+    _copy_out(bytes, n, out_ptr)
+    return max(n, 0)
+
+
+def _write_bytes(bytes: Span[UInt8, _], out_ptr: Int, cap: Int) -> Int:
+    """Copy ``bytes`` into the host's buffer. Returns their length; a
+    length larger than ``cap`` means nothing was written and the host
+    should grow the buffer and retry (Swift's ``readCoreData``)."""
+    var n = len(bytes)
+    if n == 0 or n > cap or out_ptr == 0:
+        return n
+    _copy_out(bytes, n, out_ptr)
     return n
 
 
 def _write_out(text: String, out_ptr: Int, cap: Int) -> Int:
-    """Copy ``text`` into the host's buffer. Returns its byte length; a
-    length larger than ``cap`` means nothing was written and the host
-    should grow the buffer and retry."""
-    var bytes = text.as_bytes()
-    var n = len(bytes)
-    if n == 0 or n > cap or out_ptr == 0:
-        return n
-    var op = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=out_ptr)
-    for i in range(n):
-        op[unsafe_offset=i] = bytes[i]
-    return n
+    """``_write_bytes`` for a string: the buffer contract every
+    JSON-returning call shares."""
+    return _write_bytes(text.as_bytes(), out_ptr, cap)
+
+
+def _json_span(a: Int, b: Int) -> JsonValue:
+    """``[a, b]``: a span of cells as the host reads it."""
+    var r = json_array()
+    r.append(json_int(a))
+    r.append(json_int(b))
+    return r^
 
 
 @export
@@ -1716,13 +1739,10 @@ def tk_desktop_frame_info(h: Int, cols: Int, out_ptr: Int, cap: Int) abi("C") ->
         return 0
     ref d = _desk(h)[]
     var span = d.frame_title_span(cols)
-    var title = json_array()
-    title.append(json_int(span[1]))
-    title.append(json_int(span[2]))
     var o = json_object()
     o.put(String("path"), json_str(d.frame_path()))
     o.put(String("icon"), json_int(span[0]))
-    o.put(String("title"), title)
+    o.put(String("title"), _json_span(span[1], span[2]))
     return _write_out(encode_json(o), out_ptr, cap)
 
 
@@ -1779,12 +1799,8 @@ def tk_desktop_status_layout(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
         r.append(json_int(t.b_x))
         r.append(json_bool(t.index == sb.active_tab))
         targets.append(r)
-    var git = json_array()
-    git.append(json_int(sb._git_a_x))
-    git.append(json_int(sb._git_b_x))
-    var msg = json_array()
-    msg.append(json_int(sb._msg_a_x))
-    msg.append(json_int(sb._msg_b_x))
+    var git = _json_span(sb._git_a_x, sb._git_b_x)
+    var msg = _json_span(sb._msg_a_x, sb._msg_b_x)
     var o = json_object()
     o.put(String("git"), git)
     o.put(String("message"), msg)
@@ -1973,12 +1989,7 @@ def _tree_json(ref t: FileTree, screen: Rect) -> String:
         row.append(json_int(e.depth))
         row.append(json_bool(e.is_dir))
         row.append(json_bool(e.is_expanded))
-        var modified = False
-        for k in range(len(t.modified_paths)):
-            if t.modified_paths[k] == e.path:
-                modified = True
-                break
-        row.append(json_bool(modified))
+        row.append(json_bool(t.is_modified(e.path)))
         row.append(json_str(e.path))
         es.append(row)
     o.put(String("entries"), es)
@@ -1987,6 +1998,42 @@ def _tree_json(ref t: FileTree, screen: Rect) -> String:
 
 def _review_tree_shown(ref d: Desktop) -> Bool:
     return d.native_review_reviewing() and d.review_tree.visible
+
+
+def _tree_stamp(ref t: FileTree, screen: Rect, which: Int) -> Int:
+    """Folds everything ``_tree_json`` reads into one Int (FNV-1a over
+    the fields): the listing's version, selection, focus and rect."""
+    var r = t.content_rect(screen)
+    var parts = List[Int]()
+    parts.append(which)
+    parts.append(t.entries_version)
+    parts.append(t.selected)
+    parts.append(1 if t.focused else 0)
+    parts.append(r.a.x)
+    parts.append(r.a.y)
+    parts.append(r.width())
+    parts.append(r.height())
+    var hsh = UInt64(14695981039346656037)
+    for i in range(len(parts)):
+        hsh = (hsh ^ UInt64(parts[i])) * UInt64(1099511628211)
+    # Never 0: that's "no tree".
+    return Int(hsh | 1)
+
+
+@export
+def tk_desktop_tree_stamp(h: Int, cols: Int, rows: Int) abi("C") -> Int:
+    """A stamp of the tree ``tk_desktop_tree`` would return: equal stamps
+    mean an equal payload, so the host skips the fetch. 0 when no tree is
+    shown natively."""
+    if h == 0:
+        return 0
+    ref d = _desk(h)[]
+    var screen = Rect(0, 0, cols, rows)
+    if _review_tree_shown(d):
+        return _tree_stamp(d.review_tree, screen, 2)
+    if not d.native_tree_shown():
+        return 0
+    return _tree_stamp(d.file_tree, screen, 1)
 
 
 @export
@@ -2724,17 +2771,13 @@ def _panel_json(ref d: Desktop, ref p: RightPanel, pane: Int) -> JsonValue:
 
 
 @export
-def tk_desktop_git(
-    h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
-) abi("C") -> Int:
+def tk_desktop_git(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     """The git view as JSON for the host (``look``: the macOS sheet or the
     Platinum window): files (``x`` / ``y`` porcelain columns), branches, commits, selections, focus, busy /
     flash / status lines and the open overlay. 0 when the view isn't up
     natively. Same buffer contract as ``tk_desktop_native_dialog``."""
     if h == 0:
         return 0
-    _ = cols
-    _ = rows
     return _write_out(_git_state_json(_desk(h)[]), out_ptr, cap)
 
 

@@ -77,27 +77,36 @@ def _first_uri_of(method: String, params: JsonValue) -> String:
     if method == String("textDocument/publishDiagnostics") \
             or method == String("window/showDocument"):
         return json_get_string(params, String("uri"))
+    # Every lookup reads in place: ``object_get`` would copy the whole
+    # ``edit`` (every file's edits) just to read one key.
     if method == String("workspace/configuration"):
-        var items = params.object_get(String("items")) \
-            if params.is_object() else Optional[JsonValue]()
-        if items and items.value().is_array() and items.value().array_len() > 0:
-            return json_get_string(items.value().array_at(0), String("scopeUri"))
-        return String("")
-    if method == String("workspace/applyEdit"):
-        var edit = params.object_get(String("edit")) \
-            if params.is_object() else Optional[JsonValue]()
-        if not edit or not edit.value().is_object():
+        var ii = params.object_index(String("items"))
+        if ii < 0 or params.obj_v[ii].value.array_len() == 0:
             return String("")
-        var changes = edit.value().object_get(String("changes"))
-        if changes and changes.value().is_object() \
-                and changes.value().object_len() > 0:
-            return changes.value().object_key_at(0)
-        var dcs = edit.value().object_get(String("documentChanges"))
-        if dcs and dcs.value().is_array() and dcs.value().array_len() > 0:
-            var td = dcs.value().array_at(0).object_get(String("textDocument"))
-            if td:
-                return json_get_string(td.value(), String("uri"))
+        return json_get_string(
+            params.obj_v[ii].value.arr_v[0], String("scopeUri"),
+        )
+    if method == String("workspace/applyEdit"):
+        var ei = params.object_index(String("edit"))
+        if ei < 0:
+            return String("")
+        ref edit = params.obj_v[ei].value
+        var ci = edit.object_index(String("changes"))
+        if ci >= 0 and edit.obj_v[ci].value.object_len() > 0:
+            return edit.obj_v[ci].value.obj_v[0].key
+        var di = edit.object_index(String("documentChanges"))
+        if di >= 0 and edit.obj_v[di].value.array_len() > 0:
+            return _text_document_uri(edit.obj_v[di].value.arr_v[0])
     return String("")
+
+
+def _text_document_uri(obj: JsonValue) -> String:
+    """``obj.textDocument.uri``, or ``""`` — read in place (a didOpen's
+    ``textDocument`` carries the whole file)."""
+    var ti = obj.object_index(String("textDocument"))
+    if ti < 0:
+        return String("")
+    return json_get_string(obj.obj_v[ti].value, String("uri"))
 
 
 def _mentions_path(text: String, path: String) -> Bool:
@@ -311,11 +320,7 @@ struct LspChannel(Movable):
                 return
             self._initialized_sent = True
         elif method == String("textDocument/didOpen"):
-            var uri = json_get_string(
-                params.object_get(String("textDocument")).value(), String("uri"),
-            ) if params.is_object() and params.object_has(
-                String("textDocument"),
-            ) else String("")
+            var uri = _text_document_uri(params)
             var k = self._open_index(uri)
             if k >= 0:
                 self._open_counts[k] += 1
@@ -324,11 +329,7 @@ struct LspChannel(Movable):
             self._open_counts.append(1)
             self._open_owner.append(sid)
         elif method == String("textDocument/didClose"):
-            var uri = json_get_string(
-                params.object_get(String("textDocument")).value(), String("uri"),
-            ) if params.is_object() and params.object_has(
-                String("textDocument"),
-            ) else String("")
+            var uri = _text_document_uri(params)
             var k = self._open_index(uri)
             if k >= 0:
                 self._open_counts[k] -= 1

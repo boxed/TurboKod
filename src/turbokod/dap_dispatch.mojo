@@ -2076,7 +2076,7 @@ struct DapManager(Copyable, Movable):
             return
         # Park capabilities. Only the few we actually use.
         if msg.body and msg.body.value().is_object():
-            var b = msg.body.value().copy()
+            ref b = msg.body.value()
             self._supports_configuration_done = json_get_bool(
                 b, String("supportsConfigurationDoneRequest"),
                 self._supports_configuration_done,
@@ -2138,20 +2138,19 @@ struct DapManager(Copyable, Movable):
         _ = self._inflight_set_breakpoints_lines.pop(idx)
         if not msg.body or not msg.body.value().is_object():
             return
-        var b = msg.body.value().copy()
-        var arr_opt = b.object_get(String("breakpoints"))
-        if not arr_opt or not arr_opt.value().is_array():
+        ref b = msg.body.value()
+        var at = b.object_index(String("breakpoints"))
+        if at < 0 or not b.obj_v[at].value.is_array():
             return
-        var arr = arr_opt.value().copy()
-        var n = arr.array_len()
-        for i in range(n):
-            var entry = arr.array_at(i)
+        ref arr = b.obj_v[at].value.arr_v
+        for i in range(len(arr)):
+            ref entry = arr[i]
             if not entry.is_object():
                 continue
-            var verified_opt = entry.object_get(String("verified"))
-            if not verified_opt or not verified_opt.value().is_bool():
+            var vi = entry.object_index(String("verified"))
+            if vi < 0 or not entry.obj_v[vi].value.is_bool():
                 continue
-            if verified_opt.value().as_bool():
+            if entry.obj_v[vi].value.as_bool():
                 continue
             var msg_text = json_get_string(entry, String("message"))
             if i >= len(sent_lines):
@@ -2260,7 +2259,7 @@ struct DapManager(Copyable, Movable):
             else:
                 value = String("<error>")
         elif msg.body and msg.body.value().is_object():
-            var b = msg.body.value().copy()
+            ref b = msg.body.value()
             value = json_get_string(b, String("result"), value)
             type_name = json_get_string(b, String("type"), type_name)
         self._evaluations_expr.append(expr^)
@@ -2394,7 +2393,7 @@ struct DapManager(Copyable, Movable):
             else:
                 value = String("evaluation failed")
         elif msg.body and msg.body.value().is_object():
-            var b = msg.body.value().copy()
+            ref b = msg.body.value()
             value = json_get_string(b, String("result"), value)
         self._test_eval_expr.append(expr^)
         self._test_eval_value.append(value^)
@@ -2486,13 +2485,11 @@ struct DapManager(Copyable, Movable):
         var description = String("")
         var all = False
         if msg.body and msg.body.value().is_object():
-            var b = msg.body.value().copy()
+            ref b = msg.body.value()
             tid = json_get_int(b, String("threadId"), tid)
             reason = json_get_string(b, String("reason"), reason)
             description = json_get_string(b, String("description"), description)
-            var a = b.object_get(String("allThreadsStopped"))
-            if a and a.value().is_bool():
-                all = a.value().as_bool()
+            all = json_get_bool(b, String("allThreadsStopped"), all)
         self._stopped = Optional[DapStopped](DapStopped(
             tid, reason, description, all, from_subprocess,
         ))
@@ -2523,7 +2520,7 @@ struct DapManager(Copyable, Movable):
     def _on_output_event(mut self, msg: DapIncoming):
         if not msg.body or not msg.body.value().is_object():
             return
-        var b = msg.body.value().copy()
+        ref b = msg.body.value()
         var category = String("console")
         var text = String("")
         category = json_get_string(b, String("category"), category)
@@ -2554,16 +2551,16 @@ struct DapManager(Copyable, Movable):
         """
         if not msg.body or not msg.body.value().is_object():
             return
-        var b = msg.body.value().copy()
+        ref b = msg.body.value()
         # Pull out connect.host/port. Anything weirdly-shaped → bail;
         # the subprocess will hang but the parent stays usable.
-        var c = b.object_get(String("connect"))
-        if not c or not c.value().is_object():
+        var ci = b.object_index(String("connect"))
+        if ci < 0 or not b.obj_v[ci].value.is_object():
             self.client.process.trace(String(
                 "debugpyAttach: missing/invalid 'connect' field; ignoring",
             ))
             return
-        var co = c.value().copy()
+        ref co = b.obj_v[ci].value
         var host = String("127.0.0.1")
         host = json_get_string(co, String("host"), host)
         var port = json_get_int(co, String("port"), 0)
@@ -2701,35 +2698,45 @@ def _default_exception_filters() -> List[String]:
 # --- response-body parsers ------------------------------------------------
 
 
+def _body_array(
+    body_opt: Optional[JsonValue], key: String,
+) -> Optional[Int]:
+    """Index of the array member ``key`` of the response body, so a
+    parser reads ``body.obj_v[i].value.arr_v`` in place instead of copying
+    the body and then the array out of it. None when the body or the
+    member is missing or the wrong shape."""
+    if not body_opt or not body_opt.value().is_object():
+        return Optional[Int]()
+    var at = body_opt.value().object_index(key)
+    if at < 0 or not body_opt.value().obj_v[at].value.is_array():
+        return Optional[Int]()
+    return Optional[Int](at)
+
+
+def _has_int(obj: JsonValue, key: String) -> Bool:
+    var at = obj.object_index(key)
+    return at >= 0 and obj.obj_v[at].value.is_int()
+
+
+def _has_string(obj: JsonValue, key: String) -> Bool:
+    var at = obj.object_index(key)
+    return at >= 0 and obj.obj_v[at].value.is_string()
+
+
 def _parse_stack_trace(body_opt: Optional[JsonValue]) -> List[DapStackFrame]:
     var out = List[DapStackFrame]()
-    if not body_opt:
+    var at = _body_array(body_opt, String("stackFrames"))
+    if not at:
         return out^
-    var b = body_opt.value().copy()
-    if not b.is_object():
-        return out^
-    var arr_opt = b.object_get(String("stackFrames"))
-    if not arr_opt or not arr_opt.value().is_array():
-        return out^
-    var arr = arr_opt.value().copy()
-    for i in range(arr.array_len()):
-        var f = arr.array_at(i)
+    ref arr = body_opt.value().obj_v[at.value()].value.arr_v
+    for i in range(len(arr)):
+        ref f = arr[i]
         if not f.is_object():
             continue
-        var id_opt = f.object_get(String("id"))
-        var name_opt = f.object_get(String("name"))
-        var line_opt = f.object_get(String("line"))
-        var col_opt = f.object_get(String("column"))
-        if not id_opt or not id_opt.value().is_int():
+        if not _has_int(f, String("id")) or not _has_string(f, String("name")):
             continue
-        if not name_opt or not name_opt.value().is_string():
-            continue
-        var line = 0
-        if line_opt and line_opt.value().is_int():
-            line = line_opt.value().as_int()
-        var col = 0
-        if col_opt and col_opt.value().is_int():
-            col = col_opt.value().as_int()
+        var line = json_get_int(f, String("line"), 0)
+        var col = json_get_int(f, String("column"), 0)
         # Adapters disagree on linesStartAt1: lldb-dap honors our flag;
         # debugpy + delve hardcode 1-based. Subtract 1 with floor at 0
         # so the editor's 0-based row index always lines up.
@@ -2739,20 +2746,18 @@ def _parse_stack_trace(body_opt: Optional[JsonValue]) -> List[DapStackFrame]:
             col = col - 1
         var path = String("")
         var subtle = False
-        var src_opt = f.object_get(String("source"))
-        if src_opt and src_opt.value().is_object():
-            var s = src_opt.value().copy()
+        var si = f.object_index(String("source"))
+        if si >= 0 and f.obj_v[si].value.is_object():
+            ref s = f.obj_v[si].value
             path = json_get_string(s, String("path"), path)
             # ``source.presentationHint = deemphasize`` is how lldb-dap /
             # delve mark third-party / stdlib sources. Frame-level
             # ``presentationHint`` (next block) is how debugpy marks them.
-            var sph = s.object_get(String("presentationHint"))
-            if sph and sph.value().is_string():
-                if sph.value().as_str() == String("deemphasize"):
-                    subtle = True
-        var fph = f.object_get(String("presentationHint"))
-        if fph and fph.value().is_string():
-            var h = fph.value().as_str()
+            if json_get_string(s, String("presentationHint")) \
+                    == String("deemphasize"):
+                subtle = True
+        if _has_string(f, String("presentationHint")):
+            var h = json_get_string(f, String("presentationHint"))
             # ``subtle`` is the standard "library code" hint. ``label``
             # is for synthetic separator frames (thread-name markers);
             # treat both as dim so they don't compete with user code
@@ -2760,7 +2765,7 @@ def _parse_stack_trace(body_opt: Optional[JsonValue]) -> List[DapStackFrame]:
             if h == String("subtle") or h == String("label"):
                 subtle = True
         out.append(DapStackFrame(
-            id_opt.value().as_int(), name_opt.value().as_str(),
+            json_get_int(f, String("id"), 0), json_get_string(f, String("name")),
             path, line, col, subtle,
         ))
     return out^
@@ -2797,20 +2802,15 @@ def _is_index_name(name: String) -> Bool:
 def _parse_completions(body_opt: Optional[JsonValue]) -> List[DapCompletion]:
     """``completions`` response body → targets, ``start`` kept as sent."""
     var out = List[DapCompletion]()
-    if not body_opt or not body_opt.value().is_object():
+    var at = _body_array(body_opt, String("targets"))
+    if not at:
         return out^
-    var arr_opt = body_opt.value().object_get(String("targets"))
-    if not arr_opt or not arr_opt.value().is_array():
-        return out^
-    var arr = arr_opt.value().copy()
-    for i in range(arr.array_len()):
-        var t = arr.array_at(i)
-        if not t.is_object():
+    ref arr = body_opt.value().obj_v[at.value()].value.arr_v
+    for i in range(len(arr)):
+        ref t = arr[i]
+        if not t.is_object() or not _has_string(t, String("label")):
             continue
-        var label_opt = t.object_get(String("label"))
-        if not label_opt or not label_opt.value().is_string():
-            continue
-        var label = label_opt.value().as_str()
+        var label = json_get_string(t, String("label"))
         var text = label
         text = json_get_string(t, String("text"), text)
         var type_name = String("")
@@ -2825,67 +2825,40 @@ def _parse_completions(body_opt: Optional[JsonValue]) -> List[DapCompletion]:
 
 def _parse_scopes(body_opt: Optional[JsonValue]) -> List[DapScope]:
     var out = List[DapScope]()
-    if not body_opt:
+    var at = _body_array(body_opt, String("scopes"))
+    if not at:
         return out^
-    var b = body_opt.value().copy()
-    if not b.is_object():
-        return out^
-    var arr_opt = b.object_get(String("scopes"))
-    if not arr_opt or not arr_opt.value().is_array():
-        return out^
-    var arr = arr_opt.value().copy()
-    for i in range(arr.array_len()):
-        var s = arr.array_at(i)
+    ref arr = body_opt.value().obj_v[at.value()].value.arr_v
+    for i in range(len(arr)):
+        ref s = arr[i]
         if not s.is_object():
             continue
-        var name_opt = s.object_get(String("name"))
-        var ref_opt = s.object_get(String("variablesReference"))
-        var exp_opt = s.object_get(String("expensive"))
-        if not name_opt or not name_opt.value().is_string():
+        if not _has_string(s, String("name")) \
+                or not _has_int(s, String("variablesReference")):
             continue
-        if not ref_opt or not ref_opt.value().is_int():
-            continue
-        var expensive = False
-        if exp_opt and exp_opt.value().is_bool():
-            expensive = exp_opt.value().as_bool()
         out.append(DapScope(
-            name_opt.value().as_str(), ref_opt.value().as_int(), expensive,
+            json_get_string(s, String("name")),
+            json_get_int(s, String("variablesReference"), 0),
+            json_get_bool(s, String("expensive"), False),
         ))
     return out^
 
 
 def _parse_variables(body_opt: Optional[JsonValue]) -> List[DapVariable]:
     var out = List[DapVariable]()
-    if not body_opt:
+    var at = _body_array(body_opt, String("variables"))
+    if not at:
         return out^
-    var b = body_opt.value().copy()
-    if not b.is_object():
-        return out^
-    var arr_opt = b.object_get(String("variables"))
-    if not arr_opt or not arr_opt.value().is_array():
-        return out^
-    var arr = arr_opt.value().copy()
-    for i in range(arr.array_len()):
-        var v = arr.array_at(i)
-        if not v.is_object():
+    ref arr = body_opt.value().obj_v[at.value()].value.arr_v
+    for i in range(len(arr)):
+        ref v = arr[i]
+        if not v.is_object() or not _has_string(v, String("name")):
             continue
-        var name_opt = v.object_get(String("name"))
-        var val_opt = v.object_get(String("value"))
-        var type_opt = v.object_get(String("type"))
-        var ref_opt = v.object_get(String("variablesReference"))
-        if not name_opt or not name_opt.value().is_string():
-            continue
-        var value = String("")
-        if val_opt and val_opt.value().is_string():
-            value = val_opt.value().as_str()
-        var type_name = String("")
-        if type_opt and type_opt.value().is_string():
-            type_name = type_opt.value().as_str()
-        var vref = 0
-        if ref_opt and ref_opt.value().is_int():
-            vref = ref_opt.value().as_int()
         out.append(DapVariable(
-            name_opt.value().as_str(), value, type_name, vref,
+            json_get_string(v, String("name")),
+            json_get_string(v, String("value")),
+            json_get_string(v, String("type")),
+            json_get_int(v, String("variablesReference"), 0),
         ))
     return out^
 

@@ -19,6 +19,7 @@ green and deleted files red.
 """
 
 from std.collections.list import List
+from std.collections.dict import Dict
 from std.collections.optional import Optional
 
 from .canvas import Canvas
@@ -109,11 +110,18 @@ struct FileTree(Movable):
     so listings hide ``.pixi``/``.build``/etc. without re-parsing per
     directory. ``.git`` is always hidden — it's not in ``.gitignore``
     but git itself treats it as implicitly ignored."""
-    var modified_paths: List[String]
+    var _modified_list: List[String]
     """Full paths of files with uncommitted changes — synced by the
-    Desktop from the open editors before every paint. Rows whose path
-    matches are tinted with the same green scheme the tab bar uses for
-    dirty tabs."""
+    Desktop from the open editors before every paint through
+    ``set_modified_paths``. Rows whose path matches are tinted with the
+    same green scheme the tab bar uses for dirty tabs."""
+    var _modified: Dict[String, Int]
+    """``_modified_list`` as a set, for the per-row lookup."""
+    var entries_version: Int
+    """Bumped whenever the listing (root, entries, expansion) or the
+    modified set changes. With the selection, focus and rect it's what
+    the native source list depends on, so the host can skip refetching
+    an unchanged tree (``tk_desktop_tree_stamp``)."""
     var _menu_req: Bool
     """Set by a right-click on a row; drained by the Desktop via
     ``consume_menu_request`` to open the Rename/Delete popup anchored at
@@ -161,7 +169,9 @@ struct FileTree(Movable):
         self._resizing = False
         self._type_ahead = TypeAhead()
         self._gitignore = GitignoreMatcher()
-        self.modified_paths = List[String]()
+        self._modified_list = List[String]()
+        self._modified = Dict[String, Int]()
+        self.entries_version = 0
         self._menu_req = False
         self._menu_path = String("")
         self._menu_is_dir = False
@@ -191,6 +201,7 @@ struct FileTree(Movable):
             i += 1
 
     def _load_root(mut self):
+        self.entries_version += 1
         self.entries = List[FileTreeEntry]()
         var children = self._list_dir(self.root, 0)
         for i in range(len(children)):
@@ -204,6 +215,7 @@ struct FileTree(Movable):
 
     def close(mut self):
         self.visible = False
+        self.entries_version += 1
         self.entries = List[FileTreeEntry]()
         self.root = String("")
         self.selected = -1
@@ -314,6 +326,7 @@ struct FileTree(Movable):
             return
         if not self.entries[idx].is_dir:
             return
+        self.entries_version += 1
         if self.entries[idx].is_expanded:
             self.entries[idx].is_expanded = False
             var d = self.entries[idx].depth
@@ -388,8 +401,25 @@ struct FileTree(Movable):
                 self.selected = idx
                 self._scroll_to_selection()
 
-    def _is_modified(self, path: String) -> Bool:
-        return _contains(self.modified_paths, path)
+    def set_modified_paths(mut self, var paths: List[String]):
+        """Replace the modified set; a no-op (version untouched) when it's
+        the same list as before, which it is on almost every frame."""
+        if len(paths) == len(self._modified_list):
+            var same = True
+            for i in range(len(paths)):
+                if paths[i] != self._modified_list[i]:
+                    same = False
+                    break
+            if same:
+                return
+        self._modified = Dict[String, Int]()
+        for i in range(len(paths)):
+            self._modified[paths[i]] = 1
+        self._modified_list = paths^
+        self.entries_version += 1
+
+    def is_modified(self, path: String) -> Bool:
+        return path in self._modified
 
     # --- geometry & paint -------------------------------------------------
 
@@ -460,7 +490,7 @@ struct FileTree(Movable):
             # the tab bar uses for dirty tabs: LIGHT_GREEN surface for
             # plain rows, GREEN (with the active tab's WHITE text) when
             # the row is also the selection.
-            if not e.is_dir and self._is_modified(e.path):
+            if not e.is_dir and self.is_modified(e.path):
                 if is_sel:
                     attr = Attr(WHITE, GREEN)
                 else:

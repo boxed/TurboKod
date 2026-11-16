@@ -144,6 +144,7 @@ int64_t tk_desktop_take_pending_new_window_project(int64_t h, int64_t out_ptr,
 // larger than cap means grow the buffer and retry. The _answer calls resolve
 // it through the same submit path the in-grid dialog uses.
 int64_t tk_desktop_native_dialog(int64_t h, int64_t out_ptr, int64_t cap);
+int32_t tk_desktop_native_dialog_up(int64_t h);
 int32_t tk_desktop_native_confirm_answer(int64_t h, int64_t choice);
 int32_t tk_desktop_native_prompt_answer(int64_t h, int64_t ptr, int64_t len,
                                         int64_t ok);
@@ -208,6 +209,7 @@ int64_t tk_desktop_history(int64_t h, int64_t out_ptr, int64_t cap);
 int64_t tk_desktop_history_patch(int64_t h, int64_t idx, int64_t out_ptr, int64_t cap);
 void tk_desktop_history_act(int64_t h, int64_t op, int64_t idx);
 int64_t tk_desktop_tree(int64_t h, int64_t cols, int64_t rows, int64_t out_ptr, int64_t cap);
+int64_t tk_desktop_tree_stamp(int64_t h, int64_t cols, int64_t rows);
 // macOS-style UI review mode: _review {mode: picker {tab, labels, cursor} |
 // reviewing {title, files, cur_file, change_index, change_total, num, den,
 // editable, bar}} (0 = not up natively); _review_act op 0 tab, 1 pick row,
@@ -257,7 +259,7 @@ int32_t tk_desktop_popup_choose(int64_t h, int64_t code);
 // state JSON (0 = not up), _git_panels the right side. Panes: 0 files,
 // 1 branches, 2 commits, 3 unstaged, 4 staged, 5 info. Operations reuse the
 // view's keys (_git_key); overlays are answered with _git_answer.
-int64_t tk_desktop_git(int64_t h, int64_t cols, int64_t rows, int64_t out_ptr, int64_t cap);
+int64_t tk_desktop_git(int64_t h, int64_t out_ptr, int64_t cap);
 int64_t tk_desktop_git_panels(int64_t h, int64_t cols, int64_t rows,
                               int64_t out_ptr, int64_t cap);
 void tk_desktop_git_select(int64_t h, int64_t pane, int64_t idx, int64_t cols, int64_t rows);

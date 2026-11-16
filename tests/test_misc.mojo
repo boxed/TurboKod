@@ -1257,6 +1257,33 @@ def test_config_change_by_another_process_reaches_an_open_window() raises:
     _ = delete_path(path)
 
 
+def test_config_rewrite_in_the_same_second_at_the_same_size_is_noticed() raises:
+    """The watcher compares the config file's stamp to the nanosecond: a
+    second write in the same wall-clock second that leaves the size
+    unchanged (two booleans swapped) must still reach an open window."""
+    var home = _test_home()
+    var path = home + String("/.config/turbokod/config.json")
+    _ = delete_path(path)
+    var seed = TurbokodConfig()
+    seed.minimap = True
+    seed.sticky_scroll = False
+    assert_true(save_config(seed))
+    var win = Desktop()
+    win.load_config_from_disk()
+    var before = stat_file(path)
+    var other = seed.copy()
+    other.minimap = False
+    other.sticky_scroll = True
+    assert_true(save_config(other))
+    var after = stat_file(path)
+    assert_equal(after.size, before.size)
+    win._poll_config_file()
+    assert_false(win.config.minimap)
+    assert_true(win.config.sticky_scroll)
+    win.shutdown()
+    _ = delete_path(path)
+
+
 def main() raises:
     setup_test_env()
     TestSuite.discover_tests[__functions_in_module()]().run()

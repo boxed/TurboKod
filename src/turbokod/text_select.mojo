@@ -30,6 +30,7 @@ from .events import Event, EVENT_MOUSE, MOUSE_BUTTON_LEFT
 from .geometry import Point, Rect
 from .painter import Painter
 from .string_utils import byte_slice
+from .text_view import ordered_span
 
 
 @fieldwise_init
@@ -117,16 +118,9 @@ struct PaneTextSelect(Movable):
 
     def _normalized(self) -> Tuple[Int, Int, Int, Int]:
         """``(s_key, s_byte, e_key, e_byte)`` sorted in document order."""
-        if self.anchor_key < self.cursor_key \
-                or (self.anchor_key == self.cursor_key
-                    and self.anchor_byte <= self.cursor_byte):
-            return (
-                self.anchor_key, self.anchor_byte,
-                self.cursor_key, self.cursor_byte,
-            )
-        return (
-            self.cursor_key, self.cursor_byte,
+        return ordered_span(
             self.anchor_key, self.anchor_byte,
+            self.cursor_key, self.cursor_byte,
         )
 
     def text(self) -> String:

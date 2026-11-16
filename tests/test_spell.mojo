@@ -859,6 +859,21 @@ def test_list_selection_values() raises:
     assert_equal(len(ui_list_selected(String(""))), 0)
 
 
+def test_speller_load_words_dedupes() raises:
+    """Overlapping wordlists (and case variants that normalize alike)
+    store each word once."""
+    var words = List[String]()
+    words.append(String("foo"))
+    words.append(String("Foo"))
+    words.append(String("foo"))
+    words.append(String("bar"))
+    var s = _spell_with_dict(words)
+    assert_equal(s._own.word_count(), 2)
+    s.load_words(words)
+    assert_equal(s._own.word_count(), 2)
+    assert_true(s.check_word(String("foo")))
+
+
 def main() raises:
     setup_test_env()
     TestSuite.discover_tests[__functions_in_module()]().run()

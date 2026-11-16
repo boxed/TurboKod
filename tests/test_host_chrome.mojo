@@ -9,8 +9,13 @@ Shared fixtures live in ``tests/support.mojo`` and
 
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
-from turbokod.canvas import Canvas, HOST_HSCROLL, HOST_VSCROLL
-from turbokod.colors import Attr, BLACK, WHITE
+from turbokod.canvas import (
+    Canvas, HOST_HSCROLL, HOST_SURFACE_MAIN, HOST_SURFACE_SETTINGS,
+    HOST_VSCROLL, SCALE_ONE,
+)
+from turbokod.cell import FONT_TERMINAL, FONT_UI
+from turbokod.colors import Attr, BLACK, BLUE, WHITE, default_attr
+from turbokod.grid_frame import GridFrame
 from turbokod.desktop import Desktop
 from turbokod.geometry import Point, Rect
 from turbokod.painter import Painter
@@ -108,6 +113,59 @@ def test_platinum_bars_are_two_cells_and_hit_across_both() raises:
     g.inherit_chrome(c)
     assert_equal(g.scroll_bar_cells, 2)
     assert_true(g.host_widgets)
+
+
+def test_a_reused_frame_canvas_starts_blank() raises:
+    """The host surfaces' canvases are kept between frames: the next one
+    must start exactly as a fresh canvas would — blank cells in the UI
+    font, no host items, origin at the corner — and track the size."""
+    var d = Desktop()
+    d.host_owns_menu = True
+    d.config.native_ui = True
+    d.set_area_scale(Int(FONT_TERMINAL), 1500, 2000)
+    var c = d.take_frame_canvas(HOST_SURFACE_MAIN, 20, 6, True)
+    assert_true(c.host_widgets)
+    assert_equal(c.scale_of(FONT_TERMINAL)[0], 1500)
+    c.font = FONT_TERMINAL
+    _ = c.put_text(Point(0, 0), String("dirty"), Attr(WHITE, BLUE), 20)
+    VScrollbar(19, 1, 4, 100, 4, 0).paint(c, Painter(c.bounds()), Attr(WHITE, BLACK))
+    assert_true(len(c.host_items) > 0)
+    d.return_frame_canvas(HOST_SURFACE_MAIN, c^)
+    d.config.native_ui = False
+    var again = d.take_frame_canvas(HOST_SURFACE_MAIN, 20, 6, True)
+    assert_equal(again.get(0, 0).glyph, String(" "))
+    assert_true(again.get(0, 0).attr == default_attr())
+    assert_equal(again.get(0, 0).font, FONT_UI)
+    assert_equal(again.font, FONT_UI)
+    assert_equal(len(again.host_items), 0)
+    assert_false(again.host_widgets)
+    d.return_frame_canvas(HOST_SURFACE_MAIN, again^)
+    var bigger = d.take_frame_canvas(HOST_SURFACE_MAIN, 30, 8, True)
+    assert_equal(bigger.width, 30)
+    assert_equal(bigger.height, 8)
+    assert_equal(len(bigger.cells), 240)
+    # A surface without area fonts keeps every scale at one.
+    var chrome = d.take_frame_canvas(HOST_SURFACE_SETTINGS, 10, 4, False)
+    assert_equal(chrome.scale_of(FONT_TERMINAL)[0], SCALE_ONE)
+
+
+def test_grid_frame_begins_cleared_to_the_background() raises:
+    var parent = Canvas(20, 10)
+    parent.scroll_bar_cells = 2
+    var f = GridFrame.empty(FONT_TERMINAL)
+    var bg = Attr(WHITE, BLUE)
+    var g = f.begin(parent, Rect(2, 3, 12, 7), bg)
+    assert_equal(g.width, 10)
+    assert_equal(g.height, 4)
+    assert_equal(len(g.cells), 40)
+    assert_equal(g.origin.x, 2)
+    assert_equal(g.origin.y, 3)
+    assert_equal(g.font, FONT_TERMINAL)
+    assert_equal(g.scroll_bar_cells, 2)
+    for i in range(len(g.cells)):
+        assert_equal(g.cells[i].glyph, String(" "))
+        assert_true(g.cells[i].attr == bg)
+        assert_equal(g.cells[i].font, FONT_TERMINAL)
 
 
 def main() raises:

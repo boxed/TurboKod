@@ -1848,26 +1848,25 @@ def compute_display_titles(windows: List[Window]) -> List[String]:
     tab bar and on the title border. Non-file-backed windows (and
     windows with no resolvable parent component) keep their original
     title."""
-    var titles = List[String]()
+    var titles = List[String](capacity=len(windows))
     var n = len(windows)
     for i in range(n):
         titles.append(windows[i].title)
     for i in range(n):
         if not windows[i].is_editor:
             continue
-        var path_i = windows[i].editor.file_path
+        ref path_i = windows[i].editor.file_path
         if len(path_i.as_bytes()) == 0:
             continue
+        ref title_i = windows[i].title
         var collides = False
         for j in range(n):
-            if i == j:
+            # Title first: it almost always differs, and that settles it.
+            if i == j or not windows[j].is_editor \
+                    or windows[j].title != title_i:
                 continue
-            if not windows[j].is_editor:
-                continue
-            var path_j = windows[j].editor.file_path
-            if len(path_j.as_bytes()) == 0:
-                continue
-            if windows[j].title == windows[i].title and path_j != path_i:
+            ref path_j = windows[j].editor.file_path
+            if len(path_j.as_bytes()) > 0 and path_j != path_i:
                 collides = True
                 break
         if not collides:
@@ -1876,7 +1875,7 @@ def compute_display_titles(windows: List[Window]) -> List[String]:
         if len(parent_dir.as_bytes()) == 0 or parent_dir == String("/") \
                 or parent_dir == String("."):
             continue
-        titles[i] = parent_dir + String("/") + windows[i].title
+        titles[i] = parent_dir + String("/") + title_i
     return titles^
 
 

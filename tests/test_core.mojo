@@ -48,8 +48,9 @@ from turbokod.project import FileIndexer
 from turbokod.project_targets import detect_project_language
 from turbokod.host_abi import SHAPE_NS_RESIZE, shape_code, shape_name
 from turbokod.string_utils import (
-    shell_escape_path, shell_single_quote, slice_codepoints, utf8_prefix,
-    utf8_suffix,
+    shell_escape_path, shell_single_quote, utf8_prefix,
+    utf8_suffix, cells_between, byte_of_cell_in, seg_cell_offset,
+    utf8_byte_of_cell,
 )
 from turbokod.project_on_save import on_save_equal
 from turbokod.quick_open import QuickOpen
@@ -730,7 +731,9 @@ def test_file_tree_modified_rows_tinted_like_tab_bar() raises:
             file_idx = i
             break
     assert_true(file_idx >= 0)
-    t.modified_paths.append(t.entries[file_idx].path)
+    var modified = List[String]()
+    modified.append(t.entries[file_idx].path)
+    t.set_modified_paths(modified^)
     var c = Canvas(screen.width(), screen.height())
     t.paint(c, screen)
     var row_y = area.a.y + file_idx       # scroll is 0, no title row
@@ -742,6 +745,38 @@ def test_file_tree_modified_rows_tinted_like_tab_bar() raises:
     t.paint(c, screen)
     assert_equal(c.get(cx, row_y).attr.bg, GREEN)
     assert_equal(c.get(cx, row_y).attr.fg, WHITE)
+
+
+def test_file_tree_version_tracks_listing_and_modified_set() raises:
+    """``entries_version`` (what the native tree's stamp hashes) moves
+    when the listing or the modified set changes, and only then — the
+    per-frame resync of an unchanged modified set leaves it alone."""
+    var t = FileTree()
+    t.open(String("."))
+    var v0 = t.entries_version
+    var file_idx = -1
+    var dir_idx = -1
+    for i in range(len(t.entries)):
+        if t.entries[i].is_dir and dir_idx < 0:
+            dir_idx = i
+        if not t.entries[i].is_dir and file_idx < 0:
+            file_idx = i
+    assert_true(file_idx >= 0 and dir_idx >= 0)
+    var path = t.entries[file_idx].path
+    var mods = List[String]()
+    mods.append(path)
+    t.set_modified_paths(mods.copy())
+    var v1 = t.entries_version
+    assert_true(v1 != v0)
+    assert_true(t.is_modified(path))
+    t.set_modified_paths(mods.copy())
+    assert_equal(t.entries_version, v1)
+    t.set_modified_paths(List[String]())
+    assert_true(t.entries_version != v1)
+    assert_false(t.is_modified(path))
+    var v2 = t.entries_version
+    t._toggle_expand(dir_idx)
+    assert_true(t.entries_version != v2)
 
 
 def test_file_tree_fixed_listing() raises:
@@ -1973,6 +2008,23 @@ def test_detect_project_language_no_match() raises:
     _ = external_call["rmdir", Int32]((root + String("\0")).unsafe_ptr())
 
 
+def test_canvas_set_attr_keeps_the_glyph_and_clears_the_sub_grid() raises:
+    """``set_attr`` changes only the attr (in place) — glyph, width and
+    font stay — and, being a write, clears the cell's sub-grid tag;
+    ``attr_at`` reads it back, and the default attr off the canvas."""
+    var c = Canvas(4, 2)
+    c.set(1, 0, Cell(String("😀"), Attr(WHITE, BLUE), 2))
+    c.cells[1].sub = 3
+    c.set_attr(1, 0, Attr(YELLOW, BLACK))
+    var got = c.get(1, 0)
+    assert_equal(got.glyph, String("😀"))
+    assert_equal(got.width, 2)
+    assert_equal(Int(got.sub), 0)
+    assert_true(c.attr_at(1, 0) == Attr(YELLOW, BLACK))
+    assert_true(c.attr_at(-1, 0) == default_attr())
+    assert_true(c.attr_at(9, 9) == default_attr())
+
+
 def test_canvas_darken_rect_preserves_glyph() raises:
     """``darken_rect`` is the compositor primitive for drop shadows:
     it changes a cell's attr to dim-on-black but must leave the
@@ -1999,16 +2051,23 @@ def test_canvas_darken_rect_preserves_glyph() raises:
     assert_equal(c.get(4, 0).attr.fg, WHITE)
 
 
-def test_string_utils_slice_codepoints_handles_multibyte() raises:
-    """``slice_codepoints`` slices by codepoint, not byte, so multi-byte
-    characters survive intact and cell offsets line up with cursor
-    positions."""
-    var s = String("aåbäc")  # 5 codepoints, 7 bytes
-    assert_equal(slice_codepoints(s, 0, 5), s)
-    assert_equal(slice_codepoints(s, 1, 4), String("åbä"))
-    assert_equal(slice_codepoints(s, 4, 5), String("c"))
-    assert_equal(slice_codepoints(s, 0, 0), String(""))
-    assert_equal(slice_codepoints(s, 3, 3), String(""))
+def test_string_utils_segment_cell_conversions() raises:
+    """``cells_between`` / ``seg_cell_offset`` / ``byte_of_cell_in`` count
+    from the segment's own start: tabs align to it, a wide glyph is two
+    cells, a column inside one snaps to its start, and both directions
+    clamp to the segment."""
+    var s = String("ab\tå😀c")  # a b TAB(2 cells) å(2B) 😀(4B, 2 cells) c
+    assert_equal(cells_between(s, 0, len(s.as_bytes())), 8)
+    assert_equal(cells_between(s, 1, 3), 4)  # "b\t" from col 0 at byte 1
+    assert_equal(seg_cell_offset(s, 3, 9, 5), 1)
+    assert_equal(seg_cell_offset(s, 3, 9, 99), 3)
+    assert_equal(seg_cell_offset(s, 3, 9, 2), 0)
+    assert_equal(byte_of_cell_in(s, 3, 9, 1), 5)
+    assert_equal(byte_of_cell_in(s, 3, 9, 2), 5)  # right half of the emoji
+    assert_equal(byte_of_cell_in(s, 3, 9, 3), 9)
+    assert_equal(byte_of_cell_in(s, 3, 9, 50), 9)  # clamped to the segment
+    assert_equal(utf8_byte_of_cell(s, 3), 2)  # inside the tab
+    assert_equal(utf8_byte_of_cell(s, 50), len(s.as_bytes()))
 
 
 def test_on_save_equal_matching() raises:

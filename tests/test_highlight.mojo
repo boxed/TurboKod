@@ -42,7 +42,8 @@ from turbokod.project_grammars import GrammarOverride
 from turbokod.onig import OnigRegex, onig_global_init, onig_tracked_count
 from turbokod.tm_grammar import load_grammar_from_string
 from turbokod.tm_tokenizer import (
-    _pack_groups, _substitute_backrefs, _unpack_groups, tokenize_with_grammar,
+    _pack_groups, _scope_attr_in_chain, _substitute_backrefs, _unpack_groups,
+    tokenize_with_grammar,
 )
 from turbokod.geometry import Rect
 
@@ -2243,6 +2244,21 @@ def test_backref_substitution_keeps_non_ascii_captures() raises:
     assert_equal(
         _substitute_backrefs(String("^\\1$"), unpacked), String("^ÉOF$"),
     )
+
+
+def test_scope_chain_maps_its_innermost_known_scope() raises:
+    """A scope chain is read innermost (last) first, the first scope with
+    a color wins, unknown scopes are skipped, and stray spaces don't
+    produce empty scopes; a chain with no known scope maps to nothing."""
+    var a = _scope_attr_in_chain(String("source.x comment.line meta.unknown"))
+    assert_true(a.value() == highlight_comment_attr())
+    var b = _scope_attr_in_chain(String("comment.line  keyword.operator.x "))
+    assert_true(b.value() == highlight_operator_attr())
+    var c = _scope_attr_in_chain(String("keyword.control"))
+    assert_true(c.value() == highlight_keyword_attr())
+    assert_false(_scope_attr_in_chain(String("source.x meta.y")))
+    assert_false(_scope_attr_in_chain(String("")))
+    assert_false(_scope_attr_in_chain(String("   ")))
 
 
 def main() raises:

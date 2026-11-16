@@ -1099,8 +1099,7 @@ def _park_rename(mut d: Desktop, path: String, asked_on: String, col: Int):
     file_edits.append(CodeActionFileEdit(_path_to_uri(path), edits^))
     mgr._rename_path = path
     mgr._rename_text = asked_on
-    mgr._resolved_rename_edits = file_edits^
-    mgr._has_resolved_rename = True
+    mgr._rename.finish(file_edits^)
     d.lsp_managers.append(mgr^)
 
 

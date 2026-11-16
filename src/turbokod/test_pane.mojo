@@ -52,10 +52,13 @@ from .test_report import reporting_env
 from .test_results import (
     OUTPUT_LABEL, RESULTS_LABEL, TEST_TOGGLE_VIEW, TestResultsView,
 )
+from .scrollbar import ScrollBarArea
 from .terminal_view import (
-    flush_vt_side_effects, forward_key_to_grid, grid_size, GridSelection,
-    new_grid, paint_grid, paint_grid_links, place_grid,
-    paste_to_pty,
+    body_without_bar, flush_vt_side_effects, forward_key_to_grid, grid_size,
+    GridSelection, is_click_press, new_grid, paint_grid, paint_grid_links,
+    paint_results_grid, paint_scrollback_bar, place_grid, paste_to_pty,
+    results_handle_mouse, results_pointer_shape, scrollback_bar_delta,
+    wheel_rows,
 )
 from .vt import Vt
 from .window import (
@@ -117,6 +120,8 @@ struct TestPane(Copyable, Movable):
     var results_view: Bool
     """Show ``results`` instead of the terminal grid. The host sets it
     from ``config.test_results_view`` each frame."""
+    var scroll_bar: ScrollBarArea
+    """The scrollback's bar down the body's right edge."""
 
     def __init__(out self):
         self.visible = False
@@ -138,6 +143,8 @@ struct TestPane(Copyable, Movable):
         self.link_click = LinkLatch()
         self.results = TestResultsView()
         self.results_view = False
+        self.scroll_bar = ScrollBarArea()
+
 
     # --- chrome forwarders ---------------------------------------------
 
@@ -356,6 +363,10 @@ struct TestPane(Copyable, Movable):
         if body.is_empty():
             self.sel._last_body = Rect.empty()
             return
+        # The right column is the scrollback bar's, so it never covers
+        # output; the results view takes it too (it brings its own bars).
+        var bar_area = body
+        body = body_without_bar(canvas, body)
         # The grid is the body's size in the terminal font's cells, which
         # may be another size than the screen's.
         var dims = grid_size(canvas, body)
@@ -373,13 +384,11 @@ struct TestPane(Copyable, Movable):
                 _ = self.pty.set_winsize(bw, bh)
         self.sel.set_frame(canvas, body, bw, bh)
         if self.results_view:
-            var rgrid = new_grid(bw, bh, bg)
-            rgrid.inherit_chrome(canvas)
-            self.results.paint(
-                rgrid, self.sel._last_body.a, self.running(), self.started,
-                self.exited, self.exit_code,
+            self.scroll_bar.hide()
+            paint_results_grid(
+                canvas, bar_area, bg, self.results, self.sel._last_body.a,
+                self.running(), self.started, self.exited, self.exit_code,
             )
-            place_grid(canvas, body, rgrid^)
             return
         self.results.hide()
         # Grid + selection overlay + cursor caret (shared with the shell
@@ -390,6 +399,10 @@ struct TestPane(Copyable, Movable):
         # Traceback-link overlay.
         paint_grid_links(grid, self.vt, self.sel._last_body.a, self._last_links)
         place_grid(canvas, body, grid^)
+        paint_scrollback_bar(
+            canvas, painter, self.scroll_bar, bar_area, body, self.vt,
+            self.vt.scrollback_rows(),
+        )
 
     # --- results view --------------------------------------------------
 
@@ -398,10 +411,7 @@ struct TestPane(Copyable, Movable):
         divider; empty elsewhere. ``pos`` is a screen cell."""
         if not self.visible or not self.results_view:
             return String("")
-        var e = Event.mouse_event(pos, MOUSE_BUTTON_NONE, False, True)
-        var g = self.sel.grid_event(e)
-        var o = self.sel._last_body.a
-        return self.results.pointer_shape(Point(g.pos.x - o.x, g.pos.y - o.y))
+        return results_pointer_shape(self.sel, self.results, pos)
 
     # --- copy / selection delegates ------------------------------------
 
@@ -430,32 +440,28 @@ struct TestPane(Copyable, Movable):
             if cr.focus_request:
                 self.focused = True
             return True
+        if not self.results_view:
+            var delta = scrollback_bar_delta(
+                self.scroll_bar, event, self.vt, self.vt.scrollback_rows(),
+            )
+            if delta:
+                self.focused = True
+                self.vt.scroll_view_by(delta.value())
+                return True
         # From here on positions are the grid's (``grid_event``); the
         # panel test below still uses the screen's.
         var screen_pos = event.pos
         event = self.sel.grid_event(event)
         if self.results_view:
-            var inside = panel.contains(screen_pos)
-            var used = self.results.handle_mouse(
-                event, self.sel._last_body.a, inside,
+            return results_handle_mouse(
+                self.results, event, self.sel._last_body.a,
+                panel.contains(screen_pos), self.focused, self.link_click,
             )
-            if not used:
-                if event.button != MOUSE_BUTTON_NONE \
-                        and event.pressed and not event.motion:
-                    self.focused = False
-                return False
-            if event.pressed and not event.motion:
-                self.focused = True
-            var link = self.results.take_link()
-            if link:
-                self.link_click.set(link.value())
-            return True
         # In-flight drag selection keeps consuming past the body edge.
         if self.sel.continue_drag(self.vt, event):
             return True
         if not panel.contains(screen_pos):
-            if event.button != MOUSE_BUTTON_NONE \
-                    and event.pressed and not event.motion:
+            if is_click_press(event):
                 self.focused = False
             return False
         # Wheel shifts the scrollback view (the body-relative check above
@@ -464,8 +470,7 @@ struct TestPane(Copyable, Movable):
             if not event.pressed:
                 return True
             self.focused = True
-            var dir = 3 if event.button == MOUSE_WHEEL_UP else -3
-            self.vt.scroll_view_by(dir)
+            self.vt.scroll_view_by(wheel_rows(event))
             return True
         if event.button == MOUSE_BUTTON_LEFT and event.pressed \
                 and not event.motion:

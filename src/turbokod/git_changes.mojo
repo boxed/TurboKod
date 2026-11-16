@@ -227,6 +227,24 @@ def _unquote_c(quoted: String) -> String:
     return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=len(out))))
 
 
+def _line_starts_with(text: String, s: Int, e: Int, prefix: String) -> Bool:
+    """Whether ``text[s:e]`` starts with ``prefix`` — on the bytes, so a
+    per-line prefix test builds no ``String``."""
+    var b = text.as_bytes()
+    var p = prefix.as_bytes()
+    if e - s < len(p):
+        return False
+    for k in range(len(p)):
+        if b[s + k] != p[k]:
+            return False
+    return True
+
+
+def _line_is(text: String, s: Int, e: Int, want: String) -> Bool:
+    """Whether ``text[s:e]`` is exactly ``want``."""
+    return e - s == len(want.as_bytes()) and _line_starts_with(text, s, e, want)
+
+
 def parse_unified_diff_files(diff: String) -> List[ChangedFile]:
     """Walk a multi-file unified diff and split it on ``diff --git``
     boundaries. Each ``ChangedFile`` carries its own complete chunk
@@ -254,9 +272,7 @@ def parse_unified_diff_files(diff: String) -> List[ChangedFile]:
     while i < len(line_starts) - 1:
         var s = line_starts[i]
         var e = line_starts[i + 1] if i + 1 < len(line_starts) else len(b)
-        var line = String(StringSpan(unsafe_from_utf8=b[s:e]))
-        # Strip trailing LF for the prefix check.
-        if starts_with(line, String("diff --git ")):
+        if _line_starts_with(diff, s, e, String("diff --git ")):
             chunk_starts.append(s)
         i += 1
     chunk_starts.append(len(b))    # sentinel
@@ -275,18 +291,21 @@ def parse_unified_diff_files(diff: String) -> List[ChangedFile]:
             var le = ls
             while le < len(cb) and cb[le] != 0x0A:
                 le += 1
-            var ln = String(StringSpan(unsafe_from_utf8=cb[ls:le]))
-            if starts_with(ln, String("+++ ")):
-                if ln != String("+++ /dev/null"):
-                    path = _strip_prefix_b(ln)
+            if _line_starts_with(chunk, ls, le, String("+++ ")):
+                if not _line_is(chunk, ls, le, String("+++ /dev/null")):
+                    path = _strip_prefix_b(
+                        String(StringSpan(unsafe_from_utf8=cb[ls:le])),
+                    )
                     break
                 # ``+++ /dev/null`` → pure delete; remember the source
                 # but keep scanning in case a later ``+++`` overrides
                 # (shouldn't happen inside one chunk, but cheap).
-            elif starts_with(ln, String("--- ")) \
+            elif _line_starts_with(chunk, ls, le, String("--- ")) \
                     and len(path.as_bytes()) == 0 \
-                    and ln != String("--- /dev/null"):
-                path = _strip_prefix_b(ln)
+                    and not _line_is(chunk, ls, le, String("--- /dev/null")):
+                path = _strip_prefix_b(
+                    String(StringSpan(unsafe_from_utf8=cb[ls:le])),
+                )
             ls = le + 1
         if len(path.as_bytes()) == 0:
             # Last-resort: pull the path out of ``diff --git a/X b/X``.

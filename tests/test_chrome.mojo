@@ -16,6 +16,7 @@ from turbokod.colors import (
 from turbokod.editor import Editor
 from turbokod.file_dialog import FileDialog
 from turbokod.desktop import (
+    DEBUG_CLEAR_OUTPUT, DEBUG_START_OR_CONTINUE, EDITOR_TOGGLE_LINE_NUMBERS,
     APP_QUIT_ACTION, Desktop, EDITOR_FIND, EDITOR_OPEN, EDITOR_QUICK_OPEN,
     EDITOR_FIND_SYMBOL, GIT_REVIEW, TARGET_TEST,
     EDITOR_SAVE, VIEW_CLASSIC_UI, VIEW_NATIVE_UI, VIEW_PLATINUM_UI, WINDOW_CLOSE, ctrl_key
@@ -47,6 +48,7 @@ from turbokod.events import (
 )
 from turbokod.geometry import Point, Rect
 from turbokod.prompt import Prompt
+from turbokod.project_targets import RunTarget
 from turbokod.terminal import parse_input
 from turbokod.window import Window
 
@@ -1388,6 +1390,109 @@ def _menu_labels(d: Desktop) -> List[String]:
     for i in range(len(d.menu_bar.menus)):
         out.append(d.menu_bar.menus[i].label)
     return out^
+
+
+def _item_checked(d: Desktop, action: String) -> Bool:
+    for m in range(len(d.menu_bar.menus)):
+        for it in range(len(d.menu_bar.menus[m].items)):
+            if d.menu_bar.menus[m].items[it].action == action:
+                return d.menu_bar.menus[m].items[it].checked
+    return False
+
+
+def test_view_menu_checkmarks_follow_the_config_across_frames() raises:
+    """The View menu's checkmarks are written only when what they show
+    changes — but they still have to land on menus built after the first
+    frame, and follow every later toggle."""
+    var d = Desktop()
+    var c = Canvas(100, 30)
+    d.config.line_numbers = True
+    d.paint(c, _SCREEN)
+    build_menus(d, native=False)
+    d.paint(c, _SCREEN)
+    assert_true(_item_checked(d, EDITOR_TOGGLE_LINE_NUMBERS))
+    d.config.line_numbers = False
+    d.paint(c, _SCREEN)
+    assert_false(_item_checked(d, EDITOR_TOGGLE_LINE_NUMBERS))
+    d.config.line_numbers = True
+    d.paint(c, _SCREEN)
+    assert_true(_item_checked(d, EDITOR_TOGGLE_LINE_NUMBERS))
+
+
+def test_status_bar_target_tabs_follow_the_targets() raises:
+    var d = Desktop()
+    var c = Canvas(100, 30)
+    var t = RunTarget()
+    t.name = String("app")
+    d.targets.targets.append(t^)
+    d.targets.active = 0
+    d.paint(c, _SCREEN)
+    assert_equal(len(d.status_bar.tabs), 1)
+    assert_equal(d.status_bar.tabs[0].label, String("app"))
+    assert_equal(d.status_bar.active_tab, 0)
+    d.targets.targets[0].name = String("server")
+    var t2 = RunTarget()
+    t2.name = String("tests")
+    d.targets.targets.append(t2^)
+    d.targets.active = 1
+    d.paint(c, _SCREEN)
+    assert_equal(len(d.status_bar.tabs), 2)
+    assert_equal(d.status_bar.tabs[0].label, String("server"))
+    assert_equal(d.status_bar.tabs[1].label, String("tests"))
+    assert_equal(d.status_bar.active_tab, 1)
+
+
+def test_close_all_editor_windows_keeps_the_others_in_order() raises:
+    var d = Desktop()
+    d.windows.add(Window(String("one"), Rect(0, 1, 20, 8), List[String]()))
+    d.windows.add(Window.editor_window(
+        String("ed"), Rect(5, 2, 30, 10), String("text"),
+    ))
+    d.windows.add(Window(String("two"), Rect(10, 3, 40, 12), List[String]()))
+    d.windows.add(Window.editor_window(
+        String("ed2"), Rect(5, 2, 30, 10), String("more"),
+    ))
+    d._close_all_editor_windows()
+    assert_equal(len(d.windows.windows), 2)
+    assert_equal(d.windows.windows[0].title, String("one"))
+    assert_equal(d.windows.windows[1].title, String("two"))
+    assert_equal(len(d.windows.z_order), 2)
+    assert_true(d.windows.focused == 0 or d.windows.focused == 1)
+
+
+def test_caret_blinks_only_where_no_modal_takes_the_keys() raises:
+    """``_editor_keyboard_live`` is ``_modal_owns_input``'s shared modal
+    list plus its own stricter extras: an open popup stops both, an open
+    Find dialog stops the caret too."""
+    var d = Desktop()
+    d.host_focused = True
+    assert_true(d._editor_keyboard_live())
+    assert_false(d._modal_owns_input())
+    d.blame_popup.active = True
+    assert_false(d._editor_keyboard_live())
+    assert_true(d._modal_owns_input())
+    d.blame_popup.active = False
+    d.find_dialog.active = True
+    assert_false(d._editor_keyboard_live())
+    assert_true(d._modal_owns_input())
+    d.find_dialog.active = False
+    assert_true(d._editor_keyboard_live())
+
+
+def test_debug_pane_commands_follow_the_session_state() raises:
+    """The debug pane's command strip is rebuilt on a state change, not
+    every tick: idle it's just Clear; a held run output adds Restart."""
+    var d = Desktop()
+    d.dap_tick(_SCREEN)
+    assert_equal(len(d.debug_pane.dock.commands), 1)
+    assert_equal(d.debug_pane.dock.commands[0].id, DEBUG_CLEAR_OUTPUT)
+    d._run_output_held = True
+    d.dap_tick(_SCREEN)
+    assert_equal(len(d.debug_pane.dock.commands), 2)
+    assert_equal(d.debug_pane.dock.commands[0].id, DEBUG_START_OR_CONTINUE)
+    d._run_output_held = False
+    d.dap_tick(_SCREEN)
+    assert_equal(len(d.debug_pane.dock.commands), 1)
 
 
 def test_both_frontends_share_one_menu_definition() raises:

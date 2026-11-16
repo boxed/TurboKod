@@ -434,9 +434,19 @@ struct Canvas(Copyable, Movable):
         """
         if not self.in_bounds(x, y):
             return
-        var idx = self._index(x, y)
-        var current = self.cells[idx]
-        self.cells[idx] = Cell(current.glyph, attr, current.width, current.font)
+        # In place: rebuilding the cell copied it twice. A write clears
+        # ``sub`` (see ``Cell.sub``), as a rebuilt cell did.
+        ref c = self.cells[self._index(x, y)]
+        c.attr = attr
+        c.sub = 0
+
+    def attr_at(self, x: Int, y: Int) -> Attr:
+        """The attribute at ``(x, y)`` (the default attr out of bounds) —
+        what an overlay layering a style onto the painted cell reads,
+        without copying the cell (and its glyph) as ``get`` does."""
+        if not self.in_bounds(x, y):
+            return default_attr()
+        return self.cells[self._index(x, y)].attr
 
     def darken_rect(mut self, rect: Rect):
         """Recolor every cell inside ``rect`` to a "shadow" attr,
@@ -454,9 +464,9 @@ struct Canvas(Copyable, Movable):
         var clipped = rect.intersect(self.bounds())
         for y in range(clipped.a.y, clipped.b.y):
             for x in range(clipped.a.x, clipped.b.x):
-                var idx = self._index(x, y)
-                var current = self.cells[idx]
-                self.cells[idx] = Cell(current.glyph, shadow, current.width, current.font)
+                ref c = self.cells[self._index(x, y)]
+                c.attr = shadow
+                c.sub = 0
 
     def draw_box(mut self, rect: Rect, attr: Attr, double_line: Bool = False):
         if rect.width() < 2 or rect.height() < 2:
@@ -720,8 +730,8 @@ struct RunCells(Copyable, Movable):
     var byte_start: Int       # absolute byte the run starts at
 
     def __init__(out self, run: String, origin: Int, byte_start: Int):
-        self.cells = utf8_byte_to_cell(run)
-        self.total = utf8_codepoint_count(run)
+        self.cells = List[Int](capacity=len(run.as_bytes()))
+        self.total = utf8_cell_map(run, self.cells)
         self.origin = origin
         self.byte_start = byte_start
 
@@ -764,27 +774,37 @@ def utf8_byte_to_cell(text: String) -> List[Int]:
     byte position (the editor's column model). All bytes belonging to
     one multi-byte UTF-8 sequence map to the same cell. Use
     ``utf8_codepoint_count(text)`` to find the cell *just past* the
-    last codepoint — useful when a cursor or selection sits at EOL.
+    last codepoint — useful when a cursor or selection sits at EOL —
+    or ``utf8_cell_map`` to get both in one pass.
     Tab bytes (``0x09``) expand to ``TAB_WIDTH``-aligned spaces in
     ``put_text``, so they advance the cell counter by however many
     cells are needed to reach the next tab stop. The byte itself maps
     to the *first* of those expanded cells, matching where a click on
     the tab byte would visually land.
     """
+    var result = List[Int](capacity=len(text.as_bytes()))
+    _ = utf8_cell_map(text, result)
+    return result^
+
+
+def utf8_cell_map(text: String, mut out: List[Int]) -> Int:
+    """``utf8_byte_to_cell`` and ``utf8_codepoint_count`` in one pass:
+    appends ``text``'s byte → cell map to ``out`` and returns the cell
+    count — the pair every overlay wants, which otherwise walks the
+    text twice."""
     var bytes = text.as_bytes()
     var n = len(bytes)
-    var result = List[Int]()
     var cell = 0
     var i = 0
     while i < n:
         var b = Int(bytes[i])
         if b == 0x09:
-            result.append(cell)
+            out.append(cell)
             cell += TAB_WIDTH - (cell % TAB_WIDTH)
             i += 1
             continue
         if b < 0x80:  # ASCII is one cell: skip decoding (long lines)
-            result.append(cell)
+            out.append(cell)
             cell += 1
             i += 1
             continue
@@ -792,10 +812,10 @@ def utf8_byte_to_cell(text: String) -> List[Int]:
         if i + seq_len > n:
             seq_len = n - i
         for _ in range(seq_len):
-            result.append(cell)
+            out.append(cell)
         cell += char_width(codepoint_at(text, i)[0])
         i += seq_len
-    return result^
+    return cell
 
 
 def utf8_codepoint_count(text: String) -> Int:

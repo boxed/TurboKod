@@ -22,6 +22,7 @@ from turbokod.events import (
 from turbokod.geometry import Point, Rect
 from turbokod.view import centered
 from turbokod.window import Window
+from turbokod.lsp_dispatch import TextEditEntry
 
 from support import _SCREEN, _assert_layout_contiguous, _key, setup_test_env
 
@@ -456,6 +457,54 @@ def test_text_view_selection_extracts_text() raises:
     # Reversed endpoints normalize to the same forward slice.
     var rev = Selection(True, False, 1, 11, 1, 7)
     assert_equal(rev.extracted_text(lines), String("line"))
+
+
+def _canvas_row(canvas: Canvas, y: Int) -> String:
+    var out = String("")
+    for x in range(canvas.width):
+        out += canvas.get(x, y).glyph
+    return out^
+
+
+def test_wrap_none_long_line_paints_only_what_fits() raises:
+    """With wrapping off a row's text is cut just past the content width
+    before it is mapped: the visible cells, horizontally scrolled or not,
+    still show the right text, a wide glyph straddling the cut is fine, and
+    an end-of-line note on the long row stays off screen while a short
+    row's note shows."""
+    var long_line = String("")
+    for _ in range(300):
+        long_line += String("0123456789")
+    long_line += String("😀tail")
+    var ed = Editor(long_line + String("\nshort"))
+    ed.wrap_mode = WRAP_NONE
+    ed.line_numbers = False
+    var notes = List[TextEditEntry]()
+    notes.append(TextEditEntry(0, 0, 0, 0, String("NOTE")))
+    notes.append(TextEditEntry(1, 0, 1, 0, String("NOTE")))
+    ed.set_inlay_hints(notes^)
+    var view = Rect(0, 0, 40, 5)
+    var canvas = Canvas(40, 5)
+    ed.paint(canvas, view, False)
+    var row0 = _canvas_row(canvas, 0)
+    assert_true(row0.startswith("0123456789012345678901234567890"))
+    assert_true(row0.find("NOTE") < 0)
+    assert_true(_canvas_row(canvas, 1).find("NOTE") >= 0)
+    # Scrolled: the first visible cell is the byte at ``scroll_x``.
+    ed.scroll_x = 1005
+    canvas = Canvas(40, 5)
+    ed.paint(canvas, view, False)
+    row0 = _canvas_row(canvas, 0)
+    assert_true(row0.startswith("5678901234567890"))
+    assert_true(row0.find("NOTE") < 0)
+    # Scrolled to the end: the emoji and the note come into view.
+    ed.scroll_x = 2995
+    canvas = Canvas(40, 5)
+    ed.paint(canvas, view, False)
+    row0 = _canvas_row(canvas, 0)
+    assert_true(row0.startswith("56789😀"))
+    assert_true(row0.find("tail") >= 0)
+    assert_true(row0.find("NOTE") >= 0)
 
 
 def main() raises:

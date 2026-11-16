@@ -27,7 +27,7 @@ from std.ffi import external_call
 from .json import (
     encode_json, json_array, json_bool, json_float, json_get_bool, json_get_int,
     json_get_string, json_int, json_null, json_object, json_str, JsonValue,
-    parse_json,
+    parse_json, take_json,
 )
 from .file_io import basename, join_path, parent_path, read_file, stat_file
 from .lsp_position import (
@@ -50,11 +50,29 @@ from .highlight import Highlight
 from .colors import Attr, BLACK, EDITOR_BG, WHITE
 
 
-def _lsp_debug_log(line: String):
-    """Append ``line`` (plus a trailing newline) to ``turbokod-lsp.log`` in
-    ``debug_log_path`` (``$TMPDIR``) when that file already exists, or
-    when ``TURBOKOD_LSP_LOG`` is set. No-op otherwise — ``touch
+def _lsp_debug_enabled() -> Bool:
+    """True when ``turbokod-lsp.log`` exists in ``debug_log_path``
+    (``$TMPDIR``) or ``TURBOKOD_LSP_LOG`` is set — ``touch
     "$TMPDIR/turbokod-lsp.log"`` to enable, delete the file to disable.
+    A ``stat`` + ``getenv``: ``LspManager._logging`` caches it, so a
+    keystroke's requests don't each pay for the check (or for building
+    a line nobody writes)."""
+    if stat_file(debug_log_path(String("turbokod-lsp.log"))).ok:
+        return True
+    return len(getenv_value(String("TURBOKOD_LSP_LOG")).as_bytes()) > 0
+
+
+def _lsp_debug_log(line: String):
+    """``_lsp_debug_write`` when logging is enabled — for a caller with no
+    ``LspManager._logging`` cache to ask."""
+    if _lsp_debug_enabled():
+        _lsp_debug_write(line)
+
+
+def _lsp_debug_write(line: String):
+    """Append ``line`` (plus a trailing newline) to ``turbokod-lsp.log``.
+    Callers check ``LspManager._logging`` (or ``_lsp_debug_enabled``)
+    first.
 
     Opens with ``O_APPEND`` and writes one line per call so cost stays
     O(line) regardless of how large the log has grown. The previous
@@ -63,10 +81,6 @@ def _lsp_debug_log(line: String):
     multi-second latency to completion responses.
     """
     var path = debug_log_path(String("turbokod-lsp.log"))
-    var info = stat_file(path)
-    if not info.ok \
-            and len(getenv_value(String("TURBOKOD_LSP_LOG")).as_bytes()) == 0:
-        return
     # Prefix each line with monotonic ms so the gap between
     # ``→ request_completion`` and ``← completion response`` is
     # readable by eye. The clock's absolute value is unspecified — only
@@ -85,6 +99,10 @@ def _lsp_debug_log(line: String):
         fd, bytes.unsafe_ptr(), len(bytes),
     )
     _ = external_call["close", Int32](fd)
+
+
+# How often ``LspManager._logging`` re-checks whether logging is enabled.
+comptime _LOG_RECHECK_MS = 1000
 
 
 # --- State -----------------------------------------------------------------
@@ -753,9 +771,15 @@ struct _Slot[T: Copyable & Defaultable & Deinitable](Copyable, Movable):
     def owns(self, id: String) -> Bool:
         return len(self.id.as_bytes()) > 0 and id == self.id
 
-    def finish(mut self, var value: Self.T):
+    def publish(mut self, var value: Self.T):
+        """Park ``value`` for the host, leaving any in-flight id alone (an
+        answer settled by a follow-up round-trip, after a newer request
+        may already have gone out)."""
         self.value = value^
         self.ready = True
+
+    def finish(mut self, var value: Self.T):
+        self.publish(value^)
         self.id = String("")
 
     def take(mut self) -> Self.T:
@@ -903,14 +927,16 @@ struct LspManager(Copyable, Movable):
     # notification so we never push watched-file events to a server that
     # never asked for them (most ask dynamically, post-initialize).
     var _watches_files: Bool
+    # ``_lsp_debug_enabled``, cached by ``_logging`` and re-checked at
+    # most once per ``_LOG_RECHECK_MS``.
+    var _log_on: Bool
+    var _log_checked_ms: Int
     # Generic "navigate to a location" request (typeDefinition /
     # implementation / declaration). Parked target + origin word, kept
     # separate from the definition slot so it never triggers the
     # cmd-click → references chaining the definition path does.
-    var _inflight_nav_id: String
+    var _nav: _Slot[Optional[DefinitionResolved]]
     var _nav_word: String
-    var _resolved_nav: Optional[DefinitionResolved]
-    var _has_resolved_nav: Bool
     # Background ``textDocument/definition``s asking whether misspelled
     # words are library symbols (``Desktop._maybe_probe_library_word``,
     # ``_library_check_step``). Slots of their own so they never disturb
@@ -923,11 +949,10 @@ struct LspManager(Copyable, Movable):
     # ``textDocument/prepareRename`` round-trip that gates the rename
     # flow. ``_prepare_rename_state``: 0 = unsupported / errored (host
     # falls back to a direct prompt), 1 = renameable (seed prompt with
-    # ``_prepare_rename_placeholder``), 2 = not renameable (null result).
-    var _inflight_prepare_rename_id: String
-    var _has_resolved_prepare_rename: Bool
+    # the placeholder ``_prepare_rename`` parks), 2 = not renameable
+    # (null result).
+    var _prepare_rename: _Slot[String]
     var _prepare_rename_state: Int
-    var _prepare_rename_placeholder: String
     # ``textDocument/references`` — list-of-locations form of definition.
     # Parked as ``DefinitionResolved`` rows (same shape, different list).
     # ``_references.ready`` distinguishes "no response yet" from
@@ -946,11 +971,9 @@ struct LspManager(Copyable, Movable):
     # whether the request was a user-invoked Ctrl+Space (vs. the as-you-
     # type auto-trigger) so the host can decide whether an empty
     # response should surface a ``<no completion found>`` message.
-    var _inflight_completion_id: String
+    var _completions: _Slot[List[CompletionItem]]
     var _completion_path: String
     var _completion_manual: Bool
-    var _resolved_completions: List[CompletionItem]
-    var _has_resolved_completions: Bool
     # ``completionItem/resolve`` round-trip. Servers that set
     # ``resolveProvider`` ship the initial list without ``detail`` /
     # ``additionalTextEdits`` (auto-imports) and fill them in only on a
@@ -965,32 +988,26 @@ struct LspManager(Copyable, Movable):
     # Pending ``textDocument/hover`` request state. Same idea as the
     # completion fields: ``_hover_path``/``_hover_row``/``_hover_col``
     # are echoed via ``pending_hover_*`` so the host can drop a stale
-    # response when the cursor has moved off the symbol. ``_resolved_hover``
-    # is the rendered hover text (already joined into a single string) and
-    # ``_has_resolved_hover`` is the parked-and-waiting-for-consumption flag.
-    var _inflight_hover_id: String
+    # response when the cursor has moved off the symbol. ``_hover`` parks
+    # the rendered hover text (already joined into a single string).
+    var _hover: _Slot[String]
     var _hover_path: String
     var _hover_row: Int
     var _hover_col: Int
-    var _resolved_hover: String
-    var _has_resolved_hover: Bool
-    # Pending ``textDocument/codeAction`` request state. Pattern matches
-    # the other request kinds: ``_inflight_code_action_id`` is "" when no
-    # request is outstanding; ``_resolved_code_actions`` parks the parsed
-    # action list until ``take_code_actions`` consumes it. ``_code_action_path``
-    # is echoed via ``pending_code_action_path`` so the host can tell when
-    # the response is for a stale diagnostic menu (the user moved on).
-    var _inflight_code_action_id: String
+    # Pending ``textDocument/codeAction`` request state: the slot parks
+    # the parsed action list until ``take_code_actions`` consumes it.
+    # ``_code_action_path`` is echoed via ``pending_code_action_path`` so
+    # the host can tell when the response is for a stale diagnostic menu
+    # (the user moved on).
+    var _code_actions: _Slot[List[CodeAction]]
     var _code_action_path: String
-    var _resolved_code_actions: List[CodeAction]
-    var _has_resolved_code_actions: Bool
     # ``codeAction/resolve`` fan-out. A server with
     # ``codeActionProvider.resolveProvider`` returns actions with a title and
     # no ``edit``; we resolve every such action before publishing the list, so
     # the host's contract ("these are the actions you can apply") is unchanged
     # and it needs to know nothing about resolve. Ids and the accumulator
     # slot each one fills run in parallel lists; the list emptying is what
-    # flips ``_has_resolved_code_actions``.
+    # publishes ``_code_actions``.
     var _ca_resolve: _ResolveFanout
     var _ca_accum: List[CodeAction]
     var _ca_resolve_deadline: Int
@@ -998,12 +1015,10 @@ struct LspManager(Copyable, Movable):
     # code-action slots: an inflight id, an echoed origin path so a stale
     # response can be dropped, and a parked ``WorkspaceEdit`` (reusing the
     # ``CodeActionFileEdit`` grouping since rename returns the same shape).
-    var _inflight_rename_id: String
+    var _rename: _Slot[List[CodeActionFileEdit]]
     var _rename_path: String
     # The text the rename was asked for against, as ``_formatting.text``.
     var _rename_text: String
-    var _resolved_rename_edits: List[CodeActionFileEdit]
-    var _has_resolved_rename: Bool
     # ``textDocument/formatting`` + ``rangeFormatting`` — both return a flat
     # ``TextEdit[]`` for one file, parked here for the host to apply via
     # the same edit-application path rename/code-actions use.
@@ -1027,21 +1042,17 @@ struct LspManager(Copyable, Movable):
     # the TextEdit that rewrites the literal to that form). ``_colorpres_*``
     # range fields remember the requested span so a label-only presentation
     # (no textEdit) can synthesize one.
-    var _inflight_colorpres_id: String
-    var _colorpres_labels: List[String]
+    var _colorpres: _Slot[List[String]]
     var _colorpres_edits: List[TextEditEntry]
-    var _has_colorpres: Bool
     var _colorpres_sl: Int
     var _colorpres_sc: Int
     var _colorpres_el: Int
     var _colorpres_ec: Int
     # ``textDocument/inlineCompletion`` — ghost-text suggestion. Parked text
     # + the request position (so the editor anchors the ghost there).
-    var _inflight_inlinecomp_id: String
-    var _inlinecomp_text: String
+    var _inlinecomp: _Slot[String]
     var _inlinecomp_row: Int
     var _inlinecomp_col: Int
-    var _has_inlinecomp: Bool
     # ``textDocument/linkedEditingRange`` — the set of ranges that should be
     # edited together (e.g. an HTML open/close tag pair). Parked as range
     # carriers; the host places synchronized carets at them for co-editing.
@@ -1108,13 +1119,12 @@ struct LspManager(Copyable, Movable):
     # Call / type hierarchy: a two-step flow (prepare → incomingCalls /
     # supertypes) auto-chained in ``tick``. ``_hierarchy_followup`` is the
     # method to fire on the prepared item; the final locations are parked
-    # in ``_resolved_hierarchy`` and surfaced through the references picker.
-    var _inflight_hier_prepare_id: String
+    # in ``_hierarchy`` (whose id is the prepare request's) and surfaced
+    # through the references picker.
+    var _hierarchy: _Slot[List[DefinitionResolved]]
     var _inflight_hier_followup_id: String
     var _hierarchy_followup: String
     var _hierarchy_word: String
-    var _resolved_hierarchy: List[DefinitionResolved]
-    var _has_resolved_hierarchy: Bool
     # ``textDocument/documentColor`` — per-color swatch ``Highlight``s
     # (truecolor bg) parked for the editor overlay.
     var _colors: _Slot[List[Highlight]]
@@ -1189,6 +1199,12 @@ struct LspManager(Copyable, Movable):
     # Latest published diagnostics keyed by URI-resolved path. The list
     # holds at most one bucket per path — a fresh publishDiagnostics
     # overwrites the prior bucket's list and resets ``consumed``.
+    # ``notify_closed`` deliberately keeps a closed file's bucket, so a
+    # reopen shows its squiggles at once. The cost: a server that
+    # publishes for the whole workspace (not just open files) leaves a
+    # bucket for every file it ever reported, empty ones included, and
+    # lookups scan them. That is bounded by the workspace's file count,
+    # not by session length, so it is accepted rather than evicted.
     var _diagnostic_buckets: List[_DiagnosticBucket]
 
     # In-flight diagnostic refresh tracking, parallel-list per path:
@@ -1235,66 +1251,52 @@ struct LspManager(Copyable, Movable):
         self._def_origin_word = String("")
         self._capabilities = Optional[JsonValue]()
         self._watches_files = False
-        self._inflight_nav_id = String("")
+        self._log_on = False
+        self._log_checked_ms = -_LOG_RECHECK_MS
+        self._nav = _Slot[Optional[DefinitionResolved]]()
         self._nav_word = String("")
-        self._resolved_nav = Optional[DefinitionResolved]()
-        self._has_resolved_nav = False
         self._libprobe_ids = List[String]()
         self._libprobe_words = List[String]()
         self._libprobe_tags = List[Int]()
         self._libprobe_sent_ms = List[Int]()
         self._libprobe_done = List[LibraryProbe]()
-        self._inflight_prepare_rename_id = String("")
-        self._has_resolved_prepare_rename = False
+        self._prepare_rename = _Slot[String]()
         self._prepare_rename_state = 0
-        self._prepare_rename_placeholder = String("")
         self._references = _Slot[List[DefinitionResolved]]()
         self._ref_word = String("")
         self._symbols = _Slot[List[SymbolItem]]()
         self._ws_symbols = _Slot[List[WorkspaceSymbolItem]]()
-        self._inflight_completion_id = String("")
+        self._completions = _Slot[List[CompletionItem]]()
         self._completion_path = String("")
         self._completion_manual = False
-        self._resolved_completions = List[CompletionItem]()
-        self._has_resolved_completions = False
         self._inflight_resolve_id = String("")
         self._resolve_aux = List[TextEditEntry]()
         self._resolve_detail = String("")
         self._has_resolve_result = False
-        self._inflight_hover_id = String("")
+        self._hover = _Slot[String]()
         self._hover_path = String("")
         self._hover_row = 0
         self._hover_col = 0
-        self._resolved_hover = String("")
-        self._has_resolved_hover = False
-        self._inflight_code_action_id = String("")
+        self._code_actions = _Slot[List[CodeAction]]()
         self._code_action_path = String("")
         self._ca_resolve = _ResolveFanout()
         self._ca_accum = List[CodeAction]()
         self._ca_resolve_deadline = 0
-        self._resolved_code_actions = List[CodeAction]()
-        self._has_resolved_code_actions = False
-        self._inflight_rename_id = String("")
+        self._rename = _Slot[List[CodeActionFileEdit]]()
         self._rename_path = String("")
         self._rename_text = String("")
-        self._resolved_rename_edits = List[CodeActionFileEdit]()
-        self._has_resolved_rename = False
         self._formatting = _EditSlot()
         self._ontype = _EditSlot()
         self._moniker = _Slot[String]()
-        self._inflight_colorpres_id = String("")
-        self._colorpres_labels = List[String]()
+        self._colorpres = _Slot[List[String]]()
         self._colorpres_edits = List[TextEditEntry]()
-        self._has_colorpres = False
         self._colorpres_sl = 0
         self._colorpres_sc = 0
         self._colorpres_el = 0
         self._colorpres_ec = 0
-        self._inflight_inlinecomp_id = String("")
-        self._inlinecomp_text = String("")
+        self._inlinecomp = _Slot[String]()
         self._inlinecomp_row = 0
         self._inlinecomp_col = 0
-        self._has_inlinecomp = False
         self._linked = _EditSlot()
         self._inlineval = _EditSlot()
         self._inlineval_exprs = List[TextEditEntry]()
@@ -1315,12 +1317,10 @@ struct LspManager(Copyable, Movable):
         self._server_message = String("")
         self._has_server_message = False
         self._selrange = _EditSlot()
-        self._inflight_hier_prepare_id = String("")
+        self._hierarchy = _Slot[List[DefinitionResolved]]()
         self._inflight_hier_followup_id = String("")
         self._hierarchy_followup = String("")
         self._hierarchy_word = String("")
-        self._resolved_hierarchy = List[DefinitionResolved]()
-        self._has_resolved_hierarchy = False
         self._colors = _Slot[List[Highlight]]()
         self._color_path = String("")
         self._pull_diag_ids = List[String]()
@@ -1658,9 +1658,9 @@ struct LspManager(Copyable, Movable):
         converted to the negotiated encoding exactly once, and so the
         request's document is remembered for remapping the response."""
         var uri = String("")
-        var td = params.object_get(String("textDocument"))
-        if td and td.value().is_object():
-            uri = json_get_string(td.value(), String("uri"), uri)
+        var tdi = params.object_index(String("textDocument"))
+        if tdi >= 0:
+            uri = json_get_string(params.obj_v[tdi].value, String("uri"))
         var id = self._send_wire(method, params, True)
         # Only a non-utf-8 encoding remaps responses (see the dispatch's
         # ``_take_req_uri``), so under utf-8 there's nothing to remember.
@@ -1690,6 +1690,16 @@ struct LspManager(Copyable, Movable):
         _ = self._send_wire(method, params, False)
 
     # --- transport: the private client, or a session on a shared channel --
+
+    def _logging(mut self) -> Bool:
+        """Whether debug logging is on — ``_lsp_debug_enabled`` re-asked at
+        most once per ``_LOG_RECHECK_MS``, so touching or deleting the log
+        file still takes effect within a second."""
+        var now = monotonic_ms()
+        if now - self._log_checked_ms >= _LOG_RECHECK_MS:
+            self._log_on = _lsp_debug_enabled()
+            self._log_checked_ms = now
+        return self._log_on
 
     def is_shared(self) -> Bool:
         """True while this manager is a session on a shared channel."""
@@ -2046,6 +2056,14 @@ struct LspManager(Copyable, Movable):
         # Drop any "analyzing edits…" spinner state — a closed buffer
         # must not keep one spinning.
         self._clear_diag_inflight(path, 0)
+        # Re-arm the initial pull: a reopen sends a fresh didOpen of what
+        # may be different text (changed on disk while closed), and
+        # without this ``has_pulled`` stayed true, so the reopened buffer
+        # showed the old report until its first edit.
+        for k in range(len(self._pulled_paths)):
+            if self._pulled_paths[k] == path:
+                _ = self._pulled_paths.pop(k)
+                break
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
         try:
@@ -2283,14 +2301,15 @@ struct LspManager(Copyable, Movable):
         """
         if self.state != _STATE_READY:
             return False
-        _lsp_debug_log(
-            String("→ request_definition lang=") + self._language_id
-            + String(" path=") + path
-            + String(" line=") + String(line)
-            + String(" character=") + String(character)
-            + String(" word=") + word
-            + String(" text_len=") + String(len(text.as_bytes())),
-        )
+        if self._logging():
+            _lsp_debug_write(
+                String("→ request_definition lang=") + self._language_id
+                + String(" path=") + path
+                + String(" line=") + String(line)
+                + String(" character=") + String(character)
+                + String(" word=") + word
+                + String(" text_len=") + String(len(text.as_bytes())),
+            )
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
         self._inflight_def_id = self._request(String("textDocument/definition"), params)
@@ -2423,29 +2442,26 @@ struct LspManager(Copyable, Movable):
         cmd-click → references chaining."""
         if self.state != _STATE_READY:
             return False
-        _lsp_debug_log(
-            String("→ request_navigation ") + method
-            + String(" lang=") + self._language_id
-            + String(" line=") + String(line)
-            + String(" character=") + String(character),
-        )
+        if self._logging():
+            _lsp_debug_write(
+                String("→ request_navigation ") + method
+                + String(" lang=") + self._language_id
+                + String(" line=") + String(line)
+                + String(" character=") + String(character),
+            )
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
-        try:
-            self._inflight_nav_id = self._send_request(method, params)
-        except:
-            self._inflight_nav_id = String("")
+        var sent = self._request_replacing(self._nav.id.copy(), method, params)
+        if not self._nav.start(sent):
             return False
         self._nav_word = word^
-        self._resolved_nav = Optional[DefinitionResolved]()
-        self._has_resolved_nav = False
         return True
 
     def has_pending_nav(self) -> Bool:
         """True iff a navigation response is parked. The parked target may
         still be empty (server found nothing) — distinguish via
         ``take_nav_target`` returning None."""
-        return self._has_resolved_nav
+        return self._nav.ready
 
     def nav_word(self) -> String:
         return self._nav_word
@@ -2453,10 +2469,8 @@ struct LspManager(Copyable, Movable):
     def take_nav_target(mut self) -> Optional[DefinitionResolved]:
         """Move out the parked navigation target (None if the server
         returned no location). Clears the pending flag either way."""
-        var out = self._resolved_nav
-        self._resolved_nav = Optional[DefinitionResolved]()
-        self._has_resolved_nav = False
-        return out
+        var out = self._nav.take()
+        return out^
 
     # --- library-word probe ----------------------------------------------
 
@@ -2536,28 +2550,25 @@ struct LspManager(Copyable, Movable):
             return False
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
-        self._inflight_prepare_rename_id = self._request(
+        var sent = self._request_replacing(
+            self._prepare_rename.id.copy(),
             String("textDocument/prepareRename"), params,
         )
-        if len(self._inflight_prepare_rename_id.as_bytes()) == 0:
+        if not self._prepare_rename.start(sent):
             return False
-        self._has_resolved_prepare_rename = False
         self._prepare_rename_state = 0
-        self._prepare_rename_placeholder = String("")
         return True
 
     def has_pending_prepare_rename(self) -> Bool:
-        return self._has_resolved_prepare_rename
+        return self._prepare_rename.ready
 
     def take_prepare_rename(mut self) -> Tuple[Int, String]:
         """Return ``(state, placeholder)`` and clear the pending flag.
         ``state``: 0 unsupported/error, 1 renameable, 2 not renameable."""
         var st = self._prepare_rename_state
-        var ph = self._prepare_rename_placeholder
-        self._has_resolved_prepare_rename = False
+        var ph = self._prepare_rename.take()
         self._prepare_rename_state = 0
-        self._prepare_rename_placeholder = String("")
-        return (st, ph)
+        return (st, ph^)
 
     def request_references(
         mut self, path: String, line: Int, character: Int,
@@ -2575,13 +2586,14 @@ struct LspManager(Copyable, Movable):
         """
         if self.state != _STATE_READY:
             return False
-        _lsp_debug_log(
-            String("→ request_references lang=") + self._language_id
-            + String(" path=") + path
-            + String(" line=") + String(line)
-            + String(" character=") + String(character)
-            + String(" word=") + word,
-        )
+        if self._logging():
+            _lsp_debug_write(
+                String("→ request_references lang=") + self._language_id
+                + String(" path=") + path
+                + String(" line=") + String(line)
+                + String(" character=") + String(character)
+                + String(" word=") + word,
+            )
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
         var ctx = json_object()
@@ -2718,11 +2730,11 @@ struct LspManager(Copyable, Movable):
         the server stops computing an answer nobody will read — a cursor
         move otherwise left every per-position request running to
         completion, and the stale response still got parsed and remapped
-        before being dropped."""
-        var id = self._request(method, params)
+        before being dropped. The cancel goes out first, so the fresh
+        request doesn't queue behind a worker still busy on the stale one."""
         if len(superseded.as_bytes()) > 0:
             self._send_cancel(superseded^, method)
-        return id^
+        return self._request(method, params)
 
     def _send_cancel(mut self, var request_id: String, context: String):
         """Best-effort ``$/cancelRequest`` for ``request_id``. The cancel is
@@ -2761,12 +2773,13 @@ struct LspManager(Copyable, Movable):
         """
         if self.state != _STATE_READY:
             return False
-        _lsp_debug_log(
-            String("→ request_completion lang=") + self._language_id
-            + String(" path=") + path
-            + String(" line=") + String(line)
-            + String(" character=") + String(character),
-        )
+        if self._logging():
+            _lsp_debug_write(
+                String("→ request_completion lang=") + self._language_id
+                + String(" path=") + path
+                + String(" line=") + String(line)
+                + String(" character=") + String(character),
+            )
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
         # ``CompletionContext.triggerKind`` 1 = Invoked (manual / Ctrl+Space).
@@ -2781,53 +2794,47 @@ struct LspManager(Copyable, Movable):
         # fresh request queues behind it — felt as laggy "type two
         # chars, wait for the first response to land before the popup
         # updates" behavior. The cancel is a notification (no
-        # response), so it costs us nothing on the read side. We
-        # already shadow the old id below, so the response (cancelled
-        # or not) is dropped on arrival.
-        if len(self._inflight_completion_id.as_bytes()) > 0:
-            self._send_cancel(
-                self._inflight_completion_id, String("completion"),
-            )
-        self._inflight_completion_id = self._request(
+        # response), so it costs us nothing on the read side. The slot
+        # shadows the old id, so its response (cancelled or not) is
+        # dropped on arrival.
+        var sent = self._request_replacing(
+            self._completions.id.copy(),
             String("textDocument/completion"), params,
         )
-        if len(self._inflight_completion_id.as_bytes()) == 0:
+        if not self._completions.start(sent):
             return False
         self._completion_path = path
         self._completion_manual = manual
-        self._resolved_completions = List[CompletionItem]()
-        self._has_resolved_completions = False
         return True
 
     def cancel_completion(mut self):
         """Cancel any in-flight completion request.
 
         Sends ``$/cancelRequest`` so the server can drop work it has
-        already started, and clears ``_inflight_completion_id`` so a
+        already started, and clears the slot's in-flight id so a
         late response — if one slips in before the cancel propagates —
         is ignored by the response handler instead of being parked
         for the host. Also clears any parked-but-unconsumed completion
         list (the user dismissed the popup; that list is irrelevant).
         No-op when nothing is in flight."""
-        if len(self._inflight_completion_id.as_bytes()) == 0 \
-                and not self._has_resolved_completions:
+        if len(self._completions.id.as_bytes()) == 0 \
+                and not self._completions.ready:
             return
-        if len(self._inflight_completion_id.as_bytes()) > 0:
-            _lsp_debug_log(
-                String("→ cancel_completion id=")
-                + self._inflight_completion_id
-                + String(" lang=") + self._language_id,
-            )
-            self._send_cancel(
-                self._inflight_completion_id, String("cancel_completion"),
-            )
-            self._inflight_completion_id = String("")
-        self._resolved_completions = List[CompletionItem]()
-        self._has_resolved_completions = False
+        if len(self._completions.id.as_bytes()) > 0:
+            if self._logging():
+                _lsp_debug_write(
+                    String("→ cancel_completion id=")
+                    + self._completions.id
+                    + String(" lang=") + self._language_id,
+                )
+            var stale = self._completions.id^
+            self._completions.id = String("")
+            self._send_cancel(stale^, String("cancel_completion"))
+        _ = self._completions.take()
 
     def has_pending_completions(self) -> Bool:
         """True iff a parsed completion response is parked for ``take``."""
-        return self._has_resolved_completions
+        return self._completions.ready
 
     def pending_completion_path(self) -> String:
         return self._completion_path
@@ -2844,9 +2851,7 @@ struct LspManager(Copyable, Movable):
         Pair with ``has_pending_completions()``. The flag is cleared
         either way so a subsequent call returns empty.
         """
-        var out = self._resolved_completions^
-        self._resolved_completions = List[CompletionItem]()
-        self._has_resolved_completions = False
+        var out = self._completions.take()
         return out^
 
     def request_resolve_completion(mut self, item: CompletionItem) -> Bool:
@@ -2925,21 +2930,19 @@ struct LspManager(Copyable, Movable):
         var params = _text_document_position_params(path, line, character)
         # Cancel any prior in-flight hover so the server doesn't keep
         # working on a stale position. Mirrors ``request_completion``.
-        if len(self._inflight_hover_id.as_bytes()) > 0:
-            self._send_cancel(self._inflight_hover_id, String("hover"))
-        self._inflight_hover_id = self._request(String("textDocument/hover"), params)
-        if len(self._inflight_hover_id.as_bytes()) == 0:
+        var sent = self._request_replacing(
+            self._hover.id.copy(), String("textDocument/hover"), params,
+        )
+        if not self._hover.start(sent):
             return False
         self._hover_path = path
         self._hover_row = line
         self._hover_col = character
-        self._resolved_hover = String("")
-        self._has_resolved_hover = False
         return True
 
     def has_pending_hover(self) -> Bool:
         """True iff a parsed hover response is parked for ``take``."""
-        return self._has_resolved_hover
+        return self._hover.ready
 
     def pending_hover_path(self) -> String:
         return self._hover_path
@@ -2953,9 +2956,7 @@ struct LspManager(Copyable, Movable):
     def take_hover_text(mut self) -> String:
         """Move the parked hover text out of the manager. Pair with
         ``has_pending_hover()`` — the flag is cleared either way."""
-        var out = self._resolved_hover^
-        self._resolved_hover = String("")
-        self._has_resolved_hover = False
+        var out = self._hover.take()
         return out^
 
     def request_code_actions(
@@ -2976,14 +2977,15 @@ struct LspManager(Copyable, Movable):
         """
         if self.state != _STATE_READY:
             return False
-        _lsp_debug_log(
-            String("→ request_code_actions lang=") + self._language_id
-            + String(" path=") + path
-            + String(" range=(") + String(diag.start_row)
-            + String(",") + String(diag.start_col)
-            + String(")-(") + String(diag.end_row)
-            + String(",") + String(diag.end_col) + String(")"),
-        )
+        if self._logging():
+            _lsp_debug_write(
+                String("→ request_code_actions lang=") + self._language_id
+                + String(" path=") + path
+                + String(" range=(") + String(diag.start_row)
+                + String(",") + String(diag.start_col)
+                + String(")-(") + String(diag.end_row)
+                + String(",") + String(diag.end_col) + String(")"),
+            )
         self._send_open_or_change(path, text^)
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
@@ -3011,14 +3013,13 @@ struct LspManager(Copyable, Movable):
         diags_arr.append(diag_obj)
         ctx.put(String("diagnostics"), diags_arr)
         params.put(String("context"), ctx)
-        self._inflight_code_action_id = self._request(
+        var sent = self._request_replacing(
+            self._code_actions.id.copy(),
             String("textDocument/codeAction"), params,
         )
-        if len(self._inflight_code_action_id.as_bytes()) == 0:
+        if not self._code_actions.start(sent):
             return False
         self._code_action_path = path
-        self._resolved_code_actions = List[CodeAction]()
-        self._has_resolved_code_actions = False
         return True
 
     # --- codeAction/resolve ------------------------------------------------
@@ -3056,11 +3057,12 @@ struct LspManager(Copyable, Movable):
         if self._ca_resolve.pending() > 0:
             self._ca_resolve_deadline = \
                 monotonic_ms() + _CA_RESOLVE_TIMEOUT_MS
-            _lsp_debug_log(
-                String("→ codeAction/resolve x")
-                + String(self._ca_resolve.pending())
-                + String(" lang=") + self._language_id,
-            )
+            if self._logging():
+                _lsp_debug_write(
+                    String("→ codeAction/resolve x")
+                    + String(self._ca_resolve.pending())
+                    + String(" lang=") + self._language_id,
+                )
         self._publish_code_actions_if_settled()
 
     def _publish_code_actions_if_settled(mut self):
@@ -3068,9 +3070,9 @@ struct LspManager(Copyable, Movable):
         outstanding. Idempotent — safe to call after every resolve."""
         if self._ca_resolve.pending() > 0:
             return
-        self._resolved_code_actions = self._ca_accum^
+        var settled = self._ca_accum^
         self._ca_accum = List[CodeAction]()
-        self._has_resolved_code_actions = True
+        self._code_actions.publish(settled^)
         self._ca_resolve_deadline = 0
 
     def _expire_code_action_resolves(mut self):
@@ -3086,11 +3088,12 @@ struct LspManager(Copyable, Movable):
             return
         if monotonic_ms() < self._ca_resolve_deadline:
             return
-        _lsp_debug_log(
-            String("codeAction/resolve timed out with ")
-            + String(self._ca_resolve.pending())
-            + String(" outstanding; publishing partial list"),
-        )
+        if self._logging():
+            _lsp_debug_write(
+                String("codeAction/resolve timed out with ")
+                + String(self._ca_resolve.pending())
+                + String(" outstanding; publishing partial list"),
+            )
         self._ca_resolve = _ResolveFanout()
         self._publish_code_actions_if_settled()
 
@@ -3098,7 +3101,7 @@ struct LspManager(Copyable, Movable):
         """True iff a parsed code-action response is parked for ``take``.
         Pair with ``pending_code_action_path()`` to distinguish "still
         waiting" from "empty list for this file"."""
-        return self._has_resolved_code_actions
+        return self._code_actions.ready
 
     def pending_code_action_path(self) -> String:
         """Path the most recent code-action request was issued for. Lets
@@ -3110,9 +3113,7 @@ struct LspManager(Copyable, Movable):
         """Move the parked code-action list out of the manager. Pair
         with ``has_pending_code_actions()`` — the flag is cleared either
         way so a follow-up call returns empty."""
-        var out = self._resolved_code_actions^
-        self._resolved_code_actions = List[CodeAction]()
-        self._has_resolved_code_actions = False
+        var out = self._code_actions.take()
         return out^
 
     def request_execute_command(
@@ -3152,30 +3153,31 @@ struct LspManager(Copyable, Movable):
         grouping the host already knows how to apply."""
         if self.state != _STATE_READY:
             return False
-        _lsp_debug_log(
-            String("→ request_rename lang=") + self._language_id
-            + String(" path=") + path
-            + String(" line=") + String(line)
-            + String(" character=") + String(character)
-            + String(" new_name=") + new_name,
-        )
+        if self._logging():
+            _lsp_debug_write(
+                String("→ request_rename lang=") + self._language_id
+                + String(" path=") + path
+                + String(" line=") + String(line)
+                + String(" character=") + String(character)
+                + String(" new_name=") + new_name,
+            )
         self._rename_text = text.copy()
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
         params.put(String("newName"), json_str(new_name))
-        self._inflight_rename_id = self._request(String("textDocument/rename"), params)
-        if len(self._inflight_rename_id.as_bytes()) == 0:
+        var sent = self._request_replacing(
+            self._rename.id.copy(), String("textDocument/rename"), params,
+        )
+        if not self._rename.start(sent):
             return False
         self._rename_path = path
-        self._resolved_rename_edits = List[CodeActionFileEdit]()
-        self._has_resolved_rename = False
         return True
 
     def has_pending_rename(self) -> Bool:
         """True iff a parsed rename ``WorkspaceEdit`` is parked for ``take``.
         An empty list with the flag set means "server replied but had no
         edits" (rename unsupported / nothing to rename)."""
-        return self._has_resolved_rename
+        return self._rename.ready
 
     def pending_rename_path(self) -> String:
         """Path the most recent rename request was issued for."""
@@ -3188,9 +3190,7 @@ struct LspManager(Copyable, Movable):
     def take_rename_edits(mut self) -> List[CodeActionFileEdit]:
         """Move the parked rename edits out of the manager. Clears the
         pending flag either way."""
-        var out = self._resolved_rename_edits^
-        self._resolved_rename_edits = List[CodeActionFileEdit]()
-        self._has_resolved_rename = False
+        var out = self._rename.take()
         return out^
 
     # --- formatting -------------------------------------------------------
@@ -3350,25 +3350,24 @@ struct LspManager(Copyable, Movable):
         params.put(String("textDocument"), _text_document(path))
         params.put(String("color"), color)
         params.put(String("range"), rng)
-        self._inflight_colorpres_id = self._request(
+        var sent = self._request_replacing(
+            self._colorpres.id.copy(),
             String("textDocument/colorPresentation"), params,
         )
-        if len(self._inflight_colorpres_id.as_bytes()) == 0:
+        if not self._colorpres.start(sent):
             return False
         self._colorpres_sl = start_line
         self._colorpres_sc = start_char
         self._colorpres_el = end_line
         self._colorpres_ec = end_char
-        self._colorpres_labels = List[String]()
         self._colorpres_edits = List[TextEditEntry]()
-        self._has_colorpres = False
         return True
 
     def has_color_presentations(self) -> Bool:
-        return self._has_colorpres
+        return self._colorpres.ready
 
     def color_presentation_labels(self) -> List[String]:
-        return self._colorpres_labels.copy()
+        return self._colorpres.value.copy()
 
     def take_color_presentation_edit(
         mut self, index: Int,
@@ -3379,9 +3378,8 @@ struct LspManager(Copyable, Movable):
         var out = List[TextEditEntry]()
         if 0 <= index and index < len(self._colorpres_edits):
             out.append(self._colorpres_edits[index])
-        self._colorpres_labels = List[String]()
+        _ = self._colorpres.take()
         self._colorpres_edits = List[TextEditEntry]()
-        self._has_colorpres = False
         return out^
 
     def request_inline_completion(
@@ -3397,22 +3395,21 @@ struct LspManager(Copyable, Movable):
         var ctx = json_object()
         ctx.put(String("triggerKind"), json_int(1))  # Invoked
         params.put(String("context"), ctx)
-        self._inflight_inlinecomp_id = self._request(
+        var sent = self._request_replacing(
+            self._inlinecomp.id.copy(),
             String("textDocument/inlineCompletion"), params,
         )
-        if len(self._inflight_inlinecomp_id.as_bytes()) == 0:
+        if not self._inlinecomp.start(sent):
             return False
         self._inlinecomp_row = line
         self._inlinecomp_col = character
-        self._inlinecomp_text = String("")
-        self._has_inlinecomp = False
         return True
 
     def has_inline_completion(self) -> Bool:
-        return self._has_inlinecomp
+        return self._inlinecomp.ready
 
     def inline_completion_text(self) -> String:
-        return self._inlinecomp_text
+        return self._inlinecomp.value
 
     def inline_completion_row(self) -> Int:
         return self._inlinecomp_row
@@ -3421,8 +3418,7 @@ struct LspManager(Copyable, Movable):
         return self._inlinecomp_col
 
     def clear_inline_completion(mut self):
-        self._has_inlinecomp = False
-        self._inlinecomp_text = String("")
+        _ = self._inlinecomp.take()
 
     def request_linked_editing(
         mut self, path: String, line: Int, character: Int, var text: String,
@@ -3704,11 +3700,12 @@ struct LspManager(Copyable, Movable):
                 continue
             self._dl_resolve.add(rid, parsed.unresolved_slots[k])
         if self._dl_resolve.pending() > 0:
-            _lsp_debug_log(
-                String("→ documentLink/resolve x")
-                + String(self._dl_resolve.pending())
-                + String(" lang=") + self._language_id,
-            )
+            if self._logging():
+                _lsp_debug_write(
+                    String("→ documentLink/resolve x")
+                    + String(self._dl_resolve.pending())
+                    + String(" lang=") + self._language_id,
+                )
 
     def _publish_document_links(mut self):
         """Hand the host every link that has a target.
@@ -3825,26 +3822,28 @@ struct LspManager(Copyable, Movable):
             return False
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
-        self._inflight_hier_prepare_id = self._request(prepare_method, params)
-        if len(self._inflight_hier_prepare_id.as_bytes()) == 0:
+        var sent = self._request_replacing(
+            self._hierarchy.id.copy(), prepare_method, params,
+        )
+        if not self._hierarchy.start(sent):
             return False
+        # A superseded flow already past its prepare step is cancelled too.
+        if len(self._inflight_hier_followup_id.as_bytes()) > 0:
+            var followup = self._inflight_hier_followup_id^
+            self._inflight_hier_followup_id = String("")
+            self._send_cancel(followup^, self._hierarchy_followup.copy())
         self._hierarchy_followup = followup_method
         self._hierarchy_word = word^
-        self._inflight_hier_followup_id = String("")
-        self._resolved_hierarchy = List[DefinitionResolved]()
-        self._has_resolved_hierarchy = False
         return True
 
     def has_pending_hierarchy(self) -> Bool:
-        return self._has_resolved_hierarchy
+        return self._hierarchy.ready
 
     def hierarchy_word(self) -> String:
         return self._hierarchy_word
 
     def take_hierarchy(mut self) -> List[DefinitionResolved]:
-        var out = self._resolved_hierarchy^
-        self._resolved_hierarchy = List[DefinitionResolved]()
-        self._has_resolved_hierarchy = False
+        var out = self._hierarchy.take()
         return out^
 
     # --- document color ---------------------------------------------------
@@ -3940,11 +3939,12 @@ struct LspManager(Copyable, Movable):
             self.failure_reason = String(
                 "outbound queue overflowed (server not reading stdin)",
             )
-            _lsp_debug_log(
-                String("✗ lsp ") + self._language_id
-                + String(" outbound overflow; ")
-                + String("failure_reason=") + self.failure_reason,
-            )
+            if self._logging():
+                _lsp_debug_write(
+                    String("✗ lsp ") + self._language_id
+                    + String(" outbound overflow; ")
+                    + String("failure_reason=") + self.failure_reason,
+                )
             return Optional[DefinitionResolved]()
         # Capture anything the server has written to stderr since the
         # last tick — useful diagnostic context for the info window even
@@ -3970,10 +3970,11 @@ struct LspManager(Copyable, Movable):
             if len(first.as_bytes()) > 0:
                 why = why + String(": ") + first
             self.failure_reason = why^
-            _lsp_debug_log(
-                String("✗ lsp ") + self._language_id
-                + String(" exited; failure_reason=") + self.failure_reason,
-            )
+            if self._logging():
+                _lsp_debug_write(
+                    String("✗ lsp ") + self._language_id
+                    + String(" exited; failure_reason=") + self.failure_reason,
+                )
             return Optional[DefinitionResolved]()
         var resolved = Optional[DefinitionResolved]()
         # Drain every framed message currently sitting in the kernel
@@ -4057,19 +4058,21 @@ struct LspManager(Copyable, Movable):
                 self._from_wire(msg.result.value(), default_uri)
             if id == self._inflight_def_id:
                 var loc = Optional[DefinitionResolved]()
-                var result_dump = String("<no result>")
-                var error_dump = String("<no error>")
                 if msg.result:
-                    result_dump = encode_json(msg.result.value())
                     loc = _parse_definition_result(msg.result.value())
-                if msg.error:
-                    error_dump = encode_json(msg.error.value())
-                _lsp_debug_log(
-                    String("← definition response id=") + id
-                    + String(" word=") + self._inflight_word
-                    + String(" result=") + result_dump
-                    + String(" error=") + error_dump,
-                )
+                if self._logging():
+                    var result_dump = String("<no result>")
+                    var error_dump = String("<no error>")
+                    if msg.result:
+                        result_dump = encode_json(msg.result.value())
+                    if msg.error:
+                        error_dump = encode_json(msg.error.value())
+                    _lsp_debug_write(
+                        String("← definition response id=") + id
+                        + String(" word=") + self._inflight_word
+                        + String(" result=") + result_dump
+                        + String(" error=") + error_dump,
+                    )
                 if loc:
                     resolved = loc
                     self._last_empty = False
@@ -4091,11 +4094,12 @@ struct LspManager(Copyable, Movable):
                 var refs = List[DefinitionResolved]()
                 if msg.result:
                     refs = _parse_references_result(msg.result.value())
-                _lsp_debug_log(
-                    String("← references response id=") + id
-                    + String(" lang=") + self._language_id
-                    + String(" count=") + String(len(refs)),
-                )
+                if self._logging():
+                    _lsp_debug_write(
+                        String("← references response id=") + id
+                        + String(" lang=") + self._language_id
+                        + String(" count=") + String(len(refs)),
+                    )
                 self._references.finish(refs^)
                 continue
             if self._symbols.owns(id):
@@ -4112,18 +4116,17 @@ struct LspManager(Copyable, Movable):
                     )
                 self._ws_symbols.finish(ws_items^)
                 continue
-            if id == self._inflight_completion_id:
+            if self._completions.owns(id):
                 var comps = List[CompletionItem]()
                 if msg.result:
                     comps = _parse_completion_result(msg.result.value())
-                _lsp_debug_log(
-                    String("← completion response id=") + id
-                    + String(" lang=") + self._language_id
-                    + String(" count=") + String(len(comps)),
-                )
-                self._resolved_completions = comps^
-                self._has_resolved_completions = True
-                self._inflight_completion_id = String("")
+                if self._logging():
+                    _lsp_debug_write(
+                        String("← completion response id=") + id
+                        + String(" lang=") + self._language_id
+                        + String(" count=") + String(len(comps)),
+                    )
+                self._completions.finish(comps^)
                 continue
             if id == self._inflight_resolve_id:
                 var r_aux = List[TextEditEntry]()
@@ -4133,39 +4136,40 @@ struct LspManager(Copyable, Movable):
                     r_detail = json_get_string(
                         msg.result.value(), String("detail"), r_detail,
                     )
-                _lsp_debug_log(
-                    String("← resolve response id=") + id
-                    + String(" lang=") + self._language_id
-                    + String(" aux=") + String(len(r_aux)),
-                )
+                if self._logging():
+                    _lsp_debug_write(
+                        String("← resolve response id=") + id
+                        + String(" lang=") + self._language_id
+                        + String(" aux=") + String(len(r_aux)),
+                    )
                 self._resolve_aux = r_aux^
                 self._resolve_detail = r_detail^
                 self._has_resolve_result = True
                 self._inflight_resolve_id = String("")
                 continue
-            if id == self._inflight_hover_id:
+            if self._hover.owns(id):
                 var hover_text = String("")
                 if msg.result:
                     hover_text = _parse_hover_result(msg.result.value())
-                _lsp_debug_log(
-                    String("← hover response id=") + id
-                    + String(" lang=") + self._language_id
-                    + String(" len=") + String(len(hover_text.as_bytes())),
-                )
-                self._resolved_hover = hover_text^
-                self._has_resolved_hover = True
-                self._inflight_hover_id = String("")
+                if self._logging():
+                    _lsp_debug_write(
+                        String("← hover response id=") + id
+                        + String(" lang=") + self._language_id
+                        + String(" len=") + String(len(hover_text.as_bytes())),
+                    )
+                self._hover.finish(hover_text^)
                 continue
-            if id == self._inflight_code_action_id:
+            if self._code_actions.owns(id):
                 var actions = List[CodeAction]()
                 if msg.result:
                     actions = _parse_code_action_result(msg.result.value())
-                _lsp_debug_log(
-                    String("← codeAction response id=") + id
-                    + String(" lang=") + self._language_id
-                    + String(" count=") + String(len(actions)),
-                )
-                self._inflight_code_action_id = String("")
+                if self._logging():
+                    _lsp_debug_write(
+                        String("← codeAction response id=") + id
+                        + String(" lang=") + self._language_id
+                        + String(" count=") + String(len(actions)),
+                    )
+                self._code_actions.id = String("")
                 self._start_code_action_resolves(actions^)
                 continue
             var ca_slot = self._ca_resolve.slot(id)
@@ -4188,35 +4192,33 @@ struct LspManager(Copyable, Movable):
                 self._ca_resolve.drop(id)
                 self._publish_code_actions_if_settled()
                 continue
-            if id == self._inflight_rename_id:
+            if self._rename.owns(id):
                 var rename_edits = List[CodeActionFileEdit]()
                 if msg.result and msg.result.value().is_object():
                     rename_edits = _parse_workspace_edit_changes(
                         msg.result.value(),
                     )
-                _lsp_debug_log(
-                    String("← rename response id=") + id
-                    + String(" lang=") + self._language_id
-                    + String(" files=") + String(len(rename_edits)),
-                )
-                self._resolved_rename_edits = rename_edits^
-                self._has_resolved_rename = True
-                self._inflight_rename_id = String("")
+                if self._logging():
+                    _lsp_debug_write(
+                        String("← rename response id=") + id
+                        + String(" lang=") + self._language_id
+                        + String(" files=") + String(len(rename_edits)),
+                    )
+                self._rename.finish(rename_edits^)
                 continue
-            if id == self._inflight_nav_id:
+            if self._nav.owns(id):
                 var nav = Optional[DefinitionResolved]()
                 if msg.result:
                     nav = _parse_definition_result(msg.result.value())
                 var nav_found = String("no")
                 if nav:
                     nav_found = String("yes")
-                _lsp_debug_log(
-                    String("← navigation response id=") + id
-                    + String(" found=") + nav_found,
-                )
-                self._resolved_nav = nav
-                self._has_resolved_nav = True
-                self._inflight_nav_id = String("")
+                if self._logging():
+                    _lsp_debug_write(
+                        String("← navigation response id=") + id
+                        + String(" found=") + nav_found,
+                    )
+                self._nav.finish(nav^)
                 continue
             var lp_slot = self._libprobe_slot(id)
             if lp_slot >= 0:
@@ -4230,32 +4232,31 @@ struct LspManager(Copyable, Movable):
                     self._libprobe_tags.pop(lp_slot), True,
                 ))
                 continue
-            if id == self._inflight_prepare_rename_id:
+            if self._prepare_rename.owns(id):
                 # Success with a range/placeholder → renameable (1);
                 # success with null → not renameable (2); an error
                 # response (method unsupported) → fall back (0).
                 var st = 0
                 var ph = String("")
                 if msg.result:
-                    var rv = msg.result.value().copy()
+                    ref rv = msg.result.value()
                     if rv.is_null():
                         st = 2
                     elif rv.is_object():
                         st = 1
                         ph = _parse_prepare_rename_placeholder(rv)
                 self._prepare_rename_state = st
-                self._prepare_rename_placeholder = ph^
-                self._has_resolved_prepare_rename = True
-                self._inflight_prepare_rename_id = String("")
+                self._prepare_rename.finish(ph^)
                 continue
             if self._formatting.owns(id):
                 var fmt_edits = List[TextEditEntry]()
                 if msg.result:
                     fmt_edits = _parse_text_edits(msg.result.value())
-                _lsp_debug_log(
-                    String("← formatting response id=") + id
-                    + String(" edits=") + String(len(fmt_edits)),
-                )
+                if self._logging():
+                    _lsp_debug_write(
+                        String("← formatting response id=") + id
+                        + String(" edits=") + String(len(fmt_edits)),
+                    )
                 self._formatting.finish(fmt_edits^)
                 continue
             if self._ontype.owns(id):
@@ -4270,19 +4271,17 @@ struct LspManager(Copyable, Movable):
                     mnote = _parse_monikers(msg.result.value())
                 self._moniker.finish(mnote^)
                 continue
-            if id == self._inflight_colorpres_id:
+            if self._colorpres.owns(id):
                 var cp_labels = List[String]()
                 var cp_edits = List[TextEditEntry]()
                 if msg.result and msg.result.value().is_array():
-                    var arr = msg.result.value().copy()
-                    for k in range(arr.array_len()):
-                        var e = arr.array_at(k)
-                        if not e.is_object():
+                    ref arr = msg.result.value()
+                    for k in range(len(arr.arr_v)):
+                        ref e = arr.arr_v[k]
+                        var li = e.object_index(String("label"))
+                        if li < 0 or not e.obj_v[li].value.is_string():
                             continue
-                        var lab_opt = e.object_get(String("label"))
-                        if not lab_opt or not lab_opt.value().is_string():
-                            continue
-                        var label = lab_opt.value().as_str()
+                        var label = e.obj_v[li].value.as_str()
                         cp_labels.append(label)
                         # Rewrite the color literal's range with the chosen
                         # form. (We use the label as the new text — for color
@@ -4292,18 +4291,14 @@ struct LspManager(Copyable, Movable):
                             self._colorpres_sl, self._colorpres_sc,
                             self._colorpres_el, self._colorpres_ec, label,
                         ))
-                self._colorpres_labels = cp_labels^
                 self._colorpres_edits = cp_edits^
-                self._has_colorpres = True
-                self._inflight_colorpres_id = String("")
+                self._colorpres.finish(cp_labels^)
                 continue
-            if id == self._inflight_inlinecomp_id:
+            if self._inlinecomp.owns(id):
                 var ic = String("")
                 if msg.result:
                     ic = _parse_inline_completion(msg.result.value())
-                self._inlinecomp_text = ic^
-                self._has_inlinecomp = True
-                self._inflight_inlinecomp_id = String("")
+                self._inlinecomp.finish(ic^)
                 continue
             if self._linked.owns(id):
                 var lr = List[TextEditEntry]()
@@ -4393,19 +4388,17 @@ struct LspManager(Copyable, Movable):
                     sr = _parse_selection_ranges(msg.result.value())
                 self._selrange.finish(sr^)
                 continue
-            if id == self._inflight_hier_prepare_id:
+            if self._hierarchy.owns(id):
                 # Prepare done → fire the follow-up (incomingCalls /
                 # supertypes) with the first prepared item echoed back.
-                self._inflight_hier_prepare_id = String("")
-                var item0 = Optional[JsonValue]()
+                self._hierarchy.id = String("")
                 if msg.result and msg.result.value().is_array() \
                         and msg.result.value().array_len() > 0:
-                    item0 = Optional[JsonValue](
-                        msg.result.value().array_at(0),
-                    )
-                if item0:
                     var fp = json_object()
-                    fp.put(String("item"), item0.value().copy())
+                    fp.put_owned(
+                        String("item"),
+                        take_json(msg.result.value().arr_v[0]),
+                    )
                     # Local copy: ``_send_request`` takes ``mut self``, so
                     # handing it a field of ``self`` directly aliases.
                     var hier_method = self._hierarchy_followup
@@ -4414,19 +4407,17 @@ struct LspManager(Copyable, Movable):
                             self._send_request(hier_method, fp)
                     except:
                         self._inflight_hier_followup_id = String("")
-                        self._resolved_hierarchy = List[DefinitionResolved]()
-                        self._has_resolved_hierarchy = True
+                        self._hierarchy.finish(List[DefinitionResolved]())
                 else:
                     # No symbol here → empty result so the host can notice.
-                    self._resolved_hierarchy = List[DefinitionResolved]()
-                    self._has_resolved_hierarchy = True
+                    self._hierarchy.finish(List[DefinitionResolved]())
                 continue
-            if id == self._inflight_hier_followup_id:
+            if len(self._inflight_hier_followup_id.as_bytes()) > 0 \
+                    and id == self._inflight_hier_followup_id:
                 var hits = List[DefinitionResolved]()
                 if msg.result:
                     hits = _parse_hierarchy_result(msg.result.value())
-                self._resolved_hierarchy = hits^
-                self._has_resolved_hierarchy = True
+                self._hierarchy.finish(hits^)
                 self._inflight_hier_followup_id = String("")
                 continue
             if self._colors.owns(id):
@@ -4456,11 +4447,12 @@ struct LspManager(Copyable, Movable):
                         var pdiags = List[Diagnostic]()
                         if items_opt and items_opt.value().is_array():
                             pdiags = _parse_diagnostics_array(items_opt.value())
-                        _lsp_debug_log(
-                            String("← pull diagnostic response id=") + id
-                            + String(" path=") + ppath
-                            + String(" count=") + String(len(pdiags)),
-                        )
+                        if self._logging():
+                            _lsp_debug_write(
+                                String("← pull diagnostic response id=") + id
+                                + String(" path=") + ppath
+                                + String(" count=") + String(len(pdiags)),
+                            )
                         self._store_diagnostics(ppath, pdiags^)
                 self._clear_diag_inflight(ppath, 0)
                 continue
@@ -4468,10 +4460,11 @@ struct LspManager(Copyable, Movable):
                 var wse = List[TextEditEntry]()
                 if msg.result:
                     wse = _parse_text_edits(msg.result.value())
-                _lsp_debug_log(
-                    String("← willSaveWaitUntil response id=") + id
-                    + String(" edits=") + String(len(wse)),
-                )
+                if self._logging():
+                    _lsp_debug_write(
+                        String("← willSaveWaitUntil response id=") + id
+                        + String(" edits=") + String(len(wse)),
+                    )
                 self._willsave.finish(wse^)
                 continue
         return resolved
@@ -4594,14 +4587,15 @@ struct LspManager(Copyable, Movable):
             for ref d in self._docs:
                 if d.path == path:
                     if pub_version < d.version:
-                        _lsp_debug_log(
-                            String("← publishDiagnostics (dropped stale) lang=")
-                            + self._language_id
-                            + String(" path=") + path
-                            + String(" pub_version=") + String(pub_version)
-                            + String(" latest_version=")
-                            + String(d.version),
-                        )
+                        if self._logging():
+                            _lsp_debug_write(
+                                String("← publishDiagnostics (dropped stale) lang=")
+                                + self._language_id
+                                + String(" path=") + path
+                                + String(" pub_version=") + String(pub_version)
+                                + String(" latest_version=")
+                                + String(d.version),
+                            )
                         # Stale: don't clear the in-flight flag — the
                         # newer didChange we already sent is still
                         # genuinely waiting for an answer.
@@ -4613,11 +4607,12 @@ struct LspManager(Copyable, Movable):
         # latest send).
         self._clear_diag_inflight(path, pub_version)
         var diags = _parse_diagnostics_array(params.obj_v[di].value)
-        _lsp_debug_log(
-            String("← publishDiagnostics lang=") + self._language_id
-            + String(" path=") + path
-            + String(" count=") + String(len(diags)),
-        )
+        if self._logging():
+            _lsp_debug_write(
+                String("← publishDiagnostics lang=") + self._language_id
+                + String(" path=") + path
+                + String(" count=") + String(len(diags)),
+            )
         self._store_diagnostics(path, diags^)
 
     def _store_diagnostics(mut self, path: String, var diags: List[Diagnostic]):
@@ -4639,16 +4634,11 @@ struct LspManager(Copyable, Movable):
         progress payload). ``begin`` / ``report`` build a one-line note
         (``title — message (pct%)``); ``end`` clears it. Non-WorkDone
         progress (partial results) is ignored."""
-        if not params.is_object():
+        var vi = params.object_index(String("value"))
+        if vi < 0 or not params.obj_v[vi].value.is_object():
             return
-        var val_opt = params.object_get(String("value"))
-        if not val_opt or not val_opt.value().is_object():
-            return
-        var val = val_opt.value().copy()
-        var kind_opt = val.object_get(String("kind"))
-        var kind = String("")
-        if kind_opt and kind_opt.value().is_string():
-            kind = kind_opt.value().as_str()
+        ref val = params.obj_v[vi].value
+        var kind = json_get_string(val, String("kind"))
         if kind == String("end"):
             self._progress_note = String("")
             self._has_progress_note = True
@@ -4656,17 +4646,15 @@ struct LspManager(Copyable, Movable):
         if kind != String("begin") and kind != String("report"):
             return
         var note = self._language_id
-        var title_opt = val.object_get(String("title"))
-        if title_opt and title_opt.value().is_string() \
-                and len(title_opt.value().as_str().as_bytes()) > 0:
-            note = note + String(": ") + title_opt.value().as_str()
-        var msg_opt = val.object_get(String("message"))
-        if msg_opt and msg_opt.value().is_string() \
-                and len(msg_opt.value().as_str().as_bytes()) > 0:
-            note = note + String(" — ") + msg_opt.value().as_str()
-        var pct_opt = val.object_get(String("percentage"))
-        if pct_opt and pct_opt.value().is_int():
-            note = note + String(" (") + String(pct_opt.value().as_int()) \
+        var title = json_get_string(val, String("title"))
+        if len(title.as_bytes()) > 0:
+            note = note + String(": ") + title
+        var message = json_get_string(val, String("message"))
+        if len(message.as_bytes()) > 0:
+            note = note + String(" — ") + message
+        var pi = val.object_index(String("percentage"))
+        if pi >= 0 and val.obj_v[pi].value.is_int():
+            note = note + String(" (") + String(val.obj_v[pi].value.as_int()) \
                 + String("%)")
         self._progress_note = note^
         self._has_progress_note = True
@@ -4920,10 +4908,11 @@ struct LspManager(Copyable, Movable):
                                 result.append(cfg_opt.value().copy())
                                 continue
                         result.append(json_null())
-                _lsp_debug_log(
-                    String("← server request workspace/configuration id=")
-                    + id_label + String(" items=") + String(n),
-                )
+                if self._logging():
+                    _lsp_debug_write(
+                        String("← server request workspace/configuration id=")
+                        + id_label + String(" items=") + String(n),
+                    )
                 self._reply(id, result)
                 return
             if method == String("client/registerCapability"):
@@ -4956,10 +4945,11 @@ struct LspManager(Copyable, Movable):
                                 m_opt.value().as_str(), options,
                             )
                             merged += 1
-                _lsp_debug_log(
-                    String("← server request client/registerCapability id=")
-                    + id_label + String(" merged=") + String(merged),
-                )
+                if self._logging():
+                    _lsp_debug_write(
+                        String("← server request client/registerCapability id=")
+                        + id_label + String(" merged=") + String(merged),
+                    )
                 self._reply(id, json_null())
                 return
             if method == String("client/unregisterCapability"):
@@ -4982,20 +4972,22 @@ struct LspManager(Copyable, Movable):
                                 self._remove_capability_registration(
                                     m_opt.value().as_str(),
                                 )
-                _lsp_debug_log(
-                    String("← server request client/unregisterCapability id=")
-                    + id_label + String(" (removed)"),
-                )
+                if self._logging():
+                    _lsp_debug_write(
+                        String("← server request client/unregisterCapability id=")
+                        + id_label + String(" (removed)"),
+                    )
                 self._reply(id, json_null())
                 return
             if method == String("window/workDoneProgress/create"):
                 # Acknowledge with success. We don't track the progress
                 # token itself, but accepting lets the server proceed
                 # instead of stalling on the probe.
-                _lsp_debug_log(
-                    String("← server request ") + method
-                    + String(" id=") + id_label + String(" (acked)"),
-                )
+                if self._logging():
+                    _lsp_debug_write(
+                        String("← server request ") + method
+                        + String(" id=") + id_label + String(" (acked)"),
+                    )
                 self._reply(id, json_null())
                 return
             if method == String("workspace/applyEdit"):
@@ -5015,10 +5007,11 @@ struct LspManager(Copyable, Movable):
                 self._has_resolved_applyedit = applied
                 var resp = json_object()
                 resp.put(String("applied"), json_bool(applied))
-                _lsp_debug_log(
-                    String("← server request workspace/applyEdit id=")
-                    + id_label + String(" files=") + String(edit_count),
-                )
+                if self._logging():
+                    _lsp_debug_write(
+                        String("← server request workspace/applyEdit id=")
+                        + id_label + String(" files=") + String(edit_count),
+                    )
                 self._reply(id, resp)
                 return
             if method == String("window/showMessageRequest"):
@@ -5053,11 +5046,12 @@ struct LspManager(Copyable, Movable):
                 self._msgreq_message = rmsg^
                 self._msgreq_actions = ractions^
                 self._msgreq_pending = True
-                _lsp_debug_log(
-                    String("← server request window/showMessageRequest id=")
-                    + id_label + String(" actions=")
-                    + String(len(self._msgreq_actions)),
-                )
+                if self._logging():
+                    _lsp_debug_write(
+                        String("← server request window/showMessageRequest id=")
+                        + id_label + String(" actions=")
+                        + String(len(self._msgreq_actions)),
+                    )
                 return
             if method == String("workspace/workspaceFolders"):
                 # The server asks for the open workspace folders. Reply with
@@ -5072,10 +5066,11 @@ struct LspManager(Copyable, Movable):
                         json_str(basename(_uri_to_path(self._root_uri))),
                     )
                     folders.append(f)
-                _lsp_debug_log(
-                    String("← server request workspace/workspaceFolders id=")
-                    + id_label,
-                )
+                if self._logging():
+                    _lsp_debug_write(
+                        String("← server request workspace/workspaceFolders id=")
+                        + id_label,
+                    )
                 self._reply(id, folders)
                 return
             if method == String("window/showDocument"):
@@ -5102,10 +5097,11 @@ struct LspManager(Copyable, Movable):
                 self._show_doc_pending = len(self._show_doc_uri.as_bytes()) > 0
                 var ok = json_object()
                 ok.put(String("success"), json_bool(self._show_doc_pending))
-                _lsp_debug_log(
-                    String("← server request window/showDocument id=")
-                    + id_label + String(" external=") + String(external),
-                )
+                if self._logging():
+                    _lsp_debug_write(
+                        String("← server request window/showDocument id=")
+                        + id_label + String(" external=") + String(external),
+                    )
                 self._reply(id, ok)
                 return
             if method == String("workspace/codeLens/refresh") \
@@ -5122,10 +5118,11 @@ struct LspManager(Copyable, Movable):
                 # is why a rust-analyzer build finishing never updated the
                 # code lenses already on screen.
                 self._refresh_doc_features = True
-                _lsp_debug_log(
-                    String("← server request ") + method
-                    + String(" id=") + id_label + String(" (queued refresh)"),
-                )
+                if self._logging():
+                    _lsp_debug_write(
+                        String("← server request ") + method
+                        + String(" id=") + id_label + String(" (queued refresh)"),
+                    )
                 self._reply(id, json_null())
                 return
             if method == String("workspace/diagnostic/refresh"):
@@ -5137,19 +5134,21 @@ struct LspManager(Copyable, Movable):
                 # at all.
                 self._pulled_paths = List[String]()
                 self._refresh_diagnostics = True
-                _lsp_debug_log(
-                    String("← server request ") + method
-                    + String(" id=") + id_label + String(" (re-arm pull)"),
-                )
+                if self._logging():
+                    _lsp_debug_write(
+                        String("← server request ") + method
+                        + String(" id=") + id_label + String(" (re-arm pull)"),
+                    )
                 self._reply(id, json_null())
                 return
             # Unknown method: MethodNotFound (-32601) so the server
             # stops waiting.
-            _lsp_debug_log(
-                String("← server request ") + method
-                + String(" id=") + id_label
-                + String(" (MethodNotFound)"),
-            )
+            if self._logging():
+                _lsp_debug_write(
+                    String("← server request ") + method
+                    + String(" id=") + id_label
+                    + String(" (MethodNotFound)"),
+                )
             self._reply_error(
                 id, -32601,
                 String("method not implemented by turbokod: ") + method,
@@ -5193,11 +5192,12 @@ struct LspManager(Copyable, Movable):
         # than as whatever the server claimed.
         self._position_encoding = encoding_name(self._position_enc)
         if self._position_enc != POS_UTF8:
-            _lsp_debug_log(
-                String("position encoding negotiated as '")
-                + self._position_encoding
-                + String("' (not utf-8); converting columns per line"),
-            )
+            if self._logging():
+                _lsp_debug_write(
+                    String("position encoding negotiated as '")
+                    + self._position_encoding
+                    + String("' (not utf-8); converting columns per line"),
+                )
         # Drain the queue of opens that arrived before we were ready.
         var paths = self._pending_open_paths^
         var texts = self._pending_open_texts^
@@ -5302,12 +5302,13 @@ struct LspManager(Copyable, Movable):
             k += 1
 
     def _send_did_open(mut self, path: String, var text: String):
-        _lsp_debug_log(
-            String("→ didOpen lang=") + self._language_id
-            + String(" path=") + path
-            + String(" uri=") + _path_to_uri(path)
-            + String(" text_len=") + String(len(text.as_bytes())),
-        )
+        if self._logging():
+            _lsp_debug_write(
+                String("→ didOpen lang=") + self._language_id
+                + String(" path=") + path
+                + String(" uri=") + _path_to_uri(path)
+                + String(" text_len=") + String(len(text.as_bytes())),
+            )
         var params = json_object()
         var doc = _text_document(path)
         doc.put(String("languageId"), json_str(self._language_id))
@@ -5323,13 +5324,14 @@ struct LspManager(Copyable, Movable):
         self._mark_diag_inflight(path, 1)
 
     def _send_did_change(mut self, path: String, version: Int, var text: String):
-        _lsp_debug_log(
-            String("→ didChange lang=") + self._language_id
-            + String(" path=") + path
-            + String(" uri=") + _path_to_uri(path)
-            + String(" version=") + String(version)
-            + String(" text_len=") + String(len(text.as_bytes())),
-        )
+        if self._logging():
+            _lsp_debug_write(
+                String("→ didChange lang=") + self._language_id
+                + String(" path=") + path
+                + String(" uri=") + _path_to_uri(path)
+                + String(" version=") + String(version)
+                + String(" text_len=") + String(len(text.as_bytes())),
+            )
         var params = json_object()
         var doc = _text_document(path)
         doc.put(String("version"), json_int(version))
@@ -5497,7 +5499,7 @@ def _parse_definition_result(v: JsonValue) -> Optional[DefinitionResolved]:
     if v.is_array():
         if v.array_len() == 0:
             return Optional[DefinitionResolved]()
-        return _parse_one_definition(v.array_at(0))
+        return _parse_one_definition(v.arr_v[0])
     if v.is_object():
         return _parse_one_definition(v)
     return Optional[DefinitionResolved]()
@@ -5508,23 +5510,20 @@ def _parse_one_definition(v: JsonValue) -> Optional[DefinitionResolved]:
         return Optional[DefinitionResolved]()
     # LocationLink: ``targetUri`` + ``targetSelectionRange`` (preferred) or
     # ``targetRange``. Plain Location: ``uri`` + ``range``.
-    var uri_opt = v.object_get(String("uri"))
-    var range_opt = v.object_get(String("range"))
-    if not uri_opt:
-        uri_opt = v.object_get(String("targetUri"))
-    if not range_opt:
-        range_opt = v.object_get(String("targetSelectionRange"))
-    if not range_opt:
-        range_opt = v.object_get(String("targetRange"))
-    if not uri_opt or not range_opt:
+    var ui = v.object_index(String("uri"))
+    if ui < 0:
+        ui = v.object_index(String("targetUri"))
+    var ri = v.object_index(String("range"))
+    if ri < 0:
+        ri = v.object_index(String("targetSelectionRange"))
+    if ri < 0:
+        ri = v.object_index(String("targetRange"))
+    if ui < 0 or ri < 0 or not v.obj_v[ui].value.is_string():
         return Optional[DefinitionResolved]()
-    if not uri_opt.value().is_string():
-        return Optional[DefinitionResolved]()
-    var uri = uri_opt.value().as_str()
-    var path = _uri_to_path(uri)
+    var path = _uri_to_path(v.obj_v[ui].value.str_v)
     if len(path.as_bytes()) == 0:
         return Optional[DefinitionResolved]()
-    var start = _start_pos_of(range_opt.value())
+    var start = _start_pos_of(v.obj_v[ri].value)
     if start[0] < 0:
         return Optional[DefinitionResolved]()
     return Optional[DefinitionResolved](DefinitionResolved(
@@ -5540,8 +5539,8 @@ def _parse_references_result(v: JsonValue) -> List[DefinitionResolved]:
     var out = List[DefinitionResolved]()
     if not v.is_array():
         return out^
-    for i in range(v.array_len()):
-        var one = _parse_one_definition(v.array_at(i))
+    for i in range(len(v.arr_v)):
+        var one = _parse_one_definition(v.arr_v[i])
         if one:
             out.append(one.value())
     return out^
@@ -5693,10 +5692,10 @@ def _parse_additional_text_edits(entry: JsonValue) -> List[TextEditEntry]:
     Malformed entries (missing range or newText) are skipped silently —
     losing one auxiliary edit is better than dropping the whole item.
     Returns an empty list when the field is absent or not an array."""
-    var aux_opt = entry.object_get(String("additionalTextEdits"))
-    if not aux_opt:
+    var ai = entry.object_index(String("additionalTextEdits"))
+    if ai < 0:
         return List[TextEditEntry]()
-    return _parse_text_edits(aux_opt.value())
+    return _parse_text_edits(entry.obj_v[ai].value)
 
 
 def _parse_completion_result(v: JsonValue) -> List[CompletionItem]:
@@ -5728,24 +5727,15 @@ def _parse_completion_result(v: JsonValue) -> List[CompletionItem]:
                     _parse_completion_items(v.obj_v[k].value, out)
                 break
     # Stable insertion sort by sort_text — typical completion lists are
-    # under ~200 items so quadratic worst-case is fine here. Sort an index
-    # array (cheap Int swaps) instead of the items, then reorder once so each
-    # CompletionItem (with its additional_text_edits) is moved at most once.
-    var m = len(out)
-    var order = List[Int]()
-    for i in range(m):
-        order.append(i)
-    for i in range(1, m):
+    # under ~200 items so quadratic worst-case is fine here. In place, by
+    # swapping: a swap moves two items, where building a sorted copy
+    # cloned every item (labels, aux edits and all).
+    for i in range(1, len(out)):
         var j = i
-        while j > 0 and out[order[j]].sort_text < out[order[j - 1]].sort_text:
-            var tmp = order[j]
-            order[j] = order[j - 1]
-            order[j - 1] = tmp
+        while j > 0 and out[j].sort_text < out[j - 1].sort_text:
+            out.swap_elements(j, j - 1)
             j -= 1
-    var sorted = List[CompletionItem]()
-    for i in range(m):
-        sorted.append(out[order[i]].copy())
-    return sorted^
+    return out^
 
 
 def _parse_completion_items(arr: JsonValue, mut out: List[CompletionItem]):
@@ -5754,10 +5744,10 @@ def _parse_completion_items(arr: JsonValue, mut out: List[CompletionItem]):
         ref entry = arr.arr_v[i]
         if not entry.is_object():
             continue
-        var label_opt = entry.object_get(String("label"))
-        if not label_opt or not label_opt.value().is_string():
+        var li = entry.object_index(String("label"))
+        if li < 0 or not entry.obj_v[li].value.is_string():
             continue
-        var label = label_opt.value().as_str()
+        var label = entry.obj_v[li].value.as_str()
         var kind = json_get_int(entry, String("kind"), 0)
         var detail = json_get_string(entry, String("detail"))
         var insert_text = label
@@ -5774,22 +5764,22 @@ def _parse_completion_items(arr: JsonValue, mut out: List[CompletionItem]):
             # back to ``insertText`` only when textEdit is absent, and
             # fall back to the label only when both are absent.
             var got_te = False
-            var te_opt = entry.object_get(String("textEdit"))
-            if te_opt and te_opt.value().is_object():
-                ref te = te_opt.value()
-                var nt_opt = te.object_get(String("newText"))
-                if nt_opt and nt_opt.value().is_string():
-                    insert_text = nt_opt.value().as_str()
+            var tei = entry.object_index(String("textEdit"))
+            if tei >= 0 and entry.obj_v[tei].value.is_object():
+                ref te = entry.obj_v[tei].value
+                var nti = te.object_index(String("newText"))
+                if nti >= 0 and te.obj_v[nti].value.is_string():
+                    insert_text = te.obj_v[nti].value.as_str()
                     got_te = True
                 # ``TextEdit`` carries ``range``; ``InsertReplaceEdit``
                 # carries ``insert`` and ``replace`` — prefer ``replace``
                 # so accepting overwrites existing text rather than
                 # leaving a suffix behind the cursor.
-                var rng_obj_opt = te.object_get(String("range"))
-                if not rng_obj_opt:
-                    rng_obj_opt = te.object_get(String("replace"))
-                if rng_obj_opt:
-                    var r = _parse_range(rng_obj_opt.value())
+                var rgi = te.object_index(String("range"))
+                if rgi < 0:
+                    rgi = te.object_index(String("replace"))
+                if rgi >= 0:
+                    var r = _parse_range(te.obj_v[rgi].value)
                     if r:
                         rs_line = r.value()[0]
                         rs_char = r.value()[1]
@@ -5810,9 +5800,9 @@ def _parse_completion_items(arr: JsonValue, mut out: List[CompletionItem]):
         # it unchanged — the server keys the resolve lookup off it, and a
         # resolve without it returns nothing useful.
         var data_raw = String("")
-        var data_opt = entry.object_get(String("data"))
-        if data_opt:
-            data_raw = encode_json(data_opt.value())
+        var di = entry.object_index(String("data"))
+        if di >= 0:
+            data_raw = encode_json(entry.obj_v[di].value)
         out.append(CompletionItem(
             label, insert_text, kind, detail, sort_text,
             has_range, rs_line, rs_char, re_line, re_char,
@@ -5829,13 +5819,10 @@ def _parse_hover_result(v: JsonValue) -> String:
     return the joined ``value`` strings (newline-separated). Returns the
     empty string when the result has no usable text — the host treats
     that as 'nothing to show'."""
-    if not v.is_object():
+    var ci = v.object_index(String("contents"))
+    if ci < 0:
         return String("")
-    var contents_opt = v.object_get(String("contents"))
-    if not contents_opt:
-        return String("")
-    var contents = contents_opt.value().copy()
-    return _hover_contents_to_string(contents)
+    return _hover_contents_to_string(v.obj_v[ci].value)
 
 
 def _hover_contents_to_string(v: JsonValue) -> String:
@@ -5845,14 +5832,11 @@ def _hover_contents_to_string(v: JsonValue) -> String:
         return v.as_str()
     if v.is_object():
         # MarkupContent ({kind, value}) or MarkedString ({language, value}).
-        var value_opt = v.object_get(String("value"))
-        if value_opt and value_opt.value().is_string():
-            return value_opt.value().as_str()
-        return String("")
+        return json_get_string(v, String("value"))
     if v.is_array():
         var parts = List[String]()
-        for i in range(v.array_len()):
-            var piece = _hover_contents_to_string(v.array_at(i))
+        for i in range(len(v.arr_v)):
+            var piece = _hover_contents_to_string(v.arr_v[i])
             if len(piece.as_bytes()) > 0:
                 parts.append(piece^)
         if len(parts) == 0:
@@ -6131,12 +6115,10 @@ def _parse_range(v: JsonValue) -> Optional[Tuple[Int, Int, Int, Int]]:
 def _start_pos_of(rng: JsonValue) -> Tuple[Int, Int]:
     """Extract ``(line, character)`` from a Range's ``start``. Returns
     ``(-1, -1)`` when the shape doesn't match — caller filters those out."""
-    if not rng.is_object():
+    var si = rng.object_index(String("start"))
+    if si < 0:
         return (-1, -1)
-    var start = rng.object_get(String("start"))
-    if not start:
-        return (-1, -1)
-    var p = _position_of(start.value())
+    var p = _position_of(rng.obj_v[si].value)
     if not p:
         return (-1, -1)
     return p.value()
@@ -6212,30 +6194,23 @@ def _parse_inlay_hints(v: JsonValue) -> List[TextEditEntry]:
     var out = List[TextEditEntry]()
     if not v.is_array():
         return out^
-    for i in range(v.array_len()):
-        var e = v.array_at(i)
-        if not e.is_object():
+    for i in range(len(v.arr_v)):
+        ref e = v.arr_v[i]
+        var pi = e.object_index(String("position"))
+        if pi < 0:
             continue
-        var pos_opt = e.object_get(String("position"))
-        if not pos_opt or not pos_opt.value().is_object():
+        var row = json_get_int(e.obj_v[pi].value, String("line"), -1)
+        if row < 0:
             continue
-        var ln = pos_opt.value().object_get(String("line"))
-        if not ln or not ln.value().is_int():
-            continue
-        var row = ln.value().as_int()
         var label = String("")
-        var lab_opt = e.object_get(String("label"))
-        if lab_opt:
-            var lab = lab_opt.value().copy()
+        var lbi = e.object_index(String("label"))
+        if lbi >= 0:
+            ref lab = e.obj_v[lbi].value
             if lab.is_string():
                 label = lab.as_str()
             elif lab.is_array():
-                for k in range(lab.array_len()):
-                    var part = lab.array_at(k)
-                    if part.is_object():
-                        var pv = part.object_get(String("value"))
-                        if pv and pv.value().is_string():
-                            label = label + pv.value().as_str()
+                for k in range(len(lab.arr_v)):
+                    label += json_get_string(lab.arr_v[k], String("value"))
         if len(label.as_bytes()) == 0:
             continue
         out.append(TextEditEntry(row, 0, row, 0, label))
@@ -6250,23 +6225,18 @@ def _parse_code_lens(v: JsonValue) -> List[TextEditEntry]:
     var out = List[TextEditEntry]()
     if not v.is_array():
         return out^
-    for i in range(v.array_len()):
-        var e = v.array_at(i)
-        if not e.is_object():
+    for i in range(len(v.arr_v)):
+        ref e = v.arr_v[i]
+        var ri = e.object_index(String("range"))
+        if ri < 0:
             continue
-        var rng_opt = e.object_get(String("range"))
-        if not rng_opt:
-            continue
-        var row = _start_pos_of(rng_opt.value())[0]
+        var row = _start_pos_of(e.obj_v[ri].value)[0]
         if row < 0:
             continue
-        var cmd_opt = e.object_get(String("command"))
-        if not cmd_opt or not cmd_opt.value().is_object():
+        var ci = e.object_index(String("command"))
+        if ci < 0:
             continue
-        var title_opt = cmd_opt.value().object_get(String("title"))
-        if not title_opt or not title_opt.value().is_string():
-            continue
-        var title = title_opt.value().as_str()
+        var title = json_get_string(e.obj_v[ci].value, String("title"))
         if len(title.as_bytes()) == 0:
             continue
         out.append(TextEditEntry(row, 0, row, 0, String("‹") + title + String("›")))
@@ -6313,18 +6283,11 @@ def _parse_folding_ranges(v: JsonValue) -> List[TextEditEntry]:
     var out = List[TextEditEntry]()
     if not v.is_array():
         return out^
-    for i in range(v.array_len()):
-        var e = v.array_at(i)
-        if not e.is_object():
-            continue
-        var sl_opt = e.object_get(String("startLine"))
-        var el_opt = e.object_get(String("endLine"))
-        if not sl_opt or not el_opt or not sl_opt.value().is_int() \
-                or not el_opt.value().is_int():
-            continue
-        var sl = sl_opt.value().as_int()
-        var el = el_opt.value().as_int()
-        if el <= sl:
+    for i in range(len(v.arr_v)):
+        ref e = v.arr_v[i]
+        var sl = json_get_int(e, String("startLine"), -1)
+        var el = json_get_int(e, String("endLine"), -1)
+        if sl < 0 or el <= sl:
             continue  # not a multi-line region
         out.append(TextEditEntry(sl, 0, el, 0, String("")))
     return out^
@@ -6618,30 +6581,26 @@ def _parse_document_colors(v: JsonValue) -> List[Highlight]:
     var out = List[Highlight]()
     if not v.is_array():
         return out^
-    for i in range(v.array_len()):
-        var e = v.array_at(i)
-        if not e.is_object():
+    for i in range(len(v.arr_v)):
+        ref e = v.arr_v[i]
+        var ci = e.object_index(String("color"))
+        var rni = e.object_index(String("range"))
+        if ci < 0 or not e.obj_v[ci].value.is_object() or rni < 0:
             continue
-        var col_opt = e.object_get(String("color"))
-        var rng_opt = e.object_get(String("range"))
-        if not col_opt or not col_opt.value().is_object():
+        ref col = e.obj_v[ci].value
+        var ri = col.object_index(String("red"))
+        var gi = col.object_index(String("green"))
+        var bi = col.object_index(String("blue"))
+        if ri < 0 or gi < 0 or bi < 0:
             continue
-        if not rng_opt or not rng_opt.value().is_object():
-            continue
-        var col = col_opt.value().copy()
-        var r_opt = col.object_get(String("red"))
-        var g_opt = col.object_get(String("green"))
-        var b_opt = col.object_get(String("blue"))
-        if not r_opt or not g_opt or not b_opt:
-            continue
-        var r = _color_unit_to_255(r_opt.value())
-        var g = _color_unit_to_255(g_opt.value())
-        var b = _color_unit_to_255(b_opt.value())
+        var r = _color_unit_to_255(col.obj_v[ri].value)
+        var g = _color_unit_to_255(col.obj_v[gi].value)
+        var b = _color_unit_to_255(col.obj_v[bi].value)
         var rgb = UInt32((r << 16) | (g << 8) | b)
         # Contrast foreground: dark text on light swatches, light on dark.
         var lum = (r * 299 + g * 587 + b * 114) // 1000
         var fg = BLACK if lum > 140 else WHITE
-        var span = _parse_range(rng_opt.value())
+        var span = _parse_range(e.obj_v[rni].value)
         if not span:
             continue
         # Single-row swatch (color literals don't span lines).
@@ -6709,21 +6668,26 @@ def _parse_selection_ranges(v: JsonValue) -> List[TextEditEntry]:
     var out = List[TextEditEntry]()
     if not v.is_array() or v.array_len() == 0:
         return out^
-    var cur = v.array_at(0)
-    var depth = 0
-    while cur.is_object() and depth < 128:
-        depth += 1
-        var rng_opt = cur.object_get(String("range"))
-        if rng_opt:
-            var r = _parse_range(rng_opt.value())
-            if r:
-                var t = r.value()
-                out.append(TextEditEntry(t[0], t[1], t[2], t[3], String("")))
-        var parent_opt = cur.object_get(String("parent"))
-        if not parent_opt or not parent_opt.value().is_object():
-            break
-        cur = parent_opt.value().copy()
+    _collect_selection_ranges(v.arr_v[0], 0, out)
     return out^
+
+
+def _collect_selection_ranges(
+    cur: JsonValue, depth: Int, mut out: List[TextEditEntry],
+):
+    """One link of a ``SelectionRange`` parent chain, then its parent —
+    each read in place."""
+    if not cur.is_object() or depth >= 128:
+        return
+    var ri = cur.object_index(String("range"))
+    if ri >= 0:
+        var r = _parse_range(cur.obj_v[ri].value)
+        if r:
+            var t = r.value()
+            out.append(TextEditEntry(t[0], t[1], t[2], t[3], String("")))
+    var pi = cur.object_index(String("parent"))
+    if pi >= 0:
+        _collect_selection_ranges(cur.obj_v[pi].value, depth + 1, out)
 
 
 def _parse_signature_help(v: JsonValue) -> String:
@@ -6731,36 +6695,29 @@ def _parse_signature_help(v: JsonValue) -> String:
     one-line status string. Returns the signature ``label`` and, when an
     active parameter with a string ``label`` is resolvable, appends
     ``  ▸ <param>``. Empty string for ``null`` / no signatures."""
-    if not v.is_object():
+    var si = v.object_index(String("signatures"))
+    if si < 0 or not v.obj_v[si].value.is_array():
         return String("")
-    var sigs_opt = v.object_get(String("signatures"))
-    if not sigs_opt or not sigs_opt.value().is_array():
-        return String("")
-    var sigs = sigs_opt.value().copy()
-    if sigs.array_len() == 0:
+    ref sigs = v.obj_v[si].value.arr_v
+    if len(sigs) == 0:
         return String("")
     var active = json_get_int(v, String("activeSignature"), 0)
-    if active < 0 or active >= sigs.array_len():
+    if active < 0 or active >= len(sigs):
         active = 0
-    var sig = sigs.array_at(active)
-    if not sig.is_object():
+    ref sig = sigs[active]
+    var li = sig.object_index(String("label"))
+    if li < 0 or not sig.obj_v[li].value.is_string():
         return String("")
-    var label_opt = sig.object_get(String("label"))
-    if not label_opt or not label_opt.value().is_string():
-        return String("")
-    var label = label_opt.value().as_str()
+    var label = sig.obj_v[li].value.as_str()
     # Resolve the active parameter's string label if present.
     var ap = json_get_int(v, String("activeParameter"), -1)
     ap = json_get_int(sig, String("activeParameter"), ap)
-    var params_opt = sig.object_get(String("parameters"))
-    if ap >= 0 and params_opt and params_opt.value().is_array():
-        var params = params_opt.value().copy()
-        if ap < params.array_len():
-            var p = params.array_at(ap)
-            if p.is_object():
-                var pl_opt = p.object_get(String("label"))
-                if pl_opt and pl_opt.value().is_string():
-                    return label + String("   ▸ ") + pl_opt.value().as_str()
+    var pi = sig.object_index(String("parameters"))
+    if ap >= 0 and pi >= 0 and ap < sig.obj_v[pi].value.array_len():
+        ref p = sig.obj_v[pi].value.arr_v[ap]
+        var pl = p.object_index(String("label"))
+        if pl >= 0 and p.obj_v[pl].value.is_string():
+            return label + String("   ▸ ") + p.obj_v[pl].value.as_str()
     return label
 
 
@@ -6772,14 +6729,12 @@ def _parse_document_highlights(v: JsonValue) -> List[TextEditEntry]:
     var out = List[TextEditEntry]()
     if not v.is_array():
         return out^
-    for i in range(v.array_len()):
-        var e = v.array_at(i)
-        if not e.is_object():
+    for i in range(len(v.arr_v)):
+        ref e = v.arr_v[i]
+        var ri = e.object_index(String("range"))
+        if ri < 0:
             continue
-        var rng_opt = e.object_get(String("range"))
-        if not rng_opt:
-            continue
-        var r = _parse_range(rng_opt.value())
+        var r = _parse_range(e.obj_v[ri].value)
         if not r:
             continue
         var t = r.value()
@@ -6800,19 +6755,19 @@ def _parse_text_edits(v: JsonValue) -> List[TextEditEntry]:
     var out = List[TextEditEntry]()
     if not v.is_array():
         return out^
-    for j in range(v.array_len()):
-        var te = v.array_at(j)
-        if not te.is_object():
+    for j in range(len(v.arr_v)):
+        ref te = v.arr_v[j]
+        var ni = te.object_index(String("newText"))
+        var ri = te.object_index(String("range"))
+        if ni < 0 or not te.obj_v[ni].value.is_string() or ri < 0:
             continue
-        var nt_opt = te.object_get(String("newText"))
-        var rng_opt = te.object_get(String("range"))
-        if not nt_opt or not nt_opt.value().is_string() or not rng_opt:
-            continue
-        var r = _parse_range(rng_opt.value())
+        var r = _parse_range(te.obj_v[ri].value)
         if not r:
             continue
         var t = r.value()
-        out.append(TextEditEntry(t[0], t[1], t[2], t[3], nt_opt.value().as_str()))
+        out.append(TextEditEntry(
+            t[0], t[1], t[2], t[3], te.obj_v[ni].value.as_str(),
+        ))
     return out^
 
 

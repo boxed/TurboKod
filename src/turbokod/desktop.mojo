@@ -68,7 +68,7 @@ from .diff import (
     unified_diff,
 )
 from .file_io import (
-    basename, delete_tree, find_git_project, join_path, list_directory,
+    FileInfo, basename, delete_tree, find_git_project, join_path, list_directory,
     list_directory_typed, parent_path, project_absolute, project_relative,
     read_existing_file, read_file, rename_path, stat_file, write_file,
 )
@@ -150,7 +150,8 @@ from .review_mode import ReviewMode
 from .names_review import NamesReview
 from .selection_history import SelectionHistory
 from .grammar_install import (
-    built_in_downloadable_grammars, find_downloadable_grammar_by_language,
+    DownloadableGrammar, built_in_downloadable_grammars,
+    find_downloadable_grammar_by_language,
     find_downloadable_grammar_for_extension, grammar_install_command,
     user_grammar_installed,
 )
@@ -1239,6 +1240,9 @@ struct Desktop(Movable):
     """The last frame's host-drawn chrome per ``HOST_SURFACE_*``, for
     ``tk_desktop_host_items`` (swapped off each surface's canvas like
     ``sub_grids``)."""
+    # Each host surface's frame canvas, kept between frames so a frame
+    # reuses its cells (``take_frame_canvas`` / ``return_frame_canvas``).
+    var _frame_canvases: List[Canvas]
     # The pointer's position in thousandths of a cell for the next mouse
     # event, from ``tk_desktop_set_mouse_fine``; ``take_mouse_fine``
     # consumes it.
@@ -1479,18 +1483,28 @@ struct Desktop(Movable):
     var _pending_resolve_path: String
     var _pending_resolve_index: Int
     var _pending_resolve_label: String
-    # Last cursor position a documentHighlight request was issued for,
-    # encoded ``path|row|col``. Debounces the request to once per cursor
+    # Last cursor position a documentHighlight request was issued for, as an
+    # FNV fingerprint of ``(path, row, col)`` (0: none). These debounce
+    # latches are integers, not composed strings, because they're rebuilt
+    # every tick just to be compared. Debounces the request to once per cursor
     # move so we don't re-query the server every frame.
-    var _doc_hl_pos: String
-    # Debounce latch for inlay-hint / code-lens requests: ``path|linecount``.
+    var _doc_hl_pos: UInt64
+    # Debounce latch for inlay-hint / code-lens requests: ``(path, linecount)``.
     # Re-requests on focus change or when the line count changes (covers
     # most edits); same-line edits refresh on the next line-count change.
-    var _inlay_key: String
-    # Debounce latch for selectionRange requests (``path|row|col``).
-    var _selrange_pos: String
-    # Debounce latch for foldingRange requests (``path|linecount``).
-    var _fold_key: String
+    var _inlay_key: UInt64
+    # Debounce latch for selectionRange requests (``(path, row, col)``).
+    var _selrange_pos: UInt64
+    # Debounce latch for foldingRange requests (``(path, linecount)``).
+    var _fold_key: UInt64
+    # Fingerprints of what the LSP / DAP status-bar indicators were last
+    # built from (``_refresh_lsp_status`` / ``_refresh_dap_status``).
+    var _lsp_status_key: UInt64
+    var _dap_status_key: UInt64
+    # Per-window "dim chrome" flags for ``windows.paint`` and the
+    # fingerprint they were computed for (``_refresh_subdued_windows``).
+    var _subdued: List[Bool]
+    var _subdued_key: UInt64
     # Word under the cursor at rename time — the prompt seed when the
     # server has no prepareRename placeholder (or prepareRename is
     # unsupported and we fall back to a direct prompt).
@@ -1530,7 +1544,7 @@ struct Desktop(Movable):
     # library check has open on that server without an editor.
     var _libprobe_tries: Dict[String, Int]
     var _libprobe_seen: Dict[String, Bool]
-    var _libprobe_key: String
+    var _libprobe_key: UInt64
     var library_negatives: LibraryNegatives
     var _libprobe_docs: Dict[String, String]
     # Language ids we've already prompted-to-install for in this session.
@@ -1595,6 +1609,9 @@ struct Desktop(Movable):
     # can clear the highlight cache on every open editor of that
     # extension and the colors light up immediately.
     var _grammar_install_prompted: List[String]
+    # The downloadable-grammar registry, built on first use
+    # (``_load_grammar_specs``).
+    var _grammar_specs: List[DownloadableGrammar]
     var _pending_grammar_prompt_ext: String
     var _grammar_install_lang: String
     # Spell dictionary install bookkeeping. Settings emits requests to
@@ -1665,6 +1682,21 @@ struct Desktop(Movable):
     # ``continued`` / ``terminated`` events.
     var _dap_exec_path: String
     var _dap_exec_line: Int
+    # Per window: does its file resolve to ``_dap_exec_path``? Kept for
+    # the fingerprint of the exec path + every window's path
+    # (``_refresh_dap_exec_match``), so ``dap_tick`` doesn't ``realpath``
+    # each editor every tick of a debug session.
+    var _dap_exec_match: List[Bool]
+    var _dap_exec_match_key: UInt64
+    # ``_debug_pane_commands_state`` the debug pane's command strip was
+    # last built for (-1: never).
+    var _debug_cmds_state: Int
+    # Fingerprint of what ``_apply_view_config`` last wrote into the View
+    # menu (checkmarks + the file-tree label); 0: never.
+    var _view_menu_key: UInt64
+    # Fingerprint the status bar's target tabs were last built for
+    # (``_refresh_target_tabs``).
+    var _target_tabs_key: UInt64
     # Frame chosen as "current" for variables fetch — top of stack until
     # the user clicks elsewhere. Stored so the scope/variables responses
     # know which frame they belong to even after the pane has been
@@ -1751,9 +1783,10 @@ struct Desktop(Movable):
     # and keeps its deterministic defaults.
     var _config_from_disk: Bool
     # ``stat`` of the config file as of our last read/write, for spotting a
-    # write by another window or process. Size is ``-1`` until we've looked.
-    var _config_stamp_mtime: Int64
-    var _config_stamp_size: Int64
+    # write by another window or process (``ok`` False until we've looked).
+    # Compared with ``same_content_stamp``: nanosecond mtime, so a rewrite
+    # in the same second at the same size isn't missed.
+    var _config_stamp: FileInfo
     var _last_config_poll_ms: Int
     # Per-project run/debug targets, loaded from
     # ``<project>/.turbokod/targets.json`` when ``_set_project`` runs.
@@ -2004,6 +2037,9 @@ struct Desktop(Movable):
         self.host_items = List[List[HostItem]]()
         for _ in range(HOST_SURFACES):
             self.host_items.append(List[HostItem]())
+        self._frame_canvases = List[Canvas]()
+        for _ in range(HOST_SURFACES):
+            self._frame_canvases.append(Canvas(0, 0))
         self._mouse_fine = Point(0, 0)
         self._mouse_fine_set = False
         self.host_font_effective_size = 0
@@ -2082,10 +2118,14 @@ struct Desktop(Movable):
         self._pending_resolve_path = String("")
         self._pending_resolve_index = -1
         self._pending_resolve_label = String("")
-        self._doc_hl_pos = String("")
-        self._inlay_key = String("")
-        self._selrange_pos = String("")
-        self._fold_key = String("")
+        self._doc_hl_pos = 0
+        self._inlay_key = 0
+        self._selrange_pos = 0
+        self._fold_key = 0
+        self._lsp_status_key = 0
+        self._subdued = List[Bool]()
+        self._subdued_key = 0
+        self._dap_status_key = 0
         self.lsp_status_menu = AnchoredMenu()
         self.breakpoint_menu = BreakpointMenu()
         self.breakpoint_error = BreakpointConditionErrorDialog()
@@ -2094,7 +2134,7 @@ struct Desktop(Movable):
         self.spelling_dialog = SpellingDialog()
         self._libprobe_tries = Dict[String, Int]()
         self._libprobe_seen = Dict[String, Bool]()
-        self._libprobe_key = String("")
+        self._libprobe_key = 0
         self.library_negatives = LibraryNegatives()
         self._libprobe_docs = Dict[String, String]()
         self._lsp_install_prompted = List[String]()
@@ -2112,6 +2152,7 @@ struct Desktop(Movable):
         self.pending_save_actions = List[PendingSaveAction]()
         self._install_lang = String("")
         self._grammar_install_prompted = List[String]()
+        self._grammar_specs = List[DownloadableGrammar]()
         self._pending_grammar_prompt_ext = String("")
         self._grammar_install_lang = String("")
         self._dict_install_lang = String("")
@@ -2125,6 +2166,11 @@ struct Desktop(Movable):
         self.main_focus_request = False
         self._dap_exec_path = String("")
         self._dap_exec_line = -1
+        self._dap_exec_match = List[Bool]()
+        self._dap_exec_match_key = 0
+        self._debug_cmds_state = -1
+        self._view_menu_key = 0
+        self._target_tabs_key = 0
         self._dap_current_frame_id = -1
         self._inlineval_pending_path = String("")
         self._inlineval_pending_exprs = List[String]()
@@ -2148,8 +2194,7 @@ struct Desktop(Movable):
         self.config_persistable = True
         self._config_baseline = TurbokodConfig()
         self._config_from_disk = False
-        self._config_stamp_mtime = Int64(0)
-        self._config_stamp_size = Int64(-1)
+        self._config_stamp = _no_file_info()
         self._last_config_poll_ms = 0
         self.targets = ProjectTargets()
         self._last_screen = Rect.empty()
@@ -3956,37 +4001,6 @@ struct Desktop(Movable):
         Read-only editors (the docs viewer) are special-cased: line
         numbers are forced off regardless of the global toggle, since
         a rendered docs page isn't a numbered source file."""
-        # Sync the View-menu checkmarks with the current config so the
-        # dropdown always reflects the live state (Desktop owns the
-        # config, the host owns the menu items, and this is the one
-        # place both are reachable).
-        self.menu_bar.set_item_checked(
-            EDITOR_TOGGLE_LINE_NUMBERS, self.config.line_numbers,
-        )
-        self.menu_bar.set_item_checked(
-            EDITOR_TOGGLE_GIT_CHANGES, self.config.git_changes,
-        )
-        self.menu_bar.set_item_checked(
-            EDITOR_TOGGLE_TAB_BAR, self.config.tab_bar,
-        )
-        self.menu_bar.set_item_checked(
-            VIEW_CLASSIC_UI,
-            not self.config.native_ui and not self.config.platinum_ui,
-        )
-        self.menu_bar.set_item_checked(VIEW_NATIVE_UI, self.config.native_ui)
-        self.menu_bar.set_item_checked(
-            VIEW_PLATINUM_UI,
-            self.config.platinum_ui and not self.config.native_ui,
-        )
-        self.menu_bar.set_item_checked(
-            EDITOR_TOGGLE_MINIMAP, self.config.minimap,
-        )
-        self.menu_bar.set_item_checked(
-            EDITOR_TOGGLE_STICKY_SCROLL, self.config.sticky_scroll,
-        )
-        self.menu_bar.set_item_checked(
-            EDITOR_TOGGLE_COMPRESS_KWARGS, self.config.compress_kwargs,
-        )
         # The file-tree item cycles three states instead of checking a
         # box, so its *label* carries the state.
         var tree_label = _TREE_LABEL_HIDDEN
@@ -3998,7 +4012,52 @@ struct Desktop(Movable):
         elif self.file_tree.visible:
             tree_label = _TREE_LABEL_LEFT if self.file_tree.dock_left \
                 else _TREE_LABEL_RIGHT
-        self.menu_bar.set_item_label(PROJECT_TREE_ACTION, tree_label)
+        # Sync the View-menu checkmarks (and the tree item's label) with
+        # the current config so the dropdown always reflects the live
+        # state (Desktop owns the config, the host owns the menu items,
+        # and this is the one place both are reachable). Each write is a
+        # linear menu scan, so only when something they show changed; the
+        # menu count covers ``build_menus`` filling the bar after a paint.
+        var mk = fnv_int(fnv_start(), len(self.menu_bar.menus))
+        mk = fnv_int(mk, 1 if self.config.line_numbers else 0)
+        mk = fnv_int(mk, 1 if self.config.git_changes else 0)
+        mk = fnv_int(mk, 1 if self.config.tab_bar else 0)
+        mk = fnv_int(mk, 1 if self.config.native_ui else 0)
+        mk = fnv_int(mk, 1 if self.config.platinum_ui else 0)
+        mk = fnv_int(mk, 1 if self.config.minimap else 0)
+        mk = fnv_int(mk, 1 if self.config.sticky_scroll else 0)
+        mk = fnv_int(mk, 1 if self.config.compress_kwargs else 0)
+        mk = fnv_str(mk, tree_label)
+        if mk != self._view_menu_key:
+            self._view_menu_key = mk
+            self.menu_bar.set_item_checked(
+                EDITOR_TOGGLE_LINE_NUMBERS, self.config.line_numbers,
+            )
+            self.menu_bar.set_item_checked(
+                EDITOR_TOGGLE_GIT_CHANGES, self.config.git_changes,
+            )
+            self.menu_bar.set_item_checked(
+                EDITOR_TOGGLE_TAB_BAR, self.config.tab_bar,
+            )
+            self.menu_bar.set_item_checked(
+                VIEW_CLASSIC_UI,
+                not self.config.native_ui and not self.config.platinum_ui,
+            )
+            self.menu_bar.set_item_checked(VIEW_NATIVE_UI, self.config.native_ui)
+            self.menu_bar.set_item_checked(
+                VIEW_PLATINUM_UI,
+                self.config.platinum_ui and not self.config.native_ui,
+            )
+            self.menu_bar.set_item_checked(
+                EDITOR_TOGGLE_MINIMAP, self.config.minimap,
+            )
+            self.menu_bar.set_item_checked(
+                EDITOR_TOGGLE_STICKY_SCROLL, self.config.sticky_scroll,
+            )
+            self.menu_bar.set_item_checked(
+                EDITOR_TOGGLE_COMPRESS_KWARGS, self.config.compress_kwargs,
+            )
+            self.menu_bar.set_item_label(PROJECT_TREE_ACTION, tree_label)
         # Resolve "is this a git repo" once. The check is cheap (a stat
         # walk up to ``/``), but doing it once per editor per frame
         # adds up; ``self.project`` is the only relevant root because
@@ -4174,11 +4233,16 @@ struct Desktop(Movable):
                             self.windows.windows[i].editor._git_head_lines,
                             self.windows.windows[i].editor.buffer.lines,
                         )
+                        # Swapped out, not copied: ``marks`` is ours.
+                        var statuses = List[Int]()
+                        var deleted = List[Bool]()
+                        swap(statuses, marks.statuses)
+                        swap(deleted, marks.deleted_below)
                         self.windows.windows[i].editor.set_git_changes(
-                            marks.statuses.copy(),
+                            statuses^,
                         )
                         self.windows.windows[i].editor.set_git_deletions(
-                            marks.deleted_below.copy(),
+                            deleted^,
                         )
 
     def _on_git_head_observed(mut self, root: String):
@@ -4297,13 +4361,12 @@ struct Desktop(Movable):
             # removed-line phantoms and the +/~ gutter reflect the same edit on
             # the same frame.
             if self.review.is_editable() and not self.windows.windows[ri].editor.read_only:
-                var ed_before = self.review.current_before()
                 # A save ran ``invalidate_git_changes`` (clearing the pinned
                 # baseline) — re-pin the changeset baseline so the gutter +
                 # phantoms keep diffing against it rather than a re-fetched HEAD.
                 if not self.windows.windows[ri].editor._git_head_present:
                     self.windows.windows[ri].editor.set_git_head_text(
-                        ed_before.copy(), True,
+                        self.review.current_before(), True,
                     )
                 # Re-diff the removed-line overlay against the live buffer when
                 # it changed. ``_git_changes_dirty`` is set by every edit and
@@ -4311,7 +4374,9 @@ struct Desktop(Movable):
                 # this fires once per edit, not every idle frame.
                 if self.windows.windows[ri].editor._git_changes_dirty:
                     var live_after = self.windows.windows[ri].editor.text_snapshot()
-                    self._review_compute_phantoms(ri, abs, ed_before, live_after)
+                    self._review_compute_phantoms(
+                        ri, abs, self.review.current_before(), live_after,
+                    )
             # A prev/next-change that rolled into this (newly-loaded) file
             # lands on its first/last change once its git lines are diffed.
             if self._review_pending_chunk_edge != 0 \
@@ -4899,10 +4964,9 @@ struct Desktop(Movable):
         # painted last (over the docks/chrome) at the review stage below, so
         # skip the normal multi-window pass entirely.
         if not covered and not self.review.is_reviewing():
-            self.windows.paint(
-                canvas, self._compute_subdued_windows(),
-                not self._any_dock_focused(),
-            )
+            self._refresh_subdued_windows()
+            var windows_active = not self._any_dock_focused()
+            self.windows.paint(canvas, self._subdued, windows_active)
         # Row 0 hosts the in-grid menu bar only when we own the menu;
         # under a host-owned menu the panel starts at the top edge so it
         # doesn't show a blank row above its title.
@@ -4910,15 +4974,18 @@ struct Desktop(Movable):
         self.file_tree.bottom = 3 if self._frame_rows(screen) else 1
         # Sync which files carry uncommitted changes so the tree can
         # tint their rows with the tab bar's dirty colors.
-        self.file_tree.modified_paths = List[String]()
+        # (`set_modified_paths` only stores — and bumps the tree's version —
+        # when the set differs from last frame's.)
+        var modified_paths = List[String]()
         if self.file_tree.visible:
             for i in range(len(self.windows.windows)):
                 if self.windows.windows[i].is_editor \
                         and self.windows.windows[i].editor \
                             .has_uncommitted_changes():
-                    self.file_tree.modified_paths.append(
+                    modified_paths.append(
                         self.windows.windows[i].editor.file_path,
                     )
+        self.file_tree.set_modified_paths(modified_paths^)
         if not covered:
             self.file_tree.paint(canvas, screen)
             # When floating, the tool panels render on the host's separate
@@ -5404,9 +5471,8 @@ struct Desktop(Movable):
         if len(spec.install_hint.as_bytes()) == 0:
             return
         # One nag per language per session, regardless of yes/no.
-        for i in range(len(self._lsp_install_prompted)):
-            if self._lsp_install_prompted[i] == spec.language_id:
-                return
+        if _contains(self._lsp_install_prompted, spec.language_id):
+            return
         # Belt-and-suspenders: re-check that no candidate is on PATH.
         # ``_ensure_lsp_for_extension`` only returns -1-with-known-extension
         # when this is true, so this guards against future refactors.
@@ -5443,7 +5509,8 @@ struct Desktop(Movable):
         file open (in sequence), since neither is a substitute for
         the other.
         """
-        var specs = built_in_downloadable_grammars()
+        self._load_grammar_specs()
+        ref specs = self._grammar_specs
         # A project override (``.turbokod/grammars.json``) takes priority:
         # an ext mapped to a downloadable language (the canonical case is
         # ``html`` -> ``django-html``) must prompt for *that* grammar even
@@ -5462,9 +5529,8 @@ struct Desktop(Movable):
         var spec = specs[spec_idx].copy()
         if user_grammar_installed(spec.language_id):
             return
-        for i in range(len(self._grammar_install_prompted)):
-            if self._grammar_install_prompted[i] == spec.language_id:
-                return
+        if _contains(self._grammar_install_prompted, spec.language_id):
+            return
         if self._install_prompt_blocked():
             if len(self._pending_grammar_prompt_ext.as_bytes()) == 0:
                 self._pending_grammar_prompt_ext = ext
@@ -5477,6 +5543,13 @@ struct Desktop(Movable):
                 + String(" syntax grammar?"),
             String("Download"),
         )
+
+    def _load_grammar_specs(mut self):
+        """Fill ``_grammar_specs`` (``built_in_downloadable_grammars()``)
+        once: every file open, and every embedded ``# language=`` marker,
+        consults it."""
+        if len(self._grammar_specs) == 0:
+            self._grammar_specs = built_in_downloadable_grammars()
 
     def _start_download(
         mut self, display: String, noun: String, cmd: String,
@@ -5506,7 +5579,8 @@ struct Desktop(Movable):
         install is already running, surface the conflict on the status
         bar rather than queue, since the popup only renders one at a
         time."""
-        var specs = built_in_downloadable_grammars()
+        self._load_grammar_specs()
+        ref specs = self._grammar_specs
         var spec_idx = find_downloadable_grammar_by_language(specs, lang)
         if spec_idx < 0:
             return
@@ -5532,7 +5606,8 @@ struct Desktop(Movable):
             # this language, then mark every editor's per-buffer cache
             # dirty so the next refresh tokenizes from row 0 against the
             # freshly-downloaded grammar.
-            var specs = built_in_downloadable_grammars()
+            self._load_grammar_specs()
+            ref specs = self._grammar_specs
             var spec_idx = find_downloadable_grammar_by_language(specs, lang)
             if spec_idx < 0:
                 return
@@ -5779,10 +5854,8 @@ struct Desktop(Movable):
         sees the post-close set."""
         if len(path.as_bytes()) == 0:
             return
-        for i in range(len(self.windows.windows)):
-            if self.windows.windows[i].is_editor \
-                    and self.windows.windows[i].editor.file_path == path:
-                return
+        if self._find_editor_window_exact(path) >= 0:
+            return
         var li = self._lsp_for_path(path)
         if li >= 0:
             self.lsp_managers[li].notify_closed(path)
@@ -6215,13 +6288,7 @@ struct Desktop(Movable):
     def _refresh_config_stamp(mut self):
         """Record the config file's ``stat`` as of right now, so the watcher
         only reacts to writes that aren't ours."""
-        var info = config_file_stamp()
-        if not info.ok:
-            self._config_stamp_mtime = Int64(0)
-            self._config_stamp_size = Int64(-1)
-            return
-        self._config_stamp_mtime = info.mtime_sec
-        self._config_stamp_size = info.size
+        self._config_stamp = config_file_stamp()
 
     def _adopt_config(mut self, var merged: TurbokodConfig):
         """Install ``merged`` as both the live config and the merge
@@ -6305,8 +6372,7 @@ struct Desktop(Movable):
         var info = config_file_stamp()
         if not info.ok:
             return
-        if info.mtime_sec == self._config_stamp_mtime \
-                and info.size == self._config_stamp_size:
+        if info.same_content_stamp(self._config_stamp):
             return
         var current = try_read_config()
         if not current:
@@ -6499,6 +6565,38 @@ struct Desktop(Movable):
         canvas.host_widgets = self.host_draws_chrome()
         canvas.scroll_bar_cells = self.scroll_bar_cells()
         return canvas^
+
+    def take_frame_canvas(
+        mut self, surface: Int, cols: Int, rows: Int, area_fonts: Bool,
+    ) -> Canvas:
+        """``frame_canvas`` for host surface ``surface`` (a
+        ``HOST_SURFACE_*``), reusing that surface's canvas from the last
+        frame when the size is unchanged: cleared in place instead of a
+        fresh ``cols`` x ``rows`` allocation every frame. Hand it back with
+        ``return_frame_canvas`` once packed. ``area_fonts`` False is a
+        surface without per-area font sizes (every scale ``SCALE_ONE``)."""
+        var canvas = Canvas(0, 0)
+        if 0 <= surface and surface < len(self._frame_canvases):
+            swap(canvas, self._frame_canvases[surface])
+        if canvas.width != cols or canvas.height != rows:
+            canvas = Canvas(cols, rows)
+        else:
+            canvas.font = FONT_UI
+            canvas.origin = Point(0, 0)
+            canvas.clear()
+            canvas.host_items.clear()
+        for i in range(len(canvas.area_scale)):
+            canvas.area_scale[i] = self.area_scale[i] \
+                if area_fonts and i < len(self.area_scale) else SCALE_ONE
+        canvas.host_widgets = self.host_draws_chrome()
+        canvas.scroll_bar_cells = self.scroll_bar_cells()
+        return canvas^
+
+    def return_frame_canvas(mut self, surface: Int, var canvas: Canvas):
+        """Keep ``canvas`` (from ``take_frame_canvas``) for ``surface``'s
+        next frame."""
+        if 0 <= surface and surface < len(self._frame_canvases):
+            self._frame_canvases[surface] = canvas^
 
     def scroll_bar_cells(self) -> Int:
         """``Canvas.scroll_bar_cells`` for this look."""
@@ -6833,15 +6931,21 @@ struct Desktop(Movable):
                 # here is unreachable from every later teardown — the
                 # release has to happen on the way out.
                 self.windows.windows[i].release()
-        var kept = List[Window]()
         var remap = List[Int]()
+        var kept = 0
         for i in range(len(self.windows.windows)):
             if self.windows.windows[i].is_editor:
                 remap.append(-1)
             else:
-                remap.append(len(kept))
-                kept.append(self.windows.windows[i].copy())
-        self.windows.windows = kept^
+                remap.append(kept)
+                kept += 1
+        # Drop the editors in place (back to front, so indices hold):
+        # the survivors move down rather than being deep-copied.
+        var wi = len(self.windows.windows) - 1
+        while wi >= 0:
+            if self.windows.windows[wi].is_editor:
+                _ = self.windows.windows.pop(wi)
+            wi -= 1
         var new_z = List[Int]()
         for k in range(len(self.windows.z_order)):
             var v = self.windows.z_order[k]
@@ -8062,86 +8166,47 @@ struct Desktop(Movable):
             # reaches us (a replayed menu chord) must not answer it behind
             # its back.
             return Optional[String]()
+        # The contextual popups: each opens over the editor and eats
+        # every event until resolved or dismissed, so the dismissing
+        # keystroke can't also land in the buffer. ``spell_menu`` is the
+        # topmost (it opens over the cursor). ``_feed_popup`` routes the
+        # event and answers whether it submitted.
         if self.spell_menu.active:
-            # Spell-action popup is the topmost modal: it opens
-            # contextually over the cursor, so any other modal
-            # surfacing while it's up would be a layering bug. It
-            # gets first dibs on every event until the user resolves
-            # or dismisses it.
-            if event.kind == EVENT_KEY:
-                _ = self.spell_menu.handle_key(event)
-            else:
-                _ = self.spell_menu.handle_mouse(event, screen)
-            if self.spell_menu.submitted:
+            if _feed_popup(self.spell_menu, event, screen):
                 self._on_spell_menu_submit()
             return Optional[String]()
         if self.git_gutter_menu.active:
-            # Same modality story as ``spell_menu`` — opens contextually
-            # over the gutter, eats every event until resolved.
-            if event.kind == EVENT_KEY:
-                _ = self.git_gutter_menu.handle_key(event)
-            else:
-                _ = self.git_gutter_menu.handle_mouse(event, screen)
-            if self.git_gutter_menu.submitted:
+            if _feed_popup(self.git_gutter_menu, event, screen):
                 self._on_git_gutter_menu_submit()
             return Optional[String]()
         if self.test_gutter_menu.active:
-            # Click on the gutter run-icon opens this Run/Debug menu; same
-            # input-first routing as ``git_gutter_menu``.
-            if event.kind == EVENT_KEY:
-                _ = self.test_gutter_menu.handle_key(event)
-            else:
-                _ = self.test_gutter_menu.handle_mouse(event, screen)
-            if self.test_gutter_menu.submitted:
+            # The gutter run-icon's Run/Debug menu.
+            if _feed_popup(self.test_gutter_menu, event, screen):
                 self._on_test_gutter_menu_submit()
             return Optional[String]()
         if self.blame_popup.active:
             # Read-only commit details: nothing to submit, so any key or
-            # click just dismisses. Routed here (ahead of the editor) so
-            # the dismissing keystroke can't also land in the buffer.
-            if event.kind == EVENT_KEY:
-                _ = self.blame_popup.handle_key(event)
-            else:
-                _ = self.blame_popup.handle_mouse(event, screen)
+            # click just dismisses.
+            _ = _feed_popup(self.blame_popup, event, screen)
             return Optional[String]()
         if self.diagnostic_menu.active:
-            # Right-click on a diagnostic squiggle opens this single-row
-            # menu; same input-first routing as ``git_gutter_menu``.
-            if event.kind == EVENT_KEY:
-                _ = self.diagnostic_menu.handle_key(event)
-            else:
-                _ = self.diagnostic_menu.handle_mouse(event, screen)
-            if self.diagnostic_menu.submitted:
+            # Right-click on a diagnostic squiggle.
+            if _feed_popup(self.diagnostic_menu, event, screen):
                 self._on_diagnostic_menu_submit()
             return Optional[String]()
         if self.editor_context_menu.active:
-            # Right-click on plain identifier text opens the symbol-actions
-            # popup; same input-first routing as the diagnostic menu.
-            if event.kind == EVENT_KEY:
-                _ = self.editor_context_menu.handle_key(event)
-            else:
-                _ = self.editor_context_menu.handle_mouse(event, screen)
-            if self.editor_context_menu.submitted:
+            # Right-click on plain identifier text: symbol actions.
+            if _feed_popup(self.editor_context_menu, event, screen):
                 self._on_context_menu_submit()
             return Optional[String]()
         if self.tab_context_menu.active:
-            # Right-click on a tab / window title opens the file-actions
-            # popup (Rename / Delete); same input-first routing.
-            if event.kind == EVENT_KEY:
-                _ = self.tab_context_menu.handle_key(event)
-            else:
-                _ = self.tab_context_menu.handle_mouse(event, screen)
-            if self.tab_context_menu.submitted:
+            # Right-click on a tab / window title: Rename / Delete.
+            if _feed_popup(self.tab_context_menu, event, screen):
                 return self._on_tab_context_menu_submit()
             return Optional[String]()
         if self.lsp_status_menu.active:
-            # Right-click on the LSP indicator opens this single-row
-            # menu; same input-first routing as ``git_gutter_menu``.
-            if event.kind == EVENT_KEY:
-                _ = self.lsp_status_menu.handle_key(event)
-            else:
-                _ = self.lsp_status_menu.handle_mouse(event, screen)
-            if self.lsp_status_menu.submitted:
+            # Right-click on the LSP indicator.
+            if _feed_popup(self.lsp_status_menu, event, screen):
                 self._on_lsp_status_menu_submit()
             return Optional[String]()
         if self.prompt.active:
@@ -8801,11 +8866,24 @@ struct Desktop(Movable):
         stack overflows. Gate it to the picker; while reviewing, clipboard
         actions fall through to the hosted editor where they belong.
         """
-        return self.spell_menu.active or self.breakpoint_error.active \
-            or self.breakpoint_menu.active or self.fill_dialog.active \
+        return self._input_modal_active() \
             or (self.find_dialog.active and not self._typed_beside(
                 self.dialogs_windowed(),
             )) \
+            or self._git_window_owns_input() \
+            or (self.review.active and not self.review.is_reviewing()) \
+            or (self.settings.active and not self._typed_beside(
+                self.settings_detached or self.settings_native(),
+            ))
+
+    def _input_modal_active(self) -> Bool:
+        """The modals and popups that take every keystroke whenever
+        they're up, whatever the frontend: the part ``_modal_owns_input``
+        and ``_editor_keyboard_live`` agree on. Each adds its own
+        conditional entries (Find / Replace, Settings, review, the git
+        window) on top."""
+        return self.spell_menu.active or self.breakpoint_error.active \
+            or self.breakpoint_menu.active or self.fill_dialog.active \
             or self.names_review.active \
             or self.spelling_dialog.active \
             or self.git_gutter_menu.active or self.test_gutter_menu.active \
@@ -8820,13 +8898,9 @@ struct Desktop(Movable):
             or self.quick_open.active or self.symbol_pick.active \
             or self.reference_pick.active or self.find_symbol.active \
             or self.doc_pick.active or self.project_find.active \
-            or self._git_modal() or self._git_window_owns_input() \
-            or (self.review.active and not self.review.is_reviewing()) \
+            or self._git_modal() \
             or self.history.active \
-            or self.project_settings.active \
-            or (self.settings.active and not self._typed_beside(
-                self.settings_detached or self.settings_native(),
-            ))
+            or self.project_settings.active
 
     def _typed_beside(self, windowed: Bool) -> Bool:
         """An action arrived from the project window while a dialog that's
@@ -11524,7 +11598,7 @@ struct Desktop(Movable):
 
     def _maybe_request_inlay_codelens(mut self, win_idx: Int):
         """Request inlay hints + code lens for the focused buffer when the
-        debounce key (``path|linecount``) changes. Gated per feature by the
+        debounce key (``(path, linecount)``) changes. Gated per feature by the
         ``lsp_inlay_hints`` / ``lsp_code_lens`` settings + server support."""
         if not self.config.lsp_inlay_hints and not self.config.lsp_code_lens \
                 and not self.config.lsp_document_colors \
@@ -11543,9 +11617,9 @@ struct Desktop(Movable):
         # rust-analyzer build finishing, or a dependency resolving, can be
         # never.
         if self.lsp_managers[li].take_document_refresh():
-            self._inlay_key = String("")
+            self._inlay_key = 0
         var lc = self.windows.windows[win_idx].editor.buffer.line_count()
-        var key = path + String("|") + String(lc)
+        var key = fnv_int(fnv_str(fnv_start(), path), lc)
         if key == self._inlay_key:
             return
         self._inlay_key = key
@@ -11576,7 +11650,7 @@ struct Desktop(Movable):
             return
         var row = self.windows.windows[win_idx].editor.selections[0].row
         var col = self.windows.windows[win_idx].editor.selections[0].col
-        var key = path + String("|") + String(row) + String("|") + String(col)
+        var key = fnv_int(fnv_int(fnv_str(fnv_start(), path), row), col)
         if key == self._selrange_pos:
             return
         var li = self._ready_lsp_for_path(path, String("selectionRangeProvider"))
@@ -11609,11 +11683,12 @@ struct Desktop(Movable):
         ref ed = self.windows.windows[win_idx].editor
         var crow = ed.selections[0].row
         var ccol = ed.selections[0].col
-        var key = path + String("|") + String(ed.change_count) \
-            + String("|") + String(self.speller.word_version()) \
-            + String("|") + String(len(ed.spell_highlights)) \
-            + String("|") + String(crow) \
-            + String("|") + String(ccol)
+        var key = fnv_str(fnv_start(), path)
+        key = fnv_int(key, ed.change_count)
+        key = fnv_int(key, self.speller.word_version())
+        key = fnv_int(key, len(ed.spell_highlights))
+        key = fnv_int(key, crow)
+        key = fnv_int(key, ccol)
         if key == self._libprobe_key:
             return
         for k in range(len(ed.spell_highlights)):
@@ -11778,7 +11853,7 @@ struct Desktop(Movable):
 
     def _maybe_request_folding(mut self, win_idx: Int):
         """Request ``foldingRange`` for the focused buffer when the debounce
-        key (``path|linecount``) changes and the server supports it. Not
+        key (``(path, linecount)``) changes and the server supports it. Not
         behind a user setting — it just adds a dim marker on foldable
         blocks."""
         var path = self._editor_path_at(win_idx)
@@ -11788,7 +11863,7 @@ struct Desktop(Movable):
         if li < 0:
             return
         var lc = self.windows.windows[win_idx].editor.buffer.line_count()
-        var key = path + String("|") + String(lc)
+        var key = fnv_int(fnv_str(fnv_start(), path), lc)
         if key == self._fold_key:
             return
         self._fold_key = key
@@ -11894,8 +11969,8 @@ struct Desktop(Movable):
         the editor's occurrence overlay when the cursor isn't on a word."""
         if not self.config.lsp_document_highlight:
             # Setting off: make sure no stale overlay lingers.
-            if len(self._doc_hl_pos.as_bytes()) > 0:
-                self._doc_hl_pos = String("")
+            if self._doc_hl_pos != 0:
+                self._doc_hl_pos = 0
                 if win_idx >= 0 and win_idx < len(self.windows.windows) \
                         and self.windows.windows[win_idx].is_editor:
                     self.windows.windows[win_idx].editor \
@@ -11910,11 +11985,11 @@ struct Desktop(Movable):
         var word = word_at(line, col)
         if len(word.as_bytes()) == 0:
             # Off a word: clear any overlay and reset the debounce key.
-            if len(self._doc_hl_pos.as_bytes()) > 0:
-                self._doc_hl_pos = String("")
+            if self._doc_hl_pos != 0:
+                self._doc_hl_pos = 0
                 self.windows.windows[win_idx].editor.clear_document_highlights()
             return
-        var key = path + String("|") + String(row) + String("|") + String(col)
+        var key = fnv_int(fnv_int(fnv_str(fnv_start(), path), row), col)
         if key == self._doc_hl_pos:
             return
         var li = self._ready_lsp_for_path(path, String("documentHighlightProvider"))
@@ -12290,10 +12365,24 @@ struct Desktop(Movable):
         var lsp_idx = self._lsp_for_path(path)
         if lsp_idx < 0:
             return
+        # Everything the message is built from, as a fingerprint: while it
+        # matches and the slot is still ours, the message on the bar is the
+        # one we'd build, so skip building it (this runs every tick).
+        var inflight_ms = -1
+        if self.lsp_managers[lsp_idx].is_ready() \
+                and len(self.lsp_managers[lsp_idx].inflight_word().as_bytes()) == 0 \
+                and len(path.as_bytes()) > 0:
+            inflight_ms = self.lsp_managers[lsp_idx] \
+                .diagnostics_inflight_ms_for(path)
+        var key = _lsp_status_key(self.lsp_managers[lsp_idx], inflight_ms)
+        if key == self._lsp_status_key \
+                and self.status_bar.message_owner == "lsp":
+            return
+        self._lsp_status_key = key
         var prefix = String("LSP[") + self.lsp_managers[lsp_idx].language_id() \
             + String("]: ")
         _refresh_status_for(
-            self.status_bar, prefix, self.lsp_managers[lsp_idx], path,
+            self.status_bar, prefix, self.lsp_managers[lsp_idx], inflight_ms,
         )
 
     # --- DAP wiring ------------------------------------------------------
@@ -12639,9 +12728,11 @@ struct Desktop(Movable):
         # close / focus) — into the editor's own lists, so an idle frame
         # allocates nothing for it.
         var has_session = self.dap.is_active()
+        self._refresh_dap_exec_match()
         for i in range(len(self.windows.windows)):
             if not self.windows.windows[i].is_editor:
                 continue
+            var is_exec = self._dap_exec_match[i]
             ref ed = self.windows.windows[i].editor
             if len(ed.file_path.as_bytes()) == 0:
                 ed.gutter_width = 0
@@ -12655,7 +12746,7 @@ struct Desktop(Movable):
                 ed.gutter_width = 2
             else:
                 ed.gutter_width = 0
-            if _same_file(ed.file_path, self._dap_exec_path):
+            if is_exec:
                 ed.exec_line = self._dap_exec_line
             else:
                 ed.exec_line = -1
@@ -12712,10 +12803,13 @@ struct Desktop(Movable):
             self.debug_pane.set_status(String("(exited — Esc to dismiss)"))
         # Title-row command strip — buttons mirror the keyboard
         # shortcuts so a user who's never learned the bindings can
-        # drive the debugger from the pane chrome alone. Built fresh
-        # each tick so it tracks DAP state (Continue ↔ Pause swap
-        # depending on whether the program is stopped or running).
-        self.debug_pane.set_commands(self._build_debug_pane_commands())
+        # drive the debugger from the pane chrome alone. Rebuilt when the
+        # state it depends on changes (Continue ↔ Pause swap depending on
+        # whether the program is stopped or running), not every tick.
+        var cmds_state = self._debug_pane_commands_state()
+        if cmds_state != self._debug_cmds_state:
+            self._debug_cmds_state = cmds_state
+            self.debug_pane.set_commands(self._build_debug_pane_commands())
         # Test pane is an independent bottom-docked output pane — a
         # pty/Vt terminal surface that owns its own child process. It
         # builds its own title + command strip in ``paint``, so the host
@@ -12976,28 +13070,16 @@ struct Desktop(Movable):
         never in a background window when several projects are open."""
         if not self.host_focused:
             return False
-        if self.spell_menu.active or self.breakpoint_error.active \
-                or self.breakpoint_menu.active or self.fill_dialog.active \
-                or self.find_dialog.active \
-                or self.names_review.active \
-                or self.spelling_dialog.active \
-                or self.git_gutter_menu.active or self.test_gutter_menu.active \
-                or self.blame_popup.active \
-                or self.diagnostic_menu.active \
-                or self.editor_context_menu.active \
-                or self.tab_context_menu.active \
-                or self.lsp_status_menu.active or self.prompt.active \
-                or self.confirm_dialog.active or self.merge_view.active \
-                or self.message_request_dialog.active \
-                or self.color_picker.active \
-                or self.save_as_dialog.active \
-                or self.quick_open.active or self.symbol_pick.active \
-                or self.reference_pick.active or self.find_symbol.active \
-                or self.doc_pick.active or self.project_find.active \
-                or self._git_modal() or self.review.active \
-                or self.history.active:
+        if self._input_modal_active():
             return False
-        if self.project_settings.active:
+        # Stricter than ``_modal_owns_input`` (which answers "would a
+        # replayed menu chord go to the modal?"): the caret stops blinking
+        # under any open Find / Replace — windowed or not — under review in
+        # either sub-mode (the review body draws its own caret), and under
+        # Settings unless it's detached. A keystroke arriving from the git
+        # view's own window (``_git_window_owns_input``) never stopped it,
+        # and still doesn't.
+        if self.find_dialog.active or self.review.active:
             return False
         if self.settings.active and not self.settings_detached:
             return False
@@ -13044,6 +13126,18 @@ struct Desktop(Movable):
         # the new shell is typeable without a click. See
         # ``panel_focus_request``.
         self.panel_focus_request = True
+
+    def _debug_pane_commands_state(self) -> Int:
+        """Which strip ``_build_debug_pane_commands`` builds: a code per
+        branch it can take, so the tick rebuilds it only on a change."""
+        if self.dap.is_active():
+            return 1 if self.dap.is_stopped() else 2
+        if self.run_session.is_active():
+            return 3
+        if self._run_output_held \
+                or self.dap.is_failed() or self.dap.is_terminated():
+            return 4
+        return 0
 
     def _build_debug_pane_commands(self) -> List[TitleCommand]:
         """Title-strip buttons for the debug pane.
@@ -13292,6 +13386,30 @@ struct Desktop(Movable):
         _ = self._dap_watch_values.pop(index)
         self._rebuild_pane_inspect(self._dap_locals_cache.copy())
 
+    def _refresh_dap_exec_match(mut self):
+        """Bring ``_dap_exec_match`` up to date: one flag per window,
+        True when its editor's file is ``_dap_exec_path`` (``_same_file``,
+        so a symlinked spelling still gets the ``▶``). Recomputed only
+        when the exec path or a window's path changed."""
+        var key = fnv_str(fnv_start(), self._dap_exec_path)
+        for i in range(len(self.windows.windows)):
+            if self.windows.windows[i].is_editor:
+                key = fnv_str(key, self.windows.windows[i].editor.file_path)
+            else:
+                key = fnv_int(key, -1)
+        if key == self._dap_exec_match_key \
+                and len(self._dap_exec_match) == len(self.windows.windows):
+            return
+        self._dap_exec_match_key = key
+        self._dap_exec_match = List[Bool](capacity=len(self.windows.windows))
+        for i in range(len(self.windows.windows)):
+            self._dap_exec_match.append(
+                self.windows.windows[i].is_editor and _same_file(
+                    self.windows.windows[i].editor.file_path,
+                    self._dap_exec_path,
+                )
+            )
+
     def _refresh_dap_status(mut self):
         """When a debug session is active, surface its state on the right
         side of the status bar (sharing space with the LSP indicator —
@@ -13306,6 +13424,16 @@ struct Desktop(Movable):
         if self.status_bar.holds_message(monotonic_ms()):
             return
         if self.dap.is_active() or self.dap.is_failed():
+            # Skip the rebuild while nothing ``status_summary`` reads
+            # changed and the slot is still ours (this runs every tick).
+            var key = fnv_int(fnv_start(), Int(self.dap.state))
+            key = fnv_int(key, 1 if self.dap.is_stopped() else 0)
+            key = fnv_str(key, self.dap.adapter_name)
+            key = fnv_str(key, self.dap.failure_reason)
+            if key == self._dap_status_key \
+                    and self.status_bar.message_owner == "dap":
+                return
+            self._dap_status_key = key
             var attr = Attr(BLACK, LIGHT_GRAY)
             if self.dap.is_failed():
                 attr = Attr(LIGHT_RED, LIGHT_GRAY)
@@ -13600,7 +13728,7 @@ struct Desktop(Movable):
             if inlay_changed or codelens_changed \
                     or colors_changed or links_changed:
                 # Force a re-request next frame (covers every turn-on).
-                self._inlay_key = String("")
+                self._inlay_key = 0
                 for wi in range(len(self.windows.windows)):
                     if not self.windows.windows[wi].is_editor:
                         continue
@@ -14247,27 +14375,43 @@ struct Desktop(Movable):
     def _refresh_target_tabs(mut self):
         """Push the current target list + active selection into the
         status bar so the tabs render with up-to-date state. Called
-        every paint — cheap (one short list)."""
-        var tabs = List[StatusTab]()
+        every paint; rebuilds the bar's list only when a fingerprint of
+        the tabs (names, running / debugging flags, active) changed."""
+        var key = fnv_int(fnv_start(), self.targets.active)
         for i in range(len(self.targets.targets)):
-            ref t = self.targets.targets[i]
-            var running = self.run_session.matches(t.name)
-            for k in range(len(self.terminal_panes)):
-                if self.terminal_panes[k].run_target == t.name \
-                        and not self.terminal_panes[k].tests \
-                        and self.terminal_panes[k].is_running():
-                    running = True
-            var debugging = (
-                self.dap.is_active()
-                and self.dap.language_id == t.debug_language
-                and len(t.debug_language.as_bytes()) > 0
-                and self.targets.active == i
-            )
-            tabs.append(StatusTab(t.name, running, debugging))
-        self.status_bar.set_tabs(tabs^, self.targets.active)
+            var flags = self._target_tab_flags(i)
+            key = fnv_str(key, self.targets.targets[i].name)
+            key = fnv_int(key, (1 if flags[0] else 0) + (2 if flags[1] else 0))
+        if key != self._target_tabs_key \
+                or len(self.status_bar.tabs) != len(self.targets.targets):
+            self._target_tabs_key = key
+            var tabs = List[StatusTab](capacity=len(self.targets.targets))
+            for i in range(len(self.targets.targets)):
+                var flags = self._target_tab_flags(i)
+                tabs.append(StatusTab(
+                    self.targets.targets[i].name, flags[0], flags[1],
+                ))
+            self.status_bar.set_tabs(tabs^, self.targets.active)
         self.status_bar.git_dirty = self._project_dirty
         self.status_bar.git_unpushed = self._project_unpushed
         self.status_bar.git_branch = self._project_branch
+
+    def _target_tab_flags(self, i: Int) -> Tuple[Bool, Bool]:
+        """``(running, debugging)`` for target ``i``'s status-bar tab."""
+        ref t = self.targets.targets[i]
+        var running = self.run_session.matches(t.name)
+        for k in range(len(self.terminal_panes)):
+            if self.terminal_panes[k].run_target == t.name \
+                    and not self.terminal_panes[k].tests \
+                    and self.terminal_panes[k].is_running():
+                running = True
+        var debugging = (
+            self.dap.is_active()
+            and self.dap.language_id == t.debug_language
+            and len(t.debug_language.as_bytes()) > 0
+            and self.targets.active == i
+        )
+        return (running, debugging)
 
     def _jump_to(
         mut self, target: DefinitionResolved, screen: Rect,
@@ -14393,6 +14537,24 @@ struct Desktop(Movable):
         self._close_pickers()
         self.reference_pick.open(refs^, word, root^)
 
+    def _refresh_subdued_windows(mut self):
+        """Bring ``_subdued`` up to date for this frame. The flags only
+        depend on the project root, the language table and each window's
+        path, so they're recomputed only when a fingerprint of those
+        changes — not every frame."""
+        var key = fnv_str(fnv_start(), self._project_root())
+        key = fnv_int(key, len(self.lsp_specs))
+        for i in range(len(self.windows.windows)):
+            if self.windows.windows[i].is_editor:
+                key = fnv_str(key, self.windows.windows[i].editor.file_path)
+            else:
+                key = fnv_int(key, -1)
+        if key == self._subdued_key \
+                and len(self._subdued) == len(self.windows.windows):
+            return
+        self._subdued_key = key
+        self._subdued = self._compute_subdued_windows()
+
     def _compute_subdued_windows(self) -> List[Bool]:
         """One flag per window: True means "paint with dim chrome."
 
@@ -14447,15 +14609,30 @@ struct Desktop(Movable):
 
     def _find_window_for_path(self, path: String) -> Int:
         """Return the index of an existing editor window whose file_path
-        matches ``path`` (raw or canonicalized), or -1."""
+        matches ``path`` (raw or canonicalized), or -1. An exact match
+        wins without a syscall; only a miss canonicalizes (``realpath``
+        per window), since most callers pass the path an editor holds."""
+        var exact = self._find_editor_window_exact(path)
+        if exact >= 0:
+            return exact
         var canon = realpath(path)
+        if len(canon.as_bytes()) == 0:
+            return -1
         for i in range(len(self.windows.windows)):
             if not self.windows.windows[i].is_editor:
                 continue
-            var fp = self.windows.windows[i].editor.file_path
-            if fp == path:
+            ref fp = self.windows.windows[i].editor.file_path
+            if len(fp.as_bytes()) > 0 and realpath(fp) == canon:
                 return i
-            if len(canon.as_bytes()) > 0 and realpath(fp) == canon:
+        return -1
+
+    def _find_editor_window_exact(self, path: String) -> Int:
+        """Index of the editor window whose ``file_path`` is exactly
+        ``path``, or -1. No canonicalization (see ``_find_window_for_path``
+        for that)."""
+        for i in range(len(self.windows.windows)):
+            if self.windows.windows[i].is_editor \
+                    and self.windows.windows[i].editor.file_path == path:
                 return i
         return -1
 
@@ -14538,7 +14715,7 @@ struct Desktop(Movable):
         if self._nav_pos < 0:
             self._push_nav_point(NavPoint(path, row, col))
             return
-        var cur = self._nav_stack[self._nav_pos]
+        ref cur = self._nav_stack[self._nav_pos]
         if cur.file_path == path:
             var dr = row - cur.row
             if dr < 0:
@@ -15299,12 +15476,7 @@ struct Desktop(Movable):
         anything else is the exit code and the first line it printed.
         Either way the action's previous diagnostic is replaced, so a
         clean run clears it."""
-        var idx = -1
-        for i in range(len(self.windows.windows)):
-            if self.windows.windows[i].is_editor \
-                    and self.windows.windows[i].editor.file_path == pa.saved_path:
-                idx = i
-                break
+        var idx = self._find_editor_window_exact(pa.saved_path)
         var diags = List[Diagnostic]()
         if exit_code == 0:
             self._say(String("on-save: ") + pa.label + String(" ok"))
@@ -15887,12 +16059,11 @@ struct Desktop(Movable):
         window has it open, otherwise the on-disk contents. ``None``
         on read failure.
         """
-        for i in range(len(self.windows.windows)):
-            if self.windows.windows[i].is_editor \
-                    and self.windows.windows[i].editor.file_path == path:
-                return Optional[String](
-                    self.windows.windows[i].editor.text_snapshot(),
-                )
+        var i = self._find_editor_window_exact(path)
+        if i >= 0:
+            return Optional[String](
+                self.windows.windows[i].editor.text_snapshot(),
+            )
         try:
             return Optional[String](read_existing_file(path))
         except:
@@ -16046,14 +16217,23 @@ struct Desktop(Movable):
         except e:
             self._say_error(String("Docs load failed: ") + String(e))
             return True
-        self._close_pickers()
-        self.doc_pick.open(
-            spec.display, self.doc_stores[store_idx].entries.copy(),
-        )
-        if focused_editor_idx >= 0:
-            self._seed_doc_query_from_cursor(focused_editor_idx)
-        self._last_doc_lang = spec.language_id
+        self._show_doc_pick(store_idx, spec.display, spec.language_id,
+            focused_editor_idx)
         return True
+
+    def _show_doc_pick(
+        mut self, store_idx: Int, display: String, language_id: String,
+        seed_editor_idx: Int,
+    ):
+        """Open the picker over loaded store ``store_idx``, seeded with
+        the identifier under editor ``seed_editor_idx``'s cursor (-1: no
+        seed), and remember ``language_id`` so a later Ctrl+K from any
+        window lands on the same docset."""
+        self._close_pickers()
+        self.doc_pick.open(display, self.doc_stores[store_idx].entries)
+        if seed_editor_idx >= 0:
+            self._seed_doc_query_from_cursor(seed_editor_idx)
+        self._last_doc_lang = language_id
 
     def _seed_doc_query_from_cursor(mut self, win_idx: Int):
         """Pre-fill the doc picker's query with the identifier under the
@@ -16078,16 +16258,15 @@ struct Desktop(Movable):
         modal is open or when the user has already been asked for this
         language this session — same one-nag rule as the LSP installer.
         """
-        for i in range(len(self._doc_install_prompted)):
-            if self._doc_install_prompted[i] == spec.language_id:
-                # Already declined / pending — surface a hint so the
-                # user knows why nothing happened on their second
-                # Ctrl+K attempt for this language.
-                self._say(
-                    String("Docs: ") + spec.display
-                        + String(" not installed (asked earlier this session)"),
-                )
-                return
+        if _contains(self._doc_install_prompted, spec.language_id):
+            # Already declined / pending — surface a hint so the user
+            # knows why nothing happened on their second Ctrl+K attempt
+            # for this language.
+            self._say(
+                String("Docs: ") + spec.display
+                    + String(" not installed (asked earlier this session)"),
+            )
+            return
         if self._install_prompt_blocked():
             return
         self._doc_install_prompted.append(spec.language_id)
@@ -16124,9 +16303,8 @@ struct Desktop(Movable):
             return False
         if python_venv_has_debugpy(venv_dir):
             return False
-        for i in range(len(self._debugpy_install_prompted)):
-            if self._debugpy_install_prompted[i] == venv_dir:
-                return False
+        if _contains(self._debugpy_install_prompted, venv_dir):
+            return False
         if self.install_runner.is_active():
             return False
         if self._install_prompt_blocked():
@@ -16351,16 +16529,9 @@ struct Desktop(Movable):
             self._say(String("Installed ") + result.label)
             # Open the picker now — the user just opted in to docs, so
             # taking them straight to the listing is the obvious follow-up.
-            self._close_pickers()
-            self.doc_pick.open(
-                spec.display, self.doc_stores[store_idx].entries.copy(),
+            self._show_doc_pick(
+                store_idx, spec.display, lang, self._focused_editor_idx(),
             )
-            var idx = self._focused_editor_idx()
-            if idx >= 0:
-                self._seed_doc_query_from_cursor(idx)
-            # Remember this language so a subsequent Ctrl+K from any
-            # window (focused editor or not) lands on the same docset.
-            self._last_doc_lang = lang
         else:
             self._show_install_failure(
                 String("Docs install failed"), result, screen,
@@ -19114,8 +19285,89 @@ def _mojo_include_dirs(root: String) -> List[String]:
 # --- Result / summary windows for project search ----------------------------
 
 
+def _contains(haystack: List[String], needle: String) -> Bool:
+    """Whether ``needle`` is in ``haystack`` (the install prompts'
+    one-nag-per-session lists)."""
+    for i in range(len(haystack)):
+        if haystack[i] == needle:
+            return True
+    return False
+
+
+def _no_file_info() -> FileInfo:
+    """A ``FileInfo`` for "not looked yet" (``ok`` False: never the same
+    stamp as anything)."""
+    return FileInfo(Int64(0), Int64(0), Int64(0), UInt32(0), False)
+
+
+def _feed_popup(mut m: AnchoredMenu, event: Event, screen: Rect) -> Bool:
+    """Route ``event`` to a contextual popup (keys to ``handle_key``,
+    the rest to ``handle_mouse``); True when it submitted. One overload
+    per popup type — they share the shape but no trait."""
+    if event.kind == EVENT_KEY:
+        _ = m.handle_key(event)
+    else:
+        _ = m.handle_mouse(event, screen)
+    return m.submitted
+
+
+def _feed_popup(mut m: GitGutterMenu, event: Event, screen: Rect) -> Bool:
+    if event.kind == EVENT_KEY:
+        _ = m.handle_key(event)
+    else:
+        _ = m.handle_mouse(event, screen)
+    return m.submitted
+
+
+def _feed_popup(mut m: DiagnosticMenu, event: Event, screen: Rect) -> Bool:
+    if event.kind == EVENT_KEY:
+        _ = m.handle_key(event)
+    else:
+        _ = m.handle_mouse(event, screen)
+    return m.submitted
+
+
+def _feed_popup(mut m: EditorContextMenu, event: Event, screen: Rect) -> Bool:
+    if event.kind == EVENT_KEY:
+        _ = m.handle_key(event)
+    else:
+        _ = m.handle_mouse(event, screen)
+    return m.submitted
+
+
+def _feed_popup(mut m: BlamePopup, event: Event, screen: Rect) -> Bool:
+    """Blame has nothing to submit: always False."""
+    if event.kind == EVENT_KEY:
+        _ = m.handle_key(event)
+    else:
+        _ = m.handle_mouse(event, screen)
+    return False
+
+
+def _lsp_status_key(m: LspManager, inflight_ms: Int) -> UInt64:
+    """Fingerprint of everything ``_refresh_status_for`` reads, so the
+    per-tick refresh can tell the message wouldn't change. The in-flight
+    wait is bucketed the way it's displayed (tenths, nothing under
+    200 ms)."""
+    var h = fnv_str(fnv_start(), m.language_id())
+    var state = 0
+    if m.is_failed():
+        state = 1
+    elif m.is_initializing():
+        state = 2
+    elif m.is_ready():
+        state = 3
+    h = fnv_int(h, state)
+    if state == 1:
+        h = fnv_str(h, m.failure_reason)
+    h = fnv_str(h, m.inflight_word())
+    h = fnv_int(h, inflight_ms // 100 if inflight_ms >= 200 else -1)
+    h = fnv_int(h, 1 if m.last_empty() else 0)
+    return h
+
+
 def _refresh_status_for(
-    mut sb: StatusBar, prefix: String, mut m: LspManager, focused_path: String,
+    mut sb: StatusBar, prefix: String, m: LspManager, inflight_ms: Int,
 ):
     """Free function so the caller can pass ``self.status_bar`` and one
     of ``self.lsp_*`` without tripping Mojo's exclusivity check (a
@@ -19126,8 +19378,9 @@ def _refresh_status_for(
     indicator opens the LSP info dialog regardless of state — useful
     precisely when the state is FAILED and the user wants to see why.
 
-    ``focused_path`` is the path of the editor whose squiggles the
-    user is looking at right now; used to surface an "analyzing
+    ``inflight_ms`` is how long the focused editor's diagnostics refresh
+    has been waiting (``diagnostics_inflight_ms_for``, -1 for none); used
+    to surface an "analyzing
     edits…" spinner while the server hasn't yet published fresh
     diagnostics for the latest didChange. Without that signal a slow
     type-checker (pyright on a Django settings module, ty on a large
@@ -19176,31 +19429,29 @@ def _refresh_status_for(
         # rather than a state. Any longer wait gets a visible spinner
         # plus elapsed seconds so the user can tell the difference
         # between "server is working" and "server is wedged".
-        if len(focused_path.as_bytes()) > 0:
-            var inflight_ms = m.diagnostics_inflight_ms_for(focused_path)
-            if inflight_ms >= 200:
-                var secs_x10 = inflight_ms // 100
-                var whole = secs_x10 // 10
-                var tenths = secs_x10 % 10
-                var elapsed = String(whole) + String(".") + String(tenths) \
-                    + String("s")
-                sb.set_message(
-                    prefix + String("analyzing edits (") + elapsed
-                        + String(")"),
-                    Attr(BLACK, LIGHT_GRAY),
-                    clickable=True,
-                    spinner=True,
-                    tooltip=String(
-                        "The language server is re-analyzing this file "
-                        "after your recent edits. Diagnostics on screen "
-                        "may be stale until the response arrives — "
-                        "long waits usually mean a slow type-checker "
-                        "(pyright on a large project, ty on a big "
-                        "Mojo file, etc.)."
-                    ),
-                    owner=String("lsp"),
-                )
-                return
+        if inflight_ms >= 200:
+            var secs_x10 = inflight_ms // 100
+            var whole = secs_x10 // 10
+            var tenths = secs_x10 % 10
+            var elapsed = String(whole) + String(".") + String(tenths) \
+                + String("s")
+            sb.set_message(
+                prefix + String("analyzing edits (") + elapsed
+                    + String(")"),
+                Attr(BLACK, LIGHT_GRAY),
+                clickable=True,
+                spinner=True,
+                tooltip=String(
+                    "The language server is re-analyzing this file "
+                    "after your recent edits. Diagnostics on screen "
+                    "may be stale until the response arrives — "
+                    "long waits usually mean a slow type-checker "
+                    "(pyright on a large project, ty on a big "
+                    "Mojo file, etc.)."
+                ),
+                owner=String("lsp"),
+            )
+            return
         if m.last_empty():
             sb.set_message(
                 prefix + String("no definition found"),

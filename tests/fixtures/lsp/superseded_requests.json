@@ -1,0 +1,9 @@
+{
+  "_comment": "A server that never answers rename / typeDefinition / prepareCallHierarchy, so a second request of the same kind supersedes the first while it is still in flight. The client must send $/cancelRequest for the superseded id (and only for it), so the server stops computing an answer nobody will read.",
+  "position_encoding": "utf-8",
+  "responses": {
+    "textDocument/rename": {"$no_reply": true},
+    "textDocument/typeDefinition": {"$no_reply": true},
+    "textDocument/prepareCallHierarchy": {"$no_reply": true}
+  }
+}

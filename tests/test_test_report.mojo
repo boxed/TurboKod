@@ -428,6 +428,36 @@ def test_test_pane_hands_the_child_the_report_file() raises:
     assert_false(stat_file(path).ok)
 
 
+def test_test_pane_scrollback_has_a_scroll_bar() raises:
+    """The test pane's output reserves the framework scroll bar's column
+    and shows the bar once there's history; a press on its track scrolls
+    the scrollback."""
+    var pane = TestPane()
+    pane.visible = True
+    var panel = Rect(0, 10, 60, 30)
+    var c = Canvas(60, 30)
+    pane.paint(c, panel)
+    var cols = pane.vt.cols()
+    assert_equal(cols, pane.sel._last_body.width())
+    assert_false(pane.scroll_bar.bar.metrics().present)
+    for i in range(200):
+        pane.vt.feed_string(String("line ") + String(i) + String("\r\n"))
+    pane.paint(c, panel)
+    assert_equal(pane.vt.cols(), cols)
+    assert_true(pane.scroll_bar.bar.metrics().present)
+    # The bar sits right of the grid.
+    var bx = pane.scroll_bar.bar.x
+    assert_true(bx >= pane.sel._last_body.b.x)
+    # Its up arrow scrolls one row into history.
+    var top = pane.scroll_bar.bar.top
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(bx, top), MOUSE_BUTTON_LEFT, True, False),
+        panel,
+    )
+    assert_true(pane.vt.view_offset() > 0)
+    pane.release()
+
+
 def main() raises:
     setup_test_env()
     TestSuite.discover_tests[__functions_in_module()]().run()

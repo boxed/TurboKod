@@ -43,7 +43,7 @@ from .onig import (
     ONIG_OPTION_NONE, ONIG_OPTION_NOT_BEGIN_POSITION,
 )
 from .search_options import regex_escape_literal
-from .string_utils import byte_slice, starts_with
+from .string_utils import byte_slice
 from .tm_grammar import (
     Capture, Grammar, Pattern,
     PATTERN_BEGIN_END, PATTERN_BEGIN_WHILE, PATTERN_GROUP,
@@ -560,13 +560,19 @@ def _tokenize_line_scan(
     # treating EOF the same as "next line starts with non-whitespace,"
     # which closes any single-line construct. Highlight ranges are
     # clamped to ``n`` so the ``\\n`` itself doesn't paint past the
-    # visible line.
-    var line_nl = line + String("\n") + next_line
+    # visible line. Built only once a begin/end frame is on top: most
+    # rows end outside one, and concatenating two lines for every row of
+    # every tokenize pass was pure allocation.
+    var line_nl = String()
+    var have_line_nl = False
     while len(stack) > 0:
         var top = stack[len(stack) - 1]
         ref top_pat = grammar.patterns[top.pattern_idx]
         if top_pat.kind != PATTERN_BEGIN_END:
             break
+        if not have_line_nl:
+            line_nl = line + String("\n") + next_line
+            have_line_nl = True
         # Mirror the main loop: a back-referencing end uses the frame's
         # substituted regex so a ``\\n``-bearing close still resolves
         # against the begin captures.
@@ -1059,18 +1065,20 @@ def _expand_into(
 
 def _scope_attr_in_chain(chain: String) -> Optional[Attr]:
     """Walk a space-separated scope chain innermost-first and return the
-    first scope that maps to an Attr (or ``None`` if none do). Cheap —
-    chains are short (typically 0-3 scopes deep for the bundled
-    grammars)."""
-    if len(chain.as_bytes()) == 0:
-        return Optional[Attr]()
-    var parts = _split_scopes(chain)
-    var i = len(parts) - 1
-    while i >= 0:
-        var ao = _scope_attr(parts[i])
-        if ao:
-            return ao
-        i -= 1
+    first scope that maps to an Attr (or ``None`` if none do). Walks the
+    chain's bytes in place — this runs for every token, and splitting
+    the chain into a list of strings allocated per token."""
+    var sb = chain.as_bytes()
+    var end = len(sb)
+    while end > 0:
+        var start = end
+        while start > 0 and sb[start - 1] != 0x20:  # space
+            start -= 1
+        if start < end:
+            var ao = _scope_attr_bytes(sb[start:end])
+            if ao:
+                return ao
+        end = start - 1
     return Optional[Attr]()
 
 
@@ -1089,92 +1097,108 @@ def _attr_for_scopes(chain: String, leaf: String) -> Attr:
     return highlight_ident_attr()
 
 
+def _has_prefix(sb: Span[UInt8, _], lit: StaticString) -> Bool:
+    var pb = lit.as_bytes()
+    if len(pb) > len(sb):
+        return False
+    for i in range(len(pb)):
+        if sb[i] != pb[i]:
+            return False
+    return True
+
+
 def _scope_attr(scope: String) -> Optional[Attr]:
-    """Map a single TextMate scope to an Attr by prefix.
+    """Map a single TextMate scope to an Attr by prefix."""
+    return _scope_attr_bytes(scope.as_bytes())
+
+
+def _scope_attr_bytes(scope: Span[UInt8, _]) -> Optional[Attr]:
+    """Map a single TextMate scope to an Attr by prefix. Compares
+    against static literals, so no per-call ``String`` is built.
 
     The list mirrors what the existing Mojo/Python tokenizer paints,
     plus a few TextMate-isms. Order matters only when one prefix is
     a prefix of another (e.g. ``keyword.operator`` before
     ``keyword`` would matter — listed first here).
     """
-    if starts_with(scope, String("keyword.operator")):
+    if _has_prefix(scope, "keyword.operator"):
         return Optional[Attr](highlight_operator_attr())
-    if starts_with(scope, String("keyword")):
+    if _has_prefix(scope, "keyword"):
         return Optional[Attr](highlight_keyword_attr())
     # The django-html grammar scopes bare variable references inside
     # ``{% ... %}`` tags as ``string.unquoted.tag-string.django`` (e.g.
     # ``companies`` in ``{% if companies %}``). They're identifiers, not
     # strings — color them like idents (green) before the generic
     # ``string`` prefix below would paint them string-red.
-    if starts_with(scope, String("string.unquoted.tag-string")):
+    if _has_prefix(scope, "string.unquoted.tag-string"):
         return Optional[Attr](highlight_ident_attr())
-    if starts_with(scope, String("string")):
+    if _has_prefix(scope, "string"):
         return Optional[Attr](highlight_string_attr())
-    if starts_with(scope, String("comment")):
+    if _has_prefix(scope, "comment"):
         return Optional[Attr](highlight_comment_attr())
-    if starts_with(scope, String("constant.numeric")):
+    if _has_prefix(scope, "constant.numeric"):
         return Optional[Attr](highlight_number_attr())
-    if starts_with(scope, String("constant.character")):
+    if _has_prefix(scope, "constant.character"):
         return Optional[Attr](highlight_string_attr())
-    if starts_with(scope, String("constant.language")):
+    if _has_prefix(scope, "constant.language"):
         return Optional[Attr](highlight_keyword_attr())
-    if starts_with(scope, String("storage.type")):
+    if _has_prefix(scope, "storage.type"):
         return Optional[Attr](highlight_keyword_attr())
-    if starts_with(scope, String("storage.modifier")):
+    if _has_prefix(scope, "storage.modifier"):
         return Optional[Attr](highlight_keyword_attr())
-    if starts_with(scope, String("support.type")):
+    if _has_prefix(scope, "support.type"):
         return Optional[Attr](highlight_keyword_attr())
-    if starts_with(scope, String("support.function")):
+    if _has_prefix(scope, "support.function"):
         return Optional[Attr](highlight_ident_attr())
-    if starts_with(scope, String("entity.name.function")):
+    if _has_prefix(scope, "entity.name.function"):
         return Optional[Attr](highlight_ident_attr())
-    if starts_with(scope, String("entity.name.type")):
+    if _has_prefix(scope, "entity.name.type"):
         return Optional[Attr](highlight_keyword_attr())
-    if starts_with(scope, String("meta.attribute")):
+    if _has_prefix(scope, "meta.attribute"):
         return Optional[Attr](highlight_decorator_attr())
     # Prose markup (rST / Markdown): pick the closest palette color
     # for each kind. ``markup.deleted/inserted/changed`` below are
     # the diff-specific subset and must keep their distinct mappings.
-    if starts_with(scope, String("markup.heading")):
+    if _has_prefix(scope, "markup.heading"):
         return Optional[Attr](highlight_keyword_attr())
-    if starts_with(scope, String("markup.bold")):
+    if _has_prefix(scope, "markup.bold"):
         return Optional[Attr](highlight_keyword_attr())
-    if starts_with(scope, String("markup.italic")):
+    if _has_prefix(scope, "markup.italic"):
         return Optional[Attr](highlight_ident_attr())
-    if starts_with(scope, String("markup.inline.raw")) \
-            or starts_with(scope, String("markup.raw")):
+    if _has_prefix(scope, "markup.inline.raw") \
+            or _has_prefix(scope, "markup.raw"):
         return Optional[Attr](highlight_string_attr())
-    if starts_with(scope, String("markup.underline")):
+    if _has_prefix(scope, "markup.underline"):
         return Optional[Attr](highlight_ident_attr())
-    if starts_with(scope, String("markup.list")):
+    if _has_prefix(scope, "markup.list"):
         return Optional[Attr](highlight_operator_attr())
-    if starts_with(scope, String("markup.quote")):
+    if _has_prefix(scope, "markup.quote"):
         return Optional[Attr](highlight_comment_attr())
     # Diff scopes: render like ``git diff`` does in a color terminal —
     # deleted lines red, inserted lines green, hunk-range hints cyan,
     # file headers white-on-blue (the keyword color, which is the most
     # eye-catching cell in our palette).
-    if starts_with(scope, String("markup.deleted")):
+    if _has_prefix(scope, "markup.deleted"):
         return Optional[Attr](highlight_string_attr())
-    if starts_with(scope, String("markup.inserted")):
+    if _has_prefix(scope, "markup.inserted"):
         return Optional[Attr](highlight_ident_attr())
-    if starts_with(scope, String("markup.changed")):
+    if _has_prefix(scope, "markup.changed"):
         return Optional[Attr](highlight_decorator_attr())
-    if starts_with(scope, String("meta.diff.range")) \
-            or starts_with(scope, String("meta.toc-list.line-number")):
+    if _has_prefix(scope, "meta.diff.range") \
+            or _has_prefix(scope, "meta.toc-list.line-number"):
         return Optional[Attr](highlight_decorator_attr())
-    if starts_with(scope, String("meta.diff")):
+    if _has_prefix(scope, "meta.diff"):
         return Optional[Attr](highlight_keyword_attr())
-    if starts_with(scope, String("punctuation.definition.string")):
+    if _has_prefix(scope, "punctuation.definition.string"):
         return Optional[Attr](highlight_string_attr())
     # ``punctuation.definition.comment`` is the comment *marker* itself
     # (``//``, ``/*``, ``#``) — it must read as comment, not as the
     # generic punctuation→operator below. Without this the ``//`` of an
     # embedded-JS line comment gets painted operator on top of the
     # comment body (the marker's scope wins on those two cells).
-    if starts_with(scope, String("punctuation.definition.comment")):
+    if _has_prefix(scope, "punctuation.definition.comment"):
         return Optional[Attr](highlight_comment_attr())
-    if starts_with(scope, String("punctuation")):
+    if _has_prefix(scope, "punctuation"):
         return Optional[Attr](highlight_operator_attr())
     # ``variable.*`` covers generic variables, function parameters,
     # ``self`` / ``this`` (variable.language), and assigned-name
@@ -1183,24 +1207,8 @@ def _scope_attr(scope: String) -> Optional[Attr]:
     # default ``YELLOW`` on ``BLUE``, making every identifier look
     # like a syntax error against the green-on-blue idents the rest
     # of the palette already paints (functions, type names, etc.).
-    if starts_with(scope, String("variable")):
+    if _has_prefix(scope, "variable"):
         return Optional[Attr](highlight_ident_attr())
     return Optional[Attr]()
 
 
-def _split_scopes(chain: String) -> List[String]:
-    """Split a space-separated scope chain into individual scopes."""
-    var out = List[String]()
-    var sb = chain.as_bytes()
-    var n = len(sb)
-    var start = 0
-    var i = 0
-    while i < n:
-        if sb[i] == 0x20:  # space
-            if i > start:
-                out.append(String(StringSpan(unsafe_from_utf8=sb[start:i])))
-            start = i + 1
-        i += 1
-    if start < n:
-        out.append(String(StringSpan(unsafe_from_utf8=sb[start:n])))
-    return out^

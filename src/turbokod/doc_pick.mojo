@@ -27,6 +27,9 @@ struct DocPick(Movable):
     # parallel to ``entries`` — built once in ``open`` so ``_refilter``
     # doesn't reconcatenate per entry on every keystroke.
     var _haystacks: List[String]
+    # The docset ``entries`` / ``_haystacks`` were built for, kept across
+    # ``close`` so a reopen can skip rebuilding them (see ``open``).
+    var _cached_display: String
     var matched: List[Int]
     var selected: Int
     # Submission output — index into ``entries`` (not ``matched``), set
@@ -41,27 +44,36 @@ struct DocPick(Movable):
         self.query = TextField()
         self.entries = List[DocEntry]()
         self._haystacks = List[String]()
+        self._cached_display = String("")
         self.matched = List[Int]()
         self.selected = 0
         self.selected_index = -1
 
     def open(
-        mut self, var display: String, var entries: List[DocEntry],
+        mut self, var display: String, entries: List[DocEntry],
     ):
-        """Open the picker with ``entries`` already loaded."""
+        """Open the picker over ``entries`` (a ``DocStore``'s, borrowed).
+
+        A docset holds thousands of entries, so they and their match
+        haystacks are kept after ``close``: reopening the same docset
+        (``display``, same entry count) reuses them instead of copying
+        the list and rebuilding a haystack per entry on every Ctrl+K."""
+        if not self._holds(display, entries):
+            self.entries = entries.copy()
+            # Precompute the ``type_name.name`` haystacks once so
+            # ``_refilter`` is a pure per-entry match with no string
+            # concatenation.
+            self._haystacks = List[String](capacity=len(self.entries))
+            for i in range(len(self.entries)):
+                if len(self.entries[i].type_name.as_bytes()) > 0:
+                    self._haystacks.append(
+                        self.entries[i].type_name + String(".")
+                        + self.entries[i].name
+                    )
+                else:
+                    self._haystacks.append(self.entries[i].name)
+            self._cached_display = display
         self.display = display^
-        self.entries = entries^
-        # Precompute the ``type_name.name`` haystacks once so ``_refilter``
-        # is a pure per-entry match with no string concatenation.
-        self._haystacks = List[String]()
-        for i in range(len(self.entries)):
-            if len(self.entries[i].type_name.as_bytes()) > 0:
-                self._haystacks.append(
-                    self.entries[i].type_name + String(".")
-                    + self.entries[i].name
-                )
-            else:
-                self._haystacks.append(self.entries[i].name)
         self.query = TextField()
         self.active = True
         self.submitted = False
@@ -70,13 +82,26 @@ struct DocPick(Movable):
         self.selected_index = -1
         self._refilter()
 
+    def _holds(self, display: String, entries: List[DocEntry]) -> Bool:
+        """Whether the kept ``entries`` are ``display``'s ``entries``: same
+        docset, count and ends (a reinstall that changed the list changes
+        one of them)."""
+        var n = len(entries)
+        if display != self._cached_display or n != len(self.entries):
+            return False
+        if n == 0:
+            return True
+        return entries[0].path == self.entries[0].path \
+            and entries[n - 1].path == self.entries[n - 1].path \
+            and entries[n - 1].name == self.entries[n - 1].name
+
     def close(mut self):
         self.active = False
         self.submitted = False
         self.display = String("")
         self.query = TextField()
-        self.entries = List[DocEntry]()
-        self._haystacks = List[String]()
+        # ``entries`` / ``_haystacks`` stay for the next ``open`` of the
+        # same docset.
         self.matched = List[Int]()
         self.selected = 0
         self.selected_index = -1

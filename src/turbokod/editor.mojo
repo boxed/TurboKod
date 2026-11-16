@@ -13,7 +13,7 @@ from std.collections.list import List
 
 from .canvas import (
     Canvas, paint_drop_shadow, popup_size_for_text,
-    utf8_byte_to_cell, utf8_codepoint_count,
+    utf8_byte_to_cell, utf8_cell_map, utf8_codepoint_count,
 )
 from .painter import paint_tooltip_popup, Painter
 from .cell import Cell
@@ -78,16 +78,17 @@ from .search_options import (
     SearchOptions, SearcherCache, default_search_options,
 )
 from .string_utils import (
-    byte_slice, cells_between, char_width, codepoint_at, display_columns,
+    byte_of_cell_in, byte_slice, cells_between, char_width, codepoint_at, display_columns,
     is_ascii_ident_byte,
     is_printable_text_key, is_space_cp, is_word_codepoint,
-    leading_indent_bytes, past_empty_match, prev_codepoint_start, split_lines,
+    leading_indent_bytes, past_empty_match, prev_codepoint_start,
+    seg_cell_offset, split_lines,
     split_lines_no_trailing,
     TAB_WIDTH, trailing_ws_start, truncate_to_columns, utf8_byte_of_cell, utf8_cell_of_byte,
     utf8_codepoint_size, utf8_floor, utf8_step_forward, word_char_step, word_range_at,
 )
 from .text_view import (
-    Selection, VisualLine, paint_selection_overlay,
+    Selection, VisualLine, ordered_span, paint_selection_overlay,
     smart_wrap_lines, wrap_lines,
 )
 from .config import WRAP_NONE, WRAP_SMART
@@ -448,48 +449,6 @@ def _detect_line_ending(text: String) -> String:
 # or a mouse click crosses lines whose byte and cell widths disagree.
 # ``utf8_codepoint_size`` lives in ``string_utils`` so soft-wrap and cursor
 # stepping share one source of truth for UTF-8 lead-byte decoding.
-
-
-def _seg_cell_offset(
-    line: String, seg_start: Int, seg_end: Int, target_byte: Int,
-) -> Int:
-    """Content cells (no hanging-indent) from a wrap segment's
-    ``seg_start`` to ``target_byte``, walking codepoints so emoji count
-    two. ``target_byte`` is clamped into ``[seg_start, seg_end]``. The
-    visual-vmove path adds the segment's ``indent_cells`` to turn this
-    into a screen column."""
-    if target_byte <= seg_start:
-        return 0
-    return cells_between(line, seg_start, min(target_byte, seg_end))
-
-
-def _seg_byte_of_cell(
-    line: String, seg_start: Int, seg_end: Int, want_cells: Int,
-) -> Int:
-    """Inverse of ``_seg_cell_offset``: byte offset inside
-    ``[seg_start, seg_end]`` at content-cell column ``want_cells``,
-    clamped to ``seg_end``. A column that lands on the right half of a
-    wide (emoji) glyph snaps to that glyph's start — mirrors
-    ``utf8_byte_of_cell`` but scoped to one wrap segment."""
-    if want_cells <= 0:
-        return seg_start
-    var b = seg_start
-    var cells = 0
-    while b < seg_end and cells < want_cells:
-        var w: Int
-        var step: Int
-        if Int(line.as_bytes()[b]) == 0x09:
-            w = TAB_WIDTH - (cells % TAB_WIDTH)
-            step = 1
-        else:
-            var info = codepoint_at(line, b)
-            w = char_width(info[0])
-            step = info[1]
-        if cells + w > want_cells:
-            break
-        cells += w
-        b += step
-    return b
 
 
 # --- TextBuffer -------------------------------------------------------------
@@ -868,7 +827,25 @@ disabled. Even with short lines, building the per-line visual-row table or
 tokenizing a multi-megabyte buffer is too slow to redo on width/mode change."""
 
 
+def _same_text(a: String, b: String) -> Bool:
+    """``a == b``, settled by a pointer compare when the two share their
+    bytes — an unchanged copy of a line does, strings being copy-on-write.
+    Two heap strings at the same address with the same length *are* the
+    same bytes: a copy holding a reference keeps the buffer from being
+    freed or written in place."""
+    var ab = a.as_bytes()
+    var bb = b.as_bytes()
+    if len(ab) != len(bb):
+        return False
+    if ab.unsafe_ptr() == bb.unsafe_ptr():
+        return True
+    return a == b
+
+
 comptime _TYPING_DEBOUNCE_MS = 800
+comptime _RUN_INSERT = 0
+comptime _RUN_BACKSPACE = 1
+comptime _RUN_DELETE = 2
 """How long a typing run can pause before the next keystroke starts a new
 undo step. 800 ms feels right in practice — fast enough that "type sentence,
 think for a moment, type next sentence" produces two undo steps, slow enough
@@ -986,6 +963,11 @@ struct Caret(ImplicitlyCopyable, Movable):
     var desired_col: Int
     var anchor_row: Int
     var anchor_col: Int
+
+    def span(self) -> Tuple[Int, Int, Int, Int]:
+        """The selection as ``(start_row, start_col, end_row, end_col)``
+        in document order (a single point for an empty caret)."""
+        return ordered_span(self.anchor_row, self.anchor_col, self.row, self.col)
 
 
 def _row_is_expanded(
@@ -1770,8 +1752,13 @@ struct Editor(Copyable, Movable):
     # the current undo step instead of pushing a new one. Any non-typing
     # operation (cursor move, backspace, mouse click, paste, …) clears
     # the flag so the next character starts a fresh group.
+    # ``_typing_kind`` says what the run is (``_RUN_INSERT``,
+    # ``_RUN_BACKSPACE``, ``_RUN_DELETE``): a run of plain Backspace or
+    # Delete presses groups the same way, but never with a run of the
+    # other kind — "type a word, rub it out" stays two undo steps.
     var _typing_active: Bool
     var _typing_last_ms: Int
+    var _typing_kind: Int
     # Multi-click tracking. ``_last_click_ms`` is the timestamp of the
     # most recent left-button press; ``_last_click_row`` /
     # ``_last_click_col`` were the (row, col) it landed on.
@@ -2063,6 +2050,7 @@ struct Editor(Copyable, Movable):
         self._redo_stack = List[EditorSnapshot]()
         self._typing_active = False
         self._typing_last_ms = 0
+        self._typing_kind = _RUN_INSERT
         self._last_click_ms = 0
         self._last_click_row = -1
         self._last_click_col = -1
@@ -2359,21 +2347,33 @@ struct Editor(Copyable, Movable):
         ref lines = self.buffer.lines
         var n = len(lines)
         var old_n = len(self._spell_text)
+        # An unchanged row still shares its bytes with the cached copy
+        # (String copies are copy-on-write), so ``_same_text`` settles
+        # nearly every row on a pointer compare instead of a memcmp of
+        # the whole file per edit.
         var pre = 0
-        while pre < n and pre < old_n and lines[pre] == self._spell_text[pre]:
+        while pre < n and pre < old_n \
+                and _same_text(lines[pre], self._spell_text[pre]):
             pre += 1
         var suf = 0
         while suf < n - pre and suf < old_n - pre \
-                and lines[n - 1 - suf] == self._spell_text[old_n - 1 - suf]:
+                and _same_text(lines[n - 1 - suf], self._spell_text[old_n - 1 - suf]):
             suf += 1
-        if pre < n - suf or n != old_n:
+        if n == old_n:
+            # Same row count (typing, in-place edits): re-check the
+            # changed rows where they are — no per-edit list rebuild.
+            for r in range(pre, n - suf):
+                self._spell_text[r] = lines[r]
+                self._spell_runs[r] = find_misspelled_runs(speller, lines[r])
+                self._spell_directive[r] = has_spell_noinspection_directive(lines[r])
+        else:
             var text = List[String](capacity=n)
             var runs = List[List[Tuple[Int, Int]]](capacity=n)
             var directive = List[Bool](capacity=n)
             for r in range(pre):
-                text.append(self._spell_text[r])
-                # Taken from the list being replaced, not copied: one
-                # allocation per unchanged row, on every edit, otherwise.
+                # Taken from the lists being replaced, not copied.
+                text.append(String())
+                swap(text[len(text) - 1], self._spell_text[r])
                 runs.append(List[Tuple[Int, Int]]())
                 swap(runs[len(runs) - 1], self._spell_runs[r])
                 directive.append(self._spell_directive[r])
@@ -2382,9 +2382,8 @@ struct Editor(Copyable, Movable):
                 runs.append(find_misspelled_runs(speller, lines[r]))
                 directive.append(has_spell_noinspection_directive(lines[r]))
             for r in range(old_n - suf, old_n):
-                text.append(self._spell_text[r])
-                # Taken from the list being replaced, not copied: one
-                # allocation per unchanged row, on every edit, otherwise.
+                text.append(String())
+                swap(text[len(text) - 1], self._spell_text[r])
                 runs.append(List[Tuple[Int, Int]]())
                 swap(runs[len(runs) - 1], self._spell_runs[r])
                 directive.append(self._spell_directive[r])
@@ -4856,15 +4855,7 @@ struct Editor(Copyable, Movable):
 
     def selection(self) -> Tuple[Int, Int, Int, Int]:
         """Normalized ``(start_row, start_col, end_row, end_col)`` (start <= end)."""
-        var sr = self.selections[0].anchor_row
-        var sc = self.selections[0].anchor_col
-        var er = self.selections[0].row
-        var ec = self.selections[0].col
-        if (sr > er) or (sr == er and sc > ec):
-            var tr = sr; var tc = sc
-            sr = er; sc = ec
-            er = tr; ec = tc
-        return (sr, sc, er, ec)
+        return self.selections[0].span()
 
     def _line_op_range(self) -> Tuple[Int, Int]:
         """Inclusive ``(start_row, end_row)`` for line-level commands like
@@ -6585,6 +6576,7 @@ struct Editor(Copyable, Movable):
         vis_lo: Int,
         carets: List[Caret],
         bracket_rows: List[Int],
+        max_cells: Int,
         mut display_rows: List[String],
         mut cell_maps: List[List[Int]],
         mut cell_counts: List[Int],
@@ -6600,7 +6592,14 @@ struct Editor(Copyable, Movable):
         off or the language has no keyword-arg separator — falls back to the
         raw slice + ``utf8_byte_to_cell``, so the caller can index the arrays
         unconditionally. String/comment spans are read from the row's syntax
-        highlights so separators inside literals never trigger a match."""
+        highlights so separators inside literals never trigger a match.
+
+        An uncompressed row is clipped just past ``max_cells`` cells (the
+        content width): with wrapping off a row's segment runs to the end
+        of the line, and slicing and mapping a minified line's whole tail
+        every frame cost per line length, not per screen width. The clip
+        keeps the count past the right edge, so an end-of-line annotation
+        anchored at it stays off screen, as it would be."""
         var sep = -1
         # Concealing redundant ``name=name`` args collapses bytes to a single
         # ``≡`` cell, which throws off the intra-line diff column alignment in
@@ -6622,14 +6621,21 @@ struct Editor(Copyable, Movable):
             var line_n = len(line.as_bytes())
             var start_byte = vrow.byte_start
             var end_byte = vrow.byte_end
+            var compress = sep >= 0 and start_byte < min(end_byte, line_n) \
+                and not _row_is_expanded(buf_row, carets, bracket_rows)
+            if not compress and end_byte - start_byte > max_cells:
+                # A codepoint is at least one cell, so a segment longer
+                # in bytes than the width may run past it: cut it one
+                # cell past the right edge.
+                end_byte = byte_of_cell_in(
+                    line, start_byte, end_byte, max_cells + 1,
+                )
             var seg: String
             if start_byte >= line_n:
                 seg = String("")
             else:
                 seg = byte_slice(line, start_byte, end_byte)
             var seg_n = len(seg.as_bytes())
-            var compress = sep >= 0 and seg_n > 0 \
-                and not _row_is_expanded(buf_row, carets, bracket_rows)
             if compress:
                 # String/comment byte spans (line coordinates) from this
                 # row's highlight bucket.
@@ -6666,9 +6672,10 @@ struct Editor(Copyable, Movable):
                     cell_maps.append(built[1].copy())
                     cell_counts.append(built[2])
                     continue
-            display_rows.append(seg)
-            cell_maps.append(utf8_byte_to_cell(seg))
-            cell_counts.append(utf8_codepoint_count(seg))
+            var cmap = List[Int](capacity=seg_n)
+            cell_counts.append(utf8_cell_map(seg, cmap))
+            cell_maps.append(cmap^)
+            display_rows.append(seg^)
 
     def _indent_cols(self, row: Int) -> Int:
         """Leading-whitespace width of ``row`` in columns, or ``-1`` when
@@ -6906,8 +6913,8 @@ struct Editor(Copyable, Movable):
             # Before-file syntax overlay (fg only, keep the red wash bg).
             if p_idx < len(self.diff_phantom_hl) \
                     and len(self.diff_phantom_hl[p_idx]) > 0:
-                var b2c = utf8_byte_to_cell(text)
-                var cells = utf8_codepoint_count(text)
+                var b2c = List[Int]()
+                var cells = utf8_cell_map(text, b2c)
                 for hi in range(len(self.diff_phantom_hl[p_idx])):
                     var hl = self.diff_phantom_hl[p_idx][hi]
                     var span = _span_cells(b2c, cells, hl.col_start, hl.col_end)
@@ -6915,7 +6922,7 @@ struct Editor(Copyable, Movable):
                         var sx = text_x0 + cc
                         if sx >= content_right:
                             break
-                        var cur = canvas.get(sx, y).attr
+                        var cur = canvas.attr_at(sx, y)
                         var na: Attr
                         if (hl.attr.color_mode & FG_TRUECOLOR) != 0:
                             na = cur.with_fg_rgb(hl.attr.fg_rgb)
@@ -6926,8 +6933,8 @@ struct Editor(Copyable, Movable):
             # actually changed within this (modified) line.
             if p_idx < len(self.diff_phantom_emph) \
                     and len(self.diff_phantom_emph[p_idx]) > 0:
-                var eb2c = utf8_byte_to_cell(text)
-                var ecells = utf8_codepoint_count(text)
+                var eb2c = List[Int]()
+                var ecells = utf8_cell_map(text, eb2c)
                 for er in range(len(self.diff_phantom_emph[p_idx])):
                     var rng = self.diff_phantom_emph[p_idx][er]
                     var span = _span_cells(eb2c, ecells, rng[0], rng[1])
@@ -6935,7 +6942,7 @@ struct Editor(Copyable, Movable):
                         var sx = text_x0 + cc
                         if sx >= content_right:
                             break
-                        var cur = canvas.get(sx, y).attr
+                        var cur = canvas.attr_at(sx, y)
                         canvas.set_attr(sx, y, cur.with_bg(DIFF_REM_EMPH))
             # Selection wash: when this phantom row is inside the primary
             # selection, recolour it like a selected line (same rule as
@@ -7125,7 +7132,7 @@ struct Editor(Copyable, Movable):
                 if bl_gutter > 0 and is_first_seg \
                         and buf_row >= 0 \
                         and buf_row < len(self.blame_lines):
-                    var bl = self.blame_lines[buf_row]
+                    ref bl = self.blame_lines[buf_row]
                     var bx = view.a.x + ln_gutter + dap_gutter + gc_gutter
                     # Blame columns: clip to ``[bx, bx + bl_gutter)``
                     # via a sub-painter so a long author/commit can't
@@ -7234,7 +7241,7 @@ struct Editor(Copyable, Movable):
         var cell_counts = List[Int]()
         self._concealed_display_rows(
             layout, hl_buckets, vis_lo, all_carets_paint, bracket_rows,
-            display_rows, cell_maps, cell_counts,
+            content_w, display_rows, cell_maps, cell_counts,
         )
         # Text pass — paint each row's (possibly concealed) display string.
         # ``layout`` already accounts for ``indent_cells``; clip to the text
@@ -7313,7 +7320,7 @@ struct Editor(Copyable, Movable):
             # the text pass above; we only adjust attributes here.
             ref row_bucket = hl_buckets[buf_row - vis_lo]
             for hb in range(len(row_bucket)):
-                var hl = self.highlights[row_bucket[hb]]
+                ref hl = self.highlights[row_bucket[hb]]
                 var hl_cells = _span_cells(
                     visible_cell_map, visible_cell_count, hl.col_start - start_byte, hl.col_end - start_byte,
                 )
@@ -7330,7 +7337,7 @@ struct Editor(Copyable, Movable):
             # cells to the literal's actual color (truecolor bg).
             ref color_bucket = color_buckets[buf_row - vis_lo]
             for cm in range(len(color_bucket)):
-                var ch2 = self.color_highlights[color_bucket[cm]]
+                ref ch2 = self.color_highlights[color_bucket[cm]]
                 var c2_cells = _span_cells(
                     visible_cell_map, visible_cell_count, ch2.col_start - start_byte, ch2.col_end - start_byte,
                 )
@@ -7348,7 +7355,7 @@ struct Editor(Copyable, Movable):
             # color) onto it.
             ref sp_bucket = spell_buckets[buf_row - vis_lo]
             for sb in range(len(sp_bucket)):
-                var sh = self.spell_highlights[sp_bucket[sb]]
+                ref sh = self.spell_highlights[sp_bucket[sb]]
                 var sh_cells = _span_cells(
                     visible_cell_map, visible_cell_count, sh.col_start - start_byte, sh.col_end - start_byte,
                 )
@@ -7359,7 +7366,7 @@ struct Editor(Copyable, Movable):
                     var sx_s = seg_x0 + cell_off
                     if sx_s >= content_right:
                         break
-                    var cell_attr = canvas.get(sx_s, sy_hl).attr \
+                    var cell_attr = canvas.attr_at(sx_s, sy_hl) \
                         .add_style(sh.attr.style)
                     if curly:
                         cell_attr = cell_attr.with_underline_color(
@@ -7378,7 +7385,7 @@ struct Editor(Copyable, Movable):
             # via the squiggle color.
             ref diag_bucket = diag_buckets[buf_row - vis_lo]
             for db in range(len(diag_bucket)):
-                var diag = self.diagnostics[diag_bucket[db]]
+                ref diag = self.diagnostics[diag_bucket[db]]
                 var d_lo = _diag_byte_start_for_row(diag, buf_row)
                 var d_hi = _diag_byte_end_for_row(
                     diag, buf_row, len(line.as_bytes()),
@@ -7398,7 +7405,7 @@ struct Editor(Copyable, Movable):
                     var sx_d = seg_x0 + cell_off
                     if sx_d >= content_right:
                         break
-                    var existing = canvas.get(sx_d, sy_hl).attr
+                    var existing = canvas.attr_at(sx_d, sy_hl)
                     var new_attr = existing.add_style(add_style) \
                         .with_underline_color(Int16(underline_color))
                     if not diag_extended:
@@ -7412,7 +7419,7 @@ struct Editor(Copyable, Movable):
             # STYLE_UNDERLINE so the syntax color underneath is kept;
             # Cmd+click on the span opens the target (host-side).
             for dl in range(len(self.document_links)):
-                var dk = self.document_links[dl]
+                ref dk = self.document_links[dl]
                 if buf_row < dk.start_line or buf_row > dk.end_line:
                     continue
                 var dk_nb = len(line.as_bytes())
@@ -7427,7 +7434,7 @@ struct Editor(Copyable, Movable):
                     var sx_dk = seg_x0 + cell_off
                     if sx_dk >= content_right:
                         break
-                    var dk_attr = canvas.get(sx_dk, sy_hl).attr.add_style(
+                    var dk_attr = canvas.attr_at(sx_dk, sy_hl).add_style(
                         STYLE_UNDERLINE,
                     )
                     painter.set_attr(canvas, sx_dk, sy_hl, dk_attr)
@@ -7478,7 +7485,7 @@ struct Editor(Copyable, Movable):
             # agree); sits before the selection pass so the selection still
             # dominates visually.
             for occ in range(len(self.occurrence_ranges)):
-                var oc = self.occurrence_ranges[occ]
+                ref oc = self.occurrence_ranges[occ]
                 if buf_row < oc.start_line or buf_row > oc.end_line:
                     continue
                 var line_nb2 = len(line.as_bytes())
@@ -7701,8 +7708,8 @@ struct Editor(Copyable, Movable):
                     )
                     # Re-apply this row's syntax highlights so the sticky
                     # header is coloured exactly like the real line.
-                    var cmap = utf8_byte_to_cell(line)
-                    var ncells = utf8_codepoint_count(line)
+                    var cmap = List[Int]()
+                    var ncells = utf8_cell_map(line, cmap)
                     for h in range(len(self.highlights)):
                         ref hl = self.highlights[h]
                         if hl.row != brow:
@@ -7760,8 +7767,8 @@ struct Editor(Copyable, Movable):
                         and brow < len(self.diff_emph_by_row) \
                         and len(self.diff_emph_by_row[brow]) > 0:
                     var line = self.buffer.line(brow)
-                    var lb2c = utf8_byte_to_cell(line)
-                    var lcells = utf8_codepoint_count(line)
+                    var lb2c = List[Int]()
+                    var lcells = utf8_cell_map(line, lb2c)
                     for er in range(len(self.diff_emph_by_row[brow])):
                         var rng = self.diff_emph_by_row[brow][er]
                         var span = _span_cells(lb2c, lcells, rng[0], rng[1])
@@ -7769,7 +7776,7 @@ struct Editor(Copyable, Movable):
                             var sx = text_x0 + cc
                             if sx >= wash_r:
                                 break
-                            var cur = canvas.get(sx, wy).attr
+                            var cur = canvas.attr_at(sx, wy)
                             canvas.set_attr(sx, wy, cur.with_bg(DIFF_ADD_EMPH))
         # Inline-diff removed (phantom) rows: red wash + before-file syntax,
         # no line number. Painted after the wash/dim so it owns those rows.
@@ -7833,8 +7840,8 @@ struct Editor(Copyable, Movable):
                         vis = String("")
                     else:
                         vis = byte_slice(line, seg_start, layout[sr].byte_end)
-                    var cm = utf8_byte_to_cell(vis)
-                    var cc = utf8_codepoint_count(vis)
+                    var cm = List[Int]()
+                    var cc = utf8_cell_map(vis, cm)
                     var vbc = len(vis.as_bytes())
                     var anchor_byte = self.completion_anchor_col - seg_start
                     var cell_off: Int
@@ -8270,14 +8277,11 @@ struct Editor(Copyable, Movable):
         # the user can always re-add carets after rewinding via Cmd+Down.
         self.clear_extra_carets()
         var before = self.primary_caret()
-        var sr = self.selections[0].anchor_row
-        var sc = self.selections[0].anchor_col
-        var er = self.selections[0].row
-        var ec = self.selections[0].col
-        if (sr > er) or (sr == er and sc > ec):
-            var tr = sr; var tc = sc
-            sr = er; sc = ec
-            er = tr; ec = tc
+        var sel = self.selection()
+        var sr = sel[0]
+        var sc = sel[1]
+        var er = sel[2]
+        var ec = sel[3]
         var nxt = self._smart_compute_expansion(sr, sc, er, ec)
         if nxt[0] == sr and nxt[1] == sc and nxt[2] == er and nxt[3] == ec:
             return
@@ -8810,6 +8814,7 @@ struct Editor(Copyable, Movable):
         # re-arms the flag at the end of its work.
         var was_typing = self._typing_active
         var prev_typing_ms = self._typing_last_ms
+        var prev_typing_kind = self._typing_kind
         self._typing_active = False
         # As-you-type completion: set to True by the typing / backspace
         # branches when they stamp a fresh ``pending_completion_request``.
@@ -9026,8 +9031,19 @@ struct Editor(Copyable, Movable):
                 # guard becomes "no-op when nothing to delete AND no
                 # extras" — collapsing extras is itself state worth
                 # rolling back.
-                if self.has_extra_carets() or self.has_selection() \
-                        or self.selections[0].col > 0 or self.selections[0].row > 0:
+                # A run of plain one-character backspaces is one undo
+                # step, like a run of typed characters: a snapshot per
+                # press copied the line list every time.
+                var plain = not self.has_extra_carets() \
+                    and not self.has_selection()
+                var now_bs = monotonic_ms()
+                var extend_run = plain and was_typing \
+                    and prev_typing_kind == _RUN_BACKSPACE \
+                    and now_bs - prev_typing_ms <= _TYPING_DEBOUNCE_MS
+                if not extend_run and (
+                    self.has_extra_carets() or self.has_selection()
+                    or self.selections[0].col > 0 or self.selections[0].row > 0
+                ):
                     self._push_undo()
                 self.clear_extra_carets()
                 if self.has_selection():
@@ -9037,6 +9053,10 @@ struct Editor(Copyable, Movable):
                         self.selections[0].row, self.selections[0].col,
                     )
                     self.move_to(p[0], p[1], False)
+                if plain:
+                    self._typing_active = True
+                    self._typing_last_ms = now_bs
+                    self._typing_kind = _RUN_BACKSPACE
                 self.dirty = True
                 self._mark_hl_dirty(pre_dirty_row)
             # As-you-type completion: when the popup is visible and
@@ -9064,14 +9084,26 @@ struct Editor(Copyable, Movable):
                 var at_end = self.selections[0].col \
                         >= self.buffer.line_length(self.selections[0].row) \
                     and self.selections[0].row + 1 >= self.buffer.line_count()
-                if self.has_extra_carets() or self.has_selection() \
-                        or not at_end:
+                var plain = not self.has_extra_carets() \
+                    and not self.has_selection()
+                var now_del = monotonic_ms()
+                var extend_run = plain and was_typing \
+                    and prev_typing_kind == _RUN_DELETE \
+                    and now_del - prev_typing_ms <= _TYPING_DEBOUNCE_MS
+                if not extend_run and (
+                    self.has_extra_carets() or self.has_selection()
+                    or not at_end
+                ):
                     self._push_undo()
                 self.clear_extra_carets()
                 if self.has_selection():
                     self._delete_selection()
                 else:
                     self.buffer.delete_at(self.selections[0].row, self.selections[0].col)
+                if plain:
+                    self._typing_active = True
+                    self._typing_last_ms = now_del
+                    self._typing_kind = _RUN_DELETE
                 self.dirty = True
                 self._mark_hl_dirty(pre_dirty_row)
         elif k == KEY_ENTER:
@@ -9238,6 +9270,7 @@ struct Editor(Copyable, Movable):
                 self._multi_edit_inline(chr(Int(k)), 0)
                 self._typing_active = True
                 self._typing_last_ms = now
+                self._typing_kind = _RUN_INSERT
                 self.dirty = True
                 self._mark_hl_dirty(pre_dirty_row_multi, post_dirty_row_multi)
             else:
@@ -9253,6 +9286,7 @@ struct Editor(Copyable, Movable):
                 # continuation), or anything that already cleared
                 # ``was_typing`` (cursor move, edit, paste, mouse, …).
                 var extend_group = was_typing and not self.has_selection() \
+                    and prev_typing_kind == _RUN_INSERT \
                     and now - prev_typing_ms <= _TYPING_DEBOUNCE_MS
                 if not extend_group:
                     self._push_undo()
@@ -9274,6 +9308,7 @@ struct Editor(Copyable, Movable):
                 )
                 self._typing_active = True
                 self._typing_last_ms = now
+                self._typing_kind = _RUN_INSERT
                 self.dirty = True
                 self._mark_hl_dirty(pre_dirty_row)
             # As-you-type completion. Stamp a fresh request whenever
@@ -9422,7 +9457,8 @@ struct Editor(Copyable, Movable):
         """Remove and return the selected text. Pushes an undo step iff a
         selection actually existed (so calling cut with no selection is a
         true no-op). No-op (returns empty string) when the editor is
-        read-only."""
+        read-only. The selection half of ``cut_to_clipboard``, which tests
+        can drive without the system clipboard."""
         if self.read_only:
             return String("")
         var text = self.selection_text()
@@ -9527,15 +9563,7 @@ struct Editor(Copyable, Movable):
             if self.read_only:
                 clipboard_copy(self.selection_text())
                 return
-            var pre = self.selections[0].row
-            if self.selections[0].anchor_row < pre:
-                pre = self.selections[0].anchor_row
-            var text = self.selection_text()
-            clipboard_copy(text)
-            self._push_undo()
-            self._delete_selection()
-            self.dirty = True
-            self._mark_hl_dirty(pre)
+            clipboard_copy(self.cut_selection())
             return
         if self.has_extra_carets():
             self._line_copy_text = self._caret_lines_text()
@@ -10720,24 +10748,11 @@ struct Editor(Copyable, Movable):
         var w = content_w
         if w < 1:
             w = 1
-        var one = List[String]()
-        one.append(self.buffer.line(row))
-        var segs: List[VisualLine]
         if self.wrap_mode == WRAP_NONE:
-            segs = List[VisualLine]()
-            segs.append(VisualLine(0, 0, self.buffer.line_length(row), 0, 0, 0))
-        else:
-            segs = self._wrap(one, w)
-        # ``one`` is a single-element list, so every segment carries
-        # ``line_idx == 0``; rebase to the real buffer row.
-        var out = List[VisualLine]()
-        for i in range(len(segs)):
-            var s = segs[i]
-            out.append(VisualLine(
-                row, s.byte_start, s.byte_end,
-                s.cell_start, s.cell_count, s.indent_cells,
-            ))
-        return out^
+            var segs = List[VisualLine]()
+            segs.append(VisualLine(row, 0, self.buffer.line_length(row), 0, 0, 0))
+            return segs^
+        return self._wrap(self.buffer.lines, w, row, end_line=row + 1)
 
     def _seg_index_for_col(
         self, segs: List[VisualLine], col: Int,
@@ -10786,7 +10801,7 @@ struct Editor(Copyable, Movable):
         if self._vmove_streak:
             vcol = self.selections[0].desired_col
         else:
-            vcol = segs[ci].indent_cells + _seg_cell_offset(
+            vcol = segs[ci].indent_cells + seg_cell_offset(
                 line, segs[ci].byte_start, segs[ci].byte_end, col,
             )
         # Resolve the target visual row: the adjacent segment of this line
@@ -10824,7 +10839,7 @@ struct Editor(Copyable, Movable):
         var want = vcol - tseg.indent_cells
         if want < 0:
             want = 0
-        var tbyte = _seg_byte_of_cell(
+        var tbyte = byte_of_cell_in(
             tline, tseg.byte_start, tseg.byte_end, want,
         )
         # On a non-final segment, ``byte_end`` is the wrap boundary, which
@@ -10957,20 +10972,9 @@ struct Editor(Copyable, Movable):
         return (row, c)
 
     def _scroll_to_cursor(mut self, view: Rect):
-        var h = view.height()
-        var w = self._content_width(view)
-        # Any cursor-driven scroll snaps off the smooth-scroll sub-row +
-        # fraction: a goto / search / edit / arrow-key that moves the
-        # viewport lands on a whole visual row, not a stale offset. The
-        # cursor math below assumes the viewport top is ``scroll_y``'s
-        # first segment (sub == 0), so this keeps it valid.
-        self.scroll_sub = 0
-        self.scroll_frac = 0.0
-        if self.selections[0].row < self.scroll_y:
-            self.scroll_y = self.selections[0].row
-        elif self.selections[0].row >= self.scroll_y + h:
-            self.scroll_y = self.selections[0].row - h + 1
-        self._fit_cursor_in_row(h, w)
+        """The plain edge scroll: just bring the cursor into view —
+        ``reveal_cursor`` with no context rows."""
+        self.reveal_cursor(view, margin_below=0, margin_above=0)
 
     def _fit_cursor_in_row(mut self, h: Int, w: Int):
         """Finish a vertical scroll: keep the cursor on screen along the
@@ -11006,14 +11010,12 @@ struct Editor(Copyable, Movable):
             w = 1
         if not self._is_wrapping():
             return 1
-        var single = List[String]()
-        single.append(self.buffer.line(i))
-        var n = len(self._wrap(single, w))
+        var n = len(self._wrap(self.buffer.lines, w, i, end_line=i + 1))
         return 1 if n < 1 else n
 
     def _wrap(
         self, lines: List[String], w: Int, start_line: Int = 0,
-        max_rows: Int = -1,
+        max_rows: Int = -1, end_line: Int = -1,
     ) -> List[VisualLine]:
         """Wrap ``lines`` at width ``w`` with the active (non-``WRAP_NONE``)
         mode: smart wrap for languages that support it, soft word-aware
@@ -11030,10 +11032,11 @@ struct Editor(Copyable, Movable):
                 start_line=start_line, max_rows=max_rows,
                 comma_threshold=self.smart_wrap_comma_threshold,
                 html_attr=self._smart_html_mode(),
+                end_line=end_line,
             )
         return wrap_lines(
             lines, w, indent_size=tab, word_aware=True,
-            start_line=start_line, max_rows=max_rows,
+            start_line=start_line, max_rows=max_rows, end_line=end_line,
         )
 
     def max_scroll_y(self, view: Rect) -> Int:
@@ -11296,7 +11299,11 @@ struct Editor(Copyable, Movable):
         """
         var h = view.height()
         var w = self._content_width(view)
-        # Snap off any smooth-scroll sub-row + fraction (see _scroll_to_cursor).
+        # Any cursor-driven scroll snaps off the smooth-scroll sub-row +
+        # fraction: a goto / search / edit / arrow-key that moves the
+        # viewport lands on a whole visual row, not a stale offset. The
+        # cursor math below assumes the viewport top is ``scroll_y``'s
+        # first segment (sub == 0), so this keeps it valid.
         self.scroll_sub = 0
         self.scroll_frac = 0.0
         var max_row = self.buffer.line_count() - 1
@@ -11305,9 +11312,7 @@ struct Editor(Copyable, Movable):
             # visual rows. Walk back from the cursor row accumulating each
             # line's wrapped row count until ~38.2% of the viewport sits
             # above the cursor's visual row, then anchor the top there.
-            var above = ((h - 1) * 382) // 1000
-            if above < 0:
-                above = 0
+            var above = _golden_rows_above(h)
             var acc = 0
             var top = self.selections[0].row
             while top > 0:
@@ -11325,10 +11330,7 @@ struct Editor(Copyable, Movable):
             self.scroll_x = 0
             return
         if golden:
-            # 1 - 1/φ ≈ 0.382 of the usable rows sit above the line.
-            var above = ((h - 1) * 382) // 1000
-            if above < 0:
-                above = 0
+            var above = _golden_rows_above(h)
             self.scroll_y = self.selections[0].row - above
             var max_scroll = max_row - h + 1
             if max_scroll < 0:
@@ -11351,6 +11353,12 @@ struct Editor(Copyable, Movable):
             if self.scroll_y < 0:
                 self.scroll_y = 0
         self._fit_cursor_in_row(h, w)
+
+
+def _golden_rows_above(h: Int) -> Int:
+    """Rows of a ``h``-row viewport above a golden-ratio landing:
+    1 - 1/φ ≈ 0.382 of the usable rows."""
+    return max(((h - 1) * 382) // 1000, 0)
 
 
 def _sort_carets(mut carets: List[Caret], by_range: Bool):
@@ -11391,22 +11399,16 @@ def _caret_anchor_span(c: Caret) -> Int:
 
 
 def _caret_range_start(c: Caret) -> Tuple[Int, Int]:
-    """Lower end of the caret's selection range — min of cursor and
-    anchor positions. For an empty caret (cursor == anchor) returns
-    that single shared position."""
-    if c.row < c.anchor_row \
-            or (c.row == c.anchor_row and c.col < c.anchor_col):
-        return (c.row, c.col)
-    return (c.anchor_row, c.anchor_col)
+    """Lower end of the caret's selection range (the caret itself when
+    empty)."""
+    var sp = c.span()
+    return (sp[0], sp[1])
 
 
 def _caret_range_end(c: Caret) -> Tuple[Int, Int]:
-    """Upper end of the caret's selection range — max of cursor and
-    anchor positions."""
-    if c.row > c.anchor_row \
-            or (c.row == c.anchor_row and c.col > c.anchor_col):
-        return (c.row, c.col)
-    return (c.anchor_row, c.anchor_col)
+    """Upper end of the caret's selection range."""
+    var sp = c.span()
+    return (sp[2], sp[3])
 
 
 def _caret_range_less(a: Caret, b: Caret) -> Bool:
@@ -11705,9 +11707,13 @@ def _seg_cell_of_byte(
 ) -> Int:
     """Cells from the left edge of ``line``'s visible segment ``[seg_start,
     seg_end)`` to byte ``byte`` — clamped to that edge when ``byte`` sits
-    before it (a span wrapping in from the row above)."""
-    var line_n = len(line.as_bytes())
-    var visible = String("")
-    if seg_start < line_n:
-        visible = byte_slice(line, seg_start, min(seg_end, line_n))
-    return utf8_cell_of_byte(visible, max(0, byte - seg_start))
+    before it (a span wrapping in from the row above). A byte past the
+    segment's text counts one virtual cell each, as ``utf8_cell_of_byte``
+    does past a line's end."""
+    var off = byte - seg_start
+    if off <= 0:
+        return 0
+    var visible = max(min(seg_end, len(line.as_bytes())) - seg_start, 0)
+    if off <= visible:
+        return cells_between(line, seg_start, byte)
+    return cells_between(line, seg_start, seg_start + visible) + off - visible

@@ -18,6 +18,7 @@ field access).  Objects keep their insertion order so canonical
 encodings stay stable in tests.
 """
 
+from std.collections.dict import Dict
 from std.collections.list import List
 from std.collections.optional import Optional
 
@@ -346,6 +347,17 @@ def encode_json(value: JsonValue) -> String:
     return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=len(buf))))
 
 
+def append_json(mut buf: List[UInt8], value: JsonValue):
+    """``encode_json`` appended to ``buf`` — for splicing an encoded value
+    into a larger document without building (copying) a tree around it."""
+    _encode(value, buf)
+
+
+def append_raw_json(mut buf: List[UInt8], text: String):
+    """Append ``text`` — already-valid JSON syntax — to ``buf`` verbatim."""
+    _append_bytes(buf, text)
+
+
 def _encode(value: JsonValue, mut buf: List[UInt8]):
     if value.is_null():
         _append_bytes(buf, String("null"))
@@ -474,10 +486,17 @@ def _parse_value(text: String, mut pos: Int) raises -> JsonValue:
     raise Error("unexpected byte starting JSON value")
 
 
+# Object size below which the parser finds a repeated key by scanning.
+comptime _SCAN_KEYS = 16
+
+
 def _parse_object(text: String, mut pos: Int) raises -> JsonValue:
     var bytes = text.as_bytes()
     var p = pos + 1
     var obj = json_object()
+    # Built only once an object outgrows ``_SCAN_KEYS``: most objects are
+    # small, and an empty ``Dict`` still allocates.
+    var slots = Optional[Dict[String, Int]]()
     p = _skip_ws(text, p)
     if p < len(bytes) and bytes[p] == 0x7D:
         pos = p + 1
@@ -494,7 +513,34 @@ def _parse_object(text: String, mut pos: Int) raises -> JsonValue:
         p += 1
         p = _skip_ws(text, p)
         var v = _parse_value(text, p)
-        obj.put_owned(key^, v^)
+        # A repeated key replaces the earlier value in place (last wins,
+        # as ``put`` does). Small objects scan their keys; past
+        # ``_SCAN_KEYS`` members a key → slot index takes over, so a large
+        # URI-keyed map (``WorkspaceEdit.changes``, a diagnostics report's
+        # ``relatedDocuments``) parses in linear time, not O(k²).
+        var n = len(obj.obj_v)
+        if n < _SCAN_KEYS:
+            var at = -1
+            for i in range(n):
+                if obj.obj_v[i].key == key:
+                    at = i
+                    break
+            if at >= 0:
+                obj.obj_v[at].value = v^
+            else:
+                obj.obj_v.append(JsonMember(key^, v^))
+        else:
+            if not slots:
+                var index = Dict[String, Int]()
+                for i in range(n):
+                    index[obj.obj_v[i].key] = i
+                slots = Optional(index^)
+            var found = slots.value().find(key)
+            if found:
+                obj.obj_v[found.value()].value = v^
+            else:
+                slots.value()[key] = n
+                obj.obj_v.append(JsonMember(key^, v^))
         p = _skip_ws(text, p)
         if p >= len(bytes):
             raise Error("unterminated object")

@@ -21,7 +21,7 @@ from std.ffi import external_call
 
 from .json import (
     encode_json, json_array, json_bool, json_int, json_null, json_object,
-    json_str, JsonValue, parse_json, take_json,
+    json_str, JsonValue, parse_json, take_json, append_json, append_raw_json,
 )
 from .case_fold import fold_byte
 from .string_utils import utf8_prefix
@@ -913,22 +913,13 @@ struct LspClient(Copyable, Movable):
         everything on the same footing."""
         var id = String(self._next_id)
         self._next_id += 1
-        var envelope = json_object()
-        envelope.put(String("jsonrpc"), json_str(String("2.0")))
-        envelope.put(String("id"), json_str(id))
-        envelope.put(String("method"), json_str(method))
-        envelope.put(String("params"), params)
-        self.process.write_message(encode_json(envelope))
+        self.process.write_message(_envelope(json_str(id), method, params))
         return id
 
     def send_notification(
         mut self, method: String, params: JsonValue,
     ) raises:
-        var envelope = json_object()
-        envelope.put(String("jsonrpc"), json_str(String("2.0")))
-        envelope.put(String("method"), json_str(method))
-        envelope.put(String("params"), params)
-        self.process.write_message(encode_json(envelope))
+        self.process.write_message(_envelope(json_null(), method, params))
 
     def send_response(
         mut self, id: JsonValue, result: JsonValue,
@@ -971,6 +962,27 @@ struct LspClient(Copyable, Movable):
 
     def terminate(mut self):
         self.process.terminate()
+
+
+def _envelope(id: JsonValue, method: String, params: JsonValue) -> String:
+    """The JSON-RPC request (``id`` non-null) or notification envelope
+    around ``params``: ``{"jsonrpc","id"?,"method","params"}``. Spliced as
+    text — putting ``params`` into an envelope object deep-copied the
+    tree (a didChange's whole document included) on every send."""
+    var buf = List[UInt8]()
+    append_raw_json(buf, String('{"jsonrpc":"2.0",'))
+    if not id.is_null():
+        append_raw_json(buf, String('"id":'))
+        append_json(buf, id)
+        append_raw_json(buf, String(","))
+    append_raw_json(buf, String('"method":'))
+    append_json(buf, json_str(method))
+    append_raw_json(buf, String(',"params":'))
+    append_json(buf, params)
+    append_raw_json(buf, String("}"))
+    return String(StringSpan(
+        unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=len(buf)),
+    ))
 
 
 def classify_message(var v: JsonValue) -> LspIncoming:

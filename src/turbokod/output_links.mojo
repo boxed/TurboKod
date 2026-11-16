@@ -17,6 +17,8 @@ from std.collections.list import List
 
 from .string_utils import char_width, codepoint_at, is_ascii_digit
 from .geometry import Point
+from .canvas import Canvas
+from .colors import Attr, LIGHT_BLUE, PANE_BG, STYLE_UNDERLINE
 
 
 @fieldwise_init
@@ -439,3 +441,35 @@ def link_at(links: List[OutputLink], pos: Point) -> Int:
                 and pos.x < links[i].x_end:
             return i
     return -1
+
+
+def paint_row_links(
+    mut canvas: Canvas, text: String, y: Int, x0: Int, x_max: Int,
+    origin: Point, mut links: List[OutputLink],
+    seg_lo: Int = 0, seg_hi: Int = 1 << 62,
+):
+    """Underline the link spans of one painted row and record them for
+    click hit-testing. ``text`` is the row's line, painted from cell
+    ``x0`` of row ``y`` and clipped at ``x_max``; a wrapped segment shows
+    only the line's cells ``[seg_lo, seg_hi)``. Links are recorded at
+    ``origin`` plus their canvas cell — the coordinates the pane maps its
+    clicks into. Cell offsets from the scanners are codepoint columns
+    (link text is ASCII). Shared by every pane that shows output."""
+    var link_attr = Attr(LIGHT_BLUE, PANE_BG, STYLE_UNDERLINE)
+    var hits = extract_all_links(text)
+    for h in range(len(hits)):
+        ref hit = hits[h]
+        var lo = max(hit.cell_start, seg_lo)
+        var hi = min(hit.cell_end, seg_hi)
+        if hi <= lo:
+            continue
+        var a = x0 + (lo - seg_lo)
+        var b = min(x0 + (hi - seg_lo), x_max)
+        if b <= a:
+            continue
+        for x in range(a, b):
+            canvas.set_attr(x, y, link_attr)
+        links.append(OutputLink(
+            origin.y + y, origin.x + a, origin.x + b,
+            hit.path, hit.line, hit.is_url,
+        ))

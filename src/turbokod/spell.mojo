@@ -146,9 +146,20 @@ struct SpellBase(Movable):
         self.version = 0
 
     def add(mut self, var w: String):
-        """Append the already-normalized ``w``."""
+        """Add the already-normalized ``w`` unless it's already there: the
+        wordlists overlap (~57k of ~349k words are repeats), and every
+        duplicate lengthens the bucket each lookup walks."""
         var b = _bucket(w)
+        for i in range(len(self.buckets[b])):
+            if self.buckets[b][i] == w:
+                return
         self.buckets[b].append(w^)
+
+    def word_count(self) -> Int:
+        var n = 0
+        for i in range(len(self.buckets)):
+            n += len(self.buckets[i])
+        return n
 
     def touch(mut self, loaded: Bool):
         self.loaded = loaded

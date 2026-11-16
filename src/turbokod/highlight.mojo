@@ -2150,26 +2150,21 @@ def _find_language_marker(line: String) -> Optional[_LangMarker]:
     syntax would tie this helper to the host file's extension."""
     var b = line.as_bytes()
     var n = len(b)
-    var needle = String("language=")
-    var nb = needle.as_bytes()
-    var nlen = len(nb)
-    var i = 0
-    while i + nlen <= n:
-        var matched = True
-        for k in range(nlen):
-            if b[i + k] != nb[k]:
-                matched = False
-                break
-        if matched:
-            var j = i + nlen
-            while j < n and _is_lang_char(b[j]):
-                j += 1
-            if j > i + nlen:
-                var raw = String(StringSpan(unsafe_from_utf8=b[i + nlen:j]))
-                return Optional[_LangMarker](_LangMarker(
-                    fold_ascii(raw), j,
-                ))
-        i += 1
+    var nlen = 9  # len("language=")
+    # The stdlib substring search, not a byte-at-a-time compare loop:
+    # every edit scans every line of the buffer for a marker
+    # (``_overlays_may_apply``), and almost none has one.
+    var i = line.find("language=")
+    while i >= 0:
+        var j = i + nlen
+        while j < n and _is_lang_char(b[j]):
+            j += 1
+        if j > i + nlen:
+            var raw = String(StringSpan(unsafe_from_utf8=b[i + nlen:j]))
+            return Optional[_LangMarker](_LangMarker(
+                fold_ascii(raw), j,
+            ))
+        i = line.find("language=", i + 1)
     return Optional[_LangMarker]()
 
 

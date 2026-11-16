@@ -979,6 +979,23 @@ def test_lsp_pull_diagnostics_multi_inflight() raises:
     assert_equal(mgr._pull_diag_paths[2], String("/a.py"))
 
 
+def test_lsp_closing_a_buffer_rearms_its_initial_pull() raises:
+    """A reopen sends a fresh didOpen, maybe of text changed on disk while
+    closed, so it gets a fresh initial pull rather than showing the old
+    report until its first edit."""
+    var mgr = LspManager()
+    var caps = parse_json(String("{\"diagnosticProvider\":{}}"))
+    mgr._capabilities = Optional[JsonValue](caps^)
+    mgr.state = _STATE_READY
+    mgr.notify_opened(String("/a.py"), String("x = 1\n"))
+    assert_true(mgr.request_pull_diagnostics(String("/a.py")))
+    assert_true(mgr.request_pull_diagnostics(String("/b.py")))
+    assert_true(mgr.has_pulled(String("/a.py")))
+    mgr.notify_closed(String("/a.py"))
+    assert_true(not mgr.has_pulled(String("/a.py")))
+    assert_true(mgr.has_pulled(String("/b.py")))
+
+
 def test_lsp_server_supports_will_save() raises:
     """The willSave / willSaveWaitUntil capability readers consult the
     object form of textDocumentSync; the int form (or absent) is off."""
