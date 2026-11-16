@@ -250,6 +250,101 @@ struct DapTestEvaluation(ImplicitlyCopyable, Movable):
 # breakpoints in subprocess code are pushed through, but stepping etc. is
 # parent-only for now.
 
+comptime _ANS_NONE = 0
+comptime _ANS_STACK = 1
+comptime _ANS_SCOPES = 2
+comptime _ANS_VARIABLES = 3
+comptime _ANS_COMPLETIONS = 4
+comptime _ANS_KEYS_EVAL = 5
+comptime _ANS_KEYS_VARS = 6
+comptime _ANS_EVALUATE = 7
+comptime _ANS_TEST_EVALUATE = 8
+
+
+@fieldwise_init
+struct _InspectAnswer(Movable):
+    """Which in-flight inspect request a response answers (``_ANS_*``),
+    plus what an evaluate was asked for."""
+    var kind: Int
+    var expr: String
+    var context: String
+
+
+struct _InspectRequests(Copyable, Movable):
+    """The inspect-side requests in flight on one DAP connection. The
+    parent session and a forked subprocess each have one: their seq
+    counters are independent (both start at 1), so a shared table would
+    mis-route. Answers from either land in the same ``_pending_*`` /
+    ``_evaluations_*`` buffers on ``DapManager`` — the UI is
+    single-session and doesn't care which session answered. Zero = nothing
+    in flight."""
+    var stack_trace: Int
+    var scopes: Int
+    var variables: Int
+    # Console completions and key completion (``foo['``): own slots, not
+    # the watch / variables-pane ones, so they can't steal their answers.
+    var completions: Int
+    var keys_eval: Int
+    var keys_vars: Int
+    # Watch / REPL ``evaluate``s. Lists, not one slot, so every watch can
+    # be in flight at once, demuxed on ``request_seq``. ``eval_contexts``
+    # is the request-time hint (``"watch"`` / ``"repl"`` / ``"hover"``), so
+    # the host can route REPL console lines apart from watch folds.
+    var eval_seqs: List[Int]
+    var eval_exprs: List[String]
+    var eval_contexts: List[String]
+    # The condition-error dialog's test evaluates (see ``_test_eval_*``).
+    var test_seqs: List[Int]
+    var test_exprs: List[String]
+
+    def __init__(out self):
+        self.stack_trace = 0
+        self.scopes = 0
+        self.variables = 0
+        self.completions = 0
+        self.keys_eval = 0
+        self.keys_vars = 0
+        self.eval_seqs = List[Int]()
+        self.eval_exprs = List[String]()
+        self.eval_contexts = List[String]()
+        self.test_seqs = List[Int]()
+        self.test_exprs = List[String]()
+
+    def claim(mut self, rseq: Int) -> _InspectAnswer:
+        """Which request ``rseq`` answers, no longer in flight once
+        claimed; kind ``_ANS_NONE`` when it's none of these."""
+        if rseq == self.stack_trace:
+            self.stack_trace = 0
+            return _InspectAnswer(_ANS_STACK, String(""), String(""))
+        if rseq == self.scopes:
+            self.scopes = 0
+            return _InspectAnswer(_ANS_SCOPES, String(""), String(""))
+        if rseq == self.variables:
+            self.variables = 0
+            return _InspectAnswer(_ANS_VARIABLES, String(""), String(""))
+        if rseq == self.completions:
+            self.completions = 0
+            return _InspectAnswer(_ANS_COMPLETIONS, String(""), String(""))
+        if rseq == self.keys_eval:
+            self.keys_eval = 0
+            return _InspectAnswer(_ANS_KEYS_EVAL, String(""), String(""))
+        if rseq == self.keys_vars:
+            self.keys_vars = 0
+            return _InspectAnswer(_ANS_KEYS_VARS, String(""), String(""))
+        for k in range(len(self.eval_seqs)):
+            if self.eval_seqs[k] == rseq:
+                _ = self.eval_seqs.pop(k)
+                var expr = self.eval_exprs.pop(k)
+                var ctx = self.eval_contexts.pop(k)
+                return _InspectAnswer(_ANS_EVALUATE, expr^, ctx^)
+        for k in range(len(self.test_seqs)):
+            if self.test_seqs[k] == rseq:
+                _ = self.test_seqs.pop(k)
+                var expr = self.test_exprs.pop(k)
+                return _InspectAnswer(_ANS_TEST_EVALUATE, expr^, String(""))
+        return _InspectAnswer(_ANS_NONE, String(""), String(""))
+
+
 struct SubprocessAttach(Copyable, Movable):
     var client: DapClient
     var sub_process_id: Int
@@ -258,32 +353,11 @@ struct SubprocessAttach(Copyable, Movable):
     var inflight_initialize: Int
     var inflight_attach: Int
     var inflight_config_done: Int
-    # Inspect-side inflight slots. The subprocess has its own pydevd and
-    # therefore its own seq counter, so we can't share the parent's
-    # ``_inflight_*`` fields — a parent seq=5 would collide with a
-    # subprocess seq=5. Responses arriving on the subprocess socket are
-    # demuxed against these and the parsed bodies are written into the
-    # same ``_pending_*`` buffers on ``DapManager`` (the UI is
-    # single-session and doesn't care which session answered).
-    var inflight_stack_trace: Int
-    var inflight_scopes: Int
-    var inflight_variables: Int
-    # Watch / REPL evaluates routed through the subprocess client when
-    # the inspect frame was issued by subprocess pydevd. Frame ids are
-    # session-scoped — sending a subprocess-issued frameId through the
-    # parent socket fails with ``Wrong ID sent from the client``. List
-    # rather than single-slot because watches fire all at once.
-    var inflight_evaluate_seqs: List[Int]
-    var inflight_evaluate_exprs: List[String]
-    # Per-request context hint, parallel to the seq/expr lists. Lets the
-    # response path tag each result so the host can split REPL console
-    # output from watch-row folds.
-    var inflight_evaluate_contexts: List[String]
-    var inflight_test_eval_seqs: List[Int]
-    var inflight_test_eval_exprs: List[String]
-    var inflight_completions: Int
-    var inflight_keys_eval: Int
-    var inflight_keys_vars: Int
+    # Inspect requests in flight on the subprocess socket. Frame ids are
+    # session-scoped — a subprocess-issued frameId sent through the parent
+    # socket fails with ``Wrong ID sent from the client`` — so they go out
+    # here, demuxed against this session's own seq counter.
+    var rq: _InspectRequests
     var got_initialized_event: Bool
     var pending_attach_args: JsonValue
     # Mirror of the parent's breakpoints at attach time. Sent to the
@@ -307,17 +381,7 @@ struct SubprocessAttach(Copyable, Movable):
         self.inflight_initialize = 0
         self.inflight_attach = 0
         self.inflight_config_done = 0
-        self.inflight_stack_trace = 0
-        self.inflight_scopes = 0
-        self.inflight_variables = 0
-        self.inflight_evaluate_seqs = List[Int]()
-        self.inflight_evaluate_exprs = List[String]()
-        self.inflight_evaluate_contexts = List[String]()
-        self.inflight_test_eval_seqs = List[Int]()
-        self.inflight_completions = 0
-        self.inflight_keys_eval = 0
-        self.inflight_keys_vars = 0
-        self.inflight_test_eval_exprs = List[String]()
+        self.rq = _InspectRequests()
         self.got_initialized_event = False
         self.pending_attach_args = JsonValue()
         self.bp_paths = List[String]()
@@ -358,9 +422,9 @@ struct DapManager(Copyable, Movable):
     var _inflight_launch: Int
     var _inflight_config_done: Int
     var _inflight_threads: Int
-    var _inflight_stack_trace: Int
-    var _inflight_scopes: Int
-    var _inflight_variables: Int
+    # Inspect requests in flight on the parent session (the subprocess
+    # has its own, ``_subprocess.rq``).
+    var _rq: _InspectRequests
 
     # Capabilities returned by the adapter (parked from initialize response).
     var _supports_configuration_done: Bool
@@ -368,12 +432,11 @@ struct DapManager(Copyable, Movable):
     # ``supportsCompletionsRequest`` from the capabilities — gates the
     # console's completion requests.
     var _supports_completions: Bool
-    # Console completions: one request in flight at a time (``_inflight_
-    # completions`` / the subprocess twin), the newest answer parked in
+    # Console completions: one request in flight at a time (``rq.
+    # completions``), the newest answer parked in
     # ``_completions`` until the host drains it. ``_completions_text`` /
     # ``_completions_column`` echo what the answer is for, so the host can
     # drop one that the user has since typed past.
-    var _inflight_completions: Int
     var _completions_req_text: String
     var _completions_req_column: Int
     var _completions: List[DapCompletion]
@@ -381,12 +444,8 @@ struct DapManager(Copyable, Movable):
     var _completions_text: String
     var _completions_column: Int
     # Console key completion (``foo['``): evaluate the container, then fetch
-    # its children — a mapping's children are named by key repr. Own seq
-    # slots (``_inflight_keys_*``), not the watch / variables-pane ones, so
-    # it can't steal their answers. ``_keys`` holds the drained result for
-    # ``_keys_expr``.
-    var _inflight_keys_eval: Int
-    var _inflight_keys_vars: Int
+    # its children — a mapping's children are named by key repr.
+    # ``_keys`` holds the drained result for ``_keys_expr``.
     var _keys_req_expr: String
     var _keys: List[String]
     var _keys_ready: Bool
@@ -453,17 +512,6 @@ struct DapManager(Copyable, Movable):
     # validating against capabilities (a wrong id yields a soft error
     # in the response body — non-fatal).
     var _exception_filters: List[String]
-    # In-flight ``evaluate`` requests. Single-slot tracking (like other
-    # inflight ids) would force watches to evaluate serially; using
-    # parallel lists lets us fire all watches at once and demux on
-    # ``request_seq``.
-    var _inflight_evaluate_seqs: List[Int]
-    var _inflight_evaluate_exprs: List[String]
-    # Per-request context hint (``"watch"`` / ``"repl"`` / ``"hover"``),
-    # parallel to the seq/expr lists, so the response path can tag each
-    # result and the host can route REPL console lines apart from watch
-    # folds.
-    var _inflight_evaluate_contexts: List[String]
     # Buffer of completed evaluate responses; drained by the host once
     # per frame via ``take_evaluations``. ``_evaluations_context`` and
     # ``_evaluations_is_error`` are parallel to the expr/value/type lists.
@@ -481,8 +529,6 @@ struct DapManager(Copyable, Movable):
     # seq + expression list, then drained results), with an extra
     # ``error`` flag so the dialog can distinguish "evaluation raised"
     # from "evaluation returned the string ``<error: …>``".
-    var _inflight_test_eval_seqs: List[Int]
-    var _inflight_test_eval_exprs: List[String]
     var _test_eval_expr: List[String]
     var _test_eval_value: List[String]
     var _test_eval_error: List[Bool]
@@ -589,9 +635,7 @@ struct DapManager(Copyable, Movable):
         self._inflight_launch = 0
         self._inflight_config_done = 0
         self._inflight_threads = 0
-        self._inflight_stack_trace = 0
-        self._inflight_scopes = 0
-        self._inflight_variables = 0
+        self._rq = _InspectRequests()
         self._supports_configuration_done = True
         self._supports_terminate_request = False
         self._got_initialized_event = False
@@ -607,25 +651,18 @@ struct DapManager(Copyable, Movable):
         self._inflight_set_breakpoints_lines = List[List[Int]]()
         self._bp_errors = List[DapBreakpointError]()
         self._exception_filters = _default_exception_filters()
-        self._inflight_evaluate_seqs = List[Int]()
-        self._inflight_evaluate_exprs = List[String]()
-        self._inflight_evaluate_contexts = List[String]()
         self._evaluations_expr = List[String]()
         self._evaluations_value = List[String]()
         self._evaluations_type = List[String]()
         self._evaluations_context = List[String]()
         self._evaluations_is_error = List[Bool]()
-        self._inflight_test_eval_seqs = List[Int]()
         self._supports_completions = False
-        self._inflight_completions = 0
         self._completions_req_text = String("")
         self._completions_req_column = 0
         self._completions = List[DapCompletion]()
         self._completions_ready = False
         self._completions_text = String("")
         self._completions_column = 0
-        self._inflight_keys_eval = 0
-        self._inflight_keys_vars = 0
         self._keys_req_expr = String("")
         self._keys = List[String]()
         self._keys_ready = False
@@ -633,7 +670,6 @@ struct DapManager(Copyable, Movable):
         self._keys_stage = 0
         self._keys_via_sub = False
         self._keys_frame_id = 0
-        self._inflight_test_eval_exprs = List[String]()
         self._test_eval_expr = List[String]()
         self._test_eval_value = List[String]()
         self._test_eval_error = List[Bool]()
@@ -1354,28 +1390,14 @@ struct DapManager(Copyable, Movable):
         if frame_id != 0:
             args.put(String("frameId"), json_int(frame_id))
         args.put(String("context"), json_str(context^))
-        var via_subprocess = self._inspect_via_subprocess()
-        var seq: Int
-        try:
-            if via_subprocess:
-                seq = self._subprocess.client.send_request(
-                    String("evaluate"), args,
-                )
-            else:
-                seq = self.client.send_request(String("evaluate"), args)
-        except:
+        var via_sub = self._inspect_via_subprocess()
+        var seq = self._send_inspect(via_sub, String("evaluate"), args)
+        if seq == 0:
             return False
-        # Demux table is per-channel: parent and subprocess have
-        # independent seq counters that can collide (both start at 1),
-        # so a shared list would mis-route.
-        if via_subprocess:
-            self._subprocess.inflight_evaluate_seqs.append(seq)
-            self._subprocess.inflight_evaluate_exprs.append(expression^)
-            self._subprocess.inflight_evaluate_contexts.append(ctx^)
-        else:
-            self._inflight_evaluate_seqs.append(seq)
-            self._inflight_evaluate_exprs.append(expression^)
-            self._inflight_evaluate_contexts.append(ctx^)
+        ref rq = self._requests(via_sub)
+        rq.eval_seqs.append(seq)
+        rq.eval_exprs.append(expression^)
+        rq.eval_contexts.append(ctx^)
         return True
 
     # --- completions (debug console) --------------------------------------
@@ -1399,19 +1421,11 @@ struct DapManager(Copyable, Movable):
         args.put(String("column"), json_int(column + 1))
         if frame_id != 0:
             args.put(String("frameId"), json_int(frame_id))
-        var via_subprocess = self._inspect_via_subprocess()
-        try:
-            if via_subprocess:
-                self._subprocess.inflight_completions = \
-                    self._subprocess.client.send_request(
-                        String("completions"), args,
-                    )
-            else:
-                self._inflight_completions = self.client.send_request(
-                    String("completions"), args,
-                )
-        except:
+        var via_sub = self._inspect_via_subprocess()
+        var seq = self._send_inspect(via_sub, String("completions"), args)
+        if seq == 0:
             return False
+        self._requests(via_sub).completions = seq
         self._completions_req_text = text^
         self._completions_req_column = column
         return True
@@ -1454,18 +1468,12 @@ struct DapManager(Copyable, Movable):
         if self._keys_frame_id != 0:
             args.put(String("frameId"), json_int(self._keys_frame_id))
         args.put(String("context"), json_str(String("watch")))
-        try:
-            if self._keys_via_sub:
-                self._subprocess.inflight_keys_eval = \
-                    self._subprocess.client.send_request(
-                        String("evaluate"), args,
-                    )
-            else:
-                self._inflight_keys_eval = self.client.send_request(
-                    String("evaluate"), args,
-                )
-        except:
+        var seq = self._send_inspect(
+            self._keys_via_sub, String("evaluate"), args,
+        )
+        if seq == 0:
             return False
+        self._requests(self._keys_via_sub).keys_eval = seq
         return True
 
     def has_container_keys(self) -> Bool:
@@ -1491,18 +1499,13 @@ struct DapManager(Copyable, Movable):
             return
         var args = json_object()
         args.put(String("variablesReference"), json_int(var_ref))
-        try:
-            if self._keys_via_sub:
-                self._subprocess.inflight_keys_vars = \
-                    self._subprocess.client.send_request(
-                        String("variables"), args,
-                    )
-            else:
-                self._inflight_keys_vars = self.client.send_request(
-                    String("variables"), args,
-                )
-        except:
+        var seq = self._send_inspect(
+            self._keys_via_sub, String("variables"), args,
+        )
+        if seq == 0:
             self._finish_keys(List[String]())
+            return
+        self._requests(self._keys_via_sub).keys_vars = seq
 
     def _on_keys_vars(mut self, msg: DapIncoming):
         var keys = List[String]()
@@ -1663,22 +1666,13 @@ struct DapManager(Copyable, Movable):
         # so ``_last_inspect_in_subprocess`` records which session owns
         # them — ``request_scopes`` / ``request_variables`` follow the
         # same routing on the next click.
-        var via_subprocess = self._stop_in_subprocess \
+        var via_sub = self._stop_in_subprocess \
             and self._subprocess.state == _STATE_RUNNING
-        try:
-            if via_subprocess:
-                self._subprocess.inflight_stack_trace = \
-                    self._subprocess.client.send_request(
-                        String("stackTrace"), args,
-                    )
-                self._last_inspect_in_subprocess = True
-            else:
-                self._inflight_stack_trace = self.client.send_request(
-                    String("stackTrace"), args,
-                )
-                self._last_inspect_in_subprocess = False
-        except:
+        var seq = self._send_inspect(via_sub, String("stackTrace"), args)
+        if seq == 0:
             return False
+        self._requests(via_sub).stack_trace = seq
+        self._last_inspect_in_subprocess = via_sub
         return True
 
     def request_scopes(mut self, frame_id: Int) -> Bool:
@@ -1686,19 +1680,11 @@ struct DapManager(Copyable, Movable):
             return False
         var args = json_object()
         args.put(String("frameId"), json_int(frame_id))
-        var via_subprocess = self._inspect_via_subprocess()
-        try:
-            if via_subprocess:
-                self._subprocess.inflight_scopes = \
-                    self._subprocess.client.send_request(
-                        String("scopes"), args,
-                    )
-            else:
-                self._inflight_scopes = self.client.send_request(
-                    String("scopes"), args,
-                )
-        except:
+        var via_sub = self._inspect_via_subprocess()
+        var seq = self._send_inspect(via_sub, String("scopes"), args)
+        if seq == 0:
             return False
+        self._requests(via_sub).scopes = seq
         return True
 
     def request_variables(mut self, variables_reference: Int) -> Bool:
@@ -1706,19 +1692,11 @@ struct DapManager(Copyable, Movable):
             return False
         var args = json_object()
         args.put(String("variablesReference"), json_int(variables_reference))
-        var via_subprocess = self._inspect_via_subprocess()
-        try:
-            if via_subprocess:
-                self._subprocess.inflight_variables = \
-                    self._subprocess.client.send_request(
-                        String("variables"), args,
-                    )
-            else:
-                self._inflight_variables = self.client.send_request(
-                    String("variables"), args,
-                )
-        except:
+        var via_sub = self._inspect_via_subprocess()
+        var seq = self._send_inspect(via_sub, String("variables"), args)
+        if seq == 0:
             return False
+        self._requests(via_sub).variables = seq
         return True
 
     # --- pending-event accessors -----------------------------------------
@@ -2008,57 +1986,7 @@ struct DapManager(Copyable, Movable):
                     return
                 self._subprocess.state = _STATE_RUNNING
                 return
-            # Inspect-side responses — write into the same ``_pending_*``
-            # buffers the parent path uses so the UI is session-agnostic.
-            if rseq == self._subprocess.inflight_stack_trace:
-                self._pending_stack = _parse_stack_trace(msg.body)
-                self._pending_stack_ready = True
-                self._subprocess.inflight_stack_trace = 0
-                return
-            if rseq == self._subprocess.inflight_scopes:
-                self._pending_scopes = _parse_scopes(msg.body)
-                self._pending_scopes_ready = True
-                self._subprocess.inflight_scopes = 0
-                return
-            if rseq == self._subprocess.inflight_variables:
-                self._pending_vars = _parse_variables(msg.body)
-                self._pending_vars_ready = True
-                self._subprocess.inflight_variables = 0
-                return
-            if rseq == self._subprocess.inflight_completions:
-                self._subprocess.inflight_completions = 0
-                self._stash_completions(msg)
-                return
-            if rseq == self._subprocess.inflight_keys_eval:
-                self._subprocess.inflight_keys_eval = 0
-                self._on_keys_eval(msg)
-                return
-            if rseq == self._subprocess.inflight_keys_vars:
-                self._subprocess.inflight_keys_vars = 0
-                self._on_keys_vars(msg)
-                return
-            # Watch / REPL evaluate response routed via subprocess.
-            # Output destination is the same as the parent path
-            # (``_evaluations_*``) so the host's watch fold treats it
-            # uniformly.
-            var eidx = -1
-            for k in range(len(self._subprocess.inflight_evaluate_seqs)):
-                if self._subprocess.inflight_evaluate_seqs[k] == rseq:
-                    eidx = k
-                    break
-            if eidx >= 0:
-                self._on_evaluate_response_subprocess(eidx, msg)
-                return
-            # Test-evaluate response routed via subprocess (condition
-            # dialog editing a BP that hit in subprocess code).
-            var teidx = -1
-            for k in range(len(self._subprocess.inflight_test_eval_seqs)):
-                if self._subprocess.inflight_test_eval_seqs[k] == rseq:
-                    teidx = k
-                    break
-            if teidx >= 0:
-                self._on_test_evaluate_response_subprocess(teidx, msg)
-                return
+            _ = self._on_inspect_answer(self._subprocess.rq.claim(rseq), msg)
             return
         # Reverse requests: answer not-supported so the subprocess
         # debugpy isn't blocked.
@@ -2199,53 +2127,7 @@ struct DapManager(Copyable, Movable):
             self._pending_threads_ready = True
             self._inflight_threads = 0
             return
-        if rseq == self._inflight_stack_trace:
-            self._pending_stack = _parse_stack_trace(msg.body)
-            self._pending_stack_ready = True
-            self._inflight_stack_trace = 0
-            return
-        if rseq == self._inflight_scopes:
-            self._pending_scopes = _parse_scopes(msg.body)
-            self._pending_scopes_ready = True
-            self._inflight_scopes = 0
-            return
-        if rseq == self._inflight_variables:
-            self._pending_vars = _parse_variables(msg.body)
-            self._pending_vars_ready = True
-            self._inflight_variables = 0
-            return
-        if rseq == self._inflight_completions:
-            self._inflight_completions = 0
-            self._stash_completions(msg)
-            return
-        if rseq == self._inflight_keys_eval:
-            self._inflight_keys_eval = 0
-            self._on_keys_eval(msg)
-            return
-        if rseq == self._inflight_keys_vars:
-            self._inflight_keys_vars = 0
-            self._on_keys_vars(msg)
-            return
-        # Evaluate response — match against the in-flight evaluate
-        # seq list to recover which expression this answered.
-        var eidx = -1
-        for k in range(len(self._inflight_evaluate_seqs)):
-            if self._inflight_evaluate_seqs[k] == rseq:
-                eidx = k
-                break
-        if eidx >= 0:
-            self._on_evaluate_response(eidx, msg)
-            return
-        # Test-evaluate response (condition-error dialog). Same shape
-        # as the watch evaluate but routes into a dedicated buffer so
-        # the watch fold doesn't swallow it.
-        var teidx = -1
-        for k in range(len(self._inflight_test_eval_seqs)):
-            if self._inflight_test_eval_seqs[k] == rseq:
-                teidx = k
-                break
-        if teidx >= 0:
-            self._on_test_evaluate_response(teidx, msg)
+        if self._on_inspect_answer(self._rq.claim(rseq), msg):
             return
         # ``setBreakpoints`` response: per-BP verified flag + optional
         # message. We only surface the negative case — a verified=false
@@ -2415,26 +2297,58 @@ struct DapManager(Copyable, Movable):
         close the dialog."""
         return len(self._inflight_set_breakpoints_seqs) > 0
 
-    def _on_evaluate_response(mut self, idx: Int, msg: DapIncoming):
-        """Pop ``idx`` from the parent in-flight evaluate lists and
-        stash the result. ``msg.body`` shape:
-        ``{result, type?, variablesReference}``; we surface ``result``
-        as the value text and ``type`` as the type when present."""
-        _ = self._inflight_evaluate_seqs.pop(idx)
-        var expr = self._inflight_evaluate_exprs.pop(idx)
-        var ctx = self._inflight_evaluate_contexts.pop(idx)
-        self._stash_evaluate_result(expr^, ctx^, msg)
+    def _on_inspect_answer(
+        mut self, answer: _InspectAnswer, msg: DapIncoming,
+    ) -> Bool:
+        """Park an inspect response from either session (``answer`` says
+        which request it was) where the host reads it. False when it
+        answered none of them."""
+        var k = answer.kind
+        if k == _ANS_STACK:
+            self._pending_stack = _parse_stack_trace(msg.body)
+            self._pending_stack_ready = True
+        elif k == _ANS_SCOPES:
+            self._pending_scopes = _parse_scopes(msg.body)
+            self._pending_scopes_ready = True
+        elif k == _ANS_VARIABLES:
+            self._pending_vars = _parse_variables(msg.body)
+            self._pending_vars_ready = True
+        elif k == _ANS_COMPLETIONS:
+            self._stash_completions(msg)
+        elif k == _ANS_KEYS_EVAL:
+            self._on_keys_eval(msg)
+        elif k == _ANS_KEYS_VARS:
+            self._on_keys_vars(msg)
+        elif k == _ANS_EVALUATE:
+            self._stash_evaluate_result(
+                answer.expr.copy(), answer.context.copy(), msg,
+            )
+        elif k == _ANS_TEST_EVALUATE:
+            # Its own buffer, so the watch fold doesn't swallow it.
+            self._stash_test_evaluate_result(answer.expr.copy(), msg)
+        else:
+            return False
+        return True
 
-    def _on_evaluate_response_subprocess(
-        mut self, idx: Int, msg: DapIncoming,
-    ):
-        """Subprocess-channel variant: same body, different inflight
-        list. Result lands in the same ``_evaluations_*`` buffers so
-        the host's watch fold doesn't care which session answered."""
-        _ = self._subprocess.inflight_evaluate_seqs.pop(idx)
-        var expr = self._subprocess.inflight_evaluate_exprs.pop(idx)
-        var ctx = self._subprocess.inflight_evaluate_contexts.pop(idx)
-        self._stash_evaluate_result(expr^, ctx^, msg)
+    def _requests(
+        mut self, via_sub: Bool,
+    ) -> ref[self._rq, self._subprocess.rq] _InspectRequests:
+        """The in-flight table of the session an inspect request goes to."""
+        if via_sub:
+            return self._subprocess.rq
+        return self._rq
+
+    def _send_inspect(
+        mut self, via_sub: Bool, command: String, args: JsonValue,
+    ) -> Int:
+        """Send an inspect request on the session that owns its frame ids
+        (``via_sub``: the forked subprocess). Its seq, or 0 if it failed."""
+        try:
+            if via_sub:
+                return self._subprocess.client.send_request(command, args)
+            return self.client.send_request(command, args)
+        except:
+            return 0
 
     def _stash_evaluate_result(
         mut self, var expr: String, var context: String, msg: DapIncoming,
@@ -2550,23 +2464,13 @@ struct DapManager(Copyable, Movable):
         if frame_id != 0:
             args.put(String("frameId"), json_int(frame_id))
         args.put(String("context"), json_str(String("watch")))
-        var via_subprocess = self._inspect_via_subprocess()
-        var seq: Int
-        try:
-            if via_subprocess:
-                seq = self._subprocess.client.send_request(
-                    String("evaluate"), args,
-                )
-            else:
-                seq = self.client.send_request(String("evaluate"), args)
-        except:
+        var via_sub = self._inspect_via_subprocess()
+        var seq = self._send_inspect(via_sub, String("evaluate"), args)
+        if seq == 0:
             return False
-        if via_subprocess:
-            self._subprocess.inflight_test_eval_seqs.append(seq)
-            self._subprocess.inflight_test_eval_exprs.append(expression^)
-        else:
-            self._inflight_test_eval_seqs.append(seq)
-            self._inflight_test_eval_exprs.append(expression^)
+        ref rq = self._requests(via_sub)
+        rq.test_seqs.append(seq)
+        rq.test_exprs.append(expression^)
         return True
 
     def has_test_evaluations(self) -> Bool:
@@ -2586,22 +2490,6 @@ struct DapManager(Copyable, Movable):
         return Optional[DapTestEvaluation](
             DapTestEvaluation(expr^, val^, err),
         )
-
-    def _on_test_evaluate_response(mut self, idx: Int, msg: DapIncoming):
-        """Pop the parent in-flight slot at ``idx`` and store the value
-        (or the error message) in the test-eval result lists."""
-        _ = self._inflight_test_eval_seqs.pop(idx)
-        var expr = self._inflight_test_eval_exprs.pop(idx)
-        self._stash_test_evaluate_result(expr^, msg)
-
-    def _on_test_evaluate_response_subprocess(
-        mut self, idx: Int, msg: DapIncoming,
-    ):
-        """Subprocess-channel variant — same body, different inflight
-        list. Result lands in the same ``_test_eval_*`` buffers."""
-        _ = self._subprocess.inflight_test_eval_seqs.pop(idx)
-        var expr = self._subprocess.inflight_test_eval_exprs.pop(idx)
-        self._stash_test_evaluate_result(expr^, msg)
 
     def _stash_test_evaluate_result(
         mut self, var expr: String, msg: DapIncoming,
