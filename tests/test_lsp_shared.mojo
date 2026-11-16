@@ -15,7 +15,12 @@ from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from turbokod.file_io import delete_path, read_file, stat_file, write_file
 from turbokod.json import JsonValue, parse_json
 from turbokod.lsp_dispatch import LspManager
-from turbokod.lsp_shared import free_pool, new_pool, pool_at
+from turbokod.capped_text import CappedText
+from turbokod.json import json_int
+from turbokod.lsp import LSP_NOTIFICATION, LspIncoming
+from turbokod.lsp_shared import (
+    _INBOX_MAX, _Session, free_pool, new_pool, pool_at, workspace_folder,
+)
 from turbokod.posix import getcwd_path, which
 from turbokod.string_utils import split_lines_no_trailing
 
@@ -440,6 +445,67 @@ def test_without_a_pool_every_manager_keeps_a_private_server() raises:
     a.shutdown()
     b.shutdown()
     free_pool(f.pool)
+
+
+def _note(n: Int) -> LspIncoming:
+    """A notification tagged ``n`` (in ``params``)."""
+    return LspIncoming(
+        LSP_NOTIFICATION, Optional[JsonValue](), Optional[String]("x"),
+        Optional[JsonValue](json_int(n)), Optional[JsonValue](),
+        Optional[JsonValue](),
+    )
+
+
+def _tag(msg: Optional[LspIncoming]) -> Int:
+    return msg.value().params.value().as_int()
+
+
+def test_an_inbox_is_fifo_and_drops_its_oldest_when_full() raises:
+    """A session's inbox hands messages out in arrival order with their
+    replay flags, and an undrained one (an occluded window) keeps only the
+    newest ``_INBOX_MAX`` — across the compactions its read head makes."""
+    var s = _Session(1, String("file:///p"))
+    s.push(_note(0), False)
+    s.push(_note(1), True)
+    var replay = False
+    assert_equal(_tag(s.take(replay)), 0)
+    assert_false(replay)
+    s.push(_note(2), False)
+    assert_equal(_tag(s.take(replay)), 1)
+    assert_true(replay)
+    assert_equal(_tag(s.take(replay)), 2)
+    assert_false(Bool(s.take(replay)))
+    var total = _INBOX_MAX + 300
+    for i in range(total):
+        s.push(_note(i), False)
+    assert_equal(s.pending(), _INBOX_MAX)
+    for i in range(total - _INBOX_MAX, total):
+        assert_equal(_tag(s.take(replay)), i)
+    assert_equal(s.pending(), 0)
+
+
+def test_capped_text_keeps_the_head_or_the_tail() raises:
+    """The one capped-capture rule: a head-keeping capture stops at the cap
+    (cutting the last piece on a codepoint boundary, never overshooting);
+    a tail-keeping one keeps the newest bytes."""
+    var head = CappedText(8, keep_tail=False)
+    head.append_line(String("abc"))
+    head.append_line(String("dé—f"))
+    assert_equal(head.text, String("abc\ndé"))
+    assert_true(head.full())
+    head.append(String("more"))
+    assert_equal(head.text, String("abc\ndé"))
+    var tail = CappedText(5, keep_tail=True)
+    tail.append(String("abc"))
+    tail.append(String("defg"))
+    assert_equal(tail.text, String("cdefg"))
+    assert_false(tail.full())
+
+
+def test_a_workspace_folder_is_named_after_its_decoded_root() raises:
+    var f = workspace_folder(String("file:///home/me/my%20proj"))
+    assert_equal(f.object_get("uri").value().as_str(), "file:///home/me/my%20proj")
+    assert_equal(f.object_get("name").value().as_str(), "my proj")
 
 
 def main() raises:

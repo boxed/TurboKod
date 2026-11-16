@@ -47,8 +47,9 @@ from .json import (
 )
 from .lsp import (
     LSP_NOTIFICATION, LSP_REQUEST, LSP_RESPONSE, LspClient, LspIncoming,
-    json_rpc_id,
+    file_uri_to_path, json_rpc_id,
 )
+from .capped_text import CappedText
 
 
 # Bound on the messages one pump moves; the manager's own tick loop has
@@ -153,22 +154,88 @@ def _replayed_request(method: String) -> Bool:
         and method.endswith(String("/refresh"))
 
 
+@fieldwise_init
+struct _Queued(Copyable, Movable):
+    """One inbox entry. ``replay`` marks a message another session answers
+    (the recipient applies it but must not reply). ``msg`` is emptied as
+    it is taken."""
+    var msg: Optional[LspIncoming]
+    var replay: Bool
+
+
+struct _Session(Copyable, Movable):
+    """A session on the channel: its root and its inbox, a FIFO read from
+    ``head`` so taking a message is O(1) (``pop(0)`` shifted the whole
+    inbox per message)."""
+    var id: Int
+    var root: String
+    var inbox: List[_Queued]
+    var head: Int
+
+    def __init__(out self, id: Int, root: String):
+        self.id = id
+        self.root = root
+        self.inbox = List[_Queued]()
+        self.head = 0
+
+    def pending(self) -> Int:
+        return len(self.inbox) - self.head
+
+    def push(mut self, var msg: LspIncoming, replay: Bool):
+        if self.pending() >= _INBOX_MAX:
+            # Full (nobody is draining it): the oldest goes.
+            _ = self.inbox[self.head].msg.take()
+            self.head += 1
+        if self.head >= 64 and self.head * 2 >= len(self.inbox):
+            # Compact: move the live tail down, once per inbox's worth of
+            # dropped messages.
+            var live = List[_Queued](capacity=self.pending() + 1)
+            for k in range(self.head, len(self.inbox)):
+                live.append(
+                    _Queued(self.inbox[k].msg.take(), self.inbox[k].replay),
+                )
+            self.inbox = live^
+            self.head = 0
+        self.inbox.append(_Queued(Optional[LspIncoming](msg^), replay))
+
+    def take(mut self, mut replay: Bool) -> Optional[LspIncoming]:
+        replay = False
+        if self.head >= len(self.inbox):
+            return Optional[LspIncoming]()
+        replay = self.inbox[self.head].replay
+        var msg = self.inbox[self.head].msg.take()
+        self.head += 1
+        if self.head == len(self.inbox):
+            self.inbox.clear()
+            self.head = 0
+        return Optional[LspIncoming](msg^)
+
+
+@fieldwise_init
+struct _OpenUri(Copyable, Movable):
+    """A document some session has open: how many have, and which one
+    diagnostics for it go to."""
+    var uri: String
+    var count: Int
+    var owner: Int
+
+
+@fieldwise_init
+struct _Outstanding(Copyable, Movable):
+    """A request in flight and the session that issued it."""
+    var id: String
+    var owner: Int
+
+
 struct LspChannel(Movable):
     """A server process plus the routing that lets several sessions share
     it. See the module docstring."""
 
     var client: LspClient
     var key: String
-    # Live sessions, parallel lists. ``_inbox_replay[i][k]`` marks a message
-    # another session answers (the recipient applies it but must not reply).
-    var _session_ids: List[Int]
-    var _session_roots: List[String]
-    var _inbox: List[List[LspIncoming]]
-    var _inbox_replay: List[List[Bool]]
+    var _sessions: List[_Session]
     var _next_session: Int
-    # Outstanding requests: id → issuing session.
-    var _req_ids: List[String]
-    var _req_owner: List[Int]
+    var _requests: List[_Outstanding]
     # The ``initialize`` exchange, done once per process.
     var _init_id: String
     var init_result: Optional[LspIncoming]
@@ -177,10 +244,8 @@ struct LspChannel(Movable):
     var _registrations: List[LspIncoming]
     # Document URI → open count, so two sessions opening the same file
     # (a file shown in two project windows) don't double-``didOpen`` it.
-    var _open_uris: List[String]
-    var _open_counts: List[Int]
-    var _open_owner: List[Int]
-    var stderr_log: String
+    var _open: List[_OpenUri]
+    var stderr_log: CappedText
     # Latched once the child is reaped, so every session notices the
     # death, not just whichever one's tick happened to reap it.
     var dead: Bool
@@ -191,21 +256,17 @@ struct LspChannel(Movable):
     def __init__(out self, var client: LspClient, key: String):
         self.client = client^
         self.key = key
-        self._session_ids = List[Int]()
-        self._session_roots = List[String]()
-        self._inbox = List[List[LspIncoming]]()
-        self._inbox_replay = List[List[Bool]]()
+        self._sessions = List[_Session]()
         self._next_session = 1
-        self._req_ids = List[String]()
-        self._req_owner = List[Int]()
+        self._requests = List[_Outstanding]()
         self._init_id = String("")
         self.init_result = Optional[LspIncoming]()
         self._initialized_sent = False
         self._registrations = List[LspIncoming]()
-        self._open_uris = List[String]()
-        self._open_counts = List[Int]()
-        self._open_owner = List[Int]()
-        self.stderr_log = String("")
+        self._open = List[_OpenUri]()
+        # Keeps the start of the log: the reason a server failed to come
+        # up is in its first lines.
+        self.stderr_log = CappedText(_STDERR_CAP, keep_tail=False)
         self.dead = False
         self._last_active = 0
 
@@ -214,10 +275,7 @@ struct LspChannel(Movable):
     def join(mut self, root_uri: String) -> Int:
         var sid = self._next_session
         self._next_session += 1
-        self._session_ids.append(sid)
-        self._session_roots.append(root_uri)
-        self._inbox.append(List[LspIncoming]())
-        self._inbox_replay.append(List[Bool]())
+        self._sessions.append(_Session(sid, root_uri))
         return sid
 
     def leave(mut self, sid: Int) -> Int:
@@ -225,56 +283,58 @@ struct LspChannel(Movable):
         many sessions remain."""
         var i = self._index_of(sid)
         if i >= 0:
-            _ = self._session_ids.pop(i)
-            _ = self._session_roots.pop(i)
-            _ = self._inbox.pop(i)
-            _ = self._inbox_replay.pop(i)
+            _ = self._sessions.pop(i)
         var k = 0
-        while k < len(self._req_ids):
-            if self._req_owner[k] == sid:
-                _ = self._req_ids.pop(k)
-                _ = self._req_owner.pop(k)
+        while k < len(self._requests):
+            if self._requests[k].owner == sid:
+                _ = self._requests.pop(k)
             else:
                 k += 1
-        return len(self._session_ids)
+        return len(self._sessions)
 
     def session_count(self) -> Int:
-        return len(self._session_ids)
+        return len(self._sessions)
 
     def roots(self) -> List[String]:
-        return self._session_roots.copy()
+        var out = List[String](capacity=len(self._sessions))
+        for i in range(len(self._sessions)):
+            out.append(self._sessions[i].root)
+        return out^
 
     def _index_of(self, sid: Int) -> Int:
-        for i in range(len(self._session_ids)):
-            if self._session_ids[i] == sid:
+        for i in range(len(self._sessions)):
+            if self._sessions[i].id == sid:
                 return i
         return -1
 
     def supports_folder_changes(self) -> Bool:
         """Whether the server said it accepts
         ``workspace/didChangeWorkspaceFolders`` — the condition for a
-        second session to join rather than spawn."""
-        if not self.init_result:
+        second session to join rather than spawn. Read in place: the
+        initialize result is the server's whole capability set."""
+        if not self.init_result or not self.init_result.value().result:
             return False
-        var res = self.init_result.value().result.copy()
-        if not res or not res.value().is_object():
+        ref res = self.init_result.value().result.value()
+        var ci = res.object_index(String("capabilities"))
+        if ci < 0:
             return False
-        var caps = res.value().object_get(String("capabilities"))
-        if not caps or not caps.value().is_object():
+        ref caps = res.obj_v[ci].value
+        var wi = caps.object_index(String("workspace"))
+        if wi < 0:
             return False
-        var ws = caps.value().object_get(String("workspace"))
-        if not ws or not ws.value().is_object():
+        ref ws = caps.obj_v[wi].value
+        var fi = ws.object_index(String("workspaceFolders"))
+        if fi < 0:
             return False
-        var wf = ws.value().object_get(String("workspaceFolders"))
-        if not wf or not wf.value().is_object():
+        ref wf = ws.obj_v[fi].value
+        var ni = wf.object_index(String("changeNotifications"))
+        if ni < 0:
             return False
-        var cn = wf.value().object_get(String("changeNotifications"))
-        if not cn:
-            return False
+        ref cn = wf.obj_v[ni].value
         # ``boolean | string``: a string is a registration id, i.e. yes.
-        if cn.value().is_string():
-            return len(cn.value().as_str().as_bytes()) > 0
-        return cn.value().is_bool() and cn.value().as_bool()
+        if cn.is_string():
+            return len(cn.str_v.as_bytes()) > 0
+        return cn.is_bool() and cn.as_bool()
 
     def registrations(self) -> List[LspIncoming]:
         return self._registrations.copy()
@@ -284,14 +344,14 @@ struct LspChannel(Movable):
         var event = json_object()
         var add = json_array()
         if len(added.as_bytes()) > 0:
-            add.append(_folder(added))
+            add.append_owned(workspace_folder(added))
         var rem = json_array()
         if len(removed.as_bytes()) > 0:
-            rem.append(_folder(removed))
-        event.put(String("added"), add)
-        event.put(String("removed"), rem)
+            rem.append_owned(workspace_folder(removed))
+        event.put_owned(String("added"), add^)
+        event.put_owned(String("removed"), rem^)
         var params = json_object()
-        params.put(String("event"), event)
+        params.put_owned(String("event"), event^)
         self.client.send_notification(
             String("workspace/didChangeWorkspaceFolders"), params,
         )
@@ -305,8 +365,7 @@ struct LspChannel(Movable):
         self._last_active = sid
         if method == String("initialize"):
             self._init_id = id
-        self._req_ids.append(id)
-        self._req_owner.append(sid)
+        self._requests.append(_Outstanding(id, sid))
         return id^
 
     def send_notification(
@@ -323,47 +382,43 @@ struct LspChannel(Movable):
             var uri = _text_document_uri(params)
             var k = self._open_index(uri)
             if k >= 0:
-                self._open_counts[k] += 1
+                self._open[k].count += 1
                 return
-            self._open_uris.append(uri)
-            self._open_counts.append(1)
-            self._open_owner.append(sid)
+            self._open.append(_OpenUri(uri, 1, sid))
         elif method == String("textDocument/didClose"):
             var uri = _text_document_uri(params)
             var k = self._open_index(uri)
             if k >= 0:
-                self._open_counts[k] -= 1
-                if self._open_counts[k] > 0:
-                    if self._open_owner[k] == sid:
-                        self._open_owner[k] = self._other_session(sid)
+                self._open[k].count -= 1
+                if self._open[k].count > 0:
+                    if self._open[k].owner == sid:
+                        self._open[k].owner = self._other_session(sid)
                     return
-                _ = self._open_uris.pop(k)
-                _ = self._open_counts.pop(k)
-                _ = self._open_owner.pop(k)
+                _ = self._open.pop(k)
         self.client.send_notification(method, params)
 
     def _open_index(self, uri: String) -> Int:
         if len(uri.as_bytes()) == 0:
             return -1
-        for k in range(len(self._open_uris)):
-            if self._open_uris[k] == uri:
+        for k in range(len(self._open)):
+            if self._open[k].uri == uri:
                 return k
         return -1
 
     def _other_session(self, sid: Int) -> Int:
-        for i in range(len(self._session_ids)):
-            if self._session_ids[i] != sid:
-                return self._session_ids[i]
+        for i in range(len(self._sessions)):
+            if self._sessions[i].id != sid:
+                return self._sessions[i].id
         return sid
 
     # --- inbound -----------------------------------------------------------
 
     def drain_stderr(mut self):
-        var chunk = self.client.process.drain_stderr()
-        if len(chunk.as_bytes()) == 0:
+        if self.stderr_log.full():
+            # Still drained, so the server never blocks on a full pipe.
+            _ = self.client.process.drain_stderr()
             return
-        if len(self.stderr_log.as_bytes()) + len(chunk.as_bytes()) <= _STDERR_CAP:
-            self.stderr_log = self.stderr_log + chunk
+        self.stderr_log.append(self.client.process.drain_stderr())
 
     def check_alive(mut self) -> Bool:
         """False once the child has exited (latched)."""
@@ -379,17 +434,18 @@ struct LspChannel(Movable):
         mut self, sid: Int, mut replay: Bool,
     ) raises -> Optional[LspIncoming]:
         """The next message for session ``sid``; ``replay`` says whether it
-        is a replay (apply, don't answer). Reads whatever the server has
-        sent first. The message moves out — a tuple return would make the
-        caller deep-copy it."""
-        self.pump()
+        is a replay (apply, don't answer). Reads what the server has sent
+        once the inbox runs dry — pumping per message re-polled the pipe
+        for every one already queued. The message moves out — a tuple
+        return would make the caller deep-copy it."""
         replay = False
         var i = self._index_of(sid)
-        if i < 0 or len(self._inbox[i]) == 0:
+        if i < 0:
             return Optional[LspIncoming]()
-        var msg = self._inbox[i].pop(0)
-        replay = self._inbox_replay[i].pop(0)
-        return Optional[LspIncoming](msg^)
+        if self._sessions[i].pending() == 0:
+            self.pump()
+            # ``pump`` only appends to inboxes, so ``i`` still names ours.
+        return self._sessions[i].take(replay)
 
     def pump(mut self) raises:
         """Move everything the server has sent into the inboxes."""
@@ -400,7 +456,7 @@ struct LspChannel(Movable):
             self._route(maybe.take())
 
     def _route(mut self, var msg: LspIncoming) raises:
-        if len(self._session_ids) == 0:
+        if len(self._sessions) == 0:
             return
         if msg.kind == LSP_RESPONSE:
             if not msg.id:
@@ -410,11 +466,10 @@ struct LspChannel(Movable):
                 # Kept even if the session that asked has since left: the
                 # sessions waiting to join need it either way.
                 self.init_result = Optional[LspIncoming](msg.copy())
-            for k in range(len(self._req_ids)):
-                if self._req_ids[k] == id:
-                    var owner = self._req_owner[k]
-                    _ = self._req_ids.pop(k)
-                    _ = self._req_owner.pop(k)
+            for k in range(len(self._requests)):
+                if self._requests[k].id == id:
+                    var owner = self._requests[k].owner
+                    _ = self._requests.pop(k)
                     self._deliver(owner, msg^, False)
                     return
             return   # a reply to a session that has left
@@ -431,16 +486,16 @@ struct LspChannel(Movable):
             if method == String("workspace/workspaceFolders"):
                 # Only the channel knows every root.
                 var folders = json_array()
-                for i in range(len(self._session_roots)):
-                    folders.append(_folder(self._session_roots[i]))
-                self.client.send_response(msg.id.value().copy(), folders)
+                for i in range(len(self._sessions)):
+                    folders.append_owned(workspace_folder(self._sessions[i].root))
+                self.client.send_response(msg.id.value(), folders)
                 return
             if _replayed_request(method):
                 if method.startswith(String("client/")):
                     self._registrations.append(msg.copy())
-                var first = self._session_ids[0]
-                for i in range(len(self._session_ids)):
-                    var sid = self._session_ids[i]
+                var first = self._sessions[0].id
+                for i in range(len(self._sessions)):
+                    var sid = self._sessions[i].id
                     self._deliver(sid, msg.copy(), sid != first)
                 return
             if method == String("window/showMessageRequest"):
@@ -460,12 +515,12 @@ struct LspChannel(Movable):
             if named >= 0:
                 self._deliver(named, msg^, False)
                 return
-            for i in range(len(self._session_ids)):
-                self._deliver(self._session_ids[i], msg.copy(), False)
+            for i in range(len(self._sessions)):
+                self._deliver(self._sessions[i].id, msg.copy(), False)
             return
         if _broadcast(method):
-            for i in range(len(self._session_ids)):
-                self._deliver(self._session_ids[i], msg.copy(), False)
+            for i in range(len(self._sessions)):
+                self._deliver(self._sessions[i].id, msg.copy(), False)
             return
         self._deliver(self._owner_of(first_uri), msg^, False)
 
@@ -474,14 +529,14 @@ struct LspChannel(Movable):
         one whose root holds it (the innermost, for nested roots), else the
         one the user is working in."""
         var k = self._open_index(uri)
-        if k >= 0 and self._index_of(self._open_owner[k]) >= 0:
-            return self._open_owner[k]
+        if k >= 0 and self._index_of(self._open[k].owner) >= 0:
+            return self._open[k].owner
         var best = -1
         var best_len = -1
-        for i in range(len(self._session_roots)):
-            var root = self._session_roots[i]
+        for i in range(len(self._sessions)):
+            ref root = self._sessions[i].root
             if _uri_under(uri, root) and len(root.as_bytes()) > best_len:
-                best = self._session_ids[i]
+                best = self._sessions[i].id
                 best_len = len(root.as_bytes())
         if best >= 0:
             return best
@@ -491,7 +546,7 @@ struct LspChannel(Movable):
         """The last session to talk to the server, if it's still here."""
         if self._index_of(self._last_active) >= 0:
             return self._last_active
-        return self._session_ids[0]
+        return self._sessions[0].id
 
     def _session_named_in(self, text: String) -> Int:
         """The session whose project directory ``text`` mentions (the
@@ -500,15 +555,15 @@ struct LspChannel(Movable):
         — since a pop-up has no document field."""
         var best = -1
         var best_len = -1
-        for i in range(len(self._session_roots)):
-            var root = self._session_roots[i]
+        for i in range(len(self._sessions)):
+            ref root = self._sessions[i].root
             if not root.startswith(String("file://")):
                 continue
             var path = String(root[byte=7:])
             var plen = len(path.as_bytes())
             if plen <= best_len or not _mentions_path(text, path):
                 continue
-            best = self._session_ids[i]
+            best = self._sessions[i].id
             best_len = plen
         return best
 
@@ -516,19 +571,15 @@ struct LspChannel(Movable):
         var i = self._index_of(sid)
         if i < 0:
             return
-        if len(self._inbox[i]) >= _INBOX_MAX:
-            _ = self._inbox[i].pop(0)
-            _ = self._inbox_replay[i].pop(0)
-        self._inbox[i].append(msg^)
-        self._inbox_replay[i].append(replay)
+        self._sessions[i].push(msg^, replay)
 
 
-def _folder(root_uri: String) -> JsonValue:
+def workspace_folder(root_uri: String) -> JsonValue:
+    """The LSP ``WorkspaceFolder`` for ``root_uri``: ``{uri, name}``, the
+    name being the root directory's (percent-decoded) basename."""
     var f = json_object()
-    f.put(String("uri"), json_str(root_uri))
-    var name = basename(String(root_uri[byte=7:])) \
-        if root_uri.startswith(String("file://")) else basename(root_uri)
-    f.put(String("name"), json_str(name))
+    f.put_owned(String("uri"), json_str(root_uri))
+    f.put_owned(String("name"), json_str(basename(file_uri_to_path(root_uri))))
     return f^
 
 

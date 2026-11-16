@@ -42,8 +42,8 @@ from .lsp import LspProcess
 from .posix import debug_log_path, monotonic_ms, realpath, tcp_connect, which
 from .string_utils import (
     fnv_int, fnv_start, fnv_str, starts_with, strip_trailing_newlines,
-    utf8_suffix,
 )
+from .capped_text import CappedText
 
 
 # --- state machine --------------------------------------------------------
@@ -585,7 +585,7 @@ struct DapManager(Copyable, Movable):
     # (each call empties the OS pipe). Capped at 16 KB so a runaway
     # adapter can't grow this buffer unbounded — we keep the *tail*,
     # since the latest output is what tells us why a session just died.
-    var _stderr_log: String
+    var _stderr_log: CappedText
     # Wall-clock timestamp (ms) when we entered the current state.
     # Read by the watchdog in ``tick`` to fail a session that's been
     # ``INITIALIZING`` / ``LAUNCHING`` for too long without forward
@@ -691,7 +691,8 @@ struct DapManager(Copyable, Movable):
         self._pending_vars_ready = False
         self._pending_launch_args = JsonValue()
         self.spawn_argv = List[String]()
-        self._stderr_log = String("")
+        # Keeps the tail: the most recent output says why a session died.
+        self._stderr_log = CappedText(16384, keep_tail=True)
         self._state_entered_ms = 0
         self._last_heartbeat_ms = 0
         self._subprocess = SubprocessAttach()
@@ -864,19 +865,14 @@ struct DapManager(Copyable, Movable):
             # the adapter said even though this call has already drained
             # the OS pipe. Cap the buffer at 16 KB, keeping the tail —
             # the most recent output is what tells us why a session died.
-            self._stderr_log = self._stderr_log + text
-            if len(self._stderr_log.as_bytes()) > 16384:
-                # Temporary: the slice borrows ``self._stderr_log``, so the
-                # new value has to be built before the assignment lands.
-                var tail = utf8_suffix(self._stderr_log, 16384)
-                self._stderr_log = tail^
+            self._stderr_log.append(text)
         return text^
 
     def captured_stderr(self) -> String:
         """Everything ``drain_stderr`` has read from the adapter so far,
         capped at 16 KB. Surfaced in the DAP info window so the user can
         see what the adapter printed before the handshake failed."""
-        return self._stderr_log
+        return self._stderr_log.text
 
 
     def shutdown(mut self):

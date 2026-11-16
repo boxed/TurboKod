@@ -24,7 +24,7 @@ from .json import (
     json_str, JsonObjectWriter, JsonValue, parse_json, take_json,
 )
 from .case_fold import fold_byte
-from .string_utils import utf8_prefix
+from .string_utils import hex_digit_value, utf8_prefix
 from .posix import (
     POSIX_SPAWN_FILE_ACTIONS_SIZE, SIGKILL, SIGTERM,
     alloc_zero_buffer, append_string_bytes, chdir_path, close_fd,
@@ -1221,6 +1221,29 @@ def _trace_preview(msg: String) -> String:
     if len(msg.as_bytes()) <= 400:
         return msg
     return utf8_prefix(msg, 400) + String("…")
+
+
+def file_uri_to_path(uri: String) -> String:
+    """Strip the ``file://`` scheme and percent-decode ``%XX`` escapes
+    (spec-compliant servers encode spaces / non-ASCII in path bytes; an
+    undecoded ``%20`` wouldn't match a ``_docs`` entry or open on
+    disk). A malformed ``%`` is left as a literal byte."""
+    if not uri.startswith("file://"):
+        return uri
+    var ub = uri.as_bytes()
+    var out = List[UInt8]()
+    var i = 7    # past ``file://``
+    while i < len(ub):
+        if ub[i] == 0x25 and i + 2 < len(ub):   # '%XX'
+            var hi = hex_digit_value(Int(ub[i + 1]))
+            var lo = hex_digit_value(Int(ub[i + 2]))
+            if hi >= 0 and lo >= 0:
+                out.append(UInt8((hi << 4) | lo))
+                i += 3
+                continue
+        out.append(ub[i])
+        i += 1
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=len(out))))
 
 
 def json_rpc_id(v: JsonValue) -> String:

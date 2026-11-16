@@ -35,10 +35,12 @@ from .lsp_position import (
 )
 from .lsp_shared import (
     channel_at, free_channel, new_channel, pool_at, server_key,
+    workspace_folder,
 )
+from .capped_text import CappedText
 from .lsp import (
     LSP_NOTIFICATION, LSP_REQUEST, LSP_RESPONSE, LspClient, LspIncoming,
-    LspProcess, json_rpc_id, lsp_initialize_params,
+    LspProcess, file_uri_to_path, json_rpc_id, lsp_initialize_params,
 )
 from .posix import (
     debug_log_path, getcwd_path, getenv_value, monotonic_ms, realpath, sleep_ms,
@@ -120,6 +122,8 @@ comptime _STATE_FAILED       = UInt8(3)
 # rust-analyzer / pyright cold start with a fresh cache, but stops
 # short of "user wonders if it's broken." Cheap to bump if needed.
 comptime _DIAG_INFLIGHT_TIMEOUT_MS = 8000
+# Cap on each of the server's stderr and protocol-log captures.
+comptime _LOG_CAP = 16 * 1024
 
 # How many outstanding (request id → document URI) pairs to remember for
 # response position-remapping. Comfortably above the realistic number of
@@ -1183,14 +1187,14 @@ struct LspManager(Copyable, Movable):
     # without surfacing that the user sees only an indefinite "starting…"
     # state. Capped at 16 KB to bound memory; once full, new bytes are
     # dropped (the head usually has the most useful diagnostic line).
-    var _stderr_log: String
+    var _stderr_log: CappedText
     # Rolling capture of the server's protocol-level log: ``window/
     # logMessage`` lines (prefixed by severity) and ``telemetry/event``
     # payloads, both of which the spec otherwise drops on the floor.
     # Surfaced in the LSP info window alongside stderr so a server that
     # explains a problem via logMessage (rather than crashing) is visible.
     # Capped at 16 KB like the stderr capture.
-    var _log_capture: String
+    var _log_capture: CappedText
 
     # Per-document tracking for didOpen / didChange.
     var _docs: List[_OpenDoc]
@@ -1351,8 +1355,8 @@ struct LspManager(Copyable, Movable):
         self._diag_inflight_paths = List[String]()
         self._diag_inflight_versions = List[Int]()
         self._diag_inflight_since_ms = List[Int]()
-        self._stderr_log = String("")
-        self._log_capture = String("")
+        self._stderr_log = CappedText(_LOG_CAP, keep_tail=False)
+        self._log_capture = CappedText(_LOG_CAP, keep_tail=False)
 
     def __copyinit__(mut self, copy: Self):
         # Honest copying would duplicate child PID + pipe FD ownership,
@@ -1424,7 +1428,7 @@ struct LspManager(Copyable, Movable):
         """Everything we've drained from the server's stderr since spawn,
         capped at 16 KB. Surfaced in the info window so the user can see
         what the server printed before exiting / hanging."""
-        return self._stderr_log
+        return self._stderr_log.text
 
     # --- diagnostics -------------------------------------------------------
 
@@ -3969,7 +3973,7 @@ struct LspManager(Copyable, Movable):
             self._absorb_stderr()
             self.state = _STATE_FAILED
             var why = String("server exited")
-            var first = _first_nonempty_line(self._stderr_log)
+            var first = _first_nonempty_line(self._stderr_log.text)
             if len(first.as_bytes()) > 0:
                 why = why + String(": ") + first
             self.failure_reason = why^
@@ -4024,7 +4028,8 @@ struct LspManager(Copyable, Movable):
                         # server has for "here is what I just did", and we
                         # were dropping it on the floor.
                         self._on_log_trace(msg.params.value())
-                    elif method == String("telemetry/event"):
+                    elif method == String("telemetry/event") \
+                            and not self._log_capture.full():
                         self._append_log(
                             String("[telemetry] ")
                             + encode_json(msg.params.value()),
@@ -4538,21 +4543,16 @@ struct LspManager(Copyable, Movable):
         if self._channel != 0:
             var ch = channel_at(self._channel)
             ch[].drain_stderr()
-            self._stderr_log = ch[].stderr_log
+            # The channel's log only grows (to its cap): copy on change.
+            if len(ch[].stderr_log.text.as_bytes()) \
+                    != len(self._stderr_log.text.as_bytes()):
+                self._stderr_log = ch[].stderr_log.copy()
             return
-        var chunk = self.client.process.drain_stderr()
-        if len(chunk.as_bytes()) == 0:
+        if self._stderr_log.full():
+            # Still drained, so the server never blocks on a full pipe.
+            _ = self.client.process.drain_stderr()
             return
-        comptime CAP: Int = 16 * 1024
-        var have = len(self._stderr_log.as_bytes())
-        if have >= CAP:
-            return
-        var room = CAP - have
-        var cb = chunk.as_bytes()
-        if len(cb) <= room:
-            self._stderr_log = self._stderr_log + chunk
-        else:
-            self._stderr_log = self._stderr_log + utf8_prefix(chunk, room)
+        self._stderr_log.append(self.client.process.drain_stderr())
 
     def _on_publish_diagnostics(mut self, params: JsonValue):
         """Replace (not merge) the bucket for the published URI. The
@@ -4681,7 +4681,7 @@ struct LspManager(Copyable, Movable):
         ``message`` is the line; the optional ``verbose`` field carries the
         detail (a full JSON dump, when the server is in ``verbose`` trace
         mode). Both go in — the whole point of trace output is the detail."""
-        if not params.is_object():
+        if not params.is_object() or self._log_capture.full():
             return
         var line = json_get_string(params, String("message"))
         var v_opt = params.object_get(String("verbose"))
@@ -4698,7 +4698,7 @@ struct LspManager(Copyable, Movable):
         prefixed by severity (E/W/I/L for error/warning/info/log). Unlike
         ``showMessage`` this is log-stream output, not a user toast — it
         lives in the LSP info window, not the status bar."""
-        if not params.is_object():
+        if not params.is_object() or self._log_capture.full():
             return
         var msg_opt = params.object_get(String("message"))
         if not msg_opt or not msg_opt.value().is_string():
@@ -4720,18 +4720,14 @@ struct LspManager(Copyable, Movable):
 
     def _append_log(mut self, var line: String):
         """Append one line (a newline is added) to the 16 KB-capped log
-        capture; once full, new lines are dropped (the head is usually the
-        most useful)."""
-        comptime CAP: Int = 16 * 1024
-        var have = len(self._log_capture.as_bytes())
-        if have >= CAP:
-            return
-        self._log_capture = self._log_capture + line + String("\n")
+        capture; once full, further text is dropped (the head is usually
+        the most useful). Callers check ``full()`` before formatting."""
+        self._log_capture.append_line(line)
 
     def captured_log(self) -> String:
         """The server's protocol-level log (``window/logMessage`` +
         ``telemetry/event``) captured since spawn, capped at 16 KB."""
-        return self._log_capture
+        return self._log_capture.text
 
     def has_pending_progress(self) -> Bool:
         return self._has_progress_note
@@ -5062,13 +5058,7 @@ struct LspManager(Copyable, Movable):
                 # Some servers (pyright) gate module resolution on this.
                 var folders = json_array()
                 if len(self._root_uri.as_bytes()) > 0:
-                    var f = json_object()
-                    f.put(String("uri"), json_str(self._root_uri))
-                    f.put(
-                        String("name"),
-                        json_str(basename(_uri_to_path(self._root_uri))),
-                    )
-                    folders.append(f)
+                    folders.append_owned(workspace_folder(self._root_uri))
                 if self._logging():
                     _lsp_debug_write(
                         String("← server request workspace/workspaceFolders id=")
@@ -6814,26 +6804,7 @@ def uri_to_path(uri: String) -> String:
 
 
 def _uri_to_path(uri: String) -> String:
-    """Strip the ``file://`` scheme and percent-decode ``%XX`` escapes
-    (spec-compliant servers encode spaces / non-ASCII in path bytes; an
-    undecoded ``%20`` wouldn't match a ``_docs`` entry or open on
-    disk). A malformed ``%`` is left as a literal byte."""
-    if not uri.startswith("file://"):
-        return uri
-    var ub = uri.as_bytes()
-    var out = List[UInt8]()
-    var i = 7    # past ``file://``
-    while i < len(ub):
-        if ub[i] == 0x25 and i + 2 < len(ub):   # '%XX'
-            var hi = hex_digit_value(Int(ub[i + 1]))
-            var lo = hex_digit_value(Int(ub[i + 2]))
-            if hi >= 0 and lo >= 0:
-                out.append(UInt8((hi << 4) | lo))
-                i += 3
-                continue
-        out.append(ub[i])
-        i += 1
-    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=len(out))))
+    return file_uri_to_path(uri)
 
 
 def _watched_changes_params(
