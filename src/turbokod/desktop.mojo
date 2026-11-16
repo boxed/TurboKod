@@ -3552,78 +3552,21 @@ struct Desktop(Movable):
             return True
         return False
 
-    # --- floating-panel dock accessors -------------------------------------
-    # The panel window resizes a dock identified by (kind, idx). Mojo can't
-    # hand back a mut ref to one of three differently-typed fields behind a
-    # runtime branch, so these tiny helpers branch per access instead.
-
-    def _panel_dock_resizing(self, kind: Int, idx: Int) -> Bool:
+    def _panel_dock(
+        ref self, kind: Int, idx: Int,
+    ) -> ref[
+        self.terminal_panes[0].dock, self.debug_pane.dock,
+        self.find_results_pane.dock, self.test_pane.dock,
+    ] BottomDockedPanel:
+        """The dock of the panel ``(kind, idx)`` (a ``PANEL_KIND_*``, and
+        the ``terminal_panes`` index for a terminal)."""
         if kind == PANEL_KIND_TERMINAL:
-            return self.terminal_panes[idx].dock.resizing
+            return self.terminal_panes[idx].dock
         if kind == PANEL_KIND_DEBUG:
-            return self.debug_pane.dock.resizing
+            return self.debug_pane.dock
         if kind == PANEL_KIND_FIND_RESULTS:
-            return self.find_results_pane.dock.resizing
-        return self.test_pane.dock.resizing
-
-    def _panel_dock_normal(self, kind: Int, idx: Int) -> Bool:
-        if kind == PANEL_KIND_TERMINAL:
-            return self.terminal_panes[idx].dock.state == PANEL_STATE_NORMAL
-        if kind == PANEL_KIND_DEBUG:
-            return self.debug_pane.dock.state == PANEL_STATE_NORMAL
-        if kind == PANEL_KIND_FIND_RESULTS:
-            return self.find_results_pane.dock.state == PANEL_STATE_NORMAL
-        return self.test_pane.dock.state == PANEL_STATE_NORMAL
-
-    def _panel_dock_chrome_hit(self, kind: Int, idx: Int, pos: Point) -> Bool:
-        if kind == PANEL_KIND_TERMINAL:
-            return self.terminal_panes[idx].dock.chrome_hits.on_any(pos)
-        if kind == PANEL_KIND_DEBUG:
-            return self.debug_pane.dock.chrome_hits.on_any(pos)
-        if kind == PANEL_KIND_FIND_RESULTS:
-            return self.find_results_pane.dock.chrome_hits.on_any(pos)
-        return self.test_pane.dock.chrome_hits.on_any(pos)
-
-    def _panel_dock_command_hit(self, kind: Int, idx: Int, pos: Point) -> Bool:
-        """True when ``pos`` lands on one of the panel's title-command
-        buttons (Stop / Restart / Clear, …). The splitter check excludes
-        these the same way it excludes the min/max chrome — the command
-        strip lives on the same top-border row a splitter drag starts
-        from, and the buttons must win over the grab."""
-        var hit: String
-        if kind == PANEL_KIND_TERMINAL:
-            hit = hit_title_command(
-                self.terminal_panes[idx].dock.last_cmd_hits, pos,
-            )
-        elif kind == PANEL_KIND_DEBUG:
-            hit = hit_title_command(self.debug_pane.dock.last_cmd_hits, pos)
-        elif kind == PANEL_KIND_FIND_RESULTS:
-            hit = hit_title_command(
-                self.find_results_pane.dock.last_cmd_hits, pos,
-            )
-        else:
-            hit = hit_title_command(self.test_pane.dock.last_cmd_hits, pos)
-        return len(hit.as_bytes()) > 0
-
-    def _panel_dock_set_resizing(mut self, kind: Int, idx: Int, v: Bool):
-        if kind == PANEL_KIND_TERMINAL:
-            self.terminal_panes[idx].dock.resizing = v
-        elif kind == PANEL_KIND_DEBUG:
-            self.debug_pane.dock.resizing = v
-        elif kind == PANEL_KIND_FIND_RESULTS:
-            self.find_results_pane.dock.resizing = v
-        else:
-            self.test_pane.dock.resizing = v
-
-    def _panel_dock_set_preferred(mut self, kind: Int, idx: Int, h: Int):
-        if kind == PANEL_KIND_TERMINAL:
-            self.terminal_panes[idx].dock.preferred_height = h
-        elif kind == PANEL_KIND_DEBUG:
-            self.debug_pane.dock.preferred_height = h
-        elif kind == PANEL_KIND_FIND_RESULTS:
-            self.find_results_pane.dock.preferred_height = h
-        else:
-            self.test_pane.dock.preferred_height = h
+            return self.find_results_pane.dock
+        return self.test_pane.dock
 
     def _panel_splitter_upper(
         self, slots: List[PanelSlot], pos: Point,
@@ -3643,14 +3586,20 @@ struct Desktop(Movable):
                 continue
             if prev >= 0:
                 var lower = slots[i].rect
+                # The lower panel's min/max chrome and title commands
+                # (Stop / Restart / Clear, …) live on the splitter row and
+                # win over the grab.
+                ref lower_dock = self._panel_dock(slots[i].kind, slots[i].idx)
+                var on_button = lower_dock.chrome_hits.on_any(pos) \
+                    or len(hit_title_command(
+                        lower_dock.last_cmd_hits, pos,
+                    ).as_bytes()) > 0
                 if pos.y == lower.a.y \
                         and pos.x >= lower.a.x and pos.x < lower.b.x \
-                        and not self._panel_dock_chrome_hit(
-                            slots[i].kind, slots[i].idx, pos) \
-                        and not self._panel_dock_command_hit(
-                            slots[i].kind, slots[i].idx, pos) \
-                        and self._panel_dock_normal(
-                            slots[prev].kind, slots[prev].idx):
+                        and not on_button \
+                        and self._panel_dock(
+                            slots[prev].kind, slots[prev].idx,
+                        ).state == PANEL_STATE_NORMAL:
                     return prev
             prev = i
         return -1
@@ -3672,10 +3621,11 @@ struct Desktop(Movable):
         for ref s in slots:
             if s.rect.is_empty():
                 continue
-            if not self._panel_dock_resizing(s.kind, s.idx):
+            ref dock = self._panel_dock(s.kind, s.idx)
+            if not dock.resizing:
                 continue
             if event.button == MOUSE_BUTTON_LEFT and not event.pressed:
-                self._panel_dock_set_resizing(s.kind, s.idx, False)
+                dock.resizing = False
                 return True
             var top = s.rect.a.y
             var want = event.pos.y - top
@@ -3686,7 +3636,7 @@ struct Desktop(Movable):
                 want = hi
             if want < DOCK_MIN_HEIGHT:
                 want = DOCK_MIN_HEIGHT
-            self._panel_dock_set_preferred(s.kind, s.idx, want)
+            dock.preferred_height = want
             return True
         # A fresh press on a splitter starts resizing the panel above it.
         # Not a double click: that's the lower panel's header toggling
@@ -3695,9 +3645,9 @@ struct Desktop(Movable):
                 and not event.motion and event.click_count < 2:
             var upper = self._panel_splitter_upper(slots, event.pos)
             if upper >= 0:
-                self._panel_dock_set_resizing(
-                    slots[upper].kind, slots[upper].idx, True,
-                )
+                self._panel_dock(
+                    slots[upper].kind, slots[upper].idx,
+                ).resizing = True
                 return True
         return False
 
@@ -3848,7 +3798,7 @@ struct Desktop(Movable):
         var slots = self._panel_window_slots(screen)
         for ref s in slots:
             if not s.rect.is_empty() \
-                    and self._panel_dock_resizing(s.kind, s.idx):
+                    and self._panel_dock(s.kind, s.idx).resizing:
                 return String("ns-resize")
         if self._panel_splitter_upper(slots, pos) >= 0:
             return String("ns-resize")
@@ -12925,11 +12875,7 @@ struct Desktop(Movable):
             for ref s in slots:
                 if s.rect.is_empty():
                     continue
-                var age = -1
-                if s.kind == PANEL_KIND_TERMINAL:
-                    age = self.terminal_panes[s.idx].dock.flash_age(now)
-                elif s.kind == PANEL_KIND_DEBUG:
-                    age = self.debug_pane.dock.flash_age(now)
+                var age = self._panel_dock(s.kind, s.idx).flash_age(now)
                 if age >= 0:
                     out.append(AttentionFlash(s.kind, s.idx, s.rect, age))
             return out^
