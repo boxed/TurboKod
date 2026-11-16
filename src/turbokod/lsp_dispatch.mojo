@@ -684,6 +684,9 @@ struct _OpenDoc(Copyable, Movable):
     changed, which restarts the server's analysis and flickers the
     "analyzing edits…" spinner on every cursor move."""
     var path: String    # absolute
+    # ``_path_to_uri(path)``, resolved once at didOpen: every request for
+    # the document names it, and ``realpath`` is a syscall per component.
+    var uri: String
     var version: Int
     # The last text sent. Not a second copy of the buffer: the host passes
     # ``Editor.lsp_text``, cached per edit, and a ``String`` copy shares
@@ -1479,7 +1482,7 @@ struct LspManager(Copyable, Movable):
         if self.state != _STATE_READY or not self.supports_pull_diagnostics():
             return False
         var params = json_object()
-        params.put(String("textDocument"), _text_document(path))
+        params.put_owned(String("textDocument"), self._text_doc(path))
         var req_id: String
         try:
             req_id = self._send_request(
@@ -1953,10 +1956,8 @@ struct LspManager(Copyable, Movable):
         if not self._join_pending and Bool(ch[].init_result) \
                 and ch[].check_alive():
             for ref d in self._docs:
-                var td = json_object()
-                td.put(String("uri"), json_str(_path_to_uri(d.path)))
                 var params = json_object()
-                params.put(String("textDocument"), td)
+                params.put_owned(String("textDocument"), self._text_doc(d.path))
                 try:
                     self._send_notification(
                         String("textDocument/didClose"), params,
@@ -2019,7 +2020,7 @@ struct LspManager(Copyable, Movable):
         if self._doc_index(path) < 0:
             return
         var params = json_object()
-        params.put(String("textDocument"), _text_document(path))
+        params.put_owned(String("textDocument"), self._text_doc(path))
         if self.save_includes_text():
             params.put(String("text"), json_str(text^))
         try:
@@ -2051,7 +2052,7 @@ struct LspManager(Copyable, Movable):
         var idx = self._doc_index(path)
         if idx < 0:
             return
-        _ = self._docs.pop(idx)
+        var closed = self._docs.pop(idx)
         self._remap.drop_doc(path)
         # Drop any "analyzing edits…" spinner state — a closed buffer
         # must not keep one spinning.
@@ -2065,7 +2066,9 @@ struct LspManager(Copyable, Movable):
                 _ = self._pulled_paths.pop(k)
                 break
         var params = json_object()
-        params.put(String("textDocument"), _text_document(path))
+        var td = json_object()
+        td.put_owned(String("uri"), json_str(closed.uri))
+        params.put_owned(String("textDocument"), td^)
         try:
             self._send_notification(
                 String("textDocument/didClose"), params,
@@ -2238,7 +2241,7 @@ struct LspManager(Copyable, Movable):
         if self.state != _STATE_READY or not self.server_supports_will_save():
             return
         var params = json_object()
-        params.put(String("textDocument"), _text_document(path))
+        params.put_owned(String("textDocument"), self._text_doc(path))
         params.put(String("reason"), json_int(reason))
         try:
             self._send_notification(
@@ -2261,7 +2264,7 @@ struct LspManager(Copyable, Movable):
         self._willsave.text = text.copy()
         self._send_open_or_change(path, text^)
         var params = json_object()
-        params.put(String("textDocument"), _text_document(path))
+        params.put_owned(String("textDocument"), self._text_doc(path))
         params.put(String("reason"), json_int(reason))
         return self._willsave.start(
             self._request_replacing(
@@ -2311,7 +2314,7 @@ struct LspManager(Copyable, Movable):
                 + String(" text_len=") + String(len(text.as_bytes())),
             )
         self._send_open_or_change(path, text^)
-        var params = _text_document_position_params(path, line, character)
+        var params = self._position_params(path, line, character)
         self._inflight_def_id = self._request(String("textDocument/definition"), params)
         if len(self._inflight_def_id.as_bytes()) == 0:
             return False
@@ -2450,7 +2453,7 @@ struct LspManager(Copyable, Movable):
                 + String(" character=") + String(character),
             )
         self._send_open_or_change(path, text^)
-        var params = _text_document_position_params(path, line, character)
+        var params = self._position_params(path, line, character)
         var sent = self._request_replacing(self._nav.id.copy(), method, params)
         if not self._nav.start(sent):
             return False
@@ -2486,7 +2489,7 @@ struct LspManager(Copyable, Movable):
         if self.state != _STATE_READY or len(self._libprobe_ids) >= limit:
             return False
         self._send_open_or_change(path, text^)
-        var params = _text_document_position_params(path, line, character)
+        var params = self._position_params(path, line, character)
         var id: String
         try:
             id = self._send_request(String("textDocument/definition"), params)
@@ -2549,7 +2552,7 @@ struct LspManager(Copyable, Movable):
         if self.state != _STATE_READY:
             return False
         self._send_open_or_change(path, text^)
-        var params = _text_document_position_params(path, line, character)
+        var params = self._position_params(path, line, character)
         var sent = self._request_replacing(
             self._prepare_rename.id.copy(),
             String("textDocument/prepareRename"), params,
@@ -2595,7 +2598,7 @@ struct LspManager(Copyable, Movable):
                 + String(" word=") + word,
             )
         self._send_open_or_change(path, text^)
-        var params = _text_document_position_params(path, line, character)
+        var params = self._position_params(path, line, character)
         var ctx = json_object()
         ctx.put(String("includeDeclaration"), json_bool(True))
         params.put(String("context"), ctx)
@@ -2637,7 +2640,7 @@ struct LspManager(Copyable, Movable):
             return False
         self._send_open_or_change(path, text^)
         var params = json_object()
-        params.put(String("textDocument"), _text_document(path))
+        params.put_owned(String("textDocument"), self._text_doc(path))
         var sent = self._request_replacing(
             self._symbols.id.copy(),
             String("textDocument/documentSymbol"), params,
@@ -2781,7 +2784,7 @@ struct LspManager(Copyable, Movable):
                 + String(" character=") + String(character),
             )
         self._send_open_or_change(path, text^)
-        var params = _text_document_position_params(path, line, character)
+        var params = self._position_params(path, line, character)
         # ``CompletionContext.triggerKind`` 1 = Invoked (manual / Ctrl+Space).
         # Most servers ignore the field but pyright/pylsp use it to suppress
         # auto-import suggestions when the user explicitly invoked.
@@ -2927,7 +2930,7 @@ struct LspManager(Copyable, Movable):
         if self.state != _STATE_READY:
             return False
         self._send_open_or_change(path, text^)
-        var params = _text_document_position_params(path, line, character)
+        var params = self._position_params(path, line, character)
         # Cancel any prior in-flight hover so the server doesn't keep
         # working on a stale position. Mirrors ``request_completion``.
         var sent = self._request_replacing(
@@ -2988,7 +2991,7 @@ struct LspManager(Copyable, Movable):
             )
         self._send_open_or_change(path, text^)
         var params = json_object()
-        params.put(String("textDocument"), _text_document(path))
+        params.put_owned(String("textDocument"), self._text_doc(path))
         var rng = _lsp_range(
             diag.start_row, diag.start_col, diag.end_row, diag.end_col,
         )
@@ -3163,7 +3166,7 @@ struct LspManager(Copyable, Movable):
             )
         self._rename_text = text.copy()
         self._send_open_or_change(path, text^)
-        var params = _text_document_position_params(path, line, character)
+        var params = self._position_params(path, line, character)
         params.put(String("newName"), json_str(new_name))
         var sent = self._request_replacing(
             self._rename.id.copy(), String("textDocument/rename"), params,
@@ -3206,7 +3209,7 @@ struct LspManager(Copyable, Movable):
         self._formatting.text = text.copy()
         self._send_open_or_change(path, text^)
         var params = json_object()
-        params.put(String("textDocument"), _text_document(path))
+        params.put_owned(String("textDocument"), self._text_doc(path))
         params.put(String("options"), _formatting_options(tab_size, insert_spaces))
         return self._formatting.start(
             self._request_replacing(
@@ -3224,7 +3227,7 @@ struct LspManager(Copyable, Movable):
         self._formatting.text = text.copy()
         self._send_open_or_change(path, text^)
         var params = json_object()
-        params.put(String("textDocument"), _text_document(path))
+        params.put_owned(String("textDocument"), self._text_doc(path))
         var rng = _lsp_range(start_line, start_char, end_line, end_char)
         params.put(String("range"), rng)
         params.put(String("options"), _formatting_options(tab_size, insert_spaces))
@@ -3283,7 +3286,7 @@ struct LspManager(Copyable, Movable):
             return False
         self._ontype.text = text.copy()
         self._send_open_or_change(path, text^)
-        var params = _text_document_position_params(path, line, character)
+        var params = self._position_params(path, line, character)
         params.put(String("ch"), json_str(ch))
         params.put(String("options"), _formatting_options(tab_size, insert_spaces))
         return self._ontype.start(
@@ -3312,7 +3315,7 @@ struct LspManager(Copyable, Movable):
         if self.state != _STATE_READY:
             return False
         self._send_open_or_change(path, text^)
-        var params = _text_document_position_params(path, line, character)
+        var params = self._position_params(path, line, character)
         var sent = self._request_replacing(
             self._moniker.id.copy(),
             String("textDocument/moniker"), params,
@@ -3347,7 +3350,7 @@ struct LspManager(Copyable, Movable):
         color.put(String("alpha"), json_float(String("1.0")))
         var rng = _lsp_range(start_line, start_char, end_line, end_char)
         var params = json_object()
-        params.put(String("textDocument"), _text_document(path))
+        params.put_owned(String("textDocument"), self._text_doc(path))
         params.put(String("color"), color)
         params.put(String("range"), rng)
         var sent = self._request_replacing(
@@ -3391,7 +3394,7 @@ struct LspManager(Copyable, Movable):
         if self.state != _STATE_READY:
             return False
         self._send_open_or_change(path, text^)
-        var params = _text_document_position_params(path, line, character)
+        var params = self._position_params(path, line, character)
         var ctx = json_object()
         ctx.put(String("triggerKind"), json_int(1))  # Invoked
         params.put(String("context"), ctx)
@@ -3429,7 +3432,7 @@ struct LspManager(Copyable, Movable):
         if self.state != _STATE_READY:
             return False
         self._send_open_or_change(path, text^)
-        var params = _text_document_position_params(path, line, character)
+        var params = self._position_params(path, line, character)
         if not self._linked.start(
             self._request_replacing(
                 self._linked.id.copy(), String("textDocument/linkedEditingRange"), params),
@@ -3455,7 +3458,7 @@ struct LspManager(Copyable, Movable):
             return False
         self._send_open_or_change(path, text^)
         var params = json_object()
-        params.put(String("textDocument"), _text_document(path))
+        params.put_owned(String("textDocument"), self._text_doc(path))
         var rng = _lsp_range(start_line, 0, end_line, 0)
         params.put(String("range"), rng)
         var ctx = json_object()
@@ -3493,7 +3496,7 @@ struct LspManager(Copyable, Movable):
             return False
         self._send_open_or_change(path, text^)
         var params = json_object()
-        params.put(String("textDocument"), _text_document(path))
+        params.put_owned(String("textDocument"), self._text_doc(path))
         return self._folding.start(
             self._request_replacing(
                 self._folding.id.copy(), String("textDocument/foldingRange"), params), path,
@@ -3518,7 +3521,7 @@ struct LspManager(Copyable, Movable):
         if self.state != _STATE_READY:
             return False
         self._send_open_or_change(path, text^)
-        var params = _text_document_position_params(path, line, character)
+        var params = self._position_params(path, line, character)
         return self._doc_highlight.start(
             self._request_replacing(
                 self._doc_highlight.id.copy(), String("textDocument/documentHighlight"), params), path,
@@ -3543,7 +3546,7 @@ struct LspManager(Copyable, Movable):
         if self.state != _STATE_READY:
             return False
         self._send_open_or_change(path, text^)
-        var params = _text_document_position_params(path, line, character)
+        var params = self._position_params(path, line, character)
         var sent = self._request_replacing(
             self._signature.id.copy(),
             String("textDocument/signatureHelp"), params,
@@ -3573,7 +3576,7 @@ struct LspManager(Copyable, Movable):
             return False
         self._send_open_or_change(path, text^)
         var params = json_object()
-        params.put(String("textDocument"), _text_document(path))
+        params.put_owned(String("textDocument"), self._text_doc(path))
         var rng = _lsp_range(start_line, 0, end_line, 0)
         params.put(String("range"), rng)
         return self._inlay.start(
@@ -3599,7 +3602,7 @@ struct LspManager(Copyable, Movable):
             return False
         self._send_open_or_change(path, text^)
         var params = json_object()
-        params.put(String("textDocument"), _text_document(path))
+        params.put_owned(String("textDocument"), self._text_doc(path))
         if not self._codelens.start(
             self._request_replacing(
                 self._codelens.id.copy(), String("textDocument/codeLens"), params), path,
@@ -3656,7 +3659,7 @@ struct LspManager(Copyable, Movable):
             return False
         self._send_open_or_change(path, text^)
         var params = json_object()
-        params.put(String("textDocument"), _text_document(path))
+        params.put_owned(String("textDocument"), self._text_doc(path))
         return self._doclinks.start(
             self._request_replacing(
                 self._doclinks.id.copy(), String("textDocument/documentLink"), params), path,
@@ -3742,7 +3745,7 @@ struct LspManager(Copyable, Movable):
             return False
         self._send_open_or_change(path, text^)
         var params = json_object()
-        params.put(String("textDocument"), _text_document(path))
+        params.put_owned(String("textDocument"), self._text_doc(path))
         var positions = json_array()
         positions.append(_lsp_position(line, character))
         params.put(String("positions"), positions)
@@ -3821,7 +3824,7 @@ struct LspManager(Copyable, Movable):
         if self.state != _STATE_READY:
             return False
         self._send_open_or_change(path, text^)
-        var params = _text_document_position_params(path, line, character)
+        var params = self._position_params(path, line, character)
         var sent = self._request_replacing(
             self._hierarchy.id.copy(), prepare_method, params,
         )
@@ -3856,7 +3859,7 @@ struct LspManager(Copyable, Movable):
             return False
         self._send_open_or_change(path, text^)
         var params = json_object()
-        params.put(String("textDocument"), _text_document(path))
+        params.put_owned(String("textDocument"), self._text_doc(path))
         var sent = self._request_replacing(
             self._colors.id.copy(),
             String("textDocument/documentColor"), params,
@@ -5213,10 +5216,40 @@ struct LspManager(Copyable, Movable):
                 return k
         return -1
 
+    def _doc_uri(self, path: String) -> String:
+        """``_path_to_uri(path)``, from the open document's cache when
+        there is one."""
+        var idx = self._doc_index(path)
+        if idx >= 0:
+            return self._docs[idx].uri
+        return _path_to_uri(path)
+
+    def _text_doc(self, path: String) -> JsonValue:
+        """The ``{"uri": ...}`` TextDocumentIdentifier for ``path``.
+        Callers that need a richer TextDocumentItem (languageId / version)
+        add those fields to the returned object."""
+        var doc = json_object()
+        doc.put_owned(String("uri"), json_str(self._doc_uri(path)))
+        return doc^
+
+    def _position_params(
+        self, path: String, line: Int, character: Int,
+    ) -> JsonValue:
+        """The ``{textDocument:{uri}, position:{line,character}}`` params
+        shared by the definition / references / completion / hover
+        requests. Callers add request-specific fields (e.g. ``context``)
+        to the returned object."""
+        var params = json_object()
+        params.put_owned(String("textDocument"), self._text_doc(path))
+        params.put_owned(String("position"), _lsp_position(line, character))
+        return params^
+
     def _send_open_or_change(mut self, path: String, var text: String):
         var idx = self._doc_index(path)
         if idx < 0:
-            self._docs.append(_OpenDoc(path, 1, text.copy()))
+            self._docs.append(
+                _OpenDoc(path, _path_to_uri(path), 1, text.copy()),
+            )
             self._remap.set_doc(path, text)
             self._send_did_open(path, text^)
         else:
@@ -5310,11 +5343,11 @@ struct LspManager(Copyable, Movable):
                 + String(" text_len=") + String(len(text.as_bytes())),
             )
         var params = json_object()
-        var doc = _text_document(path)
+        var doc = self._text_doc(path)
         doc.put(String("languageId"), json_str(self._language_id))
         doc.put(String("version"), json_int(1))
-        doc.put(String("text"), json_str(text^))
-        params.put(String("textDocument"), doc)
+        doc.put_owned(String("text"), json_str(text^))
+        params.put_owned(String("textDocument"), doc^)
         try:
             self._send_notification(
                 String("textDocument/didOpen"), params,
@@ -5333,15 +5366,15 @@ struct LspManager(Copyable, Movable):
                 + String(" text_len=") + String(len(text.as_bytes())),
             )
         var params = json_object()
-        var doc = _text_document(path)
+        var doc = self._text_doc(path)
         doc.put(String("version"), json_int(version))
-        params.put(String("textDocument"), doc)
+        params.put_owned(String("textDocument"), doc^)
         var changes = json_array()
         var change = json_object()
         # Full-document sync: a single change with no ``range``.
-        change.put(String("text"), json_str(text^))
-        changes.append(change)
-        params.put(String("contentChanges"), changes)
+        change.put_owned(String("text"), json_str(text^))
+        changes.append_owned(change^)
+        params.put_owned(String("contentChanges"), changes^)
         try:
             self._send_notification(
                 String("textDocument/didChange"), params,
@@ -6153,15 +6186,6 @@ def _first_nonempty_line(s: String) -> String:
     return String("")
 
 
-def _text_document(path: String) -> JsonValue:
-    """The ``{"uri": ...}`` TextDocumentIdentifier object for ``path``.
-    Callers that need a richer TextDocumentItem (languageId / version) add
-    those fields to the returned object."""
-    var doc = json_object()
-    doc.put(String("uri"), json_str(_path_to_uri(path)))
-    return doc^
-
-
 def _lsp_range(sl: Int, sc: Int, el: Int, ec: Int) -> JsonValue:
     """An LSP ``{"start", "end"}`` Range object (0-based)."""
     var rng = json_object()
@@ -6769,19 +6793,6 @@ def _parse_text_edits(v: JsonValue) -> List[TextEditEntry]:
             t[0], t[1], t[2], t[3], te.obj_v[ni].value.as_str(),
         ))
     return out^
-
-
-def _text_document_position_params(
-    path: String, line: Int, character: Int,
-) -> JsonValue:
-    """Build the ``{textDocument:{uri}, position:{line,character}}`` params
-    object shared by the definition / references / completion / hover
-    requests. Callers add request-specific fields (e.g. ``context``) to the
-    returned object."""
-    var params = json_object()
-    params.put(String("textDocument"), _text_document(path))
-    params.put(String("position"), _lsp_position(line, character))
-    return params^
 
 
 def _path_to_uri(path: String) -> String:
