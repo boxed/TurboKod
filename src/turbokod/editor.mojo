@@ -5508,21 +5508,9 @@ struct Editor(Copyable, Movable):
         # New word: clear any prior result and stamp the dwell timer.
         # Anchor at the word's first cell on this visible segment; clamp
         # to the segment's left edge when the word wraps in from above.
-        var line_n = len(line.as_bytes())
-        var byte_in_seg: Int
-        if word_start < seg_byte_start:
-            byte_in_seg = 0
-        else:
-            byte_in_seg = word_start - seg_byte_start
-        var visible: String
-        if seg_byte_start >= line_n:
-            visible = String("")
-        else:
-            var clip_end = seg_byte_end
-            if clip_end > line_n:
-                clip_end = line_n
-            visible = byte_slice(line, seg_byte_start, clip_end)
-        var cell_off = utf8_cell_of_byte(visible, byte_in_seg)
+        var cell_off = _seg_cell_of_byte(
+            line, seg_byte_start, seg_byte_end, word_start,
+        )
         self._hover_candidate_row = row
         self._hover_candidate_col = word_start
         self._hover_candidate_since_ms = monotonic_ms()
@@ -5621,25 +5609,9 @@ struct Editor(Copyable, Movable):
         var seg_start = layout[sr].byte_start
         var seg_end = layout[sr].byte_end
         var seg_x0 = text_x0 + layout[sr].indent_cells
-        var line = self.buffer.line(row)
-        var line_byte_count = len(line.as_bytes())
-        var visible_str: String
-        if seg_start >= line_byte_count:
-            visible_str = String("")
-        else:
-            visible_str = byte_slice(line, seg_start, seg_end)
-        var cell_map = utf8_byte_to_cell(visible_str)
-        var cell_count = utf8_codepoint_count(visible_str)
-        var visible_byte_count = len(visible_str.as_bytes())
-        var cursor_byte = col - seg_start
-        var cell_offset: Int
-        if cursor_byte < 0:
-            cell_offset = 0
-        elif cursor_byte < visible_byte_count:
-            cell_offset = cell_map[cursor_byte]
-        else:
-            cell_offset = cell_count + (cursor_byte - visible_byte_count)
-        var sx = seg_x0 + cell_offset
+        var sx = seg_x0 + _seg_cell_of_byte(
+            self.buffer.line(row), seg_start, seg_end, col,
+        )
         var sy = view.a.y + sr
         if not (view.a.x <= sx and sx < content_right
                 and view.a.y <= sy and sy < content_bottom):
@@ -5678,21 +5650,9 @@ struct Editor(Copyable, Movable):
         clamp to ``seg_byte_start`` so the tooltip still aligns to
         whatever is on screen rather than scrolling out of view."""
         var line = self.buffer.line(row)
-        var line_n = len(line.as_bytes())
-        var byte_in_seg: Int
-        if span_start < seg_byte_start:
-            byte_in_seg = 0
-        else:
-            byte_in_seg = span_start - seg_byte_start
-        var visible: String
-        if seg_byte_start >= line_n:
-            visible = String("")
-        else:
-            var clip_end = seg_byte_end
-            if clip_end > line_n:
-                clip_end = line_n
-            visible = byte_slice(line, seg_byte_start, clip_end)
-        var cell_off = utf8_cell_of_byte(visible, byte_in_seg)
+        var cell_off = _seg_cell_of_byte(
+            line, seg_byte_start, seg_byte_end, span_start,
+        )
         self._minimap_hover_x = seg_x0 + cell_off
         self._minimap_hover_y = screen_y + 1
         self._minimap_hover_below = True
@@ -5886,25 +5846,10 @@ struct Editor(Copyable, Movable):
         var seg_start = layout[sr].byte_start
         var indent = layout[sr].indent_cells
         var seg_x0 = text_x0 + indent
-        var line = self.buffer.line(self.completion_anchor_row)
-        var line_n = len(line.as_bytes())
-        var vis: String
-        if seg_start >= line_n:
-            vis = String("")
-        else:
-            vis = byte_slice(line, seg_start, layout[sr].byte_end)
-        var cm = utf8_byte_to_cell(vis)
-        var cc = utf8_codepoint_count(vis)
-        var vbc = len(vis.as_bytes())
-        var anchor_byte = self.completion_anchor_col - seg_start
-        var cell_off: Int
-        if anchor_byte < 0:
-            cell_off = 0
-        elif anchor_byte < vbc:
-            cell_off = cm[anchor_byte]
-        else:
-            cell_off = cc + (anchor_byte - vbc)
-        var sx = seg_x0 + cell_off
+        var sx = seg_x0 + _seg_cell_of_byte(
+            self.buffer.line(self.completion_anchor_row), seg_start,
+            layout[sr].byte_end, self.completion_anchor_col,
+        )
         var sy = view.a.y + sr
         return Optional[Rect](
             self._completion_popup_rect_at(view, sx, sy)
@@ -6413,29 +6358,12 @@ struct Editor(Copyable, Movable):
         var indent = layout[sr].indent_cells
         var seg_x0 = text_x0 + indent
         var line = self.buffer.line(row)
-        var line_byte_count = len(line.as_bytes())
-        var visible_str: String
-        if seg_start >= line_byte_count:
-            visible_str = String("")
-        else:
-            visible_str = byte_slice(line, seg_start, seg_end)
-        var cursor_cell_map = utf8_byte_to_cell(visible_str)
-        var cursor_cell_count = utf8_codepoint_count(visible_str)
-        var visible_byte_count = len(visible_str.as_bytes())
-        var cursor_byte = col - seg_start
-        var cell_offset: Int
-        if cursor_byte < 0:
-            cell_offset = 0
-        elif cursor_byte < visible_byte_count:
-            cell_offset = cursor_cell_map[cursor_byte]
-        else:
-            cell_offset = cursor_cell_count + (cursor_byte - visible_byte_count)
-        var sx = seg_x0 + cell_offset
+        var sx = seg_x0 + _seg_cell_of_byte(line, seg_start, seg_end, col)
         var sy = view.a.y + sr
         if not (seg_x0 <= sx and sx < content_right
                 and view.a.y <= sy and sy < content_bottom):
             return
-        if col < line_byte_count:
+        if col < len(line.as_bytes()):
             painter.set_attr(canvas, sx, sy, Attr(CARET_FG, CARET_BG))
         else:
             painter.set(canvas, sx, sy, Cell(String(" "), Attr(CARET_FG, CARET_BG), 1))
@@ -11747,3 +11675,16 @@ def _is_open_bracket(b: Int) -> Bool:
 
 def _is_close_bracket(b: Int) -> Bool:
     return b == 0x29 or b == 0x5D or b == 0x7D
+
+
+def _seg_cell_of_byte(
+    line: String, seg_start: Int, seg_end: Int, byte: Int,
+) -> Int:
+    """Cells from the left edge of ``line``'s visible segment ``[seg_start,
+    seg_end)`` to byte ``byte`` — clamped to that edge when ``byte`` sits
+    before it (a span wrapping in from the row above)."""
+    var line_n = len(line.as_bytes())
+    var visible = String("")
+    if seg_start < line_n:
+        visible = byte_slice(line, seg_start, min(seg_end, line_n))
+    return utf8_cell_of_byte(visible, max(0, byte - seg_start))
