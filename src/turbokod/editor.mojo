@@ -756,10 +756,10 @@ struct TextBuffer(Copyable, Movable):
         var new_n = len(new_lines)
         var lim = min(old_n, new_n)
         var p = 0
-        while p < lim and self.lines[p] == new_lines[p]:
+        while p < lim and _same_text(self.lines[p], new_lines[p]):
             p += 1
         var s = 0
-        while s < lim - p and self.lines[old_n - 1 - s] == new_lines[new_n - 1 - s]:
+        while s < lim - p and _same_text(self.lines[old_n - 1 - s], new_lines[new_n - 1 - s]):
             s += 1
         var marks = List[Bool](capacity=new_n)
         var count = 0
@@ -1180,11 +1180,11 @@ struct EditorSnapshot(Copyable, Movable):
         var n = len(self.lines)
         var m = len(base)
         var p = 0
-        while p < n and p < m and self.lines[p] == base[p]:
+        while p < n and p < m and _same_text(self.lines[p], base[p]):
             p += 1
         var sfx = 0
         while sfx < n - p and sfx < m - p \
-                and self.lines[n - 1 - sfx] == base[m - 1 - sfx]:
+                and _same_text(self.lines[n - 1 - sfx], base[m - 1 - sfx]):
             sfx += 1
         var middle = List[String](capacity=n - p - sfx)
         for i in range(p, n - sfx):
@@ -2891,6 +2891,14 @@ struct Editor(Copyable, Movable):
         self._adjust_diagnostics(r, line_delta)
         self._last_known_line_count = current_lines
 
+    def _buffer_edited(mut self, row: Int, max_row: Int = -1):
+        """An edit changed the buffer from ``row`` (to ``max_row``): mark
+        it modified and note the rows for re-tokenizing (``_mark_hl_dirty``).
+        ``_restore`` is the one edit that doesn't come through here — it can
+        land back on the saved bytes."""
+        self.dirty = True
+        self._mark_hl_dirty(row, max_row)
+
     def refresh_highlights(mut self):
         """Mark highlights dirty so the next ``flush_highlights``
         call (driven by the render path) re-tokenizes. Use this
@@ -3027,6 +3035,59 @@ struct Editor(Copyable, Movable):
             var only_primary = List[Caret]()
             only_primary.append(self.selections[0])
             self.selections = only_primary^
+
+    def _typing_key_edit(
+        mut self, kind: Int, was_typing: Bool, prev_kind: Int,
+        prev_ms: Int, pre_dirty_row: Int, text: String = String(""),
+    ):
+        """One single-caret keystroke edit of ``kind`` — ``_RUN_INSERT``
+        (type ``text``), ``_RUN_BACKSPACE`` or ``_RUN_DELETE`` — with a
+        selection or extra carets collapsed first.
+
+        A run of plain keystrokes of the same kind (no selection, no
+        extras, within ``_TYPING_DEBOUNCE_MS`` of the last) is one undo
+        step; anything else pushes one, unless there is nothing to change
+        (Backspace at the very start, Delete at the very end). Typed text
+        replacing a selection starts a run too, so the characters after it
+        join its undo step; a deleted selection doesn't."""
+        var plain = not self.has_extra_carets() and not self.has_selection()
+        var now = monotonic_ms()
+        var row = self.selections[0].row
+        var col = self.selections[0].col
+        var can_edit = True
+        if kind == _RUN_BACKSPACE:
+            can_edit = col > 0 or row > 0
+        elif kind == _RUN_DELETE:
+            can_edit = col < self.buffer.line_length(row) \
+                or row + 1 < self.buffer.line_count()
+        var extend_run = plain and was_typing and prev_kind == kind \
+            and now - prev_ms <= _TYPING_DEBOUNCE_MS
+        if not extend_run and (not plain or can_edit):
+            self._push_undo()
+        self.clear_extra_carets()
+        var replaced = self.has_selection()
+        if replaced:
+            self._delete_selection()
+        if kind == _RUN_INSERT:
+            # Cursor columns are byte offsets into the line, so advance by
+            # the inserted text's UTF-8 byte length — not a bare +1: å/ä/ö
+            # are 2 bytes, and a +1 left the cursor mid-codepoint.
+            row = self.selections[0].row
+            col = self.selections[0].col
+            self.buffer.insert(row, col, text)
+            self.move_to(row, col + len(text.as_bytes()), False)
+        elif replaced:
+            pass
+        elif kind == _RUN_BACKSPACE:
+            var p = self.buffer.delete_before(row, col)
+            self.move_to(p[0], p[1], False)
+        else:
+            self.buffer.delete_at(row, col)
+        if plain or kind == _RUN_INSERT:
+            self._typing_active = True
+            self._typing_last_ms = now
+            self._typing_kind = kind
+        self._buffer_edited(pre_dirty_row)
 
     def _collapse_extras_with_undo(mut self):
         """When extras are present, push an undo snapshot capturing
@@ -3733,8 +3794,7 @@ struct Editor(Copyable, Movable):
         self._apply_edits_desc(
             item.additional_text_edits.copy(), hl_low, hl_high,
         )
-        self.dirty = True
-        self._mark_hl_dirty(hl_low, hl_high)
+        self._buffer_edited(hl_low, hl_high)
         self.close_completion_popup()
         return True
 
@@ -3971,8 +4031,7 @@ struct Editor(Copyable, Movable):
         # A caret inside a range taken out stays where it was: back into
         # the buffer with it, merged with any it now sits on
         self._install_carets(self.selections.copy())
-        self.dirty = True
-        self._mark_hl_dirty(hl_low, hl_high)
+        self._buffer_edited(hl_low, hl_high)
         return True
 
     def _finer_edits(self, e: TextEditEntry) -> List[TextEditEntry]:
@@ -4167,8 +4226,7 @@ struct Editor(Copyable, Movable):
         # One caret, there: others could be past the end now
         self.clear_extra_carets()
         self.move_to(nr, 0, False)
-        self.dirty = True
-        self._mark_hl_dirty(bs)
+        self._buffer_edited(bs)
 
     def _build_revert_request(
         self, view: Rect, target_row: Int, anchor_x: Int, anchor_y: Int,
@@ -4777,9 +4835,9 @@ struct Editor(Copyable, Movable):
         buffer. Returns the number of replacements; sets ``dirty`` if > 0.
         Does not move the cursor (caller may want to clamp it).
 
-        An undo step is pushed eagerly and rolled back when no replacements
-        actually fired, so a bulk replace that finds nothing won't blow
-        away redo history. No-op when the editor is read-only.
+        The undo step is pushed when the first match is found, so a bulk
+        replace that finds nothing leaves the undo and redo history alone.
+        No-op when the editor is read-only.
 
         ``opts`` honors the Cc / W / .* search-mode flags; matching runs
         through ``LineSearcher``, which takes the branchless SIMD byte
@@ -4793,28 +4851,27 @@ struct Editor(Copyable, Movable):
         var searcher = self._search_cache.get(find, opts)
         if not searcher.usable():
             return 0
-        self._push_undo()
         var count = 0
+        var rlen = len(replacement.as_bytes())
         for row in range(self.buffer.line_count()):
-            var line = self.buffer.line(row)
+            var m = searcher.search(self.buffer.lines[row], 0)
+            if not m:
+                continue
+            if count == 0:
+                self._push_undo()
+            var line = self.buffer.lines[row]
             var lb = line.as_bytes()
             var h = len(lb)
-            var rebuilt = String("")
-            var pos = 0
+            var rebuilt = String()
+            rebuilt.reserve_bytes(h + rlen)
             var seg_start = 0
-            var line_changed = False
-            while pos <= h:
-                var m = searcher.search(line, pos)
-                if not m:
-                    break
+            while m:
                 var mv = m.value()
                 if mv.start > seg_start:
-                    rebuilt = rebuilt + String(StringSpan(
-                        unsafe_from_utf8=lb[seg_start:mv.start]
-                    ))
-                rebuilt = rebuilt + replacement
+                    rebuilt += StringSpan(unsafe_from_utf8=lb[seg_start:mv.start])
+                rebuilt += replacement
                 count += 1
-                line_changed = True
+                var pos: Int
                 if mv.end == mv.start:
                     # Zero-width match (regex mode only): advance one
                     # character so the loop can't spin forever.
@@ -4823,17 +4880,16 @@ struct Editor(Copyable, Movable):
                 else:
                     seg_start = mv.end
                     pos = mv.end
-            if line_changed:
-                if seg_start < h:
-                    rebuilt = rebuilt + String(StringSpan(
-                        unsafe_from_utf8=lb[seg_start:h]
-                    ))
-                self.buffer.lines[row] = rebuilt
+                if pos > h:
+                    break
+                m = searcher.search(line, pos)
+            if seg_start < h:
+                rebuilt += StringSpan(unsafe_from_utf8=lb[seg_start:h])
+            self.buffer.lines[row] = rebuilt^
         if count > 0:
-            self.dirty = True
             # ``replace_all`` may have touched any number of lines;
             # we don't track the lowest, so force a full retokenize.
-            self._mark_hl_dirty(0)
+            self._buffer_edited(0)
             # Clamp the cursor (line lengths may have changed under it).
             var max_row = self.buffer.line_count() - 1
             if self.selections[0].row > max_row: self.selections[0].row = max_row
@@ -4841,10 +4897,6 @@ struct Editor(Copyable, Movable):
             if self.selections[0].col > nlen: self.selections[0].col = nlen
             self.selections[0].anchor_row = self.selections[0].row
             self.selections[0].anchor_col = self.selections[0].col
-        else:
-            # Nothing changed — roll back the speculative snapshot so the
-            # undo stack stays in sync and redo isn't clobbered.
-            _ = _history_pop(self._undo_stack)
         return count
 
     # --- selection state ---------------------------------------------------
@@ -4894,8 +4946,7 @@ struct Editor(Copyable, Movable):
         self.selections[0].desired_col = utf8_cell_of_byte(
             self.buffer.line(self.selections[0].row), self.selections[0].col,
         )
-        self.dirty = True
-        self._mark_hl_dirty(pre_dirty_row, er)
+        self._buffer_edited(pre_dirty_row, er)
 
     def _dedent_rows(mut self, sr: Int, er: Int, pre_dirty_row: Int):
         """Remove up to one indent unit of leading whitespace from every
@@ -4944,8 +4995,7 @@ struct Editor(Copyable, Movable):
         self.selections[0].desired_col = utf8_cell_of_byte(
             self.buffer.line(self.selections[0].row), self.selections[0].col,
         )
-        self.dirty = True
-        self._mark_hl_dirty(pre_dirty_row, er)
+        self._buffer_edited(pre_dirty_row, er)
 
     def move_to(mut self, row: Int, col: Int, extend: Bool = False, sticky_col: Bool = True):
         """Place the cursor at ``(row, col)`` (``col`` is a byte offset, must
@@ -8175,8 +8225,7 @@ struct Editor(Copyable, Movable):
                 ),
             )
         self._install_carets(new_carets^)
-        self.dirty = True
-        self._mark_hl_dirty(pre_dirty_row)
+        self._buffer_edited(pre_dirty_row)
 
     def apply_fill_strings(mut self, texts: List[String]) -> Bool:
         """Insert one string per caret, in canonical (ascending) caret
@@ -8224,8 +8273,7 @@ struct Editor(Copyable, Movable):
             )
             row_shift += n_text - (actual_ec - actual_sc)
         self._install_carets(new_carets^)
-        self.dirty = True
-        self._mark_hl_dirty(pre_dirty_row)
+        self._buffer_edited(pre_dirty_row)
         return True
 
     # --- smart-select (Cmd+Up / Cmd+Down) ---------------------------------
@@ -8994,11 +9042,10 @@ struct Editor(Copyable, Movable):
                 )
                 self.move_to(p[0], p[1], True)
                 self._delete_selection()
-                self.dirty = True
                 # ``p[0]`` is the (possibly earlier) row the deletion
                 # starts on — at col 0 the word boundary is on the line
                 # above, so this is the true lowest changed row.
-                self._mark_hl_dirty(p[0])
+                self._buffer_edited(p[0])
             # Multi-caret fast path: every caret can run an inline
             # backspace (either has a same-row selection it can replace
             # with nothing, or is mid-line). Cross-row selections and
@@ -9007,8 +9054,7 @@ struct Editor(Copyable, Movable):
                     and self._all_carets_inline_safe(1):
                 self._push_undo()
                 self._multi_edit_inline(String(""), 1)
-                self.dirty = True
-                self._mark_hl_dirty(pre_dirty_row_multi, post_dirty_row_multi)
+                self._buffer_edited(pre_dirty_row_multi, post_dirty_row_multi)
             elif self.has_extra_carets() and self._all_carets_col0():
                 # Every caret sits at column 0: backspace joins each
                 # caret's row into the row above. A run of consecutive
@@ -9019,11 +9065,7 @@ struct Editor(Copyable, Movable):
                 # the topmost caret.
                 self._push_undo()
                 self._multi_join_backward()
-                self.dirty = True
-                var hl_row = pre_dirty_row_multi - 1
-                if hl_row < 0:
-                    hl_row = 0
-                self._mark_hl_dirty(hl_row)
+                self._buffer_edited(max(pre_dirty_row_multi - 1, 0))
             else:
                 # Single-caret fallback. Push once, capturing extras
                 # if any, so a single undo restores the multi-caret
@@ -9034,31 +9076,10 @@ struct Editor(Copyable, Movable):
                 # A run of plain one-character backspaces is one undo
                 # step, like a run of typed characters: a snapshot per
                 # press copied the line list every time.
-                var plain = not self.has_extra_carets() \
-                    and not self.has_selection()
-                var now_bs = monotonic_ms()
-                var extend_run = plain and was_typing \
-                    and prev_typing_kind == _RUN_BACKSPACE \
-                    and now_bs - prev_typing_ms <= _TYPING_DEBOUNCE_MS
-                if not extend_run and (
-                    self.has_extra_carets() or self.has_selection()
-                    or self.selections[0].col > 0 or self.selections[0].row > 0
-                ):
-                    self._push_undo()
-                self.clear_extra_carets()
-                if self.has_selection():
-                    self._delete_selection()
-                else:
-                    var p = self.buffer.delete_before(
-                        self.selections[0].row, self.selections[0].col,
-                    )
-                    self.move_to(p[0], p[1], False)
-                if plain:
-                    self._typing_active = True
-                    self._typing_last_ms = now_bs
-                    self._typing_kind = _RUN_BACKSPACE
-                self.dirty = True
-                self._mark_hl_dirty(pre_dirty_row)
+                self._typing_key_edit(
+                    _RUN_BACKSPACE, was_typing, prev_typing_kind,
+                    prev_typing_ms, pre_dirty_row,
+                )
             # As-you-type completion: when the popup is visible and
             # the cursor is still inside an identifier after the
             # backspace, re-stamp a request so the filtered list
@@ -9075,37 +9096,15 @@ struct Editor(Copyable, Movable):
                     and self._all_carets_inline_safe(2):
                 self._push_undo()
                 self._multi_edit_inline(String(""), 2)
-                self.dirty = True
-                self._mark_hl_dirty(pre_dirty_row_multi, post_dirty_row_multi)
+                self._buffer_edited(pre_dirty_row_multi, post_dirty_row_multi)
             else:
                 # Single-caret fallback. As with backspace, push once
                 # capturing extras so a single undo walks back to the
                 # multi-caret state.
-                var at_end = self.selections[0].col \
-                        >= self.buffer.line_length(self.selections[0].row) \
-                    and self.selections[0].row + 1 >= self.buffer.line_count()
-                var plain = not self.has_extra_carets() \
-                    and not self.has_selection()
-                var now_del = monotonic_ms()
-                var extend_run = plain and was_typing \
-                    and prev_typing_kind == _RUN_DELETE \
-                    and now_del - prev_typing_ms <= _TYPING_DEBOUNCE_MS
-                if not extend_run and (
-                    self.has_extra_carets() or self.has_selection()
-                    or not at_end
-                ):
-                    self._push_undo()
-                self.clear_extra_carets()
-                if self.has_selection():
-                    self._delete_selection()
-                else:
-                    self.buffer.delete_at(self.selections[0].row, self.selections[0].col)
-                if plain:
-                    self._typing_active = True
-                    self._typing_last_ms = now_del
-                    self._typing_kind = _RUN_DELETE
-                self.dirty = True
-                self._mark_hl_dirty(pre_dirty_row)
+                self._typing_key_edit(
+                    _RUN_DELETE, was_typing, prev_typing_kind,
+                    prev_typing_ms, pre_dirty_row,
+                )
         elif k == KEY_ENTER:
             # Alt+Enter on a misspelled word stamps a pending
             # ``SpellActionRequest`` for the host to surface its
@@ -9174,8 +9173,7 @@ struct Editor(Copyable, Movable):
                     self.selections[0].col + len(indent.as_bytes()),
                     False,
                 )
-            self.dirty = True
-            self._mark_hl_dirty(pre_dirty_row)
+            self._buffer_edited(pre_dirty_row)
             # On-type formatting trigger for newline (many servers reindent
             # on '\n'): stamp the post-split cursor + the newline char.
             self.pending_on_type = Optional[HoverRequest](
@@ -9221,8 +9219,7 @@ struct Editor(Copyable, Movable):
                     self.move_to(
                         self.selections[0].row, self.selections[0].col + indent_n, False,
                     )
-                self.dirty = True
-                self._mark_hl_dirty(pre_dirty_row_multi, post_dirty_row_multi)
+                self._buffer_edited(pre_dirty_row_multi, post_dirty_row_multi)
         elif chord == CLIP_SELECT_ALL:
             self.select_all()
         elif chord == CLIP_COPY:
@@ -9234,14 +9231,12 @@ struct Editor(Copyable, Movable):
             if self.read_only:
                 return True
             self.cut_to_clipboard()
-            self._mark_hl_dirty(pre_dirty_row)
         elif chord == CLIP_PASTE:
             if self.read_only:
                 return True
             # Multi-caret paste is supported (``_multi_paste``), so no
             # collapse here — the extras are what makes it a broadcast.
             self.paste_from_clipboard()
-            self._mark_hl_dirty(pre_dirty_row_multi)
         elif is_printable_text_key(k):
             # Printable text — the range and the reasoning behind each
             # exclusion live in ``is_printable_text_key``.
@@ -9271,8 +9266,7 @@ struct Editor(Copyable, Movable):
                 self._typing_active = True
                 self._typing_last_ms = now
                 self._typing_kind = _RUN_INSERT
-                self.dirty = True
-                self._mark_hl_dirty(pre_dirty_row_multi, post_dirty_row_multi)
+                self._buffer_edited(pre_dirty_row_multi, post_dirty_row_multi)
             else:
                 # Cross-row selections + multi-caret typing isn't
                 # supported; snapshot the multi-state so undo can
@@ -9285,32 +9279,10 @@ struct Editor(Copyable, Movable):
                 # into-selection is a destructive replace, not a
                 # continuation), or anything that already cleared
                 # ``was_typing`` (cursor move, edit, paste, mouse, …).
-                var extend_group = was_typing and not self.has_selection() \
-                    and prev_typing_kind == _RUN_INSERT \
-                    and now - prev_typing_ms <= _TYPING_DEBOUNCE_MS
-                if not extend_group:
-                    self._push_undo()
-                if self.has_selection():
-                    self._delete_selection()
-                # Cursor columns are byte offsets into the line, so advance
-                # by the inserted codepoint's UTF-8 byte length — not a bare
-                # +1. ASCII is 1 byte (unchanged), but å/ä/ö are 2 bytes; a
-                # +1 there left the cursor mid-codepoint and the next keypress
-                # spliced bytes inside the glyph.
-                var inserted = chr(Int(k))
-                self.buffer.insert(
-                    self.selections[0].row, self.selections[0].col, inserted,
+                self._typing_key_edit(
+                    _RUN_INSERT, was_typing, prev_typing_kind,
+                    prev_typing_ms, pre_dirty_row, chr(Int(k)),
                 )
-                self.move_to(
-                    self.selections[0].row,
-                    self.selections[0].col + len(inserted.as_bytes()),
-                    False,
-                )
-                self._typing_active = True
-                self._typing_last_ms = now
-                self._typing_kind = _RUN_INSERT
-                self.dirty = True
-                self._mark_hl_dirty(pre_dirty_row)
             # As-you-type completion. Stamp a fresh request whenever
             # the typed byte extends an identifier (ASCII letter,
             # digit, or underscore) or is a member-access trigger
@@ -9468,8 +9440,7 @@ struct Editor(Copyable, Movable):
                 pre = self.selections[0].anchor_row
             self._push_undo()
             self._delete_selection()
-            self.dirty = True
-            self._mark_hl_dirty(pre)
+            self._buffer_edited(pre)
         return text
 
     def paste_text(mut self, text: String):
@@ -9494,8 +9465,7 @@ struct Editor(Copyable, Movable):
         if self.has_selection():
             self._delete_selection()
         self._insert_text(text)
-        self.dirty = True
-        self._mark_hl_dirty(pre_dirty_row)
+        self._buffer_edited(pre_dirty_row)
 
     def select_all(mut self):
         """Select the whole buffer — the Ctrl/Cmd+A action.
@@ -9591,8 +9561,7 @@ struct Editor(Copyable, Movable):
             if nr > max_row:
                 nr = max_row
             self.move_to(nr, 0, False)
-        self.dirty = True
-        self._mark_hl_dirty(r)
+        self._buffer_edited(r)
 
     def _caret_rows_asc(self) -> List[Int]:
         """The distinct rows holding a caret, top to bottom."""
@@ -9639,8 +9608,7 @@ struct Editor(Copyable, Movable):
                 nr = max_row
             carets.append(Caret(nr, 0, 0, nr, 0))
         self._install_carets(carets^)
-        self.dirty = True
-        self._mark_hl_dirty(rows[0])
+        self._buffer_edited(rows[0])
 
     def paste_from_clipboard(mut self):
         """Replace any selection with the system clipboard's contents.
@@ -9690,8 +9658,7 @@ struct Editor(Copyable, Movable):
         if col > line_n:
             col = line_n
         self.move_to(self.selections[0].row, col, False)
-        self.dirty = True
-        self._mark_hl_dirty(pre_dirty_row)
+        self._buffer_edited(pre_dirty_row)
 
     # --- turbo-style editor commands --------------------------------------
 
@@ -9822,11 +9789,10 @@ struct Editor(Copyable, Movable):
         self.clear_extra_carets()
         var nr = min(cur - above, self.buffer.line_count() - 1)
         self.move_to(max(nr, 0), 0, False)
-        self.dirty = True
         # Scattered deletions defeat the speculative diagnostic shift;
         # the LSP refresh repopulates them.
         self.clear_diagnostics()
-        self._mark_hl_dirty(first)
+        self._buffer_edited(first)
         return n
 
     def selection_is_search_match(
@@ -10033,7 +9999,6 @@ struct Editor(Copyable, Movable):
                 var before = byte_slice(line, 0, common_len)
                 var after = byte_slice(line, common_len, lb_len)
                 self.buffer.lines[r] = before + effective_prefix + after
-        self.dirty = True
         # Toggle-comment edits every row in ``sr..er`` in place (the
         # line count doesn't change), so the incremental tokenizer
         # can't see the edit from the line count alone. Pass ``er`` as
@@ -10042,7 +10007,7 @@ struct Editor(Copyable, Movable):
         # comment returns to the base stack right after ``sr``, which
         # would otherwise leave ``sr+1..er`` painted with stale,
         # uncommented highlights.
-        self._mark_hl_dirty(sr, er)
+        self._buffer_edited(sr, er)
 
     def toggle_case(mut self):
         """Invert ASCII case across the current selection (no-op if empty
@@ -10067,12 +10032,11 @@ struct Editor(Copyable, Movable):
                 else:
                     new_bytes.append(lb[i])
             self.buffer.lines[r] = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=new_bytes.unsafe_ptr(), length=len(new_bytes))))
-        self.dirty = True
         # ``toggle_case`` edits ``sr..er`` in place; ``sr`` is the
         # lowest changed row, ``er`` the high-water mark that keeps the
         # incremental tokenizer from early-exiting before it re-colors
         # every edited row.
-        self._mark_hl_dirty(sr, er)
+        self._buffer_edited(sr, er)
 
     def sort_lines(mut self):
         """Sort the lines touched by the selection alphabetically, ignoring
@@ -10112,13 +10076,12 @@ struct Editor(Copyable, Movable):
         for i in range(len(order)):
             self.buffer.lines[sr + i] = rows[order[i]]
             self.buffer.set_mark(sr + i, marked[order[i]])
-        self.dirty = True
         self.move_to(sr, 0, False)
         if ends_at_next_row:
             self.move_to(er + 1, 0, True)
         else:
             self.move_to(er, len(self.buffer.line(er).as_bytes()), True)
-        self._mark_hl_dirty(sr, er)
+        self._buffer_edited(sr, er)
 
     def _insert_text_at(
         mut self, row: Int, col: Int, text: String,

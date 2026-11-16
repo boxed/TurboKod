@@ -679,6 +679,16 @@ def test_editor_replace_all_zero_width_regex() raises:
     assert_equal(ed3.buffer.line(0), String("-é-😀-b-"))
 
 
+def test_editor_replace_all_without_a_match_keeps_redo() raises:
+    var ed = Editor(String("foo"))
+    _ = ed.replace_all(String("foo"), String("bar"))
+    assert_true(ed.undo())
+    assert_equal(ed.buffer.line(0), String("foo"))
+    assert_equal(ed.replace_all(String("nope"), String("x")), 0)
+    assert_true(ed.redo())
+    assert_equal(ed.buffer.line(0), String("bar"))
+
+
 def test_editor_replace_all_leaves_read_only_and_bad_patterns_alone() raises:
     var ed = Editor(String("foo"))
     ed.read_only = True

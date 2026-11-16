@@ -202,6 +202,16 @@ def test_editor_cmd_a_selects_all() raises:
     assert_equal(ed.selections[0].col, 8)
 
 
+def test_editor_empty_paste_is_not_an_edit() raises:
+    """Cmd+V with an empty clipboard changes nothing, so it mustn't count
+    as an edit (the LSP / git gutter / tests rescans key off it)."""
+    var ed = Editor(String("hello"))
+    var before = ed.change_count
+    assert_true(ed.handle_key(_key(UInt32(ord("v")), MOD_META), _VIEW))
+    assert_equal(ed.change_count, before)
+    assert_false(ed.dirty)
+
+
 def test_editor_mouse_click_sets_cursor() raises:
     var ed = Editor(String("hello"))
     _ = ed.handle_mouse(
