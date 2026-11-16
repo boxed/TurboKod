@@ -38,5 +38,29 @@ def test_a_line_past_the_table() raises:
     assert_equal(t.line(-1), String(""))
 
 
+def test_the_table_converts_rows_in_place() raises:
+    """``col_to_wire`` / ``wire_to_col`` convert over the row's bytes (no
+    line String): CRLF rows, astral characters, and malformed UTF-8 (a
+    stray continuation byte and a truncated lead count as one unit each,
+    as ``codepoint_at`` decodes them)."""
+    var bad = List[UInt8]()
+    for c in [0x80, 0xC3, 0xA9, 0xE2]:  # stray, é, truncated lead
+        bad.append(UInt8(c))
+    var t = LineTable(
+        String("x\r\na") + chr(0x1F600) + String("b\n")
+        + String(StringSpan(unsafe_from_utf8=Span(bad)))
+    )
+    assert_equal(t.col_to_wire(0, 1, POS_UTF16), 1)
+    assert_equal(t.col_to_wire(1, 5, POS_UTF16), 3)
+    assert_equal(t.wire_to_col(1, 3, POS_UTF16), 5)
+    assert_equal(t.wire_to_col(1, 2, POS_UTF16), 1)  # inside the pair
+    assert_equal(t.col_to_wire(1, 6, POS_UTF32), 3)
+    assert_equal(t.col_to_wire(2, 3, POS_UTF16), 2)
+    assert_equal(t.col_to_wire(2, 4, POS_UTF16), 3)
+    assert_equal(t.wire_to_col(2, 1, POS_UTF16), 1)
+    assert_equal(t.wire_to_col(2, 3, POS_UTF16), 4)
+    assert_equal(t.col_to_wire(9, 3, POS_UTF16), 0)
+
+
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()

@@ -518,10 +518,11 @@ struct _PositionRemapper(Copyable, Movable):
     documentSymbol, formatting …). With no resolvable URI we leave the
     value alone — a wrong column beats a guessed one.
 
-    Open buffers are registered with ``set_doc`` as their text is sent
-    (authoritative — the buffer may be dirty) and indexed only when a walk
-    first needs them, so an edit costs nothing until a payload actually
-    mentions that document; ``set_doc`` drops the stale index. Anything
+    Open buffers' text is the manager's ``_docs`` (what the server was
+    last sent — authoritative, the buffer may be dirty), passed to each
+    walk and indexed only when a walk first needs it, so an edit costs
+    nothing until a payload actually mentions that document; an edit or
+    close ``invalidate``s the stale index. Anything
     else is read from disk, cached for the life of one walk
     (``begin_walk``), so a rename touching 50 edits in one file reads and
     indexes it once.
@@ -534,8 +535,6 @@ struct _PositionRemapper(Copyable, Movable):
     var tables: List[LineTable]
     var from_disk: List[Bool]
     var missing: List[String]
-    var doc_paths: List[String]
-    var doc_texts: List[String]
 
     def __init__(out self, enc: UInt8):
         self.enc = enc
@@ -543,35 +542,15 @@ struct _PositionRemapper(Copyable, Movable):
         self.tables = List[LineTable]()
         self.from_disk = List[Bool]()
         self.missing = List[String]()
-        self.doc_paths = List[String]()
-        self.doc_texts = List[String]()
 
-    def _drop_table(mut self, path: String):
+    def invalidate(mut self, path: String):
+        """Forget ``path``'s index: an open document's text changed, or it
+        closed (and is read from disk from now on)."""
         for i in range(len(self.paths)):
             if self.paths[i] == path:
                 _ = self.paths.pop(i)
                 _ = self.tables.pop(i)
                 _ = self.from_disk.pop(i)
-                return
-
-    def set_doc(mut self, path: String, text: String):
-        """Register an open document's current text (what the server was
-        last sent). Indexed lazily by ``_slot_for``."""
-        self._drop_table(path)
-        for i in range(len(self.doc_paths)):
-            if self.doc_paths[i] == path:
-                self.doc_texts[i] = text.copy()
-                return
-        self.doc_paths.append(path)
-        self.doc_texts.append(text.copy())
-
-    def drop_doc(mut self, path: String):
-        """Forget a closed document; it's read from disk from now on."""
-        self._drop_table(path)
-        for i in range(len(self.doc_paths)):
-            if self.doc_paths[i] == path:
-                _ = self.doc_paths.pop(i)
-                _ = self.doc_texts.pop(i)
                 return
 
     def begin_walk(mut self):
@@ -588,9 +567,10 @@ struct _PositionRemapper(Copyable, Movable):
                 i += 1
         self.missing.clear()
 
-    def _slot_for(mut self, path: String) -> Int:
-        """Cache slot for ``path``: an open document's registered text, or
-        the file on disk. Returns -1 when the file can't be read — the
+    def _slot_for(mut self, path: String, docs: List[_OpenDoc]) -> Int:
+        """Cache slot for ``path``: an open document's text (``docs``, what
+        the server was last sent — authoritative, the buffer may be dirty),
+        or the file on disk. Returns -1 when the file can't be read — the
         caller then leaves columns untouched rather than converting
         against empty text."""
         if len(path.as_bytes()) == 0:
@@ -598,10 +578,10 @@ struct _PositionRemapper(Copyable, Movable):
         for i in range(len(self.paths)):
             if self.paths[i] == path:
                 return i
-        for i in range(len(self.doc_paths)):
-            if self.doc_paths[i] == path:
+        for i in range(len(docs)):
+            if docs[i].path == path:
                 self.paths.append(path)
-                self.tables.append(LineTable(self.doc_texts[i].copy()))
+                self.tables.append(LineTable(docs[i].text.copy()))
                 self.from_disk.append(False)
                 return len(self.tables) - 1
         for i in range(len(self.missing)):
@@ -617,10 +597,10 @@ struct _PositionRemapper(Copyable, Movable):
             return -1
         return len(self.tables) - 1
 
-    def _uri_of(self, v: JsonValue, inherited: String) -> String:
-        """URI context for ``v``: its own ``uri`` / ``targetUri``, else the
+    def _own_uri(self, v: JsonValue) -> String:
+        """``v``'s own URI context: its ``uri`` / ``targetUri``, else the
         ``uri`` of a nested ``textDocument`` (the ``documentChanges``
-        shape), else whatever the parent was carrying."""
+        shape); ``""`` when it carries none and inherits its parent's."""
         var di = v.object_index(String("uri"))
         if di >= 0 and v.obj_v[di].value.is_string():
             return v.obj_v[di].value.str_v
@@ -633,9 +613,12 @@ struct _PositionRemapper(Copyable, Movable):
             var ui = td.object_index(String("uri"))
             if ui >= 0 and td.obj_v[ui].value.is_string():
                 return td.obj_v[ui].value.str_v
-        return inherited
+        return String("")
 
-    def walk(mut self, mut v: JsonValue, uri: String, to_bytes: Bool):
+    def walk(
+        mut self, mut v: JsonValue, uri: String, to_bytes: Bool,
+        docs: List[_OpenDoc],
+    ):
         """Convert every Position's ``character`` in ``v``, in place.
 
         ``to_bytes`` True is the inbound direction (wire units → byte
@@ -643,9 +626,19 @@ struct _PositionRemapper(Copyable, Movable):
         """
         if self.enc == POS_UTF8:
             return
+        var slot = _SLOT_UNRESOLVED
+        self._walk(v, uri, slot, to_bytes, docs)
+
+    def _walk(
+        mut self, mut v: JsonValue, uri: String, mut slot: Int,
+        to_bytes: Bool, docs: List[_OpenDoc],
+    ):
+        """``walk`` with the URI context's table slot, resolved on the
+        first Position under it and shared by the rest (a 500-edit
+        formatting result resolves its document once, not 500 times)."""
         if v.is_array():
             for i in range(len(v.arr_v)):
-                self.walk(v.arr_v[i], uri, to_bytes)
+                self._walk(v.arr_v[i], uri, slot, to_bytes, docs)
             return
         if not v.is_object():
             return
@@ -653,7 +646,8 @@ struct _PositionRemapper(Copyable, Movable):
         var ch = v.object_index(String("character"))
         if ln >= 0 and ch >= 0 and v.obj_v[ln].value.is_int() \
                 and v.obj_v[ch].value.is_int():
-            var slot = self._slot_for(_uri_to_path(uri))
+            if slot == _SLOT_UNRESOLVED:
+                slot = self._slot_for(_uri_to_path(uri), docs)
             if slot < 0:
                 return
             var row = v.obj_v[ln].value.int_v
@@ -664,7 +658,18 @@ struct _PositionRemapper(Copyable, Movable):
                 col = self.tables[slot].col_to_wire(row, col, self.enc)
             v.obj_v[ch].value.int_v = col
             return
-        var ctx = self._uri_of(v, uri)
+        var own = self._own_uri(v)
+        if len(own.as_bytes()) > 0:
+            # A new context: children resolve their own slot.
+            var own_slot = _SLOT_UNRESOLVED
+            self._walk_members(v, own, own_slot, to_bytes, docs)
+        else:
+            self._walk_members(v, uri, slot, to_bytes, docs)
+
+    def _walk_members(
+        mut self, mut v: JsonValue, uri: String, mut slot: Int,
+        to_bytes: Bool, docs: List[_OpenDoc],
+    ):
         for i in range(len(v.obj_v)):
             # ``WorkspaceEdit.changes`` is a ``{uri: TextEdit[]}`` map — the
             # URI context for each group is the *key*, not a field.
@@ -673,9 +678,15 @@ struct _PositionRemapper(Copyable, Movable):
                 ref changes = v.obj_v[i].value
                 for k in range(len(changes.obj_v)):
                     var curi = changes.obj_v[k].key
-                    self.walk(changes.obj_v[k].value, curi, to_bytes)
+                    var cslot = _SLOT_UNRESOLVED
+                    self._walk(
+                        changes.obj_v[k].value, curi, cslot, to_bytes, docs,
+                    )
                 continue
-            self.walk(v.obj_v[i].value, ctx, to_bytes)
+            self._walk(v.obj_v[i].value, uri, slot, to_bytes, docs)
+
+
+comptime _SLOT_UNRESOLVED = -2
 
 
 @fieldwise_init
@@ -1622,7 +1633,7 @@ struct LspManager(Copyable, Movable):
         if self._position_enc == POS_UTF8:
             return
         self._remap.begin_walk()
-        self._remap.walk(v, uri, True)
+        self._remap.walk(v, uri, True, self._docs)
 
     def _send_wire(
         mut self, method: String, params: JsonValue, is_request: Bool,
@@ -1633,7 +1644,7 @@ struct LspManager(Copyable, Movable):
             return self._transport_send(method, params, is_request)
         var wire = params.copy()
         self._remap.begin_walk()
-        self._remap.walk(wire, String(""), False)
+        self._remap.walk(wire, String(""), False, self._docs)
         return self._transport_send(method, wire, is_request)
 
     def _transport_send(
@@ -2060,7 +2071,7 @@ struct LspManager(Copyable, Movable):
         if idx < 0:
             return
         var closed = self._docs.pop(idx)
-        self._remap.drop_doc(path)
+        self._remap.invalidate(path)
         # A consumed bucket is only a marker (its list went to the editor),
         # and a pull answered after the close would just park a report
         # nobody reads: drop both. An unconsumed bucket stays for a reopen.
@@ -5265,7 +5276,7 @@ struct LspManager(Copyable, Movable):
             self._docs.append(
                 _OpenDoc(path, _path_to_uri(path), 1, text.copy()),
             )
-            self._remap.set_doc(path, text)
+            self._remap.invalidate(path)
             self._send_did_open(path, text^)
         else:
             # Unchanged text → the server already has this exact content.
@@ -5277,7 +5288,7 @@ struct LspManager(Copyable, Movable):
             d.version += 1
             var version = d.version
             d.text = text.copy()
-            self._remap.set_doc(path, text)
+            self._remap.invalidate(path)
             self._send_did_change(path, version, text^)
 
     def diagnostics_inflight_ms_for(mut self, path: String) -> Int:

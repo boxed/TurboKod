@@ -35,7 +35,7 @@ half a character in either direction.
 
 from std.collections.list import List
 
-from .string_utils import byte_slice, codepoint_at
+from .string_utils import byte_slice
 
 
 comptime POS_UTF8  = UInt8(0)
@@ -74,37 +74,90 @@ def _units_for_codepoint(cp: Int, enc: UInt8) -> Int:
     return 1
 
 
+def _step(b: Span[UInt8, _], i: Int, enc: UInt8) -> Tuple[Int, Int]:
+    """``(bytes, units)`` of the codepoint at byte ``i`` of ``b`` — decoded
+    the way ``codepoint_at`` does: a malformed or truncated sequence is
+    its lead byte alone (one unit)."""
+    var c = Int(b[i])
+    if c < 0x80:
+        return (1, 1)
+    var size = 1
+    if (c & 0xE0) == 0xC0:
+        size = 2
+    elif (c & 0xF0) == 0xE0:
+        size = 3
+    elif (c & 0xF8) == 0xF0:
+        size = 4
+    if size == 1 or i + size > len(b):
+        return (1, 1)
+    for k in range(1, size):
+        if (Int(b[i + k]) & 0xC0) != 0x80:
+            return (1, 1)
+    if size < 4:
+        return (size, 1)
+    var cp = ((c & 0x07) << 18) | ((Int(b[i + 1]) & 0x3F) << 12)
+    return (4, _units_for_codepoint(cp, enc))
+
+
+def byte_to_units_span(b: Span[UInt8, _], byte_col: Int, enc: UInt8) -> Int:
+    """``byte_to_units`` over a line's bytes — no ``String`` per call."""
+    var n = len(b)
+    if byte_col <= 0:
+        return 0
+    var limit = byte_col
+    if limit > n:
+        limit = n
+    if enc == POS_UTF8:
+        return limit
+    var units = 0
+    var i = 0
+    while i < limit:
+        if b[i] < 0x80:
+            # ASCII: one byte, one unit.
+            units += 1
+            i += 1
+            continue
+        var st = _step(b, i, enc)
+        if i + st[0] > limit:
+            # ``byte_col`` fell inside this codepoint — snap to its start.
+            break
+        units += st[1]
+        i += st[0]
+    return units
+
+
+def units_to_byte_span(b: Span[UInt8, _], units: Int, enc: UInt8) -> Int:
+    """``units_to_byte`` over a line's bytes — no ``String`` per call."""
+    var n = len(b)
+    if units <= 0:
+        return 0
+    if enc == POS_UTF8:
+        return units if units < n else n
+    var seen = 0
+    var i = 0
+    while i < n:
+        if seen >= units:
+            return i
+        if b[i] < 0x80:
+            seen += 1
+            i += 1
+            continue
+        var st = _step(b, i, enc)
+        if seen + st[1] > units:
+            # ``units`` splits a surrogate pair — snap to the codepoint start.
+            return i
+        seen += st[1]
+        i += st[0]
+    return n
+
+
 def byte_to_units(line: String, byte_col: Int, enc: UInt8) -> Int:
     """Convert a byte column on ``line`` to a wire ``character`` offset.
 
     ``byte_col`` is clamped to the line length; a column landing inside a
     codepoint snaps down to that codepoint's start (its units are not
     counted) so we never report half a character."""
-    if enc == POS_UTF8:
-        var n8 = len(line.as_bytes())
-        if byte_col < 0:
-            return 0
-        if byte_col > n8:
-            return n8
-        return byte_col
-    var n = len(line.as_bytes())
-    if byte_col <= 0:
-        return 0
-    var limit = byte_col
-    if limit > n:
-        limit = n
-    var units = 0
-    var i = 0
-    while i < limit:
-        var got = codepoint_at(line, i)
-        var cp = got[0]
-        var size = got[1]
-        if i + size > limit:
-            # ``byte_col`` fell inside this codepoint — snap to its start.
-            break
-        units += _units_for_codepoint(cp, enc)
-        i += size
-    return units
+    return byte_to_units_span(line.as_bytes(), byte_col, enc)
 
 
 def units_to_byte(line: String, units: Int, enc: UInt8) -> Int:
@@ -113,30 +166,7 @@ def units_to_byte(line: String, units: Int, enc: UInt8) -> Int:
     Past-end offsets clamp to the line length (per spec). An offset that
     lands between the two halves of a UTF-16 surrogate pair snaps to the
     start of that codepoint."""
-    var n = len(line.as_bytes())
-    if enc == POS_UTF8:
-        if units < 0:
-            return 0
-        if units > n:
-            return n
-        return units
-    if units <= 0:
-        return 0
-    var seen = 0
-    var i = 0
-    while i < n:
-        if seen >= units:
-            return i
-        var got = codepoint_at(line, i)
-        var cp = got[0]
-        var size = got[1]
-        var w = _units_for_codepoint(cp, enc)
-        if seen + w > units:
-            # ``units`` splits a surrogate pair — snap to the codepoint start.
-            return i
-        seen += w
-        i += size
-    return n
+    return units_to_byte_span(line.as_bytes(), units, enc)
 
 
 def line_units(line: String, enc: UInt8) -> Int:
@@ -170,12 +200,12 @@ struct LineTable(Copyable, Movable):
     def row_count(self) -> Int:
         return len(self.starts)
 
-    def line(self, row: Int) -> String:
-        """Text of ``row`` without its line terminator. Out-of-range rows
-        return empty — a stale response referring to a row the buffer no
-        longer has must not trap or index out of bounds."""
+    def _bounds(self, row: Int) -> Tuple[Int, Int]:
+        """Byte range of ``row`` without its line terminator; empty for an
+        out-of-range row — a stale response referring to a row the buffer
+        no longer has must not trap or index out of bounds."""
         if row < 0 or row >= len(self.starts):
-            return String("")
+            return (0, 0)
         var start = self.starts[row]
         var b = self.text.as_bytes()
         var end = len(b)
@@ -185,18 +215,27 @@ struct LineTable(Copyable, Movable):
             end -= 1  # drop a CRLF '\r'
         if end < start:
             end = start
-        return byte_slice(self.text, start, end)
+        return (start, end)
+
+    def line(self, row: Int) -> String:
+        """Text of ``row`` without its line terminator (empty when out of
+        range)."""
+        var r = self._bounds(row)
+        return byte_slice(self.text, r[0], r[1])
 
     def col_to_wire(self, row: Int, byte_col: Int, enc: UInt8) -> Int:
         """Byte column on ``row`` → wire ``character``. Identity fast path
         for utf-8 so a remap pass over a big edit list costs nothing when
-        the server honored our encoding request."""
+        the server honored our encoding request. Converts over the row's
+        bytes in place: no ``String`` per Position."""
         if enc == POS_UTF8:
             return byte_col
-        return byte_to_units(self.line(row), byte_col, enc)
+        var r = self._bounds(row)
+        return byte_to_units_span(self.text.as_bytes()[r[0]:r[1]], byte_col, enc)
 
     def wire_to_col(self, row: Int, units: Int, enc: UInt8) -> Int:
         """Wire ``character`` on ``row`` → byte column."""
         if enc == POS_UTF8:
             return units
-        return units_to_byte(self.line(row), units, enc)
+        var r = self._bounds(row)
+        return units_to_byte_span(self.text.as_bytes()[r[0]:r[1]], units, enc)
