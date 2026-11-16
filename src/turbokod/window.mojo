@@ -1334,9 +1334,10 @@ struct Window(Copyable, Movable):
     var _baseline_ws: Rect
     var _has_baseline: Bool
     var _last_observed_rect: Rect
-    # Wall-clock ms (``wall_clock_ms``) of the last time this window was
-    # the focused one — refreshed every paint while focused, then frozen
-    # when focus moves on. Drives least-recently-used eviction once the
+    # Wall-clock ms (``wall_clock_ms``) of the last time this window
+    # gained focus — stamped by ``Desktop._on_focus_change`` when focus
+    # moves to it (strictly increasing, so it orders windows by when each
+    # last had focus), never per frame. Drives least-recently-used eviction once the
     # per-project open-document cap (``config.max_open_windows``) is hit,
     # and is persisted into ``session.json`` so a restore can reopen the
     # most-recently-used documents first. ``0`` means "never focused".

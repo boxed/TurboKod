@@ -8,6 +8,8 @@ from turbokod.desktop import Desktop, HELP_HOTKEYS
 from turbokod.drafts_store import StoredDraft, load_drafts, save_drafts
 from turbokod.file_io import read_file, stat_file, write_file
 from turbokod.lsp import capture_command
+from turbokod.posix import sleep_ms
+from turbokod.session_store import load_session
 from turbokod.string_utils import string_list
 from turbokod.events import Event, KEY_BACKSPACE
 from turbokod.geometry import Rect
@@ -190,6 +192,50 @@ def test_kept_edits_of_a_file_since_deleted_come_back_untitled() raises:
             found = True
             assert_equal(len(w.editor.file_path.as_bytes()), 0)
     assert_equal(found, True)
+    _ = external_call["system", Int32]((String("rm -rf '") + root + String("'\0")).unsafe_ptr())
+
+
+def _per_user_rm(root: String, name: String):
+    _ = external_call["system", Int32]((
+        String("rm -f '") + root + String("'/.turbokod/per_user/*/") + name
+        + String("\0")
+    ).unsafe_ptr())
+
+
+def test_idle_frames_dont_rewrite_the_session_or_drafts() raises:
+    # The focused window's "last focused" stamp was refreshed every paint
+    # and persisted, so session.json (or drafts.json, for a focused
+    # untitled buffer) was rewritten and fsync'd on every frame.
+    var root = _fresh(String("_idle_frames"))
+    var path = root + String("/a.txt")
+    assert_equal(write_file(path, String("one\n")), True)
+    var screen = Rect(0, 0, 80, 30)
+    var d = Desktop()
+    d.open_project(root)
+    var canvas = Canvas(80, 30)
+    d.paint(canvas, screen)
+    d.open_file(path, screen)
+    d.new_file(screen)
+    _ = d.handle_event(Event.key_event(UInt32(ord("x"))), screen)
+    d.paint(canvas, screen)
+    assert_equal(len(load_drafts(root)), 1)
+    assert_equal(len(load_session(root).windows), 1)
+    _per_user_rm(root, String("drafts.json"))
+    _per_user_rm(root, String("session.json"))
+    for _ in range(2):
+        sleep_ms(3)
+        d.paint(canvas, screen)
+    assert_equal(len(load_drafts(root)), 0)
+    assert_equal(len(load_session(root).windows), 0)
+    # Focusing the file window is a change: saved once, then left alone.
+    d.windows.focus_by_index(d._find_window_for_path(path))
+    d.paint(canvas, screen)
+    assert_equal(len(load_session(root).windows), 1)
+    _per_user_rm(root, String("session.json"))
+    for _ in range(2):
+        sleep_ms(3)
+        d.paint(canvas, screen)
+    assert_equal(len(load_session(root).windows), 0)
     _ = external_call["system", Int32]((String("rm -rf '") + root + String("'\0")).unsafe_ptr())
 
 

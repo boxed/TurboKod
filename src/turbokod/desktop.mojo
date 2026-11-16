@@ -1951,9 +1951,15 @@ struct Desktop(Movable):
     # and painted at the far left of the status bar's git cluster. Empty
     # when the project isn't a git repo (or there's no project).
     var _project_branch: String
-    # Raw (pre-realpath) path of the last focused editor, so the per-frame
-    # recents bookkeeping can skip the realpath syscall when focus is steady.
-    var _last_focus_raw_path: String
+    # What ``_on_focus_change`` saw focused last frame: the editor window's
+    # index (-1: none), the ``_last_focus_ms`` it stamped there, and its
+    # ``file_path`` ("" for none / untitled / transient). The stamp tells a
+    # different window that landed on the same index (a close shifted it)
+    # from the one we stamped; the path catches a Save As renaming the
+    # focused buffer under a steady focus.
+    var _focus_idx: Int
+    var _focus_stamp: Int
+    var _focus_path: String
     # Wall-clock (monotonic ms) of the last key / mouse event routed
     # through ``handle_event``. The caret-blink phase is measured from
     # here so the caret is solid the instant the user types or clicks
@@ -1961,15 +1967,6 @@ struct Desktop(Movable):
     # ``_apply_view_config``). Frontend-agnostic — both frontends route
     # input through ``handle_event``.
     var _last_input_ms: Int
-    # Last-seen focused editor's ``file_path`` for the per-window
-    # save-on-focus-loss path. Updated every frame in ``paint``; when
-    # it changes and ``config.auto_save`` is on, the editor for the
-    # previously focused path is saved (mirrors the app-wide
-    # ``EVENT_FOCUS_OUT`` save, but for window-to-window switches
-    # inside the app). Untitled / file-less buffers are tracked as
-    # the empty string and skipped on save — same rule as
-    # ``_autosave_all_dirty``.
-    var _last_focused_editor_path: String
 
     def __init__(out self):
         self.menu_bar = MenuBar()
@@ -2234,9 +2231,10 @@ struct Desktop(Movable):
         self._project_branch = String("")
         self._last_git_dirty_check_ms = 0
         self._git_status_poller = GitStatusPoller()
-        self._last_focus_raw_path = String("")
+        self._focus_idx = -1
+        self._focus_stamp = -1
+        self._focus_path = String("")
         self._last_input_ms = 0
-        self._last_focused_editor_path = String("")
         # Add the framework's dynamic Window menu up-front so it renders in
         # the natural position (left-aligned, after whatever the host adds).
         # ``_rebuild_window_menu`` repopulates its items every paint.
@@ -4834,18 +4832,6 @@ struct Desktop(Movable):
         # FileIndexer trickles entries in over multiple frames so the
         # dialog opens immediately even on giant projects.
         self.quick_open.tick()
-        # Update the recents list from whichever editor is focused this
-        # frame. Cheap (one path compare against ``config.recent_files[0]``)
-        # on idle frames; promotes a path to the front exactly once
-        # whenever focus actually moves.
-        self._track_recent_focus()
-        # Per-window save on focus change. Compares the currently
-        # focused editor's path against the one we observed last
-        # frame and, when ``config.auto_save`` is on, saves the
-        # editor that just lost focus. Idle frames are a no-op
-        # (paths match); untitled / read-only / clean buffers are
-        # skipped inside the helper.
-        self._autosave_on_window_focus_change()
         # Same hook for the cross-file navigation history — record a
         # nav point whenever the focused cursor has moved far enough
         # from the last recorded one (or to a different file). Cheap:
@@ -4865,17 +4851,19 @@ struct Desktop(Movable):
             # file-backed windows so they land on top of the z-order.
             self._restore_drafts(screen)
             did_restore = True
-        # Keep the focused document's "last focused" timestamp fresh, and
-        # open its language server lazily. LSP startup is deferred out of
-        # session restore (it's the main-thread cost that delays the
-        # window appearing), so we skip it on the same frame that ran the
-        # restore — the window paints first, then the *next* frame pays
-        # the focused document's LSP startup. Non-focused restored
-        # documents stay LSP-closed until the user focuses them.
+        # Focus moved (or the focused buffer was renamed): stamp the
+        # newly focused window, promote it in the recents, auto-save the
+        # one that lost focus. Idle frames are one compare.
+        self._on_focus_change()
+        # Open the focused document's language server lazily. LSP startup
+        # is deferred out of session restore (it's the main-thread cost
+        # that delays the window appearing), so we skip it on the same
+        # frame that ran the restore — the window paints first, then the
+        # *next* frame pays the focused document's LSP startup. Non-focused
+        # restored documents stay LSP-closed until the user focuses them.
         var fw = self.windows.focused
         if 0 <= fw and fw < len(self.windows.windows) \
                 and self.windows.windows[fw].is_editor:
-            self.windows.windows[fw]._last_focus_ms = wall_clock_ms()
             if not did_restore and not self.windows.windows[fw]._lsp_opened:
                 self.windows.windows[fw]._lsp_opened = True
                 self._maybe_lsp_open(fw)
@@ -14638,45 +14626,56 @@ struct Desktop(Movable):
 
     # --- recents ----------------------------------------------------------
 
-    def _track_recent_focus(mut self):
-        """Promote the focused editor's file path to the front of
-        ``config.recent_files`` and persist the change
-        so the "Open Recent" picker keeps the list across sessions.
+    def _on_focus_change(mut self):
+        """Per-frame: react to keyboard focus moving to another editor
+        window, or the focused buffer's path changing (Save As).
 
-        Paths are canonicalized through ``realpath`` so dedup catches
-        symlinks and relative/absolute spellings of the same file (the
-        session restore path stores rects against project-relative
-        paths, which would otherwise compare unequal to the absolute
-        paths ``open_file`` writes). Untitled / file-less buffers are
-        skipped — they have no path that ``open_file`` could later
-        restore.
+        On a move, the newly focused window's ``_last_focus_ms`` is
+        stamped — once, not every frame: the stamp is persisted in
+        ``session.json`` / ``drafts.json``, so refreshing it per frame
+        rewrote (and fsync'd) both files on every paint. Stamps are
+        strictly increasing, so ordering by them is ordering by when each
+        window last had focus.
+
+        On a path change, the path is promoted to the front of
+        ``config.recent_files`` (canonicalized through ``realpath`` so
+        symlinks and relative spellings dedupe) and, with
+        ``config.auto_save`` on, the editor that just lost focus is saved
+        — the window-to-window counterpart of the app-wide
+        ``EVENT_FOCUS_OUT`` save. Untitled, read-only and clean buffers
+        aren't saved; transient (review) windows count as no path at all,
+        so they neither enter the recents nor get saved.
         """
         var idx = self._focused_editor_idx()
-        if idx < 0:
+        if idx != self._focus_idx or (
+            idx >= 0
+            and self.windows.windows[idx]._last_focus_ms != self._focus_stamp
+        ):
+            self._focus_idx = idx
+            if idx >= 0:
+                var stamp = max(wall_clock_ms(), self._focus_stamp + 1)
+                self.windows.windows[idx]._last_focus_ms = stamp
+                self._focus_stamp = stamp
+        var cur_path = String("")
+        if idx >= 0 and not self.windows.windows[idx]._transient:
+            cur_path = self.windows.windows[idx].editor.file_path
+        if cur_path == self._focus_path:
             return
-        # Transient (review) windows are isolated: never let one pollute the
-        # Open-Recent list.
-        if self.windows.windows[idx]._transient:
+        var prev = self._focus_path
+        self._focus_path = cur_path
+        if self.config.auto_save and len(prev.as_bytes()) > 0:
+            self._autosave_path(prev)
+        if len(cur_path.as_bytes()) == 0:
             return
-        var path = self.windows.windows[idx].editor.file_path
-        if len(path.as_bytes()) == 0:
-            return
-        # Focus unchanged since last frame → recents can't have moved under
-        # us here; skip the realpath syscall entirely.
-        if path == self._last_focus_raw_path:
-            return
-        self._last_focus_raw_path = path
-        var canon = realpath(path)
+        var canon = realpath(cur_path)
         if len(canon.as_bytes()) == 0:
-            canon = path
+            canon = cur_path
         # Already at the front — no change.
         if len(self.config.recent_files) > 0 \
                 and self.config.recent_files[0] == canon:
             return
-        var changed = record_recent_file(self.config, canon)
-        if not changed:
-            return
-        self._persist_config()
+        if record_recent_file(self.config, canon):
+            self._persist_config()
 
     # --- navigation history ---------------------------------------------
 
@@ -15170,44 +15169,14 @@ struct Desktop(Movable):
                     ":", String(e),
                 )
 
-    def _autosave_on_window_focus_change(mut self):
-        """Per-frame check: when keyboard focus has moved from one
-        editor to another and ``config.auto_save`` is on, save the
-        editor that just lost focus.
-
-        Mirrors the app-wide ``EVENT_FOCUS_OUT`` save but for
-        window-to-window switches inside the app — clicking a
-        different file's tab, Ctrl+digit, or rotating through windows
-        all funnel through this hook. Untitled buffers (no path) and
-        read-only views are skipped — same rules as
-        ``_autosave_all_dirty``.
-
-        ``_last_focused_editor_path`` is kept in sync even when
-        ``auto_save`` is off so flipping the toggle on later doesn't
-        immediately fire a save against whatever editor happened to
-        be focused before the user enabled it.
-        """
-        var cur_idx = self._focused_editor_idx()
-        var cur_path = String("")
-        # Transient (review) windows are isolated from focus-change autosave:
-        # leaving them never fires a save against their path (review flushes
-        # its own edits on exit). Treating the path as empty keeps it out of
-        # the ``prev``/``cur`` bookkeeping entirely.
-        if cur_idx >= 0 and not self.windows.windows[cur_idx]._transient:
-            cur_path = self.windows.windows[cur_idx].editor.file_path
-        if not self.config.auto_save:
-            self._last_focused_editor_path = cur_path
-            return
-        var prev = self._last_focused_editor_path
-        if cur_path == prev:
-            return
-        self._last_focused_editor_path = cur_path
-        if len(prev.as_bytes()) == 0:
-            return
+    def _autosave_path(mut self, path: String):
+        """Save the (first) editor window on ``path`` if it's dirty and
+        writable — ``_on_focus_change``'s save of the window that just
+        lost focus."""
         for i in range(len(self.windows.windows)):
             if not self.windows.windows[i].is_editor:
                 continue
-            if self.windows.windows[i].editor.file_path != prev:
+            if self.windows.windows[i].editor.file_path != path:
                 continue
             if self.windows.windows[i].editor.read_only:
                 return
@@ -15215,9 +15184,9 @@ struct Desktop(Movable):
                 return
             try:
                 if self.windows.windows[i].editor.save():
-                    self._after_save(i, prev)
+                    self._after_save(i, path)
             except e:
-                print("desktop: autosave_on_focus_change", prev, ":", String(e))
+                print("desktop: autosave_on_focus_change", path, ":", String(e))
             return
 
     def _do_save(mut self):

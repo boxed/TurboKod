@@ -337,7 +337,7 @@ struct TurbokodConfig(Copyable, Movable):
     # (Cmd+P). Stored as typed, so ``~`` survives; expanded at use.
     var project_dirs: List[String]
     # Canonical absolute paths of recently focused file-backed editors,
-    # most-recent first. Updated by ``Desktop._track_recent_focus``
+    # most-recent first. Updated by ``Desktop._on_focus_change``
     # whenever the focused file changes, and surfaced via the File ▸
     # "Open recent..." picker so the entries persist across sessions.
     var recent_files: List[String]
