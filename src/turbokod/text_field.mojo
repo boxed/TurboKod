@@ -29,7 +29,7 @@ the keystroke (existing pickers gate their refilter on ``changed``).
 
 from std.collections.list import List
 
-from .canvas import Canvas, utf8_codepoint_count
+from .canvas import Canvas
 from .painter import Painter
 from .cell import Cell
 from .clipboard import (
@@ -60,7 +60,8 @@ from .posix import monotonic_ms
 from .geometry import Point, Rect
 from .string_utils import (
     codepoint_at, is_printable_text_key, is_word_codepoint,
-    leading_indent_bytes, prev_codepoint_start, utf8_byte_of_cell,
+    leading_indent_bytes, next_token_end, prev_codepoint_start,
+    prev_token_start, text_cells, utf8_byte_of_cell,
     utf8_cell_of_byte, utf8_step_forward, word_char_step, word_range_at,
 )
 
@@ -237,12 +238,7 @@ struct TextField(Copyable, Movable):
         """
         self._undo.append(self._snapshot())
         if len(self._undo) > _UNDO_STACK_LIMIT:
-            var trimmed = List[_Snapshot]()
-            for i in range(
-                len(self._undo) - _UNDO_STACK_LIMIT, len(self._undo),
-            ):
-                trimmed.append(self._undo[i])
-            self._undo = trimmed^
+            _ = self._undo.pop(0)
         self._redo = List[_Snapshot]()
         self._typing_active = False
 
@@ -334,10 +330,10 @@ struct TextField(Copyable, Movable):
         self._move(utf8_step_forward(self.text, self.cursor), extend)
 
     def _word_left(mut self, extend: Bool):
-        self._move(_prev_word_pos(self.text, self.cursor), extend)
+        self._move(prev_token_start(self.text, self.cursor), extend)
 
     def _word_right(mut self, extend: Bool):
-        self._move(_next_word_pos(self.text, self.cursor), extend)
+        self._move(next_token_end(self.text, self.cursor), extend)
 
     def _home(mut self, extend: Bool):
         self._move(0, extend)
@@ -692,7 +688,7 @@ struct TextField(Copyable, Movable):
         if local_x < 0:
             local_x = 0
         var text_cell = self._scroll + local_x
-        var n_cells = utf8_codepoint_count(self.text)
+        var n_cells = text_cells(self.text)
         if text_cell >= n_cells:
             return len(self.text.as_bytes())
         return utf8_byte_of_cell(self.text, text_cell)
@@ -721,7 +717,7 @@ struct TextField(Copyable, Movable):
             self._scroll = c - width + 1
         # If text + caret-cell don't fill the window, slide left so we
         # show as much leading text as possible.
-        var n_cells = utf8_codepoint_count(self.text)
+        var n_cells = text_cells(self.text)
         var max_useful = n_cells + 1 - width
         if max_useful < 0:
             max_useful = 0
@@ -815,7 +811,7 @@ struct TextField(Copyable, Movable):
         the inverted cell) or past EOL (paint a space). Accounts for
         ``_scroll`` so a scrolled field's caret-on-glyph check uses
         the visible position."""
-        return base_x + utf8_codepoint_count(self.text) - self._scroll
+        return base_x + text_cells(self.text) - self._scroll
 
 
 # --- Form: a group of TextFields keyed by focus IDs ----------------------
@@ -969,49 +965,3 @@ def _splice(text: String, start: Int, end: Int, replacement: String) -> String:
     if len(out) == 0:
         return String("")
     return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=out.unsafe_ptr(), length=len(out))))
-
-
-# --- UTF-8 boundary helpers (mirrors editor.mojo) -----------------------
-
-
-def _next_word_pos(text: String, col: Int) -> Int:
-    """Skip the current word run, then any non-word run. Mirrors
-    ``Editor._next_word_pos`` for a single-line buffer (no row
-    wrapping). One press = one meaningful jump. Walks by UTF-8
-    codepoint so non-ASCII letters (``ä``, Cyrillic, CJK) cluster
-    with their ASCII neighbors."""
-    var bytes = text.as_bytes()
-    var n = len(bytes)
-    if col >= n:
-        return n
-    var c = col
-    while c < n:
-        var step = word_char_step(text, c)
-        if not step[0]:
-            break
-        c += step[1]
-    while c < n:
-        var step = word_char_step(text, c)
-        if step[0]:
-            break
-        c += step[1]
-    return c
-
-
-def _prev_word_pos(text: String, col: Int) -> Int:
-    if col <= 0:
-        return 0
-    var c = col
-    while c > 0:
-        var prev = prev_codepoint_start(text, c)
-        var info = codepoint_at(text, prev)
-        if is_word_codepoint(info[0]):
-            break
-        c = prev
-    while c > 0:
-        var prev = prev_codepoint_start(text, c)
-        var info = codepoint_at(text, prev)
-        if not is_word_codepoint(info[0]):
-            break
-        c = prev
-    return c

@@ -66,7 +66,8 @@ from turbokod.settings import Settings
 from turbokod.json import encode_json
 from turbokod.ui_tree import ui_to_json
 from turbokod.events import (
-    Event, KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_HOME, KEY_LEFT, KEY_TAB,
+    Event, KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_HOME, KEY_LEFT,
+    KEY_RIGHT, KEY_TAB,
     KEY_UP, MOD_ALT, MOD_CTRL, MOD_META, MOD_NONE, MOD_SHIFT,
     MENU_HIT_OUTSIDE, MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN,
     MOUSE_WHEEL_UP
@@ -2290,6 +2291,31 @@ def test_text_field_types_non_ascii_letters() raises:
         var rr = tf.handle_key(_key(bad))
         assert_false(rr.changed)
     assert_equal(tf.text, before)
+
+
+def test_text_field_word_motion_matches_the_editor() raises:
+    """Alt+Left / Alt+Right in a text field stop where the editor's word
+    motion does: whitespace is skipped, a run of one repeated punctuation
+    character is a token of its own."""
+    var tf = TextField()
+    tf.set_text(String("a <span class=\"x"))
+    tf.cursor = 0
+    tf.anchor = 0
+    var stops = List[Int]()
+    for _ in range(6):
+        _ = tf.handle_key(_key(KEY_RIGHT, MOD_ALT))
+        stops.append(tf.cursor)
+    assert_equal(stops[0], 1)   # a
+    assert_equal(stops[1], 3)   # <
+    assert_equal(stops[2], 7)   # span
+    assert_equal(stops[3], 13)  # class
+    assert_equal(stops[4], 14)  # =
+    assert_equal(stops[5], 15)  # "
+    _ = tf.handle_key(_key(KEY_LEFT, MOD_ALT))
+    assert_equal(tf.cursor, 14)
+    _ = tf.handle_key(_key(KEY_LEFT, MOD_ALT))
+    _ = tf.handle_key(_key(KEY_LEFT, MOD_ALT))
+    assert_equal(tf.cursor, 8)
 
 
 def test_text_field_scrolls_to_keep_cursor_visible() raises:

@@ -13,7 +13,7 @@ from std.collections.list import List
 
 from .canvas import (
     Canvas, paint_drop_shadow, popup_size_for_text,
-    utf8_byte_to_cell, utf8_cell_map, utf8_codepoint_count,
+    utf8_cell_map,
 )
 from .painter import paint_tooltip_popup, Painter
 from .cell import Cell
@@ -81,10 +81,11 @@ from .string_utils import (
     byte_of_cell_in, byte_slice, cells_between, char_width, codepoint_at, display_columns,
     is_ascii_ident_byte,
     is_printable_text_key, is_space_cp, is_word_codepoint,
-    leading_indent_bytes, past_empty_match, prev_codepoint_start,
+    leading_indent_bytes, next_token_end, past_empty_match,
+    prev_codepoint_start, prev_token_start,
     seg_cell_offset, split_lines,
     split_lines_no_trailing,
-    TAB_WIDTH, trailing_ws_start, truncate_to_columns, utf8_byte_of_cell, utf8_cell_of_byte,
+    TAB_WIDTH, text_cells, trailing_ws_start, truncate_to_columns, utf8_byte_of_cell, utf8_cell_of_byte,
     utf8_codepoint_size, utf8_floor, utf8_step_forward, word_char_step, word_range_at,
 )
 from .text_view import (
@@ -5319,33 +5320,55 @@ struct Editor(Copyable, Movable):
         — the first row carrying the highest-priority kind — or
         ``(0, -1)`` for a clean slice. See ``_minimap_kind_in_slice`` for
         the kinds and their order."""
-        var ds = min(start, len(self.diagnostic_lines))
-        var de = min(end, len(self.diagnostic_lines))
-        for li in range(ds, de):
-            if self.diagnostic_lines[li] == DIAG_SEVERITY_ERROR:
-                return (3, li)
-        for li in range(ds, de):
-            if self.diagnostic_lines[li] == DIAG_SEVERITY_WARNING:
-                return (4, li)
-        if self.buffer.mark_count > 0:
-            for li in range(start, min(end, self.buffer.line_count())):
-                if self.buffer.is_marked(li):
-                    return (7, li)
-        for li in range(min(start, len(self.git_change_lines)),
-                        min(end, len(self.git_change_lines))):
-            if self.git_change_lines[li] != GIT_CHANGE_NONE:
-                return (1, li)
-        for li in range(min(start, len(self.spell_lines)),
-                        min(end, len(self.spell_lines))):
-            if self.spell_lines[li]:
-                return (2, li)
-        for li in range(ds, de):
-            if self.diagnostic_lines[li] == DIAG_SEVERITY_INFO:
-                return (5, li)
-        for li in range(ds, de):
-            if self.diagnostic_lines[li] == DIAG_SEVERITY_HINT:
-                return (6, li)
-        return (0, -1)
+        # One pass over the slice, keeping the first row of the best rank
+        # seen (rank 0 = error ... 6 = hint), instead of a pass per kind.
+        var best = 7
+        var best_row = -1
+        var n_diag = len(self.diagnostic_lines)
+        var n_git = len(self.git_change_lines)
+        var n_spell = len(self.spell_lines)
+        var marks = self.buffer.mark_count > 0
+        for li in range(max(start, 0), end):
+            var rank = 7
+            if li < n_diag:
+                var sev = self.diagnostic_lines[li]
+                if sev == DIAG_SEVERITY_ERROR:
+                    rank = 0
+                elif sev == DIAG_SEVERITY_WARNING:
+                    rank = 1
+                elif sev == DIAG_SEVERITY_INFO:
+                    rank = 5
+                elif sev == DIAG_SEVERITY_HINT:
+                    rank = 6
+            if rank > 2 and marks and self.buffer.is_marked(li):
+                rank = 2
+            if rank > 3 and li < n_git \
+                    and self.git_change_lines[li] != GIT_CHANGE_NONE:
+                rank = 3
+            if rank > 4 and li < n_spell and self.spell_lines[li]:
+                rank = 4
+            if rank < best:
+                best = rank
+                best_row = li
+                if best == 0:
+                    break
+        if best_row < 0:
+            return (0, -1)
+        # Rank back to kind: error, warning, bookmark, git, spell, info, hint.
+        var kind = 6
+        if best == 0:
+            kind = 3
+        elif best == 1:
+            kind = 4
+        elif best == 2:
+            kind = 7
+        elif best == 3:
+            kind = 1
+        elif best == 4:
+            kind = 2
+        elif best == 5:
+            kind = 5
+        return (kind, best_row)
 
     def _minimap_attr_for_slice(self, start: Int, end: Int) -> Optional[Attr]:
         """Source registry for the right-side projection — same priority
@@ -5649,6 +5672,23 @@ struct Editor(Copyable, Movable):
             view, self.selections[0].row, self.selections[0].col,
         )
 
+    def _layout_point(
+        self, layout: List[VisualLine], text_x0: Int, top: Int,
+        row: Int, col: Int,
+    ) -> Optional[Point]:
+        """Screen cell of buffer position ``(row, col)`` in ``layout``
+        (painted from ``text_x0`` / ``top``), or empty when no visual row
+        of the layout holds it. Unclipped: callers check it against their
+        content area. The one place the caret / anchor geometry lives."""
+        var sr = self._screen_row_for(layout, row, col)
+        if sr < 0:
+            return Optional[Point]()
+        var x = text_x0 + layout[sr].indent_cells + _seg_cell_of_byte(
+            self.buffer.lines[row], layout[sr].byte_start,
+            layout[sr].byte_end, col,
+        )
+        return Optional[Point](Point(x, top + sr))
+
     def _screen_point_of(
         self, view: Rect, row: Int, col: Int,
     ) -> Optional[Point]:
@@ -5667,20 +5707,14 @@ struct Editor(Copyable, Movable):
         var content_h = view.height()
         var content_w = self._content_width(view)
         var layout = self._layout_lines(content_h, content_w)
-        var sr = self._screen_row_for(layout, row, col)
-        if sr < 0:
+        var pt = self._layout_point(layout, text_x0, view.a.y, row, col)
+        if not pt:
             return miss
-        var seg_start = layout[sr].byte_start
-        var seg_end = layout[sr].byte_end
-        var seg_x0 = text_x0 + layout[sr].indent_cells
-        var sx = seg_x0 + _seg_cell_of_byte(
-            self.buffer.line(row), seg_start, seg_end, col,
-        )
-        var sy = view.a.y + sr
-        if not (view.a.x <= sx and sx < content_right
-                and view.a.y <= sy and sy < content_bottom):
+        var p = pt.value()
+        if not (view.a.x <= p.x and p.x < content_right
+                and view.a.y <= p.y and p.y < content_bottom):
             return miss
-        return Optional[Point](Point(sx, sy))
+        return pt
 
     def request_context_menu_at_cursor(mut self, view: Rect) -> Bool:
         """Stash an ``EditorContextMenuRequest`` anchored at the primary
@@ -5770,7 +5804,7 @@ struct Editor(Copyable, Movable):
             visible = String("")
         else:
             visible = byte_slice(line, seg_start, seg_end)
-        var visible_cells = utf8_codepoint_count(visible)
+        var visible_cells = text_cells(visible)
         if cell_x >= visible_cells:
             return miss
         var col = seg_start + utf8_byte_of_cell(visible, cell_x)
@@ -5900,23 +5934,14 @@ struct Editor(Copyable, Movable):
         var content_h = view.height()
         var content_w = self._content_width(view)
         var layout = self._layout_lines(content_h, content_w)
-        var sr = self._screen_row_for(
-            layout, self.completion_anchor_row,
-            self.completion_anchor_col,
+        var pt = self._layout_point(
+            layout, view.a.x + total_gutter, view.a.y,
+            self.completion_anchor_row, self.completion_anchor_col,
         )
-        if sr < 0:
+        if not pt:
             return Optional[Rect]()
-        var text_x0 = view.a.x + total_gutter
-        var seg_start = layout[sr].byte_start
-        var indent = layout[sr].indent_cells
-        var seg_x0 = text_x0 + indent
-        var sx = seg_x0 + _seg_cell_of_byte(
-            self.buffer.line(self.completion_anchor_row), seg_start,
-            layout[sr].byte_end, self.completion_anchor_col,
-        )
-        var sy = view.a.y + sr
         return Optional[Rect](
-            self._completion_popup_rect_at(view, sx, sy)
+            self._completion_popup_rect_at(view, pt.value().x, pt.value().y)
         )
 
     def _paint_completion_popup_at(
@@ -6414,20 +6439,15 @@ struct Editor(Copyable, Movable):
         """Paint a single caret block at buffer position ``(row, col)``.
         Identical visual to the original primary-caret block; called
         once per caret from ``paint``. Out-of-view carets are skipped."""
-        var sr = self._screen_row_for(layout, row, col)
-        if sr < 0:
+        var pt = self._layout_point(layout, text_x0, view.a.y, row, col)
+        if not pt:
             return
-        var seg_start = layout[sr].byte_start
-        var seg_end = layout[sr].byte_end
-        var indent = layout[sr].indent_cells
-        var seg_x0 = text_x0 + indent
-        var line = self.buffer.line(row)
-        var sx = seg_x0 + _seg_cell_of_byte(line, seg_start, seg_end, col)
-        var sy = view.a.y + sr
-        if not (seg_x0 <= sx and sx < content_right
+        var sx = pt.value().x
+        var sy = pt.value().y
+        if not (sx < content_right
                 and view.a.y <= sy and sy < content_bottom):
             return
-        if col < len(line.as_bytes()):
+        if col < self.buffer.line_length(row):
             painter.set_attr(canvas, sx, sy, Attr(CARET_FG, CARET_BG))
         else:
             painter.set(canvas, sx, sy, Cell(String(" "), Attr(CARET_FG, CARET_BG), 1))
@@ -6442,31 +6462,14 @@ struct Editor(Copyable, Movable):
         Same byte→cell map as the caret block; used by the bracket-match
         overlay so the highlighted brackets land on the right column even
         when earlier glyphs on the row are multi-byte."""
-        var sr = self._screen_row_for(layout, row, col)
-        if sr < 0:
+        if col >= self.buffer.line_length(row):
             return
-        var seg_start = layout[sr].byte_start
-        var seg_end = layout[sr].byte_end
-        var indent = layout[sr].indent_cells
-        var seg_x0 = text_x0 + indent
-        var line = self.buffer.line(row)
-        var line_byte_count = len(line.as_bytes())
-        if col >= line_byte_count:
+        var pt = self._layout_point(layout, text_x0, view.a.y, row, col)
+        if not pt:
             return
-        var visible_str: String
-        if seg_start >= line_byte_count:
-            visible_str = String("")
-        else:
-            visible_str = byte_slice(line, seg_start, seg_end)
-        var cell_map = utf8_byte_to_cell(visible_str)
-        var visible_byte_count = len(visible_str.as_bytes())
-        var byte_off = col - seg_start
-        if byte_off < 0 or byte_off >= visible_byte_count:
-            return
-        var cell_offset = cell_map[byte_off]
-        var sx = seg_x0 + cell_offset
-        var sy = view.a.y + sr
-        if not (seg_x0 <= sx and sx < content_right
+        var sx = pt.value().x
+        var sy = pt.value().y
+        if not (sx < content_right
                 and view.a.y <= sy and sy < content_bottom):
             return
         painter.set_attr(canvas, sx, sy, attr)
@@ -7011,7 +7014,7 @@ struct Editor(Copyable, Movable):
                     in_sel = sel_eol \
                         and sel_e_line == self.buffer.line_count() - 1
                 if in_sel:
-                    var tcells = utf8_codepoint_count(text)
+                    var tcells = text_cells(text)
                     var cc = 0
                     while cc <= tcells:
                         var sx = text_x0 + cc
@@ -7875,35 +7878,14 @@ struct Editor(Copyable, Movable):
             # case) rather than the stale frame.
             if focused and self.completion_popup_visible \
                     and len(self.completion_items) > 0:
-                var sr = self._screen_row_for(
-                    layout, self.completion_anchor_row,
+                var pt = self._layout_point(
+                    layout, text_x0, view.a.y, self.completion_anchor_row,
                     self.completion_anchor_col,
                 )
-                if sr >= 0:
-                    var seg_start = layout[sr].byte_start
-                    var indent = layout[sr].indent_cells
-                    var seg_x0 = text_x0 + indent
-                    var line = self.buffer.line(self.completion_anchor_row)
-                    var line_n = len(line.as_bytes())
-                    var vis: String
-                    if seg_start >= line_n:
-                        vis = String("")
-                    else:
-                        vis = byte_slice(line, seg_start, layout[sr].byte_end)
-                    var cm = List[Int]()
-                    var cc = utf8_cell_map(vis, cm)
-                    var vbc = len(vis.as_bytes())
-                    var anchor_byte = self.completion_anchor_col - seg_start
-                    var cell_off: Int
-                    if anchor_byte < 0:
-                        cell_off = 0
-                    elif anchor_byte < vbc:
-                        cell_off = cm[anchor_byte]
-                    else:
-                        cell_off = cc + (anchor_byte - vbc)
-                    var sx = seg_x0 + cell_off
-                    var sy = view.a.y + sr
-                    self._paint_completion_popup_at(canvas, view, sx, sy)
+                if pt:
+                    self._paint_completion_popup_at(
+                        canvas, view, pt.value().x, pt.value().y,
+                    )
 
     # --- multi-caret movement / inline-edit dispatchers -------------------
 
@@ -10134,7 +10116,7 @@ struct Editor(Copyable, Movable):
         Painted cells (not byte length): the scroll axis and the bar's
         ``visible`` extent are both in cells, so measuring the line in bytes
         inflated the range on multi-byte lines and let the editor scroll past
-        the content into blank space. ``utf8_codepoint_count`` rather than
+        the content into blank space. ``text_cells`` rather than
         ``display_columns`` so tabs count at their expanded width, as painted.
 
         Cached by ``clamp_scroll`` (every frame) until the next edit."""
@@ -10142,7 +10124,7 @@ struct Editor(Copyable, Movable):
             return self._longest_w
         var m = 0
         for i in range(self.buffer.line_count()):
-            var n = utf8_codepoint_count(self.buffer.line(i))
+            var n = text_cells(self.buffer.line(i))
             if n > m: m = n
         return m
 
@@ -10852,87 +10834,24 @@ struct Editor(Copyable, Movable):
         self.move_to(p[0], p[1], extend)
 
     def _next_word_pos(self, row: Int, col: Int) -> Tuple[Int, Int]:
-        """Move to the end of the next token on this line.
-
-        A token is either a maximal run of word codepoints (``span``,
-        ``Godkänn``) or a maximal run of one repeated punctuation
-        codepoint (``{{`` is one token, ``="`` is two). Leading
-        whitespace is skipped, so one press lands on the end of the next
-        meaningful run — ``<span class="`` stops after ``<``, after
-        ``span``, after ``class``, after ``=``, after ``"``, …
-
-        At end of line, jumps to the start of the next line. One press =
-        one meaningful jump. Walks by UTF-8 codepoint so boundaries land
-        on character edges in non-ASCII text.
-        """
-        var line = self.buffer.line(row)
-        var bytes = line.as_bytes()
-        var n = len(bytes)
+        """The end of the next token on this line (``next_token_end``);
+        at end of line, the start of the next line. One press = one
+        meaningful jump."""
+        var n = self.buffer.line_length(row)
         if col >= n:
             if row + 1 < self.buffer.line_count():
                 return (row + 1, 0)
             return (row, n)
-        var c = col
-        # Skip leading whitespace — it never gets its own stop.
-        while c < n:
-            var info = codepoint_at(line, c)
-            if not is_space_cp(info[0]):
-                break
-            c += info[1]
-        if c >= n:
-            return (row, c)
-        var first = codepoint_at(line, c)
-        if is_word_codepoint(first[0]):
-            # Consume the whole word run.
-            while c < n:
-                var step = word_char_step(line, c)
-                if not step[0]:
-                    break
-                c += step[1]
-        else:
-            # Consume a run of the same repeated punctuation codepoint.
-            while c < n:
-                var info = codepoint_at(line, c)
-                if info[0] != first[0]:
-                    break
-                c += info[1]
-        return (row, c)
+        return (row, next_token_end(self.buffer.lines[row], col))
 
     def _prev_word_pos(self, row: Int, col: Int) -> Tuple[Int, Int]:
-        """Mirror of ``_next_word_pos`` going left: land on the start of
-        the previous token (word run or repeated-punctuation run), after
-        skipping any whitespace to the left."""
+        """The start of the previous token on this line
+        (``prev_token_start``); at column 0, the end of the line above."""
         if col == 0:
             if row > 0:
                 return (row - 1, self.buffer.line_length(row - 1))
             return (0, 0)
-        var line = self.buffer.line(row)
-        var c = col
-        # Skip whitespace to the left.
-        while c > 0:
-            var prev = prev_codepoint_start(line, c)
-            var info = codepoint_at(line, prev)
-            if not is_space_cp(info[0]):
-                break
-            c = prev
-        if c == 0:
-            return (row, 0)
-        var first = codepoint_at(line, prev_codepoint_start(line, c))
-        if is_word_codepoint(first[0]):
-            while c > 0:
-                var prev = prev_codepoint_start(line, c)
-                var info = codepoint_at(line, prev)
-                if not is_word_codepoint(info[0]):
-                    break
-                c = prev
-        else:
-            while c > 0:
-                var prev = prev_codepoint_start(line, c)
-                var info = codepoint_at(line, prev)
-                if info[0] != first[0]:
-                    break
-                c = prev
-        return (row, c)
+        return (row, prev_token_start(self.buffer.line(row), col))
 
     def _scroll_to_cursor(mut self, view: Rect):
         """The plain edge scroll: just bring the cursor into view —

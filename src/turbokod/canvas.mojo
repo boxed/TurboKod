@@ -12,7 +12,9 @@ from std.collections import List
 from .cell import Cell, FONT_SLOTS, FONT_UI, blank_cell
 from .colors import Attr, DARK_GRAY, PANE_BG, default_attr
 from .geometry import Point, Rect
-from .string_utils import char_width, codepoint_at, utf8_codepoint_size, TAB_WIDTH
+from .string_utils import (
+    char_width, codepoint_at, text_cells, utf8_codepoint_size, TAB_WIDTH,
+)
 
 
 # ``TAB_WIDTH`` (the number of cells a tab byte expands to) lives in
@@ -578,7 +580,7 @@ def popup_size_for_text(
     """
     if max_w < 5 or max_h < 3:
         return (0, 0)
-    var ideal_inner = utf8_codepoint_count(text)
+    var ideal_inner = text_cells(text)
     var inner_w: Int
     if ideal_inner + 4 <= max_w:
         inner_w = ideal_inner
@@ -773,7 +775,7 @@ def utf8_byte_to_cell(text: String) -> List[Int]:
     Length equals ``len(text.as_bytes())`` so callers can index by raw
     byte position (the editor's column model). All bytes belonging to
     one multi-byte UTF-8 sequence map to the same cell. Use
-    ``utf8_codepoint_count(text)`` to find the cell *just past* the
+    ``text_cells(text)`` to find the cell *just past* the
     last codepoint — useful when a cursor or selection sits at EOL —
     or ``utf8_cell_map`` to get both in one pass.
     Tab bytes (``0x09``) expand to ``TAB_WIDTH``-aligned spaces in
@@ -788,7 +790,7 @@ def utf8_byte_to_cell(text: String) -> List[Int]:
 
 
 def utf8_cell_map(text: String, mut out: List[Int]) -> Int:
-    """``utf8_byte_to_cell`` and ``utf8_codepoint_count`` in one pass:
+    """``utf8_byte_to_cell`` and ``text_cells`` in one pass:
     appends ``text``'s byte → cell map to ``out`` and returns the cell
     count — the pair every overlay wants, which otherwise walks the
     text twice."""
@@ -819,30 +821,7 @@ def utf8_cell_map(text: String, mut out: List[Int]) -> Int:
 
 
 def utf8_codepoint_count(text: String) -> Int:
-    """Number of cells ``Canvas.put_text(text)`` would produce.
-
-    Counts each codepoint as one cell *except* tabs, which expand to
-    however many cells the next ``TAB_WIDTH`` boundary requires.
-    Callers ranging from selection clamp logic to cursor placement
-    rely on this matching ``put_text`` exactly — keep them in sync.
-    """
-    var bytes = text.as_bytes()
-    var n = len(bytes)
-    var count = 0
-    var i = 0
-    while i < n:
-        var b = Int(bytes[i])
-        if b == 0x09:
-            count += TAB_WIDTH - (count % TAB_WIDTH)
-            i += 1
-            continue
-        if b < 0x80:  # ASCII is one cell: skip decoding (long lines)
-            count += 1
-            i += 1
-            continue
-        var seq_len = utf8_codepoint_size(b)
-        if i + seq_len > n:
-            seq_len = n - i
-        count += char_width(codepoint_at(text, i)[0])
-        i += seq_len
-    return count
+    """Number of cells ``Canvas.put_text(text)`` would produce — cells,
+    not codepoints, despite the name: the older spelling of
+    ``text_cells``, which new code should call."""
+    return text_cells(text)

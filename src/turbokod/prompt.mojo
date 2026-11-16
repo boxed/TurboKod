@@ -34,7 +34,8 @@ from .buttons import (
     BUTTON_FIRED, OptionToggle, ShadowButton,
     paint_option_toggle, paint_shadow_button,
 )
-from .canvas import Canvas, utf8_codepoint_count, wrap_to_width
+from .canvas import Canvas, wrap_to_width
+from .string_utils import text_cells
 from .painter import Painter
 from .colors import Attr, BLACK, DARK_GRAY, GREEN, LIGHT_GRAY, YELLOW
 from .events import (
@@ -304,7 +305,7 @@ struct Prompt(Movable):
         var last_label_w = 0
         if len(label_lines) <= 1:
             if len(label_lines) == 1:
-                last_label_w = utf8_codepoint_count(label_lines[0])
+                last_label_w = text_cells(label_lines[0])
             if last_label_w + _MIN_INLINE_INPUT <= text_w:
                 inline = True
         return (label_lines^, inline, last_label_w)
@@ -487,8 +488,8 @@ struct Prompt(Movable):
         row. Both inputs share a starting x derived from the wider of
         the two labels so the input columns line up.
         """
-        var label_w_1 = utf8_codepoint_count(self.label)
-        var label_w_2 = utf8_codepoint_count(self.second_label)
+        var label_w_1 = text_cells(self.label)
+        var label_w_2 = text_cells(self.second_label)
         var label_col = label_w_1
         if label_w_2 > label_col:
             label_col = label_w_2

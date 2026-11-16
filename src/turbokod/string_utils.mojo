@@ -636,6 +636,70 @@ def word_char_step(s: String, col: Int) -> Tuple[Bool, Int]:
     return (is_word_codepoint(info[0]), info[1])
 
 
+def next_token_end(line: String, col: Int) -> Int:
+    """Byte offset of the end of the next token in ``line`` from ``col``
+    — the word-right motion of the editor and of text fields.
+
+    A token is either a maximal run of word codepoints (``span``,
+    ``Godkänn``) or a maximal run of one repeated punctuation codepoint
+    (``{{`` is one token, ``="`` is two). Leading whitespace is skipped,
+    so one press lands on the end of the next meaningful run —
+    ``<span class="`` stops after ``<``, after ``span``, after ``class``,
+    after ``=``, after ``"``, … Walks by UTF-8 codepoint, so boundaries
+    land on character edges in non-ASCII text."""
+    var n = len(line.as_bytes())
+    if col >= n:
+        return n
+    var c = max(col, 0)
+    while c < n:
+        var info = codepoint_at(line, c)
+        if not is_space_cp(info[0]):
+            break
+        c += info[1]
+    if c >= n:
+        return c
+    var first = codepoint_at(line, c)
+    if is_word_codepoint(first[0]):
+        while c < n:
+            var step = word_char_step(line, c)
+            if not step[0]:
+                break
+            c += step[1]
+    else:
+        while c < n:
+            var info = codepoint_at(line, c)
+            if info[0] != first[0]:
+                break
+            c += info[1]
+    return c
+
+
+def prev_token_start(line: String, col: Int) -> Int:
+    """Mirror of ``next_token_end`` going left: the start of the previous
+    token (word run or repeated-punctuation run), after skipping any
+    whitespace to the left of ``col``."""
+    var c = min(col, len(line.as_bytes()))
+    while c > 0:
+        var prev = prev_codepoint_start(line, c)
+        if not is_space_cp(codepoint_at(line, prev)[0]):
+            break
+        c = prev
+    if c <= 0:
+        return 0
+    var first = codepoint_at(line, prev_codepoint_start(line, c))
+    var word = is_word_codepoint(first[0])
+    while c > 0:
+        var prev = prev_codepoint_start(line, c)
+        var cp = codepoint_at(line, prev)[0]
+        if word:
+            if not is_word_codepoint(cp):
+                break
+        elif cp != first[0]:
+            break
+        c = prev
+    return c
+
+
 def prev_codepoint_start(s: String, col: Int) -> Int:
     """Byte offset of the codepoint that ends at ``col``. Use to walk
     a byte array backwards one codepoint at a time. ``col == 0`` returns
@@ -685,6 +749,13 @@ def cells_between(line: String, lo: Int, hi: Int) -> Int:
         cells += char_width(info[0])
         i += info[1]
     return cells
+
+
+def text_cells(text: String) -> Int:
+    """Cells ``Canvas.put_text(text)`` paints from column 0: wide glyphs
+    two, a tab to the next ``TAB_WIDTH`` stop (``cells_between`` over the
+    whole string)."""
+    return cells_between(text, 0, len(text.as_bytes()))
 
 
 def seg_cell_offset(
