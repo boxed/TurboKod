@@ -3,7 +3,10 @@ must come back exactly as it went in, and a damaged file must be an error,
 not a read past its end."""
 
 from std.testing import TestSuite, assert_equal, assert_raises, assert_true
-from turbokod.json import encode_json, json_str, parse_json, read_int_pair, read_int_quad
+from turbokod.json import (
+    JsonObjectWriter, encode_json, json_str, parse_json, read_int_pair,
+    read_int_quad,
+)
 
 
 def _parse_str(text: String) raises -> String:
@@ -154,6 +157,28 @@ def test_a_repeated_key_keeps_its_place_and_the_last_value() raises:
     assert_equal(big.object_key_at(40), "new")
     assert_equal(big.object_value_at(40).as_int(), 8)
     assert_equal(big.object_value_at(17).as_int(), 17)
+
+
+def test_object_writer_splices_members_as_encode_json_would() raises:
+    """The wire envelopes are written member by member; the bytes must be
+    what encoding the equivalent tree gives, escapes and multibyte runs
+    included."""
+    var params = parse_json("{\"text\": \"é—x\\n\\\"q\\\"\", \"n\": [1, true, null]}")
+    var w = JsonObjectWriter(8)
+    w.put_str("jsonrpc", "2.0")
+    w.put_int("id", 42)
+    w.put_bool("ok", False)
+    w.put_str("method", "a\tb")
+    w.put_value("params", params)
+    var bytes = w^.finish()
+    var got = String(StringSpan(unsafe_from_utf8=Span(bytes)))
+    assert_equal(
+        got,
+        String("{\"jsonrpc\":\"2.0\",\"id\":42,\"ok\":false,")
+        + String("\"method\":\"a\\tb\",\"params\":") + encode_json(params)
+        + String("}"),
+    )
+    assert_equal(parse_json(got).object_get("params").value().object_get("text").value().as_str(), "é—x\n\"q\"")
 
 
 def main() raises:

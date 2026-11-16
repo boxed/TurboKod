@@ -353,29 +353,74 @@ def append_json(mut buf: List[UInt8], value: JsonValue):
     _encode(value, buf)
 
 
-def append_raw_json(mut buf: List[UInt8], text: String):
+def append_json_string(mut buf: List[UInt8], s: StringSpan):
+    """Append ``s`` as a quoted, escaped JSON string."""
+    _encode_string(s, buf)
+
+
+def append_raw_json(mut buf: List[UInt8], text: StringSpan):
     """Append ``text`` — already-valid JSON syntax — to ``buf`` verbatim."""
     _append_bytes(buf, text)
 
 
+struct JsonObjectWriter(Movable):
+    """Writes one JSON object straight to bytes, member by member — for
+    wire envelopes (JSON-RPC, DAP) whose payload is an existing tree:
+    putting that tree into an envelope ``JsonValue`` deep-copied it (a
+    didChange's whole document, a variables response) on every send."""
+    var buf: List[UInt8]
+    var _first: Bool
+
+    def __init__(out self, capacity: Int = 256):
+        self.buf = List[UInt8](capacity=capacity)
+        self.buf.append(UInt8(0x7B))  # '{'
+        self._first = True
+
+    def key(mut self, k: StringSpan):
+        """Open member ``k``; the caller appends its value next."""
+        if not self._first:
+            self.buf.append(UInt8(0x2C))  # ','
+        self._first = False
+        _encode_string(k, self.buf)
+        self.buf.append(UInt8(0x3A))  # ':'
+
+    def put_str(mut self, k: StringSpan, v: StringSpan):
+        self.key(k)
+        _encode_string(v, self.buf)
+
+    def put_int(mut self, k: StringSpan, v: Int):
+        self.key(k)
+        _append_bytes(self.buf, String(v))
+
+    def put_bool(mut self, k: StringSpan, v: Bool):
+        self.key(k)
+        _append_bytes(self.buf, "true" if v else "false")
+
+    def put_value(mut self, k: StringSpan, v: JsonValue):
+        self.key(k)
+        _encode(v, self.buf)
+
+    def finish(deinit self) -> List[UInt8]:
+        self.buf.append(UInt8(0x7D))  # '}'
+        return self.buf^
+
+
 def _encode(value: JsonValue, mut buf: List[UInt8]):
     if value.is_null():
-        _append_bytes(buf, String("null"))
+        _append_bytes(buf, "null")
         return
     if value.is_bool():
-        _append_bytes(
-            buf, String("true") if value.as_bool() else String("false"),
-        )
+        _append_bytes(buf, "true" if value.as_bool() else "false")
         return
     if value.is_int():
         _append_bytes(buf, String(value.as_int()))
         return
     if value.is_float():
         # Float was preserved verbatim from parse; round-trip the text.
-        _append_bytes(buf, value.as_str())
+        _append_bytes(buf, value.str_v)
         return
     if value.is_string():
-        _encode_string(value.as_str(), buf)
+        _encode_string(value.str_v, buf)
         return
     if value.is_array():
         buf.append(UInt8(0x5B))  # '['
@@ -395,42 +440,51 @@ def _encode(value: JsonValue, mut buf: List[UInt8]):
             _encode(value.obj_v[i].value, buf)
         buf.append(UInt8(0x7D))  # '}'
         return
-    _append_bytes(buf, String("null"))
+    _append_bytes(buf, "null")
 
 
-def _encode_string(s: String, mut buf: List[UInt8]):
+def _encode_string(s: StringSpan, mut buf: List[UInt8]):
+    """Append ``s`` as a quoted JSON string. Runs that need no escaping
+    (nearly all of a source file) are copied with one ``extend`` each
+    rather than byte by byte."""
     buf.append(UInt8(0x22))  # '"'
     var b = s.as_bytes()
-    for i in range(len(b)):
+    var n = len(b)
+    var run = 0
+    for i in range(n):
         var c = Int(b[i])
+        if c >= 0x20 and c != 0x22 and c != 0x5C:
+            continue
+        if i > run:
+            buf.extend(b[run:i])
+        run = i + 1
+        buf.append(UInt8(0x5C))
         if c == 0x22:
-            buf.append(UInt8(0x5C)); buf.append(UInt8(0x22))
+            buf.append(UInt8(0x22))
         elif c == 0x5C:
-            buf.append(UInt8(0x5C)); buf.append(UInt8(0x5C))
+            buf.append(UInt8(0x5C))
         elif c == 0x08:
-            buf.append(UInt8(0x5C)); buf.append(UInt8(0x62))
+            buf.append(UInt8(0x62))
         elif c == 0x0C:
-            buf.append(UInt8(0x5C)); buf.append(UInt8(0x66))
+            buf.append(UInt8(0x66))
         elif c == 0x0A:
-            buf.append(UInt8(0x5C)); buf.append(UInt8(0x6E))
+            buf.append(UInt8(0x6E))
         elif c == 0x0D:
-            buf.append(UInt8(0x5C)); buf.append(UInt8(0x72))
+            buf.append(UInt8(0x72))
         elif c == 0x09:
-            buf.append(UInt8(0x5C)); buf.append(UInt8(0x74))
-        elif c < 0x20:
-            buf.append(UInt8(0x5C)); buf.append(UInt8(0x75))
-            buf.append(UInt8(0x30)); buf.append(UInt8(0x30))
+            buf.append(UInt8(0x74))
+        else:
+            buf.append(UInt8(0x75)); buf.append(UInt8(0x30))
+            buf.append(UInt8(0x30))
             buf.append(UInt8(hex_digit_byte((c >> 4) & 0xF)))
             buf.append(UInt8(hex_digit_byte(c & 0xF)))
-        else:
-            buf.append(UInt8(c))
+    if n > run:
+        buf.extend(b[run:n])
     buf.append(UInt8(0x22))
 
 
-def _append_bytes(mut buf: List[UInt8], s: String):
-    var src = s.as_bytes()
-    for i in range(len(src)):
-        buf.append(src[i])
+def _append_bytes(mut buf: List[UInt8], s: StringSpan):
+    buf.extend(s.as_bytes())
 
 
 # --- parser ----------------------------------------------------------------

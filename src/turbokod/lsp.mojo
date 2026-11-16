@@ -20,8 +20,8 @@ from std.ffi import c_int
 from std.ffi import external_call
 
 from .json import (
-    encode_json, json_array, json_bool, json_int, json_null, json_object,
-    json_str, JsonValue, parse_json, take_json, append_json, append_raw_json,
+    json_array, json_bool, json_int, json_null, json_object,
+    json_str, JsonObjectWriter, JsonValue, parse_json, take_json,
 )
 from .case_fold import fold_byte
 from .string_utils import utf8_prefix
@@ -472,6 +472,10 @@ struct LspProcess(Copyable, Movable):
         f.write_bytes(bytes)
 
     def write_message(mut self, payload: String) raises:
+        """``write_payload`` for a payload already in a ``String``."""
+        self.write_payload(payload.as_bytes())
+
+    def write_payload(mut self, payload: Span[UInt8, _]) raises:
         """Frame ``payload`` with ``Content-Length: N\\r\\n\\r\\n`` and
         queue it for non-blocking delivery to the child's stdin.
 
@@ -483,22 +487,24 @@ struct LspProcess(Copyable, Movable):
         cap we drop the queue and latch ``_write_overflowed`` so the
         manager can mark the server failed.
         """
-        var n = len(payload.as_bytes())
-        var hdr = String("Content-Length: ") + String(n) + String("\r\n\r\n")
+        var n = len(payload)
         if self.trace_fd >= 0:
             # Truncate huge payloads in the trace — full breakpoint
             # lists, big stack traces etc. can run to several KB and
             # the log is meant to be human-readable.
+            var text = String(StringSpan(unsafe_from_utf8=payload))
             self.trace(
-                String("> ") + String(n) + String("B ") + _trace_preview(payload)
+                String("> ") + String(n) + String("B ") + _trace_preview(text)
             )
         if _dead_prefix_too_big(self._write_head, len(self._pending_write)):
             self._pending_write = _drop_prefix(
                 self._pending_write^, self._write_head,
             )
             self._write_head = 0
-        append_string_bytes(self._pending_write, hdr)
-        append_string_bytes(self._pending_write, payload)
+        append_string_bytes(self._pending_write, "Content-Length: ")
+        append_string_bytes(self._pending_write, String(n))
+        append_string_bytes(self._pending_write, "\r\n\r\n")
+        self._pending_write.extend(payload)
         var queued = len(self._pending_write) - self._write_head
         if queued > _BUF_CAP_GUARD:
             if self.trace_fd >= 0:
@@ -925,13 +931,20 @@ struct LspClient(Copyable, Movable):
         everything on the same footing."""
         var id = String(self._next_id)
         self._next_id += 1
-        self.process.write_message(_envelope(json_str(id), method, params))
+        var w = _rpc_writer()
+        w.put_str("id", id)
+        w.put_str("method", method)
+        w.put_value("params", params)
+        self.process.write_payload(w^.finish())
         return id
 
     def send_notification(
         mut self, method: String, params: JsonValue,
     ) raises:
-        self.process.write_message(_envelope(json_null(), method, params))
+        var w = _rpc_writer()
+        w.put_str("method", method)
+        w.put_value("params", params)
+        self.process.write_payload(w^.finish())
 
     def send_response(
         mut self, id: JsonValue, result: JsonValue,
@@ -943,11 +956,10 @@ struct LspClient(Copyable, Movable):
         client-side probe (taplo blocks all ``publishDiagnostics``
         until ``workspace/configuration`` is answered; esbonio
         similarly stalls)."""
-        var envelope = json_object()
-        envelope.put(String("jsonrpc"), json_str(String("2.0")))
-        envelope.put(String("id"), id)
-        envelope.put(String("result"), result)
-        self.process.write_message(encode_json(envelope))
+        var w = _rpc_writer()
+        w.put_value("id", id)
+        w.put_value("result", result)
+        self.process.write_payload(w^.finish())
 
     def send_error(
         mut self, id: JsonValue, code: Int, message: String,
@@ -956,14 +968,14 @@ struct LspClient(Copyable, Movable):
         envelope. Use ``-32601`` (MethodNotFound) for requests we don't
         recognize so the server stops waiting and falls back rather
         than blocking on our (absent) response."""
-        var envelope = json_object()
-        envelope.put(String("jsonrpc"), json_str(String("2.0")))
-        envelope.put(String("id"), id)
-        var err = json_object()
-        err.put(String("code"), json_int(code))
-        err.put(String("message"), json_str(message))
-        envelope.put(String("error"), err)
-        self.process.write_message(encode_json(envelope))
+        var w = _rpc_writer()
+        w.put_value("id", id)
+        w.key("error")
+        var err = JsonObjectWriter(64)
+        err.put_int("code", code)
+        err.put_str("message", message)
+        w.buf.extend(Span(err^.finish()))
+        self.process.write_payload(w^.finish())
 
     def poll(mut self, timeout_ms: Int32) raises -> Optional[LspIncoming]:
         var maybe = self.process.poll_message(timeout_ms)
@@ -976,25 +988,14 @@ struct LspClient(Copyable, Movable):
         self.process.terminate()
 
 
-def _envelope(id: JsonValue, method: String, params: JsonValue) -> String:
-    """The JSON-RPC request (``id`` non-null) or notification envelope
-    around ``params``: ``{"jsonrpc","id"?,"method","params"}``. Spliced as
-    text — putting ``params`` into an envelope object deep-copied the
-    tree (a didChange's whole document included) on every send."""
-    var buf = List[UInt8]()
-    append_raw_json(buf, String('{"jsonrpc":"2.0",'))
-    if not id.is_null():
-        append_raw_json(buf, String('"id":'))
-        append_json(buf, id)
-        append_raw_json(buf, String(","))
-    append_raw_json(buf, String('"method":'))
-    append_json(buf, json_str(method))
-    append_raw_json(buf, String(',"params":'))
-    append_json(buf, params)
-    append_raw_json(buf, String("}"))
-    return String(StringSpan(
-        unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=len(buf)),
-    ))
+def _rpc_writer() -> JsonObjectWriter:
+    """A JSON-RPC envelope under construction, ``"jsonrpc":"2.0"`` in.
+    Members are spliced as text — putting ``params`` into an envelope
+    object deep-copied the tree (a didChange's whole document included)
+    on every send."""
+    var w = JsonObjectWriter()
+    w.put_str("jsonrpc", "2.0")
+    return w^
 
 
 def classify_message(var v: JsonValue) -> LspIncoming:

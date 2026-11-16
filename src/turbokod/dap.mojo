@@ -30,8 +30,8 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .json import (
-    JsonValue, encode_json, json_bool, json_get_int, json_get_string,
-    json_int, json_object, json_str, parse_json, take_json,
+    JsonObjectWriter, JsonValue, json_bool, json_object, json_str,
+    parse_json, take_json,
 )
 from .lsp import LspProcess
 
@@ -108,12 +108,13 @@ struct DapClient(Copyable, Movable):
         """
         var seq = self._next_seq
         self._next_seq += 1
-        var envelope = json_object()
-        envelope.put(String("seq"), json_int(seq))
-        envelope.put(String("type"), json_str(String("request")))
-        envelope.put(String("command"), json_str(command))
-        envelope.put(String("arguments"), arguments)
-        self.process.write_message(encode_json(envelope))
+        # Spliced as text: an envelope tree deep-copied ``arguments``.
+        var w = JsonObjectWriter()
+        w.put_int("seq", seq)
+        w.put_str("type", "request")
+        w.put_str("command", command)
+        w.put_value("arguments", arguments)
+        self.process.write_payload(w^.finish())
         return seq
 
     def send_response(
@@ -124,14 +125,14 @@ struct DapClient(Copyable, Movable):
         layer uses this to answer ``runInTerminal`` and friends."""
         var seq = self._next_seq
         self._next_seq += 1
-        var envelope = json_object()
-        envelope.put(String("seq"), json_int(seq))
-        envelope.put(String("type"), json_str(String("response")))
-        envelope.put(String("request_seq"), json_int(request_seq))
-        envelope.put(String("success"), json_bool(success))
-        envelope.put(String("command"), json_str(command))
-        envelope.put(String("body"), body)
-        self.process.write_message(encode_json(envelope))
+        var w = JsonObjectWriter()
+        w.put_int("seq", seq)
+        w.put_str("type", "response")
+        w.put_int("request_seq", request_seq)
+        w.put_bool("success", success)
+        w.put_str("command", command)
+        w.put_value("body", body)
+        self.process.write_payload(w^.finish())
 
     def poll(mut self, timeout_ms: Int32) raises -> Optional[DapIncoming]:
         var maybe = self.process.poll_message(timeout_ms)
@@ -165,31 +166,36 @@ def classify_dap_message(var v: JsonValue) -> DapIncoming:
     var arguments_opt = Optional[JsonValue]()
     var type_str = String("")
     if v.is_object():
-        seq = json_get_int(v, String("seq"), seq)
-        type_str = json_get_string(v, String("type"), type_str)
-        var maybe_cmd = v.object_get(String("command"))
-        if maybe_cmd and maybe_cmd.value().is_string():
-            command_opt = Optional[String](maybe_cmd.value().as_str())
-        var maybe_event = v.object_get(String("event"))
-        if maybe_event and maybe_event.value().is_string():
-            event_opt = Optional[String](maybe_event.value().as_str())
-        var maybe_rseq = v.object_get(String("request_seq"))
-        if maybe_rseq and maybe_rseq.value().is_int():
-            request_seq_opt = Optional[Int](maybe_rseq.value().as_int())
-        var maybe_success = v.object_get(String("success"))
-        if maybe_success and maybe_success.value().is_bool():
-            success_opt = Optional[Bool](maybe_success.value().as_bool())
-        var maybe_msg = v.object_get(String("message"))
-        if maybe_msg and maybe_msg.value().is_string():
-            message_opt = Optional[String](maybe_msg.value().as_str())
-        # ``body`` / ``arguments`` move out of the envelope (it's ours):
-        # a stackTrace or variables response must not be cloned per hop.
-        var bi = v.object_index(String("body"))
-        if bi >= 0:
-            body_opt = Optional[JsonValue](take_json(v.obj_v[bi].value))
-        var ai = v.object_index(String("arguments"))
-        if ai >= 0:
-            arguments_opt = Optional[JsonValue](take_json(v.obj_v[ai].value))
+        # One pass over the members; ``body`` / ``arguments`` move out of
+        # the envelope (it's ours): a stackTrace or variables response
+        # must not be cloned per hop.
+        for i in range(len(v.obj_v)):
+            ref m = v.obj_v[i]
+            if m.key == "seq":
+                if m.value.is_int():
+                    seq = m.value.int_v
+            elif m.key == "type":
+                if m.value.is_string():
+                    type_str = m.value.str_v
+            elif m.key == "command":
+                if m.value.is_string():
+                    command_opt = Optional[String](m.value.str_v)
+            elif m.key == "event":
+                if m.value.is_string():
+                    event_opt = Optional[String](m.value.str_v)
+            elif m.key == "request_seq":
+                if m.value.is_int():
+                    request_seq_opt = Optional[Int](m.value.int_v)
+            elif m.key == "success":
+                if m.value.is_bool():
+                    success_opt = Optional[Bool](m.value.bool_v)
+            elif m.key == "message":
+                if m.value.is_string():
+                    message_opt = Optional[String](m.value.str_v)
+            elif m.key == "body":
+                body_opt = Optional[JsonValue](take_json(m.value))
+            elif m.key == "arguments":
+                arguments_opt = Optional[JsonValue](take_json(m.value))
     var kind: UInt8
     if type_str == String("event"):
         kind = DAP_EVENT
