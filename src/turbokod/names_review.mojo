@@ -152,7 +152,7 @@ struct NamesReview(Movable, UIDialog):
             self.model.load_changeset(tab, idx)
             var names = self.model.new_names()
             var title = self.model.title
-            var paths = self.model.file_paths.copy()
+            var paths = self.model.paths()
             # The model's copy of the texts isn't needed past this point.
             self._loaded.append(_Loaded(
                 key, title^, paths^, self.model.take_after_texts(), names^,

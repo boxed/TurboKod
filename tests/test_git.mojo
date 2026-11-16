@@ -693,7 +693,7 @@ def test_review_progress_spans_whole_changeset() raises:
     last change of the last file. Regression for two bugs: (1) numerator and
     denominator counted different things (added/modified-only vs added+removed),
     so the bar never hit 100% and lurched between files; (2) ``_reset_review``
-    didn't clear ``file_changed_lines``, so a re-opened review accumulated stale
+    didn't clear ``changed_lines``, so a re-opened review accumulated stale
     per-file totals and the denominator ballooned."""
     var paths = List[String]()
     var befores = List[String]()
@@ -716,11 +716,11 @@ def test_review_progress_spans_whole_changeset() raises:
     rv.build_from_pairs(paths, befores, afters)
 
     # Per-file totals: the denominator pieces.
-    assert_equal(rv.file_changed_lines[0], 3)
-    assert_equal(rv.file_changed_lines[1], 1)
-    assert_equal(rv.file_changed_lines[2], 2)
-    var den = rv.file_changed_lines[0] + rv.file_changed_lines[1] \
-        + rv.file_changed_lines[2]
+    assert_equal(rv.files[0].changed_lines, 3)
+    assert_equal(rv.files[1].changed_lines, 1)
+    assert_equal(rv.files[2].changed_lines, 2)
+    var den = rv.files[0].changed_lines + rv.files[1].changed_lines \
+        + rv.files[2].changed_lines
     assert_equal(den, 6)
 
     # For every file, the within-file cumulative is monotonic in the boundary
@@ -729,13 +729,13 @@ def test_review_progress_spans_whole_changeset() raises:
     var fi = 0
     while fi < 3:
         rv.cur_file = fi
-        assert_equal(rv.changed_lines_through(-1), rv.file_changed_lines[fi])
+        assert_equal(rv.changed_lines_through(-1), rv.files[fi].changed_lines)
         var prev = 0
         var b = 0
         while b <= 6:
             var cum = rv.changed_lines_through(b)
             assert_true(cum >= prev)               # never decreases
-            assert_true(cum <= rv.file_changed_lines[fi])  # never overshoots
+            assert_true(cum <= rv.files[fi].changed_lines)  # never overshoots
             prev = cum
             b += 1
         fi += 1
@@ -759,15 +759,15 @@ def test_review_progress_spans_whole_changeset() raises:
         var done = prior + rv.changed_lines_through(-1)
         assert_true(done >= last_num)
         last_num = done
-        prior += rv.file_changed_lines[f]
+        prior += rv.files[f].changed_lines
         f += 1
     assert_equal(last_num, den)  # 100% on the last change of the last file
 
     # Re-opening (rebuilding) the changeset must not accumulate stale per-file
-    # totals — len(file_changed_lines) stays aligned with the file list.
+    # totals — len(files) stays aligned with the file list.
     rv.build_from_pairs(paths, befores, afters)
-    assert_equal(len(rv.file_changed_lines), len(rv.file_paths))
-    assert_equal(len(rv.file_changed_lines), 3)
+    assert_equal(len(rv.files), len(rv.files))
+    assert_equal(len(rv.files), 3)
 
 
 def test_review_includes_added_and_deleted_files() raises:
@@ -806,11 +806,11 @@ def test_review_includes_added_and_deleted_files() raises:
     d.review.picker_cursor = 0
     d.review._start_review()
     assert_equal(d.review.file_count(), 2)
-    assert_equal(d.review.file_paths[0], String("added.txt"))
-    assert_equal(d.review.file_after[0], String("new\n"))
-    assert_false(d.review.file_deleted[0])
-    assert_equal(d.review.file_paths[1], String("gone.txt"))
-    assert_true(d.review.file_deleted[1])
+    assert_equal(d.review.files[0].path, String("added.txt"))
+    assert_equal(d.review.files[0].after, String("new\n"))
+    assert_false(d.review.files[0].deleted)
+    assert_equal(d.review.files[1].path, String("gone.txt"))
+    assert_true(d.review.files[1].deleted)
 
     var screen = Rect(0, 0, 100, 30)
     var canvas = Canvas(100, 30)
@@ -887,18 +887,18 @@ def test_review_branches_tab_and_review_file_tree() raises:
     assert_false(d.review.is_editable())
     assert_equal(current_branch_name(dir), String("main"))
     assert_equal(d.review.file_count(), 3)
-    assert_equal(d.review.file_paths[0], String("gone.txt"))
+    assert_equal(d.review.files[0].path, String("gone.txt"))
     assert_true(d.review.file_is_deleted(0))
-    assert_equal(d.review.file_paths[1], String("keep.txt"))
+    assert_equal(d.review.files[1].path, String("keep.txt"))
     # Text is fetched lazily, when a file is first shown — opening a review
     # mustn't cost two git spawns per file. Git's row count stands in until.
-    assert_false(d.review.file_loaded[1])
-    assert_equal(d.review.file_changed_lines[1], 2)
+    assert_false(d.review.files[1].loaded)
+    assert_equal(d.review.files[1].changed_lines, 2)
     d.review.load_file(1)
-    assert_true(d.review.file_loaded[1])
-    assert_equal(d.review.file_before[1], String("a\nb\n"))
-    assert_equal(d.review.file_after[1], String("a\nB\n"))
-    assert_equal(d.review.file_paths[2], String("lib/new.txt"))
+    assert_true(d.review.files[1].loaded)
+    assert_equal(d.review.files[1].before, String("a\nb\n"))
+    assert_equal(d.review.files[1].after, String("a\nB\n"))
+    assert_equal(d.review.files[2].path, String("lib/new.txt"))
     assert_true(d.review.file_is_added(2))
 
     var canvas = Canvas(100, 30)
@@ -982,7 +982,7 @@ def test_review_branches_tab_and_review_file_tree() raises:
     assert_equal(d.review.file_count(), 3)
     var ki = -1
     for i in range(d.review.file_count()):
-        if d.review.file_paths[i] == String("keep.txt"):
+        if d.review.files[i].path == String("keep.txt"):
             ki = i
     _ = d.review.goto_file(ki)
     d.paint(canvas, screen)

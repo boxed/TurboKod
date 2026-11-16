@@ -706,7 +706,7 @@ def test_dap_manager_breakpoint_wait_for_arms_on_trigger() raises:
     mgr.toggle_breakpoint(String("/tmp/x.py"), 12)
     # Default: no dependency, both stored as empty.
     assert_equal(mgr.breakpoint_wait_for(String("/tmp/x.py"), 5), String(""))
-    assert_equal(mgr.breakpoint_wait_for_at(0), String(""))
+    assert_equal(mgr.breakpoint_at(0).wait_for, String(""))
     # Make BP at line 12 wait for the BP at line 5 (1-based on the wire).
     mgr.set_breakpoint_wait_for(
         String("/tmp/x.py"), 12, String("/tmp/x.py:6"),
@@ -1944,9 +1944,9 @@ def test_dap_reset_for_restart_keeps_the_breakpoints() raises:
     mgr.failure_reason = String("stale")
     mgr.reset_for_restart()
     assert_equal(mgr.breakpoint_count(), 2)
-    assert_equal(mgr.breakpoint_path_at(0), String("/tmp/a.py"))
-    assert_equal(mgr.breakpoint_line_at(1), 7)
-    assert_true(mgr.breakpoint_enabled_at(0))
+    assert_equal(mgr.breakpoint_at(0).path, String("/tmp/a.py"))
+    assert_equal(mgr.breakpoint_at(1).line, 7)
+    assert_true(mgr.breakpoint_at(0).enabled)
     var lines = List[Int]()
     var enabled = List[Bool]()
     var conditional = List[Bool]()

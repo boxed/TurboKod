@@ -4450,9 +4450,9 @@ struct Desktop(Movable):
         if not self.review_tree.visible \
                 or self._review_tree_gen != self.review.model_gen:
             self._review_tree_gen = self.review.model_gen
-            self.review_tree.open_fixed(root, self.review.file_paths)
+            self.review_tree.open_fixed(root, self.review.paths())
             for i in range(self.review.file_count()):
-                var full = join_path(root, self.review.file_paths[i])
+                var full = join_path(root, self.review.files[i].path)
                 if self.review.file_is_added(i):
                     self.review_tree.added_paths.append(full)
                 elif self.review.file_is_deleted(i):
@@ -4540,7 +4540,7 @@ struct Desktop(Movable):
             self.project.value(), opened.value(), empty_on_exact=True,
         )
         for i in range(self.review.file_count()):
-            if self.review.file_paths[i] == rel:
+            if self.review.files[i].path == rel:
                 self._review_jump_to_file(i)
                 return
 
@@ -4677,7 +4677,7 @@ struct Desktop(Movable):
         cursor's chunk for the changeset-wide progress bar.
 
         The bar spans the whole changeset: ``ReviewMode`` owns the per-file
-        totals (``file_changed_lines``) and the within-file cumulative (computed
+        totals (``changed_lines``) and the within-file cumulative (computed
         from the same ``build_diff_rows`` pass via ``changed_lines_through``), so
         numerator and denominator share one counting basis and can't drift. Our
         only job is to locate the cursor's chunk in the gutter and hand
@@ -6717,10 +6717,7 @@ struct Desktop(Movable):
         self._last_breakpoints_json = String("")
         # Drop any in-memory breakpoints — the next project will seed
         # its own from ``.turbokod/per_user/<username>/breakpoints.json``.
-        self.dap.restore_breakpoints(
-            List[String](), List[Int](), List[String](), List[Bool](),
-            List[String](),
-        )
+        self.dap.restore_breakpoints(List[StoredBreakpoint]())
         # Forget any per-file view-state cache so the next project
         # reloads its own view_states.json fresh.
         self._view_states = List[StoredViewState]()
@@ -7145,27 +7142,13 @@ struct Desktop(Movable):
         # already shows red dots before the user starts a session, and
         # so a single ``dap_tick`` save-if-changed naturally captures
         # any subsequent toggle.
-        var stored = load_breakpoints(canonical)
-        var bp_paths = List[String]()
-        var bp_lines = List[Int]()
-        var bp_conds = List[String]()
-        var bp_enabled = List[Bool]()
-        var bp_wait_for = List[String]()
-        for i in range(len(stored)):
-            bp_paths.append(stored[i].path)
-            bp_lines.append(stored[i].line)
-            bp_conds.append(stored[i].condition)
-            bp_enabled.append(stored[i].enabled)
-            bp_wait_for.append(stored[i].wait_for)
-        self.dap.restore_breakpoints(
-            bp_paths^, bp_lines^, bp_conds^, bp_enabled^, bp_wait_for^,
-        )
+        self.dap.restore_breakpoints(load_breakpoints(canonical))
         # Seed the change-detection cache with the encoding of what we
         # just loaded so the immediate post-restore ``dap_tick`` doesn't
         # re-write the file with the same bytes.
         self._breakpoints_fp_valid = False
         self._last_breakpoints_json = encode_breakpoints(
-            canonical, self._snapshot_breakpoints(),
+            canonical, self.dap.stored_breakpoints(),
         )
         # Load per-file view states. The Desktop refreshes entries for
         # open editors on every paint and writes the file when the
@@ -7323,24 +7306,6 @@ struct Desktop(Movable):
             session.focused = -1
         return session^
 
-    def _snapshot_breakpoints(self) -> List[StoredBreakpoint]:
-        """Pull the current breakpoint set off the DAP manager into the
-        flat ``StoredBreakpoint`` list we serialize. Iterating via the
-        index API rather than returning the manager's parallel lists
-        directly keeps the encoder oblivious to ``DapManager``'s
-        internal layout."""
-        var out = List[StoredBreakpoint]()
-        var n = self.dap.breakpoint_count()
-        for i in range(n):
-            out.append(StoredBreakpoint(
-                self.dap.breakpoint_path_at(i),
-                self.dap.breakpoint_line_at(i),
-                self.dap.breakpoint_condition_at(i),
-                self.dap.breakpoint_enabled_at(i),
-                self.dap.breakpoint_wait_for_at(i),
-            ))
-        return out^
-
     def _save_breakpoints_if_changed(mut self):
         """Re-encode the current breakpoint set and write it to disk
         only when the encoding differs from the previously-written one.
@@ -7352,7 +7317,7 @@ struct Desktop(Movable):
         var fp = self.dap.breakpoints_fingerprint()
         if self._breakpoints_fp_valid and fp == self._breakpoints_fp:
             return
-        var snapshot = self._snapshot_breakpoints()
+        var snapshot = self.dap.stored_breakpoints()
         var encoded = encode_breakpoints(self.project.value(), snapshot)
         if encoded != self._last_breakpoints_json:
             if not save_breakpoints(self.project.value(), snapshot):
@@ -9894,11 +9859,11 @@ struct Desktop(Movable):
         in-grid bar fills by)."""
         var num = self.review.cur_file_cum_lines
         for i in range(self.review.cur_file):
-            if i < len(self.review.file_changed_lines):
-                num += self.review.file_changed_lines[i]
+            if i < len(self.review.files):
+                num += self.review.files[i].changed_lines
         var den = 0
-        for i in range(len(self.review.file_changed_lines)):
-            den += self.review.file_changed_lines[i]
+        for i in range(len(self.review.files)):
+            den += self.review.files[i].changed_lines
         return (min(num, den), den)
 
     # --- macOS-style and Mac OS 9 UI: tool-pane headers ------------------
@@ -18137,8 +18102,9 @@ struct Desktop(Movable):
         var out = List[String]()
         var n = self.dap.breakpoint_count()
         for i in range(n):
-            var p = self.dap.breakpoint_path_at(i)
-            var l = self.dap.breakpoint_line_at(i)
+            var b = self.dap.breakpoint_at(i)
+            var p = b.path
+            var l = b.line
             if p == self_path and l == self_line:
                 continue
             out.append(p + String(":") + String(l + 1))

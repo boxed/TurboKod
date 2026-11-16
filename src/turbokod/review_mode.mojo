@@ -180,6 +180,27 @@ def _count_changed_lines(before: String, after: String, is_binary: Bool) -> Int:
     return c
 
 
+@fieldwise_init
+struct ReviewFile(Copyable, Movable):
+    """One changed file of the changeset under review."""
+    var path: String    # repo-relative
+    # Before/after text, loaded on demand (``load_file``) when the file is
+    # first shown: fetching every file's blobs up front is two ``git show``
+    # spawns per file, which on a big branch froze the UI for seconds.
+    var before: String
+    var after: String
+    var loaded: Bool
+    var binary: Bool
+    # A file the changeset deletes — its body is read-only.
+    var deleted: Bool
+    # A file the changeset creates (incl. untracked files).
+    var added: Bool
+    # Changed (added + modified) line count. Drives the line-weighted
+    # progress bar: a file's / change's share of the bar is proportional to
+    # how many lines it touches, not just its count.
+    var changed_lines: Int
+
+
 struct ReviewMode(Movable):
     var active: Bool
     var mode: Int
@@ -210,38 +231,23 @@ struct ReviewMode(Movable):
     # (``consume_checkout_request``), which asks and then starts the review.
     var checkout_request: String
 
-    # Current changeset. ``src`` / ``sha`` identify it; the parallel
-    # ``file_*`` lists hold one entry per changed file. ``cur_file`` is
-    # the file currently hosted in the editor body.
+    # Current changeset. ``src`` / ``sha`` identify it; ``files`` holds
+    # one entry per changed file. ``cur_file`` is the file currently
+    # hosted in the editor body.
     var src: Int
     var sha: String
     var title: String
-    var file_paths: List[String]    # repo-relative
-    # Before/after text, loaded on demand (``_load_file``) when a file is
-    # first shown: fetching every file's blobs up front is two ``git show``
-    # spawns per file, which on a big branch froze the UI for seconds.
-    var file_before: List[String]
-    var file_after: List[String]
+    var files: List[ReviewFile]
     # Whether every file's text stays loaded: a names review reads them
     # all, and explicit pairs can't be fetched again. A review otherwise
     # holds only the file it shows (``_goto_file``).
     var _keep_all_text: Bool
-    var file_loaded: List[Bool]
     # The ref a branch review's "before" side is read from (its fork point
     # with the main line); empty for the other sources.
     var base_ref: String
-    var file_binary: List[Bool]
-    # True for a file the changeset deletes — its body is read-only.
-    var file_deleted: List[Bool]
-    # True for a file the changeset creates (incl. untracked files).
-    var file_added: List[Bool]
     # Bumped whenever the file list is rebuilt, so the host can tell when
     # anything derived from it (the review file tree) is stale.
     var model_gen: Int
-    # Changed (added + modified) line count per file, computed once at build.
-    # Drives the line-weighted progress bar: a file's / change's share of the
-    # bar is proportional to how many lines it touches, not just its count.
-    var file_changed_lines: List[Int]
     var cur_file: Int
 
     # In-file change counter, fed by the host each frame from the hosted
@@ -253,7 +259,7 @@ struct ReviewMode(Movable):
     var change_total: Int
     var cur_file_cum_lines: Int
     # Cache for ``changed_lines_through``: a prefix-sum of changed diff rows
-    # (added + removed, the same basis as ``file_changed_lines``) by after-file
+    # (added + removed, the same basis as ``changed_lines``) by after-file
     # row, rebuilt only when the hosted file changes. ``_cum_file`` is the file
     # index the cache is valid for (-1 = stale); ``_cum_prefix[b]`` is the number
     # of changed rows anchored at after-rows ``< b``, so ``_cum_prefix[last]``
@@ -314,17 +320,10 @@ struct ReviewMode(Movable):
         self.src = _SRC_UNSTAGED
         self.sha = String("")
         self.title = String("")
-        self.file_paths = List[String]()
-        self.file_before = List[String]()
-        self.file_after = List[String]()
-        self.file_loaded = List[Bool]()
+        self.files = List[ReviewFile]()
         self._keep_all_text = False
         self.base_ref = String("")
-        self.file_binary = List[Bool]()
-        self.file_deleted = List[Bool]()
-        self.file_added = List[Bool]()
         self.model_gen = 0
-        self.file_changed_lines = List[Int]()
         self.cur_file = 0
         self.change_index = 0
         self.change_total = 0
@@ -423,26 +422,19 @@ struct ReviewMode(Movable):
         the rest of its per-file state (the before texts above all), for a
         caller that keeps its own record of the changeset."""
         var out = List[String]()
-        swap(out, self.file_after)
+        for i in range(len(self.files)):
+            var t = String("")
+            swap(t, self.files[i].after)
+            out.append(t^)
         self._reset_review()
         return out^
 
     def _reset_review(mut self):
         self.title = String("")
-        self.file_paths = List[String]()
-        self.file_before = List[String]()
-        self.file_after = List[String]()
-        self.file_loaded = List[Bool]()
+        self.files = List[ReviewFile]()
         self._keep_all_text = False
         self.base_ref = String("")
-        self.file_binary = List[Bool]()
-        self.file_deleted = List[Bool]()
-        self.file_added = List[Bool]()
         self.model_gen += 1
-        # Must be cleared too — ``_build_model`` *appends* to it, so leaving
-        # stale entries here would misalign it with ``file_paths`` and inflate
-        # the progress-bar denominator on every re-opened review.
-        self.file_changed_lines = List[Int]()
         self.cur_file = 0
         self.change_index = 0
         self.change_total = 0
@@ -580,17 +572,12 @@ struct ReviewMode(Movable):
             _add_untracked(changed, self.root)
         for fi in range(len(changed)):
             var summary = _summarize_diff(changed[fi].diff)
-            self.file_paths.append(changed[fi].path)
-            self.file_before.append(String(""))
-            self.file_after.append(String(""))
             # A binary file has no text to load.
-            self.file_loaded.append(summary.binary)
-            self.file_binary.append(summary.binary)
-            self.file_deleted.append(summary.deleted)
-            self.file_added.append(summary.added)
-            self.file_changed_lines.append(
-                0 if summary.binary else summary.changed
-            )
+            self.files.append(ReviewFile(
+                changed[fi].path, String(""), String(""), summary.binary,
+                summary.binary, summary.deleted, summary.added,
+                0 if summary.binary else summary.changed,
+            ))
 
     # --- changeset model for the names review -----------------------------
 
@@ -634,12 +621,12 @@ struct ReviewMode(Movable):
         var befores = List[String]()
         var afters = List[String]()
         for i in range(self.file_count()):
-            paths.append(self.file_paths[i])
+            paths.append(self.files[i].path)
             # A binary file has no names; a deleted one defines none.
-            var text_ok = not self.file_binary[i]
-            befores.append(self.file_before[i] if text_ok else String(""))
+            var text_ok = not self.files[i].binary
+            befores.append(self.files[i].before if text_ok else String(""))
             afters.append(
-                self.file_after[i] if text_ok and not self.file_deleted[i]
+                self.files[i].after if text_ok and not self.files[i].deleted
                 else String("")
             )
         return new_names_in(paths, befores, afters)
@@ -649,9 +636,9 @@ struct ReviewMode(Movable):
         replace git's changed-row estimate with the exact ``build_diff_rows``
         count — the basis ``changed_lines_through`` uses, so the progress
         bar's numerator and denominator agree on every file shown."""
-        if idx < 0 or idx >= len(self.file_loaded) or self.file_loaded[idx]:
+        if idx < 0 or idx >= len(self.files) or self.files[idx].loaded:
             return
-        var path = self.file_paths[idx]
+        var path = self.files[idx].path
         var before: String
         var after: String
         if self.src == _SRC_UNSTAGED or self.branch_checked_out:
@@ -678,10 +665,10 @@ struct ReviewMode(Movable):
             # first appearance → shows as all-added).
             before = fetch_blob_text(self.root, self.sha + String("~1"), path)
             after = fetch_blob_text(self.root, self.sha, path)
-        self.file_changed_lines[idx] = _count_changed_lines(before, after, False)
-        self.file_before[idx] = before^
-        self.file_after[idx] = after^
-        self.file_loaded[idx] = True
+        self.files[idx].changed_lines = _count_changed_lines(before, after, False)
+        self.files[idx].before = before^
+        self.files[idx].after = after^
+        self.files[idx].loaded = True
         if self._cum_file == idx:
             self._cum_file = -1
 
@@ -695,22 +682,13 @@ struct ReviewMode(Movable):
         self._reset_review()
         self._keep_all_text = True
         for i in range(len(paths)):
-            self.file_paths.append(paths[i])
-            self.file_before.append(befores[i])
-            self.file_after.append(afters[i])
-            self.file_loaded.append(True)
-            self.file_binary.append(False)
-            self.file_deleted.append(
-                len(afters[i].as_bytes()) == 0
-                and len(befores[i].as_bytes()) > 0
-            )
-            self.file_added.append(
-                len(befores[i].as_bytes()) == 0
-                and len(afters[i].as_bytes()) > 0
-            )
-            self.file_changed_lines.append(
-                _count_changed_lines(befores[i], afters[i], False)
-            )
+            var has_before = len(befores[i].as_bytes()) > 0
+            var has_after = len(afters[i].as_bytes()) > 0
+            self.files.append(ReviewFile(
+                paths[i], befores[i], afters[i], True, False,
+                has_before and not has_after, has_after and not has_before,
+                _count_changed_lines(befores[i], afters[i], False),
+            ))
 
     # --- host-facing API --------------------------------------------------
 
@@ -718,38 +696,45 @@ struct ReviewMode(Movable):
         """True when active and past the picker (the body editor is live)."""
         return self.active and self.mode == _MODE_REVIEW
 
+    def paths(self) -> List[String]:
+        """Every changed file's repo-relative path, in order."""
+        var out = List[String]()
+        for ref f in self.files:
+            out.append(f.path)
+        return out^
+
     def file_count(self) -> Int:
-        return len(self.file_paths)
+        return len(self.files)
 
     def current_path(self) -> String:
         """Repo-relative path of the current file (empty when none)."""
-        if 0 <= self.cur_file and self.cur_file < len(self.file_paths):
-            return self.file_paths[self.cur_file]
+        if 0 <= self.cur_file and self.cur_file < len(self.files):
+            return self.files[self.cur_file].path
         return String("")
 
     def current_before(self) -> String:
-        if 0 <= self.cur_file and self.cur_file < len(self.file_before):
-            return self.file_before[self.cur_file]
+        if 0 <= self.cur_file and self.cur_file < len(self.files):
+            return self.files[self.cur_file].before
         return String("")
 
     def current_after(self) -> String:
-        if 0 <= self.cur_file and self.cur_file < len(self.file_after):
-            return self.file_after[self.cur_file]
+        if 0 <= self.cur_file and self.cur_file < len(self.files):
+            return self.files[self.cur_file].after
         return String("")
 
     def current_is_binary(self) -> Bool:
-        if 0 <= self.cur_file and self.cur_file < len(self.file_binary):
-            return self.file_binary[self.cur_file]
+        if 0 <= self.cur_file and self.cur_file < len(self.files):
+            return self.files[self.cur_file].binary
         return False
 
     def current_is_deleted(self) -> Bool:
-        if 0 <= self.cur_file and self.cur_file < len(self.file_deleted):
-            return self.file_deleted[self.cur_file]
+        if 0 <= self.cur_file and self.cur_file < len(self.files):
+            return self.files[self.cur_file].deleted
         return False
 
     def current_changed_lines(self) -> Int:
-        if 0 <= self.cur_file and self.cur_file < len(self.file_changed_lines):
-            return self.file_changed_lines[self.cur_file]
+        if 0 <= self.cur_file and self.cur_file < len(self.files):
+            return self.files[self.cur_file].changed_lines
         return 0
 
     def is_editable(self) -> Bool:
@@ -784,19 +769,19 @@ struct ReviewMode(Movable):
         after-row it renders before — pure-deletion runs to the next surviving
         row, trailing deletions to end-of-file — so every deletion is counted
         exactly once and ``_cum_prefix`` is non-decreasing. Built from the same
-        ``build_diff_rows`` pass as ``file_changed_lines`` (``_count_changed_lines``),
-        so ``_cum_prefix[-1]`` equals this file's ``file_changed_lines`` entry
+        ``build_diff_rows`` pass as ``changed_lines`` (``_count_changed_lines``),
+        so ``_cum_prefix[-1]`` equals this file's ``changed_lines``
         exactly — no drift between the bar's numerator and denominator."""
         if self._cum_file == self.cur_file and len(self._cum_prefix) > 0:
             return
         self._cum_file = self.cur_file
         var prefix = List[Int]()
         prefix.append(0)
-        if self.cur_file < 0 or self.cur_file >= len(self.file_before):
+        if self.cur_file < 0 or self.cur_file >= len(self.files):
             self._cum_prefix = prefix^
             return
-        var before_lines = split_lines_no_trailing(self.file_before[self.cur_file])
-        var after_lines = split_lines_no_trailing(self.file_after[self.cur_file])
+        var before_lines = split_lines_no_trailing(self.files[self.cur_file].before)
+        var after_lines = split_lines_no_trailing(self.files[self.cur_file].after)
         var n_after = len(after_lines)
         var drows = build_diff_rows(before_lines, after_lines)
         # delta[a] = changed rows anchored at after-row a (index n_after = EOF).
@@ -841,13 +826,13 @@ struct ReviewMode(Movable):
         return self._cum_prefix[b]
 
     def file_is_added(self, idx: Int) -> Bool:
-        if 0 <= idx and idx < len(self.file_added):
-            return self.file_added[idx]
+        if 0 <= idx and idx < len(self.files):
+            return self.files[idx].added
         return False
 
     def file_is_deleted(self, idx: Int) -> Bool:
-        if 0 <= idx and idx < len(self.file_deleted):
-            return self.file_deleted[idx]
+        if 0 <= idx and idx < len(self.files):
+            return self.files[idx].deleted
         return False
 
     def goto_file(mut self, idx: Int) -> Bool:
@@ -882,11 +867,11 @@ struct ReviewMode(Movable):
         # is fetched again if the review comes back to it.
         var prev = self.cur_file
         if prev != i and not self._keep_all_text \
-                and 0 <= prev and prev < len(self.file_loaded) \
-                and self.file_loaded[prev]:
-            self.file_before[prev] = String("")
-            self.file_after[prev] = String("")
-            self.file_loaded[prev] = False
+                and 0 <= prev and prev < len(self.files) \
+                and self.files[prev].loaded:
+            self.files[prev].before = String("")
+            self.files[prev].after = String("")
+            self.files[prev].loaded = False
             if self._cum_file == prev:
                 self._cum_file = -1
         self.cur_file = i
@@ -1071,11 +1056,11 @@ struct ReviewMode(Movable):
         # to the current chunk); ``den`` = changed lines across the review.
         var num = self.cur_file_cum_lines
         for i in range(self.cur_file):
-            if i < len(self.file_changed_lines):
-                num += self.file_changed_lines[i]
+            if i < len(self.files):
+                num += self.files[i].changed_lines
         var den = 0
-        for i in range(len(self.file_changed_lines)):
-            den += self.file_changed_lines[i]
+        for i in range(len(self.files)):
+            den += self.files[i].changed_lines
         var filled = 0
         if den > 0:
             if num > den:

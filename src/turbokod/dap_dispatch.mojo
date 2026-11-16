@@ -37,6 +37,7 @@ from .json import (
 )
 from std.ffi import external_call
 
+from .breakpoint_store import StoredBreakpoint
 from .lsp import LspProcess
 from .posix import debug_log_path, monotonic_ms, realpath, tcp_connect, which
 from .string_utils import (
@@ -250,6 +251,51 @@ struct DapTestEvaluation(ImplicitlyCopyable, Movable):
 # breakpoints in subprocess code are pushed through, but stepping etc. is
 # parent-only for now.
 
+@fieldwise_init
+struct DapBreakpoint(ImplicitlyCopyable, Movable):
+    """One client-side breakpoint. ``line`` is 0-based. ``condition`` is
+    empty for an unconditional one."""
+    var path: String
+    var line: Int
+    var condition: String
+    # False marks a "parked" breakpoint: it stays in the list (and on disk
+    # via ``breakpoint_store``) so the user doesn't lose the row +
+    # condition, but it's stripped from ``setBreakpoints`` payloads so the
+    # adapter never fires it.
+    var enabled: Bool
+    # "Enable after another BP is hit": empty = no dependency, else the
+    # trigger BP as ``"<full-path>:<1-based-line>"`` (matched against
+    # ``"<other.path>:<other.line+1>"``). Persisted.
+    var wait_for: String
+    # "Trigger has fired this session": True while there's no dependency,
+    # or once the trigger has been hit; until then the BP is held back
+    # from ``setBreakpoints``. Resets on session restart.
+    var armed: Bool
+
+    @staticmethod
+    def from_stored(b: StoredBreakpoint) -> DapBreakpoint:
+        return DapBreakpoint(
+            b.path, b.line, b.condition, b.enabled, b.wait_for,
+            len(b.wait_for.as_bytes()) == 0,
+        )
+
+    def stored(self) -> StoredBreakpoint:
+        return StoredBreakpoint(
+            self.path, self.line, self.condition, self.enabled, self.wait_for,
+        )
+
+
+def _bp_json(b: DapBreakpoint) -> JsonValue:
+    """One ``SourceBreakpoint`` for ``setBreakpoints``. +1: lines are
+    1-based on the wire regardless of ``linesStartAt1`` (see
+    ``toggle_breakpoint``)."""
+    var bp = json_object()
+    bp.put(String("line"), json_int(b.line + 1))
+    if len(b.condition.as_bytes()) > 0:
+        bp.put(String("condition"), json_str(b.condition))
+    return bp^
+
+
 comptime _ANS_NONE = 0
 comptime _ANS_STACK = 1
 comptime _ANS_SCOPES = 2
@@ -363,10 +409,7 @@ struct SubprocessAttach(Copyable, Movable):
     # Mirror of the parent's breakpoints at attach time. Sent to the
     # subprocess on ``initialized`` so a breakpoint set in shared code
     # (e.g. a Django view served from the forked child) actually fires.
-    var bp_paths: List[String]
-    var bp_lines: List[Int]
-    var bp_conditions: List[String]
-    var bp_enabled: List[Bool]
+    var bps: List[DapBreakpoint]
 
     def __init__(out self):
         # Inert default — ``state == _STATE_NOT_STARTED`` is the sentinel
@@ -384,10 +427,7 @@ struct SubprocessAttach(Copyable, Movable):
         self.rq = _InspectRequests()
         self.got_initialized_event = False
         self.pending_attach_args = JsonValue()
-        self.bp_paths = List[String]()
-        self.bp_lines = List[Int]()
-        self.bp_conditions = List[String]()
-        self.bp_enabled = List[Bool]()
+        self.bps = List[DapBreakpoint]()
 
     def __copyinit__(mut self, copy: Self):
         # Same caveat as ``DapManager.__copyinit__``: a real copy would
@@ -464,30 +504,8 @@ struct DapManager(Copyable, Movable):
     var _got_initialized_event: Bool
     var _launch_request_kind: UInt8
 
-    # Client-side breakpoint state. Stored as a flat list of
-    # (path, line, condition) triples rather than a nested
-    # ``List[List[...]]`` — nested generics aren't used anywhere else
-    # in this codebase, so the flat shape is the safer / more idiomatic
-    # choice. ``condition`` is empty for unconditional breakpoints.
-    var _bp_path: List[String]
-    var _bp_line: List[Int]        # 0-based
-    var _bp_condition: List[String]
-    # Per-BP enable flag. False marks a "parked" breakpoint — it stays
-    # in the list (and on disk via ``breakpoint_store``) so the user
-    # doesn't lose the row + condition, but it's stripped from
-    # ``setBreakpoints`` payloads so the adapter never fires it.
-    var _bp_enabled: List[Bool]
-    # Per-BP "enable after another BP is hit" trigger. Empty string =
-    # no dependency (the BP is live as soon as it's enabled). A
-    # non-empty value identifies the trigger BP as ``"<full-path>:<1-based-line>"``
-    # — matching ``_bp_wait_for[i]`` against ``"<other.path>:<other.line+1>"``.
-    # Persisted via ``breakpoint_store``.
-    var _bp_wait_for: List[String]
-    # Per-BP "trigger has fired this session" latch. True while there's
-    # no dependency (so the BP is always live), or once the wait-for
-    # trigger has been hit. False otherwise — those BPs are stripped
-    # from ``setBreakpoints`` until armed. Resets on session restart.
-    var _bp_armed: List[Bool]
+    # Client-side breakpoint state, in the order the user set them.
+    var _bps: List[DapBreakpoint]
     # Demux table for ``setBreakpoints`` responses. Each entry parks
     # the source path of a sent request; the response carries a
     # parallel ``breakpoints`` array we line up by index against the
@@ -538,7 +556,7 @@ struct DapManager(Copyable, Movable):
     # which the host calls once per tick after handling the surfaced
     # ``stopped`` event. Empty ``condition`` is the sentinel for "none
     # buffered" (a real BP condition expression is never empty — the
-    # absence of a condition is encoded by ``len(_bp_condition[i]) == 0``,
+    # absence of a condition is encoded by an empty ``DapBreakpoint.condition``,
     # not by storing an empty condition here).
     var _pending_cond_exc_condition: String
     var _pending_cond_exc_error: String
@@ -640,12 +658,7 @@ struct DapManager(Copyable, Movable):
         self._supports_terminate_request = False
         self._got_initialized_event = False
         self._launch_request_kind = DAP_REQUEST_LAUNCH
-        self._bp_path = List[String]()
-        self._bp_line = List[Int]()
-        self._bp_condition = List[String]()
-        self._bp_enabled = List[Bool]()
-        self._bp_wait_for = List[String]()
-        self._bp_armed = List[Bool]()
+        self._bps = List[DapBreakpoint]()
         self._inflight_set_breakpoints_seqs = List[Int]()
         self._inflight_set_breakpoints_paths = List[String]()
         self._inflight_set_breakpoints_lines = List[List[Int]]()
@@ -921,11 +934,10 @@ struct DapManager(Copyable, Movable):
         accumulated this run.
 
         Kept across restarts:
-          * Breakpoints (``_bp_path``/``_bp_line``/``_bp_condition``/
-            ``_bp_wait_for``)
+          * Breakpoints (``_bps``)
           * Exception filter selection (``_exception_filters``)
 
-        ``_bp_armed`` is reset — wait-for BPs need to re-observe their
+        Their ``armed`` latch is reset — wait-for BPs need to re-observe their
         trigger fire before they go live in the new session.
 
         Everything else is transient handshake / event state that
@@ -968,19 +980,15 @@ struct DapManager(Copyable, Movable):
         # list of field defaults, where this used to be a third copy of it
         # that a new field had to be remembered in.
         var fresh = DapManager()
-        swap(fresh._bp_path, self._bp_path)
-        swap(fresh._bp_line, self._bp_line)
-        swap(fresh._bp_condition, self._bp_condition)
-        swap(fresh._bp_enabled, self._bp_enabled)
-        swap(fresh._bp_wait_for, self._bp_wait_for)
+        swap(fresh._bps, self._bps)
         swap(fresh._exception_filters, self._exception_filters)
         swap(fresh._stderr_log, self._stderr_log)
         # Reset the per-session ``armed`` latches: dependent BPs go
         # back to "armed iff no wait-for". Without this a BP that was
         # armed by its trigger in run N would stay live in run N+1
         # before the trigger re-fires.
-        for k in range(len(fresh._bp_wait_for)):
-            fresh._bp_armed.append(len(fresh._bp_wait_for[k].as_bytes()) == 0)
+        for ref b in fresh._bps:
+            b.armed = len(b.wait_for.as_bytes()) == 0
         self = fresh^
 
     # --- breakpoints -----------------------------------------------------
@@ -997,7 +1005,7 @@ struct DapManager(Copyable, Movable):
         """
         var found = self._bp_index(path, line)
         if found >= 0:
-            self._remove_bp_at(found)
+            _ = self._bps.pop(found)
         else:
             self._append_bp(path, line, String(""))
         self._push_breakpoints_for_path(path)
@@ -1013,7 +1021,7 @@ struct DapManager(Copyable, Movable):
         if found < 0:
             self._append_bp(path, line, condition^)
         else:
-            self._bp_condition[found] = condition^
+            self._bps[found].condition = condition^
         self._push_breakpoints_for_path(path)
 
     def set_breakpoint_enabled(
@@ -1024,9 +1032,9 @@ struct DapManager(Copyable, Movable):
         a non-existent BP has no obvious meaning, and the right-click
         menu only opens over an existing dot anyway."""
         var i = self._bp_index(path, line)
-        if i < 0 or self._bp_enabled[i] == enabled:
+        if i < 0 or self._bps[i].enabled == enabled:
             return
-        self._bp_enabled[i] = enabled
+        self._bps[i].enabled = enabled
         self._push_breakpoints_for_path(path)
 
     def set_breakpoint_wait_for(
@@ -1037,20 +1045,20 @@ struct DapManager(Copyable, Movable):
         identifier of the BP that must be hit first; empty clears the
         dependency. No-op when no BP exists at that location."""
         var i = self._bp_index(path, line)
-        if i < 0 or self._bp_wait_for[i] == wait_for:
+        if i < 0 or self._bps[i].wait_for == wait_for:
             return
-        self._bp_wait_for[i] = wait_for^
         # Re-derive ``armed``: empty wait-for is always armed; non-empty
         # starts disarmed (the trigger has to fire again before the BP
         # goes live).
-        self._bp_armed[i] = len(self._bp_wait_for[i].as_bytes()) == 0
+        self._bps[i].armed = len(wait_for.as_bytes()) == 0
+        self._bps[i].wait_for = wait_for^
         self._push_breakpoints_for_path(path)
 
     def breakpoint_wait_for(self, path: String, line: Int) -> String:
         """Wait-for trigger key at ``(path, line)``, or empty string
         when none / no BP exists."""
         var i = self._bp_index(path, line)
-        return self._bp_wait_for[i] if i >= 0 else String("")
+        return self._bps[i].wait_for if i >= 0 else String("")
 
     def arm_dependents(mut self, path: String, line: Int):
         """Mark every BP whose ``wait_for`` matches ``(path, line)`` as
@@ -1068,14 +1076,12 @@ struct DapManager(Copyable, Movable):
         """
         var key = path + String(":") + String(line + 1)
         var changed_paths = List[String]()
-        for i in range(len(self._bp_wait_for)):
-            if self._bp_wait_for[i] != key:
+        for ref b in self._bps:
+            if b.wait_for != key or b.armed:
                 continue
-            if self._bp_armed[i]:
-                continue
-            self._bp_armed[i] = True
-            if self._bp_path[i] not in changed_paths:
-                changed_paths.append(self._bp_path[i])
+            b.armed = True
+            if b.path not in changed_paths:
+                changed_paths.append(b.path)
         for k in range(len(changed_paths)):
             self._push_breakpoints_for_path(changed_paths[k])
 
@@ -1083,32 +1089,23 @@ struct DapManager(Copyable, Movable):
         """Current condition for the breakpoint at ``(path, line)``,
         or empty string when none / unconditional."""
         var i = self._bp_index(path, line)
-        return self._bp_condition[i] if i >= 0 else String("")
+        return self._bps[i].condition if i >= 0 else String("")
 
     def breakpoint_enabled(self, path: String, line: Int) -> Bool:
         """Enable state at ``(path, line)``. Defaults to True (the
         most common case) so callers can use this in expressions
         without first probing ``has_breakpoint``."""
         var i = self._bp_index(path, line)
-        return self._bp_enabled[i] if i >= 0 else True
-
-    def _remove_bp_at(mut self, idx: Int):
-        """Drop entry ``idx`` from every parallel breakpoint list."""
-        _ = self._bp_path.pop(idx)
-        _ = self._bp_line.pop(idx)
-        _ = self._bp_condition.pop(idx)
-        _ = self._bp_enabled.pop(idx)
-        _ = self._bp_wait_for.pop(idx)
-        _ = self._bp_armed.pop(idx)
+        return self._bps[i].enabled if i >= 0 else True
 
     def breakpoints_for(self, path: String) -> List[Int]:
         """Return a copy of the breakpoint lines for ``path``, 0-based.
         Includes disabled breakpoints — the gutter still draws them
         (in gray) so the user knows they're parked there."""
         var out = List[Int]()
-        for i in range(len(self._bp_path)):
-            if self._bp_path[i] == path:
-                out.append(self._bp_line[i])
+        for ref b in self._bps:
+            if b.path == path:
+                out.append(b.line)
         return out^
 
     def fill_breakpoints_info(
@@ -1123,113 +1120,70 @@ struct DapManager(Copyable, Movable):
         lines.clear()
         enabled.clear()
         conditional.clear()
-        for i in range(len(self._bp_path)):
-            if self._bp_path[i] == path:
-                lines.append(self._bp_line[i])
-                enabled.append(self._bp_enabled[i])
-                conditional.append(
-                    len(self._bp_condition[i].as_bytes()) > 0,
-                )
+        for ref b in self._bps:
+            if b.path == path:
+                lines.append(b.line)
+                enabled.append(b.enabled)
+                conditional.append(len(b.condition.as_bytes()) > 0)
 
     def breakpoints_fingerprint(self) -> UInt64:
         """A hash of the whole breakpoint set, computed without
         allocating — the per-frame "has it changed since the last save?"
         check."""
         var h = fnv_start()
-        for i in range(len(self._bp_path)):
-            h = fnv_str(h, self._bp_path[i])
-            h = fnv_int(h, self._bp_line[i])
-            h = fnv_str(h, self._bp_condition[i])
-            h = fnv_int(h, 1 if self._bp_enabled[i] else 0)
-            h = fnv_str(h, self._bp_wait_for[i])
+        for ref b in self._bps:
+            h = fnv_str(h, b.path)
+            h = fnv_int(h, b.line)
+            h = fnv_str(h, b.condition)
+            h = fnv_int(h, 1 if b.enabled else 0)
+            h = fnv_str(h, b.wait_for)
         return h
 
     def breakpoint_count(self) -> Int:
-        return len(self._bp_path)
+        return len(self._bps)
 
-    def breakpoint_path_at(self, idx: Int) -> String:
-        if idx < 0 or idx >= len(self._bp_path):
-            return String("")
-        return self._bp_path[idx]
+    def breakpoint_at(self, idx: Int) -> DapBreakpoint:
+        return self._bps[idx]
 
-    def breakpoint_line_at(self, idx: Int) -> Int:
-        if idx < 0 or idx >= len(self._bp_line):
-            return 0
-        return self._bp_line[idx]
+    def stored_breakpoints(self) -> List[StoredBreakpoint]:
+        """The breakpoint set as ``breakpoint_store`` persists it."""
+        var out = List[StoredBreakpoint]()
+        for ref b in self._bps:
+            out.append(b.stored())
+        return out^
 
-    def breakpoint_condition_at(self, idx: Int) -> String:
-        if idx < 0 or idx >= len(self._bp_condition):
-            return String("")
-        return self._bp_condition[idx]
-
-    def breakpoint_enabled_at(self, idx: Int) -> Bool:
-        if idx < 0 or idx >= len(self._bp_enabled):
-            return True
-        return self._bp_enabled[idx]
-
-    def breakpoint_wait_for_at(self, idx: Int) -> String:
-        if idx < 0 or idx >= len(self._bp_wait_for):
-            return String("")
-        return self._bp_wait_for[idx]
-
-    def restore_breakpoints(
-        mut self,
-        var paths: List[String],
-        var lines: List[Int],
-        var conditions: List[String],
-        var enabled: List[Bool],
-        var wait_for: List[String],
-    ):
+    def restore_breakpoints(mut self, stored: List[StoredBreakpoint]):
         """Replace the in-memory breakpoint set wholesale, without
         sending any ``setBreakpoints`` to the adapter. Used at project
         setup to seed from the on-disk per-user file before the user
         starts a debug session — once they hit F5,
         ``_push_all_breakpoints`` ships the restored set during the
-        CONFIGURING transition.
-
-        All five lists must be the same length; a length mismatch is
-        treated as "no breakpoints to restore" rather than partially
-        populating the parallel arrays. ``armed`` is derived locally —
-        empty ``wait_for`` is always armed; non-empty starts disarmed
-        until the trigger fires this session."""
-        if len(paths) != len(lines) \
-                or len(paths) != len(conditions) \
-                or len(paths) != len(enabled) \
-                or len(paths) != len(wait_for):
-            return
-        var armed = List[Bool]()
-        for k in range(len(wait_for)):
-            armed.append(len(wait_for[k].as_bytes()) == 0)
-        self._bp_path = paths^
-        self._bp_line = lines^
-        self._bp_condition = conditions^
-        self._bp_enabled = enabled^
-        self._bp_wait_for = wait_for^
-        self._bp_armed = armed^
+        CONFIGURING transition. ``armed`` is derived — empty ``wait_for``
+        is always armed; non-empty starts disarmed until the trigger fires
+        this session."""
+        self._bps = List[DapBreakpoint]()
+        for ref b in stored:
+            self._bps.append(DapBreakpoint.from_stored(b))
 
     def has_breakpoint(self, path: String, line: Int) -> Bool:
         return self._bp_index(path, line) >= 0
 
     def _bp_index(self, path: String, line: Int) -> Int:
-        """Index of the breakpoint at ``(path, line)`` in the parallel
-        ``_bp_*`` lists, or -1."""
-        for i in range(len(self._bp_path)):
-            if self._bp_path[i] == path and self._bp_line[i] == line:
+        """Index of the breakpoint at ``(path, line)`` in ``_bps``, or -1."""
+        for i in range(len(self._bps)):
+            if self._bps[i].path == path and self._bps[i].line == line:
                 return i
         return -1
 
     def _append_bp(mut self, path: String, line: Int, var condition: String):
         """Add an enabled, armed, trigger-less breakpoint."""
-        self._bp_path.append(path)
-        self._bp_line.append(line)
-        self._bp_condition.append(condition^)
-        self._bp_enabled.append(True)
-        self._bp_wait_for.append(String(""))
-        self._bp_armed.append(True)
+        self._bps.append(
+            DapBreakpoint(path, line, condition^, True, String(""), True),
+        )
 
     def _distinct_breakpoint_paths(self) -> List[String]:
         """Unique source paths that currently hold a breakpoint."""
-        return _distinct(self._bp_path)
+        return _bp_paths(self._bps)
 
     def _push_breakpoints_for_path(mut self, path: String):
         """Send ``setBreakpoints`` for ``path`` if the adapter is in a
@@ -1260,8 +1214,8 @@ struct DapManager(Copyable, Movable):
         # order, so the response demux can map ``breakpoints[i]`` back
         # to a ``(path, line)`` pair.
         var sent_lines = List[Int]()
-        for i in range(len(self._bp_path)):
-            if self._bp_path[i] != path:
+        for ref b in self._bps:
+            if b.path != path:
                 continue
             # Disabled BPs stay in the local list (so the user keeps
             # their condition + the gutter still shows a faint dot)
@@ -1271,32 +1225,21 @@ struct DapManager(Copyable, Movable):
             # disabled BP still fires: skipping here leaves
             # ``have_oneshot_match`` False, so the oneshot branch below
             # emits it.
-            if not self._bp_enabled[i]:
+            if not b.enabled:
                 continue
             # Wait-for trigger gating: a BP that's enabled but waiting
             # on another BP is held back until ``arm_dependents`` flips
-            # ``_bp_armed[i]``. Same skip-but-no-correlation-break as
+            # ``armed``. Same skip-but-no-correlation-break as
             # the disabled branch above. The oneshot ("run to cursor")
             # exception still applies — the user explicitly asked to
             # stop on this line, dependency or not.
-            if not self._bp_armed[i]:
-                if self._oneshot_bp_path == path \
-                        and self._bp_line[i] == self._oneshot_bp_line:
-                    pass
-                else:
-                    continue
-            var bp = json_object()
-            # +1: see comment in toggle_breakpoint about lines being
-            # 1-based on the wire regardless of linesStartAt1.
-            bp.put(String("line"), json_int(self._bp_line[i] + 1))
-            if len(self._bp_condition[i].as_bytes()) > 0:
-                bp.put(
-                    String("condition"), json_str(self._bp_condition[i]),
-                )
-            bps.append(bp)
-            sent_lines.append(self._bp_line[i])
-            if self._oneshot_bp_path == path \
-                    and self._bp_line[i] == self._oneshot_bp_line:
+            var is_oneshot = self._oneshot_bp_path == path \
+                and b.line == self._oneshot_bp_line
+            if not b.armed and not is_oneshot:
+                continue
+            bps.append(_bp_json(b))
+            sent_lines.append(b.line)
+            if is_oneshot:
                 have_oneshot_match = True
         # "Run to cursor" oneshot: stitch into this path's BP list iff
         # the user doesn't already have a regular BP on the same line.
@@ -2022,28 +1965,15 @@ struct DapManager(Copyable, Movable):
         except e:
             print("dap: subprocess setDebuggerProperty:", String(e))
         # setBreakpoints per source path.
-        var paths = _distinct(self._subprocess.bp_paths)
+        var paths = _bp_paths(self._subprocess.bps)
         for i in range(len(paths)):
             var path = paths[i]
             var src = json_object()
             src.put(String("path"), json_str(path))
             var bps = json_array()
-            for k in range(len(self._subprocess.bp_paths)):
-                if self._subprocess.bp_paths[k] != path:
-                    continue
-                if not self._subprocess.bp_enabled[k]:
-                    continue
-                var bp = json_object()
-                bp.put(
-                    String("line"),
-                    json_int(self._subprocess.bp_lines[k] + 1),
-                )
-                if len(self._subprocess.bp_conditions[k].as_bytes()) > 0:
-                    bp.put(
-                        String("condition"),
-                        json_str(self._subprocess.bp_conditions[k]),
-                    )
-                bps.append(bp)
+            for ref b in self._subprocess.bps:
+                if b.path == path and b.enabled:
+                    bps.append(_bp_json(b))
             var args = json_object()
             args.put(String("source"), src)
             args.put(String("breakpoints"), bps)
@@ -2748,15 +2678,7 @@ struct DapManager(Copyable, Movable):
         # Mirror the parent's breakpoints into the subprocess so a
         # breakpoint set in shared code (a Django view served from the
         # forked child) actually fires.
-        self._subprocess.bp_paths = List[String]()
-        self._subprocess.bp_lines = List[Int]()
-        self._subprocess.bp_conditions = List[String]()
-        self._subprocess.bp_enabled = List[Bool]()
-        for i in range(len(self._bp_path)):
-            self._subprocess.bp_paths.append(self._bp_path[i])
-            self._subprocess.bp_lines.append(self._bp_line[i])
-            self._subprocess.bp_conditions.append(self._bp_condition[i])
-            self._subprocess.bp_enabled.append(self._bp_enabled[i])
+        self._subprocess.bps = self._bps.copy()
         self.client.process.trace(
             String("debugpyAttach: opened ") + host + String(":")
             + String(port) + String(" pid=") + String(spi)
@@ -3054,10 +2976,10 @@ def _exception_breakpoints_args(filters: List[String]) -> JsonValue:
     return args^
 
 
-def _distinct(items: List[String]) -> List[String]:
-    """``items`` with duplicates dropped, first-seen order kept."""
+def _bp_paths(bps: List[DapBreakpoint]) -> List[String]:
+    """The distinct source paths holding a breakpoint, first-seen order."""
     var out = List[String]()
-    for i in range(len(items)):
-        if items[i] not in out:
-            out.append(items[i])
+    for ref b in bps:
+        if b.path not in out:
+            out.append(b.path)
     return out^

@@ -2587,9 +2587,9 @@ def tk_desktop_review(
     var files = json_array()
     for i in range(rv.file_count()):
         var f = json_array()
-        f.append(json_str(rv.file_paths[i]))
-        f.append(json_bool(i < len(rv.file_added) and rv.file_added[i]))
-        f.append(json_bool(i < len(rv.file_deleted) and rv.file_deleted[i]))
+        f.append(json_str(rv.files[i].path))
+        f.append(json_bool(rv.files[i].added))
+        f.append(json_bool(rv.files[i].deleted))
         files.append(f)
     o.put(String("files"), files)
     o.put(String("cur_file"), json_int(rv.cur_file))
