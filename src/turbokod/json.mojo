@@ -175,6 +175,14 @@ def json_null() -> JsonValue:
     return v^
 
 
+def take_json(mut v: JsonValue) -> JsonValue:
+    """Move ``v`` out, leaving null behind — for lifting a subtree out of a
+    tree the caller owns without copying it."""
+    var out = json_null()
+    swap(out, v)
+    return out^
+
+
 def json_bool(b: Bool) -> JsonValue:
     var v = JsonValue()
     v.kind = JSON_BOOL

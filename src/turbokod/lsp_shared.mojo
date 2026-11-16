@@ -374,16 +374,21 @@ struct LspChannel(Movable):
             return False
         return True
 
-    def pop(mut self, sid: Int) raises -> Tuple[Optional[LspIncoming], Bool]:
-        """The next message for session ``sid`` and whether it is a replay
-        (apply, don't answer). Reads whatever the server has sent first."""
+    def pop(
+        mut self, sid: Int, mut replay: Bool,
+    ) raises -> Optional[LspIncoming]:
+        """The next message for session ``sid``; ``replay`` says whether it
+        is a replay (apply, don't answer). Reads whatever the server has
+        sent first. The message moves out — a tuple return would make the
+        caller deep-copy it."""
         self.pump()
+        replay = False
         var i = self._index_of(sid)
         if i < 0 or len(self._inbox[i]) == 0:
-            return (Optional[LspIncoming](), False)
+            return Optional[LspIncoming]()
         var msg = self._inbox[i].pop(0)
-        var replay = self._inbox_replay[i].pop(0)
-        return (Optional[LspIncoming](msg^), replay)
+        replay = self._inbox_replay[i].pop(0)
+        return Optional[LspIncoming](msg^)
 
     def pump(mut self) raises:
         """Move everything the server has sent into the inboxes."""
@@ -413,7 +418,14 @@ struct LspChannel(Movable):
                     return
             return   # a reply to a session that has left
         var method = msg.method.value() if msg.method else String("")
-        var params = msg.params.value().copy() if msg.params else json_object()
+        # Routing reads two fields; borrowed, not a copy of the params (a
+        # whole diagnostics payload) per message.
+        var message = String("")
+        var first_uri = String("")
+        if msg.params:
+            ref params = msg.params.value()
+            message = json_get_string(params, String("message"))
+            first_uri = _first_uri_of(method, params)
         if msg.kind == LSP_REQUEST:
             if method == String("workspace/workspaceFolders"):
                 # Only the channel knows every root.
@@ -433,19 +445,17 @@ struct LspChannel(Movable):
             if method == String("window/showMessageRequest"):
                 # Needs exactly one answer: the window it names, else the
                 # one the user is working in.
-                var named = self._session_named_in(
-                    json_get_string(params, String("message")),
-                )
+                var named = self._session_named_in(message)
                 self._deliver(
                     named if named >= 0 else self._active_session(), msg^, False,
                 )
                 return
-            self._deliver(self._owner_of(_first_uri_of(method, params)), msg^, False)
+            self._deliver(self._owner_of(first_uri), msg^, False)
             return
         if method == String("window/showMessage"):
             # A pop-up: to the window whose project it names, else to every
             # window on this server — a duplicate beats a missed error.
-            var named = self._session_named_in(json_get_string(params, String("message")))
+            var named = self._session_named_in(message)
             if named >= 0:
                 self._deliver(named, msg^, False)
                 return
@@ -456,7 +466,7 @@ struct LspChannel(Movable):
             for i in range(len(self._session_ids)):
                 self._deliver(self._session_ids[i], msg.copy(), False)
             return
-        self._deliver(self._owner_of(_first_uri_of(method, params)), msg^, False)
+        self._deliver(self._owner_of(first_uri), msg^, False)
 
     def _owner_of(self, uri: String) -> Int:
         """The session a document belongs to: whoever has it open, else the

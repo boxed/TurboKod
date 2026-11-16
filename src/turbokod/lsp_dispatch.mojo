@@ -44,7 +44,6 @@ from .posix import (
     debug_log_path, getcwd_path, getenv_value, monotonic_ms, realpath, sleep_ms,
 )
 from .string_utils import (
-    fnv_start, fnv_str,
     hex_digit_value, percent_encode_uri_path, strip_trailing_newlines, utf8_prefix,
 )
 from .highlight import Highlight
@@ -456,6 +455,21 @@ struct CodeAction(Copyable, Movable):
         self.unresolved = unresolved^
 
 
+def _json_at_path(
+    v: JsonValue, keys: List[String], i: Int,
+) -> Optional[JsonValue]:
+    """A copy of the value at ``v.keys[i].keys[i+1]…``, or empty when a
+    step is absent or not an object. Only the leaf is copied."""
+    if i == len(keys):
+        return v.copy()
+    if not v.is_object():
+        return None
+    var k = v.object_index(keys[i])
+    if k < 0:
+        return None
+    return _json_at_path(v.obj_v[k].value, keys, i + 1)
+
+
 struct _PositionRemapper(Copyable, Movable):
     """Rewrites every ``Position.character`` in a JSON payload between the
     editor's byte columns and the negotiated wire encoding.
@@ -482,40 +496,92 @@ struct _PositionRemapper(Copyable, Movable):
     documentSymbol, formatting …). With no resolvable URI we leave the
     value alone — a wrong column beats a guessed one.
 
-    ``LineTable``s are cached per path for the life of one walk, so a
-    rename touching 50 edits in one file indexes it once. Open buffers
-    are seeded from ``_OpenDoc.text`` (authoritative — the buffer may be
-    dirty); anything else is read from disk.
+    Open buffers are registered with ``set_doc`` as their text is sent
+    (authoritative — the buffer may be dirty) and indexed only when a walk
+    first needs them, so an edit costs nothing until a payload actually
+    mentions that document; ``set_doc`` drops the stale index. Anything
+    else is read from disk, cached for the life of one walk
+    (``begin_walk``), so a rename touching 50 edits in one file reads and
+    indexes it once.
+
+    The walk rewrites the payload in place: rebuilding it copied each
+    node once per level on the way down and again into its parent.
     """
     var enc: UInt8
     var paths: List[String]
     var tables: List[LineTable]
+    var from_disk: List[Bool]
     var missing: List[String]
+    var doc_paths: List[String]
+    var doc_texts: List[String]
 
     def __init__(out self, enc: UInt8):
         self.enc = enc
         self.paths = List[String]()
         self.tables = List[LineTable]()
+        self.from_disk = List[Bool]()
         self.missing = List[String]()
+        self.doc_paths = List[String]()
+        self.doc_texts = List[String]()
 
-    def seed(mut self, path: String, var text: String):
-        """Pre-load a document's text (an open, possibly dirty buffer)."""
+    def _drop_table(mut self, path: String):
         for i in range(len(self.paths)):
             if self.paths[i] == path:
-                self.tables[i] = LineTable(text^)
+                _ = self.paths.pop(i)
+                _ = self.tables.pop(i)
+                _ = self.from_disk.pop(i)
                 return
-        self.paths.append(path)
-        self.tables.append(LineTable(text^))
+
+    def set_doc(mut self, path: String, text: String):
+        """Register an open document's current text (what the server was
+        last sent). Indexed lazily by ``_slot_for``."""
+        self._drop_table(path)
+        for i in range(len(self.doc_paths)):
+            if self.doc_paths[i] == path:
+                self.doc_texts[i] = text.copy()
+                return
+        self.doc_paths.append(path)
+        self.doc_texts.append(text.copy())
+
+    def drop_doc(mut self, path: String):
+        """Forget a closed document; it's read from disk from now on."""
+        self._drop_table(path)
+        for i in range(len(self.doc_paths)):
+            if self.doc_paths[i] == path:
+                _ = self.doc_paths.pop(i)
+                _ = self.doc_texts.pop(i)
+                return
+
+    def begin_walk(mut self):
+        """Start a top-level walk: files read from disk may have changed
+        since the last one, so their indexes (and misses) are dropped.
+        Open documents' indexes stay until their text changes."""
+        var i = 0
+        while i < len(self.paths):
+            if self.from_disk[i]:
+                _ = self.paths.pop(i)
+                _ = self.tables.pop(i)
+                _ = self.from_disk.pop(i)
+            else:
+                i += 1
+        self.missing.clear()
 
     def _slot_for(mut self, path: String) -> Int:
-        """Cache slot for ``path``, reading it from disk on first use.
-        Returns -1 when the file can't be read — the caller then leaves
-        columns untouched rather than converting against empty text."""
+        """Cache slot for ``path``: an open document's registered text, or
+        the file on disk. Returns -1 when the file can't be read — the
+        caller then leaves columns untouched rather than converting
+        against empty text."""
         if len(path.as_bytes()) == 0:
             return -1
         for i in range(len(self.paths)):
             if self.paths[i] == path:
                 return i
+        for i in range(len(self.doc_paths)):
+            if self.doc_paths[i] == path:
+                self.paths.append(path)
+                self.tables.append(LineTable(self.doc_texts[i].copy()))
+                self.from_disk.append(False)
+                return len(self.tables) - 1
         for i in range(len(self.missing)):
             if self.missing[i] == path:
                 return -1
@@ -523,6 +589,7 @@ struct _PositionRemapper(Copyable, Movable):
             var text = read_file(path)
             self.paths.append(path)
             self.tables.append(LineTable(text^))
+            self.from_disk.append(True)
         except:
             self.missing.append(path)
             return -1
@@ -532,83 +599,61 @@ struct _PositionRemapper(Copyable, Movable):
         """URI context for ``v``: its own ``uri`` / ``targetUri``, else the
         ``uri`` of a nested ``textDocument`` (the ``documentChanges``
         shape), else whatever the parent was carrying."""
-        var direct = v.object_get(String("uri"))
-        if direct and direct.value().is_string():
-            return direct.value().as_str()
-        var target = v.object_get(String("targetUri"))
-        if target and target.value().is_string():
-            return target.value().as_str()
-        var td = v.object_get(String("textDocument"))
-        if td and td.value().is_object():
-            var tdu = td.value().object_get(String("uri"))
-            if tdu and tdu.value().is_string():
-                return tdu.value().as_str()
+        var di = v.object_index(String("uri"))
+        if di >= 0 and v.obj_v[di].value.is_string():
+            return v.obj_v[di].value.str_v
+        var ti = v.object_index(String("targetUri"))
+        if ti >= 0 and v.obj_v[ti].value.is_string():
+            return v.obj_v[ti].value.str_v
+        var tdi = v.object_index(String("textDocument"))
+        if tdi >= 0 and v.obj_v[tdi].value.is_object():
+            ref td = v.obj_v[tdi].value
+            var ui = td.object_index(String("uri"))
+            if ui >= 0 and td.obj_v[ui].value.is_string():
+                return td.obj_v[ui].value.str_v
         return inherited
 
-    def _is_position(self, v: JsonValue) -> Bool:
-        var ln = v.object_get(String("line"))
-        if not ln or not ln.value().is_int():
-            return False
-        var ch = v.object_get(String("character"))
-        return Bool(ch) and ch.value().is_int()
-
-    def walk(mut self, v: JsonValue, uri: String, to_bytes: Bool) -> JsonValue:
-        """Rebuild ``v`` with every Position's ``character`` converted.
+    def walk(mut self, mut v: JsonValue, uri: String, to_bytes: Bool):
+        """Convert every Position's ``character`` in ``v``, in place.
 
         ``to_bytes`` True is the inbound direction (wire units → byte
         columns); False is outbound (byte columns → wire units).
         """
         if self.enc == POS_UTF8:
-            return v.copy()
+            return
         if v.is_array():
-            var arr = json_array()
-            for i in range(v.array_len()):
-                arr.append(self.walk(v.array_at(i), uri, to_bytes))
-            return arr^
+            for i in range(len(v.arr_v)):
+                self.walk(v.arr_v[i], uri, to_bytes)
+            return
         if not v.is_object():
-            return v.copy()
+            return
+        var ln = v.object_index(String("line"))
+        var ch = v.object_index(String("character"))
+        if ln >= 0 and ch >= 0 and v.obj_v[ln].value.is_int() \
+                and v.obj_v[ch].value.is_int():
+            var slot = self._slot_for(_uri_to_path(uri))
+            if slot < 0:
+                return
+            var row = v.obj_v[ln].value.int_v
+            var col = v.obj_v[ch].value.int_v
+            if to_bytes:
+                col = self.tables[slot].wire_to_col(row, col, self.enc)
+            else:
+                col = self.tables[slot].col_to_wire(row, col, self.enc)
+            v.obj_v[ch].value.int_v = col
+            return
         var ctx = self._uri_of(v, uri)
-        if self._is_position(v):
-            return self._convert_position(v, ctx, to_bytes)
-        var obj = json_object()
-        for i in range(v.object_len()):
-            var key = v.object_key_at(i)
-            var val = v.object_value_at(i)
+        for i in range(len(v.obj_v)):
             # ``WorkspaceEdit.changes`` is a ``{uri: TextEdit[]}`` map — the
             # URI context for each group is the *key*, not a field.
-            if key == String("changes") and val.is_object():
-                var changes = json_object()
-                for k in range(val.object_len()):
-                    var curi = val.object_key_at(k)
-                    changes.put(
-                        curi,
-                        self.walk(val.object_value_at(k), curi, to_bytes),
-                    )
-                obj.put(key^, changes)
+            if v.obj_v[i].key == String("changes") \
+                    and v.obj_v[i].value.is_object():
+                ref changes = v.obj_v[i].value
+                for k in range(len(changes.obj_v)):
+                    var curi = changes.obj_v[k].key
+                    self.walk(changes.obj_v[k].value, curi, to_bytes)
                 continue
-            obj.put(key^, self.walk(val, ctx, to_bytes))
-        return obj^
-
-    def _convert_position(
-        mut self, v: JsonValue, uri: String, to_bytes: Bool,
-    ) -> JsonValue:
-        var out = v.copy()
-        var ln_opt = v.object_get(String("line"))
-        var ch_opt = v.object_get(String("character"))
-        if not ln_opt or not ch_opt:
-            return out^
-        var row = ln_opt.value().as_int()
-        var col = ch_opt.value().as_int()
-        var slot = self._slot_for(_uri_to_path(uri))
-        if slot < 0:
-            return out^
-        var converted: Int
-        if to_bytes:
-            converted = self.tables[slot].wire_to_col(row, col, self.enc)
-        else:
-            converted = self.tables[slot].col_to_wire(row, col, self.enc)
-        out.put(String("character"), json_int(converted))
-        return out^
+            self.walk(v.obj_v[i].value, ctx, to_bytes)
 
 
 @fieldwise_init
@@ -622,13 +667,11 @@ struct _OpenDoc(Copyable, Movable):
     "analyzing edits…" spinner on every cursor move."""
     var path: String    # absolute
     var version: Int
-    # The text itself is kept only for a server on a non-utf-8 position
-    # encoding, where the remapper needs it to convert columns; for a
-    # utf-8 one it's empty, rather than a second copy of every open buffer
-    # per server. The comparison is by ``length`` + ``hash``.
+    # The last text sent. Not a second copy of the buffer: the host passes
+    # ``Editor.lsp_text``, cached per edit, and a ``String`` copy shares
+    # its bytes — so comparing against it is a memcmp of the same buffer
+    # while nothing changed, and exact (a hash was neither).
     var text: String
-    var length: Int
-    var hash: UInt64
 
 
 struct _EditSlot(Copyable, Movable):
@@ -679,6 +722,45 @@ struct _EditSlot(Copyable, Movable):
     def take(mut self) -> List[TextEditEntry]:
         var out = self.edits^
         self.edits = List[TextEditEntry]()
+        self.ready = False
+        return out^
+
+
+struct _Slot[T: Copyable & Defaultable & Deinitable](Copyable, Movable):
+    """One request whose parsed answer is parked until the host takes it:
+    the in-flight id, the answer, and ``ready`` to tell "no answer yet"
+    from "an empty one". ``_EditSlot`` is the same for edit lists plus the
+    path / text they were asked against."""
+    var id: String
+    var value: Self.T
+    var ready: Bool
+
+    def __init__(out self):
+        self.id = String("")
+        self.value = Self.T()
+        self.ready = False
+
+    def start(mut self, id: String) -> Bool:
+        """Record a request just sent (``id`` empty: the send failed, so
+        nothing is in flight and the parked answer stays)."""
+        self.id = id
+        if len(id.as_bytes()) == 0:
+            return False
+        self.value = Self.T()
+        self.ready = False
+        return True
+
+    def owns(self, id: String) -> Bool:
+        return len(self.id.as_bytes()) > 0 and id == self.id
+
+    def finish(mut self, var value: Self.T):
+        self.value = value^
+        self.ready = True
+        self.id = String("")
+
+    def take(mut self) -> Self.T:
+        var out = Self.T()
+        swap(out, self.value)
         self.ready = False
         return out^
 
@@ -742,14 +824,10 @@ struct LspManager(Copyable, Movable):
     # that; ``_position_encoding`` keeps the raw string for display.
     var _position_encoding: String
     var _position_enc: UInt8
-    # Line-index cache backing the conversion. Rebuilding it per request
-    # would re-scan every open buffer on every keystroke-triggered
-    # completion, so it is rebuilt only when a document's text actually
-    # changes: ``_remap_epoch`` is bumped by the didOpen/didChange/didClose
-    # paths and ``_remap_cached`` is refreshed lazily on the next use.
-    var _remap_cached: _PositionRemapper
-    var _remap_cached_epoch: Int
-    var _remap_epoch: Int
+    # Line-index cache backing the conversion: open documents are
+    # registered as they're sent and indexed only when a payload needs
+    # them (see ``_PositionRemapper``).
+    var _remap: _PositionRemapper
     # ``id`` → the ``textDocument.uri`` the request was about, recorded at
     # send time. A response's positions are usually *implicitly* about the
     # request's own document (hover range, formatting TextEdits, inlay
@@ -852,33 +930,24 @@ struct LspManager(Copyable, Movable):
     var _prepare_rename_placeholder: String
     # ``textDocument/references`` — list-of-locations form of definition.
     # Parked as ``DefinitionResolved`` rows (same shape, different list).
-    # ``_has_resolved_references`` distinguishes "no response yet" from
+    # ``_references.ready`` distinguishes "no response yet" from
     # "empty list".
-    var _inflight_ref_id: String
+    var _references: _Slot[List[DefinitionResolved]]
     var _ref_word: String
-    var _resolved_references: List[DefinitionResolved]
-    var _has_resolved_references: Bool
-    var _inflight_symbol_id: String
-    var _resolved_symbols: List[SymbolItem]  # parked between tick() and take_symbols()
-    var _has_resolved_symbols: Bool          # distinguishes "no result yet" from "empty list"
+    var _symbols: _Slot[List[SymbolItem]]
     # ``workspace/symbol`` — parallel to the document-symbol fields but
     # scoped to a workspace-wide query rather than a single document.
     # Used by the Find Symbol picker to disambiguate same-named symbols.
-    var _inflight_ws_symbol_id: String
-    var _resolved_ws_symbols: List[WorkspaceSymbolItem]
-    var _has_resolved_ws_symbols: Bool
+    var _ws_symbols: _Slot[List[WorkspaceSymbolItem]]
     # Pending ``textDocument/completion`` request state. ``_completion_path``
-    # / ``_completion_row`` / ``_completion_col`` are echoed back via
-    # ``pending_completion_*`` accessors so the host can drop a stale
-    # response when the cursor has moved (or the user has switched
-    # buffers) by the time it lands. ``_completion_manual`` records
+    # is echoed back via ``pending_completion_path`` so the host can drop a
+    # stale response when the user has switched buffers by the time it
+    # lands. ``_completion_manual`` records
     # whether the request was a user-invoked Ctrl+Space (vs. the as-you-
     # type auto-trigger) so the host can decide whether an empty
     # response should surface a ``<no completion found>`` message.
     var _inflight_completion_id: String
     var _completion_path: String
-    var _completion_row: Int
-    var _completion_col: Int
     var _completion_manual: Bool
     var _resolved_completions: List[CompletionItem]
     var _has_resolved_completions: Bool
@@ -940,7 +1009,7 @@ struct LspManager(Copyable, Movable):
     # the same edit-application path rename/code-actions use.
     # ``.text`` is the buffer the edits are for; the host drops them if
     # the buffer has moved on (typing, a merged outside write) by the time
-    # they arrive. Same for ``_willsave_text``.
+    # they arrive. Same for ``_willsave.text``.
     var _formatting: _EditSlot
     # ``textDocument/onTypeFormatting`` — format-as-you-type. Fired when a
     # server-declared trigger char (``}``/``;``/newline/…) is typed; the
@@ -951,9 +1020,7 @@ struct LspManager(Copyable, Movable):
     var _ontype: _EditSlot
     # ``textDocument/moniker`` — cross-repo symbol identity (scheme +
     # identifier). Rendered as a one-line status string; parked here.
-    var _inflight_moniker_id: String
-    var _moniker_note: String
-    var _has_moniker: Bool
+    var _moniker: _Slot[String]
     # ``textDocument/colorPresentation`` — given a color + its range, the
     # server returns alternate textual forms (hex / rgb() / named). Parked
     # as parallel ``_colorpres_labels`` / ``_colorpres_edits`` (label[i] ↔
@@ -998,9 +1065,7 @@ struct LspManager(Copyable, Movable):
     var _doc_highlight: _EditSlot
     # ``textDocument/signatureHelp`` — the active signature's rendered label
     # (with the active parameter marked), parked for the status bar.
-    var _inflight_signature_id: String
-    var _resolved_signature: String
-    var _has_resolved_signature: Bool
+    var _signature: _Slot[String]
     # ``textDocument/inlayHint`` + ``codeLens`` — rendered as end-of-line
     # annotations. Parked as (row, text) carriers (``TextEditEntry`` with
     # ``start_line`` = row, ``new_text`` = the label).
@@ -1052,10 +1117,8 @@ struct LspManager(Copyable, Movable):
     var _has_resolved_hierarchy: Bool
     # ``textDocument/documentColor`` — per-color swatch ``Highlight``s
     # (truecolor bg) parked for the editor overlay.
-    var _inflight_color_id: String
+    var _colors: _Slot[List[Highlight]]
     var _color_path: String
-    var _resolved_colors: List[Highlight]
-    var _has_resolved_colors: Bool
     # ``textDocument/diagnostic`` — the pull-diagnostics model (LSP 3.17).
     # Servers that advertise ``diagnosticProvider`` don't push
     # ``publishDiagnostics``; we request a report per document instead.
@@ -1075,11 +1138,7 @@ struct LspManager(Copyable, Movable):
     # ``TextEdit[]`` to apply before the buffer is written (e.g. organize
     # imports / final-newline). Parked like the formatting edits; the host
     # applies them then writes (see ``_drain_willsave``).
-    var _inflight_willsave_id: String
-    var _willsave_path: String
-    var _willsave_text: String
-    var _resolved_willsave_edits: List[TextEditEntry]
-    var _has_resolved_willsave: Bool
+    var _willsave: _EditSlot
     # ``window/showMessageRequest`` — a server request that blocks until the
     # client replies with the chosen ``MessageActionItem`` (or null). We
     # park the message + action titles + the request id, surface a modal,
@@ -1152,9 +1211,7 @@ struct LspManager(Copyable, Movable):
         self.failure_reason = String("")
         self._position_encoding = String("utf-16")
         self._position_enc = encoding_from_name(String("utf-16"))
-        self._remap_cached = _PositionRemapper(POS_UTF8)
-        self._remap_cached_epoch = -1
-        self._remap_epoch = 0
+        self._remap = _PositionRemapper(POS_UTF8)
         self._req_uri_ids = List[String]()
         self._req_uris = List[String]()
         self._refresh_doc_features = False
@@ -1191,20 +1248,12 @@ struct LspManager(Copyable, Movable):
         self._has_resolved_prepare_rename = False
         self._prepare_rename_state = 0
         self._prepare_rename_placeholder = String("")
-        self._inflight_ref_id = String("")
+        self._references = _Slot[List[DefinitionResolved]]()
         self._ref_word = String("")
-        self._resolved_references = List[DefinitionResolved]()
-        self._has_resolved_references = False
-        self._inflight_symbol_id = String("")
-        self._resolved_symbols = List[SymbolItem]()
-        self._has_resolved_symbols = False
-        self._inflight_ws_symbol_id = String("")
-        self._resolved_ws_symbols = List[WorkspaceSymbolItem]()
-        self._has_resolved_ws_symbols = False
+        self._symbols = _Slot[List[SymbolItem]]()
+        self._ws_symbols = _Slot[List[WorkspaceSymbolItem]]()
         self._inflight_completion_id = String("")
         self._completion_path = String("")
-        self._completion_row = 0
-        self._completion_col = 0
         self._completion_manual = False
         self._resolved_completions = List[CompletionItem]()
         self._has_resolved_completions = False
@@ -1232,9 +1281,7 @@ struct LspManager(Copyable, Movable):
         self._has_resolved_rename = False
         self._formatting = _EditSlot()
         self._ontype = _EditSlot()
-        self._inflight_moniker_id = String("")
-        self._moniker_note = String("")
-        self._has_moniker = False
+        self._moniker = _Slot[String]()
         self._inflight_colorpres_id = String("")
         self._colorpres_labels = List[String]()
         self._colorpres_edits = List[TextEditEntry]()
@@ -1253,9 +1300,7 @@ struct LspManager(Copyable, Movable):
         self._inlineval_exprs = List[TextEditEntry]()
         self._folding = _EditSlot()
         self._doc_highlight = _EditSlot()
-        self._inflight_signature_id = String("")
-        self._resolved_signature = String("")
-        self._has_resolved_signature = False
+        self._signature = _Slot[String]()
         self._inlay = _EditSlot()
         self._codelens = _EditSlot()
         self._inflight_codelens_resolve_id = String("")
@@ -1276,18 +1321,12 @@ struct LspManager(Copyable, Movable):
         self._hierarchy_word = String("")
         self._resolved_hierarchy = List[DefinitionResolved]()
         self._has_resolved_hierarchy = False
-        self._inflight_color_id = String("")
+        self._colors = _Slot[List[Highlight]]()
         self._color_path = String("")
-        self._resolved_colors = List[Highlight]()
-        self._has_resolved_colors = False
         self._pull_diag_ids = List[String]()
         self._pull_diag_paths = List[String]()
         self._pulled_paths = List[String]()
-        self._inflight_willsave_id = String("")
-        self._willsave_path = String("")
-        self._willsave_text = String("")
-        self._resolved_willsave_edits = List[TextEditEntry]()
-        self._has_resolved_willsave = False
+        self._willsave = _EditSlot()
         self._msgreq_pending = False
         self._msgreq_id = Optional[JsonValue]()
         self._msgreq_message = String("")
@@ -1565,41 +1604,44 @@ struct LspManager(Copyable, Movable):
 
     # --- position encoding ------------------------------------------------
 
-    def _bump_remap_epoch(mut self):
-        """Invalidate the line-index cache — a document's text changed."""
-        self._remap_epoch += 1
-
-    def _ensure_remapper(mut self):
-        """Refresh the cached line index if a document changed since it was
-        built. Open buffers are seeded from ``_OpenDoc.text`` rather than read
-        from disk: a dirty buffer's columns must be converted against the
-        text the *server* was given, not the stale file."""
-        if self._remap_cached_epoch == self._remap_epoch:
+    def _from_wire(mut self, mut v: JsonValue, uri: String):
+        """Convert wire units in an inbound payload to byte columns, in
+        place. ``uri`` is the document the payload is implicitly about
+        (the in-flight request's file) — positions carrying their own
+        ``uri`` override it."""
+        if self._position_enc == POS_UTF8:
             return
-        var rm = _PositionRemapper(self._position_enc)
-        # Nothing to convert under utf-8 — and no text was kept for it.
-        if self._position_enc != POS_UTF8:
-            for ref d in self._docs:
-                rm.seed(d.path, d.text)
-        self._remap_cached = rm^
-        self._remap_cached_epoch = self._remap_epoch
+        self._remap.begin_walk()
+        self._remap.walk(v, uri, True)
 
-    def _to_wire(mut self, var params: JsonValue) -> JsonValue:
-        """Convert byte columns in outbound ``params`` to wire units."""
+    def _send_wire(
+        mut self, method: String, params: JsonValue, is_request: Bool,
+    ) raises -> String:
+        """Send ``params`` with byte columns converted to the negotiated
+        encoding — a copy only when there is something to convert."""
         if self._position_enc == POS_UTF8:
-            return params^
-        self._ensure_remapper()
-        return self._remap_cached.walk(params, String(""), False)
+            return self._transport_send(method, params, is_request)
+        var wire = params.copy()
+        self._remap.begin_walk()
+        self._remap.walk(wire, String(""), False)
+        return self._transport_send(method, wire, is_request)
 
-    def _from_wire(mut self, v: JsonValue, uri: String) -> JsonValue:
-        """Convert wire units in an inbound payload to byte columns.
-        ``uri`` is the document the payload is implicitly about (the
-        in-flight request's file) — positions carrying their own ``uri``
-        override it."""
-        if self._position_enc == POS_UTF8:
-            return v.copy()
-        self._ensure_remapper()
-        return self._remap_cached.walk(v, uri, True)
+    def _transport_send(
+        mut self, method: String, wire: JsonValue, is_request: Bool,
+    ) raises -> String:
+        if self._channel != 0:
+            if is_request:
+                return channel_at(self._channel)[].send_request(
+                    self._session, method, wire,
+                )
+            channel_at(self._channel)[].send_notification(
+                self._session, method, wire,
+            )
+            return String("")
+        if is_request:
+            return self.client.send_request(method, wire)
+        self.client.send_notification(method, wire)
+        return String("")
 
     def _request(mut self, method: String, params: JsonValue) -> String:
         """``_send_request`` for a caller that only needs to know whether it
@@ -1619,14 +1661,7 @@ struct LspManager(Copyable, Movable):
         var td = params.object_get(String("textDocument"))
         if td and td.value().is_object():
             uri = json_get_string(td.value(), String("uri"), uri)
-        var wire = self._to_wire(params.copy())
-        var id: String
-        if self._channel != 0:
-            id = channel_at(self._channel)[].send_request(
-                self._session, method, wire,
-            )
-        else:
-            id = self.client.send_request(method, wire)
+        var id = self._send_wire(method, params, True)
         # Only a non-utf-8 encoding remaps responses (see the dispatch's
         # ``_take_req_uri``), so under utf-8 there's nothing to remember.
         if self._position_enc != POS_UTF8 \
@@ -1652,13 +1687,7 @@ struct LspManager(Copyable, Movable):
 
     def _send_notification(mut self, method: String, params: JsonValue) raises:
         """Outbound-notification twin of ``_send_request``."""
-        var wire = self._to_wire(params.copy())
-        if self._channel != 0:
-            channel_at(self._channel)[].send_notification(
-                self._session, method, wire,
-            )
-        else:
-            self.client.send_notification(method, wire)
+        _ = self._send_wire(method, params, False)
 
     # --- transport: the private client, or a session on a shared channel --
 
@@ -1673,9 +1702,10 @@ struct LspManager(Copyable, Movable):
         if self._channel == 0:
             self._reply_muted = False
             return self.client.poll(Int32(0))
-        var got = channel_at(self._channel)[].pop(self._session)
-        self._reply_muted = got[1]
-        return got[0].copy()
+        var replay = False
+        var got = channel_at(self._channel)[].pop(self._session, replay)
+        self._reply_muted = replay
+        return got^
 
     def _reply(mut self, id: JsonValue, result: JsonValue) raises:
         if self._reply_muted:
@@ -2012,7 +2042,7 @@ struct LspManager(Copyable, Movable):
         if idx < 0:
             return
         _ = self._docs.pop(idx)
-        self._bump_remap_epoch()
+        self._remap.drop_doc(path)
         # Drop any "analyzing edits…" spinner state — a closed buffer
         # must not keep one spinning.
         self._clear_diag_inflight(path, 0)
@@ -2210,36 +2240,31 @@ struct LspManager(Copyable, Movable):
         if self.state != _STATE_READY \
                 or not self.server_supports_will_save_wait_until():
             return False
-        self._willsave_text = text.copy()
+        self._willsave.text = text.copy()
         self._send_open_or_change(path, text^)
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
         params.put(String("reason"), json_int(reason))
-        self._inflight_willsave_id = self._request(
-            String("textDocument/willSaveWaitUntil"), params,
+        return self._willsave.start(
+            self._request_replacing(
+                self._willsave.id.copy(),
+                String("textDocument/willSaveWaitUntil"), params,
+            ),
+            path,
         )
-        if len(self._inflight_willsave_id.as_bytes()) == 0:
-            return False
-        self._willsave_path = path
-        self._resolved_willsave_edits = List[TextEditEntry]()
-        self._has_resolved_willsave = False
-        return True
 
     def has_pending_willsave(self) -> Bool:
-        return self._has_resolved_willsave
+        return self._willsave.ready
 
     def pending_willsave_path(self) -> String:
-        return self._willsave_path
+        return self._willsave.path
 
     def pending_willsave_text(self) -> String:
         """The buffer text the pending willSaveWaitUntil was made against."""
-        return self._willsave_text
+        return self._willsave.text
 
     def take_willsave_edits(mut self) -> List[TextEditEntry]:
-        var out = self._resolved_willsave_edits^
-        self._resolved_willsave_edits = List[TextEditEntry]()
-        self._has_resolved_willsave = False
-        return out^
+        return self._willsave.take()
 
     def request_definition(
         mut self, path: String, line: Int, character: Int,
@@ -2299,15 +2324,13 @@ struct LspManager(Copyable, Movable):
         object. Every capability probe walks through here."""
         if not self._capabilities:
             return None
-        var cur = self._capabilities.value().copy()
+        # Borrow down the path and copy only the leaf: probes run per
+        # frame, and copying the whole capabilities tree per step was the
+        # cost.
+        var keys = List[String]()
         for i in range(len(path)):
-            if not cur.is_object():
-                return None
-            var nxt = cur.object_get(path[i])
-            if not nxt:
-                return None
-            cur = nxt.value().copy()
-        return cur^
+            keys.append(path[i])
+        return _json_at_path(self._capabilities.value(), keys, 0)
 
     def _cap_bool(self, a: String, b: String, c: String = String("")) -> Bool:
         """``capabilities.a.b[.c]`` when it's a boolean; False otherwise."""
@@ -2564,24 +2587,21 @@ struct LspManager(Copyable, Movable):
         var ctx = json_object()
         ctx.put(String("includeDeclaration"), json_bool(True))
         params.put(String("context"), ctx)
-        self._inflight_ref_id = self._request(String("textDocument/references"), params)
-        if len(self._inflight_ref_id.as_bytes()) == 0:
+        var sent = self._request_replacing(
+            self._references.id.copy(), String("textDocument/references"), params)
+        if not self._references.start(sent):
             return False
         self._ref_word = word^
-        self._has_resolved_references = False
-        self._resolved_references = List[DefinitionResolved]()
         return True
 
     def has_pending_references(self) -> Bool:
         """True iff a parsed references response is parked for ``take``."""
-        return self._has_resolved_references
+        return self._references.ready
 
     def take_references(mut self) -> List[DefinitionResolved]:
         """Move the parked references list out of the manager. Pair with
         ``has_pending_references()`` — the flag is cleared either way."""
-        var out = self._resolved_references^
-        self._resolved_references = List[DefinitionResolved]()
-        self._has_resolved_references = False
+        var out = self._references.take()
         return out^
 
     def references_word(self) -> String:
@@ -2606,18 +2626,17 @@ struct LspManager(Copyable, Movable):
         self._send_open_or_change(path, text^)
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
-        self._inflight_symbol_id = self._request(
+        var sent = self._request_replacing(
+            self._symbols.id.copy(),
             String("textDocument/documentSymbol"), params,
         )
-        if len(self._inflight_symbol_id.as_bytes()) == 0:
+        if not self._symbols.start(sent):
             return False
-        self._has_resolved_symbols = False
-        self._resolved_symbols = List[SymbolItem]()
         return True
 
     def has_pending_symbols(self) -> Bool:
         """True iff a parsed symbol response is parked, ready for ``take``."""
-        return self._has_resolved_symbols
+        return self._symbols.ready
 
     def take_symbols(mut self) -> List[SymbolItem]:
         """Move the parked symbol list out of the manager.
@@ -2626,9 +2645,7 @@ struct LspManager(Copyable, Movable):
         parked just hands back an empty list. The flag is cleared either
         way so a subsequent call returns empty.
         """
-        var out = self._resolved_symbols^
-        self._resolved_symbols = List[SymbolItem]()
-        self._has_resolved_symbols = False
+        var out = self._symbols.take()
         return out^
 
     def request_workspace_symbols(
@@ -2648,16 +2665,15 @@ struct LspManager(Copyable, Movable):
             return False
         var params = json_object()
         params.put(String("query"), json_str(query))
-        self._inflight_ws_symbol_id = self._request(String("workspace/symbol"), params)
-        if len(self._inflight_ws_symbol_id.as_bytes()) == 0:
+        var sent = self._request_replacing(
+            self._ws_symbols.id.copy(), String("workspace/symbol"), params)
+        if not self._ws_symbols.start(sent):
             return False
-        self._has_resolved_ws_symbols = False
-        self._resolved_ws_symbols = List[WorkspaceSymbolItem]()
         return True
 
     def has_pending_workspace_symbols(self) -> Bool:
         """True iff a parsed workspace-symbol response is parked."""
-        return self._has_resolved_ws_symbols
+        return self._ws_symbols.ready
 
     def take_workspace_symbols(
         mut self,
@@ -2665,9 +2681,7 @@ struct LspManager(Copyable, Movable):
         """Move the parked workspace-symbol list out of the manager.
         Pair with ``has_pending_workspace_symbols()`` to distinguish
         "no response yet" from "empty list"."""
-        var out = self._resolved_ws_symbols^
-        self._resolved_ws_symbols = List[WorkspaceSymbolItem]()
-        self._has_resolved_ws_symbols = False
+        var out = self._ws_symbols.take()
         if self._channel != 0:
             return self._own_workspace_symbols(out^)
         return out^
@@ -2695,6 +2709,20 @@ struct LspManager(Copyable, Movable):
             if len(owner.as_bytes()) == 0 or owner == own:
                 kept.append(items[k])
         return kept^
+
+    def _request_replacing(
+        mut self, var superseded: String, method: String, params: JsonValue,
+    ) -> String:
+        """``_request`` for a slot that holds one request at a time: the
+        one it replaces (``superseded``, empty if none) is cancelled, so
+        the server stops computing an answer nobody will read — a cursor
+        move otherwise left every per-position request running to
+        completion, and the stale response still got parsed and remapped
+        before being dropped."""
+        var id = self._request(method, params)
+        if len(superseded.as_bytes()) > 0:
+            self._send_cancel(superseded^, method)
+        return id^
 
     def _send_cancel(mut self, var request_id: String, context: String):
         """Best-effort ``$/cancelRequest`` for ``request_id``. The cancel is
@@ -2766,8 +2794,6 @@ struct LspManager(Copyable, Movable):
         if len(self._inflight_completion_id.as_bytes()) == 0:
             return False
         self._completion_path = path
-        self._completion_row = line
-        self._completion_col = character
         self._completion_manual = manual
         self._resolved_completions = List[CompletionItem]()
         self._has_resolved_completions = False
@@ -2805,12 +2831,6 @@ struct LspManager(Copyable, Movable):
 
     def pending_completion_path(self) -> String:
         return self._completion_path
-
-    def pending_completion_row(self) -> Int:
-        return self._completion_row
-
-    def pending_completion_col(self) -> Int:
-        return self._completion_col
 
     def pending_completion_manual(self) -> Bool:
         """Echo the ``manual`` flag of the most recent completion
@@ -3189,7 +3209,8 @@ struct LspManager(Copyable, Movable):
         params.put(String("textDocument"), _text_document(path))
         params.put(String("options"), _formatting_options(tab_size, insert_spaces))
         return self._formatting.start(
-            self._request(String("textDocument/formatting"), params), path,
+            self._request_replacing(
+                self._formatting.id.copy(), String("textDocument/formatting"), params), path,
         )
 
     def request_range_formatting(
@@ -3208,7 +3229,8 @@ struct LspManager(Copyable, Movable):
         params.put(String("range"), rng)
         params.put(String("options"), _formatting_options(tab_size, insert_spaces))
         return self._formatting.start(
-            self._request(String("textDocument/rangeFormatting"), params), path,
+            self._request_replacing(
+                self._formatting.id.copy(), String("textDocument/rangeFormatting"), params), path,
         )
 
     def has_pending_formatting(self) -> Bool:
@@ -3265,7 +3287,8 @@ struct LspManager(Copyable, Movable):
         params.put(String("ch"), json_str(ch))
         params.put(String("options"), _formatting_options(tab_size, insert_spaces))
         return self._ontype.start(
-            self._request(String("textDocument/onTypeFormatting"), params), path,
+            self._request_replacing(
+                self._ontype.id.copy(), String("textDocument/onTypeFormatting"), params), path,
         )
 
     def has_pending_ontype(self) -> Bool:
@@ -3290,22 +3313,19 @@ struct LspManager(Copyable, Movable):
             return False
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
-        self._inflight_moniker_id = self._request(
+        var sent = self._request_replacing(
+            self._moniker.id.copy(),
             String("textDocument/moniker"), params,
         )
-        if len(self._inflight_moniker_id.as_bytes()) == 0:
+        if not self._moniker.start(sent):
             return False
-        self._moniker_note = String("")
-        self._has_moniker = False
         return True
 
     def has_moniker(self) -> Bool:
-        return self._has_moniker
+        return self._moniker.ready
 
     def take_moniker(mut self) -> String:
-        var out = self._moniker_note^
-        self._moniker_note = String("")
-        self._has_moniker = False
+        var out = self._moniker.take()
         return out^
 
     def request_color_presentation(
@@ -3415,7 +3435,8 @@ struct LspManager(Copyable, Movable):
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
         if not self._linked.start(
-            self._request(String("textDocument/linkedEditingRange"), params),
+            self._request_replacing(
+                self._linked.id.copy(), String("textDocument/linkedEditingRange"), params),
         ):
             return False
         return True
@@ -3447,7 +3468,8 @@ struct LspManager(Copyable, Movable):
         ctx.put(String("stoppedLocation"), stopped)
         params.put(String("context"), ctx)
         if not self._inlineval.start(
-            self._request(String("textDocument/inlineValue"), params),
+            self._request_replacing(
+                self._inlineval.id.copy(), String("textDocument/inlineValue"), params),
         ):
             return False
         self._inlineval_exprs = List[TextEditEntry]()
@@ -3477,7 +3499,8 @@ struct LspManager(Copyable, Movable):
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
         return self._folding.start(
-            self._request(String("textDocument/foldingRange"), params), path,
+            self._request_replacing(
+                self._folding.id.copy(), String("textDocument/foldingRange"), params), path,
         )
 
     def has_pending_folding(self) -> Bool:
@@ -3501,7 +3524,8 @@ struct LspManager(Copyable, Movable):
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
         return self._doc_highlight.start(
-            self._request(String("textDocument/documentHighlight"), params), path,
+            self._request_replacing(
+                self._doc_highlight.id.copy(), String("textDocument/documentHighlight"), params), path,
         )
 
     def has_pending_doc_highlights(self) -> Bool:
@@ -3524,24 +3548,21 @@ struct LspManager(Copyable, Movable):
             return False
         self._send_open_or_change(path, text^)
         var params = _text_document_position_params(path, line, character)
-        self._inflight_signature_id = self._request(
+        var sent = self._request_replacing(
+            self._signature.id.copy(),
             String("textDocument/signatureHelp"), params,
         )
-        if len(self._inflight_signature_id.as_bytes()) == 0:
+        if not self._signature.start(sent):
             return False
-        self._resolved_signature = String("")
-        self._has_resolved_signature = False
         return True
 
     def has_pending_signature(self) -> Bool:
-        return self._has_resolved_signature
+        return self._signature.ready
 
     def take_signature(mut self) -> String:
         """Move out the parked signature label (empty if the server had no
         signature here). Clears the pending flag."""
-        var out = self._resolved_signature^
-        self._resolved_signature = String("")
-        self._has_resolved_signature = False
+        var out = self._signature.take()
         return out^
 
     # --- inlay hints / code lens -----------------------------------------
@@ -3560,7 +3581,8 @@ struct LspManager(Copyable, Movable):
         var rng = _lsp_range(start_line, 0, end_line, 0)
         params.put(String("range"), rng)
         return self._inlay.start(
-            self._request(String("textDocument/inlayHint"), params), path,
+            self._request_replacing(
+                self._inlay.id.copy(), String("textDocument/inlayHint"), params), path,
         )
 
     def has_pending_inlay(self) -> Bool:
@@ -3583,7 +3605,8 @@ struct LspManager(Copyable, Movable):
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
         if not self._codelens.start(
-            self._request(String("textDocument/codeLens"), params), path,
+            self._request_replacing(
+                self._codelens.id.copy(), String("textDocument/codeLens"), params), path,
         ):
             return False
         self._inflight_codelens_resolve_id = String("")
@@ -3639,7 +3662,8 @@ struct LspManager(Copyable, Movable):
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
         return self._doclinks.start(
-            self._request(String("textDocument/documentLink"), params), path,
+            self._request_replacing(
+                self._doclinks.id.copy(), String("textDocument/documentLink"), params), path,
         )
 
     def server_supports_document_link_resolve(self) -> Bool:
@@ -3726,7 +3750,8 @@ struct LspManager(Copyable, Movable):
         positions.append(_lsp_position(line, character))
         params.put(String("positions"), positions)
         return self._selrange.start(
-            self._request(String("textDocument/selectionRange"), params), path,
+            self._request_replacing(
+                self._selrange.id.copy(), String("textDocument/selectionRange"), params), path,
         )
 
     def has_pending_selrange(self) -> Bool:
@@ -3833,26 +3858,23 @@ struct LspManager(Copyable, Movable):
         self._send_open_or_change(path, text^)
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
-        self._inflight_color_id = self._request(
+        var sent = self._request_replacing(
+            self._colors.id.copy(),
             String("textDocument/documentColor"), params,
         )
-        if len(self._inflight_color_id.as_bytes()) == 0:
+        if not self._colors.start(sent):
             return False
         self._color_path = path
-        self._resolved_colors = List[Highlight]()
-        self._has_resolved_colors = False
         return True
 
     def has_pending_colors(self) -> Bool:
-        return self._has_resolved_colors
+        return self._colors.ready
 
     def pending_color_path(self) -> String:
         return self._color_path
 
     def take_colors(mut self) -> List[Highlight]:
-        var out = self._resolved_colors^
-        self._resolved_colors = List[Highlight]()
-        self._has_resolved_colors = False
+        var out = self._colors.take()
         return out^
 
     def take_document_refresh(mut self) -> Bool:
@@ -3982,11 +4004,7 @@ struct LspManager(Copyable, Movable):
                     # params carry the ``uri`` the walk needs; the other
                     # notifications have no positions, so converting them
                     # all is free and keeps future ones correct.
-                    if self._position_enc != POS_UTF8:
-                        var np = self._from_wire(
-                            msg.params.value(), String(""),
-                        )
-                        msg.params = Optional[JsonValue](np^)
+                    self._from_wire(msg.params.value(), String(""))
                     if method == String("textDocument/publishDiagnostics"):
                         self._on_publish_diagnostics(msg.params.value())
                     elif method == String("$/progress"):
@@ -4013,9 +4031,8 @@ struct LspManager(Copyable, Movable):
                 # ``window/showDocument`` a selection range — both in wire
                 # units, both applied to buffers, so both must be converted
                 # before ``_handle_server_request`` parses them.
-                if self._position_enc != POS_UTF8 and msg.params:
-                    var rp = self._from_wire(msg.params.value(), String(""))
-                    msg.params = Optional[JsonValue](rp^)
+                if msg.params:
+                    self._from_wire(msg.params.value(), String(""))
                 self._handle_server_request(msg)
                 continue
             if msg.kind != LSP_RESPONSE:
@@ -4037,10 +4054,7 @@ struct LspManager(Copyable, Movable):
             # until that response is handled, and it carries no positions.
             if self._position_enc != POS_UTF8 and msg.result:
                 var default_uri = self._take_req_uri(id)
-                var converted = self._from_wire(
-                    msg.result.value(), default_uri,
-                )
-                msg.result = Optional[JsonValue](converted^)
+                self._from_wire(msg.result.value(), default_uri)
             if id == self._inflight_def_id:
                 var loc = Optional[DefinitionResolved]()
                 var result_dump = String("<no result>")
@@ -4073,7 +4087,7 @@ struct LspManager(Copyable, Movable):
                 self._inflight_def_id = String("")
                 self._inflight_word = String("")
                 continue
-            if id == self._inflight_ref_id:
+            if self._references.owns(id):
                 var refs = List[DefinitionResolved]()
                 if msg.result:
                     refs = _parse_references_result(msg.result.value())
@@ -4082,27 +4096,21 @@ struct LspManager(Copyable, Movable):
                     + String(" lang=") + self._language_id
                     + String(" count=") + String(len(refs)),
                 )
-                self._resolved_references = refs^
-                self._has_resolved_references = True
-                self._inflight_ref_id = String("")
+                self._references.finish(refs^)
                 continue
-            if id == self._inflight_symbol_id:
+            if self._symbols.owns(id):
                 var items = List[SymbolItem]()
                 if msg.result:
                     items = _parse_symbols_result(msg.result.value())
-                self._resolved_symbols = items^
-                self._has_resolved_symbols = True
-                self._inflight_symbol_id = String("")
+                self._symbols.finish(items^)
                 continue
-            if id == self._inflight_ws_symbol_id:
+            if self._ws_symbols.owns(id):
                 var ws_items = List[WorkspaceSymbolItem]()
                 if msg.result:
                     ws_items = _parse_workspace_symbols_result(
                         msg.result.value(),
                     )
-                self._resolved_ws_symbols = ws_items^
-                self._has_resolved_ws_symbols = True
-                self._inflight_ws_symbol_id = String("")
+                self._ws_symbols.finish(ws_items^)
                 continue
             if id == self._inflight_completion_id:
                 var comps = List[CompletionItem]()
@@ -4256,13 +4264,11 @@ struct LspManager(Copyable, Movable):
                     ot_edits = _parse_text_edits(msg.result.value())
                 self._ontype.finish(ot_edits^)
                 continue
-            if id == self._inflight_moniker_id:
+            if self._moniker.owns(id):
                 var mnote = String("")
                 if msg.result:
                     mnote = _parse_monikers(msg.result.value())
-                self._moniker_note = mnote^
-                self._has_moniker = True
-                self._inflight_moniker_id = String("")
+                self._moniker.finish(mnote^)
                 continue
             if id == self._inflight_colorpres_id:
                 var cp_labels = List[String]()
@@ -4326,13 +4332,11 @@ struct LspManager(Copyable, Movable):
                     occ = _parse_document_highlights(msg.result.value())
                 self._doc_highlight.finish(occ^)
                 continue
-            if id == self._inflight_signature_id:
+            if self._signature.owns(id):
                 var sig = String("")
                 if msg.result:
                     sig = _parse_signature_help(msg.result.value())
-                self._resolved_signature = sig^
-                self._has_resolved_signature = True
-                self._inflight_signature_id = String("")
+                self._signature.finish(sig^)
                 continue
             if self._inlay.owns(id):
                 var ih = List[TextEditEntry]()
@@ -4425,13 +4429,11 @@ struct LspManager(Copyable, Movable):
                 self._has_resolved_hierarchy = True
                 self._inflight_hier_followup_id = String("")
                 continue
-            if id == self._inflight_color_id:
+            if self._colors.owns(id):
                 var cols = List[Highlight]()
                 if msg.result:
                     cols = _parse_document_colors(msg.result.value())
-                self._resolved_colors = cols^
-                self._has_resolved_colors = True
-                self._inflight_color_id = String("")
+                self._colors.finish(cols^)
                 continue
             var pull_slot = -1
             for pk in range(len(self._pull_diag_ids)):
@@ -4462,7 +4464,7 @@ struct LspManager(Copyable, Movable):
                         self._store_diagnostics(ppath, pdiags^)
                 self._clear_diag_inflight(ppath, 0)
                 continue
-            if id == self._inflight_willsave_id:
+            if self._willsave.owns(id):
                 var wse = List[TextEditEntry]()
                 if msg.result:
                     wse = _parse_text_edits(msg.result.value())
@@ -4470,9 +4472,7 @@ struct LspManager(Copyable, Movable):
                     String("← willSaveWaitUntil response id=") + id
                     + String(" edits=") + String(len(wse)),
                 )
-                self._resolved_willsave_edits = wse^
-                self._has_resolved_willsave = True
-                self._inflight_willsave_id = String("")
+                self._willsave.finish(wse^)
                 continue
         return resolved
 
@@ -4575,15 +4575,16 @@ struct LspManager(Copyable, Movable):
         the accept path so we don't break them."""
         if not params.is_object():
             return
-        var uri_opt = params.object_get(String("uri"))
-        var diags_opt = params.object_get(String("diagnostics"))
-        if not uri_opt or not diags_opt:
+        # Borrowed by index: ``object_get`` would copy the whole array.
+        var ui = params.object_index(String("uri"))
+        var di = params.object_index(String("diagnostics"))
+        if ui < 0 or di < 0:
             return
-        if not uri_opt.value().is_string():
+        if not params.obj_v[ui].value.is_string():
             return
-        if not diags_opt.value().is_array():
+        if not params.obj_v[di].value.is_array():
             return
-        var path = _uri_to_path(uri_opt.value().as_str())
+        var path = _uri_to_path(params.obj_v[ui].value.str_v)
         if len(path.as_bytes()) == 0:
             return
         var pub_version = 0  # 0 ⇒ server didn't echo a version
@@ -4611,7 +4612,7 @@ struct LspManager(Copyable, Movable):
         # without versions and we have to assume any reply covers the
         # latest send).
         self._clear_diag_inflight(path, pub_version)
-        var diags = _parse_diagnostics_array(diags_opt.value())
+        var diags = _parse_diagnostics_array(params.obj_v[di].value)
         _lsp_debug_log(
             String("← publishDiagnostics lang=") + self._language_id
             + String(" path=") + path
@@ -5186,6 +5187,7 @@ struct LspManager(Copyable, Movable):
                 if enc_opt and enc_opt.value().is_string():
                     self._position_encoding = enc_opt.value().as_str()
         self._position_enc = encoding_from_name(self._position_encoding)
+        self._remap.enc = self._position_enc
         # Normalize the display string too, so an unrecognized value is
         # reported as the encoding we'll actually convert against rather
         # than as whatever the server claimed.
@@ -5213,29 +5215,21 @@ struct LspManager(Copyable, Movable):
 
     def _send_open_or_change(mut self, path: String, var text: String):
         var idx = self._doc_index(path)
-        var n = len(text.as_bytes())
-        var h = fnv_str(fnv_start(), text)
-        # Only the remapper reads the text back (see ``_OpenDoc.text``).
-        var kept = String("")
-        if self._position_enc != POS_UTF8:
-            kept = text.copy()
         if idx < 0:
-            self._docs.append(_OpenDoc(path, 1, kept^, n, h))
-            self._bump_remap_epoch()
+            self._docs.append(_OpenDoc(path, 1, text.copy()))
+            self._remap.set_doc(path, text)
             self._send_did_open(path, text^)
         else:
             # Unchanged text → the server already has this exact content.
             # Skip the didChange so cursor-driven requests don't trigger a
             # spurious re-analysis (the "analyzing edits…" flicker).
             ref d = self._docs[idx]
-            if d.length == n and d.hash == h:
+            if d.text == text:
                 return
             d.version += 1
             var version = d.version
-            d.text = kept^
-            d.length = n
-            d.hash = h
-            self._bump_remap_epoch()
+            d.text = text.copy()
+            self._remap.set_doc(path, text)
             self._send_did_change(path, version, text^)
 
     def diagnostics_inflight_ms_for(mut self, path: String) -> Int:
@@ -6071,14 +6065,14 @@ def _parse_diagnostics_array(v: JsonValue) -> List[Diagnostic]:
     var out = List[Diagnostic]()
     if not v.is_array():
         return out^
-    for i in range(v.array_len()):
-        var entry = v.array_at(i)
+    for i in range(len(v.arr_v)):
+        ref entry = v.arr_v[i]
         if not entry.is_object():
             continue
-        var range_opt = entry.object_get(String("range"))
-        if not range_opt:
+        var ri = entry.object_index(String("range"))
+        if ri < 0:
             continue
-        var r = _parse_range(range_opt.value())
+        var r = _parse_range(entry.obj_v[ri].value)
         if not r:
             continue
         var rt = r.value()
@@ -6090,12 +6084,13 @@ def _parse_diagnostics_array(v: JsonValue) -> List[Diagnostic]:
         # The spec allows either a string or an integer; we coerce to
         # string and echo back as-is.
         var code = String("")
-        var code_opt = entry.object_get(String("code"))
-        if code_opt:
-            if code_opt.value().is_string():
-                code = code_opt.value().as_str()
-            elif code_opt.value().is_int():
-                code = String(code_opt.value().as_int())
+        var ci = entry.object_index(String("code"))
+        if ci >= 0:
+            ref cv = entry.obj_v[ci].value
+            if cv.is_string():
+                code = cv.str_v
+            elif cv.is_int():
+                code = String(cv.int_v)
         out.append(Diagnostic(
             rt[0], rt[1], rt[2], rt[3], severity, message^, source^, code^,
         ))
@@ -6107,11 +6102,12 @@ def _position_of(v: JsonValue) -> Optional[Tuple[Int, Int]]:
     it isn't one."""
     if not v.is_object():
         return None
-    var ln = v.object_get(String("line"))
-    var ch = v.object_get(String("character"))
-    if not ln or not ch or not ln.value().is_int() or not ch.value().is_int():
+    var ln = v.object_index(String("line"))
+    var ch = v.object_index(String("character"))
+    if ln < 0 or ch < 0 or not v.obj_v[ln].value.is_int() \
+            or not v.obj_v[ch].value.is_int():
         return None
-    return (ln.value().as_int(), ch.value().as_int())
+    return (v.obj_v[ln].value.int_v, v.obj_v[ch].value.int_v)
 
 
 def _parse_range(v: JsonValue) -> Optional[Tuple[Int, Int, Int, Int]]:
@@ -6121,12 +6117,12 @@ def _parse_range(v: JsonValue) -> Optional[Tuple[Int, Int, Int, Int]]:
     through here."""
     if not v.is_object():
         return None
-    var s = v.object_get(String("start"))
-    var e = v.object_get(String("end"))
-    if not s or not e:
+    var si = v.object_index(String("start"))
+    var ei = v.object_index(String("end"))
+    if si < 0 or ei < 0:
         return None
-    var sp = _position_of(s.value())
-    var ep = _position_of(e.value())
+    var sp = _position_of(v.obj_v[si].value)
+    var ep = _position_of(v.obj_v[ei].value)
     if not sp or not ep:
         return None
     return (sp.value()[0], sp.value()[1], ep.value()[0], ep.value()[1])

@@ -136,7 +136,7 @@ from .dap import (
 )
 from .dap_dispatch import (
     DapEvaluations, DapManager, DapOutput, DapScope, DapStackFrame,
-    DapStopped, DapThread, DapVariable,
+    DapStopped, DapVariable,
 )
 from .debug_pane import DebugPane, PaneRow, PANE_MODE_DEBUG, PANE_MODE_RUN
 from .debugger_config import (

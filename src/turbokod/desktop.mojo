@@ -11393,7 +11393,7 @@ struct Desktop(Movable):
             if self.lsp_managers[li].is_ready() \
                     and self.windows.windows[w] \
                         .editor.consume_lsp_dirty(monotonic_ms()):
-                var text = self.windows.windows[w].editor.text_snapshot()
+                var text = self.windows.windows[w].editor.lsp_text()
                 self.lsp_managers[li].notify_changed(path, text^)
                 did_change = True
             # Pull-diagnostics model (LSP 3.17): a server that advertises
@@ -11511,7 +11511,7 @@ struct Desktop(Movable):
             return
         if not self.lsp_managers[lsp_idx].is_ready():
             return
-        var text = self.windows.windows[win_idx].editor.text_snapshot()
+        var text = self.windows.windows[win_idx].editor.lsp_text()
         # ``request_completion`` flushes the latest text via
         # ``_send_open_or_change``; tell the editor not to send the
         # bulk-sync didChange again later this same tick. Without
@@ -11551,19 +11551,19 @@ struct Desktop(Movable):
         self._inlay_key = key
         if self.config.lsp_inlay_hints and self.lsp_managers[li] \
                 .server_supports(String("inlayHintProvider")):
-            var t1 = self.windows.windows[win_idx].editor.text_snapshot()
+            var t1 = self.windows.windows[win_idx].editor.lsp_text()
             _ = self.lsp_managers[li].request_inlay_hints(path, 0, lc, t1^)
         if self.config.lsp_code_lens and self.lsp_managers[li] \
                 .server_supports(String("codeLensProvider")):
-            var t2 = self.windows.windows[win_idx].editor.text_snapshot()
+            var t2 = self.windows.windows[win_idx].editor.lsp_text()
             _ = self.lsp_managers[li].request_code_lens(path, t2^)
         if self.config.lsp_document_colors and self.lsp_managers[li] \
                 .server_supports(String("colorProvider")):
-            var t4 = self.windows.windows[win_idx].editor.text_snapshot()
+            var t4 = self.windows.windows[win_idx].editor.lsp_text()
             _ = self.lsp_managers[li].request_document_colors(path, t4^)
         if self.config.lsp_document_links and self.lsp_managers[li] \
                 .server_supports(String("documentLinkProvider")):
-            var t5 = self.windows.windows[win_idx].editor.text_snapshot()
+            var t5 = self.windows.windows[win_idx].editor.lsp_text()
             _ = self.lsp_managers[li].request_document_links(path, t5^)
 
     def _maybe_request_selection_range(mut self, win_idx: Int):
@@ -11583,7 +11583,7 @@ struct Desktop(Movable):
         if li < 0:
             return
         self._selrange_pos = key
-        var text = self.windows.windows[win_idx].editor.text_snapshot()
+        var text = self.windows.windows[win_idx].editor.lsp_text()
         _ = self.lsp_managers[li].request_selection_range(path, row, col, text^)
 
     def _maybe_probe_library_word(mut self, win_idx: Int):
@@ -11632,7 +11632,7 @@ struct Desktop(Movable):
                 + String(h.col_start)
             if at in self._libprobe_seen:
                 continue
-            var text = ed.text_snapshot()
+            var text = ed.lsp_text()
             if not self.lsp_managers[li].request_library_probe(
                 path, h.row, h.col_start, word^, text^, _LIBPROBE_EDITOR,
                 _LIBPROBE_EDITOR_LIMIT,
@@ -11730,7 +11730,7 @@ struct Desktop(Movable):
             var win = self._find_window_for_path(job.at.path)
             var text: String
             if win >= 0:
-                text = self.windows.windows[win].editor.text_snapshot()
+                text = self.windows.windows[win].editor.lsp_text()
             else:
                 try:
                     text = read_file(job.at.path)
@@ -11792,7 +11792,7 @@ struct Desktop(Movable):
         if key == self._fold_key:
             return
         self._fold_key = key
-        var text = self.windows.windows[win_idx].editor.text_snapshot()
+        var text = self.windows.windows[win_idx].editor.lsp_text()
         _ = self.lsp_managers[li].request_folding_ranges(path, text^)
 
     def _dispatch_signature_help(mut self, win_idx: Int, req: HoverRequest):
@@ -11809,7 +11809,7 @@ struct Desktop(Movable):
         var li = self._ready_lsp_for_path(path, String("signatureHelpProvider"))
         if li < 0:
             return
-        var text = self.windows.windows[win_idx].editor.text_snapshot()
+        var text = self.windows.windows[win_idx].editor.lsp_text()
         _ = self.lsp_managers[li].request_signature_help(
             path, req.row, req.col, text^,
         )
@@ -11848,7 +11848,7 @@ struct Desktop(Movable):
                 break
         if not matched:
             return
-        var text = self.windows.windows[win_idx].editor.text_snapshot()
+        var text = self.windows.windows[win_idx].editor.lsp_text()
         _ = self.lsp_managers[li].request_on_type_formatting(
             path, req.row, req.col, ch, text^,
         )
@@ -11868,7 +11868,7 @@ struct Desktop(Movable):
         if w < 0:
             return
         var lc = self.windows.windows[w].editor.buffer.line_count()
-        var text = self.windows.windows[w].editor.text_snapshot()
+        var text = self.windows.windows[w].editor.lsp_text()
         _ = self.lsp_managers[li].request_inline_values(
             path, 0, lc, stopped_line, frame_id, text^,
         )
@@ -11921,7 +11921,7 @@ struct Desktop(Movable):
         if li < 0:
             return
         self._doc_hl_pos = key
-        var text = self.windows.windows[win_idx].editor.text_snapshot()
+        var text = self.windows.windows[win_idx].editor.lsp_text()
         _ = self.lsp_managers[li].request_document_highlight(
             path, row, col, text^,
         )
@@ -12015,7 +12015,7 @@ struct Desktop(Movable):
             return
         if not self.lsp_managers[lsp_idx].is_ready():
             return
-        var text = self.windows.windows[win_idx].editor.text_snapshot()
+        var text = self.windows.windows[win_idx].editor.lsp_text()
         # ``request_hover`` pre-flights with didOpen/didChange; skip the
         # bulk sync this tick so we don't double-send.
         _ = self.windows.windows[win_idx].editor.consume_lsp_dirty()
@@ -12124,7 +12124,7 @@ struct Desktop(Movable):
                 Attr(RED, LIGHT_GRAY),
             )
             return
-        var text = self.windows.windows[win_idx].editor.text_snapshot()
+        var text = self.windows.windows[win_idx].editor.lsp_text()
         # Read primitive fields first; ``word`` is moved last so it's
         # the only ownership transfer out of ``req``. Reseat afterwards
         # so Mojo's auto-destructor sees a valid String.
@@ -16870,7 +16870,7 @@ struct Desktop(Movable):
         # placeholder. The prompt opens from the response drain
         # (``_drain_prepare_rename``). Otherwise open it directly now.
         if self.lsp_managers[lsp_idx].server_supports_prepare_rename():
-            var text = self.windows.windows[win_idx].editor.text_snapshot()
+            var text = self.windows.windows[win_idx].editor.lsp_text()
             if self.lsp_managers[lsp_idx].request_prepare_rename(
                 path, row, col, text^,
             ):
@@ -16926,7 +16926,7 @@ struct Desktop(Movable):
         var win_idx = self._find_window_for_path(path)
         if win_idx < 0:
             return
-        var text = self.windows.windows[win_idx].editor.text_snapshot()
+        var text = self.windows.windows[win_idx].editor.lsp_text()
         var ok = self.lsp_managers[lsp_idx].request_rename(
             path, self._rename_line, self._rename_col, new_name, text^,
         )
@@ -16947,7 +16947,7 @@ struct Desktop(Movable):
             # typed into since, they'd land in the wrong places.
             var win = self._find_window_for_path(path)
             if len(edits) > 0 and win >= 0 \
-                    and self.windows.windows[win].editor.text_snapshot() != asked_on:
+                    and self.windows.windows[win].editor.lsp_text() != asked_on:
                 self._rename_path = String("")
                 self._say(
                     String("Not renamed: the file changed while waiting for ")
@@ -17722,7 +17722,7 @@ struct Desktop(Movable):
             if lsp_idx < 0:
                 self._say(String("References: LSP not ready"), Attr(RED, LIGHT_GRAY))
                 return
-            var text = self.windows.windows[idx].editor.text_snapshot()
+            var text = self.windows.windows[idx].editor.lsp_text()
             _ = self.lsp_managers[lsp_idx].request_references(
                 path, row, col, word^, text^,
             )
@@ -17734,7 +17734,7 @@ struct Desktop(Movable):
             if lsp_idx < 0:
                 return
             var path = self.windows.windows[idx].editor.file_path
-            var text = self.windows.windows[idx].editor.text_snapshot()
+            var text = self.windows.windows[idx].editor.lsp_text()
             if act == CTX_MENU_ACTION_CALLERS:
                 _ = self.lsp_managers[lsp_idx].request_call_hierarchy(
                     path, row, col, word^, text^,
@@ -17757,7 +17757,7 @@ struct Desktop(Movable):
             if lsp_idx < 0:
                 return
             var path = self.windows.windows[idx].editor.file_path
-            var text = self.windows.windows[idx].editor.text_snapshot()
+            var text = self.windows.windows[idx].editor.lsp_text()
             _ = self.lsp_managers[lsp_idx].request_moniker(
                 path, row, col, text^,
             )
@@ -17775,7 +17775,7 @@ struct Desktop(Movable):
             var r = Int((rgb >> 16) & 0xFF)
             var g = Int((rgb >> 8) & 0xFF)
             var b = Int(rgb & 0xFF)
-            var text = self.windows.windows[idx].editor.text_snapshot()
+            var text = self.windows.windows[idx].editor.lsp_text()
             # Remember the target editor — ``_ctx_menu_editor_idx`` is already
             # cleared by the time the async response opens the picker.
             self._colorpres_editor_idx = idx
@@ -17802,7 +17802,7 @@ struct Desktop(Movable):
             if lsp_idx < 0:
                 return
             var path = self.windows.windows[idx].editor.file_path
-            var text = self.windows.windows[idx].editor.text_snapshot()
+            var text = self.windows.windows[idx].editor.lsp_text()
             _ = self.lsp_managers[lsp_idx].request_inline_completion(
                 path, row, col, text^,
             )
@@ -17812,7 +17812,7 @@ struct Desktop(Movable):
             if lsp_idx < 0:
                 return
             var path = self.windows.windows[idx].editor.file_path
-            var text = self.windows.windows[idx].editor.text_snapshot()
+            var text = self.windows.windows[idx].editor.lsp_text()
             _ = self.lsp_managers[lsp_idx].request_linked_editing(
                 path, row, col, text^,
             )
@@ -17837,7 +17837,7 @@ struct Desktop(Movable):
         if lsp_idx < 0:
             self._say(String("LSP not ready for this file type"), Attr(RED, LIGHT_GRAY))
             return
-        var text = self.windows.windows[win_idx].editor.text_snapshot()
+        var text = self.windows.windows[win_idx].editor.lsp_text()
         _ = self.lsp_managers[lsp_idx].request_navigation(
             method, path, row, col, word^, text^,
         )
@@ -17871,7 +17871,7 @@ struct Desktop(Movable):
                 Attr(RED, LIGHT_GRAY),
             )
             return
-        var text = self.windows.windows[idx].editor.text_snapshot()
+        var text = self.windows.windows[idx].editor.lsp_text()
         _ = self.lsp_managers[li].request_formatting(path, text^)
 
     def _format_selection(mut self):
@@ -17901,7 +17901,7 @@ struct Desktop(Movable):
             var tr = sr; var tc = sc
             sr = er; sc = ec
             er = tr; ec = tc
-        var text = self.windows.windows[idx].editor.text_snapshot()
+        var text = self.windows.windows[idx].editor.lsp_text()
         _ = self.lsp_managers[li].request_range_formatting(
             path, sr, sc, er, ec, text^,
         )
@@ -17920,7 +17920,7 @@ struct Desktop(Movable):
         if win < 0:
             return -1
         if len(edits) > 0 \
-                and self.windows.windows[win].editor.text_snapshot() == text:
+                and self.windows.windows[win].editor.lsp_text() == text:
             _ = self.windows.windows[win].editor.apply_text_edits(edits^)
         return win
 

@@ -8182,14 +8182,12 @@ final class AttentionFlashView: NSView {
     }
 }
 
-/// A git list row: title (+ optional badge) over a detail line, with an
-/// optional leading stage checkbox.
+/// A git list row: title (+ optional badge) over a detail line.
 final class GitRowCell: NSTableCellView {
     private let title = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
     private let badge = NSTextField(labelWithString: "")
     private let row = NSStackView()
-    private var onCheck: (() -> Void)?
 
     init() {
         super.init(frame: .zero)
@@ -8228,17 +8226,6 @@ final class GitRowCell: NSTableCellView {
         badge.stringValue = b
         badge.textColor = badgeColor
     }
-
-    func addCheckbox(state: NSControl.StateValue, onChange: @escaping () -> Void) {
-        onCheck = onChange
-        let cb = NSButton(checkboxWithTitle: "", target: self, action: #selector(checked))
-        cb.allowsMixedState = true
-        cb.state = state
-        cb.toolTip = "Staged for the next commit"
-        row.insertArrangedSubview(cb, at: 0)
-    }
-
-    @objc private func checked() { onCheck?() }
 }
 
 

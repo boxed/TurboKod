@@ -21,7 +21,7 @@ from std.ffi import external_call
 
 from .json import (
     encode_json, json_array, json_bool, json_int, json_null, json_object,
-    json_str, JsonValue, parse_json,
+    json_str, JsonValue, parse_json, take_json,
 )
 from .case_fold import fold_byte
 from .string_utils import utf8_prefix
@@ -352,6 +352,12 @@ struct LspProcess(Copyable, Movable):
     var stderr_fd: Int32
     var alive: Bool
     var _read_buffer: List[UInt8]
+    # Bytes of ``_read_buffer`` / ``_pending_write`` already consumed. The
+    # buffers are compacted only once the dead prefix outgrows the live
+    # tail (``_dead_prefix_too_big``): dropping the prefix per message made
+    # a burst of N small messages (diagnostics at startup) cost O(N x
+    # buffer), and a large write on a 64 KB pipe copy its tail per write.
+    var _read_head: Int
     # Outbound queue. ``write_message`` frames a payload onto here and
     # then best-effort drains via a non-blocking ``write(2)``; whatever
     # the kernel didn't accept stays queued for ``pump_writes`` to
@@ -360,6 +366,7 @@ struct LspProcess(Copyable, Movable):
     # stdin, our writes pile up here (capped) instead of stalling the
     # editor inside a syscall.
     var _pending_write: List[UInt8]
+    var _write_head: Int
     var _write_overflowed: Bool
     # Optional trace log. When ``trace_fd >= 0`` every wire-level event
     # (writes, reads, message extractions) is appended to that fd as a
@@ -383,7 +390,9 @@ struct LspProcess(Copyable, Movable):
         self.stderr_fd = -1
         self.alive = False
         self._read_buffer = List[UInt8]()
+        self._read_head = 0
         self._pending_write = List[UInt8]()
+        self._write_head = 0
         self._write_overflowed = False
         self.trace_fd = -1
         self._trace_fd_owned = False
@@ -483,16 +492,22 @@ struct LspProcess(Copyable, Movable):
             self.trace(
                 String("> ") + String(n) + String("B ") + _trace_preview(payload)
             )
+        if _dead_prefix_too_big(self._write_head, len(self._pending_write)):
+            self._pending_write = _drop_prefix(
+                self._pending_write^, self._write_head,
+            )
+            self._write_head = 0
         append_string_bytes(self._pending_write, hdr)
         append_string_bytes(self._pending_write, payload)
-        if len(self._pending_write) > _BUF_CAP_GUARD:
+        var queued = len(self._pending_write) - self._write_head
+        if queued > _BUF_CAP_GUARD:
             if self.trace_fd >= 0:
                 self.trace(
                     String("> overflow: pending_write=")
-                    + String(len(self._pending_write))
+                    + String(queued)
                     + String("B exceeded cap; dropping queue"),
                 )
-            self._pending_write = List[UInt8]()
+            self._clear_writes()
             self._write_overflowed = True
             return
         self._try_flush_writes()
@@ -504,11 +519,13 @@ struct LspProcess(Copyable, Movable):
         call. No-op when the fd is gone."""
         if self.stdin_fd < 0:
             return
-        while len(self._pending_write) > 0:
+        while self._write_head < len(self._pending_write):
             var rc = external_call["tk_write_nb", Int](
                 self.stdin_fd,
-                self._pending_write.unsafe_ptr(),
-                UInt(len(self._pending_write)),
+                self._pending_write.unsafe_ptr().unsafe_offset(
+                    self._write_head,
+                ),
+                UInt(len(self._pending_write) - self._write_head),
             )
             if rc == 0:
                 # Kernel would block (EAGAIN / EWOULDBLOCK) — try
@@ -519,12 +536,14 @@ struct LspProcess(Copyable, Movable):
                 # crash detection in the manager covers the truly
                 # dead-server case; here we just drop the queue so
                 # we don't spin trying to write to a broken pipe.
-                self._pending_write = List[UInt8]()
+                self._clear_writes()
                 return
-            if rc >= len(self._pending_write):
-                self._pending_write = List[UInt8]()
-                return
-            self._pending_write = _drop_prefix(self._pending_write^, Int(rc))
+            self._write_head += Int(rc)
+        self._clear_writes()
+
+    def _clear_writes(mut self):
+        self._pending_write = List[UInt8]()
+        self._write_head = 0
 
     def pump_writes(mut self):
         """Continue draining any queued outbound bytes.
@@ -534,7 +553,7 @@ struct LspProcess(Copyable, Movable):
         momentarily full) still flushes within a frame or two of
         the server catching up.
         """
-        if len(self._pending_write) == 0:
+        if self._write_head >= len(self._pending_write):
             return
         self._try_flush_writes()
 
@@ -597,10 +616,12 @@ struct LspProcess(Copyable, Movable):
             if self.trace_fd >= 0:
                 self.trace(
                     String("< raw ") + String(n) + String("B (buffer now ")
-                    + String(len(self._read_buffer)) + String("B)"),
+                    + String(len(self._read_buffer) - self._read_head)
+                    + String("B)"),
                 )
-            if len(self._read_buffer) > _BUF_CAP_GUARD:
+            if len(self._read_buffer) - self._read_head > _BUF_CAP_GUARD:
                 self._read_buffer = List[UInt8]()
+                self._read_head = 0
                 return Optional[String]()
             var extracted = self._extract_one_message()
             if extracted:
@@ -619,26 +640,37 @@ struct LspProcess(Copyable, Movable):
 
     def _extract_one_message(mut self) -> Optional[String]:
         """Scan ``_read_buffer`` for a complete framed payload; if one is
-        present, slice it out, shrink the buffer, and return it."""
-        var hdr_end = _find_double_crlf(self._read_buffer)
+        present, slice it out, advance past it, and return it."""
+        var hdr_end = _find_double_crlf(self._read_buffer, self._read_head)
         if hdr_end < 0:
             return Optional[String]()
-        var content_length = _parse_content_length(self._read_buffer, hdr_end)
+        var content_length = _parse_content_length(
+            self._read_buffer, self._read_head, hdr_end,
+        )
         if content_length < 0:
             # Malformed header block — drop the framed prefix so we don't
             # spin forever; the next bytes are probably garbage anyway.
-            self._read_buffer = _drop_prefix(
-                self._read_buffer^, hdr_end + 4,
-            )
+            self._consume_read(hdr_end + 4)
             return Optional[String]()
         var body_start = hdr_end + 4
         if len(self._read_buffer) - body_start < content_length:
             return Optional[String]()
         var body = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=self._read_buffer.unsafe_ptr().unsafe_offset(body_start), length=content_length)))
-        self._read_buffer = _drop_prefix(
-            self._read_buffer^, body_start + content_length,
-        )
+        self._consume_read(body_start + content_length)
         return Optional[String](body^)
+
+    def _consume_read(mut self, upto: Int):
+        """Mark ``_read_buffer[:upto]`` consumed, compacting when the dead
+        prefix outgrows the live tail (or freeing a drained buffer)."""
+        self._read_head = upto
+        if self._read_head >= len(self._read_buffer):
+            self._read_buffer = List[UInt8]()
+            self._read_head = 0
+        elif _dead_prefix_too_big(self._read_head, len(self._read_buffer)):
+            self._read_buffer = _drop_prefix(
+                self._read_buffer^, self._read_head,
+            )
+            self._read_head = 0
 
     def drain_stderr(mut self) -> String:
         """Drain whatever's available on the server's stderr.
@@ -695,7 +727,7 @@ struct LspProcess(Copyable, Movable):
         self._trace_fd_owned = False
         # Drop any queued outbound bytes — they'd be writing to a
         # closed fd next time around.
-        self._pending_write = List[UInt8]()
+        self._clear_writes()
         self._write_overflowed = False
 
     @staticmethod
@@ -746,23 +778,32 @@ struct LspProcess(Copyable, Movable):
 # --- framer helpers (top-level for testability) ---------------------------
 
 
-def _find_double_crlf(buf: List[UInt8]) -> Int:
-    """Return the index of the first ``\\r\\n\\r\\n`` in ``buf``, or -1."""
-    if len(buf) < 4:
+def _dead_prefix_too_big(head: Int, length: Int) -> Bool:
+    """Whether a consumed prefix of ``head`` bytes is worth compacting
+    away: past 64 KB and more than the live tail, so compaction is
+    amortized O(1) per byte."""
+    return head > 65536 and head * 2 > length
+
+
+def _find_double_crlf(buf: List[UInt8], start: Int = 0) -> Int:
+    """Return the index of the first ``\\r\\n\\r\\n`` in ``buf`` at or
+    after ``start``, or -1."""
+    if len(buf) - start < 4:
         return -1
-    for i in range(len(buf) - 3):
+    for i in range(start, len(buf) - 3):
         if buf[i] == 0x0D and buf[i + 1] == 0x0A \
                 and buf[i + 2] == 0x0D and buf[i + 3] == 0x0A:
             return i
     return -1
 
 
-def _parse_content_length(buf: List[UInt8], hdr_end: Int) -> Int:
-    """Find ``Content-Length: N`` in the header block (case-insensitive on
-    the field name) and return ``N``. Returns -1 if not found / malformed."""
+def _parse_content_length(buf: List[UInt8], start: Int, hdr_end: Int) -> Int:
+    """Find ``Content-Length: N`` in the header block ``buf[start:hdr_end]``
+    (case-insensitive on the field name) and return ``N``. Returns -1 if
+    not found / malformed."""
     var name = String("content-length")
     var nb = name.as_bytes()
-    var i = 0
+    var i = start
     while i + len(nb) <= hdr_end:
         # Match the header name case-insensitively against the prefix
         # starting at position ``i``.
@@ -926,38 +967,37 @@ struct LspClient(Copyable, Movable):
         if not maybe:
             return Optional[LspIncoming]()
         var v = parse_json(maybe.value())
-        return Optional[LspIncoming](classify_message(v))
+        return Optional[LspIncoming](classify_message(v^))
 
     def terminate(mut self):
         self.process.terminate()
 
 
-def classify_message(v: JsonValue) -> LspIncoming:
+def classify_message(var v: JsonValue) -> LspIncoming:
     """Examine a parsed JSON-RPC envelope and tag it as response /
-    notification / request. Top-level utility for tests + clients."""
+    notification / request. Top-level utility for tests + clients.
+    Takes the envelope so its fields move out rather than being copied."""
     var id_opt = Optional[JsonValue]()
     var method_opt = Optional[String]()
     var params_opt = Optional[JsonValue]()
     var result_opt = Optional[JsonValue]()
     var error_opt = Optional[JsonValue]()
     if v.is_object():
-        # Each field is copied once, straight from the envelope's member:
-        # ``object_get`` returns a copy, and copying that into the Optional
-        # and again into the result cloned a whole completion or
-        # diagnostics payload three times per message.
+        # Each field moves straight out of the envelope's member: a whole
+        # completion or diagnostics payload must not be cloned per message.
         for i in range(len(v.obj_v)):
             ref m = v.obj_v[i]
             if m.key == String("id"):
-                id_opt = Optional[JsonValue](m.value.copy())
+                id_opt = Optional[JsonValue](take_json(m.value))
             elif m.key == String("method"):
                 if m.value.is_string():
                     method_opt = Optional[String](m.value.as_str())
             elif m.key == String("params"):
-                params_opt = Optional[JsonValue](m.value.copy())
+                params_opt = Optional[JsonValue](take_json(m.value))
             elif m.key == String("result"):
-                result_opt = Optional[JsonValue](m.value.copy())
+                result_opt = Optional[JsonValue](take_json(m.value))
             elif m.key == String("error"):
-                error_opt = Optional[JsonValue](m.value.copy())
+                error_opt = Optional[JsonValue](take_json(m.value))
     var kind: UInt8
     if Bool(method_opt) and Bool(id_opt):
         kind = LSP_REQUEST

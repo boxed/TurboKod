@@ -1539,6 +1539,10 @@ struct Editor(Copyable, Movable):
     """Bumped by every buffer edit (they all pass ``_mark_hl_dirty``): a
     cheap "did the text change" for whoever watches it, without comparing
     the text."""
+    var _lsp_text: String
+    """``lsp_text``'s cached snapshot, valid while ``change_count`` still
+    equals ``_lsp_text_count`` (-1: none yet)."""
+    var _lsp_text_count: Int
     var pending_test_run: Optional[TestRunRequest]
     # pytest ``python_files`` globs for this buffer's project (e.g.
     # ``test_*.py``, ``*__tests.py``, ``helpers.py``). Pushed by the host
@@ -2013,6 +2017,8 @@ struct Editor(Copyable, Movable):
         self.test_nodes = List[String]()
         self._tests_dirty = True
         self.change_count = 0
+        self._lsp_text = String("")
+        self._lsp_text_count = -1
         self.pending_test_run = Optional[TestRunRequest]()
         self.test_file_globs = List[String]()
         self.merge_pending = False
@@ -4584,6 +4590,23 @@ struct Editor(Copyable, Movable):
                 buf.append(UInt8(0x0A))
             append_string_bytes(buf, self.buffer.line(i))
         return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=len(buf))))
+
+    def lsp_text(mut self) -> String:
+        """``text_snapshot`` cached per edit, for the LSP request paths.
+
+        A cursor move fires several requests (selection range, document
+        highlight, inlay hints, code lens, …) and each one needs the text
+        to pre-flight its didChange. Joining the buffer for every one of
+        them was a full copy per request per cursor move; the cache makes
+        all but the first after an edit free (a ``String`` copy shares
+        its buffer). Keyed on ``change_count``, which every edit bumps
+        through ``_mark_hl_dirty`` — so this is only for the live-editing
+        paths, never for code that rewrites ``buffer.lines`` directly.
+        """
+        if self._lsp_text_count != self.change_count:
+            self._lsp_text = self.text_snapshot()
+            self._lsp_text_count = self.change_count
+        return self._lsp_text
 
     def _disk_text(self) -> String:
         """Build the byte sequence to write to disk for the current buffer,

@@ -258,14 +258,14 @@ def test_lsp_framer_finds_double_crlf() raises:
 def test_lsp_framer_parses_content_length() raises:
     var buf = _bytes_of(String("Content-Length: 42\r\n\r\n"))
     var hdr_end = _find_double_crlf(buf)
-    assert_equal(_parse_content_length(buf, hdr_end), 42)
+    assert_equal(_parse_content_length(buf, 0, hdr_end), 42)
     var buf2 = _bytes_of(String("content-length: 7\r\n\r\n"))
-    assert_equal(_parse_content_length(buf2, _find_double_crlf(buf2)), 7)
+    assert_equal(_parse_content_length(buf2, 0, _find_double_crlf(buf2)), 7)
     var buf3 = _bytes_of(String(
         "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\n"
         + "Content-Length: 11\r\n\r\n"
     ))
-    assert_equal(_parse_content_length(buf3, _find_double_crlf(buf3)), 11)
+    assert_equal(_parse_content_length(buf3, 0, _find_double_crlf(buf3)), 11)
 
 
 def test_lsp_framer_extract_one_message() raises:
@@ -302,6 +302,27 @@ def test_lsp_framer_extract_one_message() raises:
     assert_equal(done.value(), String("abcd"))
 
 
+def test_lsp_framer_backlog_compacts_and_keeps_order() raises:
+    # A backlog well past the 64 KB compaction threshold: every message
+    # comes out intact and in order, and the buffer ends drained.
+    var p = LspProcess()
+    var body = String("x") * 1000
+    for k in range(200):
+        var msg = String(k) + body
+        var framed = String("Content-Length: ") + String(len(msg.as_bytes())) \
+            + String("\r\n\r\n") + msg
+        var fb = framed.as_bytes()
+        for i in range(len(fb)):
+            p._read_buffer.append(fb[i])
+    for k in range(200):
+        var got = p._extract_one_message()
+        assert_true(Bool(got))
+        assert_equal(got.value(), String(k) + body)
+        assert_true(p._read_head <= len(p._read_buffer))
+    assert_false(Bool(p._extract_one_message()))
+    assert_equal(len(p._read_buffer), 0)
+
+
 def test_lsp_drop_prefix_helper() raises:
     var b = _bytes_of(String("hello world"))
     var rest = _drop_prefix(b^, 6)
@@ -314,7 +335,7 @@ def test_lsp_classify_message() raises:
     var resp = parse_json(String(
         "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"ok\":true}}"
     ))
-    var c = classify_message(resp)
+    var c = classify_message(resp^)
     assert_equal(Int(c.kind), Int(LSP_RESPONSE))
     assert_true(Bool(c.id))
     assert_true(c.id.value().is_int())
@@ -324,7 +345,7 @@ def test_lsp_classify_message() raises:
         "{\"jsonrpc\":\"2.0\",\"method\":\"window/logMessage\","
         + "\"params\":{\"type\":3,\"message\":\"hi\"}}"
     ))
-    var cn = classify_message(note)
+    var cn = classify_message(note^)
     assert_equal(Int(cn.kind), Int(LSP_NOTIFICATION))
     assert_equal(cn.method.value(), String("window/logMessage"))
     # esbonio sends ``workspace/configuration`` requests with a UUID
@@ -337,7 +358,7 @@ def test_lsp_classify_message() raises:
         + "\"method\":\"workspace/configuration\","
         + "\"params\":{\"items\":[]}}"
     ))
-    var cr = classify_message(str_req)
+    var cr = classify_message(str_req^)
     assert_equal(Int(cr.kind), Int(LSP_REQUEST))
     assert_true(Bool(cr.id))
     assert_true(cr.id.value().is_string())

@@ -893,6 +893,32 @@ def test_sync_highlights_keeps_one_copy_of_the_buffers_highlights() raises:
     registry.release()
 
 
+def test_sync_highlights_with_an_injection_keeps_the_grammar_output() raises:
+    """With a ``language=`` marker the overlay changes the caller's list,
+    so the cache keeps the grammar's own output to splice into; an edit
+    elsewhere still matches a full pass."""
+    var lines = List[String]()
+    lines.append(String("a = 1"))
+    lines.append(String("# language=html"))
+    lines.append(String("x = \"<b>hi</b>\""))
+    var registry = GrammarRegistry()
+    var cache = HighlightCache()
+    var hls = List[Highlight]()
+    sync_highlights(String("py"), lines, 0, registry, cache, hls)
+    assert_equal(cache.lent_len, -1)
+    assert_true(len(cache.highlights) > 0)
+    lines[0] = String("a = 12  # note")
+    sync_highlights(String("py"), lines, 0, registry, cache, hls)
+    var got = _hl_set(hls)
+    var full = _hl_set(highlight_for_extension(String("py"), lines))
+    assert_equal(len(got), len(full))
+    for i in range(len(got)):
+        assert_equal(got[i].row, full[i].row)
+        assert_equal(got[i].col_start, full[i].col_start)
+        assert_equal(got[i].col_end, full[i].col_end)
+    registry.release()
+
+
 def test_textmate_incremental_matches_full_retokenize() raises:
     """The incremental tokenizer must match a full re-run for the same buffer + dirty-row hint.
 

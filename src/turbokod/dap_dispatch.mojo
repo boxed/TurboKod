@@ -123,12 +123,6 @@ struct DapStackFrame(ImplicitlyCopyable, Movable):
 
 
 @fieldwise_init
-struct DapThread(ImplicitlyCopyable, Movable):
-    var id: Int
-    var name: String
-
-
-@fieldwise_init
 struct DapCompletion(ImplicitlyCopyable, Movable):
     """One target from a ``completions`` response. ``text`` is what to
     insert (``label`` when the adapter sent none). ``start`` / ``length``
@@ -461,7 +455,6 @@ struct DapManager(Copyable, Movable):
     var _inflight_initialize: Int
     var _inflight_launch: Int
     var _inflight_config_done: Int
-    var _inflight_threads: Int
     # Inspect requests in flight on the parent session (the subprocess
     # has its own, ``_subprocess.rq``).
     var _rq: _InspectRequests
@@ -569,8 +562,6 @@ struct DapManager(Copyable, Movable):
     var _terminated_pending: Bool
 
     # Async response buffers — single-slot, freshest wins.
-    var _pending_threads: List[DapThread]
-    var _pending_threads_ready: Bool
     var _pending_stack: List[DapStackFrame]
     var _pending_stack_ready: Bool
     var _pending_scopes: List[DapScope]
@@ -652,7 +643,6 @@ struct DapManager(Copyable, Movable):
         self._inflight_initialize = 0
         self._inflight_launch = 0
         self._inflight_config_done = 0
-        self._inflight_threads = 0
         self._rq = _InspectRequests()
         self._supports_configuration_done = True
         self._supports_terminate_request = False
@@ -693,8 +683,6 @@ struct DapManager(Copyable, Movable):
         self._continued_pending = False
         self._output_events = List[DapOutput]()
         self._terminated_pending = False
-        self._pending_threads = List[DapThread]()
-        self._pending_threads_ready = False
         self._pending_stack = List[DapStackFrame]()
         self._pending_stack_ready = False
         self._pending_scopes = List[DapScope]()
@@ -1345,9 +1333,6 @@ struct DapManager(Copyable, Movable):
 
     # --- completions (debug console) --------------------------------------
 
-    def supports_completions(self) -> Bool:
-        return self._supports_completions
-
     def request_completions(
         mut self, var text: String, column: Int, frame_id: Int,
     ) -> Bool:
@@ -1570,17 +1555,6 @@ struct DapManager(Copyable, Movable):
 
     # --- async data fetches ----------------------------------------------
 
-    def request_threads(mut self) -> Bool:
-        if not self.is_active():
-            return False
-        try:
-            self._inflight_threads = self.client.send_request(
-                String("threads"), json_object(),
-            )
-        except:
-            return False
-        return True
-
     def request_stack_trace(mut self, thread_id: Int, levels: Int = 64) -> Bool:
         if not self.is_active():
             return False
@@ -1676,15 +1650,6 @@ struct DapManager(Copyable, Movable):
             self._continued_pending = False
             return True
         return False
-
-    def has_threads(self) -> Bool:
-        return self._pending_threads_ready
-
-    def take_threads(mut self) -> List[DapThread]:
-        var out = self._pending_threads^
-        self._pending_threads = List[DapThread]()
-        self._pending_threads_ready = False
-        return out^
 
     def has_stack(self) -> Bool:
         return self._pending_stack_ready
@@ -2051,11 +2016,6 @@ struct DapManager(Copyable, Movable):
         if rseq == self._inflight_config_done:
             self._on_config_done_response(msg)
             self._inflight_config_done = 0
-            return
-        if rseq == self._inflight_threads:
-            self._pending_threads = _parse_threads(msg.body)
-            self._pending_threads_ready = True
-            self._inflight_threads = 0
             return
         if self._on_inspect_answer(self._rq.claim(rseq), msg):
             return
@@ -2739,32 +2699,6 @@ def _default_exception_filters() -> List[String]:
 
 
 # --- response-body parsers ------------------------------------------------
-
-
-def _parse_threads(body_opt: Optional[JsonValue]) -> List[DapThread]:
-    var out = List[DapThread]()
-    if not body_opt:
-        return out^
-    var b = body_opt.value().copy()
-    if not b.is_object():
-        return out^
-    var arr_opt = b.object_get(String("threads"))
-    if not arr_opt or not arr_opt.value().is_array():
-        return out^
-    var arr = arr_opt.value().copy()
-    for i in range(arr.array_len()):
-        var t = arr.array_at(i)
-        if not t.is_object():
-            continue
-        var id_opt = t.object_get(String("id"))
-        var name_opt = t.object_get(String("name"))
-        if not id_opt or not id_opt.value().is_int():
-            continue
-        var name = String("")
-        if name_opt and name_opt.value().is_string():
-            name = name_opt.value().as_str()
-        out.append(DapThread(id_opt.value().as_int(), name))
-    return out^
 
 
 def _parse_stack_trace(body_opt: Optional[JsonValue]) -> List[DapStackFrame]:

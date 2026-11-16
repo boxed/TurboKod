@@ -31,7 +31,7 @@ from std.collections.optional import Optional
 
 from .json import (
     JsonValue, encode_json, json_bool, json_get_int, json_get_string,
-    json_int, json_object, json_str, parse_json,
+    json_int, json_object, json_str, parse_json, take_json,
 )
 from .lsp import LspProcess
 
@@ -138,7 +138,7 @@ struct DapClient(Copyable, Movable):
         if not maybe:
             return Optional[DapIncoming]()
         var v = parse_json(maybe.value())
-        return Optional[DapIncoming](classify_dap_message(v))
+        return Optional[DapIncoming](classify_dap_message(v^))
 
     def terminate(mut self):
         self.process.terminate()
@@ -147,7 +147,7 @@ struct DapClient(Copyable, Movable):
 # --- classification --------------------------------------------------------
 
 
-def classify_dap_message(v: JsonValue) -> DapIncoming:
+def classify_dap_message(var v: JsonValue) -> DapIncoming:
     """Examine a parsed DAP envelope and tag it as response / event /
     (reverse) request. Top-level utility for tests + clients.
 
@@ -182,12 +182,14 @@ def classify_dap_message(v: JsonValue) -> DapIncoming:
         var maybe_msg = v.object_get(String("message"))
         if maybe_msg and maybe_msg.value().is_string():
             message_opt = Optional[String](maybe_msg.value().as_str())
-        var maybe_body = v.object_get(String("body"))
-        if maybe_body:
-            body_opt = Optional[JsonValue](maybe_body.value().copy())
-        var maybe_args = v.object_get(String("arguments"))
-        if maybe_args:
-            arguments_opt = Optional[JsonValue](maybe_args.value().copy())
+        # ``body`` / ``arguments`` move out of the envelope (it's ours):
+        # a stackTrace or variables response must not be cloned per hop.
+        var bi = v.object_index(String("body"))
+        if bi >= 0:
+            body_opt = Optional[JsonValue](take_json(v.obj_v[bi].value))
+        var ai = v.object_index(String("arguments"))
+        if ai >= 0:
+            arguments_opt = Optional[JsonValue](take_json(v.obj_v[ai].value))
     var kind: UInt8
     if type_str == String("event"):
         kind = DAP_EVENT
@@ -200,7 +202,7 @@ def classify_dap_message(v: JsonValue) -> DapIncoming:
         kind = DAP_RESPONSE
     return DapIncoming(
         kind, seq, request_seq_opt, command_opt, event_opt,
-        success_opt, message_opt, body_opt.copy(), arguments_opt.copy(),
+        success_opt, message_opt, body_opt^, arguments_opt^,
     )
 
 

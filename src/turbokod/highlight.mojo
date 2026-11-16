@@ -506,10 +506,10 @@ def sync_highlights(
 
     The cache needs the grammar's own output to splice the next edit
     into; the caller needs that plus whatever the injection overlays
-    changed. For most buffers the two are the same list, and then the
-    cache's copy is dropped and the caller's stands in for it: the next
-    call takes it back before tokenizing. A caller that replaced its list
-    in between (the length no longer matches) costs a full pass."""
+    change. For most buffers no overlay can apply, and then the grammar's
+    output moves to the caller without a copy and the cache lends it: the
+    next call takes it back before tokenizing. A caller that replaced its
+    list in between (the length no longer matches) costs a full pass."""
     var first = dirty_row
     if cache.lent_len >= 0:
         if len(hls) == cache.lent_len:
@@ -518,29 +518,17 @@ def sync_highlights(
         else:
             cache.invalidate()
             first = 0
-    hls = highlight_incremental(
-        ext, lines, first, registry, cache, dirty_max_row,
-    )
-    if _same_highlights(hls, cache.highlights):
-        cache.highlights = List[Highlight]()
-        cache.lent_len = len(hls)
-
-
-def _same_highlights(a: List[Highlight], b: List[Highlight]) -> Bool:
-    if len(a) != len(b):
-        return False
-    for i in range(len(a)):
-        ref x = a[i]
-        ref y = b[i]
-        if x.row != y.row or x.col_start != y.col_start \
-                or x.col_end != y.col_end or x.attr.fg != y.attr.fg \
-                or x.attr.bg != y.attr.bg or x.attr.style != y.attr.style \
-                or x.attr.underline_color != y.attr.underline_color \
-                or x.attr.color_mode != y.attr.color_mode \
-                or x.attr.fg_rgb != y.attr.fg_rgb \
-                or x.attr.bg_rgb != y.attr.bg_rgb:
-            return False
-    return True
+    var fb = _grammar_pass(ext, lines, first, registry, cache, dirty_max_row)
+    if fb:
+        hls = fb.take()
+        return
+    if _overlays_may_apply(ext, cache.ext, lines):
+        hls = cache.highlights.copy()
+        _apply_overlays(ext, cache.ext, lines, hls, registry)
+        return
+    hls = List[Highlight]()
+    swap(hls, cache.highlights)
+    cache.lent_len = len(hls)
 
 
 def _hl_buckets(hls: List[Highlight], n: Int) -> List[List[Highlight]]:
@@ -625,14 +613,62 @@ def highlight_incremental(
     is 0. Falls through to the generic tokenizer when there's no
     bundled grammar for the extension.
     """
+    var fb = _grammar_pass(ext, lines, dirty_row, registry, cache, dirty_max_row)
+    if fb:
+        return fb.take()
+    var out = cache.highlights.copy()
+    _apply_overlays(ext, cache.ext, lines, out, registry)
+    return out^
+
+
+def _apply_overlays(
+    ext: String, cache_key: String, lines: List[String],
+    mut hls: List[Highlight], mut registry: GrammarRegistry,
+):
+    """The passes layered over a tokenizer's output: ``language=`` /
+    Markdown-fence injections, then Django template tags."""
+    _apply_intellij_injections(ext, lines, hls, registry)
+    _apply_django_template_overlay(cache_key, lines, hls)
+
+
+def _overlays_may_apply(
+    ext: String, cache_key: String, lines: List[String],
+) -> Bool:
+    """False when ``_apply_overlays`` is certain to leave the list alone —
+    the common case, which lets ``sync_highlights`` hand the grammar's
+    output over without copying it. Conservative: True may still change
+    nothing."""
+    if _is_markdown_ext(ext) or starts_with(cache_key, String("django")):
+        return True
+    for i in range(len(lines)):
+        if _find_language_marker(lines[i]):
+            return True
+    return False
+
+
+def _fallback_with_overlays(
+    ext: String, cache_key: String, lines: List[String],
+    mut registry: GrammarRegistry,
+) -> List[Highlight]:
+    var fb = _fallback_for_extension(ext, lines)
+    _apply_overlays(ext, cache_key, lines, fb, registry)
+    return fb^
+
+
+def _grammar_pass(
+    ext: String, lines: List[String], dirty_row: Int,
+    mut registry: GrammarRegistry, mut cache: HighlightCache,
+    dirty_max_row: Int,
+) -> Optional[List[Highlight]]:
+    """``highlight_incremental``'s tokenizing half. Leaves the grammar's
+    own output (no overlays) in ``cache.highlights`` and returns empty;
+    when no grammar applies, returns the generic tokenizer's result with
+    the overlays already applied (and ``cache.highlights`` is not it)."""
     var resolved = _resolve_grammar_path(ext, registry)
     var path = resolved.path
     var cache_key = resolved.cache_key
     if len(path.as_bytes()) == 0:
-        var fb = _fallback_for_extension(ext, lines)
-        _apply_intellij_injections(ext, lines, fb, registry)
-        _apply_django_template_overlay(cache_key, lines, fb)
-        return fb^
+        return _fallback_with_overlays(ext, cache_key, lines, registry)
 
     # Grammar load — registry hit if the cache_key is already known,
     # else cold load + register. The registry is process-shared so
@@ -646,10 +682,7 @@ def highlight_incremental(
     try:
         grammar_idx = registry.ensure(cache_key, path)
     except:
-        var fb = _fallback_for_extension(ext, lines)
-        _apply_intellij_injections(ext, lines, fb, registry)
-        _apply_django_template_overlay(cache_key, lines, fb)
-        return fb^
+        return _fallback_with_overlays(ext, cache_key, lines, registry)
 
     # Per-Editor state: invalidate when the cache key changes (either
     # the extension itself moved or the project's override map did).
@@ -679,17 +712,12 @@ def highlight_incremental(
                     and len(cache.post_stacks) == n_lines
                     and len(cache.stacks.stacks) < _STACK_TABLE_LIMIT)
     if not can_incr:
-        var hls = _full_retokenize(
+        _full_retokenize(
             grammar_store_at(registry._store)[].grammars[grammar_idx], cache, lines,
         )
-        if len(hls) == 0 and _has_nonempty_line(lines):
-            var fb = _fallback_for_extension(ext, lines)
-            _apply_intellij_injections(ext, lines, fb, registry)
-            _apply_django_template_overlay(cache_key, lines, fb)
-            return fb^
-        _apply_intellij_injections(ext, lines, hls, registry)
-        _apply_django_template_overlay(cache_key, lines, hls)
-        return hls^
+        if len(cache.highlights) == 0 and _has_nonempty_line(lines):
+            return _fallback_with_overlays(ext, cache_key, lines, registry)
+        return None
 
     # Incremental path. Start state = post-state at end of line
     # (eff_dirty - 1), i.e. what eff_dirty was tokenized against
@@ -738,30 +766,24 @@ def highlight_incremental(
     # each keystroke.
     for k in range(len(new_post)):
         cache.post_stacks[eff_dirty + k] = new_post[k]
-    cache.highlights = out.copy()
+    var empty = len(out) == 0
+    cache.highlights = out^
 
-    if len(out) == 0 and _has_nonempty_line(lines):
-        var fb = _fallback_for_extension(ext, lines)
-        _apply_intellij_injections(ext, lines, fb, registry)
-        _apply_django_template_overlay(cache_key, lines, fb)
-        return fb^
-    _apply_intellij_injections(ext, lines, out, registry)
-    _apply_django_template_overlay(cache_key, lines, out)
-    return out^
+    if empty and _has_nonempty_line(lines):
+        return _fallback_with_overlays(ext, cache_key, lines, registry)
+    return None
 
 
 def _full_retokenize(
     grammar: Grammar, mut cache: HighlightCache, lines: List[String],
-) -> List[Highlight]:
+):
     """Re-tokenize ``lines`` from scratch, refreshing both
     ``cache.highlights`` and ``cache.post_stacks``. Caller owns
     the decision of whether to call us versus the incremental
     path — we just do the work."""
-    var hls = tokenize_with_grammar_full(
+    cache.highlights = tokenize_with_grammar_full(
         grammar, lines, cache.stacks, cache.post_stacks,
     )
-    cache.highlights = hls.copy()
-    return hls^
 
 
 def _fallback_for_extension(

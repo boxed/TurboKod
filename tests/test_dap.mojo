@@ -37,7 +37,7 @@ from turbokod.dap_dispatch import (
     _STATE_INITIALIZING, _STATE_TERMINATED, _is_index_name, _is_key_name,
     _parse_completions,
     _parse_scopes,
-    _parse_stack_trace, _parse_threads, _parse_variables
+    _parse_stack_trace, _parse_variables
 )
 from turbokod.debugger_config import (
     built_in_debuggers, find_debugger_for_language, launch_arguments_for
@@ -327,7 +327,7 @@ def test_dap_classify_response() raises:
         + "\"success\":true,\"command\":\"initialize\","
         + "\"body\":{\"supportsConfigurationDoneRequest\":true}}"
     ))
-    var c = classify_dap_message(resp)
+    var c = classify_dap_message(resp^)
     assert_equal(Int(c.kind), Int(DAP_RESPONSE))
     assert_equal(c.seq, 3)
     assert_true(Bool(c.request_seq))
@@ -344,7 +344,7 @@ def test_dap_classify_event() raises:
         + "\"body\":{\"reason\":\"breakpoint\",\"threadId\":1,"
         + "\"allThreadsStopped\":true}}"
     ))
-    var c = classify_dap_message(ev)
+    var c = classify_dap_message(ev^)
     assert_equal(Int(c.kind), Int(DAP_EVENT))
     assert_equal(c.seq, 4)
     assert_equal(c.event.value(), String("stopped"))
@@ -356,7 +356,7 @@ def test_dap_classify_reverse_request() raises:
         "{\"seq\":5,\"type\":\"request\",\"command\":\"runInTerminal\","
         + "\"arguments\":{\"args\":[\"/usr/bin/echo\"]}}"
     ))
-    var c = classify_dap_message(rq)
+    var c = classify_dap_message(rq^)
     assert_equal(Int(c.kind), Int(DAP_REQUEST))
     assert_equal(c.command.value(), String("runInTerminal"))
     assert_true(Bool(c.arguments))
@@ -368,7 +368,7 @@ def test_dap_classify_response_with_failure() raises:
         + "\"success\":false,\"command\":\"launch\","
         + "\"message\":\"file not found\"}"
     ))
-    var c = classify_dap_message(resp)
+    var c = classify_dap_message(resp^)
     assert_equal(Int(c.kind), Int(DAP_RESPONSE))
     assert_true(Bool(c.success))
     assert_false(c.success.value())
@@ -405,19 +405,6 @@ def test_dap_seq_autoincrement_via_cat() raises:
     assert_equal(seq1, 1)
     assert_equal(seq2, 2)
     client.terminate()
-
-
-def test_dap_parse_threads() raises:
-    var body = parse_json(String(
-        "{\"threads\":[{\"id\":1,\"name\":\"main\"},"
-        + "{\"id\":2,\"name\":\"worker\"}]}"
-    ))
-    var threads = _parse_threads(Optional[JsonValue](body.copy()))
-    assert_equal(len(threads), 2)
-    assert_equal(threads[0].id, 1)
-    assert_equal(threads[0].name, String("main"))
-    assert_equal(threads[1].id, 2)
-    assert_equal(threads[1].name, String("worker"))
 
 
 def test_dap_parse_stack_trace_zero_based() raises:

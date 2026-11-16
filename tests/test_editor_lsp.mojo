@@ -713,6 +713,21 @@ def test_editor_long_diagnostic_tooltip_fills_popup_interior() raises:
             assert_true(bg != BLUE)
 
 
+def test_editor_lsp_text_follows_every_edit() raises:
+    # ``lsp_text`` caches the snapshot per ``change_count``; an edit,
+    # an undo and a redo must each be visible in the next call.
+    var ed = Editor(String("ab\ncd"))
+    assert_equal(ed.lsp_text(), String("ab\ncd"))
+    _ = ed.handle_key(Event.key_event(KEY_BACKSPACE), Rect(0, 0, 40, 5))
+    assert_equal(ed.lsp_text(), ed.text_snapshot())
+    _ = ed.handle_key(Event.key_event(KEY_ENTER), Rect(0, 0, 40, 5))
+    assert_equal(ed.lsp_text(), ed.text_snapshot())
+    _ = ed.undo()
+    assert_equal(ed.lsp_text(), ed.text_snapshot())
+    _ = ed.redo()
+    assert_equal(ed.lsp_text(), ed.text_snapshot())
+
+
 def main() raises:
     setup_test_env()
     TestSuite.discover_tests[__functions_in_module()]().run()
