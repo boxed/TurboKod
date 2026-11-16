@@ -783,6 +783,25 @@ struct TextBuffer(Copyable, Movable):
             self.mark_count = count
 
 
+@fieldwise_init
+struct _WrapKey(ImplicitlyCopyable, Movable):
+    """The inputs a wrapped measurement of the buffer depends on: its
+    edit count, the text area's size, the wrap mode and the indent size
+    (the hanging indent)."""
+    var change_count: Int
+    var content_h: Int
+    var content_w: Int
+    var wrap_mode: Int
+    var indent: Int
+
+    def __eq__(self, other: Self) -> Bool:
+        return self.change_count == other.change_count \
+            and self.content_h == other.content_h \
+            and self.content_w == other.content_w \
+            and self.wrap_mode == other.wrap_mode \
+            and self.indent == other.indent
+
+
 # --- Undo / redo ------------------------------------------------------------
 
 
@@ -1309,6 +1328,12 @@ struct Editor(Copyable, Movable):
     var _vis_w: Int
     var _vis_mode: Int
     var _vis_dirty: Bool
+    # ``max_scroll_y`` under wrap, cached by ``clamp_scroll`` (every frame,
+    # for every editor) against what it depends on, so the scroll bar's
+    # call in the same frame and the frames after it don't re-wrap the
+    # buffer's last screenful again. ``_max_sy < 0``: nothing cached.
+    var _max_sy: Int
+    var _max_sy_key: _WrapKey
     # ``longest_line_width``, -1 until measured or after an edit: it
     # measures every line, and the scroll bar wants it every frame.
     var _longest_w: Int
@@ -1971,6 +1996,8 @@ struct Editor(Copyable, Movable):
         self._vis_w = -1
         self._vis_mode = -1
         self._vis_dirty = True
+        self._max_sy = -1
+        self._max_sy_key = _WrapKey(0, 0, 0, 0, 0)
         self._longest_w = -1
         self._suppress_overlays = False
         self.host_owns_shadows = False
@@ -2910,6 +2937,8 @@ struct Editor(Copyable, Movable):
         self._hl_cache = HighlightCache()
         self._highlights_dirty = True
         self._hl_dirty_row = 0
+        # The language (so smart wrap) may have changed with the path.
+        self._max_sy = -1
 
     def _mark_hl_dirty(mut self, row: Int, max_row: Int = -1):
         """Note that ``row`` (and possibly later rows) need
@@ -11020,6 +11049,9 @@ struct Editor(Copyable, Movable):
             var m = n_lines - content_h
             return 0 if m < 0 else m
         var content_w = self._content_width(view)
+        if self._max_sy >= 0 \
+                and self._max_sy_key == self._wrap_key(content_h, content_w):
+            return self._max_sy
         # Measure each line with the SAME wrap routine ``_layout_lines``
         # paints with, or the scrollbar/wheel range desyncs from what's on
         # screen.
@@ -11037,6 +11069,14 @@ struct Editor(Copyable, Movable):
         if ms > n_lines - 1:
             ms = n_lines - 1
         return ms
+
+    def _wrap_key(self, content_h: Int, content_w: Int) -> _WrapKey:
+        """What a wrapped measurement of the buffer depends on, for
+        ``max_scroll_y``'s cache."""
+        return _WrapKey(
+            self.change_count, content_h, content_w, self.wrap_mode,
+            self.editorconfig.effective_indent_size(),
+        )
 
     def _ensure_vis_metrics(mut self, content_w: Int):
         """Rebuild the per-line visual-row count table + prefix sums when the
@@ -11215,6 +11255,11 @@ struct Editor(Copyable, Movable):
             var cell = utf8_cell_of_byte(line, self.scroll_x)
             self.scroll_x = utf8_byte_of_cell(line, cell)
         var max_y = self.max_scroll_y(view)
+        if self._is_wrapping():
+            self._max_sy = max_y
+            self._max_sy_key = self._wrap_key(
+                view.height(), self._content_width(view),
+            )
         var prev_scroll_y = self.scroll_y
         if self.scroll_y > max_y:
             self.scroll_y = max_y

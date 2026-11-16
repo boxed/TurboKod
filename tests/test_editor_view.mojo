@@ -507,6 +507,27 @@ def test_wrap_none_long_line_paints_only_what_fits() raises:
     assert_true(row0.find("NOTE") >= 0)
 
 
+
+def test_wrapped_max_scroll_follows_edits_and_resizes() raises:
+    """``clamp_scroll`` caches the wrapped scroll range; an edit or a
+    different view must still see the fresh one."""
+    var view = Rect(0, 0, 24, 4)
+    var ed = Editor(String("a\nb\nc\nd\ne\nf"))
+    ed.wrap_mode = WRAP_SOFT
+    ed.clamp_scroll(view)
+    assert_equal(ed.max_scroll_y(view), 2)
+    ed.move_to(5, 1, False)
+    var long = String("")
+    for _ in range(80):
+        long += "x"
+    ed.paste_text(long)
+    # Row 5 now wraps to several rows, so it alone fills the view.
+    var fresh = ed.max_scroll_y(view)
+    assert_equal(fresh, 5)
+    ed.clamp_scroll(view)
+    assert_equal(ed.max_scroll_y(view), fresh)
+    assert_equal(ed.max_scroll_y(Rect(0, 0, 24, 20)), 0)
+
 def main() raises:
     setup_test_env()
     TestSuite.discover_tests[__functions_in_module()]().run()
