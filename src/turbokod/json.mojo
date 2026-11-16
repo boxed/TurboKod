@@ -634,7 +634,8 @@ def _parse_array(text: String, mut pos: Int) raises -> JsonValue:
 def _parse_string(text: String, pos: Int) raises -> Tuple[String, Int]:
     """Read one JSON-escaped string starting at ``pos``.
 
-    Accumulates into a ``List[UInt8]`` rather than ``out + chr(c)`` —
+    Escaped strings accumulate into a ``List[UInt8]`` rather than
+    ``out + chr(c)`` —
     String concat is O(N) per step in Mojo, so a multi-MB JSON value
     (DevDocs ``db.json`` body) would otherwise take O(N²) and turn the
     first ``Cmd+K`` of a session into a multi-minute hang.
@@ -643,8 +644,25 @@ def _parse_string(text: String, pos: Int) raises -> Tuple[String, Int]:
     if pos >= len(bytes) or bytes[pos] != 0x22:
         raise Error("expected string")
     var p = pos + 1
-    var out = List[UInt8]()
-    while p < len(bytes):
+    var n = len(bytes)
+    # Fast path: a string with no escapes (nearly every key and value) is
+    # one span of ``text`` — scan to its end and build the String from
+    # it, with no per-byte append and no intermediate buffer.
+    var run = p
+    while run < n:
+        var c = Int(bytes[run])
+        if c == 0x22 or c == 0x5C or c < 0x20:
+            break
+        run += 1
+    if run < n and bytes[run] == 0x22:
+        return (
+            String(StringSpan(unsafe_from_utf8=bytes[p:run])),
+            run + 1,
+        )
+    var out = List[UInt8](capacity=run - p + 16)
+    out.extend(bytes[p:run])
+    p = run
+    while p < n:
         var c = Int(bytes[p])
         if c == 0x22:
             return (
@@ -696,8 +714,15 @@ def _parse_string(text: String, pos: Int) raises -> Tuple[String, Int]:
             continue
         if c < 0x20:
             raise Error("control byte in string")
-        out.append(bytes[p])
-        p += 1
+        # Copy the unescaped run up to the next quote / escape at once.
+        var end = p + 1
+        while end < n:
+            var d = Int(bytes[end])
+            if d == 0x22 or d == 0x5C or d < 0x20:
+                break
+            end += 1
+        out.extend(bytes[p:end])
+        p = end
     raise Error("unterminated string")
 
 
