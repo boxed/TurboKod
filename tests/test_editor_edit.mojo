@@ -2124,6 +2124,30 @@ def test_editor_bracket_match_skips_brackets_in_strings() raises:
     assert_equal(p[3], 10)
 
 
+def test_editor_bracket_match_through_the_row_index() raises:
+    """With the row index built (as ``flush_highlights`` does), the string
+    skip still applies — including when the highlights aren't in row
+    order, which the overlay passes can leave them in."""
+    var ed = Editor(String("x\nf(\"(\", \"z\")"))
+    ed.highlights.append(Highlight(1, 7, 10, highlight_string_attr()))
+    ed.highlights.append(Highlight(0, 0, 1, highlight_string_attr()))
+    ed.highlights.append(Highlight(1, 2, 5, highlight_string_attr()))
+    ed._index_highlights()
+    var span = ed._hl_rows(1)
+    assert_equal(span[1] - span[0], 2)
+    ed.selections[0].row = 1
+    ed.selections[0].col = 1  # outer '('
+    var m = ed._find_bracket_match_at_cursor()
+    assert_true(m)
+    assert_equal(m.value()[2], 1)
+    assert_equal(m.value()[3], 10)
+    # And from the closer, scanning back.
+    ed.selections[0].col = 10
+    var b = ed._find_bracket_match_at_cursor()
+    assert_true(b)
+    assert_equal(b.value()[3], 1)
+
+
 def test_editor_bracket_match_source_inside_string_returns_none() raises:
     """If the source bracket itself sits inside a string scope, the
     matcher returns nothing — we don't want to confuse the user by

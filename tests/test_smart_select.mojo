@@ -11,6 +11,7 @@ from turbokod.events import (
     Event, KEY_DOWN, KEY_RIGHT, KEY_UP, MOD_META, MOD_NONE, MOD_SHIFT,
 )
 from turbokod.geometry import Rect
+from turbokod.highlight import Highlight, highlight_string_attr
 
 
 comptime _VIEW = Rect(0, 0, 80, 24)
@@ -89,6 +90,19 @@ def test_cmd_up_brackets_then_line_then_file() raises:
     s = _selection(ed)
     # whole line
     assert_equal(s[1], 0); assert_equal(s[3], 13)
+
+
+def test_cmd_up_skips_brackets_inside_strings() raises:
+    """Like bracket matching, smart-select's bracket step ignores a
+    bracket inside a string: the ``)`` in ``")"`` doesn't close the
+    call."""
+    var ed = Editor(String("f(\")\", x)"))
+    ed.highlights.append(Highlight(0, 2, 5, highlight_string_attr()))
+    _set_caret(ed, 0, 7)  # on "x"
+    _ = ed.handle_key(_key(KEY_UP, MOD_META), _VIEW)
+    _ = ed.handle_key(_key(KEY_UP, MOD_META), _VIEW)
+    var s = _selection(ed)
+    assert_equal(s[1], 2); assert_equal(s[3], 8)  # the call's arguments
 
 
 def test_cmd_up_grows_to_indent_block_and_file() raises:

@@ -864,6 +864,11 @@ and the next Alt-press for that second press to count as the "hold"
 half of a tap-then-hold gesture and enter column-draw mode."""
 
 
+comptime _BRACKET_SCAN_ROWS = 5000
+"""How far (rows) bracket matching looks for the partner before giving
+up — it runs every frame the caret sits on a bracket."""
+
+
 comptime _COMPLETION_POPUP_ROWS = 8
 """How many completion entries fit in the popup before scrolling."""
 
@@ -1368,10 +1373,22 @@ struct Editor(Copyable, Movable):
     # every edited row has been re-tokenized. ``-1`` means "no edited
     # row recorded since flush" (early-exit follows ``_hl_dirty_row``).
     var _hl_dirty_max_row: Int
+    var _hl_order: List[Int]
+    """Indices into ``highlights`` grouped by row (stable within a row):
+    row ``r``'s are ``_hl_order[_hl_row_start[r] : _hl_row_start[r + 1]]``.
+    Built by ``flush_highlights`` — the overlay passes can leave
+    ``highlights`` out of row order — so paint and the bracket match look
+    at one row's spans instead of scanning the whole file's."""
+    var _hl_row_start: List[Int]
+    var _hl_indexed_n: Int
+    """``len(highlights)`` when the index was built, ``-1`` for none. An
+    index that doesn't match (highlights set some other way, or an edit
+    changed the row count since) isn't used: see ``_hl_rows``."""
     # Spell-check overlay. ``spell_highlights`` holds underline-only
     # ``Highlight`` entries painted *after* the syntax pass so a
     # misspelled word inside a comment stays cyan but gets a squiggle.
-    # ``spell_lines[i]`` is True iff buffer row ``i`` contains at least
+    # Kept in row order (paint binary-searches it for the first visible
+    # row). ``spell_lines[i]`` is True iff buffer row ``i`` contains at least
     # one misspelling — the right-side minimap projects this list so
     # the user can scan the file at a glance.
     var spell_highlights: List[Highlight]
@@ -1970,6 +1987,9 @@ struct Editor(Copyable, Movable):
         self._highlights_dirty = True
         self._hl_dirty_row = 0
         self._hl_dirty_max_row = -1
+        self._hl_order = List[Int]()
+        self._hl_row_start = List[Int]()
+        self._hl_indexed_n = -1
         self.spell_highlights = List[Highlight]()
         self.spell_lines = List[Bool]()
         self._spell_text = List[String]()
@@ -2206,6 +2226,7 @@ struct Editor(Copyable, Movable):
             self._highlights_dirty = False
             self._hl_dirty_row = self.buffer.line_count()
             self._hl_dirty_max_row = -1
+            self._index_highlights()
             self.spell_highlights = List[Highlight]()
             self.spell_lines = List[Bool]()
             return
@@ -2223,8 +2244,57 @@ struct Editor(Copyable, Movable):
         # edit raises it again.
         self._hl_dirty_row = self.buffer.line_count()
         self._hl_dirty_max_row = -1
+        self._index_highlights()
         speller.load_default()
         self._refresh_spell(speller)
+
+    def _index_highlights(mut self):
+        """Build ``_hl_order`` / ``_hl_row_start``: a counting sort of
+        ``highlights`` by row, O(highlights + rows)."""
+        var n_rows = self.buffer.line_count()
+        var start = List[Int](length=n_rows + 1, fill=0)
+        var n = len(self.highlights)
+        for i in range(n):
+            var r = self.highlights[i].row
+            if 0 <= r and r < n_rows:
+                start[r + 1] += 1
+        for r in range(n_rows):
+            start[r + 1] += start[r]
+        var fill = List[Int](capacity=n_rows)
+        for r in range(n_rows):
+            fill.append(start[r])
+        var order = List[Int](length=start[n_rows], fill=0)
+        for i in range(n):
+            var r = self.highlights[i].row
+            if 0 <= r and r < n_rows:
+                order[fill[r]] = i
+                fill[r] += 1
+        self._hl_order = order^
+        self._hl_row_start = start^
+        self._hl_indexed_n = n
+
+    def _hl_indexed(self) -> Bool:
+        """Whether ``_hl_order`` describes the current ``highlights``."""
+        return self._hl_indexed_n == len(self.highlights) \
+            and len(self._hl_row_start) == self.buffer.line_count() + 1
+
+    def _hl_rows(self, row: Int) -> Tuple[Int, Int]:
+        """``(lo, hi)`` such that ``_hl_at(k)`` for ``k`` in ``[lo, hi)``
+        covers every highlight on ``row``: row ``row``'s slice of the index,
+        or (no usable index) every highlight, for the caller to filter by
+        row."""
+        if not self._hl_indexed():
+            return (0, len(self.highlights))
+        if row < 0 or row + 1 >= len(self._hl_row_start):
+            return (0, 0)
+        return (self._hl_row_start[row], self._hl_row_start[row + 1])
+
+    def _hl_at(self, k: Int) -> Int:
+        """The ``highlights`` index at position ``k`` of a ``_hl_rows``
+        range."""
+        if self._hl_indexed():
+            return self._hl_order[k]
+        return k
 
     def _node_id(self, enclosing: List[String], leaf: String) -> String:
         """Build a pytest node id ``<file>::<Class>::…::<leaf>`` from the
@@ -6484,8 +6554,9 @@ struct Editor(Copyable, Movable):
         fallback tokenizer in ``highlight.mojo`` does the same."""
         var s_attr = highlight_string_attr()
         var c_attr = highlight_comment_attr()
-        for i in range(len(self.highlights)):
-            var h = self.highlights[i]
+        var span = self._hl_rows(row)
+        for k in range(span[0], span[1]):
+            ref h = self.highlights[self._hl_at(k)]
             if h.row != row:
                 continue
             if not (h.col_start <= col and col < h.col_end):
@@ -6529,68 +6600,61 @@ struct Editor(Copyable, Movable):
         if src_col < 0:
             return Optional[Tuple[Int, Int, Int, Int]]()
         var src_b = Int(bytes[src_col])
-        if _is_open_bracket(src_b):
-            var close_b = _matching_closer(src_b)
-            var depth = 1
-            var r = row
-            var c = src_col + 1
-            var n_lines = self.buffer.line_count()
-            while r < n_lines:
-                var l = self.buffer.line(r)
-                var lb = l.as_bytes()
-                var ln = len(lb)
-                while c < ln:
-                    var b = Int(lb[c])
-                    if (b == src_b or b == close_b) \
-                            and self._bracket_in_skip_scope(r, c):
-                        c += 1
-                        continue
-                    if b == src_b:
-                        depth += 1
-                    elif b == close_b:
-                        depth -= 1
-                        if depth == 0:
-                            return Optional[Tuple[Int, Int, Int, Int]](
-                                (row, src_col, r, c),
-                            )
-                    c += 1
-                r += 1
-                c = 0
+        var forward = _is_open_bracket(src_b)
+        var partner = self._scan_partner(
+            row, src_col,
+            src_b if forward else _matching_opener(src_b),
+            _matching_closer(src_b) if forward else src_b,
+            forward, True,
+        )
+        if not partner:
             return Optional[Tuple[Int, Int, Int, Int]]()
-        # Closer: scan backwards.
-        var open_b = _matching_opener(src_b)
+        var p = partner.value()
+        return Optional[Tuple[Int, Int, Int, Int]]((row, src_col, p[0], p[1]))
+
+    def _scan_partner(
+        self, row: Int, col: Int, open_b: Int, close_b: Int, forward: Bool,
+        skip_scopes: Bool, max_rows: Int = _BRACKET_SCAN_ROWS,
+    ) -> Optional[Tuple[Int, Int]]:
+        """The bracket pairing with the one at ``(row, col)``: scanning
+        forward from an ``open_b`` for its ``close_b``, or backward from a
+        ``close_b`` for its ``open_b``, counting nesting of that one type.
+        With ``skip_scopes``, brackets inside a string or comment highlight
+        don't count. Gives up after ``max_rows`` rows (``-1``: never), so
+        an unmatched bracket in a huge file doesn't cost the per-frame
+        bracket match a whole-file scan."""
+        var near = open_b if forward else close_b
+        var far = close_b if forward else open_b
+        var n_lines = self.buffer.line_count()
         var depth = 1
         var r = row
-        var c = src_col - 1
-        while r >= 0:
-            if c < 0:
-                r -= 1
-                if r < 0: break
-                c = self.buffer.line_length(r) - 1
-                continue
-            var l = self.buffer.line(r)
-            var lb = l.as_bytes()
-            if c >= len(lb):
-                c = len(lb) - 1
-            while c >= 0:
+        var reach = max_rows if max_rows >= 0 else n_lines
+        var stop = min(row + reach, n_lines) if forward \
+            else max(row - reach, -1)
+        var c = col + 1 if forward else col - 1
+        while r != stop:
+            var lb = self.buffer.lines[r].as_bytes()
+            var ln = len(lb)
+            if not forward and c >= ln:
+                c = ln - 1
+            while 0 <= c and c < ln:
                 var b = Int(lb[c])
-                if (b == src_b or b == open_b) \
-                        and self._bracket_in_skip_scope(r, c):
-                    c -= 1
-                    continue
-                if b == src_b:
-                    depth += 1
-                elif b == open_b:
-                    depth -= 1
-                    if depth == 0:
-                        return Optional[Tuple[Int, Int, Int, Int]](
-                            (row, src_col, r, c),
-                        )
-                c -= 1
-            r -= 1
-            if r < 0: break
-            c = self.buffer.line_length(r) - 1
-        return Optional[Tuple[Int, Int, Int, Int]]()
+                if (b == near or b == far) and not (
+                    skip_scopes and self._bracket_in_skip_scope(r, c)
+                ):
+                    if b == near:
+                        depth += 1
+                    else:
+                        depth -= 1
+                        if depth == 0:
+                            return Optional[Tuple[Int, Int]]((r, c))
+                c += 1 if forward else -1
+            r += 1 if forward else -1
+            if forward:
+                c = 0
+            elif r >= 0:
+                c = self.buffer.line_length(r) - 1
+        return Optional[Tuple[Int, Int]]()
 
     def _screen_row_for(
         self, layout: List[VisualLine],
@@ -7254,22 +7318,40 @@ struct Editor(Copyable, Movable):
                 spell_buckets.append(List[Int]())
                 diag_buckets.append(List[Int]())
                 color_buckets.append(List[Int]())
-            for h in range(len(self.highlights)):
-                var r = self.highlights[h].row
-                if r >= vis_lo and r <= vis_hi:
-                    hl_buckets[r - vis_lo].append(h)
+            # Syntax highlights through the row index: O(visible spans),
+            # not a pass over the whole file's every frame.
+            if self._hl_indexed():
+                for r in range(vis_lo, min(vis_hi + 1, len(self._hl_row_start) - 1)):
+                    for k in range(self._hl_row_start[r], self._hl_row_start[r + 1]):
+                        hl_buckets[r - vis_lo].append(self._hl_order[k])
+            else:
+                for h in range(len(self.highlights)):
+                    var r = self.highlights[h].row
+                    if r >= vis_lo and r <= vis_hi:
+                        hl_buckets[r - vis_lo].append(h)
             for ch in range(len(self.color_highlights)):
                 var r = self.color_highlights[ch].row
                 if r >= vis_lo and r <= vis_hi:
                     color_buckets[r - vis_lo].append(ch)
-            for sh in range(len(self.spell_highlights)):
+            # Spell highlights are built top to bottom, so in row order:
+            # binary-search the first visible one.
+            var sp_lo = 0
+            var sp_hi = len(self.spell_highlights)
+            while sp_lo < sp_hi:
+                var mid = (sp_lo + sp_hi) // 2
+                if self.spell_highlights[mid].row < vis_lo:
+                    sp_lo = mid + 1
+                else:
+                    sp_hi = mid
+            for sh in range(sp_lo, len(self.spell_highlights)):
                 var r = self.spell_highlights[sh].row
-                if r >= vis_lo and r <= vis_hi:
-                    spell_buckets[r - vis_lo].append(sh)
+                if r > vis_hi:
+                    break
+                spell_buckets[r - vis_lo].append(sh)
             for d in range(len(self.diagnostics)):
-                for r in range(vis_lo, vis_hi + 1):
-                    if _diag_intersects_row(self.diagnostics[d], r):
-                        diag_buckets[r - vis_lo].append(d)
+                ref dg = self.diagnostics[d]
+                for r in range(max(dg.start_row, vis_lo), min(dg.end_row, vis_hi) + 1):
+                    diag_buckets[r - vis_lo].append(d)
         # Bracket-match partner rows stay expanded too, so the pair highlight
         # lands on real geometry; same guard as the bracket overlay below.
         var bracket_rows = List[Int]()
@@ -7763,8 +7845,9 @@ struct Editor(Copyable, Movable):
                     # header is coloured exactly like the real line.
                     var cmap = List[Int]()
                     var ncells = utf8_cell_map(line, cmap)
-                    for h in range(len(self.highlights)):
-                        ref hl = self.highlights[h]
+                    var hspan = self._hl_rows(brow)
+                    for hk in range(hspan[0], hspan[1]):
+                        ref hl = self.highlights[self._hl_at(hk)]
                         if hl.row != brow:
                             continue
                         _paint_attr_span(
@@ -8492,7 +8575,9 @@ struct Editor(Copyable, Movable):
         the counters from steering us into a wrong pair as long as the
         actual nesting balances. Once the opener is known, a forward
         scan finds the matching closer with a single same-type depth
-        counter; brackets of other types pass through untouched.
+        counter (``_scan_partner``); brackets of other types pass through
+        untouched. Both scans ignore brackets inside a string or comment,
+        as bracket matching does.
         """
         var paren_skip = 0
         var bracket_skip = 0
@@ -8518,6 +8603,10 @@ struct Editor(Copyable, Movable):
                 c = len(bytes) - 1
             while c >= 0:
                 var b = Int(bytes[c])
+                if (_is_open_bracket(b) or _is_close_bracket(b)) \
+                        and self._bracket_in_skip_scope(r, c):
+                    c -= 1
+                    continue
                 if b == 0x29:
                     paren_skip += 1
                 elif b == 0x5D:
@@ -8550,37 +8639,22 @@ struct Editor(Copyable, Movable):
             c = self.buffer.line_length(r) - 1
         if opener_r < 0:
             return Optional[Tuple[Int, Int, Int, Int]]()
-        var closer_b = _matching_closer(opener_b)
-        var depth = 1
-        var fr = opener_r
-        var fc = opener_c + 1
-        var n = self.buffer.line_count()
-        while fr < n:
-            var line = self.buffer.line(fr)
-            var bytes = line.as_bytes()
-            while fc < len(bytes):
-                var b = Int(bytes[fc])
-                if b == opener_b:
-                    depth += 1
-                elif b == closer_b:
-                    depth -= 1
-                    if depth == 0:
-                        # The found pair must strictly enclose the
-                        # cursor's *end* — otherwise the user's caret
-                        # sits outside this pair (e.g. starts in the
-                        # middle of a closer scan after a partial
-                        # selection past the bracket) and we should
-                        # report nothing.
-                        if (fr > er) or (fr == er and fc >= ec):
-                            return Optional[
-                                Tuple[Int, Int, Int, Int]
-                            ](
-                                (opener_r, opener_c, fr, fc),
-                            )
-                        return Optional[Tuple[Int, Int, Int, Int]]()
-                fc += 1
-            fr += 1
-            fc = 0
+        var closer = self._scan_partner(
+            opener_r, opener_c, opener_b, _matching_closer(opener_b),
+            True, True, -1,
+        )
+        if not closer:
+            return Optional[Tuple[Int, Int, Int, Int]]()
+        var fr = closer.value()[0]
+        var fc = closer.value()[1]
+        # The found pair must strictly enclose the cursor's *end* —
+        # otherwise the user's caret sits outside this pair (e.g. starts
+        # in the middle of a closer scan after a partial selection past
+        # the bracket) and we should report nothing.
+        if (fr > er) or (fr == er and fc >= ec):
+            return Optional[Tuple[Int, Int, Int, Int]](
+                (opener_r, opener_c, fr, fc),
+            )
         return Optional[Tuple[Int, Int, Int, Int]]()
 
     def _smart_indent_block(
