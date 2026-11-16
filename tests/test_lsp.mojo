@@ -43,7 +43,7 @@ from turbokod.lsp_dispatch import (
 from turbokod.highlight import (
     highlight_for_extension, highlight_operator_attr, highlight_string_attr
 )
-from turbokod.posix import which
+from turbokod.posix import monotonic_ms, sleep_ms, which
 from turbokod.grammar_install import (
     built_in_downloadable_grammars, find_downloadable_grammar_by_language,
     find_downloadable_grammar_for_extension
@@ -1749,6 +1749,28 @@ def test_lsp_subprocess_round_trip_via_cat() raises:
     assert_true(Bool(got2))
     assert_equal(got2.value(), String("pong"))
     p.terminate()
+
+
+def test_lsp_terminate_escalates_when_sigterm_is_ignored() raises:
+    """``terminate`` runs on the UI thread (window close, DAP restart, the
+    run pane's Stop). A child that ignores SIGTERM used to hang it in
+    ``waitpid_blocking`` forever; it now escalates to SIGKILL within
+    ``reap_child``'s bounded budget and still reaps the child."""
+    var argv = List[String]()
+    argv.append(String("sh"))
+    argv.append(String("-c"))
+    argv.append(String("trap '' TERM; exec sleep 30"))
+    var p = LspProcess.spawn(argv)
+    assert_true(p.pid > 0)
+    # Let the shell install the trap before we signal it.
+    sleep_ms(100)
+    var t0 = monotonic_ms()
+    var reaped = p.terminate_with_status()
+    var took = monotonic_ms() - t0
+    assert_true(reaped[0])
+    assert_true(took < 1000)
+    assert_false(p.alive)
+    assert_equal(Int(p.stdout_fd), -1)
 
 
 def test_lsp_write_message_queues_bytes_when_fd_is_unavailable() raises:

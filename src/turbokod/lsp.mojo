@@ -26,13 +26,13 @@ from .json import (
 from .case_fold import fold_byte
 from .string_utils import utf8_prefix
 from .posix import (
-    POSIX_SPAWN_FILE_ACTIONS_SIZE, SIGTERM,
+    POSIX_SPAWN_FILE_ACTIONS_SIZE, SIGKILL, SIGTERM,
     alloc_zero_buffer, append_string_bytes, chdir_path, close_fd,
-    drain_fd, getcwd_path, getenv_value,
+    drain_fd, drain_fd_string, getcwd_path, getenv_value,
     kill_pid, monotonic_ms, poll_stdin,
     posix_spawn_file_actions_addclose, posix_spawn_file_actions_adddup2,
     posix_spawn_file_actions_destroy, posix_spawn_file_actions_init,
-    posix_spawnp_call, read_into, set_nonblocking, stdio_pipes,
+    posix_spawnp_call, read_append, read_into, reap_child, set_nonblocking, stdio_pipes,
     track_child, untrack_child, waitpid_blocking, waitpid_nohang,
     write_buffer,
 )
@@ -542,7 +542,12 @@ struct LspProcess(Copyable, Movable):
         self._clear_writes()
 
     def _clear_writes(mut self):
-        self._pending_write = List[UInt8]()
+        # ``clear`` keeps the capacity, so the next message reuses it —
+        # unless an overflow / huge payload grew it past the guard.
+        if self._pending_write.capacity() > _BUF_CAP_GUARD:
+            self._pending_write = List[UInt8]()
+        else:
+            self._pending_write.clear()
         self._write_head = 0
 
     def pump_writes(mut self):
@@ -592,9 +597,6 @@ struct LspProcess(Copyable, Movable):
                     + _trace_preview(msg),
                 )
             return prefab
-        # Allocated on the first read: this runs every tick per server,
-        # and nearly every tick finds nothing to read.
-        var scratch = List[UInt8]()
         var first = True
         while True:
             var poll_budget: Int32
@@ -605,14 +607,13 @@ struct LspProcess(Copyable, Movable):
                 poll_budget = Int32(0)
             if not poll_stdin(self.stdout_fd, poll_budget):
                 return Optional[String]()
-            if len(scratch) == 0:
-                scratch = alloc_zero_buffer(65536)
-            var n = read_into(self.stdout_fd, scratch, 65536)
+            # Straight into the buffer's spare capacity: no scratch to
+            # zero and copy out of.
+            var n = read_append(self.stdout_fd, self._read_buffer, 65536)
             if n <= 0:
                 if self.trace_fd >= 0 and n == 0:
                     self.trace(String("< EOF on stdout"))
                 return Optional[String]()
-            self._read_buffer.extend(Span(scratch)[0:n])
             if self.trace_fd >= 0:
                 self.trace(
                     String("< raw ") + String(n) + String("B (buffer now ")
@@ -687,27 +688,37 @@ struct LspProcess(Copyable, Movable):
         on ``write(stderr, …)`` and never reaches the code that
         replies to our ``initialize`` — appearing as a total hang.
         """
-        if self.stderr_fd < 0:
-            return String("")
-        # Accumulate bytes and build the String once — ``out = out + chunk``
-        # reallocated the whole drain per read.
-        var buf = List[UInt8]()
-        _ = drain_fd(self.stderr_fd, buf, 65536)
-        var out = String(StringSpan(unsafe_from_utf8=Span(buf)))
-        return out
+        return drain_fd_string(self.stderr_fd)
 
     def terminate(mut self):
+        """``terminate_with_status`` for callers with no use for the exit
+        status."""
+        _ = self.terminate_with_status()
+
+    def terminate_with_status(mut self) -> Tuple[Bool, Int32]:
         """Send SIGTERM and reap the child, then close the I/O fds.
-        Idempotent. Safe to call on a socket-mode process (``pid == -1``)
-        — the kill/waitpid steps are skipped, the fd close still runs.
+        Returns ``reap_child``'s ``(reaped, status)``. Idempotent. Safe to
+        call on a socket-mode process (``pid == -1``) — the kill/reap
+        steps are skipped, the fd close still runs.
+
+        This runs on the UI thread (a window's LSP teardown, a DAP
+        restart, the run pane's Stop), so the reap is bounded: a child
+        that ignores SIGTERM gets SIGKILL after ``reap_child``'s budget,
+        and one that outlives that too is left tracked for the shim's
+        exit reaper — never a ``waitpid_blocking`` that hangs the editor.
 
         Socket mode shares one fd between ``stdin_fd`` and ``stdout_fd``,
         so we close it exactly once even though both fields name it.
         """
+        var reaped = (False, Int32(0))
         if self.alive and self.pid > 0:
             _ = kill_pid(self.pid, SIGTERM)
-            _ = waitpid_blocking(self.pid)
-            untrack_child(self.pid)
+            reaped = reap_child(self.pid)
+            if not reaped[0]:
+                _ = kill_pid(self.pid, SIGKILL)
+                reaped = reap_child(self.pid)
+            if reaped[0]:
+                untrack_child(self.pid)
         self.alive = False
         var dup_io = self.stdin_fd >= 0 and self.stdin_fd == self.stdout_fd
         if self.stdin_fd >= 0:
@@ -729,6 +740,7 @@ struct LspProcess(Copyable, Movable):
         # closed fd next time around.
         self._clear_writes()
         self._write_overflowed = False
+        return reaped
 
     @staticmethod
     def from_socket(fd: Int32) -> Self:

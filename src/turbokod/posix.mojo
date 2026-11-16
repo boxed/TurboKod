@@ -88,10 +88,7 @@ def tiocgwinsz() -> UInt:
 
 
 def alloc_zero_buffer(n: Int) -> List[UInt8]:
-    var buf = List[UInt8]()
-    for _ in range(n):
-        buf.append(0)
-    return buf^
+    return List[UInt8](length=n, fill=0)
 
 
 comptime DRAIN_MORE = 0   # nothing more ready, or the cap was reached
@@ -112,19 +109,25 @@ def drain_fd(
     polls first, so an idle tick allocates nothing."""
     if fd < 0 or not poll_stdin(fd, Int32(0)):
         return (0, DRAIN_MORE)
-    var scratch = alloc_zero_buffer(chunk)
     var total = 0
     while total < cap:
-        var n = read_into(fd, scratch, chunk)
+        var n = read_append(fd, out, chunk)
         if n == 0:
             return (total, DRAIN_EOF)
         if n < 0:
             return (total, DRAIN_ERROR)
-        out.extend(Span(scratch)[0:n])
         total += n
         if not poll_stdin(fd, Int32(0)):
             break
     return (total, DRAIN_MORE)
+
+
+def drain_fd_string(fd: Int32, cap: Int = 65536) -> String:
+    """``drain_fd`` into a fresh ``String`` — what a pipe pane / stderr
+    reader wants per tick. Empty when nothing was ready."""
+    var buf = List[UInt8]()
+    _ = drain_fd(fd, buf, cap)
+    return String(StringSpan(unsafe_from_utf8=Span(buf)))
 
 
 # --- Termios ----------------------------------------------------------------
@@ -286,6 +289,20 @@ def read_into(fd: Int32, mut buf: List[UInt8], count: Int) -> Int:
     return external_call["read", Int](fd, buf.unsafe_ptr(), count)
 
 
+def read_append(fd: Int32, mut buf: List[UInt8], count: Int) -> Int:
+    """Read up to ``count`` bytes from ``fd`` straight onto the end of
+    ``buf`` — into its spare capacity, no scratch buffer to zero and copy
+    out of. Same return as ``read_into``; ``buf`` grows only by what was
+    read."""
+    var old = len(buf)
+    buf.resize(unsafe_uninit_length=old + count)
+    var n = external_call["read", Int](
+        fd, buf.unsafe_ptr().unsafe_offset(old), count,
+    )
+    buf.shrink(old + max(n, 0))
+    return n
+
+
 # --- Window size ------------------------------------------------------------
 
 
@@ -337,11 +354,9 @@ def get_window_size() -> Tuple[Int, Int]:
     return (80, 24)
 
 
-def append_string_bytes(mut buf: List[UInt8], s: String):
+def append_string_bytes(mut buf: List[UInt8], s: StringSpan):
     """Copy the raw UTF-8 bytes of ``s`` onto the end of ``buf``."""
-    var src = s.as_bytes()
-    for i in range(len(src)):
-        buf.append(src[i])
+    buf.extend(s.as_bytes())
 
 
 def write_buffer(fd: Int32, mut buf: List[UInt8]):

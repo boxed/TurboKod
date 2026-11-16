@@ -29,8 +29,7 @@ from std.collections.list import List
 
 from .lsp import LspProcess
 from .posix import (
-    SIGTERM, close_fd, drain_fd, exit_code_from_status, kill_pid,
-    monotonic_ms, reap_child, untrack_child,
+    drain_fd_string, exit_code_from_status, monotonic_ms, untrack_child,
     waitpid_nohang,
 )
 from .string_utils import shell_single_quote
@@ -137,38 +136,22 @@ struct RunSession(Movable):
         self.active = True
 
     def terminate(mut self):
-        """SIGTERM the child if still alive, then close our pipe ends.
-        Idempotent — fine to call after the child has already exited."""
+        """SIGTERM the child if still alive (SIGKILL if it ignores that),
+        reap it, then close our pipe ends. Idempotent — fine to call after
+        the child has already exited.
+
+        Reaps here rather than leaving it to the next ``tick``: on the
+        shutdown path there is no next frame, and the child was left as a
+        zombie. ``LspProcess.terminate_with_status`` is bounded, so the
+        Stop button stays responsive."""
         if not self.active:
             return
-        if not self.exited and self.process.pid > 0 and self.process.alive:
-            _ = kill_pid(self.process.pid, SIGTERM)
-            # Reap here rather than leaving it to the next ``tick``. A
-            # bare post-``kill`` ``waitpid_nohang`` essentially always
-            # returns 0 (the signal is delivered, the child hasn't died
-            # yet), so "the caller polls next frame" only worked while
-            # there *was* a next frame — on the shutdown path there
-            # isn't, and the child was left as a zombie. ``reap_child``
-            # is bounded, so the Stop button stays responsive.
-            var reaped = reap_child(self.process.pid)
-            if reaped[0]:
-                untrack_child(self.process.pid)
-                self.exited = True
-                self.exit_code = exit_code_from_status(Int(reaped[1]))
-                self.process.alive = False
-        self._close_pipes()
+        var was_running = not self.exited
+        var reaped = self.process.terminate_with_status()
+        if was_running and reaped[0]:
+            self.exited = True
+            self.exit_code = exit_code_from_status(Int(reaped[1]))
         self.active = False
-
-    def _close_pipes(mut self):
-        if self.process.stdin_fd >= 0:
-            _ = close_fd(self.process.stdin_fd)
-            self.process.stdin_fd = -1
-        if self.process.stdout_fd >= 0:
-            _ = close_fd(self.process.stdout_fd)
-            self.process.stdout_fd = -1
-        if self.process.stderr_fd >= 0:
-            _ = close_fd(self.process.stderr_fd)
-            self.process.stderr_fd = -1
 
 
 struct RunOutput(ImplicitlyCopyable, Movable):
@@ -195,11 +178,11 @@ def drain_run_output(mut session: RunSession) -> RunOutput:
     # not ``is_active()``: a child that has *exited* but not yet been
     # ``terminate``d can still have its final ``printf`` payload sitting
     # in the pipe buffer, and that tail is exactly what we want to
-    # capture. ``_drain_fd`` no-ops on a closed (-1) fd.
+    # capture. ``drain_fd_string`` no-ops on a closed (-1) fd.
     if not session.active:
         return out^
-    out.stdout = _drain_fd(session.process.stdout_fd)
-    out.stderr = _drain_fd(session.process.stderr_fd)
+    out.stdout = drain_fd_string(session.process.stdout_fd)
+    out.stderr = drain_fd_string(session.process.stderr_fd)
     return out^
 
 
@@ -224,8 +207,3 @@ def poll_run_exit(mut session: RunSession) -> Bool:
     session.process.alive = False
     return True
 
-
-def _drain_fd(fd: Int32) -> String:
-    var buf = List[UInt8]()
-    _ = drain_fd(fd, buf, 65536)
-    return String(StringSpan(unsafe_from_utf8=Span(buf)))
