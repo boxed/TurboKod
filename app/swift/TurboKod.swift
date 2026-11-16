@@ -2601,6 +2601,85 @@ final class UnconstrainedWindow: NSWindow {
 
 // MARK: - App controller: windows + Mojo desktops + render timer
 
+/// What the host lays over or beside one `CellView` in its look — sheets,
+/// frames, bars, overlays — kept together so the view's window closing
+/// drops it in one go (`AppController.dropOverlays`). Fields are per look;
+/// most are nil at any time.
+final class ViewChrome {
+    /// macOS-style UI: the native sheet showing the view's core dialog (see
+    /// the "native dialogs" extension at the bottom of the file).
+    var nativeSheet: NSWindow?
+    /// macOS-style UI: the native tab strip (a titlebar accessory).
+    var tabStrip: (accessory: NSTitlebarAccessoryViewController, strip: TabStripView)?
+    /// Mac OS 9 look: the Platinum frame (with its tab strip) and the
+    /// editor's scroll bar; a floating-panels window's frame.
+    var platinumFrame: PlatinumMainFrame?
+    var platinumScroller: PlatinumScroller?
+    var platinumPanelFrame: PlatinumMainFrame?
+    /// Turbo Vision look: the frame, and the dialog window (pickers, …).
+    var tvFrame: TVMainFrame?
+    var tvDialog: TVDialogWindow?
+    /// macOS-style UI: the NSMenu standing in for a core popup.
+    var popup: PopupMenu?
+    /// The git view's window, in each look.
+    var gitSheet: GitSurface?
+    /// macOS-style UI: the find bar (a titlebar accessory), and the native
+    /// file tree laid over the tree cells.
+    var findBar: (accessory: NSTitlebarAccessoryViewController, bar: FindBar)?
+    var tree: FileTreeOverlay?
+    /// Declarative dialogs (ui_tree.mojo) projected natively, as sheets…
+    var declarative: [DeclarativeSurface]?
+    /// …and Settings in its own window, with what it opened as sheets on it.
+    var declarativeWindows: [DeclarativeSurface]?
+    /// Mac OS 9 look: the confirm, prompts and choices shown as a Platinum
+    /// alert; Find / Replace as a Platinum window, and what's in its fields
+    /// and checkboxes (kept across reopenings).
+    var platinumAlert: PlatinumDialog?
+    var platinumFind: PlatinumDialog?
+    var platinumFindValues: [String: String]?
+    /// macOS-style UI: Git history and the on-disk-change merge as sheets;
+    /// review mode's picker sheet, and the native bar laid over the toolbar
+    /// row while reviewing.
+    var historySheet: HistoryController?
+    var mergeSheet: MergeController?
+    var reviewPicker: ReviewPickerController?
+    var reviewBar: ReviewBar?
+    /// macOS-style UI: native headers over the docked tool panes, keyed
+    /// "kind:idx"; the debug pane's native tables; an overlay scroller on
+    /// the focused editor.
+    var paneHeaders: [String: PaneHeaderView]?
+    var debugInspector: DebugInspectOverlay?
+    var scroller: EditorScroller?
+    /// The fading outlines around the panes a ping came from, keyed
+    /// "look:kind:idx" (`pollAttentionFlashes`).
+    var attentionFlashes: [String: AttentionFlashView]?
+    /// Framework chrome drawn in the look (`tk_desktop_host_items`), keyed
+    /// "look:kind:index" (`pollHostItems`).
+    var hostItems: [String: HostItemView]?
+    /// Test results views drawn natively, keyed "look:tag".
+    var testHosts: [String: TestResultsHost]?
+
+    /// The field's value, cleared.
+    func take<T>(_ field: ReferenceWritableKeyPath<ViewChrome, T?>) -> T? {
+        let v = self[keyPath: field]
+        self[keyPath: field] = nil
+        return v
+    }
+
+    /// Take down what has to be dismissed rather than just dropped.
+    func close() {
+        platinumFrame?.retroShadow?.detach()
+        platinumPanelFrame?.retroShadow?.detach()
+        tvFrame?.retroShadow?.detach()
+        tvDialog?.dismiss()
+        gitSheet?.dismiss()
+        for dc in (declarativeWindows ?? []).reversed() { dc.dismiss() }
+        for dc in (declarative ?? []).reversed() { dc.dismiss() }
+        platinumAlert?.dismiss()
+        platinumFind?.dismiss()
+    }
+}
+
 final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
     static var shared: AppController?
     var windows: [NSWindow] = []
@@ -2655,69 +2734,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     private var dialogWins: [CellSurface: [ObjectIdentifier: (window: NSWindow, view: CellView)]] = [:]
     /// The Turbo Vision look's drop shadow under a Settings window, by window.
     private var tvSettingsShadows: [ObjectIdentifier: RetroShadow] = [:]
-    // macOS-style UI: the native sheet currently showing each view's core
-    // dialog (see the "native dialogs" extension at the bottom of the file).
-    var nativeSheets: [ObjectIdentifier: NSWindow] = [:]
+    /// What each view has laid over or beside it in its look (`ViewChrome`),
+    /// by `ObjectIdentifier(view)`.
+    var chromes: [ObjectIdentifier: ViewChrome] = [:]
+    func chrome(_ id: ObjectIdentifier) -> ViewChrome {
+        if let c = chromes[id] { return c }
+        let c = ViewChrome()
+        chromes[id] = c
+        return c
+    }
     var nativeDialogBuf = [UInt8](repeating: 0, count: 4096)
-    // macOS-style UI: each window's native tab strip (a titlebar accessory).
-    var tabStrips: [ObjectIdentifier: (accessory: NSTitlebarAccessoryViewController, strip: TabStripView)] = [:]
     var tabsBuf = [UInt8](repeating: 0, count: 4096)
-    // Mac OS 9 look: each window's Platinum frame (with its tab strip) and
-    // its editor's scroll bar.
-    var platinumFrames: [ObjectIdentifier: PlatinumMainFrame] = [:]
-    /// The Mac OS 9 look's floating-panels windows' frames, by panel view.
-    var platinumPanelFrames: [ObjectIdentifier: PlatinumMainFrame] = [:]
-    var tvFrames: [ObjectIdentifier: TVMainFrame] = [:]
-    // Turbo Vision look: the dialog window (pickers, …) per window.
-    var tvDialogs: [ObjectIdentifier: TVDialogWindow] = [:]
     var tvDialogBuf = [UInt8](repeating: 0, count: 1024)
     var frameInfoBuf = [UInt8](repeating: 0, count: 1024)
-    var platinumScrollers: [ObjectIdentifier: PlatinumScroller] = [:]
-    // macOS-style UI: the native picker sheet up on each window, if any.
     var welcome: WelcomeController?
-    // macOS-style UI: the NSMenu standing in for a core popup, per window.
-    var popups: [ObjectIdentifier: PopupMenu] = [:]
-    // The git view's window per project window, in each look.
-    var gitSheets: [ObjectIdentifier: GitSurface] = [:]
-    // macOS-style UI: each window's find bar (a titlebar accessory).
-    var findBars: [ObjectIdentifier: (accessory: NSTitlebarAccessoryViewController, bar: FindBar)] = [:]
-    // macOS-style UI: the native file tree laid over each window's tree cells.
-    var trees: [ObjectIdentifier: FileTreeOverlay] = [:]
-    // macOS-style UI: the native Settings window (one per Desktop that opened it).
-    // Declarative dialogs (ui_tree.mojo) projected natively, per window.
-    var declarative: [ObjectIdentifier: [DeclarativeSurface]] = [:]
-    // …and Settings in its own window, with what it opened as sheets on it.
-    var declarativeWindows: [ObjectIdentifier: [DeclarativeSurface]] = [:]
-    // Mac OS 9 look: the confirm, prompts and choices shown as a Platinum
-    // alert, per window.
-    var platinumAlerts: [ObjectIdentifier: PlatinumDialog] = [:]
-    // Mac OS 9 look: Find / Replace as a Platinum window, per window, and
-    // what's in its fields and checkboxes (kept across reopenings).
-    var platinumFinds: [ObjectIdentifier: PlatinumDialog] = [:]
-    var platinumFindValues: [ObjectIdentifier: [String: String]] = [:]
-    // macOS-style UI: Git history as a sheet, per window.
-    var historySheets: [ObjectIdentifier: HistoryController] = [:]
-    // macOS-style UI: the on-disk-change merge as a sheet, per window.
-    var mergeSheets: [ObjectIdentifier: MergeController] = [:]
-    // macOS-style UI review mode: the picker sheet, and the native bar laid
-    // over the toolbar row while reviewing.
-    var reviewPickers: [ObjectIdentifier: ReviewPickerController] = [:]
-    var reviewBars: [ObjectIdentifier: ReviewBar] = [:]
-    // macOS-style UI: native headers over the docked tool panes, per window
-    // and keyed "kind:idx".
-    var paneHeaders: [ObjectIdentifier: [String: PaneHeaderView]] = [:]
-    // The fading outlines around the panes a ping came from, per window and
-    // keyed "look:kind:idx" (`pollAttentionFlashes`).
-    var attentionFlashes: [ObjectIdentifier: [String: AttentionFlashView]] = [:]
-    // macOS-style UI: an overlay scroller on the focused editor, per window.
-    var scrollers: [ObjectIdentifier: EditorScroller] = [:]
-    // Framework chrome drawn in the look (`tk_desktop_host_items`), per
-    // window and keyed "look:kind:index" (`pollHostItems`).
-    var hostItems: [ObjectIdentifier: [String: HostItemView]] = [:]
-    // Test results views drawn natively, per window and keyed "look:tag".
-    var testHosts: [ObjectIdentifier: [String: TestResultsHost]] = [:]
     var treeBuf = [UInt8](repeating: 0, count: 1 << 16)
-    var debugInspectors: [ObjectIdentifier: DebugInspectOverlay] = [:]
     var debugInspectBuf = [UInt8](repeating: 0, count: 1 << 16)
     // Menu mirror: the snapshot from Mojo's menu_bar, hashed so we only
     // rebuild NSMenu when something actually changed (focus/visibility/
@@ -2795,7 +2826,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             tk_desktop_attention_flashes(v.handle, panels ? 1 : 0, cols, rows, $0, $1)
         })
         let list = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [[String: Any]] } ?? []
-        var current = attentionFlashes[id] ?? [:]
+        var current = chromes[id]?.attentionFlashes ?? [:]
         if list.isEmpty && current.isEmpty { return false }
         let platinum = tk_desktop_platinum_ui(v.handle) != 0
         var seen = Set<String>()
@@ -2814,7 +2845,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             fv.removeFromSuperview()
             current[key] = nil
         }
-        attentionFlashes[id] = current
+        chrome(id).attentionFlashes = current
         // Keep the timer at full rate until the core retires the outline.
         return true
     }
@@ -3115,7 +3146,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 if tk_desktop_take_main_focus_request(v.handle) != 0 {
                     // A docked git window covers the project window: step
                     // it aside (Git ▸ Local changes brings it back).
-                    self.gitSheets[ObjectIdentifier(v)]?.gitPlacement?.stepAside()
+                    self.chromes[ObjectIdentifier(v)]?.gitSheet?.gitPlacement?.stepAside()
                     NSApp.activate(ignoringOtherApps: true)
                     v.window?.makeKeyAndOrderFront(nil); changed = true
                 }
@@ -3753,7 +3784,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // ⌘W in the git window closes the git window, not an editor of
         // the project behind it.
         if action == "window:close", let w = NSApp.keyWindow, let v = gitWindowOwner(w) {
-            gitSheets[ObjectIdentifier(v)]?.closeClicked()
+            chromes[ObjectIdentifier(v)]?.gitSheet?.closeClicked()
             return
         }
         let view = keyView() ?? views.first
@@ -3983,7 +4014,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     /// The project window's view whose git window `w` is.
     func gitWindowOwner(_ w: NSWindow) -> CellView? {
-        guard let id = gitSheets.first(where: { $0.value.gitWindow === w })?.key else { return nil }
+        guard let id = chromes.first(where: { $0.value.gitSheet?.gitWindow === w })?.key else { return nil }
         return views.first { ObjectIdentifier($0) == id }
     }
 
@@ -4446,32 +4477,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         v.handle = 0
         windows.remove(at: idx)
         views.remove(at: idx)
-        tabStrips[ObjectIdentifier(v)] = nil
-        platinumFrames.removeValue(forKey: ObjectIdentifier(v))?.retroShadow?.detach()
-        tvFrames.removeValue(forKey: ObjectIdentifier(v))?.retroShadow?.detach()
-        tvDialogs.removeValue(forKey: ObjectIdentifier(v))?.dismiss()
-        platinumScrollers[ObjectIdentifier(v)] = nil
-        nativeSheets[ObjectIdentifier(v)] = nil
-        popups[ObjectIdentifier(v)] = nil
-        gitSheets.removeValue(forKey: ObjectIdentifier(v))?.dismiss()
-        findBars[ObjectIdentifier(v)] = nil
-        trees[ObjectIdentifier(v)] = nil
-        for dc in (declarativeWindows.removeValue(forKey: ObjectIdentifier(v)) ?? []).reversed() {
-            dc.dismiss()
-        }
-        for dc in (declarative.removeValue(forKey: ObjectIdentifier(v)) ?? []).reversed() {
-            dc.dismiss()
-        }
-        platinumAlerts.removeValue(forKey: ObjectIdentifier(v))?.dismiss()
-        platinumFinds.removeValue(forKey: ObjectIdentifier(v))?.dismiss()
-        platinumFindValues[ObjectIdentifier(v)] = nil
-        historySheets[ObjectIdentifier(v)] = nil
-        mergeSheets[ObjectIdentifier(v)] = nil
-        reviewPickers[ObjectIdentifier(v)] = nil
-        reviewBars[ObjectIdentifier(v)] = nil
-        paneHeaders[ObjectIdentifier(v)] = nil
-        debugInspectors[ObjectIdentifier(v)] = nil
-        scrollers[ObjectIdentifier(v)] = nil
         dropOverlays(for: v)
         // Close is instant; the language servers get their goodbye in the
         // background. `begin_close` terminates every child except the LSP
@@ -4788,7 +4793,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let floating = panels[id] != nil
         let panelWin = panels[id]?.window
         let panelFrame = panelWin.map { (($0.contentView as? PlatinumMainFrame)?.restingFrame) ?? $0.frame }
-        recordProjectGeometry(project, main: platinumFrames[id]?.restingFrame ?? mainWin.frame,
+        recordProjectGeometry(project, main: chromes[id]?.platinumFrame?.restingFrame ?? mainWin.frame,
                               floating: floating, panel: panelFrame)
     }
 
@@ -4942,9 +4947,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             return
         }
         panels.removeValue(forKey: id)
-        platinumPanelFrames.removeValue(forKey: ObjectIdentifier(pair.view))?.retroShadow?.detach()
-        paneHeaders[ObjectIdentifier(pair.view)] = nil
-        debugInspectors[ObjectIdentifier(pair.view)] = nil
         dropOverlays(for: pair.view)
         pair.view.handle = 0          // shared handle is owned by the main view
         tk_desktop_set_panels_detached(mainView.handle, 0)
@@ -5037,13 +5039,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         sv.invalidateFrame(); sv.needsDisplay = true
     }
 
-    /// Forget the overlays kept per view, on any window's close. They are
-    /// keyed by `ObjectIdentifier`, so an entry left behind is inherited by
-    /// the next view allocated at that address.
+    /// The view's window is going: take down everything laid over it. The
+    /// chrome is keyed by `ObjectIdentifier`, so one left behind would be
+    /// inherited by the next view allocated at that address.
     private func dropOverlays(for v: CellView) {
-        hostItems[ObjectIdentifier(v)] = nil
-        testHosts[ObjectIdentifier(v)] = nil
-        attentionFlashes[ObjectIdentifier(v)] = nil
+        chromes.removeValue(forKey: ObjectIdentifier(v))?.close()
         v.stopAnimations()
     }
 
@@ -5143,30 +5143,30 @@ extension AppController {
         // The Mac OS 9 look: a Platinum scroll bar in the editor's gutter,
         // there (disabled) even when there's nothing to scroll.
         if tk_desktop_platinum_ui(v.handle) != 0, let o = o {
-            if let sc = scrollers.removeValue(forKey: id) { sc.removeFromSuperview() }
-            let sc = platinumScrollers[id] ?? {
+            if let sc = chromes[id]?.take(\.scroller) { sc.removeFromSuperview() }
+            let sc = chromes[id]?.platinumScroller ?? {
                 let s = PlatinumScroller(view: v)
                 v.addSubview(s)
-                platinumScrollers[id] = s
+                chrome(id).platinumScroller = s
                 return s
             }()
             let changed = sc.update(o)
-            platinumFrames[id]?.growUnder = sc.frame
+            chromes[id]?.platinumFrame?.growUnder = sc.frame
             return changed
         }
-        platinumFrames[id]?.growUnder = nil
-        if let sc = platinumScrollers.removeValue(forKey: id) {
+        chromes[id]?.platinumFrame?.growUnder = nil
+        if let sc = chromes[id]?.take(\.platinumScroller) {
             sc.removeFromSuperview()
             return true
         }
         guard let o = o, (o["max"] as? Int ?? 0) > 0 else {
-            if let sc = scrollers.removeValue(forKey: id) { sc.removeFromSuperview(); return true }
+            if let sc = chromes[id]?.take(\.scroller) { sc.removeFromSuperview(); return true }
             return false
         }
-        let sc = scrollers[id] ?? {
+        let sc = chromes[id]?.scroller ?? {
             let s = EditorScroller(view: v)
             v.addSubview(s)
-            scrollers[id] = s
+            chrome(id).scroller = s
             return s
         }()
         return sc.update(o)
@@ -5191,7 +5191,7 @@ extension AppController {
             tk_desktop_host_items(v.handle, surface, $0, $1)
         })
         let list = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [[String: Any]] } ?? []
-        var current = hostItems[id] ?? [:]
+        var current = chromes[id]?.hostItems ?? [:]
         var changed = false
         var seen = Set<String>()
         let platinum = tk_desktop_platinum_ui(v.handle) != 0
@@ -5228,7 +5228,7 @@ extension AppController {
             current.removeValue(forKey: key)
             changed = true
         }
-        hostItems[id] = current
+        chrome(id).hostItems = current
         return changed
     }
 
@@ -5236,7 +5236,7 @@ extension AppController {
     /// frame, in the window's look.
     func pollTestHosts(_ v: CellView, _ regions: [Int: [String: NSRect]], platinum: Bool) -> Bool {
         let id = ObjectIdentifier(v)
-        var current = testHosts[id] ?? [:]
+        var current = chromes[id]?.testHosts ?? [:]
         var changed = false
         var seen = Set<String>()
         for (tag, r) in regions {
@@ -5257,7 +5257,7 @@ extension AppController {
             current.removeValue(forKey: key)
             changed = true
         }
-        testHosts[id] = current
+        chrome(id).testHosts = current
         return changed
     }
 
@@ -5271,7 +5271,7 @@ extension AppController {
                    : tk_desktop_panes(v.handle, cols, rows, $0, $1)
         })
         let list = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [[String: Any]] } ?? []
-        var current = paneHeaders[id] ?? [:]
+        var current = chromes[id]?.paneHeaders ?? [:]
         var changed = false
         var seen = Set<String>()
         // Keyed by look too, so switching looks swaps every header.
@@ -5292,7 +5292,7 @@ extension AppController {
             current[key] = nil
             changed = true
         }
-        paneHeaders[id] = current
+        chrome(id).paneHeaders = current
         return changed
     }
 
@@ -5304,17 +5304,17 @@ extension AppController {
         guard let data = readCoreData(&debugInspectBuf, {
             tk_desktop_debug_inspect(v.handle, panels ? 1 : 0, cols, rows, $0, $1)
         }) else {
-            if let d = debugInspectors[id] {
+            if let d = chromes[id]?.debugInspector {
                 d.removeFromSuperview()
-                debugInspectors[id] = nil
+                chromes[id]?.debugInspector = nil
                 return true
             }
             return false
         }
-        let d = debugInspectors[id] ?? {
+        let d = chromes[id]?.debugInspector ?? {
             let d = DebugInspectOverlay(view: v)
             v.addSubview(d)
-            debugInspectors[id] = d
+            chrome(id).debugInspector = d
             return d
         }()
         return d.update(data)
@@ -5332,17 +5332,17 @@ extension AppController {
         // Picker sheet. It steps aside while the core asks a question of
         // its own (check out the branch?) — a window shows one sheet.
         let asking = readCoreData(&nativeDialogBuf, { tk_desktop_native_dialog(v.handle, $0, $1) }) != nil
-        if let pc = reviewPickers[id], mode != "picker" || asking {
-            reviewPickers[id] = nil
+        if let pc = chromes[id]?.reviewPicker, mode != "picker" || asking {
+            chromes[id]?.reviewPicker = nil
             pc.dismiss()
             changed = true
         }
         if mode == "picker", !asking, let o = o {
-            if let pc = reviewPickers[id] {
+            if let pc = chromes[id]?.reviewPicker {
                 pc.update(o)
             } else if let win = v.window, win.isVisible, win.attachedSheet == nil {
                 let pc = ReviewPickerController(view: v)
-                reviewPickers[id] = pc
+                chrome(id).reviewPicker = pc
                 pc.update(o)
                 pc.present(in: win)
                 changed = true
@@ -5354,14 +5354,14 @@ extension AppController {
         }
         // Reviewing bar.
         if mode == "reviewing", let o = o {
-            let bar = reviewBars[id] ?? {
+            let bar = chromes[id]?.reviewBar ?? {
                 let b = ReviewBar(view: v)
                 v.addSubview(b)
-                reviewBars[id] = b
+                chrome(id).reviewBar = b
                 return b
             }()
             if bar.update(o) { changed = true }
-        } else if let bar = reviewBars.removeValue(forKey: id) {
+        } else if let bar = chromes[id]?.take(\.reviewBar) {
             bar.removeFromSuperview()
             changed = true
         }
@@ -5372,9 +5372,9 @@ extension AppController {
     func pollMerge(_ v: CellView) -> Bool {
         let id = ObjectIdentifier(v)
         let data = readCoreData(&nativeDialogBuf, { tk_desktop_merge(v.handle, $0, $1) })
-        if let mc = mergeSheets[id] {
+        if let mc = chromes[id]?.mergeSheet {
             guard let data = data else {
-                mergeSheets[id] = nil
+                chromes[id]?.mergeSheet = nil
                 mc.dismiss()
                 return true
             }
@@ -5384,7 +5384,7 @@ extension AppController {
         else { return false }
         let mc = MergeController(view: v)
         mc.onAfterAction = { [weak v] in v?.invalidateFrame(); v?.needsDisplay = true }
-        mergeSheets[id] = mc
+        chrome(id).mergeSheet = mc
         _ = mc.update(data)
         mc.present(in: win)
         return true
@@ -5394,9 +5394,9 @@ extension AppController {
     func pollHistory(_ v: CellView) -> Bool {
         let id = ObjectIdentifier(v)
         let data = readCoreData(&nativeDialogBuf, { tk_desktop_history(v.handle, $0, $1) })
-        if let hc = historySheets[id] {
+        if let hc = chromes[id]?.historySheet {
             guard let data = data else {
-                historySheets[id] = nil
+                chromes[id]?.historySheet = nil
                 hc.dismiss()
                 return true
             }
@@ -5405,7 +5405,7 @@ extension AppController {
         guard let data = data, let win = v.window, win.isVisible, win.attachedSheet == nil
         else { return false }
         let hc = HistoryController(view: v)
-        historySheets[id] = hc
+        chrome(id).historySheet = hc
         _ = hc.update(data)
         hc.present(in: win)
         return true
@@ -5416,17 +5416,17 @@ extension AppController {
         let id = ObjectIdentifier(v)
         let cols = Int64(v.cols()), rows = Int64(v.rows())
         guard let data = readCoreData(&treeBuf, { tk_desktop_tree(v.handle, cols, rows, $0, $1) }) else {
-            if let t = trees[id] {
+            if let t = chromes[id]?.tree {
                 t.removeFromSuperview()
-                trees[id] = nil
+                chromes[id]?.tree = nil
                 return true
             }
             return false
         }
-        let t = trees[id] ?? {
+        let t = chromes[id]?.tree ?? {
             let t = FileTreeOverlay(view: v)
             v.addSubview(t)
-            trees[id] = t
+            chrome(id).tree = t
             return t
         }()
         return t.update(data)
@@ -5440,11 +5440,11 @@ extension AppController {
         let native = tk_desktop_native_ui(v.handle) != 0
         let platinum = tk_desktop_platinum_ui(v.handle) != 0
         var changed = false
-        if !platinum, let f = platinumFinds.removeValue(forKey: id) {
+        if !platinum, let f = chromes[id]?.take(\.platinumFind) {
             f.dismiss()
             changed = true
         }
-        if !native, let fb = findBars[id], !fb.accessory.isHidden {
+        if !native, let fb = chromes[id]?.findBar, !fb.accessory.isHidden {
             fb.accessory.isHidden = true
             changed = true
         }
@@ -5457,7 +5457,7 @@ extension AppController {
             showPlatinumFind(req, for: v, in: win)
             return true
         }
-        if findBars[id] == nil {
+        if chromes[id]?.findBar == nil {
             let bar = FindBar(frame: NSRect(x: 0, y: 0, width: 600, height: 34))
             let acc = NSTitlebarAccessoryViewController()
             acc.layoutAttribute = .bottom
@@ -5470,13 +5470,13 @@ extension AppController {
             }
             bar.onClose = { [weak v] in
                 guard let v = v else { return }
-                if let fb = self.findBars[ObjectIdentifier(v)] { fb.accessory.isHidden = true }
+                if let fb = self.chromes[ObjectIdentifier(v)]?.findBar { fb.accessory.isHidden = true }
                 v.window?.makeFirstResponder(v)
             }
             win.addTitlebarAccessoryViewController(acc)
-            findBars[id] = (acc, bar)
+            chrome(id).findBar = (acc, bar)
         }
-        guard let fb = findBars[id] else { return false }
+        guard let fb = chromes[id]?.findBar else { return false }
         fb.accessory.isHidden = false
         fb.bar.show(req)
         return true
@@ -5488,12 +5488,12 @@ extension AppController {
     /// it seeded afresh, as the find bar re-seeds.
     private func showPlatinumFind(_ req: [String: Any], for v: CellView, in win: NSWindow) {
         let id = ObjectIdentifier(v)
-        var values = platinumFindValues[id] ?? [:]
+        var values = chromes[id]?.platinumFindValues ?? [:]
         let seed = req["seed"] as? String ?? ""
         if !seed.isEmpty { values["find"] = seed }
         for k in ["case", "word", "regex"] { values[k] = (req[k] as? Bool ?? false) ? "1" : "0" }
-        platinumFindValues[id] = values
-        platinumFinds.removeValue(forKey: id)?.dismiss()
+        chrome(id).platinumFindValues = values
+        chromes[id]?.take(\.platinumFind)?.dismiss()
         let replacing = req["mode"] as? String == "replace"
         func field(_ label: String, _ key: String) -> [String: Any] {
             ["k": "row", "text": label, "kids": [["k": "text", "key": key, "value": values[key] ?? "", "n": 36]]]
@@ -5523,16 +5523,16 @@ extension AppController {
             for e in events {
                 let key = e.count > 1 ? e[1] as? String ?? "" : ""
                 guard e.first as? Bool == true else {
-                    self.platinumFindValues[id]?[key] = e.count > 2 ? e[2] as? String ?? "" : ""
+                    self.chromes[id]?.platinumFindValues?[key] = e.count > 2 ? e[2] as? String ?? "" : ""
                     continue
                 }
                 if key == "done" {
-                    self.platinumFinds.removeValue(forKey: id)?.dismiss()
+                    self.chromes[id]?.take(\.platinumFind)?.dismiss()
                     v.window?.makeKeyAndOrderFront(nil)
                     v.window?.makeFirstResponder(v)
                     return
                 }
-                let vals = self.platinumFindValues[id] ?? [:]
+                let vals = self.chromes[id]?.platinumFindValues ?? [:]
                 let o: [String: Any] = [
                     "op": key, "find": vals["find"] ?? "", "replace": vals["replace"] ?? "",
                     "case": vals["case"] == "1", "word": vals["word"] == "1", "regex": vals["regex"] == "1",
@@ -5545,7 +5545,7 @@ extension AppController {
             }
         }
         _ = dlg.update(["k": "dialog", "text": replacing ? "Replace" : "Find", "key": "done", "kids": [body]])
-        platinumFinds[id] = dlg
+        chrome(id).platinumFind = dlg
         dlg.present(in: win)
     }
 
@@ -5564,9 +5564,9 @@ extension AppController {
         }
         // Git ▸ Local changes while it's up: bring its window forward.
         let raise = tk_desktop_take_git_front_request(v.handle) != 0
-        if let gc = gitSheets[id] {
+        if let gc = chromes[id]?.gitSheet {
             guard let data = data else {
-                gitSheets[id] = nil
+                chromes[id]?.gitSheet = nil
                 let wasKey = gc.gitWindow.isKeyWindow
                 gc.dismiss()
                 tk_desktop_set_git_window_key(v.handle, 0)
@@ -5579,7 +5579,7 @@ extension AppController {
                 return gc.update(data)
             }
             // The look changed under it: show it in the other projector.
-            gitSheets[id] = nil
+            chromes[id]?.gitSheet = nil
             gc.dismiss()
         }
         guard let data = data, let win = v.window, win.isVisible else { return false }
@@ -5590,7 +5590,7 @@ extension AppController {
             v?.invalidateFrame()
             v?.needsDisplay = true
         }
-        gitSheets[id] = gc
+        chrome(id).gitSheet = gc
         _ = gc.update(data)
         gc.present(in: win)
         return true
@@ -5601,21 +5601,21 @@ extension AppController {
     func pollPopup(_ v: CellView) -> Bool {
         let id = ObjectIdentifier(v)
         let data = readCoreData(&nativeDialogBuf, { tk_desktop_popup(v.handle, $0, $1) })
-        if let open = popups[id] {
+        if let open = chromes[id]?.popup {
             if let data = data { open.refresh(data) }
             return false
         }
         guard let data = data, let win = v.window, win.isVisible, win.attachedSheet == nil
         else { return false }
         let pm = PopupMenu(view: v)
-        popups[id] = pm
+        chrome(id).popup = pm
         pm.refresh(data)
         // Pop up outside the timer callback: NSMenu tracking is a nested
         // run loop, and the tick has to keep running (common modes) under it.
         DispatchQueue.main.async { [weak self, weak v] in
             guard let self = self, let v = v else { return }
             let code = pm.track()
-            self.popups[id] = nil
+            self.chromes[id]?.popup = nil
             guard v.handle != 0 else { return }
             let act = tk_desktop_popup_choose(v.handle, Int64(code))
             self.handleHostAction(act, sourceHandle: v.handle, view: v)
@@ -5650,9 +5650,9 @@ extension AppController {
         guard let win = v.window as? MainWindow else { return false }
         let id = ObjectIdentifier(v)
         let on = tk_desktop_platinum_ui(v.handle) != 0
-        if let pf = platinumFrames[id] {
+        if let pf = chromes[id]?.platinumFrame {
             if !on {
-                platinumFrames[id] = nil
+                chromes[id]?.platinumFrame = nil
                 pf.retroShadow?.detach()
                 let f = pf.restingFrame ?? win.frame
                 v.removeFromSuperview()
@@ -5672,7 +5672,7 @@ extension AppController {
             return changed
         }
         // Wait for the Turbo Vision frame to come off first.
-        guard on, tvFrames[id] == nil else { return false }
+        guard on, chromes[id]?.tvFrame == nil else { return false }
         let f = win.frame
         let pf = PlatinumMainFrame(cell: v)
         pf.title = win.title
@@ -5689,7 +5689,7 @@ extension AppController {
         pf.retroShadow = Platinum.castShadow(under: win)
         pf.layoutChrome()
         win.makeFirstResponder(v)
-        platinumFrames[id] = pf
+        chrome(id).platinumFrame = pf
         _ = pollPlatinumChrome(v)
         return true
     }
@@ -5700,13 +5700,13 @@ extension AppController {
     func pollPlatinumPanelChrome(_ win: NSWindow, _ pv: CellView) -> Bool {
         let id = ObjectIdentifier(pv)
         let on = pv.handle != 0 && tk_desktop_platinum_ui(pv.handle) != 0
-        if let pf = platinumPanelFrames[id] {
+        if let pf = chromes[id]?.platinumPanelFrame {
             if on {
                 pf.retroShadow?.ensureAttached()
                 pf.title = win.title
                 return false
             }
-            platinumPanelFrames[id] = nil
+            chromes[id]?.platinumPanelFrame = nil
             pf.retroShadow?.detach()
             let f = pf.restingFrame ?? win.frame
             pv.removeFromSuperview()
@@ -5746,7 +5746,7 @@ extension AppController {
         pf.retroShadow = Platinum.castShadow(under: win)
         pf.layoutChrome()
         win.makeFirstResponder(pv)
-        platinumPanelFrames[id] = pf
+        chrome(id).platinumPanelFrame = pf
         return true
     }
 
@@ -5757,13 +5757,13 @@ extension AppController {
         guard let win = v.window as? MainWindow else { return false }
         let id = ObjectIdentifier(v)
         let on = tk_desktop_tv_frame(v.handle) != 0
-        if let tf = tvFrames[id] {
+        if let tf = chromes[id]?.tvFrame {
             if on {
                 tf.retroShadow?.ensureAttached()
                 let info = readCoreData(&frameInfoBuf, { tk_desktop_frame_info(v.handle, Int64(tf.cols), $0, $1) })
                 return tf.poll(info: info)
             }
-            tvFrames[id] = nil
+            chromes[id]?.tvFrame = nil
             tf.retroShadow?.detach(restoreSystemShadow: true)
             let f = win.frame
             v.removeFromSuperview()
@@ -5774,7 +5774,7 @@ extension AppController {
             return true
         }
         // Wait for the Mac OS 9 frame to come off first.
-        guard on, platinumFrames[id] == nil else { return false }
+        guard on, chromes[id]?.platinumFrame == nil else { return false }
         // Whole cells, top-left staying put, so the ring meets the edges.
         var f = win.frame
         if !win.styleMask.contains(.fullScreen) {
@@ -5791,7 +5791,7 @@ extension AppController {
         tf.retroShadow = RetroShadow(under: win)
         tf.layoutChrome()
         win.makeFirstResponder(v)
-        tvFrames[id] = tf
+        chrome(id).tvFrame = tf
         _ = pollTVChrome(v)
         return true
     }
@@ -5805,15 +5805,15 @@ extension AppController {
         })
         let spec = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
         guard let spec = spec else {
-            guard let dw = tvDialogs.removeValue(forKey: id) else { return false }
+            guard let dw = chromes[id]?.take(\.tvDialog) else { return false }
             dw.dismiss()
             v.window?.makeKeyAndOrderFront(nil)
             return true
         }
-        if let dw = tvDialogs[id] { return dw.update(spec) }
+        if let dw = chromes[id]?.tvDialog { return dw.update(spec) }
         guard let win = v.window, win.isVisible else { return false }
         let dw = TVDialogWindow(mainView: v, view: makeSurfaceView(for: v, surface: .dialog))
-        tvDialogs[id] = dw
+        chrome(id).tvDialog = dw
         _ = dw.update(spec)
         dw.present(in: win)
         return true
@@ -5824,7 +5824,7 @@ extension AppController {
         guard let win = v.window else { return false }
         let id = ObjectIdentifier(v)
         let on = tk_desktop_native_ui(v.handle) != 0
-        if tabStrips[id] == nil {
+        if chromes[id]?.tabStrip == nil {
             guard on else { return false }
             let strip = TabStripView(frame: NSRect(x: 0, y: 0, width: 400, height: TabStripView.height))
             let acc = NSTitlebarAccessoryViewController()
@@ -5833,9 +5833,9 @@ extension AppController {
             strip.onSelect = { [weak self, weak v] i in if let v = v { self?.selectTab(v, i) } }
             strip.onClose = { [weak self, weak v] i in if let v = v { self?.closeTab(v, i) } }
             win.addTitlebarAccessoryViewController(acc)
-            tabStrips[id] = (acc, strip)
+            chrome(id).tabStrip = (acc, strip)
         }
-        guard let entry = tabStrips[id] else { return false }
+        guard let entry = chromes[id]?.tabStrip else { return false }
         var changed = false
         let data = on ? readCoreData(&tabsBuf, { tk_desktop_tabs(v.handle, $0, $1) }) : nil
         if let data = data { changed = entry.strip.update(from: data) }
@@ -5882,13 +5882,13 @@ extension AppController {
         let id = ObjectIdentifier(v)
         let o = readCoreData(&nativeDialogBuf, { tk_desktop_ui(v.handle, $0, $1) })
             .flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
-        var live = declarative[id] ?? []
-        var windowed = declarativeWindows[id] ?? []
+        var live = chromes[id]?.declarative ?? []
+        var windowed = chromes[id]?.declarativeWindows ?? []
         let look = o?["look"] as? String ?? "macos"
         let a = reconcile(&live, o?["stack"] as? [[String: Any]] ?? [], for: v, asWindow: false, look: look)
         let b = reconcile(&windowed, o?["window"] as? [[String: Any]] ?? [], for: v, asWindow: true, look: look)
-        declarative[id] = live.isEmpty ? nil : live
-        declarativeWindows[id] = windowed.isEmpty ? nil : windowed
+        chrome(id).declarative = live.isEmpty ? nil : live
+        chrome(id).declarativeWindows = windowed.isEmpty ? nil : windowed
         // A Platinum dialog is a child window, not a sheet: a click on the
         // workspace behind it mustn't keep the keyboard.
         (live.last as? PlatinumDialog)?.reclaimKey()
@@ -5951,24 +5951,24 @@ extension AppController {
     /// Where a sheet for `v` goes: on its window, or over the declarative
     /// dialog showing there (a confirm that dialog raised).
     func sheetHost(_ v: CellView) -> NSWindow? {
-        declarative[ObjectIdentifier(v)]?.last?.window ?? v.window
+        chromes[ObjectIdentifier(v)]?.declarative?.last?.window ?? v.window
     }
 
     /// Show, or retract, `v`'s native dialog. True when anything changed.
     func pollNativeDialog(_ v: CellView) -> Bool {
         let id = ObjectIdentifier(v)
         let dialog = nativeDialogJSON(v.handle)
-        if let alert = platinumAlerts[id] {
+        if let alert = chromes[id]?.platinumAlert {
             if dialog == nil {
-                platinumAlerts[id] = nil
+                chromes[id]?.platinumAlert = nil
                 alert.dismiss()
                 return true
             }
             return false
         }
-        if let sheet = nativeSheets[id] {
+        if let sheet = chromes[id]?.nativeSheet {
             if dialog == nil {
-                nativeSheets[id] = nil
+                chromes[id]?.nativeSheet = nil
                 sheet.sheetParent?.endSheet(sheet, returnCode: .abort)
                 return true
             }
@@ -6000,7 +6000,7 @@ extension AppController {
     /// Common tail for every sheet: forget it, run the answer, and act on
     /// whatever host action the core's submit handler handed back.
     private func finishNativeSheet(_ v: CellView, _ answer: () -> Int32) {
-        nativeSheets[ObjectIdentifier(v)] = nil
+        chromes[ObjectIdentifier(v)]?.nativeSheet = nil
         guard v.handle != 0 else { return }
         let code = answer()
         handleHostAction(code, sourceHandle: v.handle, view: v)
@@ -6033,7 +6033,7 @@ extension AppController {
         let alert = PlatinumDialog(name: "confirm", view: v, titled: false) { [weak self, weak v] events in
             guard let self = self, let v = v, let e = events.first, e.first as? Bool == true,
                   let i = Int(e.count > 1 ? e[1] as? String ?? "" : "") else { return }
-            self.platinumAlerts.removeValue(forKey: id)?.dismiss()
+            self.chromes[id]?.take(\.platinumAlert)?.dismiss()
             guard v.handle != 0 else { return }
             let code = tk_desktop_native_confirm_answer(v.handle, Int64(i))
             self.handleHostAction(code, sourceHandle: v.handle, view: v)
@@ -6042,7 +6042,7 @@ extension AppController {
         }
         let cancel = labels.firstIndex(of: "Cancel").map { "\($0)" } ?? ""
         _ = alert.update(["k": "dialog", "text": "", "key": cancel, "kids": [body]])
-        platinumAlerts[id] = alert
+        chrome(id).platinumAlert = alert
         alert.present(in: win)
     }
 
@@ -6063,7 +6063,7 @@ extension AppController {
                     continue
                 }
                 guard let self = self, let v = v else { return }
-                self.platinumAlerts.removeValue(forKey: id)?.dismiss()
+                self.chromes[id]?.take(\.platinumAlert)?.dismiss()
                 guard v.handle != 0 else { return }
                 let code = answer(key, values)
                 self.handleHostAction(code, sourceHandle: v.handle, view: v)
@@ -6073,7 +6073,7 @@ extension AppController {
             }
         }
         _ = alert.update(tree)
-        platinumAlerts[id] = alert
+        chrome(id).platinumAlert = alert
         alert.present(in: win)
     }
 
@@ -6150,7 +6150,7 @@ extension AppController {
                 b.keyEquivalentModifierMask = .command
             }
         }
-        nativeSheets[ObjectIdentifier(v)] = alert.window
+        chrome(ObjectIdentifier(v)).nativeSheet = alert.window
         alert.beginSheetModal(for: win) { [weak self, weak v] resp in
             guard let self = self, let v = v, resp != .abort else { return }
             let pos = resp.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
@@ -6172,7 +6172,7 @@ extension AppController {
         field.cell?.isScrollable = true
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
-        nativeSheets[ObjectIdentifier(v)] = alert.window
+        chrome(ObjectIdentifier(v)).nativeSheet = alert.window
         alert.beginSheetModal(for: win) { [weak self, weak v] resp in
             guard let self = self, let v = v, resp != .abort else { return }
             let ok = resp == .alertFirstButtonReturn
@@ -6193,7 +6193,7 @@ extension AppController {
         alert.messageText = d["message"] as? String ?? ""
         for a in actions { alert.addButton(withTitle: a) }
         alert.addButton(withTitle: actions.isEmpty ? "OK" : "Dismiss").keyEquivalent = "\u{1b}"
-        nativeSheets[ObjectIdentifier(v)] = alert.window
+        chrome(ObjectIdentifier(v)).nativeSheet = alert.window
         alert.beginSheetModal(for: win) { [weak self, weak v] resp in
             guard let self = self, let v = v, resp != .abort else { return }
             let i = resp.rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
@@ -6221,7 +6221,7 @@ extension AppController {
         alert.accessoryView = box
         alert.addButton(withTitle: "Apply")
         alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
-        nativeSheets[ObjectIdentifier(v)] = alert.window
+        chrome(ObjectIdentifier(v)).nativeSheet = alert.window
         alert.beginSheetModal(for: win) { [weak self, weak v] resp in
             guard let self = self, let v = v, resp != .abort else { return }
             NSColorPanel.shared.orderOut(nil)
@@ -6246,7 +6246,7 @@ extension AppController {
             panel.directoryURL = URL(fileURLWithPath: dir, isDirectory: true)
         }
         panel.nameFieldStringValue = d["name"] as? String ?? ""
-        nativeSheets[ObjectIdentifier(v)] = panel
+        chrome(ObjectIdentifier(v)).nativeSheet = panel
         panel.beginSheetModal(for: win) { [weak self, weak v] resp in
             guard let self = self, let v = v, resp != .abort else { return }
             let path = resp == .OK ? (panel.url?.path ?? "") : ""
