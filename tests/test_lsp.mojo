@@ -996,6 +996,42 @@ def test_lsp_closing_a_buffer_rearms_its_initial_pull() raises:
     assert_true(mgr.has_pulled(String("/b.py")))
 
 
+def test_lsp_diagnostic_buckets_go_with_their_documents() raises:
+    """Buckets don't outlive what they're for: closing a buffer drops its
+    consumed bucket and its in-flight pulls; an unconsumed one stays for a
+    reopen; an empty publish for a file that isn't open stores nothing."""
+    var mgr = LspManager()
+    var caps = parse_json(String("{\"diagnosticProvider\":{}}"))
+    mgr._capabilities = Optional[JsonValue](caps^)
+    mgr.state = _STATE_READY
+    var items = parse_json(String(
+        "[{\"range\":{\"start\":{\"line\":0,\"character\":0},"
+        + "\"end\":{\"line\":0,\"character\":1}},\"message\":\"m\"}]"
+    ))
+    mgr.notify_opened(String("/a.py"), String("x = 1\n"))
+    mgr.notify_opened(String("/b.py"), String("y = 1\n"))
+    mgr._store_diagnostics(String("/a.py"), _parse_diagnostics_array(items))
+    mgr._store_diagnostics(String("/b.py"), _parse_diagnostics_array(items))
+    assert_equal(len(mgr.take_diagnostics_for(String("/a.py"))), 1)
+    assert_true(mgr.request_pull_diagnostics(String("/a.py")))
+    assert_equal(len(mgr._diagnostic_buckets), 2)
+    mgr.notify_closed(String("/a.py"))
+    mgr.notify_closed(String("/b.py"))
+    # /a.py was consumed: gone, with its pull. /b.py wasn't: kept.
+    assert_equal(len(mgr._diagnostic_buckets), 1)
+    assert_equal(mgr._diagnostic_buckets[0].path, String("/b.py"))
+    assert_equal(len(mgr._pull_diag_paths), 0)
+    # An all-clear for a closed file deletes its bucket; for one never
+    # open it parks nothing.
+    mgr._store_diagnostics(String("/b.py"), List[Diagnostic]())
+    mgr._store_diagnostics(String("/c.py"), List[Diagnostic]())
+    assert_equal(len(mgr._diagnostic_buckets), 0)
+    # An all-clear for an open file is kept: it clears its squiggles.
+    mgr.notify_opened(String("/d.py"), String("z = 1\n"))
+    mgr._store_diagnostics(String("/d.py"), List[Diagnostic]())
+    assert_true(mgr.has_unconsumed_diagnostics_for(String("/d.py")))
+
+
 def test_lsp_server_supports_will_save() raises:
     """The willSave / willSaveWaitUntil capability readers consult the
     object form of textDocumentSync; the int form (or absent) is off."""

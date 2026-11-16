@@ -1206,12 +1206,13 @@ struct LspManager(Copyable, Movable):
     # Latest published diagnostics keyed by URI-resolved path. The list
     # holds at most one bucket per path — a fresh publishDiagnostics
     # overwrites the prior bucket's list and resets ``consumed``.
-    # ``notify_closed`` deliberately keeps a closed file's bucket, so a
-    # reopen shows its squiggles at once. The cost: a server that
-    # publishes for the whole workspace (not just open files) leaves a
-    # bucket for every file it ever reported, empty ones included, and
-    # lookups scan them. That is bounded by the workspace's file count,
-    # not by session length, so it is accepted rather than evicted.
+    # ``take_diagnostics_for`` moves the list out, so a consumed bucket is
+    # only a marker; ``notify_closed`` drops it. An *unconsumed* one stays
+    # when its file closes (or was never open — a server publishing for
+    # the whole workspace), so a reopen shows its squiggles at once; an
+    # empty publish for a file that isn't open deletes the bucket instead
+    # of parking an "all clear" nobody will read. What remains is bounded
+    # by the files the server currently reports problems in.
     var _diagnostic_buckets: List[_DiagnosticBucket]
 
     # In-flight diagnostic refresh tracking, parallel-list per path:
@@ -1452,7 +1453,9 @@ struct LspManager(Copyable, Movable):
             if self._diagnostic_buckets[k].path == path:
                 if self._diagnostic_buckets[k].consumed:
                     return List[Diagnostic]()
-                var out = self._diagnostic_buckets[k].diags.copy()
+                # Moved, not copied: nothing reads a consumed bucket's list.
+                var out = List[Diagnostic]()
+                swap(out, self._diagnostic_buckets[k].diags)
                 self._diagnostic_buckets[k].consumed = True
                 return out^
         return List[Diagnostic]()
@@ -2058,6 +2061,21 @@ struct LspManager(Copyable, Movable):
             return
         var closed = self._docs.pop(idx)
         self._remap.drop_doc(path)
+        # A consumed bucket is only a marker (its list went to the editor),
+        # and a pull answered after the close would just park a report
+        # nobody reads: drop both. An unconsumed bucket stays for a reopen.
+        for k in range(len(self._diagnostic_buckets)):
+            if self._diagnostic_buckets[k].path == path:
+                if self._diagnostic_buckets[k].consumed:
+                    _ = self._diagnostic_buckets.pop(k)
+                break
+        var pk = 0
+        while pk < len(self._pull_diag_paths):
+            if self._pull_diag_paths[pk] == path:
+                _ = self._pull_diag_ids.pop(pk)
+                _ = self._pull_diag_paths.pop(pk)
+            else:
+                pk += 1
         # Drop any "analyzing edits…" spinner state — a closed buffer
         # must not keep one spinning.
         self._clear_diag_inflight(path, 0)
@@ -4622,12 +4640,19 @@ struct LspManager(Copyable, Movable):
         """Replace (not merge) the diagnostic bucket for ``path`` and mark
         it unconsumed so the host re-applies on the next frame. Shared by
         the push (``publishDiagnostics``) and pull (``textDocument/
-        diagnostic``) paths."""
+        diagnostic``) paths. An empty set for a file that isn't open
+        deletes the bucket: there is nothing to show on a reopen."""
+        var drop = len(diags) == 0 and self._doc_index(path) < 0
         for k in range(len(self._diagnostic_buckets)):
             if self._diagnostic_buckets[k].path == path:
+                if drop:
+                    _ = self._diagnostic_buckets.pop(k)
+                    return
                 self._diagnostic_buckets[k].diags = diags^
                 self._diagnostic_buckets[k].consumed = False
                 return
+        if drop:
+            return
         self._diagnostic_buckets.append(
             _DiagnosticBucket(path, diags^, False),
         )
