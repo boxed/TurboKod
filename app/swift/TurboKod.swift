@@ -605,7 +605,19 @@ func cgcolor(_ rgb: UInt32) -> CGColor {
 /// `.dialog` is the Turbo Vision look's dialog window (`TVDialogWindow`): a
 /// declarative dialog, frame and all, in a window of its own.
 /// `.git` is the Turbo Vision look's git window (`TVDialogWindow` too).
-enum CellSurface { case main, panels, settings, frame, dialog, git }
+enum CellSurface {
+    case main, panels, settings, frame, dialog, git
+    /// Its ``HOST_SURFACE_*`` code (canvas.mojo), for the surface C ABI.
+    var code: Int64 {
+        switch self {
+        case .main, .frame: return 0
+        case .panels: return 1
+        case .settings: return 2
+        case .dialog: return 3
+        case .git: return 4
+        }
+    }
+}
 
 /// The process-wide language-server pool every window's Desktop shares
 /// (`tk_lsp_pool_new`). A `static let` rather than a top-level constant:
@@ -871,10 +883,8 @@ final class CellView: NSView {
         let p = Int64(Int(bitPattern: buf))
         switch surface {
         case .main:     return Int(tk_desktop_layout(handle, Int64(c), Int64(r), p, Int64(cap)))
-        case .panels:   return Int(tk_desktop_layout_panels(handle, Int64(c), Int64(r), p, Int64(cap)))
-        case .settings: return Int(tk_desktop_layout_settings(handle, Int64(c), Int64(r), p, Int64(cap)))
-        case .dialog:   return Int(tk_desktop_layout_dialog(handle, Int64(c), Int64(r), p, Int64(cap)))
-        case .git:      return Int(tk_desktop_layout_git(handle, Int64(c), Int64(r), p, Int64(cap)))
+        case .panels, .settings, .dialog, .git:
+            return Int(tk_desktop_surface_layout(handle, surface.code, Int64(c), Int64(r), p, Int64(cap)))
         case .frame:
             let w = window
             let zoomed = (w?.styleMask.contains(.fullScreen) ?? false) || ((w as? MainWindow)?.filled ?? false)
@@ -887,10 +897,8 @@ final class CellView: NSView {
     private func keySurface(_ key: UInt32, _ m: UInt8, _ c: Int, _ r: Int) -> Int32 {
         switch surface {
         case .main:     return tk_desktop_key(handle, key, m, Int64(c), Int64(r))
-        case .panels:   return tk_desktop_panels_key(handle, key, m, Int64(c), Int64(r))
-        case .settings: return tk_desktop_settings_key(handle, key, m, Int64(c), Int64(r))
-        case .dialog:   return tk_desktop_dialog_key(handle, key, m, Int64(c), Int64(r))
-        case .git:      return tk_desktop_git_window_key(handle, key, m, Int64(c), Int64(r))
+        case .panels, .settings, .dialog, .git:
+            return tk_desktop_surface_key(handle, surface.code, key, m, Int64(c), Int64(r))
         case .frame:    return 0
         }
     }
@@ -908,10 +916,8 @@ final class CellView: NSView {
                               _ c: Int, _ r: Int, _ cc: UInt8) -> Int32 {
         switch surface {
         case .main:     return tk_desktop_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r), cc)
-        case .panels:   return tk_desktop_panels_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r), cc)
-        case .settings: return tk_desktop_settings_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r), cc)
-        case .dialog:   return tk_desktop_dialog_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r), cc)
-        case .git:      return tk_desktop_git_window_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r), cc)
+        case .panels, .settings, .dialog, .git:
+            return tk_desktop_surface_mouse(handle, surface.code, col, row, button, pressed, motion, m, Int64(c), Int64(r), cc)
         case .frame:    return 0
         }
     }
@@ -13556,7 +13562,7 @@ final class TVMainFrame: NSView, NSDraggingSource {
 /// The Turbo Vision look's dialog window: a declarative dialog (a picker,
 /// Project Settings, …) out of the project window, as the other looks show
 /// them. Borderless; the core paints all of it, frame included
-/// (`tk_desktop_layout_dialog`). The title row drags it, the close box is
+/// (`tk_desktop_surface_layout`). The title row drags it, the close box is
 /// the core's, and the sides and bottom corners resize the ones that can be
 /// (the large dialogs); the rest follow the size the core asks for. (The
 /// git view has a window of its own, `TVGitWindow`.) Modal like the in-grid dialog: a click on the project
@@ -13849,7 +13855,7 @@ final class GitWindowPlacement {
 
 /// The git view in the Turbo Vision look: a borderless window of its own
 /// whose cells the core paints, frame and close box included
-/// (`tk_desktop_layout_git`). Not modal — the project window stays live
+/// (`tk_desktop_surface_layout`). Not modal — the project window stays live
 /// beside it. The title row drags it and the sides and bottom corners
 /// resize it, as on a dialog window.
 final class TVGitWindow: NSObject, GitSurface {

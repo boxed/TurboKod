@@ -172,13 +172,6 @@ int64_t tk_desktop_frame_info(int64_t h, int64_t cols, int64_t out_ptr, int64_t 
 // its JSON {kind, title, cols, rows, resizable}; the rest drive its surface.
 int64_t tk_desktop_dialog_window(int64_t h, int64_t cols, int64_t rows,
                                  int64_t out_ptr, int64_t cap);
-int64_t tk_desktop_layout_dialog(int64_t h, int64_t cols, int64_t rows,
-                                 int64_t out_ptr, int64_t cap);
-int32_t tk_desktop_dialog_key(int64_t h, uint32_t key, uint8_t mods,
-                              int64_t cols, int64_t rows);
-int32_t tk_desktop_dialog_mouse(int64_t h, int64_t x, int64_t y, uint8_t button,
-                                uint8_t pressed, uint8_t motion, uint8_t mods,
-                                int64_t cols, int64_t rows, uint8_t click_count);
 int64_t tk_desktop_tabs(int64_t h, int64_t out_ptr, int64_t cap);
 int32_t tk_desktop_tab_select(int64_t h, int64_t idx, int64_t cols, int64_t rows);
 void tk_desktop_tab_close(int64_t h, int64_t idx);
@@ -275,13 +268,6 @@ void tk_desktop_git_open(int64_t h, int64_t pane, int64_t row, int64_t cols, int
 void tk_desktop_git_answer(int64_t h, int64_t cptr, int64_t clen, int64_t tptr, int64_t tlen);
 int32_t tk_desktop_git_close(int64_t h);
 int64_t tk_desktop_git_window(int64_t h, int64_t out_ptr, int64_t cap);
-int64_t tk_desktop_layout_git(int64_t h, int64_t cols, int64_t rows,
-                              int64_t out_ptr, int64_t cap);
-int32_t tk_desktop_git_window_key(int64_t h, uint32_t key, uint8_t mods,
-                                  int64_t cols, int64_t rows);
-int32_t tk_desktop_git_window_mouse(int64_t h, int64_t x, int64_t y, uint8_t button,
-                                    uint8_t pressed, uint8_t motion, uint8_t mods,
-                                    int64_t cols, int64_t rows, uint8_t click_count);
 // Whether the key window is the project window (or its floating panels)
 // rather than one of its dialog windows — see tk_desktop_set_project_window_key
 // in native_api.mojo.
@@ -336,13 +322,16 @@ int32_t tk_desktop_take_main_focus_request(int64_t h);
 // main window keeps using the functions above.
 void    tk_desktop_set_panels_detached(int64_t h, int64_t on);
 int64_t tk_desktop_panels_visible_count(int64_t h);
-int64_t tk_desktop_layout_panels(int64_t h, int64_t cols, int64_t rows,
-                                 int64_t out_ptr, int64_t cap);
-int32_t tk_desktop_panels_key(int64_t h, uint32_t key, uint8_t mods,
-                              int64_t cols, int64_t rows);
-int32_t tk_desktop_panels_mouse(int64_t h, int64_t x, int64_t y, uint8_t button,
-                                uint8_t pressed, uint8_t motion, uint8_t mods,
-                                int64_t cols, int64_t rows, uint8_t click_count);
+// The host's other cell windows, by HOST_SURFACE_* code: the floating panels
+// (1), Settings (2), the dialog window (3), the git window (4).
+int64_t tk_desktop_surface_layout(int64_t h, int64_t surface, int64_t cols,
+                                  int64_t rows, int64_t out_ptr, int64_t cap);
+int32_t tk_desktop_surface_key(int64_t h, int64_t surface, uint32_t key,
+                               uint8_t mods, int64_t cols, int64_t rows);
+int32_t tk_desktop_surface_mouse(int64_t h, int64_t surface, int64_t x, int64_t y,
+                                 uint8_t button, uint8_t pressed, uint8_t motion,
+                                 uint8_t mods, int64_t cols, int64_t rows,
+                                 uint8_t click_count);
 int32_t tk_desktop_panels_pointer_shape(int64_t h, int64_t x, int64_t y,
                                         int64_t cols, int64_t rows);
 // Drag-and-drop onto the detached floating-panels window. Mirrors
@@ -363,13 +352,6 @@ int32_t tk_desktop_panels_drop_target(int64_t h, int64_t x, int64_t y,
 void    tk_desktop_set_settings_detached(int64_t h, int64_t on);
 int32_t tk_desktop_settings_active(int64_t h);
 void    tk_desktop_settings_close(int64_t h);
-int64_t tk_desktop_layout_settings(int64_t h, int64_t cols, int64_t rows,
-                                   int64_t out_ptr, int64_t cap);
-int32_t tk_desktop_settings_key(int64_t h, uint32_t key, uint8_t mods,
-                                int64_t cols, int64_t rows);
-int32_t tk_desktop_settings_mouse(int64_t h, int64_t x, int64_t y, uint8_t button,
-                                  uint8_t pressed, uint8_t motion, uint8_t mods,
-                                  int64_t cols, int64_t rows, uint8_t click_count);
 
 // Color theme: the host resolves cell color indices through the active
 // theme's 256-entry RGB palette. tk_theme_version bumps whenever the user

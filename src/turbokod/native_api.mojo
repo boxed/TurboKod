@@ -831,7 +831,7 @@ def tk_desktop_set_panels_detached(h: Int, on: Int) abi("C"):
     When ``on`` is non-zero, the main surface (``paint`` / ``workspace_rect``
     / ``handle_event``) ignores the terminal / debug / test panels — the
     editor area reclaims the freed rows — and the host drives the second
-    surface via ``tk_desktop_layout_panels`` + ``tk_desktop_panels_*``. Also
+    surface via ``tk_desktop_surface_*`` (``HOST_SURFACE_PANELS``). Also
     flips the View ▸ Floating panels checkmark. See docs/floating-panels.md."""
     if h == 0:
         return
@@ -850,64 +850,84 @@ def tk_desktop_panels_visible_count(h: Int) abi("C") -> Int:
 
 
 @export
-def tk_desktop_layout_panels(
-    h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
+def tk_desktop_surface_layout(
+    h: Int, surface: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
 ) abi("C") -> Int:
-    """Paint *only* the tool panels into the host's separate panel window and
-    pack them into the caller's buffer (same 5-u32-per-cell format as
-    ``tk_desktop_layout``). Returns the number of cells written. The panel
-    window does not run its own tick — the main window's ``tk_desktop_tick``
-    drives the whole Desktop's per-frame work for both surfaces."""
+    """Paint one of the host's other windows — ``surface`` a
+    ``HOST_SURFACE_*``: the floating panels, Settings, the dialog window or
+    the git window — and pack it into the caller's buffer like
+    ``tk_desktop_layout``. Returns the number of cells written. None of
+    them ticks: the main window's ``tk_desktop_tick`` drives the whole
+    Desktop's per-frame work."""
     if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
         return 0
-    var canvas = _frame_canvas(h, cols, rows)
-    _desk(h)[].paint_panels(canvas, Rect(0, 0, cols, rows))
-    var n = pack_canvas(canvas, cols, rows, out_ptr, cap)
-    swap(_desk(h)[].panel_sub_grids, canvas.sub_grids)
-    swap(_desk(h)[].host_items[HOST_SURFACE_PANELS], canvas.host_items)
-    return n
+    var screen = Rect(0, 0, cols, rows)
+    if surface == HOST_SURFACE_PANELS:
+        var canvas = _frame_canvas(h, cols, rows)
+        _desk(h)[].paint_panels(canvas, screen)
+        var n = pack_canvas(canvas, cols, rows, out_ptr, cap)
+        swap(_desk(h)[].panel_sub_grids, canvas.sub_grids)
+        swap(_desk(h)[].host_items[HOST_SURFACE_PANELS], canvas.host_items)
+        return n
+    var canvas = _chrome_canvas(h, cols, rows)
+    if surface == HOST_SURFACE_SETTINGS:
+        _desk(h)[].paint_settings(canvas, screen)
+    elif surface == HOST_SURFACE_DIALOG:
+        _desk(h)[].paint_dialog_window(canvas, screen)
+    elif surface == HOST_SURFACE_GIT:
+        _desk(h)[].paint_git_window(canvas, screen)
+    else:
+        return 0
+    return _pack_surface(h, surface, canvas, cols, rows, out_ptr, cap)
 
 
-@export
-def tk_desktop_panels_key(
-    h: Int, key: UInt32, mods: UInt8, cols: Int, rows: Int,
-) abi("C") -> Int32:
-    """Route a keystroke from the panel window into the tool panels.
-    Mirrors ``tk_desktop_key`` (same Ctrl/Cmd canonicalization and action
-    codes), but dispatches through ``handle_panels_event``."""
-    if h == 0:
-        return ACT_NONE
-    var k = _canon_ctrl_key(key, mods)
-    var action: Optional[String]
+def _surface_event(h: Int, surface: Int, var ev: Event, cols: Int, rows: Int) -> Int32:
+    """Route ``ev`` to the window ``surface``; a host action like
+    ``tk_desktop_key``'s (only the panels and dialog windows make one)."""
+    var screen = Rect(0, 0, cols, rows)
+    var action = Optional[String]()
     try:
-        action = _desk(h)[].handle_panels_event(
-            Event.key_event(k, mods), Rect(0, 0, cols, rows),
-        )
+        if surface == HOST_SURFACE_PANELS:
+            _desk(h)[].take_mouse_fine(ev)
+            action = _desk(h)[].handle_panels_event(ev, screen)
+        elif surface == HOST_SURFACE_SETTINGS:
+            _desk(h)[].handle_settings_event(ev, screen)
+        elif surface == HOST_SURFACE_DIALOG:
+            action = _desk(h)[].handle_dialog_window_event(ev, screen)
+        elif surface == HOST_SURFACE_GIT:
+            _desk(h)[].handle_git_window_event(ev, screen)
     except e:
-        print("turbokod: tk_desktop_panels_key:", String(e))
-        action = Optional[String]()
+        print("turbokod: surface", surface, "event:", String(e))
     return _action_code(action)
 
 
 @export
-def tk_desktop_panels_mouse(
-    h: Int, x: Int, y: Int, button: UInt8, pressed: UInt8, motion: UInt8,
-    mods: UInt8, cols: Int, rows: Int, click_count: UInt8,
+def tk_desktop_surface_key(
+    h: Int, surface: Int, key: UInt32, mods: UInt8, cols: Int, rows: Int,
 ) abi("C") -> Int32:
-    """Route a mouse event from the panel window into the tool panels.
-    Mirrors ``tk_desktop_mouse`` but dispatches through
-    ``handle_panels_event``."""
+    """A keystroke in the window ``surface`` (see
+    ``tk_desktop_surface_layout``), with ``tk_desktop_key``'s Ctrl/Cmd
+    canonicalization."""
     if h == 0:
         return ACT_NONE
-    var ev = _mouse_event(x, y, button, pressed, motion, mods, click_count)
-    _desk(h)[].take_mouse_fine(ev)
-    var action: Optional[String]
-    try:
-        action = _desk(h)[].handle_panels_event(ev, Rect(0, 0, cols, rows))
-    except e:
-        print("turbokod: tk_desktop_panels_mouse:", String(e))
-        action = Optional[String]()
-    return _action_code(action)
+    return _surface_event(
+        h, surface, Event.key_event(_canon_ctrl_key(key, mods), mods),
+        cols, rows,
+    )
+
+
+@export
+def tk_desktop_surface_mouse(
+    h: Int, surface: Int, x: Int, y: Int, button: UInt8, pressed: UInt8,
+    motion: UInt8, mods: UInt8, cols: Int, rows: Int, click_count: UInt8,
+) abi("C") -> Int32:
+    """A mouse event in the window ``surface``."""
+    if h == 0:
+        return ACT_NONE
+    return _surface_event(
+        h, surface, _mouse_event(x, y, button, pressed, motion, mods, click_count),
+        cols, rows,
+    )
 
 
 @export
@@ -1131,49 +1151,6 @@ def tk_desktop_settings_close(h: Int) abi("C"):
     if h == 0:
         return
     _desk(h)[].close_settings()
-
-
-@export
-def tk_desktop_layout_settings(
-    h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
-) abi("C") -> Int:
-    """Paint the Settings view into the host's settings window and pack it
-    into the caller's buffer (same 5-u32-per-cell format as
-    ``tk_desktop_layout``). Returns the number of cells written."""
-    if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
-        return 0
-    var canvas = _chrome_canvas(h, cols, rows)
-    _desk(h)[].paint_settings(canvas, Rect(0, 0, cols, rows))
-    return _pack_surface(h, HOST_SURFACE_SETTINGS, canvas, cols, rows, out_ptr, cap)
-
-
-@export
-def tk_desktop_settings_key(
-    h: Int, key: UInt32, mods: UInt8, cols: Int, rows: Int,
-) abi("C") -> Int32:
-    """Route a keystroke from the settings window into the Settings view.
-    Mirrors ``tk_desktop_key``'s Ctrl/Cmd canonicalization; Settings never
-    produces host actions, so this always returns ACT_NONE."""
-    if h == 0:
-        return ACT_NONE
-    var k = _canon_ctrl_key(key, mods)
-    _desk(h)[].handle_settings_event(
-        Event.key_event(k, mods), Rect(0, 0, cols, rows),
-    )
-    return ACT_NONE
-
-
-@export
-def tk_desktop_settings_mouse(
-    h: Int, x: Int, y: Int, button: UInt8, pressed: UInt8, motion: UInt8,
-    mods: UInt8, cols: Int, rows: Int, click_count: UInt8,
-) abi("C") -> Int32:
-    """Route a mouse event from the settings window into the Settings view."""
-    if h == 0:
-        return ACT_NONE
-    var ev = _mouse_event(x, y, button, pressed, motion, mods, click_count)
-    _desk(h)[].handle_settings_event(ev, Rect(0, 0, cols, rows))
-    return ACT_NONE
 
 
 @export
@@ -1645,56 +1622,6 @@ def tk_desktop_dialog_window(
     return _write_out(encode_json(o), out_ptr, cap)
 
 
-@export
-def tk_desktop_layout_dialog(
-    h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
-) abi("C") -> Int:
-    """Paint the dialog window and pack it like ``tk_desktop_layout``."""
-    if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
-        return 0
-    var canvas = _chrome_canvas(h, cols, rows)
-    _desk(h)[].paint_dialog_window(canvas, Rect(0, 0, cols, rows))
-    return _pack_surface(h, HOST_SURFACE_DIALOG, canvas, cols, rows, out_ptr, cap)
-
-
-@export
-def tk_desktop_dialog_key(
-    h: Int, key: UInt32, mods: UInt8, cols: Int, rows: Int,
-) abi("C") -> Int32:
-    """A keystroke in the dialog window; returns a host action like
-    ``tk_desktop_key`` (a picker opening a project)."""
-    if h == 0:
-        return ACT_NONE
-    var k = _canon_ctrl_key(key, mods)
-    var action: Optional[String]
-    try:
-        action = _desk(h)[].handle_dialog_window_event(
-            Event.key_event(k, mods), Rect(0, 0, cols, rows),
-        )
-    except e:
-        print("turbokod: tk_desktop_dialog_key:", String(e))
-        action = Optional[String]()
-    return _action_code(action)
-
-
-@export
-def tk_desktop_dialog_mouse(
-    h: Int, x: Int, y: Int, button: UInt8, pressed: UInt8, motion: UInt8,
-    mods: UInt8, cols: Int, rows: Int, click_count: UInt8,
-) abi("C") -> Int32:
-    """A mouse event in the dialog window."""
-    if h == 0:
-        return ACT_NONE
-    var ev = _mouse_event(x, y, button, pressed, motion, mods, click_count)
-    var action: Optional[String]
-    try:
-        action = _desk(h)[].handle_dialog_window_event(ev, Rect(0, 0, cols, rows))
-    except e:
-        print("turbokod: tk_desktop_dialog_mouse:", String(e))
-        action = Optional[String]()
-    return _action_code(action)
-
-
 # --- the git view's window -----------------------------------------------------
 #
 # In the native app the git view is a non-modal window of its own. The macOS
@@ -1715,51 +1642,6 @@ def tk_desktop_git_window(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
     var o = json_object()
     o.put(String("title"), json_str(d.git_window_title()))
     return _write_out(encode_json(o), out_ptr, cap)
-
-
-@export
-def tk_desktop_layout_git(
-    h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
-) abi("C") -> Int:
-    """Paint the git window and pack it like ``tk_desktop_layout``."""
-    if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
-        return 0
-    var canvas = _chrome_canvas(h, cols, rows)
-    _desk(h)[].paint_git_window(canvas, Rect(0, 0, cols, rows))
-    return _pack_surface(h, HOST_SURFACE_GIT, canvas, cols, rows, out_ptr, cap)
-
-
-@export
-def tk_desktop_git_window_key(
-    h: Int, key: UInt32, mods: UInt8, cols: Int, rows: Int,
-) abi("C") -> Int32:
-    """A keystroke in the git window."""
-    if h == 0:
-        return ACT_NONE
-    var k = _canon_ctrl_key(key, mods)
-    try:
-        _desk(h)[].handle_git_window_event(
-            Event.key_event(k, mods), Rect(0, 0, cols, rows),
-        )
-    except e:
-        print("turbokod: tk_desktop_git_window_key:", String(e))
-    return ACT_NONE
-
-
-@export
-def tk_desktop_git_window_mouse(
-    h: Int, x: Int, y: Int, button: UInt8, pressed: UInt8, motion: UInt8,
-    mods: UInt8, cols: Int, rows: Int, click_count: UInt8,
-) abi("C") -> Int32:
-    """A mouse event in the git window."""
-    if h == 0:
-        return ACT_NONE
-    var ev = _mouse_event(x, y, button, pressed, motion, mods, click_count)
-    try:
-        _desk(h)[].handle_git_window_event(ev, Rect(0, 0, cols, rows))
-    except e:
-        print("turbokod: tk_desktop_git_window_mouse:", String(e))
-    return ACT_NONE
 
 
 @export

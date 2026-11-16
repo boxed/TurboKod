@@ -163,20 +163,23 @@ honest the item is only added when the host owns the menu.
 
 ```c
 void    tk_desktop_set_panels_detached(int64_t h, int64_t on);
-int64_t tk_desktop_layout_panels(int64_t h, int64_t cols, int64_t rows,
-                                 int64_t out_ptr, int64_t cap);
-int32_t tk_desktop_panels_key(int64_t h, uint32_t key, uint8_t mods,
-                              int64_t cols, int64_t rows);
-int32_t tk_desktop_panels_mouse(int64_t h, int64_t x, int64_t y,
-                                uint8_t button, uint8_t pressed, uint8_t motion,
-                                uint8_t mods, int64_t cols, int64_t rows);
+// surface = HOST_SURFACE_PANELS (1); the same three serve the host's other
+// cell windows (Settings, the dialog and git windows).
+int64_t tk_desktop_surface_layout(int64_t h, int64_t surface, int64_t cols,
+                                  int64_t rows, int64_t out_ptr, int64_t cap);
+int32_t tk_desktop_surface_key(int64_t h, int64_t surface, uint32_t key,
+                               uint8_t mods, int64_t cols, int64_t rows);
+int32_t tk_desktop_surface_mouse(int64_t h, int64_t surface, int64_t x,
+                                 int64_t y, uint8_t button, uint8_t pressed,
+                                 uint8_t motion, uint8_t mods, int64_t cols,
+                                 int64_t rows, uint8_t click_count);
 int32_t tk_desktop_panels_pointer_shape(int64_t h, int64_t x, int64_t y,
                                         int64_t cols, int64_t rows);
 ```
 
-`tk_desktop_layout_panels` packs the same `[codepoint, fg|bg<<8|style<<16,
+`tk_desktop_surface_layout` packs the same `[codepoint, fg|bg<<8|style<<16,
 underline]` 3-word-per-cell buffer as `tk_desktop_layout` — the panel window's
-`PanelCellView` rasterizes it with the identical Core Text path. The `_panels`
+`PanelCellView` rasterizes it with the identical Core Text path. The surface
 key/mouse functions return the same `ACT_*` codes (so e.g. a link click in the
 debug output can still bubble an open-file action to the host).
 

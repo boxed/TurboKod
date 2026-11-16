@@ -12,8 +12,8 @@ Settings is a declarative dialog (see [declarative-ui.md](declarative-ui.md)).
 On macOS it doesn't cover the workspace, so the live retint is visible: it
 opens in its **own window**, leaving the project window fully interactive.
 That window is either the grid projection in a cell window (the classic look:
-`Desktop.settings_detached`, `tk_desktop_layout_settings` /
-`tk_desktop_settings_*`, polled via `tk_desktop_settings_active`) or a native
+`Desktop.settings_detached`, `tk_desktop_surface_*` with
+`HOST_SURFACE_SETTINGS`, polled via `tk_desktop_settings_active`) or a native
 one (the macOS-style UI: `tk_desktop_ui`'s `window` stack). In the terminal
 it's a dialog over the workspace; the preview shows the theme there.
 

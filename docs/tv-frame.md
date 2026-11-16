@@ -76,8 +76,8 @@ never set `host_owns_menu`, which `Desktop.tv_frame()` requires.
 
 The git view gets a non-modal window of its own (`TVGitWindow`, a `.git`
 `CellView`: `Desktop.git_window`, `paint_git_window`,
-`handle_git_window_event`, `tk_desktop_layout_git` /
-`tk_desktop_git_window_key` / `_mouse`), not the dialog window below; see
+`handle_git_window_event`, `tk_desktop_surface_*` with `HOST_SURFACE_GIT`),
+not the dialog window below; see
 the git view section of [native-ui.md](native-ui.md).
 
 As in the other two looks, the declarative dialogs (the
@@ -115,8 +115,8 @@ Settings moves it into that look's window.
   its editor or terminal instead of being replayed into Settings' field.
 - C ABI: `tk_desktop_dialog_window` (JSON `{kind, title, cols, rows,
   resizable}`: the size the dialog takes in the grid of a project window
-  that size), `tk_desktop_layout_dialog`, `tk_desktop_dialog_key`,
-  `tk_desktop_dialog_mouse` (both return host actions like
+  that size), and `tk_desktop_surface_layout` / `_key` / `_mouse` with
+  `HOST_SURFACE_DIALOG` (key and mouse return host actions like
   `tk_desktop_key`).
 
 Host side, `TVDialogWindow` (polled by `pollTVDialog`): a `.dialog`
