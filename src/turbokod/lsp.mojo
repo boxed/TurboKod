@@ -23,6 +23,7 @@ from .json import (
     encode_json, json_array, json_bool, json_int, json_null, json_object,
     json_str, JsonValue, parse_json,
 )
+from .case_fold import fold_byte
 from .string_utils import utf8_prefix
 from .posix import (
     POSIX_SPAWN_FILE_ACTIONS_SIZE, SIGTERM,
@@ -767,10 +768,7 @@ def _parse_content_length(buf: List[UInt8], hdr_end: Int) -> Int:
         # starting at position ``i``.
         var ok = True
         for k in range(len(nb)):
-            var bc = Int(buf[i + k])
-            if 0x41 <= bc and bc <= 0x5A:
-                bc = bc + 0x20
-            if bc != Int(nb[k]):
+            if fold_byte(buf[i + k]) != nb[k]:
                 ok = False
                 break
         if ok:

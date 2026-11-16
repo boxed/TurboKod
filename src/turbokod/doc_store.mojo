@@ -40,7 +40,7 @@ DevDocs JSON shape (as shipped by https://documents.devdocs.io/):
 
 from std.collections.list import List
 
-from .case_fold import fold_ascii
+from .case_fold import fold_ascii, fold_byte
 from .file_io import join_path, read_file, stat_file
 from .json import parse_json
 from .string_utils import display_columns, hex_digit_value
@@ -506,10 +506,7 @@ def _get_attr(tag: String, attr: String) -> String:
         if boundary:
             var matches = True
             for k in range(an):
-                var ch = Int(tb[i + k])
-                if 0x41 <= ch and ch <= 0x5A:
-                    ch += 0x20
-                if ch != Int(ab[k]):
+                if fold_byte(tb[i + k]) != ab[k]:
                     matches = False
                     break
             if matches:
@@ -603,10 +600,7 @@ def _skip_to_close(html: String, start: Int, name: String) -> Int:
                 if k + j >= n:
                     matches = False
                     break
-                var ch = Int(b[k + j])
-                if 0x41 <= ch and ch <= 0x5A:
-                    ch += 0x20
-                if ch != Int(nb[j]):
+                if fold_byte(b[k + j]) != nb[j]:
                     matches = False
                     break
             if matches:

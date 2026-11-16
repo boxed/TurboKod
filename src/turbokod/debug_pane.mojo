@@ -50,6 +50,7 @@ constants is the smoothest pattern available, and matches what
 from std.collections.list import List
 
 from .canvas import Canvas
+from .case_fold import fold_byte
 from .string_utils import display_columns, truncate_to_columns
 from .painter import Painter
 from .cell import Cell, FONT_DEBUGGER, FONT_TERMINAL
@@ -865,7 +866,7 @@ struct DebugPane(Copyable, Movable):
             var ok = True
             for k in range(we - ws):
                 if (lb[k] != b[ws + k]) if exact \
-                        else (_lower(lb[k]) != _lower(b[ws + k])):
+                        else (fold_byte(lb[k]) != fold_byte(b[ws + k])):
                     ok = False
                     break
             if ok:
@@ -1804,10 +1805,6 @@ def _is_ident_byte(c: UInt8) -> Bool:
     ``_``, and any non-ASCII (UTF-8) byte."""
     return (c >= 0x61 and c <= 0x7A) or (c >= 0x41 and c <= 0x5A) \
         or (c >= 0x30 and c <= 0x39) or c == 0x5F or c >= 0x80
-
-
-def _lower(c: UInt8) -> UInt8:
-    return c + 0x20 if c >= 0x41 and c <= 0x5A else c
 
 
 def _utf16_len(s: String, end_byte: Int) -> Int:
