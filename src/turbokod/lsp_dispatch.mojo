@@ -484,7 +484,7 @@ struct _PositionRemapper(Copyable, Movable):
 
     ``LineTable``s are cached per path for the life of one walk, so a
     rename touching 50 edits in one file indexes it once. Open buffers
-    are seeded from ``_doc_texts`` (authoritative — the buffer may be
+    are seeded from ``_OpenDoc.text`` (authoritative — the buffer may be
     dirty); anything else is read from disk.
     """
     var enc: UInt8
@@ -609,6 +609,26 @@ struct _PositionRemapper(Copyable, Movable):
             converted = self.tables[slot].col_to_wire(row, col, self.enc)
         out.put(String("character"), json_int(converted))
         return out^
+
+
+@fieldwise_init
+struct _OpenDoc(Copyable, Movable):
+    """A document the server has been sent ``didOpen`` for, and the last
+    text it got. Cursor-driven requests (documentHighlight, signatureHelp,
+    documentColor, …) all funnel through ``_send_open_or_change`` to
+    guarantee the server has the live text; without the comparison, each
+    one bumps the version and fires a no-op didChange even when nothing
+    changed, which restarts the server's analysis and flickers the
+    "analyzing edits…" spinner on every cursor move."""
+    var path: String    # absolute
+    var version: Int
+    # The text itself is kept only for a server on a non-utf-8 position
+    # encoding, where the remapper needs it to convert columns; for a
+    # utf-8 one it's empty, rather than a second copy of every open buffer
+    # per server. The comparison is by ``length`` + ``hash``.
+    var text: String
+    var length: Int
+    var hash: UInt64
 
 
 struct _EditSlot(Copyable, Movable):
@@ -1101,24 +1121,7 @@ struct LspManager(Copyable, Movable):
     var _log_capture: String
 
     # Per-document tracking for didOpen / didChange.
-    var _doc_paths: List[String]      # absolute paths
-    var _doc_versions: List[Int]
-    # Last text we actually sent the server for each doc (parallel to
-    # ``_doc_paths``). Cursor-driven requests (documentHighlight,
-    # signatureHelp, documentColor, …) all funnel through
-    # ``_send_open_or_change`` to guarantee the server has the live text;
-    # without this, each one bumps the version and fires a no-op didChange
-    # even when nothing changed, which restarts the server's analysis and
-    # flickers the "analyzing edits…" spinner on every cursor move.
-    #
-    # The comparison is by ``_doc_lens`` + ``_doc_hashes``. The text
-    # itself (``_doc_texts``) is kept only for a server on a non-utf-8
-    # position encoding, where the remapper needs it to convert columns;
-    # for a utf-8 one the entry is empty, rather than a second copy of
-    # every open buffer per server.
-    var _doc_texts: List[String]
-    var _doc_lens: List[Int]
-    var _doc_hashes: List[UInt64]
+    var _docs: List[_OpenDoc]
 
     # Queued ``(path, text)`` pairs waiting for ``initialized`` to land.
     var _pending_open_paths: List[String]
@@ -1299,11 +1302,7 @@ struct LspManager(Copyable, Movable):
         self._root_uri = String("")
         self._language_id = String("")
         self._argv = List[String]()
-        self._doc_paths = List[String]()
-        self._doc_versions = List[Int]()
-        self._doc_texts = List[String]()
-        self._doc_lens = List[Int]()
-        self._doc_hashes = List[UInt64]()
+        self._docs = List[_OpenDoc]()
         self._pending_open_paths = List[String]()
         self._pending_open_texts = List[String]()
         self._diagnostic_buckets = List[_DiagnosticBucket]()
@@ -1572,7 +1571,7 @@ struct LspManager(Copyable, Movable):
 
     def _ensure_remapper(mut self):
         """Refresh the cached line index if a document changed since it was
-        built. Open buffers are seeded from ``_doc_texts`` rather than read
+        built. Open buffers are seeded from ``_OpenDoc.text`` rather than read
         from disk: a dirty buffer's columns must be converted against the
         text the *server* was given, not the stale file."""
         if self._remap_cached_epoch == self._remap_epoch:
@@ -1580,8 +1579,8 @@ struct LspManager(Copyable, Movable):
         var rm = _PositionRemapper(self._position_enc)
         # Nothing to convert under utf-8 — and no text was kept for it.
         if self._position_enc != POS_UTF8:
-            for i in range(len(self._doc_paths)):
-                rm.seed(self._doc_paths[i], self._doc_texts[i])
+            for ref d in self._docs:
+                rm.seed(d.path, d.text)
         self._remap_cached = rm^
         self._remap_cached_epoch = self._remap_epoch
 
@@ -1913,9 +1912,9 @@ struct LspManager(Copyable, Movable):
         var ch = channel_at(self._channel)
         if not self._join_pending and Bool(ch[].init_result) \
                 and ch[].check_alive():
-            for k in range(len(self._doc_paths)):
+            for ref d in self._docs:
                 var td = json_object()
-                td.put(String("uri"), json_str(_path_to_uri(self._doc_paths[k])))
+                td.put(String("uri"), json_str(_path_to_uri(d.path)))
                 var params = json_object()
                 params.put(String("textDocument"), td)
                 try:
@@ -1977,12 +1976,7 @@ struct LspManager(Copyable, Movable):
         its sync capability; most want just the URI."""
         if self.state != _STATE_READY:
             return
-        var opened = False
-        for k in range(len(self._doc_paths)):
-            if self._doc_paths[k] == path:
-                opened = True
-                break
-        if not opened:
+        if self._doc_index(path) < 0:
             return
         var params = json_object()
         params.put(String("textDocument"), _text_document(path))
@@ -2014,18 +2008,10 @@ struct LspManager(Copyable, Movable):
                 else:
                     j += 1
             return
-        var idx = -1
-        for k in range(len(self._doc_paths)):
-            if self._doc_paths[k] == path:
-                idx = k
-                break
+        var idx = self._doc_index(path)
         if idx < 0:
             return
-        _ = self._doc_paths.pop(idx)
-        _ = self._doc_versions.pop(idx)
-        _ = self._doc_texts.pop(idx)
-        _ = self._doc_lens.pop(idx)
-        _ = self._doc_hashes.pop(idx)
+        _ = self._docs.pop(idx)
         self._bump_remap_epoch()
         # Drop any "analyzing edits…" spinner state — a closed buffer
         # must not keep one spinning.
@@ -4604,16 +4590,16 @@ struct LspManager(Copyable, Movable):
         var version_opt = params.object_get(String("version"))
         if version_opt and version_opt.value().is_int():
             pub_version = version_opt.value().as_int()
-            for k in range(len(self._doc_paths)):
-                if self._doc_paths[k] == path:
-                    if pub_version < self._doc_versions[k]:
+            for ref d in self._docs:
+                if d.path == path:
+                    if pub_version < d.version:
                         _lsp_debug_log(
                             String("← publishDiagnostics (dropped stale) lang=")
                             + self._language_id
                             + String(" path=") + path
                             + String(" pub_version=") + String(pub_version)
                             + String(" latest_version=")
-                            + String(self._doc_versions[k]),
+                            + String(d.version),
                         )
                         # Stale: don't clear the in-flight flag — the
                         # newer didChange we already sent is still
@@ -5218,37 +5204,37 @@ struct LspManager(Copyable, Movable):
         for k in range(len(paths)):
             self._send_open_or_change(paths[k], texts[k])
 
+    def _doc_index(self, path: String) -> Int:
+        """Index of the open document ``path`` in ``_docs``, or -1."""
+        for k in range(len(self._docs)):
+            if self._docs[k].path == path:
+                return k
+        return -1
+
     def _send_open_or_change(mut self, path: String, var text: String):
-        var idx = -1
-        for k in range(len(self._doc_paths)):
-            if self._doc_paths[k] == path:
-                idx = k
-                break
+        var idx = self._doc_index(path)
         var n = len(text.as_bytes())
         var h = fnv_str(fnv_start(), text)
-        # Only the remapper reads the text back (see ``_doc_texts``).
+        # Only the remapper reads the text back (see ``_OpenDoc.text``).
         var kept = String("")
         if self._position_enc != POS_UTF8:
             kept = text.copy()
         if idx < 0:
-            self._doc_paths.append(path)
-            self._doc_versions.append(1)
-            self._doc_texts.append(kept^)
-            self._doc_lens.append(n)
-            self._doc_hashes.append(h)
+            self._docs.append(_OpenDoc(path, 1, kept^, n, h))
             self._bump_remap_epoch()
             self._send_did_open(path, text^)
         else:
             # Unchanged text → the server already has this exact content.
             # Skip the didChange so cursor-driven requests don't trigger a
             # spurious re-analysis (the "analyzing edits…" flicker).
-            if self._doc_lens[idx] == n and self._doc_hashes[idx] == h:
+            ref d = self._docs[idx]
+            if d.length == n and d.hash == h:
                 return
-            var version = self._doc_versions[idx] + 1
-            self._doc_versions[idx] = version
-            self._doc_texts[idx] = kept^
-            self._doc_lens[idx] = n
-            self._doc_hashes[idx] = h
+            d.version += 1
+            var version = d.version
+            d.text = kept^
+            d.length = n
+            d.hash = h
             self._bump_remap_epoch()
             self._send_did_change(path, version, text^)
 
@@ -6868,7 +6854,7 @@ def uri_to_path(uri: String) -> String:
 def _uri_to_path(uri: String) -> String:
     """Strip the ``file://`` scheme and percent-decode ``%XX`` escapes
     (spec-compliant servers encode spaces / non-ASCII in path bytes; an
-    undecoded ``%20`` wouldn't match a ``_doc_paths`` entry or open on
+    undecoded ``%20`` wouldn't match a ``_docs`` entry or open on
     disk). A malformed ``%`` is left as a literal byte."""
     if not uri.startswith("file://"):
         return uri
