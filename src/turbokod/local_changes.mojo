@@ -4053,76 +4053,32 @@ struct LocalChanges(Movable):
         carries the driving identity through the right-pane stops so
         the next Tab knows whether to jump to Commits or wrap to
         Files."""
-        if direction > 0:
-            self._tab_forward()
-        else:
-            self._tab_backward()
+        # The cycle as (pane, driving sidebar pane) stops.
+        var panes: List[Int] = [
+            _PANE_FILES, _PANE_RIGHT_UNSTAGED, _PANE_RIGHT_STAGED,
+            _PANE_BRANCHES, _PANE_RIGHT_INFO, _PANE_COMMITS, _PANE_RIGHT_INFO,
+        ]
+        var drivers: List[Int] = [
+            _PANE_FILES, _PANE_FILES, _PANE_FILES,
+            _PANE_BRANCHES, _PANE_BRANCHES, _PANE_COMMITS, _PANE_COMMITS,
+        ]
+        var n = len(panes)
+        # Info is two stops; the driving pane says which one we're on.
+        var at = 6 if direction > 0 else 4
+        for i in range(n):
+            if panes[i] == self.focus and (
+                self.focus != _PANE_RIGHT_INFO
+                or drivers[i] == self.last_sidebar_focus
+            ):
+                at = i
+                break
+        var to = (at + (1 if direction > 0 else n - 1)) % n
+        self.focus = panes[to]
+        self.last_sidebar_focus = drivers[to]
         # Each pane has its own row labels — drop any stale type-ahead
         # buffer on a focus change so the next keystroke starts a
         # fresh search against the new pane's items.
         self._type_ahead.reset()
-
-    def _tab_forward(mut self):
-        var f = self.focus
-        if f == _PANE_FILES:
-            self.focus = _PANE_RIGHT_UNSTAGED
-            self.last_sidebar_focus = _PANE_FILES
-            return
-        if f == _PANE_RIGHT_UNSTAGED:
-            self.focus = _PANE_RIGHT_STAGED
-            return
-        if f == _PANE_RIGHT_STAGED:
-            self.focus = _PANE_BRANCHES
-            self.last_sidebar_focus = _PANE_BRANCHES
-            return
-        if f == _PANE_BRANCHES:
-            self.focus = _PANE_RIGHT_INFO
-            self.last_sidebar_focus = _PANE_BRANCHES
-            return
-        if f == _PANE_COMMITS:
-            self.focus = _PANE_RIGHT_INFO
-            self.last_sidebar_focus = _PANE_COMMITS
-            return
-        if f == _PANE_RIGHT_INFO:
-            # Two stops in the cycle land here — Branches→Info and
-            # Commits→Info. Disambiguate by the driving pane.
-            if self.last_sidebar_focus == _PANE_BRANCHES:
-                self.focus = _PANE_COMMITS
-                self.last_sidebar_focus = _PANE_COMMITS
-            else:
-                self.focus = _PANE_FILES
-                self.last_sidebar_focus = _PANE_FILES
-            return
-
-    def _tab_backward(mut self):
-        var f = self.focus
-        if f == _PANE_FILES:
-            # Wrap to last stop in the cycle: Info driven by Commits.
-            self.focus = _PANE_RIGHT_INFO
-            self.last_sidebar_focus = _PANE_COMMITS
-            return
-        if f == _PANE_RIGHT_INFO:
-            if self.last_sidebar_focus == _PANE_COMMITS:
-                self.focus = _PANE_COMMITS
-                return
-            # branches-driving → step back to Branches
-            self.focus = _PANE_BRANCHES
-            return
-        if f == _PANE_COMMITS:
-            self.focus = _PANE_RIGHT_INFO
-            self.last_sidebar_focus = _PANE_BRANCHES
-            return
-        if f == _PANE_BRANCHES:
-            self.focus = _PANE_RIGHT_STAGED
-            self.last_sidebar_focus = _PANE_FILES
-            return
-        if f == _PANE_RIGHT_STAGED:
-            self.focus = _PANE_RIGHT_UNSTAGED
-            return
-        if f == _PANE_RIGHT_UNSTAGED:
-            self.focus = _PANE_FILES
-            self.last_sidebar_focus = _PANE_FILES
-            return
 
     def _right_panel_height(self, pane: Int, container_bounds: Rect) -> Int:
         """Body height (heading row excluded) of one right-side panel."""
