@@ -558,6 +558,15 @@ def quick_open_match_parts(path: String, folded_parts: List[String]) -> Bool:
     return True
 
 
+def qualified_name(prefix: String, name: String) -> String:
+    """``prefix.name``, or bare ``name`` without a prefix: the match
+    haystack a picker builds once per entry, so typing the enclosing
+    class or section narrows nested ones."""
+    if len(prefix.as_bytes()) == 0:
+        return name
+    return prefix + String(".") + name
+
+
 def filter_indices_by_query(
     haystacks: List[String], query: String, start: Int = 0,
 ) -> List[Int]:

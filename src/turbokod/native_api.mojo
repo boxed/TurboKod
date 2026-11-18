@@ -59,7 +59,7 @@ from turbokod.file_io import basename, parent_path, project_relative
 from turbokod.colors import (
     Attr, BG_TRUECOLOR, EDITOR_BG, EDITOR_FG, FG_TRUECOLOR,
 )
-from turbokod.string_utils import byte_slice
+from turbokod.string_utils import byte_slice, fnv_int, fnv_start
 from turbokod.config import (
     chicago_font_label, default_font_label,
 )
@@ -126,12 +126,6 @@ def _pack_surface(
     swap(_desk(h)[].host_items[surface], canvas.host_items)
     _desk(h)[].return_frame_canvas(surface, canvas^)
     return n
-
-
-def _blank_canvas(cols: Int, rows: Int) -> Canvas:
-    """A ``cols``x``rows`` canvas cleared to the default attribute, ready
-    for one surface's paint."""
-    return Canvas(cols, rows)
 
 
 def _string_from(ptr: Int, n: Int) -> String:
@@ -489,7 +483,7 @@ def tk_editor_region_layout(
     by ``(sub + frac) × CELL_H``. Returns the number of cells written."""
     if h == 0 or out_ptr == 0 or region_cols <= 0 or region_rows <= 0:
         return 0
-    var canvas = _blank_canvas(region_cols, region_rows)
+    var canvas = Canvas(region_cols, region_rows)
     _desk(h)[].paint_editor_region(
         win_idx, canvas, region_cols, region_rows, True,
     )
@@ -1671,7 +1665,7 @@ def tk_desktop_layout_frame(
     the ring is meant to show; the Desktop's grid covers the rest."""
     if h == 0 or out_ptr == 0 or cols <= 0 or rows <= 0:
         return 0
-    var canvas = _blank_canvas(cols, rows)
+    var canvas = Canvas(cols, rows)
     _desk(h)[].paint_frame(canvas, Rect(0, 0, cols, rows), zoomed != 0)
     return pack_canvas(canvas, cols, rows, out_ptr, cap)
 
@@ -1948,18 +1942,14 @@ def _tree_stamp(ref t: FileTree, screen: Rect, which: Int) -> Int:
     """Folds everything ``_tree_json`` reads into one Int (FNV-1a over
     the fields): the listing's version, selection, focus and rect."""
     var r = t.content_rect(screen)
-    var parts = List[Int]()
-    parts.append(which)
-    parts.append(t.entries_version)
-    parts.append(t.selected)
-    parts.append(1 if t.focused else 0)
-    parts.append(r.a.x)
-    parts.append(r.a.y)
-    parts.append(r.width())
-    parts.append(r.height())
-    var hsh = UInt64(14695981039346656037)
-    for i in range(len(parts)):
-        hsh = (hsh ^ UInt64(parts[i])) * UInt64(1099511628211)
+    var hsh = fnv_int(fnv_start(), which)
+    hsh = fnv_int(hsh, t.entries_version)
+    hsh = fnv_int(hsh, t.selected)
+    hsh = fnv_int(hsh, 1 if t.focused else 0)
+    hsh = fnv_int(hsh, r.a.x)
+    hsh = fnv_int(hsh, r.a.y)
+    hsh = fnv_int(hsh, r.width())
+    hsh = fnv_int(hsh, r.height())
     # Never 0: that's "no tree".
     return Int(hsh | 1)
 

@@ -13,7 +13,7 @@ the same fuzzy-with-word-boundary feel as Quick Open / Go to Symbol.
 from std.collections.list import List
 
 from .doc_store import DocEntry
-from .quick_open import filter_indices_by_query
+from .quick_open import filter_indices_by_query, qualified_name
 from .text_field import TextField
 
 
@@ -65,13 +65,9 @@ struct DocPick(Movable):
             # concatenation.
             self._haystacks = List[String](capacity=len(self.entries))
             for i in range(len(self.entries)):
-                if len(self.entries[i].type_name.as_bytes()) > 0:
-                    self._haystacks.append(
-                        self.entries[i].type_name + String(".")
-                        + self.entries[i].name
-                    )
-                else:
-                    self._haystacks.append(self.entries[i].name)
+                self._haystacks.append(qualified_name(
+                    self.entries[i].type_name, self.entries[i].name,
+                ))
             self._cached_display = display
         self.display = display^
         self.query = TextField()

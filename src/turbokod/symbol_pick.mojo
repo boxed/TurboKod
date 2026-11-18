@@ -14,7 +14,7 @@ the same fuzzy-with-word-boundary feel they're already used to.
 from std.collections.list import List
 
 from .lsp_dispatch import SymbolItem
-from .quick_open import filter_indices_by_query
+from .quick_open import filter_indices_by_query, qualified_name
 from .text_field import TextField
 
 
@@ -72,13 +72,9 @@ struct SymbolPick(Movable):
         # is a pure per-entry match with no string concatenation.
         self._haystacks = List[String]()
         for i in range(len(self.entries)):
-            if len(self.entries[i].container.as_bytes()) > 0:
-                self._haystacks.append(
-                    self.entries[i].container + String(".")
-                    + self.entries[i].name
-                )
-            else:
-                self._haystacks.append(self.entries[i].name)
+            self._haystacks.append(qualified_name(
+                self.entries[i].container, self.entries[i].name,
+            ))
         self.loading = False
         self._refilter()
 
