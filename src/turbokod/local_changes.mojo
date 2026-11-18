@@ -2130,81 +2130,24 @@ struct LocalChanges(Movable):
 
     def close(mut self):
         """Hide the view and reset its per-session state (selections,
-        panels, overlays, in-flight op bookkeeping); ``open`` starts from
-        this same reset. ``_pending_commit_message`` is deliberately kept —
-        an unsent commit message survives closing the view."""
+        panels, overlays, in-flight op bookkeeping) to what ``__init__``
+        builds; ``open`` starts from this same reset. Kept across it: an
+        unsent commit message, the compiled git-output patterns (dropping
+        them would strand their libonig handles), and a git op still
+        running — it keeps ``_git_op`` so ``tick`` reaches its "closed
+        mid-op" branch and reaps the child (resetting it stranded the
+        process: closing on a file open while a push ran)."""
         self._poll_git.cancel()
-        self.active = False
-        self.submitted = False
-        self.root = String("")
-        self.files = List[FileEntry]()
-        self.file_rows = List[FileRow]()
-        # The last selected commit's whole ``git show``.
-        self._show_text = String("")
-        self._expanded_paths = List[String]()
-        self.branches = List[GitBranch]()
-        self.commits = List[GitCommit]()
-        self.focus = _PANE_FILES
-        self.last_sidebar_focus = _PANE_FILES
-        self.sel_file = 0
-        self.sel_branch = 0
-        self.sel_commit = 0
-        self.scroll_files = 0
-        self.scroll_branches = 0
-        self.scroll_commits = 0
-        self._invalidate_right_panels()
-        self.sidebar_width_user = -1
-        self.files_height_user = -1
-        self.branches_height_user = -1
-        self.unstaged_height_user = -1
-        self._drag_kind = _DRAG_NONE
-        self.selected_path = String("")
-        self.selected_line = 0
-        self.pending_open_url = String("")
-        self.status_message = String("")
-        self.overlay = _OVERLAY_NONE
-        self.overlay_input = TextField()
-        self.overlay_message = String("")
-        self.overlay_action = String("")
-        # Hand back the commit-message editor's Find regex before the
-        # value is overwritten — an ``Editor`` going out of scope
-        # reclaims nothing (see ``Window.release``).
+        # An ``Editor`` going out of scope reclaims nothing (see
+        # ``Window.release``): hand back its Find regex first.
         self.overlay_editor.release_search_cache()
-        self.overlay_editor = Editor(String(""))
-        self._reword_sha = String("")
-        self._reword_is_head = False
-        self._reword_save_btn = ShadowButton(String(_SAVE_BTN_LABEL), 0, 0)
-        self._reword_area_rect = Rect(0, 0, 0, 0)
-        self.flash_message = String("")
-        self._flash_until_ms = 0
-        self.overlay_output = String("")
-        self._overlay_lines = List[String]()
-        self._overlay_lines_valid = False
-        self.overlay_output_scroll = 0
-        self._output_links = List[OutputLink]()
-        self._output_kind = GIT_OUT_OTHER
-        self._output_promoted = False
-        self.sidebar_dock.reset()
-        self._type_ahead.reset()
-        # An op still running keeps ``_git_op``, so ``tick`` reaches its
-        # "closed mid-op" branch and reaps the child. Resetting it here
-        # made ``tick`` return early forever and stranded the process
-        # (closing on a file open while a push ran).
-        if not self.git_runner.is_active():
-            self._git_op = _GITOP_NONE
-        self._git_op_label = String("")
-        self._git_revert_path = String("")
-        self._git_revert_untracked = False
-        self._git_checkout_branch = String("")
-        self._git_merge_branch = String("")
-        self._git_delete_branch = String("")
-        self._git_delete_remote = String("")
-        self._rebase_step = 0
-        self._rebase_onto = String("")
-        self._rebase_log = String("")
-        self._rebase_noisy = False
-        self._merge_target_is_main = False
-        self._rebase_rewrote_current = False
+        var fresh = LocalChanges()
+        swap(fresh._pending_commit_message, self._pending_commit_message)
+        swap(fresh._output_matchers, self._output_matchers)
+        if self.git_runner.is_active():
+            swap(fresh.git_runner, self.git_runner)
+            fresh._git_op = self._git_op
+        self = fresh^
 
     # --- geometry ---------------------------------------------------------
 
@@ -5699,21 +5642,10 @@ struct LocalChanges(Movable):
         var op = self._git_op
         self._git_op = _GITOP_NONE
         # Modal closed mid-op: reap and drop. Nothing to flash and
-        # ``_refresh_full`` would re-fetch state we no longer display.
+        # ``_refresh_full`` would re-fetch state we no longer display;
+        # ``close`` already reset the op's arguments, rebase steps
+        # included — whatever step was in flight is the last one we drive.
         if not self.active:
-            self._git_op_label = String("")
-            self._git_revert_path = String("")
-            self._git_revert_untracked = False
-            self._git_checkout_branch = String("")
-            self._git_merge_branch = String("")
-            self._git_delete_branch = String("")
-            self._git_delete_remote = String("")
-            # Whatever step was in flight is the last one we drive — the
-            # view that would report the rest is gone.
-            self._rebase_step = 0
-            self._rebase_onto = String("")
-            self._rebase_log = String("")
-            self._rebase_noisy = False
             return
         var ok = r.ok()
         # Three fates, decided here: a routine success reports through the

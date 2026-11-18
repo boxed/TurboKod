@@ -710,78 +710,36 @@ struct _OpenDoc(Copyable, Movable):
     var text: String
 
 
-struct _EditSlot(Copyable, Movable):
-    """One request whose answer is a flat ``TextEditEntry`` list (edits,
-    or range / row carriers) for one file: the in-flight id, the path and
-    text it was asked against, and the answer parked until the host takes
-    it. ``ready`` distinguishes "no answer yet" from "an empty one"."""
+struct _Slot[T: Copyable & Defaultable & Deinitable](Copyable, Movable):
+    """One request whose parsed answer is parked until the host takes it:
+    the in-flight id, the file it was asked about, the answer, and
+    ``ready`` to tell "no answer yet" from "an empty one"."""
     var id: String
+    # The file the request was about, echoed to the host so it can drop
+    # an answer for a buffer it no longer shows.
     var path: String
-    # The buffer text the request was made against, for slots whose edits
-    # only mean anything against exactly that text (formatting, on-type):
-    # the host drops them if the buffer has moved on by the time they land.
+    # The buffer text the request was made against, for answers that only
+    # mean anything against exactly that text (formatting, on-type, rename
+    # edits): the host drops them if the buffer has moved on by the time
+    # they land. Set by the requester ahead of the send.
     var text: String
-    var edits: List[TextEditEntry]
+    var value: Self.T
     var ready: Bool
 
     def __init__(out self):
         self.id = String("")
         self.path = String("")
         self.text = String("")
-        self.edits = List[TextEditEntry]()
+        self.value = Self.T()
         self.ready = False
 
     def start(mut self, id: String, path: String = String("")) -> Bool:
         """Record a request just sent (``id`` empty: the send failed, so
-        nothing is in flight and the parked answer stays)."""
+        nothing is in flight and the parked answer, path included, stays)."""
         self.id = id
         if len(id.as_bytes()) == 0:
             return False
         self.path = path
-        self.edits = List[TextEditEntry]()
-        self.ready = False
-        return True
-
-    def owns(self, id: String) -> Bool:
-        return len(self.id.as_bytes()) > 0 and id == self.id
-
-    def publish(mut self, var edits: List[TextEditEntry]):
-        """Park ``edits`` for the host, leaving any in-flight id alone (a
-        resolve round-trip re-publishing a grown list)."""
-        self.edits = edits^
-        self.ready = True
-
-    def finish(mut self, var edits: List[TextEditEntry]):
-        self.publish(edits^)
-        self.id = String("")
-
-    def take(mut self) -> List[TextEditEntry]:
-        var out = self.edits^
-        self.edits = List[TextEditEntry]()
-        self.ready = False
-        return out^
-
-
-struct _Slot[T: Copyable & Defaultable & Deinitable](Copyable, Movable):
-    """One request whose parsed answer is parked until the host takes it:
-    the in-flight id, the answer, and ``ready`` to tell "no answer yet"
-    from "an empty one". ``_EditSlot`` is the same for edit lists plus the
-    path / text they were asked against."""
-    var id: String
-    var value: Self.T
-    var ready: Bool
-
-    def __init__(out self):
-        self.id = String("")
-        self.value = Self.T()
-        self.ready = False
-
-    def start(mut self, id: String) -> Bool:
-        """Record a request just sent (``id`` empty: the send failed, so
-        nothing is in flight and the parked answer stays)."""
-        self.id = id
-        if len(id.as_bytes()) == 0:
-            return False
         self.value = Self.T()
         self.ready = False
         return True
@@ -800,11 +758,26 @@ struct _Slot[T: Copyable & Defaultable & Deinitable](Copyable, Movable):
         self.publish(value^)
         self.id = String("")
 
+    def settle[parse: def(JsonValue) thin -> Self.T](
+        mut self, result: Optional[JsonValue],
+    ):
+        """Finish with ``parse`` of a response's result, or the empty
+        answer when there is none (an error response)."""
+        if result:
+            self.finish(parse(result.value()))
+        else:
+            self.finish(Self.T())
+
     def take(mut self) -> Self.T:
         var out = Self.T()
         swap(out, self.value)
         self.ready = False
         return out^
+
+
+# A request answered by a flat ``TextEditEntry`` list (edits, or range /
+# row carriers) for one file.
+comptime _EditSlot = _Slot[List[TextEditEntry]]
 
 
 struct _ResolveFanout(Copyable, Movable):
@@ -982,7 +955,7 @@ struct LspManager(Copyable, Movable):
     # scoped to a workspace-wide query rather than a single document.
     # Used by the Find Symbol picker to disambiguate same-named symbols.
     var _ws_symbols: _Slot[List[WorkspaceSymbolItem]]
-    # Pending ``textDocument/completion`` request state. ``_completion_path``
+    # Pending ``textDocument/completion`` request state. The slot's path
     # is echoed back via ``pending_completion_path`` so the host can drop a
     # stale response when the user has switched buffers by the time it
     # lands. ``_completion_manual`` records
@@ -990,7 +963,6 @@ struct LspManager(Copyable, Movable):
     # type auto-trigger) so the host can decide whether an empty
     # response should surface a ``<no completion found>`` message.
     var _completions: _Slot[List[CompletionItem]]
-    var _completion_path: String
     var _completion_manual: Bool
     # ``completionItem/resolve`` round-trip. Servers that set
     # ``resolveProvider`` ship the initial list without ``detail`` /
@@ -1004,21 +976,19 @@ struct LspManager(Copyable, Movable):
     var _resolve_detail: String
     var _has_resolve_result: Bool
     # Pending ``textDocument/hover`` request state. Same idea as the
-    # completion fields: ``_hover_path``/``_hover_row``/``_hover_col``
+    # completion fields: the slot's path and ``_hover_row``/``_hover_col``
     # are echoed via ``pending_hover_*`` so the host can drop a stale
     # response when the cursor has moved off the symbol. ``_hover`` parks
     # the rendered hover text (already joined into a single string).
     var _hover: _Slot[String]
-    var _hover_path: String
     var _hover_row: Int
     var _hover_col: Int
     # Pending ``textDocument/codeAction`` request state: the slot parks
     # the parsed action list until ``take_code_actions`` consumes it.
-    # ``_code_action_path`` is echoed via ``pending_code_action_path`` so
+    # The slot's path is echoed via ``pending_code_action_path`` so
     # the host can tell when the response is for a stale diagnostic menu
     # (the user moved on).
     var _code_actions: _Slot[List[CodeAction]]
-    var _code_action_path: String
     # ``codeAction/resolve`` fan-out. A server with
     # ``codeActionProvider.resolveProvider`` returns actions with a title and
     # no ``edit``; we resolve every such action before publishing the list, so
@@ -1034,9 +1004,6 @@ struct LspManager(Copyable, Movable):
     # response can be dropped, and a parked ``WorkspaceEdit`` (reusing the
     # ``CodeActionFileEdit`` grouping since rename returns the same shape).
     var _rename: _Slot[List[CodeActionFileEdit]]
-    var _rename_path: String
-    # The text the rename was asked for against, as ``_formatting.text``.
-    var _rename_text: String
     # ``textDocument/formatting`` + ``rangeFormatting`` — both return a flat
     # ``TextEdit[]`` for one file, parked here for the host to apply via
     # the same edit-application path rename/code-actions use.
@@ -1146,7 +1113,6 @@ struct LspManager(Copyable, Movable):
     # ``textDocument/documentColor`` — per-color swatch ``Highlight``s
     # (truecolor bg) parked for the editor overlay.
     var _colors: _Slot[List[Highlight]]
-    var _color_path: String
     # ``textDocument/diagnostic`` — the pull-diagnostics model (LSP 3.17).
     # Servers that advertise ``diagnosticProvider`` don't push
     # ``publishDiagnostics``; we request a report per document instead.
@@ -1286,24 +1252,19 @@ struct LspManager(Copyable, Movable):
         self._symbols = _Slot[List[SymbolItem]]()
         self._ws_symbols = _Slot[List[WorkspaceSymbolItem]]()
         self._completions = _Slot[List[CompletionItem]]()
-        self._completion_path = String("")
         self._completion_manual = False
         self._inflight_resolve_id = String("")
         self._resolve_aux = List[TextEditEntry]()
         self._resolve_detail = String("")
         self._has_resolve_result = False
         self._hover = _Slot[String]()
-        self._hover_path = String("")
         self._hover_row = 0
         self._hover_col = 0
         self._code_actions = _Slot[List[CodeAction]]()
-        self._code_action_path = String("")
         self._ca_resolve = _ResolveFanout()
         self._ca_accum = List[CodeAction]()
         self._ca_resolve_deadline = 0
         self._rename = _Slot[List[CodeActionFileEdit]]()
-        self._rename_path = String("")
-        self._rename_text = String("")
         self._formatting = _EditSlot()
         self._ontype = _EditSlot()
         self._moniker = _Slot[String]()
@@ -1341,7 +1302,6 @@ struct LspManager(Copyable, Movable):
         self._hierarchy_followup = String("")
         self._hierarchy_word = String("")
         self._colors = _Slot[List[Highlight]]()
-        self._color_path = String("")
         self._pull_diag_ids = List[String]()
         self._pull_diag_paths = List[String]()
         self._pulled_paths = List[String]()
@@ -1721,6 +1681,16 @@ struct LspManager(Copyable, Movable):
             self._log_on = _lsp_debug_enabled()
             self._log_checked_ms = now
         return self._log_on
+
+    def _log_response(mut self, what: String, id: String, label: String, n: Int):
+        """Log a response the way every slot does: what it answered, its
+        id, and one count. Nothing is built while logging is off."""
+        if self._logging():
+            _lsp_debug_write(
+                String("← ") + what + String(" response id=") + id
+                + String(" lang=") + self._language_id
+                + String(" ") + label + String("=") + String(n),
+            )
 
     def is_shared(self) -> Bool:
         """True while this manager is a session on a shared channel."""
@@ -2837,9 +2807,8 @@ struct LspManager(Copyable, Movable):
             self._completions.id.copy(),
             String("textDocument/completion"), params,
         )
-        if not self._completions.start(sent):
+        if not self._completions.start(sent, path):
             return False
-        self._completion_path = path
         self._completion_manual = manual
         return True
 
@@ -2873,7 +2842,7 @@ struct LspManager(Copyable, Movable):
         return self._completions.ready
 
     def pending_completion_path(self) -> String:
-        return self._completion_path
+        return self._completions.path
 
     def pending_completion_manual(self) -> Bool:
         """Echo the ``manual`` flag of the most recent completion
@@ -2969,9 +2938,8 @@ struct LspManager(Copyable, Movable):
         var sent = self._request_replacing(
             self._hover.id.copy(), String("textDocument/hover"), params,
         )
-        if not self._hover.start(sent):
+        if not self._hover.start(sent, path):
             return False
-        self._hover_path = path
         self._hover_row = line
         self._hover_col = character
         return True
@@ -2981,7 +2949,7 @@ struct LspManager(Copyable, Movable):
         return self._hover.ready
 
     def pending_hover_path(self) -> String:
-        return self._hover_path
+        return self._hover.path
 
     def pending_hover_row(self) -> Int:
         return self._hover_row
@@ -3053,9 +3021,8 @@ struct LspManager(Copyable, Movable):
             self._code_actions.id.copy(),
             String("textDocument/codeAction"), params,
         )
-        if not self._code_actions.start(sent):
+        if not self._code_actions.start(sent, path):
             return False
-        self._code_action_path = path
         return True
 
     # --- codeAction/resolve ------------------------------------------------
@@ -3143,7 +3110,7 @@ struct LspManager(Copyable, Movable):
         """Path the most recent code-action request was issued for. Lets
         the host drop a stale response when the user has dismissed the
         diagnostic menu before the server replied."""
-        return self._code_action_path
+        return self._code_actions.path
 
     def take_code_actions(mut self) -> List[CodeAction]:
         """Move the parked code-action list out of the manager. Pair
@@ -3197,17 +3164,14 @@ struct LspManager(Copyable, Movable):
                 + String(" character=") + String(character)
                 + String(" new_name=") + new_name,
             )
-        self._rename_text = text.copy()
+        self._rename.text = text.copy()
         self._send_open_or_change(path, text^)
         var params = self._position_params(path, line, character)
         params.put(String("newName"), json_str(new_name))
         var sent = self._request_replacing(
             self._rename.id.copy(), String("textDocument/rename"), params,
         )
-        if not self._rename.start(sent):
-            return False
-        self._rename_path = path
-        return True
+        return self._rename.start(sent, path)
 
     def has_pending_rename(self) -> Bool:
         """True iff a parsed rename ``WorkspaceEdit`` is parked for ``take``.
@@ -3217,11 +3181,11 @@ struct LspManager(Copyable, Movable):
 
     def pending_rename_path(self) -> String:
         """Path the most recent rename request was issued for."""
-        return self._rename_path
+        return self._rename.path
 
     def pending_rename_text(self) -> String:
         """The text of that file the rename was asked for against."""
-        return self._rename_text
+        return self._rename.text
 
     def take_rename_edits(mut self) -> List[CodeActionFileEdit]:
         """Move the parked rename edits out of the manager. Clears the
@@ -3897,16 +3861,15 @@ struct LspManager(Copyable, Movable):
             self._colors.id.copy(),
             String("textDocument/documentColor"), params,
         )
-        if not self._colors.start(sent):
+        if not self._colors.start(sent, path):
             return False
-        self._color_path = path
         return True
 
     def has_pending_colors(self) -> Bool:
         return self._colors.ready
 
     def pending_color_path(self) -> String:
-        return self._color_path
+        return self._colors.path
 
     def take_colors(mut self) -> List[Highlight]:
         var out = self._colors.take()
@@ -4128,42 +4091,22 @@ struct LspManager(Copyable, Movable):
                 self._inflight_word = String("")
                 continue
             if self._references.owns(id):
-                var refs = List[DefinitionResolved]()
-                if msg.result:
-                    refs = _parse_references_result(msg.result.value())
-                if self._logging():
-                    _lsp_debug_write(
-                        String("← references response id=") + id
-                        + String(" lang=") + self._language_id
-                        + String(" count=") + String(len(refs)),
-                    )
-                self._references.finish(refs^)
+                self._references.settle[_parse_references_result](msg.result)
+                self._log_response(
+                    String("references"), id, String("count"), len(self._references.value),
+                )
                 continue
             if self._symbols.owns(id):
-                var items = List[SymbolItem]()
-                if msg.result:
-                    items = _parse_symbols_result(msg.result.value())
-                self._symbols.finish(items^)
+                self._symbols.settle[_parse_symbols_result](msg.result)
                 continue
             if self._ws_symbols.owns(id):
-                var ws_items = List[WorkspaceSymbolItem]()
-                if msg.result:
-                    ws_items = _parse_workspace_symbols_result(
-                        msg.result.value(),
-                    )
-                self._ws_symbols.finish(ws_items^)
+                self._ws_symbols.settle[_parse_workspace_symbols_result](msg.result)
                 continue
             if self._completions.owns(id):
-                var comps = List[CompletionItem]()
-                if msg.result:
-                    comps = _parse_completion_result(msg.result.value())
-                if self._logging():
-                    _lsp_debug_write(
-                        String("← completion response id=") + id
-                        + String(" lang=") + self._language_id
-                        + String(" count=") + String(len(comps)),
-                    )
-                self._completions.finish(comps^)
+                self._completions.settle[_parse_completion_result](msg.result)
+                self._log_response(
+                    String("completion"), id, String("count"), len(self._completions.value),
+                )
                 continue
             if id == self._inflight_resolve_id:
                 var r_aux = List[TextEditEntry]()
@@ -4185,16 +4128,11 @@ struct LspManager(Copyable, Movable):
                 self._inflight_resolve_id = String("")
                 continue
             if self._hover.owns(id):
-                var hover_text = String("")
-                if msg.result:
-                    hover_text = _parse_hover_result(msg.result.value())
-                if self._logging():
-                    _lsp_debug_write(
-                        String("← hover response id=") + id
-                        + String(" lang=") + self._language_id
-                        + String(" len=") + String(len(hover_text.as_bytes())),
-                    )
-                self._hover.finish(hover_text^)
+                self._hover.settle[_parse_hover_result](msg.result)
+                self._log_response(
+                    String("hover"), id, String("len"),
+                    len(self._hover.value.as_bytes()),
+                )
                 continue
             if self._code_actions.owns(id):
                 var actions = List[CodeAction]()
@@ -4286,27 +4224,16 @@ struct LspManager(Copyable, Movable):
                 self._prepare_rename.finish(ph^)
                 continue
             if self._formatting.owns(id):
-                var fmt_edits = List[TextEditEntry]()
-                if msg.result:
-                    fmt_edits = _parse_text_edits(msg.result.value())
-                if self._logging():
-                    _lsp_debug_write(
-                        String("← formatting response id=") + id
-                        + String(" edits=") + String(len(fmt_edits)),
-                    )
-                self._formatting.finish(fmt_edits^)
+                self._formatting.settle[_parse_text_edits](msg.result)
+                self._log_response(
+                    String("formatting"), id, String("edits"), len(self._formatting.value),
+                )
                 continue
             if self._ontype.owns(id):
-                var ot_edits = List[TextEditEntry]()
-                if msg.result:
-                    ot_edits = _parse_text_edits(msg.result.value())
-                self._ontype.finish(ot_edits^)
+                self._ontype.settle[_parse_text_edits](msg.result)
                 continue
             if self._moniker.owns(id):
-                var mnote = String("")
-                if msg.result:
-                    mnote = _parse_monikers(msg.result.value())
-                self._moniker.finish(mnote^)
+                self._moniker.settle[_parse_monikers](msg.result)
                 continue
             if self._colorpres.owns(id):
                 var cp_labels = List[String]()
@@ -4332,16 +4259,10 @@ struct LspManager(Copyable, Movable):
                 self._colorpres.finish(cp_labels^)
                 continue
             if self._inlinecomp.owns(id):
-                var ic = String("")
-                if msg.result:
-                    ic = _parse_inline_completion(msg.result.value())
-                self._inlinecomp.finish(ic^)
+                self._inlinecomp.settle[_parse_inline_completion](msg.result)
                 continue
             if self._linked.owns(id):
-                var lr = List[TextEditEntry]()
-                if msg.result:
-                    lr = _parse_linked_ranges(msg.result.value())
-                self._linked.finish(lr^)
+                self._linked.settle[_parse_linked_ranges](msg.result)
                 continue
             if self._inlineval.owns(id):
                 var iv = List[TextEditEntry]()
@@ -4353,28 +4274,16 @@ struct LspManager(Copyable, Movable):
                 self._inlineval.finish(iv^)
                 continue
             if self._folding.owns(id):
-                var fr = List[TextEditEntry]()
-                if msg.result:
-                    fr = _parse_folding_ranges(msg.result.value())
-                self._folding.finish(fr^)
+                self._folding.settle[_parse_folding_ranges](msg.result)
                 continue
             if self._doc_highlight.owns(id):
-                var occ = List[TextEditEntry]()
-                if msg.result:
-                    occ = _parse_document_highlights(msg.result.value())
-                self._doc_highlight.finish(occ^)
+                self._doc_highlight.settle[_parse_document_highlights](msg.result)
                 continue
             if self._signature.owns(id):
-                var sig = String("")
-                if msg.result:
-                    sig = _parse_signature_help(msg.result.value())
-                self._signature.finish(sig^)
+                self._signature.settle[_parse_signature_help](msg.result)
                 continue
             if self._inlay.owns(id):
-                var ih = List[TextEditEntry]()
-                if msg.result:
-                    ih = _parse_inlay_hints(msg.result.value())
-                self._inlay.finish(ih^)
+                self._inlay.settle[_parse_inlay_hints](msg.result)
                 continue
             if self._codelens.owns(id):
                 self._codelens_accum = List[TextEditEntry]()
@@ -4420,10 +4329,7 @@ struct LspManager(Copyable, Movable):
                 self._publish_document_links()
                 continue
             if self._selrange.owns(id):
-                var sr = List[TextEditEntry]()
-                if msg.result:
-                    sr = _parse_selection_ranges(msg.result.value())
-                self._selrange.finish(sr^)
+                self._selrange.settle[_parse_selection_ranges](msg.result)
                 continue
             if self._hierarchy.owns(id):
                 # Prepare done → fire the follow-up (incomingCalls /
@@ -4458,10 +4364,7 @@ struct LspManager(Copyable, Movable):
                 self._inflight_hier_followup_id = String("")
                 continue
             if self._colors.owns(id):
-                var cols = List[Highlight]()
-                if msg.result:
-                    cols = _parse_document_colors(msg.result.value())
-                self._colors.finish(cols^)
+                self._colors.settle[_parse_document_colors](msg.result)
                 continue
             var pull_slot = -1
             for pk in range(len(self._pull_diag_ids)):
@@ -4494,15 +4397,10 @@ struct LspManager(Copyable, Movable):
                 self._clear_diag_inflight(ppath, 0)
                 continue
             if self._willsave.owns(id):
-                var wse = List[TextEditEntry]()
-                if msg.result:
-                    wse = _parse_text_edits(msg.result.value())
-                if self._logging():
-                    _lsp_debug_write(
-                        String("← willSaveWaitUntil response id=") + id
-                        + String(" edits=") + String(len(wse)),
-                    )
-                self._willsave.finish(wse^)
+                self._willsave.settle[_parse_text_edits](msg.result)
+                self._log_response(
+                    String("willSaveWaitUntil"), id, String("edits"), len(self._willsave.value),
+                )
                 continue
         return resolved
 
