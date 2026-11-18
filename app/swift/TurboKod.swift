@@ -5211,15 +5211,9 @@ extension AppController {
     /// core's in every look.
     func pollHostItems(_ v: CellView, panels: Bool = false) -> Bool {
         let id = ObjectIdentifier(v)
-        let surface: Int64
-        switch panels ? .panels : v.surface {
-        case .main: surface = 0
-        case .panels: surface = 1
-        case .settings: surface = 2
-        case .dialog: surface = 3
-        case .git: surface = 4
-        case .frame: return false
-        }
+        // The frame ring has no host items (its code is the main surface's).
+        guard panels || v.surface != .frame else { return false }
+        let surface = (panels ? CellSurface.panels : v.surface).code
         let data = readCoreData(&nativeDialogBuf, {
             tk_desktop_host_items(v.handle, surface, $0, $1)
         })
@@ -5412,44 +5406,39 @@ extension AppController {
 
     /// Show, refresh or retract `v`'s merge sheet.
     func pollMerge(_ v: CellView) -> Bool {
-        let id = ObjectIdentifier(v)
-        let data = readCoreData(&nativeDialogBuf, { tk_desktop_merge(v.handle, $0, $1) })
-        if let mc = chromes[id]?.mergeSheet {
-            guard let data = data else {
-                chromes[id]?.mergeSheet = nil
-                mc.dismiss()
-                return true
-            }
-            return mc.update(data)
+        pollSheet(v, \.mergeSheet, fetch: tk_desktop_merge) { mc in
+            mc.onAfterAction = { [weak v] in v?.redraw() }
         }
-        guard let data = data, let win = v.window, win.isVisible, win.attachedSheet == nil
-        else { return false }
-        let mc = MergeController(view: v)
-        mc.onAfterAction = { [weak v] in v?.redraw() }
-        chrome(id).mergeSheet = mc
-        _ = mc.update(data)
-        mc.present(in: win)
-        return true
     }
 
     /// Show, refresh or retract `v`'s Git history sheet.
     func pollHistory(_ v: CellView) -> Bool {
+        pollSheet(v, \.historySheet, fetch: tk_desktop_history)
+    }
+
+    /// Show a core-fed sheet while `fetch` has JSON for it, refresh it as
+    /// that changes, and retract it once the core stops asking.
+    private func pollSheet<S: CoreSheet>(
+        _ v: CellView, _ slot: ReferenceWritableKeyPath<ViewChrome, S?>,
+        fetch: (Int64, Int64, Int64) -> Int64,
+        setUp: (S) -> Void = { _ in }) -> Bool {
         let id = ObjectIdentifier(v)
-        let data = readCoreData(&nativeDialogBuf, { tk_desktop_history(v.handle, $0, $1) })
-        if let hc = chromes[id]?.historySheet {
+        let data = readCoreData(&nativeDialogBuf, { fetch(v.handle, $0, $1) })
+        if let sheet = chromes[id]?[keyPath: slot] {
             guard let data = data else {
-                chromes[id]?.historySheet = nil
-                hc.dismiss()
+                chromes[id]?[keyPath: slot] = nil
+                sheet.dismiss()
                 return true
             }
-            return hc.update(data)
+            return sheet.update(data)
         }
         guard let data = data, let win = v.window, win.isVisible, win.attachedSheet == nil
         else { return false }
-        let hc = HistoryController(view: v)
-        chrome(id).historySheet = hc
-        _ = hc.update(data)
-        hc.present(in: win)
+        let sheet = S(view: v)
+        setUp(sheet)
+        chrome(id)[keyPath: slot] = sheet
+        _ = sheet.update(data)
+        sheet.present(in: win)
         return true
     }
 
@@ -8753,6 +8742,17 @@ final class CodePreview: NSTextView {
 // commit's patch on the right, colored like the grid view colors it (by
 // line prefix) on the theme's editor background. The core fetched
 // everything when it opened; this only selects and closes.
+
+/// A native sheet whose content the core feeds as JSON (history, merge).
+protocol CoreSheet: AnyObject {
+    init(view: CellView)
+    func update(_ data: Data) -> Bool
+    func present(in win: NSWindow)
+    func dismiss()
+}
+
+extension HistoryController: CoreSheet {}
+extension MergeController: CoreSheet {}
 
 final class HistoryController: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private weak var view: CellView?
