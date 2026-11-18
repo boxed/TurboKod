@@ -22,13 +22,14 @@ Why DevDocs:
 
 from std.collections.list import List
 
+from .catalog import ExtensionKeyed
 from .string_utils import shell_fetch, shell_move_into_place, shell_single_quote, string_list
 
 
 comptime DEVDOCS_BASE = String("https://documents.devdocs.io/")
 
 
-struct DocSpec(Copyable, Movable):
+struct DocSpec(Copyable, Movable, ExtensionKeyed):
     """Routing entry: which file extensions belong to this language id,
     plus the DevDocs slug to fetch when the user asks for docs.
 
@@ -42,6 +43,13 @@ struct DocSpec(Copyable, Movable):
     var file_types: List[String]
     var slug: String
     var display: String
+
+
+    def catalog_language(self) -> String:
+        return self.language_id
+
+    def catalog_has_extension(self, ext: String) -> Bool:
+        return ext in self.file_types
 
     def __init__(
         out self, var language_id: String,
@@ -121,24 +129,8 @@ def built_in_docsets() -> List[DocSpec]:
     return out^
 
 
-def find_docset_for_extension(specs: List[DocSpec], ext: String) -> Int:
-    """Index of the spec whose ``file_types`` contains ``ext``, or -1."""
-    if len(ext.as_bytes()) == 0:
-        return -1
-    for i in range(len(specs)):
-        for k in range(len(specs[i].file_types)):
-            if specs[i].file_types[k] == ext:
-                return i
-    return -1
 
 
-def find_docset_by_language(
-    specs: List[DocSpec], language_id: String,
-) -> Int:
-    for i in range(len(specs)):
-        if specs[i].language_id == language_id:
-            return i
-    return -1
 
 
 def docs_install_command(slug: String, dest_dir: String) -> String:

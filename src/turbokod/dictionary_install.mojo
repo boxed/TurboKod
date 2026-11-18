@@ -25,12 +25,13 @@ fresh install / remove takes effect without restart.
 
 from std.collections.list import List
 
+from .catalog import LanguageKeyed
 from .file_io import delete_path, list_directory, stat_file
 from .posix import user_config_path
 from .string_utils import shell_fetch, shell_move_into_place, shell_single_quote
 
 
-struct DownloadableDictionary(ImplicitlyCopyable, Movable):
+struct DownloadableDictionary(ImplicitlyCopyable, Movable, LanguageKeyed):
     """One downloadable dictionary entry. ``url`` points at a raw
     plain-text wordlist (one word per line, ``#``-prefixed comments
     skipped). ``language_id`` doubles as the filename stem under
@@ -40,6 +41,10 @@ struct DownloadableDictionary(ImplicitlyCopyable, Movable):
     var language_id: String
     var display: String
     var url: String
+
+
+    def catalog_language(self) -> String:
+        return self.language_id
 
     def __init__(
         out self, var language_id: String, var display: String,
@@ -91,13 +96,6 @@ def built_in_downloadable_dictionaries() -> List[DownloadableDictionary]:
     return out^
 
 
-def find_downloadable_dictionary_by_language(
-    specs: List[DownloadableDictionary], language_id: String,
-) -> Int:
-    for i in range(len(specs)):
-        if specs[i].language_id == language_id:
-            return i
-    return -1
 
 
 def user_dictionaries_root() -> String:

@@ -7,6 +7,7 @@ and ``scripts/run_tests.sh`` runs every suite.
 
 from std.ffi import external_call
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
+from turbokod.catalog import catalog_by_language, catalog_by_extension
 from turbokod.canvas import Canvas
 from turbokod.claude_detect import (
     CLAUDE_ACTIVE, CLAUDE_CLEAN, CLAUDE_NONE, CLAUDE_WAITING, CLAUDE_WORKING,
@@ -55,15 +56,13 @@ from turbokod.string_utils import (
 from turbokod.project_on_save import on_save_equal
 from turbokod.quick_open import QuickOpen
 from turbokod.doc_config import (
-    built_in_docsets, docs_install_command, find_docset_by_language,
-    find_docset_for_extension
+    built_in_docsets, docs_install_command,
 )
 from turbokod.json import (
     encode_json, json_int, json_null, json_object, json_str, parse_json
 )
 from turbokod.language_config import (
     LanguageSpec, apply_language_overrides, built_in_servers,
-    find_language_by_id
 )
 from turbokod.lsp import capture_command
 from turbokod.highlight import GrammarRegistry, word_at
@@ -1495,7 +1494,7 @@ def test_apply_language_overrides_replaces_candidates() raises:
     list verbatim and preserves the built-in's ``file_types`` (we only
     override what the user explicitly chose)."""
     var specs = built_in_servers()
-    if find_language_by_id(specs, String("python")) < 0:
+    if catalog_by_language(specs, String("python")) < 0:
         # Bundled JSON missing — skip rather than fail; the unit test
         # for built_in_servers handles that case.
         return
@@ -1510,7 +1509,7 @@ def test_apply_language_overrides_replaces_candidates() raises:
     var overrides = List[LanguageServerOverride]()
     overrides.append(ov^)
     var merged = apply_language_overrides(specs.copy(), overrides)
-    var idx = find_language_by_id(merged, String("python"))
+    var idx = catalog_by_language(merged, String("python"))
     assert_true(idx >= 0)
     assert_equal(len(merged[idx].candidates), 1)
     assert_equal(merged[idx].candidates[0].argv[0], String("my-pyright"))
@@ -2107,10 +2106,10 @@ def test_doc_registry_lookup() raises:
     assert_true(len(specs) > 0)
     # Spot-check the python entry: extension routing + language lookup
     # both find it, and the slug is the pinned form (not bare "python").
-    var py_idx = find_docset_for_extension(specs, String("py"))
+    var py_idx = catalog_by_extension(specs, String("py"))
     assert_true(py_idx >= 0)
     assert_equal(specs[py_idx].language_id, String("python"))
-    var by_lang = find_docset_by_language(specs, String("python"))
+    var by_lang = catalog_by_language(specs, String("python"))
     assert_equal(by_lang, py_idx)
     var pb = specs[py_idx].slug.as_bytes()
     var has_tilde = False
@@ -2120,7 +2119,7 @@ def test_doc_registry_lookup() raises:
             break
     assert_true(has_tilde)
     # Unknown extension hits the not-found path.
-    assert_equal(find_docset_for_extension(specs, String("xyz")), -1)
+    assert_equal(catalog_by_extension(specs, String("xyz")), -1)
 
 
 def test_doc_install_command_shape() raises:

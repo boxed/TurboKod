@@ -24,6 +24,7 @@ Why this shape:
 from std.collections.list import List
 from std.collections.optional import Optional
 
+from .catalog import ExtensionKeyed, catalog_by_language
 from .config import LanguageServerOverride
 from .file_io import read_file
 from .json import (
@@ -42,7 +43,7 @@ struct ServerCandidate(Copyable, Movable):
         self.argv = argv^
 
 
-struct LanguageSpec(Copyable, Movable):
+struct LanguageSpec(Copyable, Movable, ExtensionKeyed):
     """Routing entry: which file extensions belong to this language id,
     and the ordered list of server binaries to try (first hit wins).
 
@@ -61,6 +62,13 @@ struct LanguageSpec(Copyable, Movable):
     var candidates: List[ServerCandidate]
     var install_hint: String
     var comment_token: String
+
+
+    def catalog_language(self) -> String:
+        return self.language_id
+
+    def catalog_has_extension(self, ext: String) -> Bool:
+        return ext in self.file_types
 
     def __init__(
         out self, var language_id: String,
@@ -137,29 +145,8 @@ def built_in_servers() -> List[LanguageSpec]:
     return out^
 
 
-def find_language_for_extension(
-    specs: List[LanguageSpec], ext: String,
-) -> Int:
-    """Index of the spec whose ``file_types`` contains ``ext``, or -1.
-
-    Linear scan — the spec list is small (a couple hundred entries even
-    fully populated) and this only fires once per file open, so a hash
-    table would be over-engineering.
-    """
-    if len(ext.as_bytes()) == 0:
-        return -1
-    for i in range(len(specs)):
-        for k in range(len(specs[i].file_types)):
-            if specs[i].file_types[k] == ext:
-                return i
-    return -1
 
 
-def find_language_by_id(specs: List[LanguageSpec], language_id: String) -> Int:
-    for i in range(len(specs)):
-        if specs[i].language_id == language_id:
-            return i
-    return -1
 
 
 def dependency_dirs_for_language_id(language_id: String) -> List[String]:
@@ -210,7 +197,7 @@ def apply_language_overrides(
         var cands = List[ServerCandidate]()
         for k in range(len(ov.argvs)):
             cands.append(ServerCandidate(ov.argvs[k].copy()))
-        var idx = find_language_by_id(specs, ov.language_id)
+        var idx = catalog_by_language(specs, ov.language_id)
         if idx >= 0:
             specs[idx].candidates = cands^
         else:

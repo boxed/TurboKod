@@ -22,6 +22,7 @@ set (``Desktop._sync_settings``) and writes the config to disk.
 """
 
 from std.collections.list import List
+from .catalog import catalog_by_language, catalog_by_extension
 
 from .config import (
     LanguageServerOverride, MAX_FONT_SIZE, MIN_FONT_SIZE, TurbokodConfig,
@@ -33,7 +34,6 @@ from .dictionary_install import (
 )
 from .language_config import (
     LanguageSpec, apply_language_overrides, built_in_servers,
-    find_language_by_id, find_language_for_extension,
 )
 from .font_chooser import FontChooser
 from .language_editor import LanguageEditor
@@ -212,7 +212,7 @@ struct Settings(Movable, UIDialog):
         # user most likely came to change.
         var lang_idx = -1
         if len(current_language_ext.as_bytes()) > 0:
-            lang_idx = find_language_for_extension(
+            lang_idx = catalog_by_extension(
                 self.languages_view, current_language_ext,
             )
         if lang_idx < 0 and len(self.languages_view) > 0:
@@ -707,7 +707,7 @@ struct Settings(Movable, UIDialog):
         var argvs = List[String]()
         for i in range(len(spec.candidates)):
             argvs.append(join_args(spec.candidates[i].argv))
-        var is_existing = find_language_by_id(
+        var is_existing = catalog_by_language(
             built_in_servers(), spec.language_id,
         ) >= 0
         self.language_editor.open(

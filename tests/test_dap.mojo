@@ -8,6 +8,7 @@ and ``scripts/run_tests.sh`` runs every suite.
 from std.collections.optional import Optional
 from std.ffi import external_call
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
+from turbokod.catalog import catalog_by_language
 from turbokod.canvas import Canvas
 from turbokod.colors import (
     Attr, BLACK, DARK_GRAY, LIGHT_BLUE, LIGHT_GRAY, STYLE_UNDERLINE, WHITE
@@ -40,7 +41,7 @@ from turbokod.dap_dispatch import (
     _parse_stack_trace, _parse_variables
 )
 from turbokod.debugger_config import (
-    built_in_debuggers, find_debugger_for_language, launch_arguments_for
+    built_in_debuggers, launch_arguments_for,
 )
 from turbokod.posix import (
     append_string_bytes, close_fd, pipe_pair, which, write_buffer,
@@ -453,16 +454,16 @@ def test_dap_parse_scopes_and_variables() raises:
 def test_dap_registry_lookup() raises:
     var debs = built_in_debuggers()
     assert_true(len(debs) >= 3)
-    var py = find_debugger_for_language(debs, String("python"))
+    var py = catalog_by_language(debs, String("python"))
     assert_true(py >= 0)
     assert_equal(debs[py].name, String("debugpy"))
-    var unknown = find_debugger_for_language(debs, String("ada"))
+    var unknown = catalog_by_language(debs, String("ada"))
     assert_equal(unknown, -1)
 
 
 def test_dap_launch_arguments_for_debugpy() raises:
     var debs = built_in_debuggers()
-    var idx = find_debugger_for_language(debs, String("python"))
+    var idx = catalog_by_language(debs, String("python"))
     assert_true(idx >= 0)
     var args = List[String]()
     args.append(String("--verbose"))
@@ -488,7 +489,7 @@ def test_dap_launch_arguments_for_debugpy_module_mode() raises:
     """``python -m pytest tests/x.py`` should be rewritten to debugpy's
     ``module`` field — debugpy can't ``runpy`` the python binary."""
     var debs = built_in_debuggers()
-    var idx = find_debugger_for_language(debs, String("python"))
+    var idx = catalog_by_language(debs, String("python"))
     assert_true(idx >= 0)
     var args = List[String]()
     args.append(String("-m"))
@@ -519,7 +520,7 @@ def test_dap_launch_arguments_for_debugpy_versioned_python() raises:
     """``python3.11 -m unittest`` should also trigger module-mode
     rewriting — versioned interpreter basenames are still Python."""
     var debs = built_in_debuggers()
-    var idx = find_debugger_for_language(debs, String("python"))
+    var idx = catalog_by_language(debs, String("python"))
     assert_true(idx >= 0)
     var args = List[String]()
     args.append(String("-m"))
@@ -542,7 +543,7 @@ def test_dap_launch_arguments_for_debugpy_non_python_program() raises:
     mode even when ``-m`` happens to be in args, because that's a
     plain CLI flag at that point."""
     var debs = built_in_debuggers()
-    var idx = find_debugger_for_language(debs, String("python"))
+    var idx = catalog_by_language(debs, String("python"))
     assert_true(idx >= 0)
     var args = List[String]()
     args.append(String("-m"))
@@ -563,7 +564,7 @@ def test_dap_launch_arguments_for_debugpy_script_mode() raises:
     script. Without this, debugpy tries to ``runpy`` the python
     interpreter and stalls in ``_run_code``."""
     var debs = built_in_debuggers()
-    var idx = find_debugger_for_language(debs, String("python"))
+    var idx = catalog_by_language(debs, String("python"))
     assert_true(idx >= 0)
     var args = List[String]()
     args.append(String("manage.py"))
@@ -593,7 +594,7 @@ def test_dap_launch_arguments_for_debugpy_skips_flag_args() raises:
     don't do yet, so forwarding the unrewritten args lets debugpy
     error explicitly instead of silently dropping a flag."""
     var debs = built_in_debuggers()
-    var idx = find_debugger_for_language(debs, String("python"))
+    var idx = catalog_by_language(debs, String("python"))
     assert_true(idx >= 0)
     var args = List[String]()
     args.append(String("-c"))
@@ -614,7 +615,7 @@ def test_dap_launch_arguments_for_debugpy_skips_flag_args() raises:
 
 def test_dap_launch_arguments_for_delve() raises:
     var debs = built_in_debuggers()
-    var idx = find_debugger_for_language(debs, String("go"))
+    var idx = catalog_by_language(debs, String("go"))
     assert_true(idx >= 0)
     var body = launch_arguments_for(
         debs[idx], String("/tmp/cmd"), String("/tmp"), List[String](), False,
@@ -1733,7 +1734,7 @@ def test_dap_launch_arguments_env_object() raises:
     """A target's ``env`` list rides on the launch body as an object;
     an empty list adds no ``env`` key at all."""
     var debs = built_in_debuggers()
-    var idx = find_debugger_for_language(debs, String("python"))
+    var idx = catalog_by_language(debs, String("python"))
     assert_true(idx >= 0)
     var env = List[String]()
     env.append(String("DEBUG=1"))

@@ -23,12 +23,13 @@ anything we observe is purely the protocol layer's behavior.
 from std.collections.list import List
 from std.ffi import external_call
 from std.sys import argv
+from turbokod.catalog import catalog_by_language
 
 from turbokod.canvas import Canvas
 from turbokod.dap_dispatch import DapManager, DapStackFrame
 from turbokod.debug_pane import DebugPane
 from turbokod.debugger_config import (
-    built_in_debuggers, find_debugger_for_language,
+    built_in_debuggers,
 )
 from turbokod.desktop import Desktop, DEBUG_START_OR_CONTINUE
 from turbokod.file_io import write_file
@@ -68,7 +69,7 @@ def main() raises:
 
     # 2. Pick the python debugger spec from the built-in registry.
     var debs = built_in_debuggers()
-    var idx = find_debugger_for_language(debs, String("python"))
+    var idx = catalog_by_language(debs, String("python"))
     if idx < 0:
         print("no python debugger registered")
         return

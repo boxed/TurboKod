@@ -17,6 +17,7 @@ from std.collections.list import List
 from std.collections.optional import Optional
 from std.ffi import external_call
 from std.sys import size_of
+from .catalog import catalog_by_language
 
 from .colors import (
     Attr, STYLE_NONE, STYLE_BOLD, STYLE_ITALIC, STYLE_UNDERLINE,
@@ -25,9 +26,7 @@ from .colors import (
 )
 from .diff import DIFF_ROW_REMOVED, DiffRow
 from .grammar_install import (
-    built_in_downloadable_grammars,
-    find_downloadable_grammar_by_language,
-    user_grammar_path,
+    built_in_downloadable_grammars, user_grammar_path,
     user_grammar_path_for_ext,
 )
 from .project_grammars import GrammarOverride
@@ -2304,7 +2303,7 @@ def _ext_for_language(lang: String) -> String:
     # ``# language=elm`` resolve to ``"elm"`` once the registered Elm
     # grammar is installed under ``~/.config/turbokod/languages/``.
     var specs = built_in_downloadable_grammars()
-    var idx = find_downloadable_grammar_by_language(specs, lang)
+    var idx = catalog_by_language(specs, lang)
     if idx >= 0 and len(specs[idx].file_types) > 0:
         return specs[idx].file_types[0]
     return String("")

@@ -7,6 +7,7 @@ and ``scripts/run_tests.sh`` runs every suite.
 
 from std.ffi import external_call
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
+from turbokod.catalog import catalog_by_language, catalog_by_extension
 from turbokod.canvas import Canvas
 from turbokod.colors import Attr, STYLE_BOLD, SYN_KEYWORD
 from turbokod.editor import Editor
@@ -15,13 +16,11 @@ from turbokod.project_targets import python_venv_dir
 from turbokod.debug_pane import _extract_path_line_links
 from turbokod.doc_store import html_to_text
 from turbokod.language_config import (
-    LanguageSpec, built_in_servers, find_language_by_id,
-    find_language_for_extension
+    LanguageSpec, built_in_servers,
 )
 from turbokod.language_editor import LanguageEditor
 from turbokod.debugger_config import (
-    built_in_debuggers, find_debugger_for_language,
-    python_debugger_spec_for_venv
+    built_in_debuggers, python_debugger_spec_for_venv,
 )
 from turbokod.highlight import (
     GrammarRegistry, Highlight, HighlightCache,
@@ -34,9 +33,8 @@ from turbokod.highlight import (
 )
 from turbokod.posix import which
 from turbokod.grammar_install import (
-    built_in_downloadable_grammars, find_downloadable_grammar_by_language,
-    find_downloadable_grammar_for_extension, grammar_install_command,
-    user_grammar_path, user_grammar_path_for_ext
+    built_in_downloadable_grammars, grammar_install_command, user_grammar_path,
+    user_grammar_path_for_ext,
 )
 from turbokod.project_grammars import GrammarOverride
 from turbokod.onig import OnigRegex, onig_global_init, onig_tracked_count
@@ -57,7 +55,7 @@ def test_grammar_install_command_targets_user_config() raises:
     the runner is a shell pipeline; the alternative is end-to-end with
     a fake server, which adds infrastructure with no payoff."""
     var specs = built_in_downloadable_grammars()
-    var idx = find_downloadable_grammar_by_language(specs, String("elm"))
+    var idx = catalog_by_language(specs, String("elm"))
     assert_true(idx >= 0)
     var cmd = grammar_install_command(String("elm"), specs[idx].url)
     var dest = user_grammar_path(String("elm"))
@@ -77,7 +75,7 @@ def test_django_grammar_is_in_downloadable_catalog() raises:
     Django-less project's ``.html`` files don't get hijacked. Users opt
     in per-project via ``.turbokod/grammars.json``."""
     var specs = built_in_downloadable_grammars()
-    var idx = find_downloadable_grammar_by_language(
+    var idx = catalog_by_language(
         specs, String("django-html"),
     )
     assert_true(idx >= 0)
@@ -85,7 +83,7 @@ def test_django_grammar_is_in_downloadable_catalog() raises:
     assert_equal(len(specs[idx].file_types), 0)
     # No ext should resolve to this grammar via the auto-binding lookup.
     assert_equal(
-        find_downloadable_grammar_for_extension(specs, String("html")),
+        catalog_by_extension(specs, String("html")),
         -1,
     )
 
@@ -337,14 +335,14 @@ def test_language_catalog_carries_comment_tokens() raises:
     populates ``LanguageSpec.comment_token``. This is what drives the
     Cmd+/ binding so the right marker is used per file type."""
     var specs = built_in_servers()
-    var py_idx = find_language_by_id(specs, String("python"))
+    var py_idx = catalog_by_language(specs, String("python"))
     if py_idx < 0:
         return  # bundled JSON missing — covered by its own test
     assert_equal(specs[py_idx].comment_token, String("#"))
-    var rs_idx = find_language_by_id(specs, String("rust"))
+    var rs_idx = catalog_by_language(specs, String("rust"))
     if rs_idx >= 0:
         assert_equal(specs[rs_idx].comment_token, String("//"))
-    var sql_idx = find_language_by_id(specs, String("sql"))
+    var sql_idx = catalog_by_language(specs, String("sql"))
     if sql_idx >= 0:
         assert_equal(specs[sql_idx].comment_token, String("--"))
 
@@ -1668,7 +1666,7 @@ def test_language_registry_loads_from_bundled_json() raises:
     assert_true(len(specs) > 50)
 
     # Elm regression: pre-import the registry didn't contain Elm at all.
-    var elm_idx = find_language_by_id(specs, String("elm"))
+    var elm_idx = catalog_by_language(specs, String("elm"))
     assert_true(elm_idx >= 0)
     assert_true(len(specs[elm_idx].candidates) > 0)
     assert_equal(
@@ -1677,7 +1675,7 @@ def test_language_registry_loads_from_bundled_json() raises:
     )
 
     # Extension routing for one of the curated entries with an install hint.
-    var py_idx = find_language_for_extension(specs, String("py"))
+    var py_idx = catalog_by_extension(specs, String("py"))
     assert_true(py_idx >= 0)
     assert_equal(specs[py_idx].language_id, String("python"))
     assert_true(len(specs[py_idx].install_hint.as_bytes()) > 0)
@@ -1731,7 +1729,7 @@ def test_python_debugger_spec_for_venv_prepends_venv_python() raises:
     PATH-resolved candidates as a fallback. Non-Python specs and
     empty venv dirs pass through untouched."""
     var specs = built_in_debuggers()
-    var py_idx = find_debugger_for_language(specs, String("python"))
+    var py_idx = catalog_by_language(specs, String("python"))
     assert_true(py_idx >= 0)
     var py_spec = specs[py_idx].copy()
     var orig_count = len(py_spec.candidates)
@@ -1739,7 +1737,7 @@ def test_python_debugger_spec_for_venv_prepends_venv_python() raises:
     var same = python_debugger_spec_for_venv(py_spec, String(""))
     assert_equal(len(same.candidates), orig_count)
     # Non-Python → identity even with a real-looking venv path.
-    var go_idx = find_debugger_for_language(specs, String("go"))
+    var go_idx = catalog_by_language(specs, String("go"))
     assert_true(go_idx >= 0)
     var go_same = python_debugger_spec_for_venv(
         specs[go_idx], String("/tmp/whatever"),

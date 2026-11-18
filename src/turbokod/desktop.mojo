@@ -27,6 +27,7 @@ clears the state and makes the next file open eligible to set it again.
 from std.collections.dict import Dict
 from std.collections.list import List
 from std.collections.optional import Optional
+from .catalog import catalog_by_language, catalog_by_extension
 
 from .case_fold import eq_ci, fold_byte
 from .json import JsonValue, json_null
@@ -149,25 +150,20 @@ from .names_review import NamesReview
 from .selection_history import SelectionHistory
 from .grammar_install import (
     DownloadableGrammar, built_in_downloadable_grammars,
-    find_downloadable_grammar_by_language,
-    find_downloadable_grammar_for_extension, grammar_install_command,
-    user_grammar_installed,
+    grammar_install_command, user_grammar_installed,
 )
 from .dictionary_install import (
-    built_in_downloadable_dictionaries,
-    dictionary_install_command, find_downloadable_dictionary_by_language,
+    built_in_downloadable_dictionaries, dictionary_install_command,
     remove_user_dictionary,
 )
 from .doc_config import (
     DocSpec, built_in_docsets, docs_install_command,
-    find_docset_by_language, find_docset_for_extension,
 )
 from .doc_pick import DocPick
 from .doc_store import DocEntry, DocStore, html_to_text
 from .language_config import (
     apply_language_overrides, built_in_servers,
-    dependency_dirs_for_language_id, find_language_by_id,
-    find_language_for_extension, LanguageSpec,
+    dependency_dirs_for_language_id, LanguageSpec,
 )
 from .lsp_dispatch import (
     CodeAction, CodeActionFileEdit, DefinitionResolved, DIAG_SEVERITY_ERROR,
@@ -184,8 +180,8 @@ from .debug_pane import (
     PANE_MODE_DEBUG, PANE_MODE_RUN, PANE_ROW_WATCH,
 )
 from .debugger_config import (
-    DebuggerSpec, built_in_debuggers, find_debugger_for_language,
-    python_debugger_spec_for_venv, python_venv_has_debugpy,
+    DebuggerSpec, built_in_debuggers, python_debugger_spec_for_venv,
+    python_venv_has_debugpy,
 )
 from .menu import MENU_MARK_NONE, MENU_MARK_OPEN, Menu, MenuBar, MenuItem
 from .posix import debug_log_path, monotonic_ms, sleep_ms, wall_clock_ms, which
@@ -5442,7 +5438,7 @@ struct Desktop(Movable):
         ``_pending_lsp_prompt_ext`` and ``paint`` drains it on a later
         frame — otherwise opening a file from a dialog would silently
         eat the install prompt for that language."""
-        var spec_idx = find_language_for_extension(self.lsp_specs, ext)
+        var spec_idx = catalog_by_extension(self.lsp_specs, ext)
         if spec_idx < 0:
             return
         var spec = self.lsp_specs[spec_idx].copy()
@@ -5497,11 +5493,11 @@ struct Desktop(Movable):
         var spec_idx = -1
         var override_lang = self.grammar_registry.lookup_override(ext)
         if len(override_lang.as_bytes()) > 0:
-            spec_idx = find_downloadable_grammar_by_language(
+            spec_idx = catalog_by_language(
                 specs, override_lang,
             )
         if spec_idx < 0:
-            spec_idx = find_downloadable_grammar_for_extension(specs, ext)
+            spec_idx = catalog_by_extension(specs, ext)
         if spec_idx < 0:
             return
         var spec = specs[spec_idx].copy()
@@ -5559,7 +5555,7 @@ struct Desktop(Movable):
         time."""
         self._load_grammar_specs()
         ref specs = self._grammar_specs
-        var spec_idx = find_downloadable_grammar_by_language(specs, lang)
+        var spec_idx = catalog_by_language(specs, lang)
         if spec_idx < 0:
             return
         var spec = specs[spec_idx].copy()
@@ -5585,7 +5581,7 @@ struct Desktop(Movable):
             # freshly-downloaded grammar.
             self._load_grammar_specs()
             ref specs = self._grammar_specs
-            var spec_idx = find_downloadable_grammar_by_language(specs, lang)
+            var spec_idx = catalog_by_language(specs, lang)
             if spec_idx < 0:
                 return
             var spec = specs[spec_idx].copy()
@@ -5615,7 +5611,7 @@ struct Desktop(Movable):
         since the popup only renders one at a time.
         """
         var specs = built_in_downloadable_dictionaries()
-        var spec_idx = find_downloadable_dictionary_by_language(specs, lang)
+        var spec_idx = catalog_by_language(specs, lang)
         if spec_idx < 0:
             return
         var spec = specs[spec_idx]
@@ -5629,7 +5625,7 @@ struct Desktop(Movable):
         Sync — no async work to do, so we don't go through
         ``InstallRunner``."""
         var specs = built_in_downloadable_dictionaries()
-        var spec_idx = find_downloadable_dictionary_by_language(specs, lang)
+        var spec_idx = catalog_by_language(specs, lang)
         var label = String(lang)
         if spec_idx >= 0:
             label = specs[spec_idx].display
@@ -5757,7 +5753,7 @@ struct Desktop(Movable):
         ``_lsp_bypass_pyenv_shim`` for the pyenv-shim resolution wrinkle
         in ``_pick_lsp_argv``.
         """
-        var spec_idx = find_language_for_extension(self.lsp_specs, ext)
+        var spec_idx = catalog_by_extension(self.lsp_specs, ext)
         if spec_idx < 0:
             return -1
         var lang = self.lsp_specs[spec_idx].language_id
@@ -5781,7 +5777,7 @@ struct Desktop(Movable):
         file's extension yet."""
         if len(path.as_bytes()) == 0:
             return -1
-        var spec_idx = find_language_for_extension(
+        var spec_idx = catalog_by_extension(
             self.lsp_specs, extension_of(path),
         )
         if spec_idx < 0:
@@ -6614,7 +6610,7 @@ struct Desktop(Movable):
             langs_snapshot.append(self.lsp_managers[i].language_id())
         for s in range(len(langs_snapshot)):
             var lang = langs_snapshot[s]
-            var spec_idx = find_language_by_id(self.lsp_specs, lang)
+            var spec_idx = catalog_by_language(self.lsp_specs, lang)
             if spec_idx < 0:
                 continue
             var new_argv = self._pick_lsp_argv(spec_idx)
@@ -10489,7 +10485,7 @@ struct Desktop(Movable):
                 # Helix's languages.toml — there is no LSP method for
                 # comment syntax) over the editor's hard-coded fallback.
                 var ext = extension_of(ed.file_path)
-                var spec_idx = find_language_for_extension(self.lsp_specs, ext)
+                var spec_idx = catalog_by_extension(self.lsp_specs, ext)
                 var prefix = String("")
                 if spec_idx >= 0:
                     var tok = self.lsp_specs[spec_idx].comment_token
@@ -11382,7 +11378,7 @@ struct Desktop(Movable):
             if len(path.as_bytes()) == 0:
                 continue
             var ext = extension_of(path)
-            var spec_idx = find_language_for_extension(self.lsp_specs, ext)
+            var spec_idx = catalog_by_extension(self.lsp_specs, ext)
             if spec_idx < 0:
                 continue
             if self.lsp_specs[spec_idx].language_id != lang:
@@ -12090,7 +12086,7 @@ struct Desktop(Movable):
                     _append_indented(lines, lg, String("    "))
         # Show what python candidates are on $PATH so the user can
         # tell why ty (or pyright) was selected.
-        var py_idx = find_language_by_id(self.lsp_specs, String("python"))
+        var py_idx = catalog_by_language(self.lsp_specs, String("python"))
         if py_idx >= 0:
             var spec = self.lsp_specs[py_idx].copy()
             lines.append(String(""))
@@ -13371,12 +13367,12 @@ struct Desktop(Movable):
             self._say(String("debug: save the file first"))
             return
         var ext = extension_of(path)
-        var lang_idx = find_language_for_extension(self.lsp_specs, ext)
+        var lang_idx = catalog_by_extension(self.lsp_specs, ext)
         if lang_idx < 0:
             self._say_error(String("debug: unknown language for ") + ext)
             return
         var lang_id = self.lsp_specs[lang_idx].language_id
-        var deb_idx = find_debugger_for_language(self.dap_specs, lang_id)
+        var deb_idx = catalog_by_language(self.dap_specs, lang_id)
         if deb_idx < 0:
             self._say_error(String("debug: no adapter registered for ") + lang_id)
             return
@@ -13829,7 +13825,7 @@ struct Desktop(Movable):
                     + String("' has no debug language set"),
             )
             return
-        var deb_idx = find_debugger_for_language(
+        var deb_idx = catalog_by_language(
             self.dap_specs, target.debug_language,
         )
         if deb_idx < 0:
@@ -13991,7 +13987,7 @@ struct Desktop(Movable):
         if len(project_root.as_bytes()) == 0:
             return
         var language = String("python")
-        var deb_idx = find_debugger_for_language(self.dap_specs, language)
+        var deb_idx = catalog_by_language(self.dap_specs, language)
         if deb_idx < 0:
             self._say_error(
                 String("test (debug): no adapter for language '") + language
@@ -14341,7 +14337,7 @@ struct Desktop(Movable):
         if not starts_with(path, root_with_slash):
             return True
         var ext = extension_of(path)
-        var spec_idx = find_language_for_extension(self.lsp_specs, ext)
+        var spec_idx = catalog_by_extension(self.lsp_specs, ext)
         if spec_idx < 0:
             return False
         var deps = dependency_dirs_for_language_id(
@@ -15061,7 +15057,7 @@ struct Desktop(Movable):
             return
         var actions = self.project_on_save.copy()
         var ext = extension_of(saved_path)
-        var lang_idx = find_language_for_extension(self.lsp_specs, ext)
+        var lang_idx = catalog_by_extension(self.lsp_specs, ext)
         var lang = String("")
         if lang_idx >= 0:
             lang = self.lsp_specs[lang_idx].language_id
@@ -15820,7 +15816,7 @@ struct Desktop(Movable):
         for i in range(len(self.doc_languages)):
             if self.doc_languages[i] == lang:
                 return i
-        var spec_idx = find_docset_by_language(self.doc_specs, lang)
+        var spec_idx = catalog_by_language(self.doc_specs, lang)
         if spec_idx < 0:
             return -1
         var spec = self.doc_specs[spec_idx].copy()
@@ -15856,7 +15852,7 @@ struct Desktop(Movable):
         var ext_spec_idx = -1
         if idx >= 0:
             var path = self.windows.windows[idx].editor.file_path
-            ext_spec_idx = find_docset_for_extension(
+            ext_spec_idx = catalog_by_extension(
                 self.doc_specs, extension_of(path),
             )
             if ext_spec_idx >= 0:
@@ -15925,7 +15921,7 @@ struct Desktop(Movable):
         """The loaded docs for ``lang`` (an index into ``doc_stores``), or
         -1 when it has no docset or isn't downloaded. Raises when the
         downloaded files don't load."""
-        var spec_idx = find_docset_by_language(self.doc_specs, lang)
+        var spec_idx = catalog_by_language(self.doc_specs, lang)
         if spec_idx < 0:
             return -1
         var dest = self._doc_dest_dir(self.doc_specs[spec_idx].slug)
@@ -16067,7 +16063,7 @@ struct Desktop(Movable):
         # mid-install that cleared the stash. Bail cleanly.
         if len(self._pending_dap_program.as_bytes()) == 0:
             return
-        var deb_idx = find_debugger_for_language(
+        var deb_idx = catalog_by_language(
             self.dap_specs, String("python"),
         )
         if deb_idx < 0:
@@ -16173,7 +16169,7 @@ struct Desktop(Movable):
         # is empty or shaped differently — better to install the
         # canonical default than to do nothing.
         var package = String("ty")
-        var py_idx = find_language_by_id(self.lsp_specs, String("python"))
+        var py_idx = catalog_by_language(self.lsp_specs, String("python"))
         if py_idx >= 0:
             var hint = self.lsp_specs[py_idx].install_hint
             var prefix = String("pip install ")
@@ -16203,7 +16199,7 @@ struct Desktop(Movable):
         is already in flight we surface the conflict on the status bar
         rather than queue, since the popup only renders one at a time.
         """
-        var spec_idx = find_docset_by_language(self.doc_specs, lang)
+        var spec_idx = catalog_by_language(self.doc_specs, lang)
         if spec_idx < 0:
             return
         var spec = self.doc_specs[spec_idx].copy()
@@ -18321,7 +18317,7 @@ struct Desktop(Movable):
             var lang = self._pending_arg
             self._pending_arg = String("")
             if yes:
-                var spec_idx = find_language_by_id(self.lsp_specs, lang)
+                var spec_idx = catalog_by_language(self.lsp_specs, lang)
                 if spec_idx >= 0:
                     var hint = self.lsp_specs[spec_idx].install_hint
                     clipboard_copy(hint)

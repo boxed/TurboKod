@@ -7,6 +7,7 @@ and ``scripts/run_tests.sh`` runs every suite.
 
 from std.ffi import external_call
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
+from turbokod.catalog import catalog_by_language, catalog_by_extension
 from turbokod.editor import Editor
 from turbokod.desktop import Desktop
 from turbokod.file_io import read_file, rename_path, stat_file, write_file
@@ -45,8 +46,7 @@ from turbokod.highlight import (
 )
 from turbokod.posix import monotonic_ms, sleep_ms, which
 from turbokod.grammar_install import (
-    built_in_downloadable_grammars, find_downloadable_grammar_by_language,
-    find_downloadable_grammar_for_extension
+    built_in_downloadable_grammars,
 )
 
 from support import _hl_lines, _temp_path, setup_test_env
@@ -78,11 +78,11 @@ def test_downloadable_grammar_registry_has_elm() raises:
     """The seed entry — opening a ``.elm`` file is what triggers the
     download prompt in ``Desktop._maybe_prompt_grammar_install``."""
     var specs = built_in_downloadable_grammars()
-    var idx = find_downloadable_grammar_for_extension(specs, String("elm"))
+    var idx = catalog_by_extension(specs, String("elm"))
     assert_true(idx >= 0)
     assert_equal(specs[idx].language_id, String("elm"))
     assert_equal(specs[idx].display, String("Elm"))
-    var by_lang = find_downloadable_grammar_by_language(specs, String("elm"))
+    var by_lang = catalog_by_language(specs, String("elm"))
     assert_equal(by_lang, idx)
 
 
@@ -90,7 +90,7 @@ def test_downloadable_grammar_registry_misses_unknown() raises:
     """``txt`` shouldn't trigger a grammar prompt — keeps the prompt
     machinery from firing on every file the user opens."""
     var specs = built_in_downloadable_grammars()
-    var idx = find_downloadable_grammar_for_extension(specs, String("txt"))
+    var idx = catalog_by_extension(specs, String("txt"))
     assert_equal(idx, -1)
 
 

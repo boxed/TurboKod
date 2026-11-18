@@ -27,6 +27,7 @@ entries here when the need is real, not speculative.
 
 from std.collections.list import List
 
+from .catalog import LanguageKeyed
 from .file_io import basename, join_path, list_directory, stat_file
 from .project_targets import split_env_entry
 from .string_utils import is_ascii_digit
@@ -62,7 +63,7 @@ struct AdapterCandidate(Copyable, Movable):
         self.argv = argv^
 
 
-struct DebuggerSpec(Copyable, Movable):
+struct DebuggerSpec(Copyable, Movable, LanguageKeyed):
     """Per-language debugger config: which adapters can serve it, what
     request kind to default to, and the body of arguments we send with
     that request.
@@ -75,6 +76,10 @@ struct DebuggerSpec(Copyable, Movable):
     var candidates: List[AdapterCandidate]
     var request_kind: UInt8
     var name: String  # human-readable, e.g. "debugpy"
+
+
+    def catalog_language(self) -> String:
+        return self.language_id
 
     def __init__(
         out self, var language_id: String,
@@ -120,7 +125,7 @@ def built_in_debuggers() -> List[DebuggerSpec]:
     Order within ``candidates`` is the spawn-priority order — first
     binary present on ``$PATH`` wins. The list is small (a handful of
     languages even fully populated) so a hash-table lookup would be
-    over-engineering; ``find_debugger_for_language`` is a linear scan.
+    over-engineering; ``catalog_by_language`` is a linear scan.
     """
     var out = List[DebuggerSpec]()
 
@@ -245,17 +250,6 @@ def python_venv_has_debugpy(venv_dir: String) -> Bool:
     return False
 
 
-def find_debugger_for_language(
-    specs: List[DebuggerSpec], language_id: String,
-) -> Int:
-    """Index of the spec for ``language_id``, or -1 if no debugger is
-    registered for that language. Linear scan; the list is tiny."""
-    if len(language_id.as_bytes()) == 0:
-        return -1
-    for i in range(len(specs)):
-        if specs[i].language_id == language_id:
-            return i
-    return -1
 
 
 # --- launch-arguments builders --------------------------------------------

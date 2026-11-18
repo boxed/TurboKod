@@ -24,10 +24,11 @@ pass, the click crash is genuinely UI-side and not in the data path.
 
 from std.collections.list import List
 from std.ffi import external_call
+from turbokod.catalog import catalog_by_language
 
 from turbokod.dap_dispatch import DapManager
 from turbokod.debugger_config import (
-    built_in_debuggers, find_debugger_for_language,
+    built_in_debuggers,
 )
 from turbokod.file_io import write_file
 from turbokod.posix import monotonic_ms
@@ -80,7 +81,7 @@ def main() raises:
         print("could not write test file"); return
 
     var debs = built_in_debuggers()
-    var idx = find_debugger_for_language(debs, String("python"))
+    var idx = catalog_by_language(debs, String("python"))
     if idx < 0:
         print("no python debugger registered"); return
 

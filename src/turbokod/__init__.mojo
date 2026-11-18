@@ -85,14 +85,14 @@ from .desktop import (
     WINDOW_MAXIMIZE_ALL, WINDOW_RESTORE_ALL,
     ctrl_key, format_hotkey,
 )
+from .catalog import (
+    ExtensionKeyed, LanguageKeyed, catalog_by_extension, catalog_by_language,
+)
 from .doc_config import (
     DocSpec, built_in_docsets, docs_install_command,
-    find_docset_by_language, find_docset_for_extension,
 )
 from .grammar_install import (
     DownloadableGrammar, built_in_downloadable_grammars,
-    find_downloadable_grammar_by_language,
-    find_downloadable_grammar_for_extension,
     grammar_install_command, user_grammar_dir, user_grammar_installed,
     user_grammar_path, user_grammar_path_for_ext, user_grammar_root,
 )
@@ -127,7 +127,6 @@ from .lsp import (
 )
 from .language_config import (
     LanguageSpec, ServerCandidate, built_in_servers,
-    find_language_by_id, find_language_for_extension,
 )
 from .lsp_dispatch import DefinitionResolved, LspManager, SymbolItem
 from .dap import (
@@ -140,9 +139,8 @@ from .dap_dispatch import (
 )
 from .debug_pane import DebugPane, PaneRow, PANE_MODE_DEBUG, PANE_MODE_RUN
 from .debugger_config import (
-    DAP_REQUEST_ATTACH, DAP_REQUEST_LAUNCH,
-    AdapterCandidate, DebuggerSpec,
-    built_in_debuggers, find_debugger_for_language, launch_arguments_for,
+    DAP_REQUEST_ATTACH, DAP_REQUEST_LAUNCH, AdapterCandidate, DebuggerSpec,
+    built_in_debuggers, launch_arguments_for,
 )
 from .dir_browser import DirBrowser
 from .dropdown import DROPDOWN_HIT_BODY, DROPDOWN_HIT_NONE, Dropdown
