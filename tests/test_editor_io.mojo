@@ -48,7 +48,7 @@ def test_editor_from_file() raises:
     var ed = Editor.from_file(String("examples/hello.mojo"))
     assert_true(ed.buffer.line_count() > 5)
     assert_false(ed.dirty)
-    assert_true(Int(ed.file_size) > 0)
+    assert_true(Int(ed.disk_stat.size) > 0)
     # Initial check: nothing changed since open, so the status code is
     # EXT_CHANGE_NONE.
     assert_equal(ed.check_for_external_change(), EXT_CHANGE_NONE)

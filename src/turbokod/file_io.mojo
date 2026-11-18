@@ -78,6 +78,12 @@ struct FileInfo(ImplicitlyCopyable, Movable):
     def is_dir(self) -> Bool:
         return (self.mode & _S_IFMT) == _S_IFDIR
 
+    @staticmethod
+    def unknown() -> Self:
+        """"Not looked yet": ``ok`` False, so never the same stamp as
+        anything."""
+        return Self(Int64(0), Int64(0), Int64(0), UInt32(0), False)
+
     def same_content_stamp(self, other: Self) -> Bool:
         """True when both stats succeeded and agree on size + mtime to
         nanosecond precision — i.e. the file almost certainly has not

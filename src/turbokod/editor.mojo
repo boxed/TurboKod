@@ -1384,9 +1384,8 @@ struct Editor(Copyable, Movable):
     var host_owns_shadows: Bool
     # File-backing (empty file_path means buffer is not file-backed):
     var file_path: String
-    var file_size: Int64
-    var file_mtime: Int64
-    var file_mtime_nsec: Int64
+    # The file's stat when the buffer last matched it (loaded or saved).
+    var disk_stat: FileInfo
     var dirty: Bool
     # Last on-disk byte-content we observed for this file, used as the
     # merge base when ``check_for_external_change`` detects a stat
@@ -1615,7 +1614,7 @@ struct Editor(Copyable, Movable):
     # ``merge_pending`` gates the host's poll; ``pending_merge_regions``
     # carries the stable/conflict runs. The buffer and ``disk_baseline``
     # are left untouched (the user's local edits stay put) until the
-    # user resolves the merge; only ``file_size``/``file_mtime`` are
+    # user resolves the merge; only ``disk_stat`` is
     # advanced so the next tick doesn't re-fire on the same write.
     # ``consume_merge_regions`` returns the regions and clears the flag.
     var merge_pending: Bool
@@ -2035,9 +2034,7 @@ struct Editor(Copyable, Movable):
         self._suppress_overlays = False
         self.host_owns_shadows = False
         self.file_path = String("")
-        self.file_size = Int64(0)
-        self.file_mtime = Int64(0)
-        self.file_mtime_nsec = Int64(0)
+        self.disk_stat = FileInfo.unknown()
         self.dirty = False
         self.disk_baseline = String("")
         self.editorconfig = EditorConfig()
@@ -4494,8 +4491,7 @@ struct Editor(Copyable, Movable):
         # Size + mtime to the nanosecond: ``st_mtime`` alone is 1 s
         # granularity, which misses a same-size rewrite within the second
         # — exactly what flipping between two branches produces.
-        if info.size == self.file_size and info.mtime_sec == self.file_mtime \
-                and info.mtime_nsec == self.file_mtime_nsec:
+        if info.same_content_stamp(self.disk_stat):
             return EXT_CHANGE_NONE
         return self._reconcile_with_disk(info)
 
@@ -4790,9 +4786,7 @@ struct Editor(Copyable, Movable):
             var info = stat_file(self.file_path)
             if info.ok and (
                 self.disk_conflict
-                or info.size != self.file_size
-                or info.mtime_sec != self.file_mtime
-                or info.mtime_nsec != self.file_mtime_nsec
+                or not info.same_content_stamp(self.disk_stat)
             ):
                 var status = self._reconcile_with_disk(info)
                 if status == EXT_CHANGE_CONFLICT \
@@ -5059,9 +5053,7 @@ struct Editor(Copyable, Movable):
     def _adopt_stat(mut self, info: FileInfo):
         """Record ``info`` as the on-disk state this buffer last matched,
         so ``check_for_external_change`` doesn't flag our own write/load."""
-        self.file_size = info.size
-        self.file_mtime = info.mtime_sec
-        self.file_mtime_nsec = info.mtime_nsec
+        self.disk_stat = info
 
     def set_blame(mut self, var lines: List[BlameLine]):
         """Replace the blame attribution list and turn the blame
@@ -5328,12 +5320,6 @@ struct Editor(Copyable, Movable):
         doesn't overpower a real misspelling."""
         return self._minimap_first_mark(start, end)[0]
 
-    def _minimap_first_marked_buf_row(self, start: Int, end: Int) -> Int:
-        """First buffer row in ``[start, end)`` that carries a mark,
-        in the same priority order as ``_minimap_kind_in_slice``.
-        Returns ``-1`` when the slice has no marks."""
-        return self._minimap_first_mark(start, end)[1]
-
     def _minimap_first_mark(self, start: Int, end: Int) -> Tuple[Int, Int]:
         """``(kind, row)`` of the priority-winning mark in ``[start, end)``
         — the first row carrying the highest-priority kind — or
@@ -5488,10 +5474,11 @@ struct Editor(Copyable, Movable):
         """Minimap-column branch of ``_update_minimap_hover``."""
         var sy = pos.y - view.a.y
         var rng = self._minimap_buf_range_for_screen_row(sy, view.height())
-        var kind = self._minimap_kind_in_slice(rng[0], rng[1])
+        var mark = self._minimap_first_mark(rng[0], rng[1])
+        var kind = mark[0]
         if kind == 0:
             return
-        var buf_row = self._minimap_first_marked_buf_row(rng[0], rng[1])
+        var buf_row = mark[1]
         if buf_row < 0:
             buf_row = rng[0]
         self._minimap_hover_kind = kind
@@ -5852,8 +5839,9 @@ struct Editor(Copyable, Movable):
         var rng = self._minimap_buf_range_for_screen_row(sy, content_h)
         if rng[0] >= rng[1]:
             return False
-        var kind = self._minimap_kind_in_slice(rng[0], rng[1])
-        var buf_row = self._minimap_first_marked_buf_row(rng[0], rng[1])
+        var mark = self._minimap_first_mark(rng[0], rng[1])
+        var kind = mark[0]
+        var buf_row = mark[1]
         if buf_row < 0:
             buf_row = rng[0]
         var n_lines = self.buffer.line_count()
@@ -10352,13 +10340,10 @@ struct Editor(Copyable, Movable):
         # that codepoint instead of in the middle of its UTF-8 sequence.
         var line = self.buffer.line(row)
         var line_n = len(line.as_bytes())
-        var visible: String
-        if seg_start >= line_n:
-            visible = String("")
-        else:
-            visible = byte_slice(line, seg_start, seg_end)
-        var col = seg_start + utf8_byte_of_cell(visible, cell_x)
-        if col > line_n: col = line_n
+        var col = min(
+            byte_of_cell_in(line, seg_start, min(seg_end, line_n), cell_x),
+            line_n,
+        )
         # Cmd+click: capture a go-to-definition request without moving
         # the cursor. The host polls ``consume_definition_request`` and
         # forwards to whichever LSP client is wired up. (No effect
@@ -11425,12 +11410,7 @@ def _smart_string_around(
 def _is_blank_line(line: String) -> Bool:
     """A line of zero or more spaces / tabs is blank for the purpose of
     smart-select indent block detection."""
-    var bytes = line.as_bytes()
-    for i in range(len(bytes)):
-        var b = Int(bytes[i])
-        if b != 0x20 and b != 0x09:
-            return False
-    return True
+    return leading_indent_bytes(line) == len(line.as_bytes())
 
 
 def _smart_line_content_range(line: String) -> Tuple[Int, Int]:

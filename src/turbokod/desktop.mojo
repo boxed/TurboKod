@@ -2181,7 +2181,7 @@ struct Desktop(Movable):
         self.config_persistable = True
         self._config_baseline = TurbokodConfig()
         self._config_from_disk = False
-        self._config_stamp = _no_file_info()
+        self._config_stamp = FileInfo.unknown()
         self._last_config_poll_ms = 0
         self.targets = ProjectTargets()
         self._last_screen = Rect.empty()
@@ -18861,12 +18861,6 @@ def _mojo_include_dirs(root: String) -> List[String]:
 
 
 # --- Result / summary windows for project search ----------------------------
-
-
-def _no_file_info() -> FileInfo:
-    """A ``FileInfo`` for "not looked yet" (``ok`` False: never the same
-    stamp as anything)."""
-    return FileInfo(Int64(0), Int64(0), Int64(0), UInt32(0), False)
 
 
 def _feed_popup(mut m: AnchoredMenu, event: Event, screen: Rect) -> Bool:
