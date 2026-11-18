@@ -6350,9 +6350,16 @@ struct Editor(Copyable, Movable):
                 )
 
     def _total_gutter(self) -> Int:
-        return self.gutter_width + self._line_number_gutter() \
-            + self._git_changes_gutter() + self._blame_gutter() \
-            + self._test_gutter()
+        return self._gutters().total()
+
+    def _gutters(self) -> _GutterCols:
+        """Where each left gutter column sits — the one layout paint and
+        click hit-testing both read."""
+        return _GutterCols(
+            self._line_number_gutter(), self.gutter_width,
+            self._git_changes_gutter(), self._blame_gutter(),
+            self._test_gutter(),
+        )
 
     def _layout_lines(
         self, content_h: Int, text_width: Int,
@@ -6943,10 +6950,9 @@ struct Editor(Copyable, Movable):
         var content_right = view.b.x - right_gutter
         # The change-bar sits at the git-changes gutter column when present,
         # otherwise just left of the text.
-        var gc = self._git_changes_gutter()
-        var ln = self._line_number_gutter()
-        var dap = self.gutter_width
-        var bar_x = view.a.x + ln + dap
+        var g = self._gutters()
+        var gc = g.git
+        var bar_x = view.a.x + g.git_x()
         for screen_row in range(len(layout)):
             if layout[screen_row].line_idx >= 0:
                 continue
@@ -7078,14 +7084,14 @@ struct Editor(Copyable, Movable):
         # gutter (breakpoint dot and exec arrow, owned by Desktop),
         # then the git-changes column, then the optional blame gutter
         # ("<sha> <author>"). Any of them can be zero-width.
-        var dap_gutter = self.gutter_width
-        var ln_gutter = self._line_number_gutter()
-        var gc_gutter = self._git_changes_gutter()
-        var bl_gutter = self._blame_gutter()
-        var tst_gutter = self._test_gutter()
+        var g = self._gutters()
+        var dap_gutter = g.dap
+        var ln_gutter = g.line_numbers
+        var gc_gutter = g.git
+        var bl_gutter = g.blame
+        var tst_gutter = g.test
         var right_gutter = self._right_gutter()
-        var total_gutter = dap_gutter + ln_gutter + gc_gutter + bl_gutter \
-            + tst_gutter
+        var total_gutter = g.total()
         var text_x0 = view.a.x + total_gutter
         var content_right = view.b.x - right_gutter
         var content_bottom = view.b.y
@@ -7165,19 +7171,19 @@ struct Editor(Copyable, Movable):
                                     and self.breakpoint_conditional[k]:
                                 dot_attr = Attr(LIGHT_YELLOW, EDITOR_BG)
                             painter.set(
-                                canvas, view.a.x + ln_gutter, sy_g,
+                                canvas, view.a.x + g.dap_x(), sy_g,
                                 Cell(String("●"), dot_attr, 1),
                             )
                             break
                     if buf_row == self.exec_line:
-                        var ax = view.a.x + ln_gutter \
+                        var ax = view.a.x + g.dap_x() \
                             + (1 if dap_gutter >= 2 else 0)
                         painter.set(canvas, ax, sy_g, Cell(String("▶"), exec_attr, 1))
                 if gc_gutter > 0 and is_first_seg \
                         and buf_row >= 0 \
                         and buf_row < len(self.git_change_lines):
                     var status = self.git_change_lines[buf_row]
-                    var gx = view.a.x + ln_gutter + dap_gutter
+                    var gx = view.a.x + g.git_x()
                     if status != GIT_CHANGE_NONE:
                         # In review every changed buffer row is the *new*
                         # side of a change (the old text of a modified line is
@@ -7205,7 +7211,7 @@ struct Editor(Copyable, Movable):
                         and buf_row >= 0 \
                         and buf_row < len(self.blame_lines):
                     ref bl = self.blame_lines[buf_row]
-                    var bx = view.a.x + ln_gutter + dap_gutter + gc_gutter
+                    var bx = view.a.x + g.blame_x()
                     # Blame columns: clip to ``[bx, bx + bl_gutter)``
                     # via a sub-painter so a long author/commit can't
                     # bleed into the source text column.
@@ -7225,8 +7231,7 @@ struct Editor(Copyable, Movable):
                 if tst_gutter > 0 and is_first_seg:
                     for k in range(len(self.test_rows)):
                         if self.test_rows[k] == buf_row:
-                            var tx = view.a.x + ln_gutter + dap_gutter \
-                                + gc_gutter + bl_gutter
+                            var tx = view.a.x + g.test_x()
                             painter.set(
                                 canvas, tx, sy_g,
                                 Cell(String("▶"), Attr(LIGHT_GREEN, EDITOR_BG), 1),
@@ -10239,13 +10244,9 @@ struct Editor(Copyable, Movable):
                 # specifically, over a row that has a change marker?
                 # That's an "open the revert popup" gesture; everything
                 # else in the gutter remains a breakpoint toggle.
-                var gc_w = self._git_changes_gutter()
-                var gc_x0 = self.gutter_width + self._line_number_gutter()
-                var on_gc = (
-                    gc_w > 0
-                    and rel_x >= gc_x0
-                    and rel_x < gc_x0 + gc_w
-                )
+                var g = self._gutters()
+                var on_gc = g.git > 0 and rel_x >= g.git_x() \
+                    and rel_x < g.git_x() + g.git
                 var has_change = (
                     row >= 0 and row < len(self.git_change_lines)
                     and self.git_change_lines[row] != GIT_CHANGE_NONE
@@ -10258,12 +10259,8 @@ struct Editor(Copyable, Movable):
                 # a detected-test row stashes a run request for the host's
                 # Run/Debug popup. Clicks on the column over a non-test row
                 # fall through to the breakpoint toggle like the rest.
-                var tst_w = self._test_gutter()
-                var tst_x0 = self.gutter_width + self._line_number_gutter() \
-                    + self._git_changes_gutter() + self._blame_gutter()
-                var on_test = (
-                    tst_w > 0 and rel_x >= tst_x0 and rel_x < tst_x0 + tst_w
-                )
+                var on_test = g.test > 0 and rel_x >= g.test_x() \
+                    and rel_x < g.test_x() + g.test
                 var test_idx = -1
                 if on_test:
                     for k in range(len(self.test_rows)):
@@ -10275,11 +10272,9 @@ struct Editor(Copyable, Movable):
                 # commit-detail popup. Rows with no attribution (past the
                 # end of the blame data, e.g. lines added since it loaded)
                 # fall through to the breakpoint toggle.
-                var bl_w = self._blame_gutter()
-                var bl_x0 = self.gutter_width + self._line_number_gutter() \
-                    + self._git_changes_gutter()
                 var on_blame = (
-                    bl_w > 0 and rel_x >= bl_x0 and rel_x < bl_x0 + bl_w
+                    g.blame > 0 and rel_x >= g.blame_x()
+                    and rel_x < g.blame_x() + g.blame
                     and row >= 0 and row < len(self.blame_lines)
                     and len(self.blame_lines[row].commit.as_bytes()) > 0
                 )
@@ -11323,6 +11318,33 @@ def _smart_indent_for_enter(
 # brackets → line → block → file); Cmd+Down rewinds through the snapshots
 # captured on the stack. Helpers operate on raw byte ranges and don't
 # touch the editor — keeping them pure makes the levels easy to test.
+
+
+@fieldwise_init
+struct _GutterCols(ImplicitlyCopyable, Movable):
+    """The editor's left gutter columns, left to right, by width (0 when
+    off): line numbers, the debugger's (breakpoints, exec arrow), the git
+    change bar, blame, the test run icons."""
+    var line_numbers: Int
+    var dap: Int
+    var git: Int
+    var blame: Int
+    var test: Int
+
+    def dap_x(self) -> Int:
+        return self.line_numbers
+
+    def git_x(self) -> Int:
+        return self.dap_x() + self.dap
+
+    def blame_x(self) -> Int:
+        return self.git_x() + self.git
+
+    def test_x(self) -> Int:
+        return self.blame_x() + self.blame
+
+    def total(self) -> Int:
+        return self.test_x() + self.test
 
 
 def _word_run_at_or_left(line: String, col: Int) -> Tuple[Int, Int]:
