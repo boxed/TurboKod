@@ -47,7 +47,7 @@ from .posix import close_fd, exit_code_from_status, poll_exit
 from .pty import PtyProcess
 from .test_report import reporting_env
 from .test_results import (
-    OUTPUT_LABEL, RESULTS_LABEL, TEST_TOGGLE_VIEW, TestResultsView,
+    OUTPUT_LABEL, RESULTS_LABEL, TEST_TOGGLE_VIEW, TestResultsView, tests_title,
 )
 from .scrollbar import ScrollBarArea
 from .terminal_view import (
@@ -315,17 +315,10 @@ struct TestPane(Copyable, Movable):
     # --- paint ---------------------------------------------------------
 
     def header_title(self) -> String:
-        if self.exited:
-            var t: String
-            if self.exit_code == 0:
-                t = String("Tests — passed")
-            else:
-                t = String("Tests — failed (") + String(self.exit_code) \
-                    + String(")")
-            return t + self.results.title_suffix()
-        if self.started:
-            return String("Tests — running") + self.results.title_suffix()
-        return String("Tests")
+        if not self.started:
+            return String("Tests")
+        return tests_title(self.exited, String(self.exit_code)) \
+            + self.results.title_suffix()
 
     def paint(mut self, mut canvas: Canvas, panel: Rect):
         if not self.visible or panel.is_empty():
@@ -461,10 +454,7 @@ struct TestPane(Copyable, Movable):
             # Link hit-test first — clicking a ``File "...", line N`` span
             # opens the file, a ``http(s)://`` span the browser, rather
             # than starting a selection.
-            var li = link_at(self._last_links, event.pos)
-            if li >= 0:
-                ref link = self._last_links[li]
-                self.link_click.set(link)
+            if self.link_click.click(self._last_links, event.pos):
                 return True
             self.sel.click(self.vt, event)
             return True

@@ -62,6 +62,15 @@ struct LinkLatch(Copyable, Movable):
             self.path = link.path
             self.line = link.line
 
+    def click(mut self, links: List[OutputLink], pos: Point) -> Bool:
+        """Latch the link of ``links`` under ``pos``; whether there was one
+        (a click on a link opens it rather than starting a selection)."""
+        var li = link_at(links, pos)
+        if li < 0:
+            return False
+        self.set(links[li])
+        return True
+
     def take_file(mut self) -> Tuple[String, Int]:
         """``(path, line)`` (1-based) of a pending file link, or
         ``("", 0)``; clears it."""

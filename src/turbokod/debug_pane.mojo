@@ -1476,10 +1476,7 @@ struct DebugPane(Copyable, Movable):
             # ``File "x", line N`` span opens the file, a ``http(s)://``
             # span opens the browser, rather than starting a selection drag.
             var m = self._out_frame.map(event)
-            var li = link_at(self._last_links, m.pos)
-            if li >= 0:
-                ref link = self._last_links[li]
-                self.link_click.set(link)
+            if self.link_click.click(self._last_links, m.pos):
                 return True
             # Forward to the log: starts the selection drag.
             return self.output.handle_mouse(m)
@@ -1606,26 +1603,10 @@ struct DebugPane(Copyable, Movable):
             self.pending_remove_watch = ordinal
 
     def _scroll_stack(mut self, delta: Int):
-        var ns = self.stack_scroll + delta
-        if ns < 0:
-            ns = 0
-        var max_s = len(self._left_indices) - 1
-        if max_s < 0:
-            max_s = 0
-        if ns > max_s:
-            ns = max_s
-        self.stack_scroll = ns
+        self.stack_scroll = _scrolled(self.stack_scroll, delta, len(self._left_indices))
 
     def _scroll_right(mut self, delta: Int):
-        var ns = self.right_scroll + delta
-        if ns < 0:
-            ns = 0
-        var max_s = len(self._right_indices) - 1
-        if max_s < 0:
-            max_s = 0
-        if ns > max_s:
-            ns = max_s
-        self.right_scroll = ns
+        self.right_scroll = _scrolled(self.right_scroll, delta, len(self._right_indices))
 
     def _compute_columns(mut self):
         """Partition ``rows`` into left (Stack) and right
@@ -1727,6 +1708,11 @@ def _is_ident_byte(c: UInt8) -> Bool:
     ``_``, and any non-ASCII (UTF-8) byte."""
     return (c >= 0x61 and c <= 0x7A) or (c >= 0x41 and c <= 0x5A) \
         or (c >= 0x30 and c <= 0x39) or c == 0x5F or c >= 0x80
+
+
+def _scrolled(scroll: Int, delta: Int, rows: Int) -> Int:
+    """``scroll`` moved by ``delta``, kept on one of ``rows`` rows."""
+    return max(0, min(scroll + delta, rows - 1))
 
 
 def _utf16_len(s: String, end_byte: Int) -> Int:

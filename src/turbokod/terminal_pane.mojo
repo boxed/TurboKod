@@ -53,7 +53,7 @@ from .posix import getenv_value, monotonic_ms
 from .pty import PtyProcess
 from .scrollbar import ScrollBarArea
 from .test_results import (
-    OUTPUT_LABEL, RESULTS_LABEL, TEST_TOGGLE_VIEW, TestResultsView,
+    OUTPUT_LABEL, RESULTS_LABEL, TEST_TOGGLE_VIEW, TestResultsView, tests_title,
 )
 from .tmux_session import (
     prepare_tmux_socket_dir, run_exit_line, tmux_attach_argv, tmux_binary,
@@ -785,13 +785,8 @@ struct TerminalPane(Copyable, Movable):
         set, else "Terminal". A run pane says which target, and whether it
         exited."""
         if self.tests:
-            var p = self.results.title_suffix()
-            if not self.run_exited:
-                return String("Tests — running") + p
-            if self.run_exit_status == String("0"):
-                return String("Tests — passed") + p
-            return String("Tests — failed (") + self.run_exit_status \
-                + String(")") + p
+            return tests_title(self.run_exited, self.run_exit_status) \
+                + self.results.title_suffix()
         if self.is_run():
             var t = String("Run - ") + self.run_target
             if self.run_exited:
@@ -985,10 +980,7 @@ struct TerminalPane(Copyable, Movable):
                 return True
             # A run's traceback link opens its file (a URL the browser)
             # rather than starting a selection.
-            var li = link_at(self._last_links, event.pos)
-            if li >= 0:
-                ref link = self._last_links[li]
-                self.link_click.set(link)
+            if self.link_click.click(self._last_links, event.pos):
                 return True
             self.sel.click(self._view(), event)
             return True

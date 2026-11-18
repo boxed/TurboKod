@@ -151,18 +151,9 @@ struct PtyProcess(Copyable, Movable):
             self.flush()
             return
         var n = len(bytes)
-        var sent = 0
-        while sent < n:
-            var rc = self.write_bytes(
-                bytes.unsafe_ptr().unsafe_offset(sent), n - sent,
-            )
-            if rc < 0:
-                return
-            if rc == 0:
-                if n - sent <= _MAX_UNSENT:
-                    self.unsent.extend(bytes[sent:])
-                return
-            sent += rc
+        var sent = self._send(bytes.unsafe_ptr(), n)
+        if sent >= 0 and n - sent <= _MAX_UNSENT:
+            self.unsent.extend(bytes[sent:])
 
     def flush(mut self):
         """Hand the kernel what it can take of ``unsent``. Called from the
@@ -174,19 +165,22 @@ struct PtyProcess(Copyable, Movable):
             return
         var queue = List[UInt8]()
         swap(queue, self.unsent)
-        var n = len(queue)
+        var sent = self._send(queue.unsafe_ptr(), len(queue))
+        if sent >= 0:
+            self.unsent = List[UInt8](queue[sent:])
+
+    def _send(self, ptr: Pointer[UInt8, _], n: Int) -> Int:
+        """Write ``n`` bytes at ``ptr`` until done or the kernel's queue is
+        full: how many went, or -1 when the child is gone."""
         var sent = 0
         while sent < n:
-            var rc = self.write_bytes(
-                queue.unsafe_ptr().unsafe_offset(sent), n - sent,
-            )
+            var rc = self.write_bytes(ptr.unsafe_offset(sent), n - sent)
             if rc < 0:
-                return
+                return -1
             if rc == 0:
                 break
             sent += rc
-        if sent < n:
-            self.unsent = List[UInt8](queue[sent:])
+        return sent
 
     def write_bytes(self, ptr: Pointer[UInt8, _], n: Int) -> Int:
         """Best-effort non-blocking write to the master. Returns the

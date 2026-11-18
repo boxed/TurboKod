@@ -830,6 +830,16 @@ def clean_output(text: String) -> String:
     return String(StringSpan(unsafe_from_utf8=Span(out)))
 
 
+def tests_title(exited: Bool, status: String) -> String:
+    """A test run's pane title: running, else passed (exit ``status`` "0")
+    or failed with it."""
+    if not exited:
+        return String("Tests — running")
+    if status == String("0"):
+        return String("Tests — passed")
+    return String("Tests — failed (") + status + String(")")
+
+
 def wrap_cells(line: String, width: Int) -> List[String]:
     """``line`` cut into pieces at most ``width`` cells wide (at least one
     piece, empty for an empty line). Never splits a codepoint."""
