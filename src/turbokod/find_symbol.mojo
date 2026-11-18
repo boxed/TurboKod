@@ -41,6 +41,7 @@ from .query_memory import QueryMemory
 from .text_field import TextField
 from .case_fold import contains_ci, eq_ci, starts_with_ci
 from .line_stream import LineStream
+from .rg import parse_rg_row, rg_base_argv
 
 
 comptime _ENTRIES_CAP: Int = 500
@@ -147,7 +148,7 @@ struct _FindSymbolRunner(Movable):
         var out = List[Tuple[String, Int, Int, String]]()
         var got = self.stream.tick()
         for line in got[0]:
-            var parsed = _parse_rg_match_line(line)
+            var parsed = parse_rg_row(line)
             if parsed:
                 out.append(parsed.value())
         return out^
@@ -155,33 +156,13 @@ struct _FindSymbolRunner(Movable):
 
 def _rg_argv(pattern: String, root: String, smart_case: Bool) -> List[String]:
     """``rg`` argv for the Find Symbol runner: ``path\\0line:col:text``
-    rows for every match of ``pattern`` under ``root``."""
-    var argv = List[String]()
-    argv.append(String("rg"))
-    argv.append(String("--no-heading"))
-    argv.append(String("--line-number"))
-    argv.append(String("--column"))
-    argv.append(String("--color=never"))
-    # The path ends in a NUL rather than a ``:``, which a file name can hold
-    argv.append(String("--null"))
+    rows for every match of ``pattern`` under ``root``. Dotfiles count
+    (``rg_base_argv``) — doubly so here: this runner is only the
+    *fallback* for a cold ``SymbolIndex``, whose walk sees them, and the
+    same query has to answer the same whether or not the index is ready."""
+    var argv = rg_base_argv()
     if smart_case:
         argv.append(String("--smart-case"))
-    # Include dot-prefixed files/dirs, minus ``.git`` — same reason
-    # as the project-find runner in ``project_find.mojo``. It matters
-    # doubly here: this runner is only the *fallback* for a cold
-    # ``SymbolIndex``, and the index walks the project through
-    # ``walk_project_files``, which does see dotfiles. Without this
-    # the same query answered differently depending on whether the
-    # index happened to be ready.
-    argv.append(String("--hidden"))
-    argv.append(String("-g"))
-    argv.append(String("!.git/"))
-    # Cap per-line preview so a hit inside a minified bundle can't
-    # smuggle multi-MB lines into our buffer (mirrors the cap
-    # ``project_find`` uses for the same reason).
-    argv.append(String("--max-columns"))
-    argv.append(String("1024"))
-    argv.append(String("--max-columns-preview"))
     argv.append(String("-e"))
     argv.append(pattern)
     argv.append(String("--"))
@@ -789,39 +770,6 @@ def _extract_identifier(line: String, col_1based: Int) -> String:
     while end < len(b) and is_ascii_ident_byte(b[end]):
         end += 1
     return String(StringSpan(unsafe_from_utf8=b[start:end]))
-
-
-def _parse_rg_match_line(
-    line: String,
-) -> Optional[Tuple[String, Int, Int, String]]:
-    """Decode one rg ``--no-heading --line-number --column --null`` row
-    (``path\\0line:col:matched-line-text``) into
-    ``(path, line, column, text)``. Returns ``None`` for any row
-    that isn't a path, a NUL and ``digits:digits:``.
-    """
-    var b = line.as_bytes()
-    if len(b) == 0:
-        return Optional[Tuple[String, Int, Int, String]]()
-    var i = 0
-    while i < len(b) and b[i] != 0x00:
-        i += 1
-    var j = i + 1
-    while j < len(b) and Int(b[j]) >= 0x30 and Int(b[j]) <= 0x39:
-        j += 1
-    if j == i + 1 or j >= len(b) or b[j] != 0x3A:
-        return Optional[Tuple[String, Int, Int, String]]()
-    var k = j + 1
-    while k < len(b) and Int(b[k]) >= 0x30 and Int(b[k]) <= 0x39:
-        k += 1
-    if k == j + 1 or k >= len(b) or b[k] != 0x3A:
-        return Optional[Tuple[String, Int, Int, String]]()
-    var path = String(StringSpan(unsafe_from_utf8=b[0:i]))
-    var line_no = parse_uint_range(b, i + 1, j)
-    var col_no = parse_uint_range(b, j + 1, k)
-    if line_no <= 0 or col_no <= 0:
-        return Optional[Tuple[String, Int, Int, String]]()
-    var text = String(StringSpan(unsafe_from_utf8=b[k + 1:len(b)]))
-    return Optional[Tuple[String, Int, Int, String]]((path, line_no, col_no, text))
 
 
 def _is_query_byte(b: UInt8) -> Bool:

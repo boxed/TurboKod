@@ -33,11 +33,13 @@ from .query_memory import QueryMemory
 from .search_options import SearchOptions
 from .string_utils import (
     byte_slice, char_width, codepoint_at, display_columns, parse_uint_range,
+    utf8_prefix,
     is_ascii_ident_byte, prev_codepoint_start, split_lines, TAB_WIDTH,
 )
 from .text_field import TextField
 from .case_fold import find_exact
 from .line_stream import LineStream
+from .rg import parse_rg_row, rg_base_argv
 
 
 comptime _DEBOUNCE_MS: Int = 300
@@ -835,34 +837,7 @@ def _project_find_argv(
     var search_dir = root
     if len(clean.as_bytes()) > 0:
         search_dir = join_path(root, clean)
-    var argv = List[String]()
-    argv.append(String("rg"))
-    argv.append(String("--no-heading"))
-    argv.append(String("--line-number"))
-    argv.append(String("--column"))
-    argv.append(String("--color=never"))
-    # The path ends in a NUL rather than a ``:``, which a file name can
-    # hold (``meeting: notes.md``)
-    argv.append(String("--null"))
-    # Search dot-prefixed files and directories. rg skips them by
-    # default, which silently hid every hit under ``.github/``,
-    # ``.gitlab-ci.yml``, ``.env``, ``.claude/`` and the rest of a
-    # project's dot tree — a query for a workflow job name returned
-    # zero results with the text sitting right there in
-    # ``.github/workflows/``. ``walk_project_files`` (the non-rg
-    # walker, and the file picker built on it) has always included
-    # dotfiles, so the two surfaces disagreed about what "the
-    # project" is.
-    #
-    # ``.git`` itself is the one exclusion: ``--hidden`` does descend
-    # into it (rg 13 doesn't special-case it), and its packfiles,
-    # refs and COMMIT_EDITMSG are never what a project find is
-    # after. Negated globs beat include globs in rg's override
-    # matcher regardless of order, so the user ``-g`` patterns added
-    # below can't accidentally re-admit it.
-    argv.append(String("--hidden"))
-    argv.append(String("-g"))
-    argv.append(String("!.git/"))
+    var argv = rg_base_argv()
     # Case mode: explicit ``-s`` / ``-i`` so the toggle's behavior
     # is unambiguous. Smart-case (the previous default) felt
     # slightly magical and would silently override the user's
@@ -882,17 +857,6 @@ def _project_find_argv(
     for gi in range(len(globs)):
         argv.append(String("-g"))
         argv.append(globs[gi])
-    # Cap how much rg emits per matched line. Without this, a hit
-    # in a minified JS / CSS bundle would push a single multi-MB
-    # match line into our pipe; we'd have to buffer it whole
-    # before finding the trailing ``\n`` (since lines are our
-    # match boundary), and a paint-frame's worth of work would
-    # turn into seconds. ``--max-columns-preview`` keeps the
-    # matched substring visible so the user still sees what they
-    # found, just truncated.
-    argv.append(String("--max-columns"))
-    argv.append(String("1024"))
-    argv.append(String("--max-columns-preview"))
     argv.append(String("--"))                # end of options
     argv.append(query)
     argv.append(search_dir)
@@ -1025,47 +989,23 @@ struct _RgRunner(Movable):
 
 
 def _parse_rg_line(line: String, root: String) -> Optional[ProjectMatch]:
-    """Decode one ``--no-heading --line-number --column --null`` output
-    line (``path\\0line:col:text``) into a ``ProjectMatch``. Returns None
-    for anything else (rg sometimes emits other informational lines)."""
-    var p1 = _scan_to(line, 0, len(line.as_bytes()), 0x00)       # end of path
-    if p1 < 0:
+    """One ``parse_rg_row`` row as a ``ProjectMatch``, or None."""
+    var row = parse_rg_row(line)
+    if not row:
         return Optional[ProjectMatch]()
-    var p2 = _scan_to(line, p1 + 1, len(line.as_bytes()), 0x3A)  # after the line
-    if p2 < 0:
-        return Optional[ProjectMatch]()
-    var p3 = _scan_to(line, p2 + 1, len(line.as_bytes()), 0x3A)  # after the column
-    if p3 < 0:
-        return Optional[ProjectMatch]()
-    var path = byte_slice(line, 0, p1)
-    var line_no = parse_uint_range(line.as_bytes(), p1 + 1, p2)
-    var text = byte_slice(line, p3 + 1, len(line.as_bytes()))
-    if line_no <= 0:
-        return Optional[ProjectMatch]()
+    var path = row.value()[0]
+    var line_no = row.value()[1]
+    var text = row.value()[3]
     # Truncate the matched-line text up front. We display at most a few
     # hundred cells of it, and storing the full line keeps multi-MB
     # minified-file matches alive in memory across the whole result
     # list. The cap is well above any plausible visible width.
+    # On a codepoint boundary, so the cut can't leave invalid UTF-8.
     if len(text.as_bytes()) > _MATCH_TEXT_CAP:
-        # Back the cut off any continuation byte so the cap can't split a
-        # multi-byte codepoint into invalid UTF-8.
-        var tb = text.as_bytes()
-        var cut = _MATCH_TEXT_CAP
-        while cut > 0 and (Int(tb[cut]) & 0xC0) == 0x80:
-            cut -= 1
-        text = byte_slice(text, 0, cut)
+        var cut = utf8_prefix(text, _MATCH_TEXT_CAP)
+        text = cut^
     return Optional[ProjectMatch](ProjectMatch(
         path, project_relative(root, path), line_no, text,
     ))
-
-
-def _scan_to(s: String, start: Int, end: Int, target: UInt8) -> Int:
-    var b = s.as_bytes()
-    var i = start
-    while i < end:
-        if b[i] == target:
-            return i
-        i += 1
-    return -1
 
 

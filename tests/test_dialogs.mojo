@@ -23,7 +23,7 @@ from turbokod.editor import Editor
 from turbokod.file_dialog import FileDialog
 from turbokod.find_symbol import (
     container_matches_qualifier, enclosing_container, sanitize_symbol_query,
-    _parse_rg_match_line, _query_member, _query_qualifier, _rg_argv,
+    _query_member, _query_qualifier, _rg_argv,
 )
 from turbokod.color_convert import (
     srgb_to_rgb255, rgb255_to_srgb, srgb_to_oklab, oklab_to_srgb, srgb_to_hsl,
@@ -40,6 +40,7 @@ from turbokod.menu import Menu, MenuBar, MenuItem
 from turbokod.project import ProjectMatch, find_in_project, walk_project_files
 from turbokod.find_results_pane import FindResultsPane
 from turbokod.highlight import GrammarRegistry, Highlight
+from turbokod.rg import parse_rg_row
 from turbokod.project_find import _parse_rg_line, _project_find_argv, find_hit, paint_match_row
 from turbokod.text_select import PaneTextSelect
 from turbokod.search_options import SearchOptions
@@ -2546,7 +2547,7 @@ def test_a_match_in_a_file_with_a_colon_in_its_name_is_found() raises:
     var sym = capture_command(_rg_argv(String("hello"), dir, False)).stdout
     var paths = List[String]()
     for line in sym.split("\n"):
-        var m = _parse_rg_match_line(String(line))
+        var m = parse_rg_row(String(line))
         if m:
             paths.append(m.value()[0] + ":" + String(m.value()[1]))
     sort(paths)
