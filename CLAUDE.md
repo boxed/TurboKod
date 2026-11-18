@@ -551,8 +551,8 @@ cells, and the host draws it in its look from `tk_desktop_host_items`
 Platinum bar, thumb exactly where the core hit-tests it). A bar a clip cuts
 into stays cells. Framework
 chrome that should look native goes through that path, not a bespoke C ABI
-call per widget. The test results view is the first user; the
-git view's and debug pane's older hand-rolled splitters predate it. Don't
+call per widget. The test results view and the git view use it;
+the debug pane's older hand-rolled splitter predates it. Don't
 hand-roll another.
 
 ## Text width is codepoints, not bytes
