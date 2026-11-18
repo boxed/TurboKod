@@ -591,6 +591,16 @@ func cgcolor(_ rgb: UInt32) -> CGColor {
 
 // MARK: - Cell-grid view, backed by a Mojo Desktop handle
 
+/// The ``UI_*`` flag bits of a declarative node (ui_tree.mojo), for every
+/// projector. ``static let``s in an enum: constants below ``app.run()``
+/// read 0.
+enum UIFlag {
+    static let DISABLED = 1 << 0, DEFAULT = 1 << 1, CANCEL = 1 << 2, DESTRUCTIVE = 1 << 3
+    static let CENTER = 1 << 4, SECONDARY = 1 << 5, HEADING = 1 << 6, HOTKEY = 1 << 7
+    static let CHECKABLE = 1 << 8, BROWSE = 1 << 9, NAV = 1 << 10, MULTI = 1 << 11
+    static let CODE = 1 << 12, LARGE = 1 << 13
+}
+
 // Which Mojo render surface a CellView draws. `.main` is the project window
 // (editors + file tree + status, panels docked unless floated). `.panels` is
 // the separate floating-panels window, which shares the main view's Desktop
@@ -2876,22 +2886,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         var current = chromes[id]?.attentionFlashes ?? [:]
         if list.isEmpty && current.isEmpty { return false }
         let platinum = tk_desktop_platinum_ui(v.handle) != 0
-        var seen = Set<String>()
-        for p in list {
-            let key = "\(platinum ? "p" : "n"):\(p["kind"] as? Int ?? 0):\(p["idx"] as? Int ?? 0)"
-            seen.insert(key)
-            let fv = current[key] ?? {
-                let f = AttentionFlashView(platinum: platinum)
-                v.addSubview(f, positioned: .above, relativeTo: nil)
-                current[key] = f
-                return f
-            }()
-            fv.update(p)
-        }
-        for (key, fv) in current where !seen.contains(key) {
-            fv.removeFromSuperview()
-            current[key] = nil
-        }
+        _ = reconcileViews(&current, list, key: { paneKey($0, platinum) }, make: { _ in
+            let f = AttentionFlashView(platinum: platinum)
+            v.addSubview(f, positioned: .above, relativeTo: nil)
+            return f
+        }, update: { f, p in f.update(p); return true }, remove: { $0.removeFromSuperview() })
         chrome(id).attentionFlashes = current
         // Keep the timer at full rate until the core retires the outline.
         return true
@@ -3400,10 +3399,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 let order = ["settings", "project_settings", "fill", "breakpoint",
                              "breakpoint_error", "language_editor", "action_editor"]
                 for name in order {
-                    guard let evs = o[name] as? [[Any]],
-                          let d = try? JSONSerialization.data(withJSONObject: ["name": name, "events": evs]),
-                          let json = String(data: d, encoding: .utf8) else { continue }
-                    _ = withUTF8Arg(json) { p, l in tk_desktop_ui_event(h, p, l) }
+                    if let evs = o[name] as? [[Any]] { _ = sendUIEvents(h, name, evs) }
                 }
                 self.views.first?.invalidateFrame()
             }
@@ -5220,7 +5216,6 @@ extension AppController {
         let list = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [[String: Any]] } ?? []
         var current = chromes[id]?.hostItems ?? [:]
         var changed = false
-        var seen = Set<String>()
         let platinum = tk_desktop_platinum_ui(v.handle) != 0
         // The test results views' regions, by pane.
         var tests: [Int: [String: NSRect]] = [:]
@@ -5229,30 +5224,22 @@ extension AppController {
             tests[o["tag"] as? Int ?? 0, default: [:]][kind] = hostItemFrame(o)
         }
         if pollTestHosts(v, tests, platinum: platinum) { changed = true }
-        for (i, o) in list.enumerated() {
-            guard let kind = o["kind"] as? String,
-                  ["split", "vscroll", "hscroll"].contains(kind) else { continue }
-            let bar = kind != "split"
-            let key = "\(platinum ? "p" : "n"):\(bar ? "bar" : "split"):\(i)"
-            seen.insert(key)
-            let item = current[key] ?? {
-                let h: HostItemView
-                switch (platinum, bar) {
-                case (true, true): h = PlatinumHostScrollBar()
-                case (true, false): h = PlatinumSplitDivider()
-                case (false, true): h = HostScrollBar()
-                case (false, false): h = SplitDivider()
-                }
-                v.addSubview(h)
-                current[key] = h
-                changed = true
-                return h
-            }()
-            if item.update(o) { changed = true }
+        let barItems = list.enumerated().filter {
+            ["split", "vscroll", "hscroll"].contains($0.element["kind"] as? String ?? "")
         }
-        for (key, item) in current where !seen.contains(key) {
-            item.removeFromSuperview()
-            current.removeValue(forKey: key)
+        if reconcileViews(&current, barItems, key: { e in
+            "\(platinum ? "p" : "n"):\(e.element["kind"] as? String == "split" ? "split" : "bar"):\(e.offset)"
+        }, make: { e in
+            let h: HostItemView
+            switch (platinum, e.element["kind"] as? String != "split") {
+            case (true, true): h = PlatinumHostScrollBar()
+            case (true, false): h = PlatinumSplitDivider()
+            case (false, true): h = HostScrollBar()
+            case (false, false): h = SplitDivider()
+            }
+            v.addSubview(h)
+            return h
+        }, update: { h, e in h.update(e.element) }, remove: { $0.removeFromSuperview() }) {
             changed = true
         }
         chrome(id).hostItems = current
@@ -5264,26 +5251,14 @@ extension AppController {
     func pollTestHosts(_ v: CellView, _ regions: [Int: [String: NSRect]], platinum: Bool) -> Bool {
         let id = ObjectIdentifier(v)
         var current = chromes[id]?.testHosts ?? [:]
-        var changed = false
-        var seen = Set<String>()
-        for (tag, r) in regions {
-            let key = "\(platinum ? "p" : "n"):\(tag)"
-            seen.insert(key)
-            let host = current[key] ?? {
-                let h = TestResultsHost(view: v, tag: tag, platinum: platinum)
-                current[key] = h
-                changed = true
-                return h
-            }()
-            if host.update(header: r["test_header"], list: r["test_list"], detail: r["test_detail"]) {
-                changed = true
-            }
-        }
-        for (key, host) in current where !seen.contains(key) {
-            host.remove()
-            current.removeValue(forKey: key)
-            changed = true
-        }
+        let changed = reconcileViews(&current, Array(regions), key: {
+            "\(platinum ? "p" : "n"):\($0.key)"
+        }, make: {
+            TestResultsHost(view: v, tag: $0.key, platinum: platinum)
+        }, update: { host, e in
+            host.update(header: e.value["test_header"], list: e.value["test_list"],
+                        detail: e.value["test_detail"])
+        }, remove: { $0.remove() })
         chrome(id).testHosts = current
         return changed
     }
@@ -5299,26 +5274,13 @@ extension AppController {
         })
         let list = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [[String: Any]] } ?? []
         var current = chromes[id]?.paneHeaders ?? [:]
-        var changed = false
-        var seen = Set<String>()
         // Keyed by look too, so switching looks swaps every header.
         let platinum = tk_desktop_platinum_ui(v.handle) != 0
-        for p in list {
-            let key = "\(platinum ? "p" : "n"):\(p["kind"] as? Int ?? 0):\(p["idx"] as? Int ?? 0)"
-            seen.insert(key)
-            let hv = current[key] ?? {
-                let h: PaneHeaderView = platinum ? PlatinumPaneHeader(view: v) : PaneHeader(view: v)
-                v.addSubview(h)
-                current[key] = h
-                return h
-            }()
-            if hv.update(p) { changed = true }
-        }
-        for (key, hv) in current where !seen.contains(key) {
-            hv.removeFromSuperview()
-            current[key] = nil
-            changed = true
-        }
+        let changed = reconcileViews(&current, list, key: { paneKey($0, platinum) }, make: { _ in
+            let h: PaneHeaderView = platinum ? PlatinumPaneHeader(view: v) : PaneHeader(view: v)
+            v.addSubview(h)
+            return h
+        }, update: { h, p in h.update(p) }, remove: { $0.removeFromSuperview() })
         chrome(id).paneHeaders = current
         return changed
     }
@@ -5541,13 +5503,13 @@ extension AppController {
             ["k": "button", "key": key, "text": label, "f": f]
         }
         var rows = [field("Find", "find")]
-        var buttons = [button("done", "Done", Platinum.CANCEL), button("mark", "Mark All"),
+        var buttons = [button("done", "Done", UIFlag.CANCEL), button("mark", "Mark All"),
                        button("prev", "Previous")]
         if replacing {
             rows.append(field("Replace", "replace"))
             buttons += [button("replace", "Replace"), button("replace_all", "Replace All")]
         }
-        buttons.append(button("next", "Next", Platinum.DEFAULT))
+        buttons.append(button("next", "Next", UIFlag.DEFAULT))
         let body: [String: Any] = ["k": "vstack", "n": 1, "kids": [
             ["k": "form", "n": 1, "kids": rows],
             ["k": "hstack", "n": 1, "kids": [check("case", "Match case"), check("word", "Whole word"),
@@ -5970,11 +5932,9 @@ extension AppController {
                 self.handleHostAction(code, sourceHandle: v.handle, view: v)
             }
             if name == "picker", isCapturing,
-               let q = ProcessInfo.processInfo.environment["TK_CAPTURE_PICKER_QUERY"],
-               let d = try? JSONSerialization.data(withJSONObject: ["name": name, "events": [[false, "query", q]]]),
-               let json = String(data: d, encoding: .utf8) {
+               let q = ProcessInfo.processInfo.environment["TK_CAPTURE_PICKER_QUERY"] {
                 // Scripted screenshots: show real results.
-                _ = withUTF8Arg(json) { p, l in tk_desktop_ui_event(v.handle, p, l) }
+                _ = sendUIEvents(v.handle, name, [[false, "query", q]])
             }
             if asWindow && i == 0 {
                 _ = dc.update(tree)
@@ -6059,10 +6019,10 @@ extension AppController {
         let def = min(max(d["default"] as? Int ?? 0, 0), labels.count - 1)
         let destructive = d["destructive"] as? Int ?? -1
         let buttons: [[String: Any]] = labels.enumerated().map { i, l in
-            var f = Platinum.HOTKEY
-            if i == def { f |= Platinum.DEFAULT }
-            if l == "Cancel" { f |= Platinum.CANCEL }
-            if i == destructive { f |= Platinum.DESTRUCTIVE }
+            var f = UIFlag.HOTKEY
+            if i == def { f |= UIFlag.DEFAULT }
+            if l == "Cancel" { f |= UIFlag.CANCEL }
+            if i == destructive { f |= UIFlag.DESTRUCTIVE }
             return ["k": "button", "key": "\(i)", "text": l, "f": f]
         }
         let tree = Platinum.alertTree(icon: destructive >= 0 ? "caution" : "note",
@@ -6102,8 +6062,8 @@ extension AppController {
         let text = d["text"] as? String ?? ""
         let tree = Platinum.alertTree(
             icon: nil, message: label, extra: [["k": "text", "key": "text", "value": text, "n": 40]],
-            buttons: [["k": "button", "key": "cancel", "text": "Cancel", "f": Platinum.CANCEL],
-                      ["k": "button", "key": "ok", "text": d["action"] as? String ?? "OK", "f": Platinum.DEFAULT]],
+            buttons: [["k": "button", "key": "cancel", "text": "Cancel", "f": UIFlag.CANCEL],
+                      ["k": "button", "key": "ok", "text": d["action"] as? String ?? "OK", "f": UIFlag.DEFAULT]],
             cancelKey: "cancel")
         showPlatinumAlert(tree, for: v, in: win) {
             key, values in
@@ -6118,10 +6078,10 @@ extension AppController {
     private func showPlatinumChoice(_ d: [String: Any], for v: CellView, in win: NSWindow) {
         let actions = d["actions"] as? [String] ?? []
         var buttons: [[String: Any]] = [["k": "button", "key": "-1", "text": actions.isEmpty ? "OK" : "Dismiss",
-                                         "f": actions.isEmpty ? Platinum.DEFAULT : Platinum.CANCEL]]
+                                         "f": actions.isEmpty ? UIFlag.DEFAULT : UIFlag.CANCEL]]
         for (i, a) in actions.enumerated() {
             buttons.append(["k": "button", "key": "\(i)", "text": a,
-                            "f": i == actions.count - 1 ? Platinum.DEFAULT : 0])
+                            "f": i == actions.count - 1 ? UIFlag.DEFAULT : 0])
         }
         let tree = Platinum.alertTree(icon: "note", message: d["message"] as? String ?? "",
                                       buttons: buttons, cancelKey: "-1")
@@ -9400,6 +9360,60 @@ final class ReviewBar: NSVisualEffectView {
 
 /// Read a core JSON export into `buf` (growing it when the core reports
 /// a longer payload than fits). Nil when the core had nothing to say.
+/// Keep one view per keyed entry: make the missing ones, update every one
+/// (true when it changed), and remove those no entry names any more. True
+/// when anything changed.
+func reconcileViews<V, E>(
+    _ current: inout [String: V], _ entries: [E], key: (E) -> String,
+    make: (E) -> V, update: (V, E) -> Bool, remove: (V) -> Void
+) -> Bool {
+    var changed = false
+    var seen = Set<String>()
+    for e in entries {
+        let k = key(e)
+        seen.insert(k)
+        let v: V
+        if let have = current[k] {
+            v = have
+        } else {
+            v = make(e)
+            current[k] = v
+            changed = true
+        }
+        if update(v, e) { changed = true }
+    }
+    for (k, v) in current where !seen.contains(k) {
+        remove(v)
+        current[k] = nil
+        changed = true
+    }
+    return changed
+}
+
+/// A tool pane overlay's key: the look (switching looks swaps every
+/// one), the pane kind and its index.
+func paneKey(_ p: [String: Any], _ platinum: Bool) -> String {
+    "\(platinum ? "p" : "n"):\(p["kind"] as? Int ?? 0):\(p["idx"] as? Int ?? 0)"
+}
+
+/// Hand declarative dialog ``name`` its ``[is_action, key, value]`` events
+/// (``tk_desktop_ui_event``); the host action code they answer with.
+func sendUIEvents(_ h: Int64, _ name: String, _ events: [[Any]]) -> Int32 {
+    guard let d = try? JSONSerialization.data(withJSONObject: ["name": name, "events": events]),
+          let json = String(data: d, encoding: .utf8) else { return 0 }
+    return withUTF8Arg(json) { p, l in tk_desktop_ui_event(h, p, l) }
+}
+
+/// A declarative tree's shape — node kinds, keys and options, nested. The
+/// projectors rebuild their views when it changes and update them in place
+/// when only values did.
+func uiTreeShape(_ n: [String: Any]) -> String {
+    var s = "\(n["k"] as? String ?? "")|\(n["key"] as? String ?? "")"
+    if let o = n["opts"] as? [String] { s += "[" + o.joined(separator: ",") + "]" }
+    for c in n["kids"] as? [[String: Any]] ?? [] { s += "(" + uiTreeShape(c) + ")" }
+    return s
+}
+
 func readCoreData(_ buf: inout [UInt8], _ fill: (Int64, Int64) -> Int64) -> Data? {
     var n = 0
     while true {
@@ -10002,6 +10016,29 @@ protocol HostItemView: NSView {
     func update(_ o: [String: Any]) -> Bool
 }
 
+/// What every host item view shares: flipped, click-through (the cells
+/// under it keep the mouse), laid out at the core's rect, and redrawn only
+/// when its item changed. A subclass reads its own fields in ``apply``.
+class HostItemBase: NSView, HostItemView {
+    private var last: NSDictionary?
+
+    override var isFlipped: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    final func update(_ o: [String: Any]) -> Bool {
+        let d = NSDictionary(dictionary: o)
+        if let last = last, d.isEqual(to: last) { return false }
+        last = d
+        apply(o)
+        let f = hostItemFrame(o)
+        if frame != f { frame = f }
+        needsDisplay = true
+        return true
+    }
+
+    func apply(_ o: [String: Any]) {}
+}
+
 /// The rect of a host item, from thousandths of a cell.
 func hostItemFrame(_ o: [String: Any]) -> NSRect {
     func v(_ k: String) -> CGFloat { CGFloat(o[k] as? Int ?? 0) / 1000 }
@@ -10017,24 +10054,14 @@ func rgbColor(_ c: Int) -> NSColor {
 /// A split's divider in the macOS look: a separator hairline on the window
 /// background, the accent color while it's dragged — `NSSplitView`'s thin
 /// divider.
-final class SplitDivider: NSView, HostItemView {
+final class SplitDivider: HostItemBase {
     private var side = true, active = false
     private var bg = NSColor.black
-    private var lastData = Data()
 
-    override var isFlipped: Bool { true }
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    func update(_ o: [String: Any]) -> Bool {
-        guard let data = try? JSONSerialization.data(withJSONObject: o), data != lastData else { return false }
-        lastData = data
+    override func apply(_ o: [String: Any]) {
         side = o["side"] as? Bool ?? true
         active = o["active"] as? Bool ?? false
         bg = rgbColor(o["bg"] as? Int ?? 0)
-        let f = hostItemFrame(o)
-        if frame != f { frame = f }
-        needsDisplay = true
-        return true
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -10065,29 +10092,19 @@ private func hostKnob(_ o: [String: Any], horizontal: Bool) -> (CGFloat, CGFloat
 /// A framework scroll bar in the macOS look: an overlay scroller's knob
 /// over the content's background, where the core hit-tests the thumb (the
 /// arrow cells at the ends still step a row, like a click on the track).
-final class HostScrollBar: NSView, HostItemView {
+final class HostScrollBar: HostItemBase {
     private var horizontal = false
     private var knob: (CGFloat, CGFloat) = (0, 0)
     private var bg = NSColor.black
     private var ink = NSColor.white
-    private var lastData = Data()
 
-    override var isFlipped: Bool { true }
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    func update(_ o: [String: Any]) -> Bool {
-        guard let data = try? JSONSerialization.data(withJSONObject: o), data != lastData else { return false }
-        lastData = data
+    override func apply(_ o: [String: Any]) {
         horizontal = (o["kind"] as? String) == "hscroll"
         knob = hostKnob(o, horizontal: horizontal)
         let c = o["bg"] as? Int ?? 0
         bg = rgbColor(c)
         let lum = 0.299 * Double((c >> 16) & 0xFF) + 0.587 * Double((c >> 8) & 0xFF) + 0.114 * Double(c & 0xFF)
         ink = lum < 128 ? .white : .black
-        let f = hostItemFrame(o)
-        if frame != f { frame = f }
-        needsDisplay = true
-        return true
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -10110,23 +10127,13 @@ final class HostScrollBar: NSView, HostItemView {
 /// A framework scroll bar in the Mac OS 9 look: a Platinum scroll bar a
 /// cell wide — arrow boxes the size of the end cells, a sunken track and a
 /// lavender thumb exactly where the core hit-tests it.
-final class PlatinumHostScrollBar: NSView, HostItemView {
+final class PlatinumHostScrollBar: HostItemBase {
     private var horizontal = false
     private var knob: (CGFloat, CGFloat) = (0, 0)
-    private var lastData = Data()
 
-    override var isFlipped: Bool { true }
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    func update(_ o: [String: Any]) -> Bool {
-        guard let data = try? JSONSerialization.data(withJSONObject: o), data != lastData else { return false }
-        lastData = data
+    override func apply(_ o: [String: Any]) {
         horizontal = (o["kind"] as? String) == "hscroll"
         knob = hostKnob(o, horizontal: horizontal)
-        let f = hostItemFrame(o)
-        if frame != f { frame = f }
-        needsDisplay = true
-        return true
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -10217,22 +10224,12 @@ extension Platinum {
 
 /// A split's divider in the Mac OS 9 look: a bevelled Platinum bar with a
 /// grip of ridges at its middle, darkened while it's dragged.
-final class PlatinumSplitDivider: NSView, HostItemView {
+final class PlatinumSplitDivider: HostItemBase {
     private var side = true, active = false
-    private var lastData = Data()
 
-    override var isFlipped: Bool { true }
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    func update(_ o: [String: Any]) -> Bool {
-        guard let data = try? JSONSerialization.data(withJSONObject: o), data != lastData else { return false }
-        lastData = data
+    override func apply(_ o: [String: Any]) {
         side = o["side"] as? Bool ?? true
         active = o["active"] as? Bool ?? false
-        let f = hostItemFrame(o)
-        if frame != f { frame = f }
-        needsDisplay = true
-        return true
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -10272,20 +10269,61 @@ protocol PaneHeaderView: NSView {
     func update(_ p: [String: Any]) -> Bool
 }
 
-final class PaneHeader: NSView, PaneHeaderView {
-    private weak var cellView: CellView?
-    private var kind = 0, idx = 0
+/// What both looks' pane headers share: the pane they head, placed over
+/// its header rows, redrawn only when the core's description changed, and
+/// ``act`` to run one of its controls. A look reads the rest in ``apply``.
+class PaneHeaderBase: NSView, PaneHeaderView {
+    weak var cellView: CellView?
+    var kind = 0, idx = 0
+    var focused = false
+    private var last: NSDictionary?
+
+    init(view: CellView) {
+        cellView = view
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override var isFlipped: Bool { true }
+
+    final func update(_ p: [String: Any]) -> Bool {
+        let d = NSDictionary(dictionary: p)
+        if let last = last, d.isEqual(to: last) { return false }
+        last = d
+        kind = p["kind"] as? Int ?? 0
+        idx = p["idx"] as? Int ?? 0
+        let f = NSRect(x: CGFloat(p["x"] as? Int ?? 0) * CELL_W, y: CGFloat(p["y"] as? Int ?? 0) * CELL_H,
+                       width: CGFloat(p["w"] as? Int ?? 0) * CELL_W, height: CGFloat(p["h"] as? Int ?? 1) * CELL_H)
+        if frame != f { frame = f }
+        focused = p["focused"] as? Bool ?? false
+        apply(p)
+        needsDisplay = true
+        return true
+    }
+
+    func apply(_ p: [String: Any]) {}
+
+    /// Run control ``op`` (``tk_desktop_pane_act``) and hand the keyboard
+    /// back to the cells.
+    func act(_ op: Int, _ cmd: String = "") {
+        guard let v = cellView, v.handle != 0 else { return }
+        withUTF8Arg(cmd) { p, l in tk_desktop_pane_act(v.handle, Int64(kind), Int64(idx), Int64(op), p, l) }
+        last = nil
+        v.window?.makeFirstResponder(v)
+        v.redraw()
+    }
+}
+
+final class PaneHeader: PaneHeaderBase {
     private let title = NSTextField(labelWithString: "")
     private let commands = NSStackView()
     private let minimize = NSButton()
     private let maximize = NSButton()
     private let close = NSButton()
-    private var lastData = Data()
-    private var focused = false
 
-    init(view: CellView) {
-        cellView = view
-        super.init(frame: .zero)
+    override init(view: CellView) {
+        super.init(view: view)
         title.font = .systemFont(ofSize: 12, weight: .semibold)
         title.lineBreakMode = .byTruncatingTail
         title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -10318,8 +10356,6 @@ final class PaneHeader: NSView, PaneHeaderView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
-    override var isFlipped: Bool { true }
-
     /// Only the buttons are ours; the rest of the row is the core's resize
     /// handle and focus target.
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -10338,15 +10374,7 @@ final class PaneHeader: NSView, PaneHeaderView {
         }
     }
 
-    func update(_ p: [String: Any]) -> Bool {
-        guard let data = try? JSONSerialization.data(withJSONObject: p), data != lastData else { return false }
-        lastData = data
-        kind = p["kind"] as? Int ?? 0
-        idx = p["idx"] as? Int ?? 0
-        let f = NSRect(x: CGFloat(p["x"] as? Int ?? 0) * CELL_W, y: CGFloat(p["y"] as? Int ?? 0) * CELL_H,
-                       width: CGFloat(p["w"] as? Int ?? 0) * CELL_W, height: CGFloat(p["h"] as? Int ?? 1) * CELL_H)
-        if frame != f { frame = f }
-        focused = p["focused"] as? Bool ?? false
+    override func apply(_ p: [String: Any]) {
         title.stringValue = p["title"] as? String ?? ""
         title.textColor = focused ? .labelColor : .secondaryLabelColor
         let state = p["state"] as? Int ?? 0
@@ -10372,16 +10400,6 @@ final class PaneHeader: NSView, PaneHeaderView {
             }
             commands.addArrangedSubview(b)
         }
-        needsDisplay = true
-        return true
-    }
-
-    private func act(_ op: Int, _ cmd: String = "") {
-        guard let v = cellView, v.handle != 0 else { return }
-        withUTF8Arg(cmd) { p, l in tk_desktop_pane_act(v.handle, Int64(kind), Int64(idx), Int64(op), p, l) }
-        lastData = Data()
-        v.window?.makeFirstResponder(v)
-        v.redraw()
     }
 
     @objc private func controlClicked(_ b: NSButton) { act(b.tag) }
@@ -10421,15 +10439,11 @@ final class PaneHeader: NSView, PaneHeaderView {
 /// collapse (minimize) boxes at the right; the focused pane's bar is
 /// pinstriped, like the active window's. As with `PaneHeader`, clicks off
 /// the controls fall through to the cell view (resize and focus).
-final class PlatinumPaneHeader: NSView, PaneHeaderView {
-    private weak var cellView: CellView?
-    private var kind = 0, idx = 0
+final class PlatinumPaneHeader: PaneHeaderBase {
     private var title = ""
-    private var focused = false
     private var closable = false
     /// (label, command id) per push button.
     private var commands: [(String, String)] = []
-    private var lastData = Data()
     /// The control held down: -1 none, 0…2 a box (op 1 close, 3 zoom,
     /// 2 collapse, by `boxes`), 10 + i the i-th command.
     private var pressed = -1 { didSet { if pressed != oldValue { needsDisplay = true } } }
@@ -10437,16 +10451,13 @@ final class PlatinumPaneHeader: NSView, PaneHeaderView {
 
     private static let buttonH = CGFloat(PlatinumButtonArt.height)
 
-    init(view: CellView) {
-        cellView = view
-        super.init(frame: .zero)
+    override init(view: CellView) {
+        super.init(view: view)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
     deinit { observers.forEach(NotificationCenter.default.removeObserver) }
-
-    override var isFlipped: Bool { true }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -10535,15 +10546,7 @@ final class PlatinumPaneHeader: NSView, PaneHeaderView {
         if i >= 10 { act(4, commands[i - 10].1) } else { act(boxes[i].2) }
     }
 
-    func update(_ p: [String: Any]) -> Bool {
-        guard let data = try? JSONSerialization.data(withJSONObject: p), data != lastData else { return false }
-        lastData = data
-        kind = p["kind"] as? Int ?? 0
-        idx = p["idx"] as? Int ?? 0
-        let f = NSRect(x: CGFloat(p["x"] as? Int ?? 0) * CELL_W, y: CGFloat(p["y"] as? Int ?? 0) * CELL_H,
-                       width: CGFloat(p["w"] as? Int ?? 0) * CELL_W, height: CGFloat(p["h"] as? Int ?? 1) * CELL_H)
-        if frame != f { frame = f }
-        focused = p["focused"] as? Bool ?? false
+    override func apply(_ p: [String: Any]) {
         title = p["title"] as? String ?? ""
         closable = p["close"] as? Bool ?? false
         // The commands' spelled-out names (Continue, Step Over…), as on
@@ -10551,16 +10554,6 @@ final class PlatinumPaneHeader: NSView, PaneHeaderView {
         commands = (p["commands"] as? [[String]] ?? []).filter { $0.count == 2 }.map {
             (PaneHeader.command($0[1], $0[0])?.1 ?? $0[0], $0[1])
         }
-        needsDisplay = true
-        return true
-    }
-
-    private func act(_ op: Int, _ cmd: String = "") {
-        guard let v = cellView, v.handle != 0 else { return }
-        withUTF8Arg(cmd) { p, l in tk_desktop_pane_act(v.handle, Int64(kind), Int64(idx), Int64(op), p, l) }
-        lastData = Data()
-        v.window?.makeFirstResponder(v)
-        v.redraw()
     }
 }
 
@@ -11039,10 +11032,6 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
     private var lastTree: [String: Any] = [:]
     var onAction: ((Int32) -> Void)?
 
-    // Mirrors the UI_* flag bits in ui_tree.mojo.
-    private static let DISABLED = 1 << 0, DEFAULT = 1 << 1, CANCEL = 1 << 2, DESTRUCTIVE = 1 << 3
-    private static let CENTER = 1 << 4, SECONDARY = 1 << 5, HEADING = 1 << 6, CHECKABLE = 1 << 8
-    private static let BROWSE = 1 << 9, NAV = 1 << 10, MULTI = 1 << 11, CODE = 1 << 12, LARGE = 1 << 13
 
     var window: NSWindow { panel }
 
@@ -11123,11 +11112,8 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
     // MARK: events
 
     private func send(_ events: [[Any]]) {
-        guard let h = view?.handle, h != 0,
-              let d = try? JSONSerialization.data(withJSONObject: ["name": name, "events": events]),
-              let json = String(data: d, encoding: .utf8) else { return }
-        let code = withUTF8Arg(json) { p, l in tk_desktop_ui_event(h, p, l) }
-        onAction?(code)
+        guard let h = view?.handle, h != 0 else { return }
+        onAction?(sendUIEvents(h, name, events))
         view?.redraw()
     }
 
@@ -11136,12 +11122,6 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
 
     // MARK: tree → views
 
-    private static func shapeOf(_ n: [String: Any]) -> String {
-        var s = "\(n["k"] as? String ?? "")|\(n["key"] as? String ?? "")"
-        if let o = n["opts"] as? [String] { s += "[" + o.joined(separator: ",") + "]" }
-        for c in n["kids"] as? [[String: Any]] ?? [] { s += "(" + shapeOf(c) + ")" }
-        return s
-    }
 
     /// Adopt a tree: rebuild on a new shape, else update in place.
     func update(_ tree: [String: Any]) -> Bool {
@@ -11150,9 +11130,9 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
         titleLabel.stringValue = tree["text"] as? String ?? ""
         panel.title = titleLabel.stringValue
         cancelKey = tree["key"] as? String ?? ""
-        large = has(tree, Self.LARGE)
+        large = has(tree, UIFlag.LARGE)
         let body = (tree["kids"] as? [[String: Any]])?.first ?? [:]
-        let sh = Self.shapeOf(body)
+        let sh = uiTreeShape(body)
         if sh != shape {
             shape = sh
             views = [:]
@@ -11210,7 +11190,7 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
             out = st
         case "hstack":
             var subs = kids.enumerated().map { build($1, path: "\(path).\($0)") }
-            let center = has(n, Self.CENTER)
+            let center = has(n, UIFlag.CENTER)
             if center { subs = [NSView()] + subs + [NSView()] }
             let st = NSStackView(views: subs)
             st.orientation = .horizontal
@@ -11293,7 +11273,7 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
         case "label":
             out = NSTextField(wrappingLabelWithString: n["text"] as? String ?? "")
         case "list":
-            let l = DeclarativeList(n, code: has(n, Self.CODE), multi: has(n, Self.MULTI))
+            let l = DeclarativeList(n, code: has(n, UIFlag.CODE), multi: has(n, UIFlag.MULTI))
             l.set = { [weak self] k, v in self?.set(k, v) }
             l.act = { [weak self] k in self?.act(k) }
             lists[path] = l
@@ -11304,7 +11284,7 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
             f.placeholderString = n["ph"] as? String
             f.delegate = self
             f.identifier = NSUserInterfaceItemIdentifier(key)
-            if has(n, Self.NAV) {
+            if has(n, UIFlag.NAV) {
                 navKeys.insert(key)
                 f.font = .systemFont(ofSize: 15)
             }
@@ -11314,7 +11294,7 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
                 f.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
             }
             out = f
-            if has(n, Self.BROWSE) {
+            if has(n, UIFlag.BROWSE) {
                 let b = NSButton(title: "Browse…", target: self, action: #selector(browse(_:)))
                 b.identifier = NSUserInterfaceItemIdentifier(key)
                 let row = NSStackView(views: [f, b])
@@ -11341,7 +11321,7 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
             for (i, title) in (n["opts"] as? [String] ?? []).enumerated() {
                 let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("\(i)"))
                 c.title = title
-                if i == 0 && has(n, Self.CHECKABLE) {
+                if i == 0 && has(n, UIFlag.CHECKABLE) {
                     c.width = 24
                     c.minWidth = 24
                     c.maxWidth = 24
@@ -11370,9 +11350,9 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
         case "button":
             let b = NSButton(title: n["text"] as? String ?? "", target: self, action: #selector(buttonPressed(_:)))
             b.identifier = NSUserInterfaceItemIdentifier(key)
-            if has(n, Self.DEFAULT) { b.keyEquivalent = "\r" }
-            if has(n, Self.CANCEL) { b.keyEquivalent = "\u{1b}" }
-            if has(n, Self.DESTRUCTIVE) { b.hasDestructiveAction = true }
+            if has(n, UIFlag.DEFAULT) { b.keyEquivalent = "\r" }
+            if has(n, UIFlag.CANCEL) { b.keyEquivalent = "\u{1b}" }
+            if has(n, UIFlag.DESTRUCTIVE) { b.hasDestructiveAction = true }
             out = b
         case "separator":
             let b = NSBox()
@@ -11395,7 +11375,7 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
     /// Push the tree's current values into the existing views.
     private func apply(_ n: [String: Any], path: String) {
         let kids = n["kids"] as? [[String: Any]] ?? []
-        let enabled = !has(n, Self.DISABLED)
+        let enabled = !has(n, UIFlag.DISABLED)
         let v = views[path]
         switch n["k"] as? String ?? "" {
         case "label":
@@ -11403,9 +11383,9 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
                 l.stringValue = n["text"] as? String ?? ""
                 // Empty, it takes no room (a stack detaches hidden views).
                 l.isHidden = l.stringValue.isEmpty
-                l.textColor = has(n, Self.SECONDARY) ? .secondaryLabelColor
-                    : has(n, Self.HEADING) ? .systemRed : .labelColor
-                l.font = .systemFont(ofSize: 13, weight: has(n, Self.HEADING) ? .semibold : .regular)
+                l.textColor = has(n, UIFlag.SECONDARY) ? .secondaryLabelColor
+                    : has(n, UIFlag.HEADING) ? .systemRed : .labelColor
+                l.font = .systemFont(ofSize: 13, weight: has(n, UIFlag.HEADING) ? .semibold : .regular)
             }
         case "text":
             if let f = v as? NSTextField {
@@ -11455,7 +11435,7 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
             for (i, r) in rows.enumerated() {
                 let control = (r["kids"] as? [[String: Any]])?.first ?? [:]
                 if let l = views["\(path).\(i).label"] as? NSTextField {
-                    l.textColor = has(control, Self.DISABLED) ? .tertiaryLabelColor : .labelColor
+                    l.textColor = has(control, UIFlag.DISABLED) ? .tertiaryLabelColor : .labelColor
                 }
                 apply(control, path: "\(path).\(i).0")
             }
@@ -11536,7 +11516,7 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
               let rows = entry.node["rows"] as? [[String]], row < rows.count else { return nil }
         let col = Int(tableColumn?.identifier.rawValue ?? "0") ?? 0
         let cell = col < rows[row].count ? rows[row][col] : ""
-        if col == 0 && has(entry.node, Self.CHECKABLE) {
+        if col == 0 && has(entry.node, UIFlag.CHECKABLE) {
             let b = NSButton(checkboxWithTitle: "", target: self, action: #selector(rowToggled(_:)))
             b.state = cell == "1" ? .on : .off
             b.tag = row
@@ -11925,12 +11905,8 @@ enum Platinum {
     /// spacing is uneven unantialiased however the advances are rounded.
     static let app = NSFont(name: "Geneva", size: 12) ?? .systemFont(ofSize: 12)
 
-    // Mirrors the UI_* flag bits in ui_tree.mojo; RIGHT is host-only (the
-    // alert's right-aligned button row).
-    static let DISABLED = 1 << 0, DEFAULT = 1 << 1, CANCEL = 1 << 2, DESTRUCTIVE = 1 << 3
-    static let CENTER = 1 << 4, SECONDARY = 1 << 5, HEADING = 1 << 6, HOTKEY = 1 << 7
-    static let CHECKABLE = 1 << 8, BROWSE = 1 << 9, NAV = 1 << 10, MULTI = 1 << 11
-    static let CODE = 1 << 12, LARGE = 1 << 13, RIGHT = 1 << 30
+    // A ``UIFlag`` the host adds: the alert's right-aligned button row.
+    static let RIGHT = 1 << 30
 
     static func fill(_ r: NSRect, _ c: NSColor) { c.setFill(); NSBezierPath.fill(r) }
 
@@ -12407,7 +12383,7 @@ class PNode: NSView {
 
     var key: String { node["key"] as? String ?? "" }
     var flags: Int { node["f"] as? Int ?? 0 }
-    var enabled: Bool { flags & Platinum.DISABLED == 0 }
+    var enabled: Bool { flags & UIFlag.DISABLED == 0 }
     /// Drawn live: enabled, in the active window. Input still goes by
     /// `enabled`.
     var live: Bool { enabled && Platinum.active(self) }
@@ -12493,7 +12469,7 @@ final class PStack: PNode {
         let n = node["n"] as? Int ?? 0
         return vertical ? (n > 0 ? 12 : 4) : (n > 0 ? 12 : 8)
     }
-    private var align: Int { flags & (Platinum.CENTER | Platinum.RIGHT) }
+    private var align: Int { flags & (UIFlag.CENTER | Platinum.RIGHT) }
 
     override var stretchX: Bool { vertical || align != 0 || kids.contains { $0.stretchX } }
     override var stretchY: Bool { kids.contains { $0.stretchY } }
@@ -12538,7 +12514,7 @@ final class PStack: PNode {
             let spare = max(0, r.width - want.width)
             var x: CGFloat = 0
             if stretchy.isEmpty {
-                if align & Platinum.CENTER != 0 { x = floor(spare / 2) }
+                if align & UIFlag.CENTER != 0 { x = floor(spare / 2) }
                 if align & Platinum.RIGHT != 0 { x = spare }
             }
             for (i, k) in kids.enumerated() {
@@ -12616,12 +12592,12 @@ final class PForm: PNode {
 final class PLabel: PNode {
     private static let wrap: CGFloat = 440
     private var text: String { node["text"] as? String ?? "" }
-    private var font: NSFont { has(Platinum.SECONDARY) ? Platinum.app : Platinum.system }
+    private var font: NSFont { has(UIFlag.SECONDARY) ? Platinum.app : Platinum.system }
     private var color: NSColor {
-        !Platinum.active(self) ? Platinum.disabled : has(Platinum.SECONDARY) ? Platinum.dark : .black
+        !Platinum.active(self) ? Platinum.disabled : has(UIFlag.SECONDARY) ? Platinum.dark : .black
     }
 
-    override var stretchX: Bool { has(Platinum.HEADING) }
+    override var stretchX: Bool { has(UIFlag.HEADING) }
     override var collapsed: Bool { text.isEmpty }
 
     private func measure(_ w: CGFloat) -> NSSize {
@@ -12633,7 +12609,7 @@ final class PLabel: PNode {
     override func fit() -> NSSize { measure(Self.wrap) }
 
     override func draw(_ dirtyRect: NSRect) {
-        if has(Platinum.HEADING) {
+        if has(UIFlag.HEADING) {
             // A heading carries an etched rule to its right, the way a
             // Platinum group box's title sits on its frame.
             let w = Platinum.width(text)
@@ -12658,7 +12634,7 @@ final class PButton: PNode {
     /// Overrides the dialog action (the text field's Browse… button).
     var onPress: (() -> Void)?
     var label: String { node["text"] as? String ?? "" }
-    private var ring: CGFloat { has(Platinum.DEFAULT) ? CGFloat(PlatinumButtonArt.ring) : 0 }
+    private var ring: CGFloat { has(UIFlag.DEFAULT) ? CGFloat(PlatinumButtonArt.ring) : 0 }
 
     override func fit() -> NSSize {
         NSSize(width: max(58, Platinum.width(label) + 24) + ring * 2,
@@ -12667,7 +12643,7 @@ final class PButton: PNode {
 
     override func draw(_ dirtyRect: NSRect) {
         let w = Int(bounds.width - ring * 2)
-        let art = has(Platinum.DEFAULT)
+        let art = has(UIFlag.DEFAULT)
             ? PlatinumButtonArt.defaultButton(w: w, pressed: pressed, disabled: !live)
             : PlatinumButtonArt.standard(w: w, pressed: pressed, disabled: !live)
         PlatinumButtonArt.paint(art, at: .zero)
@@ -12796,7 +12772,7 @@ final class PText: PNode {
         field.identifier = NSUserInterfaceItemIdentifier(key)
         field.delegate = dlg
         addSubview(field)
-        if has(Platinum.BROWSE) {
+        if has(UIFlag.BROWSE) {
             let b = PButton()
             b.node = ["k": "button", "text": "Browse…"]
             b.dlg = dlg
@@ -12834,7 +12810,7 @@ final class PText: PNode {
         field.isEnabled = enabled
         field.textColor = live ? .black : Platinum.disabled
         var b = browse?.node ?? [:]
-        b["f"] = enabled ? 0 : Platinum.DISABLED
+        b["f"] = enabled ? 0 : UIFlag.DISABLED
         browse?.node = b
         browse?.needsDisplay = true
     }
@@ -13009,7 +12985,7 @@ final class PList: PNode {
     private var columns: [String] { node["opts"] as? [String] ?? [] }
     private var selected: Int { node["n"] as? Int ?? 0 }
     private var activate: String { node["value"] as? String ?? "" }
-    private var checkable: Bool { has(Platinum.CHECKABLE) }
+    private var checkable: Bool { has(UIFlag.CHECKABLE) }
     private var showsHeader: Bool { columns.contains { !$0.isEmpty } }
 
     override var stretchX: Bool { true }
@@ -13204,7 +13180,7 @@ final class PList: PNode {
 final class PListView: PNode {
     let rows = PGitRows()
     private var mark = Int.min
-    var code: Bool { has(Platinum.CODE) }
+    var code: Bool { has(UIFlag.CODE) }
 
     override var stretchX: Bool { true }
     override var stretchY: Bool { true }
@@ -13216,7 +13192,7 @@ final class PListView: PNode {
             rows.rowH = 16
             rows.outlineCursor = true
         }
-        rows.multi = has(Platinum.MULTI)
+        rows.multi = has(UIFlag.MULTI)
         rows.onChoose = { [weak self] r in
             guard let self = self, !self.code else { return }
             self.dlg?.set(self.key, "\(r)")
@@ -14669,12 +14645,6 @@ final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
 
     // MARK: tree
 
-    private static func shapeOf(_ n: [String: Any]) -> String {
-        var s = "\(n["k"] as? String ?? "")|\(n["key"] as? String ?? "")"
-        if let o = n["opts"] as? [String] { s += "[" + o.joined(separator: ",") + "]" }
-        for c in n["kids"] as? [[String: Any]] ?? [] { s += "(" + shapeOf(c) + ")" }
-        return s
-    }
 
     func update(_ tree: [String: Any]) -> Bool {
         let nd = NSDictionary(dictionary: tree)
@@ -14683,9 +14653,9 @@ final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
         frameView.title = tree["text"] as? String ?? ""
         win.title = frameView.title   // drawn by the frame; kept for the Window list
         cancelKey = tree["key"] as? String ?? ""
-        large = ((tree["f"] as? Int ?? 0) & Platinum.LARGE) != 0
+        large = ((tree["f"] as? Int ?? 0) & UIFlag.LARGE) != 0
         let body = (tree["kids"] as? [[String: Any]])?.first ?? [:]
-        let sh = Self.shapeOf(body)
+        let sh = uiTreeShape(body)
         if sh != shape || root == nil {
             shape = sh
             root?.removeFromSuperview()
@@ -14733,11 +14703,8 @@ final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
 
     private func send(_ events: [[Any]]) {
         if let f = onEvents { f(events); return }
-        guard let v = view, v.handle != 0,
-              let d = try? JSONSerialization.data(withJSONObject: ["name": name, "events": events]),
-              let json = String(data: d, encoding: .utf8) else { return }
-        let code = withUTF8Arg(json) { p, l in tk_desktop_ui_event(v.handle, p, l) }
-        onAction?(code)
+        guard let v = view, v.handle != 0 else { return }
+        onAction?(sendUIEvents(v.handle, name, events))
         v.redraw()
     }
 
@@ -14745,7 +14712,7 @@ final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
     func act(_ key: String) { send([[true, key, ""]]) }
 
     func cancel() {
-        if let b = buttons().first(where: { $0.has(Platinum.CANCEL) && $0.enabled }) { b.flash(); return }
+        if let b = buttons().first(where: { $0.has(UIFlag.CANCEL) && $0.enabled }) { b.flash(); return }
         if !cancelKey.isEmpty { act(cancelKey) }
     }
 
@@ -14758,7 +14725,7 @@ final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
     }
 
     private func pressDefault() -> Bool {
-        guard let b = buttons().first(where: { $0.has(Platinum.DEFAULT) && $0.enabled }) else { return false }
+        guard let b = buttons().first(where: { $0.has(UIFlag.DEFAULT) && $0.enabled }) else { return false }
         b.flash()
         return true
     }
@@ -14789,7 +14756,7 @@ final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
 
     private func pressHotkey(_ ch: Character) -> Bool {
         guard let b = buttons().first(where: {
-            $0.has(Platinum.HOTKEY) && $0.enabled && $0.label.lowercased().first == ch
+            $0.has(UIFlag.HOTKEY) && $0.enabled && $0.label.lowercased().first == ch
         }) else { return false }
         b.flash()
         return true
@@ -14817,7 +14784,7 @@ final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
         default: break
         }
         // A search field's arrows move its list; the typing stays here.
-        guard (control.superview as? PText)?.has(Platinum.NAV) == true,
+        guard (control.superview as? PText)?.has(UIFlag.NAV) == true,
               let l = root.flatMap(Self.navList)?.rows else { return false }
         switch sel {
         case #selector(NSResponder.moveUp(_:)): l.move(-1)
@@ -14850,7 +14817,7 @@ final class PTextArea: PNode, NSTextViewDelegate {
 
     override func built() {
         text.isRichText = false
-        text.font = has(Platinum.SECONDARY) ? PlatinumGitView.mono : Platinum.app
+        text.font = has(UIFlag.SECONDARY) ? PlatinumGitView.mono : Platinum.app
         text.textColor = .black
         text.drawsBackground = false
         text.isEditable = enabled
@@ -15577,7 +15544,7 @@ final class PlatinumGitView: GitViewBase, GitSurface {
         }
         for (b, h) in zip(buttons, lastHints) {
             var n = b.node
-            n["f"] = busy && (h[0] as? String) != "ESC" ? Platinum.DISABLED : 0
+            n["f"] = busy && (h[0] as? String) != "ESC" ? UIFlag.DISABLED : 0
             b.node = n
             b.needsDisplay = true
         }
@@ -15711,13 +15678,13 @@ final class PlatinumGitView: GitViewBase, GitSurface {
         guard kind != overlayShown, alert == nil, let v = view else { return }
         overlayShown = kind
         var extra: [[String: Any]] = []
-        if !s.detail.isEmpty { extra.append(["k": "label", "text": s.detail, "f": Platinum.SECONDARY]) }
+        if !s.detail.isEmpty { extra.append(["k": "label", "text": s.detail, "f": UIFlag.SECONDARY]) }
         var values: [String: String] = [:]
         switch s.field {
         case .none: break
         case .output(let out):
             extra.append(["k": "textarea", "key": "output", "value": out, "h": 16,
-                          "f": Platinum.DISABLED | Platinum.SECONDARY])
+                          "f": UIFlag.DISABLED | UIFlag.SECONDARY])
         case .message(let msg):
             values["text"] = msg
             extra.append(["k": "textarea", "key": "text", "value": msg, "h": 7])
@@ -15730,9 +15697,9 @@ final class PlatinumGitView: GitViewBase, GitSurface {
         // Platinum lays the buttons out left to right, the default last;
         // a lone button is the default and the cancel both.
         let buttons: [[String: Any]] = s.buttons.enumerated().reversed().map { i, b in
-            var f = i == 0 ? Platinum.DEFAULT : 0
-            if b.key == s.cancelKey { f |= Platinum.CANCEL }
-            if b.destructive { f |= Platinum.DESTRUCTIVE }
+            var f = i == 0 ? UIFlag.DEFAULT : 0
+            if b.key == s.cancelKey { f |= UIFlag.CANCEL }
+            if b.destructive { f |= UIFlag.DESTRUCTIVE }
             return ["k": "button", "key": b.key, "text": b.title, "f": f]
         }
         let icon: String? = s.icon == .none ? nil : s.icon == .caution ? "caution" : "note"
