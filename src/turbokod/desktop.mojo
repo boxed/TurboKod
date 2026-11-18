@@ -12695,10 +12695,9 @@ struct Desktop(Movable):
                 var screen = self._last_screen
                 self._open_pane_link(req, url, screen)
             if self.terminal_panes[i].take_run_exit():
-                self._say_exit(
-                    self.terminal_panes[i].run_target,
-                    self.terminal_panes[i].run_exit_status,
-                )
+                var name = self.terminal_panes[i].run_target
+                var status = self.terminal_panes[i].run_exit_status
+                self._say_exit(name, status)
             i += 1
 
     def _say_exit(mut self, name: String, status: String):
