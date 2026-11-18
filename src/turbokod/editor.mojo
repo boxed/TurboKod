@@ -3331,27 +3331,22 @@ struct Editor(Copyable, Movable):
         to Ctrl+Alt+Up. No-op when the topmost caret is already on row 0
         — there's nowhere above to stamp."""
         var all_c = self._all_carets_asc()
-        var top = all_c[0]
-        if top.row <= 0:
-            return
-        var nr = top.row - 1
-        var line = self.buffer.line(nr)
-        var dc = self.selections[0].desired_col
-        var nc = utf8_byte_of_cell(line, dc)
-        self._add_caret(Caret(nr, nc, dc, nr, nc))
+        self._add_caret_at_row(all_c[0].row - 1)
 
     def add_caret_below(mut self):
         """Stamp a new caret one row below the bottommost existing caret.
         Bound to Ctrl+Alt+Down. No-op when there's no row below."""
         var all_c = self._all_carets_asc()
-        var bot = all_c[len(all_c) - 1]
-        if bot.row + 1 >= self.buffer.line_count():
+        self._add_caret_at_row(all_c[len(all_c) - 1].row + 1)
+
+    def _add_caret_at_row(mut self, row: Int):
+        """A caret on ``row`` at the primary caret's remembered column; a
+        no-op off the buffer."""
+        if row < 0 or row >= self.buffer.line_count():
             return
-        var nr = bot.row + 1
-        var line = self.buffer.line(nr)
         var dc = self.selections[0].desired_col
-        var nc = utf8_byte_of_cell(line, dc)
-        self._add_caret(Caret(nr, nc, dc, nr, nc))
+        var nc = utf8_byte_of_cell(self.buffer.line(row), dc)
+        self._add_caret(Caret(row, nc, dc, row, nc))
 
     def _all_carets_inline_safe(
         self, op: Int,
@@ -8041,7 +8036,11 @@ struct Editor(Copyable, Movable):
         guarantees no caret has a cross-row selection (which would
         renumber rows below) and that any no-selection caret can
         perform ``op`` without joining rows."""
-        var n_text = len(text.as_bytes())
+        self._multi_replace_inline([text], op)
+
+    def _multi_replace_inline(mut self, texts: List[String], op: Int):
+        """``_multi_edit_inline`` with one text per caret (ascending), or
+        one text for all of them."""
         var carets = self._all_carets_asc()
         var new_carets = List[Caret]()
         var prev_row = -1
@@ -8051,6 +8050,8 @@ struct Editor(Copyable, Movable):
             if c.row != prev_row:
                 row_shift = 0
                 prev_row = c.row
+            ref text = texts[i] if len(texts) > 1 else texts[0]
+            var n_text = len(text.as_bytes())
             var actual_cur = c.col + row_shift
             var actual_anc = c.anchor_col + row_shift
             var has_sel = c.col != c.anchor_col
@@ -8280,30 +8281,7 @@ struct Editor(Copyable, Movable):
                 return False
         var pre_dirty_row = carets[0].row
         self._push_undo()
-        var new_carets = List[Caret]()
-        var prev_row = -1
-        var row_shift = 0
-        for i in range(len(carets)):
-            var c = carets[i]
-            if c.row != prev_row:
-                row_shift = 0
-                prev_row = c.row
-            var text = texts[i]
-            var n_text = len(text.as_bytes())
-            var actual_sc = min(c.col, c.anchor_col) + row_shift
-            var actual_ec = max(c.col, c.anchor_col) + row_shift
-            _ = self.buffer.replace_range(
-                c.row, actual_sc, c.row, actual_ec, text,
-            )
-            var new_col = actual_sc + n_text
-            var new_desired = utf8_cell_of_byte(
-                self.buffer.line(c.row), new_col,
-            )
-            new_carets.append(
-                Caret(c.row, new_col, new_desired, c.row, new_col),
-            )
-            row_shift += n_text - (actual_ec - actual_sc)
-        self._install_carets(new_carets^)
+        self._multi_replace_inline(texts, 0)
         self._buffer_edited(pre_dirty_row)
         return True
 
@@ -10748,30 +10726,26 @@ struct Editor(Copyable, Movable):
         self._vmove_streak = True
 
     def _move_up(mut self, extend: Bool, content_w: Int):
-        if self.wrap_mode == WRAP_NONE:
-            self._vmove_streak = False
-            if self.selections[0].row > 0:
-                # Step over any collapsed fold above the cursor.
-                var nr = self._next_visible_row(
-                    self.selections[0].row - 1, False,
-                )
-                var nc = utf8_byte_of_cell(self.buffer.line(nr), self.selections[0].desired_col)
-                self.move_to(nr, nc, extend, False)
-        else:
-            self._visual_vmove(False, extend, content_w)
+        self._move_vertical(False, extend, content_w)
 
     def _move_down(mut self, extend: Bool, content_w: Int):
-        if self.wrap_mode == WRAP_NONE:
-            self._vmove_streak = False
-            if self.selections[0].row + 1 < self.buffer.line_count():
-                # Step over any collapsed fold below the cursor.
-                var nr = self._next_visible_row(
-                    self.selections[0].row + 1, True,
-                )
-                var nc = utf8_byte_of_cell(self.buffer.line(nr), self.selections[0].desired_col)
-                self.move_to(nr, nc, extend, False)
-        else:
-            self._visual_vmove(True, extend, content_w)
+        self._move_vertical(True, extend, content_w)
+
+    def _move_vertical(mut self, down: Bool, extend: Bool, content_w: Int):
+        """One row up or down at the remembered column — one visual row
+        when soft-wrapping. Steps over a collapsed fold."""
+        if self.wrap_mode != WRAP_NONE:
+            self._visual_vmove(down, extend, content_w)
+            return
+        self._vmove_streak = False
+        var nr = self.selections[0].row + (1 if down else -1)
+        if nr < 0 or nr >= self.buffer.line_count():
+            return
+        nr = self._next_visible_row(nr, down)
+        var nc = utf8_byte_of_cell(
+            self.buffer.line(nr), self.selections[0].desired_col,
+        )
+        self.move_to(nr, nc, extend, False)
 
     def _move_word_right(mut self, extend: Bool):
         var p = self._next_word_pos(self.selections[0].row, self.selections[0].col)
