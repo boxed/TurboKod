@@ -225,12 +225,14 @@ from .prompt import (
     SUBMIT_REPLACE_ALL, SUBMIT_UNMARK_ALL,
 )
 from .quick_open import QuickOpen
-from .run_manager import RunSession, drain_run_output, poll_run_exit
+from .run_manager import (
+    RunSession, drain_run_output, poll_run_exit, run_display_line,
+)
 from .save_as_dialog import SaveAsDialog
 from .string_utils import (
     byte_slice, display_columns, parse_int_prefix, parse_uint_range,
     split_lines_no_trailing,
-    shell_single_quote, split_whitespace, starts_with, utf8_cell_of_byte,
+    shell_command, shell_single_quote, split_whitespace, starts_with, utf8_cell_of_byte,
     fnv_int, fnv_start, fnv_str,
 )
 from .session_store import (
@@ -13723,18 +13725,10 @@ struct Desktop(Movable):
         tab now means a run" — leaving the previous shape alive would
         make Cmd+R + Cmd+D + Cmd+R produce two children for one tab.
         """
-        if not self.targets.has_active():
-            self._say(String("run: no targets defined — author .turbokod/targets.json"))
+        var active = self._active_target(String("run"))
+        if not active:
             return
-        if not self.project:
-            self._say(String("run: open a project first"))
-            return
-        var target = self.targets.targets[self.targets.active].copy()
-        if len(target.program.as_bytes()) == 0:
-            self._say_error(
-                String("run: target '") + target.name + String("' has no program"),
-            )
-            return
+        var target = active.value().copy()
         # Stop any debug session — running and debugging the same
         # target are mutually exclusive by design (cmd+r kills debug,
         # cmd+d kills run).
@@ -13753,27 +13747,14 @@ struct Desktop(Movable):
         # Surface the floating panel window on this (re)start — orderFront,
         # not focus (the host keeps keyboard focus in the editor).
         self.panel_front_request = True
-        var cwd = resolved_cwd(self.project.value(), target.cwd)
-        # Swap a bare ``python`` / ``python3`` for the project venv's
-        # interpreter when one exists — anything else (or any path
-        # the user spelled out) is passed straight through.
-        var program_seed = resolve_python_interpreter(
-            self.project.value(), target.program,
-        )
-        var program = resolved_program(
-            self.project.value(), target.cwd, program_seed,
-        )
-        # Build a pretty argv line for the pane log so the user sees
-        # exactly what got spawned (resolved paths, not the source
-        # config strings).
-        var pretty = String("")
-        for k in range(len(target.env)):
-            pretty = pretty + target.env[k] + String(" ")
-        pretty = pretty + program
-        for k in range(len(target.args)):
-            pretty = pretty + String(" ") + target.args[k]
+        var where = self._target_program(target)
+        var cwd = where[0]
+        var program = where[1]
+        # The pane log shows exactly what got spawned (resolved paths,
+        # not the source config strings).
         self.debug_pane.append_output(
-            String("$ ") + pretty, UInt8(2),  # PANE_OUT_CONSOLE
+            String("$ ") + run_display_line(program, target.args, target.env),
+            UInt8(2),  # PANE_OUT_CONSOLE
         )
         var args = target.args.copy()
         var term = self._bottom_pane_term_size()
@@ -13797,13 +13778,7 @@ struct Desktop(Movable):
         var root = self.project.value()
         self.run_session.terminate()
         self._run_output_held = False
-        var cwd = resolved_cwd(root, target.cwd)
-        var program = resolved_program(
-            root, target.cwd, resolve_python_interpreter(root, target.program),
-        )
-        var command = shell_single_quote(program)
-        for k in range(len(target.args)):
-            command = command + String(" ") + shell_single_quote(target.args[k])
+        var where = self._target_program(target)
         var idx = -1
         for i in range(len(self.terminal_panes)):
             if self.terminal_panes[i].tests:
@@ -13821,18 +13796,61 @@ struct Desktop(Movable):
             pane.tmux_project = root
             self.terminal_panes.append(pane^)
             idx = len(self.terminal_panes) - 1
+        self._launch_tmux_pane(
+            idx, where[0], shell_command(where[1], target.args),
+            target.env.copy(), String("running ") + target.name + String("…"),
+        )
+
+    def _launch_tmux_pane(
+        mut self, idx: Int, cwd: String, command: String,
+        var env: List[String], message: String,
+    ):
+        """(Re)start terminal pane ``idx``'s session on ``command`` — shown,
+        but the editor keeps the keyboard, as with the pipe-backed panes —
+        and surface the panels."""
         self.terminal_panes[idx].cwd = cwd
         self.terminal_panes[idx].startup_command = command
-        self.terminal_panes[idx].run_env = target.env.copy()
+        self.terminal_panes[idx].run_env = env^
         if self.terminal_panes[idx].visible:
             self.terminal_panes[idx].restart()
         else:
             self.terminal_panes[idx].open()
-            # Like the pipe-backed run: shown, but the editor keeps the
-            # keyboard.
             self.terminal_panes[idx].focused = False
         self.panel_front_request = True
-        self._say(String("running ") + target.name + String("…"))
+        self._say(message)
+
+    def _active_target(mut self, label: String) -> Optional[RunTarget]:
+        """The active run target, or empty after saying on the status bar
+        (prefixed ``label``) why there's nothing to run."""
+        if not self.targets.has_active():
+            self._say(
+                label + String(": no targets defined — author .turbokod/targets.json"),
+            )
+            return None
+        if not self.project:
+            self._say(label + String(": open a project first"))
+            return None
+        var target = self.targets.targets[self.targets.active].copy()
+        if len(target.program.as_bytes()) == 0:
+            self._say_error(
+                label + String(": target '") + target.name
+                + String("' has no program"),
+            )
+            return None
+        return target^
+
+    def _target_program(self, target: RunTarget) -> Tuple[String, String]:
+        """``(cwd, program)`` for running ``target``: both resolved against
+        the project, and a bare ``python`` / ``python3`` swapped for the
+        project venv's interpreter when one exists — anything else (or
+        any path the user spelled out) is passed straight through."""
+        var root = self.project.value()
+        return (
+            resolved_cwd(root, target.cwd),
+            resolved_program(
+                root, target.cwd, resolve_python_interpreter(root, target.program),
+            ),
+        )
 
     def _target_debug(mut self):
         """Cmd+D: launch the active target under the DAP adapter for
@@ -13842,24 +13860,14 @@ struct Desktop(Movable):
         Cmd+R stops debug). Reuses the existing DAP plumbing — just
         a different program / args / cwd seed.
         """
-        if not self.targets.has_active():
-            self._say(
-                String("debug: no targets defined — author .turbokod/targets.json"),
-            )
+        var active = self._active_target(String("debug"))
+        if not active:
             return
-        if not self.project:
-            self._say(String("debug: open a project first"))
-            return
-        var target = self.targets.targets[self.targets.active].copy()
+        var target = active.value().copy()
         if len(target.debug_language.as_bytes()) == 0:
             self._say_error(
                 String("debug: target '") + target.name
                     + String("' has no debug language set"),
-            )
-            return
-        if len(target.program.as_bytes()) == 0:
-            self._say_error(
-                String("debug: target '") + target.name + String("' has no program"),
             )
             return
         var deb_idx = find_debugger_for_language(
@@ -13871,16 +13879,10 @@ struct Desktop(Movable):
                     + String("'"),
             )
             return
-        var cwd = resolved_cwd(self.project.value(), target.cwd)
-        var program_seed = resolve_python_interpreter(
-            self.project.value(), target.program,
-        )
-        var program = resolved_program(
-            self.project.value(), target.cwd, program_seed,
-        )
+        var where = self._target_program(target)
         self._launch_debug(
             target.debug_language, deb_idx,
-            python_venv_dir(self.project.value()), program, cwd,
+            python_venv_dir(self.project.value()), where[1], where[0],
             target.args.copy(), target.env, target.name,
         )
         self._say(String("debugging ") + target.name + String("…"))
@@ -13983,9 +13985,6 @@ struct Desktop(Movable):
         alongside a target's run, which Cmd+R and Stop leave alone in
         turn. A new run replaces the session, so a different test (a
         gutter Run) gets its own command line."""
-        var command = shell_single_quote(program)
-        for k in range(len(args)):
-            command = command + String(" ") + shell_single_quote(args[k])
         # A run of the pty-backed pane from before tmux was on.
         self.test_pane.close()
         self._test_output_held = False
@@ -14003,26 +14002,17 @@ struct Desktop(Movable):
             pane.tmux_project = root
             self.terminal_panes.append(pane^)
             idx = len(self.terminal_panes) - 1
-        self.terminal_panes[idx].cwd = root
-        self.terminal_panes[idx].startup_command = command
         # Live results: the run reports into the session's file (see
         # ``test_report.mojo``), through the session's environment.
         var report = session_test_report_path(
             self.terminal_panes[idx].tmux_session,
         )
-        self.terminal_panes[idx].run_env = reporting_env(
-            report, pytest_plugin_dir(),
-        )
         self.terminal_panes[idx].results.start(report)
-        if self.terminal_panes[idx].visible:
-            self.terminal_panes[idx].restart()
-        else:
-            self.terminal_panes[idx].open()
-            # Shown, but the editor keeps the keyboard, as with the test
-            # pane.
-            self.terminal_panes[idx].focused = False
-        self.panel_front_request = True
-        self._say(String("running tests…"))
+        self._launch_tmux_pane(
+            idx, root, shell_command(program, args),
+            reporting_env(report, pytest_plugin_dir()),
+            String("running tests…"),
+        )
 
     def _target_test_debug(mut self, node_id: String = String("")):
         """Cmd+Shift+D: run the project's test suite under the DAP
@@ -15182,11 +15172,11 @@ struct Desktop(Movable):
         # Quoted properly: the saved file's name ends up in here, and a
         # ``'`` in it ended the quote (``Dan's notes.md`` broke the command;
         # a name made for it ran whatever followed)
+        var expanded = List[String]()
+        for a in act.args:
+            expanded.append(_expand_save_placeholders(a, saved_path))
         var cmd = String("cd ") + shell_single_quote(cwd) + String(" && ") \
-            + shell_single_quote(act.program)
-        for k in range(len(act.args)):
-            var expanded = _expand_save_placeholders(act.args[k], saved_path)
-            cmd = cmd + String(" ") + shell_single_quote(expanded)
+            + shell_command(act.program, expanded)
         var argv = List[String]()
         argv.append(String("sh"))
         argv.append(String("-c"))

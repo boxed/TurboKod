@@ -338,6 +338,15 @@ def shell_single_quote(s: String) -> String:
     return String(StringSpan(unsafe_from_utf8=Span(out)))
 
 
+def shell_command(program: String, args: List[String]) -> String:
+    """``program`` and ``args`` as one ``/bin/sh`` command line, each
+    single-quoted."""
+    var out = shell_single_quote(program)
+    for a in args:
+        out += String(" ") + shell_single_quote(a)
+    return out^
+
+
 def escape_drop_paths(paths: String) -> String:
     """Turn a newline-separated list of dropped file paths into the text a
     terminal pane should receive: each path shell-escaped (``shell_escape_path``),

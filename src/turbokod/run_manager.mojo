@@ -31,7 +31,7 @@ from .lsp import LspProcess
 from .posix import (
     drain_fd_string, exit_code_from_status, monotonic_ms, poll_exit,
 )
-from .string_utils import shell_single_quote
+from .string_utils import shell_command, shell_single_quote
 
 
 struct RunSession(Movable):
@@ -101,18 +101,11 @@ struct RunSession(Movable):
         """
         if self.active and not self.exited:
             raise Error("run session already active")
-        var pretty = String("")
-        for k in range(len(env)):
-            pretty = pretty + env[k] + String(" ")
-        pretty = pretty + program
-        for k in range(len(args)):
-            pretty = pretty + String(" ") + args[k]
+        var pretty = run_display_line(program, args, env)
         # Build the ``sh -c`` line the same way every time so the
         # diagnostic ``command`` field always matches what the
         # kernel actually ran.
-        var script = String("exec ") + shell_single_quote(program)
-        for k in range(len(args)):
-            script = script + String(" ") + shell_single_quote(args[k])
+        var script = String("exec ") + shell_command(program, args)
         if len(cwd.as_bytes()) > 0:
             script = String("cd ") + shell_single_quote(cwd) \
                 + String(" && ") + script
@@ -182,6 +175,20 @@ def drain_run_output(mut session: RunSession) -> RunOutput:
         return out^
     out.stdout = drain_fd_string(session.process.stdout_fd)
     out.stderr = drain_fd_string(session.process.stderr_fd)
+    return out^
+
+
+def run_display_line(
+    program: String, args: List[String], env: List[String],
+) -> String:
+    """What a run looks like on the pane's ``$`` line: its extra
+    ``KEY=VALUE`` entries, the resolved program, its arguments."""
+    var out = String("")
+    for e in env:
+        out += e + String(" ")
+    out += program
+    for a in args:
+        out += String(" ") + a
     return out^
 
 
