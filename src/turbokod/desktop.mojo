@@ -14741,16 +14741,8 @@ struct Desktop(Movable):
             self._open_find_dialog(False)
             return
         self._pending_action = EDITOR_FIND
-        # Prefer the editor's current selection ("find this thing I just
-        # highlighted"); when there's nothing selected, fall back to the
-        # previous Find needle so re-opening Find repeats the last search,
-        # fully selected for easy replace — matching Quick Open / Find in
-        # Files / Find Symbol.
-        var seed = self._selection_seed_for_search()
-        if len(seed.as_bytes()) == 0:
-            seed = self._last_search
         self.prompt.open(
-            String("Find: "), seed^,
+            String("Find: "), self._find_seed(),
             select_prefill=True, show_options=True, mark_buttons=True,
         )
         self.prompt.set_search_options(self._last_search_opts)
@@ -14767,11 +14759,8 @@ struct Desktop(Movable):
             self._open_find_dialog(True)
             return
         self._pending_action = _PA_REPLACE_DO
-        var seed = self._selection_seed_for_search()
-        if len(seed.as_bytes()) == 0:
-            seed = self._last_search
         self.prompt.open_replace(
-            String("Find: "), String("Replace: "), seed^,
+            String("Find: "), String("Replace: "), self._find_seed(),
             select_prefill=True, show_options=True,
         )
         self.prompt.set_search_options(self._last_search_opts)
@@ -14779,20 +14768,22 @@ struct Desktop(Movable):
     def _open_find_dialog(mut self, replacing: Bool):
         """Find / Replace in a window of its own (``find_dialog``), seeded
         like the prompt: the selection, else the previous needle."""
-        var seed = self._selection_seed_for_search()
-        if len(seed.as_bytes()) == 0:
-            seed = self._last_search
-        self.find_dialog.open(replacing, seed^, self._last_search_opts)
+        self.find_dialog.open(replacing, self._find_seed(), self._last_search_opts)
 
     def _request_native_find(mut self, mode: String):
         """Ask the host to show its find bar (a Platinum find window in the
         Mac OS 9 look), seeded like the in-grid prompt: the selection, else
         the previous needle."""
-        var seed = self._selection_seed_for_search()
-        if len(seed.as_bytes()) == 0:
-            seed = self._last_search
         self.native_find_request = mode
-        self.native_find_seed = seed^
+        self.native_find_seed = self._find_seed()
+
+    def _find_seed(self) -> String:
+        """What Find opens with: the editor's selection ("find this thing
+        I just highlighted"), else the previous needle, so re-opening Find
+        repeats the last search — fully selected for easy replace, as
+        Quick Open / Find in Files / Find Symbol do."""
+        var seed = self._selection_seed_for_search()
+        return seed^ if len(seed.as_bytes()) > 0 else self._last_search
 
     def native_find(
         mut self, op: String, find: String, replacement: String,
@@ -18486,18 +18477,12 @@ struct Desktop(Movable):
         else:
             self.prompt.close()
             self._pending_action = String("")
-        if pa == EDITOR_FIND:
-            self._last_search = text
-            self._last_search_opts = opts
-            var idx = self._focused_editor_idx()
-            if idx >= 0:
-                if submit_kind == SUBMIT_MARK_ALL \
-                        or submit_kind == SUBMIT_UNMARK_ALL:
-                    self._mark_matching_lines(
-                        idx, text, opts, submit_kind == SUBMIT_MARK_ALL,
-                    )
-                else:
-                    self._find_step(idx, text, opts, True)
+        if pa == EDITOR_FIND or pa == _PA_REPLACE_DO:
+            # The prompt's buttons are the native find bar's: Find Next
+            # (Enter), Replace (this match, then on), Replace All, and
+            # Mark / Unmark All. The prompt stays open for the stepping
+            # ones (``keep_open`` above).
+            self.native_find(_find_op(submit_kind), text, second_text, opts)
             return Optional[String]()
         if pa == _PA_DOC_INSTALL or pa == _PA_GRAMMAR_INSTALL \
                 or pa == _PA_LSP_INSTALL or pa == _PA_DEBUGPY_INSTALL:
@@ -18536,41 +18521,6 @@ struct Desktop(Movable):
                 self.windows.windows[idx].editor.reveal_cursor(
                     self.windows.windows[idx].editor_view(), golden=True,
                 )
-            return Optional[String]()
-        if pa == _PA_REPLACE_DO:
-            # Three actions sit on the dialog's button row plus an
-            # Enter-as-find-next shortcut. The prompt stays open for
-            # Find Next / Replace so the user can step through matches;
-            # Replace All finishes the operation and closes (handled
-            # by ``keep_open`` above).
-            var find = text
-            var replacement = second_text
-            self._last_search = find
-            self._last_search_opts = opts
-            var idx = self._focused_editor_idx()
-            if idx < 0:
-                return Optional[String]()
-            if submit_kind == SUBMIT_REPLACE_ALL:
-                _ = self.windows.windows[idx].editor.replace_all(
-                    find, replacement, opts,
-                )
-                return Optional[String]()
-            if submit_kind == SUBMIT_REPLACE:
-                # Replace the current match (if the selection is one)
-                # then step forward. When the selection isn't a match,
-                # this just advances — same UX as VS Code / JetBrains.
-                if self.windows.windows[idx].editor \
-                        .selection_is_search_match(find, opts):
-                    # Replace is scoped to the one match under the
-                    # primary caret. ``paste_text`` broadcasts to every
-                    # caret, so drop any stale extras first — the match
-                    # the dialog found is a primary-caret selection.
-                    self.windows.windows[idx].editor.clear_extra_carets()
-                    self.windows.windows[idx].editor.paste_text(replacement)
-                self._find_step(idx, find, opts, True)
-                return Optional[String]()
-            # SUBMIT_FIND_NEXT (Enter / Find next button) — just walk.
-            self._find_step(idx, find, opts, True)
             return Optional[String]()
         if pa == _PA_BP_CONDITION:
             # ``_pending_arg`` carries ``path|line`` from when the
@@ -18809,6 +18759,19 @@ def _category_to_pane(category: String) -> UInt8:
     if category == String("console") or category == String("important"):
         return UInt8(2)   # PANE_OUT_CONSOLE
     return UInt8(0)       # PANE_OUT_STDOUT
+
+
+def _find_op(submit_kind: UInt8) -> String:
+    """The ``Desktop.native_find`` op a Find / Replace prompt button means."""
+    if submit_kind == SUBMIT_MARK_ALL:
+        return String("mark")
+    if submit_kind == SUBMIT_UNMARK_ALL:
+        return String("unmark")
+    if submit_kind == SUBMIT_REPLACE:
+        return String("replace")
+    if submit_kind == SUBMIT_REPLACE_ALL:
+        return String("replace_all")
+    return String("next")
 
 
 def _apply_session_view(mut editor: Editor, sw: StoredWindow):
