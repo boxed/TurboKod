@@ -4290,15 +4290,10 @@ struct Editor(Copyable, Movable):
         if len(new_lines) == 0:
             new_lines.append(String(""))
         self.buffer.replace_lines(new_lines^, List[Bool]())
-        var max_row = self.buffer.line_count() - 1
-        var nr = bs
-        if nr > max_row:
-            nr = max_row
-        if nr < 0:
-            nr = 0
-        # One caret, there: others could be past the end now
+        # One caret, there (``move_to`` clamps): others could be past the
+        # end now
         self.clear_extra_carets()
-        self.move_to(nr, 0, False)
+        self.move_to(bs, 0, False)
         self._buffer_edited(bs)
 
     def _build_revert_request(
@@ -4311,29 +4306,7 @@ struct Editor(Copyable, Movable):
 
         Empty Optional when there's no HEAD baseline for this file or
         ``target_row`` doesn't fall inside a change block."""
-        if not self._git_head_present:
-            return Optional[GitRevertRequest]()
-        var block_opt = compute_revert_block_lines(
-            self._git_head_lines, self.buffer.lines, target_row,
-        )
-        if not block_opt:
-            return Optional[GitRevertRequest]()
-        var block = block_opt.value().copy()
-        var total_gutter = self._total_gutter()
-        var text_x = view.a.x + total_gutter
-        var content_h = view.height()
-        var content_w = self._content_width(view)
-        var layout = self._layout_lines(content_h, content_w)
-        var sr = self._screen_row_for(layout, block.buf_start, 0)
-        var block_top_y = (view.a.y + sr) if sr >= 0 else -1
-        var new_count = block.buf_end_excl - block.buf_start
-        return Optional[GitRevertRequest](
-            GitRevertRequest(
-                target_row, anchor_x, anchor_y,
-                text_x, block_top_y, new_count, block.head_lines.copy(),
-                False,
-            )
-        )
+        return self._revert_request(view, target_row, anchor_x, anchor_y, False)
 
     def _build_deletion_revert_request(
         self, view: Rect, marker_row: Int, anchor_x: Int, anchor_y: Int,
@@ -4345,30 +4318,41 @@ struct Editor(Copyable, Movable):
 
         Empty Optional when there's no HEAD baseline or no pure deletion
         below ``marker_row``."""
+        return self._revert_request(view, marker_row, anchor_x, anchor_y, True)
+
+    def _revert_request(
+        self, view: Rect, row: Int, anchor_x: Int, anchor_y: Int,
+        deletion: Bool,
+    ) -> Optional[GitRevertRequest]:
         if not self._git_head_present:
             return Optional[GitRevertRequest]()
         var block_opt = compute_deletion_revert_block_lines(
-            self._git_head_lines, self.buffer.lines, marker_row,
+            self._git_head_lines, self.buffer.lines, row,
+        ) if deletion else compute_revert_block_lines(
+            self._git_head_lines, self.buffer.lines, row,
         )
         if not block_opt:
             return Optional[GitRevertRequest]()
-        var block = block_opt.value().copy()
-        var total_gutter = self._total_gutter()
-        var text_x = view.a.x + total_gutter
-        var content_h = view.height()
-        var content_w = self._content_width(view)
-        var layout = self._layout_lines(content_h, content_w)
-        var sr = self._screen_row_for(layout, marker_row, 0)
-        var block_top_y = (view.a.y + sr) if sr >= 0 else -1
-        # ``new_count=1`` anchors the deleted-code preview on the row just
-        # below the marker — exactly where the lines used to live.
-        return Optional[GitRevertRequest](
-            GitRevertRequest(
-                marker_row, anchor_x, anchor_y,
-                text_x, block_top_y, 1, block.head_lines.copy(),
-                True,
-            )
-        )
+        ref block = block_opt.value()
+        var layout = self._layout_lines(view.height(), self._content_width(view))
+        # A deletion's preview sits on the row below its marker — exactly
+        # where the lines used to live — so it's anchored on the marker
+        # row and one row tall.
+        var top_row = row if deletion else block.buf_start
+        var sr = self._screen_row_for(layout, top_row, 0)
+        var new_count = 1 if deletion \
+            else block.buf_end_excl - block.buf_start
+        return Optional[GitRevertRequest](GitRevertRequest(
+            row, anchor_x, anchor_y,
+            view.a.x + self._total_gutter(),
+            (view.a.y + sr) if sr >= 0 else -1,
+            new_count, block.head_lines.copy(), deletion,
+        ))
+
+    def _is_change_chunk_start(self, r: Int) -> Bool:
+        """Row ``r`` is changed and the row above it isn't."""
+        return self.git_change_lines[r] != GIT_CHANGE_NONE \
+            and (r == 0 or self.git_change_lines[r - 1] == GIT_CHANGE_NONE)
 
     def _find_change_chunk_start(self, from_row: Int, direction: Int) -> Int:
         """Buffer row of the start of the next (``direction > 0``) or
@@ -4380,22 +4364,14 @@ struct Editor(Copyable, Movable):
         if n == 0:
             return -1
         if direction > 0:
-            for r in range(from_row + 1, n):
-                if self.git_change_lines[r] != GIT_CHANGE_NONE \
-                        and (r == 0
-                             or self.git_change_lines[r - 1] == GIT_CHANGE_NONE):
+            for r in range(max(from_row + 1, 0), n):
+                if self._is_change_chunk_start(r):
                     return r
             return -1
-        else:
-            var hi = from_row - 1
-            if hi >= n:
-                hi = n - 1
-            for r in range(hi, -1, -1):
-                if self.git_change_lines[r] != GIT_CHANGE_NONE \
-                        and (r == 0
-                             or self.git_change_lines[r - 1] == GIT_CHANGE_NONE):
-                    return r
-            return -1
+        for r in range(min(from_row - 1, n - 1), -1, -1):
+            if self._is_change_chunk_start(r):
+                return r
+        return -1
 
     def goto_change_chunk(
         mut self, direction: Int, view: Rect, popup: Bool = True,
@@ -4437,22 +4413,9 @@ struct Editor(Copyable, Movable):
         file. Returns False when there are no changes."""
         if not self._git_has_changes:
             return False
-        var n = len(self.git_change_lines)
-        var target = -1
-        if direction > 0:
-            for r in range(0, n):
-                if self.git_change_lines[r] != GIT_CHANGE_NONE \
-                        and (r == 0
-                             or self.git_change_lines[r - 1] == GIT_CHANGE_NONE):
-                    target = r
-                    break
-        else:
-            for r in range(n - 1, -1, -1):
-                if self.git_change_lines[r] != GIT_CHANGE_NONE \
-                        and (r == 0
-                             or self.git_change_lines[r - 1] == GIT_CHANGE_NONE):
-                    target = r
-                    break
+        # The first chunk after "row -1", or the last before "row n".
+        var target = self._find_change_chunk_start(-1, 1) if direction > 0 \
+            else self._find_change_chunk_start(len(self.git_change_lines), -1)
         if target < 0:
             return False
         self.move_to(target, 0, False)
@@ -8486,63 +8449,27 @@ struct Editor(Copyable, Movable):
                 sr, sc, er, ec, sr, dotted[0], sr, dotted[1],
             ):
                 return (sr, dotted[0], sr, dotted[1])
-        # 3) Interior of an enclosing same-line string literal.
+        # 3) The enclosing same-line string literal: its interior, then
+        #    with the quotes (the next step out from the interior itself).
         if sr == er:
-            var line = self.buffer.line(sr)
-            var s = _smart_string_around(line, sc, ec)
-            if s:
-                var pair = s.value()
-                var inner_s = pair[0] + 1
-                var inner_e = pair[1]
-                if _smart_strictly_contains(
-                    sr, sc, er, ec, sr, inner_s, sr, inner_e,
-                ):
-                    return (sr, inner_s, sr, inner_e)
-                # Already at the interior — try with quotes.
-                if sc == inner_s and ec == inner_e:
-                    return (sr, pair[0], sr, pair[1] + 1)
-        # 4) String with quotes (when the selection didn't reach interior
-        #    above but still sits inside a string).
-        if sr == er:
-            var line = self.buffer.line(sr)
-            var s = _smart_string_around(line, sc, ec)
-            if s:
-                var pair = s.value()
-                var with_s = pair[0]
-                var with_e = pair[1] + 1
-                if _smart_strictly_contains(
-                    sr, sc, er, ec, sr, with_s, sr, with_e,
-                ):
-                    return (sr, with_s, sr, with_e)
-        # 5) Interior of enclosing bracket pair (cross-line).
+            var q = _smart_string_around(self.buffer.line(sr), sc, ec)
+            if q:
+                var lo = q.value()[0]
+                var hi = q.value()[1]
+                if _smart_strictly_contains(sr, sc, er, ec, sr, lo + 1, sr, hi):
+                    return (sr, lo + 1, sr, hi)
+                if _smart_strictly_contains(sr, sc, er, ec, sr, lo, sr, hi + 1):
+                    return (sr, lo, sr, hi + 1)
+        # 4) The enclosing bracket pair (cross-line): its interior, then
+        #    with the brackets.
         var b = self._smart_find_enclosing_bracket(sr, sc, er, ec)
         if b:
             var p = b.value()
-            var open_r = p[0]
-            var open_c = p[1]
-            var close_r = p[2]
-            var close_c = p[3]
-            var inner_sr = open_r
-            var inner_sc = open_c + 1
-            var inner_er = close_r
-            var inner_ec = close_c
-            if _smart_strictly_contains(
-                sr, sc, er, ec, inner_sr, inner_sc, inner_er, inner_ec,
-            ):
-                return (inner_sr, inner_sc, inner_er, inner_ec)
-            # 6) With brackets.
-            if sr == inner_sr and sc == inner_sc \
-                    and er == inner_er and ec == inner_ec:
-                return (open_r, open_c, close_r, close_c + 1)
-            var with_sr = open_r
-            var with_sc = open_c
-            var with_er = close_r
-            var with_ec = close_c + 1
-            if _smart_strictly_contains(
-                sr, sc, er, ec, with_sr, with_sc, with_er, with_ec,
-            ):
-                return (with_sr, with_sc, with_er, with_ec)
-        # 7) Line content (single-line selection only).
+            if _smart_strictly_contains(sr, sc, er, ec, p[0], p[1] + 1, p[2], p[3]):
+                return (p[0], p[1] + 1, p[2], p[3])
+            if _smart_strictly_contains(sr, sc, er, ec, p[0], p[1], p[2], p[3] + 1):
+                return (p[0], p[1], p[2], p[3] + 1)
+        # 5) Line content (single-line selection only).
         if sr == er:
             var line = self.buffer.line(sr)
             var lc = _smart_line_content_range(line)
@@ -8550,13 +8477,13 @@ struct Editor(Copyable, Movable):
                 sr, sc, er, ec, sr, lc[0], sr, lc[1],
             ):
                 return (sr, lc[0], sr, lc[1])
-        # 8) Whole line(s).
+        # 6) Whole line(s).
         var line_end = self.buffer.line_length(er)
         if _smart_strictly_contains(
             sr, sc, er, ec, sr, 0, er, line_end,
         ):
             return (sr, 0, er, line_end)
-        # 9) Indent block.
+        # 7) Indent block.
         var ib = self._smart_indent_block(sr, er)
         if ib:
             var p = ib.value()
@@ -8567,7 +8494,7 @@ struct Editor(Copyable, Movable):
                 sr, sc, er, ec, b_sr, 0, b_er, b_ec,
             ):
                 return (b_sr, 0, b_er, b_ec)
-        # 10) Whole file.
+        # 8) Whole file.
         var n = self.buffer.line_count()
         if n > 0:
             var last = n - 1
@@ -8675,6 +8602,21 @@ struct Editor(Copyable, Movable):
             )
         return Optional[Tuple[Int, Int, Int, Int]]()
 
+    def _indent_extent(self, from_row: Int, step: Int, min_indent: Int) -> Int:
+        """The farthest row from ``from_row`` in direction ``step`` reached
+        through rows indented at least ``min_indent``, blank rows passed
+        over but never ending on one; ``from_row`` when there's none."""
+        var last = from_row
+        var r = from_row + step
+        while 0 <= r and r < self.buffer.line_count():
+            var line = self.buffer.line(r)
+            if not _is_blank_line(line):
+                if leading_indent_bytes(line) < min_indent:
+                    break
+                last = r
+            r += step
+        return last
+
     def _smart_indent_block(
         self, sr: Int, er: Int,
     ) -> Optional[Tuple[Int, Int]]:
@@ -8701,42 +8643,11 @@ struct Editor(Copyable, Movable):
                 min_indent = lead
         if min_indent < 0:
             min_indent = 0
-        # Phase A: include neighbors at the same-or-greater indent.
-        var new_sr = sr
-        var r = sr - 1
-        var blank_run_top = -1
-        while r >= 0:
-            var line = self.buffer.line(r)
-            if _is_blank_line(line):
-                if blank_run_top < 0:
-                    blank_run_top = r
-                r -= 1
-                continue
-            var lead = leading_indent_bytes(line)
-            if lead >= min_indent:
-                new_sr = r
-                blank_run_top = -1
-                r -= 1
-                continue
-            break
-        # Phase A: walk down.
-        var new_er = er
-        r = er + 1
-        var blank_run_bot = -1
-        while r < n:
-            var line = self.buffer.line(r)
-            if _is_blank_line(line):
-                if blank_run_bot < 0:
-                    blank_run_bot = r
-                r += 1
-                continue
-            var lead = leading_indent_bytes(line)
-            if lead >= min_indent:
-                new_er = r
-                blank_run_bot = -1
-                r += 1
-                continue
-            break
+        # Phase A: include neighbors at the same-or-greater indent, up
+        # and down; blank lines on the way don't end the block but only
+        # count once a non-blank line past them does.
+        var new_sr = self._indent_extent(sr, -1, min_indent)
+        var new_er = self._indent_extent(er, 1, min_indent)
         if new_sr < sr or new_er > er:
             return Optional[Tuple[Int, Int]]((new_sr, new_er))
         # Phase B: drop one indent level — the introducer above the
@@ -9630,11 +9541,7 @@ struct Editor(Copyable, Movable):
             self.move_to(0, 0, False)
         else:
             self.buffer.delete_rows(r, 1)
-            var max_row = self.buffer.line_count() - 1
-            var nr = r
-            if nr > max_row:
-                nr = max_row
-            self.move_to(nr, 0, False)
+            self.move_to(r, 0, False)
         self._buffer_edited(r)
 
     def _caret_rows_asc(self) -> List[Int]:
@@ -9738,11 +9645,7 @@ struct Editor(Copyable, Movable):
 
     def goto_line(mut self, one_based_line: Int):
         """Move the cursor to the start of ``one_based_line`` (clamped)."""
-        var r = one_based_line - 1
-        if r < 0: r = 0
-        var max_r = self.buffer.line_count() - 1
-        if r > max_r: r = max_r
-        self.move_to(r, 0, False)
+        self.move_to(one_based_line - 1, 0, False)
 
     # --- bookmarks --------------------------------------------------------
     #
@@ -9861,8 +9764,7 @@ struct Editor(Copyable, Movable):
                     above += 1
         var n = self.buffer.delete_marked_rows()
         self.clear_extra_carets()
-        var nr = min(cur - above, self.buffer.line_count() - 1)
-        self.move_to(max(nr, 0), 0, False)
+        self.move_to(cur - above, 0, False)
         # Scattered deletions defeat the speculative diagnostic shift;
         # the LSP refresh repopulates them.
         self.clear_diagnostics()
