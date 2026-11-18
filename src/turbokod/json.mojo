@@ -347,20 +347,10 @@ def encode_json(value: JsonValue) -> String:
     return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=buf.unsafe_ptr(), length=len(buf))))
 
 
-def append_json(mut buf: List[UInt8], value: JsonValue):
-    """``encode_json`` appended to ``buf`` — for splicing an encoded value
-    into a larger document without building (copying) a tree around it."""
-    _encode(value, buf)
 
 
-def append_json_string(mut buf: List[UInt8], s: StringSpan):
-    """Append ``s`` as a quoted, escaped JSON string."""
-    _encode_string(s, buf)
 
 
-def append_raw_json(mut buf: List[UInt8], text: StringSpan):
-    """Append ``text`` — already-valid JSON syntax — to ``buf`` verbatim."""
-    _append_bytes(buf, text)
 
 
 struct JsonObjectWriter(Movable):

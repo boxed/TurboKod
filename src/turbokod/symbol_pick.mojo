@@ -121,24 +121,3 @@ struct SymbolPick(Movable):
         self.submitted = True
 
 
-
-def symbol_kind_label(kind: Int) -> String:
-    """Map an LSP ``SymbolKind`` integer to a 5-char fixed-width label so
-    list rows align cleanly. Unknown kinds render as ``[ ? ]``."""
-    if kind == 5:  return String("[cls]")    # Class
-    if kind == 23: return String("[str]")    # Struct
-    if kind == 6:  return String("[mtd]")    # Method
-    if kind == 9:  return String("[new]")    # Constructor
-    if kind == 12: return String("[fn ]")    # Function
-    if kind == 13: return String("[var]")    # Variable
-    if kind == 14: return String("[con]")    # Constant
-    if kind == 7:  return String("[prp]")    # Property
-    if kind == 8:  return String("[fld]")    # Field
-    if kind == 10: return String("[enm]")    # Enum
-    if kind == 22: return String("[em ]")    # EnumMember
-    if kind == 11: return String("[ifc]")    # Interface
-    if kind == 2:  return String("[mod]")    # Module
-    if kind == 3:  return String("[ns ]")    # Namespace
-    if kind == 4:  return String("[pkg]")    # Package
-    if kind == 26: return String("[tp ]")    # TypeParameter
-    return String("[ ? ]")

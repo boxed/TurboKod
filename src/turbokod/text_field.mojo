@@ -687,11 +687,7 @@ struct TextField(Copyable, Movable):
         var local_x = cell_x
         if local_x < 0:
             local_x = 0
-        var text_cell = self._scroll + local_x
-        var n_cells = text_cells(self.text)
-        if text_cell >= n_cells:
-            return len(self.text.as_bytes())
-        return utf8_byte_of_cell(self.text, text_cell)
+        return utf8_byte_of_cell(self.text, self._scroll + local_x)
 
     # --- rendering helpers --------------------------------------------
 

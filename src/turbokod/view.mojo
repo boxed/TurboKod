@@ -175,17 +175,14 @@ struct RowCursor(Copyable, Movable):
     spacing by writing the obvious thing.
 
     Use ``place(height)`` for normal controls (label + field row, list,
-    button row). Use ``place_tight(height)`` for a follow-on that's part
-    of the same logical unit as the previous placement (e.g. a block
-    label glued to the list it heads). Use ``skip(rows)`` for explicit
-    extra whitespace beyond the automatic gap.
+    button row), and ``skip(rows)`` for explicit extra whitespace beyond
+    the automatic gap.
 
     ```
     var c = RowCursor(rect.a.y + 1)
     var lang_y = c.place()              # rect.a.y + 1
     var ft_y   = c.place()              # rect.a.y + 3 — one row gap
-    var lbl_y  = c.place()              # rect.a.y + 5
-    var list_y = c.place_tight(5)       # rect.a.y + 6 — no gap from label
+    var list_y = c.place(5)             # rect.a.y + 5
     ```
     """
     var y: Int
@@ -200,12 +197,6 @@ struct RowCursor(Copyable, Movable):
     def place(mut self, height: Int = 1) -> Int:
         if not self._first:
             self.y = self.y + self.gap
-        self._first = False
-        var start = self.y
-        self.y = self.y + height
-        return start
-
-    def place_tight(mut self, height: Int = 1) -> Int:
         self._first = False
         var start = self.y
         self.y = self.y + height

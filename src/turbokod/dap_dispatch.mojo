@@ -39,7 +39,9 @@ from std.ffi import external_call
 
 from .breakpoint_store import StoredBreakpoint
 from .lsp import LspProcess
-from .posix import debug_log_path, monotonic_ms, realpath, tcp_connect, which
+from .posix import (
+    debug_log_path, monotonic_ms, realpath, realpath_or_self, tcp_connect, which,
+)
 from .string_utils import (
     fnv_int, fnv_start, fnv_str, starts_with, strip_trailing_newlines,
 )
@@ -1216,9 +1218,7 @@ struct DapManager(Copyable, Movable):
         forked subprocess get the same set."""
         var args = json_object()
         var src = json_object()
-        var resolved = realpath(path)
-        var p = resolved if len(resolved.as_bytes()) > 0 else path
-        src.put(String("path"), json_str(p))
+        src.put(String("path"), json_str(realpath_or_self(path)))
         args.put(String("source"), src)
         var bps = json_array()
         var have_oneshot_match = False

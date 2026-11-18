@@ -43,7 +43,8 @@ from .lsp import (
     LspProcess, file_uri_to_path, json_rpc_id, lsp_initialize_params,
 )
 from .posix import (
-    debug_log_path, getcwd_path, getenv_value, monotonic_ms, realpath, sleep_ms,
+    debug_log_path, getcwd_path, getenv_value, monotonic_ms, realpath,
+    realpath_or_self, sleep_ms,
 )
 from .string_utils import (
     hex_digit_value, percent_encode_uri_path, strip_trailing_newlines, utf8_prefix,
@@ -6714,9 +6715,7 @@ def _path_to_uri(path: String) -> String:
     Percent-encodes bytes outside the RFC 3986 unreserved set (keeping
     ``/``) so paths with spaces / non-ASCII round-trip through
     ``_uri_to_path`` and match what spec-compliant servers expect."""
-    var resolved = realpath(path)
-    var p = resolved if len(resolved.as_bytes()) > 0 else path
-    return String("file://") + percent_encode_uri_path(p)
+    return String("file://") + percent_encode_uri_path(realpath_or_self(path))
 
 
 def uri_to_path(uri: String) -> String:

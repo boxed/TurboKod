@@ -73,7 +73,7 @@ from .spell import (
 from .terminal import terminal_supports_extended_underline
 from std.collections.optional import Optional
 from .geometry import Point, Rect
-from .posix import append_string_bytes, monotonic_ms, realpath
+from .posix import append_string_bytes, monotonic_ms, realpath, realpath_or_self
 from .search_options import (
     SearchOptions, SearcherCache, default_search_options,
 )
@@ -408,11 +408,6 @@ def _mapped_row(row_map: List[Int], row: Int) -> Int:
     if k < 0:
         return row
     return row_map[k] + (row - k)
-
-
-def _canonical_path(path: String) -> String:
-    var resolved = realpath(path)
-    return resolved if len(resolved.as_bytes()) > 0 else path
 
 
 def _detect_line_ending(text: String) -> String:
@@ -3856,24 +3851,13 @@ struct Editor(Copyable, Movable):
             start = ln
         self._push_undo()
         self._typing_active = False
-        # Delete the existing prefix span, then insert. ``start``/``end`` are
-        # byte offsets, but ``delete_before`` removes one *codepoint* per call
-        # — so loop until the cursor reaches ``start`` rather than iterating a
-        # byte count (which over-deletes when the prefix is multibyte, e.g.
-        # completing an identifier like ``Godkänn``).
-        if end > start:
-            self.move_to(self.selections[0].row, end, False)
-            while self.selections[0].col > start:
-                var before = self.selections[0].col
-                var p = self.buffer.delete_before(
-                    self.selections[0].row, self.selections[0].col,
-                )
-                self.move_to(p[0], p[1], False)
-                if self.selections[0].col >= before:
-                    break  # defensive: col didn't shrink, avoid spinning
+        # Replace the prefix span. Both ends go to a character boundary
+        # (a server range can land inside one, and a multibyte prefix like
+        # ``Godkänn`` has to go whole).
+        var row = self.selections[0].row
         var ins_end = self.buffer.replace_range(
-            self.selections[0].row, self.selections[0].col,
-            self.selections[0].row, self.selections[0].col, item.insert_text,
+            row, utf8_floor(line, start), row, utf8_floor(line, end),
+            item.insert_text,
         )
         self.move_to(ins_end[0], ins_end[1], False)
         # Apply ``additionalTextEdits`` (typically the auto-import line
@@ -4033,10 +4017,10 @@ struct Editor(Copyable, Movable):
         # By path, not URI: servers encode paths their own ways ("(" as
         # is or %28, %c3 or %C3), and an edit for this file that didn't
         # match was dropped, leaving a rename half done.
-        var my_path = _canonical_path(self.file_path)
+        var my_path = realpath_or_self(self.file_path)
         var edits = List[TextEditEntry]()
         for k in range(len(file_edits)):
-            if _canonical_path(uri_to_path(file_edits[k].uri)) == my_path:
+            if realpath_or_self(uri_to_path(file_edits[k].uri)) == my_path:
                 for j in range(len(file_edits[k].edits)):
                     edits.append(file_edits[k].edits[j])
         return self.apply_text_edits(edits^)
@@ -4157,13 +4141,7 @@ struct Editor(Copyable, Movable):
             var a = sc if r == sl else 0
             var b = ec if r == el else len(line.as_bytes())
             old.append(byte_slice(line, a, b))
-        var new = List[String]()
-        var nb = e.new_text.as_bytes()
-        var start = 0
-        for i in range(len(nb) + 1):
-            if i == len(nb) or nb[i] == 0x0A:
-                new.append(byte_slice(e.new_text, start, i))
-                start = i + 1
+        var new = split_lines(e.new_text)
         var ops = diff_lines(old, new)
         var i = 0
         var j = 0

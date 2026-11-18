@@ -1021,6 +1021,13 @@ def chdir_path(path: String) -> Int32:
     return external_call["chdir", Int32](c_path.unsafe_ptr())
 
 
+def realpath_or_self(path: String) -> String:
+    """``realpath(path)``, or ``path`` itself when it can't be resolved (it
+    doesn't exist yet, or a component is unreadable)."""
+    var resolved = realpath(path)
+    return resolved if len(resolved.as_bytes()) > 0 else path
+
+
 def realpath(path: String) -> String:
     """Return the canonical absolute form of ``path``, or empty on error.
 

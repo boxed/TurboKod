@@ -121,31 +121,6 @@ def user_dictionary_installed(language_id: String) -> Bool:
     return stat_file(path).ok
 
 
-def installed_dictionary_languages() -> List[String]:
-    """Language ids with a ``<lang>.txt`` file under
-    ``user_dictionaries_root``. Used by Settings to know which catalog
-    rows render with the "installed" tick. Order is filesystem order;
-    callers that care about display order should sort by display name
-    against the catalog."""
-    var out = List[String]()
-    var root = user_dictionaries_root()
-    if len(root.as_bytes()) == 0:
-        return out^
-    var entries = list_directory(root)
-    for i in range(len(entries)):
-        var name = entries[i]
-        if name == String(".") or name == String(".."):
-            continue
-        var b = name.as_bytes()
-        var n = len(b)
-        if n < 5:
-            continue
-        if (b[n - 4] != 0x2E or b[n - 3] != 0x74
-                or b[n - 2] != 0x78 or b[n - 1] != 0x74):
-            continue
-        var stem = String(StringSpan(unsafe_from_utf8=b[0:n - 4]))
-        out.append(stem^)
-    return out^
 
 
 def dictionary_install_command(language_id: String, url: String) -> String:

@@ -116,7 +116,7 @@ from .lsp_status_menu import (
 from .posix import (
     SIGTERM, close_fd, debug_log, drain_fd, exit_code_from_status,
     getenv_value, kill_pid,
-    poll_exit, realpath, reap_child, untrack_child,
+    poll_exit, realpath, realpath_or_self, reap_child, untrack_child,
 )
 from .file_tree import FileTree
 from .geometry import Point, Rect
@@ -228,7 +228,8 @@ from .quick_open import QuickOpen
 from .run_manager import RunSession, drain_run_output, poll_run_exit
 from .save_as_dialog import SaveAsDialog
 from .string_utils import (
-    byte_slice, display_columns, parse_int_prefix, split_lines_no_trailing,
+    byte_slice, display_columns, parse_int_prefix, parse_uint_range,
+    split_lines_no_trailing,
     shell_single_quote, split_whitespace, starts_with, utf8_cell_of_byte,
     fnv_int, fnv_start, fnv_str,
 )
@@ -5452,7 +5453,7 @@ struct Desktop(Movable):
         if len(spec.install_hint.as_bytes()) == 0:
             return
         # One nag per language per session, regardless of yes/no.
-        if _contains(self._lsp_install_prompted, spec.language_id):
+        if spec.language_id in self._lsp_install_prompted:
             return
         # Belt-and-suspenders: re-check that no candidate is on PATH.
         # ``_ensure_lsp_for_extension`` only returns -1-with-known-extension
@@ -5510,7 +5511,7 @@ struct Desktop(Movable):
         var spec = specs[spec_idx].copy()
         if user_grammar_installed(spec.language_id):
             return
-        if _contains(self._grammar_install_prompted, spec.language_id):
+        if spec.language_id in self._grammar_install_prompted:
             return
         if self._install_prompt_blocked():
             if len(self._pending_grammar_prompt_ext.as_bytes()) == 0:
@@ -6772,15 +6773,8 @@ struct Desktop(Movable):
         menu can mark them. Compares before storing — the common case is
         an unchanged list, and the Project menu's rebuild is keyed off
         this."""
-        if len(paths) == len(self.open_projects):
-            var same = True
-            for i in range(len(paths)):
-                if paths[i] != self.open_projects[i]:
-                    same = False
-                    break
-            if same:
-                return
-        self.open_projects = paths^
+        if paths != self.open_projects:
+            self.open_projects = paths^
 
     def _project_menu_paths(self) -> List[String]:
         """The project roots the Project menu lists, most-recent first.
@@ -7097,9 +7091,7 @@ struct Desktop(Movable):
         # Resolve so a label like ``.`` becomes the actual directory name,
         # and so the stored project path is canonical for downstream
         # comparisons. Fall back to the input on resolution failure.
-        var resolved = realpath(path)
-        debug_log(String("[_set_project] realpath=") + resolved)
-        var canonical = resolved if len(resolved.as_bytes()) > 0 else path
+        var canonical = realpath_or_self(path)
         debug_log(String("[_set_project] canonical=") + canonical)
         self._swap_search_memory(canonical)
         self.project = Optional[String](canonical)
@@ -7524,27 +7516,12 @@ struct Desktop(Movable):
         (seq N). Returns 0 for any title that doesn't fit the pattern —
         the caller falls back to a positional seq so the draft still
         round-trips, just without a stable number."""
-        var prefix = String("Untitled")
-        var tb = title.as_bytes()
-        var pb = prefix.as_bytes()
-        if not title.startswith("Untitled"):
-            return 0
-        if len(tb) == len(pb):
+        if title == String("Untitled"):
             return 1
-        # Expect "Untitled <n>": a single space then digits.
-        if tb[len(pb)] != 0x20:
+        if not title.startswith("Untitled "):
             return 0
-        var n = 0
-        var any = False
-        for i in range(len(pb) + 1, len(tb)):
-            var c = tb[i]
-            if c < 0x30 or c > 0x39:
-                return 0
-            n = n * 10 + Int(c - 0x30)
-            any = True
-        if not any:
-            return 0
-        return n
+        var tb = title.as_bytes()
+        return max(0, parse_uint_range(tb, 9, len(tb)))
 
     def _snapshot_drafts(self, with_files: Bool = False) -> List[StoredDraft]:
         """Build the list of untitled (file-less) editor buffers to
@@ -14649,9 +14626,7 @@ struct Desktop(Movable):
         if fidx >= 0:
             var fp = self.windows.windows[fidx].editor.file_path
             if len(fp.as_bytes()) > 0:
-                focused_canon = realpath(fp)
-                if len(focused_canon.as_bytes()) == 0:
-                    focused_canon = fp
+                focused_canon = realpath_or_self(fp)
         var root = self._project_root()
         var rel_entries = List[String]()
         var abs_entries = List[String]()
@@ -14669,20 +14644,11 @@ struct Desktop(Movable):
             var p = self.windows.windows[widx].editor.file_path
             if len(p.as_bytes()) == 0:
                 continue
-            var canon = realpath(p)
-            if len(canon.as_bytes()) == 0:
-                canon = p
-            if canon == focused_canon:
-                continue
+            var canon = realpath_or_self(p)
             # Dedup if the same path was already added (shouldn't
             # normally happen — one window per path is enforced by
             # ``_find_window_for_path`` — but cheap to defend).
-            var dup = False
-            for s in range(len(seen)):
-                if seen[s] == canon:
-                    dup = True
-                    break
-            if dup:
+            if canon == focused_canon or canon in seen:
                 continue
             seen.append(canon)
             rel_entries.append(project_relative(root, canon))
@@ -14690,14 +14656,7 @@ struct Desktop(Movable):
         # Pool 2: persisted ``config.recent_files`` not already covered above.
         for i in range(len(self.config.recent_files)):
             var p = self.config.recent_files[i]
-            if p == focused_canon:
-                continue
-            var dup = False
-            for s in range(len(seen)):
-                if seen[s] == p:
-                    dup = True
-                    break
-            if dup:
+            if p == focused_canon or p in seen:
                 continue
             seen.append(p)
             rel_entries.append(project_relative(root, p))
@@ -16081,7 +16040,7 @@ struct Desktop(Movable):
         modal is open or when the user has already been asked for this
         language this session — same one-nag rule as the LSP installer.
         """
-        if _contains(self._doc_install_prompted, spec.language_id):
+        if spec.language_id in self._doc_install_prompted:
             # Already declined / pending — surface a hint so the user
             # knows why nothing happened on their second Ctrl+K attempt
             # for this language.
@@ -16126,7 +16085,7 @@ struct Desktop(Movable):
             return False
         if python_venv_has_debugpy(venv_dir):
             return False
-        if _contains(self._debugpy_install_prompted, venv_dir):
+        if venv_dir in self._debugpy_install_prompted:
             return False
         if self.install_runner.is_active():
             return False
@@ -16952,10 +16911,9 @@ struct Desktop(Movable):
             var edits = self.lsp_managers[li].take_applyedit()
             var n = self._apply_workspace_edits(edits^, screen)
             if n > 0:
-                var suffix = String(" file")
-                if n != 1:
-                    suffix = String(" files")
-                self._say(String("Applied edit across ") + String(n) + suffix)
+                self._say(
+                    String("Applied edit across ") + _count_noun(n, String("file")),
+                )
 
     def _apply_workspace_edits(
         mut self, var file_edits: List[CodeActionFileEdit], screen: Rect,
@@ -17012,10 +16970,10 @@ struct Desktop(Movable):
             if oi >= 0:
                 self.windows.focus_by_index(oi)
         if files_changed > 0:
-            var suffix = String(" file")
-            if files_changed != 1:
-                suffix = String(" files")
-            self._say(String("Renamed across ") + String(files_changed) + suffix)
+            self._say(
+                String("Renamed across ")
+                + _count_noun(files_changed, String("file")),
+            )
         else:
             self._say(String("Rename: no edits applied"), Attr(RED, LIGHT_GRAY))
 
@@ -17249,22 +17207,10 @@ struct Desktop(Movable):
                 if len(name.as_bytes()) == 0 or name.as_bytes()[0] == 0x2E:
                     continue
                 subdirs.append(name)
-            # Insertion sort — a folder of projects is a few dozen names.
-            for a in range(1, len(subdirs)):
-                var b = a
-                while b > 0 and subdirs[b] < subdirs[b - 1]:
-                    var t = subdirs[b]
-                    subdirs[b] = subdirs[b - 1]
-                    subdirs[b - 1] = t^
-                    b -= 1
+            sort(subdirs)
             for k in range(len(subdirs)):
                 var full = join_path(root, subdirs[k])
-                var dup = False
-                for q in range(len(paths)):
-                    if paths[q] == full:
-                        dup = True
-                        break
-                if dup:
+                if full in paths:
                     continue
                 labels.append(_abbreviate_home(full, home))
                 paths.append(full^)
@@ -18355,9 +18301,8 @@ struct Desktop(Movable):
             if self.windows.windows[i].is_editor:
                 self.windows.windows[i].editor.invalidate_spell()
         var where = String("project") if to_project else String("user")
-        var msg = String("Spelling: added ") + String(len(keys)) \
-            + String(" word") + (String("") if len(keys) == 1 else String("s")) \
-            + String(" to the ") + where + String(" dictionary")
+        var msg = String("Spelling: added ") \
+            + _count_noun(len(keys), String("word")) + String(" to the ") + where + String(" dictionary")
         if not persisted:
             msg = msg + String(" (session only — couldn't write the file)")
         self._say(msg)
@@ -19049,15 +18994,6 @@ def _mojo_include_dirs(root: String) -> List[String]:
 
 
 # --- Result / summary windows for project search ----------------------------
-
-
-def _contains(haystack: List[String], needle: String) -> Bool:
-    """Whether ``needle`` is in ``haystack`` (the install prompts'
-    one-nag-per-session lists)."""
-    for i in range(len(haystack)):
-        if haystack[i] == needle:
-            return True
-    return False
 
 
 def _no_file_info() -> FileInfo:

@@ -23,15 +23,12 @@ from .case_fold import fold_ascii, is_ascii
 from .onig import unicode_case_fold
 
 
-def sorted_lines_ci(rows: List[String]) -> List[String]:
-    """``rows`` sorted case-insensitively: collated for the user's locale
-    where the platform can, Unicode-folded otherwise."""
-    return _permuted(rows, sorted_order_ci(rows))
 
 
 def sorted_order_ci(rows: List[String]) -> List[Int]:
-    """The indices of ``rows`` in ``sorted_lines_ci`` order, for moving
-    what belongs to each line (its bookmark) along with it."""
+    """The indices of ``rows`` sorted case-insensitively — collated for
+    the user's locale where the platform can, Unicode-folded otherwise —
+    so what belongs to each line (its bookmark) can move along with it."""
     var collated = _collated_order(rows, String(""))
     if collated:
         return collated.value().copy()

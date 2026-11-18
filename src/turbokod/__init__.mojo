@@ -178,7 +178,7 @@ from .run_manager import (
 )
 from .quick_open import QuickOpen
 from .search_options import SearchOptions
-from .symbol_pick import SymbolPick, symbol_kind_label
+from .symbol_pick import SymbolPick
 from .geometry import Point, Rect
 from .menu import Menu, MenuBar, MenuItem, MenuResult
 from .painter import Painter

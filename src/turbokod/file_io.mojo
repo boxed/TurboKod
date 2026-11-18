@@ -15,7 +15,7 @@ from std.ffi import external_call
 from std.sys.info import CompilationTarget
 
 from .case_fold import fold_byte
-from .posix import alloc_zero_buffer, realpath
+from .posix import alloc_zero_buffer, realpath, realpath_or_self
 from .string_utils import byte_slice
 from .json import JsonValue, json_array, parse_json
 
@@ -631,8 +631,7 @@ def find_git_project(start_path: String) -> Optional[String]:
     # Resolve to an absolute path so a relative input like "examples/foo.txt"
     # walks up past the current working directory rather than getting stuck
     # at "." (whose parent is itself).
-    var resolved = realpath(start_path)
-    var path = resolved if len(resolved.as_bytes()) > 0 else start_path
+    var path = realpath_or_self(start_path)
     var info = stat_file(path)
     if info.ok and not info.is_dir():
         path = parent_path(path)
