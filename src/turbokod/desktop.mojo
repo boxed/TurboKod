@@ -244,7 +244,7 @@ from .view_state_store import (
 from .drafts_store import (
     StoredDraft, encode_drafts, load_drafts, save_drafts,
 )
-from .status import StatusBar, StatusTab
+from .status import StatusBar, StatusTab, status_error_attr
 from .tab_bar import TabBar, TabBarItem
 from .settings import Settings
 from .project_settings import ProjectSettings
@@ -5187,7 +5187,7 @@ struct Desktop(Movable):
         try:
             w = Window.from_file(basename(path), rect, path)
         except e:
-            self._say(String("Can't read ") + basename(path), Attr(RED, LIGHT_GRAY))
+            self._say_error(String("Can't read ") + basename(path))
             raise e^
         # Re-apply any saved view state for this file (scroll + cursor).
         # Survives across window close, project close, and process
@@ -8658,7 +8658,7 @@ struct Desktop(Movable):
 
     def _say_error(mut self, var text: String):
         """Show ``text`` on the status bar's message slot, as a failure."""
-        self.status_bar.set_message(text^, Attr(LIGHT_RED, LIGHT_GRAY))
+        self.status_bar.set_message(text^, status_error_attr())
 
     def _bind(
         mut self, key: UInt32, mods: UInt8, action: String,
@@ -9444,7 +9444,7 @@ struct Desktop(Movable):
         try:
             self._save_focused_as(path)
         except:
-            self._say(String("Can't save ") + basename(path), Attr(RED, LIGHT_GRAY))
+            self._say_error(String("Can't save ") + basename(path))
             return
         self._close_if_saved_as()
 
@@ -10698,9 +10698,8 @@ struct Desktop(Movable):
                 else:
                     self._close_editor_window_at(i)
             if kept > 0:
-                self._say(
+                self._say_error(
                     String(kept) + String(" with unsaved changes left open"),
-                    Attr(RED, LIGHT_GRAY),
                 )
             return Optional[String]()
         if starts_with(action, WINDOW_FOCUS_PREFIX):
@@ -11053,7 +11052,7 @@ struct Desktop(Movable):
                     var msg = String("No result")
                     if len(nav_word.as_bytes()) > 0:
                         msg = msg + String(" for '") + nav_word + String("'")
-                    self._say(msg^, Attr(RED, LIGHT_GRAY))
+                    self._say_error(msg^)
             # Server-initiated status: work-done progress (gated by the
             # ``lsp_server_progress`` setting) and showMessage (always).
             # Always drain to clear the latch even when not displaying.
@@ -11933,7 +11932,7 @@ struct Desktop(Movable):
             return False
         var target = self._resolve_template_include(rel)
         if len(target.as_bytes()) == 0:
-            self._say(String("Template not found: ") + rel, Attr(RED, LIGHT_GRAY))
+            self._say_error(String("Template not found: ") + rel)
             return True
         try:
             self.open_file(target, screen)
@@ -11994,17 +11993,15 @@ struct Desktop(Movable):
             return
         var lsp_idx = self._lsp_for_path(path)
         if lsp_idx < 0:
-            self._say(
+            self._say_error(
                 String("LSP: not started for this file type"),
-                Attr(RED, LIGHT_GRAY),
             )
             return
         if self.lsp_managers[lsp_idx].is_failed():
             return
         if not self.lsp_managers[lsp_idx].is_active():
-            self._say(
+            self._say_error(
                 String("LSP: not started for this file type"),
-                Attr(RED, LIGHT_GRAY),
             )
             return
         var text = self.windows.windows[win_idx].editor.lsp_text()
@@ -12690,7 +12687,7 @@ struct Desktop(Movable):
         self.status_bar.set_message(
             name + String(" exited (") + status + String(")"),
             Attr(BLACK, LIGHT_GRAY) if status == String("0")
-            else Attr(LIGHT_RED, LIGHT_GRAY),
+            else status_error_attr(),
         )
 
     def take_attention_events(mut self) -> Int:
@@ -13231,7 +13228,7 @@ struct Desktop(Movable):
             self._dap_status_key = key
             var attr = Attr(BLACK, LIGHT_GRAY)
             if self.dap.is_failed():
-                attr = Attr(LIGHT_RED, LIGHT_GRAY)
+                attr = status_error_attr()
             var tooltip: String
             if self.dap.is_failed():
                 tooltip = String(
@@ -14266,7 +14263,7 @@ struct Desktop(Movable):
             var msg = String("No references")
             if len(word.as_bytes()) > 0:
                 msg = msg + String(" for '") + word + String("'")
-            self._say(msg^, Attr(RED, LIGHT_GRAY))
+            self._say_error(msg^)
             return
         if len(refs) == 1:
             var only = refs[0]
@@ -14605,7 +14602,7 @@ struct Desktop(Movable):
             for ci in range(len(self.lsp_managers)):
                 self.lsp_managers[ci].notify_did_create_files(spath)
         else:
-            self._say(String("Can't save ") + basename(path), Attr(RED, LIGHT_GRAY))
+            self._say_error(String("Can't save ") + basename(path))
 
     def _focused_editor_idx(self) -> Int:
         if self.windows.focused < 0 or self.windows.focused >= len(self.windows.windows):
@@ -14988,10 +14985,9 @@ struct Desktop(Movable):
                     and not self.windows.windows[idx].editor.merge_pending:
                 # The write failed (a read-only file, a full disk): only the
                 # dirty mark showed it
-                self._say(
+                self._say_error(
                     String("Can't save ")
                         + basename(self.windows.windows[idx].editor.file_path),
-                    Attr(RED, LIGHT_GRAY),
                 )
         except e:
             print(
@@ -15290,9 +15286,8 @@ struct Desktop(Movable):
             return
         var lsp_idx = self._lsp_for_path(path)
         if lsp_idx < 0:
-            self._say(
+            self._say_error(
                 String("LSP: not started for this file type"),
-                Attr(RED, LIGHT_GRAY),
             )
             return
         if self.lsp_managers[lsp_idx].is_failed():
@@ -15476,12 +15471,11 @@ struct Desktop(Movable):
         availability up front so a misconfigured environment fails
         fast rather than at submit time."""
         if len(which(String("rg")).as_bytes()) == 0:
-            self._say(String("Find Symbol: rg not on PATH"), Attr(RED, LIGHT_GRAY))
+            self._say_error(String("Find Symbol: rg not on PATH"))
             return
         if not self.project:
-            self._say(
+            self._say_error(
                 String("Find Symbol: open a project first"),
-                Attr(RED, LIGHT_GRAY),
             )
             return
         self._find_symbol_pending_lsps = List[Int]()
@@ -16686,7 +16680,7 @@ struct Desktop(Movable):
         if not self._is_editor_at(win_idx):
             return
         if len(word.as_bytes()) == 0:
-            self._say(String("Rename: no symbol under cursor"), Attr(RED, LIGHT_GRAY))
+            self._say_error(String("Rename: no symbol under cursor"))
             return
         var path = self.windows.windows[win_idx].editor.file_path
         if len(path.as_bytes()) == 0:
@@ -16694,9 +16688,8 @@ struct Desktop(Movable):
             return
         var lsp_idx = self._ready_lsp_for_path(path)
         if lsp_idx < 0:
-            self._say(
+            self._say_error(
                 String("Rename: LSP not ready for this file type"),
-                Attr(RED, LIGHT_GRAY),
             )
             return
         self._rename_path = path
@@ -16739,9 +16732,8 @@ struct Desktop(Movable):
             if len(self._rename_path.as_bytes()) == 0:
                 continue
             if state == 2:
-                self._say(
+                self._say_error(
                     String("Rename: this symbol can't be renamed"),
-                    Attr(RED, LIGHT_GRAY),
                 )
                 self._rename_path = String("")
                 continue
@@ -16759,7 +16751,7 @@ struct Desktop(Movable):
             return
         var lsp_idx = self._ready_lsp_for_path(path)
         if lsp_idx < 0:
-            self._say(String("Rename: LSP not ready"), Attr(RED, LIGHT_GRAY))
+            self._say_error(String("Rename: LSP not ready"))
             return
         var win_idx = self._find_window_for_path(path)
         if win_idx < 0:
@@ -16787,10 +16779,9 @@ struct Desktop(Movable):
             if len(edits) > 0 and win >= 0 \
                     and self.windows.windows[win].editor.lsp_text() != asked_on:
                 self._rename_path = String("")
-                self._say(
+                self._say_error(
                     String("Not renamed: the file changed while waiting for ")
                         + String("the language server. Rename again."),
-                    Attr(RED, LIGHT_GRAY),
                 )
                 continue
             self._apply_rename_edits(edits^, screen)
@@ -16851,9 +16842,8 @@ struct Desktop(Movable):
         var origin_path = self._rename_path
         self._rename_path = String("")
         if len(file_edits) == 0:
-            self._say(
+            self._say_error(
                 String("Rename produced no edits (unsupported here?)"),
-                Attr(RED, LIGHT_GRAY),
             )
             return
         var files_changed = self._apply_workspace_edits(file_edits^, screen)
@@ -16869,7 +16859,7 @@ struct Desktop(Movable):
                 + _count_noun(files_changed, String("file")),
             )
         else:
-            self._say(String("Rename: no edits applied"), Attr(RED, LIGHT_GRAY))
+            self._say_error(String("Rename: no edits applied"))
 
     def _maybe_open_file_tab_menu(mut self, event: Event, screen: Rect) -> Bool:
         """Open the file-actions popup (Rename / Delete) on a right-click
@@ -17007,13 +16997,12 @@ struct Desktop(Movable):
         # Changing only the case of a name finds the file itself there on a
         # case-insensitive disk, which ``realpath`` names as it is on disk
         if stat_file(new_path).ok and realpath(new_path) != realpath(old_path):
-            self._say(
+            self._say_error(
                 String("Rename: '") + basename(new_path) + String("' already exists"),
-                Attr(RED, LIGHT_GRAY),
             )
             return
         if not rename_path(old_path, new_path):
-            self._say(String("Rename failed"), Attr(RED, LIGHT_GRAY))
+            self._say_error(String("Rename failed"))
             return
         # Tell every server the file moved. pyright and
         # typescript-language-server rewrite the imports referring to it on
@@ -17076,9 +17065,8 @@ struct Desktop(Movable):
         Projects folders. Rows show ``~``-abbreviated paths so the filter
         matches the parent folder name too."""
         if len(self.config.project_dirs) == 0:
-            self._say(
+            self._say_error(
                 String("No project folders — add some in Settings ▸ Projects"),
-                Attr(RED, LIGHT_GRAY),
             )
             return
         var home = getenv_value(String("HOME"))
@@ -17102,9 +17090,8 @@ struct Desktop(Movable):
                 labels.append(_abbreviate_home(full, home))
                 paths.append(full^)
         if len(paths) == 0:
-            self._say(
+            self._say_error(
                 String("No projects found in the Settings ▸ Projects folders"),
-                Attr(RED, LIGHT_GRAY),
             )
             return
         self._close_pickers()
@@ -17122,7 +17109,7 @@ struct Desktop(Movable):
             return
         var path = self.windows.windows[idx].editor.file_path
         if len(path.as_bytes()) == 0:
-            self._say(String("Duplicate: save the file first"), Attr(RED, LIGHT_GRAY))
+            self._say_error(String("Duplicate: save the file first"))
             return
         self._file_op_path = path
         self._file_op_is_dir = False
@@ -17146,9 +17133,8 @@ struct Desktop(Movable):
         if len(new_path.as_bytes()) == 0:
             return
         if stat_file(new_path).ok:
-            self._say(
+            self._say_error(
                 String("Duplicate: '") + basename(new_path) + String("' already exists"),
-                Attr(RED, LIGHT_GRAY),
             )
             return
         var content: String
@@ -17161,10 +17147,10 @@ struct Desktop(Movable):
             try:
                 content = read_existing_file(src_path)
             except:
-                self._say(String("Duplicate failed"), Attr(RED, LIGHT_GRAY))
+                self._say_error(String("Duplicate failed"))
                 return
         if not write_file(new_path, content):
-            self._say(String("Duplicate failed"), Attr(RED, LIGHT_GRAY))
+            self._say_error(String("Duplicate failed"))
             return
         for ci in range(len(self.lsp_managers)):
             self.lsp_managers[ci].notify_did_create_files(new_path)
@@ -17186,7 +17172,7 @@ struct Desktop(Movable):
         if len(path.as_bytes()) == 0:
             return
         if not delete_tree(path, is_dir):
-            self._say(String("Delete failed"), Attr(RED, LIGHT_GRAY))
+            self._say_error(String("Delete failed"))
             return
         # Tell every server the path is gone so it drops the file from its
         # index — otherwise its stale symbols keep surfacing in Find Symbol
@@ -17489,7 +17475,7 @@ struct Desktop(Movable):
                 return
             var lsp_idx = self._ready_lsp_for_path(path)
             if lsp_idx < 0:
-                self._say(String("References: LSP not ready"), Attr(RED, LIGHT_GRAY))
+                self._say_error(String("References: LSP not ready"))
                 return
             var text = self.windows.windows[idx].editor.lsp_text()
             _ = self.lsp_managers[lsp_idx].request_references(
@@ -17595,7 +17581,7 @@ struct Desktop(Movable):
             return
         var lsp_idx = self._ready_lsp_for_path(path)
         if lsp_idx < 0:
-            self._say(String("LSP not ready for this file type"), Attr(RED, LIGHT_GRAY))
+            self._say_error(String("LSP not ready for this file type"))
             return
         var text = self.windows.windows[win_idx].editor.lsp_text()
         _ = self.lsp_managers[lsp_idx].request_navigation(
@@ -17626,9 +17612,8 @@ struct Desktop(Movable):
             return
         var li = self._ready_lsp_for_path(path, String("documentFormattingProvider"))
         if li < 0:
-            self._say(
+            self._say_error(
                 String("Formatting not available for this file type"),
-                Attr(RED, LIGHT_GRAY),
             )
             return
         var text = self.windows.windows[idx].editor.lsp_text()
@@ -17649,7 +17634,7 @@ struct Desktop(Movable):
             return
         var li = self._ready_lsp_for_path(path, String("documentRangeFormattingProvider"))
         if li < 0:
-            self._say(String("Range formatting not available"), Attr(RED, LIGHT_GRAY))
+            self._say_error(String("Range formatting not available"))
             return
         # Normalize the selection so start precedes end.
         var sel = self.windows.windows[idx].editor.selections[0]
@@ -18143,7 +18128,7 @@ struct Desktop(Movable):
         """Project ▸ Spelling: scan every project file for words the
         spell checker flags and list them by frequency."""
         if not self.project:
-            self._say(String("Spelling: open a project first"), Attr(RED, LIGHT_GRAY))
+            self._say_error(String("Spelling: open a project first"))
             return
         self.speller.load_default()
         self.spelling_dialog.open(
@@ -18339,7 +18324,7 @@ struct Desktop(Movable):
                 try:
                     self._save_focused_as(path)
                 except:
-                    self._say(String("Save failed"), Attr(RED, LIGHT_GRAY))
+                    self._say_error(String("Save failed"))
             self._close_if_saved_as()
             return Optional[String]()
         # Unknown / no pending action — nothing to do.
@@ -18921,7 +18906,7 @@ def _refresh_status_for(
     if m.is_failed():
         sb.set_message(
             prefix + m.failure_reason,
-            Attr(LIGHT_RED, LIGHT_GRAY),
+            status_error_attr(),
             clickable=True,
             owner=String("lsp"),
         )
@@ -18987,7 +18972,7 @@ def _refresh_status_for(
         if m.last_empty():
             sb.set_message(
                 prefix + String("no definition found"),
-                Attr(LIGHT_RED, LIGHT_GRAY),
+                status_error_attr(),
                 clickable=True,
                 owner=String("lsp"),
             )

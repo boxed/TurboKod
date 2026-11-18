@@ -21,6 +21,11 @@ from .string_utils import display_columns
 from .anchored_menu import anchored_menu_rect
 
 
+def status_error_attr() -> Attr:
+    """The status bar's color for a failure message."""
+    return Attr(RED, LIGHT_GRAY)
+
+
 comptime _MESSAGE_HOLD_MS = 5000
 
 
