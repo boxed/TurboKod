@@ -37,6 +37,7 @@ from .posix import DRAIN_EOF, drain_fd
 from .pty import PtyProcess
 from .scrollbar import ScrollBarArea
 from .test_results import TestResultsView
+from .text_view import word_drag_span
 
 from .string_utils import display_columns
 from .vt import Vt
@@ -353,22 +354,14 @@ struct GridSelection(Copyable, Movable):
         """Word-snapped extend: the double-clicked word stays anchored;
         the moving end snaps to whichever word the pointer is over."""
         var bounds = self._word_bounds_at(vt, r, c)
-        var word_lo = bounds[0]
-        var word_hi = bounds[1]
-        var ar = self._dc_anchor_r
-        var a_lo = self._dc_anchor_lo
-        var a_hi = self._dc_anchor_hi
-        var backward = (r < ar) or (r == ar and word_hi <= a_lo)
-        if backward:
-            self.sel_anchor_r = ar
-            self.sel_anchor_c = a_hi
-            self.sel_focus_r = r
-            self.sel_focus_c = word_lo
-        else:
-            self.sel_anchor_r = ar
-            self.sel_anchor_c = a_lo
-            self.sel_focus_r = r
-            self.sel_focus_c = word_hi
+        var span = word_drag_span(
+            self._dc_anchor_r, self._dc_anchor_lo, self._dc_anchor_hi,
+            r, bounds[0], bounds[1],
+        )
+        self.sel_anchor_r = span[0]
+        self.sel_anchor_c = span[1]
+        self.sel_focus_r = span[2]
+        self.sel_focus_c = span[3]
         self.sel_active = True
 
     def select_line_at(mut self, vt: Vt, pos: Point):

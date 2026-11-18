@@ -119,6 +119,39 @@ comptime MOUSE_WHEEL_DOWN    = UInt8(5)
 comptime DOUBLE_CLICK_MS:    Int = 500
 
 
+struct ClickCycle(ImplicitlyCopyable, Movable):
+    """Counts a widget's consecutive left presses on the same spot within
+    ``DOUBLE_CLICK_MS``: 1 → 2 → 3 (single, word, line), and the press after
+    a triple starts over at 1. For a widget that resolves a press to its
+    own position (a buffer row / column, a byte) rather than a screen
+    cell."""
+    var _last_ms: Int
+    var _last_a: Int
+    var _last_b: Int
+    var _count: Int
+
+    def __init__(out self):
+        self._last_ms = 0
+        self._last_a = -1
+        self._last_b = -1
+        self._count = 0
+
+    def press(mut self, a: Int, b: Int, now_ms: Int) -> Int:
+        """Count a press at ``(a, b)``; how many in a row it makes."""
+        if now_ms - self._last_ms <= DOUBLE_CLICK_MS \
+                and a == self._last_a and b == self._last_b:
+            self._count += 1
+        else:
+            self._count = 1
+        self._last_ms = now_ms
+        self._last_a = a
+        self._last_b = b
+        var n = self._count
+        if n >= 3:
+            self = ClickCycle()
+        return n
+
+
 # --- Popup / menu mouse hit-status -------------------------------------------
 #
 # The shared return vocabulary for the small modal popup menus

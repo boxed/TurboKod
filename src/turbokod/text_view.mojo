@@ -1416,20 +1416,11 @@ struct TextLog(Copyable, Movable):
         ``Selection.normalized`` sorts endpoints, so we just place the
         two outer edges on the correct sides."""
         var rng = word_range_at(self.lines[line_idx], col)
-        var word_lo = rng[0]
-        var word_hi = rng[1]
-        var al = self._dc_anchor_line
-        var a_lo = self._dc_anchor_lo
-        var a_hi = self._dc_anchor_hi
-        var backward = (line_idx < al) or (line_idx == al and word_hi <= a_lo)
-        if backward:
-            self.selection = Selection(
-                True, True, al, a_hi, line_idx, word_lo,
-            )
-        else:
-            self.selection = Selection(
-                True, True, al, a_lo, line_idx, word_hi,
-            )
+        var span = word_drag_span(
+            self._dc_anchor_line, self._dc_anchor_lo, self._dc_anchor_hi,
+            line_idx, rng[0], rng[1],
+        )
+        self.selection = Selection(True, True, span[0], span[1], span[2], span[3])
 
     def _select_line_at(mut self, line_idx: Int):
         """Select the whole logical line ``line_idx`` (triple-click) and
@@ -1509,6 +1500,20 @@ struct TextLog(Copyable, Movable):
             ns = max_s
         self.autoscroll = (ns >= max_s)
         self.scroll = ns
+
+
+def word_drag_span(
+    anchor_line: Int, anchor_lo: Int, anchor_hi: Int,
+    line: Int, word_lo: Int, word_hi: Int,
+) -> Tuple[Int, Int, Int, Int]:
+    """A double-click drag's selection as ``(anchor_line, anchor_col,
+    focus_line, focus_col)``: the double-clicked word
+    ``[anchor_lo, anchor_hi)`` stays whole, and the moving end takes the
+    far edge of the word ``[word_lo, word_hi)`` under the pointer —
+    its start when dragging back past the anchor word, else its end."""
+    if line < anchor_line or (line == anchor_line and word_hi <= anchor_lo):
+        return (anchor_line, anchor_hi, line, word_lo)
+    return (anchor_line, anchor_lo, line, word_hi)
 
 
 def pos_less(a_line: Int, a_col: Int, b_line: Int, b_col: Int) -> Bool:

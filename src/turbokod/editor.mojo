@@ -37,7 +37,7 @@ from .events import (
     KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME,
     KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP,
     MOD_ALT, MOD_CTRL, MOD_KEY_ALT, MOD_META, MOD_NONE, MOD_SHIFT,
-    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_BUTTON_RIGHT,
+    ClickCycle, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_BUTTON_RIGHT,
     MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .editorconfig import EditorConfig, load_editorconfig_for_path
@@ -91,6 +91,7 @@ from .string_utils import (
 )
 from .text_view import (
     Selection, VisualLine, ordered_span, paint_selection_overlay, pos_less,
+    word_drag_span,
     smart_wrap_lines, wrap_lines,
 )
 from .config import WRAP_NONE, WRAP_SMART
@@ -903,11 +904,6 @@ comptime _RUN_DELETE = 2
 undo step. 800 ms feels right in practice — fast enough that "type sentence,
 think for a moment, type next sentence" produces two undo steps, slow enough
 that a single sentence rarely splits."""
-
-
-comptime _DOUBLE_CLICK_MS = 500
-"""Maximum gap between two left-button presses (at the same cell) for the
-second one to be treated as a double-click."""
 
 
 comptime _ALT_TAP_HOLD_MS = 600
@@ -1834,20 +1830,13 @@ struct Editor(Copyable, Movable):
     var _typing_active: Bool
     var _typing_last_ms: Int
     var _typing_kind: Int
-    # Multi-click tracking. ``_last_click_ms`` is the timestamp of the
-    # most recent left-button press; ``_last_click_row`` /
-    # ``_last_click_col`` were the (row, col) it landed on.
-    # ``_click_count`` counts consecutive presses at the same cell within
-    # ``_DOUBLE_CLICK_MS`` (1=single, 2=double, 3=triple, then resets).
+    # Multi-click tracking: consecutive presses on one (row, col).
     # Double-click selects the word under the pointer; triple-click
     # selects the whole line. ``_dc_active`` / ``_tc_active`` stay True
     # until release or a press elsewhere; while set, drag-motion extends
     # in whole-word / whole-line units anchored to the originally clicked
     # word (``_dc_anchor_*``) or row (``_tc_anchor_row``).
-    var _last_click_ms: Int
-    var _last_click_row: Int
-    var _last_click_col: Int
-    var _click_count: Int
+    var _clicks: ClickCycle
     var _dc_active: Bool
     var _dc_anchor_row: Int
     var _dc_anchor_start: Int
@@ -2129,10 +2118,7 @@ struct Editor(Copyable, Movable):
         self._typing_active = False
         self._typing_last_ms = 0
         self._typing_kind = _RUN_INSERT
-        self._last_click_ms = 0
-        self._last_click_row = -1
-        self._last_click_col = -1
-        self._click_count = 0
+        self._clicks = ClickCycle()
         self._dc_active = False
         self._dc_anchor_row = 0
         self._dc_anchor_start = 0
@@ -10159,10 +10145,9 @@ struct Editor(Copyable, Movable):
         if event.button != MOUSE_BUTTON_LEFT:
             return False
         if not event.pressed:
-            # Left-button release ends any in-flight multi-click drag.
-            # We still leave ``_last_click_*`` populated so the next
-            # press within ``_DOUBLE_CLICK_MS`` can promote to a
-            # double- or triple-click.
+            # Left-button release ends any in-flight multi-click drag
+            # (``_clicks`` remembers it, so the next press can still
+            # promote to a double- or triple-click).
             if not event.motion:
                 self._dc_active = False
                 self._tc_active = False
@@ -10413,22 +10398,8 @@ struct Editor(Copyable, Movable):
         # Consecutive presses at the same cell within the double-click
         # window cycle through single → double → triple before
         # resetting; the count drives word vs. line selection.
-        var now = monotonic_ms()
-        var same_cell = (
-            now - self._last_click_ms <= _DOUBLE_CLICK_MS
-            and row == self._last_click_row
-            and col == self._last_click_col
-        )
-        if same_cell:
-            self._click_count += 1
-            if self._click_count > 3:
-                self._click_count = 1
-        else:
-            self._click_count = 1
-        self._last_click_ms = now
-        self._last_click_row = row
-        self._last_click_col = col
-        if self._click_count == 2:
+        var clicks = self._clicks.press(row, col, monotonic_ms())
+        if clicks == 2:
             var wrng = word_range_at(line, col)
             self._dc_active = True
             self._tc_active = False
@@ -10437,17 +10408,13 @@ struct Editor(Copyable, Movable):
             self._dc_anchor_end = wrng[1]
             self.move_to(row, wrng[0], False)
             self.move_to(row, wrng[1], True)
-        elif self._click_count == 3:
+        elif clicks == 3:
             self._tc_active = True
             self._dc_active = False
             self._tc_anchor_row = row
             var lrng = self._line_select_range(row)
             self.move_to(lrng[0], lrng[1], False)
             self.move_to(lrng[2], lrng[3], True)
-            # Reset so a 4th quick press starts a fresh single click
-            # instead of chaining into the cycle.
-            self._last_click_ms = 0
-            self._click_count = 0
         else:
             self._dc_active = False
             self._tc_active = False
@@ -10460,20 +10427,13 @@ struct Editor(Copyable, Movable):
         double-click-dragging. The originally double-clicked word stays
         anchored; the moving end snaps to the start or end of whichever
         word the pointer is currently over."""
-        var line = self.buffer.line(row)
-        var rng = word_range_at(line, col)
-        var word_start = rng[0]
-        var word_end = rng[1]
-        var ar = self._dc_anchor_row
-        var a_start = self._dc_anchor_start
-        var a_end = self._dc_anchor_end
-        var backward = (row < ar) or (row == ar and word_end <= a_start)
-        if backward:
-            self.move_to(ar, a_end, False)
-            self.move_to(row, word_start, True)
-        else:
-            self.move_to(ar, a_start, False)
-            self.move_to(row, word_end, True)
+        var rng = word_range_at(self.buffer.line(row), col)
+        var span = word_drag_span(
+            self._dc_anchor_row, self._dc_anchor_start, self._dc_anchor_end,
+            row, rng[0], rng[1],
+        )
+        self.move_to(span[0], span[1], False)
+        self.move_to(span[2], span[3], True)
 
     def _line_select_range(self, row: Int) -> Tuple[Int, Int, Int, Int]:
         """Return ``(start_row, start_col, end_row, end_col)`` for

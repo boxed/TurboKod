@@ -54,7 +54,7 @@ def text_field_sel_attr() -> Attr:
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE, KEY_BACKSPACE, KEY_DELETE, KEY_END,
     KEY_HOME, KEY_LEFT, KEY_RIGHT, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT,
-    MOUSE_BUTTON_LEFT,
+    ClickCycle, MOUSE_BUTTON_LEFT,
 )
 from .posix import monotonic_ms
 from .geometry import Point, Rect
@@ -66,11 +66,6 @@ from .string_utils import (
 )
 
 
-# How long a second mouse press can lag the first and still be treated
-# as a double-click. 500 ms matches the editor's own threshold (see
-# ``editor._DOUBLE_CLICK_MS``) so multi-line and single-line input
-# feel the same.
-comptime _DOUBLE_CLICK_MS = 500
 from .terminal import beep
 
 
@@ -148,17 +143,11 @@ struct TextField(Copyable, Movable):
     var _redo: List[_Snapshot]
     var _typing_active: Bool
     var _typing_last_ms: Int
-    # Multi-click tracking for double-click-to-word / triple-click-to-all.
-    # ``_last_click_ms`` is the timestamp of the most recent left-button
-    # press; ``_last_click_byte`` is the byte offset it landed on.
-    # ``_click_count`` counts consecutive presses at the same cell within
-    # ``_DOUBLE_CLICK_MS`` (1 = single, 2 = word, 3 = whole field; then
-    # resets). During a multi-click drag, ``_dc_active`` /
+    # Multi-click tracking for double-click-to-word / triple-click-to-all:
+    # consecutive presses on one byte (the editor's cycle). During a multi-click drag, ``_dc_active`` /
     # ``_tc_active`` flag which mode the drag-extend is anchored on so
     # the moving end snaps to word / line boundaries.
-    var _last_click_ms: Int
-    var _last_click_byte: Int
-    var _click_count: Int
+    var _clicks: ClickCycle
     var _dc_active: Bool
     var _tc_active: Bool
     # Word range that anchored the most recent double-click. Drag-extend
@@ -177,9 +166,7 @@ struct TextField(Copyable, Movable):
         self._redo = List[_Snapshot]()
         self._typing_active = False
         self._typing_last_ms = 0
-        self._last_click_ms = 0
-        self._last_click_byte = -1
-        self._click_count = 0
+        self._clicks = ClickCycle()
         self._dc_active = False
         self._tc_active = False
         self._dc_anchor_start = 0
@@ -605,23 +592,11 @@ struct TextField(Copyable, Movable):
             if not inside:
                 return False
             var byte = self._byte_at_x(event.pos.x - input_rect.a.x)
-            var now = monotonic_ms()
-            var same_cell = (
-                now - self._last_click_ms <= _DOUBLE_CLICK_MS
-                and byte == self._last_click_byte
-            )
-            if same_cell:
-                self._click_count += 1
-                if self._click_count > 3:
-                    self._click_count = 1
-            else:
-                self._click_count = 1
-            self._last_click_ms = now
-            self._last_click_byte = byte
+            var clicks = self._clicks.press(byte, 0, monotonic_ms())
             self._drag = True
             self._dc_active = False
             self._tc_active = False
-            if self._click_count == 2:
+            if clicks == 2:
                 # Word select: anchor the surrounding word range so a
                 # following drag snaps to whole-word boundaries.
                 var wrng = word_range_at(self.text, byte)
@@ -630,14 +605,11 @@ struct TextField(Copyable, Movable):
                 self._dc_anchor_end = wrng[1]
                 self.anchor = wrng[0]
                 self.cursor = wrng[1]
-            elif self._click_count == 3:
-                # Whole-field select. Cancels the multi-click cycle so
-                # a fourth quick press starts fresh as a single click.
+            elif clicks == 3:
+                # Whole-field select.
                 self._tc_active = True
                 self.anchor = 0
                 self.cursor = len(self.text.as_bytes())
-                self._last_click_ms = 0
-                self._click_count = 0
             else:
                 self.cursor = byte
                 self.anchor = byte
