@@ -34,6 +34,7 @@ from std.collections.optional import Optional
 from .library_words import LibraryNegatives
 from .spell import Speller
 from .spell_scan import ProjectSpellScan, SpellOccurrence, SpellScanWord
+from .stable_sort import stable_order
 from .ui_tree import (
     UIDialog,
     ListWindow, UI_CANCEL, UI_DISABLED, UI_LARGE, UI_MULTI, UI_SECONDARY,
@@ -282,11 +283,7 @@ struct SpellingDialog(Movable, UIDialog):
 
     def _resort(mut self):
         """Rebuild ``order``: count descending, then word."""
-        var idx = List[Int](capacity=len(self.scan.words))
-        for i in range(len(self.scan.words)):
-            idx.append(i)
-        _merge_sort(idx, self.scan.words)
-        self.order = idx^
+        self.order = stable_order[_before](self.scan.words)
         self._sorted_version = self.scan.version
         self._selection_stale = True
 
@@ -434,43 +431,3 @@ def _before(a: SpellScanWord, b: SpellScanWord) -> Bool:
         return a.count > b.count
     return a.key < b.key
 
-
-def _merge_sort(mut idx: List[Int], words: List[SpellScanWord]):
-    """Stable sort of ``idx`` (indices into ``words``) by ``_before``.
-    Merge sort rather than insertion: a project yields thousands of
-    distinct words and the list re-sorts while the scan runs."""
-    var n = len(idx)
-    if n < 2:
-        return
-    var buf = List[Int](capacity=n)
-    for i in range(n):
-        buf.append(idx[i])
-    var width = 1
-    while width < n:
-        var lo = 0
-        while lo < n:
-            var mid = min(lo + width, n)
-            var hi = min(lo + 2 * width, n)
-            var i = lo
-            var j = mid
-            var k = lo
-            while i < mid and j < hi:
-                if _before(words[idx[j]], words[idx[i]]):
-                    buf[k] = idx[j]
-                    j += 1
-                else:
-                    buf[k] = idx[i]
-                    i += 1
-                k += 1
-            while i < mid:
-                buf[k] = idx[i]
-                i += 1
-                k += 1
-            while j < hi:
-                buf[k] = idx[j]
-                j += 1
-                k += 1
-            lo += 2 * width
-        for t in range(n):
-            idx[t] = buf[t]
-        width *= 2

@@ -21,6 +21,7 @@ from std.ffi import external_call
 
 from .case_fold import fold_ascii, is_ascii
 from .onig import unicode_case_fold
+from .stable_sort import stable_order
 
 
 
@@ -32,7 +33,7 @@ def sorted_order_ci(rows: List[String]) -> List[Int]:
     var collated = _collated_order(rows, String(""))
     if collated:
         return collated.value().copy()
-    return _stable_order(_folded_keys(rows))
+    return stable_order[_less](_folded_keys(rows))
 
 
 def sorted_lines_collated(
@@ -70,7 +71,7 @@ def _collated_order(
 
 def sorted_lines_folded(rows: List[String]) -> List[String]:
     """``rows`` sorted by their full Unicode case fold, in codepoint order."""
-    return _permuted(rows, _stable_order(_folded_keys(rows)))
+    return _permuted(rows, stable_order[_less](_folded_keys(rows)))
 
 
 def _folded_keys(rows: List[String]) -> List[String]:
@@ -97,38 +98,6 @@ def _less(a: String, b: String) -> Bool:
         if ab[i] != bb[i]:
             return ab[i] < bb[i]
     return len(ab) < len(bb)
-
-
-def _stable_order(keys: List[String]) -> List[Int]:
-    """Indices of ``keys`` in sorted order — a bottom-up merge sort, stable."""
-    var n = len(keys)
-    var src = List[Int](capacity=n)
-    for i in range(n):
-        src.append(i)
-    var dst = src.copy()
-    var width = 1
-    while width < n:
-        var lo = 0
-        while lo < n:
-            var mid = min(lo + width, n)
-            var hi = min(lo + 2 * width, n)
-            var i = lo
-            var j = mid
-            for k in range(lo, hi):
-                # Take from the right run only when strictly smaller, so
-                # equal keys keep their original order.
-                if i < mid and (j >= hi or not _less(keys[src[j]], keys[src[i]])):
-                    dst[k] = src[i]
-                    i += 1
-                else:
-                    dst[k] = src[j]
-                    j += 1
-            lo += 2 * width
-        var t = src^
-        src = dst^
-        dst = t^
-        width *= 2
-    return src^
 
 
 def _permuted(rows: List[String], perm: List[Int]) -> List[String]:

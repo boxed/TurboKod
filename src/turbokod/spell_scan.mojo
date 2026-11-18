@@ -32,6 +32,7 @@ from .spell import (
     spell_key,
 )
 from std.collections.optional import Optional
+from .stable_sort import stable_order
 from .string_utils import fnv32, split_lines_no_trailing
 
 
@@ -368,49 +369,16 @@ struct ProjectSpellScan(Movable):
         self.version += 1
 
 
+def _larger(a: Int, b: Int) -> Bool:
+    return a > b
+
+
 def _sort_by_size_desc(mut files: List[String], mut sizes: List[Int]):
-    """Reorder ``files`` / ``sizes`` (parallel lists) largest first.
-    Bottom-up merge sort over an index permutation."""
-    var n = len(files)
-    if n < 2:
-        return
-    var idx = List[Int](capacity=n)
-    var buf = List[Int](capacity=n)
-    for i in range(n):
-        idx.append(i)
-        buf.append(i)
-    var width = 1
-    while width < n:
-        var lo = 0
-        while lo < n:
-            var mid = min(lo + width, n)
-            var hi = min(lo + 2 * width, n)
-            var i = lo
-            var j = mid
-            var k = lo
-            while i < mid and j < hi:
-                if sizes[idx[j]] > sizes[idx[i]]:
-                    buf[k] = idx[j]
-                    j += 1
-                else:
-                    buf[k] = idx[i]
-                    i += 1
-                k += 1
-            while i < mid:
-                buf[k] = idx[i]
-                i += 1
-                k += 1
-            while j < hi:
-                buf[k] = idx[j]
-                j += 1
-                k += 1
-            lo += 2 * width
-        for t in range(n):
-            idx[t] = buf[t]
-        width *= 2
-    var f2 = List[String](capacity=n)
-    var s2 = List[Int](capacity=n)
-    for t in range(n):
+    """Reorder ``files`` / ``sizes`` (parallel lists) largest first."""
+    var idx = stable_order[_larger](sizes)
+    var f2 = List[String](capacity=len(idx))
+    var s2 = List[Int](capacity=len(idx))
+    for t in range(len(idx)):
         f2.append(files[idx[t]])
         s2.append(sizes[idx[t]])
     files = f2^
