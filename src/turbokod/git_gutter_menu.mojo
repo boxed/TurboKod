@@ -63,22 +63,12 @@ struct GitGutterMenu(Movable):
     var active: Bool
     var submitted: Bool
     var action: Int
-    var row: Int
-    """Buffer row the request targets. Forwarded back to the host so it
-    recomputes the revert block at submission time (the buffer can't shift
+    var req: GitRevertRequest
+    """What it was opened for. The host's submit handler reads ``row`` to
+    recompute the revert block at submission time (the buffer can't shift
     while the modal is up, but recomputing keeps the cached baseline the
-    single source of truth)."""
-
-    var anchor_x: Int
-    var anchor_y: Int
-    var text_x: Int
-    var block_top_y: Int
-    var new_count: Int
-    var head_lines: List[String]
-    var is_deletion: Bool
-    """Mirrors ``GitRevertRequest.is_deletion`` — True when the popup was
-    opened from a ``_`` deletion marker. The host's submit handler reads it
-    to pick ``compute_deletion_revert_block`` over ``compute_revert_block``."""
+    single source of truth), and ``is_deletion`` to pick
+    ``compute_deletion_revert_block`` over ``compute_revert_block``."""
     var selected: Int
     var tracking: Bool
     """True between a captured left-press on the Revert bar and its matching
@@ -88,40 +78,18 @@ struct GitGutterMenu(Movable):
         self.active = False
         self.submitted = False
         self.action = GUTTER_ACTION_NONE
-        self.row = -1
-        self.anchor_x = 0
-        self.anchor_y = 0
-        self.text_x = 0
-        self.block_top_y = -1
-        self.new_count = 1
-        self.head_lines = List[String]()
-        self.is_deletion = False
+        self.req = GitRevertRequest(-1, 0, 0, 0, -1, 1, List[String](), False)
         self.selected = 0
         self.tracking = False
 
     def open(mut self, req: GitRevertRequest):
-        self.row = req.row
-        self.anchor_x = req.anchor_x
-        self.anchor_y = req.anchor_y
-        self.text_x = req.text_x
-        self.block_top_y = req.block_top_y
-        self.new_count = req.new_count if req.new_count > 0 else 1
-        self.head_lines = req.head_lines.copy()
-        self.is_deletion = req.is_deletion
+        self = GitGutterMenu()
+        self.req = req.copy()
+        self.req.new_count = max(self.req.new_count, 1)
         self.active = True
-        self.submitted = False
-        self.action = GUTTER_ACTION_NONE
-        self.selected = 0
-        self.tracking = False
 
     def close(mut self):
-        self.active = False
-        self.submitted = False
-        self.action = GUTTER_ACTION_NONE
-        self.row = -1
-        self.head_lines = List[String]()
-        self.is_deletion = False
-        self.tracking = False
+        self = GitGutterMenu()
 
     def _resolve(mut self, action: Int):
         self.action = action
@@ -131,8 +99,8 @@ struct GitGutterMenu(Movable):
         """Display columns of the widest thing the popup must fit — the
         Revert label or any old-code line."""
         var w = display_columns(_LABEL_REVERT)
-        for i in range(len(self.head_lines)):
-            var lw = display_columns(self.head_lines[i])
+        for i in range(len(self.req.head_lines)):
+            var lw = display_columns(self.req.head_lines[i])
             if lw > w:
                 w = lw
         return w
@@ -144,12 +112,12 @@ struct GitGutterMenu(Movable):
         above — and the drop shadow falls on the code below, never over the
         chunk itself. Flips *above* the block when there isn't room below;
         falls back to the click anchor when the block isn't on screen."""
-        var n = len(self.head_lines)
+        var n = len(self.req.head_lines)
         var rows_total = n + 1   # old-code lines + header
         # Left edge sits one column left of the text so a ``-`` marker can
         # share the gutter column while the code itself stays at ``text_x``,
         # exactly under the new code.
-        var left = self.text_x - 1
+        var left = self.req.text_x - 1
         if left < container.a.x:
             left = container.a.x
         var width = self._body_width() + 2   # marker column + 1 trailing pad
@@ -160,8 +128,8 @@ struct GitGutterMenu(Movable):
         var header_row: Int
         var old_start: Int
         var top: Int
-        if self.block_top_y >= 0:
-            var top_below = self.block_top_y + self.new_count
+        if self.req.block_top_y >= 0:
+            var top_below = self.req.block_top_y + self.req.new_count
             if top_below + rows_total <= container.b.y:
                 # Below: [old…][header], first old line abuts the change.
                 top = top_below
@@ -169,13 +137,13 @@ struct GitGutterMenu(Movable):
                 header_row = top + n
             else:
                 # Above: [header][old…], last old line abuts the change.
-                top = self.block_top_y - rows_total
+                top = self.req.block_top_y - rows_total
                 if top < container.a.y:
                     top = container.a.y
                 header_row = top
                 old_start = top + 1
         else:
-            top = self.anchor_y + 1
+            top = self.req.anchor_y + 1
             old_start = top
             header_row = top + n
             if top + rows_total > container.b.y:
@@ -198,7 +166,7 @@ struct GitGutterMenu(Movable):
         # Old code reads as "removed": white-on-red, with a ``-`` marker in
         # the gutter column, matching the diff convention used elsewhere.
         var rem_attr = Attr(WHITE, RED)
-        var n = len(self.head_lines)
+        var n = len(self.req.head_lines)
         for i in range(n):
             var ry = lay.old_start + i
             painter.fill(
@@ -207,7 +175,7 @@ struct GitGutterMenu(Movable):
             )
             painter.set(canvas, rect.a.x, ry, Cell(String("-"), rem_attr, 1))
             _ = painter.put_text(
-                canvas, Point(self.text_x, ry), self.head_lines[i], rem_attr,
+                canvas, Point(self.req.text_x, ry), self.req.head_lines[i], rem_attr,
             )
         # Header / Revert bar — a green button so it reads as the action.
         var hdr_attr = Attr(BLACK, GREEN)
@@ -216,7 +184,7 @@ struct GitGutterMenu(Movable):
             String(" "), hdr_attr,
         )
         _ = painter.put_text(
-            canvas, Point(self.text_x, lay.header_row), _LABEL_REVERT, hdr_attr,
+            canvas, Point(self.req.text_x, lay.header_row), _LABEL_REVERT, hdr_attr,
         )
 
     def handle_key(mut self, event: Event) -> Bool:

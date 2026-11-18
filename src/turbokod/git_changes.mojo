@@ -117,6 +117,65 @@ def compute_revert_block_lines(
 
 
 @fieldwise_init
+struct FileDiffSummary(ImplicitlyCopyable, Movable):
+    """What one file's slice of a unified diff says about it: its header
+    flags (everything before the first ``@@``), the ``+`` / ``-`` rows of
+    its hunks, and its length in lines."""
+    var added: Int
+    var removed: Int
+    var lines: Int
+    var new_file: Bool
+    var deleted: Bool
+    var renamed: Bool
+    var binary: Bool    # git reported it binary: no text diff to show
+
+    def status(self) -> String:
+        """``git status``'s letter for it: A, D, R or M."""
+        if self.new_file:
+            return String("A")
+        if self.deleted:
+            return String("D")
+        if self.renamed:
+            return String("R")
+        return String("M")
+
+
+def summarize_file_diff(diff_text: String) -> FileDiffSummary:
+    """One byte-level pass over a file's diff chunk. The counts are git's,
+    which is what lets a changeset be listed without fetching every file's
+    text."""
+    var b = diff_text.as_bytes()
+    var n = len(b)
+    var s = FileDiffSummary(0, 0, 0, False, False, False, False)
+    var in_hunks = False
+    var ls = 0
+    while ls < n:
+        var le = ls
+        while le < n and b[le] != 0x0A:
+            le += 1
+        s.lines += 1
+        var line = StringSpan(unsafe_from_utf8=b[ls:le])
+        if in_hunks:
+            if le > ls and b[ls] == 0x2B:
+                s.added += 1
+            elif le > ls and b[ls] == 0x2D:
+                s.removed += 1
+        elif line.startswith("@@"):
+            in_hunks = True
+        elif line.startswith("Binary files ") \
+                or line.startswith("GIT binary patch"):
+            s.binary = True
+        elif line.startswith("deleted file mode") or line == "+++ /dev/null":
+            s.deleted = True
+        elif line.startswith("new file mode") or line == "--- /dev/null":
+            s.new_file = True
+        elif line.startswith("rename to "):
+            s.renamed = True
+        ls = le + 1
+    return s
+
+
+@fieldwise_init
 struct ChangedFile(ImplicitlyCopyable, Movable):
     """One file's slice of a unified diff. ``path`` is relative to the
     project root (taken from the ``+++ b/<path>`` header so

@@ -61,7 +61,7 @@ from .git_changes import (
     current_branch_name, fetch_commit_show, fetch_git_branches,
     fetch_git_commits,
     fetch_git_status, main_line_branch, merge_base,
-    parse_unified_diff_files, split_show_output,
+    parse_unified_diff_files, split_show_output, summarize_file_diff,
 )
 from .new_names import NewName, new_names_in
 from .painter import Painter
@@ -84,57 +84,6 @@ comptime _TAB_BRANCHES: Int = 1
 
 # Number of recent commits offered in the picker.
 comptime _COMMIT_LIMIT: Int = 30
-
-
-def _extract_diff_part(show_text: String) -> String:
-    """The multi-file unified diff part of ``git show`` output. Used only
-    to recover the *file list* of a commit (the content comes from
-    blobs); empty when the commit has no diff."""
-    return split_show_output(show_text)[1]
-
-
-@fieldwise_init
-struct _DiffSummary(ImplicitlyCopyable, Movable):
-    """What the model needs from one file's slice of a unified diff."""
-    var binary: Bool    # git reported it binary — no text diff to show
-    var deleted: Bool   # the changeset deletes the file outright
-    var added: Bool     # the changeset creates it (incl. untracked files)
-    var changed: Int    # ``+`` / ``-`` rows across its hunks
-
-
-def _summarize_diff(diff_text: String) -> _DiffSummary:
-    """One byte-level pass over a file's diff chunk: the header flags
-    (everything before the first ``@@``) and the changed-row count. The
-    count is git's, which is what lets a changeset be listed without
-    fetching every file's text — ``ReviewMode._load_file`` swaps in the
-    exact ``build_diff_rows`` count once a file is actually shown."""
-    var b = diff_text.as_bytes()
-    var n = len(b)
-    var binary = False
-    var deleted = False
-    var added = False
-    var changed = 0
-    var in_hunks = False
-    var ls = 0
-    while ls < n:
-        var le = ls
-        while le < n and b[le] != 0x0A:
-            le += 1
-        var line = StringSpan(unsafe_from_utf8=b[ls:le])
-        if in_hunks:
-            if le > ls and (b[ls] == 0x2B or b[ls] == 0x2D):  # + / -
-                changed += 1
-        elif line.startswith("@@"):
-            in_hunks = True
-        elif line.startswith("Binary files ") \
-                or line.startswith("GIT binary patch"):
-            binary = True
-        elif line.startswith("deleted file mode") or line == "+++ /dev/null":
-            deleted = True
-        elif line.startswith("new file mode") or line == "--- /dev/null":
-            added = True
-        ls = le + 1
-    return _DiffSummary(binary, deleted, added, changed)
 
 
 def _untracked_paths(root: String) -> List[String]:
@@ -163,13 +112,10 @@ def _add_untracked(mut changed: List[ChangedFile], root: String):
         changed.insert(at, cf)
 
 
-def _count_changed_lines(before: String, after: String, is_binary: Bool) -> Int:
+def _count_changed_lines(before: String, after: String) -> Int:
     """Number of changed (added + removed) rows in the unified diff between
     ``before`` and ``after`` — the same rows the diff view renders as
-    changes. Drives each file's share of the line-weighted progress bar.
-    Binary files count 0 (no line-level diff)."""
-    if is_binary:
-        return 0
+    changes. Drives each file's share of the line-weighted progress bar."""
     var rows = build_diff_rows(
         split_lines_no_trailing(before), split_lines_no_trailing(after),
     )
@@ -566,17 +512,17 @@ struct ReviewMode(Movable):
                 String("") if self.branch_checked_out else self.sha,
             )
         else:
-            diff_text = _extract_diff_part(fetch_commit_show(self.root, self.sha))
+            diff_text = split_show_output(fetch_commit_show(self.root, self.sha))[1]
         var changed = parse_unified_diff_files(diff_text)
         if self.src == _SRC_UNSTAGED:
             _add_untracked(changed, self.root)
         for fi in range(len(changed)):
-            var summary = _summarize_diff(changed[fi].diff)
+            var summary = summarize_file_diff(changed[fi].diff)
             # A binary file has no text to load.
             self.files.append(ReviewFile(
                 changed[fi].path, String(""), String(""), summary.binary,
-                summary.binary, summary.deleted, summary.added,
-                0 if summary.binary else summary.changed,
+                summary.binary, summary.deleted, summary.new_file,
+                0 if summary.binary else summary.added + summary.removed,
             ))
 
     # --- changeset model for the names review -----------------------------
@@ -665,7 +611,7 @@ struct ReviewMode(Movable):
             # first appearance → shows as all-added).
             before = fetch_blob_text(self.root, self.sha + String("~1"), path)
             after = fetch_blob_text(self.root, self.sha, path)
-        self.files[idx].changed_lines = _count_changed_lines(before, after, False)
+        self.files[idx].changed_lines = _count_changed_lines(before, after)
         self.files[idx].before = before^
         self.files[idx].after = after^
         self.files[idx].loaded = True
@@ -687,7 +633,7 @@ struct ReviewMode(Movable):
             self.files.append(ReviewFile(
                 paths[i], befores[i], afters[i], True, False,
                 has_before and not has_after, has_after and not has_before,
-                _count_changed_lines(befores[i], afters[i], False),
+                _count_changed_lines(befores[i], afters[i]),
             ))
 
     # --- host-facing API --------------------------------------------------

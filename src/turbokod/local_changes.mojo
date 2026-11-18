@@ -115,7 +115,7 @@ from .highlight import (
     GrammarRegistry, Highlight, HighlightCache,
     extension_of, highlight_for_extension_cached,
 )
-from .output_links import OutputLink, extract_url_links
+from .output_links import OutputLink, extract_url_links, link_at
 from .painter import Painter
 from .file_io import basename, ci_less, join_path, read_file
 from .window import DockedPanelStack, paint_window_title, paint_window_title_at
@@ -130,7 +130,7 @@ from .git_changes import (
     git_state_mtimes, git_status_argv, GitBranch, GitCommit, GitFileStatus,
     github_compare_url, GitStateMtimes, has_merge_between, head_short_sha,
     main_line_branch, parse_git_status, parse_unified_diff_files,
-    split_show_output,
+    split_show_output, summarize_file_diff,
     stage_file, strip_remote_prefix, unstage_file,
 )
 from .line_stream import OutputStream
@@ -2476,30 +2476,11 @@ struct LocalChanges(Movable):
             if w > width:
                 width = w
         for k in range(len(changed)):
-            var status = String("M")
-            var added = 0
-            var removed = 0
-            var seen_hunk = False
-            var lines = split_lines_no_trailing(changed[k].diff)
-            diff_rows.append(len(lines))
-            for li in range(len(lines)):
-                var b = lines[li].as_bytes()
-                if len(b) == 0:
-                    continue
-                if not seen_hunk:
-                    if lines[li].startswith("new file mode"):
-                        status = String("A")
-                    elif lines[li].startswith("deleted file mode"):
-                        status = String("D")
-                    elif lines[li].startswith("rename to "):
-                        status = String("R")
-                    elif b[0] == 0x40:
-                        seen_hunk = True
-                    continue
-                if b[0] == 0x2B:
-                    added += 1
-                elif b[0] == 0x2D:
-                    removed += 1
+            var sm = summarize_file_diff(changed[k].diff)
+            diff_rows.append(sm.lines)
+            var added = sm.added
+            var removed = sm.removed
+            var status = sm.status()
             total_add += added
             total_del += removed
             var pad = String("")
@@ -3212,12 +3193,9 @@ struct LocalChanges(Movable):
         if event.button != MOUSE_BUTTON_LEFT or not event.pressed \
                 or event.motion or Int(event.click_count) >= 2:
             return
-        for i in range(len(self._output_links)):
-            var link = self._output_links[i]
-            if event.pos.y == link.y and event.pos.x >= link.x_start \
-                    and event.pos.x < link.x_end:
-                self.pending_open_url = link.path
-                return
+        var li = link_at(self._output_links, event.pos)
+        if li >= 0:
+            self.pending_open_url = self._output_links[li].path
 
     def _scroll_output_overlay(mut self, delta: Int):
         """Move the log viewport. The clamp lives in paint (which knows the
