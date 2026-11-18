@@ -327,9 +327,7 @@ def load_grammar_from_file(path: String) raises -> Grammar:
     list lets the tokenizer route into the embedded grammars'
     root patterns at runtime.
     """
-    var text = read_file(path)
-    var loaded = List[String]()
-    return _load_grammar_full(text, loaded)
+    return _load_grammar_full(read_file(path))
 
 
 def load_grammar_from_string(text: String) raises -> Grammar:
@@ -339,82 +337,92 @@ def load_grammar_from_string(text: String) raises -> Grammar:
     those need a path resolver, which we don't have for raw-string
     callers. Use ``load_grammar_from_file`` if your grammar embeds
     others."""
-    var loaded = List[String]()
-    return _load_grammar_full(text, loaded)
+    return _load_grammar_full(text)
 
 
-def _load_grammar_full(
-    text: String, mut loaded_scopes: List[String],
-) raises -> Grammar:
-    """Inner loader. ``loaded_scopes`` tracks the chain of scopes
-    currently being parsed so a circular external include doesn't
-    drive us into infinite recursion."""
+struct _GrammarBuild(Movable):
+    """The tables a grammar load fills in, threaded through every compile:
+    the flat pattern and regex lists, the repository, the embedded
+    grammars' roots, and the chain of scopes being loaded (so a circular
+    external include can't recurse forever)."""
+    var patterns: List[Pattern]
+    var regexes: List[OnigRegex]
+    var repo_keys: List[String]
+    var repo_idxs: List[Int]
+    var external_scopes: List[String]
+    var external_roots: List[List[Int]]
+    var loaded_scopes: List[String]
+
+    def __init__(out self):
+        self.patterns = List[Pattern]()
+        self.regexes = List[OnigRegex]()
+        self.repo_keys = List[String]()
+        self.repo_idxs = List[Int]()
+        self.external_scopes = List[String]()
+        self.external_roots = List[List[Int]]()
+        self.loaded_scopes = List[String]()
+
+    def grammar(
+        deinit self, var scope_name: String, var root_patterns: List[Int],
+    ) -> Grammar:
+        """The finished grammar, its tables moved out of the build."""
+        return Grammar(
+            scope_name^, root_patterns^, self.patterns^, self.regexes^,
+            self.repo_keys^, self.repo_idxs^, self.external_scopes^,
+            self.external_roots^,
+        )
+
+
+def _load_grammar_full(text: String) raises -> Grammar:
     var doc = parse_json(text)
     if not doc.is_object():
         raise Error("grammar root is not an object")
-
-    var scope_v = doc.object_get(String("scopeName"))
-    var scope_name = String("")
-    if scope_v:
-        var sv = scope_v.value().copy()
-        if sv.is_string():
-            scope_name = sv.as_str()
+    var scope_name = json_get_string(doc, String("scopeName"))
+    var b = _GrammarBuild()
     if len(scope_name.as_bytes()) > 0:
-        loaded_scopes.append(scope_name)
-
-    var patterns = List[Pattern]()
-    var regexes = List[OnigRegex]()
-    var external_scopes = List[String]()
-    var external_roots = List[List[Int]]()
-
-    # Parse the repository first so root patterns can reference it
-    # via ``$self`` / ``#name`` indices that already exist.
-    var repo_keys = List[String]()
-    var repo_idxs = List[Int]()
-    var repo_v = doc.object_get(String("repository"))
-    if repo_v:
-        var ro = repo_v.value().copy()
-        if ro.is_object():
-            for i in range(len(ro.obj_v)):
-                var member = ro.obj_v[i].copy()
-                var idx = _compile_pattern(
-                    member.value, patterns, regexes,
-                    external_scopes, external_roots, loaded_scopes,
-                    repo_keys, repo_idxs,
-                )
-                repo_keys.append(member.key)
-                repo_idxs.append(idx)
-
-    # Top-level ``patterns`` array.
-    var root_patterns = List[Int]()
-    var top_v = doc.object_get(String("patterns"))
-    if top_v:
-        var tv = top_v.value().copy()
-        if tv.is_array():
-            for i in range(tv.array_len()):
-                var idx = _compile_pattern(
-                    tv.array_at(i), patterns, regexes,
-                    external_scopes, external_roots, loaded_scopes,
-                    repo_keys, repo_idxs,
-                )
-                root_patterns.append(idx)
-
-    return Grammar(
-        scope_name^, root_patterns^, patterns^, regexes^,
-        repo_keys^, repo_idxs^,
-        external_scopes^, external_roots^,
-    )
+        b.loaded_scopes.append(scope_name)
+    var root_patterns = _compile_grammar(doc, b, String(""))
+    return b^.grammar(scope_name^, root_patterns^)
 
 
-def _maybe_load_external(
-    target: String,
-    mut patterns: List[Pattern], mut regexes: List[OnigRegex],
-    mut external_scopes: List[String],
-    mut external_roots: List[List[Int]],
-    mut loaded_scopes: List[String],
-    mut repo_keys: List[String],
-    mut repo_idxs: List[Int],
-) raises:
+def _compile_grammar(
+    doc: JsonValue, mut b: _GrammarBuild, scope_prefix: String,
+) raises -> List[Int]:
+    """Compile a grammar document's ``repository`` and then its top-level
+    ``patterns`` into ``b``, returning the root pattern indices. The
+    repository goes first so the roots can reference it by indices that
+    already exist. An embedded grammar's (``scope_prefix`` its scope
+    name) repo keys register as ``"<scope>#<name>"``, which is what
+    ``_compile_pattern``'s rewrite of its ``#name`` references looks up:
+    without the prefix they would lose to identically-named host keys (or
+    host lookups would resolve into them)."""
+    var ri = doc.object_index(String("repository"))
+    if ri >= 0 and doc.obj_v[ri].value.is_object():
+        for ref member in doc.obj_v[ri].value.obj_v:
+            var idx = _compile_pattern(member.value, b, scope_prefix)
+            if len(scope_prefix.as_bytes()) > 0:
+                b.repo_keys.append(scope_prefix + String("#") + member.key)
+            else:
+                b.repo_keys.append(member.key)
+            b.repo_idxs.append(idx)
+    return _compile_patterns(doc, b, scope_prefix)
+
+
+def _compile_patterns(
+    node: JsonValue, mut b: _GrammarBuild, scope_prefix: String,
+) raises -> List[Int]:
+    """Compile each entry of ``node``'s ``patterns`` array, returning
+    their indices (none when it has no such array)."""
+    var out = List[Int]()
+    var pi = node.object_index(String("patterns"))
+    if pi < 0 or not node.obj_v[pi].value.is_array():
+        return out^
+    for ref child in node.obj_v[pi].value.arr_v:
+        out.append(_compile_pattern(child, b, scope_prefix))
+    return out^
+
+
+def _maybe_load_external(target: String, mut b: _GrammarBuild) raises:
     """If ``target`` is an external grammar scope (contains a
     ``.`` and isn't ``$self`` or ``__none__``) and we know how to
     load it (``_path_for_scope`` returns a path), recursively load
@@ -431,30 +439,15 @@ def _maybe_load_external(
     # in the target). External-scope targets always contain a dot.
     if target == String("$self") or target == String("__none__"):
         return
-    var has_dot = False
-    var tb = target.as_bytes()
-    for i in range(len(tb)):
-        if tb[i] == 0x2E:
-            has_dot = True
-            break
-    if not has_dot:
+    if target.find(String(".")) < 0:
         return
-    # Already loading this scope (cycle) — leave include alone.
-    for i in range(len(loaded_scopes)):
-        if loaded_scopes[i] == target:
-            return
-    # Already loaded as an external — reuse, no extra work.
-    for i in range(len(external_scopes)):
-        if external_scopes[i] == target:
-            return
+    # Already loading this scope (cycle), or already loaded as an
+    # external — the existing entry resolves the include.
+    if target in b.loaded_scopes or target in b.external_scopes:
+        return
     var sub_path = _path_for_scope(target)
     if len(sub_path.as_bytes()) == 0:
         return
-    # Load the embedded grammar's JSON, then merge its patterns
-    # and regexes into ours. We append its compiled patterns into
-    # the same flat list so all pattern indices live in one
-    # namespace; its root indices get shifted by ``len(patterns)``
-    # at the time we begin appending.
     var sub_text: String
     try:
         sub_text = read_file(sub_path)
@@ -466,70 +459,28 @@ def _maybe_load_external(
     # Allocate a placeholder slot in external_scopes/roots before
     # recursing, so a cycle from the embedded grammar back to us
     # would find the placeholder rather than re-loading.
-    external_scopes.append(target)
-    external_roots.append(List[Int]())
-    var slot_idx = len(external_scopes) - 1
-    loaded_scopes.append(target)
-
-    # Compile the embedded grammar's repository entries into the
-    # shared flat ``patterns`` / ``regexes`` lists, *and* register
-    # their keys under ``"<scope>#<name>"`` in the host's repo so
-    # ``#name`` references rewritten by ``_compile_pattern``'s
-    # scope-prefix logic find them at lookup time. Without the
-    # prefix, embedded keys would silently lose to identically-named
-    # host keys (or worse, host lookups would resolve into embedded
-    # entries).
-    var sub_root = List[Int]()
-    var sub_repo_v = sub_doc.object_get(String("repository"))
-    if sub_repo_v:
-        var sro = sub_repo_v.value().copy()
-        if sro.is_object():
-            for i in range(len(sro.obj_v)):
-                var sm = sro.obj_v[i].copy()
-                var sub_idx = _compile_pattern(
-                    sm.value, patterns, regexes,
-                    external_scopes, external_roots, loaded_scopes,
-                    repo_keys, repo_idxs,
-                    target,
-                )
-                repo_keys.append(target + String("#") + sm.key)
-                repo_idxs.append(sub_idx)
-    var sub_top_v = sub_doc.object_get(String("patterns"))
-    if sub_top_v:
-        var stv = sub_top_v.value().copy()
-        if stv.is_array():
-            for i in range(stv.array_len()):
-                var ridx = _compile_pattern(
-                    stv.array_at(i), patterns, regexes,
-                    external_scopes, external_roots, loaded_scopes,
-                    repo_keys, repo_idxs,
-                    target,
-                )
-                sub_root.append(ridx)
-    external_roots[slot_idx] = sub_root^
+    b.external_scopes.append(target)
+    b.external_roots.append(List[Int]())
+    var slot_idx = len(b.external_scopes) - 1
+    b.loaded_scopes.append(target)
+    # Its patterns land in the same flat tables, so every pattern index
+    # lives in one namespace. Into a local first: compiling can grow
+    # ``external_roots`` (a nested embed), moving the slot.
+    var roots = _compile_grammar(sub_doc, b, target)
+    b.external_roots[slot_idx] = roots^
     # Pop the loaded-scope marker so siblings can re-encounter
     # this scope later in the parse without being treated as
     # cycles.
-    if len(loaded_scopes) > 0 \
-            and loaded_scopes[len(loaded_scopes) - 1] == target:
-        loaded_scopes.resize(
-            len(loaded_scopes) - 1, String(""),
-        )
+    if len(b.loaded_scopes) > 0 \
+            and b.loaded_scopes[len(b.loaded_scopes) - 1] == target:
+        _ = b.loaded_scopes.pop()
 
 
 def _compile_pattern(
-    node: JsonValue,
-    mut patterns: List[Pattern],
-    mut regexes: List[OnigRegex],
-    mut external_scopes: List[String],
-    mut external_roots: List[List[Int]],
-    mut loaded_scopes: List[String],
-    mut repo_keys: List[String],
-    mut repo_idxs: List[Int],
-    scope_prefix: String = String(""),
+    node: JsonValue, mut b: _GrammarBuild, scope_prefix: String = String(""),
 ) raises -> Int:
-    """Append a pattern (and any nested ones) to ``patterns``,
-    compiling regexes into ``regexes`` along the way. Returns the
+    """Append a pattern (and any nested ones) to ``b.patterns``,
+    compiling regexes into ``b.regexes`` along the way. Returns the
     index of the newly added pattern.
 
     Nested ``patterns`` arrays are flattened: each child pattern
@@ -554,56 +505,42 @@ def _compile_pattern(
     """
     if not node.is_object():
         # Defensive: a malformed grammar shouldn't crash the editor.
-        # Append a no-op INCLUDE that points at a non-existent key
-        # so the tokenizer skips it.
-        return _append_dead_pattern(patterns)
+        return _append_dead_pattern(b.patterns)
 
     # ``include``: store and return; no regexes to compile.
     # Also: if the include's target is an external grammar scope
     # name (contains a ``.``), trigger a recursive load so the
     # tokenizer can route into the embedded grammar's roots.
-    var inc_v = node.object_get(String("include"))
-    if inc_v:
-        var sv = inc_v.value().copy()
-        if sv.is_string():
-            var raw = sv.as_str()
-            var target = raw
-            var rb = raw.as_bytes()
-            var is_repo_ref = (len(rb) > 0 and rb[0] == 0x23)
-            if is_repo_ref:
-                target = String(StringSpan(unsafe_from_utf8=rb[1:len(rb)]))
-            # Apply the embedded-grammar scope-prefix rewrite so
-            # references inside an embedded grammar resolve to that
-            # grammar's namespaced repo / roots in the merged tables.
-            if len(scope_prefix.as_bytes()) > 0:
-                if target == String("$self"):
-                    target = scope_prefix
-                elif is_repo_ref:
-                    target = scope_prefix + String("#") + target
-            # Copy the target before calling ``_maybe_load_external``
-            # so we don't hold an aliasing read of ``patterns``
-            # alongside the ``mut`` borrow it takes.
-            var resolved_target = target
-            patterns.append(Pattern(
-                PATTERN_INCLUDE, String(""), String(""), -1, -1,
-                List[Int](), target^,
-            ))
-            var idx = len(patterns) - 1
-            _maybe_load_external(
-                resolved_target,
-                patterns, regexes,
-                external_scopes, external_roots, loaded_scopes,
-                repo_keys, repo_idxs,
-            )
-            return idx
+    var ii = node.object_index(String("include"))
+    if ii >= 0 and node.obj_v[ii].value.is_string():
+        var raw = node.obj_v[ii].value.as_str()
+        var target = raw
+        var rb = raw.as_bytes()
+        var is_repo_ref = (len(rb) > 0 and rb[0] == 0x23)
+        if is_repo_ref:
+            target = String(StringSpan(unsafe_from_utf8=rb[1:len(rb)]))
+        # Apply the embedded-grammar scope-prefix rewrite so
+        # references inside an embedded grammar resolve to that
+        # grammar's namespaced repo / roots in the merged tables.
+        if len(scope_prefix.as_bytes()) > 0:
+            if target == String("$self"):
+                target = scope_prefix
+            elif is_repo_ref:
+                target = scope_prefix + String("#") + target
+        b.patterns.append(Pattern(
+            PATTERN_INCLUDE, String(""), String(""), -1, -1,
+            List[Int](), target,
+        ))
+        var idx = len(b.patterns) - 1
+        _maybe_load_external(target, b)
+        return idx
 
     var name_str = json_get_string(node, String("name"))
     var content_name = json_get_string(node, String("contentName"))
 
-    var match_v = node.object_get(String("match"))
-    var begin_v = node.object_get(String("begin"))
-    if match_v:
-        var pat_str = match_v.value().as_str()
+    var mi = node.object_index(String("match"))
+    if mi >= 0:
+        var pat_str = node.obj_v[mi].value.as_str()
         # libonig occasionally rejects a regex from a real grammar
         # (look-behind quantifier weirdness, named-group syntax it
         # doesn't recognize, ...). Treat compile failure as "this
@@ -611,40 +548,38 @@ def _compile_pattern(
         # surrounding patterns still light up.
         try:
             var rx = OnigRegex(pat_str)
-            regexes.append(rx^)
-            var match_idx = len(regexes) - 1
+            b.regexes.append(rx^)
+            var match_idx = len(b.regexes) - 1
             var caps = _parse_captures(
-                node, String("captures"), patterns, regexes,
-                external_scopes, external_roots, loaded_scopes,
-                repo_keys, repo_idxs,
-                scope_prefix,
+                node, String("captures"), b, scope_prefix,
             )
-            patterns.append(Pattern(
+            b.patterns.append(Pattern(
                 PATTERN_MATCH, name_str^, content_name^, match_idx, -1,
                 List[Int](), String(""),
                 caps^, List[Capture](),
             ))
-            return len(patterns) - 1
+            return len(b.patterns) - 1
         except:
-            return _append_dead_pattern(patterns)
+            return _append_dead_pattern(b.patterns)
 
-    if begin_v:
-        var begin_str = begin_v.value().as_str()
+    var bi = node.object_index(String("begin"))
+    if bi >= 0:
+        var begin_str = node.obj_v[bi].value.as_str()
         # A ``begin`` pattern is paired with either ``end`` or
         # ``while``; ``while``-rules anchor a scope that stays open
         # only as long as each new line starts with the regex.
-        var end_v = node.object_get(String("end"))
-        var while_v = node.object_get(String("while"))
-        if not end_v and not while_v:
+        var ei = node.object_index(String("end"))
+        var wi = node.object_index(String("while"))
+        if ei < 0 and wi < 0:
             # ``begin`` without either is malformed — skip.
-            return _append_dead_pattern(patterns)
+            return _append_dead_pattern(b.patterns)
         var second_str: String
         var pattern_kind: UInt8
-        if end_v:
-            second_str = end_v.value().as_str()
+        if ei >= 0:
+            second_str = node.obj_v[ei].value.as_str()
             pattern_kind = PATTERN_BEGIN_END
         else:
-            second_str = while_v.value().as_str()
+            second_str = node.obj_v[wi].value.as_str()
             pattern_kind = PATTERN_BEGIN_WHILE
         # Same defensive compile as the ``match`` branch — if either
         # the begin or the second-side regex won't compile, drop the
@@ -653,31 +588,17 @@ def _compile_pattern(
         var end_idx: Int
         try:
             var begin_rx = OnigRegex(begin_str)
-            regexes.append(begin_rx^)
-            begin_idx = len(regexes) - 1
+            b.regexes.append(begin_rx^)
+            begin_idx = len(b.regexes) - 1
             var second_rx = OnigRegex(second_str)
-            regexes.append(second_rx^)
-            end_idx = len(regexes) - 1
+            b.regexes.append(second_rx^)
+            end_idx = len(b.regexes) - 1
         except:
-            return _append_dead_pattern(patterns)
+            return _append_dead_pattern(b.patterns)
 
         # Nested patterns must be compiled before the parent is
-        # appended so we know each child's index. Otherwise the
-        # parent's slot ID would be ambiguous if children referenced
-        # each other.
-        var nested = List[Int]()
-        var nested_v = node.object_get(String("patterns"))
-        if nested_v:
-            var nv = nested_v.value().copy()
-            if nv.is_array():
-                for k in range(nv.array_len()):
-                    var ci = _compile_pattern(
-                        nv.array_at(k), patterns, regexes,
-                        external_scopes, external_roots, loaded_scopes,
-                        repo_keys, repo_idxs,
-                        scope_prefix,
-                    )
-                    nested.append(ci)
+        # appended so we know each child's index.
+        var nested = _compile_patterns(node, b, scope_prefix)
 
         # ``captures`` (singular) on a begin/end pattern is shorthand
         # for "applies to both begin and end" in TextMate's spec.
@@ -686,28 +607,16 @@ def _compile_pattern(
         # (we map it onto the same ``end_captures`` slot since each
         # pattern only has one tail-side anyway).
         var both_caps = _parse_captures(
-            node, String("captures"), patterns, regexes,
-            external_scopes, external_roots, loaded_scopes,
-            repo_keys, repo_idxs,
-            scope_prefix,
+            node, String("captures"), b, scope_prefix,
         )
         var begin_caps = _parse_captures(
-            node, String("beginCaptures"), patterns, regexes,
-            external_scopes, external_roots, loaded_scopes,
-            repo_keys, repo_idxs,
-            scope_prefix,
+            node, String("beginCaptures"), b, scope_prefix,
         )
         var end_caps = _parse_captures(
-            node, String("endCaptures"), patterns, regexes,
-            external_scopes, external_roots, loaded_scopes,
-            repo_keys, repo_idxs,
-            scope_prefix,
+            node, String("endCaptures"), b, scope_prefix,
         )
         var while_caps = _parse_captures(
-            node, String("whileCaptures"), patterns, regexes,
-            external_scopes, external_roots, loaded_scopes,
-            repo_keys, repo_idxs,
-            scope_prefix,
+            node, String("whileCaptures"), b, scope_prefix,
         )
         if len(begin_caps) == 0 and len(both_caps) > 0:
             begin_caps = both_caps.copy()
@@ -720,13 +629,13 @@ def _compile_pattern(
             elif len(both_caps) > 0:
                 end_caps = both_caps.copy()
 
-        patterns.append(Pattern(
+        b.patterns.append(Pattern(
             pattern_kind, name_str^, content_name^,
             begin_idx, end_idx, nested^, String(""),
             begin_caps^, end_caps^,
             second_str, _has_cross_backref(second_str),
         ))
-        return len(patterns) - 1
+        return len(b.patterns) - 1
 
     # No ``match`` / ``begin`` / ``include`` — but the entry may
     # carry a nested ``patterns`` array as a pure container ("group").
@@ -734,27 +643,15 @@ def _compile_pattern(
     # ``"keywords": { "patterns": [...] }``. We compile the children
     # eagerly and store their indices in ``nested``; the tokenizer's
     # ``_expand_into`` walks GROUPs the same way it walks INCLUDEs.
-    var grp_v = node.object_get(String("patterns"))
-    var grp_children = List[Int]()
-    if grp_v:
-        var gv = grp_v.value().copy()
-        if gv.is_array():
-            for k in range(gv.array_len()):
-                var ci = _compile_pattern(
-                    gv.array_at(k), patterns, regexes,
-                    external_scopes, external_roots, loaded_scopes,
-                    repo_keys, repo_idxs,
-                    scope_prefix,
-                )
-                grp_children.append(ci)
+    var grp_children = _compile_patterns(node, b, scope_prefix)
     if len(grp_children) > 0:
-        patterns.append(Pattern(
+        b.patterns.append(Pattern(
             PATTERN_GROUP, String(""), String(""), -1, -1,
             grp_children^, String(""),
         ))
-        return len(patterns) - 1
+        return len(b.patterns) - 1
     # Truly empty entry — fall back to a no-op include.
-    return _append_dead_pattern(patterns)
+    return _append_dead_pattern(b.patterns)
 
 
 def _append_dead_pattern(mut patterns: List[Pattern]) -> Int:
@@ -769,14 +666,7 @@ def _append_dead_pattern(mut patterns: List[Pattern]) -> Int:
 
 
 def _parse_captures(
-    node: JsonValue, key: String,
-    mut patterns: List[Pattern], mut regexes: List[OnigRegex],
-    mut external_scopes: List[String],
-    mut external_roots: List[List[Int]],
-    mut loaded_scopes: List[String],
-    mut repo_keys: List[String],
-    mut repo_idxs: List[Int],
-    scope_prefix: String = String(""),
+    node: JsonValue, key: String, mut b: _GrammarBuild, scope_prefix: String,
 ) raises -> List[Capture]:
     """Parse a ``captures``-style block:
 
@@ -791,52 +681,20 @@ def _parse_captures(
     Each key is a stringified group index (``"0"`` covers the whole
     match). The optional ``patterns`` array under a capture re-runs
     the listed patterns on the captured substring — a "mini-tokenize"
-    inside the group. Anything that isn't an object with at least
-    a ``name`` or ``patterns`` field is skipped silently.
-
-    Why ``raises``: nested ``patterns`` may contain regex patterns,
-    so we have to push compilation through the same path used by
-    top-level patterns, which can ``raise`` on bad regex. The
-    parent loader threads ``raises`` through.
+    inside the group, compiled flat into the grammar's tables with
+    their indices on the ``Capture`` for the tokenizer's
+    ``_emit_captures``. Anything that isn't an object with at least a
+    ``name`` or ``patterns`` field is skipped silently.
     """
     var out = List[Capture]()
-    var v = node.object_get(key)
-    if not v:
+    var ci = node.object_index(key)
+    if ci < 0 or not node.obj_v[ci].value.is_object():
         return out^
-    var ov = v.value().copy()
-    if not ov.is_object():
-        return out^
-    for i in range(len(ov.obj_v)):
-        var member = ov.obj_v[i].copy()
+    for ref member in node.obj_v[ci].value.obj_v:
         if not member.value.is_object():
             continue
-        var name_str = String("")
-        var name_v = member.value.object_get(String("name"))
-        if name_v:
-            var sv = name_v.value().copy()
-            if sv.is_string():
-                name_str = sv.as_str()
-        # Parse a nested ``patterns`` array if present. The patterns
-        # get compiled flat into the parent grammar's ``patterns`` /
-        # ``regexes`` lists; we record their indices on the Capture
-        # so the tokenizer's ``_emit_captures`` can apply them to
-        # the captured byte range.
-        var nested = List[Int]()
-        var pats_v = member.value.object_get(String("patterns"))
-        if pats_v:
-            var pv = pats_v.value().copy()
-            if pv.is_array():
-                for k in range(pv.array_len()):
-                    var ci = _compile_pattern(
-                        pv.array_at(k), patterns, regexes,
-                        external_scopes, external_roots, loaded_scopes,
-                        repo_keys, repo_idxs,
-                        scope_prefix,
-                    )
-                    nested.append(ci)
-        # Suppress "unused parameter" when these thread through but
-        # the captured patterns array is empty.
-        _ = scope_prefix
+        var name_str = json_get_string(member.value, String("name"))
+        var nested = _compile_patterns(member.value, b, scope_prefix)
         if len(name_str.as_bytes()) == 0 and len(nested) == 0:
             continue
         var idx = parse_int_all(member.key)
