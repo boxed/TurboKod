@@ -911,12 +911,9 @@ final class CellView: NSView {
         if surface == .main { tk_desktop_tick(handle, Int64(c), Int64(r)) }
     }
     private func keySurface(_ key: UInt32, _ m: UInt8, _ c: Int, _ r: Int) -> Int32 {
-        switch surface {
-        case .main:     return tk_desktop_key(handle, key, m, Int64(c), Int64(r))
-        case .panels, .settings, .dialog, .git:
-            return tk_desktop_surface_key(handle, surface.code, key, m, Int64(c), Int64(r))
-        case .frame:    return 0
-        }
+        // The frame ring only draws (its code is the main surface's).
+        if surface == .frame { return 0 }
+        return tk_desktop_surface_key(handle, surface.code, key, m, Int64(c), Int64(r))
     }
     private func modKeySurface(_ modId: UInt32, _ pressed: UInt8) -> Int32 {
         // Editors only live on the main Desktop surface; the floating
@@ -930,12 +927,9 @@ final class CellView: NSView {
     private func mouseSurface(_ col: Int64, _ row: Int64, _ button: UInt8,
                               _ pressed: UInt8, _ motion: UInt8, _ m: UInt8,
                               _ c: Int, _ r: Int, _ cc: UInt8) -> Int32 {
-        switch surface {
-        case .main:     return tk_desktop_mouse(handle, col, row, button, pressed, motion, m, Int64(c), Int64(r), cc)
-        case .panels, .settings, .dialog, .git:
-            return tk_desktop_surface_mouse(handle, surface.code, col, row, button, pressed, motion, m, Int64(c), Int64(r), cc)
-        case .frame:    return 0
-        }
+        if surface == .frame { return 0 }
+        return tk_desktop_surface_mouse(handle, surface.code, col, row, button, pressed, motion, m,
+                                        Int64(c), Int64(r), cc)
     }
     /// Show the cursor for a ``host_abi.SHAPE_*`` code.
     private func applyCursorShape(_ code: Int32) {
@@ -949,11 +943,8 @@ final class CellView: NSView {
     }
 
     private func pointerShapeSurface(_ col: Int64, _ row: Int64, _ c: Int, _ r: Int) -> Int32 {
-        switch surface {
-        case .main:     return tk_desktop_pointer_shape(handle, col, row, Int64(c), Int64(r))
-        case .panels:   return tk_desktop_panels_pointer_shape(handle, col, row, Int64(c), Int64(r))
-        case .settings, .frame, .dialog, .git: return 0   // default arrow everywhere
-        }
+        if surface == .frame { return 0 }
+        return tk_desktop_surface_pointer_shape(handle, surface.code, col, row, Int64(c), Int64(r))
     }
 
     // `buf`, `regionBuf` and the sub-grid buffers are manual allocations, so ARC
@@ -2361,7 +2352,7 @@ final class CellView: NSView {
     // terminal emulator supports, so a shell / Claude session receives them as
     // if typed. Over an *editor body* a small menu offers full path / filename
     // / project-relative path, and the chosen form is inserted verbatim at the
-    // drop point. The Mojo core owns the hit-test (tk_desktop_drop_target); the
+    // drop point. The Mojo core owns the hit-test (tk_desktop_surface_drop_target); the
     // host just routes by its answer. Settings windows don't accept drops.
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -2384,11 +2375,9 @@ final class CellView: NSView {
 
     /// 0 = nothing droppable, 1 = terminal pane, 2 = editor body.
     private func dropTargetSurface(_ col: Int64, _ row: Int64) -> Int32 {
-        switch surface {
-        case .main:   return tk_desktop_drop_target(handle, col, row, Int64(cols()), Int64(rows()))
-        case .panels: return tk_desktop_panels_drop_target(handle, col, row, Int64(cols()), Int64(rows()))
-        default:      return 0
-        }
+        if surface == .frame { return 0 }
+        return tk_desktop_surface_drop_target(handle, surface.code, col, row,
+                                              Int64(cols()), Int64(rows()))
     }
 
     // Show the copy cursor only over a real target (terminal pane or editor) so
@@ -2425,12 +2414,10 @@ final class CellView: NSView {
     /// pastes them (full path, the terminal drag convention — no menu).
     private func dropOnTerminal(_ urls: [URL], _ col: Int64, _ row: Int64) -> Bool {
         let paths = urls.map { $0.path }.joined(separator: "\n")
+        if surface == .frame { return false }
         let r = withUTF8Arg(paths) { ptr, len -> Int32 in
-            switch surface {
-            case .main:   return tk_desktop_drop_paths(handle, col, row, ptr, len, Int64(cols()), Int64(rows()))
-            case .panels: return tk_desktop_panels_drop_paths(handle, col, row, ptr, len, Int64(cols()), Int64(rows()))
-            default:      return 0
-            }
+            tk_desktop_surface_drop_paths(handle, surface.code, col, row, ptr, len,
+                                          Int64(cols()), Int64(rows()))
         }
         return r != 0
     }
@@ -2882,7 +2869,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let data = readCoreData(&nativeDialogBuf, {
             tk_desktop_attention_flashes(v.handle, panels ? 1 : 0, cols, rows, $0, $1)
         })
-        let list = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [[String: Any]] } ?? []
+        let list = jsonList(data)
         var current = chromes[id]?.attentionFlashes ?? [:]
         if list.isEmpty && current.isEmpty { return false }
         let platinum = tk_desktop_platinum_ui(v.handle) != 0
@@ -4244,21 +4231,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // recent project from the right-aligned Project menu. Returns nil
     // when no path is queued (the usual case for File ▸ New window).
     private func takePendingNewWindowProject(_ h: Int64) -> String? {
-        // 4 KiB covers every realistic project path; PATH_MAX on macOS
-        // is 1024 and even deep monorepos rarely exceed a few hundred
-        // bytes. If the Mojo side ever queues something larger,
-        // tk_desktop_take_pending_new_window_project returns 0 *and
-        // leaves the path queued*, so we'd need to retry with a bigger
-        // buffer — not worth the complication today.
-        let cap = 4096
-        var buf = [UInt8](repeating: 0, count: cap)
-        let n = buf.withUnsafeMutableBufferPointer { b -> Int in
-            return Int(tk_desktop_take_pending_new_window_project(
-                h, Int64(Int(bitPattern: b.baseAddress)), Int64(cap),
-            ))
-        }
-        if n <= 0 { return nil }
-        return String(bytes: buf[0..<n], encoding: .utf8)
+        var buf = [UInt8](repeating: 0, count: 1024)
+        return readCoreData(&buf, { tk_desktop_take_pending_new_window_project(h, $0, $1) })
+            .flatMap { String(data: $0, encoding: .utf8) }
     }
 
     // MARK: windows + desktops
@@ -5213,7 +5188,7 @@ extension AppController {
         let data = readCoreData(&nativeDialogBuf, {
             tk_desktop_host_items(v.handle, surface, $0, $1)
         })
-        let list = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [[String: Any]] } ?? []
+        let list = jsonList(data)
         var current = chromes[id]?.hostItems ?? [:]
         var changed = false
         let platinum = tk_desktop_platinum_ui(v.handle) != 0
@@ -5272,7 +5247,7 @@ extension AppController {
             panels ? tk_desktop_panels_panes(v.handle, cols, rows, $0, $1)
                    : tk_desktop_panes(v.handle, cols, rows, $0, $1)
         })
-        let list = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [[String: Any]] } ?? []
+        let list = jsonList(data)
         var current = chromes[id]?.paneHeaders ?? [:]
         // Keyed by look too, so switching looks swaps every header.
         let platinum = tk_desktop_platinum_ui(v.handle) != 0
@@ -5321,7 +5296,7 @@ extension AppController {
         if let c = c, data != nil, data == c.reviewData {
             o = c.reviewState
         } else {
-            o = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
+            o = jsonObject(data)
             chrome(id).reviewData = data
             chrome(id).reviewState = o
         }
@@ -5796,7 +5771,7 @@ extension AppController {
         let data = readCoreData(&tvDialogBuf, {
             tk_desktop_dialog_window(v.handle, Int64(v.cols()), Int64(v.rows()), $0, $1)
         })
-        let spec = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
+        let spec = jsonObject(data)
         guard let spec = spec else {
             guard let dw = chromes[id]?.take(\.tvDialog) else { return false }
             dw.dismiss()
@@ -5881,7 +5856,7 @@ extension AppController {
             return false
         }
         if data == nil, chromes[id] == nil { return false }
-        let o = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
+        let o = jsonObject(data)
         var live = chromes[id]?.declarative ?? []
         var windowed = chromes[id]?.declarativeWindows ?? []
         let look = o?["look"] as? String ?? "macos"
@@ -7304,6 +7279,60 @@ class GitViewBase: NSObject {
 
     fileprivate func ch(_ c: Character) -> UInt32 { c.unicodeScalars.first!.value }
 
+    /// The core's index for row `row` of a sidebar list: a file row's file
+    /// (nil for a directory row), else the row itself.
+    fileprivate func coreIndex(_ pane: Int, _ row: Int) -> Int? {
+        guard row >= 0 else { return nil }
+        if pane == GitPane.files { return row < fileRows.count ? fileRows[row].file : nil }
+        return row
+    }
+
+    /// The selected row of a sidebar list (-1: none).
+    fileprivate func selection(_ pane: Int) -> Int {
+        switch pane {
+        case GitPane.files:
+            let sel = state["sel_file"] as? Int ?? -1
+            return fileRows.firstIndex { $0.file == sel } ?? -1
+        case GitPane.branches: return state["sel_branch"] as? Int ?? -1
+        default: return state["sel_commit"] as? Int ?? -1
+        }
+    }
+
+    /// Double-click / Return on a sidebar row: open the file, check out the
+    /// branch, open the commit.
+    fileprivate func activate(_ pane: Int, _ row: Int) {
+        guard let idx = coreIndex(pane, row) else { return }
+        switch pane {
+        case GitPane.files: openFile(idx)
+        case GitPane.branches: key(GitPane.branches, 0x20)
+        default: key(GitPane.commits, 0x0D)
+        }
+    }
+
+    /// Open what diff / info row `row` of `pane` points at.
+    fileprivate func openRow(_ pane: Int, _ row: Int) {
+        guard let v = view, v.handle != 0 else { return }
+        tk_desktop_git_open(v.handle, Int64(pane), Int64(row), Int64(v.cols()), Int64(v.rows()))
+        onAfterAction?()
+    }
+
+    /// Put `pane`'s diff cursor on its row `row` (the user's click).
+    fileprivate func moveCursor(_ pane: Int, _ row: Int) {
+        guard let v = view, v.handle != 0 else { return }
+        tk_desktop_git_cursor(v.handle, Int64(pane), Int64(row))
+        lastData = Data()
+        onAfterAction?()
+    }
+
+    /// The close box / ⌘W / Esc: close the view, unless a git op still runs.
+    @objc func closeClicked() {
+        if !closeCore() { showNote("Wait for the running git operation to finish.") }
+        afterClose()
+    }
+
+    /// A one-line note under the header, in the look.
+    fileprivate func showNote(_ text: String) {}
+
     // MARK: overlays (each view shows them as an alert in its look)
 
     /// The core's open overlay (a confirm, the commit message, the
@@ -7772,7 +7801,7 @@ final class GitController: GitViewBase, NSTableViewDataSource, NSTableViewDelega
         syncing = true
         for t in [filesTable, branchesTable, commitsTable] {
             t.reloadData()
-            let sel = selectedRow(t)
+            let sel = selection(t.tag)
             if sel >= 0 && sel < t.numberOfRows {
                 t.selectRowIndexes(IndexSet(integer: sel), byExtendingSelection: false)
                 t.scrollRowToVisible(sel)
@@ -7787,22 +7816,6 @@ final class GitController: GitViewBase, NSTableViewDataSource, NSTableViewDelega
         return true
     }
 
-    private func selectedRow(_ t: NSTableView) -> Int {
-        switch t.tag {
-        case GitPane.files:
-            let sel = state["sel_file"] as? Int ?? -1
-            return fileRows.firstIndex { $0.file == sel } ?? -1
-        case GitPane.branches: return state["sel_branch"] as? Int ?? -1
-        default: return state["sel_commit"] as? Int ?? -1
-        }
-    }
-
-    /// The core's index for table row `row`.
-    private func index(_ t: NSTableView, _ row: Int) -> Int? {
-        guard row >= 0 else { return nil }
-        if t.tag == GitPane.files { return row < fileRows.count ? fileRows[row].file : nil }
-        return row
-    }
 
     // MARK: action bar
 
@@ -7918,7 +7931,7 @@ final class GitController: GitViewBase, NSTableViewDataSource, NSTableViewDelega
 
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard !syncing, let t = notification.object as? NSTableView,
-              let idx = index(t, t.selectedRow) else { return }
+              let idx = coreIndex(t.tag, t.selectedRow) else { return }
         select(t.tag, idx)
     }
 
@@ -7943,16 +7956,7 @@ final class GitController: GitViewBase, NSTableViewDataSource, NSTableViewDelega
 
     @objc private func tableDoubleClicked(_ sender: Any?) {
         guard let t = sender as? NSTableView, let v = view, v.handle != 0 else { return }
-        let row = t.clickedRow >= 0 ? t.clickedRow : t.selectedRow
-        guard let idx = index(t, row) else { return }
-        switch t.tag {
-        case GitPane.files:
-            openFile(idx)
-        case GitPane.branches:
-            key(GitPane.branches, 0x20)   // check it out
-        default:
-            key(GitPane.commits, 0x0D)    // open
-        }
+        activate(t.tag, t.clickedRow >= 0 ? t.clickedRow : t.selectedRow)
     }
 
     /// The close box closes the view; `pollGit` hides the window.
@@ -7961,12 +7965,7 @@ final class GitController: GitViewBase, NSTableViewDataSource, NSTableViewDelega
         return false
     }
 
-    @objc func closeClicked() {
-        if !closeCore() {
-            flashLabel.stringValue = "Wait for the running git operation to finish."
-        }
-        afterClose()
-    }
+    override fileprivate func showNote(_ text: String) { flashLabel.stringValue = text }
 
     // MARK: diff
 
@@ -8066,10 +8065,8 @@ final class GitController: GitViewBase, NSTableViewDataSource, NSTableViewDelega
         let li = dp.lineIndex(at: tv.selectedRange().location)
         guard li >= 0, li < dp.lineMap.count, let row = dp.lineMap[li] else { return }
         dp.cursorLine = li
-        tk_desktop_git_cursor(v.handle, Int64(corePane(dp)), Int64(row))
         dp.markCursor()
-        lastData = Data()
-        onAfterAction?()
+        moveCursor(corePane(dp), row)
     }
 
     private func diffKey(_ k: String, _ dp: GitDiffPane) -> Bool {
@@ -8085,9 +8082,7 @@ final class GitController: GitViewBase, NSTableViewDataSource, NSTableViewDelega
     }
 
     private func openCursor(_ dp: GitDiffPane) {
-        guard let v = view, v.handle != 0, let row = dp.cursorRow else { return }
-        tk_desktop_git_open(v.handle, Int64(corePane(dp)), Int64(row), Int64(v.cols()), Int64(v.rows()))
-        onAfterAction?()
+        if let row = dp.cursorRow { openRow(corePane(dp), row) }
     }
 
 
@@ -8161,7 +8156,7 @@ extension GitController: NSMenuDelegate {
         menu.removeAllItems()
         var items: [MenuItem] = []
         if let t = [filesTable, branchesTable, commitsTable].first(where: { $0.menu === menu }) {
-            guard let idx = index(t, t.clickedRow) else { return }
+            guard let idx = coreIndex(t.tag, t.clickedRow) else { return }
             select(t.tag, idx)
             items = listMenuItems(t.tag, idx) { [weak self, weak t] in self?.tableDoubleClicked(t) }
         } else if let dp = [unstaged, staged].first(where: { $0.view.menu === menu }) {
@@ -8220,8 +8215,7 @@ final class AttentionFlashView: NSView {
     }
 
     func update(_ p: [String: Any]) {
-        let f = NSRect(x: CGFloat(p["x"] as? Int ?? 0) * CELL_W, y: CGFloat(p["y"] as? Int ?? 0) * CELL_H,
-                       width: CGFloat(p["w"] as? Int ?? 0) * CELL_W, height: CGFloat(p["h"] as? Int ?? 0) * CELL_H)
+        let f = cellRect(p)
         if frame != f { frame = f; needsDisplay = true }
         let age = p["age"] as? Int ?? 0
         // A younger age than last time is a fresh flash: (re)start the fade.
@@ -9360,6 +9354,24 @@ final class ReviewBar: NSVisualEffectView {
 
 /// Read a core JSON export into `buf` (growing it when the core reports
 /// a longer payload than fits). Nil when the core had nothing to say.
+/// A core-fed JSON array of objects (empty when there was none).
+func jsonList(_ data: Data?) -> [[String: Any]] {
+    data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [[String: Any]] } ?? []
+}
+
+/// A core-fed JSON object, if there was one.
+func jsonObject(_ data: Data?) -> [String: Any]? {
+    data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
+}
+
+/// The view rect of a core item's ``x`` / ``y`` / ``w`` / ``h`` in cells
+/// (``h`` when it has none).
+func cellRect(_ o: [String: Any], h: Int = 0) -> NSRect {
+    NSRect(x: CGFloat(o["x"] as? Int ?? 0) * CELL_W, y: CGFloat(o["y"] as? Int ?? 0) * CELL_H,
+           width: CGFloat(o["w"] as? Int ?? 0) * CELL_W,
+           height: CGFloat(o["h"] as? Int ?? h) * CELL_H)
+}
+
 /// Keep one view per keyed entry: make the missing ones, update every one
 /// (true when it changed), and remove those no entry names any more. True
 /// when anything changed.
@@ -10293,8 +10305,7 @@ class PaneHeaderBase: NSView, PaneHeaderView {
         last = d
         kind = p["kind"] as? Int ?? 0
         idx = p["idx"] as? Int ?? 0
-        let f = NSRect(x: CGFloat(p["x"] as? Int ?? 0) * CELL_W, y: CGFloat(p["y"] as? Int ?? 0) * CELL_H,
-                       width: CGFloat(p["w"] as? Int ?? 0) * CELL_W, height: CGFloat(p["h"] as? Int ?? 1) * CELL_H)
+        let f = cellRect(p, h: 1)
         if frame != f { frame = f }
         focused = p["focused"] as? Bool ?? false
         apply(p)
@@ -10666,8 +10677,7 @@ final class DebugInspectOverlay: NSView, NSTableViewDataSource, NSTableViewDeleg
               let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         else { return false }
         lastData = data
-        let f = NSRect(x: CGFloat(o["x"] as? Int ?? 0) * CELL_W, y: CGFloat(o["y"] as? Int ?? 0) * CELL_H,
-                       width: CGFloat(o["w"] as? Int ?? 0) * CELL_W, height: CGFloat(o["h"] as? Int ?? 0) * CELL_H)
+        let f = cellRect(o)
         if frame != f { frame = f }
         let out = o["output"] as? Bool ?? false
         if out != showOutput { showOutput = out; needsLayout = true; needsDisplay = true }
@@ -15241,14 +15251,14 @@ final class PlatinumGitView: GitViewBase, GitSurface {
         for (l, pane) in lists {
             body.addSubview(l)
             l.onChoose = { [weak self] r in
-                guard let self = self, let idx = self.index(pane, r) else { return }
+                guard let self = self, let idx = self.coreIndex(pane, r) else { return }
                 self.select(pane, idx)
             }
             l.onActivate = { [weak self] r in self?.activate(pane, r) }
             l.onKey = { [weak self] e in self?.listKey(pane, e) ?? false }
             l.onMenu = { [weak self] r, e in self?.listMenu(pane, r, e) }
             l.onFocus = { [weak self, weak l] in
-                guard let self = self, let l = l, self.focus != pane, let idx = self.index(pane, l.selected)
+                guard let self = self, let l = l, self.focus != pane, let idx = self.coreIndex(pane, l.selected)
                 else { return }
                 self.select(pane, idx)
             }
@@ -15265,11 +15275,11 @@ final class PlatinumGitView: GitViewBase, GitSurface {
             d.outlineCursor = true
             d.onChoose = { [weak self, weak d] line in
                 guard let self = self, let d = d, let row = self.coreRow(d, line) else { return }
-                self.cursor(d, row)
+                self.moveCursor(self.corePane(d), row)
             }
             d.onActivate = { [weak self, weak d] line in
                 guard let self = self, let d = d, let row = self.coreRow(d, line) else { return }
-                self.open(self.corePane(d), row)
+                self.openRow(self.corePane(d), row)
             }
             d.onKey = { [weak self, weak d] e in
                 guard let self = self, let d = d else { return false }
@@ -15282,7 +15292,7 @@ final class PlatinumGitView: GitViewBase, GitSurface {
             d.onFocus = { [weak self, weak d] in
                 guard let self = self, let d = d, self.focus != self.corePane(d) else { return }
                 let line = d.selected >= 0 ? d.selected : (d.rows.firstIndex { $0.selectable } ?? -1)
-                if let row = self.coreRow(d, line) { self.cursor(d, row) }
+                if let row = self.coreRow(d, line) { self.moveCursor(self.corePane(d), row) }
             }
         }
     }
@@ -15437,10 +15447,9 @@ final class PlatinumGitView: GitViewBase, GitSurface {
             return PGitRows.Row(runs: runs, lead: ((pushed ? "" : "↑") + (c["sha"] as? String ?? ""),
                                                    pushed ? Platinum.dark : Self.red))
         }
-        let sel = st["sel_file"] as? Int ?? -1
-        for (l, s) in [(filesList, fileRows.firstIndex { $0.file == sel } ?? -1),
-                       (branchesList, st["sel_branch"] as? Int ?? -1),
-                       (commitsList, st["sel_commit"] as? Int ?? -1)] {
+        for (l, s) in [(filesList, selection(GitPane.files)),
+                       (branchesList, selection(GitPane.branches)),
+                       (commitsList, selection(GitPane.commits))] {
             l.selected = s < l.rows.count ? s : -1
             l.reveal(l.selected)
         }
@@ -15451,38 +15460,9 @@ final class PlatinumGitView: GitViewBase, GitSurface {
         return true
     }
 
-    /// The core's index for row `r` of a list.
-    private func index(_ pane: Int, _ r: Int) -> Int? {
-        guard r >= 0 else { return nil }
-        if pane == GitPane.files { return r < fileRows.count ? fileRows[r].file : nil }
-        return r
-    }
-
-    // MARK: operations
-
-    private func open(_ pane: Int, _ row: Int) {
-        guard let v = view, v.handle != 0 else { return }
-        tk_desktop_git_open(v.handle, Int64(pane), Int64(row), Int64(v.cols()), Int64(v.rows()))
-        onAfterAction?()
-    }
-
-    /// Double-click / Return: open the file, check out the branch, open
-    /// the commit.
-    private func activate(_ pane: Int, _ r: Int) {
-        guard let idx = index(pane, r) else { return }
-        switch pane {
-        case GitPane.files: openFile(idx)
-        case GitPane.branches: key(GitPane.branches, 0x20)
-        default: key(GitPane.commits, 0x0D)
-        }
-    }
-
-    func closeClicked() {
-        if !closeCore() {
-            note = "Wait for the running git operation to finish."
-            body.needsDisplay = true
-        }
-        afterClose()
+    override fileprivate func showNote(_ text: String) {
+        note = text
+        body.needsDisplay = true
     }
 
     private func listKey(_ pane: Int, _ e: NSEvent) -> Bool {
@@ -15561,12 +15541,6 @@ final class PlatinumGitView: GitViewBase, GitSurface {
         return line >= 0 && line < map.count ? map[line] : nil
     }
 
-    private func cursor(_ d: PGitRows, _ row: Int) {
-        guard let v = view, v.handle != 0 else { return }
-        tk_desktop_git_cursor(v.handle, Int64(corePane(d)), Int64(row))
-        lastData = Data()
-        onAfterAction?()
-    }
 
     private func diffKey(_ d: PGitRows, _ e: NSEvent) -> Bool {
         guard e.keyCode == 49, e.modifierFlags.intersection([.command, .control, .option]).isEmpty,
@@ -15653,14 +15627,14 @@ final class PlatinumGitView: GitViewBase, GitSurface {
     }
 
     private func listMenu(_ pane: Int, _ r: Int, _ e: NSEvent) {
-        guard let idx = index(pane, r) else { return }
+        guard let idx = coreIndex(pane, r) else { return }
         popUp(listMenuItems(pane, idx) { [weak self] in self?.activate(pane, r) }, at: e)
     }
 
     private func diffMenu(_ d: PGitRows, _ line: Int, _ e: NSEvent) {
         guard let row = coreRow(d, line) else { return }
         let pane = corePane(d)
-        popUp(diffMenuItems(pane) { [weak self] in self?.open(pane, row) }, at: e)
+        popUp(diffMenuItems(pane) { [weak self] in self?.openRow(pane, row) }, at: e)
     }
 
 

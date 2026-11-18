@@ -236,19 +236,14 @@ def _push_palette(h: Int, mut app: Application):
 
 def main() raises:
     # Absolutize file args against the launch cwd *before* we chdir into the
-    # bundle's Resources dir; keep the optional ``\x1f<line>`` jump suffix.
-    var open_args = List[String]()
+    # bundle's Resources dir; keep the optional jump-to line.
+    var open_paths = List[String]()
+    var open_lines = List[Int]()
     var all_args = argv()
     for i in range(1, len(all_args)):
-        var raw = String(all_args[i])
-        var parsed = split_open_arg(raw)
-        var path = parsed[0]
-        var line = parsed[1]
-        var ap = _abspath(path)
-        if line > 0:
-            open_args.append(ap + chr(0x1F) + String(line))
-        else:
-            open_args.append(ap)
+        var parsed = split_open_arg(String(all_args[i]))
+        open_paths.append(_abspath(parsed[0]))
+        open_lines.append(parsed[1])
 
     _chdir_to_resources_if_bundled()
 
@@ -273,8 +268,11 @@ def main() raises:
     _push_palette(h, app)
 
     # Open any startup args (dir -> project, file -> editor, ...#line -> jump).
-    for i in range(len(open_args)):
-        _open_arg(h, open_args[i], app.back.width, app.back.height, last_project)
+    for i in range(len(open_paths)):
+        _open_path(
+            h, open_paths[i], open_lines[i], app.back.width, app.back.height,
+            last_project,
+        )
 
     var layout_buf = List[UInt32]()
     var buf_cells = -1
@@ -352,22 +350,7 @@ def main() raises:
         # A path forwarded from a second invocation (same treatment as argv).
         if ev.kind == EVENT_OPEN_PATH:
             if ev.text.byte_length() > 0:
-                var info = stat_file(ev.text)
-                if info.ok and info.is_dir():
-                    _tk_open_project(h, Int(ev.text.unsafe_ptr()), len(ev.text.as_bytes()))
-                    last_project = Optional[String](ev.text)
-                else:
-                    var line = ev.pos.y
-                    if line > 0:
-                        _tk_open_file_at(
-                            h, Int(ev.text.unsafe_ptr()), len(ev.text.as_bytes()),
-                            line - 1, 0, cols, rows,
-                        )
-                    else:
-                        _tk_open_file(
-                            h, Int(ev.text.unsafe_ptr()), len(ev.text.as_bytes()),
-                            cols, rows,
-                        )
+                _open_path(h, ev.text, ev.pos.y, cols, rows, last_project)
             continue
 
         # Modal: the file dialog eats every event while open.
@@ -378,13 +361,8 @@ def main() raises:
                 _ = file_dialog.handle_mouse(ev, app.screen())
             if file_dialog.submitted:
                 var path = file_dialog.selected_path
-                var picks_project = file_dialog.dirs_only
                 file_dialog.close()
-                if picks_project:
-                    _tk_open_project(h, Int(path.unsafe_ptr()), len(path.as_bytes()))
-                    last_project = Optional[String](path)
-                else:
-                    _tk_open_file(h, Int(path.unsafe_ptr()), len(path.as_bytes()), cols, rows)
+                _open_path(h, path, 0, cols, rows, last_project)
             continue
 
         # Feed the event to the core; act on the returned host-action code.
@@ -476,12 +454,12 @@ def _dialog_start(project: Optional[String]) -> String:
     return String(".")
 
 
-def _open_arg(
-    h: Int, raw: String, cols: Int, rows: Int, mut last_project: Optional[String],
+def _open_path(
+    h: Int, path: String, line: Int, cols: Int, rows: Int,
+    mut last_project: Optional[String],
 ):
-    var parsed = split_open_arg(raw)
-    var path = parsed[0]
-    var line = parsed[1]
+    """Open ``path``: a directory as the project, a file at 1-based
+    ``line`` (0: wherever it opens)."""
     var info = stat_file(path)
     if info.ok and info.is_dir():
         _tk_open_project(h, Int(path.unsafe_ptr()), len(path.as_bytes()))

@@ -98,18 +98,6 @@ int32_t tk_desktop_mod_key(int64_t h, uint32_t mod_id, uint8_t pressed);
 // 4 ew-resize (host_abi.mojo SHAPE_*).
 int32_t tk_desktop_pointer_shape(int64_t h, int64_t x, int64_t y,
                                  int64_t cols, int64_t rows);
-// Host drag-and-drop of file(s) onto the main window. paths is a
-// newline-separated UTF-8 list of absolute paths. When a terminal pane sits
-// under cell (x,y) the paths are shell-escaped + injected as a bracketed
-// paste. Returns 1 when a pane consumed the drop, else 0.
-int32_t tk_desktop_drop_paths(int64_t h, int64_t x, int64_t y,
-                              int64_t paths_ptr, int64_t paths_len,
-                              int64_t cols, int64_t rows);
-// Classify a drop at cell (x,y) on the main window: 1 = terminal pane,
-// 2 = editor body, 0 = nothing droppable. Polled during the drag (cursor)
-// and on drop (terminal paste vs editor format-choice menu).
-int32_t tk_desktop_drop_target(int64_t h, int64_t x, int64_t y,
-                               int64_t cols, int64_t rows);
 // Insert text verbatim into the editor under cell (x,y), caret at the drop
 // point. The host formats the dropped path (full/filename/relative) first.
 // Returns 1 when an editor consumed it.
@@ -334,17 +322,23 @@ int32_t tk_desktop_surface_mouse(int64_t h, int64_t surface, int64_t x, int64_t 
                                  uint8_t button, uint8_t pressed, uint8_t motion,
                                  uint8_t mods, int64_t cols, int64_t rows,
                                  uint8_t click_count);
-int32_t tk_desktop_panels_pointer_shape(int64_t h, int64_t x, int64_t y,
-                                        int64_t cols, int64_t rows);
-// Drag-and-drop onto the detached floating-panels window. Mirrors
-// tk_desktop_drop_paths but routes through the panel-window layout.
-int32_t tk_desktop_panels_drop_paths(int64_t h, int64_t x, int64_t y,
-                                     int64_t paths_ptr, int64_t paths_len,
-                                     int64_t cols, int64_t rows);
-// Classify a drop on the detached panels window: 1 = terminal pane, 0 = none
-// (no editors there). Companion to tk_desktop_drop_target.
-int32_t tk_desktop_panels_drop_target(int64_t h, int64_t x, int64_t y,
-                                      int64_t cols, int64_t rows);
+// Pointer shape (SHAPE_*) at (x, y) on the main surface or the floating
+// panels; 0 (arrow) on the others.
+int32_t tk_desktop_surface_pointer_shape(int64_t h, int64_t surface, int64_t x,
+                                         int64_t y, int64_t cols, int64_t rows);
+// Host drag-and-drop of file(s) onto the main surface or the floating
+// panels. paths is a newline-separated UTF-8 list of absolute paths. When a
+// terminal pane sits under cell (x,y) the paths are shell-escaped + injected
+// as a bracketed paste. Returns 1 when a pane consumed the drop, else 0.
+int32_t tk_desktop_surface_drop_paths(int64_t h, int64_t surface, int64_t x,
+                                      int64_t y, int64_t paths_ptr,
+                                      int64_t paths_len, int64_t cols,
+                                      int64_t rows);
+// Classify a drop at cell (x,y): 1 = terminal pane, 2 = editor body (main
+// surface only), 0 = nothing droppable. Polled during the drag (cursor) and
+// on drop (terminal paste vs editor format-choice menu).
+int32_t tk_desktop_surface_drop_target(int64_t h, int64_t surface, int64_t x,
+                                       int64_t y, int64_t cols, int64_t rows);
 
 // Settings window: like the floating panels, the macOS host renders the
 // Settings view in its own native window. The host sets _set_settings_detached

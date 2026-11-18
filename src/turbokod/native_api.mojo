@@ -29,7 +29,7 @@ from turbokod.canvas import (
     HOST_SURFACE_MAIN, HOST_SURFACE_PANELS, HOST_SURFACE_SETTINGS,
     HOST_SURFACES, HOST_VSCROLL, SubGrid,
 )
-from turbokod.events import Event, MOD_CTRL, MOD_META
+from turbokod.events import Event, EVENT_MOUSE, MOD_CTRL, MOD_META
 from turbokod.geometry import Point, Rect
 from turbokod.local_changes import RightPanel
 from turbokod.lsp_shared import new_pool
@@ -883,12 +883,16 @@ def tk_desktop_surface_layout(
 
 
 def _surface_event(h: Int, surface: Int, var ev: Event, cols: Int, rows: Int) -> Int32:
-    """Route ``ev`` to the window ``surface``; a host action like
-    ``tk_desktop_key``'s (only the panels and dialog windows make one)."""
+    """Route ``ev`` to the window ``surface``; the host action it makes
+    (only the main, panels and dialog windows make one)."""
     var screen = Rect(0, 0, cols, rows)
     var action = Optional[String]()
     try:
-        if surface == HOST_SURFACE_PANELS:
+        if surface == HOST_SURFACE_MAIN:
+            if ev.kind == EVENT_MOUSE:
+                _desk(h)[].take_mouse_fine(ev)
+            action = _desk(h)[].handle_event(ev, screen)
+        elif surface == HOST_SURFACE_PANELS:
             _desk(h)[].take_mouse_fine(ev)
             action = _desk(h)[].handle_panels_event(ev, screen)
         elif surface == HOST_SURFACE_SETTINGS:
@@ -931,47 +935,10 @@ def tk_desktop_surface_mouse(
     )
 
 
-@export
-def tk_desktop_panels_pointer_shape(
-    h: Int, x: Int, y: Int, cols: Int, rows: Int,
-) abi("C") -> Int32:
-    """A ``host_abi.SHAPE_*`` code for the pointer at ``(x, y)`` in the
-    panel window."""
-    if h == 0:
-        return Int32(0)
-    var shape = _desk(h)[].pointer_shape_panels(Point(x, y), Rect(0, 0, cols, rows))
-    return shape_code(shape)
 
 
-@export
-def tk_desktop_panels_drop_paths(
-    h: Int, x: Int, y: Int, paths_ptr: Int, paths_len: Int, cols: Int, rows: Int,
-) abi("C") -> Int32:
-    """Host drag-and-drop onto the detached floating-panels window. Mirrors
-    ``tk_desktop_drop_paths`` but routes through ``drop_text_on_panel`` (the
-    panel-window layout)."""
-    if h == 0:
-        return Int32(0)
-    var text = escape_drop_paths(_string_from(paths_ptr, paths_len))
-    if len(text.as_bytes()) == 0:
-        return Int32(0)
-    if _desk(h)[].drop_text_on_panel(text, Point(x, y), Rect(0, 0, cols, rows)):
-        return Int32(1)
-    return Int32(0)
 
 
-@export
-def tk_desktop_panels_drop_target(
-    h: Int, x: Int, y: Int, cols: Int, rows: Int,
-) abi("C") -> Int32:
-    """Classify a drag-and-drop on the detached floating-panels window: 1 =
-    terminal pane, 0 = nothing (the panels window has no editors, so never 2).
-    Companion to ``tk_desktop_drop_target``."""
-    if h == 0:
-        return Int32(0)
-    return Int32(
-        _desk(h)[].drop_target_panel_at(Point(x, y), Rect(0, 0, cols, rows))
-    )
 
 
 # --- Settings window surface -------------------------------------------------
@@ -1153,18 +1120,8 @@ def tk_desktop_settings_close(h: Int) abi("C"):
 
 @export
 def tk_desktop_key(h: Int, key: UInt32, mods: UInt8, cols: Int, rows: Int) abi("C") -> Int32:
-    if h == 0:
-        return ACT_NONE
-    # Canonicalize Ctrl/Cmd + uppercase letter to lowercase (matches the
-    # terminal path so hotkey tables match regardless of frontend).
-    var k = _canon_ctrl_key(key, mods)
-    var action: Optional[String]
-    try:
-        action = _desk(h)[].handle_event(Event.key_event(k, mods), Rect(0, 0, cols, rows))
-    except e:
-        print("turbokod: tk_desktop_key:", String(e))
-        action = Optional[String]()
-    return _action_code(action)
+    """``tk_desktop_surface_key`` on the main surface (tk-tui's entry)."""
+    return tk_desktop_surface_key(h, HOST_SURFACE_MAIN, key, mods, cols, rows)
 
 
 @export
@@ -1179,15 +1136,9 @@ def tk_desktop_mod_key(h: Int, mod_id: UInt32, pressed: UInt8) abi("C") -> Int32
     screen rect, so we pass an empty one."""
     if h == 0:
         return ACT_NONE
-    var action: Optional[String]
-    try:
-        action = _desk(h)[].handle_event(
-            Event.mod_key_event(mod_id, pressed != 0), Rect(0, 0, 0, 0),
-        )
-    except e:
-        print("turbokod: tk_desktop_mod_key:", String(e))
-        action = Optional[String]()
-    return _action_code(action)
+    return _surface_event(
+        h, HOST_SURFACE_MAIN, Event.mod_key_event(mod_id, pressed != 0), 0, 0,
+    )
 
 
 @export
@@ -1195,59 +1146,83 @@ def tk_desktop_mouse(
     h: Int, x: Int, y: Int, button: UInt8, pressed: UInt8, motion: UInt8,
     mods: UInt8, cols: Int, rows: Int, click_count: UInt8,
 ) abi("C") -> Int32:
-    if h == 0:
-        return ACT_NONE
-    var ev = _mouse_event(x, y, button, pressed, motion, mods, click_count)
-    _desk(h)[].take_mouse_fine(ev)
-    var action: Optional[String]
-    try:
-        action = _desk(h)[].handle_event(ev, Rect(0, 0, cols, rows))
-    except e:
-        print("turbokod: tk_desktop_mouse:", String(e))
-        action = Optional[String]()
-    return _action_code(action)
+    """``tk_desktop_surface_mouse`` on the main surface."""
+    return tk_desktop_surface_mouse(
+        h, HOST_SURFACE_MAIN, x, y, button, pressed, motion, mods, cols, rows,
+        click_count,
+    )
 
 
 @export
 def tk_desktop_pointer_shape(h: Int, x: Int, y: Int, cols: Int, rows: Int) abi("C") -> Int32:
-    """A ``host_abi.SHAPE_*`` code for the pointer at ``(x, y)``."""
-    if h == 0:
-        return Int32(0)
-    var shape = _desk(h)[].pointer_shape_at(Point(x, y), Rect(0, 0, cols, rows))
-    return shape_code(shape)
+    """``tk_desktop_surface_pointer_shape`` on the main surface (tk-tui's
+    entry)."""
+    return tk_desktop_surface_pointer_shape(h, HOST_SURFACE_MAIN, x, y, cols, rows)
 
 
 @export
-def tk_desktop_drop_paths(
-    h: Int, x: Int, y: Int, paths_ptr: Int, paths_len: Int, cols: Int, rows: Int,
+def tk_desktop_surface_pointer_shape(
+    h: Int, surface: Int, x: Int, y: Int, cols: Int, rows: Int,
 ) abi("C") -> Int32:
-    """Host drag-and-drop of one or more files onto the *main* window.
-    ``paths`` is a newline-separated list of absolute file paths. If a terminal
-    pane sits under cell ``(x, y)``, the paths are shell-escaped, space-joined
-    (``escape_drop_paths``) and injected as a bracketed paste — so a shell or
-    Claude session running in that pane receives them exactly as a terminal
-    emulator's drag-to-insert would. Returns 1 when a pane consumed the drop,
-    else 0 (the host then leaves the OS drag unhandled)."""
+    """A ``host_abi.SHAPE_*`` code for the pointer at ``(x, y)`` on the main
+    surface or the floating panels; the default arrow elsewhere."""
     if h == 0:
         return Int32(0)
-    var text = escape_drop_paths(_string_from(paths_ptr, paths_len))
-    if len(text.as_bytes()) == 0:
-        return Int32(0)
-    if _desk(h)[].drop_text_on_pane(text, Point(x, y), Rect(0, 0, cols, rows)):
-        return Int32(1)
+    var pos = Point(x, y)
+    var screen = Rect(0, 0, cols, rows)
+    if surface == HOST_SURFACE_MAIN:
+        return shape_code(_desk(h)[].pointer_shape_at(pos, screen))
+    if surface == HOST_SURFACE_PANELS:
+        return shape_code(_desk(h)[].pointer_shape_panels(pos, screen))
     return Int32(0)
 
 
 @export
-def tk_desktop_drop_target(h: Int, x: Int, y: Int, cols: Int, rows: Int) abi("C") -> Int32:
-    """Classify a drag-and-drop landing at cell ``(x, y)`` on the *main*
-    window: 1 = terminal pane, 2 = editor window body, 0 = nothing droppable.
-    The host polls this during the drag (to set the copy/no-drop cursor) and on
-    drop (to choose between the terminal paste path and the editor format-choice
-    menu)."""
+def tk_desktop_surface_drop_paths(
+    h: Int, surface: Int, x: Int, y: Int, paths_ptr: Int, paths_len: Int,
+    cols: Int, rows: Int,
+) abi("C") -> Int32:
+    """Host drag-and-drop of files onto the main surface or the floating
+    panels. ``paths`` is a newline-separated list of absolute paths. If a
+    terminal pane sits under cell ``(x, y)``, they're shell-escaped,
+    space-joined (``escape_drop_paths``) and injected as a bracketed paste —
+    so a shell or Claude session there receives them exactly as a terminal
+    emulator's drag-to-insert would. 1 when a pane consumed the drop, else 0
+    (the host then leaves the OS drag unhandled)."""
+    if h == 0 or (surface != HOST_SURFACE_MAIN and surface != HOST_SURFACE_PANELS):
+        return Int32(0)
+    var text = escape_drop_paths(_string_from(paths_ptr, paths_len))
+    if len(text.as_bytes()) == 0:
+        return Int32(0)
+    var pos = Point(x, y)
+    var screen = Rect(0, 0, cols, rows)
+    var done = _desk(h)[].drop_text_on_pane(text, pos, screen) \
+        if surface == HOST_SURFACE_MAIN \
+        else _desk(h)[].drop_text_on_panel(text, pos, screen)
+    return Int32(1) if done else Int32(0)
+
+
+@export
+def tk_desktop_surface_drop_target(
+    h: Int, surface: Int, x: Int, y: Int, cols: Int, rows: Int,
+) abi("C") -> Int32:
+    """Classify a drag-and-drop landing at cell ``(x, y)``: 1 = terminal
+    pane, 2 = editor body (main surface only), 0 = nothing droppable. The
+    host polls it during the drag (the copy / no-drop cursor) and on drop
+    (terminal paste vs the editor's format-choice menu)."""
     if h == 0:
         return Int32(0)
-    return Int32(_desk(h)[].drop_target_at(Point(x, y), Rect(0, 0, cols, rows)))
+    var pos = Point(x, y)
+    var screen = Rect(0, 0, cols, rows)
+    if surface == HOST_SURFACE_MAIN:
+        return Int32(_desk(h)[].drop_target_at(pos, screen))
+    if surface == HOST_SURFACE_PANELS:
+        return Int32(_desk(h)[].drop_target_panel_at(pos, screen))
+    return Int32(0)
+
+
+
+
 
 
 @export
@@ -3019,31 +2994,21 @@ def tk_desktop_take_pending_new_window_project(
     h: Int, out_ptr: Int, cap: Int,
 ) abi("C") -> Int:
     """Drain the "open this project in a new window" path queued by the
-    Project menu's inline recent-project picks. Returns the number of
-    UTF-8 bytes written into the caller's buffer; returns 0 when
-    nothing is queued or the buffer can't hold the path (the latter
-    leaves the path queued so the host can retry with a larger cap).
+    Project menu's inline recent-project picks. The ``_write_out``
+    contract: 0 when nothing is queued, and the path stays queued until
+    it fits the buffer.
 
     The host calls this right after receiving ``ACT_NEW_WINDOW`` from
     ``tk_desktop_menu_invoke`` to discover whether the new-window
     request was a plain "File ▸ New window" pick (returns 0) or a
     recent-project pick that should land in a project-loaded window
     (returns the path)."""
-    if h == 0 or out_ptr == 0 or cap <= 0:
+    if h == 0:
         return 0
-    # Peek before consuming so an undersized buffer leaves the path
-    # in place for the caller to retry with a larger ``cap`` — a
-    # truncated path would point somewhere wrong.
-    ref pending = _desk(h)[]._pending_new_window_project
-    if not pending:
+    ref d = _desk(h)[]
+    if not d._pending_new_window_project:
         return 0
-    var path = pending.value()
-    var bytes = path.as_bytes()
-    var n = len(bytes)
-    if n > cap:
-        return 0
-    _desk(h)[]._pending_new_window_project = Optional[String]()
-    var op = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=out_ptr)
-    for i in range(n):
-        op[unsafe_offset=i] = bytes[i]
+    var n = _write_out(d._pending_new_window_project.value(), out_ptr, cap)
+    if n > 0 and n <= cap:
+        d._pending_new_window_project = Optional[String]()
     return n

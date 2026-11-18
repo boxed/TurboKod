@@ -173,9 +173,12 @@ int32_t tk_desktop_surface_mouse(int64_t h, int64_t surface, int64_t x,
                                  int64_t y, uint8_t button, uint8_t pressed,
                                  uint8_t motion, uint8_t mods, int64_t cols,
                                  int64_t rows, uint8_t click_count);
-int32_t tk_desktop_panels_pointer_shape(int64_t h, int64_t x, int64_t y,
-                                        int64_t cols, int64_t rows);
+int32_t tk_desktop_surface_pointer_shape(int64_t h, int64_t surface, int64_t x,
+                                         int64_t y, int64_t cols, int64_t rows);
 ```
+
+The main window goes through the same calls with `HOST_SURFACE_MAIN` (0), and so
+do drag-and-drop (`tk_desktop_surface_drop_target` / `_drop_paths`).
 
 `tk_desktop_surface_layout` packs the same `[codepoint, fg|bg<<8|style<<16,
 underline]` 3-word-per-cell buffer as `tk_desktop_layout` — the panel window's
