@@ -30,7 +30,9 @@ something, just with the default grammar.
 
 from std.collections.list import List
 
-from .per_user_store import project_config_dir, project_config_path
+from .per_user_store import (
+    project_config_dir, project_config_path, write_project_config_json,
+)
 from .file_io import join_path, load_json_object, make_dir, write_file
 from .json import encode_json, json_object, json_str
 
@@ -94,26 +96,14 @@ def write_grammar_overrides(
     ``GrammarRegistry.lookup_override``'s first-match semantics, so a
     duplicate ext added in the UI doesn't silently shadow the original.
     Returns False when there's no project root or the write fails."""
-    var path = _grammars_path(project_root)
-    if len(path.as_bytes()) == 0:
-        return False
-    make_dir(project_config_dir(project_root))
     var exts = json_object()
     var seen = List[String]()
-    for i in range(len(overrides)):
-        var ext = overrides[i].ext
-        var lang = overrides[i].language_id
-        if len(ext.as_bytes()) == 0 or len(lang.as_bytes()) == 0:
+    for ref o in overrides:
+        if len(o.ext.as_bytes()) == 0 or len(o.language_id.as_bytes()) == 0 \
+                or o.ext in seen:
             continue
-        var dup = False
-        for j in range(len(seen)):
-            if seen[j] == ext:
-                dup = True
-                break
-        if dup:
-            continue
-        seen.append(ext)
-        exts.put(ext, json_str(lang))
+        seen.append(o.ext)
+        exts.put(o.ext, json_str(o.language_id))
     var root = json_object()
     root.put(String("extensions"), exts)
-    return write_file(path, encode_json(root) + String("\n"))
+    return write_project_config_json(project_root, _GRAMMARS_FILE, root)

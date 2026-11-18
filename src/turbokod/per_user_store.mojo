@@ -10,6 +10,7 @@ each carry their own copy.
 
 
 from .file_io import join_path, make_dir, stat_file, write_file
+from .json import JsonValue, encode_json
 from .posix import getenv_value
 
 
@@ -82,6 +83,19 @@ def ensure_per_user_dir(project_root: String):
     var ignore = join_path(per_user, String(".gitignore"))
     if not stat_file(ignore).ok:
         _ = write_file(ignore, String("*\n"))
+
+
+def write_project_config_json(
+    project_root: String, file_name: String, root: JsonValue,
+) -> Bool:
+    """Write ``root`` as ``file_name`` in ``project_config_dir``, creating
+    the directory first. False for an empty project root or a failed
+    write."""
+    var path = project_config_path(project_root, file_name)
+    if len(path.as_bytes()) == 0:
+        return False
+    make_dir(project_config_dir(project_root))
+    return write_file(path, encode_json(root) + String("\n"))
 
 
 def write_per_user_file(

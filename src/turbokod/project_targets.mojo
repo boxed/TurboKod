@@ -49,7 +49,9 @@ re-saves through the dialog.
 from std.collections.list import List
 from std.collections.optional import Optional
 
-from .per_user_store import project_config_dir, project_config_path
+from .per_user_store import (
+    project_config_dir, project_config_path, write_project_config_json,
+)
 from .file_io import (
     join_path, list_directory, load_json_object, make_dir, read_file,
     stat_file, write_file,
@@ -284,10 +286,6 @@ def write_all_targets(
     Always writes the new flat shape — legacy ``run`` / ``debug``
     keys won't survive a save, which is the migration path.
     """
-    var path = _targets_path(project_root)
-    if len(path.as_bytes()) == 0:
-        return False
-    make_dir(project_config_dir(project_root))
     var active_name = String("")
     if targets.has_active():
         active_name = targets.targets[targets.active].name
@@ -297,7 +295,7 @@ def write_all_targets(
     for i in range(len(targets.targets)):
         arr.append(_encode_target(targets.targets[i]))
     root.put(String("targets"), arr)
-    return write_file(path, encode_json(root) + String("\n"))
+    return write_project_config_json(project_root, TARGETS_FILE, root)
 
 
 def save_project_targets(
@@ -346,13 +344,7 @@ def save_project_targets(
         if not existing_arr:
             root.put(String("targets"), json_array())
         return write_file(path, encode_json(root) + String("\n"))
-    var stub = json_object()
-    stub.put(String("active"), json_str(active_name))
-    var arr = json_array()
-    for i in range(len(targets.targets)):
-        arr.append(_encode_target(targets.targets[i]))
-    stub.put(String("targets"), arr)
-    return write_file(path, encode_json(stub) + String("\n"))
+    return write_all_targets(project_root, targets)
 
 
 def resolved_cwd(project_root: String, target_cwd: String) -> String:

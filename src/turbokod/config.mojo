@@ -196,6 +196,25 @@ struct OnSaveAction(Copyable, Movable):
         self.args = args^
         self.cwd = cwd^
 
+    @staticmethod
+    def from_json(item: JsonValue) -> Self:
+        """Read what ``to_json`` writes, in the global config and in a
+        project's ``on_save.json`` alike."""
+        return Self(
+            json_get_string(item, String("language_id")),
+            json_get_string(item, String("program")),
+            json_get_string_array(item, String("args")),
+            json_get_string(item, String("cwd")),
+        )
+
+    def to_json(self) -> JsonValue:
+        var obj = json_object()
+        obj.put(String("language_id"), json_str(self.language_id))
+        obj.put(String("program"), json_str(self.program))
+        obj.put(String("args"), json_string_array(self.args))
+        obj.put(String("cwd"), json_str(self.cwd))
+        return obj^
+
 
 @fieldwise_init
 struct TurbokodConfig(Copyable, Movable):
@@ -611,14 +630,8 @@ def _config_from_json(root: JsonValue) raises -> TurbokodConfig:
         var arr = osa.value().copy()
         for i in range(arr.array_len()):
             var item = arr.array_at(i)
-            if not item.is_object():
-                continue
-            var act = OnSaveAction()
-            act.language_id = json_get_string(item, String("language_id"))
-            act.program = json_get_string(item, String("program"))
-            act.args = json_get_string_array(item, String("args"))
-            act.cwd = json_get_string(item, String("cwd"))
-            cfg.on_save_actions.append(act^)
+            if item.is_object():
+                cfg.on_save_actions.append(OnSaveAction.from_json(item))
     var lsv = root.object_get(String("language_servers"))
     if lsv and lsv.value().is_array():
         var arr = lsv.value().copy()
@@ -778,14 +791,8 @@ def _config_to_json(config: TurbokodConfig) -> JsonValue:
     root.put(String("recent_files"), json_string_array(config.recent_files))
     root.put(String("project_dirs"), json_string_array(config.project_dirs))
     var osa = json_array()
-    for i in range(len(config.on_save_actions)):
-        var act = config.on_save_actions[i].copy()
-        var obj = json_object()
-        obj.put(String("language_id"), json_str(act.language_id))
-        obj.put(String("program"), json_str(act.program))
-        obj.put(String("args"), json_string_array(act.args))
-        obj.put(String("cwd"), json_str(act.cwd))
-        osa.append(obj)
+    for ref act in config.on_save_actions:
+        osa.append(act.to_json())
     root.put(String("on_save_actions"), osa)
     var lsv = json_array()
     for i in range(len(config.language_servers)):

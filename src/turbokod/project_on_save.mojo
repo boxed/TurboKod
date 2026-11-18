@@ -26,7 +26,9 @@ Missing file / malformed JSON / missing keys all degrade to an empty list
 
 from std.collections.list import List
 
-from .per_user_store import project_config_dir, project_config_path
+from .per_user_store import (
+    project_config_dir, project_config_path, write_project_config_json,
+)
 from .config import OnSaveAction
 from .file_io import join_path, load_json_array, make_dir, write_file
 from .json import (
@@ -70,14 +72,9 @@ def load_project_on_save(project_root: String) -> List[OnSaveAction]:
         var item = arr.array_at(i)
         if not item.is_object():
             continue
-        var act = OnSaveAction()
-        act.language_id = json_get_string(item, String("language_id"))
-        act.program = json_get_string(item, String("program"))
-        act.args = json_get_string_array(item, String("args"))
-        act.cwd = json_get_string(item, String("cwd"))
-        if len(act.program.as_bytes()) == 0:
-            continue
-        out.append(act^)
+        var act = OnSaveAction.from_json(item)
+        if len(act.program.as_bytes()) > 0:
+            out.append(act^)
     return out^
 
 
@@ -91,21 +88,10 @@ def write_project_on_save(
     linger. Rows with an empty ``program`` are dropped (the section can
     hold half-filled state mid-edit). Returns False when there's no
     project root or the write fails."""
-    var path = _on_save_path(project_root)
-    if len(path.as_bytes()) == 0:
-        return False
-    make_dir(project_config_dir(project_root))
     var arr = json_array()
-    for i in range(len(actions)):
-        var act = actions[i].copy()
-        if len(act.program.as_bytes()) == 0:
-            continue
-        var obj = json_object()
-        obj.put(String("language_id"), json_str(act.language_id))
-        obj.put(String("program"), json_str(act.program))
-        obj.put(String("args"), json_string_array(act.args))
-        obj.put(String("cwd"), json_str(act.cwd))
-        arr.append(obj)
+    for ref act in actions:
+        if len(act.program.as_bytes()) > 0:
+            arr.append(act.to_json())
     var root = json_object()
     root.put(String("actions"), arr)
-    return write_file(path, encode_json(root) + String("\n"))
+    return write_project_config_json(project_root, _ON_SAVE_FILE, root)
