@@ -59,7 +59,7 @@ from .geometry import Point, Rect
 from .output_links import extract_all_links, link_at, OutputLink, paint_row_links
 from .scrollbar import ScrollBarArea
 from .split_area import SplitArea
-from .string_utils import char_width, display_columns
+from .string_utils import char_width, codepoint_at, display_columns
 from .test_report import (
     OUTCOME_ERROR, OUTCOME_FAILED, OUTCOME_PASSED, OUTCOME_RUNNING,
     OUTCOME_SKIPPED, OUTCOME_XFAILED, OUTCOME_XPASSED, TestReport,
@@ -799,25 +799,6 @@ def _count_seg(mut segs: List[Tuple[String, Attr]], outcome: UInt8, n: Int):
         segs.append((icon[0] + String(" ") + String(n), Attr(icon[1], PANE_BG)))
 
 
-def _utf8_step(lead: UInt8) -> Int:
-    if lead < 0x80:
-        return 1
-    if lead < 0xE0:
-        return 2
-    if lead < 0xF0:
-        return 3
-    return 4
-
-
-def _decode_at(b: Span[UInt8, _], i: Int, step: Int) -> Int:
-    if step == 1 or i + step > len(b):
-        return Int(b[i])
-    var cp = Int(b[i]) & (0xFF >> (step + 1))
-    for k in range(1, step):
-        cp = (cp << 6) | (Int(b[i + k]) & 0x3F)
-    return cp
-
-
 def clean_output(text: String) -> String:
     """``text`` as plain lines for the results list: ANSI escape sequences
     and carriage returns removed, tabs as four spaces."""
@@ -861,10 +842,9 @@ def wrap_cells(line: String, width: Int) -> List[String]:
     var cells = 0
     var i = 0
     while i < len(b):
-        var step = _utf8_step(b[i])
-        if i + step > len(b):
-            step = len(b) - i
-        var cw = char_width(_decode_at(b, i, step))
+        var cp = codepoint_at(line, i)
+        var step = cp[1]
+        var cw = char_width(cp[0])
         if cells + cw > width and i > start:
             out.append(String(StringSpan(unsafe_from_utf8=b[start:i])))
             start = i

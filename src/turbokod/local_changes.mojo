@@ -145,6 +145,7 @@ from .install_runner import InstallRunner
 from .string_utils import (
     byte_slice,
     display_columns,
+    fnv32,
     is_ascii_digit,
     parse_uint_range,
     split_lines,
@@ -841,11 +842,7 @@ def _author_color(author: String) -> UInt8:
         LIGHT_CYAN, LIGHT_GREEN, LIGHT_YELLOW, LIGHT_MAGENTA, LIGHT_RED,
         CYAN, GREEN, YELLOW, MAGENTA, WHITE,
     ]
-    var b = author.as_bytes()
-    var h = UInt32(2166136261)
-    for i in range(len(b)):
-        h = (h ^ UInt32(b[i])) * UInt32(16777619)
-    return palette[Int(h % UInt32(len(palette)))]
+    return palette[Int(fnv32(author) % UInt32(len(palette)))]
 
 
 def _clamp(v: Int, hi: Int) -> Int:

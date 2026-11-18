@@ -12,7 +12,8 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .file_io import (
-    is_symlink, join_path, list_directory, project_relative, read_file, stat_file,
+    is_symlink, join_path, list_directory, looks_binary, project_relative,
+    read_file, stat_file,
     write_file,
 )
 from .lsp import LspProcess, capture_command
@@ -592,17 +593,6 @@ def walk_project_files(
     return out^
 
 
-def _looks_binary(text: String) -> Bool:
-    var bytes = text.as_bytes()
-    var n = len(bytes)
-    if n > 4096:
-        n = 4096
-    for i in range(n):
-        if bytes[i] == 0:
-            return True
-    return False
-
-
 def find_in_project(
     root: String, needle: String,
     opts: SearchOptions = default_search_options(),
@@ -642,7 +632,7 @@ def find_in_project(
                 text = read_file(full)
             except:
                 continue
-            if _looks_binary(text):
+            if looks_binary(text.as_bytes(), 4096):
                 continue
             var lines = split_lines_no_trailing(text)
             var rel = project_relative(root, full)
@@ -700,7 +690,7 @@ def replace_in_project(
                 text = read_file(full)
             except:
                 continue
-            if _looks_binary(text):
+            if looks_binary(text.as_bytes(), 4096):
                 continue
             var count: Int
             var new_text: String

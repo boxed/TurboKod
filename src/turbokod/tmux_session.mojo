@@ -44,7 +44,7 @@ from std.collections.list import List
 
 from std.ffi import external_call
 
-from .file_io import stat_file
+from .file_io import basename, stat_file
 from .lsp import capture_command
 from .posix import exit_code_from_status, getenv_value, which
 from .string_utils import shell_single_quote
@@ -120,24 +120,13 @@ def new_tmux_session_name(
     label: the project a session
     belongs to is ``@tk_project``, so two projects with the same directory
     name can't mix up their panes."""
-    var base = _name_part(_basename(project)) + String("-") + _name_part(kind)
+    var base = _name_part(basename(project)) + String("-") + _name_part(kind)
     if base not in taken:
         return base
     var n = 2
     while (base + String("-") + String(n)) in taken:
         n += 1
     return base + String("-") + String(n)
-
-
-def _basename(path: String) -> String:
-    var b = path.as_bytes()
-    var end = len(b)
-    while end > 1 and b[end - 1] == 0x2F:
-        end -= 1
-    var start = end
-    while start > 0 and b[start - 1] != 0x2F:
-        start -= 1
-    return String(StringSpan(unsafe_from_utf8=b[start:end]))
 
 
 def _name_part(s: String) -> String:

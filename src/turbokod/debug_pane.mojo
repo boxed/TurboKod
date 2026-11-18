@@ -49,6 +49,7 @@ constants is the smoothest pattern available, and matches what
 
 from std.collections.list import List
 
+from .lsp_position import POS_UTF16, byte_to_units
 from .canvas import Canvas
 from .case_fold import fold_byte
 from .string_utils import display_columns, truncate_to_columns
@@ -1730,21 +1731,5 @@ def _is_ident_byte(c: UInt8) -> Bool:
 
 def _utf16_len(s: String, end_byte: Int) -> Int:
     """UTF-16 code units in ``s[:end_byte]`` — DAP's column unit."""
-    var b = s.as_bytes()
-    var n = 0
-    var i = 0
-    var end = min(end_byte, len(b))
-    while i < end:
-        var c = b[i]
-        if c < 0x80:
-            i += 1
-        elif c < 0xE0:
-            i += 2
-        elif c < 0xF0:
-            i += 3
-        else:
-            i += 4
-            n += 1   # astral codepoint: a surrogate pair
-        n += 1
-    return n
+    return byte_to_units(s, end_byte, POS_UTF16)
 

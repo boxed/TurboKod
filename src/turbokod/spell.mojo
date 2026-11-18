@@ -25,7 +25,7 @@ from .file_io import (
 )
 from .posix import debug_log, user_config_path
 from .string_utils import (
-    append_utf8,
+    append_utf8, fnv32,
     byte_slice, codepoint_at, is_ascii_digit, is_ascii_ident_byte,
     is_word_codepoint, split_lines_no_trailing, word_char_step,
 )
@@ -874,11 +874,7 @@ def spell_key(word: String) -> String:
 
 
 def _bucket(w: String) -> Int:
-    var b = w.as_bytes()
-    var h = UInt32(2166136261)
-    for i in range(len(b)):
-        h = (h ^ UInt32(b[i])) * UInt32(16777619)
-    return Int(h % _N_BUCKETS)
+    return Int(fnv32(w) % _N_BUCKETS)
 
 
 def _normalize(s: String) -> String:

@@ -16,6 +16,7 @@ that ``Tab`` walks, and Esc to cancel.
 from std.collections.list import List
 from std.collections.optional import Optional
 
+from .string_utils import hex_digit_byte, parse_uint_range
 from .ui_tree import (
     UIDialog,
     UI_CANCEL, UI_DEFAULT, UI_SECONDARY, UINode, ui_bool, ui_buttons,
@@ -41,26 +42,11 @@ def _parse_signed_int(s: String) -> Optional[Int]:
     initial / increment fields so the user can start from a negative
     base or step backwards through a range."""
     var b = s.as_bytes()
-    var n = len(b)
-    if n == 0:
+    var signed = len(b) > 0 and (b[0] == 0x2D or b[0] == 0x2B)
+    var v = parse_uint_range(b, 1 if signed else 0, len(b))
+    if v < 0:
         return Optional[Int]()
-    var i = 0
-    var sign = 1
-    if b[0] == 0x2D:
-        sign = -1
-        i = 1
-    elif b[0] == 0x2B:
-        i = 1
-    if i >= n:
-        return Optional[Int]()
-    var v = 0
-    while i < n:
-        var c = Int(b[i])
-        if c < 0x30 or c > 0x39:
-            return Optional[Int]()
-        v = v * 10 + (c - 0x30)
-        i += 1
-    return Optional[Int](sign * v)
+    return Optional[Int](-v if signed and b[0] == 0x2D else v)
 
 
 def _format_int(value: Int, base: Int, min_digits: Int) -> String:
@@ -75,14 +61,8 @@ def _format_int(value: Int, base: Int, min_digits: Int) -> String:
         rev.append(UInt8(0x30))
     else:
         while n > 0:
-            var d = n % base
+            rev.append(UInt8(hex_digit_byte(n % base)))
             n = n // base
-            var ch: Int
-            if d < 10:
-                ch = 0x30 + d
-            else:
-                ch = 0x61 + (d - 10)
-            rev.append(UInt8(ch))
     var pad_n = min_digits - len(rev)
     var fwd = List[UInt8]()
     while pad_n > 0:

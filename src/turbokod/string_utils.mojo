@@ -1078,6 +1078,15 @@ def hex_digit_byte(n: Int) -> Int:
     return 0x30 + n if n < 10 else 0x61 + (n - 10)
 
 
+def fnv32(s: String) -> UInt32:
+    """32-bit FNV-1a of ``s``'s bytes — for bucketing a short key (a
+    word, an author's name)."""
+    var h = UInt32(2166136261)
+    for c in s.as_bytes():
+        h = (h ^ UInt32(c)) * UInt32(16777619)
+    return h
+
+
 def fnv_start() -> UInt64:
     """The FNV-1a offset basis: where a ``fnv_int`` / ``fnv_str`` chain
     starts. For a cheap "did any of this change?" fingerprint of state

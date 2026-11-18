@@ -23,7 +23,7 @@ from std.collections.dict import Dict
 from std.collections.list import List
 
 from .case_fold import fold_ascii
-from .file_io import read_file, stat_file
+from .file_io import looks_binary, read_file, stat_file
 from .highlight import extension_of
 from .posix import monotonic_ms
 from .project import walk_project_files
@@ -32,7 +32,7 @@ from .spell import (
     spell_key,
 )
 from std.collections.optional import Optional
-from .string_utils import split_lines_no_trailing
+from .string_utils import fnv32, split_lines_no_trailing
 
 
 comptime SPELL_SCAN_MAX_FILE_BYTES = 2_000_000
@@ -112,11 +112,7 @@ def _grouping_word(word: String) -> String:
 
 
 def _bucket(key: String) -> Int:
-    var b = key.as_bytes()
-    var h = UInt32(2166136261)
-    for i in range(len(b)):
-        h = (h ^ UInt32(b[i])) * UInt32(16777619)
-    return Int(h % _N_BUCKETS)
+    return Int(fnv32(key) % _N_BUCKETS)
 
 
 def spell_scan_files(root: String) -> List[String]:
@@ -196,9 +192,8 @@ def _load_lines(path: String) -> Optional[List[String]]:
     var b = text.as_bytes()
     if len(b) == 0 or len(b) > SPELL_SCAN_MAX_FILE_BYTES:
         return Optional[List[String]]()
-    for i in range(min(len(b), 8192)):
-        if b[i] == 0:
-            return Optional[List[String]]()
+    if looks_binary(b, 8192):
+        return Optional[List[String]]()
     var lines = split_lines_no_trailing(text)
     for i in range(len(lines)):
         if len(lines[i].as_bytes()) > SPELL_SCAN_MAX_LINE_BYTES:

@@ -44,13 +44,6 @@ from .type_ahead import TypeAhead, is_type_ahead_key, type_ahead_pick
 from .picker_input import picker_nav_key, picker_wheel_scroll, scroll_to_reveal
 
 
-def _contains(paths: List[String], path: String) -> Bool:
-    for i in range(len(paths)):
-        if paths[i] == path:
-            return True
-    return False
-
-
 comptime FILE_TREE_WIDTH: Int = 28
 comptime FILE_TREE_MIN_WIDTH: Int = 10
 """Lower bound for resize drags: enough to keep a usable filename
@@ -497,9 +490,9 @@ struct FileTree(Movable):
                     attr = attr.with_bg(LIGHT_GREEN)
             # Changeset status (fixed listings): added green, deleted red.
             if not e.is_dir:
-                if _contains(self.added_paths, e.path):
+                if e.path in self.added_paths:
                     attr = attr.with_fg(GREEN)
-                elif _contains(self.removed_paths, e.path):
+                elif e.path in self.removed_paths:
                     attr = attr.with_fg(RED)
             # Paint the row background first so selection covers full width.
             painter.fill(

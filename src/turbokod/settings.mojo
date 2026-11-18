@@ -38,7 +38,7 @@ from .language_config import (
 from .font_chooser import FontChooser
 from .language_editor import LanguageEditor
 from .theme import theme_names
-from .string_utils import join_args
+from .string_utils import join_args, parse_int_all
 from .ui_tree import (
     UIDialog,
     UI_DEFAULT, UI_DISABLED, UI_SECONDARY, UINode, ui_bool, ui_button,
@@ -94,16 +94,9 @@ def _digits(text: String, max_len: Int) -> String:
 
 
 def _parse_digits(text: String, empty: Int) -> Int:
-    var bytes = text.as_bytes()
-    if len(bytes) == 0:
-        return empty
-    var v = 0
-    for i in range(len(bytes)):
-        var d = Int(bytes[i]) - 0x30
-        if d < 0 or d > 9:
-            return empty
-        v = v * 10 + d
-    return v
+    """``text`` as a non-negative decimal, or ``empty`` when it isn't one."""
+    var v = parse_int_all(text)
+    return v if v >= 0 else empty
 
 
 struct Settings(Movable, UIDialog):

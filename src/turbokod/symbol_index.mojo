@@ -96,7 +96,7 @@ from std.collections.list import List
 from std.collections.optional import Optional
 
 from .case_fold import find_exact
-from .file_io import read_file, stat_file
+from .file_io import looks_binary, read_file, stat_file
 from .symbol_seed import is_definition_site, seed_priority
 from .string_utils import is_ascii_ident_byte
 
@@ -142,16 +142,6 @@ def _starts_with_digit(b: Span[UInt8, _]) -> Bool:
     if len(b) == 0:
         return False
     return 0x30 <= Int(b[0]) and Int(b[0]) <= 0x39
-
-
-def _looks_binary(b: Span[UInt8, _]) -> Bool:
-    var n = _BINARY_SNIFF_BYTES
-    if len(b) < n:
-        n = len(b)
-    for i in range(n):
-        if b[i] == 0:
-            return True
-    return False
 
 
 def _hash_bytes(b: Span[UInt8, _]) -> UInt64:
@@ -505,7 +495,7 @@ struct SymbolIndex(Movable):
         self.file_size[fid] = info.size
         self.file_mtime_sec[fid] = info.mtime_sec
         self.file_mtime_nsec[fid] = info.mtime_nsec
-        if _looks_binary(b):
+        if looks_binary(b, _BINARY_SNIFF_BYTES):
             return len(b)
         self._add_segment(fid, b)
         return len(b)

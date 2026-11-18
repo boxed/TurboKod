@@ -604,6 +604,15 @@ def sort_directory_listing(
             j -= 1
 
 
+def looks_binary(b: Span[UInt8, _], sniff: Int) -> Bool:
+    """A NUL byte in the first ``sniff`` bytes: binary, as far as text
+    tools here are concerned."""
+    for i in range(min(len(b), sniff)):
+        if b[i] == 0:
+            return True
+    return False
+
+
 def basename(path: String) -> String:
     """Return the last path component of ``path`` (no trailing slash).
 
