@@ -3159,7 +3159,7 @@ def test_desktop_confirm_dialog_download_starts_grammar_install() raises:
     grammar-install pending action and pressing 'y' must clear the
     dialog and leave a grammar-install language recorded on the
     desktop. Doesn't actually run curl — the desktop's
-    ``_start_grammar_install`` records ``_grammar_install_lang`` only
+    ``_start_grammar_install`` records the install only
     after a successful ``InstallRunner.start``, which would normally
     require a sub-process; checking that the pending state was
     cleared is enough to verify the dispatch path."""

@@ -1048,6 +1048,14 @@ struct EditorScrollRegion(ImplicitlyCopyable, Movable):
     var right_gutter: Int
 
 
+comptime _INSTALL_LSP = 0
+comptime _INSTALL_DOCS = 1
+comptime _INSTALL_GRAMMAR = 2
+comptime _INSTALL_DICT = 3
+comptime _INSTALL_DEBUGPY = 4
+"""What ``Desktop.install_runner`` is installing (``_install_kind``)."""
+
+
 comptime _SLOT_TEST = 0
 comptime _SLOT_FIND = 1
 comptime _SLOT_DEBUG = 2
@@ -1382,11 +1390,6 @@ struct Desktop(Movable):
     var doc_stores: List[DocStore]
     var doc_languages: List[String]
     var doc_pick: DocPick
-    # Language id of the docs install currently in flight. Mirrors
-    # ``_install_lang`` but for the docs path so the two install kinds
-    # don't fight over the same field. ``install_runner`` is shared:
-    # one of LSP-install / docs-install can be in flight at a time.
-    var _doc_install_lang: String
     # One nag per language per session for docs (mirrors ``_lsp_install_prompted``).
     var _doc_install_prompted: List[String]
     # Most recently opened docset's language id. Used as the fallback
@@ -1563,11 +1566,6 @@ struct Desktop(Movable):
     # F5 after the user said no would be hostile, and re-asking after a
     # successful install would race the pip-installed bits.
     var _debugpy_install_prompted: List[String]
-    # Set while the in-flight ``install_runner`` job is a debugpy install,
-    # so ``_on_install_complete`` can dispatch to the debugpy-specific
-    # completion path (which retries the deferred ``dap.start``) instead
-    # of treating it as an LSP install.
-    var _debugpy_install_active: Bool
     # Stash for the ``dap.start`` parameters that were deferred while we
     # asked the user about installing debugpy. Replayed by
     # ``_on_debugpy_install_complete`` after the pip install finishes.
@@ -1597,30 +1595,24 @@ struct Desktop(Movable):
     # a slow or hung formatter can't freeze the UI. New saves append;
     # completion reloads the buffer + flashes a status-bar message.
     var pending_save_actions: List[PendingSaveAction]
-    # Language id of the install currently in flight. We remember it so
-    # that on success we can re-attempt to start the LSP for any open
-    # editor windows of that language without the user having to close
-    # and re-open the file.
+    # The install currently in flight: the language (the venv for
+    # debugpy) — on success, an LSP is re-attempted for the open editors
+    # of that language, a grammar's or dictionary's editors re-highlight.
     var _install_lang: String
+    # What the single-slot ``install_runner`` is installing for
+    # ``_install_lang`` (an ``_INSTALL_*``), which picks the completion
+    # handler: the LSP's, a docset's, a grammar's, a dictionary's, or
+    # debugpy's (which replays the deferred ``dap.start``).
+    var _install_kind: Int
     # Grammar-download bookkeeping (mirrors the LSP install fields above).
     # ``_grammar_install_prompted`` is the one-nag-per-language cap;
     # ``_pending_grammar_prompt_ext`` carries a deferred prompt past a
-    # blocking modal; ``_grammar_install_lang`` is the language id whose
-    # grammar curl is currently in flight, so the install-complete hook
-    # can clear the highlight cache on every open editor of that
-    # extension and the colors light up immediately.
+    # blocking modal.
     var _grammar_install_prompted: List[String]
     # The downloadable-grammar registry, built on first use
     # (``_load_grammar_specs``).
     var _grammar_specs: List[DownloadableGrammar]
     var _pending_grammar_prompt_ext: String
-    var _grammar_install_lang: String
-    # Spell dictionary install bookkeeping. Settings emits requests to
-    # install / remove an extra-language wordlist; ``_dict_install_lang``
-    # is the language whose curl is currently in flight, so the
-    # install-complete hook reloads the speller and invalidates spell
-    # highlights on every open editor.
-    var _dict_install_lang: String
     # Debugger state. One ``DapManager`` per Desktop (single concurrent
     # session) — multi-session debugging would need a list keyed by
     # something (language? session id?), and we don't have a use case
@@ -2087,7 +2079,6 @@ struct Desktop(Movable):
         self.doc_stores = List[DocStore]()
         self.doc_languages = List[String]()
         self.doc_pick = DocPick()
-        self._doc_install_lang = String("")
         self._doc_install_prompted = List[String]()
         self._last_doc_lang = String("")
         self.grammar_registry = GrammarRegistry()
@@ -2138,7 +2129,6 @@ struct Desktop(Movable):
         self._lsp_install_prompted = List[String]()
         self._venv_lsp_installed = List[String]()
         self._debugpy_install_prompted = List[String]()
-        self._debugpy_install_active = False
         self._pending_dap_program = String("")
         self._pending_dap_cwd = String("")
         self._pending_dap_args = List[String]()
@@ -2149,11 +2139,10 @@ struct Desktop(Movable):
         self.install_runner = InstallRunner()
         self.pending_save_actions = List[PendingSaveAction]()
         self._install_lang = String("")
+        self._install_kind = _INSTALL_LSP
         self._grammar_install_prompted = List[String]()
         self._grammar_specs = List[DownloadableGrammar]()
         self._pending_grammar_prompt_ext = String("")
-        self._grammar_install_lang = String("")
-        self._dict_install_lang = String("")
         self.dap = DapManager()
         self.dap_specs = built_in_debuggers()
         self.debug_pane = DebugPane()
@@ -3990,6 +3979,11 @@ struct Desktop(Movable):
         var y = (screen.b.y - 3) // 2
         return Rect(x + 1, y + 1, x + width - 1, y + 2)
 
+    def _view_config_changed(mut self):
+        """A view setting changed: apply it, and save it for every window."""
+        self._apply_view_config()
+        self._persist_config()
+
     def _apply_view_config(mut self):
         """Push ``self.config`` into every editor window. Called every
         paint so the global preference is the source of truth no matter
@@ -5571,7 +5565,7 @@ struct Desktop(Movable):
         var spec = specs[spec_idx].copy()
         var cmd = grammar_install_command(spec.language_id, spec.url)
         if self._start_download(spec.display, String("grammar"), cmd):
-            self._grammar_install_lang = lang
+            self._start_install(_INSTALL_GRAMMAR, lang)
 
     def _on_grammar_install_complete(
         mut self, result: InstallResult, screen: Rect,
@@ -5582,8 +5576,7 @@ struct Desktop(Movable):
         without needing the user to close+reopen the file. Failure:
         same shape as the LSP install path — pop the curl output into a
         new editor window."""
-        var lang = self._grammar_install_lang
-        self._grammar_install_lang = String("")
+        var lang = self._install_lang
         if result.ok():
             self._say(String("Installed ") + result.label)
             # Drop the cached compile of any prior in-process state for
@@ -5628,7 +5621,7 @@ struct Desktop(Movable):
         var spec = specs[spec_idx]
         var cmd = dictionary_install_command(spec.language_id, spec.url)
         if self._start_download(spec.display, String("dictionary"), cmd):
-            self._dict_install_lang = lang
+            self._start_install(_INSTALL_DICT, lang)
 
     def _do_dict_remove(mut self, lang: String):
         """Delete the on-disk wordlist for ``lang`` and reload the
@@ -5673,7 +5666,6 @@ struct Desktop(Movable):
         every editor's spell highlights. Failure: pop the curl output
         into a new editor window — same shape as LSP / grammar / docs
         install failures."""
-        self._dict_install_lang = String("")
         if result.ok():
             self._reload_speller()
             self._say(String("Installed ") + result.label)
@@ -9161,8 +9153,7 @@ struct Desktop(Movable):
             self.settings.cfg.font_size = self.config.font_size
             self.settings.area_font_choices = self._area_font_labels()
             self.settings.cfg.area_font_sizes = self.config.area_font_sizes.copy()
-        self._apply_view_config()
-        self._persist_config()
+        self._view_config_changed()
 
     def close_tab(mut self, idx: Int):
         """The host tab strip's close button: close window ``idx`` the way
@@ -10423,11 +10414,11 @@ struct Desktop(Movable):
         if action == EDITOR_FIND:
             self._open_find_prompt()
             return Optional[String]()
-        if action == EDITOR_FIND_NEXT:
-            # Repeat the previous Find without re-prompting. ``find_next``
-            # already wraps to the top when it falls off the end. With no
-            # prior search, fall through to the Find prompt so Ctrl+G is
-            # still useful on a fresh editor.
+        if action == EDITOR_FIND_NEXT or action == EDITOR_FIND_PREV:
+            # Repeat the previous Find without re-prompting, forward or
+            # back (wrapping past either end). With no prior search, the
+            # Find prompt instead, so Ctrl+G is still useful on a fresh
+            # editor.
             if len(self._last_search.as_bytes()) == 0:
                 self._open_find_prompt()
                 return Optional[String]()
@@ -10435,19 +10426,7 @@ struct Desktop(Movable):
             if idx >= 0:
                 var needle = self._last_search
                 var opts = self._last_search_opts
-                self._find_step(idx, needle, opts, True)
-            return Optional[String]()
-        if action == EDITOR_FIND_PREV:
-            # Mirror of Find Next, walking backward from the current
-            # selection / cursor and wrapping to the file end on miss.
-            if len(self._last_search.as_bytes()) == 0:
-                self._open_find_prompt()
-                return Optional[String]()
-            var idx = self._focused_editor_idx()
-            if idx >= 0:
-                var needle = self._last_search
-                var opts = self._last_search_opts
-                self._find_step(idx, needle, opts, False)
+                self._find_step(idx, needle, opts, action == EDITOR_FIND_NEXT)
             return Optional[String]()
         if action == EDITOR_REPLACE:
             self._open_replace_prompt()
@@ -10533,13 +10512,11 @@ struct Desktop(Movable):
             return Optional[String]()
         if action == EDITOR_TOGGLE_LINE_NUMBERS:
             self.config.line_numbers = not self.config.line_numbers
-            self._apply_view_config()
-            self._persist_config()
+            self._view_config_changed()
             return Optional[String]()
         if action == EDITOR_TOGGLE_COMPRESS_KWARGS:
             self.config.compress_kwargs = not self.config.compress_kwargs
-            self._apply_view_config()
-            self._persist_config()
+            self._view_config_changed()
             return Optional[String]()
         if action == EDITOR_TOGGLE_GIT_CHANGES:
             self.config.git_changes = not self.config.git_changes
@@ -10549,13 +10526,11 @@ struct Desktop(Movable):
             for i in range(len(self.windows.windows)):
                 if self.windows.windows[i].is_editor:
                     self.windows.windows[i].editor.invalidate_git_changes()
-            self._apply_view_config()
-            self._persist_config()
+            self._view_config_changed()
             return Optional[String]()
         if action == EDITOR_TOGGLE_TAB_BAR:
             self.config.tab_bar = not self.config.tab_bar
-            self._apply_view_config()
-            self._persist_config()
+            self._view_config_changed()
             return Optional[String]()
         if (
             action == VIEW_CLASSIC_UI or action == VIEW_NATIVE_UI
@@ -10568,18 +10543,15 @@ struct Desktop(Movable):
             # An open Settings shows it, and writes it back with its edits
             self.settings.cfg.native_ui = self.config.native_ui
             self.settings.cfg.platinum_ui = self.config.platinum_ui
-            self._apply_view_config()
-            self._persist_config()
+            self._view_config_changed()
             return Optional[String]()
         if action == EDITOR_TOGGLE_MINIMAP:
             self.config.minimap = not self.config.minimap
-            self._apply_view_config()
-            self._persist_config()
+            self._view_config_changed()
             return Optional[String]()
         if action == EDITOR_TOGGLE_STICKY_SCROLL:
             self.config.sticky_scroll = not self.config.sticky_scroll
-            self._apply_view_config()
-            self._persist_config()
+            self._view_config_changed()
             return Optional[String]()
         if action == GIT_LOCAL_CHANGES:
             if self.local_changes.active and self.git_windowed():
@@ -10686,45 +10658,29 @@ struct Desktop(Movable):
                 if n > 1:
                     self.fill_dialog.open(n)
             return Optional[String]()
-        if action == EDITOR_UNDO:
+        if action == EDITOR_UNDO or action == EDITOR_REDO:
             var idx = self._keyboard_editor_idx()
             if idx >= 0:
-                if self.windows.windows[idx].editor.undo():
-                    self.windows.windows[idx].editor.reveal_cursor(
-                        self.windows.windows[idx].editor_view(),
-                    )
+                ref ed = self.windows.windows[idx].editor
+                var moved = ed.undo() if action == EDITOR_UNDO else ed.redo()
+                if moved:
+                    ed.reveal_cursor(self.windows.windows[idx].editor_view())
             return Optional[String]()
-        if action == EDITOR_REDO:
-            var idx = self._keyboard_editor_idx()
-            if idx >= 0:
-                if self.windows.windows[idx].editor.redo():
-                    self.windows.windows[idx].editor.reveal_cursor(
-                        self.windows.windows[idx].editor_view(),
-                    )
-            return Optional[String]()
-        if action == PROJECT_FIND:
+        if action == PROJECT_FIND or action == PROJECT_REPLACE:
             if self.project:
                 if len(which(String("rg")).as_bytes()) == 0:
                     self.windows.add(_rg_missing_window())
                 else:
                     var prefill = self._selection_seed_for_search()
                     self._close_pickers()
-                    self.project_find.open(
-                        self.project.value(), prefill,
-                        select_prefill=True,
-                    )
-            return Optional[String]()
-        if action == PROJECT_REPLACE:
-            if self.project:
-                if len(which(String("rg")).as_bytes()) == 0:
-                    self.windows.add(_rg_missing_window())
-                else:
-                    self._close_pickers()
-                    self.project_find.open_replace(
-                        self.project.value(),
-                        self._selection_seed_for_search(),
-                        select_prefill=True,
-                    )
+                    if action == PROJECT_FIND:
+                        self.project_find.open(
+                            self.project.value(), prefill, select_prefill=True,
+                        )
+                    else:
+                        self.project_find.open_replace(
+                            self.project.value(), prefill, select_prefill=True,
+                        )
             return Optional[String]()
         if action == WINDOW_MAXIMIZE_ALL:
             self.windows.maximize_all(self.workspace_rect(screen))
@@ -10770,22 +10726,17 @@ struct Desktop(Movable):
             # when the user expects them at the editor cursor.
             self._focus_dock(DOCK_NONE)
             return Optional[String]()
-        if action == WINDOW_ROTATE_NEXT:
-            # ⇧⌘→ is a native NSMenu key-equivalent, so AppKit dispatches
-            # this action before the keystroke can reach review's own event
-            # handling. While reviewing, repurpose it as next-change (rolling
-            # across files) instead of rotating windows out of review.
+        if action == WINDOW_ROTATE_NEXT or action == WINDOW_ROTATE_PREV:
+            # ⇧⌘→ / ⇧⌘← are native NSMenu key-equivalents, so AppKit
+            # dispatches these actions before the keystroke can reach
+            # review's own event handling. While reviewing, repurpose them
+            # as next / previous change (rolling across files) instead of
+            # rotating windows out of review.
+            var forward = action == WINDOW_ROTATE_NEXT
             if self.review.is_reviewing():
-                self._review_goto_change(1)
+                self._review_goto_change(1 if forward else -1)
                 return Optional[String]()
-            self.windows.rotate_focus(True)
-            self._focus_dock(DOCK_NONE)
-            return Optional[String]()
-        if action == WINDOW_ROTATE_PREV:
-            if self.review.is_reviewing():
-                self._review_goto_change(-1)
-                return Optional[String]()
-            self.windows.rotate_focus(False)
+            self.windows.rotate_focus(forward)
             self._focus_dock(DOCK_NONE)
             return Optional[String]()
         if action == EDITOR_NAV_BACK:
@@ -11390,21 +11341,26 @@ struct Desktop(Movable):
         whichever ``_*_install_lang`` field was set when the install
         started (mutually exclusive: only one runner is active at a
         time, and only one of these fields is non-empty)."""
-        if len(self._doc_install_lang.as_bytes()) > 0:
+        var kind = self._install_kind
+        if kind == _INSTALL_DOCS:
             self._on_doc_install_complete(result, screen)
-            return
-        if len(self._grammar_install_lang.as_bytes()) > 0:
+        elif kind == _INSTALL_GRAMMAR:
             self._on_grammar_install_complete(result, screen)
-            return
-        if len(self._dict_install_lang.as_bytes()) > 0:
+        elif kind == _INSTALL_DICT:
             self._on_dict_install_complete(result, screen)
-            return
-        if self._debugpy_install_active:
-            self._debugpy_install_active = False
+        elif kind == _INSTALL_DEBUGPY:
             self._on_debugpy_install_complete(result, screen)
-            return
+        else:
+            self._on_lsp_install_complete(result, screen)
+
+    def _start_install(mut self, kind: Int, lang: String):
+        """Record what the ``install_runner`` that just started is
+        installing, for ``_on_install_complete``."""
+        self._install_kind = kind
+        self._install_lang = lang
+
+    def _on_lsp_install_complete(mut self, result: InstallResult, screen: Rect):
         var lang = self._install_lang
-        self._install_lang = String("")
         if result.ok():
             self._say(String("Installed ") + result.label)
             self._retry_lsp_for_language(lang)
@@ -12739,15 +12695,19 @@ struct Desktop(Movable):
                 var screen = self._last_screen
                 self._open_pane_link(req, url, screen)
             if self.terminal_panes[i].take_run_exit():
-                var status = self.terminal_panes[i].run_exit_status
-                var attr = Attr(BLACK, LIGHT_GRAY) if status == String("0") \
-                    else Attr(LIGHT_RED, LIGHT_GRAY)
-                self.status_bar.set_message(
-                    self.terminal_panes[i].run_target + String(" exited (")
-                        + status + String(")"),
-                    attr,
+                self._say_exit(
+                    self.terminal_panes[i].run_target,
+                    self.terminal_panes[i].run_exit_status,
                 )
             i += 1
+
+    def _say_exit(mut self, name: String, status: String):
+        """``<name> exited (<status>)`` on the status bar, red unless 0."""
+        self.status_bar.set_message(
+            name + String(" exited (") + status + String(")"),
+            Attr(BLACK, LIGHT_GRAY) if status == String("0")
+            else Attr(LIGHT_RED, LIGHT_GRAY),
+        )
 
     def take_attention_events(mut self) -> Int:
         """Drain and return every pending attention event: Desktop-level
@@ -14075,12 +14035,7 @@ struct Desktop(Movable):
                     + String(code) + String("]"),
                 UInt8(2),  # PANE_OUT_CONSOLE
             )
-            var attr = Attr(BLACK, LIGHT_GRAY) if code == 0 \
-                else Attr(LIGHT_RED, LIGHT_GRAY)
-            self.status_bar.set_message(
-                name + String(" exited (") + String(code) + String(")"),
-                attr,
-            )
+            self._say_exit(name, String(code))
             # Pin the output pane open until the user dismisses it —
             # otherwise the exit message and any tail output flash off
             # screen as ``run_session.is_active()`` flips to False.
@@ -14152,13 +14107,7 @@ struct Desktop(Movable):
             return
         self.test_pane.tick()
         if not self.test_pane.running():
-            var code = self.test_pane.exit_code
-            var attr = Attr(BLACK, LIGHT_GRAY) if code == 0 \
-                else Attr(LIGHT_RED, LIGHT_GRAY)
-            self.status_bar.set_message(
-                String("tests exited (") + String(code) + String(")"),
-                attr,
-            )
+            self._say_exit(String("tests"), String(self.test_pane.exit_code))
             # Pin the pane open so the results don't flash off screen
             # when ``running()`` flips to False.
             self._test_output_held = True
@@ -15961,24 +15910,31 @@ struct Desktop(Movable):
         the query; pass -1 to skip seeding (fallback tiers where no
         editor was usable).
         """
-        var spec_idx = find_docset_by_language(self.doc_specs, lang)
-        if spec_idx < 0:
-            return False
-        var spec = self.doc_specs[spec_idx].copy()
-        var dest = self._doc_dest_dir(spec.slug)
-        var store_idx = self._ensure_doc_store(spec.language_id)
-        if store_idx < 0:
-            return False
-        if not self.doc_stores[store_idx].is_installed(dest):
-            return False
+        var store_idx: Int
         try:
-            self.doc_stores[store_idx].load(dest)
+            store_idx = self._installed_doc_store(lang)
         except e:
             self._say_error(String("Docs load failed: ") + String(e))
             return True
-        self._show_doc_pick(store_idx, spec.display, spec.language_id,
-            focused_editor_idx)
+        if store_idx < 0:
+            return False
+        var display = self.doc_stores[store_idx].display
+        self._show_doc_pick(store_idx, display, lang, focused_editor_idx)
         return True
+
+    def _installed_doc_store(mut self, lang: String) raises -> Int:
+        """The loaded docs for ``lang`` (an index into ``doc_stores``), or
+        -1 when it has no docset or isn't downloaded. Raises when the
+        downloaded files don't load."""
+        var spec_idx = find_docset_by_language(self.doc_specs, lang)
+        if spec_idx < 0:
+            return -1
+        var dest = self._doc_dest_dir(self.doc_specs[spec_idx].slug)
+        var store_idx = self._ensure_doc_store(lang)
+        if store_idx < 0 or not self.doc_stores[store_idx].is_installed(dest):
+            return -1
+        self.doc_stores[store_idx].load(dest)
+        return store_idx
 
     def _show_doc_pick(
         mut self, store_idx: Int, display: String, language_id: String,
@@ -16234,7 +16190,7 @@ struct Desktop(Movable):
             self.install_runner.start(
                 String("python LSP into venv"), cmd,
             )
-            self._install_lang = String("python")
+            self._start_install(_INSTALL_LSP, String("python"))
             self._say(String("Installing ") + package + String(" into ") + venv_dir)
         except e:
             print("desktop: _start_venv_lsp_install", venv_dir, ":", String(e))
@@ -16255,7 +16211,7 @@ struct Desktop(Movable):
         var dest = self._doc_dest_dir(spec.slug)
         var cmd = docs_install_command(spec.slug, dest)
         if self._start_download(spec.display, String("docs"), cmd):
-            self._doc_install_lang = lang
+            self._start_install(_INSTALL_DOCS, lang)
 
     def _on_doc_install_complete(
         mut self, result: InstallResult, screen: Rect,
@@ -16264,28 +16220,12 @@ struct Desktop(Movable):
         picker right away so the user sees the entries they just paid
         for. Failure: same shape as the LSP install path — popup an
         editor window with the curl output."""
-        var lang = self._doc_install_lang
-        self._doc_install_lang = String("")
+        var lang = self._install_lang
         if result.ok():
-            var store_idx = self._ensure_doc_store(lang)
-            if store_idx < 0:
-                return
-            var spec_idx = find_docset_by_language(self.doc_specs, lang)
-            if spec_idx < 0:
-                return
-            var spec = self.doc_specs[spec_idx].copy()
-            var dest = self._doc_dest_dir(spec.slug)
-            try:
-                self.doc_stores[store_idx].load(dest)
-            except e:
-                self._say_error(String("Docs load failed: ") + String(e))
-                return
             self._say(String("Installed ") + result.label)
             # Open the picker now — the user just opted in to docs, so
             # taking them straight to the listing is the obvious follow-up.
-            self._show_doc_pick(
-                store_idx, spec.display, lang, self._focused_editor_idx(),
-            )
+            _ = self._open_doc_pick_for_lang(lang, self._focused_editor_idx())
         else:
             self._show_install_failure(
                 String("Docs install failed"), result, screen,
@@ -16309,31 +16249,24 @@ struct Desktop(Movable):
           methods still resolve. Multiple suffix matches → first one
           wins; the user can still hit Ctrl+K to disambiguate.
         """
-        var spec_idx = find_docset_by_language(self.doc_specs, lang)
-        if spec_idx < 0:
-            return False
-        var spec = self.doc_specs[spec_idx].copy()
-        var dest = self._doc_dest_dir(spec.slug)
-        var store_idx = self._ensure_doc_store(lang)
-        if store_idx < 0:
-            return False
         # Don't trigger an install here — silently bail when the user
         # hasn't opted in to docs for this language yet.
-        if not self.doc_stores[store_idx].is_installed(dest):
+        var store_idx: Int
+        try:
+            store_idx = self._installed_doc_store(lang)
+        except:
             return False
-        if not self.doc_stores[store_idx].loaded:
-            try:
-                self.doc_stores[store_idx].load(dest)
-            except:
-                return False
+        if store_idx < 0:
+            return False
+        var display = self.doc_stores[store_idx].display
         var entry_idx = _find_doc_entry_for_word(
             self.doc_stores[store_idx].entries, word,
         )
         if entry_idx < 0:
             return False
-        self._open_doc_entry(entry_idx, spec.display, screen)
+        self._open_doc_entry(entry_idx, display, screen)
         self._say(
-            String("Opened docs: ") + word + String(" (") + spec.display + String(")"),
+            String("Opened docs: ") + word + String(" (") + display + String(")"),
         )
         return True
 
@@ -17568,20 +17501,15 @@ struct Desktop(Movable):
             self.windows.windows[idx].editor.pending_definition = \
                 Optional[DefinitionRequest](DefinitionRequest(row, col, word^))
             return
-        if act == CTX_MENU_ACTION_TYPE_DEFINITION:
-            self._dispatch_navigation(
-                String("textDocument/typeDefinition"), idx, row, col, word^,
-            )
-            return
-        if act == CTX_MENU_ACTION_IMPLEMENTATION:
-            self._dispatch_navigation(
-                String("textDocument/implementation"), idx, row, col, word^,
-            )
-            return
-        if act == CTX_MENU_ACTION_DECLARATION:
-            self._dispatch_navigation(
-                String("textDocument/declaration"), idx, row, col, word^,
-            )
+        if act == CTX_MENU_ACTION_TYPE_DEFINITION \
+                or act == CTX_MENU_ACTION_IMPLEMENTATION \
+                or act == CTX_MENU_ACTION_DECLARATION:
+            var method = String("textDocument/typeDefinition")
+            if act == CTX_MENU_ACTION_IMPLEMENTATION:
+                method = String("textDocument/implementation")
+            elif act == CTX_MENU_ACTION_DECLARATION:
+                method = String("textDocument/declaration")
+            self._dispatch_navigation(method, idx, row, col, word^)
             return
         if act == CTX_MENU_ACTION_REFERENCES:
             var path = self.windows.windows[idx].editor.file_path
@@ -17621,15 +17549,26 @@ struct Desktop(Movable):
                     path, row, col, word^, text^,
                 )
             return
-        if act == CTX_MENU_ACTION_MONIKER:
+        if act == CTX_MENU_ACTION_MONIKER \
+                or act == CTX_MENU_ACTION_INLINE_COMPLETION \
+                or act == CTX_MENU_ACTION_LINKED_EDIT:
             var lsp_idx = self._ready_lsp_for_window(idx)
             if lsp_idx < 0:
                 return
             var path = self.windows.windows[idx].editor.file_path
             var text = self.windows.windows[idx].editor.lsp_text()
-            _ = self.lsp_managers[lsp_idx].request_moniker(
-                path, row, col, text^,
-            )
+            if act == CTX_MENU_ACTION_MONIKER:
+                _ = self.lsp_managers[lsp_idx].request_moniker(
+                    path, row, col, text^,
+                )
+            elif act == CTX_MENU_ACTION_INLINE_COMPLETION:
+                _ = self.lsp_managers[lsp_idx].request_inline_completion(
+                    path, row, col, text^,
+                )
+            else:
+                _ = self.lsp_managers[lsp_idx].request_linked_editing(
+                    path, row, col, text^,
+                )
             return
         if act == CTX_MENU_ACTION_COLOR_PRESENTATION:
             var lsp_idx = self._ready_lsp_for_window(idx)
@@ -17665,26 +17604,6 @@ struct Desktop(Movable):
             self._color_picker_row = sw.row
             self._color_picker_col_start = sw.col_start
             self._color_picker_col_end = sw.col_end
-            return
-        if act == CTX_MENU_ACTION_INLINE_COMPLETION:
-            var lsp_idx = self._ready_lsp_for_window(idx)
-            if lsp_idx < 0:
-                return
-            var path = self.windows.windows[idx].editor.file_path
-            var text = self.windows.windows[idx].editor.lsp_text()
-            _ = self.lsp_managers[lsp_idx].request_inline_completion(
-                path, row, col, text^,
-            )
-            return
-        if act == CTX_MENU_ACTION_LINKED_EDIT:
-            var lsp_idx = self._ready_lsp_for_window(idx)
-            if lsp_idx < 0:
-                return
-            var path = self.windows.windows[idx].editor.file_path
-            var text = self.windows.windows[idx].editor.lsp_text()
-            _ = self.lsp_managers[lsp_idx].request_linked_editing(
-                path, row, col, text^,
-            )
             return
         if act == CTX_MENU_ACTION_TOGGLE_FOLD:
             self.windows.windows[idx].editor.toggle_fold_at(row)
@@ -18386,7 +18305,7 @@ struct Desktop(Movable):
                 self.install_runner.start(
                     String("debugpy into venv"), cmd,
                 )
-                self._debugpy_install_active = True
+                self._start_install(_INSTALL_DEBUGPY, venv_dir)
                 self._say(String("Installing debugpy into ") + venv_dir)
             except:
                 self._clear_pending_dap_start()
@@ -18414,7 +18333,7 @@ struct Desktop(Movable):
                             self.install_runner.start(
                                 String(lang), String(hint),
                             )
-                            self._install_lang = lang
+                            self._start_install(_INSTALL_LSP, lang)
                             self._say(
                                 String("Installing ") + lang
                                     + String("…  (also copied to clipboard)"),
