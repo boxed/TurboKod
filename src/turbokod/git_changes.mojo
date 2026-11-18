@@ -10,7 +10,7 @@ reads as empty output; callers treat that as "nothing to show".
 from std.collections.list import List
 from std.collections.optional import Optional
 
-from .diff import OP_DELETE, OP_EQUAL, diff_lines
+from .diff import change_runs, diff_lines, line_range
 from .file_io import find_git_project, join_path, project_relative, stat_file
 from .lsp import capture_command
 from .string_utils import (
@@ -104,43 +104,15 @@ def compute_revert_block_lines(
     on every gutter click."""
     if target_row < 0 or target_row >= len(buffer_lines):
         return Optional[GitRevertBlock]()
-    var ops = diff_lines(head_lines, buffer_lines)
-    var i = 0
-    var n = len(ops)
-    while i < n:
-        if ops[i].kind == OP_EQUAL:
-            i += 1
-            continue
-        # Scan the whole non-equal run.
-        var run_start = i
-        while i < n and ops[i].kind != 0:
-            i += 1
-        # First buffer / head row in this run, plus length on each side.
-        var buf_start = -1
-        var buf_end_excl = -1
-        var head_start = -1
-        var head_end_excl = -1
-        for j in range(run_start, i):
-            if ops[j].kind == OP_DELETE:    # delete from a (head)
-                if head_start == -1:
-                    head_start = ops[j].a_index
-                head_end_excl = ops[j].a_index + 1
-            else:                   # insert from b (buffer)
-                if buf_start == -1:
-                    buf_start = ops[j].b_index
-                buf_end_excl = ops[j].b_index + 1
-        if buf_start == -1:
-            # Deletion-only run — the gutter shows nothing at this run, so
-            # a click can't have landed here. Skip.
-            continue
-        if buf_start <= target_row and target_row < buf_end_excl:
-            var head_slice = List[String]()
-            if head_start != -1:
-                for k in range(head_start, head_end_excl):
-                    head_slice.append(head_lines[k])
-            return Optional[GitRevertBlock](
-                GitRevertBlock(buf_start, buf_end_excl, head_slice^)
-            )
+    var runs = change_runs(diff_lines(head_lines, buffer_lines))
+    for ref run in runs:
+        # A deletion-only run covers no buffer rows: the gutter shows
+        # nothing there, so a click can't have landed on it.
+        if run.b_lo <= target_row and target_row < run.b_hi:
+            return Optional[GitRevertBlock](GitRevertBlock(
+                run.b_lo, run.b_hi,
+                line_range(head_lines, run.a_lo, run.a_hi),
+            ))
     return Optional[GitRevertBlock]()
 
 
@@ -438,39 +410,21 @@ def diff_buffer_marks(
     var b_mid = List[String](capacity=nb - lo - tail)
     for k in range(lo, nb - tail):
         b_mid.append(buffer_lines[k])
-    var ops = diff_lines(a_mid, b_mid)
-    for k in range(len(ops)):
-        if ops[k].a_index >= 0:
-            ops[k].a_index += lo
-        if ops[k].b_index >= 0:
-            ops[k].b_index += lo
-    var i = 0
-    var n = len(ops)
-    # Highest buffer row consumed by an equal/insert op so far — the row
-    # a following pure-deletion run sits just below. -1 before any row.
-    var last_buf_row = lo - 1
-    while i < n:
-        if ops[i].kind == OP_EQUAL:
-            last_buf_row = ops[i].b_index
-            i += 1
-            continue
-        # Buffer row immediately above this non-equal run (captured before
-        # the run's own inserts advance ``last_buf_row``).
-        var run_anchor = last_buf_row
-        # Scan the whole non-equal run first — Myers can emit inserts
-        # and deletes in either order within a run, so we can't classify
-        # an insert as ADDED vs MODIFIED until we know how many deletes
-        # share the run with it.
+    # Whole-file line numbers: the diffed middle starts at ``lo`` on both
+    # sides.
+    var runs = change_runs(diff_lines(a_mid, b_mid), lo, lo)
+    for ref run in runs:
+        # A whole run is classified at once — Myers can emit inserts and
+        # deletes in either order within it, so an insert can't be told
+        # ADDED from MODIFIED until we know how many deletes share it.
         var ins_bi = List[Int]()      # buffer rows inserted in this run
+        for r in range(run.b_lo, run.b_hi):
+            ins_bi.append(r)
         var del_ai = List[Int]()      # head rows deleted in this run
-        while i < n and ops[i].kind != 0:
-            if ops[i].kind == OP_DELETE:
-                del_ai.append(ops[i].a_index)
-            elif 0 <= ops[i].b_index and ops[i].b_index < nb:
-                ins_bi.append(ops[i].b_index)
-                last_buf_row = ops[i].b_index
-            i += 1
+        for r in range(run.a_lo, run.a_hi):
+            del_ai.append(r)
         # Pure-deletion run (deletes, no inserts): flag the row above.
+        var run_anchor = run.b_lo - 1
         if len(ins_bi) == 0 and len(del_ai) > 0 \
                 and run_anchor >= 0 and run_anchor < nb:
             deleted_below[run_anchor] = True
@@ -549,36 +503,14 @@ def compute_deletion_revert_block_lines(
     lines."""
     if marker_row < 0:
         return Optional[GitRevertBlock]()
-    var ops = diff_lines(head_lines, buffer_lines)
-    var i = 0
-    var n = len(ops)
-    var last_buf_row = -1
-    while i < n:
-        if ops[i].kind == OP_EQUAL:
-            last_buf_row = ops[i].b_index
-            i += 1
-            continue
-        var run_anchor = last_buf_row
-        var head_start = -1
-        var head_end_excl = -1
-        var has_ins = False
-        while i < n and ops[i].kind != 0:
-            if ops[i].kind == OP_DELETE:
-                if head_start == -1:
-                    head_start = ops[i].a_index
-                head_end_excl = ops[i].a_index + 1
-            else:
-                has_ins = True
-                last_buf_row = ops[i].b_index
-            i += 1
-        if (not has_ins) and head_start != -1 \
-                and run_anchor == marker_row:
-            var head_slice = List[String]()
-            for k in range(head_start, head_end_excl):
-                head_slice.append(head_lines[k])
-            return Optional[GitRevertBlock](
-                GitRevertBlock(marker_row + 1, marker_row + 1, head_slice^)
-            )
+    var runs = change_runs(diff_lines(head_lines, buffer_lines))
+    for ref run in runs:
+        if run.b_lo == run.b_hi and run.a_lo < run.a_hi \
+                and run.b_lo - 1 == marker_row:
+            return Optional[GitRevertBlock](GitRevertBlock(
+                marker_row + 1, marker_row + 1,
+                line_range(head_lines, run.a_lo, run.a_hi),
+            ))
     return Optional[GitRevertBlock]()
 
 

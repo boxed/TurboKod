@@ -223,6 +223,55 @@ def diff_row_line_label(row: DiffRow) -> String:
     return String(row.after_row + 1)
 
 
+@fieldwise_init
+struct ChangeRun(ImplicitlyCopyable, Movable):
+    """One run of an edit script between two unchanged lines: it replaces
+    lines ``[a_lo, a_hi)`` of ``a`` with ``[b_lo, b_hi)`` of ``b`` (either
+    side may be empty). Within a run each side's lines are contiguous,
+    whatever order the script lists them in; ``b_lo - 1`` is the ``b`` line
+    just above it (-1 at the top)."""
+    var a_lo: Int
+    var a_hi: Int
+    var b_lo: Int
+    var b_hi: Int
+
+
+def change_runs(
+    ops: List[DiffOp], a_start: Int = 0, b_start: Int = 0,
+) -> List[ChangeRun]:
+    """The change runs of ``ops`` (``diff_lines`` of inputs whose first
+    lines are ``a_start`` / ``b_start`` of the whole: a diff of a middle
+    slice reports whole-file lines)."""
+    var out = List[ChangeRun]()
+    var a = a_start
+    var b = b_start
+    var i = 0
+    var n = len(ops)
+    while i < n:
+        if ops[i].kind == OP_EQUAL:
+            a += 1
+            b += 1
+            i += 1
+            continue
+        var a0 = a
+        var b0 = b
+        while i < n and ops[i].kind != OP_EQUAL:
+            if ops[i].kind == OP_DELETE:
+                a += 1
+            else:
+                b += 1
+            i += 1
+        out.append(ChangeRun(a0, a, b0, b))
+    return out^
+
+
+def line_range(src: List[String], lo: Int, hi: Int) -> List[String]:
+    """``src[lo:hi]`` as a new list."""
+    var out = List[String](capacity=max(0, hi - lo))
+    _append_range(out, src, lo, hi)
+    return out^
+
+
 def build_diff_rows(before: List[String], after: List[String]) -> List[DiffRow]:
     """Interleave ``before`` / ``after`` into unified-diff rows: unchanged
     lines as context, inserts as added, deletes as removed. Within each
@@ -231,36 +280,19 @@ def build_diff_rows(before: List[String], after: List[String]) -> List[DiffRow]:
     ``after_row = -1`` — they have no line number — which is exactly the
     case the review editor must render as a no-line-number row.
     """
-    var ops = diff_lines(before, after)
     var out = List[DiffRow]()
-    var i = 0
-    var n = len(ops)
-    while i < n:
-        if ops[i].kind == OP_EQUAL:
-            out.append(DiffRow(
-                ops[i].b_index, after[ops[i].b_index], DIFF_ROW_CONTEXT,
-                ops[i].b_index,
-            ))
-            i += 1
-            continue
-        # Gather one change run, then emit removed (from before) then added
-        # (from after) so the block reads old-above-new.
-        var run_rem = List[Int]()
-        var run_add = List[Int]()
-        while i < n and ops[i].kind != 0:
-            if ops[i].kind == OP_DELETE:
-                run_rem.append(ops[i].a_index)
-            else:
-                run_add.append(ops[i].b_index)
-            i += 1
-        for r in range(len(run_rem)):
-            out.append(DiffRow(
-                -1, before[run_rem[r]], DIFF_ROW_REMOVED, run_rem[r],
-            ))
-        for r in range(len(run_add)):
-            out.append(DiffRow(
-                run_add[r], after[run_add[r]], DIFF_ROW_ADDED, run_add[r],
-            ))
+    var b = 0
+    var runs = change_runs(diff_lines(before, after))
+    for ref run in runs:
+        for k in range(b, run.b_lo):
+            out.append(DiffRow(k, after[k], DIFF_ROW_CONTEXT, k))
+        for k in range(run.a_lo, run.a_hi):
+            out.append(DiffRow(-1, before[k], DIFF_ROW_REMOVED, k))
+        for k in range(run.b_lo, run.b_hi):
+            out.append(DiffRow(k, after[k], DIFF_ROW_ADDED, k))
+        b = run.b_hi
+    for k in range(b, len(after)):
+        out.append(DiffRow(k, after[k], DIFF_ROW_CONTEXT, k))
     return out^
 
 
