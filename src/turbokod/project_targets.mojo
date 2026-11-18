@@ -419,7 +419,7 @@ def detect_project_language(project_root: String) -> String:
     py_markers.append(String("setup.cfg"))
     for i in range(len(py_markers)):
         var info = stat_file(join_path(project_root, py_markers[i]))
-        if info.ok and not info.is_dir():
+        if info.is_file():
             return String("python")
     # Fall back to a top-level ``*.py`` scan. Skip into subdirs would
     # let a single vendored Python tool flip a non-Python project to
@@ -692,6 +692,6 @@ def python_venv_dir(project_root: String) -> String:
     for i in range(len(dirs)):
         var py = join_path(dirs[i], String("bin/python"))
         var info = stat_file(py)
-        if info.ok and not info.is_dir():
+        if info.is_file():
             return dirs[i]
     return String("")

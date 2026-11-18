@@ -1053,46 +1053,43 @@ def tk_desktop_focus(h: Int, on: Int, cols: Int, rows: Int) abi("C"):
         print("turbokod: tk_desktop_focus:", String(e))
 
 
-@export
-def tk_desktop_take_panel_focus_request(h: Int) abi("C") -> Int32:
-    """Drain the one-shot "focus the panel window" request. Returns 1
-    exactly once after the user explicitly opens a new terminal pane,
-    0 otherwise. When the tool panels float on their own window the host
-    uses this to make that window key so the fresh shell is typeable
-    without a click (the auto-show poll only ``orderFront``s). Harmless
-    to poll while docked — the flag just clears."""
-    if h == 0:
-        return Int32(0)
-    return Int32(1) if _desk(h)[].consume_panel_focus_request() else Int32(0)
+comptime _REQ_PANEL_FOCUS = 1
+comptime _REQ_PANEL_FRONT = 2
+comptime _REQ_MAIN_FOCUS = 4
+comptime _REQ_GIT_FRONT = 8
 
 
 @export
-def tk_desktop_take_panel_front_request(h: Int) abi("C") -> Int32:
-    """Drain the one-shot "raise the panel window" request. Returns 1
-    exactly once after a target run / test / debug (re)start, 0 otherwise.
-    When the tool panels float on their own window the host uses this to
-    ``orderFront`` that window — *without* ``makeKey`` — so a restart
-    surfaces the panels even when they're buried behind other windows, but
-    keyboard focus stays in the editor. Unlike the auto-show poll (which
-    only fires on the empty→non-empty transition), this fires on every
-    (re)start. Harmless to poll while docked — the flag just clears."""
+def tk_desktop_take_window_requests(h: Int, mask: Int) abi("C") -> Int32:
+    """Drain the one-shot window requests in ``mask``.
+
+    Returns the bits that were set. Each fires once and clears whether
+    or not the host acts on it (docked panels have no window to raise),
+    so it can't fire stale later. The bits:
+
+    - 1: make the floating panel window key — the user opened a terminal
+      pane, and the shell should be typeable without a click.
+    - 2: ``orderFront`` the floating panel window, *without* ``makeKey``
+      — a target run / test / debug (re)started, and its output should
+      surface even when buried while keyboard focus stays in the editor.
+    - 4: ``makeKeyAndOrderFront`` the main window — a deliberate
+      open-at-line jump (an output-pane link click or a ``turbokod://``
+      open) mustn't leave the code behind the panels.
+    - 8: bring the git window forward (Git ▸ Local changes while it's up).
+    """
     if h == 0:
         return Int32(0)
-    return Int32(1) if _desk(h)[].consume_panel_front_request() else Int32(0)
-
-
-@export
-def tk_desktop_take_main_focus_request(h: Int) abi("C") -> Int32:
-    """Drain the one-shot "raise the main window" request. Returns 1
-    exactly once after a deliberate open-at-line jump (an output-pane
-    link click or a ``turbokod://`` command-line open), 0 otherwise. The
-    host uses it to ``makeKeyAndOrderFront`` the editor's main window so a
-    link clicked in the floating panels window doesn't leave the jumped-to
-    code behind the panels. Harmless to poll while docked — the flag just
-    clears."""
-    if h == 0:
-        return Int32(0)
-    return Int32(1) if _desk(h)[].consume_main_focus_request() else Int32(0)
+    ref d = _desk(h)[]
+    var out = 0
+    if (mask & _REQ_PANEL_FOCUS) != 0 and d.consume_panel_focus_request():
+        out |= _REQ_PANEL_FOCUS
+    if (mask & _REQ_PANEL_FRONT) != 0 and d.consume_panel_front_request():
+        out |= _REQ_PANEL_FRONT
+    if (mask & _REQ_MAIN_FOCUS) != 0 and d.consume_main_focus_request():
+        out |= _REQ_MAIN_FOCUS
+    if (mask & _REQ_GIT_FRONT) != 0 and d.consume_git_front_request():
+        out |= _REQ_GIT_FRONT
+    return Int32(out)
 
 
 @export
@@ -1630,25 +1627,19 @@ def tk_desktop_git_window(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
 
 
 @export
-def tk_desktop_set_project_window_key(h: Int, on: Int) abi("C"):
-    """Whether the key window is the project window (or its floating
-    panels) rather than one of its dialog windows. The host reports it
-    before dispatching an Edit-menu action, so a dialog open in a window of
-    its own (Find / Replace, Settings) only takes Paste / Undo / … typed
-    there."""
+def tk_desktop_set_key_surface(h: Int, surface: Int) abi("C"):
+    """Which of the project's surfaces has the key window:
+    ``HOST_SURFACE_MAIN``, ``HOST_SURFACE_PANELS``, or -1 for anything
+    else (one of its dialog windows). The host reports it before
+    dispatching an Edit-menu action, so a dialog open in a window of its
+    own (Find / Replace, Settings) only takes Paste / Undo / … typed
+    there, and a menu-bar chord replayed into the core reaches the
+    focused tool pane in the floating panels."""
     if h == 0:
         return
-    _desk(h)[].project_window_key = on != 0
-
-
-@export
-def tk_desktop_set_panels_window_key(h: Int, on: Int) abi("C"):
-    """Whether the key window is the floating panels' one. Reported with
-    ``tk_desktop_set_project_window_key``, so a menu-bar chord replayed
-    into the core reaches the focused tool pane there."""
-    if h == 0:
-        return
-    _desk(h)[].panels_window_key = on != 0
+    _desk(h)[].project_window_key = surface == HOST_SURFACE_MAIN \
+        or surface == HOST_SURFACE_PANELS
+    _desk(h)[].panels_window_key = surface == HOST_SURFACE_PANELS
 
 
 @export
@@ -1666,15 +1657,6 @@ def tk_desktop_set_git_docked(h: Int, on: Int) abi("C"):
     if h == 0:
         return
     _desk(h)[].git_window_docked = on != 0
-
-
-@export
-def tk_desktop_take_git_front_request(h: Int) abi("C") -> Int32:
-    """Drain the one-shot "bring the git window to the front" request
-    (Git ▸ Local changes while it's already up)."""
-    if h == 0:
-        return Int32(0)
-    return Int32(1) if _desk(h)[].consume_git_front_request() else Int32(0)
 
 
 @export

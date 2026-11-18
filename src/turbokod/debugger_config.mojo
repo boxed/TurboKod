@@ -196,11 +196,11 @@ def python_debugger_spec_for_venv(
     var venv_cands = List[AdapterCandidate]()
     var direct = join_path(bin_dir, String("debugpy-adapter"))
     var info_d = stat_file(direct)
-    if info_d.ok and not info_d.is_dir():
+    if info_d.is_file():
         venv_cands.append(_argv1(direct))
     var py = join_path(bin_dir, String("python"))
     var info_p = stat_file(py)
-    if info_p.ok and not info_p.is_dir():
+    if info_p.is_file():
         venv_cands.append(_argv3(py, String("-m"), String("debugpy.adapter")))
     if len(venv_cands) == 0:
         return spec.copy()
@@ -231,7 +231,7 @@ def python_venv_has_debugpy(venv_dir: String) -> Bool:
     var bin_dir = join_path(venv_dir, String("bin"))
     var direct = join_path(bin_dir, String("debugpy-adapter"))
     var info_d = stat_file(direct)
-    if info_d.ok and not info_d.is_dir():
+    if info_d.is_file():
         return True
     var lib_dir = join_path(venv_dir, String("lib"))
     var entries = list_directory(lib_dir)

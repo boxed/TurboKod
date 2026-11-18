@@ -258,18 +258,14 @@ void tk_desktop_git_open(int64_t h, int64_t pane, int64_t row, int64_t cols, int
 void tk_desktop_git_answer(int64_t h, int64_t cptr, int64_t clen, int64_t tptr, int64_t tlen);
 int32_t tk_desktop_git_close(int64_t h);
 int64_t tk_desktop_git_window(int64_t h, int64_t out_ptr, int64_t cap);
-// Whether the key window is the project window (or its floating panels)
-// rather than one of its dialog windows — see tk_desktop_set_project_window_key
-// in native_api.mojo.
-void tk_desktop_set_project_window_key(int64_t h, int64_t on);
-// The key window is the floating panels' one (a replayed menu chord goes to
-// the focused tool pane).
-void tk_desktop_set_panels_window_key(int64_t h, int64_t on);
+// Which surface has the key window: 0 the project window, 1 its floating
+// panels, -1 anything else (one of its dialog windows) — see
+// tk_desktop_set_key_surface in native_api.mojo.
+void tk_desktop_set_key_surface(int64_t h, int64_t surface);
 void tk_desktop_set_git_window_key(int64_t h, int64_t on);
 // The Turbo Vision look's git window is docked over the project window
 // (its dock box shows ▼) rather than floating (▲).
 void tk_desktop_set_git_docked(int64_t h, int64_t on);
-int32_t tk_desktop_take_git_front_request(int64_t h);
 int32_t tk_desktop_welcome_needed(int64_t h);
 int64_t tk_desktop_welcome_options(int64_t h, int64_t out_ptr, int64_t cap);
 void tk_desktop_welcome_apply(int64_t h, int64_t ptr, int64_t len, int64_t done);
@@ -290,22 +286,10 @@ void tk_desktop_attention_seen(int64_t h, int64_t flash);
 int64_t tk_desktop_attention_flashes(int64_t h, int64_t panels, int64_t cols, int64_t rows,
                                      int64_t out_ptr, int64_t cap);
 
-// One-shot: returns 1 once after the user explicitly opens a new terminal pane,
-// 0 otherwise. With the tool panels floating on their own window, the host uses
-// this to make that window key so the fresh shell is typeable without a click.
-int32_t tk_desktop_take_panel_focus_request(int64_t h);
-
-// One-shot: returns 1 once after a target run / test / debug (re)start, 0
-// otherwise. With the tool panels floating on their own window, the host uses
-// this to orderFront that window (NOT makeKey) so a restart surfaces the panels
-// even when buried behind other windows, without stealing keyboard focus.
-int32_t tk_desktop_take_panel_front_request(int64_t h);
-
-// One-shot: returns 1 once after a deliberate open-at-line jump (an output-pane
-// link click or a turbokod:// command-line open), 0 otherwise. The host uses it
-// to makeKeyAndOrderFront the editor's main window so a link clicked in the
-// floating panels window doesn't leave the jumped-to code behind the panels.
-int32_t tk_desktop_take_main_focus_request(int64_t h);
+// Drain the one-shot window requests in `mask` (bits: 1 make the floating
+// panel window key, 2 orderFront it without makeKey, 4 makeKeyAndOrderFront
+// the main window, 8 raise the git window); returns those that were set.
+int32_t tk_desktop_take_window_requests(int64_t h, int64_t mask);
 
 // Floating panels (native macOS) — see docs/floating-panels.md. The tool
 // panels render on a separate host window via the _panels entry points; the

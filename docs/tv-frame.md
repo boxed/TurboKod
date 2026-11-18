@@ -109,7 +109,7 @@ Settings moves it into that look's window.
 - Settings, though, is *not* modal: the project window stays usable
   beside it. So before dispatching a menu action the host reports whether
   the key window is the project window (or its floating panels):
-  `tk_desktop_set_project_window_key` → `Desktop.project_window_key`. With
+  `tk_desktop_set_key_surface` → `Desktop.project_window_key`. With
   it set, `_modal_owns_input` doesn't count Settings (or a windowed Find /
   Replace) as owning input, and ⌘V / ⌘Z typed in the project window reach
   its editor or terminal instead of being replayed into Settings' field.

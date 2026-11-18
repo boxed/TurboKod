@@ -78,6 +78,10 @@ struct FileInfo(ImplicitlyCopyable, Movable):
     def is_dir(self) -> Bool:
         return (self.mode & _S_IFMT) == _S_IFDIR
 
+    def is_file(self) -> Bool:
+        """The stat succeeded on something that isn't a directory."""
+        return self.ok and not self.is_dir()
+
     @staticmethod
     def unknown() -> Self:
         """"Not looked yet": ``ok`` False, so never the same stamp as
@@ -648,7 +652,7 @@ def find_git_project(start_path: String) -> Optional[String]:
     # at "." (whose parent is itself).
     var path = realpath_or_self(start_path)
     var info = stat_file(path)
-    if info.ok and not info.is_dir():
+    if info.is_file():
         path = parent_path(path)
     while True:
         var git_path = join_path(path, String(".git"))

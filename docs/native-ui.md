@@ -370,7 +370,7 @@ frontends' in-grid modal — is what the modal checks ask, not
 `local_changes.active`. The view notices edits saved meanwhile through its
 external-change poll. Opening a file from it leaves it open and brings the
 project window forward (`main_focus_request`); Git ▸ Local changes while
-it's up raises its window (`tk_desktop_take_git_front_request`); closing
+it's up raises its window (`tk_desktop_take_window_requests`, bit 8); closing
 the project closes it. Its title is `Local changes — <project>`
 (`LocalChanges.title`, sent as `title`).
 

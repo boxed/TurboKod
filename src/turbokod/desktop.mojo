@@ -3945,21 +3945,10 @@ struct Desktop(Movable):
                 # deep-copies the whole Editor (buffer + every highlight +
                 # undo stack + tokenizer cache) on *every mouse move*, which
                 # profiling showed dominated CPU while moving the pointer.
-                # We only need two rectangles, so read them off the window
-                # in place and compute the interior inline (``interior()``
-                # would itself copy ``self``).
                 ref win = self.windows.windows[i]
                 if win.rect.contains(pos):
-                    if win.is_editor:
-                        var inner = Rect(
-                            win.rect.a.x, win.rect.a.y,
-                            win.rect.b.x - win.gutter, win.rect.b.y,
-                        ) if win.frameless else Rect(
-                            win.rect.a.x + 1, win.rect.a.y + 1,
-                            win.rect.b.x - 1, win.rect.b.y - 1,
-                        )
-                        if inner.contains(pos):
-                            return String("text")
+                    if win.is_editor and win.interior().contains(pos):
+                        return String("text")
                     return String("default")
                 k -= 1
         return String("default")
@@ -5713,7 +5702,7 @@ struct Desktop(Movable):
                         venv, String("bin/") + cand.argv[0],
                     )
                     var vinfo = stat_file(vb)
-                    if vinfo.ok and not vinfo.is_dir():
+                    if vinfo.is_file():
                         real = vb
                 if len(real.as_bytes()) == 0:
                     real = _resolve_pyenv_shim_to_real(
@@ -16009,7 +15998,7 @@ struct Desktop(Movable):
             return False
         var py = join_path(venv_dir, String("bin/python"))
         var info_py = stat_file(py)
-        if not info_py.ok or info_py.is_dir():
+        if not info_py.is_file():
             return False
         if python_venv_has_debugpy(venv_dir):
             return False
@@ -16135,7 +16124,7 @@ struct Desktop(Movable):
             return
         var py = join_path(venv_dir, String("bin/python"))
         var info_py = stat_file(py)
-        if not info_py.ok or info_py.is_dir():
+        if not info_py.is_file():
             return
         # Already installed?  Probe for the canonical ty binary plus a
         # couple of fallbacks; any hit means the venv has *some* Python
@@ -16154,7 +16143,7 @@ struct Desktop(Movable):
             var info = stat_file(join_path(
                 venv_dir, String("bin/") + probes[i],
             ))
-            if info.ok and not info.is_dir():
+            if info.is_file():
                 return
             if len(which(probes[i]).as_bytes()) > 0:
                 return
@@ -16497,8 +16486,8 @@ struct Desktop(Movable):
         also pulls focus, and a future async refresh of the baseline
         could otherwise stale-out a stashed block."""
         var act = self.git_gutter_menu.action
-        var row = self.git_gutter_menu.row
-        var is_del = self.git_gutter_menu.is_deletion
+        var row = self.git_gutter_menu.req.row
+        var is_del = self.git_gutter_menu.req.is_deletion
         self.git_gutter_menu.close()
         if not self.windows.focused_is_editor():
             return
@@ -17012,15 +17001,8 @@ struct Desktop(Movable):
         self._file_op_path = String("")
         if len(old_path.as_bytes()) == 0:
             return
-        var trimmed = String(new_name.strip())
-        if len(trimmed.as_bytes()) == 0:
-            return
-        var new_path: String
-        if trimmed.as_bytes()[0] == 0x2F:    # absolute
-            new_path = trimmed
-        else:
-            new_path = join_path(parent_path(old_path), trimmed)
-        if new_path == old_path:
+        var new_path = _sibling_path(old_path, new_name)
+        if len(new_path.as_bytes()) == 0 or new_path == old_path:
             return
         # Changing only the case of a name finds the file itself there on a
         # case-insensitive disk, which ``realpath`` names as it is on disk
@@ -17160,14 +17142,9 @@ struct Desktop(Movable):
         self._file_op_path = String("")
         if len(src_path.as_bytes()) == 0:
             return
-        var trimmed = String(new_name.strip())
-        if len(trimmed.as_bytes()) == 0:
+        var new_path = _sibling_path(src_path, new_name)
+        if len(new_path.as_bytes()) == 0:
             return
-        var new_path: String
-        if trimmed.as_bytes()[0] == 0x2F:    # absolute
-            new_path = trimmed
-        else:
-            new_path = join_path(parent_path(src_path), trimmed)
         if stat_file(new_path).ok:
             self._say(
                 String("Duplicate: '") + basename(new_path) + String("' already exists"),
@@ -18673,6 +18650,18 @@ def _category_to_pane(category: String) -> UInt8:
     if category == String("console") or category == String("important"):
         return UInt8(2)   # PANE_OUT_CONSOLE
     return UInt8(0)       # PANE_OUT_STDOUT
+
+
+def _sibling_path(path: String, name: String) -> String:
+    """Where a Rename / Duplicate of ``path`` to the typed ``name`` goes:
+    beside ``path`` for a bare name or a relative path, verbatim for an
+    absolute one; ``""`` when nothing was typed."""
+    var trimmed = String(name.strip())
+    if len(trimmed.as_bytes()) == 0:
+        return String("")
+    if trimmed.as_bytes()[0] == 0x2F:    # absolute
+        return trimmed^
+    return join_path(parent_path(path), trimmed)
 
 
 def _find_op(submit_kind: UInt8) -> String:

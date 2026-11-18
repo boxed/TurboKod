@@ -632,6 +632,14 @@ enum CellSurface {
 /// The process-wide language-server pool every window's Desktop shares
 /// (`tk_lsp_pool_new`). A `static let` rather than a top-level constant:
 /// constants below `app.run()` in this file read 0.
+/// The one-shot window requests `tk_desktop_take_window_requests` drains.
+enum WindowRequest {
+    static let panelFocus: Int32 = 1
+    static let panelFront: Int32 = 2
+    static let mainFocus: Int32 = 4
+    static let gitFront: Int32 = 8
+}
+
 enum SharedLsp {
     static let pool: Int64 = tk_lsp_pool_new()
 }
@@ -3150,12 +3158,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             let keyWin = NSApp.isActive ? NSApp.keyWindow : nil
             for v in self.views where v.handle != 0 {
                 tk_desktop_set_host_focused(v.handle, (v.window === keyWin) ? 1 : 0)
+                let req = tk_desktop_take_window_requests(
+                    v.handle, Int64(WindowRequest.panelFocus | WindowRequest.panelFront
+                        | WindowRequest.mainFocus))
                 // The user just explicitly opened a new terminal pane. When the
                 // tool panels float on their own window, in-process focus isn't
                 // enough — make that window key so the shell is typeable without
                 // a click. Always drain (even when docked, where focus already
                 // works in-core) so the one-shot flag can't fire stale later.
-                if tk_desktop_take_panel_focus_request(v.handle) != 0 {
+                if req & WindowRequest.panelFocus != 0 {
                     if let pair = self.panels[ObjectIdentifier(v)] {
                         pair.window.makeKeyAndOrderFront(nil); changed = true
                     }
@@ -3166,7 +3177,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // keyboard focus stays in the editor (the auto-show poll only
                 // fires on the empty→non-empty transition, missing restarts).
                 // Always drain so the one-shot can't fire stale later.
-                if tk_desktop_take_panel_front_request(v.handle) != 0 {
+                if req & WindowRequest.panelFront != 0 {
                     if let pair = self.panels[ObjectIdentifier(v)] {
                         pair.window.orderFront(nil); changed = true
                     }
@@ -3176,7 +3187,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // key — the click may have come from the floating panels
                 // window sitting on top of it. Always drain so the one-shot
                 // flag can't fire stale later (no-op when docked + frontmost).
-                if tk_desktop_take_main_focus_request(v.handle) != 0 {
+                if req & WindowRequest.mainFocus != 0 {
                     // A docked git window covers the project window: step
                     // it aside (Git ▸ Local changes brings it back).
                     self.chromes[ObjectIdentifier(v)]?.gitSheet?.gitPlacement?.stepAside()
@@ -3813,8 +3824,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // lands in that dialog's field instead of the editor or terminal.
         if let v = view, v.handle != 0 {
             let s = NSApp.keyWindow?.cellView?.surface
-            tk_desktop_set_project_window_key(v.handle, s == .main || s == .panels ? 1 : 0)
-            tk_desktop_set_panels_window_key(v.handle, s == .panels ? 1 : 0)
+            tk_desktop_set_key_surface(v.handle, s == .main || s == .panels ? s!.code : -1)
         }
         if action == "edit:paste", let v = view {
             // File(s) on the clipboard → the path-format menu.
@@ -5535,7 +5545,7 @@ extension AppController {
             look = "tv"
         }
         // Git ▸ Local changes while it's up: bring its window forward.
-        let raise = tk_desktop_take_git_front_request(v.handle) != 0
+        let raise = tk_desktop_take_window_requests(v.handle, Int64(WindowRequest.gitFront)) != 0
         if let gc = chromes[id]?.gitSheet {
             guard let data = data else {
                 chromes[id]?.gitSheet = nil

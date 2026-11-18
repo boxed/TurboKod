@@ -476,7 +476,7 @@ struct SymbolIndex(Movable):
         the bytes read, for the caller's budget accounting."""
         var info = stat_file(self.files[fid])
         self._retire_segment(fid)
-        if not info.ok or info.is_dir() \
+        if not info.is_file() \
                 or Int(info.size) > _MAX_FILE_BYTES:
             self.file_mtime_sec[fid] = Int64(-1)
             self.file_mtime_nsec[fid] = Int64(-1)

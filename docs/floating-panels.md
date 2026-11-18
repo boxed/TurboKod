@@ -136,7 +136,7 @@ steal keyboard focus (you don't want Cmd+T to yank you out of the editor).
 
 That's a one-shot `Desktop.panel_front_request`, raised wherever a run/test/debug
 makes a bottom pane visible, drained by the host each tick via
-`tk_desktop_take_panel_front_request` → `pair.window.orderFront(nil)` (note:
+`tk_desktop_take_window_requests` (bit 2) → `pair.window.orderFront(nil)` (note:
 `orderFront`, **not** `makeKey`). It's the focus-less sibling of
 `panel_focus_request` — which an *explicit new terminal pane* (incl. a new Claude
 panel) raises to `makeKeyAndOrderFront` the window, because there you *do* want to
