@@ -48,11 +48,11 @@ from std.collections.list import List
 
 from .file_io import load_json_array
 from .json import (
-    JsonValue, encode_json, json_array, json_bool, json_int, json_object,
-    json_str, json_get_bool, json_get_int, json_get_string, encode_int_pair,
-    encode_int_quad, read_int_pair, read_int_quad,
+    JsonValue, encode_json, json_array, json_int, json_object, json_str,
+    json_get_int, json_get_string,
 )
 from .per_user_store import per_user_path, write_per_user_file
+from .session_store import StoredWindow
 
 
 comptime DRAFTS_FILE = String("drafts.json")
@@ -62,24 +62,10 @@ struct StoredDraft(ImplicitlyCopyable, Movable):
     """One untitled buffer's restorable state. ``content`` is the raw
     buffer text (lines joined with ``\\n``, no trailing newline — the
     same shape ``Editor.text_snapshot`` produces and ``Editor(text)``
-    consumes). ``restore_rect`` is the un-maximized rect; it equals
-    ``rect`` for a non-maximized window."""
+    consumes)."""
     var seq: Int
     var content: String
-    var rect_a_x: Int
-    var rect_a_y: Int
-    var rect_b_x: Int
-    var rect_b_y: Int
-    var is_maximized: Bool
-    var restore_a_x: Int
-    var restore_a_y: Int
-    var restore_b_x: Int
-    var restore_b_y: Int
-    var cursor_row: Int
-    var cursor_col: Int
-    var scroll_x: Int
-    var scroll_y: Int
-    var last_focus_ms: Int
+    var win: StoredWindow
     var path: String
     """Empty for an untitled buffer. Otherwise the file whose unsaved
     edits these are, kept at quit because they couldn't be saved (or
@@ -91,20 +77,7 @@ struct StoredDraft(ImplicitlyCopyable, Movable):
     def __init__(out self):
         self.seq = 0
         self.content = String("")
-        self.rect_a_x = 0
-        self.rect_a_y = 0
-        self.rect_b_x = 0
-        self.rect_b_y = 0
-        self.is_maximized = False
-        self.restore_a_x = 0
-        self.restore_a_y = 0
-        self.restore_b_x = 0
-        self.restore_b_y = 0
-        self.cursor_row = 0
-        self.cursor_col = 0
-        self.scroll_x = 0
-        self.scroll_y = 0
-        self.last_focus_ms = 0
+        self.win = StoredWindow()
         self.path = String("")
         self.base = String("")
 
@@ -119,27 +92,7 @@ def _parse_draft(node: JsonValue) -> StoredDraft:
         return d^
     d.seq = json_get_int(node, String("seq"), 0)
     d.content = json_get_string(node, String("content"))
-    var rect = read_int_quad(node, String("rect"), 0, 0, 0, 0)
-    d.rect_a_x = rect[0]
-    d.rect_a_y = rect[1]
-    d.rect_b_x = rect[2]
-    d.rect_b_y = rect[3]
-    d.is_maximized = json_get_bool(node, String("maximized"), False)
-    var restore = read_int_quad(
-        node, String("restore_rect"),
-        d.rect_a_x, d.rect_a_y, d.rect_b_x, d.rect_b_y,
-    )
-    d.restore_a_x = restore[0]
-    d.restore_a_y = restore[1]
-    d.restore_b_x = restore[2]
-    d.restore_b_y = restore[3]
-    var cursor = read_int_pair(node, String("cursor"), 0, 0)
-    d.cursor_row = cursor[0]
-    d.cursor_col = cursor[1]
-    var scroll = read_int_pair(node, String("scroll"), 0, 0)
-    d.scroll_x = scroll[0]
-    d.scroll_y = scroll[1]
-    d.last_focus_ms = json_get_int(node, String("last_focus_ms"), 0)
+    d.win = StoredWindow.from_json(node)
     d.path = json_get_string(node, String("path"))
     d.base = json_get_string(node, String("base"))
     return d^
@@ -162,20 +115,7 @@ def _encode_draft(d: StoredDraft) -> JsonValue:
     var obj = json_object()
     obj.put(String("seq"), json_int(d.seq))
     obj.put(String("content"), json_str(d.content))
-    obj.put(
-        String("rect"),
-        encode_int_quad(d.rect_a_x, d.rect_a_y, d.rect_b_x, d.rect_b_y),
-    )
-    obj.put(String("maximized"), json_bool(d.is_maximized))
-    obj.put(
-        String("restore_rect"),
-        encode_int_quad(
-            d.restore_a_x, d.restore_a_y, d.restore_b_x, d.restore_b_y,
-        ),
-    )
-    obj.put(String("cursor"), encode_int_pair(d.cursor_row, d.cursor_col))
-    obj.put(String("scroll"), encode_int_pair(d.scroll_x, d.scroll_y))
-    obj.put(String("last_focus_ms"), json_int(d.last_focus_ms))
+    d.win.put_json(obj)
     if len(d.path.as_bytes()) > 0:
         obj.put(String("path"), json_str(d.path))
         obj.put(String("base"), json_str(d.base))

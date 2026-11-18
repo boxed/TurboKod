@@ -2409,36 +2409,24 @@ def test_session_round_trip() raises:
     var s = Session()
     var w0 = SessionWindow()
     w0.path = String("src/turbokod/desktop.mojo")
-    w0.rect_a_x = 5
-    w0.rect_a_y = 3
-    w0.rect_b_x = 75
-    w0.rect_b_y = 28
-    w0.is_maximized = False
-    w0.restore_a_x = 5
-    w0.restore_a_y = 3
-    w0.restore_b_x = 75
-    w0.restore_b_y = 28
-    w0.cursor_row = 42
-    w0.cursor_col = 7
-    w0.scroll_x = 0
-    w0.scroll_y = 30
-    w0.last_focus_ms = 1_700_000_000_123
+    w0.win.rect = Rect(5, 3, 75, 28)
+    w0.win.maximized = False
+    w0.win.restore = Rect(5, 3, 75, 28)
+    w0.win.cursor_row = 42
+    w0.win.cursor_col = 7
+    w0.win.scroll_x = 0
+    w0.win.scroll_y = 30
+    w0.win.last_focus_ms = 1_700_000_000_123
     s.windows.append(w0^)
     var w1 = SessionWindow()
     w1.path = String("/abs/somewhere/else.txt")
-    w1.rect_a_x = 0
-    w1.rect_a_y = 0
-    w1.rect_b_x = 40
-    w1.rect_b_y = 20
-    w1.is_maximized = True
-    w1.restore_a_x = 10
-    w1.restore_a_y = 4
-    w1.restore_b_x = 60
-    w1.restore_b_y = 22
-    w1.cursor_row = 0
-    w1.cursor_col = 12
-    w1.scroll_x = 5
-    w1.scroll_y = 0
+    w1.win.rect = Rect(0, 0, 40, 20)
+    w1.win.maximized = True
+    w1.win.restore = Rect(10, 4, 60, 22)
+    w1.win.cursor_row = 0
+    w1.win.cursor_col = 12
+    w1.win.scroll_x = 5
+    w1.win.scroll_y = 0
     s.windows.append(w1^)
     s.z_order.append(1)
     s.z_order.append(0)
@@ -2447,16 +2435,16 @@ def test_session_round_trip() raises:
     var loaded = load_session(root)
     assert_equal(len(loaded.windows), 2)
     assert_equal(loaded.windows[0].path, String("src/turbokod/desktop.mojo"))
-    assert_equal(loaded.windows[0].rect_a_x, 5)
-    assert_equal(loaded.windows[0].rect_b_y, 28)
-    assert_equal(loaded.windows[0].cursor_row, 42)
-    assert_equal(loaded.windows[0].scroll_y, 30)
-    assert_equal(loaded.windows[0].last_focus_ms, 1_700_000_000_123)
+    assert_equal(loaded.windows[0].win.rect.a.x, 5)
+    assert_equal(loaded.windows[0].win.rect.b.y, 28)
+    assert_equal(loaded.windows[0].win.cursor_row, 42)
+    assert_equal(loaded.windows[0].win.scroll_y, 30)
+    assert_equal(loaded.windows[0].win.last_focus_ms, 1_700_000_000_123)
     # A window that never carried a timestamp loads as 0 (epoch).
-    assert_equal(loaded.windows[1].last_focus_ms, 0)
-    assert_false(loaded.windows[0].is_maximized)
-    assert_true(loaded.windows[1].is_maximized)
-    assert_equal(loaded.windows[1].restore_a_x, 10)
+    assert_equal(loaded.windows[1].win.last_focus_ms, 0)
+    assert_false(loaded.windows[0].win.maximized)
+    assert_true(loaded.windows[1].win.maximized)
+    assert_equal(loaded.windows[1].win.restore.a.x, 10)
     assert_equal(loaded.windows[1].path, String("/abs/somewhere/else.txt"))
     assert_equal(len(loaded.z_order), 2)
     assert_equal(loaded.z_order[0], 1)
@@ -2485,14 +2473,8 @@ def test_session_per_user_path() raises:
     var s = Session()
     var w = SessionWindow()
     w.path = String("main.py")
-    w.rect_a_x = 0
-    w.rect_a_y = 1
-    w.rect_b_x = 40
-    w.rect_b_y = 20
-    w.restore_a_x = 0
-    w.restore_a_y = 1
-    w.restore_b_x = 40
-    w.restore_b_y = 20
+    w.win.rect = Rect(0, 1, 40, 20)
+    w.win.restore = Rect(0, 1, 40, 20)
     s.windows.append(w^)
     s.focused = 0
     assert_true(save_session(root, s))
@@ -2640,19 +2622,13 @@ def test_desktop_restores_session_from_disk() raises:
     var s = Session()
     var sw = SessionWindow()
     sw.path = String("foo.txt")
-    sw.rect_a_x = 4
-    sw.rect_a_y = 2
-    sw.rect_b_x = 50
-    sw.rect_b_y = 18
-    sw.is_maximized = False
-    sw.restore_a_x = 4
-    sw.restore_a_y = 2
-    sw.restore_b_x = 50
-    sw.restore_b_y = 18
-    sw.cursor_row = 2
-    sw.cursor_col = 3
-    sw.scroll_x = 0
-    sw.scroll_y = 0
+    sw.win.rect = Rect(4, 2, 50, 18)
+    sw.win.maximized = False
+    sw.win.restore = Rect(4, 2, 50, 18)
+    sw.win.cursor_row = 2
+    sw.win.cursor_col = 3
+    sw.win.scroll_x = 0
+    sw.win.scroll_y = 0
     s.windows.append(sw^)
     s.z_order.append(0)
     s.focused = 0
@@ -2694,16 +2670,10 @@ def test_desktop_restores_drafts_from_disk() raises:
     var d0 = StoredDraft()
     d0.seq = 2
     d0.content = String("draft line one\ndraft line two")
-    d0.rect_a_x = 4
-    d0.rect_a_y = 2
-    d0.rect_b_x = 50
-    d0.rect_b_y = 18
-    d0.restore_a_x = 4
-    d0.restore_a_y = 2
-    d0.restore_b_x = 50
-    d0.restore_b_y = 18
-    d0.cursor_row = 1
-    d0.cursor_col = 5
+    d0.win.rect = Rect(4, 2, 50, 18)
+    d0.win.restore = Rect(4, 2, 50, 18)
+    d0.win.cursor_row = 1
+    d0.win.cursor_col = 5
     drafts.append(d0^)
     assert_true(save_drafts(root, drafts))
     var d = Desktop()
@@ -2749,15 +2719,9 @@ def test_desktop_resize_reapplies_clipped_session_rect() raises:
     var sw = SessionWindow()
     sw.path = String("foo.txt")
     # Saved rect (20, 8, 75, 24) — fits a 100x30 screen, NOT a 80x24 one.
-    sw.rect_a_x = 20
-    sw.rect_a_y = 8
-    sw.rect_b_x = 75
-    sw.rect_b_y = 24
-    sw.is_maximized = False
-    sw.restore_a_x = 20
-    sw.restore_a_y = 8
-    sw.restore_b_x = 75
-    sw.restore_b_y = 24
+    sw.win.rect = Rect(20, 8, 75, 24)
+    sw.win.maximized = False
+    sw.win.restore = Rect(20, 8, 75, 24)
     s.windows.append(sw^)
     s.z_order.append(0)
     s.focused = 0
@@ -2834,19 +2798,13 @@ def test_desktop_restores_non_maximized_rect_not_restore_rect() raises:
     sw.path = String("moved.txt")
     # User dragged the window to (20, 8, 80, 28); the stale
     # ``_restore_rect`` is the original cascade slot at (5, 2, 60, 20).
-    sw.rect_a_x = 20
-    sw.rect_a_y = 8
-    sw.rect_b_x = 80
-    sw.rect_b_y = 28
-    sw.is_maximized = False
-    sw.restore_a_x = 5
-    sw.restore_a_y = 2
-    sw.restore_b_x = 60
-    sw.restore_b_y = 20
-    sw.cursor_row = 0
-    sw.cursor_col = 0
-    sw.scroll_x = 0
-    sw.scroll_y = 0
+    sw.win.rect = Rect(20, 8, 80, 28)
+    sw.win.maximized = False
+    sw.win.restore = Rect(5, 2, 60, 20)
+    sw.win.cursor_row = 0
+    sw.win.cursor_col = 0
+    sw.win.scroll_x = 0
+    sw.win.scroll_y = 0
     s.windows.append(sw^)
     s.z_order.append(0)
     s.focused = 0
@@ -2921,10 +2879,10 @@ def test_desktop_snapshot_captures_per_window_rects() raises:
             idx_b = i
     assert_true(idx_a >= 0)
     assert_true(idx_b >= 0)
-    assert_equal(session.windows[idx_a].rect_a_x, 2)
-    assert_equal(session.windows[idx_a].rect_b_x, 30)
-    assert_equal(session.windows[idx_b].rect_a_x, 40)
-    assert_equal(session.windows[idx_b].rect_b_x, 75)
+    assert_equal(session.windows[idx_a].win.rect.a.x, 2)
+    assert_equal(session.windows[idx_a].win.rect.b.x, 30)
+    assert_equal(session.windows[idx_b].win.rect.a.x, 40)
+    assert_equal(session.windows[idx_b].win.rect.b.x, 75)
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
 
 
@@ -2944,27 +2902,15 @@ def test_desktop_restores_multiple_windows_at_distinct_positions() raises:
     var s = Session()
     var w0 = SessionWindow()
     w0.path = String("foo.txt")
-    w0.rect_a_x = 2
-    w0.rect_a_y = 1
-    w0.rect_b_x = 30
-    w0.rect_b_y = 12
-    w0.restore_a_x = 2
-    w0.restore_a_y = 1
-    w0.restore_b_x = 30
-    w0.restore_b_y = 12
+    w0.win.rect = Rect(2, 1, 30, 12)
+    w0.win.restore = Rect(2, 1, 30, 12)
     s.windows.append(w0^)
     var w1 = SessionWindow()
     w1.path = String("bar.txt")
-    w1.rect_a_x = 40
-    w1.rect_a_y = 5
-    w1.rect_b_x = 75
-    w1.rect_b_y = 25
-    w1.restore_a_x = 40
-    w1.restore_a_y = 5
-    w1.restore_b_x = 75
-    w1.restore_b_y = 25
-    w1.cursor_row = 1
-    w1.cursor_col = 2
+    w1.win.rect = Rect(40, 5, 75, 25)
+    w1.win.restore = Rect(40, 5, 75, 25)
+    w1.win.cursor_row = 1
+    w1.win.cursor_col = 2
     s.windows.append(w1^)
     s.z_order.append(0)
     s.z_order.append(1)
@@ -3024,15 +2970,9 @@ def test_desktop_restores_maximized_window_keeps_per_window_restore_rect() raise
     sw.path = String("m.txt")
     # Saved state: window is maximized to a 100×30 workspace, but the
     # underlying un-maximized rect is small (8, 4)→(40, 18).
-    sw.rect_a_x = 0
-    sw.rect_a_y = 1
-    sw.rect_b_x = 100
-    sw.rect_b_y = 28
-    sw.is_maximized = True
-    sw.restore_a_x = 8
-    sw.restore_a_y = 4
-    sw.restore_b_x = 40
-    sw.restore_b_y = 18
+    sw.win.rect = Rect(0, 1, 100, 28)
+    sw.win.maximized = True
+    sw.win.restore = Rect(8, 4, 40, 18)
     s.windows.append(sw^)
     s.focused = 0
     assert_true(save_session(root, s))

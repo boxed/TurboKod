@@ -268,10 +268,10 @@ def test_tabbed_session_saves_the_framed_layout() raises:
     d.windows.windows[0].editor.file_path = String("/x/a.txt")
     var snap = d._snapshot_session()
     assert_equal(len(snap.windows), 1)
-    assert_false(snap.windows[0].is_maximized)
+    assert_false(snap.windows[0].win.maximized)
     # The framed rect, scaled to the app's workspace (no menu row), not the
     # tab's whole workspace.
-    var saved = snap.windows[0].rect()
+    var saved = snap.windows[0].win.rect
     assert_false(saved == d.workspace_rect(_SCREEN))
     assert_equal(saved.a.x, framed.a.x)
     assert_equal(saved.b.x, framed.b.x)

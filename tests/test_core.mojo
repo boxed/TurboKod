@@ -2201,18 +2201,12 @@ def test_drafts_store_round_trip() raises:
     var d0 = StoredDraft()
     d0.seq = 1
     d0.content = String("hello\nworld")
-    d0.rect_a_x = 4
-    d0.rect_a_y = 2
-    d0.rect_b_x = 50
-    d0.rect_b_y = 18
-    d0.restore_a_x = 4
-    d0.restore_a_y = 2
-    d0.restore_b_x = 50
-    d0.restore_b_y = 18
-    d0.cursor_row = 1
-    d0.cursor_col = 3
-    d0.scroll_y = 7
-    d0.last_focus_ms = 123456
+    d0.win.rect = Rect(4, 2, 50, 18)
+    d0.win.restore = Rect(4, 2, 50, 18)
+    d0.win.cursor_row = 1
+    d0.win.cursor_col = 3
+    d0.win.scroll_y = 7
+    d0.win.last_focus_ms = 123456
     drafts.append(d0^)
     var d1 = StoredDraft()
     d1.seq = 5
@@ -2223,12 +2217,12 @@ def test_drafts_store_round_trip() raises:
     assert_equal(len(loaded), 2)
     assert_equal(loaded[0].seq, 1)
     assert_equal(loaded[0].content, String("hello\nworld"))
-    assert_equal(loaded[0].rect_a_x, 4)
-    assert_equal(loaded[0].rect_b_y, 18)
-    assert_equal(loaded[0].cursor_row, 1)
-    assert_equal(loaded[0].cursor_col, 3)
-    assert_equal(loaded[0].scroll_y, 7)
-    assert_equal(loaded[0].last_focus_ms, 123456)
+    assert_equal(loaded[0].win.rect.a.x, 4)
+    assert_equal(loaded[0].win.rect.b.y, 18)
+    assert_equal(loaded[0].win.cursor_row, 1)
+    assert_equal(loaded[0].win.cursor_col, 3)
+    assert_equal(loaded[0].win.scroll_y, 7)
+    assert_equal(loaded[0].win.last_focus_ms, 123456)
     assert_equal(loaded[1].seq, 5)
     assert_equal(loaded[1].content, String("scratch"))
     _ = external_call["system", Int32](cleanup.unsafe_ptr())

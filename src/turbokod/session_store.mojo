@@ -45,25 +45,14 @@ from .per_user_store import per_user_path, write_per_user_file
 comptime SESSION_FILE = String("session.json")
 
 
-struct SessionWindow(ImplicitlyCopyable, Movable):
-    """One file-backed editor window's restorable state.
-
-    ``path`` is project-relative when the file lives inside the project
-    root, absolute otherwise — picked at save time by
-    ``_session_relative``. ``restore_rect`` is the rect to fall back to
-    when the user un-maximizes; for a non-maximized window it equals
-    ``rect``.
-    """
-    var path: String
-    var rect_a_x: Int
-    var rect_a_y: Int
-    var rect_b_x: Int
-    var rect_b_y: Int
-    var is_maximized: Bool
-    var restore_a_x: Int
-    var restore_a_y: Int
-    var restore_b_x: Int
-    var restore_b_y: Int
+struct StoredWindow(ImplicitlyCopyable, Movable):
+    """An editor window's restorable geometry and view, as both the session
+    and the drafts store keep it: its ``rect``, whether it's maximized, the
+    ``restore`` rect it un-maximizes to (equal to ``rect`` for a window
+    that isn't), the caret and scroll, and when it was last focused."""
+    var rect: Rect
+    var restore: Rect
+    var maximized: Bool
     var cursor_row: Int
     var cursor_col: Int
     var scroll_x: Int
@@ -74,30 +63,64 @@ struct SessionWindow(ImplicitlyCopyable, Movable):
     documents when the open count would exceed ``max_open_windows``."""
 
     def __init__(out self):
-        self.path = String("")
-        self.rect_a_x = 0
-        self.rect_a_y = 0
-        self.rect_b_x = 0
-        self.rect_b_y = 0
-        self.is_maximized = False
-        self.restore_a_x = 0
-        self.restore_a_y = 0
-        self.restore_b_x = 0
-        self.restore_b_y = 0
+        self.rect = Rect(0, 0, 0, 0)
+        self.restore = Rect(0, 0, 0, 0)
+        self.maximized = False
         self.cursor_row = 0
         self.cursor_col = 0
         self.scroll_x = 0
         self.scroll_y = 0
         self.last_focus_ms = 0
 
-    def rect(self) -> Rect:
-        return Rect(self.rect_a_x, self.rect_a_y, self.rect_b_x, self.rect_b_y)
-
-    def restore_rect(self) -> Rect:
-        return Rect(
-            self.restore_a_x, self.restore_a_y,
-            self.restore_b_x, self.restore_b_y,
+    @staticmethod
+    def from_json(node: JsonValue) -> Self:
+        """Read the fields ``put_json`` writes; a missing one keeps its
+        default, and a missing ``restore_rect`` is the ``rect``."""
+        var w = Self()
+        var r = read_int_quad(node, String("rect"), 0, 0, 0, 0)
+        w.rect = Rect(r[0], r[1], r[2], r[3])
+        w.maximized = json_get_bool(node, String("maximized"), False)
+        var q = read_int_quad(
+            node, String("restore_rect"), r[0], r[1], r[2], r[3],
         )
+        w.restore = Rect(q[0], q[1], q[2], q[3])
+        var cursor = read_int_pair(node, String("cursor"), 0, 0)
+        w.cursor_row = cursor[0]
+        w.cursor_col = cursor[1]
+        var scroll = read_int_pair(node, String("scroll"), 0, 0)
+        w.scroll_x = scroll[0]
+        w.scroll_y = scroll[1]
+        w.last_focus_ms = json_get_int(node, String("last_focus_ms"), 0)
+        return w
+
+    def put_json(self, mut obj: JsonValue):
+        obj.put(String("rect"), _encode_rect(self.rect))
+        obj.put(String("maximized"), json_bool(self.maximized))
+        obj.put(String("restore_rect"), _encode_rect(self.restore))
+        obj.put(
+            String("cursor"), encode_int_pair(self.cursor_row, self.cursor_col),
+        )
+        obj.put(String("scroll"), encode_int_pair(self.scroll_x, self.scroll_y))
+        obj.put(String("last_focus_ms"), json_int(self.last_focus_ms))
+
+
+def _encode_rect(r: Rect) -> JsonValue:
+    return encode_int_quad(r.a.x, r.a.y, r.b.x, r.b.y)
+
+
+struct SessionWindow(ImplicitlyCopyable, Movable):
+    """One file-backed editor window's restorable state.
+
+    ``path`` is project-relative when the file lives inside the project
+    root, absolute otherwise — picked at save time by
+    ``_session_relative``.
+    """
+    var path: String
+    var win: StoredWindow
+
+    def __init__(out self):
+        self.path = String("")
+        self.win = StoredWindow()
 
 struct Session(Copyable, Movable):
     """Snapshot of the windows in a project, plus z-order and focus.
@@ -136,27 +159,7 @@ def _parse_session_window(node: JsonValue) -> SessionWindow:
     if not node.is_object():
         return w^
     w.path = json_get_string(node, String("path"))
-    var rect = read_int_quad(node, String("rect"), 0, 0, 0, 0)
-    w.rect_a_x = rect[0]
-    w.rect_a_y = rect[1]
-    w.rect_b_x = rect[2]
-    w.rect_b_y = rect[3]
-    w.is_maximized = json_get_bool(node, String("maximized"), False)
-    var restore = read_int_quad(
-        node, String("restore_rect"),
-        w.rect_a_x, w.rect_a_y, w.rect_b_x, w.rect_b_y,
-    )
-    w.restore_a_x = restore[0]
-    w.restore_a_y = restore[1]
-    w.restore_b_x = restore[2]
-    w.restore_b_y = restore[3]
-    var cursor = read_int_pair(node, String("cursor"), 0, 0)
-    w.cursor_row = cursor[0]
-    w.cursor_col = cursor[1]
-    var scroll = read_int_pair(node, String("scroll"), 0, 0)
-    w.scroll_x = scroll[0]
-    w.scroll_y = scroll[1]
-    w.last_focus_ms = json_get_int(node, String("last_focus_ms"), 0)
+    w.win = StoredWindow.from_json(node)
     return w^
 
 
@@ -196,20 +199,7 @@ def load_session(project_root: String) -> Session:
 def _encode_session_window(w: SessionWindow) -> JsonValue:
     var obj = json_object()
     obj.put(String("path"), json_str(w.path))
-    obj.put(
-        String("rect"),
-        encode_int_quad(w.rect_a_x, w.rect_a_y, w.rect_b_x, w.rect_b_y),
-    )
-    obj.put(String("maximized"), json_bool(w.is_maximized))
-    obj.put(
-        String("restore_rect"),
-        encode_int_quad(
-            w.restore_a_x, w.restore_a_y, w.restore_b_x, w.restore_b_y,
-        ),
-    )
-    obj.put(String("cursor"), encode_int_pair(w.cursor_row, w.cursor_col))
-    obj.put(String("scroll"), encode_int_pair(w.scroll_x, w.scroll_y))
-    obj.put(String("last_focus_ms"), json_int(w.last_focus_ms))
+    w.win.put_json(obj)
     return obj^
 
 

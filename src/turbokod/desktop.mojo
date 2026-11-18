@@ -233,7 +233,7 @@ from .string_utils import (
     fnv_int, fnv_start, fnv_str,
 )
 from .session_store import (
-    Session, SessionWindow,
+    Session, SessionWindow, StoredWindow,
     encode_session, load_session, save_session,
 )
 from .breakpoint_store import (
@@ -7299,27 +7299,13 @@ struct Desktop(Movable):
                 continue
             var sw = SessionWindow()
             sw.path = project_relative(root, fp)
+            sw.win = self._stored_window(i)
             # A window the tabbed layout maximized is saved as the framed
             # window it goes back to, so the layout survives a restart
             # with the macOS-style UI switched off.
-            var r = self.windows.windows[i].rect
             if self.windows.windows[i]._tab_maximized:
-                r = self.windows.windows[i]._restore_rect
-            sw.rect_a_x = r.a.x
-            sw.rect_a_y = r.a.y
-            sw.rect_b_x = r.b.x
-            sw.rect_b_y = r.b.y
-            sw.is_maximized = self.windows.windows[i].is_maximized \
-                and not self.windows.windows[i]._tab_maximized
-            sw.restore_a_x = self.windows.windows[i]._restore_rect.a.x
-            sw.restore_a_y = self.windows.windows[i]._restore_rect.a.y
-            sw.restore_b_x = self.windows.windows[i]._restore_rect.b.x
-            sw.restore_b_y = self.windows.windows[i]._restore_rect.b.y
-            sw.cursor_row = self.windows.windows[i].editor.selections[0].row
-            sw.cursor_col = self.windows.windows[i].editor.selections[0].col
-            sw.scroll_x = self.windows.windows[i].editor.scroll_x
-            sw.scroll_y = self.windows.windows[i].editor.scroll_y
-            sw.last_focus_ms = self.windows.windows[i]._last_focus_ms
+                sw.win.rect = sw.win.restore
+                sw.win.maximized = False
             session.windows.append(sw^)
             win_to_session.append(len(session.windows) - 1)
         # Translate z-order. Drop windows that filtered out so the
@@ -7586,22 +7572,9 @@ struct Desktop(Movable):
                     fd.path = ed.file_path
                     fd.base = ed.disk_baseline
                     fd.content = ed.text_snapshot()
-                    fd.cursor_row = ed.selections[0].row
-                    fd.cursor_col = ed.selections[0].col
-                    fd.scroll_x = ed.scroll_x
-                    fd.scroll_y = ed.scroll_y
-                    # where an untitled stand-in goes if the file is gone
-                    ref w = self.windows.windows[i]
-                    fd.rect_a_x = w.rect.a.x
-                    fd.rect_a_y = w.rect.a.y
-                    fd.rect_b_x = w.rect.b.x
-                    fd.rect_b_y = w.rect.b.y
-                    fd.restore_a_x = w._restore_rect.a.x
-                    fd.restore_a_y = w._restore_rect.a.y
-                    fd.restore_b_x = w._restore_rect.b.x
-                    fd.restore_b_y = w._restore_rect.b.y
-                    fd.is_maximized = w.is_maximized
-                    fd.last_focus_ms = w._last_focus_ms
+                    # The geometry: where an untitled stand-in goes if the
+                    # file is gone.
+                    fd.win = self._stored_window(i)
                     out.append(fd^)
                 continue
             var content = self.windows.windows[i].editor.text_snapshot()
@@ -7615,22 +7588,24 @@ struct Desktop(Movable):
                 seq = len(out) + 1
             d.seq = seq
             d.content = content^
-            d.rect_a_x = self.windows.windows[i].rect.a.x
-            d.rect_a_y = self.windows.windows[i].rect.a.y
-            d.rect_b_x = self.windows.windows[i].rect.b.x
-            d.rect_b_y = self.windows.windows[i].rect.b.y
-            d.is_maximized = self.windows.windows[i].is_maximized
-            d.restore_a_x = self.windows.windows[i]._restore_rect.a.x
-            d.restore_a_y = self.windows.windows[i]._restore_rect.a.y
-            d.restore_b_x = self.windows.windows[i]._restore_rect.b.x
-            d.restore_b_y = self.windows.windows[i]._restore_rect.b.y
-            d.cursor_row = self.windows.windows[i].editor.selections[0].row
-            d.cursor_col = self.windows.windows[i].editor.selections[0].col
-            d.scroll_x = self.windows.windows[i].editor.scroll_x
-            d.scroll_y = self.windows.windows[i].editor.scroll_y
-            d.last_focus_ms = self.windows.windows[i]._last_focus_ms
+            d.win = self._stored_window(i)
             out.append(d^)
         return out^
+
+    def _stored_window(self, i: Int) -> StoredWindow:
+        """Window ``i``'s geometry, caret and scroll, as the session and
+        drafts stores keep them."""
+        ref w = self.windows.windows[i]
+        var s = StoredWindow()
+        s.rect = w.rect
+        s.restore = w._restore_rect
+        s.maximized = w.is_maximized
+        s.cursor_row = w.editor.selections[0].row
+        s.cursor_col = w.editor.selections[0].col
+        s.scroll_x = w.editor.scroll_x
+        s.scroll_y = w.editor.scroll_y
+        s.last_focus_ms = w._last_focus_ms
+        return s
 
     def _save_drafts_if_changed(mut self, with_files: Bool = False):
         """Re-encode the untitled-drafts snapshot and write it only when
@@ -7728,43 +7703,25 @@ struct Desktop(Movable):
                 title = title + String(" ") + String(seq)
             if seq > self._untitled_count:
                 self._untitled_count = seq
-            var rect = _clip_rect_to_workspace(
-                Rect(d.rect_a_x, d.rect_a_y, d.rect_b_x, d.rect_b_y),
-                workspace,
+            var w = Window.editor_window(
+                title^, _clip_rect_to_workspace(d.win.rect, workspace),
+                d.content,
             )
-            var restore = _clip_rect_to_workspace(
-                Rect(d.restore_a_x, d.restore_a_y,
-                     d.restore_b_x, d.restore_b_y),
-                workspace,
-            )
-            var w = Window.editor_window(title^, rect, d.content)
-            w._restore_rect = restore
-            w._last_focus_ms = d.last_focus_ms
+            w._last_focus_ms = d.win.last_focus_ms
             # Unsaved by definition: keep the UI showing a dirty buffer
             # even though the bytes live in drafts.json.
             w.editor.dirty = True
-            var line_count = w.editor.buffer.line_count()
-            var cr = d.cursor_row
-            if cr < 0:
-                cr = 0
-            if line_count > 0 and cr >= line_count:
-                cr = line_count - 1
-            w.editor.move_to(cr, d.cursor_col)
-            w.editor.scroll_x = d.scroll_x
-            w.editor.scroll_y = d.scroll_y
+            _apply_session_view(w.editor, d.win)
             self.windows.add(w^)
             var idx = len(self.windows.windows) - 1
-            if d.is_maximized:
-                self.windows.windows[idx].rect = workspace
-                self.windows.windows[idx].is_maximized = True
-                self.windows.windows[idx]._restore_rect = restore
+            self._place_session_window(idx, d.win, workspace)
             # This draft wins focus if it was more recently focused than
             # the current leader — or if there was no session focus at
             # all (file-less project), so a draft-only restore still lands
             # on a focused window rather than ``-1``.
-            if winner < 0 or d.last_focus_ms > winner_ms:
+            if winner < 0 or d.win.last_focus_ms > winner_ms:
                 winner = idx
-                winner_ms = d.last_focus_ms
+                winner_ms = d.win.last_focus_ms
         # Focus (and raise to top of z-order) the overall most-recently-
         # focused window. ``focus_by_index`` is a no-op for an out-of-
         # range index, so a ``-1`` winner is harmless.
@@ -7791,9 +7748,7 @@ struct Desktop(Movable):
             self.windows.windows[idx].editor.restore_unsaved(d.content, d.base)
         except:
             return False
-        self.windows.windows[idx].editor.move_to(d.cursor_row, d.cursor_col)
-        self.windows.windows[idx].editor.scroll_x = d.scroll_x
-        self.windows.windows[idx].editor.scroll_y = d.scroll_y
+        _apply_session_view(self.windows.windows[idx].editor, d.win)
         return True
 
     def _restore_session(mut self, screen: Rect):
@@ -7854,7 +7809,7 @@ struct Desktop(Movable):
                 for ci in range(len(session.windows)):
                     if allowed[ci]:
                         continue
-                    var ms = session.windows[ci].last_focus_ms
+                    var ms = session.windows[ci].win.last_focus_ms
                     if best < 0 or ms > best_ms:
                         best = ci
                         best_ms = ms
@@ -7871,8 +7826,6 @@ struct Desktop(Movable):
                 continue
             var sw = session.windows[i]
             var resolved = project_absolute(root, sw.path)
-            var rect = _clip_rect_to_workspace(sw.rect(), workspace)
-            var restore = _clip_rect_to_workspace(sw.restore_rect(), workspace)
             var existing = self._find_window_for_path(resolved)
             if existing >= 0:
                 # The window for this file is already open — likely the
@@ -7885,34 +7838,29 @@ struct Desktop(Movable):
                 # ``_restore_rect`` with the current rect, which would
                 # erase the per-window un-maximized rect we just loaded
                 # from disk.
-                self._place_session_window(existing, sw, workspace)
-                _apply_session_view(self.windows.windows[existing].editor, sw)
+                self._place_session_window(existing, sw.win, workspace)
+                _apply_session_view(
+                    self.windows.windows[existing].editor, sw.win,
+                )
                 # Keep the more-recent of the two: this window may have
                 # just been opened (stamped "now" by ``open_file``), which
                 # must win over the older persisted value.
-                if sw.last_focus_ms > self.windows.windows[existing]._last_focus_ms:
-                    self.windows.windows[existing]._last_focus_ms = sw.last_focus_ms
+                if sw.win.last_focus_ms \
+                        > self.windows.windows[existing]._last_focus_ms:
+                    self.windows.windows[existing]._last_focus_ms = \
+                        sw.win.last_focus_ms
                 session_to_window.append(existing)
                 continue
             try:
-                # Construct at the saved ``rect`` (the current/last-known
-                # position) and explicitly set ``_restore_rect`` to the
-                # saved un-maximized rect. The maximized branch below
-                # then overwrites ``rect`` to ``workspace`` if needed.
-                # We don't call ``toggle_maximize`` because that would
-                # clobber ``_restore_rect`` with the current rect.
-                var w = Window.from_file(basename(resolved), rect, resolved)
-                w._restore_rect = restore
-                w._last_focus_ms = sw.last_focus_ms
-                _apply_session_view(w.editor, sw)
+                var w = Window.from_file(
+                    basename(resolved),
+                    _clip_rect_to_workspace(sw.win.rect, workspace), resolved,
+                )
+                w._last_focus_ms = sw.win.last_focus_ms
+                _apply_session_view(w.editor, sw.win)
                 self.windows.add(w^)
                 var idx = len(self.windows.windows) - 1
-                if sw.is_maximized:
-                    # Direct field set — see the existing-window branch
-                    # for why we don't call toggle_maximize here.
-                    self.windows.windows[idx].rect = workspace
-                    self.windows.windows[idx].is_maximized = True
-                    self.windows.windows[idx]._restore_rect = restore
+                self._place_session_window(idx, sw.win, workspace)
                 debug_log(String("[_restore_session] adding window idx=")
                     + String(idx) + String(" path=") + resolved)
                 # LSP is opened lazily when the document is first focused
@@ -7958,22 +7906,22 @@ struct Desktop(Movable):
         self._last_session_json = encode_session(self._snapshot_session())
 
     def _place_session_window(
-        mut self, idx: Int, sw: SessionWindow, workspace: Rect,
+        mut self, idx: Int, sw: StoredWindow, workspace: Rect,
     ):
-        """Put open window ``idx`` where session entry ``sw`` says, clipped
-        to ``workspace``. Sets ``is_maximized`` / ``rect`` directly rather
+        """Put open window ``idx`` where ``sw`` (a session entry's or a
+        draft's) says, clipped to ``workspace``. Sets ``is_maximized`` / ``rect`` directly rather
         than calling ``toggle_maximize``, which would clobber
         ``_restore_rect`` (the saved un-maximized rect) with the current
         one."""
-        if sw.is_maximized:
+        if sw.maximized:
             self.windows.windows[idx].rect = workspace
         else:
             self.windows.windows[idx].rect = _clip_rect_to_workspace(
-                sw.rect(), workspace,
+                sw.rect, workspace,
             )
-        self.windows.windows[idx].is_maximized = sw.is_maximized
+        self.windows.windows[idx].is_maximized = sw.maximized
         self.windows.windows[idx]._restore_rect = _clip_rect_to_workspace(
-            sw.restore_rect(), workspace,
+            sw.restore, workspace,
         )
 
     def _reapply_session_rects(mut self, screen: Rect):
@@ -7995,7 +7943,7 @@ struct Desktop(Movable):
             var resolved = project_absolute(root, sw.path)
             var existing = self._find_window_for_path(resolved)
             if existing >= 0:
-                self._place_session_window(existing, sw, workspace)
+                self._place_session_window(existing, sw.win, workspace)
         # Re-baseline the window manager's workspace snapshot to the
         # workspace we just restored against — otherwise the next paint
         # would see "workspace changed since last fit" (the startup
@@ -18932,16 +18880,11 @@ def _category_to_pane(category: String) -> UInt8:
     return UInt8(0)       # PANE_OUT_STDOUT
 
 
-def _apply_session_view(mut editor: Editor, sw: SessionWindow):
-    """Restore a buffer's caret and scroll from a session entry. The row
-    is clamped to the buffer so a file truncated since the session was
-    saved can't put the caret past its end."""
-    var line_count = editor.buffer.line_count()
-    var cr = max(0, sw.cursor_row)
-    if line_count > 0 and cr >= line_count:
-        cr = line_count - 1
-    # ``move_to`` keeps the column on a character of the line as it is now.
-    editor.move_to(cr, sw.cursor_col)
+def _apply_session_view(mut editor: Editor, sw: StoredWindow):
+    """Restore a buffer's caret and scroll from a session entry or a
+    draft. ``move_to`` clamps the caret to the buffer as it is now, so a
+    file truncated since can't put it past the end."""
+    editor.move_to(sw.cursor_row, sw.cursor_col)
     editor.scroll_x = sw.scroll_x
     editor.scroll_y = sw.scroll_y
 

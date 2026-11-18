@@ -873,24 +873,21 @@ def test_restore_caps_to_most_recently_focused() raises:
     var s = Session()
     var wa = SessionWindow()
     wa.path = String("a.txt")
-    wa.rect_a_x = 2; wa.rect_a_y = 1; wa.rect_b_x = 30; wa.rect_b_y = 12
-    wa.restore_a_x = 2; wa.restore_a_y = 1
-    wa.restore_b_x = 30; wa.restore_b_y = 12
-    wa.last_focus_ms = 100
+    wa.win.rect = Rect(2, 1, 30, 12)
+    wa.win.restore = Rect(2, 1, 30, 12)
+    wa.win.last_focus_ms = 100
     s.windows.append(wa^)
     var wb = SessionWindow()
     wb.path = String("b.txt")
-    wb.rect_a_x = 32; wb.rect_a_y = 1; wb.rect_b_x = 60; wb.rect_b_y = 12
-    wb.restore_a_x = 32; wb.restore_a_y = 1
-    wb.restore_b_x = 60; wb.restore_b_y = 12
-    wb.last_focus_ms = 300
+    wb.win.rect = Rect(32, 1, 60, 12)
+    wb.win.restore = Rect(32, 1, 60, 12)
+    wb.win.last_focus_ms = 300
     s.windows.append(wb^)
     var wc = SessionWindow()
     wc.path = String("c.txt")
-    wc.rect_a_x = 2; wc.rect_a_y = 14; wc.rect_b_x = 30; wc.rect_b_y = 25
-    wc.restore_a_x = 2; wc.restore_a_y = 14
-    wc.restore_b_x = 30; wc.restore_b_y = 25
-    wc.last_focus_ms = 200
+    wc.win.rect = Rect(2, 14, 30, 25)
+    wc.win.restore = Rect(2, 14, 30, 25)
+    wc.win.last_focus_ms = 200
     s.windows.append(wc^)
     s.z_order.append(0); s.z_order.append(2); s.z_order.append(1)
     s.focused = 0
