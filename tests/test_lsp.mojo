@@ -966,17 +966,17 @@ def test_lsp_pull_diagnostics_multi_inflight() raises:
     assert_true(mgr.request_pull_diagnostics(String("/b.py")))
     assert_true(mgr.request_pull_diagnostics(String("/c.py")))
     # All three outstanding, with distinct ids (not collapsed to one slot).
-    assert_equal(len(mgr._pull_diag_ids), 3)
-    assert_equal(len(mgr._pull_diag_paths), 3)
-    assert_equal(mgr._pull_diag_paths[0], String("/a.py"))
-    assert_equal(mgr._pull_diag_paths[2], String("/c.py"))
-    assert_true(mgr._pull_diag_ids[0] != mgr._pull_diag_ids[2])
+    assert_equal(len(mgr._pull_diags), 3)
+    assert_equal(len(mgr._pull_diags), 3)
+    assert_equal(mgr._pull_diags[0].text, String("/a.py"))
+    assert_equal(mgr._pull_diags[2].text, String("/c.py"))
+    assert_true(mgr._pull_diags[0].key != mgr._pull_diags[2].key)
     # Re-pulling an already-inflight path supersedes the old entry rather
     # than duplicating it (edit-driven pull replaces the initial one).
     assert_true(mgr.request_pull_diagnostics(String("/a.py")))
-    assert_equal(len(mgr._pull_diag_paths), 3)
+    assert_equal(len(mgr._pull_diags), 3)
     # /a.py moved to the tail with a fresh id; /b.py and /c.py stay.
-    assert_equal(mgr._pull_diag_paths[2], String("/a.py"))
+    assert_equal(mgr._pull_diags[2].text, String("/a.py"))
 
 
 def test_lsp_closing_a_buffer_rearms_its_initial_pull() raises:
@@ -1020,7 +1020,7 @@ def test_lsp_diagnostic_buckets_go_with_their_documents() raises:
     # /a.py was consumed: gone, with its pull. /b.py wasn't: kept.
     assert_equal(len(mgr._diagnostic_buckets), 1)
     assert_equal(mgr._diagnostic_buckets[0].path, String("/b.py"))
-    assert_equal(len(mgr._pull_diag_paths), 0)
+    assert_equal(len(mgr._pull_diags), 0)
     # An all-clear for a closed file deletes its bucket; for one never
     # open it parks nothing.
     mgr._store_diagnostics(String("/b.py"), List[Diagnostic]())

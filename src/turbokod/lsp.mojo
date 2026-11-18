@@ -26,7 +26,7 @@ from .json import (
 from .case_fold import fold_byte
 from .string_utils import hex_digit_value, utf8_prefix
 from .posix import (
-    POSIX_SPAWN_FILE_ACTIONS_SIZE, SIGKILL, SIGTERM,
+    DRAIN_MORE, POSIX_SPAWN_FILE_ACTIONS_SIZE, SIGKILL, SIGTERM,
     alloc_zero_buffer, append_string_bytes, chdir_path, close_fd,
     drain_fd, drain_fd_string, getcwd_path, getenv_value,
     kill_pid, monotonic_ms, poll_stdin,
@@ -177,9 +177,7 @@ def _spawn_piped(
     var fa = alloc_zero_buffer(POSIX_SPAWN_FILE_ACTIONS_SIZE)
     var rc_init = posix_spawn_file_actions_init(fa)
     if Int(rc_init) != 0:
-        _ = close_fd(stdin_r); _ = close_fd(stdin_w)
-        _ = close_fd(stdout_r); _ = close_fd(stdout_w)
-        _ = close_fd(stderr_r); _ = close_fd(stderr_w)
+        _close_pipes(stdin_r, stdin_w, stdout_r, stdout_w, stderr_r, stderr_w)
         raise Error("posix_spawn_file_actions_init failed")
     # Child side: dup pipe ends onto stdin/stdout/stderr, then close
     # the parent ends in the child.
@@ -220,9 +218,7 @@ def _spawn_piped(
         if did_chdir and len(saved_cwd.as_bytes()) > 0:
             _ = chdir_path(saved_cwd)
         _ = posix_spawn_file_actions_destroy(fa)
-        _ = close_fd(stdin_r); _ = close_fd(stdin_w)
-        _ = close_fd(stdout_r); _ = close_fd(stdout_w)
-        _ = close_fd(stderr_r); _ = close_fd(stderr_w)
+        _close_pipes(stdin_r, stdin_w, stdout_r, stdout_w, stderr_r, stderr_w)
         raise Error("posix_spawnp failed")
     if did_chdir and len(saved_cwd.as_bytes()) > 0:
         _ = chdir_path(saved_cwd)
@@ -288,6 +284,12 @@ def capture_command(
     return CaptureResult(out^, err^, status)
 
 
+def _close_pipes(a: Int32, b: Int32, c: Int32, d: Int32, e: Int32, f: Int32):
+    """Close a failed spawn's three pipes, both ends each."""
+    for fd in [a, b, c, d, e, f]:
+        _ = close_fd(fd)
+
+
 def _drain_both_to_eof(out_fd: Int32, err_fd: Int32) -> Tuple[String, String]:
     """Read two pipes to EOF, whichever has data first. Reading one to EOF
     before starting the other deadlocks as soon as the child writes more
@@ -295,27 +297,18 @@ def _drain_both_to_eof(out_fd: Int32, err_fd: Int32) -> Tuple[String, String]:
     and never closes the first. Bytes accumulate in buffers and each
     String is built once (``out = out + chunk`` was O(n^2) on the many-MB
     ``rg`` / git output this drains)."""
-    var bufs = List[List[UInt8]]()
-    bufs.append(List[UInt8]())
-    bufs.append(List[UInt8]())
-    var fds = List[Int32]()
-    fds.append(out_fd)
-    fds.append(err_fd)
-    var open = List[Bool]()
-    open.append(True)
-    open.append(True)
-    var scratch = alloc_zero_buffer(8192)
+    var bufs = [List[UInt8](), List[UInt8]()]
+    var fds = [out_fd, err_fd]
+    var open = [True, True]
     while open[0] or open[1]:
         var progressed = False
         for i in range(2):
-            if not open[i] or not poll_stdin(fds[i], Int32(0)):
+            if not open[i]:
                 continue
-            var n = read_into(fds[i], scratch, 8192)
-            if n <= 0:
+            var r = drain_fd(fds[i], bufs[i], 1 << 20)
+            if r[1] != DRAIN_MORE:
                 open[i] = False
-            else:
-                bufs[i].extend(Span(scratch)[0:n])
-            progressed = True
+            progressed = progressed or r[0] > 0 or not open[i]
         if not progressed:
             # Nothing ready: block briefly on whichever is still open.
             _ = poll_stdin(fds[0] if open[0] else fds[1], Int32(20))

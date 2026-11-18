@@ -311,6 +311,27 @@ struct _InspectAnswer(Movable):
     var context: String
 
 
+@fieldwise_init
+struct _PendingEval(Copyable, Movable):
+    """An ``evaluate`` in flight: its seq, the expression, the request-time
+    context hint (``"watch"`` / ``"repl"`` / ``"hover"``, so the host can
+    route REPL console lines apart from watch folds), and whether it's the
+    condition-error dialog's test evaluate."""
+    var seq: Int
+    var expr: String
+    var context: String
+    var test: Bool
+
+
+@fieldwise_init
+struct _InflightSetBreakpoints(Copyable, Movable):
+    """A ``setBreakpoints`` in flight: its seq, the file, and the exact
+    lines sent (adapter array order; -1 for a run-to-cursor oneshot)."""
+    var seq: Int
+    var path: String
+    var lines: List[Int]
+
+
 struct _InspectRequests(Copyable, Movable):
     """The inspect-side requests in flight on one DAP connection. The
     parent session and a forked subprocess each have one: their seq
@@ -327,16 +348,9 @@ struct _InspectRequests(Copyable, Movable):
     var completions: Int
     var keys_eval: Int
     var keys_vars: Int
-    # Watch / REPL ``evaluate``s. Lists, not one slot, so every watch can
-    # be in flight at once, demuxed on ``request_seq``. ``eval_contexts``
-    # is the request-time hint (``"watch"`` / ``"repl"`` / ``"hover"``), so
-    # the host can route REPL console lines apart from watch folds.
-    var eval_seqs: List[Int]
-    var eval_exprs: List[String]
-    var eval_contexts: List[String]
-    # The condition-error dialog's test evaluates (see ``_test_evals``).
-    var test_seqs: List[Int]
-    var test_exprs: List[String]
+    # Watch / REPL / test ``evaluate``s. A list, not one slot, so every
+    # watch can be in flight at once, demuxed on ``request_seq``.
+    var evals: List[_PendingEval]
 
     def __init__(out self):
         self.stack_trace = 0
@@ -345,11 +359,7 @@ struct _InspectRequests(Copyable, Movable):
         self.completions = 0
         self.keys_eval = 0
         self.keys_vars = 0
-        self.eval_seqs = List[Int]()
-        self.eval_exprs = List[String]()
-        self.eval_contexts = List[String]()
-        self.test_seqs = List[Int]()
-        self.test_exprs = List[String]()
+        self.evals = List[_PendingEval]()
 
     def claim(mut self, rseq: Int) -> _InspectAnswer:
         """Which request ``rseq`` answers, no longer in flight once
@@ -372,17 +382,13 @@ struct _InspectRequests(Copyable, Movable):
         if rseq == self.keys_vars:
             self.keys_vars = 0
             return _InspectAnswer(_ANS_KEYS_VARS, String(""), String(""))
-        for k in range(len(self.eval_seqs)):
-            if self.eval_seqs[k] == rseq:
-                _ = self.eval_seqs.pop(k)
-                var expr = self.eval_exprs.pop(k)
-                var ctx = self.eval_contexts.pop(k)
-                return _InspectAnswer(_ANS_EVALUATE, expr^, ctx^)
-        for k in range(len(self.test_seqs)):
-            if self.test_seqs[k] == rseq:
-                _ = self.test_seqs.pop(k)
-                var expr = self.test_exprs.pop(k)
-                return _InspectAnswer(_ANS_TEST_EVALUATE, expr^, String(""))
+        for k in range(len(self.evals)):
+            if self.evals[k].seq == rseq:
+                var e = self.evals.pop(k)
+                return _InspectAnswer(
+                    _ANS_TEST_EVALUATE if e.test else _ANS_EVALUATE,
+                    e.expr, e.context,
+                )
         return _InspectAnswer(_ANS_NONE, String(""), String(""))
 
 
@@ -502,14 +508,11 @@ struct DapManager(Copyable, Movable):
     # *which* file's BPs the adapter just verified — and without that
     # we can't surface a per-BP "verified=false, message=..." back to
     # the user as a condition error.
-    var _inflight_set_breakpoints_seqs: List[Int]
-    var _inflight_set_breakpoints_paths: List[String]
-    # The exact line list (in adapter array order) we sent with each
-    # inflight request, parallel to ``_seqs``/``_paths``. The response demux
-    # MUST use this rather than re-deriving from the live BP arrays: those
-    # can change (toggle/enable/remove) between send and response, which
-    # would mis-align a ``verified=false`` rejection with the wrong line.
-    var _inflight_set_breakpoints_lines: List[List[Int]]
+    # Each keeps the exact lines sent: the response demux MUST use them
+    # rather than re-deriving from the live BP arrays, which can change
+    # (toggle/enable/remove) between send and response and would
+    # mis-align a ``verified=false`` rejection with the wrong line.
+    var _inflight_set_breakpoints: List[_InflightSetBreakpoints]
     # Buffer of breakpoint errors surfaced via ``take_breakpoint_errors``.
     # Single drain per frame; entries describe one rejected BP each.
     var _bp_errors: List[DapBreakpointError]
@@ -639,9 +642,7 @@ struct DapManager(Copyable, Movable):
         self._got_initialized_event = False
         self._launch_request_kind = DAP_REQUEST_LAUNCH
         self._bps = List[DapBreakpoint]()
-        self._inflight_set_breakpoints_seqs = List[Int]()
-        self._inflight_set_breakpoints_paths = List[String]()
-        self._inflight_set_breakpoints_lines = List[List[Int]]()
+        self._inflight_set_breakpoints = List[_InflightSetBreakpoints]()
         self._bp_errors = List[DapBreakpointError]()
         self._exception_filters = _default_exception_filters()
         self._evaluations = List[DapEvaluation]()
@@ -1185,12 +1186,9 @@ struct DapManager(Copyable, Movable):
             var seq = self.client.send_request(
                 String("setBreakpoints"), args.copy(),
             )
-            self._inflight_set_breakpoints_seqs.append(seq)
-            self._inflight_set_breakpoints_paths.append(path)
-            # Stash the exact lines we sent (in adapter array order) so the
-            # response demux maps rejections by position without re-deriving
-            # from the live arrays, which may have changed since.
-            self._inflight_set_breakpoints_lines.append(built[1].copy())
+            self._inflight_set_breakpoints.append(
+                _InflightSetBreakpoints(seq, path, built[1].copy()),
+            )
         except e:
             print("dap: setBreakpoints", path, ":", String(e))
         # Mirror to the attached subprocess if any — without this, a
@@ -1316,9 +1314,7 @@ struct DapManager(Copyable, Movable):
         if seq == 0:
             return False
         ref rq = self._requests(via_sub)
-        rq.eval_seqs.append(seq)
-        rq.eval_exprs.append(expression^)
-        rq.eval_contexts.append(context^)
+        rq.evals.append(_PendingEval(seq, expression^, context^, False))
         return True
 
     # --- completions (debug console) --------------------------------------
@@ -1979,8 +1975,8 @@ struct DapManager(Copyable, Movable):
         # invalid ``condition``, and that's the trigger for the
         # condition-fix dialog.
         var sidx = -1
-        for k in range(len(self._inflight_set_breakpoints_seqs)):
-            if self._inflight_set_breakpoints_seqs[k] == rseq:
+        for k in range(len(self._inflight_set_breakpoints)):
+            if self._inflight_set_breakpoints[k].seq == rseq:
                 sidx = k
                 break
         if sidx >= 0:
@@ -2070,17 +2066,12 @@ struct DapManager(Copyable, Movable):
         local list (filtered by enabled-state to mirror what we sent).
         Any ``verified == false`` entry produces a ``DapBreakpointError``
         for the host to surface."""
-        var path = self._inflight_set_breakpoints_paths[idx]
         # The exact lines sent with THIS request (adapter array order),
-        # captured at send time. Re-deriving from the live arrays would
-        # misalign if the user toggled/enabled/removed a BP for this path
-        # while the request was in flight. A ``-1`` entry is the oneshot
-        # "run to cursor" row (no user-visible BP).
-        var sent_lines = self._inflight_set_breakpoints_lines[idx].copy()
-        # Compact inflight tables.
-        _ = self._inflight_set_breakpoints_seqs.pop(idx)
-        _ = self._inflight_set_breakpoints_paths.pop(idx)
-        _ = self._inflight_set_breakpoints_lines.pop(idx)
+        # captured at send time. A ``-1`` entry is the oneshot "run to
+        # cursor" row (no user-visible BP).
+        var sent = self._inflight_set_breakpoints.pop(idx)
+        var path = sent.path
+        var sent_lines = sent.lines.copy()
         if not msg.body or not msg.body.value().is_object():
             return
         ref b = msg.body.value()
@@ -2129,7 +2120,7 @@ struct DapManager(Copyable, Movable):
         tell "the adapter hasn't answered yet" from "the adapter
         accepted the new condition" — only the latter is a cue to
         close the dialog."""
-        return len(self._inflight_set_breakpoints_seqs) > 0
+        return len(self._inflight_set_breakpoints) > 0
 
     def _on_inspect_answer(
         mut self, answer: _InspectAnswer, msg: DapIncoming,
@@ -2292,8 +2283,7 @@ struct DapManager(Copyable, Movable):
         if seq == 0:
             return False
         ref rq = self._requests(via_sub)
-        rq.test_seqs.append(seq)
-        rq.test_exprs.append(expression^)
+        rq.evals.append(_PendingEval(seq, expression^, String(""), True))
         return True
 
     def has_test_evaluations(self) -> Bool:

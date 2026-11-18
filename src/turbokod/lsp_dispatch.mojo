@@ -174,6 +174,22 @@ comptime _LIBPROBE_TIMEOUT_MS = 10_000
 
 
 @fieldwise_init
+struct _IdText(Copyable, Movable):
+    """A request id (or a path) and the string that goes with it: a pull
+    diagnostic's path, a request's document URI, a queued open's text."""
+    var key: String
+    var text: String
+
+
+@fieldwise_init
+struct _InflightProbe(Copyable, Movable):
+    var id: String
+    var word: String
+    var tag: Int
+    var sent_ms: Int
+
+
+@fieldwise_init
 struct LibraryProbe(ImplicitlyCopyable, Movable):
     """A library-word probe's answer: where ``word`` is defined (None
     when the server found nothing), and the ``tag`` it was sent with."""
@@ -852,8 +868,7 @@ struct LspManager(Copyable, Movable):
     # than a per-request ``_x_path`` field means every request — including
     # ones added later — gets it for free. Bounded ring: a response we
     # never see would otherwise leak an entry per request.
-    var _req_uri_ids: List[String]
-    var _req_uris: List[String]
+    var _req_uris: List[_IdText]
     # Server-driven invalidation (``workspace/*/refresh``). The server tells
     # us its previous answers for a whole class of feature are stale — after
     # a build finishes, a dependency resolves, a config file changes. We used
@@ -933,10 +948,7 @@ struct LspManager(Copyable, Movable):
     # words are library symbols (``Desktop._maybe_probe_library_word``,
     # ``_library_check_step``). Slots of their own so they never disturb
     # a user's Cmd+click; answers queue in arrival order.
-    var _libprobe_ids: List[String]
-    var _libprobe_words: List[String]
-    var _libprobe_tags: List[Int]
-    var _libprobe_sent_ms: List[Int]
+    var _libprobes: List[_InflightProbe]
     var _libprobe_done: List[LibraryProbe]
     # ``textDocument/prepareRename`` round-trip that gates the rename
     # flow. ``_prepare_rename_state``: 0 = unsupported / errored (host
@@ -1126,8 +1138,7 @@ struct LspManager(Copyable, Movable):
     # ``_diagnostic_buckets`` the push path uses. ``_pulled_paths`` records
     # every path we've requested so the host can fire the *initial* pull
     # exactly once per buffer (subsequent pulls are edit-driven).
-    var _pull_diag_ids: List[String]
-    var _pull_diag_paths: List[String]
+    var _pull_diags: List[_IdText]   # (request id, path)
     var _pulled_paths: List[String]
     # ``textDocument/willSaveWaitUntil`` — the server returns a
     # ``TextEdit[]`` to apply before the buffer is written (e.g. organize
@@ -1178,8 +1189,7 @@ struct LspManager(Copyable, Movable):
     var _docs: List[_OpenDoc]
 
     # Queued ``(path, text)`` pairs waiting for ``initialized`` to land.
-    var _pending_open_paths: List[String]
-    var _pending_open_texts: List[String]
+    var _pending_opens: List[_IdText]   # (path, text)
 
     # Latest published diagnostics keyed by URI-resolved path. The list
     # holds at most one bucket per path — a fresh publishDiagnostics
@@ -1214,8 +1224,7 @@ struct LspManager(Copyable, Movable):
         self._position_encoding = String("utf-16")
         self._position_enc = encoding_from_name(String("utf-16"))
         self._remap = _PositionRemapper(POS_UTF8)
-        self._req_uri_ids = List[String]()
-        self._req_uris = List[String]()
+        self._req_uris = List[_IdText]()
         self._refresh_doc_features = False
         self._refresh_diagnostics = False
         self._close_stage = _CLOSE_IDLE
@@ -1241,10 +1250,7 @@ struct LspManager(Copyable, Movable):
         self._log_checked_ms = -_LOG_RECHECK_MS
         self._nav = _Slot[Optional[DefinitionResolved]]()
         self._nav_word = String("")
-        self._libprobe_ids = List[String]()
-        self._libprobe_words = List[String]()
-        self._libprobe_tags = List[Int]()
-        self._libprobe_sent_ms = List[Int]()
+        self._libprobes = List[_InflightProbe]()
         self._libprobe_done = List[LibraryProbe]()
         self._prepare_rename = _Slot[String]()
         self._prepare_rename_state = 0
@@ -1303,8 +1309,7 @@ struct LspManager(Copyable, Movable):
         self._hierarchy_followup = String("")
         self._hierarchy_word = String("")
         self._colors = _Slot[List[Highlight]]()
-        self._pull_diag_ids = List[String]()
-        self._pull_diag_paths = List[String]()
+        self._pull_diags = List[_IdText]()
         self._pulled_paths = List[String]()
         self._willsave = _EditSlot()
         self._msgreq_pending = False
@@ -1322,8 +1327,7 @@ struct LspManager(Copyable, Movable):
         self._language_id = String("")
         self._argv = List[String]()
         self._docs = List[_OpenDoc]()
-        self._pending_open_paths = List[String]()
-        self._pending_open_texts = List[String]()
+        self._pending_opens = List[_IdText]()
         self._diagnostic_buckets = List[_DiagnosticBucket]()
         self._diag_inflight_paths = List[String]()
         self._diag_inflight_versions = List[Int]()
@@ -1454,7 +1458,7 @@ struct LspManager(Copyable, Movable):
         push path writes, so the host consumes them identically. Every
         outstanding request is tracked by (id, path) so a burst of pulls
         across many buffers (session restore opens N files in one frame)
-        all match their responses — see ``_pull_diag_ids``.
+        all match their responses — see ``_pull_diags``.
         No-op unless ready and the server advertises ``diagnosticProvider``;
         assumes the document is already open (caller pre-flights via the
         normal didOpen/didChange path)."""
@@ -1471,15 +1475,8 @@ struct LspManager(Copyable, Movable):
         # Drop any prior outstanding request for the same path — a newer
         # pull (edit-driven) supersedes it, and its response would just
         # overwrite the same bucket.
-        var k = 0
-        while k < len(self._pull_diag_paths):
-            if self._pull_diag_paths[k] == path:
-                _ = self._pull_diag_ids.pop(k)
-                _ = self._pull_diag_paths.pop(k)
-            else:
-                k += 1
-        self._pull_diag_ids.append(req_id)
-        self._pull_diag_paths.append(path)
+        self._drop_pull_diags(path)
+        self._pull_diags.append(_IdText(req_id, path))
         if not self.has_pulled(path):
             self._pulled_paths.append(path)
         return True
@@ -1647,10 +1644,8 @@ struct LspManager(Copyable, Movable):
         # ``_take_req_uri``), so under utf-8 there's nothing to remember.
         if self._position_enc != POS_UTF8 \
                 and len(uri.as_bytes()) > 0 and len(id.as_bytes()) > 0:
-            self._req_uri_ids.append(id)
-            self._req_uris.append(uri^)
-            while len(self._req_uri_ids) > _REQ_URI_RING:
-                _ = self._req_uri_ids.pop(0)
+            self._req_uris.append(_IdText(id, uri^))
+            while len(self._req_uris) > _REQ_URI_RING:
                 _ = self._req_uris.pop(0)
         return id^
 
@@ -1658,12 +1653,9 @@ struct LspManager(Copyable, Movable):
         """The document URI recorded for ``id``, consuming the entry.
         Empty when unknown — the walk then relies on URIs carried in the
         payload itself and leaves positionless-context values alone."""
-        for i in range(len(self._req_uri_ids)):
-            if self._req_uri_ids[i] == id:
-                var uri = self._req_uris[i]
-                _ = self._req_uri_ids.pop(i)
-                _ = self._req_uris.pop(i)
-                return uri^
+        for i in range(len(self._req_uris)):
+            if self._req_uris[i].key == id:
+                return self._req_uris.pop(i).text
         return String("")
 
     def _send_notification(mut self, method: String, params: JsonValue) raises:
@@ -1999,8 +1991,7 @@ struct LspManager(Copyable, Movable):
         if self.state == _STATE_FAILED or self.state == _STATE_NOT_STARTED:
             return
         if self.state == _STATE_INITIALIZING:
-            self._pending_open_paths.append(path)
-            self._pending_open_texts.append(text^)
+            self._pending_opens.append(_IdText(path, text^))
             return
         self._send_open_or_change(path, text^)
 
@@ -2043,10 +2034,9 @@ struct LspManager(Copyable, Movable):
             return
         if self.state == _STATE_INITIALIZING:
             var j = 0
-            while j < len(self._pending_open_paths):
-                if self._pending_open_paths[j] == path:
-                    _ = self._pending_open_paths.pop(j)
-                    _ = self._pending_open_texts.pop(j)
+            while j < len(self._pending_opens):
+                if self._pending_opens[j].key == path:
+                    _ = self._pending_opens.pop(j)
                 else:
                     j += 1
             return
@@ -2063,13 +2053,7 @@ struct LspManager(Copyable, Movable):
                 if self._diagnostic_buckets[k].consumed:
                     _ = self._diagnostic_buckets.pop(k)
                 break
-        var pk = 0
-        while pk < len(self._pull_diag_paths):
-            if self._pull_diag_paths[pk] == path:
-                _ = self._pull_diag_ids.pop(pk)
-                _ = self._pull_diag_paths.pop(pk)
-            else:
-                pk += 1
+        self._drop_pull_diags(path)
         # Drop any "analyzing edits…" spinner state — a closed buffer
         # must not keep one spinning.
         self._clear_diag_inflight(path, 0)
@@ -2465,7 +2449,7 @@ struct LspManager(Copyable, Movable):
         ``tag`` comes back with the answer (who asked). False while
         ``limit`` probes are already in flight or the server isn't
         ready."""
-        if self.state != _STATE_READY or len(self._libprobe_ids) >= limit:
+        if self.state != _STATE_READY or len(self._libprobes) >= limit:
             return False
         self._send_open_or_change(path, text^)
         var params = self._position_params(path, line, character)
@@ -2474,19 +2458,16 @@ struct LspManager(Copyable, Movable):
             id = self._send_request(String("textDocument/definition"), params)
         except:
             return False
-        self._libprobe_ids.append(id^)
-        self._libprobe_words.append(word^)
-        self._libprobe_tags.append(tag)
-        self._libprobe_sent_ms.append(monotonic_ms())
+        self._libprobes.append(_InflightProbe(id^, word^, tag, monotonic_ms()))
         return True
 
     def library_probes_inflight(self) -> Int:
-        return len(self._libprobe_ids)
+        return len(self._libprobes)
 
     def library_probes_inflight_tagged(self, tag: Int) -> Int:
         var n = 0
-        for i in range(len(self._libprobe_tags)):
-            if self._libprobe_tags[i] == tag:
+        for ref p in self._libprobes:
+            if p.tag == tag:
                 n += 1
         return n
 
@@ -2503,22 +2484,30 @@ struct LspManager(Copyable, Movable):
         wedged server can't stall Project ▸ Spelling's library check."""
         var now = monotonic_ms()
         var i = 0
-        while i < len(self._libprobe_ids):
-            if now - self._libprobe_sent_ms[i] < _LIBPROBE_TIMEOUT_MS:
+        while i < len(self._libprobes):
+            if now - self._libprobes[i].sent_ms < _LIBPROBE_TIMEOUT_MS:
                 i += 1
                 continue
-            _ = self._libprobe_ids.pop(i)
-            _ = self._libprobe_sent_ms.pop(i)
+            var p = self._libprobes.pop(i)
             self._libprobe_done.append(LibraryProbe(
-                self._libprobe_words.pop(i), Optional[DefinitionResolved](),
-                self._libprobe_tags.pop(i), False,
+                p.word, Optional[DefinitionResolved](), p.tag, False,
             ))
 
     def _libprobe_slot(self, id: String) -> Int:
-        for i in range(len(self._libprobe_ids)):
-            if self._libprobe_ids[i] == id:
+        for i in range(len(self._libprobes)):
+            if self._libprobes[i].id == id:
                 return i
         return -1
+
+    def _drop_pull_diags(mut self, path: String):
+        """Forget the pull-diagnostic requests outstanding for ``path`` (a
+        newer pull supersedes them; a close makes them moot)."""
+        var k = 0
+        while k < len(self._pull_diags):
+            if self._pull_diags[k].text == path:
+                _ = self._pull_diags.pop(k)
+            else:
+                k += 1
 
     # --- prepareRename ----------------------------------------------------
 
@@ -3001,22 +2990,16 @@ struct LspManager(Copyable, Movable):
         if not self.server_supports_code_action_resolve():
             self._publish_code_actions_if_settled()
             return
+        var raws = List[JsonValue]()
+        var slots = List[Int]()
         for i in range(len(self._ca_accum)):
-            if len(self._ca_accum[i].file_edits) > 0:
-                continue
-            if not self._ca_accum[i].unresolved:
-                continue
-            var params = self._ca_accum[i].unresolved.value().copy()
-            var rid: String
-            try:
-                rid = self._send_request(
-                    String("codeAction/resolve"), params,
-                )
-            except:
-                continue
-            if len(rid.as_bytes()) == 0:
-                continue
-            self._ca_resolve.add(rid, i)
+            ref a = self._ca_accum[i]
+            if len(a.file_edits) == 0 and a.unresolved:
+                raws.append(a.unresolved.value().copy())
+                slots.append(i)
+        self._ca_resolve = self._send_resolves(
+            String("codeAction/resolve"), raws, slots,
+        )
         if self._ca_resolve.pending() > 0:
             self._ca_resolve_deadline = \
                 monotonic_ms() + _CA_RESOLVE_TIMEOUT_MS
@@ -3624,18 +3607,10 @@ struct LspManager(Copyable, Movable):
         self._publish_document_links()
         if not self.server_supports_document_link_resolve():
             return
-        for k in range(len(parsed.unresolved_slots)):
-            var params = parsed.unresolved_raw[k].copy()
-            var rid: String
-            try:
-                rid = self._send_request(
-                    String("documentLink/resolve"), params,
-                )
-            except:
-                continue
-            if len(rid.as_bytes()) == 0:
-                continue
-            self._dl_resolve.add(rid, parsed.unresolved_slots[k])
+        self._dl_resolve = self._send_resolves(
+            String("documentLink/resolve"), parsed.unresolved_raw,
+            parsed.unresolved_slots,
+        )
         if self._dl_resolve.pending() > 0:
             if self._logging():
                 _lsp_debug_write(
@@ -3643,6 +3618,23 @@ struct LspManager(Copyable, Movable):
                     + String(self._dl_resolve.pending())
                     + String(" lang=") + self._language_id,
                 )
+
+    def _send_resolves(
+        mut self, method: String, raws: List[JsonValue], slots: List[Int],
+    ) -> _ResolveFanout:
+        """Send ``method`` for each of ``raws`` (the items as the server
+        sent them), each answer to fill ``slots[i]``; the requests that
+        went out."""
+        var out = _ResolveFanout()
+        for i in range(len(raws)):
+            var rid: String
+            try:
+                rid = self._send_request(method, raws[i])
+            except:
+                continue
+            if len(rid.as_bytes()) > 0:
+                out.add(rid, slots[i])
+        return out^
 
     def _publish_document_links(mut self):
         """Hand the host every link that has a target.
@@ -4130,11 +4122,9 @@ struct LspManager(Copyable, Movable):
                 var probe = Optional[DefinitionResolved]()
                 if msg.result:
                     probe = _parse_definition_result(msg.result.value())
-                _ = self._libprobe_ids.pop(lp_slot)
-                _ = self._libprobe_sent_ms.pop(lp_slot)
+                var p = self._libprobes.pop(lp_slot)
                 self._libprobe_done.append(LibraryProbe(
-                    self._libprobe_words.pop(lp_slot), probe,
-                    self._libprobe_tags.pop(lp_slot), True,
+                    p.word, probe, p.tag, True,
                 ))
                 continue
             if self._prepare_rename.owns(id):
@@ -4297,8 +4287,8 @@ struct LspManager(Copyable, Movable):
                 self._colors.settle[_parse_document_colors](msg.result)
                 continue
             var pull_slot = -1
-            for pk in range(len(self._pull_diag_ids)):
-                if self._pull_diag_ids[pk] == id:
+            for pk in range(len(self._pull_diags)):
+                if self._pull_diags[pk].key == id:
                     pull_slot = pk
                     break
             if pull_slot >= 0:
@@ -4306,9 +4296,7 @@ struct LspManager(Copyable, Movable):
                 # carrying ``items``) replaces the bucket — an empty
                 # ``items`` array is a valid "all clear". An "unchanged"
                 # report means reuse what we have, so leave the bucket be.
-                var ppath = self._pull_diag_paths[pull_slot]
-                _ = self._pull_diag_ids.pop(pull_slot)
-                _ = self._pull_diag_paths.pop(pull_slot)
+                var ppath = self._pull_diags.pop(pull_slot).text
                 if msg.result and msg.result.value().is_object():
                     var rep = msg.result.value().copy()
                     var kind = json_get_string(rep, String("kind"))
@@ -5020,12 +5008,10 @@ struct LspManager(Copyable, Movable):
                     + String("' (not utf-8); converting columns per line"),
                 )
         # Drain the queue of opens that arrived before we were ready.
-        var paths = self._pending_open_paths^
-        var texts = self._pending_open_texts^
-        self._pending_open_paths = List[String]()
-        self._pending_open_texts = List[String]()
-        for k in range(len(paths)):
-            self._send_open_or_change(paths[k], texts[k])
+        var opens = List[_IdText]()
+        swap(opens, self._pending_opens)
+        for ref o in opens:
+            self._send_open_or_change(o.key, o.text)
 
     def _doc_index(self, path: String) -> Int:
         """Index of the open document ``path`` in ``_docs``, or -1."""
