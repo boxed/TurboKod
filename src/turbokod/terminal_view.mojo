@@ -33,6 +33,7 @@ from .geometry import Point, Rect
 from .grid_frame import floor_div
 from .output_links import LinkLatch, OutputLink, paint_row_links
 from .painter import Painter
+from .posix import DRAIN_EOF, drain_fd
 from .pty import PtyProcess
 from .scrollbar import ScrollBarArea
 from .test_results import TestResultsView
@@ -556,6 +557,18 @@ def _invert_attr(a: Attr) -> Attr:
         mode = mode | BG_TRUECOLOR
     r.color_mode = mode
     return r
+
+
+def drain_pty(mut pty: PtyProcess, mut vt: Vt) -> Tuple[Int, Bool]:
+    """Feed what the pty's master has ready into ``vt``: ``(bytes fed, saw
+    EOF)``. At most 64 KB a tick, so a child flooding output (``cat
+    big.log``, a test dumping a huge log) doesn't lock up the UI loop —
+    the rest drains next frame. EOF means the child closed its side; what
+    to do about it is the pane's call."""
+    var buf = List[UInt8]()
+    var r = drain_fd(pty.master_fd, buf, 65536)
+    vt.feed(Span(buf))
+    return (r[0], r[1] == DRAIN_EOF)
 
 
 def flush_vt_side_effects(mut pty: PtyProcess, mut vt: Vt):

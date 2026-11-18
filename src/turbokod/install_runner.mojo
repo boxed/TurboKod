@@ -31,7 +31,7 @@ from .window import paint_window_title_at
 from .posix import (
     close_fd, drain_fd, exit_code_from_status,
     kill_pid, monotonic_ms, reap_child, SIGTERM,
-    untrack_child, waitpid_nohang,
+    poll_exit, untrack_child,
 )
 
 
@@ -149,9 +149,8 @@ struct InstallRunner(Movable):
         check whether it has exited. Returns the ``InstallResult`` once
         on the tick where the child reaps; ``None`` on every other tick.
 
-        We call ``waitpid_nohang`` directly (rather than going through
-        ``LspProcess.try_reap``) so we can capture the raw status and
-        derive an exit code — ``try_reap`` discards the status word.
+        ``poll_exit`` rather than ``LspProcess.try_reap``: we need the raw
+        status for the exit code, and ``try_reap`` discards it.
         """
         if not self.active:
             return Optional[InstallResult]()
@@ -159,15 +158,14 @@ struct InstallRunner(Movable):
         # backpressure us into a deadlock on its stderr write.
         self._drain_fd(self.process.stdout_fd)
         self._drain_fd(self.process.stderr_fd)
-        var pair = waitpid_nohang(self.process.pid)
-        if Int(pair[0]) != Int(self.process.pid):
+        var exited = poll_exit(self.process.pid)
+        if not exited:
             return Optional[InstallResult]()
-        untrack_child(self.process.pid)
         # Child reaped. Drain once more so we don't miss the last write
         # that landed between the previous drain and the EOF.
         self._drain_fd(self.process.stdout_fd)
         self._drain_fd(self.process.stderr_fd)
-        var status = pair[1]
+        var status = exited.value()
         var result = InstallResult(
             self.label, self.command, status, self.output,
         )
@@ -215,7 +213,7 @@ struct InstallRunner(Movable):
 
     def _reset(mut self):
         # Close the parent ends of the pipes that we still own; the child
-        # was reaped by ``waitpid_nohang`` so its side is already gone.
+        # was reaped by ``poll_exit`` so its side is already gone.
         if self.process.stdin_fd  >= 0: _ = close_fd(self.process.stdin_fd)
         if self.process.stdout_fd >= 0: _ = close_fd(self.process.stdout_fd)
         if self.process.stderr_fd >= 0: _ = close_fd(self.process.stderr_fd)

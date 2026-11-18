@@ -33,7 +33,7 @@ from .posix import (
     posix_spawn_file_actions_addclose, posix_spawn_file_actions_adddup2,
     posix_spawn_file_actions_destroy, posix_spawn_file_actions_init,
     posix_spawnp_call, read_append, read_into, reap_child, set_nonblocking, stdio_pipes,
-    track_child, untrack_child, waitpid_blocking, waitpid_nohang,
+    poll_exit, track_child, untrack_child, waitpid_blocking,
     write_buffer,
 )
 
@@ -785,9 +785,7 @@ struct LspProcess(Copyable, Movable):
             return True
         if self.pid <= 0:
             return False
-        var pair = waitpid_nohang(self.pid)
-        if Int(pair[0]) == Int(self.pid):
-            untrack_child(self.pid)
+        if poll_exit(self.pid):
             self.alive = False
             return True
         return False

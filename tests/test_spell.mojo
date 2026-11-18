@@ -555,20 +555,19 @@ def test_spell_menu_enter_on_user_resolves_with_add_user() raises:
     assert_equal(m.action, SPELL_ACTION_ADD_USER)
 
 
-def test_spell_menu_enter_on_project_disabled_stays_open() raises:
-    """When ``has_project=False``, pressing Enter on the project row
-    must NOT submit — the menu stays open so the user can arrow back
-    up to the user-dict row."""
+def test_spell_menu_skips_disabled_project_row() raises:
+    """When ``has_project=False`` the arrows step over the greyed project
+    row, as a native menu does, and a press on it picks nothing — the
+    menu stays open on the user-dict row."""
     var m = AnchoredMenu()
     m.open(Point(0, 0), spell_menu_items(False), String("helo"))
     _ = m.handle_key(Event.key_event(KEY_DOWN))
-    assert_equal(m.selected, 1)
+    assert_equal(m.selected, 0)
+    m.selected = 1
     _ = m.handle_key(Event.key_event(KEY_ENTER))
     assert_false(m.submitted)
     assert_true(m.active)
-    # Arrow back up — the user-dict pick still works.
-    _ = m.handle_key(Event.key_event(KEY_UP))
-    assert_equal(m.selected, 0)
+    m.selected = 0
     _ = m.handle_key(Event.key_event(KEY_ENTER))
     assert_true(m.submitted)
     assert_equal(m.action, SPELL_ACTION_ADD_USER)

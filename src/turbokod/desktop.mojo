@@ -91,7 +91,7 @@ from .test_gutter_menu import (
     TEST_ACTION_DEBUG, TEST_ACTION_RUN, test_menu_items,
 )
 from .diagnostic_menu import (
-    DIAG_MENU_ACTION_APPLY_FIX, DIAG_MENU_ACTION_COPY, DiagnosticMenu,
+    DIAG_MENU_ACTION_COPY, NATIVE_FIX_BASE, diagnostic_menu_items,
 )
 from .context_menu import (
     CTX_MENU_ACTION_CALLEES, CTX_MENU_ACTION_CALLERS,
@@ -108,7 +108,6 @@ from .context_menu import (
     CTX_MENU_ACTION_RENAME, CTX_MENU_ACTION_SUBTYPES,
     CTX_MENU_ACTION_SUPERTYPES,
     CTX_MENU_ACTION_TYPE_DEFINITION, CTX_MENU_ACTION_SEND_TO_CLAUDE,
-    EditorContextMenu, ctx_menu_separator,
 )
 from .lsp import LspProcess
 from .lsp_status_menu import (
@@ -117,8 +116,7 @@ from .lsp_status_menu import (
 from .posix import (
     SIGTERM, close_fd, debug_log, drain_fd, exit_code_from_status,
     getenv_value, kill_pid,
-    realpath, reap_child, untrack_child,
-    waitpid_nohang,
+    poll_exit, realpath, reap_child, untrack_child,
 )
 from .file_tree import FileTree
 from .geometry import Point, Rect
@@ -389,7 +387,7 @@ comptime EDITOR_FORMAT_SELECTION = String("edit:format_selection")
 # typed new name to ``_on_prompt_submit``.
 comptime _PA_RENAME           = String("rename:do")
 # Tab / window-title file-actions popup. The action ints carried by the
-# reused EditorContextMenu, plus the two pending-action tags that the name
+# reused AnchoredMenu, plus the two pending-action tags that the name
 # prompt (rename) and confirm dialog (delete) resolve against.
 comptime _TAB_FILE_ACTION_RENAME = 101
 comptime _TAB_FILE_ACTION_DELETE = 102
@@ -1433,30 +1431,30 @@ struct Desktop(Movable):
     # the LSP message onto the system clipboard. Surfaced from
     # ``Editor.consume_diagnostic_menu_request`` and routed input-first
     # like ``git_gutter_menu``.
-    var diagnostic_menu: DiagnosticMenu
+    var diagnostic_menu: AnchoredMenu
     # Editor that opened ``diagnostic_menu`` (index into ``windows``).
     # ``-1`` when the menu is closed. Held separately from the menu so
     # the menu type doesn't need to know about the WindowManager: the
     # host carries the routing, the menu carries the UI state.
     var _diag_menu_editor_idx: Int
     # Code-action list parked alongside the open diagnostic menu so the
-    # submit handler can find the chosen action's edits by
-    # ``selected_fix_index``. Sized to match the menu's ``fix_titles``.
+    # submit handler can find the chosen action's edits by its fix row's
+    # index (``NATIVE_FIX_BASE + i``), one row per entry.
     var _diag_menu_actions: List[CodeAction]
     # Right-click symbol-actions popup (Rename / Definition / References)
     # and the click context it was opened with, mirroring the diagnostic
     # menu's split of widget UI state vs. host routing state.
-    var editor_context_menu: EditorContextMenu
+    var editor_context_menu: AnchoredMenu
     var _ctx_menu_editor_idx: Int
     var _ctx_menu_row: Int
     var _ctx_menu_col: Int
     var _ctx_menu_word: String
     # Right-click on a tab / window title opens this file-actions popup
-    # (Rename / Delete). Reuses the generic EditorContextMenu widget — the
+    # (Rename / Delete). Reuses the generic AnchoredMenu widget — the
     # action ints are interpreted by ``_on_tab_context_menu_submit`` rather
     # than the symbol handler. ``_file_op_path`` pins the targeted
     # file across the prompt/confirm round-trip.
-    var tab_context_menu: EditorContextMenu
+    var tab_context_menu: AnchoredMenu
     var _file_op_path: String
     var _file_op_is_dir: Bool
     # Origin of an in-flight rename: the path/line/col the request was
@@ -2095,15 +2093,15 @@ struct Desktop(Movable):
         self.git_gutter_menu = GitGutterMenu()
         self.test_gutter_menu = AnchoredMenu()
         self.blame_popup = BlamePopup()
-        self.diagnostic_menu = DiagnosticMenu()
+        self.diagnostic_menu = AnchoredMenu()
         self._diag_menu_editor_idx = -1
         self._diag_menu_actions = List[CodeAction]()
-        self.editor_context_menu = EditorContextMenu()
+        self.editor_context_menu = AnchoredMenu()
         self._ctx_menu_editor_idx = -1
         self._ctx_menu_row = 0
         self._ctx_menu_col = 0
         self._ctx_menu_word = String("")
-        self.tab_context_menu = EditorContextMenu()
+        self.tab_context_menu = AnchoredMenu()
         self._file_op_path = String("")
         self._file_op_is_dir = False
         self._rename_path = String("")
@@ -9771,8 +9769,7 @@ struct Desktop(Movable):
             self._on_test_gutter_menu_submit()
         elif kind == String("diagnostic"):
             self.diagnostic_menu.choose(code)
-            if self.diagnostic_menu.submitted:
-                self._on_diagnostic_menu_submit()
+            self._on_diagnostic_menu_submit()
         elif kind == String("context"):
             self.editor_context_menu.choose(code)
             self._on_context_menu_submit()
@@ -15390,11 +15387,10 @@ struct Desktop(Movable):
             var pa = self.pending_save_actions[i].copy()
             self._drain_save_action_fd(pa.stdout_fd, pa.stdout_head)
             self._drain_save_action_fd(pa.stderr_fd, pa.stderr_head)
-            var pair = waitpid_nohang(pa.pid)
-            if Int(pair[0]) != Int(pa.pid):
+            var status = poll_exit(pa.pid)
+            if not status:
                 still_pending.append(pa^)
                 continue
-            untrack_child(pa.pid)
             # Drain once more so a final write between the previous
             # drain and EOF doesn't get lost (same shape as
             # ``InstallRunner.tick``).
@@ -15402,7 +15398,7 @@ struct Desktop(Movable):
             self._drain_save_action_fd(pa.stderr_fd, pa.stderr_head)
             if pa.stdout_fd >= 0: _ = close_fd(pa.stdout_fd)
             if pa.stderr_fd >= 0: _ = close_fd(pa.stderr_fd)
-            var exit_code = exit_code_from_status(Int(pair[1]))
+            var exit_code = exit_code_from_status(Int(status.value()))
             self._reload_after_on_save(pa.saved_path)
             self._report_on_save_result(pa, exit_code)
         self.pending_save_actions = still_pending^
@@ -16813,8 +16809,8 @@ struct Desktop(Movable):
             return
         var req = req_opt.value()
         self.diagnostic_menu.open(
-            req.message,
             self._code_anchor(idx, Point(req.anchor_x, req.anchor_y)),
+            diagnostic_menu_items(List[String](), False), req.message,
         )
         # Track which editor opened the menu so the response handler
         # knows where to apply the fix.
@@ -16834,7 +16830,9 @@ struct Desktop(Movable):
             path, req.diag, text^,
         )
         if ok:
-            self.diagnostic_menu.set_loading_fixes(True)
+            self.diagnostic_menu.set_items(
+                diagnostic_menu_items(List[String](), True),
+            )
 
     def _drain_diagnostic_code_actions(mut self):
         """Each frame, check whether any LSP manager parked a code-action
@@ -16862,23 +16860,17 @@ struct Desktop(Movable):
             # editor's open menu (if any) consume it.
             return
         var actions = self.lsp_managers[li].take_code_actions()
+        # Keep actions we can act on: a direct WorkspaceEdit, or a Command
+        # we can run via workspace/executeCommand (the server pushes the
+        # resulting edit back via workspace/applyEdit). The submit handler
+        # finds the picked one by its row's index into this list.
         var titles = List[String]()
-        for k in range(len(actions)):
-            # Keep actions we can act on: a direct WorkspaceEdit, or a
-            # Command we can run via workspace/executeCommand (the server
-            # pushes the resulting edit back via workspace/applyEdit).
-            if len(actions[k].file_edits) == 0 \
-                    and len(actions[k].command.as_bytes()) == 0:
-                continue
-            titles.append(actions[k].title)
-        self.diagnostic_menu.set_actions(titles^)
-        # Stash the kept action list (same filter) so the submit handler
-        # can find the matching action by selected index.
         var keep = List[CodeAction]()
-        for k in range(len(actions)):
-            if len(actions[k].file_edits) > 0 \
-                    or len(actions[k].command.as_bytes()) > 0:
-                keep.append(actions[k].copy())
+        for ref a in actions:
+            if len(a.file_edits) > 0 or len(a.command.as_bytes()) > 0:
+                titles.append(a.title)
+                keep.append(a.copy())
+        self.diagnostic_menu.set_items(diagnostic_menu_items(titles, False))
         self._diag_menu_actions = keep^
 
     def _on_diagnostic_menu_submit(mut self):
@@ -16887,8 +16879,7 @@ struct Desktop(Movable):
         action's WorkspaceEdit through ``Editor.apply_code_action_edits``
         on the editor that opened the menu."""
         var act = self.diagnostic_menu.action
-        var msg = self.diagnostic_menu.message
-        var fix_idx = self.diagnostic_menu.selected_fix_index
+        var msg = self.diagnostic_menu.subject
         var editor_idx = self._diag_menu_editor_idx
         var actions = self._diag_menu_actions.copy()
         self.diagnostic_menu.close()
@@ -16900,8 +16891,9 @@ struct Desktop(Movable):
             clipboard_copy(msg)
             self._say(String("Copied diagnostic message"))
             return
-        if act == DIAG_MENU_ACTION_APPLY_FIX:
-            if fix_idx < 0 or fix_idx >= len(actions):
+        if act >= NATIVE_FIX_BASE:
+            var fix_idx = act - NATIVE_FIX_BASE
+            if fix_idx >= len(actions):
                 return
             if editor_idx < 0 or editor_idx >= len(self.windows.windows):
                 return
@@ -17207,13 +17199,10 @@ struct Desktop(Movable):
         (or -1 — directories and unopened files have none)."""
         self._file_op_path = path^
         self._file_op_is_dir = is_dir
-        var labels = List[String]()
-        var actions = List[Int]()
-        labels.append(String("Rename…"))
-        actions.append(_TAB_FILE_ACTION_RENAME)
-        labels.append(String("Delete…"))
-        actions.append(_TAB_FILE_ACTION_DELETE)
-        self.tab_context_menu.open(anchor, labels^, actions^)
+        var items = List[NativeMenuItem]()
+        items.append(NativeMenuItem(String("Rename…"), _TAB_FILE_ACTION_RENAME, True))
+        items.append(NativeMenuItem(String("Delete…"), _TAB_FILE_ACTION_DELETE, True))
+        self.tab_context_menu.open(anchor, items^)
 
     def _on_tab_context_menu_submit(mut self) -> Optional[String]:
         """Resolve the file-actions popup: Rename opens the name prompt
@@ -17542,24 +17531,23 @@ struct Desktop(Movable):
         self._ctx_menu_row = req.row
         self._ctx_menu_col = 0
         self._ctx_menu_word = String("")
-        var labels = List[String]()
-        var actions = List[Int]()
-        labels.append(
+        var items = List[NativeMenuItem]()
+        items.append(NativeMenuItem(
             String("Hide Blame")
             if self.windows.windows[idx].editor.blame_visible
-            else String("Show Blame")
-        )
-        actions.append(CTX_MENU_ACTION_TOGGLE_BLAME)
-        ctx_menu_separator(labels, actions)
-        self._append_line_actions(idx, req.row, labels, actions)
+            else String("Show Blame"),
+            CTX_MENU_ACTION_TOGGLE_BLAME, True,
+        ))
+        items.append(NativeMenuItem.separator())
+        self._append_line_actions(idx, req.row, items)
         self.editor_context_menu.open(
             self._code_anchor(idx, Point(req.anchor_x, req.anchor_y)),
-            labels^, actions^,
+            items^,
         )
 
     def _append_line_actions(
         self, idx: Int, row: Int,
-        mut labels: List[String], mut actions: List[Int],
+        mut items: List[NativeMenuItem],
     ):
         """The rows about editor ``idx``'s buffer ``row`` rather than a
         symbol, shared by the gutter and context menus: the line group
@@ -17570,21 +17558,15 @@ struct Desktop(Movable):
         ref ed = self.windows.windows[idx].editor
         var has_path = len(ed.file_path.as_bytes()) > 0
         if ed.has_foldable_at(row):
-            labels.append(String("Toggle Fold"))
-            actions.append(CTX_MENU_ACTION_TOGGLE_FOLD)
-        labels.append(String("Toggle Bookmark"))
-        actions.append(CTX_MENU_ACTION_TOGGLE_BOOKMARK)
+            items.append(NativeMenuItem(String("Toggle Fold"), CTX_MENU_ACTION_TOGGLE_FOLD, True))
+        items.append(NativeMenuItem(String("Toggle Bookmark"), CTX_MENU_ACTION_TOGGLE_BOOKMARK, True))
         if has_path:
-            labels.append(String("Toggle Breakpoint"))
-            actions.append(CTX_MENU_ACTION_TOGGLE_BREAKPOINT)
+            items.append(NativeMenuItem(String("Toggle Breakpoint"), CTX_MENU_ACTION_TOGGLE_BREAKPOINT, True))
             if self.dap.has_breakpoint(ed.file_path, row):
-                labels.append(String("Edit Breakpoint…"))
-                actions.append(CTX_MENU_ACTION_EDIT_BREAKPOINT)
-            ctx_menu_separator(labels, actions)
-            labels.append(String("Copy Location"))
-            actions.append(CTX_MENU_ACTION_COPY_LOCATION)
-            labels.append(String("Send Location to Claude"))
-            actions.append(CTX_MENU_ACTION_SEND_TO_CLAUDE)
+                items.append(NativeMenuItem(String("Edit Breakpoint…"), CTX_MENU_ACTION_EDIT_BREAKPOINT, True))
+            items.append(NativeMenuItem.separator())
+            items.append(NativeMenuItem(String("Copy Location"), CTX_MENU_ACTION_COPY_LOCATION, True))
+            items.append(NativeMenuItem(String("Send Location to Claude"), CTX_MENU_ACTION_SEND_TO_CLAUDE, True))
 
     def _location_label(self, path: String) -> String:
         """``path`` as Copy Location / Send Location show it: relative to
@@ -17693,78 +17675,49 @@ struct Desktop(Movable):
         var path = self.windows.windows[idx].editor.file_path
         var li = self._lsp_for_path(path)
         var on_word = len(req.word.as_bytes()) > 0
-        var labels = List[String]()
-        var actions = List[Int]()
+        var items = List[NativeMenuItem]()
         if on_word:
-            labels.append(String("Go to Definition"))
-            actions.append(CTX_MENU_ACTION_DEFINITION)
-            if li >= 0 and self.lsp_managers[li].server_supports(
-                String("typeDefinitionProvider"),
-            ):
-                labels.append(String("Go to Type Definition"))
-                actions.append(CTX_MENU_ACTION_TYPE_DEFINITION)
-            if li >= 0 and self.lsp_managers[li].server_supports(
-                String("implementationProvider"),
-            ):
-                labels.append(String("Go to Implementation"))
-                actions.append(CTX_MENU_ACTION_IMPLEMENTATION)
-            if li >= 0 and self.lsp_managers[li].server_supports(
-                String("declarationProvider"),
-            ):
-                labels.append(String("Go to Declaration"))
-                actions.append(CTX_MENU_ACTION_DECLARATION)
-            ctx_menu_separator(labels, actions)
-            labels.append(String("Find References"))
-            actions.append(CTX_MENU_ACTION_REFERENCES)
-            if li >= 0 and self.lsp_managers[li].server_supports(
-                String("callHierarchyProvider"),
-            ):
-                labels.append(String("Find Callers"))
-                actions.append(CTX_MENU_ACTION_CALLERS)
-                labels.append(String("Find Callees"))
-                actions.append(CTX_MENU_ACTION_CALLEES)
-            if li >= 0 and self.lsp_managers[li].server_supports(
-                String("typeHierarchyProvider"),
-            ):
-                labels.append(String("Find Supertypes"))
-                actions.append(CTX_MENU_ACTION_SUPERTYPES)
-                labels.append(String("Find Subtypes"))
-                actions.append(CTX_MENU_ACTION_SUBTYPES)
-            if li >= 0 and self.lsp_managers[li].server_supports(
-                String("monikerProvider"),
-            ):
-                labels.append(String("Show Moniker"))
-                actions.append(CTX_MENU_ACTION_MONIKER)
-            ctx_menu_separator(labels, actions)
-            labels.append(String("Rename Symbol…"))
-            actions.append(CTX_MENU_ACTION_RENAME)
-            if li >= 0 and self.lsp_managers[li].server_supports(
-                String("linkedEditingRangeProvider"),
-            ):
-                labels.append(String("Linked Edit"))
-                actions.append(CTX_MENU_ACTION_LINKED_EDIT)
-        if li >= 0 and self.lsp_managers[li].server_supports(
-            String("inlineCompletionProvider"),
-        ):
-            labels.append(String("Inline Suggestion"))
-            actions.append(CTX_MENU_ACTION_INLINE_COMPLETION)
+            items.append(NativeMenuItem(String("Go to Definition"), CTX_MENU_ACTION_DEFINITION, True))
+            if self._lsp_supports(li, String("typeDefinitionProvider")):
+                items.append(NativeMenuItem(String("Go to Type Definition"), CTX_MENU_ACTION_TYPE_DEFINITION, True))
+            if self._lsp_supports(li, String("implementationProvider")):
+                items.append(NativeMenuItem(String("Go to Implementation"), CTX_MENU_ACTION_IMPLEMENTATION, True))
+            if self._lsp_supports(li, String("declarationProvider")):
+                items.append(NativeMenuItem(String("Go to Declaration"), CTX_MENU_ACTION_DECLARATION, True))
+            items.append(NativeMenuItem.separator())
+            items.append(NativeMenuItem(String("Find References"), CTX_MENU_ACTION_REFERENCES, True))
+            if self._lsp_supports(li, String("callHierarchyProvider")):
+                items.append(NativeMenuItem(String("Find Callers"), CTX_MENU_ACTION_CALLERS, True))
+                items.append(NativeMenuItem(String("Find Callees"), CTX_MENU_ACTION_CALLEES, True))
+            if self._lsp_supports(li, String("typeHierarchyProvider")):
+                items.append(NativeMenuItem(String("Find Supertypes"), CTX_MENU_ACTION_SUPERTYPES, True))
+                items.append(NativeMenuItem(String("Find Subtypes"), CTX_MENU_ACTION_SUBTYPES, True))
+            if self._lsp_supports(li, String("monikerProvider")):
+                items.append(NativeMenuItem(String("Show Moniker"), CTX_MENU_ACTION_MONIKER, True))
+            items.append(NativeMenuItem.separator())
+            items.append(NativeMenuItem(String("Rename Symbol…"), CTX_MENU_ACTION_RENAME, True))
+            if self._lsp_supports(li, String("linkedEditingRangeProvider")):
+                items.append(NativeMenuItem(String("Linked Edit"), CTX_MENU_ACTION_LINKED_EDIT, True))
+        if self._lsp_supports(li, String("inlineCompletionProvider")):
+            items.append(NativeMenuItem(String("Inline Suggestion"), CTX_MENU_ACTION_INLINE_COMPLETION, True))
         # Color-format conversion: only when the cursor sits on a
         # documentColor swatch and the server provides colors.
-        if li >= 0 and self.lsp_managers[li].server_supports(
-            String("colorProvider"),
-        ) and self.windows.windows[idx].editor.color_at(
+        if self._lsp_supports(li, String("colorProvider")) and self.windows.windows[idx].editor.color_at(
             req.row, req.col,
         ):
-            labels.append(String("Change Color Format…"))
-            actions.append(CTX_MENU_ACTION_COLOR_PRESENTATION)
-            labels.append(String("Color Picker…"))
-            actions.append(CTX_MENU_ACTION_COLOR_PICKER)
-        ctx_menu_separator(labels, actions)
-        self._append_line_actions(idx, req.row, labels, actions)
+            items.append(NativeMenuItem(String("Change Color Format…"), CTX_MENU_ACTION_COLOR_PRESENTATION, True))
+            items.append(NativeMenuItem(String("Color Picker…"), CTX_MENU_ACTION_COLOR_PICKER, True))
+        items.append(NativeMenuItem.separator())
+        self._append_line_actions(idx, req.row, items)
         self.editor_context_menu.open(
             self._code_anchor(idx, Point(req.anchor_x, req.anchor_y)),
-            labels^, actions^,
+            items^,
         )
+
+    def _lsp_supports(self, li: Int, capability: String) -> Bool:
+        """Whether language server ``li`` (-1: none) advertises
+        ``capability``."""
+        return li >= 0 and self.lsp_managers[li].server_supports(capability)
 
     def _ready_lsp_for_window(self, win_idx: Int) -> Int:
         """The ready language server for editor window ``win_idx``'s file,
@@ -19241,22 +19194,6 @@ def _feed_popup(mut m: AnchoredMenu, event: Event, screen: Rect) -> Bool:
 
 
 def _feed_popup(mut m: GitGutterMenu, event: Event, screen: Rect) -> Bool:
-    if event.kind == EVENT_KEY:
-        _ = m.handle_key(event)
-    else:
-        _ = m.handle_mouse(event, screen)
-    return m.submitted
-
-
-def _feed_popup(mut m: DiagnosticMenu, event: Event, screen: Rect) -> Bool:
-    if event.kind == EVENT_KEY:
-        _ = m.handle_key(event)
-    else:
-        _ = m.handle_mouse(event, screen)
-    return m.submitted
-
-
-def _feed_popup(mut m: EditorContextMenu, event: Event, screen: Rect) -> Bool:
     if event.kind == EVENT_KEY:
         _ = m.handle_key(event)
     else:

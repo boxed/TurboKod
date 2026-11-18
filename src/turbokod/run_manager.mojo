@@ -29,8 +29,7 @@ from std.collections.list import List
 
 from .lsp import LspProcess
 from .posix import (
-    drain_fd_string, exit_code_from_status, monotonic_ms, untrack_child,
-    waitpid_nohang,
+    drain_fd_string, exit_code_from_status, monotonic_ms, poll_exit,
 )
 from .string_utils import shell_single_quote
 
@@ -198,12 +197,11 @@ def poll_run_exit(mut session: RunSession) -> Bool:
     if not session.process.alive or session.process.pid <= 0:
         session.exited = True
         return True
-    var pair = waitpid_nohang(session.process.pid)
-    if Int(pair[0]) != Int(session.process.pid):
+    var status = poll_exit(session.process.pid)
+    if not status:
         return False
-    untrack_child(session.process.pid)
     session.exited = True
-    session.exit_code = exit_code_from_status(Int(pair[1]))
+    session.exit_code = exit_code_from_status(Int(status.value()))
     session.process.alive = False
     return True
 

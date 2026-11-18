@@ -30,9 +30,9 @@ from turbokod.events import (
 from turbokod.terminal_pane import TerminalPane
 from turbokod.context_menu import (
     CTX_MENU_ACTION_COPY_LOCATION, CTX_MENU_ACTION_DEFINITION,
-    CTX_MENU_ACTION_REFERENCES, CTX_MENU_SEPARATOR, EditorContextMenu,
-    ctx_menu_separator,
+    CTX_MENU_ACTION_REFERENCES,
 )
+from turbokod.anchored_menu import AnchoredMenu, NativeMenuItem
 from turbokod.geometry import Point, Rect
 from turbokod.window import Window
 from turbokod.dap_dispatch import DapStackFrame, DapVariable
@@ -1161,22 +1161,23 @@ def test_context_menu_separators_divide_groups_and_are_skipped() raises:
     """A separator per group is dropped where it would lead, trail or
     double up; the arrows step over the ones left, and Enter can't pick
     one."""
-    var labels = List[String]()
-    var actions = List[Int]()
-    ctx_menu_separator(labels, actions)
-    labels.append(String("Go to Definition"))
-    actions.append(CTX_MENU_ACTION_DEFINITION)
-    ctx_menu_separator(labels, actions)
-    ctx_menu_separator(labels, actions)
-    labels.append(String("Find References"))
-    actions.append(CTX_MENU_ACTION_REFERENCES)
-    ctx_menu_separator(labels, actions)
-    var m = EditorContextMenu()
-    m.open(Point(0, 0), labels^, actions^)
-    assert_equal(len(m.actions), 3)
-    assert_equal(m.actions[0], CTX_MENU_ACTION_DEFINITION)
-    assert_equal(m.actions[1], CTX_MENU_SEPARATOR)
-    assert_equal(m.actions[2], CTX_MENU_ACTION_REFERENCES)
+    var items = List[NativeMenuItem]()
+    items.append(NativeMenuItem.separator())
+    items.append(NativeMenuItem(
+        String("Go to Definition"), CTX_MENU_ACTION_DEFINITION, True,
+    ))
+    items.append(NativeMenuItem.separator())
+    items.append(NativeMenuItem.separator())
+    items.append(NativeMenuItem(
+        String("Find References"), CTX_MENU_ACTION_REFERENCES, True,
+    ))
+    items.append(NativeMenuItem.separator())
+    var m = AnchoredMenu()
+    m.open(Point(0, 0), items^)
+    assert_equal(len(m.items), 3)
+    assert_equal(m.items[0].code, CTX_MENU_ACTION_DEFINITION)
+    assert_true(m.items[1].is_separator())
+    assert_equal(m.items[2].code, CTX_MENU_ACTION_REFERENCES)
     assert_true(m.native_items()[1].is_separator())
     _ = m.handle_key(Event.key_event(KEY_DOWN))
     assert_equal(m.selected, 2)

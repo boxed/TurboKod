@@ -43,10 +43,7 @@ from .events import (
 from .geometry import Point, Rect
 from .output_links import extract_all_links, link_at, LinkLatch, OutputLink
 from .painter import Painter
-from .posix import (
-    alloc_zero_buffer, close_fd, exit_code_from_status, poll_stdin,
-    read_into, untrack_child, waitpid_nohang,
-)
+from .posix import close_fd, exit_code_from_status, poll_exit
 from .pty import PtyProcess
 from .test_report import reporting_env
 from .test_results import (
@@ -54,8 +51,8 @@ from .test_results import (
 )
 from .scrollbar import ScrollBarArea
 from .terminal_view import (
-    body_without_bar, flush_vt_side_effects, forward_key_to_grid, grid_size,
-    GridSelection, is_click_press, new_grid, paint_grid, paint_grid_links,
+    body_without_bar, drain_pty, flush_vt_side_effects, forward_key_to_grid,
+    grid_size, GridSelection, is_click_press, new_grid, paint_grid, paint_grid_links,
     paint_results_grid, paint_scrollback_bar, place_grid, paste_to_pty,
     results_handle_mouse, results_pointer_shape, scrollback_bar_delta,
     wheel_rows,
@@ -268,35 +265,21 @@ struct TestPane(Copyable, Movable):
         self.results.poll()
         if self.pty.master_fd >= 0:
             self.pty.flush()
-            var scratch = alloc_zero_buffer(4096)
-            var total = 0
-            # 64 KB cap per tick so a flood (a test dumping a huge log)
-            # doesn't lock the UI — the rest drains next frame.
-            while poll_stdin(self.pty.master_fd, Int32(0)) and total < 65536:
-                var n = read_into(self.pty.master_fd, scratch, 4096)
-                if n <= 0:
-                    if n == 0:
-                        # EOF — the child closed its end. Reap below.
-                        self._eof = True
-                        self.pty.alive = False
-                    break
-                var span = Span[UInt8, origin_of(scratch)](
-                    unsafe_ptr=scratch.unsafe_ptr(), length=n,
-                )
-                self.vt.feed(span)
-                total += n
+            if drain_pty(self.pty, self.vt)[1]:
+                # EOF — the child closed its end. Reap below.
+                self._eof = True
+                self.pty.alive = False
         # Flush emulator side-effects (DSR/DA replies, OSC 52 clipboard).
         flush_vt_side_effects(self.pty, self.vt)
         # Once EOF is seen, reap the child to harvest its exit code. The
         # reap can lag a tick or two behind EOF; keep trying until
         # ``waitpid`` reports the pid.
         if self._eof and self.pty.pid > 0:
-            var pair = waitpid_nohang(self.pty.pid)
-            if Int(pair[0]) == Int(self.pty.pid):
+            var status = poll_exit(self.pty.pid)
+            if status:
                 # What the runner wrote just before it exited.
                 self.results.poll()
-                self.exit_code = exit_code_from_status(Int(pair[1]))
-                untrack_child(self.pty.pid)
+                self.exit_code = exit_code_from_status(Int(status.value()))
                 # Reaped: forget the pid so a later ``terminate`` can't
                 # signal or reap whatever process recycles it.
                 self.pty.pid = -1

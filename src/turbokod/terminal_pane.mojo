@@ -49,9 +49,7 @@ from .events import (
 from .geometry import Point, Rect
 from .output_links import extract_all_links, link_at, LinkLatch, OutputLink
 from .painter import Painter
-from .posix import (
-    alloc_zero_buffer, getenv_value, monotonic_ms, poll_stdin, read_into,
-)
+from .posix import getenv_value, monotonic_ms
 from .pty import PtyProcess
 from .scrollbar import ScrollBarArea
 from .test_results import (
@@ -63,8 +61,8 @@ from .tmux_session import (
     tmux_socket_path, tmux_stop,
 )
 from .terminal_view import (
-    body_without_bar, flush_vt_side_effects, forward_key_to_grid, grid_size,
-    GridSelection, cursor_keys_to_click, is_click_press, new_grid, paint_grid,
+    body_without_bar, drain_pty, flush_vt_side_effects, forward_key_to_grid,
+    grid_size, GridSelection, cursor_keys_to_click, is_click_press, new_grid, paint_grid,
     paint_grid_links, paint_results_grid, paint_scrollback_bar, paste_to_pty,
     place_grid, results_handle_mouse, results_pointer_shape,
     scrollback_bar_delta, wheel_rows,
@@ -595,32 +593,19 @@ struct TerminalPane(Copyable, Movable):
         if not self.pty.alive or self.pty.master_fd < 0:
             return
         self.pty.flush()
-        var scratch = alloc_zero_buffer(4096)
-        var total = 0
-        # 64 KB cap per tick so a child flooding output (e.g. ``cat
-        # big.log``) doesn't lock up the UI loop — we'll drain the
-        # rest next frame.
-        while poll_stdin(self.pty.master_fd, Int32(0)) and total < 65536:
-            var n = read_into(self.pty.master_fd, scratch, 4096)
-            if n <= 0:
-                if n == 0:
-                    # EOF from the slave side closing — the child is gone
-                    # (the user typed ``exit``, or the shell died). Tear it
-                    # down here rather than just latching ``alive`` False:
-                    # nothing else will. ``close`` runs only when the user
-                    # closes the pane, and the next ``ensure_started``
-                    # overwrites this ``PtyProcess`` wholesale — either way
-                    # the master fd and the unreaped child would be
-                    # unreachable. ``terminate`` skips the SIGTERM now that
-                    # ``alive`` is False and does the reap + close.
-                    self.pty.alive = False
-                    self.pty.terminate()
-                break
-            var span = Span[UInt8, origin_of(scratch)](
-                unsafe_ptr=scratch.unsafe_ptr(), length=n,
-            )
-            self.vt.feed(span)
-            total += n
+        var drained = drain_pty(self.pty, self.vt)
+        var total = drained[0]
+        if drained[1]:
+            # EOF from the slave side closing — the child is gone (the
+            # user typed ``exit``, or the shell died). Tear it down here
+            # rather than just latching ``alive`` False: nothing else
+            # will. ``close`` runs only when the user closes the pane, and
+            # the next ``ensure_started`` overwrites this ``PtyProcess``
+            # wholesale — either way the master fd and the unreaped child
+            # would be unreachable. ``terminate`` skips the SIGTERM now
+            # that ``alive`` is False and does the reap + close.
+            self.pty.alive = False
+            self.pty.terminate()
         # Drain emulator side-effects:
         #   * DSR / DA replies, OSC-with-reply → bytes back to child.
         #   * OSC 52 clipboard writes → system clipboard.

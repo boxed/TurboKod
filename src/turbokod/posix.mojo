@@ -14,6 +14,7 @@ the ``external_call`` avoids that whole song and dance.
 """
 
 from std.collections.list import List
+from std.collections.optional import Optional
 from std.ffi import external_call
 from std.io.file_descriptor import RawFileDescriptor
 from std.ffi import c_int
@@ -609,6 +610,20 @@ def waitpid_nohang(pid: Int32) -> Tuple[Int32, Int32]:
     var status = alloc_zero_buffer(4)
     var rc = external_call["waitpid", Int32](pid, status.unsafe_ptr(), WNOHANG)
     return (rc, status.unsafe_ptr().unsafe_bitcast[Int32]()[unsafe_offset=0])
+
+
+def poll_exit(pid: Int32) -> Optional[Int32]:
+    """``pid``'s raw ``waitpid(2)`` status once it has exited — reaped and
+    dropped from the kill-on-parent-death registry — or empty while it still
+    runs. Non-blocking, for a per-frame tick: polling across ticks gives the
+    child time to die, unlike a retry right after ``kill`` (``reap_child``)."""
+    if pid <= 0:
+        return None
+    var pair = waitpid_nohang(pid)
+    if Int(pair[0]) != Int(pid):
+        return None
+    untrack_child(pid)
+    return pair[1]
 
 
 def exit_code_from_status(status: Int) -> Int:

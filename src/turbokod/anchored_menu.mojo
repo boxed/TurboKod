@@ -1,6 +1,6 @@
 """The small anchored popup menus. ``AnchoredMenu`` is a whole one — a
-list of action rows anchored to a cell (the spell, test-gutter and
-LSP-status menus). The git-gutter and diagnostic menus lay out rows of
+list of action rows anchored to a cell (the editor and tab context menus,
+the spell, test-gutter and LSP-status menus). The git-gutter and diagnostic menus lay out rows of
 their own, so they compose the shared pieces instead:
 
 * ``anchored_menu_rect`` — the anchor-clamped placement (open below /
@@ -164,8 +164,8 @@ struct AnchoredMenu(Movable):
     enabled), routes keys and mouse to it while ``active``, and once
     ``submitted`` reads ``action`` (0 = dismissed) and ``subject`` (what
     it was opened over: the word, the test's node id), then ``close``s it.
-    A disabled row is drawn greyed and can't be picked; Enter on it keeps
-    the menu open so the user can arrow to another."""
+    A disabled row is drawn greyed and a separator as a rule; neither can
+    be picked, and the selection steps over both."""
     var active: Bool
     var submitted: Bool
     var action: Int
@@ -199,10 +199,13 @@ struct AnchoredMenu(Movable):
         mut self, anchor: Point, var items: List[NativeMenuItem],
         var subject: String = String(""), prefer_above: Bool = False,
     ):
-        """Open over ``anchor`` with the first row selected."""
+        """Open over ``anchor`` with the first pickable row selected.
+        Separators that would lead, trail or double up are dropped, so a
+        host can append one per group without checking whether the group
+        before it turned out empty."""
         self = AnchoredMenu()
         self.active = True
-        self.items = items^
+        self.set_items(items^)
         self.subject = subject^
         self.anchor_x = anchor.x
         self.anchor_y = anchor.y
@@ -210,6 +213,25 @@ struct AnchoredMenu(Movable):
 
     def close(mut self):
         self = AnchoredMenu()
+
+    def set_items(mut self, var items: List[NativeMenuItem]):
+        """Replace the rows of an open menu (rows that arrive late, like a
+        server's quick fixes), selecting the first pickable one; a press
+        in progress carries on."""
+        self.items = List[NativeMenuItem]()
+        for ref item in items:
+            if item.is_separator() and (
+                len(self.items) == 0
+                or self.items[len(self.items) - 1].is_separator()
+            ):
+                continue
+            self.items.append(item.copy())
+        if len(self.items) > 0 \
+                and self.items[len(self.items) - 1].is_separator():
+            _ = self.items.pop()
+        self.selected = 0
+        if not self._pickable(0):
+            self._step(1)
 
     def native_items(self) -> List[NativeMenuItem]:
         return self.items.copy()
@@ -219,9 +241,24 @@ struct AnchoredMenu(Movable):
         self.action = action
         self.submitted = True
 
+    def _pickable(self, row: Int) -> Bool:
+        """An enabled action row (a separator is never enabled)."""
+        return 0 <= row and row < len(self.items) and self.items[row].enabled
+
     def _pick(mut self, row: Int):
-        if 0 <= row and row < len(self.items) and self.items[row].enabled:
+        if self._pickable(row):
             self.choose(self.items[row].code)
+
+    def _step(mut self, delta: Int):
+        """Select the next pickable row ``delta`` away, wrapping past
+        either end; stay put when there is none."""
+        var n = len(self.items)
+        var i = self.selected
+        for _ in range(n):
+            i = menu_step_wrap(i, delta, n)
+            if self._pickable(i):
+                self.selected = i
+                return
 
     def _rect(self, container_bounds: Rect) -> Rect:
         var width = 0
@@ -233,7 +270,7 @@ struct AnchoredMenu(Movable):
         )
 
     def paint(self, mut canvas: Canvas, container_bounds: Rect):
-        if not self.active:
+        if not self.active or len(self.items) == 0:
             return
         var rect = self._rect(container_bounds)
         var attr = Attr(BLACK, LIGHT_GRAY)
@@ -241,6 +278,10 @@ struct AnchoredMenu(Movable):
         var painter = Painter(rect)
         for i in range(len(self.items)):
             var y = menu_row_y(rect) + i
+            if self.items[i].is_separator():
+                for x in range(rect.a.x + 1, rect.b.x - 1):
+                    _ = painter.put_text(canvas, Point(x, y), String("─"), attr)
+                continue
             var on = self.items[i].enabled
             var row_attr = attr if on else Attr(DARK_GRAY, LIGHT_GRAY)
             if self.selected == i:
@@ -264,9 +305,9 @@ struct AnchoredMenu(Movable):
         if k == KEY_ESC:
             self.choose(0)
         elif k == KEY_UP:
-            self.selected = menu_step_wrap(self.selected, -1, len(self.items))
+            self._step(-1)
         elif k == KEY_DOWN:
-            self.selected = menu_step_wrap(self.selected, 1, len(self.items))
+            self._step(1)
         elif k == KEY_ENTER:
             self._pick(self.selected)
         return True
@@ -277,10 +318,14 @@ struct AnchoredMenu(Movable):
         if not self.active:
             return MENU_HIT_NONE
         var rect = self._rect(container_bounds)
+        var before = self.selected
         var r = anchored_menu_mouse(
             event, rect, menu_row_y(rect), len(self.items),
             self.selected, self.tracking,
         )
+        # A press on a row that can't be picked doesn't move the selection.
+        if not self._pickable(self.selected):
+            self.selected = before
         if r.cancel:
             self.choose(0)
         elif r.fired_row >= 0:
