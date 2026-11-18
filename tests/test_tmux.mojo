@@ -351,6 +351,12 @@ def test_tmux_test_run() raises:
     d._target_run_in_tmux(t)
     assert_equal(len(d.terminal_panes), 2)
     assert_false(d.terminal_panes[1].tests)
+    # Let the run's shell set up its Ctrl-C trap before Stop sends one: a
+    # Ctrl-C that lands first kills the session, and the reopen below
+    # then finds one pane, not two.
+    for _ in range(25):
+        d.terminal_tick()
+        sleep_ms(20)
     d._stop_debug_and_run()
     assert_true(_run_pane_settles(d, 0))
     assert_equal(d.terminal_panes[0].run_exit_status, String("1"))
