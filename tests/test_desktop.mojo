@@ -693,6 +693,22 @@ def test_window_focus_change_skips_untitled_buffer() raises:
     _ = external_call["unlink", Int32]((path_b + String("\0")).unsafe_ptr())
 
 
+def test_desktop_breakpoint_condition_prompt_keeps_a_path_with_a_pipe() raises:
+    var d = Desktop()
+    d.windows.add(Window.editor_window(
+        String("buf"), Rect(0, 1, 40, 12), String("a\nb\nc\n"),
+    ))
+    var path = String("/proj/odd|name.py")
+    d.windows.windows[0].editor.file_path = path
+    d.windows.windows[0].editor.move_to(2, 0, False)
+    d._debug_open_condition_prompt()
+    assert_true(d.prompt.active)
+    d.prompt.input.set_text(String("i > 0"))
+    d.prompt.submitted = True
+    _ = d._on_prompt_submit()
+    assert_equal(d.dap.breakpoint_condition(path, 2), String("i > 0"))
+
+
 def test_desktop_replace_all_button_runs_global_replace() raises:
     var d = Desktop()
     d.windows.add(Window.editor_window(

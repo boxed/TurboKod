@@ -10029,12 +10029,9 @@ struct Editor(Copyable, Movable):
             if len(effective_prefix.as_bytes()) == 0:
                 effective_prefix = String("// ")
         self._push_undo()
-        var sel = self.selection()
-        var sr = sel[0]
-        var er = sel[2]
-        if not self.has_selection():
-            sr = self.selections[0].row
-            er = self.selections[0].row
+        var rows = self._line_op_range()
+        var sr = rows[0]
+        var er = rows[1]
         var pn = len(effective_prefix.as_bytes())
         var pb = effective_prefix.as_bytes()
 

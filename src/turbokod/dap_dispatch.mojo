@@ -400,10 +400,6 @@ struct SubprocessAttach(Copyable, Movable):
     var rq: _InspectRequests
     var got_initialized_event: Bool
     var pending_attach_args: JsonValue
-    # Mirror of the parent's breakpoints at attach time. Sent to the
-    # subprocess on ``initialized`` so a breakpoint set in shared code
-    # (e.g. a Django view served from the forked child) actually fires.
-    var bps: List[DapBreakpoint]
 
     def __init__(out self):
         # Inert default — ``state == _STATE_NOT_STARTED`` is the sentinel
@@ -421,7 +417,6 @@ struct SubprocessAttach(Copyable, Movable):
         self.rq = _InspectRequests()
         self.got_initialized_event = False
         self.pending_attach_args = JsonValue()
-        self.bps = List[DapBreakpoint]()
 
     def __copyinit__(mut self, copy: Self):
         # Same caveat as ``DapManager.__copyinit__``: a real copy would
@@ -1186,6 +1181,39 @@ struct DapManager(Copyable, Movable):
             self._send_set_breakpoints(paths[i])
 
     def _send_set_breakpoints(mut self, path: String):
+        var built = self._set_breakpoints_args(path)
+        ref args = built[0]
+        try:
+            var seq = self.client.send_request(
+                String("setBreakpoints"), args.copy(),
+            )
+            self._inflight_set_breakpoints_seqs.append(seq)
+            self._inflight_set_breakpoints_paths.append(path)
+            # Stash the exact lines we sent (in adapter array order) so the
+            # response demux maps rejections by position without re-deriving
+            # from the live arrays, which may have changed since.
+            self._inflight_set_breakpoints_lines.append(built[1].copy())
+        except e:
+            print("dap: setBreakpoints", path, ":", String(e))
+        # Mirror to the attached subprocess if any — without this, a
+        # breakpoint toggled after attach in shared code (a Django view
+        # served from the forked child) wouldn't fire because only the
+        # parent gets the update.
+        if self._subprocess.state == _STATE_RUNNING \
+                or self._subprocess.state == _STATE_CONFIGURING:
+            try:
+                _ = self._subprocess.client.send_request(
+                    String("setBreakpoints"), args,
+                )
+            except e:
+                print("dap: setBreakpoints (subprocess)", path, ":", String(e))
+
+    def _set_breakpoints_args(self, path: String) -> Tuple[JsonValue, List[Int]]:
+        """``setBreakpoints`` arguments for ``path`` — what the adapter
+        should hold now (enabled, armed, plus a run-to-cursor oneshot) —
+        and the line of each sent breakpoint in wire order (-1 for the
+        oneshot), for the response demux. The parent session and a
+        forked subprocess get the same set."""
         var args = json_object()
         var src = json_object()
         var resolved = realpath(path)
@@ -1239,30 +1267,7 @@ struct DapManager(Copyable, Movable):
             sent_lines.append(-1)
         args.put(String("breakpoints"), bps)
         args.put(String("sourceModified"), json_bool(False))
-        try:
-            var seq = self.client.send_request(
-                String("setBreakpoints"), args.copy(),
-            )
-            self._inflight_set_breakpoints_seqs.append(seq)
-            self._inflight_set_breakpoints_paths.append(path)
-            # Stash the exact lines we sent (in adapter array order) so the
-            # response demux maps rejections by position without re-deriving
-            # from the live arrays, which may have changed since.
-            self._inflight_set_breakpoints_lines.append(sent_lines^)
-        except e:
-            print("dap: setBreakpoints", path, ":", String(e))
-        # Mirror to the attached subprocess if any — without this, a
-        # breakpoint toggled after attach in shared code (a Django view
-        # served from the forked child) wouldn't fire because only the
-        # parent gets the update.
-        if self._subprocess.state == _STATE_RUNNING \
-                or self._subprocess.state == _STATE_CONFIGURING:
-            try:
-                _ = self._subprocess.client.send_request(
-                    String("setBreakpoints"), args,
-                )
-            except e:
-                print("dap: setBreakpoints (subprocess)", path, ":", String(e))
+        return (args^, sent_lines^)
 
     # --- exception breakpoints --------------------------------------------
 
@@ -1925,26 +1930,18 @@ struct DapManager(Copyable, Movable):
             )
         except e:
             print("dap: subprocess setDebuggerProperty:", String(e))
-        # setBreakpoints per source path.
-        var paths = _bp_paths(self._subprocess.bps)
+        # setBreakpoints per source path: the parent's set as it stands
+        # now (wait-for gating and all) — a breakpoint set in shared code
+        # (a Django view served from the forked child) has to fire here.
+        var paths = self._distinct_breakpoint_paths()
         for i in range(len(paths)):
-            var path = paths[i]
-            var src = json_object()
-            src.put(String("path"), json_str(path))
-            var bps = json_array()
-            for ref b in self._subprocess.bps:
-                if b.path == path and b.enabled:
-                    bps.append(_bp_json(b))
-            var args = json_object()
-            args.put(String("source"), src)
-            args.put(String("breakpoints"), bps)
-            args.put(String("sourceModified"), json_bool(False))
+            var built = self._set_breakpoints_args(paths[i])
             try:
                 _ = self._subprocess.client.send_request(
-                    String("setBreakpoints"), args,
+                    String("setBreakpoints"), built[0],
                 )
             except e:
-                print("dap: subprocess _configure setBreakpoints", path, ":", String(e))
+                print("dap: subprocess _configure setBreakpoints", paths[i], ":", String(e))
         # setExceptionBreakpoints — same defaults as parent.
         try:
             _ = self._subprocess.client.send_request(
@@ -2587,17 +2584,15 @@ struct DapManager(Copyable, Movable):
         var proc = LspProcess.from_socket(fd)
         # Shared with the parent session, which owns the close.
         proc.borrow_trace_fd(self.client.process.trace_fd)
-        # Reset the subprocess slot in place — direct field access
-        # (instead of an Optional swap) avoids copying the live socket
-        # fd, which the inert __copyinit__ would lose.
+        # A fresh slot — the new client's seq restarts at 1, so nothing
+        # from a previous subprocess (in-flight inspect requests, attach
+        # args) may survive to claim its responses. Moved in, never
+        # copied: the inert __copyinit__ would lose the live socket fd.
+        self._subprocess = SubprocessAttach()
         self._subprocess.client = DapClient(proc^)
         self._subprocess.sub_process_id = spi
         self._subprocess.name = name
         self._subprocess.state = _STATE_INITIALIZING
-        self._subprocess.inflight_initialize = 0
-        self._subprocess.inflight_attach = 0
-        self._subprocess.inflight_config_done = 0
-        self._subprocess.got_initialized_event = False
         # Send the standard initialize. Same arguments as the parent —
         # debugpy doesn't really care, but matching shape keeps the log
         # sensible and the capabilities response well-formed.
@@ -2628,10 +2623,6 @@ struct DapManager(Copyable, Movable):
                 continue
             attach_args.put(k, b.obj_v[i].value)
         self._subprocess.pending_attach_args = attach_args^
-        # Mirror the parent's breakpoints into the subprocess so a
-        # breakpoint set in shared code (a Django view served from the
-        # forked child) actually fires.
-        self._subprocess.bps = self._bps.copy()
         self.client.process.trace(
             String("debugpyAttach: opened ") + host + String(":")
             + String(port) + String(" pid=") + String(spi)

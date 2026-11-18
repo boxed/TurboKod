@@ -6373,31 +6373,20 @@ def _parse_inline_values(v: JsonValue) -> List[TextEditEntry]:
 
 def _parse_linked_ranges(v: JsonValue) -> List[TextEditEntry]:
     """Parse ``LinkedEditingRanges`` (``{ranges: Range[], wordPattern?}``)
-    into range carriers (``new_text`` unused)."""
+    into range carriers (``new_text`` unused). A malformed Range is
+    skipped, not carried with a ``-1`` end."""
     var out = List[TextEditEntry]()
     if not v.is_object():
         return out^
-    var r_opt = v.object_get(String("ranges"))
-    if not r_opt or not r_opt.value().is_array():
+    var ri = v.object_index(String("ranges"))
+    if ri < 0 or not v.obj_v[ri].value.is_array():
         return out^
-    var arr = r_opt.value().copy()
-    for i in range(arr.array_len()):
-        var rng = arr.array_at(i)
-        if not rng.is_object():
+    for ref rng in v.obj_v[ri].value.arr_v:
+        var r = _parse_range(rng)
+        if not r:
             continue
-        var en_opt = rng.object_get(String("end"))
-        if not en_opt or not en_opt.value().is_object():
-            continue
-        var sp = _start_pos_of(rng)
-        var el_opt = en_opt.value().object_get(String("line"))
-        var ec_opt = en_opt.value().object_get(String("character"))
-        if not el_opt or not ec_opt or not el_opt.value().is_int() \
-                or not ec_opt.value().is_int():
-            continue
-        out.append(TextEditEntry(
-            sp[0], sp[1], el_opt.value().as_int(), ec_opt.value().as_int(),
-            String(""),
-        ))
+        var t = r.value()
+        out.append(TextEditEntry(t[0], t[1], t[2], t[3], String("")))
     return out^
 
 

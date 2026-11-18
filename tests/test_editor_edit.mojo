@@ -479,6 +479,18 @@ def test_editor_toggle_comment_selection() raises:
     assert_equal(ed.buffer.line(2), String("c"))
 
 
+def test_editor_toggle_comment_excludes_row_selected_at_column_0() raises:
+    # A line selection (Shift+Down, triple click) ends at column 0 of the
+    # next row; that row isn't part of it, as for indent / dedent.
+    var ed = Editor(String("a\nb\nc"))
+    ed.move_to(0, 0, False)
+    ed.move_to(2, 0, True)
+    ed.toggle_comment()
+    assert_equal(ed.buffer.line(0), String("// a"))
+    assert_equal(ed.buffer.line(1), String("// b"))
+    assert_equal(ed.buffer.line(2), String("c"))
+
+
 def test_editor_toggle_comment_language_aware() raises:
     # Python: `# ` prefix derived from .py extension.
     var py = Editor(String("hello"))

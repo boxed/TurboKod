@@ -26,7 +26,7 @@ from .painter import Painter
 from .colors import Attr, BLACK, LIGHT_GRAY, YELLOW
 from .geometry import Point, Rect
 from .lsp import LspProcess
-from .string_utils import display_columns
+from .string_utils import display_columns, utf8_suffix
 from .window import paint_window_title_at
 from .posix import (
     close_fd, drain_fd, exit_code_from_status,
@@ -192,12 +192,9 @@ struct InstallRunner(Movable):
             # Keep the *tail*: install failures put the diagnostic at the
             # bottom of the log, and silently dropping the head is much
             # less misleading than dropping a multi-megabyte tail.
-            var ob = self.output.as_bytes()
-            # Temporary: ``ob`` borrows ``self.output``, so the trimmed
-            # value must exist before we overwrite what it points into.
-            var tail = String(StringSpan(
-                unsafe_from_utf8=ob[len(ob) - _OUTPUT_CAP:],
-            ))
+            # On a codepoint boundary, as ``CappedText`` cuts. Built before
+            # the assignment: the suffix borrows ``self.output``.
+            var tail = utf8_suffix(self.output, _OUTPUT_CAP)
             self.output = tail^
 
     def terminate(mut self):

@@ -717,6 +717,23 @@ def test_dap_manager_breakpoint_wait_for_arms_on_trigger() raises:
     assert_equal(mgr.breakpoint_wait_for(String("/tmp/x.py"), 12), String(""))
 
 
+def test_dap_set_breakpoints_args_hold_back_a_waiting_breakpoint() raises:
+    """The parent session and a forked subprocess both send
+    ``_set_breakpoints_args``: a breakpoint waiting on another stays off
+    the wire until it's armed (the subprocess used to get it live)."""
+    var mgr = DapManager()
+    var path = String("/tmp/x.py")
+    mgr.toggle_breakpoint(path, 5)
+    mgr.toggle_breakpoint(path, 12)
+    mgr.set_breakpoint_wait_for(path, 12, String("/tmp/x.py:6"))
+    var built = mgr._set_breakpoints_args(path)
+    assert_equal(len(built[1]), 1)
+    assert_equal(built[1][0], 5)
+    mgr.arm_dependents(path, 5)
+    built = mgr._set_breakpoints_args(path)
+    assert_equal(len(built[1]), 2)
+
+
 def test_dap_manager_captures_condition_exception_from_output() raises:
     """A pydevd ``Error while evaluating expression in conditional
     breakpoint`` output event must be parsed into the condition + the

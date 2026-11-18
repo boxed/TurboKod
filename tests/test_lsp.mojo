@@ -1220,6 +1220,12 @@ def test_lsp_parse_linked_ranges() raises:
     assert_equal(r[0].end_char, 4)
     assert_equal(r[1].start_line, 3)
     assert_equal(len(_parse_linked_ranges(parse_json(String("null")))), 0)
+    # A Range with a malformed start is dropped, not carried as (-1, -1).
+    var bad = parse_json(String(
+        "{\"ranges\":[{\"start\":{\"line\":\"x\"},"
+        + "\"end\":{\"line\":1,\"character\":4}}]}"
+    ))
+    assert_equal(len(_parse_linked_ranges(bad)), 0)
 
 
 def test_lsp_parse_inline_completion() raises:

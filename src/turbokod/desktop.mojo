@@ -13560,45 +13560,47 @@ struct Desktop(Movable):
         if deb_idx < 0:
             self._say_error(String("debug: no adapter registered for ") + lang_id)
             return
-        # If the manager is already TERMINATED / FAILED from a prior
-        # session, return it to NOT_STARTED so ``start`` will run.
-        # ``reset_for_restart`` is preferred over replacing ``self.dap``
-        # because it preserves the user's breakpoints + exception
-        # filter selection — wholesale replacement would silently drop
-        # both, so the second F5 would launch with no breakpoints set
-        # and the program would run straight through.
-        if self.dap.is_failed() or self.dap.is_terminated():
-            self.dap.reset_for_restart()
         var cwd = self.project.value() if self.project else String(".")
-        var venv_dir = python_venv_dir(cwd)
+        self._launch_debug(
+            lang_id, deb_idx, python_venv_dir(cwd), path, cwd, List[String](),
+            List[String](), basename(path),
+        )
+
+    def _launch_debug(
+        mut self, language: String, deb_idx: Int, venv_dir: String,
+        program: String, cwd: String, var args: List[String],
+        env: List[String], name: String,
+    ):
+        """Start a debug session of ``program`` — unless debugpy has to be
+        installed into the project venv first: then the confirm opens
+        and ``_on_debugpy_install_complete`` replays the start once the
+        user accepts and pip finishes. The prompt goes ahead of the LSP
+        install so the single-slot ``install_runner`` is free for it."""
+        # Stamped before the prompt gate so the deferred replay keeps it.
+        self._debug_target_name = name
+        if self._maybe_prompt_debugpy_install(
+            language, venv_dir, program, cwd, args.copy(), env.copy(),
+        ):
+            return
+        self._start_debug(language, deb_idx, venv_dir, program, cwd, args^, env)
+
+    def _start_debug(
+        mut self, language: String, deb_idx: Int, venv_dir: String,
+        program: String, cwd: String, var args: List[String],
+        env: List[String],
+    ):
+        """Free the single run/debug slot (stopping any plain run), start
+        the adapter, and show the pane with its spawn line. Python in a
+        project venv runs the adapter from ``<venv>/bin`` — the same
+        interpreter the program gets — and gets a one-shot LSP install
+        into the venv; both no-op otherwise."""
+        self._reset_debug_slot()
+        self._maybe_install_python_lsp_in_venv(language, venv_dir)
         var spec = python_debugger_spec_for_venv(
             self.dap_specs[deb_idx], venv_dir,
         )
-        # Ask before pip-installing debugpy. If the prompt opens, defer
-        # the dap.start — ``_on_debugpy_install_complete`` replays it
-        # (and runs the LSP auto-install at that point) once the user
-        # accepts and pip finishes. Ordered ahead of the LSP install
-        # so the single-slot ``install_runner`` is free for the debugpy
-        # job we're about to kick off if the user says yes.
-        # Stamped before the prompt gate so the deferred replay keeps it.
-        self._debug_target_name = basename(path)
-        if self._maybe_prompt_debugpy_install(
-            lang_id, venv_dir, path, cwd, List[String](),
-        ):
-            return
-        self._maybe_install_python_lsp_in_venv(lang_id, venv_dir)
-        self.dap.start(spec, path, cwd, List[String]())
-        # Surface the resolved spawn line to the pane log immediately.
-        # Pre-stderr-drain debugging this was guesswork ("did it pick
-        # debugpy-adapter or python -m debugpy.adapter?"); a single
-        # console-category line removes the ambiguity. Also visible
-        # before the first event arrives, which matters when the
-        # adapter crashes silently.
-        if self._echo_dap_spawn_line():
-            self.debug_pane.visible = True
-            # Surface the floating panel window on this run-to-cursor —
-            # orderFront, not focus (keyboard focus stays in the editor).
-            self.panel_front_request = True
+        self.dap.start(spec, program, cwd, args^, env=env)
+        self._show_dap_spawn()
 
     # --- target run / debug ----------------------------------------------
 
@@ -14010,9 +14012,6 @@ struct Desktop(Movable):
                     + String("'"),
             )
             return
-        # Stop any in-flight run for this target — the user just
-        # asked for a debug session of the same thing.
-        self._reset_debug_slot()
         var cwd = resolved_cwd(self.project.value(), target.cwd)
         var program_seed = resolve_python_interpreter(
             self.project.value(), target.program,
@@ -14020,30 +14019,11 @@ struct Desktop(Movable):
         var program = resolved_program(
             self.project.value(), target.cwd, program_seed,
         )
-        var args = target.args.copy()
-        # Python in a project venv: redirect the adapter to ``<venv>/bin``
-        # so the debugger runs against the same interpreter the program
-        # does, and kick off a one-shot LSP install into the venv so the
-        # editor's completion / diagnostics also see venv-installed
-        # packages. Both no-op for non-Python targets and projects
-        # without a venv, so this is safe to apply unconditionally.
-        var venv_dir = python_venv_dir(self.project.value())
-        var spec = python_debugger_spec_for_venv(
-            self.dap_specs[deb_idx], venv_dir,
+        self._launch_debug(
+            target.debug_language, deb_idx,
+            python_venv_dir(self.project.value()), program, cwd,
+            target.args.copy(), target.env, target.name,
         )
-        # See ``_debug_start_or_continue`` — same prompt-before-start
-        # gating, with the deferred replay rebuilding the spawn-line
-        # log + status flash from the same fields the user authored
-        # the target with.
-        self._debug_target_name = target.name
-        if self._maybe_prompt_debugpy_install(
-            target.debug_language, venv_dir, program, cwd, args.copy(),
-            target.env.copy(),
-        ):
-            return
-        self._maybe_install_python_lsp_in_venv(target.debug_language, venv_dir)
-        self.dap.start(spec, program, cwd, args^, env=target.env.copy())
-        self._show_dap_spawn()
         self._say(String("debugging ") + target.name + String("…"))
 
     def _python_test_root(mut self, label: String) -> String:
@@ -14217,23 +14197,10 @@ struct Desktop(Movable):
         args.append(String("--color=yes"))
         if len(node_id.as_bytes()) > 0:
             args.append(node_id)
-        var venv_dir = python_venv_dir(project_root)
-        var spec = python_debugger_spec_for_venv(
-            self.dap_specs[deb_idx], venv_dir,
+        self._launch_debug(
+            language, deb_idx, python_venv_dir(project_root), program,
+            project_root, args^, List[String](), String("tests"),
         )
-        # Same prompt-before-start gating as ``_target_debug``: if
-        # debugpy isn't installed in the venv, surface the install
-        # prompt instead of failing the spawn.
-        self._debug_target_name = String("tests")
-        if self._maybe_prompt_debugpy_install(
-            language, venv_dir, program, project_root, args.copy(),
-        ):
-            return
-        self._maybe_install_python_lsp_in_venv(language, venv_dir)
-        # Stop any prior run / debug — the debug pane is single-slot.
-        self._reset_debug_slot()
-        self.dap.start(spec, program, project_root, args^)
-        self._show_dap_spawn()
         self._say(String("debugging tests…"))
 
     def target_tick(mut self):
@@ -16331,19 +16298,14 @@ struct Desktop(Movable):
             self._clear_pending_dap_start()
             return
         var venv_dir = self._pending_dap_venv_dir
-        var spec = python_debugger_spec_for_venv(
-            self.dap_specs[deb_idx], venv_dir,
-        )
-        if self.dap.is_failed() or self.dap.is_terminated():
-            self.dap.reset_for_restart()
         var program = self._pending_dap_program
         var cwd = self._pending_dap_cwd
         var args = self._pending_dap_args.copy()
         var env = self._pending_dap_env.copy()
         self._clear_pending_dap_start()
-        self._maybe_install_python_lsp_in_venv(String("python"), venv_dir)
-        self.dap.start(spec, program, cwd, args^, env=env)
-        self._show_dap_spawn()
+        self._start_debug(
+            String("python"), deb_idx, venv_dir, program, cwd, args^, env,
+        )
 
     def _echo_dap_spawn_line(mut self) -> Bool:
         """Log the adapter's resolved ``$ argv`` line to the debug pane so
@@ -18839,19 +18801,15 @@ struct Desktop(Movable):
             return Optional[String]()
         if pa == _PA_BP_CONDITION:
             # ``_pending_arg`` carries ``path|line`` from when the
-            # prompt was opened. Empty input clears any existing
+            # prompt was opened; split at the *last* ``|``, since a path
+            # may contain one. Empty input clears any existing
             # condition (the breakpoint stays).
             var arg = self._pending_arg
             self._pending_arg = String("")
-            var sep = -1
-            var ab = arg.as_bytes()
-            for k in range(len(ab)):
-                if ab[k] == 0x7C:  # '|'
-                    sep = k
-                    break
+            var sep = arg.rfind(String("|"))
             if sep > 0:
-                var path = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=ab.unsafe_ptr(), length=sep)))
-                var line_str = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=ab.unsafe_ptr().unsafe_offset(sep).unsafe_offset(1), length=len(ab) - sep - 1)))
+                var path = byte_slice(arg, 0, sep)
+                var line_str = byte_slice(arg, sep + 1, len(arg.as_bytes()))
                 var line = 0
                 try:
                     line = Int(atol(line_str))
