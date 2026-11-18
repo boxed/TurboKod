@@ -36,7 +36,7 @@ from turbokod.lsp_shared import new_pool
 from turbokod.highlight import new_grammar_store
 from turbokod.spell import new_spell_base
 from turbokod.json import (
-    json_get_string_array,
+    json_get_string_array, json_string_array,
     JsonValue, encode_json, json_array, json_bool, json_int, json_object, json_str,
 )
 from turbokod.posix import (
@@ -1064,10 +1064,7 @@ def tk_desktop_attention_flashes(
         var o = json_object()
         o.put(String("kind"), json_int(f.kind))
         o.put(String("idx"), json_int(f.idx))
-        o.put(String("x"), json_int(f.rect.a.x))
-        o.put(String("y"), json_int(f.rect.a.y))
-        o.put(String("w"), json_int(f.rect.width()))
-        o.put(String("h"), json_int(f.rect.height()))
+        _put_rect(o, f.rect)
         o.put(String("age"), json_int(f.age_ms))
         a.append(o)
     return _write_out(encode_json(a), out_ptr, cap)
@@ -1477,13 +1474,6 @@ def tk_desktop_menu_invoke(
 # --- macOS-style UI: native dialogs ---------------------------------------
 
 
-def _strings(items: List[String]) -> JsonValue:
-    var a = json_array()
-    for i in range(len(items)):
-        a.append(json_str(items[i]))
-    return a^
-
-
 def _native_dialog_json(ref d: Desktop) -> String:
     """The dialog the host should be showing natively, as JSON, or empty."""
     if not d.native_dialog_active():
@@ -1492,10 +1482,7 @@ def _native_dialog_json(ref d: Desktop) -> String:
     if d.confirm_dialog.active:
         o.put(String("kind"), json_str(String("confirm")))
         o.put(String("message"), json_str(d.confirm_dialog.message))
-        var buttons = json_array()
-        for i in range(len(d.confirm_dialog.labels)):
-            buttons.append(json_str(d.confirm_dialog.labels[i]))
-        o.put(String("buttons"), buttons)
+        o.put(String("buttons"), json_string_array(d.confirm_dialog.labels))
         o.put(String("default"), json_int(d.confirm_dialog.default_index))
         o.put(
             String("destructive"),
@@ -1508,10 +1495,10 @@ def _native_dialog_json(ref d: Desktop) -> String:
     elif d.message_request_dialog.active:
         o.put(String("kind"), json_str(String("choice")))
         o.put(String("message"), json_str(d.message_request_dialog.message))
-        var acts = json_array()
-        for i in range(len(d.message_request_dialog.actions)):
-            acts.append(json_str(d.message_request_dialog.actions[i]))
-        o.put(String("actions"), acts)
+        o.put(
+            String("actions"),
+            json_string_array(d.message_request_dialog.actions),
+        )
     elif d.native_prompt_active():
         o.put(String("kind"), json_str(String("prompt")))
         o.put(String("label"), json_str(d.prompt.label))
@@ -1853,8 +1840,8 @@ def tk_desktop_merge(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
         if m.regions[ri].kind == REGION_STABLE:
             continue
         var c = json_object()
-        c.put(String("ours"), _strings(m.regions[ri].ours_lines))
-        c.put(String("theirs"), _strings(m.regions[ri].theirs_lines))
+        c.put(String("ours"), json_string_array(m.regions[ri].ours_lines))
+        c.put(String("theirs"), json_string_array(m.regions[ri].theirs_lines))
         var before = List[String]()
         if ri > 0 and m.regions[ri - 1].kind == REGION_STABLE:
             ref ls = m.regions[ri - 1].lines
@@ -1865,10 +1852,10 @@ def tk_desktop_merge(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
             ref ls = m.regions[ri + 1].lines
             for k in range(min(3, len(ls))):
                 after.append(ls[k])
-        c.put(String("before"), _strings(before))
-        c.put(String("after"), _strings(after))
+        c.put(String("before"), json_string_array(before))
+        c.put(String("after"), json_string_array(after))
         c.put(String("choice"), json_int(m.states[ci].choice))
-        c.put(String("edited"), _strings(m.states[ci].edited_lines))
+        c.put(String("edited"), json_string_array(m.states[ci].edited_lines))
         cs.append(c)
         ci += 1
     o.put(String("conflicts"), cs)
@@ -1974,10 +1961,7 @@ def tk_desktop_history_act(h: Int, op: Int, idx: Int) abi("C"):
 def _tree_json(ref t: FileTree, screen: Rect) -> String:
     var r = t.content_rect(screen)
     var o = json_object()
-    o.put(String("x"), json_int(r.a.x))
-    o.put(String("y"), json_int(r.a.y))
-    o.put(String("w"), json_int(r.width()))
-    o.put(String("h"), json_int(r.height()))
+    _put_rect(o, r)
     o.put(String("root"), json_str(t.root))
     o.put(String("selected"), json_int(t.selected))
     o.put(String("focused"), json_bool(t.focused))
@@ -2140,6 +2124,14 @@ def tk_desktop_host_items(
     return _write_out(encode_json(arr), out_ptr, cap)
 
 
+def _put_rect(mut o: JsonValue, r: Rect):
+    """``r`` as cell ``x`` / ``y`` / ``w`` / ``h`` fields of ``o``."""
+    o.put(String("x"), json_int(r.a.x))
+    o.put(String("y"), json_int(r.a.y))
+    o.put(String("w"), json_int(r.width()))
+    o.put(String("h"), json_int(r.height()))
+
+
 def _attr_rgb(ref d: Desktop, attr: Attr, fg: Bool) -> Int:
     """``attr``'s foreground or background as 0xRRGGBB, through the theme."""
     if fg:
@@ -2220,10 +2212,7 @@ def tk_desktop_editor_scroller(
     var m = d.smooth_begin(win, Rect(0, 0, cols, rows))
     var o = json_object()
     o.put(String("win"), json_int(win))
-    o.put(String("x"), json_int(r.a.x))
-    o.put(String("y"), json_int(r.a.y))
-    o.put(String("w"), json_int(r.width()))
-    o.put(String("h"), json_int(r.height()))
+    _put_rect(o, r)
     o.put(String("cur"), json_int(Int(m[0] * 1000.0)))
     o.put(String("max"), json_int(Int(m[1] * 1000.0)))
     # The editor background, so the knob can contrast with it.
@@ -2416,10 +2405,7 @@ def tk_desktop_debug_inspect(
             if s.kind == PANEL_KIND_DEBUG:
                 pane_bottom = s.rect.b.y
     var o = json_object()
-    o.put(String("x"), json_int(r.a.x))
-    o.put(String("y"), json_int(r.a.y))
-    o.put(String("w"), json_int(r.width()))
-    o.put(String("h"), json_int(r.height()))
+    _put_rect(o, r)
     o.put(String("output"), json_bool(r.b.y < pane_bottom))
     o.put(String("focused"), json_bool(p.focused))
     o.put(String("status"), json_str(p.status_text))
@@ -2506,7 +2492,7 @@ def tk_desktop_review(
     if d.native_review_picker():
         o.put(String("mode"), json_str(String("picker")))
         o.put(String("tab"), json_int(rv.picker_tab))
-        o.put(String("labels"), _strings(rv.picker_labels))
+        o.put(String("labels"), json_string_array(rv.picker_labels))
         o.put(String("cursor"), json_int(rv.picker_cursor))
         return _write_out(encode_json(o), out_ptr, cap)
     if not d.native_review_reviewing():
@@ -2733,10 +2719,7 @@ def _git_state_json(mut d: Desktop) -> String:
     ov.put(String("action"), json_str(g.overlay_action))
     ov.put(String("text"), json_str(g.native_overlay_text()))
     ov.put(String("output"), json_str(g.overlay_output))
-    var remotes = json_array()
-    for i in range(len(g._remotes)):
-        remotes.append(json_str(g._remotes[i]))
-    ov.put(String("remotes"), remotes)
+    ov.put(String("remotes"), json_string_array(g._remotes))
     ov.put(String("remote_sel"), json_int(g._remote_sel))
     ov.put(String("prefix"), json_str(g.native_typed_prefix()))
     ov.put(String("into_main"), json_bool(g.native_merge_into_main()))
@@ -2762,9 +2745,7 @@ def _panel_json(ref d: Desktop, ref p: RightPanel, pane: Int) -> JsonValue:
         sp.append(json_int(h.row))
         sp.append(json_int(h.col_start))
         sp.append(json_int(h.col_end))
-        sp.append(json_int(_attr_fg_rgb(
-            d, h.attr.fg, h.attr.color_mode, h.attr.fg_rgb,
-        )))
+        sp.append(json_int(_attr_rgb(d, h.attr, True)))
         spans.append(sp)
     o.put(String("spans"), spans)
     return o^
@@ -2903,11 +2884,7 @@ def tk_desktop_welcome_options(h: Int, out_ptr: Int, cap: Int) abi("C") -> Int:
         return 0
     ref d = _desk(h)[]
     var o = json_object()
-    var themes = json_array()
-    var names = theme_names()
-    for i in range(len(names)):
-        themes.append(json_str(names[i]))
-    o.put(String("themes"), themes)
+    o.put(String("themes"), json_string_array(theme_names()))
     var fonts = json_array()
     fonts.append(json_str(default_font_label()))
     fonts.append(json_str(chicago_font_label()))
@@ -2942,12 +2919,6 @@ def tk_desktop_welcome_apply(h: Int, ptr: Int, n: Int, done: Int) abi("C"):
 
 
 # --- macOS-style UI: native pickers ----------------------------------------
-
-
-def _attr_fg_rgb(ref d: Desktop, fg: UInt8, mode: UInt8, rgb: UInt32) -> Int:
-    if (mode & FG_TRUECOLOR) != 0:
-        return Int(rgb)
-    return Int(d.active_theme.palette[Int(fg)])
 
 
 @export

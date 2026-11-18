@@ -1021,6 +1021,9 @@ final class CellView: NSView {
     /// any frame an earlier `pollFrame` left behind stale.
     func invalidateFrame() { framePending = false }
 
+    /// Refetch the frame from the core and repaint.
+    func redraw() { invalidateFrame(); needsDisplay = true }
+
     /// Resolve a cell's foreground/background to 24-bit ``0xRRGGBB``, honoring
     /// the ``color_mode`` truecolor bits (real RGB from the per-cell fg_rgb /
     /// bg_rgb words) and the ``STYLE_REVERSE`` fg/bg swap. Non-truecolor
@@ -1935,8 +1938,7 @@ final class CellView: NSView {
         if key == 0 { return }
         let action = keySurface(key, mods(event), cols(), rows())
         handleAction(action)
-        invalidateFrame()
-        needsDisplay = true
+        redraw()
     }
 
     /// Forward inserted text — emoji palette / Character Viewer (which deliver
@@ -1951,8 +1953,7 @@ final class CellView: NSView {
         for scalar in s.unicodeScalars {
             handleAction(keySurface(scalar.value, 0, cols(), rows()))
         }
-        invalidateFrame()
-        needsDisplay = true
+        redraw()
     }
 
     override func flagsChanged(with event: NSEvent) {
@@ -1965,8 +1966,7 @@ final class CellView: NSView {
         optionDown = nowDown
         let action = modKeySurface(MOD_KEY_ALT, nowDown ? 1 : 0)
         handleAction(action)
-        invalidateFrame()
-        needsDisplay = true
+        redraw()
     }
 
     /// `quiet` dispatches the event into the core but skips the cursor-shape
@@ -2407,8 +2407,7 @@ final class CellView: NSView {
         default: return false
         }
         guard consumed else { return false }
-        invalidateFrame()
-        needsDisplay = true
+        redraw()
         return true
     }
 
@@ -2486,8 +2485,7 @@ final class CellView: NSView {
         guard fmt >= 0 else { return true }   // cancelled — swallow, don't text-paste
         let text = urls.map { formatPath($0, fmt) }.joined(separator: " ")
         _ = withUTF8Arg(text) { ptr, len in tk_desktop_paste_text(handle, ptr, len) }
-        invalidateFrame()
-        needsDisplay = true
+        redraw()
         return true
     }
 
@@ -2857,11 +2855,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             guard tk_desktop_attention_unseen(v.handle) > 0 else { continue }
             tk_desktop_attention_seen(v.handle, 1)
             idleTicks = 0   // full rate while the outline fades
-            v.invalidateFrame()
-            v.needsDisplay = true
+            v.redraw()
             if let pv = panels[ObjectIdentifier(v)]?.view {
-                pv.invalidateFrame()
-                pv.needsDisplay = true
+                pv.redraw()
             }
         }
         drainAttention()
@@ -3322,7 +3318,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // gutters to re-diff against HEAD instead of waiting on the 1 Hz
             // mtime poll (which a worktree-only edit doesn't even trip).
             for v in self.views { tk_desktop_refresh_git(v.handle) }
-            for v in self.views { v.invalidateFrame(); v.needsDisplay = true }
+            for v in self.views { v.redraw() }
         }
         nc.addObserver(forName: NSWindow.didChangeOcclusionStateNotification,
                        object: nil, queue: .main) { [weak self] note in
@@ -3331,8 +3327,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                   w.occlusionState.contains(.visible),
                   let v = w.cellView else { return }
             self.idleTicks = 0
-            v.invalidateFrame()
-            v.needsDisplay = true
+            v.redraw()
         }
         // Display connect/disconnect / resolution change: re-evaluate every
         // open project against the now-current configuration, floating or
@@ -3844,8 +3839,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             // Plain text → NFC-normalize in the host (macOS hands out
             // decomposed text that the bitmap font can't render) then paste.
             if v.pasteTextNormalized() {
-                v.invalidateFrame()
-                v.needsDisplay = true
+                v.redraw()
                 return
             }
         }
@@ -3862,8 +3856,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             tk_desktop_menu_invoke(h, ptr, len, cols, rows)
         }
         handleHostAction(code, sourceHandle: h, view: view)
-        view?.invalidateFrame()
-        view?.needsDisplay = true
+        view?.redraw()
     }
 
     // NSMenuDelegate — pause refreshMenu while AppKit is tracking an open
@@ -4785,13 +4778,23 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // re-floating returns to the remembered size.
     private func recordProjectGeometry(
         _ project: String, main: NSRect, floating: Bool, panel: NSRect?) {
+        updateGeometry(project, last: main) { e in
+            e.main = main
+            e.floating = floating
+            if floating { e.panel = panel }
+        }
+    }
+
+    /// Change the project's entry for the current display configuration in
+    /// place, so every field `change` doesn't touch keeps its saved value.
+    private func updateGeometry(
+        _ project: String, last: NSRect? = nil, _ change: (inout PanelConfigEntry) -> Void) {
         var geom = loadProjectGeometry(project)
-        geom.last = main
+        if let last { geom.last = last }
         let key = displayConfigKey()
-        let keepPanel = floating ? panel : geom.configs[key]?.panel
-        geom.configs[key] = PanelConfigEntry(main: main, floating: floating, panel: keepPanel,
-                                             git: geom.configs[key]?.git,
-                                             gitDocked: geom.configs[key]?.gitDocked)
+        var e = geom.configs[key] ?? PanelConfigEntry(main: nil, floating: false, panel: nil)
+        change(&e)
+        geom.configs[key] = e
         saveProjectGeometry(project, geom)
     }
 
@@ -4808,21 +4811,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     func recordGitDocked(_ project: String, _ docked: Bool) {
-        var geom = loadProjectGeometry(project)
-        let key = displayConfigKey()
-        var e = geom.configs[key] ?? PanelConfigEntry(main: nil, floating: false, panel: nil)
-        e.gitDocked = docked
-        geom.configs[key] = e
-        saveProjectGeometry(project, geom)
+        updateGeometry(project) { $0.gitDocked = docked }
     }
 
     func recordGitFrame(_ project: String, _ frame: NSRect) {
-        var geom = loadProjectGeometry(project)
-        let key = displayConfigKey()
-        var e = geom.configs[key] ?? PanelConfigEntry(main: nil, floating: false, panel: nil)
-        e.git = frame
-        geom.configs[key] = e
-        saveProjectGeometry(project, geom)
+        updateGeometry(project) { $0.git = frame }
     }
 
     // Capture a project window's full geometry — main frame, whether its
@@ -4977,8 +4970,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if tk_desktop_panels_visible_count(mainView.handle) > 0 {
             win.orderFront(nil)
         }
-        mainView.invalidateFrame(); mainView.needsDisplay = true
-        pv.invalidateFrame(); pv.needsDisplay = true
+        mainView.redraw()
+        pv.redraw()
     }
 
     // Tear the panel window down and re-dock the panels.
@@ -4993,7 +4986,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         pair.view.handle = 0          // shared handle is owned by the main view
         tk_desktop_set_panels_detached(mainView.handle, 0)
         pair.window.orderOut(nil)     // see windowShouldClose (Sequoia teardown)
-        mainView.invalidateFrame(); mainView.needsDisplay = true
+        mainView.redraw()
         if save && !isTerminating { saveGeometryFor(mainView) }
     }
 
@@ -5076,7 +5069,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             dialogWins[d.surface, default: [:]][id] = (window: win, view: sv)
         }
         win.makeKeyAndOrderFront(nil)
-        sv.invalidateFrame(); sv.needsDisplay = true
+        sv.redraw()
     }
 
     /// The view's window is going: take down everything laid over it. The
@@ -5432,7 +5425,7 @@ extension AppController {
         guard let data = data, let win = v.window, win.isVisible, win.attachedSheet == nil
         else { return false }
         let mc = MergeController(view: v)
-        mc.onAfterAction = { [weak v] in v?.invalidateFrame(); v?.needsDisplay = true }
+        mc.onAfterAction = { [weak v] in v?.redraw() }
         chrome(id).mergeSheet = mc
         _ = mc.update(data)
         mc.present(in: win)
@@ -5520,8 +5513,7 @@ extension AppController {
             bar.onOp = { [weak v] json in
                 guard let v = v, v.handle != 0 else { return }
                 withUTF8Arg(json) { p, l in tk_desktop_find(v.handle, p, l) }
-                v.invalidateFrame()
-                v.needsDisplay = true
+                v.redraw()
             }
             bar.onClose = { [weak v] in
                 guard let v = v else { return }
@@ -5595,8 +5587,7 @@ extension AppController {
                 guard v.handle != 0, let d = try? JSONSerialization.data(withJSONObject: o),
                       let json = String(data: d, encoding: .utf8) else { return }
                 withUTF8Arg(json) { p, l in tk_desktop_find(v.handle, p, l) }
-                v.invalidateFrame()
-                v.needsDisplay = true
+                v.redraw()
             }
         }
         _ = dlg.update(["k": "dialog", "text": replacing ? "Replace" : "Find", "key": "done", "kids": [body]])
@@ -5642,8 +5633,7 @@ extension AppController {
             : look == "tv" ? TVGitWindow(mainView: v, view: makeSurfaceView(for: v, surface: .git))
             : GitController(view: v)
         gc.onAfterAction = { [weak v] in
-            v?.invalidateFrame()
-            v?.needsDisplay = true
+            v?.redraw()
         }
         chrome(id).gitSheet = gc
         _ = gc.update(data)
@@ -5674,8 +5664,7 @@ extension AppController {
             guard v.handle != 0 else { return }
             let act = tk_desktop_popup_choose(v.handle, Int64(code))
             self.handleHostAction(act, sourceHandle: v.handle, view: v)
-            v.invalidateFrame()
-            v.needsDisplay = true
+            v.redraw()
         }
         return true
     }
@@ -5686,16 +5675,14 @@ extension AppController {
         let code = tk_desktop_tab_select(v.handle, Int64(i), Int64(v.cols()), Int64(v.rows()))
         handleHostAction(code, sourceHandle: v.handle, view: v)
         v.window?.makeFirstResponder(v)
-        v.invalidateFrame()
-        v.needsDisplay = true
+        v.redraw()
     }
 
     /// A tab's close button.
     func closeTab(_ v: CellView, _ i: Int) {
         guard v.handle != 0 else { return }
         tk_desktop_tab_close(v.handle, Int64(i))
-        v.invalidateFrame()
-        v.needsDisplay = true
+        v.redraw()
     }
 
     /// Put `v`'s window into the Mac OS 9 look's frame or back into the
@@ -5925,7 +5912,7 @@ extension AppController {
             let h = self.views.first?.handle ?? self.chromeDesktop
             guard h != 0 else { return }
             withUTF8Arg(json) { p, l in tk_desktop_welcome_apply(h, p, l, done ? 1 : 0) }
-            for v in self.views { v.invalidateFrame(); v.needsDisplay = true }
+            for v in self.views { v.redraw() }
             if done { self.welcome = nil }
         }
         welcome = w
@@ -6072,8 +6059,7 @@ extension AppController {
         guard v.handle != 0 else { return }
         let code = answer()
         handleHostAction(code, sourceHandle: v.handle, view: v)
-        v.invalidateFrame()
-        v.needsDisplay = true
+        v.redraw()
     }
 
     /// The Mac OS 9 look's confirm: a Platinum alert, the core's buttons
@@ -6112,8 +6098,7 @@ extension AppController {
             guard v.handle != 0 else { return }
             let code = answer(key, values)
             self.handleHostAction(code, sourceHandle: v.handle, view: v)
-            v.invalidateFrame()
-            v.needsDisplay = true
+            v.redraw()
         })
         _ = alert.update(tree)
         chrome(id).platinumAlert = alert
@@ -8588,8 +8573,7 @@ final class FileTreeOverlay: NSVisualEffectView, NSTableViewDataSource, NSTableV
         tk_desktop_tree_act(v.handle, Int64(op), Int64(idx),
                             Int64(at.x / CELL_W), Int64(at.y / CELL_H))
         lastData = Data()
-        v.invalidateFrame()
-        v.needsDisplay = true
+        v.redraw()
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { entries.count }
@@ -8933,8 +8917,7 @@ final class HistoryController: NSObject, NSTableViewDataSource, NSTableViewDeleg
     @objc private func closeClicked() {
         guard let h = view?.handle, h != 0 else { return }
         tk_desktop_history_act(h, 1, 0)
-        view?.invalidateFrame()
-        view?.needsDisplay = true
+        view?.redraw()
     }
 }
 
@@ -9284,8 +9267,7 @@ final class ReviewPickerController: NSObject, NSTableViewDataSource, NSTableView
     private func act(_ op: Int, _ arg: Int) {
         guard let h = view?.handle, h != 0 else { return }
         tk_desktop_review_act(h, Int64(op), Int64(arg))
-        view?.invalidateFrame()
-        view?.needsDisplay = true
+        view?.redraw()
     }
 
     @objc private func tabChanged() {
@@ -9396,8 +9378,7 @@ final class ReviewBar: NSVisualEffectView {
         tk_desktop_review_act(v.handle, Int64(op), Int64(arg))
         lastData = Data()
         v.window?.makeFirstResponder(v)
-        v.invalidateFrame()
-        v.needsDisplay = true
+        v.redraw()
     }
 
     @objc private func prevClicked() { act(4) }
@@ -10400,8 +10381,7 @@ final class PaneHeader: NSView, PaneHeaderView {
         withUTF8Arg(cmd) { p, l in tk_desktop_pane_act(v.handle, Int64(kind), Int64(idx), Int64(op), p, l) }
         lastData = Data()
         v.window?.makeFirstResponder(v)
-        v.invalidateFrame()
-        v.needsDisplay = true
+        v.redraw()
     }
 
     @objc private func controlClicked(_ b: NSButton) { act(b.tag) }
@@ -10580,8 +10560,7 @@ final class PlatinumPaneHeader: NSView, PaneHeaderView {
         withUTF8Arg(cmd) { p, l in tk_desktop_pane_act(v.handle, Int64(kind), Int64(idx), Int64(op), p, l) }
         lastData = Data()
         v.window?.makeFirstResponder(v)
-        v.invalidateFrame()
-        v.needsDisplay = true
+        v.redraw()
     }
 }
 
@@ -10737,8 +10716,7 @@ final class DebugInspectOverlay: NSView, NSTableViewDataSource, NSTableViewDeleg
         guard let v = cellView, v.handle != 0 else { return }
         withUTF8Arg(text) { p, l in tk_desktop_debug_inspect_act(v.handle, Int64(op), Int64(row), p, l) }
         lastData = Data()
-        v.invalidateFrame()
-        v.needsDisplay = true
+        v.redraw()
     }
 
     // MARK: table data
@@ -11000,8 +10978,7 @@ final class EditorScroller: NSView {
         tk_editor_minimap_to(v.handle, Int64(win), Int64(frac * 1_000_000))
         cur = Double(frac) * maxv
         needsDisplay = true
-        v.invalidateFrame()
-        v.needsDisplay = true
+        v.redraw()
     }
 
     override func mouseDown(with e: NSEvent) {
@@ -11151,8 +11128,7 @@ final class DeclarativeController: NSObject, NSTextFieldDelegate, NSTableViewDat
               let json = String(data: d, encoding: .utf8) else { return }
         let code = withUTF8Arg(json) { p, l in tk_desktop_ui_event(h, p, l) }
         onAction?(code)
-        view?.invalidateFrame()
-        view?.needsDisplay = true
+        view?.redraw()
     }
 
     private func set(_ key: String, _ value: String) { send([[false, key, value]]) }
@@ -13545,8 +13521,7 @@ final class TVMainFrame: NSView, NSDraggingSource {
         let ring = NSRect(x: 0, y: 0, width: c * CELL_W, height: r * CELL_H)
         if chrome.frame != ring {
             chrome.frame = ring
-            chrome.invalidateFrame()
-            chrome.needsDisplay = true
+            chrome.redraw()
             window?.invalidateCursorRects(for: self)
         }
         let inner = NSRect(x: CELL_W, y: CELL_H, width: (c - 2) * CELL_W, height: (r - 1) * CELL_H)
@@ -13789,8 +13764,7 @@ final class TVDialogWindow: NSObject {
         let top = pf.maxY - max(CELL_H, (pf.height - h) / 3)
         win.setFrame(NSRect(x: floor(pf.midX - w / 2), y: floor(top - h), width: w, height: h),
                      display: true)
-        view.invalidateFrame()
-        view.needsDisplay = true
+        view.redraw()
     }
 
     private func chromeMouse(_ e: NSEvent) -> Bool {
@@ -13815,8 +13789,7 @@ final class TVDialogWindow: NSObject {
         guard resizable && (x == 0 || x >= c - 1) else { return false }
         trackCellResize(win, left: x == 0, down: y >= r - 1, minCols: 40, minRows: 10) {
             resized()
-            view.invalidateFrame()
-            view.needsDisplay = true
+            view.redraw()
         }
         return true
     }
@@ -14081,8 +14054,7 @@ final class TVGitWindow: NSObject, GitSurface {
         p.onDockChange = { [weak self] docked in
             guard let self = self, let h = self.mainView?.handle, h != 0 else { return }
             tk_desktop_set_git_docked(h, docked ? 1 : 0)
-            self.view.invalidateFrame()
-            self.view.needsDisplay = true
+            self.view.redraw()
         }
         placement = p
         p.start()
@@ -14766,8 +14738,7 @@ final class PlatinumDialog: NSObject, DeclarativeSurface, NSTextFieldDelegate {
               let json = String(data: d, encoding: .utf8) else { return }
         let code = withUTF8Arg(json) { p, l in tk_desktop_ui_event(v.handle, p, l) }
         onAction?(code)
-        v.invalidateFrame()
-        v.needsDisplay = true
+        v.redraw()
     }
 
     func set(_ key: String, _ value: String) { send([[false, key, value]]) }
