@@ -1511,6 +1511,11 @@ struct TextLog(Copyable, Movable):
         self.scroll = ns
 
 
+def pos_less(a_line: Int, a_col: Int, b_line: Int, b_col: Int) -> Bool:
+    """Position ``a`` comes before position ``b`` in the document."""
+    return a_line < b_line or (a_line == b_line and a_col < b_col)
+
+
 def ordered_span(
     a_line: Int, a_col: Int, b_line: Int, b_col: Int,
 ) -> Tuple[Int, Int, Int, Int]:

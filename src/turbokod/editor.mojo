@@ -86,10 +86,11 @@ from .string_utils import (
     seg_cell_offset, split_lines,
     split_lines_no_trailing,
     TAB_WIDTH, text_cells, trailing_ws_start, truncate_to_columns, utf8_byte_of_cell, utf8_cell_of_byte,
-    utf8_codepoint_size, utf8_floor, utf8_step_forward, word_char_step, word_range_at,
+    utf8_codepoint_size, utf8_floor, utf8_step_forward, word_char_step,
+    word_end_from, word_range_at, word_start_before,
 )
 from .text_view import (
-    Selection, VisualLine, ordered_span, paint_selection_overlay,
+    Selection, VisualLine, ordered_span, paint_selection_overlay, pos_less,
     smart_wrap_lines, wrap_lines,
 )
 from .config import WRAP_NONE, WRAP_SMART
@@ -3665,29 +3666,17 @@ struct Editor(Copyable, Movable):
         backward through word codepoints until hitting a non-word char
         or the start of the line. Used to anchor the completion popup
         so accepting an entry replaces what the user already typed."""
-        var line = self.buffer.line(self.selections[0].row)
-        var col = self.selections[0].col
-        while col > 0:
-            var prev = prev_codepoint_start(line, col)
-            var info = codepoint_at(line, prev)
-            if not is_word_codepoint(info[0]):
-                break
-            col = prev
-        return col
+        return word_start_before(
+            self.buffer.line(self.selections[0].row), self.selections[0].col,
+        )
 
     def _cursor_after_word_codepoint(self) -> Bool:
         """True iff the codepoint immediately to the left of the cursor
         is a word codepoint (letter, digit, or underscore). Used by the
         as-you-type completion auto-trigger to decide whether the
         cursor is still inside an identifier after a backspace."""
-        if self.selections[0].col == 0:
-            return False
-        var line = self.buffer.line(self.selections[0].row)
-        if len(line.as_bytes()) == 0:
-            return False
-        var prev = prev_codepoint_start(line, self.selections[0].col)
-        var info = codepoint_at(line, prev)
-        return is_word_codepoint(info[0])
+        var col = self.selections[0].col
+        return word_start_before(self.buffer.line(self.selections[0].row), col) < col
 
     def _stamp_completion_request(mut self, manual: Bool = False):
         """Stamp ``pending_completion_request`` at the current cursor.
@@ -8217,15 +8206,11 @@ struct Editor(Copyable, Movable):
         for idx in range(n):
             var c = carets[idx]
             # Canonical (start <= end) selection range, pre-edit coords.
-            var osr = c.anchor_row
-            var osc = c.anchor_col
-            var oer = c.row
-            var oec = c.col
-            if (oer < osr) or (oer == osr and oec < osc):
-                osr = c.row
-                osc = c.col
-                oer = c.anchor_row
-                oec = c.anchor_col
+            var span = c.span()
+            var osr = span[0]
+            var osc = span[1]
+            var oer = span[2]
+            var oec = span[3]
             var sr = osr
             var sc = osc
             var er = oer
@@ -11316,27 +11301,22 @@ def _try_merge_carets(
     after the merge stays consistent with the new cursor."""
     var a_end = _caret_range_end(a)
     var b_start = _caret_range_start(b)
-    if b_start[0] > a_end[0] \
-            or (b_start[0] == a_end[0] and b_start[1] > a_end[1]):
+    if pos_less(a_end[0], a_end[1], b_start[0], b_start[1]):
         return Optional[Caret]()
     var a_start = _caret_range_start(a)
     var b_end = _caret_range_end(b)
     var u_start_r = a_start[0]
     var u_start_c = a_start[1]
-    if b_start[0] < u_start_r \
-            or (b_start[0] == u_start_r and b_start[1] < u_start_c):
+    if pos_less(b_start[0], b_start[1], u_start_r, u_start_c):
         u_start_r = b_start[0]
         u_start_c = b_start[1]
     var u_end_r = a_end[0]
     var u_end_c = a_end[1]
-    if b_end[0] > u_end_r \
-            or (b_end[0] == u_end_r and b_end[1] > u_end_c):
+    if pos_less(u_end_r, u_end_c, b_end[0], b_end[1]):
         u_end_r = b_end[0]
         u_end_c = b_end[1]
-    var a_fwd = a.row > a.anchor_row \
-            or (a.row == a.anchor_row and a.col > a.anchor_col)
-    var b_fwd = b.row > b.anchor_row \
-            or (b.row == b.anchor_row and b.col > b.anchor_col)
+    var a_fwd = pos_less(a.anchor_row, a.anchor_col, a.row, a.col)
+    var b_fwd = pos_less(b.anchor_row, b.anchor_col, b.row, b.col)
     var a_empty = a.row == a.anchor_row and a.col == a.anchor_col
     var b_empty = b.row == b.anchor_row and b.col == b.anchor_col
     var fwd = a_fwd or b_fwd or (a_empty and b_empty)
@@ -11388,49 +11368,21 @@ def _smart_indent_for_enter(
 
 def _word_run_at_or_left(line: String, col: Int) -> Tuple[Int, Int]:
     """Word range covering ``col``. If ``col`` sits on whitespace or
-    punctuation, try ``col - 1`` so a click just past the end of an
-    identifier still selects it. Empty result when neither side is a
-    word character. Walks by UTF-8 codepoint so non-ASCII identifiers
+    punctuation, the word just left of it, so a click just past the end
+    of an identifier still selects it. Empty result when neither side is
+    a word character. Walks by UTF-8 codepoint so non-ASCII identifiers
     select cleanly."""
-    var bytes = line.as_bytes()
-    var n = len(bytes)
+    var n = len(line.as_bytes())
     var c = col
     if c >= n:
         c = prev_codepoint_start(line, n)
     if c < 0:
         return (0, 0)
-    var here = codepoint_at(line, c)
-    if is_word_codepoint(here[0]):
-        var start = c
-        while start > 0:
-            var prev = prev_codepoint_start(line, start)
-            var info = codepoint_at(line, prev)
-            if not is_word_codepoint(info[0]):
-                break
-            start = prev
-        var end = c + here[1]
-        while end < n:
-            var info = codepoint_at(line, end)
-            if not is_word_codepoint(info[0]):
-                break
-            end += info[1]
-        return (start, end)
-    # ``c`` not on a word char — try the codepoint immediately before it,
-    # so a click just past the end of an identifier still selects the
-    # whole word.
-    if c > 0:
-        var prev = prev_codepoint_start(line, c)
-        var info = codepoint_at(line, prev)
-        if is_word_codepoint(info[0]):
-            var end = c
-            var start = prev
-            while start > 0:
-                var p = prev_codepoint_start(line, start)
-                var pinfo = codepoint_at(line, p)
-                if not is_word_codepoint(pinfo[0]):
-                    break
-                start = p
-            return (start, end)
+    if is_word_codepoint(codepoint_at(line, c)[0]):
+        return (word_start_before(line, c), word_end_from(line, c))
+    var start = word_start_before(line, c)
+    if start < c:
+        return (start, c)
     return (col, col)
 
 
@@ -11449,24 +11401,13 @@ def _smart_dotted_extend(
         var info = codepoint_at(line, before_dot)
         if not is_word_codepoint(info[0]):
             break
-        s = before_dot
-        while s > 0:
-            var prev = prev_codepoint_start(line, s)
-            var pinfo = codepoint_at(line, prev)
-            if not is_word_codepoint(pinfo[0]):
-                break
-            s = prev
+        s = word_start_before(line, before_dot)
     while e + 1 < n and Int(bytes[e]) == 0x2E:
         var after_dot = e + 1
         var info = codepoint_at(line, after_dot)
         if not is_word_codepoint(info[0]):
             break
-        e = after_dot + info[1]
-        while e < n:
-            var einfo = codepoint_at(line, e)
-            if not is_word_codepoint(einfo[0]):
-                break
-            e += einfo[1]
+        e = word_end_from(line, after_dot)
     return (s, e)
 
 
@@ -11533,13 +11474,9 @@ def _smart_strictly_contains(
     """``True`` if range 2 is a *strictly* larger range than range 1 —
     i.e. range 2 contains range 1 and they aren't equal. Used to decide
     whether a candidate expansion actually grows the current selection."""
-    var start_le = (sr2 < sr1) or (sr2 == sr1 and sc2 <= sc1)
-    var end_ge = (er2 > er1) or (er2 == er1 and ec2 >= ec1)
-    if not (start_le and end_ge):
-        return False
-    var start_lt = (sr2 < sr1) or (sr2 == sr1 and sc2 < sc1)
-    var end_gt = (er2 > er1) or (er2 == er1 and ec2 > ec1)
-    return start_lt or end_gt
+    if pos_less(sr1, sc1, sr2, sc2) or pos_less(er2, ec2, er1, ec1):
+        return False    # range 2 doesn't contain range 1
+    return pos_less(sr2, sc2, sr1, sc1) or pos_less(er1, ec1, er2, ec2)
 
 
 def _matching_closer(opener: Int) -> Int:

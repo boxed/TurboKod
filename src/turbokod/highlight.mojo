@@ -35,7 +35,7 @@ from .case_fold import fold_ascii
 from .string_utils import (
     byte_slice, codepoint_at, is_ascii_digit, is_ascii_ident_byte,
     is_ascii_ident_start, is_word_codepoint, prev_codepoint_start, starts_with,
-    string_list,
+    string_list, word_end_from, word_start_before,
 )
 from .tm_grammar import Grammar, load_grammar_from_file
 from .tm_tokenizer import (
@@ -904,27 +904,10 @@ def word_at(line: String, col: Int) -> String:
     empty string when ``col`` isn't on an identifier codepoint. Walks
     by UTF-8 codepoint so non-ASCII letters (``ä``, Cyrillic, CJK)
     cluster with their neighbors rather than splitting the word."""
-    var b = line.as_bytes()
-    var n = len(b)
-    if col < 0 or col >= n:
+    if col < 0 or col >= len(line.as_bytes()) \
+            or not is_word_codepoint(codepoint_at(line, col)[0]):
         return String("")
-    var here = codepoint_at(line, col)
-    if not is_word_codepoint(here[0]):
-        return String("")
-    var start = col
-    while start > 0:
-        var prev = prev_codepoint_start(line, start)
-        var info = codepoint_at(line, prev)
-        if not is_word_codepoint(info[0]):
-            break
-        start = prev
-    var end = col + here[1]
-    while end < n:
-        var info = codepoint_at(line, end)
-        if not is_word_codepoint(info[0]):
-            break
-        end += info[1]
-    return String(StringSpan(unsafe_from_utf8=b[start:end]))
+    return byte_slice(line, word_start_before(line, col), word_end_from(line, col))
 
 
 def template_include_at(line: String, col: Int) -> String:

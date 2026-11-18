@@ -636,6 +636,32 @@ def word_char_step(s: String, col: Int) -> Tuple[Bool, Int]:
     return (is_word_codepoint(info[0]), info[1])
 
 
+def word_start_before(line: String, col: Int) -> Int:
+    """Where the run of word codepoints ending at ``col`` starts — ``col``
+    itself when the codepoint before it isn't one. By codepoint, so
+    ``Godkänn`` is one word."""
+    var c = col
+    while c > 0:
+        var prev = prev_codepoint_start(line, c)
+        if not is_word_codepoint(codepoint_at(line, prev)[0]):
+            break
+        c = prev
+    return c
+
+
+def word_end_from(line: String, col: Int) -> Int:
+    """Where the run of word codepoints starting at ``col`` ends — ``col``
+    itself when the codepoint there isn't one."""
+    var n = len(line.as_bytes())
+    var c = col
+    while c < n:
+        var info = codepoint_at(line, c)
+        if not is_word_codepoint(info[0]):
+            break
+        c += info[1]
+    return c
+
+
 def next_token_end(line: String, col: Int) -> Int:
     """Byte offset of the end of the next token in ``line`` from ``col``
     — the word-right motion of the editor and of text fields.
