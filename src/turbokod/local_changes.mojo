@@ -160,7 +160,7 @@ from .editor import Editor
 from .config import WRAP_SOFT
 from .list_box import clamp_list_scroll, paint_list_rows
 from .scrollbar import ScrollBarArea
-from .picker_input import picker_nav_key
+from .picker_input import picker_nav_key, scroll_to_reveal
 
 
 comptime _SIDEBAR_MIN: Int = 28
@@ -477,7 +477,6 @@ struct RightPanel(Movable):
     var hl_indexed: Int
     var links: List[PanelLink]
     var scroll: Int
-    var scroll_x: Int
     var cursor: Int
 
     def index_highlights(mut self):
@@ -528,7 +527,6 @@ struct RightPanel(Movable):
         self.hl_indexed = -1
         self.links = List[PanelLink]()
         self.scroll = 0
-        self.scroll_x = 0
         self.cursor = 0
 
     def reset(mut self):
@@ -884,14 +882,7 @@ def _move_panel_cursor(mut panel: RightPanel, delta: Int, h_in: Int):
     if c < 0: c = 0
     if c >= n: c = n - 1
     panel.cursor = c
-    var h = h_in
-    if h < 1: h = 1
-    if panel.cursor < panel.scroll:
-        panel.scroll = panel.cursor
-    elif panel.cursor >= panel.scroll + h:
-        panel.scroll = panel.cursor - h + 1
-    if panel.scroll < 0:
-        panel.scroll = 0
+    panel.scroll = scroll_to_reveal(panel.scroll, panel.cursor, max(h_in, 1))
 
 
 def _seek_panel_to_stageable(mut panel: RightPanel, file_line: Int, h: Int):
@@ -1045,19 +1036,6 @@ def _emit_body_row(
     panel.file_line.append(line)
 
 
-def _cells_skipped(line: String, scroll_x: Int) -> Int:
-    """Cell columns of ``line`` hidden off the left edge by the panel's
-    ``scroll_x``, which is a *byte* offset (the panels slice raw bytes to
-    scroll). Link spans are in cell offsets, so they need this conversion
-    before they can be turned into screen columns."""
-    if scroll_x <= 0:
-        return 0
-    var bytes = line.as_bytes()
-    if scroll_x >= len(bytes):
-        return utf8_codepoint_count(line)
-    return utf8_byte_to_cell(line)[scroll_x]
-
-
 def _underline_row_links(
     mut canvas: Canvas, painter: Painter, panel: RightPanel,
     row: Int, y: Int, body_x: Int, x_max: Int, attr: Attr,
@@ -1066,13 +1044,12 @@ def _underline_row_links(
     screen row ``y`` starting at column ``body_x`` (exclusive right edge
     ``x_max``). Attr-only writes, so the glyphs the row already painted
     stay put and only their colour + underline change."""
-    var skipped = _cells_skipped(panel.lines[row], panel.scroll_x)
     for i in range(len(panel.links)):
         var l = panel.links[i]
         if l.row != row:
             continue
-        var x0 = body_x + l.cell_start - skipped
-        var x1 = body_x + l.cell_end - skipped
+        var x0 = body_x + l.cell_start
+        var x1 = body_x + l.cell_end
         if x0 < body_x:
             x0 = body_x
         if x1 > x_max:
@@ -1410,30 +1387,8 @@ def _populate_diff_panel(
         # for ``-`` it's the upcoming new-file position (the row that
         # took the deletion's place, or the next live line) so a
         # double-click on a removal still lands somewhere meaningful.
-        if len(b) == 0:
-            # Bare blank inside a hunk: treat as context.
-            var jump = new_line if new_line > 0 else 0
-            _emit_body_row(
-                panel, String(""), _LINE_CTX, i, file_path, jump,
-            )
-            if sides_from_diff:
-                syn_after.append(String(""))
-                syn_before.append(String(""))
-                display_to_after_row.append(len(syn_after) - 1)
-                display_to_before_row.append(-1)
-            else:
-                display_to_after_row.append(
-                    new_line - 1 if new_line > 0 else -1,
-                )
-                display_to_before_row.append(
-                    old_line - 1 if old_line > 0 and ctx_uses_before else -1,
-                )
-            if new_line > 0:
-                new_line += 1
-            if old_line > 0:
-                old_line += 1
-            continue
-        var c0 = Int(b[0])
+        # A bare blank inside a hunk is context (a lost leading space).
+        var c0 = Int(b[0]) if len(b) > 0 else 0x20
         if c0 == 0x5C:    # ``\ No newline at end of file``
             _emit_body_row(
                 panel, ln, _LINE_NONEWLINE, i, String(""), 0,
@@ -1477,13 +1432,11 @@ def _populate_diff_panel(
             continue
         if c0 == 0x20:
             var jump = new_line if new_line > 0 else 0
-            _emit_body_row(
-                panel, _strip_first_byte_to_string(ln),
-                _LINE_CTX, i, file_path, jump,
-            )
+            var text = _strip_first_byte_to_string(ln)
+            _emit_body_row(panel, text, _LINE_CTX, i, file_path, jump)
             if sides_from_diff:
-                syn_after.append(_strip_first_byte_to_string(ln))
-                syn_before.append(_strip_first_byte_to_string(ln))
+                syn_after.append(text)
+                syn_before.append(text)
                 display_to_after_row.append(len(syn_after) - 1)
                 display_to_before_row.append(-1)
             else:
@@ -2367,7 +2320,6 @@ struct LocalChanges(Movable):
         var keep_view = self._keep_info_view
         self._keep_info_view = False
         var info_scroll = self.info.scroll
-        var info_scroll_x = self.info.scroll_x
         var info_cursor = self.info.cursor
         self.unstaged.reset()
         self.staged.reset()
@@ -2406,7 +2358,6 @@ struct LocalChanges(Movable):
             if keep_view:
                 var last = len(self.info.lines) - 1
                 self.info.scroll = max(0, min(info_scroll, last))
-                self.info.scroll_x = info_scroll_x
                 self.info.cursor = max(0, min(info_cursor, last))
 
     def _collapsed_path_at(self, li: Int) -> String:
@@ -3806,16 +3757,9 @@ struct LocalChanges(Movable):
                         canvas, Point(area.a.x, y),
                         gutter_glyph, cursor_active,
                     )
-                var bytes_c = line.as_bytes()
-                if panel.scroll_x < len(bytes_c):
-                    var visible_c = String(StringSpan(
-                        unsafe_from_utf8=bytes_c[
-                            panel.scroll_x:len(bytes_c)
-                        ],
-                    ))
-                    _ = painter.put_text(
-                        canvas, Point(body_x, y), visible_c, cursor_active,
-                    )
+                _ = painter.put_text(
+                    canvas, Point(body_x, y), line, cursor_active,
+                )
                 # Keep URLs marked on the cursor row too, but as an
                 # underline over the selection colours rather than the
                 # blue link attr — recolouring would swallow the cursor.
@@ -3841,15 +3785,7 @@ struct LocalChanges(Movable):
                 _ = painter.put_text(
                     canvas, Point(area.a.x, y), gutter_glyph, gutter_attr,
                 )
-            var bytes = line.as_bytes()
-            var start = panel.scroll_x
-            if start < len(bytes):
-                var visible = String(StringSpan(
-                    unsafe_from_utf8=bytes[start:len(bytes)],
-                ))
-                _ = painter.put_text(
-                    canvas, Point(body_x, y), visible, line_attr,
-                )
+            _ = painter.put_text(canvas, Point(body_x, y), line, line_attr)
             # Syntax-highlight overlay. Highlights' columns are *byte*
             # offsets in the line text (the same convention the editor
             # uses); we run them through ``utf8_byte_to_cell`` to land
@@ -3861,31 +3797,21 @@ struct LocalChanges(Movable):
             var hl_lo = panel.hl_row_start[idx] if hl_ready else 0
             var hl_hi = panel.hl_row_start[idx + 1] if hl_ready else 0
             if has_gutter and hl_hi > hl_lo:
-                # ``byte_to_cell`` is over the whole line, so highlight
-                # bytes stay absolute and the cells scrolled off the left
-                # are subtracted afterwards — converting a scroll-relative
-                # byte offset through it would mis-place every highlight
-                # after a multi-byte character once scrolled sideways.
                 var byte_to_cell = utf8_byte_to_cell(line)
-                var byte_count = len(bytes)
+                var byte_count = len(line.as_bytes())
                 var cell_count = utf8_codepoint_count(line)
-                var skipped = _cells_skipped(line, panel.scroll_x)
                 for hi in range(hl_lo, hl_hi):
                     var hl = panel.highlights[hi]
-                    var hl_byte_lo = hl.col_start
-                    var hl_byte_hi = hl.col_end
-                    if hl_byte_lo < panel.scroll_x:
-                        hl_byte_lo = panel.scroll_x
-                    if hl_byte_hi > byte_count:
-                        hl_byte_hi = byte_count
+                    var hl_byte_lo = max(hl.col_start, 0)
+                    var hl_byte_hi = min(hl.col_end, byte_count)
                     if hl_byte_lo >= hl_byte_hi:
                         continue
-                    var hl_cell_lo = byte_to_cell[hl_byte_lo] - skipped
+                    var hl_cell_lo = byte_to_cell[hl_byte_lo]
                     var hl_cell_hi: Int
                     if hl_byte_hi < byte_count:
-                        hl_cell_hi = byte_to_cell[hl_byte_hi] - skipped
+                        hl_cell_hi = byte_to_cell[hl_byte_hi]
                     else:
-                        hl_cell_hi = cell_count - skipped
+                        hl_cell_hi = cell_count
                     for c in range(hl_cell_lo, hl_cell_hi):
                         var sx = body_x + c
                         if sx >= area.b.x:
@@ -4035,28 +3961,27 @@ struct LocalChanges(Movable):
     def _focused_right_panel_height(self, container_bounds: Rect) -> Int:
         return self._right_panel_height(self.focus, container_bounds)
 
-    def _scroll_focused_right(mut self, delta: Int, container_bounds: Rect):
-        """Scroll the focused right panel and clamp its cursor.
+    def _panel(
+        ref self, pane: Int,
+    ) -> ref[self.unstaged, self.staged, self.info] RightPanel:
+        """The right panel ``pane`` names (``_PANE_RIGHT_*``; anything
+        else is the info panel)."""
+        if pane == _PANE_RIGHT_UNSTAGED:
+            return self.unstaged
+        if pane == _PANE_RIGHT_STAGED:
+            return self.staged
+        return self.info
 
-        Dispatches to a free function (rather than a method) because
-        Mojo's borrow checker rejects passing ``self.unstaged`` as a
-        ``mut`` arg from a method that already holds ``mut self``."""
-        var h = self._focused_right_panel_height(container_bounds)
-        if self.focus == _PANE_RIGHT_UNSTAGED:
-            _scroll_panel(self.unstaged, delta, h)
-        elif self.focus == _PANE_RIGHT_STAGED:
-            _scroll_panel(self.staged, delta, h)
-        elif self.focus == _PANE_RIGHT_INFO:
-            _scroll_panel(self.info, delta, h)
+    def _scroll_focused_right(mut self, delta: Int, container_bounds: Rect):
+        """Scroll the focused right panel and clamp its cursor."""
+        if self._is_right_focus():
+            var h = self._focused_right_panel_height(container_bounds)
+            _scroll_panel(self._panel(self.focus), delta, h)
 
     def _move_focused_right_cursor(mut self, delta: Int, container_bounds: Rect):
-        var h = self._focused_right_panel_height(container_bounds)
-        if self.focus == _PANE_RIGHT_UNSTAGED:
-            _move_panel_cursor(self.unstaged, delta, h)
-        elif self.focus == _PANE_RIGHT_STAGED:
-            _move_panel_cursor(self.staged, delta, h)
-        elif self.focus == _PANE_RIGHT_INFO:
-            _move_panel_cursor(self.info, delta, h)
+        if self._is_right_focus():
+            var h = self._focused_right_panel_height(container_bounds)
+            _move_panel_cursor(self._panel(self.focus), delta, h)
 
     def _enter_right_pane(
         mut self, container_bounds: Rect, mut registry: GrammarRegistry,
@@ -4072,31 +3997,14 @@ struct LocalChanges(Movable):
         var driving = self.last_sidebar_focus
         if driving == _PANE_FILES:
             self.focus = _PANE_RIGHT_UNSTAGED
-            # Find first stageable add/remove line in unstaged; fall
-            # back to 0. Lines now carry their kind explicitly because
-            # the prefix character has moved to the gutter.
-            var found = -1
-            for i in range(len(self.unstaged.lines)):
-                if self.unstaged.diff_line[i] < 0:
-                    continue
-                if i >= len(self.unstaged.kind):
-                    continue
-                var k = self.unstaged.kind[i]
-                if k == _LINE_ADD or k == _LINE_REM:
-                    found = i
-                    break
-            if found < 0:
-                self.unstaged.cursor = 0
-            else:
-                self.unstaged.cursor = found
-            var h = self._focused_right_panel_height(container_bounds)
-            if h < 1: h = 1
-            if self.unstaged.cursor < self.unstaged.scroll:
-                self.unstaged.scroll = self.unstaged.cursor
-            elif self.unstaged.cursor >= self.unstaged.scroll + h:
-                self.unstaged.scroll = self.unstaged.cursor - h + 1
-            if self.unstaged.scroll < 0:
-                self.unstaged.scroll = 0
+            # On the first stageable add/remove line (any file line is at
+            # or after line 0), else the top.
+            self.unstaged.cursor = 0
+            self.unstaged.scroll = 0
+            _seek_panel_to_stageable(
+                self.unstaged, 0,
+                self._focused_right_panel_height(container_bounds),
+            )
             return
         # Branch / commit selection → single info panel.
         self.focus = _PANE_RIGHT_INFO
@@ -4135,18 +4043,10 @@ struct LocalChanges(Movable):
             if 0 <= self.sel_file and self.sel_file < len(self.files):
                 clipboard_copy(self.files[self.sel_file].path.copy())
             return
-        if self.focus == _PANE_RIGHT_UNSTAGED:
-            if 0 <= self.unstaged.cursor \
-                    and self.unstaged.cursor < len(self.unstaged.lines):
-                clipboard_copy(self.unstaged.lines[self.unstaged.cursor].copy())
-        elif self.focus == _PANE_RIGHT_STAGED:
-            if 0 <= self.staged.cursor \
-                    and self.staged.cursor < len(self.staged.lines):
-                clipboard_copy(self.staged.lines[self.staged.cursor].copy())
-        elif self.focus == _PANE_RIGHT_INFO:
-            if 0 <= self.info.cursor \
-                    and self.info.cursor < len(self.info.lines):
-                clipboard_copy(self.info.lines[self.info.cursor].copy())
+        if self._is_right_focus():
+            ref p = self._panel(self.focus)
+            if 0 <= p.cursor and p.cursor < len(p.lines):
+                clipboard_copy(p.lines[p.cursor].copy())
 
     def handle_key(
         mut self, event: Event, container_bounds: Rect,
@@ -4380,19 +4280,14 @@ struct LocalChanges(Movable):
         if self.focus == _PANE_BRANCHES:
             self._run_checkout()
             return
-        if self.focus == _PANE_RIGHT_UNSTAGED:
-            var cursor = self.unstaged.cursor
-            var n = len(self.unstaged.lines)
-            if 0 <= cursor and cursor < n:
-                var diff_idx = self.unstaged.diff_line[cursor]
-                self._toggle_diff_line(diff_idx, False)
-            return
-        if self.focus == _PANE_RIGHT_STAGED:
-            var cursor = self.staged.cursor
-            var n = len(self.staged.lines)
-            if 0 <= cursor and cursor < n:
-                var diff_idx = self.staged.diff_line[cursor]
-                self._toggle_diff_line(diff_idx, True)
+        if self.focus == _PANE_RIGHT_UNSTAGED \
+                or self.focus == _PANE_RIGHT_STAGED:
+            ref p = self._panel(self.focus)
+            if 0 <= p.cursor and p.cursor < len(p.lines):
+                var diff_idx = p.diff_line[p.cursor]
+                self._toggle_diff_line(
+                    diff_idx, self.focus == _PANE_RIGHT_STAGED,
+                )
             return
 
     def _toggle_file_at(mut self, idx: Int):
@@ -4477,11 +4372,9 @@ struct LocalChanges(Movable):
         # selection is some other file and the anchor means nothing.
         if self.files[self.sel_file].path != path:
             return
-        var h = self._right_panel_height(pane, panel_bounds)
-        if pane == _PANE_RIGHT_UNSTAGED:
-            _seek_panel_to_stageable(self.unstaged, line, h)
-        elif pane == _PANE_RIGHT_STAGED:
-            _seek_panel_to_stageable(self.staged, line, h)
+        if pane == _PANE_RIGHT_UNSTAGED or pane == _PANE_RIGHT_STAGED:
+            var h = self._right_panel_height(pane, panel_bounds)
+            _seek_panel_to_stageable(self._panel(pane), line, h)
 
     def _refresh_after_mutation(mut self, kept_path: String):
         """Re-fetch files after a stage/unstage. Try to keep the user's
@@ -6076,11 +5969,8 @@ struct LocalChanges(Movable):
             return (len(self.branches), self.scroll_branches)
         if pane == _PANE_COMMITS:
             return (len(self.commits), self.scroll_commits)
-        if pane == _PANE_RIGHT_UNSTAGED:
-            return (len(self.unstaged.lines), self.unstaged.scroll)
-        if pane == _PANE_RIGHT_STAGED:
-            return (len(self.staged.lines), self.staged.scroll)
-        return (len(self.info.lines), self.info.scroll)
+        ref p = self._panel(pane)
+        return (len(p.lines), p.scroll)
 
     def _set_pane_scroll(mut self, pane: Int, scroll: Int, bounds: Rect):
         """Scroll a pane to ``scroll`` (its scroll bar's answer): the
@@ -6091,12 +5981,8 @@ struct LocalChanges(Movable):
             self._scroll_pane_view(pane, scroll - cur, bounds)
             return
         var h = self._right_panel_height(pane, bounds)
-        if pane == _PANE_RIGHT_UNSTAGED:
-            _scroll_panel(self.unstaged, scroll - self.unstaged.scroll, h)
-        elif pane == _PANE_RIGHT_STAGED:
-            _scroll_panel(self.staged, scroll - self.staged.scroll, h)
-        else:
-            _scroll_panel(self.info, scroll - self.info.scroll, h)
+        var cur = self._panel(pane).scroll
+        _scroll_panel(self._panel(pane), scroll - cur, h)
 
     def _scroll_pane_view(
         mut self, pane: Int, delta: Int, container_bounds: Rect,
@@ -6173,9 +6059,7 @@ struct LocalChanges(Movable):
         if row < 0 or row >= len(self.info.lines):
             return String("")
         var body_x = self._diff_left(container_bounds)
-        var cell = pos.x - body_x \
-            + _cells_skipped(self.info.lines[row], self.info.scroll_x)
-        return self.info.link_at(row, cell)
+        return self.info.link_at(row, pos.x - body_x)
 
     # --- native host (macOS-style UI) ------------------------------------
     #
@@ -6195,14 +6079,10 @@ struct LocalChanges(Movable):
 
     def native_cursor(mut self, pane: Int, row: Int):
         """Put a right-panel cursor on ``row`` and focus that panel."""
-        if pane == _PANE_RIGHT_UNSTAGED:
-            self.unstaged.cursor = max(0, min(row, len(self.unstaged.lines) - 1))
-        elif pane == _PANE_RIGHT_STAGED:
-            self.staged.cursor = max(0, min(row, len(self.staged.lines) - 1))
-        elif pane == _PANE_RIGHT_INFO:
-            self.info.cursor = max(0, min(row, len(self.info.lines) - 1))
-        else:
+        if pane < _PANE_RIGHT_UNSTAGED or pane > _PANE_RIGHT_INFO:
             return
+        ref p = self._panel(pane)
+        p.cursor = max(0, min(row, len(p.lines) - 1))
         self.focus = pane
 
     def native_key(
@@ -6223,10 +6103,8 @@ struct LocalChanges(Movable):
         diff / info row's jump target."""
         if pane == _PANE_FILES:
             self._submit_selected_file()
-        elif pane == _PANE_RIGHT_UNSTAGED:
-            self._submit_jump_target(self.unstaged.jump_target(row))
-        elif pane == _PANE_RIGHT_STAGED:
-            self._submit_jump_target(self.staged.jump_target(row))
+        elif pane == _PANE_RIGHT_UNSTAGED or pane == _PANE_RIGHT_STAGED:
+            self._submit_jump_target(self._panel(pane).jump_target(row))
         elif pane == _PANE_RIGHT_INFO:
             if not self._expand_commit_diff(row):
                 self._submit_jump_target(self.info.jump_target(row))
@@ -6554,24 +6432,18 @@ struct LocalChanges(Movable):
                                 return True
                             self._submit_jump_target(self.info.jump_target(li))
                     return True
+                # Unstaged or Staged: its heading row, then its body.
                 var rp = self._right_panes(bounds)
-                if rpane == _PANE_RIGHT_UNSTAGED:
-                    if pos.y == rp[0]:
-                        return True
-                    var li = self.unstaged.scroll + (pos.y - rp[0] - 1)
-                    if 0 <= li and li < len(self.unstaged.lines):
-                        self.unstaged.cursor = li
-                        if Int(event.click_count) >= 2:
-                            self._submit_jump_target(self.unstaged.jump_target(li))
+                var head = rp[0] if rpane == _PANE_RIGHT_UNSTAGED else rp[2]
+                if pos.y == head:
                     return True
-                # Staged.
-                if pos.y == rp[2]:
-                    return True
-                var li = self.staged.scroll + (pos.y - rp[2] - 1)
-                if 0 <= li and li < len(self.staged.lines):
-                    self.staged.cursor = li
+                ref p = self._panel(rpane)
+                var li = p.scroll + (pos.y - head - 1)
+                if 0 <= li and li < len(p.lines):
+                    p.cursor = li
                     if Int(event.click_count) >= 2:
-                        self._submit_jump_target(self.staged.jump_target(li))
+                        var target = p.jump_target(li)
+                        self._submit_jump_target(target)
                 return True
             # Sidebar click.
             var pane = self._pane_at(pos, bounds)
