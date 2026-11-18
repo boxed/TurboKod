@@ -607,14 +607,9 @@ def _git_ok(
     project_root: String, var args: List[String],
     stdin_text: String = String(""),
 ) -> Bool:
-    """Run ``git -C <root> <args...>`` (optionally feeding ``stdin_text``);
-    return ``True`` iff git exited 0. The common shape for the mutating
-    commands that only care whether they succeeded."""
-    try:
-        var r = capture_command(_git_argv(project_root, args^), stdin_text)
-        return Int(r.status) == 0
-    except:
-        return False
+    """:func:`_git_capture` for the mutating commands that only care
+    whether git exited 0."""
+    return Bool(_git_capture(project_root, args^, stdin_text))
 
 
 def fetch_head_text(project_root: String, file_path: String) -> Optional[String]:
@@ -851,7 +846,7 @@ def has_tracked_changes(project_root: String) -> Bool:
     work. Untracked files don't count."""
     var st = fetch_git_status(project_root)
     for i in range(len(st)):
-        if not (Int(st[i].staged) == 0x3F and Int(st[i].worktree) == 0x3F):
+        if not st[i].is_untracked():
             return True
     return False
 
@@ -931,6 +926,10 @@ struct GitFileStatus(ImplicitlyCopyable, Movable):
     var staged: UInt8
     var worktree: UInt8
     var orig_path: String
+
+    def is_untracked(self) -> Bool:
+        """Porcelain ``??`` — a file git doesn't track yet."""
+        return self.staged == 0x3F and self.worktree == 0x3F
 
 
 def fetch_git_status(project_root: String) -> List[GitFileStatus]:

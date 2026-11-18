@@ -4816,10 +4816,7 @@ struct LocalChanges(Movable):
         reaps. Flashes a one-line status on spawn failure rather than
         raising — these are user-visible operations and a hung modal is
         worse than an inline error."""
-        if self._is_git_busy():
-            self._show_status(
-                String("Another git operation is still running."), False,
-            )
+        if self._refuse_if_git_busy():
             return
         var argv = git_base_argv(self.root)
         argv.extend(args.copy())
@@ -5780,16 +5777,20 @@ struct LocalChanges(Movable):
         # action's letter — 'd' is what opens three of them, so a double
         # tap would discard / delete.
         if k == KEY_ENTER:
-            if self.overlay == _OVERLAY_AMEND_CONFIRM:
-                self._confirm_amend()
-            elif self.overlay == _OVERLAY_REVERT_CONFIRM:
-                self._confirm_revert()
-            elif self.overlay == _OVERLAY_DISCARD_LINE_CONFIRM:
-                self._confirm_discard_line()
-            elif self.overlay == _OVERLAY_DELETE_BRANCH_CONFIRM:
-                self._confirm_delete_branch()
-            return True
+            self._confirm_overlay()
         return True
+
+    def _confirm_overlay(mut self):
+        """Do what the open confirmation overlay names — its Enter in the
+        grid, its OK button natively. A no-op on any other overlay."""
+        if self.overlay == _OVERLAY_AMEND_CONFIRM:
+            self._confirm_amend()
+        elif self.overlay == _OVERLAY_REVERT_CONFIRM:
+            self._confirm_revert()
+        elif self.overlay == _OVERLAY_DISCARD_LINE_CONFIRM:
+            self._confirm_discard_line()
+        elif self.overlay == _OVERLAY_DELETE_BRANCH_CONFIRM:
+            self._confirm_delete_branch()
 
     # --- mouse / drag helpers ---------------------------------------------
 
@@ -6124,14 +6125,6 @@ struct LocalChanges(Movable):
         if ov == _OVERLAY_COMMIT:
             self.overlay_input.set_text(text^)
             self._submit_commit()
-        elif ov == _OVERLAY_AMEND_CONFIRM:
-            self._confirm_amend()
-        elif ov == _OVERLAY_REVERT_CONFIRM:
-            self._confirm_revert()
-        elif ov == _OVERLAY_DISCARD_LINE_CONFIRM:
-            self._confirm_discard_line()
-        elif ov == _OVERLAY_DELETE_BRANCH_CONFIRM:
-            self._confirm_delete_branch()
         elif ov == _OVERLAY_MERGE_CHOICE:
             if choice == String("rebase"):
                 self._confirm_merge_rebase()
@@ -6152,6 +6145,8 @@ struct LocalChanges(Movable):
         elif ov == _OVERLAY_DELETE_REMOTE_TYPED:
             if text == self._remote_delete_prefix():
                 self._confirm_delete_branch()
+        else:
+            self._confirm_overlay()
 
     def hints(self) -> List[GitHint]:
         """The hint bar for the focused pane — painted as text in the grid,

@@ -26,13 +26,9 @@ from .painter import Painter
 from .colors import Attr, BLACK, LIGHT_GRAY, YELLOW
 from .geometry import Point, Rect
 from .lsp import LspProcess
-from .string_utils import display_columns, utf8_suffix
+from .string_utils import display_columns, string_list, utf8_suffix
 from .window import paint_window_title_at
-from .posix import (
-    close_fd, drain_fd, exit_code_from_status,
-    kill_pid, monotonic_ms, reap_child, SIGTERM,
-    poll_exit, untrack_child,
-)
+from .posix import drain_fd, exit_code_from_status, monotonic_ms, poll_exit
 
 
 # Spinner frames. Cycled at ~10 Hz off ``monotonic_ms`` — slow enough to
@@ -105,11 +101,9 @@ struct InstallRunner(Movable):
         is already in flight (single-slot — host should check first)."""
         if self.active:
             raise Error("install runner already active")
-        var argv = List[String]()
-        argv.append(String("sh"))
-        argv.append(String("-c"))
-        argv.append(command)
-        self.process = LspProcess.spawn(argv)
+        self.process = LspProcess.spawn(
+            string_list(String("sh"), String("-c"), command),
+        )
         self._arm(label^, command^, String("Installing "))
 
     def _arm(
@@ -161,6 +155,7 @@ struct InstallRunner(Movable):
         var exited = poll_exit(self.process.pid)
         if not exited:
             return Optional[InstallResult]()
+        self.process.alive = False
         # Child reaped. Drain once more so we don't miss the last write
         # that landed between the previous drain and the EOF.
         self._drain_fd(self.process.stdout_fd)
@@ -202,28 +197,16 @@ struct InstallRunner(Movable):
         child when it exits on its own, so a window closed mid-install
         would otherwise leave the installer running with our three
         descriptors held."""
-        if not self.active:
-            return
-        if self.process.pid > 0 and self.process.alive:
-            _ = kill_pid(self.process.pid, SIGTERM)
-            _ = reap_child(self.process.pid)
-            untrack_child(self.process.pid)
-            self.process.alive = False
-        self._reset()
+        if self.active:
+            self._reset()
 
     def _reset(mut self):
-        # Close the parent ends of the pipes that we still own; the child
-        # was reaped by ``poll_exit`` so its side is already gone.
-        if self.process.stdin_fd  >= 0: _ = close_fd(self.process.stdin_fd)
-        if self.process.stdout_fd >= 0: _ = close_fd(self.process.stdout_fd)
-        if self.process.stderr_fd >= 0: _ = close_fd(self.process.stderr_fd)
-        self.active = False
-        self.label = String("")
-        self.command = String("")
-        self.title_prefix = String("Installing ")
-        self.output = String("")
-        self._spinner_anchor_ms = 0
-        self.process = LspProcess()
+        """Back to idle: stop the child if it still runs (bounded, see
+        ``LspProcess.terminate``), release its pipes, and drop the run's
+        state. ``tick`` marks a child it reaped dead first, so its pid —
+        maybe someone else's by now — is never signaled."""
+        self.process.terminate()
+        self = InstallRunner()
 
     # --- paint ------------------------------------------------------------
 

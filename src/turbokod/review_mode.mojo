@@ -144,7 +144,7 @@ def _untracked_paths(root: String) -> List[String]:
     var out = List[String]()
     var statuses = fetch_git_status(root)
     for i in range(len(statuses)):
-        if Int(statuses[i].staged) == 0x3F and Int(statuses[i].worktree) == 0x3F:
+        if statuses[i].is_untracked():
             out.append(statuses[i].path)
     return out^
 
