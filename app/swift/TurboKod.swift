@@ -5631,14 +5631,7 @@ extension AppController {
         if let pf = chromes[id]?.platinumFrame {
             if !on {
                 chromes[id]?.platinumFrame = nil
-                pf.retroShadow?.detach()
-                let f = pf.restingFrame ?? win.frame
-                v.removeFromSuperview()
-                win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-                win.hasShadow = true
-                win.contentView = v
-                win.setFrame(f, display: true)
-                win.makeFirstResponder(v)
+                removeLookFrame(win, pf, cell: v, at: pf.restingFrame ?? win.frame)
                 return true
             }
             pf.retroShadow?.ensureAttached()
@@ -5659,14 +5652,8 @@ extension AppController {
         pf.onCollapse = { [weak pf] in pf?.toggleShade() }
         pf.tabs.onSelect = { [weak self, weak v] i in if let v = v { self?.selectTab(v, i) } }
         pf.tabs.onClose = { [weak self, weak v] i in if let v = v { self?.closeTab(v, i) } }
-        win.styleMask = [.borderless, .miniaturizable, .resizable]
-        win.hasShadow = false
-        win.backgroundColor = Platinum.face
-        win.contentView = pf
-        win.setFrame(f, display: false)
-        pf.retroShadow = Platinum.castShadow(under: win)
-        pf.layoutChrome()
-        win.makeFirstResponder(v)
+        installLookFrame(win, pf, cell: v, at: f, background: Platinum.face,
+                         shadow: Platinum.castShadow(under:))
         chrome(id).platinumFrame = pf
         _ = pollPlatinumChrome(v)
         return true
@@ -5685,14 +5672,7 @@ extension AppController {
                 return false
             }
             chromes[id]?.platinumPanelFrame = nil
-            pf.retroShadow?.detach()
-            let f = pf.restingFrame ?? win.frame
-            pv.removeFromSuperview()
-            win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-            win.hasShadow = true
-            win.contentView = pv
-            win.setFrame(f, display: true)
-            win.makeFirstResponder(pv)
+            removeLookFrame(win, pf, cell: pv, at: pf.restingFrame ?? win.frame)
             return true
         }
         guard on else { return false }
@@ -5706,24 +5686,11 @@ extension AppController {
         // Zoom fills the screen and back, as `MainWindow.performZoom` does.
         var unzoomed: NSRect?
         pf.onZoom = { [weak win] in
-            guard let win = win, let vf = win.screen?.visibleFrame else { return }
-            if let u = unzoomed, win.frame.size == vf.size {
-                unzoomed = nil
-                win.setFrame(u, display: true)
-            } else {
-                unzoomed = win.frame
-                win.setFrame(vf, display: true)
-            }
+            if let win = win { MainWindow.toggleFill(win, &unzoomed) }
         }
         pf.onCollapse = { [weak pf] in pf?.toggleShade() }
-        win.styleMask = [.borderless, .miniaturizable, .resizable]
-        win.hasShadow = false
-        win.backgroundColor = Platinum.face
-        win.contentView = pf
-        win.setFrame(f, display: false)
-        pf.retroShadow = Platinum.castShadow(under: win)
-        pf.layoutChrome()
-        win.makeFirstResponder(pv)
+        installLookFrame(win, pf, cell: pv, at: f, background: Platinum.face,
+                         shadow: Platinum.castShadow(under:))
         chrome(id).platinumPanelFrame = pf
         return true
     }
@@ -5742,13 +5709,7 @@ extension AppController {
                 return tf.poll(info: info)
             }
             chromes[id]?.tvFrame = nil
-            tf.retroShadow?.detach(restoreSystemShadow: true)
-            let f = win.frame
-            v.removeFromSuperview()
-            win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-            win.contentView = v
-            win.setFrame(f, display: true)
-            win.makeFirstResponder(v)
+            removeLookFrame(win, tf, cell: v, at: win.frame)
             return true
         }
         // Wait for the Mac OS 9 frame to come off first.
@@ -5761,14 +5722,9 @@ extension AppController {
             f = NSRect(x: f.minX, y: f.maxY - h, width: w, height: h)
         }
         let tf = TVMainFrame(cell: v)
-        win.styleMask = [.borderless, .miniaturizable, .resizable]
         win.collectionBehavior.insert(.fullScreenPrimary)
-        win.backgroundColor = .black
-        win.contentView = tf
-        win.setFrame(f, display: false)
-        tf.retroShadow = RetroShadow(under: win)
-        tf.layoutChrome()
-        win.makeFirstResponder(v)
+        installLookFrame(win, tf, cell: v, at: f, background: .black,
+                         shadow: { RetroShadow(under: $0) })
         chrome(id).tvFrame = tf
         _ = pollTVChrome(v)
         return true
@@ -13455,15 +13411,57 @@ final class MainWindow: NSWindow {
 
     override func performZoom(_ sender: Any?) {
         guard platinum else { return super.performZoom(sender) }
-        guard let vf = screen?.visibleFrame else { return }
-        if let u = unzoomed, frame.size == vf.size {
+        MainWindow.toggleFill(self, &unzoomed)
+    }
+
+    /// A borderless window's zoom: fill the screen, and back to
+    /// `unzoomed` (where it was before) when it already does.
+    static func toggleFill(_ win: NSWindow, _ unzoomed: inout NSRect?) {
+        guard let vf = win.screen?.visibleFrame else { return }
+        if let u = unzoomed, win.frame.size == vf.size {
             unzoomed = nil
-            setFrame(u, display: true)
+            win.setFrame(u, display: true)
         } else {
-            unzoomed = frame
-            setFrame(vf, display: true)
+            unzoomed = win.frame
+            win.setFrame(vf, display: true)
         }
     }
+}
+
+/// A look's own window frame (`PlatinumMainFrame`, `TVMainFrame`): a
+/// borderless window's content view, holding the cell grid.
+protocol LookFrame: NSView {
+    var retroShadow: RetroShadow? { get set }
+    func layoutChrome()
+}
+
+extension PlatinumMainFrame: LookFrame {}
+extension TVMainFrame: LookFrame {}
+
+/// Make `win` borderless inside `frame` (which holds `cell`) at `f`,
+/// under the look's shadow.
+func installLookFrame(
+    _ win: NSWindow, _ frame: LookFrame, cell: NSView, at f: NSRect,
+    background: NSColor, shadow: (NSWindow) -> RetroShadow
+) {
+    win.styleMask = [.borderless, .miniaturizable, .resizable]
+    win.backgroundColor = background
+    win.contentView = frame
+    win.setFrame(f, display: false)
+    frame.retroShadow = shadow(win)
+    frame.layoutChrome()
+    win.makeFirstResponder(cell)
+}
+
+/// Take `win` out of `frame` and back into the system's frame (and
+/// shadow), `cell` its content again, at `f`.
+func removeLookFrame(_ win: NSWindow, _ frame: LookFrame, cell: NSView, at f: NSRect) {
+    frame.retroShadow?.detach(restoreSystemShadow: true)
+    cell.removeFromSuperview()
+    win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+    win.contentView = cell
+    win.setFrame(f, display: true)
+    win.makeFirstResponder(cell)
 }
 
 /// The Turbo Vision look's project window: borderless, with the grid one
