@@ -1460,8 +1460,7 @@ struct LspManager(Copyable, Movable):
         normal didOpen/didChange path)."""
         if self.state != _STATE_READY or not self.supports_pull_diagnostics():
             return False
-        var params = json_object()
-        params.put_owned(String("textDocument"), self._text_doc(path))
+        var params = self._doc_params(path)
         var req_id: String
         try:
             req_id = self._send_request(
@@ -1671,6 +1670,15 @@ struct LspManager(Copyable, Movable):
         """Outbound-notification twin of ``_send_request``."""
         _ = self._send_wire(method, params, False)
 
+    def _notify(mut self, method: String, params: JsonValue, context: String):
+        """``_send_notification`` for a fire-and-forget notification: a
+        failed send is printed (with ``context``, say the path) and
+        otherwise dropped."""
+        try:
+            self._send_notification(method, params)
+        except e:
+            print("lsp:", method, context, ":", String(e))
+
     # --- transport: the private client, or a session on a shared channel --
 
     def _logging(mut self) -> Bool:
@@ -1682,6 +1690,16 @@ struct LspManager(Copyable, Movable):
             self._log_on = _lsp_debug_enabled()
             self._log_checked_ms = now
         return self._log_on
+
+    def _log_server_request(
+        mut self, method: String, id_label: String, note: String,
+    ):
+        """Log a request the server sent us, with what we made of it."""
+        if self._logging():
+            _lsp_debug_write(
+                String("← server request ") + method + String(" id=")
+                + id_label + note,
+            )
 
     def _log_response(mut self, what: String, id: String, label: String, n: Int):
         """Log a response the way every slot does: what it answered, its
@@ -2008,16 +2026,10 @@ struct LspManager(Copyable, Movable):
             return
         if self._doc_index(path) < 0:
             return
-        var params = json_object()
-        params.put_owned(String("textDocument"), self._text_doc(path))
+        var params = self._doc_params(path)
         if self.save_includes_text():
             params.put(String("text"), json_str(text^))
-        try:
-            self._send_notification(
-                String("textDocument/didSave"), params,
-            )
-        except e:
-            print("lsp: didSave", path, ":", String(e))
+        self._notify(String("textDocument/didSave"), params, path)
 
     def notify_closed(mut self, path: String):
         """Send ``textDocument/didClose`` and forget the document so a
@@ -2073,12 +2085,7 @@ struct LspManager(Copyable, Movable):
         var td = json_object()
         td.put_owned(String("uri"), json_str(closed.uri))
         params.put_owned(String("textDocument"), td^)
-        try:
-            self._send_notification(
-                String("textDocument/didClose"), params,
-            )
-        except e:
-            print("lsp: didClose", path, ":", String(e))
+        self._notify(String("textDocument/didClose"), params, path)
 
     def notify_watched_changed(mut self, path: String, change_type: Int):
         """Send ``workspace/didChangeWatchedFiles`` for one on-disk change
@@ -2107,16 +2114,11 @@ struct LspManager(Copyable, Movable):
         if self.state != _STATE_READY or not self._watches_files \
                 or len(paths) == 0:
             return
-        try:
-            self._send_notification(
-                String("workspace/didChangeWatchedFiles"),
-                _watched_changes_params(paths, types),
-            )
-        except e:
-            print(
-                "lsp: didChangeWatchedFiles", len(paths), "changes:",
-                String(e),
-            )
+        self._notify(
+            String("workspace/didChangeWatchedFiles"),
+            _watched_changes_params(paths, types),
+            String(len(paths)) + String(" changes"),
+        )
 
     def notify_configuration_changed(mut self):
         """Send ``workspace/didChangeConfiguration`` so the server knows
@@ -2131,12 +2133,9 @@ struct LspManager(Copyable, Movable):
             return
         var params = json_object()
         params.put(String("settings"), json_object())
-        try:
-            self._send_notification(
-                String("workspace/didChangeConfiguration"), params,
-            )
-        except e:
-            print("lsp: didChangeConfiguration", ":", String(e))
+        self._notify(
+            String("workspace/didChangeConfiguration"), params, String(""),
+        )
 
     def _server_wants_file_op(self, key: String) -> Bool:
         """True iff the server advertised ``workspace.fileOperations.<key>``
@@ -2176,18 +2175,17 @@ struct LspManager(Copyable, Movable):
         paths outside its set, which it ignores (spec-legal)."""
         if self.state != _STATE_READY or not self.server_wants_did_create():
             return
-        var params = json_object()
-        var files = json_array()
+        self._notify_file_op(String("workspace/didCreateFiles"), path)
+
+    def _notify_file_op(mut self, method: String, path: String):
+        """Send a one-file ``workspace/didCreateFiles`` / ``didDeleteFiles``."""
         var f = json_object()
         f.put(String("uri"), json_str(_path_to_uri(path)))
+        var files = json_array()
         files.append(f)
+        var params = json_object()
         params.put(String("files"), files)
-        try:
-            self._send_notification(
-                String("workspace/didCreateFiles"), params,
-            )
-        except e:
-            print("lsp: didCreateFiles", path, ":", String(e))
+        self._notify(method, params, path)
 
     def notify_did_rename_files(mut self, old_path: String, new_path: String):
         """Send ``workspace/didRenameFiles`` for one rename.
@@ -2210,12 +2208,7 @@ struct LspManager(Copyable, Movable):
         f.put(String("newUri"), json_str(_path_to_uri(new_path)))
         files.append(f)
         params.put(String("files"), files)
-        try:
-            self._send_notification(
-                String("workspace/didRenameFiles"), params,
-            )
-        except e:
-            print("lsp: didRenameFiles", old_path, ":", String(e))
+        self._notify(String("workspace/didRenameFiles"), params, old_path)
 
     def notify_did_delete_files(mut self, path: String):
         """Send ``workspace/didDeleteFiles`` for one deleted file or
@@ -2224,18 +2217,7 @@ struct LspManager(Copyable, Movable):
         Find Symbol and go-to-definition as jumps into nothing)."""
         if self.state != _STATE_READY or not self.server_wants_did_delete():
             return
-        var params = json_object()
-        var files = json_array()
-        var f = json_object()
-        f.put(String("uri"), json_str(_path_to_uri(path)))
-        files.append(f)
-        params.put(String("files"), files)
-        try:
-            self._send_notification(
-                String("workspace/didDeleteFiles"), params,
-            )
-        except e:
-            print("lsp: didDeleteFiles", path, ":", String(e))
+        self._notify_file_op(String("workspace/didDeleteFiles"), path)
 
     def notify_will_save(mut self, path: String, reason: Int):
         """Send ``textDocument/willSave`` (``reason``: 1=manual, 2=after-
@@ -2244,15 +2226,9 @@ struct LspManager(Copyable, Movable):
         ``textDocumentSync.willSave``."""
         if self.state != _STATE_READY or not self.server_supports_will_save():
             return
-        var params = json_object()
-        params.put_owned(String("textDocument"), self._text_doc(path))
+        var params = self._doc_params(path)
         params.put(String("reason"), json_int(reason))
-        try:
-            self._send_notification(
-                String("textDocument/willSave"), params,
-            )
-        except e:
-            print("lsp: willSave", path, ":", String(e))
+        self._notify(String("textDocument/willSave"), params, path)
 
     def request_will_save_wait_until(
         mut self, path: String, reason: Int, var text: String,
@@ -2267,8 +2243,7 @@ struct LspManager(Copyable, Movable):
             return False
         self._willsave.text = text.copy()
         self._send_open_or_change(path, text^)
-        var params = json_object()
-        params.put_owned(String("textDocument"), self._text_doc(path))
+        var params = self._doc_params(path)
         params.put(String("reason"), json_int(reason))
         return self._willsave.start(
             self._request_replacing(
@@ -2553,9 +2528,8 @@ struct LspManager(Copyable, Movable):
         """Send ``textDocument/prepareRename`` to validate the symbol at
         ``(line, character)`` and fetch its placeholder before prompting.
         Parks a tri-state result drained via ``take_prepare_rename``."""
-        if self.state != _STATE_READY:
+        if not self._sync_for_request(path, text^):
             return False
-        self._send_open_or_change(path, text^)
         var params = self._position_params(path, line, character)
         var sent = self._request_replacing(
             self._prepare_rename.id.copy(),
@@ -2640,18 +2614,14 @@ struct LspManager(Copyable, Movable):
         in the READY state. A fresh request shadows any earlier in-flight
         symbol id — there's no concurrent symbol lookup model here.
         """
-        if self.state != _STATE_READY:
+        if not self._sync_for_request(path, text^):
             return False
-        self._send_open_or_change(path, text^)
-        var params = json_object()
-        params.put_owned(String("textDocument"), self._text_doc(path))
+        var params = self._doc_params(path)
         var sent = self._request_replacing(
             self._symbols.id.copy(),
             String("textDocument/documentSymbol"), params,
         )
-        if not self._symbols.start(sent):
-            return False
-        return True
+        return self._symbols.start(sent)
 
     def has_pending_symbols(self) -> Bool:
         """True iff a parsed symbol response is parked, ready for ``take``."""
@@ -2686,9 +2656,7 @@ struct LspManager(Copyable, Movable):
         params.put(String("query"), json_str(query))
         var sent = self._request_replacing(
             self._ws_symbols.id.copy(), String("workspace/symbol"), params)
-        if not self._ws_symbols.start(sent):
-            return False
-        return True
+        return self._ws_symbols.start(sent)
 
     def has_pending_workspace_symbols(self) -> Bool:
         """True iff a parsed workspace-symbol response is parked."""
@@ -2750,12 +2718,7 @@ struct LspManager(Copyable, Movable):
         the cancel is a no-op anyway."""
         var cancel_params = json_object()
         cancel_params.put(String("id"), json_str(request_id))
-        try:
-            self._send_notification(
-                String("$/cancelRequest"), cancel_params,
-            )
-        except e:
-            print("lsp: cancelRequest (" + context + "):", String(e))
+        self._notify(String("$/cancelRequest"), cancel_params, context)
 
     def request_completion(
         mut self, path: String, line: Int, character: Int,
@@ -2930,9 +2893,8 @@ struct LspManager(Copyable, Movable):
         so the host can drop a stale response when the cursor has moved
         on by the time the response arrives.
         """
-        if self.state != _STATE_READY:
+        if not self._sync_for_request(path, text^):
             return False
-        self._send_open_or_change(path, text^)
         var params = self._position_params(path, line, character)
         # Cancel any prior in-flight hover so the server doesn't keep
         # working on a stale position. Mirrors ``request_completion``.
@@ -2992,8 +2954,7 @@ struct LspManager(Copyable, Movable):
                 + String(",") + String(diag.end_col) + String(")"),
             )
         self._send_open_or_change(path, text^)
-        var params = json_object()
-        params.put_owned(String("textDocument"), self._text_doc(path))
+        var params = self._doc_params(path)
         var rng = _lsp_range(
             diag.start_row, diag.start_col, diag.end_row, diag.end_col,
         )
@@ -3022,9 +2983,7 @@ struct LspManager(Copyable, Movable):
             self._code_actions.id.copy(),
             String("textDocument/codeAction"), params,
         )
-        if not self._code_actions.start(sent, path):
-            return False
-        return True
+        return self._code_actions.start(sent, path)
 
     # --- codeAction/resolve ------------------------------------------------
 
@@ -3206,8 +3165,7 @@ struct LspManager(Copyable, Movable):
             return False
         self._formatting.text = text.copy()
         self._send_open_or_change(path, text^)
-        var params = json_object()
-        params.put_owned(String("textDocument"), self._text_doc(path))
+        var params = self._doc_params(path)
         params.put(String("options"), _formatting_options(tab_size, insert_spaces))
         return self._formatting.start(
             self._request_replacing(
@@ -3224,8 +3182,7 @@ struct LspManager(Copyable, Movable):
             return False
         self._formatting.text = text.copy()
         self._send_open_or_change(path, text^)
-        var params = json_object()
-        params.put_owned(String("textDocument"), self._text_doc(path))
+        var params = self._doc_params(path)
         var rng = _lsp_range(start_line, start_char, end_line, end_char)
         params.put(String("range"), rng)
         params.put(String("options"), _formatting_options(tab_size, insert_spaces))
@@ -3310,17 +3267,14 @@ struct LspManager(Copyable, Movable):
         """Send ``textDocument/moniker`` for the symbol at ``(line,
         character)``. The parsed ``scheme:identifier`` list is parked as a
         status string."""
-        if self.state != _STATE_READY:
+        if not self._sync_for_request(path, text^):
             return False
-        self._send_open_or_change(path, text^)
         var params = self._position_params(path, line, character)
         var sent = self._request_replacing(
             self._moniker.id.copy(),
             String("textDocument/moniker"), params,
         )
-        if not self._moniker.start(sent):
-            return False
-        return True
+        return self._moniker.start(sent)
 
     def has_moniker(self) -> Bool:
         return self._moniker.ready
@@ -3338,17 +3292,15 @@ struct LspManager(Copyable, Movable):
         (0..255) occupying the given range. The server returns alternate
         textual forms; each becomes a (label, edit) pair the host shows in a
         picker."""
-        if self.state != _STATE_READY:
+        if not self._sync_for_request(path, text^):
             return False
-        self._send_open_or_change(path, text^)
         var color = json_object()
         color.put(String("red"), json_float(_unit_text(r)))
         color.put(String("green"), json_float(_unit_text(g)))
         color.put(String("blue"), json_float(_unit_text(b)))
         color.put(String("alpha"), json_float(String("1.0")))
         var rng = _lsp_range(start_line, start_char, end_line, end_char)
-        var params = json_object()
-        params.put_owned(String("textDocument"), self._text_doc(path))
+        var params = self._doc_params(path)
         params.put(String("color"), color)
         params.put(String("range"), rng)
         var sent = self._request_replacing(
@@ -3389,9 +3341,8 @@ struct LspManager(Copyable, Movable):
         """Send ``textDocument/inlineCompletion`` at ``(line, character)``
         (manually invoked). The first item's insert text is parked as a
         ghost-text suggestion anchored at the request position."""
-        if self.state != _STATE_READY:
+        if not self._sync_for_request(path, text^):
             return False
-        self._send_open_or_change(path, text^)
         var params = self._position_params(path, line, character)
         var ctx = json_object()
         ctx.put(String("triggerKind"), json_int(1))  # Invoked
@@ -3427,9 +3378,8 @@ struct LspManager(Copyable, Movable):
         """Send ``textDocument/linkedEditingRange`` at ``(line, character)``.
         Parks the linked ranges (range carriers) for the host to place
         synchronized carets at."""
-        if self.state != _STATE_READY:
+        if not self._sync_for_request(path, text^):
             return False
-        self._send_open_or_change(path, text^)
         var params = self._position_params(path, line, character)
         if not self._linked.start(
             self._request_replacing(
@@ -3452,11 +3402,9 @@ struct LspManager(Copyable, Movable):
         end_line]`` range with the debugger's stopped context. Parks the
         ``InlineValueText`` entries as (row, text) carriers for end-of-line
         rendering."""
-        if self.state != _STATE_READY:
+        if not self._sync_for_request(path, text^):
             return False
-        self._send_open_or_change(path, text^)
-        var params = json_object()
-        params.put_owned(String("textDocument"), self._text_doc(path))
+        var params = self._doc_params(path)
         var rng = _lsp_range(start_line, 0, end_line, 0)
         params.put(String("range"), rng)
         var ctx = json_object()
@@ -3490,11 +3438,9 @@ struct LspManager(Copyable, Movable):
     ) -> Bool:
         """Send ``textDocument/foldingRange`` for the whole file. Parks the
         collapsible regions as (start_line..end_line) range carriers."""
-        if self.state != _STATE_READY:
+        if not self._sync_for_request(path, text^):
             return False
-        self._send_open_or_change(path, text^)
-        var params = json_object()
-        params.put_owned(String("textDocument"), self._text_doc(path))
+        var params = self._doc_params(path)
         return self._folding.start(
             self._request_replacing(
                 self._folding.id.copy(), String("textDocument/foldingRange"), params), path,
@@ -3516,9 +3462,8 @@ struct LspManager(Copyable, Movable):
     ) -> Bool:
         """Send ``textDocument/documentHighlight`` for the symbol at
         ``(line, character)``. Parks the occurrence ranges."""
-        if self.state != _STATE_READY:
+        if not self._sync_for_request(path, text^):
             return False
-        self._send_open_or_change(path, text^)
         var params = self._position_params(path, line, character)
         return self._doc_highlight.start(
             self._request_replacing(
@@ -3541,17 +3486,14 @@ struct LspManager(Copyable, Movable):
     ) -> Bool:
         """Send ``textDocument/signatureHelp`` at ``(line, character)``.
         Parks the rendered active-signature label for the status bar."""
-        if self.state != _STATE_READY:
+        if not self._sync_for_request(path, text^):
             return False
-        self._send_open_or_change(path, text^)
         var params = self._position_params(path, line, character)
         var sent = self._request_replacing(
             self._signature.id.copy(),
             String("textDocument/signatureHelp"), params,
         )
-        if not self._signature.start(sent):
-            return False
-        return True
+        return self._signature.start(sent)
 
     def has_pending_signature(self) -> Bool:
         return self._signature.ready
@@ -3570,11 +3512,9 @@ struct LspManager(Copyable, Movable):
     ) -> Bool:
         """Send ``textDocument/inlayHint`` for the ``[start_line, end_line]``
         range (typically the visible rows). Parks (row, label) carriers."""
-        if self.state != _STATE_READY:
+        if not self._sync_for_request(path, text^):
             return False
-        self._send_open_or_change(path, text^)
-        var params = json_object()
-        params.put_owned(String("textDocument"), self._text_doc(path))
+        var params = self._doc_params(path)
         var rng = _lsp_range(start_line, 0, end_line, 0)
         params.put(String("range"), rng)
         return self._inlay.start(
@@ -3596,11 +3536,9 @@ struct LspManager(Copyable, Movable):
     ) -> Bool:
         """Send ``textDocument/codeLens`` for the whole file. Parks
         (row, title) carriers for lenses that carry a resolved command."""
-        if self.state != _STATE_READY:
+        if not self._sync_for_request(path, text^):
             return False
-        self._send_open_or_change(path, text^)
-        var params = json_object()
-        params.put_owned(String("textDocument"), self._text_doc(path))
+        var params = self._doc_params(path)
         if not self._codelens.start(
             self._request_replacing(
                 self._codelens.id.copy(), String("textDocument/codeLens"), params), path,
@@ -3653,11 +3591,9 @@ struct LspManager(Copyable, Movable):
         """Send ``textDocument/documentLink`` for the whole file. Parks
         range carriers (``new_text`` = target uri) for links the server
         returned with an inline target."""
-        if self.state != _STATE_READY:
+        if not self._sync_for_request(path, text^):
             return False
-        self._send_open_or_change(path, text^)
-        var params = json_object()
-        params.put_owned(String("textDocument"), self._text_doc(path))
+        var params = self._doc_params(path)
         return self._doclinks.start(
             self._request_replacing(
                 self._doclinks.id.copy(), String("textDocument/documentLink"), params), path,
@@ -3739,11 +3675,9 @@ struct LspManager(Copyable, Movable):
     ) -> Bool:
         """Send ``textDocument/selectionRange`` for one position. Parks the
         flattened range hierarchy (innermost→outermost)."""
-        if self.state != _STATE_READY:
+        if not self._sync_for_request(path, text^):
             return False
-        self._send_open_or_change(path, text^)
-        var params = json_object()
-        params.put_owned(String("textDocument"), self._text_doc(path))
+        var params = self._doc_params(path)
         var positions = json_array()
         positions.append(_lsp_position(line, character))
         params.put(String("positions"), positions)
@@ -3819,9 +3753,8 @@ struct LspManager(Copyable, Movable):
         path: String, line: Int, character: Int,
         var word: String, var text: String,
     ) -> Bool:
-        if self.state != _STATE_READY:
+        if not self._sync_for_request(path, text^):
             return False
-        self._send_open_or_change(path, text^)
         var params = self._position_params(path, line, character)
         var sent = self._request_replacing(
             self._hierarchy.id.copy(), prepare_method, params,
@@ -3853,18 +3786,14 @@ struct LspManager(Copyable, Movable):
         mut self, path: String, var text: String,
     ) -> Bool:
         """Send ``textDocument/documentColor``. Parks swatch highlights."""
-        if self.state != _STATE_READY:
+        if not self._sync_for_request(path, text^):
             return False
-        self._send_open_or_change(path, text^)
-        var params = json_object()
-        params.put_owned(String("textDocument"), self._text_doc(path))
+        var params = self._doc_params(path)
         var sent = self._request_replacing(
             self._colors.id.copy(),
             String("textDocument/documentColor"), params,
         )
-        if not self._colors.start(sent, path):
-            return False
-        return True
+        return self._colors.start(sent, path)
 
     def has_pending_colors(self) -> Bool:
         return self._colors.ready
@@ -4842,11 +4771,9 @@ struct LspManager(Copyable, Movable):
                                 result.append(cfg_opt.value().copy())
                                 continue
                         result.append(json_null())
-                if self._logging():
-                    _lsp_debug_write(
-                        String("← server request workspace/configuration id=")
-                        + id_label + String(" items=") + String(n),
-                    )
+                self._log_server_request(
+                    method, id_label, String(" items=") + String(n),
+                )
                 self._reply(id, result)
                 return
             if method == String("client/registerCapability"):
@@ -4879,11 +4806,9 @@ struct LspManager(Copyable, Movable):
                                 m_opt.value().as_str(), options,
                             )
                             merged += 1
-                if self._logging():
-                    _lsp_debug_write(
-                        String("← server request client/registerCapability id=")
-                        + id_label + String(" merged=") + String(merged),
-                    )
+                self._log_server_request(
+                    method, id_label, String(" merged=") + String(merged),
+                )
                 self._reply(id, json_null())
                 return
             if method == String("client/unregisterCapability"):
@@ -4906,22 +4831,14 @@ struct LspManager(Copyable, Movable):
                                 self._remove_capability_registration(
                                     m_opt.value().as_str(),
                                 )
-                if self._logging():
-                    _lsp_debug_write(
-                        String("← server request client/unregisterCapability id=")
-                        + id_label + String(" (removed)"),
-                    )
+                self._log_server_request(method, id_label, String(" (removed)"))
                 self._reply(id, json_null())
                 return
             if method == String("window/workDoneProgress/create"):
                 # Acknowledge with success. We don't track the progress
                 # token itself, but accepting lets the server proceed
                 # instead of stalling on the probe.
-                if self._logging():
-                    _lsp_debug_write(
-                        String("← server request ") + method
-                        + String(" id=") + id_label + String(" (acked)"),
-                    )
+                self._log_server_request(method, id_label, String(" (acked)"))
                 self._reply(id, json_null())
                 return
             if method == String("workspace/applyEdit"):
@@ -4941,11 +4858,9 @@ struct LspManager(Copyable, Movable):
                 self._has_resolved_applyedit = applied
                 var resp = json_object()
                 resp.put(String("applied"), json_bool(applied))
-                if self._logging():
-                    _lsp_debug_write(
-                        String("← server request workspace/applyEdit id=")
-                        + id_label + String(" files=") + String(edit_count),
-                    )
+                self._log_server_request(
+                    method, id_label, String(" files=") + String(edit_count),
+                )
                 self._reply(id, resp)
                 return
             if method == String("window/showMessageRequest"):
@@ -4980,12 +4895,9 @@ struct LspManager(Copyable, Movable):
                 self._msgreq_message = rmsg^
                 self._msgreq_actions = ractions^
                 self._msgreq_pending = True
-                if self._logging():
-                    _lsp_debug_write(
-                        String("← server request window/showMessageRequest id=")
-                        + id_label + String(" actions=")
-                        + String(len(self._msgreq_actions)),
-                    )
+                self._log_server_request(
+                    method, id_label, String(" actions=") + String(len(self._msgreq_actions)),
+                )
                 return
             if method == String("workspace/workspaceFolders"):
                 # The server asks for the open workspace folders. Reply with
@@ -4994,11 +4906,7 @@ struct LspManager(Copyable, Movable):
                 var folders = json_array()
                 if len(self._root_uri.as_bytes()) > 0:
                     folders.append_owned(workspace_folder(self._root_uri))
-                if self._logging():
-                    _lsp_debug_write(
-                        String("← server request workspace/workspaceFolders id=")
-                        + id_label,
-                    )
+                self._log_server_request(method, id_label, String(""))
                 self._reply(id, folders)
                 return
             if method == String("window/showDocument"):
@@ -5025,11 +4933,9 @@ struct LspManager(Copyable, Movable):
                 self._show_doc_pending = len(self._show_doc_uri.as_bytes()) > 0
                 var ok = json_object()
                 ok.put(String("success"), json_bool(self._show_doc_pending))
-                if self._logging():
-                    _lsp_debug_write(
-                        String("← server request window/showDocument id=")
-                        + id_label + String(" external=") + String(external),
-                    )
+                self._log_server_request(
+                    method, id_label, String(" external=") + String(external),
+                )
                 self._reply(id, ok)
                 return
             if method == String("workspace/codeLens/refresh") \
@@ -5046,11 +4952,7 @@ struct LspManager(Copyable, Movable):
                 # is why a rust-analyzer build finishing never updated the
                 # code lenses already on screen.
                 self._refresh_doc_features = True
-                if self._logging():
-                    _lsp_debug_write(
-                        String("← server request ") + method
-                        + String(" id=") + id_label + String(" (queued refresh)"),
-                    )
+                self._log_server_request(method, id_label, String(" (queued refresh)"))
                 self._reply(id, json_null())
                 return
             if method == String("workspace/diagnostic/refresh"):
@@ -5062,21 +4964,12 @@ struct LspManager(Copyable, Movable):
                 # at all.
                 self._pulled_paths = List[String]()
                 self._refresh_diagnostics = True
-                if self._logging():
-                    _lsp_debug_write(
-                        String("← server request ") + method
-                        + String(" id=") + id_label + String(" (re-arm pull)"),
-                    )
+                self._log_server_request(method, id_label, String(" (re-arm pull)"))
                 self._reply(id, json_null())
                 return
             # Unknown method: MethodNotFound (-32601) so the server
             # stops waiting.
-            if self._logging():
-                _lsp_debug_write(
-                    String("← server request ") + method
-                    + String(" id=") + id_label
-                    + String(" (MethodNotFound)"),
-                )
+            self._log_server_request(method, id_label, String(" (MethodNotFound)"))
             self._reply_error(
                 id, -32601,
                 String("method not implemented by turbokod: ") + method,
@@ -5164,9 +5057,23 @@ struct LspManager(Copyable, Movable):
         shared by the definition / references / completion / hover
         requests. Callers add request-specific fields (e.g. ``context``)
         to the returned object."""
+        var params = self._doc_params(path)
+        params.put_owned(String("position"), _lsp_position(line, character))
+        return params^
+
+    def _sync_for_request(mut self, path: String, var text: String) -> Bool:
+        """Bring the server's copy of ``path`` up to ``text`` before a
+        request about it; False (nothing sent) unless the server is ready."""
+        if self.state != _STATE_READY:
+            return False
+        self._send_open_or_change(path, text^)
+        return True
+
+    def _doc_params(self, path: String) -> JsonValue:
+        """``{textDocument: {uri}}`` — the params of a whole-document
+        request, for the caller to add to."""
         var params = json_object()
         params.put_owned(String("textDocument"), self._text_doc(path))
-        params.put_owned(String("position"), _lsp_position(line, character))
         return params^
 
     def _send_open_or_change(mut self, path: String, var text: String):
@@ -5273,12 +5180,7 @@ struct LspManager(Copyable, Movable):
         doc.put(String("version"), json_int(1))
         doc.put_owned(String("text"), json_str(text^))
         params.put_owned(String("textDocument"), doc^)
-        try:
-            self._send_notification(
-                String("textDocument/didOpen"), params,
-            )
-        except e:
-            print("lsp: didOpen", path, ":", String(e))
+        self._notify(String("textDocument/didOpen"), params, path)
         self._mark_diag_inflight(path, 1)
 
     def _send_did_change(mut self, path: String, version: Int, var text: String):
@@ -5300,12 +5202,10 @@ struct LspManager(Copyable, Movable):
         change.put_owned(String("text"), json_str(text^))
         changes.append_owned(change^)
         params.put_owned(String("contentChanges"), changes^)
-        try:
-            self._send_notification(
-                String("textDocument/didChange"), params,
-            )
-        except e:
-            print("lsp: didChange", path, "v=", version, ":", String(e))
+        self._notify(
+            String("textDocument/didChange"), params,
+            path + String(" v=") + String(version),
+        )
         self._mark_diag_inflight(path, version)
 
 
