@@ -3175,15 +3175,6 @@ struct Desktop(Movable):
             )
         return total
 
-    def _terminal_pane_at(self, pos: Point, screen: Rect) -> Int:
-        """Return the index of the terminal pane whose painted rect
-        contains ``pos``, or ``-1`` if no pane is hit. Walks panes
-        in painted order; rects can't overlap so the first match wins."""
-        for i in range(len(self.terminal_panes)):
-            if self.terminal_pane_rect(screen, i).contains(pos):
-                return i
-        return -1
-
     def drop_text_on_pane(
         mut self, text: String, pos: Point, screen: Rect,
     ) -> Bool:
@@ -3195,13 +3186,7 @@ struct Desktop(Movable):
         paths exactly as a terminal emulator's drop would. Returns True when a
         pane consumed the drop. A no-op when the panels are detached (the main
         window then paints no terminal panes — see ``drop_text_on_panel``)."""
-        if self.panels_detached:
-            return False
-        var idx = self._terminal_pane_at(pos, screen)
-        if idx < 0:
-            return False
-        self._focus_dock(DOCK_TERMINAL, idx)
-        return self.terminal_panes[idx].handle_key(Event.paste_event(text))
+        return self._drop_text_on_terminal(text, pos, screen, False)
 
     def drop_text_on_panel(
         mut self, text: String, pos: Point, screen: Rect,
@@ -3210,18 +3195,16 @@ struct Desktop(Movable):
         window: finds the terminal pane slot under ``pos`` via the panel-window
         layout and injects the dropped paths as a paste. A no-op unless the
         panels are detached (only then does that window exist)."""
-        if not self.panels_detached:
+        return self._drop_text_on_terminal(text, pos, screen, True)
+
+    def _drop_text_on_terminal(
+        mut self, text: String, pos: Point, screen: Rect, panels: Bool,
+    ) -> Bool:
+        var idx = self._terminal_slot_at(pos, screen, panels)
+        if idx < 0:
             return False
-        var slots = self._panel_window_slots(screen)
-        for ref s in slots:
-            if s.kind != PANEL_KIND_TERMINAL or s.rect.is_empty():
-                continue
-            if s.rect.contains(pos):
-                self._focus_dock(DOCK_TERMINAL, s.idx)
-                return self.terminal_panes[s.idx].handle_key(
-                    Event.paste_event(text)
-                )
-        return False
+        self._focus_dock(DOCK_TERMINAL, idx)
+        return self.terminal_panes[idx].handle_key(Event.paste_event(text))
 
     def _editor_window_at(self, pos: Point) -> Int:
         """Index of the top-most editor window whose editable interior contains
@@ -3242,9 +3225,8 @@ struct Desktop(Movable):
         nothing droppable. The host uses this to set the drag cursor and to
         decide whether to pop the filename-vs-path choice menu (editor only).
         Terminal panes only live here while *not* detached."""
-        if not self.panels_detached:
-            if self._terminal_pane_at(pos, screen) >= 0:
-                return 1
+        if self._terminal_slot_at(pos, screen, False) >= 0:
+            return 1
         if self._editor_window_at(pos) >= 0:
             return 2
         return 0
@@ -3253,14 +3235,7 @@ struct Desktop(Movable):
         """``1`` when a terminal pane sits under ``pos`` in the detached panels
         window, else ``0`` — that window has no editors, so it never returns
         ``2`` (companion to ``drop_target_at``)."""
-        if not self.panels_detached:
-            return 0
-        var slots = self._panel_window_slots(screen)
-        for ref s in slots:
-            if s.kind == PANEL_KIND_TERMINAL and not s.rect.is_empty() \
-                    and s.rect.contains(pos):
-                return 1
-        return 0
+        return 1 if self._terminal_slot_at(pos, screen, True) >= 0 else 0
 
     def drop_text_on_editor(
         mut self, text: String, pos: Point, screen: Rect,
@@ -3444,6 +3419,43 @@ struct Desktop(Movable):
             n += 1
         return n
 
+    def _dock_slots(self, screen: Rect) -> List[PanelSlot]:
+        """The main window's docked tool panes and their rects (empty
+        while hidden), in paint and hit-test order: the terminals, then the
+        run/debug, find-results and test panes. Their rects don't overlap,
+        so the order only decides who paints first. The floating-panels
+        window's counterpart is ``_panel_window_slots``."""
+        var slots = List[PanelSlot]()
+        for i in range(len(self.terminal_panes)):
+            slots.append(PanelSlot(
+                PANEL_KIND_TERMINAL, i, self.terminal_pane_rect(screen, i),
+            ))
+        slots.append(PanelSlot(PANEL_KIND_DEBUG, 0, self.debug_pane_rect(screen)))
+        slots.append(PanelSlot(
+            PANEL_KIND_FIND_RESULTS, 0, self.find_results_pane_rect(screen),
+        ))
+        slots.append(PanelSlot(PANEL_KIND_TEST, 0, self.test_pane_rect(screen)))
+        return slots^
+
+    def _surface_slots(self, screen: Rect, panels: Bool) -> List[PanelSlot]:
+        """The tool panes one surface shows: the floating-panels window's
+        (``panels``) or the main window's — none on the surface the panes
+        aren't on."""
+        if panels != self.panels_detached:
+            return List[PanelSlot]()
+        if panels:
+            return self._panel_window_slots(screen)
+        return self._dock_slots(screen)
+
+    def _terminal_slot_at(self, pos: Point, screen: Rect, panels: Bool) -> Int:
+        """The ``terminal_panes`` index of the terminal under ``pos`` on
+        one surface (see ``_surface_slots``), or -1."""
+        var slots = self._surface_slots(screen, panels)
+        for ref s in slots:
+            if s.kind == PANEL_KIND_TERMINAL and s.rect.contains(pos):
+                return s.idx
+        return -1
+
     def _panel_window_slots(self, screen: Rect) -> List[PanelSlot]:
         """Placement of every visible tool panel inside the panel window.
 
@@ -3541,53 +3553,57 @@ struct Desktop(Movable):
             )
             return
         for ref s in slots:
-            if s.rect.is_empty():
-                continue
-            if s.kind == PANEL_KIND_TERMINAL:
-                self.terminal_panes[s.idx].paint(canvas, s.rect)
-            elif s.kind == PANEL_KIND_DEBUG:
-                self.debug_pane.paint(canvas, s.rect)
-            elif s.kind == PANEL_KIND_FIND_RESULTS:
-                self.find_results_pane.paint(
-                    canvas, s.rect, self.grammar_registry,
-                )
-            else:
-                self.test_pane.paint(canvas, s.rect)
+            if not s.rect.is_empty():
+                self._paint_slot(canvas, s)
         self._paint_attention_flashes(canvas, screen, True)
+
+    def _paint_slot(mut self, mut canvas: Canvas, s: PanelSlot):
+        if s.kind == PANEL_KIND_TERMINAL:
+            self.terminal_panes[s.idx].paint(canvas, s.rect)
+        elif s.kind == PANEL_KIND_DEBUG:
+            self.debug_pane.paint(canvas, s.rect)
+        elif s.kind == PANEL_KIND_FIND_RESULTS:
+            self.find_results_pane.paint(canvas, s.rect, self.grammar_registry)
+        else:
+            self.test_pane.paint(canvas, s.rect)
 
     def _panel_slot_handle_mouse(
         mut self, kind: Int, idx: Int, event: Event, rect: Rect,
+        allow_resize: Bool = False,
     ) -> Bool:
-        """Route a mouse event to one panel and rebroadcast its focus.
-        Returns True when the panel consumed the event.
+        """Route a mouse event to one panel and rebroadcast its focus, so
+        exactly one dock is keyboard-live. Returns True when the panel
+        consumed the event.
 
-        ``allow_resize=False``: panels in the floating window never resize
-        via their own top border — the host drives splitter resize through
-        ``_panels_drive_resize`` instead. A top-border press here only
-        focuses."""
+        ``allow_resize=False`` in the floating window: panels there never
+        resize via their own top border — the host drives splitter resize
+        through ``_panels_drive_resize`` instead, so a top-border press
+        only focuses. Docked in the main window they do."""
         if kind == PANEL_KIND_TERMINAL:
             if self.terminal_panes[idx].handle_mouse(
-                event, rect, allow_resize=False,
+                event, rect, allow_resize=allow_resize,
             ):
                 if self.terminal_panes[idx].focused:
                     self._focus_dock(DOCK_TERMINAL, idx)
                 return True
             return False
         if kind == PANEL_KIND_DEBUG:
-            if self.debug_pane.handle_mouse(event, rect, allow_resize=False):
+            if self.debug_pane.handle_mouse(
+                event, rect, allow_resize=allow_resize,
+            ):
                 if self.debug_pane.focused:
                     self._focus_dock(DOCK_DEBUG_PANE)
                 return True
             return False
         if kind == PANEL_KIND_FIND_RESULTS:
             if self.find_results_pane.handle_mouse(
-                event, rect, allow_resize=False,
+                event, rect, allow_resize=allow_resize,
             ):
                 if self.find_results_pane.focused:
                     self._focus_dock(DOCK_FIND_RESULTS_PANE)
                 return True
             return False
-        if self.test_pane.handle_mouse(event, rect, allow_resize=False):
+        if self.test_pane.handle_mouse(event, rect, allow_resize=allow_resize):
             if self.test_pane.focused:
                 self._focus_dock(DOCK_TEST_PANE)
             return True
@@ -3919,26 +3935,10 @@ struct Desktop(Movable):
         # claim the cell. An in-flight drag also pins the cursor in
         # the resize shape so it doesn't flicker as the pointer moves
         # across the workspace.
-        if self.debug_pane.is_resizing() \
-                or self.debug_pane.is_on_resize_edge(
-                    pos, self.debug_pane_rect(screen)
-                ):
-            return String("ns-resize")
-        if self.find_results_pane.is_resizing() \
-                or self.find_results_pane.is_on_resize_edge(
-                    pos, self.find_results_pane_rect(screen)
-                ):
-            return String("ns-resize")
-        if self.test_pane.is_resizing() \
-                or self.test_pane.is_on_resize_edge(
-                    pos, self.test_pane_rect(screen)
-                ):
-            return String("ns-resize")
-        for i in range(len(self.terminal_panes)):
-            if self.terminal_panes[i].is_resizing() \
-                    or self.terminal_panes[i].is_on_resize_edge(
-                        pos, self.terminal_pane_rect(screen, i)
-                    ):
+        var slots = self._dock_slots(screen)
+        for ref s in slots:
+            ref dock = self._panel_dock(s.kind, s.idx)
+            if dock.is_resizing() or dock.is_on_resize_edge(pos, s.rect):
                 return String("ns-resize")
         # A split inside a pane (the test results' list / detail).
         var split = self._pane_split_shape(pos)
@@ -4980,16 +4980,9 @@ struct Desktop(Movable):
             # panel window (see `paint_panels`); the main surface skips them
             # entirely.
             if not self.panels_detached:
-                for i in range(len(self.terminal_panes)):
-                    self.terminal_panes[i].paint(
-                        canvas, self.terminal_pane_rect(screen, i),
-                    )
-                self.debug_pane.paint(canvas, self.debug_pane_rect(screen))
-                self.find_results_pane.paint(
-                    canvas, self.find_results_pane_rect(screen),
-                    self.grammar_registry,
-                )
-                self.test_pane.paint(canvas, self.test_pane_rect(screen))
+                var slots = self._dock_slots(screen)
+                for ref s in slots:
+                    self._paint_slot(canvas, s)
                 self._paint_attention_flashes(canvas, screen, False)
             # Swift/AppKit host owns the menu — see `host_owns_menu`. Skip
             # the in-grid paint so the top row stays clear for other content.
@@ -8378,37 +8371,17 @@ struct Desktop(Movable):
         # border sits over the workspace where ``windows.handle_mouse``
         # would otherwise grab clicks.
         if event.kind == EVENT_MOUSE and not self.panels_detached:
-            var dp_rect = self.debug_pane_rect(screen)
-            if self.debug_pane.is_resizing() \
-                    or (event.button == MOUSE_BUTTON_LEFT \
-                        and event.pressed and not event.motion \
-                        and self.debug_pane.is_on_resize_edge(event.pos, dp_rect)):
-                if self.debug_pane.handle_mouse(event, dp_rect):
-                    return Optional[String]()
-            var fr_rect = self.find_results_pane_rect(screen)
-            if self.find_results_pane.is_resizing() \
-                    or (event.button == MOUSE_BUTTON_LEFT \
-                        and event.pressed and not event.motion \
-                        and self.find_results_pane.is_on_resize_edge(
-                            event.pos, fr_rect)):
-                if self.find_results_pane.handle_mouse(event, fr_rect):
-                    return Optional[String]()
-            var test_rect = self.test_pane_rect(screen)
-            if self.test_pane.is_resizing() \
-                    or (event.button == MOUSE_BUTTON_LEFT \
-                        and event.pressed and not event.motion \
-                        and self.test_pane.is_on_resize_edge(event.pos, test_rect)):
-                if self.test_pane.handle_mouse(event, test_rect):
-                    return Optional[String]()
-            for i in range(len(self.terminal_panes)):
-                var tp_rect = self.terminal_pane_rect(screen, i)
-                if self.terminal_panes[i].is_resizing() \
-                        or (event.button == MOUSE_BUTTON_LEFT \
-                            and event.pressed and not event.motion \
-                            and self.terminal_panes[i].is_on_resize_edge(
-                                event.pos, tp_rect,
-                            )):
-                    if self.terminal_panes[i].handle_mouse(event, tp_rect):
+            var press = event.button == MOUSE_BUTTON_LEFT \
+                and event.pressed and not event.motion
+            var slots = self._dock_slots(screen)
+            for ref s in slots:
+                ref dock = self._panel_dock(s.kind, s.idx)
+                if dock.is_resizing() or (
+                    press and dock.is_on_resize_edge(event.pos, s.rect)
+                ):
+                    if self._panel_slot_handle_mouse(
+                        s.kind, s.idx, event, s.rect, allow_resize=True,
+                    ):
                         return Optional[String]()
         if event.kind == EVENT_MOUSE:
             if self.file_tree.is_resizing() \
@@ -8491,27 +8464,11 @@ struct Desktop(Movable):
         # as a single invariant rather than per-route plumbing.
         # When floating, the panels are hit-tested by `handle_panels_event`
         # against the separate window's grid — never on this surface.
-        if not self.panels_detached:
-            for i in range(len(self.terminal_panes)):
-                if self.terminal_panes[i].handle_mouse(
-                    event, self.terminal_pane_rect(screen, i),
-                ):
-                    if self.terminal_panes[i].focused:
-                        self._focus_dock(DOCK_TERMINAL, i)
-                    return Optional[String]()
-            if self.debug_pane.handle_mouse(event, self.debug_pane_rect(screen)):
-                if self.debug_pane.focused:
-                    self._focus_dock(DOCK_DEBUG_PANE)
-                return Optional[String]()
-            if self.find_results_pane.handle_mouse(
-                event, self.find_results_pane_rect(screen),
+        var pane_slots = self._surface_slots(screen, False)
+        for ref s in pane_slots:
+            if self._panel_slot_handle_mouse(
+                s.kind, s.idx, event, s.rect, allow_resize=True,
             ):
-                if self.find_results_pane.focused:
-                    self._focus_dock(DOCK_FIND_RESULTS_PANE)
-                return Optional[String]()
-            if self.test_pane.handle_mouse(event, self.test_pane_rect(screen)):
-                if self.test_pane.focused:
-                    self._focus_dock(DOCK_TEST_PANE)
                 return Optional[String]()
         if self.file_tree.handle_mouse(event, screen):
             if self.file_tree.focused:
@@ -12922,30 +12879,14 @@ struct Desktop(Movable):
         floating-panels window. Each is the pane's whole rect and how far
         into its fade it is."""
         var out = List[AttentionFlash]()
-        if panels != self.panels_detached:
-            return out^
         var now = monotonic_ms()
-        if panels:
-            var slots = self._panel_window_slots(screen)
-            for ref s in slots:
-                if s.rect.is_empty():
-                    continue
-                var age = self._panel_dock(s.kind, s.idx).flash_age(now)
-                if age >= 0:
-                    out.append(AttentionFlash(s.kind, s.idx, s.rect, age))
-            return out^
-        for i in range(len(self.terminal_panes)):
-            var age = self.terminal_panes[i].dock.flash_age(now)
+        var slots = self._surface_slots(screen, panels)
+        for ref s in slots:
+            if s.rect.is_empty():
+                continue
+            var age = self._panel_dock(s.kind, s.idx).flash_age(now)
             if age >= 0:
-                var r = self.terminal_pane_rect(screen, i)
-                if not r.is_empty():
-                    out.append(AttentionFlash(PANEL_KIND_TERMINAL, i, r, age))
-        if self.debug_pane.visible:
-            var age = self.debug_pane.dock.flash_age(now)
-            if age >= 0:
-                var r = self.debug_pane_rect(screen)
-                if not r.is_empty():
-                    out.append(AttentionFlash(PANEL_KIND_DEBUG, 0, r, age))
+                out.append(AttentionFlash(s.kind, s.idx, s.rect, age))
         return out^
 
     def _paint_attention_flashes(

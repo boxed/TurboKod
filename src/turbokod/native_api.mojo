@@ -48,7 +48,7 @@ from turbokod.desktop import (
     Desktop, APP_QUIT_ACTION, EDITOR_OPEN, EDITOR_PASTE, EDITOR_QUICK_OPEN,
     PROJECT_OPEN, WINDOW_FOCUS_PREFIX, DOCK_DEBUG_PANE, DOCK_FIND_RESULTS_PANE,
     DOCK_TERMINAL, DOCK_TEST_PANE, PANEL_KIND_DEBUG, PANEL_KIND_FIND_RESULTS,
-    PANEL_KIND_TERMINAL,
+    PANEL_KIND_TERMINAL, PanelSlot,
 )
 from turbokod.window import BottomDockedPanel, compute_display_titles
 from turbokod.debug_pane import (
@@ -2254,6 +2254,42 @@ def _pane_json(
     return o^
 
 
+def _pane_slot_json(ref d: Desktop, s: PanelSlot) -> JsonValue:
+    if s.kind == PANEL_KIND_TERMINAL:
+        ref t = d.terminal_panes[s.idx]
+        return _pane_json(
+            Int(DOCK_TERMINAL), s.idx, s.rect, t.header_title(), t.focused,
+            t.dock, String("T"),
+        )
+    if s.kind == PANEL_KIND_DEBUG:
+        return _pane_json(
+            Int(DOCK_DEBUG_PANE), 0, s.rect, d.debug_pane.header_title(),
+            d.debug_pane.focused, d.debug_pane.dock, String("9"),
+        )
+    if s.kind == PANEL_KIND_FIND_RESULTS:
+        return _pane_json(
+            Int(DOCK_FIND_RESULTS_PANE), 0, s.rect,
+            d.find_results_pane.header_title(), d.find_results_pane.focused,
+            d.find_results_pane.dock, String(""),
+        )
+    return _pane_json(
+        Int(DOCK_TEST_PANE), 0, s.rect, d.test_pane.header_title(),
+        d.test_pane.focused, d.test_pane.dock, String(""),
+    )
+
+
+def _write_panes(
+    ref d: Desktop, slots: List[PanelSlot], out_ptr: Int, cap: Int,
+) -> Int:
+    var a = json_array()
+    for ref s in slots:
+        if not s.rect.is_empty():
+            a.append(_pane_slot_json(d, s))
+    if a.array_len() == 0:
+        return 0
+    return _write_out(encode_json(a), out_ptr, cap)
+
+
 @export
 def tk_desktop_panes(
     h: Int, cols: Int, rows: Int, out_ptr: Int, cap: Int,
@@ -2267,42 +2303,7 @@ def tk_desktop_panes(
     ref d = _desk(h)[]
     if not d.native_panes_shown():
         return 0
-    var screen = Rect(0, 0, cols, rows)
-    var a = json_array()
-    for i in range(len(d.terminal_panes)):
-        var r = d.terminal_pane_rect(screen, i)
-        if r.is_empty():
-            continue
-        a.append(_pane_json(
-            Int(DOCK_TERMINAL), i, r, d.terminal_panes[i].header_title(),
-            d.terminal_panes[i].focused, d.terminal_panes[i].dock, String("T"),
-        ))
-    if d.debug_pane.visible:
-        var r = d.debug_pane_rect(screen)
-        if not r.is_empty():
-            a.append(_pane_json(
-                Int(DOCK_DEBUG_PANE), 0, r, d.debug_pane.header_title(),
-                d.debug_pane.focused, d.debug_pane.dock, String("9"),
-            ))
-    if d.find_results_pane.visible:
-        var r = d.find_results_pane_rect(screen)
-        if not r.is_empty():
-            a.append(_pane_json(
-                Int(DOCK_FIND_RESULTS_PANE), 0, r,
-                d.find_results_pane.header_title(),
-                d.find_results_pane.focused, d.find_results_pane.dock,
-                String(""),
-            ))
-    if d.test_pane.visible:
-        var r = d.test_pane_rect(screen)
-        if not r.is_empty():
-            a.append(_pane_json(
-                Int(DOCK_TEST_PANE), 0, r, d.test_pane.header_title(),
-                d.test_pane.focused, d.test_pane.dock, String(""),
-            ))
-    if a.array_len() == 0:
-        return 0
-    return _write_out(encode_json(a), out_ptr, cap)
+    return _write_panes(d, d._dock_slots(Rect(0, 0, cols, rows)), out_ptr, cap)
 
 
 @export
@@ -2316,37 +2317,9 @@ def tk_desktop_panels_panes(
     ref d = _desk(h)[]
     if not d.native_panels_shown():
         return 0
-    var a = json_array()
-    var slots = d._panel_window_slots(Rect(0, 0, cols, rows))
-    for ref s in slots:
-        if s.rect.is_empty():
-            continue
-        if s.kind == PANEL_KIND_TERMINAL:
-            ref t = d.terminal_panes[s.idx]
-            a.append(_pane_json(
-                Int(DOCK_TERMINAL), s.idx, s.rect, t.header_title(),
-                t.focused, t.dock, String("T"),
-            ))
-        elif s.kind == PANEL_KIND_DEBUG:
-            a.append(_pane_json(
-                Int(DOCK_DEBUG_PANE), 0, s.rect, d.debug_pane.header_title(),
-                d.debug_pane.focused, d.debug_pane.dock, String("9"),
-            ))
-        elif s.kind == PANEL_KIND_FIND_RESULTS:
-            a.append(_pane_json(
-                Int(DOCK_FIND_RESULTS_PANE), 0, s.rect,
-                d.find_results_pane.header_title(),
-                d.find_results_pane.focused, d.find_results_pane.dock,
-                String(""),
-            ))
-        else:
-            a.append(_pane_json(
-                Int(DOCK_TEST_PANE), 0, s.rect, d.test_pane.header_title(),
-                d.test_pane.focused, d.test_pane.dock, String(""),
-            ))
-    if a.array_len() == 0:
-        return 0
-    return _write_out(encode_json(a), out_ptr, cap)
+    return _write_panes(
+        d, d._panel_window_slots(Rect(0, 0, cols, rows)), out_ptr, cap,
+    )
 
 
 @export
