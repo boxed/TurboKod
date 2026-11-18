@@ -1596,6 +1596,47 @@ def test_diff_view_phantom_syntax_overlay() raises:
     assert_equal(c.get(gx, 1).attr.bg, DIFF_REM_BG)        # red wash kept
 
 
+def test_diff_view_phantom_rows_scroll_horizontally() raises:
+    """Removed (phantom) rows scroll horizontally with the code, their syntax
+    spans shifted along — before, they stayed pinned at column 0, so the end
+    of a long removed line could never be reviewed."""
+    var ed = _diff_editor(
+        _slist(String("keep"), String("0123456789keyword tail")),
+        _slist(String("keep")),
+    )
+    var hl = List[Highlight]()
+    hl.append(Highlight(0, 10, 17, Attr(SYN_KEYWORD, EDITOR_BG)))
+    ed.diff_phantom_hl = List[List[Highlight]]()
+    ed.diff_phantom_hl.append(hl^)
+    ed.scroll_x = 10
+    var w = 60
+    var h = 8
+    var c = Canvas(w, h)
+    ed.paint(c, Rect(0, 0, w, h), False)
+    var gx = ed._total_gutter()
+    assert_equal(_diff_row_text(c, 1, gx, w), String("keyword tail"))
+    assert_equal(c.get(gx, 1).attr.fg, SYN_KEYWORD)        # 'k'
+    assert_equal(c.get(gx + 6, 1).attr.fg, SYN_KEYWORD)    # 'd'
+    assert_true(c.get(gx + 8, 1).attr.fg != SYN_KEYWORD)   # 't' of tail
+
+
+def test_diff_view_long_phantom_widens_horizontal_scroll() raises:
+    """A removed line wider than every current line sets the scroll range,
+    and scrolling to its end sticks even with the caret on a short row
+    (the per-frame clamp used to snap ``scroll_x`` back to that row's
+    length)."""
+    var ed = _diff_editor(
+        _slist(String("keep"), String("x") * 100),
+        _slist(String("keep")),
+    )
+    var view = Rect(0, 0, 40, 8)
+    var max_x = ed.max_scroll_x(view)
+    assert_equal(max_x, 100 - ed._content_width(view))
+    ed.scroll_x = max_x
+    ed.clamp_scroll(view)
+    assert_equal(ed.scroll_x, max_x)
+
+
 def test_diff_view_unhighlighted_text_uses_identifier_color() raises:
     """Real rows with no syntax spans render in the SYN_IDENT baseline (green),
     matching the normal editor — not white. Regression for the white-variable bug."""

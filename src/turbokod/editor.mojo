@@ -7050,7 +7050,20 @@ struct Editor(Copyable, Movable):
                 _ = painter.put_text(
                     canvas, Point(bar_x, y), String("▌"), Attr(LIGHT_RED, DIFF_REM_BG),
                 )
-            var text = self.diff_phantom_text[p_idx]
+            # Horizontal scroll: real rows are sliced at byte ``scroll_x``, so
+            # slice the removed line the same way (snapped to a codepoint
+            # boundary of *its* text) and shift its byte-keyed spans to match.
+            var full = self.diff_phantom_text[p_idx]
+            var skip = 0
+            if self.scroll_x > 0:
+                var full_n = len(full.as_bytes())
+                if self.scroll_x >= full_n:
+                    skip = full_n
+                else:
+                    skip = utf8_byte_of_cell(
+                        full, utf8_cell_of_byte(full, self.scroll_x),
+                    )
+            var text = byte_slice(full, skip, len(full.as_bytes()))
             _ = painter.put_text(canvas, Point(text_x0, y), text, rem_attr)
             # Before-file syntax overlay (fg only, keep the red wash bg).
             if p_idx < len(self.diff_phantom_hl) \
@@ -7059,7 +7072,9 @@ struct Editor(Copyable, Movable):
                 var cells = utf8_cell_map(text, b2c)
                 for hi in range(len(self.diff_phantom_hl[p_idx])):
                     var hl = self.diff_phantom_hl[p_idx][hi]
-                    var span = _span_cells(b2c, cells, hl.col_start, hl.col_end)
+                    var span = _span_cells(
+                        b2c, cells, hl.col_start - skip, hl.col_end - skip,
+                    )
                     for cc in range(span[0], span[1]):
                         var sx = text_x0 + cc
                         if sx >= content_right:
@@ -7079,7 +7094,9 @@ struct Editor(Copyable, Movable):
                 var ecells = utf8_cell_map(text, eb2c)
                 for er in range(len(self.diff_phantom_emph[p_idx])):
                     var rng = self.diff_phantom_emph[p_idx][er]
-                    var span = _span_cells(eb2c, ecells, rng[0], rng[1])
+                    var span = _span_cells(
+                        eb2c, ecells, rng[0] - skip, rng[1] - skip,
+                    )
                     for cc in range(span[0], span[1]):
                         var sx = text_x0 + cc
                         if sx >= content_right:
@@ -10196,6 +10213,13 @@ struct Editor(Copyable, Movable):
         for i in range(self.buffer.line_count()):
             var n = text_cells(self.buffer.line(i))
             if n > m: m = n
+        # Inline-diff removed (phantom) rows scroll with the code, so a
+        # removed line wider than every current one must widen the range
+        # too, or its end could never be scrolled into view.
+        if self.diff_active:
+            for i in range(len(self.diff_phantom_text)):
+                var n = text_cells(self.diff_phantom_text[i])
+                if n > m: m = n
         return m
 
     def handle_mouse(mut self, event: Event, view: Rect) -> Bool:
@@ -11209,10 +11233,15 @@ struct Editor(Copyable, Movable):
             if self.scroll_x < 0:
                 self.scroll_x = 0
             # Re-snap to a codepoint boundary on the cursor row so a
-            # multi-byte glyph isn't sliced by paint's substring.
+            # multi-byte glyph isn't sliced by paint's substring. Only
+            # within the row: past its end there's no glyph to split, and
+            # ``utf8_byte_of_cell`` clamps to the row's length — which
+            # yanked the view back whenever the caret sat on a line shorter
+            # than the scroll offset.
             var line = self.buffer.line(self.selections[0].row)
-            var cell = utf8_cell_of_byte(line, self.scroll_x)
-            self.scroll_x = utf8_byte_of_cell(line, cell)
+            if self.scroll_x < len(line.as_bytes()):
+                var cell = utf8_cell_of_byte(line, self.scroll_x)
+                self.scroll_x = utf8_byte_of_cell(line, cell)
         var max_y = self.max_scroll_y(view)
         if self._is_wrapping():
             self._max_sy = max_y

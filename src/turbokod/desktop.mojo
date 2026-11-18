@@ -4655,6 +4655,8 @@ struct Desktop(Movable):
         self.windows.windows[idx].editor.diff_phantom_buckets = ph_buckets^
         self.windows.windows[idx].editor.diff_phantom_emph = ph_emph^
         self.windows.windows[idx].editor.diff_emph_by_row = emph_by_row^
+        # The removed lines count toward the horizontal scroll range.
+        self.windows.windows[idx].editor._longest_w = -1
 
     def _review_teardown(mut self):
         """Close the transient, review-owned window — review never leaves a
