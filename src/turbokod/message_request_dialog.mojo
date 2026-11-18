@@ -58,12 +58,7 @@ struct MessageRequestDialog(Movable):
         self._sel = 0
 
     def close(mut self):
-        self.active = False
-        self.submitted = False
-        self.selected_index = -1
-        self.message = String("")
-        self.actions = List[String]()
-        self._sel = 0
+        self = MessageRequestDialog()
 
     def _layout(self, container_bounds: Rect) -> Rect:
         var width = _DEFAULT_WIDTH

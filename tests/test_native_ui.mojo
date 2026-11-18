@@ -344,9 +344,9 @@ def test_native_project_find_fields_and_toggles_rerun_the_search() raises:
     assert_true(d.project_find.searching())   # debounce pending
     d.picker_set(String("replace"), String("pin"))
     assert_equal(d.project_find.replace.text, String("pin"))
-    var was_on = d.project_find.toggle_regex.on
+    var was_on = d.project_find.opts.regex
     d.picker_option(String("regex"), not was_on)
-    assert_true(d.project_find.toggle_regex.on != was_on)
+    assert_true(d.project_find.opts.regex != was_on)
     d.picker_option(String("regex"), was_on)   # leave it as found
     # Buttons need results to act on.
     d.picker_action(String("send_to_panel"), _SCREEN)

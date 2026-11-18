@@ -55,12 +55,7 @@ struct ReferencePick(Movable):
         self.selected_character = 0
 
     def close(mut self):
-        self.active = False
-        self.submitted = False
-        self.entries = List[DefinitionResolved]()
-        self.word = String("")
-        self.project_root = String("")
-        self.selected = 0
+        self = ReferencePick()
 
     def submit(mut self):
         """Jump to the selected entry: sets ``selected_path`` /

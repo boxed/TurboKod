@@ -139,18 +139,7 @@ struct ConfirmDialog(Movable):
         self.choice = CONFIRM_DISMISSED
 
     def close(mut self):
-        self.active = False
-        self.submitted = False
-        self.confirmed = False
-        self.choice = CONFIRM_DISMISSED
-        self.message = String("")
-        self._buttons = List[ShadowButton]()
-        self._keys = List[UInt32]()
-        self._destructive = -1
-        self._confirm_index = -1
-        self._focus = FocusGroup(0)
-        self.labels = List[String]()
-        self.default_index = 0
+        self = ConfirmDialog()
 
     def destructive_index(self) -> Int:
         return self._destructive

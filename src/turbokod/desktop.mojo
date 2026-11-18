@@ -9545,11 +9545,7 @@ struct Desktop(Movable):
             var replacement = self.project_find.replace.text
             var scope = self.project_find.scope.text
             var glob = self.project_find.glob.text
-            var opts = SearchOptions(
-                self.project_find.toggle_case.on,
-                self.project_find.toggle_word.on,
-                self.project_find.toggle_regex.on,
-            )
+            var opts = self.project_find.opts
             self._last_search = find
             self._last_search_opts = opts
             self.project_find.close()
@@ -15833,7 +15829,7 @@ struct Desktop(Movable):
                 deduped[k].line + 1,
                 deduped[k].character + 1,
             ))
-        self.find_symbol.set_choices(name, choices^)
+        self.find_symbol.set_choices(choices^)
         self._find_symbol_pending_lsps = List[Int]()
 
     def _snapshot_or_read(self, path: String) -> Optional[String]:

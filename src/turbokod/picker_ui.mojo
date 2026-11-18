@@ -176,9 +176,9 @@ def project_find_fields(p: ProjectFind) -> List[UINode]:
 def project_find_toggles(p: ProjectFind) -> List[UINode]:
     """Match case / whole word / regular expression, in one row."""
     var toggles = List[UINode]()
-    toggles.append(ui_check(String("case"), String("Match case"), p.toggle_case.on))
-    toggles.append(ui_check(String("word"), String("Whole word"), p.toggle_word.on))
-    toggles.append(ui_check(String("regex"), String("Regular expression"), p.toggle_regex.on))
+    toggles.append(ui_check(String("case"), String("Match case"), p.opts.case_sensitive))
+    toggles.append(ui_check(String("word"), String("Whole word"), p.opts.whole_word))
+    toggles.append(ui_check(String("regex"), String("Regular expression"), p.opts.regex))
     var out = List[UINode]()
     out.append(ui_hstack(toggles^))
     return out^

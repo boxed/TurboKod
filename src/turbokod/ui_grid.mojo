@@ -496,7 +496,6 @@ struct GridForm(Movable):
     """A code view's marked line as last revealed, parallel to ``_lists``."""
     var _button_keys: List[String]
     var _buttons: List[ShadowButton]
-    var _open_drop: String
     var _screen: Rect
     var _file_dialog: FileDialog
     var _browse_key: String
@@ -524,7 +523,6 @@ struct GridForm(Movable):
         self._list_marks = List[Int]()
         self._button_keys = List[String]()
         self._buttons = List[ShadowButton]()
-        self._open_drop = String("")
         self._screen = Rect(0, 0, 0, 0)
         self._file_dialog = FileDialog()
         self._browse_key = String("")
@@ -544,7 +542,6 @@ struct GridForm(Movable):
         self._list_marks = List[Int]()
         self._button_keys = List[String]()
         self._buttons = List[ShadowButton]()
-        self._open_drop = String("")
         self._file_dialog.close()
         self._browse_key = String("")
         self._type_ahead.reset()

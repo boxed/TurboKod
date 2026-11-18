@@ -16,7 +16,6 @@ is read lazily and cached — typical navigation stays inside one file.
 from std.collections.list import List
 from std.collections.optional import Optional
 
-from .buttons import OptionToggle
 from .canvas import Canvas, RunCells
 from .painter import Painter
 from .cell import Cell
@@ -84,9 +83,6 @@ struct ProjectFind(Movable):
     # Empty == every file. Edited via Tab like the scope field; a change
     # kicks off a fresh debounced search.
     var glob: TextField
-    var _last_searched_query: String   # what we last ran a search for
-    var _last_searched_scope: String   # scope path at last search
-    var _last_searched_glob: String    # filename glob at last search
     var _last_searched_opts: SearchOptions   # toggle state at last search
     var _query_dirty_at_ms: Int        # 0 when no debounce pending
     var matches: List[ProjectMatch]
@@ -98,9 +94,7 @@ struct ProjectFind(Movable):
     # ``.*`` chips so the project-wide flow honors the same flags.
     # State persists across opens; flipping a toggle while the dialog
     # is open kicks off a new debounced search.
-    var toggle_case: OptionToggle
-    var toggle_word: OptionToggle
-    var toggle_regex: OptionToggle
+    var opts: SearchOptions
     # Context cache: lines of the file containing ``matches[selected]``.
     # We reload only when the path changes — typical up/down navigation
     # stays in one file. ``_context_highlights`` is the syntax-highlight
@@ -145,24 +139,13 @@ struct ProjectFind(Movable):
         self.replace = TextField()
         self.scope = TextField()
         self.glob = TextField()
-        self._last_searched_query = String("")
-        self._last_searched_scope = String("")
-        self._last_searched_glob = String("")
         self._last_searched_opts = SearchOptions()
         self._query_dirty_at_ms = 0
         self.matches = List[ProjectMatch]()
         self.selected = 0
         self.selected_path = String("")
         self.selected_line = 0
-        self.toggle_case = OptionToggle(
-            String("Cc"), String("Match case"),
-        )
-        self.toggle_word = OptionToggle(
-            String("W"), String("Whole word"),
-        )
-        self.toggle_regex = OptionToggle(
-            String(".*"), String("Regular expression"),
-        )
+        self.opts = SearchOptions()
         self._context_path = String("")
         self._context_lines = List[String]()
         self._context_highlights = List[Highlight]()
@@ -248,9 +231,6 @@ struct ProjectFind(Movable):
         # query field.
         self.scope = TextField()
         self.glob = TextField()
-        self._last_searched_query = String("")
-        self._last_searched_scope = String("")
-        self._last_searched_glob = String("")
         self._last_searched_opts = SearchOptions()
         # ``1`` is the "fire on next tick" sentinel (see _mark_toggle_changed).
         self._query_dirty_at_ms = 1 if has_prefill else 0
@@ -258,7 +238,7 @@ struct ProjectFind(Movable):
         self.selected = 0
         self.selected_path = String("")
         self.selected_line = 0
-        # Toggle state persists across opens — leave ``toggle_*.on``
+        # Toggle state persists across opens — leave ``opts``
         # untouched so the user keeps the flags they had on for the
         # previous Find-in-Project.
         self._context_path = String("")
@@ -289,11 +269,6 @@ struct ProjectFind(Movable):
         self._context_path = String("")
         self._context_lines = List[String]()
         self._context_highlights = List[Highlight]()
-
-    def _current_options(self) -> SearchOptions:
-        return SearchOptions(
-            self.toggle_case.on, self.toggle_word.on, self.toggle_regex.on,
-        )
 
     # --- per-frame tick ---------------------------------------------------
 
@@ -380,10 +355,7 @@ struct ProjectFind(Movable):
             self._truncated = False
 
     def _run_search(mut self):
-        self._last_searched_query = self.query.text
-        self._last_searched_scope = self.scope.text
-        self._last_searched_glob = self.glob.text
-        var opts = self._current_options()
+        var opts = self.opts
         self._last_searched_opts = opts
         self.matches = List[ProjectMatch]()
         self.selected = 0
@@ -500,21 +472,20 @@ struct ProjectFind(Movable):
 
     def set_option(mut self, name: String, on: Bool):
         """Set the ``case`` / ``word`` / ``regex`` toggle."""
+        var was: Bool
         if name == String("case"):
-            if self.toggle_case.on == on:
-                return
-            self.toggle_case.on = on
+            was = self.opts.case_sensitive
+            self.opts.case_sensitive = on
         elif name == String("word"):
-            if self.toggle_word.on == on:
-                return
-            self.toggle_word.on = on
+            was = self.opts.whole_word
+            self.opts.whole_word = on
         elif name == String("regex"):
-            if self.toggle_regex.on == on:
-                return
-            self.toggle_regex.on = on
+            was = self.opts.regex
+            self.opts.regex = on
         else:
             return
-        self._mark_toggle_changed()
+        if was != on:
+            self._mark_toggle_changed()
 
     def select(mut self, idx: Int):
         if idx < 0 or idx >= len(self.matches):
@@ -534,7 +505,7 @@ struct ProjectFind(Movable):
         var text = _lstrip_tabs(self.matches[idx].line_text)
         var q = self.query.text
         var hit = find_hit(
-            text.as_bytes(), q.as_bytes(), self.toggle_word.on,
+            text.as_bytes(), q.as_bytes(), self.opts.whole_word,
         ) if len(q.as_bytes()) > 0 else -1
         return (text^, hit)
 

@@ -261,9 +261,6 @@ struct FindSymbol(Movable):
     # runner is silent, the query field freezes, and the rank/alpha
     # reorder is skipped so the host's curated order is preserved.
     var _chooser_mode: Bool
-    # The name the user picked in the first step. Shown in the input
-    # row so they can see what they're disambiguating; empty otherwise.
-    var _chooser_name: String
     # The last query per project root: ``close`` stores it, ``open``
     # restores it (fully selected) when there's no prefill.
     var _queries: QueryMemory
@@ -288,7 +285,6 @@ struct FindSymbol(Movable):
         self.runner = _FindSymbolRunner()
         self._user_navigated = False
         self._chooser_mode = False
-        self._chooser_name = String("")
         self._queries = QueryMemory()
         self.query_dirty = False
         self._class_mode = False
@@ -339,7 +335,6 @@ struct FindSymbol(Movable):
         self.runner.cancel()
         self._user_navigated = False
         self._chooser_mode = False
-        self._chooser_name = String("")
         self._class_mode = False
         # The host re-runs the search on the next frame, choosing the
         # index or ``rg``; see ``query_dirty``.
@@ -363,7 +358,6 @@ struct FindSymbol(Movable):
         self.runner.cancel()
         self._user_navigated = False
         self._chooser_mode = False
-        self._chooser_name = String("")
         self.query_dirty = False
         self._class_mode = False
 
@@ -387,11 +381,7 @@ struct FindSymbol(Movable):
         request."""
         return self._chooser_mode
 
-    def set_choices(
-        mut self,
-        var name: String,
-        var choices: List[FindSymbolMatch],
-    ):
+    def set_choices(mut self, var choices: List[FindSymbolMatch]):
         """Switch the picker into chooser mode with ``choices`` as the
         static entry list. Used after a workspace/symbol response
         returns multiple locations for ``name`` — the host hands us the
@@ -405,7 +395,6 @@ struct FindSymbol(Movable):
         self.selected = 0
         self._user_navigated = False
         self._chooser_mode = True
-        self._chooser_name = name^
         self.state = _STATE_IDLE
         self.status_message = String("")
         # The host's curated list *is* the result — a pending query would

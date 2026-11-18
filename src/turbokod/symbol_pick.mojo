@@ -83,15 +83,7 @@ struct SymbolPick(Movable):
         self._refilter()
 
     def close(mut self):
-        self.active = False
-        self.loading = False
-        self.submitted = False
-        self.path = String("")
-        self.query = TextField()
-        self.entries = List[SymbolItem]()
-        self._haystacks = List[String]()
-        self.matched = List[Int]()
-        self.selected = 0
+        self = SymbolPick()
 
     # --- filtering --------------------------------------------------------
 
