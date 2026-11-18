@@ -45,7 +45,7 @@ from .events import (
 from .geometry import Point, Rect
 from .search_options import SearchOptions
 from .text_field import TextField
-from .view import FocusGroup
+from .view import FocusGroup, centered_row_start
 from .window import close_button_clicked, paint_modal_frame
 
 
@@ -570,9 +570,7 @@ struct Prompt(Movable):
             else self._btn_replace_all.total_width()
         var bgap = 2
         var btotal = b1_w + bgap + b2_w + bgap + b3_w
-        var bx = rect.a.x + (rect.width() - btotal) // 2
-        if bx < rect.a.x + 2:
-            bx = rect.a.x + 2
+        var bx = centered_row_start(rect, btotal)
         self._btn_find_next.move_to(bx, button_y)
         var face = Attr(BLACK, GREEN)
         paint_shadow_button(canvas, self._btn_find_next, face, LIGHT_GRAY, clip_x)

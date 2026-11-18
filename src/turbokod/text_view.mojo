@@ -293,11 +293,7 @@ def wrap_lines(
             continue
         var cont_indent = 0
         if indent_size > 0:
-            cont_indent = leading_indent_bytes(line) + indent_size
-            if cont_indent > content_w - 1:
-                cont_indent = content_w - 1
-            if cont_indent < 0:
-                cont_indent = 0
+            cont_indent = _hanging_indent(line, indent_size, content_w)
         _ = _wrap_one_line_into(
             out, br, line, 0, line_n, content_w,
             0, cont_indent, 0, word_aware, max_rows,
@@ -558,40 +554,20 @@ def smart_wrap_lines(
             var s_cuts = hres[0].copy()
             var s_item = hres[1].copy()
             var s_any = hres[2]
-            var s_indent = leading_indent_bytes(line) + indent_size
-            if s_indent > content_w - 1:
-                s_indent = content_w - 1
-            if s_indent < 0:
-                s_indent = 0
-            if not s_any:
-                if overflow:
-                    _ = _wrap_one_line_into(
-                        out, br, line, 0, line_n, content_w,
-                        0, s_indent, 0, True, max_rows,
-                    )
-                else:
-                    out.append(VisualLine(br, 0, line_n, 0, cols, 0))
-                br += 1
-                continue
-            # Walk the cut list: item segments hang at the item indent, the
-            # structural ones (head / bridge / closing quote + trailing
-            # markup) sit at indent 0.
-            var s_off = 0
-            var s_seg = 0
-            while s_seg + 1 < len(s_cuts):
-                if max_rows >= 0 and len(out) >= max_rows:
-                    break
-                var s_lo = s_cuts[s_seg]
-                var s_hi = s_cuts[s_seg + 1]
-                if s_hi <= s_lo:
-                    s_seg += 1
-                    continue
-                var s_first = s_indent if s_item[s_seg] else 0
-                s_off = _wrap_one_line_into(
-                    out, br, line, s_lo, s_hi, content_w,
-                    s_first, s_indent, s_off, True, max_rows,
+            var s_indent = _hanging_indent(line, indent_size, content_w)
+            if s_any:
+                # Item segments hang at the item indent, the structural
+                # ones (head / bridge / closing quote + trailing markup)
+                # sit at indent 0.
+                _emit_cut_segments(
+                    out, br, line, s_cuts, s_item, s_indent, content_w,
+                    max_rows,
                 )
-                s_seg += 1
+            else:
+                _emit_whole_line(
+                    out, br, line, cols, overflow, s_indent, content_w,
+                    max_rows,
+                )
             br += 1
             continue
         # Scan once for the outermost bracket group's structure.
@@ -656,11 +632,7 @@ def smart_wrap_lines(
                 if item_starts[z] < close_idx:
                     filtered.append(item_starts[z])
             item_starts = filtered^
-        var item_indent = leading_indent_bytes(line) + indent_size
-        if item_indent > content_w - 1:
-            item_indent = content_w - 1
-        if item_indent < 0:
-            item_indent = 0
+        var item_indent = _hanging_indent(line, indent_size, content_w)
         var breakable = (
             head_open >= 0 and len(item_starts) >= 1 and not in_str
         )
@@ -670,47 +642,70 @@ def smart_wrap_lines(
             comma_threshold >= 0 and comma_count > comma_threshold
         )
         if not breakable or not (overflow or comma_trigger):
-            if overflow:
-                # No usable structure — degrade to word-aware soft wrap.
-                _ = _wrap_one_line_into(
-                    out, br, line, 0, line_n, content_w,
-                    0, item_indent, 0, True, max_rows,
-                )
-            else:
-                # Fits and isn't being force-broken — emit one row as-is.
-                out.append(VisualLine(br, 0, line_n, 0, cols, 0))
+            _emit_whole_line(
+                out, br, line, cols, overflow, item_indent, content_w,
+                max_rows,
+            )
             br += 1
             continue
         # Cut list: head ends after the opener; each item begins at its
         # first non-ws byte; the final segment runs to end-of-line so the
         # close bracket + any trailing tail ride the last item's row.
+        # The head's first row sits at the original column (indent 0);
+        # every item hangs at ``item_indent``.
         var cuts = List[Int]()
+        var hangs = List[Bool]()
         cuts.append(0)
+        hangs.append(False)
         cuts.append(head_open + 1)
         for z in range(len(item_starts)):
+            hangs.append(True)
             cuts.append(item_starts[z])
+        hangs.append(True)
         cuts.append(line_n)
-        var cell_offset = 0
-        var seg = 0
-        while seg + 1 < len(cuts):
-            if max_rows >= 0 and len(out) >= max_rows:
-                break
-            var lo = cuts[seg]
-            var hi = cuts[seg + 1]
-            if hi <= lo:
-                seg += 1
-                continue
-            # Head's first row sits at the original column (indent 0);
-            # everything else (and any continuation of an over-wide item
-            # or head) hangs at ``item_indent``.
-            var first_ind = 0 if seg == 0 else item_indent
-            cell_offset = _wrap_one_line_into(
-                out, br, line, lo, hi, content_w,
-                first_ind, item_indent, cell_offset, True, max_rows,
-            )
-            seg += 1
+        _emit_cut_segments(
+            out, br, line, cuts, hangs, item_indent, content_w, max_rows,
+        )
         br += 1
     return out^
+
+
+def _emit_whole_line(
+    mut out: List[VisualLine], br: Int, line: String, cols: Int,
+    overflow: Bool, indent: Int, content_w: Int, max_rows: Int,
+):
+    """A line with nothing to break at: word-wrapped (continuations at
+    ``indent``) when it overflows, one row as-is otherwise."""
+    var line_n = len(line.as_bytes())
+    if overflow:
+        _ = _wrap_one_line_into(
+            out, br, line, 0, line_n, content_w, 0, indent, 0, True,
+            max_rows,
+        )
+    else:
+        out.append(VisualLine(br, 0, line_n, 0, cols, 0))
+
+
+def _emit_cut_segments(
+    mut out: List[VisualLine], br: Int, line: String, cuts: List[Int],
+    hangs: List[Bool], indent: Int, content_w: Int, max_rows: Int,
+):
+    """Lay ``line`` out one segment per row, segment ``k`` being
+    ``[cuts[k], cuts[k + 1])``: it starts at ``indent`` when ``hangs[k]``,
+    at column 0 otherwise, and a segment too wide for ``content_w`` wraps
+    with its continuations at ``indent``."""
+    var cell_offset = 0
+    for seg in range(len(cuts) - 1):
+        if max_rows >= 0 and len(out) >= max_rows:
+            break
+        var lo = cuts[seg]
+        var hi = cuts[seg + 1]
+        if hi <= lo:
+            continue
+        cell_offset = _wrap_one_line_into(
+            out, br, line, lo, hi, content_w,
+            indent if hangs[seg] else 0, indent, cell_offset, True, max_rows,
+        )
 
 
 @fieldwise_init
@@ -1487,19 +1482,14 @@ struct TextLog(Copyable, Movable):
         helper exists so callers driving the scrollbar can think in
         terms of "top of view" without juggling that detail.
         """
-        var visible = self.last_visible_count
-        if visible < 1:
-            visible = 1
-        var max_s = len(self.last_visual) - 1
-        if max_s < 0:
-            max_s = 0
-        var ns = top + visible - 1
-        if ns < 0:
-            ns = 0
-        if ns > max_s:
-            ns = max_s
-        self.autoscroll = (ns >= max_s)
-        self.scroll = ns
+        var last = top + max(self.last_visible_count, 1) - 1
+        self.scroll_by(last - self.scroll)
+
+
+def _hanging_indent(line: String, indent_size: Int, content_w: Int) -> Int:
+    """Where a wrapped line's continuation rows start: its own indent plus
+    ``indent_size``, kept inside the wrap width."""
+    return max(0, min(leading_indent_bytes(line) + indent_size, content_w - 1))
 
 
 def word_drag_span(
