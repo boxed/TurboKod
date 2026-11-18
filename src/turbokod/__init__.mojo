@@ -135,7 +135,7 @@ from .dap import (
     DapClient, DapIncoming, classify_dap_message, dap_initialize_arguments,
 )
 from .dap_dispatch import (
-    DapEvaluations, DapManager, DapOutput, DapScope, DapStackFrame,
+    DapEvaluation, DapManager, DapOutput, DapScope, DapStackFrame,
     DapStopped, DapVariable,
 )
 from .debug_pane import DebugPane, PaneRow, PANE_MODE_DEBUG, PANE_MODE_RUN

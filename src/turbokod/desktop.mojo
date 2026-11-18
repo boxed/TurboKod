@@ -13158,23 +13158,23 @@ struct Desktop(Movable):
         original expression string — we don't keep an explicit seq map
         on the Desktop side because the DAP layer already does that."""
         var batch = self.dap.take_evaluations()
-        # ``types`` is returned but the pane currently shows just value.
-        for i in range(len(batch.expressions)):
-            var e = batch.expressions[i]
+        # ``type_name`` is returned but the pane currently shows just value.
+        for ref ev in batch:
+            ref e = ev.expression
             # Interactive-console results go to the output log, not the
             # watch rows. Errors print red (stderr category); successful
             # values print as a discrete console line.
-            if i < len(batch.contexts) and batch.contexts[i] == String("repl"):
-                if i < len(batch.is_errors) and batch.is_errors[i]:
+            if ev.context == String("repl"):
+                if ev.is_error:
                     self.debug_pane.append_output(
-                        batch.values[i] + String("\n"), UInt8(1),
+                        ev.value + String("\n"), UInt8(1),
                     )
                 else:
-                    self.debug_pane.append_output(batch.values[i], UInt8(2))
+                    self.debug_pane.append_output(ev.value, UInt8(2))
                 continue
             for k in range(len(self._dap_watch_exprs)):
                 if self._dap_watch_exprs[k] == e:
-                    self._dap_watch_values[k] = batch.values[i]
+                    self._dap_watch_values[k] = ev.value
                     break
             # LSP inline values: a matching pending expression becomes an
             # "expr = value" annotation on the stopped file's editor.
@@ -13186,7 +13186,7 @@ struct Desktop(Movable):
                     if ivw >= 0:
                         self.windows.windows[ivw].editor.add_inline_value(
                             self._inlineval_pending_rows[k],
-                            e + String(" = ") + batch.values[i],
+                            e + String(" = ") + ev.value,
                         )
                     break
         # Patch the watch rows' text in place: a full rebuild would

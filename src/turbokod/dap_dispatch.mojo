@@ -149,21 +149,20 @@ struct DapScope(ImplicitlyCopyable, Movable):
 
 
 @fieldwise_init
-struct DapEvaluations(Movable):
-    """Drained evaluate-response batch. Parallel lists in one return
-    value so the host doesn't need a second pass to demux.
+struct DapEvaluation(Copyable, Movable):
+    """One evaluate response, as ``take_evaluations`` drains them.
 
-    ``contexts`` carries the request-time hint (``"watch"`` / ``"repl"``
+    ``context`` carries the request-time hint (``"watch"`` / ``"repl"``
     / ``"hover"``) so the host can route REPL console results to the
-    output log while watch results fold into their rows.
-    ``is_errors[i]`` is True when the adapter reported the evaluate as a
-    failed request (the expression raised) — the console paints those
-    red rather than as a normal value."""
-    var expressions: List[String]
-    var values: List[String]
-    var types: List[String]
-    var contexts: List[String]
-    var is_errors: List[Bool]
+    output log while watch results fold into their rows. ``is_error`` is
+    True when the adapter reported the evaluate as a failed request (the
+    expression raised) — the console paints those red rather than as a
+    normal value, which is ``<error: …>`` then."""
+    var expression: String
+    var value: String
+    var type_name: String
+    var context: String
+    var is_error: Bool
 
 
 @fieldwise_init
@@ -317,7 +316,7 @@ struct _InspectRequests(Copyable, Movable):
     parent session and a forked subprocess each have one: their seq
     counters are independent (both start at 1), so a shared table would
     mis-route. Answers from either land in the same ``_pending_*`` /
-    ``_evaluations_*`` buffers on ``DapManager`` — the UI is
+    ``_evaluations`` buffer on ``DapManager`` — the UI is
     single-session and doesn't care which session answered. Zero = nothing
     in flight."""
     var stack_trace: Int
@@ -335,7 +334,7 @@ struct _InspectRequests(Copyable, Movable):
     var eval_seqs: List[Int]
     var eval_exprs: List[String]
     var eval_contexts: List[String]
-    # The condition-error dialog's test evaluates (see ``_test_eval_*``).
+    # The condition-error dialog's test evaluates (see ``_test_evals``).
     var test_seqs: List[Int]
     var test_exprs: List[String]
 
@@ -523,11 +522,7 @@ struct DapManager(Copyable, Movable):
     # Buffer of completed evaluate responses; drained by the host once
     # per frame via ``take_evaluations``. ``_evaluations_context`` and
     # ``_evaluations_is_error`` are parallel to the expr/value/type lists.
-    var _evaluations_expr: List[String]
-    var _evaluations_value: List[String]
-    var _evaluations_type: List[String]
-    var _evaluations_context: List[String]
-    var _evaluations_is_error: List[Bool]
+    var _evaluations: List[DapEvaluation]
     # Independent test-evaluate channel — used by the condition-error
     # dialog to validate an edited BP condition against the live frame
     # before committing it. Kept separate from the watch/REPL evaluate
@@ -537,9 +532,7 @@ struct DapManager(Copyable, Movable):
     # seq + expression list, then drained results), with an extra
     # ``error`` flag so the dialog can distinguish "evaluation raised"
     # from "evaluation returned the string ``<error: …>``".
-    var _test_eval_expr: List[String]
-    var _test_eval_value: List[String]
-    var _test_eval_error: List[Bool]
+    var _test_evals: List[DapTestEvaluation]
     # Most-recent ``Error while evaluating expression in conditional
     # breakpoint`` message, parsed from a debugpy ``output`` event of
     # category ``important``. Cleared by ``take_condition_exception``,
@@ -651,11 +644,7 @@ struct DapManager(Copyable, Movable):
         self._inflight_set_breakpoints_lines = List[List[Int]]()
         self._bp_errors = List[DapBreakpointError]()
         self._exception_filters = _default_exception_filters()
-        self._evaluations_expr = List[String]()
-        self._evaluations_value = List[String]()
-        self._evaluations_type = List[String]()
-        self._evaluations_context = List[String]()
-        self._evaluations_is_error = List[Bool]()
+        self._evaluations = List[DapEvaluation]()
         self._supports_completions = False
         self._completions_req_text = String("")
         self._completions_req_column = 0
@@ -670,9 +659,7 @@ struct DapManager(Copyable, Movable):
         self._keys_stage = 0
         self._keys_via_sub = False
         self._keys_frame_id = 0
-        self._test_eval_expr = List[String]()
-        self._test_eval_value = List[String]()
-        self._test_eval_error = List[Bool]()
+        self._test_evals = List[DapTestEvaluation]()
         self._pending_cond_exc_condition = String("")
         self._pending_cond_exc_error = String("")
         self._stopped = Optional[DapStopped]()
@@ -730,6 +717,21 @@ struct DapManager(Copyable, Movable):
     def is_failed(self) -> Bool:
         return self.state == _STATE_FAILED
 
+    def _fail(mut self, var reason: String):
+        """Latch the session FAILED with ``reason`` (shown to the user, and
+        traced)."""
+        self.state = _STATE_FAILED
+        self.client.process.trace(String("FAIL: ") + reason)
+        self.failure_reason = reason^
+
+    def _fail_rejected(mut self, what: String, msg: DapIncoming):
+        """``_fail`` for a request the adapter answered with
+        ``success: false``: ``<what> rejected[: <its message>]``."""
+        var why = what + String(" rejected")
+        if msg.message:
+            why += String(": ") + msg.message.value()
+        self._fail(why^)
+
     def is_terminated(self) -> Bool:
         return self.state == _STATE_TERMINATED
 
@@ -775,8 +777,7 @@ struct DapManager(Copyable, Movable):
             return
         var argv = self._pick_argv(spec)
         if len(argv) == 0:
-            self.state = _STATE_FAILED
-            self.failure_reason = String("no adapter on $PATH for ") + spec.name
+            self._fail(String("no adapter on $PATH for ") + spec.name)
             return
         self.adapter_name = spec.name
         self.language_id = spec.language_id
@@ -791,8 +792,7 @@ struct DapManager(Copyable, Movable):
         try:
             self.client = DapClient.spawn(argv)
         except e:
-            self.state = _STATE_FAILED
-            self.failure_reason = String("spawn failed: ") + String(e)
+            self._fail(String("spawn failed: ") + String(e))
             return
         # Open the streaming trace log right after spawn. ``creat``
         # truncates so the file is fresh per session. Errors yield -1,
@@ -815,11 +815,7 @@ struct DapManager(Copyable, Movable):
                 String("initialize"), init_args,
             )
         except e:
-            self.state = _STATE_FAILED
-            self.failure_reason = String("initialize failed: ") + String(e)
-            self.client.process.trace(
-                String("FAIL: ") + self.failure_reason
-            )
+            self._fail(String("initialize failed: ") + String(e))
             return
         # Stash the launch arguments to send on the initialize response.
         # We keep them as a JsonValue rather than re-deriving from spec
@@ -1314,14 +1310,7 @@ struct DapManager(Copyable, Movable):
         returns ``Wrong ID sent from the client``."""
         if not self.is_active():
             return False
-        # Keep a copy of the context hint for the inflight table — the
-        # original is moved into the request args below.
-        var ctx = context.copy()
-        var args = json_object()
-        args.put(String("expression"), json_str(expression))
-        if frame_id != 0:
-            args.put(String("frameId"), json_int(frame_id))
-        args.put(String("context"), json_str(context^))
+        var args = _evaluate_args(expression, frame_id, context)
         var via_sub = self._inspect_via_subprocess()
         var seq = self._send_inspect(via_sub, String("evaluate"), args)
         if seq == 0:
@@ -1329,7 +1318,7 @@ struct DapManager(Copyable, Movable):
         ref rq = self._requests(via_sub)
         rq.eval_seqs.append(seq)
         rq.eval_exprs.append(expression^)
-        rq.eval_contexts.append(ctx^)
+        rq.eval_contexts.append(context^)
         return True
 
     # --- completions (debug console) --------------------------------------
@@ -1392,11 +1381,7 @@ struct DapManager(Copyable, Movable):
         return self._send_keys_eval(expr^)
 
     def _send_keys_eval(mut self, var expr: String) -> Bool:
-        var args = json_object()
-        args.put(String("expression"), json_str(expr))
-        if self._keys_frame_id != 0:
-            args.put(String("frameId"), json_int(self._keys_frame_id))
-        args.put(String("context"), json_str(String("watch")))
+        var args = _evaluate_args(expr, self._keys_frame_id, String("watch"))
         var seq = self._send_inspect(
             self._keys_via_sub, String("evaluate"), args,
         )
@@ -1465,24 +1450,16 @@ struct DapManager(Copyable, Movable):
         self._keys_ready = True
 
     def has_evaluations(self) -> Bool:
-        return len(self._evaluations_expr) > 0
+        return len(self._evaluations) > 0
 
-    def take_evaluations(mut self) -> DapEvaluations:
+    def take_evaluations(mut self) -> List[DapEvaluation]:
         """Drain the buffered evaluate responses.
 
         Empty types are common for adapters that don't return ``type``
         on plain identifier lookups."""
-        var e = self._evaluations_expr^
-        var v = self._evaluations_value^
-        var t = self._evaluations_type^
-        var c = self._evaluations_context^
-        var err = self._evaluations_is_error^
-        self._evaluations_expr = List[String]()
-        self._evaluations_value = List[String]()
-        self._evaluations_type = List[String]()
-        self._evaluations_context = List[String]()
-        self._evaluations_is_error = List[Bool]()
-        return DapEvaluations(e^, v^, t^, c^, err^)
+        var out = List[DapEvaluation]()
+        swap(out, self._evaluations)
+        return out^
 
     # --- execution control -----------------------------------------------
 
@@ -1700,12 +1677,8 @@ struct DapManager(Copyable, Movable):
         # one shot is parked here and flushed on subsequent ticks.
         self.client.process.pump_writes()
         if self.client.process.write_overflowed():
-            self.state = _STATE_FAILED
-            self.failure_reason = String(
+            self._fail(String(
                 "outbound queue overflowed (adapter not reading stdin)"
-            )
-            self.client.process.trace(String(
-                "FAIL: outbound queue overflow",
             ))
             return
         # Crash-detection: ``try_reap`` returns True iff the child has
@@ -1715,13 +1688,7 @@ struct DapManager(Copyable, Movable):
         # FAILED so the UI shows a real error instead of an indefinite
         # ``initializing`` spinner.
         if self.client.process.try_reap():
-            self.state = _STATE_FAILED
-            self.failure_reason = String(
-                "adapter exited before completing handshake"
-            )
-            self.client.process.trace(String(
-                "FAIL: adapter exited (try_reap returned True)",
-            ))
+            self._fail(String("adapter exited before completing handshake"))
             return
         # Heartbeat. Once per second while alive — short enough that
         # a crash anywhere in the host loop is visible within a frame
@@ -1750,13 +1717,7 @@ struct DapManager(Copyable, Movable):
             var elapsed = monotonic_ms() - self._state_entered_ms
             if elapsed > 15000:
                 var prior = _state_name(self.state)
-                self.state = _STATE_FAILED
-                self.failure_reason = String(
-                    "adapter unresponsive for 15s in "
-                ) + prior
-                self.client.process.trace(
-                    String("FAIL: watchdog ") + prior,
-                )
+                self._fail(String("adapter unresponsive for 15s in ") + prior)
                 return
         var i = 0
         while i < 32:
@@ -2060,12 +2021,7 @@ struct DapManager(Copyable, Movable):
         # the boolean check is unambiguous.
         var success_ok = msg.ok()
         if not success_ok:
-            self.state = _STATE_FAILED
-            var why = String("initialize rejected")
-            if msg.message:
-                why = why + String(": ") + msg.message.value()
-            self.failure_reason = why
-            self.client.process.trace(String("FAIL: ") + why)
+            self._fail_rejected(String("initialize"), msg)
             return
         # Park capabilities. Only the few we actually use.
         if msg.body and msg.body.value().is_object():
@@ -2091,11 +2047,7 @@ struct DapManager(Copyable, Movable):
                 cmd, self._pending_launch_args,
             )
         except e:
-            self.state = _STATE_FAILED
-            self.failure_reason = String("launch failed: ") + String(e)
-            self.client.process.trace(
-                String("FAIL: ") + self.failure_reason
-            )
+            self._fail(String("launch failed: ") + String(e))
             return
         self.state = _STATE_LAUNCHING
         self._state_entered_ms = monotonic_ms()
@@ -2240,26 +2192,19 @@ struct DapManager(Copyable, Movable):
         both surface identically to the host. ``context`` is the
         request-time hint, carried through so the host can route REPL
         console results apart from watch folds."""
-        var value = String("")
-        var type_name = String("")
+        var r = _evaluate_result(msg)
+        var value = r[0]
         var eval_ok = msg.ok()
         if not eval_ok:
             # Error response — surface the message as the value so the
             # watch row reads ``len(items) = <error>`` rather than
             # going stale or vanishing.
-            if msg.message:
-                value = String("<error: ") + msg.message.value() + String(">")
-            else:
-                value = String("<error>")
-        elif msg.body and msg.body.value().is_object():
-            ref b = msg.body.value()
-            value = json_get_string(b, String("result"), value)
-            type_name = json_get_string(b, String("type"), type_name)
-        self._evaluations_expr.append(expr^)
-        self._evaluations_value.append(value^)
-        self._evaluations_type.append(type_name^)
-        self._evaluations_context.append(context^)
-        self._evaluations_is_error.append(not eval_ok)
+            value = String("<error: ") + msg.message.value() + String(">") \
+                if msg.message else String("<error>")
+        var type_name = r[1]
+        self._evaluations.append(DapEvaluation(
+            expr^, value^, type_name^, context^, not eval_ok,
+        ))
 
     # --- condition-exception buffer & test-evaluate channel --------------
 
@@ -2341,11 +2286,7 @@ struct DapManager(Copyable, Movable):
         forces per-channel inflight tables to avoid collision)."""
         if not self.is_active():
             return False
-        var args = json_object()
-        args.put(String("expression"), json_str(expression))
-        if frame_id != 0:
-            args.put(String("frameId"), json_int(frame_id))
-        args.put(String("context"), json_str(String("watch")))
+        var args = _evaluate_args(expression, frame_id, String("watch"))
         var via_sub = self._inspect_via_subprocess()
         var seq = self._send_inspect(via_sub, String("evaluate"), args)
         if seq == 0:
@@ -2356,7 +2297,7 @@ struct DapManager(Copyable, Movable):
         return True
 
     def has_test_evaluations(self) -> Bool:
-        return len(self._test_eval_expr) > 0
+        return len(self._test_evals) > 0
 
     def take_test_evaluation(mut self) -> Optional[DapTestEvaluation]:
         """Pop the oldest test-evaluate result. Returns ``None`` when
@@ -2364,33 +2305,19 @@ struct DapManager(Copyable, Movable):
         the batch so the dialog state machine handles each ``Try again``
         round trip independently — the batch shape would force the
         host to track which result belongs to which submit."""
-        if len(self._test_eval_expr) == 0:
+        if len(self._test_evals) == 0:
             return Optional[DapTestEvaluation]()
-        var expr = self._test_eval_expr.pop(0)
-        var val = self._test_eval_value.pop(0)
-        var err = self._test_eval_error.pop(0)
-        return Optional[DapTestEvaluation](
-            DapTestEvaluation(expr^, val^, err),
-        )
+        return Optional[DapTestEvaluation](self._test_evals.pop(0))
 
     def _stash_test_evaluate_result(
         mut self, var expr: String, msg: DapIncoming,
     ):
-        var value = String("")
-        var is_error = False
-        var test_eval_ok = msg.ok()
-        if not test_eval_ok:
-            is_error = True
-            if msg.message:
-                value = msg.message.value()
-            else:
-                value = String("evaluation failed")
-        elif msg.body and msg.body.value().is_object():
-            ref b = msg.body.value()
-            value = json_get_string(b, String("result"), value)
-        self._test_eval_expr.append(expr^)
-        self._test_eval_value.append(value^)
-        self._test_eval_error.append(is_error)
+        var r = _evaluate_result(msg)
+        var value = r[0]
+        if not msg.ok():
+            value = msg.message.value() if msg.message \
+                else String("evaluation failed")
+        self._test_evals.append(DapTestEvaluation(expr^, value^, not msg.ok()))
 
     def _send_set_debugger_property_debugpy(mut self):
         """debugpy-only: tell pydevd to suspend (and print) on every
@@ -2430,11 +2357,7 @@ struct DapManager(Copyable, Movable):
                     String("configurationDone"), json_object(),
                 )
             except e:
-                self.state = _STATE_FAILED
-                self.failure_reason = String("configurationDone failed: ") + String(e)
-                self.client.process.trace(
-                    String("FAIL: ") + self.failure_reason
-                )
+                self._fail(String("configurationDone failed: ") + String(e))
                 return
             self.state = _STATE_CONFIGURING
             self.client.process.trace(String("state -> configuring"))
@@ -2451,21 +2374,12 @@ struct DapManager(Copyable, Movable):
         # success=false; otherwise the response is informational.
         var launch_ok = msg.ok()
         if not launch_ok:
-            self.state = _STATE_FAILED
-            var why = String("launch rejected")
-            if msg.message:
-                why = why + String(": ") + msg.message.value()
-            self.failure_reason = why
-            self.client.process.trace(String("FAIL: ") + why)
+            self._fail_rejected(String("launch"), msg)
 
     def _on_config_done_response(mut self, msg: DapIncoming):
         var cfg_ok = msg.ok()
         if not cfg_ok:
-            self.state = _STATE_FAILED
-            self.failure_reason = String("configurationDone rejected")
-            self.client.process.trace(
-                String("FAIL: ") + self.failure_reason
-            )
+            self._fail(String("configurationDone rejected"))
             return
         if self.state == _STATE_CONFIGURING:
             self.state = _STATE_RUNNING
@@ -2868,6 +2782,30 @@ def _exception_breakpoints_args(filters: List[String]) -> JsonValue:
     var args = json_object()
     args.put(String("filters"), arr)
     return args^
+
+
+def _evaluate_args(
+    expression: String, frame_id: Int, context: String,
+) -> JsonValue:
+    """``evaluate`` arguments. ``frame_id`` 0 leaves the frame out, which
+    adapters read as "the current top frame"."""
+    var args = json_object()
+    args.put(String("expression"), json_str(expression))
+    if frame_id != 0:
+        args.put(String("frameId"), json_int(frame_id))
+    args.put(String("context"), json_str(context))
+    return args^
+
+
+def _evaluate_result(msg: DapIncoming) -> Tuple[String, String]:
+    """A successful ``evaluate`` response's ``(result, type)`` — empty for
+    an error response or a body without them."""
+    if not msg.ok() or not msg.body or not msg.body.value().is_object():
+        return (String(""), String(""))
+    ref b = msg.body.value()
+    return (
+        json_get_string(b, String("result")), json_get_string(b, String("type")),
+    )
 
 
 def _bp_paths(bps: List[DapBreakpoint]) -> List[String]:
