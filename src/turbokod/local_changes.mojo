@@ -59,12 +59,10 @@ Up/Down/PgUp/PgDn, Home/End operate on the focused panel; Left-arrow
 returns focus from the right side to whichever sidebar panel was last
 active.
 
-All three sidebar splitters and the right-side splitter are
-**draggable** — click on a splitter row (the thin ``─`` bar between
-panels, or the ``│`` column between sidebar and right) and drag to
-resize. The vertical separator resizes sidebar / right; horizontal
-splitters resize the panels above / below. Sizes are remembered until
-the modal closes.
+The dividers are ``SplitArea``s — drag the ``│`` column between sidebar
+and right side, or a ``─`` row between panels, to resize; a double click
+puts one back. Sizes are fractions, so they scale with the window, and
+are remembered until the modal closes.
 
 **Reporting outcomes.** Every git operation ends in one of three ways,
 chosen by whether its output was the one git prints when nothing
@@ -161,11 +159,10 @@ from .editor import Editor
 from .config import WRAP_SOFT
 from .list_box import clamp_list_scroll, paint_list_rows
 from .scrollbar import ScrollBarArea
+from .split_area import SplitArea
 from .picker_input import picker_nav_key, scroll_to_reveal
 
 
-comptime _SIDEBAR_MIN: Int = 28
-comptime _SIDEBAR_MAX: Int = 56
 comptime _COMMIT_LIMIT: Int = 500
 
 comptime _PANE_FILES:           Int = 0
@@ -178,15 +175,9 @@ comptime _PANE_RIGHT_UNSTAGED:  Int = 3
 comptime _PANE_RIGHT_STAGED:    Int = 4
 comptime _PANE_RIGHT_INFO:      Int = 5
 
-# Drag identifiers — which splitter is currently being dragged.
-comptime _DRAG_NONE:        Int = 0
-comptime _DRAG_SIDEBAR:     Int = 1   # vertical: sidebar / right
-comptime _DRAG_SPLIT_FB:    Int = 2   # horizontal: files / branches
-comptime _DRAG_SPLIT_BC:    Int = 3   # horizontal: branches / commits
-comptime _DRAG_SPLIT_US:    Int = 4   # horizontal: unstaged / staged
-
 # Minimum body rows for any panel (header is one row on top of this).
 comptime _PANEL_MIN_BODY:   Int = 1
+comptime _PANEL_MIN_H:      Int = 1 + _PANEL_MIN_BODY
 
 # Overlay modes — when non-zero, an inline modal (commit prompt /
 # confirmation / status flash) is on top of the normal LocalChanges UI
@@ -1594,17 +1585,15 @@ struct LocalChanges(Movable):
     # scroll and cursor, since everything above the expanded file lays
     # out exactly as before.
     var _keep_info_view: Bool
-    # Splitter overrides. ``-1`` means "use the auto-computed default";
-    # any positive value is the user's dragged setpoint and gets
-    # clamped to the available space on each frame so resizing the
-    # terminal doesn't break the layout.
-    var sidebar_width_user: Int
-    var files_height_user: Int
-    var branches_height_user: Int
-    var unstaged_height_user: Int
-    # Which splitter (if any) the mouse is currently dragging. Cleared
-    # on release. Drives the mouse-motion path in ``handle_mouse``.
-    var _drag_kind: Int
+    # The draggable dividers: sidebar | right side; in the sidebar,
+    # files | branches + commits, then branches | commits (only while
+    # every section is NORMAL — otherwise ``sidebar_dock`` sizes them);
+    # on the right, unstaged | staged (only for a file selection).
+    # Fractions of the space, so a dragged size scales with the window.
+    var _side_split: SplitArea
+    var _files_split: SplitArea
+    var _branches_split: SplitArea
+    var _unstaged_split: SplitArea
     # One scroll bar per pane, by ``_PANE_*`` (files .. right info).
     var _bars: List[ScrollBarArea]
     # Submission contract — same shape as the previous file-only
@@ -1817,11 +1806,12 @@ struct LocalChanges(Movable):
         self._expanded_sha = String("")
         self._show_text = String("")
         self._keep_info_view = False
-        self.sidebar_width_user = -1
-        self.files_height_user = -1
-        self.branches_height_user = -1
-        self.unstaged_height_user = -1
-        self._drag_kind = _DRAG_NONE
+        self._side_split = SplitArea(300)
+        self._files_split = SplitArea(
+            333, _PANEL_MIN_H, 2 * _PANEL_MIN_H + 1,
+        )
+        self._branches_split = SplitArea(500, _PANEL_MIN_H, _PANEL_MIN_H)
+        self._unstaged_split = SplitArea(500, _PANEL_MIN_H, _PANEL_MIN_H)
         self._bars = List[ScrollBarArea]()
         for _ in range(_PANE_RIGHT_INFO + 1):
             self._bars.append(ScrollBarArea())
@@ -2102,25 +2092,47 @@ struct LocalChanges(Movable):
     # --- geometry ---------------------------------------------------------
 
     def _sidebar_width(self, container_bounds: Rect) -> Int:
-        """Sidebar width in cells. The auto-default (no user drag yet)
-        targets ~⅓ of the window with the ``_SIDEBAR_MIN``/``MAX``
-        comfort range. Once the user drags, only natural bounds apply
-        — the splitter must stay one cell inside the box on each side
-        so the borders don't get clobbered, but otherwise the user can
-        crush the sidebar (or the right side) all the way to 1 cell."""
-        var hard_max = container_bounds.width() - 2
-        if hard_max < 1:
-            hard_max = 1
-        var w: Int
-        if self.sidebar_width_user >= 0:
-            w = self.sidebar_width_user
+        """Columns from the box's left edge to the sidebar | right
+        divider: the sidebar's width plus the border."""
+        return self._side_halves(container_bounds)[0].b.x \
+            - container_bounds.a.x
+
+    def _side_halves(self, container_bounds: Rect) -> Tuple[Rect, Rect]:
+        """The sidebar and the right side, inside the box's border, from
+        the title rows to the hint row."""
+        return self._side_split.halves(Rect(
+            container_bounds.a.x + 1, self._list_top(container_bounds),
+            container_bounds.b.x - 1, self._list_bottom(container_bounds),
+        ), True)
+
+    def _layout_splits(mut self, container_bounds: Rect):
+        """Lay the dividers out for this frame — where ``paint`` draws them
+        and ``handle_mouse`` hits them — hiding those not on screen."""
+        var side = self._side_split.layout(Rect(
+            container_bounds.a.x + 1, self._list_top(container_bounds),
+            container_bounds.b.x - 1, self._list_bottom(container_bounds),
+        ), True)
+        if self.sidebar_dock.all_normal():
+            var fh = self._files_split.layout(side[0], False)
+            _ = self._branches_split.layout(fh[1], False)
         else:
-            w = container_bounds.width() // 3
-            if w < _SIDEBAR_MIN: w = _SIDEBAR_MIN
-            if w > _SIDEBAR_MAX: w = _SIDEBAR_MAX
-        if w < 1: w = 1
-        if w > hard_max: w = hard_max
-        return w
+            self._files_split.hide()
+            self._branches_split.hide()
+        if self._driving_pane() == _PANE_FILES:
+            _ = self._unstaged_split.layout(side[1], False)
+        else:
+            self._unstaged_split.hide()
+
+    def pointer_shape(self, pos: Point) -> String:
+        """A resize shape over a divider (or for a drag); empty elsewhere."""
+        var shape = self._side_split.pointer_shape(pos)
+        if len(shape.as_bytes()) == 0:
+            shape = self._files_split.pointer_shape(pos)
+        if len(shape.as_bytes()) == 0:
+            shape = self._branches_split.pointer_shape(pos)
+        if len(shape.as_bytes()) == 0:
+            shape = self._unstaged_split.pointer_shape(pos)
+        return shape^
 
     def _list_top(self, container_bounds: Rect) -> Int:
         return container_bounds.a.y + 2
@@ -2148,92 +2160,38 @@ struct LocalChanges(Movable):
         ``branches_top + branches_h``.
 
         Delegates to ``DockedPanelStack.layout`` when any section is in
-        a non-NORMAL state (the state machine drives the heights). When
-        all sections are NORMAL we honor ``files_height_user`` /
-        ``branches_height_user`` so the user's splitter drags persist
-        across frames."""
-        var top = self._list_top(container_bounds)
-        var bottom = self._list_bottom(container_bounds)
-        var total = bottom - top
-        if total < 6:
-            total = 6
-        var splitters = 2  # two horizontal splitters between three panels
-        var content = total - splitters
-        if content < 6:
-            content = 6
-        var min_h = 1 + _PANEL_MIN_BODY  # header row + body row
-        var f_h: Int
-        var b_h: Int
-        var c_h: Int
+        a non-NORMAL state (the state machine drives the heights); when
+        all sections are NORMAL the two dividers the user drags do."""
         if not self.sidebar_dock.all_normal():
-            return self.sidebar_dock.layout(top, bottom)
-        if self.files_height_user > 0:
-            f_h = self.files_height_user
-        else:
-            f_h = content // 3
-        if self.branches_height_user > 0:
-            b_h = self.branches_height_user
-        else:
-            b_h = content // 3
-        if f_h < min_h: f_h = min_h
-        if b_h < min_h: b_h = min_h
-        if f_h + b_h > content - min_h:
-            # Trim branches first (most recently sized), then files.
-            var over = f_h + b_h - (content - min_h)
-            var b_trim = b_h - min_h
-            if over <= b_trim:
-                b_h -= over
-                _ = over
-            else:
-                over -= b_trim
-                b_h = min_h
-                var f_trim = f_h - min_h
-                if over <= f_trim:
-                    f_h -= over
-                else:
-                    f_h = min_h
-        c_h = content - f_h - b_h
-        if c_h < min_h: c_h = min_h
+            return self.sidebar_dock.layout(
+                self._list_top(container_bounds),
+                self._list_bottom(container_bounds),
+            )
+        var fh = self._files_split.halves(
+            self._side_halves(container_bounds)[0], False,
+        )
+        var bc = self._branches_split.halves(fh[1], False)
         var out = List[Int]()
-        out.append(top)
-        out.append(f_h)
-        out.append(top + f_h + 1)            # +1 for splitter row
-        out.append(b_h)
-        out.append(top + f_h + 1 + b_h + 1)  # +1 for second splitter row
-        out.append(c_h)
+        out.append(fh[0].a.y)
+        out.append(fh[0].height())
+        out.append(bc[0].a.y)
+        out.append(bc[0].height())
+        out.append(bc[1].a.y)
+        out.append(bc[1].height())
         return out^
 
     def _right_panes(self, container_bounds: Rect) -> List[Int]:
         """Returns ``[unstaged_top, unstaged_h, staged_top, staged_h]``
-        when the right side is split for a file selection. Same min-
-        height clamping logic as ``_pane_rows`` so dragging never
-        squashes a panel below one body row. Honors
-        ``unstaged_height_user`` when set."""
-        var top = self._list_top(container_bounds)
-        var bottom = self._list_bottom(container_bounds)
-        var total = bottom - top
-        if total < 4:
-            total = 4
-        var splitters = 1  # one splitter between two panels
-        var content = total - splitters
-        if content < 4:
-            content = 4
-        var min_h = 1 + _PANEL_MIN_BODY
-        var u_h: Int
-        if self.unstaged_height_user > 0:
-            u_h = self.unstaged_height_user
-        else:
-            u_h = content // 2
-        if u_h < min_h: u_h = min_h
-        if u_h > content - min_h: u_h = content - min_h
-        if u_h < min_h: u_h = min_h
-        var s_h = content - u_h
-        if s_h < min_h: s_h = min_h
+        when the right side is split for a file selection, around the
+        divider the user drags; neither shrinks below one body row."""
+        var us = self._unstaged_split.halves(
+            self._side_halves(container_bounds)[1], False,
+        )
         var out = List[Int]()
-        out.append(top)
-        out.append(u_h)
-        out.append(top + u_h + 1)   # +1 for splitter row
-        out.append(s_h)
+        out.append(us[0].a.y)
+        out.append(us[0].height())
+        out.append(us[1].a.y)
+        out.append(us[1].height())
         return out^
 
     # --- right-pane refresh ----------------------------------------------
@@ -2692,11 +2650,10 @@ struct LocalChanges(Movable):
         _ = canvas.put_text(
             Point(bounds.a.x + 1, sub_y), sub, sub_attr, bounds.b.x - 1,
         )
-        # Vertical separator (also the sidebar/right splitter target).
+        # The dividers: sidebar | right, and between the panels.
+        self._layout_splits(bounds)
+        self._side_split.paint(canvas, sep_attr)
         var sw = self._sidebar_width(bounds)
-        var sep_x = bounds.a.x + sw
-        for y in range(self._list_top(bounds), self._list_bottom(bounds)):
-            canvas.set(sep_x, y, Cell(String("│"), sep_attr, 1))
         # Sidebar: three stacked panels with horizontal splitters between.
         # Section bodies paint first (they may not draw the header row
         # at all when collapsed); the framework dock paints titles +
@@ -2708,16 +2665,20 @@ struct LocalChanges(Movable):
             canvas, left, right, rows[0], rows[1], _PANE_FILES,
             list_attr, sel_attr, sel_inactive, list_dim,
         )
-        self._paint_horizontal_splitter(
-            canvas, left, right, rows[0] + rows[1], splitter_attr,
-        )
         self._paint_section_body(
             canvas, left, right, rows[2], rows[3], _PANE_BRANCHES,
             list_attr, sel_attr, sel_inactive, list_dim,
         )
-        self._paint_horizontal_splitter(
-            canvas, left, right, rows[2] + rows[3], splitter_attr,
-        )
+        if self.sidebar_dock.all_normal():
+            self._files_split.paint(canvas, splitter_attr)
+            self._branches_split.paint(canvas, splitter_attr)
+        else:
+            self._paint_horizontal_splitter(
+                canvas, left, right, rows[0] + rows[1], splitter_attr,
+            )
+            self._paint_horizontal_splitter(
+                canvas, left, right, rows[2] + rows[3], splitter_attr,
+            )
         self._paint_section_body(
             canvas, left, right, rows[4], rows[5], _PANE_COMMITS,
             list_attr, sel_attr, sel_inactive, list_dim,
@@ -3559,9 +3520,7 @@ struct LocalChanges(Movable):
                 section_attr,
                 ctx_attr, header_attr,
             )
-            self._paint_horizontal_splitter(
-                canvas, left, right_excl - 1, rp[0] + rp[1], splitter_attr,
-            )
+            self._unstaged_split.paint(canvas, splitter_attr)
             self._paint_panel_with_header(
                 canvas,
                 Rect(left, rp[2], right_excl, rp[2] + rp[3]),
@@ -5769,103 +5728,6 @@ struct LocalChanges(Movable):
 
     # --- mouse / drag helpers ---------------------------------------------
 
-    def _hit_splitter(self, pos: Point, container_bounds: Rect) -> Int:
-        """Return ``_DRAG_*`` for the splitter at ``pos``, or
-        ``_DRAG_NONE`` if the position isn't on any splitter. The
-        vertical sidebar/right splitter takes a 2-cell hit zone (the
-        ``│`` column plus the last sidebar column, which is padding)
-        so the drag is discoverable; widening the hit zone over the
-        right side would steal clicks from diff body rows. Horizontal
-        splitters are the ``─`` rows between sidebar/right sub-panels."""
-        var top = self._list_top(container_bounds)
-        var bottom = self._list_bottom(container_bounds)
-        if pos.y < top or pos.y >= bottom:
-            return _DRAG_NONE
-        var sw = self._sidebar_width(container_bounds)
-        var sep_x = container_bounds.a.x + sw
-        # Vertical sidebar/right splitter.
-        if pos.x >= sep_x - 1 and pos.x <= sep_x:
-            return _DRAG_SIDEBAR
-        var rows = self._pane_rows(container_bounds)
-        var split1_y = rows[0] + rows[1]
-        var split2_y = rows[2] + rows[3]
-        # Sidebar horizontal splitters span [container_bounds.a.x, sep_x - 1]. Only
-        # draggable when all three sidebar panels are in NORMAL state —
-        # min/max collapse the layout to state-driven sizing where
-        # ``files_height_user`` / ``branches_height_user`` aren't read.
-        if self.sidebar_dock.all_normal() \
-                and pos.x >= container_bounds.a.x and pos.x < sep_x:
-            if pos.y == split1_y:
-                return _DRAG_SPLIT_FB
-            if pos.y == split2_y:
-                return _DRAG_SPLIT_BC
-        # Right-side horizontal splitter (file mode only).
-        if self._driving_pane() == _PANE_FILES \
-                and pos.x > sep_x and pos.x <= container_bounds.b.x - 1:
-            var rp = self._right_panes(container_bounds)
-            var split3_y = rp[0] + rp[1]
-            if pos.y == split3_y:
-                return _DRAG_SPLIT_US
-        return _DRAG_NONE
-
-    def _apply_drag(mut self, pos: Point, container_bounds: Rect):
-        """Continue a drag: update the relevant override based on
-        ``pos.y`` (or ``pos.x`` for the vertical splitter). The
-        geometry helpers clamp on read, so we just store the raw value."""
-        var top = self._list_top(container_bounds)
-        var bottom = self._list_bottom(container_bounds)
-        if self._drag_kind == _DRAG_SIDEBAR:
-            # Only natural bounds: the splitter must stay one cell
-            # inside the box on either side so the borders survive.
-            # The user can drag the sidebar all the way down to 1 or
-            # all the way up to ``container_bounds.width() - 2``.
-            var w = pos.x - container_bounds.a.x
-            if w < 1: w = 1
-            var max_w = container_bounds.width() - 2
-            if max_w < 1: max_w = 1
-            if w > max_w: w = max_w
-            self.sidebar_width_user = w
-            return
-        if self._drag_kind == _DRAG_SPLIT_FB:
-            # New files panel height = pos.y - top.
-            var h = pos.y - top
-            var min_h = 1 + _PANEL_MIN_BODY
-            if h < min_h: h = min_h
-            # Ensure at least min_h for branches + commits combined +
-            # the second splitter row.
-            var max_h = (bottom - top) - (2 * min_h) - 2
-            if h > max_h: h = max_h
-            if h < min_h: h = min_h
-            self.files_height_user = h
-            # When dragging files/branches splitter, leave branches in
-            # auto unless user has explicitly sized it; geometry will
-            # clamp.
-            return
-        if self._drag_kind == _DRAG_SPLIT_BC:
-            # pos.y is the new branches-bottom; subtract files_top + f_h + 1
-            # (splitter row) to get branches height.
-            var rows = self._pane_rows(container_bounds)
-            var b_top = rows[2]
-            var h = pos.y - b_top
-            var min_h = 1 + _PANEL_MIN_BODY
-            if h < min_h: h = min_h
-            # Ensure commits keeps min_h: pos.y must leave at least
-            # min_h rows below before list_bottom.
-            var max_h = bottom - b_top - min_h - 1  # -1 for splitter row
-            if h > max_h: h = max_h
-            if h < min_h: h = min_h
-            self.branches_height_user = h
-            return
-        if self._drag_kind == _DRAG_SPLIT_US:
-            var h = pos.y - top
-            var min_h = 1 + _PANEL_MIN_BODY
-            if h < min_h: h = min_h
-            var max_h = bottom - top - min_h - 1  # -1 for splitter row
-            if h > max_h: h = max_h
-            if h < min_h: h = min_h
-            self.unstaged_height_user = h
-            return
-
     def _pane_at(self, pos: Point, container_bounds: Rect) -> Int:
         """Return which sidebar pane (or -1 for "right pane / outside /
         on a splitter row") the cursor position falls in."""
@@ -6304,19 +6166,6 @@ struct LocalChanges(Movable):
             if s >= 0:
                 self._set_pane_scroll(pane, s, bounds)
                 return True
-        # --- in-progress splitter drag -----------------------------------
-        # Resolved before any other handling so a click that *starts* on
-        # a splitter never also triggers list-row behaviour even if the
-        # cursor crosses into a panel mid-drag.
-        if self._drag_kind != _DRAG_NONE:
-            if event.button == MOUSE_BUTTON_LEFT and event.pressed \
-                    and event.motion:
-                self._apply_drag(pos, bounds)
-                return True
-            if not event.pressed:
-                self._drag_kind = _DRAG_NONE
-                return True
-            return True
         # Sidebar panel min/max chrome buttons. Take priority over
         # splitter drag-start so a header click never accidentally
         # initiates a sidebar resize.
@@ -6329,6 +6178,14 @@ struct LocalChanges(Movable):
                 else:
                     self.sidebar_dock.toggle_min(dock_hit.section_idx)
                 return True
+        # The dividers: a press on one starts a drag that takes every
+        # event up to the release, so a drag never also selects a row.
+        self._layout_splits(bounds)
+        if self._side_split.handle_mouse(event) \
+                or self._files_split.handle_mouse(event) \
+                or self._branches_split.handle_mouse(event) \
+                or self._unstaged_split.handle_mouse(event):
+            return True
         var sw = self._sidebar_width(bounds)
         var sidebar_right = bounds.a.x + sw
         # Wheel: forward to whichever pane the cursor sits over.
@@ -6354,11 +6211,6 @@ struct LocalChanges(Movable):
         # --- left-button press: drag-start, focus or selection ----------
         if event.button == MOUSE_BUTTON_LEFT and event.pressed \
                 and not event.motion:
-            # Splitter hit?
-            var splitter = self._hit_splitter(pos, bounds)
-            if splitter != _DRAG_NONE:
-                self._drag_kind = splitter
-                return True
             # Right-side click: focus the sub-panel and jump line cursor.
             if pos.x > sidebar_right:
                 var rpane = self._right_pane_at(pos, bounds)

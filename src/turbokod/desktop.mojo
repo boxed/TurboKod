@@ -3905,6 +3905,9 @@ struct Desktop(Movable):
                 return String("text")
             return String("default")
         if self._git_modal():
+            var git_shape = self.local_changes.pointer_shape(pos)
+            if len(git_shape.as_bytes()) > 0:
+                return git_shape
             return String("default")
         if self.review.active:
             if self.review.is_reviewing() and (

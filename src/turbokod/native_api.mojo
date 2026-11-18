@@ -1162,7 +1162,8 @@ def tk_desktop_surface_pointer_shape(
     h: Int, surface: Int, x: Int, y: Int, cols: Int, rows: Int,
 ) abi("C") -> Int32:
     """A ``host_abi.SHAPE_*`` code for the pointer at ``(x, y)`` on the main
-    surface or the floating panels; the default arrow elsewhere."""
+    surface, the floating panels or the git window; the default arrow
+    elsewhere."""
     if h == 0:
         return Int32(0)
     var pos = Point(x, y)
@@ -1171,6 +1172,8 @@ def tk_desktop_surface_pointer_shape(
         return shape_code(_desk(h)[].pointer_shape_at(pos, screen))
     if surface == HOST_SURFACE_PANELS:
         return shape_code(_desk(h)[].pointer_shape_panels(pos, screen))
+    if surface == HOST_SURFACE_GIT and _desk(h)[].local_changes.active:
+        return shape_code(_desk(h)[].local_changes.pointer_shape(pos))
     return Int32(0)
 
 

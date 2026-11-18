@@ -2002,64 +2002,74 @@ def test_local_changes_click_on_commit_message_url_opens_browser() raises:
     assert_equal(lc.info.cursor, 3)
 
 
+def _drag_git_divider(
+    mut lc: LocalChanges, frm: Point, to: Point, screen: Rect,
+    mut registry: GrammarRegistry,
+) raises:
+    _ = lc.handle_mouse(
+        Event.mouse_event(frm, MOUSE_BUTTON_LEFT, True, False),
+        screen, registry,
+    )
+    _ = lc.handle_mouse(
+        Event.mouse_event(to, MOUSE_BUTTON_LEFT, True, True),
+        screen, registry,
+    )
+    _ = lc.handle_mouse(
+        Event.mouse_event(to, MOUSE_BUTTON_LEFT, False, False),
+        screen, registry,
+    )
+
+
 def test_local_changes_sidebar_splitter_drag_resizes_right_pane() raises:
-    """A press on the vertical ``│`` splitter followed by a drag-motion
-    must update ``sidebar_width_user``, which is what shrinks the
-    sidebar and grows the right-side window. Verifies the artificial
-    16/56-cell caps are gone — the user can drag the splitter freely
-    down to a 1-cell sidebar (so the right side fills nearly the whole
-    window) or out to ``screen.width() - 2``."""
+    """Dragging the vertical ``│`` divider moves it with the pointer, from
+    a 1-cell sidebar out to nearly the whole width, and the size is a
+    fraction: the same drag holds its share of a wider window."""
     var lc = LocalChanges()
     lc.open(String("/tmp"))
     var screen = Rect(0, 0, 200, 40)
     var registry = GrammarRegistry()
-    var default_w = 56
-    # Drag from auto-default to a narrow sidebar.
+    var default_w = lc._sidebar_width(screen)
+    assert_true(default_w > 2 and default_w < 100)
+    assert_equal(lc.pointer_shape(Point(default_w, 10)), String(""))
+    lc._layout_splits(screen)
+    assert_equal(
+        lc.pointer_shape(Point(default_w, 10)), String("ew-resize"),
+    )
+    _drag_git_divider(lc, Point(default_w, 10), Point(30, 10), screen, registry)
+    assert_equal(lc._sidebar_width(screen), 30)
+    _drag_git_divider(lc, Point(30, 10), Point(2, 10), screen, registry)
+    assert_equal(lc._sidebar_width(screen), 2)
+    _drag_git_divider(lc, Point(2, 10), Point(180, 10), screen, registry)
+    assert_equal(lc._sidebar_width(screen), 180)
+    # Twice as wide: the divider keeps its share of the space.
+    var wide = lc._sidebar_width(Rect(0, 0, 400, 40))
+    assert_true(wide >= 358 and wide <= 362)
+    lc.close()
+
+
+def test_local_changes_panel_divider_drag_and_reset() raises:
+    """The ``─`` divider under the Files panel drags with the pointer, and
+    a double click puts it back."""
+    var lc = LocalChanges()
+    lc.open(String("/tmp"))
+    var screen = Rect(0, 0, 120, 40)
+    var registry = GrammarRegistry()
+    var rows = lc._pane_rows(screen)
+    var div_y = rows[0] + rows[1]
+    _drag_git_divider(
+        lc, Point(5, div_y), Point(5, div_y + 6), screen, registry,
+    )
+    var moved = lc._pane_rows(screen)
+    assert_equal(moved[0] + moved[1], div_y + 6)
     _ = lc.handle_mouse(
         Event.mouse_event(
-            Point(default_w, 10), MOUSE_BUTTON_LEFT, True, False,
+            Point(5, div_y + 6), MOUSE_BUTTON_LEFT, True, False,
+            click_count=2,
         ),
         screen, registry,
     )
-    _ = lc.handle_mouse(
-        Event.mouse_event(Point(30, 10), MOUSE_BUTTON_LEFT, True, True),
-        screen, registry,
-    )
-    _ = lc.handle_mouse(
-        Event.mouse_event(Point(30, 10), MOUSE_BUTTON_LEFT, False, False),
-        screen, registry,
-    )
-    assert_equal(lc.sidebar_width_user, 30)
-    # Drag past the old 16-cell minimum — the user is free to crush
-    # the sidebar to 1 cell.
-    _ = lc.handle_mouse(
-        Event.mouse_event(Point(30, 10), MOUSE_BUTTON_LEFT, True, False),
-        screen, registry,
-    )
-    _ = lc.handle_mouse(
-        Event.mouse_event(Point(2, 10), MOUSE_BUTTON_LEFT, True, True),
-        screen, registry,
-    )
-    _ = lc.handle_mouse(
-        Event.mouse_event(Point(2, 10), MOUSE_BUTTON_LEFT, False, False),
-        screen, registry,
-    )
-    assert_equal(lc.sidebar_width_user, 2)
-    # And drag past the old 56-cell maximum — the user can also push
-    # the sidebar out to almost the entire width.
-    _ = lc.handle_mouse(
-        Event.mouse_event(Point(2, 10), MOUSE_BUTTON_LEFT, True, False),
-        screen, registry,
-    )
-    _ = lc.handle_mouse(
-        Event.mouse_event(Point(180, 10), MOUSE_BUTTON_LEFT, True, True),
-        screen, registry,
-    )
-    _ = lc.handle_mouse(
-        Event.mouse_event(Point(180, 10), MOUSE_BUTTON_LEFT, False, False),
-        screen, registry,
-    )
-    assert_equal(lc.sidebar_width_user, 180)
+    var back = lc._pane_rows(screen)
+    assert_equal(back[0] + back[1], div_y)
     lc.close()
 
 

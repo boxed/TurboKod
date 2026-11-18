@@ -82,25 +82,34 @@ struct SplitArea(Copyable, Movable):
         self._changed = False
 
     def layout(mut self, area: Rect, side_by_side: Bool) -> Tuple[Rect, Rect]:
-        """The two halves of ``area`` (left / top first). Too small an area
-        for a divider gives it all to the first half."""
+        """The two halves of ``area`` (left / top first), remembered for
+        ``paint`` and ``handle_mouse``. Too small an area for a divider
+        gives it all to the first half."""
         self.side_by_side = side_by_side
-        self._area = area
+        var h = self.halves(area, side_by_side)
+        if h[1].is_empty():
+            self._area = Rect.empty()
+        else:
+            self._area = area
+            self._div = h[0].b.x if side_by_side else h[0].b.y
+        return h
+
+    def halves(self, area: Rect, side_by_side: Bool) -> Tuple[Rect, Rect]:
+        """What ``layout`` would cut ``area`` into, without remembering it:
+        for an owner's geometry queries between frames."""
         var span = area.width() if side_by_side else area.height()
         var lo = area.a.x if side_by_side else area.a.y
         if span < 3:
-            self._area = Rect.empty()
             return (area, Rect.empty())
-        var first = self._first_size(span)
-        self._div = lo + first
+        var div = lo + self._first_size(span)
         if side_by_side:
             return (
-                Rect(area.a.x, area.a.y, self._div, area.b.y),
-                Rect(self._div + 1, area.a.y, area.b.x, area.b.y),
+                Rect(area.a.x, area.a.y, div, area.b.y),
+                Rect(div + 1, area.a.y, area.b.x, area.b.y),
             )
         return (
-            Rect(area.a.x, area.a.y, area.b.x, self._div),
-            Rect(area.a.x, self._div + 1, area.b.x, area.b.y),
+            Rect(area.a.x, area.a.y, area.b.x, div),
+            Rect(area.a.x, div + 1, area.b.x, area.b.y),
         )
 
     def _first_size(self, span: Int) -> Int:
@@ -129,15 +138,18 @@ struct SplitArea(Copyable, Movable):
     def on_divider(self, pos: Point) -> Bool:
         return self.divider_rect().contains(pos)
 
-    def paint(self, mut canvas: Canvas):
-        """The divider in cells, or — when the host draws chrome
+    def paint(
+        self, mut canvas: Canvas, attr: Attr = Attr(PANE_FG, PANE_BG),
+    ):
+        """The divider in cells, in ``attr`` (its foreground
+        ``BORDER_FOCUS`` while dragged), or — when the host draws chrome
         (``canvas.host_widgets``: the macOS-style and Mac OS 9 looks) — a
         ``HOST_SPLIT`` item over blank cells, which still take the mouse."""
         var r = self.divider_rect()
         if r.is_empty():
             return
         if canvas.host_widgets:
-            var blank = Attr(PANE_FG, PANE_BG)
+            var blank = Attr(attr.fg, attr.bg)
             for y in range(r.a.y, r.b.y):
                 for x in range(r.a.x, r.b.x):
                     canvas.set(x, y, Cell(String(" "), blank))
@@ -149,11 +161,11 @@ struct SplitArea(Copyable, Movable):
                 self.side_by_side, self.dragging, 0, 0, blank, 0,
             ))
             return
-        var attr = Attr(BORDER_FOCUS if self.dragging else PANE_FG, PANE_BG)
+        var cell_attr = Attr(BORDER_FOCUS, attr.bg) if self.dragging else attr
         var glyph = String("│") if self.side_by_side else String("─")
         for y in range(r.a.y, r.b.y):
             for x in range(r.a.x, r.b.x):
-                canvas.set(x, y, Cell(glyph, attr))
+                canvas.set(x, y, Cell(glyph, cell_attr))
 
     def pointer_shape(self, pos: Point) -> String:
         if self.dragging or self.on_divider(pos):
