@@ -795,6 +795,22 @@ def test_review_includes_added_and_deleted_files() raises:
     var rv = ReviewMode()
     rv.open(dir)
     assert_equal(rv.picker_labels[0], String("Unstaged changes"))
+    # A click on a picker row (press, then release over it) reviews it.
+    var pick_screen = Rect(0, 0, 100, 30)
+    var pick_canvas = Canvas(100, 30)
+    rv.paint(pick_canvas, pick_screen, 1)
+    var row = Point(rv.pk_list_rect.a.x + 2, rv.pk_list_rect.a.y)
+    _ = rv.handle_event(
+        Event.mouse_event(row, MOUSE_BUTTON_LEFT, True, False),
+        pick_screen, 1,
+    )
+    assert_false(rv.is_reviewing())
+    _ = rv.handle_event(
+        Event.mouse_event(row, MOUSE_BUTTON_LEFT, False, False),
+        pick_screen, 1,
+    )
+    assert_true(rv.is_reviewing())
+    assert_equal(rv.file_count(), 1)
     rv.close()
 
     _ = external_call["unlink", Int32](
@@ -803,7 +819,7 @@ def test_review_includes_added_and_deleted_files() raises:
     var d = Desktop()
     d.project = Optional[String](dir)
     d.review.open(dir)
-    d.review.picker_cursor = 0
+    d.review.picker_list.selected = 0
     d.review._start_review()
     assert_equal(d.review.file_count(), 2)
     assert_equal(d.review.files[0].path, String("added.txt"))

@@ -9705,7 +9705,7 @@ struct Desktop(Movable):
             return
         if i < 0 or i >= len(self.review.picker_labels):
             return
-        self.review.picker_cursor = i
+        self.review.picker_list.selected = i
         self.review._start_review()
         self._review_answer_checkout_request()
 

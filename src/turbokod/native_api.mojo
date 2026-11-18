@@ -2426,7 +2426,7 @@ def tk_desktop_review(
         o.put(String("mode"), json_str(String("picker")))
         o.put(String("tab"), json_int(rv.picker_tab))
         o.put(String("labels"), json_string_array(rv.picker_labels))
-        o.put(String("cursor"), json_int(rv.picker_cursor))
+        o.put(String("cursor"), json_int(max(rv.picker_list.selected, 0)))
         return _write_out(encode_json(o), out_ptr, cap)
     if not d.native_review_reviewing():
         return 0

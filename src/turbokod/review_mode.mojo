@@ -43,6 +43,7 @@ macOS frontends with no host-specific code.
 from .canvas import Canvas, paint_drop_shadow
 from .cell import Cell
 from .colors import Attr, BLACK, CYAN, DARK_GRAY, GREEN, LIGHT_GRAY, WHITE
+from .list_box import ListBox
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE, KEY_TAB,
     KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC, KEY_HOME, KEY_LEFT, KEY_RIGHT,
@@ -159,7 +160,7 @@ struct ReviewMode(Movable):
     var picker_labels: List[String]
     var picker_kind: List[Int]
     var picker_sha: List[String]
-    var picker_cursor: Int
+    var picker_list: ListBox
     var picker_tab: Int
     var _tab_labels: List[List[String]]
     var _tab_kind: List[List[Int]]
@@ -237,11 +238,7 @@ struct ReviewMode(Movable):
     var tb_prev_hi: Int
     var tb_next_lo: Int
     var tb_next_hi: Int
-    var pk_y0: Int
-    var pk_x0: Int
-    var pk_x1: Int
-    var pk_first: Int   # first label index shown (the list scrolls)
-    var pk_rows: Int    # label rows that fit in the box
+    var pk_list_rect: Rect   # where the list painted last
     var pk_tab_y: Int   # tab-header row
     var pk_tab_lo: List[Int]  # per-tab header x-span [lo, hi)
     var pk_tab_hi: List[Int]
@@ -253,7 +250,7 @@ struct ReviewMode(Movable):
         self.picker_labels = List[String]()
         self.picker_kind = List[Int]()
         self.picker_sha = List[String]()
-        self.picker_cursor = 0
+        self.picker_list = ListBox()
         self.picker_tab = _TAB_COMMITS
         self._tab_labels = List[List[String]]()
         self._tab_kind = List[List[Int]]()
@@ -285,11 +282,7 @@ struct ReviewMode(Movable):
         self.tb_prev_hi = -1
         self.tb_next_lo = -1
         self.tb_next_hi = -1
-        self.pk_y0 = -1
-        self.pk_x0 = -1
-        self.pk_x1 = -1
-        self.pk_first = 0
-        self.pk_rows = 0
+        self.pk_list_rect = Rect.empty()
         self.pk_tab_y = -1
         self.pk_tab_lo = List[Int]()
         self.pk_tab_hi = List[Int]()
@@ -447,33 +440,34 @@ struct ReviewMode(Movable):
         if tab < 0 or tab >= len(self._tab_labels):
             return
         if 0 <= self.picker_tab and self.picker_tab < len(self._tab_cursor):
-            self._tab_cursor[self.picker_tab] = self.picker_cursor
+            self._tab_cursor[self.picker_tab] = self.picker_list.selected
         self.picker_tab = tab
         self.picker_labels = self._tab_labels[tab].copy()
         self.picker_kind = self._tab_kind[tab].copy()
         self.picker_sha = self._tab_sha[tab].copy()
-        self.picker_cursor = self._tab_cursor[tab]
-        if self.picker_cursor >= len(self.picker_labels):
-            self.picker_cursor = 0
+        self.picker_list.reset()
+        var cursor = self._tab_cursor[tab]
+        self.picker_list.selected = cursor \
+            if cursor < len(self.picker_labels) else 0
 
     def _start_review(mut self, ask_checkout: Bool = True):
-        if self.picker_cursor < 0 or self.picker_cursor >= len(self.picker_labels):
+        if self.picker_list.selected < 0 or self.picker_list.selected >= len(self.picker_labels):
             return
         # A branch that isn't checked out can only be reviewed read-only;
         # hand the host the chance to offer a checkout first.
         if ask_checkout \
-                and self.picker_kind[self.picker_cursor] == _SRC_BRANCH \
-                and self.picker_sha[self.picker_cursor] != self.current_branch:
-            self.checkout_request = self.picker_sha[self.picker_cursor]
+                and self.picker_kind[self.picker_list.selected] == _SRC_BRANCH \
+                and self.picker_sha[self.picker_list.selected] != self.current_branch:
+            self.checkout_request = self.picker_sha[self.picker_list.selected]
             return
-        self.src = self.picker_kind[self.picker_cursor]
-        self.sha = self.picker_sha[self.picker_cursor]
+        self.src = self.picker_kind[self.picker_list.selected]
+        self.sha = self.picker_sha[self.picker_list.selected]
         self.branch_checked_out = self.src == _SRC_BRANCH \
             and self.sha == self.current_branch
         self.last_key = self._mem_key()
         self._build_model()
         # After the build: it resets the model, title included.
-        self.title = self.picker_labels[self.picker_cursor]
+        self.title = self.picker_labels[self.picker_list.selected]
         if self.src == _SRC_BRANCH:
             self.title = self.sha + String(" vs ") + self.main_branch
         # Restore the file we were last on for this changeset (if any).
@@ -547,7 +541,7 @@ struct ReviewMode(Movable):
         if i < 0 or i >= len(self.picker_labels):
             self._reset_review()
             return
-        self.picker_cursor = i
+        self.picker_list.selected = i
         self.src = self.picker_kind[i]
         self.sha = self.picker_sha[i]
         self.branch_checked_out = self.src == _SRC_BRANCH \
@@ -698,9 +692,9 @@ struct ReviewMode(Movable):
         """Start the review of the picked branch after the host answered its
         ``checkout_request``: ``checked_out`` means it's now the current
         branch (editable review), otherwise it's reviewed read-only."""
-        if checked_out and 0 <= self.picker_cursor \
-                and self.picker_cursor < len(self.picker_sha):
-            self.current_branch = self.picker_sha[self.picker_cursor]
+        if checked_out and 0 <= self.picker_list.selected \
+                and self.picker_list.selected < len(self.picker_sha):
+            self.current_branch = self.picker_sha[self.picker_list.selected]
         self._start_review(ask_checkout=False)
 
     def set_change_counter(mut self, index: Int, total: Int, cum_lines: Int):
@@ -844,7 +838,6 @@ struct ReviewMode(Movable):
 
     def _paint_picker(mut self, mut canvas: Canvas, screen: Rect, top_y: Int):
         var dialog_bg = Attr(BLACK, LIGHT_GRAY)
-        var cursor_attr = Attr(BLACK, CYAN)
         var tab_on = Attr(WHITE, BLACK)
         var title = String(" Review changes ")
         var tab_names = List[String]()
@@ -916,41 +909,23 @@ struct ReviewMode(Movable):
             elif x == x0 + box_w - 1:
                 g = String("┤")
             painter.set(canvas, x, y0 + 2, Cell(g, dialog_bg, 1))
-        self.pk_y0 = y0 + 3
-        self.pk_x0 = x0 + 1
-        self.pk_x1 = x0 + box_w - 1
         var rows_shown = max(0, box_h - 4)
+        self.pk_list_rect = Rect(
+            x0 + 1, y0 + 3, x0 + box_w - 1, y0 + 3 + rows_shown,
+        )
         if n == 0 and rows_shown > 0:
             var empty = String("No commits to review")
             if self.picker_tab == _TAB_BRANCHES:
                 empty = String("No branches to compare") \
                     if len(self.main_branch.as_bytes()) > 0 \
                     else String("No main/master branch to compare with")
-            _ = painter.put_text(
-                canvas, Point(x0 + 2, self.pk_y0), empty,
-                Attr(DARK_GRAY, LIGHT_GRAY),
+            self.picker_list.paint_empty_hint(
+                canvas, self.pk_list_rect, empty, Attr(DARK_GRAY, LIGHT_GRAY),
             )
-        # Scroll just far enough to keep the cursor on screen when the
-        # list is taller than the box (a short terminal).
-        var first = 0
-        if self.picker_cursor >= rows_shown:
-            first = self.picker_cursor - rows_shown + 1
-        self.pk_first = first
-        self.pk_rows = rows_shown
-        for r in range(rows_shown):
-            var i = first + r
-            if i >= n:
-                break
-            var y = self.pk_y0 + r
-            var row_attr = cursor_attr if i == self.picker_cursor else dialog_bg
-            painter.fill(
-                canvas, Rect(self.pk_x0, y, self.pk_x1, y + 1),
-                String(" "), row_attr,
-            )
-            # Clip inside the frame so a long commit subject can't overwrite
-            # the right border.
-            _ = painter.sub(Rect(self.pk_x0, y, self.pk_x1 - 1, y + 1)).put_text(
-                canvas, Point(x0 + 2, y), self.picker_labels[i], row_attr,
+        else:
+            self.picker_list.paint(
+                canvas, self.pk_list_rect, self.picker_labels, True,
+                dialog_bg,
             )
 
     def _paint_toolbar(mut self, mut canvas: Canvas, screen: Rect):
@@ -1080,41 +1055,30 @@ struct ReviewMode(Movable):
             self._show_tab(self.picker_tab + 1)
         elif event.key == KEY_TAB:
             self._show_tab((self.picker_tab + 1) % 2)
-        elif event.key == KEY_UP:
-            if self.picker_cursor > 0:
-                self.picker_cursor -= 1
-        elif event.key == KEY_DOWN:
-            if self.picker_cursor < n - 1:
-                self.picker_cursor += 1
-        elif event.key == KEY_HOME:
-            self.picker_cursor = 0
-        elif event.key == KEY_END:
-            self.picker_cursor = n - 1 if n > 0 else 0
         elif event.key == KEY_ENTER:
             self._start_review()
+        else:
+            _ = self.picker_list.handle_nav_key(
+                event, n, max(self.pk_list_rect.height() - 1, 1),
+            )
 
     def _handle_picker_mouse(mut self, event: Event):
-        if event.button == MOUSE_WHEEL_UP:
-            if self.picker_cursor > 0:
-                self.picker_cursor -= 1
-        elif event.button == MOUSE_WHEEL_DOWN:
-            if self.picker_cursor < len(self.picker_labels) - 1:
-                self.picker_cursor += 1
-        elif event.button == MOUSE_BUTTON_LEFT and event.pressed \
-                and not event.motion:
-            var px = event.pos.x
-            var py = event.pos.y
-            if py == self.pk_tab_y:
-                for t in range(len(self.pk_tab_lo)):
-                    if self.pk_tab_lo[t] <= px and px < self.pk_tab_hi[t]:
-                        self._show_tab(t)
-                return
-            var idx = self.pk_first + (py - self.pk_y0)
-            if self.pk_x0 <= px and px < self.pk_x1 \
-                    and self.pk_y0 <= py and py < self.pk_y0 + self.pk_rows \
-                    and idx < len(self.picker_labels):
-                self.picker_cursor = idx
+        """A press picks a row, the release over it starts reviewing it."""
+        var n = len(self.picker_labels)
+        var rect = self.pk_list_rect
+        var bar_drag = self.picker_list.scrolling()
+        if self.picker_list.handle_mouse_drag(event, rect, n):
+            if not bar_drag and not event.pressed and rect.contains(event.pos):
                 self._start_review()
+            return
+        if event.button == MOUSE_BUTTON_LEFT and event.pressed \
+                and not event.motion and event.pos.y == self.pk_tab_y:
+            for t in range(len(self.pk_tab_lo)):
+                if self.pk_tab_lo[t] <= event.pos.x \
+                        and event.pos.x < self.pk_tab_hi[t]:
+                    self._show_tab(t)
+            return
+        _ = self.picker_list.handle_mouse_press(event, rect, n)
 
     def _handle_review_key(mut self, event: Event) -> Bool:
         if event.key == KEY_ESC:
