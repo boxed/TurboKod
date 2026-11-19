@@ -709,6 +709,14 @@ comptime _CARET_BLINK_HALF_MS = 530
 # ``_poll_config_file``). Half a second: settings are changed by hand, so
 # this only has to beat human patience, and the check is one ``stat``.
 comptime _CONFIG_POLL_MS = 500
+# One byte budget for the undo history of every editor a ``Desktop`` has
+# open (``Desktop.trim_undo_history``). Each editor caps its own at 64 MB
+# (``_UNDO_STACK_BYTE_BUDGET``), which with ``max_open_windows`` files
+# open bounded nothing: 20 x 64 MB. Four editors' worth in total.
+comptime _UNDO_BUDGET_BYTES = 256 * 1024 * 1024
+# How often the total is added up. It only grows as fast as someone can
+# rewrite whole files, and the sum is a few thousand integer adds.
+comptime _UNDO_BUDGET_POLL_MS = 2000
 
 # How long to sleep between polls in the *blocking* teardown
 # (``Desktop.shutdown``). Only the terminal frontend, a Cmd+Q cascade and
@@ -1777,6 +1785,10 @@ struct Desktop(Movable):
     # in the same second at the same size isn't missed.
     var _config_stamp: FileInfo
     var _last_config_poll_ms: Int
+    var undo_budget_bytes: Int
+    """Cap on the undo history of all this desktop's editors together
+    (``trim_undo_history``)."""
+    var _last_undo_poll_ms: Int
     # Per-project run/debug targets, loaded from
     # ``<project>/.turbokod/targets.json`` when ``_set_project`` runs.
     # Empty (no targets) when no project is open. The active index
@@ -2179,6 +2191,8 @@ struct Desktop(Movable):
         self._config_from_disk = False
         self._config_stamp = FileInfo.unknown()
         self._last_config_poll_ms = 0
+        self.undo_budget_bytes = _UNDO_BUDGET_BYTES
+        self._last_undo_poll_ms = 0
         self.targets = ProjectTargets()
         self._last_screen = Rect.empty()
         self._picker_window = ListWindow()
@@ -6000,6 +6014,10 @@ struct Desktop(Movable):
         # frontends run, and the only one the window-less chrome Desktop
         # that drives the native menu bar ever gets.
         self._poll_config_file()
+        var undo_now = monotonic_ms()
+        if undo_now - self._last_undo_poll_ms >= _UNDO_BUDGET_POLL_MS:
+            self._last_undo_poll_ms = undo_now
+            self.trim_undo_history()
         # Advance any language server still winding down (LSP ▸ Restart, a
         # settings change to a server's argv). Cheap: a poll per closing
         # manager, and the list is empty in the steady state.
@@ -6310,6 +6328,40 @@ struct Desktop(Movable):
         if not saved.ok:
             return
         self._adopt_config(saved.config.copy())
+
+    def trim_undo_history(mut self):
+        """Hold the undo history of every open editor to
+        ``undo_budget_bytes`` in total, taking the excess from the editors
+        least recently looked at — their oldest steps first
+        (``Editor.shed_undo``) — and from the focused one last. Every
+        editor keeps its newest few steps whatever the total."""
+        var total = 0
+        for i in range(len(self.windows.windows)):
+            if self.windows.windows[i].is_editor:
+                total += self.windows.windows[i].editor.undo_bytes()
+        if total <= self.undo_budget_bytes:
+            return
+        var done = List[Bool](length=len(self.windows.windows), fill=False)
+        while total > self.undo_budget_bytes:
+            var victim = -1
+            for i in range(len(self.windows.windows)):
+                if done[i] or not self.windows.windows[i].is_editor:
+                    continue
+                if victim < 0:
+                    victim = i
+                    continue
+                var older = self.windows.windows[i]._last_focus_ms \
+                    < self.windows.windows[victim]._last_focus_ms
+                if victim == self.windows.focused or (
+                    i != self.windows.focused and older
+                ):
+                    victim = i
+            if victim < 0:
+                return
+            done[victim] = True
+            total -= self.windows.windows[victim].editor.shed_undo(
+                total - self.undo_budget_bytes,
+            )
 
     def _poll_config_file(mut self):
         """Pick up config changes written by another window or another

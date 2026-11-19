@@ -908,6 +908,10 @@ size — but an edit that rewrites every row (Replace All, a reformat, a
 reload) leaves an entry the size of the buffer, and a run of those would
 cost ``entries x file size``.
 
+That is per editor. Across all of a window's editors the history shares
+one further budget (``Desktop.undo_budget_bytes``), or twenty open files
+could each hold this much.
+
 Before entries were deltas each one was a whole-buffer copy: 500 edits in
 a 1 MB file retained ~500 MB per editor, times every open window."""
 
@@ -3145,6 +3149,34 @@ struct Editor(Copyable, Movable):
         ):
             total -= self._undo_stack[0].byte_size
             _ = self._undo_stack.pop(0)
+
+    def undo_bytes(self) -> Int:
+        """Bytes of text the undo and redo history hold, as the byte
+        budgets count them (``EditorSnapshot.byte_size``)."""
+        var total = 0
+        for i in range(len(self._undo_stack)):
+            total += self._undo_stack[i].byte_size
+        for i in range(len(self._redo_stack)):
+            total += self._redo_stack[i].byte_size
+        return total
+
+    def shed_undo(mut self, want: Int) -> Int:
+        """Drop history, oldest first, until ``want`` bytes are gone or
+        only the newest ``_UNDO_STACK_MIN_ENTRIES`` steps of each stack
+        are left; the bytes dropped. For ``Desktop``'s budget across all
+        of its editors, which this editor's own caps know nothing of.
+
+        The far end of each stack goes: the oldest undo steps, then the
+        redo steps furthest from where the buffer is now. An entry is a
+        delta against the one above it, so the bottom one can always go."""
+        var freed = 0
+        while freed < want and len(self._undo_stack) > _UNDO_STACK_MIN_ENTRIES:
+            freed += self._undo_stack[0].byte_size
+            _ = self._undo_stack.pop(0)
+        while freed < want and len(self._redo_stack) > _UNDO_STACK_MIN_ENTRIES:
+            freed += self._redo_stack[0].byte_size
+            _ = self._redo_stack.pop(0)
+        return freed
 
     def _restore(mut self, var snap: EditorSnapshot):
         # ``undo`` / ``redo`` popped ``snap`` and are done with it: take its

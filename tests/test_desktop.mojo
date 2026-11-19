@@ -3059,6 +3059,73 @@ def test_desktop_save_then_restore_round_trip_through_paint() raises:
     _ = external_call["system", Int32](cleanup.unsafe_ptr())
 
 
+def test_undo_history_shares_one_budget_across_editors() raises:
+    """Every editor's undo history counts against one budget: the excess
+    comes off the editors least recently focused, oldest steps first, and
+    off the focused one last; each keeps its newest few steps regardless."""
+    var chunk = String("")
+    for _ in range(64):
+        chunk = chunk + String("0123456789abcdef")
+    var other_chunk = String("")
+    for _ in range(64):
+        other_chunk = other_chunk + String("fedcba9876543210")
+    var lines = List[String]()
+    var other = List[String]()
+    for _ in range(100):
+        lines.append(chunk)
+        other.append(other_chunk)
+    var d = Desktop()
+    for w in range(3):
+        d.windows.add(Window.editor_window(
+            String("w"), Rect(0, 1, 40, 12), String(""),
+        ))
+        d.windows.windows[w]._last_focus_ms = 100 + w
+        d.windows.windows[w].editor.buffer.lines = lines.copy()
+        # Twenty steps that each rewrite the whole 100 KB buffer.
+        for k in range(20):
+            d.windows.windows[w].editor._push_undo()
+            d.windows.windows[w].editor.buffer.lines = \
+                other.copy() if k % 2 == 0 else lines.copy()
+    d.windows.focus_by_index(2)
+    var per_editor = d.windows.windows[0].editor.undo_bytes()
+    assert_true(per_editor > 2000000)
+    # Within budget: nothing is touched.
+    d.undo_budget_bytes = 3 * per_editor
+    d.trim_undo_history()
+    for w in range(3):
+        assert_equal(len(d.windows.windows[w].editor._undo_stack), 20)
+    # Half of it: the two unfocused editors are cut to their floor of 8
+    # steps, and the focused one gives up only what is still over.
+    d.undo_budget_bytes = 3 * per_editor // 2
+    d.trim_undo_history()
+    assert_equal(len(d.windows.windows[0].editor._undo_stack), 8)
+    assert_equal(len(d.windows.windows[1].editor._undo_stack), 8)
+    var kept = len(d.windows.windows[2].editor._undo_stack)
+    assert_true(kept > 8 and kept < 20)
+    var total = 0
+    for w in range(3):
+        total += d.windows.windows[w].editor.undo_bytes()
+    assert_true(total <= d.undo_budget_bytes)
+    # The steps it kept are the newest: undo goes back one rewrite.
+    assert_equal(d.windows.windows[0].editor.buffer.lines[0], lines[0])
+    assert_true(d.windows.windows[0].editor.undo())
+    assert_equal(d.windows.windows[0].editor.buffer.lines[0], other[0])
+    # A redo stack is shed too, from the far end.
+    var ed = Editor(String(""))
+    ed.buffer.lines = lines.copy()
+    for k in range(20):
+        ed._push_undo()
+        ed.buffer.lines = other.copy() if k % 2 == 0 else lines.copy()
+    for _ in range(20):
+        assert_true(ed.undo())
+    assert_equal(len(ed._redo_stack), 20)
+    var freed = ed.shed_undo(1 << 40)
+    assert_true(freed > 0)
+    assert_equal(len(ed._redo_stack), 8)
+    assert_true(ed.redo())
+    d.shutdown()
+
+
 def test_window_cap_evicts_least_recently_used() raises:
     """With ``max_open_windows`` set, opening a document past the cap
     closes the least-recently-focused *clean* document — never the
