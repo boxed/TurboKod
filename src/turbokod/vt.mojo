@@ -44,6 +44,7 @@ from .colors import (
     STYLE_UNDERLINE, STYLE_UNDERLINE_CURLY,
 )
 from .events import MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT
+from .string_utils import string_from_address
 
 
 comptime SCROLLBACK_LINES = 10000
@@ -99,13 +100,6 @@ def vt_live_count() -> Int:
     """How many emulators exist and haven't been released — the measure of
     whether a teardown actually gave them back."""
     return external_call["tk_vt_live_count", Int]()
-
-
-def _string_from(ptr: Int, n: Int) -> String:
-    if ptr == 0 or n <= 0:
-        return String("")
-    var p = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=ptr)
-    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=p, length=n)))
 
 
 def xterm_256_rgb(idx: Int) -> UInt32:
@@ -205,7 +199,7 @@ struct VtGrid(ImplicitlyCopyable, Movable):
         # a blank in their own colors.
         if n == 0 or (flags & 0x20) != 0 or wide == _WIDE_SPACER_HEAD:
             return Cell(String(" "), attr, 1)
-        var glyph = _string_from(self._text + Int(w[unsafe_offset=base]), n)
+        var glyph = string_from_address(self._text + Int(w[unsafe_offset=base]), n)
         return Cell(glyph, attr, 2 if wide == _WIDE_WIDE else 1)
 
     def row_text(self, r: Int, c0: Int = 0, c1: Int = -1) -> String:
@@ -265,7 +259,7 @@ struct Vt(ImplicitlyCopyable, Movable):
             return String("")
         var out = List[Int](length=1, fill=0)
         var n = external_call["tk_vt_peek", Int](self._h, chan, out.unsafe_ptr())
-        return _string_from(out[0], n)
+        return string_from_address(out[0], n)
 
     # --- shape / state -------------------------------------------------
 

@@ -39,7 +39,6 @@ from .cell import Cell, FONT_CODE, FONT_SLOTS, FONT_UI
 from .painter import Painter
 from .colors import (
     Attr, BLACK, BORDER_FOCUS, EDITOR_BG, EDITOR_FG, FG_TRUECOLOR, LIGHT_GRAY,
-    LIGHT_RED, RED,
 )
 from .theme import Theme, theme_by_name
 from .events import (
@@ -212,9 +211,7 @@ from .fill_dialog import FillDialog
 from .find_dialog import FindDialog
 from .query_memory import QueryMemory
 from .spell_scan import spell_scan_files
-from .spelling_dialog import (
-    SPELLING_ADD_PROJECT, SPELLING_ADD_USER, SpellingDialog,
-)
+from .spelling_dialog import SPELLING_ADD_PROJECT, SpellingDialog
 from .prompt import (
     Prompt,
     SUBMIT_DEFAULT, SUBMIT_FIND_NEXT, SUBMIT_MARK_ALL, SUBMIT_REPLACE,
@@ -17524,7 +17521,7 @@ struct Desktop(Movable):
             self._open_terminal_pane(String("claude"))
             target = len(self.terminal_panes) - 1
         else:
-            if self.terminal_panes[target].is_minimized():
+            if self.terminal_panes[target].dock.is_minimized():
                 self.terminal_panes[target].dock.set_state(PANEL_STATE_NORMAL)
             self._focus_dock(DOCK_TERMINAL, target)
             self.panel_focus_request = True

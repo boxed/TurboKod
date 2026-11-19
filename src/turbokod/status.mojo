@@ -133,10 +133,9 @@ struct StatusBar(Movable):
     var message_tooltip: String
     # Wallclock at which the cursor first entered the message rect.
     # ``-1`` when the cursor isn't on the message; once the dwell
-    # exceeds ``_TOOLTIP_HOVER_MS`` the popup paints. ``_hover_x`` /
-    # ``_hover_y`` anchor the popup just above the cursor cell.
+    # exceeds ``_TOOLTIP_HOVER_MS`` the popup paints. ``_hover_y`` is the
+    # pointer's row, which the popup sits just above.
     var _hover_since_ms: Int
-    var _hover_x: Int
     var _hover_y: Int
     var _tab_hits: List[_TabHit] # captured by ``paint`` for ``hit_test``
     # Painted bounds of the right-aligned message — captured by ``paint``
@@ -165,7 +164,6 @@ struct StatusBar(Movable):
         self.message_set_ms = 0
         self.message_tooltip = String("")
         self._hover_since_ms = -1
-        self._hover_x = 0
         self._hover_y = 0
         self._tab_hits = List[_TabHit]()
         self._msg_a_x = 0
@@ -375,7 +373,6 @@ struct StatusBar(Movable):
         # Re-anchor on every refresh so the popup follows the pointer
         # if the user slides along the message instead of resting
         # exactly on one cell.
-        self._hover_x = pos.x
         self._hover_y = pos.y
 
 

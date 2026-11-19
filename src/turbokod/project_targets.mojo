@@ -64,7 +64,6 @@ from .posix import getenv_value
 from .string_utils import leading_indent_bytes, split_args, split_whitespace
 
 
-comptime TURBOKOD_DIR    = String(".turbokod")
 comptime TARGETS_FILE    = String("targets.json")
 
 

@@ -319,20 +319,6 @@ struct DirBrowser(Movable):
             return False
         return self.entry_is_dir[self.selected]
 
-    def current_path(self) -> String:
-        """Joined path of the highlighted entry, or ``self.dir`` when
-        nothing is selected. Returns the parent dir for ``..``, not the
-        literal ``"<dir>/.."`` — that's never what callers want."""
-        var name = self.current_name()
-        if len(name.as_bytes()) == 0:
-            return self.dir
-        if name == String(".."):
-            var resolved = realpath(self.dir)
-            if len(resolved.as_bytes()) > 0:
-                return parent_path(resolved)
-            return parent_path(self.dir)
-        return join_path(self.dir, name)
-
     def move_by(mut self, delta: Int, list_h: Int):
         """Bump the selection by ``delta`` rows and re-clip ``scroll`` so
         the new selection stays visible. ``list_h`` is the visible row

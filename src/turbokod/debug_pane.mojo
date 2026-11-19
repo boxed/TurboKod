@@ -71,7 +71,7 @@ from .events import (
 from .geometry import Point, Rect
 from .output_links import (
     extract_path_line_links as _extract_path_line_links, paint_row_links,
-    link_at, LinkLatch, OutputLink,
+    LinkLatch, OutputLink,
 )
 from .scrollbar import ScrollBarArea
 from .text_field import TextField
@@ -393,15 +393,6 @@ struct DebugPane(Copyable, Movable):
         each tick so the visible buttons track DAP state — the pane
         just paints what's handed in."""
         self.dock.set_commands(commands^)
-
-    def is_minimized(self) -> Bool:
-        return self.dock.is_minimized()
-
-    def is_maximized(self) -> Bool:
-        return self.dock.is_maximized()
-
-    def set_state(mut self, state: UInt8):
-        self.dock.set_state(state)
 
     def rebuild_inspect(
         mut self,
@@ -1355,17 +1346,6 @@ struct DebugPane(Copyable, Movable):
                 _ = pop.put_text(canvas, Point(type_x, y), item.type_name, type_attr)
 
     # --- input -----------------------------------------------------------
-
-    def is_on_resize_edge(self, pos: Point, panel: Rect) -> Bool:
-        """Hit-test for the top-border row — the pane's drag handle.
-        Used by the host to switch the mouse pointer to ``ns-resize``
-        on hover."""
-        if not self.visible:
-            return False
-        return self.dock.is_on_resize_edge(pos, panel)
-
-    def is_resizing(self) -> Bool:
-        return self.dock.is_resizing()
 
     def handle_mouse(
         mut self, event: Event, panel: Rect, allow_resize: Bool = True,

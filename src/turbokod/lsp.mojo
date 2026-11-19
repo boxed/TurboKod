@@ -27,14 +27,13 @@ from .case_fold import fold_byte
 from .string_utils import hex_digit_value, utf8_prefix
 from .posix import (
     DRAIN_MORE, POSIX_SPAWN_FILE_ACTIONS_SIZE, SIGKILL, SIGTERM,
-    alloc_zero_buffer, append_string_bytes, chdir_path, close_fd,
-    drain_fd, drain_fd_string, getcwd_path, getenv_value,
-    kill_pid, monotonic_ms, poll_stdin,
-    posix_spawn_file_actions_addclose, posix_spawn_file_actions_adddup2,
-    posix_spawn_file_actions_destroy, posix_spawn_file_actions_init,
-    posix_spawnp_call, read_append, read_into, reap_child, set_nonblocking, stdio_pipes,
-    poll_exit, track_child, untrack_child, waitpid_blocking,
-    write_buffer,
+    alloc_zero_buffer, append_string_bytes, chdir_path, close_fd, drain_fd,
+    drain_fd_string, getcwd_path, getenv_value, kill_pid, monotonic_ms,
+    poll_stdin, posix_spawn_file_actions_addclose,
+    posix_spawn_file_actions_adddup2, posix_spawn_file_actions_destroy,
+    posix_spawn_file_actions_init, posix_spawnp_call, read_append, reap_child,
+    set_nonblocking, stdio_pipes, poll_exit, track_child, untrack_child,
+    waitpid_blocking, write_buffer,
 )
 
 

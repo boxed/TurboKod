@@ -21,10 +21,9 @@ from .find_symbol import FindSymbol
 from .project_find import ProjectFind
 from .quick_open import QuickOpen
 from .reference_pick import ReferencePick
-from .string_utils import byte_slice
 from .symbol_pick import SymbolPick
 from .ui_tree import (
-    UI_CANCEL, UI_CODE, UI_DEFAULT, UI_DISABLED, UI_LARGE, UI_MULTI, UI_NAV,
+    UI_CANCEL, UI_DEFAULT, UI_DISABLED, UI_LARGE, UI_MULTI, UI_NAV,
     UI_SECONDARY, UINode, UISpan, ui_button, ui_buttons, ui_check, ui_dialog,
     ui_form, ui_hstack, ui_label, ui_list, ui_row, ui_text, ui_vstack,
 )

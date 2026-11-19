@@ -33,15 +33,13 @@ cleared by the host each tick.
 from std.collections.list import List
 
 from .canvas import Canvas
-from .colors import (
-    Attr, LIGHT_BLUE, PANE_BG, STYLE_UNDERLINE, WHITE,
-)
+from .colors import Attr, PANE_BG, WHITE
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE, EVENT_PASTE, KEY_ESC, MOD_META, MOD_NONE,
-    MOD_SHIFT, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
+    MOD_SHIFT, MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
-from .output_links import extract_all_links, link_at, LinkLatch, OutputLink
+from .output_links import LinkLatch, OutputLink
 from .painter import Painter
 from .posix import close_fd, exit_code_from_status, monotonic_ms, poll_exit
 from .pty import PtyProcess
@@ -104,8 +102,6 @@ struct TestPane(Copyable, Movable):
     poll ``waitpid`` over subsequent ticks until it reports the exit
     status — EOF on the master can momentarily precede the child's
     actual exit."""
-    var last_command: String
-    """Pretty argv of the in-flight / last run, for the ``$`` banner."""
 
     # --- link bookkeeping (rebuilt each paint) -------------------------
     var _last_links: List[OutputLink]
@@ -135,7 +131,6 @@ struct TestPane(Copyable, Movable):
         self.exited = False
         self.exit_code = 0
         self._eof = False
-        self.last_command = String("")
         self._last_links = List[OutputLink]()
         self.link_click = LinkLatch()
         self.results = TestResultsView()
@@ -144,20 +139,6 @@ struct TestPane(Copyable, Movable):
 
 
     # --- chrome forwarders ---------------------------------------------
-
-    def is_minimized(self) -> Bool:
-        return self.dock.is_minimized()
-
-    def is_maximized(self) -> Bool:
-        return self.dock.is_maximized()
-
-    def is_resizing(self) -> Bool:
-        return self.dock.is_resizing()
-
-    def is_on_resize_edge(self, pos: Point, panel: Rect) -> Bool:
-        if not self.visible:
-            return False
-        return self.dock.is_on_resize_edge(pos, panel)
 
     def consume_command_id(mut self) -> String:
         return self.dock.consume_command_id()
@@ -205,7 +186,6 @@ struct TestPane(Copyable, Movable):
         var cmd = program
         for k in range(len(args)):
             cmd = cmd + String(" ") + args[k]
-        self.last_command = cmd
         # Echo the command as a banner — a pty child doesn't echo its own
         # argv, and the user wants to see what ran.
         self._emit(String("$ ") + cmd + String("\r\n"))

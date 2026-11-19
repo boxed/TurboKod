@@ -18,9 +18,8 @@ when it is the saved path, or a relative path the saved path ends with
 is pure, so the conventions are tested without spawning anything.
 """
 
-from std.collections.list import List
 
-from .string_utils import is_ascii_digit
+from .string_utils import is_ascii_digit, scan_decimal
 
 
 @fieldwise_init
@@ -56,17 +55,6 @@ def _matches_saved(token: String, saved_path: String) -> Bool:
     return not t.startswith("/") and saved_path.endswith(String("/") + t)
 
 
-def _digits(bytes: Span[UInt8, _], mut p: Int) -> Int:
-    """The decimal at ``bytes[p:]``, advancing ``p`` past it; -1 (``p``
-    unchanged) when there's no digit there."""
-    var start = p
-    var v = 0
-    while p < len(bytes) and is_ascii_digit(bytes[p]):
-        v = v * 10 + Int(bytes[p] - 0x30)
-        p += 1
-    return v if p > start else -1
-
-
 def _rest(line: String, p: Int) -> String:
     """``line[p:]`` without the ``:`` / whitespace that separates a
     location from its message."""
@@ -89,10 +77,10 @@ def _line_col_after(bytes: Span[UInt8, _], start: Int) -> Tuple[Int, Int, Int]:
         if is_ascii_digit(bytes[i]) and i > 0 \
                 and (bytes[i - 1] == 0x20 or bytes[i - 1] == 0x28):
             var p = i
-            var ln = _digits(bytes, p)
+            var ln = scan_decimal(bytes, p)
             if p < len(bytes) and bytes[p] == 0x3A:
                 p += 1
-                var col = _digits(bytes, p)
+                var col = scan_decimal(bytes, p)
                 if col >= 0:
                     return (ln, col, p)
             i = p
@@ -119,23 +107,23 @@ def _locate_in_line(line: String, saved_path: String) -> OnSaveLocation:
         # path:LINE[:COL]
         if p < n and bytes[p] == 0x3A:
             p += 1
-            var ln = _digits(bytes, p)
+            var ln = scan_decimal(bytes, p)
             if ln > 0:
                 var col = 0
                 if p + 1 < n and bytes[p] == 0x3A and is_ascii_digit(bytes[p + 1]):
                     p += 1
-                    col = _digits(bytes, p)
+                    col = scan_decimal(bytes, p)
                 return OnSaveLocation(ln, col, _rest(line, p))
         p = i
         # path(LINE[,COL])
         if p < n and bytes[p] == 0x28:
             p += 1
-            var ln = _digits(bytes, p)
+            var ln = scan_decimal(bytes, p)
             if ln > 0:
                 var col = 0
                 if p < n and bytes[p] == 0x2C:
                     p += 1
-                    col = max(_digits(bytes, p), 0)
+                    col = max(scan_decimal(bytes, p), 0)
                 if p < n and bytes[p] == 0x29:
                     p += 1
                 return OnSaveLocation(ln, col, _rest(line, p))
@@ -146,7 +134,7 @@ def _locate_in_line(line: String, saved_path: String) -> OnSaveLocation:
             p += 1
         if line[byte=p:].startswith(", line "):
             p += 7
-            var ln = _digits(bytes, p)
+            var ln = scan_decimal(bytes, p)
             if ln > 0:
                 return OnSaveLocation(ln, 0, String(""))
         # path ... LINE:COL (black, prettier)

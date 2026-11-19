@@ -26,7 +26,7 @@ fresh install / remove takes effect without restart.
 from std.collections.list import List
 
 from .catalog import LanguageKeyed
-from .file_io import delete_path, list_directory, stat_file
+from .file_io import delete_path, stat_file
 from .posix import user_config_path
 from .string_utils import shell_fetch, shell_move_into_place, shell_single_quote
 

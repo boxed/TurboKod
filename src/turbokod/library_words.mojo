@@ -19,7 +19,6 @@ thousands of words, and rewriting the file per word would be quadratic.
 """
 
 from std.collections.dict import Dict
-from std.collections.list import List
 
 from .file_io import make_parent_dirs, read_file, stat_file, write_file
 from .per_user_store import per_user_path

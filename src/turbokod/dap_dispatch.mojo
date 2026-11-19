@@ -40,7 +40,7 @@ from std.ffi import external_call
 from .breakpoint_store import StoredBreakpoint
 from .lsp import LspProcess
 from .posix import (
-    debug_log_path, monotonic_ms, realpath, realpath_or_self, tcp_connect, which,
+    debug_log_path, monotonic_ms, realpath_or_self, tcp_connect, which,
 )
 from .string_utils import (
     fnv_int, fnv_start, fnv_str, starts_with, strip_trailing_newlines,

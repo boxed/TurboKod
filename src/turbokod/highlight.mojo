@@ -33,8 +33,8 @@ from .project_grammars import GrammarOverride
 from .case_fold import fold_ascii
 from .string_utils import (
     byte_slice, codepoint_at, is_ascii_digit, is_ascii_ident_byte,
-    is_ascii_ident_start, is_word_codepoint, prev_codepoint_start, starts_with,
-    string_list, word_end_from, word_start_before,
+    is_ascii_ident_start, is_word_codepoint, starts_with, string_list,
+    word_end_from, word_start_before,
 )
 from .tm_grammar import Grammar, load_grammar_from_file
 from .tm_tokenizer import (

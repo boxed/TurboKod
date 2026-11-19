@@ -160,10 +160,8 @@ def paint_modal_frame(mut canvas: Canvas, rect: Rect, attr: Attr) -> Painter:
     """Standard modal/dialog chrome: a drop shadow, a filled bordered box,
     and the top-left close button. Returns the Painter bound to ``rect`` so
     the caller can layer its title / body / list on top. Shared by the
-    prompt, confirm dialog, and the LSP/quick pickers.
-
-    (``fill_dialog`` intentionally keeps its own ``draw_box_inner`` frame —
-    it wants the border-clipped sub-painter — so it doesn't use this.)"""
+    prompt, the confirm and message-request dialogs, the color picker and
+    the declarative dialogs' grid projection (``ui_grid``)."""
     paint_drop_shadow(canvas, rect)
     var painter = Painter(rect)
     painter.fill(canvas, rect, String(" "), attr)
@@ -1070,9 +1068,6 @@ struct DockedPanelStack(Movable):
         """Append a section, return its 0-based index."""
         self.sections.append(DockedSection(title^))
         return len(self.sections) - 1
-
-    def count(self) -> Int:
-        return len(self.sections)
 
     def state(self, idx: Int) -> UInt8:
         if idx < 0 or idx >= len(self.sections):

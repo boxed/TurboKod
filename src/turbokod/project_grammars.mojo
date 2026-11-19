@@ -30,11 +30,9 @@ something, just with the default grammar.
 
 from std.collections.list import List
 
-from .per_user_store import (
-    project_config_dir, project_config_path, write_project_config_json,
-)
-from .file_io import join_path, load_json_object, make_dir, write_file
-from .json import encode_json, json_object, json_str
+from .per_user_store import project_config_path, write_project_config_json
+from .file_io import load_json_object
+from .json import json_object, json_str
 
 
 comptime _GRAMMARS_FILE   = String("grammars.json")

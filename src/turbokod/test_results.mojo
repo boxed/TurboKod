@@ -63,7 +63,6 @@ from .string_utils import char_width, codepoint_at, display_columns
 from .test_report import (
     OUTCOME_ERROR, OUTCOME_FAILED, OUTCOME_PASSED, OUTCOME_RUNNING,
     OUTCOME_SKIPPED, OUTCOME_XFAILED, OUTCOME_XPASSED, TestReport,
-    TestResult,
 )
 
 

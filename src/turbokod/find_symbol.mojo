@@ -28,12 +28,9 @@ every query change cancel the previous child via ``SIGTERM``.
 """
 
 from std.collections.list import List
-from std.collections.optional import Optional
 
 from .file_io import ci_less, read_file
-from .string_utils import (
-    is_ascii_ident_byte, parse_uint_range, starts_with,
-)
+from .string_utils import is_ascii_ident_byte, starts_with
 from .symbol_seed import (
     is_definition_keyword, is_definition_site, seed_priority,
 )

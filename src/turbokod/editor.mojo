@@ -42,7 +42,7 @@ from .events import (
 )
 from .editorconfig import EditorConfig, load_editorconfig_for_path
 from .file_io import (
-    FileInfo, read_existing_file, read_file, stat_file, write_file_stamped,
+    FileInfo, read_existing_file, stat_file, write_file_stamped,
 )
 from .git_blame import BlameLine, BlameTable
 from .git_changes import (
@@ -74,21 +74,19 @@ from .spell import (
 from .terminal import terminal_supports_extended_underline
 from std.collections.optional import Optional
 from .geometry import Point, Rect
-from .posix import append_string_bytes, monotonic_ms, realpath, realpath_or_self
+from .posix import append_string_bytes, monotonic_ms, realpath_or_self
 from .search_options import (
     SearchOptions, SearcherCache, default_search_options,
 )
 from .string_utils import (
-    byte_of_cell_in, byte_slice, cells_between, char_width, codepoint_at, display_columns,
-    is_ascii_ident_byte,
-    is_printable_text_key, is_space_cp, is_word_codepoint,
+    byte_of_cell_in, byte_slice, cells_between, codepoint_at, display_columns,
+    is_ascii_ident_byte, is_printable_text_key, is_word_codepoint,
     leading_indent_bytes, next_token_end, past_empty_match,
-    prev_codepoint_start, prev_token_start,
-    seg_cell_offset, split_lines,
-    split_lines_no_trailing,
-    TAB_WIDTH, text_cells, trailing_ws_start, truncate_to_columns, utf8_byte_of_cell, utf8_cell_of_byte,
-    utf8_codepoint_size, utf8_floor, utf8_step_forward, word_char_step,
-    word_end_from, word_range_at, word_start_before,
+    prev_codepoint_start, prev_token_start, seg_cell_offset, split_lines,
+    split_lines_no_trailing, text_cells, trailing_ws_start,
+    truncate_to_columns, utf8_byte_of_cell, utf8_cell_of_byte,
+    utf8_codepoint_size, utf8_floor, utf8_step_forward, word_end_from,
+    word_range_at, word_start_before,
 )
 from .text_view import (
     Selection, VisualLine, ordered_span, paint_selection_overlay, pos_less,

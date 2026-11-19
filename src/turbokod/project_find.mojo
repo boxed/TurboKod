@@ -32,8 +32,7 @@ from .project import ProjectMatch
 from .query_memory import QueryMemory
 from .search_options import SearchOptions
 from .string_utils import (
-    byte_slice, char_width, codepoint_at, display_columns, parse_uint_range,
-    utf8_prefix,
+    byte_slice, char_width, codepoint_at, display_columns, utf8_prefix,
     is_ascii_ident_byte, prev_codepoint_start, split_lines, TAB_WIDTH,
 )
 from .text_field import TextField

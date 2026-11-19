@@ -527,6 +527,26 @@ def tail_to_columns(s: String, max_cols: Int) -> String:
     return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(i), length=n - i)))
 
 
+def string_from_address(ptr: Int, n: Int) -> String:
+    """A copy of the ``n`` bytes at ``ptr`` (what a C caller, or a C
+    library, handed over) as a ``String``; empty for a null pointer."""
+    if ptr == 0 or n <= 0:
+        return String("")
+    var p = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=ptr)
+    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=p, length=n)))
+
+
+def scan_decimal(bytes: Span[UInt8, _], mut p: Int) -> Int:
+    """The ASCII decimal at ``bytes[p:]``, advancing ``p`` past it; -1
+    (``p`` unchanged) when there's no digit there."""
+    var start = p
+    var v = 0
+    while p < len(bytes) and is_ascii_digit(bytes[p]):
+        v = v * 10 + Int(bytes[p] - 0x30)
+        p += 1
+    return v if p > start else -1
+
+
 def parse_uint_range(b: Span[UInt8, _], start: Int, end: Int) -> Int:
     """Parse ``b[start:end]`` as a non-negative decimal; ``-1`` when the
     range is empty or holds a non-digit."""

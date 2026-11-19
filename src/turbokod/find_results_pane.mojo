@@ -143,12 +143,6 @@ struct FindResultsPane(Movable):
         self.anchor = 0
         self.scroll = 0
 
-    def is_resizing(self) -> Bool:
-        return self.dock.is_resizing()
-
-    def is_on_resize_edge(self, pos: Point, panel: Rect) -> Bool:
-        return self.dock.is_on_resize_edge(pos, panel)
-
     def consume_command_id(mut self) -> String:
         """Title-strip / ``[■]`` close command the user clicked, or empty.
         Polled by the host each frame — same channel the other panes use."""

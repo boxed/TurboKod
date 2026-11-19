@@ -26,9 +26,8 @@ from .file_io import (
 from .posix import debug_log, user_config_path
 from .word_set import WordSet
 from .string_utils import (
-    append_utf8,
-    byte_slice, codepoint_at, is_ascii_digit, is_ascii_ident_byte,
-    is_word_codepoint, split_lines_no_trailing, word_char_step,
+    append_utf8, byte_slice, codepoint_at, is_ascii_ident_byte,
+    is_word_codepoint, split_lines_no_trailing,
 )
 
 

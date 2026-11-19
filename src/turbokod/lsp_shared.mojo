@@ -46,8 +46,8 @@ from .json import (
     JsonValue, json_array, json_get_string, json_object, json_str,
 )
 from .lsp import (
-    LSP_NOTIFICATION, LSP_REQUEST, LSP_RESPONSE, LspClient, LspIncoming,
-    file_uri_to_path, json_rpc_id,
+    LSP_REQUEST, LSP_RESPONSE, LspClient, LspIncoming, file_uri_to_path,
+    json_rpc_id,
 )
 from .capped_text import CappedText
 

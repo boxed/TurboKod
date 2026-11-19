@@ -266,10 +266,6 @@ struct ProjectSpellScan(Movable):
         for i in range(len(self._buckets)):
             self._buckets[i] = List[Int]()
 
-    def cancel(mut self):
-        """Stop. Idempotent."""
-        self.active = False
-
     def clear(mut self):
         """Stop and drop the result — every project path, word and
         occurrence — rather than hold it until the next ``start``. The

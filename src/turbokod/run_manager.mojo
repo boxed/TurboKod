@@ -28,9 +28,7 @@ sharing would add branches everywhere.
 from std.collections.list import List
 
 from .lsp import LspProcess
-from .posix import (
-    drain_fd_string, exit_code_from_status, monotonic_ms, poll_exit,
-)
+from .posix import drain_fd_string, exit_code_from_status, poll_exit
 from .string_utils import shell_command, shell_single_quote
 
 
@@ -53,7 +51,6 @@ struct RunSession(Movable):
     var process: LspProcess
     var exited: Bool
     var exit_code: Int
-    var started_ms: Int
 
     def __init__(out self):
         self.active = False
@@ -62,7 +59,6 @@ struct RunSession(Movable):
         self.process = LspProcess()
         self.exited = False
         self.exit_code = 0
-        self.started_ms = 0
 
     def is_active(self) -> Bool:
         return self.active and not self.exited
@@ -124,7 +120,6 @@ struct RunSession(Movable):
         self.command = pretty^
         self.exited = False
         self.exit_code = 0
-        self.started_ms = monotonic_ms()
         self.active = True
 
     def terminate(mut self):

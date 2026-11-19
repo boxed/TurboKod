@@ -14,7 +14,7 @@ from std.collections.optional import Optional
 from std.ffi import external_call
 
 from .file_io import (
-    FileInfo, make_dir, move_aside, read_file, rename_path, stat_file, write_file,
+    FileInfo, make_dir, move_aside, read_file, stat_file, write_file,
 )
 from .json import (
     JsonValue, encode_json, json_array, json_bool, json_int, json_object,

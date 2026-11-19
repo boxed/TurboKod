@@ -15,7 +15,7 @@ directly to screen X without redoing the UTF-8 walk.
 
 from std.collections.list import List
 
-from .string_utils import char_width, codepoint_at, is_ascii_digit
+from .string_utils import char_width, codepoint_at, scan_decimal
 from .geometry import Point
 from .canvas import Canvas
 from .colors import Attr, LIGHT_BLUE, PANE_BG, STYLE_UNDERLINE
@@ -170,7 +170,7 @@ def extract_python_traceback_links(line: String) -> List[LinkHit]:
             p += 7
             # One or more ASCII digits — the line number.
             var digit_start = p
-            var line_no = _scan_line_number(bytes, p)
+            var line_no = scan_decimal(bytes, p)
             if line_no < 0:
                 cell += 1
                 i += 1
@@ -199,17 +199,6 @@ def extract_python_traceback_links(line: String) -> List[LinkHit]:
             cell += char_width(codepoint_at(line, i)[0])
         i += 1
     return out^
-
-
-def _scan_line_number(bytes: Span[UInt8, _], mut p: Int) -> Int:
-    """Read the ASCII decimal at ``bytes[p:]``, advancing ``p`` past it;
-    ``-1`` (``p`` unchanged) when no digit is there."""
-    var start = p
-    var v = 0
-    while p < len(bytes) and is_ascii_digit(bytes[p]):
-        v = v * 10 + Int(bytes[p] - 0x30)
-        p += 1
-    return v if p > start else -1
 
 
 def _is_path_byte(b: Int) -> Bool:
@@ -303,7 +292,7 @@ def extract_path_line_links(line: String) -> List[LinkHit]:
                 # Parse the line number after the colon.
                 var p = i + 1
                 var digit_start = p
-                var line_no = _scan_line_number(bytes, p)
+                var line_no = scan_decimal(bytes, p)
                 if line_no >= 0:
                     var path = String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=bytes.unsafe_ptr().unsafe_offset(tok_start_byte), length=tok_end_byte - tok_start_byte)))
                     # ``cell`` sits on the colon. Span = colon (1) plus

@@ -36,8 +36,8 @@ from turbokod.lsp_shared import new_pool
 from turbokod.highlight import new_grammar_store
 from turbokod.spell import new_spell_base
 from turbokod.json import (
-    json_get_string_array, json_string_array,
-    JsonValue, encode_json, json_array, json_bool, json_int, json_object, json_str,
+    json_string_array, JsonValue, encode_json, json_array, json_bool, json_int,
+    json_object, json_str,
 )
 from turbokod.posix import (
     getenv_value, prepend_user_bin_dirs_to_path, recover_path_deferred_once,
@@ -55,11 +55,12 @@ from turbokod.debug_pane import (
     PANE_ROW_BLANK, PANE_ROW_FRAME, PANE_ROW_HEADER, PANE_ROW_VARIABLE,
 )
 from turbokod.file_tree import FileTree
-from turbokod.file_io import basename, parent_path, project_relative
 from turbokod.colors import (
     Attr, BG_TRUECOLOR, EDITOR_BG, EDITOR_FG, FG_TRUECOLOR,
 )
-from turbokod.string_utils import byte_slice, fnv_int, fnv_start
+from turbokod.string_utils import (
+    byte_slice, fnv_int, fnv_start, string_from_address,
+)
 from turbokod.config import (
     chicago_font_label, default_font_label,
 )
@@ -67,7 +68,6 @@ from turbokod.json import json_get_bool, json_get_int, json_get_string, parse_js
 from turbokod.theme import theme_names
 from turbokod.ui_grid import UIEvent
 from turbokod.ui_tree import ui_to_json
-from turbokod.dictionary_install import user_dictionary_installed
 from turbokod.search_options import SearchOptions
 from turbokod.git_changes import format_age
 from turbokod.diff import REGION_STABLE
@@ -126,13 +126,6 @@ def _pack_surface(
     swap(_desk(h)[].host_items[surface], canvas.host_items)
     _desk(h)[].return_frame_canvas(surface, canvas^)
     return n
-
-
-def _string_from(ptr: Int, n: Int) -> String:
-    if ptr == 0 or n <= 0:
-        return String("")
-    var p = Pointer[UInt8, MutUntrackedOrigin](unsafe_from_address=ptr)
-    return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=p, length=n)))
 
 
 def _action_code(action: Optional[String]) -> Int32:
@@ -337,7 +330,7 @@ def tk_desktop_free(h: Int) abi("C"):
 def tk_desktop_open_project(h: Int, path_ptr: Int, path_len: Int) abi("C"):
     if h == 0:
         return
-    var path = _string_from(path_ptr, path_len)
+    var path = string_from_address(path_ptr, path_len)
     if len(path.as_bytes()) == 0:
         return
     _desk(h)[].open_project(path)
@@ -347,7 +340,7 @@ def tk_desktop_open_project(h: Int, path_ptr: Int, path_len: Int) abi("C"):
 def tk_desktop_open_file(h: Int, path_ptr: Int, path_len: Int, cols: Int, rows: Int) abi("C"):
     if h == 0:
         return
-    var path = _string_from(path_ptr, path_len)
+    var path = string_from_address(path_ptr, path_len)
     if len(path.as_bytes()) == 0:
         return
     try:
@@ -366,7 +359,7 @@ def tk_desktop_open_file_at(
     Swift host converts the URL's 1-based line to 0-based before calling."""
     if h == 0:
         return
-    var path = _string_from(path_ptr, path_len)
+    var path = string_from_address(path_ptr, path_len)
     if len(path.as_bytes()) == 0:
         return
     try:
@@ -664,7 +657,7 @@ def tk_desktop_set_font_options(h: Int, ptr: Int, n: Int) abi("C"):
     Mojo side, so the host passes only real system families."""
     if h == 0:
         return
-    var text = _string_from(ptr, n)
+    var text = string_from_address(ptr, n)
     var names = List[String]()
     var lines = split_lines_no_trailing(text)
     for i in range(len(lines)):
@@ -687,7 +680,7 @@ def tk_desktop_set_open_projects(h: Int, ptr: Int, n: Int) abi("C"):
     """
     if h == 0:
         return
-    var text = _string_from(ptr, n)
+    var text = string_from_address(ptr, n)
     var paths = List[String]()
     var lines = split_lines_no_trailing(text)
     for i in range(len(lines)):
@@ -1211,7 +1204,7 @@ def tk_desktop_surface_drop_paths(
     (the host then leaves the OS drag unhandled)."""
     if h == 0 or (surface != HOST_SURFACE_MAIN and surface != HOST_SURFACE_PANELS):
         return Int32(0)
-    var text = escape_drop_paths(_string_from(paths_ptr, paths_len))
+    var text = escape_drop_paths(string_from_address(paths_ptr, paths_len))
     if len(text.as_bytes()) == 0:
         return Int32(0)
     var pos = Point(x, y)
@@ -1256,7 +1249,7 @@ def tk_desktop_insert_text(
     here. Returns 1 when an editor consumed it, else 0."""
     if h == 0:
         return Int32(0)
-    var text = _string_from(text_ptr, text_len)
+    var text = string_from_address(text_ptr, text_len)
     if len(text.as_bytes()) == 0:
         return Int32(0)
     try:
@@ -1285,7 +1278,7 @@ def tk_desktop_paste_text(h: Int, text_ptr: Int, text_len: Int) abi("C") -> Int3
     the current cursor rather than a drop point. Returns 1 when handled."""
     if h == 0:
         return Int32(0)
-    var text = _string_from(text_ptr, text_len)
+    var text = string_from_address(text_ptr, text_len)
     if len(text.as_bytes()) == 0:
         return Int32(0)
     try:
@@ -1308,7 +1301,7 @@ def tk_desktop_paste_clipboard_text(h: Int, text_ptr: Int, text_len: Int) abi("C
     line-clipboard handling). Returns 1 when something consumed the paste."""
     if h == 0:
         return Int32(0)
-    var text = _string_from(text_ptr, text_len)
+    var text = string_from_address(text_ptr, text_len)
     return Int32(1) if _desk(h)[].paste_text_into_focus(text) else Int32(0)
 
 
@@ -1456,7 +1449,7 @@ def tk_desktop_menu_invoke(
     """
     if h == 0:
         return ACT_NONE
-    var action = _string_from(action_ptr, action_len)
+    var action = string_from_address(action_ptr, action_len)
     if len(action.as_bytes()) == 0:
         return ACT_NONE
     var result = _desk(h)[].dispatch_action(action, Rect(0, 0, cols, rows))
@@ -1853,7 +1846,7 @@ def tk_desktop_merge_choose(
     var edited = List[String]()
     if choice == 4:
         try:
-            var a = parse_json(_string_from(ptr, n))
+            var a = parse_json(string_from_address(ptr, n))
             for i in range(a.array_len()):
                 edited.append(a.array_at(i).as_str())
         except:
@@ -2160,7 +2153,7 @@ def tk_desktop_test_results_act(
     the URL (string). The pane takes the keyboard either way."""
     if h == 0:
         return
-    _desk(h)[].native_test_act(tag, op, index, _string_from(ptr, n))
+    _desk(h)[].native_test_act(tag, op, index, string_from_address(ptr, n))
 
 
 # --- macOS-style UI: editor scroller --------------------------------------------
@@ -2307,7 +2300,7 @@ def tk_desktop_pane_act(
     string."""
     if h == 0:
         return
-    _desk(h)[].native_pane_act(UInt8(kind), idx, op, _string_from(ptr, n))
+    _desk(h)[].native_pane_act(UInt8(kind), idx, op, string_from_address(ptr, n))
 
 
 # --- macOS-style UI: debug pane inspect tables ---------------------------------
@@ -2418,7 +2411,7 @@ def tk_desktop_debug_inspect_act(
     pane."""
     if h == 0:
         return
-    _desk(h)[].native_debug_act(op, row, _string_from(ptr, n))
+    _desk(h)[].native_debug_act(op, row, string_from_address(ptr, n))
 
 
 # --- macOS-style UI: review mode ----------------------------------------------
@@ -2527,7 +2520,7 @@ def tk_desktop_find(h: Int, ptr: Int, n: Int) abi("C"):
     if h == 0:
         return
     try:
-        var o = parse_json(_string_from(ptr, n))
+        var o = parse_json(string_from_address(ptr, n))
         var opts = SearchOptions(
             json_get_bool(o, String("case"), False),
             json_get_bool(o, String("word"), False),
@@ -2799,7 +2792,7 @@ def tk_desktop_git_answer(
     if h == 0:
         return
     _desk(h)[].native_git_answer(
-        _string_from(cptr, clen), _string_from(tptr, tlen),
+        string_from_address(cptr, clen), string_from_address(tptr, tlen),
     )
 
 
@@ -2854,7 +2847,7 @@ def tk_desktop_welcome_apply(h: Int, ptr: Int, n: Int, done: Int) abi("C"):
     if h == 0:
         return
     try:
-        var o = parse_json(_string_from(ptr, n))
+        var o = parse_json(string_from_address(ptr, n))
         _desk(h)[].apply_welcome(
             json_get_bool(o, String("native_ui"), False),
             json_get_bool(o, String("platinum_ui"), False),
@@ -2937,7 +2930,7 @@ def tk_desktop_ui_event(h: Int, ptr: Int, n: Int) abi("C") -> Int32:
         return ACT_NONE
     ref d = _desk(h)[]
     try:
-        var o = parse_json(_string_from(ptr, n))
+        var o = parse_json(string_from_address(ptr, n))
         var name = json_get_string(o, String("name"))
         var window = d.settings_surfaces()
         if name != d.ui_surface() and not (
@@ -2977,7 +2970,7 @@ def tk_desktop_native_prompt_answer(
     if h == 0:
         return ACT_NONE
     return _action_code(
-        _desk(h)[].native_prompt_answer(_string_from(ptr, n), ok != 0)
+        _desk(h)[].native_prompt_answer(string_from_address(ptr, n), ok != 0)
     )
 
 
@@ -2987,7 +2980,7 @@ def tk_desktop_native_save_as_answer(h: Int, ptr: Int, n: Int) abi("C"):
     empty one (``n`` = 0) when cancelled."""
     if h == 0:
         return
-    _desk(h)[].native_save_as_answer(_string_from(ptr, n))
+    _desk(h)[].native_save_as_answer(string_from_address(ptr, n))
 
 
 @export

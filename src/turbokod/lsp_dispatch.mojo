@@ -46,9 +46,7 @@ from .posix import (
     debug_log_path, getcwd_path, getenv_value, monotonic_ms, realpath,
     realpath_or_self, sleep_ms,
 )
-from .string_utils import (
-    hex_digit_value, percent_encode_uri_path, strip_trailing_newlines, utf8_prefix,
-)
+from .string_utils import percent_encode_uri_path, strip_trailing_newlines
 from .highlight import Highlight
 from .colors import Attr, BLACK, EDITOR_BG, WHITE
 

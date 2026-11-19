@@ -39,10 +39,9 @@ from .colors import (
 )
 from .dropdown import DROPDOWN_HIT_BODY, DROPDOWN_HIT_POPUP, Dropdown
 from .events import (
-    Event, EVENT_KEY, EVENT_MOUSE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_ESC,
-    KEY_HOME, KEY_LEFT, KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_SPACE,
-    KEY_TAB, KEY_UP, MOD_ALT, MOD_CTRL, MOD_META, MOD_SHIFT,
-    MOUSE_BUTTON_LEFT,
+    Event, EVENT_KEY, EVENT_MOUSE, KEY_DOWN, KEY_ENTER, KEY_ESC, KEY_LEFT,
+    KEY_PAGEDOWN, KEY_PAGEUP, KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP, MOD_ALT,
+    MOD_CTRL, MOD_META, MOD_SHIFT, MOUSE_BUTTON_LEFT,
 )
 from .file_dialog import FileDialog
 from .geometry import Point, Rect, center_in
@@ -52,14 +51,12 @@ from .string_utils import display_columns, truncate_to_columns
 from .text_field import TextField
 from .type_ahead import TypeAhead, is_type_ahead_key, type_ahead_pick
 from .ui_tree import (
-    UIDialog,
-    UI_BROWSE, UI_BUTTON, UI_CANCEL, UI_CENTER, UI_CHECK, UI_CHECKABLE, UI_CHOICE,
-    UI_DEFAULT, UI_DESTRUCTIVE, UI_DIALOG, UI_FORM, UI_HEADING, UI_HOTKEY,
-    UI_HSTACK, UI_LABEL, UI_ROW, UI_SECONDARY, UI_SEPARATOR, UI_SPACER,
-    UI_DISABLED, UI_PREVIEW, UI_TABLE, UI_TABS, UI_TEXT, UI_VSTACK, UINode,
-    UI_CODE, UI_LARGE, UI_LIST, UI_MULTI, UI_NAV, UI_RGB, UISpan,
-    ui_button, ui_list_anchor, ui_list_row, ui_list_selected,
-    ui_list_selection,
+    UIDialog, UI_BROWSE, UI_BUTTON, UI_CENTER, UI_CHECK, UI_CHECKABLE,
+    UI_CHOICE, UI_DEFAULT, UI_DESTRUCTIVE, UI_DIALOG, UI_FORM, UI_HEADING,
+    UI_HOTKEY, UI_HSTACK, UI_LABEL, UI_ROW, UI_SECONDARY, UI_SEPARATOR,
+    UI_SPACER, UI_DISABLED, UI_PREVIEW, UI_TABLE, UI_TABS, UI_TEXT, UI_VSTACK,
+    UINode, UI_CODE, UI_LARGE, UI_LIST, UI_MULTI, UI_NAV, UI_RGB, ui_button,
+    ui_list_anchor, ui_list_selected, ui_list_selection,
 )
 from .scrollbar import ScrollBarArea
 from .window import close_button_clicked, paint_modal_frame, paint_window_title

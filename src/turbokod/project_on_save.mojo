@@ -26,16 +26,10 @@ Missing file / malformed JSON / missing keys all degrade to an empty list
 
 from std.collections.list import List
 
-from .per_user_store import (
-    project_config_dir, project_config_path, write_project_config_json,
-)
+from .per_user_store import project_config_path, write_project_config_json
 from .config import OnSaveAction
-from .file_io import join_path, load_json_array, make_dir, write_file
-from .json import (
-    encode_json, json_array, json_get_string, json_get_string_array,
-    json_string_array,
-    json_object, json_str,
-)
+from .file_io import load_json_array
+from .json import json_array, json_object
 
 
 comptime _ON_SAVE_FILE   = String("on_save.json")

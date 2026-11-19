@@ -32,8 +32,7 @@ from .file_io import basename, join_path, list_directory, stat_file
 from .project_targets import split_env_entry
 from .string_utils import is_ascii_digit
 from .json import (
-    JsonValue, json_array, json_bool, json_object, json_str,
-    json_string_array,
+    JsonValue, json_bool, json_object, json_str, json_string_array,
 )
 
 

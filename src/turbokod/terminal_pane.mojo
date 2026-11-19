@@ -39,7 +39,7 @@ from .claude_detect import (
     CLAUDE_CLEAN, CLAUDE_NONE, CLAUDE_WAITING, CLAUDE_WORKING,
     ClaudeStateTracker, claude_state_label,
 )
-from .colors import Attr, LIGHT_BLUE, PANE_BG, PANE_FG, STYLE_UNDERLINE, WHITE
+from .colors import Attr, PANE_BG, WHITE
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE, EVENT_PASTE, KEY_ESC, KEY_PAGEDOWN,
     KEY_PAGEUP, MOD_ALT, MOD_META, MOD_NONE,
@@ -47,7 +47,7 @@ from .events import (
     MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
-from .output_links import extract_all_links, link_at, LinkLatch, OutputLink
+from .output_links import LinkLatch, OutputLink
 from .painter import Painter
 from .posix import getenv_value, monotonic_ms
 from .pty import PtyProcess
@@ -217,7 +217,6 @@ struct TerminalPane(Copyable, Movable):
     var _run_rescan: Bool
 
     # --- paint-time hit-test bookkeeping -------------------------------
-    var _last_panel_top: Int
     var _last_links: List[OutputLink]
     """A run pane's ``File "...", line N`` / ``path:N`` / URL spans on
     screen, rebuilt each paint (``output_links``)."""
@@ -303,7 +302,6 @@ struct TerminalPane(Copyable, Movable):
         self._run_exit_event = False
         self._run_scan_after_ms = 0
         self._run_rescan = True
-        self._last_panel_top = 0
         self._last_links = List[OutputLink]()
         self.link_click = LinkLatch()
         self._claude_tracker = ClaudeStateTracker()
@@ -317,20 +315,6 @@ struct TerminalPane(Copyable, Movable):
         self.attention_events = 0
 
     # --- chrome forwarders ---------------------------------------------
-
-    def is_minimized(self) -> Bool:
-        return self.dock.is_minimized()
-
-    def is_maximized(self) -> Bool:
-        return self.dock.is_maximized()
-
-    def is_resizing(self) -> Bool:
-        return self.dock.is_resizing()
-
-    def is_on_resize_edge(self, pos: Point, panel: Rect) -> Bool:
-        if not self.visible:
-            return False
-        return self.dock.is_on_resize_edge(pos, panel)
 
     def consume_command_id(mut self) -> String:
         return self.dock.consume_command_id()
@@ -875,7 +859,6 @@ struct TerminalPane(Copyable, Movable):
         var bg = Attr(WHITE, PANE_BG)
         var painter = Painter(panel)
         painter.fill(canvas, panel, String(" "), bg)
-        self._last_panel_top = panel.a.y
         # A tests pane's toggle changes face with the view.
         if len(self.dock.commands) == 0 or self.tests:
             self.dock.commands = self.build_commands()
