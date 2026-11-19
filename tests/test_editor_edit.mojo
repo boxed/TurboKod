@@ -2160,6 +2160,39 @@ def test_editor_bracket_match_through_the_row_index() raises:
     assert_equal(b.value()[3], 1)
 
 
+def test_editor_row_index_skips_the_order_list_when_in_row_order() raises:
+    """Highlights already in row order (a tokenizer's output) need no
+    order list: a row's range indexes ``highlights`` directly. Out of
+    order, or with a row outside the buffer, the list is built."""
+    var ed = Editor(String("a\nb\nc"))
+    ed.highlights.append(Highlight(0, 0, 1, highlight_string_attr()))
+    ed.highlights.append(Highlight(2, 0, 1, highlight_string_attr()))
+    ed.highlights.append(Highlight(2, 1, 2, highlight_string_attr()))
+    ed._index_highlights()
+    assert_equal(len(ed._hl_order), 0)
+    assert_true(ed._hl_indexed())
+    var none = ed._hl_rows(1)
+    assert_equal(none[1] - none[0], 0)
+    var two = ed._hl_rows(2)
+    assert_equal(two[1] - two[0], 2)
+    assert_equal(ed._hl_at(two[0]), 1)
+    assert_equal(ed._hl_at(two[0] + 1), 2)
+    # A row past the end isn't indexed, so positions stop matching indices.
+    ed.highlights.insert(0, Highlight(7, 0, 1, highlight_string_attr()))
+    ed._index_highlights()
+    assert_equal(len(ed._hl_order), 3)
+    var zero = ed._hl_rows(0)
+    assert_equal(ed._hl_at(zero[0]), 1)
+    # Out of row order.
+    ed.highlights = List[Highlight]()
+    ed.highlights.append(Highlight(2, 0, 1, highlight_string_attr()))
+    ed.highlights.append(Highlight(0, 0, 1, highlight_string_attr()))
+    ed._index_highlights()
+    assert_equal(len(ed._hl_order), 2)
+    assert_equal(ed._hl_at(ed._hl_rows(0)[0]), 1)
+    assert_equal(ed._hl_at(ed._hl_rows(2)[0]), 0)
+
+
 def test_editor_bracket_match_source_inside_string_returns_none() raises:
     """If the source bracket itself sits inside a string scope, the
     matcher returns nothing — we don't want to confuse the user by

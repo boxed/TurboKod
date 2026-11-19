@@ -1431,7 +1431,10 @@ struct Editor(Copyable, Movable):
     row ``r``'s are ``_hl_order[_hl_row_start[r] : _hl_row_start[r + 1]]``.
     Built by ``flush_highlights`` — the overlay passes can leave
     ``highlights`` out of row order — so paint and the bracket match look
-    at one row's spans instead of scanning the whole file's."""
+    at one row's spans instead of scanning the whole file's. Empty when
+    ``highlights`` is already in row order, as a tokenizer's output is:
+    position ``k`` is then index ``k`` (``_hl_at``), and the file's
+    highlights aren't shadowed by 8 bytes apiece."""
     var _hl_row_start: List[Int]
     var _hl_indexed_n: Int
     """``len(highlights)`` when the index was built, ``-1`` for none. An
@@ -2297,12 +2300,24 @@ struct Editor(Copyable, Movable):
         var n_rows = self.buffer.line_count()
         var start = List[Int](length=n_rows + 1, fill=0)
         var n = len(self.highlights)
+        var in_order = True
+        var prev = 0
         for i in range(n):
             var r = self.highlights[i].row
             if 0 <= r and r < n_rows:
                 start[r + 1] += 1
+                if r < prev:
+                    in_order = False
+                prev = r
+            else:
+                in_order = False
         for r in range(n_rows):
             start[r + 1] += start[r]
+        if in_order:
+            self._hl_order = List[Int]()
+            self._hl_row_start = start^
+            self._hl_indexed_n = n
+            return
         var fill = List[Int](capacity=n_rows)
         for r in range(n_rows):
             fill.append(start[r])
@@ -2335,7 +2350,7 @@ struct Editor(Copyable, Movable):
     def _hl_at(self, k: Int) -> Int:
         """The ``highlights`` index at position ``k`` of a ``_hl_rows``
         range."""
-        if self._hl_indexed():
+        if self._hl_indexed() and len(self._hl_order) > 0:
             return self._hl_order[k]
         return k
 
@@ -7267,9 +7282,12 @@ struct Editor(Copyable, Movable):
             # Syntax highlights through the row index: O(visible spans),
             # not a pass over the whole file's every frame.
             if self._hl_indexed():
+                var in_order = len(self._hl_order) == 0
                 for r in range(vis_lo, min(vis_hi + 1, len(self._hl_row_start) - 1)):
                     for k in range(self._hl_row_start[r], self._hl_row_start[r + 1]):
-                        hl_buckets[r - vis_lo].append(self._hl_order[k])
+                        hl_buckets[r - vis_lo].append(
+                            k if in_order else self._hl_order[k],
+                        )
             else:
                 for h in range(len(self.highlights)):
                     var r = self.highlights[h].row
