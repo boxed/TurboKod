@@ -2973,6 +2973,32 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         if more { ptyWake() }
     }
 
+    // Frame-sliced work in the core (`tk_desktop_busy`): a big file's syntax
+    // coloring past the first screen, mostly. Each frame does about 10 ms
+    // of it, so the frames are run back to back — with a gap for input —
+    // rather than at the timer's 20 Hz, where a second of work took five.
+    private static let busyGap: CFTimeInterval = 0.004
+    private var busyPollQueued = false
+
+    func busyWake() {
+        if busyPollQueued { return }
+        busyPollQueued = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.busyGap) { [weak self] in
+            guard let self else { return }
+            self.busyPollQueued = false
+            if NSApp.isHidden { return }
+            var more = false
+            for v in self.views where v.handle != 0 && tk_desktop_busy(v.handle) != 0 {
+                // A buried window's work waits until it can be seen.
+                guard Self.paintable(v.window) else { continue }
+                if v.pollFrame() { v.needsDisplay = true }
+                self.idleTicks = 0
+                if tk_desktop_busy(v.handle) != 0 { more = true }
+            }
+            if more { self.busyWake() }
+        }
+    }
+
     private static func paintable(_ w: NSWindow?) -> Bool {
         guard let w else { return false }
         return w.isVisible && w.occlusionState.contains(.visible)
@@ -3287,6 +3313,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 // differs from what's on screen — no cursor blink means an
                 // idle frame is identical and needs no Core Text repaint.
                 if v.pollFrame() { v.needsDisplay = true; changed = true }
+                // Work the core does a slice of per frame: don't idle down
+                // under it, and don't make it wait for the next tick.
+                if tk_desktop_busy(v.handle) != 0 { changed = true; self.busyWake() }
             }
             // Panel windows share the main Desktop and don't tick (pollFrame on
             // a `.panels` view only re-lays-out), so the main window's tick

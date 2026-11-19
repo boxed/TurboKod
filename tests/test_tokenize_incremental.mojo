@@ -83,10 +83,50 @@ def _assert_matches_full_pass(
         assert_true(a.attr == b.attr)
 
 
-def _random_edits(ext: String, text: String, seed: Int, steps: Int) raises:
+def _assert_first_rows_match_full_pass(
+    ed: Editor, ext: String, mut registry: GrammarRegistry, through: Int,
+    step: Int,
+) raises:
+    """The highlights on rows ``<= through`` against a full pass's: what a
+    pass that stopped early still has to have right."""
+    var cache = HighlightCache()
+    var full = HighlightList()
+    sync_highlights(ext, ed.buffer.lines, 0, registry, cache, full, -1)
+    var a = 0
+    var b = 0
+    while True:
+        while a < len(ed.highlights) and ed.highlights.row(a) > through:
+            a += 1
+        while b < len(full) and full.row(b) > through:
+            b += 1
+        if a >= len(ed.highlights) or b >= len(full):
+            break
+        var x = ed.highlights[a]
+        var y = full[b]
+        if x.row != y.row or x.col_start != y.col_start \
+                or x.col_end != y.col_end or not (x.attr == y.attr):
+            print("step", step, "row", x.row, "full row", y.row)
+        assert_equal(x.row, y.row)
+        assert_equal(x.col_start, y.col_start)
+        assert_equal(x.col_end, y.col_end)
+        assert_true(x.attr == y.attr)
+        a += 1
+        b += 1
+    assert_equal(a >= len(ed.highlights), b >= len(full))
+
+
+def _random_edits(
+    ext: String, text: String, seed: Int, steps: Int, sliced: Bool = False,
+) raises:
     """Type, split, join, paste, delete selections and undo at random,
     comparing with a full pass after every flush — and flushing only after
-    most edits, so several land in one."""
+    most edits, so several land in one.
+
+    ``sliced``: flush as a paint does, asking only for the rows down to
+    some row and stopping there — so edits land on a buffer that is
+    tokenized part of the way, above and below where the pass stopped —
+    and compare those rows; every few steps, let it finish and compare
+    everything."""
     var registry = GrammarRegistry()
     var speller = Speller()
     var ed = Editor(text)
@@ -131,7 +171,15 @@ def _random_edits(ext: String, text: String, seed: Int, steps: Int) raises:
         else:
             var row = pick % rows
             ed.move_to(row, (pick // 11) % (ed.buffer.line_length(row) + 1), False)
-        if (pick // 13) % 3 != 0:
+        if sliced:
+            var need = (pick // 17) % ed.buffer.line_count()
+            ed.flush_highlights(registry, speller, need, 0)
+            _assert_first_rows_match_full_pass(ed, ext, registry, need, step)
+            if step % 5 == 4:
+                ed.flush_highlights(registry, speller)
+                assert_true(not ed.highlights_pending())
+                _assert_matches_full_pass(ed, ext, registry, step)
+        elif (pick // 13) % 3 != 0:
             ed.flush_highlights(registry, speller)
             _assert_matches_full_pass(ed, ext, registry, step)
     ed.flush_highlights(registry, speller)
@@ -156,6 +204,47 @@ def test_random_edits_around_an_injection_marker_match_a_full_pass() raises:
 def test_random_rust_edits_match_a_full_pass() raises:
     _random_edits(String("rs"), _rust_text(), 3, 400)
     _random_edits(String("rs"), _rust_text(), 99991, 400)
+
+
+def test_random_edits_on_a_partly_tokenized_buffer_match_a_full_pass() raises:
+    _random_edits(String("py"), _python_text(), 5, 400, True)
+    _random_edits(String("rs"), _rust_text(), 77, 400, True)
+    var marked = String("# language=html\nPAGE = \"<p class='a'>hi</p>\"\n") \
+        + _python_text()
+    _random_edits(String("py"), marked, 123, 300, True)
+
+
+def test_a_pass_stops_at_the_rows_asked_for_and_resumes() raises:
+    # Opening a big file tokenized all of it before the first frame. A
+    # paint now asks for the rows on screen; the rest follows.
+    var text = String("")
+    for i in range(400):
+        text += String("def f") + String(i) + String("(a):\n    return 'x'\n")
+    var registry = GrammarRegistry()
+    var speller = Speller()
+    var ed = Editor(text)
+    ed.file_path = String("big.py")
+    ed.flush_highlights(registry, speller, 40, 0)
+    assert_true(ed.highlights_pending())
+    assert_equal(ed._hl_cache.pending_row, 41)
+    _assert_first_rows_match_full_pass(ed, String("py"), registry, 40, 0)
+    # Nothing below has been touched yet.
+    assert_true(ed.highlights.row(len(ed.highlights) - 1) <= 40)
+    # The next paints carry on from there, a row at a time with no budget…
+    ed.flush_highlights(registry, speller, 40, 0)
+    assert_equal(ed._hl_cache.pending_row, 42)
+    # …an edit above the frontier is redone without starting over…
+    ed.move_to(10, 4, False)
+    _ = ed.handle_key(_key(KEY_ENTER), _VIEW)
+    ed.flush_highlights(registry, speller, 40, 0)
+    assert_equal(ed._hl_cache.full_passes, 1)
+    _assert_first_rows_match_full_pass(ed, String("py"), registry, 40, 1)
+    # …and a caller that asks for everything gets it.
+    ed.flush_highlights(registry, speller)
+    assert_true(not ed.highlights_pending())
+    assert_equal(ed._hl_cache.full_passes, 1)
+    _assert_matches_full_pass(ed, String("py"), registry, 2)
+    registry.release()
 
 
 def test_a_split_or_joined_line_is_not_a_full_pass() raises:

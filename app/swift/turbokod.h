@@ -40,6 +40,11 @@ void    tk_desktop_tick(int64_t h, int64_t cols, int64_t rows);
 void    tk_pty_wake_install(void (*callback)(void));
 void    tk_pty_wake_ack(void);
 int32_t tk_desktop_pty_pending(int64_t h);
+// 1 while the Desktop has frame-sliced work under way that the user is
+// waiting on (a big file's syntax coloring below the first screen, the
+// Project > Spelling scan): each frame advances it, so the host keeps the
+// frames coming instead of idling down.
+int32_t tk_desktop_busy(int64_t h);
 int64_t tk_desktop_layout(int64_t h, int64_t cols, int64_t rows,
                           int64_t out_ptr, int64_t cap);
 // Native smooth-scroll (macOS host), working in *visual-row* coordinates so

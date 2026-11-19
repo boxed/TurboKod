@@ -967,6 +967,11 @@ that even a handful of snapshots blows the budget. Worst case is
 snapshots of a 20 MB file."""
 
 
+comptime _TOKENIZE_SLICE_MS = 10
+"""How long ``flush_highlights`` goes on tokenizing past the rows on screen
+before it leaves the rest for the next frame."""
+
+
 comptime _BIG_BUFFER_LINE_BYTES = 5000
 """A single logical line longer than this (bytes) marks the buffer "big",
 disabling soft/smart wrap and syntax tokenizing for the whole buffer. Both
@@ -2335,6 +2340,7 @@ struct Editor(Copyable, Movable):
 
     def flush_highlights(
         mut self, mut registry: GrammarRegistry, mut speller: Speller,
+        need_row: Int = -1, slice_ms: Int = _TOKENIZE_SLICE_MS,
     ):
         """Bring ``self.highlights`` up to date by tokenizing against
         the shared ``GrammarRegistry``. No-op if not ``_highlights_dirty``.
@@ -2351,6 +2357,14 @@ struct Editor(Copyable, Movable):
         the dirty-row marker via ``_mark_hl_dirty``, so highlights
         stay slightly stale between an edit and the next paint.
         Tests that need synchronous highlights call this directly.
+
+        ``need_row`` is the last row that has to be right when this
+        returns — the bottom of what's on screen, with a margin. Given
+        one, tokenizing stops there once ``slice_ms`` is spent and the
+        next paint carries on (``highlights_pending``): a big
+        file's first screen is colored in its first frame instead of
+        after the whole file, and so is an edit that changes the scope of
+        everything below it. Without one the result is complete.
         """
         # Refresh the gutter run-icons first — cheap line scan, and
         # independent of syntax tokenizing, so it runs even when the
@@ -2382,9 +2396,10 @@ struct Editor(Copyable, Movable):
         sync_highlights(
             ext, self.buffer.lines, min(self._hl_dirty_row, span[0]),
             registry, self._hl_cache, self.highlights,
-            max(last_edited, -1),
+            max(last_edited, -1), need_row, slice_ms,
         )
-        self._highlights_dirty = False
+        # Still dirty while rows wait their turn: the next paint resumes.
+        self._highlights_dirty = self._hl_cache.pending()
         # Mark the cache as fully clean by parking the dirty row
         # past the end of the buffer. Any subsequent edit will
         # bring it back to a real row via ``_mark_hl_dirty``, and the
@@ -2394,6 +2409,11 @@ struct Editor(Copyable, Movable):
         self._index_highlights()
         speller.load_default()
         self._refresh_spell(speller)
+
+    def highlights_pending(self) -> Bool:
+        """A sliced tokenize pass has rows left (``flush_highlights``'
+        ``need_row``): the host should keep the frames coming."""
+        return self._highlights_dirty and self._hl_cache.pending()
 
     def _index_highlights(mut self):
         """Build ``_hl_order`` / ``_hl_row_start``: a counting sort of

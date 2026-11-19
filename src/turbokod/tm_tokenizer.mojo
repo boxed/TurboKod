@@ -43,6 +43,7 @@ from .onig import (
     ONIG_OPTION_NONE, ONIG_OPTION_NOT_BEGIN_POSITION,
 )
 from .search_options import regex_escape_literal
+from .posix import monotonic_ms
 from .string_utils import byte_slice
 from .tm_grammar import (
     Capture, Grammar, Pattern,
@@ -231,43 +232,42 @@ def tokenize_with_grammar_full(
 
 def tokenize_lines_from(
     grammar: Grammar, lines: List[String],
-    start_row: Int, min_row: Int, start_stack: List[Frame],
+    start_row: Int, start_stack: List[Frame],
     cached_post_ids: List[Int32],
     mut table: StackTable,
     mut post_ids: List[Int32],
     mut stable_row: Int,
+    mut rejoined: Bool,
+    need_row: Int = -1,
+    deadline_ms: Int = 0,
+    size_hint: Int = 0,
 ) -> HighlightList:
-    """Tokenize ``lines[start_row:]`` starting from ``start_stack``.
+    """Tokenize ``lines`` from ``start_row``, starting in ``start_stack``,
+    until one of three things:
 
-    The early-exit lives inside this loop so we don't burn cycles
-    re-tokenizing a long tail that we'll throw away — as soon as
-    the new post-stack at row ``r`` matches ``cached_post_ids[r]``
-    we know everything from ``r+1`` onward is identical to last
-    time and we can stop.
+    * **It rejoins the cached trajectory** — the new post-stack at a row
+      equals ``cached_post_ids[row]``, so every row below that was
+      tokenized from this same state and is still right. This is what
+      makes an edit cost its own rows rather than the file's.
+      ``rejoined`` is set and ``stable_row`` is the row after. A cached
+      id of -1 marks a row whose cached result is void (its text changed,
+      or it was never tokenized) and equals nothing, so the pass can't
+      stop there.
+    * **It has done enough for now** — only with ``need_row >= 0``: once
+      that row is done and ``deadline_ms`` (``monotonic_ms``; 0 means at
+      once) has passed. ``stable_row`` is the first row *not* tokenized,
+      where a later call resumes. Opening a big file colors what's on
+      screen in the first frame this way and the rest over the next ones.
+    * **The end of the buffer**: ``stable_row == len(lines)``.
 
-    Early-exit is suppressed for rows ``< min_row``: the caller begins
-    one row *above* the edited row because rows are coupled by multi-line
-    ``\\n`` end-regexes (row R-1 is tokenized against
-    ``line[R-1] + "\\n" + line[R]``), and without this guard the loop would
-    match the unchanged starting row's post-stack and quit before reaching
-    the actual edit. Pass ``min_row == start_row`` for the classic behaviour.
-
-    On return:
-
-    * ``post_ids`` holds the post-stack for each row we *did*
-      tokenize, as an index into ``table`` — i.e. ``post_ids[k]`` is the
-      stack at end of row ``start_row + k``.
-    * ``stable_row`` is the first row whose cached state we trust.
-      Highlights for ``[start_row, stable_row)`` came from this
-      call; rows ``>= stable_row`` should be spliced in from the
-      caller's cached highlights.
-
-    When ``cached_post_ids`` is empty (cold load) or
-    insufficient, we tokenize the whole tail and ``stable_row``
-    ends up at ``len(lines)`` — i.e. nothing to splice.
+    ``post_ids`` gets the post-stack of each row tokenized, as an index
+    into ``table`` — ``post_ids[k]`` is the stack at the end of row
+    ``start_row + k``. The highlights returned are those rows'.
+    ``size_hint`` is how many to make room for up front.
     """
     post_ids.clear()
-    var out = HighlightList()
+    rejoined = False
+    var out = HighlightList(capacity=size_hint)
     var stack = copy_stack(start_stack)
     var memo = _CandidateMemo()
     var row = start_row
@@ -279,9 +279,16 @@ def tokenize_lines_from(
         _tokenize_line(grammar, lines[row], next_line, row, stack, out, memo)
         last = table.intern(stack, last)
         post_ids.append(Int32(last))
-        if row >= min_row \
-                and row < len(cached_post_ids) \
-                and last == Int(cached_post_ids[row]):
+        if row < len(cached_post_ids) and last == Int(cached_post_ids[row]):
+            rejoined = True
+            stable_row = row + 1
+            return out^
+        # The clock is read every 32 rows: a row is a few microseconds.
+        if need_row >= 0 and row >= need_row and row + 1 < len(lines) and (
+            deadline_ms <= 0 or (
+                ((row - start_row) & 31) == 31 and monotonic_ms() >= deadline_ms
+            )
+        ):
             stable_row = row + 1
             return out^
         row += 1

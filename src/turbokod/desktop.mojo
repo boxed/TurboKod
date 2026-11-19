@@ -668,6 +668,12 @@ comptime _VIEW_STATES_MAX = 500
 # project writes whatever is waiting.
 comptime _UI_STATE_SAVE_MS = 1000
 
+# Rows past twice the window's height that a paint tokenizes before the
+# time budget may stop it (``Editor.flush_highlights``) — in a buffer of
+# at least ``_TOKENIZE_SLICE_MIN_LINES``; a smaller one is tokenized whole.
+comptime _TOKENIZE_MARGIN_ROWS = 50
+comptime _TOKENIZE_SLICE_MIN_LINES = 1000
+
 # Keyboard-focus discriminants for the docked-pane stack. Editor
 # windows have their own ``windows.focused`` index; the panes are
 # conceptually a parallel set of "docked windows" and we keep their
@@ -4980,8 +4986,18 @@ struct Desktop(Movable):
                     self._pytest_file_globs,
                 )
                 if not skip_highlight:
-                    self.windows.windows[i].editor.flush_highlights(
-                        self.grammar_registry, self.speller,
+                    # Right through what's on screen (and as far again,
+                    # for a scroll before the next frame); the rest of a
+                    # big file follows over the next frames. A small one
+                    # is simply done: it costs less than a frame, and what
+                    # a paint leaves behind then doesn't depend on timing.
+                    ref w = self.windows.windows[i]
+                    var need_row = -1
+                    if w.editor.buffer.line_count() >= _TOKENIZE_SLICE_MIN_LINES:
+                        need_row = w.editor.scroll_y \
+                            + 2 * max(w.rect.height(), 1) + _TOKENIZE_MARGIN_ROWS
+                    w.editor.flush_highlights(
+                        self.grammar_registry, self.speller, need_row,
                     )
         # Refit windows to the current workspace before painting. Cheap
         # (idempotent for already-fitting windows) and covers both file
@@ -18345,14 +18361,21 @@ struct Desktop(Movable):
 
     def has_background_work(self) -> Bool:
         """True while frame-sliced work is running that the user is
-        waiting on (the Project ▸ Spelling scan and its library check).
+        waiting on (the Project ▸ Spelling scan and its library check, a
+        big file's syntax coloring below the first screen).
         The terminal loops poll for input without a timeout while this
         holds, so the work advances every frame instead of once per 50 ms
         idle wait."""
-        return self.spelling_dialog.active and (
+        if self.spelling_dialog.active and (
             self.spelling_dialog.scan.active
             or self.spelling_dialog.library_checking()
-        )
+        ):
+            return True
+        for i in range(len(self.windows.windows)):
+            if self.windows.windows[i].is_editor \
+                    and self.windows.windows[i].editor.highlights_pending():
+                return True
+        return False
 
     def _open_spelling_dialog(mut self):
         """Project ▸ Spelling: scan every project file for words the

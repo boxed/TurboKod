@@ -123,7 +123,39 @@ s, a 4k-line Go file 730 ms to 245 ms; one 9 KB line of CSS 1 s to 33 ms):
    (`_CandidateMemo`). It depends only on the top frame's pattern, and
    building it follows every `include` beneath.
 
-The shell grammar is the remaining outlier (about 0.8 ms a line).
+Shell is the slowest grammar per line (about 50 us), and one 11k-line
+generated script in the corpus sends it 196 scopes deep and takes 9 s:
+the grammar loses track of a scope there, which is a highlighting bug
+more than a speed one.
+
+### A big file is tokenized a screen at a time
+
+The pass above is still 70 ms for a 19k-line Mojo file and 1.5 s for a
+13k-line C one, and it used to run whole before the file's first frame.
+`Desktop.paint` now asks `Editor.flush_highlights` for the rows the
+window shows (twice its height, plus a margin); the pass stops there once
+10 ms are spent and the next frame carries on from
+`HighlightCache.pending_row`. Measured through the dylib, 250x70:
+
+| | first frame | everything colored |
+|---|---|---|
+| 19k-line Mojo file, at the top | 46 ms (was 82) | 120 ms later, over 8 frames |
+| 13k-line C file, at the top | 15-80 ms (was ~1500) | 1.5 s later, over ~120 frames |
+| the C file, opened at line 9000 | ~1050 ms | — the rows above have to be tokenized first |
+
+Not a background thread: Mojo's async runtime can't run in the dylib
+(see CLAUDE.md), and a compiled regex has one match buffer, so two
+threads can't search with it. A slice per frame on the main thread gets
+the same first screen.
+
+The hosts have to keep the frames coming while rows are waiting:
+`Desktop.has_background_work()` is true then (`tk_desktop_busy`), the
+Swift host runs frames back to back with a 4 ms gap for input
+(`AppController.busyWake`), and the terminal loops poll with a 1 ms
+timeout. A buried window's work waits until it is visible.
+
+What's left of a big file's first frames after this is a synchronous
+`git show HEAD:<path>` for the change gutter (10-20 ms, in the paint).
 
 ## Hot-path traps (do not reintroduce)
 

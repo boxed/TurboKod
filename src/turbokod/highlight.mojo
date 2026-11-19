@@ -37,9 +37,9 @@ from .string_utils import (
     word_end_from, word_start_before,
 )
 from .tm_grammar import Grammar, load_grammar_from_file
+from .posix import monotonic_ms
 from .tm_tokenizer import (
-    StackTable, tokenize_lines_from, tokenize_with_grammar,
-    tokenize_with_grammar_full,
+    Frame, StackTable, tokenize_lines_from, tokenize_with_grammar,
 )
 
 
@@ -588,12 +588,19 @@ struct HighlightCache(Copyable, Movable):
     """``sync_highlights``: ``>= 0`` while the caller's list *is* the
     cached one (``highlights`` is then empty), holding its length."""
     var post_stacks: List[Int32]
-    """Each line's end-of-line scope stack, as an index into ``stacks``."""
+    """Each line's end-of-line scope stack, as an index into ``stacks`` —
+    or -1 for a row whose cached result is void: its text changed, or it
+    hasn't been tokenized yet."""
+    var pending_row: Int
+    """Rows before this are tokenized and right; the next pass resumes
+    here — the first voided row. ``len(post_stacks)`` when the whole
+    buffer is done (``pending`` is then False) — which, for a big file,
+    is some frames after it opened: a pass given a ``need_row`` stops once
+    the rows on screen are done and its time is up."""
     var stacks: StackTable
     var full_passes: Int
-    """How many times the whole buffer has been tokenized through this
-    cache — what a test asserts on to show an edit took the incremental
-    path."""
+    """How many times this cache has started the buffer over from the top
+    — what a test asserts on to show an edit took the incremental path."""
     var marker_rows: List[Int32]
     """``sync_highlights``: the rows with a ``language=`` marker, in
     order, when ``marker_lines >= 0`` — the line count they were found
@@ -606,6 +613,7 @@ struct HighlightCache(Copyable, Movable):
         self.highlights = HighlightList()
         self.lent_len = -1
         self.post_stacks = List[Int32]()
+        self.pending_row = 0
         self.stacks = StackTable()
         self.full_passes = 0
         self.marker_rows = List[Int32]()
@@ -618,8 +626,13 @@ struct HighlightCache(Copyable, Movable):
         self.highlights = HighlightList()
         self.lent_len = -1
         self.post_stacks = List[Int32]()
+        self.pending_row = 0
         self.stacks = StackTable()
         self.marker_lines = -1
+
+    def pending(self) -> Bool:
+        """Rows are still waiting to be tokenized (see ``pending_row``)."""
+        return self.pending_row < len(self.post_stacks)
 
 
 comptime _STACK_TABLE_LIMIT = 4096
@@ -645,6 +658,7 @@ def sync_highlights(
     ext: String, lines: List[String], dirty_row: Int,
     mut registry: GrammarRegistry, mut cache: HighlightCache,
     mut hls: HighlightList, dirty_max_row: Int = -1,
+    need_row: Int = -1, budget_ms: Int = 0,
 ):
     """``highlight_incremental`` for a caller that keeps the result in
     ``hls`` between calls (an ``Editor``), without the buffer's highlights
@@ -655,7 +669,12 @@ def sync_highlights(
     change. For most buffers no overlay can apply, and then the grammar's
     output moves to the caller without a copy and the cache lends it: the
     next call takes it back before tokenizing. A caller that replaced its
-    list in between (the length no longer matches) costs a full pass."""
+    list in between (the length no longer matches) costs a full pass.
+
+    With ``need_row >= 0`` the pass may stop early — once that row is
+    tokenized and ``budget_ms`` is spent — leaving ``cache.pending()``
+    set: the caller calls again (an ``Editor`` does on its next paint)
+    and it resumes. Without, the result is always complete."""
     var first = dirty_row
     if cache.lent_len >= 0:
         if len(hls) == cache.lent_len:
@@ -664,7 +683,9 @@ def sync_highlights(
         else:
             cache.invalidate()
             first = 0
-    var fb = _grammar_pass(ext, lines, first, registry, cache, dirty_max_row)
+    var fb = _grammar_pass(
+        ext, lines, first, registry, cache, dirty_max_row, need_row, budget_ms,
+    )
     if fb:
         hls = fb.take()
         cache.marker_lines = -1
@@ -857,7 +878,7 @@ def _fallback_with_overlays(
 def _grammar_pass(
     ext: String, lines: List[String], dirty_row: Int,
     mut registry: GrammarRegistry, mut cache: HighlightCache,
-    dirty_max_row: Int,
+    dirty_max_row: Int, need_row: Int = -1, budget_ms: Int = 0,
 ) -> Optional[HighlightList]:
     """``highlight_incremental``'s tokenizing half. Leaves the grammar's
     own output (no overlays) in ``cache.highlights`` and returns empty;
@@ -889,89 +910,114 @@ def _grammar_pass(
         cache.invalidate()
         cache.ext = cache_key
 
-    # Decide whether we can incrementalize. Conditions for "yes":
-    #   * cache is warm: we already tokenized this extension before
-    #     and have ``post_stacks`` for the buffer as it was;
-    #   * eff_dirty > 0 (else there's nothing to skip — full retokenize);
-    #   * eff_dirty is in range;
-    #   * if the line count changed, the caller said where the edit ends
-    #     (``dirty_max_row``), so the cached rows below it can be moved
-    #     to where they are now.
-    # Anything else collapses to a full retokenize.
+    # Bring the cache in line with the buffer, then tokenize from where it
+    # stops being right. Three cases for the first half:
+    #   * nothing to go by — a cold cache, an edit in the first two rows
+    #     (``dirty_row`` 0 is also every caller's "anything may have
+    #     changed"), or a line count that changed without the caller
+    #     saying where the edit ends: start over;
+    #   * an edit: void the edited rows' cached results (and move the rows
+    #     below it, if the line count changed);
+    #   * no edit: a pass that stopped early carries on.
     var n_lines = len(lines)
     # An edit on row R can stale row R-1's cached result, not just R's: a
     # grammar with a multi-line end regex (``end: "\\n..."``) tokenizes row
     # R-1 against ``line[R-1] + "\n" + line[R]``, so row R-1's highlights and
-    # post-stack depend on row R's text. Back the incremental window up one
-    # row so that coupling can't leave stale highlights above the edit.
-    # Costs one extra row of tokenizing; an edit at row 1 collapses to a full
-    # retokenize (eff_dirty == 0), which is correct.
+    # post-stack depend on row R's text. Back the edit up one row so that
+    # coupling can't leave stale highlights above it.
     var eff_dirty = dirty_row - 1
-    # The table only ever grows between full passes (a retired stack isn't
-    # removed); one that has collected thousands is rebuilt from scratch.
-    var can_incr = (eff_dirty > 0
-                    and eff_dirty <= n_lines
-                    and len(cache.stacks.stacks) < _STACK_TABLE_LIMIT)
-    if can_incr and len(cache.post_stacks) != n_lines:
-        can_incr = _move_cached_tail(cache, n_lines, eff_dirty, dirty_max_row)
-    if not can_incr:
-        _full_retokenize(
-            grammar_store_at(registry._store)[].grammars[grammar_idx], cache, lines,
+    var n_cached = len(cache.post_stacks)
+    var start_over = n_cached == 0
+    if not start_over and (dirty_row < n_lines or n_cached != n_lines):
+        # The table only ever grows between full passes (a retired stack
+        # isn't removed); one that has collected thousands is rebuilt from
+        # scratch — but not mid-pass, or a file that needs that many
+        # would start over forever.
+        if eff_dirty <= 0 or eff_dirty > n_lines or (
+            not cache.pending()
+            and len(cache.stacks.stacks) >= _STACK_TABLE_LIMIT
+        ):
+            start_over = True
+        elif n_cached != n_lines and not _move_cached_tail(
+            cache, n_lines, eff_dirty, dirty_max_row,
+        ):
+            start_over = True
+        else:
+            # Void the edited rows, so the pass can't take a stale
+            # post-stack for the trajectory it is rejoining — all but the
+            # last: matching *its* old post-stack is exactly what says
+            # the rows below are untouched. The row above the edit always
+            # goes (the coupling above).
+            var last = dirty_max_row if dirty_max_row >= eff_dirty else dirty_row
+            for r in range(eff_dirty, min(max(last, eff_dirty + 1), n_lines)):
+                cache.post_stacks[r] = Int32(-1)
+            if eff_dirty < cache.pending_row:
+                cache.pending_row = eff_dirty
+    if start_over:
+        _start_over(cache, lines)
+    var deadline_ms = 0
+    if need_row >= 0 and budget_ms > 0:
+        deadline_ms = monotonic_ms() + budget_ms
+    while cache.pending():
+        var start = cache.pending_row
+        var start_stack = List[Frame]()
+        if start > 0:
+            var above = Int(cache.post_stacks[start - 1])
+            if above < 0:
+                # Can't be: rows before ``pending_row`` are tokenized.
+                # Rather than index with it, start over.
+                _start_over(cache, lines)
+                continue
+            start_stack = cache.stacks.stacks[above].copy()
+        var new_post = List[Int32]()
+        var stable_row = 0
+        var rejoined = False
+        # Room for a whole first pass's highlights up front: a list that
+        # doubles its way to a big file's 80k copies itself a dozen times
+        # and leaves as much again behind in outgrown blocks, which the
+        # allocator keeps. The excess is left alone: the tail of a large
+        # block that is never written is never backed by memory.
+        var hint = 0
+        if start == 0 and len(cache.highlights) == 0:
+            hint = _size_hint(lines) + 64
+        var new_hls = tokenize_lines_from(
+            grammar_store_at(registry._store)[].grammars[grammar_idx], lines,
+            start, start_stack, cache.post_stacks, cache.stacks, new_post,
+            stable_row, rejoined, need_row, deadline_ms, hint,
         )
-        if len(cache.highlights) == 0 and _has_nonempty_line(lines):
-            return _fallback_with_overlays(ext, cache_key, lines, registry)
-        return None
+        if len(cache.highlights) == 0:
+            cache.highlights = new_hls^
+        else:
+            # Splice: cached rows above the pass, what it produced, cached
+            # rows from where it stopped (right ones after a rejoin; stale
+            # ones, shown until their turn, after an early stop).
+            var out = HighlightList(
+                capacity=len(cache.highlights) + len(new_hls),
+            )
+            out.extend(cache.highlights, 0, start)
+            out.extend(new_hls)
+            if stable_row < n_lines:
+                out.extend(cache.highlights, stable_row)
+            cache.highlights = out^
+        for k in range(len(new_post)):
+            cache.post_stacks[start + k] = new_post[k]
+        if not rejoined:
+            # The end of the buffer, or enough for this call. Where it
+            # stopped is voided: the rows from there may hold an older
+            # pass's results, and only that mark says they aren't to be
+            # trusted once an edit above moves ``pending_row`` up.
+            cache.pending_row = stable_row
+            if stable_row < n_lines:
+                cache.post_stacks[stable_row] = Int32(-1)
+            break
+        # Right again from here to the next voided row, if there is one.
+        var next = stable_row
+        while next < n_lines and cache.post_stacks[next] != -1:
+            next += 1
+        cache.pending_row = next
 
-    # Incremental path. Start state = post-state at end of line
-    # (eff_dirty - 1), i.e. what eff_dirty was tokenized against
-    # last time. The tokenizer itself stops as soon as state
-    # rejoins the cached trajectory and reports back via
-    # ``stable_row``.
-    var start_stack = cache.stacks.stacks[
-        Int(cache.post_stacks[eff_dirty - 1])
-    ].copy()
-    var new_post = List[Int32]()
-    var stable_row: Int = 0
-    # Earliest row the tokenizer may early-exit on: the bottom of the
-    # edited range, so every in-place-edited row is re-tokenized before
-    # we trust the cached tail. Defaults to ``dirty_row`` (classic
-    # single-row behaviour) when no high-water mark was supplied.
-    var min_row = dirty_row
-    if dirty_max_row > min_row:
-        min_row = dirty_max_row
-    var new_hls = tokenize_lines_from(
-        grammar_store_at(registry._store)[].grammars[grammar_idx], lines, eff_dirty, min_row,
-        start_stack, cache.post_stacks, cache.stacks, new_post, stable_row,
-    )
-
-    # Splice highlights:
-    #   1. Keep cached highlights with row < eff_dirty.
-    #   2. Append re-tokenized highlights (rows ``[eff_dirty,
-    #      stable_row)``).
-    #   3. Append cached highlights with row >= stable_row.
-    # ``new_hls`` already contains only rows up to ``stable_row``
-    # because that's where the tokenizer stopped. Sized up front (the
-    # replaced rows' spans are the only slack): grown from empty, the list
-    # doubled its way there on every keystroke, a dozen copies of itself.
-    var out = HighlightList(
-        capacity=len(cache.highlights) + len(new_hls),
-    )
-    out.extend(cache.highlights, 0, eff_dirty)
-    out.extend(new_hls)
-    if stable_row < n_lines:
-        out.extend(cache.highlights, stable_row)
-
-    # Update cached post_stacks: rows ``[eff_dirty, stable_row)`` take the
-    # new ones, in place. The tokenizer appended exactly one stack per row
-    # it tokenized, and the rows on either side are untouched — rebuilding
-    # the list copied every row's stack (an allocation per buffer line) on
-    # each keystroke.
-    for k in range(len(new_post)):
-        cache.post_stacks[eff_dirty + k] = new_post[k]
-    var empty = len(out) == 0
-    cache.highlights = out^
-
-    if empty and _has_nonempty_line(lines):
+    if not cache.pending() and len(cache.highlights) == 0 \
+            and _has_nonempty_line(lines):
         return _fallback_with_overlays(ext, cache_key, lines, registry)
     return None
 
@@ -1015,27 +1061,14 @@ def _move_cached_tail(
     return True
 
 
-def _full_retokenize(
-    grammar: Grammar, mut cache: HighlightCache, lines: List[String],
-):
-    """Re-tokenize ``lines`` from scratch, refreshing both
-    ``cache.highlights`` and ``cache.post_stacks``. Caller owns
-    the decision of whether to call us versus the incremental
-    path — we just do the work."""
-    # Room for the result up front: a list that doubles its way to a big
-    # file's 80k highlights copies itself a dozen times and leaves as much
-    # again behind in outgrown blocks, which the allocator keeps. The last
-    # pass's count is the best guess; a first pass goes by the text's size, one
-    # highlight per 8 bytes being generous for code. The excess is left
-    # alone: the tail of a large block that is never written is never
-    # backed by memory, where trimming to fit would write a second copy.
-    var hint = len(cache.highlights)
-    if hint == 0:
-        hint = _size_hint(lines)
+def _start_over(mut cache: HighlightCache, lines: List[String]):
+    """Void everything cached for ``lines``: every row waits to be
+    tokenized, from the top."""
+    cache.post_stacks = List[Int32](length=len(lines), fill=-1)
+    cache.pending_row = 0
+    cache.stacks.stacks.clear()
+    cache.highlights = HighlightList()
     cache.full_passes += 1
-    cache.highlights = tokenize_with_grammar_full(
-        grammar, lines, cache.stacks, cache.post_stacks, hint + 64,
-    )
 
 
 def _size_hint(lines: List[String]) -> Int:
