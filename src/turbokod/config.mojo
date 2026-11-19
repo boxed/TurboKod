@@ -316,9 +316,9 @@ struct TurbokodConfig(Copyable, Movable):
     # Settings ▸ Font (native macOS frontend only). Family name of the
     # monospace font the Swift host renders cells with. Empty means the
     # bundled IBM VGA font: the 16x32 redraw, which draws the original
-    # 8x16 pixels wherever a cell is 16 device pixels tall. ``CLASSIC_FONT``
-    # pins the original Px437 IBM VGA 8x16 font at every size. The
-    # terminal frontend ignores it — the terminal emulator owns the font
+    # 8x16 pixels wherever a cell is 16 device pixels tall (a config still
+    # naming the retired Px437 font, ``_RETIRED_CLASSIC_FONT``, reads as
+    # that). The terminal frontend ignores it — the terminal emulator owns the font
     # there.
     var font: String
     # Settings ▸ Font size in points (native macOS frontend only). 0 means

@@ -113,7 +113,7 @@ struct SessionWindow(ImplicitlyCopyable, Movable):
 
     ``path`` is project-relative when the file lives inside the project
     root, absolute otherwise — picked at save time by
-    ``_session_relative``.
+    ``project_relative``.
     """
     var path: String
     var win: StoredWindow

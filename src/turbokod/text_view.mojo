@@ -23,7 +23,7 @@ Exported types:
   read-only consumers default to indent 0 / hard-break.
 * ``TextLog`` — the composed view. Owns appended text + selection +
   scroll + paint + mouse drag + copy. Caller layers its own overlays
-  by reading ``last_visible_rows()`` after ``paint`` returns.
+  by reading the ``last_*`` layout fields after ``paint`` returns.
 """
 
 from std.collections.list import List
@@ -973,8 +973,9 @@ struct TextLog(Copyable, Movable):
 
     Layout-cache fields (``last_*``) are stamped on every ``paint`` so
     callers that need to overlay other things (clickable spans, hover
-    state) can iterate ``last_visible_rows()`` without re-running the
-    wrap math.
+    state) can iterate the visible part of ``last_visual`` (from
+    ``last_first_visual``, ``last_visible_count`` rows) without
+    re-running the wrap math.
     """
     var lines: List[String]
     var line_attrs: List[Attr]

@@ -12,11 +12,11 @@ value.
 
 The widget owns its option list and the currently committed index.
 For dialog use, the surrounding model (e.g. a ``RunTarget.debug_language``
-string) stays canonical: callers ``set_value`` from the model before
-each paint and read ``value()`` back after each event. Unknown
-values are preserved — ``set_value`` with a string that isn't in
-the option list appends it as a synthetic entry, so a config loaded
-from disk never silently snaps to a different choice.
+string) stays canonical: callers set ``index`` from the model before
+each paint and read ``value()`` back after each event. The option list
+is the caller's too, so a value loaded from disk that isn't among the
+usual choices has to be put in it — otherwise the index snaps to
+another one.
 
 Painting is two-phase to support proper z-ordering: ``paint`` draws
 the collapsed strip, ``paint_popup`` draws the popup list. The

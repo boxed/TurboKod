@@ -14,8 +14,8 @@ Mirrors the shape of ``grammar_install.mojo``:
 * ``dictionary_install_command`` is the ``sh -c`` line we hand to
   ``InstallRunner`` (``mkdir -p`` + ``curl -fsSL -o <path>``).
 * ``remove_user_dictionary`` deletes the file.
-* ``installed_dictionary_languages`` enumerates language ids whose
-  ``.txt`` file is present on disk — used by Settings to render the
+* ``user_dictionary_installed`` says whether a language id's ``.txt``
+  file is present on disk — used by Settings to render the
   "[X] installed" tick next to each catalog row.
 
 The Speller picks up everything in ``user_dictionaries_root`` on the

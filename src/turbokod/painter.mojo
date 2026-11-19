@@ -48,7 +48,7 @@ struct Painter(Copyable, Movable):
 
         When the start point is left of the clip, leading codepoints
         are walked forward (advancing the canvas's cell counter — tabs
-        expand to ``_TAB_WIDTH``-aligned spaces, narrow codepoints to
+        expand to ``TAB_WIDTH``-aligned spaces, narrow codepoints to
         one cell each) until ``x`` reaches the clip's left edge. The
         right edge is delegated to ``Canvas.put_text``'s ``max_x`` arg,
         which already stops mid-string without splitting a UTF-8

@@ -67,7 +67,7 @@ struct NamesReview(Movable, UIDialog):
     var paths: List[String]     # repo-relative, per changeset file
     var names: List[NewName]
     var selected: Int
-    # Set by Open: the host opens ``open_request``'s name and closes.
+    # Set by Open: the host opens the selected name and closes.
     var open_requested: Bool
     var close_requested: Bool
     var code_window: ListWindow

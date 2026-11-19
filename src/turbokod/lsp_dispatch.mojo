@@ -1064,7 +1064,7 @@ struct LspManager(Copyable, Movable):
     var _moniker: _Slot[String]
     # ``textDocument/colorPresentation`` — given a color + its range, the
     # server returns alternate textual forms (hex / rgb() / named). Parked
-    # as parallel ``_colorpres_labels`` / ``_colorpres_edits`` (label[i] ↔
+    # as parallel ``_colorpres`` (the labels) / ``_colorpres_edits`` (label[i] ↔
     # the TextEdit that rewrites the literal to that form). ``_colorpres_*``
     # range fields remember the requested span so a label-only presentation
     # (no textEdit) can synthesize one.
@@ -1112,7 +1112,7 @@ struct LspManager(Copyable, Movable):
     # without a ``command`` — just ``range`` + ``data`` — and fill the
     # title only on resolve. We'd otherwise drop those, so we queue the raw
     # unresolved lenses, resolve them one at a time, and grow ``_codelens_
-    # accum`` (the source of truth re-published into ``_resolved_codelens``
+    # accum`` (the source of truth re-published into ``_codelens``
     # after each resolve so the host's overlay grows). ``_codelens_resolve_
     # row`` is the line of the in-flight lens.
     var _inflight_codelens_resolve_id: String
@@ -4787,7 +4787,7 @@ struct LspManager(Copyable, Movable):
         if not msg.id or not msg.method:
             return
         var id = msg.id.value().copy()
-        # ``_id_to_string`` is purely for logging — the response itself
+        # ``json_rpc_id`` is purely for logging — the response itself
         # carries the original JsonValue id verbatim so JSON-RPC pairing
         # works regardless of integer-vs-string typing.
         var id_label = json_rpc_id(id)
@@ -5842,7 +5842,7 @@ def _parse_code_action_result(v: JsonValue) -> List[CodeAction]:
             has_inline_edit = True
             file_edits = _parse_workspace_edit_changes(edit_opt.value())
         # No inline edit → the action may be resolvable. Keep the entry so
-        # ``_resolve_code_actions`` can hand it back verbatim.
+        # ``_start_code_action_resolves`` can hand it back verbatim.
         var unresolved = Optional[JsonValue]()
         if not has_inline_edit:
             unresolved = Optional[JsonValue](entry.copy())

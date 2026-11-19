@@ -1093,9 +1093,9 @@ struct Caret(ImplicitlyCopyable, Movable):
     ``desired_col``; this struct mirrors the same five fields so any
     operation can be expressed as "set the primary to this caret, run
     the existing single-caret code, capture the result". Additional
-    carets sit in ``Editor.extra_carets``; the empty-list case is the
-    common one and reduces to the original single-caret model with no
-    per-keystroke overhead.
+    carets follow the primary in ``Editor.selections``; a list of one is
+    the common case and reduces to the original single-caret model with
+    no per-keystroke overhead.
     """
     var row: Int
     var col: Int
@@ -1388,7 +1388,7 @@ struct Editor(Copyable, Movable):
     anchor to the new cursor position. Word movement (Ctrl) and selection
     (Shift) are independent dimensions that compose cleanly.
 
-    Multiple cursors live in ``extra_carets``. Most edit / movement ops
+    Multiple cursors live in ``selections`` (the primary first). Most edit / movement ops
     iterate every caret (primary + extras) and run the single-caret code
     once per caret — so the empty-extras path is identical to the
     pre-multi-cursor code. Bindings: Alt+click adds a caret, Ctrl+Alt+

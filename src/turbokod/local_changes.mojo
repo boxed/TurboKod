@@ -262,7 +262,7 @@ comptime _LC_INPUT_QUIET_MS:   Int = 250
 # single repeat settled long enough to pay a full rebuild (~25-45 ms
 # measured on a 2000-file tree, see ``bench/git_view_bench.mojo``) and
 # a held arrow key crawled. The real window is derived from the
-# observed cadence instead — see ``_ensure_frame_settle_ms``.
+# observed cadence instead — see ``_settle_window_ms``.
 comptime _SETTLE_MS:      Int = 70
 # How much of a commit's diff the info panel lays out up front. Every row
 # costs a tokenize plus its share of the native host's JSON (~25 us), so a
@@ -559,7 +559,7 @@ def _line_starts_with_at_at(line: String) -> Bool:
 
 def _convert_to_context(line: String) -> String:
     """Swap the leading ``+`` / ``-`` prefix for a single space, leaving
-    the rest of the line untouched. Used by ``_build_minimal_patch`` to
+    the rest of the line untouched. Used by ``build_minimal_patch`` to
     demote unselected ± lines to context so they stay in the target
     file when the patch is applied."""
     var n = len(line.as_bytes())

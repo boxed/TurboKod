@@ -523,8 +523,8 @@ struct DapManager(Copyable, Movable):
     # in the response body — non-fatal).
     var _exception_filters: List[String]
     # Buffer of completed evaluate responses; drained by the host once
-    # per frame via ``take_evaluations``. ``_evaluations_context`` and
-    # ``_evaluations_is_error`` are parallel to the expr/value/type lists.
+    # per frame via ``take_evaluations``. Each ``DapEvaluation`` carries
+    # its own request context and error flag.
     var _evaluations: List[DapEvaluation]
     # Independent test-evaluate channel — used by the condition-error
     # dialog to validate an edited BP condition against the live frame
@@ -1543,7 +1543,7 @@ struct DapManager(Copyable, Movable):
         # *additionally* needs ``justMyCode: false`` in the launch
         # config to expose stdlib / site-packages frames at all; with
         # ``justMyCode: true`` it drops them server-side regardless of
-        # this flag. See ``_build_debugpy_launch_args``.
+        # this flag. See ``_launch_args_debugpy`` (``debugger_config.mojo``).
         var fmt = json_object()
         fmt.put(String("includeAll"), json_bool(True))
         args.put(String("format"), fmt)

@@ -123,10 +123,10 @@ def spell_scan_files(root: String) -> List[String]:
     (``.po`` / ``.pot`` / ``.mo``), which are other languages' text.
 
     Deliberately not ``git ls-files --eol``: git decides "binary" by
-    looking for a NUL in the first 8000 bytes — the same test ``_load``
+    looking for a NUL in the first 8000 bytes — the same test ``_load_lines``
     applies — so it has to read every file, which took 3.4 s on a 7k-file
     checkout, while the extension list already caught 99% of what git
-    flagged there. The sniff in ``_load`` covers the rest."""
+    flagged there. The sniff in ``_load_lines`` covers the rest."""
     var files = walk_project_files(root)
     var out = List[String]()
     for i in range(len(files)):

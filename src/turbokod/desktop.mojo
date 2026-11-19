@@ -557,7 +557,7 @@ comptime DEBUG_TOGGLE_RAISED     = String("debug:toggle_raised_exceptions")
 comptime DEBUG_FOCUS_PANE        = String("debug:focus_pane")
 comptime DEBUG_CLEAR_OUTPUT      = String("debug:clear_output")
 # Project-target run/debug actions. ``TARGET_RUN`` (Cmd+R) launches
-# the active target's ``run_command`` as a captured subprocess;
+# the active target's ``program`` + ``args`` as a captured subprocess;
 # ``TARGET_DEBUG`` (Cmd+D) launches the same target under DAP. Each
 # action stops the *other* mode for that target before starting, so
 # the user can flip between run and debug freely without leaking
@@ -794,8 +794,8 @@ def char_key(c: String) -> UInt32:
 
 # Documentation group names for the Keyboard Shortcuts page. Shared by the
 # hotkey registrations and ``_hotkeys_help_text`` so the two can't drift on
-# spelling; the page renders groups in this declaration order (see
-# ``_HK_GROUP_ORDER``).
+# spelling; the page renders groups in this declaration order (the
+# ``preferred`` list in ``_hotkeys_help_text``).
 comptime HKG_FILES   = String("Files")
 comptime HKG_EDIT    = String("Edit")
 comptime HKG_FIND    = String("Find & navigate")
@@ -1316,8 +1316,8 @@ struct Desktop(Movable):
     var _window_menu_titles: List[String]
     var _window_menu_built: Bool     # force the first build (0 windows == empty snapshot)
     var _shortcut_snapshot: List[String]
-    # Path to open in a new host window on the next ``take_pending_new_window_project``
-    # call. Set when the user picks a recent project from the Project menu
+    # Path to open in a new host window on the next
+    # ``tk_desktop_take_pending_new_window_project`` call. Set when the user picks a recent project from the Project menu
     # while ``host_owns_menu`` is True. The host reads + clears it after
     # spawning the new window.
     var _pending_new_window_project: Optional[String]
@@ -2299,7 +2299,7 @@ struct Desktop(Movable):
         # summarised by a single ``doc_only`` row). ``doc_only`` rows are
         # never dispatched — they document a key the editor (or another
         # layer) handles directly, or fold a range/informational binding
-        # into one readable line. ``register_hotkeys`` order is the
+        # into one readable line. ``register_hotkey`` order is the
         # newest-wins dispatch order; the page's group order is fixed
         # separately in ``_hotkeys_help_text``.
 
@@ -7522,7 +7522,7 @@ struct Desktop(Movable):
 
     def _refresh_view_states_from_windows(mut self):
         """Copy scroll + cursor off every file-backed editor window into
-        ``_view_states`` so the next ``save_view_states_if_changed``
+        ``_view_states`` so the next ``_save_view_states_if_changed``
         captures the latest values. Untitled buffers (no ``file_path``)
         are skipped — they have no path the on-disk record could key
         against. Existing entries for other files are kept untouched so
@@ -13832,7 +13832,7 @@ struct Desktop(Movable):
                 self._maybe_prompt_grammar_install(checks[i])
 
     def _target_run(mut self):
-        """Cmd+R: spawn the active target's ``run_command``.
+        """Cmd+R: spawn the active target's ``program`` + ``args``.
 
         If a debug session is running for the same target, terminate
         it first; if a run is already in flight (same or different
@@ -17270,7 +17270,7 @@ struct Desktop(Movable):
         # current window's state is preserved. We stash the
         # path and bubble up the host's "new window" sentinel;
         # the host reads the path back via
-        # ``take_pending_new_window_project`` after creating
+        # ``tk_desktop_take_pending_new_window_project`` after creating
         # the window — and focuses the existing window instead
         # when the project is already open there. The terminal
         # frontend has no multi-window story, so it keeps the
@@ -18307,7 +18307,7 @@ struct Desktop(Movable):
         dictionary and force every editor to recompute its spell
         overlay so the underline disappears on this same frame.
 
-        On ``ADD_USER`` we tolerate the persist-to-disk step failing
+        On ``SPELLING_ADD_USER`` we tolerate the persist-to-disk step failing
         (e.g. ``$HOME`` unset, no write permission): the word still
         sticks for the rest of the session via the in-memory bucket
         update, just not across restarts. We surface that via the
@@ -18403,7 +18403,7 @@ struct Desktop(Movable):
         # Always drain the parked presentations — even on a cancel
         # (``choice < 0``). ``take_color_presentation_edit`` is what clears
         # ``has_color_presentations()``; skipping it on cancel leaves the
-        # latch set and ``process_lsp`` re-opens the picker every tick.
+        # latch set and ``lsp_tick`` re-opens the picker every tick.
         var edits = self.lsp_managers[idx].take_color_presentation_edit(choice)
         var w = self._colorpres_editor_idx
         self._colorpres_editor_idx = -1

@@ -119,10 +119,10 @@ comptime SYMBOL_SEARCH_CASE_SENSITIVE: Bool = True
 
 This preserves what the picker has always actually done — the old
 ``rg --smart-case`` was overridden by the ``A-Z`` in its own character
-class — but states it as a decision. The switch is a real one:
-``case_fold`` offers ``find_folded`` at the same throughput as
-``find_exact``, so flipping this costs a pre-folded blob and nothing
-else."""
+class — but states it as a decision. Nothing reads this constant: the
+searches call ``find_exact``. Changing the decision means calling
+``case_fold``'s ``find_folded`` there instead, which runs at the same
+throughput and costs a pre-folded blob."""
 
 comptime _MAX_FILE_BYTES: Int = 4 * 1024 * 1024
 """Files larger than this are skipped. A 4 MB source file is generated

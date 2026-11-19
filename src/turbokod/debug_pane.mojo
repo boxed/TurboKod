@@ -26,10 +26,9 @@ user has scrolled up manually.
 
 State model: one flat ``rows`` list for inspect content, with a kind
 tag per row (``PANE_ROW_*``) so paint and click-handling can dispatch
-without checking type. Output keeps its own list (``output_lines``) and
-attribute parallel array because its row population pattern (append
-on every event) is structurally different from inspect's
-(rebuilt-from-scratch on stop).
+without checking type. Output is a ``TextLog`` of its own (``output``)
+because its row population pattern (append on every event) is
+structurally different from inspect's (rebuilt-from-scratch on stop).
 
 UI intents flow back to Desktop through ``pending_*`` fields the host
 polls each frame:

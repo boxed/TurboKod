@@ -45,7 +45,8 @@ comptime BP_FILE = String("breakpoints.json")
 struct StoredBreakpoint(ImplicitlyCopyable, Movable):
     """One breakpoint as it lives on disk. ``path`` is project-relative
     when the file lives inside the project root, absolute otherwise.
-    ``line`` is 0-based — same convention as ``DapManager._bp_line``.
+    ``line`` is 0-based — the convention the debug adapter is configured
+    with (``linesStartAt1=false``).
     ``condition`` is empty for unconditional breakpoints.
     ``enabled`` is False to skip the breakpoint without removing it —
     the gutter still shows it as a faint dot so the user knows it's

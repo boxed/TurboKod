@@ -10,7 +10,8 @@ other anchored popups so a stray keystroke can't land in the editor behind
 it.
 
 The host (Desktop) opens it from ``Editor.consume_blame_info_request``,
-having filled in the full commit message with ``git_blame.commit_message``
+having filled in the full commit message with
+``git_blame.blame_commit_message``
 (the porcelain blame stream only carries the subject line).
 """
 

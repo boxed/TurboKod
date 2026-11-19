@@ -572,7 +572,7 @@ struct HighlightCache(Copyable, Movable):
     """Per-``Editor`` incremental tokenizer state.
 
     Holds the most recently produced highlights and the per-line
-    tokenizer stack at end-of-line so the next ``_refresh_highlights``
+    tokenizer stack at end-of-line so the next ``sync_highlights``
     can re-tokenize starting from the dirty row instead of from the
     top of the buffer. Lives on ``Editor`` (one per buffer);
     ``GrammarRegistry`` carries the actual loaded grammars and is

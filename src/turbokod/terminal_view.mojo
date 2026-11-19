@@ -53,7 +53,7 @@ comptime _EDGE_SCROLL_MAX = 6
 struct GridSelection(Copyable, Movable):
     """Mouse selection state over a ``Vt`` grid, in (row, col)
     coordinates whose row is *absolute* — counted from the top of the
-    scrollback (``_view_top``), not from the viewport — so a selection
+    scrollback (``view_top``), not from the viewport — so a selection
     stays on its text while the view scrolls or new output pushes it up. Drives the inverted overlay during paint and the
     extracted text on copy. Cell / word / line drag modes mirror the
     editor's selection gestures. ``_last_body`` is the body rect from
