@@ -14,8 +14,8 @@ from .diff import change_runs, diff_lines, line_range
 from .file_io import find_git_project, join_path, project_relative, stat_file
 from .lsp import capture_command
 from .string_utils import (
-    byte_slice, parse_int_all, percent_encode_uri_path, split_lines,
-    split_lines_no_trailing, starts_with, string_list,
+    byte_slice, parse_int_all, percent_encode_uri_path, same_text,
+    split_lines, split_lines_no_trailing, starts_with, string_list,
 )
 from .case_fold import find_exact
 
@@ -455,11 +455,14 @@ def diff_buffer_marks(
     deleted_below = List[Bool](length=nb, fill=False)
     var na = len(head_lines)
     var lo = 0
-    while lo < na and lo < nb and head_lines[lo] == buffer_lines[lo]:
+    # ``same_text``: HEAD's lines share their bytes with the buffer's
+    # wherever the two agree, so nearly every compare is a pointer's.
+    while lo < na and lo < nb and same_text(head_lines[lo], buffer_lines[lo]):
         lo += 1
     var tail = 0
-    while tail < na - lo and tail < nb - lo \
-            and head_lines[na - 1 - tail] == buffer_lines[nb - 1 - tail]:
+    while tail < na - lo and tail < nb - lo and same_text(
+        head_lines[na - 1 - tail], buffer_lines[nb - 1 - tail],
+    ):
         tail += 1
     if lo == na and lo == nb:
         return BufferDiffMarks(out^, deleted_below^)

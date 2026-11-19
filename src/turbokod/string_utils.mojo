@@ -532,6 +532,21 @@ def tail_to_columns(s: String, max_cols: Int) -> String:
     return String(StringSpan(unsafe_from_utf8=Span(unsafe_ptr=b.unsafe_ptr().unsafe_offset(i), length=n - i)))
 
 
+def same_text(a: String, b: String) -> Bool:
+    """``a == b``, settled by a pointer compare when the two share their
+    bytes — an unchanged copy of a line does, strings being copy-on-write.
+    Two heap strings at the same address with the same length *are* the
+    same bytes: a copy holding a reference keeps the buffer from being
+    freed or written in place."""
+    var ab = a.as_bytes()
+    var bb = b.as_bytes()
+    if len(ab) != len(bb):
+        return False
+    if ab.unsafe_ptr() == bb.unsafe_ptr():
+        return True
+    return a == b
+
+
 def string_from_address(ptr: Int, n: Int) -> String:
     """A copy of the ``n`` bytes at ``ptr`` (what a C caller, or a C
     library, handed over) as a ``String``; empty for a null pointer."""

@@ -36,9 +36,9 @@ struct PtyProcess(Copyable, Movable):
 
     Bidirectional: read from ``master_fd`` to get the child's combined
     stdout+stderr; write to it to send keystrokes. ``alive`` is the
-    same one-shot flag pattern as ``LspProcess`` — set to False once
-    we observe the child has exited (via ``waitpid_nohang``) so the
-    drain loop stops trying.
+    same one-shot flag pattern as ``LspProcess`` — set to False from
+    outside, by the pane whose drain reads the child's EOF, so the drain
+    stops trying (and ``terminate`` skips the signal).
 
     ``Copyable`` is declared so the containing ``TerminalPane`` can
     satisfy ``Copyable`` itself; the manual ``__copyinit__`` produces a

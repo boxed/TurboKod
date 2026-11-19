@@ -21,7 +21,7 @@ Output is GNU-style unified diff with three lines of context, including
 
 from std.collections.list import List
 
-from .string_utils import leading_indent_bytes, split_lines
+from .string_utils import leading_indent_bytes, same_text, split_lines
 
 
 @fieldwise_init
@@ -64,10 +64,11 @@ def diff_lines(a: List[String], b: List[String]) -> List[DiffOp]:
     var n_all = len(a)
     var m_all = len(b)
     var lo = 0
-    while lo < n_all and lo < m_all and a[lo] == b[lo]:
+    while lo < n_all and lo < m_all and same_text(a[lo], b[lo]):
         lo += 1
     var tail = 0
-    while tail < n_all - lo and tail < m_all - lo and a[n_all - 1 - tail] == b[m_all - 1 - tail]:
+    while tail < n_all - lo and tail < m_all - lo \
+            and same_text(a[n_all - 1 - tail], b[m_all - 1 - tail]):
         tail += 1
     var ops = List[DiffOp]()
     for i in range(lo):
@@ -121,7 +122,7 @@ def _myers(
                 else:
                     x = right
             var y = x - k
-            while x < n and y < m and a[a_lo + x] == b[b_lo + y]:
+            while x < n and y < m and same_text(a[a_lo + x], b[b_lo + y]):
                 x += 1
                 y += 1
             v[k + offset] = x

@@ -82,7 +82,8 @@ from .string_utils import (
     byte_of_cell_in, byte_slice, cells_between, codepoint_at, display_columns,
     is_ascii_ident_byte, is_printable_text_key, is_word_codepoint,
     leading_indent_bytes, next_token_end, past_empty_match,
-    prev_codepoint_start, prev_token_start, seg_cell_offset, split_lines,
+    prev_codepoint_start, prev_token_start, same_text, seg_cell_offset,
+    split_lines,
     split_lines_no_trailing, text_cells, trailing_ws_start,
     truncate_to_columns, utf8_byte_of_cell, utf8_cell_of_byte,
     utf8_codepoint_size, utf8_floor, utf8_step_forward, word_end_from,
@@ -882,10 +883,10 @@ struct TextBuffer(Copyable, Movable):
         var new_n = len(new_lines)
         var lim = min(old_n, new_n)
         var p = 0
-        while p < lim and _same_text(self.lines[p], new_lines[p]):
+        while p < lim and same_text(self.lines[p], new_lines[p]):
             p += 1
         var s = 0
-        while s < lim - p and _same_text(self.lines[old_n - 1 - s], new_lines[new_n - 1 - s]):
+        while s < lim - p and same_text(self.lines[old_n - 1 - s], new_lines[new_n - 1 - s]):
             s += 1
         self._note_edit(p, s)
         if len(self.marks) == 0 and len(new_marks) == 0:
@@ -978,21 +979,6 @@ comptime _BIG_BUFFER_TOTAL_BYTES = 2_000_000
 """Total buffer size (bytes) past which wrap + syntax highlighting are
 disabled. Even with short lines, building the per-line visual-row table or
 tokenizing a multi-megabyte buffer is too slow to redo on width/mode change."""
-
-
-def _same_text(a: String, b: String) -> Bool:
-    """``a == b``, settled by a pointer compare when the two share their
-    bytes — an unchanged copy of a line does, strings being copy-on-write.
-    Two heap strings at the same address with the same length *are* the
-    same bytes: a copy holding a reference keeps the buffer from being
-    freed or written in place."""
-    var ab = a.as_bytes()
-    var bb = b.as_bytes()
-    if len(ab) != len(bb):
-        return False
-    if ab.unsafe_ptr() == bb.unsafe_ptr():
-        return True
-    return a == b
 
 
 comptime _TYPING_DEBOUNCE_MS = 800
@@ -1183,8 +1169,10 @@ struct BlameInfoRequest(ImplicitlyCopyable, Movable):
     var anchor_y: Int
 
 
-def _lit_at(s: String, off: Int, lit: String) -> Bool:
-    """True if ``s``'s bytes at ``off`` equal ``lit`` exactly (bounds-safe)."""
+def _lit_at(s: String, off: Int, lit: StaticString) -> Bool:
+    """True if ``s``'s bytes at ``off`` equal ``lit`` exactly (bounds-safe).
+    A literal, not a ``String``: the pytest scan asks three times a line
+    of every line on every edit, and each was an allocation."""
     var b = s.as_bytes()
     var p = lit.as_bytes()
     if off < 0 or off + len(p) > len(b):
@@ -1333,11 +1321,11 @@ struct EditorSnapshot(Copyable, Movable):
         var n = len(self.lines)
         var m = len(base)
         var p = 0
-        while p < n and p < m and _same_text(self.lines[p], base[p]):
+        while p < n and p < m and same_text(self.lines[p], base[p]):
             p += 1
         var sfx = 0
         while sfx < n - p and sfx < m - p \
-                and _same_text(self.lines[n - 1 - sfx], base[m - 1 - sfx]):
+                and same_text(self.lines[n - 1 - sfx], base[m - 1 - sfx]):
             sfx += 1
         var middle = List[String](capacity=n - p - sfx)
         for i in range(p, n - sfx):
@@ -2517,22 +2505,22 @@ struct Editor(Copyable, Movable):
                 collectable = indent == 0
             else:
                 collectable = indent > stk_indent[len(stk_indent) - 1]
-            if _lit_at(line, indent, String("class ")):
+            if _lit_at(line, indent, "class "):
                 var cname = _test_ident_at(line, indent + 6)
-                if collectable and _lit_at(cname, 0, String("Test")):
+                if collectable and _lit_at(cname, 0, "Test"):
                     self.test_rows.append(i)
                     self.test_nodes.append(self._node_id(stk_name, cname))
                     stk_indent.append(indent)
                     stk_name.append(cname^)
             else:
                 var doff = -1
-                if _lit_at(line, indent, String("async def ")):
+                if _lit_at(line, indent, "async def "):
                     doff = indent + 10
-                elif _lit_at(line, indent, String("def ")):
+                elif _lit_at(line, indent, "def "):
                     doff = indent + 4
                 if doff >= 0:
                     var fname = _test_ident_at(line, doff)
-                    if collectable and _lit_at(fname, 0, String("test")):
+                    if collectable and _lit_at(fname, 0, "test"):
                         self.test_rows.append(i)
                         self.test_nodes.append(self._node_id(stk_name, fname))
 
@@ -2594,16 +2582,16 @@ struct Editor(Copyable, Movable):
         var n = len(lines)
         var old_n = len(self._spell_text)
         # An unchanged row still shares its bytes with the cached copy
-        # (String copies are copy-on-write), so ``_same_text`` settles
+        # (String copies are copy-on-write), so ``same_text`` settles
         # nearly every row on a pointer compare instead of a memcmp of
         # the whole file per edit.
         var pre = 0
         while pre < n and pre < old_n \
-                and _same_text(lines[pre], self._spell_text[pre]):
+                and same_text(lines[pre], self._spell_text[pre]):
             pre += 1
         var suf = 0
         while suf < n - pre and suf < old_n - pre \
-                and _same_text(lines[n - 1 - suf], self._spell_text[old_n - 1 - suf]):
+                and same_text(lines[n - 1 - suf], self._spell_text[old_n - 1 - suf]):
             suf += 1
         # The runs: the unchanged rows' copied across, the rows between
         # re-checked. Rebuilt whole each time — a few integers a row.

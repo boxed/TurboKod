@@ -46,7 +46,9 @@ from .posix import (
     debug_log_path, getcwd_path, getenv_value, monotonic_ms, realpath,
     realpath_or_self, sleep_ms,
 )
-from .string_utils import percent_encode_uri_path, strip_trailing_newlines
+from .string_utils import (
+    percent_encode_uri_path, same_text, strip_trailing_newlines,
+)
 from .highlight import Highlight
 from .colors import Attr, BLACK, EDITOR_BG, WHITE
 
@@ -5139,7 +5141,9 @@ struct LspManager(Copyable, Movable):
             # Skip the didChange so cursor-driven requests don't trigger a
             # spurious re-analysis (the "analyzing edits…" flicker).
             ref d = self._docs[idx]
-            if d.text == text:
+            # Usually the very buffer it was handed last time: settled by
+            # the pointer, not by comparing the whole file per request.
+            if same_text(d.text, text):
                 # Same content: keep the caller's copy, which is the
                 # editor's cached snapshot, so the two share one buffer
                 # rather than each holding the file.
