@@ -594,6 +594,12 @@ struct HighlightCache(Copyable, Movable):
     """How many times the whole buffer has been tokenized through this
     cache — what a test asserts on to show an edit took the incremental
     path."""
+    var marker_rows: List[Int32]
+    """``sync_highlights``: the rows with a ``language=`` marker, in
+    order, when ``marker_lines >= 0`` — the line count they were found
+    in. Nearly always empty, and what says the injection overlay has
+    nothing to do without searching every line on every edit."""
+    var marker_lines: Int
 
     def __init__(out self):
         self.ext = String("")
@@ -602,6 +608,8 @@ struct HighlightCache(Copyable, Movable):
         self.post_stacks = List[Int32]()
         self.stacks = StackTable()
         self.full_passes = 0
+        self.marker_rows = List[Int32]()
+        self.marker_lines = -1
 
     def invalidate(mut self):
         """Drop the per-line state — used when the extension or the
@@ -611,6 +619,7 @@ struct HighlightCache(Copyable, Movable):
         self.lent_len = -1
         self.post_stacks = List[Int32]()
         self.stacks = StackTable()
+        self.marker_lines = -1
 
 
 comptime _STACK_TABLE_LIMIT = 4096
@@ -658,8 +667,11 @@ def sync_highlights(
     var fb = _grammar_pass(ext, lines, first, registry, cache, dirty_max_row)
     if fb:
         hls = fb.take()
+        cache.marker_lines = -1
         return
-    if _overlays_may_apply(ext, cache.ext, lines):
+    _track_marker_rows(cache, lines, first, dirty_max_row)
+    if len(cache.marker_rows) > 0 or _is_markdown_ext(ext) \
+            or starts_with(cache.ext, String("django")):
         hls = cache.highlights.copy()
         _apply_overlays(ext, cache.ext, lines, hls, registry)
         # "May apply" is a guess from the text: a file that only mentions
@@ -671,6 +683,46 @@ def sync_highlights(
     hls = HighlightList()
     swap(hls, cache.highlights)
     cache.lent_len = len(hls)
+
+
+def _track_marker_rows(
+    mut cache: HighlightCache, lines: List[String], first: Int,
+    last_edited: Int,
+):
+    """Bring ``cache.marker_rows`` up to date with ``lines``, of which
+    rows ``[first, last_edited]`` are new since the last call (and the
+    rows below those the old ones the same distance from the end). Only
+    the new rows are searched; without knowing which they are — a first
+    call, or a line count that changed with no ``last_edited`` — all of
+    them."""
+    var n = len(lines)
+    var n_before = cache.marker_lines
+    var last = last_edited if last_edited >= first - 1 else first
+    if last >= n:
+        last = n - 1
+    # Where the unchanged tail began in the lines as they were.
+    var tail_before = last + 1 - (n - n_before)
+    var rows = List[Int32]()
+    var scan_from = 0
+    var scan_to = n
+    if n_before >= 0 and first > 0 and first <= n \
+            and tail_before >= first and tail_before <= n_before \
+            and (n == n_before or last_edited >= 0):
+        scan_from = first
+        scan_to = last + 1
+        for i in range(len(cache.marker_rows)):
+            if Int(cache.marker_rows[i]) < first:
+                rows.append(cache.marker_rows[i])
+    for r in range(scan_from, scan_to):
+        if _find_language_marker(lines[r]):
+            rows.append(Int32(r))
+    if scan_to < n:
+        for i in range(len(cache.marker_rows)):
+            var r = Int(cache.marker_rows[i])
+            if r >= tail_before:
+                rows.append(Int32(r + n - n_before))
+    cache.marker_rows = rows^
+    cache.marker_lines = n
 
 
 def _hl_buckets(hls: List[Highlight], n: Int) -> List[List[Highlight]]:

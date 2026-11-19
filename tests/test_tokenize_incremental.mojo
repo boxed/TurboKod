@@ -97,6 +97,8 @@ def _random_edits(ext: String, text: String, seed: Int, steps: Int) raises:
     var pastes = [
         String("a = \"\"\"x\ny\"\"\"\nz\n"), String("/* c\n d */\n"),
         String("one\ntwo\nthree"), String("\n\n"), String("# note"),
+        # An injection marker: the overlay it switches on follows its row.
+        String("# language=html\ns = \"<b>x</b>\"\n"),
     ]
     var state = seed
     for step in range(steps):
@@ -140,6 +142,15 @@ def _random_edits(ext: String, text: String, seed: Int, steps: Int) raises:
 def test_random_python_edits_match_a_full_pass() raises:
     _random_edits(String("py"), _python_text(), 7, 400)
     _random_edits(String("py"), _python_text(), 20261119, 400)
+
+
+def test_random_edits_around_an_injection_marker_match_a_full_pass() raises:
+    # The rows with a ``language=`` marker are tracked across edits rather
+    # than searched for in every line each time.
+    var text = String("# language=html\nPAGE = \"<p class='a'>hi</p>\"\n") \
+        + _python_text() + String("# language=css\nCSS = \"a { color: red }\"\n")
+    _random_edits(String("py"), text, 11, 400)
+    _random_edits(String("py"), text, 4242, 400)
 
 
 def test_random_rust_edits_match_a_full_pass() raises:
