@@ -174,16 +174,19 @@ def tokenize_with_grammar(
 def tokenize_with_grammar_full(
     grammar: Grammar, lines: List[String],
     mut table: StackTable, mut post_ids: List[Int],
+    size_hint: Int = 0,
 ) -> List[Highlight]:
     """As ``tokenize_with_grammar``, but also fills ``post_ids`` with
     the scope stack at the *end* of each line, as an index into ``table``
     (which is reset). After the call, ``table.stacks[post_ids[i]]`` is the
     state that line ``i+1`` would start in. Used by ``HighlightCache`` to
     support incremental re-runs that pick up from a known-good row
-    instead of restarting at the top of the buffer."""
+    instead of restarting at the top of the buffer.
+
+    ``size_hint`` is how many highlights to make room for up front."""
     post_ids.clear()
     table.stacks.clear()
-    var out = List[Highlight]()
+    var out = List[Highlight](capacity=size_hint)
     var stack = List[Frame]()
     var last = -1
     for row in range(len(lines)):

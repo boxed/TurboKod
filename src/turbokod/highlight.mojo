@@ -524,7 +524,12 @@ def sync_highlights(
     if _overlays_may_apply(ext, cache.ext, lines):
         hls = cache.highlights.copy()
         _apply_overlays(ext, cache.ext, lines, hls, registry)
-        return
+        # "May apply" is a guess from the text: a file that only mentions
+        # ``language=`` (in a comment, or naming a language with no
+        # grammar) comes back unchanged, and is lent like any other rather
+        # than held twice for as long as it's open.
+        if not _same_highlights(hls, cache.highlights):
+            return
     hls = List[Highlight]()
     swap(hls, cache.highlights)
     cache.lent_len = len(hls)
@@ -618,6 +623,16 @@ def highlight_incremental(
     var out = cache.highlights.copy()
     _apply_overlays(ext, cache.ext, lines, out, registry)
     return out^
+
+
+def _same_highlights(a: List[Highlight], b: List[Highlight]) -> Bool:
+    if len(a) != len(b):
+        return False
+    for i in range(len(a)):
+        if a[i].row != b[i].row or a[i].col_start != b[i].col_start \
+                or a[i].col_end != b[i].col_end or a[i].attr != b[i].attr:
+            return False
+    return True
 
 
 def _apply_overlays(
@@ -746,8 +761,12 @@ def _grammar_pass(
     #      stable_row)``).
     #   3. Append cached highlights with row >= stable_row.
     # ``new_hls`` already contains only rows up to ``stable_row``
-    # because that's where the tokenizer stopped.
-    var out = List[Highlight]()
+    # because that's where the tokenizer stopped. Sized up front (the
+    # replaced rows' spans are the only slack): grown from empty, the list
+    # doubled its way there on every keystroke, a dozen copies of itself.
+    var out = List[Highlight](
+        capacity=len(cache.highlights) + len(new_hls),
+    )
     for i in range(len(cache.highlights)):
         if cache.highlights[i].row < eff_dirty:
             out.append(cache.highlights[i])
@@ -780,8 +799,22 @@ def _full_retokenize(
     ``cache.highlights`` and ``cache.post_stacks``. Caller owns
     the decision of whether to call us versus the incremental
     path — we just do the work."""
+    # Room for the result up front: a list that doubles its way to a big
+    # file's 80k highlights copies itself a dozen times and leaves as much
+    # again behind in outgrown blocks, which the allocator keeps. The last
+    # pass's count is the best guess (a full pass follows every edit that
+    # changes the line count); a first pass goes by the text's size, one
+    # highlight per 8 bytes being generous for code. The excess is left
+    # alone: the tail of a large block that is never written is never
+    # backed by memory, where trimming to fit would write a second copy.
+    var hint = len(cache.highlights)
+    if hint == 0:
+        var bytes = 0
+        for i in range(len(lines)):
+            bytes += lines[i].byte_length()
+        hint = bytes // 8
     cache.highlights = tokenize_with_grammar_full(
-        grammar, lines, cache.stacks, cache.post_stacks,
+        grammar, lines, cache.stacks, cache.post_stacks, hint + 64,
     )
 
 

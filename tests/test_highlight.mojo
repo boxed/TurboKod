@@ -918,6 +918,35 @@ def test_sync_highlights_with_an_injection_keeps_the_grammar_output() raises:
     registry.release()
 
 
+def test_sync_highlights_lends_when_a_marker_injects_nothing() raises:
+    """A file that only mentions ``language=`` (prose in a comment, no
+    string after it) comes out of the overlay pass unchanged, so its
+    highlights are held once like any other file's — and an edit still
+    splices into the lent list."""
+    var lines = List[String]()
+    lines.append(String("a = 1"))
+    lines.append(String("# set language=html to inject"))
+    lines.append(String("b = 2"))
+    var registry = GrammarRegistry()
+    var cache = HighlightCache()
+    var hls = List[Highlight]()
+    sync_highlights(String("py"), lines, 0, registry, cache, hls)
+    assert_true(len(hls) > 0)
+    assert_equal(len(cache.highlights), 0)
+    assert_equal(cache.lent_len, len(hls))
+    lines[2] = String("b = 22  # note")
+    sync_highlights(String("py"), lines, 2, registry, cache, hls)
+    assert_equal(len(cache.highlights), 0)
+    var got = _hl_set(hls)
+    var full = _hl_set(highlight_for_extension(String("py"), lines))
+    assert_equal(len(got), len(full))
+    for i in range(len(got)):
+        assert_equal(got[i].row, full[i].row)
+        assert_equal(got[i].col_start, full[i].col_start)
+        assert_equal(got[i].col_end, full[i].col_end)
+    registry.release()
+
+
 def test_textmate_incremental_matches_full_retokenize() raises:
     """The incremental tokenizer must match a full re-run for the same buffer + dirty-row hint.
 
