@@ -14,6 +14,27 @@ keyboard protocol, focus / bracketed-paste / mouse modes as Ghostty's own
 renderer implements them, and replies to every query it understands
 (DA1/2/3, DSR, DECRQM, XTVERSION, XTWINOPS size, OSC color queries).
 
+## Selecting more than the view
+
+A selection's rows are absolute (counted from the top of the scrollback),
+so it can be longer than the pane. Three ways to make one, the same as in
+the editor, all in `GridSelection` and so in every pty pane:
+
+- **Wheel mid-drag.** With the button held the wheel scrolls the view and
+  `redrag` moves the selection's end to what is under the still pointer.
+  A drag in flight takes the wheel even in a program that tracks the mouse.
+- **Drag past the top or bottom edge.** `edge_scroll` returns the rows to
+  scroll — one per row the pointer is past the edge, at most 6, a step every
+  50 ms whatever the frame rate — and the pane's tick scrolls and re-drags.
+  It is tick-driven because a pointer held still sends no events. The drag
+  has to keep reaching its pane for that, so `Desktop.handle_event` and
+  `handle_panels_event` give a pane with `sel_dragging` first dibs on motion
+  and release, like a resize in flight.
+- **Click, scroll, Shift+click.** A press leaves an anchor (`_anchored`);
+  `click(extend=True)` runs the selection from it to the Shift+click. In a
+  program that tracks the mouse Shift is what makes a click the pane's at
+  all, so there it stays a plain click. Typing drops the anchor.
+
 ## Layers
 
 ```
@@ -175,6 +196,16 @@ the pane is a plain shell as before.
   scrolled back (in plain panes too); back at the bottom, a key, a paste or a
   resize drops it and the live grid returns. The capture is a snapshot —
   output arriving meanwhile shows on return, as in a terminal's scrollback.
+  A selection crosses between the two emulators (below): the same text has
+  other absolute rows in each, so entering and leaving the capture shifts
+  what `GridSelection` holds (`shift_rows`) instead of clearing it, and
+  `_settle_history` keeps the capture at the bottom while the selection
+  still needs it — a drag in flight, or a selection that runs from the
+  screen up into the history (highlighted, so the pane visibly isn't live).
+  A selection wholly above the screen, or a click up there waiting for its
+  Shift+click, shows nothing, so it holds the capture only until the live
+  screen stops matching it (`_history_is_current`): a pane that looks live
+  must not sit on old output.
 - **tmux is the record of which pane belongs to which project.** A session is
   tagged with `@tk_project` (canonical root) and `@tk_cmd` (startup command —
   `claude` for a Claude pane, which Restart reuses). `Desktop._set_project` →

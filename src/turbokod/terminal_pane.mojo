@@ -65,7 +65,7 @@ from .terminal_view import (
     grid_size, GridSelection, cursor_keys_to_click, is_click_press, new_grid, paint_grid,
     paint_grid_links, paint_results_grid, paint_scrollback_bar, paste_to_pty,
     place_grid, results_handle_mouse, results_pointer_shape,
-    scrollback_bar_delta, wheel_rows,
+    scrollback_bar_delta, view_top, wheel_rows,
 )
 
 from .vt import MOUSE_MOTION, MOUSE_PRESS, MOUSE_RELEASE, SCROLLBACK_LINES, Vt
@@ -150,6 +150,9 @@ struct TerminalPane(Copyable, Movable):
     scrollback. Back at the bottom it is dropped and ``vt`` is live again.
     This keeps tmux's copy mode — its own selection that copies on release
     and its ``[0/123]`` position indicator — out of the pane."""
+    var _history_stale: Bool
+    """Output has changed the live screen since ``history`` was captured,
+    so its bottom rows are no longer the screen."""
     var _history_on: Bool
     var _modes_ms: Int
     var _child_mouse: Bool
@@ -279,6 +282,7 @@ struct TerminalPane(Copyable, Movable):
         self.history = Vt(1, 1)
         self.history.release()
         self._history_on = False
+        self._history_stale = False
         self._modes_ms = -_MODES_TTL_MS
         self._child_mouse = False
         self._child_alt = False
@@ -558,22 +562,72 @@ struct TerminalPane(Copyable, Movable):
         if h.scrollback_rows() == 0:
             h.release()
             return
+        # The capture's bottom rows are the screen, so the cursor is
+        # where the live one is and what was selected (or clicked) on the
+        # screen keeps its text — a drag that scrolls up into history
+        # goes on selecting.
+        h.feed_string(
+            String("\x1b[") + String(self.vt.cursor_row() + 1) + String(";")
+            + String(self.vt.cursor_col() + 1) + String("H")
+            + (String("") if self.vt.cursor_visible() else String("\x1b[?25l")),
+        )
+        self.sel.shift_rows(h.scrollback_rows() - view_top(self.vt))
         self.history = h
         self._history_on = True
-        self.sel.clear()
+        self._history_stale = False
 
     def _settle_history(mut self):
-        """Back at the bottom (and not mid-drag on the bar): live again."""
-        if self._history_on and self.history.view_offset() == 0 \
-                and not self.scroll_bar.dragging:
-            self._leave_history()
+        """Back at the bottom (and not mid-drag on the bar): live again —
+        unless the selection still needs the capture. A drag in flight
+        does, and so does a selection that runs from the screen up into
+        history, which stays (highlighted) until it is copied or dropped.
+        One wholly above the screen, or a click up there waiting for its
+        Shift+click, is out of sight, so it holds the capture only while
+        the capture still shows what the live screen does: a pane that
+        looks live must not sit on old output."""
+        if not self._history_on or self.history.view_offset() != 0 \
+                or self.scroll_bar.dragging or self.sel.sel_dragging:
+            return
+        var top = self.history.scrollback_rows()
+        if self.sel.reaches_above(top) \
+                and (self.sel.shown_from(top) or not self._history_stale):
+            return
+        self._leave_history()
+
+    def _history_is_current(self) -> Bool:
+        """Whether the capture's screen is still the live one."""
+        var rows = self.vt.rows()
+        if rows != self.history.rows():
+            return False
+        var live = List[String]()
+        for r in range(rows):
+            live.append(self.vt.row_text(r, 0, -1, False))
+        for r in range(rows):
+            if live[r] != self.history.row_text(r, 0, -1, False):
+                return False
+        return True
 
     def _leave_history(mut self):
         if not self._history_on:
             return
+        # Back in the live screen's rows, when what is held is still
+        # there to be read; the rest only the capture had.
+        var top = self.history.scrollback_rows()
+        if self._history_stale or self.sel.reaches_above(top):
+            self.sel.clear()
+        else:
+            self.sel.shift_rows(view_top(self.vt) - top)
         self.history.release()
         self._history_on = False
-        self.sel.clear()
+
+    def _drag_scroll(mut self):
+        """Scroll under a selection drag held past the top or bottom
+        edge, a step a tick, so the selection can outgrow the view."""
+        var rows = self.sel.edge_scroll(monotonic_ms())
+        if rows == 0:
+            return
+        self.scroll_view_by(rows)
+        self.sel.redrag(self._view())
 
     def clear(mut self):
         """Wipe the visible grid. Doesn't kill the shell — equivalent
@@ -590,11 +644,16 @@ struct TerminalPane(Copyable, Movable):
         any DSR/DA/clipboard side-effects the parse may have queued."""
         if self.tests:
             self.results.poll()
+        self._drag_scroll()
         if not self.pty.alive or self.pty.master_fd < 0:
             return
         self.pty.flush()
         var drained = drain_pty(self.pty, self.vt)
         var total = drained[0]
+        if self._history_on:
+            if total > 0 and not self._history_stale:
+                self._history_stale = not self._history_is_current()
+            self._settle_history()
         if drained[1]:
             # EOF from the slave side closing — the child is gone (the
             # user typed ``exit``, or the shell died). Tear it down here
@@ -906,6 +965,14 @@ struct TerminalPane(Copyable, Movable):
     def handle_mouse(
         mut self, screen_event: Event, panel: Rect, allow_resize: Bool = True,
     ) -> Bool:
+        var used = self._handle_mouse(screen_event, panel, allow_resize)
+        # A click or a finished drag may be what the capture was kept for.
+        self._settle_history()
+        return used
+
+    def _handle_mouse(
+        mut self, screen_event: Event, panel: Rect, allow_resize: Bool,
+    ) -> Bool:
         var event = screen_event
         if event.kind != EVENT_MOUSE:
             return False
@@ -950,11 +1017,14 @@ struct TerminalPane(Copyable, Movable):
             if not event.pressed:
                 return True
             self.focused = True
-            if (event.mods & MOD_SHIFT) == 0 \
+            # A selection drag in flight is ours, so the wheel scrolls
+            # under it and the selection grows past the view.
+            if (event.mods & MOD_SHIFT) == 0 and not self.sel.sel_dragging \
                     and self._child_tracks_mouse(True):
                 self._forward_mouse_to_pty(event, MOUSE_PRESS)
                 return True
             self.scroll_view_by(wheel_rows(event))
+            self.sel.redrag(self._view())
             return True
         # Press / release / motion. With tracking on and Shift not
         # held, route the event to the child instead of selection —
@@ -963,8 +1033,8 @@ struct TerminalPane(Copyable, Movable):
         # override.
         var shift_held = (event.mods & MOD_SHIFT) != 0
         var is_press = is_click_press(event)
-        var routes_to_child = not shift_held \
-            and self._child_tracks_mouse(is_press)
+        var tracked = self._child_tracks_mouse(is_press)
+        var routes_to_child = not shift_held and tracked
         if event.button == MOUSE_BUTTON_LEFT and event.pressed \
                 and not event.motion:
             self.focused = True
@@ -982,7 +1052,10 @@ struct TerminalPane(Copyable, Movable):
             # rather than starting a selection.
             if self.link_click.click(self._last_links, event.pos):
                 return True
-            self.sel.click(self._view(), event)
+            # Shift+click extends the selection to here — except in a
+            # program that takes the mouse, where Shift is what makes the
+            # click ours in the first place.
+            self.sel.click(self._view(), event, shift_held and not tracked)
             return True
         if routes_to_child:
             # Release / motion / non-left presses. The encoder drops what

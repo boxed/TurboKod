@@ -38,12 +38,12 @@ from .colors import (
 )
 from .events import (
     Event, EVENT_KEY, EVENT_MOUSE, EVENT_PASTE, KEY_ESC, MOD_META, MOD_NONE,
-    MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
+    MOD_SHIFT, MOUSE_BUTTON_LEFT, MOUSE_BUTTON_NONE, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from .geometry import Point, Rect
 from .output_links import extract_all_links, link_at, LinkLatch, OutputLink
 from .painter import Painter
-from .posix import close_fd, exit_code_from_status, poll_exit
+from .posix import close_fd, exit_code_from_status, monotonic_ms, poll_exit
 from .pty import PtyProcess
 from .test_report import reporting_env
 from .test_results import (
@@ -257,6 +257,16 @@ struct TestPane(Copyable, Movable):
 
     # --- per-tick drain ------------------------------------------------
 
+    def drag_scroll(mut self):
+        """Scroll under a selection drag held past the top or bottom
+        edge, a step a frame, so the selection can outgrow the view.
+        Apart from ``tick``: a finished run's output is still read."""
+        var rows = self.sel.edge_scroll(monotonic_ms())
+        if rows == 0:
+            return
+        self.vt.scroll_view_by(rows)
+        self.sel.redrag(self.vt)
+
     def tick(mut self):
         """Drain the pty into the emulator, flush its side-effects, and
         detect child exit. Called by ``Desktop`` each frame."""
@@ -447,6 +457,8 @@ struct TestPane(Copyable, Movable):
                 return True
             self.focused = True
             self.vt.scroll_view_by(wheel_rows(event))
+            # Mid-drag, the selection grows with the scroll.
+            self.sel.redrag(self.vt)
             return True
         if event.button == MOUSE_BUTTON_LEFT and event.pressed \
                 and not event.motion:
@@ -456,7 +468,8 @@ struct TestPane(Copyable, Movable):
             # than starting a selection.
             if self.link_click.click(self._last_links, event.pos):
                 return True
-            self.sel.click(self.vt, event)
+            # Shift+click extends the selection to here.
+            self.sel.click(self.vt, event, (event.mods & MOD_SHIFT) != 0)
             return True
         return True
 

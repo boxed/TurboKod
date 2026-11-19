@@ -3622,6 +3622,15 @@ struct Desktop(Movable):
             return True
         return False
 
+    def _panel_selecting(self, kind: Int, idx: Int) -> Bool:
+        """Whether a text-selection drag is in flight in the pty panel
+        ``(kind, idx)``."""
+        if kind == PANEL_KIND_TERMINAL:
+            return self.terminal_panes[idx].sel.sel_dragging
+        if kind == PANEL_KIND_TEST:
+            return self.test_pane.sel.sel_dragging
+        return False
+
     def _panel_dock(
         ref self, kind: Int, idx: Int,
     ) -> ref[
@@ -3808,6 +3817,14 @@ struct Desktop(Movable):
         # rather than the panel's own top border resizing itself.
         if self._panels_drive_resize(event, slots, screen):
             return Optional[String]()
+        # A selection drag in flight is its pane's, over whichever panel
+        # the pointer is now.
+        for ref s in slots:
+            if not s.rect.is_empty() and self._panel_selecting(s.kind, s.idx) \
+                    and self._panel_slot_handle_mouse(
+                        s.kind, s.idx, event, s.rect,
+                    ):
+                return Optional[String]()
         for ref s in slots:
             if s.rect.is_empty():
                 continue
@@ -8349,9 +8366,12 @@ struct Desktop(Movable):
             var slots = self._dock_slots(screen)
             for ref s in slots:
                 ref dock = self._panel_dock(s.kind, s.idx)
+                # A selection drag in a pty pane is that pane's too,
+                # wherever the pointer went: past its top edge is how the
+                # selection scrolls on.
                 if dock.is_resizing() or (
                     press and dock.is_on_resize_edge(event.pos, s.rect)
-                ):
+                ) or (not press and self._panel_selecting(s.kind, s.idx)):
                     if self._panel_slot_handle_mouse(
                         s.kind, s.idx, event, s.rect, allow_resize=True,
                     ):
@@ -14154,6 +14174,7 @@ struct Desktop(Movable):
         line. (``running()`` is True here, so the post-tick check fires
         the status message exactly on the tick the child exits.)
         """
+        self.test_pane.drag_scroll()
         if not self.test_pane.running():
             return
         self.test_pane.tick()

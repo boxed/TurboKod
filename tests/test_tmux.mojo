@@ -10,7 +10,7 @@ from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from turbokod.canvas import Canvas
 from turbokod.desktop import Desktop
 from turbokod.events import (
-    Event, MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
+    Event, MOD_SHIFT, MOUSE_BUTTON_LEFT, MOUSE_WHEEL_DOWN, MOUSE_WHEEL_UP,
 )
 from turbokod.geometry import Point, Rect
 from turbokod.lsp import capture_command
@@ -378,6 +378,136 @@ def test_tmux_test_run() raises:
     kill.append(tmux_socket_path())
     kill.append(String("kill-server"))
     _ = capture_command(kill)
+    d.shutdown()
+    _rm_rf(root)
+
+
+def _newlines(text: String) -> Int:
+    var n = 0
+    var b = text.as_bytes()
+    for i in range(len(b)):
+        if b[i] == 0x0A:
+            n += 1
+    return n
+
+
+def test_tmux_selection_outgrows_the_view() raises:
+    """A tmux pane's history is another emulator than its screen, and the
+    selection crosses between the two: a drag that scrolls up into the
+    history keeps what it had, and a click up there waits for its
+    Shift+click at the bottom."""
+    if not tmux_available():
+        return
+    var root = _temp_path(String("_tmux_select"))
+    _rm_rf(root)
+    _ensure_dir(root)
+    var d = Desktop()
+    d.config.terminal_tmux = True
+    d.open_project(root)
+    d._open_terminal_pane(String("seq 1 200"))
+    var panel = Rect(0, 0, 60, 16)
+    var canvas = Canvas(60, 16)
+    d.terminal_panes[0].paint(canvas, panel)
+    assert_true(_pane_shows(d, String("200")))
+    for _ in range(60):
+        d.terminal_tick()
+        sleep_ms(20)
+    d.terminal_panes[0].paint(canvas, panel)
+    var up = Event.mouse_event(Point(5, 3), MOUSE_WHEEL_UP, True, False)
+    var down = Event.mouse_event(Point(5, 3), MOUSE_WHEEL_DOWN, True, False)
+
+    # Press on the live screen, scroll two notches with the button held.
+    var at = Point(0, 3)
+    var live_row = d.terminal_panes[0].vt.row_text(2)
+    _ = d.terminal_panes[0].handle_mouse(
+        Event.mouse_event(at, MOUSE_BUTTON_LEFT, True, False), panel,
+    )
+    _ = d.terminal_panes[0].handle_mouse(up, panel)
+    assert_true(d.terminal_panes[0]._history_on)
+    assert_true(d.terminal_panes[0].sel.sel_dragging)
+    # The anchor is on the same text in the capture.
+    var h = d.terminal_panes[0].history
+    assert_equal(
+        d.terminal_panes[0].sel.sel_anchor_r, h.scrollback_rows() + 2,
+    )
+    assert_equal(h.row_text(5), live_row)
+    _ = d.terminal_panes[0].handle_mouse(up, panel)
+    _ = d.terminal_panes[0].handle_mouse(
+        Event.mouse_event(at, MOUSE_BUTTON_LEFT, False, False), panel,
+    )
+    assert_true(d.terminal_panes[0].has_selection())
+    var text = d.terminal_panes[0].selected_text()
+    assert_equal(_newlines(text), 6)
+    assert_true(text.as_bytes()[0] >= 0x30 and text.as_bytes()[0] <= 0x39)
+
+    # Back at the bottom it runs off the top of the screen: the capture
+    # stays, and so does the selection.
+    _ = d.terminal_panes[0].handle_mouse(down, panel)
+    _ = d.terminal_panes[0].handle_mouse(down, panel)
+    assert_true(d.terminal_panes[0]._history_on)
+    assert_equal(d.terminal_panes[0].history.view_offset(), 0)
+    d.terminal_tick()
+    assert_true(d.terminal_panes[0]._history_on)
+    assert_equal(d.terminal_panes[0].selected_text(), text)
+    # The cursor is drawn where the live one is.
+    assert_equal(
+        d.terminal_panes[0].history.cursor_row(),
+        d.terminal_panes[0].vt.cursor_row(),
+    )
+    assert_equal(
+        d.terminal_panes[0].history.cursor_col(),
+        d.terminal_panes[0].vt.cursor_col(),
+    )
+    # A click drops it, and with nothing left to keep the pane is live.
+    _ = d.terminal_panes[0].handle_mouse(
+        Event.mouse_event(Point(4, 6), MOUSE_BUTTON_LEFT, True, False), panel,
+    )
+    _ = d.terminal_panes[0].handle_mouse(
+        Event.mouse_event(Point(4, 6), MOUSE_BUTTON_LEFT, False, False), panel,
+    )
+    assert_false(d.terminal_panes[0]._history_on)
+    assert_false(d.terminal_panes[0].has_selection())
+    # The click came along to the live screen's rows.
+    assert_true(d.terminal_panes[0].sel._anchored)
+    assert_equal(d.terminal_panes[0].sel.sel_anchor_r, 5)
+
+    # Click in the history, scroll to the bottom, Shift+click.
+    _ = d.terminal_panes[0].handle_mouse(up, panel)
+    _ = d.terminal_panes[0].handle_mouse(up, panel)
+    _ = d.terminal_panes[0].handle_mouse(
+        Event.mouse_event(Point(0, 1), MOUSE_BUTTON_LEFT, True, False), panel,
+    )
+    _ = d.terminal_panes[0].handle_mouse(
+        Event.mouse_event(Point(0, 1), MOUSE_BUTTON_LEFT, False, False), panel,
+    )
+    _ = d.terminal_panes[0].handle_mouse(down, panel)
+    _ = d.terminal_panes[0].handle_mouse(down, panel)
+    assert_equal(d.terminal_panes[0].history.view_offset(), 0)
+    d.terminal_tick()
+    assert_true(d.terminal_panes[0]._history_on)
+    _ = d.terminal_panes[0].handle_mouse(
+        Event.mouse_event(Point(0, 4), MOUSE_BUTTON_LEFT, True, False,
+                          MOD_SHIFT), panel,
+    )
+    _ = d.terminal_panes[0].handle_mouse(
+        Event.mouse_event(Point(0, 4), MOUSE_BUTTON_LEFT, False, False,
+                          MOD_SHIFT), panel,
+    )
+    assert_true(d.terminal_panes[0].has_selection())
+    assert_equal(_newlines(d.terminal_panes[0].selected_text()), 9)
+
+    # A click waiting up there doesn't hold a pane that has new output:
+    # nothing shows that it isn't live.
+    d.terminal_panes[0].sel.sel_active = False
+    assert_true(d.terminal_panes[0]._history_on)
+    d.terminal_panes[0]._history_stale = True
+    d.terminal_tick()
+    assert_false(d.terminal_panes[0]._history_on)
+    assert_false(d.terminal_panes[0].sel._anchored)
+
+    d.terminal_panes[0].dock.request_close()
+    d.terminal_tick()
+    assert_equal(_tmux_sessions_settle(d, root, 0), 0)
     d.shutdown()
     _rm_rf(root)
 

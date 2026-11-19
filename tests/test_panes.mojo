@@ -198,6 +198,159 @@ def test_terminal_selection_follows_text_when_scrolled() raises:
     assert_equal(pane.vt.view_offset(), 2)
 
 
+def _numbered_pane(lines: Int) -> TerminalPane:
+    """A pane that printed ``line 0`` … ``line <lines - 1>``, so most of
+    it is scrollback."""
+    var text = String("")
+    for i in range(lines):
+        text += String("line ") + String(i) + String("\r\n")
+    return _terminal_pane_with_text(text)
+
+
+def _wheel_up(mut pane: TerminalPane, panel: Rect, steps: Int):
+    for _ in range(steps):
+        _ = pane.handle_mouse(
+            Event.mouse_event(Point(2, 5), MOUSE_WHEEL_UP, True, False), panel,
+        )
+
+
+def test_terminal_shift_click_extends_past_the_view() raises:
+    """Click, scroll, Shift+click selects from the click to the
+    Shift+click — more than the view holds — as it does in the editor."""
+    var pane = _numbered_pane(100)
+    var panel = Rect(Point(0, 0), Point(80, 25))
+    var rows = pane.vt.rows()
+    # The view's bottom text row (the last row is the empty line the
+    # final newline left).
+    var start = Point(0, rows - 1)
+    _ = pane.handle_mouse(
+        Event.mouse_event(start, MOUSE_BUTTON_LEFT, True, False), panel,
+    )
+    _ = pane.handle_mouse(
+        Event.mouse_event(start, MOUSE_BUTTON_LEFT, False, False), panel,
+    )
+    assert_false(pane.has_selection())
+    _wheel_up(pane, panel, 12)
+    assert_equal(pane.vt.view_offset(), 36)
+    # Shift+click the top row of what is shown now.
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(0, 1), MOUSE_BUTTON_LEFT, True, False,
+                          MOD_SHIFT), panel,
+    )
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(0, 1), MOUSE_BUTTON_LEFT, False, False,
+                          MOD_SHIFT), panel,
+    )
+    assert_true(pane.has_selection())
+    # ``line 99`` sat on view row rows - 2 (y = rows - 1); the click took
+    # its start, the Shift+click the start of the row 36 + rows - 2 up.
+    var first = 99 - 36 - (rows - 2)
+    var want = String("")
+    for i in range(first, 99):
+        want += String("line ") + String(i) + String("\n")
+    assert_equal(pane.selected_text(), want)
+    assert_true(99 - first > rows)
+    # A plain click starts over; typing drops the anchor.
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(3, 4), MOUSE_BUTTON_LEFT, True, False), panel,
+    )
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(3, 4), MOUSE_BUTTON_LEFT, False, False), panel,
+    )
+    assert_false(pane.has_selection())
+    assert_true(pane.sel._anchored)
+    pane.sel.clear()
+    assert_false(pane.sel._anchored)
+    # With no anchor a Shift+click is a click.
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(3, 6), MOUSE_BUTTON_LEFT, True, False,
+                          MOD_SHIFT), panel,
+    )
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(3, 6), MOUSE_BUTTON_LEFT, False, False,
+                          MOD_SHIFT), panel,
+    )
+    assert_false(pane.has_selection())
+
+
+def test_terminal_wheel_mid_drag_grows_the_selection() raises:
+    """Scrolling the wheel with the button held extends the selection to
+    what scrolled in under the pointer."""
+    var pane = _numbered_pane(100)
+    var panel = Rect(Point(0, 0), Point(80, 25))
+    var rows = pane.vt.rows()
+    var at = Point(0, rows - 1)
+    _ = pane.handle_mouse(
+        Event.mouse_event(at, MOUSE_BUTTON_LEFT, True, False), panel,
+    )
+    _wheel_up(pane, panel, 10)
+    # No motion, no release yet: the wheel alone moved the end.
+    assert_true(pane.sel.sel_dragging)
+    assert_true(pane.sel.cell_in_selection(pane.sel.sel_focus_r, 0))
+    _ = pane.handle_mouse(
+        Event.mouse_event(at, MOUSE_BUTTON_LEFT, False, False), panel,
+    )
+    var want = String("")
+    for i in range(69, 99):
+        want += String("line ") + String(i) + String("\n")
+    assert_equal(pane.selected_text(), want)
+
+
+def test_terminal_drag_past_the_edge_scrolls() raises:
+    """A drag held above the body scrolls back a step a tick, faster the
+    further out, and the selection follows; below it, forward again."""
+    var pane = _numbered_pane(100)
+    var panel = Rect(Point(0, 0), Point(80, 25))
+    var rows = pane.vt.rows()
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(0, rows - 1), MOUSE_BUTTON_LEFT, True, False),
+        panel,
+    )
+    # Inside the body nothing scrolls.
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(0, 3), MOUSE_BUTTON_LEFT, True, True), panel,
+    )
+    pane.tick()
+    assert_equal(pane.vt.view_offset(), 0)
+    # One row above the body (the title row): a row a step.
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(0, 0), MOUSE_BUTTON_LEFT, True, True), panel,
+    )
+    pane.tick()
+    assert_equal(pane.vt.view_offset(), 1)
+    # The next step waits its turn.
+    pane.tick()
+    assert_equal(pane.vt.view_offset(), 1)
+    pane.sel._edge_ms = 0
+    pane.tick()
+    assert_equal(pane.vt.view_offset(), 2)
+    # Far out is faster, but capped.
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(0, -40), MOUSE_BUTTON_LEFT, True, True), panel,
+    )
+    pane.sel._edge_ms = 0
+    pane.tick()
+    assert_equal(pane.vt.view_offset(), 8)
+    # The end of the selection is the top row shown.
+    assert_equal(
+        pane.sel.sel_focus_r, pane.vt.scrollback_rows() - pane.vt.view_offset(),
+    )
+    # Below the body it comes back.
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(0, 26), MOUSE_BUTTON_LEFT, True, True), panel,
+    )
+    pane.sel._edge_ms = 0
+    pane.tick()
+    assert_equal(pane.vt.view_offset(), 6)
+    # Released, it stops.
+    _ = pane.handle_mouse(
+        Event.mouse_event(Point(0, 26), MOUSE_BUTTON_LEFT, False, False), panel,
+    )
+    pane.sel._edge_ms = 0
+    pane.tick()
+    assert_equal(pane.vt.view_offset(), 6)
+
+
 def test_terminal_parses_modified_arrows() raises:
     """The CSI ``ESC[1;<mod><letter>`` form gives us shift/ctrl on arrows."""
     var shift_right = parse_input(String("\x1b[1;2C"))

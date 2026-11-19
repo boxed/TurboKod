@@ -43,6 +43,13 @@ from .string_utils import display_columns
 from .vt import Vt
 
 
+comptime _EDGE_SCROLL_MS = 50
+"""Least time between two steps of a drag's edge scroll — a rate of its
+own, whatever the frontend's frame rate."""
+comptime _EDGE_SCROLL_MAX = 6
+"""Most rows one step scrolls, however far past the edge the pointer is."""
+
+
 struct GridSelection(Copyable, Movable):
     """Mouse selection state over a ``Vt`` grid, in (row, col)
     coordinates whose row is *absolute* — counted from the top of the
@@ -50,7 +57,13 @@ struct GridSelection(Copyable, Movable):
     stays on its text while the view scrolls or new output pushes it up. Drives the inverted overlay during paint and the
     extracted text on copy. Cell / word / line drag modes mirror the
     editor's selection gestures. ``_last_body`` is the body rect from
-    the last paint, used to map screen positions back to grid coords."""
+    the last paint, used to map screen positions back to grid coords.
+
+    A selection can be longer than the view, the same three ways as in
+    the editor: scroll the wheel mid-drag (``redrag``), drag past the top
+    or bottom edge (``edge_scroll``, stepped by the pane's tick), or
+    click, scroll, and Shift+click where it should end (``click`` with
+    ``extend``)."""
     var sel_active: Bool
     """True when a finished selection is on screen."""
     var sel_dragging: Bool
@@ -72,6 +85,15 @@ struct GridSelection(Copyable, Movable):
     word — the fixed end of a word-snapped drag."""
     var _tc_anchor_r: Int
     """Row the triple-click landed on — the fixed end of a line drag."""
+    var _anchored: Bool
+    """A press has put the anchor somewhere, so a Shift+click has a
+    place to extend from. Dropped with the selection (``clear``)."""
+    var _drag_pos: Point
+    """Where the pointer last was during the drag in flight, in grid
+    cells like ``_last_body`` — what the selection is re-extended to when
+    the view scrolls under a still pointer."""
+    var _edge_ms: Int
+    """When ``edge_scroll`` last stepped."""
     var _last_body: Rect
     """Body rect from the last paint, in grid cells from the body's
     top-left corner: the body itself unless the terminal font has a
@@ -95,6 +117,9 @@ struct GridSelection(Copyable, Movable):
         self._dc_anchor_lo = 0
         self._dc_anchor_hi = 0
         self._tc_anchor_r = 0
+        self._anchored = False
+        self._drag_pos = Point(0, 0)
+        self._edge_ms = 0
         self._last_body = Rect.empty()
         self._scale_x = SCALE_ONE
         self._scale_y = SCALE_ONE
@@ -160,6 +185,29 @@ struct GridSelection(Copyable, Movable):
         self.sel_dragging = False
         self._drag_word = False
         self._drag_line = False
+        self._anchored = False
+
+    def shift_rows(mut self, delta: Int):
+        """Move everything held ``delta`` rows down: the same text has
+        other absolute rows in another emulator (a tmux pane's captured
+        history against its live screen)."""
+        self.sel_anchor_r += delta
+        self.sel_focus_r += delta
+        self._dc_anchor_r += delta
+        self._tc_anchor_r += delta
+
+    def reaches_above(self, row: Int) -> Bool:
+        """Whether the selection — or, with none, the anchor a Shift+click
+        would extend from — has a row above absolute row ``row``."""
+        if self.sel_active or self.sel_dragging:
+            return min(self.sel_anchor_r, self.sel_focus_r) < row
+        return self._anchored and self.sel_anchor_r < row
+
+    def shown_from(self, row: Int) -> Bool:
+        """Whether a finished selection covers absolute row ``row`` or
+        rows below it."""
+        return self.sel_active \
+            and max(self.sel_anchor_r, self.sel_focus_r) >= row
 
     # --- copy ----------------------------------------------------------
 
@@ -195,13 +243,13 @@ struct GridSelection(Copyable, Movable):
             var c_end   = sc1 if r == sr1 else v.cols()
             if c_end > v.cols(): c_end = v.cols()
             if c_start < 0: c_start = 0
-            var vr = r - _view_top(v)
+            var vr = r - view_top(v)
             if vr < 0:
                 v.scroll_view_by(-vr)
-                vr = r - _view_top(v)
+                vr = r - view_top(v)
             elif vr >= rows:
                 v.scroll_view_by(-(vr - rows + 1))
-                vr = r - _view_top(v)
+                vr = r - view_top(v)
             if 0 <= vr and vr < rows:
                 out += v.row_text(vr, c_start, c_end)
             if r < sr1:
@@ -230,7 +278,7 @@ struct GridSelection(Copyable, Movable):
         if r >= rows: r = rows - 1
         if c < 0: c = 0
         if c > cols: c = cols
-        return (r + _view_top(vt), c)
+        return (r + view_top(vt), c)
 
     # --- drag ----------------------------------------------------------
 
@@ -248,17 +296,51 @@ struct GridSelection(Copyable, Movable):
             return True
         return False
 
-    def click(mut self, vt: Vt, event: Event):
+    def click(mut self, vt: Vt, event: Event, extend: Bool = False):
         """A left press in the body: triple-click selects the row,
         double-click the word under the pointer, a single click starts a
         cell drag. ``click_count`` comes from the input parser, so no
-        timing state lives here."""
+        timing state lives here.
+
+        ``extend`` is a Shift+click: the selection then runs from the
+        anchor — the last plain click, or where the selection started —
+        to here, however far the view scrolled in between. With no
+        anchor yet it is a plain click."""
         if event.click_count >= 3:
             self.select_line_at(vt, event.pos)
         elif event.click_count == 2:
             self.select_word_at(vt, event.pos)
+        elif extend and self._anchored:
+            self.sel_dragging = True
+            self._drag_word = False
+            self._drag_line = False
+            self.extend_drag(vt, event.pos)
         else:
             self.begin_drag(vt, event.pos)
+
+    def redrag(mut self, vt: Vt):
+        """The view scrolled under a drag in flight: the moving end is
+        whatever is under the (still) pointer now."""
+        if self.sel_dragging:
+            var pos = self._drag_pos
+            self.extend_drag(vt, pos)
+
+    def edge_scroll(mut self, now_ms: Int) -> Int:
+        """Rows the drag in flight asks the view to scroll: into history
+        (positive) while the pointer is above the body, toward the live
+        tail below it, more the further out it is. 0 with no such drag,
+        and between steps. The pane scrolls by it and calls ``redrag``."""
+        if not self.sel_dragging or self._last_body.is_empty():
+            return 0
+        var rows = 0
+        if self._drag_pos.y < self._last_body.a.y:
+            rows = self._last_body.a.y - self._drag_pos.y
+        elif self._drag_pos.y >= self._last_body.b.y:
+            rows = self._last_body.b.y - 1 - self._drag_pos.y
+        if rows == 0 or now_ms - self._edge_ms < _EDGE_SCROLL_MS:
+            return 0
+        self._edge_ms = now_ms
+        return max(-_EDGE_SCROLL_MAX, min(rows, _EDGE_SCROLL_MAX))
 
     def begin_drag(mut self, vt: Vt, pos: Point):
         var rc = self.grid_xy_for_pos(vt, pos)
@@ -266,6 +348,8 @@ struct GridSelection(Copyable, Movable):
         self.sel_anchor_c = rc[1]
         self.sel_focus_r  = rc[0]
         self.sel_focus_c  = rc[1]
+        self._anchored = True
+        self._drag_pos = pos
         self.sel_dragging = True
         self.sel_active   = False
         # A plain single-click drag selects cell-by-cell, not snapped.
@@ -275,6 +359,7 @@ struct GridSelection(Copyable, Movable):
     def extend_drag(mut self, vt: Vt, pos: Point):
         # While a double-/triple-click drag is in flight the moving end
         # snaps to whole-word / whole-line boundaries.
+        self._drag_pos = pos
         var rc = self.grid_xy_for_pos(vt, pos)
         if self._drag_line:
             self._extend_line_drag(vt, rc[0])
@@ -306,7 +391,7 @@ struct GridSelection(Copyable, Movable):
         returns just that single cell. ``r_abs`` is absolute and must be
         in the view (it's the row under the pointer)."""
         var grid = vt.grid()
-        var r = r_abs - _view_top(vt)
+        var r = r_abs - view_top(vt)
         if r < 0 or r >= grid.rows:
             return (c_in, c_in + 1)
         var c = c_in
@@ -341,6 +426,8 @@ struct GridSelection(Copyable, Movable):
         self.sel_focus_r = r
         self.sel_focus_c = bounds[1]
         self.sel_active = True
+        self._anchored = True
+        self._drag_pos = pos
         # Stay "dragging" so a drag without lifting keeps consuming
         # motion, and remember the clicked word as the fixed anchor.
         self.sel_dragging = True
@@ -374,6 +461,8 @@ struct GridSelection(Copyable, Movable):
         self.sel_focus_r = r
         self.sel_focus_c = vt.cols()
         self.sel_active = True
+        self._anchored = True
+        self._drag_pos = pos
         self.sel_dragging = True
         self._drag_word = False
         self._drag_line = True
@@ -472,7 +561,7 @@ def _paint_grid_cells(
     sel: GridSelection, body: Rect, focused: Bool,
 ):
     var grid = vt.grid()
-    var top = _view_top(vt)
+    var top = view_top(vt)
     for r in range(grid.rows):
         for c in range(grid.cols):
             var cell = grid.cell(r, c)
@@ -500,7 +589,7 @@ def _paint_grid_cells(
 # --- visual helpers -------------------------------------------------------
 
 
-def _view_top(vt: Vt) -> Int:
+def view_top(vt: Vt) -> Int:
     """Absolute row (counted from the top of the scrollback) of the
     viewport's first row — what ``GridSelection`` adds to a view row."""
     return vt.scrollback_rows() - vt.view_offset()
@@ -607,9 +696,11 @@ def forward_key_to_grid(
         _ = sel.copy_to_clipboard(vt)
         sel.clear()
         return True
-    # Any keystroke clears a finished selection, and typing snaps back to
-    # the live tail — same as every terminal app.
+    # Any keystroke clears a finished selection (and what a Shift+click
+    # would extend from), and typing snaps back to the live tail — same
+    # as every terminal app.
     sel.sel_active = False
+    sel._anchored = False
     if vt.view_offset() != 0:
         vt.reset_view()
     var word = _word_motion(vt, event)
@@ -651,7 +742,7 @@ def cursor_keys_to_click(vt: Vt, sel: GridSelection, pos: Point) -> String:
         return String("")
     var rc = sel.grid_xy_for_pos(vt, pos)
     var cols = vt.cols()
-    var tr = rc[0] - _view_top(vt)
+    var tr = rc[0] - view_top(vt)
     var tc = min(rc[1], cols - 1)
     var cr = vt.cursor_row()
     var cc = vt.cursor_col()

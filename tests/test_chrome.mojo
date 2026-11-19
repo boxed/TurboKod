@@ -1049,6 +1049,53 @@ def test_docked_panel_stack_layout_normal_split() raises:
     assert_equal(lay[5], 7)
 
 
+def test_terminal_selection_drag_leaves_the_pane_and_scrolls() raises:
+    """A selection drag that started in a terminal stays that terminal's
+    once the pointer is over the editor above it: the pane scrolls back a
+    step a tick and the selection grows past what the view held."""
+    var d = Desktop()
+    var screen = Rect(0, 0, 100, 40)
+    d.terminal_panes.append(TerminalPane())
+    # Shown, with no shell behind it: the test feeds the emulator.
+    d.terminal_panes[0].visible = True
+    var canvas = Canvas(100, 40)
+    d.paint(canvas, screen)
+    var text = String("")
+    for i in range(100):
+        text += String("line ") + String(i) + String("\r\n")
+    d.terminal_panes[0].vt.feed_string(text)
+    d.paint(canvas, screen)
+    var rect = d.terminal_pane_rect(screen, 0)
+    var rows = d.terminal_panes[0].vt.rows()
+    assert_true(rect.a.y > 6)
+    _ = d.handle_event(
+        Event.mouse_event(Point(0, rect.b.y - 2), MOUSE_BUTTON_LEFT, True, False),
+        screen,
+    )
+    assert_true(d.terminal_panes[0].sel.sel_dragging)
+    # Up into the editor area, four rows above the pane's first text row.
+    _ = d.handle_event(
+        Event.mouse_event(Point(0, rect.a.y - 3), MOUSE_BUTTON_LEFT, True, True),
+        screen,
+    )
+    for _ in range(3):
+        d.terminal_panes[0].sel._edge_ms = 0
+        d.terminal_tick()
+    assert_equal(d.terminal_panes[0].vt.view_offset(), 12)
+    _ = d.handle_event(
+        Event.mouse_event(Point(0, rect.a.y - 3), MOUSE_BUTTON_LEFT, False, False),
+        screen,
+    )
+    assert_false(d.terminal_panes[0].sel.sel_dragging)
+    assert_true(d.terminal_panes[0].has_selection())
+    var b = d.terminal_panes[0].selected_text().as_bytes()
+    var lines = 0
+    for i in range(len(b)):
+        if b[i] == 0x0A:
+            lines += 1
+    assert_true(lines > rows)
+
+
 def test_maximized_bottom_pane_keeps_the_others_as_headers() raises:
     """Three terminal panes, the middle one maximized: the other two
     minimize in place — still on screen, above and below it — and come
