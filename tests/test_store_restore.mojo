@@ -11,7 +11,8 @@ from turbokod.lsp import capture_command
 from turbokod.posix import sleep_ms
 from turbokod.session_store import load_session
 from turbokod.string_utils import string_list
-from turbokod.events import Event, KEY_BACKSPACE
+from turbokod.view_state_store import load_view_states
+from turbokod.events import Event, KEY_BACKSPACE, KEY_DOWN
 from turbokod.geometry import Rect
 from support import _temp_path, setup_test_env
 
@@ -232,6 +233,36 @@ def test_idle_frames_dont_rewrite_the_session_or_drafts() raises:
         sleep_ms(3)
         d.paint(canvas, screen)
     assert_equal(len(load_session(root).windows), 0)
+    _ = external_call["system", Int32]((String("rm -rf '") + root + String("'\0")).unsafe_ptr())
+
+
+def test_cursor_moves_are_written_once_a_second_and_on_close() raises:
+    # session.json and view_states.json were rewritten (encode, write,
+    # fsync, rename, twice) on every paint the cursor or the scroll had
+    # moved in: two files a frame under a held arrow key. A window opening
+    # is still written on its paint.
+    var root = _fresh(String("_ui_state_pace"))
+    var path = root + String("/a.txt")
+    assert_equal(write_file(path, String("one\ntwo\nthree\n")), True)
+    var screen = Rect(0, 0, 80, 30)
+    var d = Desktop()
+    d.open_project(root)
+    var canvas = Canvas(80, 30)
+    d.paint(canvas, screen)
+    d.open_file(path, screen)
+    d.paint(canvas, screen)
+    assert_equal(load_session(root).windows[0].win.cursor_row, 0)
+    assert_equal(load_view_states(root)[0].cursor_row, 0)
+    _ = d.handle_event(Event.key_event(KEY_DOWN), screen)
+    d.paint(canvas, screen)
+    # Moved, and not on disk yet…
+    assert_equal(d.windows.windows[0].editor.selections[0].row, 1)
+    assert_equal(load_session(root).windows[0].win.cursor_row, 0)
+    assert_equal(load_view_states(root)[0].cursor_row, 0)
+    # …until the window closes.
+    d.shutdown()
+    assert_equal(load_session(root).windows[0].win.cursor_row, 1)
+    assert_equal(load_view_states(root)[0].cursor_row, 1)
     _ = external_call["system", Int32]((String("rm -rf '") + root + String("'\0")).unsafe_ptr())
 
 

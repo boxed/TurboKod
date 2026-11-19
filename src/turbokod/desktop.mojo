@@ -662,6 +662,15 @@ comptime _NAV_STACK_CAP = 100
 # as long as the user kept browsing the repo.
 comptime _VIEW_STATES_MAX = 500
 
+# How often the session and the view states are written while only a
+# cursor, a scroll position or a window's rect keeps changing. Both files
+# are rewritten whole (encode, write, fsync, rename), and written on every
+# changed paint that was two of them per frame of a held arrow key or a
+# trackpad scroll: 40% of such a frame. A window opening, closing or taking
+# focus is still written on its paint, and closing the window or the
+# project writes whatever is waiting.
+comptime _UI_STATE_SAVE_MS = 1000
+
 # Keyboard-focus discriminants for the docked-pane stack. Editor
 # windows have their own ``windows.focused`` index; the panes are
 # conceptually a parallel set of "docked windows" and we keep their
@@ -1866,6 +1875,17 @@ struct Desktop(Movable):
     # against, so an unchanged frame skips the snapshot and the encode.
     var _session_fp: UInt64
     var _session_fp_valid: Bool
+    var _session_shape_fp: UInt64
+    """``_session_fingerprint``'s second half as of the last write: which
+    windows there are, their order and the focus. A change there is
+    written at once; anything else waits out ``_UI_STATE_SAVE_MS``."""
+    var _session_saved_ms: Int
+    """When the session was last written; the view states have
+    ``_view_states_saved_ms``."""
+    var _view_states_saved_ms: Int
+    var _view_states_grew: Bool
+    """A file got its first view state since the last write, which is
+    written at once (a moved cursor waits)."""
     var _pending_restore_refit: Optional[Session]
     # Progressive syntax coloring. True until the first frame that has an
     # editor to show; that frame skips the cold TextMate tokenize so the
@@ -2219,6 +2239,10 @@ struct Desktop(Movable):
         self._pending_restore = False
         self._session_fp_valid = False
         self._session_fp = UInt64(0)
+        self._session_shape_fp = UInt64(0)
+        self._session_saved_ms = -_UI_STATE_SAVE_MS
+        self._view_states_saved_ms = -_UI_STATE_SAVE_MS
+        self._view_states_grew = False
         self._last_session_json = String("")
         self._pending_restore_refit = Optional[Session]()
         self._defer_first_highlight = True
@@ -6010,6 +6034,9 @@ struct Desktop(Movable):
         # What's still unsaved (a save failed, or auto-save is off and
         # quitting can't ask) goes with the drafts, back next time
         self._save_drafts_if_changed(True)
+        # Where the cursor went in the last ``_UI_STATE_SAVE_MS``.
+        self._save_session_if_changed(True)
+        self._save_view_states_if_changed(True)
         self.library_negatives.flush()
         for i in range(len(self.lsp_managers)):
             self.lsp_managers[i].begin_shutdown()
@@ -6746,8 +6773,10 @@ struct Desktop(Movable):
         # windows while we still know the project root. After
         # ``self.project`` is cleared (and the windows themselves
         # dropped), the save path bails — and the open windows' final
-        # scroll positions would never make it to disk.
-        self._save_view_states_if_changed()
+        # scroll positions would never make it to disk. The session too:
+        # it stops being written once the project is cleared.
+        self._save_session_if_changed(True)
+        self._save_view_states_if_changed(True)
         # The windows close below: save their edits as switching away
         # would, and the untitled ones to the drafts.
         if self.config.auto_save:
@@ -7486,6 +7515,7 @@ struct Desktop(Movable):
             vs.scroll_y = sy
         else:
             self._view_states.append(StoredViewState(fp, row, col, sx, sy))
+            self._view_states_grew = True
         self._view_states_dirty = True
 
     def _refresh_view_states_from_windows(mut self):
@@ -7498,13 +7528,14 @@ struct Desktop(Movable):
         for i in range(len(self.windows.windows)):
             self._capture_view_state_for_window(i)
 
-    def _save_view_states_if_changed(mut self):
+    def _save_view_states_if_changed(mut self, now: Bool = False):
         """Refresh entries from the live editors, then re-encode and
         write the per-user view-states file only when the encoding
-        differs from the previously-written one. Skipped when no
-        project is open — there's nowhere to write. (Unlike the session
-        and drafts, these are loaded in ``_set_project``, so saving before
-        the restore is fine.)"""
+        differs from the previously-written one — and, unless ``now`` or a
+        file is new to the list, at most once per ``_UI_STATE_SAVE_MS``.
+        Skipped when no project is open — there's nowhere to write.
+        (Unlike the session and drafts, these are loaded in
+        ``_set_project``, so saving before the restore is fine.)"""
         if not self.project:
             return
         self._refresh_view_states_from_windows()
@@ -7513,19 +7544,28 @@ struct Desktop(Movable):
         # equal to the last write was most of an idle frame's allocations.
         if not self._view_states_dirty:
             return
+        var now_ms = monotonic_ms()
+        if not now and not self._view_states_grew \
+                and now_ms - self._view_states_saved_ms < _UI_STATE_SAVE_MS:
+            return
         var encoded = encode_view_states(
             self.project.value(), self._view_states,
         )
         if encoded == self._last_view_states_json:
             self._view_states_dirty = False
+            self._view_states_grew = False
             return
         if save_view_states(self.project.value(), self._view_states):
             self._last_view_states_json = encoded
             self._view_states_dirty = False
+            self._view_states_grew = False
+            self._view_states_saved_ms = now_ms
 
-    def _save_session_if_changed(mut self):
+    def _save_session_if_changed(mut self, now: Bool = False):
         """Re-encode the current session and write it to disk only when
-        the encoding differs from the previously-written one. Skipped
+        the encoding differs from the previously-written one — and, unless
+        ``now`` or the set of windows changed, at most once per
+        ``_UI_STATE_SAVE_MS``. Skipped
         when no project is open — nowhere to write. Closing the last
         window writes an empty session so the next ``open_project``
         starts clean rather than restoring a stale window. The
@@ -7538,8 +7578,15 @@ struct Desktop(Movable):
             return
         # Runs every paint: don't build and encode the session just to
         # find it equal to the last write.
-        var fp = self._session_fingerprint()
+        var fps = self._session_fingerprint()
+        var fp = fps[0]
         if self._session_fp_valid and fp == self._session_fp:
+            return
+        var now_ms = monotonic_ms()
+        var same_shape = self._session_fp_valid \
+            and fps[1] == self._session_shape_fp
+        if not now and same_shape \
+                and now_ms - self._session_saved_ms < _UI_STATE_SAVE_MS:
             return
         var session = self._snapshot_session()
         var encoded = encode_session(session)
@@ -7547,18 +7594,24 @@ struct Desktop(Movable):
             if not save_session(self.project.value(), session):
                 return
             self._last_session_json = encoded
+            self._session_saved_ms = now_ms
         self._session_fp = fp
+        self._session_shape_fp = fps[1]
         self._session_fp_valid = True
 
-    def _session_fingerprint(self) -> UInt64:
+    def _session_fingerprint(self) -> Tuple[UInt64, UInt64]:
         """A hash of everything ``_snapshot_session`` reads, computed
-        without allocating."""
+        without allocating — and one of just its shape: which files have
+        a window, their order and which is focused."""
         var h = fnv_start()
+        var shape = fnv_start()
         for i in range(len(self.windows.windows)):
             ref w = self.windows.windows[i]
             if not w.is_editor or w._transient \
                     or len(w.editor.file_path.as_bytes()) == 0:
                 continue
+            shape = fnv_int(shape, i)
+            shape = fnv_str(shape, w.editor.file_path)
             h = fnv_int(h, i)
             h = fnv_str(h, w.editor.file_path)
             h = fnv_int(h, w.rect.a.x)
@@ -7578,8 +7631,10 @@ struct Desktop(Movable):
             h = fnv_int(h, Int(w._last_focus_ms))
         for k in range(len(self.windows.z_order)):
             h = fnv_int(h, self.windows.z_order[k])
+            shape = fnv_int(shape, self.windows.z_order[k])
         h = fnv_int(h, self.windows.focused)
-        return h
+        shape = fnv_int(shape, self.windows.focused)
+        return (h, shape)
 
     def _draft_seq_from_title(self, title: String) -> Int:
         """Recover the ``_untitled_count`` value a window was created
