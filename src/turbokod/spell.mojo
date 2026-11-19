@@ -26,18 +26,10 @@ from .file_io import (
 from .posix import debug_log, user_config_path
 from .word_set import WordSet
 from .string_utils import (
-    append_utf8, fnv32,
+    append_utf8,
     byte_slice, codepoint_at, is_ascii_digit, is_ascii_ident_byte,
     is_word_codepoint, split_lines_no_trailing, word_char_step,
 )
-
-
-# 8192 buckets keyed by FNV-1a low bits. Bucketing keeps lookup at
-# O(bucket_size) ≈ 45 string compares for the ~350k words loaded on
-# macOS (OS list + bundled SCOWL English + programmer lists), without
-# pulling in a real hash map. Lookup is the dominant cost so it's
-# worth the extra List headers.
-comptime _N_BUCKETS = UInt32(8192)
 
 
 def user_dict_path() -> String:
@@ -205,7 +197,7 @@ struct Speller(Movable):
     * the main set (``SpellBase``) — OS dictionary (large, immutable per
       session) and the per-user dictionary. Loaded once on the first ``load_default``
       call and never cleared.
-    * ``project_buckets`` — per-project dictionary loaded from
+    * ``project_words`` — per-project dictionary loaded from
       ``<project>/.turbokod/dictionary.txt``. Cleared and reloaded
       whenever the open project changes via ``set_project``.
 
@@ -221,9 +213,9 @@ struct Speller(Movable):
     host hands one to every window, so the 350k-word dictionary is held
     once per process rather than once per window; a word added to it in
     one window is known in all of them."""
-    var project_buckets: List[List[String]]
+    var project_words: WordSet
     var _project_version: Int
-    # Path of the project dictionary currently in ``project_buckets``;
+    # Path of the project dictionary currently in ``project_words``;
     # empty means "no project loaded." Tracked so ``set_project`` can
     # short-circuit re-load when the project hasn't actually changed.
     var project_root: String
@@ -231,9 +223,7 @@ struct Speller(Movable):
     def __init__(out self):
         self._own = SpellBase()
         self.shared = 0
-        self.project_buckets = List[List[String]]()
-        for _ in range(Int(_N_BUCKETS)):
-            self.project_buckets.append(List[String]())
+        self.project_words = WordSet()
         self._project_version = 0
         self.project_root = String("")
 
@@ -426,17 +416,17 @@ struct Speller(Movable):
         from Settings — the just-installed words show up on the next
         spell pass without restarting the editor.
 
-        ``project_buckets`` is preserved (the project dictionary is
+        ``project_words`` is preserved (the project dictionary is
         independent of installed languages); the caller decides whether
         to additionally call ``set_project`` to refresh it."""
         self._base_clear()
         self.load_default()
 
     def set_project(mut self, project_root: String):
-        """Swap ``project_buckets`` to the dictionary for ``project_root``.
+        """Swap ``project_words`` to the dictionary for ``project_root``.
 
         Loads two sources, in order, into the freshly cleared project
-        buckets:
+        set:
 
         1. ``<project>/.turbokod/dictionary.txt`` — our own per-project
            dictionary (one word per line).
@@ -451,8 +441,7 @@ struct Speller(Movable):
         frame."""
         if project_root == self.project_root:
             return
-        for i in range(len(self.project_buckets)):
-            self.project_buckets[i] = List[String]()
+        self.project_words.clear()
         self.project_root = project_root
         self._project_version += 1
         if len(project_root.as_bytes()) == 0:
@@ -498,8 +487,7 @@ struct Speller(Movable):
             var w = _normalize(words[i])
             if len(w.as_bytes()) == 0:
                 continue
-            var b = _bucket(w)
-            self.project_buckets[b].append(w^)
+            _ = self.project_words.add(w.as_bytes())
         self._project_version += 1
 
     def add_user_word(mut self, word: String) -> Bool:
@@ -508,7 +496,7 @@ struct Speller(Movable):
         In-memory addition flips ``loaded`` to True even on systems
         without an OS wordlist — the user explicitly trained the
         speller, so subsequent ``check_word`` calls should consult the
-        bucket they just put a word into instead of returning True for
+        set they just put a word into instead of returning True for
         everything.
         Returns False when the word can't be persisted (e.g. ``$HOME``
         unset); the in-memory addition still happens so the underline
@@ -527,7 +515,7 @@ struct Speller(Movable):
         if self._has(lw):
             if not self.is_loaded():
                 self._base_touch(True)
-            return True  # already known — don't grow the bucket / dup the file
+            return True  # already known — don't dup the file
         self._base_add(lw)
         self._base_touch(True)
         if len(path.as_bytes()) == 0:
@@ -548,9 +536,8 @@ struct Speller(Movable):
         if len(lw.as_bytes()) == 0:
             return False
         if self._has(lw):
-            return True  # already known — don't grow the bucket / dup the file
-        var b = _bucket(lw)
-        self.project_buckets[b].append(lw)
+            return True  # already known — don't dup the file
+        _ = self.project_words.add(lw.as_bytes())
         self._project_version += 1
         var path = project_dict_path(self.project_root)
         if len(path.as_bytes()) == 0:
@@ -640,12 +627,7 @@ struct Speller(Movable):
     def _has(self, w: String) -> Bool:
         if self._base_has(w):
             return True
-        var b = _bucket(w)
-        var pn = len(self.project_buckets[b])
-        for i in range(pn):
-            if self.project_buckets[b][i] == w:
-                return True
-        return False
+        return self.project_words.has(w.as_bytes())
 
 
 def find_misspelled_runs(
@@ -874,10 +856,6 @@ def spell_key(word: String) -> String:
     return _normalize(word)
 
 
-def _bucket(w: String) -> Int:
-    return Int(fnv32(w) % _N_BUCKETS)
-
-
 def _normalize(s: String) -> String:
     """Bucket-lookup key: lowercase + Latin-1 case fold + NFD→NFC compose.
 
@@ -886,7 +864,7 @@ def _normalize(s: String) -> String:
 
     * **Case fold** ASCII A-Z and the Latin-1 supplement (À-Ö, Ø-Þ).
       Without the second range, ``Övrigt`` (Ö = ``0xC3 0x96``) hashed
-      to a different bucket than the on-disk lowercase ``övrigt``
+      differently from the on-disk lowercase ``övrigt``
       (ö = ``0xC3 0xB6``) and was flagged as a misspelling.
     * **NFD → NFC compose** the Latin-1 letters. macOS-sourced text
       sometimes ships in NFD form: ``Ö`` arrives as ``O`` + combining
@@ -898,7 +876,7 @@ def _normalize(s: String) -> String:
       have only one form), and 4-byte codepoints (CJK, emoji) are
       preserved untouched.
 
-    Used both at load time (when populating buckets) and at lookup
+    Used both at load time (when populating the sets) and at lookup
     time, so producer and consumer agree on the canonical form."""
     var n_bytes = len(s.as_bytes())
     if n_bytes == 0:
@@ -952,7 +930,7 @@ def _compose_diacritic(base: Int, mark: Int) -> Int:
     for actually use: grave, acute, circumflex, tilde, diaeresis,
     ring above, cedilla. Letters outside this list (e.g. composed
     Latin Extended-A like ``ē`` U+0113) aren't folded — the spell
-    bucket just stores them in their decomposed form, which is fine
+    set just stores them in their decomposed form, which is fine
     as long as both producer and consumer agree (and they do, since
     both go through this normalizer)."""
     if mark == 0x300:
