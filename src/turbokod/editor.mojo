@@ -531,6 +531,12 @@ def _merged_mark(
     return head_mark or tail_mark
 
 
+comptime _NO_EDIT = 1 << 60
+"""``TextBuffer._edit_head`` / ``_edit_tail`` (and the editor's
+``_hl_clean_tail``) when nothing has been edited: more rows than any
+buffer has."""
+
+
 struct TextBuffer(Copyable, Movable):
     """Line-oriented buffer. Always has at least one (possibly empty) line."""
     var lines: List[String]
@@ -544,12 +550,25 @@ struct TextBuffer(Copyable, Movable):
     follow its line's text through edits. Reshaping ``lines`` directly
     instead leaves bookmarks on the wrong rows."""
     var mark_count: Int
+    var _edit_head: Int
+    """How many rows at the top the structural edits below have left
+    alone since ``take_edit_span`` — and ``_edit_tail`` how many at the
+    bottom. Between them is everything that was inserted, removed or
+    rewritten, however the row numbers moved: a head row keeps its index,
+    a tail row its distance from the end. ``_NO_EDIT`` for none; a new
+    buffer starts as all edit. This is what lets the tokenizer (and
+    anything else with per-row state) follow an edit that changes the line
+    count instead of starting over. A row written through ``lines[r] =``
+    isn't seen here; ``Editor._mark_hl_dirty`` is told about those."""
+    var _edit_tail: Int
 
     def __init__(out self):
         self.lines = List[String]()
         self.lines.append(String(""))
         self.marks = List[Bool]()
         self.mark_count = 0
+        self._edit_head = 0
+        self._edit_tail = 0
 
     def __init__(out self, var text: String):
         # CRLF is folded to LF here; the file's line ending is tracked
@@ -558,6 +577,25 @@ struct TextBuffer(Copyable, Movable):
         self.lines = _split_buffer_lines(text)
         self.marks = List[Bool]()
         self.mark_count = 0
+        self._edit_head = 0
+        self._edit_tail = 0
+
+    def _note_edit(mut self, head: Int, tail: Int):
+        """An edit left the first ``head`` rows and the last ``tail``
+        alone."""
+        if head < self._edit_head:
+            self._edit_head = max(head, 0)
+        if tail < self._edit_tail:
+            self._edit_tail = max(tail, 0)
+
+    def take_edit_span(mut self) -> Tuple[Int, Int]:
+        """``(head, tail)``: the rows at the top and at the bottom that no
+        structural edit has touched since the last call (``_NO_EDIT`` each
+        when there was none)."""
+        var span = (self._edit_head, self._edit_tail)
+        self._edit_head = _NO_EDIT
+        self._edit_tail = _NO_EDIT
+        return span
 
     def line_count(self) -> Int:
         return len(self.lines)
@@ -670,6 +708,7 @@ struct TextBuffer(Copyable, Movable):
         self.clear_marks()
         if len(self.lines) == 0:
             self.lines.append(String(""))
+        self._note_edit(0, 0)
         return removed
 
     # --- edits -------------------------------------------------------------
@@ -754,6 +793,7 @@ struct TextBuffer(Copyable, Movable):
             self.insert_rows(sl + 1, rows^)
             if s_col == 0 and tail_n > 0:
                 self.move_mark(sl, end_row)
+        self._note_edit(sl, len(self.lines) - 1 - end_row)
         return (end_row, end_col)
 
     def insert(mut self, row: Int, col: Int, text: String):
@@ -793,6 +833,7 @@ struct TextBuffer(Copyable, Movable):
         if k <= 0:
             return
         self._delete_marks(at, k)
+        self._note_edit(at, len(self.lines) - at - k)
         if k == 1:
             _ = self.lines.pop(at)
             return
@@ -809,6 +850,7 @@ struct TextBuffer(Copyable, Movable):
         if k == 0:
             return
         self._insert_marks(at, k)
+        self._note_edit(at, len(self.lines) - at)
         if k == 1:
             self.lines.insert(at, rows[0])
             return
@@ -834,12 +876,10 @@ struct TextBuffer(Copyable, Movable):
         empty for none: what an undo snapshot remembered for them, so
         undoing Delete bookmarked lines brings the bookmarks back too.
         Costs one string compare per unchanged row, against the copy of
-        every row the swap already made."""
+        every row the swap already made — a pointer compare when the two
+        lists share their strings, as an undo's do."""
         if len(new_lines) == 0:
             new_lines.append(String(""))
-        if len(self.marks) == 0 and len(new_marks) == 0:
-            self.lines = new_lines^
-            return
         var old_n = len(self.lines)
         var new_n = len(new_lines)
         var lim = min(old_n, new_n)
@@ -849,6 +889,10 @@ struct TextBuffer(Copyable, Movable):
         var s = 0
         while s < lim - p and _same_text(self.lines[old_n - 1 - s], new_lines[new_n - 1 - s]):
             s += 1
+        self._note_edit(p, s)
+        if len(self.marks) == 0 and len(new_marks) == 0:
+            self.lines = new_lines^
+            return
         var marks = List[Bool](capacity=new_n)
         var count = 0
         for i in range(new_n):
@@ -1471,18 +1515,20 @@ struct Editor(Copyable, Movable):
     var highlights: HighlightList
     var _highlights_dirty: Bool
     var _hl_dirty_row: Int
-    # High-water mark companion to ``_hl_dirty_row``: the *highest*
-    # row an in-place edit touched since the last flush. An in-place
+    # Companion to ``_hl_dirty_row``: how many rows at the *bottom* no
+    # edit has touched since the last flush, so the last edited row is
+    # ``line_count - 1 - _hl_clean_tail`` whatever the edits in between
+    # did to the line count (``_NO_EDIT`` for none). An in-place
     # multi-row edit (toggle-comment, indent/dedent, multi-caret
-    # typing) changes several rows' text without changing the line
-    # count, so the incremental tokenizer can't rely on the line count
-    # to spot it. Without this, the tokenizer would early-exit at the
-    # first edited row whose post-stack rejoined the cached trajectory
-    # and splice stale highlights for the edited rows below it. Carried
-    # as ``min_row`` into the tokenizer to suppress early-exit until
-    # every edited row has been re-tokenized. ``-1`` means "no edited
-    # row recorded since flush" (early-exit follows ``_hl_dirty_row``).
-    var _hl_dirty_max_row: Int
+    # typing) changes several rows' text, and without this the tokenizer
+    # would early-exit at the first edited row whose post-stack rejoined
+    # the cached trajectory and splice stale highlights for the edited
+    # rows below it. Carried as ``min_row`` into the tokenizer to
+    # suppress early-exit until every edited row has been re-tokenized.
+    # Edits that add or remove rows report theirs through
+    # ``TextBuffer.take_edit_span``; ``flush_highlights`` takes the
+    # smaller of the two.
+    var _hl_clean_tail: Int
     var _hl_order: List[Int]
     """Indices into ``highlights`` grouped by row (stable within a row):
     row ``r``'s are ``_hl_order[_hl_row_start[r] : _hl_row_start[r + 1]]``.
@@ -2098,7 +2144,7 @@ struct Editor(Copyable, Movable):
         self.highlights = HighlightList()
         self._highlights_dirty = True
         self._hl_dirty_row = 0
-        self._hl_dirty_max_row = -1
+        self._hl_clean_tail = _NO_EDIT
         self._hl_order = List[Int]()
         self._hl_row_start = List[Int32]()
         self._hl_indexed_n = -1
@@ -2331,29 +2377,34 @@ struct Editor(Copyable, Movable):
         # Big buffers (minified / very long lines) skip syntax tokenizing:
         # a 30 KB line through the TextMate/onig grammar took ~28 s. Leave
         # highlights empty (plain, uncolored text) so the file opens fast.
+        var span = self.buffer.take_edit_span()
         if self._big_buffer:
             self.highlights = HighlightList()
             self._highlights_dirty = False
             self._hl_dirty_row = self.buffer.line_count()
-            self._hl_dirty_max_row = -1
+            self._hl_clean_tail = _NO_EDIT
             self._index_highlights()
             self.spell_highlights = List[Highlight]()
             self.spell_lines = List[Bool]()
             return
         var ext = extension_of(self.file_path)
+        # The edited rows, from what the edit handlers reported and what
+        # the buffer saw happen to its rows: everything above the first
+        # and below the last is as it was at the last flush.
+        var last_edited = self.buffer.line_count() - 1 \
+            - min(self._hl_clean_tail, span[1])
         sync_highlights(
-            ext, self.buffer.lines, self._hl_dirty_row,
+            ext, self.buffer.lines, min(self._hl_dirty_row, span[0]),
             registry, self._hl_cache, self.highlights,
-            self._hl_dirty_max_row,
+            max(last_edited, -1),
         )
         self._highlights_dirty = False
         # Mark the cache as fully clean by parking the dirty row
         # past the end of the buffer. Any subsequent edit will
-        # bring it back to a real row via ``_mark_hl_dirty``. The
-        # high-water mark resets to "no edited row" until the next
-        # edit raises it again.
+        # bring it back to a real row via ``_mark_hl_dirty``, and the
+        # clean tail back to a real count.
         self._hl_dirty_row = self.buffer.line_count()
-        self._hl_dirty_max_row = -1
+        self._hl_clean_tail = _NO_EDIT
         self._index_highlights()
         speller.load_default()
         self._refresh_spell(speller)
@@ -3072,19 +3123,26 @@ struct Editor(Copyable, Movable):
         ``max_row`` is the *highest* row this edit touched, for
         in-place multi-row edits (toggle-comment, indent/dedent,
         multi-caret typing) that change several rows without changing
-        the line count. It feeds the ``_hl_dirty_max_row`` high-water
-        mark so the incremental tokenizer doesn't early-exit before
-        re-tokenizing every edited row. Defaults to ``row`` — a
-        single-row edit's high-water mark is its own row, which leaves
-        the tokenizer's early-exit unchanged from the classic path."""
+        the line count. It feeds ``_hl_clean_tail`` so the incremental
+        tokenizer doesn't early-exit before re-tokenizing every edited
+        row. Defaults to ``row`` — a single-row edit's last row is its
+        own. Rows an edit added or removed needn't be covered: the
+        buffer reports those itself (``TextBuffer.take_edit_span``)."""
         var r = row
         if r < 0:
             r = 0
         if r < self._hl_dirty_row:
             self._hl_dirty_row = r
         var hi = max_row if max_row >= r else r
-        if hi > self._hl_dirty_max_row:
-            self._hl_dirty_max_row = hi
+        var below = max(self.buffer.line_count() - 1 - hi, 0)
+        if below < self._hl_clean_tail:
+            self._hl_clean_tail = below
+        self._buffer_changed(r)
+
+    def _buffer_changed(mut self, r: Int):
+        """What follows any change to the buffer, whichever rows it was
+        (``r`` the first, for the diagnostics): the highlights and every
+        cache keyed on the text are stale."""
         self._highlights_dirty = True
         # A buffer edit can change wrap counts, so the smooth-scroll
         # visual-row metrics cache must rebuild on next access.
@@ -3233,16 +3291,12 @@ struct Editor(Copyable, Movable):
         # left the modified marker up with nothing to save. So compare
         # what a save would write against the baseline instead of assuming
         # every restore is a change. The extra serialization is noise
-        # against what ``_restore`` already costs: it copies every line
-        # and forces a full retokenize below.
+        # against what ``_restore`` already costs: it copies every line.
         self.dirty = not self.matches_disk_baseline()
-        # Undo/redo restores the entire buffer; we don't know which
-        # rows differ from the post-state we last tokenized, so we
-        # force a full retokenize. Could narrow this by diffing
-        # ``snap.lines`` against ``self.buffer.lines`` pre-restore,
-        # but the marginal cost of a full retokenize on undo is
-        # acceptable for now.
-        self._mark_hl_dirty(0)
+        # Which rows differ is ``replace_lines``' to say (it compared the
+        # two line lists, and the buffer's edit span has the result), so
+        # the tokenizer redoes those rather than the whole file.
+        self._buffer_changed(0)
         # Undo/redo restores wholesale buffer state; speculative
         # shift can't make sense of the jump, so clear and let the
         # LSP refresh repopulate from the restored text.

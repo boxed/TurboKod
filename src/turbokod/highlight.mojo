@@ -139,8 +139,10 @@ struct HighlightList(Copyable, Movable, Sized):
 
     def extend(
         mut self, other: Self, lo_row: Int = 0, hi_row: Int = 1 << 62,
+        row_shift: Int = 0,
     ):
-        """Append ``other``'s highlights on rows ``[lo_row, hi_row)``."""
+        """Append ``other``'s highlights on rows ``[lo_row, hi_row)``,
+        each moved down ``row_shift`` rows."""
         var remap = List[UInt16](capacity=len(other.attrs))
         for i in range(len(other.attrs)):
             remap.append(self._attr_id(other.attrs[i]))
@@ -148,7 +150,8 @@ struct HighlightList(Copyable, Movable, Sized):
             var p = other.items[i]
             if Int(p.row) >= lo_row and Int(p.row) < hi_row:
                 self.items.append(_PackedHighlight(
-                    p.row, p.col_start, p.width, remap[Int(p.attr)],
+                    Int32(Int(p.row) + row_shift), p.col_start, p.width,
+                    remap[Int(p.attr)],
                 ))
 
     def clear(mut self):
@@ -587,6 +590,10 @@ struct HighlightCache(Copyable, Movable):
     var post_stacks: List[Int32]
     """Each line's end-of-line scope stack, as an index into ``stacks``."""
     var stacks: StackTable
+    var full_passes: Int
+    """How many times the whole buffer has been tokenized through this
+    cache — what a test asserts on to show an edit took the incremental
+    path."""
 
     def __init__(out self):
         self.ext = String("")
@@ -594,10 +601,11 @@ struct HighlightCache(Copyable, Movable):
         self.lent_len = -1
         self.post_stacks = List[Int32]()
         self.stacks = StackTable()
+        self.full_passes = 0
 
     def invalidate(mut self):
-        """Drop the per-line state — used when the line count or
-        extension shifts in a way the incremental path can't
+        """Drop the per-line state — used when the extension or the
+        caller's list shifts in a way the incremental path can't
         reconcile."""
         self.highlights = HighlightList()
         self.lent_len = -1
@@ -742,10 +750,13 @@ def highlight_incremental(
     stack immediately) and splice stale highlights over the edited
     rows below it.
 
+    When the line count changed, ``dirty_max_row`` is also what says
+    where the cached rows below the edit are now (``_move_cached_tail``).
+
     Falls back to a full retokenize when the cache is cold, the
-    extension changed, the line count changed, or ``dirty_row``
-    is 0. Falls through to the generic tokenizer when there's no
-    bundled grammar for the extension.
+    extension changed, the line count changed without a
+    ``dirty_max_row``, or ``dirty_row`` is 0. Falls through to the
+    generic tokenizer when there's no bundled grammar for the extension.
     """
     var fb = _grammar_pass(ext, lines, dirty_row, registry, cache, dirty_max_row)
     if fb:
@@ -828,9 +839,12 @@ def _grammar_pass(
 
     # Decide whether we can incrementalize. Conditions for "yes":
     #   * cache is warm: we already tokenized this extension before
-    #     and have ``post_stacks`` of the right length;
+    #     and have ``post_stacks`` for the buffer as it was;
     #   * eff_dirty > 0 (else there's nothing to skip — full retokenize);
-    #   * eff_dirty is in range.
+    #   * eff_dirty is in range;
+    #   * if the line count changed, the caller said where the edit ends
+    #     (``dirty_max_row``), so the cached rows below it can be moved
+    #     to where they are now.
     # Anything else collapses to a full retokenize.
     var n_lines = len(lines)
     # An edit on row R can stale row R-1's cached result, not just R's: a
@@ -845,8 +859,9 @@ def _grammar_pass(
     # removed); one that has collected thousands is rebuilt from scratch.
     var can_incr = (eff_dirty > 0
                     and eff_dirty <= n_lines
-                    and len(cache.post_stacks) == n_lines
                     and len(cache.stacks.stacks) < _STACK_TABLE_LIMIT)
+    if can_incr and len(cache.post_stacks) != n_lines:
+        can_incr = _move_cached_tail(cache, n_lines, eff_dirty, dirty_max_row)
     if not can_incr:
         _full_retokenize(
             grammar_store_at(registry._store)[].grammars[grammar_idx], cache, lines,
@@ -909,6 +924,45 @@ def _grammar_pass(
     return None
 
 
+def _move_cached_tail(
+    mut cache: HighlightCache, n_lines: Int, eff_dirty: Int, last_edited: Int,
+) -> Bool:
+    """Line the cache up with a buffer whose line count changed: the rows
+    below ``last_edited`` are the cached rows the same distance from the
+    end, so their highlights and post-stacks move with them. False (and
+    the cache untouched) when that can't be so — the edit's end isn't
+    known, or it leaves fewer rows than the claim needs.
+
+    Without this every Enter, joined line and multi-line paste tokenized
+    the whole file again: 70 ms a keystroke in a 19k-line Mojo file, most
+    of a second in a 12k-line C one.
+
+    Rows ``[eff_dirty, last_edited)`` get a post-stack no real one equals,
+    so the tokenizer can't stop inside the edit; ``last_edited`` itself
+    gets that of the cached row just above the moved tail — the state
+    the tail was tokenized from, which is what stopping there has to
+    match."""
+    var n_cached = len(cache.post_stacks)
+    var delta = n_lines - n_cached
+    var tail_old = last_edited + 1 - delta
+    if last_edited < eff_dirty or last_edited >= n_lines \
+            or tail_old <= eff_dirty or tail_old > n_cached:
+        return False
+    var posts = List[Int32](capacity=n_lines)
+    for r in range(eff_dirty):
+        posts.append(cache.post_stacks[r])
+    for _ in range(eff_dirty, last_edited):
+        posts.append(Int32(-1))
+    for r in range(tail_old - 1, n_cached):
+        posts.append(cache.post_stacks[r])
+    var hls = HighlightList(capacity=len(cache.highlights))
+    hls.extend(cache.highlights, 0, eff_dirty)
+    hls.extend(cache.highlights, tail_old, 1 << 62, delta)
+    cache.post_stacks = posts^
+    cache.highlights = hls^
+    return True
+
+
 def _full_retokenize(
     grammar: Grammar, mut cache: HighlightCache, lines: List[String],
 ):
@@ -919,14 +973,14 @@ def _full_retokenize(
     # Room for the result up front: a list that doubles its way to a big
     # file's 80k highlights copies itself a dozen times and leaves as much
     # again behind in outgrown blocks, which the allocator keeps. The last
-    # pass's count is the best guess (a full pass follows every edit that
-    # changes the line count); a first pass goes by the text's size, one
+    # pass's count is the best guess; a first pass goes by the text's size, one
     # highlight per 8 bytes being generous for code. The excess is left
     # alone: the tail of a large block that is never written is never
     # backed by memory, where trimming to fit would write a second copy.
     var hint = len(cache.highlights)
     if hint == 0:
         hint = _size_hint(lines)
+    cache.full_passes += 1
     cache.highlights = tokenize_with_grammar_full(
         grammar, lines, cache.stacks, cache.post_stacks, hint + 64,
     )
