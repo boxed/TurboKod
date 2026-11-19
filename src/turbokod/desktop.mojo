@@ -1569,6 +1569,10 @@ struct Desktop(Movable):
     var _libprobe_tries: Dict[String, Int]
     var _libprobe_seen: Dict[String, Bool]
     var _libprobe_key: UInt64
+    var _libprobe_passed_caret: Bool
+    """The scan ``_libprobe_key`` records skipped a word for being under
+    the caret, so a caret move can make a word eligible; when it didn't,
+    moving the caret changes nothing and the scan isn't run again."""
     var library_negatives: LibraryNegatives
     var _libprobe_docs: Dict[String, String]
     # Language ids we've already prompted-to-install for in this session.
@@ -2160,6 +2164,7 @@ struct Desktop(Movable):
         self._libprobe_tries = Dict[String, Int]()
         self._libprobe_seen = Dict[String, Bool]()
         self._libprobe_key = 0
+        self._libprobe_passed_caret = False
         self.library_negatives = LibraryNegatives()
         self._libprobe_docs = Dict[String, String]()
         self._lsp_install_prompted = List[String]()
@@ -11639,18 +11644,25 @@ struct Desktop(Movable):
         ref ed = self.windows.windows[win_idx].editor
         var crow = ed.selections[0].row
         var ccol = ed.selections[0].col
+        # Everything a finished scan's verdict depends on. The caret is
+        # part of it only when that scan skipped a word for it: a pass
+        # over every flagged word on every cursor move was most of a
+        # move's tick in a file with a language server.
         var key = fnv_str(fnv_start(), path)
         key = fnv_int(key, ed.change_count)
         key = fnv_int(key, self.speller.word_version())
         key = fnv_int(key, len(ed.spell_highlights))
-        key = fnv_int(key, crow)
-        key = fnv_int(key, ccol)
-        if key == self._libprobe_key:
+        var caret_key = fnv_int(fnv_int(key, crow), ccol)
+        if self._libprobe_key == key and not self._libprobe_passed_caret:
             return
+        if self._libprobe_key == caret_key and self._libprobe_passed_caret:
+            return
+        var passed_caret = False
         for k in range(len(ed.spell_highlights)):
             var h = ed.spell_highlights[k]
             if h.row == crow and h.col_start <= ccol \
                     and ccol <= h.col_end:
+                passed_caret = True
                 continue
             if h.row >= ed.buffer.line_count():
                 continue
@@ -11672,7 +11684,8 @@ struct Desktop(Movable):
             self._libprobe_seen[at] = True
             self._libprobe_tries[wk] = tries + 1
             return
-        self._libprobe_key = key
+        self._libprobe_key = caret_key if passed_caret else key
+        self._libprobe_passed_caret = passed_caret
 
     def _on_library_probe(mut self, var probe: LibraryProbe):
         """A probe's answer. Defined in a library: learn the word, drop it
