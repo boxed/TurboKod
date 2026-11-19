@@ -463,13 +463,18 @@ def display_columns(s: String) -> Int:
     reserve too many cells for non-ASCII labels and — in the menu's
     per-byte paint loop — emit one cell per continuation byte.
 
-    East-Asian fullwidth is still not modeled (only emoji are
-    double-width), so wide CJK glyphs still over-advance by one cell."""
+    ASCII text — nearly every label and line — is one cell a byte and
+    is recognized 32 bytes at a time (``_one_cell_run``)."""
     var b = s.as_bytes()
     var n = len(b)
     var i = 0
     var cols = 0
     while i < n:
+        var run = _one_cell_run(b, i, n, False)
+        cols += run - i
+        i = run
+        if i >= n:
+            break
         var info = codepoint_at(s, i)
         cols += char_width(info[0])
         i += info[1]
@@ -801,6 +806,40 @@ def prev_codepoint_start(s: String, col: Int) -> Int:
     return c
 
 
+comptime _CELL_W: Int = 32
+"""Bytes per SIMD step of ``_one_cell_run`` (as ``case_fold.FOLD_W``)."""
+
+
+def _one_cell_run(
+    b: Span[UInt8, _], lo: Int, hi: Int, tabs_expand: Bool,
+) -> Int:
+    """The first index in ``b[lo:hi]`` whose byte is not exactly one cell
+    — not ASCII, or (with ``tabs_expand``) a tab — or ``hi``. Checked 32
+    bytes at a time, so the caller's per-codepoint loop only handles the
+    bytes that need it. Most text needs none: measuring every line of a
+    19k-line file took 555 us a byte at a time and takes 180 this way
+    (1160 us to 173 for ``display_columns``, which decoded every
+    codepoint)."""
+    var p = b.unsafe_ptr()
+    var high = SIMD[DType.uint8, _CELL_W](0x80)
+    var tab = SIMD[DType.uint8, _CELL_W](0x09)
+    var i = lo
+    while i + _CELL_W <= hi:
+        var v = p.unsafe_offset(i).unsafe_load[width=_CELL_W]()
+        var odd = v.ge(high)
+        if tabs_expand:
+            odd = odd | v.eq(tab)
+        if odd.reduce_or():
+            break  # the loop below finds which of these 32 it is
+        i += _CELL_W
+    while i < hi:
+        var c = p[unsafe_offset=i]
+        if c >= 0x80 or (tabs_expand and c == 0x09):
+            return i
+        i += 1
+    return hi
+
+
 def cells_between(line: String, lo: Int, hi: Int) -> Int:
     """Display columns spanned by ``line``'s bytes ``[lo, hi)``, starting
     from column 0 at ``lo``: codepoints are walked summing ``char_width``
@@ -808,17 +847,18 @@ def cells_between(line: String, lo: Int, hi: Int) -> Int:
     boundary, as ``Canvas.put_text`` paints them. The one loop behind
     every byte → cell conversion."""
     var bytes = line.as_bytes()
-    var n = len(bytes)
+    var end = min(hi, len(bytes))
     var i = max(lo, 0)
     var cells = 0
-    while i < hi and i < n:
-        var b = Int(bytes[i])
-        if b == 0x09:
+    while i < end:
+        # ASCII is one cell a byte: no decoding, 32 at a time.
+        var run = _one_cell_run(bytes, i, end, True)
+        cells += run - i
+        i = run
+        if i >= end:
+            break
+        if bytes[i] == 0x09:
             cells += TAB_WIDTH - (cells % TAB_WIDTH)
-            i += 1
-            continue
-        if b < 0x80:  # ASCII is one cell: skip decoding (long lines)
-            cells += 1
             i += 1
             continue
         var info = codepoint_at(line, i)

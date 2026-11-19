@@ -27,9 +27,10 @@ from turbokod.project import replace_in_project
 from turbokod.text_select import PaneTextSelect
 from turbokod.project_targets import resolve_python_interpreter
 from turbokod.string_utils import (
-    char_width, display_columns, escape_drop_paths, prev_codepoint_start,
-    shell_fetch, shell_move_into_place, split_whitespace, string_list,
-    tail_to_columns, text_cells,
+    TAB_WIDTH, byte_slice, cells_between, char_width, codepoint_at,
+    display_columns, escape_drop_paths, prev_codepoint_start, shell_fetch,
+    shell_move_into_place, split_whitespace, string_list, tail_to_columns,
+    text_cells,
 )
 from turbokod.lsp import capture_command
 from turbokod.posix import debug_log_path, getenv_value
@@ -118,6 +119,54 @@ def test_prev_codepoint_start_tolerates_past_eol_columns() raises:
     assert_equal(prev_codepoint_start(multi, 3), 1)
     assert_equal(prev_codepoint_start(multi, 42), 1)
     assert_equal(prev_codepoint_start(multi, 0), 0)
+
+
+def _cells_one_at_a_time(line: String, lo: Int, hi: Int) -> Int:
+    """``cells_between`` as it was before it skipped runs of ASCII: every
+    codepoint decoded, a tab to the next stop."""
+    var bytes = line.as_bytes()
+    var i = max(lo, 0)
+    var cells = 0
+    while i < hi and i < len(bytes):
+        if bytes[i] == 0x09:
+            cells += TAB_WIDTH - (cells % TAB_WIDTH)
+            i += 1
+            continue
+        var info = codepoint_at(line, i)
+        cells += char_width(info[0])
+        i += info[1]
+    return cells
+
+
+def test_width_of_long_lines_matches_a_codepoint_walk() raises:
+    # Runs of ASCII are measured 32 bytes at a time, so what has to hold
+    # is at the seams: a tab, an em dash or an emoji at every offset
+    # around a 32-byte step, in lines of every length around one.
+    var odd = [String("\t"), String("—"), String("🚀"), String("ä")]
+    for length in range(0, 100):
+        var plain = String("")
+        for k in range(length):
+            plain += String(chr(0x61 + k % 26))
+        assert_equal(text_cells(plain), length)
+        assert_equal(display_columns(plain), length)
+        for at in range(0, length + 1, 3):
+            for o in range(len(odd)):
+                var line = String(byte_slice(plain, 0, at)) + odd[o] \
+                    + String(byte_slice(plain, at, length)) + odd[(o + 1) % 4]
+                var n = len(line.as_bytes())
+                assert_equal(text_cells(line), _cells_one_at_a_time(line, 0, n))
+                # A window of it, as a wrapped row or a scrolled one asks.
+                assert_equal(
+                    cells_between(line, at // 2, n - 1),
+                    _cells_one_at_a_time(line, at // 2, n - 1),
+                )
+                var cols = 0
+                var i = 0
+                while i < n:
+                    var info = codepoint_at(line, i)
+                    cols += char_width(info[0])
+                    i += info[1]
+                assert_equal(display_columns(line), cols)
 
 
 def test_emoji_double_width() raises:
