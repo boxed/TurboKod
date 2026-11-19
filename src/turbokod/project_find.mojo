@@ -23,8 +23,8 @@ from .colors import Attr
 from .file_io import join_path, project_relative, read_file, stat_file
 from .geometry import Point, Rect
 from .highlight import (
-    GrammarRegistry, Highlight, HighlightCache, extension_of,
-    highlight_for_extension_cached,
+    GrammarRegistry, Highlight, HighlightCache, HighlightList, extension_of,
+    highlight_for_extension_cached, sync_highlights,
 )
 from .posix import monotonic_ms
 from .lsp import capture_command
@@ -102,7 +102,7 @@ struct ProjectFind(Movable):
     # overlay computed once per file load.
     var _context_path: String
     var _context_lines: List[String]
-    var _context_highlights: List[Highlight]
+    var _context_highlights: HighlightList
     # Streaming ripgrep runner. Holds the spawned child for the in-flight
     # search (if any); a fresh keystroke after the debounce kills the old
     # one and starts a new one, so a query that turns out to be too broad
@@ -149,7 +149,7 @@ struct ProjectFind(Movable):
         self.opts = SearchOptions()
         self._context_path = String("")
         self._context_lines = List[String]()
-        self._context_highlights = List[Highlight]()
+        self._context_highlights = HighlightList()
         self._runner = _RgRunner()
         self._truncated = False
         self.send_to_panel = False
@@ -244,7 +244,7 @@ struct ProjectFind(Movable):
         # previous Find-in-Project.
         self._context_path = String("")
         self._context_lines = List[String]()
-        self._context_highlights = List[Highlight]()
+        self._context_highlights = HighlightList()
         self._truncated = False
         self.active = True
         self.submitted = False
@@ -269,7 +269,7 @@ struct ProjectFind(Movable):
         # re-read on the next open; the matches are what resuming needs.
         self._context_path = String("")
         self._context_lines = List[String]()
-        self._context_highlights = List[Highlight]()
+        self._context_highlights = HighlightList()
 
     # --- per-frame tick ---------------------------------------------------
 
@@ -383,14 +383,14 @@ struct ProjectFind(Movable):
         if self.selected < 0 or self.selected >= len(self.matches):
             self._context_path = String("")
             self._context_lines = List[String]()
-            self._context_highlights = List[Highlight]()
+            self._context_highlights = HighlightList()
             return
         var path = self.matches[self.selected].path
         if path == self._context_path and len(self._context_lines) > 0:
             return
         self._context_path = path
         self._context_lines = List[String]()
-        self._context_highlights = List[Highlight]()
+        self._context_highlights = HighlightList()
         # Skip oversized files entirely: a multi-MB minified bundle
         # would still be readable but the next-frame tokenize step
         # would burn seconds on it. The ±5-line context view isn't
@@ -427,11 +427,12 @@ struct ProjectFind(Movable):
         for i in range(len(self._context_lines)):
             if len(self._context_lines[i].as_bytes()) > _CTX_LINE_CAP:
                 return
+        # Kept in the compact form: a preview of a 4 MB file was 14 MB of
+        # 40-byte ``Highlight``s for as long as the dialog showed it.
         var ctx_cache = HighlightCache()
-        self._context_highlights = highlight_for_extension_cached(
-            extension_of(self._context_path),
-            self._context_lines,
-            registry, ctx_cache,
+        sync_highlights(
+            extension_of(self._context_path), self._context_lines, 0,
+            registry, ctx_cache, self._context_highlights,
         )
 
     def submit(mut self):
@@ -523,7 +524,7 @@ struct ProjectFind(Movable):
             lines.append(self._context_lines[i])
         var hls = List[Highlight]()
         for i in range(len(self._context_highlights)):
-            var r = self._context_highlights[i].row
+            var r = self._context_highlights.row(i)
             if r >= first and r < end:
                 hls.append(self._context_highlights[i])
         return (n, lines^, hls^)

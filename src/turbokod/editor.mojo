@@ -1442,17 +1442,18 @@ struct Editor(Copyable, Movable):
     # nav, search jumps, and mouse-wheel notches snap to a whole visual row.
     var scroll_sub: Int
     var scroll_frac: Float64
-    # Cached per-buffer-line *visual* row counts (under the active wrap mode +
-    # width), with their running prefix sum, so the smooth-scroll machinery
-    # can map a global visual-row coordinate to a (buffer line, sub-row)
-    # anchor in O(log n) without re-wrapping the whole document every event.
+    # The running sum of per-buffer-line *visual* row counts (under the
+    # active wrap mode + width), so the smooth-scroll machinery can map a
+    # global visual-row coordinate to a (buffer line, sub-row) anchor in
+    # O(log n) without re-wrapping the whole document every event.
     # Rebuilt lazily by ``_ensure_vis_metrics`` when the width / wrap mode
     # changes or ``_vis_dirty`` is set by an edit. ``_vis_prefix[i]`` is the
     # number of visual rows in buffer lines ``[0, i)``; ``_vis_prefix[-1]`` is
-    # the document total. Empty / unused when not wrapping (visual row ==
-    # buffer line there, so no table is needed).
-    var _vis_counts: List[Int]
-    var _vis_prefix: List[Int]
+    # the document total (a line's own count is the difference of two).
+    # Empty / unused when not wrapping (visual row == buffer line there, so
+    # no table is needed). 32-bit and sized once: it is a row per buffer
+    # line for as long as a wrapped file is open.
+    var _vis_prefix: List[Int32]
     var _vis_w: Int
     var _vis_mode: Int
     var _vis_dirty: Bool
@@ -2122,8 +2123,7 @@ struct Editor(Copyable, Movable):
         self.scroll_x = 0
         self.scroll_sub = 0
         self.scroll_frac = 0.0
-        self._vis_counts = List[Int]()
-        self._vis_prefix = List[Int]()
+        self._vis_prefix = List[Int32]()
         self._vis_w = -1
         self._vis_mode = -1
         self._vis_dirty = True
@@ -4115,16 +4115,21 @@ struct Editor(Copyable, Movable):
 
     def _diagnostic_row_index(self, diags: List[Diagnostic]) -> List[Int]:
         """Per buffer row, the most severe diagnostic severity starting on
-        it (0 = clean) — what the minimap colors a row by."""
+        it (0 = clean) — what the minimap colors a row by. Empty when no
+        row has one."""
         var n_lines = self.buffer.line_count()
         var per_row = List[Int]()
-        for _ in range(n_lines):
-            per_row.append(0)
         for i in range(len(diags)):
             var row = diags[i].start_row
             var sev = diags[i].severity
             if row < 0 or row >= n_lines or sev <= 0:
                 continue
+            # A row per line only once there is something to flag: a
+            # server publishes an empty set for every file it has open,
+            # and that was 8 bytes a line for each of them, rebuilt on
+            # every Enter.
+            if len(per_row) == 0:
+                per_row = List[Int](length=n_lines, fill=0)
             # Lower numeric value wins (1=Error beats 2=Warning).
             if per_row[row] == 0 or sev < per_row[row]:
                 per_row[row] = sev
@@ -11049,15 +11054,12 @@ struct Editor(Copyable, Movable):
                 and len(self._vis_prefix) == self.buffer.line_count() + 1:
             return
         var n = self.buffer.line_count()
-        self._vis_counts = List[Int]()
-        self._vis_prefix = List[Int]()
+        self._vis_prefix = List[Int32](capacity=n + 1)
         self._vis_prefix.append(0)
         var total = 0
         for i in range(n):
-            var c = self._line_visual_rows(i, w)
-            self._vis_counts.append(c)
-            total += c
-            self._vis_prefix.append(total)
+            total += self._line_visual_rows(i, w)
+            self._vis_prefix.append(Int32(total))
         self._vis_w = w
         self._vis_mode = self.wrap_mode
         self._vis_dirty = False
@@ -11079,7 +11081,7 @@ struct Editor(Copyable, Movable):
                 mx = 0.0
             return (Float64(self.scroll_y) + self.scroll_frac, mx)
         self._ensure_vis_metrics(self._content_width(view))
-        var total = self._vis_prefix[len(self._vis_prefix) - 1]
+        var total = Int(self._vis_prefix[len(self._vis_prefix) - 1])
         var mx = Float64(total - content_h)
         if mx < 0.0:
             mx = 0.0
@@ -11090,7 +11092,7 @@ struct Editor(Copyable, Movable):
             sy = len(self._vis_prefix) - 2
         if sy < 0:
             sy = 0
-        var cur = Float64(self._vis_prefix[sy] + self.scroll_sub) \
+        var cur = Float64(Int(self._vis_prefix[sy]) + self.scroll_sub) \
             + self.scroll_frac
         return (cur, mx)
 
@@ -11117,7 +11119,7 @@ struct Editor(Copyable, Movable):
             self.scroll_frac = vis - Float64(base)
             return
         self._ensure_vis_metrics(self._content_width(view))
-        var total = self._vis_prefix[len(self._vis_prefix) - 1]
+        var total = Int(self._vis_prefix[len(self._vis_prefix) - 1])
         var maxv = total - content_h
         if maxv < 0:
             maxv = 0
@@ -11128,7 +11130,7 @@ struct Editor(Copyable, Movable):
             base = maxv
         # Largest buffer line L with prefix[L] <= base (binary search).
         var lo = 0
-        var hi = len(self._vis_counts) - 1
+        var hi = len(self._vis_prefix) - 2
         if hi < 0:
             self.scroll_y = 0
             self.scroll_sub = 0
@@ -11136,12 +11138,12 @@ struct Editor(Copyable, Movable):
             return
         while lo < hi:
             var mid = (lo + hi + 1) // 2
-            if self._vis_prefix[mid] <= base:
+            if Int(self._vis_prefix[mid]) <= base:
                 lo = mid
             else:
                 hi = mid - 1
         self.scroll_y = lo
-        self.scroll_sub = base - self._vis_prefix[lo]
+        self.scroll_sub = base - Int(self._vis_prefix[lo])
         self.scroll_frac = vis - Float64(base)
 
     def minimap_to(mut self, view: Rect, frac: Float64):

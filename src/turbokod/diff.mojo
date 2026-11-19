@@ -46,8 +46,8 @@ comptime OP_INSERT: Int = 2
 comptime _DIFF_MAX_D = 2000
 """Beyond this many differences ``diff_lines`` stops looking for the
 shortest script and reports the rest as one replaced block. The search
-keeps a snapshot per difference (``2d+1`` ints at depth ``d``), so this
-bounds it to about 32 MB; a precise diff of a file a formatter rewrote is
+keeps a snapshot per difference (``2d+1`` 32-bit ints at depth ``d``), so
+this bounds it to about 16 MB; a precise diff of a file a formatter rewrote is
 worth less than a responsive editor (it runs per paint, for the change
 gutter). A 3-way merge over such a block comes out a conflict, never a
 wrong merge."""
@@ -92,18 +92,18 @@ def _myers(
         return List[DiffOp]()
     var offset = max_d
     var size = 2 * max_d + 1
-    var v = List[Int]()
-    for _ in range(size):
-        v.append(0)
+    var v = List[Int](length=size, fill=0)
     # trace[d] is V before depth d was computed, for k in [-d, d] only
     # (at index k + d): the rest isn't read back, and copying all of V per
-    # depth made a big rewrite take gigabytes.
-    var trace = List[List[Int]]()
+    # depth made a big rewrite take gigabytes. 32-bit, and each sized for
+    # what it holds — at the cap that halves 32 MB and leaves no outgrown
+    # blocks behind.
+    var trace = List[List[Int32]]()
     var found_d = -1
     for d in range(min(max_d, _DIFF_MAX_D) + 1):
-        var snap = List[Int]()
+        var snap = List[Int32](capacity=2 * d + 1)
         for k in range(-d, d + 1):
-            snap.append(v[k + offset])
+            snap.append(Int32(v[k + offset]))
         trace.append(snap^)
         var k = -d
         var done = False
@@ -154,13 +154,13 @@ def _myers(
         elif k_cur == d_cur:
             prev_k = k_cur - 1
         else:
-            var down = trace[d_cur][k_cur + 1 + d_cur]
-            var right = trace[d_cur][k_cur - 1 + d_cur] + 1
+            var down = Int(trace[d_cur][k_cur + 1 + d_cur])
+            var right = Int(trace[d_cur][k_cur - 1 + d_cur]) + 1
             if down > right:
                 prev_k = k_cur + 1
             else:
                 prev_k = k_cur - 1
-        var prev_x = trace[d_cur][prev_k + d_cur]
+        var prev_x = Int(trace[d_cur][prev_k + d_cur])
         var prev_y = prev_x - prev_k
         # Snake first (in reverse): walk diagonally down-left until either
         # x or y reaches the predecessor's coordinate.
