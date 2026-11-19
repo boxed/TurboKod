@@ -249,8 +249,9 @@ struct ColorRun(ImplicitlyCopyable, Movable):
     var attr: Attr
 
 
-def attr_to_sgr(attr: Attr) -> String:
-    """Render an `Attr` as a CSI SGR escape sequence (no leading ESC[)."""
+def _sgr_styles(attr: Attr) -> String:
+    """The start of an SGR parameter list: a reset (simpler than diffing
+    the previous attr), then one parameter per style bit."""
     var s = String("0")  # reset first; simpler than diffing previous attr
     if (attr.style & STYLE_BOLD) != 0:      s += String(";1")
     if (attr.style & STYLE_DIM) != 0:       s += String(";2")
@@ -262,6 +263,31 @@ def attr_to_sgr(attr: Attr) -> String:
             s += String(";4")
     if (attr.style & STYLE_REVERSE) != 0:   s += String(";7")
     if (attr.style & STYLE_STRIKE) != 0:    s += String(";9")
+    return s
+
+
+def _palette_rgb(palette: List[UInt32], index: Int) -> UInt32:
+    """``palette[index]``, or entry 0 for an index it doesn't have."""
+    return palette[index if index < len(palette) else 0]
+
+
+def _fg_rgb(attr: Attr, palette: List[UInt32]) -> UInt32:
+    """The foreground as ``0xRRGGBB``: its own when truecolor, else the
+    palette's."""
+    if (attr.color_mode & FG_TRUECOLOR) != 0:
+        return attr.fg_rgb
+    return _palette_rgb(palette, Int(attr.fg))
+
+
+def _bg_rgb(attr: Attr, palette: List[UInt32]) -> UInt32:
+    if (attr.color_mode & BG_TRUECOLOR) != 0:
+        return attr.bg_rgb
+    return _palette_rgb(palette, Int(attr.bg))
+
+
+def attr_to_sgr(attr: Attr) -> String:
+    """Render an `Attr` as a CSI SGR escape sequence (no leading ESC[)."""
+    var s = _sgr_styles(attr)
     s += String(";38;5;") + String(Int(attr.fg))
     s += String(";48;5;") + String(Int(attr.bg))
     if attr.underline_color >= 0:
@@ -286,32 +312,12 @@ def attr_to_sgr_rgb(attr: Attr, palette: List[UInt32]) -> String:
     user's own terminal color scheme. ``palette`` must have 256 entries
     (``0xRRGGBB``); out-of-range indices fall back to index 0.
     """
-    var s = String("0")  # reset first; simpler than diffing previous attr
-    if (attr.style & STYLE_BOLD) != 0:      s += String(";1")
-    if (attr.style & STYLE_DIM) != 0:       s += String(";2")
-    if (attr.style & STYLE_ITALIC) != 0:    s += String(";3")
-    if (attr.style & STYLE_UNDERLINE) != 0:
-        if (attr.style & STYLE_UNDERLINE_CURLY) != 0:
-            s += String(";4:3")
-        else:
-            s += String(";4")
-    if (attr.style & STYLE_REVERSE) != 0:   s += String(";7")
-    if (attr.style & STYLE_STRIKE) != 0:    s += String(";9")
-    var n = len(palette)
-    if (attr.color_mode & FG_TRUECOLOR) != 0:
-        s += String(";38;2;") + _rgb_triplet(attr.fg_rgb)
-    else:
-        var fg_i = Int(attr.fg) if Int(attr.fg) < n else 0
-        s += String(";38;2;") + _rgb_triplet(palette[fg_i])
-    if (attr.color_mode & BG_TRUECOLOR) != 0:
-        s += String(";48;2;") + _rgb_triplet(attr.bg_rgb)
-    else:
-        var bg_i = Int(attr.bg) if Int(attr.bg) < n else 0
-        s += String(";48;2;") + _rgb_triplet(palette[bg_i])
-    if attr.underline_color >= 0:
-        var uc = Int(attr.underline_color)
-        if uc < n:
-            s += String(";58;2;") + _rgb_triplet(palette[uc])
+    var s = _sgr_styles(attr)
+    s += String(";38;2;") + _rgb_triplet(_fg_rgb(attr, palette))
+    s += String(";48;2;") + _rgb_triplet(_bg_rgb(attr, palette))
+    var uc = Int(attr.underline_color)
+    if uc >= 0 and uc < len(palette):
+        s += String(";58;2;") + _rgb_triplet(palette[uc])
     return s
 
 
@@ -335,32 +341,14 @@ def attr_to_sgr_indexed(attr: Attr, palette: List[UInt32]) -> String:
     black. Folding the theme's actual RGB to the nearest cube/ramp color renders
     the theme approximately (blue editor background, etc.) instead of black.
     """
-    var s = String("0")  # reset first; simpler than diffing previous attr
-    if (attr.style & STYLE_BOLD) != 0:      s += String(";1")
-    if (attr.style & STYLE_DIM) != 0:       s += String(";2")
-    if (attr.style & STYLE_ITALIC) != 0:    s += String(";3")
-    if (attr.style & STYLE_UNDERLINE) != 0:
-        if (attr.style & STYLE_UNDERLINE_CURLY) != 0:
-            s += String(";4:3")
-        else:
-            s += String(";4")
-    if (attr.style & STYLE_REVERSE) != 0:   s += String(";7")
-    if (attr.style & STYLE_STRIKE) != 0:    s += String(";9")
-    var n = len(palette)
-    if (attr.color_mode & FG_TRUECOLOR) != 0:
-        s += String(";38;5;") + String(Int(_rgb_to_256_packed(attr.fg_rgb)))
-    else:
-        var fg_i = Int(attr.fg) if Int(attr.fg) < n else 0
-        s += String(";38;5;") + String(Int(_rgb_to_256_packed(palette[fg_i])))
-    if (attr.color_mode & BG_TRUECOLOR) != 0:
-        s += String(";48;5;") + String(Int(_rgb_to_256_packed(attr.bg_rgb)))
-    else:
-        var bg_i = Int(attr.bg) if Int(attr.bg) < n else 0
-        s += String(";48;5;") + String(Int(_rgb_to_256_packed(palette[bg_i])))
-    if attr.underline_color >= 0:
-        var uc = Int(attr.underline_color)
-        if uc < n:
-            s += String(";58;5;") + String(Int(_rgb_to_256_packed(palette[uc])))
+    var s = _sgr_styles(attr)
+    s += String(";38;5;") \
+        + String(Int(_rgb_to_256_packed(_fg_rgb(attr, palette))))
+    s += String(";48;5;") \
+        + String(Int(_rgb_to_256_packed(_bg_rgb(attr, palette))))
+    var uc = Int(attr.underline_color)
+    if uc >= 0 and uc < len(palette):
+        s += String(";58;5;") + String(Int(_rgb_to_256_packed(palette[uc])))
     return s
 
 
