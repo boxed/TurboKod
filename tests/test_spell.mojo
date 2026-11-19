@@ -9,6 +9,7 @@ from std.ffi import external_call
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 from turbokod.file_io import read_file, stat_file, write_file
 from turbokod.posix import getenv_value, which
+from turbokod.word_set import WordSet
 from turbokod.spell import (
     Speller, free_spell_base, new_spell_base, find_misspelled_runs, has_spell_noinspection_directive,
     is_library_location, library_words_path, project_dict_path,
@@ -856,6 +857,70 @@ def test_list_selection_values() raises:
     assert_equal(rows[1], 3)
     assert_equal(len(ui_list_selected(String("4:2"))), 3)
     assert_equal(len(ui_list_selected(String(""))), 0)
+
+
+def test_word_set_add_has_and_growth() raises:
+    """Words are found whole (not by prefix), stored once, and survive the
+    table and blob growing under them."""
+    var ws = WordSet()
+    assert_false(ws.has(String("foo").as_bytes()))
+    assert_true(ws.add(String("foo").as_bytes()))
+    assert_false(ws.add(String("foo").as_bytes()))
+    assert_true(ws.has(String("foo").as_bytes()))
+    assert_false(ws.has(String("fo").as_bytes()))
+    assert_false(ws.has(String("fooo").as_bytes()))
+    # Not storable: empty, or with a NUL (the blob's separator).
+    assert_false(ws.add(String("").as_bytes()))
+    assert_false(ws.add(String("a\0b").as_bytes()))
+    assert_false(ws.has(String("").as_bytes()))
+    for i in range(5000):
+        assert_true(ws.add((String("w") + String(i)).as_bytes()))
+    assert_equal(ws.count, 5001)
+    for i in range(5000):
+        assert_true(ws.has((String("w") + String(i)).as_bytes()))
+    assert_false(ws.has(String("w5000").as_bytes()))
+    assert_true(ws.has(String("foo").as_bytes()))
+    # At most three quarters full, a power of two.
+    assert_true(ws.count * 4 <= len(ws.slots) * 3)
+    assert_equal(len(ws.slots) & (len(ws.slots) - 1), 0)
+    ws.clear()
+    assert_equal(ws.count, 0)
+    assert_false(ws.has(String("foo").as_bytes()))
+    assert_true(ws.add(String("foo").as_bytes()))
+
+
+def test_word_set_reserve_keeps_words_and_avoids_regrowth() raises:
+    var ws = WordSet()
+    _ = ws.add(String("alpha").as_bytes())
+    ws.reserve(60000, 10000)
+    var slots = len(ws.slots)
+    var cap = ws.blob.capacity()
+    assert_true(ws.has(String("alpha").as_bytes()))
+    for i in range(10000):
+        _ = ws.add((String("w") + String(i)).as_bytes())
+    assert_equal(len(ws.slots), slots)
+    assert_equal(ws.blob.capacity(), cap)
+    assert_true(ws.has(String("alpha").as_bytes()))
+    assert_true(ws.has(String("w9999").as_bytes()))
+
+
+def test_speller_load_text_strips_and_normalizes() raises:
+    """A cspell-style list: comments, padded lines and multi-word lines are
+    skipped or trimmed; a plain list takes each line as it is. Either way
+    words are stored normalized, non-ASCII ones included."""
+    var s = Speller()
+    var scratch = List[UInt8]()
+    assert_true(s._load_text(
+        String("# comment\n  Padded \t\r\ntwo words\n\nÖvrigt\nlast"),
+        True, scratch,
+    ))
+    assert_equal(s._own.word_count(), 3)
+    assert_true(s._own.has(String("padded")))
+    assert_true(s._own.has(String("övrigt")))
+    assert_true(s._own.has(String("last")))
+    assert_false(s._load_text(String("\n\n"), False, scratch))
+    assert_true(s._load_text(String("Plain\n"), False, scratch))
+    assert_true(s._own.has(String("plain")))
 
 
 def test_speller_load_words_dedupes() raises:

@@ -2,7 +2,7 @@
 
 Loads a wordlist (the bundled SCOWL English list plus, on macOS,
 ``/usr/share/dict/words``; common Linux paths otherwise) into a
-hash-bucketed set keyed by lowercase word. Lookup is case-insensitive
+compact set (``WordSet``) keyed by lowercase word. Lookup is case-insensitive
 and strips a few common suffixes (``'s``, ``s``, ``es``, ``ed``,
 ``ing``) so plurals and conjugations don't trigger false positives even
 when only the base form is in the dictionary.
@@ -24,6 +24,7 @@ from .file_io import (
     read_file, stat_file, write_file,
 )
 from .posix import debug_log, user_config_path
+from .word_set import WordSet
 from .string_utils import (
     append_utf8, fnv32,
     byte_slice, codepoint_at, is_ascii_digit, is_ascii_ident_byte,
@@ -134,48 +135,45 @@ struct SpellBase(Movable):
     """The main word set — OS dictionary, bundled wordlists, user and
     library words — which is the same for every window of a process.
     A ``Speller`` owns one, or reads a shared one (``Speller.shared``)."""
-    var buckets: List[List[String]]
+    var words: WordSet
     var loaded: Bool
     var version: Int
 
     def __init__(out self):
-        self.buckets = List[List[String]]()
-        for _ in range(Int(_N_BUCKETS)):
-            self.buckets.append(List[String]())
+        self.words = WordSet()
         self.loaded = False
         self.version = 0
 
-    def add(mut self, var w: String):
+    def add(mut self, w: String):
         """Add the already-normalized ``w`` unless it's already there: the
-        wordlists overlap (~57k of ~349k words are repeats), and every
-        duplicate lengthens the bucket each lookup walks."""
-        var b = _bucket(w)
-        for i in range(len(self.buckets[b])):
-            if self.buckets[b][i] == w:
-                return
-        self.buckets[b].append(w^)
+        wordlists overlap (~57k of ~349k words are repeats)."""
+        _ = self.words.add(w.as_bytes())
 
     def word_count(self) -> Int:
-        var n = 0
-        for i in range(len(self.buckets)):
-            n += len(self.buckets[i])
-        return n
+        return self.words.count
 
     def touch(mut self, loaded: Bool):
         self.loaded = loaded
         self.version += 1
 
     def clear(mut self):
-        for i in range(len(self.buckets)):
-            self.buckets[i] = List[String]()
+        self.words.clear()
         self.touch(False)
 
     def has(self, w: String) -> Bool:
-        var b = _bucket(w)
-        for i in range(len(self.buckets[b])):
-            if self.buckets[b][i] == w:
-                return True
-        return False
+        return self.words.has(w.as_bytes())
+
+
+@fieldwise_init
+struct _WordSource(Copyable, Movable):
+    """One wordlist file ``Speller.load_default`` reads."""
+    var path: String
+    var strip: Bool
+    """A cspell-style list: trim each line, skip ``#`` comments and
+    anything with whitespace in it. False takes each line as a word."""
+    var report: Bool
+    """Print a failed read (the user's own lists) instead of skipping it
+    silently."""
 
 
 def spell_base_at(addr: Int) -> Pointer[SpellBase, MutUntrackedOrigin]:
@@ -203,9 +201,9 @@ def free_spell_base(addr: Int):
 struct Speller(Movable):
     """Lazy wordlist with case-insensitive + plural-tolerant lookup.
 
-    Tracks three layered word sources in two bucket sets:
-    * ``buckets`` — OS dictionary (large, immutable per session) and
-      the per-user dictionary. Loaded once on the first ``load_default``
+    Tracks three layered word sources in two sets:
+    * the main set (``SpellBase``) — OS dictionary (large, immutable per
+      session) and the per-user dictionary. Loaded once on the first ``load_default``
       call and never cleared.
     * ``project_buckets`` — per-project dictionary loaded from
       ``<project>/.turbokod/dictionary.txt``. Cleared and reloaded
@@ -254,11 +252,24 @@ struct Speller(Movable):
             return self._project_version + spell_base_at(self.shared)[].version
         return self._project_version + self._own.version
 
-    def _base_add(mut self, var w: String):
+    def _base_add(mut self, w: String):
         if self.shared != 0:
-            spell_base_at(self.shared)[].add(w^)
+            spell_base_at(self.shared)[].add(w)
         else:
-            self._own.add(w^)
+            self._own.add(w)
+
+    def _base_add_bytes(mut self, w: Span[UInt8, _]):
+        """``_base_add`` for normalized bytes that aren't a ``String`` yet."""
+        if self.shared != 0:
+            _ = spell_base_at(self.shared)[].words.add(w)
+        else:
+            _ = self._own.words.add(w)
+
+    def _base_reserve(mut self, bytes: Int, words: Int):
+        if self.shared != 0:
+            spell_base_at(self.shared)[].words.reserve(bytes, words)
+        else:
+            self._own.words.reserve(bytes, words)
 
     def _base_touch(mut self, loaded: Bool):
         """Record a change to the main set: its ``loaded`` flag and a
@@ -280,7 +291,7 @@ struct Speller(Movable):
         return self._own.has(w)
 
     def load_default(mut self):
-        """Layer five word sources, in order, into ``buckets``:
+        """Layer five word sources, in order, into the main set:
 
         1. The OS-supplied wordlist (``/usr/share/dict/words`` and
            friends) — broad but archaic English vocabulary (on macOS
@@ -305,43 +316,112 @@ struct Speller(Movable):
         ``check_word`` returns True for everything so the editor degrades
         to "no spell highlights" rather than spurious squiggles.
 
-        The user dictionary loads last so additions reach ``buckets``
+        The user dictionary loads last so additions reach the set
         even when the OS / bundled lists fail."""
         if self.is_loaded():
             return
+        var sources = List[_WordSource]()
         var candidates = List[String]()
         candidates.append(String("/usr/share/dict/words"))
         candidates.append(String("/usr/share/dict/american-english"))
         candidates.append(String("/usr/share/dict/british-english"))
         for i in range(len(candidates)):
-            try:
-                var content = read_file(candidates[i])
-                if len(content.as_bytes()) == 0:
-                    continue
-                var lines = split_lines_no_trailing(content)
-                self._load_words(lines)
+            var info = stat_file(candidates[i])
+            if info.ok and info.size > 0:
+                sources.append(_WordSource(candidates[i], False, False))
                 break
-            except:
-                continue
-        self._load_bundled_wordlists()
-        self._load_user_language_dictionaries()
-        self._load_user_wordlist(user_dict_path())
-        self._load_user_wordlist(library_words_path())
+        # Path is relative to cwd; ``run.sh`` cd's to the project root
+        # before exec, and the app bundle chdirs to its resources.
+        _wordlists_in(String("src/turbokod/data/wordlists"), sources)
+        var user_dir = user_dictionaries_root()
+        if len(user_dir.as_bytes()) > 0:
+            _wordlists_in(user_dir, sources)
+        var own = List[String]()
+        own.append(user_dict_path())
+        own.append(library_words_path())
+        for i in range(len(own)):
+            if len(own[i].as_bytes()) > 0 and stat_file(own[i]).ok:
+                sources.append(_WordSource(own[i], False, True))
+        # Size the set once, from the files' sizes: grown word by word it
+        # leaves every outgrown blob and table behind as garbage. A word
+        # per line makes the bytes exact; the word count is a low guess
+        # (12 bytes a word, where English averages 10) because the table
+        # doubles, and one doubling too many is megabytes.
+        var total = 0
+        for i in range(len(sources)):
+            total += Int(stat_file(sources[i].path).size)
+        self._base_reserve(total, total // 12)
+        var scratch = List[UInt8]()
+        for i in range(len(sources)):
+            try:
+                var content = read_file(sources[i].path)
+                if self._load_text(content, sources[i].strip, scratch):
+                    self._base_touch(True)
+            except e:
+                # Log the user's own lists so a permission flap is
+                # debuggable; a missing bundled one is skipped.
+                if sources[i].report:
+                    print("spell: load", sources[i].path, ":", String(e))
 
-    def _load_user_wordlist(mut self, path: String):
-        if len(path.as_bytes()) == 0 or not stat_file(path).ok:
-            return
-        try:
-            var content = read_file(path)
-            if len(content.as_bytes()) > 0:
-                var lines = split_lines_no_trailing(content)
-                self._load_words(lines)
-        except e:
-            # Log so a permission flap is debuggable.
-            print("spell: load", path, ":", String(e))
+    def _load_text(
+        mut self, content: String, strip: Bool, mut scratch: List[UInt8],
+    ) -> Bool:
+        """Add every line of ``content`` as a word, normalized; whether
+        there were any. Straight from the file's bytes: splitting 235k
+        lines into a ``List[String]`` first and building a ``String`` per
+        normalized word was most of the load's time and garbage."""
+        var b = content.as_bytes()
+        var n = len(b)
+        var any = False
+        var start = 0
+        for i in range(n + 1):
+            if i < n and b[i] != 0x0A:
+                continue
+            var lo = start
+            var hi = i
+            start = i + 1
+            if strip:
+                while lo < hi and (b[lo] == 0x20 or b[lo] == 0x09):
+                    lo += 1
+                while hi > lo and (
+                    b[hi - 1] == 0x20 or b[hi - 1] == 0x09
+                    or b[hi - 1] == 0x0D
+                ):
+                    hi -= 1
+                if lo < hi and b[lo] == 0x23:    # '#'
+                    continue
+                var spaced = False
+                for k in range(lo, hi):
+                    if b[k] == 0x20 or b[k] == 0x09:
+                        spaced = True
+                        break
+                if spaced:
+                    continue
+            if hi <= lo:
+                continue
+            # ASCII (nearly every word) only needs lowercasing; the rest
+            # goes through ``_normalize``.
+            scratch.clear()
+            var ascii = True
+            for k in range(lo, hi):
+                var c = b[k]
+                if c >= 0x80:
+                    ascii = False
+                    break
+                if c >= 0x41 and c <= 0x5A:
+                    c += 0x20
+                scratch.append(c)
+            if ascii:
+                self._base_add_bytes(Span(scratch))
+            else:
+                self._base_add(
+                    _normalize(String(StringSpan(unsafe_from_utf8=b[lo:hi]))),
+                )
+            any = True
+        return any
 
     def reload(mut self):
-        """Drop the in-memory main bucket set and re-run ``load_default``.
+        """Drop the in-memory main word set and re-run ``load_default``.
         Used after the user installs or removes a downloaded dictionary
         from Settings — the just-installed words show up on the next
         spell pass without restarting the editor.
@@ -351,59 +431,6 @@ struct Speller(Movable):
         to additionally call ``set_project`` to refresh it."""
         self._base_clear()
         self.load_default()
-
-    def _load_user_language_dictionaries(mut self):
-        """Load every ``<lang>.txt`` under ``~/.config/turbokod/dictionaries/``.
-
-        Each file is treated as a plain wordlist (one word per line,
-        ``#``-prefixed comments skipped, lines containing whitespace
-        rejected — the same shape as the bundled cspell-derived
-        wordlists). Missing root dir is a silent no-op so a fresh
-        machine without any installed extra languages still loads
-        cleanly."""
-        var dir = user_dictionaries_root()
-        if len(dir.as_bytes()) == 0:
-            return
-        self._load_wordlist_dir(dir)
-
-    def _load_wordlist_dir(mut self, dir: String):
-        """Load every ``.txt`` wordlist in ``dir``: one word per line. A
-        missing or empty directory, or an unreadable file, is skipped."""
-        var entries = list_directory(dir)
-        if len(entries) == 0:
-            return
-        for i in range(len(entries)):
-            var name = entries[i]
-            if not name.endswith(".txt"):
-                continue
-            var path = join_path(dir, name)
-            try:
-                var content = read_file(path)
-                if len(content.as_bytes()) == 0:
-                    continue
-                var lines = split_lines_no_trailing(content)
-                var filtered = List[String]()
-                for j in range(len(lines)):
-                    var w = _strip_word(lines[j])
-                    if len(w.as_bytes()) == 0:
-                        continue
-                    filtered.append(w^)
-                if len(filtered) > 0:
-                    self._load_words(filtered)
-            except:
-                continue
-
-    def _load_bundled_wordlists(mut self):
-        """Load every ``.txt`` in ``src/turbokod/data/wordlists/``.
-
-        Path is relative to cwd; ``run.sh`` cd's to the project root
-        before exec, so this resolves whether the user invokes the
-        editor via ``run.sh`` or ``pixi run``. When the directory is
-        missing (e.g. running from an installed binary in a future
-        packaging) the load is silently skipped — the OS list and user
-        dict still work."""
-        var dir = String("src/turbokod/data/wordlists")
-        self._load_wordlist_dir(dir)
 
     def set_project(mut self, project_root: String):
         """Swap ``project_buckets`` to the dictionary for ``project_root``.
@@ -541,7 +568,7 @@ struct Speller(Movable):
             var w = _normalize(words[i])
             if len(w.as_bytes()) == 0:
                 continue
-            self._base_add(w^)
+            self._base_add(w)
         self._base_touch(True)
 
     def check_word(self, word: String) -> Bool:
@@ -969,29 +996,14 @@ def _is_letter(c: UInt8) -> Bool:
     return (c >= 0x41 and c <= 0x5A) or (c >= 0x61 and c <= 0x7A)
 
 
-def _strip_word(line: String) -> String:
-    """Strip a wordlist line: trim ASCII whitespace, drop comment-only
-    (``#``-prefixed) lines, and reject anything containing whitespace
-    after trimming (entries from cspell are sometimes weird shapes —
-    e.g. ``en cspell-tools: keep-case`` headers — that we don't want
-    polluting the buckets)."""
-    var b = line.as_bytes()
-    var n = len(b)
-    var i = 0
-    while i < n and (b[i] == 0x20 or b[i] == 0x09):
-        i += 1
-    var j = n
-    while j > i and (b[j - 1] == 0x20 or b[j - 1] == 0x09 or b[j - 1] == 0x0D):
-        j -= 1
-    if j <= i:
-        return String("")
-    if b[i] == 0x23:    # '#'
-        return String("")
-    for k in range(i, j):
-        var c = b[k]
-        if c == 0x20 or c == 0x09:
-            return String("")
-    return String(StringSpan(unsafe_from_utf8=b[i:j]))
+def _wordlists_in(dir: String, mut out: List[_WordSource]):
+    """Append every ``.txt`` wordlist in ``dir`` (one word per line, the
+    shape of the bundled cspell-derived lists). A missing or empty
+    directory adds nothing."""
+    var entries = list_directory(dir)
+    for i in range(len(entries)):
+        if entries[i].endswith(".txt"):
+            out.append(_WordSource(join_path(dir, entries[i]), True, False))
 
 
 def _parse_idea_dict_words(content: String, mut out: List[String]):
