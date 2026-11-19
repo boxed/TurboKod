@@ -26,7 +26,7 @@ from turbokod.editor import (
     Editor, TextBuffer, _split_buffer_lines, _split_lines_sharing,
 )
 from turbokod.view_state_store import StoredViewState
-from turbokod.desktop import Desktop
+from turbokod.desktop import DOCK_FILE_TREE, Desktop, EDITOR_COPY, EDITOR_CUT
 from turbokod.file_io import delete_path, join_path, read_file, stat_file, write_file
 from turbokod.git_blame import (
     BlameLine, BlameTable, format_commit_time, parse_blame_porcelain,
@@ -846,6 +846,59 @@ def test_review_includes_added_and_deleted_files() raises:
     assert_equal(d.review.change_total, 1)
     d.review.close()
     d._review_teardown()
+    _rm_rf(dir)
+
+
+def test_review_keeps_the_keyboard_from_a_pane_focused_before_it() raises:
+    """Review covers the docks, so the keyboard is the hosted editor's
+    whatever pane had it before: Copy (and Cut, and a typed key) must reach
+    the diff, not the file tree or terminal hidden under it. The pane gets
+    the keyboard back when the review ends."""
+    var dir = _temp_path(String("_review_keys"))
+    _rm_rf(dir)
+    _ensure_dir(dir)
+    if _run_git(dir, string_list(String("init"), String("-q"))) != 0:
+        _rm_rf(dir)
+        return
+    _ = _run_git(dir, string_list(
+        String("config"), String("user.email"), String("test@example.com"),
+    ))
+    _ = _run_git(dir, string_list(String("config"), String("user.name"), String("T")))
+    assert_true(write_file(join_path(dir, String("f.txt")), String("one\ntwo\n")))
+    _ = _run_git(dir, string_list(String("add"), String(".")))
+    _ = _run_git(dir, string_list(String("commit"), String("-qm"), String("one")))
+    assert_true(write_file(join_path(dir, String("f.txt")), String("one\nTWO\n")))
+
+    var d = Desktop()
+    d.project = Optional[String](dir)
+    var screen = Rect(0, 0, 100, 30)
+    var canvas = Canvas(100, 30)
+    d.file_tree.visible = True
+    d._focus_dock(DOCK_FILE_TREE)
+    assert_false(d.key_target().is_editor())
+    d.review.open(dir)
+    d.review.picker_list.selected = 0
+    d.review._start_review()
+    d.paint(canvas, screen)
+    d.paint(canvas, screen)
+    var ridx = d._review_win_idx
+    assert_true(ridx >= 0)
+    assert_true(d.key_target().is_editor())
+    # Copy with no selection takes the caret's line (and flashes it).
+    _ = d.dispatch_action(EDITOR_COPY, screen)
+    assert_true(d.windows.windows[ridx].editor._copy_flash_line >= 0)
+    # Cut removes the selection from the (editable, unstaged) buffer.
+    d.windows.windows[ridx].editor.move_to(0, 0, False)
+    d.windows.windows[ridx].editor.move_to(0, 3, True)
+    _ = d.dispatch_action(EDITOR_CUT, screen)
+    assert_equal(d.windows.windows[ridx].editor.buffer.line(0), String(""))
+    # A typed key goes to the editor too, not to the tree under the review.
+    _ = d.handle_event(Event.key_event(UInt32(ord("x"))), screen)
+    assert_equal(d.windows.windows[ridx].editor.buffer.line(0), String("x"))
+    d.windows.windows[ridx].editor.dirty = False
+    d.review.close()
+    d._review_teardown()
+    assert_false(d.key_target().is_editor())
     _rm_rf(dir)
 
 

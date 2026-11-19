@@ -1106,7 +1106,7 @@ final class CellView: NSView {
         ctx.setFillColor(cgcolor(palette[0]))
         ctx.fill(bounds)
 
-        drawCells(ctx, buf, n, c, originX: 0, originY: 0)
+        drawCells(ctx, buf, n, c, originX: 0, originY: 0, overBase: true)
         // Smooth scroll: when the focused editor rests (or is being dragged)
         // at a sub-line offset, overdraw its body translated by the fraction.
         if surface == .main { compositeSmoothScroll(ctx, mainN: n, mainCols: c) }
@@ -1376,11 +1376,18 @@ final class CellView: NSView {
     /// the CELL_W/CELL_H `withCellMetrics` set) and a `cacheKey` of its
     /// own. `only` limits the draw to the cells it accepts — the cells
     /// painted over a sub-grid, redrawn on top of it.
+    ///
+    /// `overBase` says the area was just cleared to `palette[0]`, so cells
+    /// of that background need no fill. Only the full-frame pass can say
+    /// so: anything drawn over other pixels (a sub-grid, the cells put back
+    /// on top of one, the smooth-scroll composite) has to fill them, or
+    /// what's underneath shows through.
     private func drawCells(_ ctx: CGContext,
                            _ p: UnsafeMutablePointer<UInt32>,
                            _ n: Int, _ c: Int,
                            originX: CGFloat, originY: CGFloat,
                            face: SlotFace? = nil, cacheKey: String = "",
+                           overBase: Bool = false,
                            only: ((Int) -> Bool)? = nil) {
         // Backgrounds, one fill per run of equal color along a row.
         let base = palette[0]
@@ -1392,7 +1399,7 @@ final class CellView: NSView {
             var j = i + 1
             while j < min(n, rowEnd) && cellColors(p, j).bg == bg
                 && (only.map { $0(j) } ?? true) { j += 1 }
-            if bg != base {
+            if !overBase || bg != base {
                 ctx.setFillColor(cgcolor(bg))
                 ctx.fill(CGRect(x: originX + CGFloat(i % c) * CELL_W,
                                 y: originY + CGFloat(i / c) * CELL_H,

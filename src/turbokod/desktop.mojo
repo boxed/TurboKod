@@ -3290,9 +3290,8 @@ struct Desktop(Movable):
         focus. The host checks this before offering the file-path paste menu —
         if a terminal pane is focused, a file paste belongs to the shell, not
         an editor (and goes through the normal paste path)."""
-        if self._any_dock_focused():
-            return False
-        return self.windows.focused_is_editor()
+        return self.key_target().is_editor() \
+            and self.windows.focused_is_editor()
 
     def insert_text_focused_editor(mut self, text: String) raises -> Bool:
         """Insert ``text`` verbatim at the focused editor's current caret — the
@@ -3746,8 +3745,16 @@ struct Desktop(Movable):
         window*: with the panels floating, a terminal keeps it while the
         user works in the project window. So the panes count only while
         their window has the keyboard, and in the panels' window nothing
-        else does."""
+        else does.
+
+        While reviewing, the project window is the review's: it paints
+        over the docks, so a pane that had the keyboard before the review
+        opened is hidden under it and can't have it now (Copy went to that
+        pane and copied nothing). The flags are left alone, so the pane
+        has the keyboard again when the review ends."""
         var in_panels = self.panels_detached and self.panels_window_key
+        if self.review.is_reviewing() and not in_panels:
+            return KeyTarget(DOCK_NONE, 0)
         if in_panels or not self.panels_detached:
             for i in range(len(self.terminal_panes)):
                 if self.terminal_panes[i].focused \

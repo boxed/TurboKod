@@ -89,7 +89,11 @@ font really gives the shell more columns and rows, and the pty is told so.
   (`tk_desktop_sub_grid_info` / `_layout`) over its rect, in the area's
   cell size and face (`withCellMetrics`). It then redraws on top the rect's
   cells whose tag isn't that grid's: any write clears a cell's tag, so a
-  popup or a menu painted over the pane stays in front. The sub-grids are
+  popup or a menu painted over the pane stays in front. Both passes fill
+  every cell's background: only the full-frame pass may skip the cells in
+  `palette[0]` (`drawCells`' `overBase`), since only it draws on a surface
+  just cleared to that color. Skipped here, a black cell let the code under
+  it show through. The sub-grids are
   part of the host's change detection (`subGridsHash`); the frame's own
   cells under them are blank and don't change.
 
