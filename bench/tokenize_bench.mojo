@@ -60,6 +60,10 @@ def main() raises:
         var best_ns = 0
         var count = 0
         var sum: UInt64 = 0
+        # Distinct end-of-line scope stacks, and the deepest: a grammar
+        # that loses track of a scope shows up as both running away.
+        var states = 0
+        var deepest = 0
         # One extra pass first: it compiles the grammar's regexes.
         for rep in range(reps + 1):
             var cache = HighlightCache()
@@ -71,6 +75,11 @@ def main() raises:
                 best_ns = took
             count = len(hls)
             sum = _checksum(hls)
+            states = len(cache.stacks.stacks)
+            deepest = 0
+            for k in range(states):
+                if len(cache.stacks.stacks[k]) > deepest:
+                    deepest = len(cache.stacks.stacks[k])
         if dump:
             var cache = HighlightCache()
             var hls = HighlightList()
@@ -83,6 +92,7 @@ def main() raises:
                 )
         print(
             path, ": ", len(lines), " lines, ", count, " highlights, ",
-            best_ns // 1000, " us, checksum ", sum, sep="",
+            best_ns // 1000, " us, checksum ", sum, ", ", states,
+            " states, deepest ", deepest, sep="",
         )
     registry.release()
