@@ -148,6 +148,21 @@ def test_indent_size_tab_uses_the_tab_width() raises:
     assert_equal(_config("indent_size", "3").indent_string(), "   ")
     assert_equal(_config("indent_style", "tab", "indent_size", "3").indent_string(), "\t")
 
+def test_formatting_options_carry_the_files_indent() raises:
+    # ``textDocument/formatting`` and its range / on-type siblings always
+    # asked for 4 spaces, so a language server reformatted a 2-space or a
+    # tab-indented file to that.
+    var two = _config("indent_style", "space", "indent_size", "2").formatting_options()
+    assert_equal(two[0], 2)
+    assert_true(two[1])
+    var tabs = _config("indent_style", "tab", "tab_width", "8").formatting_options()
+    assert_equal(tabs[0], 8)
+    assert_false(tabs[1])
+    var unset = EditorConfig().formatting_options()
+    assert_equal(unset[0], 4)
+    assert_true(unset[1])
+
+
 
 def test_line_separators() raises:
     assert_equal(_config("end_of_line", "crlf").line_separator(), "\r\n")

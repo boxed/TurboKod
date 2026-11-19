@@ -11893,8 +11893,10 @@ struct Desktop(Movable):
         if not matched:
             return
         var text = self.windows.windows[win_idx].editor.lsp_text()
+        var opts = self.windows.windows[win_idx].editor.editorconfig \
+            .formatting_options()
         _ = self.lsp_managers[li].request_on_type_formatting(
-            path, req.row, req.col, ch, text^,
+            path, req.row, req.col, ch, text^, opts[0], opts[1],
         )
 
     def _request_inline_values(
@@ -15125,7 +15127,11 @@ struct Desktop(Movable):
             var li = self._ready_lsp_for_path(path, String("documentFormattingProvider"))
             if li >= 0:
                 var text = self.windows.windows[idx].editor.lsp_text()
-                if self.lsp_managers[li].request_formatting(path, text^):
+                var opts = self.windows.windows[idx].editor.editorconfig \
+                    .formatting_options()
+                if self.lsp_managers[li].request_formatting(
+                    path, text^, opts[0], opts[1],
+                ):
                     self._format_then_save_path = path
                     return
         # Normal save path. Clear any stale deferred-write latches for this
@@ -17835,7 +17841,11 @@ struct Desktop(Movable):
             )
             return
         var text = self.windows.windows[idx].editor.lsp_text()
-        _ = self.lsp_managers[li].request_formatting(path, text^)
+        var opts = self.windows.windows[idx].editor.editorconfig \
+            .formatting_options()
+        _ = self.lsp_managers[li].request_formatting(
+            path, text^, opts[0], opts[1],
+        )
 
     def _format_selection(mut self):
         """Edit-menu / hotkey: format the current selection via
@@ -17865,8 +17875,10 @@ struct Desktop(Movable):
             sr = er; sc = ec
             er = tr; ec = tc
         var text = self.windows.windows[idx].editor.lsp_text()
+        var opts = self.windows.windows[idx].editor.editorconfig \
+            .formatting_options()
         _ = self.lsp_managers[li].request_range_formatting(
-            path, sr, sc, er, ec, text^,
+            path, sr, sc, er, ec, text^, opts[0], opts[1],
         )
 
     def _apply_parked_edits(

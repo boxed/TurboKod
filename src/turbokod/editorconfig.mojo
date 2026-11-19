@@ -92,6 +92,13 @@ struct EditorConfig(ImplicitlyCopyable, Movable):
             return self.tab_width
         return 4
 
+    def formatting_options(self) -> Tuple[Int, Bool]:
+        """``(tabSize, insertSpaces)`` for an LSP ``FormattingOptions``:
+        how wide this file's indentation is and whether it is spaces. The
+        requests were always sent 4 and spaces, so a server formatted a
+        2-space or tab-indented file to that."""
+        return (self.effective_indent_size(), self.indent_style != String("tab"))
+
     def indent_string(self) -> String:
         """Bytes to insert when the user presses Tab."""
         if self.indent_style == String("tab"):
